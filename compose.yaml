@@ -1,0 +1,6 @@
+# Standalone deployment: docker compose up
+services:
+  waxflow:
+    extends:
+      file: compose.base.yaml
+      service: waxflow

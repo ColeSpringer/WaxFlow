@@ -1,0 +1,15 @@
+# Full Wax stack: WaxBin library volumes mounted read-only. The volume
+# shape is fixed now so deployments don't churn; the pieces that light it
+# up land later: library roots config (os.Root confinement), then the
+# resolver flavor and catalog mount (src=pid: support).
+services:
+  waxflow:
+    extends:
+      file: compose.base.yaml
+      service: waxflow
+    # Switch to the resolver flavor image once it ships.
+    # image: ghcr.io/colespringer/waxflow:latest-waxbin
+    volumes:
+      - ${WAXFLOW_LIBRARY:-./library}:/library:ro
+      # WaxBin catalog, read-only, for the resolver flavor.
+      # - ${WAXBIN_DATA:-./waxbin}/waxbin.db:/catalog/waxbin.db:ro

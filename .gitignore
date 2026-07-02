@@ -1,0 +1,11 @@
+# build artifacts
+/bin/
+/dist/
+
+# test/profile droppings
+*.test
+*.out
+*.prof
+
+# local scratch config
+/waxflow.json
