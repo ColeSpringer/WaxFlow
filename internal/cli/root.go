@@ -60,6 +60,8 @@ Configuration precedence: flag > WAXFLOW_* environment > JSON config file
 		newPingCmd(),
 		newExitCodesCmd(),
 		newServerCmd(version),
+		newProbeCmd(),
+		newTranscodeCmd(),
 	)
 	return root
 }

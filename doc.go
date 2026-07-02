@@ -1,9 +1,8 @@
-// Package waxflow will expose the transcoding engine facade (New, Probe,
+// Package waxflow exposes the transcoding engine facade (New, Probe,
 // Transcode, OpenStream), the library-first entry point to the pure-Go
 // audio pipeline: request -> decode -> DSP -> encode -> stream.
 //
-// The facade lands with the audio core. Through v1.0 the public,
-// stdlib-only packages live under this module:
+// Through v1.0 the public, stdlib-only packages live under this module:
 //
 //	waxerr        - error taxonomy: codes, sentinels, exit-code contract
 //	audio         - PCM model (planar buffers, formats, layouts)

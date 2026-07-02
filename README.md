@@ -12,12 +12,20 @@ so anyone can import them.
 
 ## Status
 
-Pre-1.0, bootstrap complete: module layout, error taxonomy
-(`waxerr`), config loading, CLI skeleton, distroless Docker image, CI and
-release pipelines, ADR pack, and pinned [quality gates](docs/quality-gates.md).
-The daemon serves liveness only so far; WAV/FLAC streaming is next, and
-the service becomes broadly useful once MP3 encoding lands. Unfinished codecs stay
-unregistered, so `/caps` never advertises what doesn't work.
+Pre-1.0. The audio core is in: the planar PCM model (`audio`), the
+codec/container interfaces, the PCM codec, WAV (including RF64/BW64 read
+and automatic RF64 write past the 4 GiB mark) and AIFF/AIFF-C containers,
+format probing with sample-exact seeking, the engine facade (`New`,
+`Probe`, `Transcode`, `OpenStream`), and the test harness (ffmpeg as
+differential oracle, never a runtime dependency). Local `waxflow probe`
+and `waxflow transcode` work today; WAV/AIFF round-trips are bit-exact by
+construction and verified against ffmpeg.
+
+The daemon still serves liveness only; WAV/FLAC streaming is next, and
+the service becomes broadly useful once MP3 encoding lands. Unfinished
+codecs stay unregistered, so probe and `/caps` never advertise what
+doesn't work. Quality bars are pinned in
+[docs/quality-gates.md](docs/quality-gates.md).
 
 ## Quick start
 
@@ -49,6 +57,12 @@ The table grows as features land.
 ## CLI
 
 - `waxflow server`: run the daemon
+- `waxflow probe <file>`: identify a file and print stream parameters
+  (`--json` for the schemaVersion'd machine shape, `--strict` to treat
+  tolerated input damage as errors)
+- `waxflow transcode <in> <out>`: local one-shot file-to-file transcode
+  through the same engine the daemon uses (`--format wav|aiff`, default
+  from the output extension; `--force` to overwrite)
 - `waxflow ping`: liveness probe; the container HEALTHCHECK
 - `waxflow version`: version and build info
 - `waxflow exit-codes`: print the documented exit-code contract (0 ok,
@@ -67,8 +81,10 @@ distributed cache; two-pass loudness on live streams (jobs only).
 ## Development
 
 ```sh
-make check     # gofmt + vet + go test -race + depcheck
-make docker    # local image build
+make check           # gofmt + vet + go test -race + depcheck
+make docker          # local image build
+make verify-vectors  # fetch SHA-256-pinned conformance vectors (CI-cached)
+make goldens         # regenerate muxer golden files (review the diff)
 ```
 
 - Architecture invariants live in [docs/adr/](docs/adr/README.md). Read

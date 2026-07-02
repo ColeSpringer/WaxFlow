@@ -5,9 +5,9 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # The public, stdlib-only tree (ADR-0002). Grows as public packages land; every
 # new public package MUST be added here. depcheck is the CI gate behind
 # the "stdlib-only codecs" promise.
-PUBLIC_PKGS := . ./waxerr
+PUBLIC_PKGS := . ./waxerr ./audio ./codec/... ./container/... ./format
 
-.PHONY: build test vet fmt fmt-check depcheck check docker clean
+.PHONY: build test vet fmt fmt-check depcheck check docker clean verify-vectors goldens
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/waxflow ./cmd/waxflow
@@ -34,6 +34,16 @@ depcheck:
 	echo "depcheck ok: public tree ($(PUBLIC_PKGS)) is stdlib-only"
 
 check: fmt-check vet test depcheck
+
+# Fetch the SHA-256-pinned conformance vectors into testdata/vectors
+# (CI-cached, never committed). Vector-gated tests self-skip until run;
+# WAXFLOW_REQUIRE_VECTORS=1 escalates skips to failures.
+verify-vectors:
+	go run ./internal/testutil/cmd/vectorfetch
+
+# Regenerate muxer golden files. Review the diff before committing.
+goldens:
+	go test -run TestGoldenMuxOutputs ./container/riff ./container/aiff -update
 
 docker:
 	docker build --build-arg VERSION=$(VERSION) -t waxflow:$(VERSION) .

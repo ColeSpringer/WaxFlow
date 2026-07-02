@@ -1,0 +1,44 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+env:
+  GO_VERSION: "1.26.3"
+
+jobs:
+  # Long fuzz soak over every native fuzz target: minutes per target
+  # nightly versus the 2-minute smoke in ci.yml. New Fuzz* functions are
+  # picked up automatically. Findings land in the job log; reproduce
+  # locally and commit the regression corpus.
+  fuzz-soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: run each fuzz target for 20 minutes
+        run: |
+          set -eu
+          for pkg in $(go list ./...); do
+            for target in $(go test -list '^Fuzz' "$pkg" 2>/dev/null | grep '^Fuzz' || true); do
+              echo "fuzzing $pkg $target"
+              go test -run '^$' -fuzz "^${target}\$" -fuzztime 20m "$pkg"
+            done
+          done
+
+  # The full suite with the differential oracle required, so a broken
+  # ffmpeg comparison cannot hide behind a skip.
+  differential:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: WAXFLOW_REQUIRE_FFMPEG=1 go test -race -count=1 ./...

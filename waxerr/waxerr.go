@@ -27,6 +27,7 @@ const (
 	CodeUnsupportedSource  Code = "unsupported-source"
 	CodePayloadTooLarge    Code = "payload-too-large"
 	CodeSourceUnreadable   Code = "source-unreadable"
+	CodeOutputUnwritable   Code = "output-unwritable"
 	CodeOverloaded         Code = "overloaded"
 	CodeCanceled           Code = "canceled"
 	CodeCatalogUnavailable Code = "catalog-unavailable"
@@ -47,6 +48,7 @@ func Codes() []Code {
 		CodeUnsupportedSource,
 		CodePayloadTooLarge,
 		CodeSourceUnreadable,
+		CodeOutputUnwritable,
 		CodeOverloaded,
 		CodeCanceled,
 		CodeCatalogUnavailable,
@@ -113,6 +115,7 @@ var (
 	ErrCanceled           = New(CodeCanceled, "")
 	ErrCatalogUnavailable = New(CodeCatalogUnavailable, "")
 	ErrSourceUnreadable   = New(CodeSourceUnreadable, "")
+	ErrOutputUnwritable   = New(CodeOutputUnwritable, "")
 	ErrInternal           = New(CodeInternal, "")
 )
 
@@ -153,7 +156,7 @@ func ExitContract() []ExitClass {
 		{Exit: 1, Name: "internal", Codes: []Code{CodeInternal}},
 		{Exit: 2, Name: "invalid", Codes: []Code{CodeInvalidRequest, CodePayloadTooLarge}},
 		{Exit: 3, Name: "not-found", Codes: []Code{CodeNotFound}},
-		{Exit: 4, Name: "io", Codes: []Code{CodeSourceUnreadable, CodeSourceChanged, CodeCatalogUnavailable}},
+		{Exit: 4, Name: "io", Codes: []Code{CodeSourceUnreadable, CodeOutputUnwritable, CodeSourceChanged, CodeCatalogUnavailable}},
 		{Exit: 5, Name: "unsupported", Codes: []Code{CodeUnsupportedFormat, CodeUnsupportedSource}},
 		{Exit: 6, Name: "canceled", Codes: []Code{CodeCanceled}},
 		{Exit: 7, Name: "unauthorized", Codes: []Code{CodeUnauthorized, CodeSignatureInvalid, CodeSignatureExpired}},
