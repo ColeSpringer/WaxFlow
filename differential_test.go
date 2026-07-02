@@ -28,25 +28,33 @@ import (
 var fixtures = []struct {
 	name      string
 	container string
+	codec     codec.ID
 	rate      int
 	channels  int
 	sampleTyp audio.SampleType
 	bitDepth  int
 	samples   int64
 }{
-	{"sine-u8.wav", "wav", 44100, 1, audio.Int, 8, 2205},
-	{"sine-s16.wav", "wav", 44100, 2, audio.Int, 16, 2205},
-	{"sine-s24.wav", "wav", 48000, 2, audio.Int, 24, 2400},
-	{"sine-s32.wav", "wav", 48000, 2, audio.Int, 32, 2400},
-	{"sine-f32.wav", "wav", 48000, 2, audio.Float, 32, 2400},
-	{"sine-f64.wav", "wav", 44100, 1, audio.Float, 32, 2205},
-	{"sine-5_1-s16.wav", "wav", 48000, 6, audio.Int, 16, 2400},
-	{"sine-rf64.wav", "wav", 44100, 2, audio.Int, 16, 2205},
-	{"sine-s16.aiff", "aiff", 44100, 2, audio.Int, 16, 2205},
-	{"sine-s24.aiff", "aiff", 48000, 2, audio.Int, 24, 2400},
-	{"sine-s8.aiff", "aiff", 44100, 1, audio.Int, 8, 2205},
-	{"sine-f32.aiff", "aiff", 48000, 2, audio.Float, 32, 2400},
-	{"sine-sowt.aiff", "aiff", 44100, 2, audio.Int, 16, 2205},
+	{"sine-u8.wav", "wav", codec.PCM, 44100, 1, audio.Int, 8, 2205},
+	{"sine-s16.wav", "wav", codec.PCM, 44100, 2, audio.Int, 16, 2205},
+	{"sine-s24.wav", "wav", codec.PCM, 48000, 2, audio.Int, 24, 2400},
+	{"sine-s32.wav", "wav", codec.PCM, 48000, 2, audio.Int, 32, 2400},
+	{"sine-f32.wav", "wav", codec.PCM, 48000, 2, audio.Float, 32, 2400},
+	{"sine-f64.wav", "wav", codec.PCM, 44100, 1, audio.Float, 32, 2205},
+	{"sine-5_1-s16.wav", "wav", codec.PCM, 48000, 6, audio.Int, 16, 2400},
+	{"sine-rf64.wav", "wav", codec.PCM, 44100, 2, audio.Int, 16, 2205},
+	{"sine-s16.aiff", "aiff", codec.PCM, 44100, 2, audio.Int, 16, 2205},
+	{"sine-s24.aiff", "aiff", codec.PCM, 48000, 2, audio.Int, 24, 2400},
+	{"sine-s8.aiff", "aiff", codec.PCM, 44100, 1, audio.Int, 8, 2205},
+	{"sine-f32.aiff", "aiff", codec.PCM, 48000, 2, audio.Float, 32, 2400},
+	{"sine-sowt.aiff", "aiff", codec.PCM, 44100, 2, audio.Int, 16, 2205},
+	{"sine-s16.flac", "flac", codec.FLAC, 44100, 2, audio.Int, 16, 15435},
+	{"sine-s24.flac", "flac", codec.FLAC, 48000, 2, audio.Int, 24, 16800},
+	{"sine-mono-s16.flac", "flac", codec.FLAC, 44100, 1, audio.Int, 16, 15435},
+	{"sine-5_1-s16.flac", "flac", codec.FLAC, 48000, 6, audio.Int, 16, 16800},
+	{"noise-s16.flac", "flac", codec.FLAC, 44100, 2, audio.Int, 16, 15435},
+	{"sine-s16.oga", "ogg", codec.FLAC, 44100, 2, audio.Int, 16, 15435},
+	{"noise-s24.oga", "ogg", codec.FLAC, 48000, 2, audio.Int, 24, 16800},
 }
 
 func fixtureSource(t testing.TB, name string) container.Source {
@@ -110,8 +118,8 @@ func TestFixturesProbe(t *testing.T) {
 				t.Errorf("warnings on a clean fixture: %v", info.Warnings)
 			}
 			d := info.Default()
-			if d.Codec != codec.PCM {
-				t.Errorf("codec = %q", d.Codec)
+			if d.Codec != tt.codec {
+				t.Errorf("codec = %q, want %q", d.Codec, tt.codec)
 			}
 			if d.Fmt.Rate != tt.rate || d.Fmt.Channels != tt.channels || d.Fmt.Type != tt.sampleTyp || d.Fmt.BitDepth != tt.bitDepth {
 				t.Errorf("format = %v, want %d Hz %d ch %v%d", d.Fmt, tt.rate, tt.channels, tt.sampleTyp, tt.bitDepth)
@@ -168,11 +176,15 @@ func TestFixturesProbeAgreesWithFFprobe(t *testing.T) {
 			if ref.Samples >= 0 && d.Samples != ref.Samples {
 				t.Errorf("samples = %d, ffprobe says %d", d.Samples, ref.Samples)
 			}
-			// ffprobe reports the container word width; ours is the valid
-			// precision. They agree on every fixture (no reduced-precision
-			// fixture exists), except floats where ours is the pipeline's 32.
-			if tt.sampleTyp == audio.Int && d.Fmt.BitDepth != ref.BitsPerSample {
-				t.Errorf("bit depth = %d, ffprobe says %d", d.Fmt.BitDepth, ref.BitsPerSample)
+			// ffprobe reports PCM word width in bits_per_sample but codec
+			// precision (FLAC) in bits_per_raw_sample; ours is always the
+			// valid precision. Floats stay the pipeline's 32.
+			refBits := ref.BitsPerSample
+			if ref.BitsPerRawSample != 0 {
+				refBits = ref.BitsPerRawSample
+			}
+			if tt.sampleTyp == audio.Int && d.Fmt.BitDepth != refBits {
+				t.Errorf("bit depth = %d, ffprobe says %d", d.Fmt.BitDepth, refBits)
 			}
 		})
 	}

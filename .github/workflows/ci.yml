@@ -64,9 +64,10 @@ jobs:
             VERSION=ci
 
   # ffmpeg is a TEST ORACLE only, never a runtime dependency (ADR-0001).
-  # The differential harness lands with the first codec;
-  # WAXFLOW_REQUIRE_FFMPEG=1 escalates
-  # its self-skipping tests to hard failures on this job.
+  # WAXFLOW_REQUIRE_FFMPEG=1 escalates the oracle tests' self-skips to
+  # hard failures on this job, and WAXFLOW_REQUIRE_VECTORS=1 does the
+  # same for the SHA-256-pinned conformance vectors (cached across runs,
+  # keyed by the pin list).
   differential:
     runs-on: ubuntu-latest
     steps:
@@ -75,7 +76,12 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - run: WAXFLOW_REQUIRE_FFMPEG=1 go test -race ./...
+      - uses: actions/cache@v4
+        with:
+          path: testdata/vectors
+          key: vectors-${{ hashFiles('internal/testutil/vectors.go') }}
+      - run: make verify-vectors
+      - run: WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_REQUIRE_VECTORS=1 go test -race ./...
 
   # 2 min per fuzz target; nightly.yml (lands with the first parser)
   # runs the long soak. Finds every native Fuzz* target automatically.

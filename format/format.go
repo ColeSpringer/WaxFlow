@@ -63,9 +63,9 @@ type Media interface {
 }
 
 // sniffLen is the hard upper bound on the probe read. The actual read is
-// sized to what the registered drivers declare they need (12 bytes while
-// only RIFF and FORM are in the table); deep-window formats joining later
-// (ftyp scans, EBML, sync-word searches) raise it toward this cap.
+// sized to what the registered drivers declare they need (12 bytes: fLaC
+// and OggS need 4, RIFF and FORM need 12); deep-window formats joining
+// later (ftyp scans, EBML, sync-word searches) raise it toward this cap.
 const sniffLen = 64 * 1024
 
 // maxSniffNeed is the largest head the current driver table uses.

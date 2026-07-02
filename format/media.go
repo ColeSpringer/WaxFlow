@@ -103,7 +103,10 @@ func (m *media) ReadChunk(dst *audio.Buffer) error {
 
 // SeekSample repositions to target. The demuxer lands on a sync point at
 // or before it; the remainder is decoded and discarded so the next chunk
-// starts exactly at target (or at end of stream for past-the-end targets).
+// starts exactly at target (or at end of stream for past-the-end
+// targets). When the stream's first sync point lies beyond the target
+// (container.Seeker allows that landing), the returned position exceeds
+// the target and is where the next chunk really starts.
 func (m *media) SeekSample(target int64) (int64, error) {
 	if m.closed {
 		return 0, waxerr.New(waxerr.CodeInternal, "format: SeekSample on closed media")

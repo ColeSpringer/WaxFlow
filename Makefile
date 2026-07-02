@@ -7,7 +7,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # the "stdlib-only codecs" promise.
 PUBLIC_PKGS := . ./waxerr ./audio ./codec/... ./container/... ./format
 
-.PHONY: build test vet fmt fmt-check depcheck check docker clean verify-vectors goldens
+.PHONY: build test vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/waxflow ./cmd/waxflow
@@ -44,6 +44,12 @@ verify-vectors:
 # Regenerate muxer golden files. Review the diff before committing.
 goldens:
 	go test -run TestGoldenMuxOutputs ./container/riff ./container/aiff -update
+
+# Decode/encode throughput; the x-realtime metric is judged against the
+# per-codec floors in docs/quality-gates.md (nightly benchstat ratchets
+# land at M19).
+bench:
+	go test -run '^$$' -bench . -benchtime 2s ./...
 
 docker:
 	docker build --build-arg VERSION=$(VERSION) -t waxflow:$(VERSION) .

@@ -31,8 +31,8 @@ jobs:
             done
           done
 
-  # The full suite with the differential oracle required, so a broken
-  # ffmpeg comparison cannot hide behind a skip.
+  # The full suite with the differential oracle and conformance vectors
+  # required, so a broken comparison cannot hide behind a skip.
   differential:
     runs-on: ubuntu-latest
     steps:
@@ -41,4 +41,9 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - run: WAXFLOW_REQUIRE_FFMPEG=1 go test -race -count=1 ./...
+      - uses: actions/cache@v4
+        with:
+          path: testdata/vectors
+          key: vectors-${{ hashFiles('internal/testutil/vectors.go') }}
+      - run: make verify-vectors
+      - run: WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_REQUIRE_VECTORS=1 go test -race -count=1 ./...

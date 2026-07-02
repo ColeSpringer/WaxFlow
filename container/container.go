@@ -110,7 +110,11 @@ type Demuxer interface {
 // Seeker is implemented by demuxers that can reposition. SeekSample lands
 // on the nearest sync point at or before the target sample and returns the
 // landed position; sample-exact landing is format.Media's job, via
-// decode-and-discard pre-roll from there.
+// decode-and-discard pre-roll from there. When the stream has no sync
+// point at or before the target (its first frame starts later, say after
+// tolerated damage at the head), the landing is the earliest sync point
+// and may exceed the target; consumers treat the returned position as
+// authoritative either way.
 type Seeker interface {
 	SeekSample(track int, sample int64) (landed int64, err error)
 }

@@ -24,7 +24,9 @@ Operationally:
 
 | Component | Tier A references used | Tier B behavioral artifacts |
 |---|---|---|
-| (none yet) | | |
+| codec/flac (decoder) | RFC 9639 (spec); IETF flac-test-files suite (test vectors, SHA-256-pinned); libFLAC behavioral fact only: unequal STREAMINFO block bounds mark pre-1.0 variable-blocksize streams (libFLAC is BSD/Tier A regardless; no source consulted) | none |
+| container/flacn | RFC 9639 (spec) | none |
+| container/ogg | RFC 3533 (spec); Xiph Ogg-FLAC mapping 1.0 (spec) | none |
 
 ## AAC patent-status review
 

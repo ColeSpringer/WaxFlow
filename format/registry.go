@@ -4,9 +4,12 @@ import (
 	"fmt"
 
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/aiff"
+	"github.com/colespringer/waxflow/container/flacn"
+	"github.com/colespringer/waxflow/container/ogg"
 	"github.com/colespringer/waxflow/container/riff"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -26,8 +29,17 @@ type driver struct {
 // drivers is the explicit ordered magic table (no blank-import
 // registration). The full v1.0 order is: fLaC, RIFF, FORM, OggS, ftyp,
 // EBML, ADTS syncword, MPEG syncword last (it false-positives); entries
-// appear here as their milestones land.
+// appear here as their milestones land. flac, wav, aiff, and ogg are in.
 var drivers = []driver{
+	{
+		name:  "flac",
+		match: flacn.Match,
+		need:  4,
+		exts:  []string{"flac"},
+		open: func(src container.Source, opts *Options) (container.Demuxer, error) {
+			return flacn.NewDemuxer(src, &flacn.DemuxerOptions{Strict: opts != nil && opts.Strict})
+		},
+	},
 	{
 		name:  "wav",
 		match: riff.Match,
@@ -46,6 +58,15 @@ var drivers = []driver{
 			return aiff.NewDemuxer(src, &aiff.DemuxerOptions{Strict: opts != nil && opts.Strict})
 		},
 	},
+	{
+		name:  "ogg",
+		match: ogg.Match,
+		need:  4,
+		exts:  []string{"ogg", "oga"},
+		open: func(src container.Source, opts *Options) (container.Demuxer, error) {
+			return ogg.NewDemuxer(src, &ogg.DemuxerOptions{Strict: opts != nil && opts.Strict})
+		},
+	},
 }
 
 // newDecoder builds a decoder for a track, capability-gated the same way
@@ -58,6 +79,12 @@ func newDecoder(t container.Track) (codec.Decoder, error) {
 			return nil, err
 		}
 		return pcm.NewDecoder(cfg, t.Fmt)
+	case codec.FLAC:
+		si, err := flac.ParseStreamInfo(t.CodecConfig)
+		if err != nil {
+			return nil, err
+		}
+		return flac.NewDecoder(si, t.Fmt)
 	default:
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 			fmt.Sprintf("format: no decoder registered for codec %q", t.Codec))

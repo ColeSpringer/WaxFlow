@@ -17,9 +17,13 @@ codec/container interfaces, the PCM codec, WAV (including RF64/BW64 read
 and automatic RF64 write past the 4 GiB mark) and AIFF/AIFF-C containers,
 format probing with sample-exact seeking, the engine facade (`New`,
 `Probe`, `Transcode`, `OpenStream`), and the test harness (ffmpeg as
-differential oracle, never a runtime dependency). Local `waxflow probe`
-and `waxflow transcode` work today; WAV/AIFF round-trips are bit-exact by
-construction and verified against ffmpeg.
+differential oracle, never a runtime dependency). FLAC decoding is in:
+the `codec/flac` decoder (RFC 9639, bit-exact on the complete IETF
+decoder testbench), the native FLAC container with checksum-confirmed
+frame boundaries and SEEKTABLE/bisection seeking, and Ogg demuxing with
+the Ogg-FLAC mapping. Local `waxflow probe` and `waxflow transcode` work
+today; WAV/AIFF round-trips are bit-exact by construction, FLAC and
+Ogg-FLAC decode bit-exactly, all verified against ffmpeg.
 
 The daemon still serves liveness only; WAV/FLAC streaming is next, and
 the service becomes broadly useful once MP3 encoding lands. Unfinished
