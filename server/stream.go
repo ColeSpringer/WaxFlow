@@ -10,6 +10,7 @@ import (
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/audio"
+	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/cache"
 	"github.com/colespringer/waxflow/source"
@@ -320,6 +321,37 @@ func (s *Server) pace(ctx context.Context, sent, burstBytes int64, byteRate floa
 	case <-t.C:
 	case <-ctx.Done():
 	}
+}
+
+// idxCache adapts the sidecar store to waxflow.IndexCache: blobs key by
+// source identity (ADR-0003: ref plus size plus mtimeNS), so an edited
+// file misses and its stale index ages out of the store.
+type idxCache struct {
+	store *cache.IdxStore
+}
+
+func (c *idxCache) Load(src container.Source) []byte {
+	f, ok := src.(*source.File)
+	if !ok {
+		return nil // uploads and test sources: nothing durable to key on
+	}
+	return c.store.Load(identityString(f.Ref, f.ID))
+}
+
+func (c *idxCache) Save(src container.Source, blob []byte) {
+	f, ok := src.(*source.File)
+	if !ok {
+		return
+	}
+	c.store.Save(identityString(f.Ref, f.ID), blob)
+}
+
+func (c *idxCache) Drop(src container.Source) {
+	f, ok := src.(*source.File)
+	if !ok {
+		return
+	}
+	c.store.Drop(identityString(f.Ref, f.ID))
 }
 
 // directPlayable decides ladder rung 1: the source itself satisfies the

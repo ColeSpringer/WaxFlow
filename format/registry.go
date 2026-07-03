@@ -5,10 +5,12 @@ import (
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/flac"
+	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/aiff"
 	"github.com/colespringer/waxflow/container/flacn"
+	"github.com/colespringer/waxflow/container/mpa"
 	"github.com/colespringer/waxflow/container/ogg"
 	"github.com/colespringer/waxflow/container/riff"
 	"github.com/colespringer/waxflow/waxerr"
@@ -74,6 +76,18 @@ var drivers = []driver{
 			return ogg.NewDemuxer(src, &ogg.DemuxerOptions{Strict: opts != nil && opts.Strict})
 		},
 	},
+	// The MPEG sync word stays last: it is twelve set bits anywhere in a
+	// window, which false-positives on other formats' payloads.
+	{
+		name:      "mp3",
+		match:     mpa.Match,
+		need:      mpa.MatchNeed,
+		exts:      []string{"mp3", "mpga"},
+		mediaType: "audio/mpeg",
+		open: func(src container.Source, opts *Options) (container.Demuxer, error) {
+			return mpa.NewDemuxer(src, &mpa.DemuxerOptions{Strict: opts != nil && opts.Strict})
+		},
+	},
 }
 
 // Inputs lists the registered container drivers in sniff order: the
@@ -118,6 +132,9 @@ var decoders = []struct {
 			return nil, err
 		}
 		return flac.NewDecoder(si, t.Fmt)
+	}},
+	{codec.MP3, func(t container.Track) (codec.Decoder, error) {
+		return mp3.NewDecoder(t.Fmt)
 	}},
 }
 

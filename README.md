@@ -39,7 +39,15 @@ the streamable subset) and `container/flacn` a muxer (streaming form on
 a plain writer; exact STREAMINFO with MD5 signature plus a SEEKTABLE on
 seekable output). The whole IETF suite re-encodes losslessly, `flac -t`
 accepts every output, and level 5 lands within the pinned size gate of
-`flac -5` (currently 0.996x on the suite).
+`flac -5` (currently 0.996x on the suite). MP3 decoding is in: a
+from-scratch `codec/mp3` Layer III decoder (MPEG-1/2/2.5, both stereo
+modes, bit reservoir) and the `container/mpa` elementary-stream demuxer
+(ID3 handling, Xing/Info/VBRI metadata, LAME gapless trims, and a lazy
+exact frame index that makes VBR seeking sample-exact and persists
+across sessions via the cache's index sidecar). Decoded output sits
+around 1e-7 RMS of ffmpeg's float decoder against the 1e-4 gate, the
+LAME gapless sample-count invariant holds end to end, and seeks land
+bit-identical to a linear decode at 100 random offsets in VBR streams.
 
 The service is live: the daemon streams progressive audio (`GET
 /stream`) with a direct-play/transcode decision ladder, sample-exact

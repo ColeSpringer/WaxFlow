@@ -370,6 +370,17 @@ func seekMatchesReference(t *testing.T, med format.Media, ref *audio.Buffer, n i
 			t.Fatalf("post-seek chunk pos=%d discont=%v, want pos=%d", dst.Pos, dst.Discont, target)
 		}
 		for c := 0; c < f.Channels; c++ {
+			if f.Type == audio.Float {
+				// Float tracks (lossy decoders) are held to the same bar:
+				// post-seek output is bit-identical to the linear decode.
+				got, want := dst.ChanF(c), ref.ChanF(c)[target:target+int64(dst.N)]
+				for j := range got {
+					if got[j] != want[j] {
+						t.Fatalf("seek to %d: channel %d differs at frame %d", target, c, j)
+					}
+				}
+				continue
+			}
 			want := ref.ChanI(c)[target : target+int64(dst.N)]
 			if idx := testutil.DiffI32(dst.ChanI(c), want); idx != -1 {
 				t.Fatalf("seek to %d: channel %d differs at frame %d", target, c, idx)

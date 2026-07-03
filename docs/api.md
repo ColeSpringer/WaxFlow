@@ -181,8 +181,8 @@ resolved and embedded as `id`, and the response is:
 
     {
       "schemaVersion": 1,
-      "inputs": ["flac", "wav", "aiff", "ogg"],
-      "decoders": ["pcm", "flac"],
+      "inputs": ["flac", "wav", "aiff", "ogg", "mp3"],
+      "decoders": ["pcm", "flac", "mp3"],
       "outputs": [{"name": "wav", "live": true, "exts": ["wav", "wave", "rf64", "bw64"]},
                    {"name": "aiff", "live": false, "exts": ["aif", "aiff", "aifc", "afc"]},
                    {"name": "flac", "live": true, "exts": ["flac"]}],

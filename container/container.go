@@ -119,6 +119,22 @@ type Seeker interface {
 	SeekSample(track int, sample int64) (landed int64, err error)
 }
 
+// Indexer is implemented by demuxers whose seeking builds an expensive
+// source index (exact frame tables, seek tables) worth persisting across
+// sessions: the cacheDir/idx sidecar. Both methods are cheap when there
+// is nothing to do.
+type Indexer interface {
+	// IndexSnapshot serializes the index built so far, or nil when it is
+	// not worth keeping (too small, or unchanged since RestoreIndex).
+	IndexSnapshot() []byte
+	// RestoreIndex adopts a previously snapshotted index and reports
+	// whether the blob was accepted. Implementations validate the blob
+	// against the open source and reject anything inconsistent, so a
+	// stale or foreign blob degrades to a fresh walk, never to bad
+	// positions.
+	RestoreIndex(blob []byte) bool
+}
+
 // Warning is a structured note about tolerated input damage, surfaced
 // through probe results.
 type Warning struct {

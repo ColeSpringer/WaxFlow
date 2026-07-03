@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -196,6 +197,16 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The index sidecar (plan section 10) shares the cache volume but
+	// not the entry lifecycle; losing it only costs index rebuilds, so
+	// an unusable idx directory downgrades to no sidecar, not a refusal
+	// to start.
+	engineOpts := []waxflow.Option{waxflow.WithLogger(log)}
+	if idx, err := cache.OpenIdx(filepath.Join(cfg.CacheDir, "idx"), 0); err != nil {
+		log.Warn("index sidecar unavailable", "err", err)
+	} else {
+		engineOpts = append(engineOpts, waxflow.WithIndexCache(&idxCache{idx}))
+	}
 
 	resolver := cfg.Resolver
 	if resolver == nil {
@@ -217,7 +228,7 @@ func New(cfg Config) (*Server, error) {
 	s := &Server{
 		cfg:         cfg,
 		log:         log,
-		eng:         waxflow.New(waxflow.WithLogger(log)),
+		eng:         waxflow.New(engineOpts...),
 		resolver:    resolver,
 		store:       store,
 		pools:       admission.New(liveSlots, jobSlots),

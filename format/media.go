@@ -38,6 +38,15 @@ type media struct {
 	discont  bool                      // stamp the next chunk as a discontinuity
 	eof      bool
 	closed   bool
+
+	// Gapless trims (Track.Delay/Padding): the delivered timeline is the
+	// trimmed one, so sample 0 is the first real sample and Track.Samples
+	// is the length. delay is the raw samples to cut off the front (skip
+	// counts down what is still owed); rawEnd caps the raw decoder
+	// timeline where the padding starts, -1 when the length is unknown.
+	delay  int64
+	skip   int64
+	rawEnd int64
 }
 
 func newMedia(info *Info, demux container.Demuxer) (Media, error) {
@@ -49,13 +58,36 @@ func newMedia(info *Info, demux container.Demuxer) (Media, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &media{info: info, demux: demux, track: track, decoder: dec}
+	m := &media{info: info, demux: demux, track: track, decoder: dec,
+		delay: track.Delay, skip: track.Delay, rawEnd: -1}
+	// The raw-end cap engages only when the container signaled trims: a
+	// declared-total mismatch in an untrimmed format (a lying FLAC
+	// STREAMINFO, say) stays a tolerated oddity, not a truncation.
+	if (track.Delay > 0 || track.Padding > 0) && track.Samples >= 0 {
+		m.rawEnd = track.Delay + track.Samples
+	}
 	m.stashFn = m.stash
 	if s, ok := demux.(container.Seeker); ok {
 		m.seeker = s
 	}
+	// Only demuxers that keep a persistable index yield a Media that
+	// advertises container.Indexer, so a type assertion is an honest
+	// capability gate: consumers skip sidecar work for formats that
+	// would only ever answer nil.
+	if ix, ok := demux.(container.Indexer); ok {
+		return &indexableMedia{media: m, ix: ix}, nil
+	}
 	return m, nil
 }
+
+// indexableMedia adds the demuxer's container.Indexer to the Media.
+type indexableMedia struct {
+	*media
+	ix container.Indexer
+}
+
+func (m *indexableMedia) IndexSnapshot() []byte         { return m.ix.IndexSnapshot() }
+func (m *indexableMedia) RestoreIndex(blob []byte) bool { return m.ix.RestoreIndex(blob) }
 
 func (m *media) Info() *Info { return m.info }
 
@@ -84,11 +116,28 @@ func (m *media) ReadChunk(dst *audio.Buffer) error {
 	if dst.Cap() == 0 {
 		return waxerr.New(waxerr.CodeInvalidRequest, "format: zero-capacity chunk buffer")
 	}
+	// The front trim still owed (Track.Delay before the first read) is
+	// decoded and discarded exactly like seek pre-roll.
+	if m.skip > 0 && !m.eof {
+		dropped, err := m.discard(m.skip)
+		if err != nil {
+			return err
+		}
+		m.skip -= dropped
+	}
 	dst.N = 0
 	m.copyOut(dst)
 	for dst.N < dst.Cap() && !m.eof {
 		if err := m.fill(dst); err != nil && err != io.EOF {
 			return err
+		}
+	}
+	// The back trim (Track.Padding): frames past the raw end are the
+	// encoder's flush, not audio.
+	if m.rawEnd >= 0 {
+		if allowed := m.rawEnd - m.delay - m.pos; int64(dst.N) >= allowed {
+			dst.N = int(max(allowed, 0))
+			m.eof = true
 		}
 	}
 	if dst.N == 0 {
@@ -117,7 +166,13 @@ func (m *media) SeekSample(target int64) (int64, error) {
 	if target < 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, "format: negative seek target")
 	}
-	landed, err := m.seeker.SeekSample(m.track.ID, target)
+	// The demuxer speaks the raw decoder timeline; the trims map the
+	// delivered (trimmed) target onto it.
+	rawTarget := target + m.delay
+	if m.rawEnd >= 0 {
+		rawTarget = min(rawTarget, m.rawEnd)
+	}
+	landed, err := m.seeker.SeekSample(m.track.ID, rawTarget)
 	if err != nil {
 		return 0, err
 	}
@@ -127,27 +182,44 @@ func (m *media) SeekSample(target int64) (int64, error) {
 		m.carry.N = 0
 	}
 	m.eof = false
+	m.skip = 0 // the pre-roll below subsumes any front trim still owed
 
 	// Pre-roll: decode into the carry and discard up to the target,
-	// sample-exact.
+	// sample-exact. A short discard means the target was past the end:
+	// the landing is the stream's end.
 	pos := landed
-	for pos < target {
+	if rawTarget > landed {
+		dropped, err := m.discard(rawTarget - landed)
+		if err != nil {
+			return 0, err
+		}
+		pos += dropped
+	}
+	m.pos = max(pos-m.delay, 0)
+	m.discont = true
+	return m.pos, nil
+}
+
+// discard decodes and drops up to n frames, returning how many were
+// dropped: fewer than asked means end of stream (eof latches in fill).
+// Both the initial front trim and seek pre-roll ride on this.
+func (m *media) discard(n int64) (int64, error) {
+	var dropped int64
+	for dropped < n {
 		if m.carryLen() == 0 {
 			err := m.fill(nil)
 			if err == io.EOF {
-				break // target past end: land at the stream's end
+				break
 			}
 			if err != nil {
-				return 0, err
+				return dropped, err
 			}
 		}
-		drop := int(min(int64(m.carryLen()), target-pos))
+		drop := int(min(int64(m.carryLen()), n-dropped))
 		m.carryOff += drop
-		pos += int64(drop)
+		dropped += int64(drop)
 	}
-	m.pos = pos
-	m.discont = true
-	return pos, nil
+	return dropped, nil
 }
 
 // carryLen is the number of undelivered frames in the carry buffer.

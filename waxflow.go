@@ -25,6 +25,7 @@ import (
 // The CLI and the HTTP server are both thin layers over it.
 type Engine struct {
 	log *slog.Logger
+	idx IndexCache // nil: no index sidecar
 
 	// plans caches the chain-invariant part of PlanTranscode results, so
 	// per-request planning does not materialize a filter bank.
@@ -47,9 +48,61 @@ func (e *Engine) Probe(src container.Source, hint string, opts *ProbeOptions) (*
 	return format.Probe(src, hint, &format.Options{Strict: opts != nil && opts.Strict})
 }
 
-// OpenStream opens src for decoded, sample-exact PCM access.
+// OpenStream opens src for decoded, sample-exact PCM access. With an
+// IndexCache configured, a saved source index (the MP3 frame table) is
+// restored into the demuxer before the first read, and a grown one is
+// saved back when the media closes.
 func (e *Engine) OpenStream(src container.Source, hint string) (format.Media, error) {
-	return format.Open(src, hint, nil)
+	med, err := format.Open(src, hint, nil)
+	if err != nil || e.idx == nil {
+		return med, err
+	}
+	ix, ok := med.(container.Indexer)
+	if !ok {
+		return med, nil
+	}
+	if blob := e.idx.Load(src); blob != nil {
+		if !ix.RestoreIndex(blob) {
+			// The demuxer found the blob inconsistent with the source;
+			// drop it so it is not served (and kept warm) again.
+			e.idx.Drop(src)
+			e.log.Debug("index sidecar rejected and dropped", "hint", hint)
+		}
+	}
+	return &indexSavingMedia{Media: med, ix: ix, cache: e.idx, src: src}, nil
+}
+
+// indexSavingMedia saves a grown source index when the media closes.
+// Close is idempotent like the media it wraps (ix nils after the first
+// call, so a double Close cannot double-save), and the wrapper stays
+// transparent to container.Indexer asserts: embedding the Media
+// interface does not promote methods outside it.
+type indexSavingMedia struct {
+	format.Media
+	ix    container.Indexer
+	cache IndexCache
+	src   container.Source
+}
+
+func (m *indexSavingMedia) Close() error {
+	if m.ix != nil {
+		if blob := m.ix.IndexSnapshot(); blob != nil {
+			m.cache.Save(m.src, blob)
+		}
+		m.ix = nil
+	}
+	return m.Media.Close()
+}
+
+func (m *indexSavingMedia) IndexSnapshot() []byte {
+	if m.ix == nil {
+		return nil
+	}
+	return m.ix.IndexSnapshot()
+}
+
+func (m *indexSavingMedia) RestoreIndex(blob []byte) bool {
+	return m.ix != nil && m.ix.RestoreIndex(blob)
 }
 
 // TranscodeResult reports what Transcode produced.

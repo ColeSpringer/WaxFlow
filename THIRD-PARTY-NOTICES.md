@@ -16,3 +16,14 @@ Entries follow this format:
 > https://github.com/xiph/flac, as permitted for Tier A sources. The
 > implementation is original code written against RFC 9639; no source
 > was ported line-by-line.
+
+> **codec/mp3 decoder**: the granule pipeline structure and the ported
+> table data (the Huffman tree tables in huffman.go and the ISO Table
+> B.3 synthesis window in synthwin.go) derive from the public-domain
+> PDMP3 via *hajimehoshi/go-mp3* (Apache-2.0),
+> https://github.com/hajimehoshi/go-mp3, v0.3.4. The low sampling
+> frequency handling (MPEG-2/2.5 scalefactor decoding, intensity stereo,
+> band tables, and band-edge behavior) was ported from *minimp3* (CC0),
+> https://github.com/lieff/minimp3. go-mp3 also serves as a test-only
+> differential oracle per the testing policy; it is never imported by
+> the public tree or the runtime pipeline.

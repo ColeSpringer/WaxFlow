@@ -3,6 +3,7 @@ package waxflow
 import (
 	"log/slog"
 
+	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/dsp/dither"
 	"github.com/colespringer/waxflow/dsp/resample"
 )
@@ -16,6 +17,32 @@ func WithLogger(l *slog.Logger) Option {
 		if l != nil {
 			e.log = l
 		}
+	}
+}
+
+// IndexCache persists demuxer-built source indexes across sessions (the
+// cacheDir/idx sidecar): MP3 frame tables today, seek tables for later
+// formats. The engine restores a cached index when it opens a source
+// whose demuxer can use one, and saves fresh snapshots on close. Keying
+// blobs by source identity is the implementation's job (the server keys
+// by ref plus size plus mtime); the engine stays identity-agnostic.
+type IndexCache interface {
+	// Load returns the saved index blob for src, or nil.
+	Load(src container.Source) []byte
+	// Save persists a fresh snapshot for src. Best effort: failures are
+	// the implementation's to swallow (a lost sidecar only costs a
+	// rebuild).
+	Save(src container.Source, blob []byte)
+	// Drop removes src's saved blob. The engine calls it when a demuxer
+	// rejects a loaded blob, so an invalid one stops being served (and
+	// LRU-refreshed) forever.
+	Drop(src container.Source)
+}
+
+// WithIndexCache wires an index sidecar cache into the Engine.
+func WithIndexCache(c IndexCache) Option {
+	return func(e *Engine) {
+		e.idx = c
 	}
 }
 
