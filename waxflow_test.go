@@ -172,7 +172,7 @@ func equalPCM(t *testing.T, want, got *audio.Buffer) {
 	}
 }
 
-// TestTranscodeBitExactRoundTrips is the M1 exit criterion: WAV to AIFF
+// TestTranscodeBitExactRoundTrips pins the audio-core promise: WAV to AIFF
 // and back, across bit depths, float, EXTENSIBLE valid bits, and
 // multichannel, must reproduce the source samples bit for bit.
 func TestTranscodeBitExactRoundTrips(t *testing.T) {
@@ -291,7 +291,7 @@ func TestTranscodeRejections(t *testing.T) {
 
 	_, err := e.Transcode(context.Background(), container.BytesSource(wav), "", &memWS{}, waxflow.TranscodeOptions{Format: "opus"})
 	if !errors.Is(err, waxerr.ErrUnsupportedFormat) {
-		t.Errorf("opus output err = %v, want unsupported-format (not registered until its milestone)", err)
+		t.Errorf("opus output err = %v, want unsupported-format (encoder not registered yet)", err)
 	}
 	_, err = e.Transcode(context.Background(), container.BytesSource(wav), "", &memWS{}, waxflow.TranscodeOptions{})
 	if !errors.Is(err, waxerr.ErrInvalidRequest) {

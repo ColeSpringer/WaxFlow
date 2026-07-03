@@ -34,7 +34,7 @@ const (
 )
 
 // Known mapping signatures, so unsupported-format errors can name what
-// they found. Only FLAC opens; the rest join at their codec milestones.
+// they found. Only FLAC opens; the rest join with their codecs.
 var mappingNames = []struct {
 	prefix string
 	name   string
@@ -418,7 +418,7 @@ func (d *Demuxer) parse() error {
 		if len(found) == 0 {
 			return malformed("no streams")
 		}
-		return malformed("no FLAC stream (found: %s); other mappings land with their codec milestones",
+		return malformed("no FLAC stream (found: %s); other mappings land with their codecs",
 			joinNames(found))
 	}
 	if len(found) > 0 {

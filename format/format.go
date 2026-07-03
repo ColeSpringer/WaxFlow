@@ -4,7 +4,7 @@
 // reads planar PCM chunks and seeks sample-exact.
 //
 // The driver table is capability-gated: codecs and containers register
-// here only once their milestones land, so probe and /caps never claim
+// here only once they actually work, so probe and /caps never claim
 // what does not work.
 package format
 

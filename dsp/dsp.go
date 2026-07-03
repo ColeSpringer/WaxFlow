@@ -2,10 +2,9 @@
 //
 //	format.Media -> [convert] -> [resample] -> [mix] -> [gain] -> [dither] -> framer
 //
-// Nodes are inserted only when needed, in that fixed order (plan section
-// 8). Every node implements the pull-based Stage interface; the whole
-// chain runs synchronously in the caller's goroutine, one chunk at a
-// time. A single stream is sequential and CPU-bound, so parallelism
+// Nodes are inserted only when needed, in that fixed order. Every node
+// implements the pull-based Stage interface; the whole chain runs
+// synchronously in the caller's goroutine, one chunk at a time. A single stream is sequential and CPU-bound, so parallelism
 // comes from concurrent sessions, not from goroutines inside the chain.
 //
 // Position authority follows ADR-0006: format.Media stamps Buffer.Pos,
@@ -42,7 +41,7 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-// Node version constants for cache keys (plan section 10). Convert and
+// Node version constants for cache keys (ADR-0004). Convert and
 // widen affect sample values (domain and word width), so they carry
 // versions; the framer only re-chunks and does not.
 const (
@@ -229,7 +228,7 @@ func NewChain(src Stage, spec ChainSpec) (*Chain, error) {
 
 	// The limiter engages whenever the level path can clip: net positive
 	// gain, or a downmix whose worst-case matrix gain exceeds unity
-	// (plan section 8; protection is by analysis, not hope).
+	// (protection is by analysis, not hope).
 	if spec.GainDB > 0 || (matrix != nil && matrix.MaxGain() > 1) {
 		lim, err := gain.NewLimiter(cur.Rate, cur.Channels, gain.DefaultCeilingDB)
 		if err != nil {
@@ -289,6 +288,11 @@ func (c *Chain) ReadChunk(dst *audio.Buffer) error {
 	return c.out.ReadChunk(dst)
 }
 
+// Ratio returns the chain's output/input rate ratio in lowest terms,
+// 1/1 when the rate is unchanged. Callers projecting lengths without
+// holding a chain (plan caches) use this with the OutputSamples formula.
+func (c *Chain) Ratio() (l, m int) { return c.l, c.m }
+
 // OutputSamples maps a source-stream length onto the chain's output
 // length: rate conversion rescales (ceil, matching the resampler's drain
 // guarantee), everything else is one to one. Unknown lengths (negative,
@@ -301,7 +305,7 @@ func (c *Chain) OutputSamples(in int64) int64 {
 }
 
 // Versions lists the algorithm revisions of every sample-affecting node
-// in chain order, for the cache key (plan section 10).
+// in chain order, for the cache key (ADR-0004).
 func (c *Chain) Versions() []string { return c.versions }
 
 // Release returns all stage scratch buffers to the pool. The chain must

@@ -43,6 +43,13 @@ documented residual risk, with `POST /cache/gc` as the escape hatch.
 - The version prefix `waxflow-v1` makes future canonical-string changes an
   explicit new scheme rather than a silent break.
 - Because `exp` is inside the signature, clock skew handling belongs to the
-  verifier (small fixed leeway, to be pinned when `server` lands).
+  verifier. Pinned with the streaming server: a fixed **60 second** leeway past `exp`
+  (`sign.Leeway`), tolerant of unsynchronized self-hosted boxes without
+  meaningfully extending a URL's life. Signature validity is checked
+  before expiry, so a tampered expired URL reports `signature-invalid`,
+  never `signature-expired`.
+- The identity travels as the `id` query parameter (`<size>-<mtimeNS>`),
+  inside the signature like everything else; signed URLs without it are
+  refused as invalid.
 - The `client` package ships a mint helper so WaxDeck never reimplements
   canonicalization.

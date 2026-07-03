@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -149,5 +150,114 @@ func TestZeroValueUsable(t *testing.T) {
 	}
 	if cfg.ResolvedAddr() != DefaultAddr {
 		t.Errorf("zero Config addr = %q, want %q", cfg.ResolvedAddr(), DefaultAddr)
+	}
+	if got := cfg.ResolvedSourceMaxBytes(); got != DefaultSourceMaxBytes {
+		t.Errorf("ResolvedSourceMaxBytes() = %d", got)
+	}
+	if got := cfg.ResolvedCacheMaxBytes(); got != DefaultCacheMaxBytes {
+		t.Errorf("ResolvedCacheMaxBytes() = %d", got)
+	}
+	if age, err := cfg.ResolvedCacheMaxAge(); err != nil || age != 0 {
+		t.Errorf("ResolvedCacheMaxAge() = %v, %v", age, err)
+	}
+	if got := cfg.ResolvedLiveSlots(); got < 1 {
+		t.Errorf("ResolvedLiveSlots() = %d", got)
+	}
+	if got := cfg.ResolvedJobSlots(); got != DefaultJobSlots {
+		t.Errorf("ResolvedJobSlots() = %d", got)
+	}
+	if got := cfg.ResolvedDefaultGain(); got != "track" {
+		t.Errorf("ResolvedDefaultGain() = %q", got)
+	}
+	if got := cfg.ResolvedPaceBurst(); got != DefaultPaceBurst {
+		t.Errorf("ResolvedPaceBurst() = %v", got)
+	}
+	if got := cfg.ResolvedPaceFactor(); got != DefaultPaceFactor {
+		t.Errorf("ResolvedPaceFactor() = %v", got)
+	}
+}
+
+func TestServiceFieldsFromJSONAndEnv(t *testing.T) {
+	path := writeConfig(t, `{
+		"roots": [{"name":"lib","path":"/music"}],
+		"apiKeys": ["k1"],
+		"cacheMaxAge": "720h",
+		"paceFactor": 0
+	}`)
+	cfg, err := Load(path, envMap(map[string]string{
+		"WAXFLOW_ROOTS":           "a=/x, b=/y",
+		"WAXFLOW_API_KEYS":        "k2, k3",
+		"WAXFLOW_ALLOWED_ORIGINS": "https://deck.example",
+		"WAXFLOW_LIVE_SLOTS":      "3",
+		"WAXFLOW_DEMO":            "true",
+		"WAXFLOW_CACHE_MAX_BYTES": "1024",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Roots) != 2 || cfg.Roots[0] != (Root{"a", "/x"}) || cfg.Roots[1] != (Root{"b", "/y"}) {
+		t.Errorf("env roots override = %+v", cfg.Roots)
+	}
+	if len(cfg.APIKeys) != 2 || cfg.APIKeys[0] != "k2" {
+		t.Errorf("env apiKeys override = %v", cfg.APIKeys)
+	}
+	if len(cfg.AllowedOrigins) != 1 || cfg.AllowedOrigins[0] != "https://deck.example" {
+		t.Errorf("allowedOrigins = %v", cfg.AllowedOrigins)
+	}
+	if cfg.LiveSlots != 3 || !cfg.Demo || cfg.CacheMaxBytes != 1024 {
+		t.Errorf("scalar envs: liveSlots=%d demo=%v cacheMaxBytes=%d", cfg.LiveSlots, cfg.Demo, cfg.CacheMaxBytes)
+	}
+	if age, err := cfg.ResolvedCacheMaxAge(); err != nil || age != 720*time.Hour {
+		t.Errorf("cacheMaxAge = %v, %v", age, err)
+	}
+	// paceFactor: an explicit JSON 0 disables pacing, distinct from absent.
+	if got := cfg.ResolvedPaceFactor(); got != 0 {
+		t.Errorf("explicit paceFactor 0 resolved to %v", got)
+	}
+}
+
+func TestEmptyEnvDoesNotOverride(t *testing.T) {
+	// A set-but-empty variable counts as unset: compose blocks and
+	// sourced env files export empty strings freely, and an empty
+	// WAXFLOW_API_KEYS must never silently wipe file-configured keys
+	// (that would disable auth with no error).
+	path := writeConfig(t, `{"apiKeys":["k1"],"addr":"127.0.0.1:5000"}`)
+	cfg, err := Load(path, envMap(map[string]string{
+		"WAXFLOW_API_KEYS": "",
+		"WAXFLOW_ADDR":     "  ",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.APIKeys) != 1 || cfg.APIKeys[0] != "k1" {
+		t.Fatalf("empty env wiped file keys: %v", cfg.APIKeys)
+	}
+	if cfg.Addr != "127.0.0.1:5000" {
+		t.Fatalf("blank env overrode addr: %q", cfg.Addr)
+	}
+}
+
+func TestServiceFieldValidation(t *testing.T) {
+	bad := []Config{
+		{Roots: []Root{{Name: "a/b", Path: "/x"}}},
+		{Roots: []Root{{Name: "a", Path: ""}}},
+		{SourceMaxBytes: -1},
+		{LiveSlots: -1},
+		{CacheMaxAge: "yesterday"},
+		{TLSCert: "cert.pem"}, // key missing
+		{DebugAddr: "no-port"},
+		{PaceBurstSeconds: -3},
+		{ResampleProfile: "ultra"},
+	}
+	for i, cfg := range bad {
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("case %d validated: %+v", i, cfg)
+		} else if waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+			t.Errorf("case %d code = %s", i, waxerr.CodeOf(err))
+		}
+	}
+	neg := -1.0
+	if err := (Config{PaceFactor: &neg}).Validate(); err == nil {
+		t.Error("negative paceFactor validated")
 	}
 }

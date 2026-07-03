@@ -4,7 +4,7 @@
 // loudness for uncorrelated content and rarely clip. Rarely is not never:
 // correlated content can still sum past full scale, which is why the
 // chain inserts the true-peak limiter whenever MaxGain reports a row
-// whose worst-case sum exceeds unity (plan section 8; protection is by
+// whose worst-case sum exceeds unity (protection is by
 // analysis, not hope).
 //
 // The position gain table follows ITU-R BS.775 conventions: full passes
@@ -24,7 +24,7 @@ import (
 )
 
 // Version is this node's algorithm revision for cache keys: bump on any
-// change to the gain table or normalization (plan section 10).
+// change to the gain table or normalization (ADR-0004).
 const Version = "mix-1"
 
 // Matrix is an immutable channel conversion: out[o] = sum_i coef[o][i] * in[i].
@@ -65,7 +65,7 @@ var stereoGain = map[audio.ChannelMask][2]float64{
 
 // For builds the conversion matrix from src to dst. Supported targets
 // are mono and stereo (lossy outputs downmix, lossless passes layout
-// through, plan section 7) plus unity mono-to-stereo duplication. Equal
+// through by design) plus unity mono-to-stereo duplication. Equal
 // layouts are refused: the caller decides identity, no-op nodes are never
 // built.
 func For(src, dst audio.ChannelMask) (*Matrix, error) {
@@ -109,7 +109,7 @@ func For(src, dst audio.ChannelMask) (*Matrix, error) {
 		rows = [][]float64{m}
 	default:
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("mix: unsupported target layout %v (mono and stereo through M3)", dst))
+			fmt.Sprintf("mix: unsupported target layout %v (only mono and stereo targets exist)", dst))
 	}
 
 	// Energy normalization: rows are scaled down to unit power gain,

@@ -25,9 +25,9 @@ type Vector struct {
 }
 
 // Vectors lists every pinned vector, fetched by `make verify-vectors`
-// (CI-cached, never committed). The list grows as codec milestones land:
-// the IETF FLAC suite landed at M2, MP3/LAME gapless fixtures come at M6,
-// opus_testvectors at M10. Committed fixtures stay tiny and live directly
+// (CI-cached, never committed). The list grows with the codecs: the IETF
+// FLAC suite is in; MP3/LAME gapless fixtures and opus_testvectors join
+// with their decoders. Committed fixtures stay tiny and live directly
 // under testdata/.
 //
 // The FLAC entries are the complete IETF decoder testbench

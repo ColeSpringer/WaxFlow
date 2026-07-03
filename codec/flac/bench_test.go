@@ -15,7 +15,7 @@ import (
 	"github.com/colespringer/waxflow/internal/testutil"
 )
 
-// The M2 performance floor is 100x realtime per core for FLAC decode
+// The performance floor is 100x realtime per core for FLAC decode
 // (docs/quality-gates.md); `make bench` reports the factor as the
 // "x-realtime" metric. The committed pink-noise fixture is the harder
 // case (dense Rice residuals); the IETF vector, when fetched, adds a

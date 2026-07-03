@@ -5,7 +5,7 @@
 // computed.
 //
 // Two profiles trade quality for taps (docs/quality-gates.md pins the
-// numbers, plan section 13 milestone M3):
+// numbers):
 //
 //   - HQ:   passband to 0.91x the narrower Nyquist, ripple <= 0.05 dB,
 //     alias and image rejection >= 110 dB in the passband.
@@ -26,7 +26,7 @@
 // output grid aligned after a mid-stream anchor.
 //
 // Kernels here follow the DSP slice convention: per-channel []float32
-// views, never audio.Buffer or strides (plan section 7).
+// views, never audio.Buffer or strides.
 package resample
 
 import (
@@ -50,9 +50,25 @@ const (
 // Version returns the profile's algorithm revision for cache keys. A
 // change that alters output samples (design formula, tap count, window)
 // must bump this, or stale cache entries would serve the old filter's
-// audio (plan section 10).
+// audio.
 func (p Profile) Version() string {
 	return "resample-" + string(p) + "-1"
+}
+
+// ParseProfile resolves a profile name; the empty string means HQ. This
+// is the single owner of the name set: configuration validation, the
+// server, and the CLI all resolve through it, so adding a profile is a
+// one-place change.
+func ParseProfile(name string) (Profile, error) {
+	switch p := Profile(name); {
+	case name == "":
+		return HQ, nil
+	case p.valid():
+		return p, nil
+	default:
+		return "", waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("resample: unknown profile %q (%s, %s)", name, HQ, Fast))
+	}
 }
 
 func (p Profile) valid() bool { return p == HQ || p == Fast }

@@ -10,7 +10,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 )
 
-// wireMatrix is every wire configuration M1 supports, exercised by the
+// wireMatrix is every supported wire configuration, exercised by the
 // round-trip and marshal tests.
 var wireMatrix = []struct {
 	name string

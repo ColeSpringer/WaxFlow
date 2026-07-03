@@ -10,11 +10,17 @@ services:
     image: ghcr.io/colespringer/waxflow:latest
     environment:
       WAXFLOW_ADDR: 0.0.0.0:4418
+      # Fail-closed rule: a non-loopback listen address requires API keys
+      # (or an explicit WAXFLOW_ALLOW_UNAUTHENTICATED=true, LAN-only).
+      WAXFLOW_API_KEYS: ${WAXFLOW_API_KEYS:?set WAXFLOW_API_KEYS (comma-separated) or override allowUnauthenticated}
     ports:
       - "4418:4418"
     read_only: true
     tmpfs:
       - /tmp
+    volumes:
+      - waxflow-data:/data
+      - waxflow-cache:/cache
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true

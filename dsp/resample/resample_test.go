@@ -125,7 +125,7 @@ type profileGate struct {
 	stopStart float64 // fraction of the narrower Nyquist where rejection is owed
 }
 
-// The gates under test are the documented profile guarantees (plan M3):
+// The gates under test are the documented profile guarantees:
 // hq passband 0.91x Nyquist at <=0.05 dB ripple with >=110 dB rejection,
 // fast at 0.85x / ~70 dB.
 var profileGates = []profileGate{

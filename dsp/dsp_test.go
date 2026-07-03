@@ -243,7 +243,7 @@ func TestWidenExact(t *testing.T) {
 	}
 }
 
-// TestChainEndToEnd is the M3 conversion: 96k/24 stereo to 44.1k/16 with
+// TestChainEndToEnd is the flagship conversion: 96k/24 stereo to 44.1k/16 with
 // dither. Sample count follows the rate ratio exactly, the tone
 // survives at level, and the noise floor sits where 16-bit TPDF puts it.
 func TestChainEndToEnd(t *testing.T) {

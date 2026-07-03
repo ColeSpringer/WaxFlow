@@ -34,8 +34,16 @@ bit-exact by construction, FLAC and Ogg-FLAC decode bit-exactly, and
 resampled output is level-matched against ffmpeg's soxr, all verified
 against ffmpeg.
 
-The daemon still serves liveness only; WAV/FLAC streaming is next, and
-the service becomes broadly useful once MP3 encoding lands. Unfinished
+The service is live: the daemon streams progressive audio (`GET
+/stream`) with a direct-play/transcode decision ladder, sample-exact
+`t=` seeking, short-lived HMAC-signed playback URLs pinned to source
+identity, a write-through transcode cache with read-behind delivery
+(slow clients never backpressure the encoder; a full cache disk degrades
+to ring-fed streaming instead of killing playback), admission control,
+Prometheus metrics, and a full API contract in
+[docs/api.md](docs/api.md). WAV streams live-transcode today; FLAC and
+friends direct-play, and each new encoder widens `format=`.
+The service becomes broadly useful once MP3 encoding lands. Unfinished
 codecs stay unregistered, so probe and `/caps` never advertise what
 doesn't work. Quality bars are pinned in
 [docs/quality-gates.md](docs/quality-gates.md).
@@ -43,16 +51,22 @@ doesn't work. Quality bars are pinned in
 ## Quick start
 
 ```sh
-docker compose up -d          # hardened standalone deployment, port 4418
+# Hardened standalone deployment, port 4418. Publishing a non-loopback
+# port requires API keys (the daemon fails closed without them).
+WAXFLOW_API_KEYS=$(openssl rand -hex 24) docker compose up -d
 curl http://localhost:4418/ping
+curl -H "X-API-Key: $WAXFLOW_API_KEYS" http://localhost:4418/caps
 ```
 
-Or from source (Go 1.26.3):
+Put music under `./library` (or set `WAXFLOW_LIBRARY=/path/to/music`)
+and stream: mint a URL with `POST /sign`, or try the dev demo page
+(`--demo`). Or from source (Go 1.26.3):
 
 ```sh
 make build
-./bin/waxflow server &
+./bin/waxflow server --demo &   # loopback: keyless is allowed
 ./bin/waxflow ping
+open http://127.0.0.1:4418/demo
 ```
 
 ## Configuration
@@ -64,23 +78,42 @@ Precedence: **flag > `WAXFLOW_*` env > JSON config file > default**
 |---|---|---|---|
 | `addr` | `WAXFLOW_ADDR` | `127.0.0.1:4418` | listen address (compose widens to `0.0.0.0`) |
 | `logLevel` | `WAXFLOW_LOG_LEVEL` | `info` | `debug`\|`info`\|`warn`\|`error` |
-
-The table grows as features land.
+| `roots` | `WAXFLOW_ROOTS` | none | named library roots; JSON `[{"name","path"}]`, env `name=path,name2=path2`; each opened via `os.Root` (no escape, symlinks confined), files validated regular and size-capped |
+| `apiKeys` | `WAXFLOW_API_KEYS` | none | control-API keys (comma-separated in env). **Fail closed**: required on a non-loopback `addr` unless `allowUnauthenticated` |
+| `allowUnauthenticated` | `WAXFLOW_ALLOW_UNAUTHENTICATED` | `false` | explicit opt-in to keyless on non-loopback |
+| `sourceMaxBytes` | `WAXFLOW_SOURCE_MAX_BYTES` | 4 GiB | per-source open cap |
+| `metricsKey` | `WAXFLOW_METRICS_KEY` | none | additionally unlocks `GET /metrics` |
+| `signingSecret` | `WAXFLOW_SIGNING_SECRET` | auto-generated into `dataDir` (0600) | HMAC key for signed URLs; `kid:hex,kid2:hex` rotation list or a literal secret |
+| `allowedOrigins` | `WAXFLOW_ALLOWED_ORIGINS` | none | CORS allowlist for playback endpoints |
+| `dataDir` / `cacheDir` | `WAXFLOW_DATA_DIR` / `WAXFLOW_CACHE_DIR` | platform dirs | daemon state / transcode cache |
+| `cacheMaxBytes` / `cacheMaxAge` | `WAXFLOW_CACHE_MAX_*` | 10 GiB / off | LRU eviction policy (`cacheMaxAge` is a Go duration) |
+| `liveSlots` / `jobSlots` | `WAXFLOW_*_SLOTS` | NumCPU-1 / 2 | admission pools; over limit means 503 + `Retry-After: 2` |
+| `defaultGain` | `WAXFLOW_DEFAULT_GAIN` | `track` | gain mode when `gain=` absent |
+| `resampleProfile` | `WAXFLOW_RESAMPLE_PROFILE` | `hq` | `hq` or `fast` (constrained hosts) |
+| `tlsCert` / `tlsKey` | `WAXFLOW_TLS_*` | none | native TLS; else put a terminating proxy in front (ADR-0007) |
+| `debugAddr` | `WAXFLOW_DEBUG_ADDR` | off | loopback-only pprof listener |
+| `paceBurstSeconds` / `paceFactor` | `WAXFLOW_PACE_*` | 30 / 2.0 | read-behind delivery pacing (factor 0 disables) |
+| `demo` | `WAXFLOW_DEMO` | `false` | serve the browser test page at `/demo` (dev only) |
 
 ## CLI
 
-- `waxflow server`: run the daemon
+- `waxflow server`: run the daemon (`--demo` for the browser test page)
 - `waxflow probe <file>`: identify a file and print stream parameters
-  (`--json` for the schemaVersion'd machine shape, `--strict` to treat
-  tolerated input damage as errors)
+  (`--json` for the schemaVersion'd machine shape, identical to `GET
+  /probe`; `--strict` to treat tolerated input damage as errors)
 - `waxflow transcode <in> <out>`: local one-shot file-to-file transcode
   through the same engine the daemon uses (`--format wav|aiff`, default
   from the output extension; `--force` to overwrite)
+- `waxflow sign --src lib/a.flac`: mint a signed playback URL offline
+  (ADR-0003; uses the same secret and roots the daemon holds)
+- `waxflow cache stats|gc`: inspect or evict a running daemon's cache
 - `waxflow ping`: liveness probe; the container HEALTHCHECK
 - `waxflow version`: version and build info
 - `waxflow exit-codes`: print the documented exit-code contract (0 ok,
   1 internal, 2 invalid, 3 not-found, 4 io, 5 unsupported, 6 canceled,
   7 unauthorized, 8 overloaded)
+
+The HTTP surface is documented in [docs/api.md](docs/api.md).
 
 ## Non-goals for v1.0
 

@@ -9,7 +9,13 @@ services:
       service: waxflow
     # Switch to the resolver flavor image once it ships.
     # image: ghcr.io/colespringer/waxflow:latest-waxbin
+    environment:
+      WAXFLOW_ROOTS: lib=/library
     volumes:
       - ${WAXFLOW_LIBRARY:-./library}:/library:ro
       # WaxBin catalog, read-only, for the resolver flavor.
       # - ${WAXBIN_DATA:-./waxbin}/waxbin.db:/catalog/waxbin.db:ro
+
+volumes:
+  waxflow-data:
+  waxflow-cache:

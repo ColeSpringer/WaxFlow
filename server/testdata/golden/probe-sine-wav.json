@@ -1,0 +1,1 @@
+{"schemaVersion":1,"container":"wav","tracks":[{"id":0,"codec":"pcm","rate":44100,"channels":2,"layout":"FL|FR","sampleType":"int","bitDepth":16,"samples":2205,"durationSeconds":0.05,"default":true}]}

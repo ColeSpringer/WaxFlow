@@ -155,7 +155,7 @@ func TestFixturesDecodeDifferential(t *testing.T) {
 	}
 }
 
-// TestFixturesProbeAgreesWithFFprobe is the M1 exit criterion "probe
+// TestFixturesProbeAgreesWithFFprobe pins the promise "probe
 // agrees with ffprobe".
 func TestFixturesProbeAgreesWithFFprobe(t *testing.T) {
 	for _, tt := range fixtures {

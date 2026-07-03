@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxflow/internal/config"
+	"github.com/colespringer/waxflow/server"
 )
 
 func run(t *testing.T, args ...string) (code int, stdout, stderr string) {
@@ -60,8 +61,20 @@ func TestUsageErrorsExitInvalid(t *testing.T) {
 	}
 }
 
-func TestPingAgainstSkeletonHandler(t *testing.T) {
-	srv := httptest.NewServer(newServeMux())
+// newTestHandler builds a minimal keyless server (loopback posture) for
+// CLI-facing tests.
+func newTestHandler(t *testing.T) http.Handler {
+	t.Helper()
+	srv, err := server.New(server.Config{CacheDir: t.TempDir(), Version: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	return srv
+}
+
+func TestPingAgainstHandler(t *testing.T) {
+	srv := httptest.NewServer(newTestHandler(t))
 	defer srv.Close()
 	addr := strings.TrimPrefix(srv.URL, "http://")
 
@@ -100,7 +113,7 @@ func TestServeLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- serve(ctx, ln, cfgLogger, "test") }()
+	go func() { serveErr <- serve(ctx, ln, newTestHandler(t), config.Config{}, cfgLogger, "test") }()
 
 	base := "http://" + ln.Addr().String()
 
@@ -120,17 +133,17 @@ func TestServeLifecycle(t *testing.T) {
 		t.Errorf("GET /ping = %d %+v, want 200 {ok 1}", resp.StatusCode, ping)
 	}
 
-	resp, err = http.Get(base + "/stream")
+	resp, err = http.Get(base + "/nope")
 	if err != nil {
-		t.Fatalf("GET /stream: %v", err)
+		t.Fatalf("GET /nope: %v", err)
 	}
-	var env envelope
+	var env server.ErrorBody
 	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
 		t.Fatalf("decoding envelope: %v", err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound || string(env.Code) != "not-found" || env.SchemaVersion != 1 {
-		t.Errorf("GET /stream = %d %+v, want 404 envelope with code not-found", resp.StatusCode, env)
+		t.Errorf("GET /nope = %d %+v, want 404 envelope with code not-found", resp.StatusCode, env)
 	}
 
 	cancel()

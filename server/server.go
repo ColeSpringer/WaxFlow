@@ -1,0 +1,321 @@
+// Package server is WaxFlow's HTTP service: the progressive streaming
+// surface over the engine. Stdlib mux with Go 1.22 method patterns, no
+// middleware framework, no /api/v1 (a schemaVersion field in JSON bodies
+// instead), and the JSON error envelope {"error","code","schemaVersion"}
+// shared across the Wax family.
+//
+// Construction wires the pieces; behavior lives in the internal packages
+// (cache, sign, admission, flight, metrics) and the engine. The package
+// is transport only: it owns parameter parsing, auth, the decision ladder
+// dispatch, and header semantics, nothing sample-shaped.
+package server
+
+import (
+	"context"
+	"crypto/sha256"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/dsp/resample"
+	"github.com/colespringer/waxflow/internal/admission"
+	"github.com/colespringer/waxflow/internal/cache"
+	"github.com/colespringer/waxflow/internal/config"
+	"github.com/colespringer/waxflow/internal/flight"
+	"github.com/colespringer/waxflow/internal/metrics"
+	"github.com/colespringer/waxflow/internal/sign"
+	"github.com/colespringer/waxflow/source"
+	"github.com/colespringer/waxflow/waxerr"
+)
+
+// writeStallTimeout kills a session that cannot complete a single write
+// for this long: the slow-client defense. Refreshed per chunk via
+// http.ResponseController.
+const writeStallTimeout = 60 * time.Second
+
+// SigningKey is one HMAC key for signed playback URLs; the first
+// configured key mints, every key verifies (rotation).
+type SigningKey struct {
+	ID     string
+	Secret []byte
+}
+
+// Config configures a Server. The CLI resolves config-file defaults
+// before construction; zero values here mean what each field documents.
+type Config struct {
+	// Addr is the address the daemon will listen on, used for the
+	// fail-closed check (the server itself does not listen; the caller
+	// owns the listener).
+	Addr string
+
+	// APIKeys are the control-API keys. Empty plus a non-loopback Addr
+	// refuses to start unless AllowUnauthenticated is set.
+	APIKeys              []string
+	AllowUnauthenticated bool
+
+	// MetricsKey additionally unlocks GET /metrics without a full API key.
+	MetricsKey string
+
+	// AllowedOrigins is the CORS allowlist for playback endpoints. "*"
+	// allows any origin.
+	AllowedOrigins []string
+
+	// Resolver opens source references. Nil means no roots (every source
+	// resolves not-found); the resolver flavor injects its own.
+	Resolver source.Resolver
+
+	// SigningKeys enable signed playback URLs. Empty disables sig auth
+	// and POST /sign.
+	SigningKeys []SigningKey
+
+	// CacheDir is the transcode cache location (required).
+	CacheDir      string
+	CacheMaxBytes int64
+	CacheMaxAge   time.Duration
+	// RingBytes bounds degradation/one-shot rings; 0 means 4 MiB.
+	RingBytes int
+
+	// LiveSlots and JobSlots size the admission pools; 0 means
+	// max(1, NumCPU-1) and 2.
+	LiveSlots int
+	JobSlots  int
+
+	// DefaultGain applies when a request has no gain= parameter: off,
+	// track, album, or a +/-dB number. Empty means track.
+	DefaultGain string
+
+	// ResampleProfile is hq or fast; empty means hq.
+	ResampleProfile string
+
+	// PaceBurst and PaceFactor shape read-behind delivery: burst that
+	// much audio, then cap at factor x realtime. PaceBurst 0 means 30 s;
+	// PaceFactor 0 disables pacing (the CLI passes its resolved default).
+	PaceBurst  time.Duration
+	PaceFactor float64
+
+	// Demo serves the browser test page at GET /demo.
+	Demo bool
+
+	// Version is the build version served by /version and /metrics.
+	Version string
+
+	// Logger receives request warnings and session lifecycle notes; nil
+	// discards.
+	Logger *slog.Logger
+}
+
+// Server is the WaxFlow HTTP handler. Construct with New, serve via
+// ServeHTTP, stop with Close.
+type Server struct {
+	cfg      Config
+	log      *slog.Logger
+	eng      *waxflow.Engine
+	resolver source.Resolver
+	store    *cache.Store
+	pools    *admission.Pools
+	signer   *sign.Signer
+	met      *metrics.Metrics
+	mux      *http.ServeMux
+
+	keyHashes      [][sha256.Size]byte
+	metricsKeyHash [sha256.Size]byte
+	hasMetricsKey  bool
+	origins        map[string]bool
+	anyOrigin      bool
+
+	defaultGain gainSpec
+	profile     resample.Profile
+
+	fl flight.Group[*cache.Entry]
+
+	// baseCtx bounds pipeline goroutines: pipelines outlive their
+	// requests (read-behind), not the server.
+	baseCtx context.Context
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
+}
+
+// New validates cfg and builds a Server. The fail-closed rule is enforced
+// here: keyless on a non-loopback address requires AllowUnauthenticated.
+func New(cfg Config) (*Server, error) {
+	log := cfg.Logger
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	if len(cfg.APIKeys) == 0 && !cfg.AllowUnauthenticated && !LoopbackAddr(cfg.Addr) {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("server: refusing to run keyless on non-loopback %q; configure apiKeys or set allowUnauthenticated", cfg.Addr))
+	}
+	if cfg.CacheDir == "" {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, "server: cacheDir is required")
+	}
+
+	// Zero-value defaults resolve through the same constants the config
+	// layer owns, so a direct embedder and a CLI-configured daemon cannot
+	// drift.
+	if cfg.DefaultGain == "" {
+		cfg.DefaultGain = config.DefaultGainMode
+	}
+	if cfg.PaceBurst == 0 {
+		cfg.PaceBurst = config.DefaultPaceBurst
+	}
+	if cfg.RingBytes == 0 {
+		cfg.RingBytes = cache.DefaultRingBytes
+	}
+	defaultGain, err := parseGain(cfg.DefaultGain, gainSpec{mode: gainTrack})
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeInvalidRequest, "server: defaultGain", err)
+	}
+	profile, err := resample.ParseProfile(cfg.ResampleProfile)
+	if err != nil {
+		return nil, err
+	}
+
+	var signer *sign.Signer
+	if len(cfg.SigningKeys) > 0 {
+		keys := make([]sign.Key, len(cfg.SigningKeys))
+		for i, k := range cfg.SigningKeys {
+			keys[i] = sign.Key{ID: k.ID, Secret: k.Secret}
+		}
+		if signer, err = sign.New(keys); err != nil {
+			return nil, err
+		}
+	}
+
+	store, err := cache.Open(cfg.CacheDir, cache.Options{
+		MaxBytes:  cfg.CacheMaxBytes,
+		MaxAge:    cfg.CacheMaxAge,
+		RingBytes: cfg.RingBytes,
+		Logger:    log,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	resolver := cfg.Resolver
+	if resolver == nil {
+		if resolver, err = source.OpenRoots(nil, 0); err != nil {
+			store.Close()
+			return nil, err
+		}
+	}
+
+	liveSlots := cfg.LiveSlots
+	if liveSlots == 0 {
+		liveSlots = config.DefaultLiveSlots()
+	}
+	jobSlots := cfg.JobSlots
+	if jobSlots == 0 {
+		jobSlots = config.DefaultJobSlots
+	}
+
+	s := &Server{
+		cfg:         cfg,
+		log:         log,
+		eng:         waxflow.New(waxflow.WithLogger(log)),
+		resolver:    resolver,
+		store:       store,
+		pools:       admission.New(liveSlots, jobSlots),
+		signer:      signer,
+		met:         &metrics.Metrics{},
+		defaultGain: defaultGain,
+		profile:     profile,
+	}
+	s.baseCtx, s.cancel = context.WithCancel(context.Background())
+
+	for _, k := range cfg.APIKeys {
+		s.keyHashes = append(s.keyHashes, sha256.Sum256([]byte(k)))
+	}
+	if cfg.MetricsKey != "" {
+		s.metricsKeyHash = sha256.Sum256([]byte(cfg.MetricsKey))
+		s.hasMetricsKey = true
+	}
+	s.origins = make(map[string]bool, len(cfg.AllowedOrigins))
+	for _, o := range cfg.AllowedOrigins {
+		if o == "*" {
+			s.anyOrigin = true
+			continue
+		}
+		s.origins[o] = true
+	}
+
+	s.routes()
+	return s, nil
+}
+
+func (s *Server) routes() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /ping", s.handlePing)
+	mux.HandleFunc("GET /version", s.requireKey(s.handleVersion))
+	mux.HandleFunc("GET /caps", s.requireKey(s.handleCaps))
+	mux.HandleFunc("GET /probe", s.requireKey(s.handleProbe))
+	mux.HandleFunc("POST /probe", s.requireKey(s.handleProbe))
+	mux.HandleFunc("POST /sign", s.requireKey(s.handleSign))
+	mux.HandleFunc("POST /transcode", s.requireKey(s.handleTranscode))
+	mux.HandleFunc("GET /stream", s.handleStream)
+	mux.HandleFunc("HEAD /stream", s.handleStream)
+	mux.HandleFunc("OPTIONS /stream", s.handlePreflight)
+	mux.HandleFunc("GET /cache/stats", s.requireKey(s.handleCacheStats))
+	mux.HandleFunc("POST /cache/gc", s.requireKey(s.handleCacheGC))
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
+	if s.cfg.Demo {
+		mux.HandleFunc("GET /demo", s.handleDemo)
+	}
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		s.writeEnvelope(w, http.StatusNotFound, waxerr.CodeNotFound,
+			fmt.Sprintf("no such endpoint: %s %s", r.Method, r.URL.Path))
+	})
+	s.mux = mux
+}
+
+// ServeHTTP implements http.Handler.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mux.ServeHTTP(w, r)
+}
+
+// Close stops pipeline goroutines and the cache janitor. Call after the
+// http.Server has drained.
+func (s *Server) Close() error {
+	s.cancel()
+	s.wg.Wait()
+	return s.store.Close()
+}
+
+// Metrics exposes the metric set (the CLI wires nothing; tests observe).
+func (s *Server) Metrics() *metrics.Metrics { return s.met }
+
+func (s *Server) handlePing(w http.ResponseWriter, _ *http.Request) {
+	s.writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "schemaVersion": 1})
+}
+
+func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
+	s.writeJSON(w, http.StatusOK, VersionInfo{SchemaVersion: 1, Version: s.cfg.Version})
+}
+
+// LoopbackAddr reports whether addr binds only loopback: the fail-closed
+// predicate, exported so the CLI's loopback-only debug listener enforces
+// the identical notion of loopback.
+// The empty address means the config default (loopback); an empty host
+// means wildcard.
+func LoopbackAddr(addr string) bool {
+	if addr == "" {
+		return true
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}

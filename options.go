@@ -20,10 +20,10 @@ func WithLogger(l *slog.Logger) Option {
 }
 
 // TranscodeOptions selects the Transcode output. It grows as encoders
-// land; through M3 output is always PCM, with the DSP chain (resample,
-// mix, gain, dither) between decode and encode. Zero values keep the
-// source's properties, so the zero options are a bit-exact container
-// rewrite.
+// land; until the first compressed encoder does, output is always PCM,
+// with the DSP chain (resample, mix, gain, dither) between decode and
+// encode. Zero values keep the source's properties, so the zero options
+// are a bit-exact container rewrite.
 type TranscodeOptions struct {
 	// Format is the output container: "wav" or "aiff".
 	Format string
@@ -39,6 +39,10 @@ type TranscodeOptions struct {
 	// gain engages the true-peak limiter; tighter policy clamps (the
 	// HTTP +12 dB bound) live at the API boundary, not here.
 	GainDB float64
+	// FromSample starts output at this source-timeline sample, seeking
+	// sample-exact before the first chunk. Seconds convert to samples at
+	// the API boundary (ADR-0006); 0 starts at the beginning.
+	FromSample int64
 	// Shaping selects the dither strategy for quantization; the default
 	// is flat TPDF.
 	Shaping dither.Shaping

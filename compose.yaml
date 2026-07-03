@@ -1,6 +1,19 @@
 # Standalone deployment: docker compose up
+#
+#   WAXFLOW_API_KEYS=$(openssl rand -hex 24) docker compose up -d
+#
+# Mount your audio files under /library and name it as a root; signed URLs and
+# the transcode cache persist in the named volumes.
 services:
   waxflow:
     extends:
       file: compose.base.yaml
       service: waxflow
+    environment:
+      WAXFLOW_ROOTS: lib=/library
+    volumes:
+      - ${WAXFLOW_LIBRARY:-./library}:/library:ro
+
+volumes:
+  waxflow-data:
+  waxflow-cache:

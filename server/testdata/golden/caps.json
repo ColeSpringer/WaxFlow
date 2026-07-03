@@ -1,0 +1,1 @@
+{"schemaVersion":1,"inputs":["flac","wav","aiff","ogg"],"decoders":["pcm","flac"],"outputs":[{"name":"wav","live":true,"exts":["wav","wave","rf64","bw64"]},{"name":"aiff","live":false,"exts":["aif","aiff","aifc","afc"]}],"delivery":{"progressive":true,"hls":false,"jobs":false,"uploads":false},"profiles":{}}

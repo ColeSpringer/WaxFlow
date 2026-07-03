@@ -2,11 +2,11 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,80 +15,169 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/colespringer/waxflow/internal/config"
+	"github.com/colespringer/waxflow/internal/sign"
+	"github.com/colespringer/waxflow/server"
+	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-// The skeleton daemon serves only GET /ping. The real server package
-// (auth, signing, streaming, cache, admission) will replace the handler.
-// The daemon lifecycle here (config resolution, slog to stdout, graceful
-// SIGTERM drain) is already the permanent shape.
-
-// envelope is the JSON error body shared server<->client across the family.
-type envelope struct {
-	Error         string      `json:"error"`
-	Code          waxerr.Code `json:"code"`
-	SchemaVersion int         `json:"schemaVersion"`
-}
-
 func newServerCmd(version string) *cobra.Command {
+	var demo bool
 	cmd := &cobra.Command{
 		Use:   "server",
-		Short: "Run the WaxFlow daemon (skeleton: liveness only)",
+		Short: "Run the WaxFlow daemon",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := resolveConfig(cmd)
 			if err != nil {
 				return err
 			}
+			if demo {
+				cfg.Demo = true
+			}
 			// Daemon convention: logs to stdout.
 			logger, err := newLogger(cmd.OutOrStdout(), cfg)
 			if err != nil {
 				return err
 			}
+			srvCfg, cleanup, err := buildServerConfig(cfg, version, logger)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			srv, err := server.New(srvCfg)
+			if err != nil {
+				return err
+			}
+			defer srv.Close()
+
 			ln, err := net.Listen("tcp", cfg.ResolvedAddr())
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeInternal, "listen", err)
 			}
+			stopDebug, err := startDebugListener(cfg, logger)
+			if err != nil {
+				ln.Close()
+				return err
+			}
+			defer stopDebug()
+
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
-			return serve(ctx, ln, logger, version)
+			return serve(ctx, ln, srv, cfg, logger, version)
 		},
 	}
 	cmd.Flags().String("addr", "", "listen address host:port (default "+config.DefaultAddr+")")
+	cmd.Flags().BoolVar(&demo, "demo", false, "serve the browser test page at /demo (dev mode)")
 	return cmd
 }
 
-func newServeMux() *http.ServeMux {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /ping", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "schemaVersion": 1})
-	})
-	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusNotFound, envelope{
-			Error:         "no such endpoint (this skeleton daemon serves /ping only)",
-			Code:          waxerr.CodeNotFound,
-			SchemaVersion: 1,
-		})
-	})
-	return mux
+// buildServerConfig maps the file/env/flag configuration onto the server
+// package's dependencies: opened roots, signing keys (auto-generated into
+// dataDir on first run), and resolved directories.
+func buildServerConfig(cfg config.Config, version string, logger *slog.Logger) (server.Config, func(), error) {
+	nop := func() {}
+	dataDir, err := cfg.ResolvedDataDir()
+	if err != nil {
+		return server.Config{}, nop, err
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return server.Config{}, nop, waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating dataDir", err)
+	}
+	cacheDir, err := cfg.ResolvedCacheDir()
+	if err != nil {
+		return server.Config{}, nop, err
+	}
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return server.Config{}, nop, waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating cacheDir", err)
+	}
+
+	keys, err := sign.ResolveKeys(cfg.SigningSecret, dataDir)
+	if err != nil {
+		return server.Config{}, nop, err
+	}
+	signingKeys := make([]server.SigningKey, len(keys))
+	for i, k := range keys {
+		signingKeys[i] = server.SigningKey{ID: k.ID, Secret: k.Secret}
+	}
+
+	roots, err := source.OpenRoots(configRoots(cfg), cfg.ResolvedSourceMaxBytes())
+	if err != nil {
+		return server.Config{}, nop, err
+	}
+	maxAge, err := cfg.ResolvedCacheMaxAge()
+	if err != nil {
+		roots.Close()
+		return server.Config{}, nop, err
+	}
+
+	return server.Config{
+		Addr:                 cfg.ResolvedAddr(),
+		APIKeys:              cfg.APIKeys,
+		AllowUnauthenticated: cfg.AllowUnauthenticated,
+		MetricsKey:           cfg.MetricsKey,
+		AllowedOrigins:       cfg.AllowedOrigins,
+		Resolver:             roots,
+		SigningKeys:          signingKeys,
+		CacheDir:             cacheDir,
+		CacheMaxBytes:        cfg.ResolvedCacheMaxBytes(),
+		CacheMaxAge:          maxAge,
+		LiveSlots:            cfg.ResolvedLiveSlots(),
+		JobSlots:             cfg.ResolvedJobSlots(),
+		DefaultGain:          cfg.ResolvedDefaultGain(),
+		ResampleProfile:      cfg.ResolvedResampleProfile(),
+		PaceBurst:            cfg.ResolvedPaceBurst(),
+		PaceFactor:           cfg.ResolvedPaceFactor(),
+		Demo:                 cfg.Demo,
+		Version:              version,
+		Logger:               logger,
+	}, func() { roots.Close() }, nil
 }
 
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	// Encode errors mean the client went away; nothing useful to do.
-	_ = json.NewEncoder(w).Encode(v)
+func configRoots(cfg config.Config) []source.Root {
+	roots := make([]source.Root, len(cfg.Roots))
+	for i, r := range cfg.Roots {
+		roots[i] = source.Root{Name: r.Name, Path: r.Path}
+	}
+	return roots
 }
 
-// serve runs the daemon on ln until ctx is canceled, then drains gracefully.
-// The caller must eventually cancel ctx (the shutdown goroutine waits on it).
-func serve(ctx context.Context, ln net.Listener, logger *slog.Logger, version string) error {
+// startDebugListener serves pprof on the loopback-only debugAddr: live
+// profiles from real deployments, never exposed.
+func startDebugListener(cfg config.Config, logger *slog.Logger) (func(), error) {
+	if cfg.DebugAddr == "" {
+		return func() {}, nil
+	}
+	// The same loopback notion as the fail-closed rule, one predicate.
+	if !server.LoopbackAddr(cfg.DebugAddr) {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, "debugAddr must be loopback-only")
+	}
+	dmux := http.NewServeMux()
+	dmux.HandleFunc("/debug/pprof/", pprof.Index)
+	dmux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	dmux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	dmux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	dmux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	ln, err := net.Listen("tcp", cfg.DebugAddr)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeInternal, "debug listen", err)
+	}
+	dsrv := &http.Server{Handler: dmux, ReadHeaderTimeout: 5 * time.Second}
+	go dsrv.Serve(ln)
+	logger.Info("debug listener up", "addr", ln.Addr().String())
+	return func() { dsrv.Close() }, nil
+}
+
+// serve runs the daemon on ln until ctx is canceled, then drains
+// gracefully. TLS engages when both tlsCert and tlsKey are configured
+// (ADR-0007); otherwise document the terminating reverse proxy.
+func serve(ctx context.Context, ln net.Listener, handler http.Handler, cfg config.Config, logger *slog.Logger, version string) error {
 	srv := &http.Server{
-		Handler:           newServeMux(),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       90 * time.Second,
-		// WriteTimeout deliberately unset: long-lived streams will refresh
+		// WriteTimeout deliberately unset: long-lived streams refresh
 		// per-chunk write deadlines via http.ResponseController instead.
 		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
@@ -100,8 +189,14 @@ func serve(ctx context.Context, ln net.Listener, logger *slog.Logger, version st
 		shutdownErr <- srv.Shutdown(shutCtx)
 	}()
 	logger.Info("waxflow daemon listening",
-		"addr", ln.Addr().String(), "version", version, "skeleton", "/ping only")
-	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
+		"addr", ln.Addr().String(), "version", version, "tls", cfg.TLSCert != "")
+	var err error
+	if cfg.TLSCert != "" {
+		err = srv.ServeTLS(ln, cfg.TLSCert, cfg.TLSKey)
+	} else {
+		err = srv.Serve(ln)
+	}
+	if !errors.Is(err, http.ErrServerClosed) {
 		return waxerr.Wrap(waxerr.CodeInternal, "serve", err)
 	}
 	if err := <-shutdownErr; err != nil {

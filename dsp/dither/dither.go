@@ -9,7 +9,7 @@
 // each channel derives an independent stream from the seed, so identical
 // input, seed, and settings produce identical output regardless of how
 // the stream is chunked. Golden-stream tests and byte-identical cache
-// regeneration depend on this (plan section 14, deterministic mode).
+// regeneration depend on this (deterministic mode).
 package dither
 
 import (

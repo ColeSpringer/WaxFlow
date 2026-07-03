@@ -26,7 +26,7 @@ changing it re-baselines every gate in the same PR.
 - **Validity**: the reference decoder (and ours) accepts every produced
   stream; decoded sample count matches the gapless invariant
   (`output_samples == source_samples_after_trim`) wherever the format
-  signals it (capability matrix, plan section 8).
+  signals it (capability matrix).
 - **Differential RMS / max-abs**: full-scale-relative error vs the ffmpeg
   float decode of the same stream.
 - **ODG-proxy**: PEAQ-anchored objective difference grade implemented in

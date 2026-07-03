@@ -93,7 +93,7 @@ func writeSineWAV(t *testing.T, path string, rate, channels, bits, frames int) {
 	}
 }
 
-// TestTranscodeDSP is the M3 CLI exit criterion: 96 kHz / 24-bit in,
+// TestTranscodeDSP drives the DSP chain end to end: 96 kHz / 24-bit in,
 // 44.1 kHz / 16-bit out, dithered, through the real command.
 func TestTranscodeDSP(t *testing.T) {
 	dir := t.TempDir()

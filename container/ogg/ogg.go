@@ -2,7 +2,7 @@
 // verification, packet reassembly across pages, and per-mapping content
 // handling. The only mapping wired so far is Ogg-FLAC (the Xiph FLAC-in-
 // Ogg mapping, version 1); Vorbis and Opus land with their codec
-// milestones. Other mappings are still recognized by name so errors can
+// codecs. Other mappings are still recognized by name so errors can
 // say what was found.
 //
 // Seeking bisects on page granule positions to get near the target, then

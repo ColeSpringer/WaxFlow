@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WaxFlow demo</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 44rem; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.3rem; }
+  label { display: block; margin-top: .75rem; font-weight: 600; }
+  input, select { width: 100%; padding: .4rem; font: inherit; box-sizing: border-box; }
+  .row { display: flex; gap: .75rem; }
+  .row > div { flex: 1; }
+  button { margin-top: 1rem; margin-right: .5rem; padding: .5rem 1rem; font: inherit; cursor: pointer; }
+  audio { width: 100%; margin-top: 1rem; }
+  pre { background: #f4f4f4; padding: .75rem; overflow-x: auto; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>WaxFlow demo (dev mode)</h1>
+<p>Mints a signed URL via <code>POST /sign</code> and plays it. Direct
+play (format auto on an untransformed source) serves original bytes with
+full range support; anything else streams a live WAV transcode where the
+<code>t=</code> box seeks sample-exact.</p>
+
+<label>API key <input id="key" placeholder="X-API-Key value (leave empty on a keyless daemon)"></label>
+<label>Source reference <input id="src" placeholder="lib/album/track.flac"></label>
+<div class="row">
+  <div><label>Format
+    <select id="format">
+      <option value="auto">auto (direct play)</option>
+      <option value="wav">wav (transcode)</option>
+    </select></label></div>
+  <div><label>Start at t= seconds <input id="t" type="number" min="0" step="0.001" value="0"></label></div>
+</div>
+
+<button id="play">Mint &amp; play</button>
+<button id="probe">Probe</button>
+
+<audio id="player" controls></audio>
+<pre id="out">ready</pre>
+
+<script>
+const out = document.getElementById('out');
+const show = (v) => { out.textContent = typeof v === 'string' ? v : JSON.stringify(v, null, 2); };
+const headers = () => {
+  const k = document.getElementById('key').value.trim();
+  return k ? { 'X-API-Key': k } : {};
+};
+
+document.getElementById('play').onclick = async () => {
+  try {
+    const params = {
+      src: document.getElementById('src').value,
+      format: document.getElementById('format').value,
+    };
+    const t = parseFloat(document.getElementById('t').value);
+    if (t > 0) params.t = String(t);
+    const resp = await fetch('/sign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers() },
+      body: JSON.stringify({ params }),
+    });
+    const body = await resp.json();
+    show(body);
+    if (!resp.ok) return;
+    const player = document.getElementById('player');
+    player.src = body.url;
+    player.play();
+  } catch (err) { show(String(err)); }
+};
+
+document.getElementById('probe').onclick = async () => {
+  try {
+    const src = encodeURIComponent(document.getElementById('src').value);
+    const resp = await fetch(`/probe?src=${src}`, { headers: headers() });
+    show(await resp.json());
+  } catch (err) { show(String(err)); }
+};
+</script>
+</body>
+</html>

@@ -1,7 +1,7 @@
 // Package gain scales PCM level: a plain scalar gain kernel, plus a
 // look-ahead true-peak limiter the chain inserts whenever the level path
 // can clip (net positive gain, or a downmix whose worst-case matrix gain
-// exceeds unity; plan section 8). Kernels follow the DSP slice
+// exceeds unity). Kernels follow the DSP slice
 // convention: per-channel []float32, no buffers, no strides.
 package gain
 

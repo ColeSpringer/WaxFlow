@@ -1,7 +1,7 @@
 package waxflow_test
 
 // FLAC conformance against the IETF decoder testbench
-// (ietf-wg-cellar/flac-test-files), the M2 exit gate: bit-exact decodes
+// (ietf-wg-cellar/flac-test-files), the FLAC acceptance gate: bit-exact decodes
 // on the full subset suite, correct handling of the uncommon set, and
 // graceful failure on the faulty set. Vectors are SHA-256-pinned and
 // fetched by `make verify-vectors`; tests self-skip until then and
@@ -116,7 +116,7 @@ func requireBitExact(t *testing.T, name string) {
 	}
 }
 
-// TestFLACSubsetBitExact is the headline M2 gate: every subset file
+// TestFLACSubsetBitExact is the headline conformance gate: every subset file
 // decodes bit-exactly.
 func TestFLACSubsetBitExact(t *testing.T) {
 	for _, name := range subsetFiles {
