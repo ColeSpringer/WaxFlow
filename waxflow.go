@@ -13,6 +13,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/aiff"
 	"github.com/colespringer/waxflow/container/riff"
+	"github.com/colespringer/waxflow/dsp"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -54,8 +55,10 @@ type TranscodeResult struct {
 }
 
 // Transcode decodes src and writes it to dst in the requested output
-// format: decode -> encode -> mux, checking ctx between chunks. Through
-// M1 both ends are PCM, so transcodes are bit-exact by construction.
+// format: decode -> DSP -> encode -> mux, checking ctx between chunks.
+// The DSP chain (convert, resample, mix, gain, dither; plan section 8)
+// is assembled only from the options that differ from the source, so
+// zero options make the transcode a bit-exact container rewrite.
 // Output formats whose muxer needs to back-patch headers (AIFF, exact
 // WAV sizes) want dst to be an io.WriteSeeker; WAV falls back to a
 // compliant streaming form on a plain writer.
@@ -67,7 +70,23 @@ func (e *Engine) Transcode(ctx context.Context, src container.Source, hint strin
 	defer med.Close()
 
 	srcTrack := med.Info().Default()
-	f := srcTrack.Fmt
+	chain, err := dsp.NewChain(dsp.NewSource(med, srcTrack.Fmt), dsp.ChainSpec{
+		Rate:     opts.Rate,
+		Channels: opts.Channels,
+		BitDepth: opts.BitDepth,
+		GainDB:   opts.GainDB,
+		Shaping:  opts.Shaping,
+		Profile:  opts.ResampleProfile,
+		// FrameSize stays 0 through M3: the PCM encoder accepts any
+		// chunk length. Once frame-native encoders land, their
+		// InputFormat drives the spec and FrameSize carries FrameSize().
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer chain.Release()
+
+	f := chain.Format()
 	cfg, mux, err := outputFor(opts.Format, f, dst)
 	if err != nil {
 		return nil, err
@@ -90,7 +109,7 @@ func (e *Engine) Transcode(ctx context.Context, src container.Source, hint strin
 		Codec:       codec.PCM,
 		CodecConfig: enc.CodecConfig(),
 		Fmt:         f,
-		Samples:     srcTrack.Samples,
+		Samples:     chain.OutputSamples(srcTrack.Samples),
 		Default:     true,
 	}
 	if err := mux.Begin([]container.Track{track}); err != nil {
@@ -98,8 +117,9 @@ func (e *Engine) Transcode(ctx context.Context, src container.Source, hint strin
 	}
 
 	e.log.Debug("transcode started",
-		"container", med.Info().Container, "format", f.String(),
-		"samples", srcTrack.Samples, "out", opts.Format)
+		"container", med.Info().Container, "source", srcTrack.Fmt.String(),
+		"format", f.String(), "samples", track.Samples, "out", opts.Format,
+		"dsp", strings.Join(chain.Versions(), ","))
 
 	emit := func(p codec.Packet) error {
 		return mux.WritePacket(container.Packet{Track: 0, Packet: p})
@@ -110,7 +130,7 @@ func (e *Engine) Transcode(ctx context.Context, src container.Source, hint strin
 		if err := ctx.Err(); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeCanceled, "transcode canceled", err)
 		}
-		err := med.ReadChunk(buf)
+		err := chain.ReadChunk(buf)
 		if err == io.EOF {
 			break
 		}

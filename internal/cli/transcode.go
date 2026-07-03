@@ -10,22 +10,37 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/dsp/dither"
+	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
 func newTranscodeCmd() *cobra.Command {
 	var formatName string
 	var force bool
+	var rate, channels, bits int
+	var gainDB float64
+	var profileName, ditherName string
 	cmd := &cobra.Command{
 		Use:   "transcode <input> <output>",
 		Short: "Transcode an audio file locally through the engine",
 		Long: `Transcode decodes the input and writes it to the output path via the
-same engine the daemon uses: decode -> encode -> mux. The output format
-comes from --format or the output extension. Through M1 both ends are
-PCM (WAV/AIFF in, WAV/AIFF out) and transcodes are bit-exact.`,
+same engine the daemon uses: decode -> DSP -> encode -> mux. The output
+format comes from --format or the output extension. Without conversion
+flags the transcode is a bit-exact container rewrite; --rate,
+--channels, --bits and --gain insert only the DSP nodes they need
+(resampling, downmix, gain with true-peak limiting, dither).`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := resolveConfig(cmd)
+			if err != nil {
+				return err
+			}
+			profile, err := parseProfile(profileName)
+			if err != nil {
+				return err
+			}
+			shaping, err := parseDither(ditherName)
 			if err != nil {
 				return err
 			}
@@ -64,35 +79,90 @@ PCM (WAV/AIFF in, WAV/AIFF out) and transcodes are bit-exact.`,
 				}
 			}
 
-			flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+			// The output is created exclusively at its final path, or,
+			// under --force, staged in the same directory and renamed
+			// into place only after the transcode succeeds. Overwriting
+			// in place would truncate first, so any failure (a bad flag
+			// caught by chain validation, an unreadable source, a full
+			// disk) would destroy the file it was asked to replace.
+			outPath := args[1]
+			writePath := outPath
 			if force {
-				flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+				writePath = fmt.Sprintf("%s.tmp-%d", outPath, os.Getpid())
 			}
-			out, err := os.OpenFile(args[1], flags, 0o644)
+			out, err := os.OpenFile(writePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 			if err != nil {
-				if errors.Is(err, os.ErrExist) {
+				if !force && errors.Is(err, os.ErrExist) {
 					return waxerr.Wrap(waxerr.CodeInvalidRequest, "output exists (use --force to overwrite)", err)
 				}
 				return waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating output", err)
 			}
 
 			e := waxflow.New(waxflow.WithLogger(logger))
-			res, err := e.Transcode(cmd.Context(), src, extHint(args[0]), out, waxflow.TranscodeOptions{Format: outFormat})
+			res, err := e.Transcode(cmd.Context(), src, extHint(args[0]), out, waxflow.TranscodeOptions{
+				Format:          outFormat,
+				Rate:            rate,
+				Channels:        channels,
+				BitDepth:        bits,
+				GainDB:          gainDB,
+				Shaping:         shaping,
+				ResampleProfile: profile,
+			})
 			if err != nil {
 				out.Close()
-				// A failed transcode leaves no half-written artifact.
-				os.Remove(args[1])
+				// A failed transcode leaves no half-written artifact;
+				// under --force the target was never touched.
+				os.Remove(writePath)
 				return err
 			}
 			if err := out.Close(); err != nil {
+				os.Remove(writePath)
 				return waxerr.Wrap(waxerr.CodeOutputUnwritable, "closing output", err)
 			}
+			if force {
+				if err := os.Rename(writePath, outPath); err != nil {
+					os.Remove(writePath)
+					return waxerr.Wrap(waxerr.CodeOutputUnwritable, "replacing output", err)
+				}
+			}
 			fmt.Fprintf(cmd.OutOrStdout(), "wrote %s: %s %d samples (%.3fs)\n",
-				args[1], res.Format, res.Samples, durationSeconds(res.Samples, res.Format.Rate))
+				outPath, res.Format, res.Samples, durationSeconds(res.Samples, res.Format.Rate))
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&formatName, "format", "", "output format: wav or aiff (default: from output extension)")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite the output if it exists")
+	cmd.Flags().IntVar(&rate, "rate", 0, "output sample rate in Hz (default: source rate)")
+	cmd.Flags().IntVar(&channels, "channels", 0, "output channel count: 1 or 2 (default: source layout)")
+	cmd.Flags().IntVar(&bits, "bits", 0, "output bit depth, dithered when reducing (default: source depth)")
+	cmd.Flags().Float64Var(&gainDB, "gain", 0, "gain in dB; positive gain engages the true-peak limiter")
+	cmd.Flags().StringVar(&profileName, "resample-profile", "hq", "resampler quality: hq or fast")
+	cmd.Flags().StringVar(&ditherName, "dither", "tpdf", "dither when reducing depth: tpdf, shaped, or off")
 	return cmd
+}
+
+func parseProfile(name string) (resample.Profile, error) {
+	switch name {
+	case "hq", "":
+		return resample.HQ, nil
+	case "fast":
+		return resample.Fast, nil
+	default:
+		return "", waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("unknown resample profile %q (hq, fast)", name))
+	}
+}
+
+func parseDither(name string) (dither.Shaping, error) {
+	switch name {
+	case "tpdf", "":
+		return dither.TPDF, nil
+	case "shaped":
+		return dither.Shaped, nil
+	case "off", "none":
+		return dither.None, nil
+	default:
+		return 0, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("unknown dither mode %q (tpdf, shaped, off)", name))
+	}
 }

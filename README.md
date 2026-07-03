@@ -21,9 +21,18 @@ differential oracle, never a runtime dependency). FLAC decoding is in:
 the `codec/flac` decoder (RFC 9639, bit-exact on the complete IETF
 decoder testbench), the native FLAC container with checksum-confirmed
 frame boundaries and SEEKTABLE/bisection seeking, and Ogg demuxing with
-the Ogg-FLAC mapping. Local `waxflow probe` and `waxflow transcode` work
-today; WAV/AIFF round-trips are bit-exact by construction, FLAC and
-Ogg-FLAC decode bit-exactly, all verified against ffmpeg.
+the Ogg-FLAC mapping. The DSP core is in: a streaming Kaiser
+windowed-sinc polyphase resampler (`hq`: alias rejection >= 110 dB with
+passband ripple <= 0.05 dB out to 0.91x Nyquist; `fast`: ~70 dB for
+constrained hosts), energy-normalized channel downmix, gain with a
+look-ahead true-peak limiter, TPDF and noise-shaped dither, all
+deterministic and assembled by a pull-based stage chain that inserts
+only the nodes a conversion needs. Local `waxflow probe` and `waxflow
+transcode` work today, the latter with `--rate`, `--channels`, `--bits`,
+`--gain`, `--resample-profile`, and `--dither`; WAV/AIFF round-trips are
+bit-exact by construction, FLAC and Ogg-FLAC decode bit-exactly, and
+resampled output is level-matched against ffmpeg's soxr, all verified
+against ffmpeg.
 
 The daemon still serves liveness only; WAV/FLAC streaming is next, and
 the service becomes broadly useful once MP3 encoding lands. Unfinished

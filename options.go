@@ -1,6 +1,11 @@
 package waxflow
 
-import "log/slog"
+import (
+	"log/slog"
+
+	"github.com/colespringer/waxflow/dsp/dither"
+	"github.com/colespringer/waxflow/dsp/resample"
+)
 
 // Option configures an Engine.
 type Option func(*Engine)
@@ -15,11 +20,30 @@ func WithLogger(l *slog.Logger) Option {
 }
 
 // TranscodeOptions selects the Transcode output. It grows as encoders
-// land; through M1 the only knob is the container, and output is always
-// PCM in the source's sample format.
+// land; through M3 output is always PCM, with the DSP chain (resample,
+// mix, gain, dither) between decode and encode. Zero values keep the
+// source's properties, so the zero options are a bit-exact container
+// rewrite.
 type TranscodeOptions struct {
 	// Format is the output container: "wav" or "aiff".
 	Format string
+	// Rate resamples to this sample rate in Hz; 0 keeps the source rate.
+	Rate int
+	// Channels converts the channel count (downmix to 1 or 2, or mono
+	// duplication to stereo); 0 keeps the source layout.
+	Channels int
+	// BitDepth forces integer output at this depth, dithered when
+	// reducing; 0 keeps the source domain and depth.
+	BitDepth int
+	// GainDB applies a scalar gain, finite within +-120 dB. Positive
+	// gain engages the true-peak limiter; tighter policy clamps (the
+	// HTTP +12 dB bound) live at the API boundary, not here.
+	GainDB float64
+	// Shaping selects the dither strategy for quantization; the default
+	// is flat TPDF.
+	Shaping dither.Shaping
+	// ResampleProfile selects resampler quality; empty means resample.HQ.
+	ResampleProfile resample.Profile
 }
 
 // ProbeOptions configures Engine.Probe.
