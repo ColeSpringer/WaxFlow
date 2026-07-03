@@ -331,6 +331,72 @@ func TestTranscodeCommand(t *testing.T) {
 	}
 }
 
+// TestTranscodeFLAC drives the flac output through the real command:
+// extension inference, the level flag's 0 spelling, level validation,
+// and a bit-exact ramp round trip.
+func TestTranscodeFLAC(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	writeWAV(t, in, 4800)
+
+	outPath := filepath.Join(dir, "out.flac")
+	code, out, errOut := run(t, "transcode", in, outPath, "--flac-level", "0")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, errOut)
+	}
+	if !strings.Contains(out, "4800 samples") {
+		t.Errorf("output = %q", out)
+	}
+
+	f, err := os.Open(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	src, err := container.FileSource(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	med, err := waxflow.New().OpenStream(src, "flac")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	info := med.Info()
+	if info.Container != "flac" || info.Default().Samples != 4800 {
+		t.Fatalf("output probe = %+v", info)
+	}
+	fm := info.Default().Fmt
+	dst := audio.Get(fm, audio.StandardChunk)
+	defer audio.Put(dst)
+	pos := int64(0)
+	for {
+		err := med.ReadChunk(dst)
+		if err != nil {
+			break
+		}
+		for c := 0; c < fm.Channels; c++ {
+			for i, v := range dst.ChanI(c) {
+				if want := testutil.RampAtI(fm, c, pos+int64(i)); v != want {
+					t.Fatalf("ch%d sample %d = %d, want %d", c, pos+int64(i), v, want)
+				}
+			}
+		}
+		pos += int64(dst.N)
+	}
+	if pos != 4800 {
+		t.Fatalf("decoded %d frames, want 4800", pos)
+	}
+
+	code, _, errOut = run(t, "transcode", in, filepath.Join(dir, "bad.flac"), "--flac-level", "9")
+	if code != 2 {
+		t.Errorf("level 9 exit = %d, want 2 (invalid), stderr: %s", code, errOut)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "bad.flac")); err == nil {
+		t.Error("failed transcode left an output file behind")
+	}
+}
+
 // TestTranscodeForcePreservesExisting pins the staged overwrite: a
 // --force transcode that fails, at any stage, must leave the
 // pre-existing output byte-identical and no temp file behind. In-place

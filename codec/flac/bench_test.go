@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
+	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/flacn"
@@ -69,6 +70,55 @@ func benchDecode(b *testing.B, path string) {
 	b.StopTimer()
 	seconds := float64(samples) / float64(track.Fmt.Rate)
 	b.ReportMetric(seconds/b.Elapsed().Seconds(), "x-realtime")
+}
+
+// The encode floor is 60x realtime per core at level 5
+// (docs/quality-gates.md). Noise is the residual-heavy worst case; the
+// sine is the predictor-friendly one, so real music lands between.
+func benchEncode(b *testing.B, src *audio.Buffer, level int) {
+	defer audio.Put(src)
+	enc, err := flac.NewEncoder(src.Fmt, &flac.EncoderOptions{Level: level})
+	if err != nil {
+		b.Fatal(err)
+	}
+	chunk := audio.Get(src.Fmt, enc.FrameSize())
+	defer audio.Put(chunk)
+	emit := func(codec.Packet) error { return nil }
+
+	var samples int64
+	b.ResetTimer()
+	for b.Loop() {
+		// A fresh encoder per pass would reset frame numbering; feeding
+		// the same chunks again just grows the stream, which is fine for
+		// throughput measurement.
+		for off := 0; off+enc.FrameSize() <= src.N; off += enc.FrameSize() {
+			audio.CopyFrames(chunk, 0, src, off, enc.FrameSize())
+			chunk.N = enc.FrameSize()
+			if err := enc.Encode(chunk, emit); err != nil {
+				b.Fatal(err)
+			}
+			samples += int64(chunk.N)
+		}
+	}
+	b.StopTimer()
+	seconds := float64(samples) / float64(src.Fmt.Rate)
+	b.ReportMetric(seconds/b.Elapsed().Seconds(), "x-realtime")
+}
+
+func benchFormat() audio.Format {
+	return audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
+}
+
+func BenchmarkEncodeSineL5(b *testing.B) {
+	benchEncode(b, testutil.Sine(benchFormat(), 10*4096, 997, 0.8), 5)
+}
+
+func BenchmarkEncodeNoiseL5(b *testing.B) {
+	benchEncode(b, testutil.Noise(benchFormat(), 10*4096, 42), 5)
+}
+
+func BenchmarkEncodeNoiseL8(b *testing.B) {
+	benchEncode(b, testutil.Noise(benchFormat(), 10*4096, 42), 8)
 }
 
 func BenchmarkDecodeNoise16(b *testing.B) {

@@ -43,7 +43,7 @@ verify-vectors:
 
 # Regenerate muxer golden files. Review the diff before committing.
 goldens:
-	go test -run TestGoldenMuxOutputs ./container/riff ./container/aiff -update
+	go test -run TestGoldenMuxOutputs ./container/riff ./container/aiff ./container/flacn -update
 
 # Decode/encode throughput; the x-realtime metric is judged against the
 # per-codec floors in docs/quality-gates.md (nightly benchstat ratchets

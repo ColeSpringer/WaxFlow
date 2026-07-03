@@ -222,6 +222,76 @@ func TestTranscodeBitExactRoundTrips(t *testing.T) {
 	}
 }
 
+// TestTranscodeFLACRoundTrips pins the first compressed encoder to the
+// same promise as the PCM containers: integer sources survive WAV to
+// FLAC and back bit for bit, across depths, channel counts, and
+// compression levels (the level changes the bytes, never the samples).
+func TestTranscodeFLACRoundTrips(t *testing.T) {
+	matrix := []struct {
+		name     string
+		cfg      pcm.Config
+		channels int
+		level    int // TranscodeOptions.FLACLevel spelling
+	}{
+		{"u8 mono fastest", pcm.Config{Encoding: pcm.UnsignedInt, Bits: 8}, 1, -1},
+		{"s16 stereo default", pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, 2, 0},
+		{"s24 stereo l3", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, 2, 3},
+		{"s32 stereo l8", pcm.Config{Encoding: pcm.SignedInt, Bits: 32}, 2, 8},
+		{"s16 5.1 default", pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, 6, 0},
+	}
+	e := waxflow.New()
+	const frames = 9111 // not a multiple of the encoder block size
+	for _, tt := range matrix {
+		t.Run(tt.name, func(t *testing.T) {
+			wav, src := makeWAV(t, tt.cfg, tt.channels, frames, 17)
+			defer audio.Put(src)
+
+			flacOut := &memWS{}
+			res, err := e.Transcode(context.Background(), container.BytesSource(wav), "", flacOut, waxflow.TranscodeOptions{Format: "flac", FLACLevel: tt.level})
+			if err != nil {
+				t.Fatalf("wav->flac: %v", err)
+			}
+			if res.Samples != frames {
+				t.Fatalf("wav->flac samples = %d, want %d", res.Samples, frames)
+			}
+			wavOut := &memWS{}
+			if _, err := e.Transcode(context.Background(), container.BytesSource(flacOut.b), "", wavOut, waxflow.TranscodeOptions{Format: "wav"}); err != nil {
+				t.Fatalf("flac->wav: %v", err)
+			}
+
+			got := readAll(t, e, wavOut.b, frames)
+			defer audio.Put(got)
+			equalPCM(t, src, got)
+		})
+	}
+
+	// A float source has no lossless FLAC form; the engine quantizes to
+	// 24-bit integers by default rather than refusing.
+	t.Run("f32 defaults to 24-bit", func(t *testing.T) {
+		wav, src := makeWAV(t, pcm.Config{Encoding: pcm.Float, Bits: 32}, 2, 4321, 29)
+		defer audio.Put(src)
+		out := &memWS{}
+		res, err := e.Transcode(context.Background(), container.BytesSource(wav), "", out, waxflow.TranscodeOptions{Format: "flac"})
+		if err != nil {
+			t.Fatalf("f32->flac: %v", err)
+		}
+		if res.Format.Type != audio.Int || res.Format.BitDepth != 24 {
+			t.Fatalf("float source encoded as %v, want int24", res.Format)
+		}
+		got := readAll(t, e, out.b, 4321)
+		audio.Put(got)
+	})
+
+	t.Run("bad level", func(t *testing.T) {
+		wav, src := makeWAV(t, pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, 2, 100, 3)
+		defer audio.Put(src)
+		_, err := e.Transcode(context.Background(), container.BytesSource(wav), "", &memWS{}, waxflow.TranscodeOptions{Format: "flac", FLACLevel: 9})
+		if waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+			t.Fatalf("level 9 = %v, want invalid-request", err)
+		}
+	})
+}
+
 // TestTranscodeRF64RoundTrip covers the RF64 read path through the whole
 // engine: a file written past a tiny size limit decodes identically.
 func TestTranscodeRF64RoundTrip(t *testing.T) {
@@ -316,12 +386,13 @@ func (onlyWriter) Write(p []byte) (int, error) { return len(p), nil }
 // TestOutputTable pins the writer-side capability table: names, extension
 // mapping (both spellings), and its agreement with the read-side exts.
 func TestOutputTable(t *testing.T) {
-	if got := waxflow.OutputFormats(); len(got) != 2 || got[0] != "wav" || got[1] != "aiff" {
+	if got := waxflow.OutputFormats(); len(got) != 3 || got[0] != "wav" || got[1] != "aiff" || got[2] != "flac" {
 		t.Errorf("OutputFormats() = %v", got)
 	}
 	tests := []struct{ ext, want string }{
 		{"wav", "wav"}, {".WAV", "wav"}, {"rf64", "wav"}, {"bw64", "wav"},
 		{"aif", "aiff"}, {".aiff", "aiff"}, {"aifc", "aiff"}, {"afc", "aiff"},
+		{"flac", "flac"}, {".FLAC", "flac"},
 		{"xyz", ""}, {"", ""},
 	}
 	for _, tt := range tests {

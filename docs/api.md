@@ -100,7 +100,7 @@ byte-identical to `waxflow probe --json`.
 
 ## GET /stream
 
-    /stream?src=<ref>&format=auto|wav&rate=&ch=&bits=16|24&gain=&t=&track=&maxBitRate=
+    /stream?src=<ref>&format=auto|wav|flac&rate=&ch=&bits=16|24&gain=&t=&track=&maxBitRate=
 
 Source references (`src`): `<root>/<relative/path>` under a configured
 library root; `upload:<id>` and `pid:<ULID>` return `501
@@ -110,8 +110,13 @@ land.
 Parameters (unknown parameter names are rejected):
 
 - `format`: `auto` (default) engages the decision ladder; `wav` forces a
-  WAV transcode. Other formats join as encoders land (`/caps` is the
-  truth). `aiff` exists for jobs but has no streaming form: 415.
+  WAV transcode; `flac` a FLAC one (lossless, level 5; a FLAC source
+  under `format=flac` with no transforming parameters direct-plays
+  instead). Other formats join as encoders land (`/caps` is the truth).
+  `aiff` exists for jobs but has no streaming form: 415. Live FLAC
+  streams omit the size hints and byte-rate pacing: a lossless encoder's
+  output size is signal-dependent and unknown up front. Completed cache
+  entries serve with exact sizes like any other.
 - `rate`, `ch`, `bits`: output sample rate, channel count (1 or 2), bit
   depth (16 or 24, dithered when reducing). Absent keeps the source's.
 - `gain`: `off`, `track` (default), `album`, or an explicit `+/-dB`
@@ -179,7 +184,8 @@ resolved and embedded as `id`, and the response is:
       "inputs": ["flac", "wav", "aiff", "ogg"],
       "decoders": ["pcm", "flac"],
       "outputs": [{"name": "wav", "live": true, "exts": ["wav", "wave", "rf64", "bw64"]},
-                   {"name": "aiff", "live": false, "exts": ["aif", "aiff", "aifc", "afc"]}],
+                   {"name": "aiff", "live": false, "exts": ["aif", "aiff", "aifc", "afc"]},
+                   {"name": "flac", "live": true, "exts": ["flac"]}],
       "delivery": {"progressive": true, "hls": false, "jobs": false, "uploads": false},
       "profiles": {}
     }

@@ -8,6 +8,7 @@ package waxflow_test
 // conversions).
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/riff"
@@ -208,6 +210,8 @@ func TestEncodeDifferential(t *testing.T) {
 		{"f32 to wav", pcm.Config{Encoding: pcm.Float, Bits: 32}, "wav", "wav"},
 		{"u8 to aiff", pcm.Config{Encoding: pcm.UnsignedInt, Bits: 8}, "aiff", "aiff"},
 		{"s24 to wav", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, "wav", "wav"},
+		{"s16 to flac", pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, "flac", "flac"},
+		{"s24 to flac", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, "flac", "flac"},
 	}
 	const frames = 4801
 	e := waxflow.New()
@@ -250,6 +254,118 @@ func TestEncodeDifferential(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestFLACOutputAcceptedByFlacTool runs the reference decoder's own
+// conformance check, `flac -t`, over engine FLAC outputs written the
+// two ways the service writes them: a seekable file (STREAMINFO
+// back-patched, MD5 present and verified by the tool) and a plain
+// stream (placeholders stand; the tool accepts with an MD5 warning).
+func TestFLACOutputAcceptedByFlacTool(t *testing.T) {
+	testutil.FlacTool(t)
+	e := waxflow.New()
+	sources := []string{"sine-s16.wav", "noise-s16.flac", "sine-5_1-s16.wav", "sine-f32.wav"}
+	for _, name := range sources {
+		t.Run(name, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join("testdata", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			outPath := filepath.Join(t.TempDir(), "out.flac")
+			outFile, err := os.Create(outPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := e.Transcode(context.Background(), container.BytesSource(raw), "", outFile, waxflow.TranscodeOptions{Format: "flac"}); err != nil {
+				t.Fatalf("transcode: %v", err)
+			}
+			if err := outFile.Close(); err != nil {
+				t.Fatal(err)
+			}
+			testutil.FlacTest(t, outPath)
+
+			// The file form must carry a verifiable MD5 signature.
+			head := make([]byte, 8+flac.StreamInfoLen)
+			f, err := os.Open(outPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			if _, err := io.ReadFull(f, head); err != nil {
+				t.Fatal(err)
+			}
+			si, err := flac.ParseStreamInfo(head[8:])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if si.MD5 == [16]byte{} {
+				t.Error("file output left the MD5 signature unset")
+			}
+
+			streamPath := filepath.Join(t.TempDir(), "stream.flac")
+			var buf bytes.Buffer
+			if _, err := e.Transcode(context.Background(), container.BytesSource(raw), "", &buf, waxflow.TranscodeOptions{Format: "flac"}); err != nil {
+				t.Fatalf("streaming transcode: %v", err)
+			}
+			if err := os.WriteFile(streamPath, buf.Bytes(), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			testutil.FlacTest(t, streamPath)
+		})
+	}
+}
+
+// TestFLACEncodeSizeGate enforces the size thresholds in
+// docs/quality-gates.md at level 5 against the reference encoder's -5,
+// over the IETF subset suite's audio (the stand-in corpus until the
+// encoder-quality corpus lands with the first lossy encoder): total
+// within 1.05x, no track past 1.08x.
+func TestFLACEncodeSizeGate(t *testing.T) {
+	testutil.FlacTool(t)
+	if testing.Short() {
+		t.Skip("size gate re-encodes the whole suite")
+	}
+	e := waxflow.New()
+	var ours, refs int64
+	for _, name := range subsetFiles {
+		raw, err := os.ReadFile(testutil.VectorPath(t, "flac/subset/"+name+".flac"))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Both encoders get bit-identical PCM: ours via the engine
+		// (lossless by the conformance suite), the reference via a WAV
+		// rewrite of the same source.
+		wavPath := filepath.Join(t.TempDir(), "in.wav")
+		wavFile, err := os.Create(wavPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.Transcode(context.Background(), container.BytesSource(raw), "flac", wavFile, waxflow.TranscodeOptions{Format: "wav"}); err != nil {
+			t.Fatalf("%s: wav rewrite: %v", name, err)
+		}
+		if err := wavFile.Close(); err != nil {
+			t.Fatal(err)
+		}
+		ref := testutil.FlacEncodeFile(t, wavPath, 5)
+
+		var out bytes.Buffer
+		if _, err := e.Transcode(context.Background(), container.BytesSource(raw), "flac", &out, waxflow.TranscodeOptions{Format: "flac"}); err != nil {
+			t.Fatalf("%s: our encode: %v", name, err)
+		}
+		our := int64(out.Len())
+
+		ours += our
+		refs += ref
+		if ratio := float64(our) / float64(ref); ratio > 1.08 {
+			t.Errorf("%s: %d bytes vs flac -5's %d (%.3fx > 1.08x)", name, our, ref, ratio)
+		}
+	}
+	if ratio := float64(ours) / float64(refs); ratio > 1.05 {
+		t.Errorf("suite total %d bytes vs flac -5's %d (%.3fx > 1.05x)", ours, refs, ratio)
+	} else {
+		t.Logf("suite total %d bytes vs flac -5's %d (%.3fx)", ours, refs, ratio)
 	}
 }
 

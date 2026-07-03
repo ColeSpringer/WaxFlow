@@ -10,9 +10,11 @@ import (
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/aiff"
+	"github.com/colespringer/waxflow/container/flacn"
 	"github.com/colespringer/waxflow/container/riff"
 	"github.com/colespringer/waxflow/dsp"
 	"github.com/colespringer/waxflow/format"
@@ -91,22 +93,25 @@ func (e *Engine) Transcode(ctx context.Context, src container.Source, hint strin
 			srcSamples = max(0, srcSamples-landed)
 		}
 	}
-	chain, err := dsp.NewChain(dsp.NewSource(med, srcTrack.Fmt), specFor(opts))
+	row, err := outputRow(opts.Format)
+	if err != nil {
+		return nil, err
+	}
+	spec := specFor(opts)
+	if row.adjust != nil {
+		row.adjust(&spec, srcTrack.Fmt, opts)
+	}
+	chain, err := dsp.NewChain(dsp.NewSource(med, srcTrack.Fmt), spec)
 	if err != nil {
 		return nil, err
 	}
 	defer chain.Release()
 
 	f := chain.Format()
-	row, err := outputRow(opts.Format)
+	enc, mux, err := row.build(f, opts, dst)
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := row.config(f)
-	if err != nil {
-		return nil, err
-	}
-	mux := row.mux(dst)
 	// The one capability bit Muxer exposes: back-patching muxers need a
 	// seekable destination (a file), checked here once so no future muxer
 	// re-invents the guard and no work starts on a doomed transcode.
@@ -116,13 +121,9 @@ func (e *Engine) Transcode(ctx context.Context, src container.Source, hint strin
 				fmt.Sprintf("waxflow: %s output requires a seekable destination", opts.Format))
 		}
 	}
-	enc, err := pcm.NewEncoder(cfg, f)
-	if err != nil {
-		return nil, err
-	}
 
 	track := container.Track{
-		Codec:       codec.PCM,
+		Codec:       row.codecID,
 		CodecConfig: enc.CodecConfig(),
 		Fmt:         f,
 		Samples:     chain.OutputSamples(srcSamples),
@@ -140,7 +141,7 @@ func (e *Engine) Transcode(ctx context.Context, src container.Source, hint strin
 	emit := func(p codec.Packet) error {
 		return mux.WritePacket(container.Packet{Track: 0, Packet: p})
 	}
-	buf := audio.Get(f, audio.StandardChunk)
+	buf := audio.Get(f, max(audio.StandardChunk, spec.FrameSize))
 	defer audio.Put(buf)
 	for {
 		if err := ctx.Err(); err != nil {
@@ -178,9 +179,9 @@ func specFor(opts TranscodeOptions) dsp.ChainSpec {
 		GainDB:   opts.GainDB,
 		Shaping:  opts.Shaping,
 		Profile:  opts.ResampleProfile,
-		// FrameSize stays 0 until frame-native encoders land; the PCM
-		// encoder accepts any chunk length. Frame-native encoders'
-		// InputFormat will drive the spec and FrameSize carry FrameSize().
+		// FrameSize stays 0 here; frame-native encoders set it through
+		// their output row's adjust hook (the PCM rows accept any chunk
+		// length).
 	}
 }
 
@@ -285,8 +286,10 @@ func (e *Engine) PlanTranscode(track container.Track, opts TranscodeOptions) (*T
 	if samples >= 0 {
 		samples = (samples*int64(core.l) + int64(core.m) - 1) / int64(core.m)
 	}
+	// Compressed encoders report bytesPerFrame 0 (output size depends on
+	// the signal), which leaves size and rate hints honestly unknown.
 	estimated := int64(-1)
-	if samples >= 0 {
+	if samples >= 0 && core.bytesPerFrame > 0 {
 		estimated = int64(core.headerBytes) + samples*int64(core.bytesPerFrame)
 	}
 	return &TranscodePlan{
@@ -309,13 +312,17 @@ func buildPlanCore(in audio.Format, opts TranscodeOptions) (*planCore, error) {
 	if err != nil {
 		return nil, err
 	}
-	chain, err := dsp.NewChain(dsp.NewSource(eofReader{}, in), specFor(opts))
+	spec := specFor(opts)
+	if row.adjust != nil {
+		row.adjust(&spec, in, opts)
+	}
+	chain, err := dsp.NewChain(dsp.NewSource(eofReader{}, in), spec)
 	if err != nil {
 		return nil, err
 	}
 	defer chain.Release()
 	f := chain.Format()
-	cfg, err := row.config(f)
+	version, bytesPerFrame, err := row.plan(f, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -325,10 +332,10 @@ func buildPlanCore(in audio.Format, opts TranscodeOptions) (*planCore, error) {
 		container:     row.name,
 		mediaType:     row.mediaType,
 		live:          row.live,
-		versions:      append(chain.Versions(), pcm.Version),
+		versions:      append(chain.Versions(), version),
 		l:             l,
 		m:             m,
-		bytesPerFrame: cfg.BytesPerFrame(f.Channels),
+		bytesPerFrame: bytesPerFrame,
 		headerBytes:   row.headerBytes,
 	}, nil
 }
@@ -348,8 +355,22 @@ type output struct {
 	mediaType string
 	// headerBytes is the nominal container overhead, for size estimates.
 	headerBytes int
-	config      func(f audio.Format) (pcm.Config, error)
-	mux         func(dst io.Writer) container.Muxer
+	// codecID is what the encoder produces, for the muxed Track.
+	codecID codec.ID
+	// adjust folds the encoder's input constraints into the chain spec:
+	// its native frame size, and a depth default when the encoder cannot
+	// take the float domain the chain would otherwise emit. Plan and
+	// Transcode both apply it, so they cannot disagree about the output
+	// format. Nil when the encoder takes anything.
+	adjust func(spec *dsp.ChainSpec, src audio.Format, opts TranscodeOptions)
+	// plan validates the encoder configuration against the chain output
+	// format and reports the encoder's cache-key version (ADR-0004) and
+	// the wire bytes per frame, 0 when output size is signal-dependent
+	// (compressed encoders). A plan that succeeds must guarantee build
+	// succeeds.
+	plan func(f audio.Format, opts TranscodeOptions) (version string, bytesPerFrame int, err error)
+	// build constructs the wired encoder and muxer for one transcode.
+	build func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error)
 }
 
 var outputs = []output{
@@ -359,8 +380,25 @@ var outputs = []output{
 		live:        true,
 		mediaType:   "audio/wav",
 		headerBytes: 44,
-		config:      riff.DefaultConfig,
-		mux:         func(dst io.Writer) container.Muxer { return riff.NewMuxer(dst, nil) },
+		codecID:     codec.PCM,
+		plan: func(f audio.Format, _ TranscodeOptions) (string, int, error) {
+			cfg, err := riff.DefaultConfig(f)
+			if err != nil {
+				return "", 0, err
+			}
+			return pcm.Version, cfg.BytesPerFrame(f.Channels), nil
+		},
+		build: func(f audio.Format, _ TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
+			cfg, err := riff.DefaultConfig(f)
+			if err != nil {
+				return nil, nil, err
+			}
+			enc, err := pcm.NewEncoder(cfg, f)
+			if err != nil {
+				return nil, nil, err
+			}
+			return enc, riff.NewMuxer(dst, nil), nil
+		},
 	},
 	{
 		name:        "aiff",
@@ -368,9 +406,84 @@ var outputs = []output{
 		live:        false,
 		mediaType:   "audio/aiff",
 		headerBytes: 54,
-		config:      aiff.DefaultConfig,
-		mux:         func(dst io.Writer) container.Muxer { return aiff.NewMuxer(dst) },
+		codecID:     codec.PCM,
+		plan: func(f audio.Format, _ TranscodeOptions) (string, int, error) {
+			cfg, err := aiff.DefaultConfig(f)
+			if err != nil {
+				return "", 0, err
+			}
+			return pcm.Version, cfg.BytesPerFrame(f.Channels), nil
+		},
+		build: func(f audio.Format, _ TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
+			cfg, err := aiff.DefaultConfig(f)
+			if err != nil {
+				return nil, nil, err
+			}
+			enc, err := pcm.NewEncoder(cfg, f)
+			if err != nil {
+				return nil, nil, err
+			}
+			return enc, aiff.NewMuxer(dst), nil
+		},
 	},
+	{
+		name:      "flac",
+		exts:      []string{"flac"},
+		live:      true,
+		mediaType: "audio/flac",
+		// headerBytes stays 0: size estimates are gated on a fixed
+		// bytesPerFrame, which VBR lossless lacks.
+		codecID: codec.FLAC,
+		adjust: func(spec *dsp.ChainSpec, src audio.Format, opts TranscodeOptions) {
+			// FLAC holds integer PCM only; a float source with no depth
+			// requested quantizes to 24 bits, which carries the whole
+			// float32 mantissa. An invalid level leaves FrameSize 0 and
+			// plan reports the error.
+			if level, err := flacLevel(opts); err == nil {
+				spec.FrameSize = flac.EncoderBlockSize(level)
+			}
+			if src.Type == audio.Float && opts.BitDepth == 0 {
+				spec.BitDepth = 24
+			}
+		},
+		plan: func(f audio.Format, opts TranscodeOptions) (string, int, error) {
+			level, err := flacLevel(opts)
+			if err != nil {
+				return "", 0, err
+			}
+			if _, err := flac.NewEncoder(f, &flac.EncoderOptions{Level: level}); err != nil {
+				return "", 0, err
+			}
+			return flac.EncoderVersion(level), 0, nil
+		},
+		build: func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
+			level, err := flacLevel(opts)
+			if err != nil {
+				return nil, nil, err
+			}
+			enc, err := flac.NewEncoder(f, &flac.EncoderOptions{Level: level})
+			if err != nil {
+				return nil, nil, err
+			}
+			return enc, flacn.NewMuxer(dst, &flacn.MuxerOptions{MD5: enc.MD5}), nil
+		},
+	},
+}
+
+// flacLevel resolves TranscodeOptions.FLACLevel: the zero value keeps
+// the encoder default, -1 selects level 0 (which the zero value cannot
+// mean without stealing the default), and 1..8 pass through.
+func flacLevel(opts TranscodeOptions) (int, error) {
+	switch {
+	case opts.FLACLevel == FLACLevelDefault:
+		return flac.DefaultEncoderLevel, nil
+	case opts.FLACLevel == FLACLevelFastest:
+		return 0, nil
+	case opts.FLACLevel >= 1 && opts.FLACLevel <= 8:
+		return opts.FLACLevel, nil
+	}
+	return 0, waxerr.New(waxerr.CodeInvalidRequest,
+		fmt.Sprintf("waxflow: FLAC level %d outside -1..8", opts.FLACLevel))
 }
 
 // DefaultLiveFormat returns the output format that format=auto resolves

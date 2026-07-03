@@ -29,10 +29,17 @@ look-ahead true-peak limiter, TPDF and noise-shaped dither, all
 deterministic and assembled by a pull-based stage chain that inserts
 only the nodes a conversion needs. Local `waxflow probe` and `waxflow
 transcode` work today, the latter with `--rate`, `--channels`, `--bits`,
-`--gain`, `--resample-profile`, and `--dither`; WAV/AIFF round-trips are
-bit-exact by construction, FLAC and Ogg-FLAC decode bit-exactly, and
-resampled output is level-matched against ffmpeg's soxr, all verified
-against ffmpeg.
+`--gain`, `--resample-profile`, `--dither`, and `--flac-level`; WAV/AIFF
+round-trips are bit-exact by construction, FLAC and Ogg-FLAC decode
+bit-exactly, and resampled output is level-matched against ffmpeg's
+soxr, all verified against ffmpeg. FLAC encoding is in: `codec/flac`
+gained a from-scratch encoder (fixed and LPC prediction, full stereo
+decorrelation search, Rice partition optimization, levels 0-8 inside
+the streamable subset) and `container/flacn` a muxer (streaming form on
+a plain writer; exact STREAMINFO with MD5 signature plus a SEEKTABLE on
+seekable output). The whole IETF suite re-encodes losslessly, `flac -t`
+accepts every output, and level 5 lands within the pinned size gate of
+`flac -5` (currently 0.996x on the suite).
 
 The service is live: the daemon streams progressive audio (`GET
 /stream`) with a direct-play/transcode decision ladder, sample-exact
@@ -41,8 +48,9 @@ identity, a write-through transcode cache with read-behind delivery
 (slow clients never backpressure the encoder; a full cache disk degrades
 to ring-fed streaming instead of killing playback), admission control,
 Prometheus metrics, and a full API contract in
-[docs/api.md](docs/api.md). WAV streams live-transcode today; FLAC and
-friends direct-play, and each new encoder widens `format=`.
+[docs/api.md](docs/api.md). WAV and FLAC streams live-transcode
+today; compliant sources direct-play, and each new encoder widens
+`format=`.
 The service becomes broadly useful once MP3 encoding lands. Unfinished
 codecs stay unregistered, so probe and `/caps` never advertise what
 doesn't work. Quality bars are pinned in
@@ -102,8 +110,8 @@ Precedence: **flag > `WAXFLOW_*` env > JSON config file > default**
   (`--json` for the schemaVersion'd machine shape, identical to `GET
   /probe`; `--strict` to treat tolerated input damage as errors)
 - `waxflow transcode <in> <out>`: local one-shot file-to-file transcode
-  through the same engine the daemon uses (`--format wav|aiff`, default
-  from the output extension; `--force` to overwrite)
+  through the same engine the daemon uses (`--format wav|aiff|flac`,
+  default from the output extension; `--force` to overwrite)
 - `waxflow sign --src lib/a.flac`: mint a signed playback URL offline
   (ADR-0003; uses the same secret and roots the daemon holds)
 - `waxflow cache stats|gc`: inspect or evict a running daemon's cache

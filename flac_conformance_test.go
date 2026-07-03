@@ -8,6 +8,8 @@ package waxflow_test
 // WAXFLOW_REQUIRE_VECTORS=1 escalates skips to failures.
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -122,6 +124,50 @@ func TestFLACSubsetBitExact(t *testing.T) {
 	for _, name := range subsetFiles {
 		t.Run(name, func(t *testing.T) {
 			requireBitExact(t, "flac/subset/"+name+".flac")
+		})
+	}
+}
+
+// TestFLACEncodeRoundTripSuite is the encoder's conformance gate over
+// the same suite the decoder cleared: every subset vector re-encodes
+// losslessly, decode(encode(x)) == x. The level rotates with the file
+// index, so the whole 0..8 range is exercised about seven times each
+// across the suite without a nine-fold runtime (the size gate and the
+// service tests add plenty of default-level coverage).
+func TestFLACEncodeRoundTripSuite(t *testing.T) {
+	e := waxflow.New()
+	for i, name := range subsetFiles {
+		t.Run(name, func(t *testing.T) {
+			raw, err := os.ReadFile(testutil.VectorPath(t, "flac/subset/"+name+".flac"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := decodeAllDynamic(t, container.BytesSource(raw), "flac")
+			if err != nil {
+				t.Fatalf("decode source: %v", err)
+			}
+			defer audio.Put(want)
+
+			// The options spelling: -1 means level 0, 0 the default (5).
+			level := i % 9
+			if level == 0 {
+				level = -1
+			}
+			var out bytes.Buffer
+			if _, err := e.Transcode(context.Background(), container.BytesSource(raw), "flac", &out,
+				waxflow.TranscodeOptions{Format: "flac", FLACLevel: level}); err != nil {
+				t.Fatalf("encode at level spelling %d: %v", level, err)
+			}
+			got, err := decodeAllDynamic(t, container.BytesSource(out.Bytes()), "flac")
+			if err != nil {
+				t.Fatalf("decode our output (level spelling %d): %v", level, err)
+			}
+			defer audio.Put(got)
+			if got.N != want.N {
+				t.Errorf("level spelling %d: %d samples, want %d", level, got.N, want.N)
+			} else if idx := testutil.DiffI32(testutil.Interleave(got), testutil.Interleave(want)); idx != -1 {
+				t.Errorf("level spelling %d: first mismatch at interleaved index %d", level, idx)
+			}
 		})
 	}
 }

@@ -19,6 +19,7 @@ func newTranscodeCmd() *cobra.Command {
 	var formatName string
 	var force bool
 	var rate, channels, bits int
+	var flacLevel int
 	var gainDB float64
 	var profileName, ditherName string
 	cmd := &cobra.Command{
@@ -98,6 +99,13 @@ flags the transcode is a bit-exact container rewrite; --rate,
 				return waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating output", err)
 			}
 
+			// The options field cannot say "level 0" with a plain 0 (that
+			// selects the default), so the flag's 0 maps to the sentinel.
+			optLevel := flacLevel
+			if optLevel == 0 {
+				optLevel = waxflow.FLACLevelFastest
+			}
+
 			e := waxflow.New(waxflow.WithLogger(logger))
 			res, err := e.Transcode(cmd.Context(), src, extHint(args[0]), out, waxflow.TranscodeOptions{
 				Format:          outFormat,
@@ -107,6 +115,7 @@ flags the transcode is a bit-exact container rewrite; --rate,
 				GainDB:          gainDB,
 				Shaping:         shaping,
 				ResampleProfile: profile,
+				FLACLevel:       optLevel,
 			})
 			if err != nil {
 				out.Close()
@@ -130,7 +139,7 @@ flags the transcode is a bit-exact container rewrite; --rate,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&formatName, "format", "", "output format: wav or aiff (default: from output extension)")
+	cmd.Flags().StringVar(&formatName, "format", "", "output format: wav, aiff, or flac (default: from output extension)")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite the output if it exists")
 	cmd.Flags().IntVar(&rate, "rate", 0, "output sample rate in Hz (default: source rate)")
 	cmd.Flags().IntVar(&channels, "channels", 0, "output channel count: 1 or 2 (default: source layout)")
@@ -138,6 +147,7 @@ flags the transcode is a bit-exact container rewrite; --rate,
 	cmd.Flags().Float64Var(&gainDB, "gain", 0, "gain in dB; positive gain engages the true-peak limiter")
 	cmd.Flags().StringVar(&profileName, "resample-profile", "hq", "resampler quality: hq or fast")
 	cmd.Flags().StringVar(&ditherName, "dither", "tpdf", "dither when reducing depth: tpdf, shaped, or off")
+	cmd.Flags().IntVar(&flacLevel, "flac-level", 5, "FLAC compression level 0-8, size vs speed (flac output only)")
 	return cmd
 }
 

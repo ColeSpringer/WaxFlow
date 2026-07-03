@@ -98,10 +98,19 @@ func (s *Server) planTranscode(req *streamRequest) error {
 		return waxerr.New(waxerr.CodeUnsupportedFormat,
 			fmt.Sprintf("%s has no streaming form; request it as a job output once jobs land", plan.Container))
 	}
-	if kbit := req.p.maxBitRate; kbit > 0 && plan.BitRate > kbit*1000 {
-		return waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("no available encoding satisfies maxBitRate %d kbit/s (projected %d kbit/s; /caps lists the encoders)",
-				kbit, plan.BitRate/1000))
+	if kbit := req.p.maxBitRate; kbit > 0 {
+		// A plan without a bit rate (VBR lossless: the output size is
+		// signal-dependent) cannot promise any cap, so a cap on it is
+		// refused rather than silently unenforced.
+		if plan.BitRate == 0 {
+			return waxerr.New(waxerr.CodeUnsupportedFormat,
+				fmt.Sprintf("%s output has no fixed bit rate to hold under maxBitRate %d kbit/s", plan.Container, kbit))
+		}
+		if plan.BitRate > kbit*1000 {
+			return waxerr.New(waxerr.CodeUnsupportedFormat,
+				fmt.Sprintf("no available encoding satisfies maxBitRate %d kbit/s (projected %d kbit/s; /caps lists the encoders)",
+					kbit, plan.BitRate/1000))
+		}
 	}
 	req.plan = plan
 	req.canonical = canonicalParams(plan, req.gainDB, req.from)

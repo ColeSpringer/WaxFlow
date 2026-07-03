@@ -448,6 +448,97 @@ func TestStreamTranscodeWriteThrough(t *testing.T) {
 	}
 }
 
+// TestStreamTranscodeFLACWriteThrough runs the write-through matrix for
+// the first compressed encoder: live FLAC bytes equal the engine
+// reference, size hints stay honestly absent (VBR output has no
+// projected size), and the completed cache entry serves with full
+// ranges and the cache-key ETag.
+func TestStreamTranscodeFLACWriteThrough(t *testing.T) {
+	env := newTestEnv(t, nil)
+	want := engineReference(t, filepath.Join(env.root, "sine.wav"), waxflow.TranscodeOptions{Format: "flac"})
+
+	resp := env.get(t, "/stream?src=lib/sine.wav&format=flac", nil)
+	first := readBody(t, resp)
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "audio/flac" {
+		t.Fatalf("live transcode = %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	if resp.Header.Get("Accept-Ranges") != "none" {
+		t.Fatalf("live Accept-Ranges = %q", resp.Header.Get("Accept-Ranges"))
+	}
+	if resp.Header.Get("X-Content-Duration") == "" {
+		t.Fatal("live duration hint missing")
+	}
+	if got := resp.Header.Get("X-Estimated-Content-Length"); got != "" {
+		t.Fatalf("size hint %q on a VBR stream, want none (size is signal-dependent)", got)
+	}
+	if !bytes.Equal(first, want) {
+		t.Fatalf("live stream bytes differ from the engine reference (%d vs %d bytes)", len(first), len(want))
+	}
+
+	// The same URL now serves the completed cache entry: real length,
+	// ranges, strong ETag, conditional revalidation.
+	deadline := time.Now().Add(5 * time.Second)
+	var cached *http.Response
+	for {
+		cached = env.get(t, "/stream?src=lib/sine.wav&format=flac", nil)
+		if cached.Header.Get("Accept-Ranges") == "bytes" || time.Now().After(deadline) {
+			break
+		}
+		readBody(t, cached)
+		time.Sleep(10 * time.Millisecond)
+	}
+	second := readBody(t, cached)
+	if cached.Header.Get("Accept-Ranges") != "bytes" {
+		t.Fatal("completed entry must serve with full range support")
+	}
+	if cached.ContentLength != int64(len(want)) || !bytes.Equal(second, want) {
+		t.Fatalf("cached response differs (len %d vs %d)", cached.ContentLength, len(want))
+	}
+	etag := cached.Header.Get("ETag")
+	if etag == "" {
+		t.Fatal("cached response needs the cache-key ETag")
+	}
+
+	resp = env.get(t, "/stream?src=lib/sine.wav&format=flac", map[string]string{"Range": "bytes=10-99"})
+	part := readBody(t, resp)
+	if resp.StatusCode != http.StatusPartialContent || !bytes.Equal(part, want[10:100]) {
+		t.Fatalf("cached range = %d, %d bytes", resp.StatusCode, len(part))
+	}
+	resp = env.get(t, "/stream?src=lib/sine.wav&format=flac", map[string]string{"If-None-Match": etag})
+	if readBody(t, resp); resp.StatusCode != http.StatusNotModified {
+		t.Fatalf("If-None-Match with the entry's ETag = %d, want 304", resp.StatusCode)
+	}
+}
+
+// TestStreamFLACFormatLadder pins the decision ladder around the flac
+// encoder: a compliant FLAC source under format=flac direct-plays the
+// original bytes, and t>0 forces a live re-encode.
+func TestStreamFLACFormatLadder(t *testing.T) {
+	env := newTestEnv(t, nil)
+	orig, err := os.ReadFile(filepath.Join(env.root, "album", "track.flac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp := env.get(t, "/stream?src=lib/album/track.flac&format=flac", nil)
+	body := readBody(t, resp)
+	if resp.StatusCode != 200 || resp.Header.Get("Accept-Ranges") != "bytes" {
+		t.Fatalf("compliant source did not direct-play: %d, Accept-Ranges %q", resp.StatusCode, resp.Header.Get("Accept-Ranges"))
+	}
+	if !bytes.Equal(body, orig) {
+		t.Fatal("direct play must serve the original bytes")
+	}
+
+	resp = env.get(t, "/stream?src=lib/album/track.flac&format=flac&t=0.1", nil)
+	body = readBody(t, resp)
+	if resp.StatusCode != 200 || resp.Header.Get("Accept-Ranges") != "none" {
+		t.Fatalf("t>0 must transcode live: %d, Accept-Ranges %q", resp.StatusCode, resp.Header.Get("Accept-Ranges"))
+	}
+	if resp.Header.Get("Content-Type") != "audio/flac" || bytes.Equal(body, orig) {
+		t.Fatal("t>0 response must be a fresh FLAC encode, not the original bytes")
+	}
+}
+
 func TestRangeMatrixLive(t *testing.T) {
 	env := newTestEnv(t, nil)
 
@@ -792,6 +883,9 @@ func TestParameterValidation(t *testing.T) {
 		{"src=lib/sine.wav&format=opus", 415, waxerr.CodeUnsupportedFormat},   // not registered
 		{"src=lib/sine.wav&format=aiff", 415, waxerr.CodeUnsupportedFormat},   // no streaming form
 		{"src=lib/sine.wav&maxBitRate=64", 415, waxerr.CodeUnsupportedFormat}, // cap unsatisfiable
+		// A cap on VBR lossless output cannot be promised, so it is
+		// refused rather than silently unenforced.
+		{"src=lib/sine.wav&format=flac&maxBitRate=6400", 415, waxerr.CodeUnsupportedFormat},
 		{"src=upload:abc", 501, waxerr.CodeUnsupportedSource},
 		{"src=pid:01ABC", 501, waxerr.CodeUnsupportedSource},
 		{"src=lib/missing.wav", 404, waxerr.CodeNotFound},
