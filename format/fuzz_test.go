@@ -79,14 +79,23 @@ func FuzzProbe(f *testing.F) {
 
 		samples := med.Info().Default().Samples
 		if samples > 0 {
+			// A seek to 0 lands on the stream's earliest sync point. For a
+			// well-formed stream that is sample 0, but a fuzzed one may code
+			// its frames past the origin (declared length and actual content
+			// disagree), so the start can sit beyond a mid-stream target.
+			// The demuxer then legitimately lands on that start rather than
+			// before the target (ADR-0006, container.Seeker), and Media
+			// reports it verbatim. This bounds the real seek by it, matching
+			// the container-level fuzz tests.
+			start, startErr := med.SeekSample(0)
 			target := samples / 2
 			landed, err := med.SeekSample(target)
 			if err == nil {
-				// Media pre-rolls to the exact sample; landing short of the
-				// target is legal only when the stream really ends first
-				// (declared length and actual content may disagree).
-				if landed > target {
-					t.Fatalf("seek to %d landed past it at %d", target, landed)
+				// Media pre-rolls to the exact sample; landing past the target
+				// is legal only up to the stream start, landing short only
+				// when the stream really ends first.
+				if startErr == nil && landed > max(target, start) {
+					t.Fatalf("seek to %d landed past it at %d (stream starts at %d)", target, landed, start)
 				}
 				if err := med.ReadChunk(dst); err == nil {
 					if dst.Pos != landed || !dst.Discont {
