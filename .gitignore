@@ -7,6 +7,9 @@
 *.out
 *.prof
 
+# per-target logs from scripts/fuzz.sh (make fuzz)
+/fuzz-logs/
+
 # fetched conformance vectors (make verify-vectors); pinned, never committed
 /testdata/vectors/
 

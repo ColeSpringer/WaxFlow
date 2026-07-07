@@ -7,7 +7,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # the "stdlib-only codecs" promise.
 PUBLIC_PKGS := . ./waxerr ./audio ./dsp/... ./codec/... ./container/... ./format ./source ./server ./client
 
-.PHONY: build test vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench
+.PHONY: build test vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench fuzz
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/waxflow ./cmd/waxflow
@@ -40,6 +40,13 @@ check: fmt-check vet test depcheck
 # WAXFLOW_REQUIRE_VECTORS=1 escalates skips to failures.
 verify-vectors:
 	go run ./internal/testutil/cmd/vectorfetch
+
+# Run every Fuzz* target and classify findings (scripts/fuzz.sh). Only a real
+# crasher fails; Go's end-of-run "context deadline exceeded" is treated as a
+# pass. Override the per-target budget with FUZZTIME (CI uses 2m/20m).
+FUZZTIME ?= 30s
+fuzz:
+	./scripts/fuzz.sh $(FUZZTIME)
 
 # Regenerate muxer golden files. Review the diff before committing.
 goldens:
