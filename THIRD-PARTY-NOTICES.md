@@ -27,3 +27,11 @@ Entries follow this format:
 > https://github.com/lieff/minimp3. go-mp3 also serves as a test-only
 > differential oracle per the testing policy; it is never imported by
 > the public tree or the runtime pipeline.
+
+> **codec/mp3 encoder**: original code written against ISO 11172-3 /
+> 13818-3 and textbook filterbank/MDCT theory. It introduces no new
+> third-party data: the forward Huffman tables are derived at init from
+> the decoder's tree tables (attributed above), and the polyphase
+> analysis window is derived from the synthesis window (attributed
+> above). *Shine* (LGPL, Tier B) is used only as a black-box quality
+> oracle through `ffmpeg -c:a libshine`; its source was not consulted.

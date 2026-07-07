@@ -7,7 +7,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # the "stdlib-only codecs" promise.
 PUBLIC_PKGS := . ./waxerr ./audio ./dsp/... ./codec/... ./container/... ./format ./source ./server ./client
 
-.PHONY: build test vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench fuzz
+.PHONY: build test vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench encoder-quality fuzz
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/waxflow ./cmd/waxflow
@@ -50,13 +50,23 @@ fuzz:
 
 # Regenerate muxer golden files. Review the diff before committing.
 goldens:
-	go test -run TestGoldenMuxOutputs ./container/riff ./container/aiff ./container/flacn -update
+	go test -run TestGoldenMuxOutputs ./container/riff ./container/aiff ./container/flacn ./container/mpa -update
 
 # Decode/encode throughput; the x-realtime metric is judged against the
 # per-codec floors in docs/quality-gates.md (nightly benchstat ratchets
 # land at M19).
 bench:
 	go test -run '^$$' -bench . -benchtime 2s ./...
+
+# Encoder-quality report: encode a corpus with our lossy encoders and the
+# reference baselines (Shine for MP3), score both with the ODG-proxy, enforce
+# the docs/quality-gates.md parity gates, and publish an HTML report. Requires
+# ffmpeg with libshine; WAXFLOW_REQUIRE_SHINE=1 escalates a missing baseline to
+# a failure. Override the output path with QUALITY_REPORT.
+QUALITY_REPORT ?= quality-report.html
+encoder-quality:
+	WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_REQUIRE_SHINE=1 WAXFLOW_QUALITY_REPORT=$(QUALITY_REPORT) \
+		go test -run TestMP3EncoderQuality -count=1 -v .
 
 docker:
 	docker build --build-arg VERSION=$(VERSION) -t waxflow:$(VERSION) .

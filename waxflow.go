@@ -11,10 +11,12 @@ import (
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/flac"
+	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/aiff"
 	"github.com/colespringer/waxflow/container/flacn"
+	"github.com/colespringer/waxflow/container/mpa"
 	"github.com/colespringer/waxflow/container/riff"
 	"github.com/colespringer/waxflow/dsp"
 	"github.com/colespringer/waxflow/format"
@@ -295,7 +297,11 @@ type planCore struct {
 	versions      []string
 	l, m          int
 	bytesPerFrame int
-	headerBytes   int
+	// bitRate is a fixed output bit rate in bits per second, for compressed
+	// CBR encoders whose per-sample byte cost is fractional. 0 means derive
+	// it from bytesPerFrame (uncompressed PCM) or leave it unknown (VBR).
+	bitRate     int
+	headerBytes int
 }
 
 // maxPlanCache bounds the plan cache; the key space is as unbounded as
@@ -339,11 +345,20 @@ func (e *Engine) PlanTranscode(track container.Track, opts TranscodeOptions) (*T
 	if samples >= 0 {
 		samples = (samples*int64(core.l) + int64(core.m) - 1) / int64(core.m)
 	}
-	// Compressed encoders report bytesPerFrame 0 (output size depends on
-	// the signal), which leaves size and rate hints honestly unknown.
+	// A fixed CBR bit rate (compressed) overrides the per-sample derivation;
+	// PCM leaves bitRate 0 and derives it from bytesPerFrame. VBR encoders
+	// report both 0, leaving size and rate hints honestly unknown.
+	bitRate := core.bitRate
+	if bitRate == 0 {
+		bitRate = core.bytesPerFrame * core.format.Rate * 8
+	}
 	estimated := int64(-1)
-	if samples >= 0 && core.bytesPerFrame > 0 {
+	switch {
+	case samples >= 0 && core.bytesPerFrame > 0:
 		estimated = int64(core.headerBytes) + samples*int64(core.bytesPerFrame)
+	case samples >= 0 && bitRate > 0 && core.format.Rate > 0:
+		// CBR compressed: bytes = bit rate * duration / 8.
+		estimated = int64(core.headerBytes) + samples*int64(bitRate)/(int64(core.format.Rate)*8)
 	}
 	return &TranscodePlan{
 		Format:         core.format,
@@ -353,7 +368,7 @@ func (e *Engine) PlanTranscode(track container.Track, opts TranscodeOptions) (*T
 		Versions:       core.versions,
 		Samples:        samples,
 		BytesPerFrame:  core.bytesPerFrame,
-		BitRate:        core.bytesPerFrame * core.format.Rate * 8,
+		BitRate:        bitRate,
 		EstimatedBytes: estimated,
 	}, nil
 }
@@ -375,7 +390,7 @@ func buildPlanCore(in audio.Format, opts TranscodeOptions) (*planCore, error) {
 	}
 	defer chain.Release()
 	f := chain.Format()
-	version, bytesPerFrame, err := row.plan(f, opts)
+	version, bytesPerFrame, bitRate, err := row.plan(f, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -389,6 +404,7 @@ func buildPlanCore(in audio.Format, opts TranscodeOptions) (*planCore, error) {
 		l:             l,
 		m:             m,
 		bytesPerFrame: bytesPerFrame,
+		bitRate:       bitRate,
 		headerBytes:   row.headerBytes,
 	}, nil
 }
@@ -404,6 +420,10 @@ type output struct {
 	// live: the muxer writes a compliant stream to a plain io.Writer
 	// (NeedsSeek false), so /stream can serve it.
 	live bool
+	// lossy reports the encoder discards audio for a target bit rate, so it
+	// accepts the bitrate/q quality parameters. This is the single source of
+	// truth for lossiness (a hardcoded name in the server would drift).
+	lossy bool
 	// mediaType is the HTTP media type transcode responses carry.
 	mediaType string
 	// headerBytes is the nominal container overhead, for size estimates.
@@ -417,11 +437,12 @@ type output struct {
 	// format. Nil when the encoder takes anything.
 	adjust func(spec *dsp.ChainSpec, src audio.Format, opts TranscodeOptions)
 	// plan validates the encoder configuration against the chain output
-	// format and reports the encoder's cache-key version (ADR-0004) and
-	// the wire bytes per frame, 0 when output size is signal-dependent
-	// (compressed encoders). A plan that succeeds must guarantee build
-	// succeeds.
-	plan func(f audio.Format, opts TranscodeOptions) (version string, bytesPerFrame int, err error)
+	// format and reports the encoder's cache-key version (ADR-0004), the
+	// wire bytes per frame (0 when per-sample size is signal-dependent), and
+	// a fixed bit rate in bits per second (0 unless the encoder is CBR with a
+	// fractional per-sample byte cost). A plan that succeeds must guarantee
+	// build succeeds.
+	plan func(f audio.Format, opts TranscodeOptions) (version string, bytesPerFrame, bitRate int, err error)
 	// build constructs the wired encoder and muxer for one transcode.
 	build func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error)
 }
@@ -434,12 +455,12 @@ var outputs = []output{
 		mediaType:   "audio/wav",
 		headerBytes: 44,
 		codecID:     codec.PCM,
-		plan: func(f audio.Format, _ TranscodeOptions) (string, int, error) {
+		plan: func(f audio.Format, _ TranscodeOptions) (string, int, int, error) {
 			cfg, err := riff.DefaultConfig(f)
 			if err != nil {
-				return "", 0, err
+				return "", 0, 0, err
 			}
-			return pcm.Version, cfg.BytesPerFrame(f.Channels), nil
+			return pcm.Version, cfg.BytesPerFrame(f.Channels), 0, nil
 		},
 		build: func(f audio.Format, _ TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
 			cfg, err := riff.DefaultConfig(f)
@@ -460,12 +481,12 @@ var outputs = []output{
 		mediaType:   "audio/aiff",
 		headerBytes: 54,
 		codecID:     codec.PCM,
-		plan: func(f audio.Format, _ TranscodeOptions) (string, int, error) {
+		plan: func(f audio.Format, _ TranscodeOptions) (string, int, int, error) {
 			cfg, err := aiff.DefaultConfig(f)
 			if err != nil {
-				return "", 0, err
+				return "", 0, 0, err
 			}
-			return pcm.Version, cfg.BytesPerFrame(f.Channels), nil
+			return pcm.Version, cfg.BytesPerFrame(f.Channels), 0, nil
 		},
 		build: func(f audio.Format, _ TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
 			cfg, err := aiff.DefaultConfig(f)
@@ -499,15 +520,15 @@ var outputs = []output{
 				spec.BitDepth = 24
 			}
 		},
-		plan: func(f audio.Format, opts TranscodeOptions) (string, int, error) {
+		plan: func(f audio.Format, opts TranscodeOptions) (string, int, int, error) {
 			level, err := flacLevel(opts)
 			if err != nil {
-				return "", 0, err
+				return "", 0, 0, err
 			}
 			if _, err := flac.NewEncoder(f, &flac.EncoderOptions{Level: level}); err != nil {
-				return "", 0, err
+				return "", 0, 0, err
 			}
-			return flac.EncoderVersion(level), 0, nil
+			return flac.EncoderVersion(level), 0, 0, nil
 		},
 		build: func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
 			level, err := flacLevel(opts)
@@ -521,6 +542,65 @@ var outputs = []output{
 			return enc, flacn.NewMuxer(dst, &flacn.MuxerOptions{MD5: enc.MD5}), nil
 		},
 	},
+	{
+		name: "mp3",
+		exts: []string{"mp3", "mpga"},
+		live: true,
+		// headerBytes approximates the non-audio overhead the sample-based
+		// estimate omits: the leading Xing/Info frame plus the two flush
+		// frames. The exact size is rate-dependent, so this is a hint (the
+		// stream is chunked with no Content-Length anyway).
+		headerBytes: 1024,
+		lossy:       true,
+		mediaType:   "audio/mpeg",
+		codecID:     codec.MP3,
+		adjust: func(spec *dsp.ChainSpec, _ audio.Format, _ TranscodeOptions) {
+			// MP3 encodes float32 in native frames: two granules (MPEG-1) or
+			// one (MPEG-2/2.5), which the framer resolves from the rate. The
+			// lossy path always runs in the float domain, so any integer
+			// depth request is dropped.
+			spec.FrameSize = 1152
+			spec.BitDepth = 0
+			spec.Float = true
+		},
+		plan: func(f audio.Format, opts TranscodeOptions) (string, int, int, error) {
+			bitrate, err := mp3Bitrate(opts)
+			if err != nil {
+				return "", 0, 0, err
+			}
+			enc, err := mp3.NewEncoder(f, &mp3.EncoderOptions{Bitrate: bitrate})
+			if err != nil {
+				return "", 0, 0, err
+			}
+			// The encoder clamps to a layer-legal rate; report the actual one.
+			return mp3.EncoderVersion, 0, enc.Bitrate(), nil
+		},
+		build: func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
+			bitrate, err := mp3Bitrate(opts)
+			if err != nil {
+				return nil, nil, err
+			}
+			enc, err := mp3.NewEncoder(f, &mp3.EncoderOptions{Bitrate: bitrate})
+			if err != nil {
+				return nil, nil, err
+			}
+			return enc, mpa.NewMuxer(dst, &mpa.MuxerOptions{Delay: enc.Delay()}), nil
+		},
+	},
+}
+
+// mp3Bitrate resolves TranscodeOptions.MP3Bitrate: the zero value keeps the
+// encoder default (128 kbit/s), and any other value passes through to the
+// encoder, which validates it against the layer's legal CBR rates.
+func mp3Bitrate(opts TranscodeOptions) (int, error) {
+	if opts.MP3Bitrate == 0 {
+		return mp3.DefaultBitrate, nil
+	}
+	if opts.MP3Bitrate < 0 {
+		return 0, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("waxflow: MP3 bit rate %d is negative", opts.MP3Bitrate))
+	}
+	return opts.MP3Bitrate, nil
 }
 
 // flacLevel resolves TranscodeOptions.FLACLevel: the zero value keeps
@@ -575,6 +655,19 @@ func OutputFormats() []string {
 		names[i] = o.name
 	}
 	return names
+}
+
+// LossyFormat reports whether the named output format is lossy (accepts
+// bitrate/q), and whether it is a registered format at all. An unregistered
+// name returns (false, false) so callers defer to the format-existence error
+// rather than mislabeling it as lossless.
+func LossyFormat(name string) (lossy, known bool) {
+	for _, o := range outputs {
+		if o.name == name {
+			return o.lossy, true
+		}
+	}
+	return false, false
 }
 
 // OutputFormatForExt maps a file extension (with or without the leading

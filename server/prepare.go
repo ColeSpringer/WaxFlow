@@ -81,6 +81,16 @@ func (s *Server) planTranscode(req *streamRequest) error {
 	if outFormat == "auto" {
 		outFormat = waxflow.DefaultLiveFormat()
 	}
+	// bitrate/q select a lossy output bit rate; a registered lossless format
+	// has none to set, so the request is refused rather than silently
+	// ignored. An unregistered format falls through to PlanTranscode's
+	// unsupported-format error instead of being mislabeled "lossless".
+	if req.p.bitrate != 0 {
+		if lossy, known := waxflow.LossyFormat(outFormat); known && !lossy {
+			return waxerr.New(waxerr.CodeUnsupportedFormat,
+				fmt.Sprintf("bitrate/q apply to lossy output; %s is lossless", outFormat))
+		}
+	}
 	req.opts = waxflow.TranscodeOptions{
 		Format:          outFormat,
 		Rate:            req.p.rate,
@@ -89,6 +99,7 @@ func (s *Server) planTranscode(req *streamRequest) error {
 		GainDB:          req.gainDB,
 		FromSample:      req.from,
 		ResampleProfile: s.profile,
+		MP3Bitrate:      req.p.bitrate * 1000,
 	}
 	plan, err := s.eng.PlanTranscode(req.track, req.opts)
 	if err != nil {

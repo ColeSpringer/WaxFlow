@@ -52,7 +52,7 @@ func WithIndexCache(c IndexCache) Option {
 // encode. Zero values keep the source's properties, so the zero options
 // are a bit-exact container rewrite.
 type TranscodeOptions struct {
-	// Format is the output container: "wav", "aiff", or "flac".
+	// Format is the output container: "wav", "aiff", "flac", or "mp3".
 	Format string
 	// Rate resamples to this sample rate in Hz; 0 keeps the source rate.
 	Rate int
@@ -77,6 +77,10 @@ type TranscodeOptions struct {
 	// the default. Levels trade encode speed for size and never affect
 	// decoded audio.
 	FLACLevel int
+	// MP3Bitrate selects the constant bit rate in bits per second for mp3
+	// output; the zero value uses the encoder default (128000). It must be
+	// a legal Layer III CBR rate for the output sample rate.
+	MP3Bitrate int
 	// Shaping selects the dither strategy for quantization; the default
 	// is flat TPDF.
 	Shaping dither.Shaping

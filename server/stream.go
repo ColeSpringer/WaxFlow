@@ -267,7 +267,13 @@ func (s *Server) serveLive(w http.ResponseWriter, r *http.Request, reader *cache
 	w.WriteHeader(http.StatusOK)
 
 	rc := http.NewResponseController(w)
+	// Bytes per second: PCM derives it from the per-sample byte cost, a
+	// compressed CBR stream (MP3) from its fixed bit rate. Without this
+	// fallback the primary streaming format would never be paced.
 	byteRate := float64(plan.BytesPerFrame * plan.Format.Rate)
+	if byteRate == 0 && plan.BitRate > 0 {
+		byteRate = float64(plan.BitRate) / 8
+	}
 	if !paced {
 		byteRate = 0 // disables pace() below
 	}
@@ -368,6 +374,8 @@ func directPlayable(req *streamRequest) bool {
 	switch {
 	case req.from > 0:
 		return false // t= means a transcode timeline
+	case p.bitrate != 0:
+		return false // bitrate/q asks for a lossy re-encode, not the original
 	case p.format != "auto" && p.format != req.info.Container:
 		return false
 	case p.rate != 0 && p.rate != track.Fmt.Rate:

@@ -100,7 +100,7 @@ byte-identical to `waxflow probe --json`.
 
 ## GET /stream
 
-    /stream?src=<ref>&format=auto|wav|flac&rate=&ch=&bits=16|24&gain=&t=&track=&maxBitRate=
+    /stream?src=<ref>&format=auto|wav|flac|mp3&rate=&ch=&bits=16|24&bitrate=|q=&gain=&t=&track=&maxBitRate=
 
 Source references (`src`): `<root>/<relative/path>` under a configured
 library root; `upload:<id>` and `pid:<ULID>` return `501
@@ -112,11 +112,13 @@ Parameters (unknown parameter names are rejected):
 - `format`: `auto` (default) engages the decision ladder; `wav` forces a
   WAV transcode; `flac` a FLAC one (lossless, level 5; a FLAC source
   under `format=flac` with no transforming parameters direct-plays
-  instead). Other formats join as encoders land (`/caps` is the truth).
+  instead); `mp3` a baseline CBR MP3 (128 kbit/s default, `bitrate`/`q`
+  select it). Other formats join as encoders land (`/caps` is the truth).
   `aiff` exists for jobs but has no streaming form: 415. Live FLAC
   streams omit the size hints and byte-rate pacing: a lossless encoder's
-  output size is signal-dependent and unknown up front. Completed cache
-  entries serve with exact sizes like any other.
+  output size is signal-dependent and unknown up front. CBR MP3 carries a
+  size estimate. Completed cache entries serve with exact sizes like any
+  other.
 - `rate`, `ch`, `bits`: output sample rate, channel count (1 or 2), bit
   depth (16 or 24, dithered when reducing). Absent keeps the source's.
 - `gain`: `off`, `track` (default), `album`, or an explicit `+/-dB`
@@ -131,11 +133,18 @@ Parameters (unknown parameter names are rejected):
   (`X-Content-Duration: 0.000`).
 - `track`: must name the default track until multi-track containers
   land.
-- `bitrate`, `q`, `maxBitRate`: recognized, but need a lossy encoder:
-  415 today unless the ladder can direct-play under the cap. For direct
-  play the cap is checked against whole-file bytes over duration (tags
-  and embedded art included): direct play ships the entire file, so the
-  wire cost is what the cap protects.
+- `bitrate`, `q`: lossy quality selection, mutually exclusive. `bitrate`
+  is an explicit CBR rate in kbit/s; `q` is a preset (`low` 96, `med`
+  128, `high` 192). Both require an explicit lossy `format` (today
+  `mp3`); on a lossless output they are `415`. A `bitrate`/`q` request
+  forces a re-encode (never direct-play), and the resolved bit rate is
+  part of the cache key, so two rates never share an entry.
+- `maxBitRate`: a kbit/s cap for the decision ladder. For direct play the
+  cap is checked against whole-file bytes over duration (tags and
+  embedded art included): direct play ships the entire file, so the wire
+  cost is what the cap protects. A VBR-lossless plan has no fixed rate to
+  hold under the cap, so a cap on it is `415` rather than silently
+  unenforced.
 
 **Decision ladder (v1)**: if the source already satisfies the request
 (`format=auto` or matching container, no transforming parameters, under
@@ -185,7 +194,8 @@ resolved and embedded as `id`, and the response is:
       "decoders": ["pcm", "flac", "mp3"],
       "outputs": [{"name": "wav", "live": true, "exts": ["wav", "wave", "rf64", "bw64"]},
                    {"name": "aiff", "live": false, "exts": ["aif", "aiff", "aifc", "afc"]},
-                   {"name": "flac", "live": true, "exts": ["flac"]}],
+                   {"name": "flac", "live": true, "exts": ["flac"]},
+                   {"name": "mp3", "live": true, "exts": ["mp3", "mpga"]}],
       "delivery": {"progressive": true, "hls": false, "jobs": false, "uploads": false},
       "profiles": {}
     }

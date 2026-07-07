@@ -105,6 +105,10 @@ type ChainSpec struct {
 	// BitDepth selects integer output at that depth (2..32), 0 to keep
 	// the source domain and depth. Reductions are dithered.
 	BitDepth int
+	// Float forces float32 output, converting an integer source. Lossy
+	// encoders (MP3, later AAC/Opus) require it; it is mutually exclusive
+	// with BitDepth, which wins if both are set.
+	Float bool
 	// GainDB applies a scalar gain and must be finite within +-120 dB
 	// (a correctness bound; the HTTP layer owns tighter policy clamps).
 	// Positive gain engages the true-peak limiter (the chain can clip).
@@ -151,6 +155,13 @@ func NewChain(src Stage, spec ChainSpec) (*Chain, error) {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("dsp: output depth %d outside 2..32", spec.BitDepth))
 	}
+	if spec.Float && spec.BitDepth != 0 {
+		// Float and BitDepth name conflicting output domains; requiring one
+		// or neither keeps the illegal "both set" state from resolving by a
+		// silent precedence rule.
+		return nil, waxerr.New(waxerr.CodeInvalidRequest,
+			"dsp: Float and BitDepth are mutually exclusive output domains")
+	}
 	if !(spec.GainDB >= -maxGainDB && spec.GainDB <= maxGainDB) {
 		// Written to fail NaN as well as infinities and out-of-range
 		// values: a non-finite gain would otherwise slip past the != 0
@@ -172,17 +183,21 @@ func NewChain(src Stage, spec ChainSpec) (*Chain, error) {
 	needMix := channels != in.Channels
 	needGain := spec.GainDB != 0
 
-	// Output domain: BitDepth set forces int at that depth; otherwise the
-	// source domain is kept, quantizing back to the source depth when
-	// float processing was forced onto an int source.
+	// Output domain: BitDepth set forces int at that depth; Float forces the
+	// float domain (for lossy encoders); otherwise the source domain is kept,
+	// quantizing back to the source depth when float processing was forced
+	// onto an int source.
 	outInt := in.Type == audio.Int
 	outDepth := in.BitDepth
 	if spec.BitDepth != 0 {
 		outInt = true
 		outDepth = spec.BitDepth
+	} else if spec.Float {
+		outInt = false
 	}
 	narrowing := in.Type == audio.Int && outInt && outDepth < in.BitDepth
-	floatWork := needRate || needMix || needGain || narrowing
+	forceFloat := spec.Float && in.Type == audio.Int // BitDepth is 0 here (validated above)
+	floatWork := needRate || needMix || needGain || narrowing || forceFloat
 
 	c := &Chain{out: src, l: 1, m: 1}
 	cur := in

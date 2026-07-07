@@ -93,8 +93,15 @@ type streamParams struct {
 	t          float64 // seconds; samples are derived after probe
 	track      int     // -1 when absent
 	maxBitRate int     // kbit/s cap for the decision ladder; 0 none
+	bitrate    int     // lossy output bit rate in kbit/s; 0 selects the default
 	identity   string  // id= parameter, "" when absent
 }
+
+// qPreset maps the q= quality preset to a lossy CBR bit rate in kbit/s. These
+// are MP3 CBR points; when a VBR codec lands, q will need a per-codec quality
+// mapping rather than a shared bit-rate ladder (the encoder clamps an
+// out-of-range preset to a layer-legal rate, so a preset never fails).
+var qPreset = map[string]int{"low": 96, "med": 128, "high": 192}
 
 func parseStreamParams(q url.Values, defaultGain gainSpec) (*streamParams, error) {
 	bad := func(format string, args ...any) (*streamParams, error) {
@@ -105,13 +112,6 @@ func parseStreamParams(q url.Values, defaultGain gainSpec) (*streamParams, error
 			return bad("unknown parameter %q", k)
 		}
 	}
-	if q.Has("bitrate") || q.Has("q") {
-		// Honest capability gating: quality selection needs a lossy
-		// encoder, and /caps does not advertise one yet.
-		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
-			"bitrate/q need a lossy encoder; none is available yet (see /caps)")
-	}
-
 	p := &streamParams{src: q.Get("src"), format: q.Get("format"), track: -1, identity: q.Get("id")}
 	if p.src == "" {
 		return bad("src is required")
@@ -149,6 +149,26 @@ func parseStreamParams(q url.Values, defaultGain gainSpec) (*streamParams, error
 	default:
 		return bad("bits %d: want 16 or 24", p.bits)
 	}
+	// Lossy quality selection: q= is a named preset, bitrate= an explicit
+	// kbit/s rate, mutually exclusive. Whether the resolved output can honor
+	// them is checked after format resolution (planTranscode).
+	if q.Get("q") != "" && q.Get("bitrate") != "" {
+		return bad("q and bitrate are mutually exclusive")
+	}
+	if v := q.Get("q"); v != "" {
+		kbps, ok := qPreset[v]
+		if !ok {
+			return bad("q %q: want low, med, or high", v)
+		}
+		p.bitrate = kbps
+	} else if q.Get("bitrate") != "" {
+		if p.bitrate, err = intParam(q, "bitrate", 0); err != nil {
+			return nil, err
+		}
+		if p.bitrate <= 0 {
+			return bad("bitrate must be a positive kbit/s value")
+		}
+	}
 	if p.gain, err = parseGain(q.Get("gain"), defaultGain); err != nil {
 		return nil, err
 	}
@@ -183,9 +203,10 @@ func identityString(ref string, id source.Identity) string {
 // canonicalParams serializes every output-shaping parameter in one fixed
 // order for the cache key (ADR-0004). Values are the resolved plan, not
 // the raw request: "rate=48000" and an absent rate on a 48 kHz source
-// are the same output and must share an entry.
+// are the same output and must share an entry. The plan's BitRate stands in
+// for the lossy bitrate/q request so two rates never share a cache entry.
 func canonicalParams(plan *waxflow.TranscodePlan, gainDB float64, from int64) string {
-	return fmt.Sprintf("container=%s&rate=%d&ch=%d&type=%s&bits=%d&gain=%s&from=%d",
+	return fmt.Sprintf("container=%s&rate=%d&ch=%d&type=%s&bits=%d&bitrate=%d&gain=%s&from=%d",
 		plan.Container, plan.Format.Rate, plan.Format.Channels, plan.Format.Type,
-		plan.Format.BitDepth, strconv.FormatFloat(gainDB, 'g', -1, 64), from)
+		plan.Format.BitDepth, plan.BitRate, strconv.FormatFloat(gainDB, 'g', -1, 64), from)
 }

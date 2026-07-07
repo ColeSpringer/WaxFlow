@@ -510,6 +510,87 @@ func TestStreamTranscodeFLACWriteThrough(t *testing.T) {
 	}
 }
 
+// TestStreamTranscodeMP3 pins the baseline MP3 encoder over /stream: a live
+// CBR transcode that carries a size estimate (unlike VBR FLAC), matches the
+// engine byte for byte, and promotes to a range-served cache entry.
+func TestStreamTranscodeMP3(t *testing.T) {
+	env := newTestEnv(t, nil)
+	want := engineReference(t, filepath.Join(env.root, "sine.wav"),
+		waxflow.TranscodeOptions{Format: "mp3", MP3Bitrate: 128000})
+
+	resp := env.get(t, "/stream?src=lib/sine.wav&format=mp3&bitrate=128", nil)
+	first := readBody(t, resp)
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "audio/mpeg" {
+		t.Fatalf("live mp3 transcode = %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	if resp.Header.Get("Accept-Ranges") != "none" {
+		t.Fatalf("live Accept-Ranges = %q", resp.Header.Get("Accept-Ranges"))
+	}
+	if resp.Header.Get("X-Content-Duration") == "" {
+		t.Fatal("live duration hint missing")
+	}
+	// CBR MP3 has a fixed bit rate, so the size estimate is present.
+	if resp.Header.Get("X-Estimated-Content-Length") == "" {
+		t.Fatal("CBR mp3 size estimate missing")
+	}
+	if !bytes.Equal(first, want) {
+		t.Fatalf("live mp3 bytes differ from the engine reference (%d vs %d bytes)", len(first), len(want))
+	}
+	// The output must be a valid MP3: it starts with a frame sync.
+	if len(first) < 2 || first[0] != 0xFF || first[1]&0xE0 != 0xE0 {
+		t.Fatal("output does not begin with an MPEG frame sync")
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	var cached *http.Response
+	for {
+		cached = env.get(t, "/stream?src=lib/sine.wav&format=mp3&bitrate=128", nil)
+		if cached.Header.Get("Accept-Ranges") == "bytes" || time.Now().After(deadline) {
+			break
+		}
+		readBody(t, cached)
+		time.Sleep(10 * time.Millisecond)
+	}
+	second := readBody(t, cached)
+	if cached.Header.Get("Accept-Ranges") != "bytes" {
+		t.Fatal("completed mp3 entry must serve with full range support")
+	}
+	if cached.ContentLength != int64(len(want)) || !bytes.Equal(second, want) {
+		t.Fatalf("cached mp3 differs (len %d vs %d)", cached.ContentLength, len(want))
+	}
+
+	// A different bitrate is a different cache entry (canonical params key on
+	// the resolved bit rate), so it re-encodes rather than serving the 128k
+	// bytes.
+	other := readBody(t, env.get(t, "/stream?src=lib/sine.wav&format=mp3&bitrate=192", nil))
+	if bytes.Equal(other, want) {
+		t.Fatal("bitrate=192 served the 128k cache entry; bitrate is not in the cache key")
+	}
+}
+
+// TestStreamMP3BitrateEdges checks the lossy quality-parameter edges: q=high
+// clamps to the layer maximum on a low output rate instead of erroring, and an
+// empty q= value is ignored rather than tripping the q/bitrate exclusion.
+func TestStreamMP3BitrateEdges(t *testing.T) {
+	env := newTestEnv(t, nil)
+
+	// q=high is 192, illegal on the MPEG-2 layer (24 kHz output), so it must
+	// clamp to 160 and stream rather than 415.
+	resp := env.get(t, "/stream?src=lib/sine.wav&format=mp3&rate=24000&q=high", nil)
+	if b := readBody(t, resp); resp.StatusCode != 200 {
+		t.Fatalf("q=high on a 24 kHz output = %d (%s), want 200 (clamped)", resp.StatusCode, b)
+	}
+	if resp.Header.Get("Content-Type") != "audio/mpeg" {
+		t.Errorf("content type %q, want audio/mpeg", resp.Header.Get("Content-Type"))
+	}
+
+	// An empty q= must be treated as absent, not as conflicting with bitrate.
+	resp = env.get(t, "/stream?src=lib/sine.wav&format=mp3&q=&bitrate=128", nil)
+	if readBody(t, resp); resp.StatusCode != 200 {
+		t.Fatalf("empty q with bitrate = %d, want 200 (q ignored)", resp.StatusCode)
+	}
+}
+
 // TestStreamFLACFormatLadder pins the decision ladder around the flac
 // encoder: a compliant FLAC source under format=flac direct-plays the
 // original bytes, and t>0 forces a live re-encode.
@@ -873,16 +954,20 @@ func TestParameterValidation(t *testing.T) {
 		status int
 		code   waxerr.Code
 	}{
-		{"src=lib/sine.wav&chanels=1", 400, waxerr.CodeInvalidRequest},        // unknown param
-		{"src=lib/sine.wav&bits=8", 400, waxerr.CodeInvalidRequest},           // outside 16|24
-		{"src=lib/sine.wav&t=-3", 400, waxerr.CodeInvalidRequest},             // negative seek
-		{"src=lib/sine.wav&t=1e18", 400, waxerr.CodeInvalidRequest},           // beyond the seek bound
-		{"src=lib/sine.wav&track=-5", 400, waxerr.CodeInvalidRequest},         // explicit negative track
-		{"src=lib/sine.wav&gain=loud", 400, waxerr.CodeInvalidRequest},        // bad gain
-		{"src=lib/sine.wav&bitrate=128", 415, waxerr.CodeUnsupportedFormat},   // no lossy encoder yet
-		{"src=lib/sine.wav&format=opus", 415, waxerr.CodeUnsupportedFormat},   // not registered
-		{"src=lib/sine.wav&format=aiff", 415, waxerr.CodeUnsupportedFormat},   // no streaming form
-		{"src=lib/sine.wav&maxBitRate=64", 415, waxerr.CodeUnsupportedFormat}, // cap unsatisfiable
+		{"src=lib/sine.wav&chanels=1", 400, waxerr.CodeInvalidRequest},                   // unknown param
+		{"src=lib/sine.wav&bits=8", 400, waxerr.CodeInvalidRequest},                      // outside 16|24
+		{"src=lib/sine.wav&t=-3", 400, waxerr.CodeInvalidRequest},                        // negative seek
+		{"src=lib/sine.wav&t=1e18", 400, waxerr.CodeInvalidRequest},                      // beyond the seek bound
+		{"src=lib/sine.wav&track=-5", 400, waxerr.CodeInvalidRequest},                    // explicit negative track
+		{"src=lib/sine.wav&gain=loud", 400, waxerr.CodeInvalidRequest},                   // bad gain
+		{"src=lib/sine.wav&bitrate=128", 415, waxerr.CodeUnsupportedFormat},              // bitrate needs an explicit lossy format
+		{"src=lib/sine.wav&format=flac&bitrate=128", 415, waxerr.CodeUnsupportedFormat},  // bitrate on lossless output
+		{"src=lib/sine.wav&q=huge", 400, waxerr.CodeInvalidRequest},                      // bad q preset
+		{"src=lib/sine.wav&format=mp3&q=low&bitrate=96", 400, waxerr.CodeInvalidRequest}, // q and bitrate together
+		{"src=lib/sine.wav&format=opus", 415, waxerr.CodeUnsupportedFormat},              // not registered
+		{"src=lib/sine.wav&format=opus&bitrate=128", 415, waxerr.CodeUnsupportedFormat},  // unregistered format, not "lossless"
+		{"src=lib/sine.wav&format=aiff", 415, waxerr.CodeUnsupportedFormat},              // no streaming form
+		{"src=lib/sine.wav&maxBitRate=64", 415, waxerr.CodeUnsupportedFormat},            // cap unsatisfiable
 		// A cap on VBR lossless output cannot be promised, so it is
 		// refused rather than silently unenforced.
 		{"src=lib/sine.wav&format=flac&maxBitRate=6400", 415, waxerr.CodeUnsupportedFormat},

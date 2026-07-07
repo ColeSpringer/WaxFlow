@@ -111,7 +111,7 @@ func parseVBRTag(h mp3.Header, frame []byte) (vbrTag, bool) {
 			// padding packed in three bytes at its offset 21.
 			if enc := take(9); enc != nil {
 				switch string(enc[:4]) {
-				case "LAME", "Lavc", "Lavf":
+				case "LAME", "Lavc", "Lavf", "WaxF":
 					if p+12+3 <= len(frame) {
 						b := frame[p+12:]
 						tag.delay = int64(b[0])<<4 | int64(b[1])>>4

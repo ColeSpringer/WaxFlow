@@ -27,6 +27,9 @@ Operationally:
 | codec/flac (decoder) | RFC 9639 (spec); IETF flac-test-files suite (test vectors, SHA-256-pinned); libFLAC behavioral fact only: unequal STREAMINFO block bounds mark pre-1.0 variable-blocksize streams (libFLAC is BSD/Tier A regardless; no source consulted) | none |
 | container/flacn | RFC 9639 (spec) | none |
 | container/ogg | RFC 3533 (spec); Xiph Ogg-FLAC mapping 1.0 (spec) | none |
+| codec/mp3 (decoder) | ISO 11172-3 / 13818-3 (spec); PDMP3 via hajimehoshi/go-mp3 (Apache-2.0, pipeline structure + tables); minimp3 (CC0, LSF scalefactor/intensity/band-edge handling) | none |
+| codec/mp3 (encoder) | ISO 11172-3 / 13818-3 (spec, quantization and Huffman); the forward Huffman tables and the polyphase analysis window are derived in code from the decoder's already-attributed decode trees and synthesis window (no new source); textbook filterbank/MDCT theory | Shine reached only as an `ffmpeg -c:a libshine` quality oracle (never opened; the ODG-proxy parity gate) |
+| container/mpa | ISO 11172-3 (spec); Xing/Info/VBRI and LAME-tag layout (documented interchange formats) | none |
 
 ## AAC patent-status review
 
@@ -37,9 +40,31 @@ expired; verify then, not now).
 
 ## Listening-test protocol
 
-**Open. To be written when the nightly encoder-quality harness stands
-up.** Will define the ABX procedure behind the clips the nightly report
-publishes.
+The nightly encoder-quality harness (`make encoder-quality`, the
+`encoder-quality` job in `nightly.yml`) is the objective gate: it encodes
+the corpus with our encoder and the reference baseline (Shine for MP3),
+scores both with the ODG-proxy (`internal/testutil/odg.go`, a bark-band
+noise-to-mask ratio), and fails when our corpus mean falls below the
+baseline or any track drops more than the per-codec allowance. The HTML
+report is uploaded as a CI artifact.
+
+Objective scores are a proxy, so a subjective ABX pass gates a release
+when a codec's quality changes:
+
+1. **Material.** Use the same corpus classes the gate names (broadband
+   music, speech, transients, tonal). Prefer the pinned real-audio
+   vectors once they land; the synthesized corpus is the interim stand-in.
+2. **Preparation.** Encode each item with the release build and decode it
+   back. Level-match decoded and reference to within 0.1 dB and align
+   them sample-exact (the gapless trims already do this for our streams).
+3. **Procedure.** Blind ABX (reference vs coded, order randomized) with at
+   least 12 trials per item per listener, two listeners minimum. Record
+   the identification rate; anything a listener cannot distinguish from
+   the reference passes that item.
+4. **Decision.** A release is clear when no item is reliably
+   distinguished (identification rate not significantly above chance) at
+   the target bit rate. A regression that the objective gate misses but a
+   listener catches blocks the release and re-baselines the metric.
 
 ## Release checklist (grows over time)
 

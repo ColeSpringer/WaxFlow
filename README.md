@@ -48,6 +48,17 @@ across sessions via the cache's index sidecar). Decoded output sits
 around 1e-7 RMS of ffmpeg's float decoder against the 1e-4 gate, the
 LAME gapless sample-count invariant holds end to end, and seeks land
 bit-identical to a linear decode at 100 random offsets in VBR streams.
+MP3 encoding is in: a from-scratch baseline CBR Layer III encoder
+(polyphase analysis filterbank and forward MDCT that invert the decoder
+exactly, a global-gain rate-control loop, Huffman table selection, and a
+bit reservoir; long blocks only, from ISO 11172-3 and textbooks) plus a
+`container/mpa` muxer whose leading Xing/Info frame carries a LAME-format
+gapless tag. Output decodes in ffmpeg, go-mp3, and our own decoder; the
+gapless round-trip holds (decoded length equals the source length) across
+sample rates and channel counts; encoding runs 68-111x realtime against
+the 40x floor; and the first-lossy-encoder quality harness scores it at or
+above the Shine baseline on every corpus track via a ported ODG-proxy
+(the nightly report the quality gates name).
 
 The service is live: the daemon streams progressive audio (`GET
 /stream`) with a direct-play/transcode decision ladder, sample-exact
@@ -56,10 +67,11 @@ identity, a write-through transcode cache with read-behind delivery
 (slow clients never backpressure the encoder; a full cache disk degrades
 to ring-fed streaming instead of killing playback), admission control,
 Prometheus metrics, and a full API contract in
-[docs/api.md](docs/api.md). WAV and FLAC streams live-transcode
+[docs/api.md](docs/api.md). WAV, FLAC, and MP3 streams live-transcode
 today; compliant sources direct-play, and each new encoder widens
 `format=`.
-The service becomes broadly useful once MP3 encoding lands. Unfinished
+With MP3 encoding landed, the service is broadly useful: any supported
+source streams as MP3 to essentially every player. Unfinished
 codecs stay unregistered, so probe and `/caps` never advertise what
 doesn't work. Quality bars are pinned in
 [docs/quality-gates.md](docs/quality-gates.md).
@@ -118,8 +130,9 @@ Precedence: **flag > `WAXFLOW_*` env > JSON config file > default**
   (`--json` for the schemaVersion'd machine shape, identical to `GET
   /probe`; `--strict` to treat tolerated input damage as errors)
 - `waxflow transcode <in> <out>`: local one-shot file-to-file transcode
-  through the same engine the daemon uses (`--format wav|aiff|flac`,
-  default from the output extension; `--force` to overwrite)
+  through the same engine the daemon uses (`--format wav|aiff|flac|mp3`,
+  `--flac-level`, `--mp3-bitrate`, default from the output extension;
+  `--force` to overwrite)
 - `waxflow sign --src lib/a.flac`: mint a signed playback URL offline
   (ADR-0003; uses the same secret and roots the daemon holds)
 - `waxflow cache stats|gc`: inspect or evict a running daemon's cache
