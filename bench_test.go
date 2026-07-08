@@ -66,6 +66,14 @@ func BenchmarkEngineDecodeMP3VBR(b *testing.B) {
 	benchOpenAndDecode(b, filepath.Join("testdata", "sine-vbr.mp3"), "")
 }
 
+func BenchmarkEngineDecodeALAC(b *testing.B) {
+	benchOpenAndDecode(b, filepath.Join("container", "mp4", "testdata", "alac-stereo.m4a"), "m4a")
+}
+
+func BenchmarkEngineDecodeAAC(b *testing.B) {
+	benchOpenAndDecode(b, filepath.Join("container", "adts", "testdata", "stereo.aac"), "aac")
+}
+
 func BenchmarkEngineDecodeFLACVector01(b *testing.B) {
 	path := filepath.Join(testutil.VectorsDir(), "flac", "subset", "01 - blocksize 4096.flac")
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {

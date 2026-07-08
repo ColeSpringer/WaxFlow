@@ -4,12 +4,16 @@ import (
 	"fmt"
 
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/aac"
+	"github.com/colespringer/waxflow/codec/alac"
 	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/adts"
 	"github.com/colespringer/waxflow/container/aiff"
 	"github.com/colespringer/waxflow/container/flacn"
+	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/container/mpa"
 	"github.com/colespringer/waxflow/container/ogg"
 	"github.com/colespringer/waxflow/container/riff"
@@ -76,6 +80,26 @@ var drivers = []driver{
 			return ogg.NewDemuxer(src, &ogg.DemuxerOptions{Strict: opts != nil && opts.Strict})
 		},
 	},
+	{
+		name:      "mp4",
+		match:     mp4.Match,
+		need:      mp4.MatchNeed,
+		exts:      []string{"m4a", "m4b", "mp4", "m4r", "mov"},
+		mediaType: "audio/mp4",
+		open: func(src container.Source, opts *Options) (container.Demuxer, error) {
+			return mp4.NewDemuxer(src, &mp4.DemuxerOptions{Strict: opts != nil && opts.Strict})
+		},
+	},
+	{
+		name:      "adts",
+		match:     adts.Match,
+		need:      adts.MatchNeed,
+		exts:      []string{"aac", "adts"},
+		mediaType: "audio/aac",
+		open: func(src container.Source, opts *Options) (container.Demuxer, error) {
+			return adts.NewDemuxer(src, &adts.DemuxerOptions{Strict: opts != nil && opts.Strict})
+		},
+	},
 	// The MPEG sync word stays last: it is twelve set bits anywhere in a
 	// window, which false-positives on other formats' payloads.
 	{
@@ -135,6 +159,20 @@ var decoders = []struct {
 	}},
 	{codec.MP3, func(t container.Track) (codec.Decoder, error) {
 		return mp3.NewDecoder(t.Fmt)
+	}},
+	{codec.ALAC, func(t container.Track) (codec.Decoder, error) {
+		cfg, err := alac.ParseMagicCookie(t.CodecConfig)
+		if err != nil {
+			return nil, err
+		}
+		return alac.NewDecoder(cfg, t.Fmt)
+	}},
+	{codec.AACLC, func(t container.Track) (codec.Decoder, error) {
+		cfg, err := aac.ParseASC(t.CodecConfig)
+		if err != nil {
+			return nil, err
+		}
+		return aac.NewDecoder(cfg, t.Fmt)
 	}},
 }
 

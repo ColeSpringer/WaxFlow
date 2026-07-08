@@ -8,6 +8,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/id3"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -103,7 +104,7 @@ func (d *Demuxer) parse() error {
 	off := int64(0)
 	for range maxID3Tags {
 		head := d.w.BytesAt(off, 10)
-		n := id3v2Size(head)
+		n := id3.Size(head)
 		if n == 0 || off+n > d.w.DataEnd() {
 			break
 		}
@@ -318,8 +319,8 @@ func (d *Demuxer) recognizedTrailer(off int64) bool {
 			b = b[min(128, len(b)):]
 		case len(b) >= 8 && string(b[:8]) == "APETAGEX":
 			return true // size fields point forward; accept the rest
-		case id3v2Size(b) > 0:
-			n := id3v2Size(b)
+		case id3.Size(b) > 0:
+			n := id3.Size(b)
 			if n > int64(len(b)) {
 				return true // truncated tag is still a tag
 			}

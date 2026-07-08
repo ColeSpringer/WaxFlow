@@ -1,0 +1,5 @@
+go test fuzz v1
+[]byte("0\x00\x10")
+uint16(4096)
+uint8(0)
+uint8(1)

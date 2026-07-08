@@ -131,22 +131,3 @@ func parseVBRTag(h mp3.Header, frame []byte) (vbrTag, bool) {
 	}
 	return vbrTag{}, false
 }
-
-// id3v2Size returns the total byte length of an ID3v2 tag starting at b,
-// or 0. MP3 files routinely carry one (or several, stacked).
-func id3v2Size(b []byte) int64 {
-	if len(b) < 10 || string(b[:3]) != "ID3" {
-		return 0
-	}
-	for _, x := range b[6:10] {
-		if x&0x80 != 0 {
-			return 0 // not syncsafe: treat as absent rather than guess
-		}
-	}
-	n := int64(b[6])<<21 | int64(b[7])<<14 | int64(b[8])<<7 | int64(b[9])
-	n += 10
-	if b[5]&0x10 != 0 {
-		n += 10 // footer
-	}
-	return n
-}

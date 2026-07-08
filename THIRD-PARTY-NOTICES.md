@@ -35,3 +35,24 @@ Entries follow this format:
 > analysis window is derived from the synthesis window (attributed
 > above). *Shine* (LGPL, Tier B) is used only as a black-box quality
 > oracle through `ffmpeg -c:a libshine`; its source was not consulted.
+
+> **codec/alac decoder**: a clean-room port of Apple's *ALAC* reference
+> decoder (Apache-2.0), https://github.com/macosforge/alac. The adaptive
+> Golomb decode (ag_dec.c), the cascaded adaptive-FIR predictor
+> (dp_dec.c / unpc_block), and the lossless middle-side matrix
+> (matrix_dec.c / unmix) are ported faithfully so decodes are bit-exact;
+> the frame element structure follows ALACDecoder.cpp. The bitstream
+> reader, buffer model, and codec.Decoder integration are original.
+
+> **codec/aac decoder**: the decode logic (raw_data_block, ICS, section
+> and scalefactor decode, dequantization, TNS, M/S and intensity stereo,
+> the IMDCT filterbank) is original code written against ISO/IEC 14496-3
+> and Bosi/Goldberg. AAC is Tier B, so faad/ffmpeg decoders were not
+> opened while implementing it. The file `codec/aac/tables_hcb.go` is the
+> ADR-0001 black-box PARAMETER artifact: the normative Huffman codeword
+> and length tables and scalefactor-band boundaries (facts fixed by ISO
+> 14496-3), extracted as a data-only table from *FFmpeg*'s `aactab.c`
+> (LGPL) in a separate analysis pass per the ADR-0001 provision that
+> permits parameter tables. No decoder logic was taken. Perceptual noise
+> substitution is filled with local noise (non-reproducible by design);
+> SBR/PS are out of scope.
