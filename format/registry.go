@@ -9,6 +9,7 @@ import (
 	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/codec/pcm"
+	"github.com/colespringer/waxflow/codec/vorbis"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/adts"
 	"github.com/colespringer/waxflow/container/aiff"
@@ -174,6 +175,17 @@ var decoders = []struct {
 		}
 		return aac.NewDecoder(cfg, t.Fmt)
 	}},
+	{codec.Vorbis, func(t container.Track) (codec.Decoder, error) {
+		cfg, err := vorbis.ParseConfig(t.CodecConfig)
+		if err != nil {
+			return nil, err
+		}
+		return vorbis.NewDecoder(cfg, t.Fmt)
+	}},
+	// codec.Opus is deliberately absent: the ogg demuxer recognizes Ogg-Opus
+	// and probe/OpusHead parsing work, but the SILK/CELT/hybrid mode decoders
+	// that synthesize PCM are not implemented yet, so an Opus stream probes but
+	// fails to open (the capability gate). It joins here once those land.
 }
 
 // Decoders lists the codecs with registered decoders, in registry order.

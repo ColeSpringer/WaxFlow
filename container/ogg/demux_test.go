@@ -246,18 +246,19 @@ func TestSeek(t *testing.T) {
 	}
 }
 
-func TestRejectsNonFLACMappings(t *testing.T) {
-	vorbisBOS := append([]byte("\x01vorbis"), make([]byte, 23)...)
-	stream := buildPage(flagBOS, 0, 111, 0, vorbisBOS)
+func TestRejectsUnsupportedMappings(t *testing.T) {
+	// Speex is recognized (so the error can name it) but has no decoder.
+	speexBOS := append([]byte("Speex   "), make([]byte, 72)...)
+	stream := buildPage(flagBOS, 0, 111, 0, speexBOS)
 	stream = append(stream, buildPage(flagEOS, 0, 111, 1, []byte{0})...)
 	_, err := NewDemuxer(container.BytesSource(stream), nil)
 	if err == nil {
-		t.Fatal("accepted a vorbis-only stream")
+		t.Fatal("accepted a speex-only stream")
 	}
 	if waxerr.CodeOf(err) != waxerr.CodeUnsupportedFormat {
 		t.Fatalf("error code = %v", waxerr.CodeOf(err))
 	}
-	if got := err.Error(); !contains(got, "vorbis") {
+	if got := err.Error(); !contains(got, "speex") {
 		t.Errorf("error does not name the found mapping: %q", got)
 	}
 }

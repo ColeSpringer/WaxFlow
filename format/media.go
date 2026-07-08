@@ -60,10 +60,11 @@ func newMedia(info *Info, demux container.Demuxer) (Media, error) {
 	}
 	m := &media{info: info, demux: demux, track: track, decoder: dec,
 		delay: track.Delay, skip: track.Delay, rawEnd: -1}
-	// The raw-end cap engages only when the container signaled trims: a
-	// declared-total mismatch in an untrimmed format (a lying FLAC
-	// STREAMINFO, say) stays a tolerated oddity, not a truncation.
-	if (track.Delay > 0 || track.Padding > 0) && track.Samples >= 0 {
+	// The raw-end cap engages only when the container signaled trims, or when
+	// the length is authoritative (SamplesExact): a declared-total mismatch in
+	// an untrimmed advisory format (a lying FLAC STREAMINFO, say) stays a
+	// tolerated oddity, not a truncation.
+	if (track.SamplesExact || track.Delay > 0 || track.Padding > 0) && track.Samples >= 0 {
 		m.rawEnd = track.Delay + track.Samples
 	}
 	m.stashFn = m.stash

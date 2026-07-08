@@ -56,3 +56,23 @@ Entries follow this format:
 > permits parameter tables. No decoder logic was taken. Perceptual noise
 > substitution is filled with local noise (non-reproducible by design);
 > SBR/PS are out of scope.
+
+> **codec/vorbis decoder**: original code written against the Xiph
+> *Vorbis I specification*. The codebook Huffman codeword assignment
+> (`assignCodewords`) follows the algorithm in the public-domain
+> *stb_vorbis*, https://github.com/nothings/stb, and the overall decode
+> structure (floor 1 curve synthesis, residue partition passes, channel
+> coupling, the MDCT/overlap-add) was cross-checked for shape against
+> *stb_vorbis* and *jfreymuth/oggvorbis* (MIT),
+> https://github.com/jfreymuth/oggvorbis, both Tier A. No source was
+> ported line-by-line; the floor1 inverse-dB table is computed rather
+> than transcribed, and the IMDCT reuses WaxFlow's own transform.
+
+> **codec/opus range decoder**: `codec/opus/rangedec.go` is a clean-room
+> port of the Opus entropy decoder from *libopus* `entdec.c`
+> (BSD-3-Clause), https://gitlab.xiph.org/xiph/opus, per RFC 6716
+> section 4.1. The range coder must be bit-exact with the reference, so
+> the arithmetic (renormalization, `ec_decode`/`ec_dec_update`, the
+> inverse-CDF and raw-bit readers, and the `ec_tell` accounting) is
+> ported faithfully. The TOC/framing (`opus.go`) is original code written
+> against RFC 6716 section 3.

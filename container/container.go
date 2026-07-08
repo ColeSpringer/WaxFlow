@@ -86,6 +86,12 @@ type Track struct {
 	// (LAME tag, iTunSMPB, Opus pre-skip, edit lists), in samples.
 	Delay   int64
 	Padding int64
+	// SamplesExact marks Samples as an authoritative hard length the decoder
+	// must be trimmed to, not an advisory total. Ogg-Vorbis and Ogg-Opus set
+	// it (the last page granule is exact and the decoder over-produces past
+	// it); formats whose declared total can lie (a bad FLAC STREAMINFO) leave
+	// it false so a mismatch stays a tolerated oddity rather than a truncation.
+	SamplesExact bool
 	// Default marks the container's designated default track.
 	Default bool
 }
