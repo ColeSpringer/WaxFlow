@@ -1,6 +1,10 @@
 package mp4
 
-import "github.com/colespringer/waxflow/container"
+import (
+	"encoding/binary"
+
+	"github.com/colespringer/waxflow/container"
+)
 
 // box is one parsed box header plus its payload offset within a parent
 // buffer or the source. size is the whole box length including the header.
@@ -103,4 +107,40 @@ func fullBox(payload []byte) (version byte, flags uint32, rest []byte, ok bool) 
 		return 0, 0, nil, false
 	}
 	return payload[0], be32(payload[:4]) & 0xFFFFFF, payload[4:], true
+}
+
+// makeBox assembles a box: a 4-byte size, the 4-byte type, and the
+// concatenated parts. Every box the muxer writes fits in 32 bits (fragments
+// are bounded), so no 64-bit largesize form is needed.
+func makeBox(typ string, parts ...[]byte) []byte {
+	n := 8
+	for _, p := range parts {
+		n += len(p)
+	}
+	b := make([]byte, 8, n)
+	binary.BigEndian.PutUint32(b, uint32(n))
+	copy(b[4:], typ)
+	for _, p := range parts {
+		b = append(b, p...)
+	}
+	return b
+}
+
+// makeFullBox assembles a FullBox: the version byte and 24-bit flags precede
+// the body.
+func makeFullBox(typ string, version byte, flags uint32, parts ...[]byte) []byte {
+	head := []byte{version, byte(flags >> 16), byte(flags >> 8), byte(flags)}
+	return makeBox(typ, append([][]byte{head}, parts...)...)
+}
+
+// u16, u32, u64 render big-endian integer fields for box assembly.
+func u16(v uint16) []byte { return []byte{byte(v >> 8), byte(v)} }
+
+func u32(v uint32) []byte {
+	return []byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)}
+}
+
+func u64(v uint64) []byte {
+	return []byte{byte(v >> 56), byte(v >> 48), byte(v >> 40), byte(v >> 32),
+		byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)}
 }

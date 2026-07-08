@@ -52,7 +52,8 @@ func WithIndexCache(c IndexCache) Option {
 // encode. Zero values keep the source's properties, so the zero options
 // are a bit-exact container rewrite.
 type TranscodeOptions struct {
-	// Format is the output container: "wav", "aiff", "flac", or "mp3".
+	// Format is the output container: "wav", "aiff", "flac", "mp3", or
+	// "alac".
 	Format string
 	// Rate resamples to this sample rate in Hz; 0 keeps the source rate.
 	Rate int

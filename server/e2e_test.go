@@ -510,6 +510,66 @@ func TestStreamTranscodeFLACWriteThrough(t *testing.T) {
 	}
 }
 
+// TestStreamTranscodeALAC pins the ALAC encoder and fragmented-MP4 muxer
+// over /stream: a live lossless transcode (VBR, so no size hint) that
+// matches the engine byte for byte and promotes to a range-served cache
+// entry, exactly like the FLAC path but delivering audio/mp4.
+func TestStreamTranscodeALAC(t *testing.T) {
+	env := newTestEnv(t, nil)
+	want := engineReference(t, filepath.Join(env.root, "sine.wav"), waxflow.TranscodeOptions{Format: "alac"})
+
+	resp := env.get(t, "/stream?src=lib/sine.wav&format=alac", nil)
+	first := readBody(t, resp)
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "audio/mp4" {
+		t.Fatalf("live transcode = %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	if resp.Header.Get("Accept-Ranges") != "none" {
+		t.Fatalf("live Accept-Ranges = %q", resp.Header.Get("Accept-Ranges"))
+	}
+	if resp.Header.Get("X-Content-Duration") == "" {
+		t.Fatal("live duration hint missing")
+	}
+	if got := resp.Header.Get("X-Estimated-Content-Length"); got != "" {
+		t.Fatalf("size hint %q on a VBR stream, want none (size is signal-dependent)", got)
+	}
+	if !bytes.Equal(first, want) {
+		t.Fatalf("live stream bytes differ from the engine reference (%d vs %d bytes)", len(first), len(want))
+	}
+
+	// The completed cache entry serves with real length, ranges, and ETag.
+	deadline := time.Now().Add(5 * time.Second)
+	var cached *http.Response
+	for {
+		cached = env.get(t, "/stream?src=lib/sine.wav&format=alac", nil)
+		if cached.Header.Get("Accept-Ranges") == "bytes" || time.Now().After(deadline) {
+			break
+		}
+		readBody(t, cached)
+		time.Sleep(10 * time.Millisecond)
+	}
+	second := readBody(t, cached)
+	if cached.Header.Get("Accept-Ranges") != "bytes" {
+		t.Fatal("completed entry must serve with full range support")
+	}
+	if cached.ContentLength != int64(len(want)) || !bytes.Equal(second, want) {
+		t.Fatalf("cached response differs (len %d vs %d)", cached.ContentLength, len(want))
+	}
+	if cached.Header.Get("ETag") == "" {
+		t.Fatal("cached response needs the cache-key ETag")
+	}
+}
+
+// TestStreamALACRejectsBitrate confirms the lossless ALAC output refuses the
+// lossy quality parameters, like any other lossless format.
+func TestStreamALACRejectsBitrate(t *testing.T) {
+	env := newTestEnv(t, nil)
+	resp := env.get(t, "/stream?src=lib/sine.wav&format=alac&bitrate=128", nil)
+	readBody(t, resp)
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Fatalf("alac with bitrate = %d, want 415", resp.StatusCode)
+	}
+}
+
 // TestStreamTranscodeMP3 pins the baseline MP3 encoder over /stream: a live
 // CBR transcode that carries a size estimate (unlike VBR FLAC), matches the
 // engine byte for byte, and promotes to a range-served cache entry.

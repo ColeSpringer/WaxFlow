@@ -212,6 +212,11 @@ func TestEncodeDifferential(t *testing.T) {
 		{"s24 to wav", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, "wav", "wav"},
 		{"s16 to flac", pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, "flac", "flac"},
 		{"s24 to flac", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, "flac", "flac"},
+		{"s16 to alac", pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, "alac", "m4a"},
+		{"s24 to alac", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, "alac", "m4a"},
+		// 32-bit exercises the wasted-byte shift path (the coded high part is
+		// 24-bit); ffmpeg decodes it, unlike the full-width form it rejects.
+		{"s32 to alac", pcm.Config{Encoding: pcm.SignedInt, Bits: 32}, "alac", "m4a"},
 	}
 	const frames = 4801
 	e := waxflow.New()

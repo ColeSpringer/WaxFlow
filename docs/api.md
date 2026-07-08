@@ -100,7 +100,7 @@ byte-identical to `waxflow probe --json`.
 
 ## GET /stream
 
-    /stream?src=<ref>&format=auto|wav|flac|mp3&rate=&ch=&bits=16|24&bitrate=|q=&gain=&t=&track=&maxBitRate=
+    /stream?src=<ref>&format=auto|wav|flac|alac|mp3&rate=&ch=&bits=16|24&bitrate=|q=&gain=&t=&track=&maxBitRate=
 
 Source references (`src`): `<root>/<relative/path>` under a configured
 library root; `upload:<id>` and `pid:<ULID>` return `501
@@ -112,13 +112,14 @@ Parameters (unknown parameter names are rejected):
 - `format`: `auto` (default) engages the decision ladder; `wav` forces a
   WAV transcode; `flac` a FLAC one (lossless, level 5; a FLAC source
   under `format=flac` with no transforming parameters direct-plays
-  instead); `mp3` a baseline CBR MP3 (128 kbit/s default, `bitrate`/`q`
-  select it). Other formats join as encoders land (`/caps` is the truth).
-  `aiff` exists for jobs but has no streaming form: 415. Live FLAC
-  streams omit the size hints and byte-rate pacing: a lossless encoder's
-  output size is signal-dependent and unknown up front. CBR MP3 carries a
-  size estimate. Completed cache entries serve with exact sizes like any
-  other.
+  instead); `alac` a lossless Apple Lossless stream in progressive
+  fragmented MP4 (`audio/mp4`); `mp3` a baseline CBR MP3 (128 kbit/s
+  default, `bitrate`/`q` select it). Other formats join as encoders land
+  (`/caps` is the truth). `aiff` exists for jobs but has no streaming
+  form: 415. Live FLAC and ALAC streams omit the size hints and byte-rate
+  pacing: a lossless encoder's output size is signal-dependent and unknown
+  up front. CBR MP3 carries a size estimate. Completed cache entries serve
+  with exact sizes like any other.
 - `rate`, `ch`, `bits`: output sample rate, channel count (1 or 2), bit
   depth (16 or 24, dithered when reducing). Absent keeps the source's.
 - `gain`: `off`, `track` (default), `album`, or an explicit `+/-dB`
@@ -190,12 +191,13 @@ resolved and embedded as `id`, and the response is:
 
     {
       "schemaVersion": 1,
-      "inputs": ["flac", "wav", "aiff", "ogg", "mp3"],
-      "decoders": ["pcm", "flac", "mp3"],
+      "inputs": ["flac", "wav", "aiff", "ogg", "mp4", "adts", "mp3"],
+      "decoders": ["pcm", "flac", "mp3", "alac", "aac-lc"],
       "outputs": [{"name": "wav", "live": true, "exts": ["wav", "wave", "rf64", "bw64"]},
                    {"name": "aiff", "live": false, "exts": ["aif", "aiff", "aifc", "afc"]},
                    {"name": "flac", "live": true, "exts": ["flac"]},
-                   {"name": "mp3", "live": true, "exts": ["mp3", "mpga"]}],
+                   {"name": "mp3", "live": true, "exts": ["mp3", "mpga"]},
+                   {"name": "alac", "live": true, "exts": ["m4a"]}],
       "delivery": {"progressive": true, "hls": false, "jobs": false, "uploads": false},
       "profiles": {}
     }

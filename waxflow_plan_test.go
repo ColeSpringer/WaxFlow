@@ -117,10 +117,11 @@ func TestPlanTranscode(t *testing.T) {
 
 func TestOutputsTable(t *testing.T) {
 	outs := waxflow.Outputs()
-	if len(outs) != 4 || outs[0].Name != "wav" || !outs[0].Live ||
+	if len(outs) != 5 || outs[0].Name != "wav" || !outs[0].Live ||
 		outs[1].Name != "aiff" || outs[1].Live ||
 		outs[2].Name != "flac" || !outs[2].Live ||
-		outs[3].Name != "mp3" || !outs[3].Live {
+		outs[3].Name != "mp3" || !outs[3].Live ||
+		outs[4].Name != "alac" || !outs[4].Live {
 		t.Fatalf("Outputs() = %+v", outs)
 	}
 }

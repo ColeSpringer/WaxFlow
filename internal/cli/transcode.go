@@ -141,7 +141,7 @@ flags the transcode is a bit-exact container rewrite; --rate,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&formatName, "format", "", "output format: wav, aiff, flac, or mp3 (default: from output extension)")
+	cmd.Flags().StringVar(&formatName, "format", "", "output format: wav, aiff, flac, mp3, or alac (default: from output extension)")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite the output if it exists")
 	cmd.Flags().IntVar(&rate, "rate", 0, "output sample rate in Hz (default: source rate)")
 	cmd.Flags().IntVar(&channels, "channels", 0, "output channel count: 1 or 2 (default: source layout)")

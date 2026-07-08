@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
+	"github.com/colespringer/waxflow/codec"
 )
 
 // cookie builds a valid ALACSpecificConfig for the fuzz target.
@@ -53,5 +54,99 @@ func FuzzDecode(f *testing.F) {
 			}
 			return nil
 		})
+	})
+}
+
+// FuzzEncode drives arbitrary PCM through the encoder and back through the
+// decoder. The bytes select the depth, channel count, and frame length, and
+// seed a sample generator, so the predictor, mixRes search, adaptive-Golomb
+// coder, zero-run escape, and verbatim fallback all see hostile input.
+// Invariant: no panic, and decode(encode(x)) == x (ALAC is lossless).
+func FuzzEncode(f *testing.F) {
+	f.Add(uint8(0), uint8(1), uint16(4096), uint64(1))
+	f.Add(uint8(2), uint8(0), uint16(4096), uint64(7))
+	f.Add(uint8(3), uint8(1), uint16(17), uint64(99))
+	f.Add(uint8(1), uint8(1), uint16(9111), uint64(3))
+
+	depths := []int{16, 20, 24, 32}
+	f.Fuzz(func(t *testing.T, depthSel, chanSel uint8, lenSel uint16, seed uint64) {
+		depth := depths[int(depthSel)%len(depths)]
+		ch := int(chanSel)%2 + 1
+		n := int(lenSel)%(FrameSize*2) + 1
+		fm := audio.Format{Rate: 44100, Channels: ch, Layout: audio.DefaultLayout(ch), Type: audio.Int, BitDepth: depth}
+
+		src := audio.Get(fm, n)
+		defer audio.Put(src)
+		src.N = n
+		// A cheap xorshift fill spanning the depth's range.
+		st := seed | 1
+		lo := int32(-1) << (depth - 1)
+		span := uint64(-(lo + 1)) - uint64(lo) + 1
+		for c := 0; c < ch; c++ {
+			s := src.ChanI(c)
+			for i := range s {
+				st ^= st << 13
+				st ^= st >> 7
+				st ^= st << 17
+				s[i] = lo + int32(st%span)
+			}
+		}
+
+		enc, err := NewEncoder(fm, nil)
+		if err != nil {
+			t.Fatalf("NewEncoder: %v", err)
+		}
+		cfg, err := ParseMagicCookie(enc.CodecConfig())
+		if err != nil {
+			t.Fatalf("cookie: %v", err)
+		}
+		dec, err := NewDecoder(cfg, fm)
+		if err != nil {
+			t.Fatalf("NewDecoder: %v", err)
+		}
+		defer dec.Release()
+
+		got := audio.Get(fm, n)
+		defer audio.Put(got)
+		pos := 0
+		emit := func(pkt codec.Packet) error {
+			return dec.Decode(pkt.Data, func(b *audio.Buffer) error {
+				// A correct round-trip decodes exactly the encoded samples; a
+				// bug that over-produces is reported here rather than as an
+				// opaque slice-bounds panic in the copy below.
+				if pos+b.N > n {
+					t.Fatalf("decoded %d+%d samples exceeds source length %d", pos, b.N, n)
+				}
+				for c := 0; c < ch; c++ {
+					copy(got.I[c*got.Stride+pos:c*got.Stride+pos+b.N], b.ChanI(c))
+				}
+				pos += b.N
+				return nil
+			})
+		}
+		frame := audio.Get(fm, FrameSize)
+		defer audio.Put(frame)
+		for off := 0; off < n; off += FrameSize {
+			m := min(FrameSize, n-off)
+			frame.N = m
+			for c := 0; c < ch; c++ {
+				copy(frame.ChanI(c), src.I[c*src.Stride+off:c*src.Stride+off+m])
+			}
+			if err := enc.Encode(frame, emit); err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+		}
+		if pos != n {
+			t.Fatalf("decoded %d samples, want %d", pos, n)
+		}
+		for c := 0; c < ch; c++ {
+			w := src.I[c*src.Stride : c*src.Stride+n]
+			g := got.I[c*got.Stride : c*got.Stride+n]
+			for i := range w {
+				if w[i] != g[i] {
+					t.Fatalf("ch%d[%d] = %d, want %d", c, i, g[i], w[i])
+				}
+			}
+		}
 	})
 }

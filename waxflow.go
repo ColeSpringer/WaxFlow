@@ -10,12 +10,14 @@ import (
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/alac"
 	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/aiff"
 	"github.com/colespringer/waxflow/container/flacn"
+	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/container/mpa"
 	"github.com/colespringer/waxflow/container/riff"
 	"github.com/colespringer/waxflow/dsp"
@@ -587,6 +589,59 @@ var outputs = []output{
 			return enc, mpa.NewMuxer(dst, &mpa.MuxerOptions{Delay: enc.Delay()}), nil
 		},
 	},
+	{
+		name:      "alac",
+		exts:      []string{"m4a"},
+		live:      true,
+		mediaType: "audio/mp4",
+		// headerBytes stays 0: size estimates are gated on a fixed
+		// bytesPerFrame, which VBR lossless lacks.
+		codecID: codec.ALAC,
+		adjust: func(spec *dsp.ChainSpec, src audio.Format, opts TranscodeOptions) {
+			spec.FrameSize = alac.FrameSize
+			if opts.BitDepth != 0 {
+				return // explicit depth; plan validates it against ALAC's set
+			}
+			// ALAC holds integer PCM at 16/20/24/32 bits. A float source with
+			// no depth requested quantizes to 24 bits (the whole float32
+			// mantissa); an integer source at another depth snaps up to the
+			// nearest ALAC depth (8-bit becomes 16, losslessly widened).
+			// alacSnapDepth is the identity on the ALAC depths, so a source
+			// already at one needs no override.
+			if src.Type == audio.Float {
+				spec.BitDepth = 24
+			} else if d := alacSnapDepth(src.BitDepth); d != src.BitDepth {
+				spec.BitDepth = d
+			}
+		},
+		plan: func(f audio.Format, _ TranscodeOptions) (string, int, int, error) {
+			if _, err := alac.NewEncoder(f, nil); err != nil {
+				return "", 0, 0, err
+			}
+			return alac.EncoderVersion, 0, 0, nil
+		},
+		build: func(f audio.Format, _ TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
+			enc, err := alac.NewEncoder(f, nil)
+			if err != nil {
+				return nil, nil, err
+			}
+			return enc, mp4.NewMuxer(dst, nil), nil
+		},
+	},
+}
+
+// alacSnapDepth rounds an integer bit depth up to the nearest ALAC depth.
+func alacSnapDepth(d int) int {
+	switch {
+	case d <= 16:
+		return 16
+	case d <= 20:
+		return 20
+	case d <= 24:
+		return 24
+	default:
+		return 32
+	}
 }
 
 // mp3Bitrate resolves TranscodeOptions.MP3Bitrate: the zero value keeps the
