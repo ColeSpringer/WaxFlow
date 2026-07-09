@@ -29,6 +29,44 @@ func TestParseOpusHead(t *testing.T) {
 	}
 }
 
+// TestPacketSamples pins the prefix-only duration helper against known TOC
+// framings (RFC 6716 Table 2), including the 120 ms (5760-sample) cap that
+// bounds a legal packet.
+func TestPacketSamples(t *testing.T) {
+	cases := []struct {
+		name string
+		pkt  []byte
+		want int // -1 means an error is expected
+	}{
+		{"silk-nb-10ms", []byte{0x00, 0}, 480},         // config 0, code 0
+		{"silk-nb-20ms", []byte{0x08, 0}, 960},         // config 1, code 0
+		{"silk-nb-60ms", []byte{0x18, 0}, 2880},        // config 3, code 0
+		{"celt-nb-2.5ms", []byte{0x80, 0}, 120},        // config 16, code 0
+		{"code1-two-frames", []byte{0x09, 0, 0}, 1920}, // config 1, code 1: 2 * 960
+		{"code3-six-frames", []byte{0x0B, 0x06}, 5760}, // 6 * 960, at the cap
+		{"code3-seven-over-cap", []byte{0x0B, 0x07}, -1},
+		{"code3-truncated", []byte{0x0B}, -1},
+		{"empty", []byte{}, -1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := PacketSamples(c.pkt)
+			if c.want < 0 {
+				if err == nil {
+					t.Errorf("PacketSamples = %d, want error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("PacketSamples: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("PacketSamples = %d, want %d", got, c.want)
+			}
+		})
+	}
+}
+
 // TestFramingVsFFprobe checks the TOC parse and frame splitting against
 // ffprobe's independent per-packet durations: the sum of a packet's frame
 // sizes must equal ffprobe's reported packet duration.

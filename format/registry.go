@@ -15,6 +15,7 @@ import (
 	"github.com/colespringer/waxflow/container/adts"
 	"github.com/colespringer/waxflow/container/aiff"
 	"github.com/colespringer/waxflow/container/flacn"
+	"github.com/colespringer/waxflow/container/mka"
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/container/mpa"
 	"github.com/colespringer/waxflow/container/ogg"
@@ -90,6 +91,16 @@ var drivers = []driver{
 		mediaType: "audio/mp4",
 		open: func(src container.Source, opts *Options) (container.Demuxer, error) {
 			return mp4.NewDemuxer(src, &mp4.DemuxerOptions{Strict: opts != nil && opts.Strict})
+		},
+	},
+	{
+		name:      "mka",
+		match:     mka.Match,
+		need:      mka.MatchNeed,
+		exts:      []string{"mka", "mkv", "webm"},
+		mediaType: "audio/x-matroska",
+		open: func(src container.Source, opts *Options) (container.Demuxer, error) {
+			return mka.NewDemuxer(src, &mka.DemuxerOptions{Strict: opts != nil && opts.Strict})
 		},
 	},
 	{

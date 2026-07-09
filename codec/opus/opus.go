@@ -117,6 +117,36 @@ var tocTable = func() [32]tocConfig {
 	return t
 }()
 
+// PacketSamples returns the number of 48 kHz samples a packet decodes to,
+// derived from its TOC byte and frame count alone (RFC 6716 section 3.1). It
+// reads only the first one or two bytes, so a truncated leading slice still
+// times correctly, which is what lets containers time Opus packets from a
+// prefix without decoding or materializing the whole packet.
+func PacketSamples(pkt []byte) (int, error) {
+	if len(pkt) == 0 {
+		return 0, malformed("empty packet")
+	}
+	frameSize := tocTable[pkt[0]>>3].frameSize
+	var frames int
+	switch pkt[0] & 0x3 {
+	case 0:
+		frames = 1
+	case 1, 2:
+		frames = 2
+	case 3:
+		if len(pkt) < 2 {
+			return 0, malformed("code 3 packet missing frame count byte")
+		}
+		frames = int(pkt[1] & 0x3F)
+	}
+	total := frameSize * frames
+	// RFC 6716: a packet spans at most 120 ms (5760 samples at 48 kHz).
+	if frames <= 0 || total <= 0 || total > 5760 {
+		return 0, malformed("packet duration %d samples out of range", total)
+	}
+	return total, nil
+}
+
 // frame is one Opus frame's compressed bytes plus its shared configuration.
 type frame struct {
 	data   []byte

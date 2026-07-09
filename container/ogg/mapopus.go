@@ -126,6 +126,9 @@ func (m *opusMapping) finalizeTrack(lastGranule func() int64) (container.Track, 
 
 // opusFrameSamples is the frame length in 48 kHz samples for each TOC config
 // (RFC 6716 Table 2): SILK 10/20/40/60 ms, Hybrid 10/20 ms, CELT 2.5/5/10/20 ms.
+// It is kept here rather than shared with codec/opus.PacketSamples because
+// opus's own end-to-end test imports this package, and importing opus back
+// would form a cycle.
 var opusFrameSamples = [32]int64{
 	480, 960, 1920, 2880, // 0-3   SILK NB
 	480, 960, 1920, 2880, // 4-7   SILK MB
