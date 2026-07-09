@@ -270,6 +270,18 @@ func (d *Demuxer) loadBlockGroup(g element) (bool, error) {
 				return false, err
 			}
 			discardNS = beInt(body)
+			if discardNS < 0 {
+				// A negative DiscardPadding is spec-legal (the discard moves
+				// to the start of the block) but not honored here; the
+				// gapless total treats it as zero, surfaced once per file.
+				if !d.warnedNegativeDiscard {
+					d.warnedNegativeDiscard = true
+					if werr := d.warn(e.dataOff, "ignoring negative DiscardPadding"); werr != nil {
+						return false, werr
+					}
+				}
+				discardNS = 0
+			}
 		}
 		if e.unknownSize {
 			break

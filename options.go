@@ -82,6 +82,18 @@ type TranscodeOptions struct {
 	// output; the zero value uses the encoder default (128000). It must be
 	// a legal Layer III CBR rate for the output sample rate.
 	MP3Bitrate int
+	// OpusBitrate selects the target bit rate in bits per second for opus
+	// output; the zero value uses the encoder default (96000).
+	OpusBitrate int
+	// OpusComplexity gates the Opus encoder's analysis depth: 1 through 10
+	// literally, OpusComplexityDefault (the zero value) for the encoder
+	// default (5), and OpusComplexityLowest for complexity 0, which needs a
+	// sentinel because the zero value cannot mean it without stealing the
+	// default. Higher is slower and higher quality.
+	OpusComplexity int
+	// OpusVBR selects variable bit rate for opus output, sizing each frame to its
+	// content around OpusBitrate. The zero value is constant bit rate.
+	OpusVBR bool
 	// Shaping selects the dither strategy for quantization; the default
 	// is flat TPDF.
 	Shaping dither.Shaping
@@ -95,6 +107,14 @@ const (
 	FLACLevelDefault = 0
 	// FLACLevelFastest selects FLAC level 0.
 	FLACLevelFastest = -1
+)
+
+// OpusComplexity spellings whose meaning the zero value cannot carry.
+const (
+	// OpusComplexityDefault keeps the encoder's default complexity.
+	OpusComplexityDefault = 0
+	// OpusComplexityLowest selects complexity 0.
+	OpusComplexityLowest = -1
 )
 
 // ProbeOptions configures Engine.Probe.

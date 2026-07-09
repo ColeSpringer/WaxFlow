@@ -88,7 +88,7 @@ func initCaps(cap []int, LM, C int) {
 // band's budget into fine-energy bits (ebits) and PVQ bits (bits).
 func interpBits2Pulses(start, end, skipStart int, bits1, bits2, thresh, cap []int, total int, balance *int,
 	skipRsv int, intensity *int, intensityRsv int, dualStereo *int, dualStereoRsv int,
-	bits, ebits, finePriority []int, C, LM int, d *rangeDecoder) int {
+	bits, ebits, finePriority []int, C, LM int, enc *rangeEncoder, d *rangeDecoder, encode bool, prev, signalBandwidth int) int {
 
 	allocFloor := C << bitRes
 	stereo := b2i(C > 1)
@@ -149,7 +149,23 @@ func interpBits2Pulses(start, end, skipStart int, bits1, bits2, thresh, cap []in
 		bandWidth := int(celtEBands[codedBands]) - int(celtEBands[j])
 		bandBits := bits[j] + percoeff*bandWidth + rem
 		if bandBits >= max(thresh[j], allocFloor+(1<<bitRes)) {
-			if d.decodeBitLogp(1) != 0 {
+			if encode {
+				// The only non-mandatory part of allocation: a band we skip
+				// must be signaled. Hysteresis keeps bands from fluctuating.
+				depthThreshold := 0
+				if codedBands > 17 {
+					if j < prev {
+						depthThreshold = 7
+					} else {
+						depthThreshold = 9
+					}
+				}
+				if codedBands <= start+2 || (bandBits > (depthThreshold*bandWidth<<LM<<bitRes)>>4 && j <= signalBandwidth) {
+					enc.encodeBitLogp(1, 1)
+					break
+				}
+				enc.encodeBitLogp(0, 1)
+			} else if d.decodeBitLogp(1) != 0 {
 				break
 			}
 			psum += 1 << bitRes
@@ -171,7 +187,14 @@ func interpBits2Pulses(start, end, skipStart int, bits1, bits2, thresh, cap []in
 
 	// Intensity and dual-stereo parameters.
 	if intensityRsv > 0 {
-		*intensity = start + int(d.decodeUint(uint32(codedBands+1-start)))
+		if encode {
+			if *intensity > codedBands {
+				*intensity = codedBands
+			}
+			enc.encodeUint(uint32(*intensity-start), uint32(codedBands+1-start))
+		} else {
+			*intensity = start + int(d.decodeUint(uint32(codedBands+1-start)))
+		}
 	} else {
 		*intensity = 0
 	}
@@ -180,7 +203,11 @@ func interpBits2Pulses(start, end, skipStart int, bits1, bits2, thresh, cap []in
 		dualStereoRsv = 0
 	}
 	if dualStereoRsv > 0 {
-		*dualStereo = d.decodeBitLogp(1)
+		if encode {
+			enc.encodeBitLogp(*dualStereo, 1)
+		} else {
+			*dualStereo = d.decodeBitLogp(1)
+		}
 	} else {
 		*dualStereo = 0
 	}
@@ -262,7 +289,8 @@ func interpBits2Pulses(start, end, skipStart int, bits1, bits2, thresh, cap []in
 // the two interpolation endpoints from the allocation vectors and trim, then
 // runs interpBits2Pulses.
 func cltComputeAllocation(start, end int, offsets, cap []int, allocTrim int, intensity, dualStereo *int,
-	total int, balance *int, pulses, ebits, finePriority []int, C, LM int, d *rangeDecoder) int {
+	total int, balance *int, pulses, ebits, finePriority []int, C, LM int,
+	enc *rangeEncoder, d *rangeDecoder, encode bool, prev, signalBandwidth int) int {
 
 	total = max(total, 0)
 	length := celtNBands
@@ -358,5 +386,6 @@ func cltComputeAllocation(start, end int, offsets, cap []int, allocTrim int, int
 	}
 
 	return interpBits2Pulses(start, end, skipStart, bits1, bits2, thresh, cap, total, balance,
-		skipRsv, intensity, intensityRsv, dualStereo, dualStereoRsv, pulses, ebits, finePriority, C, LM, d)
+		skipRsv, intensity, intensityRsv, dualStereo, dualStereoRsv, pulses, ebits, finePriority, C, LM,
+		enc, d, encode, prev, signalBandwidth)
 }

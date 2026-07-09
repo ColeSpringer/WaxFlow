@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -132,6 +133,52 @@ var Vectors = []Vector{
 	// stale: current libopus fails 05/06/12 against them) and mono
 	// references were added.
 	{Name: "opus/opus_testvectors-rfc8251.tar.gz", URL: "https://opus-codec.org/static/testvectors/opus_testvectors-rfc8251.tar.gz", SHA256: "6b26a22f9ba87b2b836906a9bb7afec5f8e54d49553b1200382520ee6fedfa55"},
+	// The libopus source release the Opus work was ported from. It is pinned
+	// here so `make opus-tools` can build the reference tools opus_demo and
+	// opus_compare, the encoder-quality oracle (docs/quality-gates.md): a
+	// test-time oracle only, never a runtime dependency, exactly like ffmpeg.
+	{Name: "opus/opus-1.6.1.tar.gz", URL: "https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz", SHA256: "6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1"},
+	// The Opus encoder-quality corpus: the first 20 reference clips (a
+	// bias-free fixed prefix) of the 30-sample Hydrogenaudio 2011 public
+	// multiformat listening test, which mixed 15 known-difficult samples from
+	// prior HA tests with 15 organizer-selected ones spanning music, speech,
+	// transient, and tonal material. The clips are exactly the encoder-gate
+	// shape (48 kHz / 16-bit / stereo WAV, 7-30 s), were hand-picked for
+	// codec evaluation, and Xiph has hosted them with upstream SHA256SUMS
+	// since 2011. They are short fair-use excerpts: fetched at test time,
+	// never committed or redistributed.
+	{Name: "opus/corpus/sample01r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample01r.wav", SHA256: "fd843f1288aa3b6d5e3adfa8cf7b0ee5f0aef2cc5ce5bbf3cf01203ecfc84abf"},
+	{Name: "opus/corpus/sample02r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample02r.wav", SHA256: "ca8a4603211dd9bd7476d99811bed773501dc250804f4c07e7c68e95ab7dd53c"},
+	{Name: "opus/corpus/sample03r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample03r.wav", SHA256: "479834bbaf3bb54145e3ee1b32e575f3620400dcdb81fb6fe188e7a73d8f4f74"},
+	{Name: "opus/corpus/sample04r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample04r.wav", SHA256: "1d2647185e5da6ced1912a8c5dd9c7c1f3f6029b2eb72f37d3ee2afb83177e6d"},
+	{Name: "opus/corpus/sample05r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample05r.wav", SHA256: "d60fca97e5732b6f9b65fdb792c3f7c11f6c3feeb558a46ebd4066c811164058"},
+	{Name: "opus/corpus/sample06r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample06r.wav", SHA256: "db700dd9097110206c1e3a4ade4a907cb8976f2b6fd4bfc5d7f0fe297449ae74"},
+	{Name: "opus/corpus/sample07r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample07r.wav", SHA256: "8a73cdc83ca5438537e81e56c4b19e5a94417179e86c5e49d75139e59a71d2c0"},
+	{Name: "opus/corpus/sample08r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample08r.wav", SHA256: "8a3e074dcdbb4c2918751c04f03af824bdb565fdc3197b1abb73ee6d7e255371"},
+	{Name: "opus/corpus/sample09r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample09r.wav", SHA256: "672c11e4f85e22ff7ba10e7c33dd1a71c3d4bc57238fc5abee55582bf6d2066d"},
+	{Name: "opus/corpus/sample10r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample10r.wav", SHA256: "3e635e89c56b8bf3f6802fbaddce54ea0dd50f17928f22c7dc483668dafe8a9b"},
+	{Name: "opus/corpus/sample11r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample11r.wav", SHA256: "1815761739e407802bb7ac9248d67af20d16ca962c66f1b0e4083b1d180cd820"},
+	{Name: "opus/corpus/sample12r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample12r.wav", SHA256: "b7b4ac804dded473e8a80519c2e791705fa94977b0b1d8bbe7d3fbe4904ec189"},
+	{Name: "opus/corpus/sample13r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample13r.wav", SHA256: "a58082e4e47c8ba2e5f838c1be0e69b4bcfd0a778f20f43594f5a5c119378f30"},
+	{Name: "opus/corpus/sample14r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample14r.wav", SHA256: "8f736812cf0551b3aedf19544be8e8a23e2ba71e46280f243f5b9fd7f5e71676"},
+	{Name: "opus/corpus/sample15r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample15r.wav", SHA256: "8fb87f1dfc95dfcc996cd983d8bcd3a07652fbc913d4388e7304a9847b22ca75"},
+	{Name: "opus/corpus/sample16r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample16r.wav", SHA256: "be02daaaf4999de279ddf7b3429b55cbaf89da8cb4e3fc983625a43a516501cc"},
+	{Name: "opus/corpus/sample17r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample17r.wav", SHA256: "d7d5581c33708bd5444c8ec2e52517409845345e04956c243c0a6de91a5e5b62"},
+	{Name: "opus/corpus/sample18r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample18r.wav", SHA256: "8c8992f75ad19d4c6bcc08451f10e24ad4cf079edb0f6274678bf45d4346a42d"},
+	{Name: "opus/corpus/sample19r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample19r.wav", SHA256: "449a991ff64548a542ead06731df08985144dac90d5331fc80fe072165c6be0a"},
+	{Name: "opus/corpus/sample20r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample20r.wav", SHA256: "959d38211f5e6318a7dc47dae8f7f3b3be6d5397c22ee73db17ab376402b6515"},
+}
+
+// OpusQualityCorpus lists the vector names of the pinned 20-track Opus
+// encoder-quality corpus in gate order.
+func OpusQualityCorpus() []string {
+	names := make([]string, 0, 20)
+	for _, v := range Vectors {
+		if strings.HasPrefix(v.Name, "opus/corpus/") {
+			names = append(names, v.Name)
+		}
+	}
+	return names
 }
 
 // VectorsDir returns the on-disk vector cache, testdata/vectors under the

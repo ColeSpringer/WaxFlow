@@ -1,6 +1,6 @@
 // Package client is the Go API client for a WaxFlow daemon (WaxSeal
 // client/ precedent): thin typed wrappers over the HTTP surface plus an
-// offline signed-URL mint helper, so WaxDeck and the CLI never
+// offline signed-URL mint helper, so the users and CLI never
 // reimplement canonicalization or envelope decoding.
 //
 // Error returns carry waxerr codes decoded from the response envelope,

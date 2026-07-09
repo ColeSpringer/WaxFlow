@@ -185,6 +185,177 @@ func algUnquant(X []float32, n, K, spread, B int, d *rangeDecoder, gain float32,
 	return extractCollapseMask(iy, n, B)
 }
 
+func iabs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+// opPVQSearch finds the K-pulse integer vector iy that best matches the band
+// shape X (maximizing the projection X·y/‖y‖), returning Σy². It is a clean-room
+// port of libopus vq.c op_pvq_search_c (float build): a pyramid pre-projection
+// when K is large, then a greedy pulse-by-pulse refinement. X is consumed (its
+// sign is stripped); the caller resynthesizes from iy.
+func opPVQSearch(X []float32, iy []int, K, N int) float32 {
+	y := make([]float32, N)
+	signx := make([]int, N)
+	var sum, xy, yy float32
+	for j := 0; j < N; j++ {
+		if X[j] < 0 {
+			signx[j] = 1
+		} else {
+			signx[j] = 0
+		}
+		X[j] = absf(X[j])
+		iy[j] = 0
+		y[j] = 0
+	}
+	pulsesLeft := K
+	if K > N>>1 {
+		for j := 0; j < N; j++ {
+			sum += X[j]
+		}
+		// If X is too small, replace it with a single pulse to avoid NaNs and
+		// over-allocation (64 approximates infinity).
+		if !(sum > 1e-15 && sum < 64) {
+			X[0] = 1.0
+			for j := 1; j < N; j++ {
+				X[j] = 0
+			}
+			sum = 1.0
+		}
+		// K+0.8 guarantees at most K pulses after the floor.
+		rcp := (float32(K) + 0.8) / sum
+		for j := 0; j < N; j++ {
+			iy[j] = int(math.Floor(float64(rcp * X[j])))
+			y[j] = float32(iy[j])
+			yy += y[j] * y[j]
+			xy += X[j] * y[j]
+			y[j] *= 2
+			pulsesLeft -= iy[j]
+		}
+	}
+	// Should not happen outside silence, but keep the pulse count exact.
+	if pulsesLeft > N+3 {
+		tmp := float32(pulsesLeft)
+		yy += tmp * tmp
+		yy += tmp * y[0]
+		iy[0] += pulsesLeft
+		pulsesLeft = 0
+	}
+	for i := 0; i < pulsesLeft; i++ {
+		yy += 1
+		// Position 0 out of the loop; the branch below is usually not taken.
+		Rxy := xy + X[0]
+		Ryy := yy + y[0]
+		Rxy = Rxy * Rxy
+		bestDen := Ryy
+		bestNum := Rxy
+		bestID := 0
+		for j := 1; j < N; j++ {
+			Rxy = xy + X[j]
+			Ryy = yy + y[j]
+			Rxy = Rxy * Rxy
+			// Maximize Rxy/sqrt(Ryy) via a cross-multiply, no division.
+			if bestDen*Rxy > Ryy*bestNum {
+				bestDen = Ryy
+				bestNum = Rxy
+				bestID = j
+			}
+		}
+		xy += X[bestID]
+		yy += y[bestID]
+		y[bestID] += 2
+		iy[bestID]++
+	}
+	for j := 0; j < N; j++ {
+		iy[j] = (iy[j] ^ -signx[j]) + signx[j]
+	}
+	return yy
+}
+
+// icwrs returns the PVQ codeword index for the pulse vector y (length n, k
+// pulses) and V(n,k), using u as scratch of length ≥ k+2 (libopus cwrs.c
+// SMALL_FOOTPRINT icwrs). It is the exact inverse of cwrsi.
+func icwrs(n, k int, y []int, u []uint32) (i, nc uint32) {
+	u[0] = 0
+	for m := 1; m <= k+1; m++ {
+		u[m] = uint32(m<<1) - 1
+	}
+	run := iabs(y[n-1]) // running |sum|, from icwrs1 on the last element
+	if y[n-1] < 0 {
+		i = 1
+	}
+	j := n - 2
+	i += u[run]
+	run += iabs(y[j])
+	if y[j] < 0 {
+		i += u[run+1]
+	}
+	for j > 0 {
+		j--
+		unext(u, k+2, 0)
+		i += u[run]
+		run += iabs(y[j])
+		if y[j] < 0 {
+			i += u[run+1]
+		}
+	}
+	return i, u[run] + u[run+1]
+}
+
+// encodePulses range-codes the PVQ index for y (n samples, k pulses), the
+// inverse of decodePulses. u is caller scratch of length ≥ k+2.
+func encodePulses(y []int, n, k int, e *rangeEncoder, u []uint32) {
+	i, nc := icwrs(n, k, y, u)
+	e.encodeUint(i, nc)
+}
+
+// algQuant searches and encodes a band's shape: spread-rotate, PVQ pulse search,
+// then codeword encode. When resynth is set it also rebuilds the reconstructed
+// unit vector into X (needed only when a later stage folds from it); a normal
+// encode leaves resynth off, matching libopus at moderate complexity. Clean-room
+// port of libopus vq.c alg_quant (float build). iy and u are caller scratch.
+func algQuant(X []float32, n, K, spread, B int, e *rangeEncoder, gain float32, iy []int, u []uint32, resynth bool) uint32 {
+	expRotation(X, n, 1, B, K, spread)
+	yy := opPVQSearch(X, iy, K, n)
+	cm := extractCollapseMask(iy, n, B)
+	encodePulses(iy, n, K, e, u)
+	if resynth {
+		normaliseResidual(iy, X, n, yy, gain)
+		expRotation(X, n, -1, B, K, spread)
+	}
+	return cm
+}
+
+// stereoItheta estimates a band's mid/side (or two-half) split angle in Q30
+// (libopus vq.c stereo_itheta, float build): the normalized atan2 of the side
+// energy over the mid energy. The result feeds compute_theta's quantizer.
+func stereoItheta(X, Y []float32, stereo, N int) int {
+	var Emid, Eside float32
+	if stereo != 0 {
+		for i := 0; i < N; i++ {
+			m := X[i] + Y[i]
+			s := X[i] - Y[i]
+			Emid += m * m
+			Eside += s * s
+		}
+	} else {
+		for i := 0; i < N; i++ {
+			Emid += X[i] * X[i]
+			Eside += Y[i] * Y[i]
+		}
+	}
+	if Emid+Eside < 1e-18 {
+		return 0
+	}
+	mid := math.Sqrt(float64(Emid))
+	side := math.Sqrt(float64(Eside))
+	// atan2p_norm(side, mid) = atan2(side,mid)·2/π in [0,1]; scale to Q30.
+	return int(math.Floor(0.5 + 1073741824.0*(math.Atan2(side, mid)*(2.0/math.Pi))))
+}
+
 // renormaliseVector rescales X to gain·X/‖X‖ (libopus vq.c renormalise_vector;
 // float build). Used by band folding and the theta split.
 func renormaliseVector(X []float32, N int, gain float32) {

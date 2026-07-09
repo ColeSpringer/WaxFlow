@@ -72,7 +72,8 @@ type Demuxer struct {
 
 	vorbisPrevBlock int
 
-	warnings []container.Warning
+	warnings              []container.Warning
+	warnedNegativeDiscard bool // negative DiscardPadding is surfaced once per file
 }
 
 // NewDemuxer parses the segment header and positions on the first cluster.

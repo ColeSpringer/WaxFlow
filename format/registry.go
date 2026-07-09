@@ -77,7 +77,7 @@ var drivers = []driver{
 		name:      "ogg",
 		match:     ogg.Match,
 		need:      4,
-		exts:      []string{"ogg", "oga"},
+		exts:      []string{"ogg", "oga", "opus"},
 		mediaType: "audio/ogg",
 		open: func(src container.Source, opts *Options) (container.Demuxer, error) {
 			return ogg.NewDemuxer(src, &ogg.DemuxerOptions{Strict: opts != nil && opts.Strict})

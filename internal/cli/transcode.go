@@ -21,6 +21,9 @@ func newTranscodeCmd() *cobra.Command {
 	var rate, channels, bits int
 	var flacLevel int
 	var mp3Bitrate int
+	var opusBitrate int
+	var opusComplexity int
+	var opusVBR bool
 	var gainDB float64
 	var profileName, ditherName string
 	cmd := &cobra.Command{
@@ -100,11 +103,16 @@ flags the transcode is a bit-exact container rewrite; --rate,
 				return waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating output", err)
 			}
 
-			// The options field cannot say "level 0" with a plain 0 (that
-			// selects the default), so the flag's 0 maps to the sentinel.
+			// The options fields cannot say "level 0" or "complexity 0"
+			// with a plain 0 (that selects the default), so the flags' 0
+			// maps to the sentinels.
 			optLevel := flacLevel
 			if optLevel == 0 {
 				optLevel = waxflow.FLACLevelFastest
+			}
+			optComplexity := opusComplexity
+			if optComplexity == 0 {
+				optComplexity = waxflow.OpusComplexityLowest
 			}
 
 			e := waxflow.New(waxflow.WithLogger(logger))
@@ -118,6 +126,9 @@ flags the transcode is a bit-exact container rewrite; --rate,
 				ResampleProfile: profile,
 				FLACLevel:       optLevel,
 				MP3Bitrate:      mp3Bitrate * 1000,
+				OpusBitrate:     opusBitrate * 1000,
+				OpusComplexity:  optComplexity,
+				OpusVBR:         opusVBR,
 			})
 			if err != nil {
 				out.Close()
@@ -141,7 +152,7 @@ flags the transcode is a bit-exact container rewrite; --rate,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&formatName, "format", "", "output format: wav, aiff, flac, mp3, or alac (default: from output extension)")
+	cmd.Flags().StringVar(&formatName, "format", "", "output format: wav, aiff, flac, mp3, alac, or opus (default: from output extension)")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite the output if it exists")
 	cmd.Flags().IntVar(&rate, "rate", 0, "output sample rate in Hz (default: source rate)")
 	cmd.Flags().IntVar(&channels, "channels", 0, "output channel count: 1 or 2 (default: source layout)")
@@ -151,6 +162,9 @@ flags the transcode is a bit-exact container rewrite; --rate,
 	cmd.Flags().StringVar(&ditherName, "dither", "tpdf", "dither when reducing depth: tpdf, shaped, or off")
 	cmd.Flags().IntVar(&flacLevel, "flac-level", 5, "FLAC compression level 0-8, size vs speed (flac output only)")
 	cmd.Flags().IntVar(&mp3Bitrate, "mp3-bitrate", 128, "MP3 constant bit rate in kbit/s (mp3 output only)")
+	cmd.Flags().IntVar(&opusBitrate, "opus-bitrate", 96, "Opus target bit rate in kbit/s (opus output only)")
+	cmd.Flags().IntVar(&opusComplexity, "opus-complexity", 5, "Opus encoder complexity 0-10, quality vs speed (opus output only)")
+	cmd.Flags().BoolVar(&opusVBR, "opus-vbr", false, "encode Opus at variable bit rate around --opus-bitrate (opus output only)")
 	return cmd
 }
 

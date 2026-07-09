@@ -3,7 +3,7 @@ package server
 import "net/http"
 
 // applyCORS sets response CORS headers on playback endpoints when the
-// Origin is allowlisted. Playback endpoints only, for WaxDeck-web and
+// Origin is allowlisted. Playback endpoints only, for players and
 // hls.js; the control API is same-origin tooling.
 func (s *Server) applyCORS(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")

@@ -2,13 +2,16 @@ package opus
 
 import "math"
 
-// CELT band shape decoding and synthesis prep (RFC 6716 sections 4.3.4-4.3.6).
-// Ported from libopus bands.c. This is the decode path
-// only: the reference's encoder branches (theta_rdo distortion search, encode
-// side of compute_theta) and the experimental QEXT paths are not part of the
-// bitstream and are omitted. Every band's unit-norm shape is decoded by PVQ,
-// with recursive mid/side (theta) splitting, stereo, transient time-frequency
-// resolution changes, and spectral folding of empty bands.
+// CELT band shape coding and synthesis prep (RFC 6716 sections 4.3.4-4.3.6).
+// Ported from libopus bands.c: one shared code path serves the decoder
+// (resynth always on) and the encoder (bandCtx.encode), including the
+// encoder's high-complexity theta_rdo distortion search, which turns encoder
+// resynthesis on and codes each stereo band twice (split angle rounded down
+// and up), keeping the rounding with less weighted distortion. The
+// experimental QEXT paths are not part of the bitstream and are omitted.
+// Every band's unit-norm shape is coded by PVQ, with recursive mid/side
+// (theta) splitting, stereo, transient time-frequency resolution changes,
+// and spectral folding of empty bands.
 
 const (
 	qthetaOffset         = 4  // QTHETA_OFFSET
@@ -243,18 +246,38 @@ func stereoMerge(X, Y []float32, mid float32, N int) {
 // --- band context and theta split ---
 
 type bandCtx struct {
+	encode        bool
+	resynth       bool
 	i             int
 	intensity     int
 	spread        int
 	tfChange      int
-	ec            *rangeDecoder
+	enc           *rangeEncoder // encode path
+	dec           *rangeDecoder // decode path
 	remainingBits int
-	bandE         []float32
+	bandE         []float32 // encode: linear band energies (intensity/min-stereo)
 	seed          uint32
 	disableInv    int
 	avoidSplit    int
-	iy            []int    // alg_unquant pulse scratch
+	thetaRound    int      // theta RDO rounding: -1 down, +1 up, 0 nearest
+	iy            []int    // PVQ pulse scratch
 	u             []uint32 // CWRS U-row scratch
+}
+
+// tellFrac and tell dispatch to whichever coder is active (libopus shares
+// ec_tell/ec_tell_frac across encoder and decoder via the ec_ctx base type).
+func (ctx *bandCtx) tellFrac() int {
+	if ctx.encode {
+		return ctx.enc.tellFrac()
+	}
+	return ctx.dec.tellFrac()
+}
+
+func (ctx *bandCtx) tell() int {
+	if ctx.encode {
+		return ctx.enc.tell()
+	}
+	return ctx.dec.tell()
 }
 
 type splitCtx struct {
@@ -276,8 +299,48 @@ func computeQn(N, b, offset, pulseCap, stereo int) int {
 	return (qn + 1) >> 1 << 1
 }
 
-// computeTheta decodes the mid/side split angle for a band (libopus bands.c
-// compute_theta, decode path).
+// intensityStereo collapses a stereo band onto its intensity (mid-only)
+// direction, the encoder's choice when the split angle is 0 (libopus bands.c
+// intensity_stereo, float build). bandE holds the linear per-band energies.
+func intensityStereo(X, Y, bandE []float32, bandID, N int) {
+	left := bandE[bandID]
+	right := bandE[bandID+celtNBands]
+	norm := 1e-15 + float32(math.Sqrt(float64(1e-15+left*left+right*right)))
+	a1 := left / norm
+	a2 := right / norm
+	for j := 0; j < N; j++ {
+		X[j] = a1*X[j] + a2*Y[j]
+	}
+}
+
+// computeChannelWeights derives the perceptual channel weights for the theta
+// RDO distortion measure from the linear band energies (libopus bands.c
+// compute_channel_weights, float build): each channel weighs by its energy,
+// pulled slightly toward the quieter channel to stay conservative about
+// inter-aural masking.
+func computeChannelWeights(ex, ey float32) (w0, w1 float32) {
+	minE := min(ex, ey)
+	return ex + minE/3, ey + minE/3
+}
+
+// stereoSplit rotates a stereo band into orthogonal mid/side (libopus bands.c
+// stereo_split, float build).
+func stereoSplit(X, Y []float32, N int) {
+	const s = float32(0.70710678)
+	for j := 0; j < N; j++ {
+		l := s * X[j]
+		r := s * Y[j]
+		X[j] = l + r
+		Y[j] = r - l
+	}
+}
+
+// computeTheta computes and codes the mid/side split angle for a band (libopus
+// bands.c compute_theta). On encode it derives the angle from the band's mid/side
+// energies (stereo_itheta), quantizes it, codes it, and rotates X/Y accordingly;
+// on decode it reads the angle back. Under theta RDO (ctx.thetaRound != 0) a
+// stereo band's angle is rounded down or up instead of to nearest, so the
+// caller can code the band both ways and keep the better reconstruction.
 func (ctx *bandCtx) computeTheta(sctx *splitCtx, X, Y []float32, N int, b *int, B, B0, LM, stereo int, fill *int) {
 	pulseCap := int(celtLogN[ctx.i]) + LM*(1<<bitRes)
 	off := qthetaOffset
@@ -289,59 +352,135 @@ func (ctx *bandCtx) computeTheta(sctx *splitCtx, X, Y []float32, N int, b *int, 
 	if stereo != 0 && ctx.i >= ctx.intensity {
 		qn = 1
 	}
-	tell := ctx.ec.tellFrac()
 	itheta := 0
+	if ctx.encode {
+		itheta = stereoItheta(X, Y, stereo, N) >> 16
+	}
+	tell := ctx.tellFrac()
 	inv := 0
 	if qn != 1 {
+		if ctx.encode {
+			switch {
+			case stereo == 0 || ctx.thetaRound == 0:
+				itheta = (itheta*qn + 8192) >> 14
+				// Avoid a split that would inject noise onto a near-zero side.
+				if stereo == 0 && ctx.avoidSplit != 0 && itheta > 0 && itheta < qn {
+					unquantized := itheta * 16384 / qn
+					imid := bitexactCos(int16(unquantized))
+					iside := bitexactCos(int16(16384 - unquantized))
+					delta := fracMul16((N-1)<<7, bitexactLog2Tan(iside, imid))
+					if delta > *b {
+						itheta = qn
+					} else if delta < -*b {
+						itheta = 0
+					}
+				}
+			case ctx.thetaRound < 0:
+				itheta = itheta * qn >> 14
+			default:
+				itheta = (itheta*qn + 16383) >> 14
+			}
+		}
+		// Entropy code the angle: a step pdf for stereo, uniform for the time
+		// split, triangular otherwise.
 		if stereo != 0 && N > 2 {
 			p0 := 3
 			x0 := qn / 2
 			ft := p0*(x0+1) + x0
-			fs := int(ctx.ec.decode(uint32(ft)))
-			var x int
-			if fs < (x0+1)*p0 {
-				x = fs / p0
+			if ctx.encode {
+				x := itheta
+				var fl, fh int
+				if x <= x0 {
+					fl, fh = p0*x, p0*(x+1)
+				} else {
+					fl, fh = (x-1-x0)+(x0+1)*p0, (x-x0)+(x0+1)*p0
+				}
+				ctx.enc.encode(uint32(fl), uint32(fh), uint32(ft))
 			} else {
-				x = x0 + 1 + (fs - (x0+1)*p0)
+				fs := int(ctx.dec.decode(uint32(ft)))
+				var x int
+				if fs < (x0+1)*p0 {
+					x = fs / p0
+				} else {
+					x = x0 + 1 + (fs - (x0+1)*p0)
+				}
+				var fl, fh int
+				if x <= x0 {
+					fl, fh = p0*x, p0*(x+1)
+				} else {
+					fl, fh = (x-1-x0)+(x0+1)*p0, (x-x0)+(x0+1)*p0
+				}
+				ctx.dec.update(uint32(fl), uint32(fh), uint32(ft))
+				itheta = x
 			}
-			var fl, fh int
-			if x <= x0 {
-				fl = p0 * x
-				fh = p0 * (x + 1)
-			} else {
-				fl = (x - 1 - x0) + (x0+1)*p0
-				fh = (x - x0) + (x0+1)*p0
-			}
-			ctx.ec.update(uint32(fl), uint32(fh), uint32(ft))
-			itheta = x
 		} else if B0 > 1 || stereo != 0 {
-			itheta = int(ctx.ec.decodeUint(uint32(qn + 1)))
+			if ctx.encode {
+				ctx.enc.encodeUint(uint32(itheta), uint32(qn+1))
+			} else {
+				itheta = int(ctx.dec.decodeUint(uint32(qn + 1)))
+			}
 		} else {
 			ft := ((qn >> 1) + 1) * ((qn >> 1) + 1)
-			fm := int(ctx.ec.decode(uint32(ft)))
-			var fl, fs int
-			if fm < ((qn>>1)*((qn>>1)+1))>>1 {
-				itheta = (int(isqrt32(uint32(8*fm+1))) - 1) >> 1
-				fs = itheta + 1
-				fl = itheta * (itheta + 1) >> 1
+			if ctx.encode {
+				var fl, fs int
+				if itheta <= qn>>1 {
+					fs = itheta + 1
+					fl = itheta * (itheta + 1) >> 1
+				} else {
+					fs = qn + 1 - itheta
+					fl = ft - ((qn+1-itheta)*(qn+2-itheta))>>1
+				}
+				ctx.enc.encode(uint32(fl), uint32(fl+fs), uint32(ft))
 			} else {
-				itheta = (2*(qn+1) - int(isqrt32(uint32(8*(ft-fm-1)+1)))) >> 1
-				fs = qn + 1 - itheta
-				fl = ft - ((qn+1-itheta)*(qn+2-itheta))>>1
+				fm := int(ctx.dec.decode(uint32(ft)))
+				var fl, fs int
+				if fm < ((qn>>1)*((qn>>1)+1))>>1 {
+					itheta = (int(isqrt32(uint32(8*fm+1))) - 1) >> 1
+					fs = itheta + 1
+					fl = itheta * (itheta + 1) >> 1
+				} else {
+					itheta = (2*(qn+1) - int(isqrt32(uint32(8*(ft-fm-1)+1)))) >> 1
+					fs = qn + 1 - itheta
+					fl = ft - ((qn+1-itheta)*(qn+2-itheta))>>1
+				}
+				ctx.dec.update(uint32(fl), uint32(fl+fs), uint32(ft))
 			}
-			ctx.ec.update(uint32(fl), uint32(fl+fs), uint32(ft))
 		}
 		itheta = itheta * 16384 / qn
+		if ctx.encode && stereo != 0 {
+			if itheta == 0 {
+				intensityStereo(X, Y, ctx.bandE, ctx.i, N)
+			} else {
+				stereoSplit(X, Y, N)
+			}
+		}
 	} else if stereo != 0 {
+		if ctx.encode {
+			if itheta > 8192 && ctx.disableInv == 0 {
+				inv = 1
+			}
+			if inv != 0 {
+				for j := 0; j < N; j++ {
+					Y[j] = -Y[j]
+				}
+			}
+			intensityStereo(X, Y, ctx.bandE, ctx.i, N)
+		}
 		if *b > 2<<bitRes && ctx.remainingBits > 2<<bitRes {
-			inv = ctx.ec.decodeBitLogp(2)
+			if ctx.encode {
+				ctx.enc.encodeBitLogp(inv, 2)
+			} else {
+				inv = ctx.dec.decodeBitLogp(2)
+			}
+		} else {
+			inv = 0
 		}
 		if ctx.disableInv != 0 {
 			inv = 0
 		}
 		itheta = 0
 	}
-	qalloc := ctx.ec.tellFrac() - tell
+	qalloc := ctx.tellFrac() - tell
 	*b -= qalloc
 	var imid, iside, delta int
 	switch {
@@ -373,13 +512,22 @@ func (ctx *bandCtx) quantBandN1(X, Y, lowbandOut []float32) uint32 {
 	for c := 0; c <= stereo; c++ {
 		sign := 0
 		if ctx.remainingBits >= 1<<bitRes {
-			sign = int(ctx.ec.decodeRawBits(1))
+			if ctx.encode {
+				if x[0] < 0 {
+					sign = 1
+				}
+				ctx.enc.encodeRawBits(uint32(sign), 1)
+			} else {
+				sign = int(ctx.dec.decodeRawBits(1))
+			}
 			ctx.remainingBits -= 1 << bitRes
 		}
-		if sign != 0 {
-			x[0] = -1
-		} else {
-			x[0] = 1
+		if ctx.resynth {
+			if sign != 0 {
+				x[0] = -1
+			} else {
+				x[0] = 1
+			}
 		}
 		x = Y
 	}
@@ -460,9 +608,14 @@ func (ctx *bandCtx) quantPartition(X []float32, N, b, B int, lowband []float32, 
 	}
 	if q != 0 {
 		K := getPulses(q)
-		cm = algUnquant(X, N, K, spread, B, ctx.ec, gain, ctx.iy, ctx.u)
-	} else {
-		// Fill an unpulsed band with folded spectrum or noise.
+		if ctx.encode {
+			cm = algQuant(X, N, K, spread, B, ctx.enc, gain, ctx.iy, ctx.u, ctx.resynth)
+		} else {
+			cm = algUnquant(X, N, K, spread, B, ctx.dec, gain, ctx.iy, ctx.u)
+		}
+	} else if ctx.resynth {
+		// Fill an unpulsed band with folded spectrum or noise (resynth only:
+		// a normal encode transmits nothing here and never reconstructs it).
 		cmMask := uint32(1<<uint(B)) - 1
 		fill &= int(cmMask)
 		if fill == 0 {
@@ -526,7 +679,12 @@ func (ctx *bandCtx) quantBand(X []float32, N, b, B int, lowband []float32, LM in
 		copy(lowbandScratch[:N], lowband[:N])
 		lowband = lowbandScratch
 	}
+	// Band recombining to increase frequency resolution. The encoder transforms
+	// X forward here; the decoder transforms only lowband and undoes X below.
 	for k := 0; k < recombine; k++ {
+		if ctx.encode {
+			haar1(X, N>>uint(k), 1<<uint(k))
+		}
 		if lowband != nil {
 			haar1(lowband, N>>uint(k), 1<<uint(k))
 		}
@@ -534,7 +692,11 @@ func (ctx *bandCtx) quantBand(X []float32, N, b, B int, lowband []float32, LM in
 	}
 	B >>= recombine
 	NB <<= recombine
+	// Increasing the time resolution.
 	for (NB&1) == 0 && tfChange < 0 {
+		if ctx.encode {
+			haar1(X, NB, B)
+		}
 		if lowband != nil {
 			haar1(lowband, NB, B)
 		}
@@ -546,7 +708,11 @@ func (ctx *bandCtx) quantBand(X []float32, N, b, B int, lowband []float32, LM in
 	}
 	B0 = B
 	NB0 := NB
+	// Reorganize the samples in time order instead of frequency order.
 	if B0 > 1 {
+		if ctx.encode {
+			deinterleaveHadamard(X, NB>>uint(recombine), B0<<uint(recombine), longBlocks)
+		}
 		if lowband != nil {
 			deinterleaveHadamard(lowband, NB>>uint(recombine), B0<<uint(recombine), longBlocks)
 		}
@@ -554,30 +720,33 @@ func (ctx *bandCtx) quantBand(X []float32, N, b, B int, lowband []float32, LM in
 
 	cm = ctx.quantPartition(X, N, b, B, lowband, LM, gain, fill)
 
-	// Resynthesis (always on for decode): undo the time/frequency reorderings.
-	if B0 > 1 {
-		interleaveHadamard(X, NB>>uint(recombine), B0<<uint(recombine), longBlocks)
-	}
-	NB = NB0
-	B = B0
-	for k := 0; k < timeDivide; k++ {
-		B >>= 1
-		NB <<= 1
-		cm |= cm >> uint(B)
-		haar1(X, NB, B)
-	}
-	for k := 0; k < recombine; k++ {
-		cm = uint32(bitDeinterleaveTable[cm&0xFF])
-		haar1(X, N0>>uint(k), 1<<uint(k))
-	}
-	B <<= recombine
-	if lowbandOut != nil {
-		n := float32(math.Sqrt(float64(N0)))
-		for j := 0; j < N0; j++ {
-			lowbandOut[j] = n * X[j]
+	// Resynthesis: undo the time/frequency reorderings (decoder, or a
+	// resynth-enabled encoder). A normal encode discards X, so it is skipped.
+	if ctx.resynth {
+		if B0 > 1 {
+			interleaveHadamard(X, NB>>uint(recombine), B0<<uint(recombine), longBlocks)
 		}
+		NB = NB0
+		B = B0
+		for k := 0; k < timeDivide; k++ {
+			B >>= 1
+			NB <<= 1
+			cm |= cm >> uint(B)
+			haar1(X, NB, B)
+		}
+		for k := 0; k < recombine; k++ {
+			cm = uint32(bitDeinterleaveTable[cm&0xFF])
+			haar1(X, N0>>uint(k), 1<<uint(k))
+		}
+		B <<= recombine
+		if lowbandOut != nil {
+			n := float32(math.Sqrt(float64(N0)))
+			for j := 0; j < N0; j++ {
+				lowbandOut[j] = n * X[j]
+			}
+		}
+		cm &= (1 << uint(B)) - 1
 	}
-	cm &= (1 << uint(B)) - 1
 	return cm
 }
 
@@ -592,6 +761,17 @@ func (ctx *bandCtx) quantBandStereo(X, Y []float32, N, b, B int, lowband []float
 		return ctx.quantBandN1(X, Y, lowbandOut)
 	}
 	origFill := fill
+	// If either channel of the band is near silent, copy the louder onto the
+	// quieter so the split doesn't waste bits coding phase noise (encode only).
+	if ctx.encode {
+		if ctx.bandE[ctx.i] < 1e-10 || ctx.bandE[celtNBands+ctx.i] < 1e-10 {
+			if ctx.bandE[ctx.i] > ctx.bandE[celtNBands+ctx.i] {
+				copy(Y[:N], X[:N])
+			} else {
+				copy(X[:N], Y[:N])
+			}
+		}
+	}
 	ctx.computeTheta(&sctx, X, Y, N, &b, B, B, LM, 1, &fill)
 	inv := sctx.inv
 	imid, iside := sctx.imid, sctx.iside
@@ -614,23 +794,32 @@ func (ctx *bandCtx) quantBandStereo(X, Y []float32, N, b, B int, lowband []float
 		}
 		sign := 0
 		if sbits != 0 {
-			sign = int(ctx.ec.decodeRawBits(1))
+			if ctx.encode {
+				// Only a sign for the side is needed.
+				if x2[0]*y2[1]-x2[1]*y2[0] < 0 {
+					sign = 1
+				}
+				ctx.enc.encodeRawBits(uint32(sign), 1)
+			} else {
+				sign = int(ctx.dec.decodeRawBits(1))
+			}
 		}
 		signf := 1 - 2*sign
 		cm = ctx.quantBand(x2, N, mbits, B, lowband, LM, lowbandOut, 1.0, lowbandScratch, origFill)
 		y2[0] = float32(-signf) * x2[1]
 		y2[1] = float32(signf) * x2[0]
-		// resynth
-		X[0] = mid * X[0]
-		X[1] = mid * X[1]
-		Y[0] = side * Y[0]
-		Y[1] = side * Y[1]
-		t := X[0]
-		X[0] = t - Y[0]
-		Y[0] = t + Y[0]
-		t = X[1]
-		X[1] = t - Y[1]
-		Y[1] = t + Y[1]
+		if ctx.resynth {
+			X[0] = mid * X[0]
+			X[1] = mid * X[1]
+			Y[0] = side * Y[0]
+			Y[1] = side * Y[1]
+			t := X[0]
+			X[0] = t - Y[0]
+			Y[0] = t + Y[0]
+			t = X[1]
+			X[1] = t - Y[1]
+			Y[1] = t + Y[1]
+		}
 	} else {
 		mbits := max(0, min(b, (b-delta)/2))
 		sbits := b - mbits
@@ -651,12 +840,15 @@ func (ctx *bandCtx) quantBandStereo(X, Y []float32, N, b, B int, lowband []float
 			}
 			cm |= ctx.quantBand(X, N, mbits, B, lowband, LM, lowbandOut, 1.0, lowbandScratch, fill)
 		}
-		// resynth
-		stereoMerge(X, Y, mid, N)
 	}
-	if inv != 0 {
-		for j := 0; j < N; j++ {
-			Y[j] = -Y[j]
+	if ctx.resynth {
+		if N != 2 {
+			stereoMerge(X, Y, mid, N)
+		}
+		if inv != 0 {
+			for j := 0; j < N; j++ {
+				Y[j] = -Y[j]
+			}
 		}
 	}
 	return cm
@@ -673,12 +865,15 @@ func specialHybridFolding(norm, norm2 []float32, start, M, dualStereo int) {
 	}
 }
 
-// quantAllBands drives the per-band shape decode across the frame, managing the
-// folding "lowband" history and stereo mode (libopus bands.c quant_all_bands;
-// decode path).
+// quantAllBands drives the per-band shape coding across the frame, managing
+// the folding "lowband" history and stereo mode (libopus bands.c
+// quant_all_bands). A plain encode codes X/Y forward with resynth off; at
+// complexity >= 8 a stereo encode runs the theta RDO search, which needs
+// encoder resynthesis so each band's two candidate codings can be compared
+// against the pre-quantization signal.
 func quantAllBands(start, end int, X, Y []float32, collapseMasks []byte, bandE []float32,
 	pulses []int, shortBlocks, spread, dualStereo, intensity int, tfRes []int,
-	totalBits, balance int, ec *rangeDecoder, LM, codedBands int, seed *uint32, disableInv int, iy []int, u []uint32) {
+	totalBits, balance int, enc *rangeEncoder, dec *rangeDecoder, LM, codedBands int, seed *uint32, complexity, disableInv int, iy []int, u []uint32) {
 
 	M := 1 << LM
 	B := 1
@@ -696,12 +891,30 @@ func quantAllBands(start, end int, X, Y []float32, collapseMasks []byte, bandE [
 
 	lowbandOffset := 0
 	updateLowband := true
+	encode := enc != nil
+	thetaRDO := encode && Y != nil && dualStereo == 0 && complexity >= 8
 	ctx := bandCtx{
-		bandE: bandE, ec: ec, intensity: intensity, spread: spread,
+		encode: encode, resynth: !encode || thetaRDO,
+		bandE: bandE, enc: enc, dec: dec, intensity: intensity, spread: spread,
 		seed: *seed, disableInv: disableInv, iy: iy, u: u,
 	}
-	// A scratch band at the end of X used for lowband copies during decode.
+	// A scratch band used for lowband copies: the decoder can reuse the last
+	// band of X (it never needs that data until it decodes the last band),
+	// but a resynth-enabled encoder still has real spectrum there, so it gets
+	// its own scratch, along with the theta RDO save areas sized to the
+	// widest band.
 	lowbandScratch := X[M*int(celtEBands[celtNBands-1]):]
+	var xSave, ySave, xSave2, ySave2, normSave2 []float32
+	var bytesSave []byte
+	if encode && ctx.resynth {
+		resynthAlloc := M * (int(celtEBands[celtNBands]) - int(celtEBands[celtNBands-1]))
+		lowbandScratch = make([]float32, resynthAlloc)
+		xSave = make([]float32, resynthAlloc)
+		ySave = make([]float32, resynthAlloc)
+		xSave2 = make([]float32, resynthAlloc)
+		ySave2 = make([]float32, resynthAlloc)
+		normSave2 = make([]float32, resynthAlloc)
+	}
 	ctx.avoidSplit = b2i(B > 1)
 
 	for i := start; i < end; i++ {
@@ -713,7 +926,7 @@ func quantAllBands(start, end int, X, Y []float32, collapseMasks []byte, bandE [
 			Yb = Y[M*int(celtEBands[i]):]
 		}
 		N := M*int(celtEBands[i+1]) - M*int(celtEBands[i])
-		tell := ec.tellFrac()
+		tell := ctx.tellFrac()
 		if i != start {
 			balance -= tell
 		}
@@ -776,7 +989,9 @@ func quantAllBands(start, end int, X, Y []float32, collapseMasks []byte, bandE [
 			lowOut = norm[M*int(celtEBands[i])-normOffset:]
 		}
 		var scratch []float32
-		if !(i >= celtNBands || last) { // effEBands == nbEBands for the standard mode
+		// effEBands == nbEBands for the standard mode; theta RDO keeps the
+		// scratch for the last band because its resynthesis is still needed.
+		if !(i >= celtNBands || (last && !thetaRDO)) {
 			scratch = lowbandScratch
 		}
 
@@ -797,7 +1012,59 @@ func quantAllBands(start, end int, X, Y []float32, collapseMasks []byte, bandE [
 			if effectiveLowband != -1 {
 				lb = norm[effectiveLowband:]
 			}
-			xCM = ctx.quantBandStereo(Xb, Yb, N, b, B, lb, LM, lowOut, scratch, int(xCM|yCM))
+			if thetaRDO && i < ctx.intensity {
+				// Theta RDO: code the band with the split angle rounded down
+				// and rounded up, and keep whichever reconstruction stays
+				// closer to the pre-quantization band under perceptual
+				// channel weights (libopus quant_all_bands).
+				w0, w1 := computeChannelWeights(bandE[i], bandE[i+celtNBands])
+				cm := int(xCM | yCM)
+				encSave := enc.snapshot()
+				ctxSave := ctx
+				copy(xSave[:N], Xb[:N])
+				copy(ySave[:N], Yb[:N])
+				// Encode and round down.
+				ctx.thetaRound = -1
+				xCM = ctx.quantBandStereo(Xb, Yb, N, b, B, lb, LM, lowOut, scratch, cm)
+				dist0 := w0*innerProd(xSave, Xb, N) + w1*innerProd(ySave, Yb, N)
+				// Save the first result.
+				cm2 := xCM
+				encSave2 := enc.snapshot()
+				ctxSave2 := ctx
+				copy(xSave2[:N], Xb[:N])
+				copy(ySave2[:N], Yb[:N])
+				if !last {
+					copy(normSave2[:N], lowOut[:N])
+				}
+				bytesSave = enc.tailBytes(&encSave, bytesSave)
+				// Restore and encode rounding up.
+				enc.restore(&encSave)
+				ctx = ctxSave
+				copy(Xb[:N], xSave[:N])
+				copy(Yb[:N], ySave[:N])
+				if i == start+1 {
+					specialHybridFolding(norm, norm2, start, M, dualStereo)
+				}
+				ctx.thetaRound = 1
+				xCM = ctx.quantBandStereo(Xb, Yb, N, b, B, lb, LM, lowOut, scratch, cm)
+				dist1 := w0*innerProd(xSave, Xb, N) + w1*innerProd(ySave, Yb, N)
+				// The weighted inner products measure correlation with the
+				// original, so the larger one wins; ties keep the first.
+				if dist0 >= dist1 {
+					xCM = cm2
+					enc.restore(&encSave2)
+					ctx = ctxSave2
+					copy(Xb[:N], xSave2[:N])
+					copy(Yb[:N], ySave2[:N])
+					if !last {
+						copy(lowOut[:N], normSave2[:N])
+					}
+					enc.restoreTail(&encSave, bytesSave)
+				}
+			} else {
+				ctx.thetaRound = 0
+				xCM = ctx.quantBandStereo(Xb, Yb, N, b, B, lb, LM, lowOut, scratch, int(xCM|yCM))
+			}
 			yCM = xCM
 		} else {
 			var lb []float32

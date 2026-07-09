@@ -13,12 +13,14 @@ import (
 	"github.com/colespringer/waxflow/codec/alac"
 	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/codec/mp3"
+	"github.com/colespringer/waxflow/codec/opus"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/aiff"
 	"github.com/colespringer/waxflow/container/flacn"
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/container/mpa"
+	"github.com/colespringer/waxflow/container/ogg"
 	"github.com/colespringer/waxflow/container/riff"
 	"github.com/colespringer/waxflow/dsp"
 	"github.com/colespringer/waxflow/format"
@@ -477,6 +479,46 @@ var outputs = []output{
 		},
 	},
 	{
+		name:      "opus",
+		exts:      []string{"opus"},
+		live:      true,
+		lossy:     true,
+		mediaType: "audio/ogg",
+		// headerBytes approximates the Ogg-Opus overhead the sample-based
+		// estimate omits: the two header pages plus per-page framing. It is a
+		// hint; the live stream is chunked with no Content-Length.
+		headerBytes: 512,
+		codecID:     codec.Opus,
+		adjust: func(spec *dsp.ChainSpec, src audio.Format, _ TranscodeOptions) {
+			// Opus decodes at 48 kHz and encodes float; more than two channels
+			// downmix to stereo by default (the lossy-output convention). An
+			// explicit channel request is never overridden: 1 and 2 are
+			// honored, and anything else fails loudly in the chain or the
+			// encoder rather than being silently rewritten.
+			spec.Rate = opus.SampleRate
+			spec.Float = true
+			spec.BitDepth = 0
+			spec.FrameSize = 960 // 20 ms at 48 kHz, the encoder-native frame
+			if spec.Channels == 0 && src.Channels > 2 {
+				spec.Channels = 2
+			}
+		},
+		plan: func(f audio.Format, opts TranscodeOptions) (string, int, int, error) {
+			enc, err := opus.NewEncoder(f, opusEncoderOptions(opts))
+			if err != nil {
+				return "", 0, 0, err
+			}
+			return opus.EncoderVersion, 0, enc.Bitrate(), nil
+		},
+		build: func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
+			enc, err := opus.NewEncoder(f, opusEncoderOptions(opts))
+			if err != nil {
+				return nil, nil, err
+			}
+			return enc, ogg.NewMuxer(dst, nil), nil
+		},
+	},
+	{
 		name:        "aiff",
 		exts:        []string{"aif", "aiff", "aifc", "afc"},
 		live:        false,
@@ -642,6 +684,26 @@ func alacSnapDepth(d int) int {
 	default:
 		return 32
 	}
+}
+
+// opusEncoderOptions builds the codec-level Opus options from a transcode
+// request, resolving the zero values to encoder defaults.
+func opusEncoderOptions(opts TranscodeOptions) *opus.EncoderOptions {
+	return &opus.EncoderOptions{
+		Bitrate:    opusBitrate(opts),
+		Complexity: opts.OpusComplexity,
+		VBR:        opts.OpusVBR,
+	}
+}
+
+// opusBitrate resolves TranscodeOptions.OpusBitrate: the zero value keeps the
+// encoder default (96 kbit/s); any other value passes through to the encoder,
+// which validates it.
+func opusBitrate(opts TranscodeOptions) int {
+	if opts.OpusBitrate == 0 {
+		return opus.DefaultBitrate
+	}
+	return opts.OpusBitrate
 }
 
 // mp3Bitrate resolves TranscodeOptions.MP3Bitrate: the zero value keeps the

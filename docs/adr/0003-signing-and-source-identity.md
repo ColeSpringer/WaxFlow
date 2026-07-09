@@ -8,7 +8,7 @@ Players (browser `<audio>`, AVPlayer, ExoPlayer, hls.js) cannot attach API
 keys to media requests, and HLS multiplies requests across segments. Stream
 and segment fetches therefore authenticate with short-lived signed URLs.
 Signed URLs are bearer tokens exposed to the WAN; the format cannot change
-casually once WaxDeck mints them, so it is pinned before the first line of
+casually, so it is pinned before the first line of
 server code.
 
 ## Decision
@@ -51,5 +51,4 @@ documented residual risk, with `POST /cache/gc` as the escape hatch.
 - The identity travels as the `id` query parameter (`<size>-<mtimeNS>`),
   inside the signature like everything else; signed URLs without it are
   refused as invalid.
-- The `client` package ships a mint helper so WaxDeck never reimplements
-  canonicalization.
+- The `client` package ships a mint helper.

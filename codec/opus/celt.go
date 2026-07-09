@@ -10,6 +10,7 @@ package opus
 const (
 	celtDecodeBufferSize = 2048 // DECODE_BUFFER_SIZE
 	combMinPeriod        = 15   // COMBFILTER_MINPERIOD
+	combMaxPeriod        = 1024 // COMBFILTER_MAXPERIOD
 	celtSigScale         = 32768.0
 	celtPreemph          = 0.85000610 // mode->preemph[0] for the 48 kHz mode
 )
@@ -52,12 +53,12 @@ type celtDecoder struct {
 	// the performance milestone alongside the MDCT FFT.
 	window  []float64
 	mdctScr *mdctScratch
-	mplans  map[int]*mdctPlan
-	freq    []float32
-	freq2   []float32 // second channel for the stereo->mono downmix
-	xnorm   []float32
-	iy      []int
-	u       []uint32
+	mdctPlanCache
+	freq  []float32
+	freq2 []float32 // second channel for the stereo->mono downmix
+	xnorm []float32
+	iy    []int
+	u     []uint32
 }
 
 func newCELTDecoder(channels int) *celtDecoder {
@@ -70,7 +71,6 @@ func newCELTDecoder(channels int) *celtDecoder {
 		backgroundLogE: make([]float32, 2*celtNBands),
 		window:         celtWindow(celtOverlap),
 		mdctScr:        newMDCTScratch(480),
-		mplans:         map[int]*mdctPlan{},
 		freq:           make([]float32, celtShortMDCTSize<<celtMaxLM),
 		freq2:          make([]float32, celtShortMDCTSize<<celtMaxLM),
 		xnorm:          make([]float32, 2*(celtShortMDCTSize<<celtMaxLM)),
@@ -89,15 +89,6 @@ func newCELTDecoder(channels int) *celtDecoder {
 }
 
 const celtMaxPulses = 128
-
-func (d *celtDecoder) planFor(n int) *mdctPlan {
-	if p, ok := d.mplans[n]; ok {
-		return p
-	}
-	p := newMDCTPlan(n)
-	d.mplans[n] = p
-	return p
-}
 
 // Reset clears the inter-frame state after a seek or mode switch
 // (OPUS_RESET_STATE: everything zeroed, then oldLogE/oldLogE2 to -28;
@@ -288,7 +279,7 @@ func (d *celtDecoder) celtDecodeInner(dec *rangeDecoder, data []byte, LM, C, sta
 	finePriority := make([]int, nb)
 	intensity, dualStereo, balance := 0, 0, 0
 	codedBands := cltComputeAllocation(start, end, offsets, cap, allocTrim, &intensity, &dualStereo,
-		bits, &balance, pulses, fineQuant, finePriority, C, LM, dec)
+		bits, &balance, pulses, fineQuant, finePriority, C, LM, nil, dec, false, 0, 0)
 
 	unquantFineEnergy(d.oldBandE, nb, start, end, fineQuant, dec, C)
 
@@ -314,8 +305,8 @@ func (d *celtDecoder) celtDecodeInner(dec *rangeDecoder, data []byte, LM, C, sta
 		disableInv = 1
 	}
 	quantAllBands(start, end, X, Y, collapseMasks, d.oldBandE, pulses, shortBlocks, spread,
-		dualStereo, intensity, tfRes, len(data)*(8<<bitRes)-antiCollapseRsv, balance, dec,
-		LM, codedBands, &d.rng, disableInv, d.iy, d.u)
+		dualStereo, intensity, tfRes, len(data)*(8<<bitRes)-antiCollapseRsv, balance, nil, dec,
+		LM, codedBands, &d.rng, 0, disableInv, d.iy, d.u)
 
 	antiCollapseOn := 0
 	if antiCollapseRsv > 0 {
@@ -338,11 +329,11 @@ func (d *celtDecoder) celtDecodeInner(dec *rangeDecoder, data []byte, LM, C, sta
 		base := celtDecodeBufferSize - N
 		d.postPeriod = max(d.postPeriod, combMinPeriod)
 		d.postPeriodOld = max(d.postPeriodOld, combMinPeriod)
-		d.combFilter(d.decodeMem[c], base, d.postPeriodOld, d.postPeriod, celtShortMDCTSize,
-			d.postGainOld, d.postGain, d.postTapsetOld, d.postTapset, overlap)
+		combFilter(d.decodeMem[c], base, d.decodeMem[c], base, d.postPeriodOld, d.postPeriod, celtShortMDCTSize,
+			d.postGainOld, d.postGain, d.postTapsetOld, d.postTapset, d.window, overlap)
 		if LM != 0 {
-			d.combFilter(d.decodeMem[c], base+celtShortMDCTSize, d.postPeriod, postPitch, N-celtShortMDCTSize,
-				d.postGain, postGain, d.postTapset, postTapset, overlap)
+			combFilter(d.decodeMem[c], base+celtShortMDCTSize, d.decodeMem[c], base+celtShortMDCTSize, d.postPeriod, postPitch, N-celtShortMDCTSize,
+				d.postGain, postGain, d.postTapset, postTapset, d.window, overlap)
 		}
 	}
 	d.postPeriodOld = d.postPeriod
@@ -427,52 +418,6 @@ func (d *celtDecoder) synthesis(X []float32, LM, C, CC, isTransient, start, effE
 		for c := 0; c < CC; c++ {
 			do(c, c)
 		}
-	}
-}
-
-// combFilter applies the pitch post-filter FIR in place over buf[base:base+N],
-// reading pitch-lagged history behind base (libopus celt.c comb_filter; float).
-func (d *celtDecoder) combFilter(buf []float32, base, T0, T1, N int, g0, g1 float32, tapset0, tapset1, overlap int) {
-	if g0 == 0 && g1 == 0 {
-		return
-	}
-	T0 = max(T0, combMinPeriod)
-	T1 = max(T1, combMinPeriod)
-	g00 := g0 * combGains[tapset0][0]
-	g01 := g0 * combGains[tapset0][1]
-	g02 := g0 * combGains[tapset0][2]
-	g10 := g1 * combGains[tapset1][0]
-	g11 := g1 * combGains[tapset1][1]
-	g12 := g1 * combGains[tapset1][2]
-	x := func(i int) float32 { return buf[base+i] }
-	x1 := x(-T1 + 1)
-	x2 := x(-T1)
-	x3 := x(-T1 - 1)
-	x4 := x(-T1 - 2)
-	if g0 == g1 && T0 == T1 && tapset0 == tapset1 {
-		overlap = 0
-	}
-	i := 0
-	for ; i < overlap; i++ {
-		x0 := x(i - T1 + 2)
-		f := float32(d.window[i] * d.window[i])
-		buf[base+i] = x(i) +
-			(1-f)*g00*x(i-T0) +
-			(1-f)*g01*(x(i-T0+1)+x(i-T0-1)) +
-			(1-f)*g02*(x(i-T0+2)+x(i-T0-2)) +
-			f*g10*x2 +
-			f*g11*(x1+x3) +
-			f*g12*(x0+x4)
-		x4, x3, x2, x1 = x3, x2, x1, x0
-	}
-	if g1 == 0 {
-		return
-	}
-	// Constant-filter tail with T1.
-	for ; i < N; i++ {
-		x0 := x(i - T1 + 2)
-		buf[base+i] = x(i) + g10*x2 + g11*(x1+x3) + g12*(x0+x4)
-		x4, x3, x2, x1 = x3, x2, x1, x0
 	}
 }
 

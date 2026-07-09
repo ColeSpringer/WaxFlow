@@ -179,6 +179,14 @@ const (
 	spreadAggr   = 3
 )
 
+// Intensity-stereo thresholds/hysteresis (in kb/s) indexed by band count: the
+// encoder starts intensity coding from band hysteresisDecision(equiv_rate/1000)
+// (libopus celt_encoder.c). Higher rates push the boundary to higher bands.
+var (
+	celtIntensityThresholds = []float32{1, 2, 3, 4, 5, 6, 7, 8, 16, 24, 36, 44, 50, 56, 62, 67, 72, 79, 88, 106, 134}
+	celtIntensityHysteresis = []float32{1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 3, 3, 4, 5, 6, 8, 8}
+)
+
 // BITRES is the allocator's bit-resolution shift: budgets are tracked in
 // 1/8-bit units (libopus).
 const bitRes = 3

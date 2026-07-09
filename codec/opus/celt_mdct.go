@@ -27,6 +27,24 @@ type mdctPlan struct {
 	tws []float64 // DFT twiddle sin, length n/4: sin(2π m/n4)
 }
 
+// mdctPlanCache lazily builds and reuses MDCT plans per transform size; the
+// encoder and decoder each embed one.
+type mdctPlanCache struct {
+	mplans map[int]*mdctPlan
+}
+
+func (c *mdctPlanCache) planFor(n int) *mdctPlan {
+	if p, ok := c.mplans[n]; ok {
+		return p
+	}
+	if c.mplans == nil {
+		c.mplans = map[int]*mdctPlan{}
+	}
+	p := newMDCTPlan(n)
+	c.mplans[n] = p
+	return p
+}
+
 func newMDCTPlan(n int) *mdctPlan {
 	p := &mdctPlan{n: n, n2: n / 2, n4: n / 4}
 	p.tr = make([]float64, p.n2)
@@ -55,8 +73,8 @@ func celtWindow(overlap int) []float64 {
 	return w
 }
 
-// mdctScratch is caller-owned working memory for backward, sized to the
-// largest DFT length (n/4) the decoder will use, so the hot path never
+// mdctScratch is caller-owned working memory for backward and forward, sized to
+// the largest DFT length (n/4) either direction will use, so the hot path never
 // allocates. fr/fi hold the pre-rotated input; gr/gi hold the DFT output.
 type mdctScratch struct {
 	fr, fi, gr, gi []float64
@@ -147,5 +165,80 @@ func (p *mdctPlan) backward(in []float32, stride int, out []float32, window []fl
 		w2 := window[overlap-1-i]
 		out[i] = float32(x2*w2 - x1*w1)
 		out[overlap-1-i] = float32(x2*w1 + x1*w2)
+	}
+}
+
+// forward computes the forward MDCT of the block at `in` (n2 coded samples plus
+// the `overlap` window tail: in must hold n2+overlap samples), writing the n2
+// frequency coefficients into out at the given stride. It is a clean-room port
+// of libopus clt_mdct_forward (float build, FFT scale 1/n4) and the exact
+// analysis companion of backward: decode(backward) inverts encode(forward), so
+// the quantized band energies match the reference. The pre-rotation and DFT
+// reuse the same trig table and forward-DFT direction backward uses.
+func (p *mdctPlan) forward(in []float32, out []float32, stride int, window []float64, overlap int, s *mdctScratch) {
+	n2, n4 := p.n2, p.n4
+	tr := p.tr
+	fr, fi := s.fr[:n4], s.fi[:n4]
+	gr, gi := s.gr[:n4], s.gi[:n4]
+	scale := 1.0 / float64(n4)
+	o2 := overlap / 2
+	half1 := (overlap + 3) >> 2
+
+	// Window, shuffle, fold the n2+overlap input into n4 complex samples, fused
+	// with the pre-rotation (libopus folds then pre-rotates in two passes; the
+	// arithmetic is identical done together).
+	for i := 0; i < n4; i++ {
+		xp1 := o2 + 2*i
+		xp2 := n2 - 1 + o2 - 2*i
+		var re, im float64
+		switch {
+		case i < half1:
+			wp1 := o2 + 2*i
+			wp2 := o2 - 1 - 2*i
+			re = float64(in[xp1+n2])*window[wp2] + float64(in[xp2])*window[wp1]
+			im = float64(in[xp1])*window[wp1] - float64(in[xp2-n2])*window[wp2]
+		case i < n4-half1:
+			re = float64(in[xp2])
+			im = float64(in[xp1])
+		default:
+			k := i - (n4 - half1)
+			wp1 := 2 * k
+			wp2 := overlap - 1 - 2*k
+			re = -float64(in[xp1-n2])*window[wp1] + float64(in[xp2])*window[wp2]
+			im = float64(in[xp1])*window[wp2] + float64(in[xp2+n2])*window[wp1]
+		}
+		t0 := tr[i]
+		t1 := tr[n4+i]
+		fr[i] = (re*t0 - im*t1) * scale
+		fi[i] = (im*t0 + re*t1) * scale
+	}
+
+	// N/4-point forward DFT (same direction and twiddles as backward).
+	twc, tws := p.twc, p.tws
+	for k := 0; k < n4; k++ {
+		var sr, si float64
+		idx := 0
+		for j := 0; j < n4; j++ {
+			c := twc[idx]
+			sn := tws[idx]
+			sr += fr[j]*c + fi[j]*sn
+			si += fi[j]*c - fr[j]*sn
+			idx += k
+			if idx >= n4 {
+				idx -= n4
+			}
+		}
+		gr[k] = sr
+		gi[k] = si
+	}
+
+	// Post-rotation, de-shuffled into out at the block stride.
+	for i := 0; i < n4; i++ {
+		t0 := tr[i]
+		t1 := tr[n4+i]
+		yr := gi[i]*t1 - gr[i]*t0
+		yi := gr[i]*t1 + gi[i]*t0
+		out[stride*(2*i)] = float32(yr)
+		out[stride*(n2-1-2*i)] = float32(yi)
 	}
 }

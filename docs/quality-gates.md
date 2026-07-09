@@ -9,17 +9,16 @@ requires a superseding ADR.
 ## Reference corpus
 
 A fixed 20-item corpus, SHA-256-pinned and fetched by `make verify-vectors`
-(CI-cached, never committed):
+(CI-cached, never committed): the first 20 reference clips (a bias-free
+fixed prefix) of the 30-sample Hydrogenaudio 2011 public multiformat
+listening test, which mixed 15 known-difficult samples from prior HA tests
+with 15 organizer-selected ones spanning music, speech, transient, and
+tonal material: clips hand-picked for codec evaluation and hosted by Xiph
+with upstream checksums since 2011 (`internal/testutil/vectors.go`,
+`opus/corpus/`).
 
-| Class | Items | Purpose |
-|---|---|---|
-| Music (broadband) | 8 | steady-state psychoacoustics |
-| Speech (clean + noisy) | 4 | SILK path, low-rate tuning |
-| Transients (percussion, castanets, glockenspiel) | 4 | window switching, pre-echo |
-| Tonal/pathological (pitch pipe, harpsichord, sine sweeps) | 4 | tonality estimation, ringing |
-
-All items 44.1 or 48 kHz stereo source, >=16-bit. The corpus is versioned;
-changing it re-baselines every gate in the same PR.
+All items 48 kHz stereo 16-bit, 7-30 s. The corpus is versioned; changing
+it re-baselines every gate in the same PR.
 
 ## Metrics
 
@@ -74,10 +73,22 @@ deterministic mode.
 - >= **80x** realtime.
 
 ### Opus phase 1: CELT/music
-- Every bitstream decodes via libopus AND our decoder.
-- opus_compare deficit vs libopus at matched bitrate, decoded by libopus,
-  scored against the original, at **96, 128, 160 kbps** stereo:
-  corpus mean deficit <= **2.0** points; no track > **5.0** points.
+- Every bitstream decodes via libopus AND our decoder; the harness carries
+  the range coder's final state per packet, so the reference decoder
+  cross-checks every packet (`opus_demo` hard-fails on a mismatch).
+- opus_compare vs libopus at matched CBR and complexity 10, both decoded by
+  the reference decoder (`opus_demo`, sample-exact by construction, no
+  cross-correlation alignment), scored against the original, on the pinned
+  20-track corpus at **96, 128, 160 kbps** stereo. The gate unit is the
+  **internal weighted-error ratio** (ours / libopus), because Q-point deltas
+  do not compare across error depths (ADR-0008; the original 2.0/5.0-point
+  budgets translate at the metric's calibration to ratios 1.20/1.51).
+- Gate: geometric-mean error ratio <= **1.20** per bitrate; no track >
+  **2.6**. The per-track bound admits the documented phase-1 gap (no
+  tonality analyser, worth up to 2.5x per track in libopus's own A/B), and
+  phase 2 tightens it to **1.5** when the analyser lands (ADR-0008).
+- The pitch pre-filter's per-frame decisions (on, period, gain, tapset)
+  agree with libopus on >= **90%** of frames on a pitched fixture.
 - >= **15x** realtime portable (>= 30x with the SIMD build).
 
 ### AAC-LC
@@ -93,8 +104,12 @@ deterministic mode.
   non-blocking).
 
 ### Opus phase 2: SILK + hybrid
-- At **24, 32, 48 kbps** (speech corpus, NB-WB): mean opus_compare deficit
-  vs libopus <= **3.0** points; no item > **6.0** points.
+- At **24, 32, 48 kbps** (speech corpus, NB-WB): mean opus_compare
+  weighted-error ratio vs libopus <= **1.35**; no item > **2.0** (the
+  3.0/6.0-point budgets translated per ADR-0008).
+- The tonality analyser (analysis.c) lands here and is wired into CELT
+  (`max_pitch_ratio`, `leak_boost`, tonality VBR boost); the phase-1
+  per-track bound tightens from 2.6 to **1.5**.
 - Speech/music mode decision agrees with libopus on >= **90%** of corpus
   windows (report-only below 95%, blocking below 90%).
 - Non-negotiable for v1.0: CELT-only is sequencing, not scope fallback.

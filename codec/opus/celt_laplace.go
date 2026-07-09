@@ -55,3 +55,43 @@ func (d *rangeDecoder) laplaceDecode(fs uint32, decay int) int {
 	d.update(fl, hi, 32768)
 	return val
 }
+
+// laplaceEncode codes one signed energy delta (the inverse of laplaceDecode,
+// libopus ec_laplace_encode). It returns the value actually coded: a delta that
+// lands past the decaying part of the PDF is clamped toward zero, and the caller
+// must feed the returned value back into its prediction so encoder and decoder
+// reconstruct the same energy.
+func (e *rangeEncoder) laplaceEncode(value int, fs uint32, decay int) int {
+	fl := uint32(0)
+	val := value
+	if val != 0 {
+		s := 0
+		if val < 0 {
+			s = -1
+		}
+		val = (val + s) ^ s // |value|
+		fl = fs
+		fs = laplaceGetFreq1(fs, decay)
+		// Walk the decaying part of the PDF.
+		i := 1
+		for ; fs > 0 && i < val; i++ {
+			fs *= 2
+			fl += fs + 2*laplaceMinP
+			fs = uint32((int64(fs) * int64(decay)) >> 15)
+		}
+		// Everything beyond decays to the floor probability.
+		if fs == 0 {
+			ndiMax := int(32768-fl+laplaceMinP-1) >> laplaceLogMinP
+			ndiMax = (ndiMax - s) >> 1
+			di := min(val-i, ndiMax-1)
+			fl += uint32(2*di+1+s) * laplaceMinP
+			fs = uint32(min(int(laplaceMinP), int(32768-fl)))
+			value = (i + di + s) ^ s
+		} else {
+			fs += laplaceMinP
+			fl += fs &^ uint32(s)
+		}
+	}
+	e.encodeBin(fl, fl+fs, 15)
+	return value
+}

@@ -359,9 +359,9 @@ func TestTranscodeRejections(t *testing.T) {
 	audio.Put(src)
 	e := waxflow.New()
 
-	_, err := e.Transcode(context.Background(), container.BytesSource(wav), "", &memWS{}, waxflow.TranscodeOptions{Format: "opus"})
+	_, err := e.Transcode(context.Background(), container.BytesSource(wav), "", &memWS{}, waxflow.TranscodeOptions{Format: "vorbis"})
 	if !errors.Is(err, waxerr.ErrUnsupportedFormat) {
-		t.Errorf("opus output err = %v, want unsupported-format (encoder not registered yet)", err)
+		t.Errorf("vorbis output err = %v, want unsupported-format (decode-only, no encoder)", err)
 	}
 	_, err = e.Transcode(context.Background(), container.BytesSource(wav), "", &memWS{}, waxflow.TranscodeOptions{})
 	if !errors.Is(err, waxerr.ErrInvalidRequest) {
@@ -386,10 +386,11 @@ func (onlyWriter) Write(p []byte) (int, error) { return len(p), nil }
 // TestOutputTable pins the writer-side capability table: names, extension
 // mapping (both spellings), and its agreement with the read-side exts.
 func TestOutputTable(t *testing.T) {
-	if got := waxflow.OutputFormats(); len(got) != 5 || got[0] != "wav" || got[1] != "aiff" || got[2] != "flac" || got[3] != "mp3" || got[4] != "alac" {
+	if got := waxflow.OutputFormats(); len(got) != 6 || got[0] != "wav" || got[1] != "opus" || got[2] != "aiff" || got[3] != "flac" || got[4] != "mp3" || got[5] != "alac" {
 		t.Errorf("OutputFormats() = %v", got)
 	}
 	tests := []struct{ ext, want string }{
+		{"opus", "opus"}, {".OPUS", "opus"},
 		{"wav", "wav"}, {".WAV", "wav"}, {"rf64", "wav"}, {"bw64", "wav"},
 		{"aif", "aiff"}, {".aiff", "aiff"}, {"aifc", "aiff"}, {"afc", "aiff"},
 		{"flac", "flac"}, {".FLAC", "flac"},

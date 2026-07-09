@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -501,12 +502,20 @@ func TestTranscodeCommandErrors(t *testing.T) {
 	if code != 2 {
 		t.Errorf("unknown extension exit = %d, want 2 (invalid)", code)
 	}
-	code, _, _ = run(t, "transcode", "--format", "opus", in, filepath.Join(dir, "out.opus"))
+	code, _, _ = run(t, "transcode", "--format", "vorbis", in, filepath.Join(dir, "out.vorbis"))
 	if code != 5 {
 		t.Errorf("unregistered format exit = %d, want 5 (unsupported)", code)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "out.opus")); err == nil {
+	if _, err := os.Stat(filepath.Join(dir, "out.vorbis")); err == nil {
 		t.Error("failed transcode must not leave an output file")
+	}
+	// Opus is registered: a transcode to .opus succeeds and writes an Ogg file.
+	code, _, _ = run(t, "transcode", in, filepath.Join(dir, "out.opus"))
+	if code != 0 {
+		t.Errorf("opus transcode exit = %d, want 0", code)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "out.opus")); err != nil || len(b) < 4 || string(b[:4]) != "OggS" {
+		t.Errorf("opus output missing or not Ogg (err=%v)", err)
 	}
 	code, _, _ = run(t, "transcode", filepath.Join(dir, "missing.wav"), filepath.Join(dir, "out.wav"))
 	if code != 3 {
@@ -518,5 +527,35 @@ func TestTranscodeCommandErrors(t *testing.T) {
 	code, _, errOut := run(t, "transcode", in, filepath.Join(dir, "out.afc"))
 	if code != 0 {
 		t.Errorf(".afc transcode exit = %d, want 0; stderr: %s", code, errOut)
+	}
+}
+
+// TestTranscodeOpusComplexityZero pins the --opus-complexity flag's 0
+// spelling: it must select the encoder's lowest setting, not silently fall
+// back to the default. Complexity 0 disables the analysis stages, so its
+// output bytes must differ from the default's on the same input.
+func TestTranscodeOpusComplexityZero(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	writeWAV(t, in, 48000)
+
+	lowest := filepath.Join(dir, "c0.opus")
+	if code, _, errOut := run(t, "transcode", in, lowest, "--opus-complexity", "0"); code != 0 {
+		t.Fatalf("complexity 0 exit = %d, stderr: %s", code, errOut)
+	}
+	def := filepath.Join(dir, "c5.opus")
+	if code, _, errOut := run(t, "transcode", in, def); code != 0 {
+		t.Fatalf("default exit = %d, stderr: %s", code, errOut)
+	}
+	a, err := os.ReadFile(lowest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(a, b) {
+		t.Error("--opus-complexity 0 produced the default's bytes: the lowest setting is unreachable")
 	}
 }

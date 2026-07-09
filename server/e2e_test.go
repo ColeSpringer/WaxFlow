@@ -628,6 +628,30 @@ func TestStreamTranscodeMP3(t *testing.T) {
 	}
 }
 
+// TestStreamTranscodeOpus streams a WAV source as Ogg-Opus and checks the live
+// transcode matches the engine byte-for-byte and is a well-formed Ogg stream.
+func TestStreamTranscodeOpus(t *testing.T) {
+	env := newTestEnv(t, nil)
+	want := engineReference(t, filepath.Join(env.root, "sine.wav"),
+		waxflow.TranscodeOptions{Format: "opus", OpusBitrate: 96000})
+
+	resp := env.get(t, "/stream?src=lib/sine.wav&format=opus", nil)
+	first := readBody(t, resp)
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "audio/ogg" {
+		t.Fatalf("live opus transcode = %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	if resp.Header.Get("Accept-Ranges") != "none" {
+		t.Fatalf("live Accept-Ranges = %q", resp.Header.Get("Accept-Ranges"))
+	}
+	if !bytes.Equal(first, want) {
+		t.Fatalf("live opus bytes differ from the engine reference (%d vs %d bytes)", len(first), len(want))
+	}
+	// The output must be a valid Ogg stream: it starts with a capture pattern.
+	if len(first) < 4 || string(first[:4]) != "OggS" {
+		t.Fatal("opus output does not begin with an Ogg capture pattern")
+	}
+}
+
 // TestStreamMP3BitrateEdges checks the lossy quality-parameter edges: q=high
 // clamps to the layer maximum on a low output rate instead of erroring, and an
 // empty q= value is ignored rather than tripping the q/bitrate exclusion.
@@ -1024,8 +1048,6 @@ func TestParameterValidation(t *testing.T) {
 		{"src=lib/sine.wav&format=flac&bitrate=128", 415, waxerr.CodeUnsupportedFormat},  // bitrate on lossless output
 		{"src=lib/sine.wav&q=huge", 400, waxerr.CodeInvalidRequest},                      // bad q preset
 		{"src=lib/sine.wav&format=mp3&q=low&bitrate=96", 400, waxerr.CodeInvalidRequest}, // q and bitrate together
-		{"src=lib/sine.wav&format=opus", 415, waxerr.CodeUnsupportedFormat},              // not registered
-		{"src=lib/sine.wav&format=opus&bitrate=128", 415, waxerr.CodeUnsupportedFormat},  // unregistered format, not "lossless"
 		{"src=lib/sine.wav&format=aiff", 415, waxerr.CodeUnsupportedFormat},              // no streaming form
 		{"src=lib/sine.wav&maxBitRate=64", 415, waxerr.CodeUnsupportedFormat},            // cap unsatisfiable
 		// A cap on VBR lossless output cannot be promised, so it is

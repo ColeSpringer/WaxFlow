@@ -205,16 +205,24 @@ func (d *rangeDecoder) tell() int {
 
 // tellFrac returns bits consumed in eighth-bit units (RFC 6716 4.1.6).
 func (d *rangeDecoder) tellFrac() int {
-	// Correct rng to 15 significant bits, then look up the fractional bits.
-	nbits := d.nbits << 3
-	l := ilog(d.rng)
-	r := d.rng >> uint(l-16)
+	return ecTellFrac(d.nbits, d.rng)
+}
+
+// ecTellFrac computes bits used in eighth-bit units from a coder's bit count
+// and range register (RFC 6716 section 4.1.6): rng is corrected to 15
+// significant bits, then the fractional part comes from the table. The
+// encoder and decoder share it because bit allocation must see identical
+// accounting on both sides.
+func ecTellFrac(nbits int, rng uint32) int {
+	n := nbits << 3
+	l := ilog(rng)
+	r := rng >> uint(l-16)
 	b := (r >> 12) - 8
 	if r > correctionThresh[b] {
 		b++
 	}
 	l = l*8 + int(b)
-	return nbits - l
+	return n - l
 }
 
 // correctionThresh is the tell_frac fractional-bit correction table (libopus).

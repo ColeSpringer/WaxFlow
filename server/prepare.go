@@ -100,6 +100,7 @@ func (s *Server) planTranscode(req *streamRequest) error {
 		FromSample:      req.from,
 		ResampleProfile: s.profile,
 		MP3Bitrate:      req.p.bitrate * 1000,
+		OpusBitrate:     req.p.bitrate * 1000,
 	}
 	plan, err := s.eng.PlanTranscode(req.track, req.opts)
 	if err != nil {

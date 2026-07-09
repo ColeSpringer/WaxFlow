@@ -10,11 +10,15 @@
 # per-target logs from scripts/fuzz.sh (make fuzz)
 /fuzz-logs/
 
-# generated encoder-quality report (make encoder-quality); a nightly artifact
+# generated encoder-quality reports (make encoder-quality); nightly artifacts
 /quality-report.html
+/opus-quality-report.html
 
 # fetched conformance vectors (make verify-vectors); pinned, never committed
 /testdata/vectors/
+
+# reference oracle tools built from pinned sources (make opus-tools)
+/testdata/tools/
 
 # local scratch config
 /waxflow.json

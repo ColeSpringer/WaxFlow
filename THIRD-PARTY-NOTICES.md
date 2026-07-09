@@ -111,6 +111,20 @@ Entries follow this format:
 > libopus `src/opus_decoder.c`. Loss concealment (PLC), comfort noise, DTX,
 > and the neural OSCE enhancer are out of scope (file decode, not RTC).
 
+> **codec/opus CELT encoder**: `codec/opus/rangeenc.go`,
+> `celt_encode.go`, `celt_encanalysis.go`, `celt_encpitch.go`, and the
+> encode branches of the shared band/energy/PVQ/allocation code are a
+> clean-room port of the *libopus* CELT float encoder (BSD-3-Clause),
+> https://gitlab.xiph.org/xiph/opus: the entropy encoder (`entenc.c`), the
+> analysis stages, rate control (CBR, VBR, constrained VBR), theta RDO, and
+> the pitch pre-filter with its pitch estimator and tone detection
+> (`celt_encoder.c`, `bands.c`, `quant_bands.c`, `vq.c`, `pitch.c`,
+> `celt_lpc.c`, `celt.c`). The forward MDCT ports the reference's rotation
+> and windowing over the same direct DFT as the decoder. Encoder
+> bit-exactness with the reference is a non-goal (the port uses exact math
+> where the reference approximates); the produced bitstreams are verified
+> against the reference decoder instead.
+
 > **internal/testutil opus_compare**: `internal/testutil/opuscompare.go` is
 > a Go port of *libopus*'s `src/opus_compare.c` (BSD-3-Clause),
 > https://gitlab.xiph.org/xiph/opus, the RFC 6716 section 6 decoder
