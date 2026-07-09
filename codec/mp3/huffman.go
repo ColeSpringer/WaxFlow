@@ -1,7 +1,7 @@
 package mp3
 
 // Layer III Huffman tables in PDMP3's compact tree-walk form, ported via
-// go-mp3 (Apache-2.0): each node is either an interior step (branch
+// go-mp3: each node is either an interior step (branch
 // offsets in the two bytes) or a leaf with the x, y pair packed in the
 // low byte. Tables 16 to 23 and 24 to 31 share trees and differ only in
 // linbits; tables 4 and 14 are reserved and, like table 0, decode to

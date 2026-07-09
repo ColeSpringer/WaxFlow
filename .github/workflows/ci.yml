@@ -63,12 +63,14 @@ jobs:
           build-args: |
             VERSION=ci
 
-  # ffmpeg is a TEST ORACLE only, never a runtime dependency (ADR-0001).
+  # ffmpeg is a TEST ORACLE only, never a runtime dependency.
   # WAXFLOW_REQUIRE_FFMPEG=1 and WAXFLOW_REQUIRE_FLAC=1 escalate the
   # oracle tests' self-skips to hard failures on this job, and
   # WAXFLOW_REQUIRE_VECTORS=1 does the
   # same for the SHA-256-pinned conformance vectors (cached across runs,
-  # keyed by the pin list).
+  # keyed by the pin list). The Opus conformance suite (24 decode cells)
+  # skips itself under -race (single-goroutine numeric decode, ~10x slower
+  # for no concurrency coverage), so it gets its own non-race step here.
   differential:
     runs-on: ubuntu-latest
     steps:
@@ -83,6 +85,7 @@ jobs:
           key: vectors-${{ hashFiles('internal/testutil/vectors.go') }}
       - run: make verify-vectors
       - run: WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_REQUIRE_FLAC=1 WAXFLOW_REQUIRE_VECTORS=1 go test -race -timeout 30m ./...
+      - run: WAXFLOW_REQUIRE_VECTORS=1 go test -timeout 30m -run 'TestConformanceVectors' ./codec/opus/
 
   # 2 min per fuzz target; nightly.yml runs the long soak. Finds every
   # native Fuzz* target automatically. scripts/fuzz.sh classifies outcomes so

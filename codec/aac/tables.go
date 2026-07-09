@@ -2,14 +2,12 @@ package aac
 
 import "math"
 
-// Clean-room provenance (ADR-0001): the AAC-LC decode logic in this package
-// is written from ISO/IEC 14496-3 and Bosi/Goldberg (Tier A). AAC reference
-// decoders (faad, ffmpeg) are Tier B and were not opened while implementing
-// the decode path. The one exception is tables_hcb.go, the normative
-// parameter tables (Huffman codeword/length data and scalefactor-band
-// boundaries) extracted as a black-box artifact per the ADR-0001 provision
-// that permits parameter tables produced in a separate analysis pass; it
-// carries data only, no decoder logic. THIRD-PARTY-NOTICES.md records it.
+// Provenance: the AAC-LC decode logic in this package is written from
+// ISO/IEC 14496-3 and Bosi/Goldberg. AAC reference decoders (faad, ffmpeg)
+// were not opened while implementing the decode path. The one exception is
+// tables_hcb.go, the normative parameter tables (Huffman codeword/length
+// data and scalefactor-band boundaries) extracted as a black-box artifact
+// in a separate analysis pass; it carries data only, no decoder logic.
 
 // Window sequences (ISO 14496-3 4.5.2.3.2).
 const (

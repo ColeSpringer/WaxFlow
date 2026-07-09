@@ -1,0 +1,151 @@
+package opus
+
+import "math"
+
+// The CELT inverse MDCT. This is a clean-room port of libopus mdct.c
+// (clt_mdct_backward) and the CELT window from modes.c,
+// implementing the transform RFC 6716 section 4.3.7 specifies. CELT factors the
+// inverse MDCT into a pre-rotation, an N/4-point complex DFT, a post-rotation,
+// and a windowed time-domain aliasing (TDAC) fold.
+//
+// libopus runs the DFT with a mixed-radix FFT (kiss_fft). We use a direct DFT
+// of the same length: mathematically identical, accumulated in float64 so it is
+// at least as accurate as the reference float build, and correctness-first
+// (M10 sets no Opus decode-speed gate; the FFT is a later optimization). All
+// rotation and windowing arithmetic is ported faithfully so the transform's
+// phase and normalization match the reference exactly.
+
+// mdctPlan holds the read-only rotation table and DFT twiddles for one MDCT
+// length. Plans are keyed by the full time-domain length n (n/2 frequency
+// bins, n/4-point DFT) and shared across sessions.
+type mdctPlan struct {
+	n   int       // full MDCT length in time samples
+	n2  int       // n/2, the number of frequency bins
+	n4  int       // n/4, the DFT length
+	tr  []float64 // trig[j] = cos(2π(j+0.125)/n), length n/2
+	twc []float64 // DFT twiddle cos, length n/4: cos(2π m/n4)
+	tws []float64 // DFT twiddle sin, length n/4: sin(2π m/n4)
+}
+
+func newMDCTPlan(n int) *mdctPlan {
+	p := &mdctPlan{n: n, n2: n / 2, n4: n / 4}
+	p.tr = make([]float64, p.n2)
+	for j := range p.tr {
+		p.tr[j] = math.Cos(2 * math.Pi * (float64(j) + 0.125) / float64(n))
+	}
+	p.twc = make([]float64, p.n4)
+	p.tws = make([]float64, p.n4)
+	for m := range p.twc {
+		a := 2 * math.Pi * float64(m) / float64(p.n4)
+		p.twc[m] = math.Cos(a)
+		p.tws[m] = math.Sin(a)
+	}
+	return p
+}
+
+// celtWindow computes CELT's overlap window (libopus modes.c): the rising half
+// w[i] = sin(π/2 · sin²(π/2 · (i+0.5)/overlap)), i in [0, overlap). The window
+// is symmetric; the falling half is w[overlap-1-i].
+func celtWindow(overlap int) []float64 {
+	w := make([]float64, overlap)
+	for i := range w {
+		s := math.Sin(0.5 * math.Pi * (float64(i) + 0.5) / float64(overlap))
+		w[i] = math.Sin(0.5 * math.Pi * s * s)
+	}
+	return w
+}
+
+// mdctScratch is caller-owned working memory for backward, sized to the
+// largest DFT length (n/4) the decoder will use, so the hot path never
+// allocates. fr/fi hold the pre-rotated input; gr/gi hold the DFT output.
+type mdctScratch struct {
+	fr, fi, gr, gi []float64
+}
+
+func newMDCTScratch(maxN4 int) *mdctScratch {
+	return &mdctScratch{
+		fr: make([]float64, maxN4),
+		fi: make([]float64, maxN4),
+		gr: make([]float64, maxN4),
+		gi: make([]float64, maxN4),
+	}
+}
+
+// backward computes the inverse MDCT of the n2 frequency coefficients read from
+// in at the given stride (CELT interleaves B short-block spectra, so a block's
+// coefficients are in[0], in[stride], in[2·stride], …). It writes the windowed
+// time-domain block into out, overlap-adding into out's leading `overlap`
+// samples exactly as libopus does in place: out[0:overlap] must hold the prior
+// block's tail on entry, and out must have room through overlap/2 + n2.
+func (p *mdctPlan) backward(in []float32, stride int, out []float32, window []float64, overlap int, s *mdctScratch) {
+	n2, n4 := p.n2, p.n4
+	tr := p.tr
+	fr, fi := s.fr[:n4], s.fi[:n4]
+	gr, gi := s.gr[:n4], s.gi[:n4]
+
+	// Pre-rotation: fold the coefficients from both ends into n4 complex
+	// samples. Real and imaginary parts are swapped throughout because the DFT
+	// runs forward where the transform wants an inverse (libopus does the same).
+	for i := 0; i < n4; i++ {
+		x1 := float64(in[(2*i)*stride])
+		x2 := float64(in[(n2-1-2*i)*stride])
+		yr := x2*tr[i] + x1*tr[n4+i]
+		yi := x1*tr[i] - x2*tr[n4+i]
+		fr[i] = yi
+		fi[i] = yr
+	}
+
+	// N/4-point forward DFT, accumulated in float64. G[k] = Σ f[j]·e^(-2πi kj/n4).
+	twc, tws := p.twc, p.tws
+	for k := 0; k < n4; k++ {
+		var sr, si float64
+		idx := 0
+		for j := 0; j < n4; j++ {
+			c := twc[idx]
+			sn := tws[idx]
+			sr += fr[j]*c + fi[j]*sn
+			si += fi[j]*c - fr[j]*sn
+			idx += k
+			if idx >= n4 {
+				idx -= n4
+			}
+		}
+		gr[k] = sr
+		gi[k] = si
+	}
+
+	// Post-rotation and de-shuffle into out[overlap/2 : overlap/2 + n2].
+	mid := overlap / 2
+	half := (n4 + 1) >> 1
+	for i := 0; i < half; i++ {
+		// low end
+		re := gi[i]
+		im := gr[i]
+		t0 := tr[i]
+		t1 := tr[n4+i]
+		yr0 := re*t0 + im*t1
+		yi0 := re*t1 - im*t0
+		// high end
+		re2 := gi[n4-1-i]
+		im2 := gr[n4-1-i]
+		t0b := tr[n4-1-i]
+		t1b := tr[n2-1-i]
+		yr1 := re2*t0b + im2*t1b
+		yi1 := re2*t1b - im2*t0b
+		out[mid+2*i] = float32(yr0)
+		out[mid+n2-1-2*i] = float32(yi0)
+		out[mid+n2-2-2*i] = float32(yr1)
+		out[mid+2*i+1] = float32(yi1)
+	}
+
+	// TDAC: window and mirror the leading `overlap` samples, folding in the
+	// prior block's tail already present in out[0:overlap].
+	for i := 0; i < overlap/2; i++ {
+		x1 := float64(out[overlap-1-i])
+		x2 := float64(out[i])
+		w1 := window[i]
+		w2 := window[overlap-1-i]
+		out[i] = float32(x2*w2 - x1*w1)
+		out[overlap-1-i] = float32(x2*w1 + x1*w2)
+	}
+}

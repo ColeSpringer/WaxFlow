@@ -8,8 +8,8 @@ import (
 )
 
 // Shine is the MP3 baseline quality oracle: LAME's small sibling, reached
-// through ffmpeg's libshine encoder. The clean-room policy (ADR-0001) makes
-// Shine a Tier-B source whose code is never opened while implementing the MP3
+// through ffmpeg's libshine encoder. The clean-room policy makes Shine a
+// source whose code is never opened while implementing the MP3
 // encoder, but invoking its binary as a test oracle is explicitly permitted
 // (running a program is not copying it). The MP3 baseline gate is parity with
 // Shine on the ODG-proxy (docs/quality-gates.md).

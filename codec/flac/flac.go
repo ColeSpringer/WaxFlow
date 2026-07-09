@@ -1,5 +1,5 @@
 // Package flac implements a FLAC decoder (RFC 9639), written from the
-// specification (clean-room Tier A, ADR-0001). It covers the full frame
+// specification. It covers the full frame
 // syntax: constant, verbatim, fixed, and LPC subframes, Rice-coded
 // residuals with escaped partitions, all stereo decorrelation modes,
 // wasted bits, and sample depths from 4 to 32 bits (side channels carry

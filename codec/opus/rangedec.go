@@ -4,7 +4,7 @@ import "math/bits"
 
 // rangeDecoder is Opus's entropy decoder (RFC 6716 section 4.1), a range coder
 // that reads range-coded symbols from the front of the packet and raw bits from
-// the back. It is a clean-room port of libopus entdec.c (BSD-3-Clause, Tier A);
+// the back. It is a clean-room port of libopus entdec.c;
 // the arithmetic is bit-exact with the reference, which the RFC requires.
 type rangeDecoder struct {
 	buf     []byte
@@ -18,7 +18,6 @@ type rangeDecoder struct {
 	val     uint32
 	ext     uint32 // scratch shared by decode/update
 	rem     int    // last byte read from the front (normalize straddle)
-	err     bool
 }
 
 // Range coder constants (RFC 6716 section 4.1 / libopus).
@@ -186,7 +185,10 @@ func (d *rangeDecoder) decodeUint(ft uint32) uint32 {
 		if v <= ft {
 			return v
 		}
-		d.err = true
+		// Out-of-range raw tail: the packet is corrupt. Clamp and keep
+		// decoding, matching the reference (ec_dec_uint returns ft and the
+		// decode carries on); a decoder is robust, not validating, and the
+		// bounded output on hostile input is what the fuzzer asserts.
 		return ft
 	}
 	ft++

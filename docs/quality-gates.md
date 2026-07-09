@@ -34,8 +34,9 @@ changing it re-baselines every gate in the same PR.
   compare *deltas between encoders on the identical metric version*, so a
   metric revision re-baselines both sides in one PR, never silently.
 - **opus_compare**: the RFC 6716 section 6 comparison tool ported into
-  `internal/testutil`; quality score in [0, 100], vectors pass at >= 90 per
-  the RFC procedure.
+  `internal/testutil`; quality score Q <= 100, vectors pass at Q >= 0 (the
+  tool's own pass bar, weighted error <= 0.277). The decoder currently
+  scores 96-100 across all vectors at both rates.
 - **Realtime factor**: single-core, portable (non-SIMD) build, measured on
   the CI baseline machine class; recorded by `make bench`.
 
@@ -47,7 +48,7 @@ changing it re-baselines every gate in the same PR.
 | MP3 | vs ffmpeg: RMS < 1e-4 FS, max < 1e-3 FS; LAME gapless sample-count invariant; sample-exact seek at 100 random offsets in VBR; >=150x realtime |
 | AAC-LC | vs ffmpeg: RMS < 2^-13 FS; iTunes (iTunSMPB) gapless invariant; edit-list seek exact; >=80x realtime |
 | ALAC | bit-exact vs ffmpeg; >=100x realtime |
-| Opus | all opus_testvectors 01-12 pass RFC 6716 section 6 (ported opus_compare, both decode rates); Ogg bisection seek exact after 80 ms pre-roll; >=60x realtime |
+| Opus | all opus_testvectors 01-12 pass RFC 6716 section 6 (ported opus_compare, both decode rates, against the RFC 8251 regenerated references; the 2012 originals are stale for hybrid/transition vectors and fail even current libopus); Ogg bisection seek exact after 80 ms pre-roll; >=60x realtime |
 | Vorbis | vs ffmpeg: RMS < 1e-4 FS, max < 1e-3 FS; >=80x realtime |
 
 ## Encoder gates

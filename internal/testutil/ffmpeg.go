@@ -2,7 +2,7 @@
 // differential oracle, PCM comparison helpers, deterministic signal
 // synthesis, and the SHA-256-pinned conformance-vector fetcher.
 //
-// ffmpeg is a TEST ORACLE only, never a runtime dependency (ADR-0001).
+// ffmpeg is a TEST ORACLE only, never a runtime dependency.
 // Oracle-based tests self-skip when ffmpeg is not installed; setting
 // WAXFLOW_REQUIRE_FFMPEG=1 (the dedicated CI differential job) escalates
 // absence to a hard failure so the suite cannot silently thin out.

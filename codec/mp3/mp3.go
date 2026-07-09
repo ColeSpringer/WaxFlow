@@ -16,9 +16,9 @@
 // knowledge.
 //
 // Implementation notes: the decode pipeline structure follows the public
-// domain PDMP3 via hajimehoshi/go-mp3 (Apache-2.0), with the low sampling
+// domain PDMP3 via hajimehoshi/go-mp3, with the low sampling
 // frequency (MPEG-2/2.5) scalefactor, intensity stereo, and band edge
-// handling ported from minimp3 (CC0). See THIRD-PARTY-NOTICES.md.
+// handling ported from minimp3. See THIRD-PARTY-NOTICES.md.
 package mp3
 
 import (

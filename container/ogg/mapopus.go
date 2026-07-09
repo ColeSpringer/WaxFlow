@@ -58,6 +58,20 @@ func (m *opusMapping) parseID(pkt []byte) (int, error) {
 				return 0, malformed("OpusHead family 1 channel maps to stream %d of %d", v, streams+coupled)
 			}
 		}
+		// The decoder handles one elementary stream (mono or stereo), so a
+		// family-1 layout is decodable only when it is the family-0 shape in
+		// disguise: a single stream whose channels map onto its outputs in
+		// order. Several streams need multistream de-framing (each packet
+		// carries self-delimited sub-packets), a permuted or 255 (silent)
+		// table entry needs output routing; neither is implemented.
+		if streams != 1 || coupled != m.channels-1 {
+			return 0, malformed("OpusHead family 1 with %d streams (%d coupled) for %d channels is multistream; mono and stereo single-stream only", streams, coupled, m.channels)
+		}
+		for i := 0; i < m.channels; i++ {
+			if int(pkt[21+i]) != i {
+				return 0, malformed("OpusHead family 1 channel table %v is not the identity mapping", pkt[21:21+m.channels])
+			}
+		}
 	default:
 		return 0, malformed("OpusHead channel mapping family %d unsupported", m.family)
 	}

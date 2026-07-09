@@ -5,8 +5,8 @@ import "math"
 // Band and window tables for Layer III. The scalefactor band width tables
 // (one row per sample rate family, 11.025 and 12 kHz sharing a row; see
 // Header.rateRow) and the scalefactor partition table follow the ISO band
-// tables as arranged by minimp3 (CC0). The synthesis window is the ISO
-// Table B.3 coefficient set as carried by PDMP3 via go-mp3 (Apache-2.0).
+// tables as arranged by minimp3. The synthesis window is the ISO
+// Table B.3 coefficient set as carried by PDMP3 via go-mp3.
 // Everything derivable is computed at init from the spec formulas.
 
 // sfbLong, sfbShort, and sfbMixed hold scalefactor band widths in

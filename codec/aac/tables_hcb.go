@@ -1,8 +1,7 @@
 // Code generated from the ISO/IEC 14496-3 normative Huffman and
 // scalefactor-band tables. DO NOT EDIT. See doc at the head of tables.go
-// and the THIRD-PARTY-NOTICES.md entry: this file is the ADR-0001
-// black-box PARAMETER artifact (codeword/length data only, no decoder
-// logic), consumed by the clean-room AAC-LC decoder.
+// this file is the black-box PARAMETER artifact (codeword/length data
+// only, no decoder logic), consumed by the clean-room AAC-LC decoder.
 
 package aac
 

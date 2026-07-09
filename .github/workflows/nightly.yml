@@ -51,6 +51,8 @@ jobs:
           key: vectors-${{ hashFiles('internal/testutil/vectors.go') }}
       - run: make verify-vectors
       - run: WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_REQUIRE_FLAC=1 WAXFLOW_REQUIRE_VECTORS=1 go test -race -count=1 -timeout 30m ./...
+      # Opus conformance skips itself under -race (see ci.yml); run it non-race.
+      - run: WAXFLOW_REQUIRE_VECTORS=1 go test -count=1 -timeout 30m -run 'TestConformanceVectors' ./codec/opus/
 
   # Encoder-quality report: score our lossy encoders against the reference
   # baselines (Shine for MP3) with the ODG-proxy, enforce the parity gates,

@@ -6,7 +6,7 @@
 // (speech, LPC), CELT (music, MDCT), and a hybrid that stacks SILK on the low
 // band and CELT on the high band. The range decoder (rangedec.go) is shared;
 // each mode has its own decode path. The implementation is clean-room from the
-// RFC, cross-checked structurally against libopus (BSD-3, Tier A).
+// RFC, cross-checked structurally against libopus.
 package opus
 
 import (

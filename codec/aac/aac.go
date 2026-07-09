@@ -1,6 +1,6 @@
 // Package aac implements an AAC-LC decoder (ISO/IEC 14496-3), written from
-// the specification and Bosi/Goldberg (clean-room, ADR-0001: AAC sources
-// are Tier B, behavioral-reference only, never opened while implementing).
+// the specification and Bosi/Goldberg (clean-room: AAC reference decoders
+// were behavioral references only, never opened while implementing).
 //
 // Scope is Low Complexity only: no SBR, no PS, no gain control, no LTP. An
 // AudioSpecificConfig announcing SBR or PS decodes its AAC-LC base layer at

@@ -1,6 +1,30 @@
 package opus
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/colespringer/waxflow/audio"
+)
+
+// FuzzDecode drives the full SILK/CELT/hybrid decode path with arbitrary packets
+// on both mono and stereo decoders: no hostile packet may panic or read out of
+// bounds, since a registered Opus decoder is reachable from untrusted input.
+func FuzzDecode(f *testing.F) {
+	f.Add([]byte{0x00, 0x11, 0x22})       // SILK NB
+	f.Add([]byte{0x64, 0x33, 0x44, 0x55}) // hybrid SWB
+	f.Add([]byte{0xFC, 0x00, 0x01, 0x02}) // CELT FB
+	f.Fuzz(func(t *testing.T, data []byte) {
+		for _, ch := range []int{1, 2} {
+			cfg := Config{Channels: ch, Family: 1}
+			d, err := NewDecoder(cfg, cfg.Format())
+			if err != nil {
+				continue
+			}
+			_ = d.Decode(data, func(b *audio.Buffer) error { return nil })
+			d.Release()
+		}
+	})
+}
 
 // FuzzSplitPacket exercises TOC parsing and frame splitting on arbitrary bytes:
 // the framing must never panic or index out of range on hostile packets.

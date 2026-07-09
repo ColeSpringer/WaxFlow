@@ -1,7 +1,7 @@
 // Package vorbis decodes Vorbis I audio (the Xiph "Vorbis I specification").
 // It is a clean-room implementation from the specification, cross-checked
 // against the permissive references stb_vorbis (public domain) and
-// jfreymuth/oggvorbis (MIT) for structure only.
+// jfreymuth/oggvorbis for structure only.
 //
 // The decoder consumes whole Vorbis packets (as the Ogg demuxer reassembles
 // them) and emits planar float32 buffers. Vorbis is inherently float, so the

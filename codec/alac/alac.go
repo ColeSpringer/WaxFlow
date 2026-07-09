@@ -1,7 +1,6 @@
 // Package alac implements an Apple Lossless (ALAC) decoder. It is a
-// clean-room port of Apple's ALAC reference decoder (Apache-2.0), which the
-// clean-room policy classes Tier A (permissive, may be ported with
-// attribution; see THIRD-PARTY-NOTICES.md). The algorithm is faithful to
+// clean-room port of Apple's ALAC reference decoder (see
+// THIRD-PARTY-NOTICES.md). The algorithm is faithful to
 // the reference: adaptive-Golomb residual coding, the cascaded adaptive FIR
 // predictor, and the lossless middle-side matrix, so decodes are bit-exact.
 //

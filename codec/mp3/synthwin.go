@@ -3,7 +3,7 @@ package mp3
 // synthD is the synthesis window (ISO 11172-3 Table B.3) in the
 // sign-folded arrangement PDMP3 uses, where the alternating 64-block
 // sign flips of the standard windowing loop are baked into the
-// coefficients. Ported via go-mp3 (Apache-2.0).
+// coefficients. Ported via go-mp3.
 var synthD = [512]float32{
 	0.000000000, -0.000015259, -0.000015259, -0.000015259, -0.000015259, -0.000015259, -0.000015259, -0.000030518,
 	-0.000030518, -0.000030518, -0.000030518, -0.000045776, -0.000045776, -0.000061035, -0.000061035, -0.000076294,

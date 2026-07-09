@@ -64,7 +64,7 @@ func (s Shaping) String() string {
 
 // fWeighted is the Lipshitz 5-tap F-weighted noise shaping filter: the
 // error feedback convolution kernel, newest error first. Values are the
-// published table (Tier A academic source, clean-room policy ADR-0001).
+// published table.
 var fWeighted = [5]float64{2.033, -2.165, 1.959, -1.590, 0.6149}
 
 // SupportsShaping reports whether Shaped's noise shaping filter suits an

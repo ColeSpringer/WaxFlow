@@ -122,6 +122,16 @@ var Vectors = []Vector{
 	{Name: "flac/faulty/09 - blocksize 1.flac", URL: "https://raw.githubusercontent.com/ietf-wg-cellar/flac-test-files/aa7b0c6cf32994c106ae517a08134c28a96ff5b2/faulty/09%20-%20blocksize%201.flac", SHA256: "4a1e703e9ac7dc67ac82dc74087ba1d62a0f13e89d11e020e01e26306a0102af"},
 	{Name: "flac/faulty/10 - invalid vorbis comment metadata block.flac", URL: "https://raw.githubusercontent.com/ietf-wg-cellar/flac-test-files/aa7b0c6cf32994c106ae517a08134c28a96ff5b2/faulty/10%20-%20invalid%20vorbis%20comment%20metadata%20block.flac", SHA256: "c79b0514a61634035a5653c5493797bbd1fcc78982116e4d429630e9e462d29b"},
 	{Name: "flac/faulty/11 - incorrect metadata block length.flac", URL: "https://raw.githubusercontent.com/ietf-wg-cellar/flac-test-files/aa7b0c6cf32994c106ae517a08134c28a96ff5b2/faulty/11%20-%20incorrect%20metadata%20block%20length.flac", SHA256: "3732151ba8c4e66a785165aa75a444aad814c16807ddc97b793811376acacfd6"},
+	// The official Opus conformance vectors: testvector01-12 in opus_demo
+	// bitstream form plus their reference decodes at both rates (stereo
+	// testvectorNN.dec, mono testvectorNNm.dec), pinned as the upstream
+	// tarball and extracted by the opus conformance test. This is the RFC
+	// 8251 tarball: the bitstreams are byte-identical to the original 2012
+	// RFC 6716 tarball, but the references were regenerated after RFC 8251's
+	// normative decoder changes (the 2012 hybrid/transition references are
+	// stale: current libopus fails 05/06/12 against them) and mono
+	// references were added.
+	{Name: "opus/opus_testvectors-rfc8251.tar.gz", URL: "https://opus-codec.org/static/testvectors/opus_testvectors-rfc8251.tar.gz", SHA256: "6b26a22f9ba87b2b836906a9bb7afec5f8e54d49553b1200382520ee6fedfa55"},
 }
 
 // VectorsDir returns the on-disk vector cache, testdata/vectors under the

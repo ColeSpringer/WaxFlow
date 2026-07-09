@@ -5,7 +5,7 @@ package mp3
 // second copy: a depth-first walk of each tree recovers every leaf's bit
 // path, which is exactly the codeword the encoder must emit. This keeps
 // one source of truth for the wire format and inherits the decode blob's
-// clean-room provenance (ADR-0001).
+// clean-room provenance.
 
 // hcode is one Huffman codeword: the low n bits of bits, MSB first.
 type hcode struct {
