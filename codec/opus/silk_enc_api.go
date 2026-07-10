@@ -115,12 +115,14 @@ func (ch *silkEncoderChannel) encodeFrame(enc *rangeEncoder, condCoding, maxBits
 		var pGainsQ16 [silkMaxNBSubfr]int32
 
 		nBits := int32(0)
+	iterLoop:
 		for iter := 0; ; iter++ {
-			if gainsID == gainsIDLower {
+			switch gainsID {
+			case gainsIDLower:
 				nBits = nBitsLower
-			} else if gainsID == gainsIDUpper {
+			case gainsIDUpper:
 				nBits = nBitsUpper
-			} else {
+			default:
 				if iter > 0 {
 					enc.restore(&sRangeEncCopy)
 					ch.sNSQ = sNSQCopy0
@@ -161,7 +163,7 @@ func (ch *silkEncoderChannel) encodeFrame(enc *rangeEncoder, condCoding, maxBits
 				}
 
 				if !useCBR && iter == 0 && nBits <= int32(maxBits) {
-					break
+					break iterLoop
 				}
 			}
 
@@ -590,9 +592,12 @@ func (e *silkEncoder) encode(encControl *silkEncControl, samplesIn []int16, nSam
 			if totBlocks == 2 && currBlock == 0 {
 				maxBits = maxBits * 3 / 5
 			} else if totBlocks == 3 {
-				if currBlock == 0 {
+				// Cap the first two blocks so the last of three keeps its
+				// full budget.
+				switch currBlock {
+				case 0:
 					maxBits = maxBits * 2 / 5
-				} else if currBlock == 1 {
+				case 1:
 					maxBits = maxBits * 3 / 4
 				}
 			}

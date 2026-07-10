@@ -887,25 +887,21 @@ func TestSignedURLLifecycle(t *testing.T) {
 func TestAdmission503UnderLoad(t *testing.T) {
 	env := newTestEnv(t, func(c *server.Config) {
 		c.LiveSlots = 1
-		c.RingBytes = 64 << 10
 	})
 
-	// A sync one-shot with an unread body: the ring fills, the pipeline
-	// blocks, the single live slot stays held.
-	req, err := http.NewRequest(http.MethodPost, env.ts.URL+"/transcode?src=lib/ramp.wav&format=wav", nil)
-	if err != nil {
-		t.Fatal(err)
+	// Occupy the only live slot. Holding it directly keeps the test
+	// deterministic; driving it through a real held /transcode is flaky,
+	// since that slot is freed the moment its finite body finishes writing
+	// and the loopback socket buffers can swallow the whole body first.
+	release, ok := env.srv.HoldLiveSlot()
+	if !ok {
+		t.Fatal("could not take the only live slot")
 	}
-	req.Header.Set("X-API-Key", testKey)
-	held, err := env.ts.Client().Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if held.StatusCode != 200 {
-		t.Fatalf("held transcode = %d", held.StatusCode)
-	}
+	// Free the slot even if an assertion below aborts the test; release is
+	// idempotent, so the explicit call in the recovery phase still stands.
+	t.Cleanup(release)
 
-	// A second pipeline cannot start: 503 with Retry-After.
+	// A live transcode cannot start: 503 with Retry-After.
 	resp := env.get(t, "/stream?src=lib/ramp.wav&format=wav&t=2", nil)
 	if resp.Header.Get("Retry-After") != "2" {
 		t.Fatalf("Retry-After = %q", resp.Header.Get("Retry-After"))
@@ -922,7 +918,7 @@ func TestAdmission503UnderLoad(t *testing.T) {
 	}
 
 	// Releasing the held slot lets pipelines start again.
-	held.Body.Close()
+	release()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		resp = env.get(t, "/stream?src=lib/ramp.wav&format=wav&t=2", nil)
@@ -932,7 +928,7 @@ func TestAdmission503UnderLoad(t *testing.T) {
 		}
 		readBody(t, resp)
 		if time.Now().After(deadline) {
-			t.Fatal("slot never released after client abandonment")
+			t.Fatal("slot never freed after release")
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
