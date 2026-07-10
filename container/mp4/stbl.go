@@ -1,6 +1,11 @@
 package mp4
 
-import "sort"
+import (
+	"math"
+	"math/bits"
+	"slices"
+	"sort"
+)
 
 // sampleTable is a track's flattened sample map: per-sample file offset and
 // byte size, a run-encoded time base in output samples, and the sync set.
@@ -197,7 +202,14 @@ func (d *Demuxer) buildTimeBase(st *sampleTable, stts []sttsEntry, timescale, ra
 		count := min(e.count, st.total-sample)
 		delta := e.delta
 		if rescale {
-			delta = e.delta * rate / timescale
+			delta = rescaleTicks(e.delta, rate, timescale)
+		}
+		if delta < 1 {
+			// Every frame must advance the timeline. A raw stts delta of zero,
+			// or a rescale that floored to nothing (a media timescale far above
+			// the sample rate), would stall PTS and hand ReadPacket a
+			// non-positive duration.
+			delta = 1
 		}
 		st.runStart = append(st.runStart, sample)
 		st.runPTS = append(st.runPTS, pts)
@@ -219,6 +231,24 @@ func (d *Demuxer) buildTimeBase(st *sampleTable, stts []sttsEntry, timescale, ra
 	}
 }
 
+// rescaleTicks converts a media-tick sample delta to output samples as
+// delta*rate/timescale, evaluated in 128 bits so a crafted rate or timescale
+// cannot overflow the multiply. The quotient is capped at the 32-bit tick
+// domain: a rate far above the timescale could otherwise yield a single delta
+// large enough to overflow count*delta during PTS accumulation. The caller
+// floors the returned value at one output sample.
+func rescaleTicks(delta, rate, timescale int64) int64 {
+	hi, lo := bits.Mul64(uint64(delta), uint64(rate))
+	if hi >= uint64(timescale) {
+		return math.MaxUint32 // quotient would exceed 64 bits: degenerate ratio
+	}
+	q, _ := bits.Div64(hi, lo, uint64(timescale))
+	if q > math.MaxUint32 {
+		return math.MaxUint32
+	}
+	return int64(q)
+}
+
 // buildSync stores the sync set from an stss table (1-based sample numbers)
 // as sorted 0-based indices; an absent or empty stss means all-sync.
 func buildSync(st *sampleTable, stss []int64) {
@@ -234,8 +264,10 @@ func buildSync(st *sampleTable, stss []int64) {
 	if len(sync) == 0 {
 		return // no in-range entries: fall back to all-sync (nil), not no-sync
 	}
-	sort.Slice(sync, func(i, j int) bool { return sync[i] < sync[j] })
-	st.sync = sync
+	// A malformed stss may repeat sample numbers; sort then drop the
+	// duplicates so isSync and syncAtOrBefore search a minimal set.
+	slices.Sort(sync)
+	st.sync = slices.Compact(sync)
 }
 
 // timeOf returns sample i's output position and duration.

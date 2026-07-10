@@ -174,6 +174,41 @@ func TestBuildSyncOutOfRangeStaysAllSync(t *testing.T) {
 	}
 }
 
+// TestBuildTimeBasePositiveDuration guards the FuzzDemux crash where a
+// mutated mdhd timescale far above the sample rate rescaled a per-sample
+// delta down to zero, so ReadPacket emitted packets with a non-positive
+// duration. Every sample must carry a positive duration across the three
+// ways a delta can degenerate: a rescale that floors to zero, a rescale that
+// would overflow int64, and a raw stts delta of zero.
+func TestBuildTimeBasePositiveDuration(t *testing.T) {
+	cases := []struct {
+		name                   string
+		delta, timescale, rate int64
+	}{
+		{"rescale floors to zero", 4096, 1 << 40, 44100},
+		{"rescale overflows int64", math.MaxUint32, 1, math.MaxUint32},
+		{"raw stts delta zero", 0, 44100, 44100},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &Demuxer{}
+			st := &sampleTable{total: 3}
+			d.buildTimeBase(st, []sttsEntry{{count: 3, delta: tc.delta}}, tc.timescale, tc.rate)
+			var prev int64 = -1
+			for i := int64(0); i < st.total; i++ {
+				pts, dur := st.timeOf(i)
+				if dur <= 0 {
+					t.Fatalf("sample %d: duration %d, want positive", i, dur)
+				}
+				if pts <= prev {
+					t.Fatalf("sample %d: pts %d not advancing past %d", i, pts, prev)
+				}
+				prev = pts
+			}
+		})
+	}
+}
+
 // TestGaplessSMPBNoOverflow feeds a hostile iTunSMPB true-sample count near
 // 2^63; the trims must stay consistent (delay+padding+samples == totalRaw)
 // instead of letting delay+samples overflow past the reset guard.
@@ -187,5 +222,74 @@ func TestGaplessSMPBNoOverflow(t *testing.T) {
 	}
 	if delay+padding+samples != tr.st.totalDur {
 		t.Errorf("delay+padding+samples = %d, want totalRaw %d", delay+padding+samples, tr.st.totalDur)
+	}
+}
+
+// TestGaplessEditListNoOverflow feeds a hostile edit list whose media_time and
+// segment_duration are near 2^63 together with a large sample rate, so the
+// naive editMedia*rate and editSegDur*rate products overflow int64. The
+// resulting trims must stay in range and consistent rather than wrapping into
+// a negative delay or a bogus sample count.
+func TestGaplessEditListNoOverflow(t *testing.T) {
+	d := &Demuxer{movieTimescale: 1}
+	tr := &track{
+		fmt:        audio.Format{Rate: math.MaxUint32},
+		hasEdit:    true,
+		editMedia:  math.MaxInt64,
+		editSegDur: math.MaxInt64,
+		timescale:  1,
+	}
+	tr.st.totalDur = 40000
+	delay, padding, samples := d.gapless(tr)
+	if delay < 0 || delay > tr.st.totalDur {
+		t.Fatalf("delay = %d, out of range for totalRaw %d", delay, tr.st.totalDur)
+	}
+	if samples < 0 || samples > tr.st.totalDur {
+		t.Fatalf("samples = %d, out of range for totalRaw %d", samples, tr.st.totalDur)
+	}
+	if padding < 0 {
+		t.Fatalf("padding = %d, want non-negative", padding)
+	}
+	if delay+padding+samples != tr.st.totalDur {
+		t.Errorf("delay+padding+samples = %d, want totalRaw %d", delay+padding+samples, tr.st.totalDur)
+	}
+}
+
+// TestMulDivSat checks the saturating rescale: exact for values that fit,
+// saturated at math.MaxInt64 when the product or quotient would overflow, and
+// zero for a non-positive operand.
+func TestMulDivSat(t *testing.T) {
+	cases := []struct {
+		a, b, c, want int64
+	}{
+		{10, 20, 4, 50},                                  // exact
+		{1000, int64(1e9), 600, 1666666666},              // chapter ns, no overflow
+		{math.MaxInt64, math.MaxInt64, 1, math.MaxInt64}, // product overflows -> saturate
+		{math.MaxInt64, 2, 1, math.MaxInt64},             // quotient overflows int64 -> saturate
+		{1 << 40, 1 << 40, 1 << 40, 1 << 40},             // 128-bit intermediate, exact
+		{-5, 10, 2, 0},                                   // non-positive operand
+		{5, 10, 0, 0},                                    // non-positive divisor
+	}
+	for _, tc := range cases {
+		if got := mulDivSat(tc.a, tc.b, tc.c); got != tc.want {
+			t.Errorf("mulDivSat(%d, %d, %d) = %d, want %d", tc.a, tc.b, tc.c, got, tc.want)
+		}
+	}
+}
+
+// TestBuildSyncDeduplicates checks that a stss repeating sample numbers yields
+// a sync set with no duplicates, so isSync and syncAtOrBefore search a minimal
+// list.
+func TestBuildSyncDeduplicates(t *testing.T) {
+	st := &sampleTable{total: 10}
+	buildSync(st, []int64{5, 1, 5, 3, 1, 3}) // 1-based, with repeats
+	want := []int64{0, 2, 4}                 // deduped 0-based
+	if len(st.sync) != len(want) {
+		t.Fatalf("sync = %v, want %v", st.sync, want)
+	}
+	for i, v := range want {
+		if st.sync[i] != v {
+			t.Fatalf("sync = %v, want %v", st.sync, want)
+		}
 	}
 }

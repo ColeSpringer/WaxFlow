@@ -1,6 +1,8 @@
 package mp4
 
 import (
+	"math"
+	"math/bits"
 	"strconv"
 	"strings"
 	"time"
@@ -30,11 +32,11 @@ func (d *Demuxer) gapless(t *track) (delay, padding, samples int64) {
 	if t.hasEdit && t.editMedia > 0 {
 		delay = t.editMedia
 		if t.timescale > 0 && rate > 0 && t.timescale != rate {
-			delay = t.editMedia * rate / t.timescale
+			delay = mulDivSat(t.editMedia, rate, t.timescale)
 		}
 		delay = clamp(delay, 0, totalRaw)
 		if t.editSegDur > 0 && d.movieTimescale > 0 && rate > 0 {
-			samples = t.editSegDur * rate / d.movieTimescale
+			samples = mulDivSat(t.editSegDur, rate, d.movieTimescale)
 		} else {
 			samples = totalRaw - delay
 		}
@@ -56,6 +58,27 @@ func clamp(v, lo, hi int64) int64 {
 		return hi
 	}
 	return v
+}
+
+// mulDivSat computes a*b/c in 128 bits, saturating at math.MaxInt64 so a
+// hostile edit-list time or chapter timescale cannot overflow the product.
+// A non-positive operand yields 0. It backs the movie-timeline rescales,
+// whose results are int64 sample counts or nanosecond durations; the
+// per-sample delta path in stbl.go uses rescaleTicks instead, which caps
+// tighter to keep count*delta from overflowing during PTS accumulation.
+func mulDivSat(a, b, c int64) int64 {
+	if a <= 0 || b <= 0 || c <= 0 {
+		return 0
+	}
+	hi, lo := bits.Mul64(uint64(a), uint64(b))
+	if hi >= uint64(c) {
+		return math.MaxInt64 // quotient would exceed 64 bits
+	}
+	q, _ := bits.Div64(hi, lo, uint64(c))
+	if q > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(q)
 }
 
 // parseUdta walks the user-data box for Nero chapters (chpl) and the
@@ -247,10 +270,10 @@ func (d *Demuxer) readTextChapters(ct *track) []Chapter {
 			textLen = len(buf) - 2
 		}
 		pts, _ := st.timeOf(i)
-		var start time.Duration
-		if ct.timescale > 0 {
-			start = time.Duration(pts) * time.Second / time.Duration(ct.timescale)
-		}
+		// pts*time.Second can overflow int64 for a hostile pts or a tiny
+		// timescale; the saturating rescale keeps chapter times from wrapping
+		// negative. mulDivSat returns 0 when ct.timescale is not positive.
+		start := time.Duration(mulDivSat(pts, int64(time.Second), ct.timescale))
 		out = append(out, Chapter{Start: start, Title: sanitizeTitle(buf[2 : 2+textLen])})
 	}
 	return out
