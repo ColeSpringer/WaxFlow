@@ -41,6 +41,7 @@ func TestGoldenSegments(t *testing.T) {
 	}{
 		{"opus", waxflow.TranscodeOptions{Format: "opus"}, 48000},
 		{"flac", waxflow.TranscodeOptions{Format: "flac"}, 45056},
+		{"aac", waxflow.TranscodeOptions{Format: "aac"}, 48128},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -154,6 +155,38 @@ func TestSegmentsFFprobe(t *testing.T) {
 		ref := testutil.FFmpegDecodeS32(t, path)
 		if idx := testutil.DiffI32(testutil.Interleave(src), ref); idx != -1 {
 			t.Fatalf("ffmpeg decode differs from the source at interleaved sample %d", idx)
+		}
+	})
+
+	t.Run("aac", func(t *testing.T) {
+		opts := waxflow.TranscodeOptions{Format: "aac"}
+		plan, err := e.PlanSegments(pcmTrack(src.Fmt, frames), opts, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		init, err := e.InitSegment(plan, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		segs, _ := collectSegments(t, e, raw, opts, plan.SegmentSamples, 0)
+		path := writeTemp(t, "stream-aac.mp4", concatSegments(init, segs...))
+		info := testutil.FFprobeFile(t, path)
+		if info.CodecName != "aac" || info.SampleRate != 48000 || info.Channels != 2 {
+			t.Fatalf("ffprobe = %+v", info)
+		}
+		// The edit list's front trim applies; the tail edit is beyond
+		// ffmpeg's fragmented reader, so the decoded run is the trimmed
+		// start through the final padded frame.
+		got := testutil.FFmpegDecodeF32(t, path)
+		if n := len(got) / 2; n < frames || n > frames+1024 {
+			t.Fatalf("ffmpeg decoded %d frames, want %d..%d", n, frames, frames+1024)
+		}
+		// Every segment is independently decodable after the init header.
+		for _, s := range segs {
+			segPath := writeTemp(t, "seg-aac.mp4", concatSegments(init, s))
+			if got := testutil.FFmpegDecodeF32(t, segPath); len(got) == 0 {
+				t.Fatalf("segment %d: ffmpeg decoded nothing", s.Index)
+			}
 		}
 	})
 }

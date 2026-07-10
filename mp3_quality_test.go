@@ -17,11 +17,13 @@ import (
 // TestMP3EncoderQuality is the nightly encoder-quality harness, standing up
 // with the first lossy encoder (M7). It encodes a corpus with our MP3 encoder
 // and with Shine (the baseline the gate names), scores both against the source
-// with the ODG-proxy, and enforces the MP3 baseline gate: our corpus mean is
-// at least Shine's, and no track falls more than 0.25 below Shine
-// (docs/quality-gates.md). It self-skips without ffmpeg+libshine; the nightly
-// job sets WAXFLOW_REQUIRE_SHINE=1 and WAXFLOW_QUALITY_REPORT to publish the
-// HTML report.
+// with the ODG-proxy, and enforces the M14 quality-phase gate: our corpus
+// mean beats Shine's by at least 0.3, and no track falls more than 0.1 below
+// Shine (docs/quality-gates.md). A LAME (libmp3lame) column joins the report
+// when the local ffmpeg carries it: informational, never blocking. It
+// self-skips without ffmpeg+libshine; the nightly job sets
+// WAXFLOW_REQUIRE_SHINE=1 and WAXFLOW_QUALITY_REPORT to publish the HTML
+// report.
 //
 // The corpus is synthesized deterministically here (broadband, tonal,
 // transient, and noise classes). The pinned 20-item real-audio corpus in
@@ -29,6 +31,7 @@ import (
 // harness, metric, and gate are what land now.
 func TestMP3EncoderQuality(t *testing.T) {
 	testutil.Shine(t) // skip early if libshine is unavailable
+	haveLame := testutil.HaveLAME(t)
 
 	const rate, kbps = 44100, 128
 	corpus := qualityCorpus(rate, 3*rate)
@@ -36,6 +39,7 @@ func TestMP3EncoderQuality(t *testing.T) {
 	type row struct {
 		name               string
 		ours, shine, delta float64
+		lame               float64 // NaN when unavailable
 	}
 	var rows []row
 	var sumOurs, sumShine float64
@@ -64,12 +68,19 @@ func TestMP3EncoderQuality(t *testing.T) {
 		shineDec := testutil.FFmpegDecodeF32(t, shinePath)
 		shineODG := testutil.ODGProxy(ref, shineDec, rate, item.ch)
 
+		lameODG := math.NaN()
+		if haveLame {
+			lamePath := testutil.LAMEEncodeFile(t, wavPath, kbps)
+			lameDec := testutil.FFmpegDecodeF32(t, lamePath)
+			lameODG = testutil.ODGProxy(ref, lameDec, rate, item.ch)
+		}
+
 		delta := ourODG - shineODG
-		rows = append(rows, row{item.name, ourODG, shineODG, delta})
+		rows = append(rows, row{item.name, ourODG, shineODG, delta, lameODG})
 		sumOurs += ourODG
 		sumShine += shineODG
 		worst = math.Min(worst, delta)
-		t.Logf("%-20s ours=%.3f shine=%.3f delta=%+.3f", item.name, ourODG, shineODG, delta)
+		t.Logf("%-20s ours=%.3f shine=%.3f delta=%+.3f lame=%.3f", item.name, ourODG, shineODG, delta, lameODG)
 	}
 
 	meanOurs := sumOurs / float64(len(rows))
@@ -79,14 +90,18 @@ func TestMP3EncoderQuality(t *testing.T) {
 
 	if path := os.Getenv("WAXFLOW_QUALITY_REPORT"); path != "" {
 		var b strings.Builder
-		fmt.Fprintf(&b, "<h1>MP3 baseline encoder-quality report</h1>\n")
-		fmt.Fprintf(&b, "<p>ODG-proxy at %d kbit/s CBR. Higher is better (0 imperceptible, -4 very annoying). Gate: mean &ge; Shine, no track &gt; 0.25 below.</p>\n", kbps)
-		fmt.Fprintf(&b, "<table border=1 cellpadding=4><tr><th>track</th><th>WaxFlow</th><th>Shine</th><th>delta</th></tr>\n")
+		fmt.Fprintf(&b, "<h1>MP3 encoder-quality report</h1>\n")
+		fmt.Fprintf(&b, "<p>ODG-proxy at %d kbit/s CBR. Higher is better (0 imperceptible, -4 very annoying). Gate: mean &ge; Shine + 0.3, no track &gt; 0.1 below Shine. The LAME column is informational.</p>\n", kbps)
+		fmt.Fprintf(&b, "<table border=1 cellpadding=4><tr><th>track</th><th>WaxFlow</th><th>Shine</th><th>delta</th><th>LAME</th></tr>\n")
 		for _, r := range rows {
-			fmt.Fprintf(&b, "<tr><td>%s</td><td>%.3f</td><td>%.3f</td><td>%+.3f</td></tr>\n",
-				html.EscapeString(r.name), r.ours, r.shine, r.delta)
+			lame := "&mdash;"
+			if !math.IsNaN(r.lame) {
+				lame = fmt.Sprintf("%.3f", r.lame)
+			}
+			fmt.Fprintf(&b, "<tr><td>%s</td><td>%.3f</td><td>%.3f</td><td>%+.3f</td><td>%s</td></tr>\n",
+				html.EscapeString(r.name), r.ours, r.shine, r.delta, lame)
 		}
-		fmt.Fprintf(&b, "<tr><th>mean</th><th>%.3f</th><th>%.3f</th><th>%+.3f</th></tr>\n", meanOurs, meanShine, meanOurs-meanShine)
+		fmt.Fprintf(&b, "<tr><th>mean</th><th>%.3f</th><th>%.3f</th><th>%+.3f</th><th></th></tr>\n", meanOurs, meanShine, meanOurs-meanShine)
 		fmt.Fprintf(&b, "</table>\n")
 		if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
 			t.Fatalf("writing quality report: %v", err)
@@ -94,11 +109,11 @@ func TestMP3EncoderQuality(t *testing.T) {
 		t.Logf("wrote quality report to %s", path)
 	}
 
-	if meanOurs < meanShine {
-		t.Errorf("corpus mean ODG %.3f below Shine mean %.3f (parity gate)", meanOurs, meanShine)
+	if meanOurs < meanShine+0.3 {
+		t.Errorf("corpus mean ODG %.3f below Shine mean %.3f + 0.3 (quality-phase gate)", meanOurs, meanShine)
 	}
-	if worst < -0.25 {
-		t.Errorf("worst per-track ODG delta %.3f exceeds the 0.25 allowance below Shine", worst)
+	if worst < -0.1 {
+		t.Errorf("worst per-track ODG delta %.3f exceeds the 0.1 allowance below Shine", worst)
 	}
 }
 

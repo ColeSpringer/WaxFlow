@@ -93,6 +93,7 @@ func (s *Server) planTranscode(req *streamRequest) error {
 	}
 	req.opts = waxflow.TranscodeOptions{
 		Format:          outFormat,
+		Container:       req.p.container,
 		Rate:            req.p.rate,
 		Channels:        req.p.ch,
 		BitDepth:        req.p.bits,
@@ -101,6 +102,7 @@ func (s *Server) planTranscode(req *streamRequest) error {
 		ResampleProfile: s.profile,
 		MP3Bitrate:      req.p.bitrate * 1000,
 		OpusBitrate:     req.p.bitrate * 1000,
+		AACBitrate:      req.p.bitrate * 1000,
 	}
 	plan, err := s.eng.PlanTranscode(req.track, req.opts)
 	if err != nil {

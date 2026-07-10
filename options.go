@@ -52,9 +52,15 @@ func WithIndexCache(c IndexCache) Option {
 // encode. Zero values keep the source's properties, so the zero options
 // are a bit-exact container rewrite.
 type TranscodeOptions struct {
-	// Format is the output container: "wav", "aiff", "flac", "mp3", or
-	// "alac".
+	// Format is the output format name: "wav", "aiff", "flac", "mp3",
+	// "alac", "aac", or "opus".
 	Format string
+	// Container overrides the format's default container where the
+	// format defines an alternative; empty selects the default. Today
+	// only aac has one: "adts" replaces the progressive fragmented MP4
+	// with the raw ADTS elementary stream, a legacy opt-out that
+	// sacrifices gapless signaling (ADTS has none).
+	Container string
 	// Rate resamples to this sample rate in Hz; 0 keeps the source rate.
 	Rate int
 	// Channels converts the channel count (downmix to 1 or 2, or mono
@@ -80,11 +86,21 @@ type TranscodeOptions struct {
 	FLACLevel int
 	// MP3Bitrate selects the constant bit rate in bits per second for mp3
 	// output; the zero value uses the encoder default (128000). It must be
-	// a legal Layer III CBR rate for the output sample rate.
+	// a legal Layer III CBR rate for the output sample rate. Under MP3VBR
+	// it anchors the quality level instead.
 	MP3Bitrate int
+	// MP3VBR selects variable bit rate for mp3 output: each frame carries
+	// the smallest legal bit-rate index that holds its psychoacoustic
+	// demand, anchored at MP3Bitrate. The zero value is constant bit rate.
+	MP3VBR bool
 	// OpusBitrate selects the target bit rate in bits per second for opus
 	// output; the zero value uses the encoder default (96000).
 	OpusBitrate int
+	// AACBitrate selects the target bit rate in bits per second for aac
+	// output; the zero value uses the encoder default (128000). AAC
+	// frames are variable-size, so the encoder holds the long-term mean
+	// at the target with a bit reservoir.
+	AACBitrate int
 	// OpusComplexity gates the Opus encoder's analysis depth: 1 through 10
 	// literally, OpusComplexityDefault (the zero value) for the encoder
 	// default (5), and OpusComplexityLowest for complexity 0, which needs a

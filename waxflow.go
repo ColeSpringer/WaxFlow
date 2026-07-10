@@ -10,12 +10,14 @@ import (
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/codec/alac"
 	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/codec/opus"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/adts"
 	"github.com/colespringer/waxflow/container/aiff"
 	"github.com/colespringer/waxflow/container/flacn"
 	"github.com/colespringer/waxflow/container/mp4"
@@ -156,6 +158,13 @@ func (e *Engine) Transcode(ctx context.Context, src container.Source, hint strin
 	if err != nil {
 		return nil, err
 	}
+	if opts.Container != "" && row.container == nil {
+		// Mirror of the plan-side check: a container override the format
+		// cannot honor must fail here too, so a caller skipping the plan
+		// cannot have it silently ignored.
+		return nil, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("waxflow: format %s has no alternate container (container=%s)", row.name, opts.Container))
+	}
 	spec := specFor(opts)
 	if row.adjust != nil {
 		row.adjust(&spec, srcTrack.Fmt, opts)
@@ -187,6 +196,12 @@ func (e *Engine) Transcode(ctx context.Context, src container.Source, hint strin
 		Fmt:         f,
 		Samples:     chain.OutputSamples(srcSamples),
 		Default:     true,
+	}
+	// Encoders with priming declare it; muxers that can signal it (the
+	// fMP4 edit list) read it from the track, and the trailer restates
+	// it exactly at End.
+	if d, ok := enc.(interface{ Delay() int }); ok {
+		track.Delay = int64(d.Delay())
 	}
 	if err := mux.Begin([]container.Track{track}); err != nil {
 		return nil, err
@@ -225,7 +240,13 @@ func (e *Engine) Transcode(ctx context.Context, src container.Source, hint strin
 		return nil, err
 	}
 	e.log.Debug("transcode finished", "samples", trailer.Samples)
-	return &TranscodeResult{Samples: trailer.Samples, Format: f, Container: opts.Format}, nil
+	// The container is the format's default unless the request overrode
+	// it, the same resolution PlanTranscode reports.
+	containerName := row.name
+	if opts.Container != "" {
+		containerName = opts.Container
+	}
+	return &TranscodeResult{Samples: trailer.Samples, Format: f, Container: containerName}, nil
 }
 
 // specFor maps TranscodeOptions onto the DSP chain spec, in one place so
@@ -405,10 +426,22 @@ func buildPlanCore(in audio.Format, opts TranscodeOptions) (*planCore, error) {
 		return nil, err
 	}
 	l, m := chain.Ratio()
+	containerName, mediaType := row.name, row.mediaType
+	if opts.Container != "" {
+		if row.container == nil {
+			return nil, waxerr.New(waxerr.CodeInvalidRequest,
+				fmt.Sprintf("waxflow: format %s has no alternate container (container=%s)", row.name, opts.Container))
+		}
+		mt, err := row.container(opts.Container)
+		if err != nil {
+			return nil, err
+		}
+		containerName, mediaType = opts.Container, mt
+	}
 	return &planCore{
 		format:        f,
-		container:     row.name,
-		mediaType:     row.mediaType,
+		container:     containerName,
+		mediaType:     mediaType,
 		live:          row.live,
 		versions:      append(chain.Versions(), version),
 		l:             l,
@@ -456,6 +489,12 @@ type output struct {
 	plan func(f audio.Format, opts TranscodeOptions) (version string, bytesPerFrame, bitRate int, err error)
 	// build constructs the wired encoder and muxer for one transcode.
 	build func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error)
+	// container resolves a TranscodeOptions.Container override to its
+	// HTTP media type; nil means the format has no alternate container
+	// and any override is rejected up front (the unknown-parameter
+	// principle: a request naming a container the format cannot honor
+	// must fail, never fall back silently).
+	container func(name string) (mediaType string, err error)
 	// hls describes the format's segmented CMAF form; nil means the format
 	// has none and cannot serve HLS.
 	hls *hlsOutput
@@ -658,32 +697,93 @@ var outputs = []output{
 			spec.Float = true
 		},
 		plan: func(f audio.Format, opts TranscodeOptions) (string, int, int, error) {
-			bitrate, err := mp3Bitrate(opts)
+			eo, err := mp3EncoderOptions(opts)
 			if err != nil {
 				return "", 0, 0, err
 			}
-			enc, err := mp3.NewEncoder(f, &mp3.EncoderOptions{Bitrate: bitrate})
+			enc, err := mp3.NewEncoder(f, eo)
 			if err != nil {
 				return "", 0, 0, err
 			}
-			// The encoder clamps to a layer-legal rate; report the actual one.
+			// The encoder clamps to a layer-legal rate; report the actual
+			// one. A VBR encoder reports 0, leaving rate and size hints
+			// honestly unknown (the PlanTranscode VBR contract).
 			return mp3.EncoderVersion, 0, enc.Bitrate(), nil
 		},
 		build: func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
-			bitrate, err := mp3Bitrate(opts)
+			eo, err := mp3EncoderOptions(opts)
 			if err != nil {
 				return nil, nil, err
 			}
-			enc, err := mp3.NewEncoder(f, &mp3.EncoderOptions{Bitrate: bitrate})
+			enc, err := mp3.NewEncoder(f, eo)
 			if err != nil {
 				return nil, nil, err
 			}
-			return enc, mpa.NewMuxer(dst, &mpa.MuxerOptions{Delay: enc.Delay()}), nil
+			return enc, mpa.NewMuxer(dst, &mpa.MuxerOptions{Delay: enc.Delay(), VBR: opts.MP3VBR}), nil
 		},
 	},
 	{
-		name:      "alac",
-		exts:      []string{"m4a"},
+		name: "aac",
+		// m4a moved here from the alac row when the AAC encoder landed
+		// (the anticipated disambiguation): the extension overwhelmingly
+		// means AAC in the wild. The bare .aac extension implies the
+		// ADTS container at the CLI boundary.
+		exts:      []string{"m4a", "aac"},
+		live:      true,
+		lossy:     true,
+		mediaType: "audio/mp4",
+		// headerBytes approximates the fMP4 init header (ftyp+moov).
+		headerBytes: 700,
+		codecID:     codec.AACLC,
+		adjust: func(spec *dsp.ChainSpec, _ audio.Format, _ TranscodeOptions) {
+			// AAC-LC encodes float32 in 1024-sample frames. The lossy path
+			// always runs in the float domain, so any integer depth request
+			// is dropped. The rate is not snapped: the encoder accepts the
+			// thirteen AAC rates and rejects anything else at plan time,
+			// like the mp3 row (an explicit rate= converts first).
+			spec.FrameSize = 1024
+			spec.BitDepth = 0
+			spec.Float = true
+		},
+		plan: func(f audio.Format, opts TranscodeOptions) (string, int, int, error) {
+			if _, err := aacContainerMediaType(opts.Container); err != nil {
+				return "", 0, 0, err
+			}
+			enc, err := aac.NewEncoder(f, &aac.EncoderOptions{Bitrate: opts.AACBitrate})
+			if err != nil {
+				return "", 0, 0, err
+			}
+			// The encoder clamps to its legal range; report the actual
+			// target (an ABR mean, held by the bit reservoir).
+			return aac.EncoderVersion, 0, enc.Bitrate(), nil
+		},
+		build: func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
+			if _, err := aacContainerMediaType(opts.Container); err != nil {
+				return nil, nil, err
+			}
+			enc, err := aac.NewEncoder(f, &aac.EncoderOptions{Bitrate: opts.AACBitrate})
+			if err != nil {
+				return nil, nil, err
+			}
+			if opts.Container == "adts" {
+				return enc, adts.NewMuxer(dst), nil
+			}
+			return enc, mp4.NewMuxer(dst, nil), nil
+		},
+		container: aacContainerMediaType,
+		hls: &hlsOutput{
+			codecs: "mp4a.40.2",
+			delay:  aac.EncoderDelay,
+			encode: func(f audio.Format, opts TranscodeOptions, _ int64) (codec.Encoder, error) {
+				return aac.NewEncoder(f, &aac.EncoderOptions{Bitrate: opts.AACBitrate})
+			},
+		},
+	},
+	{
+		name: "alac",
+		// exts is empty since the aac row claimed m4a: ALAC output is
+		// reachable by naming the format explicitly.
+		exts:      []string{},
 		live:      true,
 		mediaType: "audio/mp4",
 		// headerBytes stays 0: size estimates are gated on a fixed
@@ -728,6 +828,21 @@ var outputs = []output{
 	},
 }
 
+// aacContainerMediaType resolves the aac row's container override:
+// empty selects progressive fragmented MP4 (the default, with gapless
+// edit-list signaling), "adts" the raw elementary stream (no gapless
+// signaling at all, which is why it is the opt-out and not the default).
+func aacContainerMediaType(name string) (string, error) {
+	switch name {
+	case "":
+		return "audio/mp4", nil
+	case "adts":
+		return "audio/aac", nil
+	}
+	return "", waxerr.New(waxerr.CodeInvalidRequest,
+		fmt.Sprintf("waxflow: aac container %q: want adts (or empty for fMP4)", name))
+}
+
 // alacSnapDepth rounds an integer bit depth up to the nearest ALAC depth.
 func alacSnapDepth(d int) int {
 	switch {
@@ -762,18 +877,20 @@ func opusBitrate(opts TranscodeOptions) int {
 	return opts.OpusBitrate
 }
 
-// mp3Bitrate resolves TranscodeOptions.MP3Bitrate: the zero value keeps the
-// encoder default (128 kbit/s), and any other value passes through to the
-// encoder, which validates it against the layer's legal CBR rates.
-func mp3Bitrate(opts TranscodeOptions) (int, error) {
-	if opts.MP3Bitrate == 0 {
-		return mp3.DefaultBitrate, nil
+// mp3EncoderOptions builds the codec-level MP3 options from a transcode
+// request. The zero bit rate keeps the encoder default (128 kbit/s); any
+// other value passes through to the encoder, which validates it against
+// the layer's legal rates (a CBR rate, or the VBR quality anchor).
+func mp3EncoderOptions(opts TranscodeOptions) (*mp3.EncoderOptions, error) {
+	bitrate := opts.MP3Bitrate
+	if bitrate == 0 {
+		bitrate = mp3.DefaultBitrate
 	}
-	if opts.MP3Bitrate < 0 {
-		return 0, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("waxflow: MP3 bit rate %d is negative", opts.MP3Bitrate))
+	if bitrate < 0 {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("waxflow: MP3 bit rate %d is negative", bitrate))
 	}
-	return opts.MP3Bitrate, nil
+	return &mp3.EncoderOptions{Bitrate: bitrate, VBR: opts.MP3VBR}, nil
 }
 
 // flacLevel resolves TranscodeOptions.FLACLevel: the zero value keeps
@@ -816,7 +933,9 @@ type OutputInfo struct {
 func Outputs() []OutputInfo {
 	infos := make([]OutputInfo, len(outputs))
 	for i, o := range outputs {
-		infos[i] = OutputInfo{Name: o.name, Exts: append([]string(nil), o.exts...), Live: o.live}
+		// The copy starts from a non-nil empty slice so a format with no
+		// extensions (alac since aac claimed m4a) marshals as [] not null.
+		infos[i] = OutputInfo{Name: o.name, Exts: append([]string{}, o.exts...), Live: o.live}
 	}
 	return infos
 }

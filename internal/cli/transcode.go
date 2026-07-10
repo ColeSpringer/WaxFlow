@@ -16,14 +16,16 @@ import (
 )
 
 func newTranscodeCmd() *cobra.Command {
-	var formatName string
+	var formatName, containerName string
 	var force bool
 	var rate, channels, bits int
 	var flacLevel int
 	var mp3Bitrate int
+	var mp3VBR bool
 	var opusBitrate int
 	var opusComplexity int
 	var opusVBR bool
+	var aacBitrate int
 	var gainDB float64
 	var profileName, ditherName string
 	cmd := &cobra.Command{
@@ -64,6 +66,12 @@ flags the transcode is a bit-exact container rewrite; --rate,
 						fmt.Sprintf("cannot infer output format from %q; pass --format (%s)",
 							filepath.Base(args[1]), strings.Join(waxflow.OutputFormats(), ", ")))
 				}
+			}
+			// A bare .aac output means the ADTS elementary stream (the
+			// .m4a extension is the fMP4 default); an explicit
+			// --container always wins.
+			if containerName == "" && outFormat == "aac" && extHint(args[1]) == "aac" {
+				containerName = "adts"
 			}
 
 			src, cleanup, err := openSource(args[0])
@@ -118,6 +126,7 @@ flags the transcode is a bit-exact container rewrite; --rate,
 			e := waxflow.New(waxflow.WithLogger(logger))
 			res, err := e.Transcode(cmd.Context(), src, extHint(args[0]), out, waxflow.TranscodeOptions{
 				Format:          outFormat,
+				Container:       containerName,
 				Rate:            rate,
 				Channels:        channels,
 				BitDepth:        bits,
@@ -126,9 +135,11 @@ flags the transcode is a bit-exact container rewrite; --rate,
 				ResampleProfile: profile,
 				FLACLevel:       optLevel,
 				MP3Bitrate:      mp3Bitrate * 1000,
+				MP3VBR:          mp3VBR,
 				OpusBitrate:     opusBitrate * 1000,
 				OpusComplexity:  optComplexity,
 				OpusVBR:         opusVBR,
+				AACBitrate:      aacBitrate * 1000,
 			})
 			if err != nil {
 				out.Close()
@@ -152,7 +163,8 @@ flags the transcode is a bit-exact container rewrite; --rate,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&formatName, "format", "", "output format: wav, aiff, flac, mp3, alac, or opus (default: from output extension)")
+	cmd.Flags().StringVar(&formatName, "format", "", "output format: wav, aiff, flac, mp3, aac, alac, or opus (default: from output extension)")
+	cmd.Flags().StringVar(&containerName, "container", "", "container override where the format has one: adts for aac (default: the format's native container; a bare .aac output implies adts)")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite the output if it exists")
 	cmd.Flags().IntVar(&rate, "rate", 0, "output sample rate in Hz (default: source rate)")
 	cmd.Flags().IntVar(&channels, "channels", 0, "output channel count: 1 or 2 (default: source layout)")
@@ -161,10 +173,12 @@ flags the transcode is a bit-exact container rewrite; --rate,
 	cmd.Flags().StringVar(&profileName, "resample-profile", "hq", "resampler quality: hq or fast")
 	cmd.Flags().StringVar(&ditherName, "dither", "tpdf", "dither when reducing depth: tpdf, shaped, or off")
 	cmd.Flags().IntVar(&flacLevel, "flac-level", 5, "FLAC compression level 0-8, size vs speed (flac output only)")
-	cmd.Flags().IntVar(&mp3Bitrate, "mp3-bitrate", 128, "MP3 constant bit rate in kbit/s (mp3 output only)")
+	cmd.Flags().IntVar(&mp3Bitrate, "mp3-bitrate", 128, "MP3 bit rate in kbit/s: constant, or the quality anchor under --mp3-vbr (mp3 output only)")
+	cmd.Flags().BoolVar(&mp3VBR, "mp3-vbr", false, "encode MP3 at variable bit rate anchored at --mp3-bitrate (mp3 output only)")
 	cmd.Flags().IntVar(&opusBitrate, "opus-bitrate", 96, "Opus target bit rate in kbit/s (opus output only)")
 	cmd.Flags().IntVar(&opusComplexity, "opus-complexity", 5, "Opus encoder complexity 0-10, quality vs speed (opus output only)")
 	cmd.Flags().BoolVar(&opusVBR, "opus-vbr", false, "encode Opus at variable bit rate around --opus-bitrate (opus output only)")
+	cmd.Flags().IntVar(&aacBitrate, "aac-bitrate", 128, "AAC target bit rate in kbit/s (aac output only)")
 	return cmd
 }
 

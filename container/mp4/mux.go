@@ -8,6 +8,7 @@ import (
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/codec/alac"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/waxerr"
@@ -39,12 +40,18 @@ type MuxerOptions struct {
 // live. The design is the CMAF/DASH shape HLS segments (a later milestone)
 // reuse.
 //
-// v1 carries ALAC only (the first fMP4 encoder). ALAC is lossless and
-// signals no gapless trims, so a nonzero Delay/Padding is rejected rather
-// than silently dropped; the edit-list path arrives with the lossy fMP4
-// codecs.
+// The muxer carries ALAC and AAC-LC. ALAC is lossless and signals no
+// gapless trims, so a nonzero Delay/Padding is rejected rather than
+// silently dropped. AAC's encoder priming rides in the init header's
+// edit list (delay is known up front; the length joins it when the
+// engine projects one), and when the writer can seek, End patches the
+// edit's duration with the encoder's exact trailer, upgrading a
+// projected or unknown length to the exact one. On a pure stream the
+// init bytes stand as written: full gapless when the length was known,
+// delay-only otherwise (the capability matrix's live fMP4 cell).
 type Muxer struct {
-	w io.Writer
+	w  io.Writer
+	ws io.WriteSeeker // nil when w cannot seek
 
 	rate     int
 	fragTgt  int
@@ -52,6 +59,15 @@ type Muxer struct {
 	ended    bool
 	seq      uint32 // next moof sequence number (1-based)
 	baseTime int64  // decode time (in samples) of the current fragment's first sample
+
+	// Edit-list back-patch state (AAC): the file offset of the elst
+	// entry's 64-bit duration, -1 when no edit list was written; the
+	// delay Begin declared; whether Begin already knew the exact length.
+	elstDurOff int64
+	delay      int64
+	knownLen   int64
+
+	off int64 // bytes written
 
 	// current fragment accumulator.
 	fragSamples int
@@ -62,7 +78,10 @@ type Muxer struct {
 
 // NewMuxer returns a fragmented MP4 muxer writing to w.
 func NewMuxer(w io.Writer, opts *MuxerOptions) *Muxer {
-	m := &Muxer{w: w, seq: 1}
+	m := &Muxer{w: w, seq: 1, elstDurOff: -1}
+	if ws, ok := w.(io.WriteSeeker); ok {
+		m.ws = ws
+	}
 	if opts != nil {
 		m.fragTgt = opts.FragmentSamples
 	}
@@ -81,29 +100,55 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("mp4: muxers are single-track, got %d", len(tracks)))
 	}
 	t := tracks[0]
-	if t.Codec != codec.ALAC {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("mp4: cannot mux codec %q (only alac)", t.Codec))
-	}
-	if t.Delay != 0 || t.Padding != 0 {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, "mp4: ALAC signals no gapless trims (lossless streams have none)")
-	}
 	if err := t.Fmt.Valid(); err != nil {
 		return err
 	}
-	cfg, err := alac.ParseMagicCookie(t.CodecConfig)
-	if err != nil {
-		return err
-	}
-	// Compare the fields the cookie constrains, not the whole Format: the
-	// cookie has no channel-layout field, so cfg.Format always reports the
-	// default layout, but the chain may deliver a non-default mask (a WAV
-	// EXTENSIBLE stereo file, say) that ALAC codes in bitstream order all the
-	// same. Requiring an exact Layout match would reject a track the plan and
-	// the encoder both accepted.
-	if want := cfg.Format(); t.Fmt.Rate != want.Rate || t.Fmt.Channels != want.Channels ||
-		t.Fmt.Type != want.Type || t.Fmt.BitDepth != want.BitDepth {
-		return waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("mp4: track format %v does not match the ALAC cookie (%v)", t.Fmt, want))
+
+	var entry, edts []byte
+	defaultDur := 0
+	switch t.Codec {
+	case codec.ALAC:
+		if t.Delay != 0 || t.Padding != 0 {
+			return waxerr.New(waxerr.CodeUnsupportedFormat, "mp4: ALAC signals no gapless trims (lossless streams have none)")
+		}
+		cfg, err := alac.ParseMagicCookie(t.CodecConfig)
+		if err != nil {
+			return err
+		}
+		// Compare the fields the cookie constrains, not the whole Format: the
+		// cookie has no channel-layout field, so cfg.Format always reports the
+		// default layout, but the chain may deliver a non-default mask (a WAV
+		// EXTENSIBLE stereo file, say) that ALAC codes in bitstream order all the
+		// same. Requiring an exact Layout match would reject a track the plan and
+		// the encoder both accepted.
+		if want := cfg.Format(); t.Fmt.Rate != want.Rate || t.Fmt.Channels != want.Channels ||
+			t.Fmt.Type != want.Type || t.Fmt.BitDepth != want.BitDepth {
+			return waxerr.New(waxerr.CodeUnsupportedFormat,
+				fmt.Sprintf("mp4: track format %v does not match the ALAC cookie (%v)", t.Fmt, want))
+		}
+		entry = alacSampleEntry(t.Fmt, cfg.Cookie)
+		defaultDur = alac.FrameSize
+	case codec.AACLC:
+		if t.Delay < 0 || t.Padding < 0 {
+			return waxerr.New(waxerr.CodeInvalidRequest, "mp4: negative gapless trims")
+		}
+		var err error
+		entry, err = aacSampleEntry(t) // validates the ASC against t.Fmt
+		if err != nil {
+			return err
+		}
+		cfg, _ := aac.ParseASC(t.CodecConfig)
+		defaultDur = cfg.FrameLength
+		// The edit list carries the encoder priming up front, plus the
+		// exact length when the engine projected one; End refines the
+		// length from the trailer when the writer can seek.
+		if t.Delay > 0 || t.Samples > 0 {
+			edts = elstBox(t.Delay, max(t.Samples, 0))
+		}
+		m.delay = t.Delay
+		m.knownLen = t.Samples
+	default:
+		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("mp4: cannot mux codec %q (alac, aac-lc)", t.Codec))
 	}
 
 	m.rate = t.Fmt.Rate
@@ -115,7 +160,19 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	if err := m.write(ftypBox()); err != nil {
 		return err
 	}
-	return m.write(moovBox(t.Fmt.Rate, alacSampleEntry(t.Fmt, cfg.Cookie), nil, alac.FrameSize))
+	moov := moovBox(t.Fmt.Rate, entry, edts, defaultDur)
+	if edts != nil {
+		// Remember where the elst entry's 64-bit duration landed for the
+		// End back-patch. The whole edts blob is matched, not the 4-byte
+		// tag, so a field added ahead of it later whose bytes happen to
+		// spell "elst" can never redirect the patch (today everything
+		// before the box is fixed constants plus the timescale, but the
+		// back-patch must not depend on that staying true).
+		if i := bytes.Index(moov, edts); i >= 0 {
+			m.elstDurOff = m.off + int64(i) + elstDurOffset
+		}
+	}
+	return m.write(moov)
 }
 
 // WritePacket appends one ALAC frame to the current fragment, flushing when
@@ -156,11 +213,35 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 		return waxerr.New(waxerr.CodeInternal, "mp4: End outside Begin")
 	}
 	m.ended = true
-	if trailer.Delay != 0 || trailer.Padding != 0 {
+	if trailer.Delay != m.delay {
+		return waxerr.New(waxerr.CodeInternal,
+			fmt.Sprintf("mp4: trailer delay %d disagrees with the init header's %d", trailer.Delay, m.delay))
+	}
+	if m.delay == 0 && (trailer.Padding != 0 || trailer.Delay != 0) {
+		// The ALAC path: lossless streams have no trims and Begin wrote
+		// no edit list to carry any.
 		return waxerr.New(waxerr.CodeUnsupportedFormat, "mp4: ALAC signals no gapless trims")
 	}
 	if len(m.durs) > 0 {
-		return m.flush()
+		if err := m.flush(); err != nil {
+			return err
+		}
+	}
+	// With a seekable writer, refine the edit list's duration to the
+	// encoder's exact sample count (the projected or unknown length
+	// Begin wrote becomes exact, completing the gapless signaling).
+	if m.ws != nil && m.elstDurOff >= 0 && trailer.Samples > 0 && trailer.Samples != m.knownLen {
+		if _, err := m.ws.Seek(m.elstDurOff, io.SeekStart); err != nil {
+			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp4: elst seek", err)
+		}
+		var dur [8]byte
+		binary.BigEndian.PutUint64(dur[:], uint64(trailer.Samples))
+		if _, err := m.ws.Write(dur[:]); err != nil {
+			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp4: elst patch", err)
+		}
+		if _, err := m.ws.Seek(m.off, io.SeekStart); err != nil {
+			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp4: seeking to end", err)
+		}
 	}
 	return nil
 }
@@ -185,6 +266,7 @@ func (m *Muxer) write(b []byte) error {
 	if _, err := m.w.Write(b); err != nil {
 		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp4: write", err)
 	}
+	m.off += int64(len(b))
 	return nil
 }
 

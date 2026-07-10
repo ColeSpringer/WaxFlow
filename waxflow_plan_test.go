@@ -121,6 +121,23 @@ func TestPlanTranscode(t *testing.T) {
 		t.Fatalf("VBR opus plan = bitRate %d estimated %d, want 0 and -1 (unknown)", vbrPlan.BitRate, vbrPlan.EstimatedBytes)
 	}
 
+	// MP3 follows the same contract: CBR reports its clamped rate, VBR
+	// leaves rate and size unknown.
+	mp3CBR, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "mp3", Rate: 44100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mp3CBR.BitRate != 128000 || mp3CBR.EstimatedBytes < 0 {
+		t.Fatalf("CBR mp3 plan = bitRate %d estimated %d, want 128000 and known", mp3CBR.BitRate, mp3CBR.EstimatedBytes)
+	}
+	mp3VBR, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "mp3", Rate: 44100, MP3VBR: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mp3VBR.BitRate != 0 || mp3VBR.EstimatedBytes != -1 {
+		t.Fatalf("VBR mp3 plan = bitRate %d estimated %d, want 0 and -1 (unknown)", mp3VBR.BitRate, mp3VBR.EstimatedBytes)
+	}
+
 	// Plan validation mirrors Transcode validation.
 	if _, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "vorbis"}); waxerr.CodeOf(err) != waxerr.CodeUnsupportedFormat {
 		t.Fatalf("unknown format: %v", err)
@@ -135,12 +152,13 @@ func TestPlanTranscode(t *testing.T) {
 
 func TestOutputsTable(t *testing.T) {
 	outs := waxflow.Outputs()
-	if len(outs) != 6 || outs[0].Name != "wav" || !outs[0].Live ||
+	if len(outs) != 7 || outs[0].Name != "wav" || !outs[0].Live ||
 		outs[1].Name != "opus" || !outs[1].Live ||
 		outs[2].Name != "aiff" || outs[2].Live ||
 		outs[3].Name != "flac" || !outs[3].Live ||
 		outs[4].Name != "mp3" || !outs[4].Live ||
-		outs[5].Name != "alac" || !outs[5].Live {
+		outs[5].Name != "aac" || !outs[5].Live ||
+		outs[6].Name != "alac" || !outs[6].Live {
 		t.Fatalf("Outputs() = %+v", outs)
 	}
 }

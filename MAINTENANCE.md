@@ -28,25 +28,48 @@ Operationally:
 | container/flacn | RFC 9639 (spec) | none |
 | container/ogg | RFC 3533 (spec); Xiph Ogg-FLAC mapping 1.0 (spec) | none |
 | codec/mp3 (decoder) | ISO 11172-3 / 13818-3 (spec); PDMP3 via hajimehoshi/go-mp3 (Apache-2.0, pipeline structure + tables); minimp3 (CC0, LSF scalefactor/intensity/band-edge handling) | none |
-| codec/mp3 (encoder) | ISO 11172-3 / 13818-3 (spec, quantization and Huffman); the forward Huffman tables and the polyphase analysis window are derived in code from the decoder's already-attributed decode trees and synthesis window (no new source); textbook filterbank/MDCT theory | Shine reached only as an `ffmpeg -c:a libshine` quality oracle (never opened; the ODG-proxy parity gate) |
+| codec/mp3 (encoder) | ISO 11172-3 / 13818-3 (spec: quantization, Huffman, scalefactor/compress/preflag layout, the informative two-loop encoder structure); the forward Huffman tables and the polyphase analysis window are derived in code from the decoder's already-attributed decode trees and synthesis window (no new source); dsp/psy (own, spec-derived) drives the noise shaping; textbook filterbank/MDCT theory | Shine and LAME reached only as `ffmpeg -c:a libshine` / `-c:a libmp3lame` binary quality oracles (never opened; the ODG-proxy gate names Shine, LAME is informational) |
 | container/mpa | ISO 11172-3 (spec); Xing/Info/VBRI and LAME-tag layout (documented interchange formats) | none |
+| dsp/psy | ISO 11172-3 Annex D model 2 and ISO 13818-7 Annex B (spec, informative psychoacoustic model); Terhardt ATH approximation and the bark scale (published formulas) | none |
+| codec/aac (encoder) | ISO 14496-3 (spec, incl. the informative encoder annex's two-loop structure); Bosi/Goldberg (textbook); forward Huffman tables, band boundaries, and windows derived in code from the decoder's already-attributed tables (no new source) | ffmpeg's native AAC encoder reached only as a binary quality oracle (never opened; the ODG-proxy gate) |
+| container/adts (muxer) | ISO 14496-3 1.A (spec); the write-side inverse of the demuxer's header parser | none |
+| container/mp4 (esds writer) | ISO 14496-1 section 7.2.6 descriptors (spec); the write-side inverse of the demuxer's parser | none |
 
 ## AAC patent-status review
 
-**Open. Must be completed before the AAC-LC encoder is enabled in release
-builds.** Record here a good-faith review of the base MPEG-2/4 AAC-LC
-patent status at time of shipping (the base patents are widely believed
-expired; verify then, not now).
+**Recorded 2026-07-10, at the milestone that enables the AAC-LC encoder
+in release builds.** This is a good-faith engineering review, not legal
+advice.
+
+- WaxFlow implements only the AAC-LC toolset: window switching, TNS,
+  M/S stereo, Huffman coding, the two-loop quantizer. Every one of
+  these tools is present in MPEG-2 AAC (ISO/IEC 13818-7, published
+  1997; essential filings 1997 and earlier), whose base patents, on
+  20-year terms, expired by the late 2010s. Commonly cited expiry
+  surveys place the last base AAC-LC-relevant patents' expiry in the
+  early 2020s across major jurisdictions; all predate this review by
+  several years.
+- Public precedent: Red Hat's legal review cleared an LC-only encoder
+  and decoder ("fdk-aac-free") for Fedora in 2017, and distributions
+  have shipped LC codecs since. ffmpeg has shipped a native AAC-LC
+  encoder in default builds for years.
+- The actively licensed parts of the Via/Fraunhofer AAC pool concern
+  the later extensions: SBR/HE-AAC, PS, ELD, xHE/USAC. All are
+  explicitly out of WaxFlow's scope (the decoder rejects or decodes
+  only the LC base layer; the encoder produces LC only).
+- Action if scope ever grows toward SBR/PS/xHE: redo this review
+  first; those toolsets remain licensed.
 
 ## Listening-test protocol
 
 The nightly encoder-quality harness (`make encoder-quality`, the
 `encoder-quality` job in `nightly.yml`) is the objective gate: it encodes
-the corpus with our encoder and the reference baseline (Shine for MP3),
-scores both with the ODG-proxy (`internal/testutil/odg.go`, a bark-band
-noise-to-mask ratio), and fails when our corpus mean falls below the
-baseline or any track drops more than the per-codec allowance. The HTML
-report is uploaded as a CI artifact.
+the corpus with our encoder and the reference baseline (Shine for MP3,
+ffmpeg's native aac for AAC-LC, libopus via the reference tools for
+Opus), scores both with the ODG-proxy (`internal/testutil/odg.go`, a
+bark-band noise-to-mask ratio) or opus_compare, and fails when our corpus
+mean falls below the baseline or any track drops more than the per-codec
+allowance. The HTML reports are uploaded as CI artifacts.
 
 Objective scores are a proxy, so a subjective ABX pass gates a release
 when a codec's quality changes:

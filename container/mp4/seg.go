@@ -209,6 +209,13 @@ func elstBox(mediaTime, duration int64) []byte {
 	return makeBox("edts", elst)
 }
 
+// elstDurOffset is where the entry's 64-bit duration sits inside the
+// blob elstBox returns: the edts and elst headers (8 bytes each), the
+// elst version/flags (4), and entry_count (4). The progressive muxer's
+// End back-patch depends on it; TestElstDurOffset pins it against the
+// builder.
+const elstDurOffset = 8 + 8 + 4 + 4
+
 // sampleEntryFor builds the codec's AudioSampleEntry from the track's
 // codec config, validating config against format like Muxer.Begin does.
 func sampleEntryFor(t container.Track) ([]byte, error) {
@@ -220,6 +227,8 @@ func sampleEntryFor(t container.Track) ([]byte, error) {
 		return opusSampleEntry(t)
 	case codec.FLAC:
 		return flacSampleEntry(t)
+	case codec.AACLC:
+		return aacSampleEntry(t)
 	case codec.ALAC:
 		cfg, err := alac.ParseMagicCookie(t.CodecConfig)
 		if err != nil {
@@ -236,7 +245,7 @@ func sampleEntryFor(t container.Track) ([]byte, error) {
 		return alacSampleEntry(t.Fmt, cfg.Cookie), nil
 	}
 	return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
-		fmt.Sprintf("mp4: cannot segment codec %q (opus, flac, alac)", t.Codec))
+		fmt.Sprintf("mp4: cannot segment codec %q (opus, flac, alac, aac-lc)", t.Codec))
 }
 
 // opusSampleEntry wraps the OpusHead fields in an 'Opus' entry with a

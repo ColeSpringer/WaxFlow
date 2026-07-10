@@ -47,3 +47,26 @@ func ShineEncodeFile(t testing.TB, wavPath string, kbps int) string {
 		"-c:a", "libshine", "-b:a", strconv.Itoa(kbps)+"k", out)
 	return out
 }
+
+// HaveLAME reports whether ffmpeg carries libmp3lame. LAME is an
+// informational reference column in the quality report, never a gate, so
+// absence is a false, not a skip.
+func HaveLAME(t testing.TB) bool {
+	t.Helper()
+	path, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return false
+	}
+	return exec.Command(path, "-hide_banner", "-h", "encoder=libmp3lame").Run() == nil
+}
+
+// LAMEEncodeFile encodes a WAV file to CBR MP3 with libmp3lame and returns
+// the output path.
+func LAMEEncodeFile(t testing.TB, wavPath string, kbps int) string {
+	t.Helper()
+	out := wavPath + ".lame.mp3"
+	t.Cleanup(func() { os.Remove(out) })
+	run(t, FFmpeg(t), "-hide_banner", "-v", "error", "-y", "-i", wavPath,
+		"-c:a", "libmp3lame", "-b:a", strconv.Itoa(kbps)+"k", out)
+	return out
+}

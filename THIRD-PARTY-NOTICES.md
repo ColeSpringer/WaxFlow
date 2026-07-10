@@ -57,6 +57,17 @@ Entries follow this format:
 > substitution is filled with local noise (non-reproducible by design);
 > SBR/PS are out of scope.
 
+> **codec/aac encoder**: original code written against ISO/IEC 14496-3
+> (the informative encoder annex for the two-loop quantizer structure)
+> and Bosi/Goldberg. AAC encoders are Tier B (ffmpeg aacenc is LGPL), so
+> none were opened while implementing. It introduces no new third-party
+> data: the forward Huffman tables, scalefactor-band boundaries, and
+> window shapes are the decoder's already-attributed tables (above), and
+> the psychoacoustic model is dsp/psy, written from the ISO 11172-3
+> Annex D model 2 description. ffmpeg's native AAC encoder serves only
+> as a black-box quality oracle in the encoder-quality gate; its source
+> was not consulted.
+
 > **codec/vorbis decoder**: original code written against the Xiph
 > *Vorbis I specification*. The codebook Huffman codeword assignment
 > (`assignCodewords`) follows the algorithm in the public-domain

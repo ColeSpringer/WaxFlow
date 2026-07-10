@@ -652,6 +652,48 @@ func TestStreamTranscodeOpus(t *testing.T) {
 	}
 }
 
+// TestStreamTranscodeAAC streams a WAV source as AAC in both containers:
+// the default progressive fMP4 (audio/mp4) and the container=adts legacy
+// opt-out (audio/aac, a raw ADTS elementary stream). The two are distinct
+// cache entries (the canonical params carry the container).
+func TestStreamTranscodeAAC(t *testing.T) {
+	env := newTestEnv(t, nil)
+
+	resp := env.get(t, "/stream?src=lib/sine.wav&format=aac&bitrate=128", nil)
+	fmp4 := readBody(t, resp)
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "audio/mp4" {
+		t.Fatalf("live aac transcode = %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	if len(fmp4) < 8 || string(fmp4[4:8]) != "ftyp" {
+		t.Fatal("aac fMP4 output does not begin with an ftyp box")
+	}
+
+	resp = env.get(t, "/stream?src=lib/sine.wav&format=aac&bitrate=128&container=adts", nil)
+	adts := readBody(t, resp)
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "audio/aac" {
+		t.Fatalf("live adts transcode = %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	if len(adts) < 2 || adts[0] != 0xFF || adts[1]&0xF0 != 0xF0 {
+		t.Fatal("adts output does not begin with an ADTS syncword")
+	}
+	if bytes.Equal(adts, fmp4) {
+		t.Fatal("container=adts served the fMP4 cache entry; the container is not in the cache key")
+	}
+
+	// container= on a format without alternates, and with auto, both fail
+	// up front with the invalid-request envelope.
+	resp = env.get(t, "/stream?src=lib/sine.wav&format=mp3&container=adts", nil)
+	if resp.StatusCode != 400 {
+		t.Fatalf("container=adts on mp3 = %d, want 400", resp.StatusCode)
+	}
+	readBody(t, resp)
+	resp = env.get(t, "/stream?src=lib/sine.wav&container=adts", nil)
+	if resp.StatusCode != 400 {
+		t.Fatalf("container=adts with format=auto = %d, want 400", resp.StatusCode)
+	}
+	readBody(t, resp)
+}
+
 // TestStreamMP3BitrateEdges checks the lossy quality-parameter edges: q=high
 // clamps to the layer maximum on a low output rate instead of erroring, and an
 // empty q= value is ignored rather than tripping the q/bitrate exclusion.

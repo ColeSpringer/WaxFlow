@@ -418,7 +418,7 @@ func TestSegmentedResampledRestart(t *testing.T) {
 func TestInitSegmentDeterministic(t *testing.T) {
 	e := waxflow.New()
 	track := container.Track{Codec: codec.PCM, Fmt: audio.Format{Rate: 48000, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}, Samples: 480000, Default: true}
-	for _, format := range []string{"opus", "flac", "alac"} {
+	for _, format := range []string{"opus", "flac", "alac", "aac"} {
 		opts := waxflow.TranscodeOptions{Format: format}
 		plan, err := e.PlanSegments(track, opts, 0)
 		if err != nil {
@@ -445,6 +445,11 @@ func TestInitSegmentDeterministic(t *testing.T) {
 		}
 		if format == "flac" && !bytes.Contains(a, []byte("dfLa")) {
 			t.Errorf("flac init missing dfLa")
+		}
+		if format == "aac" {
+			if !bytes.Contains(a, []byte("mp4a")) || !bytes.Contains(a, []byte("esds")) || !bytes.Contains(a, []byte("elst")) {
+				t.Errorf("aac init missing mp4a/esds or the delay edit list")
+			}
 		}
 	}
 }

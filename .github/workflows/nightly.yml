@@ -71,11 +71,12 @@ jobs:
       - run: make hls-e2e
 
   # Encoder-quality gates: score our lossy encoders against the reference
-  # baselines (Shine for MP3 via the ODG-proxy; libopus for Opus via the
-  # reference opus_demo/opus_compare built from the pinned source), enforce
-  # the docs/quality-gates.md parity gates, and upload the HTML reports.
-  # libshine ships in Ubuntu's ffmpeg build; the libopus tools are built by
-  # `make opus-tools` and cached alongside the pinned corpus.
+  # baselines (Shine for MP3 and ffmpeg's native aac for AAC via the
+  # ODG-proxy; libopus for Opus via the reference opus_demo/opus_compare
+  # built from the pinned source), enforce the docs/quality-gates.md gates,
+  # and upload the HTML reports. libshine ships in Ubuntu's ffmpeg build;
+  # the libopus tools are built by `make opus-tools` and cached alongside
+  # the pinned corpus.
   encoder-quality:
     runs-on: ubuntu-latest
     steps:
@@ -92,7 +93,7 @@ jobs:
           key: quality-${{ hashFiles('internal/testutil/vectors.go') }}
       - run: go run ./internal/testutil/cmd/vectorfetch opus/corpus/
       - run: make opus-tools
-      - run: make encoder-quality QUALITY_REPORT=quality-report.html OPUS_QUALITY_REPORT=opus-quality-report.html
+      - run: make encoder-quality QUALITY_REPORT=quality-report.html AAC_QUALITY_REPORT=aac-quality-report.html OPUS_QUALITY_REPORT=opus-quality-report.html
       - name: upload the encoder-quality reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -100,5 +101,6 @@ jobs:
           name: encoder-quality-report
           path: |
             quality-report.html
+            aac-quality-report.html
             opus-quality-report.html
           if-no-files-found: ignore

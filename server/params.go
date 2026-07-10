@@ -78,7 +78,7 @@ func parseGain(v string, dflt gainSpec) (gainSpec, error) {
 var streamParamNames = map[string]bool{
 	"src": true, "format": true, "rate": true, "ch": true, "bits": true,
 	"gain": true, "t": true, "track": true, "maxBitRate": true,
-	"bitrate": true, "q": true,
+	"bitrate": true, "q": true, "container": true,
 	"id": true, sign.ParamExp: true, sign.ParamKID: true, sign.ParamSig: true,
 }
 
@@ -94,6 +94,7 @@ type streamParams struct {
 	track      int     // -1 when absent
 	maxBitRate int     // kbit/s cap for the decision ladder; 0 none
 	bitrate    int     // lossy output bit rate in kbit/s; 0 selects the default
+	container  string  // container override ("adts"); "" selects the format default
 	identity   string  // id= parameter, "" when absent
 }
 
@@ -118,6 +119,14 @@ func parseStreamParams(q url.Values, defaultGain gainSpec) (*streamParams, error
 	}
 	if p.format == "" {
 		p.format = "auto"
+	}
+	// container= overrides the format's default packaging where one
+	// exists (today: aac's adts opt-out). Whether the resolved format
+	// honors it is the plan's call; format=auto never resolves to a
+	// format with alternates, so pairing it with auto is a caller error.
+	p.container = q.Get("container")
+	if p.container != "" && p.format == "auto" {
+		return bad("container requires an explicit format")
 	}
 
 	var err error

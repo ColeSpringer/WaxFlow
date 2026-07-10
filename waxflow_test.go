@@ -386,7 +386,7 @@ func (onlyWriter) Write(p []byte) (int, error) { return len(p), nil }
 // TestOutputTable pins the writer-side capability table: names, extension
 // mapping (both spellings), and its agreement with the read-side exts.
 func TestOutputTable(t *testing.T) {
-	if got := waxflow.OutputFormats(); len(got) != 6 || got[0] != "wav" || got[1] != "opus" || got[2] != "aiff" || got[3] != "flac" || got[4] != "mp3" || got[5] != "alac" {
+	if got := waxflow.OutputFormats(); len(got) != 7 || got[0] != "wav" || got[1] != "opus" || got[2] != "aiff" || got[3] != "flac" || got[4] != "mp3" || got[5] != "aac" || got[6] != "alac" {
 		t.Errorf("OutputFormats() = %v", got)
 	}
 	tests := []struct{ ext, want string }{
@@ -395,7 +395,10 @@ func TestOutputTable(t *testing.T) {
 		{"aif", "aiff"}, {".aiff", "aiff"}, {"aifc", "aiff"}, {"afc", "aiff"},
 		{"flac", "flac"}, {".FLAC", "flac"},
 		{"mp3", "mp3"}, {".MP3", "mp3"}, {"mpga", "mp3"},
-		{"alac", ""}, {"m4a", "alac"}, {".M4A", "alac"},
+		// m4a moved from alac to aac when the AAC encoder landed (the
+		// M9-anticipated disambiguation); alac keeps no extension and is
+		// selected by name.
+		{"alac", ""}, {"m4a", "aac"}, {".M4A", "aac"}, {"aac", "aac"},
 		{"xyz", ""}, {"", ""},
 	}
 	for _, tt := range tests {

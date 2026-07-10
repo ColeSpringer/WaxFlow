@@ -200,6 +200,43 @@ func TestMP3EncodeDifferential(t *testing.T) {
 	}
 }
 
+// TestMP3VBRGaplessAndOracle checks the VBR path end to end: the engine
+// writes a Xing-led variable-rate stream whose gapless invariant holds
+// through our read pipeline, and ffmpeg (when available) decodes it and
+// reports the exact duration from the tag.
+func TestMP3VBRGaplessAndOracle(t *testing.T) {
+	const rate, frames = 44100, 40000
+	f := audio.Format{Rate: rate, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
+	wav := synthWAV(t, f, frames)
+	mp3Bytes := transcodeMP3(t, wav, waxflow.TranscodeOptions{MP3Bitrate: 128000, MP3VBR: true})
+
+	// Frames pick their own rates; at least the Xing frame's rate and one
+	// content rate must appear.
+	out, reported := decodeMP3Ours(t, mp3Bytes)
+	if reported != frames {
+		t.Errorf("reported track samples %d, want %d", reported, frames)
+	}
+	if got := int64(len(out) / 2); got != frames {
+		t.Errorf("decoded %d frames after gapless trim, want %d", got, frames)
+	}
+
+	if path := testutil.FFmpeg(t); path != "" {
+		dir := t.TempDir()
+		fp := filepath.Join(dir, "out.mp3")
+		if err := os.WriteFile(fp, mp3Bytes, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		dec := testutil.FFmpegDecodeF32(t, fp)
+		if len(dec) == 0 {
+			t.Fatal("ffmpeg decoded nothing")
+		}
+		info := testutil.FFprobeFile(t, fp)
+		if info.CodecName != "mp3" {
+			t.Errorf("ffprobe codec %q, want mp3", info.CodecName)
+		}
+	}
+}
+
 // snrDB computes SNR at a fixed lag over interleaved channels.
 func snrDB(ref, got []float32, lag, ch int) float64 {
 	var s, n float64

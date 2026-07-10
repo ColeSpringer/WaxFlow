@@ -102,7 +102,7 @@ byte-identical to `waxflow probe --json`.
 
 ## GET /stream
 
-    /stream?src=<ref>&format=auto|wav|flac|alac|mp3|opus&rate=&ch=&bits=16|24&bitrate=|q=&gain=&t=&track=&maxBitRate=
+    /stream?src=<ref>&format=auto|wav|flac|alac|mp3|aac|opus&rate=&ch=&bits=16|24&bitrate=|q=&container=&gain=&t=&track=&maxBitRate=
 
 Source references (`src`): `<root>/<relative/path>` under a configured
 library root; `upload:<id>` and `pid:<ULID>` return `501
@@ -116,7 +116,10 @@ Parameters (unknown parameter names are rejected):
   under `format=flac` with no transforming parameters direct-plays
   instead); `alac` a lossless Apple Lossless stream in progressive
   fragmented MP4 (`audio/mp4`); `mp3` a baseline CBR MP3 (128 kbit/s
-  default, `bitrate`/`q` select it); `opus` a CELT-only Ogg-Opus stream
+  default, `bitrate`/`q` select it); `aac` an AAC-LC stream in
+  progressive fragmented MP4 (`audio/mp4`, 128 kbit/s default,
+  `bitrate`/`q` select it; the init header's edit list carries the
+  gapless trims); `opus` a CELT-only Ogg-Opus stream
   (`audio/ogg`, 96 kbit/s default, `bitrate`/`q` select it). Other formats
   join as encoders land (`/caps` is the truth). `aiff` exists for jobs but
   has no streaming form: 415. Live FLAC and ALAC streams omit the size hints
@@ -139,10 +142,16 @@ Parameters (unknown parameter names are rejected):
   land.
 - `bitrate`, `q`: lossy quality selection, mutually exclusive. `bitrate`
   is an explicit CBR rate in kbit/s; `q` is a preset (`low` 96, `med`
-  128, `high` 192). Both require an explicit lossy `format` (today
-  `mp3`); on a lossless output they are `415`. A `bitrate`/`q` request
+  128, `high` 192). Both require an explicit lossy `format` (`mp3`,
+  `aac`, `opus`); on a lossless output they are `415`. A `bitrate`/`q` request
   forces a re-encode (never direct-play), and the resolved bit rate is
   part of the cache key, so two rates never share an entry.
+- `container`: overrides the format's packaging where an alternative
+  exists; today only `format=aac` has one: `container=adts` selects the
+  raw ADTS elementary stream (`audio/aac`), a legacy opt-out for players
+  without fMP4 support. ADTS carries no gapless signaling, which is why
+  fMP4 is the default. On any other format (or with `format=auto`) the
+  parameter is `400`.
 - `maxBitRate`: a kbit/s cap for the decision ladder. For direct play the
   cap is checked against whole-file bytes over duration (tags and
   embedded art included): direct play ships the entire file, so the wire
@@ -201,7 +210,7 @@ session.
 
 | Path | Purpose |
 |---|---|
-| `GET /hls/master.m3u8?v=...` | master playlist: one rung per ladder bitrate with `BANDWIDTH` and `CODECS` (`Opus`, `fLaC`, `alac`). With an API key, raw parameters (`src`, `format`, `bitrate` or `bitrates`, `bits`, `rate`, `ch`, `gain`, `segDur`) also work; the daemon builds the descriptor. |
+| `GET /hls/master.m3u8?v=...` | master playlist: one rung per ladder bitrate with `BANDWIDTH` and `CODECS` (`Opus`, `fLaC`, `alac`, `mp4a.40.2`). With an API key, raw parameters (`src`, `format`, `bitrate` or `bitrates`, `bits`, `rate`, `ch`, `gain`, `segDur`) also work; the daemon builds the descriptor. |
 | `GET /hls/media.m3u8?v=...` | variant VOD playlist: `EXT-X-VERSION:7`, `EXT-X-MAP`, `EXT-X-INDEPENDENT-SEGMENTS`, every segment listed with its exact duration, `EXT-X-ENDLIST`. Unknown source lengths are measured (frame-index walk), never estimated. |
 | `GET /hls/init.mp4?v=...` | the CMAF init header (codec config; the edit list carries encoder delay and the exact length) |
 | `GET /hls/seg/{n}.m4s?v=...` | media segment n (0-based). Cached segments serve with ranges and strong ETags; misses wait on the variant worker (within a 3-segment lookahead) or restart it at n. |
@@ -209,7 +218,7 @@ session.
 Segments are `styp` + `moof`+`mdat` fragments, boundaries snapped to
 whole encoder frames (`segDur` is a target; the playlist carries exact
 durations), all sync samples, decode timeline in sample units. Formats
-with a segmented form: `opus`, `flac`, `alac` (see `/caps`
+with a segmented form: `opus`, `flac`, `alac`, `aac` (see `/caps`
 `delivery.hlsFormats`). A `410 source-changed` means the file changed
 since minting: re-mint and reload.
 
@@ -235,8 +244,9 @@ embedded, and the response is:
                    {"name": "aiff", "live": false, "exts": ["aif", "aiff", "aifc", "afc"]},
                    {"name": "flac", "live": true, "exts": ["flac"]},
                    {"name": "mp3", "live": true, "exts": ["mp3", "mpga"]},
-                   {"name": "alac", "live": true, "exts": ["m4a"]}],
-      "delivery": {"progressive": true, "hls": true, "hlsFormats": ["opus", "flac", "alac"],
+                   {"name": "aac", "live": true, "exts": ["m4a", "aac"]},
+                   {"name": "alac", "live": true, "exts": []}],
+      "delivery": {"progressive": true, "hls": true, "hlsFormats": ["opus", "flac", "alac", "aac"],
                    "jobs": false, "uploads": false},
       "profiles": {}
     }
