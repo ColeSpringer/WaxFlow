@@ -1,11 +1,13 @@
 package opus
 
 // SILK resampler, ported from libopus silk/resampler.c,
-// resampler_private_up2_HQ.c, and resampler_private_IIR_FIR.c.
-// Opus decodes SILK at its internal 8/12/16 kHz rate and this
-// resamples to the 48 kHz output; that path is always the IIR_FIR flavor (a 2x
-// HQ IIR upsample followed by a 12-phase fractional FIR), so only the
-// upsampling case is ported.
+// resampler_private_up2_HQ.c, resampler_private_IIR_FIR.c,
+// resampler_private_down_FIR.c, and resampler_private_AR2.c.
+// The decoder upsamples SILK's internal 8/12/16 kHz rate to the 48 kHz output
+// (always the IIR_FIR flavor: a 2x HQ IIR upsample followed by a 12-phase
+// fractional FIR). The encoder runs the opposite direction, 48 kHz API input
+// down to the internal rate, which is always the down-FIR flavor (a
+// second-order AR filter followed by FIR interpolation).
 
 // delayMatrixDec[rateID(in)][rateID(out)] is the resampler input delay
 // (silk/resampler.c). rateID(48000) == 4.
@@ -13,6 +15,16 @@ var delayMatrixDec = [3][6]int8{
 	{4, 0, 2, 0, 0, 0},
 	{0, 9, 4, 7, 4, 4},
 	{0, 3, 12, 7, 7, 7},
+}
+
+// delayMatrixEnc[rateID(in)][rateID(out)] is the encoder-direction input delay.
+var delayMatrixEnc = [6][3]int8{
+	{6, 0, 3},
+	{0, 7, 3},
+	{0, 1, 10},
+	{0, 2, 6},
+	{18, 10, 12},
+	{0, 0, 44},
 }
 
 // rateID maps a sample rate to its delay-matrix column (silk/resampler.c).
@@ -31,47 +43,132 @@ func b2iRate(b bool) int {
 	return 0
 }
 
+// Resampler flavors (silk/resampler.c USE_silk_resampler_*).
+const (
+	resamplerCopy = iota
+	resamplerUp2HQWrapper
+	resamplerIIRFIR
+	resamplerDownFIR
+)
+
+// Down-FIR orders (silk/resampler_structs.h).
+const (
+	resamplerDownOrderFIR0 = 18
+	resamplerDownOrderFIR1 = 24
+	resamplerDownOrderFIR2 = 36
+	resamplerMaxFIROrder   = 36
+)
+
 // silkResampler holds one channel's resampler state (silk_resampler_state_struct).
 type silkResampler struct {
 	sIIR        [6]int32
-	sFIR        [resamplerOrderFIR12]int16
+	sFIR16      [resamplerMaxFIROrder]int16
+	sFIR32      [resamplerMaxFIROrder]int32
 	delayBuf    [96]int16
 	fsInKHz     int
 	fsOutKHz    int
 	inputDelay  int
 	invRatioQ16 int32
 	batchSize   int
+	fn          int
+	firOrder    int
+	firFracs    int
+	coefs       []int16
 }
 
-// init configures the resampler for the given input/output rates (Hz). Only
-// upsampling to a higher rate (the decoder path) is supported.
-func (S *silkResampler) init(fsInHz, fsOutHz int) {
+// init configures the resampler for the given input/output rates (Hz).
+// forEnc selects the encoder direction (downsampling to 8/12/16 kHz);
+// otherwise the decoder direction (upsampling from 8/12/16 kHz).
+func (S *silkResampler) init(fsInHz, fsOutHz int, forEnc bool) {
 	*S = silkResampler{}
-	S.inputDelay = int(delayMatrixDec[rateID(fsInHz)][rateID(fsOutHz)])
+	if forEnc {
+		S.inputDelay = int(delayMatrixEnc[rateID(fsInHz)][rateID(fsOutHz)])
+	} else {
+		S.inputDelay = int(delayMatrixDec[rateID(fsInHz)][rateID(fsOutHz)])
+	}
 	S.fsInKHz = fsInHz / 1000
 	S.fsOutKHz = fsOutHz / 1000
 	S.batchSize = S.fsInKHz * resamplerMaxBatchMS
-	const up2x = 1
+	up2x := 0
+	switch {
+	case fsOutHz > fsInHz:
+		if fsOutHz == 2*fsInHz {
+			S.fn = resamplerUp2HQWrapper
+		} else {
+			S.fn = resamplerIIRFIR
+			up2x = 1
+		}
+	case fsOutHz < fsInHz:
+		S.fn = resamplerDownFIR
+		switch {
+		case 4*fsOutHz == 3*fsInHz:
+			S.firFracs = 3
+			S.firOrder = resamplerDownOrderFIR0
+			S.coefs = silk_Resampler_3_4_COEFS
+		case 3*fsOutHz == 2*fsInHz:
+			S.firFracs = 2
+			S.firOrder = resamplerDownOrderFIR0
+			S.coefs = silk_Resampler_2_3_COEFS
+		case 2*fsOutHz == fsInHz:
+			S.firFracs = 1
+			S.firOrder = resamplerDownOrderFIR1
+			S.coefs = silk_Resampler_1_2_COEFS
+		case 3*fsOutHz == fsInHz:
+			S.firFracs = 1
+			S.firOrder = resamplerDownOrderFIR2
+			S.coefs = silk_Resampler_1_3_COEFS
+		case 4*fsOutHz == fsInHz:
+			S.firFracs = 1
+			S.firOrder = resamplerDownOrderFIR2
+			S.coefs = silk_Resampler_1_4_COEFS
+		case 6*fsOutHz == fsInHz:
+			S.firFracs = 1
+			S.firOrder = resamplerDownOrderFIR2
+			S.coefs = silk_Resampler_1_6_COEFS
+		default:
+			panic("opus: unsupported resampler ratio")
+		}
+	default:
+		S.fn = resamplerCopy
+	}
 	S.invRatioQ16 = silkLSHIFT32(silkDIV32(silkLSHIFT32(int32(fsInHz), 14+up2x), int32(fsOutHz)), 2)
 	for silkSMULWW(S.invRatioQ16, int32(fsOutHz)) < silkLSHIFT32(int32(fsInHz), up2x) {
 		S.invRatioQ16++
 	}
 }
 
-// resample resamples inLen input samples to out (silk_resampler; IIR_FIR path).
+// resample resamples inLen input samples to out (silk_resampler).
 func (S *silkResampler) resample(out, in []int16, inLen int) {
 	nSamples := S.fsInKHz - S.inputDelay
 	copy(S.delayBuf[S.inputDelay:S.fsInKHz], in[:nSamples])
-	S.iirFIR(out, S.delayBuf[:S.fsInKHz], S.fsInKHz)
-	S.iirFIR(out[S.fsOutKHz:], in[nSamples:inLen], inLen-S.fsInKHz)
+	switch S.fn {
+	case resamplerUp2HQWrapper:
+		S.up2HQWrapper(out, S.delayBuf[:S.fsInKHz], S.fsInKHz)
+		S.up2HQWrapper(out[S.fsOutKHz:], in[nSamples:inLen], inLen-S.fsInKHz)
+	case resamplerIIRFIR:
+		S.iirFIR(out, S.delayBuf[:S.fsInKHz], S.fsInKHz)
+		S.iirFIR(out[S.fsOutKHz:], in[nSamples:inLen], inLen-S.fsInKHz)
+	case resamplerDownFIR:
+		S.downFIR(out, S.delayBuf[:S.fsInKHz], S.fsInKHz)
+		S.downFIR(out[S.fsOutKHz:], in[nSamples:inLen], inLen-S.fsInKHz)
+	default:
+		copy(out, S.delayBuf[:S.fsInKHz])
+		copy(out[S.fsOutKHz:], in[nSamples:inLen])
+	}
 	copy(S.delayBuf[:S.inputDelay], in[inLen-S.inputDelay:inLen])
+}
+
+// up2HQWrapper is the exact-2x upsampling flavor
+// (silk_resampler_private_up2_HQ_wrapper).
+func (S *silkResampler) up2HQWrapper(out, in []int16, inLen int) {
+	silkResamplerUp2HQ(S.sIIR[:], out, in, inLen)
 }
 
 // iirFIR runs the 2x HQ upsampler then the fractional FIR interpolation
 // (silk_resampler_private_IIR_FIR).
 func (S *silkResampler) iirFIR(out, in []int16, inLen int) {
 	buf := make([]int16, resamplerOrderFIR12+2*S.batchSize)
-	copy(buf[:resamplerOrderFIR12], S.sFIR[:])
+	copy(buf[:resamplerOrderFIR12], S.sFIR16[:resamplerOrderFIR12])
 	indexInc := S.invRatioQ16
 	outPos, inPos := 0, 0
 	nSamplesIn := 0
@@ -91,7 +188,7 @@ func (S *silkResampler) iirFIR(out, in []int16, inLen int) {
 			break
 		}
 	}
-	copy(S.sFIR[:], buf[nSamplesIn<<1:])
+	copy(S.sFIR16[:resamplerOrderFIR12], buf[nSamplesIn<<1:])
 }
 
 // iirFIRInterpol applies the 12-phase fractional FIR and returns the number of
@@ -111,6 +208,91 @@ func iirFIRInterpol(out []int16, buf []int16, maxIndexQ16, indexIncQ16 int32) in
 		resQ15 = silkSMLABB(resQ15, int32(b[7]), int32(silk_resampler_frac_FIR_12[11-ti][0]))
 		out[n] = int16(silkSAT16(silkRSHIFTROUND(resQ15, 15)))
 		n++
+	}
+	return n
+}
+
+// downFIR runs the second-order AR filter then FIR interpolation
+// (silk_resampler_private_down_FIR).
+func (S *silkResampler) downFIR(out, in []int16, inLen int) {
+	buf := make([]int32, S.batchSize+S.firOrder)
+	copy(buf[:S.firOrder], S.sFIR32[:S.firOrder])
+	firCoefs := S.coefs[2:]
+	indexInc := S.invRatioQ16
+	outPos, inPos := 0, 0
+	nSamplesIn := 0
+	for {
+		nSamplesIn = inLen
+		if nSamplesIn > S.batchSize {
+			nSamplesIn = S.batchSize
+		}
+		silkResamplerAR2(S.sIIR[:2], buf[S.firOrder:], in[inPos:], S.coefs, nSamplesIn)
+		maxIndex := int32(nSamplesIn) << 16
+		outPos += downFIRInterpol(out[outPos:], buf, firCoefs, S.firOrder, S.firFracs, maxIndex, indexInc)
+		inPos += nSamplesIn
+		inLen -= nSamplesIn
+		if inLen > 1 {
+			copy(buf[:S.firOrder], buf[nSamplesIn:])
+		} else {
+			break
+		}
+	}
+	copy(S.sFIR32[:S.firOrder], buf[nSamplesIn:])
+}
+
+// silkResamplerAR2 is the second-order AR filter with single delay elements
+// (silk_resampler_private_AR2). Output is Q8.
+func silkResamplerAR2(S []int32, outQ8 []int32, in []int16, aQ14 []int16, length int) {
+	for k := 0; k < length; k++ {
+		out32 := S[0] + silkLSHIFT(int32(in[k]), 8)
+		outQ8[k] = out32
+		out32 = silkLSHIFT(out32, 2)
+		S[0] = silkSMLAWB(S[1], out32, int32(aQ14[0]))
+		S[1] = silkSMULWB(out32, int32(aQ14[1]))
+	}
+}
+
+// downFIRInterpol applies the down-FIR interpolation and returns the number of
+// output samples written (silk_resampler_private_down_FIR_INTERPOL).
+func downFIRInterpol(out []int16, buf []int32, firCoefs []int16, firOrder, firFracs int, maxIndexQ16, indexIncQ16 int32) int {
+	n := 0
+	switch firOrder {
+	case resamplerDownOrderFIR0:
+		for indexQ16 := int32(0); indexQ16 < maxIndexQ16; indexQ16 += indexIncQ16 {
+			b := buf[indexQ16>>16:]
+			interpolInd := silkSMULWB(indexQ16&0xFFFF, int32(firFracs))
+			p := firCoefs[resamplerDownOrderFIR0/2*interpolInd:]
+			resQ6 := silkSMULWB(b[0], int32(p[0]))
+			for j := 1; j < 9; j++ {
+				resQ6 = silkSMLAWB(resQ6, b[j], int32(p[j]))
+			}
+			p = firCoefs[resamplerDownOrderFIR0/2*(int32(firFracs)-1-interpolInd):]
+			for j := 0; j < 9; j++ {
+				resQ6 = silkSMLAWB(resQ6, b[17-j], int32(p[j]))
+			}
+			out[n] = int16(silkSAT16(silkRSHIFTROUND(resQ6, 6)))
+			n++
+		}
+	case resamplerDownOrderFIR1:
+		for indexQ16 := int32(0); indexQ16 < maxIndexQ16; indexQ16 += indexIncQ16 {
+			b := buf[indexQ16>>16:]
+			resQ6 := silkSMULWB(b[0]+b[23], int32(firCoefs[0]))
+			for j := 1; j < 12; j++ {
+				resQ6 = silkSMLAWB(resQ6, b[j]+b[23-j], int32(firCoefs[j]))
+			}
+			out[n] = int16(silkSAT16(silkRSHIFTROUND(resQ6, 6)))
+			n++
+		}
+	case resamplerDownOrderFIR2:
+		for indexQ16 := int32(0); indexQ16 < maxIndexQ16; indexQ16 += indexIncQ16 {
+			b := buf[indexQ16>>16:]
+			resQ6 := silkSMULWB(b[0]+b[35], int32(firCoefs[0]))
+			for j := 1; j < 18; j++ {
+				resQ6 = silkSMLAWB(resQ6, b[j]+b[35-j], int32(firCoefs[j]))
+			}
+			out[n] = int16(silkSAT16(silkRSHIFTROUND(resQ6, 6)))
+			n++
+		}
 	}
 	return n
 }

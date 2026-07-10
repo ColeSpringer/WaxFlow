@@ -28,8 +28,15 @@ var transientInvTable = [128]byte{
 // metric is scale-invariant. Clean-room port of libopus transient_analysis.
 // toneFreq/toneishness (tone_detect) keep the partial cycle of a very low
 // frequency tone from reading as a transient.
-func transientAnalysis(in [][]float32, n, C int, tfEstimate *float32, tfChan *int, toneFreq, toneishness float32) int {
-	const forwardDecay = float32(0.0625)
+func transientAnalysis(in [][]float32, n, C int, tfEstimate *float32, tfChan *int,
+	allowWeakTransients bool, weakTransient *int, toneFreq, toneishness float32) int {
+	// For lower bitrates (hybrid), a slower forward masking decay avoids
+	// having to code transients that could destabilize energy.
+	forwardDecay := float32(0.0625)
+	*weakTransient = 0
+	if allowWeakTransients {
+		forwardDecay = 0.03125
+	}
 	len2 := n / 2
 	tmp := make([]float32, n)
 	maskMetric := 0
@@ -97,6 +104,12 @@ func transientAnalysis(in [][]float32, n, C int, tfEstimate *float32, tfChan *in
 	if toneishness > 0.98 && toneFreq < 0.026 {
 		isTransient = 0
 		maskMetric = 0
+	}
+	// A weak transient doesn't get short blocks; the hybrid tf override
+	// handles it instead.
+	if allowWeakTransients && isTransient != 0 && maskMetric < 600 {
+		isTransient = 0
+		*weakTransient = 1
 	}
 	// Arbitrary metric for VBR boost / tf_analysis.
 	tfMax := float32(math.Sqrt(27*float64(maskMetric))) - 42
@@ -300,10 +313,10 @@ func tfAnalysis(effEnd, isTransient int, tfRes []int, lambda int, X []float32, N
 // allocTrimAnalysis picks the allocation trim (0..10), which tilts the bit
 // allocation toward low or high frequencies. Clean-room port of libopus
 // alloc_trim_analysis (float build): the base level tracks equiv_rate, then the
-// spectral tilt, transient estimate, and (stereo) inter-channel correlation
-// nudge it. The stereo-saving output feeds VBR only and is not tracked here;
-// surround trim and the tonality analysis are out of scope.
-func allocTrimAnalysis(X, bandLogE []float32, end, LM, C, N0 int, tfEstimate float32, intensity, equivRate int, stereoSaving *float32) int {
+// spectral tilt, transient estimate, tonality slope, and (stereo) inter-channel
+// correlation nudge it. The stereo-saving output feeds VBR only and is not
+// tracked here; surround trim is out of scope.
+func allocTrimAnalysis(X, bandLogE []float32, end, LM, C, N0 int, tfEstimate float32, intensity, equivRate int, stereoSaving *float32, analysis *analysisInfo) int {
 	trim := float32(5.0)
 	if equivRate < 64000 {
 		trim = 4.0
@@ -342,6 +355,11 @@ func allocTrimAnalysis(X, bandLogE []float32, end, LM, C, N0 int, tfEstimate flo
 	diff /= float32(C * (end - 1))
 	trim -= max(-2.0, min(2.0, (diff+1.0)/6.0))
 	trim -= 2 * tfEstimate
+	// A rising tonality slope means the tonal energy sits high in the spectrum,
+	// so tilt the allocation that way.
+	if analysis.valid {
+		trim -= max(-2.0, min(2.0, 2.0*(analysis.tonalitySlope+0.05)))
+	}
 	trimIndex := int(math.Floor(float64(0.5 + trim)))
 	if trimIndex < 0 {
 		trimIndex = 0
@@ -542,7 +560,7 @@ func stereoAnalysis(X []float32, LM, N0 int) int {
 // energy (a copy of bandLogE unless the complexity>=8 second MDCT ran); offsets
 // are consumed by the dynalloc coding loop, so a suboptimal value only costs
 // quality, never a decodable stream.
-func dynallocOffsets(bandLogE, bandLogE2, oldBandE []float32, start, end, C, LM, effectiveBytes, isTransient int, vbr, constrainedVBR bool, offsets, importance, spreadWeight []int, totBoost *int, toneFreq, toneishness float32) float32 {
+func dynallocOffsets(bandLogE, bandLogE2, oldBandE []float32, start, end, C, LM, effectiveBytes, isTransient int, vbr, constrainedVBR bool, offsets, importance, spreadWeight []int, totBoost *int, toneFreq, toneishness float32, analysis *analysisInfo) float32 {
 	nb := celtNBands
 	for i := 0; i < end; i++ {
 		offsets[i] = 0
@@ -685,6 +703,13 @@ func dynallocOffsets(bandLogE, bandLogE2, oldBandE []float32, start, end, C, LM,
 			follower[end-2] += 1
 		}
 	}
+	// Boost the low bands the analyser flagged as leaking through the MDCT
+	// (leak_boost is in 1/64 dB-ish units per band).
+	if analysis.valid {
+		for i := start; i < min(leakBands, end); i++ {
+			follower[i] += float32(analysis.leakBoost[i]) * (1.0 / 64)
+		}
+	}
 	boostTotal := 0
 	for i := start; i < end; i++ {
 		follower[i] = min(follower[i], 4)
@@ -717,13 +742,14 @@ func dynallocOffsets(bandLogE, bandLogE2, oldBandE []float32, start, end, C, LM,
 }
 
 // computeVBR derives the VBR target rate (in 1/8-bit units per frame) from the
-// base target and the frame's analysis: stereo savings, dynalloc boost, the
-// transient estimate, an energy floor (maxDepth), and a temporal-VBR nudge.
-// Clean-room port of libopus compute_vbr (float build) for the CELT-music path:
-// the tonality/activity/surround terms depend on the tone analyser and energy
-// mask, which are out of scope, so their neutral (disabled) values apply.
+// base target and the frame's analysis: the analyser's activity and tonality,
+// stereo savings, dynalloc boost, the transient estimate, an energy floor
+// (maxDepth), and a temporal-VBR nudge. Clean-room port of libopus compute_vbr
+// (float build); the surround terms depend on the energy mask, which is out of
+// scope, so their neutral (disabled) values apply.
 func computeVBR(baseTarget, LM, bitrate, lastCodedBands, C, intensity int, constrainedVBR bool,
-	stereoSaving float32, totBoost int, tfEstimate float32, maxDepth, temporalVBR float32) int {
+	stereoSaving float32, totBoost int, tfEstimate float32, maxDepth, temporalVBR float32,
+	analysis *analysisInfo, pitchChange bool) int {
 	nb := celtNBands
 	codedBands := lastCodedBands
 	if codedBands == 0 {
@@ -734,6 +760,10 @@ func computeVBR(baseTarget, LM, bitrate, lastCodedBands, C, intensity int, const
 		codedBins += int(celtEBands[min(intensity, codedBands)]) << LM
 	}
 	target := baseTarget
+	// Mostly-inactive frames (silence, speech pauses) need fewer bits.
+	if analysis.valid && analysis.activity < 0.4 {
+		target -= int(float32(codedBins<<bitRes) * (0.4 - analysis.activity))
+	}
 	// Stereo savings: fewer bits when the channels are correlated.
 	if C == 2 {
 		codedStereoBands := min(intensity, codedBands)
@@ -748,6 +778,16 @@ func computeVBR(baseTarget, LM, bitrate, lastCodedBands, C, intensity int, const
 	// Transient boost (compensating for the average). SHL32 is a float no-op.
 	const tfCalibration = 0.044
 	target += int((tfEstimate - tfCalibration) * float32(target))
+	// Tonality boost (compensating for the average): tonal content masks
+	// quantization noise poorly, and a pitch change costs prediction.
+	if analysis.valid {
+		tonal := max(0.0, analysis.tonality-0.15) - 0.12
+		tonalTarget := target + int(float32(codedBins<<bitRes)*1.2*tonal)
+		if pitchChange {
+			tonalTarget += int(float32(codedBins<<bitRes) * 0.8)
+		}
+		target = tonalTarget
+	}
 	// Energy floor so we never starve a loud frame.
 	bins := int(celtEBands[nb-2]) << LM
 	floorDepth := int(float32(C*bins<<bitRes) * maxDepth)

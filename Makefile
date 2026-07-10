@@ -93,22 +93,26 @@ opus-tools:
 
 # Encoder-quality gates: encode a corpus with our lossy encoders and the
 # reference baselines, score both (ODG-proxy vs Shine for MP3 and vs
-# ffmpeg's native aac for AAC; reference opus_compare vs libopus for Opus),
-# enforce the docs/quality-gates.md gates, and publish HTML reports. MP3
-# requires ffmpeg with libshine, AAC plain ffmpeg; Opus requires `make
-# opus-tools` and the fetched corpus (`make verify-vectors`). Override the
-# output paths with QUALITY_REPORT / AAC_QUALITY_REPORT /
-# OPUS_QUALITY_REPORT.
+# ffmpeg's native aac for AAC; reference opus_compare vs libopus for Opus,
+# on the music corpus at 96/128/160k stereo and the TSP speech corpus at
+# 24/32/48k mono), enforce the docs/quality-gates.md gates, and publish
+# HTML reports. MP3 requires ffmpeg with libshine, AAC plain ffmpeg; Opus
+# requires `make opus-tools` and the fetched corpora (`make
+# verify-vectors`). Override the output paths with QUALITY_REPORT /
+# AAC_QUALITY_REPORT / OPUS_QUALITY_REPORT / OPUS_SPEECH_QUALITY_REPORT.
 QUALITY_REPORT ?= quality-report.html
 AAC_QUALITY_REPORT ?= aac-quality-report.html
 OPUS_QUALITY_REPORT ?= opus-quality-report.html
+OPUS_SPEECH_QUALITY_REPORT ?= opus-speech-quality-report.html
 encoder-quality:
 	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_REQUIRE_SHINE=1 WAXFLOW_QUALITY_REPORT=$(QUALITY_REPORT) \
 		go test -run TestMP3EncoderQuality -count=1 -v .
 	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_QUALITY_REPORT=$(AAC_QUALITY_REPORT) \
 		go test -run TestAACEncoderQuality -count=1 -v .
 	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_OPUS_TOOLS=1 WAXFLOW_REQUIRE_VECTORS=1 WAXFLOW_QUALITY_REPORT=$(OPUS_QUALITY_REPORT) \
-		go test -run TestOpusEncoderQuality -count=1 -timeout 30m -v .
+		go test -run 'TestOpusEncoderQuality$$' -count=1 -timeout 30m -v .
+	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_OPUS_TOOLS=1 WAXFLOW_REQUIRE_VECTORS=1 WAXFLOW_QUALITY_REPORT=$(OPUS_SPEECH_QUALITY_REPORT) \
+		go test -run TestOpusSpeechEncoderQuality -count=1 -timeout 30m -v .
 
 # Browser HLS e2e: a real daemon, the committed /demo page, and hls.js in
 # headless Chromium via Playwright (scripts/hls-e2e.mjs). Gated tooling:

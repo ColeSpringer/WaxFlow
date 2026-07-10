@@ -51,8 +51,9 @@ per-track bound to **1.5**.
 ## Consequences
 
 - `TestOpusEncoderQuality` enforces: geometric-mean error ratio <= 1.20 per
-  bitrate (96/128/160 kbps stereo) and no track > 2.6, on the pinned
-  20-track corpus, complexity 10, CBR.
+  bitrate (96/128/160 kbps stereo) and no track > 2.6 for phase 1, tightened
+  to 1.5 at M15 as planned, on the pinned 20-track corpus, complexity 10,
+  CBR.
 - The nightly report still shows Q values per track for human reading; the
   gate math uses error ratios only.
 - The phase-2 gate (docs/quality-gates.md) inherits the same unit, and the

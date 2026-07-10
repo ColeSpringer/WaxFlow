@@ -941,7 +941,13 @@ func quantAllBands(start, end int, X, Y []float32, collapseMasks []byte, bandE [
 			b = 0
 		}
 
-		if (M*int(celtEBands[i])-N >= M*int(celtEBands[start]) || i == start+1) && (updateLowband || lowbandOffset == 0) {
+		// Folding state advances only under resynth (the decoder, or an RDO
+		// encoder): a plain encode keeps lowband nil like the reference, which
+		// is what makes aliasing lowbandScratch onto the last band's X safe.
+		// Without the resynth condition, transient-frame scratch copies destroy
+		// the last band's spectrum before it is coded (silent quality loss:
+		// legal bitstream, collapsed top band).
+		if ctx.resynth && (M*int(celtEBands[i])-N >= M*int(celtEBands[start]) || i == start+1) && (updateLowband || lowbandOffset == 0) {
 			lowbandOffset = i
 		}
 		if i == start+1 {

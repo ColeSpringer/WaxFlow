@@ -167,6 +167,32 @@ var Vectors = []Vector{
 	{Name: "opus/corpus/sample18r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample18r.wav", SHA256: "8c8992f75ad19d4c6bcc08451f10e24ad4cf079edb0f6274678bf45d4346a42d"},
 	{Name: "opus/corpus/sample19r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample19r.wav", SHA256: "449a991ff64548a542ead06731df08985144dac90d5331fc80fe072165c6be0a"},
 	{Name: "opus/corpus/sample20r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample20r.wav", SHA256: "959d38211f5e6318a7dc47dae8f7f3b3be6d5397c22ee73db17ab376402b6515"},
+	// The Opus speech-quality corpus source: the McGill TSP Speech Database
+	// 48 kHz set (Peter Kabal, BSD-2-Clause; hosted by the McGill MMSP lab
+	// since the late 1990s), ~1400 short studio-recorded Harvard sentences
+	// from two dozen speakers as mono 16-bit WAV. The speech gate reads a
+	// fixed subset straight from the zip (OpusSpeechCorpus): eight speakers,
+	// four female and four male, six lexically-first utterances each,
+	// concatenated to one ~15 s item per speaker. Fetched at test time and
+	// cached like the tarballs; never committed.
+	{Name: "opus/speech/tsp48k.zip", URL: "https://www.mmsp.ece.mcgill.ca/Documents/Data/TSP-Speech-Database/48k.zip", SHA256: "9cfb3a3a13014c8ff90770a5d1923f376da73ac927b9100f09826f60cf06cf43"},
+}
+
+// OpusSpeechCorpus returns the speech-gate items: a name per speaker and the
+// zip member paths whose decoded audio is concatenated in order.
+func OpusSpeechCorpus() map[string][]string {
+	speakers := map[string][]string{}
+	for _, s := range []struct{ spk, script string }{
+		{"FA", "FA01"}, {"FC", "FC13"}, {"FE", "FE25"}, {"FG", "FG37"},
+		{"MA", "MA01"}, {"MC", "MC13"}, {"MH", "MH43"}, {"MK", "MK61"},
+	} {
+		var members []string
+		for i := 1; i <= 6; i++ {
+			members = append(members, fmt.Sprintf("48k/%s/%s_%02d.wav", s.spk, s.script, i))
+		}
+		speakers["tsp-"+strings.ToLower(s.spk)] = members
+	}
+	return speakers
 }
 
 // OpusQualityCorpus lists the vector names of the pinned 20-track Opus

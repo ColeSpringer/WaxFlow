@@ -10,10 +10,12 @@ package opus
 // search at high complexity) into one CELT payload. The analysis depth is gated
 // by the complexity knob (see EncoderOptions.Complexity).
 //
-// Phase-1 scope: the tonality analyser (analysis->valid) stays off, so its
-// activity/tonality boosts and the pre-filter gain damping are not taken; it
-// lands with the phase-2 speech/music decision. The bitstream is fully
-// standards-compliant and decodes with both our decoder and libopus.
+// The tonality analyser's per-frame result (analysisInfo) feeds four hooks,
+// matching the reference: leak_boost into the dynalloc follower, the
+// max_pitch_ratio damping of the pre-filter gain, the activity/tonality VBR
+// target adjustments, and the analysis-driven signalBandwidth handed to the
+// allocator. The Opus layer stamps e.analysis before each frame; a zero value
+// (valid=false) reproduces the phase-1 analyser-less behavior bit-exactly.
 
 // celtEncoder holds the persistent CELT encode state for one stream.
 type celtEncoder struct {
@@ -45,6 +47,17 @@ type celtEncoder struct {
 	oldLogE     []float32
 	oldLogE2    []float32
 	energyError []float32
+
+	// Hybrid/redundancy controls set by the Opus layer: disablePF and
+	// forceIntra mirror CELT_SET_PREDICTION, silkInfo* mirror
+	// CELT_SET_SILK_INFO, analysis mirrors CELT_SET_ANALYSIS (cleared by
+	// Reset like the reference's post-ENCODER_RESET_START region, so
+	// mode-transition frames encode analyser-less exactly as libopus does).
+	disablePF          bool
+	forceIntra         bool
+	silkInfoSignalType int
+	silkInfoOffset     int
+	analysis           analysisInfo
 
 	delayedIntra    float32
 	consecTransient int
@@ -120,6 +133,7 @@ func (e *celtEncoder) Reset() {
 		e.oldLogE[i] = -28
 		e.oldLogE2[i] = -28
 	}
+	e.analysis = analysisInfo{}
 	e.delayedIntra = 0
 	e.consecTransient = 0
 	e.spreadDecision = spreadNormal
@@ -219,22 +233,46 @@ func tfEncode(start, end, isTransient int, tfRes []int, LM, tfSelect int, e *ran
 // frame is then shrunk to its computed size). It returns the range-coded payload,
 // whose length equals nbBytes in CBR and is <= nbBytes in VBR.
 func (e *celtEncoder) celtEncode(pcm [][]float32, N, LM, C, start, end, nbBytes int) []byte {
+	buf := make([]byte, nbBytes)
+	enc := newRangeEncoder(buf)
+	n := e.celtEncodeWithEC(pcm, N, LM, C, start, end, enc, nbBytes)
+	return enc.payload()[:n]
+}
+
+// celtEncodeWithEC encodes one frame into enc, which may already carry SILK
+// data (the hybrid stitch; libopus celt_encode_with_ec with an external
+// ec_enc). nbBytes is the total packet budget including any bits already in
+// enc. It finalizes enc and returns the compressed size in bytes.
+func (e *celtEncoder) celtEncodeWithEC(pcm [][]float32, N, LM, C, start, end int, enc *rangeEncoder, nbBytes int) int {
 	M := 1 << LM
 	overlap := e.overlap
 	nb := celtNBands
 	effEnd := min(end, nb)
+	hybrid := start != 0
+
+	tell0Frac := enc.tellFrac()
+	tell := enc.tell()
+	nbFilledBytes := 0
+	if tell > 1 {
+		nbFilledBytes = (tell + 4) >> 3
+	} else {
+		tell0Frac = 1
+		tell = 1
+	}
 
 	// Rate control. In CBR, nbCompressedBytes is the fixed payload size and
-	// effectiveBytes equals it. In VBR, the buffer starts at the passed maximum
-	// (nbBytes), effectiveBytes tracks the target rate, and the frame is shrunk
-	// to its computed size after the analysis (libopus vbr_rate/effectiveBytes).
+	// effectiveBytes equals the still-free part. In VBR, the buffer starts at
+	// the passed maximum (nbBytes), effectiveBytes tracks the target rate, and
+	// the frame is shrunk to its computed size after the analysis (libopus
+	// vbr_rate/effectiveBytes).
+	nbCompressedBytes := nbBytes
 	vbrRate := 0
-	effectiveBytes := nbBytes
+	effectiveBytes := nbCompressedBytes - nbFilledBytes
 	if e.vbr && e.bitrate > 0 {
-		vbrRate = (e.bitrate / 50) << bitRes
+		// Target bits per frame in 1/8-bit units (frame rate = 48000/N).
+		vbrRate = (e.bitrate / (48000 / N)) << bitRes
 		effectiveBytes = vbrRate >> (3 + bitRes)
 	}
-	nbCompressedBytes := nbBytes
 	totalBits := nbCompressedBytes * 8
 
 	// Equivalent bitrate for the frame, clamped to the configured target. Feeds
@@ -243,9 +281,6 @@ func (e *celtEncoder) celtEncode(pcm [][]float32, N, LM, C, start, end, nbBytes 
 	if e.bitrate > 0 {
 		equivRate = min(equivRate, e.bitrate-(40*C+20)*((400>>LM)-50))
 	}
-
-	buf := make([]byte, nbCompressedBytes)
-	enc := newRangeEncoder(buf)
 
 	// Constrained-VBR bust prevention: cap this frame's buffer so the
 	// short-term rate can never violate the reservoir bound, before any
@@ -277,15 +312,19 @@ func (e *celtEncoder) celtEncode(pcm [][]float32, N, LM, C, start, end, nbBytes 
 		}
 	}
 
-	// Silence flag (tell==1 at the start of a CELT-only frame).
+	// Silence flag (codable only at tell==1, i.e. never mid-packet in hybrid).
 	silence := 0
 	if sampleMax <= 1.0/(1<<24) {
 		silence = 1
 	}
-	enc.encodeBitLogp(silence, 15)
+	if tell == 1 {
+		enc.encodeBitLogp(silence, 15)
+	} else {
+		silence = 0
+	}
 	if silence != 0 {
-		tell := nbCompressedBytes * 8
-		enc.nbits += tell - enc.tell()
+		tellAll := nbCompressedBytes * 8
+		enc.nbits += tellAll - enc.tell()
 	}
 
 	// Tone detection guards the pitch estimator, the transient detector, and
@@ -296,23 +335,35 @@ func (e *celtEncoder) celtEncode(pcm [][]float32, N, LM, C, start, end, nbBytes 
 	// Transient analysis (complexity >= 1).
 	isTransient := 0
 	shortBlocks := 0
+	weakTransient := 0
 	var tfEstimate float32
 	tfChan := 0
 	if silence == 0 {
-		isTransient = transientAnalysis(in, N+overlap, C, &tfEstimate, &tfChan, toneFreq, toneishness)
+		// Reduces energy instability on fricatives at low-bitrate hybrid while
+		// keeping real transients on vowels (small SILK quantization offset).
+		allowWeak := hybrid && effectiveBytes < 15 && e.silkInfoSignalType != 2
+		isTransient = transientAnalysis(in, N+overlap, C, &tfEstimate, &tfChan, allowWeak, &weakTransient, toneFreq, toneishness)
 	}
 	toneishness = min(toneishness, 1-tfEstimate)
 
 	// Pitch pre-filter: search, decide, apply, and code the post-filter
 	// parameters the decoder reads back (the filter pair is exactly inverse).
-	nbAvailableBytes := nbCompressedBytes
+	nbAvailableBytes := nbCompressedBytes - nbFilledBytes
+	pitchChange := false
 	{
-		enabled := silence == 0 && nbAvailableBytes > 12*C && enc.tell()+16 <= totalBits
+		enabled := silence == 0 && nbAvailableBytes > 12*C && enc.tell()+16 <= totalBits &&
+			!hybrid && !e.disablePF
 		prefilterTapset := e.tapsetDecision
 		pfOn, pitchIndex, gain1, qg := e.runPrefilter(in, C, N, prefilterTapset,
 			enabled, tfEstimate, nbAvailableBytes, toneFreq, toneishness)
+		// A pitch jump on a strongly pitched frame feeds the VBR tonality boost
+		// (compared against the previous frame's period, before the update below).
+		if (gain1 > 0.4 || e.prefilterGain > 0.4) && (!e.analysis.valid || e.analysis.tonality > 0.3) &&
+			(float64(pitchIndex) > 1.26*float64(e.prefilterPeriod) || float64(pitchIndex) < 0.79*float64(e.prefilterPeriod)) {
+			pitchChange = true
+		}
 		if pfOn == 0 {
-			if enc.tell()+16 <= totalBits {
+			if !hybrid && enc.tell()+16 <= totalBits {
 				enc.encodeBitLogp(0, 1)
 			}
 		} else {
@@ -420,20 +471,33 @@ func (e *celtEncoder) celtEncode(pcm [][]float32, N, LM, C, start, end, nbBytes 
 	spreadWeight := make([]int, nb)
 	totBoost := 0
 	maxDepth := dynallocOffsets(bandLogE, bandLogE2, e.oldBandE, start, end, C, LM, effectiveBytes, isTransient,
-		e.vbr, e.constrainedVBR, offsets, importance, spreadWeight, &totBoost, toneFreq, toneishness)
+		e.vbr, e.constrainedVBR, offsets, importance, spreadWeight, &totBoost, toneFreq, toneishness, &e.analysis)
 
 	// Time-frequency resolution analysis (complexity >= 2), consuming importance
 	// and producing per-band tf_res plus tf_select. Below the threshold or at low
 	// complexity, resolution follows the transient flag (libopus fallback).
 	tfRes := make([]int, nb)
 	tfSelect := 0
-	if effectiveBytes >= 15*C && e.complexity >= 2 {
+	switch {
+	case effectiveBytes >= 15*C && !hybrid && e.complexity >= 2 && toneishness < 0.98:
 		lambda := max(80, 20480/effectiveBytes+2)
 		tfSelect = tfAnalysis(effEnd, isTransient, tfRes, lambda, X, N, LM, tfEstimate, tfChan, importance)
 		for i := effEnd; i < end; i++ {
 			tfRes[i] = tfRes[effEnd-1]
 		}
-	} else {
+	case hybrid && weakTransient != 0:
+		// Weak transients rely on TF-on-long-window's imperfection instead of
+		// short blocks, avoiding energy collapse at low bitrate.
+		for i := 0; i < end; i++ {
+			tfRes[i] = 1
+		}
+	case hybrid && effectiveBytes < 15 && e.silkInfoSignalType != 2:
+		// Low-bitrate hybrid: force 5 ms temporal resolution.
+		for i := 0; i < end; i++ {
+			tfRes[i] = 0
+		}
+		tfSelect = isTransient
+	default:
 		for i := 0; i < end; i++ {
 			tfRes[i] = isTransient
 		}
@@ -450,7 +514,7 @@ func (e *celtEncoder) celtEncode(pcm [][]float32, N, LM, C, start, end, nbBytes 
 
 	errorArr := make([]float32, C*nb)
 	quantCoarseEnergy(start, end, effEnd, bandLogE, e.oldBandE, totalBits, errorArr, enc,
-		C, LM, nbCompressedBytes, false, &e.delayedIntra, e.complexity >= 4)
+		C, LM, nbAvailableBytes, e.forceIntra, &e.delayedIntra, e.complexity >= 4)
 
 	tfEncode(start, end, isTransient, tfRes, LM, tfSelect, enc)
 
@@ -460,7 +524,13 @@ func (e *celtEncoder) celtEncode(pcm [][]float32, N, LM, C, start, end, nbBytes 
 	// anchor for the next frame.
 	spread := spreadNormal
 	if enc.tell()+4 <= totalBits {
-		if shortBlocks != 0 || e.complexity < 3 || nbCompressedBytes < 10*C {
+		if hybrid {
+			if e.complexity == 0 {
+				spread = spreadNone
+			} else if isTransient == 0 {
+				spread = spreadAggr
+			}
+		} else if shortBlocks != 0 || e.complexity < 3 || nbCompressedBytes < 10*C {
 			if e.complexity == 0 {
 				spread = spreadNone
 			}
@@ -524,7 +594,7 @@ func (e *celtEncoder) celtEncode(pcm [][]float32, N, LM, C, start, end, nbBytes 
 	// stereo-saving estimate the VBR rate control reads.
 	allocTrim := 5
 	if tellF+(6<<bitRes) <= totalBitsFrac-totalBoost {
-		allocTrim = allocTrimAnalysis(X, bandLogE, end, LM, C, N, tfEstimate, e.intensity, equivRate, &e.stereoSaving)
+		allocTrim = allocTrimAnalysis(X, bandLogE, end, LM, C, N, tfEstimate, e.intensity, equivRate, &e.stereoSaving, &e.analysis)
 		enc.encodeICDF(allocTrim, celtTrimICDF, 7)
 		tellF = enc.tellFrac()
 	}
@@ -538,13 +608,42 @@ func (e *celtEncoder) celtEncode(pcm [][]float32, N, LM, C, start, end, nbBytes 
 	if vbrRate > 0 {
 		lmDiff := celtMaxLM - LM
 		minAllowed := ((tellF + totalBoost + (1 << (bitRes + 3)) - 1) >> (bitRes + 3)) + 2
-		nbCompressedBytes = min(nbCompressedBytes, maxFrameBytes) // packet_size_cap (LM==3: >>0)
-		baseTarget := vbrRate - ((40*C + 20) << bitRes)
+		// The 37 bits reserved in hybrid keep space to signal a redundant
+		// frame; a shorter packet would desync the entropy coder.
+		if hybrid {
+			minAllowed = max(minAllowed, (tell0Frac+(37<<bitRes)+totalBoost+(1<<(bitRes+3))-1)>>(bitRes+3))
+		}
+		nbCompressedBytes = min(nbCompressedBytes, maxFrameBytes>>(3-LM)) // packet_size_cap
+		var baseTarget int
+		if !hybrid {
+			baseTarget = vbrRate - ((40*C + 20) << bitRes)
+		} else {
+			baseTarget = max(0, vbrRate-((9*C+4)<<bitRes))
+		}
 		if e.constrainedVBR {
 			baseTarget += e.vbrOffset >> lmDiff
 		}
-		target := computeVBR(baseTarget, LM, e.bitrate, e.lastCodedBands, C, e.intensity,
-			e.constrainedVBR, e.stereoSaving, totBoost, tfEstimate, maxDepth, temporalVBR)
+		var target int
+		if !hybrid {
+			target = computeVBR(baseTarget, LM, e.bitrate, e.lastCodedBands, C, e.intensity,
+				e.constrainedVBR, e.stereoSaving, totBoost, tfEstimate, maxDepth, temporalVBR,
+				&e.analysis, pitchChange)
+		} else {
+			target = baseTarget
+			// Tonal frames (offset<100) need more bits than noisy ones.
+			if e.silkInfoOffset < 100 {
+				target += 12 << bitRes >> (3 - LM)
+			}
+			if e.silkInfoOffset > 100 {
+				target -= 18 << bitRes >> (3 - LM)
+			}
+			// Boost transients and vowels with temporal spikes.
+			target += int((tfEstimate - 0.25) * float32(50<<bitRes))
+			// A strong transient needs enough bits for the first two bands.
+			if tfEstimate > 0.7 {
+				target = max(target, 50<<bitRes)
+			}
+		}
 		target += tellF
 		nbAvailableBytes := (target + (1 << (bitRes + 2))) >> (bitRes + 3)
 		nbAvailableBytes = max(minAllowed, nbAvailableBytes)
@@ -600,7 +699,25 @@ func (e *celtEncoder) celtEncode(pcm [][]float32, N, LM, C, start, end, nbBytes 
 	fineQuant := make([]int, nb)
 	finePriority := make([]int, nb)
 	balance := 0
+	// The allocator skips bands above the signal's detected bandwidth, floored
+	// by rate so a misdetection can't starve the coded spectrum.
 	signalBandwidth := end - 1
+	if e.analysis.valid {
+		var minBandwidth int
+		switch {
+		case equivRate < 32000*C:
+			minBandwidth = 13
+		case equivRate < 48000*C:
+			minBandwidth = 16
+		case equivRate < 60000*C:
+			minBandwidth = 18
+		case equivRate < 80000*C:
+			minBandwidth = 19
+		default:
+			minBandwidth = 20
+		}
+		signalBandwidth = max(e.analysis.bandwidth, minBandwidth)
+	}
 	codedBands := cltComputeAllocation(start, end, offsets, caps, allocTrim, &e.intensity, &dualStereo,
 		bits, &balance, pulses, fineQuant, finePriority, C, LM, enc, nil, true, e.lastCodedBands, signalBandwidth)
 	if e.lastCodedBands != 0 {
@@ -653,7 +770,7 @@ func (e *celtEncoder) celtEncode(pcm [][]float32, N, LM, C, start, end, nbBytes 
 	}
 
 	enc.done()
-	return enc.payload()
+	return nbCompressedBytes
 }
 
 // updateEnergyState carries the quantized log energies forward for the next

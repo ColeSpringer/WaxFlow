@@ -84,9 +84,11 @@ deterministic mode.
   do not compare across error depths (ADR-0008; the original 2.0/5.0-point
   budgets translate at the metric's calibration to ratios 1.20/1.51).
 - Gate: geometric-mean error ratio <= **1.20** per bitrate; no track >
-  **2.6**. The per-track bound admits the documented phase-1 gap (no
-  tonality analyser, worth up to 2.5x per track in libopus's own A/B), and
-  phase 2 tightens it to **1.5** when the analyser lands (ADR-0008).
+  **1.5** (ADR-0008). The phase-1 bound was 2.6, admitting the documented
+  analyser-less gap; M15 landed the tonality analyser's CELT hooks and
+  fixed the encoder's last-band scratch clobber, and the measured corpus
+  now sits at mean parity or better (128/160k means below 1.0, worst track
+  1.22 at 96k).
 - The pitch pre-filter's per-frame decisions (on, period, gain, tapset)
   agree with libopus on >= **90%** of frames on a pitched fixture.
 - >= **15x** realtime portable (>= 30x with the SIMD build).

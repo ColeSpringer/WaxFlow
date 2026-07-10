@@ -1,6 +1,7 @@
 package opus
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -136,4 +137,60 @@ func TestFramingVsFFprobe(t *testing.T) {
 		t.Fatal("no packets decoded")
 	}
 	t.Logf("validated %d Opus packets against ffprobe durations", i)
+}
+
+// TestOpusPacketPad pins the CBR padding encoding across every structural
+// shape (RFC 6716 section 3.2.5): growth by exactly one byte must produce a
+// plain code 3 packet with the padding bit clear (the padding form has two
+// bytes of minimum overhead, so it cannot express one), and larger growth
+// pads with correctly chained length bytes. Every padded packet must parse
+// back through the decoder's packet splitter to the original frame at the
+// exact target length.
+func TestOpusPacketPad(t *testing.T) {
+	toc := genTOC(modeSILK, 50, bandwidthWide, 1) // config 9, code 0
+	frame := make([]byte, 40)
+	for i := range frame {
+		frame[i] = byte(i + 1)
+	}
+	pkt := append([]byte{toc}, frame...)
+
+	for _, tc := range []struct {
+		name    string
+		target  int
+		wantPad bool
+	}{
+		{"short-by-1", len(pkt) + 1, false},
+		{"short-by-2", len(pkt) + 2, true},
+		{"short-by-3", len(pkt) + 3, true},
+		{"short-by-256", len(pkt) + 256, true},
+		{"short-by-257", len(pkt) + 257, true},
+		{"short-by-258", len(pkt) + 258, true},
+		{"short-by-512", len(pkt) + 512, true},
+		{"already-at-target", len(pkt), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := opusPacketPad(append([]byte(nil), pkt...), tc.target)
+			if len(out) != max(tc.target, len(pkt)) {
+				t.Fatalf("padded length %d, want %d", len(out), tc.target)
+			}
+			if tc.target > len(pkt) {
+				if out[0] != toc|0x3 {
+					t.Fatalf("TOC %#x, want code 3 %#x", out[0], toc|0x3)
+				}
+				if got := out[1]&0x40 != 0; got != tc.wantPad {
+					t.Fatalf("padding bit %v, want %v (count byte %#x)", got, tc.wantPad, out[1])
+				}
+			}
+			frames, err := splitPacket(out)
+			if err != nil {
+				t.Fatalf("padded packet does not parse: %v", err)
+			}
+			if len(frames) != 1 {
+				t.Fatalf("parsed %d frames, want 1", len(frames))
+			}
+			if !bytes.Equal(frames[0].data, frame) {
+				t.Fatalf("frame data corrupted by padding")
+			}
+		})
+	}
 }

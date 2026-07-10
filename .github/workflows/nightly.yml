@@ -94,9 +94,9 @@ jobs:
             testdata/vectors
             testdata/tools
           key: quality-${{ hashFiles('internal/testutil/vectors.go') }}
-      - run: go run ./internal/testutil/cmd/vectorfetch opus/corpus/
+      - run: go run ./internal/testutil/cmd/vectorfetch opus/corpus/ opus/speech/
       - run: make opus-tools
-      - run: make encoder-quality QUALITY_REPORT=quality-report.html AAC_QUALITY_REPORT=aac-quality-report.html OPUS_QUALITY_REPORT=opus-quality-report.html
+      - run: make encoder-quality QUALITY_REPORT=quality-report.html AAC_QUALITY_REPORT=aac-quality-report.html OPUS_QUALITY_REPORT=opus-quality-report.html OPUS_SPEECH_QUALITY_REPORT=opus-speech-quality-report.html
       - name: upload the encoder-quality reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -106,4 +106,5 @@ jobs:
             quality-report.html
             aac-quality-report.html
             opus-quality-report.html
+            opus-speech-quality-report.html
           if-no-files-found: ignore

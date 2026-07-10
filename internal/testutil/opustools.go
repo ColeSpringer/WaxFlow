@@ -85,7 +85,11 @@ func WriteOpusBitstream(path string, packets [][]byte, ranges []uint32) error {
 // for sample-exact alignment.
 func OpusDemoDecode(t testing.TB, opusDemo, bitPath string, rate, channels int) []int16 {
 	t.Helper()
-	out := filepath.Join(t.TempDir(), "dec.sw")
+	// Not t.TempDir(): that defers cleanup to test end, and a corpus-sweep
+	// test makes hundreds of these calls (gigabytes on a tmpfs /tmp).
+	dir := mkTempDir(t)
+	defer os.RemoveAll(dir)
+	out := filepath.Join(dir, "dec.sw")
 	cmd := exec.Command(opusDemo, "-d", strconv.Itoa(rate), strconv.Itoa(channels), bitPath, out)
 	if msg, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("opus_demo -d: %v\n%s", err, msg)
@@ -100,7 +104,8 @@ func OpusDemoDecode(t testing.TB, opusDemo, bitPath string, rate, channels int) 
 // shorter by the lookahead at the tail).
 func OpusDemoRoundTrip(t testing.TB, opusDemo string, pcm []int16, rate, channels, bps, complexity int) []int16 {
 	t.Helper()
-	dir := t.TempDir()
+	dir := mkTempDir(t)
+	defer os.RemoveAll(dir)
 	in := filepath.Join(dir, "in.sw")
 	out := filepath.Join(dir, "out.sw")
 	writeSW(t, in, pcm)
@@ -110,6 +115,39 @@ func OpusDemoRoundTrip(t testing.TB, opusDemo string, pcm []int16, rate, channel
 		t.Fatalf("opus_demo round trip: %v\n%s", err, msg)
 	}
 	return readSW(t, out)
+}
+
+// OpusDemoEncode encodes raw PCM with the reference libopus encoder alone
+// (opus_demo -e) at the given CBR bit rate and complexity, returning the raw
+// Opus packets. The TOC byte of each packet carries libopus's mode and
+// bandwidth decisions, which the speech gate compares against ours.
+func OpusDemoEncode(t testing.TB, opusDemo string, pcm []int16, rate, channels, bps, complexity int) [][]byte {
+	t.Helper()
+	dir := mkTempDir(t)
+	defer os.RemoveAll(dir)
+	in := filepath.Join(dir, "in.sw")
+	out := filepath.Join(dir, "out.bit")
+	writeSW(t, in, pcm)
+	cmd := exec.Command(opusDemo, "-e", "audio", strconv.Itoa(rate), strconv.Itoa(channels),
+		strconv.Itoa(bps), "-cbr", "-complexity", strconv.Itoa(complexity), in, out)
+	if msg, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("opus_demo -e: %v\n%s", err, msg)
+	}
+	buf, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("reading %s: %v", out, err)
+	}
+	var packets [][]byte
+	for len(buf) >= 8 {
+		n := int(binary.BigEndian.Uint32(buf[0:]))
+		buf = buf[8:]
+		if n < 0 || n > len(buf) {
+			t.Fatalf("opus_demo bitstream: packet length %d exceeds remaining %d bytes", n, len(buf))
+		}
+		packets = append(packets, append([]byte(nil), buf[:n]...))
+		buf = buf[n:]
+	}
+	return packets
 }
 
 var opusCompareErrRE = regexp.MustCompile(`(?i)internal weighted error is ([0-9.eE+-]+)`)
@@ -128,10 +166,24 @@ func OpusCompareTool(t testing.TB, opusCompare string, ref, test []int16, channe
 	if len(ref) != len(test) {
 		t.Fatalf("opus_compare inputs disagree: %d vs %d samples", len(ref), len(test))
 	}
-	dir := t.TempDir()
+	dir := mkTempDir(t)
+	defer os.RemoveAll(dir)
 	refPath := filepath.Join(dir, "ref.sw")
 	testPath := filepath.Join(dir, "test.sw")
-	writeSW(t, refPath, ref)
+	if channels == 1 {
+		// opus_compare always reads the reference as stereo pairs and, in
+		// mono mode, averages each pair (that is how the RFC ships mono
+		// references). Duplicating each sample makes the average the
+		// original sample.
+		stereoRef := make([]int16, 2*len(ref))
+		for i, s := range ref {
+			stereoRef[2*i] = s
+			stereoRef[2*i+1] = s
+		}
+		writeSW(t, refPath, stereoRef)
+	} else {
+		writeSW(t, refPath, ref)
+	}
 	writeSW(t, testPath, test)
 	args := []string{}
 	if channels == 2 {
@@ -150,6 +202,17 @@ func OpusCompareTool(t testing.TB, opusCompare string, ref, test []int16, channe
 		t.Fatalf("opus_compare error value %q: %v", m[1], err)
 	}
 	return errVal, 100 * (1 - 0.5*math.Log(1+errVal)/math.Log(1.13))
+}
+
+// mkTempDir is a per-call temp dir the caller removes as soon as its files
+// are consumed, unlike t.TempDir() whose cleanup waits for test end.
+func mkTempDir(t testing.TB) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "opustools-")
+	if err != nil {
+		t.Fatalf("creating temp dir: %v", err)
+	}
+	return dir
 }
 
 func writeSW(t testing.TB, path string, pcm []int16) {

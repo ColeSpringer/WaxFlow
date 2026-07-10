@@ -110,6 +110,11 @@ type TranscodeOptions struct {
 	// OpusVBR selects variable bit rate for opus output, sizing each frame to its
 	// content around OpusBitrate. The zero value is constant bit rate.
 	OpusVBR bool
+	// OpusSignal hints the opus encoder about the content type: "voice"
+	// biases the speech/music mode decision toward SILK/hybrid (audiobooks,
+	// podcasts), "music" toward CELT. The zero value ("" or "auto") lets the
+	// encoder's analyser decide per frame.
+	OpusSignal string
 	// Shaping selects the dither strategy for quantization; the default
 	// is flat TPDF.
 	Shaping dither.Shaping

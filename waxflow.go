@@ -571,14 +571,22 @@ var outputs = []output{
 			}
 		},
 		plan: func(f audio.Format, opts TranscodeOptions) (string, int, int, error) {
-			enc, err := opus.NewEncoder(f, opusEncoderOptions(opts))
+			eopts, err := opusEncoderOptions(opts)
+			if err != nil {
+				return "", 0, 0, err
+			}
+			enc, err := opus.NewEncoder(f, eopts)
 			if err != nil {
 				return "", 0, 0, err
 			}
 			return opus.EncoderVersion, 0, enc.Bitrate(), nil
 		},
 		build: func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
-			enc, err := opus.NewEncoder(f, opusEncoderOptions(opts))
+			eopts, err := opusEncoderOptions(opts)
+			if err != nil {
+				return nil, nil, err
+			}
+			enc, err := opus.NewEncoder(f, eopts)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -588,7 +596,11 @@ var outputs = []output{
 			codecs: "Opus",
 			delay:  opus.EncoderDelay,
 			encode: func(f audio.Format, opts TranscodeOptions, _ int64) (codec.Encoder, error) {
-				return opus.NewEncoder(f, opusEncoderOptions(opts))
+				eopts, err := opusEncoderOptions(opts)
+				if err != nil {
+					return nil, err
+				}
+				return opus.NewEncoder(f, eopts)
 			},
 		},
 	},
@@ -858,13 +870,33 @@ func alacSnapDepth(d int) int {
 }
 
 // opusEncoderOptions builds the codec-level Opus options from a transcode
-// request, resolving the zero values to encoder defaults.
-func opusEncoderOptions(opts TranscodeOptions) *opus.EncoderOptions {
+// request, resolving the zero values to encoder defaults. An unknown signal
+// hint fails here, so plans reject it before any work starts.
+func opusEncoderOptions(opts TranscodeOptions) (*opus.EncoderOptions, error) {
+	sig, err := opusSignal(opts)
+	if err != nil {
+		return nil, err
+	}
 	return &opus.EncoderOptions{
 		Bitrate:    opusBitrate(opts),
 		Complexity: opts.OpusComplexity,
 		VBR:        opts.OpusVBR,
+		Signal:     sig,
+	}, nil
+}
+
+// opusSignal resolves TranscodeOptions.OpusSignal to the codec-level hint.
+func opusSignal(opts TranscodeOptions) (opus.Signal, error) {
+	switch opts.OpusSignal {
+	case "", "auto":
+		return opus.SignalAuto, nil
+	case "voice":
+		return opus.SignalVoice, nil
+	case "music":
+		return opus.SignalMusic, nil
 	}
+	return opus.SignalAuto, waxerr.New(waxerr.CodeInvalidRequest,
+		fmt.Sprintf("opus signal hint %q is not auto, voice, or music", opts.OpusSignal))
 }
 
 // opusBitrate resolves TranscodeOptions.OpusBitrate: the zero value keeps the

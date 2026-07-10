@@ -160,10 +160,10 @@ func TestPlanSegments(t *testing.T) {
 		if plan.SegmentSamples != 192000 { // 4 s at 48 kHz, 200 whole frames
 			t.Fatalf("SegmentSamples %d, want 192000", plan.SegmentSamples)
 		}
-		if plan.Codecs != "Opus" || plan.Delay != 120 {
+		if plan.Codecs != "Opus" || plan.Delay != 312 {
 			t.Fatalf("codecs %q delay %d", plan.Codecs, plan.Delay)
 		}
-		// 480000 samples + 120 delay pads to 481 whole frames = 480960
+		// 480000 samples + 312 delay pads to 501 whole frames = 480960
 		// decode samples: three segments of 192000, 192000, 96960.
 		if plan.TotalDecodeSamples != 480960 || plan.Segments != 3 {
 			t.Fatalf("total %d segments %d, want 480960 and 3", plan.TotalDecodeSamples, plan.Segments)

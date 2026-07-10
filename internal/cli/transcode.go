@@ -25,6 +25,7 @@ func newTranscodeCmd() *cobra.Command {
 	var opusBitrate int
 	var opusComplexity int
 	var opusVBR bool
+	var opusSignal string
 	var aacBitrate int
 	var gainDB float64
 	var profileName, ditherName string
@@ -139,6 +140,7 @@ flags the transcode is a bit-exact container rewrite; --rate,
 				OpusBitrate:     opusBitrate * 1000,
 				OpusComplexity:  optComplexity,
 				OpusVBR:         opusVBR,
+				OpusSignal:      opusSignal,
 				AACBitrate:      aacBitrate * 1000,
 			})
 			if err != nil {
@@ -178,6 +180,7 @@ flags the transcode is a bit-exact container rewrite; --rate,
 	cmd.Flags().IntVar(&opusBitrate, "opus-bitrate", 96, "Opus target bit rate in kbit/s (opus output only)")
 	cmd.Flags().IntVar(&opusComplexity, "opus-complexity", 5, "Opus encoder complexity 0-10, quality vs speed (opus output only)")
 	cmd.Flags().BoolVar(&opusVBR, "opus-vbr", false, "encode Opus at variable bit rate around --opus-bitrate (opus output only)")
+	cmd.Flags().StringVar(&opusSignal, "opus-signal", "auto", "Opus content hint: auto, voice, or music (opus output only)")
 	cmd.Flags().IntVar(&aacBitrate, "aac-bitrate", 128, "AAC target bit rate in kbit/s (aac output only)")
 	return cmd
 }

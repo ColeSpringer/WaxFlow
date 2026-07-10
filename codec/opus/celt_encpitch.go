@@ -501,6 +501,11 @@ func (e *celtEncoder) runPrefilter(in [][]float32, C, N int, prefilterTapset int
 		gain1 = 0
 		pitchIndex = minPeriod
 	}
+	// The analyser damps the gain when the signal is not actually pitched
+	// (max_pitch_ratio near 0 on noise, near 1 on clean pitch).
+	if e.analysis.valid {
+		gain1 *= e.analysis.maxPitchRatio
+	}
 
 	// Gain threshold for enabling the prefilter/postfilter, adjusted by rate
 	// and continuity.

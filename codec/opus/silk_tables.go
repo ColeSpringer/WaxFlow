@@ -80,6 +80,7 @@ var silkNLSFCBNBMB = &nlsfCB{
 	predQ8:             silk_NLSF_PRED_NB_MB_Q8,
 	ecSel:              silk_NLSF_CB2_SELECT_NB_MB,
 	ecICDF:             silk_NLSF_CB2_iCDF_NB_MB,
+	ecRatesQ5:          silk_NLSF_CB2_BITS_NB_MB_Q5,
 	deltaMinQ15:        silk_NLSF_DELTA_MIN_NB_MB_Q15,
 }
 
@@ -93,6 +94,7 @@ var silkNLSFCBWB = &nlsfCB{
 	predQ8:             silk_NLSF_PRED_WB_Q8,
 	ecSel:              silk_NLSF_CB2_SELECT_WB,
 	ecICDF:             silk_NLSF_CB2_iCDF_WB,
+	ecRatesQ5:          silk_NLSF_CB2_BITS_WB_Q5,
 	deltaMinQ15:        silk_NLSF_DELTA_MIN_WB_Q15,
 }
 

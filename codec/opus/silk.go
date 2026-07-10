@@ -105,7 +105,7 @@ func (cs *silkChannelState) setFS(fsKHz int, fsAPIHz int) {
 	cs.subfrLength = silkSubFrameMS * fsKHz
 	frameLength := cs.nbSubfr * cs.subfrLength
 	if cs.fsKHz != fsKHz || cs.resampler.fsInKHz*1000 != fsKHz*1000 || cs.resampler.fsOutKHz*1000 != fsAPIHz {
-		cs.resampler.init(fsKHz*1000, fsAPIHz)
+		cs.resampler.init(fsKHz*1000, fsAPIHz, false)
 	}
 	if cs.fsKHz != fsKHz || frameLength != cs.frameLength {
 		if fsKHz == 8 {

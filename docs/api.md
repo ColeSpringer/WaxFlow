@@ -119,8 +119,10 @@ Parameters (unknown parameter names are rejected):
   default, `bitrate`/`q` select it); `aac` an AAC-LC stream in
   progressive fragmented MP4 (`audio/mp4`, 128 kbit/s default,
   `bitrate`/`q` select it; the init header's edit list carries the
-  gapless trims); `opus` a CELT-only Ogg-Opus stream
-  (`audio/ogg`, 96 kbit/s default, `bitrate`/`q` select it). Other formats
+  gapless trims); `opus` an Ogg-Opus stream (`audio/ogg`, 96 kbit/s
+  default, `bitrate`/`q` select it) from the full Opus encoder: SILK,
+  hybrid, and CELT modes with analyser-driven speech/music selection.
+  Other formats
   join as encoders land (`/caps` is the truth). `aiff` exists for jobs but
   has no streaming form: 415. Live FLAC and ALAC streams omit the size hints
   and byte-rate pacing: a lossless encoder's output size is signal-dependent
