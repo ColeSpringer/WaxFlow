@@ -61,9 +61,12 @@ type Meta struct {
 	Ref           string `json:"ref"`
 	Identity      string `json:"identity"`
 	Params        string `json:"params"`
-	Ext           string `json:"ext"`
-	ContentType   string `json:"contentType"`
-	Bytes         int64  `json:"bytes"`
+	// Kind distinguishes the entry layout: empty for a progressive
+	// out.<ext>, KindHLS for a variant directory of segments.
+	Kind        string `json:"kind,omitempty"`
+	Ext         string `json:"ext"`
+	ContentType string `json:"contentType"`
+	Bytes       int64  `json:"bytes"`
 	// Samples and Rate carry the output timeline for duration headers.
 	Samples   int64     `json:"samples"`
 	Rate      int       `json:"rate"`

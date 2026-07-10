@@ -266,6 +266,10 @@ type TranscodePlan struct {
 	Samples int64
 	// BytesPerFrame is the output wire size of one frame across channels.
 	BytesPerFrame int
+	// FrameSize is the encoder-native frame length in output samples (the
+	// chain framer's chunk), 0 for formats that accept any chunk length.
+	// Segmented (HLS) outputs snap their boundaries to it.
+	FrameSize int
 	// BitRate is the projected output bit rate in bits per second, 0 when
 	// unknown. PCM outputs derive it from the wire format; lossy encoders
 	// will report their target rate here.
@@ -306,6 +310,7 @@ type planCore struct {
 	// it from bytesPerFrame (uncompressed PCM) or leave it unknown (VBR).
 	bitRate     int
 	headerBytes int
+	frameSize   int
 }
 
 // maxPlanCache bounds the plan cache; the key space is as unbounded as
@@ -372,6 +377,7 @@ func (e *Engine) PlanTranscode(track container.Track, opts TranscodeOptions) (*T
 		Versions:       core.versions,
 		Samples:        samples,
 		BytesPerFrame:  core.bytesPerFrame,
+		FrameSize:      core.frameSize,
 		BitRate:        bitRate,
 		EstimatedBytes: estimated,
 	}, nil
@@ -410,6 +416,7 @@ func buildPlanCore(in audio.Format, opts TranscodeOptions) (*planCore, error) {
 		bytesPerFrame: bytesPerFrame,
 		bitRate:       bitRate,
 		headerBytes:   row.headerBytes,
+		frameSize:     spec.FrameSize,
 	}, nil
 }
 
@@ -449,6 +456,27 @@ type output struct {
 	plan func(f audio.Format, opts TranscodeOptions) (version string, bytesPerFrame, bitRate int, err error)
 	// build constructs the wired encoder and muxer for one transcode.
 	build func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error)
+	// hls describes the format's segmented CMAF form; nil means the format
+	// has none and cannot serve HLS.
+	hls *hlsOutput
+}
+
+// hlsOutput is the writer-side table's segmented-delivery column: what an
+// output format needs beyond its progressive muxer to become numbered
+// fMP4 segments.
+type hlsOutput struct {
+	// codecs is the RFC 6381 CODECS attribute value for master playlists.
+	codecs string
+	// delay is the encoder delay in output samples. It rides in the init
+	// segment's edit list and shifts the decode timeline: packet j holds
+	// input samples [j*F-delay, (j+1)*F-delay).
+	delay int64
+	// encode builds the encoder for one segmented run. startSample is the
+	// decode-timeline position of the first PCM sample the run feeds
+	// (zero for a whole stream): FLAC numbers its frame headers by
+	// absolute position, so a worker restarted mid-stream must say where
+	// it stands; the other codecs ignore it.
+	encode func(f audio.Format, opts TranscodeOptions, startSample int64) (codec.Encoder, error)
 }
 
 var outputs = []output{
@@ -517,6 +545,13 @@ var outputs = []output{
 			}
 			return enc, ogg.NewMuxer(dst, nil), nil
 		},
+		hls: &hlsOutput{
+			codecs: "Opus",
+			delay:  opus.EncoderDelay,
+			encode: func(f audio.Format, opts TranscodeOptions, _ int64) (codec.Encoder, error) {
+				return opus.NewEncoder(f, opusEncoderOptions(opts))
+			},
+		},
 	},
 	{
 		name:        "aiff",
@@ -584,6 +619,21 @@ var outputs = []output{
 				return nil, nil, err
 			}
 			return enc, flacn.NewMuxer(dst, &flacn.MuxerOptions{MD5: enc.MD5}), nil
+		},
+		hls: &hlsOutput{
+			codecs: "fLaC",
+			encode: func(f audio.Format, opts TranscodeOptions, startSample int64) (codec.Encoder, error) {
+				level, err := flacLevel(opts)
+				if err != nil {
+					return nil, err
+				}
+				// Segment boundaries are frame multiples, so a mid-stream
+				// start is a whole frame number.
+				return flac.NewEncoder(f, &flac.EncoderOptions{
+					Level:      level,
+					FirstFrame: startSample / int64(flac.EncoderBlockSize(level)),
+				})
+			},
 		},
 	},
 	{
@@ -668,6 +718,12 @@ var outputs = []output{
 				return nil, nil, err
 			}
 			return enc, mp4.NewMuxer(dst, nil), nil
+		},
+		hls: &hlsOutput{
+			codecs: "alac",
+			encode: func(f audio.Format, _ TranscodeOptions, _ int64) (codec.Encoder, error) {
+				return alac.NewEncoder(f, nil)
+			},
 		},
 	},
 }

@@ -51,6 +51,7 @@ type Store struct {
 	mu         sync.Mutex
 	index      map[Key]*indexEntry
 	writing    map[Key]*Entry
+	pinned     map[Key]int // eviction-excluded while a worker fills the entry
 	totalBytes int64
 	tmpSeq     atomic.Uint64
 
@@ -132,6 +133,12 @@ func (s *Store) scan() error {
 				os.RemoveAll(dir)
 				continue
 			}
+			if meta.Kind == KindHLS {
+				// A variant's size lives in its files, not its meta (born
+				// before its segments); interrupted temp writes are debris.
+				pruneVariantTemps(dir)
+				meta.Bytes = variantSize(dir)
+			}
 			s.index[Key(ent.Name())] = &indexEntry{size: meta.Bytes, lastAccess: mtime, meta: meta}
 			s.totalBytes += meta.Bytes
 		}
@@ -173,7 +180,9 @@ const touchInterval = 5 * time.Minute
 func (s *Store) Lookup(key Key) *Cached {
 	s.mu.Lock()
 	ie := s.index[key]
-	if ie == nil {
+	if ie == nil || ie.meta.Kind == KindHLS {
+		// HLS variants have no out.<ext>; a progressive Lookup on one is a
+		// key-derivation bug upstream and must miss, not drop the variant.
 		s.mu.Unlock()
 		s.misses.Add(1)
 		return nil
@@ -371,6 +380,9 @@ func (s *Store) gc() (removed int, freed int64) {
 	s.mu.Lock()
 	all := make([]victim, 0, len(s.index))
 	for k, ie := range s.index {
+		if s.pinned[k] > 0 {
+			continue // a worker is filling it; evicting under it would race
+		}
 		all = append(all, victim{k, ie.size, ie.lastAccess})
 	}
 	total := s.totalBytes

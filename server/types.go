@@ -95,8 +95,10 @@ type CapsOutput struct {
 type CapsDelivery struct {
 	Progressive bool `json:"progressive"`
 	HLS         bool `json:"hls"`
-	Jobs        bool `json:"jobs"`
-	Uploads     bool `json:"uploads"`
+	// HLSFormats are the output formats with a segmented (fMP4) form.
+	HLSFormats []string `json:"hlsFormats,omitempty"`
+	Jobs       bool     `json:"jobs"`
+	Uploads    bool     `json:"uploads"`
 }
 
 // SignRequest is the POST /sign body.
@@ -138,7 +140,7 @@ func buildCaps() Caps {
 	caps := Caps{
 		SchemaVersion: 1,
 		Inputs:        format.Inputs(),
-		Delivery:      CapsDelivery{Progressive: true},
+		Delivery:      CapsDelivery{Progressive: true, HLS: true, HLSFormats: waxflow.SegmentedFormats()},
 		Profiles:      map[string]any{},
 	}
 	for _, id := range format.Decoders() {

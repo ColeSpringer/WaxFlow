@@ -73,10 +73,12 @@ or `waxflow sign`.
 | `POST /sign` | key | mint a signed playback URL |
 | `GET/HEAD /stream` | key or sig | progressive stream (decision ladder) |
 | `POST /transcode` | key | synchronous one-shot; the response body is the transcode |
+| `GET /hls/master.m3u8` | key or sig | HLS master playlist (ladder; see the HLS section) |
+| `GET /hls/media.m3u8`, `/hls/init.mp4`, `/hls/seg/{n}.m4s` | key or sig | HLS variant playlist, init header, media segments |
 | `GET /cache/stats`, `POST /cache/gc` | key | cache operations |
 | `GET /metrics` | key or metricsKey | Prometheus text exposition |
 | `GET /demo` | none (dev mode only, `demo: true`) | browser test page |
-| `POST /uploads`, `/jobs`, `/hls/*`, `/art`, `/lyrics` | | *later* (job store, HLS, metadata mapping) |
+| `POST /uploads`, `/jobs`, `/art`, `/lyrics` | | *later* (job store, metadata mapping) |
 
 ## GET /probe, POST /probe
 
@@ -178,13 +180,48 @@ Same query parameters as `/stream`; the response body is the transcode
 `Content-Disposition: attachment`. Counts against live admission slots
 for its whole duration, so scripts do not starve playback.
 
+## HLS
+
+Stateless CMAF/fMP4 delivery: every HLS URL carries a `v=` descriptor
+(base64url JSON) holding the complete output selection plus the source
+identity, so segments regenerate after eviction or restart with zero
+session state. Descriptor schema (version 1):
+
+    {"ver":1, "src":"lib/a.flac", "id":"<size-mtimeNS>", "format":"opus",
+     "bitrate":96, "bitrates":[64,96,160], "bits":16, "rate":48000,
+     "ch":2, "gain":"track", "segDur":4}
+
+`bitrates` (the ladder) appears only in master URLs; every other URL is
+per-variant. Descriptors are minted by the daemon (`POST /sign` with
+`path:/hls/master.m3u8`, or the keyed raw-parameter master form below),
+never hand-built by clients. Auth is an API key or the signed query,
+like `/stream`; playlist child URLs come out signed (when signing is
+configured) with the parent's expiry, so one minting governs a playback
+session.
+
+| Path | Purpose |
+|---|---|
+| `GET /hls/master.m3u8?v=...` | master playlist: one rung per ladder bitrate with `BANDWIDTH` and `CODECS` (`Opus`, `fLaC`, `alac`). With an API key, raw parameters (`src`, `format`, `bitrate` or `bitrates`, `bits`, `rate`, `ch`, `gain`, `segDur`) also work; the daemon builds the descriptor. |
+| `GET /hls/media.m3u8?v=...` | variant VOD playlist: `EXT-X-VERSION:7`, `EXT-X-MAP`, `EXT-X-INDEPENDENT-SEGMENTS`, every segment listed with its exact duration, `EXT-X-ENDLIST`. Unknown source lengths are measured (frame-index walk), never estimated. |
+| `GET /hls/init.mp4?v=...` | the CMAF init header (codec config; the edit list carries encoder delay and the exact length) |
+| `GET /hls/seg/{n}.m4s?v=...` | media segment n (0-based). Cached segments serve with ranges and strong ETags; misses wait on the variant worker (within a 3-segment lookahead) or restart it at n. |
+
+Segments are `styp` + `moof`+`mdat` fragments, boundaries snapped to
+whole encoder frames (`segDur` is a target; the playlist carries exact
+durations), all sync samples, decode timeline in sample units. Formats
+with a segmented form: `opus`, `flac`, `alac` (see `/caps`
+`delivery.hlsFormats`). A `410 source-changed` means the file changed
+since minting: re-mint and reload.
+
 ## POST /sign
 
     {"path": "/stream", "params": {"src": "lib/a.flac", "format": "wav"}, "ttlSeconds": 3600}
 
-`path` defaults to `/stream` (the only signable path until HLS).
-`params` are validated like a live request, the source identity is
-resolved and embedded as `id`, and the response is:
+`path` defaults to `/stream`; `/hls/master.m3u8` is also signable (its
+`params` are the raw HLS master parameters above, and every rung is
+planned at mint time so a URL that mints is a URL that plays). `params`
+are validated like a live request, the source identity is resolved and
+embedded, and the response is:
 
     {"schemaVersion": 1, "url": "/stream?exp=...&format=wav&id=...&kid=1&sig=...&src=...", "exp": 1767225600}
 
@@ -199,7 +236,8 @@ resolved and embedded as `id`, and the response is:
                    {"name": "flac", "live": true, "exts": ["flac"]},
                    {"name": "mp3", "live": true, "exts": ["mp3", "mpga"]},
                    {"name": "alac", "live": true, "exts": ["m4a"]}],
-      "delivery": {"progressive": true, "hls": false, "jobs": false, "uploads": false},
+      "delivery": {"progressive": true, "hls": true, "hlsFormats": ["opus", "flac", "alac"],
+                   "jobs": false, "uploads": false},
       "profiles": {}
     }
 
@@ -217,7 +255,8 @@ client matrix is verified, with tested delivery profiles
 ## GET /metrics
 
 Prometheus text: `waxflow_build_info`, `waxflow_sessions_active`,
-`waxflow_sessions_total{kind}`, `waxflow_direct_play_total`,
+`waxflow_sessions_total{kind}` (live, sync, hls),
+`waxflow_direct_play_total`, `waxflow_hls_segments_total`,
 `waxflow_cache_{hits,misses}_total`, `waxflow_cache_{bytes,entries}`,
 `waxflow_admission_rejects_total`, `waxflow_admission_in_use{pool}`,
 `waxflow_session_degradations_total`, `waxflow_ttfb_seconds` histogram.

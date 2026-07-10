@@ -17,10 +17,14 @@ import (
 type Metrics struct {
 	// SessionsActive counts running transcode pipelines.
 	SessionsActive atomic.Int64
-	// SessionsLive and SessionsSync count started pipelines by kind:
-	// live /stream sessions and sync /transcode one-shots.
+	// SessionsLive, SessionsSync, and SessionsHLS count started pipelines
+	// by kind: live /stream sessions, sync /transcode one-shots, and HLS
+	// variant workers.
 	SessionsLive atomic.Uint64
 	SessionsSync atomic.Uint64
+	SessionsHLS  atomic.Uint64
+	// HLSSegments counts media segments served (cache hits included).
+	HLSSegments atomic.Uint64
 	// DirectPlays counts requests served as original bytes (ladder rung 1).
 	DirectPlays atomic.Uint64
 	// AdmissionRejects counts 503s from saturated pools.
@@ -90,10 +94,15 @@ func (m *Metrics) WritePrometheus(w io.Writer, version string, g Gauges) {
 	p("# TYPE waxflow_sessions_total counter\n")
 	p("waxflow_sessions_total{kind=\"live\"} %d\n", m.SessionsLive.Load())
 	p("waxflow_sessions_total{kind=\"sync\"} %d\n", m.SessionsSync.Load())
+	p("waxflow_sessions_total{kind=\"hls\"} %d\n", m.SessionsHLS.Load())
 
 	p("# HELP waxflow_direct_play_total Requests served as original bytes.\n")
 	p("# TYPE waxflow_direct_play_total counter\n")
 	p("waxflow_direct_play_total %d\n", m.DirectPlays.Load())
+
+	p("# HELP waxflow_hls_segments_total HLS media segments served.\n")
+	p("# TYPE waxflow_hls_segments_total counter\n")
+	p("waxflow_hls_segments_total %d\n", m.HLSSegments.Load())
 
 	p("# HELP waxflow_cache_hits_total Cache lookups served from a completed entry.\n")
 	p("# TYPE waxflow_cache_hits_total counter\n")

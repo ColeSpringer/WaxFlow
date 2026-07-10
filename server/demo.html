@@ -39,6 +39,23 @@ full range support; anything else streams a live WAV transcode where the
 <button id="probe">Probe</button>
 
 <audio id="player" controls></audio>
+
+<h1>HLS</h1>
+<p>Mints a signed <code>/hls/master.m3u8</code> URL and plays it through
+hls.js (fetched from a CDN; this page is dev-mode only). Safari can also
+take the master URL natively.</p>
+<div class="row">
+  <div><label>HLS format
+    <select id="hlsFormat">
+      <option value="opus">opus</option>
+      <option value="flac">flac (lossless)</option>
+      <option value="alac">alac (lossless)</option>
+    </select></label></div>
+  <div><label>Bitrate ladder (kbit/s, lossy) <input id="hlsBitrates" placeholder="64,96,160"></label></div>
+</div>
+<button id="hlsPlay">Mint &amp; play HLS</button>
+<audio id="hlsPlayer" controls></audio>
+
 <pre id="out">ready</pre>
 
 <script>
@@ -76,6 +93,46 @@ document.getElementById('probe').onclick = async () => {
     const src = encodeURIComponent(document.getElementById('src').value);
     const resp = await fetch(`/probe?src=${src}`, { headers: headers() });
     show(await resp.json());
+  } catch (err) { show(String(err)); }
+};
+
+let hlsScript;
+const loadHlsJS = () => new Promise((resolve, reject) => {
+  if (window.Hls) return resolve();
+  hlsScript = document.createElement('script');
+  hlsScript.src = 'https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js';
+  hlsScript.onload = resolve;
+  hlsScript.onerror = () => reject(new Error('loading hls.js from the CDN failed'));
+  document.head.appendChild(hlsScript);
+});
+
+document.getElementById('hlsPlay').onclick = async () => {
+  try {
+    const params = {
+      src: document.getElementById('src').value,
+      format: document.getElementById('hlsFormat').value,
+    };
+    const ladder = document.getElementById('hlsBitrates').value.trim();
+    if (ladder) params.bitrates = ladder;
+    const resp = await fetch('/sign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers() },
+      body: JSON.stringify({ path: '/hls/master.m3u8', params }),
+    });
+    const body = await resp.json();
+    show(body);
+    if (!resp.ok) return;
+    const player = document.getElementById('hlsPlayer');
+    if (player.canPlayType('application/vnd.apple.mpegurl')) {
+      player.src = body.url; // Safari: native HLS
+    } else {
+      await loadHlsJS();
+      const h = new Hls();
+      h.loadSource(body.url);
+      h.attachMedia(player);
+      h.on(Hls.Events.ERROR, (_, data) => show(data));
+    }
+    player.play();
   } catch (err) { show(String(err)); }
 };
 </script>

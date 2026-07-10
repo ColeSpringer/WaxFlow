@@ -28,6 +28,7 @@ import (
 	"github.com/colespringer/waxflow/internal/cache"
 	"github.com/colespringer/waxflow/internal/config"
 	"github.com/colespringer/waxflow/internal/flight"
+	"github.com/colespringer/waxflow/internal/hls"
 	"github.com/colespringer/waxflow/internal/metrics"
 	"github.com/colespringer/waxflow/internal/sign"
 	"github.com/colespringer/waxflow/source"
@@ -132,7 +133,8 @@ type Server struct {
 	defaultGain gainSpec
 	profile     resample.Profile
 
-	fl flight.Group[*cache.Entry]
+	fl     flight.Group[*cache.Entry]
+	hlsMgr hls.Manager
 
 	// baseCtx bounds pipeline goroutines: pipelines outlive their
 	// requests (read-behind), not the server.
@@ -271,6 +273,11 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET /stream", s.handleStream)
 	mux.HandleFunc("HEAD /stream", s.handleStream)
 	mux.HandleFunc("OPTIONS /stream", s.handlePreflight)
+	mux.HandleFunc("GET /hls/master.m3u8", s.handleHLSMaster)
+	mux.HandleFunc("GET /hls/media.m3u8", s.handleHLSMedia)
+	mux.HandleFunc("GET /hls/init.mp4", s.handleHLSInit)
+	mux.HandleFunc("GET /hls/seg/{seg}", s.handleHLSSegment)
+	mux.HandleFunc("OPTIONS /hls/", s.handlePreflight)
 	mux.HandleFunc("GET /cache/stats", s.requireKey(s.handleCacheStats))
 	mux.HandleFunc("POST /cache/gc", s.requireKey(s.handleCacheGC))
 	mux.HandleFunc("GET /metrics", s.handleMetrics)

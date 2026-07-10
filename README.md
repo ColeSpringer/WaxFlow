@@ -69,7 +69,11 @@ to ring-fed streaming instead of killing playback), admission control,
 Prometheus metrics, and a full API contract in
 [docs/api.md](docs/api.md). WAV, FLAC, and MP3 streams live-transcode
 today; compliant sources direct-play, and each new encoder widens
-`format=`.
+`format=`. HLS delivery (`/hls/*`) serves CMAF/fMP4 segments of Opus,
+FLAC, and ALAC from stateless signed URLs: VOD playlists with exact
+segment counts, a bitrate ladder, incremental segment caching, and
+seek-restarted variant workers primed to keep the decode timeline exact
+(validation layers in [docs/hls-validation.md](docs/hls-validation.md)).
 With MP3 encoding landed, the service is broadly useful: any supported
 source streams as MP3 to essentially every player. Unfinished
 codecs stay unregistered, so probe and `/caps` never advertise what

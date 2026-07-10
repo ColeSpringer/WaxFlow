@@ -115,7 +115,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	if err := m.write(ftypBox()); err != nil {
 		return err
 	}
-	return m.write(moovBox(t.Fmt, cfg.Cookie))
+	return m.write(moovBox(t.Fmt.Rate, alacSampleEntry(t.Fmt, cfg.Cookie), nil, alac.FrameSize))
 }
 
 // WritePacket appends one ALAC frame to the current fragment, flushing when
@@ -210,23 +210,24 @@ func ftypBox() []byte {
 // moovBox builds the movie header for a fragmented file: a track with an
 // empty sample table and a movie-extends box declaring the fragment
 // defaults. The media timescale is the sample rate, so decode times are
-// sample counts.
-func moovBox(f audio.Format, cookie []byte) []byte {
-	rate := uint32(f.Rate)
+// sample counts. entry is the codec's AudioSampleEntry; a non-nil edts
+// (the segmenter's edit list) rides inside the trak; defaultDur is the
+// trex fallback sample duration (the trun always overrides it).
+func moovBox(rate int, entry, edts []byte, defaultDur int) []byte {
 	mvhd := makeFullBox("mvhd", 0, 0,
 		u32(0), u32(0), // creation, modification time
-		u32(rate),                                            // timescale
+		u32(uint32(rate)),                                    // timescale
 		u32(0),                                               // duration (0: fragmented, from moof)
 		u32(0x00010000), u16(0x0100), u16(0), u32(0), u32(0), // rate, volume, reserved
 		identityMatrix(),
 		make([]byte, 24), // pre_defined
 		u32(trackID+1))   // next_track_ID
-	trak := trakBox(f, cookie)
-	mvex := makeBox("mvex", trexBox())
+	trak := trakBox(rate, entry, edts)
+	mvex := makeBox("mvex", trexBox(defaultDur))
 	return makeBox("moov", mvhd, trak, mvex)
 }
 
-func trakBox(f audio.Format, cookie []byte) []byte {
+func trakBox(rate int, entry, edts []byte) []byte {
 	tkhd := makeFullBox("tkhd", 0, 0x000007, // track enabled, in movie, in preview
 		u32(0), u32(0), // creation, modification
 		u32(trackID),
@@ -237,15 +238,17 @@ func trakBox(f audio.Format, cookie []byte) []byte {
 		u16(0x0100), u16(0), // volume (audio), reserved
 		identityMatrix(),
 		u32(0), u32(0)) // width, height (audio: 0)
-	mdia := mdiaBox(f, cookie)
+	mdia := mdiaBox(rate, entry)
+	if edts != nil {
+		return makeBox("trak", tkhd, edts, mdia)
+	}
 	return makeBox("trak", tkhd, mdia)
 }
 
-func mdiaBox(f audio.Format, cookie []byte) []byte {
-	rate := uint32(f.Rate)
+func mdiaBox(rate int, entry []byte) []byte {
 	mdhd := makeFullBox("mdhd", 0, 0,
 		u32(0), u32(0), // creation, modification
-		u32(rate),           // timescale
+		u32(uint32(rate)),   // timescale
 		u32(0),              // duration (fragmented)
 		u16(0x55C4), u16(0)) // language 'und', pre_defined
 	hdlr := makeFullBox("hdlr", 0, 0,
@@ -253,23 +256,23 @@ func mdiaBox(f audio.Format, cookie []byte) []byte {
 		[]byte("soun"),         // handler_type
 		u32(0), u32(0), u32(0), // reserved
 		append([]byte("SoundHandler"), 0)) // name
-	minf := minfBox(f, cookie)
+	minf := minfBox(entry)
 	return makeBox("mdia", mdhd, hdlr, minf)
 }
 
-func minfBox(f audio.Format, cookie []byte) []byte {
+func minfBox(entry []byte) []byte {
 	smhd := makeFullBox("smhd", 0, 0, u16(0), u16(0)) // balance, reserved
 	dref := makeFullBox("dref", 0, 0, u32(1),
 		makeFullBox("url ", 0, 0x000001)) // self-contained
 	dinf := makeBox("dinf", dref)
-	stbl := stblBox(f, cookie)
+	stbl := stblBox(entry)
 	return makeBox("minf", smhd, dinf, stbl)
 }
 
 // stblBox holds the sample description plus empty timing/size/offset tables:
 // a fragmented file carries no samples in moov.
-func stblBox(f audio.Format, cookie []byte) []byte {
-	stsd := makeFullBox("stsd", 0, 0, u32(1), alacSampleEntry(f, cookie))
+func stblBox(entry []byte) []byte {
+	stsd := makeFullBox("stsd", 0, 0, u32(1), entry)
 	stts := makeFullBox("stts", 0, 0, u32(0))
 	stsc := makeFullBox("stsc", 0, 0, u32(0))
 	stsz := makeFullBox("stsz", 0, 0, u32(0), u32(0)) // sample_size, sample_count
@@ -303,17 +306,18 @@ func alacSampleEntry(f audio.Format, cookie []byte) []byte {
 		inner)
 }
 
-// trexBox declares the fragment defaults: one sample description, the ALAC
-// frame length as the default duration, and sync-sample flags (every ALAC
-// frame is independently decodable). trun overrides duration/size per
-// sample, so these are only fallbacks.
-func trexBox() []byte {
+// trexBox declares the fragment defaults: one sample description, the
+// codec frame length as the default duration, and sync-sample flags
+// (every frame of the audio codecs muxed here is independently
+// decodable). trun overrides duration/size per sample, so these are only
+// fallbacks.
+func trexBox(defaultDur int) []byte {
 	return makeFullBox("trex", 0, 0,
 		u32(trackID),
-		u32(1),               // default_sample_description_index
-		u32(alac.FrameSize),  // default_sample_duration
-		u32(0),               // default_sample_size
-		u32(syncSampleFlags)) // default_sample_flags
+		u32(1),                  // default_sample_description_index
+		u32(uint32(defaultDur)), // default_sample_duration
+		u32(0),                  // default_sample_size
+		u32(syncSampleFlags))    // default_sample_flags
 }
 
 // syncSampleFlags marks a sample as independently decodable: sample_depends_on

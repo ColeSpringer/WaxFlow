@@ -7,7 +7,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # the "stdlib-only codecs" promise.
 PUBLIC_PKGS := . ./waxerr ./audio ./dsp/... ./codec/... ./container/... ./format ./source ./server ./client
 
-.PHONY: build test vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench encoder-quality fuzz opus-tools
+.PHONY: build test vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench encoder-quality fuzz opus-tools hls-e2e
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/waxflow ./cmd/waxflow
@@ -51,6 +51,7 @@ fuzz:
 # Regenerate muxer golden files. Review the diff before committing.
 goldens:
 	go test -run TestGoldenMuxOutputs ./container/riff ./container/aiff ./container/flacn ./container/mpa -update
+	go test -run TestGoldenSegments . -update
 
 # Decode/encode throughput; the x-realtime metric is judged against the
 # per-codec floors in docs/quality-gates.md (nightly benchstat ratchets
@@ -89,6 +90,13 @@ encoder-quality:
 		go test -run TestMP3EncoderQuality -count=1 -v .
 	WAXFLOW_REQUIRE_OPUS_TOOLS=1 WAXFLOW_REQUIRE_VECTORS=1 WAXFLOW_QUALITY_REPORT=$(OPUS_QUALITY_REPORT) \
 		go test -run TestOpusEncoderQuality -count=1 -timeout 30m -v .
+
+# Browser HLS e2e: a real daemon, the committed /demo page, and hls.js in
+# headless Chromium via Playwright (scripts/hls-e2e.mjs). Gated tooling:
+# needs Node plus `npm install playwright && npx playwright install
+# chromium`; see docs/hls-validation.md.
+hls-e2e:
+	node scripts/hls-e2e.mjs
 
 docker:
 	docker build --build-arg VERSION=$(VERSION) -t waxflow:$(VERSION) .

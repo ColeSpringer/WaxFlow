@@ -70,28 +70,6 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 	if req.Path == "" {
 		req.Path = "/stream"
 	}
-	if req.Path != "/stream" {
-		s.writeError(w, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("path %q: only /stream is signable until HLS lands", req.Path)))
-		return
-	}
-	q := make(url.Values, len(req.Params)+4)
-	for k, v := range req.Params {
-		q.Set(k, v)
-	}
-	// Reject junk at mint time, not at playback time.
-	p, err := parseStreamParams(q, s.defaultGain)
-	if err != nil {
-		s.writeError(w, err)
-		return
-	}
-	f, err := s.resolver.Resolve(p.src)
-	if err != nil {
-		s.writeError(w, err)
-		return
-	}
-	defer f.Close()
-	q.Set("id", f.ID.String())
 
 	// Explicit TTLs are bounded on both sides: negative is meaningless,
 	// and values past MaxTTL would overflow the duration arithmetic into
@@ -101,15 +79,54 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("ttlSeconds %d outside 0..%d", req.TTLSeconds, int64(sign.MaxTTL/time.Second))))
 		return
 	}
-	ttl := time.Duration(req.TTLSeconds) * time.Second
-	if req.TTLSeconds == 0 {
+
+	var q url.Values
+	var duration float64
+	switch req.Path {
+	case "/stream":
+		q = make(url.Values, len(req.Params)+4)
+		for k, v := range req.Params {
+			q.Set(k, v)
+		}
+		// Reject junk at mint time, not at playback time.
+		p, err := parseStreamParams(q, s.defaultGain)
+		if err != nil {
+			s.writeError(w, err)
+			return
+		}
+		f, err := s.resolver.Resolve(p.src)
+		if err != nil {
+			s.writeError(w, err)
+			return
+		}
+		q.Set("id", f.ID.String())
 		// Duration comes from the probe; unknown lengths get the floor.
-		var d float64 = -1
+		duration = -1
 		if info, err := s.eng.Probe(f, f.Ext, nil); err == nil {
 			track := info.Default()
-			d = DurationSeconds(track.Samples, track.Fmt.Rate)
+			duration = DurationSeconds(track.Samples, track.Fmt.Rate)
 		}
-		ttl = sign.DefaultTTLFor(d)
+		f.Close()
+	case "/hls/master.m3u8":
+		// The HLS surface signs one URL: master. Its children (media
+		// playlists, init, segments) are signed by the daemon as it
+		// emits them, inheriting this URL's expiry.
+		desc, d, err := s.mintHLSDescriptor(req.Params)
+		if err != nil {
+			s.writeError(w, err)
+			return
+		}
+		q = url.Values{"v": []string{desc.Encode()}}
+		duration = d
+	default:
+		s.writeError(w, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("path %q: only /stream and /hls/master.m3u8 are signable", req.Path)))
+		return
+	}
+
+	ttl := time.Duration(req.TTLSeconds) * time.Second
+	if req.TTLSeconds == 0 {
+		ttl = sign.DefaultTTLFor(duration)
 	}
 	exp := time.Now().Add(ttl)
 	signed := s.signer.Sign(http.MethodGet, req.Path, q, exp)

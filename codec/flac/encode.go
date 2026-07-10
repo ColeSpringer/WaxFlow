@@ -24,6 +24,13 @@ type EncoderOptions struct {
 	// Level is the compression level, 0 (fastest) through 8 (smallest).
 	// Levels trade encode speed for size and never affect decoded audio.
 	Level int
+	// FirstFrame numbers the first encoded frame. Frame headers carry the
+	// frame's ordinal under the fixed blocking strategy, so an encoder
+	// producing a mid-stream slice (an HLS worker restarted at a segment
+	// boundary) must number frames by their absolute position or the slice
+	// disagrees with the stream around it. 0 (the default) is a whole
+	// stream from the top.
+	FirstFrame int64
 }
 
 // levelParams maps a compression level to its search effort, modeled on
@@ -135,12 +142,18 @@ type Encoder struct {
 // pipeline produces.
 func NewEncoder(f audio.Format, opts *EncoderOptions) (*Encoder, error) {
 	level := DefaultEncoderLevel
+	firstFrame := int64(0)
 	if opts != nil {
 		level = opts.Level
+		firstFrame = opts.FirstFrame
 	}
 	if level < 0 || level >= len(levels) {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("flac: compression level %d outside 0..8", level))
+	}
+	if firstFrame < 0 || firstFrame > 1<<31-1 {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("flac: first frame number %d outside 0..2^31-1", firstFrame))
 	}
 	if err := f.Valid(); err != nil {
 		return nil, err
@@ -160,7 +173,7 @@ func NewEncoder(f audio.Format, opts *EncoderOptions) (*Encoder, error) {
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 			fmt.Sprintf("flac: cannot encode format %v (nearest encodable is %v)", f, want))
 	}
-	e := &Encoder{fmt: f, si: si, lv: lv, level: level, md5: md5.New()}
+	e := &Encoder{fmt: f, si: si, lv: lv, level: level, frameNo: firstFrame, md5: md5.New()}
 	if lv.maxLPC > 0 {
 		e.wins = make(map[float64][]float64, len(lv.apod))
 		for _, p := range lv.apod {
