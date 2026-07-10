@@ -56,6 +56,7 @@ func TestConformanceVectors(t *testing.T) {
 		}
 		for _, channels := range []int{2, 1} {
 			t.Run(fmt.Sprintf("%s/%dch", name, channels), func(t *testing.T) {
+				t.Parallel()
 				got := decodeVector(t, bit, channels)
 				test := make([]float32, len(got))
 				for i, v := range got {

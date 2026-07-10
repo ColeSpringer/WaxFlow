@@ -91,7 +91,7 @@ when a codec's quality changes:
 
 ## Release checklist (grows over time)
 
-- [ ] `make check` green (fmt, vet, race tests, depcheck)
+- [ ] `make check` green (fmt, vet, functional + race passes, depcheck)
 - [ ] `THIRD-PARTY-NOTICES.md` audited against the reference ledger
 - [ ] Tag `vX.Y.Z` pushed -> `release.yml` publishes binaries + SHA256SUMS +
       multi-arch image to ghcr.io

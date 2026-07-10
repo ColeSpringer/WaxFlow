@@ -30,7 +30,8 @@ import (
 // internal/testutil/vectors.go supersedes it once the vectors are chosen; the
 // harness, metric, and gate are what land now.
 func TestMP3EncoderQuality(t *testing.T) {
-	testutil.Shine(t) // skip early if libshine is unavailable
+	testutil.EncoderQualityGate(t) // not part of the default loop; `make encoder-quality`
+	testutil.Shine(t)              // skip early if libshine is unavailable
 	haveLame := testutil.HaveLAME(t)
 
 	const rate, kbps = 44100, 128

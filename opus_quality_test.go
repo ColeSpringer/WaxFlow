@@ -47,6 +47,7 @@ import (
 // WAXFLOW_REQUIRE_OPUS_TOOLS=1. WAXFLOW_QUALITY_REPORT writes the per-track
 // HTML report published as a nightly artifact.
 func TestOpusEncoderQuality(t *testing.T) {
+	testutil.EncoderQualityGate(t) // not part of the default loop; `make encoder-quality`
 	if raceEnabled {
 		// Single-goroutine numeric encode over the whole corpus: many times
 		// slower under the race detector for no concurrency coverage, like

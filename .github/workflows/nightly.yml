@@ -36,7 +36,9 @@ jobs:
           if-no-files-found: ignore
 
   # The full suite with the differential oracle and conformance vectors
-  # required, so a broken comparison cannot hide behind a skip.
+  # required, so a broken comparison cannot hide behind a skip. The non-race
+  # run enforces the oracles (all single-goroutine numeric); the race pass
+  # (whole tree, heavy numeric suites self-skip) covers the concurrent code.
   differential:
     runs-on: ubuntu-latest
     steps:
@@ -50,9 +52,10 @@ jobs:
           path: testdata/vectors
           key: vectors-${{ hashFiles('internal/testutil/vectors.go') }}
       - run: make verify-vectors
-      - run: WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_REQUIRE_FLAC=1 WAXFLOW_REQUIRE_VECTORS=1 go test -race -count=1 -timeout 30m ./...
-      # Opus conformance skips itself under -race (see ci.yml); run it non-race.
-      - run: WAXFLOW_REQUIRE_VECTORS=1 go test -count=1 -timeout 30m -run 'TestConformanceVectors' ./codec/opus/
+      - run: WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_REQUIRE_FLAC=1 WAXFLOW_REQUIRE_VECTORS=1 go test -count=1 -timeout 30m ./...
+      # -count=1 so the scheduled soak actually re-executes: without it the
+      # cached GOCACHE (restored by setup-go) short-circuits an unchanged tree.
+      - run: GOFLAGS=-count=1 make test-race
 
   # hls.js end to end in a real browser: a live daemon over a generated
   # library, the committed /demo page, headless Chromium via Playwright

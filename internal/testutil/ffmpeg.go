@@ -33,6 +33,19 @@ func tool(t testing.TB, name string) string {
 	return path
 }
 
+// EncoderQualityGate self-skips an encoder-quality gate unless
+// WAXFLOW_ENCODER_QUALITY=1 is set. These gates re-encode a corpus with our
+// lossy encoders and a reference baseline and score both: minutes of work
+// whose home is the dedicated `make encoder-quality` target and the nightly
+// job, not the default `go test` loop. `make encoder-quality` sets the
+// variable; without it the gates skip so a plain run stays fast.
+func EncoderQualityGate(t testing.TB) {
+	t.Helper()
+	if os.Getenv("WAXFLOW_ENCODER_QUALITY") != "1" {
+		t.Skip("encoder-quality gate skipped; run `make encoder-quality` (or set WAXFLOW_ENCODER_QUALITY=1)")
+	}
+}
+
 // FFmpeg returns the ffmpeg path, skipping or failing per the policy.
 func FFmpeg(t testing.TB) string { return tool(t, "ffmpeg") }
 

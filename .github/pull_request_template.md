@@ -4,7 +4,7 @@
 
 ## Checklist
 
-- [ ] `make check` passes locally (gofmt, vet, `go test -race`, depcheck)
+- [ ] `make check` passes locally (gofmt, vet, functional + `test-race`, depcheck)
 - [ ] **Clean-room affirmation**: I did not open any Tier B (LGPL/GPL)
       source (LAME, Shine or its ports, ffmpeg, faad) while implementing
       code in this PR (ADR-0001)

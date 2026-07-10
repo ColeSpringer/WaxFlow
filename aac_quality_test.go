@@ -28,7 +28,8 @@ import (
 // stream, so the comparison is codec against codec; the metric's alignment
 // search absorbs the unsignaled priming), the reference as its native M4A.
 func TestAACEncoderQuality(t *testing.T) {
-	testutil.FFmpeg(t) // skip early without the oracle
+	testutil.EncoderQualityGate(t) // not part of the default loop; `make encoder-quality`
+	testutil.FFmpeg(t)             // skip early without the oracle
 
 	const rate, kbps = 44100, 128
 	corpus := qualityCorpus(rate, 3*rate)

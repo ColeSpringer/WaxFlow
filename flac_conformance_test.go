@@ -118,11 +118,29 @@ func requireBitExact(t *testing.T, name string) {
 	}
 }
 
+// skipHeavyUnderRace skips one of the two large pure-numeric FLAC suites when
+// the race detector is on. They spawn no goroutines of their own, so -race
+// only multiplies their runtime with nothing to detect. They run non-race
+// wherever the pinned vectors are present: locally after `make verify-vectors`
+// and the differential CI job (which fetches them and sets
+// WAXFLOW_REQUIRE_VECTORS=1); like every vector-gated test they self-skip when
+// the vectors are absent. Everything else, including the smaller FLAC suites
+// and the concurrency-bearing packages, still runs under `make test-race`
+// (go test -race ./...). Mirrors the Opus conformance suite's own guard.
+func skipHeavyUnderRace(t *testing.T) {
+	t.Helper()
+	if raceEnabled {
+		t.Skip("large pure-numeric FLAC suite; skipped under -race (runs non-race where vectors are present)")
+	}
+}
+
 // TestFLACSubsetBitExact is the headline conformance gate: every subset file
 // decodes bit-exactly.
 func TestFLACSubsetBitExact(t *testing.T) {
+	skipHeavyUnderRace(t)
 	for _, name := range subsetFiles {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			requireBitExact(t, "flac/subset/"+name+".flac")
 		})
 	}
@@ -135,9 +153,14 @@ func TestFLACSubsetBitExact(t *testing.T) {
 // across the suite without a nine-fold runtime (the size gate and the
 // service tests add plenty of default-level coverage).
 func TestFLACEncodeRoundTripSuite(t *testing.T) {
-	e := waxflow.New()
+	skipHeavyUnderRace(t)
 	for i, name := range subsetFiles {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			// A fresh engine per subtest: the parallel subtests share nothing,
+			// so the parallelization is safe by construction. Concurrent reuse
+			// of one engine is covered under -race by the server tests.
+			e := waxflow.New()
 			raw, err := os.ReadFile(testutil.VectorPath(t, "flac/subset/"+name+".flac"))
 			if err != nil {
 				t.Fatal(err)
@@ -177,6 +200,7 @@ func TestFLACEncodeRoundTripSuite(t *testing.T) {
 func TestFLACSubsetProbeClean(t *testing.T) {
 	for _, name := range subsetFiles {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			info, err := waxflow.New().Probe(vectorSource(t, "flac/subset/"+name+".flac"), "flac", nil)
 			if err != nil {
 				t.Fatal(err)
@@ -199,6 +223,7 @@ func TestFLACUncommon(t *testing.T) {
 	}
 	for _, name := range bitExact {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			requireBitExact(t, "flac/uncommon/"+name+".flac")
 		})
 	}
@@ -210,6 +235,7 @@ func TestFLACUncommon(t *testing.T) {
 	}
 	for _, name := range rejected {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			buf, err := decodeAllDynamic(t, vectorSource(t, "flac/uncommon/"+name+".flac"), "flac")
 			if err == nil {
 				audio.Put(buf)
@@ -234,6 +260,7 @@ func TestFLACFaulty(t *testing.T) {
 	}
 	for _, name := range stillExact {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			requireBitExact(t, "flac/faulty/"+name+".flac")
 		})
 	}
@@ -243,6 +270,7 @@ func TestFLACFaulty(t *testing.T) {
 	// no oracle. We size per frame, so the whole stream decodes; its
 	// declared total (which IS correct in this file) pins the length.
 	t.Run("01 - wrong max blocksize", func(t *testing.T) {
+		t.Parallel()
 		got, err := decodeAllDynamic(t, vectorSource(t, "flac/faulty/01 - wrong max blocksize.flac"), "flac")
 		if err != nil {
 			t.Fatalf("decode: %v", err)
@@ -257,6 +285,7 @@ func TestFLACFaulty(t *testing.T) {
 	// warning (ffmpeg refuses it outright, so again no oracle), rejected
 	// in strict mode.
 	t.Run("07 - other metadata blocks preceding streaminfo metadata block", func(t *testing.T) {
+		t.Parallel()
 		name := "flac/faulty/07 - other metadata blocks preceding streaminfo metadata block.flac"
 		got, err := decodeAllDynamic(t, vectorSource(t, name), "flac")
 		if err != nil {
@@ -281,6 +310,7 @@ func TestFLACFaulty(t *testing.T) {
 	}
 	for _, name := range rejected {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			buf, err := decodeAllDynamic(t, vectorSource(t, "flac/faulty/"+name+".flac"), "flac")
 			if err == nil {
 				audio.Put(buf)
@@ -297,6 +327,7 @@ func TestFLACFaulty(t *testing.T) {
 	graceful := []string{"09 - blocksize 1", "11 - incorrect metadata block length"}
 	for _, name := range graceful {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			buf, err := decodeAllDynamic(t, vectorSource(t, "flac/faulty/"+name+".flac"), "flac")
 			if err == nil {
 				audio.Put(buf)
@@ -324,6 +355,7 @@ func TestFLACSeekSampleExact(t *testing.T) {
 	}
 	for _, name := range files {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			src := vectorSource(t, name)
 			ref, err := decodeAllDynamic(t, src, "flac")
 			if err != nil {
@@ -411,6 +443,7 @@ func TestFLACProbeAgreesWithFFprobeOnSuite(t *testing.T) {
 	}
 	for _, name := range files {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			path := testutil.VectorPath(t, name)
 			ref := testutil.FFprobeFile(t, path)
 			info, err := waxflow.New().Probe(vectorSource(t, name), "flac", nil)

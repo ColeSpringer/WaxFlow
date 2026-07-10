@@ -7,12 +7,26 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # the "stdlib-only codecs" promise.
 PUBLIC_PKGS := . ./waxerr ./audio ./dsp/... ./codec/... ./container/... ./format ./source ./server ./client
 
-.PHONY: build test vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench encoder-quality fuzz opus-tools hls-e2e
+.PHONY: build test test-race vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench encoder-quality fuzz opus-tools hls-e2e
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/waxflow ./cmd/waxflow
 
+# The default loop: the whole suite without the race detector. The codecs and
+# DSP are single-goroutine numeric code, so -race there is a many-fold
+# slowdown; this pass is where the heavy conformance suites (FLAC, Opus) and
+# the encoder-quality gates run. The gates self-skip unless WAXFLOW_ENCODER_-
+# QUALITY=1 (they belong to `make encoder-quality`).
 test:
+	go test -timeout 30m ./...
+
+# The race pass: the whole tree under the detector, so any data race anywhere
+# is caught. It stays fast because the two largest pure-numeric FLAC suites and
+# the Opus conformance suite self-skip under -race (they have no goroutines and
+# run in full in the non-race pass above). Concurrency lives in the server and
+# internal packages; the engine's shared plans cache is exercised concurrently
+# by the server tests, which run here under the detector.
+test-race:
 	go test -race -timeout 30m ./...
 
 vet:
@@ -33,7 +47,7 @@ depcheck:
 		echo "$$bad"; exit 1; fi; \
 	echo "depcheck ok: public tree ($(PUBLIC_PKGS)) is stdlib-only"
 
-check: fmt-check vet test depcheck
+check: fmt-check vet test test-race depcheck
 
 # Fetch the SHA-256-pinned conformance vectors into testdata/vectors
 # (CI-cached, never committed). Vector-gated tests self-skip until run;
@@ -89,11 +103,11 @@ QUALITY_REPORT ?= quality-report.html
 AAC_QUALITY_REPORT ?= aac-quality-report.html
 OPUS_QUALITY_REPORT ?= opus-quality-report.html
 encoder-quality:
-	WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_REQUIRE_SHINE=1 WAXFLOW_QUALITY_REPORT=$(QUALITY_REPORT) \
+	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_REQUIRE_SHINE=1 WAXFLOW_QUALITY_REPORT=$(QUALITY_REPORT) \
 		go test -run TestMP3EncoderQuality -count=1 -v .
-	WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_QUALITY_REPORT=$(AAC_QUALITY_REPORT) \
+	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_QUALITY_REPORT=$(AAC_QUALITY_REPORT) \
 		go test -run TestAACEncoderQuality -count=1 -v .
-	WAXFLOW_REQUIRE_OPUS_TOOLS=1 WAXFLOW_REQUIRE_VECTORS=1 WAXFLOW_QUALITY_REPORT=$(OPUS_QUALITY_REPORT) \
+	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_OPUS_TOOLS=1 WAXFLOW_REQUIRE_VECTORS=1 WAXFLOW_QUALITY_REPORT=$(OPUS_QUALITY_REPORT) \
 		go test -run TestOpusEncoderQuality -count=1 -timeout 30m -v .
 
 # Browser HLS e2e: a real daemon, the committed /demo page, and hls.js in

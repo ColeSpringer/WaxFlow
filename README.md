@@ -160,7 +160,9 @@ distributed cache; two-pass loudness on live streams (jobs only).
 ## Development
 
 ```sh
-make check           # gofmt + vet + go test -race + depcheck
+make check           # gofmt + vet + test (functional) + test-race + depcheck
+make test            # full suite, no race detector (the fast default loop)
+make test-race       # race detector over the whole tree (heavy numeric suites self-skip)
 make docker          # local image build
 make verify-vectors  # fetch SHA-256-pinned conformance vectors (CI-cached)
 make goldens         # regenerate muxer golden files (review the diff)
