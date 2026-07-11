@@ -39,6 +39,7 @@ type Muxer struct {
 	samples int64 // engine's projected input sample count, -1 unknown
 	rate    int
 	off     int64 // bytes written
+	id3Len  int64 // leading ID3v2 tag length; the MPEG stream starts here
 	infoLen int   // metadata frame length, for the End back-patch
 
 	hdr [mp3.HeaderLen]byte // first frame's header, the metadata frame template
@@ -65,6 +66,11 @@ type MuxerOptions struct {
 	// the 100-point TOC) for a variable-bit-rate stream; the default
 	// "Info" form marks constant rate.
 	VBR bool
+	// Tags are written as a leading ID3v2.4 tag (the descriptive frames
+	// id3Text maps; other keys are skipped). The Xing byte counts and TOC
+	// stay relative to the first MPEG frame, so the tag never skews seek
+	// arithmetic.
+	Tags []container.Tag
 }
 
 // tocSampleCap bounds the retained frame offsets; reaching it halves the
@@ -104,6 +110,12 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	m.samples = t.Samples
 	m.rate = t.Fmt.Rate
 	m.began = true
+	if id3 := id3v2Tag(m.opts.Tags); id3 != nil {
+		if err := m.write(id3); err != nil {
+			return err
+		}
+		m.id3Len = int64(len(id3))
+	}
 	return nil
 }
 
@@ -175,16 +187,17 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 		return nil // no metadata frame to back-patch; the projection stands
 	}
 	// Rebuild the metadata frame with the exact trailer, audio-frame
-	// count, and measured seek table, then patch it in place at offset 0.
+	// count, and measured seek table, then patch it in place where the
+	// MPEG stream starts (past any leading ID3v2 tag).
 	var toc []byte
 	if m.opts.VBR {
 		toc = m.measureTOC()
 	}
-	info := m.buildInfoFrame(int(trailer.Delay), int(trailer.Padding), m.audioFrames, toc, m.off)
+	info := m.buildInfoFrame(int(trailer.Delay), int(trailer.Padding), m.audioFrames, toc, m.off-m.id3Len)
 	if info == nil || len(info) != m.infoLen {
 		return nil // unbuildable now (should not happen); leave the projection
 	}
-	if _, err := m.ws.Seek(0, io.SeekStart); err != nil {
+	if _, err := m.ws.Seek(m.id3Len, io.SeekStart); err != nil {
 		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mpa: seek for patch", err)
 	}
 	if _, err := m.ws.Write(info); err != nil {
@@ -198,10 +211,13 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 
 // measureTOC builds the Xing 100-point seek table from the sampled frame
 // offsets: entry i is the stream byte offset at time fraction i/100, as a
-// 0..255 fraction of the total byte count.
+// 0..255 fraction of the total byte count. Offsets and the total count
+// from the first MPEG frame, so a leading ID3v2 tag never skews the
+// fractions.
 func (m *Muxer) measureTOC() []byte {
 	toc := make([]byte, 100)
-	if len(m.frameOff) == 0 || m.off <= 0 || m.audioFrames == 0 {
+	total := m.off - m.id3Len
+	if len(m.frameOff) == 0 || total <= 0 || m.audioFrames == 0 {
 		for i := range toc {
 			toc[i] = byte(min(i*256/100, 255))
 		}
@@ -210,7 +226,7 @@ func (m *Muxer) measureTOC() []byte {
 	for i := range toc {
 		frame := m.audioFrames * i / 100
 		j := min(frame/m.stride, len(m.frameOff)-1)
-		toc[i] = byte(min(m.frameOff[j]*256/m.off, 255))
+		toc[i] = byte(min((m.frameOff[j]-m.id3Len)*256/total, 255))
 	}
 	return toc
 }

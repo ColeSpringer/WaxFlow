@@ -69,6 +69,19 @@ type ProbeInfo struct {
 	Container     string       `json:"container"`
 	Tracks        []ProbeTrack `json:"tracks"`
 	Warnings      []string     `json:"warnings,omitempty"`
+
+	// Metadata summary, present when the daemon maps metadata and the
+	// source carries it.
+	Tags      map[string][]string `json:"tags,omitempty"`
+	Chapters  []ProbeChapter      `json:"chapters,omitempty"`
+	HasArt    bool                `json:"hasArt,omitempty"`
+	HasLyrics bool                `json:"hasLyrics,omitempty"`
+}
+
+// ProbeChapter is one chapter marker.
+type ProbeChapter struct {
+	StartSeconds float64 `json:"startSeconds"`
+	Title        string  `json:"title,omitempty"`
 }
 
 type ProbeTrack struct {

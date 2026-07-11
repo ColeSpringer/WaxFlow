@@ -30,7 +30,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err)
 		return
 	}
-	req, err := s.prepareSource(q, sigAuthed)
+	req, err := s.prepareSource(r.Context(), q, sigAuthed)
 	if err != nil {
 		s.writeError(w, err)
 		return

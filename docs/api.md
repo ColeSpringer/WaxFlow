@@ -78,7 +78,11 @@ or `waxflow sign`.
 | `GET /cache/stats`, `POST /cache/gc` | key | cache operations |
 | `GET /metrics` | key or metricsKey | Prometheus text exposition |
 | `GET /demo` | none (dev mode only, `demo: true`) | browser test page |
-| `POST /uploads`, `/jobs`, `/art`, `/lyrics` | | *later* (job store, metadata mapping) |
+| `POST /uploads`, `DELETE /uploads/{id}` | key | spool one-shot sources; reference as `src=upload:<id>` |
+| `POST /jobs`, `GET /jobs[/{id}]`, `DELETE /jobs/{id}` | key | async full-file transcode/analyze jobs |
+| `GET /jobs/{id}/events` | key or sig | server-sent job progress events (`EventSource` cannot set headers) |
+| `GET /jobs/{id}/result` | key or sig | finished output (full ranges) or analysis JSON |
+| `GET /art`, `GET /lyrics` | key or sig | embedded cover art / lyrics passthrough (raw bytes, ETag'd, no resizing) |
 
 ## GET /probe, POST /probe
 
@@ -95,6 +99,12 @@ or `waxflow sign`.
       }],
       "warnings": ["..."]
     }
+
+With metadata mapping (the CLI daemon always has it), the body also
+carries the source's tag summary when present: `tags` (canonical
+uppercase keys to value lists, ReplayGain included; the lyric sheet is
+excluded, `hasLyrics` plus `GET /lyrics` cover it), `chapters`
+(`[{"startSeconds", "title"}]`), `hasArt`, and `hasLyrics`.
 
 `warnings` lists input damage the tolerant parser worked around; `strict`
 turns damage into errors. `samples: -1` means unknown length. This is
@@ -132,8 +142,10 @@ Parameters (unknown parameter names are rejected):
   depth (16 or 24, dithered when reducing). Absent keeps the source's.
 - `gain`: `off`, `track` (default), `album`, or an explicit `+/-dB`
   number (clamped at +12 dB; positive gain engages the true-peak
-  limiter). Tag-based ReplayGain (`track`/`album`) resolves to 0 dB until
-  metadata mapping lands.
+  limiter). `track` and `album` resolve against the source's ReplayGain
+  2 tags (Opus `R128_*` tags convert from the -23 LUFS reference), fall
+  back from album to track, and resolve to 0 dB when the source carries
+  none. Exact measured loudness belongs to jobs (`loudness: "analyze"`).
 - `t`: start position in **seconds** (decimal allowed). Seeks are
   sample-exact: the decoder pre-rolls from the nearest sync point. A
   `t>0` request is always a transcode (a new request per seek; live
@@ -228,11 +240,14 @@ since minting: re-mint and reload.
 
     {"path": "/stream", "params": {"src": "lib/a.flac", "format": "wav"}, "ttlSeconds": 3600}
 
-`path` defaults to `/stream`; `/hls/master.m3u8` is also signable (its
+`path` defaults to `/stream`. Also signable: `/hls/master.m3u8` (its
 `params` are the raw HLS master parameters above, and every rung is
-planned at mint time so a URL that mints is a URL that plays). `params`
-are validated like a live request, the source identity is resolved and
-embedded, and the response is:
+planned at mint time so a URL that mints is a URL that plays), `/art`
+and `/lyrics` (`params` take only `src`; identity is embedded), and
+`/jobs/<id>/events` / `/jobs/<id>/result` (no `params`; the signature
+pins the job id through the path). `params` are validated like a live
+request, the source identity is resolved and embedded, and the response
+is:
 
     {"schemaVersion": 1, "url": "/stream?exp=...&format=wav&id=...&kid=1&sig=...&src=...", "exp": 1767225600}
 
@@ -253,9 +268,86 @@ embedded, and the response is:
       "profiles": {}
     }
 
-Capability-gated: only what works is listed. `profiles` fills once the
-client matrix is verified, with tested delivery profiles
-(`apple-native`, `hls-js`, ...).
+Capability-gated: only what works is listed. `delivery.jobs` and
+`delivery.uploads` report whether this daemon runs with a job store and
+an upload spool (the CLI daemon always does; a bare library embedding
+may not). `profiles` fills once the client matrix is verified, with
+tested delivery profiles (`apple-native`, `hls-js`, ...).
+
+## Uploads
+
+`POST /uploads` spools the raw request body as a one-shot source and
+returns
+
+    {"schemaVersion": 1, "id": "01J...", "ref": "upload:01J...", "name": "in.flac", "bytes": 123, "expiresAt": 1767225600}
+
+The optional `name` query parameter supplies the original filename (its
+extension seeds the probe hint). Reference the upload anywhere a `src`
+is accepted, `upload:<id>`. Uploads expire `uploadTTL` after creation
+(default 1 h; `expiresAt` is absent when expiry is off) and are capped
+by `uploadMaxBytes` each and `scratchMaxBytes` together.
+`DELETE /uploads/{id}` removes one immediately (204).
+
+## Jobs
+
+Async full-file work that outlives any request, persisted under
+`dataDir/jobs`: completed results survive daemon restarts, and a job
+interrupted mid-run restarts cleanly from zero on the next start.
+
+`POST /jobs` with a JSON body:
+
+    {"type": "transcode", "src": "lib/a.flac", "format": "opus", "bitrate": 96}
+    {"type": "transcode", "src": "lib/a.flac", "format": "flac", "loudness": "analyze"}
+    {"type": "analyze", "src": "lib/a.flac"}
+
+Transcode jobs take the /stream shaping parameters (`format` required,
+plus `container`, `rate`, `ch`, `bits`, `bitrate`, `gain`, `flacLevel`)
+and, unlike /stream, may target non-streaming formats (`aiff`): job
+outputs are seekable files, so every muxer back-patch applies (exact WAV
+sizes, FLAC seek tables, the MP4 `iTunSMPB` gapless atom). `loudness:
+"analyze"` selects the two-pass form: measure the source, apply the
+exact gain to the ReplayGain reference (replacing `gain`), and write
+measured `REPLAYGAIN_TRACK_*` tags describing the finished output.
+Analyze jobs measure EBU R128 loudness (integrated LUFS, loudness
+range, true peak, sample peak) without producing audio.
+
+The response (and `GET /jobs/{id}`) is the job document:
+
+    {"schemaVersion": 1, "id": "01J...", "type": "transcode", "state": "queued",
+     "request": {...}, "created": "...",
+     "progress": {"phase": "transcode", "done": 123, "total": 456, "percent": 26.9},
+     "output": {"file": "out.opus", "mediaType": "audio/ogg", "container": "opus", "bytes": 1, "samples": 1, "rate": 48000},
+     "analysis": {"integratedLufs": -17.2, "loudnessRange": 4.1, "truePeakDb": -0.9, ...},
+     "error": {"code": "...", "message": "..."}}
+
+States: `queued`, `running`, then one of `done`, `failed`, `canceled`.
+`analysis` peak and loudness fields are `null` for digital silence
+(negative infinity does not survive JSON). Jobs queue beyond the
+`jobSlots` worker count, and running jobs pause between chunks while
+the live pool is saturated: interactive streams always win.
+
+`GET /jobs` lists all jobs (`{"schemaVersion": 1, "jobs": [...]}`).
+`DELETE /jobs/{id}` cancels the job if running and removes it (204).
+
+`GET /jobs/{id}/events` is a server-sent event stream: one `event: job`
+per state or progress update, each `data:` line a full job document,
+ending after the terminal event (comment heartbeats every 15 s keep
+proxies from timing it out). `GET /jobs/{id}/result` serves a finished
+transcode's file (real `Content-Length`, full ranges, strong per-job
+`ETag`, `Content-Disposition: attachment`) or an analyze job's analysis
+JSON; a queued or running job answers 400, a failed one replays its
+error envelope. Both accept signed URLs, because a browser
+`EventSource` and a plain download link cannot set headers.
+
+## GET /art, GET /lyrics
+
+`?src=<ref>` (plus optional `id` identity pin; both signable). `/art`
+serves the source's embedded cover art verbatim, preferring the front
+cover, with its own MIME type and a strong identity-derived `ETag`: a
+remote player streaming through WaxFlow has no other channel for
+artwork. `/lyrics` serves embedded lyrics as `text/plain` (unsynced
+text, or an LRC rendering of synced lyrics when that is all the source
+has). Sources without the datum answer 404.
 
 ## Cache operations
 

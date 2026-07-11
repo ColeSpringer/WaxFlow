@@ -66,6 +66,7 @@ fuzz:
 goldens:
 	go test -run TestGoldenMuxOutputs ./container/riff ./container/aiff ./container/flacn ./container/mpa -update
 	go test -run TestGoldenSegments . -update
+	go test -run TestGoldenM4BChapters . -update
 
 # Decode/encode throughput; the x-realtime metric is judged against the
 # per-codec floors in docs/quality-gates.md (nightly benchstat ratchets

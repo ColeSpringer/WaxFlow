@@ -35,12 +35,15 @@ const DefaultAddr = "127.0.0.1:4418"
 // normalizes its zero-value Config through these same constants, so a
 // direct embedder and a CLI-configured daemon cannot drift.
 const (
-	DefaultSourceMaxBytes = 4 << 30
-	DefaultCacheMaxBytes  = 10 << 30
-	DefaultJobSlots       = 2
-	DefaultGainMode       = "track"
-	DefaultPaceBurst      = 30 * time.Second
-	DefaultPaceFactor     = 2.0
+	DefaultSourceMaxBytes  = 4 << 30
+	DefaultCacheMaxBytes   = 10 << 30
+	DefaultJobSlots        = 2
+	DefaultGainMode        = "track"
+	DefaultPaceBurst       = 30 * time.Second
+	DefaultPaceFactor      = 2.0
+	DefaultUploadMaxBytes  = 2 << 30
+	DefaultUploadTTL       = time.Hour
+	DefaultScratchMaxBytes = 8 << 30
 )
 
 // DefaultLiveSlots is the live admission pool default: one slot per CPU,
@@ -112,6 +115,23 @@ type Config struct {
 	// ("720h"). Empty means no age limit.
 	CacheMaxAge string `json:"cacheMaxAge"`
 
+	// ScratchDir holds the upload spool. Empty means the platform temp
+	// directory plus /waxflow (the hardened container mounts a tmpfs
+	// there).
+	ScratchDir string `json:"scratchDir"`
+
+	// UploadMaxBytes caps one spooled upload; 0 means 2 GiB.
+	UploadMaxBytes int64 `json:"uploadMaxBytes"`
+
+	// UploadTTL evicts spooled uploads this long after creation, as a Go
+	// duration string ("1h"). Empty means the 1 hour default; "0" never
+	// expires.
+	UploadTTL string `json:"uploadTTL"`
+
+	// ScratchMaxBytes caps the aggregate spool directory (UploadMaxBytes
+	// only caps one upload); 0 means 8 GiB.
+	ScratchMaxBytes int64 `json:"scratchMaxBytes"`
+
 	// LiveSlots and JobSlots size the admission pools; 0 means
 	// max(1, NumCPU-1) and 2 respectively.
 	LiveSlots int `json:"liveSlots"`
@@ -164,6 +184,10 @@ var envVars = []struct {
 	{"WAXFLOW_CACHE_DIR", func(c *Config, v string) error { c.CacheDir = v; return nil }},
 	{"WAXFLOW_CACHE_MAX_BYTES", func(c *Config, v string) error { return parseInt64(v, &c.CacheMaxBytes) }},
 	{"WAXFLOW_CACHE_MAX_AGE", func(c *Config, v string) error { c.CacheMaxAge = v; return nil }},
+	{"WAXFLOW_SCRATCH_DIR", func(c *Config, v string) error { c.ScratchDir = v; return nil }},
+	{"WAXFLOW_UPLOAD_MAX_BYTES", func(c *Config, v string) error { return parseInt64(v, &c.UploadMaxBytes) }},
+	{"WAXFLOW_UPLOAD_TTL", func(c *Config, v string) error { c.UploadTTL = v; return nil }},
+	{"WAXFLOW_SCRATCH_MAX_BYTES", func(c *Config, v string) error { return parseInt64(v, &c.ScratchMaxBytes) }},
 	{"WAXFLOW_LIVE_SLOTS", func(c *Config, v string) error { return parseInt(v, &c.LiveSlots) }},
 	{"WAXFLOW_JOB_SLOTS", func(c *Config, v string) error { return parseInt(v, &c.JobSlots) }},
 	{"WAXFLOW_DEFAULT_GAIN", func(c *Config, v string) error { c.DefaultGain = v; return nil }},
@@ -257,10 +281,14 @@ func (c Config) Validate() error {
 			return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("root %q has no path", r.Name))
 		}
 	}
-	if c.SourceMaxBytes < 0 || c.CacheMaxBytes < 0 || c.LiveSlots < 0 || c.JobSlots < 0 {
+	if c.SourceMaxBytes < 0 || c.CacheMaxBytes < 0 || c.LiveSlots < 0 || c.JobSlots < 0 ||
+		c.UploadMaxBytes < 0 || c.ScratchMaxBytes < 0 {
 		return waxerr.New(waxerr.CodeInvalidRequest, "size and slot settings must be non-negative")
 	}
 	if _, err := c.ResolvedCacheMaxAge(); err != nil {
+		return err
+	}
+	if _, err := c.ResolvedUploadTTL(); err != nil {
 		return err
 	}
 	if (c.TLSCert == "") != (c.TLSKey == "") {
@@ -377,6 +405,44 @@ func (c Config) ResolvedPaceFactor() float64 {
 		return DefaultPaceFactor
 	}
 	return *c.PaceFactor
+}
+
+// ResolvedUploadMaxBytes returns the per-upload cap, defaulted.
+func (c Config) ResolvedUploadMaxBytes() int64 {
+	if c.UploadMaxBytes == 0 {
+		return DefaultUploadMaxBytes
+	}
+	return c.UploadMaxBytes
+}
+
+// ResolvedScratchMaxBytes returns the aggregate spool cap, defaulted.
+func (c Config) ResolvedScratchMaxBytes() int64 {
+	if c.ScratchMaxBytes == 0 {
+		return DefaultScratchMaxBytes
+	}
+	return c.ScratchMaxBytes
+}
+
+// ResolvedUploadTTL parses UploadTTL; empty means the 1 hour default,
+// an explicit "0" disables expiry.
+func (c Config) ResolvedUploadTTL() (time.Duration, error) {
+	if c.UploadTTL == "" {
+		return DefaultUploadTTL, nil
+	}
+	d, err := time.ParseDuration(c.UploadTTL)
+	if err != nil || d < 0 {
+		return 0, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("uploadTTL %q: want a non-negative Go duration like 1h (0 never expires)", c.UploadTTL))
+	}
+	return d, nil
+}
+
+// ResolvedScratchDir returns ScratchDir or the platform temp default.
+func (c Config) ResolvedScratchDir() string {
+	if c.ScratchDir != "" {
+		return c.ScratchDir
+	}
+	return filepath.Join(os.TempDir(), "waxflow")
 }
 
 // ResolvedDataDir returns DataDir or the platform default.

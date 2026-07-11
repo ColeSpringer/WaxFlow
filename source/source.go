@@ -124,7 +124,7 @@ func scheme(ref string) (string, bool) {
 func unsupportedScheme(s string) error {
 	switch s {
 	case "upload":
-		return waxerr.New(waxerr.CodeUnsupportedSource, "source: upload references land with the job store")
+		return waxerr.New(waxerr.CodeUnsupportedSource, "source: upload references need the daemon's upload spool (uploads are disabled here)")
 	case "pid":
 		return waxerr.New(waxerr.CodeUnsupportedSource, "source: pid references require the WaxBin resolver flavor")
 	default:
@@ -135,4 +135,33 @@ func unsupportedScheme(s string) error {
 // extHint extracts the extension hint from a relative path.
 func extHint(rel string) string {
 	return strings.TrimPrefix(strings.ToLower(path.Ext(rel)), ".")
+}
+
+// OpenLocal opens a trusted local path (the upload spool) as a resolved
+// File with the same regular-file validation as root resolution. ref is
+// the reference the file answers for ("upload:<id>") and name supplies
+// the extension hint (the client's original filename); path confinement
+// is the caller's job, since the spool directory is daemon-owned, not a
+// user-named root.
+func OpenLocal(ref, path, name string) (*File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|openNonblock, 0)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeNotFound, "source: no such file", err)
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, waxerr.Wrap(waxerr.CodeSourceUnreadable, "source: stat", err)
+	}
+	if !fi.Mode().IsRegular() {
+		f.Close()
+		return nil, waxerr.New(waxerr.CodeUnsupportedSource,
+			fmt.Sprintf("source: %q is a %s, not a regular file", ref, modeWord(fi.Mode())))
+	}
+	return &File{
+		Ref: ref,
+		Ext: extHint(name),
+		ID:  Identity{Size: fi.Size(), MtimeNS: fi.ModTime().UnixNano()},
+		f:   f,
+	}, nil
 }

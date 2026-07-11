@@ -120,6 +120,28 @@ type TranscodeOptions struct {
 	Shaping dither.Shaping
 	// ResampleProfile selects resampler quality; empty means resample.HQ.
 	ResampleProfile resample.Profile
+	// Tags embeds canonical metadata fields (TITLE, ARTIST, ...) in the
+	// output where the muxer can represent them in its stream form: Ogg
+	// OpusTags, a FLAC VORBIS_COMMENT block, an MP3 ID3v2 tag, MP4 ilst
+	// atoms. Formats without stream-form tagging (WAV, AIFF, ADTS)
+	// ignore them; a finished file gets full metadata from the mapping
+	// post-pass instead. Tags never change the plan: callers keying
+	// cached bytes must fold the tag values into their own key.
+	Tags []container.Tag
+	// Chapters embeds chapter markers. Only the MP4 muxer represents
+	// them (Nero chpl); the mapping post-pass covers finished files of
+	// the other formats.
+	Chapters []container.Chapter
+	// Art embeds cover art. Only the MP4 muxer represents it (the ilst
+	// covr atom); art inflates the pre-audio init header, so live
+	// streams should leave it nil.
+	Art *container.Picture
+	// Progress, when non-nil, is called after each encoded chunk with
+	// the encoder-input samples consumed so far and the projected total
+	// (-1 unknown). It runs on the transcoding goroutine, so blocking it
+	// pauses the pipeline; the job runner's yield-to-live-streams check
+	// rides on exactly that.
+	Progress func(done, total int64)
 }
 
 // FLACLevel spellings whose meaning the zero value cannot carry.

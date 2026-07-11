@@ -31,6 +31,15 @@ type MuxerOptions struct {
 	// roughly defaultFragmentSeconds of audio at the track rate. A fragment
 	// closes once it reaches the target (the final one may be shorter).
 	FragmentSamples int
+	// Tags embeds canonical metadata fields as iTunes ilst atoms in the
+	// moov (the keys ilstText and ilstFreeform map; others are skipped).
+	Tags []container.Tag
+	// Chapters embeds Nero chpl chapter markers in the moov's udta.
+	Chapters []container.Chapter
+	// Art embeds cover art as the ilst covr atom. Init headers are written
+	// before the first audio byte, so large art delays first audio on a
+	// live stream; the caller decides (jobs pass it, live streams do not).
+	Art *container.Picture
 }
 
 // Muxer writes one audio track as a progressive fragmented MP4 (fMP4): an
@@ -50,8 +59,9 @@ type MuxerOptions struct {
 // init bytes stand as written: full gapless when the length was known,
 // delay-only otherwise (the capability matrix's live fMP4 cell).
 type Muxer struct {
-	w  io.Writer
-	ws io.WriteSeeker // nil when w cannot seek
+	w    io.Writer
+	ws   io.WriteSeeker // nil when w cannot seek
+	opts MuxerOptions
 
 	rate     int
 	fragTgt  int
@@ -67,6 +77,11 @@ type Muxer struct {
 	delay      int64
 	knownLen   int64
 
+	// iTunSMPB back-patch state (AAC on a seekable writer): the file
+	// offset of the atom's payload, -1 when none was written. Padding and
+	// the exact length are fixed-width hex fields End fills in.
+	smpbOff int64
+
 	off int64 // bytes written
 
 	// current fragment accumulator.
@@ -78,11 +93,12 @@ type Muxer struct {
 
 // NewMuxer returns a fragmented MP4 muxer writing to w.
 func NewMuxer(w io.Writer, opts *MuxerOptions) *Muxer {
-	m := &Muxer{w: w, seq: 1, elstDurOff: -1}
+	m := &Muxer{w: w, seq: 1, elstDurOff: -1, smpbOff: -1}
 	if ws, ok := w.(io.WriteSeeker); ok {
 		m.ws = ws
 	}
 	if opts != nil {
+		m.opts = *opts
 		m.fragTgt = opts.FragmentSamples
 	}
 	return m
@@ -160,7 +176,17 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	if err := m.write(ftypBox()); err != nil {
 		return err
 	}
-	moov := moovBox(t.Fmt.Rate, entry, edts, defaultDur)
+	// The iTunSMPB gapless atom needs the exact padding and length only
+	// End knows, and its fields cannot be corrected on a pure stream, so
+	// it is written (with zeros to patch) only when the writer can seek:
+	// the job path. Live streams keep the edit list's delay-only (or
+	// projected-length) signaling.
+	var smpb []byte
+	if t.Codec == codec.AACLC && m.ws != nil && t.Delay > 0 {
+		smpb = freeformAtom("iTunSMPB", smpbPayload(t.Delay, max(t.Samples, 0)))
+	}
+	udta := udtaBox(m.opts.Tags, m.opts.Chapters, m.opts.Art, smpb)
+	moov := moovBox(t.Fmt.Rate, entry, edts, defaultDur, udta)
 	if edts != nil {
 		// Remember where the elst entry's 64-bit duration landed for the
 		// End back-patch. The whole edts blob is matched, not the 4-byte
@@ -170,6 +196,16 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 		// back-patch must not depend on that staying true).
 		if i := bytes.Index(moov, edts); i >= 0 {
 			m.elstDurOff = m.off + int64(i) + elstDurOffset
+		}
+	}
+	if smpb != nil {
+		// Same idea for the iTunSMPB payload: locate it by content (the
+		// template's leading zero field), not by arithmetic over the
+		// freeform layout.
+		if i := bytes.Index(moov, smpb); i >= 0 {
+			if j := bytes.Index(smpb, []byte(" 00000000 ")); j >= 0 {
+				m.smpbOff = m.off + int64(i) + int64(j)
+			}
 		}
 	}
 	return m.write(moov)
@@ -231,17 +267,39 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 	// encoder's exact sample count (the projected or unknown length
 	// Begin wrote becomes exact, completing the gapless signaling).
 	if m.ws != nil && m.elstDurOff >= 0 && trailer.Samples > 0 && trailer.Samples != m.knownLen {
-		if _, err := m.ws.Seek(m.elstDurOff, io.SeekStart); err != nil {
-			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp4: elst seek", err)
-		}
 		var dur [8]byte
 		binary.BigEndian.PutUint64(dur[:], uint64(trailer.Samples))
-		if _, err := m.ws.Write(dur[:]); err != nil {
-			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp4: elst patch", err)
+		if err := m.patch(m.elstDurOff, dur[:], "elst"); err != nil {
+			return err
 		}
-		if _, err := m.ws.Seek(m.off, io.SeekStart); err != nil {
-			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp4: seeking to end", err)
+	}
+	// Fill the iTunSMPB padding and exact length (fixed-width hex, so the
+	// header never moves). Together with the edit list this makes the
+	// seekable AAC output a full gapless cell.
+	if m.ws != nil && m.smpbOff >= 0 {
+		pad := fmt.Sprintf("%08X", uint32(trailer.Padding))
+		length := fmt.Sprintf("%016X", uint64(max(trailer.Samples, 0)))
+		if err := m.patch(m.smpbOff+smpbPaddingOff, []byte(pad), "iTunSMPB"); err != nil {
+			return err
 		}
+		if err := m.patch(m.smpbOff+smpbLengthOff, []byte(length), "iTunSMPB"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// patch overwrites len(b) bytes at off and restores the write position to
+// the stream end.
+func (m *Muxer) patch(off int64, b []byte, what string) error {
+	if _, err := m.ws.Seek(off, io.SeekStart); err != nil {
+		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp4: "+what+" seek", err)
+	}
+	if _, err := m.ws.Write(b); err != nil {
+		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp4: "+what+" patch", err)
+	}
+	if _, err := m.ws.Seek(m.off, io.SeekStart); err != nil {
+		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp4: seeking to end", err)
 	}
 	return nil
 }
@@ -294,8 +352,9 @@ func ftypBox() []byte {
 // defaults. The media timescale is the sample rate, so decode times are
 // sample counts. entry is the codec's AudioSampleEntry; a non-nil edts
 // (the segmenter's edit list) rides inside the trak; defaultDur is the
-// trex fallback sample duration (the trun always overrides it).
-func moovBox(rate int, entry, edts []byte, defaultDur int) []byte {
+// trex fallback sample duration (the trun always overrides it); a
+// non-nil udta (tags, chapters, iTunSMPB) closes the box.
+func moovBox(rate int, entry, edts []byte, defaultDur int, udta []byte) []byte {
 	mvhd := makeFullBox("mvhd", 0, 0,
 		u32(0), u32(0), // creation, modification time
 		u32(uint32(rate)),                                    // timescale
@@ -306,6 +365,9 @@ func moovBox(rate int, entry, edts []byte, defaultDur int) []byte {
 		u32(trackID+1))   // next_track_ID
 	trak := trakBox(rate, entry, edts)
 	mvex := makeBox("mvex", trexBox(defaultDur))
+	if udta != nil {
+		return makeBox("moov", mvhd, trak, mvex, udta)
+	}
 	return makeBox("moov", mvhd, trak, mvex)
 }
 

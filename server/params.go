@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/sign"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
@@ -32,19 +33,32 @@ const (
 	gainFixed
 )
 
-// gainSpec is a parsed gain= parameter. Tag-based modes (track, album)
-// will read ReplayGain via waxlabel once metadata mapping lands; until
-// then they resolve to 0 dB, which also keeps their cache keys shared
-// with off.
+// gainSpec is a parsed gain= parameter.
 type gainSpec struct {
 	mode gainMode
 	db   float64
 }
 
-// resolveDB is the dB the DSP chain actually applies today.
-func (g gainSpec) resolveDB() float64 {
-	if g.mode == gainFixed {
+// resolveDB is the dB the DSP chain applies: fixed values verbatim, tag
+// modes from the source's ReplayGain (album falls back to track, the
+// usual player behavior), 0 when the tags or the mapper are absent.
+// Tag-sourced positive gain clamps at the same +12 dB policy bound as
+// fixed gain.
+func (g gainSpec) resolveDB(info *meta.Info) float64 {
+	switch g.mode {
+	case gainFixed:
 		return g.db
+	case gainTrack:
+		if db, ok := meta.TrackGainDB(info); ok {
+			return min(db, maxGainDB)
+		}
+	case gainAlbum:
+		if db, ok := meta.AlbumGainDB(info); ok {
+			return min(db, maxGainDB)
+		}
+		if db, ok := meta.TrackGainDB(info); ok {
+			return min(db, maxGainDB)
+		}
 	}
 	return 0
 }

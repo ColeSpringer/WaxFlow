@@ -3,7 +3,7 @@ package admission
 import "testing"
 
 func TestPoolExhaustionAndRelease(t *testing.T) {
-	p := New(2, 1)
+	p := New(2)
 
 	r1, ok1 := p.AcquireLive()
 	r2, ok2 := p.AcquireLive()
@@ -16,16 +16,17 @@ func TestPoolExhaustionAndRelease(t *testing.T) {
 	if p.LiveInUse() != 2 {
 		t.Fatalf("LiveInUse = %d", p.LiveInUse())
 	}
-
-	// Job pool is independent of the live pool.
-	if _, ok := p.AcquireJob(); !ok {
-		t.Fatal("job slot must acquire while live pool is saturated")
+	if !p.LiveSaturated() {
+		t.Fatal("full pool must report saturated")
 	}
 
 	r1()
 	r1() // idempotent: a double release must not free someone else's slot
 	if p.LiveInUse() != 1 {
 		t.Fatalf("LiveInUse after release = %d", p.LiveInUse())
+	}
+	if p.LiveSaturated() {
+		t.Fatal("pool with a free slot must not report saturated")
 	}
 	if _, ok := p.AcquireLive(); !ok {
 		t.Fatal("released slot must be reusable")
@@ -34,11 +35,8 @@ func TestPoolExhaustionAndRelease(t *testing.T) {
 }
 
 func TestMinimumOneSlot(t *testing.T) {
-	p := New(0, -3)
+	p := New(0)
 	if _, ok := p.AcquireLive(); !ok {
 		t.Fatal("live pool floor is one slot")
-	}
-	if _, ok := p.AcquireJob(); !ok {
-		t.Fatal("job pool floor is one slot")
 	}
 }

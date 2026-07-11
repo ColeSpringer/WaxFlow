@@ -142,3 +142,12 @@ Entries follow this format:
 > conformance metric. Test-support code only: it is compiled into test
 > binaries, never into release builds. Validated bit-for-bit against the C
 > tool on the official test vectors.
+
+> **dsp/loudness K-weighting**: the rate-independent analog
+> parametrization of the BS.1770 pre-filter pair (shelf and high-pass
+> center frequencies, Q values, and gain, used to derive biquad
+> coefficients at any sample rate) follows the published
+> de-quantification also used by *libebur128* (MIT),
+> https://github.com/jiixyj/libebur128. The meter itself (gating, LRA,
+> true peak) is original code written against ITU-R BS.1770-4 and EBU
+> Tech 3341/3342; no source was ported.

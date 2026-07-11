@@ -117,9 +117,12 @@ Precedence: **flag > `WAXFLOW_*` env > JSON config file > default**
 | `metricsKey` | `WAXFLOW_METRICS_KEY` | none | additionally unlocks `GET /metrics` |
 | `signingSecret` | `WAXFLOW_SIGNING_SECRET` | auto-generated into `dataDir` (0600) | HMAC key for signed URLs; `kid:hex,kid2:hex` rotation list or a literal secret |
 | `allowedOrigins` | `WAXFLOW_ALLOWED_ORIGINS` | none | CORS allowlist for playback endpoints |
-| `dataDir` / `cacheDir` | `WAXFLOW_DATA_DIR` / `WAXFLOW_CACHE_DIR` | platform dirs | daemon state / transcode cache |
+| `dataDir` / `cacheDir` | `WAXFLOW_DATA_DIR` / `WAXFLOW_CACHE_DIR` | platform dirs | daemon state (signing secret, job store) / transcode cache |
+| `scratchDir` | `WAXFLOW_SCRATCH_DIR` | temp dir + `/waxflow` | upload spool (the hardened container mounts a tmpfs) |
+| `uploadMaxBytes` / `uploadTTL` | `WAXFLOW_UPLOAD_MAX_BYTES` / `WAXFLOW_UPLOAD_TTL` | 2 GiB / `1h` | one upload's size cap / spool eviction after creation (Go duration, `0` never) |
+| `scratchMaxBytes` | `WAXFLOW_SCRATCH_MAX_BYTES` | 8 GiB | aggregate spool cap (`uploadMaxBytes` only caps one upload) |
 | `cacheMaxBytes` / `cacheMaxAge` | `WAXFLOW_CACHE_MAX_*` | 10 GiB / off | LRU eviction policy (`cacheMaxAge` is a Go duration) |
-| `liveSlots` / `jobSlots` | `WAXFLOW_*_SLOTS` | NumCPU-1 / 2 | admission pools; over limit means 503 + `Retry-After: 2` |
+| `liveSlots` / `jobSlots` | `WAXFLOW_*_SLOTS` | NumCPU-1 / 2 | live admission pool (over limit means 503 + `Retry-After: 2`) / concurrent job workers (jobs queue and also pause while the live pool is saturated) |
 | `defaultGain` | `WAXFLOW_DEFAULT_GAIN` | `track` | gain mode when `gain=` absent |
 | `resampleProfile` | `WAXFLOW_RESAMPLE_PROFILE` | `hq` | `hq` or `fast` (constrained hosts) |
 | `tlsCert` / `tlsKey` | `WAXFLOW_TLS_*` | none | native TLS; else put a terminating proxy in front (ADR-0007) |
@@ -134,9 +137,12 @@ Precedence: **flag > `WAXFLOW_*` env > JSON config file > default**
   (`--json` for the schemaVersion'd machine shape, identical to `GET
   /probe`; `--strict` to treat tolerated input damage as errors)
 - `waxflow transcode <in> <out>`: local one-shot file-to-file transcode
-  through the same engine the daemon uses (`--format wav|aiff|flac|mp3`,
+  through the same engine the daemon uses (`--format wav|aiff|flac|mp3|aac|alac|opus`,
   `--flac-level`, `--mp3-bitrate`, default from the output extension;
-  `--force` to overwrite)
+  `--force` to overwrite). Metadata (tags, chapters, cover art, lyrics)
+  passes through onto the output automatically (`--no-tags` to skip);
+  `--loudness analyze` measures the source, applies the exact gain to
+  the ReplayGain reference, and writes measured RG tags on the output
 - `waxflow sign --src lib/a.flac`: mint a signed playback URL offline
   (ADR-0003; uses the same secret and roots the daemon holds)
 - `waxflow cache stats|gc`: inspect or evict a running daemon's cache

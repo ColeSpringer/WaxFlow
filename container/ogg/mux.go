@@ -25,6 +25,7 @@ type Muxer struct {
 	seq    uint32
 	head   []byte // OpusHead, from the track's CodecConfig
 	vendor string
+	tags   []container.Tag
 
 	granule int64 // cumulative decoded samples (48 kHz, includes pre-skip)
 	// The audio page being batched: packet payloads, their segment table,
@@ -53,6 +54,10 @@ type MuxerOptions struct {
 	Vendor string
 	// Serial overrides the logical bitstream serial number (0 uses the default).
 	Serial uint32
+	// Tags are written as OpusTags user comments in order. Vorbis comments
+	// are the canonical vocabulary already, so every key passes through as
+	// KEY=value.
+	Tags []container.Tag
 }
 
 // oggOpusSerial is the default logical-stream serial ("Opus"), fixed so
@@ -69,6 +74,7 @@ func NewMuxer(w io.Writer, opts *MuxerOptions) *Muxer {
 		if opts.Serial != 0 {
 			m.serial = opts.Serial
 		}
+		m.tags = opts.Tags
 	}
 	return m
 }
@@ -91,14 +97,40 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	if err := m.emitPage(head, lacing(len(head)), 0, flagBOS); err != nil {
 		return err
 	}
-	// Second page: the OpusTags comment header.
+	// Second page: the OpusTags comment header. Comments stay bounded so
+	// the header always fits one page's segment table (255*255 bytes);
+	// the engine passes a minimal tag set, and anything past the cap is
+	// dropped rather than growing the pre-audio headers without limit.
 	tags := make([]byte, 0, 8+4+len(m.vendor)+4)
 	tags = append(tags, "OpusTags"...)
 	tags = binary.LittleEndian.AppendUint32(tags, uint32(len(m.vendor)))
 	tags = append(tags, m.vendor...)
-	tags = binary.LittleEndian.AppendUint32(tags, 0) // user comment count
+	countAt := len(tags)
+	tags = binary.LittleEndian.AppendUint32(tags, 0) // user comment count, patched below
+	count := uint32(0)
+	for _, t := range m.tags {
+		if !container.ValidTagKey(t.Key) {
+			continue
+		}
+		c := t.Key + "=" + t.Value
+		if len(tags)+4+len(c) > maxTagsPageBytes {
+			// Skip just the comment that does not fit: one oversized
+			// value (hostile or merely huge lyrics) must not erase the
+			// small descriptive tags after it.
+			continue
+		}
+		tags = binary.LittleEndian.AppendUint32(tags, uint32(len(c)))
+		tags = append(tags, c...)
+		count++
+	}
+	binary.LittleEndian.PutUint32(tags[countAt:], count)
 	return m.emitPage(tags, lacing(len(tags)), 0, 0)
 }
+
+// maxTagsPageBytes bounds the OpusTags header so it stays a single page
+// (the segment table caps a page at 255*255 payload bytes) and keeps the
+// pre-audio headers small for time-to-first-audio.
+const maxTagsPageBytes = 48 << 10
 
 // WritePacket adds an Opus packet to the page being batched, first flushing
 // that page when the packet would not fit (segment table, byte target, or

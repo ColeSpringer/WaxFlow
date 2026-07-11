@@ -29,8 +29,11 @@ import (
 	"github.com/colespringer/waxflow/internal/config"
 	"github.com/colespringer/waxflow/internal/flight"
 	"github.com/colespringer/waxflow/internal/hls"
+	"github.com/colespringer/waxflow/internal/jobs"
+	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/metrics"
 	"github.com/colespringer/waxflow/internal/sign"
+	"github.com/colespringer/waxflow/internal/uploads"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -81,6 +84,27 @@ type Config struct {
 	CacheMaxAge   time.Duration
 	// RingBytes bounds degradation/one-shot rings; 0 means 4 MiB.
 	RingBytes int
+
+	// JobsDir persists the async job store (dataDir/jobs); empty
+	// disables the /jobs API.
+	JobsDir string
+
+	// UploadDir is the upload spool (scratchDir/uploads); empty disables
+	// /uploads and upload: references. UploadMaxBytes caps one upload
+	// (0: 2 GiB), ScratchMaxBytes the whole spool (0: 8 GiB), UploadTTL
+	// evicts spooled uploads after creation (0: never).
+	UploadDir       string
+	UploadMaxBytes  int64
+	ScratchMaxBytes int64
+	UploadTTL       time.Duration
+
+	// Meta is the metadata mapper: source tag/art/chapter/lyrics reads,
+	// the live minimal-tag passthrough, tag-based gain resolution, and
+	// the job post-pass. The implementation is internal (waxlabel stays
+	// out of the depcheck-enforced public tree), so only the waxflow CLI
+	// can construct one; embedders leave it nil, which disables metadata
+	// passthrough and resolves tag-based gain to 0 dB.
+	Meta meta.Mapper
 
 	// LiveSlots and JobSlots size the admission pools; 0 means
 	// max(1, NumCPU-1) and 2.
@@ -133,6 +157,12 @@ type Server struct {
 	defaultGain gainSpec
 	profile     resample.Profile
 
+	uploads *uploads.Store // nil: uploads disabled
+	jobs    *jobs.Runner   // nil: jobs disabled
+
+	// metaCache holds per-identity metadata reads (see readMeta).
+	metaCache metaCache
+
 	fl     flight.Group[*cache.Entry]
 	hlsMgr hls.Manager
 
@@ -141,6 +171,9 @@ type Server struct {
 	baseCtx context.Context
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // New validates cfg and builds a Server. The fail-closed rule is enforced
@@ -218,6 +251,29 @@ func New(cfg Config) (*Server, error) {
 		}
 	}
 
+	var uploadStore *uploads.Store
+	if cfg.UploadDir != "" {
+		maxUp := cfg.UploadMaxBytes
+		if maxUp == 0 {
+			maxUp = config.DefaultUploadMaxBytes
+		}
+		maxTotal := cfg.ScratchMaxBytes
+		if maxTotal == 0 {
+			maxTotal = config.DefaultScratchMaxBytes
+		}
+		uploadStore, err = uploads.Open(cfg.UploadDir, uploads.Options{
+			MaxBytes:      maxUp,
+			MaxTotalBytes: maxTotal,
+			TTL:           cfg.UploadTTL,
+			Logger:        log,
+		})
+		if err != nil {
+			store.Close()
+			return nil, err
+		}
+		resolver = uploadResolver{next: resolver, store: uploadStore}
+	}
+
 	liveSlots := cfg.LiveSlots
 	if liveSlots == 0 {
 		liveSlots = config.DefaultLiveSlots()
@@ -233,13 +289,42 @@ func New(cfg Config) (*Server, error) {
 		eng:         waxflow.New(engineOpts...),
 		resolver:    resolver,
 		store:       store,
-		pools:       admission.New(liveSlots, jobSlots),
+		pools:       admission.New(liveSlots),
 		signer:      signer,
 		met:         &metrics.Metrics{},
 		defaultGain: defaultGain,
 		profile:     profile,
+		uploads:     uploadStore,
 	}
 	s.baseCtx, s.cancel = context.WithCancel(context.Background())
+
+	if cfg.JobsDir != "" {
+		s.jobs, err = jobs.Open(jobs.Config{
+			Dir:      cfg.JobsDir,
+			Engine:   s.eng,
+			Resolver: resolver,
+			Meta:     cfg.Meta,
+			Pools:    s.pools,
+			ResolveGain: func(gain string, info *meta.Info) (float64, error) {
+				g, err := parseGain(gain, s.defaultGain)
+				if err != nil {
+					return 0, err
+				}
+				return g.resolveDB(info), nil
+			},
+			Slots:   jobSlots,
+			Profile: profile,
+			Logger:  log,
+		})
+		if err != nil {
+			if uploadStore != nil {
+				uploadStore.Close()
+			}
+			store.Close()
+			s.cancel()
+			return nil, err
+		}
+	}
 
 	for _, k := range cfg.APIKeys {
 		s.keyHashes = append(s.keyHashes, sha256.Sum256([]byte(k)))
@@ -278,6 +363,22 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET /hls/init.mp4", s.handleHLSInit)
 	mux.HandleFunc("GET /hls/seg/{seg}", s.handleHLSSegment)
 	mux.HandleFunc("OPTIONS /hls/", s.handlePreflight)
+	if s.uploads != nil {
+		mux.HandleFunc("POST /uploads", s.requireKey(s.handleUploadCreate))
+		mux.HandleFunc("DELETE /uploads/{id}", s.requireKey(s.handleUploadDelete))
+	}
+	if s.jobs != nil {
+		mux.HandleFunc("POST /jobs", s.requireKey(s.handleJobCreate))
+		mux.HandleFunc("GET /jobs", s.requireKey(s.handleJobList))
+		mux.HandleFunc("GET /jobs/{id}", s.requireKey(s.handleJobGet))
+		mux.HandleFunc("DELETE /jobs/{id}", s.requireKey(s.handleJobDelete))
+		mux.HandleFunc("GET /jobs/{id}/events", s.handleJobEvents)
+		mux.HandleFunc("GET /jobs/{id}/result", s.handleJobResult)
+	}
+	mux.HandleFunc("GET /art", s.handleArt)
+	mux.HandleFunc("HEAD /art", s.handleArt)
+	mux.HandleFunc("GET /lyrics", s.handleLyrics)
+	mux.HandleFunc("HEAD /lyrics", s.handleLyrics)
 	mux.HandleFunc("GET /cache/stats", s.requireKey(s.handleCacheStats))
 	mux.HandleFunc("POST /cache/gc", s.requireKey(s.handleCacheGC))
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
@@ -296,12 +397,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
-// Close stops pipeline goroutines and the cache janitor. Call after the
-// http.Server has drained.
+// Close stops pipeline goroutines, the job workers, the upload janitor,
+// and the cache janitor. Call after the http.Server has drained. Running
+// jobs stay in their persisted running state, which the next start
+// requeues from zero (the restart contract). Close is idempotent: a
+// restart-managing caller and a deferred cleanup may both call it.
 func (s *Server) Close() error {
-	s.cancel()
-	s.wg.Wait()
-	return s.store.Close()
+	s.closeOnce.Do(func() {
+		s.cancel()
+		s.wg.Wait()
+		if s.jobs != nil {
+			s.jobs.Close()
+		}
+		if s.uploads != nil {
+			s.uploads.Close()
+		}
+		s.closeErr = s.store.Close()
+	})
+	return s.closeErr
 }
 
 // Metrics exposes the metric set (the CLI wires nothing; tests observe).

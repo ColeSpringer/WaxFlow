@@ -14,6 +14,8 @@ import (
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/internal/meta"
+	"github.com/colespringer/waxflow/internal/meta/label"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -34,10 +36,13 @@ func newProbeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Metadata is best-effort: a source the mapper cannot read
+			// still probes (m carries the warning, or stays nil).
+			m, _ := label.New().Read(cmd.Context(), src, extHint(args[0]), meta.ReadOptions{})
 			if jsonOut {
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(server.ProbeJSON(info))
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(server.ProbeJSON(info, m))
 			}
-			printProbe(cmd, info)
+			printProbe(cmd, info, m)
 			return nil
 		},
 	}
@@ -79,7 +84,7 @@ func durationSeconds(samples int64, rate int) float64 {
 	return server.DurationSeconds(samples, rate)
 }
 
-func printProbe(cmd *cobra.Command, info *format.Info) {
+func printProbe(cmd *cobra.Command, info *format.Info, m *meta.Info) {
 	w := cmd.OutOrStdout()
 	fmt.Fprintf(w, "container: %s\n", info.Container)
 	for _, t := range info.Tracks {
@@ -92,6 +97,19 @@ func printProbe(cmd *cobra.Command, info *format.Info) {
 			fmt.Fprintf(w, "samples:   %d (%.3fs)\n", t.Samples, durationSeconds(t.Samples, t.Fmt.Rate))
 		} else {
 			fmt.Fprintln(w, "samples:   unknown")
+		}
+	}
+	if m != nil {
+		for _, key := range []string{"TITLE", "ARTIST", "ALBUM"} {
+			if vs := m.Tags[key]; len(vs) > 0 {
+				fmt.Fprintf(w, "%-10s %s\n", strings.ToLower(key)+":", strings.Join(vs, "; "))
+			}
+		}
+		if len(m.Chapters) > 0 {
+			fmt.Fprintf(w, "chapters:  %d\n", len(m.Chapters))
+		}
+		if m.HasPictures {
+			fmt.Fprintln(w, "art:       embedded")
 		}
 	}
 	for _, warn := range info.Warnings {

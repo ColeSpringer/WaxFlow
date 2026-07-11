@@ -8,6 +8,7 @@ require (
 )
 
 require (
+	github.com/colespringer/waxlabel v0.0.0-20260710232702-d0c5558af9a3
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 )

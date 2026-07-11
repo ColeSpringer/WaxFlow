@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,8 +11,13 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/dsp/dither"
+	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/dsp/resample"
+	"github.com/colespringer/waxflow/internal/meta"
+	"github.com/colespringer/waxflow/internal/meta/label"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -29,6 +35,8 @@ func newTranscodeCmd() *cobra.Command {
 	var aacBitrate int
 	var gainDB float64
 	var profileName, ditherName string
+	var loudness string
+	var noTags bool
 	cmd := &cobra.Command{
 		Use:   "transcode <input> <output>",
 		Short: "Transcode an audio file locally through the engine",
@@ -112,6 +120,18 @@ flags the transcode is a bit-exact container rewrite; --rate,
 				return waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating output", err)
 			}
 
+			if loudness != "" && loudness != "analyze" {
+				out.Close()
+				os.Remove(writePath)
+				return waxerr.New(waxerr.CodeInvalidRequest,
+					fmt.Sprintf("loudness %q: want analyze (or omit)", loudness))
+			}
+			if loudness == "analyze" && gainDB != 0 {
+				out.Close()
+				os.Remove(writePath)
+				return waxerr.New(waxerr.CodeInvalidRequest, "--loudness analyze replaces --gain; drop one")
+			}
+
 			// The options fields cannot say "level 0" or "complexity 0"
 			// with a plain 0 (that selects the default), so the flags' 0
 			// maps to the sentinels.
@@ -125,6 +145,62 @@ flags the transcode is a bit-exact container rewrite; --rate,
 			}
 
 			e := waxflow.New(waxflow.WithLogger(logger))
+
+			// The file-output passthrough matrix: full tags, chapters,
+			// and art flow onto the output (the MP4 muxer embeds them;
+			// every other format gets the mapping post-pass below).
+			mapper := label.New()
+			var info *meta.Info
+			if !noTags {
+				if m, merr := mapper.Read(cmd.Context(), src, extHint(args[0]), meta.ReadOptions{Pictures: true}); merr == nil {
+					info = m
+					for _, warn := range m.Warnings {
+						fmt.Fprintf(cmd.ErrOrStderr(), "metadata: %s\n", warn)
+					}
+				}
+			}
+			analyzeLoudness := loudness == "analyze"
+			var srcRes *waxflow.AnalyzeResult
+			if analyzeLoudness {
+				res, aerr := e.Analyze(cmd.Context(), src, extHint(args[0]), waxflow.AnalyzeOptions{})
+				if aerr != nil {
+					out.Close()
+					os.Remove(writePath)
+					return aerr
+				}
+				srcRes = res
+				if !math.IsInf(res.IntegratedLUFS, -1) {
+					gainDB = meta.ReplayGainGainDB(res.IntegratedLUFS)
+				}
+				fmt.Fprintf(cmd.ErrOrStderr(), "loudness: source %.2f LUFS, applying %+.2f dB\n",
+					res.IntegratedLUFS, gainDB)
+			}
+			dropRG := gainDB != 0 || analyzeLoudness
+			tagInfo := info
+			if dropRG {
+				tagInfo = meta.WithoutReplayGain(info)
+			}
+			tags := meta.FullTags(tagInfo)
+			// Only the MP4 path patches placeholders after the encode;
+			// any other format gets its measured values through the
+			// mapping post-pass, and embedding unity placeholders there
+			// would ship wrong ReplayGain whenever that post-pass is
+			// skipped (--no-tags) or fails.
+			isMP4 := outFormat == "alac" || (outFormat == "aac" && containerName != "adts")
+			if analyzeLoudness && isMP4 {
+				tags = append(tags,
+					container.Tag{Key: "REPLAYGAIN_TRACK_GAIN", Value: meta.FormatGain(0)},
+					container.Tag{Key: "REPLAYGAIN_TRACK_PEAK", Value: meta.FormatPeak(0)})
+			}
+			var chapters []container.Chapter
+			var art *container.Picture
+			if tagInfo != nil {
+				chapters = tagInfo.Chapters
+				if p := tagInfo.FrontPicture(); p != nil {
+					art = &container.Picture{MIME: p.MIME, Data: p.Data}
+				}
+			}
+
 			res, err := e.Transcode(cmd.Context(), src, extHint(args[0]), out, waxflow.TranscodeOptions{
 				Format:          outFormat,
 				Container:       containerName,
@@ -142,6 +218,9 @@ flags the transcode is a bit-exact container rewrite; --rate,
 				OpusVBR:         opusVBR,
 				OpusSignal:      opusSignal,
 				AACBitrate:      aacBitrate * 1000,
+				Tags:            tags,
+				Chapters:        chapters,
+				Art:             art,
 			})
 			if err != nil {
 				out.Close()
@@ -153,6 +232,22 @@ flags the transcode is a bit-exact container rewrite; --rate,
 			if err := out.Close(); err != nil {
 				os.Remove(writePath)
 				return waxerr.Wrap(waxerr.CodeOutputUnwritable, "closing output", err)
+			}
+
+			// Post-pass on the finished file: measured ReplayGain under
+			// --loudness analyze, and the full metadata set for formats
+			// the mapper can rewrite (MP4 got everything at Begin).
+			var rg []container.Tag
+			if analyzeLoudness {
+				if rg, err = analyzeOutputRG(cmd, e, writePath, extHint(outPath), isMP4, srcRes, gainDB); err != nil {
+					os.Remove(writePath)
+					return err
+				}
+			}
+			if !noTags && !isMP4 && tagInfo != nil {
+				if aerr := mapper.Apply(cmd.Context(), writePath, tagInfo, rg); aerr != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "metadata: post-pass failed: %v\n", aerr)
+				}
 			}
 			if force {
 				if err := os.Rename(writePath, outPath); err != nil {
@@ -182,7 +277,56 @@ flags the transcode is a bit-exact container rewrite; --rate,
 	cmd.Flags().BoolVar(&opusVBR, "opus-vbr", false, "encode Opus at variable bit rate around --opus-bitrate (opus output only)")
 	cmd.Flags().StringVar(&opusSignal, "opus-signal", "auto", "Opus content hint: auto, voice, or music (opus output only)")
 	cmd.Flags().IntVar(&aacBitrate, "aac-bitrate", 128, "AAC target bit rate in kbit/s (aac output only)")
+	cmd.Flags().StringVar(&loudness, "loudness", "", "analyze: two-pass loudness (exact gain to the ReplayGain reference, measured RG tags on the output)")
+	cmd.Flags().BoolVar(&noTags, "no-tags", false, "skip the metadata passthrough (tags, chapters, art)")
 	return cmd
+}
+
+// analyzeOutputRG returns (after patching MP4 headers in place) the
+// ReplayGain tags for the finished output: measured from the file where
+// the engine can decode it back, derived from the source measurement
+// plus the applied gain for fragmented MP4, which has no read path
+// (exact for lossless ALAC, within the encoder's fraction of a dB for
+// AAC; positive gain caps the derived peak at the limiter ceiling).
+func analyzeOutputRG(cmd *cobra.Command, e *waxflow.Engine, path, hint string, isMP4 bool, srcRes *waxflow.AnalyzeResult, gainDB float64) ([]container.Tag, error) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "reopening output", err)
+	}
+	defer f.Close()
+	var outLUFS, outTP float64
+	if isMP4 {
+		outLUFS = math.Inf(-1)
+		if !math.IsInf(srcRes.IntegratedLUFS, -1) {
+			outLUFS = srcRes.IntegratedLUFS + gainDB
+		}
+		outTP = srcRes.TruePeakDB + gainDB
+		if gainDB > 0 {
+			outTP = min(outTP, gain.DefaultCeilingDB)
+		}
+	} else {
+		fsrc, err := container.FileSource(f)
+		if err != nil {
+			return nil, err
+		}
+		outRes, err := e.Analyze(cmd.Context(), fsrc, hint, waxflow.AnalyzeOptions{})
+		if err != nil {
+			return nil, err
+		}
+		outLUFS, outTP = outRes.IntegratedLUFS, outRes.TruePeakDB
+	}
+	rg := meta.ReplayGainTags(outLUFS, outTP)
+	fmt.Fprintf(cmd.ErrOrStderr(), "loudness: output %.2f LUFS, %s / %s\n",
+		outLUFS, rg[0].Value, rg[1].Value)
+	if isMP4 {
+		if err := mp4.PatchFreeform(f, "REPLAYGAIN_TRACK_GAIN", meta.FormatGain(0), rg[0].Value); err != nil {
+			return nil, err
+		}
+		if err := mp4.PatchFreeform(f, "REPLAYGAIN_TRACK_PEAK", meta.FormatPeak(0), rg[1].Value); err != nil {
+			return nil, err
+		}
+	}
+	return rg, nil
 }
 
 func parseProfile(name string) (resample.Profile, error) {

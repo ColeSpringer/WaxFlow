@@ -16,6 +16,7 @@ import (
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/internal/cache"
 	"github.com/colespringer/waxflow/internal/hls"
+	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/sign"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
@@ -127,7 +128,7 @@ func (s *Server) prepareHLS(r *http.Request) (*hlsRequest, error) {
 			return nil, err
 		}
 	}
-	opts, plan, err := s.planHLSVariant(desc, track)
+	opts, plan, err := s.planHLSVariant(desc, track, s.readMeta(r.Context(), src, false))
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +174,7 @@ func (s *Server) measureSamples(src *source.File) (int64, error) {
 // planHLSVariant maps one variant descriptor onto engine options and its
 // segment plan, mirroring planTranscode's policy checks so /stream and
 // HLS cannot drift.
-func (s *Server) planHLSVariant(desc hls.Descriptor, track container.Track) (waxflow.TranscodeOptions, *waxflow.SegmentPlan, error) {
+func (s *Server) planHLSVariant(desc hls.Descriptor, track container.Track, m *meta.Info) (waxflow.TranscodeOptions, *waxflow.SegmentPlan, error) {
 	if desc.Bitrate != 0 {
 		if lossy, known := waxflow.LossyFormat(desc.Format); known && !lossy {
 			return waxflow.TranscodeOptions{}, nil, waxerr.New(waxerr.CodeUnsupportedFormat,
@@ -189,7 +190,7 @@ func (s *Server) planHLSVariant(desc hls.Descriptor, track container.Track) (wax
 		Rate:            desc.Rate,
 		Channels:        desc.Ch,
 		BitDepth:        desc.Bits,
-		GainDB:          gain.resolveDB(),
+		GainDB:          gain.resolveDB(m),
 		ResampleProfile: s.profile,
 		MP3Bitrate:      desc.Bitrate * 1000,
 		OpusBitrate:     desc.Bitrate * 1000,
@@ -300,10 +301,11 @@ func (s *Server) handleHLSMaster(w http.ResponseWriter, r *http.Request) {
 			exp = time.Unix(e, 0)
 		}
 	}
+	m := s.readMeta(r.Context(), src, false)
 	var variants []hls.MasterVariant
 	for _, kbps := range desc.Ladder() {
 		vdesc := desc.Variant(kbps)
-		_, plan, err := s.planHLSVariant(vdesc, track)
+		_, plan, err := s.planHLSVariant(vdesc, track, m)
 		if err != nil {
 			s.writeError(w, err) // one bad rung fails the master honestly
 			return
@@ -603,7 +605,9 @@ func (s *Server) mintHLSDescriptor(params map[string]string) (hls.Descriptor, fl
 	}
 	track := info.Default()
 	for _, kbps := range out.Ladder() {
-		if _, _, err := s.planHLSVariant(out.Variant(kbps), track); err != nil {
+		// Mint-time validation plans with nil metadata: the resolved gain
+		// value never shapes plan validity, only playback bytes.
+		if _, _, err := s.planHLSVariant(out.Variant(kbps), track, nil); err != nil {
 			return hls.Descriptor{}, 0, err
 		}
 	}

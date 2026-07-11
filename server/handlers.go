@@ -18,7 +18,7 @@ import (
 )
 
 func (s *Server) handleCaps(w http.ResponseWriter, _ *http.Request) {
-	s.writeJSON(w, http.StatusOK, buildCaps())
+	s.writeJSON(w, http.StatusOK, buildCaps(s.jobs != nil, s.uploads != nil))
 }
 
 // probeRequest is the POST /probe body; GET uses src and strict query
@@ -54,7 +54,7 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, ProbeJSON(info))
+	s.writeJSON(w, http.StatusOK, ProbeJSON(info, s.readMeta(r.Context(), f, false)))
 }
 
 func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
@@ -118,10 +118,31 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 		}
 		q = url.Values{"v": []string{desc.Encode()}}
 		duration = d
+	case "/art", "/lyrics":
+		var err error
+		if q, err = s.signMetaPath(req.Params); err != nil {
+			s.writeError(w, err)
+			return
+		}
+		duration = -1
 	default:
-		s.writeError(w, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("path %q: only /stream and /hls/master.m3u8 are signable", req.Path)))
-		return
+		// Jobs paths carry the job id in the path itself, so the
+		// signature pins it with no query parameters of its own.
+		if err := s.signableJobPath(req.Path); err != nil {
+			if waxerr.CodeOf(err) != waxerr.CodeInvalidRequest || strings.HasPrefix(req.Path, "/jobs/") {
+				s.writeError(w, err)
+				return
+			}
+			s.writeError(w, waxerr.New(waxerr.CodeInvalidRequest,
+				fmt.Sprintf("path %q: signable paths are /stream, /hls/master.m3u8, /art, /lyrics, and /jobs/<id>/{events,result}", req.Path)))
+			return
+		}
+		if len(req.Params) > 0 {
+			s.writeError(w, waxerr.New(waxerr.CodeInvalidRequest, "jobs paths take no params"))
+			return
+		}
+		q = url.Values{}
+		duration = -1
 	}
 
 	ttl := time.Duration(req.TTLSeconds) * time.Second
@@ -145,7 +166,7 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 // /stream.
 func (s *Server) handleTranscode(w http.ResponseWriter, r *http.Request) {
 	reqStart := time.Now()
-	req, err := s.prepareSource(r.URL.Query(), false)
+	req, err := s.prepareSource(r.Context(), r.URL.Query(), false)
 	if err != nil {
 		s.writeError(w, err)
 		return
@@ -226,7 +247,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		CacheHits:    st.Hits,
 		CacheMisses:  st.Misses,
 		LiveInUse:    s.pools.LiveInUse(),
-		JobInUse:     s.pools.JobInUse(),
+		JobInUse:     s.jobsRunning(),
 	})
 }
 

@@ -180,7 +180,7 @@ func InitSegment(t container.Track) ([]byte, error) {
 		edts = elstBox(t.Delay, max(t.Samples, 0))
 	}
 	init := append([]byte{}, initFtypBox...)
-	return append(init, moovBox(t.Fmt.Rate, entry, edts, 0)...), nil
+	return append(init, moovBox(t.Fmt.Rate, entry, edts, 0, nil)...), nil
 }
 
 // initFtypBox and stypBox are constants of the segment layout: an iso6

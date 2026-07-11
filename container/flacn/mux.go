@@ -43,6 +43,10 @@ type MuxerOptions struct {
 	// initial STREAMINFO's signature stands; a packet-for-packet remux
 	// wants exactly that, since identical audio keeps its signature.
 	MD5 func() [16]byte
+	// Tags are written as a VORBIS_COMMENT block between STREAMINFO and
+	// the audio. Vorbis comments are the canonical vocabulary already, so
+	// every key passes through as KEY=value.
+	Tags []container.Tag
 }
 
 // Muxer writes one FLAC track as a native FLAC stream. NeedsSeek
@@ -124,8 +128,9 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	m.began = true
 
 	table := m.ws != nil && si.Samples > 0
+	vc := vorbisCommentBlock(m.opts.Tags)
 	head := [4]byte{0x80} // STREAMINFO, last metadata block
-	if table {
+	if table || vc != nil {
 		head[0] = 0x00
 	}
 	head[1], head[2], head[3] = 0, 0, flac.StreamInfoLen
@@ -135,6 +140,16 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	}
 	if err := m.write([]byte("fLaC"), head[:], body); err != nil {
 		return err
+	}
+
+	if vc != nil {
+		hdr := [4]byte{4, byte(len(vc) >> 16), byte(len(vc) >> 8), byte(len(vc))}
+		if !table {
+			hdr[0] |= 0x80 // last metadata block
+		}
+		if err := m.write(hdr[:], vc); err != nil {
+			return err
+		}
 	}
 
 	if table {
@@ -273,4 +288,41 @@ func (m *Muxer) patch(off int64, parts ...[]byte) error {
 		}
 	}
 	return nil
+}
+
+// maxCommentBytes bounds the VORBIS_COMMENT block body. The engine passes
+// a minimal tag set; comments past the cap are dropped rather than growing
+// the pre-audio headers without limit (the block length field itself only
+// holds 24 bits).
+const maxCommentBytes = 48 << 10
+
+// vorbisCommentBlock renders tags as a VORBIS_COMMENT body (RFC 9639
+// section 8.6: little-endian lengths, UTF-8 KEY=value comments), nil for
+// no tags.
+func vorbisCommentBlock(tags []container.Tag) []byte {
+	if len(tags) == 0 {
+		return nil
+	}
+	const vendor = "WaxFlow"
+	body := binary.LittleEndian.AppendUint32(nil, uint32(len(vendor)))
+	body = append(body, vendor...)
+	countAt := len(body)
+	body = binary.LittleEndian.AppendUint32(body, 0)
+	count := uint32(0)
+	for _, t := range tags {
+		if !container.ValidTagKey(t.Key) {
+			continue
+		}
+		c := t.Key + "=" + t.Value
+		if len(body)+4+len(c) > maxCommentBytes {
+			// Skip just the comment that does not fit: one oversized
+			// value must not erase the small descriptive tags after it.
+			continue
+		}
+		body = binary.LittleEndian.AppendUint32(body, uint32(len(c)))
+		body = append(body, c...)
+		count++
+	}
+	binary.LittleEndian.PutUint32(body[countAt:], count)
+	return body
 }

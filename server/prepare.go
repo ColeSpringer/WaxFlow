@@ -1,12 +1,14 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -27,6 +29,9 @@ type streamRequest struct {
 	// the canonical cache-key params, and the entry meta, which must all
 	// agree byte-for-byte.
 	gainDB float64
+	// meta is the source's mapped metadata, nil without a mapper. It
+	// resolves tag-based gain and supplies the live minimal tag set.
+	meta *meta.Info
 
 	// Set by planTranscode for transcode-shaped requests.
 	opts      waxflow.TranscodeOptions
@@ -39,7 +44,7 @@ func (req *streamRequest) Close() error { return req.src.Close() }
 
 // prepareSource runs the shared request front half. On success the caller
 // owns req.Close.
-func (s *Server) prepareSource(q url.Values, sigAuthed bool) (*streamRequest, error) {
+func (s *Server) prepareSource(ctx context.Context, q url.Values, sigAuthed bool) (*streamRequest, error) {
 	p, err := parseStreamParams(q, s.defaultGain)
 	if err != nil {
 		return nil, err
@@ -63,13 +68,15 @@ func (s *Server) prepareSource(q url.Values, sigAuthed bool) (*streamRequest, er
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("track %d: only the default track (%d) is selectable until multi-track containers land", p.track, track.ID))
 	}
+	m := s.readMeta(ctx, src, false)
 	return &streamRequest{
 		p:      p,
 		src:    src,
 		info:   info,
 		track:  track,
 		from:   int64(p.t * float64(track.Fmt.Rate)),
-		gainDB: p.gain.resolveDB(),
+		gainDB: p.gain.resolveDB(m),
+		meta:   m,
 	}, nil
 }
 
@@ -103,6 +110,9 @@ func (s *Server) planTranscode(req *streamRequest) error {
 		MP3Bitrate:      req.p.bitrate * 1000,
 		OpusBitrate:     req.p.bitrate * 1000,
 		AACBitrate:      req.p.bitrate * 1000,
+		// The live passthrough: the minimal descriptive set, embedded by
+		// muxers with a stream-form tag representation.
+		Tags: meta.MinimalTags(req.meta),
 	}
 	plan, err := s.eng.PlanTranscode(req.track, req.opts)
 	if err != nil {
@@ -128,5 +138,8 @@ func (s *Server) planTranscode(req *streamRequest) error {
 	}
 	req.plan = plan
 	req.canonical = canonicalParams(plan, req.gainDB, req.from)
+	if len(req.opts.Tags) > 0 {
+		req.canonical += "&tags=" + tagsFingerprint(req.opts.Tags)
+	}
 	return nil
 }

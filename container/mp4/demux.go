@@ -3,7 +3,6 @@ package mp4
 import (
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
@@ -23,11 +22,10 @@ type DemuxerOptions struct {
 	Strict bool
 }
 
-// Chapter is one parsed chapter marker, timed in the movie timeline.
-type Chapter struct {
-	Start time.Duration
-	Title string
-}
+// Chapter is one parsed chapter marker, timed in the movie timeline. It
+// aliases the container-level type so demuxer chapters feed muxer options
+// (and the metadata mapper) without conversion.
+type Chapter = container.Chapter
 
 // Demuxer reads one audio track from an ISO base media file. It selects
 // the sound track, exposes it as a single track (ID 0), and reads sample

@@ -9,12 +9,14 @@ import (
 	"net/http/pprof"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/colespringer/waxflow/internal/config"
+	"github.com/colespringer/waxflow/internal/meta/label"
 	"github.com/colespringer/waxflow/internal/sign"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/source"
@@ -110,6 +112,16 @@ func buildServerConfig(cfg config.Config, version string, logger *slog.Logger) (
 		roots.Close()
 		return server.Config{}, nop, err
 	}
+	uploadTTL, err := cfg.ResolvedUploadTTL()
+	if err != nil {
+		roots.Close()
+		return server.Config{}, nop, err
+	}
+	scratchDir := cfg.ResolvedScratchDir()
+	if err := os.MkdirAll(scratchDir, 0o700); err != nil {
+		roots.Close()
+		return server.Config{}, nop, waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating scratchDir", err)
+	}
 
 	return server.Config{
 		Addr:                 cfg.ResolvedAddr(),
@@ -122,6 +134,12 @@ func buildServerConfig(cfg config.Config, version string, logger *slog.Logger) (
 		CacheDir:             cacheDir,
 		CacheMaxBytes:        cfg.ResolvedCacheMaxBytes(),
 		CacheMaxAge:          maxAge,
+		JobsDir:              filepath.Join(dataDir, "jobs"),
+		UploadDir:            filepath.Join(scratchDir, "uploads"),
+		UploadMaxBytes:       cfg.ResolvedUploadMaxBytes(),
+		ScratchMaxBytes:      cfg.ResolvedScratchMaxBytes(),
+		UploadTTL:            uploadTTL,
+		Meta:                 label.New(),
 		LiveSlots:            cfg.ResolvedLiveSlots(),
 		JobSlots:             cfg.ResolvedJobSlots(),
 		DefaultGain:          cfg.ResolvedDefaultGain(),

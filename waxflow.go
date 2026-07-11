@@ -25,6 +25,8 @@ import (
 	"github.com/colespringer/waxflow/container/ogg"
 	"github.com/colespringer/waxflow/container/riff"
 	"github.com/colespringer/waxflow/dsp"
+	"github.com/colespringer/waxflow/dsp/dither"
+	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -217,6 +219,7 @@ func (e *Engine) Transcode(ctx context.Context, src container.Source, hint strin
 	}
 	buf := audio.Get(f, max(audio.StandardChunk, spec.FrameSize))
 	defer audio.Put(buf)
+	var done int64
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeCanceled, "transcode canceled", err)
@@ -230,6 +233,10 @@ func (e *Engine) Transcode(ctx context.Context, src container.Source, hint strin
 		}
 		if err := enc.Encode(buf, emit); err != nil {
 			return nil, err
+		}
+		if opts.Progress != nil {
+			done += int64(buf.N)
+			opts.Progress(done, track.Samples)
 		}
 	}
 	trailer, err := enc.Finish(emit)
@@ -308,10 +315,58 @@ type eofReader struct{}
 func (eofReader) ReadChunk(*audio.Buffer) error { return io.EOF }
 
 // planKey addresses the chain-invariant part of a plan: everything except
-// the seek position, which never shapes the chain.
+// the seek position and the per-call payloads (tags, chapters, art, the
+// progress callback), none of which shape the chain.
 type planKey struct {
 	fmt  audio.Format
-	opts TranscodeOptions
+	opts planOpts
+}
+
+// planOpts is the comparable projection of TranscodeOptions the plan
+// cache keys on. Every TranscodeOptions field that shapes the chain or
+// the plan MUST appear here with the same name and type;
+// TestPlanOptsCoverage pins the two field lists together, because a new
+// option missing from this key would let two different requests share a
+// stale plan (wrong Format, wrong Versions, wrong cache entries).
+type planOpts struct {
+	Format          string
+	Container       string
+	Rate            int
+	Channels        int
+	BitDepth        int
+	GainDB          float64
+	FLACLevel       int
+	MP3Bitrate      int
+	MP3VBR          bool
+	OpusBitrate     int
+	AACBitrate      int
+	OpusComplexity  int
+	OpusVBR         bool
+	OpusSignal      string
+	Shaping         dither.Shaping
+	ResampleProfile resample.Profile
+}
+
+// planOptsOf projects the plan-shaping option fields.
+func planOptsOf(opts TranscodeOptions) planOpts {
+	return planOpts{
+		Format:          opts.Format,
+		Container:       opts.Container,
+		Rate:            opts.Rate,
+		Channels:        opts.Channels,
+		BitDepth:        opts.BitDepth,
+		GainDB:          opts.GainDB,
+		FLACLevel:       opts.FLACLevel,
+		MP3Bitrate:      opts.MP3Bitrate,
+		MP3VBR:          opts.MP3VBR,
+		OpusBitrate:     opts.OpusBitrate,
+		AACBitrate:      opts.AACBitrate,
+		OpusComplexity:  opts.OpusComplexity,
+		OpusVBR:         opts.OpusVBR,
+		OpusSignal:      opts.OpusSignal,
+		Shaping:         opts.Shaping,
+		ResampleProfile: opts.ResampleProfile,
+	}
 }
 
 // planCore is the cached invariant part of a plan. Building it constructs
@@ -346,15 +401,19 @@ func (e *Engine) PlanTranscode(track container.Track, opts TranscodeOptions) (*T
 	if opts.FromSample < 0 {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: negative FromSample")
 	}
-	key := planKey{fmt: track.Fmt, opts: opts}
-	key.opts.FromSample = 0
+	key := planKey{fmt: track.Fmt, opts: planOptsOf(opts)}
 
 	e.mu.RLock()
 	core, ok := e.plans[key]
 	e.mu.RUnlock()
 	if !ok {
+		// The core builds from the normalized options: no seek position,
+		// no per-call payloads, exactly what the key says.
+		norm := opts
+		norm.FromSample = 0
+		norm.Tags, norm.Chapters, norm.Art, norm.Progress = nil, nil, nil, nil
 		var err error
-		if core, err = buildPlanCore(track.Fmt, key.opts); err != nil {
+		if core, err = buildPlanCore(track.Fmt, norm); err != nil {
 			return nil, err
 		}
 		e.mu.Lock()
@@ -590,7 +649,7 @@ var outputs = []output{
 			if err != nil {
 				return nil, nil, err
 			}
-			return enc, ogg.NewMuxer(dst, nil), nil
+			return enc, ogg.NewMuxer(dst, &ogg.MuxerOptions{Tags: opts.Tags}), nil
 		},
 		hls: &hlsOutput{
 			codecs: "Opus",
@@ -669,7 +728,7 @@ var outputs = []output{
 			if err != nil {
 				return nil, nil, err
 			}
-			return enc, flacn.NewMuxer(dst, &flacn.MuxerOptions{MD5: enc.MD5}), nil
+			return enc, flacn.NewMuxer(dst, &flacn.MuxerOptions{MD5: enc.MD5, Tags: opts.Tags}), nil
 		},
 		hls: &hlsOutput{
 			codecs: "fLaC",
@@ -731,7 +790,7 @@ var outputs = []output{
 			if err != nil {
 				return nil, nil, err
 			}
-			return enc, mpa.NewMuxer(dst, &mpa.MuxerOptions{Delay: enc.Delay(), VBR: opts.MP3VBR}), nil
+			return enc, mpa.NewMuxer(dst, &mpa.MuxerOptions{Delay: enc.Delay(), VBR: opts.MP3VBR, Tags: opts.Tags}), nil
 		},
 	},
 	{
@@ -780,7 +839,7 @@ var outputs = []output{
 			if opts.Container == "adts" {
 				return enc, adts.NewMuxer(dst), nil
 			}
-			return enc, mp4.NewMuxer(dst, nil), nil
+			return enc, mp4.NewMuxer(dst, mp4MuxerOptions(opts)), nil
 		},
 		container: aacContainerMediaType,
 		hls: &hlsOutput{
@@ -824,12 +883,12 @@ var outputs = []output{
 			}
 			return alac.EncoderVersion, 0, 0, nil
 		},
-		build: func(f audio.Format, _ TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
+		build: func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
 			enc, err := alac.NewEncoder(f, nil)
 			if err != nil {
 				return nil, nil, err
 			}
-			return enc, mp4.NewMuxer(dst, nil), nil
+			return enc, mp4.NewMuxer(dst, mp4MuxerOptions(opts)), nil
 		},
 		hls: &hlsOutput{
 			codecs: "alac",
@@ -853,6 +912,16 @@ func aacContainerMediaType(name string) (string, error) {
 	}
 	return "", waxerr.New(waxerr.CodeInvalidRequest,
 		fmt.Sprintf("waxflow: aac container %q: want adts (or empty for fMP4)", name))
+}
+
+// mp4MuxerOptions carries the per-call metadata payloads into the MP4
+// muxer; nil when there are none, so the default construction stays the
+// zero options.
+func mp4MuxerOptions(opts TranscodeOptions) *mp4.MuxerOptions {
+	if len(opts.Tags) == 0 && len(opts.Chapters) == 0 && opts.Art == nil {
+		return nil
+	}
+	return &mp4.MuxerOptions{Tags: opts.Tags, Chapters: opts.Chapters, Art: opts.Art}
 }
 
 // alacSnapDepth rounds an integer bit depth up to the nearest ALAC depth.
