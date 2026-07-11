@@ -15,6 +15,10 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
+// Version is the decoder's cache-key version constant (ADR-0004): bump on
+// any change that alters decoded samples.
+const Version = "aac-dec-1"
+
 // Audio object types (ISO/IEC 14496-3 Table 1.17). Only LC is decoded.
 const (
 	aotAACMain = 1

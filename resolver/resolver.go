@@ -94,10 +94,19 @@ type Catalog struct {
 	pollMu sync.Mutex
 	mu     sync.Mutex
 	// entries caches item PID -> resolved path; byFile maps the path's
-	// file PID back to the item, because renames and moves arrive on
-	// the change feed as file-entity rows carrying the file PID.
-	entries  map[model.PID]*entry
-	byFile   map[model.PID]model.PID
+	// file PID back to the items resolving through it, because renames
+	// and moves arrive on the change feed as file-entity rows carrying
+	// the file PID. The value is a set: nothing in the catalog contract
+	// promises two items never share a file, and a single-value index
+	// would let a file row invalidate only the last item stored.
+	entries map[model.PID]*entry
+	byFile  map[model.PID]map[model.PID]struct{}
+	// invalGen counts item/file invalidation rows. Resolve snapshots it
+	// before its catalog lookup and store refuses to cache a result from
+	// before a newer invalidation: otherwise a change row consumed
+	// between the lookup and the store would leave a stale path with its
+	// invalidating row already spent (the poll never revisits a seq).
+	invalGen uint64
 	clock    int64
 	sinceSeq int64
 	dataVer  int64
@@ -159,7 +168,7 @@ func Open(ctx context.Context, opts Options) (*Catalog, error) {
 		queryCtx:    queryCtx,
 		stopQueries: stopQueries,
 		entries:     make(map[model.PID]*entry),
-		byFile:      make(map[model.PID]model.PID),
+		byFile:      make(map[model.PID]map[model.PID]struct{}),
 		ownedNext:   ownedNext,
 	}
 	if err := c.initCursor(ctx); err != nil {
@@ -224,6 +233,7 @@ func (c *Catalog) Resolve(ref string) (*source.File, error) {
 		// self-heals without waiting for the next poll tick.
 		c.drop(pid)
 	}
+	gen := c.generation()
 	ctx, cancel := context.WithTimeout(c.queryCtx, queryTimeout)
 	defer cancel()
 	iv, err := c.lib.Get(ctx, pid)
@@ -235,7 +245,7 @@ func (c *Catalog) Resolve(ref string) (*source.File, error) {
 		return nil, waxerr.Wrap(waxerr.CodeCatalogUnavailable, "source: catalog lookup", err)
 	}
 	path := string(iv.Path)
-	c.store(pid, path, iv.FilePID)
+	c.store(pid, path, iv.FilePID, gen)
 	return c.open(ref, path)
 }
 
@@ -305,14 +315,24 @@ func (c *Catalog) invalidate(rows []model.Change) int {
 	for _, ch := range rows {
 		switch ch.EntityType {
 		case "item":
+			c.invalGen++
 			dropped += c.dropLocked(ch.EntityPID)
 		case "file":
-			if itemPID, ok := c.byFile[ch.EntityPID]; ok {
+			c.invalGen++
+			for itemPID := range c.byFile[ch.EntityPID] {
 				dropped += c.dropLocked(itemPID)
 			}
 		}
 	}
 	return dropped
+}
+
+// generation snapshots the invalidation counter for a store that follows
+// an unlocked catalog lookup.
+func (c *Catalog) generation() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.invalGen
 }
 
 func (c *Catalog) cached(pid model.PID) (string, bool) {
@@ -327,19 +347,44 @@ func (c *Catalog) cached(pid model.PID) (string, bool) {
 	return e.path, true
 }
 
-func (c *Catalog) store(pid model.PID, path string, filePID model.PID) {
+// store caches a resolved path. gen is the invalidation snapshot taken
+// before the catalog lookup that produced it; a lookup raced by newer
+// item/file change rows is not cached (its invalidating rows are already
+// consumed, so a stale insert would survive until the next change).
+func (c *Catalog) store(pid model.PID, path string, filePID model.PID, gen uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.invalGen != gen {
+		return
+	}
 	if _, exists := c.entries[pid]; !exists && len(c.entries) >= maxEntries {
 		c.evictOldestLocked()
 	}
 	if old := c.entries[pid]; old != nil {
-		delete(c.byFile, old.filePID)
+		c.unindexLocked(old.filePID, pid)
 	}
 	c.clock++
 	c.entries[pid] = &entry{path: path, filePID: filePID, used: c.clock}
 	if filePID != "" {
-		c.byFile[filePID] = pid
+		items, ok := c.byFile[filePID]
+		if !ok {
+			items = make(map[model.PID]struct{}, 1)
+			c.byFile[filePID] = items
+		}
+		items[pid] = struct{}{}
+	}
+}
+
+// unindexLocked removes one item from a file's reverse index, deleting
+// the set when it empties.
+func (c *Catalog) unindexLocked(filePID, pid model.PID) {
+	items, ok := c.byFile[filePID]
+	if !ok {
+		return
+	}
+	delete(items, pid)
+	if len(items) == 0 {
+		delete(c.byFile, filePID)
 	}
 }
 
@@ -355,7 +400,7 @@ func (c *Catalog) dropLocked(pid model.PID) int {
 		return 0
 	}
 	delete(c.entries, pid)
-	delete(c.byFile, e.filePID)
+	c.unindexLocked(e.filePID, pid)
 	return 1
 }
 

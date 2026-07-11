@@ -76,9 +76,12 @@ type Config struct {
 
 	// CatalogDB is the path of a WaxBin catalog database, opened
 	// read-only to resolve pid:<ULID> source references. Only the WaxBin
-	// resolver flavor serves it; the stock binary refuses to start with
-	// it set rather than silently ignoring a capability the operator
-	// asked for.
+	// resolver flavor serves it; the stock build refuses it loudly,
+	// rather than silently ignoring a capability the operator asked for,
+	// everywhere configuration is resolved: the server, sign, and any
+	// one-shot given a pid: or upload: ref. One-shots on plain paths
+	// never read configuration at all (a broken config file must not
+	// fail probing a local file), so they neither honor nor refuse it.
 	CatalogDB string `json:"catalogDB"`
 
 	// APIKeys are the control-API keys. With none configured, a

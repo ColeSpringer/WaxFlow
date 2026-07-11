@@ -111,7 +111,7 @@ Precedence: **flag > `WAXFLOW_*` env > JSON config file > default**
 | `addr` | `WAXFLOW_ADDR` | `127.0.0.1:4418` | listen address (compose widens to `0.0.0.0`) |
 | `logLevel` | `WAXFLOW_LOG_LEVEL` | `info` | `debug`\|`info`\|`warn`\|`error` |
 | `roots` | `WAXFLOW_ROOTS` | none | named library roots; JSON `[{"name","path"}]`, env `name=path,name2=path2`; each opened via `os.Root` (no escape, symlinks confined), files validated regular and size-capped |
-| `catalogDB` | `WAXFLOW_CATALOG_DB` | none | WaxBin catalog SQLite path, opened read-only for `pid:<ULID>` source references. Waxbin flavor only: the stock binary refuses to start with it set |
+| `catalogDB` | `WAXFLOW_CATALOG_DB` | none | WaxBin catalog SQLite path, opened read-only for `pid:<ULID>` source references. Waxbin flavor only: the stock server refuses to start with it set (one-shots on plain paths never read config, so they neither honor nor refuse it) |
 | `apiKeys` | `WAXFLOW_API_KEYS` | none | control-API keys (comma-separated in env). **Fail closed**: required on a non-loopback `addr` unless `allowUnauthenticated` |
 | `allowUnauthenticated` | `WAXFLOW_ALLOW_UNAUTHENTICATED` | `false` | explicit opt-in to keyless on non-loopback |
 | `sourceMaxBytes` | `WAXFLOW_SOURCE_MAX_BYTES` | 4 GiB | per-source open cap |

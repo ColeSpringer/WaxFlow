@@ -16,6 +16,7 @@ import (
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/codec/opus"
 	"github.com/colespringer/waxflow/codec/pcm"
+	"github.com/colespringer/waxflow/codec/vorbis"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/adts"
 	"github.com/colespringer/waxflow/container/aiff"
@@ -287,7 +288,10 @@ type TranscodePlan struct {
 	// that does not need a seekable destination).
 	Live bool
 	// Versions are the version constants of every sample-affecting node,
-	// DSP chain then encoder, for the cache key (ADR-0004).
+	// source decoder, then DSP chain, then encoder, for the cache key:
+	// a decoder revision must invalidate cached transcodes of
+	// that codec's sources just as an encoder revision invalidates its
+	// outputs.
 	Versions []string
 	// Samples is the projected output length from FromSample to the end,
 	// -1 when the source length is unknown.
@@ -306,6 +310,36 @@ type TranscodePlan struct {
 	// nominal container header, -1 when the source length is unknown. A
 	// hint for players, not a promise.
 	EstimatedBytes int64
+}
+
+// decodeVersion is the read-side member of the plan's version tuple: the
+// source codec's decoder revision (each codec package's Version constant).
+// It rides in TranscodePlan.Versions so a decoder change invalidates
+// cached transcodes OF that codec's sources, closing the loop ADR-0004
+// requires of every sample-affecting node; the encoder version alone only
+// covers outputs. The plan core stays codec-independent (it is keyed and
+// cached on the decoded PCM format), so this composes per call.
+func decodeVersion(id codec.ID) string {
+	switch id {
+	case codec.PCM:
+		return pcm.Version
+	case codec.FLAC:
+		return flac.Version
+	case codec.ALAC:
+		return alac.Version
+	case codec.MP3:
+		return mp3.Version
+	case codec.AACLC:
+		return aac.Version
+	case codec.Opus:
+		return opus.Version
+	case codec.Vorbis:
+		return vorbis.Version
+	default:
+		// Unregistered codecs cannot decode, so no cached bytes exist to
+		// go stale; keep their plans keyed distinctly all the same.
+		return "dec:" + string(id)
+	}
 }
 
 // eofReader satisfies dsp.Reader for plan-only chains, which are built
@@ -454,7 +488,7 @@ func (e *Engine) PlanTranscode(track container.Track, opts TranscodeOptions) (*T
 		Container:      core.container,
 		MediaType:      core.mediaType,
 		Live:           core.live,
-		Versions:       core.versions,
+		Versions:       append([]string{decodeVersion(track.Codec)}, core.versions...),
 		Samples:        samples,
 		BytesPerFrame:  core.bytesPerFrame,
 		FrameSize:      core.frameSize,

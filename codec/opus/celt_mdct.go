@@ -1,6 +1,10 @@
 package opus
 
-import "math"
+import (
+	"math"
+
+	"github.com/colespringer/waxflow/dsp/fft"
+)
 
 // The CELT inverse MDCT. This is a clean-room port of libopus mdct.c
 // (clt_mdct_backward) and the CELT window from modes.c,
@@ -8,23 +12,22 @@ import "math"
 // inverse MDCT into a pre-rotation, an N/4-point complex DFT, a post-rotation,
 // and a windowed time-domain aliasing (TDAC) fold.
 //
-// libopus runs the DFT with a mixed-radix FFT (kiss_fft). We use a direct DFT
-// of the same length: mathematically identical, accumulated in float64 so it is
-// at least as accurate as the reference float build, and correctness-first
-// (M10 sets no Opus decode-speed gate; the FFT is a later optimization). All
-// rotation and windowing arithmetic is ported faithfully so the transform's
-// phase and normalization match the reference exactly.
+// libopus runs the DFT with a mixed-radix float32 FFT (kiss_fft); so do we,
+// through dsp/fft. The rotation and windowing passes stay in float64 (they
+// are O(n) against the transform's O(n log n), and keeping their arithmetic
+// unchanged confines this revision's numeric delta to the DFT itself), so
+// the transform's phase and normalization match the reference exactly and
+// its precision matches the reference float build's.
 
-// mdctPlan holds the read-only rotation table and DFT twiddles for one MDCT
+// mdctPlan holds the read-only rotation table and DFT plan for one MDCT
 // length. Plans are keyed by the full time-domain length n (n/2 frequency
 // bins, n/4-point DFT) and shared across sessions.
 type mdctPlan struct {
-	n   int       // full MDCT length in time samples
-	n2  int       // n/2, the number of frequency bins
-	n4  int       // n/4, the DFT length
-	tr  []float64 // trig[j] = cos(2π(j+0.125)/n), length n/2
-	twc []float64 // DFT twiddle cos, length n/4: cos(2π m/n4)
-	tws []float64 // DFT twiddle sin, length n/4: sin(2π m/n4)
+	n  int       // full MDCT length in time samples
+	n2 int       // n/2, the number of frequency bins
+	n4 int       // n/4, the DFT length
+	tr []float64 // trig[j] = cos(2π(j+0.125)/n), length n/2
+	fp *fft.Plan // the n/4-point complex DFT
 }
 
 // mdctPlanCache lazily builds and reuses MDCT plans per transform size; the
@@ -51,13 +54,7 @@ func newMDCTPlan(n int) *mdctPlan {
 	for j := range p.tr {
 		p.tr[j] = math.Cos(2 * math.Pi * (float64(j) + 0.125) / float64(n))
 	}
-	p.twc = make([]float64, p.n4)
-	p.tws = make([]float64, p.n4)
-	for m := range p.twc {
-		a := 2 * math.Pi * float64(m) / float64(p.n4)
-		p.twc[m] = math.Cos(a)
-		p.tws[m] = math.Sin(a)
-	}
+	p.fp = fft.NewPlan(p.n4)
 	return p
 }
 
@@ -77,15 +74,15 @@ func celtWindow(overlap int) []float64 {
 // the largest DFT length (n/4) either direction will use, so the hot path never
 // allocates. fr/fi hold the pre-rotated input; gr/gi hold the DFT output.
 type mdctScratch struct {
-	fr, fi, gr, gi []float64
+	fr, fi, gr, gi []float32
 }
 
 func newMDCTScratch(maxN4 int) *mdctScratch {
 	return &mdctScratch{
-		fr: make([]float64, maxN4),
-		fi: make([]float64, maxN4),
-		gr: make([]float64, maxN4),
-		gi: make([]float64, maxN4),
+		fr: make([]float32, maxN4),
+		fi: make([]float32, maxN4),
+		gr: make([]float32, maxN4),
+		gi: make([]float32, maxN4),
 	}
 }
 
@@ -109,43 +106,27 @@ func (p *mdctPlan) backward(in []float32, stride int, out []float32, window []fl
 		x2 := float64(in[(n2-1-2*i)*stride])
 		yr := x2*tr[i] + x1*tr[n4+i]
 		yi := x1*tr[i] - x2*tr[n4+i]
-		fr[i] = yi
-		fi[i] = yr
+		fr[i] = float32(yi)
+		fi[i] = float32(yr)
 	}
 
-	// N/4-point forward DFT, accumulated in float64. G[k] = Σ f[j]·e^(-2πi kj/n4).
-	twc, tws := p.twc, p.tws
-	for k := 0; k < n4; k++ {
-		var sr, si float64
-		idx := 0
-		for j := 0; j < n4; j++ {
-			c := twc[idx]
-			sn := tws[idx]
-			sr += fr[j]*c + fi[j]*sn
-			si += fi[j]*c - fr[j]*sn
-			idx += k
-			if idx >= n4 {
-				idx -= n4
-			}
-		}
-		gr[k] = sr
-		gi[k] = si
-	}
+	// N/4-point forward DFT: G[k] = Σ f[j]·e^(-2πi kj/n4).
+	p.fp.Transform(gr, gi, fr, fi)
 
 	// Post-rotation and de-shuffle into out[overlap/2 : overlap/2 + n2].
 	mid := overlap / 2
 	half := (n4 + 1) >> 1
 	for i := 0; i < half; i++ {
 		// low end
-		re := gi[i]
-		im := gr[i]
+		re := float64(gi[i])
+		im := float64(gr[i])
 		t0 := tr[i]
 		t1 := tr[n4+i]
 		yr0 := re*t0 + im*t1
 		yi0 := re*t1 - im*t0
 		// high end
-		re2 := gi[n4-1-i]
-		im2 := gr[n4-1-i]
+		re2 := float64(gi[n4-1-i])
+		im2 := float64(gr[n4-1-i])
 		t0b := tr[n4-1-i]
 		t1b := tr[n2-1-i]
 		yr1 := re2*t0b + im2*t1b
@@ -209,35 +190,19 @@ func (p *mdctPlan) forward(in []float32, out []float32, stride int, window []flo
 		}
 		t0 := tr[i]
 		t1 := tr[n4+i]
-		fr[i] = (re*t0 - im*t1) * scale
-		fi[i] = (im*t0 + re*t1) * scale
+		fr[i] = float32((re*t0 - im*t1) * scale)
+		fi[i] = float32((im*t0 + re*t1) * scale)
 	}
 
-	// N/4-point forward DFT (same direction and twiddles as backward).
-	twc, tws := p.twc, p.tws
-	for k := 0; k < n4; k++ {
-		var sr, si float64
-		idx := 0
-		for j := 0; j < n4; j++ {
-			c := twc[idx]
-			sn := tws[idx]
-			sr += fr[j]*c + fi[j]*sn
-			si += fi[j]*c - fr[j]*sn
-			idx += k
-			if idx >= n4 {
-				idx -= n4
-			}
-		}
-		gr[k] = sr
-		gi[k] = si
-	}
+	// N/4-point forward DFT (same direction as backward).
+	p.fp.Transform(gr, gi, fr, fi)
 
 	// Post-rotation, de-shuffled into out at the block stride.
 	for i := 0; i < n4; i++ {
 		t0 := tr[i]
 		t1 := tr[n4+i]
-		yr := gi[i]*t1 - gr[i]*t0
-		yi := gr[i]*t1 + gi[i]*t0
+		yr := float64(gi[i])*t1 - float64(gr[i])*t0
+		yi := float64(gr[i])*t1 + float64(gi[i])*t0
 		out[stride*(2*i)] = float32(yr)
 		out[stride*(n2-1-2*i)] = float32(yi)
 	}

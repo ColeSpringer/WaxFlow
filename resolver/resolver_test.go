@@ -148,7 +148,7 @@ func newTestCatalog(t *testing.T, f *fakeCatalog, next source.Resolver, maxBytes
 		queryCtx:    queryCtx,
 		stopQueries: stopQueries,
 		entries:     make(map[model.PID]*entry),
-		byFile:      make(map[model.PID]model.PID),
+		byFile:      make(map[model.PID]map[model.PID]struct{}),
 	}
 	if err := c.initCursor(context.Background()); err != nil {
 		t.Fatalf("initCursor: %v", err)
@@ -402,7 +402,7 @@ func TestCacheEvictsOldest(t *testing.T) {
 	pids := make([]model.PID, maxEntries+1)
 	for i := range pids {
 		pids[i] = model.PID(fmt.Sprintf("%026d", i))
-		c.store(pids[i], fmt.Sprintf("/x/%d", i), model.PID(fmt.Sprintf("F%025d", i)))
+		c.store(pids[i], fmt.Sprintf("/x/%d", i), model.PID(fmt.Sprintf("F%025d", i)), c.generation())
 	}
 	if len(c.entries) != maxEntries {
 		t.Fatalf("entries = %d, want the %d bound", len(c.entries), maxEntries)
@@ -412,5 +412,62 @@ func TestCacheEvictsOldest(t *testing.T) {
 	}
 	if _, ok := c.cached(pids[1]); !ok {
 		t.Fatal("second-oldest entry evicted too")
+	}
+}
+
+// A change row consumed between Resolve's catalog lookup and its store
+// must not leave a stale entry behind: the row is already spent, so
+// nothing would ever invalidate the late insert. store refuses results
+// from before a newer invalidation.
+func TestStoreLosesRaceToInvalidation(t *testing.T) {
+	fake := newFakeCatalog()
+	c := newTestCatalog(t, fake, nil, 0)
+	pid := model.NewPID()
+
+	// Snapshot before the "lookup", as Resolve does, then let an
+	// invalidating item row land in the window before the store.
+	gen := c.generation()
+	c.invalidate([]model.Change{{Seq: 1, EntityType: "item", EntityPID: pid, Op: model.OpUpdate}})
+	c.store(pid, "/stale/path.flac", model.PID("F0000000000000000000000001"), gen)
+	if _, ok := c.cached(pid); ok {
+		t.Fatal("store cached a path from before a consumed invalidation row")
+	}
+
+	// A store with no intervening invalidation still lands.
+	c.store(pid, "/fresh/path.flac", model.PID("F0000000000000000000000001"), c.generation())
+	if path, ok := c.cached(pid); !ok || path != "/fresh/path.flac" {
+		t.Fatalf("clean store missing: %q, %v", path, ok)
+	}
+
+	// Unrelated entity rows (play state and friends) do not spend the
+	// generation, so they cannot starve stores under churn.
+	gen = c.generation()
+	c.invalidate([]model.Change{{Seq: 2, EntityType: "play_state", EntityPID: model.NewPID(), Op: model.OpUpdate}})
+	c.store(model.PID("00000000000000000000000042"), "/other.flac", "", gen)
+	if _, ok := c.cached(model.PID("00000000000000000000000042")); !ok {
+		t.Fatal("a play_state row aborted an unrelated store")
+	}
+}
+
+// Two items resolving through one file PID must both fall to a single
+// file change row; a single-value reverse index would invalidate only
+// the item stored last.
+func TestFileRowInvalidatesAllSharingItems(t *testing.T) {
+	fake := newFakeCatalog()
+	c := newTestCatalog(t, fake, nil, 0)
+	filePID := model.PID("F0000000000000000000000009")
+	a, b := model.NewPID(), model.NewPID()
+	c.store(a, "/dup/a.flac", filePID, c.generation())
+	c.store(b, "/dup/b.flac", filePID, c.generation())
+
+	c.invalidate([]model.Change{{Seq: 1, EntityType: "file", EntityPID: filePID, Op: model.OpUpdate}})
+	if _, ok := c.cached(a); ok {
+		t.Fatal("item a survived its file's change row")
+	}
+	if _, ok := c.cached(b); ok {
+		t.Fatal("item b survived its file's change row")
+	}
+	if len(c.byFile) != 0 {
+		t.Fatalf("byFile index not emptied: %v", c.byFile)
 	}
 }

@@ -36,8 +36,8 @@ it re-baselines every gate in the same PR.
   `internal/testutil`; quality score Q <= 100, vectors pass at Q >= 0 (the
   tool's own pass bar, weighted error <= 0.277). The decoder currently
   scores 96-100 across all vectors at both rates.
-- **Realtime factor**: single-core, portable (non-SIMD) build, measured on
-  the CI baseline machine class; recorded by `make bench`.
+- **Realtime factor**: single-core, measured on the CI baseline machine
+  class; recorded by `make bench`.
 
 ## Decoder gates
 
@@ -91,7 +91,8 @@ deterministic mode.
   1.22 at 96k).
 - The pitch pre-filter's per-frame decisions (on, period, gain, tapset)
   agree with libopus on >= **90%** of frames on a pitched fixture.
-- >= **15x** realtime portable (>= 30x with the SIMD build).
+- >= **15x** realtime (measured 55-68x after the M18 FFT; the floor is a
+  ratchet and only rises once the CI baseline confirms headroom).
 
 ### AAC-LC
 - ODG-proxy at 128 kbps: corpus mean >= **ffmpeg-aac mean - 0.2**; no track

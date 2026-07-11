@@ -63,7 +63,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
       # Multi-arch (amd64 + arm64): self-hosters run Pi/ARM NAS boxes.
-      # The simd flavor stays amd64-only.
       - uses: docker/build-push-action@v6
         with:
           context: .

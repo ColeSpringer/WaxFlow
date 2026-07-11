@@ -27,11 +27,17 @@ transcoder has.
   (format, bitrate/quality, bits, rate, channels, gain mode, segment
   duration for HLS) serialized in one canonical order.
 - `nodeVersions`: the `Version()` constant of **every sample-affecting node
-  in the chain**: each encoder (bitstream/algorithm revision, psy-model
-  revision, deterministic-mode flag) *and* each DSP node (resampler, dither,
-  limiter, mix matrices). A resampler fix that changes output samples must
-  never serve stale audio; conversely, improving the Opus encoder
-  invalidates only Opus entries, not the whole cache.
+  in the chain**: the source codec's decoder (amended at M18, which shipped
+  the first decoder revision and found decode versions defined per codec
+  but never wired into the key), each encoder (bitstream/algorithm
+  revision, psy-model revision, deterministic-mode flag) *and* each DSP
+  node (resampler, dither, limiter, mix matrices). A resampler fix that
+  changes output samples must never serve stale audio; conversely,
+  improving the Opus encoder invalidates only entries whose *output* is
+  Opus, and revising the Opus decoder only entries whose *source* is.
+  Demuxer changes that alter emitted samples (trim fixes) remain covered
+  only by a schema bump; they are rarer than codec revisions and the
+  standing PR question below applies.
 
 Layout (fixed alongside the key): `cacheDir/v1/<aa>/<hash>/meta.json` plus
 `out.<ext>` (progressive) or `init.mp4 seg-*.m4s media.m3u8` (HLS variant).

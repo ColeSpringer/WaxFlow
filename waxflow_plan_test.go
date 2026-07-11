@@ -7,6 +7,8 @@ import (
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/audio"
+	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/opus"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/waxerr"
@@ -85,13 +87,33 @@ func TestPlanTranscode(t *testing.T) {
 		t.Fatalf("resampling plan must carry DSP node versions, got %v", plan.Versions)
 	}
 
-	// The same options with no conversion carry only the encoder version.
+	// The same options with no conversion carry exactly the source decoder
+	// and the encoder version (both pcm here).
 	base, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "wav"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(base.Versions) != 1 || base.Samples != frames {
+	if len(base.Versions) != 2 || base.Samples != frames {
 		t.Fatalf("baseline plan = %+v", base)
+	}
+	if base.Versions[0] != pcm.Version {
+		t.Fatalf("baseline versions %v must lead with the source decoder", base.Versions)
+	}
+
+	// A compressed source leads with its codec's decoder version, so a
+	// decoder revision invalidates cached transcodes of that codec's
+	// sources (ADR-0004); the rest of the plan is source-codec-blind.
+	opusTrack := track
+	opusTrack.Codec = codec.Opus
+	fromOpus, err := e.PlanTranscode(opusTrack, waxflow.TranscodeOptions{Format: "wav"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fromOpus.Versions[0] != opus.Version {
+		t.Fatalf("opus-source versions %v must lead with %s", fromOpus.Versions, opus.Version)
+	}
+	if slices.Equal(fromOpus.Versions, base.Versions) {
+		t.Fatal("opus-source and pcm-source plans must not share cache versions")
 	}
 
 	// AIFF exists in the table but has no streaming form.

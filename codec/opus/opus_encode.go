@@ -90,7 +90,7 @@ const (
 
 // EncoderVersion identifies the encoder bitstream/algorithm revision for the
 // cache key. Bump it when a change alters the produced bytes.
-const EncoderVersion = "opus-enc-4"
+const EncoderVersion = "opus-enc-5"
 
 // EncoderOptions configures the Opus encoder.
 type EncoderOptions struct {

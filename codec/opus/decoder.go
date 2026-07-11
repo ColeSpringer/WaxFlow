@@ -15,6 +15,12 @@ import (
 )
 
 // maxFrameSamples is the largest single Opus frame at 48 kHz (SILK 60 ms).
+// Version is the decoder's cache-key version constant (ADR-0004): bump on
+// any change that alters decoded samples. Revision 2: the CELT inverse
+// MDCT's DFT moved from a float64 direct form to the float32 dsp/fft
+// kernel (M18).
+const Version = "opus-dec-2"
+
 const maxFrameSamples = 2880
 
 // CELT sub-frame sizes at 48 kHz used by the redundancy/transition logic

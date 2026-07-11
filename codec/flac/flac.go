@@ -21,6 +21,10 @@ import (
 // StreamInfoLen is the byte length of a STREAMINFO metadata block body,
 // which is also the codec configuration blob (codec.Encoder.CodecConfig
 // shape) carried in container.Track.CodecConfig.
+// Version is the decoder's cache-key version constant (ADR-0004): bump on
+// any change that alters decoded samples.
+const Version = "flac-dec-1"
+
 const StreamInfoLen = 34
 
 // MaxBlockSize is the largest legal FLAC block size in samples.
