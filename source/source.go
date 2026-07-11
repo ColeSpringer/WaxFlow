@@ -102,6 +102,12 @@ var _ container.Source = (*File)(nil)
 // validate what they open (regular file, size cap) and reject references
 // they do not serve with waxerr.CodeUnsupportedSource; unknown names and
 // paths carry waxerr.CodeNotFound.
+//
+// Resolve carries no context: root and upload resolution are local file
+// opens. Implementations that reach further (the WaxBin catalog
+// resolver) bound their own queries with internal timeouts, at the cost
+// of not observing request cancellation, a known limitation of this
+// signature.
 type Resolver interface {
 	Resolve(ref string) (*File, error)
 }

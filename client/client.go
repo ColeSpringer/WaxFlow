@@ -117,6 +117,9 @@ type CapsDelivery struct {
 	HLS         bool `json:"hls"`
 	Jobs        bool `json:"jobs"`
 	Uploads     bool `json:"uploads"`
+	// PID: the daemon resolves pid:<ULID> source references against a
+	// WaxBin catalog (the resolver flavor).
+	PID bool `json:"pid"`
 }
 
 type SignRequest struct {

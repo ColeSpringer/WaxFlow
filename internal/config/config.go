@@ -74,6 +74,13 @@ type Config struct {
 	// form is comma-separated name=path pairs.
 	Roots []Root `json:"roots"`
 
+	// CatalogDB is the path of a WaxBin catalog database, opened
+	// read-only to resolve pid:<ULID> source references. Only the WaxBin
+	// resolver flavor serves it; the stock binary refuses to start with
+	// it set rather than silently ignoring a capability the operator
+	// asked for.
+	CatalogDB string `json:"catalogDB"`
+
 	// APIKeys are the control-API keys. With none configured, a
 	// non-loopback Addr refuses to start unless AllowUnauthenticated is
 	// explicit (the fail-closed rule). The env form is comma-separated.
@@ -174,6 +181,7 @@ var envVars = []struct {
 	{"WAXFLOW_ADDR", func(c *Config, v string) error { c.Addr = v; return nil }},
 	{"WAXFLOW_LOG_LEVEL", func(c *Config, v string) error { c.LogLevel = v; return nil }},
 	{"WAXFLOW_ROOTS", func(c *Config, v string) error { return parseRoots(v, &c.Roots) }},
+	{"WAXFLOW_CATALOG_DB", func(c *Config, v string) error { c.CatalogDB = v; return nil }},
 	{"WAXFLOW_API_KEYS", func(c *Config, v string) error { c.APIKeys = splitList(v); return nil }},
 	{"WAXFLOW_ALLOW_UNAUTHENTICATED", func(c *Config, v string) error { return parseBool(v, &c.AllowUnauthenticated) }},
 	{"WAXFLOW_SOURCE_MAX_BYTES", func(c *Config, v string) error { return parseInt64(v, &c.SourceMaxBytes) }},

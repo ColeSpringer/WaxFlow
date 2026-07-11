@@ -304,6 +304,27 @@ func TestAuthMatrix(t *testing.T) {
 	wantEnvelope(t, resp, http.StatusUnauthorized, waxerr.CodeUnauthorized)
 }
 
+// downCatalog stands in for the resolver flavor with an unreachable
+// catalog: every resolve fails catalog-unavailable.
+type downCatalog struct{}
+
+func (downCatalog) Resolve(string) (*source.File, error) {
+	return nil, waxerr.New(waxerr.CodeCatalogUnavailable, "catalog query failed")
+}
+
+func TestCatalogUnavailableRetryAfter(t *testing.T) {
+	env := newTestEnv(t, func(cfg *server.Config) {
+		cfg.Resolver = downCatalog{}
+	})
+	resp := env.get(t, "/probe?src=pid:01ARZ3NDEKTSV4RRFFQ69G5FAV", nil)
+	wantEnvelope(t, resp, http.StatusServiceUnavailable, waxerr.CodeCatalogUnavailable)
+	// api.md promises Retry-After on catalog-unavailable, like overloaded:
+	// the condition is transient and clients should come back.
+	if got := resp.Header.Get("Retry-After"); got != "2" {
+		t.Fatalf("Retry-After = %q, want 2", got)
+	}
+}
+
 func TestGoldenResponses(t *testing.T) {
 	env := newTestEnv(t, nil)
 	cases := []struct {

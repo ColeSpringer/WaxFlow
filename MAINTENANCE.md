@@ -93,6 +93,9 @@ when a codec's quality changes:
 
 - [ ] `make check` green (fmt, vet, functional + race passes, depcheck)
 - [ ] `THIRD-PARTY-NOTICES.md` audited against the reference ledger
+- [ ] `resolver/go.mod`: if WaxBin has rebased onto current waxlabel, drop
+      the waxlabel `replace` pin (comment in that file explains it) and
+      bump the waxbin pseudo-version
 - [ ] Tag `vX.Y.Z` pushed -> `release.yml` publishes binaries + SHA256SUMS +
       multi-arch image to ghcr.io
 - [ ] Container smoke: `docker run` + HEALTHCHECK healthy

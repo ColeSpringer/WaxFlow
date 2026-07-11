@@ -115,9 +115,12 @@ byte-identical to `waxflow probe --json`.
     /stream?src=<ref>&format=auto|wav|flac|alac|mp3|aac|opus&rate=&ch=&bits=16|24&bitrate=|q=&container=&gain=&t=&track=&maxBitRate=
 
 Source references (`src`): `<root>/<relative/path>` under a configured
-library root; `upload:<id>` and `pid:<ULID>` return `501
-unsupported-source` until the job store and the WaxBin resolver flavor
-land.
+library root; `upload:<id>` for a spooled one-shot upload (POST
+/uploads); `pid:<ULID>` for a WaxBin catalog item, served by the waxbin
+flavor with `catalogDB` configured (`delivery.pid` in `/caps`) and `501
+unsupported-source` everywhere else. A pid reference re-resolves to the
+item's current path on every request, so catalog renames and moves are
+transparent: the source identity pins bytes, not locations.
 
 Parameters (unknown parameter names are rejected):
 
@@ -264,15 +267,17 @@ is:
                    {"name": "aac", "live": true, "exts": ["m4a", "aac"]},
                    {"name": "alac", "live": true, "exts": []}],
       "delivery": {"progressive": true, "hls": true, "hlsFormats": ["opus", "flac", "alac", "aac"],
-                   "jobs": false, "uploads": false},
+                   "jobs": false, "uploads": false, "pid": false},
       "profiles": {}
     }
 
 Capability-gated: only what works is listed. `delivery.jobs` and
 `delivery.uploads` report whether this daemon runs with a job store and
 an upload spool (the CLI daemon always does; a bare library embedding
-may not). `profiles` fills once the client matrix is verified, with
-tested delivery profiles (`apple-native`, `hls-js`, ...).
+may not). `delivery.pid` reports whether `pid:<ULID>` source references
+resolve against a WaxBin catalog (the waxbin flavor with `catalogDB`).
+`profiles` fills once the client matrix is verified, with tested
+delivery profiles (`apple-native`, `hls-js`, ...).
 
 ## Uploads
 

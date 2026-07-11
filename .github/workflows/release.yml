@@ -74,3 +74,17 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:${{ github.ref_name }}
             ${{ env.IMAGE }}:latest
+      # The WaxBin resolver flavor: identical CLI plus pid:<ULID> source
+      # resolution against a WaxBin catalog (compose.full.yaml uses it).
+      - name: waxbin flavor image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            MAIN_PKG=./resolver/cmd/waxflow
+          tags: |
+            ${{ env.IMAGE }}:${{ github.ref_name }}-waxbin
+            ${{ env.IMAGE }}:latest-waxbin

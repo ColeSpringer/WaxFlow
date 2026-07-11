@@ -3,15 +3,20 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/colespringer/waxflow/internal/config"
 	"github.com/colespringer/waxflow/server"
+	"github.com/colespringer/waxflow/source"
 )
 
 func run(t *testing.T, args ...string) (code int, stdout, stderr string) {
@@ -28,6 +33,77 @@ func TestVersion(t *testing.T) {
 	}
 	if !strings.HasPrefix(out, "waxflow test ") {
 		t.Errorf("output = %q, want prefix %q", out, "waxflow test ")
+	}
+}
+
+// fakePIDResolver stands in for the WaxBin catalog resolver: pid: refs
+// resolve to one fixed local file, everything else delegates.
+type fakePIDResolver struct {
+	next source.Resolver
+	path string
+}
+
+func (f fakePIDResolver) Resolve(ref string) (*source.File, error) {
+	if strings.HasPrefix(ref, "pid:") {
+		return source.OpenLocal(ref, f.path, f.path)
+	}
+	return f.next.Resolve(ref)
+}
+
+func TestFlavorVersionOutput(t *testing.T) {
+	var out, errOut strings.Builder
+	code := ExecuteFlavor("test", []string{"version"}, &out, &errOut, Flavor{Name: "waxbin"})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr: %s", code, errOut.String())
+	}
+	if !strings.HasPrefix(out.String(), "waxflow-waxbin test ") {
+		t.Errorf("output = %q, want prefix %q", out.String(), "waxflow-waxbin test ")
+	}
+}
+
+func TestStockBuildRefusesCatalogDB(t *testing.T) {
+	// A configured catalogDB on the stock build must fail loudly: the
+	// operator asked for pid: sources and this binary cannot serve them.
+	t.Setenv("WAXFLOW_CATALOG_DB", "/nonexistent/waxbin.db")
+	code, _, stderr := run(t, "sign", "--src", "pid:01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (invalid-request); stderr: %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "waxbin flavor") {
+		t.Errorf("stderr = %q, want a pointer at the waxbin flavor", stderr)
+	}
+}
+
+func TestFlavorSignsPIDSource(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "track.wav")
+	if err := os.WriteFile(path, []byte("not audio; sign only stats it"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(dir, "data")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WAXFLOW_DATA_DIR", dataDir)
+	flavor := Flavor{
+		Name: "waxbin",
+		OpenResolver: func(_ config.Config, next source.Resolver, _ *slog.Logger, daemon bool) (source.Resolver, io.Closer, error) {
+			if daemon {
+				t.Error("sign is a one-shot command; daemon must be false")
+			}
+			return fakePIDResolver{next: next, path: path}, nil, nil
+		},
+	}
+	var out, errOut strings.Builder
+	code := ExecuteFlavor("test", []string{"sign", "--src", "pid:01ARZ3NDEKTSV4RRFFQ69G5FAV"}, &out, &errOut, flavor)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr: %s", code, errOut.String())
+	}
+	url := out.String()
+	for _, want := range []string{"src=pid%3A01ARZ3NDEKTSV4RRFFQ69G5FAV", "id=", "sig=", "exp="} {
+		if !strings.Contains(url, want) {
+			t.Errorf("minted URL missing %q: %s", want, url)
+		}
 	}
 }
 

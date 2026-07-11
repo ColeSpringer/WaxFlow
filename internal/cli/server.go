@@ -23,7 +23,7 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-func newServerCmd(version string) *cobra.Command {
+func newServerCmd(version string, flavor Flavor) *cobra.Command {
 	var demo bool
 	cmd := &cobra.Command{
 		Use:   "server",
@@ -42,7 +42,7 @@ func newServerCmd(version string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			srvCfg, cleanup, err := buildServerConfig(cfg, version, logger)
+			srvCfg, cleanup, err := buildServerConfig(cfg, version, logger, flavor)
 			if err != nil {
 				return err
 			}
@@ -75,9 +75,10 @@ func newServerCmd(version string) *cobra.Command {
 }
 
 // buildServerConfig maps the file/env/flag configuration onto the server
-// package's dependencies: opened roots, signing keys (auto-generated into
-// dataDir on first run), and resolved directories.
-func buildServerConfig(cfg config.Config, version string, logger *slog.Logger) (server.Config, func(), error) {
+// package's dependencies: the resolver chain (roots plus the flavor's
+// schemes), signing keys (auto-generated into dataDir on first run), and
+// resolved directories.
+func buildServerConfig(cfg config.Config, version string, logger *slog.Logger, flavor Flavor) (server.Config, func(), error) {
 	nop := func() {}
 	dataDir, err := cfg.ResolvedDataDir()
 	if err != nil {
@@ -103,23 +104,23 @@ func buildServerConfig(cfg config.Config, version string, logger *slog.Logger) (
 		signingKeys[i] = server.SigningKey{ID: k.ID, Secret: k.Secret}
 	}
 
-	roots, err := source.OpenRoots(configRoots(cfg), cfg.ResolvedSourceMaxBytes())
+	resolver, closeResolver, err := flavor.openResolver(cfg, logger, true)
 	if err != nil {
 		return server.Config{}, nop, err
 	}
 	maxAge, err := cfg.ResolvedCacheMaxAge()
 	if err != nil {
-		roots.Close()
+		closeResolver()
 		return server.Config{}, nop, err
 	}
 	uploadTTL, err := cfg.ResolvedUploadTTL()
 	if err != nil {
-		roots.Close()
+		closeResolver()
 		return server.Config{}, nop, err
 	}
 	scratchDir := cfg.ResolvedScratchDir()
 	if err := os.MkdirAll(scratchDir, 0o700); err != nil {
-		roots.Close()
+		closeResolver()
 		return server.Config{}, nop, waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating scratchDir", err)
 	}
 
@@ -129,7 +130,8 @@ func buildServerConfig(cfg config.Config, version string, logger *slog.Logger) (
 		AllowUnauthenticated: cfg.AllowUnauthenticated,
 		MetricsKey:           cfg.MetricsKey,
 		AllowedOrigins:       cfg.AllowedOrigins,
-		Resolver:             roots,
+		Resolver:             resolver,
+		PIDSources:           cfg.CatalogDB != "",
 		SigningKeys:          signingKeys,
 		CacheDir:             cacheDir,
 		CacheMaxBytes:        cfg.ResolvedCacheMaxBytes(),
@@ -149,7 +151,7 @@ func buildServerConfig(cfg config.Config, version string, logger *slog.Logger) (
 		Demo:                 cfg.Demo,
 		Version:              version,
 		Logger:               logger,
-	}, func() { roots.Close() }, nil
+	}, closeResolver, nil
 }
 
 func configRoots(cfg config.Config) []source.Root {

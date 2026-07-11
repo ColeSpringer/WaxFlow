@@ -11,15 +11,14 @@ import (
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/internal/config"
 	"github.com/colespringer/waxflow/internal/sign"
-	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 	urlpkg "net/url"
 )
 
 // newSignCmd mints signed playback URLs offline: the daemon does not need
-// to be running, only the signing secret and the roots configuration must
-// match its.
-func newSignCmd() *cobra.Command {
+// to be running, only the signing secret and the source configuration
+// (roots, catalogDB in the resolver flavor) must match its.
+func newSignCmd(flavor Flavor) *cobra.Command {
 	var src, format, gain string
 	var rate, channels, bits int
 	var t float64
@@ -43,12 +42,18 @@ minted here dies with 410 source-changed if the file changes.`,
 				return waxerr.New(waxerr.CodeInvalidRequest, "--src is required")
 			}
 
-			roots, err := source.OpenRoots(configRoots(cfg), cfg.ResolvedSourceMaxBytes())
+			// CLI convention: diagnostics from the resolver chain go to
+			// stderr; the minted URL alone lands on stdout.
+			logger, err := newLogger(cmd.ErrOrStderr(), cfg)
 			if err != nil {
 				return err
 			}
-			defer roots.Close()
-			f, err := roots.Resolve(src)
+			resolver, closeResolver, err := flavor.openResolver(cfg, logger, false)
+			if err != nil {
+				return err
+			}
+			defer closeResolver()
+			f, err := resolver.Resolve(src)
 			if err != nil {
 				return err
 			}

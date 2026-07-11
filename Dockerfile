@@ -3,17 +3,25 @@
 FROM golang:1.26-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
+COPY resolver/go.mod resolver/go.sum resolver/
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
 ARG VERSION=dev
-# MAIN_PKG lets the future WaxBin resolver flavor build its "-waxbin"
-# main from the same Dockerfile.
+# MAIN_PKG selects the entry point: ./cmd/waxflow (stock) or
+# ./resolver/cmd/waxflow (the "-waxbin" flavor). The resolver is a
+# nested module, so its main builds from inside its own directory and
+# downloads its own dependencies (cheap via the cache mount, and only
+# when the flavor is requested).
 ARG MAIN_PKG=./cmd/waxflow
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
+    case "${MAIN_PKG}" in \
+      ./resolver/*) cd resolver && go mod download && pkg=".${MAIN_PKG#./resolver}" ;; \
+      *) pkg="${MAIN_PKG}" ;; \
+    esac && \
     CGO_ENABLED=0 go build -trimpath \
     -ldflags "-s -w -X main.version=${VERSION}" \
-    -o /out/waxflow ${MAIN_PKG}
+    -o /out/waxflow ${pkg}
 # Pre-owned state dirs: distroless has no shell to mkdir/chown, and named
 # volumes inherit the image directory's ownership (UID 10001, see below).
 RUN mkdir -p /out/state/data /out/state/cache && chown -R 10001:10001 /out/state

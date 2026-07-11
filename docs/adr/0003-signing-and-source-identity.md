@@ -30,10 +30,20 @@ no padding, of HMAC-SHA256 over the canonical string:
 - Default TTL: `max(6h, 2 x source duration)`.
 
 **Source identity.** The signed descriptor embeds the identity of the bytes
-it was minted for: `size + mtimeNS` (resolver mode adds PID and catalog
-sequence). On mismatch at request time the server returns
-`410 source-changed` and the client re-mints. A stale URL can never serve
-surprise content, and cache keys (ADR-0004) stay coherent with signatures.
+it was minted for: `size + mtimeNS`. On mismatch at request time the server
+returns `410 source-changed` and the client re-mints. A stale URL can never
+serve surprise content, and cache keys (ADR-0004) stay coherent with
+signatures.
+
+*Amended at M17 (resolver mode):* the original text said resolver mode
+"adds PID and catalog sequence" to the identity. The PID needs no new
+field (it is the `src` parameter, already inside the signature), and the
+catalog sequence is deliberately excluded: identity pins bytes, and a
+rename or catalog metadata edit changes no bytes. Folding the per-item
+change sequence in would kill valid URLs on every rename, the exact event
+the resolver's re-resolution makes transparent, while byte changes are
+already caught because the identity is stat'd from whatever file the PID
+currently resolves to.
 Content hashing was rejected: hashing a 300 MB FLAC on first request
 defeats the time-to-first-audio budget; `mtimeNS` granularity is the
 documented residual risk, with `POST /cache/gc` as the escape hatch.

@@ -191,6 +191,7 @@ func TestServiceFieldsFromJSONAndEnv(t *testing.T) {
 		"WAXFLOW_LIVE_SLOTS":      "3",
 		"WAXFLOW_DEMO":            "true",
 		"WAXFLOW_CACHE_MAX_BYTES": "1024",
+		"WAXFLOW_CATALOG_DB":      "/catalog/waxbin.db",
 	}))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -206,6 +207,9 @@ func TestServiceFieldsFromJSONAndEnv(t *testing.T) {
 	}
 	if cfg.LiveSlots != 3 || !cfg.Demo || cfg.CacheMaxBytes != 1024 {
 		t.Errorf("scalar envs: liveSlots=%d demo=%v cacheMaxBytes=%d", cfg.LiveSlots, cfg.Demo, cfg.CacheMaxBytes)
+	}
+	if cfg.CatalogDB != "/catalog/waxbin.db" {
+		t.Errorf("catalogDB = %q", cfg.CatalogDB)
 	}
 	if age, err := cfg.ResolvedCacheMaxAge(); err != nil || age != 720*time.Hour {
 		t.Errorf("cacheMaxAge = %v, %v", age, err)

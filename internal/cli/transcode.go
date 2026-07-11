@@ -21,7 +21,7 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-func newTranscodeCmd() *cobra.Command {
+func newTranscodeCmd(flavor Flavor) *cobra.Command {
 	var formatName, containerName string
 	var force bool
 	var rate, channels, bits int
@@ -83,7 +83,7 @@ flags the transcode is a bit-exact container rewrite; --rate,
 				containerName = "adts"
 			}
 
-			src, cleanup, err := openSource(args[0])
+			src, srcHint, cleanup, err := openSourceRef(cmd, flavor, args[0], &cfg, logger)
 			if err != nil {
 				return err
 			}
@@ -152,7 +152,7 @@ flags the transcode is a bit-exact container rewrite; --rate,
 			mapper := label.New()
 			var info *meta.Info
 			if !noTags {
-				if m, merr := mapper.Read(cmd.Context(), src, extHint(args[0]), meta.ReadOptions{Pictures: true}); merr == nil {
+				if m, merr := mapper.Read(cmd.Context(), src, srcHint, meta.ReadOptions{Pictures: true}); merr == nil {
 					info = m
 					for _, warn := range m.Warnings {
 						fmt.Fprintf(cmd.ErrOrStderr(), "metadata: %s\n", warn)
@@ -162,7 +162,7 @@ flags the transcode is a bit-exact container rewrite; --rate,
 			analyzeLoudness := loudness == "analyze"
 			var srcRes *waxflow.AnalyzeResult
 			if analyzeLoudness {
-				res, aerr := e.Analyze(cmd.Context(), src, extHint(args[0]), waxflow.AnalyzeOptions{})
+				res, aerr := e.Analyze(cmd.Context(), src, srcHint, waxflow.AnalyzeOptions{})
 				if aerr != nil {
 					out.Close()
 					os.Remove(writePath)
@@ -201,7 +201,7 @@ flags the transcode is a bit-exact container rewrite; --rate,
 				}
 			}
 
-			res, err := e.Transcode(cmd.Context(), src, extHint(args[0]), out, waxflow.TranscodeOptions{
+			res, err := e.Transcode(cmd.Context(), src, srcHint, out, waxflow.TranscodeOptions{
 				Format:          outFormat,
 				Container:       containerName,
 				Rate:            rate,

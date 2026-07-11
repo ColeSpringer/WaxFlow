@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,31 +15,32 @@ import (
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/internal/config"
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/meta/label"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-func newProbeCmd() *cobra.Command {
+func newProbeCmd(flavor Flavor) *cobra.Command {
 	var jsonOut, strict bool
 	cmd := &cobra.Command{
 		Use:   "probe <file>",
 		Short: "Identify an audio file and print its stream parameters",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			src, cleanup, err := openSource(args[0])
+			src, hint, cleanup, err := openSourceRef(cmd, flavor, args[0], nil, nil)
 			if err != nil {
 				return err
 			}
 			defer cleanup()
-			info, err := waxflow.New().Probe(src, extHint(args[0]), &waxflow.ProbeOptions{Strict: strict})
+			info, err := waxflow.New().Probe(src, hint, &waxflow.ProbeOptions{Strict: strict})
 			if err != nil {
 				return err
 			}
 			// Metadata is best-effort: a source the mapper cannot read
 			// still probes (m carries the warning, or stays nil).
-			m, _ := label.New().Read(cmd.Context(), src, extHint(args[0]), meta.ReadOptions{})
+			m, _ := label.New().Read(cmd.Context(), src, hint, meta.ReadOptions{})
 			if jsonOut {
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(server.ProbeJSON(info, m))
 			}
@@ -49,6 +51,47 @@ func newProbeCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "print machine-readable JSON (schemaVersion'd)")
 	cmd.Flags().BoolVar(&strict, "strict", false, "treat tolerated input damage as errors")
 	return cmd
+}
+
+// openSourceRef opens a probe/transcode input and returns it with its
+// extension hint. A plain argument is a local file path; a
+// source-scheme argument (pid:<ULID>, upload:<id>) resolves through the
+// same chain the daemon uses, so the resolver flavor probes and
+// transcodes straight from catalog references. Only those two literal
+// schemes get resolver treatment; everything else stays a filesystem
+// path (Windows drive letters also contain a colon).
+//
+// cfg and logger are needed only for scheme-shaped args. Callers that
+// already resolved them (transcode) pass them in; nil resolves them on
+// demand, so a plain-path probe never requires a loadable configuration.
+func openSourceRef(cmd *cobra.Command, flavor Flavor, arg string, cfg *config.Config, logger *slog.Logger) (container.Source, string, func(), error) {
+	if !strings.HasPrefix(arg, "pid:") && !strings.HasPrefix(arg, "upload:") {
+		src, cleanup, err := openSource(arg)
+		return src, extHint(arg), cleanup, err
+	}
+	if cfg == nil {
+		resolved, err := resolveConfig(cmd)
+		if err != nil {
+			return nil, "", nil, err
+		}
+		cfg = &resolved
+	}
+	if logger == nil {
+		var err error
+		if logger, err = newLogger(cmd.ErrOrStderr(), *cfg); err != nil { // CLI logs to stderr
+			return nil, "", nil, err
+		}
+	}
+	resolver, closeResolver, err := flavor.openResolver(*cfg, logger, false)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	f, err := resolver.Resolve(arg)
+	if err != nil {
+		closeResolver()
+		return nil, "", nil, err
+	}
+	return f, f.Ext, func() { f.Close(); closeResolver() }, nil
 }
 
 // openSource opens a local file as a container.Source. The caller must

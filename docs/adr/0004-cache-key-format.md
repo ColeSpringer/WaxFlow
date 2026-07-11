@@ -16,8 +16,13 @@ transcoder has.
     )
 
 - `cacheSchemaVersion`: bumps invalidate everything (layout changes).
-- `sourceIdentity`: `path + size + mtimeNS` (+ PID and catalog sequence in
-  resolver mode), identical to the identity inside signed URLs (ADR-0003).
+- `sourceIdentity`: `ref + size + mtimeNS`, identical to the identity
+  inside signed URLs (ADR-0003). In resolver mode the ref is the
+  `pid:<ULID>` reference itself, so the PID keys entries with no extra
+  field; the catalog sequence is deliberately excluded (amended at M17,
+  see ADR-0003): a rename changes no bytes, so it must not orphan cache
+  entries, while replaced content misses because size+mtimeNS come from
+  the file the PID currently resolves to.
 - `canonicalOutputParams`: every parameter that shapes output bytes
   (format, bitrate/quality, bits, rate, channels, gain mode, segment
   duration for HLS) serialized in one canonical order.

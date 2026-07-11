@@ -74,6 +74,12 @@ type Config struct {
 	// resolves not-found); the resolver flavor injects its own.
 	Resolver source.Resolver
 
+	// PIDSources advertises pid:<ULID> source support in /caps. The
+	// resolver flavor sets it when a catalog is wired; whether pid refs
+	// actually resolve is Resolver's business, this flag only keeps the
+	// capability surface honest.
+	PIDSources bool
+
 	// SigningKeys enable signed playback URLs. Empty disables sig auth
 	// and POST /sign.
 	SigningKeys []SigningKey

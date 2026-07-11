@@ -7,10 +7,16 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # the "stdlib-only codecs" promise.
 PUBLIC_PKGS := . ./waxerr ./audio ./dsp/... ./codec/... ./container/... ./format ./source ./server ./client
 
-.PHONY: build test test-race vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench encoder-quality fuzz opus-tools hls-e2e
+.PHONY: build build-waxbin test test-race test-resolver vet fmt fmt-check depcheck check docker docker-waxbin clean verify-vectors goldens bench encoder-quality fuzz opus-tools hls-e2e
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/waxflow ./cmd/waxflow
+
+# The WaxBin resolver flavor: the identical CLI with pid:<ULID> source
+# support, built from the nested resolver/ module (which is what keeps
+# WaxBin's SQLite dependency out of the main module's tree).
+build-waxbin:
+	cd resolver && CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o ../bin/waxflow-waxbin ./cmd/waxflow
 
 # The default loop: the whole suite without the race detector. The codecs and
 # DSP are single-goroutine numeric code, so -race there is a many-fold
@@ -28,6 +34,12 @@ test:
 # by the server tests, which run here under the detector.
 test-race:
 	go test -race -timeout 30m ./...
+
+# The nested resolver module: ./... at the root stops at its go.mod
+# boundary, so it gets its own vet+test (race included: the poll loop is
+# concurrent) here and a dedicated CI step.
+test-resolver:
+	cd resolver && go vet ./... && go test -race -timeout 10m ./...
 
 vet:
 	go vet ./...
@@ -47,7 +59,7 @@ depcheck:
 		echo "$$bad"; exit 1; fi; \
 	echo "depcheck ok: public tree ($(PUBLIC_PKGS)) is stdlib-only"
 
-check: fmt-check vet test test-race depcheck
+check: fmt-check vet test test-race test-resolver depcheck
 
 # Fetch the SHA-256-pinned conformance vectors into testdata/vectors
 # (CI-cached, never committed). Vector-gated tests self-skip until run;
@@ -124,6 +136,10 @@ hls-e2e:
 
 docker:
 	docker build --build-arg VERSION=$(VERSION) -t waxflow:$(VERSION) .
+
+docker-waxbin:
+	docker build --build-arg VERSION=$(VERSION) --build-arg MAIN_PKG=./resolver/cmd/waxflow \
+		-t waxflow:$(VERSION)-waxbin .
 
 clean:
 	rm -rf bin dist

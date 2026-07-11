@@ -48,8 +48,9 @@ func statusFor(code waxerr.Code) int {
 // pre-body failures.
 func (s *Server) writeError(w http.ResponseWriter, err error) {
 	code := waxerr.CodeOf(err)
-	if code == waxerr.CodeOverloaded {
-		// Over admission limits, tell clients when to come back.
+	if code == waxerr.CodeOverloaded || code == waxerr.CodeCatalogUnavailable {
+		// Over admission limits or a briefly unreachable catalog, tell
+		// clients when to come back.
 		w.Header().Set("Retry-After", "2")
 	}
 	s.writeEnvelope(w, statusFor(code), code, err.Error())

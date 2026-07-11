@@ -111,6 +111,7 @@ Precedence: **flag > `WAXFLOW_*` env > JSON config file > default**
 | `addr` | `WAXFLOW_ADDR` | `127.0.0.1:4418` | listen address (compose widens to `0.0.0.0`) |
 | `logLevel` | `WAXFLOW_LOG_LEVEL` | `info` | `debug`\|`info`\|`warn`\|`error` |
 | `roots` | `WAXFLOW_ROOTS` | none | named library roots; JSON `[{"name","path"}]`, env `name=path,name2=path2`; each opened via `os.Root` (no escape, symlinks confined), files validated regular and size-capped |
+| `catalogDB` | `WAXFLOW_CATALOG_DB` | none | WaxBin catalog SQLite path, opened read-only for `pid:<ULID>` source references. Waxbin flavor only: the stock binary refuses to start with it set |
 | `apiKeys` | `WAXFLOW_API_KEYS` | none | control-API keys (comma-separated in env). **Fail closed**: required on a non-loopback `addr` unless `allowUnauthenticated` |
 | `allowUnauthenticated` | `WAXFLOW_ALLOW_UNAUTHENTICATED` | `false` | explicit opt-in to keyless on non-loopback |
 | `sourceMaxBytes` | `WAXFLOW_SOURCE_MAX_BYTES` | 4 GiB | per-source open cap |
@@ -153,6 +154,30 @@ Precedence: **flag > `WAXFLOW_*` env > JSON config file > default**
   7 unauthorized, 8 overloaded)
 
 The HTTP surface is documented in [docs/api.md](docs/api.md).
+
+## WaxBin resolver flavor
+
+`ghcr.io/colespringer/waxflow:latest-waxbin` (or `make build-waxbin`) is
+the identical CLI with one addition: `pid:<ULID>` source references
+resolve against a WaxBin catalog. Point `catalogDB` at WaxBin's
+database (created by WaxBin first; opened read-only, never taking
+WaxBin's write lock) and every surface that accepts a source reference
+accepts `pid:`: `/stream`, `/probe`, `/sign`, jobs, HLS, plus `waxflow
+probe|transcode|sign` on the command line. `/caps` reports it as
+`delivery.pid`.
+
+Resolved paths are cached and the catalog's change feed is polled every
+5 seconds, so a rename or move by WaxBin's organizer is picked up
+within one poll (a stale path self-heals immediately on the next
+request). Signed URLs pin bytes, not locations: a rename does not kill
+them, while replaced content still dies with `410 source-changed`.
+`compose.full.yaml` runs this flavor against WaxBin's volumes; note the
+catalog directory mounts writable because SQLite WAL readers write
+read-marks into the `-shm` sidecar, even though the database itself is
+opened read-only.
+
+The flavor lives in the nested module `resolver/`, which is what keeps
+WaxBin's SQLite dependency out of the main module's tree.
 
 ## Non-goals for v1.0
 

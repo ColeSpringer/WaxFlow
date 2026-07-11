@@ -140,6 +140,9 @@ type CapsDelivery struct {
 	HLSFormats []string `json:"hlsFormats,omitempty"`
 	Jobs       bool     `json:"jobs"`
 	Uploads    bool     `json:"uploads"`
+	// PID: pid:<ULID> source references resolve against a WaxBin
+	// catalog (the resolver flavor with catalogDB configured).
+	PID bool `json:"pid"`
 }
 
 // UploadResponse is the POST /uploads body.
@@ -193,7 +196,7 @@ type CacheGCResponse struct {
 
 // buildCaps assembles Caps from the capability-gated tables plus the
 // configured optional surfaces.
-func buildCaps(jobs, uploads bool) Caps {
+func buildCaps(jobs, uploads, pid bool) Caps {
 	caps := Caps{
 		SchemaVersion: 1,
 		Inputs:        format.Inputs(),
@@ -203,6 +206,7 @@ func buildCaps(jobs, uploads bool) Caps {
 			HLSFormats:  waxflow.SegmentedFormats(),
 			Jobs:        jobs,
 			Uploads:     uploads,
+			PID:         pid,
 		},
 		Profiles: map[string]any{},
 	}
