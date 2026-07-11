@@ -27,8 +27,11 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-// Version identifies the meter algorithm revision for cache keys
-// (ADR-0004 style).
+// Version identifies the meter algorithm revision (ADR-0004 style).
+// WaxFlow itself computes loudness fresh per job, but external callers
+// that persist measurements (WaxBin's catalog is the anticipated one)
+// should store it alongside their results so a meter revision
+// invalidates them.
 const Version = "r128-1"
 
 // The gating windows in 100 ms sub-blocks: both the 400 ms momentary

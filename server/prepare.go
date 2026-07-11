@@ -49,7 +49,7 @@ func (s *Server) prepareSource(ctx context.Context, q url.Values, sigAuthed bool
 	if err != nil {
 		return nil, err
 	}
-	src, err := s.resolver.Resolve(p.src)
+	src, err := s.resolver.Resolve(ctx, p.src)
 	if err != nil {
 		return nil, err
 	}

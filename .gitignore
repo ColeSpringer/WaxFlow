@@ -23,7 +23,7 @@
 # local scratch config
 /waxflow.json
 
-# playwright install for the gated hls.js e2e (make hls-e2e)
+# playwright install for the gated browser e2e (make client-e2e)
 /node_modules/
 /package.json
 /package-lock.json

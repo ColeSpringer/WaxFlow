@@ -175,7 +175,7 @@ func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, ref stri
 
 		// The pipeline owns its own source handle; the request's closes
 		// with the handler.
-		src, err := s.resolver.Resolve(ref)
+		src, err := s.resolver.Resolve(ctx, ref)
 		if err != nil {
 			entry.Fail(err)
 			return

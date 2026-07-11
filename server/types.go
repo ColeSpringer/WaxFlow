@@ -2,9 +2,26 @@ package server
 
 import (
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/meta"
 )
+
+// probeMetadata summarizes an internal metadata read for ProbeJSON.
+// The CLI probe command builds the identical summary (pinned against
+// this one by TestProbeJSONMatchesHTTP in the cli module), keeping the
+// internal meta type out of the public signature.
+func probeMetadata(m *meta.Info) *ProbeMetadata {
+	if m == nil {
+		return nil
+	}
+	return &ProbeMetadata{
+		Tags:      m.TagSummary(),
+		Chapters:  m.Chapters,
+		HasArt:    m.HasPictures,
+		HasLyrics: m.HasLyrics(),
+	}
+}
 
 // Wire types for the JSON API. These are the contract documented in
 // docs/api.md and pinned by golden fixtures; the client package mirrors
@@ -56,25 +73,30 @@ type ProbeTrack struct {
 	Default         bool    `json:"default"`
 }
 
-// ProbeJSON maps a format.Info (and, when a mapper ran, the source's
-// metadata) onto the wire shape.
-func ProbeJSON(info *format.Info, m *meta.Info) ProbeInfo {
+// ProbeMetadata is the optional metadata summary a probe response
+// carries; nil means no mapper ran (or the source has none). All fields
+// are caller-owned public types, so external embedders can fill it from
+// any metadata source.
+type ProbeMetadata struct {
+	// Tags is the canonical tag summary (TITLE, ARTIST, ...). The lyric
+	// sheet does not belong here: it is served whole by /lyrics and
+	// reported via HasLyrics.
+	Tags map[string][]string
+	// Chapters are embedded chapter markers in playback order.
+	Chapters []container.Chapter
+	// HasArt and HasLyrics report what /art and /lyrics can serve.
+	HasArt    bool
+	HasLyrics bool
+}
+
+// ProbeJSON maps a format.Info (and, when metadata was read, its
+// summary) onto the wire shape.
+func ProbeJSON(info *format.Info, m *ProbeMetadata) ProbeInfo {
 	out := ProbeInfo{SchemaVersion: 1, Container: info.Container, Warnings: info.Warnings}
 	if m != nil {
-		// A tag summary, not the payloads: the lyric sheet (potentially
-		// many KB on every probe) is served by /lyrics and reported here
-		// as hasLyrics. Copied, never aliased: the meta Info may be a
-		// shared cache entry.
-		if len(m.Tags) > 0 {
-			out.Tags = make(map[string][]string, len(m.Tags))
-			for k, v := range m.Tags {
-				if k != "LYRICS" {
-					out.Tags[k] = v
-				}
-			}
-		}
-		out.HasArt = m.HasPictures
-		out.HasLyrics = m.Lyrics() != "" || len(m.Synced) > 0
+		out.Tags = m.Tags
+		out.HasArt = m.HasArt
+		out.HasLyrics = m.HasLyrics
 		for _, ch := range m.Chapters {
 			out.Chapters = append(out.Chapters, ProbeChapter{
 				StartSeconds: ch.Start.Seconds(),
@@ -117,10 +139,79 @@ type Caps struct {
 	Decoders      []string     `json:"decoders"`
 	Outputs       []CapsOutput `json:"outputs"`
 	Delivery      CapsDelivery `json:"delivery"`
-	// Profiles are the named delivery profiles (apple-native, hls-js,
-	// ...) whose contents will be tested facts from the client-matrix
-	// verification; empty until that verification exists.
-	Profiles map[string]any `json:"profiles"`
+	// Profiles are the named delivery profiles: per client family, the
+	// playback capabilities established by the client matrix
+	// (docs/client-matrix.md), so a UI picks a profile instead of
+	// guessing codecs.
+	Profiles map[string]CapsProfile `json:"profiles"`
+}
+
+// CapsProfile is one named delivery profile. The format lists are facts
+// from the client-matrix verification, filtered against what this build
+// actually serves, in preference order (first is the default choice).
+type CapsProfile struct {
+	// Delivery is the recommended surface for this client family:
+	// "hls" or "progressive".
+	Delivery string `json:"delivery"`
+	// Progressive lists the output formats verified to play as
+	// progressive streams (including live chunked transcodes).
+	Progressive []string `json:"progressive"`
+	// HLS lists the output formats verified to play as HLS rungs.
+	HLS []string `json:"hls"`
+	// Basis states how these facts were established: the automated
+	// browser run or the documented manual checklist.
+	Basis string `json:"basis"`
+	// Notes carry client-version caveats a UI may need to surface.
+	Notes []string `json:"notes,omitempty"`
+}
+
+// deliveryProfiles is the client matrix distilled (docs/client-matrix.md
+// owns the per-cell evidence; this table must agree with it). Lists here
+// may name formats a build does not register; buildCaps filters them so
+// /caps never advertises more than the build serves.
+var deliveryProfiles = map[string]CapsProfile{
+	// Web players driving hls.js over MSE, and browser <audio> for
+	// progressive. Verified in Chromium by scripts/client-e2e.mjs
+	// (nightly); ALAC is absent because non-Safari browsers ship no
+	// ALAC decoder.
+	"hls-js": {
+		Delivery:    "hls",
+		Progressive: []string{"opus", "flac", "mp3", "aac", "wav"},
+		HLS:         []string{"opus", "flac", "aac"},
+		Basis:       "automated: hls.js + <audio> in Chromium (make client-e2e, nightly)",
+	},
+	// AVPlayer and Safari. HLS is Apple's own guaranteed-supported
+	// path (fMP4 for FLAC/ALAC/Opus per the HLS authoring spec);
+	// progressive live transcodes are chunked with no Content-Length,
+	// and AVPlayer's tolerance for that is a per-release manual
+	// checklist cell, so the recommendation steers to HLS.
+	"apple-native": {
+		Delivery:    "hls",
+		Progressive: []string{"aac", "mp3", "flac", "alac", "opus"},
+		HLS:         []string{"aac", "alac", "flac", "opus"},
+		Basis:       "vendor-documented + manual checklist (docs/client-matrix.md)",
+		Notes: []string{
+			"hls opus needs iOS/tvOS 17 or macOS 14",
+			"progressive opus (Ogg) needs Safari/iOS 18.4",
+			"progressive live transcodes pending checklist verification; prefer hls",
+		},
+	},
+	// Android Media3/ExoPlayer. No ALAC decoder exists on Android.
+	"android-exoplayer": {
+		Delivery:    "hls",
+		Progressive: []string{"opus", "flac", "mp3", "aac", "wav"},
+		HLS:         []string{"opus", "flac", "aac"},
+		Basis:       "vendor-documented + manual checklist (docs/client-matrix.md)",
+	},
+	// Desktop players on libmpv/ffmpeg (mpv, VLC, media_kit): every
+	// output plays; progressive is preferred on LAN (simpler, full
+	// quality, instant seek via t=).
+	"desktop-mpv": {
+		Delivery:    "progressive",
+		Progressive: []string{"opus", "flac", "mp3", "aac", "alac", "wav"},
+		HLS:         []string{"opus", "flac", "aac", "alac"},
+		Basis:       "manual checklist (docs/client-matrix.md)",
+	},
 }
 
 // CapsOutput is one writable format.
@@ -208,13 +299,38 @@ func buildCaps(jobs, uploads, pid bool) Caps {
 			Uploads:     uploads,
 			PID:         pid,
 		},
-		Profiles: map[string]any{},
+		Profiles: make(map[string]CapsProfile, len(deliveryProfiles)),
 	}
 	for _, id := range format.Decoders() {
 		caps.Decoders = append(caps.Decoders, string(id))
 	}
+	live := make(map[string]bool)
 	for _, o := range waxflow.Outputs() {
 		caps.Outputs = append(caps.Outputs, CapsOutput{Name: o.Name, Live: o.Live, Exts: o.Exts})
+		if o.Live {
+			live[o.Name] = true
+		}
+	}
+	segmented := make(map[string]bool)
+	for _, name := range caps.Delivery.HLSFormats {
+		segmented[name] = true
+	}
+	for name, p := range deliveryProfiles {
+		p.Progressive = keep(p.Progressive, live)
+		p.HLS = keep(p.HLS, segmented)
+		caps.Profiles[name] = p
 	}
 	return caps
+}
+
+// keep filters names to those present in the capability set, preserving
+// preference order.
+func keep(names []string, in map[string]bool) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if in[n] {
+			out = append(out, n)
+		}
+	}
+	return out
 }

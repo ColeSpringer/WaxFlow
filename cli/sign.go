@@ -53,7 +53,7 @@ minted here dies with 410 source-changed if the file changes.`,
 				return err
 			}
 			defer closeResolver()
-			f, err := resolver.Resolve(src)
+			f, err := resolver.Resolve(cmd.Context(), src)
 			if err != nil {
 				return err
 			}

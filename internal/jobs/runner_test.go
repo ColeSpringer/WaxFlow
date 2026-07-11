@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"math"
 	"os"
@@ -62,7 +63,7 @@ func openLib(t *testing.T) (res *source.Roots, ref, srcID string) {
 // size-mtimeNS form, the value a creating server would pin.
 func pinID(t *testing.T, res source.Resolver, ref string) string {
 	t.Helper()
-	src, err := res.Resolve(ref)
+	src, err := res.Resolve(context.Background(), ref)
 	if err != nil {
 		t.Fatal(err)
 	}

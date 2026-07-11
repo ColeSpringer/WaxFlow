@@ -89,10 +89,35 @@ when a codec's quality changes:
    the target bit rate. A regression that the objective gate misses but a
    listener catches blocks the release and re-baselines the metric.
 
+## Fuzzing posture
+
+Every parser (demuxers, packet decoders, probe, the HLS descriptor, the
+signature verifier) carries a native `Fuzz*` target; findings become
+committed regression corpus entries under `testdata/fuzz/`. The layout
+is OSS-Fuzz-compatible (native Go fuzzing, no external fixtures needed
+to build the targets), so onboarding to OSS-Fuzz needs only the
+standard `compile_native_go_fuzzer` build script listing the targets.
+Budgets: CI smoke 45 s/target, nightly 20 m/target, and a release soak
+via `make fuzz FUZZTIME=160m` (about 72 hours of aggregate fuzzing
+across the ~27 targets; run it on a spare box, not CI).
+
 ## Release checklist (grows over time)
 
-- [ ] `make check` green (fmt, vet, functional + race passes, depcheck)
+- [ ] `make check` green (fmt, vet, functional + race passes, the cli /
+      resolver / oracletest module suites, depcheck)
 - [ ] `THIRD-PARTY-NOTICES.md` audited against the reference ledger
+- [ ] Root `go.mod` require block still empty (the v1.0 structural
+      guarantee; new dependencies belong in the cli, resolver, or
+      oracletest modules)
+- [ ] `make soak` on a quiet box: streaming soak clean (no goroutine or
+      heap growth), TTFA p95 targets met; update the README performance
+      section if the numbers moved
+- [ ] Fuzz soak run for a release that touched any parser
+      (`make fuzz FUZZTIME=160m`, see the fuzzing posture above)
+- [ ] Client matrix re-run for a release that touched delivery:
+      `make client-e2e` (automated browser cells) plus the manual
+      checklists in docs/client-matrix.md (Apple, ExoPlayer, mpv);
+      update the /caps profiles if any cell changed
 - [ ] `resolver/go.mod`: if WaxBin has rebased onto current waxlabel, drop
       the waxlabel `replace` pin (comment in that file explains it) and
       bump the waxbin pseudo-version

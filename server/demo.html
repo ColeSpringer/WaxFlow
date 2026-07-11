@@ -20,7 +20,7 @@
 <h1>WaxFlow demo (dev mode)</h1>
 <p>Mints a signed URL via <code>POST /sign</code> and plays it. Direct
 play (format auto on an untransformed source) serves original bytes with
-full range support; anything else streams a live WAV transcode where the
+full range support; anything else streams a live transcode where the
 <code>t=</code> box seeks sample-exact.</p>
 
 <label>API key <input id="key" placeholder="X-API-Key value (leave empty on a keyless daemon)"></label>
@@ -29,8 +29,12 @@ full range support; anything else streams a live WAV transcode where the
   <div><label>Format
     <select id="format">
       <option value="auto">auto (direct play)</option>
-      <option value="wav">wav (transcode)</option>
-      <option value="flac">flac (lossless transcode)</option>
+      <option value="opus">opus (Ogg)</option>
+      <option value="mp3">mp3</option>
+      <option value="aac">aac (fMP4)</option>
+      <option value="flac">flac (lossless)</option>
+      <option value="alac">alac (lossless fMP4)</option>
+      <option value="wav">wav</option>
     </select></label></div>
   <div><label>Start at t= seconds <input id="t" type="number" min="0" step="0.001" value="0"></label></div>
 </div>
@@ -48,6 +52,7 @@ take the master URL natively.</p>
   <div><label>HLS format
     <select id="hlsFormat">
       <option value="opus">opus</option>
+      <option value="aac">aac</option>
       <option value="flac">flac (lossless)</option>
       <option value="alac">alac (lossless)</option>
     </select></label></div>

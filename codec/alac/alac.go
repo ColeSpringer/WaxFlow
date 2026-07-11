@@ -19,12 +19,12 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-// CookieLen is the byte length of an ALACSpecificConfig (the magic cookie),
-// the blob carried in container.Track.CodecConfig.
 // Version is the decoder's cache-key version constant (ADR-0004): bump on
 // any change that alters decoded samples.
 const Version = "alac-dec-1"
 
+// CookieLen is the byte length of an ALACSpecificConfig (the magic cookie),
+// the blob carried in container.Track.CodecConfig.
 const CookieLen = 24
 
 // maxFrameLength bounds a packet's declared sample count, which sizes the

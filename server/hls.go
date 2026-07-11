@@ -96,7 +96,7 @@ func (s *Server) prepareHLS(r *http.Request) (*hlsRequest, error) {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			"this URL is per-variant; the bitrates ladder belongs to master.m3u8")
 	}
-	src, err := s.resolver.Resolve(desc.Src)
+	src, err := s.resolver.Resolve(r.Context(), desc.Src)
 	if err != nil {
 		return nil, err
 	}
@@ -266,13 +266,13 @@ func (s *Server) handleHLSMaster(w http.ResponseWriter, r *http.Request) {
 		for k := range q {
 			params[k] = q.Get(k)
 		}
-		if desc, _, err = s.mintHLSDescriptor(params); err != nil {
+		if desc, _, err = s.mintHLSDescriptor(r.Context(), params); err != nil {
 			s.writeError(w, err)
 			return
 		}
 	}
 
-	src, err := s.resolver.Resolve(desc.Src)
+	src, err := s.resolver.Resolve(r.Context(), desc.Src)
 	if err != nil {
 		s.writeError(w, err)
 		return
@@ -484,7 +484,7 @@ func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64,
 func (s *Server) runHLSWorker(ctx context.Context, ref string, id source.Identity, ext string,
 	opts waxflow.TranscodeOptions, plan *waxflow.SegmentPlan, variant *cache.Variant,
 	start int64, notify func(int64)) error {
-	src, err := s.resolver.Resolve(ref)
+	src, err := s.resolver.Resolve(ctx, ref)
 	if err != nil {
 		return err
 	}
@@ -524,7 +524,7 @@ func (s *Server) runHLSWorker(ctx context.Context, ref string, id source.Identit
 // own validation, so mint-time junk is rejected exactly like
 // playback-time junk. It also returns the source duration in seconds
 // (-1 unknown) for the TTL policy.
-func (s *Server) mintHLSDescriptor(params map[string]string) (hls.Descriptor, float64, error) {
+func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string) (hls.Descriptor, float64, error) {
 	bad := func(format string, args ...any) (hls.Descriptor, float64, error) {
 		return hls.Descriptor{}, 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(format, args...))
 	}
@@ -583,7 +583,7 @@ func (s *Server) mintHLSDescriptor(params map[string]string) (hls.Descriptor, fl
 		return hls.Descriptor{}, 0, err
 	}
 
-	f, err := s.resolver.Resolve(d.Src)
+	f, err := s.resolver.Resolve(ctx, d.Src)
 	if err != nil {
 		return hls.Descriptor{}, 0, err
 	}

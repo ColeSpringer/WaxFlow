@@ -124,14 +124,14 @@ func (f *fakeCatalog) commit(rows ...model.Change) {
 // nextStub records delegated refs.
 type nextStub struct{ refs []string }
 
-func (n *nextStub) Resolve(ref string) (*source.File, error) {
+func (n *nextStub) Resolve(_ context.Context, ref string) (*source.File, error) {
 	n.refs = append(n.refs, ref)
 	return nil, waxerr.New(waxerr.CodeNotFound, "stub: "+ref)
 }
 
 // newTestCatalog wires a Catalog over the fake exactly as Open does,
 // minus waxbin.Open and the background loop.
-func newTestCatalog(t *testing.T, f *fakeCatalog, next source.Resolver, maxBytes int64) *Catalog {
+func newTestCatalog(t *testing.T, f catalog, next source.Resolver, maxBytes int64) *Catalog {
 	t.Helper()
 	if next == nil {
 		next, _ = source.OpenRoots(nil, 0)
@@ -181,7 +181,7 @@ func TestResolveCachesAndDelegates(t *testing.T) {
 	next := &nextStub{}
 	c := newTestCatalog(t, fake, next, 0)
 
-	f, err := c.Resolve("pid:" + string(pid))
+	f, err := c.Resolve(context.Background(), "pid:"+string(pid))
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestResolveCachesAndDelegates(t *testing.T) {
 	}
 
 	// Second resolve is a cache hit: no catalog query.
-	f2, err := c.Resolve("pid:" + string(pid))
+	f2, err := c.Resolve(context.Background(), "pid:"+string(pid))
 	if err != nil {
 		t.Fatalf("cached Resolve: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestResolveCachesAndDelegates(t *testing.T) {
 	}
 
 	// Non-pid references delegate untouched.
-	if _, err := c.Resolve("lib/album/track.flac"); err == nil {
+	if _, err := c.Resolve(context.Background(), "lib/album/track.flac"); err == nil {
 		t.Fatal("stub next should refuse")
 	}
 	if len(next.refs) != 1 || next.refs[0] != "lib/album/track.flac" {
@@ -209,16 +209,16 @@ func TestResolveCachesAndDelegates(t *testing.T) {
 	}
 
 	// Malformed and unknown pids map onto the envelope codes.
-	_, err = c.Resolve("pid:not-a-ulid")
+	_, err = c.Resolve(context.Background(), "pid:not-a-ulid")
 	wantCode(t, err, waxerr.CodeInvalidRequest)
-	_, err = c.Resolve("pid:" + string(model.NewPID()))
+	_, err = c.Resolve(context.Background(), "pid:"+string(model.NewPID()))
 	wantCode(t, err, waxerr.CodeNotFound)
 
 	// A failing catalog is catalog-unavailable, never a silent 404.
 	fake.mu.Lock()
 	fake.getErr = errors.New("disk on fire")
 	fake.mu.Unlock()
-	_, err = c.Resolve("pid:" + string(model.NewPID()))
+	_, err = c.Resolve(context.Background(), "pid:"+string(model.NewPID()))
 	wantCode(t, err, waxerr.CodeCatalogUnavailable)
 }
 
@@ -229,7 +229,7 @@ func TestResolveSizeCap(t *testing.T) {
 	fake.setItem(pid, model.NewPID(), path)
 	c := newTestCatalog(t, fake, nil, 8)
 
-	_, err := c.Resolve("pid:" + string(pid))
+	_, err := c.Resolve(context.Background(), "pid:"+string(pid))
 	wantCode(t, err, waxerr.CodePayloadTooLarge)
 }
 
@@ -244,7 +244,7 @@ func TestStalePathSelfHeals(t *testing.T) {
 	fake.setItem(pid, filePID, oldPath)
 	c := newTestCatalog(t, fake, nil, 0)
 
-	f, err := c.Resolve("pid:" + string(pid))
+	f, err := c.Resolve(context.Background(), "pid:"+string(pid))
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestStalePathSelfHeals(t *testing.T) {
 	}
 	fake.setItem(pid, filePID, newPath)
 
-	f, err = c.Resolve("pid:" + string(pid))
+	f, err = c.Resolve(context.Background(), "pid:"+string(pid))
 	if err != nil {
 		t.Fatalf("Resolve after rename: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestPollInvalidation(t *testing.T) {
 	}
 	c := newTestCatalog(t, fake, nil, 0)
 	for _, it := range items {
-		f, err := c.Resolve("pid:" + string(it.pid))
+		f, err := c.Resolve(context.Background(), "pid:"+string(it.pid))
 		if err != nil {
 			t.Fatalf("warm Resolve: %v", err)
 		}
@@ -331,7 +331,7 @@ func TestPollPagesToTheTail(t *testing.T) {
 	path := writeTemp(t, "t.wav", "x")
 	fake.setItem(pid, filePID, path)
 	c := newTestCatalog(t, fake, nil, 0)
-	f, err := c.Resolve("pid:" + string(pid))
+	f, err := c.Resolve(context.Background(), "pid:"+string(pid))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,5 +469,68 @@ func TestFileRowInvalidatesAllSharingItems(t *testing.T) {
 	}
 	if len(c.byFile) != 0 {
 		t.Fatalf("byFile index not emptied: %v", c.byFile)
+	}
+}
+
+// blockingGetCatalog hangs every Get until its query context ends,
+// signaling on getting when a lookup is in flight.
+type blockingGetCatalog struct {
+	*fakeCatalog
+	getting chan struct{}
+}
+
+func (b *blockingGetCatalog) Get(ctx context.Context, _ model.PID) (*model.ItemView, error) {
+	select {
+	case b.getting <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestResolveHonorsCallerContext pins the v1.0 Resolver contract change:
+// a canceled request context aborts a hung catalog lookup instead of
+// waiting out queryTimeout.
+func TestResolveHonorsCallerContext(t *testing.T) {
+	b := &blockingGetCatalog{fakeCatalog: newFakeCatalog(), getting: make(chan struct{}, 1)}
+	c := newTestCatalog(t, b, nil, 0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := c.Resolve(ctx, "pid:"+string(model.NewPID()))
+	if err == nil {
+		t.Fatal("Resolve returned nil error from a canceled lookup")
+	}
+	if code := waxerr.CodeOf(err); code != waxerr.CodeCatalogUnavailable {
+		t.Fatalf("code = %q, want catalog-unavailable", code)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Resolve took %v; want prompt abort on the caller's deadline", elapsed)
+	}
+}
+
+// TestCloseAbortsHungResolve pins the other half of the bridge: Close
+// aborts an in-flight lookup even while the caller's context lives on.
+func TestCloseAbortsHungResolve(t *testing.T) {
+	b := &blockingGetCatalog{fakeCatalog: newFakeCatalog(), getting: make(chan struct{}, 1)}
+	c := newTestCatalog(t, b, nil, 0)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Resolve(context.Background(), "pid:"+string(model.NewPID()))
+		done <- err
+	}()
+	<-b.getting
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Resolve returned nil error after Close aborted it")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Resolve still hung 2s after Close; the query-context bridge is broken")
 	}
 }

@@ -43,11 +43,11 @@ type fakePIDResolver struct {
 	path string
 }
 
-func (f fakePIDResolver) Resolve(ref string) (*source.File, error) {
+func (f fakePIDResolver) Resolve(ctx context.Context, ref string) (*source.File, error) {
 	if strings.HasPrefix(ref, "pid:") {
 		return source.OpenLocal(ref, f.path, f.path)
 	}
-	return f.next.Resolve(ref)
+	return f.next.Resolve(ctx, ref)
 }
 
 func TestFlavorVersionOutput(t *testing.T) {

@@ -59,11 +59,13 @@ func New(baseURL, apiKey string, opts ...Option) (*Client, error) {
 // Wire types mirror the server's (docs/api.md); the golden fixtures pin
 // both sides against drift.
 
+// VersionInfo is the GET /version body.
 type VersionInfo struct {
 	SchemaVersion int    `json:"schemaVersion"`
 	Version       string `json:"version"`
 }
 
+// ProbeInfo is the GET /probe body.
 type ProbeInfo struct {
 	SchemaVersion int          `json:"schemaVersion"`
 	Container     string       `json:"container"`
@@ -84,6 +86,7 @@ type ProbeChapter struct {
 	Title        string  `json:"title,omitempty"`
 }
 
+// ProbeTrack is one stream in a ProbeInfo.
 type ProbeTrack struct {
 	ID              int     `json:"id"`
 	Codec           string  `json:"codec"`
@@ -97,21 +100,37 @@ type ProbeTrack struct {
 	Default         bool    `json:"default"`
 }
 
+// Caps is the GET /caps body: this daemon's tested capabilities.
 type Caps struct {
-	SchemaVersion int            `json:"schemaVersion"`
-	Inputs        []string       `json:"inputs"`
-	Decoders      []string       `json:"decoders"`
-	Outputs       []CapsOutput   `json:"outputs"`
-	Delivery      CapsDelivery   `json:"delivery"`
-	Profiles      map[string]any `json:"profiles"`
+	SchemaVersion int                    `json:"schemaVersion"`
+	Inputs        []string               `json:"inputs"`
+	Decoders      []string               `json:"decoders"`
+	Outputs       []CapsOutput           `json:"outputs"`
+	Delivery      CapsDelivery           `json:"delivery"`
+	Profiles      map[string]CapsProfile `json:"profiles"`
 }
 
+// CapsProfile is one named delivery profile: the playback capabilities
+// of a client family per the server's client matrix, in preference
+// order. Pick the profile matching the player stack instead of guessing
+// codecs.
+type CapsProfile struct {
+	Delivery    string   `json:"delivery"`
+	Progressive []string `json:"progressive"`
+	HLS         []string `json:"hls"`
+	Basis       string   `json:"basis"`
+	Notes       []string `json:"notes,omitempty"`
+}
+
+// CapsOutput is one writable format; Live means the progressive
+// /stream surface can serve it (false is jobs-only).
 type CapsOutput struct {
 	Name string   `json:"name"`
 	Live bool     `json:"live"`
 	Exts []string `json:"exts"`
 }
 
+// CapsDelivery flags the delivery surfaces the daemon serves.
 type CapsDelivery struct {
 	Progressive bool `json:"progressive"`
 	HLS         bool `json:"hls"`
@@ -122,19 +141,24 @@ type CapsDelivery struct {
 	PID bool `json:"pid"`
 }
 
+// SignRequest is the POST /sign body; Params carries the playback
+// query parameters (src required).
 type SignRequest struct {
 	Path       string            `json:"path,omitempty"`
 	Params     map[string]string `json:"params"`
 	TTLSeconds int64             `json:"ttlSeconds,omitempty"`
 }
 
+// SignResponse is the POST /sign response: a ready-to-fetch relative
+// URL and its expiry.
 type SignResponse struct {
 	SchemaVersion int    `json:"schemaVersion"`
 	URL           string `json:"url"`
 	Exp           int64  `json:"exp"`
 }
 
-type CacheStats struct {
+// CacheStatsResponse is the GET /cache/stats body.
+type CacheStatsResponse struct {
 	SchemaVersion int    `json:"schemaVersion"`
 	Entries       int    `json:"entries"`
 	Bytes         int64  `json:"bytes"`
@@ -142,7 +166,8 @@ type CacheStats struct {
 	Misses        uint64 `json:"misses"`
 }
 
-type CacheGCResult struct {
+// CacheGCResponse is the POST /cache/gc body.
+type CacheGCResponse struct {
 	SchemaVersion int   `json:"schemaVersion"`
 	Removed       int   `json:"removed"`
 	FreedBytes    int64 `json:"freedBytes"`
@@ -190,8 +215,8 @@ func (c *Client) Sign(ctx context.Context, req SignRequest) (*SignResponse, erro
 }
 
 // CacheStats fetches cache shape and hit counters.
-func (c *Client) CacheStats(ctx context.Context) (*CacheStats, error) {
-	var v CacheStats
+func (c *Client) CacheStats(ctx context.Context) (*CacheStatsResponse, error) {
+	var v CacheStatsResponse
 	if err := c.getJSON(ctx, "/cache/stats", nil, &v); err != nil {
 		return nil, err
 	}
@@ -199,8 +224,8 @@ func (c *Client) CacheStats(ctx context.Context) (*CacheStats, error) {
 }
 
 // CacheGC runs eviction now.
-func (c *Client) CacheGC(ctx context.Context) (*CacheGCResult, error) {
-	var v CacheGCResult
+func (c *Client) CacheGC(ctx context.Context) (*CacheGCResponse, error) {
+	var v CacheGCResponse
 	if err := c.postJSON(ctx, "/cache/gc", nil, &v); err != nil {
 		return nil, err
 	}

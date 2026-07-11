@@ -15,8 +15,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/colespringer/waxflow/cli/label"
 	"github.com/colespringer/waxflow/internal/config"
-	"github.com/colespringer/waxflow/internal/meta/label"
 	"github.com/colespringer/waxflow/internal/sign"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/source"

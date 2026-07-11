@@ -1,6 +1,7 @@
 package source
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -29,7 +30,7 @@ func newRoots(t *testing.T, maxBytes int64) (*Roots, string) {
 
 func TestResolve(t *testing.T) {
 	r, dir := newRoots(t, 0)
-	f, err := r.Resolve("lib/sub/a.wav")
+	f, err := r.Resolve(context.Background(), "lib/sub/a.wav")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +81,7 @@ func TestResolveErrors(t *testing.T) {
 		{"weird:thing", waxerr.CodeUnsupportedSource},
 	}
 	for _, tc := range cases {
-		f, err := r.Resolve(tc.ref)
+		f, err := r.Resolve(context.Background(), tc.ref)
 		if err == nil {
 			f.Close()
 			t.Errorf("Resolve(%q) succeeded, want %s", tc.ref, tc.code)
@@ -95,14 +96,14 @@ func TestResolveErrors(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "sub", "b:c.wav"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	f, err := r.Resolve("lib/sub/b:c.wav")
+	f, err := r.Resolve(context.Background(), "lib/sub/b:c.wav")
 	if err != nil {
 		t.Fatalf("colon-in-path ref failed: %v", err)
 	}
 	f.Close()
 
 	// Within-root symlinks stay allowed (in-place libraries use them).
-	f, err = r.Resolve("lib/inside")
+	f, err = r.Resolve(context.Background(), "lib/inside")
 	if err != nil {
 		t.Fatalf("within-root symlink failed: %v", err)
 	}
@@ -111,7 +112,7 @@ func TestResolveErrors(t *testing.T) {
 
 func TestResolveSizeCap(t *testing.T) {
 	r, _ := newRoots(t, 4)
-	_, err := r.Resolve("lib/sub/a.wav") // 8 bytes > 4-byte cap
+	_, err := r.Resolve(context.Background(), "lib/sub/a.wav") // 8 bytes > 4-byte cap
 	if got := waxerr.CodeOf(err); got != waxerr.CodePayloadTooLarge {
 		t.Fatalf("code = %s (%v), want payload-too-large", got, err)
 	}

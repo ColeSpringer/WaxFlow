@@ -11,7 +11,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/colespringer/waxflow/internal/cli"
+	"github.com/colespringer/waxflow/cli"
 	"github.com/colespringer/waxflow/internal/config"
 	"github.com/colespringer/waxflow/resolver"
 	"github.com/colespringer/waxflow/source"
@@ -57,10 +57,10 @@ func openResolver(cfg config.Config, next source.Resolver, logger *slog.Logger, 
 // noCatalog answers pid refs precisely when no catalog is configured.
 type noCatalog struct{ next source.Resolver }
 
-func (n noCatalog) Resolve(ref string) (*source.File, error) {
+func (n noCatalog) Resolve(ctx context.Context, ref string) (*source.File, error) {
 	if strings.HasPrefix(ref, "pid:") {
 		return nil, waxerr.New(waxerr.CodeUnsupportedSource,
 			"source: pid references need catalogDB configured")
 	}
-	return n.next.Resolve(ref)
+	return n.next.Resolve(ctx, ref)
 }

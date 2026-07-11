@@ -44,18 +44,24 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
       - run: make depcheck
 
-  # The nested resolver module (the WaxBin flavor): ./... at the root
-  # stops at its go.mod boundary, so it builds and tests here. The suite
-  # includes the real-WaxBin integration tests (the catalog is authored
-  # through the waxbin library over temp files; no external services).
-  resolver:
+  # The nested modules: ./... at the root stops at their go.mod
+  # boundaries, so each builds and tests here. cli carries the cobra
+  # CLI plus the waxlabel mapper, resolver the WaxBin flavor (its suite
+  # includes the real-WaxBin integration tests; the catalog is authored
+  # through the waxbin library over temp files, no external services),
+  # and oracletest the third-party-oracle tests that keep the root
+  # module's require block empty.
+  nested-modules:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+      - run: make test-cli
       - run: make test-resolver
+      - run: make test-oracle
+      - run: make build
       - run: make build-waxbin
 
   cross-compile:
@@ -71,6 +77,8 @@ jobs:
           for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
             GOOS="${target%/*}" GOARCH="${target#*/}" CGO_ENABLED=0 \
               go build -trimpath ./...
+            GOOS="${target%/*}" GOARCH="${target#*/}" CGO_ENABLED=0 \
+              go build -C cli -trimpath ./...
             echo "ok $target"
           done
 

@@ -43,7 +43,7 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, waxerr.New(waxerr.CodeInvalidRequest, "src is required"))
 		return
 	}
-	f, err := s.resolver.Resolve(req.Src)
+	f, err := s.resolver.Resolve(r.Context(), req.Src)
 	if err != nil {
 		s.writeError(w, err)
 		return
@@ -54,7 +54,7 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, ProbeJSON(info, s.readMeta(r.Context(), f, false)))
+	s.writeJSON(w, http.StatusOK, ProbeJSON(info, probeMetadata(s.readMeta(r.Context(), f, false))))
 }
 
 func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
@@ -94,7 +94,7 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, err)
 			return
 		}
-		f, err := s.resolver.Resolve(p.src)
+		f, err := s.resolver.Resolve(r.Context(), p.src)
 		if err != nil {
 			s.writeError(w, err)
 			return
@@ -111,7 +111,7 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 		// The HLS surface signs one URL: master. Its children (media
 		// playlists, init, segments) are signed by the daemon as it
 		// emits them, inheriting this URL's expiry.
-		desc, d, err := s.mintHLSDescriptor(req.Params)
+		desc, d, err := s.mintHLSDescriptor(r.Context(), req.Params)
 		if err != nil {
 			s.writeError(w, err)
 			return
@@ -120,7 +120,7 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 		duration = d
 	case "/art", "/lyrics":
 		var err error
-		if q, err = s.signMetaPath(req.Params); err != nil {
+		if q, err = s.signMetaPath(r.Context(), req.Params); err != nil {
 			s.writeError(w, err)
 			return
 		}

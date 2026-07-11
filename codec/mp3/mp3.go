@@ -59,13 +59,33 @@ func (v MPEGVersion) String() string {
 	}
 }
 
+// ChannelMode is the header's 2-bit channel mode field; ModeExt
+// qualifies joint stereo.
+type ChannelMode uint8
+
 // Channel modes (header mode field).
 const (
-	ModeStereo = 0
-	ModeJoint  = 1
-	ModeDual   = 2
-	ModeMono   = 3
+	ModeStereo ChannelMode = 0
+	ModeJoint  ChannelMode = 1
+	ModeDual   ChannelMode = 2
+	ModeMono   ChannelMode = 3
 )
+
+// String names the mode for diagnostics.
+func (m ChannelMode) String() string {
+	switch m {
+	case ModeStereo:
+		return "stereo"
+	case ModeJoint:
+		return "joint-stereo"
+	case ModeDual:
+		return "dual-channel"
+	case ModeMono:
+		return "mono"
+	default:
+		return fmt.Sprintf("ChannelMode(%d)", uint8(m))
+	}
+}
 
 // Header is a parsed MPEG audio frame header. Only Layer III headers
 // parse; Layer I/II carry the same sync but a different frame layout, and
@@ -79,8 +99,8 @@ type Header struct {
 	Rate int
 	// Channels is 1 or 2.
 	Channels int
-	// Mode is the raw channel mode; ModeExt qualifies joint stereo.
-	Mode    int
+	// Mode is the channel mode; ModeExt qualifies joint stereo.
+	Mode    ChannelMode
 	ModeExt int
 	// Bitrate is the frame's bit rate in bits per second, 0 for the free
 	// format (frame size fixed by the stream, not the header).
@@ -158,7 +178,7 @@ func ParseHeader(b []byte) (Header, error) {
 	}
 	h.Padding = b[2]&2 != 0
 
-	h.Mode = int(b[3] >> 6)
+	h.Mode = ChannelMode(b[3] >> 6)
 	h.ModeExt = int(b[3] >> 4 & 3)
 	h.Channels = 2
 	if h.Mode == ModeMono {

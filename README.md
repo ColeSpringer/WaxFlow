@@ -12,73 +12,71 @@ so anyone can import them.
 
 ## Status
 
-Pre-1.0. The audio core is in: the planar PCM model (`audio`), the
-codec/container interfaces, the PCM codec, WAV (including RF64/BW64 read
-and automatic RF64 write past the 4 GiB mark) and AIFF/AIFF-C containers,
-format probing with sample-exact seeking, the engine facade (`New`,
-`Probe`, `Transcode`, `OpenStream`), and the test harness (ffmpeg as
-differential oracle, never a runtime dependency). FLAC decoding is in:
-the `codec/flac` decoder (RFC 9639, bit-exact on the complete IETF
-decoder testbench), the native FLAC container with checksum-confirmed
-frame boundaries and SEEKTABLE/bisection seeking, and Ogg demuxing with
-the Ogg-FLAC mapping. The DSP core is in: a streaming Kaiser
-windowed-sinc polyphase resampler (`hq`: alias rejection >= 110 dB with
-passband ripple <= 0.05 dB out to 0.91x Nyquist; `fast`: ~70 dB for
-constrained hosts), energy-normalized channel downmix, gain with a
-look-ahead true-peak limiter, TPDF and noise-shaped dither, all
-deterministic and assembled by a pull-based stage chain that inserts
-only the nodes a conversion needs. Local `waxflow probe` and `waxflow
-transcode` work today, the latter with `--rate`, `--channels`, `--bits`,
-`--gain`, `--resample-profile`, `--dither`, and `--flac-level`; WAV/AIFF
-round-trips are bit-exact by construction, FLAC and Ogg-FLAC decode
-bit-exactly, and resampled output is level-matched against ffmpeg's
-soxr, all verified against ffmpeg. FLAC encoding is in: `codec/flac`
-gained a from-scratch encoder (fixed and LPC prediction, full stereo
-decorrelation search, Rice partition optimization, levels 0-8 inside
-the streamable subset) and `container/flacn` a muxer (streaming form on
-a plain writer; exact STREAMINFO with MD5 signature plus a SEEKTABLE on
-seekable output). The whole IETF suite re-encodes losslessly, `flac -t`
-accepts every output, and level 5 lands within the pinned size gate of
-`flac -5` (currently 0.996x on the suite). MP3 decoding is in: a
-from-scratch `codec/mp3` Layer III decoder (MPEG-1/2/2.5, both stereo
-modes, bit reservoir) and the `container/mpa` elementary-stream demuxer
-(ID3 handling, Xing/Info/VBRI metadata, LAME gapless trims, and a lazy
-exact frame index that makes VBR seeking sample-exact and persists
-across sessions via the cache's index sidecar). Decoded output sits
-around 1e-7 RMS of ffmpeg's float decoder against the 1e-4 gate, the
-LAME gapless sample-count invariant holds end to end, and seeks land
-bit-identical to a linear decode at 100 random offsets in VBR streams.
-MP3 encoding is in: a from-scratch baseline CBR Layer III encoder
-(polyphase analysis filterbank and forward MDCT that invert the decoder
-exactly, a global-gain rate-control loop, Huffman table selection, and a
-bit reservoir; long blocks only, from ISO 11172-3 and textbooks) plus a
-`container/mpa` muxer whose leading Xing/Info frame carries a LAME-format
-gapless tag. Output decodes in ffmpeg, go-mp3, and our own decoder; the
-gapless round-trip holds (decoded length equals the source length) across
-sample rates and channel counts; encoding runs 68-111x realtime against
-the 40x floor; and the first-lossy-encoder quality harness scores it at or
-above the Shine baseline on every corpus track via a ported ODG-proxy
-(the nightly report the quality gates name).
+**v1.0 feature-complete.** Everything below is tested, capability-gated
+(`/caps` never advertises what does not work), and held to the pinned
+gates in [docs/quality-gates.md](docs/quality-gates.md).
 
-The service is live: the daemon streams progressive audio (`GET
-/stream`) with a direct-play/transcode decision ladder, sample-exact
-`t=` seeking, short-lived HMAC-signed playback URLs pinned to source
-identity, a write-through transcode cache with read-behind delivery
-(slow clients never backpressure the encoder; a full cache disk degrades
-to ring-fed streaming instead of killing playback), admission control,
-Prometheus metrics, and a full API contract in
-[docs/api.md](docs/api.md). WAV, FLAC, and MP3 streams live-transcode
-today; compliant sources direct-play, and each new encoder widens
-`format=`. HLS delivery (`/hls/*`) serves CMAF/fMP4 segments of Opus,
-FLAC, and ALAC from stateless signed URLs: VOD playlists with exact
-segment counts, a bitrate ladder, incremental segment caching, and
-seek-restarted variant workers primed to keep the decode timeline exact
-(validation layers in [docs/hls-validation.md](docs/hls-validation.md)).
-With MP3 encoding landed, the service is broadly useful: any supported
-source streams as MP3 to essentially every player. Unfinished
-codecs stay unregistered, so probe and `/caps` never advertise what
-doesn't work. Quality bars are pinned in
-[docs/quality-gates.md](docs/quality-gates.md).
+- **Encoders** (all from scratch, stdlib-only): Opus (full SILK, hybrid,
+  and CELT with the tonality analyser; at quality parity with libopus
+  on the reference `opus_compare` metric across music and speech
+  corpora), MP3 (psychoacoustic model, joint stereo, CBR and VBR, LAME
+  gapless tag), AAC-LC (window switching, TNS, M/S, two-loop
+  quantization; at parity with ffmpeg's native encoder on the ODG-proxy
+  gate), FLAC (levels 0-8, smaller than `flac -5` at level 5), ALAC
+  (bit-exact round trip), and WAV/AIFF PCM.
+- **Decoders / inputs**: FLAC (bit-exact on the IETF suite), WAV, AIFF,
+  MP3, AAC-LC and ALAC in MP4/M4A/M4B, ADTS, Opus (all RFC 6716/8251
+  conformance vectors pass), Vorbis, Ogg, Matroska/WebM. Sample-exact
+  seeking everywhere, gapless honored per format (LAME tag, iTunSMPB,
+  edit lists, Ogg pre-skip/end-trim, Matroska CodecDelay).
+- **DSP**: Kaiser windowed-sinc resampling (`hq`/`fast`), BS.775
+  downmix, gain with true-peak limiting, TPDF and shaped dither, EBU
+  R128 / BS.1770-4 loudness (differential-verified against ffmpeg).
+- **Service**: progressive streaming with a direct-play/transmux/
+  transcode ladder, sample-exact `t=` seeks, HMAC-signed URLs pinned to
+  source identity, a write-through cache with read-behind delivery and
+  full ranges on completed entries, HLS (CMAF/fMP4, stateless signed
+  URLs, bitrate ladders, byte-identical segment regeneration), async
+  jobs with restart safety, uploads, loudness analysis with ReplayGain
+  tagging, metadata passthrough (tags, chapters, cover art, lyrics),
+  admission control, Prometheus metrics, named client delivery profiles
+  in `/caps`, and a full API contract in [docs/api.md](docs/api.md).
+- **Structure**: the root module is the importable, dependency-free
+  audio library; its `go.mod` has an **empty require block**, so
+  importing `codec/flac` (or any public package) pulls in nothing.
+  The CLI/daemon binary lives in the nested `cli/` module (cobra +
+  waxlabel), the WaxBin flavor in `resolver/`, and the tests that need
+  third-party oracles in `oracletest/`.
+
+## Performance
+
+Measured by the committed harnesses on the reference dev box (12-core
+x86-64, Linux, loopback HTTP; `server/load_soak_test.go`, re-run per
+release with `make soak`):
+
+- **Time to first audio** (`TestTTFAPercentiles`, n=50): cold transcode
+  (also the cost of every `t=` seek, since each offset is its own cache
+  entry) p50 0.6 ms / p95 0.9 ms; warm (completed cache entry) p50
+  0.21 ms / p95 0.24 ms; seek into a 60 s FLAC source (bisection seek +
+  pipeline start) p50 1.7 ms / p95 2.7 ms. Targets: p95 <300 ms warm,
+  <800 ms cold, met with three orders of headroom on this box; network
+  and disk latency dominate in deployment.
+- **HLS seek-to-segment** (variant-worker restart): worst 49 ms in the
+  restart-heavy e2e fetch pattern, p95 well under the 1 s target.
+- **Load** (`TestLoadMixedTraffic`): 6,350 req/s of mixed live
+  transcodes, seeks, direct play, probes, and HLS over 8 concurrent
+  workers with zero malformed responses (503s under saturation carry
+  the honest `overloaded` envelope).
+- **Streaming soak** (`TestStreamingSoak`, goroutine/heap leak watch):
+  918k requests over a sustained run with full reads, mid-body client
+  disconnects, seeks, and HLS fetches; goroutines returned to baseline
+  and heap stayed flat (~1.3 MiB). The nightly job runs a 20-minute
+  soak; `make soak` runs 30 minutes locally.
+- **Codec throughput** (per core, `make bench`): every codec clears its
+  pinned floor in [docs/quality-gates.md](docs/quality-gates.md) by a
+  wide margin (Opus encode 55-67x realtime, decode 274-514x; MP3 encode
+  50-69x, decode ~200x; FLAC encode ~200x, decode 490-870x; AAC encode
+  20-68x, decode ~240x).
 
 ## Quick start
 
@@ -147,6 +145,11 @@ Precedence: **flag > `WAXFLOW_*` env > JSON config file > default**
 - `waxflow sign --src lib/a.flac`: mint a signed playback URL offline
   (ADR-0003; uses the same secret and roots the daemon holds)
 - `waxflow cache stats|gc`: inspect or evict a running daemon's cache
+- `waxflow doctor`: check the local environment a daemon needs: config
+  resolves, every root opens and reads, the cache/data/scratch dirs
+  accept writes, the WaxBin catalog opens (flavor builds), a quick
+  self-bench transcodes faster than realtime, and the absence of ffmpeg
+  is confirmed to be fine (`--json` for the machine shape)
 - `waxflow ping`: liveness probe; the container HEALTHCHECK
 - `waxflow version`: version and build info
 - `waxflow exit-codes`: print the documented exit-code contract (0 ok,
@@ -191,9 +194,14 @@ distributed cache; two-pass loudness on live streams (jobs only).
 ## Development
 
 ```sh
-make check           # gofmt + vet + test (functional) + test-race + depcheck
-make test            # full suite, no race detector (the fast default loop)
-make test-race       # race detector over the whole tree (heavy numeric suites self-skip)
+make check           # gofmt + vet + test + test-race + nested modules + depcheck
+make test            # root-module suite, no race detector (the fast default loop)
+make test-race       # race detector over the root module (heavy numeric suites self-skip)
+make test-cli        # the cli module (cobra CLI + waxlabel mapper), race included
+make test-resolver   # the WaxBin resolver flavor module, race included
+make test-oracle     # the third-party-oracle tests (waxlabel round trips, go-mp3)
+make soak            # 30m streaming soak + load + TTFA percentiles (nightly-scale)
+make client-e2e      # browser client-matrix cells via Playwright (gated tooling)
 make docker          # local image build
 make verify-vectors  # fetch SHA-256-pinned conformance vectors (CI-cached)
 make goldens         # regenerate muxer golden files (review the diff)

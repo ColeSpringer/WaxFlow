@@ -18,6 +18,7 @@
 package source
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -103,13 +104,12 @@ var _ container.Source = (*File)(nil)
 // they do not serve with waxerr.CodeUnsupportedSource; unknown names and
 // paths carry waxerr.CodeNotFound.
 //
-// Resolve carries no context: root and upload resolution are local file
-// opens. Implementations that reach further (the WaxBin catalog
-// resolver) bound their own queries with internal timeouts, at the cost
-// of not observing request cancellation, a known limitation of this
-// signature.
+// ctx governs the resolution only, not the returned File: local file
+// opens (roots, uploads) may ignore it, while implementations that
+// reach further (the WaxBin catalog resolver) derive their lookup
+// deadlines from it so a canceled request stops waiting.
 type Resolver interface {
-	Resolve(ref string) (*File, error)
+	Resolve(ctx context.Context, ref string) (*File, error)
 }
 
 // scheme splits a reference of the form "<scheme>:<rest>" where the colon

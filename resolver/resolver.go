@@ -38,8 +38,10 @@ const DefaultPollInterval = 5 * time.Second
 const (
 	// maxEntries bounds the PID-to-path cache; oldest-out beyond it.
 	maxEntries = 4096
-	// queryTimeout bounds every catalog query issued without a caller
-	// context (Resolve has none; the interface is Resolve(ref)).
+	// queryTimeout is the upper bound on any single catalog query: the
+	// poll loop has no caller context, and a Resolve caller's context
+	// may be unbounded (a long download), which must not pin a hung
+	// database query for its whole life.
 	queryTimeout = 10 * time.Second
 )
 
@@ -212,11 +214,13 @@ func (c *Catalog) initCursor(ctx context.Context) error {
 }
 
 // Resolve implements source.Resolver: pid refs against the catalog,
-// everything else through next.
-func (c *Catalog) Resolve(ref string) (*source.File, error) {
+// everything else through next. The catalog lookup honors ctx (a
+// canceled request stops waiting) bounded by queryTimeout, and Close
+// still aborts it via the query context.
+func (c *Catalog) Resolve(ctx context.Context, ref string) (*source.File, error) {
 	id, ok := strings.CutPrefix(ref, "pid:")
 	if !ok {
-		return c.next.Resolve(ref)
+		return c.next.Resolve(ctx, ref)
 	}
 	pid := model.PID(id)
 	if !pid.Valid() {
@@ -234,9 +238,13 @@ func (c *Catalog) Resolve(ref string) (*source.File, error) {
 		c.drop(pid)
 	}
 	gen := c.generation()
-	ctx, cancel := context.WithTimeout(c.queryCtx, queryTimeout)
+	qctx, cancel := context.WithTimeout(ctx, queryTimeout)
 	defer cancel()
-	iv, err := c.lib.Get(ctx, pid)
+	// Close must still abort an in-flight lookup even when the caller's
+	// context lives on; bridge the lifetime context into this query.
+	stop := context.AfterFunc(c.queryCtx, cancel)
+	defer stop()
+	iv, err := c.lib.Get(qctx, pid)
 	if err != nil {
 		if binerr.Is(err, binerr.CodeNotFound) {
 			return nil, waxerr.New(waxerr.CodeNotFound,

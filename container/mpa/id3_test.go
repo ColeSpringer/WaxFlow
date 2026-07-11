@@ -6,8 +6,6 @@ import (
 	"io"
 	"testing"
 
-	waxlabel "github.com/colespringer/waxlabel"
-
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/mp3"
@@ -145,8 +143,9 @@ func muxWith(t *testing.T, w io.Writer, pkts [][]byte, tr codec.Trailer, project
 // TestMuxID3RoundTrip muxes an encoded stream with a leading ID3v2 tag
 // and checks the tag is pure prefix: the MPEG stream after it is byte
 // identical to a no-tags run (so gapless trims, sample counts, and the
-// back-patch are untouched), the demuxer agrees, and waxlabel reads the
-// fields back.
+// back-patch are untouched), the demuxer agrees, and the rendered ID3
+// frames carry the fields. The waxlabel read-back cell lives in the
+// oracletest module.
 func TestMuxID3RoundTrip(t *testing.T) {
 	const rate, channels, n = 44100, 2, 20000
 	pkts, tr, samples := encodeTone(t, rate, channels, 128000, n)
@@ -204,17 +203,6 @@ func TestMuxID3RoundTrip(t *testing.T) {
 					trkT.Samples, trkP.Samples, samples)
 			}
 
-			doc, err := waxlabel.Parse(t.Context(), container.BytesSource(tagged))
-			if err != nil {
-				t.Fatalf("waxlabel.Parse: %v", err)
-			}
-			fields := doc.Fields()
-			if fields.Title != "Stream Title" {
-				t.Errorf("waxlabel TITLE %q, want %q", fields.Title, "Stream Title")
-			}
-			if len(fields.Artists) != 1 || fields.Artists[0] != "Stream Artist" {
-				t.Errorf("waxlabel ARTIST %q, want %q", fields.Artists, "Stream Artist")
-			}
 		})
 	}
 }

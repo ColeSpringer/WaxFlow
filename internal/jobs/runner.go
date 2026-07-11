@@ -333,8 +333,8 @@ func (r *Runner) run(j *Job) {
 }
 
 // open resolves the job's source and enforces the pinned identity.
-func (r *Runner) open(req Request) (*source.File, error) {
-	src, err := r.cfg.Resolver.Resolve(req.Src)
+func (r *Runner) open(ctx context.Context, req Request) (*source.File, error) {
+	src, err := r.cfg.Resolver.Resolve(ctx, req.Src)
 	if err != nil {
 		return nil, err
 	}
@@ -423,7 +423,7 @@ func finiteOrNil(v float64) *float64 {
 
 // runAnalyze measures the source and stores the numbers.
 func (r *Runner) runAnalyze(ctx context.Context, j *Job) error {
-	src, err := r.open(j.Request)
+	src, err := r.open(ctx, j.Request)
 	if err != nil {
 		return err
 	}
@@ -465,7 +465,7 @@ func (req Request) TranscodeOptions(gainDB float64, profile resample.Profile) wa
 // mapping post-pass.
 func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 	req := j.Request
-	src, err := r.open(req)
+	src, err := r.open(ctx, req)
 	if err != nil {
 		return err
 	}

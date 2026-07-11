@@ -27,9 +27,9 @@ func appendXiphLen(out []byte, n int) []byte {
 	return append(out, byte(n))
 }
 
-// SplitHeaders reverses PackHeaders, returning the identification, comment, and
+// splitHeaders reverses PackHeaders, returning the identification, comment, and
 // setup packets.
-func SplitHeaders(blob []byte) (id, comment, setup []byte, err error) {
+func splitHeaders(blob []byte) (id, comment, setup []byte, err error) {
 	if len(blob) < 1 || blob[0] != 2 {
 		return nil, nil, nil, malformed("codec config: want 3 Vorbis headers, got count byte %d", firstByte(blob))
 	}
@@ -74,7 +74,7 @@ func firstByte(b []byte) int {
 
 // ParseConfig unpacks a codec-config blob and parses it into a Config.
 func ParseConfig(blob []byte) (Config, error) {
-	id, comment, setup, err := SplitHeaders(blob)
+	id, comment, setup, err := splitHeaders(blob)
 	if err != nil {
 		return Config{}, err
 	}

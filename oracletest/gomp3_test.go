@@ -1,4 +1,4 @@
-package testutil
+package oracletest
 
 import (
 	"bytes"

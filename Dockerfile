@@ -2,21 +2,23 @@
 
 FROM golang:1.26-bookworm AS build
 WORKDIR /src
-COPY go.mod go.sum ./
+COPY go.mod ./
+COPY cli/go.mod cli/go.sum cli/
 COPY resolver/go.mod resolver/go.sum resolver/
-RUN --mount=type=cache,target=/go/pkg/mod go mod download
+RUN --mount=type=cache,target=/go/pkg/mod cd cli && go mod download
 COPY . .
 ARG VERSION=dev
-# MAIN_PKG selects the entry point: ./cmd/waxflow (stock) or
-# ./resolver/cmd/waxflow (the "-waxbin" flavor). The resolver is a
-# nested module, so its main builds from inside its own directory and
-# downloads its own dependencies (cheap via the cache mount, and only
-# when the flavor is requested).
-ARG MAIN_PKG=./cmd/waxflow
+# MAIN_PKG selects the entry point: ./cli/cmd/waxflow (stock) or
+# ./resolver/cmd/waxflow (the "-waxbin" flavor). Both mains live in
+# nested modules (the root module is the dependency-free codec tree),
+# so each builds from inside its own directory and downloads its own
+# dependencies (cheap via the cache mount).
+ARG MAIN_PKG=./cli/cmd/waxflow
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     case "${MAIN_PKG}" in \
       ./resolver/*) cd resolver && go mod download && pkg=".${MAIN_PKG#./resolver}" ;; \
+      ./cli/*) cd cli && pkg=".${MAIN_PKG#./cli}" ;; \
       *) pkg="${MAIN_PKG}" ;; \
     esac && \
     CGO_ENABLED=0 go build -trimpath \

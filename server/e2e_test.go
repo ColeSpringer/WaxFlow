@@ -7,6 +7,7 @@ package server_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -308,7 +309,7 @@ func TestAuthMatrix(t *testing.T) {
 // catalog: every resolve fails catalog-unavailable.
 type downCatalog struct{}
 
-func (downCatalog) Resolve(string) (*source.File, error) {
+func (downCatalog) Resolve(context.Context, string) (*source.File, error) {
 	return nil, waxerr.New(waxerr.CodeCatalogUnavailable, "catalog query failed")
 }
 
@@ -854,7 +855,7 @@ func TestSignedURLLifecycle(t *testing.T) {
 	// Expired URLs (minted offline with the same secret) report expiry.
 	src, _ := source.OpenRoots([]source.Root{{Name: "lib", Path: env.root}}, 0)
 	defer src.Close()
-	f, err := src.Resolve("lib/album/track.flac")
+	f, err := src.Resolve(context.Background(), "lib/album/track.flac")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1135,14 +1136,14 @@ type vanishingResolver struct {
 	allowed int
 }
 
-func (v *vanishingResolver) Resolve(ref string) (*source.File, error) {
+func (v *vanishingResolver) Resolve(ctx context.Context, ref string) (*source.File, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.allowed <= 0 {
 		return nil, waxerr.New(waxerr.CodeNotFound, "source: vanished between resolve and pipeline")
 	}
 	v.allowed--
-	return v.inner.Resolve(ref)
+	return v.inner.Resolve(ctx, ref)
 }
 
 func TestPipelineFastFailPropagatesRealError(t *testing.T) {

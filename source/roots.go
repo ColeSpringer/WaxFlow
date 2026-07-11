@@ -1,6 +1,7 @@
 package source
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -80,7 +81,9 @@ func (r *Roots) Close() error {
 }
 
 // Resolve implements Resolver for "<root>/<relative/path>" references.
-func (r *Roots) Resolve(ref string) (*File, error) {
+// ctx is ignored: opening a local regular file does not block on
+// anything cancelable.
+func (r *Roots) Resolve(_ context.Context, ref string) (*File, error) {
 	if ref == "" {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, "source: empty source reference")
 	}

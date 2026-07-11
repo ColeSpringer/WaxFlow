@@ -124,7 +124,7 @@ func TestResolveAgainstRealCatalog(t *testing.T) {
 	}
 	defer cat.Close()
 
-	f, err := cat.Resolve("pid:" + string(pids["alpha.wav"]))
+	f, err := cat.Resolve(context.Background(), "pid:"+string(pids["alpha.wav"]))
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestResolveAgainstRealCatalog(t *testing.T) {
 		t.Fatal("resolved file does not serve the cataloged bytes")
 	}
 
-	if _, err := cat.Resolve("pid:" + string(model.NewPID())); waxerr.CodeOf(err) != waxerr.CodeNotFound {
+	if _, err := cat.Resolve(context.Background(), "pid:"+string(model.NewPID())); waxerr.CodeOf(err) != waxerr.CodeNotFound {
 		t.Fatalf("unknown pid = %v, want not-found", err)
 	}
 }
@@ -160,7 +160,7 @@ func TestRenameInvalidatesWithinOnePoll(t *testing.T) {
 	}
 	defer cat.Close()
 
-	f, err := cat.Resolve("pid:" + string(pid))
+	f, err := cat.Resolve(context.Background(), "pid:"+string(pid))
 	if err != nil {
 		t.Fatalf("warm Resolve: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestRenameInvalidatesWithinOnePoll(t *testing.T) {
 	}
 
 	// And the next resolve serves the new location, byte-identical.
-	f, err = cat.Resolve("pid:" + string(pid))
+	f, err = cat.Resolve(context.Background(), "pid:"+string(pid))
 	if err != nil {
 		t.Fatalf("Resolve after rename: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestBackgroundPollInvalidates(t *testing.T) {
 	}
 	defer cat.Close()
 
-	f, err := cat.Resolve("pid:" + string(pid))
+	f, err := cat.Resolve(context.Background(), "pid:"+string(pid))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +340,7 @@ func TestPIDStreamsE2E(t *testing.T) {
 	// A rename changes no bytes, so a URL pinned to the true identity
 	// keeps playing across it: the pid re-resolves to the new path and
 	// identity (size+mtimeNS, preserved by rename) still matches.
-	f, err := cat.Resolve("pid:" + string(pid))
+	f, err := cat.Resolve(context.Background(), "pid:"+string(pid))
 	if err != nil {
 		t.Fatal(err)
 	}

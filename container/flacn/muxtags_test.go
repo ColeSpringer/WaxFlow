@@ -5,8 +5,6 @@ import (
 	"io"
 	"testing"
 
-	waxlabel "github.com/colespringer/waxlabel"
-
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/flac"
@@ -69,29 +67,12 @@ func vcHeader(t *testing.T, raw []byte) (hdr byte, bodyLen int) {
 	return hdr, int(raw[off+1])<<16 | int(raw[off+2])<<8 | int(raw[off+3])
 }
 
-// assertLabelTags reads the stream back through waxlabel and checks the
-// two fixture fields survived.
-func assertLabelTags(t *testing.T, raw []byte) {
-	t.Helper()
-	doc, err := waxlabel.Parse(t.Context(), container.BytesSource(raw))
-	if err != nil {
-		t.Fatalf("waxlabel.Parse: %v", err)
-	}
-	fields := doc.Fields()
-	if fields.Title != "Flac Title" {
-		t.Errorf("waxlabel TITLE %q, want %q", fields.Title, "Flac Title")
-	}
-	if len(fields.Artists) != 1 || fields.Artists[0] != "Flac Artist" {
-		t.Errorf("waxlabel ARTIST %q, want %q", fields.Artists, "Flac Artist")
-	}
-}
-
 // TestMuxTagsRoundTrip checks the VORBIS_COMMENT block sits between
 // STREAMINFO and the rest of the stream without disturbing either side:
 // the demuxer decodes the same samples as a no-tags run, the STREAMINFO
 // back-patch (fixed offset 8) still lands on a seekable writer, the
 // last-metadata-block flag follows whether a seek table trails the
-// comments, and waxlabel reads the tags back.
+// comments. The waxlabel read-back cell lives in the oracletest module.
 func TestMuxTagsRoundTrip(t *testing.T) {
 	tags := []container.Tag{
 		{Key: "TITLE", Value: "Flac Title"},
@@ -132,7 +113,6 @@ func TestMuxTagsRoundTrip(t *testing.T) {
 		if !bytes.Equal(raw[base+4+vcLen:], plain[base:]) {
 			t.Error("stream after the comment block differs from a no-tags run")
 		}
-		assertLabelTags(t, raw)
 	})
 
 	t.Run("streaming", func(t *testing.T) {
@@ -163,6 +143,5 @@ func TestMuxTagsRoundTrip(t *testing.T) {
 		if !bytes.Equal(raw[base+4+vcLen:], plain[base:]) {
 			t.Error("frames after the comment block differ from a no-tags run")
 		}
-		assertLabelTags(t, raw)
 	})
 }

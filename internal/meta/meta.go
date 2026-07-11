@@ -1,8 +1,8 @@
 // Package meta defines WaxFlow's metadata model and the Mapper seam
 // between it and the tag library. The types here are plain data over
 // stdlib plus the module's own packages, so the public server package
-// can consume them while the waxlabel-backed implementation stays in
-// the label subpackage, outside the depcheck-enforced stdlib-only tree
+// can consume them while the waxlabel-backed implementation lives in
+// the cli module (cli/label), outside the dependency-free root module
 // (the CLI injects it; see server.Config.Meta).
 //
 // The passthrough matrix this implements: live streams embed a minimal
@@ -71,7 +71,7 @@ type ReadOptions struct {
 }
 
 // Mapper reads source metadata and writes it onto finished outputs. The
-// implementation lives in the label subpackage.
+// implementation lives in the cli module (cli/label).
 type Mapper interface {
 	// Read extracts metadata from a source. A source whose metadata
 	// cannot be parsed yields an empty Info with warnings, not an error:
@@ -90,6 +90,29 @@ func (i *Info) Lyrics() string {
 		return ""
 	}
 	return i.Tags["LYRICS"][0]
+}
+
+// HasLyrics reports whether /lyrics has anything to serve: an unsynced
+// sheet or a synced set.
+func (i *Info) HasLyrics() bool {
+	return i != nil && (i.Lyrics() != "" || len(i.Synced) > 0)
+}
+
+// TagSummary is the tag map for probe-style summaries: LYRICS excluded
+// (the sheet can be many KB and is served by /lyrics, reported as a
+// boolean), copied so callers can never alias a shared cache entry. Nil
+// when there are no tags.
+func (i *Info) TagSummary() map[string][]string {
+	if i == nil || len(i.Tags) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(i.Tags))
+	for k, v := range i.Tags {
+		if k != "LYRICS" {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // FrontPicture picks the cover to serve: the first front cover, else the

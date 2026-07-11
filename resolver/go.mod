@@ -5,15 +5,15 @@ go 1.26.3
 require (
 	github.com/colespringer/waxbin v0.0.0-20260702055125-8fd6f8d0a05e
 	github.com/colespringer/waxflow v0.0.0-00010101000000-000000000000
+	github.com/colespringer/waxflow/cli v0.0.0-00010101000000-000000000000
 )
 
 require (
-	github.com/colespringer/waxlabel v0.0.0-20260710232702-d0c5558af9a3 // indirect
+	github.com/colespringer/waxlabel v1.0.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/gofrs/flock v0.13.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/hajimehoshi/go-mp3 v0.3.4 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
@@ -31,6 +31,8 @@ require (
 )
 
 replace github.com/colespringer/waxflow => ../
+
+replace github.com/colespringer/waxflow/cli => ../cli
 
 // WaxBin's pinned commit predates waxlabel's Fields.Comment string ->
 // []string change and does not compile against the parent's newer

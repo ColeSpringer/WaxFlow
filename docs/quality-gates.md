@@ -91,8 +91,8 @@ deterministic mode.
   1.22 at 96k).
 - The pitch pre-filter's per-frame decisions (on, period, gain, tapset)
   agree with libopus on >= **90%** of frames on a pitched fixture.
-- >= **15x** realtime (measured 55-68x after the M18 FFT; the floor is a
-  ratchet and only rises once the CI baseline confirms headroom).
+- >= **30x** realtime (ratcheted from 15x at the M19 bench pass;
+  measured 55-68x after the M18 FFT).
 
 ### AAC-LC
 - ODG-proxy at 128 kbps: corpus mean >= **ffmpeg-aac mean - 0.2**; no track
@@ -124,10 +124,31 @@ deterministic mode.
 
 ## Performance floors (ratchets, may only rise)
 
-Portable build, per core: decode FLAC >=100x / MP3 >=150x / AAC >=80x /
-Opus >=60x / Vorbis >=80x; encode FLAC >=60x / ALAC >=80x / MP3 >=40x /
-AAC >=20x / Opus >=15x; resampler HQ >=200x. Enforced by `make bench` +
-benchstat regression thresholds in nightly CI.
+Portable build, per core: decode FLAC >=**300x** / MP3 >=150x /
+AAC >=**150x** / Opus >=**150x** / Vorbis >=80x; encode FLAC >=**150x** /
+ALAC >=80x / MP3 >=40x / AAC >=20x / Opus >=**30x**; resampler HQ
+>=200x. The bolded floors were ratcheted at the M19 bench pass against
+the post-FFT measurements (decode FLAC 537-934x, AAC 260x, Opus
+289-522x; encode FLAC 230-250x at level 5, Opus 55-67x), leaving 2x or
+more headroom for slower CI runners. Watched by the nightly `bench` job
+(benchstat against the previous night's numbers, cache-carried).
+
+Recorded M19 floor notes:
+
+- The AAC encode floor stays at 20x: the synthetic noise worst case
+  measures 19-20x across every box since M14 (real audio measures
+  49-68x), so the M14/M18 ratchet candidate is closed as declined; a
+  noise-dominated track still encodes at ~5x the 2x-realtime delivery
+  pace, and the two-loop is the cost of the quality gate. The recorded
+  DP-sectioning idea remains a post-1.0 quality candidate, not debt.
+- Vorbis decode has no default-suite benchmark: WaxFlow has no Vorbis
+  encoder to self-generate fixtures, so its performance is observed via
+  the differential job's corpus decodes. The 80x floor stands on the
+  M10-era measurements.
+- The per-frame allocation scratch passes recorded at M10/M12 (Opus
+  decode ~19-31 allocs/packet, encoder equivalents) are closed as
+  declined at v1.0: immaterial at 55-500x realtime; reopen only if a
+  profile on real hardware says otherwise.
 
 ## Reporting
 

@@ -45,8 +45,8 @@ import (
 // widen affect sample values (domain and word width), so they carry
 // versions; the framer only re-chunks and does not.
 const (
-	ConvertVersion = "convert-1"
-	WidenVersion   = "widen-1"
+	convertVersion = "convert-1"
+	widenVersion   = "widen-1"
 )
 
 // maxGainDB bounds ChainSpec.GainDB. This is a correctness bound, not
@@ -204,7 +204,7 @@ func NewChain(src Stage, spec ChainSpec) (*Chain, error) {
 
 	if floatWork && in.Type == audio.Int {
 		cur = withType(cur, audio.Float, 32)
-		c.push(&convertStage{up: c.out, fmt: cur, scale: float32(1 / scaleFor(in.BitDepth))}, ConvertVersion)
+		c.push(&convertStage{up: c.out, fmt: cur, scale: float32(1 / scaleFor(in.BitDepth))}, convertVersion)
 	}
 
 	if needRate {
@@ -271,7 +271,7 @@ func NewChain(src Stage, spec ChainSpec) (*Chain, error) {
 	case outInt && outDepth > cur.BitDepth:
 		shift := outDepth - cur.BitDepth
 		cur = withType(cur, audio.Int, outDepth)
-		c.push(&widenStage{up: c.out, fmt: cur, shift: uint(shift)}, WidenVersion)
+		c.push(&widenStage{up: c.out, fmt: cur, shift: uint(shift)}, widenVersion)
 	}
 
 	if spec.FrameSize > 0 {

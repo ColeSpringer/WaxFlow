@@ -57,10 +57,11 @@ jobs:
       # cached GOCACHE (restored by setup-go) short-circuits an unchanged tree.
       - run: GOFLAGS=-count=1 make test-race
 
-  # hls.js end to end in a real browser: a live daemon over a generated
-  # library, the committed /demo page, headless Chromium via Playwright
-  # (scripts/hls-e2e.mjs; docs/hls-validation.md).
-  hls-browser:
+  # The browser column of the client matrix, end to end: a live daemon
+  # over a generated library, the committed /demo page, headless Chromium
+  # via Playwright driving every hls.js and progressive cell
+  # (scripts/client-e2e.mjs; docs/client-matrix.md).
+  client-browser:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -71,7 +72,59 @@ jobs:
         with:
           node-version: 22
       - run: npm install playwright && npx playwright install --with-deps chromium
-      - run: make hls-e2e
+      - run: make client-e2e
+
+  # Codec/DSP throughput watch: run the benchmarks, compare against the
+  # previous night's numbers with benchstat (carried via the cache), and
+  # publish both as artifacts. Informational: runner performance varies,
+  # so regressions are triaged by a human against the floors in
+  # docs/quality-gates.md rather than failing the job on noise.
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: actions/cache@v4
+        with:
+          path: bench-baseline.txt
+          key: bench-baseline-${{ github.run_id }}
+          restore-keys: bench-baseline-
+      - run: go install golang.org/x/perf/cmd/benchstat@latest
+      - run: make bench | tee bench-current.txt
+      - name: compare against the previous night
+        run: |
+          if [ -f bench-baseline.txt ]; then
+            benchstat bench-baseline.txt bench-current.txt | tee benchstat.txt
+          else
+            echo "no baseline yet; tonight's run becomes it" | tee benchstat.txt
+          fi
+          cp bench-current.txt bench-baseline.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-nightly
+          path: |
+            bench-current.txt
+            benchstat.txt
+
+  # The long streaming soak (goroutine/heap leak watch), sustained load,
+  # and TTFA percentile checks (server/load_soak_test.go). Durations are
+  # trimmed to the runner: the leak watch needs sustained traffic, not a
+  # specific wall-clock length.
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: make soak
+        env:
+          WAXFLOW_SOAK_DURATION: 20m
+          WAXFLOW_LOAD_DURATION: 3m
 
   # Encoder-quality gates: score our lossy encoders against the reference
   # baselines (Shine for MP3 and ffmpeg's native aac for AAC via the

@@ -143,7 +143,8 @@ func TestMP3EncodeGapless(t *testing.T) {
 
 // TestMP3EncodeDifferential encodes through the engine and confirms the output
 // decodes to a signal that tracks the source, both with our own read pipeline
-// and (when available) with ffmpeg and the pure-Go go-mp3 oracle. A lossy
+// and (when available) with ffmpeg; the go-mp3 oracle cell lives in the
+// oracletest module. A lossy
 // baseline is not exact, so the bar is a reasonable signal-to-noise ratio at
 // the best alignment, not sample equality.
 func TestMP3EncodeDifferential(t *testing.T) {
@@ -170,15 +171,8 @@ func TestMP3EncodeDifferential(t *testing.T) {
 		t.Logf("our-decode SNR %.1f dB", snr)
 	}
 
-	// go-mp3: pure-Go oracle, stereo, no gapless trim. It also decodes the
-	// Info metadata frame as audio, so the real content sits a further frame
-	// in; search wide enough to reach it.
-	want, _ := testutil.GoMP3Decode(t, mp3)
-	if snr := bestSNR(ref, want, 3000, 2); snr < 40 {
-		t.Errorf("go-mp3 SNR %.1f dB below 40 dB", snr)
-	} else {
-		t.Logf("go-mp3 SNR %.1f dB", snr)
-	}
+	// The go-mp3 oracle cell lives in oracletest (its module carries the
+	// third-party oracle dependencies).
 
 	// ffmpeg: authoritative decoder, gated on availability.
 	if path := testutil.FFmpeg(t); path != "" {

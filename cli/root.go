@@ -90,6 +90,7 @@ Configuration precedence: flag > WAXFLOW_* environment > JSON config file
 		newTranscodeCmd(flavor),
 		newSignCmd(flavor),
 		newCacheCmd(),
+		newDoctorCmd(flavor),
 	)
 	return root
 }

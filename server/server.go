@@ -423,9 +423,6 @@ func (s *Server) Close() error {
 	return s.closeErr
 }
 
-// Metrics exposes the metric set (the CLI wires nothing; tests observe).
-func (s *Server) Metrics() *metrics.Metrics { return s.met }
-
 func (s *Server) handlePing(w http.ResponseWriter, _ *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "schemaVersion": 1})
 }

@@ -1,4 +1,4 @@
-package waxflow_test
+package oracletest
 
 import (
 	"bytes"
@@ -9,10 +9,10 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/cli/label"
 	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/internal/meta"
-	"github.com/colespringer/waxflow/internal/meta/label"
 )
 
 // TestGoldenM4BChapters is the M16 audiobook passthrough pin: an m4b with
@@ -21,7 +21,7 @@ import (
 // edit list, the seekable job path) preserved, byte for byte against the
 // committed golden. Regenerate with `make goldens` and review the diff.
 func TestGoldenM4BChapters(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("testdata", "chapters.m4b"))
+	raw, err := os.ReadFile(filepath.Join("..", "testdata", "chapters.m4b"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestGoldenM4BChapters(t *testing.T) {
 		t.Errorf("iTunSMPB fields sum to %d, not whole AAC frames", total)
 	}
 
-	golden := filepath.Join("testdata", "golden", "m4b-chapters.m4b")
+	golden := filepath.Join("..", "testdata", "golden", "m4b-chapters.m4b")
 	if *updateGoldens {
 		if err := os.WriteFile(golden, got, 0o644); err != nil {
 			t.Fatal(err)

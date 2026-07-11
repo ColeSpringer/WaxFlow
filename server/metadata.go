@@ -22,10 +22,10 @@ type uploadResolver struct {
 	store *uploads.Store
 }
 
-func (r uploadResolver) Resolve(ref string) (*source.File, error) {
+func (r uploadResolver) Resolve(ctx context.Context, ref string) (*source.File, error) {
 	id, ok := strings.CutPrefix(ref, "upload:")
 	if !ok {
-		return r.next.Resolve(ref)
+		return r.next.Resolve(ctx, ref)
 	}
 	item, path, err := r.store.Get(id)
 	if err != nil {

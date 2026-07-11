@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	waxlabel "github.com/colespringer/waxlabel"
-
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
 )
@@ -125,7 +123,8 @@ func opusTagsComments(t *testing.T, stream []byte) (vendor string, comments []st
 
 // TestMuxOpusTagsRoundTrip checks the OpusTags user comments carry the
 // caller's tags without disturbing the audio: the demuxer sees the same
-// packets, timing, and trims as a no-tags run, and waxlabel reads the
+// packets, timing, and trims as a no-tags run (the waxlabel read-back
+// cell lives in the oracletest module), and the comment header reads the
 // fields back.
 func TestMuxOpusTagsRoundTrip(t *testing.T) {
 	const packets = 60
@@ -173,17 +172,6 @@ func TestMuxOpusTagsRoundTrip(t *testing.T) {
 		}
 	}
 
-	doc, err := waxlabel.Parse(t.Context(), container.BytesSource(tagged))
-	if err != nil {
-		t.Fatalf("waxlabel.Parse: %v", err)
-	}
-	fields := doc.Fields()
-	if fields.Title != "Opus Title" {
-		t.Errorf("waxlabel TITLE %q, want %q", fields.Title, "Opus Title")
-	}
-	if len(fields.Artists) != 1 || fields.Artists[0] != "Opus Artist" {
-		t.Errorf("waxlabel ARTIST %q, want %q", fields.Artists, "Opus Artist")
-	}
 }
 
 // TestMuxOpusTagsCap pins the header cap: a comment that would push the

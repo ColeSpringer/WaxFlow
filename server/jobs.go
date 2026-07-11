@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -86,7 +87,7 @@ func (s *Server) handleJobCreate(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err)
 		return
 	}
-	req, err := s.validateJobRequest(body)
+	req, err := s.validateJobRequest(r.Context(), body)
 	if err != nil {
 		s.writeError(w, err)
 		return
@@ -103,7 +104,7 @@ func (s *Server) handleJobCreate(w http.ResponseWriter, r *http.Request) {
 // plan against the probed source (gain 0: the resolved value never
 // shapes plan validity), so a 201 means the job will not fail on
 // request shape later.
-func (s *Server) validateJobRequest(body jobRequest) (*jobs.Request, error) {
+func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs.Request, error) {
 	bad := func(format string, args ...any) (*jobs.Request, error) {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(format, args...))
 	}
@@ -123,7 +124,7 @@ func (s *Server) validateJobRequest(body jobRequest) (*jobs.Request, error) {
 		Loudness:  body.Loudness,
 		FLACLevel: body.FLACLevel,
 	}
-	src, err := s.resolver.Resolve(body.Src)
+	src, err := s.resolver.Resolve(ctx, body.Src)
 	if err != nil {
 		return nil, err
 	}
@@ -343,7 +344,7 @@ func (s *Server) prepareMetaRequest(w http.ResponseWriter, r *http.Request, pict
 		s.writeError(w, waxerr.New(waxerr.CodeInvalidRequest, "src is required"))
 		return nil, nil, false
 	}
-	src, err := s.resolver.Resolve(p.src)
+	src, err := s.resolver.Resolve(r.Context(), p.src)
 	if err != nil {
 		s.writeError(w, err)
 		return nil, nil, false
@@ -424,7 +425,7 @@ func (s *Server) signableJobPath(path string) error {
 
 // signMetaPath prepares the query for signing /art and /lyrics: src plus
 // the pinned identity, exactly like /stream.
-func (s *Server) signMetaPath(params map[string]string) (url.Values, error) {
+func (s *Server) signMetaPath(ctx context.Context, params map[string]string) (url.Values, error) {
 	src := params["src"]
 	if src == "" {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, "src is required")
@@ -434,7 +435,7 @@ func (s *Server) signMetaPath(params map[string]string) (url.Values, error) {
 			return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("unknown parameter %q", k))
 		}
 	}
-	f, err := s.resolver.Resolve(src)
+	f, err := s.resolver.Resolve(ctx, src)
 	if err != nil {
 		return nil, err
 	}

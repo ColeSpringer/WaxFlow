@@ -11,13 +11,13 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/cli/label"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/dsp/dither"
 	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/internal/meta"
-	"github.com/colespringer/waxflow/internal/meta/label"
 	"github.com/colespringer/waxflow/waxerr"
 )
 

@@ -3,7 +3,7 @@
 // with ReplayGain tags on analyzed outputs, the metadata passthrough
 // matrix (live minimal tags, job full tags), tag-based gain resolution,
 // and the /art and /lyrics passthrough endpoints.
-package server_test
+package oracletest
 
 import (
 	"bufio"
@@ -25,9 +25,9 @@ import (
 	waxlabel "github.com/colespringer/waxlabel"
 	"github.com/colespringer/waxlabel/tag"
 
+	"github.com/colespringer/waxflow/cli/label"
 	"github.com/colespringer/waxflow/internal/jobs"
 	"github.com/colespringer/waxflow/internal/meta"
-	"github.com/colespringer/waxflow/internal/meta/label"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
@@ -564,7 +564,7 @@ func TestJobRestartSafety(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, err := idRoots.Resolve("lib/sine.wav")
+	f, err := idRoots.Resolve(context.Background(), "lib/sine.wav")
 	if err != nil {
 		t.Fatal(err)
 	}

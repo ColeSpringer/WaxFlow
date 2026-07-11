@@ -26,11 +26,12 @@ mostly for the parts that cannot be automated on Linux.
   codec and decode fully; each single segment after the init header is
   independently decodable; FLAC survives ffmpeg's fMP4 demuxer
   bit-exact.
-- **hls.js in a real browser** (gated): `make hls-e2e` drives the demo
-  page's HLS player with Playwright against a live daemon and asserts
-  playback progresses without player errors. Requires Node and
-  Playwright (`npx playwright install chromium`); the nightly workflow
-  is the intended home once runners have browsers.
+- **hls.js in a real browser** (gated, nightly): `make client-e2e`
+  drives every browser cell of the client matrix (HLS through hls.js
+  plus progressive and direct play through `<audio>`) with Playwright
+  against a live daemon and asserts each cell progresses without player
+  errors. Requires Node and Playwright (`npx playwright install
+  chromium`); see docs/client-matrix.md for the cells.
 
 ## Apple mediastreamvalidator (manual, per release)
 

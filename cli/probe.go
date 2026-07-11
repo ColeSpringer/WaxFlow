@@ -13,11 +13,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/cli/label"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/config"
 	"github.com/colespringer/waxflow/internal/meta"
-	"github.com/colespringer/waxflow/internal/meta/label"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -42,7 +42,7 @@ func newProbeCmd(flavor Flavor) *cobra.Command {
 			// still probes (m carries the warning, or stays nil).
 			m, _ := label.New().Read(cmd.Context(), src, hint, meta.ReadOptions{})
 			if jsonOut {
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(server.ProbeJSON(info, m))
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(server.ProbeJSON(info, probeMetadata(m)))
 			}
 			printProbe(cmd, info, m)
 			return nil
@@ -86,7 +86,7 @@ func openSourceRef(cmd *cobra.Command, flavor Flavor, arg string, cfg *config.Co
 	if err != nil {
 		return nil, "", nil, err
 	}
-	f, err := resolver.Resolve(arg)
+	f, err := resolver.Resolve(cmd.Context(), arg)
 	if err != nil {
 		closeResolver()
 		return nil, "", nil, err
@@ -120,6 +120,22 @@ func extHint(path string) string {
 
 // The probe JSON shape lives in the server package (server.ProbeInfo):
 // the CLI and GET /probe serve the identical contract by construction.
+
+// probeMetadata summarizes a metadata read for server.ProbeJSON,
+// mirroring the server's own unexported adapter (the public signature
+// must not carry the internal meta type). TestProbeJSONMatchesHTTP pins
+// the two outputs byte-equal.
+func probeMetadata(m *meta.Info) *server.ProbeMetadata {
+	if m == nil {
+		return nil
+	}
+	return &server.ProbeMetadata{
+		Tags:      m.TagSummary(),
+		Chapters:  m.Chapters,
+		HasArt:    m.HasPictures,
+		HasLyrics: m.HasLyrics(),
+	}
+}
 
 // durationSeconds converts samples to seconds at the presentation
 // boundary; positions stay integer samples everywhere else (ADR-0006).

@@ -4,7 +4,7 @@ package main
 import (
 	"os"
 
-	"github.com/colespringer/waxflow/internal/cli"
+	"github.com/colespringer/waxflow/cli"
 )
 
 // version is stamped by the build: -ldflags "-X main.version=v0.0.1".

@@ -268,7 +268,20 @@ is:
                    {"name": "alac", "live": true, "exts": []}],
       "delivery": {"progressive": true, "hls": true, "hlsFormats": ["opus", "flac", "alac", "aac"],
                    "jobs": false, "uploads": false, "pid": false},
-      "profiles": {}
+      "profiles": {
+        "apple-native": {
+          "delivery": "hls",
+          "progressive": ["aac", "mp3", "flac", "alac", "opus"],
+          "hls": ["aac", "alac", "flac", "opus"],
+          "basis": "vendor-documented + manual checklist (docs/client-matrix.md)",
+          "notes": ["hls opus needs iOS/tvOS 17 or macOS 14", "..."]
+        },
+        "hls-js": {"delivery": "hls", "progressive": ["opus", "flac", "mp3", "aac", "wav"],
+                   "hls": ["opus", "flac", "aac"],
+                   "basis": "automated: hls.js + <audio> in Chromium (make client-e2e, nightly)"},
+        "android-exoplayer": {"...": "..."},
+        "desktop-mpv": {"...": "..."}
+      }
     }
 
 Capability-gated: only what works is listed. `delivery.jobs` and
@@ -276,8 +289,17 @@ Capability-gated: only what works is listed. `delivery.jobs` and
 an upload spool (the CLI daemon always does; a bare library embedding
 may not). `delivery.pid` reports whether `pid:<ULID>` source references
 resolve against a WaxBin catalog (the waxbin flavor with `catalogDB`).
-`profiles` fills once the client matrix is verified, with tested
-delivery profiles (`apple-native`, `hls-js`, ...).
+
+`profiles` are the named delivery profiles: per client family, the
+formats verified to play on each surface, in preference order (first is
+the default choice), plus the recommended surface (`delivery`). Pick
+the profile matching your player stack instead of guessing codecs:
+`apple-native` (AVPlayer/Safari), `hls-js` (browser web players),
+`android-exoplayer` (Media3), `desktop-mpv` (libmpv/ffmpeg players).
+Each profile states the `basis` for its facts; the per-cell evidence
+and the manual checklists live in docs/client-matrix.md. Profile lists
+are filtered against this build's real outputs, so they never advertise
+more than the daemon serves.
 
 ## Uploads
 

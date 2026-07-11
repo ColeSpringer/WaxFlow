@@ -311,38 +311,6 @@ func TestMP3TranscodeToFLAC(t *testing.T) {
 	}
 }
 
-// TestMP3DecodeAgainstGoMP3 is the no-ffmpeg differential: the pure-Go
-// go-mp3 oracle decodes the untagged fixture (it applies no gapless
-// trims, so only the untrimmed stream compares one to one). Its output
-// is 16-bit quantized, which floors the achievable agreement around
-// 1e-5 RMS; the gate leaves headroom over that floor, not over ours.
-func TestMP3DecodeAgainstGoMP3(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("testdata", "sine-untagged.mp3"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want, rate := testutil.GoMP3Decode(t, raw)
-	if rate != 44100 {
-		t.Fatalf("oracle rate = %d", rate)
-	}
-	got, err := decodeAllDynamic(t, container.BytesSource(raw), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer audio.Put(got)
-	d := testutil.CompareF32(testutil.InterleaveF(got), want)
-	t.Logf("diff: %v", d)
-	if d.N < 0 {
-		t.Fatalf("length mismatch: ours %d floats, oracle %d", got.N*got.Fmt.Channels, len(want))
-	}
-	if d.RMS > 1e-4 {
-		t.Errorf("RMS %g exceeds 1e-4", d.RMS)
-	}
-	if d.MaxAbs > 1e-3 {
-		t.Errorf("max abs %g exceeds 1e-3", d.MaxAbs)
-	}
-}
-
 // captureIndexCache is a waxflow.IndexCache that records traffic.
 type captureIndexCache struct {
 	blobs map[string][]byte

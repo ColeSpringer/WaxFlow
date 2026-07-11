@@ -11,7 +11,7 @@ import (
 // TestEncodeRealtimeFactor reports the CELT encoder's realtime factor (audio
 // seconds encoded per wall-clock second, per core) at the default complexity
 // and at complexity 10 (the quality-gate configuration, with theta RDO and
-// the second MDCT). The floor is >=15x portable at both
+// the second MDCT). The floor is >=30x portable at both
 // (docs/quality-gates.md).
 func TestEncodeRealtimeFactor(t *testing.T) {
 	if testing.Short() {
@@ -56,8 +56,8 @@ func TestEncodeRealtimeFactor(t *testing.T) {
 		audioSec := float64(encoded) / sr
 		rtf := audioSec / elapsed.Seconds()
 		t.Logf("CELT encode complexity %d: %.1fx realtime (%d frames x %d reps, %s)", complexity, rtf, frames, reps, elapsed)
-		if rtf < 15 {
-			t.Errorf("complexity %d: encode realtime factor %.1fx below the 15x floor", complexity, rtf)
+		if rtf < 30 {
+			t.Errorf("complexity %d: encode realtime factor %.1fx below the 30x floor", complexity, rtf)
 		}
 	}
 }
@@ -65,7 +65,7 @@ func TestEncodeRealtimeFactor(t *testing.T) {
 // TestOpusEncodeRealtimeFactor reports the FULL Opus encoder's realtime
 // factor: the tonality analyser, mode decision, and delay plumbing on top of
 // the codec cores, over the paths a real stream takes (CELT music at 96k
-// stereo, SILK/hybrid speech at 24k mono). Same >=15x portable floor
+// stereo, SILK/hybrid speech at 24k mono). Same >=30x portable floor
 // (docs/quality-gates.md).
 func TestOpusEncodeRealtimeFactor(t *testing.T) {
 	if testing.Short() {
@@ -116,8 +116,8 @@ func TestOpusEncodeRealtimeFactor(t *testing.T) {
 		audio.Put(b)
 		rtf := (float64(encoded) / sr) / elapsed.Seconds()
 		t.Logf("opus encode %s: %.1fx realtime (%d frames x %d reps, %s)", tc.name, rtf, frames, reps, elapsed)
-		if rtf < 15 {
-			t.Errorf("%s: encode realtime factor %.1fx below the 15x floor", tc.name, rtf)
+		if rtf < 30 {
+			t.Errorf("%s: encode realtime factor %.1fx below the 30x floor", tc.name, rtf)
 		}
 	}
 }

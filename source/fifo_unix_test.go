@@ -3,6 +3,7 @@
 package source
 
 import (
+	"context"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -18,7 +19,7 @@ func TestResolveRejectsFIFO(t *testing.T) {
 	}
 	// This must return promptly (O_NONBLOCK), not hang waiting for a
 	// writer, and then fail the regular-file check.
-	_, err := r.Resolve("lib/pipe")
+	_, err := r.Resolve(context.Background(), "lib/pipe")
 	if got := waxerr.CodeOf(err); got != waxerr.CodeUnsupportedSource {
 		t.Fatalf("FIFO resolve code = %s (%v), want unsupported-source", got, err)
 	}

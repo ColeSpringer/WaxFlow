@@ -7,10 +7,10 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # the "stdlib-only codecs" promise.
 PUBLIC_PKGS := . ./waxerr ./audio ./dsp/... ./codec/... ./container/... ./format ./source ./server ./client
 
-.PHONY: build build-waxbin test test-race test-resolver vet fmt fmt-check depcheck check docker docker-waxbin clean verify-vectors goldens bench encoder-quality fuzz opus-tools hls-e2e
+.PHONY: build build-waxbin test test-race test-cli test-resolver test-oracle vet fmt fmt-check depcheck check docker docker-waxbin clean verify-vectors goldens bench encoder-quality fuzz opus-tools client-e2e hls-e2e soak
 
 build:
-	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/waxflow ./cmd/waxflow
+	cd cli && CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o ../bin/waxflow ./cmd/waxflow
 
 # The WaxBin resolver flavor: the identical CLI with pid:<ULID> source
 # support, built from the nested resolver/ module (which is what keeps
@@ -35,11 +35,20 @@ test:
 test-race:
 	go test -race -timeout 30m ./...
 
-# The nested resolver module: ./... at the root stops at its go.mod
-# boundary, so it gets its own vet+test (race included: the poll loop is
-# concurrent) here and a dedicated CI step.
+# The nested modules: ./... at the root stops at their go.mod
+# boundaries, so each gets its own vet+test here and a dedicated CI
+# step. cli is the cobra/waxlabel binary module, resolver the WaxBin
+# flavor (race included: the poll loop is concurrent), oracletest the
+# third-party-oracle tests (waxlabel round trips, go-mp3 differential)
+# that keep the root module's require block empty.
+test-cli:
+	cd cli && go vet ./... && go test -race -timeout 10m ./...
+
 test-resolver:
 	cd resolver && go vet ./... && go test -race -timeout 10m ./...
+
+test-oracle:
+	cd oracletest && go vet ./... && go test -timeout 10m ./...
 
 vet:
 	go vet ./...
@@ -59,7 +68,7 @@ depcheck:
 		echo "$$bad"; exit 1; fi; \
 	echo "depcheck ok: public tree ($(PUBLIC_PKGS)) is stdlib-only"
 
-check: fmt-check vet test test-race test-resolver depcheck
+check: fmt-check vet test test-race test-cli test-resolver test-oracle depcheck
 
 # Fetch the SHA-256-pinned conformance vectors into testdata/vectors
 # (CI-cached, never committed). Vector-gated tests self-skip until run;
@@ -78,11 +87,10 @@ fuzz:
 goldens:
 	go test -run TestGoldenMuxOutputs ./container/riff ./container/aiff ./container/flacn ./container/mpa -update
 	go test -run TestGoldenSegments . -update
-	go test -run TestGoldenM4BChapters . -update
+	cd oracletest && go test -run TestGoldenM4BChapters . -update
 
 # Decode/encode throughput; the x-realtime metric is judged against the
-# per-codec floors in docs/quality-gates.md (nightly benchstat ratchets
-# land at M19).
+# per-codec floors in docs/quality-gates.md.
 bench:
 	go test -run '^$$' -bench . -benchtime 2s ./...
 
@@ -127,12 +135,18 @@ encoder-quality:
 	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_OPUS_TOOLS=1 WAXFLOW_REQUIRE_VECTORS=1 WAXFLOW_QUALITY_REPORT=$(OPUS_SPEECH_QUALITY_REPORT) \
 		go test -run TestOpusSpeechEncoderQuality -count=1 -timeout 30m -v .
 
-# Browser HLS e2e: a real daemon, the committed /demo page, and hls.js in
-# headless Chromium via Playwright (scripts/hls-e2e.mjs). Gated tooling:
-# needs Node plus `npm install playwright && npx playwright install
-# chromium`; see docs/hls-validation.md.
-hls-e2e:
-	node scripts/hls-e2e.mjs
+# Browser client-matrix e2e: a real daemon, the committed /demo page,
+# and headless Chromium via Playwright (scripts/client-e2e.mjs) driving
+# every browser cell of docs/client-matrix.md: HLS variants through
+# hls.js plus progressive and direct-play streams through <audio>. This
+# run is the automated basis behind the hls-js /caps profile. Gated
+# tooling: needs Node plus `npm install playwright && npx playwright
+# install chromium`.
+client-e2e: build
+	WAXFLOW_BIN=./bin/waxflow node scripts/client-e2e.mjs
+
+# The old name, kept as an alias.
+hls-e2e: client-e2e
 
 docker:
 	docker build --build-arg VERSION=$(VERSION) -t waxflow:$(VERSION) .
@@ -143,3 +157,14 @@ docker-waxbin:
 
 clean:
 	rm -rf bin dist
+
+# The M19 hardening harnesses at nightly scale: a long streaming soak
+# with the goroutine/heap leak watch, a sustained mixed-traffic load
+# test, and the TTFA/seek percentiles with the p95 targets enforced.
+# The same tests run for seconds inside `make test`; this target is the
+# real thing (also the nightly soak job).
+soak:
+	WAXFLOW_SOAK_DURATION=$${WAXFLOW_SOAK_DURATION:-30m} \
+	WAXFLOW_LOAD_DURATION=$${WAXFLOW_LOAD_DURATION:-5m} \
+	WAXFLOW_PERF=1 WAXFLOW_PERF_ITERS=$${WAXFLOW_PERF_ITERS:-50} \
+		go test -run 'TestStreamingSoak|TestLoadMixedTraffic|TestTTFAPercentiles' -count=1 -timeout 90m -v ./server

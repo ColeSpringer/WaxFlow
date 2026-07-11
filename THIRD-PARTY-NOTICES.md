@@ -44,6 +44,15 @@ Entries follow this format:
 > the frame element structure follows ALACDecoder.cpp. The bitstream
 > reader, buffer model, and codec.Decoder integration are original.
 
+> **codec/alac encoder**: the forward direction of the same reference
+> (Apache-2.0): adaptive Golomb encode with the derived escape
+> (ag_enc.c), the forward adaptive-FIR predictor run in lockstep with
+> the decoder's adaptation (dp_enc.c / pc_block), the forward mixer
+> (matrix_enc.c / mix), and the magic-cookie layout. Ported faithfully
+> so decode(encode(x)) is bit-exact and third-party decoders accept the
+> output; the mixRes search, verbatim fallback policy, and muxer
+> integration are original.
+
 > **codec/aac decoder**: the decode logic (raw_data_block, ICS, section
 > and scalefactor decode, dequantization, TNS, M/S and intensity stereo,
 > the IMDCT filterbank) is original code written against ISO/IEC 14496-3
@@ -135,6 +144,27 @@ Entries follow this format:
 > bit-exactness with the reference is a non-goal (the port uses exact math
 > where the reference approximates); the produced bitstreams are verified
 > against the reference decoder instead.
+
+> **codec/opus SILK encoder, tonality analyser, and encoder
+> integration**: `codec/opus/silk_enc_*.go`, `silk_nsq.go`,
+> `silk_encode.go`, `analysis.go`, `mlp.go`, and `opus_encode.go` are a
+> clean-room port of the *libopus* 1.6.1 encoder side (BSD-3-Clause),
+> https://gitlab.xiph.org/xiph/opus: the SILK float analysis chain
+> (`silk/float/*_FLP.c`: pitch analysis, Burg LPC, noise shaping, gain
+> processing), the shared fixed-point quantization core (NSQ, NLSF VQ,
+> gain and LTP quantizers, shell coder) so the bitstream side mirrors
+> the bit-exact decoder, the encode-side bitstream writers
+> (`encode_indices.c`, `encode_pulses.c`, `stereo_encode_pred.c`,
+> `stereo_LR_to_MS.c`), the packet driver with the CBR gain loop
+> (`enc_API.c`, `silk/float/encode_frame_FLP.c`), the tonality analyser
+> and its MLP (`src/analysis.c`, `src/mlp.c`, weights mechanically
+> extracted; its 480-point FFT is WaxFlow's own kernel, not kiss_fft),
+> and the mode-decision/hybrid/redundancy integration
+> (`src/opus_encoder.c`). Constant tables in `silk_enc_tables_gen.go`
+> are extracted by script from the same source. Encoder bit-exactness
+> with the reference is a non-goal; the produced bitstreams are
+> verified through the reference decoder with per-packet range-coder
+> final-state checks.
 
 > **internal/testutil opus_compare**: `internal/testutil/opuscompare.go` is
 > a Go port of *libopus*'s `src/opus_compare.c` (BSD-3-Clause),
