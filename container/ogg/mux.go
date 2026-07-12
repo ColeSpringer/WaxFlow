@@ -94,7 +94,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	m.mapping = muxMappingFor(tracks[0].Codec)
 	if m.mapping == nil {
 		return waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("ogg: cannot mux codec %q (opus, flac)", tracks[0].Codec))
+			fmt.Sprintf("ogg: cannot mux codec %q (opus, flac, vorbis)", tracks[0].Codec))
 	}
 	m.begun = true
 	// The mapping emits its identification and comment pages; comments stay

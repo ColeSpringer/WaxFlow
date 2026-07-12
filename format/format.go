@@ -111,6 +111,20 @@ func Open(src container.Source, hint string, opts *Options) (Media, error) {
 	return newMedia(buildInfo(d.name, demux), demux)
 }
 
+// FromDemuxer wraps an already-opened demuxer into a Media, for sources that
+// are assembled rather than sniffed from one byte stream. The HLS client builds
+// a fragmented-MP4 demuxer over concatenated media segments behind an
+// out-of-band init segment, which has no single sniffable Source for Open to
+// resolve; name labels the synthetic container in Info. The decoder wiring,
+// gapless trims, and seek support are identical to Open's.
+func FromDemuxer(name string, demux container.Demuxer) (Media, error) {
+	info := buildInfo(name, demux)
+	if len(info.Tracks) == 0 {
+		return nil, waxerr.New(waxerr.CodeUnsupportedFormat, "format: no audio tracks")
+	}
+	return newMedia(info, demux)
+}
+
 func buildInfo(name string, demux container.Demuxer) *Info {
 	info := &Info{Container: name, Tracks: demux.Tracks()}
 	if w, ok := demux.(container.Warner); ok {

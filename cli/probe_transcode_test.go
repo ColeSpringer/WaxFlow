@@ -591,11 +591,11 @@ func TestTranscodeCommandErrors(t *testing.T) {
 	if code != 2 {
 		t.Errorf("unknown extension exit = %d, want 2 (invalid)", code)
 	}
-	code, _, _ = run(t, "transcode", "--format", "vorbis", in, filepath.Join(dir, "out.vorbis"))
+	code, _, _ = run(t, "transcode", "--format", "wavpack", in, filepath.Join(dir, "out.wavpack"))
 	if code != 5 {
 		t.Errorf("unregistered format exit = %d, want 5 (unsupported)", code)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "out.vorbis")); err == nil {
+	if _, err := os.Stat(filepath.Join(dir, "out.wavpack")); err == nil {
 		t.Error("failed transcode must not leave an output file")
 	}
 	// Opus is registered: a transcode to .opus succeeds and writes an Ogg file.

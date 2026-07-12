@@ -47,7 +47,8 @@ func TestPlanOptsCoverage(t *testing.T) {
 		Format: "x", Container: "x", Rate: 1, Channels: 1, BitDepth: 1,
 		GainDB: 1, FLACLevel: 1, MP3Bitrate: 1, MP3VBR: true,
 		OpusBitrate: 1, AACBitrate: 1, OpusComplexity: 1, OpusVBR: true,
-		OpusSignal: "x", Shaping: 1, ResampleProfile: "x",
+		OpusSignal: "x", VorbisQuality: 1, VorbisBitrate: 1,
+		Shaping: 1, ResampleProfile: "x",
 	}
 	p := reflect.ValueOf(planOptsOf(populated))
 	for i := range p.NumField() {

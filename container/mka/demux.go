@@ -3,6 +3,7 @@ package mka
 import (
 	"fmt"
 
+	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
 	"github.com/colespringer/waxflow/waxerr"
@@ -479,10 +480,14 @@ func (d *Demuxer) finalizeTrack() error {
 
 	samples := int64(-1)
 	exact := false
-	if d.sel.codecDelay > 0 && d.haveFirstCluster {
-		// A gapless track (CodecDelay is the Opus-in-WebM signal) needs the
-		// exact decoder-output total to place the end trim. The walk that finds
-		// it also builds the seek index.
+	if (d.sel.codecDelay > 0 || d.needsGaplessWalk()) && d.haveFirstCluster {
+		// A gapless track needs the exact decoder-output total to place the end
+		// trim. Opus signals it with CodecDelay (front) plus DiscardPadding
+		// (tail); Vorbis carries no absolute sample count in its bitstream and
+		// signals its tail trim with DiscardPadding alone (CodecDelay 0, the
+		// priming is inside its first packet), so it always needs the walk to
+		// resolve rawTotal - padding. The walk that finds the total also builds
+		// the seek index.
 		if err := d.ensureWalk(); err != nil {
 			return err
 		}
@@ -508,6 +513,15 @@ func (d *Demuxer) finalizeTrack() error {
 	}
 	d.resetReading(d.firstClusterOff)
 	return nil
+}
+
+// needsGaplessWalk reports whether the selected codec needs the frame-counting
+// walk to resolve an exact sample total independent of a CodecDelay signal.
+// Vorbis does: its packets carry no absolute position (unlike FLAC's numbered
+// frames) and it self-primes with no front delay, so the container's rawTotal
+// minus the DiscardPadding tail is the only exact length.
+func (d *Demuxer) needsGaplessWalk() bool {
+	return d.setup.id == codec.Vorbis
 }
 
 // durationSamples converts the Info Duration (in ticks) to a sample count, or

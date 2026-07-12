@@ -115,6 +115,17 @@ type TranscodeOptions struct {
 	// podcasts), "music" toward CELT. The zero value ("" or "auto") lets the
 	// encoder's analyser decide per frame.
 	OpusSignal string
+	// VorbisQuality selects VBR quality for vorbis output on libvorbis's -q
+	// scale (-1..10); higher is larger and better. The zero value uses the
+	// encoder default (3.0). Vorbis is natively quality-driven, so this is the
+	// primary knob; a small nonzero value near 0 reaches the lowest qualities
+	// (the zero value cannot, matching the "0 means default" idiom).
+	VorbisQuality float64
+	// VorbisBitrate is a reserved ABR target in bits per second for vorbis
+	// output. ABR rate control is not implemented, so a nonzero value is
+	// rejected at plan time rather than silently ignored; leave it 0 for
+	// quality-driven VBR.
+	VorbisBitrate int
 	// Shaping selects the dither strategy for quantization; the default
 	// is flat TPDF.
 	Shaping dither.Shaping

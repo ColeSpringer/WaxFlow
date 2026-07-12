@@ -143,7 +143,16 @@ func (e *Engine) Transcode(ctx context.Context, src container.Source, hint strin
 		return nil, err
 	}
 	defer med.Close()
+	return e.TranscodeMedia(ctx, med, dst, opts)
+}
 
+// TranscodeMedia transcodes an already-opened Media to dst, the same
+// decode -> DSP -> encode -> mux pipeline as Transcode without the source-open
+// step. It is the entry point for inputs that are not a single sniffable Source:
+// the HLS client assembles a presentation from many fetched resources and
+// exposes it as a format.Media, which flows through here exactly like a local
+// file. The caller owns med and closes it.
+func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Writer, opts TranscodeOptions) (*TranscodeResult, error) {
 	srcTrack := med.Info().Default()
 	srcSamples := srcTrack.Samples
 	if opts.FromSample < 0 {
@@ -384,6 +393,8 @@ type planOpts struct {
 	OpusComplexity  int
 	OpusVBR         bool
 	OpusSignal      string
+	VorbisQuality   float64
+	VorbisBitrate   int
 	Shaping         dither.Shaping
 	ResampleProfile resample.Profile
 }
@@ -405,6 +416,8 @@ func planOptsOf(opts TranscodeOptions) planOpts {
 		OpusComplexity:  opts.OpusComplexity,
 		OpusVBR:         opts.OpusVBR,
 		OpusSignal:      opts.OpusSignal,
+		VorbisQuality:   opts.VorbisQuality,
+		VorbisBitrate:   opts.VorbisBitrate,
 		Shaping:         opts.Shaping,
 		ResampleProfile: opts.ResampleProfile,
 	}
@@ -730,6 +743,66 @@ var outputs = []output{
 				return opus.NewEncoder(f, eopts)
 			},
 		},
+	},
+	{
+		name: "vorbis",
+		// The opus row claims only "opus", and flac's Ogg form is a container
+		// override (its extension stays "flac"), so "ogg"/"oga" are free for the
+		// native Ogg-Vorbis output the extension conventionally implies.
+		exts:      []string{"ogg", "oga"},
+		live:      true,
+		lossy:     true,
+		mediaType: "audio/ogg",
+		// headerBytes approximates the Ogg-Vorbis overhead the sample estimate
+		// omits: the identification/comment/setup header pages plus per-page
+		// framing. The setup header is the bulk; it is a hint, and the live
+		// stream is chunked with no Content-Length.
+		headerBytes: 4096,
+		codecID:     codec.Vorbis,
+		adjust: func(spec *dsp.ChainSpec, _ audio.Format, _ TranscodeOptions) {
+			// Vorbis encodes float at the source rate and supports multichannel
+			// natively (up to eight channels), so unlike Opus it neither resamples
+			// to a fixed rate nor downmixes: keep the source rate and channel
+			// count. Block sizes vary per packet, so leave FrameSize 0 and let the
+			// encoder do its own overlap buffering.
+			spec.Float = true
+			spec.BitDepth = 0
+		},
+		plan: func(f audio.Format, opts TranscodeOptions) (string, int, int, error) {
+			eopts, err := vorbisEncoderOptions(opts)
+			if err != nil {
+				return "", 0, 0, err
+			}
+			enc, err := vorbis.NewEncoder(f, eopts)
+			if err != nil {
+				return "", 0, 0, err
+			}
+			return vorbis.EncoderVersion, 0, enc.Bitrate(), nil
+		},
+		build: func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
+			eopts, err := vorbisEncoderOptions(opts)
+			if err != nil {
+				return nil, nil, err
+			}
+			enc, err := vorbis.NewEncoder(f, eopts)
+			if err != nil {
+				return nil, nil, err
+			}
+			if isMatroska(opts.Container) {
+				return enc, mkaMuxer(dst, opts), nil
+			}
+			return enc, ogg.NewMuxer(dst, &ogg.MuxerOptions{Tags: opts.Tags}), nil
+		},
+		// Vorbis rides in Matroska and WebM (it is, with Opus, one of webm's two
+		// audio codecs) besides its native Ogg.
+		container: func(name string) (string, error) {
+			if mt, ok := matroskaContainer(name, true); ok {
+				return mt, nil
+			}
+			return "", waxerr.New(waxerr.CodeInvalidRequest,
+				fmt.Sprintf("waxflow: vorbis container %q: want mka or webm", name))
+		},
+		// hls stays nil: Vorbis has no CMAF/HLS segmented form.
 	},
 	{
 		name:        "aiff",
@@ -1129,6 +1202,17 @@ func opusEncoderOptions(opts TranscodeOptions) (*opus.EncoderOptions, error) {
 		Complexity: opts.OpusComplexity,
 		VBR:        opts.OpusVBR,
 		Signal:     sig,
+	}, nil
+}
+
+// vorbisEncoderOptions builds the codec-level Vorbis options from a transcode
+// request. A zero VorbisQuality keeps the encoder default; VorbisBitrate passes
+// through so the encoder rejects a nonzero ABR target (unimplemented) at plan
+// time rather than silently ignoring it.
+func vorbisEncoderOptions(opts TranscodeOptions) (*vorbis.EncoderOptions, error) {
+	return &vorbis.EncoderOptions{
+		Quality: opts.VorbisQuality,
+		Bitrate: opts.VorbisBitrate,
 	}, nil
 }
 

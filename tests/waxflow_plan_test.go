@@ -161,7 +161,7 @@ func TestPlanTranscode(t *testing.T) {
 	}
 
 	// Plan validation mirrors Transcode validation.
-	if _, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "vorbis"}); waxerr.CodeOf(err) != waxerr.CodeUnsupportedFormat {
+	if _, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "wavpack"}); waxerr.CodeOf(err) != waxerr.CodeUnsupportedFormat {
 		t.Fatalf("unknown format: %v", err)
 	}
 	if _, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "wav", FromSample: -5}); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
@@ -174,13 +174,14 @@ func TestPlanTranscode(t *testing.T) {
 
 func TestOutputsTable(t *testing.T) {
 	outs := waxflow.Outputs()
-	if len(outs) != 7 || outs[0].Name != "wav" || !outs[0].Live ||
+	if len(outs) != 8 || outs[0].Name != "wav" || !outs[0].Live ||
 		outs[1].Name != "opus" || !outs[1].Live ||
-		outs[2].Name != "aiff" || outs[2].Live ||
-		outs[3].Name != "flac" || !outs[3].Live ||
-		outs[4].Name != "mp3" || !outs[4].Live ||
-		outs[5].Name != "aac" || !outs[5].Live ||
-		outs[6].Name != "alac" || !outs[6].Live {
+		outs[2].Name != "vorbis" || !outs[2].Live ||
+		outs[3].Name != "aiff" || outs[3].Live ||
+		outs[4].Name != "flac" || !outs[4].Live ||
+		outs[5].Name != "mp3" || !outs[5].Live ||
+		outs[6].Name != "aac" || !outs[6].Live ||
+		outs[7].Name != "alac" || !outs[7].Live {
 		t.Fatalf("Outputs() = %+v", outs)
 	}
 }

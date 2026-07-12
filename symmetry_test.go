@@ -30,11 +30,10 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	// symmetryGaps is the allowlist: the asymmetries that are known-open and
 	// deliberately deferred to a later phase. Each phase deletes its own entry
 	// as it lands, so the list is the burn-down checklist and is empty once
-	// every codec encodes+decodes and every container demuxes+muxes.
-	symmetryGaps := map[string]string{
-		"vorbis-encode":  "phase 4/5: Vorbis encoder",
-		"ogg-vorbis-mux": "phase 5: Ogg-Vorbis mux mapping (rides with the encoder)",
-	}
+	// every codec encodes+decodes and every container demuxes+muxes. Phases 0-5
+	// closed every gap, so the list is now empty: the guard is a pure ratchet
+	// that fails the moment a new codec or container ships half-symmetric.
+	symmetryGaps := map[string]string{}
 
 	decodes := map[codec.ID]bool{}
 	for _, id := range format.Decoders() {
@@ -88,7 +87,7 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	// half, so a new decoder-only or encoder-only codec is caught even if
 	// nobody thought to add a named predicate for it.
 	for id := range decodes {
-		if !encodes[id] && !(id == codec.Vorbis && symmetryGaps["vorbis-encode"] != "") {
+		if !encodes[id] {
 			t.Errorf("codec %q decodes but has no encoder (add an outputs row or an allowlist entry)", id)
 		}
 	}

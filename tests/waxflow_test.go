@@ -359,9 +359,13 @@ func TestTranscodeRejections(t *testing.T) {
 	audio.Put(src)
 	e := waxflow.New()
 
-	_, err := e.Transcode(context.Background(), container.BytesSource(wav), "", &memWS{}, waxflow.TranscodeOptions{Format: "vorbis"})
-	if !errors.Is(err, waxerr.ErrUnsupportedFormat) {
-		t.Errorf("vorbis output err = %v, want unsupported-format (decode-only, no encoder)", err)
+	// A nonzero VorbisBitrate is a reserved ABR target the encoder does not
+	// implement, so a vorbis request carrying one must fail at plan time rather
+	// than silently produce a VBR stream that never holds the rate.
+	_, err := e.Transcode(context.Background(), container.BytesSource(wav), "", &memWS{},
+		waxflow.TranscodeOptions{Format: "vorbis", VorbisBitrate: 128000})
+	if !errors.Is(err, waxerr.ErrInvalidRequest) {
+		t.Errorf("vorbis ABR err = %v, want invalid-request (ABR unimplemented)", err)
 	}
 	_, err = e.Transcode(context.Background(), container.BytesSource(wav), "", &memWS{}, waxflow.TranscodeOptions{})
 	if !errors.Is(err, waxerr.ErrInvalidRequest) {
@@ -386,11 +390,12 @@ func (onlyWriter) Write(p []byte) (int, error) { return len(p), nil }
 // TestOutputTable pins the writer-side capability table: names, extension
 // mapping (both spellings), and its agreement with the read-side exts.
 func TestOutputTable(t *testing.T) {
-	if got := waxflow.OutputFormats(); len(got) != 7 || got[0] != "wav" || got[1] != "opus" || got[2] != "aiff" || got[3] != "flac" || got[4] != "mp3" || got[5] != "aac" || got[6] != "alac" {
+	if got := waxflow.OutputFormats(); len(got) != 8 || got[0] != "wav" || got[1] != "opus" || got[2] != "vorbis" || got[3] != "aiff" || got[4] != "flac" || got[5] != "mp3" || got[6] != "aac" || got[7] != "alac" {
 		t.Errorf("OutputFormats() = %v", got)
 	}
 	tests := []struct{ ext, want string }{
 		{"opus", "opus"}, {".OPUS", "opus"},
+		{"ogg", "vorbis"}, {".OGG", "vorbis"}, {"oga", "vorbis"},
 		{"wav", "wav"}, {".WAV", "wav"}, {"rf64", "wav"}, {"bw64", "wav"},
 		{"aif", "aiff"}, {".aiff", "aiff"}, {"aifc", "aiff"}, {"afc", "aiff"},
 		{"flac", "flac"}, {".FLAC", "flac"},

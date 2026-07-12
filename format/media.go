@@ -102,6 +102,13 @@ func (m *media) Close() error {
 	if r, ok := m.decoder.(codec.Releaser); ok {
 		r.Release()
 	}
+	// A demuxer that owns resources beyond the Source (the HLS client backs its
+	// concatenated media with a temp file it must delete) is closed here, so
+	// closing the Media releases the whole chain. Most demuxers hold nothing and
+	// do not implement io.Closer.
+	if c, ok := m.demux.(io.Closer); ok {
+		return c.Close()
+	}
 	return nil
 }
 
