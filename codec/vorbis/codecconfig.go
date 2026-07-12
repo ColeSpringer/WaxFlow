@@ -27,6 +27,13 @@ func appendXiphLen(out []byte, n int) []byte {
 	return append(out, byte(n))
 }
 
+// SplitConfig reverses PackHeaders, returning the identification, comment, and
+// setup packets. The Ogg-Vorbis and Matroska muxers and the encoder-quality
+// harness split the codec-config blob back into its three Vorbis headers.
+func SplitConfig(blob []byte) (id, comment, setup []byte, err error) {
+	return splitHeaders(blob)
+}
+
 // splitHeaders reverses PackHeaders, returning the identification, comment, and
 // setup packets.
 func splitHeaders(blob []byte) (id, comment, setup []byte, err error) {

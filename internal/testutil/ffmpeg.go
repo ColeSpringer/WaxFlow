@@ -78,11 +78,29 @@ func FFmpegDecodeS32(t testing.TB, path string) []int32 {
 	return out
 }
 
-// FFmpegDecodeF32 decodes a file with ffmpeg to raw interleaved
-// little-endian float32 samples.
+// FFmpegDecodeF32 decodes a file with ffmpeg (its default decoder) to raw
+// interleaved little-endian float32 samples.
 func FFmpegDecodeF32(t testing.TB, path string) []float32 {
+	return ffmpegDecodeF32(t, path, "")
+}
+
+// FFmpegDecodeF32Codec decodes with a specific ffmpeg decoder (e.g. "libvorbis").
+// ffmpeg's default Vorbis decoder is its own native one, which is flagged
+// experimental (trac.ffmpeg.org ticket 10571) and mis-decodes some legal
+// coupled streams; selecting libvorbis pins the reference decoder so a stream is
+// tested against libvorbis itself, not ffmpeg's experimental reimplementation.
+func FFmpegDecodeF32Codec(t testing.TB, path, decoder string) []float32 {
+	return ffmpegDecodeF32(t, path, decoder)
+}
+
+func ffmpegDecodeF32(t testing.TB, path, decoder string) []float32 {
 	t.Helper()
-	raw := run(t, FFmpeg(t), "-v", "error", "-i", path, "-f", "f32le", "-c:a", "pcm_f32le", "-")
+	args := []string{"-v", "error"}
+	if decoder != "" {
+		args = append(args, "-c:a", decoder)
+	}
+	args = append(args, "-i", path, "-f", "f32le", "-c:a", "pcm_f32le", "-")
+	raw := run(t, FFmpeg(t), args...)
 	out := make([]float32, len(raw)/4)
 	for i := range out {
 		out[i] = math.Float32frombits(binary.LittleEndian.Uint32(raw[i*4:]))

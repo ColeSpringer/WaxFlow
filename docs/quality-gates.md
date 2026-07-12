@@ -117,6 +117,41 @@ deterministic mode.
   windows (report-only below 95%, blocking below 90%).
 - Non-negotiable for v1.0: CELT-only is sequencing, not scope fallback.
 
+### Vorbis
+- `decode(encode(x))` runs through both our decoder and libvorbis (via ffmpeg);
+  the gapless sample-count invariant (`SamplesExact`) holds; golden-stream
+  byte-exactness in deterministic mode.
+- ODG-proxy at libvorbis -q4 (~128 kbps): corpus mean >= **libvorbis mean -
+  0.2**; no track > **0.5** below libvorbis. libvorbis (the reference) is a
+  clean-room oracle, never opened while implementing our encoder.
+- Self-generated clean-room codebooks trade size for provenance: streams may be
+  somewhat larger than libvorbis at equal quality; the gate is quality
+  (ODG-proxy), not byte-competitiveness.
+- >= **40x** realtime (matching MP3; a long-block-plus-psy pipeline).
+- Decode with libvorbis, not ffmpeg's *native* Vorbis decoder: the native
+  decoder is experimental (trac.ffmpeg.org/10571) and mis-decodes some legal
+  coupled streams, so the tests pin `-c:a libvorbis`.
+- Status: the encoder MEETS the ODG gate. At -q4 the corpus mean is ~+0.3 vs
+  libvorbis with every track at or above libvorbis (worst per-track ~+0.03,
+  tonal): a peak-envelope floor plus a block-relative mask floor fixed tonal,
+  block switching fixed transient pre-echo, and square-polar stereo coupling
+  (per-channel type-1 residues, coupling applied at the mapping layer) with
+  perceptual (not uniformly-fine) allocation
+  carries stereo material near libvorbis in both quality and size.
+- Size: residue is coded by multi-dimensional product-lattice VQ books whose
+  codeword lengths are trained offline (`books_gen.go` via `go generate`), and it
+  is allocated by masking, not uniformly fine: coupled stereo splits into per-
+  channel magnitude and angle (the angle skips wherever it is zero), and steady
+  broadband noise is capped at coarse (its quantization noise is self-masked)
+  while a transient's broadband attack stays fine (gated on temporal steadiness,
+  since a sharp attack looks flat too). At libvorbis -q4 the synthesized corpus
+  runs ~2.6x libvorbis's size (down from ~3.9x before these allocations), tonal
+  ~2x, noise the widest (~5.6x: even coarse carries more precision than
+  libvorbis's noise coding). Streams still exceed libvorbis (the clean-room books
+  and the peak-floor scheme carry more residue precision), which the plan accepts
+  for a VBR codec; the gate remains quality, not size, and quality is unchanged
+  by the allocation (mean +0.31, every track >= libvorbis).
+
 ## Service targets (recorded per release once streaming and HLS exist)
 
 - TTFA p95: < **300 ms** warm cache, < **800 ms** cold.

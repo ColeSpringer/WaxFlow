@@ -204,16 +204,31 @@ func (f *floor1) apply(st *floorState, spec []float32, n2 int) {
 		st.final = make([]int, count)
 		st.step2 = make([]bool, count)
 	}
-	final := st.final[:count]
-	step2 := st.step2[:count]
-	final[0] = st.y[0]
-	final[1] = st.y[1]
+	if cap(st.curve) < n2 {
+		st.curve = make([]float32, n2)
+	}
+	curve := st.curve[:n2]
+	f.curve(st.y, curve, st.final[:count], st.step2[:count], n2)
+	for i := 0; i < n2; i++ {
+		spec[i] *= curve[i]
+	}
+}
+
+// curve synthesizes the floor-1 amplitude curve from decoded posts y into
+// curve[:n2] (spec 7.2.4). final and step2 are caller scratch of length >=
+// len(xs). It is the amplitude the residue multiplies; the encoder calls it
+// with the posts it will emit so its residue normalization divides by exactly
+// the curve the decoder reconstructs.
+func (f *floor1) curve(y []int, curve []float32, final []int, step2 []bool, n2 int) {
+	count := len(f.xs)
+	final[0] = y[0]
+	final[1] = y[1]
 	step2[0], step2[1] = true, true
 	rng := f.rangeVal
 	for i := 2; i < count; i++ {
 		low, high := f.lowNeighbor[i], f.highNeighbor[i]
 		pred := renderPoint(f.xs[low], final[low], f.xs[high], final[high], f.xs[i])
-		val := st.y[i]
+		val := y[i]
 		highroom := rng - pred
 		lowroom := pred
 		room := 2 * lowroom
@@ -239,11 +254,6 @@ func (f *floor1) apply(st *floorState, spec []float32, n2 int) {
 			final[i] = pred
 		}
 	}
-
-	if cap(st.curve) < n2 {
-		st.curve = make([]float32, n2)
-	}
-	curve := st.curve[:n2]
 	hx, hy := 0, 0
 	lx := 0
 	ly := final[f.sortOrder[0]] * f.multiplier
@@ -259,9 +269,6 @@ func (f *floor1) apply(st *floorState, spec []float32, n2 int) {
 	}
 	if hx < n2 {
 		renderLine(hx, hy, n2, hy, curve)
-	}
-	for i := 0; i < n2; i++ {
-		spec[i] *= curve[i]
 	}
 }
 

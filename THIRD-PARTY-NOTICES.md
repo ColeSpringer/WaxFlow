@@ -88,6 +88,20 @@ Entries follow this format:
 > ported line-by-line; the floor1 inverse-dB table is computed rather
 > than transcribed, and the IMDCT reuses WaxFlow's own transform.
 
+> **codec/vorbis encoder**: original code written against the Xiph
+> *Vorbis I specification*, the forward direction of the decoder above. Its
+> codebooks are self-generated clean-room books: computed floor/class books,
+> plus multi-dimensional product-lattice residue books whose codeword lengths
+> are Huffman-trained offline (`codec/vorbis/books_gen.go`, produced by the
+> `booksgen` generator run via `go generate`) on a corpus WaxFlow synthesizes
+> from scratch (tones, chords, noise, sweeps). No external or libvorbis-derived
+> audio or book tables are used; the encoder defines its own books in the setup
+> header. libvorbis is a test-only
+> quality oracle (its binary is invoked via ffmpeg; its source is never
+> opened), and *jfreymuth/oggvorbis* (MIT) additionally serves as a test-only
+> independent decoder oracle in the nested `oracletest` module, alongside
+> *hajimehoshi/go-mp3*. Neither enters the runtime pipeline.
+
 > **codec/opus range decoder**: `codec/opus/rangedec.go` is a clean-room
 > port of the Opus entropy decoder from *libopus* `entdec.c`
 > (BSD-3-Clause), https://gitlab.xiph.org/xiph/opus, per RFC 6716
