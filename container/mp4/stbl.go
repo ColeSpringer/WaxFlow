@@ -95,6 +95,12 @@ func (d *Demuxer) parseStbl(t *track, body []byte, depth int) error {
 	if !isAudio && !isText {
 		return nil // video and other tracks need no sample map here
 	}
+	// A fragmented movie's sample tables are empty by design (samples live in
+	// moof fragments); the stsd alone gives the codec, config, and format. So
+	// require the full table only for a progressive movie.
+	if d.fragmented {
+		return nil
+	}
 	if !haveStsd || !haveStsz || len(stts) == 0 || len(chunks) == 0 {
 		if isAudio {
 			return malformed("audio track %d missing a sample table box", t.id)

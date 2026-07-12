@@ -33,6 +33,15 @@ type track struct {
 // parseMoov walks the movie box, returning the parsed tracks. It records
 // the movie timescale and Nero chapter list on the demuxer.
 func (d *Demuxer) parseMoov(moov []byte) ([]*track, error) {
+	// Pre-scan for mvex so parseStbl knows the movie is fragmented (its sample
+	// tables are empty by design) before it parses any trak; mvex trails the
+	// traks in the box order, so it cannot be discovered during the main walk.
+	_ = walkBoxes(moov, func(typ string, payload []byte) error {
+		if typ == "mvex" {
+			d.parseMvex(payload)
+		}
+		return nil
+	})
 	var tracks []*track
 	err := walkBoxes(moov, func(typ string, payload []byte) error {
 		switch typ {

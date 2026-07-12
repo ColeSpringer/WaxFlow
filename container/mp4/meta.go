@@ -17,7 +17,6 @@ import (
 // Delay/Padding/Samples to deliver the trimmed timeline and to map seeks.
 func (d *Demuxer) gapless(t *track) (delay, padding, samples int64) {
 	totalRaw := t.st.totalDur
-	rate := int64(t.fmt.Rate)
 
 	if d.smpbOK {
 		delay = clamp(d.smpbDelay, 0, totalRaw)
@@ -29,14 +28,17 @@ func (d *Demuxer) gapless(t *track) (delay, padding, samples int64) {
 		return delay, padding, samples
 	}
 
+	// A nonzero edit-list media_time is the encoder-delay priming. The
+	// progressive path trusts it only for a real (nonzero) delay, falling back
+	// to the stbl raw total for the length; a zero-delay edit is ignored here
+	// because the sample table already gives the exact length. (The fragmented
+	// path in fragdemux.go has no sample table, so it trusts the edit's
+	// duration even at zero delay; both share editListTrims for the rescale.)
 	if t.hasEdit && t.editMedia > 0 {
-		delay = t.editMedia
-		if t.timescale > 0 && rate > 0 && t.timescale != rate {
-			delay = mulDivSat(t.editMedia, rate, t.timescale)
-		}
+		delay, seg, haveSeg := editListTrims(t, d.movieTimescale)
 		delay = clamp(delay, 0, totalRaw)
-		if t.editSegDur > 0 && d.movieTimescale > 0 && rate > 0 {
-			samples = mulDivSat(t.editSegDur, rate, d.movieTimescale)
+		if haveSeg {
+			samples = seg
 		} else {
 			samples = totalRaw - delay
 		}
@@ -48,6 +50,28 @@ func (d *Demuxer) gapless(t *track) (delay, padding, samples int64) {
 	}
 
 	return 0, 0, totalRaw
+}
+
+// editListTrims rescales a track's first real edit into gapless trims in output
+// samples: the front delay from its media_time (media timescale) and the played
+// length from its segment_duration (movie timescale). haveSeg is false when the
+// edit declares no usable duration, leaving the length to the caller's fallback.
+// The progressive (gapless) and fragmented (fragmentedGapless) readers share
+// this rescale and differ only in that fallback (the stbl raw total vs unknown),
+// which each applies around this call.
+func editListTrims(t *track, movieTimescale int64) (delay, segSamples int64, haveSeg bool) {
+	rate := int64(t.fmt.Rate)
+	delay = t.editMedia
+	if t.timescale > 0 && rate > 0 && t.timescale != rate {
+		delay = mulDivSat(t.editMedia, rate, t.timescale)
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	if t.editSegDur > 0 && movieTimescale > 0 && rate > 0 {
+		return delay, mulDivSat(t.editSegDur, rate, movieTimescale), true
+	}
+	return delay, 0, false
 }
 
 func clamp(v, lo, hi int64) int64 {

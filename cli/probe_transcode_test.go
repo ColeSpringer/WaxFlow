@@ -206,6 +206,95 @@ func TestTranscodeFlagErrors(t *testing.T) {
 	}
 }
 
+// probedOutput is a container/codec probe of a written file.
+type probedOutput struct{ container, codec string }
+
+func probeOutput(t *testing.T, path string) probedOutput {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	src, err := container.FileSource(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := waxflow.New().Probe(src, "", nil)
+	if err != nil {
+		t.Fatalf("probe %s: %v", path, err)
+	}
+	return probedOutput{container: info.Container, codec: string(info.Default().Codec)}
+}
+
+// TestTranscodeAACInMatroskaLoudness guards the isMP4 classification: AAC in a
+// Matroska container with loudness analysis previously misread the output as
+// MP4 and tried to patch MP4 ReplayGain atoms in a Matroska file, which failed
+// and deleted the output. It must now succeed and leave a real .mka.
+func TestTranscodeAACInMatroskaLoudness(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	out := filepath.Join(dir, "out.mka")
+	writeWAV(t, in, 48000)
+
+	code, _, errOut := run(t, "transcode", "--format", "aac", "--container", "mka",
+		"--loudness", "analyze", in, out)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, errOut)
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Fatalf("output missing (wrongly patched as MP4 and deleted?): %v", err)
+	}
+	if got := probeOutput(t, out); got.container != "mka" || got.codec != "aac-lc" {
+		t.Errorf("output = %+v, want mka/aac-lc", got)
+	}
+}
+
+// TestTranscodeExplicitFormatInfersContainer guards container inference: an
+// explicit --format must not defeat the extension's container, so
+// `--format opus out.webm` writes Opus-in-WebM (a Matroska file), not an Ogg
+// stream misnamed .webm.
+func TestTranscodeExplicitFormatInfersContainer(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	writeWAV(t, in, 4800)
+	out := filepath.Join(dir, "out.webm")
+
+	code, _, errOut := run(t, "transcode", "--format", "opus", in, out)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, errOut)
+	}
+	// The mka demuxer names both Matroska and WebM "mka"; an Ogg-Opus stream
+	// would probe as "ogg" instead.
+	if got := probeOutput(t, out); got.container != "mka" || got.codec != "opus" {
+		t.Errorf("output = %+v, want mka (Matroska/WebM)/opus", got)
+	}
+}
+
+// TestTranscodeOggFLACLoudnessEmbedsRG guards the Ogg loudness path: the Ogg
+// muxer embeds tags at Begin and the post-pass is skipped for Ogg, so the
+// measured ReplayGain must be predicted and embedded up front rather than
+// computed and dropped. The RG tag rides in the VORBIS_COMMENT as plain text.
+func TestTranscodeOggFLACLoudnessEmbedsRG(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	out := filepath.Join(dir, "out.oga")
+	writeWAV(t, in, 48000)
+
+	code, _, errOut := run(t, "transcode", "--format", "flac", "--container", "ogg",
+		"--loudness", "analyze", in, out)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, errOut)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte("REPLAYGAIN_TRACK_GAIN")) {
+		t.Error("Ogg-FLAC + --loudness analyze output is missing its ReplayGain tag")
+	}
+}
+
 func TestProbeCommand(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "test.wav")

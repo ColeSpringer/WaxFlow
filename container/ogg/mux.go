@@ -2,6 +2,7 @@ package ogg
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 
 	"github.com/colespringer/waxflow/codec"
@@ -9,25 +10,26 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-// Muxer writes an Ogg-Opus stream (RFC 7845): an OpusHead page, an OpusTags
-// page, then audio pages batching multiple Opus packets each. The header
-// pages and the first audio page are small so the first audio flushes
-// quickly (TTFA); later packets batch until a page nears the streaming
+// Muxer writes an Ogg stream: header pages (identification, comment), then
+// audio pages batching multiple packets each. The codec-specific part (which
+// header pages, how a packet advances the granule, the final granule) lives in
+// a muxMapping selected from the track codec at Begin; Opus and FLAC are wired.
+// The header pages and the first audio page are small so the first audio
+// flushes quickly (TTFA); later packets batch until a page nears the streaming
 // target size, one second of audio, or the segment-table limit, keeping the
-// per-page framing overhead a fraction of a percent instead of the ~11% a
-// page per 20 ms packet would cost. Pages carry a 48 kHz granule position;
-// the page being batched is held until End can stamp the final page's
-// granule with the end-trim and the end-of-stream flag. The muxer needs no
-// seeking, so it streams live.
+// per-page framing overhead a fraction of a percent instead of the ~11% a page
+// per 20 ms packet would cost. The page being batched is held until End can
+// stamp the final page's granule with the mapping's end position and the
+// end-of-stream flag. The muxer needs no seeking, so it streams live.
 type Muxer struct {
-	w      io.Writer
-	serial uint32
-	seq    uint32
-	head   []byte // OpusHead, from the track's CodecConfig
-	vendor string
-	tags   []container.Tag
+	w       io.Writer
+	serial  uint32
+	seq     uint32
+	vendor  string
+	tags    []container.Tag
+	mapping muxMapping
 
-	granule int64 // cumulative decoded samples (48 kHz, includes pre-skip)
+	granule int64 // cumulative decoded samples (the mapping's granule timeline)
 	// The audio page being batched: packet payloads, their segment table,
 	// the granule after the last batched packet, and the batch's duration.
 	pending        []byte
@@ -48,23 +50,25 @@ const (
 	maxPageSegEntries = 255
 )
 
-// MuxerOptions configures the Ogg-Opus muxer.
+// MuxerOptions configures the Ogg muxer.
 type MuxerOptions struct {
-	// Vendor is the OpusTags vendor string (defaults to "WaxFlow").
+	// Vendor is the comment-header vendor string (defaults to "WaxFlow").
 	Vendor string
 	// Serial overrides the logical bitstream serial number (0 uses the default).
 	Serial uint32
-	// Tags are written as OpusTags user comments in order. Vorbis comments
-	// are the canonical vocabulary already, so every key passes through as
-	// KEY=value.
+	// Tags are written as comment-header user comments in order. Vorbis
+	// comments are the canonical vocabulary already, so every key passes
+	// through as KEY=value.
 	Tags []container.Tag
 }
 
 // oggOpusSerial is the default logical-stream serial ("Opus"), fixed so
-// deterministic-mode output is byte-reproducible.
+// deterministic-mode output is byte-reproducible. The value is the same for
+// every mapping; the serial only needs to be stable within one stream.
 const oggOpusSerial = 0x4F707573
 
-// NewMuxer returns an Ogg-Opus muxer writing to w.
+// NewMuxer returns an Ogg muxer writing to w. The codec (and so the mapping) is
+// selected from the track at Begin.
 func NewMuxer(w io.Writer, opts *MuxerOptions) *Muxer {
 	m := &Muxer{w: w, serial: oggOpusSerial, vendor: "WaxFlow"}
 	if opts != nil {
@@ -82,81 +86,58 @@ func NewMuxer(w io.Writer, opts *MuxerOptions) *Muxer {
 // NeedsSeek is false: Ogg-Opus writes a compliant streaming form.
 func (m *Muxer) NeedsSeek() bool { return false }
 
-// Begin writes the OpusHead and OpusTags header pages.
+// Begin selects the codec's mapping and writes its header pages.
 func (m *Muxer) Begin(tracks []container.Track) error {
-	if len(tracks) != 1 || tracks[0].Codec != codec.Opus {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, "ogg: muxer needs a single Opus track")
+	if len(tracks) != 1 {
+		return waxerr.New(waxerr.CodeUnsupportedFormat, "ogg: muxer needs a single track")
 	}
-	head := tracks[0].CodecConfig
-	if len(head) < 19 || string(head[:8]) != "OpusHead" {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, "ogg: track CodecConfig is not an OpusHead")
+	m.mapping = muxMappingFor(tracks[0].Codec)
+	if m.mapping == nil {
+		return waxerr.New(waxerr.CodeUnsupportedFormat,
+			fmt.Sprintf("ogg: cannot mux codec %q (opus, flac)", tracks[0].Codec))
 	}
-	m.head = head
 	m.begun = true
-	// BOS page: OpusHead alone.
-	if err := m.emitPage(head, lacing(len(head)), 0, flagBOS); err != nil {
-		return err
-	}
-	// Second page: the OpusTags comment header. Comments stay bounded so
-	// the header always fits one page's segment table (255*255 bytes);
-	// the engine passes a minimal tag set, and anything past the cap is
-	// dropped rather than growing the pre-audio headers without limit.
-	tags := make([]byte, 0, 8+4+len(m.vendor)+4)
-	tags = append(tags, "OpusTags"...)
-	tags = binary.LittleEndian.AppendUint32(tags, uint32(len(m.vendor)))
-	tags = append(tags, m.vendor...)
-	countAt := len(tags)
-	tags = binary.LittleEndian.AppendUint32(tags, 0) // user comment count, patched below
-	count := uint32(0)
-	for _, t := range m.tags {
-		if !container.ValidTagKey(t.Key) {
-			continue
-		}
-		c := t.Key + "=" + t.Value
-		if len(tags)+4+len(c) > maxTagsPageBytes {
-			// Skip just the comment that does not fit: one oversized
-			// value (hostile or merely huge lyrics) must not erase the
-			// small descriptive tags after it.
-			continue
-		}
-		tags = binary.LittleEndian.AppendUint32(tags, uint32(len(c)))
-		tags = append(tags, c...)
-		count++
-	}
-	binary.LittleEndian.PutUint32(tags[countAt:], count)
-	return m.emitPage(tags, lacing(len(tags)), 0, 0)
+	// The mapping emits its identification and comment pages; comments stay
+	// bounded (maxTagsPageBytes) so the comment header always fits one page's
+	// segment table (255*255 bytes) and the pre-audio headers stay small.
+	return m.mapping.writeHeaders(tracks[0].CodecConfig, m.tags, m.vendor, m.emitPage)
 }
 
-// maxTagsPageBytes bounds the OpusTags header so it stays a single page
-// (the segment table caps a page at 255*255 payload bytes) and keeps the
-// pre-audio headers small for time-to-first-audio.
+// maxTagsPageBytes bounds a comment header so it stays a single page (the
+// segment table caps a page at 255*255 payload bytes) and keeps the pre-audio
+// headers small for time-to-first-audio.
 const maxTagsPageBytes = 48 << 10
 
-// WritePacket adds an Opus packet to the page being batched, first flushing
-// that page when the packet would not fit (segment table, byte target, or
-// duration cap) or when it is the stream's first audio page, which stays a
-// single packet so audio reaches the client right after the headers. The
-// batch always keeps at least the newest packet, so End can stamp the final
-// page's granule with the end-trim.
+// WritePacket adds a packet to the page being batched, first flushing that page
+// when the packet would not fit (segment table, byte target, or duration cap)
+// or when it is the stream's first audio page, which stays a single packet so
+// audio reaches the client right after the headers. The granule increment comes
+// from the mapping (pkt.Dur for Opus and FLAC), so accumulation stays codec
+// correct. The batch always keeps at least the newest packet, so End can stamp
+// the final page's granule with the end position.
 func (m *Muxer) WritePacket(pkt container.Packet) error {
 	if !m.begun {
 		return waxerr.New(waxerr.CodeInternal, "ogg: WritePacket before Begin")
+	}
+	inc, err := m.mapping.writePacket(pkt)
+	if err != nil {
+		return err
 	}
 	segs := len(pkt.Data)/255 + 1
 	if len(m.pending) > 0 &&
 		(m.audioPages == 0 ||
 			len(m.pendingSeg)+segs > maxPageSegEntries ||
 			len(m.pending)+len(pkt.Data) > pageTargetBytes ||
-			m.pendingDur+pkt.Dur > maxPageGranules) {
+			m.pendingDur+inc > maxPageGranules) {
 		if err := m.flushPending(0); err != nil {
 			return err
 		}
 	}
-	m.granule += pkt.Dur
+	m.granule += inc
 	m.pending = append(m.pending, pkt.Data...)
 	m.pendingSeg = appendLacing(m.pendingSeg, len(pkt.Data))
 	m.pendingGranule = m.granule
-	m.pendingDur += pkt.Dur
+	m.pendingDur += inc
 	return nil
 }
 
@@ -170,12 +151,12 @@ func (m *Muxer) flushPending(headerType byte) error {
 	return err
 }
 
-// End writes the final page with the gapless end granule and the EOS flag.
+// End writes the final page with the mapping's end granule and the EOS flag.
 func (m *Muxer) End(trailer codec.Trailer) error {
 	if !m.begun {
 		return waxerr.New(waxerr.CodeInternal, "ogg: End before Begin")
 	}
-	endGranule := trailer.Delay + trailer.Samples
+	endGranule := m.mapping.endGranule(trailer)
 	if len(m.pending) == 0 {
 		// No audio: emit an empty EOS page so the stream is well-formed.
 		return m.emitPage(nil, lacing(0), endGranule, flagEOS)

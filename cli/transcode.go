@@ -66,21 +66,36 @@ flags the transcode is a bit-exact container rewrite; --rate,
 			}
 
 			outFormat := formatName
+			ext := extHint(args[1])
 			if outFormat == "" {
 				// The engine's output table is the single source of truth
-				// for extensions, so the CLI cannot drift from it.
-				outFormat = waxflow.OutputFormatForExt(extHint(args[1]))
-				if outFormat == "" {
-					return waxerr.New(waxerr.CodeInvalidRequest,
-						fmt.Sprintf("cannot infer output format from %q; pass --format (%s)",
-							filepath.Base(args[1]), strings.Join(waxflow.OutputFormats(), ", ")))
+				// for extensions, so the CLI cannot drift from it. A
+				// container-selecting extension (.mka/.webm) names a
+				// container form rather than a top-level format, so it
+				// resolves to a (format, container) pair.
+				if f, _, ok := waxflow.OutputContainerForExt(ext); ok {
+					outFormat = f
+				} else {
+					outFormat = waxflow.OutputFormatForExt(ext)
+					if outFormat == "" {
+						return waxerr.New(waxerr.CodeInvalidRequest,
+							fmt.Sprintf("cannot infer output format from %q; pass --format (%s)",
+								filepath.Base(args[1]), strings.Join(waxflow.OutputFormats(), ", ")))
+					}
 				}
 			}
-			// A bare .aac output means the ADTS elementary stream (the
-			// .m4a extension is the fMP4 default); an explicit
-			// --container always wins.
-			if containerName == "" && outFormat == "aac" && extHint(args[1]) == "aac" {
-				containerName = "adts"
+			// The output extension also implies a container when --container
+			// was not given, whether or not --format was explicit: a .mka/.webm
+			// output writes Matroska/WebM (so `--format opus out.webm` is
+			// Opus-in-WebM, not an Ogg stream misnamed .webm), and a bare .aac
+			// output is the ADTS elementary stream (the .m4a extension is the
+			// fMP4 default). An explicit --container always wins.
+			if containerName == "" {
+				if _, c, ok := waxflow.OutputContainerForExt(ext); ok {
+					containerName = c
+				} else if outFormat == "aac" && ext == "aac" {
+					containerName = "adts"
+				}
 			}
 
 			src, srcHint, cleanup, err := openSourceRef(cmd, flavor, args[0], &cfg, logger)
@@ -186,11 +201,31 @@ flags the transcode is a bit-exact container rewrite; --rate,
 			// mapping post-pass, and embedding unity placeholders there
 			// would ship wrong ReplayGain whenever that post-pass is
 			// skipped (--no-tags) or fails.
-			isMP4 := outFormat == "alac" || (outFormat == "aac" && containerName != "adts")
-			if analyzeLoudness && isMP4 {
+			//
+			// isMP4 must mean "written by the mp4 muxer" (fragmented default or
+			// progressive), the only path that embeds tags in moov and takes the
+			// mp4-specific ReplayGain patch. AAC also rides in adts (elementary)
+			// and mka (Matroska), which are NOT MP4: patching them as MP4 would
+			// fail and delete the output. ALAC is always MP4.
+			isMP4 := outFormat == "alac" ||
+				(outFormat == "aac" && (containerName == "" || containerName == "progressive"))
+			switch {
+			case analyzeLoudness && isMP4:
+				// Unity placeholders, patched with the measured RG by
+				// analyzeOutputRG after the encode.
 				tags = append(tags,
 					container.Tag{Key: "REPLAYGAIN_TRACK_GAIN", Value: meta.FormatGain(0)},
 					container.Tag{Key: "REPLAYGAIN_TRACK_PEAK", Value: meta.FormatPeak(0)})
+			case analyzeLoudness && containerName == "ogg":
+				// The Ogg muxer embeds the comment header at Begin and cannot be
+				// patched afterward, and the post-pass is skipped for Ogg, so the
+				// measured RG would otherwise be computed and dropped. Embed the
+				// RG predicted from the source loudness and the applied gain now
+				// (the same estimate the MP4 path patches in).
+				rg, outLUFS := predictedRG(srcRes, gainDB)
+				tags = append(tags, rg...)
+				fmt.Fprintf(cmd.ErrOrStderr(), "loudness: output %.2f LUFS, %s / %s\n",
+					outLUFS, rg[0].Value, rg[1].Value)
 			}
 			var chapters []container.Chapter
 			var art *container.Picture
@@ -238,13 +273,25 @@ flags the transcode is a bit-exact container rewrite; --rate,
 			// --loudness analyze, and the full metadata set for formats
 			// the mapper can rewrite (MP4 got everything at Begin).
 			var rg []container.Tag
-			if analyzeLoudness {
+			if analyzeLoudness && containerName != "ogg" {
+				// Ogg already embedded its predicted RG at Begin (it cannot be
+				// patched); mp4 patches its placeholders here, and post-pass
+				// formats get their measured values written below.
 				if rg, err = analyzeOutputRG(cmd, e, writePath, extHint(outPath), isMP4, srcRes, gainDB); err != nil {
 					os.Remove(writePath)
 					return err
 				}
 			}
-			if !noTags && !isMP4 && tagInfo != nil {
+			// embedsTags names the outputs whose muxer already wrote the tags at
+			// mux time, so the post-pass must skip them to avoid a redundant (or
+			// conflicting) second write. The MP4 muxers embed an ilst in moov;
+			// the Ogg muxer embeds the comment header at Begin (and the label
+			// mapper has no Ogg-FLAC writer anyway). Every other output, incl.
+			// Matroska (.mka/.webm), defers to the post-pass: the mka muxer
+			// accepts Tags but does not emit them (see container/mka.MuxerOptions),
+			// so if it ever starts writing tags at Begin, add its containers here.
+			embedsTags := isMP4 || containerName == "ogg"
+			if !noTags && !embedsTags && tagInfo != nil {
 				if aerr := mapper.Apply(cmd.Context(), writePath, tagInfo, rg); aerr != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "metadata: post-pass failed: %v\n", aerr)
 				}
@@ -261,7 +308,7 @@ flags the transcode is a bit-exact container rewrite; --rate,
 		},
 	}
 	cmd.Flags().StringVar(&formatName, "format", "", "output format: wav, aiff, flac, mp3, aac, alac, or opus (default: from output extension)")
-	cmd.Flags().StringVar(&containerName, "container", "", "container override where the format has one: adts for aac (default: the format's native container; a bare .aac output implies adts)")
+	cmd.Flags().StringVar(&containerName, "container", "", "container override where the format has one: adts for aac, progressive for aac/alac (flat non-streaming MP4), mka/webm for opus/aac/flac/wav, ogg for flac (default: the format's native container; a bare .aac output implies adts)")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite the output if it exists")
 	cmd.Flags().IntVar(&rate, "rate", 0, "output sample rate in Hz (default: source rate)")
 	cmd.Flags().IntVar(&channels, "channels", 0, "output channel count: 1 or 2 (default: source layout)")
@@ -288,22 +335,35 @@ flags the transcode is a bit-exact container rewrite; --rate,
 // plus the applied gain for fragmented MP4, which has no read path
 // (exact for lossless ALAC, within the encoder's fraction of a dB for
 // AAC; positive gain caps the derived peak at the limiter ceiling).
+// predictedRG estimates the output ReplayGain from the source loudness analysis
+// and the gain being applied: after normalization the output sits at
+// srcLUFS+gain, and its true peak follows the gain (clamped to the ceiling when
+// boosting). It is the estimate the MP4 path patches into its placeholders and
+// the value the Ogg path embeds at Begin (Ogg cannot be patched afterward).
+func predictedRG(srcRes *waxflow.AnalyzeResult, gainDB float64) (rg []container.Tag, outLUFS float64) {
+	outLUFS = math.Inf(-1)
+	if !math.IsInf(srcRes.IntegratedLUFS, -1) {
+		outLUFS = srcRes.IntegratedLUFS + gainDB
+	}
+	outTP := srcRes.TruePeakDB + gainDB
+	if gainDB > 0 {
+		outTP = min(outTP, gain.DefaultCeilingDB)
+	}
+	return meta.ReplayGainTags(outLUFS, outTP), outLUFS
+}
+
 func analyzeOutputRG(cmd *cobra.Command, e *waxflow.Engine, path, hint string, isMP4 bool, srcRes *waxflow.AnalyzeResult, gainDB float64) ([]container.Tag, error) {
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "reopening output", err)
 	}
 	defer f.Close()
-	var outLUFS, outTP float64
+	var rg []container.Tag
+	var outLUFS float64
 	if isMP4 {
-		outLUFS = math.Inf(-1)
-		if !math.IsInf(srcRes.IntegratedLUFS, -1) {
-			outLUFS = srcRes.IntegratedLUFS + gainDB
-		}
-		outTP = srcRes.TruePeakDB + gainDB
-		if gainDB > 0 {
-			outTP = min(outTP, gain.DefaultCeilingDB)
-		}
+		// The MP4 output edit list already normalized to the target; the RG is
+		// predicted from the source and gain, then patched into placeholders.
+		rg, outLUFS = predictedRG(srcRes, gainDB)
 	} else {
 		fsrc, err := container.FileSource(f)
 		if err != nil {
@@ -313,9 +373,8 @@ func analyzeOutputRG(cmd *cobra.Command, e *waxflow.Engine, path, hint string, i
 		if err != nil {
 			return nil, err
 		}
-		outLUFS, outTP = outRes.IntegratedLUFS, outRes.TruePeakDB
+		rg, outLUFS = meta.ReplayGainTags(outRes.IntegratedLUFS, outRes.TruePeakDB), outRes.IntegratedLUFS
 	}
-	rg := meta.ReplayGainTags(outLUFS, outTP)
 	fmt.Fprintf(cmd.ErrOrStderr(), "loudness: output %.2f LUFS, %s / %s\n",
 		outLUFS, rg[0].Value, rg[1].Value)
 	if isMP4 {

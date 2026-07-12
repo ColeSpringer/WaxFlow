@@ -56,6 +56,17 @@ type Demuxer struct {
 
 	cur int64 // next sample index ReadPacket delivers
 
+	// Fragmented (CMAF) reading state, populated when the movie carries an
+	// mvex box; the samples then live in moof+mdat fragments rather than the
+	// (empty) moov sample table. See fragdemux.go.
+	fragmented bool
+	trex       trexDefaults
+	fragStart  int64        // offset of the first top-level box after moov
+	fragOff    int64        // next top-level box the fragment iterator reads
+	fragQueue  []fragSample // the current fragment's samples
+	fragIdx    int
+	fragDecode int64 // running decode time (samples) for the next sample's PTS
+
 	// w is the shared read-ahead window over mdat sample data.
 	w srcwin.Window
 }
@@ -113,6 +124,9 @@ func (d *Demuxer) parse() error {
 			if err := container.ReadFull(d.src, moov, b.payloadOff()); err != nil {
 				return err
 			}
+			// Fragments (moof+mdat) of a fragmented movie follow moov; record
+			// where the fragment iterator starts scanning.
+			d.fragStart = b.off + b.size
 		}
 		if b.toEnd {
 			break
@@ -164,7 +178,7 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 			foundCodecs = append(foundCodecs, "unknown")
 			continue
 		}
-		if t.codec != codec.ALAC && t.codec != codec.AACLC {
+		if !decodableAudio(t.codec) {
 			foundCodecs = append(foundCodecs, string(t.codec))
 			continue
 		}
@@ -187,18 +201,44 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		d.seekPreroll = 1 // one frame of IMDCT overlap history
 	}
 
-	delay, padding, samples := d.gapless(audio)
-	d.track = container.Track{
-		Codec:       audio.codec,
-		CodecConfig: audio.codecConfig,
-		Fmt:         audio.fmt,
-		Samples:     samples,
-		Delay:       delay,
-		Padding:     padding,
-		Default:     true,
+	var delay, padding, samples int64
+	var exact bool
+	if d.fragmented {
+		// The fragmented sample tables are empty; gapless comes from the init
+		// edit list, and the length is authoritative (SamplesExact) when the
+		// edit list carries a segment duration.
+		delay, samples, exact = d.fragmentedGapless(audio)
+		d.fragOff = d.fragStart
+	} else {
+		delay, padding, samples = d.gapless(audio)
 	}
-	d.resolveChapters(tracks, audio)
+	d.track = container.Track{
+		Codec:        audio.codec,
+		CodecConfig:  audio.codecConfig,
+		Fmt:          audio.fmt,
+		Samples:      samples,
+		Delay:        delay,
+		Padding:      padding,
+		SamplesExact: exact,
+		Default:      true,
+	}
+	// Chapters ride in text-track sample tables, which a fragmented movie's
+	// moov does not carry; only the progressive path resolves them.
+	if !d.fragmented {
+		d.resolveChapters(tracks, audio)
+	}
 	return nil
+}
+
+// decodableAudio reports whether the demuxer decodes a codec: ALAC and AAC-LC
+// (progressive) plus Opus and FLAC (their sample entries are read for the
+// fragmented path, and their decoders are registered).
+func decodableAudio(id codec.ID) bool {
+	switch id {
+	case codec.ALAC, codec.AACLC, codec.Opus, codec.FLAC:
+		return true
+	}
+	return false
 }
 
 // Tracks returns the single selected audio track.
@@ -216,6 +256,9 @@ func (d *Demuxer) Brands() []string { return d.brands }
 // ReadPacket yields the next sample as a codec packet. Packet data aliases
 // the read window and is reused across calls.
 func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
+	if d.fragmented {
+		return d.readFragmentedPacket(pkt)
+	}
 	st := &d.sel.st
 	if d.cur >= st.total {
 		if d.w.Err() != nil {
@@ -258,6 +301,9 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	}
 	if sample < 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, "mp4: negative seek target")
+	}
+	if d.fragmented {
+		return d.seekFragmented(sample)
 	}
 	st := &d.sel.st
 	if st.total == 0 {

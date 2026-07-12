@@ -1,15 +1,19 @@
 package mp4
 
 import (
+	"encoding/binary"
+
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/codec/alac"
+	"github.com/colespringer/waxflow/codec/flac"
+	"github.com/colespringer/waxflow/codec/opus"
 )
 
 // parseStsd parses the sample description box, reading the first audio
-// sample entry into the track. Only ALAC and AAC-LC are wired; an entry
-// of any other format leaves t.codec set to the format name so selectAudio
-// can report it.
+// sample entry into the track. ALAC, AAC-LC, Opus, and FLAC are wired; an
+// entry of any other format leaves t.codec set to the format name so
+// selectAudio can report it.
 func (d *Demuxer) parseStsd(t *track, payload []byte, depth int) error {
 	if depth > maxDepth {
 		return malformed("box nesting deeper than %d", maxDepth)
@@ -69,10 +73,76 @@ func (d *Demuxer) parseAudioSampleEntry(t *track, format string, body []byte, de
 		return d.setALAC(t, format, children, sampleRate, channels, bitsPerSample)
 	case "mp4a":
 		return d.setMP4A(t, children, sampleRate, channels)
+	case "Opus":
+		return d.setOpus(t, children)
+	case "fLaC":
+		return d.setFLAC(t, children)
 	default:
 		t.codec = codec.ID(format) // an unknown but named audio codec
 		return nil
 	}
+}
+
+// setOpus reads the 'dOps' box (Opus-in-ISOBMFF) and rebuilds the OpusHead
+// codec config, the inverse of seg.go's opusSampleEntry. dOps is big-endian
+// where OpusHead is little-endian, so the fields are byte-swapped; only channel
+// mapping family 0 (mono and stereo single-stream) is read, matching the muxer.
+func (d *Demuxer) setOpus(t *track, children []byte) error {
+	dops := findChild(children, "dOps")
+	if dops == nil {
+		return malformed("Opus sample entry has no dOps box")
+	}
+	// Version(1) OutputChannelCount(1) PreSkip(2) InputSampleRate(4)
+	// OutputGain(2) ChannelMappingFamily(1).
+	if len(dops) < 11 {
+		return malformed("dOps box truncated (%d bytes)", len(dops))
+	}
+	if family := dops[10]; family != 0 {
+		return malformed("Opus channel mapping family %d unsupported", family)
+	}
+	head := make([]byte, 19)
+	copy(head, "OpusHead")
+	head[8] = 1                                              // version
+	head[9] = dops[1]                                        // channel count
+	binary.LittleEndian.PutUint16(head[10:], be16(dops[2:])) // pre-skip
+	binary.LittleEndian.PutUint32(head[12:], be32(dops[4:])) // input sample rate
+	binary.LittleEndian.PutUint16(head[16:], be16(dops[8:])) // output gain
+	head[18] = 0                                             // channel mapping family 0
+	cfg, err := opus.ParseOpusHead(head)
+	if err != nil {
+		return err
+	}
+	t.codec = codec.Opus
+	t.codecConfig = head
+	t.fmt = cfg.Format()
+	return nil
+}
+
+// setFLAC reads the 'dfLa' box (FLAC-in-ISOBMFF) and extracts the STREAMINFO,
+// the inverse of seg.go's flacSampleEntry.
+func (d *Demuxer) setFLAC(t *track, children []byte) error {
+	dfla := findChild(children, "dfLa")
+	if dfla == nil {
+		return malformed("FLAC sample entry has no dfLa box")
+	}
+	// FullBox(4) then a metadata block: a 4-byte block header (last-flag|type,
+	// 24-bit length) and the STREAMINFO body.
+	_, _, rest, ok := fullBox(dfla)
+	if !ok || len(rest) < 4+flac.StreamInfoLen {
+		return malformed("dfLa box truncated")
+	}
+	if typ := rest[0] & 0x7F; typ != 0 {
+		return malformed("dfLa first metadata block is type %d, want STREAMINFO", typ)
+	}
+	si := append([]byte(nil), rest[4:4+flac.StreamInfoLen]...)
+	parsed, err := flac.ParseStreamInfo(si)
+	if err != nil {
+		return err
+	}
+	t.codec = codec.FLAC
+	t.codecConfig = si
+	t.fmt = parsed.PCMFormat()
+	return nil
 }
 
 // setALAC extracts the ALAC magic cookie (the 'alac' extension box) and

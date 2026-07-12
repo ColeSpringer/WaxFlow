@@ -21,6 +21,7 @@ import (
 	"github.com/colespringer/waxflow/container/adts"
 	"github.com/colespringer/waxflow/container/aiff"
 	"github.com/colespringer/waxflow/container/flacn"
+	"github.com/colespringer/waxflow/container/mka"
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/container/mpa"
 	"github.com/colespringer/waxflow/container/ogg"
@@ -161,12 +162,18 @@ func (e *Engine) Transcode(ctx context.Context, src container.Source, hint strin
 	if err != nil {
 		return nil, err
 	}
-	if opts.Container != "" && row.container == nil {
+	if opts.Container != "" {
 		// Mirror of the plan-side check: a container override the format
 		// cannot honor must fail here too, so a caller skipping the plan
-		// cannot have it silently ignored.
-		return nil, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("waxflow: format %s has no alternate container (container=%s)", row.name, opts.Container))
+		// cannot have it silently ignored (a build closure that just falls
+		// through on an unknown name would otherwise write the default form).
+		if row.container == nil {
+			return nil, waxerr.New(waxerr.CodeInvalidRequest,
+				fmt.Sprintf("waxflow: format %s has no alternate container (container=%s)", row.name, opts.Container))
+		}
+		if _, err := row.container(opts.Container); err != nil {
+			return nil, err
+		}
 	}
 	spec := specFor(opts)
 	if row.adjust != nil {
@@ -535,7 +542,7 @@ func buildPlanCore(in audio.Format, opts TranscodeOptions) (*planCore, error) {
 		format:        f,
 		container:     containerName,
 		mediaType:     mediaType,
-		live:          row.live,
+		live:          containerLive(row.live, opts.Container),
 		versions:      append(chain.Versions(), version),
 		l:             l,
 		m:             m,
@@ -626,7 +633,14 @@ var outputs = []output{
 			}
 			return pcm.Version, cfg.BytesPerFrame(f.Channels), 0, nil
 		},
-		build: func(f audio.Format, _ TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
+		build: func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
+			if isMatroska(opts.Container) {
+				enc, err := pcm.NewEncoder(mkaPCMConfig(f), f)
+				if err != nil {
+					return nil, nil, err
+				}
+				return enc, mkaMuxer(dst, opts), nil
+			}
 			cfg, err := riff.DefaultConfig(f)
 			if err != nil {
 				return nil, nil, err
@@ -636,6 +650,15 @@ var outputs = []output{
 				return nil, nil, err
 			}
 			return enc, riff.NewMuxer(dst, nil), nil
+		},
+		// PCM rides in Matroska (A_PCM/INT/LIT or A_PCM/FLOAT/IEEE) but not
+		// WebM, whose audio subset is Opus and Vorbis only.
+		container: func(name string) (string, error) {
+			if mt, ok := matroskaContainer(name, false); ok {
+				return mt, nil
+			}
+			return "", waxerr.New(waxerr.CodeInvalidRequest,
+				fmt.Sprintf("waxflow: wav container %q: want mka", name))
 		},
 	},
 	{
@@ -683,7 +706,18 @@ var outputs = []output{
 			if err != nil {
 				return nil, nil, err
 			}
+			if isMatroska(opts.Container) {
+				return enc, mkaMuxer(dst, opts), nil
+			}
 			return enc, ogg.NewMuxer(dst, &ogg.MuxerOptions{Tags: opts.Tags}), nil
+		},
+		// Opus rides in Matroska and WebM (its native container besides Ogg).
+		container: func(name string) (string, error) {
+			if mt, ok := matroskaContainer(name, true); ok {
+				return mt, nil
+			}
+			return "", waxerr.New(waxerr.CodeInvalidRequest,
+				fmt.Sprintf("waxflow: opus container %q: want mka or webm", name))
 		},
 		hls: &hlsOutput{
 			codecs: "Opus",
@@ -762,7 +796,25 @@ var outputs = []output{
 			if err != nil {
 				return nil, nil, err
 			}
+			if isMatroska(opts.Container) {
+				return enc, mkaMuxer(dst, opts), nil
+			}
+			if opts.Container == "ogg" {
+				return enc, ogg.NewMuxer(dst, &ogg.MuxerOptions{Tags: opts.Tags}), nil
+			}
 			return enc, flacn.NewMuxer(dst, &flacn.MuxerOptions{MD5: enc.MD5, Tags: opts.Tags}), nil
+		},
+		// FLAC rides in Matroska (A_FLAC) and Ogg (the Xiph FLAC-in-Ogg
+		// mapping), but not WebM (Opus/Vorbis only).
+		container: func(name string) (string, error) {
+			if name == "ogg" {
+				return "audio/ogg", nil
+			}
+			if mt, ok := matroskaContainer(name, false); ok {
+				return mt, nil
+			}
+			return "", waxerr.New(waxerr.CodeInvalidRequest,
+				fmt.Sprintf("waxflow: flac container %q: want mka or ogg", name))
 		},
 		hls: &hlsOutput{
 			codecs: "fLaC",
@@ -870,8 +922,14 @@ var outputs = []output{
 			if err != nil {
 				return nil, nil, err
 			}
+			if isMatroska(opts.Container) {
+				return enc, mkaMuxer(dst, opts), nil
+			}
 			if opts.Container == "adts" {
 				return enc, adts.NewMuxer(dst), nil
+			}
+			if opts.Container == mp4Progressive {
+				return enc, mp4.NewProgressiveMuxer(dst, mp4MuxerOptions(opts)), nil
 			}
 			return enc, mp4.NewMuxer(dst, mp4MuxerOptions(opts)), nil
 		},
@@ -922,7 +980,19 @@ var outputs = []output{
 			if err != nil {
 				return nil, nil, err
 			}
+			if opts.Container == mp4Progressive {
+				return enc, mp4.NewProgressiveMuxer(dst, mp4MuxerOptions(opts)), nil
+			}
 			return enc, mp4.NewMuxer(dst, mp4MuxerOptions(opts)), nil
+		},
+		// ALAC's only alternate form is progressive (flat) MP4; the default is
+		// fragmented CMAF.
+		container: func(name string) (string, error) {
+			if name == mp4Progressive {
+				return "audio/mp4", nil
+			}
+			return "", waxerr.New(waxerr.CodeInvalidRequest,
+				fmt.Sprintf("waxflow: alac container %q: want progressive (or empty for fMP4)", name))
 		},
 		hls: &hlsOutput{
 			codecs: "alac",
@@ -943,9 +1013,83 @@ func aacContainerMediaType(name string) (string, error) {
 		return "audio/mp4", nil
 	case "adts":
 		return "audio/aac", nil
+	case mp4Progressive:
+		// Flat MP4 (moov+mdat): the same media type as fragmented, a
+		// different box shape (and not a streaming form).
+		return "audio/mp4", nil
+	}
+	// AAC also rides in Matroska (A_AAC), though not WebM (Opus/Vorbis only).
+	if mt, ok := matroskaContainer(name, false); ok {
+		return mt, nil
 	}
 	return "", waxerr.New(waxerr.CodeInvalidRequest,
-		fmt.Sprintf("waxflow: aac container %q: want adts (or empty for fMP4)", name))
+		fmt.Sprintf("waxflow: aac container %q: want adts, progressive, or mka (or empty for fMP4)", name))
+}
+
+// mp4Progressive is the Container override that selects the flat (non-
+// fragmented) MP4 form on the aac and alac rows, the ".m4a most players
+// expect." The default (empty) container stays the fragmented CMAF form, which
+// streams; progressive back-patches its header, so it needs a seekable
+// destination and is not live.
+const mp4Progressive = "progressive"
+
+// containerLive reports the effective liveness of a transcode: a Container
+// override can select a muxer whose NeedsSeek differs from the row's default.
+// Only progressive MP4 flips it (it back-patches the mdat size, so NeedsSeek is
+// true); every other override (adts, mka, webm, ogg) streams like the row's
+// default. The row's static live bit is exactly the default-container
+// liveness, so the empty override is unchanged. This keeps /stream (which plans
+// first) from offering the progressive form, while /caps still advertises the
+// row's default streamability.
+func containerLive(rowLive bool, container string) bool {
+	if container == mp4Progressive {
+		return false
+	}
+	return rowLive
+}
+
+// matroskaContainer resolves the Matroska/WebM container overrides shared by
+// every codec row MKA carries (opus, aac, flac, wav): "mka" is always valid,
+// "webm" only when the codec is in webm's subset (webmOK; Opus and Vorbis).
+// ok is false for a name that is not a Matroska form, so a row falls through
+// to its own overrides (adts for aac). This is the aac/adts precedent applied
+// to one muxer serving many codecs.
+func matroskaContainer(name string, webmOK bool) (mediaType string, ok bool) {
+	switch name {
+	case "mka":
+		return "audio/x-matroska", true
+	case "webm":
+		if webmOK {
+			return "audio/webm", true
+		}
+	}
+	return "", false
+}
+
+// isMatroska reports whether a Container override selects the MKA muxer.
+func isMatroska(name string) bool { return name == "mka" || name == "webm" }
+
+// mkaMuxer builds the Matroska/WebM muxer for a container override, selecting
+// the DocType from the requested name (webm vs mka).
+func mkaMuxer(dst io.Writer, opts TranscodeOptions) container.Muxer {
+	return mka.NewMuxer(dst, &mka.MuxerOptions{WebM: opts.Container == "webm", Tags: opts.Tags})
+}
+
+// mkaPCMConfig is the PCM wire configuration for a track carried in Matroska:
+// like riff.DefaultConfig, but signed rather than unsigned for 8-bit, since
+// Matroska PCM is signed (A_PCM/INT/LIT) with no unsigned form. Float stays
+// 32-bit IEEE (A_PCM/FLOAT/IEEE). This is what the mka muxer's CodecID and
+// BitDepth declare, so the demuxer reads the bytes back unchanged.
+func mkaPCMConfig(f audio.Format) pcm.Config {
+	if f.Type == audio.Float {
+		return pcm.Config{Encoding: pcm.Float, Bits: 32}
+	}
+	bits := pcm.ContainerBits(f.BitDepth)
+	cfg := pcm.Config{Encoding: pcm.SignedInt, Bits: bits}
+	if f.BitDepth != bits {
+		cfg.ValidBits = f.BitDepth
+	}
+	return cfg
 }
 
 // mp4MuxerOptions carries the per-call metadata payloads into the MP4
@@ -1110,6 +1254,23 @@ func OutputFormatForExt(ext string) string {
 		}
 	}
 	return ""
+}
+
+// OutputContainerForExt maps a container-selecting output extension (one that
+// names a container form rather than a top-level format) to the format and
+// container override it implies. MKA and WebM are reached through a Container
+// override on a codec row, not their own output rows, so the extension alone
+// does not resolve through OutputFormatForExt; this fills that gap for the CLI.
+// A ".mka"/".mkv" defaults to lossless FLAC-in-Matroska (matching a lossless
+// source), ".webm" to Opus-in-WebM. ok is false for any other extension.
+func OutputContainerForExt(ext string) (format, container string, ok bool) {
+	switch strings.ToLower(strings.TrimPrefix(ext, ".")) {
+	case "mka", "mkv":
+		return "flac", "mka", true
+	case "webm":
+		return "opus", "webm", true
+	}
+	return "", "", false
 }
 
 // outputRow resolves an output format name against the table.
