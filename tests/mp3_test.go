@@ -92,7 +92,7 @@ func TestMP3DecodeDifferential(t *testing.T) {
 			if int64(got.N) != tt.rawLen {
 				t.Fatalf("decoded %d samples, want %d", got.N, tt.rawLen)
 			}
-			want := testutil.FFmpegDecodeF32(t, filepath.Join("testdata", tt.name))
+			want := testutil.FFmpegDecodeF32(t, repoPath("testdata", tt.name))
 			d := testutil.CompareF32(testutil.InterleaveF(got), want)
 			if d.N < 0 {
 				t.Fatalf("length mismatch vs ffmpeg: ours %d, ffmpeg %d floats", got.N*got.Fmt.Channels, len(want))
@@ -114,7 +114,7 @@ func TestMP3DecodeDifferential(t *testing.T) {
 func TestMP3ProbeAgreesWithFFprobe(t *testing.T) {
 	for _, tt := range mp3Fixtures {
 		t.Run(tt.name, func(t *testing.T) {
-			ref := testutil.FFprobeFile(t, filepath.Join("testdata", tt.name))
+			ref := testutil.FFprobeFile(t, repoPath("testdata", tt.name))
 			if ref.CodecName != "mp3" {
 				t.Fatalf("ffprobe codec = %q", ref.CodecName)
 			}
@@ -144,7 +144,7 @@ func TestMP3LAMEGaplessInvariant(t *testing.T) {
 			if n != tt.samples {
 				t.Errorf("decoded %d samples, invariant wants %d", n, tt.samples)
 			}
-			ff := testutil.FFmpegDecodeF32(t, filepath.Join("testdata", tt.name))
+			ff := testutil.FFmpegDecodeF32(t, repoPath("testdata", tt.name))
 			if ffN := int64(len(ff) / tt.channels); ffN != tt.samples {
 				t.Errorf("ffmpeg decodes %d samples, invariant wants %d (fixture pin is wrong?)", ffN, tt.samples)
 			}
@@ -207,7 +207,7 @@ func TestMP3VBRSeek100Offsets(t *testing.T) {
 // fixtures: junk survives with warnings, strict mode turns them into
 // errors, and the decode still runs.
 func TestMP3ToleratedDamage(t *testing.T) {
-	clean, err := os.ReadFile(filepath.Join("testdata", "sine-untagged.mp3"))
+	clean, err := os.ReadFile(repoPath("testdata", "sine-untagged.mp3"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestMP3ToleratedDamage(t *testing.T) {
 // the float track quantizes to 24-bit by the flac row's default and the
 // sample count survives.
 func TestMP3TranscodeToFLAC(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("testdata", "sine-cbr128.mp3"))
+	raw, err := os.ReadFile(repoPath("testdata", "sine-cbr128.mp3"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +340,7 @@ func (c *captureIndexCache) Drop(src container.Source) {
 // session's seek builds and saves the frame index, the second session
 // restores it and seeks to the same sample-exact landing.
 func TestMP3IndexSidecar(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("testdata", "sine-untagged.mp3"))
+	raw, err := os.ReadFile(repoPath("testdata", "sine-untagged.mp3"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,7 +406,7 @@ func TestMP3IndexSidecar(t *testing.T) {
 // TestMP3RejectsFreeFormat pins the documented deviation: free-format
 // streams (bit rate index 0) are refused as unsupported, not misparsed.
 func TestMP3RejectsFreeFormat(t *testing.T) {
-	clean, err := os.ReadFile(filepath.Join("testdata", "sine-untagged.mp3"))
+	clean, err := os.ReadFile(repoPath("testdata", "sine-untagged.mp3"))
 	if err != nil {
 		t.Fatal(err)
 	}

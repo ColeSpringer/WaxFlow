@@ -70,7 +70,7 @@ func TestGoldenSegments(t *testing.T) {
 
 func checkGolden(t *testing.T, name string, data []byte) {
 	t.Helper()
-	path := filepath.Join("testdata", "golden", "hls", name)
+	path := repoPath("testdata", "golden", "hls", name)
 	if *updateGoldens {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)

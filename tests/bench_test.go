@@ -51,27 +51,27 @@ func benchOpenAndDecode(b *testing.B, path, hint string) {
 }
 
 func BenchmarkEngineDecodeFLACNoise(b *testing.B) {
-	benchOpenAndDecode(b, filepath.Join("testdata", "noise-s16.flac"), "")
+	benchOpenAndDecode(b, repoPath("testdata", "noise-s16.flac"), "")
 }
 
 func BenchmarkEngineDecodeOggFLACNoise(b *testing.B) {
-	benchOpenAndDecode(b, filepath.Join("testdata", "noise-s24.oga"), "")
+	benchOpenAndDecode(b, repoPath("testdata", "noise-s24.oga"), "")
 }
 
 func BenchmarkEngineDecodeMP3Noise320(b *testing.B) {
-	benchOpenAndDecode(b, filepath.Join("testdata", "noise-cbr320.mp3"), "")
+	benchOpenAndDecode(b, repoPath("testdata", "noise-cbr320.mp3"), "")
 }
 
 func BenchmarkEngineDecodeMP3VBR(b *testing.B) {
-	benchOpenAndDecode(b, filepath.Join("testdata", "sine-vbr.mp3"), "")
+	benchOpenAndDecode(b, repoPath("testdata", "sine-vbr.mp3"), "")
 }
 
 func BenchmarkEngineDecodeALAC(b *testing.B) {
-	benchOpenAndDecode(b, filepath.Join("container", "mp4", "testdata", "alac-stereo.m4a"), "m4a")
+	benchOpenAndDecode(b, repoPath("container", "mp4", "testdata", "alac-stereo.m4a"), "m4a")
 }
 
 func BenchmarkEngineDecodeAAC(b *testing.B) {
-	benchOpenAndDecode(b, filepath.Join("container", "adts", "testdata", "stereo.aac"), "aac")
+	benchOpenAndDecode(b, repoPath("container", "adts", "testdata", "stereo.aac"), "aac")
 }
 
 func BenchmarkEngineDecodeFLACVector01(b *testing.B) {

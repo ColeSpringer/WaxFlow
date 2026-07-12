@@ -86,7 +86,7 @@ fuzz:
 # Regenerate muxer golden files. Review the diff before committing.
 goldens:
 	go test -run TestGoldenMuxOutputs ./container/riff ./container/aiff ./container/flacn ./container/mpa ./container/mka -update
-	go test -run TestGoldenSegments . -update
+	go test -run TestGoldenSegments ./tests -update
 	cd oracletest && go test -run TestGoldenM4BChapters . -update
 
 # Decode/encode throughput; the x-realtime metric is judged against the
@@ -127,13 +127,13 @@ OPUS_QUALITY_REPORT ?= opus-quality-report.html
 OPUS_SPEECH_QUALITY_REPORT ?= opus-speech-quality-report.html
 encoder-quality:
 	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_REQUIRE_SHINE=1 WAXFLOW_QUALITY_REPORT=$(QUALITY_REPORT) \
-		go test -run TestMP3EncoderQuality -count=1 -v .
+		go test -run TestMP3EncoderQuality -count=1 -v ./tests
 	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_QUALITY_REPORT=$(AAC_QUALITY_REPORT) \
-		go test -run TestAACEncoderQuality -count=1 -v .
+		go test -run TestAACEncoderQuality -count=1 -v ./tests
 	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_OPUS_TOOLS=1 WAXFLOW_REQUIRE_VECTORS=1 WAXFLOW_QUALITY_REPORT=$(OPUS_QUALITY_REPORT) \
-		go test -run 'TestOpusEncoderQuality$$' -count=1 -timeout 30m -v .
+		go test -run 'TestOpusEncoderQuality$$' -count=1 -timeout 30m -v ./tests
 	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_OPUS_TOOLS=1 WAXFLOW_REQUIRE_VECTORS=1 WAXFLOW_QUALITY_REPORT=$(OPUS_SPEECH_QUALITY_REPORT) \
-		go test -run TestOpusSpeechEncoderQuality -count=1 -timeout 30m -v .
+		go test -run TestOpusSpeechEncoderQuality -count=1 -timeout 30m -v ./tests
 
 # Browser client-matrix e2e: a real daemon, the committed /demo page,
 # and headless Chromium via Playwright (scripts/client-e2e.mjs) driving

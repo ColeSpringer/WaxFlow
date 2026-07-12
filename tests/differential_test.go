@@ -61,7 +61,7 @@ var fixtures = []struct {
 
 func fixtureSource(t testing.TB, name string) container.Source {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("testdata", name))
+	raw, err := os.ReadFile(repoPath("testdata", name))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestFixturesProbe(t *testing.T) {
 func TestFixturesDecodeDifferential(t *testing.T) {
 	for _, tt := range fixtures {
 		t.Run(tt.name, func(t *testing.T) {
-			path := filepath.Join("testdata", tt.name)
+			path := repoPath("testdata", tt.name)
 			got := decodeAll(t, fixtureSource(t, tt.name), "")
 			defer audio.Put(got)
 			if tt.sampleTyp == audio.Int {
@@ -162,7 +162,7 @@ func TestFixturesDecodeDifferential(t *testing.T) {
 func TestFixturesProbeAgreesWithFFprobe(t *testing.T) {
 	for _, tt := range fixtures {
 		t.Run(tt.name, func(t *testing.T) {
-			path := filepath.Join("testdata", tt.name)
+			path := repoPath("testdata", tt.name)
 			ref := testutil.FFprobeFile(t, path)
 			info, err := waxflow.New().Probe(fixtureSource(t, tt.name), "", nil)
 			if err != nil {
@@ -273,7 +273,7 @@ func TestFLACOutputAcceptedByFlacTool(t *testing.T) {
 	sources := []string{"sine-s16.wav", "noise-s16.flac", "sine-5_1-s16.wav", "sine-f32.wav"}
 	for _, name := range sources {
 		t.Run(name, func(t *testing.T) {
-			raw, err := os.ReadFile(filepath.Join("testdata", name))
+			raw, err := os.ReadFile(repoPath("testdata", name))
 			if err != nil {
 				t.Fatal(err)
 			}
