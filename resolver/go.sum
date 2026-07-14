@@ -1,7 +1,7 @@
-github.com/colespringer/waxbin v0.0.0-20260702055125-8fd6f8d0a05e h1:oQZcWIY0dOb3fIiUSTzqjXvtlRqi3mzHB+PZhz82GLQ=
-github.com/colespringer/waxbin v0.0.0-20260702055125-8fd6f8d0a05e/go.mod h1:wlDe2qIDQ7uS1z06B9+wZvHR4IbXQBFlUZeU0CkidEw=
-github.com/colespringer/waxlabel v0.0.0-20260629094436-9b68ee971607 h1:ckHI+sXTFtPPAOvr0aThCO7Rtqdl0AWj8Q9lb3iHGjk=
-github.com/colespringer/waxlabel v0.0.0-20260629094436-9b68ee971607/go.mod h1:vNfr3pXMymG1dBnoMJc7/1JFdtmHBP+8Jhz5dYlriyA=
+github.com/colespringer/waxbin v0.0.0-20260714191434-6e2b7c2ffead h1:NJaa3e8fps1YOipJo3IEpHIteLBUT6tTES4U1jia3Rw=
+github.com/colespringer/waxbin v0.0.0-20260714191434-6e2b7c2ffead/go.mod h1:3inN5lcu/7xsLllAtBf49bGU7aqfYJJf4fcgdeC3lT0=
+github.com/colespringer/waxlabel v1.0.0 h1:XU+xRo+PO3olXrit1xyngZWKwoOfwUDCJCv4SzcnS/I=
+github.com/colespringer/waxlabel v1.0.0/go.mod h1:vNfr3pXMymG1dBnoMJc7/1JFdtmHBP+8Jhz5dYlriyA=
 github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=

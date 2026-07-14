@@ -3,7 +3,7 @@ module github.com/colespringer/waxflow/resolver
 go 1.26
 
 require (
-	github.com/colespringer/waxbin v0.0.0-20260702055125-8fd6f8d0a05e
+	github.com/colespringer/waxbin v0.0.0-20260714191434-6e2b7c2ffead
 	github.com/colespringer/waxflow v0.0.0-00010101000000-000000000000
 	github.com/colespringer/waxflow/cli v0.0.0-00010101000000-000000000000
 )
@@ -33,11 +33,3 @@ require (
 replace github.com/colespringer/waxflow => ../
 
 replace github.com/colespringer/waxflow/cli => ../cli
-
-// WaxBin's pinned commit predates waxlabel's Fields.Comment string ->
-// []string change and does not compile against the parent's newer
-// waxlabel, so this binary pins waxlabel at WaxBin's version. Verified
-// against the parent's metadata suite run from this module (m4b golden
-// byte-identical, jobs/tags/RG e2e green). Drop this replace when
-// WaxBin rebases onto current waxlabel.
-replace github.com/colespringer/waxlabel => github.com/colespringer/waxlabel v0.0.0-20260629094436-9b68ee971607

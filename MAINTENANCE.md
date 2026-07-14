@@ -118,9 +118,12 @@ across the ~27 targets; run it on a spare box, not CI).
       `make client-e2e` (automated browser cells) plus the manual
       checklists in docs/client-matrix.md (Apple, ExoPlayer, mpv);
       update the /caps profiles if any cell changed
-- [ ] `resolver/go.mod`: if WaxBin has rebased onto current waxlabel, drop
-      the waxlabel `replace` pin (comment in that file explains it) and
-      bump the waxbin pseudo-version
+- [ ] `resolver/go.mod`: bump the waxbin pseudo-version (WaxBin publishes no
+      tags, so `@latest` resolves off its default branch). Never ship a
+      resolver behind the WaxBin whose catalog it reads: it opens read-only
+      and never migrates, so an older catalog is fine but a newer one is
+      refused outright (`catalog schema vN is newer than this build
+      supports`), failing `resolver.Open` at startup. Ahead is inert and safe
 - [ ] Tag `vX.Y.Z` pushed -> `release.yml` publishes binaries + SHA256SUMS +
       multi-arch image to ghcr.io
 - [ ] Container smoke: `docker run` + HEALTHCHECK healthy
