@@ -12,6 +12,7 @@ package container
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 
@@ -26,6 +27,42 @@ import (
 type Source interface {
 	io.ReaderAt
 	Size() int64
+}
+
+// Contextual is implemented by a Source whose reads can be bound to a context,
+// as a network-backed source can. io.ReaderAt has no ctx by construction, so a
+// struct field is the only place one can live; this gate makes that handoff
+// explicit instead of implicit. A file-backed source does not implement it, so
+// the assertion is an honest capability gate rather than a universal wrapper.
+//
+// The ctx bound here must be the engine's, never a request's. Live pipelines
+// resolve under the server's base context by design, so that read-behind can
+// finish an encode after the client has left; binding a request ctx to a
+// Source would make those reads die on disconnect.
+//
+// Bind at the outermost Source, before handing it to Open or Probe. A Source
+// may be wrapped internally (skipping a leading ID3v2 tag hides the tag from
+// drivers behind an offsetting wrapper), and such a wrapper carries the binding
+// for free by delegating its reads inward: it need not implement Contextual
+// itself, and does not. The invariant is the ordering, not the delegation. A
+// wrapper that is itself handed to BindContext, rather than wrapping something
+// already bound, silently drops the ctx.
+type Contextual interface {
+	// WithContext returns a Source whose reads honor ctx. The receiver is
+	// unchanged, so a caller may hold both.
+	WithContext(ctx context.Context) Source
+}
+
+// BindContext binds ctx to src when src is Contextual, and returns src
+// unchanged otherwise. It is the assertion side of the Contextual gate, in one
+// place so callers do not each rewrite it.
+//
+// Pass the owning pipeline's context, not a request's: see Contextual.
+func BindContext(ctx context.Context, src Source) Source {
+	if c, ok := src.(Contextual); ok {
+		return c.WithContext(ctx)
+	}
+	return src
 }
 
 // FileSource wraps an open file as a Source. The file must stay open for
@@ -141,15 +178,24 @@ type Indexer interface {
 	RestoreIndex(blob []byte) bool
 }
 
-// Warning is a structured note about tolerated input damage, surfaced
-// through probe results.
+// Warning is a structured note about input this decoder accepted but a caller
+// should know about, surfaced through probe results. That covers two kinds:
+// tolerated damage (a truncated table, a sample running past end of file), and
+// a limitation of this decoder against a file that is perfectly well formed
+// (an HE-AAC config whose high band is not synthesized).
+//
+// The distinction matters to strict mode, which escalates the first kind and
+// not the second: strict exists to reject real-world mess for conformance runs,
+// so it must not reject a conformant file merely because a codec is scoped
+// below it.
 type Warning struct {
 	// Offset is the byte position of the oddity, -1 when not localized.
 	Offset int64
 	Msg    string
 }
 
-// Warner is implemented by demuxers that record tolerated damage.
+// Warner is implemented by demuxers that record Warnings: tolerated damage, or
+// a decoder limitation against a well-formed file.
 type Warner interface {
 	Warnings() []Warning
 }

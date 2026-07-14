@@ -106,6 +106,14 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	return nil
 }
 
+// note records a Warning that Strict must not escalate: a limitation of this
+// decoder against a file that is well formed, rather than damage in the file.
+// See mp4's note, which exists for the same reason: Strict rejects mess, and an
+// HE-AAC config is not mess.
+func (d *Demuxer) note(off int64, format string, args ...any) {
+	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...)})
+}
+
 // readBytes reads n bytes at off into a fresh buffer, bounded by a cap so a
 // crafted size cannot force a huge allocation.
 func (d *Demuxer) readBytes(off, n, cap int64) ([]byte, error) {
@@ -455,6 +463,9 @@ func (d *Demuxer) selectTrack() error {
 	}
 	if err := setup.fmt.Valid(); err != nil {
 		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "mka: unusable audio format", err)
+	}
+	if setup.warning != "" {
+		d.note(0, "%s", setup.warning)
 	}
 	d.sel = chosen
 	d.setup = setup

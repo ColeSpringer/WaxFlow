@@ -11,6 +11,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/dsp"
+	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -221,6 +222,26 @@ type SegmentedResult struct {
 // in order starting at StartSegment; ctx is checked between chunks.
 func (e *Engine) TranscodeSegments(ctx context.Context, src container.Source, hint string, opts TranscodeOptions,
 	segOpts SegmentedOptions, emit func(mp4.Segment) error) (*SegmentedResult, error) {
+	// Reject on the options alone before opening anything. TranscodeSegmentsMedia
+	// checks the same things, so the two entry points still fail identically;
+	// this only keeps a request that was never going to run from paying for a
+	// container open first, and keeps the error about the option that is wrong
+	// rather than about a source we had no reason to touch.
+	if _, err := segmentOutputRow(opts); err != nil {
+		return nil, err
+	}
+	med, err := e.OpenStream(src, hint)
+	if err != nil {
+		return nil, err
+	}
+	defer med.Close()
+	return e.TranscodeSegmentsMedia(ctx, med, opts, segOpts, emit)
+}
+
+// segmentOutputRow validates the segmented options that do not depend on the
+// source and returns the output row they select. It is a pure function of opts,
+// so both segmented entry points can call it and agree.
+func segmentOutputRow(opts TranscodeOptions) (*output, error) {
 	if opts.FromSample != 0 {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: segmented transcodes have no FromSample")
 	}
@@ -232,11 +253,19 @@ func (e *Engine) TranscodeSegments(ctx context.Context, src container.Source, hi
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 			fmt.Sprintf("waxflow: %s has no segmented (HLS) form", opts.Format))
 	}
-	med, err := e.OpenStream(src, hint)
+	return row, nil
+}
+
+// TranscodeSegmentsMedia emits numbered CMAF media segments from an
+// already-opened Media: the seam TranscodeSegments is built on, for inputs
+// that are not a single sniffable Source (a concatenated album timeline).
+// The caller owns med and closes it.
+func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, opts TranscodeOptions,
+	segOpts SegmentedOptions, emit func(mp4.Segment) error) (*SegmentedResult, error) {
+	row, err := segmentOutputRow(opts)
 	if err != nil {
 		return nil, err
 	}
-	defer med.Close()
 	srcTrack := med.Info().Default()
 
 	spec := specFor(opts)

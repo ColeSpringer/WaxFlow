@@ -39,6 +39,11 @@ type codecSetup struct {
 	vorbisCfg        vorbis.Config
 	vorbisModeBits   int
 	haveVorbis       bool
+
+	// warning is a note the resolving demuxer records once the track is
+	// selected, for a limitation knowable from the codec config alone (an
+	// explicitly signalled HE-AAC band limit). Empty for a clean track.
+	warning string
 }
 
 // mkvCodecs maps a Matroska CodecID to a waxflow codec.ID. A recognized but
@@ -144,7 +149,13 @@ func setupAAC(t *trackEntry) (codecSetup, error) {
 	if cfg.Channels == 0 && t.channels >= 1 && t.channels <= 2 {
 		cfg.Channels = t.channels
 	}
-	return codecSetup{id: codec.AACLC, config: t.codecPriv, fmt: cfg.Format(), aacFrameLength: cfg.FrameLength}, nil
+	return codecSetup{
+		id:             codec.AACLC,
+		config:         t.codecPriv,
+		fmt:            cfg.Format(),
+		aacFrameLength: cfg.FrameLength,
+		warning:        cfg.SBRWarning(),
+	}, nil
 }
 
 // preRoll is the sample count a seek should land before its target so an

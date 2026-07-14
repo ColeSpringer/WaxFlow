@@ -17,6 +17,11 @@ type track struct {
 	codecConfig []byte
 	fmt         audio.Format
 
+	// note is a decoder-limitation Warning for this track (an HE-AAC band
+	// limit), recorded at parse and emitted by selectAudio only if this track
+	// is the one chosen. Empty for a track with nothing to say.
+	note string
+
 	st sampleTable
 
 	// First edit-list entry: a nonzero media time is the encoder-delay

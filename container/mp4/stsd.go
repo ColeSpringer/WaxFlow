@@ -196,6 +196,13 @@ func (d *Demuxer) setMP4A(t *track, children []byte, rate, channels int) error {
 	if cfg.Channels == 0 {
 		cfg.Channels = channels
 	}
+	// An esds carries a full ASC, so HE-AAC signals explicitly here and the
+	// band limit is knowable at open. Record it on the track rather than
+	// emitting it now: this runs for every mp4a track, and a file with an
+	// alternate audio track we never select would otherwise warn about audio
+	// nobody decodes. selectAudio emits it for the chosen track, which is what
+	// mka does.
+	t.note = cfg.SBRWarning()
 	t.codec = codec.AACLC
 	t.codecConfig = append([]byte(nil), asc...)
 	t.fmt = cfg.Format()

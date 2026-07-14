@@ -43,9 +43,11 @@ func newTranscodeCmd(flavor Flavor) *cobra.Command {
 		Long: `Transcode decodes the input and writes it to the output path via the
 same engine the daemon uses: decode -> DSP -> encode -> mux. The output
 format comes from --format or the output extension. Without conversion
-flags the transcode is a bit-exact container rewrite; --rate,
---channels, --bits and --gain insert only the DSP nodes they need
-(resampling, downmix, gain with true-peak limiting, dither).`,
+flags no DSP node is inserted at all, so a lossless input to a lossless
+output is a bit-exact container rewrite; a lossy input is still decoded
+and re-encoded, which costs a generation. --rate, --channels, --bits and
+--gain insert only the DSP nodes they need (resampling, downmix, gain
+with true-peak limiting, dither).`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := resolveConfig(cmd)

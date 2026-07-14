@@ -131,9 +131,13 @@ type TranscodeResult struct {
 // format: decode -> DSP -> encode -> mux, checking ctx between chunks.
 // The DSP chain (convert, resample, mix, gain, dither, in that fixed
 // order) is assembled only from the options that differ from the source, so
-// zero options make the transcode a bit-exact container rewrite. A
-// positive FromSample seeks sample-exact before the first chunk (the
-// HTTP t= parameter, converted at the boundary).
+// zero options add no stage at all and the decoder's samples reach the
+// encoder unaltered. Against a lossless source and a lossless output that
+// makes the transcode a bit-exact container rewrite. A lossy source is still
+// decoded and re-encoded, which is a new generation rather than a rewrite of
+// its packets; moving packets through untouched is a separate rung this
+// engine does not yet have. A positive FromSample seeks sample-exact before
+// the first chunk (the HTTP t= parameter, converted at the boundary).
 // Output formats whose muxer needs to back-patch headers (AIFF, exact
 // WAV sizes) want dst to be an io.WriteSeeker; WAV falls back to a
 // compliant streaming form on a plain writer.

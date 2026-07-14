@@ -114,19 +114,9 @@ func (s *Server) prepareHLS(r *http.Request) (*hlsRequest, error) {
 		return nil, waxerr.New(waxerr.CodeSourceChanged,
 			"the source changed since this URL was minted; request a fresh one")
 	}
-	info, err := s.eng.Probe(src, src.Ext, nil)
+	track, err := s.trackFor(src)
 	if err != nil {
 		return nil, err
-	}
-	track := info.Default()
-	if track.Samples < 0 {
-		// VOD playlists promise an exact segment count, so an unknown
-		// length is measured, never estimated (estimates yield tail 404s
-		// or an early ENDLIST). The walk is IO-bound and the index
-		// sidecar keeps repeats cheap.
-		if track.Samples, err = s.measureSamples(src); err != nil {
-			return nil, err
-		}
 	}
 	opts, plan, err := s.planHLSVariant(desc, track, s.readMeta(r.Context(), src, false))
 	if err != nil {

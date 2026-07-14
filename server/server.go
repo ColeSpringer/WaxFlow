@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/internal/admission"
 	"github.com/colespringer/waxflow/internal/cache"
@@ -168,6 +169,11 @@ type Server struct {
 
 	// metaCache holds per-identity metadata reads (see readMeta).
 	metaCache metaCache
+
+	// trackCache holds per-identity probed, measured tracks, and trackFlight
+	// collapses concurrent misses for one identity (see trackFor).
+	trackCache  trackCache
+	trackFlight flight.Group[container.Track]
 
 	fl     flight.Group[*cache.Entry]
 	hlsMgr hls.Manager

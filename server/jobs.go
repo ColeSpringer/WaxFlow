@@ -78,6 +78,28 @@ type jobRequest struct {
 	FLACLevel int    `json:"flacLevel,omitempty"`
 }
 
+// requestFrom maps the wire body onto a job request, field for field.
+//
+// SourceID is deliberately not among them: it is absent from jobRequest so a
+// client cannot forge the identity pin, and the caller fills it from the
+// resolved source instead. TestJobRequestCoverage pins both the mapping and
+// that exemption.
+func requestFrom(body jobRequest) *jobs.Request {
+	return &jobs.Request{
+		Type:      jobs.Type(body.Type),
+		Src:       body.Src,
+		Format:    body.Format,
+		Container: body.Container,
+		Rate:      body.Rate,
+		Channels:  body.Ch,
+		Bits:      body.Bits,
+		Bitrate:   body.Bitrate,
+		Gain:      body.Gain,
+		Loudness:  body.Loudness,
+		FLACLevel: body.FLACLevel,
+	}
+}
+
 // handleJobCreate serves POST /jobs: validate everything a queued job
 // will need (source, identity, plan) so acceptance means the job can
 // run, then persist and enqueue it.
@@ -111,19 +133,7 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 	if body.Src == "" {
 		return bad("src is required")
 	}
-	req := &jobs.Request{
-		Type:      jobs.Type(body.Type),
-		Src:       body.Src,
-		Format:    body.Format,
-		Container: body.Container,
-		Rate:      body.Rate,
-		Channels:  body.Ch,
-		Bits:      body.Bits,
-		Bitrate:   body.Bitrate,
-		Gain:      body.Gain,
-		Loudness:  body.Loudness,
-		FLACLevel: body.FLACLevel,
-	}
+	req := requestFrom(body)
 	src, err := s.resolver.Resolve(ctx, body.Src)
 	if err != nil {
 		return nil, err

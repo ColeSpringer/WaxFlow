@@ -2,10 +2,8 @@ package loudness
 
 import (
 	"bytes"
-	"encoding/binary"
 	"math"
 	"math/rand"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -60,7 +58,7 @@ func TestFFmpegDifferential(t *testing.T) {
 			m.Flush()
 
 			wav := filepath.Join(t.TempDir(), "in.wav")
-			writeFloatWAV(t, wav, c.rate, c.chans)
+			testutil.WriteFloatWAV(t, wav, c.rate, c.chans)
 			ref := ffmpegEbur128(t, ffmpeg, wav)
 
 			i, lra, tp := m.Integrated(), m.Range(), m.TruePeak()
@@ -125,38 +123,6 @@ func toneOverNoise(rate, frames int, seed int64) []float32 {
 		out[i] = float32(env*math.Sin(2*math.Pi*1202*tsec) + 0.15*lp)
 	}
 	return out
-}
-
-// writeFloatWAV writes planar channels as an interleaved IEEE float32
-// WAV, so ffmpeg measures bit-identical samples to what the meter saw.
-func writeFloatWAV(t *testing.T, path string, rate int, chans [][]float32) {
-	t.Helper()
-	n, ch := len(chans[0]), len(chans)
-	data := 4 * n * ch
-	buf := make([]byte, 44+data)
-	le := binary.LittleEndian
-	copy(buf[0:], "RIFF")
-	le.PutUint32(buf[4:], uint32(36+data))
-	copy(buf[8:], "WAVEfmt ")
-	le.PutUint32(buf[16:], 16)
-	le.PutUint16(buf[20:], 3) // WAVE_FORMAT_IEEE_FLOAT
-	le.PutUint16(buf[22:], uint16(ch))
-	le.PutUint32(buf[24:], uint32(rate))
-	le.PutUint32(buf[28:], uint32(4*rate*ch))
-	le.PutUint16(buf[32:], uint16(4*ch))
-	le.PutUint16(buf[34:], 32)
-	copy(buf[36:], "data")
-	le.PutUint32(buf[40:], uint32(data))
-	off := 44
-	for i := 0; i < n; i++ {
-		for c := 0; c < ch; c++ {
-			le.PutUint32(buf[off:], math.Float32bits(chans[c][i]))
-			off += 4
-		}
-	}
-	if err := os.WriteFile(path, buf, 0o666); err != nil {
-		t.Fatalf("writing %s: %v", path, err)
-	}
 }
 
 // ebur128Summary is the ffmpeg summary subset the differential compares.

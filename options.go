@@ -46,14 +46,15 @@ func WithIndexCache(c IndexCache) Option {
 	}
 }
 
-// TranscodeOptions selects the Transcode output. It grows as encoders
-// land; until the first compressed encoder does, output is always PCM,
-// with the DSP chain (resample, mix, gain, dither) between decode and
-// encode. Zero values keep the source's properties, so the zero options
-// are a bit-exact container rewrite.
+// TranscodeOptions selects the Transcode output, with the DSP chain
+// (resample, mix, gain, dither) between decode and encode. Zero values keep
+// the source's properties, so the zero options add no DSP stage and the
+// decoder's samples reach the encoder unaltered: a bit-exact container
+// rewrite for a lossless source to a lossless output. A lossy source is
+// decoded and re-encoded even so, which costs a generation; see Transcode.
 type TranscodeOptions struct {
 	// Format is the output format name: "wav", "aiff", "flac", "mp3",
-	// "alac", "aac", or "opus".
+	// "alac", "aac", "opus", or "vorbis".
 	Format string
 	// Container overrides the format's default container where the
 	// format defines an alternative; empty selects the default. Today

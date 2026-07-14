@@ -1,8 +1,25 @@
 package server
 
-import "github.com/colespringer/waxflow/internal/metrics"
+import (
+	"reflect"
+
+	"github.com/colespringer/waxflow/internal/metrics"
+)
 
 // Test-only seams exposed to the external server_test package.
+
+// JobRequestJSONTags lists the POST /jobs body's field names as the wire
+// spells them, so an external test can assert its own table covers every one.
+func JobRequestJSONTags() []string {
+	t := reflect.TypeFor[jobRequest]()
+	tags := make([]string, 0, t.NumField())
+	for i := range t.NumField() {
+		if tag := jsonTag(t.Field(i)); tag != "" {
+			tags = append(tags, tag)
+		}
+	}
+	return tags
+}
 
 // HoldLiveSlot takes one live admission slot and returns its idempotent
 // release. It lets a test drive the live pool to saturation directly,

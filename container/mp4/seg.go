@@ -15,7 +15,7 @@ import (
 // SegmenterVersion identifies the segment and init-header box layout for
 // the ADR-0004 cache key: cached segments regenerate when this bumps, so
 // a box-layout fix can never serve stale segments next to fresh ones.
-const SegmenterVersion = "mp4-seg-2"
+const SegmenterVersion = "mp4-seg-3"
 
 // maxSegmentPayload bounds one segment's mdat payload. A segment is a
 // single moof+mdat pair (see Segmenter), and the most extreme legal
@@ -190,9 +190,14 @@ var (
 	initFtypBox = makeBox("ftyp",
 		[]byte("iso6"), u32(0),
 		[]byte("iso6"), []byte("iso5"), []byte("cmfc"), []byte("mp41"))
+	// msdh alone: msix is DASH's Indexed Media Segment brand and requires a
+	// sidx per segment, which is not written and would be redundant if it
+	// were. One segment is served per URL, so there are no byte ranges to
+	// index. HLS players ignore brands, so claiming msix was invisible; a
+	// DASH conformance validator would not have ignored it.
 	stypBox = makeBox("styp",
 		[]byte("msdh"), u32(0),
-		[]byte("msdh"), []byte("msix"))
+		[]byte("msdh"))
 )
 
 // elstBox is a version-1 edit list with one entry: presentation starts

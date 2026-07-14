@@ -95,6 +95,18 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	return nil
 }
 
+// note records a Warning that Strict must not escalate: a limitation of this
+// decoder against a file that is well formed, rather than damage in the file.
+//
+// warn is for mess, and Strict turns mess into an error for conformance runs.
+// An HE-AAC config is not mess; it is a conformant file whose high band this
+// decoder does not synthesize. Routing that through warn would make
+// `probe --strict` reject valid HE-AAC files as malformed, which is why this
+// path exists and why it cannot fail.
+func (d *Demuxer) note(off int64, format string, args ...any) {
+	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...)})
+}
+
 // parse scans the top-level boxes, reads moov into memory, builds the
 // track tree, and selects the audio track.
 func (d *Demuxer) parse() error {
@@ -193,6 +205,9 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		return malformed("no audio track")
 	}
 	d.sel = audio
+	if audio.note != "" {
+		d.note(0, "%s", audio.note)
+	}
 
 	if err := audio.fmt.Valid(); err != nil {
 		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "mp4: unusable audio format", err)
