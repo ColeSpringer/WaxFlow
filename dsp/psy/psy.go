@@ -77,6 +77,15 @@ type Config struct {
 	// thresholds (more bits, higher quality). This is the encoders'
 	// quality/rate tuning knob.
 	OffsetDB float64
+	// ATHOffsetDB shifts the absolute-threshold floor: positive values
+	// lower it (more of the near-inaudible spectral extremes are kept).
+	// The 96 dB SPL full-scale anchor is a playback-level convention, so
+	// content near the absolute threshold is a judgment call the quality
+	// setting should own: at high quality an encoder buys insurance
+	// against louder playback, at low quality it sheds barely-audible
+	// extremes first. Zero keeps the anchored threshold as-is (the
+	// existing encoders' behavior).
+	ATHOffsetDB float64
 }
 
 // Result is one block's analysis. The slices are owned by the Model and
@@ -238,6 +247,7 @@ func (m *Model) buildPartitions() {
 	fsLine := float64(m.cfg.FFTSize) / 4
 	fsEnergy := fsLine * fsLine
 
+	athScale := math.Pow(10, -m.cfg.ATHOffsetDB/10)
 	lo := 0
 	for lo < half {
 		hi := lo + 1
@@ -249,7 +259,7 @@ func (m *Model) buildPartitions() {
 		bval := bark(center)
 		qthr := 0.0
 		for w := lo; w < hi; w++ {
-			qthr += math.Pow(10, (athDB(float64(w)*df)-athSPL)/10) * fsEnergy
+			qthr += math.Pow(10, (athDB(float64(w)*df)-athSPL)/10) * fsEnergy * athScale
 		}
 		m.parts = append(m.parts, partition{
 			lo: lo, hi: hi, bval: bval,

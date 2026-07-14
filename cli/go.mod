@@ -1,6 +1,6 @@
 module github.com/colespringer/waxflow/cli
 
-go 1.26.3
+go 1.26
 
 require (
 	github.com/colespringer/waxflow v0.0.0-00010101000000-000000000000

@@ -34,8 +34,11 @@ func TestGenerateBooks(t *testing.T) {
 	fl, _ := buildFloor1(n2, floorPartitions)
 	win := fullWindow(n)
 
+	noiseHist := make([]float64, resNoiseEntries)
 	coarseHist := make([]float64, resCoarseEntries)
-	fineHist := make([]float64, resFineEntries)
+	r1Hist := make([]float64, resR1Entries)
+	r2Hist := make([]float64, resR2Entries)
+	r3Hist := make([]float64, resR3Entries)
 
 	// scratch reused per block
 	windowed := make([]float32, n)
@@ -48,7 +51,14 @@ func TestGenerateBooks(t *testing.T) {
 	fStep2 := make([]bool, len(fl.xs))
 
 	// residues computes the masked, floor-normalized residue of one windowed
-	// block of a signal into resid (the exact front-end emitBlock runs).
+	// block of a signal into resid. It runs the same MDCT/floor/normalize
+	// front-end as emitBlock, but masks with a nil threshold (floor-only): the
+	// generator has no psy model, so it cannot reproduce emitBlock's per-line
+	// psy test. That makes it zero a superset of the lines the encoder zeros (it
+	// drops the below-floor-but-above-threshold detail the encoder keeps), so the
+	// smallest-residue tail is under-represented in training. The effect is on
+	// codeword lengths only (size), not on any decoded value; tightening it by
+	// feeding the generator a representative threshold is a known size lever.
 	residues := func(sig []float32, start int) {
 		for i := 0; i < n; i++ {
 			j := start + i
@@ -63,18 +73,30 @@ func TestGenerateBooks(t *testing.T) {
 		floor1EncodeVals(fl, targets, vals, fFinal)
 		fl.curve(vals, curve, fFinal, fStep2, n2)
 		normalizeResidue(spec, curve, resid, n2)
-		maskResidue(spec, resid, n2)
+		maskResidue(spec, resid, nil, n2)
 	}
 
-	// accumPair histograms one residue pair (v0,v1) onto the coarse lattice and
-	// its coarse-quantization residual onto the fine lattice, matching the cascade
-	// the encoder codes: coarse index, then the leftover onto the fine index.
+	// accumPair histograms one residue pair (v0,v1) onto every book's lattice,
+	// walking the same coarse -> r1 -> r2 -> r3 cascade the encoder codes: the raw
+	// pair onto the noise and coarse lattices, then each stage's rounding residual
+	// onto the next refinement lattice. The generator does not classify, so each
+	// book's table is a prior over all coded partitions rather than class-
+	// conditional, trained at the front-end's nominal masking (see residues).
+	refine := func(v0, v1, min, delta float64, hist []float64) (float64, float64) {
+		i0 := refineLatIndex(v0, min, delta)
+		i1 := refineLatIndex(v1, min, delta)
+		hist[i0+i1*resRefineL]++
+		return v0 - (min + float64(i0)*delta), v1 - (min + float64(i1)*delta)
+	}
 	accumPair := func(v0, v1 float64) {
-		i0, i1 := coarseLatIndex(v0), coarseLatIndex(v1)
-		coarseHist[i0+i1*resCoarseL]++
-		r0 := v0 - coarseLatValue(i0)
-		r1 := v1 - coarseLatValue(i1)
-		fineHist[fineLatIndex(r0)+fineLatIndex(r1)*resFineL]++
+		noiseHist[noiseLatIndex(v0)+noiseLatIndex(v1)*resNoiseL]++
+		c0, c1 := coarseLatIndex(v0), coarseLatIndex(v1)
+		coarseHist[c0+c1*resCoarseL]++
+		r0 := v0 - coarseLatValue(c0)
+		r1 := v1 - coarseLatValue(c1)
+		r0, r1 = refine(r0, r1, resR1Min, resR1Delta, r1Hist)
+		r0, r1 = refine(r0, r1, resR2Min, resR2Delta, r2Hist)
+		refine(r0, r1, resR3Min, resR3Delta, r3Hist)
 	}
 
 	// partitionCoded reports whether a 32-line partition holds any coded line, so
@@ -137,16 +159,24 @@ func TestGenerateBooks(t *testing.T) {
 		}
 	}
 
+	noiseLengths := huffmanLengths(noiseHist)
 	coarseLengths := huffmanLengths(coarseHist)
-	fineLengths := huffmanLengths(fineHist)
-	if _, ok := assignCodewords(coarseLengths); !ok {
-		t.Fatal("coarse book over-subscribed")
-	}
-	if _, ok := assignCodewords(fineLengths); !ok {
-		t.Fatal("fine book over-subscribed")
+	r1Lengths := huffmanLengths(r1Hist)
+	r2Lengths := huffmanLengths(r2Hist)
+	r3Lengths := huffmanLengths(r3Hist)
+	for _, b := range []struct {
+		name    string
+		lengths []uint8
+	}{
+		{"noise", noiseLengths}, {"coarse", coarseLengths},
+		{"r1", r1Lengths}, {"r2", r2Lengths}, {"r3", r3Lengths},
+	} {
+		if _, ok := assignCodewords(b.lengths); !ok {
+			t.Fatalf("%s book over-subscribed", b.name)
+		}
 	}
 
-	src := emitBooksFile(nBlocks, coarseLengths, fineLengths)
+	src := emitBooksFile(nBlocks, noiseLengths, coarseLengths, r1Lengths, r2Lengths, r3Lengths)
 	formatted, err := format.Source(src)
 	if err != nil {
 		t.Fatalf("gofmt generated source: %v\n%s", err, src)
@@ -154,8 +184,8 @@ func TestGenerateBooks(t *testing.T) {
 	if err := os.WriteFile("books_gen.go", formatted, 0o644); err != nil {
 		t.Fatalf("write books_gen.go: %v", err)
 	}
-	t.Logf("trained on %d blocks; wrote books_gen.go (coarse %d, fine %d entries)",
-		nBlocks, len(coarseLengths), len(fineLengths))
+	t.Logf("trained on %d blocks; wrote books_gen.go (noise %d, coarse %d, refine %d entries)",
+		nBlocks, len(noiseLengths), len(coarseLengths), len(r1Lengths))
 }
 
 // Lattice helpers duplicate the geometry from books.go so the generator bins
@@ -164,7 +194,12 @@ func coarseLatIndex(v float64) int {
 	return clampIdx(math.Round((v-resCoarseMin)/resCoarseDelta), resCoarseL)
 }
 func coarseLatValue(i int) float64 { return resCoarseMin + float64(i)*resCoarseDelta }
-func fineLatIndex(v float64) int   { return clampIdx(math.Round((v-resFineMin)/resFineDelta), resFineL) }
+func noiseLatIndex(v float64) int {
+	return clampIdx(math.Round((v-resNoiseMin)/resNoiseDelta), resNoiseL)
+}
+func refineLatIndex(v, min, delta float64) int {
+	return clampIdx(math.Round((v-min)/delta), resRefineL)
+}
 func clampIdx(f float64, L int) int {
 	i := int(f)
 	if i < 0 {
@@ -257,7 +292,7 @@ func stereoCorpus(rate int) [][2][]float32 {
 	return out
 }
 
-func emitBooksFile(nBlocks int, coarse, fine []uint8) []byte {
+func emitBooksFile(nBlocks int, noise, coarse, r1, r2, r3 []uint8) []byte {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "// Code generated by booksgen; DO NOT EDIT.\n")
 	fmt.Fprintf(&b, "// Regenerate with `go generate ./codec/vorbis`.\n")
@@ -266,9 +301,15 @@ func emitBooksFile(nBlocks int, coarse, fine []uint8) []byte {
 	fmt.Fprintf(&b, "// a self-synthesized corpus (%d analysis blocks of tones, chords, noise, and\n", nBlocks)
 	fmt.Fprintf(&b, "// sweeps). No external or libvorbis-derived tables. Geometry is in books.go.\n\n")
 	fmt.Fprintf(&b, "package vorbis\n\n")
+	emitLengths(&b, "resNoiseLengths", noise)
+	b.WriteString("\n")
 	emitLengths(&b, "resCoarseLengths", coarse)
 	b.WriteString("\n")
-	emitLengths(&b, "resFineLengths", fine)
+	emitLengths(&b, "resR1Lengths", r1)
+	b.WriteString("\n")
+	emitLengths(&b, "resR2Lengths", r2)
+	b.WriteString("\n")
+	emitLengths(&b, "resR3Lengths", r3)
 	return b.Bytes()
 }
 

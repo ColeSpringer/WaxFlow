@@ -15,7 +15,7 @@ var _ codec.Encoder = (*Encoder)(nil)
 // ADR-0004 cache key. It composes the psychoacoustic model's revision, so
 // retuning dsp/psy invalidates exactly these streams. Bump it whenever a change
 // alters the produced bytes.
-const EncoderVersion = "vorbis-enc-5+" + psy.Version
+const EncoderVersion = "vorbis-enc-7+" + psy.Version
 
 // encVendor is the fixed vendor string the standalone encoder stamps into the
 // comment header, so deterministic-mode output stays byte-identical. In the
@@ -378,17 +378,19 @@ func (e *Encoder) emitBlock(emit func(codec.Packet) error, n, prevN, nextN int) 
 			return err
 		}
 		lineThresholds(psyRes, e.spec[c][:n2], e.thrLine[:n2], n2)
-		classifyPartitions(e.spec[c][:n2], e.thrLine[:n2], e.classes[c][:n2/resPartSize], resPartSize, n2, capNoise)
-		maskResidue(e.spec[c][:n2], e.resid[c][:n2], n2)
+		classifyPartitions(e.spec[c][:n2], e.curve[c][:n2], e.thrLine[:n2], e.classes[c][:n2/resPartSize], resPartSize, n2, capNoise)
+		maskResidue(e.spec[c][:n2], e.resid[c][:n2], e.thrLine[:n2], n2)
 	}
 
 	// Stereo coupling: replace the two channels' residues with the magnitude and
 	// angle the decoder decouples, then reclassify the pair as magnitude and angle
 	// (the per-channel L/R classes computed above no longer describe them): the
 	// magnitude takes the band's masking allocation, the angle its own precision.
+	magChannel := -1
 	if len(e.cfg.mappings[slot].couplingMag) > 0 {
 		coupleResidues(e.resid, n2)
 		deriveCoupledClasses(e.classes[0][:n2/resPartSize], e.classes[1][:n2/resPartSize], e.resid[1][:n2], n2)
+		magChannel = e.cfg.mappings[slot].couplingMag[0]
 	}
 
 	e.w.reset()
@@ -401,7 +403,7 @@ func (e *Encoder) emitBlock(emit func(codec.Packet) error, n, prevN, nextN int) 
 	for c := 0; c < e.channels; c++ {
 		writeFloorData(&e.w, fl, e.vals[c][:postCount], e.cfg.books[bookFloorPosts])
 	}
-	encodeResidueType1(&e.w, res, e.cfg.books, e.resid, e.classes, n2)
+	encodeResidueType1(&e.w, res, e.cfg.books, e.resid, e.classes, n2, magChannel)
 
 	l := int64((prevN + n) / 4)
 	out := l

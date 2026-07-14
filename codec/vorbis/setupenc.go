@@ -119,12 +119,12 @@ const (
 // band width, so a masking threshold maps straight to a partition.
 const resPartSize = 32
 
-// buildResidue lays out a block's residue: resPartSize partitions, three
-// perceptual classes, and a two-pass cascade of the product-lattice residue
-// books. A skipped partition carries no book (only its class symbol); a coarse
-// partition is one pass of the coarse book; a fine partition adds the fine book
-// as a second pass that refines the coarse pass's quantization error, so the
-// coarse book is shared as pass 0 of both coded classes.
+// buildResidue lays out a block's residue: resPartSize partitions, six
+// perceptual classes, and up to a four-pass cascade of the product-lattice
+// residue books. A skipped partition carries no book (only its class symbol); a
+// noise partition is one pass of the cheap noise book; the tonal classes share
+// the coarse book as pass 0 and add 0..3 quarter-step refinement passes (r1/r2/
+// r3), so med/fine/super reconstruct on the 1/64, 1/256, and 1/1024 grids.
 //
 // Both mono and coupled stereo use residue type 1 (per-channel classification).
 // For a stereo pair the two channels are the coupled magnitude and angle, and
@@ -141,13 +141,15 @@ func buildResidue(n2 int) *residue {
 		partSize:  resPartSize,
 		classes:   numResClass,
 		classbook: bookResClass,
-		maxPass:   2,
+		maxPass:   4,
 	}
-	none := []int{-1, -1, -1, -1, -1, -1, -1, -1}
 	r.books = make([][]int, numResClass)
-	r.books[classSkip] = append([]int(nil), none...)
+	r.books[classSkip] = []int{-1, -1, -1, -1, -1, -1, -1, -1}
+	r.books[classNoise] = []int{bookResNoise, -1, -1, -1, -1, -1, -1, -1}
 	r.books[classCoarse] = []int{bookResCoarse, -1, -1, -1, -1, -1, -1, -1}
-	r.books[classFine] = []int{bookResCoarse, bookResFine, -1, -1, -1, -1, -1, -1}
+	r.books[classMed] = []int{bookResCoarse, bookResR1, -1, -1, -1, -1, -1, -1}
+	r.books[classFine] = []int{bookResCoarse, bookResR1, bookResR2, -1, -1, -1, -1, -1}
+	r.books[classSuper] = []int{bookResCoarse, bookResR1, bookResR2, bookResR3, -1, -1, -1, -1}
 	return r
 }
 

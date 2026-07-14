@@ -25,7 +25,12 @@ import (
 // and no hand-tuned window/scale constant is needed.
 
 // newPsyModel builds the long-block psychoacoustic model for one channel with
-// one masking threshold per MDCT line.
+// one masking threshold per MDCT line. The quality offset drives the absolute
+// threshold too: the ATH anchor is a playback-level convention, and the region
+// it governs (chiefly the top octaves) would otherwise be invisible to the
+// quality knob, since OffsetDB only shifts the masking-derived demand. At high
+// quality the encoder keeps near-threshold extremes (insurance against loud
+// playback); at low quality it sheds them first.
 func newPsyModel(rate, n2 int, offsetDB float64) (*psy.Model, error) {
 	offsets := make([]int, n2+1)
 	for i := range offsets {
@@ -37,6 +42,7 @@ func newPsyModel(rate, n2 int, offsetDB float64) (*psy.Model, error) {
 		FFTSize:     2 * n2,
 		BandOffsets: offsets,
 		OffsetDB:    offsetDB,
+		ATHOffsetDB: offsetDB,
 	})
 }
 
@@ -65,15 +71,26 @@ func lineThresholds(res psy.Result, spec []float32, dst []float64, n2 int) {
 	}
 }
 
-// classifyPartitions assigns each residue partition a coding class. A partition
-// with no line above its masking threshold is masked and dropped (skip); an
-// audible one is coded coarse or fine. The coarse/fine split is peak-SNR-driven
-// for tonal partitions but capped at coarse for noise-like ones: the peak-per-line
-// SNR test (which a tone needs, so a real spectral line is never averaged away)
-// otherwise mistakes a noise fluctuation for a tone and codes noise at fine
-// precision, where coarse-quantization noise is fully masked by the noise itself.
-// Tonality is measured by spectral flatness: a tone concentrates energy in one
-// line (low flatness), noise spreads it across the partition (high flatness).
+// classifyPartitions assigns each residue partition a coding class: the
+// cheapest rung of the precision ladder whose quantization noise stays under
+// the partition's masking demand. A partition with no line above its masking
+// threshold is masked and dropped (skip); noise-like partitions are capped at
+// the cheap noise class (coarse quantization noise there is self-masked); an
+// audible tonal partition takes the class whose step meets its demand.
+//
+// The demand is measured where quantization noise actually lands: a residue
+// step of delta reconstructs with noise ~delta^2/12 scaled by the floor curve's
+// energy at each line, so the binding line is the audible line maximizing
+// curve^2/thr, not the peak signal-to-mask line (a quiet audible line under a
+// high peak-envelope floor takes full-floor-scaled noise). The audibility test
+// (peak per-line SNR, never a band sum) is unchanged: a real spectral line must
+// never be averaged away by the huge DC threshold sharing its partition.
+//
+// Because the psy thresholds carry the quality knob (OffsetDB), the demand
+// rises and falls with -q, so partitions migrate up the ladder at high quality
+// (through fine to superfine) and down at low quality. This is what lets the
+// quality setting reach bands that are already audible instead of only
+// reclassifying near-masked ones.
 //
 // The noise cap runs only on temporally steady blocks (capNoise, decided by the
 // caller). A transient's sharp attack is broadband too (flatter, even, than
@@ -81,17 +98,33 @@ func lineThresholds(res psy.Result, spec []float32, dst []float64, n2 int) {
 // must-stay-sharp attack; the caller instead gates the cap on temporal steadiness
 // (an attack concentrates energy into part of the block), so steady noise
 // coarsens while a transient's residue stays fine regardless of block size.
-func classifyPartitions(spec []float32, thrLine []float64, classes []int, partSize, n2 int, capNoise bool) {
+func classifyPartitions(spec, curve []float32, thrLine []float64, classes []int, partSize, n2 int, capNoise bool) {
 	nParts := n2 / partSize
 	for p := 0; p < nParts; p++ {
 		lo, hi := p*partSize, (p+1)*partSize
-		var peak, sumE float64
+		var peak, demand, sumE float64
 		for l := lo; l < hi; l++ {
 			e := float64(spec[l]) * float64(spec[l])
 			sumE += e
 			if t := thrLine[l]; t > 0 {
 				if snr := e / t; snr > peak {
 					peak = snr
+				}
+				if e > t {
+					// A line's demand is the floor-scaled quantization noise it
+					// takes (curve^2/thr), capped at demandSlack above its own
+					// audibility: a quiet line a coarse step would round to zero
+					// costs at most its own energy, so it cannot honestly demand
+					// the full floor-referenced precision a loud line does.
+					cv := float64(curve[l])
+					d := cv * cv
+					if maxD := e * demandSlack; maxD < d {
+						d = maxD
+					}
+					d /= t
+					if d > demand {
+						demand = d
+					}
 				}
 			}
 		}
@@ -100,10 +133,10 @@ func classifyPartitions(spec []float32, thrLine []float64, classes []int, partSi
 			continue
 		}
 		if capNoise && partitionFlatness(spec, lo, hi, sumE) >= noiseSFM {
-			classes[p] = classCoarse
+			classes[p] = classNoise
 			continue
 		}
-		classes[p] = classFromSNR(peak)
+		classes[p] = classFromDemand(demand)
 	}
 }
 
@@ -130,20 +163,22 @@ func partitionFlatness(spec []float32, lo, hi int, sumE float64) float64 {
 	return math.Exp(sumLog/n) / meanE
 }
 
-// maskResidue zeros the floor-normalized residue of every line more than
-// globalMaskDB below the block's loudest line. Such a line sits under the ear's
-// absolute floor relative to the block's dominant content, so coding it would
-// only scatter quantization noise into otherwise-silent critical bands.
+// maskResidue zeros the floor-normalized residue of every line that is BOTH
+// more than globalMaskDB below the block's loudest line AND under its own psy
+// masking threshold. Such a line is inaudible twice over, so coding it would
+// only spend bits scattering quantization noise into otherwise-silent bands.
 //
-// The drop is deliberately a block-relative floor, not the per-line psy
-// threshold: the coarse structure (which whole partitions to skip) already comes
-// from the psy threshold via classifyPartitions, and dropping every individually
-// sub-threshold line on top of that also discards a strong tone's near-frequency
-// leakage. That leakage is masked to the ear, but it lands in the critical band
-// beside the tone where an objective metric with no cross-band spreading scores
-// it as missing signal. Coding it (down to the block floor) is what keeps tonal
-// material at parity; the partition skip still drops the genuinely empty bands.
-func maskResidue(spec []float32, resid []float32, n2 int) {
+// Both conditions are required, each covering the other's failure mode. The
+// block-relative floor alone (the earlier form) zeroed audible content on
+// tilted real spectra, where legitimate high-frequency detail sits ~50+ dB
+// below the bass peak yet well above the ear's threshold; requiring the line
+// to also be psy-inaudible keeps that detail. The per-line psy test alone
+// would discard a strong tone's near-frequency leakage: masked to the ear, but
+// it lands in the critical band beside the tone where an objective metric with
+// no cross-band spreading scores it as missing signal, so anything within the
+// block floor of the peak stays coded regardless. A nil thrLine (the offline
+// book generator, which has no psy model) falls back to the floor test alone.
+func maskResidue(spec, resid []float32, thrLine []float64, n2 int) {
 	var peak2 float64
 	for l := 0; l < n2; l++ {
 		if s := float64(spec[l]); s*s > peak2 {
@@ -153,7 +188,11 @@ func maskResidue(spec []float32, resid []float32, n2 int) {
 	globalFloor := peak2 * globalMaskRatio
 	for l := 0; l < n2; l++ {
 		s := float64(spec[l])
-		if s*s <= globalFloor {
+		e := s * s
+		if e > globalFloor {
+			continue
+		}
+		if thrLine == nil || e <= thrLine[l] {
 			resid[l] = 0
 		}
 	}
@@ -166,15 +205,30 @@ const (
 	globalMaskRatio = 1e-5 // 10^(-globalMaskDB/10)
 )
 
-// classFromSNR maps a peak signal-to-mask ratio to a residue class.
-func classFromSNR(snr float64) int {
-	if snr <= 1 {
-		return classSkip // no line rises above its masking threshold
-	}
-	if 10*math.Log10(snr) < coarseFineDB {
+// classFromDemand maps a partition's masking demand (max curve^2/thr over its
+// audible lines) to the cheapest residue class whose quantization step meets
+// it. A step of delta injects ~delta^2/12 noise per unit of floor energy, so a
+// class's capability is 10log10(12/delta^2), an even ~12 dB per rung: ~29 dB for
+// noise (1/8), ~35 for coarse (1/16), ~47 for med (1/64), ~59 for fine (1/256),
+// ~71 for super (1/1024). The boundaries sit a few dB below those capabilities,
+// leaving headroom for the uniform-error model's optimism (worst-case error is
+// ~4.8 dB over RMS) and the floor's interpolation wander. The lowest audible
+// tonal bands ride the same cheap noise book as the noise cap, so barely-audible
+// content spends the least.
+func classFromDemand(demand float64) int {
+	db := 10 * math.Log10(demand)
+	switch {
+	case db <= noiseMaxDB:
+		return classNoise
+	case db <= coarseMaxDB:
 		return classCoarse
+	case db <= medMaxDB:
+		return classMed
+	case db <= fineMaxDB:
+		return classFine
+	default:
+		return classSuper
 	}
-	return classFine
 }
 
 // qualityToOffsetDB maps the libvorbis -q scale (-1..10) to the psy model's
@@ -185,17 +239,31 @@ func qualityToOffsetDB(quality float64) float64 {
 	return (quality - DefaultQuality) * 2.0
 }
 
-// Residue classes (4b): skip a masked partition, code an audible one coarse or
-// fine. coarseFineDB is the peak SNR above the masking threshold at which fine
-// coding starts.
+// Residue classes: skip a masked partition, cap a steady noise partition at
+// the cheap noise book, and code an audible tonal one at the cheapest of
+// coarse/med/fine/super that meets its masking demand. The ordinals ascend in
+// precision, so "the more demanding of two classes" is the larger ordinal
+// (deriveCoupledClasses relies on this).
 const (
-	classSkip    = 0
-	classCoarse  = 1
-	classFine    = 2
-	numResClass  = 3
-	coarseFineDB = 12.0
+	classSkip   = 0
+	classNoise  = 1
+	classCoarse = 2
+	classMed    = 3
+	classFine   = 4
+	classSuper  = 5
+	numResClass = 6
+	// The demand boundaries of the ladder, each ~3 dB under the class's
+	// ~29/35/47/59 dB capability (see classFromDemand); a demand over fineMaxDB
+	// takes the top (super) rung.
+	noiseMaxDB  = 26.0
+	coarseMaxDB = 32.0
+	medMaxDB    = 44.0
+	fineMaxDB   = 56.0
+	// demandSlack caps a quiet audible line's demand at this factor (~12 dB)
+	// over its own signal-to-mask ratio (see classifyPartitions).
+	demandSlack = 16.0
 	// noiseSFM is the spectral-flatness threshold above which a partition is
-	// treated as noise-like and capped at coarse. A single windowed tone leaks to
-	// a flatness well under this; broadband noise sits well above it.
+	// treated as noise-like and capped at the noise class. A single windowed tone
+	// leaks to a flatness well under this; broadband noise sits well above it.
 	noiseSFM = 0.25
 )

@@ -1,6 +1,6 @@
 module github.com/colespringer/waxflow/resolver
 
-go 1.26.3
+go 1.26
 
 require (
 	github.com/colespringer/waxbin v0.0.0-20260702055125-8fd6f8d0a05e

@@ -180,4 +180,4 @@ func bytesEqual(a, b []byte) bool {
 // goldenEncodeHash pins the FNV-1a hash of the reference encode (headers plus
 // length-prefixed packets). Regenerate it and bump EncoderVersion whenever a
 // deliberate bitstream change lands.
-const goldenEncodeHash uint64 = 0x1874097c5d7bc314
+const goldenEncodeHash uint64 = 0x3b0da36a84fe62f5

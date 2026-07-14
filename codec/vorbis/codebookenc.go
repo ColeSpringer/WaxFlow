@@ -114,15 +114,48 @@ func (b *encBook) latIndex(v float64) int {
 // refining it.
 func (b *encBook) latValue(idx int) float64 { return b.minimum + float64(idx)*b.delta }
 
+// latIndexSigned is latIndex constrained never to quantize a nonzero value to a
+// lattice point of the opposite sign (or to zero). It is used for the coupled
+// magnitude channel's final cascade pass on a line the earlier passes left at
+// zero: the decoder picks its decouple branch from sign(magnitude), so a small
+// nonzero magnitude the whole cascade rounds into its zero dead-zone would flip
+// the branch and invert the angle channel. Nudging that last pass to the nearest
+// same-sign point costs at most one final-step of magnitude accuracy but keeps
+// the branch correct; exact zero (a genuinely silent line) stays zero and takes
+// the decoder's mag<=0 branch. Applying it only on the last pass (not pass 0) is
+// what keeps the refinement cascade convergent: a pass-0 nudge to a same-sign
+// coarse point lands a residual outside the refinement books' range, which they
+// cannot walk back.
+func (b *encBook) latIndexSigned(v float64) int {
+	idx := b.latIndex(v)
+	switch {
+	case v > 0 && b.latValue(idx) <= 0:
+		for idx < b.lookupValues-1 && b.latValue(idx) <= 0 {
+			idx++
+		}
+	case v < 0 && b.latValue(idx) >= 0:
+		for idx > 0 && b.latValue(idx) >= 0 {
+			idx--
+		}
+	}
+	return idx
+}
+
 // vectorEntry returns the product-lattice entry nearest the dimension-length vector
 // vals: each dimension picks its nearest lattice index independently (the lattice is
 // separable because sequenceP is false), and the indices compose low-dimension-first
 // into the entry, exactly the base-lookupValues digit order the decoder's valueVector
-// reads back. vals must have length b.dimensions.
-func (b *encBook) vectorEntry(vals []float64) int {
+// reads back. vals must have length b.dimensions. A non-nil sign selects, per
+// dimension, latIndexSigned over latIndex where sign[k] holds (the last cascade pass
+// of a coupled magnitude line the earlier passes left at zero; see latIndexSigned).
+func (b *encBook) vectorEntry(vals []float64, sign []bool) int {
 	entry, pow := 0, 1
 	for k := 0; k < b.dimensions; k++ {
-		entry += b.latIndex(vals[k]) * pow
+		idx := b.latIndex(vals[k])
+		if sign != nil && sign[k] {
+			idx = b.latIndexSigned(vals[k])
+		}
+		entry += idx * pow
 		pow *= b.lookupValues
 	}
 	return entry

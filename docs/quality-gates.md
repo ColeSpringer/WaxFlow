@@ -124,6 +124,20 @@ deterministic mode.
 - ODG-proxy at libvorbis -q4 (~128 kbps): corpus mean >= **libvorbis mean -
   0.2**; no track > **0.5** below libvorbis. libvorbis (the reference) is a
   clean-room oracle, never opened while implementing our encoder.
+- The ODG proxy shapes its absolute-mask floor by the threshold of hearing (both
+  the top-octave and deep-bass limbs), so error the ear can barely hear at a
+  moderate playback level is not scored as fully audible; without it the proxy
+  over-penalizes an encoder that drops a defensible top-octave rolloff. The rise
+  is **capped at 15 dB** (was 40): the proxy has no absolute SPL anchor, so the
+  ATH's magnitude is really a playback-level assumption, and a 40 dB rise assumed
+  a playback so loud the top octave's floor reached the signal peak, leaving the
+  metric blind to a whole-octave rolloff (it scored 0). 15 dB keeps a moderate,
+  defensible allowance that still scores gross HF removal and a sub-bass deficit.
+- High-q and real-audio validation is a separate, gated harness (not the q4
+  synthetic gate, which favors us and cannot see the high-q size/quality
+  tradeoff): `TestVorbisRealAudioQuality`/`TestVorbisRealAudioDiag` in `tests/`
+  (set `WAXFLOW_REAL_AUDIO_DIR`) sweep q4/q6/q8 on real lossless clips and break
+  the deficit down per bark band.
 - Self-generated clean-room codebooks trade size for provenance: streams may be
   somewhat larger than libvorbis at equal quality; the gate is quality
   (ODG-proxy), not byte-competitiveness.
@@ -131,26 +145,44 @@ deterministic mode.
 - Decode with libvorbis, not ffmpeg's *native* Vorbis decoder: the native
   decoder is experimental (trac.ffmpeg.org/10571) and mis-decodes some legal
   coupled streams, so the tests pin `-c:a libvorbis`.
-- Status: the encoder MEETS the ODG gate. At -q4 the corpus mean is ~+0.3 vs
-  libvorbis with every track at or above libvorbis (worst per-track ~+0.03,
-  tonal): a peak-envelope floor plus a block-relative mask floor fixed tonal,
-  block switching fixed transient pre-echo, and square-polar stereo coupling
-  (per-channel type-1 residues, coupling applied at the mapping layer) with
-  perceptual (not uniformly-fine) allocation
-  carries stereo material near libvorbis in both quality and size.
+- Status: the encoder MEETS the ODG gate. At -q4 the corpus mean is **+0.52** vs
+  libvorbis with every track at or above libvorbis (worst per-track +0.00): a
+  peak-envelope floor plus a perceptual mask floor fixed tonal, block switching
+  fixed transient pre-echo, and square-polar stereo coupling (per-channel type-1
+  residues, coupling applied at the mapping layer) with demand-driven allocation
+  carries stereo material at or above libvorbis. The +0.52 is smaller than the
+  ~+1.0 reported when the proxy's ATH cap was 40 dB: tightening the cap to 15 dB
+  (see the ODG-proxy note above) removed an over-generous sub-bass and top-octave
+  discount that had inflated the margin, so this is the honest gain from the
+  encoder alone. The earlier real-audio figures (q4 ~+0.8, q6 ~+0.7, q8 ~+0.4)
+  were measured under the 40 dB proxy and should be re-run under the 15 dB cap;
+  they will come in lower but keep the same ordering (the gate is comparative, so
+  the reweighting hits our encoder and libvorbis alike).
 - Size: residue is coded by multi-dimensional product-lattice VQ books whose
   codeword lengths are trained offline (`books_gen.go` via `go generate`), and it
-  is allocated by masking, not uniformly fine: coupled stereo splits into per-
-  channel magnitude and angle (the angle skips wherever it is zero), and steady
-  broadband noise is capped at coarse (its quantization noise is self-masked)
-  while a transient's broadband attack stays fine (gated on temporal steadiness,
-  since a sharp attack looks flat too). At libvorbis -q4 the synthesized corpus
-  runs ~2.6x libvorbis's size (down from ~3.9x before these allocations), tonal
-  ~2x, noise the widest (~5.6x: even coarse carries more precision than
-  libvorbis's noise coding). Streams still exceed libvorbis (the clean-room books
-  and the peak-floor scheme carry more residue precision), which the plan accepts
-  for a VBR codec; the gate remains quality, not size, and quality is unchanged
-  by the allocation (mean +0.31, every track >= libvorbis).
+  is allocated by masking on a graduated precision ladder (noise 1/8, coarse
+  1/16, then quarter-step refinement passes to 1/64, 1/256, 1/1024), so a
+  partition takes the cheapest rung whose quantization noise clears its masking
+  demand rather than overshooting a coarse-to-fine gap. Coupled stereo splits
+  into per-channel magnitude and angle (the angle skips wherever it is zero), and
+  steady broadband noise caps at the noise book while a transient's broadband
+  attack stays fine (gated on temporal steadiness). On real clips the encoder
+  runs ~2.8x libvorbis at q4 down to ~1.7x at q8 (the deficit narrows as -q rises
+  because libvorbis grows faster). Streams still exceed libvorbis (the clean-room
+  books and the peak-floor scheme carry more residue precision), which the plan
+  accepts for a VBR codec; the gate remains quality, not size.
+- The refinement books are mid-tread (they include a zero point): the decoder
+  picks its stereo decouple branch from the sign of the magnitude channel, so a
+  coupled magnitude of exactly zero must reconstruct as exactly zero, and on the
+  anti-phase lines where the angle exceeds the magnitude the sign is preserved so
+  a small magnitude cannot round into the wrong sign and invert the angle channel.
+  That sign-preserving nudge runs on the **last** cascade pass, not pass 0: a
+  pass-0 nudge to a same-sign coarse point lands a residual outside the refinement
+  books' range, which they cannot walk back, wrecking accuracy (~890x worse error)
+  on every anti-phase coupled magnitude line while a finer class is meant to be
+  most precise. Applied on the last pass, and only where the cascade so far is
+  still zero, it costs at most one final-step of accuracy and keeps the cascade
+  convergent.
 
 ## Service targets (recorded per release once streaming and HLS exist)
 
