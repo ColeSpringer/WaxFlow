@@ -1,4 +1,4 @@
-// The M16 acceptance suite: uploads, the async job API (creation,
+// The acceptance suite for uploads, the async job API (creation,
 // progress events, results, cancel, restart safety), loudness analysis
 // with ReplayGain tags on analyzed outputs, the metadata passthrough
 // matrix (live minimal tags, job full tags), tag-based gain resolution,
@@ -39,7 +39,7 @@ type jobsEnvDirs struct {
 	root, cache, jobs, uploads string
 }
 
-// withJobs enables the M16 surfaces on a test server config.
+// withJobs enables the job surfaces on a test server config.
 func withJobs(d jobsEnvDirs) func(*server.Config) {
 	return func(cfg *server.Config) {
 		cfg.JobsDir = d.jobs

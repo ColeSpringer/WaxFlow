@@ -50,7 +50,7 @@ type celtDecoder struct {
 	// per-frame temporaries (band vectors sized celtNBands, SILK frame
 	// buffers) deliberately still allocate, ~20-30 allocs/packet measured as
 	// immaterial next to decode cost. The full scratch sweep is deferred to
-	// the performance milestone alongside the MDCT FFT.
+	// the performance pass alongside the MDCT FFT.
 	window  []float64
 	mdctScr *mdctScratch
 	mdctPlanCache

@@ -225,7 +225,7 @@ func bestAlign(got, want []float32, channels, delay int) testutil.FloatDiff {
 
 // lossyTolerance is the RMS ceiling for a lossy codec's decode-vs-ffmpeg
 // differential. These are loose demuxer-level bounds: the decoders were
-// validated to tight metrics in their own milestones, so a correct demuxer
+// validated to tight metrics in their own suites, so a correct demuxer
 // lands far inside these, and only mis-framed packets blow past them.
 func lossyTolerance(id codec.ID) float64 {
 	switch id {

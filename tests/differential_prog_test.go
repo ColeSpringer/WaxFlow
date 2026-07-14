@@ -1,6 +1,6 @@
 package waxflow_test
 
-// Progressive-MP4 differential (phase 3b): the flat moov/stbl form the aac/alac
+// Progressive-MP4 differential: the flat moov/stbl form the aac/alac
 // rows write through the "progressive" container override must be a real .m4a a
 // third-party tool reads. Transcode through the engine, confirm ffmpeg parses
 // it as a non-fragmented (no moof) AAC movie, and decode it back to the right

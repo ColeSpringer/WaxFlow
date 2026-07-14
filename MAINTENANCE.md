@@ -37,8 +37,8 @@ Operationally:
 
 ## AAC patent-status review
 
-**Recorded 2026-07-10, at the milestone that enables the AAC-LC encoder
-in release builds.** This is a good-faith engineering review, not legal
+**Recorded 2026-07-10, when the AAC-LC encoder was enabled in release
+builds.** This is a good-faith engineering review, not legal
 advice.
 
 - WaxFlow implements only the AAC-LC toolset: window switching, TNS,

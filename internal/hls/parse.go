@@ -8,7 +8,7 @@ import (
 
 // The parsers here are the read side of the M3U8 writers in playlist.go: they
 // round-trip Master/Media output and read the third-party playlists the HLS
-// client (a later milestone) follows. Playlists are attacker-influenced input
+// client follows. Playlists are attacker-influenced input
 // once the client fetches over the network, so parsing is bounded (a line cap
 // and per-line length cap) and tolerant of unknown tags, which HLS requires a
 // client to ignore.

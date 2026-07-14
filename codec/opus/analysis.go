@@ -4,7 +4,7 @@ package opus
 // downmix in 10 ms hops, computing per-frame tonality/noisiness/bandwidth
 // features and the MLP-based music and activity probabilities that drive the
 // SILK/CELT mode decision, plus the CELT hooks (leak_boost, max_pitch_ratio,
-// tonality) that M12 left for this milestone.
+// tonality) that the earlier port left out.
 //
 // The 480-point complex FFT stands in for celt's kiss_fft: a plain
 // mixed-radix Cooley-Tukey with the same forward 1/N scaling. The analysis

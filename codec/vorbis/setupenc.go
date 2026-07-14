@@ -8,13 +8,14 @@ import "math/bits"
 // three Vorbis headers, so the encoder and decoder are guaranteed to agree on
 // geometry, book by book, field by field.
 //
-// The 4a configuration is deliberately minimal: long blocks only, one floor,
-// one residue, one mapping, one mode. 4c adds the short block size with its own
-// floor/residue/mapping/mode and bumps EncoderVersion. The header format is
-// therefore a sub-phase property, not frozen here.
+// The original configuration was deliberately minimal: long blocks only, one
+// floor, one residue, one mapping, one mode. Block switching adds the short
+// block size with its own floor/residue/mapping/mode and bumps EncoderVersion.
+// The header format therefore tracks the encoder's scope, and is not frozen
+// here.
 
 // encConfig is the encoder's parsed-equivalent stream configuration. It carries
-// both block sizes' geometry (4c block switching): slot 0 is the short block,
+// both block sizes' geometry (block switching): slot 0 is the short block,
 // slot 1 the long, matching blockSizes. Each slot has its own floor, residue,
 // and mapping because the geometry (X positions, coded band, partition count)
 // scales with the block's n2. Two modes select the two slots.
@@ -181,8 +182,8 @@ func (c *encConfig) idHeader() []byte {
 }
 
 // commentHeader serializes a Vorbis comment header with the given vendor string
-// and user comments ("KEY=value"). The muxer owns tags in the container path
-// (phase 5); this is the standalone/deterministic default.
+// and user comments ("KEY=value"). The muxer owns tags in the container path;
+// this is the standalone/deterministic default.
 func commentHeader(vendor string, comments []string) []byte {
 	var w bitWriter
 	writeString(&w, 0x03, "vorbis")

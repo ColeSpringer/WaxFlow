@@ -16,22 +16,22 @@ import (
 // test reconciles the tables and fails on any asymmetry that is not recorded
 // in the allowlist below.
 //
-// The allowlist is the plan's burn-down list. Each entry names a known-open
-// gap and the phase that closes it. The check is bidirectional, so it is a
+// The allowlist is the burn-down list. Each entry names a known-open
+// gap and the work that closes it. The check is bidirectional, so it is a
 // ratchet, not just a filter:
 //
 //   - an open gap that is NOT allowlisted fails (new drift: fix it or record it);
 //   - an allowlisted gap that has CLOSED fails (delete the stale entry).
 //
-// So a phase that lands its capability must also delete its allowlist entry in
-// the same change, and the list is empty once every codec encodes+decodes and
-// every container demuxes+muxes.
+// So the change that lands a capability must also delete its allowlist entry,
+// and the list is empty once every codec encodes+decodes and every container
+// demuxes+muxes.
 func TestCodecContainerSymmetry(t *testing.T) {
 	// symmetryGaps is the allowlist: the asymmetries that are known-open and
-	// deliberately deferred to a later phase. Each phase deletes its own entry
-	// as it lands, so the list is the burn-down checklist and is empty once
-	// every codec encodes+decodes and every container demuxes+muxes. Phases 0-5
-	// closed every gap, so the list is now empty: the guard is a pure ratchet
+	// deliberately deferred. Each entry is deleted by the change that lands its
+	// capability, so the list is the burn-down checklist and is empty once
+	// every codec encodes+decodes and every container demuxes+muxes. Every gap
+	// has since closed, so the list is now empty: the guard is a pure ratchet
 	// that fails the moment a new codec or container ships half-symmetric.
 	symmetryGaps := map[string]string{}
 
@@ -50,16 +50,16 @@ func TestCodecContainerSymmetry(t *testing.T) {
 		// A codec with a decoder but no encoder-bearing outputs row.
 		"vorbis-encode": decodes[codec.Vorbis] && !encodes[codec.Vorbis],
 		// The mka package demuxes but has no muxer wired into any output row's
-		// container override (opus/aac/flac/pcm reach it once phase 1 lands).
+		// container override (opus/aac/flac/pcm reach it once the mka muxer lands).
 		"mka-mux": !containerWritable("mka") && !containerWritable("webm"),
 		// The ogg demuxer reads FLAC (mapflac.go) but the muxer writes Opus
-		// only until the flac row gains an "ogg" container override (phase 2).
+		// only until the flac row gains an "ogg" container override.
 		"ogg-flac-mux": !rowWritesContainer("flac", "ogg"),
 		// The ogg demuxer reads Vorbis (mapvorbis.go) but no output row muxes
-		// Vorbis into Ogg until the vorbis row lands (phase 5).
+		// Vorbis into Ogg until the vorbis row lands.
 		"ogg-vorbis-mux": !codecWritesContainer(codec.Vorbis, "ogg"),
 		// The mp4 muxer/segmenter writes codecs the demuxer cannot read back
-		// (Opus/FLAC fMP4); phase 3a teaches the demuxer the fragmented form.
+		// (Opus/FLAC fMP4); the demuxer learns the fragmented form to close it.
 		"mp4-read-back": !mp4DemuxCoversMux(),
 	}
 
@@ -68,7 +68,7 @@ func TestCodecContainerSymmetry(t *testing.T) {
 		_, listed := symmetryGaps[name]
 		switch {
 		case isOpen && !listed:
-			t.Errorf("symmetry gap %q is open but not in the allowlist: close it or record it with the phase that will", name)
+			t.Errorf("symmetry gap %q is open but not in the allowlist: close it or record it with the change that will", name)
 		case !isOpen && listed:
 			t.Errorf("symmetry gap %q has closed; delete its allowlist entry (%s)", name, symmetryGaps[name])
 		}
@@ -169,13 +169,13 @@ var rowDefaultContainer = map[string]string{
 
 // mp4DemuxCodecs is the set of codecs the mp4 demuxer reads. It is the one
 // maintained datum in this test, edited exactly when the demuxer learns a
-// codec, so the edit that closes the mp4-read-back gap (phase 3a: Opus and
-// FLAC sample entries plus the fragmented branch) is the same edit that
+// codec, so the edit that closes the mp4-read-back gap (Opus and FLAC
+// sample entries plus the fragmented branch) is the same edit that
 // records the burn-down here.
 var mp4DemuxCodecs = map[codec.ID]bool{
 	codec.AACLC: true,
 	codec.ALAC:  true,
-	// Phase 3a: the demuxer learned the fragmented form (moof/traf/trun) and
+	// The demuxer learned the fragmented form (moof/traf/trun) and
 	// the dOps/dfLa sample entries the segmenter writes, so it reads back the
 	// Opus and FLAC fMP4 it produces.
 	codec.Opus: true,

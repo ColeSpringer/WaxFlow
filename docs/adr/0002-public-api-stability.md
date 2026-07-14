@@ -38,7 +38,7 @@ tagging ceremony.
 - `resolver/` is the one intentional nested module planned before v1.0,
   keeping `modernc.org/sqlite` out of the main module graph.
 
-## Amendment (2026-07-11, M19): the extraction as implemented
+## Amendment (2026-07-11): the extraction as implemented
 
 The v1.0 structural extraction landed inverted from the original
 wording, with the same guarantee: instead of the stdlib-only tree
@@ -57,12 +57,12 @@ pre-push guard).
   requiring `waxflow/cli` for the shared command tree.
 - `oracletest/` (nested module, test-only): the tests whose oracles are
   third-party modules (waxlabel metadata round trips, the go-mp3
-  differential, the m4b chapter golden, the jobs e2e). The M17
+  differential, the m4b chapter golden, the jobs e2e). The resolver's
   precedent (nested modules keep gated integration suites out of `go
   test ./...`) applied to test dependencies; `make test-oracle` and a
   dedicated CI step run it.
 - The v1.0 surface audit also added `context.Context` to
-  `source.Resolver.Resolve` (the recorded M17 limitation): catalog
+  `source.Resolver.Resolve` (the recorded resolver limitation): catalog
   lookups now observe request cancellation, bounded by the resolver's
   own query timeout and still aborted by Close.
 

@@ -69,7 +69,7 @@ func muxVorbis(t *testing.T, f audio.Format, cfg []byte, packets [][]byte, tr co
 	return out.Bytes()
 }
 
-// TestMuxVorbisRoundTrip is the phase-5 acceptance gate: a mux->demux round trip
+// TestMuxVorbisRoundTrip is the Ogg-Vorbis acceptance gate: a mux->demux round trip
 // of real Vorbis packets recovers the true sample count exactly (SamplesExact),
 // which only holds when the muxer's granulepos accounting carries the
 // firstBlock/2 priming shift the demuxer subtracts back off. It also confirms

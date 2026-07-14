@@ -15,9 +15,9 @@ import (
 )
 
 // TestMP3EncoderQuality is the nightly encoder-quality harness, standing up
-// with the first lossy encoder (M7). It encodes a corpus with our MP3 encoder
+// with the first lossy encoder. It encodes a corpus with our MP3 encoder
 // and with Shine (the baseline the gate names), scores both against the source
-// with the ODG-proxy, and enforces the M14 quality-phase gate: our corpus
+// with the ODG-proxy, and enforces the MP3 quality gate: our corpus
 // mean beats Shine's by at least 0.3, and no track falls more than 0.1 below
 // Shine (docs/quality-gates.md). A LAME (libmp3lame) column joins the report
 // when the local ffmpeg carries it: informational, never blocking. It
@@ -111,7 +111,7 @@ func TestMP3EncoderQuality(t *testing.T) {
 	}
 
 	if meanOurs < meanShine+0.3 {
-		t.Errorf("corpus mean ODG %.3f below Shine mean %.3f + 0.3 (quality-phase gate)", meanOurs, meanShine)
+		t.Errorf("corpus mean ODG %.3f below Shine mean %.3f + 0.3 (quality gate)", meanOurs, meanShine)
 	}
 	if worst < -0.1 {
 		t.Errorf("worst per-track ODG delta %.3f exceeds the 0.1 allowance below Shine", worst)

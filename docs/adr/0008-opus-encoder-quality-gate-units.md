@@ -38,23 +38,23 @@ complexity 10.
 The original point budgets translate at the metric's calibration point
 (Q ~ 90) to error ratios of **1.20 mean** and **1.51 per track**; the mean
 budget carries over directly. The per-track budget is set at **2.6** for
-phase 1 (CELT-only), because phase 1 deliberately runs without libopus's
+the CELT-only encoder, because it deliberately runs without libopus's
 tonality analyser (`analysis.c`, an opus-layer component whose primary job
-is the phase-2 speech/music decision): the analyser's absence alone is
-worth up to 2.5x per track in libopus's own A/B above, and phase 1 measures
+is the speech/music decision): the analyser's absence alone is
+worth up to 2.5x per track in libopus's own A/B above, and CELT-only measures
 at per-track parity with analyser-less libopus (identical prefilter
 decisions frame by frame; matching error ratios on the worst tracks).
-Phase 2 (M15) ports the analyser regardless, wires it into CELT
+The SILK/hybrid work ports the analyser regardless, wires it into CELT
 (`max_pitch_ratio`, `leak_boost`, tonality VBR boost), and tightens the
 per-track bound to **1.5**.
 
 ## Consequences
 
 - `TestOpusEncoderQuality` enforces: geometric-mean error ratio <= 1.20 per
-  bitrate (96/128/160 kbps stereo) and no track > 2.6 for phase 1, tightened
-  to 1.5 at M15 as planned, on the pinned 20-track corpus, complexity 10,
-  CBR.
+  bitrate (96/128/160 kbps stereo) and no track > 2.6 for CELT-only, tightened
+  to 1.5 once the analyser landed as planned, on the pinned 20-track corpus,
+  complexity 10, CBR.
 - The nightly report still shows Q values per track for human reading; the
   gate math uses error ratios only.
-- The phase-2 gate (docs/quality-gates.md) inherits the same unit, and the
-  per-track tightening to 1.5 is part of M15's exit criteria.
+- The SILK/hybrid gate (docs/quality-gates.md) inherits the same unit, and
+  the per-track tightening to 1.5 lands with the analyser.

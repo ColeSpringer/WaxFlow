@@ -1,6 +1,6 @@
 package waxflow_test
 
-// Progressive-MP4 output (phase 3b engine wiring): the aac and alac rows expose
+// Progressive-MP4 output (engine wiring): the aac and alac rows expose
 // the flat (non-fragmented) MP4 form through the "progressive" container
 // override. It round-trips through the demuxer's progressive path, reports as
 // not-live in the plan (it back-patches, so it needs a seekable destination),

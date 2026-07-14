@@ -1,6 +1,6 @@
 package server_test
 
-// The M19 hardening harnesses: a mixed-traffic load test, a long
+// The v1.0 hardening harnesses: a mixed-traffic load test, a long
 // streaming soak with a goroutine/heap leak watch, and the TTFA/seek
 // latency percentiles recorded in the README.
 //

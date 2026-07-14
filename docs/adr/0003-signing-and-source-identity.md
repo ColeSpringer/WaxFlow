@@ -35,7 +35,7 @@ returns `410 source-changed` and the client re-mints. A stale URL can never
 serve surprise content, and cache keys (ADR-0004) stay coherent with
 signatures.
 
-*Amended at M17 (resolver mode):* the original text said resolver mode
+*Amended for resolver mode:* the original text said resolver mode
 "adds PID and catalog sequence" to the identity. The PID needs no new
 field (it is the `src` parameter, already inside the signature), and the
 catalog sequence is deliberately excluded: identity pins bytes, and a

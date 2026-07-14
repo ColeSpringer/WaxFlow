@@ -173,7 +173,7 @@ func TestMP3FixtureSeekSampleExact(t *testing.T) {
 	}
 }
 
-// TestMP3VBRSeek100Offsets is the roadmap gate: a VBR stream long enough
+// TestMP3VBRSeek100Offsets is the seek gate: a VBR stream long enough
 // that frame sizes vary widely, 100 pseudo-random offsets, each seek
 // sample-exact against the linear reference.
 func TestMP3VBRSeek100Offsets(t *testing.T) {

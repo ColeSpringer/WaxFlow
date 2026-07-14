@@ -28,8 +28,8 @@ import (
 // the reference libopus decoder, score each against the original with the
 // reference opus_compare metric, and enforce the weighted-error ratio
 // (ours / libopus): geometric mean <= 1.20 per bitrate, no track > 1.5, at
-// 96/128/160 kbps stereo. (The per-track bound tightened from the phase-1
-// 2.6 at M15, once the analyser hooks landed and the encoder's last-band
+// 96/128/160 kbps stereo. (The per-track bound tightened from the original
+// 2.6 once the analyser hooks landed and the encoder's last-band
 // scratch clobber was fixed; measured worst is 1.22 with means at or below
 // parity at 128/160k.)
 //

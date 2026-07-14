@@ -9,10 +9,10 @@ import (
 	"github.com/colespringer/waxflow/internal/testutil"
 )
 
-// The decode floor is 60x realtime per core (docs/quality-gates.md), an
-// M18/M19 ratchet rather than an M10 gate: the inverse MDCT currently runs a
-// direct O(N^2) DFT in place of a mixed-radix FFT, so these benches record
-// the factor for the nightly trend without asserting the floor yet. The
+// The decode floor is 150x realtime per core (docs/quality-gates.md). These
+// benches report the factor for the nightly trend rather than asserting the
+// floor: a shared runner measures its own scheduling noise as much as the
+// decoder, so the floor is triaged from the nightly numbers instead. The
 // conformance vectors cover the three engines: 04 is SILK (speech), 11 is
 // CELT (music), 06 is hybrid.
 

@@ -1,6 +1,6 @@
 package waxflow_test
 
-// Ogg-FLAC coverage: the phase-2 mux-mapping refactor exposes FLAC in Ogg
+// Ogg-FLAC coverage: the mux-mapping refactor exposes FLAC in Ogg
 // through the flac row's container override. A lossless source must survive
 // WAV -> FLAC-in-Ogg -> decode bit for bit, and ffmpeg must accept the output
 // as a real .oga a third-party tool reads.

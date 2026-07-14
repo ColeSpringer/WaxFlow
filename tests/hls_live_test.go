@@ -1,6 +1,6 @@
 package waxflow_test
 
-// HLS live client (phase 6b): follow a growing (non-ENDLIST) media playlist,
+// HLS live client: follow a growing (non-ENDLIST) media playlist,
 // picking up new segments across reloads and decoding them as one continuous
 // stream, until the playlist finally carries EXT-X-ENDLIST. Also the ABR safety
 // guard (format-lock: a master whose variants disagree on codec is refused) and

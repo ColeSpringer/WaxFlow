@@ -77,7 +77,7 @@ func musicish(rate, n, ch int, seed int64) [][]float32 {
 // TestVorbisEncoderQuality measures our encoder against libvorbis on a
 // tonal corpus: ODG-proxy vs source and the coded bit rate for each. It is a
 // measurement/iteration harness gated by WAXFLOW_ENCODER_QUALITY, not a hard
-// gate here (the corpus gate lives in tests/); it lets 4b tuning see the delta.
+// gate here (the corpus gate lives in tests/); it lets psy tuning see the delta.
 func TestVorbisEncoderQuality(t *testing.T) {
 	testutil.EncoderQualityGate(t)
 	testutil.FFmpeg(t)

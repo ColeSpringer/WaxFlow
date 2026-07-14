@@ -158,7 +158,7 @@ docker-waxbin:
 clean:
 	rm -rf bin dist
 
-# The M19 hardening harnesses at nightly scale: a long streaming soak
+# The v1.0 hardening harnesses at nightly scale: a long streaming soak
 # with the goroutine/heap leak watch, a sustained mixed-traffic load
 # test, and the TTFA/seek percentiles with the p95 targets enforced.
 # The same tests run for seconds inside `make test`; this target is the

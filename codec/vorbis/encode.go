@@ -19,7 +19,7 @@ const EncoderVersion = "vorbis-enc-7+" + psy.Version
 
 // encVendor is the fixed vendor string the standalone encoder stamps into the
 // comment header, so deterministic-mode output stays byte-identical. In the
-// container path the muxer owns the comment header (phase 5).
+// container path the muxer owns the comment header.
 const encVendor = "WaxFlow"
 
 // EncoderOptions configures NewEncoder. The zero value is a sensible default

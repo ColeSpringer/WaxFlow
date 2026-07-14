@@ -24,7 +24,7 @@ import (
 // report variables.
 //
 // Both outputs decode through ffmpeg. Ours is framed into Ogg-Vorbis by the
-// test packer (the production Ogg-Vorbis muxer is a later phase); the metric's
+// test packer, not the production Ogg-Vorbis muxer; the metric's
 // alignment search absorbs the priming difference.
 func TestVorbisEncoderQuality(t *testing.T) {
 	testutil.EncoderQualityGate(t) // not part of the default loop; `make encoder-quality`
@@ -105,8 +105,8 @@ func TestVorbisEncoderQuality(t *testing.T) {
 }
 
 // encodeVorbisOgg encodes interleaved samples with our Vorbis encoder and frames
-// the result into an Ogg-Vorbis byte stream (the test packer; the production
-// muxer is a later phase).
+// the result into an Ogg-Vorbis byte stream (the test packer, not the
+// production muxer).
 func encodeVorbisOgg(t *testing.T, f audio.Format, interleaved []float32, quality float64) []byte {
 	t.Helper()
 	ch := f.Channels

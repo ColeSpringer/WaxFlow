@@ -115,7 +115,7 @@ func decodePackets(t *testing.T, cfg Config, packets [][]byte) []float32 {
 	return out
 }
 
-// TestEncodeDecodeRoundTrip is the 4a correctness gate: encode a signal, decode
+// TestEncodeDecodeRoundTrip is the correctness gate: encode a signal, decode
 // it through our own decoder, confirm the gapless sample-count invariant holds
 // exactly and the reconstruction tracks the source under a lossy bound.
 // TestNewEncoderRejectsBitrate confirms a nonzero ABR Bitrate target is rejected
@@ -201,7 +201,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 			nrmse := math.Sqrt(sqErr / sqSig)
 			t.Logf("%s: %d packets, %d frames, NRMSE=%.4f", tc.name, len(packets), gotFrames, nrmse)
 			if nrmse > 0.25 {
-				t.Errorf("normalized RMS error %.4f exceeds the 4a lossy bound 0.25", nrmse)
+				t.Errorf("normalized RMS error %.4f exceeds the lossy bound 0.25", nrmse)
 			}
 		})
 	}

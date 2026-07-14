@@ -15,7 +15,7 @@ package opus
 // max_pitch_ratio damping of the pre-filter gain, the activity/tonality VBR
 // target adjustments, and the analysis-driven signalBandwidth handed to the
 // allocator. The Opus layer stamps e.analysis before each frame; a zero value
-// (valid=false) reproduces the phase-1 analyser-less behavior bit-exactly.
+// (valid=false) reproduces the analyser-less behavior bit-exactly.
 
 // celtEncoder holds the persistent CELT encode state for one stream.
 type celtEncoder struct {

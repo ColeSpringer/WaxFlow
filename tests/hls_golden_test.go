@@ -24,7 +24,7 @@ func pcmTrack(f audio.Format, frames int) container.Track {
 }
 
 // TestGoldenSegments pins the HLS init headers and media segments byte
-// for byte: the M13 exit criterion that deterministic-mode segments stay
+// for byte: the exit criterion that deterministic-mode segments stay
 // byte-identical across regeneration, plus a tripwire for anything that
 // would silently change the wire format cached segments stand for
 // (encoder bytes, box layout, boundary arithmetic). Regenerate with

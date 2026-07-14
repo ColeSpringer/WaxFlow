@@ -76,7 +76,7 @@ func TestStreamTagsWaxlabelRoundTrip(t *testing.T) {
 				if err != nil {
 					if format == "aac" || format == "alac" {
 						// waxlabel cannot parse fragmented MP4 (the
-						// recorded M16 finding; the mux is fragmented in
+						// recorded finding; the mux is fragmented in
 						// both forms); the m4b golden and the jobs e2e
 						// cover the MP4 ilst path instead.
 						t.Skipf("waxlabel cannot parse the fragmented %s output: %v", format, err)

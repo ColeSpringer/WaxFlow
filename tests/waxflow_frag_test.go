@@ -1,6 +1,6 @@
 package waxflow_test
 
-// Fragmented-MP4 read-back (phase 3a): the aac and alac output rows write
+// Fragmented-MP4 read-back: the aac and alac output rows write
 // fragmented (CMAF) MP4 through mp4.NewMuxer, which the demuxer previously
 // could not read back (it parsed progressive moov/stbl only). This closes that
 // asymmetry: transcode to fragmented MP4 and re-read it through the production

@@ -212,7 +212,7 @@ func floor1DecodeVal(pred, val, rng int) int {
 // floor1.decode): the present bit, the two absolute posts, then each interior
 // post's differential through the scalar floor book, in xs order.
 func writeFloorData(w *bitWriter, f *floor1, vals []int, book *encBook) {
-	w.writeBit(1) // floor present (4a never emits a silent channel)
+	w.writeBit(1) // floor present (the encoder never emits a silent channel)
 	ilr := ilog(f.rangeVal - 1)
 	w.writeBits(uint(ilr), uint32(vals[0]))
 	w.writeBits(uint(ilr), uint32(vals[1]))

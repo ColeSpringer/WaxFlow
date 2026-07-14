@@ -61,7 +61,7 @@ func TestDeliveryProfilesAreHonest(t *testing.T) {
 	}
 
 	// The Apple recommendation steers to HLS until the progressive
-	// live-transcode checklist cell is verified (the recorded M19
+	// live-transcode checklist cell is verified (the recorded
 	// decision); a change here must be deliberate.
 	if caps.Profiles["apple-native"].Delivery != "hls" {
 		t.Error("apple-native must recommend hls (progressive live transcodes are a manual checklist cell)")

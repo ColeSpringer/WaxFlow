@@ -15,7 +15,7 @@ import (
 	"github.com/colespringer/waxflow/internal/meta"
 )
 
-// TestGoldenM4BChapters is the M16 audiobook passthrough pin: an m4b with
+// TestGoldenM4BChapters is the audiobook passthrough pin: an m4b with
 // chapters and tags transcodes to AAC fMP4 with the chapters (Nero chpl),
 // the tags (ilst), and full gapless signaling (iTunSMPB plus the exact
 // edit list, the seekable job path) preserved, byte for byte against the

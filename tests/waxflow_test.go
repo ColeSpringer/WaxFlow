@@ -401,7 +401,7 @@ func TestOutputTable(t *testing.T) {
 		{"flac", "flac"}, {".FLAC", "flac"},
 		{"mp3", "mp3"}, {".MP3", "mp3"}, {"mpga", "mp3"},
 		// m4a moved from alac to aac when the AAC encoder landed (the
-		// M9-anticipated disambiguation); alac keeps no extension and is
+		// anticipated disambiguation); alac keeps no extension and is
 		// selected by name.
 		{"alac", ""}, {"m4a", "aac"}, {".M4A", "aac"}, {"aac", "aac"},
 		{"xyz", ""}, {"", ""},

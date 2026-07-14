@@ -46,8 +46,7 @@ type MuxerOptions struct {
 // ftyp+moov init header declaring an empty sample table plus a movie-extends
 // (mvex) box, then a moof+mdat fragment per bounded run of samples. Nothing
 // is back-patched, so NeedsSeek reports false and a plain io.Writer streams
-// live. The design is the CMAF/DASH shape HLS segments (a later milestone)
-// reuse.
+// live. The design is the CMAF/DASH shape the HLS segments reuse.
 //
 // The muxer carries ALAC and AAC-LC. ALAC is lossless and signals no
 // gapless trims, so a nonzero Delay/Padding is rejected rather than

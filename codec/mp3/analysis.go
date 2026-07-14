@@ -15,7 +15,7 @@ package mp3
 // the synthesis window (synthD) scaled by 1/32 (ISO 11172-3, D[i] = 32 C[i]).
 //
 // Baseline scope: long blocks only. Block switching (short windows, the
-// transient path) is a later milestone; this encoder never emits it, so the
+// transient path) is later work; this encoder never emits it, so the
 // short-window kernels stay decode-only.
 
 import "math"

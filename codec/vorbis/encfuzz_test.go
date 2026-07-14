@@ -3,6 +3,7 @@ package vorbis
 import (
 	"encoding/binary"
 	"math"
+	"runtime"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
@@ -129,6 +130,24 @@ func TestEncodeDeterministic(t *testing.T) {
 // TestEncodeGolden pins a hash of a fixed encode so a bitstream change is a
 // deliberate, reviewed event (EncoderVersion must bump with it). The hash is a
 // cheap stand-in for a committed golden file; it fails loud on any drift.
+//
+// The pin is per-architecture, and asserts only on goldenEncodeArch. Go leaves
+// a compiler free to contract a*b+c into a single rounding, which arm64 does
+// and amd64 does not, and the math package's arch-specific implementations
+// need not agree in the last ulp either. Either one moves a spectral value by
+// an ulp, which is all it takes to land a residue line on the other side of a
+// quantizer decision (latIndexSigned's sign test, for one) and pick a
+// different codeword from there on. The result is a valid, equivalent stream
+// that hashes differently, so other architectures report the hash and skip
+// rather than fail a legitimate encode.
+//
+// Byte-exactness across architectures is not a property this encoder has, nor
+// one anything depends on: the ADR-0004 cache key needs a build to reproduce
+// its own bytes, which is TestEncodeDeterministic's job and runs everywhere.
+// Making the stream portable would mean forcing an explicit rounding at every
+// contraction site in codec/vorbis, dsp/fft, and dsp/psy and holding that line
+// forever, at the cost of the FFT and psy hot loops that codec/opus shares,
+// while opus's own float path stayed architecture-dependent regardless.
 func TestEncodeGolden(t *testing.T) {
 	const rate = 44100
 	fm := audio.Format{Rate: rate, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Float, BitDepth: 32}
@@ -150,9 +169,14 @@ func TestEncodeGolden(t *testing.T) {
 		mix(p)
 	}
 	const golden = goldenEncodeHash
-	if h != golden {
-		t.Errorf("encode hash %#016x != golden %#016x: the bitstream changed. If intended, bump EncoderVersion and update goldenEncodeHash.", h, golden)
+	if h == golden {
+		return
 	}
+	if runtime.GOARCH != goldenEncodeArch {
+		t.Skipf("encode hash %#016x != golden %#016x: expected, the golden is pinned to %s and this is %s, which evaluates the encoder's float path to different last-ulp values. Re-pin from a %s build if this needs to gate here.",
+			h, golden, goldenEncodeArch, runtime.GOARCH, goldenEncodeArch)
+	}
+	t.Errorf("encode hash %#016x != golden %#016x: the bitstream changed. If intended, bump EncoderVersion and update goldenEncodeHash.", h, golden)
 }
 
 func encodeAll(t *testing.T, fm audio.Format, src [][]float32) [][]byte {
@@ -179,5 +203,11 @@ func bytesEqual(a, b []byte) bool {
 
 // goldenEncodeHash pins the FNV-1a hash of the reference encode (headers plus
 // length-prefixed packets). Regenerate it and bump EncoderVersion whenever a
-// deliberate bitstream change lands.
+// deliberate bitstream change lands on amd64, the architecture it is pinned
+// to; see TestEncodeGolden for why it is not portable.
 const goldenEncodeHash uint64 = 0x3b0da36a84fe62f5
+
+// goldenEncodeArch is the architecture goldenEncodeHash was taken on, and the
+// only one that asserts it. Verified to hold at both GOAMD64=v1 (the CI
+// baseline) and v3, so the pin is not sensitive to the amd64 microarch level.
+const goldenEncodeArch = "amd64"

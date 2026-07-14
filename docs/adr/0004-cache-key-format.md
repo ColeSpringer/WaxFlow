@@ -19,7 +19,7 @@ transcoder has.
 - `sourceIdentity`: `ref + size + mtimeNS`, identical to the identity
   inside signed URLs (ADR-0003). In resolver mode the ref is the
   `pid:<ULID>` reference itself, so the PID keys entries with no extra
-  field; the catalog sequence is deliberately excluded (amended at M17,
+  field; the catalog sequence is deliberately excluded (amended with resolver mode,
   see ADR-0003): a rename changes no bytes, so it must not orphan cache
   entries, while replaced content misses because size+mtimeNS come from
   the file the PID currently resolves to.
@@ -27,8 +27,8 @@ transcoder has.
   (format, bitrate/quality, bits, rate, channels, gain mode, segment
   duration for HLS) serialized in one canonical order.
 - `nodeVersions`: the `Version()` constant of **every sample-affecting node
-  in the chain**: the source codec's decoder (amended at M18, which shipped
-  the first decoder revision and found decode versions defined per codec
+  in the chain**: the source codec's decoder (amended when the first
+  decoder revision shipped and found decode versions defined per codec
   but never wired into the key), each encoder (bitstream/algorithm
   revision, psy-model revision, deterministic-mode flag) *and* each DSP
   node (resampler, dither, limiter, mix matrices). A resampler fix that

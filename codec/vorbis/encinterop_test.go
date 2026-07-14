@@ -14,7 +14,7 @@ import (
 // tests/ quality gate shares it; it frames raw Vorbis packets so ffmpeg can
 // decode our stream before the production Ogg-Vorbis muxer exists.
 
-// TestEncodeFFmpegDecode is the other half of the 4a validity gate: libvorbis
+// TestEncodeFFmpegDecode is the other half of the validity gate: libvorbis
 // (via ffmpeg) decodes our encoded stream, and the reconstruction tracks the
 // source under the same lossy bound the in-house round-trip uses. It skips
 // without ffmpeg.
@@ -60,12 +60,13 @@ func TestEncodeFFmpegDecode(t *testing.T) {
 		ref := interleave(src)
 		off, nrmse := shapeError(dec, ref, ch, e.long)
 		t.Logf("ch=%d: ffmpeg decoded %d frames, off=%d NRMSE=%.4f", ch, len(dec)/ch, off, nrmse)
-		// A loose validity bound: 4a has no psychoacoustics and a coarse scalar
+		// A loose validity bound: the validity configuration has no psychoacoustics
+		// and a coarse scalar
 		// residue book, and ffmpeg applies its own gapless trim against our
 		// approximate test-packer granulepos, so shape error runs a little above
-		// the exact in-house round-trip. 4b's ODG gate is the real quality bar.
+		// the exact in-house round-trip. The ODG gate is the real quality bar.
 		if nrmse > 0.30 {
-			t.Errorf("ch=%d: libvorbis-decoded shape error %.4f exceeds the 4a lossy bound", ch, nrmse)
+			t.Errorf("ch=%d: libvorbis-decoded shape error %.4f exceeds the lossy bound", ch, nrmse)
 		}
 	}
 }

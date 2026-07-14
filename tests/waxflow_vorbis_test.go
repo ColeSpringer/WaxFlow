@@ -1,6 +1,6 @@
 package waxflow_test
 
-// Ogg-Vorbis and Vorbis-in-Matroska coverage (phase 5): the Vorbis encoder is
+// Ogg-Vorbis and Vorbis-in-Matroska coverage: the Vorbis encoder is
 // wired into the engine through the vorbis output row, muxed into Ogg by the
 // vorbisMuxMapping and into Matroska by the mka muxer's A_VORBIS reverse map. A
 // float source must survive WAV -> Ogg-Vorbis -> decode within a lossy bound and

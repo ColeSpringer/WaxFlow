@@ -43,11 +43,11 @@ it re-baselines every gate in the same PR.
 
 | Decoder | Gate |
 |---|---|
-| FLAC | bit-exact on the full IETF/Xiph suite; sample-exact seek; >=100x realtime |
+| FLAC | bit-exact on the full IETF/Xiph suite; sample-exact seek; >=300x realtime |
 | MP3 | vs ffmpeg: RMS < 1e-4 FS, max < 1e-3 FS; LAME gapless sample-count invariant; sample-exact seek at 100 random offsets in VBR; >=150x realtime |
-| AAC-LC | vs ffmpeg: RMS < 2^-13 FS; iTunes (iTunSMPB) gapless invariant; edit-list seek exact; >=80x realtime |
+| AAC-LC | vs ffmpeg: RMS < 2^-13 FS; iTunes (iTunSMPB) gapless invariant; edit-list seek exact; >=150x realtime |
 | ALAC | bit-exact vs ffmpeg; >=100x realtime |
-| Opus | all opus_testvectors 01-12 pass RFC 6716 section 6 (ported opus_compare, both decode rates, against the RFC 8251 regenerated references; the 2012 originals are stale for hybrid/transition vectors and fail even current libopus); Ogg bisection seek exact after 80 ms pre-roll; >=60x realtime |
+| Opus | all opus_testvectors 01-12 pass RFC 6716 section 6 (ported opus_compare, both decode rates, against the RFC 8251 regenerated references; the 2012 originals are stale for hybrid/transition vectors and fail even current libopus); Ogg bisection seek exact after 80 ms pre-roll; >=150x realtime |
 | Vorbis | vs ffmpeg: RMS < 1e-4 FS, max < 1e-3 FS; >=80x realtime |
 
 ## Encoder gates
@@ -55,11 +55,21 @@ it re-baselines every gate in the same PR.
 Every encoder, always: validity (above) plus golden-stream byte-exactness in
 deterministic mode.
 
+Byte-exactness holds *within* a build, not across architectures. Go lets a
+compiler contract `a*b+c` to a single rounding (arm64 does, amd64 does not),
+and the math package's per-arch implementations need not agree in the last
+ulp; either moves a float encoder's spectral values by an ulp, which is enough
+to flip a quantizer decision and pick different codewords. The stream stays
+valid and the quality gates still hold, so golden hashes are pinned to one
+architecture and skip elsewhere (`codec/vorbis.goldenEncodeArch`). What the
+ADR-0004 cache key rests on is a build reproducing its own bytes, which the
+deterministic-mode tests cover on every platform.
+
 ### FLAC
 - `decode(encode(x)) == x` bit-exact on all suites, levels 0-8.
 - `flac -t` accepts every output; streamable-subset compliant.
 - Size at level 5: corpus total <= **1.05x** `flac -5`; no track > **1.08x**.
-- >= **60x** realtime at level 5.
+- >= **150x** realtime at level 5.
 
 ### MP3 baseline, CBR
 - LAME-tag gapless round-trip; decodes in ffmpeg, LAME, browser matrix.
@@ -72,7 +82,7 @@ deterministic mode.
 - Size: corpus total <= **1.05x** ffmpeg's ALAC encoder.
 - >= **80x** realtime.
 
-### Opus phase 1: CELT/music
+### Opus: CELT/music
 - Every bitstream decodes via libopus AND our decoder; the harness carries
   the range coder's final state per packet, so the reference decoder
   cross-checks every packet (`opus_demo` hard-fails on a mismatch).
@@ -84,15 +94,15 @@ deterministic mode.
   do not compare across error depths (ADR-0008; the original 2.0/5.0-point
   budgets translate at the metric's calibration to ratios 1.20/1.51).
 - Gate: geometric-mean error ratio <= **1.20** per bitrate; no track >
-  **1.5** (ADR-0008). The phase-1 bound was 2.6, admitting the documented
-  analyser-less gap; M15 landed the tonality analyser's CELT hooks and
-  fixed the encoder's last-band scratch clobber, and the measured corpus
+  **1.5** (ADR-0008). The original bound was 2.6, admitting the documented
+  analyser-less gap; the tonality analyser's CELT hooks and the fix for the
+  encoder's last-band scratch clobber closed it, and the measured corpus
   now sits at mean parity or better (128/160k means below 1.0, worst track
   1.22 at 96k).
 - The pitch pre-filter's per-frame decisions (on, period, gain, tapset)
   agree with libopus on >= **90%** of frames on a pitched fixture.
-- >= **30x** realtime (ratcheted from 15x at the M19 bench pass;
-  measured 55-68x after the M18 FFT).
+- >= **30x** realtime (ratcheted from 15x at the v1.0 bench pass; measured
+  55-68x once the CELT MDCT moved onto `dsp/fft`).
 
 ### AAC-LC
 - ODG-proxy at 128 kbps: corpus mean >= **ffmpeg-aac mean - 0.2**; no track
@@ -100,18 +110,18 @@ deterministic mode.
 - Plays in AVFoundation and ExoPlayer (client matrix).
 - >= **20x** realtime.
 
-### MP3 quality phase, VBR + joint stereo
+### MP3 quality, VBR + joint stereo
 - ODG-proxy at 128 kbps: corpus mean >= **Shine mean + 0.3** (measurably
   better); no track below Shine - 0.1.
 - LAME comparison reported in the nightly artifact (informational,
   non-blocking).
 
-### Opus phase 2: SILK + hybrid
+### Opus: SILK + hybrid
 - At **24, 32, 48 kbps** (speech corpus, NB-WB): mean opus_compare
   weighted-error ratio vs libopus <= **1.35**; no item > **2.0** (the
   3.0/6.0-point budgets translated per ADR-0008).
 - The tonality analyser (analysis.c) lands here and is wired into CELT
-  (`max_pitch_ratio`, `leak_boost`, tonality VBR boost); the phase-1
+  (`max_pitch_ratio`, `leak_boost`, tonality VBR boost); the CELT/music
   per-track bound tightens from 2.6 to **1.5**.
 - Speech/music mode decision agrees with libopus on >= **90%** of corpus
   windows (report-only below 95%, blocking below 90%).
@@ -194,26 +204,38 @@ deterministic mode.
 Portable build, per core: decode FLAC >=**300x** / MP3 >=150x /
 AAC >=**150x** / Opus >=**150x** / Vorbis >=80x; encode FLAC >=**150x** /
 ALAC >=80x / MP3 >=40x / AAC >=20x / Opus >=**30x**; resampler HQ
->=200x. The bolded floors were ratcheted at the M19 bench pass against
+>=200x. The bolded floors were ratcheted at the v1.0 bench pass against
 the post-FFT measurements (decode FLAC 537-934x, AAC 260x, Opus
 289-522x; encode FLAC 230-250x at level 5, Opus 55-67x), leaving 2x or
 more headroom for slower CI runners. Watched by the nightly `bench` job
 (benchstat against the previous night's numbers, cache-carried).
 
-Recorded M19 floor notes:
+The floors are triaged from that job's numbers, not asserted by the default
+suite: a shared runner measures its own scheduling noise as much as the codec,
+so wall-clock assertions there fail on the runner rather than on a regression.
+The realtime-factor tests report their numbers always and gate only under
+`WAXFLOW_PERF=1`, for a dedicated perf run on a baseline machine, the same
+switch `server`'s TTFA percentiles use.
+
+Floor notes recorded at the v1.0 bench pass:
 
 - The AAC encode floor stays at 20x: the synthetic noise worst case
-  measures 19-20x across every box since M14 (real audio measures
-  49-68x), so the M14/M18 ratchet candidate is closed as declined; a
+  measures 19-20x across every box since the encoder was first benched
+  (real audio measures 49-68x), so the ratchet candidate, raised at that
+  first bench and again after the FFT, is closed as declined; a
   noise-dominated track still encodes at ~5x the 2x-realtime delivery
   pace, and the two-loop is the cost of the quality gate. The recorded
   DP-sectioning idea remains a post-1.0 quality candidate, not debt.
-- Vorbis decode has no default-suite benchmark: WaxFlow has no Vorbis
-  encoder to self-generate fixtures, so its performance is observed via
-  the differential job's corpus decodes. The 80x floor stands on the
-  M10-era measurements.
-- The per-frame allocation scratch passes recorded at M10/M12 (Opus
-  decode ~19-31 allocs/packet, encoder equivalents) are closed as
+- Vorbis decode still has no default-suite benchmark, so its performance is
+  observed via the differential job's corpus decodes and the 80x floor stands
+  on the original decoder measurements. The reason recorded here, that WaxFlow
+  had no Vorbis encoder to self-generate fixtures, expired when the encoder
+  landed: `codec/vorbis` now self-generates its own encode benchmarks
+  (`BenchmarkEncodeSine`/`BenchmarkEncodeNoise`), and a decode benchmark can be
+  fed the same way. Adding one is now an open task rather than something the
+  tree cannot express.
+- The per-frame allocation scratch passes recorded during the Opus work
+  (Opus decode ~19-31 allocs/packet, encoder equivalents) are closed as
   declined at v1.0: immaterial at 55-500x realtime; reopen only if a
   profile on real hardware says otherwise.
 

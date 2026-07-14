@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// The flac reference tool is the encoder milestones' second oracle
+// The flac reference tool is the encoders' second oracle
 // beside ffmpeg: `flac -t` is the conformance acceptance the quality
 // gates name, and `flac -<level>` is the size baseline. Same policy as
 // ffmpeg: tests self-skip when it is missing, and the CI differential

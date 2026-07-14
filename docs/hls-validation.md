@@ -70,7 +70,7 @@ tagging a release that touches HLS:
      measurements disagree.
 5. Play each master in Safari and in AVPlayer (an iOS device or
    simulator): start, seek far ahead, seek back, play to the end. The
-   M19 client matrix records the outcomes per format and feeds the
+   client matrix records the outcomes per format and feeds the
    `/caps` delivery profiles; ALAC/FLAC-in-fMP4 support notes belong
    there, not here.
 

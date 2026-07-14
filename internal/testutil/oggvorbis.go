@@ -7,9 +7,9 @@ import (
 
 // OggVorbisFile frames raw Vorbis packets into an Ogg-Vorbis byte stream for
 // ffmpeg (or another decoder) to read. It is TEST-ONLY scaffolding so the Vorbis
-// encoder can be exercised through a real container before the production
-// Ogg-Vorbis muxer exists (that muxer, with exact gapless granulepos, is a later
-// phase). The granule positions here are approximate: they are enough for a
+// encoder can be exercised through a real container without depending on the
+// production Ogg-Vorbis muxer (which carries the exact gapless granulepos).
+// The granule positions here are approximate: they are enough for a
 // decoder to produce PCM, not the exact trims a player would honor.
 //
 // id/comment/setup are the three Vorbis headers; packets are the audio packets;

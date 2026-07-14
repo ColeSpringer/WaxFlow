@@ -79,7 +79,7 @@ func newMDCTForward(n int) *mdctForward {
 // fullWindow is the symmetric analysis/synthesis window for an all-long block:
 // the plan's rising half (from the shared plan) followed by its mirror,
 // matching what the decoder's applyWindow produces when both neighbours are the
-// same size. Block switching (4c) uses neighbour-aware windows instead.
+// same size. Block switching uses neighbour-aware windows instead.
 func fullWindow(n int) []float32 {
 	rise := getPlan(n).window // length n/2
 	w := make([]float32, n)

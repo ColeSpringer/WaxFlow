@@ -1,6 +1,6 @@
 package waxflow_test
 
-// HLS VOD read-back (phase 6a): the symmetry closer for HLS. The segmenter
+// HLS VOD read-back: the symmetry closer for HLS. The segmenter
 // writes an init segment, numbered fMP4 media segments, and M3U8 playlists; the
 // HLS client reads that presentation back over HTTP, follows the playlists,
 // concatenates the media behind the out-of-band init, and decodes it through the

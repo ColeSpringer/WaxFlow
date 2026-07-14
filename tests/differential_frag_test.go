@@ -1,6 +1,6 @@
 package waxflow_test
 
-// Fragmented-MP4 demux differential (phase 3a): our demuxer must read the
+// Fragmented-MP4 demux differential: our demuxer must read the
 // fragmented (CMAF) MP4 a third-party muxer writes, not just its own output.
 // ffmpeg generates fragmented ALAC and AAC (ftyp+moov(mvex)+moof+mdat); we read
 // each through the production facade and compare the decoded PCM to ffmpeg's
