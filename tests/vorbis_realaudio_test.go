@@ -23,8 +23,9 @@ import (
 // never runs in the default or encoder-quality suites; the audio is not part of
 // the repo (the clean-room posture keeps external audio out of the tree). Point
 // it at any set of lossless/high-bitrate .wav files. Optional env:
-//   WAXFLOW_REAL_AUDIO_Q        comma-separated -q points (default "4,6,8")
-//   WAXFLOW_REAL_AUDIO_SECONDS  per-clip trim length (default 20)
+//
+//	WAXFLOW_REAL_AUDIO_Q        comma-separated -q points (default "4,6,8")
+//	WAXFLOW_REAL_AUDIO_SECONDS  per-clip trim length (default 20)
 //
 // Both our stream and the libvorbis reference decode through the pinned
 // libvorbis decoder (ffmpeg's native Vorbis decoder is experimental and

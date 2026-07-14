@@ -16,8 +16,9 @@ import (
 // clip it breaks the coding error down per bark band (ours vs libvorbis, both
 // against the source) so the high-q deficit can be localized in frequency
 // instead of guessed at. Gated exactly like TestVorbisRealAudioQuality.
-//   WAXFLOW_REAL_AUDIO_Q        single -q point (default 8, where we plateau)
-//   WAXFLOW_REAL_AUDIO_SECONDS  per-clip trim length (default 20)
+//
+//	WAXFLOW_REAL_AUDIO_Q        single -q point (default 8, where we plateau)
+//	WAXFLOW_REAL_AUDIO_SECONDS  per-clip trim length (default 20)
 func TestVorbisRealAudioDiag(t *testing.T) {
 	dir := os.Getenv("WAXFLOW_REAL_AUDIO_DIR")
 	if dir == "" {
