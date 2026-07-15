@@ -209,6 +209,16 @@ type Warner interface {
 // and refuses live streams. Muxers with NeedsSeek false write a compliant
 // stream to a plain io.Writer and use seekability, when present, only to
 // improve the result (exact sizes instead of streaming placeholders).
+//
+// WritePacket must not retain pkt.Data past the call: it writes the payload
+// through, or copies what it holds. This is the reciprocal of the Demuxer
+// contract above, and remux is what makes it load-bearing rather than
+// incidental. An encoder's packets are borrowed for the emit callback alone
+// (see codec.Encoder), and a demuxer's are reused across ReadPacket calls, so
+// a muxer feeding straight from either sees its payload overwritten under it.
+// The corruption would be cross-packet and silent, which no test over a single
+// packet can catch, so the rule is stated rather than left to hold by
+// construction.
 type Muxer interface {
 	Begin(tracks []Track) error
 	WritePacket(pkt Packet) error

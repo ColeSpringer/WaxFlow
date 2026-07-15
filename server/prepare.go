@@ -34,8 +34,13 @@ type streamRequest struct {
 	meta *meta.Info
 
 	// Set by planTranscode for transcode-shaped requests.
-	opts      waxflow.TranscodeOptions
-	plan      *waxflow.TranscodePlan
+	opts waxflow.TranscodeOptions
+	plan *waxflow.TranscodePlan
+	// remux is the ladder's rung 2 when this request can be served by
+	// rewriting the container around the source's own packets, nil when it
+	// cannot and the request takes rung 3. plan points at its embedded
+	// TranscodePlan when it is set, so everything downstream reads one shape.
+	remux     *waxflow.RemuxPlan
 	canonical string
 }
 
@@ -139,10 +144,19 @@ func (s *Server) planTranscode(req *streamRequest) error {
 		// muxers with a stream-form tag representation.
 		Tags: meta.MinimalTags(req.meta),
 	}
-	plan, err := s.eng.PlanTranscode(req.track, req.opts)
-	if err != nil {
-		return err
+	// Ladder rung 2: rewrite the container around the source's own packets.
+	// Rung 1 (directPlayable) already declined, or we would not be here, so
+	// this is the cheapest remaining answer whenever the codec survives.
+	if req.remux = s.remuxPlanFor(req); req.remux != nil {
+		req.plan = &req.remux.TranscodePlan
+	} else {
+		plan, err := s.eng.PlanTranscode(req.track, req.opts)
+		if err != nil {
+			return err
+		}
+		req.plan = plan
 	}
+	plan := req.plan
 	if !plan.Live {
 		return waxerr.New(waxerr.CodeUnsupportedFormat,
 			fmt.Sprintf("%s has no streaming form; request it as a job output once jobs land", plan.Container))
@@ -161,10 +175,43 @@ func (s *Server) planTranscode(req *streamRequest) error {
 					kbit, plan.BitRate/1000))
 		}
 	}
-	req.plan = plan
 	req.canonical = canonicalParams(plan, req.gainDB, req.p.dynamics, req.p.span, req.from)
 	if len(req.opts.Tags) > 0 {
 		req.canonical += "&tags=" + tagsFingerprint(req.opts.Tags)
 	}
 	return nil
+}
+
+// remuxPlanFor returns the ladder's rung-2 plan for a prepared request, or nil
+// when the request must take rung 3.
+//
+// The two declines here are the server's own, and neither is visible to
+// PlanRemux: the engine is handed options, and these are facts about the
+// request around them.
+//
+// A span cuts the stream at an arbitrary sample, which means cutting
+// mid-packet, so a virtual track always decodes. Note this cannot be left to
+// the FromSample check inside PlanRemux: the span is applied by wrapping the
+// Media, never through the options, so PlanRemux would see a plain request and
+// happily remux the whole file for someone who asked for one track of it. It is
+// the same asymmetry that makes the span easy to miss in directPlayable, and it
+// bites the same way.
+//
+// A maxBitRate cap needs a rate this rung cannot promise: the source's real bit
+// rate is in its packets, not its headers, and a plan reads headers. Declining
+// hands the request to the rung that can hold a cap honestly, rather than
+// refusing a request a transcode would serve.
+func (s *Server) remuxPlanFor(req *streamRequest) *waxflow.RemuxPlan {
+	switch {
+	case req.p.span.narrowed(), req.p.maxBitRate > 0:
+		return nil
+	}
+	// An error here is not this rung's to report: it means the request is wrong
+	// for every rung (an unsupported format, a container the format cannot
+	// produce), and PlanTranscode is about to say so with the same words.
+	rp, err := s.eng.PlanRemux(req.track, req.opts)
+	if err != nil {
+		return nil
+	}
+	return rp
 }

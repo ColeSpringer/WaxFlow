@@ -89,8 +89,13 @@ type hlsRequest struct {
 	members []hlsSource
 	opts    waxflow.TranscodeOptions
 	plan    *waxflow.SegmentPlan
-	key     cache.Key
-	meta    cache.Meta
+	// remux is the ladder's rung 2 when this variant can be served by rewriting
+	// the container around the source's own packets, nil when it takes rung 3.
+	// plan points at its embedded SegmentPlan when it is set, so the playlist,
+	// the key, and the worker all read one shape.
+	remux *waxflow.RemuxSegmentPlan
+	key   cache.Key
+	meta  cache.Meta
 	// exp is the request's own signature expiry (unix seconds), 0 when
 	// key-authed; child URLs inherit it so one minting governs the whole
 	// playback session's lifetime.
@@ -144,11 +149,15 @@ func (s *Server) prepareHLS(r *http.Request) (*hlsRequest, error) {
 	// Metadata resolves tag-based gain, which only a single-track URL can
 	// have: a timeline refuses the tag-derived modes at mint, because one
 	// chain has one gain and N members have N answers (see checkTimelineGain).
+	// A timeline hands no source to the remux rung either: it cannot take one,
+	// and resolving a member's grid would be a walk for an answer nobody reads.
 	var m *meta.Info
+	var rmx *source.File
 	if desc.Tl == "" {
 		m = s.readMeta(r.Context(), req.srcs[0], false)
+		rmx = req.srcs[0]
 	}
-	if req.opts, req.plan, err = s.planHLSVariant(desc, req.tracks(), m); err != nil {
+	if req.opts, req.plan, req.remux, err = s.planHLSVariant(desc, req.tracks(), m, rmx); err != nil {
 		return nil, err
 	}
 	if req.plan.Segments > maxPlaylistSegments {
@@ -342,9 +351,14 @@ func (s *Server) measureSamples(src *source.File) (int64, error) {
 // segment plan, mirroring planTranscode's policy checks so /stream and
 // HLS cannot drift. tracks is the single source's track, or the timeline's
 // members' tracks in order.
-func (s *Server) planHLSVariant(desc hls.Descriptor, tracks []container.Track, m *meta.Info) (waxflow.TranscodeOptions, *waxflow.SegmentPlan, error) {
-	fail := func(err error) (waxflow.TranscodeOptions, *waxflow.SegmentPlan, error) {
-		return waxflow.TranscodeOptions{}, nil, err
+// rmx is the source to try the remux rung against, nil to skip it: the master
+// playlist plans every variant to advertise it and runs none, so it has no
+// reason to pay for a packet walk, and the rung it would find changes nothing
+// it prints.
+func (s *Server) planHLSVariant(desc hls.Descriptor, tracks []container.Track, m *meta.Info,
+	rmx *source.File) (waxflow.TranscodeOptions, *waxflow.SegmentPlan, *waxflow.RemuxSegmentPlan, error) {
+	fail := func(err error) (waxflow.TranscodeOptions, *waxflow.SegmentPlan, *waxflow.RemuxSegmentPlan, error) {
+		return waxflow.TranscodeOptions{}, nil, nil, err
 	}
 	if desc.Bitrate != 0 {
 		if lossy, known := waxflow.LossyFormat(desc.Format); known && !lossy {
@@ -390,9 +404,29 @@ func (s *Server) planHLSVariant(desc hls.Descriptor, tracks []container.Track, m
 		// the whole rip. Planning the file's track and bounding afterward
 		// would promise a playlist the span cannot fill.
 		track := tracks[0]
-		if sp := descSpan(desc); sp.narrowed() {
-			if track, err = waxflow.SpanTrack(track, sp.from, sp.end()); err != nil {
+		spanned := descSpan(desc).narrowed()
+		if spanned {
+			if track, err = waxflow.SpanTrack(track, descSpan(desc).from, descSpan(desc).end()); err != nil {
 				return fail(err)
+			}
+		}
+		// Ladder rung 2, the segmented spelling: rewrite the container around
+		// the source's own packets. This is where format=opus on an Opus source
+		// stops re-encoding, which is the case that motivated the rung.
+		//
+		// The two declines are structural and neither is visible to the engine,
+		// which is handed a track and options. A timeline cannot remux: one
+		// fMP4 timeline carries one edit list, and per-member delay and padding
+		// cannot be trimmed at a seam where the packets overlap. A span cannot
+		// remux: cutting at an arbitrary sample means cutting mid-packet. Both
+		// always take rung 3.
+		if rmx != nil && !spanned {
+			rp, err := s.remuxSegmentPlanFor(rmx, track, opts, desc.SegDur)
+			if err != nil {
+				return fail(err)
+			}
+			if rp != nil {
+				return opts, &rp.SegmentPlan, rp, nil
 			}
 		}
 		plan, err = s.eng.PlanSegments(track, opts, desc.SegDur)
@@ -400,7 +434,35 @@ func (s *Server) planHLSVariant(desc hls.Descriptor, tracks []container.Track, m
 	if err != nil {
 		return fail(err)
 	}
-	return opts, plan, nil
+	return opts, plan, nil, nil
+}
+
+// remuxSegmentPlanFor tries the segmented remux rung for one variant, returning
+// nil when the source's packets have no uniform grid to lay segment boundaries
+// on and the variant must therefore be transcoded.
+//
+// The header-only check runs first and the packet walk second, which is the
+// whole reason this is not a single call into PlanRemuxSegments. gridFor walks
+// every packet in the source; PlanRemux reads the track and the options and
+// nothing else. A variant that cannot remux whatever the packets look like (a
+// bitrate ladder rung, a codec mismatch) must not pay for a walk to be told what
+// its options already say, and a ladder is exactly where that bites: every rung
+// of it declines, and every rung of it would have walked.
+func (s *Server) remuxSegmentPlanFor(src *source.File, track container.Track,
+	opts waxflow.TranscodeOptions, segDur float64) (*waxflow.RemuxSegmentPlan, error) {
+	// An error is not this rung's to report; PlanSegments is about to hit the
+	// same one with the same words.
+	if rp, err := s.eng.PlanRemux(track, opts); err != nil || rp == nil {
+		return nil, nil
+	}
+	grid, err := s.gridFor(src)
+	if err != nil {
+		return nil, err
+	}
+	if grid <= 0 {
+		return nil, nil
+	}
+	return s.eng.PlanRemuxSegments(track, opts, segDur, grid)
 }
 
 // descSpan is the descriptor's span in the server's own spelling.
@@ -509,7 +571,7 @@ func (s *Server) handleHLSMaster(w http.ResponseWriter, r *http.Request) {
 	var variants []hls.MasterVariant
 	for _, kbps := range desc.Ladder() {
 		vdesc := desc.Variant(kbps)
-		_, plan, err := s.planHLSVariant(vdesc, tracks, m)
+		_, plan, _, err := s.planHLSVariant(vdesc, tracks, m, nil)
 		if err != nil {
 			s.writeError(w, err) // one bad rung fails the master honestly
 			return
@@ -583,7 +645,7 @@ func (s *Server) handleHLSInit(w http.ResponseWriter, r *http.Request) {
 		http.ServeContent(w, r, "", c.ModTime, c.File)
 		return
 	}
-	init, err := s.eng.InitSegment(req.plan, req.opts)
+	init, err := s.initSegmentFor(req)
 	if err != nil {
 		s.writeError(w, err)
 		return
@@ -593,6 +655,17 @@ func (s *Server) handleHLSInit(w http.ResponseWriter, r *http.Request) {
 	}
 	s.met.TTFB.Observe(time.Since(reqStart).Seconds())
 	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(init))
+}
+
+// initSegmentFor builds the variant's init header on whichever rung the plan
+// chose, so the handler's on-the-spot build and the worker's cannot disagree
+// about what describes the segments. A remuxed variant's header carries the
+// source's own sample entry; a transcoded one's carries the encoder's.
+func (s *Server) initSegmentFor(req *hlsRequest) ([]byte, error) {
+	if req.remux != nil {
+		return s.eng.RemuxInitSegment(req.remux)
+	}
+	return s.eng.InitSegment(req.plan, req.opts)
 }
 
 // handleHLSSegment serves one media segment: cache hit, wait on the
@@ -658,7 +731,7 @@ func segmentName(n int64) string { return fmt.Sprintf("seg-%d.m4s", n) }
 func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64, func(int64), func(error)) (context.CancelFunc, error) {
 	// The worker outlives the request; capture values, never req.srcs.
 	members, tl := req.members, req.desc.Tl != ""
-	opts, plan, key := req.opts, req.plan, req.key
+	opts, plan, key, rmx := req.opts, req.plan, req.key, req.remux
 	sp := descSpan(req.desc)
 	return func(start int64, notify func(int64), exit func(error)) (context.CancelFunc, error) {
 		release, ok := s.pools.AcquireLive()
@@ -677,18 +750,84 @@ func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64,
 			defer s.store.Unpin(key)
 			defer release()
 			defer cancel()
-			exit(s.runHLSWorker(ctx, members, tl, sp, opts, plan, variant, start, notify))
+			exit(s.runHLSWorker(ctx, members, tl, sp, opts, plan, rmx, variant, start, notify))
 		}()
 		return cancel, nil
 	}
+}
+
+// logHLSWorker records a finished worker and passes its error through, so both
+// rungs report the same way and a session can be filtered by which one ran it.
+func (s *Server) logHLSWorker(ref, rung string, members int, start int64, err error) error {
+	if err != nil {
+		s.log.Warn("hls worker failed", "src", ref, "rung", rung, "members", members, "start", start, "err", err)
+	} else {
+		s.log.Debug("hls worker finished", "src", ref, "rung", rung, "members", members, "start", start)
+	}
+	return err
+}
+
+// runHLSRemuxWorker is one variant worker on the ladder's middle rung: the
+// source's own packets, resegmented, with no decoder and no encoder anywhere in
+// it.
+//
+// It re-resolves and re-checks identity exactly as the transcoding worker does
+// through openHLSMedia, and for the same reason: a worker outlives its request,
+// so it cannot borrow a handle, and the file it opens must still be the file the
+// plan was computed against or its segments describe something else.
+//
+// It takes one source by construction. A timeline and a span both decline this
+// rung at plan time (see planHLSVariant), so there is no member list to walk and
+// no window to apply.
+func (s *Server) runHLSRemuxWorker(ctx context.Context, m hlsSource, opts waxflow.TranscodeOptions,
+	plan *waxflow.RemuxSegmentPlan, variant *cache.Variant, start int64, publish func(mp4.Segment) error) error {
+	src, err := s.resolver.Resolve(ctx, m.Ref)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	if src.ID != m.ID {
+		return waxerr.New(waxerr.CodeSourceChanged, "source changed while starting the worker")
+	}
+	if !variant.Has("init.mp4") {
+		// The source's own sample entry, not an encoder's: the packets these
+		// segments carry are the ones this header must describe.
+		init, err := s.eng.RemuxInitSegment(plan)
+		if err != nil {
+			return err
+		}
+		if err := variant.WriteFile("init.mp4", init); err != nil {
+			return err
+		}
+	}
+	s.met.Remuxes.Add(1)
+	_, err = s.eng.RemuxSegments(ctx, src, m.Ext, opts,
+		waxflow.SegmentedOptions{SegmentSamples: plan.SegmentSamples, StartSegment: start}, publish)
+	return err
 }
 
 // runHLSWorker is one variant worker: its own input, opened afresh, the init
 // header if the variant lacks one, then segments from start to end of
 // stream, each published atomically and announced.
 func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool, sp span,
-	opts waxflow.TranscodeOptions, plan *waxflow.SegmentPlan, variant *cache.Variant,
-	start int64, notify func(int64)) error {
+	opts waxflow.TranscodeOptions, plan *waxflow.SegmentPlan, rmx *waxflow.RemuxSegmentPlan,
+	variant *cache.Variant, start int64, notify func(int64)) error {
+	publish := func(seg mp4.Segment) error {
+		if err := variant.WriteFile(segmentName(seg.Index), seg.Data); err != nil {
+			return err
+		}
+		notify(seg.Index)
+		return nil
+	}
+	ref := members[0].Ref
+	// Ladder rung 2, which the plan already chose: the source's own packets,
+	// resegmented. It is passed rather than re-derived so the bytes a worker
+	// writes are the ones the playlist's segment count and the cache key were
+	// computed for.
+	if rmx != nil {
+		return s.logHLSWorker(ref, rungName(true), len(members), start,
+			s.runHLSRemuxWorker(ctx, members[0], opts, rmx, variant, start, publish))
+	}
 	med, err := s.openHLSMedia(ctx, members, tl, sp, opts)
 	if err != nil {
 		return err
@@ -705,20 +844,8 @@ func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool,
 	}
 	_, err = s.eng.TranscodeSegmentsMedia(ctx, med, opts,
 		waxflow.SegmentedOptions{SegmentSamples: plan.SegmentSamples, StartSegment: start},
-		func(seg mp4.Segment) error {
-			if err := variant.WriteFile(segmentName(seg.Index), seg.Data); err != nil {
-				return err
-			}
-			notify(seg.Index)
-			return nil
-		})
-	ref := members[0].Ref
-	if err != nil {
-		s.log.Warn("hls worker failed", "src", ref, "members", len(members), "start", start, "err", err)
-	} else {
-		s.log.Debug("hls worker finished", "src", ref, "members", len(members), "start", start)
-	}
-	return err
+		publish)
+	return s.logHLSWorker(ref, rungName(false), len(members), start, err)
 }
 
 // openHLSMedia opens a worker's input: the source itself for a single-track
@@ -902,8 +1029,11 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string
 	tracks := req.tracks()
 	for _, kbps := range out.Ladder() {
 		// Mint-time validation plans with nil metadata: the resolved gain
-		// value never shapes plan validity, only playback bytes.
-		if _, _, err := s.planHLSVariant(out.Variant(kbps), tracks, nil); err != nil {
+		// value never shapes plan validity, only playback bytes. It hands the
+		// remux rung no source for the same reason: a mint validates that some
+		// rung can serve the variant, and rung 3 always can wherever rung 2
+		// could, so paying for a packet walk here would buy nothing.
+		if _, _, _, err := s.planHLSVariant(out.Variant(kbps), tracks, nil, nil); err != nil {
 			return hls.Descriptor{}, 0, err
 		}
 	}

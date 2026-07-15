@@ -134,6 +134,34 @@ func Open(src container.Source, hint string, opts *Options) (Media, error) {
 	return newMedia(buildInfo(d.name, demux), demux)
 }
 
+// OpenDemuxer identifies src and opens its demuxer without wiring a decoder,
+// for callers that move encoded packets rather than samples (the remux rung).
+// Info is built exactly as Open's is, so the two cannot disagree about a
+// container's tracks.
+//
+// The caller drives the demuxer directly and so inherits its contract: packets
+// are borrowed, and ReadPacket returns the bare io.EOF sentinel at the end. A
+// Demuxer has no Close; what needs closing is src, which the caller owns, as it
+// does for Probe.
+func OpenDemuxer(src container.Source, hint string, opts *Options) (container.Demuxer, *Info, error) {
+	src, d, err := resolve(src, hint)
+	if err != nil {
+		return nil, nil, err
+	}
+	demux, err := d.open(src, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	// The trackless check is Probe's, restated rather than borrowed: Open gets
+	// it from newMedia, and this path reaches neither. All three entry points
+	// promise an Info with at least one track.
+	info := buildInfo(d.name, demux)
+	if len(info.Tracks) == 0 {
+		return nil, nil, waxerr.New(waxerr.CodeUnsupportedFormat, "format: no audio tracks")
+	}
+	return demux, info, nil
+}
+
 // FromDemuxer wraps an already-opened demuxer into a Media, for sources that
 // are assembled rather than sniffed from one byte stream. The HLS client builds
 // a fragmented-MP4 demuxer over concatenated media segments behind an

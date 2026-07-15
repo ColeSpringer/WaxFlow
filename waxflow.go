@@ -176,18 +176,13 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 	if err != nil {
 		return nil, err
 	}
-	if opts.Container != "" {
-		// Mirror of the plan-side check: a container override the format
-		// cannot honor must fail here too, so a caller skipping the plan
-		// cannot have it silently ignored (a build closure that just falls
-		// through on an unknown name would otherwise write the default form).
-		if row.container == nil {
-			return nil, waxerr.New(waxerr.CodeInvalidRequest,
-				fmt.Sprintf("waxflow: format %s has no alternate container (container=%s)", row.name, opts.Container))
-		}
-		if _, err := row.container(opts.Container); err != nil {
-			return nil, err
-		}
+	// Mirror of the plan-side check, through the plan's own funnel: a container
+	// override the format cannot honor must fail here too, so a caller skipping
+	// the plan cannot have it silently ignored (a mux closure that just fell
+	// through on an unknown name would otherwise write the default form).
+	containerName, _, err := resolveContainer(row, opts.Container)
+	if err != nil {
+		return nil, err
 	}
 	spec := specFor(opts)
 	if row.adjust != nil {
@@ -200,18 +195,9 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 	defer chain.Release()
 
 	f := chain.Format()
-	enc, mux, err := row.build(f, opts, dst)
+	enc, err := row.encode(f, opts)
 	if err != nil {
 		return nil, err
-	}
-	// The one capability bit Muxer exposes: back-patching muxers need a
-	// seekable destination (a file), checked here once so no future muxer
-	// re-invents the guard and no work starts on a doomed transcode.
-	if mux.NeedsSeek() {
-		if _, ok := dst.(io.WriteSeeker); !ok {
-			return nil, waxerr.New(waxerr.CodeInvalidRequest,
-				fmt.Sprintf("waxflow: %s output requires a seekable destination", opts.Format))
-		}
 	}
 
 	track := container.Track{
@@ -226,6 +212,17 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 	// it exactly at End.
 	if d, ok := enc.(interface{ Delay() int }); ok {
 		track.Delay = int64(d.Delay())
+	}
+	// The muxer is built from the finished track, which is why this follows
+	// the encoder rather than arriving beside it: a muxer reads the stream's
+	// shape off the track, and the remux rung has a track with no encoder
+	// behind it. See output.mux.
+	mux, err := row.mux(track, opts, enc, dst)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkSeekable(mux, dst, opts.Format); err != nil {
+		return nil, err
 	}
 	if err := mux.Begin([]container.Track{track}); err != nil {
 		return nil, err
@@ -269,13 +266,46 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 		return nil, err
 	}
 	e.log.Debug("transcode finished", "samples", trailer.Samples)
-	// The container is the format's default unless the request overrode
-	// it, the same resolution PlanTranscode reports.
-	containerName := row.name
-	if opts.Container != "" {
-		containerName = opts.Container
-	}
 	return &TranscodeResult{Samples: trailer.Samples, Format: f, Container: containerName}, nil
+}
+
+// resolveContainer resolves a Container override against a row: the name the
+// output carries and its HTTP media type, or the row's own defaults for the
+// empty override.
+//
+// A row with no alternate form rejects any override up front, per the
+// unknown-parameter principle: a request naming a container the format cannot
+// honor must fail, never fall back silently to the default form. Every rung
+// resolves through here, so a plan and the run it plans cannot disagree about
+// which wrapper was asked for.
+func resolveContainer(row *output, name string) (containerName, mediaType string, err error) {
+	if name == "" {
+		return row.name, row.mediaType, nil
+	}
+	if row.container == nil {
+		return "", "", waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("waxflow: format %s has no alternate container (container=%s)", row.name, name))
+	}
+	mt, err := row.container(name)
+	if err != nil {
+		return "", "", err
+	}
+	return name, mt, nil
+}
+
+// checkSeekable enforces the one capability bit Muxer exposes: a
+// back-patching muxer needs a seekable destination (a file). It is checked
+// before any work starts on a doomed output, in one place so no muxer, and
+// no rung of the ladder, re-invents the guard.
+func checkSeekable(mux container.Muxer, dst io.Writer, format string) error {
+	if !mux.NeedsSeek() {
+		return nil
+	}
+	if _, ok := dst.(io.WriteSeeker); !ok {
+		return waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("waxflow: %s output requires a seekable destination", format))
+	}
+	return nil
 }
 
 // specFor maps TranscodeOptions onto the DSP chain spec, in one place so
@@ -547,17 +577,9 @@ func buildPlanCore(in audio.Format, opts TranscodeOptions) (*planCore, error) {
 		return nil, err
 	}
 	l, m := chain.Ratio()
-	containerName, mediaType := row.name, row.mediaType
-	if opts.Container != "" {
-		if row.container == nil {
-			return nil, waxerr.New(waxerr.CodeInvalidRequest,
-				fmt.Sprintf("waxflow: format %s has no alternate container (container=%s)", row.name, opts.Container))
-		}
-		mt, err := row.container(opts.Container)
-		if err != nil {
-			return nil, err
-		}
-		containerName, mediaType = opts.Container, mt
+	containerName, mediaType, err := resolveContainer(row, opts.Container)
+	if err != nil {
+		return nil, err
 	}
 	return &planCore{
 		format:        f,
@@ -619,8 +641,27 @@ type output struct {
 	// fractional per-sample byte cost). A plan that succeeds must guarantee
 	// build succeeds.
 	plan func(f audio.Format, opts TranscodeOptions) (version string, bytesPerFrame, bitRate int, err error)
-	// build constructs the wired encoder and muxer for one transcode.
-	build func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error)
+	// encode constructs the row's encoder for one transcode.
+	encode func(f audio.Format, opts TranscodeOptions) (codec.Encoder, error)
+	// mux constructs the row's container writer, resolving the Container
+	// override to the wrapper it names.
+	//
+	// It is separate from encode because remux has no encoder: the middle rung
+	// moves the source's own packets, so the muxer must be reachable without
+	// one. Splitting it is what makes the muxer a remux writes through the same
+	// muxer a transcode writes through, rather than two constructions that
+	// agree only until someone edits one of them.
+	//
+	// t is the output track, which is where a muxer reads what it needs to know
+	// about the stream (the mpa Xing header's encoder delay). enc is the
+	// encoder that produced the track, or nil for a remux, and it exists for
+	// the one fact no track can carry: FLAC's MD5 over the *unencoded* audio,
+	// which is knowable only by having encoded it. Leaving it nil on a remux is
+	// not a degradation but the correct answer, since the source's own
+	// STREAMINFO signature still describes the audio the packets hold; handing
+	// a remux a fresh encoder's MD5 would back-patch the signature of nothing
+	// over a correct one.
+	mux func(t container.Track, opts TranscodeOptions, enc codec.Encoder, dst io.Writer) (container.Muxer, error)
 	// container resolves a TranscodeOptions.Container override to its
 	// HTTP media type; nil means the format has no alternate container
 	// and any override is rejected up front (the unknown-parameter
@@ -665,23 +706,21 @@ var outputs = []output{
 			}
 			return pcm.Version, cfg.BytesPerFrame(f.Channels), 0, nil
 		},
-		build: func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
+		encode: func(f audio.Format, opts TranscodeOptions) (codec.Encoder, error) {
 			if isMatroska(opts.Container) {
-				enc, err := pcm.NewEncoder(mkaPCMConfig(f), f)
-				if err != nil {
-					return nil, nil, err
-				}
-				return enc, mkaMuxer(dst, opts), nil
+				return pcm.NewEncoder(mkaPCMConfig(f), f)
 			}
 			cfg, err := riff.DefaultConfig(f)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
-			enc, err := pcm.NewEncoder(cfg, f)
-			if err != nil {
-				return nil, nil, err
+			return pcm.NewEncoder(cfg, f)
+		},
+		mux: func(_ container.Track, opts TranscodeOptions, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
+			if isMatroska(opts.Container) {
+				return mkaMuxer(dst, opts), nil
 			}
-			return enc, riff.NewMuxer(dst, nil), nil
+			return riff.NewMuxer(dst, nil), nil
 		},
 		// PCM rides in Matroska (A_PCM/INT/LIT or A_PCM/FLOAT/IEEE) but not
 		// WebM, whose audio subset is Opus and Vorbis only.
@@ -729,19 +768,18 @@ var outputs = []output{
 			}
 			return opus.EncoderVersion, 0, enc.Bitrate(), nil
 		},
-		build: func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
+		encode: func(f audio.Format, opts TranscodeOptions) (codec.Encoder, error) {
 			eopts, err := opusEncoderOptions(opts)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
-			enc, err := opus.NewEncoder(f, eopts)
-			if err != nil {
-				return nil, nil, err
-			}
+			return opus.NewEncoder(f, eopts)
+		},
+		mux: func(_ container.Track, opts TranscodeOptions, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 			if isMatroska(opts.Container) {
-				return enc, mkaMuxer(dst, opts), nil
+				return mkaMuxer(dst, opts), nil
 			}
-			return enc, ogg.NewMuxer(dst, &ogg.MuxerOptions{Tags: opts.Tags}), nil
+			return ogg.NewMuxer(dst, &ogg.MuxerOptions{Tags: opts.Tags}), nil
 		},
 		// Opus rides in Matroska and WebM (its native container besides Ogg).
 		container: func(name string) (string, error) {
@@ -798,19 +836,18 @@ var outputs = []output{
 			}
 			return vorbis.EncoderVersion, 0, enc.Bitrate(), nil
 		},
-		build: func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
+		encode: func(f audio.Format, opts TranscodeOptions) (codec.Encoder, error) {
 			eopts, err := vorbisEncoderOptions(opts)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
-			enc, err := vorbis.NewEncoder(f, eopts)
-			if err != nil {
-				return nil, nil, err
-			}
+			return vorbis.NewEncoder(f, eopts)
+		},
+		mux: func(_ container.Track, opts TranscodeOptions, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 			if isMatroska(opts.Container) {
-				return enc, mkaMuxer(dst, opts), nil
+				return mkaMuxer(dst, opts), nil
 			}
-			return enc, ogg.NewMuxer(dst, &ogg.MuxerOptions{Tags: opts.Tags}), nil
+			return ogg.NewMuxer(dst, &ogg.MuxerOptions{Tags: opts.Tags}), nil
 		},
 		// Vorbis rides in Matroska and WebM (it is, with Opus, one of webm's two
 		// audio codecs) besides its native Ogg.
@@ -837,16 +874,15 @@ var outputs = []output{
 			}
 			return pcm.Version, cfg.BytesPerFrame(f.Channels), 0, nil
 		},
-		build: func(f audio.Format, _ TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
+		encode: func(f audio.Format, _ TranscodeOptions) (codec.Encoder, error) {
 			cfg, err := aiff.DefaultConfig(f)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
-			enc, err := pcm.NewEncoder(cfg, f)
-			if err != nil {
-				return nil, nil, err
-			}
-			return enc, aiff.NewMuxer(dst), nil
+			return pcm.NewEncoder(cfg, f)
+		},
+		mux: func(_ container.Track, _ TranscodeOptions, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
+			return aiff.NewMuxer(dst), nil
 		},
 	},
 	{
@@ -879,22 +915,29 @@ var outputs = []output{
 			}
 			return flac.EncoderVersion(level), 0, 0, nil
 		},
-		build: func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
+		encode: func(f audio.Format, opts TranscodeOptions) (codec.Encoder, error) {
 			level, err := flacLevel(opts)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
-			enc, err := flac.NewEncoder(f, &flac.EncoderOptions{Level: level})
-			if err != nil {
-				return nil, nil, err
-			}
+			return flac.NewEncoder(f, &flac.EncoderOptions{Level: level})
+		},
+		mux: func(_ container.Track, opts TranscodeOptions, enc codec.Encoder, dst io.Writer) (container.Muxer, error) {
 			if isMatroska(opts.Container) {
-				return enc, mkaMuxer(dst, opts), nil
+				return mkaMuxer(dst, opts), nil
 			}
 			if opts.Container == "ogg" {
-				return enc, ogg.NewMuxer(dst, &ogg.MuxerOptions{Tags: opts.Tags}), nil
+				return ogg.NewMuxer(dst, &ogg.MuxerOptions{Tags: opts.Tags}), nil
 			}
-			return enc, flacn.NewMuxer(dst, &flacn.MuxerOptions{MD5: enc.MD5, Tags: opts.Tags}), nil
+			mo := flacn.MuxerOptions{Tags: opts.Tags}
+			// The signature comes from the encoder or not at all, and this is the
+			// row the nil-enc contract exists for: a remux leaves it nil and the
+			// source's own STREAMINFO signature stands, which is right because
+			// the packets carry the same audio it was computed over.
+			if fe, ok := enc.(*flac.Encoder); ok {
+				mo.MD5 = fe.MD5
+			}
+			return flacn.NewMuxer(dst, &mo), nil
 		},
 		// FLAC rides in Matroska (A_FLAC) and Ogg (the Xiph FLAC-in-Ogg
 		// mapping), but not WebM (Opus/Vorbis only).
@@ -959,16 +1002,19 @@ var outputs = []output{
 			// honestly unknown (the PlanTranscode VBR contract).
 			return mp3.EncoderVersion, 0, enc.Bitrate(), nil
 		},
-		build: func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
+		encode: func(f audio.Format, opts TranscodeOptions) (codec.Encoder, error) {
 			eo, err := mp3EncoderOptions(opts)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
-			enc, err := mp3.NewEncoder(f, eo)
-			if err != nil {
-				return nil, nil, err
-			}
-			return enc, mpa.NewMuxer(dst, &mpa.MuxerOptions{Delay: enc.Delay(), VBR: opts.MP3VBR, Tags: opts.Tags}), nil
+			return mp3.NewEncoder(f, eo)
+		},
+		// The Xing header's delay reads off the track rather than the encoder,
+		// which is the same number by construction (Transcode stamps track.Delay
+		// from the encoder) and is also the one a remux has: the source's own
+		// LAME-tag delay, carried across.
+		mux: func(t container.Track, opts TranscodeOptions, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
+			return mpa.NewMuxer(dst, &mpa.MuxerOptions{Delay: int(t.Delay), VBR: opts.MP3VBR, Tags: opts.Tags}), nil
 		},
 	},
 	{
@@ -1006,24 +1052,26 @@ var outputs = []output{
 			// target (an ABR mean, held by the bit reservoir).
 			return aac.EncoderVersion, 0, enc.Bitrate(), nil
 		},
-		build: func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
+		encode: func(f audio.Format, opts TranscodeOptions) (codec.Encoder, error) {
 			if _, err := aacContainerMediaType(opts.Container); err != nil {
-				return nil, nil, err
+				return nil, err
 			}
-			enc, err := aac.NewEncoder(f, &aac.EncoderOptions{Bitrate: opts.AACBitrate})
-			if err != nil {
-				return nil, nil, err
-			}
+			return aac.NewEncoder(f, &aac.EncoderOptions{Bitrate: opts.AACBitrate})
+		},
+		// The container name is not re-validated here: every caller resolves it
+		// through resolveContainer (which is this row's own aacContainerMediaType)
+		// before reaching mux, and the encode closure checks it besides.
+		mux: func(_ container.Track, opts TranscodeOptions, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 			if isMatroska(opts.Container) {
-				return enc, mkaMuxer(dst, opts), nil
+				return mkaMuxer(dst, opts), nil
 			}
 			if opts.Container == "adts" {
-				return enc, adts.NewMuxer(dst), nil
+				return adts.NewMuxer(dst), nil
 			}
 			if opts.Container == mp4Progressive {
-				return enc, mp4.NewProgressiveMuxer(dst, mp4MuxerOptions(opts)), nil
+				return mp4.NewProgressiveMuxer(dst, mp4MuxerOptions(opts)), nil
 			}
-			return enc, mp4.NewMuxer(dst, mp4MuxerOptions(opts)), nil
+			return mp4.NewMuxer(dst, mp4MuxerOptions(opts)), nil
 		},
 		container: aacContainerMediaType,
 		hls: &hlsOutput{
@@ -1069,15 +1117,14 @@ var outputs = []output{
 			}
 			return alac.EncoderVersion, 0, 0, nil
 		},
-		build: func(f audio.Format, opts TranscodeOptions, dst io.Writer) (codec.Encoder, container.Muxer, error) {
-			enc, err := alac.NewEncoder(f, nil)
-			if err != nil {
-				return nil, nil, err
-			}
+		encode: func(f audio.Format, _ TranscodeOptions) (codec.Encoder, error) {
+			return alac.NewEncoder(f, nil)
+		},
+		mux: func(_ container.Track, opts TranscodeOptions, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 			if opts.Container == mp4Progressive {
-				return enc, mp4.NewProgressiveMuxer(dst, mp4MuxerOptions(opts)), nil
+				return mp4.NewProgressiveMuxer(dst, mp4MuxerOptions(opts)), nil
 			}
-			return enc, mp4.NewMuxer(dst, mp4MuxerOptions(opts)), nil
+			return mp4.NewMuxer(dst, mp4MuxerOptions(opts)), nil
 		},
 		// ALAC's only alternate form is progressive (flat) MP4; the default is
 		// fragmented CMAF.

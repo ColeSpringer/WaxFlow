@@ -41,6 +41,30 @@ const maxSegmentSeconds = 60.0
 // nothing yet needed them to differ.
 const primeSeconds = 0.1
 
+// snapSegmentSamples resolves a requested segment duration to a whole number
+// of frames of the given grid, at least one, so segment boundaries land exactly
+// between packets.
+//
+// The grid is the encoder's native frame size for a transcode and the source's
+// own packet duration for a remux, and that is the whole of what makes the
+// segmented remux rung work: mp4.Segmenter's tfdt = index * SegmentSamples is
+// only true if boundaries fall on packet boundaries, and snapping is what makes
+// them. Both rungs snap through here so neither can drift from the other's
+// notion of where a segment ends.
+func snapSegmentSamples(segSeconds float64, rate, grid int) (int, error) {
+	switch {
+	case segSeconds == 0:
+		segSeconds = DefaultSegmentSeconds
+	case segSeconds < 0 || segSeconds > maxSegmentSeconds:
+		return 0, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("waxflow: segment duration %g outside 0..%g seconds", segSeconds, maxSegmentSeconds))
+	}
+	if grid <= 0 {
+		return 0, waxerr.New(waxerr.CodeInternal, "waxflow: segment grid must be positive")
+	}
+	return max(int(segSeconds*float64(rate)/float64(grid)+0.5), 1) * grid, nil
+}
+
 // SegmentPlan describes the segmented CMAF (HLS) form of a transcode,
 // computed from headers alone like TranscodePlan (which it embeds: the
 // embedded Versions already carry the segmenter revision, so an HLS cache
@@ -98,28 +122,18 @@ func (e *Engine) PlanSegments(track container.Track, opts TranscodeOptions, segS
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 			fmt.Sprintf("waxflow: %s has no segmented (HLS) form (available: %s)", opts.Format, strings.Join(SegmentedFormats(), ", ")))
 	}
-	switch {
-	case segSeconds == 0:
-		segSeconds = DefaultSegmentSeconds
-	case segSeconds < 0 || segSeconds > maxSegmentSeconds:
-		return nil, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("waxflow: segment duration %g outside 0..%g seconds", segSeconds, maxSegmentSeconds))
-	}
 	plan, err := e.PlanTranscode(track, opts)
 	if err != nil {
 		return nil, err
 	}
-	f := plan.FrameSize
-	if f <= 0 {
+	if plan.FrameSize <= 0 {
 		return nil, waxerr.New(waxerr.CodeInternal,
 			fmt.Sprintf("waxflow: %s registered an HLS form without a native frame size", opts.Format))
 	}
-	// Snap the target duration to whole encoder frames, at least one.
-	segSamples := int(segSeconds*float64(plan.Format.Rate)/float64(f)+0.5) * f
-	if segSamples < f {
-		segSamples = f
+	segSamples, err := snapSegmentSamples(segSeconds, plan.Format.Rate, plan.FrameSize)
+	if err != nil {
+		return nil, err
 	}
-
 	sp := &SegmentPlan{
 		TranscodePlan:      *plan,
 		SegmentSamples:     segSamples,
@@ -133,7 +147,7 @@ func (e *Engine) PlanSegments(track container.Track, opts TranscodeOptions, segS
 	sp.Versions = append(append([]string{}, plan.Versions...), mp4.SegmenterVersion)
 
 	if plan.Samples >= 0 {
-		sp.TotalDecodeSamples = totalDecodeSamples(plan.Samples, row.hls.delay, int64(f))
+		sp.TotalDecodeSamples = totalDecodeSamples(plan.Samples, row.hls.delay, int64(plan.FrameSize))
 		sp.Segments = (sp.TotalDecodeSamples + int64(segSamples) - 1) / int64(segSamples)
 	}
 
@@ -144,7 +158,7 @@ func (e *Engine) PlanSegments(track container.Track, opts TranscodeOptions, segS
 	if base == 0 {
 		base = plan.Format.Rate * plan.Format.Channels * max(plan.Format.BitDepth, 16)
 	}
-	sp.Bandwidth = base + plan.Format.Rate/f*64 + 2000
+	sp.Bandwidth = base + plan.Format.Rate/plan.FrameSize*64 + 2000
 	return sp, nil
 }
 

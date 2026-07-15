@@ -247,11 +247,29 @@ Parameters (unknown parameter names are rejected):
   forces a re-encode (never direct-play), and the resolved bit rate is
   part of the cache key, so two rates never share an entry.
 - `container`: overrides the format's packaging where an alternative
-  exists; today only `format=aac` has one: `container=adts` selects the
-  raw ADTS elementary stream (`audio/aac`), a legacy opt-out for players
-  without fMP4 support. ADTS carries no gapless signaling, which is why
-  fMP4 is the default. On any other format (or with `format=auto`) the
-  parameter is `400`.
+  exists. It requires an explicit `format`, and a name the format cannot
+  produce is `400` rather than a silent fall back to the default form.
+  A container override never direct-plays: direct play serves the file in
+  the wrapper it already has, so an override is always a request for bytes
+  rung 1 does not hold. Where the codec survives, rung 2 answers it without
+  re-encoding. The available forms, by format:
+
+  | format | `container=` |
+  |---|---|
+  | `aac` | `adts`, `progressive`, `mka` (empty is fragmented MP4) |
+  | `alac` | `progressive` (empty is fragmented MP4) |
+  | `flac` | `mka`, `ogg` (empty is native FLAC) |
+  | `opus` | `mka`, `webm` (empty is Ogg) |
+  | `vorbis` | `mka`, `webm` (empty is Ogg) |
+  | `wav` | `mka` (empty is RIFF) |
+
+  `container=adts` selects the raw ADTS elementary stream (`audio/aac`), a
+  legacy opt-out for players without fMP4 support; it carries no gapless
+  signaling, which is why fMP4 is the default. `container=progressive`
+  flattens the MP4 boxes (`moov`+`mdat`, the `.m4a` most players expect)
+  and back-patches its header, so it needs a seekable destination and is
+  not a streaming form: `/stream` refuses it and a job output takes it.
+  `webm` is Opus and Vorbis only, which is webm's audio subset.
 - `maxBitRate`: a kbit/s cap for the decision ladder. For direct play the
   cap is checked against whole-file bytes over duration (tags and
   embedded art included): direct play ships the entire file, so the wire
@@ -259,12 +277,34 @@ Parameters (unknown parameter names are rejected):
   hold under the cap, so a cap on it is `415` rather than silently
   unenforced.
 
-**Decision ladder (v1)**: if the source already satisfies the request
-(`format=auto` or matching container, no transforming parameters, under
-`maxBitRate` if given), the original bytes are served: `200`,
-`Content-Type` per container, strong identity `ETag`, `Accept-Ranges:
-bytes` with full RFC 7233 range and `If-None-Match` support. Transmux
-rungs light up as muxer pairs land; otherwise a WAV transcode streams.
+**Decision ladder (v1)**, three rungs, cheapest first:
+
+1. **Direct play.** The source already satisfies the request (`format=auto`
+   or a matching container, no `container` override, no transforming
+   parameters, under `maxBitRate` if given), so the original bytes are
+   served: `200`, `Content-Type` per container, strong identity `ETag`,
+   `Accept-Ranges: bytes` with full RFC 7233 range and `If-None-Match`
+   support.
+2. **Transmux.** The codec survives but the wrapper does not: the request
+   names a container the source is not in, and nothing asks for a sample
+   transform. The container is rewritten around the source's own packets,
+   so there is no decode, no re-encode, and no generation loss for a lossy
+   source. Gapless trims are carried across and re-signalled in whatever
+   the target container uses (iTunSMPB, an edit list, an Ogg pre-skip).
+   `format=flac&container=mka` on a FLAC file is this rung, as is
+   `format=opus` on an Opus file over HLS.
+3. **Transcode.** Anything else: decode, DSP, encode.
+
+Rung 2 declines, and falls to rung 3, whenever the codec would not survive
+(`track.Codec` is not the output format's), any parameter transforms samples
+(`rate`, `ch`, `bits`, `gain`, `dynamics`, `t=`, `bitrate`/`q`), the request
+names a span (`from`/`to` cut at an arbitrary sample, which means
+mid-packet), the URL names a timeline (one fMP4 timeline carries one edit
+list, and the packets at a seam overlap), or `maxBitRate` is set (this rung
+reads headers, and a source's real bit rate is in its packets). Over HLS it
+also declines a source whose packet durations vary, since there is then no
+grid to lay segment boundaries on. `waxflow_remux_total` in `/metrics`
+counts the pipelines it served.
 
 **Live transcode responses**: `200` chunked, `Accept-Ranges: none`,
 `Cache-Control: no-store`, `X-Accel-Buffering: no`, plus hints
@@ -747,7 +787,8 @@ to be worth a janitor of their own.
 
 Prometheus text: `waxflow_build_info`, `waxflow_sessions_active`,
 `waxflow_sessions_total{kind}` (live, sync, hls),
-`waxflow_direct_play_total`, `waxflow_hls_segments_total`,
+`waxflow_direct_play_total`, `waxflow_remux_total`,
+`waxflow_hls_segments_total`,
 `waxflow_cache_{hits,misses}_total`, `waxflow_cache_{bytes,entries}`,
 `waxflow_admission_rejects_total`, `waxflow_admission_in_use{pool}`,
 `waxflow_session_degradations_total`, `waxflow_ttfb_seconds` histogram.

@@ -203,7 +203,7 @@ func (s *Server) handleTranscode(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err)
 		return
 	}
-	s.startPipeline(r.Context(), entry, req.p.src, req.src.ID, req.src.Ext, req.opts, req.p.span, release, true)
+	s.startPipeline(r.Context(), entry, req.p.src, req.src.ID, req.src.Ext, req.opts, req.p.span, req.remux != nil, release, true)
 	armed = true
 
 	// The extension is the output table's, not the plan's container name: the

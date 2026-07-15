@@ -52,7 +52,15 @@ func WithIndexCache(c IndexCache) Option {
 // the source's properties, so the zero options add no DSP stage and the
 // decoder's samples reach the encoder unaltered: a bit-exact container
 // rewrite for a lossless source to a lossless output. A lossy source is
-// decoded and re-encoded even so, which costs a generation; see Transcode.
+// decoded and re-encoded even so, which costs a generation.
+//
+// Remux is what removes that generation, and the options it accepts are exactly
+// the ones described above: zero everywhere but Format and Container. It moves
+// the source's own packets rather than decoding them, so it is a bit-exact
+// container rewrite for a lossy source too, but only where the codec survives
+// the trip (the output format's codec must already be the source's). PlanRemux
+// answers whether a given request is one of those, and the server's ladder asks
+// it before reaching for a transcode.
 type TranscodeOptions struct {
 	// Format is the output format name: "wav", "aiff", "flac", "mp3",
 	// "alac", "aac", "opus", or "vorbis".

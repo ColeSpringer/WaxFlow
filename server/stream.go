@@ -19,8 +19,8 @@ import (
 )
 
 // handleStream serves GET/HEAD /stream: auth, parameter parsing, source
-// identity, then the decision ladder: direct play, (transmux, once a
-// pair exists), transcode via the cache.
+// identity, then the decision ladder: direct play, transmux, transcode, all
+// via the cache.
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	reqStart := time.Now()
 	s.applyCORS(w, r)
@@ -133,7 +133,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 				s.met.Degradations.Add(1)
 				entry = cache.NewMemEntry(s.cfg.RingBytes, meta)
 			}
-			s.startPipeline(s.baseCtx, entry, req.p.src, req.src.ID, req.src.Ext, req.opts, req.p.span, release, false)
+			s.startPipeline(s.baseCtx, entry, req.p.src, req.src.ID, req.src.Ext, req.opts, req.p.span, req.remux != nil, release, false)
 			armed = true
 			return entry, nil
 		})
@@ -167,7 +167,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 // the first client leaves. Sync one-shots pass their request context to
 // die with it.
 func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, ref string, id source.Identity, hint string,
-	opts waxflow.TranscodeOptions, sp span, release func(), sync bool) {
+	opts waxflow.TranscodeOptions, sp span, remux bool, release func(), sync bool) {
 	if sync {
 		s.met.SessionsSync.Add(1)
 	} else {
@@ -192,9 +192,9 @@ func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, ref stri
 			entry.Fail(waxerr.New(waxerr.CodeSourceChanged, "source changed while starting the pipeline"))
 			return
 		}
-		res, err := s.transcodeSpan(ctx, src, hint, entry, opts, sp)
+		res, err := s.transcodeSpan(ctx, src, hint, entry, opts, sp, remux)
 		if err != nil {
-			s.log.Warn("pipeline failed", "src", ref, "err", err)
+			s.log.Warn("pipeline failed", "src", ref, "rung", rungName(remux), "err", err)
 			entry.Fail(err)
 			return
 		}
@@ -206,12 +206,30 @@ func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, ref stri
 		if entry.FileBacked() && entry.Degraded() {
 			s.met.Degradations.Add(1)
 		}
-		s.log.Debug("pipeline finished", "src", ref, "samples", res.Samples, "degraded", entry.Degraded())
+		s.log.Debug("pipeline finished", "src", ref, "rung", rungName(remux),
+			"samples", res.Samples, "degraded", entry.Degraded())
 	}()
 }
 
-// transcodeSpan runs the transcode, bounding the source to the request's
-// span when it has one.
+// rungName spells the decision ladder's rung for a log line, so a session can
+// be filtered by which one served it. Direct play never reaches a pipeline (it
+// serves the file straight from the handler), so only the two that do are named
+// here; waxflow_direct_play_total counts the other.
+func rungName(remux bool) string {
+	if remux {
+		return "remux"
+	}
+	return "transcode"
+}
+
+// transcodeSpan runs the request's chosen rung, bounding the source to the
+// request's span when it has one.
+//
+// remux selects ladder rung 2, which the plan already decided: it is passed
+// rather than re-derived so the bytes served are the ones the cache key and the
+// response headers were computed for. A remux never has a span (rung 2 declines
+// them, since cutting at an arbitrary sample means cutting mid-packet), so the
+// two branches cannot both apply.
 //
 // A request with no span takes Engine.Transcode untouched, which is not
 // merely an optimization: it keeps every existing progressive stream on the
@@ -228,7 +246,11 @@ func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, ref stri
 // arithmetic that served t= on a whole file serves t= inside a virtual
 // track with no special case.
 func (s *Server) transcodeSpan(ctx context.Context, src *source.File, hint string, dst io.Writer,
-	opts waxflow.TranscodeOptions, sp span) (*waxflow.TranscodeResult, error) {
+	opts waxflow.TranscodeOptions, sp span, remux bool) (*waxflow.TranscodeResult, error) {
+	if remux {
+		s.met.Remuxes.Add(1)
+		return s.eng.Remux(ctx, src, hint, dst, opts)
+	}
 	if !sp.narrowed() {
 		return s.eng.Transcode(ctx, src, hint, dst, opts)
 	}
@@ -427,6 +449,18 @@ func directPlayable(req *streamRequest) bool {
 		return false
 	case p.bitrate != 0:
 		return false // bitrate/q asks for a lossy re-encode, not the original
+	case p.container != "":
+		// A container override names a wrapper other than the one the format
+		// delivers by default, and direct play delivers the file in the wrapper
+		// it already has, so an override is always a request for bytes this rung
+		// does not hold. It cannot be folded into the format clause below: that
+		// one matches an output format name against the *input* container's
+		// name, and the two namespaces meet only where the source already is
+		// what was asked for, which says nothing about the wrapper. Without this
+		// clause, format=flac&container=mka on a FLAC source direct-played the
+		// native .flac file and ignored the override entirely. Rung 2 is what
+		// honors an override without re-encoding.
+		return false
 	case p.format != "auto" && p.format != req.info.Container:
 		return false
 	case p.rate != 0 && p.rate != track.Fmt.Rate:

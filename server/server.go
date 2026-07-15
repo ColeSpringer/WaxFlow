@@ -182,6 +182,13 @@ type Server struct {
 	trackCache  trackCache
 	trackFlight flight.Group[container.Track]
 
+	// gridCache holds per-identity packet grids for the remux rung, and
+	// gridFlight collapses concurrent misses, exactly as the pair above do for
+	// tracks and for the same reason: prepareHLS runs per segment request, and
+	// the grid costs a demuxer walk of the whole source.
+	gridCache  gridCache
+	gridFlight flight.Group[int]
+
 	fl     flight.Group[*cache.Entry]
 	hlsMgr hls.Manager
 

@@ -27,6 +27,12 @@ type Metrics struct {
 	HLSSegments atomic.Uint64
 	// DirectPlays counts requests served as original bytes (ladder rung 1).
 	DirectPlays atomic.Uint64
+	// Remuxes counts pipelines served by rewriting the container around the
+	// source's own packets (ladder rung 2), progressive and segmented alike. It
+	// counts pipelines rather than requests, so a cache hit on a remuxed entry
+	// does not add to it: the question this answers is how much work the rung
+	// saved, and a hit did no work on any rung.
+	Remuxes atomic.Uint64
 	// AdmissionRejects counts 503s from saturated pools.
 	AdmissionRejects atomic.Uint64
 	// Degradations counts sessions downgraded to ring-fed streaming by
@@ -99,6 +105,10 @@ func (m *Metrics) WritePrometheus(w io.Writer, version string, g Gauges) {
 	p("# HELP waxflow_direct_play_total Requests served as original bytes.\n")
 	p("# TYPE waxflow_direct_play_total counter\n")
 	p("waxflow_direct_play_total %d\n", m.DirectPlays.Load())
+
+	p("# HELP waxflow_remux_total Pipelines served by rewriting the container around the source's own packets.\n")
+	p("# TYPE waxflow_remux_total counter\n")
+	p("waxflow_remux_total %d\n", m.Remuxes.Load())
 
 	p("# HELP waxflow_hls_segments_total HLS media segments served.\n")
 	p("# TYPE waxflow_hls_segments_total counter\n")
