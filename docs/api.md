@@ -75,6 +75,7 @@ or `waxflow sign`.
 | `POST /transcode` | key | synchronous one-shot; the response body is the transcode |
 | `GET /hls/master.m3u8` | key or sig | HLS master playlist (ladder; see the HLS section) |
 | `GET /hls/media.m3u8`, `/hls/init.mp4`, `/hls/seg/{n}.m4s` | key or sig | HLS variant playlist, init header, media segments |
+| `POST /hls/timeline` | key | mint a multi-source timeline (a play queue) into a `tl` digest |
 | `GET /cache/stats`, `POST /cache/gc` | key | cache operations |
 | `GET /metrics` | key or metricsKey | Prometheus text exposition |
 | `GET /demo` | none (dev mode only, `demo: true`) | browser test page |
@@ -273,13 +274,75 @@ with a segmented form: `opus`, `flac`, `alac`, `aac` (see `/caps`
 `delivery.hlsFormats`). A `410 source-changed` means the file changed
 since minting: re-mint and reload.
 
+### Multi-source timelines (`tl`)
+
+A play queue can be streamed as one gapless timeline: several files
+delivered as a single continuous stream, so a gapless album crosses its
+track boundaries with no seam, no re-buffer, and no gap. It is one media
+playlist, one init header, and one edit list, with no
+`EXT-X-DISCONTINUITY` anywhere, because a concatenated timeline really is
+continuous.
+
+Mint the queue first, then sign a master against the digest:
+
+    POST /hls/timeline
+    {"srcs": [{"src": "lib/Album/01.flac"}, {"src": "lib/Album/02.flac"}]}
+
+    201 {"schemaVersion": 1, "tl": "kJ3n...pQ", "members": 2, "durationSeconds": 2998.5}
+
+    POST /sign
+    {"path": "/hls/master.m3u8", "params": {"tl": "kJ3n...pQ", "format": "opus", "gain": "off"}}
+
+`tl` and `src` are exclusive: a URL names one stream or one timeline.
+Everything else (`format`, `bitrate`/`bitrates`, `bits`, `rate`, `ch`,
+`dynamics`, `segDur`) means what it means for a single source.
+
+Things worth knowing before you build on it:
+
+- **The digest is the identity.** It covers every member's reference and
+  its source identity, so a member replaced on disk yields a different
+  digest and the old URL is a `410 source-changed`, exactly as for a
+  single source. Minting the same queue twice returns the same digest, so
+  a client that did not keep it pays nothing to ask again.
+- **`gain=track` and `gain=album` are refused.** A timeline is one
+  processing chain, so it has one gain, and there is no honest single
+  answer to read out of several members' tags; per-track gain would step
+  the level at every track boundary, which is the artifact album gain
+  exists to prevent. Pass `gain=off` or the dB you want. Note that this
+  bites a request with no `gain=` at all when the daemon's default is a
+  tag mode, which is why the refusal names the default rather than a
+  parameter you did not send.
+- **Members are normalized, not refused.** Mixed rates, channel counts,
+  and bit depths are converted to the envelope no member loses information
+  reaching (the maximum of each). A uniform queue, which is what a gapless
+  album is, is passed through untouched and costs nothing.
+- **`202` means the mint had to measure.** A timeline's positions are a
+  prefix sum, so every member's length is measured rather than read off
+  its headers. That is a sub-millisecond walk for formats whose demuxer
+  can find its end from a table (FLAC, WAV, Ogg, mp4), and a whole-file
+  scan for MP3. When a cold queue needs enough of the latter to be worth
+  it, the response is `202` with a job instead of `201` with a digest;
+  poll `GET /jobs/{id}` or follow its events, and the finished job's
+  `timeline` field carries the same three values the `201` body would. The
+  cost is once per file, so the same queue mints in one round trip
+  afterwards.
+- **`404 not-found` on a timeline means re-mint it.** A stored timeline
+  outlives every URL minted against it, so a correct client does not hit
+  this during normal playback; it means the daemon's store was wiped or
+  the timeline aged out unused. Re-mint from the queue you still have and
+  carry on. Do **not** reset the queue position: the digest is a function
+  of the members, so the re-minted timeline is the same timeline.
+- **`maxTimelineMembers`** (in `/caps`) bounds one timeline at 1000. A
+  timeline is a play queue, not a library.
+
 ## POST /sign
 
     {"path": "/stream", "params": {"src": "lib/a.flac", "format": "wav"}, "ttlSeconds": 3600}
 
 `path` defaults to `/stream`. Also signable: `/hls/master.m3u8` (its
-`params` are the raw HLS master parameters above, and every rung is
-planned at mint time so a URL that mints is a URL that plays), `/art`
+`params` are the raw HLS master parameters above, `src` or `tl`, and
+every rung is planned at mint time so a URL that mints is a URL that
+plays), `/art`
 and `/lyrics` (`params` take only `src`; identity is embedded), and
 `/jobs/<id>/events` / `/jobs/<id>/result` (no `params`; the signature
 pins the job id through the path). `params` are validated like a live
@@ -301,7 +364,8 @@ is:
                    {"name": "aac", "live": true, "exts": ["m4a", "aac"]},
                    {"name": "alac", "live": true, "exts": []}],
       "delivery": {"progressive": true, "hls": true, "hlsFormats": ["opus", "flac", "alac", "aac"],
-                   "jobs": false, "uploads": false, "pid": false},
+                   "jobs": false, "uploads": false, "pid": false,
+                   "timelines": true, "maxTimelineMembers": 1000},
       "profiles": {
         "apple-native": {
           "delivery": "hls",
@@ -323,6 +387,8 @@ Capability-gated: only what works is listed. `delivery.jobs` and
 an upload spool (the CLI daemon always does; a bare library embedding
 may not). `delivery.pid` reports whether `pid:<ULID>` source references
 resolve against a WaxBin catalog (the waxbin flavor with `catalogDB`).
+`delivery.timelines` reports whether `POST /hls/timeline` and the `tl`
+parameter are served, and `maxTimelineMembers` bounds one timeline.
 
 `dsp` is the signal-processing surface, so a format policy routes by
 capability instead of sniffing a version:
@@ -397,6 +463,15 @@ Analyze jobs measure EBU R128 loudness (integrated LUFS, loudness
 range, true peak, sample peak) without producing audio. Each field
 belongs to exactly one job type: a transcode field on an analyze job is
 a 400, and so is a silence field on a transcode job.
+
+A third type, `timeline`, appears in `GET /jobs` but cannot be created
+here: `POST /hls/timeline` creates one on its own when a cold queue needs
+enough measuring to be worth it (see the HLS section). Its product is the
+`timeline` field, `{"tl", "members", "durationSeconds"}`, rather than an
+output file, since a timeline lives in the timeline store under the digest
+that is its identity. The restart contract still holds, by
+content-addressing rather than by the usual rule: re-running the mint from
+zero writes the same digest.
 
 ### Silence detection
 
@@ -502,7 +577,11 @@ has). Sources without the datum answer 404.
 `GET /cache/stats` returns
 `{"schemaVersion":1,"entries":n,"bytes":n,"hits":n,"misses":n}`.
 `POST /cache/gc` runs eviction now and returns
-`{"schemaVersion":1,"removed":n,"freedBytes":n}`.
+`{"schemaVersion":1,"removed":n,"freedBytes":n,"timelinesRemoved":n}`.
+It also sweeps stored timelines past their expiry, which is why the last
+field is there: timelines are not cache entries and free no cache bytes,
+so they are counted apart, but they are too small and too rarely minted
+to be worth a janitor of their own.
 
 ## GET /metrics
 

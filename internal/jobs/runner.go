@@ -38,6 +38,15 @@ type Config struct {
 	// ResolveGain resolves a gain= spelling against source metadata.
 	// The server owns gain policy (modes, clamps); jobs stay policy-free.
 	ResolveGain func(gain string, info *meta.Info) (float64, error)
+	// MintTimeline stores a multi-source timeline and reports what it named,
+	// measuring the members whose headers cannot declare an exact length.
+	// Nil disables timeline jobs.
+	//
+	// It is a hook for the same reason ResolveGain is: the timeline store and
+	// its identity rules belong to the server, and a job here is only the
+	// async wrapper the measuring needs. The runner supplies the progress
+	// callback so a cold mint of a long queue reports where it is.
+	MintTimeline func(ctx context.Context, srcs []string, progress func(done, total int64)) (*Timeline, error)
 	// Slots is the number of concurrently running jobs (jobSlots).
 	Slots int
 	// Profile is the daemon's resampler profile.
@@ -298,6 +307,8 @@ func (r *Runner) run(j *Job) {
 		err = r.runTranscode(ctx, j)
 	case TypeAnalyze:
 		err = r.runAnalyze(ctx, j)
+	case TypeTimeline:
+		err = r.runTimeline(ctx, j)
 	default:
 		err = waxerr.New(waxerr.CodeInvalidRequest, "jobs: unknown job type")
 	}
@@ -455,6 +466,23 @@ func (r *Runner) runAnalyze(ctx context.Context, j *Job) error {
 			job.Output = out
 		}
 	})
+	return nil
+}
+
+// runTimeline mints a multi-source timeline, measuring the members that need
+// it. The product is the digest, which lives in the timeline store rather
+// than in the job directory; re-running from zero re-mints the same digest,
+// so the restart contract holds by content-addressing rather than by the
+// usual "outputs are recreated whole".
+func (r *Runner) runTimeline(ctx context.Context, j *Job) error {
+	if r.cfg.MintTimeline == nil {
+		return waxerr.New(waxerr.CodeInvalidRequest, "jobs: timelines are not configured on this daemon")
+	}
+	tl, err := r.cfg.MintTimeline(ctx, j.Request.Srcs, r.progressFunc(ctx, j.ID, "measure"))
+	if err != nil {
+		return err
+	}
+	r.store.update(j.ID, false, func(job *Job) { job.Timeline = tl })
 	return nil
 }
 

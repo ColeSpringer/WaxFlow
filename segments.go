@@ -12,6 +12,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/dsp"
+	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -145,6 +146,83 @@ func (e *Engine) PlanSegments(track container.Track, opts TranscodeOptions, segS
 	}
 	sp.Bandwidth = base + plan.Format.Rate/f*64 + 2000
 	return sp, nil
+}
+
+// PlanSegmentsTimeline plans the segmented form of a concatenated timeline
+// from its members' tracks alone (no decode, no open), exactly as
+// PlanSegments does for one track: it is the same plan, over the synthetic
+// track ConcatTrack computes, with the versions the synthetic track cannot
+// name prepended.
+//
+// opts and segSeconds mean what they mean for PlanSegments, and
+// opts.ResampleProfile must be the profile the matching Concat is built with
+// (see ConcatOptions.Profile).
+func (e *Engine) PlanSegmentsTimeline(tracks []container.Track, opts TranscodeOptions, segSeconds float64) (*SegmentPlan, error) {
+	env, err := ConcatTrack(tracks)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := e.PlanSegments(env, opts, segSeconds)
+	if err != nil {
+		return nil, err
+	}
+	extra, err := timelineVersions(tracks, env.Fmt, opts.ResampleProfile)
+	if err != nil {
+		return nil, err
+	}
+	// PlanSegments already returned a Versions slice of its own, so
+	// prepending cannot reach the plan cache's shared one.
+	plan.Versions = append(extra, plan.Versions...)
+	return plan, nil
+}
+
+// timelineVersions lists what a timeline's synthetic track cannot: every
+// member's decoder revision, and the revisions of the nodes each member's
+// own normalization to the envelope runs through.
+//
+// Both are silent under-keying if left out, which ADR-0004 exists to
+// prevent. The synthetic track's codec is PCM, so the plan folds in pcm's
+// version and names no member's decoder, and a FLAC decoder fix would leave
+// every album's cached segments stale. The plan's chain runs envelope to
+// output, so it names none of the resampling a member does to reach the
+// envelope: a 44.1 kHz member of a 48 kHz timeline delivered to a 48 kHz
+// output resamples through a profile the key never mentions.
+//
+// The entries are prepended rather than replacing the synthetic pcm entry.
+// Replacing would mean knowing which entry the plan's decode version is,
+// which is fragile in exactly the way this is not; over-keying is safe, and
+// under-keying is the sin. Both lists are deduplicated (there are about
+// seven decoders, and a queue holds few distinct formats), so a
+// thousand-member timeline still keys on a handful of entries.
+func timelineVersions(tracks []container.Track, env audio.Format, profile resample.Profile) ([]string, error) {
+	var out []string
+	seen := map[string]bool{}
+	add := func(v string) {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	normalized := map[audio.Format]bool{}
+	for _, t := range tracks {
+		add(decodeVersion(t.Codec))
+		if t.Fmt == env || normalized[t.Fmt] {
+			continue
+		}
+		normalized[t.Fmt] = true
+		// The same throwaway-chain trick buildPlanCore uses: build what the
+		// run will build, read its versions off, and release it, so the two
+		// cannot describe different processing.
+		chain, err := dsp.NewChain(dsp.NewSource(eofReader{}, t.Fmt), concatSpec(env, ConcatOptions{Profile: profile}))
+		if err != nil {
+			return nil, err
+		}
+		for _, v := range chain.Versions() {
+			add(v)
+		}
+		chain.Release()
+	}
+	return out, nil
 }
 
 // primeStarts computes a mid-stream run's two priming starts on the output

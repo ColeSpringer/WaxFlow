@@ -40,6 +40,17 @@ HLS is the CMAF/fMP4 variant surface.
 | Progressive alac (fMP4) | no-decoder | **manual, pending** | no-decoder | manual |
 | Progressive wav | automated | vendor-doc | vendor-doc | manual |
 | Direct play (format=auto) | automated | vendor-doc | vendor-doc | manual |
+| Timeline (`tl=`, gapless queue) | automated | vendor-doc | vendor-doc | manual |
+
+The timeline cell is the multi-source surface (`POST /hls/timeline` then a
+master signed against the `tl` digest). It is HLS, so nothing about it is
+new to a client: it is one media playlist, one init segment, and one edit
+list, with no `EXT-X-DISCONTINUITY`, which is exactly what makes it
+deliverable at all. The automated cell mints a three-track queue, requires
+the player to see one stream of the whole queue's length, and then seeks
+across a track boundary and requires playback to carry on through it. The
+other columns inherit their HLS rows: a client that plays HLS opus plays a
+timeline of opus, because it is the same presentation.
 
 The **manual, pending** cells are the "Safari progressive playback of a
 live transcode" question: our live transcodes are chunked with no

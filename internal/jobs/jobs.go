@@ -10,6 +10,7 @@
 package jobs
 
 import (
+	"slices"
 	"time"
 )
 
@@ -21,6 +22,12 @@ const (
 	TypeTranscode Type = "transcode"
 	// TypeAnalyze measures loudness (EBU R128) and stores the numbers.
 	TypeAnalyze Type = "analyze"
+	// TypeTimeline mints a multi-source HLS timeline, measuring the members
+	// whose headers cannot declare an exact length. Unlike the other two it
+	// is not created through POST /jobs: POST /hls/timeline answers 201 with
+	// the digest when no member needs measuring, and falls back to one of
+	// these when one does.
+	TypeTimeline Type = "timeline"
 )
 
 // State is a job's lifecycle position. Queued and running reset to
@@ -82,6 +89,12 @@ type Request struct {
 	// SilenceMinSeconds is the shortest span worth reporting; 0 means the
 	// engine default.
 	SilenceMinSeconds float64 `json:"silenceMinSeconds,omitempty"`
+
+	// Srcs are a timeline job's members, in order. Timeline-only, and Src
+	// and SourceID stay empty for one: a timeline pins its members'
+	// identities inside the digest it mints, so there is no single source to
+	// pin here.
+	Srcs []string `json:"srcs,omitempty"`
 }
 
 // ErrInfo is a terminal failure, in the envelope vocabulary.
@@ -192,6 +205,23 @@ type Analysis struct {
 	Silence *SilenceSummary `json:"silence,omitempty"`
 }
 
+// Timeline is a timeline job's product: the digest a client puts in a tl=
+// parameter, and what it names.
+//
+// It is not an Output, because it is not a file in the job directory: the
+// timeline lives in the timeline store, under the digest that is its
+// identity. The restart contract still covers it, for the same reason by a
+// different route: content-addressing makes a re-mint write the same digest,
+// so re-running the job from zero is idempotent.
+type Timeline struct {
+	// Tl is the timeline's digest.
+	Tl string `json:"tl"`
+	// Members is how many sources it holds.
+	Members int `json:"members"`
+	// DurationSeconds is the concatenated timeline's length.
+	DurationSeconds float64 `json:"durationSeconds"`
+}
+
 // Progress is the running job's position, updated in memory and
 // broadcast to event subscribers; it is persisted only incidentally on
 // state changes.
@@ -218,6 +248,7 @@ type Job struct {
 	Error         *ErrInfo   `json:"error,omitempty"`
 	Output        *Output    `json:"output,omitempty"`
 	Analysis      *Analysis  `json:"analysis,omitempty"`
+	Timeline      *Timeline  `json:"timeline,omitempty"`
 	Progress      *Progress  `json:"progress,omitempty"`
 	// Warnings are non-fatal notes (metadata that could not be read or
 	// written); the audio outcome is unaffected.
@@ -225,8 +256,20 @@ type Job struct {
 }
 
 // clone returns an independent copy safe to hand out.
+//
+// The struct copy is not a deep copy, and every reference field below is here
+// because of that. Request in particular used to be safe to copy by value and
+// no longer is: Srcs is a slice, so a shallow copy would hand a caller the
+// stored job's own backing array. TestJobCloneIsDeep is the guard, and it is
+// hand-written rather than reflective because what it must catch is a field
+// that was added and forgotten here.
 func (j *Job) clone() *Job {
 	c := *j
+	c.Request.Srcs = slices.Clone(j.Request.Srcs)
+	if j.Timeline != nil {
+		tl := *j.Timeline
+		c.Timeline = &tl
+	}
 	if j.Started != nil {
 		t := *j.Started
 		c.Started = &t

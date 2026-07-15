@@ -15,10 +15,12 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/dsp/gain"
+	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/cache"
 	"github.com/colespringer/waxflow/internal/hls"
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/sign"
+	"github.com/colespringer/waxflow/internal/timeline"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -49,11 +51,26 @@ var hlsParamNames = map[string]bool{
 
 // hlsMintParamNames is the surface that mints descriptors: the raw-query
 // master form and POST /sign's params. bitrates is the ladder
-// (comma-separated kbit/s).
+// (comma-separated kbit/s); src and tl are mutually exclusive, one stream or
+// one timeline.
 var hlsMintParamNames = map[string]bool{
-	"src": true, "format": true, "bitrate": true, "bitrates": true,
+	"src": true, "tl": true, "format": true, "bitrate": true, "bitrates": true,
 	"bits": true, "rate": true, "ch": true, "gain": true, "dynamics": true,
 	"segDur": true,
+}
+
+// hlsSource is one resolved source as a worker needs it. Workers outlive
+// their requests, so they re-resolve from these values rather than borrowing
+// a handle the request is about to close.
+type hlsSource struct {
+	Ref string
+	ID  source.Identity
+	Ext string
+	// Track is the probed, measured track the plan was computed from. A
+	// timeline hands it back to Concat, so the run's members are declared by
+	// exactly what the plan projected: plan and run cannot disagree about a
+	// member's format or length, because the number is not computed twice.
+	Track container.Track
 }
 
 // hlsRequest is one parsed, resolved, identity-checked, planned HLS
@@ -61,24 +78,40 @@ var hlsMintParamNames = map[string]bool{
 // segment).
 type hlsRequest struct {
 	desc hls.Descriptor
-	src  *source.File
-	opts waxflow.TranscodeOptions
-	plan *waxflow.SegmentPlan
-	key  cache.Key
-	meta cache.Meta
+	// srcs are the open handles the request still needs: exactly one for a
+	// single-track stream (the metadata read wants it), and none for a
+	// timeline, whose members are closed as soon as they are checked and
+	// probed. The request owns them and Close releases them.
+	srcs []*source.File
+	// members is every source this URL names, in order, as values: what the
+	// plan reads and what a worker (which outlives the request, and so cannot
+	// borrow a handle) re-resolves from.
+	members []hlsSource
+	opts    waxflow.TranscodeOptions
+	plan    *waxflow.SegmentPlan
+	key     cache.Key
+	meta    cache.Meta
 	// exp is the request's own signature expiry (unix seconds), 0 when
 	// key-authed; child URLs inherit it so one minting governs the whole
 	// playback session's lifetime.
 	exp int64
 }
 
-func (req *hlsRequest) Close() error { return req.src.Close() }
+func (req *hlsRequest) Close() error {
+	closeAll(req.srcs)
+	req.srcs = nil
+	return nil
+}
 
 // prepareHLS runs the shared front half of the per-variant HLS handlers:
 // auth, the closed parameter surface, descriptor decode, source identity
 // (410 on mismatch, always: the descriptor embeds identity by
 // construction), probe, the exact-length walk when the headers cannot
 // provide one, and the variant plan plus its ADR-0004 cache key.
+//
+// A single-track URL and a timeline URL diverge only at the front door, in
+// what they resolve. Everything past it (the identity checks, the tracks,
+// the plan, the key) runs over a list of sources that happens to hold one.
 func (s *Server) prepareHLS(r *http.Request) (*hlsRequest, error) {
 	q := r.URL.Query()
 	sigAuthed, err := s.playbackAuth(r, q)
@@ -98,58 +131,182 @@ func (s *Server) prepareHLS(r *http.Request) (*hlsRequest, error) {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			"this URL is per-variant; the bitrates ladder belongs to master.m3u8")
 	}
-	src, err := s.resolver.Resolve(r.Context(), desc.Src)
-	if err != nil {
-		return nil, err
-	}
+	req := &hlsRequest{desc: desc}
 	ok := false
 	defer func() {
 		if !ok {
-			src.Close()
+			req.Close()
 		}
 	}()
-	want, err := source.ParseIdentity(desc.ID)
-	if err != nil {
+	if err := s.resolveHLSSources(r.Context(), req); err != nil {
 		return nil, err
 	}
-	if want != src.ID {
-		return nil, waxerr.New(waxerr.CodeSourceChanged,
-			"the source changed since this URL was minted; request a fresh one")
+	// Metadata resolves tag-based gain, which only a single-track URL can
+	// have: a timeline refuses the tag-derived modes at mint, because one
+	// chain has one gain and N members have N answers (see checkTimelineGain).
+	var m *meta.Info
+	if desc.Tl == "" {
+		m = s.readMeta(r.Context(), req.srcs[0], false)
 	}
-	track, err := s.trackFor(src)
-	if err != nil {
+	if req.opts, req.plan, err = s.planHLSVariant(desc, req.tracks(), m); err != nil {
 		return nil, err
 	}
-	opts, plan, err := s.planHLSVariant(desc, track, s.readMeta(r.Context(), src, false))
-	if err != nil {
-		return nil, err
-	}
-	if plan.Segments > maxPlaylistSegments {
+	if req.plan.Segments > maxPlaylistSegments {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("segment duration yields %d segments (max %d); raise segDur", plan.Segments, maxPlaylistSegments))
+			fmt.Sprintf("segment duration yields %d segments (max %d); raise segDur", req.plan.Segments, maxPlaylistSegments))
 	}
-	canonical := canonicalHLSParams(plan, opts.GainDB, opts.Dynamics)
-	req := &hlsRequest{
-		desc: desc,
-		src:  src,
-		opts: opts,
-		plan: plan,
-		key:  cache.NewKey(identityString(desc.Src, src.ID), canonical, plan.Versions),
-		meta: cache.Meta{
-			Ref:         desc.Src,
-			Identity:    src.ID.String(),
-			Params:      canonical,
-			Ext:         "m4s",
-			ContentType: hlsMediaType,
-			Samples:     plan.Samples,
-			Rate:        plan.Format.Rate,
-		},
+	canonical := canonicalHLSParams(req.plan, req.opts.GainDB, req.opts.Dynamics)
+	identity := hlsIdentity(desc, req.members)
+	req.key = cache.NewKey(identity, canonical, req.plan.Versions)
+	req.meta = cache.Meta{
+		Ref:         hlsRef(desc),
+		Identity:    identity,
+		Params:      canonical,
+		Ext:         "m4s",
+		ContentType: hlsMediaType,
+		Samples:     req.plan.Samples,
+		Rate:        req.plan.Format.Rate,
 	}
 	if sigAuthed {
 		req.exp, _ = strconv.ParseInt(q.Get(sign.ParamExp), 10, 64)
 	}
+	if desc.Tl != "" {
+		// Every read touches the timeline, not just the mint, and it extends
+		// the expiry to cover the URLs this request is about to hand out. A
+		// long session (an audiobook, or one paused across the window) keeps
+		// fetching segments against a timeline nobody re-mints, and evicting
+		// it mid-playback would 404 the player at a buffer refill.
+		s.timelines.Touch(desc.Tl, req.childExp())
+	}
 	ok = true
 	return req, nil
+}
+
+// resolveHLSSources resolves, identity-checks, and probes everything the
+// descriptor names: the one source, or the timeline's members in order.
+//
+// The identity check runs per request and is never skipped, for a timeline
+// exactly as for a single source. A timeline's digest pins its members'
+// identities by covering them, so a member replaced on disk cannot match the
+// digest minted against it, and the mismatch is the 410 the URL promises.
+//
+// A timeline's members are measured rather than trusted, which a single
+// source is not. A timeline's positions are a prefix sum, so a member that
+// delivers two samples fewer than its headers declare desyncs every position
+// after it and makes the playlist promise segments the stream cannot fill.
+// One file's advisory length is a tolerated oddity because nothing
+// downstream of it depends on the number.
+func (s *Server) resolveHLSSources(ctx context.Context, req *hlsRequest) error {
+	tl := req.desc.Tl != ""
+	refs := []timeline.Member{{Src: req.desc.Src, ID: req.desc.ID}}
+	if tl {
+		if s.timelines == nil {
+			return waxerr.New(waxerr.CodeUnsupportedFormat,
+				"multi-source timelines are not enabled on this daemon")
+		}
+		var err error
+		if refs, err = s.timelines.Members(req.desc.Tl); err != nil {
+			return err
+		}
+	}
+	for _, ref := range refs {
+		if err := s.resolveMember(ctx, req, ref, tl); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// resolveMember resolves one member, enforces the identity the URL pins,
+// probes it, and records what the plan and the worker need.
+//
+// It keeps the open handle only for a single source, whose metadata read still
+// needs one. A timeline's handles are scaffolding: nothing reads a member
+// again once it is checked and probed, and every position past that comes from
+// the recorded track. Holding them would put one open file per member on every
+// segment request, for the life of the request, which for a thousand-member
+// queue is a thousand descriptors against a default limit of 1024. It would
+// also undo the point of opening members lazily: the timeline exists so a queue
+// of any length costs one descriptor, and eagerly holding them here is exactly
+// what Concat is built not to do.
+func (s *Server) resolveMember(ctx context.Context, req *hlsRequest, ref timeline.Member, tl bool) error {
+	want, err := source.ParseIdentity(ref.ID)
+	if err != nil {
+		return err
+	}
+	f, err := s.resolver.Resolve(ctx, ref.Src)
+	if err != nil {
+		return err
+	}
+	keep := false
+	defer func() {
+		if !keep {
+			f.Close()
+		}
+	}()
+	if want != f.ID {
+		return waxerr.New(waxerr.CodeSourceChanged,
+			"the source changed since this URL was minted; request a fresh one")
+	}
+	track, err := s.trackFor(f, tl)
+	if err != nil {
+		return err
+	}
+	req.members = append(req.members, hlsSource{Ref: ref.Src, ID: f.ID, Ext: f.Ext, Track: track})
+	if !tl {
+		// The metadata read that resolves tag-based gain still needs it, and
+		// req.Close owns it from here.
+		req.srcs = append(req.srcs, f)
+		keep = true
+	}
+	return nil
+}
+
+// tracks are the members' tracks in order: what the variant plans from.
+func (req *hlsRequest) tracks() []container.Track {
+	out := make([]container.Track, len(req.members))
+	for i, m := range req.members {
+		out[i] = m.Track
+	}
+	return out
+}
+
+// hlsDuration is the source duration a URL's TTL policy reads: the track's
+// for a single source, the whole concatenated timeline's for a timeline. A
+// signed URL is meant to outlive one playthrough, and a twelve-track album's
+// playthrough is not its first track's.
+func hlsDuration(desc hls.Descriptor, tracks []container.Track) (float64, error) {
+	if desc.Tl == "" {
+		return DurationSeconds(tracks[0].Samples, tracks[0].Fmt.Rate), nil
+	}
+	env, err := waxflow.ConcatTrack(tracks)
+	if err != nil {
+		return 0, err
+	}
+	return DurationSeconds(env.Samples, env.Fmt.Rate), nil
+}
+
+// hlsRef is the source reference a variant's cache metadata records, for a
+// human reading the cache directory.
+func hlsRef(desc hls.Descriptor) string {
+	if desc.Tl != "" {
+		return "tl:" + desc.Tl
+	}
+	return desc.Src
+}
+
+// hlsIdentity is the ADR-0004 identity a variant's entries key on: the
+// source's own for a single-track stream, the digest for a timeline.
+//
+// The digest is enough by itself, which is the whole point of content-
+// addressing it. It covers every member's reference and identity, so any
+// change to any member is a different digest and therefore a different key,
+// and there is no second list identity that could disagree with it.
+func hlsIdentity(desc hls.Descriptor, members []hlsSource) string {
+	if desc.Tl != "" {
+		return "tl:" + desc.Tl
+	}
+	return identityString(desc.Src, members[0].ID)
 }
 
 // measureSamples forces a source's exact length: seek past any possible
@@ -165,21 +322,30 @@ func (s *Server) measureSamples(src *source.File) (int64, error) {
 
 // planHLSVariant maps one variant descriptor onto engine options and its
 // segment plan, mirroring planTranscode's policy checks so /stream and
-// HLS cannot drift.
-func (s *Server) planHLSVariant(desc hls.Descriptor, track container.Track, m *meta.Info) (waxflow.TranscodeOptions, *waxflow.SegmentPlan, error) {
+// HLS cannot drift. tracks is the single source's track, or the timeline's
+// members' tracks in order.
+func (s *Server) planHLSVariant(desc hls.Descriptor, tracks []container.Track, m *meta.Info) (waxflow.TranscodeOptions, *waxflow.SegmentPlan, error) {
+	fail := func(err error) (waxflow.TranscodeOptions, *waxflow.SegmentPlan, error) {
+		return waxflow.TranscodeOptions{}, nil, err
+	}
 	if desc.Bitrate != 0 {
 		if lossy, known := waxflow.LossyFormat(desc.Format); known && !lossy {
-			return waxflow.TranscodeOptions{}, nil, waxerr.New(waxerr.CodeUnsupportedFormat,
-				fmt.Sprintf("bitrate applies to lossy output; %s is lossless", desc.Format))
+			return fail(waxerr.New(waxerr.CodeUnsupportedFormat,
+				fmt.Sprintf("bitrate applies to lossy output; %s is lossless", desc.Format)))
 		}
 	}
 	g, err := parseGain(desc.Gain, s.defaultGain)
 	if err != nil {
-		return waxflow.TranscodeOptions{}, nil, err
+		return fail(err)
+	}
+	if desc.Tl != "" {
+		if err := checkTimelineGain(desc.Gain, g); err != nil {
+			return fail(err)
+		}
 	}
 	dyn, err := parseDynamics(desc.Dynamics)
 	if err != nil {
-		return waxflow.TranscodeOptions{}, nil, err
+		return fail(err)
 	}
 	opts := waxflow.TranscodeOptions{
 		Format:          desc.Format,
@@ -192,9 +358,18 @@ func (s *Server) planHLSVariant(desc hls.Descriptor, track container.Track, m *m
 		MP3Bitrate:      desc.Bitrate * 1000,
 		OpusBitrate:     desc.Bitrate * 1000,
 	}
-	plan, err := s.eng.PlanSegments(track, opts, desc.SegDur)
+	// The timeline plan is not the single-source plan over a synthetic
+	// track: it also carries the members' decoder revisions and the
+	// normalization each member runs through, neither of which the synthetic
+	// track can name. See PlanSegmentsTimeline.
+	var plan *waxflow.SegmentPlan
+	if desc.Tl != "" {
+		plan, err = s.eng.PlanSegmentsTimeline(tracks, opts, desc.SegDur)
+	} else {
+		plan, err = s.eng.PlanSegments(tracks[0], opts, desc.SegDur)
+	}
 	if err != nil {
-		return waxflow.TranscodeOptions{}, nil, err
+		return fail(err)
 	}
 	return opts, plan, nil
 }
@@ -268,40 +443,41 @@ func (s *Server) handleHLSMaster(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	src, err := s.resolver.Resolve(r.Context(), desc.Src)
+	req := &hlsRequest{desc: desc}
+	defer req.Close()
+	if err := s.resolveHLSSources(r.Context(), req); err != nil {
+		s.writeError(w, err)
+		return
+	}
+	tracks := req.tracks()
+	duration, err := hlsDuration(desc, tracks)
 	if err != nil {
 		s.writeError(w, err)
 		return
 	}
-	defer src.Close()
-	want, err := source.ParseIdentity(desc.ID)
-	if err != nil {
-		s.writeError(w, err)
-		return
-	}
-	if want != src.ID {
-		s.writeError(w, waxerr.New(waxerr.CodeSourceChanged,
-			"the source changed since this URL was minted; request a fresh one"))
-		return
-	}
-	info, err := s.eng.Probe(src, src.Ext, nil)
-	if err != nil {
-		s.writeError(w, err)
-		return
-	}
-	track := info.Default()
 
-	exp := time.Now().Add(sign.DefaultTTLFor(DurationSeconds(track.Samples, track.Fmt.Rate)))
+	exp := time.Now().Add(sign.DefaultTTLFor(duration))
 	if sigAuthed {
 		if e, _ := strconv.ParseInt(q.Get(sign.ParamExp), 10, 64); e > 0 {
 			exp = time.Unix(e, 0)
 		}
 	}
-	m := s.readMeta(r.Context(), src, false)
+	if desc.Tl != "" {
+		// The master is a URL-minting path, like /sign: every child URL below
+		// is signed with exp, so the timeline has to outlive them. This is the
+		// one minting path that does not go through /sign, and without this it
+		// would be the one that can hand out URLs whose timeline is swept
+		// before they expire.
+		s.timelines.Touch(desc.Tl, exp)
+	}
+	var m *meta.Info
+	if desc.Tl == "" {
+		m = s.readMeta(r.Context(), req.srcs[0], false)
+	}
 	var variants []hls.MasterVariant
 	for _, kbps := range desc.Ladder() {
 		vdesc := desc.Variant(kbps)
-		_, plan, err := s.planHLSVariant(vdesc, track, m)
+		_, plan, err := s.planHLSVariant(vdesc, tracks, m)
 		if err != nil {
 			s.writeError(w, err) // one bad rung fails the master honestly
 			return
@@ -448,8 +624,8 @@ func segmentName(n int64) string { return fmt.Sprintf("seg-%d.m4s", n) }
 // the worker goroutine bounded by the server's base context (workers
 // outlive their requests, like read-behind pipelines).
 func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64, func(int64), func(error)) (context.CancelFunc, error) {
-	// The worker outlives the request; capture values, never req.src.
-	ref, id, ext := req.desc.Src, req.src.ID, req.src.Ext
+	// The worker outlives the request; capture values, never req.srcs.
+	members, tl := req.members, req.desc.Tl != ""
 	opts, plan, key := req.opts, req.plan, req.key
 	return func(start int64, notify func(int64), exit func(error)) (context.CancelFunc, error) {
 		release, ok := s.pools.AcquireLive()
@@ -468,26 +644,23 @@ func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64,
 			defer s.store.Unpin(key)
 			defer release()
 			defer cancel()
-			exit(s.runHLSWorker(ctx, ref, id, ext, opts, plan, variant, start, notify))
+			exit(s.runHLSWorker(ctx, members, tl, opts, plan, variant, start, notify))
 		}()
 		return cancel, nil
 	}
 }
 
-// runHLSWorker is one variant worker: its own source handle, the init
+// runHLSWorker is one variant worker: its own input, opened afresh, the init
 // header if the variant lacks one, then segments from start to end of
 // stream, each published atomically and announced.
-func (s *Server) runHLSWorker(ctx context.Context, ref string, id source.Identity, ext string,
+func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool,
 	opts waxflow.TranscodeOptions, plan *waxflow.SegmentPlan, variant *cache.Variant,
 	start int64, notify func(int64)) error {
-	src, err := s.resolver.Resolve(ctx, ref)
+	med, err := s.openHLSMedia(ctx, members, tl, opts)
 	if err != nil {
 		return err
 	}
-	defer src.Close()
-	if src.ID != id {
-		return waxerr.New(waxerr.CodeSourceChanged, "source changed while starting the segment worker")
-	}
+	defer med.Close()
 	if !variant.Has("init.mp4") {
 		init, err := s.eng.InitSegment(plan, opts)
 		if err != nil {
@@ -497,7 +670,7 @@ func (s *Server) runHLSWorker(ctx context.Context, ref string, id source.Identit
 			return err
 		}
 	}
-	_, err = s.eng.TranscodeSegments(ctx, src, ext, opts,
+	_, err = s.eng.TranscodeSegmentsMedia(ctx, med, opts,
 		waxflow.SegmentedOptions{SegmentSamples: plan.SegmentSamples, StartSegment: start},
 		func(seg mp4.Segment) error {
 			if err := variant.WriteFile(segmentName(seg.Index), seg.Data); err != nil {
@@ -506,10 +679,73 @@ func (s *Server) runHLSWorker(ctx context.Context, ref string, id source.Identit
 			notify(seg.Index)
 			return nil
 		})
+	ref := members[0].Ref
 	if err != nil {
-		s.log.Warn("hls worker failed", "src", ref, "start", start, "err", err)
+		s.log.Warn("hls worker failed", "src", ref, "members", len(members), "start", start, "err", err)
 	} else {
-		s.log.Debug("hls worker finished", "src", ref, "start", start)
+		s.log.Debug("hls worker finished", "src", ref, "members", len(members), "start", start)
+	}
+	return err
+}
+
+// openHLSMedia opens a worker's input: the source itself for a single-track
+// stream, a lazily opened timeline for a multi-source one. Both are one
+// format.Media, so the segmented engine has a single entry point behind the
+// branch.
+//
+// ctx is the worker's, which is derived from the server's base context and
+// not from any request. That is the rule a timeline makes easy to break: its
+// members open mid-stream, minutes after the request that planned them
+// returned, so a request context threaded in here would kill a member's
+// first read the moment the client disconnected, which is precisely what
+// read-behind exists not to do.
+func (s *Server) openHLSMedia(ctx context.Context, members []hlsSource, tl bool,
+	opts waxflow.TranscodeOptions) (format.Media, error) {
+	if !tl {
+		return s.openMember(ctx, members[0])
+	}
+	srcs := make([]waxflow.ConcatSource, len(members))
+	for i, m := range members {
+		srcs[i] = waxflow.ConcatSource{
+			Track: m.Track,
+			Open:  func() (format.Media, error) { return s.openMember(ctx, m) },
+		}
+	}
+	return waxflow.Concat(srcs, waxflow.ConcatOptions{Profile: opts.ResampleProfile})
+}
+
+// openMember resolves one source, enforces the identity the plan was made
+// against, and opens it. The returned Media owns the handle, so closing it
+// releases the descriptor: that is what makes a timeline's lazy opening
+// worth having, since a 500-track queue then holds one open file and not
+// 500.
+func (s *Server) openMember(ctx context.Context, m hlsSource) (format.Media, error) {
+	f, err := s.resolver.Resolve(ctx, m.Ref)
+	if err != nil {
+		return nil, err
+	}
+	if f.ID != m.ID {
+		f.Close()
+		return nil, waxerr.New(waxerr.CodeSourceChanged, "source changed while starting the segment worker")
+	}
+	med, err := s.eng.OpenStream(f, f.Ext)
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return closingMedia{Media: med, f: f}, nil
+}
+
+// closingMedia releases the source handle with the media.
+type closingMedia struct {
+	format.Media
+	f *source.File
+}
+
+func (m closingMedia) Close() error {
+	err := m.Media.Close()
+	if cerr := m.f.Close(); err == nil {
+		err = cerr
 	}
 	return err
 }
@@ -529,10 +765,13 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string
 			return bad("unknown parameter %q", k)
 		}
 	}
-	d := hls.Descriptor{Ver: hls.DescriptorVersion, Src: params["src"], Format: params["format"],
-		Gain: params["gain"], Dynamics: params["dynamics"]}
-	if d.Src == "" {
-		return bad("src is required")
+	d := hls.Descriptor{Ver: hls.DescriptorVersion, Src: params["src"], Tl: params["tl"],
+		Format: params["format"], Gain: params["gain"], Dynamics: params["dynamics"]}
+	switch {
+	case d.Src == "" && d.Tl == "":
+		return bad("src or tl is required")
+	case d.Src != "" && d.Tl != "":
+		return bad("src and tl are exclusive: a URL names one stream or one timeline")
 	}
 	if d.Format == "" {
 		d.Format = waxflow.SegmentedFormats()[0]
@@ -583,12 +822,16 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string
 		return hls.Descriptor{}, 0, err
 	}
 
-	f, err := s.resolver.Resolve(ctx, d.Src)
-	if err != nil {
-		return hls.Descriptor{}, 0, err
+	// A timeline's members already carry their identities inside the digest,
+	// so only a single source needs one pinned here.
+	if d.Src != "" {
+		f, err := s.resolver.Resolve(ctx, d.Src)
+		if err != nil {
+			return hls.Descriptor{}, 0, err
+		}
+		d.ID = f.ID.String()
+		f.Close()
 	}
-	defer f.Close()
-	d.ID = f.ID.String()
 
 	// Round trip through the wire form: one validator for minting and
 	// playback.
@@ -597,19 +840,25 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string
 		return hls.Descriptor{}, 0, err
 	}
 	// Every rung must plan (mirroring the master handler), so a URL that
-	// mints is a URL that plays: a lossless format with a bitrate, or a
-	// format with no segmented form, fails here and not in the player.
-	info, err := s.eng.Probe(f, f.Ext, nil)
-	if err != nil {
+	// mints is a URL that plays: a lossless format with a bitrate, a format
+	// with no segmented form, or a queue whose members cannot be
+	// concatenated fails here and not in the player.
+	req := &hlsRequest{desc: out}
+	defer req.Close()
+	if err := s.resolveHLSSources(ctx, req); err != nil {
 		return hls.Descriptor{}, 0, err
 	}
-	track := info.Default()
+	tracks := req.tracks()
 	for _, kbps := range out.Ladder() {
 		// Mint-time validation plans with nil metadata: the resolved gain
 		// value never shapes plan validity, only playback bytes.
-		if _, _, err := s.planHLSVariant(out.Variant(kbps), track, nil); err != nil {
+		if _, _, err := s.planHLSVariant(out.Variant(kbps), tracks, nil); err != nil {
 			return hls.Descriptor{}, 0, err
 		}
 	}
-	return out, DurationSeconds(track.Samples, track.Fmt.Rate), nil
+	duration, err := hlsDuration(out, tracks)
+	if err != nil {
+		return hls.Descriptor{}, 0, err
+	}
+	return out, duration, nil
 }

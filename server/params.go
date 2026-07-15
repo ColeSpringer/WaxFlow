@@ -180,6 +180,47 @@ func (g gainSpec) resolveDB(info *meta.Info, dyn gain.Preset) float64 {
 	return 0
 }
 
+// checkTimelineGain refuses the tag-derived gain modes for a timeline.
+//
+// A timeline is one chain, so it has one gain, and there is no honest single
+// answer to read out of N members' tags. Per-track gain is worse than merely
+// ambiguous: applied to a continuous timeline it steps the level at every
+// seam, which is the artifact album gain exists to prevent, so the mode that
+// looks most reasonable is the one that would sound wrong. Album gain is
+// uniform across a real album and arbitrary across anything else, and nothing
+// here can tell which a queue is.
+//
+// So a timeline takes gain=off or the dB the caller wants, which is what a
+// caller with its own loudness measurements sends anyway. The refusal is at
+// mint time, where the client can act on it, rather than at playback.
+func checkTimelineGain(spelling string, g gainSpec) error {
+	if g.mode != gainTrack && g.mode != gainAlbum {
+		return nil
+	}
+	how := "gain=" + spelling
+	if spelling == "" {
+		// The request named no gain at all, so this is the daemon's default
+		// biting. Say that, or the error names a parameter the caller can
+		// look at its own request and not find.
+		how = "this daemon's default gain (" + gainModeName(g.mode) + ")"
+	}
+	return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+		"%s resolves from one source's tags and a timeline has many; pass gain=off or a dB number", how))
+}
+
+func gainModeName(m gainMode) string {
+	switch m {
+	case gainTrack:
+		return "track"
+	case gainAlbum:
+		return "album"
+	case gainFixed:
+		return "a dB number"
+	default:
+		return "off"
+	}
+}
+
 func parseGain(v string, dflt gainSpec) (gainSpec, error) {
 	switch strings.ToLower(v) {
 	case "":

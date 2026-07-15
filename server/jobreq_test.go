@@ -48,6 +48,11 @@ func TestJobRequestCoverage(t *testing.T) {
 	exempt := map[string]string{
 		"sourceId": "server-computed from the resolved source; a client-settable " +
 			"identity pin would defeat the source-changed guarantee",
+		"srcs": "a timeline job's members. Timeline jobs are created by POST /hls/timeline, " +
+			"never by POST /jobs (validateJobRequest refuses the type), because that endpoint " +
+			"answers 201 with the digest whenever nothing needs measuring and only falls back " +
+			"to a job when it does. A srcs field here would be a second front door that skips " +
+			"the fast path and the mint's own validation",
 	}
 
 	wire := fieldsByJSONTag(reflect.TypeFor[jobRequest]())

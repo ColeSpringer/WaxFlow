@@ -80,6 +80,7 @@ func openStore(dir string, log *slog.Logger) (*store, error) {
 func (s *store) resetForRequeue(j *Job) {
 	j.State = StateQueued
 	j.Started, j.Finished, j.Error, j.Output, j.Analysis, j.Progress = nil, nil, nil, nil, nil, nil
+	j.Timeline = nil
 	j.Warnings = nil
 	dir := s.jobDir(j.ID)
 	entries, err := os.ReadDir(dir)

@@ -35,6 +35,7 @@ import (
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/metrics"
 	"github.com/colespringer/waxflow/internal/sign"
+	"github.com/colespringer/waxflow/internal/timeline"
 	"github.com/colespringer/waxflow/internal/uploads"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
@@ -96,6 +97,10 @@ type Config struct {
 	// JobsDir persists the async job store (dataDir/jobs); empty
 	// disables the /jobs API.
 	JobsDir string
+
+	// TimelineDir persists multi-source HLS timelines (dataDir/timelines);
+	// empty disables POST /hls/timeline and the tl= surface with it.
+	TimelineDir string
 
 	// UploadDir is the upload spool (scratchDir/uploads); empty disables
 	// /uploads and upload: references. UploadMaxBytes caps one upload
@@ -165,8 +170,9 @@ type Server struct {
 	defaultGain gainSpec
 	profile     resample.Profile
 
-	uploads *uploads.Store // nil: uploads disabled
-	jobs    *jobs.Runner   // nil: jobs disabled
+	uploads   *uploads.Store  // nil: uploads disabled
+	jobs      *jobs.Runner    // nil: jobs disabled
+	timelines *timeline.Store // nil: multi-source timelines disabled
 
 	// metaCache holds per-identity metadata reads (see readMeta).
 	metaCache metaCache
@@ -311,6 +317,17 @@ func New(cfg Config) (*Server, error) {
 	}
 	s.baseCtx, s.cancel = context.WithCancel(context.Background())
 
+	if cfg.TimelineDir != "" {
+		if s.timelines, err = timeline.Open(cfg.TimelineDir, timeline.Options{Logger: log}); err != nil {
+			if uploadStore != nil {
+				uploadStore.Close()
+			}
+			store.Close()
+			s.cancel()
+			return nil, err
+		}
+	}
+
 	if cfg.JobsDir != "" {
 		s.jobs, err = jobs.Open(jobs.Config{
 			Dir:      cfg.JobsDir,
@@ -328,9 +345,10 @@ func New(cfg Config) (*Server, error) {
 				}
 				return g.resolveDB(info, gain.PresetOff), nil
 			},
-			Slots:   jobSlots,
-			Profile: profile,
-			Logger:  log,
+			MintTimeline: s.mintTimelineJob,
+			Slots:        jobSlots,
+			Profile:      profile,
+			Logger:       log,
 		})
 		if err != nil {
 			if uploadStore != nil {
@@ -374,6 +392,9 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET /stream", s.handleStream)
 	mux.HandleFunc("HEAD /stream", s.handleStream)
 	mux.HandleFunc("OPTIONS /stream", s.handlePreflight)
+	if s.timelines != nil {
+		mux.HandleFunc("POST /hls/timeline", s.requireKey(s.handleTimelineCreate))
+	}
 	mux.HandleFunc("GET /hls/master.m3u8", s.handleHLSMaster)
 	mux.HandleFunc("GET /hls/media.m3u8", s.handleHLSMedia)
 	mux.HandleFunc("GET /hls/init.mp4", s.handleHLSInit)

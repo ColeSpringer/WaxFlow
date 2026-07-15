@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/colespringer/waxflow/internal/timeline"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -27,14 +28,27 @@ const maxDescriptorBytes = 4096
 // Bitrates, one ladder's) complete output selection plus the source
 // identity, so every HLS URL is stateless and self-contained. Segments
 // regenerate after eviction or restart from nothing but this.
+//
+// A multi-source timeline is the one thing that does not fit inside the URL,
+// and it names a stored digest (Tl) instead. That is confined to Tl on
+// purpose: a single-track stream keeps Src and ID and keeps the documented
+// guarantee whole, which is the shape 99% of URLs have and which gains
+// nothing from a store.
 type Descriptor struct {
 	// Ver is the schema version, always DescriptorVersion.
 	Ver int `json:"ver"`
-	// Src is the source reference (rootName/rel/path or upload:<id>).
-	Src string `json:"src"`
-	// ID is the ADR-0003 source identity (size-mtimeNS). Embedded so a
-	// stale URL can never serve surprise bytes: mismatch means 410.
-	ID string `json:"id"`
+	// Src is the source reference (rootName/rel/path or upload:<id>) of a
+	// single-track stream. Exactly one of Src and Tl is set.
+	Src string `json:"src,omitempty"`
+	// ID is Src's ADR-0003 source identity (size-mtimeNS). Embedded so a
+	// stale URL can never serve surprise bytes: mismatch means 410. A
+	// timeline needs no counterpart, because its members' identities are
+	// inside the digest that names it.
+	ID string `json:"id,omitempty"`
+	// Tl is the digest of a stored multi-source timeline. Exactly one of Src
+	// and Tl is set: these are not two spellings of one fact, the way
+	// Bitrate and Bitrates are, but two different things a URL can name.
+	Tl string `json:"tl,omitempty"`
 	// Format is the output format name (an HLS-capable output row).
 	Format string `json:"format"`
 	// Bitrate is the variant's lossy bit rate in kbit/s, 0 for the
@@ -123,10 +137,19 @@ func DecodeDescriptor(s string) (Descriptor, error) {
 	switch {
 	case d.Ver != DescriptorVersion:
 		return bad("version %d, want %d", d.Ver, DescriptorVersion)
-	case d.Src == "":
-		return bad("has no src")
-	case d.ID == "":
+	case d.Src == "" && d.Tl == "":
+		return bad("names neither a src nor a tl")
+	case d.Src != "" && d.Tl != "":
+		return bad("names both a src and a tl; a URL is one stream or one timeline")
+	case d.Src != "" && d.ID == "":
 		return bad("has no source identity")
+	case d.Tl != "" && d.ID != "":
+		// A timeline's members carry their identities inside its digest, so
+		// an id here would be a second, unchecked one: it could only ever
+		// disagree with what the digest already pins.
+		return bad("names a tl and an id; a timeline's identities are inside its digest")
+	case d.Tl != "" && !timeline.ValidDigest(d.Tl):
+		return bad("tl %q is not a timeline digest", d.Tl)
 	case d.Format == "":
 		return bad("has no format")
 	case d.Bitrate < 0:

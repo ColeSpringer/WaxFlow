@@ -55,13 +55,27 @@ func (c *trackCache) get(key string) (container.Track, bool) {
 	return e.track, true
 }
 
+// put stores t, except that it never downgrades a measured entry to an
+// advisory one.
+//
+// The two are not interchangeable and the writes race: an exact caller (a
+// timeline mint) and an ordinary one can miss on the same source together,
+// run separate flights, and both write, in either order. Letting the advisory
+// write win would throw away a walk that already happened and make the next
+// timeline request pay for it again. Neither caller is served a wrong track
+// either way, since each returns its own flight's result; this is only about
+// which one the memo keeps.
 func (c *trackCache) put(key string, t container.Track) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.entries == nil {
 		c.entries = make(map[string]*trackEntry, trackCacheCap)
 	}
-	if _, exists := c.entries[key]; !exists && len(c.entries) >= trackCacheCap {
+	if e, exists := c.entries[key]; exists {
+		if e.track.SamplesExact && !t.SamplesExact {
+			return
+		}
+	} else if len(c.entries) >= trackCacheCap {
 		c.evictOldestLocked()
 	}
 	c.clock++
@@ -89,14 +103,33 @@ func (c *trackCache) evictOldestLocked() {
 	}
 }
 
-// trackFor returns src's default track, probed and (if its length is not
-// declared) measured, memoized by source identity.
+// trackFor returns src's default track, probed and (as exact requires)
+// measured, memoized by source identity.
 //
 // prepareHLS runs per segment request, so a 70-minute stream is ~1050 probes
 // without this and a 12-track album would be ~12,600. The key is the identity,
 // which encodes its own invalidation: a replaced file has a new identity and
 // misses, so a stale track cannot be served. The identity check itself still
 // re-resolves per request, so the 410 source-changed guarantee is unaffected.
+//
+// exact asks for a length that is authoritative rather than declared, which
+// is what a timeline member needs and a single source does not. A single
+// source tolerates an advisory total (format.Media calls a lying FLAC
+// STREAMINFO an oddity rather than a truncation) because nothing downstream
+// of it depends on the number matching. A timeline's positions are a prefix
+// sum, so two samples of drift desync every position after that member: its
+// members are measured, not trusted. That covers more than an unknown length,
+// which is why the flag is not "measure when Samples < 0": an MP3 with a Xing
+// header declares a total from its headers and can still be wrong.
+//
+// A measured entry satisfies both callers, so the memo is shared. Only the
+// flight keys differ, and they differ in both directions on purpose. An exact
+// caller must not join a non-exact flight, which would hand it the advisory
+// track it exists to avoid. And a non-exact caller must not join an exact one,
+// which is the tempting half: it would save a probe, but flight blocks its
+// waiters, so a segment request would stall behind a timeline mint's whole
+// measure to be handed a length it never needed. The duplicate is one header
+// parse in a race window; the alternative is a live request waiting on a walk.
 //
 // Misses are deduplicated per key, not just memoized. The memo alone leaves a
 // stampede window that is small but lands at the worst moment: the memo is
@@ -108,16 +141,20 @@ func (c *trackCache) evictOldestLocked() {
 //
 // The memo is in-memory only: a binary upgrade re-probes rather than trusting a
 // memo written by a different decoder revision.
-func (s *Server) trackFor(src *source.File) (container.Track, error) {
+func (s *Server) trackFor(src *source.File, exact bool) (container.Track, error) {
 	key := identityString(src.Ref, src.ID)
-	if t, ok := s.trackCache.get(key); ok {
+	if t, ok := s.trackCache.get(key); ok && (!exact || t.SamplesExact) {
 		return t, nil
 	}
-	return s.trackFlight.Do(key, func() (container.Track, error) {
+	flightKey := key
+	if exact {
+		flightKey += "|exact"
+	}
+	return s.trackFlight.Do(flightKey, func() (container.Track, error) {
 		// Re-check under the flight: flight is duplicate suppression, not
 		// caching, so a caller that missed the memo just as the previous
 		// flight filled it would otherwise probe again.
-		if t, ok := s.trackCache.get(key); ok {
+		if t, ok := s.trackCache.get(key); ok && (!exact || t.SamplesExact) {
 			return t, nil
 		}
 		info, err := s.eng.Probe(src, src.Ext, nil)
@@ -125,7 +162,7 @@ func (s *Server) trackFor(src *source.File) (container.Track, error) {
 			return container.Track{}, err
 		}
 		track := info.Default()
-		if track.Samples < 0 {
+		if track.Samples < 0 || (exact && !track.SamplesExact) {
 			// VOD playlists promise an exact segment count, so an unknown
 			// length is measured, never estimated (estimates yield tail 404s
 			// or an early ENDLIST). The walk is IO-bound and the index sidecar
@@ -133,8 +170,24 @@ func (s *Server) trackFor(src *source.File) (container.Track, error) {
 			if track.Samples, err = s.measureSamples(src); err != nil {
 				return container.Track{}, err
 			}
+			// The walk decoded to the true end of stream, so the length is
+			// now authoritative and saying so is honest rather than a
+			// convenience: it is what lets a later exact caller reuse this
+			// entry, and what stops a measured track being measured again.
+			track.SamplesExact = true
 		}
 		s.trackCache.put(key, track)
 		return track, nil
 	})
+}
+
+// trackIsExact reports whether src's track is already known to have an
+// authoritative length: either its headers say so, or a previous request
+// measured it. It is the mint's fast-path test, so an album of FLACs (or any
+// album minted before) answers in one round trip instead of becoming a job.
+func (s *Server) trackIsExact(src *source.File) bool {
+	if t, ok := s.trackCache.get(identityString(src.Ref, src.ID)); ok {
+		return t.SamplesExact
+	}
+	return false
 }

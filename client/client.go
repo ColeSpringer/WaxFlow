@@ -166,6 +166,32 @@ type CapsDelivery struct {
 	// PID: the daemon resolves pid:<ULID> source references against a
 	// WaxBin catalog (the resolver flavor).
 	PID bool `json:"pid"`
+	// Timelines: the daemon mints multi-source timelines (CreateTimeline),
+	// which a tl= parameter then streams gaplessly.
+	Timelines bool `json:"timelines"`
+	// MaxTimelineMembers bounds one timeline's member count.
+	MaxTimelineMembers int `json:"maxTimelineMembers,omitempty"`
+}
+
+// TimelineRequest is the POST /hls/timeline body: a play queue, in order.
+type TimelineRequest struct {
+	Srcs []TimelineSrc `json:"srcs"`
+}
+
+// TimelineSrc is one member of a timeline request.
+type TimelineSrc struct {
+	Src string `json:"src"`
+}
+
+// TimelineResponse is POST /hls/timeline's 201 body.
+type TimelineResponse struct {
+	SchemaVersion int `json:"schemaVersion"`
+	// Tl is the timeline's digest: what a tl= parameter names.
+	Tl string `json:"tl"`
+	// Members is how many sources the timeline holds.
+	Members int `json:"members"`
+	// DurationSeconds is the concatenated timeline's length.
+	DurationSeconds float64 `json:"durationSeconds"`
 }
 
 // SignRequest is the POST /sign body; Params carries the playback
@@ -198,6 +224,8 @@ type CacheGCResponse struct {
 	SchemaVersion int   `json:"schemaVersion"`
 	Removed       int   `json:"removed"`
 	FreedBytes    int64 `json:"freedBytes"`
+	// TimelinesRemoved counts stored timelines swept past their expiry.
+	TimelinesRemoved int `json:"timelinesRemoved,omitempty"`
 }
 
 // Ping checks daemon liveness.
@@ -239,6 +267,37 @@ func (c *Client) Sign(ctx context.Context, req SignRequest) (*SignResponse, erro
 		return nil, err
 	}
 	return &v, nil
+}
+
+// CreateTimeline mints a multi-source timeline and returns the digest a tl=
+// parameter names, for a signed /hls/master.m3u8 over a whole play queue.
+//
+// A member whose headers cannot declare an exact length has to be measured,
+// which means decoding it; the daemon then answers with a job rather than a
+// digest, and jobID names it. Exactly one of tl and jobID is set. A queue of
+// FLACs, of tagged MP3s, or any queue minted before (the daemon memoizes per
+// file) returns the digest directly.
+//
+// This package has no jobs surface, so following the job is GET /jobs/{id}
+// or its event stream; the finished job's timeline field carries the same
+// values this returns.
+func (c *Client) CreateTimeline(ctx context.Context, srcs []string) (tl *TimelineResponse, jobID string, err error) {
+	req := TimelineRequest{Srcs: make([]TimelineSrc, len(srcs))}
+	for i, src := range srcs {
+		req.Srcs[i] = TimelineSrc{Src: src}
+	}
+	var v struct {
+		TimelineResponse
+		// The 202 body is the job, whose id is all this package can use.
+		ID string `json:"id"`
+	}
+	if err := c.postJSON(ctx, "/hls/timeline", req, &v); err != nil {
+		return nil, "", err
+	}
+	if v.Tl == "" {
+		return nil, v.ID, nil
+	}
+	return &v.TimelineResponse, "", nil
 }
 
 // CacheStats fetches cache shape and hit counters.

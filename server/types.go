@@ -6,6 +6,7 @@ import (
 	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/meta"
+	"github.com/colespringer/waxflow/internal/timeline"
 )
 
 // probeMetadata summarizes an internal metadata read for ProbeJSON.
@@ -269,6 +270,10 @@ type CapsDelivery struct {
 	// PID: pid:<ULID> source references resolve against a WaxBin
 	// catalog (the resolver flavor with catalogDB configured).
 	PID bool `json:"pid"`
+	// Timelines: POST /hls/timeline mints multi-source timelines, which the
+	// tl= parameter then streams gaplessly. MaxTimelineMembers bounds one.
+	Timelines          bool `json:"timelines"`
+	MaxTimelineMembers int  `json:"maxTimelineMembers,omitempty"`
 }
 
 // UploadResponse is the POST /uploads body.
@@ -282,6 +287,33 @@ type UploadResponse struct {
 	// ExpiresAt is the unix time the TTL janitor removes the upload, 0
 	// when uploads never expire.
 	ExpiresAt int64 `json:"expiresAt,omitempty"`
+}
+
+// TimelineRequest is the POST /hls/timeline body: a play queue, in order.
+//
+// Each member is an object rather than a bare string so the shape has room
+// to grow (a span of one file is the obvious next member kind) without a
+// second endpoint.
+type TimelineRequest struct {
+	Srcs []TimelineSrc `json:"srcs"`
+}
+
+// TimelineSrc is one member of a timeline request.
+type TimelineSrc struct {
+	Src string `json:"src"`
+}
+
+// TimelineResponse is POST /hls/timeline's 201 body. A mint that had to
+// measure a member answers 202 with a job instead, and the job's timeline
+// field carries the same three values.
+type TimelineResponse struct {
+	SchemaVersion int `json:"schemaVersion"`
+	// Tl is the timeline's digest: what a tl= parameter names.
+	Tl string `json:"tl"`
+	// Members is how many sources the timeline holds.
+	Members int `json:"members"`
+	// DurationSeconds is the concatenated timeline's length.
+	DurationSeconds float64 `json:"durationSeconds"`
 }
 
 // SignRequest is the POST /sign body.
@@ -318,11 +350,17 @@ type CacheGCResponse struct {
 	SchemaVersion int   `json:"schemaVersion"`
 	Removed       int   `json:"removed"`
 	FreedBytes    int64 `json:"freedBytes"`
+	// TimelinesRemoved counts stored timelines swept past their expiry.
+	// They are not cache entries and free no cache bytes, so they are
+	// counted separately rather than folded into Removed; they are swept on
+	// this trigger because they are too small and too rarely minted to
+	// deserve a janitor of their own.
+	TimelinesRemoved int `json:"timelinesRemoved,omitempty"`
 }
 
 // buildCaps assembles Caps from the capability-gated tables plus the
 // configured optional surfaces.
-func buildCaps(jobs, uploads, pid bool) Caps {
+func buildCaps(jobs, uploads, pid, timelines bool) Caps {
 	caps := Caps{
 		SchemaVersion: 1,
 		Inputs:        format.Inputs(),
@@ -333,6 +371,7 @@ func buildCaps(jobs, uploads, pid bool) Caps {
 			Jobs:        jobs,
 			Uploads:     uploads,
 			PID:         pid,
+			Timelines:   timelines,
 		},
 		DSP: CapsDSP{
 			// Derived from the parsers rather than restated, so an
@@ -346,6 +385,9 @@ func buildCaps(jobs, uploads, pid bool) Caps {
 			TruePeakCeilingDB: gain.DefaultCeilingDB,
 		},
 		Profiles: make(map[string]CapsProfile, len(deliveryProfiles)),
+	}
+	if timelines {
+		caps.Delivery.MaxTimelineMembers = timeline.MaxMembers
 	}
 	for _, id := range format.Decoders() {
 		caps.Decoders = append(caps.Decoders, string(id))

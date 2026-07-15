@@ -156,7 +156,7 @@ func TestTrackForCollapsesConcurrentMisses(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start // release together, so the miss is genuinely concurrent
-			got[i], errs[i] = s.trackFor(src)
+			got[i], errs[i] = s.trackFor(src, false)
 		}()
 	}
 	close(start)
@@ -179,7 +179,7 @@ func TestTrackForCollapsesConcurrentMisses(t *testing.T) {
 	}
 
 	// Warm: the memo now serves without measuring again.
-	if _, err := s.trackFor(src); err != nil {
+	if _, err := s.trackFor(src, false); err != nil {
 		t.Fatal(err)
 	}
 	if n := idx.count(); n != 1 {
@@ -205,7 +205,7 @@ func TestTrackForKeysBySource(t *testing.T) {
 			}
 			defer src.Close()
 			<-start
-			if _, err := s.trackFor(src); err != nil {
+			if _, err := s.trackFor(src, false); err != nil {
 				t.Errorf("%s: %v", ref, err)
 			}
 		}()

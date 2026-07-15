@@ -61,6 +61,27 @@ take the master URL natively.</p>
 <button id="hlsPlay">Mint &amp; play HLS</button>
 <audio id="hlsPlayer" controls></audio>
 
+<h1>Timeline (gapless queue)</h1>
+<p>Mints a play queue into a <code>tl</code> digest via
+<code>POST /hls/timeline</code>, then signs a master against it: several
+files delivered as one continuous stream, so seeking across a track
+boundary is just seeking. Gain must be <code>off</code> or a dB number
+here, because one stream has one gain and a queue has many tags.</p>
+<label>Queue (one source reference per line, in order)
+  <textarea id="tlSrcs" rows="3" placeholder="lib/album/01.flac&#10;lib/album/02.flac"></textarea></label>
+<div class="row">
+  <div><label>Format
+    <select id="tlFormat">
+      <option value="opus">opus</option>
+      <option value="aac">aac</option>
+      <option value="flac">flac (lossless)</option>
+      <option value="alac">alac (lossless)</option>
+    </select></label></div>
+  <div><label>Gain <input id="tlGain" value="off" placeholder="off or a dB number"></label></div>
+</div>
+<button id="tlPlay">Mint &amp; play timeline</button>
+<audio id="tlPlayer" controls></audio>
+
 <pre id="out">ready</pre>
 
 <script>
@@ -127,17 +148,58 @@ document.getElementById('hlsPlay').onclick = async () => {
     const body = await resp.json();
     show(body);
     if (!resp.ok) return;
-    const player = document.getElementById('hlsPlayer');
-    if (player.canPlayType('application/vnd.apple.mpegurl')) {
-      player.src = body.url; // Safari: native HLS
-    } else {
-      await loadHlsJS();
-      const h = new Hls();
-      h.loadSource(body.url);
-      h.attachMedia(player);
-      h.on(Hls.Events.ERROR, (_, data) => show(data));
-    }
-    player.play();
+    await playHLS(document.getElementById('hlsPlayer'), body.url);
+  } catch (err) { show(String(err)); }
+};
+
+// Plays a signed master URL: Safari takes one natively, everything else
+// goes through hls.js over MSE.
+const playHLS = async (player, url) => {
+  if (player.canPlayType('application/vnd.apple.mpegurl')) {
+    player.src = url; // Safari: native HLS
+  } else {
+    await loadHlsJS();
+    const h = new Hls();
+    h.loadSource(url);
+    h.attachMedia(player);
+    h.on(Hls.Events.ERROR, (_, data) => show(data));
+  }
+  player.play();
+};
+
+document.getElementById('tlPlay').onclick = async () => {
+  try {
+    const srcs = document.getElementById('tlSrcs').value
+      .split('\n').map((s) => s.trim()).filter(Boolean).map((src) => ({ src }));
+    if (!srcs.length) return show('the queue is empty');
+    // Mint the queue into a digest. A 202 means a member's length had to
+    // be measured and the answer is a job, not a digest.
+    const mint = await fetch('/hls/timeline', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers() },
+      body: JSON.stringify({ srcs }),
+    });
+    const tl = await mint.json();
+    show(tl);
+    if (!mint.ok) return;
+    if (!tl.tl) return show({ note: 'the mint is a job; poll /jobs/' + tl.id, job: tl });
+
+    const resp = await fetch('/sign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers() },
+      body: JSON.stringify({
+        path: '/hls/master.m3u8',
+        params: {
+          tl: tl.tl,
+          format: document.getElementById('tlFormat').value,
+          gain: document.getElementById('tlGain').value.trim(),
+        },
+      }),
+    });
+    const body = await resp.json();
+    show({ timeline: tl, signed: body });
+    if (!resp.ok) return;
+    await playHLS(document.getElementById('tlPlayer'), body.url);
   } catch (err) { show(String(err)); }
 };
 </script>

@@ -18,7 +18,7 @@ import (
 )
 
 func (s *Server) handleCaps(w http.ResponseWriter, _ *http.Request) {
-	s.writeJSON(w, http.StatusOK, buildCaps(s.jobs != nil, s.uploads != nil, s.cfg.PIDSources))
+	s.writeJSON(w, http.StatusOK, buildCaps(s.jobs != nil, s.uploads != nil, s.cfg.PIDSources, s.timelines != nil))
 }
 
 // probeRequest is the POST /probe body; GET uses src and strict query
@@ -150,6 +150,13 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 		ttl = sign.DefaultTTLFor(duration)
 	}
 	exp := time.Now().Add(ttl)
+	if tl := req.Params["tl"]; tl != "" && s.timelines != nil {
+		// The store's rule is that a timeline outlives every URL minted
+		// against it, so a URL minted here extends it. Without this a long
+		// explicit TTL would hand out a URL that verifies for a year against
+		// a timeline swept in a month.
+		s.timelines.Touch(tl, exp)
+	}
 	signed := s.signer.Sign(http.MethodGet, req.Path, q, exp)
 	s.writeJSON(w, http.StatusOK, SignResponse{
 		SchemaVersion: 1,
@@ -231,7 +238,17 @@ func (s *Server) handleCacheStats(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleCacheGC(w http.ResponseWriter, _ *http.Request) {
 	removed, freed := s.store.GC()
-	s.writeJSON(w, http.StatusOK, CacheGCResponse{SchemaVersion: 1, Removed: removed, FreedBytes: freed})
+	resp := CacheGCResponse{SchemaVersion: 1, Removed: removed, FreedBytes: freed}
+	if s.timelines != nil {
+		// Timelines are swept on the same operator trigger rather than on a
+		// timer of their own. They are minted rarely and are a few hundred
+		// bytes each, so a janitor goroutine would cost more than it
+		// collects; expiry is what bounds them, and the sweep is only when
+		// the disk entries go. It is reported rather than done quietly: an
+		// operator who ran a GC is owed what it collected.
+		resp.TimelinesRemoved = s.timelines.GC()
+	}
+	s.writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {

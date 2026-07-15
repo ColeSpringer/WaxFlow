@@ -124,7 +124,25 @@ type sourceStage struct {
 
 func (s *sourceStage) Format() audio.Format { return s.fmt }
 
-func (s *sourceStage) ReadChunk(dst *audio.Buffer) error { return s.r.ReadChunk(dst) }
+// ReadChunk pulls from the reader and holds it to the one part of the Stage
+// contract the chain cannot survive being wrong about: io.EOF is the only
+// empty answer.
+//
+// A buffering kernel loops until it has produced a frame or seen the end, so
+// a reader that returns neither spins it forever, inside a ReadChunk that
+// never returns and therefore never reaches any caller's context check. That
+// makes it the one contract breach here that is unkillable rather than merely
+// wrong, which is why it is checked rather than assumed. Every in-tree reader
+// honors the contract; this is the seam where a caller's own format.Media
+// enters a chain, so this is where the contract stops being ours.
+func (s *sourceStage) ReadChunk(dst *audio.Buffer) error {
+	err := s.r.ReadChunk(dst)
+	if err == nil && dst.N == 0 {
+		return waxerr.New(waxerr.CodeInternal,
+			"dsp: the chain's source returned no frames and no error; io.EOF is the only empty answer")
+	}
+	return err
+}
 
 // ChainSpec declares the output a chain must produce. Zero values mean
 // "keep the source's": an entirely zero spec builds an empty chain that

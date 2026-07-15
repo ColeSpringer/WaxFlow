@@ -62,6 +62,20 @@ type Media interface {
 	Close() error
 }
 
+// Composite is implemented by a Media assembled from several sources rather
+// than opened from one: a concatenated timeline. Like container.Indexer and
+// container.Warner, it is an honest capability gate rather than a universal
+// method, since a Media opened from a single file has no members to report
+// and does not implement it.
+//
+// Info describes what the assembled stream delivers, which is a synthetic
+// envelope: it names no member's codec, format, or length. A consumer keying
+// its own cache on what the stream is made of needs those facts, so this
+// hands back the members' own tracks.
+type Composite interface {
+	Members() []container.Track
+}
+
 // sniffLen is the hard upper bound on the probe read. The actual read is
 // sized to what the registered drivers declare they need (12 bytes: fLaC
 // and OggS need 4, RIFF and FORM need 12); deep-window formats joining

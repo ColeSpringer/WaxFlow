@@ -1,10 +1,10 @@
 // Browser client-matrix check: start a real WaxFlow daemon over a
 // generated library, open the committed /demo page in headless Chromium,
 // and drive every playback cell the browser column of
-// docs/client-matrix.md claims: HLS variants through hls.js and
-// progressive streams (live transcodes plus direct play) through
-// <audio>. Each cell must actually progress past 2 s of playback with a
-// healthy player.
+// docs/client-matrix.md claims: HLS variants through hls.js, progressive
+// streams (live transcodes plus direct play) through <audio>, and
+// multi-source timelines seeked across a track boundary. Each cell must
+// actually progress past 2 s of playback with a healthy player.
 //
 // This run is the "automated" basis behind the hls-js profile in GET
 // /caps; if a cell here changes, the profile table in server/types.go
@@ -43,7 +43,18 @@ const CELLS = [
   { surface: "progressive", format: "flac" },
   { surface: "progressive", format: "wav" },
   { surface: "progressive", format: "auto" }, // direct play, original bytes
+  // A three-file queue delivered as one continuous stream, seeked across a
+  // track boundary. The engine tests prove the samples; only a real player
+  // proves that what it receives is one stream it can seek inside.
+  { surface: "timeline", format: "opus" },
+  { surface: "timeline", format: "flac" },
 ];
+
+// The timeline fixture: three tracks whose boundaries are not on segment
+// boundaries, so a seam that survived the sample math still has somewhere
+// to show up. TIMELINE_SEAM is the first boundary, inside track 2.
+const TIMELINE_TRACKS = [5, 4, 5]; // seconds
+const TIMELINE_SEAM = TIMELINE_TRACKS[0];
 
 const only = process.env.CLIENT_E2E_CELLS
   ? new Set(process.env.CLIENT_E2E_CELLS.split(","))
@@ -90,15 +101,41 @@ async function waitForPing(base, deadlineMS) {
 // Drive one cell on the demo page and require playback progress: the
 // player's currentTime past 2 s within 30 s, not paused, no fatal
 // hls.js error and no <audio> element error.
+const PLAYER_ID = { hls: "hlsPlayer", progressive: "player", timeline: "tlPlayer" };
+
+// health reads the player's state and throws on anything a working cell
+// cannot show: a self-pause, a media element error, an hls.js fatal.
+async function health(page, playerID, what) {
+  const state = await page.evaluate((id) => {
+    const p = document.getElementById(id);
+    return {
+      paused: p.paused,
+      currentTime: p.currentTime,
+      duration: p.duration,
+      mediaError: p.error ? p.error.code : 0,
+      out: document.getElementById("out").textContent,
+    };
+  }, playerID);
+  if (state.paused) throw new Error(`player paused itself ${what}`);
+  if (state.mediaError) throw new Error(`media element error code ${state.mediaError} ${what}`);
+  if (state.out.includes('"fatal":true')) throw new Error(`hls.js fatal error ${what}: ${state.out}`);
+  return state;
+}
+
 async function runCell(page, base, cell) {
   await page.goto(`${base}/demo`);
   await page.fill("#key", API_KEY);
-  await page.fill("#src", "lib/test.wav");
-  const playerID = cell.surface === "hls" ? "hlsPlayer" : "player";
-  if (cell.surface === "hls") {
+  const playerID = PLAYER_ID[cell.surface];
+  if (cell.surface === "timeline") {
+    await page.fill("#tlSrcs", TIMELINE_TRACKS.map((_, i) => `lib/tl-${i}.wav`).join("\n"));
+    await page.selectOption("#tlFormat", cell.format);
+    await page.click("#tlPlay");
+  } else if (cell.surface === "hls") {
+    await page.fill("#src", "lib/test.wav");
     await page.selectOption("#hlsFormat", cell.format);
     await page.click("#hlsPlay");
   } else {
+    await page.fill("#src", "lib/test.wav");
     await page.selectOption("#format", cell.format);
     await page.click("#play");
   }
@@ -107,17 +144,41 @@ async function runCell(page, base, cell) {
     playerID,
     { timeout: 30000 },
   );
-  const state = await page.evaluate((id) => {
-    const p = document.getElementById(id);
-    return {
-      paused: p.paused,
-      mediaError: p.error ? p.error.code : 0,
-      out: document.getElementById("out").textContent,
-    };
-  }, playerID);
-  if (state.paused) throw new Error("player paused itself");
-  if (state.mediaError) throw new Error(`media element error code ${state.mediaError}`);
-  if (state.out.includes('"fatal":true')) throw new Error(`hls.js fatal error: ${state.out}`);
+  const state = await health(page, playerID, "during playback");
+  if (cell.surface !== "timeline") return;
+
+  // The player must see the whole queue as one stream. Asserted before the
+  // seek because it is the same failure with a better name: a timeline that
+  // silently delivered only its first member would otherwise fail below as a
+  // bare 30-second timeout waiting to reach a boundary it never had.
+  const want = TIMELINE_TRACKS.reduce((a, b) => a + b, 0);
+  if (Math.abs(state.duration - want) > 0.5) {
+    throw new Error(
+      `the player sees a ${state.duration.toFixed(3)}s stream, want the queue's ${want}s: ` +
+        `the timeline is not being delivered whole`,
+    );
+  }
+
+  // The timeline's own claim: a queue is one stream, so seeking across a
+  // track boundary is an ordinary seek. Land just before the first seam and
+  // require playback to carry on through it, which is where a delivery that
+  // only pretends to be continuous (a second init, a discontinuity, a
+  // mis-numbered segment) would stall or error instead.
+  const seekTo = TIMELINE_SEAM - 1;
+  await page.evaluate(
+    ([id, t]) => {
+      const p = document.getElementById(id);
+      p.currentTime = t;
+      p.play();
+    },
+    [playerID, seekTo],
+  );
+  await page.waitForFunction(
+    ([id, past]) => document.getElementById(id).currentTime > past,
+    [playerID, TIMELINE_SEAM + 1],
+    { timeout: 30000 },
+  );
+  await health(page, playerID, `after seeking across the ${TIMELINE_SEAM}s track boundary`);
 }
 
 // Hard watchdog: a hung browser launch or player must fail the run,
@@ -134,6 +195,12 @@ const cache = join(work, "cache");
 const data = join(work, "data");
 for (const d of [root, cache, data]) mkdirSync(d, { recursive: true });
 writeFileSync(join(root, "test.wav"), makeWAV());
+// The timeline queue: three tracks of different lengths, so a bug that
+// assumed uniform members shows up as a wrong boundary rather than passing
+// by symmetry.
+TIMELINE_TRACKS.forEach((seconds, i) => {
+  writeFileSync(join(root, `tl-${i}.wav`), makeWAV(seconds));
+});
 const configPath = join(work, "config.json");
 writeFileSync(
   configPath,

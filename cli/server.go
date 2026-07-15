@@ -137,6 +137,7 @@ func buildServerConfig(cfg config.Config, version string, logger *slog.Logger, f
 		CacheMaxBytes:        cfg.ResolvedCacheMaxBytes(),
 		CacheMaxAge:          maxAge,
 		JobsDir:              filepath.Join(dataDir, "jobs"),
+		TimelineDir:          filepath.Join(dataDir, "timelines"),
 		UploadDir:            filepath.Join(scratchDir, "uploads"),
 		UploadMaxBytes:       cfg.ResolvedUploadMaxBytes(),
 		ScratchMaxBytes:      cfg.ResolvedScratchMaxBytes(),
