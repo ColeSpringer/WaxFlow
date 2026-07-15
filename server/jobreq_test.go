@@ -102,6 +102,7 @@ func populatedJobRequest() jobRequest {
 	return jobRequest{
 		Type: "transcode", Src: "x", Format: "x", Container: "x",
 		Rate: 1, Ch: 1, Bits: 1, Bitrate: 1, Gain: "x", Loudness: "x", FLACLevel: 1,
+		Silence: true, SilenceThresholdDB: -60, SilenceMinSeconds: 0.25,
 	}
 }
 

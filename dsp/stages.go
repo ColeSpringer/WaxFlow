@@ -3,6 +3,7 @@ package dsp
 import (
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/dsp/dither"
@@ -155,9 +156,11 @@ func (s *gainStage) ReadChunk(dst *audio.Buffer) error {
 	return nil
 }
 
-// quantizeStage crosses float-to-int with the dithering quantizer. A
-// Discont resets the dither streams and shaping history, so a segment
-// requantizes identically wherever playback lands (deterministic mode).
+// quantizeStage crosses float-to-int with the dithering quantizer. The
+// dither is keyed by the chunk's absolute Pos, not by a running stream, so
+// a segment requantizes identically wherever playback lands and whatever
+// preceded it (deterministic mode). A Discont resets the shaping history,
+// which is the only state left.
 type quantizeStage struct {
 	up  Stage
 	fmt audio.Format
@@ -177,7 +180,7 @@ func (s *quantizeStage) ReadChunk(dst *audio.Buffer) error {
 		s.q.Reset()
 	}
 	for c := 0; c < s.fmt.Channels; c++ {
-		s.q.Quantize(dst.ChanI(c), in.ChanF(c), c)
+		s.q.Quantize(dst.ChanI(c), in.ChanF(c), c, in.Pos)
 	}
 	return nil
 }
@@ -210,6 +213,17 @@ func (o limiterOps) anchor(pos int64) int64 {
 	o.k.Reset()
 	return pos
 }
+func (o limiterOps) Horizon() time.Duration { return o.k.Horizon() }
+
+type compressorOps struct{ k *gain.Compressor }
+
+func (o compressorOps) process(dst, src [][]float32) (int, int) { return o.k.Process(dst, src) }
+func (o compressorOps) drain(dst [][]float32) int               { return o.k.Drain(dst) }
+func (o compressorOps) anchor(pos int64) int64 {
+	o.k.Reset()
+	return pos
+}
+func (o compressorOps) Horizon() time.Duration { return o.k.Horizon() }
 
 // pumpStage drives a buffering kernel whose output is not frame-aligned
 // with its input (the resampler changes the count, the limiter delays).
@@ -247,6 +261,15 @@ func newPump(up Stage, out audio.Format, ops kernelOps) *pumpStage {
 
 func (s *pumpStage) Format() audio.Format { return s.fmt }
 func (s *pumpStage) release()             { s.box.release() }
+
+// horizon reports the kernel's settle horizon, 0 for a kernel that
+// declares none (an FIR window, which the primeSeconds floor covers).
+func (s *pumpStage) horizon() time.Duration {
+	if st, ok := s.ops.(Settler); ok {
+		return st.Horizon()
+	}
+	return 0
+}
 
 func (s *pumpStage) ReadChunk(dst *audio.Buffer) error {
 	if s.srcV == nil {

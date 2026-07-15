@@ -196,6 +196,209 @@ func writeLongWAV(t *testing.T, dir string) (ref string) {
 	return "lib/long.wav"
 }
 
+// writeSilenceWAV renders a 44.1k stereo WAV alternating a -6 dBFS tone and
+// true digital zero at hard cuts, returning the ref and the spans it
+// contains by construction.
+func writeSilenceWAV(t *testing.T, dir string) (ref string, want []waxflow.SilenceSpan) {
+	t.Helper()
+	const rate = 44100
+	f := audio.Format{Rate: rate, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
+	// 1 s tone, 1 s silence, 1 s tone, 2 s silence, 1 s tone.
+	regions := []struct {
+		silent bool
+		frames int
+	}{{false, rate}, {true, rate}, {false, rate}, {true, 2 * rate}, {false, rate}}
+
+	frames := 0
+	for _, r := range regions {
+		frames += r.frames
+	}
+	buf := audio.Get(f, frames)
+	defer audio.Put(buf)
+	buf.N = frames
+	at := 0
+	for _, r := range regions {
+		if !r.silent {
+			for i := range r.frames {
+				v := int32(0.5 * 32767 * math.Sin(2*math.Pi*997*float64(at+i)/rate))
+				for c := range f.Channels {
+					buf.I[c*buf.Stride+at+i] = v
+				}
+			}
+		} else {
+			want = append(want, waxflow.SilenceSpan{From: int64(at), To: int64(at + r.frames)})
+		}
+		at += r.frames
+	}
+
+	enc, err := pcm.NewEncoder(pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	mux := riff.NewMuxer(&out, nil)
+	track := container.Track{Codec: codec.PCM, CodecConfig: enc.CodecConfig(), Fmt: f, Samples: int64(frames), Default: true}
+	if err := mux.Begin([]container.Track{track}); err != nil {
+		t.Fatal(err)
+	}
+	emit := func(p codec.Packet) error { return mux.WritePacket(container.Packet{Track: 0, Packet: p}) }
+	if err := enc.Encode(buf, emit); err != nil {
+		t.Fatal(err)
+	}
+	trailer, err := enc.Finish(emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mux.End(trailer); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "silence.wav"), out.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return "lib/silence.wav", want
+}
+
+// TestSilenceJobEndToEnd drives the whole A12 path: an analyze job asks for
+// the map, the runner writes it into the job directory as an output file
+// rather than onto the job, and the job carries only the summary.
+func TestSilenceJobEndToEnd(t *testing.T) {
+	root := t.TempDir()
+	ref, want := writeSilenceWAV(t, root)
+	res := openRoots(t, root)
+	srcID := pinID(t, res, ref)
+	dir := t.TempDir()
+	r := openRunner(t, Config{Dir: dir, Resolver: res})
+
+	req := analyzeReq(ref, srcID)
+	req.Silence = true
+	j, err := r.Create(req)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	done := waitJob(t, r, j.ID, StateDone)
+
+	// The loudness half is unaffected by asking for the map.
+	if done.Analysis == nil || done.Analysis.IntegratedLUFS == nil {
+		t.Fatal("silence analyze lost the loudness measurement")
+	}
+	s := done.Analysis.Silence
+	if s == nil {
+		t.Fatal("done silence analyze has no summary")
+	}
+	if s.Version == "" {
+		t.Error("summary carries no detector version; a caller's cache cannot tell when the map went stale")
+	}
+	if s.Spans != len(want) {
+		t.Errorf("summary spans = %d, want %d", s.Spans, len(want))
+	}
+	if s.ThresholdDB != waxflow.DefaultSilenceThresholdDB {
+		t.Errorf("summary thresholdDb = %v, want the default %v", s.ThresholdDB, waxflow.DefaultSilenceThresholdDB)
+	}
+	if s.MinSeconds != waxflow.DefaultSilenceMinDuration.Seconds() {
+		t.Errorf("summary minSeconds = %v, want the default %v", s.MinSeconds, waxflow.DefaultSilenceMinDuration.Seconds())
+	}
+	if s.TotalSeconds < 2.9 || s.TotalSeconds > 3.1 {
+		t.Errorf("summary totalSeconds = %v, want ~3 (a 1 s and a 2 s silence)", s.TotalSeconds)
+	}
+	// The fixture's silences are clean, so almost nothing is dropped by
+	// length: this is the healthy side of the DroppedSeconds diagnostic.
+	if s.DroppedSeconds > 0.05 {
+		t.Errorf("summary droppedSeconds = %v, want ~0 for clean digital silence", s.DroppedSeconds)
+	}
+
+	// The map is an output file, not an inline field: job.json is broadcast
+	// whole on every progress event, so a 4800-span map cannot live there.
+	out := done.Output
+	if out == nil {
+		t.Fatal("silence analyze wrote no output")
+	}
+	if out.File != silenceMapFile {
+		t.Errorf("output file = %q, want %q", out.File, silenceMapFile)
+	}
+	if out.MediaType != "application/json" {
+		t.Errorf("output mediaType = %q, want application/json", out.MediaType)
+	}
+	if out.Samples != 0 || out.Rate != 0 {
+		t.Errorf("output samples/rate = %d/%d, want 0/0: the map is not audio", out.Samples, out.Rate)
+	}
+
+	var doc SilenceMap
+	raw, err := os.ReadFile(filepath.Join(dir, j.ID, silenceMapFile))
+	if err != nil {
+		t.Fatalf("reading the map: %v", err)
+	}
+	if int64(len(raw)) != out.Bytes {
+		t.Errorf("map is %d bytes, output claims %d", len(raw), out.Bytes)
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parsing the map: %v", err)
+	}
+	if doc.Rate != 44100 {
+		t.Errorf("map rate = %d, want 44100", doc.Rate)
+	}
+	if len(doc.Spans) != len(want) {
+		t.Fatalf("map has %d spans, want %d: %+v", len(doc.Spans), len(want), doc.Spans)
+	}
+	const tol = 44100 / 1000 // 1 ms
+	for i, w := range want {
+		got := doc.Spans[i]
+		if abs64(got.FromSample-w.From) > tol || abs64(got.ToSample-w.To) > tol {
+			t.Errorf("span %d = [%d,%d), want ~[%d,%d)", i, got.FromSample, got.ToSample, w.From, w.To)
+		}
+		// Both spellings must agree, which is the point of carrying both:
+		// the samples are exact and the seconds are the convenience.
+		if wantSec := float64(got.FromSample) / 44100; math.Abs(got.FromSeconds-wantSec) > 1e-9 {
+			t.Errorf("span %d fromSeconds = %v, want %v (it must match fromSample)", i, got.FromSeconds, wantSec)
+		}
+		if wantSec := float64(got.ToSample) / 44100; math.Abs(got.ToSeconds-wantSec) > 1e-9 {
+			t.Errorf("span %d toSeconds = %v, want %v (it must match toSample)", i, got.ToSeconds, wantSec)
+		}
+	}
+}
+
+// TestBareAnalyzeMapsNoSilence pins that the map is opt-in: an analyze job
+// that did not ask for one is byte-identical to what it always was.
+func TestBareAnalyzeMapsNoSilence(t *testing.T) {
+	root := t.TempDir()
+	ref, _ := writeSilenceWAV(t, root)
+	res := openRoots(t, root)
+	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res})
+
+	j, err := r.Create(analyzeReq(ref, pinID(t, res, ref)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := waitJob(t, r, j.ID, StateDone)
+	if done.Analysis.Silence != nil {
+		t.Error("a bare analyze job grew a silence summary")
+	}
+	if done.Output != nil {
+		t.Errorf("a bare analyze job grew an output: %+v", done.Output)
+	}
+}
+
+// TestSilenceCloneIsIndependent pins clone's new pointer branch: the
+// summary is a pointer, so a shallow copy would share it with the store's
+// live job and let a handed-out snapshot mutate underneath its reader.
+func TestSilenceCloneIsIndependent(t *testing.T) {
+	j := &Job{Analysis: &Analysis{Silence: &SilenceSummary{Spans: 3}}}
+	c := j.clone()
+	if c.Analysis.Silence == j.Analysis.Silence {
+		t.Fatal("clone shares the silence summary pointer with the original")
+	}
+	c.Analysis.Silence.Spans = 99
+	if j.Analysis.Silence.Spans != 3 {
+		t.Errorf("mutating the clone changed the original: Spans = %d, want 3", j.Analysis.Silence.Spans)
+	}
+}
+
+func abs64(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
 func TestTranscodeJobEndToEnd(t *testing.T) {
 	res, ref, srcID := openLib(t)
 	dir := t.TempDir()

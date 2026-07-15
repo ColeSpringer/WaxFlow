@@ -3,12 +3,23 @@ package waxflow
 import (
 	"context"
 	"io"
+	"time"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/dsp"
 	"github.com/colespringer/waxflow/dsp/loudness"
+	"github.com/colespringer/waxflow/dsp/silence"
 	"github.com/colespringer/waxflow/waxerr"
+)
+
+// Silence detection defaults, applied to the zero fields of
+// SilenceOptions. The threshold suits studio-quiet content; see
+// SilenceOptions.ThresholdDB for why the right value is a property of the
+// source rather than of the detector.
+const (
+	DefaultSilenceThresholdDB = -50.0
+	DefaultSilenceMinDuration = 500 * time.Millisecond
 )
 
 // AnalyzeOptions configures Engine.Analyze.
@@ -19,6 +30,83 @@ type AnalyzeOptions struct {
 	// analysis; the job runner's yield-to-live-streams check rides on
 	// exactly that.
 	Progress func(done, total int64)
+	// Silence, when non-nil, maps the source's silent spans alongside the
+	// loudness measurement, from the same decode. Nil omits the map
+	// entirely, so an analysis that does not ask for it is unchanged.
+	Silence *SilenceOptions
+}
+
+// SilenceOptions configures the silence map. Both fields are raw
+// parameters rather than a closed vocabulary, which is the opposite of the
+// choice gain= and dynamics= make, and deliberately: a closed vocabulary
+// belongs where a value enters a cache key or a validated signal path,
+// where it must mean the same thing forever. These values do neither. They
+// shape a report, nothing is keyed by them, and the caller genuinely knows
+// better than the daemon does.
+type SilenceOptions struct {
+	// ThresholdDB is the silence threshold in dBFS; 0 means
+	// DefaultSilenceThresholdDB. It must be negative and finite, which the
+	// detector enforces; tighter policy clamps live at the API boundary,
+	// not here, exactly as they do for TranscodeOptions.GainDB.
+	//
+	// The right value is a property of the content, so there is no default
+	// that suits everything. See dsp/silence.New for the guidance, and
+	// SilenceResult.DroppedSamples for what a wrong one looks like: it does
+	// not fail cleanly, it reports no silence at all.
+	ThresholdDB float64
+	// MinDuration is the shortest span worth reporting; 0 means
+	// DefaultSilenceMinDuration. It must be positive, which the detector
+	// enforces.
+	MinDuration time.Duration
+}
+
+// resolve applies the defaults to the zero fields.
+func (o SilenceOptions) resolve() (thresholdDB float64, minDur time.Duration) {
+	thresholdDB, minDur = o.ThresholdDB, o.MinDuration
+	if thresholdDB == 0 {
+		thresholdDB = DefaultSilenceThresholdDB
+	}
+	if minDur == 0 {
+		minDur = DefaultSilenceMinDuration
+	}
+	return thresholdDB, minDur
+}
+
+// SilenceSpan is one silent span of the analyzed source, in frames on its
+// own timeline (ADR-0006). To is exclusive.
+type SilenceSpan struct {
+	From int64
+	To   int64
+}
+
+// SilenceResult is the silence map: the spans plus the parameters they were
+// found with, so a caller that stores the map can tell what it means.
+type SilenceResult struct {
+	// Version is the detector revision (ADR-0004 style). WaxFlow keys
+	// nothing by it, but a caller caching the map needs it to know when
+	// the map went stale.
+	Version string
+	// ThresholdDB and MinDuration are the resolved parameters, defaults
+	// applied.
+	ThresholdDB float64
+	MinDuration time.Duration
+	// Spans are the detected silences, in stream order.
+	Spans []SilenceSpan
+	// Dropped counts runs discarded for falling short of MinDuration.
+	// Read it with DroppedSamples, never alone: ordinary audio dips under
+	// any threshold at every zero crossing, so this is large even for a
+	// source with clean silences.
+	Dropped int
+	// DroppedSamples is the summed length of those runs, and it is the
+	// diagnostic. Against Samples it says how much of the source sat
+	// below the threshold without ever staying there long enough to
+	// report: near zero for a healthy source however large Dropped grows,
+	// and a sizeable share of the stream when the threshold is wrong for
+	// this source (see SilenceOptions.ThresholdDB).
+	DroppedSamples int64
+	// TotalSamples is the summed length of Spans, which is what a
+	// "time saved by trimming" figure reads.
+	TotalSamples int64
 }
 
 // AnalyzeResult is a full-stream loudness measurement of the decoded
@@ -40,6 +128,9 @@ type AnalyzeResult struct {
 	// SamplePeakDB is the maximum sample magnitude in dBFS, math.Inf(-1)
 	// for silence.
 	SamplePeakDB float64
+	// Silence is the silence map, non-nil exactly when AnalyzeOptions
+	// asked for one.
+	Silence *SilenceResult
 }
 
 // Analyze decodes src end to end and measures its loudness: integrated
@@ -47,6 +138,12 @@ type AnalyzeResult struct {
 // type:analyze job and the loudness:analyze two-pass transcode (the R128
 // half of the loudness design: live streams stay tag-based, exact
 // measurement belongs to jobs, where a second pass is affordable).
+//
+// AnalyzeOptions.Silence adds the silence map to the same pass. Both
+// analyzers want the identical chain for the identical reason (the source's
+// own rate and layout, in the float domain), so they share one decode
+// rather than paying for two: the decode is the expensive half, and a
+// library-wide sweep runs this over everything.
 func (e *Engine) Analyze(ctx context.Context, src container.Source, hint string, opts AnalyzeOptions) (*AnalyzeResult, error) {
 	med, err := e.OpenStream(src, hint)
 	if err != nil {
@@ -69,6 +166,15 @@ func (e *Engine) Analyze(ctx context.Context, src container.Source, hint string,
 	if err != nil {
 		return nil, err
 	}
+	var det *silence.Detector
+	var silThreshold float64
+	var silMinDur time.Duration
+	if opts.Silence != nil {
+		silThreshold, silMinDur = opts.Silence.resolve()
+		if det, err = silence.New(f.Rate, f.Channels, silThreshold, silMinDur); err != nil {
+			return nil, err
+		}
+	}
 	buf := audio.Get(f, audio.StandardChunk)
 	defer audio.Put(buf)
 	chans := make([][]float32, f.Channels)
@@ -90,18 +196,40 @@ func (e *Engine) Analyze(ctx context.Context, src container.Source, hint string,
 		if err := meter.Process(chans); err != nil {
 			return nil, err
 		}
+		if det != nil {
+			if err := det.Process(chans); err != nil {
+				return nil, err
+			}
+		}
 		done += int64(buf.N)
 		if opts.Progress != nil {
 			opts.Progress(done, track.Samples)
 		}
 	}
 	meter.Flush()
-	return &AnalyzeResult{
+	res := &AnalyzeResult{
 		Format:         f,
 		Samples:        done,
 		IntegratedLUFS: meter.Integrated(),
 		LoudnessRange:  meter.Range(),
 		TruePeakDB:     meter.TruePeak(),
 		SamplePeakDB:   meter.SamplePeak(),
-	}, nil
+	}
+	if det != nil {
+		det.Flush()
+		spans := make([]SilenceSpan, len(det.Spans()))
+		for i, s := range det.Spans() {
+			spans[i] = SilenceSpan{From: s.From, To: s.To}
+		}
+		res.Silence = &SilenceResult{
+			Version:        silence.Version,
+			ThresholdDB:    silThreshold,
+			MinDuration:    silMinDur,
+			Spans:          spans,
+			Dropped:        det.Dropped(),
+			DroppedSamples: det.DroppedSamples(),
+			TotalSamples:   det.TotalSamples(),
+		}
+	}
+	return res, nil
 }

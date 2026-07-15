@@ -14,6 +14,7 @@ import (
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/mp4"
+	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/internal/cache"
 	"github.com/colespringer/waxflow/internal/hls"
 	"github.com/colespringer/waxflow/internal/meta"
@@ -51,7 +52,8 @@ var hlsParamNames = map[string]bool{
 // (comma-separated kbit/s).
 var hlsMintParamNames = map[string]bool{
 	"src": true, "format": true, "bitrate": true, "bitrates": true,
-	"bits": true, "rate": true, "ch": true, "gain": true, "segDur": true,
+	"bits": true, "rate": true, "ch": true, "gain": true, "dynamics": true,
+	"segDur": true,
 }
 
 // hlsRequest is one parsed, resolved, identity-checked, planned HLS
@@ -126,7 +128,7 @@ func (s *Server) prepareHLS(r *http.Request) (*hlsRequest, error) {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("segment duration yields %d segments (max %d); raise segDur", plan.Segments, maxPlaylistSegments))
 	}
-	canonical := canonicalHLSParams(plan, opts.GainDB)
+	canonical := canonicalHLSParams(plan, opts.GainDB, opts.Dynamics)
 	req := &hlsRequest{
 		desc: desc,
 		src:  src,
@@ -171,7 +173,11 @@ func (s *Server) planHLSVariant(desc hls.Descriptor, track container.Track, m *m
 				fmt.Sprintf("bitrate applies to lossy output; %s is lossless", desc.Format))
 		}
 	}
-	gain, err := parseGain(desc.Gain, s.defaultGain)
+	g, err := parseGain(desc.Gain, s.defaultGain)
+	if err != nil {
+		return waxflow.TranscodeOptions{}, nil, err
+	}
+	dyn, err := parseDynamics(desc.Dynamics)
 	if err != nil {
 		return waxflow.TranscodeOptions{}, nil, err
 	}
@@ -180,7 +186,8 @@ func (s *Server) planHLSVariant(desc hls.Descriptor, track container.Track, m *m
 		Rate:            desc.Rate,
 		Channels:        desc.Ch,
 		BitDepth:        desc.Bits,
-		GainDB:          gain.resolveDB(m),
+		GainDB:          g.resolveDB(m, dyn),
+		Dynamics:        dyn,
 		ResampleProfile: s.profile,
 		MP3Bitrate:      desc.Bitrate * 1000,
 		OpusBitrate:     desc.Bitrate * 1000,
@@ -192,14 +199,13 @@ func (s *Server) planHLSVariant(desc hls.Descriptor, track container.Track, m *m
 	return opts, plan, nil
 }
 
-// canonicalHLSParams is the HLS analog of canonicalParams: every
-// output-shaping parameter in one fixed order for the cache key, values
-// from the resolved plan. segSamples pins the segment numbering; the hls
-// prefix keeps the key space disjoint from progressive entries.
-func canonicalHLSParams(plan *waxflow.SegmentPlan, gainDB float64) string {
-	return fmt.Sprintf("hls&container=%s&rate=%d&ch=%d&type=%s&bits=%d&bitrate=%d&gain=%s&segSamples=%d",
-		plan.Container, plan.Format.Rate, plan.Format.Channels, plan.Format.Type,
-		plan.Format.BitDepth, plan.BitRate, strconv.FormatFloat(gainDB, 'g', -1, 64), plan.SegmentSamples)
+// canonicalHLSParams is the segmented cache key's parameter string: the
+// core canonicalParams shares, plus the segment length that pins the
+// numbering. The hls prefix keeps the key space disjoint from progressive
+// entries.
+func canonicalHLSParams(plan *waxflow.SegmentPlan, gainDB float64, dyn gain.Preset) string {
+	return fmt.Sprintf("hls&%s&segSamples=%d",
+		canonicalCore(&plan.TranscodePlan, gainDB, dyn), plan.SegmentSamples)
 }
 
 // hlsChildExp is the expiry child URLs (media playlists, init, segments)
@@ -523,7 +529,8 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string
 			return bad("unknown parameter %q", k)
 		}
 	}
-	d := hls.Descriptor{Ver: hls.DescriptorVersion, Src: params["src"], Format: params["format"], Gain: params["gain"]}
+	d := hls.Descriptor{Ver: hls.DescriptorVersion, Src: params["src"], Format: params["format"],
+		Gain: params["gain"], Dynamics: params["dynamics"]}
 	if d.Src == "" {
 		return bad("src is required")
 	}
@@ -568,8 +575,11 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string
 			d.Bitrates = append(d.Bitrates, kbps)
 		}
 	}
-	// The gain spelling must parse now, not at playback.
+	// The gain and dynamics spellings must parse now, not at playback.
 	if _, err := parseGain(d.Gain, s.defaultGain); err != nil {
+		return hls.Descriptor{}, 0, err
+	}
+	if _, err := parseDynamics(d.Dynamics); err != nil {
 		return hls.Descriptor{}, 0, err
 	}
 

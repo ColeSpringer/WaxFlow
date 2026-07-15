@@ -24,6 +24,7 @@ import (
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/internal/admission"
 	"github.com/colespringer/waxflow/internal/cache"
@@ -317,12 +318,15 @@ func New(cfg Config) (*Server, error) {
 			Resolver: resolver,
 			Meta:     cfg.Meta,
 			Pools:    s.pools,
-			ResolveGain: func(gain string, info *meta.Info) (float64, error) {
-				g, err := parseGain(gain, s.defaultGain)
+			// The parameter is the gain= spelling, not the gain package:
+			// jobs carry no dynamics parameter, so the music ceiling is the
+			// one that applies to them.
+			ResolveGain: func(spelling string, info *meta.Info) (float64, error) {
+				g, err := parseGain(spelling, s.defaultGain)
 				if err != nil {
 					return 0, err
 				}
-				return g.resolveDB(info), nil
+				return g.resolveDB(info, gain.PresetOff), nil
 			},
 			Slots:   jobSlots,
 			Profile: profile,

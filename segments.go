@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
@@ -26,12 +27,17 @@ const DefaultSegmentSeconds = 4.0
 const maxSegmentSeconds = 60.0
 
 // primeSeconds is how much pre-target audio a mid-stream segmented run
-// feeds before its first kept sample, rounded up to whole encoder frames:
-// enough to settle the encoder's cross-frame state (psychoacoustic and
-// prefilter history) and the resampler's window so segment n from a
-// restarted worker joins segment n-1 from a continuous one without an
-// audible seam. The priming packets are discarded on an exact frame
-// boundary, so the kept stream's decode timeline is unshifted.
+// feeds the *encoder* before its first kept sample, rounded up to whole
+// encoder frames: enough to settle the encoder's cross-frame state
+// (psychoacoustic and prefilter history) and the resampler's window so
+// segment n from a restarted worker joins segment n-1 from a continuous one
+// without an audible seam. The priming packets are discarded on an exact
+// frame boundary, so the kept stream's decode timeline is unshifted.
+//
+// It is also the floor on the *chain's* pre-roll, which is a longer window
+// whenever the chain holds a node whose state decays rather than ends; see
+// dsp.Settler and primeStarts. The two were one constant only because
+// nothing yet needed them to differ.
 const primeSeconds = 0.1
 
 // SegmentPlan describes the segmented CMAF (HLS) form of a transcode,
@@ -139,6 +145,44 @@ func (e *Engine) PlanSegments(track container.Track, opts TranscodeOptions, segS
 	}
 	sp.Bandwidth = base + plan.Format.Rate/f*64 + 2000
 	return sp, nil
+}
+
+// primeStarts computes a mid-stream run's two priming starts on the output
+// timeline: pChain is the first sample fed to the DSP chain, pEnc the first
+// fed to the encoder, both for a run whose first kept sample is p0. A run
+// from the top of the stream primes neither, so both are 0.
+//
+// The two windows are split because they settle different things at very
+// different costs. The encoder needs primeSeconds to settle its own
+// cross-frame state, and priming is discarded *after* the encoder, so every
+// primed sample costs a decode plus DSP plus an encode. A chain holding a
+// node whose state decays exponentially needs far longer (10 s for a voice
+// compressor against the encoder's 0.1 s), and feeding that through the
+// encoder would cost roughly 170 ms of CPU per worker restart instead of
+// ~2 ms. Feeding the long window to the chain alone and the short one to
+// the encoder keeps the expensive half at its old cost, which is what makes
+// the horizon affordable rather than an optimization held in reserve.
+//
+// Capping the long window is never an option: a short pre-roll is precisely
+// the bug the horizon exists to fix, and a restarted worker would resume
+// emitting segments that are not the ones a continuous run produces.
+//
+// Both starts round up to whole encoder frames and clamp at the stream top,
+// so the packet discard below stays exact.
+func primeStarts(p0 int64, rate, frame int, horizon time.Duration, midStream bool) (pChain, pEnc int64) {
+	if !midStream {
+		return 0, 0
+	}
+	roundUp := func(n int64) int64 { return (n + int64(frame) - 1) / int64(frame) * int64(frame) }
+	encPrime := roundUp(int64(float64(rate) * primeSeconds))
+	// The chain's window sits in front of the encoder's, it does not replace
+	// it: the encoder's covers the finite-memory nodes (the resampler's FIR
+	// window) and the encoder's own cross-frame state, and the chain's
+	// horizon assumes those already converged. So they add. A chain that
+	// declares no horizon (no gain, no dynamics: every plain FLAC or
+	// untouched Opus stream) adds zero and primes exactly as it always did.
+	chainPrime := encPrime + roundUp(int64(horizon.Seconds()*float64(rate)))
+	return max(0, p0-chainPrime), max(0, p0-encPrime)
 }
 
 // totalDecodeSamples is the whole stream's decode duration for a trimmed
@@ -297,24 +341,19 @@ func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, o
 	defer chain.Release()
 	f := chain.Format()
 
-	// Output-timeline positions: p0 is the first kept sample, pStart the
-	// first fed one (priming rounds up to whole frames and clamps at the
-	// stream top, so both stay frame multiples).
+	// Output-timeline positions: p0 is the first kept sample, pChain the
+	// first fed to the chain, pEnc the first fed to the encoder.
 	p0 := segOpts.StartSegment * int64(segOpts.SegmentSamples)
-	var pStart int64
-	if segOpts.StartSegment > 0 {
-		prime := (int64(float64(f.Rate)*primeSeconds) + int64(frame) - 1) / int64(frame) * int64(frame)
-		pStart = max(0, p0-prime)
-	}
+	pChain, pEnc := primeStarts(p0, f.Rate, frame, chain.Horizon(), segOpts.StartSegment > 0)
 
-	if pStart > 0 {
+	if pChain > 0 {
 		// Map the output position back to the source timeline. Rounding
-		// must land at or before pStart, so the floor conversion backs off
+		// must land at or before pChain, so the floor conversion backs off
 		// one more source sample; the remainder is discarded from the
 		// chain's output below, positioned by the first chunk's Pos.
-		srcPos := pStart
+		srcPos := pChain
 		if l, m := chain.Ratio(); l != m {
-			srcPos = pStart * int64(m) / int64(l)
+			srcPos = pChain * int64(m) / int64(l)
 			if srcPos > 0 {
 				srcPos--
 			}
@@ -324,7 +363,7 @@ func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, o
 		}
 	}
 
-	enc, err := row.hls.encode(f, opts, pStart)
+	enc, err := row.hls.encode(f, opts, pEnc)
 	if err != nil {
 		return nil, err
 	}
@@ -345,9 +384,10 @@ func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, o
 		res.Segments++
 		return emit(s)
 	}
-	// Packets count off from pStart, one per frame (the priming feed is
-	// frame-aligned, so the discard boundary is exact).
-	discard := (p0 - pStart) / int64(frame)
+	// Packets count off from pEnc, one per frame (the priming feed is
+	// frame-aligned, so the discard boundary is exact). The chain's own
+	// longer pre-roll never reaches the encoder, so it is not counted here.
+	discard := (p0 - pEnc) / int64(frame)
 	pkts := int64(0)
 	emitPkt := func(p codec.Packet) error {
 		pkts++
@@ -370,7 +410,12 @@ func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, o
 	stage := audio.Get(f, frame)
 	defer audio.Put(stage)
 
-	skip := int64(-1) // output samples to drop before pStart; set by the first chunk's Pos
+	// Output samples to drop before the encoder's first fed sample, set by
+	// the first chunk's Pos. It spans two things at once: the slop between
+	// where the seek landed and pChain, and the chain's own pre-roll from
+	// pChain to pEnc, which has done its work by passing through the chain
+	// and must not reach the encoder.
+	skip := int64(-1)
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeCanceled, "segmented transcode canceled", err)
@@ -383,10 +428,10 @@ func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, o
 			return nil, err
 		}
 		if skip < 0 {
-			skip = pStart - buf.Pos
+			skip = pEnc - buf.Pos
 			if skip < 0 {
 				return nil, waxerr.New(waxerr.CodeInternal,
-					fmt.Sprintf("waxflow: chain landed at %d, past the priming start %d", buf.Pos, pStart))
+					fmt.Sprintf("waxflow: chain landed at %d, past the priming start %d", buf.Pos, pEnc))
 			}
 		}
 		from := 0
@@ -412,7 +457,10 @@ func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, o
 	if err := seg.End(emitSeg); err != nil {
 		return nil, err
 	}
-	res.Samples = pStart + trailer.Samples
+	// The encoder is the authority on what was produced, so the run's
+	// length counts from where the encoder started, not from the chain's
+	// earlier pre-roll start.
+	res.Samples = pEnc + trailer.Samples
 	e.log.Debug("segmented transcode finished", "samples", res.Samples, "segments", res.Segments)
 	return res, nil
 }

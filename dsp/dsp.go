@@ -1,8 +1,10 @@
 // Package dsp assembles the transcode pipeline's PCM processing chain:
 //
-//	format.Media -> [convert] -> [resample] -> [mix] -> [gain] -> [dither] -> framer
+//	format.Media -> [convert] -> [resample] -> [mix] -> [gain] -> [dynamics] -> [limiter] -> [dither] -> framer
 //
-// Nodes are inserted only when needed, in that fixed order. Every node
+// Nodes are inserted only when needed, in that fixed order. Dynamics sits
+// after gain, because it acts on the level the caller asked for, and before
+// the limiter, which is the ceiling of last resort. Every node
 // implements the pull-based Stage interface; the whole chain runs
 // synchronously in the caller's goroutine, one chunk at a time. A single stream is sequential and CPU-bound, so parallelism
 // comes from concurrent sessions, not from goroutines inside the chain.
@@ -13,9 +15,17 @@
 // through untouched. A Discont input first finishes the segment in
 // flight: buffering nodes (resampler, limiter) drain to the exact output
 // end of stream would produce, then reset state (filter history,
-// look-ahead, dither error feedback) and re-anchor. A spliced stream is
-// therefore just as deterministic as a linear one: neither segment's
-// length nor samples depend on how the input was chunked.
+// look-ahead, gain envelopes, dither error feedback) and re-anchor. A
+// spliced stream is therefore just as deterministic as a linear one:
+// neither segment's length nor samples depend on how the input was chunked.
+//
+// Chunking invariance is not restart invariance, and the two need different
+// machinery. Invariance to chunking says the output does not depend on how
+// the input was sliced; invariance to restart says it does not depend on
+// where the run started, which is what a segmented worker rests on. A node
+// with finite memory gets the second for free once its window fills with
+// real audio. A node whose state decays exponentially never does, so it
+// declares a Settler horizon and the caller pre-rolls it.
 //
 // Kernels live in the subpackages (resample, mix, gain, dither) and
 // operate on plain per-channel []float32 slices; this package owns all
@@ -32,6 +42,7 @@ package dsp
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/dsp/dither"
@@ -68,6 +79,29 @@ type Stage interface {
 // Reader is the upstream side of a chain. format.Media satisfies it.
 type Reader interface {
 	ReadChunk(dst *audio.Buffer) error
+}
+
+// Settler is an optional capability, asserted by pumpStage on its kernel.
+//
+// It is implemented by a kernel whose state decays rather than ends: an
+// exponential envelope converges asymptotically, so unlike an FIR window
+// there is no sample after which a restarted run and a continuous run are
+// simply equal. Horizon reports the pre-roll needed for that discrepancy to
+// collapse to bit-equality. A finite-memory kernel does not implement it,
+// because the primeSeconds floor already covers an FIR window: once the
+// window fills with real audio the two runs agree exactly, which is why
+// priming works at all.
+//
+// Horizon returns a duration rather than a sample count, and that is not
+// cosmetic. The segmented run computes priming on the output timeline and
+// converts to the source only at the seek, which works because the floor is
+// rate-agnostic. A sample count would break it: the limiter and compressor
+// sit after the resampler and would report output samples, while the
+// resampler's own window is in input samples, so a chain-wide maximum would
+// be taking a max over two different units. A duration has no unit to
+// confuse, and the call site converts once.
+type Settler interface {
+	Horizon() time.Duration
 }
 
 // releaser is implemented by stages holding pooled scratch buffers.
@@ -113,6 +147,12 @@ type ChainSpec struct {
 	// (a correctness bound; the HTTP layer owns tighter policy clamps).
 	// Positive gain engages the true-peak limiter (the chain can clip).
 	GainDB float64
+	// Dynamics inserts a dynamics-processing node after the gain, so it
+	// acts on the level the caller asked for. gain.PresetOff (the zero
+	// value) inserts nothing. Any other preset engages the true-peak
+	// limiter, since makeup gain applied before the envelope catches a
+	// transient is exactly the case that clips.
+	Dynamics gain.Preset
 	// Shaping selects the dither strategy for quantization. Shaped falls
 	// back to TPDF at output rates dither.SupportsShaping rejects.
 	Shaping dither.Shaping
@@ -135,7 +175,8 @@ type Chain struct {
 	out      Stage
 	stages   []Stage
 	versions []string
-	l, m     int // output/input rate ratio, reduced; 1/1 when unchanged
+	l, m     int           // output/input rate ratio, reduced; 1/1 when unchanged
+	horizon  time.Duration // max Settler horizon over the pushed kernels
 }
 
 // NewChain builds the processing chain from src's format to the spec,
@@ -182,6 +223,7 @@ func NewChain(src Stage, spec ChainSpec) (*Chain, error) {
 	needRate := rate != in.Rate
 	needMix := channels != in.Channels
 	needGain := spec.GainDB != 0
+	needDyn := spec.Dynamics != gain.PresetOff
 
 	// Output domain: BitDepth set forces int at that depth; Float forces the
 	// float domain (for lossy encoders); otherwise the source domain is kept,
@@ -197,7 +239,12 @@ func NewChain(src Stage, spec ChainSpec) (*Chain, error) {
 	}
 	narrowing := in.Type == audio.Int && outInt && outDepth < in.BitDepth
 	forceFloat := spec.Float && in.Type == audio.Int // BitDepth is 0 here (validated above)
-	floatWork := needRate || needMix || needGain || narrowing || forceFloat
+	// needDyn belongs here for the same reason every other term does: the
+	// dynamics node is float-domain, so an int source that asks for nothing
+	// else would otherwise skip convertStage and leave the node reading an
+	// int buffer through ChanF. TestNodeInsertion's int-source row is the
+	// guard.
+	floatWork := needRate || needMix || needGain || needDyn || narrowing || forceFloat
 
 	c := &Chain{out: src, l: 1, m: 1}
 	cur := in
@@ -241,10 +288,21 @@ func NewChain(src Stage, spec ChainSpec) (*Chain, error) {
 		c.push(&gainStage{up: c.out, fmt: cur, g: float32(gain.FromDB(spec.GainDB))}, gain.Version)
 	}
 
+	if needDyn {
+		comp, err := gain.NewCompressor(cur.Rate, cur.Channels, spec.Dynamics)
+		if err != nil {
+			return nil, err
+		}
+		c.push(newPump(c.out, cur, compressorOps{comp}), gain.CompressorVersion)
+	}
+
 	// The limiter engages whenever the level path can clip: net positive
-	// gain, or a downmix whose worst-case matrix gain exceeds unity
-	// (protection is by analysis, not hope).
-	if spec.GainDB > 0 || (matrix != nil && matrix.MaxGain() > 1) {
+	// gain, a downmix whose worst-case matrix gain exceeds unity, or a
+	// dynamics preset, whose makeup gain reaches a transient before the
+	// envelope that should have ducked it does (the compressor has no
+	// look-ahead, by design, precisely because this node is here).
+	// Protection is by analysis, not hope.
+	if spec.GainDB > 0 || needDyn || (matrix != nil && matrix.MaxGain() > 1) {
 		lim, err := gain.NewLimiter(cur.Rate, cur.Channels, gain.DefaultCeilingDB)
 		if err != nil {
 			return nil, err
@@ -286,7 +344,40 @@ func (c *Chain) push(s Stage, version string) {
 	if version != "" {
 		c.versions = append(c.versions, version)
 	}
+	// Accumulate here rather than at each call site: a kernel that decays
+	// must not be able to join the chain without its horizon being counted,
+	// and the whole point of the Settler capability is that forgetting it
+	// is a silent determinism bug rather than a loud one.
+	if p, ok := s.(*pumpStage); ok {
+		c.horizon += p.horizon()
+	}
 }
+
+// Horizon reports how much pre-roll a mid-stream start must feed this chain
+// before its first kept sample for the output to be bit-identical to a
+// continuous run's: 0 when no node decays, which is every chain with no gain
+// and no dynamics.
+//
+// Cascaded horizons add, they do not max, and the difference is the whole
+// reason this is computed rather than read off the slowest kernel. Each
+// kernel's horizon is the time for *its* two runs to converge once its input
+// is identical. Downstream of another decaying kernel, that clock does not
+// start at the pre-roll's first sample: it starts when the upstream kernel's
+// output converged. So a compressor feeding a limiter needs the compressor's
+// 10 s and then the limiter's 2 s on top, and taking the max would leave the
+// limiter's envelope short by exactly the compressor's settling time.
+//
+// Taking the max happens to pass today, which is worse than failing: the
+// compressor's horizon carries a 2x safety factor (see
+// gain.Compressor.Horizon) that is large enough to hide the limiter's 2 s
+// underneath it. That is luck about two constants, not a property of the
+// chain, and it would evaporate the moment either was retuned.
+//
+// Finite-memory nodes are not counted here and do not need to be: they
+// declare no Settler, and the caller's own priming floor (a fixed window far
+// exceeding any FIR here) covers them, in front of this. See Settler for why
+// the unit is a duration.
+func (c *Chain) Horizon() time.Duration { return c.horizon }
 
 // Format returns the chain's output format.
 func (c *Chain) Format() audio.Format { return c.out.Format() }

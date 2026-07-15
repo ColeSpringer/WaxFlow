@@ -107,7 +107,34 @@ type Caps struct {
 	Decoders      []string               `json:"decoders"`
 	Outputs       []CapsOutput           `json:"outputs"`
 	Delivery      CapsDelivery           `json:"delivery"`
+	DSP           CapsDSP                `json:"dsp"`
 	Profiles      map[string]CapsProfile `json:"profiles"`
+}
+
+// CapsDSP is the daemon's signal-processing surface, so a format policy
+// routes by capability rather than by sniffing a version. It is orthogonal
+// to Profiles, which describe client decoder support; dynamics is
+// server-side and client-agnostic.
+type CapsDSP struct {
+	// GainModes are the named gain= spellings. The scalar escape hatch (a
+	// dB number) is always accepted and is not listed, because every
+	// advertised value must parse; GainMaxDB and GainMaxVoiceDB describe
+	// it instead.
+	GainModes []string `json:"gainModes"`
+	// GainMaxDB and GainMaxVoiceDB are the clamps on requested positive
+	// gain. They differ because a spoken-word dynamics preset raises the
+	// ceiling: gain=16 is clamped without dynamics=voice and honored with
+	// it. Read the pair, not one of them.
+	GainMaxDB      float64 `json:"gainMaxDb"`
+	GainMaxVoiceDB float64 `json:"gainMaxVoiceDb"`
+	// Dynamics are the dynamics= spellings this daemon accepts.
+	Dynamics []string `json:"dynamics"`
+	// Loudness lists the loudness surfaces, which are jobs-only: a live
+	// stream cannot be measured before it is served.
+	Loudness []string `json:"loudness"`
+	// TruePeakCeilingDB is the limiter ceiling in dBTP that every gain- or
+	// dynamics-engaged output is held under.
+	TruePeakCeilingDB float64 `json:"truePeakCeilingDb"`
 }
 
 // CapsProfile is one named delivery profile: the playback capabilities

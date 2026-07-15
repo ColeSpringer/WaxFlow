@@ -28,6 +28,7 @@ import (
 	"github.com/colespringer/waxflow/container/riff"
 	"github.com/colespringer/waxflow/dsp"
 	"github.com/colespringer/waxflow/dsp/dither"
+	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/waxerr"
@@ -285,6 +286,7 @@ func specFor(opts TranscodeOptions) dsp.ChainSpec {
 		Channels: opts.Channels,
 		BitDepth: opts.BitDepth,
 		GainDB:   opts.GainDB,
+		Dynamics: opts.Dynamics,
 		Shaping:  opts.Shaping,
 		Profile:  opts.ResampleProfile,
 		// FrameSize stays 0 here; frame-native encoders set it through
@@ -389,6 +391,7 @@ type planOpts struct {
 	Channels        int
 	BitDepth        int
 	GainDB          float64
+	Dynamics        gain.Preset
 	FLACLevel       int
 	MP3Bitrate      int
 	MP3VBR          bool
@@ -412,6 +415,7 @@ func planOptsOf(opts TranscodeOptions) planOpts {
 		Channels:        opts.Channels,
 		BitDepth:        opts.BitDepth,
 		GainDB:          opts.GainDB,
+		Dynamics:        opts.Dynamics,
 		FLACLevel:       opts.FLACLevel,
 		MP3Bitrate:      opts.MP3Bitrate,
 		MP3VBR:          opts.MP3VBR,

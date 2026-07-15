@@ -3,6 +3,8 @@ package waxflow
 import (
 	"reflect"
 	"testing"
+
+	"github.com/colespringer/waxflow/dsp/gain"
 )
 
 // TestPlanOptsCoverage pins planOpts to TranscodeOptions: every option
@@ -45,7 +47,7 @@ func TestPlanOptsCoverage(t *testing.T) {
 	// fully populated option struct means a forgotten assignment.
 	populated := TranscodeOptions{
 		Format: "x", Container: "x", Rate: 1, Channels: 1, BitDepth: 1,
-		GainDB: 1, FLACLevel: 1, MP3Bitrate: 1, MP3VBR: true,
+		GainDB: 1, Dynamics: gain.PresetVoice, FLACLevel: 1, MP3Bitrate: 1, MP3VBR: true,
 		OpusBitrate: 1, AACBitrate: 1, OpusComplexity: 1, OpusVBR: true,
 		OpusSignal: "x", VorbisQuality: 1, VorbisBitrate: 1,
 		Shaping: 1, ResampleProfile: "x",

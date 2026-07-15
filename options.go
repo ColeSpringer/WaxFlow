@@ -5,6 +5,7 @@ import (
 
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/dsp/dither"
+	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/dsp/resample"
 )
 
@@ -74,6 +75,21 @@ type TranscodeOptions struct {
 	// gain engages the true-peak limiter; tighter policy clamps (the
 	// HTTP +12 dB bound) live at the API boundary, not here.
 	GainDB float64
+	// Dynamics applies a dynamics-processing preset to the post-gain
+	// signal: gain.PresetOff (the zero value) applies none, gain.PresetVoice
+	// the spoken-word leveller. It is a closed vocabulary rather than raw
+	// compressor parameters; see gain.Preset for why.
+	//
+	// It composes with GainDB rather than replacing it, and the order is
+	// load-bearing: the preset's curve has a fixed threshold, so the caller
+	// levels the signal to a known point with GainDB first and the preset
+	// then shapes it. A caller with a measured loudness (an analyze job's)
+	// sends the exact dB alongside the preset. WaxFlow cannot measure a
+	// live stream, so it cannot do this for the caller: two-pass is
+	// jobs-only.
+	//
+	// A preset always engages the true-peak limiter.
+	Dynamics gain.Preset
 	// FromSample starts output at this source-timeline sample, seeking
 	// sample-exact before the first chunk. Seconds convert to samples at
 	// the API boundary (ADR-0006); 0 starts at the beginning.

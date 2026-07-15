@@ -89,6 +89,39 @@ when a codec's quality changes:
    the target bit rate. A regression that the objective gate misses but a
    listener catches blocks the release and re-baselines the metric.
 
+### A deliberately audible node needs a different protocol
+
+The ABX protocol above rests on one assumption: the node under test is
+trying to be transparent, so "the listener cannot distinguish it from the
+reference" is a pass. Every codec and every resampler here is like that.
+
+`dynamics=voice` is not. It **must** be distinguishable from the
+reference; that is the entire feature, and a `voice` preset that passed
+an ABX would be a broken one. Running the protocol above against it would
+either fail it for working or, worse, pass it for doing nothing.
+
+So a dynamics preset gets a **subjective sign-off** rather than an ABX,
+and it is a release gate for exactly the same reason the ABX is: the
+objective tests (`TestCompressorReducesRange` and friends) prove the
+curve does arithmetic, not that the arithmetic sounds right.
+
+1. **Material.** Spoken word, and specifically the case the preset exists
+   for: a wide-range reading with quiet passages, not studio-levelled
+   broadcast speech that has nothing left to compress.
+2. **Preparation.** Serve the same source twice, `dynamics=off` and
+   `dynamics=voice`, with the same `gain=` in both, since the preset acts
+   on the post-gain signal and comparing across different levels compares
+   the wrong thing.
+3. **Procedure.** Sighted, not blind. Listen at low volume, which is the
+   condition the preset exists for. The questions are: are the quiet
+   passages now intelligible, does the loud material stay unpumped, and
+   is the noise floor between phrases still unobtrusive (makeup gain
+   raises it too).
+4. **Decision.** One named listener signs off per preset per change to
+   its curve. A `CompressorVersion` bump is the marker that this is owed
+   again: the constant exists to invalidate caches, but it is also the
+   flag that the curve moved and nobody has heard it yet.
+
 ## Fuzzing posture
 
 Every parser (demuxers, packet decoders, probe, the HLS descriptor, the

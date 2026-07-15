@@ -1257,3 +1257,48 @@ func cacheStats(t *testing.T, env *testEnv) (out struct {
 func hexEncode(s string) string {
 	return fmt.Sprintf("%x", s)
 }
+
+// TestDynamicsDeclinesDirectPlay pins the ladder rule that is easiest to
+// miss: a dynamics preset has no no-op state, so a request carrying one can
+// never be answered with the source's own bytes. The asymmetry is what
+// hides it: gain=track on an untagged file resolves to 0 dB and correctly
+// direct-plays, because 0 dB really is a no-op.
+func TestDynamicsDeclinesDirectPlay(t *testing.T) {
+	env := newTestEnv(t, nil)
+
+	// The control: a format-matching request with no dynamics direct-plays,
+	// so the assertion below is about dynamics and not about the fixture.
+	resp := env.get(t, "/stream?src=lib/album/track.flac&format=flac", nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("control: status %d, want 200", resp.StatusCode)
+	}
+	direct := resp.Header.Get("Accept-Ranges") != "none" && resp.Header.Get("Content-Length") != ""
+	if !direct {
+		t.Fatal("control: the fixture did not direct-play, so this test proves nothing")
+	}
+	controlLen := resp.Header.Get("Content-Length")
+
+	// The same request plus a preset must be a transcode, not the original
+	// bytes. A live transcode has no Content-Length to give.
+	resp2 := env.get(t, "/stream?src=lib/album/track.flac&format=flac&dynamics=voice", nil)
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("dynamics: status %d, want 200: %s", resp2.StatusCode, readBody(t, resp2))
+	}
+	body := readBody(t, resp2)
+	if resp2.Header.Get("Content-Length") == controlLen && len(body) > 0 {
+		t.Error("dynamics=voice served the source's own bytes; the preset was silently dropped")
+	}
+	if len(body) == 0 {
+		t.Error("dynamics=voice produced no audio")
+	}
+}
+
+// TestDynamicsRejectsUnknownPreset pins the closed vocabulary: an
+// unrecognized preset is a 400, never a silently ignored parameter.
+func TestDynamicsRejectsUnknownPreset(t *testing.T) {
+	env := newTestEnv(t, nil)
+	resp := env.get(t, "/stream?src=lib/sine.wav&format=wav&dynamics=loud", nil)
+	wantEnvelope(t, resp, http.StatusBadRequest, waxerr.CodeInvalidRequest)
+}

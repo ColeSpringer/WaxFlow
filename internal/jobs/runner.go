@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"math"
 	"os"
@@ -421,7 +422,11 @@ func finiteOrNil(v float64) *float64 {
 	return &v
 }
 
-// runAnalyze measures the source and stores the numbers.
+// silenceMapFile is the silence map's name within the job directory.
+const silenceMapFile = "silence.json"
+
+// runAnalyze measures the source and stores the numbers, optionally mapping
+// its silences from the same decode.
 func (r *Runner) runAnalyze(ctx context.Context, j *Job) error {
 	src, err := r.open(ctx, j.Request)
 	if err != nil {
@@ -430,12 +435,134 @@ func (r *Runner) runAnalyze(ctx context.Context, j *Job) error {
 	defer src.Close()
 	res, err := r.cfg.Engine.Analyze(ctx, src, src.Ext, waxflow.AnalyzeOptions{
 		Progress: r.progressFunc(ctx, j.ID, "analyze"),
+		Silence:  j.Request.SilenceOptions(),
 	})
 	if err != nil {
 		return err
 	}
-	r.store.update(j.ID, false, func(job *Job) { job.Analysis = analysisOf(res) })
+	a := analysisOf(res)
+	var out *Output
+	if res.Silence != nil {
+		doc := silenceMapOf(res)
+		if out, err = r.writeSilenceMap(j.ID, doc); err != nil {
+			return err
+		}
+		a.Silence = doc.summary()
+	}
+	r.store.update(j.ID, false, func(job *Job) {
+		job.Analysis = a
+		if out != nil {
+			job.Output = out
+		}
+	})
 	return nil
+}
+
+// silenceMapOf renders the engine's map into the silence.json document.
+func silenceMapOf(res *waxflow.AnalyzeResult) SilenceMap {
+	s := res.Silence
+	rate := res.Format.Rate
+	seconds := func(frames int64) float64 {
+		if rate <= 0 {
+			return 0
+		}
+		return float64(frames) / float64(rate)
+	}
+	doc := SilenceMap{
+		SchemaVersion:   1,
+		Version:         s.Version,
+		ThresholdDB:     s.ThresholdDB,
+		MinSeconds:      s.MinDuration.Seconds(),
+		Rate:            rate,
+		Samples:         res.Samples,
+		DurationSeconds: seconds(res.Samples),
+		Spans:           make([]SilenceMapSpan, len(s.Spans)),
+		Dropped:         s.Dropped,
+		DroppedSeconds:  seconds(s.DroppedSamples),
+		TotalSeconds:    seconds(s.TotalSamples),
+	}
+	for i, sp := range s.Spans {
+		doc.Spans[i] = SilenceMapSpan{
+			FromSample:  sp.From,
+			ToSample:    sp.To,
+			FromSeconds: seconds(sp.From),
+			ToSeconds:   seconds(sp.To),
+		}
+	}
+	return doc
+}
+
+// summary reduces the document to the headline the job carries inline.
+//
+// It projects the map rather than recomputing from the measurement, so the
+// two cannot disagree about what was found: a summary that contradicted its
+// own map would be the worst kind of bug here, since the summary is what a
+// caller reads first and the map is what it acts on.
+func (m SilenceMap) summary() *SilenceSummary {
+	return &SilenceSummary{
+		Version:        m.Version,
+		ThresholdDB:    m.ThresholdDB,
+		MinSeconds:     m.MinSeconds,
+		Spans:          len(m.Spans),
+		Dropped:        m.Dropped,
+		DroppedSeconds: m.DroppedSeconds,
+		TotalSeconds:   m.TotalSeconds,
+	}
+}
+
+// writeSilenceMap writes the document into the job directory, whole, like
+// every other job output, so the restart contract ("outputs live inside the
+// job's own directory and are recreated whole") covers it with nothing
+// added.
+func (r *Runner) writeSilenceMap(id string, doc SilenceMap) (*Output, error) {
+	data, err := json.Marshal(doc)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeInternal, "jobs: encoding the silence map", err)
+	}
+	if err := os.WriteFile(filepath.Join(r.store.jobDir(id), silenceMapFile), data, 0o600); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: writing the silence map", err)
+	}
+	return &Output{
+		File:      silenceMapFile,
+		MediaType: "application/json",
+		Container: "json",
+		Bytes:     int64(len(data)),
+		// Samples and Rate stay zero: this output is not audio. The map's
+		// own document carries the analyzed length.
+	}, nil
+}
+
+// SilenceOptions maps the request's silence fields onto engine options,
+// nil when the request asked for no map. The server calls it at creation to
+// validate, and the runner to execute, so the two cannot disagree about
+// what a request means.
+func (req Request) SilenceOptions() *waxflow.SilenceOptions {
+	if !req.Silence {
+		return nil
+	}
+	return &waxflow.SilenceOptions{
+		ThresholdDB: req.SilenceThresholdDB,
+		MinDuration: secondsToDuration(req.SilenceMinSeconds),
+	}
+}
+
+// secondsToDuration converts a wire seconds field to a Duration without
+// risking the out-of-range float-to-int conversion, whose result Go leaves
+// implementation-defined: a value that large could otherwise wrap back
+// inside a policy bound instead of failing it. Saturating instead maps
+// every out-of-range input to one the bound rejects on sight, and NaN with
+// it.
+func secondsToDuration(seconds float64) time.Duration {
+	const maxSeconds = float64(math.MaxInt64) / float64(time.Second)
+	switch {
+	case math.IsNaN(seconds):
+		return -1
+	case seconds >= maxSeconds:
+		return time.Duration(math.MaxInt64)
+	case seconds <= -maxSeconds:
+		return time.Duration(math.MinInt64)
+	}
+	return time.Duration(seconds * float64(time.Second))
 }
 
 // TranscodeOptions maps the request onto engine options. gainDB is the

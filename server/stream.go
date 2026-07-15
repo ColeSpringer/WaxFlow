@@ -11,6 +11,7 @@ import (
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/cache"
 	"github.com/colespringer/waxflow/source"
@@ -385,6 +386,14 @@ func directPlayable(req *streamRequest) bool {
 	case p.bits != 0 && (track.Fmt.Type != audio.Int || p.bits != track.Fmt.BitDepth):
 		return false
 	case req.gainDB != 0:
+		return false
+	case p.dynamics != gain.PresetOff:
+		// Note the asymmetry with the gain check above, which is what makes
+		// this easy to miss: gain=track on an untagged file resolves to 0 dB
+		// and direct-plays correctly, because 0 dB is a genuine no-op. A
+		// dynamics preset has no no-op state. Without this clause a
+		// dynamics=voice request on a format-matching source would serve the
+		// original bytes with no compression at all.
 		return false
 	}
 	if p.maxBitRate > 0 {

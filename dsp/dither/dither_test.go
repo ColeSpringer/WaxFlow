@@ -17,7 +17,7 @@ func sine(rate int, freq float64, frames int, amp float64) []float32 {
 func errSignal(t *testing.T, q *Quantizer, src []float32) []float64 {
 	t.Helper()
 	dst := make([]int32, len(src))
-	q.Quantize(dst, src, 0)
+	q.Quantize(dst, src, 0, 0)
 	scale := math.Ldexp(1, q.Bits()-1)
 	e := make([]float64, len(src))
 	for i := range src {
@@ -148,7 +148,7 @@ func TestDeterminism(t *testing.T) {
 		out := make([]int32, len(src))
 		for pos := 0; pos < len(src); pos += chunk {
 			end := min(pos+chunk, len(src))
-			q.Quantize(out[pos:end], src[pos:end], 0)
+			q.Quantize(out[pos:end], src[pos:end], 0, int64(pos))
 		}
 		return out
 	}
@@ -181,8 +181,8 @@ func TestChannelIndependence(t *testing.T) {
 	src := make([]float32, 4096) // silence exposes raw dither
 	l := make([]int32, len(src))
 	r := make([]int32, len(src))
-	q.Quantize(l, src, 0)
-	q.Quantize(r, src, 1)
+	q.Quantize(l, src, 0, 0)
+	q.Quantize(r, src, 1, 0)
 	same := 0
 	for i := range l {
 		if l[i] == r[i] {
@@ -203,7 +203,7 @@ func TestClampAndNaN(t *testing.T) {
 	}
 	src := []float32{2, -2, float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1))}
 	dst := make([]int32, len(src))
-	q.Quantize(dst, src, 0)
+	q.Quantize(dst, src, 0, 0)
 	want := []int32{32767, -32768, 0, 32767, -32768}
 	for i := range want {
 		if dst[i] != want[i] {
@@ -228,7 +228,7 @@ func TestShapedAnomalyRecovery(t *testing.T) {
 	src[300] = float32(math.Inf(-1))
 
 	dst := make([]int32, n)
-	q.Quantize(dst, src, 0)
+	q.Quantize(dst, src, 0, 0)
 
 	if dst[100] != 0 {
 		t.Errorf("NaN quantized to %d, want 0", dst[100])
@@ -257,7 +257,7 @@ func TestWideningExact(t *testing.T) {
 	}
 	src := []float32{0, 0.5, -0.5, 12345.0 / 32768, -32768.0 / 32768}
 	dst := make([]int32, len(src))
-	q.Quantize(dst, src, 0)
+	q.Quantize(dst, src, 0, 0)
 	want := []int32{0, 1 << 22, -(1 << 22), 12345 << 8, -(32768 << 8)}
 	for i := range want {
 		if dst[i] != want[i] {
@@ -291,7 +291,7 @@ func benchQuantize(b *testing.B, shaping Shaping) {
 	dst := make([]int32, chunk)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		q.Quantize(dst, src, 0)
+		q.Quantize(dst, src, 0, 0)
 	}
 	b.StopTimer()
 	seconds := float64(b.N) * chunk / 48000
@@ -313,5 +313,70 @@ func TestNewQuantizerValidation(t *testing.T) {
 	}
 	if _, err := NewQuantizer(16, 1, Shaping(9), 1); err == nil {
 		t.Error("unknown shaping: want error")
+	}
+}
+
+// TestDitherIsPositionKeyed pins the property the package doc rests on, and
+// the one a running PRNG cannot provide: the noise at a sample is a
+// function of where that sample is, not of how many samples the quantizer
+// has drawn. A run that begins mid-stream must produce exactly what a
+// continuous run produces there.
+//
+// This is the property whose absence made a segmented worker restarted
+// mid-stream emit different bytes from a continuous one, on any
+// gain-engaged stream with an integer output (which is every FLAC or ALAC
+// HLS variant carrying gain=track on a positively-tagged file). Chunking
+// invariance does not imply it and did not catch it, which is the lesson
+// worth keeping: a running PRNG is invariant to how its input is sliced and
+// not to where the slicing began, and those are different guarantees.
+func TestDitherIsPositionKeyed(t *testing.T) {
+	src := sine(44100, 441, 8192, 0.5)
+	const restart = 3000
+
+	full, err := NewQuantizer(16, 1, TPDF, DefaultSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	continuous := make([]int32, len(src))
+	full.Quantize(continuous, src, 0, 0)
+
+	// A second quantizer that has never seen the head of the stream, told
+	// only where its samples sit.
+	part, err := NewQuantizer(16, 1, TPDF, DefaultSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := make([]int32, len(src)-restart)
+	part.Quantize(restarted, src[restart:], 0, restart)
+
+	for i := range restarted {
+		if restarted[i] != continuous[restart+i] {
+			t.Fatalf("restarted at %d: sample %d = %d, continuous run has %d; "+
+				"the dither is not a function of position", restart, restart+i, restarted[i], continuous[restart+i])
+		}
+	}
+}
+
+// TestDitherPositionChangesNoise is the control for the test above: if the
+// noise ignored position entirely, restart invariance would hold trivially
+// and the dither would be a fixed pattern rather than noise.
+func TestDitherPositionChangesNoise(t *testing.T) {
+	q, err := NewQuantizer(16, 1, TPDF, DefaultSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := make([]float32, 512) // silence exposes the raw dither
+	a := make([]int32, len(src))
+	b := make([]int32, len(src))
+	q.Quantize(a, src, 0, 0)
+	q.Quantize(b, src, 0, 100000)
+	same := 0
+	for i := range a {
+		if a[i] == b[i] {
+			same++
+		}
+	}
+	if same == len(a) {
+		t.Error("the dither is identical at two different positions; it is a pattern, not noise")
 	}
 }

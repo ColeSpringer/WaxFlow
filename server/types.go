@@ -3,6 +3,7 @@ package server
 import (
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/meta"
 )
@@ -139,11 +140,45 @@ type Caps struct {
 	Decoders      []string     `json:"decoders"`
 	Outputs       []CapsOutput `json:"outputs"`
 	Delivery      CapsDelivery `json:"delivery"`
+	// DSP is the signal-processing surface, so a client routes by
+	// capability rather than by sniffing a version.
+	DSP CapsDSP `json:"dsp"`
 	// Profiles are the named delivery profiles: per client family, the
 	// playback capabilities established by the client matrix
 	// (docs/client-matrix.md), so a UI picks a profile instead of
 	// guessing codecs.
 	Profiles map[string]CapsProfile `json:"profiles"`
+}
+
+// CapsDSP is the /caps DSP slot: what this build's signal path can do, so
+// a client's format policy routes by capability instead of by version
+// sniffing. It is deliberately orthogonal to Profiles, which are about
+// client decoder support: dynamics is server-side and client-agnostic, so
+// a profile has nothing to say about it.
+type CapsDSP struct {
+	// GainModes are the named gain spellings, not including the scalar
+	// escape hatch. Every entry here must parse, which is why a "<db>"
+	// placeholder cannot live in this list: parseGain would reject it, and
+	// TestCapsDSPIsHonest checks exactly that rule. The escape hatch is
+	// expressed by the ceilings below, which is what a client actually
+	// needs to know.
+	GainModes []string `json:"gainModes"`
+	// GainMaxDB and GainMaxVoiceDB are the policy clamps on requested
+	// positive gain, which differ by mode: a spoken-word dynamics preset
+	// raises the ceiling (see gainCeilingFor). Both are advertised because
+	// the clamp is a function of a neighbouring parameter, so without them
+	// a client is back to sniffing a version to learn whether gain=16 is
+	// legal, which is the exact failure this slot exists to prevent.
+	GainMaxDB      float64 `json:"gainMaxDb"`
+	GainMaxVoiceDB float64 `json:"gainMaxVoiceDb"`
+	// Dynamics are the dynamics= spellings this build accepts.
+	Dynamics []string `json:"dynamics"`
+	// Loudness lists the loudness surfaces, which are jobs-only: WaxFlow
+	// cannot measure a live stream, so exact measurement is a second pass.
+	Loudness []string `json:"loudness"`
+	// TruePeakCeilingDB is the limiter's ceiling in dBTP, which every
+	// gain- or dynamics-engaged output is held under.
+	TruePeakCeilingDB float64 `json:"truePeakCeilingDb"`
 }
 
 // CapsProfile is one named delivery profile. The format lists are facts
@@ -298,6 +333,17 @@ func buildCaps(jobs, uploads, pid bool) Caps {
 			Jobs:        jobs,
 			Uploads:     uploads,
 			PID:         pid,
+		},
+		DSP: CapsDSP{
+			// Derived from the parsers rather than restated, so an
+			// advertised value that does not parse is impossible to write
+			// rather than merely caught by a test.
+			GainModes:         gainSpellings(),
+			GainMaxDB:         gainCeilingFor(gain.PresetOff),
+			GainMaxVoiceDB:    gainCeilingFor(gain.PresetVoice),
+			Dynamics:          dynamicsSpellings(),
+			Loudness:          []string{"analyze"},
+			TruePeakCeilingDB: gain.DefaultCeilingDB,
 		},
 		Profiles: make(map[string]CapsProfile, len(deliveryProfiles)),
 	}

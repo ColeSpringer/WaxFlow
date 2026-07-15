@@ -7,6 +7,7 @@ import (
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/dsp/dither"
+	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/dsp/resample"
 )
 
@@ -167,7 +168,7 @@ func TestNodeInsertion(t *testing.T) {
 			name: "downmix 5.1",
 			in:   intFormat(48000, 6, 16),
 			spec: ChainSpec{Channels: 2},
-			want: []string{convertVersion, "mix-1", "limiter-1", dither.Version},
+			want: []string{convertVersion, "mix-1", gain.LimiterVersion, dither.Version},
 		},
 		{
 			name: "negative gain no limiter",
@@ -179,7 +180,25 @@ func TestNodeInsertion(t *testing.T) {
 			name: "positive gain limits",
 			in:   intFormat(44100, 2, 16),
 			spec: ChainSpec{GainDB: 3},
-			want: []string{convertVersion, "gain-1", "limiter-1", dither.Version},
+			want: []string{convertVersion, "gain-1", gain.LimiterVersion, dither.Version},
+		},
+		{
+			// The floatWork guard: an int source asking for nothing but
+			// dynamics must still get convertStage, or the float-domain
+			// compressor reads an int buffer through ChanF. A missing
+			// convert fails this row by construction.
+			name: "dynamics on an int source converts and limits",
+			in:   intFormat(44100, 2, 16),
+			spec: ChainSpec{Dynamics: gain.PresetVoice},
+			want: []string{convertVersion, gain.CompressorVersion, gain.LimiterVersion, dither.Version},
+		},
+		{
+			// Dynamics sits after the gain, and engages the limiter even
+			// when the gain alone would not have.
+			name: "negative gain with dynamics still limits",
+			in:   intFormat(44100, 2, 16),
+			spec: ChainSpec{GainDB: -6, Dynamics: gain.PresetVoice},
+			want: []string{convertVersion, "gain-1", gain.CompressorVersion, gain.LimiterVersion, dither.Version},
 		},
 		{
 			name: "mono to stereo no limiter",

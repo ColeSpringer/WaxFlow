@@ -81,7 +81,7 @@ or `waxflow sign`.
 | `POST /uploads`, `DELETE /uploads/{id}` | key | spool one-shot sources; reference as `src=upload:<id>` |
 | `POST /jobs`, `GET /jobs[/{id}]`, `DELETE /jobs/{id}` | key | async full-file transcode/analyze jobs |
 | `GET /jobs/{id}/events` | key or sig | server-sent job progress events (`EventSource` cannot set headers) |
-| `GET /jobs/{id}/result` | key or sig | finished output (full ranges) or analysis JSON |
+| `GET /jobs/{id}/result` | key or sig | finished output file (full ranges) or analysis JSON |
 | `GET /art`, `GET /lyrics` | key or sig | embedded cover art / lyrics passthrough (raw bytes, ETag'd, no resizing) |
 
 ## GET /probe, POST /probe
@@ -112,7 +112,7 @@ byte-identical to `waxflow probe --json`.
 
 ## GET /stream
 
-    /stream?src=<ref>&format=auto|wav|flac|alac|mp3|aac|opus&rate=&ch=&bits=16|24&bitrate=|q=&container=&gain=&t=&track=&maxBitRate=
+    /stream?src=<ref>&format=auto|wav|flac|alac|mp3|aac|opus&rate=&ch=&bits=16|24&bitrate=|q=&container=&gain=&dynamics=&t=&track=&maxBitRate=
 
 Source references (`src`): `<root>/<relative/path>` under a configured
 library root; `upload:<id>` for a spooled one-shot upload (POST
@@ -144,11 +144,45 @@ Parameters (unknown parameter names are rejected):
 - `rate`, `ch`, `bits`: output sample rate, channel count (1 or 2), bit
   depth (16 or 24, dithered when reducing). Absent keeps the source's.
 - `gain`: `off`, `track` (default), `album`, or an explicit `+/-dB`
-  number (clamped at +12 dB; positive gain engages the true-peak
-  limiter). `track` and `album` resolve against the source's ReplayGain
+  number. `track` and `album` resolve against the source's ReplayGain
   2 tags (Opus `R128_*` tags convert from the -23 LUFS reference), fall
   back from album to track, and resolve to 0 dB when the source carries
   none. Exact measured loudness belongs to jobs (`loudness: "analyze"`).
+  Positive gain engages the true-peak limiter and is **clamped at
+  +12 dB, or +24 dB with `dynamics=voice`** (see below). Read the
+  ceiling off `/caps` (`dsp.gainMaxDb`, `dsp.gainMaxVoiceDb`) rather
+  than assuming one.
+- `dynamics`: `off` (default) or `voice`. `voice` is a spoken-word
+  leveller: a gentle 2.5:1 compressor with makeup gain, meant to make an
+  audiobook or podcast intelligible at low volume, where the quiet half
+  of a wide-range reading otherwise falls under the room. It is
+  deliberately audible: that is the feature. It always engages the
+  true-peak limiter.
+
+  **Dynamics acts on the post-gain signal, and composes with `gain`
+  rather than replacing it.** The preset's curve has a fixed threshold,
+  so level the signal to a known point first and let the preset shape it:
+
+      /stream?src=book.m4b&format=opus&gain=-6.2&dynamics=voice
+
+  The daemon cannot do the levelling for you on a live stream, because it
+  cannot measure one before serving it; that is what analyze jobs are
+  for. A client with a measured loudness sends the exact dB.
+
+  **The gain ceiling is a function of this parameter**, which is worth
+  stating plainly rather than leaving to be discovered: `gain=16` alone
+  resolves to +12 dB, and `gain=16&dynamics=voice` resolves to 16. The
+  +12 bound is calibrated for ReplayGain-style music normalization, where
+  more is amplifying noise. Spoken word is a different taste: amateur
+  podcast and audiobook recordings sit near -30 LUFS routinely and cannot
+  reach a -14 LUFS target in one pass under +12. Declaring the source is
+  speech raises the ceiling to +24. Both bounds are taste rather than
+  safety: the true-peak limiter is what makes either one safe, and a
+  dynamics preset always engages it, so the higher ceiling cannot clip.
+
+  A `dynamics` request never direct-plays: unlike `gain=track` on an
+  untagged file, which resolves to 0 dB and is a genuine no-op, a preset
+  has no no-op state.
 - `t`: start position in **seconds** (decimal allowed). Seeks are
   sample-exact: the decoder pre-rolls from the nearest sync point. A
   `t>0` request is always a transcode (a new request per seek; live
@@ -215,7 +249,7 @@ session state. Descriptor schema (version 1):
 
     {"ver":1, "src":"lib/a.flac", "id":"<size-mtimeNS>", "format":"opus",
      "bitrate":96, "bitrates":[64,96,160], "bits":16, "rate":48000,
-     "ch":2, "gain":"track", "segDur":4}
+     "ch":2, "gain":"track", "dynamics":"off", "segDur":4}
 
 `bitrates` (the ladder) appears only in master URLs; every other URL is
 per-variant. Descriptors are minted by the daemon (`POST /sign` with
@@ -227,7 +261,7 @@ session.
 
 | Path | Purpose |
 |---|---|
-| `GET /hls/master.m3u8?v=...` | master playlist: one rung per ladder bitrate with `BANDWIDTH` and `CODECS` (`Opus`, `fLaC`, `alac`, `mp4a.40.2`). With an API key, raw parameters (`src`, `format`, `bitrate` or `bitrates`, `bits`, `rate`, `ch`, `gain`, `segDur`) also work; the daemon builds the descriptor. |
+| `GET /hls/master.m3u8?v=...` | master playlist: one rung per ladder bitrate with `BANDWIDTH` and `CODECS` (`Opus`, `fLaC`, `alac`, `mp4a.40.2`). With an API key, raw parameters (`src`, `format`, `bitrate` or `bitrates`, `bits`, `rate`, `ch`, `gain`, `dynamics`, `segDur`) also work; the daemon builds the descriptor. |
 | `GET /hls/media.m3u8?v=...` | variant VOD playlist: `EXT-X-VERSION:7`, `EXT-X-MAP`, `EXT-X-INDEPENDENT-SEGMENTS`, every segment listed with its exact duration, `EXT-X-ENDLIST`. Unknown source lengths are measured (frame-index walk), never estimated. |
 | `GET /hls/init.mp4?v=...` | the CMAF init header (codec config; the edit list carries encoder delay and the exact length) |
 | `GET /hls/seg/{n}.m4s?v=...` | media segment n (0-based). Cached segments serve with ranges and strong ETags; misses wait on the variant worker (within a 3-segment lookahead) or restart it at n. |
@@ -290,6 +324,29 @@ an upload spool (the CLI daemon always does; a bare library embedding
 may not). `delivery.pid` reports whether `pid:<ULID>` source references
 resolve against a WaxBin catalog (the waxbin flavor with `catalogDB`).
 
+`dsp` is the signal-processing surface, so a format policy routes by
+capability instead of sniffing a version:
+
+    "dsp": {
+      "gainModes": ["off", "track", "album"],
+      "gainMaxDb": 12, "gainMaxVoiceDb": 24,
+      "dynamics": ["off", "voice"],
+      "loudness": ["analyze"],
+      "truePeakCeilingDb": -1
+    }
+
+Every advertised value parses, which is why `gainModes` does not list a
+`"<db>"` placeholder for the scalar escape hatch: a dB number is always
+accepted, and the two ceilings are what a client actually needs to know
+about it. **Read both ceilings, not one.** The clamp on positive gain
+depends on `dynamics` (see /stream), so `gainMaxDb` alone does not tell
+you whether `gain=16` is legal. `loudness` is jobs-only by construction:
+a live stream cannot be measured before it is served.
+
+`dsp` is deliberately orthogonal to `profiles`. Profiles are about what a
+client can decode; dynamics is server-side and client-agnostic, so no
+profile has anything to say about it.
+
 `profiles` are the named delivery profiles: per client family, the
 formats verified to play on each surface, in preference order (first is
 the default choice), plus the recommended surface (`delivery`). Pick
@@ -326,6 +383,7 @@ interrupted mid-run restarts cleanly from zero on the next start.
     {"type": "transcode", "src": "lib/a.flac", "format": "opus", "bitrate": 96}
     {"type": "transcode", "src": "lib/a.flac", "format": "flac", "loudness": "analyze"}
     {"type": "analyze", "src": "lib/a.flac"}
+    {"type": "analyze", "src": "lib/a.flac", "silence": true}
 
 Transcode jobs take the /stream shaping parameters (`format` required,
 plus `container`, `rate`, `ch`, `bits`, `bitrate`, `gain`, `flacLevel`)
@@ -336,7 +394,69 @@ sizes, FLAC seek tables, the MP4 `iTunSMPB` gapless atom). `loudness:
 exact gain to the ReplayGain reference (replacing `gain`), and write
 measured `REPLAYGAIN_TRACK_*` tags describing the finished output.
 Analyze jobs measure EBU R128 loudness (integrated LUFS, loudness
-range, true peak, sample peak) without producing audio.
+range, true peak, sample peak) without producing audio. Each field
+belongs to exactly one job type: a transcode field on an analyze job is
+a 400, and so is a silence field on a transcode job.
+
+### Silence detection
+
+`silence: true` on an analyze job maps the source's silent spans from
+the same decode the loudness measurement runs on, so it costs no extra
+I/O. Two optional parameters shape it:
+
+| field | default | range |
+|---|---|---|
+| `silenceThresholdDb` | -50 | -90 up to (not including) 0 |
+| `silenceMinSeconds` | 0.5 | above 0, at most 60 |
+
+Either without `silence: true` is a 400 rather than a silently ignored
+field. These are raw numbers rather than named levels, unlike `gain` and
+`dynamics`, and deliberately: a closed vocabulary belongs where a value
+enters a cache key or a validated signal path, where it must mean the
+same thing forever. These do neither. They shape a report, nothing is
+keyed by them, and **the right threshold is a property of the content**,
+which the caller knows and the daemon does not, because what counts as
+silence is wherever the source's own noise floor sits: a studio podcast or
+any clean digital capture near -80 dBFS, an audiobook's room tone near
+-55, an analog or vinyl transfer near -40.
+
+Getting it wrong does not fail cleanly. A threshold below the source's
+noise floor makes the signal cross it repeatedly, which fragments one
+long silence into many short ones that each fall under
+`silenceMinSeconds` and are dropped, reporting a plainly quiet source as
+having **no silence at all**. `droppedSeconds` is how that shows up: read
+it against the source's duration. A healthy source leaves it a fraction
+of a percent; a sizeable share of the stream means the threshold is
+wrong for this source rather than that the source is loud.
+
+Read `dropped` (the count) only alongside it, never alone. Ordinary audio
+dips under any threshold at every zero crossing, so even a clean source
+with well-formed silences drops hundreds of one-sample runs per second
+and the count is large either way.
+
+The job carries only the summary:
+
+    "silence": {"version": "silence-1", "thresholdDb": -50, "minSeconds": 0.5,
+                "spans": 12, "dropped": 431, "droppedSeconds": 0.009, "totalSeconds": 84.2}
+
+The spans themselves are the job's **output file**, served by `GET
+/jobs/{id}/result`, because a 40-hour audiobook pausing every 30 s is
+~4800 spans and the job document is broadcast whole on every progress
+event. It is `silence.json`:
+
+    {"schemaVersion": 1, "version": "silence-1", "thresholdDb": -50, "minSeconds": 0.5,
+     "rate": 44100, "samples": 220500, "durationSeconds": 5,
+     "spans": [{"fromSample": 44100, "toSample": 88200, "fromSeconds": 1, "toSeconds": 2}],
+     "dropped": 431, "droppedSeconds": 0.009, "totalSeconds": 3}
+
+Spans are half-open (`toSample` exclusive) and carry both spellings.
+The samples are the exact ones, and are what a cut-point list wants;
+the seconds are the convenience. `version` is the detector revision: a
+caller caching the map needs it to know when the map went stale.
+Detection matches ffmpeg's `silencedetect` exactly (a frame is silent
+when every channel is strictly inside the threshold band), which is what
+lets the differential test assert span counts rather than approximate
+them.
 
 The response (and `GET /jobs/{id}`) is the job document:
 
@@ -359,11 +479,12 @@ the live pool is saturated: interactive streams always win.
 `GET /jobs/{id}/events` is a server-sent event stream: one `event: job`
 per state or progress update, each `data:` line a full job document,
 ending after the terminal event (comment heartbeats every 15 s keep
-proxies from timing it out). `GET /jobs/{id}/result` serves a finished
-transcode's file (real `Content-Length`, full ranges, strong per-job
-`ETag`, `Content-Disposition: attachment`) or an analyze job's analysis
-JSON; a queued or running job answers 400, a failed one replays its
-error envelope. Both accept signed URLs, because a browser
+proxies from timing it out). `GET /jobs/{id}/result` serves the job's
+output file (real `Content-Length`, full ranges, strong per-job `ETag`,
+`Content-Disposition: attachment`), which is a transcode's audio or an
+analyze job's `silence.json`, and an analyze job's analysis JSON when it
+produced no file; a queued or running job answers 400, a failed one
+replays its error envelope. Both accept signed URLs, because a browser
 `EventSource` and a plain download link cannot set headers.
 
 ## GET /art, GET /lyrics

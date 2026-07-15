@@ -76,6 +76,10 @@ type jobRequest struct {
 	Gain      string `json:"gain,omitempty"`
 	Loudness  string `json:"loudness,omitempty"`
 	FLACLevel int    `json:"flacLevel,omitempty"`
+
+	Silence            bool    `json:"silence,omitempty"`
+	SilenceThresholdDB float64 `json:"silenceThresholdDb,omitempty"`
+	SilenceMinSeconds  float64 `json:"silenceMinSeconds,omitempty"`
 }
 
 // requestFrom maps the wire body onto a job request, field for field.
@@ -86,17 +90,20 @@ type jobRequest struct {
 // that exemption.
 func requestFrom(body jobRequest) *jobs.Request {
 	return &jobs.Request{
-		Type:      jobs.Type(body.Type),
-		Src:       body.Src,
-		Format:    body.Format,
-		Container: body.Container,
-		Rate:      body.Rate,
-		Channels:  body.Ch,
-		Bits:      body.Bits,
-		Bitrate:   body.Bitrate,
-		Gain:      body.Gain,
-		Loudness:  body.Loudness,
-		FLACLevel: body.FLACLevel,
+		Type:               jobs.Type(body.Type),
+		Src:                body.Src,
+		Format:             body.Format,
+		Container:          body.Container,
+		Rate:               body.Rate,
+		Channels:           body.Ch,
+		Bits:               body.Bits,
+		Bitrate:            body.Bitrate,
+		Gain:               body.Gain,
+		Loudness:           body.Loudness,
+		FLACLevel:          body.FLACLevel,
+		Silence:            body.Silence,
+		SilenceThresholdDB: body.SilenceThresholdDB,
+		SilenceMinSeconds:  body.SilenceMinSeconds,
 	}
 }
 
@@ -150,10 +157,24 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 	case jobs.TypeAnalyze:
 		if body.Format != "" || body.Container != "" || body.Rate != 0 || body.Ch != 0 ||
 			body.Bits != 0 || body.Bitrate != 0 || body.Gain != "" || body.Loudness != "" || body.FLACLevel != 0 {
-			return bad("type analyze takes only src")
+			return bad("type analyze takes src and the silence fields")
+		}
+		// A threshold with no silence:true would be silently ignored, which
+		// is the shape of acceptance this gate exists to refuse.
+		if !body.Silence && (body.SilenceThresholdDB != 0 || body.SilenceMinSeconds != 0) {
+			return bad("silenceThresholdDb and silenceMinSeconds need silence:true")
+		}
+		// Named sil, not s: the receiver is the Server.
+		if sil := req.SilenceOptions(); sil != nil {
+			if err := checkSilenceOptions(sil); err != nil {
+				return nil, err
+			}
 		}
 		return req, nil
 	case jobs.TypeTranscode:
+		if body.Silence || body.SilenceThresholdDB != 0 || body.SilenceMinSeconds != 0 {
+			return bad("the silence fields apply to analyze jobs")
+		}
 	default:
 		return bad("type %q: want transcode or analyze", body.Type)
 	}
@@ -274,9 +295,11 @@ func (s *Server) handleJobEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleJobResult serves GET /jobs/{id}/result: the finished transcode
-// file (full ranges, immutable-per-id strong ETag) or the analysis JSON.
-// Sig auth is accepted so a browser can download without headers.
+// handleJobResult serves GET /jobs/{id}/result: the job's output file
+// (full ranges, immutable-per-id strong ETag), which is a transcode's audio
+// or an analyze job's silence map, and the analysis JSON for an analyze job
+// that produced no file. Sig auth is accepted so a browser can download
+// without headers.
 func (s *Server) handleJobResult(w http.ResponseWriter, r *http.Request) {
 	s.applyCORS(w, r)
 	q := r.URL.Query()
@@ -300,8 +323,14 @@ func (s *Server) handleJobResult(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("job is %s; the result is not ready", j.State)))
 		return
 	}
-	if j.Type == jobs.TypeAnalyze {
-		s.writeJSON(w, http.StatusOK, j.Analysis)
+	// An analyze job has an output only when it mapped silence; the
+	// loudness numbers stay on the job itself either way.
+	if j.Output == nil {
+		if j.Type == jobs.TypeAnalyze {
+			s.writeJSON(w, http.StatusOK, j.Analysis)
+			return
+		}
+		s.writeError(w, waxerr.New(waxerr.CodeInternal, "job has no output"))
 		return
 	}
 	f, err := s.jobs.OutputFile(j)

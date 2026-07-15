@@ -75,7 +75,7 @@ func (s *Server) prepareSource(ctx context.Context, q url.Values, sigAuthed bool
 		info:   info,
 		track:  track,
 		from:   int64(p.t * float64(track.Fmt.Rate)),
-		gainDB: p.gain.resolveDB(m),
+		gainDB: p.gain.resolveDB(m, p.dynamics),
 		meta:   m,
 	}, nil
 }
@@ -105,6 +105,7 @@ func (s *Server) planTranscode(req *streamRequest) error {
 		Channels:        req.p.ch,
 		BitDepth:        req.p.bits,
 		GainDB:          req.gainDB,
+		Dynamics:        req.p.dynamics,
 		FromSample:      req.from,
 		ResampleProfile: s.profile,
 		MP3Bitrate:      req.p.bitrate * 1000,
@@ -137,7 +138,7 @@ func (s *Server) planTranscode(req *streamRequest) error {
 		}
 	}
 	req.plan = plan
-	req.canonical = canonicalParams(plan, req.gainDB, req.from)
+	req.canonical = canonicalParams(plan, req.gainDB, req.p.dynamics, req.from)
 	if len(req.opts.Tags) > 0 {
 		req.canonical += "&tags=" + tagsFingerprint(req.opts.Tags)
 	}

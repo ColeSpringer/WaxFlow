@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"io"
+	"math"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/audio"
@@ -15,6 +18,8 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/container/riff"
+	"github.com/colespringer/waxflow/dsp"
+	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -524,4 +529,260 @@ func TestSegmentedCancellation(t *testing.T) {
 	if waxerr.CodeOf(err) != waxerr.CodeCanceled {
 		t.Fatalf("err %v, want canceled", err)
 	}
+}
+
+// transientWAV renders a stereo 48 kHz WAV that is quiet everywhere except
+// for a loud burst in [loudFrom, loudTo), returned as a WAV and its PCM.
+//
+// The burst's placement is the whole point of the fixtures below: a gain
+// envelope only diverges where it has been driven somewhere, so a restart
+// test whose audio is uniform proves nothing about restart state at all.
+func transientWAV(t *testing.T, frames, loudFrom, loudTo int) []byte {
+	return ampWAV(t, frames, func(i int) float64 {
+		if i >= loudFrom && i < loudTo {
+			return 0.95 // driven hard
+		}
+		return 0.03 // a quiet bed: the limiter rests here
+	})
+}
+
+// ampWAV renders a stereo 48 kHz WAV whose amplitude at each frame comes
+// from amp, as a 440 Hz tone.
+func ampWAV(t *testing.T, frames int, amp func(i int) float64) []byte {
+	t.Helper()
+	cfg := pcm.Config{Bits: 16}
+	f := cfg.PCMFormat(48000, 2, audio.DefaultLayout(2))
+	src := audio.Get(f, frames)
+	defer audio.Put(src)
+	src.N = frames
+	for i := range frames {
+		v := int32(amp(i) * 32767 * math.Sin(2*math.Pi*440*float64(i)/48000))
+		for c := range f.Channels {
+			src.I[c*src.Stride+i] = v
+		}
+	}
+	enc, err := pcm.NewEncoder(cfg, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := &memWS{}
+	m := riff.NewMuxer(ws, nil)
+	track := container.Track{Codec: codec.PCM, CodecConfig: enc.CodecConfig(), Fmt: f, Samples: int64(frames), Default: true}
+	if err := m.Begin([]container.Track{track}); err != nil {
+		t.Fatal(err)
+	}
+	emit := func(p codec.Packet) error { return m.WritePacket(container.Packet{Track: 0, Packet: p}) }
+	if err := enc.Encode(src, emit); err != nil {
+		t.Fatal(err)
+	}
+	tr, err := enc.Finish(emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.End(tr); err != nil {
+		t.Fatal(err)
+	}
+	return ws.b
+}
+
+// assertRestartMatches runs the stream continuously and again restarted at
+// startAt, and requires byte-identical segments from startAt on.
+func assertRestartMatches(t *testing.T, e *waxflow.Engine, raw []byte,
+	opts waxflow.TranscodeOptions, segSamples int, startAt int64) {
+	t.Helper()
+	full, _ := collectSegments(t, e, raw, opts, segSamples, 0)
+	tail, _ := collectSegments(t, e, raw, opts, segSamples, startAt)
+	if int64(len(tail)) != int64(len(full))-startAt {
+		t.Fatalf("restart yielded %d segments, want %d", len(tail), int64(len(full))-startAt)
+	}
+	for i, s := range tail {
+		cont := full[int64(i)+startAt]
+		if !bytes.Equal(s.Data, cont.Data) {
+			t.Fatalf("restarted segment %d differs from the continuous run (%d bytes vs %d): "+
+				"the chain's priming did not settle its state", s.Index, len(s.Data), len(cont.Data))
+		}
+	}
+}
+
+// TestSegmentedRestartWithLimiter is a regression test for a bug that
+// shipped, not a test for a new feature.
+//
+// Segment restart determinism rested on primeSeconds = 0.1 exceeding every
+// stateful node's memory. That reasoning holds only for finite memory: the
+// resampler is an FIR, so once its window fills with real audio a restarted
+// run and a continuous one are exactly equal. The limiter's gain is a
+// one-pole IIR with a 50 ms time constant, which converges asymptotically
+// and never exactly, so 100 ms of priming left e^-2 (13.5 percent) of the
+// gain discrepancy alive: a run restarted after a loud passage reached its
+// first kept sample with roughly a 4 percent gain error and produced
+// segments that were not the ones a continuous run produces.
+//
+// It was reachable in a shipped daemon by gain=track on a positively-tagged
+// file over HLS, and nothing caught it, because the only restart test
+// (TestSegmentedRestartFLAC) runs with no gain: spec.GainDB == 0, so the
+// limiter is never in the chain and the path was never exercised. This test
+// exists to be the one that would have.
+func TestSegmentedRestartWithLimiter(t *testing.T) {
+	const frames = 400000
+	const segSamples = 49152 // 12 blocks of 4096
+	const restartAt = 4
+	// The burst ends just before the restart point, so the continuous run
+	// arrives there mid-release with the gain far from rest, which is the
+	// worst case for a short pre-roll.
+	raw := transientWAV(t, frames, restartAt*segSamples-24000, restartAt*segSamples-1000)
+
+	e := waxflow.New()
+	// Positive gain is what engages the limiter; the FLAC output keeps the
+	// comparison at the segment bytes rather than an encoder's own state.
+	opts := waxflow.TranscodeOptions{Format: "flac", GainDB: 6}
+	assertRestartMatches(t, e, raw, opts, segSamples, restartAt)
+}
+
+// TestSegmentedRestartWithDynamics is the same guarantee for A10's node,
+// whose release is 250 ms and whose horizon is therefore 10 s: five times
+// the limiter's, and a hundred times the priming window that used to cover
+// both.
+func TestSegmentedRestartWithDynamics(t *testing.T) {
+	const segSamples = 49152
+	// The restart must sit beyond the 10 s horizon, or priming clamps at the
+	// top of the stream and both runs start from sample 0: the test would
+	// pass without exercising convergence at all, which is the trap this
+	// comment exists to stop the next person falling into.
+	const restartAt = 14 // 14 * 49152 = 688128 samples = 14.3 s at 48 kHz
+	const frames = 1200000
+	// The chain's horizon is the compressor's 10 s plus the limiter's 2 s,
+	// which the preset engages. The restart must sit beyond it, or priming
+	// clamps at the top of the stream and both runs start from sample 0: the
+	// test would pass without exercising convergence at all, which is the
+	// trap this check exists to stop the next person falling into.
+	if restartAt*segSamples <= 12*48000 {
+		t.Fatalf("restart at %d samples is inside the 12 s horizon; priming would clamp at 0 "+
+			"and the runs would start together", restartAt*segSamples)
+	}
+	raw := transientWAV(t, frames, restartAt*segSamples-24000, restartAt*segSamples-1000)
+
+	e := waxflow.New()
+	opts := waxflow.TranscodeOptions{Format: "flac", Dynamics: gain.PresetVoice}
+	assertRestartMatches(t, e, raw, opts, segSamples, restartAt)
+}
+
+// TestChainHorizonDrivesPriming pins the wiring rather than the audio: a
+// chain with no decaying node keeps the old 100 ms window exactly and pays
+// nothing new, and each kernel that declares a horizon raises it to its own.
+// Without this, a regression that returned 0 from Chain.Horizon would leave
+// the restart tests above as the only signal, and they are slow and
+// content-dependent.
+func TestChainHorizonDrivesPriming(t *testing.T) {
+	f := audio.Format{Rate: 48000, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Float, BitDepth: 32}
+	for _, tc := range []struct {
+		name string
+		spec dsp.ChainSpec
+		want time.Duration
+	}{
+		{"plain passthrough", dsp.ChainSpec{}, 0},
+		{"resample only: an FIR window needs no horizon", dsp.ChainSpec{Rate: 44100}, 0},
+		{"negative gain: no limiter", dsp.ChainSpec{GainDB: -6}, 0},
+		{"positive gain engages the limiter", dsp.ChainSpec{GainDB: 6}, 2 * time.Second},
+		// Dynamics engages the limiter too, so this chain already holds two
+		// decaying kernels in series and pays for both.
+		{"dynamics: compressor plus the limiter it engages", dsp.ChainSpec{Dynamics: gain.PresetVoice}, 12 * time.Second},
+		{"gain and dynamics: the same two nodes", dsp.ChainSpec{GainDB: 6, Dynamics: gain.PresetVoice}, 12 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := audio.Get(f, 64)
+			buf.N = 64
+			defer audio.Put(buf)
+			chain, err := dsp.NewChain(dsp.NewSource(&nullReader{}, f), tc.spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer chain.Release()
+			if got := chain.Horizon(); got != tc.want {
+				t.Errorf("Horizon = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// nullReader is an immediately-exhausted chain source: the horizon is a
+// property of the assembled chain, so no audio need flow to read it.
+type nullReader struct{}
+
+func (r *nullReader) ReadChunk(dst *audio.Buffer) error { return io.EOF }
+
+// TestDynamicsReducesRangeEndToEnd drives A10 through the whole engine
+// rather than the kernel: transcode a wide-range spoken-word-shaped source
+// with the preset off and on, decode both back, and measure them with the
+// R128 meter. The loudness range must fall, which is the feature stated as
+// a measurement.
+//
+// The kernel tests prove the curve does arithmetic. This proves the
+// arithmetic survives the chain, the encoder, and the decoder, which is
+// what a caller actually receives.
+//
+// The passage levels are chosen against the meter, not for realism: EBU
+// Tech 3342 gates the loudness range at 20 LU under the mean, so passages
+// further apart than that are excluded from the figure and a wider fixture
+// would report a *smaller* range to begin with. 16 LU apart stays inside
+// the gate, so the number moves for the reason the test claims.
+func TestDynamicsReducesRangeEndToEnd(t *testing.T) {
+	// The passages must outlast the meter's own 3 s short-term window, or
+	// every window straddles a loud and a quiet one, they all measure the
+	// same, and the range collapses to nothing before the preset touches it.
+	const seg = 5 * 48000 // 5 s passages
+	const frames = 8 * seg
+	raw := ampWAV(t, frames, func(i int) float64 {
+		if (i/seg)%2 == 0 {
+			return 0.4 // about -8 dBFS
+		}
+		return 0.063 // about -24 dBFS
+	})
+
+	e := waxflow.New()
+	measure := func(dyn gain.Preset) *waxflow.AnalyzeResult {
+		t.Helper()
+		var out bytes.Buffer
+		if _, err := e.Transcode(context.Background(), container.BytesSource(raw), "wav", &out,
+			waxflow.TranscodeOptions{Format: "flac", Dynamics: dyn}); err != nil {
+			t.Fatalf("transcode (dynamics=%q): %v", dyn, err)
+		}
+		res, err := e.Analyze(context.Background(), container.BytesSource(out.Bytes()), "flac",
+			waxflow.AnalyzeOptions{})
+		if err != nil {
+			t.Fatalf("analyze (dynamics=%q): %v", dyn, err)
+		}
+		return res
+	}
+	off, on := measure(gain.PresetOff), measure(gain.PresetVoice)
+
+	t.Logf("dynamics=off:   range %.2f LU, integrated %.2f LUFS, true peak %.2f dBTP",
+		off.LoudnessRange, off.IntegratedLUFS, off.TruePeakDB)
+	t.Logf("dynamics=voice: range %.2f LU, integrated %.2f LUFS, true peak %.2f dBTP",
+		on.LoudnessRange, on.IntegratedLUFS, on.TruePeakDB)
+
+	// The fixture must have a range to reduce, or the assertion below
+	// passes on a measurement that was never there.
+	if off.LoudnessRange < 10 {
+		t.Fatalf("the fixture's own range is only %.2f LU; it is not exercising the preset", off.LoudnessRange)
+	}
+	if on.LoudnessRange >= off.LoudnessRange-3 {
+		t.Errorf("loudness range %.2f -> %.2f LU: the preset did not meaningfully reduce it",
+			off.LoudnessRange, on.LoudnessRange)
+	}
+	// The limiter is engaged by the preset and is what makes the raised
+	// gain ceiling safe, so the output must sit under its true-peak
+	// ceiling. Without the preset this fixture peaks far below it, so this
+	// is a real check on the preset's own path.
+	if on.TruePeakDB > gain.DefaultCeilingDB+0.1 {
+		t.Errorf("true peak %.2f dBTP exceeds the limiter ceiling %.2f: the limiter did not engage",
+			on.TruePeakDB, gain.DefaultCeilingDB)
+	}
+	if off.Samples != on.Samples {
+		t.Errorf("dynamics changed the length: %d samples vs %d", on.Samples, off.Samples)
+	}
+	// Integrated loudness is deliberately not asserted in either
+	// direction. It is dominated by whichever passages are loudest, which
+	// the preset brings down, so its sign is a property of the content
+	// rather than of the preset: a reading with hot passages lands quieter
+	// and a uniformly quiet one lands louder. The range is the claim.
 }

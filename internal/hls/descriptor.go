@@ -53,6 +53,10 @@ type Descriptor struct {
 	// Gain is the gain parameter exactly as /stream spells it (off,
 	// track, album, or a dB number); empty means the daemon default.
 	Gain string `json:"gain,omitempty"`
+	// Dynamics is the dynamics preset exactly as /stream spells it (off
+	// or voice); empty means off. It shapes the samples, so it is part of
+	// the variant's identity.
+	Dynamics string `json:"dynamics,omitempty"`
 	// SegDur is the target segment duration in seconds, 0 for the
 	// default. The plan snaps it to whole encoder frames, so it is part
 	// of the variant's identity: a different SegDur is a different

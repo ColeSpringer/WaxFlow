@@ -20,6 +20,7 @@ import (
 // (roots, catalogDB in the resolver flavor) must match its.
 func newSignCmd(flavor Flavor) *cobra.Command {
 	var src, format, gain string
+	var dynamics dynamicsFlag
 	var rate, channels, bits int
 	var t float64
 	var ttl time.Duration
@@ -66,6 +67,9 @@ minted here dies with 410 source-changed if the file changes.`,
 			if gain != "" {
 				params.Set("gain", gain)
 			}
+			if dynamics != "" {
+				params.Set("dynamics", dynamics.String())
+			}
 			for name, v := range map[string]int{"rate": rate, "ch": channels, "bits": bits} {
 				if v != 0 {
 					params.Set(name, strconv.Itoa(v))
@@ -108,6 +112,10 @@ minted here dies with 410 source-changed if the file changes.`,
 	cmd.Flags().IntVar(&channels, "channels", 0, "output channel count")
 	cmd.Flags().IntVar(&bits, "bits", 0, "output bit depth: 16 or 24")
 	cmd.Flags().StringVar(&gain, "gain", "", "gain mode: off, track, album, or +/-dB")
+	// A closed vocabulary parsed here rather than at playback: minting a URL
+	// the daemon will refuse is a worse failure than refusing the flag, since
+	// the URL only fails once it reaches a player.
+	cmd.Flags().Var(&dynamics, "dynamics", "dynamics preset: off (default) or voice")
 	cmd.Flags().Float64Var(&t, "t", 0, "start position in seconds")
 	cmd.Flags().DurationVar(&ttl, "ttl", 0, "URL lifetime (default max(6h, 2x duration))")
 	cmd.Flags().StringVar(&base, "base", "", "base URL to print (default from addr)")

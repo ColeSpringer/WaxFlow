@@ -34,6 +34,7 @@ func newTranscodeCmd(flavor Flavor) *cobra.Command {
 	var opusSignal string
 	var aacBitrate int
 	var gainDB float64
+	var dynamics dynamicsFlag
 	var profileName, ditherName string
 	var loudness string
 	var noTags bool
@@ -245,6 +246,7 @@ with true-peak limiting, dither).`,
 				Channels:        channels,
 				BitDepth:        bits,
 				GainDB:          gainDB,
+				Dynamics:        gain.Preset(dynamics),
 				Shaping:         shaping,
 				ResampleProfile: profile,
 				FLACLevel:       optLevel,
@@ -316,6 +318,7 @@ with true-peak limiting, dither).`,
 	cmd.Flags().IntVar(&channels, "channels", 0, "output channel count: 1 or 2 (default: source layout)")
 	cmd.Flags().IntVar(&bits, "bits", 0, "output bit depth, dithered when reducing (default: source depth)")
 	cmd.Flags().Float64Var(&gainDB, "gain", 0, "gain in dB; positive gain engages the true-peak limiter")
+	cmd.Flags().Var(&dynamics, "dynamics", "dynamics preset: off (default) or voice; acts on the post-gain signal")
 	cmd.Flags().StringVar(&profileName, "resample-profile", "hq", "resampler quality: hq or fast")
 	cmd.Flags().StringVar(&ditherName, "dither", "tpdf", "dither when reducing depth: tpdf, shaped, or off")
 	cmd.Flags().IntVar(&flacLevel, "flac-level", 5, "FLAC compression level 0-8, size vs speed (flac output only)")
@@ -414,4 +417,32 @@ func parseDither(name string) (dither.Shaping, error) {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("unknown dither mode %q (tpdf, shaped, off)", name))
 	}
+}
+
+// dynamicsFlag is the --dynamics flag: a closed vocabulary, so an
+// unrecognized preset is rejected at parse time with the list rather than
+// reaching the engine as an unsupported-format error.
+type dynamicsFlag gain.Preset
+
+func (d *dynamicsFlag) String() string { return string(*d) }
+func (d *dynamicsFlag) Type() string   { return "preset" }
+
+func (d *dynamicsFlag) Set(v string) error {
+	switch strings.ToLower(v) {
+	case "", "off":
+		*d = dynamicsFlag(gain.PresetOff)
+		return nil
+	}
+	for _, p := range gain.Presets() {
+		if strings.EqualFold(v, string(p)) {
+			*d = dynamicsFlag(p)
+			return nil
+		}
+	}
+	names := []string{"off"}
+	for _, p := range gain.Presets() {
+		names = append(names, string(p))
+	}
+	return waxerr.New(waxerr.CodeInvalidRequest,
+		fmt.Sprintf("dynamics %q: want %s", v, strings.Join(names, ", ")))
 }

@@ -3,6 +3,7 @@ package gain
 import (
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/colespringer/waxflow/dsp/internal/firwin"
 	"github.com/colespringer/waxflow/waxerr"
@@ -11,7 +12,20 @@ import (
 // LimiterVersion is the limiter node's revision for cache keys: bump on
 // any change to detection, smoothing constants, or the clamp (plan
 // section 10).
-const LimiterVersion = "limiter-1"
+//
+// limiter-2 is the settle horizon (see Horizon). The kernel's arithmetic
+// did not change, so a whole-file transcode is byte-identical to
+// limiter-1's; a segmented run starting mid-stream is not, because the old
+// flat 100 ms priming left the gain envelope short of convergence and the
+// segments it produced were not the ones a continuous run produces. This
+// constant is the right one to bump for that even so: it is in the cache
+// key exactly when the limiter is in the chain, which is exactly when the
+// bytes change.
+const LimiterVersion = "limiter-2"
+
+// limiterRelease is the gain-recovery time constant: 50 ms to climb back
+// after a peak passes. It is the limiter's slow pole, so it sets Horizon.
+const limiterRelease = 50 * time.Millisecond
 
 // DefaultCeilingDB is the default limiter ceiling in dBTP. -1 dB is the
 // EBU R128 s1 headroom convention and leaves margin for the 4x detector's
@@ -91,9 +105,9 @@ func NewLimiter(rate, channels int, ceilingDB float64) (*Limiter, error) {
 		look:     max(rate/200, 32), // 5 ms
 	}
 	// Attack settles to within e^-4 (2 percent) of the required gain by
-	// the time the peak arrives; release takes 50 ms to recover.
+	// the time the peak arrives; release takes limiterRelease to recover.
 	l.aAtk = 1 - math.Exp(-4/float64(l.look))
-	l.aRel = 1 - math.Exp(-1/(0.050*float64(rate)))
+	l.aRel = 1 - math.Exp(-1/(limiterRelease.Seconds()*float64(rate)))
 	l.designInterp()
 
 	capFrames := l.look + interpTaps + 4096
@@ -104,6 +118,14 @@ func NewLimiter(rate, channels int, ceilingDB float64) (*Limiter, error) {
 	l.peaks = make([]float32, capFrames)
 	l.Reset()
 	return l, nil
+}
+
+// Horizon reports the pre-roll a restarted run needs before its output
+// rejoins a continuous run's bit-exactly (the dsp.Settler capability): 2 s,
+// from the 50 ms release. See Compressor.Horizon for the derivation, which
+// is the same one; the attack pole is far faster and never binds.
+func (l *Limiter) Horizon() time.Duration {
+	return time.Duration(settleTimeConstants * float64(limiterRelease))
 }
 
 // Reset clears all state for a new stream segment.
@@ -126,7 +148,8 @@ func (l *Limiter) Process(dst, src [][]float32) (produced, consumed int) {
 	if len(dst) != l.channels || len(src) != l.channels {
 		panic("gain: limiter channel count mismatch")
 	}
-	space := len(dst[0])
+	checkFrames("limiter source", src)
+	space := checkFrames("limiter destination", dst)
 	for {
 		// Append what fits after sliding out the emitted prefix.
 		l.compact()
@@ -151,6 +174,7 @@ func (l *Limiter) Drain(dst [][]float32) (produced int) {
 	if len(dst) != l.channels {
 		panic("gain: limiter channel count mismatch")
 	}
+	checkFrames("limiter drain destination", dst)
 	l.draining = true
 	l.detect(true)
 	return l.emit(dst, 0, len(dst[0]), true)
