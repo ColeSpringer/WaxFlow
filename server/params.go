@@ -251,8 +251,48 @@ func parseGain(v string, dflt gainSpec) (gainSpec, error) {
 var streamParamNames = map[string]bool{
 	"src": true, "format": true, "rate": true, "ch": true, "bits": true,
 	"gain": true, "dynamics": true, "t": true, "track": true, "maxBitRate": true,
-	"bitrate": true, "q": true, "container": true,
+	"bitrate": true, "q": true, "container": true, "from": true, "to": true,
 	"id": true, sign.ParamExp: true, sign.ParamKID: true, sign.ParamSig: true,
+}
+
+// span is a request's sample window over the source timeline: the virtual
+// track A11 asks for, one offset range of one file served as a stream in
+// its own right.
+//
+// It is expressed in samples, not seconds, and that is load-bearing rather
+// than a taste. ADR-0006's "seconds convert at the API boundary" is the
+// right convention for a seek, where a sample either way is meaningless. A
+// span is not a seek: it declares which samples are this track, so it is
+// content identity. A CUE boundary at 245.32 s is not exactly representable
+// in binary, and 245.32*44100 floors to 10818611 rather than 10818612,
+// putting a one-sample error at every track boundary of a gapless album.
+// That is the exact failure the CD-frame arithmetic in internal/cue exists
+// to prevent, and seconds here would quietly undo it.
+//
+// So the two coexist with different jobs and compose: from and to are
+// samples on the source timeline, t= stays seconds and seeks within the
+// span.
+type span struct {
+	// from is the window's first sample.
+	from int64
+	// to is one past the window's last sample, 0 when it runs to the end.
+	//
+	// Zero rather than waxflow.ToEnd so that the zero value of a span is
+	// the whole source. A sentinel that had to be set explicitly would make
+	// "nobody set this" mean "empty window", which is the one answer no
+	// caller ever wants and the one a forgotten initializer would produce.
+	to int64
+}
+
+// narrowed reports whether the span bounds the source at all.
+func (sp span) narrowed() bool { return sp.from > 0 || sp.to > 0 }
+
+// end is the window's end in Slice's spelling, where an open end is ToEnd.
+func (sp span) end() int64 {
+	if sp.to <= 0 {
+		return waxflow.ToEnd
+	}
+	return sp.to
 }
 
 // streamParams is a parsed, policy-checked /stream request.
@@ -265,6 +305,7 @@ type streamParams struct {
 	gain       gainSpec
 	dynamics   gain.Preset
 	t          float64 // seconds; samples are derived after probe
+	span       span    // source-sample window; the zero value is the whole source
 	track      int     // -1 when absent
 	maxBitRate int     // kbit/s cap for the decision ladder; 0 none
 	bitrate    int     // lossy output bit rate in kbit/s; 0 selects the default
@@ -365,7 +406,42 @@ func parseStreamParams(q url.Values, defaultGain gainSpec) (*streamParams, error
 		}
 		p.t = t
 	}
+	if p.span, err = parseSpan(q.Get("from"), q.Get("to")); err != nil {
+		return nil, err
+	}
 	return p, nil
+}
+
+// parseSpan parses the from/to virtual-track window. Both are source
+// samples and to is exclusive; either may be absent.
+//
+// The window is only checked for internal sense here (non-negative,
+// ascending). Whether it fits the source is SpanTrack's call, which needs
+// the probed length and makes it in one place for both the plan and the
+// run.
+func parseSpan(fromV, toV string) (span, error) {
+	bad := func(format string, args ...any) (span, error) {
+		return span{}, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(format, args...))
+	}
+	var sp span
+	var err error
+	if fromV != "" {
+		if sp.from, err = strconv.ParseInt(fromV, 10, 64); err != nil || sp.from < 0 {
+			return bad("from %q: want a non-negative sample offset on the source timeline", fromV)
+		}
+	}
+	if toV != "" {
+		if sp.to, err = strconv.ParseInt(toV, 10, 64); err != nil || sp.to <= 0 {
+			// Zero is refused rather than read as "the whole source": to is
+			// exclusive, so to=0 spells the empty span, and a caller who
+			// means the whole source omits the parameter.
+			return bad("to %q: want a positive sample offset on the source timeline, exclusive", toV)
+		}
+	}
+	if sp.to > 0 && sp.to <= sp.from {
+		return bad("span [%d, %d) ends before it starts", sp.from, sp.to)
+	}
+	return sp, nil
 }
 
 func intParam(q url.Values, name string, dflt int) (int, error) {
@@ -396,14 +472,26 @@ func identityString(ref string, id source.Identity) string {
 // seek position, a segment length). Sharing the core is what stops a new
 // shaping parameter from landing in one key and not the other, which is how
 // two different requests come to share a stale entry.
-func canonicalCore(plan *waxflow.TranscodePlan, gainDB float64, dyn gain.Preset) string {
-	return fmt.Sprintf("container=%s&rate=%d&ch=%d&type=%s&bits=%d&bitrate=%d&gain=%s&dynamics=%s",
+//
+// The span belongs here rather than in either key alone, and that is the
+// same rule: two different windows of one file are two different streams,
+// so a key that does not name the window would serve one span's bytes for
+// another's request. Both surfaces carry a span, so both must name it.
+func canonicalCore(plan *waxflow.TranscodePlan, gainDB float64, dyn gain.Preset, sp span) string {
+	return fmt.Sprintf("container=%s&rate=%d&ch=%d&type=%s&bits=%d&bitrate=%d&gain=%s&dynamics=%s&from=%d&to=%d",
 		plan.Container, plan.Format.Rate, plan.Format.Channels, plan.Format.Type,
-		plan.Format.BitDepth, plan.BitRate, strconv.FormatFloat(gainDB, 'g', -1, 64), dynSpelling(dyn))
+		plan.Format.BitDepth, plan.BitRate, strconv.FormatFloat(gainDB, 'g', -1, 64), dynSpelling(dyn),
+		sp.from, sp.end())
 }
 
 // canonicalParams is the progressive cache key's parameter string: the
 // shared core plus the seek position.
-func canonicalParams(plan *waxflow.TranscodePlan, gainDB float64, dyn gain.Preset, from int64) string {
-	return fmt.Sprintf("%s&from=%d", canonicalCore(plan, gainDB, dyn), from)
+//
+// The seek is spelled seek=, not from=, because from= now names the span's
+// start in the shared core and the two are different quantities: the span
+// says which samples are this track, the seek says where inside it playback
+// begins. Spelling both from= would put the term in one key twice, and the
+// names now match the wire (from/to are parameters, the seek is t=).
+func canonicalParams(plan *waxflow.TranscodePlan, gainDB float64, dyn gain.Preset, sp span, seek int64) string {
+	return fmt.Sprintf("%s&seek=%d", canonicalCore(plan, gainDB, dyn, sp), seek)
 }

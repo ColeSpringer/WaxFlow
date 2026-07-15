@@ -76,6 +76,19 @@ type Descriptor struct {
 	// of the variant's identity: a different SegDur is a different
 	// segment numbering.
 	SegDur float64 `json:"segDur,omitempty"`
+	// From and To bound the stream to a sample range of Src: the virtual
+	// track. To is exclusive, 0 meaning the end of the source. They are
+	// exclusive with Tl, since a span narrows one file and a timeline is
+	// several.
+	//
+	// Samples rather than seconds, and int64 rather than SegDur's float64,
+	// for a reason that does not apply to SegDur: a span declares which
+	// samples are this track, so it is content identity, while SegDur is a
+	// target the plan snaps anyway. A CUE boundary at 245.32 s is not
+	// exactly representable in binary and would land a sample off at every
+	// track boundary of a gapless album.
+	From int64 `json:"from,omitempty"`
+	To   int64 `json:"to,omitempty"`
 }
 
 // Encode serializes the descriptor as base64url JSON for the v=
@@ -160,6 +173,18 @@ func DecodeDescriptor(s string) (Descriptor, error) {
 		return bad("rate and ch must be non-negative")
 	case d.SegDur < 0:
 		return bad("segDur %g is negative", d.SegDur)
+	case d.From < 0:
+		return bad("from %d is negative", d.From)
+	case d.To < 0:
+		return bad("to %d is negative", d.To)
+	case d.To > 0 && d.To <= d.From:
+		return bad("span [%d, %d) ends before it starts", d.From, d.To)
+	case d.Tl != "" && (d.From > 0 || d.To > 0):
+		// A span narrows one file; a timeline is several. Spanning a
+		// timeline would be a coherent thing to want one day, but it would
+		// have to address the timeline's own envelope, which is not what
+		// these samples mean.
+		return bad("names a tl and a span; a span bounds one source")
 	}
 	for _, b := range d.Bitrates {
 		if b <= 0 {

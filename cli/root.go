@@ -88,6 +88,7 @@ Configuration precedence: flag > WAXFLOW_* environment > JSON config file
 		newServerCmd(version, flavor),
 		newProbeCmd(flavor),
 		newTranscodeCmd(flavor),
+		newSplitCmd(flavor),
 		newSignCmd(flavor),
 		newCacheCmd(),
 		newDoctorCmd(flavor),

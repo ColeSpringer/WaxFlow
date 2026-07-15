@@ -22,6 +22,20 @@ type Chapter struct {
 	Title string
 }
 
+// Chapterer is implemented by demuxers that parse chapter markers, in the
+// same idiom as Warner and Indexer: an honest capability gate rather than
+// a method every demuxer carries, since a container with no chapter form
+// has nothing to answer and does not implement it.
+//
+// Chapters is a field read, so asking is free: a demuxer that implements
+// this resolved its chapters during the header parse. The parse itself is
+// not free, and an mp4 chapter text track is why: its chapters live in a
+// sample table, which costs one read each. That is the reason they are
+// resolved once, with the header, rather than per caller.
+type Chapterer interface {
+	Chapters() []Chapter
+}
+
 // Picture is embedded cover art for muxers that can embed it.
 type Picture struct {
 	MIME string

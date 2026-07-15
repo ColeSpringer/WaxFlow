@@ -225,10 +225,14 @@ func timelineVersions(tracks []container.Track, env audio.Format, profile resamp
 	return out, nil
 }
 
-// primeStarts computes a mid-stream run's two priming starts on the output
-// timeline: pChain is the first sample fed to the DSP chain, pEnc the first
-// fed to the encoder, both for a run whose first kept sample is p0. A run
-// from the top of the stream primes neither, so both are 0.
+// primeStarts computes a run's two priming starts on the output timeline:
+// pChain is the first sample fed to the DSP chain, pEnc the first fed to the
+// encoder, both for a run whose first kept sample is p0.
+//
+// A run from the top of a media that has nothing ahead of its sample 0 primes
+// neither, and that falls out of the clamps rather than being tested for:
+// both windows reach back from p0, and at the top of such a stream there is
+// nothing behind p0 for them to reach into.
 //
 // The two windows are split because they settle different things at very
 // different costs. The encoder needs primeSeconds to settle its own
@@ -247,10 +251,19 @@ func timelineVersions(tracks []container.Track, env audio.Format, profile resamp
 //
 // Both starts round up to whole encoder frames and clamp at the stream top,
 // so the packet discard below stays exact.
-func primeStarts(p0 int64, rate, frame int, horizon time.Duration, midStream bool) (pChain, pEnc int64) {
-	if !midStream {
-		return 0, 0
-	}
+//
+// floor is the lowest position the media can deliver, which is 0 for a file
+// and negative for a span: see Headroomer. It bounds the chain's window
+// only, and the asymmetry is the point rather than an oversight. Feeding
+// the chain from before a span's sample 0 is what makes that sample hold
+// the audio a continuous run of the whole source delivers there, since the
+// resampler's window is then full of real samples instead of zeros. The
+// encoder needs no such thing: a span is served as its own stream, with its
+// own init segment, so its sample 0 genuinely is where its encoder starts,
+// exactly as a whole track's is. Priming the encoder from a negative
+// position would also number its first frame below zero, which is a thing
+// no encoder here can express.
+func primeStarts(p0 int64, rate, frame int, horizon time.Duration, floor int64) (pChain, pEnc int64) {
 	roundUp := func(n int64) int64 { return (n + int64(frame) - 1) / int64(frame) * int64(frame) }
 	encPrime := roundUp(int64(float64(rate) * primeSeconds))
 	// The chain's window sits in front of the encoder's, it does not replace
@@ -260,7 +273,52 @@ func primeStarts(p0 int64, rate, frame int, horizon time.Duration, midStream boo
 	// declares no horizon (no gain, no dynamics: every plain FLAC or
 	// untouched Opus stream) adds zero and primes exactly as it always did.
 	chainPrime := encPrime + roundUp(int64(horizon.Seconds()*float64(rate)))
-	return max(0, p0-chainPrime), max(0, p0-encPrime)
+	// The floor rounds toward zero to a whole frame, keeping every start a
+	// frame multiple so the packet discard stays exact.
+	floor = floor / int64(frame) * int64(frame)
+	return max(floor, p0-chainPrime), max(0, p0-encPrime)
+}
+
+// headroomFloor is the lowest output position the chain may be fed from: 0
+// for an ordinary media, negative for one that has real audio ahead of its
+// sample 0. See Headroomer.
+//
+// It converts the media's headroom from source samples to output samples,
+// keeping a small margin at the far end, because the caller maps the
+// position it picks back to the source with a floor and one further sample
+// of slop. Without the margin, a run priming to the very edge of the
+// headroom would ask the media for a sample just before its source's start
+// and fail the seek. Understating the headroom costs a sample of priming;
+// overstating it costs the request.
+func headroomFloor(med format.Media, chain *dsp.Chain) int64 {
+	h, ok := med.(Headroomer)
+	if !ok {
+		return 0
+	}
+	room := h.Headroom() - headroomMargin
+	if room <= 0 {
+		return 0
+	}
+	l, m := chain.Ratio()
+	return -(room * int64(l) / int64(m))
+}
+
+// headroomMargin is the source samples headroomFloor holds back to cover
+// the floor-and-back-off the output-to-source map applies.
+const headroomMargin = 2
+
+// floorDiv is floor(a/b) for a positive b, over the whole range of a.
+//
+// Go's integer division truncates toward zero, which rounds a negative
+// position up, and up is the wrong way for a map that must land at or
+// before its target. A span priming ahead of its own sample 0 is the case
+// where a is negative.
+func floorDiv(a, b int64) int64 {
+	q, r := a/b, a%b
+	if r < 0 {
+		q--
+	}
+	return q
 }
 
 // totalDecodeSamples is the whole stream's decode duration for a trimmed
@@ -421,20 +479,23 @@ func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, o
 
 	// Output-timeline positions: p0 is the first kept sample, pChain the
 	// first fed to the chain, pEnc the first fed to the encoder.
+	//
+	// A span primes its own segment 0, which a file cannot: headroomFloor is
+	// negative exactly when the media has real audio ahead of its sample 0,
+	// so the run has something to prime with even at the top of the stream,
+	// because for a span there genuinely is.
 	p0 := segOpts.StartSegment * int64(segOpts.SegmentSamples)
-	pChain, pEnc := primeStarts(p0, f.Rate, frame, chain.Horizon(), segOpts.StartSegment > 0)
+	floor := headroomFloor(med, chain)
+	pChain, pEnc := primeStarts(p0, f.Rate, frame, chain.Horizon(), floor)
 
-	if pChain > 0 {
+	if pChain != 0 {
 		// Map the output position back to the source timeline. Rounding
-		// must land at or before pChain, so the floor conversion backs off
-		// one more source sample; the remainder is discarded from the
-		// chain's output below, positioned by the first chunk's Pos.
+		// must land at or before pChain, so the conversion floors and then
+		// backs off one more source sample; the remainder is discarded from
+		// the chain's output below, positioned by the first chunk's Pos.
 		srcPos := pChain
 		if l, m := chain.Ratio(); l != m {
-			srcPos = pChain * int64(m) / int64(l)
-			if srcPos > 0 {
-				srcPos--
-			}
+			srcPos = floorDiv(pChain*int64(m), int64(l)) - 1
 		}
 		if _, err := med.SeekSample(srcPos); err != nil {
 			return nil, err

@@ -2,6 +2,7 @@ package mp4
 
 import (
 	"encoding/binary"
+	"math"
 
 	"github.com/colespringer/waxflow/container"
 )
@@ -131,6 +132,54 @@ func makeBox(typ string, parts ...[]byte) []byte {
 func makeFullBox(typ string, version byte, flags uint32, parts ...[]byte) []byte {
 	head := []byte{version, byte(flags >> 16), byte(flags >> 8), byte(flags)}
 	return makeBox(typ, append([][]byte{head}, parts...)...)
+}
+
+// durVersion is the full-box version a movie, track or media header needs
+// to state dur: 0 while it fits in 32 bits, 1 when it does not. Version 1
+// widens creation_time, modification_time and duration to 64 bits and
+// changes nothing else.
+//
+// This is not a hypothetical bound at audio rates, which is why the choice
+// is made per file rather than pinned at 0. A header's duration counts
+// media ticks, and for an audio track a tick is a sample, so 2^32 of them
+// is 27 hours at 44.1 kHz and under 25 at 48. An audiobook read is
+// routinely longer than that, and a wrapped duration is a file that lies
+// about its own length to every player. The edit list has been version 1
+// since it was written, for exactly this reason; the headers were simply
+// left at 0 behind it.
+//
+// Version 0 stays the answer for everything short enough, so ordinary
+// output is byte-identical to what it always was.
+func durVersion(dur int64) byte {
+	if dur > math.MaxUint32 {
+		return 1
+	}
+	return 0
+}
+
+// zeroTimes renders the creation_time and modification_time pair a movie,
+// track or media header opens with, at the width its version implies.
+//
+// Both are zero, deliberately: this muxer does not date its output, so the
+// same input produces the same bytes and a golden file means something.
+func zeroTimes(version byte) []byte {
+	if version == 1 {
+		return make([]byte, 16)
+	}
+	return make([]byte, 8)
+}
+
+// durField renders a duration at the width its version implies. A negative
+// duration is a bug upstream rather than a value to encode, and clamps to
+// zero rather than wrapping to enormous.
+func durField(version byte, dur int64) []byte {
+	if dur < 0 {
+		dur = 0
+	}
+	if version == 1 {
+		return u64(uint64(dur))
+	}
+	return u32(uint32(dur))
 }
 
 // u16, u32, u64 render big-endian integer fields for box assembly.

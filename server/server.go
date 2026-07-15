@@ -346,6 +346,9 @@ func New(cfg Config) (*Server, error) {
 				return g.resolveDB(info, gain.PresetOff), nil
 			},
 			MintTimeline: s.mintTimelineJob,
+			// The exact length a merge's members need, through the memo the
+			// timeline mint fills: creation measured them, so the run does not.
+			MeasureTrack: func(src *source.File) (container.Track, error) { return s.trackFor(src, true) },
 			Slots:        jobSlots,
 			Profile:      profile,
 			Logger:       log,
@@ -411,6 +414,9 @@ func (s *Server) routes() {
 		mux.HandleFunc("DELETE /jobs/{id}", s.requireKey(s.handleJobDelete))
 		mux.HandleFunc("GET /jobs/{id}/events", s.handleJobEvents)
 		mux.HandleFunc("GET /jobs/{id}/result", s.handleJobResult)
+		// The indexed form is the same handler: a job with one output answers
+		// on both, and the bare path refuses only where it would have to guess.
+		mux.HandleFunc("GET /jobs/{id}/result/{n}", s.handleJobResult)
 	}
 	mux.HandleFunc("GET /art", s.handleArt)
 	mux.HandleFunc("HEAD /art", s.handleArt)

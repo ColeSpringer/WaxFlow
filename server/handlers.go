@@ -133,8 +133,9 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 				s.writeError(w, err)
 				return
 			}
-			s.writeError(w, waxerr.New(waxerr.CodeInvalidRequest,
-				fmt.Sprintf("path %q: signable paths are /stream, /hls/master.m3u8, /art, /lyrics, and /jobs/<id>/{events,result}", req.Path)))
+			s.writeError(w, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+				"path %q: signable paths are /stream, /hls/master.m3u8, /art, /lyrics, "+
+					"and /jobs/<id>/{events,result,result/<n>}", req.Path)))
 			return
 		}
 		if len(req.Params) > 0 {
@@ -196,25 +197,42 @@ func (s *Server) handleTranscode(w http.ResponseWriter, r *http.Request) {
 			release()
 		}
 	}()
-	entry := cache.NewMemEntry(s.cfg.RingBytes, cache.Meta{Ext: req.plan.Container})
+	entry := cache.NewMemEntry(s.cfg.RingBytes, cache.Meta{Ext: waxflow.OutputExt(req.opts.Format, req.opts.Container)})
 	reader, err := entry.NewReader()
 	if err != nil {
 		s.writeError(w, err)
 		return
 	}
-	s.startPipeline(r.Context(), entry, req.p.src, req.src.ID, req.src.Ext, req.opts, release, true)
+	s.startPipeline(r.Context(), entry, req.p.src, req.src.ID, req.src.Ext, req.opts, req.p.span, release, true)
 	armed = true
 
-	w.Header().Set("Content-Disposition", "attachment; filename=\""+outputFilename(req.p.src, req.plan.Container)+"\"")
+	// The extension is the output table's, not the plan's container name: the
+	// latter is a muxer-form selector (see OutputExt), and only coincides with
+	// a file form for the rows whose names happen to be extensions.
+	w.Header().Set("Content-Disposition",
+		"attachment; filename=\""+outputFilename(req.p.src, waxflow.OutputExt(req.opts.Format, req.opts.Container))+"\"")
 	// Downloads are not playback: no pacing.
 	s.serveLive(w, r, reader, req.plan, false, reqStart)
 }
 
 // outputFilename derives the attachment name from the source reference.
+//
+// A ref with no name of its own falls back rather than composing one out of
+// punctuation. Every caller requires a ref (parseStreamParams refuses an
+// empty src, validateJobRequest an empty src and empty srcs), so this is a
+// guard on the arithmetic and not a live path; it is here because the
+// arithmetic is a trap. path.Base("") is ".", whose only dot is at index 0,
+// which the extension strip below skips over on purpose (a leading dot is a
+// name, not an extension), so the result would be "..flac", and for a
+// split's pieces "..0.flac". Those are hidden files: the download would
+// arrive and vanish from the folder it landed in.
 func outputFilename(ref, ext string) string {
 	base := path.Base(ref)
 	if i := strings.LastIndexByte(base, '.'); i > 0 {
 		base = base[:i]
+	}
+	if base == "." || base == ".." || base == "/" || base == "" {
+		base = "output"
 	}
 	base = strings.Map(func(r rune) rune {
 		if r == '"' || r == '\\' || r < 0x20 {

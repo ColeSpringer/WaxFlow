@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"testing"
 
 	"github.com/colespringer/waxflow"
@@ -409,6 +410,67 @@ func TestOutputTable(t *testing.T) {
 	for _, tt := range tests {
 		if got := waxflow.OutputFormatForExt(tt.ext); got != tt.want {
 			t.Errorf("OutputFormatForExt(%q) = %q, want %q", tt.ext, got, tt.want)
+		}
+	}
+}
+
+// TestOutputExt pins the write direction of the same table, which is not the
+// read direction inverted: two formats write .m4a and only one claims it, and
+// a container override renames the file only where it names a real second
+// wrapper rather than the row's own in another box shape.
+func TestOutputExt(t *testing.T) {
+	tests := []struct{ format, container, want string }{
+		// The default form of a row is the first extension it claims.
+		{"wav", "", "wav"},
+		{"opus", "", "opus"},
+		{"vorbis", "", "ogg"},
+		{"aiff", "", "aif"},
+		{"flac", "", "flac"},
+		{"mp3", "", "mp3"},
+		{"aac", "", "m4a"},
+		// alac claims no extension (aac took m4a) and writes an m4a all the
+		// same. The read direction cannot say so and does not have to.
+		{"alac", "", "m4a"},
+		// progressive is the row's own MP4 flattened, not a second container,
+		// so the file keeps its name: naming the override instead is the
+		// foo.progressive download this exists to stop.
+		{"aac", "progressive", "m4a"},
+		{"alac", "progressive", "m4a"},
+		// A real second wrapper renames the file.
+		{"aac", "adts", "aac"},
+		{"wav", "mka", "mka"},
+		{"flac", "mka", "mka"},
+		{"opus", "mka", "mka"},
+		{"opus", "webm", "webm"},
+		{"vorbis", "webm", "webm"},
+		{"flac", "ogg", "oga"},
+		// An unregistered format has no file form to name, whatever wrapper
+		// comes with it.
+		{"xyz", "", "bin"},
+		{"xyz", "mka", "bin"},
+		{"", "", "bin"},
+	}
+	for _, tt := range tests {
+		if got := waxflow.OutputExt(tt.format, tt.container); got != tt.want {
+			t.Errorf("OutputExt(%q, %q) = %q, want %q", tt.format, tt.container, got, tt.want)
+		}
+	}
+}
+
+// TestOutputExtEveryRow walks the table, so a row that lands without a write
+// extension fails here rather than in the name of a download.
+func TestOutputExtEveryRow(t *testing.T) {
+	for _, o := range waxflow.Outputs() {
+		ext := waxflow.OutputExt(o.Name, "")
+		switch {
+		case ext == "":
+			t.Errorf("%s writes no extension at all", o.Name)
+		case ext == "bin":
+			t.Errorf("%s falls back to .bin, which is the answer for a format with no file "+
+				"form: the row claims no extension and names no write extension either", o.Name)
+		case len(o.Exts) > 0 && !slices.Contains(o.Exts, ext):
+			t.Errorf("%s writes .%s but claims %v; the two directions may differ, but not "+
+				"about a row that answers to its own extension", o.Name, ext, o.Exts)
 		}
 	}
 }

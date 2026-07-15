@@ -48,7 +48,24 @@ const CELLS = [
   // proves that what it receives is one stream it can seek inside.
   { surface: "timeline", format: "opus" },
   { surface: "timeline", format: "flac" },
+  // A virtual track: one offset range of one file, served as its own HLS
+  // presentation. The engine tests prove the samples are the right ones
+  // (TestSpanDeliversItsOwnSamples) and that a resampled span's first
+  // samples are primed rather than a transient
+  // (TestSpanPrerollMatchesContinuous). What only a real player proves is
+  // that the presentation it receives describes the span and not the file:
+  // opus resamples 44.1k to 48k, which is the case a CUE rip actually hits.
+  { surface: "span", format: "opus" },
 ];
+
+// The span cell's window over span.wav, in source samples. Both ends are
+// CD frame boundaries (588 samples each at 44100) and neither is a round
+// number of seconds, which is the case a seconds-based span gets wrong and
+// this surface exists not to be. 137 and 438 frames: 1.827 s to 5.840 s.
+const SPAN_RATE = 44100;
+const SPAN_FROM = 137 * 588; // 80556
+const SPAN_TO = 438 * 588; // 257544, inside the 6 s fixture
+const SPAN_SECONDS = (SPAN_TO - SPAN_FROM) / SPAN_RATE; // 4.013...
 
 // The timeline fixture: three tracks whose boundaries are not on segment
 // boundaries, so a seam that survived the sample math still has somewhere
@@ -101,7 +118,7 @@ async function waitForPing(base, deadlineMS) {
 // Drive one cell on the demo page and require playback progress: the
 // player's currentTime past 2 s within 30 s, not paused, no fatal
 // hls.js error and no <audio> element error.
-const PLAYER_ID = { hls: "hlsPlayer", progressive: "player", timeline: "tlPlayer" };
+const PLAYER_ID = { hls: "hlsPlayer", progressive: "player", timeline: "tlPlayer", span: "hlsPlayer" };
 
 // health reads the player's state and throws on anything a working cell
 // cannot show: a self-pause, a media element error, an hls.js fatal.
@@ -130,6 +147,12 @@ async function runCell(page, base, cell) {
     await page.fill("#tlSrcs", TIMELINE_TRACKS.map((_, i) => `lib/tl-${i}.wav`).join("\n"));
     await page.selectOption("#tlFormat", cell.format);
     await page.click("#tlPlay");
+  } else if (cell.surface === "span") {
+    await page.fill("#src", "lib/span.wav");
+    await page.selectOption("#hlsFormat", cell.format);
+    await page.fill("#hlsFrom", String(SPAN_FROM));
+    await page.fill("#hlsTo", String(SPAN_TO));
+    await page.click("#hlsPlay");
   } else if (cell.surface === "hls") {
     await page.fill("#src", "lib/test.wav");
     await page.selectOption("#hlsFormat", cell.format);
@@ -145,6 +168,20 @@ async function runCell(page, base, cell) {
     { timeout: 30000 },
   );
   const state = await health(page, playerID, "during playback");
+
+  if (cell.surface === "span") {
+    // The whole claim: the presentation describes the span, not the file.
+    // A playlist built from the file's track would run the fixture's full
+    // 6 s, and would play perfectly while being the wrong stream, so the
+    // duration is the assertion rather than a proxy for one.
+    if (Math.abs(state.duration - SPAN_SECONDS) > 0.2) {
+      throw new Error(
+        `the player sees a ${state.duration.toFixed(3)}s stream, want the span's ` +
+          `${SPAN_SECONDS.toFixed(3)}s: the playlist describes the file, not the virtual track`,
+      );
+    }
+    return;
+  }
   if (cell.surface !== "timeline") return;
 
   // The player must see the whole queue as one stream. Asserted before the
@@ -195,6 +232,11 @@ const cache = join(work, "cache");
 const data = join(work, "data");
 for (const d of [root, cache, data]) mkdirSync(d, { recursive: true });
 writeFileSync(join(root, "test.wav"), makeWAV());
+// The span fixture is 44.1 kHz on purpose: HLS opus is always 48 kHz, so a
+// span of it is resampled by construction, which is the CUE-rip case and
+// the one where a span's first samples come out of a filter window that
+// has to be primed rather than empty.
+writeFileSync(join(root, "span.wav"), makeWAV(6, SPAN_RATE));
 // The timeline queue: three tracks of different lengths, so a bug that
 // assumed uniform members shows up as a wrong boundary rather than passing
 // by symmetry.

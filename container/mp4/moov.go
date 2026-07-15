@@ -31,6 +31,13 @@ type track struct {
 	editMedia  int64 // media_time in media timescale ticks (-1 = empty edit)
 	editSegDur int64 // segment_duration in movie timescale ticks
 
+	// emptyEdit is the blank presentation time the edit list inserts before
+	// the first sample, in movie ticks: the standard way a track states that
+	// it starts late. A chapter track's first chapter start rides here,
+	// because stts times its samples as deltas from zero and so cannot hold
+	// an absolute start; readTextChapters adds it back.
+	emptyEdit int64
+
 	// chapRefs are track_IDs referenced as chapter tracks ('chap' tref).
 	chapRefs []int
 }
@@ -191,8 +198,10 @@ func (d *Demuxer) parseMinf(t *track, body []byte, depth int) error {
 // parseElst reads the edit list. For gapless the meaningful values are the
 // first non-empty edit's media_time (the encoder-delay priming iTunes
 // writes) and the total played duration (sum of segment durations over
-// non-empty edits, in movie ticks). An empty edit (media_time -1) inserts
-// blank presentation time and is skipped for the delay.
+// non-empty edits, in movie ticks). An empty edit (media_time -1) consumes no
+// media and so contributes no delay, but its segment duration is kept: it is
+// how a track states that its presentation starts late, which is the whole of
+// a chapter track's first start.
 func parseElst(t *track, payload []byte) {
 	version, _, rest, ok := fullBox(payload)
 	if !ok || len(rest) < 4 {
@@ -207,7 +216,7 @@ func parseElst(t *track, payload []byte) {
 	if count > int64(len(rest))/entrySize {
 		count = int64(len(rest)) / entrySize
 	}
-	var totalSeg int64
+	var totalSeg, empty int64
 	mediaTime := int64(-1)
 	for i := int64(0); i < count; i++ {
 		e := rest[i*entrySize:]
@@ -220,13 +229,21 @@ func parseElst(t *track, payload []byte) {
 			mt = int64(int32(be32(e[4:])))
 		}
 		if mt < 0 {
-			continue // empty edit: blank time, no media consumed
+			// An empty edit: blank time, no media consumed. Only a leading run
+			// of them offsets the first sample, which is the offset wanted here;
+			// one between two real edits is a gap mid-track, and a sample table
+			// read straight through cannot express it anyway.
+			if mediaTime < 0 && segDur > 0 {
+				empty += segDur
+			}
+			continue
 		}
 		if mediaTime < 0 {
 			mediaTime = mt // first real edit's start offset
 		}
 		totalSeg += segDur
 	}
+	t.emptyEdit = empty
 	if mediaTime < 0 {
 		return // only empty edits; nothing to trim
 	}

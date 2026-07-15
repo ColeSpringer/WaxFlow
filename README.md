@@ -37,7 +37,10 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   source identity, a write-through cache with read-behind delivery and
   full ranges on completed entries, HLS (CMAF/fMP4, stateless signed
   URLs, bitrate ladders, byte-identical segment regeneration), async
-  jobs with restart safety, uploads, loudness analysis with ReplayGain
+  jobs with restart safety (transcode, analyze, and the gapless
+  merge/split pair: a lossless split rejoins bit for bit, and a split
+  takes a CUE sheet or sample cut points), uploads,
+  loudness analysis with ReplayGain
   tagging, metadata passthrough (tags, chapters, cover art, lyrics),
   admission control, Prometheus metrics, named client delivery profiles
   in `/caps`, and a full API contract in [docs/api.md](docs/api.md).
@@ -142,6 +145,14 @@ Precedence: **flag > `WAXFLOW_*` env > JSON config file > default**
   passes through onto the output automatically (`--no-tags` to skip);
   `--loudness analyze` measures the source, applies the exact gain to
   the ReplayGain reference, and writes measured RG tags on the output
+- `waxflow split <in> <dir>`: cut a single-file rip into one output per
+  track, from a CUE sheet (`--cue album.cue`) or explicit source-sample
+  offsets (`--at`). Cut points are samples either way: a sheet's `MM:SS:FF`
+  times are CD frames of 1/75 s, which every CD-family rate divides exactly
+  (44100/75 = 588), so a boundary converts with no rounding, where seconds
+  would land a sample off and click at every join. The default FLAC output
+  at the source's own rate makes the cut bit-exact, so the pieces rejoin
+  into the original. `--dry-run` prints the pieces and their ranges
 - `waxflow sign --src lib/a.flac`: mint a signed playback URL offline
   (ADR-0003; uses the same secret and roots the daemon holds)
 - `waxflow cache stats|gc`: inspect or evict a running daemon's cache
@@ -188,7 +199,7 @@ Video; HE-AAC/SBR/xHE; Vorbis/WMA/APE/WavPack **encoding**; WMA/APE/WavPack
 decoding; DASH manifests (the CMAF segments are already DASH-compatible);
 DRM/HLS-AES; Opus PLC; CD ripping; any database (WaxBin owns cataloging);
 tag *editing* (WaxLabel owns it; WaxFlow only maps and passes metadata);
-Icecast/radio ingest; CUE splitting; waveform peaks (WaxBin has them);
+Icecast/radio ingest; waveform peaks (WaxBin has them);
 distributed cache; two-pass loudness on live streams (jobs only).
 
 ## Development

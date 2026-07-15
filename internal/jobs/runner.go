@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"math"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/dsp/resample"
+	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/admission"
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/source"
@@ -47,6 +49,22 @@ type Config struct {
 	// async wrapper the measuring needs. The runner supplies the progress
 	// callback so a cold mint of a long queue reports where it is.
 	MintTimeline func(ctx context.Context, srcs []string, progress func(done, total int64)) (*Timeline, error)
+	// MeasureTrack reports a source's default track with an authoritative
+	// length, walking the source when its headers cannot declare one. Nil
+	// disables merge jobs.
+	//
+	// It is a hook for the reason the two above are: the memo that makes this
+	// affordable belongs to the server (it is the same one the HLS timeline
+	// mint fills, keyed by source identity), and a merge is the same measuring
+	// problem the mint has. Sharing it is what makes a merge of an album that
+	// was already timelined cost nothing, and what makes creation's
+	// measurement the run's.
+	//
+	// A merge cannot use the declared length the way a single-source transcode
+	// can. Concat holds every member to its track, so an advisory total that
+	// is two samples out fails the run outright; and even if it did not, a
+	// prefix sum desyncs every position after it.
+	MeasureTrack func(src *source.File) (container.Track, error)
 	// Slots is the number of concurrently running jobs (jobSlots).
 	Slots int
 	// Profile is the daemon's resampler profile.
@@ -130,19 +148,20 @@ func (r *Runner) Running() int {
 	return len(r.cancels)
 }
 
-// OutputPath resolves a finished transcode's file.
-func (r *Runner) OutputPath(j *Job) string {
-	if j.Output == nil {
+// OutputPath resolves the file of the job's nth output, empty for an index
+// the job does not have.
+func (r *Runner) OutputPath(j *Job, n int) string {
+	if n < 0 || n >= len(j.Outputs) {
 		return ""
 	}
-	return filepath.Join(r.store.jobDir(j.ID), j.Output.File)
+	return filepath.Join(r.store.jobDir(j.ID), j.Outputs[n].File)
 }
 
-// OutputFile opens a finished transcode's product for serving.
-func (r *Runner) OutputFile(j *Job) (*os.File, error) {
-	p := r.OutputPath(j)
+// OutputFile opens the job's nth product for serving.
+func (r *Runner) OutputFile(j *Job, n int) (*os.File, error) {
+	p := r.OutputPath(j, n)
 	if p == "" {
-		return nil, waxerr.New(waxerr.CodeInternal, "jobs: job has no output")
+		return nil, waxerr.New(waxerr.CodeNotFound, "jobs: no such output")
 	}
 	f, err := os.Open(p)
 	if err != nil {
@@ -309,6 +328,10 @@ func (r *Runner) run(j *Job) {
 		err = r.runAnalyze(ctx, j)
 	case TypeTimeline:
 		err = r.runTimeline(ctx, j)
+	case TypeMerge:
+		err = r.runMerge(ctx, j)
+	case TypeSplit:
+		err = r.runSplit(ctx, j)
 	default:
 		err = waxerr.New(waxerr.CodeInvalidRequest, "jobs: unknown job type")
 	}
@@ -346,16 +369,79 @@ func (r *Runner) run(j *Job) {
 
 // open resolves the job's source and enforces the pinned identity.
 func (r *Runner) open(ctx context.Context, req Request) (*source.File, error) {
-	src, err := r.cfg.Resolver.Resolve(ctx, req.Src)
+	return r.resolvePinned(ctx, req.Src, req.SourceID, -1)
+}
+
+// openMember resolves a merge's ith member and enforces its own pinned
+// identity.
+func (r *Runner) openMember(ctx context.Context, req Request, i int) (*source.File, error) {
+	var id string
+	if i < len(req.SourceIDs) {
+		id = req.SourceIDs[i]
+	}
+	return r.resolvePinned(ctx, req.Srcs[i], id, i)
+}
+
+// resolvePinned resolves ref and holds it to the identity the job was created
+// against. member is the member index for a merge, negative for a job with one
+// source.
+//
+// The index is in the message rather than only in the log, and that is the
+// whole reason this is shared rather than two functions. A merge of 40
+// chapters that reports "the source changed" names 40 candidates; naming the
+// one that moved is the difference between a caller re-uploading a file and a
+// caller re-uploading a library.
+func (r *Runner) resolvePinned(ctx context.Context, ref, id string, member int) (*source.File, error) {
+	src, err := r.cfg.Resolver.Resolve(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
-	if req.SourceID != "" && req.SourceID != src.ID.String() {
+	if id != "" && id != src.ID.String() {
 		src.Close()
-		return nil, waxerr.New(waxerr.CodeSourceChanged,
-			"jobs: the source changed since the job was created")
+		msg := "jobs: the source changed since the job was created"
+		if member >= 0 {
+			msg = fmt.Sprintf("jobs: member %d (%s): the source changed since the job was created", member, ref)
+		}
+		return nil, waxerr.New(waxerr.CodeSourceChanged, msg)
 	}
 	return src, nil
+}
+
+// closingMedia releases the source handle with the media, so a Concat member
+// closed on advance gives its file descriptor back.
+type closingMedia struct {
+	format.Media
+	f *source.File
+}
+
+func (m closingMedia) Close() error {
+	err := m.Media.Close()
+	m.f.Close()
+	return err
+}
+
+// openMemberMedia is a merge member's Open: resolve, re-pin, decode.
+//
+// The pin is checked here as well as during the measuring pass, because these
+// are different moments and the second is the one that matters: members open
+// lazily, as the concat reaches them, which for a long queue is minutes after
+// the pass that measured them. A member replaced in between would otherwise be
+// concatenated at its old length, which is the desync the pin exists to catch.
+//
+// ctx is the job's own, never a request's, exactly as ConcatSource.Open
+// requires: this fires deep inside the transcode, long after the call that
+// built the Concat returned.
+func (r *Runner) openMemberMedia(ctx context.Context, req Request, i int) (format.Media, error) {
+	f, err := r.openMember(ctx, req, i)
+	if err != nil {
+		return nil, err
+	}
+	med, err := r.cfg.Engine.OpenStream(f, f.Ext)
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return closingMedia{Media: med, f: f}, nil
 }
 
 // progressFunc builds the per-chunk hook: it updates the in-memory
@@ -463,7 +549,7 @@ func (r *Runner) runAnalyze(ctx context.Context, j *Job) error {
 	r.store.update(j.ID, false, func(job *Job) {
 		job.Analysis = a
 		if out != nil {
-			job.Output = out
+			job.Outputs = []Output{*out}
 		}
 	})
 	return nil
@@ -664,6 +750,16 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 		}
 	}
 
+	// Probe before the options rather than after: it fixes the output's
+	// identity fields (media type, container) for the plan below, and it
+	// carries the container's own chapters, which the options need. Creation
+	// validated this same plan, so failures here mean the source itself
+	// changed shape.
+	probe, err := r.cfg.Engine.Probe(src, src.Ext, nil)
+	if err != nil {
+		return err
+	}
+
 	dropRG := gainDB != 0 || analyzeLoudness
 	tagInfo := info
 	if dropRG {
@@ -671,20 +767,24 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 	}
 	opts := req.TranscodeOptions(gainDB, r.cfg.Profile)
 	opts.Tags = meta.FullTags(tagInfo)
+	// The container's own chapters are the floor, and the mapper's win when a
+	// mapper is wired and read some: a richer tag library may know forms the
+	// container package does not. GET /probe resolves the same two sources the
+	// same way, which is the point of matching it here: a caller that probes a
+	// file and then transcodes it must not be told about chapters the output
+	// then lacks. Reading them only from the mapper is what made a daemon
+	// embedded by anyone who injects none write chapterless outputs, for a
+	// file whose chapters the demuxer had already parsed off the header.
+	opts.Chapters = probe.Chapters
 	if info != nil {
-		opts.Chapters = info.Chapters
+		if len(info.Chapters) > 0 {
+			opts.Chapters = info.Chapters
+		}
 		if p := info.FrontPicture(); p != nil {
 			opts.Art = &container.Picture{MIME: p.MIME, Data: p.Data}
 		}
 	}
 
-	// Plan before running for the output's identity fields (media type,
-	// container); creation validated this same plan, so failures here
-	// mean the source itself changed shape.
-	probe, err := r.cfg.Engine.Probe(src, src.Ext, nil)
-	if err != nil {
-		return err
-	}
 	plan, err := r.cfg.Engine.PlanTranscode(probe.Default(), opts)
 	if err != nil {
 		return err
@@ -703,7 +803,7 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 			container.Tag{Key: "REPLAYGAIN_TRACK_PEAK", Value: meta.FormatPeak(0)})
 	}
 
-	outName := "out." + plan.Container
+	outName := "out." + outputExt(opts)
 	outPath := filepath.Join(r.store.jobDir(j.ID), outName)
 	f, err := os.OpenFile(outPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -783,15 +883,296 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 		return waxerr.Wrap(waxerr.CodeInternal, "jobs: output stat", err)
 	}
 	r.store.update(j.ID, false, func(job *Job) {
-		job.Output = &Output{
+		job.Outputs = []Output{{
 			File:      outName,
 			MediaType: plan.MediaType,
 			Container: plan.Container,
 			Bytes:     fi.Size(),
 			Samples:   res.Samples,
 			Rate:      plan.Format.Rate,
-		}
+		}}
 		job.Analysis = analysis
 	})
+	return nil
+}
+
+// outputExt is the extension a job's product is written with.
+//
+// It is asked of the requested format and container, never of plan.Container,
+// which is the trap: the plan reports the row's own name when nothing
+// overrode it, so naming a file by it writes out.alac, and reports the
+// override when something did, so an mp4-family merge writes out.progressive.
+// Neither is a file a player will open, and progressive is not even a
+// different container, it is the same MP4 with its boxes flattened.
+//
+// Output.Container goes on carrying the container name; only the filename
+// takes the extension. The two answer different questions and deriving one
+// from the other at each use is what keeps them from drifting apart on disk.
+//
+// Every caller is past its plan, and a plan is refused for a format with no
+// row, so the bin fallback cannot fire here.
+func outputExt(opts waxflow.TranscodeOptions) string {
+	return waxflow.OutputExt(opts.Format, opts.Container)
+}
+
+// writeMedia transcodes med into the job directory under name and describes
+// what landed. It is the tail every audio-writing job shares: create, run,
+// sync, close, stat.
+//
+// The sync and the explicit close are not ceremony. A job's product outlives
+// the process that made it, and its size is recorded in job.json from the stat
+// below; a deferred close would let that stat run against a file whose last
+// write is still in the writer, and a close error (a full disk reporting late)
+// would be discarded exactly when it is the whole story.
+func (r *Runner) writeMedia(ctx context.Context, j *Job, med format.Media, name string,
+	opts waxflow.TranscodeOptions, mediaType string) (*Output, error) {
+	path := filepath.Join(r.store.jobDir(j.ID), name)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: creating output", err)
+	}
+	defer f.Close()
+	res, err := r.cfg.Engine.TranscodeMedia(ctx, med, f, opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Sync(); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: output sync", err)
+	}
+	if err := f.Close(); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: output close", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeInternal, "jobs: output stat", err)
+	}
+	return &Output{
+		File:      name,
+		MediaType: mediaType,
+		Container: res.Container,
+		Bytes:     fi.Size(),
+		Samples:   res.Samples,
+		Rate:      res.Format.Rate,
+	}, nil
+}
+
+// runMerge concatenates the request's members into one output.
+//
+// It is the timeline primitive with a file on the end, and that is the point
+// rather than a convenience: the plan comes from ConcatTrack and the samples
+// come from Concat, the same two functions the HLS timeline uses, so the seam
+// between two chapters of an audiobook is gapless for the same reason and by
+// the same code as the seam between two tracks of a play queue. Nothing here
+// knows how a seam works.
+//
+// The members are measured first and opened later, in two passes. The measure
+// pass needs every member's authoritative length before anything can be
+// planned (a prefix sum has no partial answer), while the open pass is
+// Concat's own, one member at a time, so a 500-chapter merge holds one file
+// descriptor rather than 500.
+func (r *Runner) runMerge(ctx context.Context, j *Job) error {
+	req := j.Request
+	if r.cfg.MeasureTrack == nil {
+		return waxerr.New(waxerr.CodeInvalidRequest, "jobs: merges are not configured on this daemon")
+	}
+	measure := r.progressFunc(ctx, j.ID, "measure")
+	tracks := make([]container.Track, len(req.Srcs))
+	for i := range req.Srcs {
+		if err := ctx.Err(); err != nil {
+			return waxerr.Wrap(waxerr.CodeCanceled, "merge canceled", err)
+		}
+		f, err := r.openMember(ctx, req, i)
+		if err != nil {
+			return err
+		}
+		track, err := r.cfg.MeasureTrack(f)
+		f.Close()
+		if err != nil {
+			return err
+		}
+		tracks[i] = track
+		measure(int64(i+1), int64(len(req.Srcs)))
+	}
+
+	members := make([]waxflow.ConcatSource, len(tracks))
+	for i := range tracks {
+		members[i] = waxflow.ConcatSource{
+			Track: tracks[i],
+			Open:  func() (format.Media, error) { return r.openMemberMedia(ctx, req, i) },
+		}
+	}
+	med, err := waxflow.Concat(members, waxflow.ConcatOptions{Profile: r.cfg.Profile})
+	if err != nil {
+		return err
+	}
+	defer med.Close()
+
+	// Gain is zero and there are no tags: a merge takes neither field, since
+	// both are per-track answers and this has N tracks in and one file out.
+	// The server refuses them at creation; this is only where that shows.
+	opts := req.TranscodeOptions(0, r.cfg.Profile)
+	opts.Progress = r.progressFunc(ctx, j.ID, "transcode")
+	plan, err := r.cfg.Engine.PlanTranscode(med.Info().Default(), opts)
+	if err != nil {
+		return err
+	}
+	out, err := r.writeMedia(ctx, j, med, "out."+outputExt(opts), opts, plan.MediaType)
+	if err != nil {
+		return err
+	}
+	r.store.update(j.ID, false, func(job *Job) { job.Outputs = []Output{*out} })
+	return nil
+}
+
+// splitProgressAt places a piece's own progress on the source's timeline: the
+// piece starts at source sample base and covers span of them, and the encoder
+// has read done of a projected pieceTotal.
+//
+// The piece's fraction is scaled onto its span rather than added to its start,
+// because the two are not the same unit: the engine counts encoder-input
+// samples, which are the source's own only while nothing resamples. Adding
+// them raw would run the bar a resample ratio past the next piece's start and
+// step it backwards on arrival.
+func splitProgressAt(base, span, done, pieceTotal int64) int64 {
+	if span <= 0 || pieceTotal <= 0 {
+		// A source that declares no length leaves the last piece open-ended,
+		// and its start is then the only honest thing to report.
+		return base
+	}
+	// Clamped because the projection is the muxer's estimate: a piece that
+	// encodes a few samples past it must not push the bar into the next one.
+	return base + int64(float64(span)*min(1, float64(done)/float64(pieceTotal)))
+}
+
+// splitLength is the source length a split's cuts are resolved against: the
+// header's own, measured only when the header declares none.
+//
+// Filling an absent length is the whole of the measuring, and overriding a
+// declared one is deliberately not. waxflow.Slice opens its own Media per
+// piece and bounds each explicit span end through SpanTrack against that
+// Media's declared track, with no seam to hand it a number measured out here.
+// A length measured in defiance of a header could then only widen what this
+// accepts into cuts Slice refuses anyway, moving a clear refusal at the funnel
+// three layers down for no gain: a source that under-declares keeps its extra
+// audio unaddressable either way, which is what a lying header buys and the
+// position SpanTrack already takes.
+//
+// An absent length carries no such conflict, since SpanTrack bounds nothing
+// against a track that declares nothing. There the measurement adds the
+// refusal that was missing rather than contradicting one, and that refusal is
+// the point: without it every cut is accepted, and the pieces before the one
+// that cannot exist are already written when it fails the job, orphaned in the
+// job directory.
+//
+// The server holds a split's cuts to this same rule at creation. What the two
+// share is that rule, not a number: each fills an absent length and neither
+// overrides a declared one, so they answer alike without consulting each
+// other. The measuring is a memo hit rather than a second walk of the file:
+// the pass that measured this source to validate the cuts filled it, keyed by
+// source identity.
+//
+// A daemon with no MeasureTrack leaves an absent length absent rather than
+// refusing the split, where a merge refuses outright. The asymmetry is the two
+// jobs' own: a merge cannot run on an advisory length at all, since Concat
+// holds every member to its track and a total two samples out fails the run,
+// while a split's last piece is open-ended and inherits whatever the source
+// turns out to hold. Such an embedder keeps the looser bound it already had,
+// and nothing can disagree with it: the server always wires the hook, so a nil
+// one means the server is not the caller and no validation of these cuts ran
+// anywhere.
+func (r *Runner) splitLength(src *source.File) (int64, error) {
+	info, err := r.cfg.Engine.Probe(src, src.Ext, nil)
+	if err != nil {
+		return 0, err
+	}
+	if samples := info.Default().Samples; samples >= 0 || r.cfg.MeasureTrack == nil {
+		return samples, nil
+	}
+	track, err := r.cfg.MeasureTrack(src)
+	if err != nil {
+		return 0, err
+	}
+	return track.Samples, nil
+}
+
+// runSplit cuts the source at the request's cut points, one output per piece.
+//
+// Each piece is its own Slice of its own freshly opened Media, rather than one
+// Media seeked between pieces. That costs a header parse per piece and buys
+// the property the whole feature rests on: a slice's sample 0 is the source's
+// sample from with nothing primed from before it, so a lossless split at the
+// source rate rejoins bit for bit. A reused, seeked Media would leave the
+// answer depending on what the demuxer happened to hold.
+func (r *Runner) runSplit(ctx context.Context, j *Job) error {
+	req := j.Request
+	src, err := r.open(ctx, req)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	srcSamples, err := r.splitLength(src)
+	if err != nil {
+		return err
+	}
+	spans, err := req.SplitSpans(srcSamples)
+	if err != nil {
+		return err
+	}
+
+	opts := req.TranscodeOptions(0, r.cfg.Profile)
+	outs := make([]Output, 0, len(spans))
+	// Every piece is the same format through the same options, so the pieces
+	// differ by index alone; a plan is still made per piece, since only a
+	// piece's own track can be planned against.
+	ext := outputExt(opts)
+	// One progress bar over the whole split rather than one per piece, on the
+	// source's own timeline: the spans partition the source, so a piece's
+	// start plus how far into that piece the encoder has read is the split's
+	// position. Pieces are not the same length, so counting pieces would jump
+	// the bar in N uneven steps, and each piece's own samples would reset it N
+	// times. A source that declares no length leaves the total 0, which
+	// progressFunc renders as an unknown percent rather than a wrong one.
+	report := r.progressFunc(ctx, j.ID, "transcode")
+	total := max(srcSamples, 0)
+	for i, sp := range spans {
+		// The piece's end is its own except for the last, which is ToEnd:
+		// whatever the source turns out to hold, which is what total names.
+		end := sp[1]
+		if end == waxflow.ToEnd {
+			end = srcSamples
+		}
+		base, span := sp[0], end-sp[0]
+		// The hook still fires per chunk, and that is not a waste even when
+		// the bar barely moves: progressFunc is also where a job yields to a
+		// saturated live pool, and that has to be asked per chunk.
+		opts.Progress = func(done, pieceTotal int64) {
+			report(splitProgressAt(base, span, done, pieceTotal), total)
+		}
+		med, err := r.cfg.Engine.OpenStream(src, src.Ext)
+		if err != nil {
+			return err
+		}
+		// Slice takes ownership, so a failure here closes what it did not take.
+		sl, err := waxflow.Slice(med, sp[0], sp[1])
+		if err != nil {
+			med.Close()
+			return err
+		}
+		plan, err := r.cfg.Engine.PlanTranscode(sl.Info().Default(), opts)
+		if err != nil {
+			sl.Close()
+			return err
+		}
+		out, err := r.writeMedia(ctx, j, sl, fmt.Sprintf("out.%d.%s", i, ext), opts, plan.MediaType)
+		sl.Close()
+		if err != nil {
+			return err
+		}
+		outs = append(outs, *out)
+		if end >= 0 {
+			report(end, total)
+		}
+	}
+	r.store.update(j.ID, false, func(job *Job) { job.Outputs = outs })
 	return nil
 }

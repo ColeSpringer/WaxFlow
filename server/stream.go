@@ -52,10 +52,16 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	key := cache.NewKey(identityString(req.p.src, req.src.ID), req.canonical, plan.Versions)
 	meta := cache.Meta{
-		Ref:         req.p.src,
-		Identity:    req.src.ID.String(),
-		Params:      req.canonical,
-		Ext:         plan.Container,
+		Ref:      req.p.src,
+		Identity: req.src.ID.String(),
+		Params:   req.canonical,
+		// The entry's payload is named out.<Ext>, and the output table answers
+		// what file form these bytes are; the plan's container name only ever
+		// coincided with one. An operator copying out.progressive from the
+		// cache to play it has the same problem the download did. Entries
+		// carry their own Ext in meta.json, so a name written before this
+		// still resolves to itself.
+		Ext:         waxflow.OutputExt(req.opts.Format, req.opts.Container),
 		ContentType: plan.MediaType,
 		Samples:     plan.Samples,
 		Rate:        plan.Format.Rate,
@@ -127,7 +133,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 				s.met.Degradations.Add(1)
 				entry = cache.NewMemEntry(s.cfg.RingBytes, meta)
 			}
-			s.startPipeline(s.baseCtx, entry, req.p.src, req.src.ID, req.src.Ext, req.opts, release, false)
+			s.startPipeline(s.baseCtx, entry, req.p.src, req.src.ID, req.src.Ext, req.opts, req.p.span, release, false)
 			armed = true
 			return entry, nil
 		})
@@ -161,7 +167,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 // the first client leaves. Sync one-shots pass their request context to
 // die with it.
 func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, ref string, id source.Identity, hint string,
-	opts waxflow.TranscodeOptions, release func(), sync bool) {
+	opts waxflow.TranscodeOptions, sp span, release func(), sync bool) {
 	if sync {
 		s.met.SessionsSync.Add(1)
 	} else {
@@ -186,7 +192,7 @@ func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, ref stri
 			entry.Fail(waxerr.New(waxerr.CodeSourceChanged, "source changed while starting the pipeline"))
 			return
 		}
-		res, err := s.eng.Transcode(ctx, src, hint, entry, opts)
+		res, err := s.transcodeSpan(ctx, src, hint, entry, opts, sp)
 		if err != nil {
 			s.log.Warn("pipeline failed", "src", ref, "err", err)
 			entry.Fail(err)
@@ -202,6 +208,41 @@ func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, ref stri
 		}
 		s.log.Debug("pipeline finished", "src", ref, "samples", res.Samples, "degraded", entry.Degraded())
 	}()
+}
+
+// transcodeSpan runs the transcode, bounding the source to the request's
+// span when it has one.
+//
+// A request with no span takes Engine.Transcode untouched, which is not
+// merely an optimization: it keeps every existing progressive stream on the
+// exact path it has always taken, so nothing about the common case depends
+// on the span machinery being right.
+//
+// A spanned request opens the stream itself so it can wrap the Media, since
+// Transcode's convenience of opening and closing internally is the one
+// thing a wrapper cannot borrow. The slice owns the Media and closes it,
+// which is why only the slice is deferred here.
+//
+// opts.FromSample stays the seek, and it is now the seek within the span:
+// the sliced Media addresses from 0 at the span's start, so the same
+// arithmetic that served t= on a whole file serves t= inside a virtual
+// track with no special case.
+func (s *Server) transcodeSpan(ctx context.Context, src *source.File, hint string, dst io.Writer,
+	opts waxflow.TranscodeOptions, sp span) (*waxflow.TranscodeResult, error) {
+	if !sp.narrowed() {
+		return s.eng.Transcode(ctx, src, hint, dst, opts)
+	}
+	med, err := s.eng.OpenStream(src, hint)
+	if err != nil {
+		return nil, err
+	}
+	sl, err := waxflow.Slice(med, sp.from, sp.end())
+	if err != nil {
+		med.Close()
+		return nil, err
+	}
+	defer sl.Close()
+	return s.eng.TranscodeMedia(ctx, sl, dst, opts)
 }
 
 // serveDirect is ladder rung 1: the original bytes with full range
@@ -375,6 +416,15 @@ func directPlayable(req *streamRequest) bool {
 	switch {
 	case req.from > 0:
 		return false // t= means a transcode timeline
+	case req.p.span.narrowed():
+		// A span is the same statement as t=: the request is for a stream
+		// whose timeline is not the file's. Note this cannot be folded into
+		// the check above, and the trap is the same asymmetry the dynamics
+		// clause below exists for: a span that only trims the end leaves
+		// from at 0, so it would pass every clause here and direct-play the
+		// whole file, delivering the entire rip for a request that asked
+		// for one track of it.
+		return false
 	case p.bitrate != 0:
 		return false // bitrate/q asks for a lossy re-encode, not the original
 	case p.format != "auto" && p.format != req.info.Container:

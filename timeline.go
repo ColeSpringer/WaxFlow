@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"time"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
@@ -19,6 +20,507 @@ import (
 // format.FromDemuxer labels an assembled one: there is no file here, so
 // Info.Container has to say what the media actually is.
 const concatContainer = "timeline"
+
+// ToEnd is Slice's open-ended upper bound: the span runs to the end of the
+// source.
+const ToEnd = -1
+
+// Slice bounds med to the sample range [from, to) of its own timeline, as
+// a Media whose sample 0 is med's sample from and whose length is to-from.
+// to is exclusive; ToEnd means to the end. The returned Media owns med and
+// closes it.
+//
+// It is the primitive behind three things that looked like three features:
+// a split job's cut points, an end trim (a span with a from of 0), and a
+// virtual track streamed over an offset range of one file. All three are
+// "bound this stream to a sample range", so they land once.
+//
+// A wrapper rather than a TranscodeOptions field, deliberately. An end
+// bound as an option would need about six branches in the most
+// invariant-dense function in the library, permanently: a clamp in the
+// length math, a refusal in the segmented plan, the right interaction with
+// the projected output length that feeds both the muxer's declared length
+// and the edit list (get that wrong and every M4B lies about its
+// duration), the progress total, and both canonical cache-key strings. A
+// Media that is already the bounded stream needs none of them, because
+// every one of those reads the length off the track and the track is
+// already right.
+//
+// It composes, which is the clinching part. A sliced Media is the shifted
+// stream, addressing from 0, so it hands the segmented path a start offset
+// that PlanSegments refuses to take as an option ("segments address time");
+// and "start the album at track 3" is Concat(members[2:]) with no new
+// option at all.
+//
+// # Exactness is conditional, and the condition is worth stating
+//
+// A slice hands the chain a stream starting at sample from, and the chain
+// starts fresh there, so any stateful node primes from nothing exactly as
+// it does after a seek.
+//
+//   - A cut with no rate change is exact, and that is the case that
+//     matters. A CUE split to FLAC at the source rate builds a chain with
+//     no resampler and no limiter, so there is no state to prime and each
+//     piece's sample 0 is the source's sample from, bit for bit.
+//     TestSliceSplitRoundTrip proves precisely that: a transient would make
+//     a bit-exact rejoin fail.
+//   - A resampled span would carry a short transient at sample 0, because
+//     the resampler's FIR window starts zero-filled, and that is what
+//     Headroom exists to remove: a span is a window onto a longer stream, so
+//     unlike a file it genuinely has audio before its own sample 0 to prime
+//     with. The segmented run uses it, so a virtual track's first sample is
+//     the same audio a continuous run of the whole source delivers there.
+//     That is what lets consecutive virtual tracks of one rip play gaplessly.
+//
+// Cut points are not assumed frame- or packet-aligned. Slice sits
+// downstream of decode, so it cuts at any sample, which is the whole reason
+// it is sample-exact where a packet-level cut would not be.
+func Slice(med format.Media, from, to int64) (format.Media, error) {
+	if med == nil {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: Slice of a nil Media")
+	}
+	track := med.Info().Default()
+	spanned, err := SpanTrack(track, from, to)
+	if err != nil {
+		return nil, err
+	}
+	s := &slice{med: med, from: from, limit: ToEnd, fmt: track.Fmt}
+	// limit is the clamp; the track's Samples is what it advertises. They
+	// differ on purpose for the open-ended form: an explicit end is a
+	// declaration this holds the source to, while a slice that just trims
+	// the front inherits the source's own length and the source's own
+	// honesty about it. Clamping the open form at an advisory length would
+	// truncate a source that is merely mis-declared, which the unsliced
+	// Media tolerates and which is not this wrapper's business to change.
+	if to >= 0 {
+		s.limit = to - from
+	}
+	in := med.Info()
+	s.info = &format.Info{
+		Container: in.Container,
+		Tracks:    []container.Track{spanned},
+		Chapters:  spanChapters(in.Chapters, from, s.limit, track.Fmt.Rate),
+		Warnings:  in.Warnings,
+	}
+	return s, nil
+}
+
+// spanChapters rebases a source's chapters onto the window [from, from+limit)
+// of its own timeline: shifted so the window's start is zero, clipped to the
+// window, and with everything outside it dropped. limit is ToEnd for an
+// unbounded window. A chapter straddling an edge survives with its title and
+// the part of its range that is inside.
+//
+// A zero End is the start-only chapter form (see container.Chapter): the
+// chapter runs until the next one, or to the end of the stream. It stays zero
+// on the way out, which is exact rather than a punt, because both things a
+// consumer resolves it against are already this Media's own: the next chapter
+// is in this list, rebased, and the stream ends where the window does.
+// Writing an end here instead would declare one the source never did.
+//
+// The unbounded window clips nothing at the far end, for the reason Slice's
+// limit exists: an open span holds the source to no length of its own, so a
+// chapter running past the source's advisory end is the source's own business,
+// exactly as the audio past it is.
+//
+// A rate of zero cannot place a chapter on a sample window at all, and there
+// is then no answer to give rather than a wrong one to give (see slice).
+func spanChapters(chapters []container.Chapter, from, limit int64, rate int) []container.Chapter {
+	if len(chapters) == 0 || rate <= 0 {
+		return nil
+	}
+	start := sampleTime(from, rate)
+	end := time.Duration(-1)
+	if limit >= 0 {
+		end = sampleTime(from+limit, rate)
+	}
+	var out []container.Chapter
+	for i, ch := range chapters {
+		// Begins at or after the window's end, or is over before its start:
+		// outside either way. The far test is skipped for an unbounded
+		// window, which has no far end to be past.
+		if end >= 0 && ch.Start >= end {
+			continue
+		}
+		if e := chapterEnd(chapters, i); e >= 0 && e <= start {
+			continue
+		}
+		ch.Start = max(ch.Start-start, 0)
+		if ch.End > 0 {
+			if end >= 0 {
+				ch.End = min(ch.End, end)
+			}
+			ch.End -= start
+		}
+		out = append(out, ch)
+	}
+	return out
+}
+
+// chapterEnd is where chapter i really ends, for deciding whether it reaches
+// a window at all: its own End, or the next chapter's start for the
+// start-only form (a zero End). -1 means it runs to the end of the stream,
+// which no window can begin after: that is the last chapter of a start-only
+// list, and it always reaches.
+//
+// It resolves what spanChapters deliberately does not write down. Where a
+// start-only chapter ends decides whether it is in the window, so the test
+// needs the answer; the rebased list does not, and inventing an End there
+// would put a boundary in the output the source never declared.
+func chapterEnd(chapters []container.Chapter, i int) time.Duration {
+	if e := chapters[i].End; e > 0 {
+		return e
+	}
+	if i+1 < len(chapters) {
+		return chapters[i+1].Start
+	}
+	return -1
+}
+
+// sampleTime is sample n's position on a stream's clock at rate.
+//
+// The division is split so the whole-second part stays exact at any stream
+// length: the direct n*time.Second/rate overflows an int64 past about 53
+// hours at 48 kHz, and a long file is exactly the kind that carries chapters.
+// What is left rounds toward zero, below the nanosecond the Duration itself
+// resolves.
+func sampleTime(n int64, rate int) time.Duration {
+	sec, rem := n/int64(rate), n%int64(rate)
+	return time.Duration(sec)*time.Second + time.Duration(rem)*time.Second/time.Duration(rate)
+}
+
+// SpanTrack computes the track a Slice of track to [from, to) presents: the
+// same format, the window's length, and no gapless trims. It is a pure
+// function of the header, so planning a span and running it cannot disagree
+// about what gets delivered.
+//
+// It is the single funnel, the discipline ConcatTrack applies to a
+// timeline: Slice resolves its track through this at open, and a caller
+// planning a span resolves through it too, from the probed track alone and
+// without opening anything. Without that, a plan's length and the slice's
+// actual delivery drift, and the drift is invisible until a cache entry
+// holds segments for a track that is not the one being served.
+//
+// to is exclusive; ToEnd means to the end of track.
+func SpanTrack(track container.Track, from, to int64) (container.Track, error) {
+	switch {
+	case from < 0:
+		return container.Track{}, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("waxflow: negative span start %d", from))
+	case to < ToEnd:
+		return container.Track{}, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("waxflow: span end %d: want a sample offset or %d for the end of the source", to, ToEnd))
+	case to >= 0 && to < from:
+		return container.Track{}, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("waxflow: span [%d, %d) ends before it starts", from, to))
+	}
+	total := track.Samples
+
+	// A span past the end is refused rather than clamped, and that is the
+	// same call ConcatTrack makes about a member's declared length. A span
+	// is content identity: it says which samples are this track. So a cut
+	// point past the end means the caller's cut points do not describe this
+	// file (a CUE sheet paired with the wrong rip, a chapter list from a
+	// different edition), and silently clamping would hand back a track
+	// shorter than the caller believes it asked for, with no way to notice.
+	// That is precisely the desync a prefix sum cannot survive.
+	//
+	// The bound is the declared length whatever SamplesExact says, which
+	// looks like the wrong predicate and is not. SamplesExact is a
+	// truncation instruction (the decoder over-produces and must be cut back
+	// to this), not a claim about precision, so gating on it would drop the
+	// refusal for exactly the sources a split is usually pointed at: WAV and
+	// FLAC leave it false because their totals can lie, not because they are
+	// approximate. Gating here would trade a real refusal on the common case
+	// for a narrow one on Matroska, whose advisory total can sit up to a
+	// millisecond under the audio it has.
+	if total >= 0 {
+		if from > total {
+			return container.Track{}, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+				"waxflow: span starts at sample %d, past the source's %d samples", from, total))
+		}
+		if to > total {
+			return container.Track{}, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+				"waxflow: span ends at sample %d, past the source's %d samples", to, total))
+		}
+	}
+
+	out := track
+	switch {
+	case to >= 0:
+		out.Samples, out.SamplesExact = to-from, true
+	case total >= 0:
+		out.Samples = total - from
+	}
+	// Zero, and load-bearing rather than incidental, exactly as a Concat's
+	// envelope is: a Media delivers gapless-trimmed PCM, so both trims
+	// happened inside it before a slice sees a sample. Passing the
+	// container's declaration through would make a downstream consumer trim
+	// a second time, against a stream that has no delay left to cut.
+	out.Delay, out.Padding = 0, 0
+	// The source's own codec is kept, unlike a Concat's synthetic PCM
+	// envelope, and that is not cosmetic: the codec is what names the
+	// decoder revision in a plan's Versions, so a span of a FLAC keys on the
+	// FLAC decoder and a decoder fix invalidates its cached bytes. A Concat
+	// cannot do that (N members, N codecs), which is why it has to repair
+	// the hole afterward; a span has exactly one source and keeps the truth.
+	return out, nil
+}
+
+// Headroomer is implemented by a Media that has real audio before its own
+// sample 0, as a window onto a longer stream does. It is an optional
+// capability in the same idiom as container.Indexer, container.Warner, and
+// dsp.Settler: a Media opened from a file has nothing before its first
+// sample and does not implement it, so the assertion is an honest gate.
+//
+// It exists because priming a chain and starting a stream are different
+// questions, and only a span can answer the first one for its own sample 0.
+// A stateful node primes from nothing at a stream's start, which is correct
+// for a file (there is nothing earlier) and wrong for a span (there is). A
+// consumer that wants a span's sample 0 to hold the same audio a continuous
+// run of the whole source delivers there reads Headroom, seeks to a
+// negative position, and discards the output it fed through.
+//
+// Positions below 0 are the whole point of the interface and are legal only
+// on a Media that implements it. They stay within [-Headroom(), 0): the
+// samples are real, they are simply upstream of the window this Media
+// presents.
+type Headroomer interface {
+	// Headroom is how many samples of real audio lie before sample 0, so a
+	// caller knows how far back it may seek. Zero means none.
+	Headroom() int64
+}
+
+// slice is Slice's Media: one source, positioned at the window's start and
+// cut off at its end.
+//
+// What it says about the source follows one rule: rebase onto the window's
+// own timeline where a right answer exists there, and answer nothing where
+// none does.
+//
+// Chapters have one, so they are rebased (spanChapters). A chapter is a
+// range on the very timeline the window cuts, so the part of the list lying
+// inside the window is a fact about the window rather than a guess at it.
+// Forwarding the source's list verbatim is the wrong answer and not a
+// cautious one: it says a span holds chapters it does not, at times it does
+// not hold them, and a consumer that writes them into the output (a split
+// job stamping a piece with its source's metadata) has no way to notice.
+//
+// format.Composite has no right answer, so it is deliberately not forwarded.
+// A slice of a timeline is not a timeline of the same members (its window
+// covers some part of some of them) and no member list describes the window,
+// so answering with the inner Media's would be a plain lie to a consumer
+// keying a cache on it. Nothing slices a Concat today; the point is that if
+// something does, it gets no answer rather than a wrong one.
+//
+// container.Indexer needs no forwarding either, for a different reason: the
+// engine wraps index restore and save around the Media inside OpenStream,
+// under this, and the save fires on Close, which this delegates. The
+// sidecar keeps working through a slice without this knowing about it.
+type slice struct {
+	med  format.Media
+	info *format.Info
+	fmt  audio.Format
+	// from is the window's first sample on med's timeline.
+	from int64
+	// limit is the window's length, ToEnd for an unbounded one. See Slice.
+	limit int64
+
+	pos     int64 // delivered-timeline position of the next frame out
+	started bool  // med has been positioned at from
+	discont bool
+	closed  bool
+}
+
+func (s *slice) Info() *format.Info { return s.info }
+
+// Headroom is the audio ahead of the window: the samples between the inner
+// media's start and this span's, plus whatever the inner media can itself
+// reach back to.
+//
+// The second term is what makes a span of a span report the truth. Nothing
+// nests them today, and the sum is still the right answer rather than
+// speculation: headroom means "how far back can I be positioned", and for
+// an inner span that is its own window's start plus its own headroom, all
+// of which SeekSample below can actually deliver. Reporting only from
+// would under-report it, which does not fail loudly. It quietly primes a
+// chain with less than it asked for.
+func (s *slice) Headroom() int64 {
+	if h, ok := s.med.(Headroomer); ok {
+		return s.from + h.Headroom()
+	}
+	return s.from
+}
+
+func (s *slice) Close() error {
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	return s.med.Close()
+}
+
+// ensureStart positions med at the window's start, lazily.
+//
+// Lazily, and only when from is nonzero, so that a pure end trim (a span
+// starting at 0) neither seeks nor requires a seekable source. The
+// unbounded, unshifted slice is then free.
+//
+// A failed seek leaves the span unstarted, so the next read attempts it
+// again, and that is the opposite of the call concat makes about its own
+// failed seek. The two are not inconsistent: the difference is whether
+// re-attempting is even defined. concat's seek walks toward a target the
+// caller chose, moving the state its position is relative to on the way
+// (which member is open, its chain, where that member's media sits), so a
+// failure part way leaves pos describing somewhere the stream no longer is
+// and nothing coherent to retry; it has to latch. This has one target for
+// the life of the Media, from, and reaches it in one step. A failure writes
+// nothing, so the state after it is the state before it, and the next read
+// re-attempts the identical seek from the identical place: a sticky error
+// would refuse what a retry can still get right, and would need a field to
+// say what started already says.
+//
+// What both answers share is the only part that is not a choice: a position
+// that never succeeded never becomes one a read can deliver samples against.
+// started latches after the seek here, exactly as it does in SeekSample.
+func (s *slice) ensureStart() error {
+	if s.started {
+		return nil
+	}
+	if s.from == 0 {
+		s.started = true
+		return nil
+	}
+	landed, err := s.med.SeekSample(s.from)
+	if err != nil {
+		return err
+	}
+	// A landing past the ask is what container.Seeker permits when the
+	// stream's first sync point lies beyond the target, and it means the
+	// span really does start late. Report where the stream is rather than
+	// pretending, exactly as a Concat's member seek does; for every
+	// seekable source in the tree the Media pre-rolls and this is 0.
+	//
+	// The floor is not the same floor SeekSample deliberately does without,
+	// and the difference is which question was asked. A negative target
+	// there is a caller reaching into the headroom on purpose, so a
+	// negative answer is the truth. Here the target is the window's own
+	// start, and a format.Media seek cannot land below its target except by
+	// running out of stream: it lands on a sync point at or before the ask
+	// and then decodes forward to the ask exactly, so a short answer means
+	// the source ended early, not that this is somehow positioned in its own
+	// headroom. Zero is then the honest position, and it is what lets
+	// endOfSource say the source ended n samples into a span of m rather
+	// than report a negative count.
+	s.pos = max(landed-s.from, 0)
+	s.started = true
+	return nil
+}
+
+// ReadChunk fills dst from the window.
+//
+// The front of the window is handled by the seek in ensureStart rather than
+// by shifting a buffer, which is what lets the inner Media fill dst
+// directly: an audio.Buffer is planar with a stride and has no sub-buffer
+// view, so a shifted fill would need a copy. The back is a clamp on dst.N,
+// the same shape the gapless padding trim already uses one layer down.
+func (s *slice) ReadChunk(dst *audio.Buffer) error {
+	switch {
+	case s.closed:
+		return waxerr.New(waxerr.CodeInternal, "waxflow: ReadChunk on a closed span")
+	case dst.Fmt != s.fmt:
+		return waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("waxflow: chunk buffer is %v, span is %v", dst.Fmt, s.fmt))
+	case dst.Cap() == 0:
+		return waxerr.New(waxerr.CodeInvalidRequest, "waxflow: zero-capacity chunk buffer")
+	}
+	if err := s.ensureStart(); err != nil {
+		return err
+	}
+	if s.limit >= 0 && s.pos >= s.limit {
+		return io.EOF
+	}
+	dst.N = 0
+	err := s.med.ReadChunk(dst)
+	if err == io.EOF {
+		return s.endOfSource()
+	}
+	if err != nil {
+		return err
+	}
+	if dst.N == 0 {
+		return waxerr.New(waxerr.CodeInternal,
+			"waxflow: a span's source returned no frames and no error; io.EOF is the only empty answer")
+	}
+	if s.limit >= 0 {
+		if allowed := s.limit - s.pos; int64(dst.N) >= allowed {
+			dst.N = int(max(allowed, 0))
+		}
+	}
+	dst.Pos = s.pos
+	dst.Discont = s.discont
+	s.discont = false
+	s.pos += int64(dst.N)
+	return nil
+}
+
+// endOfSource reports the source running out, which is only legal when the
+// window did not declare where it ends.
+//
+// A bounded span whose source ends early is an error rather than a short
+// stream, and for the same reason a Concat holds its members to their
+// declared lengths: the track this Media advertises says to-from samples,
+// a plan has already promised a segment count built from that number, and
+// delivering fewer produces the tail 404 that number exists to prevent.
+// Failing here names the real cause instead.
+func (s *slice) endOfSource() error {
+	if s.limit >= 0 && s.pos < s.limit {
+		return waxerr.New(waxerr.CodeSourceUnreadable, fmt.Sprintf(
+			"waxflow: the source ended %d samples into a span that declared %d; its cut points do not describe this file",
+			s.pos, s.limit))
+	}
+	return io.EOF
+}
+
+// SeekSample repositions to target on the window's own timeline.
+//
+// A negative target is legal here, and only here, down to -Headroom(): it
+// addresses the real audio ahead of the window, which is what a consumer
+// priming a chain for the span's sample 0 asks for. Everything below the
+// window is still the source's own audio, so the seek is an ordinary one
+// once rebased. See Headroomer.
+func (s *slice) SeekSample(target int64) (int64, error) {
+	// The bound is what Headroom advertises, not from alone: the two have to
+	// agree, or a caller that primes by exactly the headroom it was told
+	// about gets refused for asking.
+	room := s.Headroom()
+	switch {
+	case s.closed:
+		return 0, waxerr.New(waxerr.CodeInternal, "waxflow: SeekSample on a closed span")
+	case target < -room:
+		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+			"waxflow: seek to %d is %d samples before the source's start; the span has %d samples of headroom",
+			target, -target-room, room))
+	}
+	// Past the window's end lands at its end, as a single Media does at the
+	// end of a file.
+	if s.limit >= 0 {
+		target = min(target, s.limit)
+	}
+	landed, err := s.med.SeekSample(s.from + target)
+	if err != nil {
+		return 0, err
+	}
+	s.started = true
+	// Rebased, and not floored at 0: a landing inside the headroom is a
+	// real position on this timeline, just a negative one.
+	s.pos = landed - s.from
+	if s.limit >= 0 {
+		s.pos = min(s.pos, s.limit)
+	}
+	s.discont = true
+	return s.pos, nil
+}
 
 // ConcatSource is one member of a timeline: its track, as Probe reported it,
 // so a timeline can be planned without opening anything, and a function that

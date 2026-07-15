@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/audio"
+	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/internal/hls"
 	"github.com/colespringer/waxflow/internal/timeline"
 	"github.com/colespringer/waxflow/source"
@@ -91,6 +93,48 @@ func TestResolveHLSSourcesHoldsNoTimelineHandles(t *testing.T) {
 		if m.Track.Samples <= 0 || m.Track.Fmt.Rate == 0 {
 			t.Fatalf("member %d kept no usable track (%d samples, %v)", i, m.Track.Samples, m.Track.Fmt)
 		}
+	}
+}
+
+// TestHLSDurationIsTheStreamsOwn pins what the TTL policy is sized from: the
+// duration of the stream the URL actually plays, not of the file it was cut
+// from.
+//
+// A signed URL is meant to outlive one playthrough, which is the rationale
+// hlsDuration states for itself, and a span's playthrough is the span. Reading
+// the whole track's length for a two-minute excerpt of an hour-long rip hands
+// DefaultTTLFor a number 30x too large, and it is only ever too large, which is
+// why nothing broke and why nothing caught it either.
+func TestHLSDurationIsTheStreamsOwn(t *testing.T) {
+	// An hour at 44100, so the file and any span of it are far apart.
+	tracks := []container.Track{{Samples: 3600 * 44100, Fmt: audio.Format{Rate: 44100}}}
+	for _, tc := range []struct {
+		name     string
+		from, to int64
+		want     float64
+	}{
+		// The whole file: no span, so nothing narrows.
+		{"no span", 0, 0, 3600},
+		// A 60 s window starting one second in.
+		{"from and to", 44100, 61 * 44100, 60},
+		// from alone runs to the end, so the span is what remains.
+		{"from alone", 3599 * 44100, 0, 1},
+		// to alone starts at 0.
+		{"to alone", 0, 90 * 44100, 90},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			desc := hls.Descriptor{Ver: hls.DescriptorVersion, Src: "lib/rip.flac", Format: "aac",
+				From: tc.from, To: tc.to}
+			got, err := hlsDuration(desc, tracks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("hlsDuration(from %d, to %d) = %g s, want %g: the TTL is sized from "+
+					"the stream this URL plays, not from the file it was cut out of",
+					tc.from, tc.to, got, tc.want)
+			}
+		})
 	}
 }
 

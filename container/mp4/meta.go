@@ -105,6 +105,36 @@ func mulDivSat(a, b, c int64) int64 {
 	return int64(q)
 }
 
+// mulDivRound computes a*b/c like mulDivSat, rounding to nearest rather than
+// truncating, in 128 bits and saturating at math.MaxInt64. A non-positive
+// operand yields 0.
+//
+// It exists for rescales between two grids that do not divide each other, where
+// truncation is a bias and not just a rounding: a chapter track's empty edit is
+// spelled in movie ticks, and at 44.1 kHz a millisecond is 44.1 of them, so
+// converting the edit back to the millisecond grid the chapter was authored on
+// truncates a whole millisecond off the track's anchor. Rounding recovers the
+// authored value exactly, since the movie-tick error is a fraction of a tick and
+// every audio rate makes a tick far shorter than the millisecond it lands in.
+func mulDivRound(a, b, c int64) int64 {
+	if a <= 0 || b <= 0 || c <= 0 {
+		return 0
+	}
+	hi, lo := bits.Mul64(uint64(a), uint64(b))
+	// a and b are int64, so the product is below 2^126 and hi below 2^62: the
+	// half-divisor carry cannot overflow hi.
+	lo, carry := bits.Add64(lo, uint64(c)/2, 0)
+	hi += carry
+	if hi >= uint64(c) {
+		return math.MaxInt64 // quotient would exceed 64 bits
+	}
+	q, _ := bits.Div64(hi, lo, uint64(c))
+	if q > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(q)
+}
+
 // parseUdta walks the user-data box for Nero chapters (chpl) and the
 // metadata item list (meta > ilst) carrying iTunSMPB. Chapter and tag
 // parsing is tolerant: malformed metadata yields no markers, never an
@@ -233,17 +263,31 @@ func (d *Demuxer) parseChpl(payload []byte) {
 	}
 }
 
-// resolveChapters picks the chapter source: Nero chpl if present, else a
-// text chapter track referenced by the audio track.
+// resolveChapters picks the chapter source: a text chapter track referenced
+// by the audio track if present, else the Nero chpl list.
+//
+// The text track wins because it is the lossless form: a real track whose
+// sample table is unbounded and whose stts times every chapter to its end.
+// chpl is a Nero extension whose one-byte count caps the list at 255, and
+// whose entries are starts only, ends discarded by construction. A file
+// carrying both (the common case, ours included: the muxer writes every
+// chapter to the text track and the first 255 to chpl) would otherwise read
+// back through chpl and lose everything past chapter 255.
+//
+// A fragmented movie resolves here too, and lands on chpl. Only the text track
+// is out of reach: its samples would live in the fragments, and a fragmented
+// moov's sample tables are empty by design, so chapterTrack passes it over for
+// having no samples. chpl is in the udta, which a fragmented moov carries like
+// any other, and the fragmented muxer writes one. Skipping this whole resolve
+// for a fragmented file threw away chapters the file plainly held.
 func (d *Demuxer) resolveChapters(tracks []*track, audio *track) {
-	if len(d.chplChapters) > 0 {
-		d.chapters = d.chplChapters
-		return
+	if ct := d.chapterTrack(tracks, audio); ct != nil {
+		if chapters := d.readTextChapters(ct); len(chapters) > 0 {
+			d.chapters = chapters
+			return
+		}
 	}
-	ct := d.chapterTrack(tracks, audio)
-	if ct != nil {
-		d.chapters = d.readTextChapters(ct)
-	}
+	d.chapters = d.chplChapters
 }
 
 // chapterTrack finds the text track holding chapter titles: one referenced
@@ -279,6 +323,17 @@ func (d *Demuxer) readTextChapters(ct *track) []Chapter {
 	if n > maxChapters {
 		n = maxChapters
 	}
+	// The track's leading empty edit, on the track's own timeline. stts times
+	// the samples as deltas accumulated from zero, so the first chapter's start
+	// is in none of them: it is the edit list's blank presentation time, and a
+	// reader that ignores it reports every chapter in the file early by that
+	// much. A track whose first chapter starts at zero carries no edit and
+	// shifts by nothing.
+	//
+	// The rescale rounds because the two grids do not divide each other: the
+	// edit is in movie ticks, 44.1 of which make a millisecond at 44.1 kHz, and
+	// truncating would move the anchor a millisecond rather than a tick.
+	shift := mulDivRound(ct.emptyEdit, ct.timescale, d.movieTimescale)
 	var out []Chapter
 	for i := int64(0); i < n; i++ {
 		size := int(st.sizes[i])
@@ -293,12 +348,20 @@ func (d *Demuxer) readTextChapters(ct *track) []Chapter {
 		if 2+textLen > len(buf) {
 			textLen = len(buf) - 2
 		}
-		pts, _ := st.timeOf(i)
+		pts, dur := st.timeOf(i)
 		// pts*time.Second can overflow int64 for a hostile pts or a tiny
 		// timescale; the saturating rescale keeps chapter times from wrapping
 		// negative. mulDivSat returns 0 when ct.timescale is not positive.
-		start := time.Duration(mulDivSat(pts, int64(time.Second), ct.timescale))
-		out = append(out, Chapter{Start: start, Title: sanitizeTitle(buf[2 : 2+textLen])})
+		start := time.Duration(mulDivSat(pts+shift, int64(time.Second), ct.timescale))
+		// A text track times every chapter to its end, which is why this
+		// source outranks chpl: chpl has nowhere to put an end. A
+		// zero-duration sample leaves End zero, which reads as "until the
+		// next chapter" exactly as a chpl entry does.
+		end := time.Duration(0)
+		if dur > 0 {
+			end = time.Duration(mulDivSat(pts+shift+dur, int64(time.Second), ct.timescale))
+		}
+		out = append(out, Chapter{Start: start, End: end, Title: sanitizeTitle(buf[2 : 2+textLen])})
 	}
 	return out
 }

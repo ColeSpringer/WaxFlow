@@ -31,6 +31,15 @@ type Info struct {
 	Container string
 	// Tracks are the container's audio tracks.
 	Tracks []container.Track
+	// Chapters are the source's chapter markers, nil when the container
+	// carries none or cannot hold them.
+	//
+	// They are read here rather than only through a metadata mapper
+	// because the parser is in the container package already: the mapper
+	// route reaches a transcode only via the CLI's injected mapper, so a
+	// server embedded by anyone else silently dropped them. A capability
+	// gate the demuxer already satisfies costs nothing to ask.
+	Chapters []container.Chapter
 	// Warnings describe input damage the tolerant parser worked around.
 	Warnings []string
 }
@@ -141,6 +150,9 @@ func FromDemuxer(name string, demux container.Demuxer) (Media, error) {
 
 func buildInfo(name string, demux container.Demuxer) *Info {
 	info := &Info{Container: name, Tracks: demux.Tracks()}
+	if c, ok := demux.(container.Chapterer); ok {
+		info.Chapters = c.Chapters()
+	}
 	if w, ok := demux.(container.Warner); ok {
 		for _, warn := range w.Warnings() {
 			if warn.Offset >= 0 {

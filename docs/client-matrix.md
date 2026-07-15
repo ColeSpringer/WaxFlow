@@ -41,6 +41,7 @@ HLS is the CMAF/fMP4 variant surface.
 | Progressive wav | automated | vendor-doc | vendor-doc | manual |
 | Direct play (format=auto) | automated | vendor-doc | vendor-doc | manual |
 | Timeline (`tl=`, gapless queue) | automated | vendor-doc | vendor-doc | manual |
+| Span (`from=`/`to=`, virtual track) | automated | vendor-doc | vendor-doc | manual |
 
 The timeline cell is the multi-source surface (`POST /hls/timeline` then a
 master signed against the `tl` digest). It is HLS, so nothing about it is
@@ -51,6 +52,19 @@ the player to see one stream of the whole queue's length, and then seeks
 across a track boundary and requires playback to carry on through it. The
 other columns inherit their HLS rows: a client that plays HLS opus plays a
 timeline of opus, because it is the same presentation.
+
+The span cell is the virtual-track surface (`from=`/`to=` on the HLS mint):
+one offset range of one file served as its own presentation. It inherits
+the other columns for the same reason a timeline does, since a span is
+also just one playlist, one init, and one edit list. The automated cell
+mints a span of a **44.1 kHz** fixture as 48 kHz opus, which is the CUE-rip
+case and forces the resampler, and requires the player to see the span's
+own duration rather than the file's. That assertion is the cell: a playlist
+built from the file's track plays perfectly while being the wrong stream,
+so it is checked directly rather than through a proxy. Whether the samples
+are the right ones is the engine suite's job
+(`TestSpanDeliversItsOwnSamples`, `TestSpanPrerollMatchesContinuous`); a
+browser cannot see that and should not be asked to.
 
 The **manual, pending** cells are the "Safari progressive playback of a
 live transcode" question: our live transcodes are chunked with no

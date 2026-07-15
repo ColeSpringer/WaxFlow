@@ -58,7 +58,12 @@ type ProbeInfo struct {
 // ProbeChapter is one chapter marker.
 type ProbeChapter struct {
 	StartSeconds float64 `json:"startSeconds"`
-	Title        string  `json:"title,omitempty"`
+	// EndSeconds is the chapter's end, absent for the start-only chapter
+	// forms (Nero chpl) that mean "until the next chapter, or end of
+	// stream". A caller deriving a span from a chapter reads this when it
+	// is there and the next chapter's start when it is not.
+	EndSeconds float64 `json:"endSeconds,omitempty"`
+	Title      string  `json:"title,omitempty"`
 }
 
 // ProbeTrack is one stream in a ProbeInfo.
@@ -99,12 +104,23 @@ func ProbeJSON(info *format.Info, m *ProbeMetadata) ProbeInfo {
 		out.Tags = m.Tags
 		out.HasArt = m.HasArt
 		out.HasLyrics = m.HasLyrics
-		for _, ch := range m.Chapters {
-			out.Chapters = append(out.Chapters, ProbeChapter{
-				StartSeconds: ch.Start.Seconds(),
-				Title:        ch.Title,
-			})
-		}
+	}
+	// The mapper's chapters win when a mapper is wired, since that is where
+	// this surface has always read them and a richer tag library may know
+	// forms the container package does not. The container's own are the
+	// fallback, and they are the reason Info carries them at all: without
+	// this branch a daemon embedded by anyone who does not inject a mapper
+	// reports no chapters for a file that plainly has them.
+	chapters := info.Chapters
+	if m != nil && len(m.Chapters) > 0 {
+		chapters = m.Chapters
+	}
+	for _, ch := range chapters {
+		out.Chapters = append(out.Chapters, ProbeChapter{
+			StartSeconds: ch.Start.Seconds(),
+			EndSeconds:   ch.End.Seconds(),
+			Title:        ch.Title,
+		})
 	}
 	for _, t := range info.Tracks {
 		out.Tracks = append(out.Tracks, ProbeTrack{

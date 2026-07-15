@@ -112,15 +112,23 @@ func (c *trackCache) evictOldestLocked() {
 // misses, so a stale track cannot be served. The identity check itself still
 // re-resolves per request, so the 410 source-changed guarantee is unaffected.
 //
-// exact asks for a length that is authoritative rather than declared, which
-// is what a timeline member needs and a single source does not. A single
-// source tolerates an advisory total (format.Media calls a lying FLAC
-// STREAMINFO an oddity rather than a truncation) because nothing downstream
-// of it depends on the number matching. A timeline's positions are a prefix
-// sum, so two samples of drift desync every position after that member: its
-// members are measured, not trusted. That covers more than an unknown length,
-// which is why the flag is not "measure when Samples < 0": an MP3 with a Xing
-// header declares a total from its headers and can still be wrong.
+// exact asks for a length that is authoritative rather than declared. It is
+// what a timeline member needs, whose positions are a prefix sum: two samples
+// of drift desync every position after that member, so members are measured
+// and not trusted. It covers more than an unknown length, which is why the
+// flag is not "measure when Samples < 0": an MP3 with a Xing header declares a
+// total from its headers and can still be wrong.
+//
+// A whole single source tolerates an advisory total (format.Media calls a
+// lying FLAC STREAMINFO an oddity rather than a truncation) because nothing
+// downstream of it depends on the number matching: the stream ends where the
+// samples end. The tolerance is the whole source's alone, and does not extend
+// to every single-source request. A span is validated against the total
+// (SpanTrack refuses to > total), so its callers ask for exact even though
+// they name one source: an under-declared length would refuse a span the file
+// can serve, and an over-declared one would mint a span that dies part way.
+// Whether the number is depended on is the question, not how many sources
+// there are.
 //
 // A measured entry satisfies both callers, so the memo is shared. Only the
 // flight keys differ, and they differ in both directions on purpose. An exact

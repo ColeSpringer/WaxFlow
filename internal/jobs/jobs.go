@@ -10,8 +10,12 @@
 package jobs
 
 import (
+	"fmt"
 	"slices"
 	"time"
+
+	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // Type selects what a job does.
@@ -23,11 +27,22 @@ const (
 	// TypeAnalyze measures loudness (EBU R128) and stores the numbers.
 	TypeAnalyze Type = "analyze"
 	// TypeTimeline mints a multi-source HLS timeline, measuring the members
-	// whose headers cannot declare an exact length. Unlike the other two it
-	// is not created through POST /jobs: POST /hls/timeline answers 201 with
+	// whose headers cannot declare an exact length. Unlike the others it is
+	// not created through POST /jobs: POST /hls/timeline answers 201 with
 	// the digest when no member needs measuring, and falls back to one of
 	// these when one does.
 	TypeTimeline Type = "timeline"
+	// TypeMerge concatenates Srcs into one output file. It is the timeline
+	// primitive pointed at a file rather than at a segment ladder: the same
+	// ConcatTrack plans it and the same Concat runs it, so a merged
+	// audiobook and an HLS play queue are gapless for one reason rather
+	// than two.
+	TypeMerge Type = "merge"
+	// TypeSplit cuts one source at Cuts into N output files, each a Slice of
+	// the source. It is Merge's inverse, and deliberately so: a split to a
+	// lossless output at the source rate rejoins bit for bit, which is the
+	// property the pair is worth having for.
+	TypeSplit Type = "split"
 )
 
 // State is a job's lifecycle position. Queued and running reset to
@@ -51,12 +66,24 @@ func (s State) Terminal() bool {
 // validates the HTTP body into it, and the runner rebuilds the engine
 // options from it after a restart.
 type Request struct {
-	Type Type   `json:"type"`
-	Src  string `json:"src"`
+	Type Type `json:"type"`
+	// Src is the single source a transcode, an analyze, or a split reads.
+	// Empty for a merge, which names its members in Srcs instead.
+	Src string `json:"src"`
 	// SourceID pins the source identity (size-mtimeNS) at creation; a
 	// source that changed before the job ran fails with source-changed
 	// rather than silently transcoding different bytes.
 	SourceID string `json:"sourceId"`
+	// SourceIDs pins Srcs' identities the same way, one per member and in
+	// the same order. It is a separate field rather than a widened SourceID
+	// because the two guard different shapes and both must stay honest: a
+	// merge has no single source to pin, and a single-source job has no
+	// member list to be off by one against.
+	//
+	// Like SourceID it is server-computed and absent from the wire body. A
+	// client that could send member identities could send the ones it wished
+	// were true, which is the whole guarantee.
+	SourceIDs []string `json:"sourceIds,omitempty"`
 
 	// Transcode parameters, mirroring the /stream surface.
 	Format    string `json:"format,omitempty"`
@@ -90,11 +117,73 @@ type Request struct {
 	// engine default.
 	SilenceMinSeconds float64 `json:"silenceMinSeconds,omitempty"`
 
-	// Srcs are a timeline job's members, in order. Timeline-only, and Src
-	// and SourceID stay empty for one: a timeline pins its members'
-	// identities inside the digest it mints, so there is no single source to
-	// pin here.
+	// Srcs are the members a timeline or a merge concatenates, in order. Src
+	// and SourceID stay empty for both, since neither has a single source.
+	// Where the two pin those members differs: a timeline pins them inside
+	// the digest it mints, while a merge pins them in SourceIDs, because it
+	// mints nothing and its product is a file.
 	Srcs []string `json:"srcs,omitempty"`
+
+	// Cuts are a split job's cut points, as sample offsets on the source's
+	// own timeline, strictly ascending. Split-only.
+	//
+	// They are interior points, so N cuts make N+1 pieces: piece i runs
+	// [Cuts[i-1], Cuts[i]) with 0 implied before the first and the source's
+	// end implied after the last. A cut is where the tape is cut, which is
+	// the only reading under which every offset in the list does something;
+	// a leading 0 or a trailing end-of-source would each ask for an empty
+	// piece, and are refused rather than tolerated (SplitSpans).
+	//
+	// Samples, not seconds, for the reason a span is: a cut point declares
+	// which samples are this piece, so it is content identity, and 245.32 s
+	// at 44100 floors to one sample short of the boundary a CUE sheet's
+	// CD-frame arithmetic names exactly.
+	Cuts []int64 `json:"cuts,omitempty"`
+}
+
+// SplitSpans resolves Cuts into the [from, to) span of each piece, in order,
+// against a source of total samples (negative when the headers do not declare
+// one). to is waxflow.ToEnd for the last piece, which inherits whatever the
+// source turns out to hold rather than being held to a declaration.
+//
+// It is the single funnel for the cut arithmetic, in the SpanTrack spirit and
+// for the same reason: the server validates cuts at creation and the runner
+// cuts by them at run, and the two must not be able to disagree about which
+// samples are piece 3. Every rule about what a cut list may say lives here.
+func (req Request) SplitSpans(total int64) ([][2]int64, error) {
+	if len(req.Cuts) == 0 {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest,
+			"jobs: a split needs at least one cut point")
+	}
+	// prev is both halves of the walk: the cut a cut must advance past, and
+	// the sample the piece it opens starts at. They are the same number, so
+	// checking and cutting in one pass is not a fusion of two loops that
+	// happen to agree, it is the arithmetic saying so once.
+	spans := make([][2]int64, 0, len(req.Cuts)+1)
+	prev := int64(0)
+	for i, c := range req.Cuts {
+		switch {
+		case c <= prev:
+			// One message for "not ascending" and for a leading 0, because
+			// they are one rule: every cut opens a piece, so a cut that does
+			// not advance past the one before it (or past the implied 0) is
+			// asking for an empty one.
+			return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+				"jobs: cut %d is at sample %d, which does not advance past %d; "+
+					"cuts are interior points, strictly ascending", i, c, prev))
+		case total >= 0 && c >= total:
+			// Refused rather than clamped, the call SpanTrack makes about a
+			// span past the end: a cut list that overshoots does not describe
+			// this source (a CUE sheet paired with the wrong rip), and
+			// clamping would hand back fewer or emptier pieces than the
+			// caller believes it asked for, with nothing to notice it by.
+			return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+				"jobs: cut %d is at sample %d, at or past the source's %d samples", i, c, total))
+		}
+		spans = append(spans, [2]int64{prev, c})
+		prev = c
+	}
+	return append(spans, [2]int64{prev, waxflow.ToEnd}), nil
 }
 
 // ErrInfo is a terminal failure, in the envelope vocabulary.
@@ -103,8 +192,9 @@ type ErrInfo struct {
 	Message string `json:"message"`
 }
 
-// Output describes a finished job's product: a transcode's audio file, or
-// an analyze job's silence map. GET /jobs/{id}/result serves it.
+// Output describes one of a finished job's products: a transcode's or a
+// merge's audio file, one piece of a split, or an analyze job's silence map.
+// GET /jobs/{id}/result/{n} serves it.
 type Output struct {
 	// File is the output's name within the job directory.
 	File      string `json:"file"`
@@ -234,6 +324,19 @@ type Progress struct {
 	Percent float64 `json:"percent"`
 }
 
+// SchemaVersion is the job.json version this build writes, and the only one
+// it reads: a job.json naming any other version is refused by the store, which
+// quarantines the directory rather than deleting it.
+//
+// 2 replaced the single Output field with the Outputs list, a different JSON
+// key. There is no migration because there is nothing released to migrate
+// from, and a migration for a schema that never shipped is code that can only
+// rot. Refusing is what keeps the alternative from happening quietly: a v1
+// file still parses as a valid job whose product list is simply empty, so
+// without the bump a finished output would sit on disk unreachable, its job
+// terminal and therefore never requeued.
+const SchemaVersion = 2
+
 // Job is one job's full state: the job.json shape and the wire shape are
 // the same document.
 type Job struct {
@@ -246,10 +349,15 @@ type Job struct {
 	Started       *time.Time `json:"started,omitempty"`
 	Finished      *time.Time `json:"finished,omitempty"`
 	Error         *ErrInfo   `json:"error,omitempty"`
-	Output        *Output    `json:"output,omitempty"`
-	Analysis      *Analysis  `json:"analysis,omitempty"`
-	Timeline      *Timeline  `json:"timeline,omitempty"`
-	Progress      *Progress  `json:"progress,omitempty"`
+	// Outputs are the job's product files, in order, and the index is the
+	// one GET /jobs/{id}/result/{n} takes. It is a list rather than the
+	// single output the other three types have, because a split has N: one
+	// output plus a count would be the same list with a way to be
+	// inconsistent, and every consumer would still have to handle N.
+	Outputs  []Output  `json:"outputs,omitempty"`
+	Analysis *Analysis `json:"analysis,omitempty"`
+	Timeline *Timeline `json:"timeline,omitempty"`
+	Progress *Progress `json:"progress,omitempty"`
 	// Warnings are non-fatal notes (metadata that could not be read or
 	// written); the audio outcome is unaffected.
 	Warnings []string `json:"warnings,omitempty"`
@@ -259,45 +367,50 @@ type Job struct {
 //
 // The struct copy is not a deep copy, and every reference field below is here
 // because of that. Request in particular used to be safe to copy by value and
-// no longer is: Srcs is a slice, so a shallow copy would hand a caller the
-// stored job's own backing array. TestJobCloneIsDeep is the guard, and it is
-// hand-written rather than reflective because what it must catch is a field
-// that was added and forgotten here.
+// no longer is: Srcs, SourceIDs, and Cuts are slices, so a shallow copy would
+// hand a caller the stored job's own backing arrays. TestJobCloneIsDeep is the
+// guard, and its checks are hand-written because what they must catch is a
+// field that was added and forgotten here: a reflective deep-copy check would
+// be this function written a second time.
 func (j *Job) clone() *Job {
 	c := *j
 	c.Request.Srcs = slices.Clone(j.Request.Srcs)
-	if j.Timeline != nil {
-		tl := *j.Timeline
-		c.Timeline = &tl
-	}
-	if j.Started != nil {
-		t := *j.Started
-		c.Started = &t
-	}
-	if j.Finished != nil {
-		t := *j.Finished
-		c.Finished = &t
-	}
-	if j.Error != nil {
-		e := *j.Error
-		c.Error = &e
-	}
-	if j.Output != nil {
-		o := *j.Output
-		c.Output = &o
-	}
+	c.Request.SourceIDs = slices.Clone(j.Request.SourceIDs)
+	c.Request.Cuts = slices.Clone(j.Request.Cuts)
+	// Output holds no reference field of its own, so cloning the slice is
+	// the whole of it; a pointer added to Output would need a loop here.
+	c.Outputs = slices.Clone(j.Outputs)
+	c.Timeline = clonePtr(j.Timeline)
+	c.Started = clonePtr(j.Started)
+	c.Finished = clonePtr(j.Finished)
+	c.Error = clonePtr(j.Error)
+	c.Progress = clonePtr(j.Progress)
 	if j.Analysis != nil {
+		// Analysis is the one struct here that holds pointers of its own, so
+		// copying it is not the whole of it: the loudness and peak fields are
+		// pointers to carry the negative infinity of digital silence, and the
+		// summary is one to stay omittable, and all five would otherwise be
+		// the stored job's own.
 		a := *j.Analysis
-		if a.Silence != nil {
-			s := *a.Silence
-			a.Silence = &s
-		}
+		a.IntegratedLUFS = clonePtr(a.IntegratedLUFS)
+		a.TruePeakDB = clonePtr(a.TruePeakDB)
+		a.SamplePeakDB = clonePtr(a.SamplePeakDB)
+		a.AppliedGainDB = clonePtr(a.AppliedGainDB)
+		a.Silence = clonePtr(a.Silence)
 		c.Analysis = &a
 	}
-	if j.Progress != nil {
-		p := *j.Progress
-		c.Progress = &p
-	}
-	c.Warnings = append([]string(nil), j.Warnings...)
+	c.Warnings = slices.Clone(j.Warnings)
 	return &c
+}
+
+// clonePtr copies what p points at, nil through. It is what keeps clone one
+// line per pointer field: every such field holds a struct or a number with no
+// references below it (Analysis excepted, which clone spells out), so copying
+// the pointee is the whole job.
+func clonePtr[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }

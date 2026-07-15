@@ -83,7 +83,10 @@ type ProbeInfo struct {
 // ProbeChapter is one chapter marker.
 type ProbeChapter struct {
 	StartSeconds float64 `json:"startSeconds"`
-	Title        string  `json:"title,omitempty"`
+	// EndSeconds is the chapter's end, absent for start-only chapter forms
+	// that mean "until the next chapter, or end of stream".
+	EndSeconds float64 `json:"endSeconds,omitempty"`
+	Title      string  `json:"title,omitempty"`
 }
 
 // ProbeTrack is one stream in a ProbeInfo.

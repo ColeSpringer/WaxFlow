@@ -348,11 +348,24 @@ func dot2(c, x0, x1 []float32) (float32, float32) {
 	return a0 + a1, b0 + b1
 }
 
-// ceilDiv is ceiling division for non-negative operands and positive
-// divisors; numerators here are products of sample positions and reduced
-// ratio terms, both non-negative by construction.
+// ceilDiv is ceil(a/b) for a positive b, over the whole range of a
+// including negatives.
+//
+// The obvious (a + b - 1) / b is only ceil for a non-negative a, and the
+// difference is not academic: a segment anchored before its stream's own
+// sample 0 (a span pre-rolling into the audio ahead of its window) has a
+// negative position, and the bias term overshoots by one there. Go's
+// integer division truncates toward zero, which for a negative a is
+// already ceiling, so the correction only applies when the remainder is
+// positive. For a >= 0 this returns exactly what the bias form did, so
+// nothing that was already right moves; it also cannot overflow on a huge
+// a, which the bias form could.
 func ceilDiv(a, b int64) int64 {
-	return (a + b - 1) / b
+	q, r := a/b, a%b
+	if r > 0 {
+		q++
+	}
+	return q
 }
 
 func gcd(a, b int) int {

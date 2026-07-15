@@ -77,9 +77,16 @@ func openStore(dir string, log *slog.Logger) (*store, error) {
 
 // resetForRequeue returns an interrupted job to its just-created shape
 // and removes everything but job.json from its directory.
+//
+// The sweep is by exclusion rather than by naming the outputs, and that is
+// what makes it hold for a split, whose N pieces are N files the interrupted
+// job may have left in any state (some finished, one half-written, the rest
+// absent). Nothing here has to know how many there were, or that there can be
+// more than one: everything the run created goes, and the rerun recreates it
+// whole.
 func (s *store) resetForRequeue(j *Job) {
 	j.State = StateQueued
-	j.Started, j.Finished, j.Error, j.Output, j.Analysis, j.Progress = nil, nil, nil, nil, nil, nil
+	j.Started, j.Finished, j.Error, j.Outputs, j.Analysis, j.Progress = nil, nil, nil, nil, nil, nil
 	j.Timeline = nil
 	j.Warnings = nil
 	dir := s.jobDir(j.ID)
@@ -107,8 +114,9 @@ func (s *store) load(id string) (*Job, error) {
 	if err := json.Unmarshal(b, &j); err != nil {
 		return nil, err
 	}
-	if j.ID != id || j.SchemaVersion != 1 {
-		return nil, fmt.Errorf("jobs: job.json for %s names %q schema %d", id, j.ID, j.SchemaVersion)
+	if j.ID != id || j.SchemaVersion != SchemaVersion {
+		return nil, fmt.Errorf("jobs: job.json for %s names %q schema %d, want %q schema %d",
+			id, j.ID, j.SchemaVersion, id, SchemaVersion)
 	}
 	return &j, nil
 }
@@ -142,7 +150,7 @@ func (s *store) create(req Request) (*Job, error) {
 		return nil, waxerr.Wrap(waxerr.CodeInternal, "jobs: minting id", err)
 	}
 	j := &Job{
-		SchemaVersion: 1,
+		SchemaVersion: SchemaVersion,
 		ID:            id,
 		Type:          req.Type,
 		State:         StateQueued,

@@ -581,7 +581,18 @@ func buildPlanCore(in audio.Format, opts TranscodeOptions) (*planCore, error) {
 // table instead of maintaining their own lists.
 type output struct {
 	name string
+	// exts are the extensions that resolve TO this format (the read
+	// direction, OutputFormatForExt). A row claims one only where it is what
+	// that extension should mean, so at most one row claims any extension.
 	exts []string
+	// writeExt is the extension a file of this format is written with (the
+	// write direction, OutputExt) when it is not the first claimed one. The
+	// two directions are not inverses, and alac is why: it writes an entirely
+	// ordinary .m4a, it just is not what .m4a resolves back to, since aac
+	// claimed that. Adding m4a to its exts to say so would make the read
+	// direction answer two formats for one extension, so the row carries the
+	// name it writes separately from the names it answers to.
+	writeExt string
 	// live: the muxer writes a compliant stream to a plain io.Writer
 	// (NeedsSeek false), so /stream can serve it.
 	live bool
@@ -1026,8 +1037,10 @@ var outputs = []output{
 	{
 		name: "alac",
 		// exts is empty since the aac row claimed m4a: ALAC output is
-		// reachable by naming the format explicitly.
+		// reachable by naming the format explicitly. It still writes an m4a,
+		// which is what writeExt says; see the field.
 		exts:      []string{},
+		writeExt:  "m4a",
 		live:      true,
 		mediaType: "audio/mp4",
 		// headerBytes stays 0: size estimates are gated on a fixed
@@ -1363,6 +1376,74 @@ func OutputContainerForExt(ext string) (format, container string, ok bool) {
 		return "opus", "webm", true
 	}
 	return "", "", false
+}
+
+// OutputExt is the file extension for an output written as format in
+// container (empty for the format's default form), without the leading dot.
+//
+// It is the write direction of OutputFormatForExt and a separate function
+// rather than that one inverted, because the two are not inverses: an
+// extension resolves to at most one format, so of the two formats that write
+// .m4a only aac claims it, and yet both write it. A caller naming a download
+// needs the name the file should carry, which is the question the read
+// direction cannot answer. See output.writeExt.
+//
+// A container override names a wrapper, not a box shape, and only a
+// different wrapper renames the file: adts, mka, webm, and ogg each write a
+// different kind of file than the row's default, while progressive is the
+// aac/alac row's own MP4 with its boxes flattened and stays an m4a. That
+// distinction is what this exists for. A container name used as an extension
+// yields foo.progressive, which is not a file Apple Books will open.
+//
+// An unregistered format falls back to bin. The caller is naming a download,
+// so "" is not an answer; the format's own name is the confident lie this
+// removes (foo.alac), and a format with no row has no file form to name at
+// all, which is exactly what bin says.
+//
+// format and container are taken as a pair some plan already accepted: this
+// names the result, it does not re-validate the request.
+func OutputExt(format, container string) string {
+	row, err := outputRow(format)
+	if err != nil {
+		return outputExtFallback
+	}
+	if ext, ok := containerExt(container); ok {
+		return ext
+	}
+	if row.writeExt != "" {
+		return row.writeExt
+	}
+	if len(row.exts) > 0 {
+		return row.exts[0]
+	}
+	return outputExtFallback
+}
+
+// outputExtFallback is the extension for an output there is no file form for:
+// opaque bytes, promising nothing. See OutputExt.
+const outputExtFallback = "bin"
+
+// containerExt maps a Container override to the extension its wrapper is
+// written with, reporting false for one that does not rename the file at all:
+// the empty default, and mp4Progressive, which is the row's own MP4 in a flat
+// box shape rather than a second container. The rest are the shared override
+// names (the matroskaContainer set, aac's adts, flac's ogg), resolved in one
+// place for the same reason those are: one wrapper serves many rows.
+func containerExt(name string) (ext string, ok bool) {
+	switch name {
+	case "adts":
+		return "aac", true
+	case "mka":
+		return "mka", true
+	case "webm":
+		return "webm", true
+	case "ogg":
+		// The Xiph extension for Ogg-encapsulated audio that is not Vorbis.
+		// Only the flac row takes this override, and .flac there would name a
+		// native-FLAC file that these bytes are not.
+		return "oga", true
+	}
+	return "", false
 }
 
 // outputRow resolves an output format name against the table.

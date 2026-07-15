@@ -68,12 +68,36 @@ func (s *Server) prepareSource(ctx context.Context, q url.Values, sigAuthed bool
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("track %d: only the default track (%d) is selectable until multi-track containers land", p.track, track.ID))
 	}
+	// Everything downstream plans from the spanned track, not the file's,
+	// which is the whole of what makes a virtual track real: plan.Samples
+	// must promise the span's length, or a bounded request advertises the
+	// whole rip's duration and its segment count runs off the end. The
+	// window is resolved through the same funnel Slice uses at open, so the
+	// plan and the delivery cannot disagree about it.
+	if p.span.narrowed() {
+		// The window is checked against the total, so the total has to be one
+		// that was measured: an under-declared source would refuse a span the
+		// file can serve, and an over-declared one would admit a span that
+		// dies part way through delivery. The measure is only on this branch,
+		// since an ordinary stream depends on no number and must not pay for a
+		// walk to be told it.
+		if track, err = s.trackFor(src, true); err != nil {
+			src.Close()
+			return nil, err
+		}
+		if track, err = waxflow.SpanTrack(track, p.span.from, p.span.end()); err != nil {
+			src.Close()
+			return nil, err
+		}
+	}
 	m := s.readMeta(ctx, src, false)
 	return &streamRequest{
-		p:      p,
-		src:    src,
-		info:   info,
-		track:  track,
+		p:     p,
+		src:   src,
+		info:  info,
+		track: track,
+		// The seek is inside the span: t= addresses the virtual track's own
+		// timeline, because that is the stream the caller is playing.
 		from:   int64(p.t * float64(track.Fmt.Rate)),
 		gainDB: p.gain.resolveDB(m, p.dynamics),
 		meta:   m,
@@ -138,7 +162,7 @@ func (s *Server) planTranscode(req *streamRequest) error {
 		}
 	}
 	req.plan = plan
-	req.canonical = canonicalParams(plan, req.gainDB, req.p.dynamics, req.from)
+	req.canonical = canonicalParams(plan, req.gainDB, req.p.dynamics, req.p.span, req.from)
 	if len(req.opts.Tags) > 0 {
 		req.canonical += "&tags=" + tagsFingerprint(req.opts.Tags)
 	}

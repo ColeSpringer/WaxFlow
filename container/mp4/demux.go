@@ -11,9 +11,10 @@ import (
 )
 
 var (
-	_ container.Demuxer = (*Demuxer)(nil)
-	_ container.Seeker  = (*Demuxer)(nil)
-	_ container.Warner  = (*Demuxer)(nil)
+	_ container.Demuxer   = (*Demuxer)(nil)
+	_ container.Seeker    = (*Demuxer)(nil)
+	_ container.Warner    = (*Demuxer)(nil)
+	_ container.Chapterer = (*Demuxer)(nil)
 )
 
 // DemuxerOptions configures parsing.
@@ -237,11 +238,7 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		SamplesExact: exact,
 		Default:      true,
 	}
-	// Chapters ride in text-track sample tables, which a fragmented movie's
-	// moov does not carry; only the progressive path resolves them.
-	if !d.fragmented {
-		d.resolveChapters(tracks, audio)
-	}
+	d.resolveChapters(tracks, audio)
 	return nil
 }
 

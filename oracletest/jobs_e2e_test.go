@@ -249,11 +249,11 @@ func TestJobTranscodeE2E(t *testing.T) {
 		t.Fatalf("fresh job state %s", j.State)
 	}
 	done := waitJob(t, env, j.ID)
-	if done.State != jobs.StateDone || done.Output == nil {
-		t.Fatalf("job ended %s: %+v", done.State, done.Error)
+	if done.State != jobs.StateDone || len(done.Outputs) != 1 {
+		t.Fatalf("job ended %s with %d outputs: %+v", done.State, len(done.Outputs), done.Error)
 	}
-	if done.Output.Container != "opus" || done.Output.MediaType != "audio/ogg" {
-		t.Fatalf("output: %+v", done.Output)
+	if done.Outputs[0].Container != "opus" || done.Outputs[0].MediaType != "audio/ogg" {
+		t.Fatalf("output: %+v", done.Outputs[0])
 	}
 
 	t.Run("list contains it", func(t *testing.T) {
@@ -277,8 +277,8 @@ func TestJobTranscodeE2E(t *testing.T) {
 		if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "audio/ogg" {
 			t.Fatalf("result: %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
 		}
-		if int64(len(result)) != done.Output.Bytes {
-			t.Fatalf("result bytes %d, job says %d", len(result), done.Output.Bytes)
+		if int64(len(result)) != done.Outputs[0].Bytes {
+			t.Fatalf("result bytes %d, job says %d", len(result), done.Outputs[0].Bytes)
 		}
 		resp = env.get(t, "/jobs/"+j.ID+"/result", map[string]string{"Range": "bytes=0-99"})
 		part := readBody(t, resp)
@@ -572,7 +572,10 @@ func TestJobRestartSafety(t *testing.T) {
 	f.Close()
 	idRoots.Close()
 	interrupted := jobs.Job{
-		SchemaVersion: 1,
+		// The constant, not the number it currently holds: this plants a job
+		// to test the restart contract, so a schema bump must not silently
+		// turn it into a test of the quarantine path instead.
+		SchemaVersion: jobs.SchemaVersion,
 		ID:            interruptedID,
 		Type:          jobs.TypeTranscode,
 		State:         jobs.StateRunning,
@@ -629,7 +632,7 @@ func TestJobRestartSafety(t *testing.T) {
 
 	t.Run("completed job survives", func(t *testing.T) {
 		got := decodeJob(t, envB.get(t, "/jobs/"+j.ID, nil), http.StatusOK)
-		if got.State != jobs.StateDone || got.Output == nil {
+		if got.State != jobs.StateDone || len(got.Outputs) == 0 {
 			t.Fatalf("survivor: %+v", got)
 		}
 		resultB := readBody(t, envB.get(t, "/jobs/"+j.ID+"/result", nil))
@@ -640,11 +643,11 @@ func TestJobRestartSafety(t *testing.T) {
 
 	t.Run("interrupted job reruns from zero", func(t *testing.T) {
 		got := waitJob(t, envB, interruptedID)
-		if got.State != jobs.StateDone || got.Output == nil {
+		if got.State != jobs.StateDone || len(got.Outputs) == 0 {
 			t.Fatalf("requeued job: state %s, %+v", got.State, got.Error)
 		}
 		out := readBody(t, envB.get(t, "/jobs/"+interruptedID+"/result", nil))
-		if bytes.Contains(out, []byte("partial junk")) || len(out) != int(got.Output.Bytes) {
+		if bytes.Contains(out, []byte("partial junk")) || len(out) != int(got.Outputs[0].Bytes) {
 			t.Fatal("partial output survived the requeue")
 		}
 		if decodePCM(t, out).N == 0 {

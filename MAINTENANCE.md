@@ -131,8 +131,8 @@ is OSS-Fuzz-compatible (native Go fuzzing, no external fixtures needed
 to build the targets), so onboarding to OSS-Fuzz needs only the
 standard `compile_native_go_fuzzer` build script listing the targets.
 Budgets: CI smoke 45 s/target, nightly 20 m/target, and a release soak
-via `make fuzz FUZZTIME=160m` (about 72 hours of aggregate fuzzing
-across the ~27 targets; run it on a spare box, not CI).
+via `make fuzz FUZZTIME=160m` (about 80 hours of aggregate fuzzing
+across the ~30 targets; run it on a spare box, not CI).
 
 ## Release checklist (grows over time)
 

@@ -58,6 +58,13 @@ take the master URL natively.</p>
     </select></label></div>
   <div><label>Bitrate ladder (kbit/s, lossy) <input id="hlsBitrates" placeholder="64,96,160"></label></div>
 </div>
+<div class="row">
+  <div><label>Span from (source samples) <input id="hlsFrom" placeholder="0"></label></div>
+  <div><label>Span to (exclusive) <input id="hlsTo" placeholder="end"></label></div>
+</div>
+<p>A span serves one offset range of the file as a stream in its own right:
+the virtual track. Samples, not seconds, because a span says which samples
+are this track. Leave both empty for the whole file.</p>
 <button id="hlsPlay">Mint &amp; play HLS</button>
 <audio id="hlsPlayer" controls></audio>
 
@@ -140,6 +147,10 @@ document.getElementById('hlsPlay').onclick = async () => {
     };
     const ladder = document.getElementById('hlsBitrates').value.trim();
     if (ladder) params.bitrates = ladder;
+    const from = document.getElementById('hlsFrom').value.trim();
+    const to = document.getElementById('hlsTo').value.trim();
+    if (from) params.from = from;
+    if (to) params.to = to;
     const resp = await fetch('/sign', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...headers() },

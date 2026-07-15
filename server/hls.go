@@ -56,7 +56,7 @@ var hlsParamNames = map[string]bool{
 var hlsMintParamNames = map[string]bool{
 	"src": true, "tl": true, "format": true, "bitrate": true, "bitrates": true,
 	"bits": true, "rate": true, "ch": true, "gain": true, "dynamics": true,
-	"segDur": true,
+	"segDur": true, "from": true, "to": true,
 }
 
 // hlsSource is one resolved source as a worker needs it. Workers outlive
@@ -155,7 +155,7 @@ func (s *Server) prepareHLS(r *http.Request) (*hlsRequest, error) {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("segment duration yields %d segments (max %d); raise segDur", req.plan.Segments, maxPlaylistSegments))
 	}
-	canonical := canonicalHLSParams(req.plan, req.opts.GainDB, req.opts.Dynamics)
+	canonical := canonicalHLSParams(req.plan, req.opts.GainDB, req.opts.Dynamics, descSpan(desc))
 	identity := hlsIdentity(desc, req.members)
 	req.key = cache.NewKey(identity, canonical, req.plan.Versions)
 	req.meta = cache.Meta{
@@ -220,6 +220,13 @@ func (s *Server) resolveHLSSources(ctx context.Context, req *hlsRequest) error {
 // resolveMember resolves one member, enforces the identity the URL pins,
 // probes it, and records what the plan and the worker need.
 //
+// It measures for a timeline's member, and for a span. A span is the case that
+// makes an advisory length load-bearing on a single source: SpanTrack checks
+// to against the total, so an under-declared source refuses a legitimate span
+// at mint, and an over-declared one mints a span whose segments run past the
+// stream. Neither is a length nobody depended on, which is the only condition
+// under which trusting the headers was free.
+//
 // It keeps the open handle only for a single source, whose metadata read still
 // needs one. A timeline's handles are scaffolding: nothing reads a member
 // again once it is checked and probed, and every position past that comes from
@@ -248,7 +255,7 @@ func (s *Server) resolveMember(ctx context.Context, req *hlsRequest, ref timelin
 		return waxerr.New(waxerr.CodeSourceChanged,
 			"the source changed since this URL was minted; request a fresh one")
 	}
-	track, err := s.trackFor(f, tl)
+	track, err := s.trackFor(f, tl || descSpan(req.desc).narrowed())
 	if err != nil {
 		return err
 	}
@@ -271,13 +278,24 @@ func (req *hlsRequest) tracks() []container.Track {
 	return out
 }
 
-// hlsDuration is the source duration a URL's TTL policy reads: the track's
-// for a single source, the whole concatenated timeline's for a timeline. A
-// signed URL is meant to outlive one playthrough, and a twelve-track album's
-// playthrough is not its first track's.
+// hlsDuration is the stream duration a URL's TTL policy reads: the span's for
+// a single source, the whole concatenated timeline's for a timeline. A signed
+// URL is meant to outlive one playthrough, and a twelve-track album's
+// playthrough is not its first track's, just as a two-minute span's is not the
+// hour-long rip it was cut from.
+//
+// The span narrows the track through the same funnel planHLSVariant uses, so
+// the duration the TTL is sized from is the duration the playlist promises.
 func hlsDuration(desc hls.Descriptor, tracks []container.Track) (float64, error) {
 	if desc.Tl == "" {
-		return DurationSeconds(tracks[0].Samples, tracks[0].Fmt.Rate), nil
+		track := tracks[0]
+		if sp := descSpan(desc); sp.narrowed() {
+			var err error
+			if track, err = waxflow.SpanTrack(track, sp.from, sp.end()); err != nil {
+				return 0, err
+			}
+		}
+		return DurationSeconds(track.Samples, track.Fmt.Rate), nil
 	}
 	env, err := waxflow.ConcatTrack(tracks)
 	if err != nil {
@@ -366,7 +384,18 @@ func (s *Server) planHLSVariant(desc hls.Descriptor, tracks []container.Track, m
 	if desc.Tl != "" {
 		plan, err = s.eng.PlanSegmentsTimeline(tracks, opts, desc.SegDur)
 	} else {
-		plan, err = s.eng.PlanSegments(tracks[0], opts, desc.SegDur)
+		// The span narrows the track before it is planned, which is what
+		// makes a virtual track a stream in its own right: its segment 0 is
+		// the span's first sample and its segment count covers to-from, not
+		// the whole rip. Planning the file's track and bounding afterward
+		// would promise a playlist the span cannot fill.
+		track := tracks[0]
+		if sp := descSpan(desc); sp.narrowed() {
+			if track, err = waxflow.SpanTrack(track, sp.from, sp.end()); err != nil {
+				return fail(err)
+			}
+		}
+		plan, err = s.eng.PlanSegments(track, opts, desc.SegDur)
 	}
 	if err != nil {
 		return fail(err)
@@ -374,13 +403,16 @@ func (s *Server) planHLSVariant(desc hls.Descriptor, tracks []container.Track, m
 	return opts, plan, nil
 }
 
+// descSpan is the descriptor's span in the server's own spelling.
+func descSpan(desc hls.Descriptor) span { return span{from: desc.From, to: desc.To} }
+
 // canonicalHLSParams is the segmented cache key's parameter string: the
 // core canonicalParams shares, plus the segment length that pins the
 // numbering. The hls prefix keeps the key space disjoint from progressive
 // entries.
-func canonicalHLSParams(plan *waxflow.SegmentPlan, gainDB float64, dyn gain.Preset) string {
+func canonicalHLSParams(plan *waxflow.SegmentPlan, gainDB float64, dyn gain.Preset, sp span) string {
 	return fmt.Sprintf("hls&%s&segSamples=%d",
-		canonicalCore(&plan.TranscodePlan, gainDB, dyn), plan.SegmentSamples)
+		canonicalCore(&plan.TranscodePlan, gainDB, dyn, sp), plan.SegmentSamples)
 }
 
 // hlsChildExp is the expiry child URLs (media playlists, init, segments)
@@ -627,6 +659,7 @@ func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64,
 	// The worker outlives the request; capture values, never req.srcs.
 	members, tl := req.members, req.desc.Tl != ""
 	opts, plan, key := req.opts, req.plan, req.key
+	sp := descSpan(req.desc)
 	return func(start int64, notify func(int64), exit func(error)) (context.CancelFunc, error) {
 		release, ok := s.pools.AcquireLive()
 		if !ok {
@@ -644,7 +677,7 @@ func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64,
 			defer s.store.Unpin(key)
 			defer release()
 			defer cancel()
-			exit(s.runHLSWorker(ctx, members, tl, opts, plan, variant, start, notify))
+			exit(s.runHLSWorker(ctx, members, tl, sp, opts, plan, variant, start, notify))
 		}()
 		return cancel, nil
 	}
@@ -653,10 +686,10 @@ func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64,
 // runHLSWorker is one variant worker: its own input, opened afresh, the init
 // header if the variant lacks one, then segments from start to end of
 // stream, each published atomically and announced.
-func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool,
+func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool, sp span,
 	opts waxflow.TranscodeOptions, plan *waxflow.SegmentPlan, variant *cache.Variant,
 	start int64, notify func(int64)) error {
-	med, err := s.openHLSMedia(ctx, members, tl, opts)
+	med, err := s.openHLSMedia(ctx, members, tl, sp, opts)
 	if err != nil {
 		return err
 	}
@@ -700,9 +733,20 @@ func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool,
 // first read the moment the client disconnected, which is precisely what
 // read-behind exists not to do.
 func (s *Server) openHLSMedia(ctx context.Context, members []hlsSource, tl bool,
-	opts waxflow.TranscodeOptions) (format.Media, error) {
+	sp span, opts waxflow.TranscodeOptions) (format.Media, error) {
 	if !tl {
-		return s.openMember(ctx, members[0])
+		med, err := s.openMember(ctx, members[0])
+		if err != nil || !sp.narrowed() {
+			return med, err
+		}
+		// The slice takes ownership, so a failure here has to close what it
+		// did not take.
+		sl, err := waxflow.Slice(med, sp.from, sp.end())
+		if err != nil {
+			med.Close()
+			return nil, err
+		}
+		return sl, nil
 	}
 	srcs := make([]waxflow.ConcatSource, len(members))
 	for i, m := range members {
@@ -797,6 +841,13 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string
 	if d.Rate, err = atoi("rate"); err != nil {
 		return hls.Descriptor{}, 0, err
 	}
+	// The span is parsed by the same function /stream uses, so the two
+	// surfaces cannot come to disagree about what from and to mean.
+	sp, err := parseSpan(params["from"], params["to"])
+	if err != nil {
+		return hls.Descriptor{}, 0, err
+	}
+	d.From, d.To = sp.from, sp.to
 	if d.Ch, err = atoi("ch"); err != nil {
 		return hls.Descriptor{}, 0, err
 	}

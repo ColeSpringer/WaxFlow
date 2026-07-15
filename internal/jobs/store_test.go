@@ -3,6 +3,7 @@ package jobs
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -57,18 +58,19 @@ func TestRestartCompletedJobSurvives(t *testing.T) {
 	if got.State != StateDone {
 		t.Fatalf("state after reopen = %s, want %s", got.State, StateDone)
 	}
-	if got.Output == nil || *got.Output != *done.Output {
-		t.Errorf("output after reopen = %+v, want %+v", got.Output, done.Output)
+	if len(got.Outputs) != 1 || got.Outputs[0] != *soleOutput(t, done) {
+		t.Errorf("outputs after reopen = %+v, want %+v", got.Outputs, done.Outputs)
 	}
 	if got.Finished == nil || !got.Finished.Equal(*done.Finished) {
 		t.Errorf("finished after reopen = %v, want %v", got.Finished, done.Finished)
 	}
-	fi, err := os.Stat(filepath.Join(dir, j.ID, got.Output.File))
+	out := soleOutput(t, got)
+	fi, err := os.Stat(filepath.Join(dir, j.ID, out.File))
 	if err != nil {
 		t.Fatalf("output file after reopen: %v", err)
 	}
-	if fi.Size() != got.Output.Bytes {
-		t.Errorf("output file is %d bytes after reopen, Output.Bytes says %d", fi.Size(), got.Output.Bytes)
+	if fi.Size() != out.Bytes {
+		t.Errorf("output file is %d bytes after reopen, Output.Bytes says %d", fi.Size(), out.Bytes)
 	}
 }
 
@@ -80,7 +82,7 @@ func TestRestartRequeuesIncomplete(t *testing.T) {
 			id := mustULID(t)
 			now := time.Now().UTC()
 			j := &Job{
-				SchemaVersion: 1,
+				SchemaVersion: SchemaVersion,
 				ID:            id,
 				Type:          TypeTranscode,
 				State:         state,
@@ -104,21 +106,19 @@ func TestRestartRequeuesIncomplete(t *testing.T) {
 
 			r := openRunner(t, Config{Dir: dir, Resolver: res})
 			done := waitJob(t, r, id, StateDone)
-			if done.Output == nil {
-				t.Fatal("requeued job finished without an output")
-			}
+			rerun := soleOutput(t, done)
 			if _, err := os.Stat(filepath.Join(jdir, "foo.tmp")); !os.IsNotExist(err) {
 				t.Errorf("stray foo.tmp survived the requeue: %v", err)
 			}
-			out, err := os.ReadFile(filepath.Join(jdir, done.Output.File))
+			out, err := os.ReadFile(filepath.Join(jdir, rerun.File))
 			if err != nil {
 				t.Fatalf("reading rerun output: %v", err)
 			}
 			if !bytes.HasPrefix(out, []byte("fLaC")) {
 				t.Error("rerun output is not a FLAC stream; the junk partial survived")
 			}
-			if int64(len(out)) != done.Output.Bytes {
-				t.Errorf("rerun output is %d bytes, Output.Bytes says %d", len(out), done.Output.Bytes)
+			if int64(len(out)) != rerun.Bytes {
+				t.Errorf("rerun output is %d bytes, Output.Bytes says %d", len(out), rerun.Bytes)
 			}
 		})
 	}
@@ -132,7 +132,7 @@ func TestRestartLeavesTerminalUntouched(t *testing.T) {
 	started := created.Add(time.Second)
 	finished := created.Add(2 * time.Second)
 	j := &Job{
-		SchemaVersion: 1,
+		SchemaVersion: SchemaVersion,
 		ID:            id,
 		Type:          TypeTranscode,
 		State:         StateFailed,
@@ -178,6 +178,55 @@ func TestRestartLeavesTerminalUntouched(t *testing.T) {
 	}
 }
 
+// TestOlderSchemaQuarantined pins the schema gate against the version that
+// made it necessary: v1 carried one "output" object where v2 carries an
+// "outputs" list.
+//
+// Nothing but the version tells the two apart, which is the danger. A v1
+// document unmarshals cleanly into this build's Job (the key it names is
+// simply one nothing reads), leaving a done job with no products at all, and
+// done is terminal, so the requeue that recreates outputs never runs: the
+// finished file below would sit on disk unreachable for good. Refusing hands
+// the directory to openStore's quarantine, which keeps it for the operator.
+func TestOlderSchemaQuarantined(t *testing.T) {
+	res, _, _ := openLib(t)
+	dir := t.TempDir()
+	id := mustULID(t)
+	jdir := filepath.Join(dir, id)
+	if err := os.MkdirAll(jdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Hand-written rather than marshaled from a Job: the shape it pins is one
+	// this build can no longer express.
+	v1 := fmt.Sprintf(`{
+  "schemaVersion": 1,
+  "id": %q,
+  "type": "transcode",
+  "state": "done",
+  "request": {"type": "transcode", "src": "lib/sine-s16.wav", "sourceId": "1-1", "format": "flac"},
+  "created": "2026-01-01T00:00:00Z",
+  "output": {"file": "out.flac", "mediaType": "audio/flac", "container": "flac", "bytes": 8, "samples": 1, "rate": 44100}
+}`, id)
+	if err := os.WriteFile(filepath.Join(jdir, jobFile), []byte(v1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(jdir, "out.flac"), []byte("survivor"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := openRunner(t, Config{Dir: dir, Resolver: res})
+	if got, ok := r.Get(id); ok {
+		t.Errorf("a v1 job.json loaded as a live job (%+v); its product list is empty and its "+
+			"state terminal, so its finished output is unreachable forever", got)
+	}
+	if _, err := os.Stat(jdir); !os.IsNotExist(err) {
+		t.Errorf("the v1 dir survived at its id: %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, id+".unreadable", "out.flac")); err != nil || string(b) != "survivor" {
+		t.Errorf("quarantine did not preserve the finished output: %v %q", err, b)
+	}
+}
+
 func TestUnreadableJobDirsQuarantined(t *testing.T) {
 	res, _, _ := openLib(t)
 	dir := t.TempDir()
@@ -188,7 +237,7 @@ func TestUnreadableJobDirsQuarantined(t *testing.T) {
 	fileID := mustULID(t)
 
 	// A directory whose job.json names another job entirely.
-	writeJob(t, dir, &Job{SchemaVersion: 1, ID: mustULID(t), Type: TypeAnalyze, State: StateQueued, Created: time.Now().UTC()})
+	writeJob(t, dir, &Job{SchemaVersion: SchemaVersion, ID: mustULID(t), Type: TypeAnalyze, State: StateQueued, Created: time.Now().UTC()})
 	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("planting the mismatched dir: %v (%d entries)", err, len(entries))

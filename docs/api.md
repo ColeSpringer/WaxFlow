@@ -80,9 +80,9 @@ or `waxflow sign`.
 | `GET /metrics` | key or metricsKey | Prometheus text exposition |
 | `GET /demo` | none (dev mode only, `demo: true`) | browser test page |
 | `POST /uploads`, `DELETE /uploads/{id}` | key | spool one-shot sources; reference as `src=upload:<id>` |
-| `POST /jobs`, `GET /jobs[/{id}]`, `DELETE /jobs/{id}` | key | async full-file transcode/analyze jobs |
+| `POST /jobs`, `GET /jobs[/{id}]`, `DELETE /jobs/{id}` | key | async full-file transcode/analyze/merge/split jobs |
 | `GET /jobs/{id}/events` | key or sig | server-sent job progress events (`EventSource` cannot set headers) |
-| `GET /jobs/{id}/result` | key or sig | finished output file (full ranges) or analysis JSON |
+| `GET /jobs/{id}/result[/{n}]` | key or sig | finished output file (full ranges), or the job's product as JSON when it wrote no file |
 | `GET /art`, `GET /lyrics` | key or sig | embedded cover art / lyrics passthrough (raw bytes, ETag'd, no resizing) |
 
 ## GET /probe, POST /probe
@@ -104,8 +104,17 @@ or `waxflow sign`.
 With metadata mapping (the CLI daemon always has it), the body also
 carries the source's tag summary when present: `tags` (canonical
 uppercase keys to value lists, ReplayGain included; the lyric sheet is
-excluded, `hasLyrics` plus `GET /lyrics` cover it), `chapters`
-(`[{"startSeconds", "title"}]`), `hasArt`, and `hasLyrics`.
+excluded, `hasLyrics` plus `GET /lyrics` cover it), `hasArt`, and
+`hasLyrics`.
+
+`chapters` (`[{"startSeconds", "endSeconds", "title"}]`) needs **no**
+mapper: a container that parses chapters surfaces them either way, so a
+daemon embedded without one still reports them. A mapper's chapters win
+when one is wired, since a tag library may know forms the container
+package does not. `endSeconds` is omitted for the start-only chapter
+forms (Nero `chpl`) that mean "until the next chapter, or end of
+stream"; a caller deriving a span from chapter *n* reads it when present
+and chapter *n+1*'s `startSeconds` when not.
 
 `warnings` lists input damage the tolerant parser worked around; `strict`
 turns damage into errors. `samples: -1` means unknown length. This is
@@ -113,7 +122,7 @@ byte-identical to `waxflow probe --json`.
 
 ## GET /stream
 
-    /stream?src=<ref>&format=auto|wav|flac|alac|mp3|aac|opus&rate=&ch=&bits=16|24&bitrate=|q=&container=&gain=&dynamics=&t=&track=&maxBitRate=
+    /stream?src=<ref>&format=auto|wav|flac|alac|mp3|aac|opus&rate=&ch=&bits=16|24&bitrate=|q=&container=&gain=&dynamics=&t=&from=&to=&track=&maxBitRate=
 
 Source references (`src`): `<root>/<relative/path>` under a configured
 library root; `upload:<id>` for a spooled one-shot upload (POST
@@ -190,6 +199,45 @@ Parameters (unknown parameter names are rejected):
   streams are not byte-addressable). Seeking at or past the end of the
   track is not an error: the response is a valid empty stream
   (`X-Content-Duration: 0.000`).
+- `from`, `to`: bound the stream to a **sample range** of the source, `to`
+  exclusive. This is the virtual-track surface: one offset range of one
+  file, served as a stream in its own right. `from` defaults to the start
+  and `to` to the end; `to=0` is `400` (the span would be empty; omit the
+  parameter to mean the end). A range outside the source is `400` rather
+  than clamped, since a cut point past the end means the caller's cut
+  points describe a different file.
+
+  A span is streamed, not seeked: `plan.Samples`, `X-Content-Duration`,
+  and the HLS segment count all describe the span, so
+  `/hls/master.m3u8?v={...,"from":10804500,"to":18744300}` is a
+  playlist for the virtual track alone. A spanned request never
+  direct-plays, including one that only sets `to`.
+
+  **Samples, not seconds, and the difference is load-bearing.** `t` is a
+  seek, where a sample either way is meaningless, so it takes seconds. A
+  span is not a seek: it declares *which samples are this track*, so it is
+  content identity. A CUE boundary at 245.32 s is not exactly
+  representable in binary (`245.32 * 44100` floors to 10818611, not
+  10818612), which puts a one-sample error at every track boundary of a
+  gapless album. That is exactly the failure a CUE split exists to avoid.
+
+  The two compose, with different jobs: `from`/`to` say which samples the
+  track is, `t` seeks **within** it.
+
+      /stream?src=rip.flac&from=10804500&to=18744300        the virtual track
+      /stream?src=rip.flac&from=10804500&to=18744300&t=30   30 s into it
+
+  A span with no rate change is bit-exact: the same samples a split job
+  writes for the same cut points. A **resampled** span is primed rather
+  than started cold, which matters because HLS Opus is always 48 kHz and a
+  CUE rip is 44.1 kHz, so a virtual track is resampled by construction.
+  Unlike a file, a span has real audio ahead of its own first sample, and
+  the segmented path feeds the resampler from it and discards the
+  pre-roll. Its first samples are therefore the ones a continuous run of
+  the whole source delivers at that offset, not a transient out of a
+  zero-filled filter window. (The progressive form does not prime, matching
+  what `t=` has always done at a seek; HLS is where a virtual track is
+  served.)
 - `track`: must name the default track until multi-track containers
   land.
 - `bitrate`, `q`: lossy quality selection, mutually exclusive. `bitrate`
@@ -250,7 +298,17 @@ session state. Descriptor schema (version 1):
 
     {"ver":1, "src":"lib/a.flac", "id":"<size-mtimeNS>", "format":"opus",
      "bitrate":96, "bitrates":[64,96,160], "bits":16, "rate":48000,
-     "ch":2, "gain":"track", "dynamics":"off", "segDur":4}
+     "ch":2, "gain":"track", "dynamics":"off", "segDur":4,
+     "from":10804500, "to":18744300}
+
+`from`/`to` are the virtual-track span: samples on the source timeline,
+`to` exclusive and omitted for the end. They mint from `from=`/`to=`
+parameters exactly as `/stream` spells them, and they are `int64` samples
+rather than `segDur`'s float seconds for the reason `/stream` gives above
+(a span is content identity, a segment duration is a target the plan snaps
+anyway). The playlist then describes the span alone: segment 0 is the
+span's first sample and the segment count covers `to-from`. A span is
+exclusive with `tl`, since it bounds one source and a timeline is several.
 
 `bitrates` (the ladder) appears only in master URLs; every other URL is
 per-variant. Descriptors are minted by the daemon (`POST /sign` with
@@ -344,8 +402,10 @@ Things worth knowing before you build on it:
 every rung is planned at mint time so a URL that mints is a URL that
 plays), `/art`
 and `/lyrics` (`params` take only `src`; identity is embedded), and
-`/jobs/<id>/events` / `/jobs/<id>/result` (no `params`; the signature
-pins the job id through the path). `params` are validated like a live
+`/jobs/<id>/events` / `/jobs/<id>/result` / `/jobs/<id>/result/<n>` (no
+`params`; the signature pins the job id, and the index, through the path;
+the index is checked for shape only, since a URL worth signing is minted
+while the job is still queued and has no outputs yet). `params` are validated like a live
 request, the source identity is resolved and embedded, and the response
 is:
 
@@ -450,6 +510,9 @@ interrupted mid-run restarts cleanly from zero on the next start.
     {"type": "transcode", "src": "lib/a.flac", "format": "flac", "loudness": "analyze"}
     {"type": "analyze", "src": "lib/a.flac"}
     {"type": "analyze", "src": "lib/a.flac", "silence": true}
+    {"type": "merge", "srcs": ["lib/ch1.flac", "lib/ch2.flac"], "format": "alac"}
+    {"type": "split", "src": "lib/album.flac", "format": "flac", "cuts": [10584000, 21344400]}
+    {"type": "split", "src": "lib/album.flac", "format": "flac", "cue": "lib/album.cue"}
 
 Transcode jobs take the /stream shaping parameters (`format` required,
 plus `container`, `rate`, `ch`, `bits`, `bitrate`, `gain`, `flacLevel`)
@@ -460,11 +523,83 @@ sizes, FLAC seek tables, the MP4 `iTunSMPB` gapless atom). `loudness:
 exact gain to the ReplayGain reference (replacing `gain`), and write
 measured `REPLAYGAIN_TRACK_*` tags describing the finished output.
 Analyze jobs measure EBU R128 loudness (integrated LUFS, loudness
-range, true peak, sample peak) without producing audio. Each field
-belongs to exactly one job type: a transcode field on an analyze job is
-a 400, and so is a silence field on a transcode job.
+range, true peak, sample peak) without producing audio.
 
-A third type, `timeline`, appears in `GET /jobs` but cannot be created
+Each field belongs to a specific set of job types, and a field on a type
+that does not take it is a 400 rather than a field silently ignored at
+run time: `srcs` is merge-only, `cuts` and `cue` split-only (and exclusive
+with each other), the silence fields analyze-only, `gain` and `loudness`
+transcode-only, and the shaping parameters belong to transcode, merge, and
+split. `src` is required by every type but merge, which refuses it.
+
+### Merge and split
+
+`merge` concatenates `srcs` into one output, gaplessly: it is the same
+timeline primitive `tl=` streams over HLS, pointed at a file. Members are
+normalized to a common envelope (the maximum rate and channel count, so
+no member loses information), and their lengths are **measured** rather
+than trusted, since a timeline's positions are a prefix sum and an
+advisory length that is two samples out desyncs every seam after it. That
+measuring is what a `POST /jobs` for a cold MP3 queue waits on; a queue
+already minted as a timeline (or any queue of FLACs) measures nothing.
+
+`split` cuts one `src` at `cuts` into N+1 outputs. Cut points are **source
+sample offsets, strictly ascending, and interior**: `0` is implied before
+the first and the source's end after the last, so N cuts make N+1 pieces
+and piece *i* runs `[cuts[i-1], cuts[i])`. A leading `0`, a cut at or past
+the end, a repeat, or a descending pair each ask for an empty piece or for
+samples the source does not have, and are all a 400 at creation rather
+than a job that dies on piece 7. Samples rather than seconds for the same
+reason a span is: a cut declares which samples are this piece, so it is
+content identity, and 245.32 s at 44100 floors to one sample short of the
+boundary a CUE sheet's CD-frame arithmetic names exactly.
+
+**`cue` names a CUE sheet instead**, exclusive with `cuts`. It is a source
+reference like `src`, so the sheet can be uploaded (`upload:<id>`) or sit
+in a library root beside its rip, and it resolves through the same
+resolver. The sheet's track boundaries become this split's cut points at
+creation: the first track's start is dropped (it is the implied 0, and a
+cut there would ask for an empty piece), so a sheet of N tracks yields
+N-1 cuts and N pieces.
+
+The daemon parses the sheet rather than making each client do it, and that
+is the point of the field. A CD frame is 1/75 s, which no nanosecond clock
+can represent, so the obvious conversion lands a sample short at every
+boundary; every CD-family rate divides by 75 exactly (44100/75 = 588), so
+frames convert to samples directly and exactly. Pushing that to each
+client is pushing each client to rediscover the same off-by-one. Sheets
+are decoded best-effort (BOM stripped, UTF-8 when valid, CP1252
+otherwise), and a sheet indexing several files is refused: its tracks are
+already separate, so there is nothing to cut.
+
+The sheet does not reach the job. It is resolved into `cuts`, which is
+what the job carries, so `GET /jobs/{id}` shows the boundaries the 201
+accepted and an edit to the sheet afterward cannot change what runs.
+Sending `cue` and sending the samples it means produce the identical job.
+
+The pair is exact, and that is the property worth having: **a split to a
+lossless format at the source rate rejoins bit for bit through a merge.**
+No resampler and no limiter means nothing to prime, so each piece's sample
+0 is the source's sample `from` exactly. Ask for a rate change and each
+piece carries the same ~1.5 ms head transient a seek already does.
+
+Neither takes `gain` or `loudness`. Both answer "how loud should this one
+track be", against that track's own measurement or its own ReplayGain
+tags; a merge has N tracks in and one file out and a split one in and N
+out, so either would have to apply one source's number to things it does
+not describe. Normalize with a transcode job after the cut, where the
+numbers name what they measure. Neither carries tags or chapters yet.
+
+An mp4-family merge (`alac`, `aac`) writes the **flat** MP4 form by
+default, `container: "progressive"`, which is what the job document will
+say. That is the shape most players expect from an `.m4a`/`.m4b`, and the
+only one that can carry a chapter text track; the fragmented CMAF form is
+the row default only because `/stream` needs a container that streams, and
+a job writes to a seekable file where the flat form's back-patch applies.
+An explicit `container` wins, which also means a merge cannot ask for the
+fragmented form: omitting the field is how you get the flat one.
+
+A fifth type, `timeline`, appears in `GET /jobs` but cannot be created
 here: `POST /hls/timeline` creates one on its own when a cold queue needs
 enough measuring to be worth it (see the HLS section). Its product is the
 `timeline` field, `{"tl", "members", "durationSeconds"}`, rather than an
@@ -472,6 +607,13 @@ output file, since a timeline lives in the timeline store under the digest
 that is its identity. The restart contract still holds, by
 content-addressing rather than by the usual rule: re-running the mint from
 zero writes the same digest.
+
+Every job's sources are pinned by identity at creation, so a source
+replaced before the job ran fails with `source-changed` rather than
+quietly producing different audio. A merge pins each member, and the error
+names the index that moved (`member 2 (lib/ch3.flac): the source changed
+since the job was created`): naming one of forty candidates is the
+difference between re-uploading a file and re-uploading a library.
 
 ### Silence detection
 
@@ -535,12 +677,16 @@ them.
 
 The response (and `GET /jobs/{id}`) is the job document:
 
-    {"schemaVersion": 1, "id": "01J...", "type": "transcode", "state": "queued",
+    {"schemaVersion": 2, "id": "01J...", "type": "transcode", "state": "queued",
      "request": {...}, "created": "...",
      "progress": {"phase": "transcode", "done": 123, "total": 456, "percent": 26.9},
-     "output": {"file": "out.opus", "mediaType": "audio/ogg", "container": "opus", "bytes": 1, "samples": 1, "rate": 48000},
+     "outputs": [{"file": "out.opus", "mediaType": "audio/ogg", "container": "opus", "bytes": 1, "samples": 1, "rate": 48000}],
      "analysis": {"integratedLufs": -17.2, "loudnessRange": 4.1, "truePeakDb": -0.9, ...},
      "error": {"code": "...", "message": "..."}}
+
+`outputs` is a list because a split has one entry per piece, in cut order;
+every other type has at most one. Its index is what `GET
+/jobs/{id}/result/{n}` takes.
 
 States: `queued`, `running`, then one of `done`, `failed`, `canceled`.
 `analysis` peak and loudness fields are `null` for digital silence
@@ -554,13 +700,27 @@ the live pool is saturated: interactive streams always win.
 `GET /jobs/{id}/events` is a server-sent event stream: one `event: job`
 per state or progress update, each `data:` line a full job document,
 ending after the terminal event (comment heartbeats every 15 s keep
-proxies from timing it out). `GET /jobs/{id}/result` serves the job's
-output file (real `Content-Length`, full ranges, strong per-job `ETag`,
-`Content-Disposition: attachment`), which is a transcode's audio or an
-analyze job's `silence.json`, and an analyze job's analysis JSON when it
-produced no file; a queued or running job answers 400, a failed one
-replays its error envelope. Both accept signed URLs, because a browser
-`EventSource` and a plain download link cannot set headers.
+proxies from timing it out).
+
+`GET /jobs/{id}/result/{n}` serves the job's nth output file (real
+`Content-Length`, full ranges, strong per-output `ETag`,
+`Content-Disposition: attachment`): a transcode's or a merge's audio, one
+piece of a split, or an analyze job's `silence.json`. An index the job
+does not have is a 404. A queued or running job answers 400, a failed one
+replays its error envelope.
+
+`GET /jobs/{id}/result`, no index, answers **only where it cannot be
+wrong**: the single output of a job that has one, and a 400 naming the
+indexed form for a job with several. Handing back piece 1 of 12 to a
+caller who never learned the pieces existed would be a plausible-looking
+wrong answer, and refusing is what the daemon does with every other
+ambiguity it meets. A job whose product is not a file answers with the
+product as JSON instead: an analyze job's `analysis`, a timeline job's
+`{"tl", "members", "durationSeconds"}`.
+
+Both accept signed URLs, because a browser `EventSource` and a plain
+download link cannot set headers. `/jobs/<id>/result/<n>` is signable, so
+a split's pieces can be handed out as N links.
 
 ## GET /art, GET /lyrics
 
