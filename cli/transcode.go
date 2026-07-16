@@ -179,8 +179,27 @@ with true-peak limiting, dither).`,
 			}
 			analyzeLoudness := loudness == "analyze"
 			var srcRes *waxflow.AnalyzeResult
+			var peakLimited bool
 			if analyzeLoudness {
-				res, aerr := e.Analyze(cmd.Context(), src, srcHint, waxflow.AnalyzeOptions{})
+				// The predicted-output peak below (predictedRG / analyzeOutputRG)
+				// must be clamped to the ceiling whenever the encode chain's
+				// true-peak limiter is engaged: positive gain, a dynamics preset,
+				// or a downmix whose matrix can sum past unity. Probe the source
+				// channel count so a downmix is detected too, not just positive
+				// gain; analyze runs the raw fold with no limiter, so its true
+				// peak can sit above the ceiling the encode holds. The probe is
+				// best-effort (only the estimate rides on it, never the encode),
+				// and runs on the fresh source before the analyze consumes it.
+				var srcChannels int
+				if channels != 0 {
+					if pb, perr := e.Probe(src, srcHint, nil); perr == nil {
+						srcChannels = pb.Default().Fmt.Channels
+					}
+				}
+				// Measure after the same downmix the encode will apply, so the
+				// two-pass gain (and the predictedRG derived from this) lands on
+				// the audio the encode meters, not the wider source layout.
+				res, aerr := e.Analyze(cmd.Context(), src, srcHint, waxflow.AnalyzeOptions{Channels: channels})
 				if aerr != nil {
 					out.Close()
 					os.Remove(writePath)
@@ -192,6 +211,8 @@ with true-peak limiting, dither).`,
 				}
 				fmt.Fprintf(cmd.ErrOrStderr(), "loudness: source %.2f LUFS, applying %+.2f dB\n",
 					res.IntegratedLUFS, gainDB)
+				peakLimited = gainDB > 0 || gain.Preset(dynamics) != gain.PresetOff ||
+					(channels != 0 && srcChannels != 0 && channels < srcChannels)
 			}
 			dropRG := gainDB != 0 || analyzeLoudness
 			tagInfo := info
@@ -225,7 +246,7 @@ with true-peak limiting, dither).`,
 				// measured RG would otherwise be computed and dropped. Embed the
 				// RG predicted from the source loudness and the applied gain now
 				// (the same estimate the MP4 path patches in).
-				rg, outLUFS := predictedRG(srcRes, gainDB)
+				rg, outLUFS := predictedRG(srcRes, gainDB, peakLimited)
 				tags = append(tags, rg...)
 				fmt.Fprintf(cmd.ErrOrStderr(), "loudness: output %.2f LUFS, %s / %s\n",
 					outLUFS, rg[0].Value, rg[1].Value)
@@ -281,7 +302,7 @@ with true-peak limiting, dither).`,
 				// Ogg already embedded its predicted RG at Begin (it cannot be
 				// patched); mp4 patches its placeholders here, and post-pass
 				// formats get their measured values written below.
-				if rg, err = analyzeOutputRG(cmd, e, writePath, extHint(outPath), isMP4, srcRes, gainDB); err != nil {
+				if rg, err = analyzeOutputRG(cmd, e, writePath, extHint(outPath), isMP4, srcRes, gainDB, peakLimited); err != nil {
 					os.Remove(writePath)
 					return err
 				}
@@ -329,7 +350,7 @@ with true-peak limiting, dither).`,
 	cmd.Flags().BoolVar(&opusVBR, "opus-vbr", false, "encode Opus at variable bit rate around --opus-bitrate (opus output only)")
 	cmd.Flags().StringVar(&opusSignal, "opus-signal", "auto", "Opus content hint: auto, voice, or music (opus output only)")
 	cmd.Flags().IntVar(&aacBitrate, "aac-bitrate", 128, "AAC target bit rate in kbit/s (aac output only)")
-	cmd.Flags().StringVar(&loudness, "loudness", "", "analyze: two-pass loudness (exact gain to the ReplayGain reference, measured RG tags on the output)")
+	cmd.Flags().StringVar(&loudness, "loudness", "", "analyze: two-pass loudness (exact gain to the ReplayGain reference, measured RG tags on the output); the gain is measured after any --channels downmix")
 	cmd.Flags().BoolVar(&noTags, "no-tags", false, "skip the metadata passthrough (tags, chapters, art)")
 	return cmd
 }
@@ -339,25 +360,29 @@ with true-peak limiting, dither).`,
 // the engine can decode it back, derived from the source measurement
 // plus the applied gain for fragmented MP4, which has no read path
 // (exact for lossless ALAC, within the encoder's fraction of a dB for
-// AAC; positive gain caps the derived peak at the limiter ceiling).
+// AAC; the encode's limiter caps the derived peak).
 // predictedRG estimates the output ReplayGain from the source loudness analysis
 // and the gain being applied: after normalization the output sits at
-// srcLUFS+gain, and its true peak follows the gain (clamped to the ceiling when
-// boosting). It is the estimate the MP4 path patches into its placeholders and
-// the value the Ogg path embeds at Begin (Ogg cannot be patched afterward).
-func predictedRG(srcRes *waxflow.AnalyzeResult, gainDB float64) (rg []container.Tag, outLUFS float64) {
+// srcLUFS+gain, and its true peak follows the gain, clamped to the ceiling when
+// the encode chain limits (limited). The limiter engages for positive gain and
+// for a downmix whose matrix can sum past unity, so a downmix estimate must
+// pass limited even for negative gain: analyze runs the raw fold with no
+// limiter, so srcRes.TruePeakDB can already exceed the ceiling. It is the
+// estimate the MP4 path patches into its placeholders and the value the Ogg
+// path embeds at Begin (Ogg cannot be patched afterward).
+func predictedRG(srcRes *waxflow.AnalyzeResult, gainDB float64, limited bool) (rg []container.Tag, outLUFS float64) {
 	outLUFS = math.Inf(-1)
 	if !math.IsInf(srcRes.IntegratedLUFS, -1) {
 		outLUFS = srcRes.IntegratedLUFS + gainDB
 	}
 	outTP := srcRes.TruePeakDB + gainDB
-	if gainDB > 0 {
+	if limited {
 		outTP = min(outTP, gain.DefaultCeilingDB)
 	}
 	return meta.ReplayGainTags(outLUFS, outTP), outLUFS
 }
 
-func analyzeOutputRG(cmd *cobra.Command, e *waxflow.Engine, path, hint string, isMP4 bool, srcRes *waxflow.AnalyzeResult, gainDB float64) ([]container.Tag, error) {
+func analyzeOutputRG(cmd *cobra.Command, e *waxflow.Engine, path, hint string, isMP4 bool, srcRes *waxflow.AnalyzeResult, gainDB float64, limited bool) ([]container.Tag, error) {
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "reopening output", err)
@@ -368,7 +393,7 @@ func analyzeOutputRG(cmd *cobra.Command, e *waxflow.Engine, path, hint string, i
 	if isMP4 {
 		// The MP4 output edit list already normalized to the target; the RG is
 		// predicted from the source and gain, then patched into placeholders.
-		rg, outLUFS = predictedRG(srcRes, gainDB)
+		rg, outLUFS = predictedRG(srcRes, gainDB, limited)
 	} else {
 		fsrc, err := container.FileSource(f)
 		if err != nil {

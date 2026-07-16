@@ -481,15 +481,19 @@ func (r *Runner) warn(id, note string) {
 // deriveOutputLoudness projects the output's loudness and true peak
 // from the source measurement and the applied gain, for outputs the
 // engine cannot decode back (fragmented MP4). A linear gain shifts both
-// numbers exactly; positive gain engages the true-peak limiter, whose
-// ceiling caps the derived peak.
-func deriveOutputLoudness(src *waxflow.AnalyzeResult, gainDB float64) (lufs, truePeakDB float64) {
+// numbers exactly; when the encode chain's true-peak limiter is engaged
+// (limited), it caps the projected peak at the ceiling. The limiter runs
+// for positive gain and also for a downmix whose matrix can sum past unity,
+// so a downmix measurement must pass limited even when the gain is negative:
+// analyze runs the raw fold with no limiter, so src.TruePeakDB can already
+// sit above the ceiling the encode holds.
+func deriveOutputLoudness(src *waxflow.AnalyzeResult, gainDB float64, limited bool) (lufs, truePeakDB float64) {
 	lufs = math.Inf(-1)
 	if !math.IsInf(src.IntegratedLUFS, -1) {
 		lufs = src.IntegratedLUFS + gainDB
 	}
 	truePeakDB = src.TruePeakDB + gainDB
-	if gainDB > 0 {
+	if limited {
 		truePeakDB = min(truePeakDB, gain.DefaultCeilingDB)
 	}
 	return lufs, truePeakDB
@@ -731,6 +735,12 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 	if analyzeLoudness {
 		res, err := r.cfg.Engine.Analyze(ctx, src, src.Ext, waxflow.AnalyzeOptions{
 			Progress: r.progressFunc(ctx, j.ID, "analyze"),
+			// Measure after the encode's downmix so the gain (and the
+			// derived-output RG for fragmented MP4) sits on the audio the
+			// encode meters. The stored Analysis.Channels then reports this
+			// measurement basis, not the source count, which is what makes
+			// IntegratedLUFS + AppliedGainDB land on the RG reference.
+			Channels: req.Channels,
 		})
 		if err != nil {
 			return err
@@ -824,10 +834,14 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 			// There is no fragmented-MP4 read path, so the output cannot
 			// be decoded back; derive its values from the source
 			// measurement instead: exact for lossless ALAC, within the
-			// encoder's fraction of a dB for AAC. Positive gain engages
-			// the true-peak limiter, which caps the derived peak at its
-			// ceiling.
-			outLUFS, outTP = deriveOutputLoudness(srcRes, gainDB)
+			// encoder's fraction of a dB for AAC. The true-peak limiter
+			// engages for positive gain or a downmix (its matrix can sum
+			// past unity), and caps the derived peak at its ceiling; pass
+			// that so a negative-gain downmix's peak is capped rather than
+			// reading back the raw fold's overshoot.
+			limited := gainDB > 0 || opts.Dynamics != gain.PresetOff ||
+				(req.Channels != 0 && req.Channels < probe.Default().Fmt.Channels)
+			outLUFS, outTP = deriveOutputLoudness(srcRes, gainDB, limited)
 		} else {
 			// Measure the finished output so the written ReplayGain
 			// values describe exactly the bytes a player gets (the

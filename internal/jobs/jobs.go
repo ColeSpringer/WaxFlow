@@ -276,14 +276,22 @@ type SilenceMapSpan struct {
 // pointers because digital silence measures negative infinity, which
 // JSON cannot carry: null means silence.
 type Analysis struct {
-	IntegratedLUFS  *float64 `json:"integratedLufs"`
-	LoudnessRange   float64  `json:"loudnessRange"`
-	TruePeakDB      *float64 `json:"truePeakDb"`
-	SamplePeakDB    *float64 `json:"samplePeakDb"`
-	Samples         int64    `json:"samples"`
-	Rate            int      `json:"rate"`
-	Channels        int      `json:"channels"`
-	DurationSeconds float64  `json:"durationSeconds"`
+	IntegratedLUFS *float64 `json:"integratedLufs"`
+	LoudnessRange  float64  `json:"loudnessRange"`
+	TruePeakDB     *float64 `json:"truePeakDb"`
+	SamplePeakDB   *float64 `json:"samplePeakDb"`
+	// Samples, Rate, and Channels describe the basis the numbers above were
+	// measured on, which is not always the source's. A loudness:analyze
+	// transcode that downmixes measures the fold, so Channels is the downmix
+	// target and the loudness fields are the downmix loudness (this is what
+	// makes IntegratedLUFS + AppliedGainDB land on the RG reference), while
+	// Rate and Samples stay the source's because the measurement never
+	// resamples. A standalone analyze job never downmixes, so there Channels
+	// is the source layout.
+	Samples         int64   `json:"samples"`
+	Rate            int     `json:"rate"`
+	Channels        int     `json:"channels"`
+	DurationSeconds float64 `json:"durationSeconds"`
 	// AppliedGainDB is the exact gain a loudness:analyze transcode
 	// applied (the RG2 reference minus the measured source loudness).
 	AppliedGainDB *float64 `json:"appliedGainDb,omitempty"`

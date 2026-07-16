@@ -5,12 +5,17 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/dsp"
+	"github.com/colespringer/waxflow/internal/testutil"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // analyzeFixture is a FLAC-encoded source with a real silent span in it:
@@ -296,5 +301,243 @@ func TestAnalyzeTapErrorFailsTheAnalysis(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("tap called %d times; a failing tap must abort the decode, not run it out", calls)
+	}
+}
+
+// AnalyzeOptions.Channels folds the measurement to the encode's target
+// channel count so a two-pass gain is computed on the audio the encode
+// actually meters (a 5.1 measurement applied to a stereo downmix misses the
+// target by the surround-weighting error). The tests below pin the fold
+// against the real encode chain, the regression direction, the closed-form
+// mono->stereo delta, and the no-op / rejection edges.
+
+const (
+	analyzeChRate   = 48000
+	analyzeChFrames = analyzeChRate * 4 // 4 s: enough gated blocks for a stable integrated
+)
+
+// multiSine builds planar float channels, one steady sine per channel at the
+// given amplitude and frequency. Distinct per-channel frequencies keep the
+// channels decorrelated, so a downmix's summed power (and thus its loudness)
+// genuinely differs from the source meter's weighted sum, which is what these
+// tests turn on. Amplitudes stay low so the encode's downmix limiter never
+// fires and the transcoded file tracks the raw fold.
+func multiSine(rate, frames int, amps, freqs []float64) [][]float32 {
+	chans := make([][]float32, len(amps))
+	for c := range chans {
+		chans[c] = make([]float32, frames)
+		for i := range chans[c] {
+			chans[c][i] = float32(amps[c] * math.Sin(2*math.Pi*freqs[c]*float64(i)/float64(rate)))
+		}
+	}
+	return chans
+}
+
+// floatWAVSource writes planar channels as a float WAV and returns the bytes.
+// A real WAV decode (not a raw buffer) exercises the demuxer's layout
+// resolution, which the fold depends on: a plain multichannel WAV carries no
+// explicit mask, so the demuxer's DefaultLayout fallback is what gives the
+// meter its surround weights.
+func floatWAVSource(t *testing.T, rate int, chans [][]float32) []byte {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "src.wav")
+	testutil.WriteFloatWAV(t, path, rate, chans)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// fivePointOneFixture is a 5.1 source whose distinguishing energy sits in FC
+// (unity in every basis) and the surrounds BL/BR (weighted x1.41 by the
+// native meter but only db3-folded into a stereo/mono downmix), so the native
+// measurement and the fold diverge by well over the regression margin. LFE
+// carries a low tone for realism only: the fold drops it and the native meter
+// weighs it zero, so it moves neither number. Channel order is DefaultLayout(6):
+// FL, FR, FC, LFE, BL, BR.
+func fivePointOneFixture(t *testing.T) []byte {
+	return floatWAVSource(t, analyzeChRate, multiSine(analyzeChRate, analyzeChFrames,
+		[]float64{0.05, 0.05, 0.15, 0.10, 0.15, 0.15},
+		[]float64{311, 349, 440, 55, 587, 622}))
+}
+
+// TestAnalyzeChannelsMatchesEncode is the primary oracle: for every reachable
+// fold, the mix-only measurement at the target count must match a measurement
+// of the file the real encode chain (convert->mix->limiter->dither) produces
+// at that count, and the source-basis measurement must be genuinely wrong.
+// Both sides share mix.For but run through completely different plumbing, so
+// agreement proves the wiring, not the matrix.
+func TestAnalyzeChannelsMatchesEncode(t *testing.T) {
+	e := waxflow.New()
+	analyze := func(src []byte, opts waxflow.AnalyzeOptions) *waxflow.AnalyzeResult {
+		t.Helper()
+		res, err := e.Analyze(context.Background(), container.BytesSource(src), "wav", opts)
+		if err != nil {
+			t.Fatalf("analyze: %v", err)
+		}
+		return res
+	}
+
+	five := fivePointOneFixture(t)
+	// Decorrelated stereo (distinct L/R frequencies): stereo->mono then reads
+	// ~3 LU quieter than the source, the fully-uncorrelated end of the range.
+	stereo := floatWAVSource(t, analyzeChRate, multiSine(analyzeChRate, analyzeChFrames,
+		[]float64{0.2, 0.2}, []float64{311, 440}))
+	mono := floatWAVSource(t, analyzeChRate, multiSine(analyzeChRate, analyzeChFrames,
+		[]float64{0.25}, []float64{440}))
+
+	cases := []struct {
+		name       string
+		src        []byte
+		srcCh, dst int
+	}{
+		{"5.1->2", five, 6, 2},
+		{"5.1->1", five, 6, 1},
+		{"2->1", stereo, 2, 1},
+		{"1->2", mono, 1, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// The source must resolve to the layout we think it does, or the
+			// fold and the transcode would both agree on the wrong thing and
+			// the oracle would pass vacuously.
+			native := analyze(tc.src, waxflow.AnalyzeOptions{})
+			if native.Format.Channels != tc.srcCh {
+				t.Fatalf("source is %d channels, want %d", native.Format.Channels, tc.srcCh)
+			}
+			if want := audio.DefaultLayout(tc.srcCh); native.Format.Layout != want {
+				t.Fatalf("source layout %v, want %v (the demuxer must resolve the mask or the test is vacuous)",
+					native.Format.Layout, want)
+			}
+
+			// Mix-only measurement at the target count.
+			downmix := analyze(tc.src, waxflow.AnalyzeOptions{Channels: tc.dst})
+			if downmix.Format.Channels != tc.dst {
+				t.Fatalf("downmix measured %d channels, want %d", downmix.Format.Channels, tc.dst)
+			}
+
+			// The production oracle: transcode through the real encode chain
+			// to a lossless output of the same layout, then measure it. 24-bit
+			// keeps quantization off the oracle; GainDB 0 and the low fixture
+			// levels keep the (inserted) downmix limiter from firing.
+			var out bytes.Buffer
+			if _, err := e.Transcode(context.Background(), container.BytesSource(tc.src), "wav", &out,
+				waxflow.TranscodeOptions{Format: "wav", Channels: tc.dst, BitDepth: 24, GainDB: 0}); err != nil {
+				t.Fatalf("transcode: %v", err)
+			}
+			encoded := analyze(out.Bytes(), waxflow.AnalyzeOptions{})
+			if encoded.Format.Channels != tc.dst {
+				t.Fatalf("encoded output is %d channels, want %d", encoded.Format.Channels, tc.dst)
+			}
+
+			if d := math.Abs(downmix.IntegratedLUFS - encoded.IntegratedLUFS); d > 0.1 {
+				t.Errorf("mix-only %.4f LUFS vs encoded %.4f LUFS differ by %.4f (> 0.1): the fold does not match the encode",
+					downmix.IntegratedLUFS, encoded.IntegratedLUFS, d)
+			}
+			// Regression direction with a concrete margin: the source-basis
+			// measurement is genuinely far from what the encode produces.
+			if d := math.Abs(native.IntegratedLUFS - encoded.IntegratedLUFS); d <= 0.5 {
+				t.Errorf("native %.4f LUFS is only %.4f from encoded %.4f (<= 0.5): the fixture does not exercise the regression",
+					native.IntegratedLUFS, d, encoded.IntegratedLUFS)
+			}
+		})
+	}
+}
+
+// TestAnalyzeChannelsMonoToStereoAnalytic is the closed-form check: unity
+// mono->stereo duplication doubles every block's channel-sum power, a pure
+// +10*log10(2) shift of the integrated loudness with the peaks and the spread
+// left untouched. Pinning all four outputs fixes the delta as a channel-count
+// effect with nothing else drifting.
+func TestAnalyzeChannelsMonoToStereoAnalytic(t *testing.T) {
+	e := waxflow.New()
+	src := floatWAVSource(t, analyzeChRate, multiSine(analyzeChRate, analyzeChFrames,
+		[]float64{0.25}, []float64{440}))
+	analyze := func(opts waxflow.AnalyzeOptions) *waxflow.AnalyzeResult {
+		t.Helper()
+		res, err := e.Analyze(context.Background(), container.BytesSource(src), "wav", opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+
+	bare := analyze(waxflow.AnalyzeOptions{})
+	dup := analyze(waxflow.AnalyzeOptions{Channels: 2})
+
+	const wantShift = 3.0102999566398120 // 10*log10(2)
+	if d := dup.IntegratedLUFS - bare.IntegratedLUFS; math.Abs(d-wantShift) > 1e-3 {
+		t.Errorf("mono->stereo shifted integrated by %.6f LU, want %.6f", d, wantShift)
+	}
+	// Both output channels equal the mono source, so the per-channel peaks are
+	// unchanged and the uniform level shift leaves the loudness range untouched.
+	if dup.TruePeakDB != bare.TruePeakDB {
+		t.Errorf("true peak moved under duplication: %.6f vs %.6f", dup.TruePeakDB, bare.TruePeakDB)
+	}
+	if dup.SamplePeakDB != bare.SamplePeakDB {
+		t.Errorf("sample peak moved under duplication: %.6f vs %.6f", dup.SamplePeakDB, bare.SamplePeakDB)
+	}
+	if dup.LoudnessRange != bare.LoudnessRange {
+		t.Errorf("loudness range moved under duplication: %.6f vs %.6f", dup.LoudnessRange, bare.LoudnessRange)
+	}
+}
+
+// TestAnalyzeChannelsNoopAndValidation pins the no-op paths (Channels 0 and
+// Channels equal to the source count return the source measurement verbatim)
+// and the clean rejection of an unreachable target (no panic): a 6-channel
+// fold from a stereo source has no mono/stereo matrix, and a negative count
+// has no layout convention.
+func TestAnalyzeChannelsNoopAndValidation(t *testing.T) {
+	e := waxflow.New()
+	analyze := func(src []byte, opts waxflow.AnalyzeOptions) (*waxflow.AnalyzeResult, error) {
+		return e.Analyze(context.Background(), container.BytesSource(src), "wav", opts)
+	}
+	// A stereo fixture, so Channels 6 enters the fold (6 != 2) and rejects,
+	// rather than hitting the no-op path a 6-channel source would.
+	stereo := floatWAVSource(t, analyzeChRate, multiSine(analyzeChRate, analyzeChFrames,
+		[]float64{0.2, 0.2}, []float64{311, 440}))
+
+	bare, err := analyze(stereo, waxflow.AnalyzeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	zero, err := analyze(stereo, waxflow.AnalyzeOptions{Channels: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *zero != *bare {
+		t.Errorf("Channels 0 changed the measurement:\n zero: %+v\n bare: %+v", *zero, *bare)
+	}
+	same, err := analyze(stereo, waxflow.AnalyzeOptions{Channels: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *same != *bare {
+		t.Errorf("Channels == source count changed the measurement:\n same: %+v\n bare: %+v", *same, *bare)
+	}
+
+	// The rejection code distinguishes a malformed count from a valid-but-
+	// unreachable target, and matches what the encode's chain returns for the
+	// same TranscodeOptions.Channels, so a two-pass job that hands the same
+	// bad value to both passes reports it the same way from either.
+	for _, tc := range []struct {
+		ch   int
+		code waxerr.Code
+	}{
+		{6, waxerr.CodeUnsupportedFormat}, // a valid 5.1 mask, but no downmix targets it
+		{-1, waxerr.CodeInvalidRequest},   // a negative count is malformed, not unsupported
+	} {
+		res, err := analyze(stereo, waxflow.AnalyzeOptions{Channels: tc.ch})
+		if err == nil {
+			t.Errorf("Channels %d returned no error for an unreachable fold", tc.ch)
+			continue
+		}
+		if got := waxerr.CodeOf(err); got != tc.code {
+			t.Errorf("Channels %d error code = %v, want %v (%v)", tc.ch, got, tc.code, err)
+		}
+		if res != nil {
+			t.Errorf("Channels %d returned a result alongside the error: %+v", tc.ch, res)
+		}
 	}
 }

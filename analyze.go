@@ -2,6 +2,7 @@ package waxflow
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/dsp"
 	"github.com/colespringer/waxflow/dsp/loudness"
+	"github.com/colespringer/waxflow/dsp/mix"
 	"github.com/colespringer/waxflow/dsp/silence"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/waxerr"
@@ -25,6 +27,15 @@ const (
 
 // AnalyzeOptions configures Engine.Analyze.
 type AnalyzeOptions struct {
+	// Channels, when non-zero, measures the loudness after mixing the
+	// source down to this channel count (1 or 2, matching a later
+	// TranscodeOptions.Channels), so a two-pass gain is computed on the
+	// audio the encode will meter. 0 keeps the source layout. The fold is
+	// the same one the encode applies (dsp/mix), but with no limiter, gain,
+	// or dither: a measurement observes the raw fold, so TruePeakDB stays
+	// honest where the encode's overshoot limiter would flatten it. This is
+	// the substantive difference from TranscodeOptions.Channels.
+	Channels int
 	// Progress, when non-nil, is called after each decoded chunk with the
 	// samples measured so far and the projected total (-1 unknown). It
 	// runs on the analyzing goroutine, so blocking it pauses the
@@ -132,8 +143,15 @@ type SilenceResult struct {
 // AnalyzeResult is a full-stream loudness measurement of the decoded
 // audio per ITU-R BS.1770-4 and EBU R128.
 type AnalyzeResult struct {
-	// Format is the PCM format the measurement ran on: the source's rate
-	// and layout in the float domain.
+	// Format is the PCM format the measurement ran on: the source rate in
+	// the float domain, and the source channel layout unless
+	// AnalyzeOptions.Channels asked for a downmix, in which case it is the
+	// folded layout (the rate stays the source rate either way). When a
+	// downmix was asked for, every measured field below (IntegratedLUFS,
+	// LoudnessRange, TruePeakDB, SamplePeakDB) is on that downmix basis,
+	// since all come off one meter fed the folded channels: a 5.1 source
+	// measured at Channels 2 reports a stereo loudness, range, and true
+	// peak, which is what makes the two-pass gain correct.
 	Format audio.Format
 	// Samples is the number of frames measured.
 	Samples int64
@@ -180,10 +198,24 @@ func (e *Engine) Analyze(ctx context.Context, src container.Source, hint string,
 // format.Media, which flows through here exactly like a local file. The
 // caller owns med and closes it.
 func (e *Engine) AnalyzeMedia(ctx context.Context, med format.Media, opts AnalyzeOptions) (*AnalyzeResult, error) {
+	// A negative channel count is a malformed request, not an unsupported
+	// layout: reject it upfront with the same code the encode's NewChain
+	// gives TranscodeOptions.Channels < 0 (dsp.go), so a two-pass job that
+	// passes the same bad value to both passes reports it the same way.
+	if opts.Channels < 0 {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("analyze: negative channel count %d", opts.Channels))
+	}
 	track := med.Info().Default()
 	// The chain only converts to float here (no resample, no mix): the
-	// meter is rate-aware and weighs channels itself, so measurement runs
-	// on the source's own timeline.
+	// meter is rate-aware, and absent a downmix it weighs the source
+	// channels itself, so measurement runs on the source's own timeline. An
+	// AnalyzeOptions.Channels downmix folds below with the same dsp/mix
+	// primitive mixStage uses, but deliberately outside this chain, so it
+	// skips the overshoot limiter the chain inserts for a downmix (dsp.go):
+	// that limiter holds true peak at the ceiling and acts non-linearly on
+	// pre-gain overshoots, which would corrupt the very loudness and
+	// true-peak numbers the measurement exists to report.
 	chain, err := dsp.NewChain(dsp.NewSource(med, track.Fmt), dsp.ChainSpec{Float: true})
 	if err != nil {
 		return nil, err
@@ -191,10 +223,62 @@ func (e *Engine) AnalyzeMedia(ctx context.Context, med format.Media, opts Analyz
 	defer chain.Release()
 
 	f := chain.Format()
-	meter, err := loudness.NewMeter(f.Rate, f.Channels, f.Layout)
+
+	// meterFmt is the format the meter runs on: the source format, unless a
+	// downmix was asked for, in which case the channel count and layout
+	// become the fold's target. The rate stays the source rate on purpose:
+	// only channels are folded here (loudness is essentially
+	// resample-invariant and the meter is rate-aware), so a job that both
+	// resamples and downmixes keeps a deliberate sub-0.01 LU rate residual.
+	// Do not "fix" it by resampling the measurement; the multi-dB error is
+	// the channel count, which this handles.
+	meterFmt := f
+	var matrix *mix.Matrix
+	var scratch *audio.Buffer
+	var dstV [][]float32
+	if opts.Channels != 0 && opts.Channels != f.Channels {
+		// srcLayout mirrors the encode's mixStage fallback (dsp.go): an
+		// unmasked source takes its count's default layout, so the fold's
+		// inputs are byte-identical to the encode's. A decoded source is
+		// always 1..MaxChannels, all of which have a default, so in practice
+		// only dstLayout can come back zero.
+		srcLayout := f.Layout
+		if srcLayout == 0 {
+			srcLayout = audio.DefaultLayout(f.Channels)
+		}
+		dstLayout := audio.DefaultLayout(opts.Channels)
+		// A target count with no layout convention (above MaxChannels) has a
+		// zero mask; reject it before mix.For with the dsp.go phrasing. The
+		// srcLayout == 0 disjunct only mirrors dsp.go:292 one for one; after
+		// the fallback above it cannot fire for a real 1..MaxChannels source.
+		if srcLayout == 0 || dstLayout == 0 {
+			return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
+				fmt.Sprintf("analyze: no layout convention for %d -> %d channels", f.Channels, opts.Channels))
+		}
+		// mix.For next, before any buffer: a target with a valid mask but no
+		// downmix (3 or 6 channels, since only mono and stereo targets exist)
+		// rejects here with a clean error, whereas audio.Get below panics on
+		// an invalid format.
+		matrix, err = mix.For(srcLayout, dstLayout)
+		if err != nil {
+			return nil, err
+		}
+		meterFmt.Channels = opts.Channels
+		meterFmt.Layout = dstLayout
+		scratch = audio.Get(meterFmt, audio.StandardChunk)
+		defer audio.Put(scratch)
+		dstV = make([][]float32, opts.Channels)
+	}
+
+	meter, err := loudness.NewMeter(meterFmt.Rate, meterFmt.Channels, meterFmt.Layout)
 	if err != nil {
 		return nil, err
 	}
+	// The silence detector and Tap keep consuming the source channels, never
+	// the downmix: Tap's contract is the source's own rate and layout, and
+	// the fold drops LFE, so an LFE-only span reads silent in a stereo fold
+	// yet is not silent in the source. A silence span is a source-timeline
+	// property, so it must be measured on the source.
 	var det *silence.Detector
 	var silThreshold float64
 	var silMinDur time.Duration
@@ -222,7 +306,23 @@ func (e *Engine) AnalyzeMedia(ctx context.Context, med format.Media, opts Analyz
 		for c := range chans {
 			chans[c] = buf.ChanF(c)
 		}
-		if err := meter.Process(chans); err != nil {
+		if matrix != nil {
+			// scratch.N sizes the ChanF views below, and the meter infers
+			// its frame count from len(dstV[c]) (loudness.Process takes no
+			// explicit count). A zero-N scratch would not panic (Apply folds
+			// correctly into the backing array whatever N is); it would make
+			// the meter silently measure zero frames. Set N to this chunk's
+			// count so the views are the right length. buf and scratch are
+			// distinct pool allocations, so dst and src never alias.
+			scratch.N = buf.N
+			for c := range dstV {
+				dstV[c] = scratch.ChanF(c)
+			}
+			matrix.Apply(dstV, chans, buf.N)
+			if err := meter.Process(dstV); err != nil {
+				return nil, err
+			}
+		} else if err := meter.Process(chans); err != nil {
 			return nil, err
 		}
 		if det != nil {
@@ -242,7 +342,7 @@ func (e *Engine) AnalyzeMedia(ctx context.Context, med format.Media, opts Analyz
 	}
 	meter.Flush()
 	res := &AnalyzeResult{
-		Format:         f,
+		Format:         meterFmt,
 		Samples:        done,
 		IntegratedLUFS: meter.Integrated(),
 		LoudnessRange:  meter.Range(),
