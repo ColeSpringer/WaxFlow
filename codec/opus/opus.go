@@ -25,6 +25,45 @@ func malformed(format string, args ...any) error {
 // regardless of the OpusHead input rate (RFC 7845).
 const SampleRate = 48000
 
+// SeekPreroll is the decoder convergence time RFC 7845 section 4.2
+// recommends: 80 ms at Opus's fixed 48 kHz. A decoder started cold at an
+// arbitrary packet has neither its filter state nor its overlap window, so
+// audio before this much has converged is not the audio the encoder wrote.
+//
+// It is the amount a cut backs its head off by, which is what makes an
+// exact head mean exact *audio* rather than an exact sample index. It is
+// also what opusenc writes as its pre-skip, and that coincidence is worth
+// naming because it is the one that bites: 3840 is a whole multiple of the
+// 960-sample grid, so a snap that did not back off by it would drop every
+// priming packet of such a stream and declare Delay 0, leaving a cold
+// decoder at output sample 0.
+const SeekPreroll = 3840
+
+// SetPreSkip returns a copy of an OpusHead header with its pre-skip set to
+// n samples.
+//
+// The header is copied rather than patched in place because a
+// container.Track's CodecConfig is shared with the demuxer that produced
+// it: patching would reach back into a stream still being read.
+//
+// This is the rewrite a cut cannot skip. The pre-skip in OpusHead is the
+// authority every muxer reads for Opus priming (mka overwrites Track.Delay
+// from it outright, and mp4 and ogg source it independently of Track.Delay
+// too), so setting Track.Delay without also rewriting the config does
+// nothing at all: the trim silently never happens.
+func SetPreSkip(head []byte, n int) ([]byte, error) {
+	if _, err := ParseOpusHead(head); err != nil {
+		return nil, err
+	}
+	if n < 0 || n > 65535 {
+		return nil, malformed("pre-skip %d does not fit OpusHead's 16-bit field", n)
+	}
+	out := make([]byte, len(head))
+	copy(out, head)
+	binary.LittleEndian.PutUint16(out[10:], uint16(n))
+	return out, nil
+}
+
 // Config is the stream configuration from the OpusHead identification header
 // (RFC 7845 section 5.1).
 type Config struct {

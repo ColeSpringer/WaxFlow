@@ -634,7 +634,24 @@ func (e *Engine) Remux(ctx context.Context, src container.Source, hint string, d
 	if err != nil {
 		return nil, err
 	}
-	track := info.Default()
+	return e.RemuxDemuxer(ctx, demux, info.Default(), dst, opts)
+}
+
+// RemuxDemuxer remuxes an already-opened demuxer to dst, the same packet copy
+// as Remux without the source-open step. It is the entry point for packets that
+// are not a single sniffable Source, and the packet-domain sibling of
+// TranscodeMedia: the suffix says which domain the caller is opening into,
+// since this one takes a container.Demuxer (packets) rather than a format.Media
+// (decoded samples). Cut is the caller it exists for, handing in a filtered,
+// retimed view of another demuxer.
+//
+// track is the demuxer's own track, not a plan's. The distinction is not
+// stylistic: the packet walk filters on track.ID while the muxer is opened with
+// PlanRemux's ID-0 normalization of it, so handing a plan's Track here would
+// filter out every packet of a source whose track ID is not 0 and write an
+// empty file. The caller owns demux.
+func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, track container.Track,
+	dst io.Writer, opts TranscodeOptions) (*TranscodeResult, error) {
 	plan, err := e.PlanRemux(track, opts)
 	if err != nil {
 		return nil, err
@@ -660,8 +677,8 @@ func (e *Engine) Remux(ctx context.Context, src container.Source, hint string, d
 	if err := mux.Begin([]container.Track{plan.Track}); err != nil {
 		return nil, err
 	}
-	e.log.Debug("remux started", "container", info.Container, "codec", track.Codec,
-		"out", opts.Format, "outContainer", plan.Container, "samples", track.Samples)
+	e.log.Debug("remux started", "codec", track.Codec,
+		"out", opts.Format, "outContainer", plan.Container, "samples", plan.Track.Samples)
 
 	var done int64
 	decoded, err := copyPackets(ctx, demux, track.ID, func(pkt container.Packet) error {
@@ -671,10 +688,15 @@ func (e *Engine) Remux(ctx context.Context, src container.Source, hint string, d
 		// Progress means the same thing on every rung, so a caller that gets
 		// callbacks from a transcode gets them here. The units match too: the
 		// transcode reports output samples against the track's length, and a
-		// remux's output samples are the source's.
+		// remux's output samples are the planned track's.
+		//
+		// The planned track's length, not the demuxer's own. They are the same
+		// number for a whole-file remux and are not for a cut, whose demuxer is
+		// a filtered view of a longer source: reporting the uncut length there
+		// would have progress stall short of its total forever.
 		if opts.Progress != nil {
 			done += pkt.Dur
-			opts.Progress(done, track.Samples)
+			opts.Progress(done, plan.Track.Samples)
 		}
 		return nil
 	})

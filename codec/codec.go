@@ -37,6 +37,14 @@ type Packet struct {
 // Trailer carries gapless finalization from an encoder to a muxer:
 // Samples is the true source length, Delay the encoder priming to trim
 // from the front, Padding the trailing samples to trim.
+//
+// Samples carries container.Track's -1-means-unknown sentinel, and it is
+// load-bearing rather than decorative: the muxers that can check a
+// declared length against what they wrote do so as
+// "Samples >= 0 && Samples != written", so a -1 is what lets a producer
+// that genuinely does not know the length stay silent instead of asserting
+// a wrong one. A zero is not that sentinel. It is a claim that the stream
+// is empty, and those muxers will say so.
 type Trailer struct {
 	Samples int64
 	Delay   int64

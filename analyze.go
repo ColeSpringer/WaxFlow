@@ -10,6 +10,7 @@ import (
 	"github.com/colespringer/waxflow/dsp"
 	"github.com/colespringer/waxflow/dsp/loudness"
 	"github.com/colespringer/waxflow/dsp/silence"
+	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -34,6 +35,25 @@ type AnalyzeOptions struct {
 	// loudness measurement, from the same decode. Nil omits the map
 	// entirely, so an analysis that does not ask for it is unchanged.
 	Silence *SilenceOptions
+	// Tap, when non-nil, is called with each decoded chunk's planar channel
+	// slices at the source's own rate and layout: chans[c][i] is sample i of
+	// channel c, all channel slices the same length, values nominal full
+	// scale +-1.0. It is the seam for an analyzer WaxFlow does not own,
+	// riding the same decode as the meter rather than paying for a second
+	// one, which is what AnalyzeOptions.Silence already does for one WaxFlow
+	// does own.
+	//
+	// It runs on the analyzing goroutine, so blocking it pauses the
+	// analysis; the same contract Progress carries. An error from it fails
+	// the analysis, as an error from the meter does.
+	//
+	// The slices are borrowed: they alias the pooled chunk buffer and are
+	// valid only for the duration of the call, and the next chunk reuses
+	// them. A tap that keeps the samples must copy them. It must also not
+	// write to them, which is why it runs after the analyzers this engine
+	// owns rather than before: their measurements are already taken, so a
+	// tap that breaks the rule breaks only its own result.
+	Tap func(chans [][]float32) error
 }
 
 // SilenceOptions configures the silence map. Both fields are raw
@@ -150,7 +170,16 @@ func (e *Engine) Analyze(ctx context.Context, src container.Source, hint string,
 		return nil, err
 	}
 	defer med.Close()
+	return e.AnalyzeMedia(ctx, med, opts)
+}
 
+// AnalyzeMedia analyzes an already-opened Media, the same measurement as
+// Analyze without the source-open step. It is the entry point for inputs
+// that are not a single sniffable Source: the HLS client assembles a
+// presentation from many fetched resources and exposes it as a
+// format.Media, which flows through here exactly like a local file. The
+// caller owns med and closes it.
+func (e *Engine) AnalyzeMedia(ctx context.Context, med format.Media, opts AnalyzeOptions) (*AnalyzeResult, error) {
 	track := med.Info().Default()
 	// The chain only converts to float here (no resample, no mix): the
 	// meter is rate-aware and weighs channels itself, so measurement runs
@@ -198,6 +227,11 @@ func (e *Engine) Analyze(ctx context.Context, src container.Source, hint string,
 		}
 		if det != nil {
 			if err := det.Process(chans); err != nil {
+				return nil, err
+			}
+		}
+		if opts.Tap != nil {
+			if err := opts.Tap(chans); err != nil {
 				return nil, err
 			}
 		}

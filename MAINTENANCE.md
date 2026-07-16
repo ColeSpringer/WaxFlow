@@ -157,6 +157,24 @@ across the ~30 targets; run it on a spare box, not CI).
       and never migrates, so an older catalog is fine but a newer one is
       refused outright (`catalog schema vN is newer than this build
       supports`), failing `resolver.Open` at startup. Ahead is inert and safe
+- [ ] If WaxBin has started requiring WaxFlow (M26's analyze seams are what
+      unblock that), re-read `resolver/waxbin_e2e_test.go`'s result before
+      trusting it. `resolver/go.mod` ends with
+      `replace github.com/colespringer/waxflow => ../`, and a `replace` in the
+      main module applies build-wide rather than to that module's own imports:
+      so once waxbin requires waxflow, a resolver build resolves *waxbin's*
+      waxflow dependency to this local tree too, and that e2e test stops
+      testing waxbin against a released waxflow entirely. An incompatibility
+      between them would pass CI here and surface only downstream. There is no
+      way to scope a `replace`; verifying the pairing means building waxbin
+      outside this module
+
+  The tripwire it sits next to: there is no module cycle today (waxbin ->
+  waxflow root, waxflow/resolver -> waxbin, and `resolver` is a separate
+  module), and there is one the moment waxbin imports anything under
+  `waxflow/resolver`. Worth stating because the root module's empty require
+  block above is a declared v1.0 structural guarantee, and it holds only while
+  the dependency points at the root.
 - [ ] Tag `vX.Y.Z` pushed -> `release.yml` publishes binaries + SHA256SUMS +
       multi-arch image to ghcr.io
 - [ ] Container smoke: `docker run` + HEALTHCHECK healthy

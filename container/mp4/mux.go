@@ -252,10 +252,25 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 		return waxerr.New(waxerr.CodeInternal,
 			fmt.Sprintf("mp4: trailer delay %d disagrees with the init header's %d", trailer.Delay, m.delay))
 	}
-	if m.delay == 0 && (trailer.Padding != 0 || trailer.Delay != 0) {
-		// The ALAC path: lossless streams have no trims and Begin wrote
-		// no edit list to carry any.
-		return waxerr.New(waxerr.CodeUnsupportedFormat, "mp4: ALAC signals no gapless trims")
+	if m.delay == 0 && trailer.Padding != 0 {
+		// A track that declared no delay is one Begin recorded nothing
+		// for, so a trim arriving only now cannot be signalled.
+		//
+		// This was written as the ALAC path, and ALAC does still reach
+		// it (lossless declares no trims, so only the AAC branch above
+		// ever sets m.delay), but it was never really about the codec:
+		// it is this muxer asking whether it has anywhere to put a trim.
+		// The cut rung is the first thing that can bring an AAC track
+		// here, carrying a padding its source never had, so the message
+		// must stop naming a codec that is merely its most common
+		// visitor.
+		//
+		// The Delay sub-clause that used to ride along here was dead:
+		// the check above forces trailer.Delay == m.delay, and this
+		// branch is m.delay == 0.
+		return waxerr.New(waxerr.CodeUnsupportedFormat,
+			fmt.Sprintf("mp4: this track signals no gapless delay, so %d samples of end trim cannot be written",
+				trailer.Padding))
 	}
 	if len(m.durs) > 0 {
 		if err := m.flush(); err != nil {
