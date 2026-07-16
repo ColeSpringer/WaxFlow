@@ -15,6 +15,35 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
+// timelineOptions is the ConcatOptions every timeline this server plans or
+// runs is built with, in one place because ConcatOptions' own convention says
+// the plan and the run must be handed the same one.
+//
+// The server never crossfades, and this is where that is true rather than in
+// the four literals it replaces. A blend is a caller's editorial decision
+// about their material; the HTTP surface has no way to ask for one and no
+// business inventing one, and a queue arriving over /hls/timeline is a gapless
+// album as often as not, which is exactly the case a nonzero default would
+// ruin. The zero value is what says so.
+//
+// It is also what keeps ADR-0009's identity section true. The digest covers
+// the members and nothing else, so if the server ever did crossfade, the
+// digest would name two different timelines by one name.
+//
+// # One construction site is deliberately not here
+//
+// The merge job's run builds its own ConcatOptions (internal/jobs' runMerge),
+// and cannot call this: the dependency runs the other way. So a merge is the
+// one plan/run pair this method does not join up, since validateMergeRequest
+// plans its envelope through here. They agree because both are the daemon's
+// profile and neither crossfades, and that holds only while nothing threads a
+// crossfade to a job -- which nothing asks for, and which is where the digest
+// question arrives for real. If that day comes, runMerge is the second place,
+// and its own comment says so.
+func (s *Server) timelineOptions() waxflow.ConcatOptions {
+	return waxflow.ConcatOptions{Profile: s.profile}
+}
+
 // handleTimelineCreate serves POST /hls/timeline: it resolves and probes the
 // queue's members, stores them under the digest that is their identity, and
 // answers with the digest a tl= parameter names.
@@ -155,7 +184,7 @@ func (s *Server) mintTimelineFrom(ctx context.Context, srcs []*source.File, prog
 	// Planning the envelope now is what makes a mint mean something: a queue
 	// whose members cannot be concatenated (a member laid out for other
 	// speakers, say) fails here rather than at the first segment request.
-	env, err := waxflow.ConcatTrack(tracks)
+	env, err := waxflow.ConcatTrack(tracks, s.timelineOptions())
 	if err != nil {
 		return nil, err
 	}

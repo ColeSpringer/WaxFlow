@@ -125,7 +125,7 @@ func TestHLSDurationIsTheStreamsOwn(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			desc := hls.Descriptor{Ver: hls.DescriptorVersion, Src: "lib/rip.flac", Format: "aac",
 				From: tc.from, To: tc.to}
-			got, err := hlsDuration(desc, tracks)
+			got, err := hlsDuration(desc, tracks, waxflow.ConcatOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}

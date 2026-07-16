@@ -2,6 +2,7 @@ package waxflow
 
 import (
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -147,7 +148,7 @@ func TestConcatTrackEnvelope(t *testing.T) {
 			for i, f := range tc.in {
 				tracks[i] = container.Track{Codec: codec.PCM, Fmt: f, Samples: 48000}
 			}
-			env, err := ConcatTrack(tracks)
+			env, err := ConcatTrack(tracks, ConcatOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -174,7 +175,7 @@ func TestConcatTrackRejectsUnmeasured(t *testing.T) {
 	_, err := ConcatTrack([]container.Track{
 		{Codec: codec.PCM, Fmt: stereo48, Samples: 48000},
 		{Codec: codec.PCM, Fmt: stereo48, Samples: -1},
-	})
+	}, ConcatOptions{})
 	if err == nil {
 		t.Fatal("a member with an unknown length planned a timeline")
 	}
@@ -250,6 +251,58 @@ func TestConcatFailedSeekDoesNotDesync(t *testing.T) {
 	}
 }
 
+// shortSeekMedia lands before the ask. The Media contract permits landing
+// *past* a target (the first sync point may lie beyond it) and never short, so
+// this is a caller's Media breaking its contract, which is the same class as
+// stallMedia below and reachable the same way: a member's Open is a caller's
+// function returning a caller's Media.
+type shortSeekMedia struct{ *fixedMedia }
+
+func (m *shortSeekMedia) SeekSample(target int64) (int64, error) {
+	return m.fixedMedia.SeekSample(max(target-100, 0))
+}
+
+// TestConcatCrossfadeRefusesAShortSeekLanding pins the one precondition the
+// blend's whole overflow argument rests on: capture begins at the body's end.
+//
+// captureTail sizes its buffer at X and reads the member's rest to io.EOF,
+// which is safe only because blend.N == local-(L-X) throughout, so count's
+// ceiling is the buffer's. A member that lands short of the body starts the
+// capture early, and then the identity is false: the member has more than X
+// frames left, count never fires (local stays under L), and CopyFrames writes
+// past the buffer's stride. audio.CopyFrames bounds offsets by Stride as a
+// contract on its caller rather than a check, so the overrun corrupts each
+// channel into the next one's region and panics on the last -- silent for
+// every channel but one.
+//
+// A seek into the zone is the only way in, because that is the only path that
+// reaches captureTail from a member seek rather than from bound() == 0.
+func TestConcatCrossfadeRefusesAShortSeekLanding(t *testing.T) {
+	const n, x = 1000, 256
+	open := func() (format.Media, error) { return &shortSeekMedia{newFixedMedia(stereo48, n)}, nil }
+	track := container.Track{Codec: codec.PCM, Fmt: stereo48, Samples: n, SamplesExact: true, Default: true}
+	med, err := Concat([]ConcatSource{{Track: track, Open: open}, {Track: track, Open: open}}, ConcatOptions{Crossfade: x})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+
+	// Ten frames into member 1's head zone, which is member 0's tail: reaching
+	// it opens member 0 and seeks it to its body's end, and this member lands
+	// 100 frames short of that.
+	if _, err := med.SeekSample(n - x + 10); err == nil {
+		t.Fatal("a member that landed short of its own crossfade zone captured a tail anyway; " +
+			"the blend buffer is sized at exactly the zone, so the extra frames run past it")
+	}
+	// The latch is the existing contract and it still holds: a failed seek
+	// leaves the timeline unpositioned rather than reading on from nowhere.
+	buf := audio.Get(stereo48, 128)
+	defer audio.Put(buf)
+	if err := med.ReadChunk(buf); err == nil {
+		t.Fatal("reading after the refused seek delivered samples")
+	}
+}
+
 // stallMedia breaks the Stage contract: it returns no frames and no error,
 // where the contract says io.EOF is the only empty answer.
 type stallMedia struct{ *fixedMedia }
@@ -295,6 +348,183 @@ func TestConcatSeekPreRollRefusesAStalledMember(t *testing.T) {
 	}
 }
 
+// TestConcatTrackCrossfadeRefusals pins every crossfade refusal, and pins them
+// through both entry points.
+//
+// The funnel is the claim under test rather than the messages. ConcatTrack is
+// where a crossfade is checked, and Concat resolves through it, so a request
+// that cannot be planned must be one that cannot be run: if the two ever
+// disagree, a plan promises a length no run delivers, which is the prefix-sum
+// desync ADR-0009 exists to prevent. Asserting both is what makes that
+// structural rather than a comment.
+func TestConcatTrackCrossfadeRefusals(t *testing.T) {
+	// The memory cap in the envelope's own terms: X*ch <= 4 Mi, which for
+	// stereo is 2 Mi frames.
+	const stereoCap = maxCrossfadeBytes / (2 * 4)
+	for _, tc := range []struct {
+		name  string
+		lens  []int64
+		x     int64
+		want  bool
+		names string
+	}{
+		{name: "zero is a butt-join", lens: []int64{1000, 1000}, x: 0},
+		{name: "the ordinary declick", lens: []int64{1000, 1000}, x: 256},
+		{name: "negative", lens: []int64{1000, 1000}, x: -1, want: true, names: "-1"},
+		// Equality is legal at both bounds, and both are worth pinning: an
+		// off-by-one in either refuses a request that fits exactly.
+		{name: "fit exactly, two members", lens: []int64{256, 256}, x: 256},
+		{name: "fit exactly, three members", lens: []int64{256, 512, 256}, x: 256},
+		{name: "one short, edge member", lens: []int64{255, 256}, x: 256, want: true, names: "255"},
+		{name: "one short, middle member", lens: []int64{256, 511, 256}, x: 256, want: true, names: "511"},
+		// N=1 has no seam, so it passes for free rather than by special case:
+		// its only member is both first and last and carries no zone at all.
+		{name: "a single member never blends", lens: []int64{1}, x: stereoCap},
+		{name: "the memory cap, exactly", lens: []int64{stereoCap, stereoCap}, x: stereoCap},
+		{name: "one sample past the cap", lens: []int64{1 << 24, 1 << 24}, x: stereoCap + 1, want: true, names: "2097153"},
+		// The cap is checked by dividing, never by multiplying: x*channels*4
+		// wraps an int64 long before a number this size fails any comparison,
+		// and a wrapped product compares small and is accepted. Neither the
+		// check nor its message may touch the product, which is why the
+		// message quotes no byte count.
+		//
+		// The members are absurd on purpose, and they are what makes this row
+		// test the cap rather than the fit rule. Nothing in the tree bounds a
+		// member's declared length above, so a header can say 2^62 samples;
+		// with members that long, a 2^61 crossfade passes the fit rule
+		// honestly and arrives at the cap as the only thing standing between
+		// it and a multiply that overflows to zero.
+		{name: "a crossfade whose byte count would overflow", lens: []int64{1 << 62, 1 << 62},
+			x: 1 << 61, want: true, names: "2305843009213693952"},
+		// A zero-length member is refused by name at mint time, where a client
+		// can still act, rather than surfacing as a blend against nothing.
+		{name: "a zero-length member", lens: []int64{0, 1000}, x: 256, want: true, names: "0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tracks := make([]container.Track, len(tc.lens))
+			members := make([]ConcatSource, len(tc.lens))
+			for i, l := range tc.lens {
+				tracks[i] = container.Track{Codec: codec.PCM, Fmt: stereo48, Samples: l, SamplesExact: true, Default: true}
+				members[i] = fixedMember(stereo48, l)
+			}
+			opts := ConcatOptions{Crossfade: tc.x}
+			_, planErr := ConcatTrack(tracks, opts)
+			med, runErr := Concat(members, opts)
+			if runErr == nil {
+				med.Close()
+			}
+			if (planErr != nil) != tc.want {
+				t.Fatalf("ConcatTrack error = %v, want refusal = %v", planErr, tc.want)
+			}
+			if (runErr != nil) != tc.want {
+				t.Fatalf("Concat error = %v, want refusal = %v; the plan said %v. "+
+					"ConcatTrack is the single funnel, so the two cannot disagree", runErr, tc.want, planErr)
+			}
+			// The number the caller has to act on is the one they set, or the
+			// one that did not fit. A refusal they cannot locate is one they
+			// answer by guessing.
+			if tc.want && !strings.Contains(planErr.Error(), tc.names) {
+				t.Errorf("the refusal does not name %s, so a caller cannot tell which member or which number is the problem: %v",
+					tc.names, planErr)
+			}
+		})
+	}
+}
+
+// TestConcatCrossfadeStartsOverlap pins the arithmetic that the naive prefix
+// sum gets wrong.
+//
+// starts and lens are separate facts once members overlap, and the trap is the
+// last hop: the last member has no tail zone, so subtracting X on every hop
+// leaves the timeline X short of the length its own track declares. That is a
+// tail 404, and it is invisible until the last segment of a stream.
+func TestConcatCrossfadeStartsOverlap(t *testing.T) {
+	const x = 256
+	lens := []int64{1000, 2000, 3000}
+	members := make([]ConcatSource, len(lens))
+	tracks := make([]container.Track, len(lens))
+	for i, l := range lens {
+		members[i] = fixedMember(stereo48, l)
+		tracks[i] = container.Track{Codec: codec.PCM, Fmt: stereo48, Samples: l, SamplesExact: true, Default: true}
+	}
+	med, err := Concat(members, ConcatOptions{Crossfade: x})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	c := med.(*concat)
+
+	// Member i begins where the previous one's tail zone does: X before it
+	// ends, because that region is the same region.
+	wantStarts := []int64{0, 1000 - x, 1000 - x + 2000 - x, 6000 - 2*x}
+	for i, want := range wantStarts {
+		if c.starts[i] != want {
+			t.Errorf("starts[%d] = %d, want %d", i, c.starts[i], want)
+		}
+	}
+	// lens is untouched by the overlap: a member is as long as it is, wherever
+	// it sits. Conflating the two is what the second field exists to prevent.
+	for i, want := range lens {
+		if c.lens[i] != want {
+			t.Errorf("lens[%d] = %d, want %d; a member's length is not the distance to the next one's start", i, c.lens[i], want)
+		}
+	}
+	env, err := ConcatTrack(tracks, ConcatOptions{Crossfade: x})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.starts[len(lens)] != env.Samples {
+		t.Fatalf("the walk ends at %d and the track declares %d: the plan and the run disagree about "+
+			"how long this timeline is, which is the tail 404 the exact-length walk exists to prevent",
+			c.starts[len(lens)], env.Samples)
+	}
+}
+
+// TestConcatButtJoinTakesNoBound pins the zero-copy claim at the only level it
+// is observable.
+//
+// A bound costs a right-sized audio.Get and a CopyFrames, because Cap() ==
+// Stride and a buffer has no sub-buffer view. Computed unconditionally, the
+// bound would put the last chunk of every member of every butt-joined timeline
+// through that copy: today's timelines, all of them, paying for a feature none
+// of them use. bound() returning -1 is what makes X=0 take today's path
+// structurally, and this is the assertion that it does.
+func TestConcatButtJoinTakesNoBound(t *testing.T) {
+	med, err := Concat([]ConcatSource{
+		fixedMember(stereo48, 5000),
+		fixedMember(stereo48, 5000),
+	}, ConcatOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	c := med.(*concat)
+
+	buf := audio.Get(stereo48, 1024)
+	defer audio.Put(buf)
+	for {
+		// Checked before every read, including the reads that straddle both
+		// seams, which is where a computed bound would bite.
+		if got := c.bound(); got != -1 {
+			t.Fatalf("bound() = %d at member %d local %d; a butt-joined timeline has no tail zone anywhere, "+
+				"so it must have no bound to compute", got, c.cur, c.local)
+		}
+		if c.blend != nil {
+			t.Fatalf("a butt-joined timeline captured a blend buffer at member %d", c.cur)
+		}
+		err := c.ReadChunk(buf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c.blend != nil {
+		t.Fatal("a butt-joined timeline held a blend buffer at the end of the stream")
+	}
+}
+
 // TestConcatTrackRejectsUnconventionalLayout pins the one envelope case the
 // mix node cannot reach. It mixes to audio.DefaultLayout, so that has to be
 // the envelope's layout, and a member already at the envelope's channel
@@ -305,7 +535,7 @@ func TestConcatTrackRejectsUnconventionalLayout(t *testing.T) {
 	_, err := ConcatTrack([]container.Track{
 		{Codec: codec.PCM, Fmt: stereo48, Samples: 48000},
 		{Codec: codec.PCM, Fmt: odd, Samples: 48000},
-	})
+	}, ConcatOptions{})
 	if err == nil {
 		t.Fatal("a member laid out for other speakers joined a timeline silently")
 	}

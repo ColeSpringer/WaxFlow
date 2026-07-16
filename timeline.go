@@ -3,6 +3,7 @@ package waxflow
 import (
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"time"
 
@@ -546,16 +547,74 @@ type ConcatSource struct {
 }
 
 // ConcatOptions configures a Concat.
+//
+// # Hand the same options to the plan and to the run
+//
+// PlanSegmentsTimeline(tracks, copts, ...) and Concat(members, copts) are two
+// calls taking two separately constructed ConcatOptions, and nothing checks
+// that they match. Both fields below make a mismatch a silent wrong answer
+// rather than an error, so the convention is: build one ConcatOptions and pass
+// it to both.
+//
+// For Profile a mismatch is a wrong cache key: the plan names one profile in
+// its Versions and the run resamples through another, so the cached bytes
+// describe processing that did not happen.
+//
+// For Crossfade it is worse, and it is why this paragraph exists rather than
+// the field being left to speak for itself. A crossfade changes the timeline's
+// length, so a plan built with one and a run built without it disagree about
+// how many samples exist: the plan promises the sum less (N-1)*Crossfade
+// against a run delivering the full sum. That is the prefix-sum desync and the
+// tail 404 that ADR-0009's advisory-length section exists to prevent, arriving
+// by a different door.
 type ConcatOptions struct {
 	// Profile selects the resampler quality profile for normalizing members
 	// whose rate is not the envelope's; empty means resample.HQ.
 	//
-	// It must be the profile the transcode's own TranscodeOptions carry.
-	// PlanSegmentsTimeline names this profile in the plan's Versions on the
-	// members' behalf, so a Concat built with a different one would resample
-	// in a way the cache key does not describe.
+	// It must be the profile the transcode's own TranscodeOptions carry. See
+	// the convention above.
 	Profile resample.Profile
+
+	// Crossfade is how many samples of each seam are a blend of the two
+	// members meeting there, on the envelope's timeline. Zero, the default, is
+	// a butt-join: sample len(a) is b's sample 0, exactly, which is what every
+	// existing caller gets and what ADR-0009's primitive is.
+	//
+	// There is no nonzero default and there will not be one. A gapless album
+	// must never blend, because the seam it would smear is the artifact this
+	// primitive exists to deliver intact. A crossfade is a thing a caller asks
+	// for on material that wants it (a declick between two independently
+	// recorded takes, a play queue of unrelated tracks), never something the
+	// library decides on their behalf.
+	//
+	// Each seam costs X samples of total length: N members crossfaded by X
+	// deliver sum(len) - (N-1)*X. Member i's tail zone and member i+1's head
+	// zone are the same region of the timeline, which is what the overlap is.
+	// The blend is equal-power (cos/sin), so uncorrelated material holds its
+	// level across the zone where a linear fade would dip 3 dB.
+	//
+	// Bounded twice, both refused at ConcatTrack so a plan and a run refuse
+	// identically: every member must be long enough for the zones it carries
+	// (head plus tail, so the edge members need only one), and a zone must fit
+	// maxCrossfadeBytes.
+	Crossfade int64
 }
+
+// maxCrossfadeBytes bounds one blend buffer, and the number is derived rather
+// than chosen: audio/pool.go's top size class is maxClassBits = 22, "4 Mi
+// samples = 16 MiB int32/float32", and audio.Get sizes on frames*Channels. So
+// X*ch*4 <= 16 MiB is exactly X*ch <= 4 Mi, which is exactly the largest blend
+// audio.Get will pool.
+//
+// One sample more and classBits returns -1: the buffer allocates directly and
+// is dropped on Put (pool.go:14-17), so every seam of every timeline becomes a
+// 16 MB allocate-and-discard. That is the cliff this refuses at, and it is why
+// the constant is this number and not a round one near it.
+//
+// timeline.MaxMembers is the precedent for the form: a named constant carrying
+// its own reason. (ADR-0009 and /caps spell that bound maxTimelineMembers,
+// which is the wire field's name and not an identifier in the tree.)
+const maxCrossfadeBytes = 16 << 20
 
 // ConcatTrack computes the synthetic track a Concat of these members
 // presents: the common (envelope) format, the summed normalized length, and
@@ -592,7 +651,12 @@ type ConcatOptions struct {
 // happened inside each member before Concat saw a sample. That is exactly
 // why concatenation is sample-exact, and a nonzero trim here would make a
 // downstream consumer trim a second time.
-func ConcatTrack(tracks []container.Track) (container.Track, error) {
+//
+// It takes the options because it is the single funnel and a crossfade
+// changes the length: opts.Crossfade shortens the total by X per seam, and
+// every refusal a crossfade needs lives here so that planning a timeline and
+// running one refuse the same requests for the same reasons.
+func ConcatTrack(tracks []container.Track, opts ConcatOptions) (container.Track, error) {
 	if len(tracks) == 0 {
 		return container.Track{}, waxerr.New(waxerr.CodeInvalidRequest,
 			"waxflow: a timeline needs at least one member")
@@ -638,10 +702,18 @@ func ConcatTrack(tracks []container.Track) (container.Track, error) {
 		}
 	}
 
+	lens := make([]int64, len(tracks))
 	var total int64
-	for _, t := range tracks {
-		total += concatMemberSamples(t, env)
+	for i, t := range tracks {
+		lens[i] = concatMemberSamples(t, env)
+		total += lens[i]
 	}
+	if err := checkCrossfade(lens, env, opts.Crossfade); err != nil {
+		return container.Track{}, err
+	}
+	// One zone per seam, and there are N-1 seams. Subtracted after every
+	// member's own ceil, so the sum-of-ceils the members produce is untouched.
+	total -= int64(len(tracks)-1) * opts.Crossfade
 	return container.Track{
 		Codec: codec.PCM,
 		Fmt:   env,
@@ -652,6 +724,58 @@ func ConcatTrack(tracks []container.Track) (container.Track, error) {
 		SamplesExact: true,
 		Default:      true,
 	}, nil
+}
+
+// checkCrossfade holds a crossfade to what the members and the envelope can
+// actually carry: a legal length, a blend that fits one pooled buffer, and a
+// zone that fits every member it lands on.
+//
+// It runs inside ConcatTrack, which is what makes a plan and a run refuse
+// identically. lens are the members' normalized lengths, in the envelope's
+// samples, which is the timeline X is measured on too.
+func checkCrossfade(lens []int64, env audio.Format, x int64) error {
+	if x == 0 {
+		return nil
+	}
+	if x < 0 {
+		return waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("waxflow: negative crossfade %d", x))
+	}
+	// Divide rather than multiply: x is a caller's int64, so x*ch*4 overflows
+	// before it refuses, and the refusal is the point. The message obeys the
+	// same rule, which is why it quotes no byte count: x*perFrame would
+	// overflow here too, on exactly the inputs this exists to catch.
+	if perFrame := int64(env.Channels) * 4; x > maxCrossfadeBytes/perFrame {
+		limit := maxCrossfadeBytes / perFrame
+		// In the caller's own units. They set a frame count, not a byte count,
+		// so an answer in MiB would leave them to rediscover the channel
+		// arithmetic that produced it; the seconds are what make the number
+		// mean anything at the rate they are actually running.
+		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+			"waxflow: a crossfade of %d samples is more than this timeline can blend; the most it can is "+
+				"%d samples (%.1f s at %d Hz, %d channels), which is the largest buffer the sample pool holds",
+			x, limit, float64(limit)/float64(env.Rate), env.Rate, env.Channels))
+	}
+	// The fit rule is head+tail <= L, not 2X <= L: the first and last members
+	// carry one zone rather than two, and stating it this way makes N=1 pass
+	// with no special case (its only member is both first and last, so it
+	// carries neither zone).
+	for i, l := range lens {
+		var need int64
+		if i > 0 {
+			need += x
+		}
+		if i < len(lens)-1 {
+			need += x
+		}
+		if need > l {
+			return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+				"waxflow: timeline member %d is %d samples, too short for the %d samples of crossfade it carries "+
+					"(a crossfade of %d, on %d of its seams)",
+				i, l, need, x, need/x))
+		}
+	}
+	return nil
 }
 
 // concatMemberSamples is the member's length on the envelope timeline. It
@@ -688,12 +812,19 @@ func concatSpec(env audio.Format, opts ConcatOptions) dsp.ChainSpec {
 }
 
 // Concat sequences members into one gapless format.Media: a single
-// continuous timeline whose sample len(a) is b's sample 0, exactly.
+// continuous timeline whose sample len(a) is b's sample 0, exactly, unless
+// opts.Crossfade asks for a blend.
 //
-// It is sample-exact by construction rather than by arithmetic. format.Media
-// already delivers gapless-trimmed PCM, so there is no encoder delay or
-// padding left to reason about at the seam; concatenation is just reading
-// one stream after another.
+// The butt-join is the default and the primitive. It is sample-exact by
+// construction rather than by arithmetic: format.Media already delivers
+// gapless-trimmed PCM, so there is no encoder delay or padding left to reason
+// about at the seam, and concatenation is just reading one stream after
+// another.
+//
+// A crossfade trades exactly that away, on purpose and only when asked: the
+// seam becomes a zone of Crossfade samples that is both members at once, and
+// the timeline shortens by one zone per seam. See ConcatOptions.Crossfade,
+// which is zero for every caller that does not want it.
 //
 // Members open on demand and close on advance. That is the design and not an
 // optimization: besides costing one file descriptor for a queue of any
@@ -714,13 +845,25 @@ func Concat(members []ConcatSource, opts ConcatOptions) (format.Media, error) {
 		}
 		tracks[i] = members[i].Track
 	}
-	env, err := ConcatTrack(tracks)
+	env, err := ConcatTrack(tracks, opts)
 	if err != nil {
 		return nil, err
 	}
 	starts := make([]int64, len(members)+1)
+	lens := make([]int64, len(members))
 	for i, t := range tracks {
-		starts[i+1] = starts[i] + concatMemberSamples(t, env.Fmt)
+		lens[i] = concatMemberSamples(t, env.Fmt)
+		// The next member begins where this one's tail zone does, which is X
+		// before this one ends: the two share that region. The subtraction is
+		// this member's tail, so the last member (which has none) contributes
+		// its whole length and starts[N] is the total ConcatTrack computed.
+		// Running the naive starts[i+1] = starts[i] + lens[i] - X through the
+		// last hop instead would leave the timeline X short of its own track.
+		tail := int64(0)
+		if i < len(members)-1 {
+			tail = opts.Crossfade
+		}
+		starts[i+1] = starts[i] + lens[i] - tail
 	}
 	return &concat{
 		members: members,
@@ -728,6 +871,7 @@ func Concat(members []ConcatSource, opts ConcatOptions) (format.Media, error) {
 		opts:    opts,
 		fmt:     env.Fmt,
 		starts:  starts,
+		lens:    lens,
 		info:    &format.Info{Container: concatContainer, Tracks: []container.Track{env}},
 	}, nil
 }
@@ -740,10 +884,23 @@ type concat struct {
 	opts    ConcatOptions
 	info    *format.Info
 	fmt     audio.Format
-	// starts is the prefix sum of the members' normalized lengths: starts[i]
-	// is member i's first sample on the timeline, and starts[len(members)]
-	// is the whole timeline's length.
+	// starts is where each member begins on the timeline: starts[i] is member
+	// i's first sample, and starts[len(members)] is the whole timeline's
+	// length.
+	//
+	// lens is what each member is: lens[i] is member i's own normalized
+	// length. The two are separate fields rather than one derived from the
+	// other because a crossfade makes them genuinely different facts. A
+	// butt-joined timeline has starts[i+1]-starts[i] == lens[i] and the
+	// distinction is invisible; with a crossfade of X, consecutive members
+	// overlap by X, so starts[i+1]-starts[i] is lens[i]-X and a member
+	// occupies [starts[i], starts[i]+lens[i]), which runs past where the next
+	// one begins. Reading a length off starts is then wrong by exactly the
+	// overlap, and wrong in the direction that desyncs the prefix sum (see
+	// count and advance, and ADR-0009's advisory-length section for what that
+	// costs).
 	starts []int64
+	lens   []int64
 
 	cur   int          // the open member's index; len(members) past the end
 	med   format.Media // nil when no member is open
@@ -753,6 +910,17 @@ type concat struct {
 	pos     int64 // timeline position of the next frame out
 	discont bool
 	closed  bool
+	// blend holds the previous member's captured tail while the open member's
+	// head zone is being read: the two are the same region of the timeline, so
+	// the zone's output is the one mixed with the other. It is nil whenever no
+	// zone is in flight, which is always at Crossfade 0.
+	//
+	// It outlives closeMember by design. The tail belongs to a member that is
+	// finished and closed; the blend is what is left of it, and it has to
+	// survive into the next member's first chunks or there is nothing to mix
+	// them with. There is one at a time, ever.
+	blend    *audio.Buffer
+	blendOff int // frames of blend already mixed out
 	// unpositioned latches a failed seek: pos no longer describes where the
 	// next sample comes from, so reading is refused until a seek succeeds.
 	unpositioned bool
@@ -770,6 +938,7 @@ func (c *concat) Close() error {
 		return nil
 	}
 	c.closed = true
+	c.releaseBlend()
 	return c.closeMember()
 }
 
@@ -779,8 +948,20 @@ func (c *concat) Close() error {
 // it ends the next one opens and fills a fresh chunk, so the only cost of a
 // boundary is one short chunk, which the Stage contract allows everywhere.
 // Filling across the boundary instead would need a carry buffer, since an
-// audio.Buffer is planar with a stride and has no sub-buffer view, and would
-// buy nothing.
+// audio.Buffer is planar with a stride and has no sub-buffer view.
+//
+// That is exactly true of a butt-join, which is what a boundary is at
+// Crossfade 0 and what every seam was before crossfades existed. A crossfade
+// is the case where the carry buffer buys something, and it is the blend: the
+// zone's chunks come from the outgoing member's captured tail and the incoming
+// member's first frames, so the two do meet inside one chunk. The seam is
+// still not spanned, because with a zone there is no seam to span. The zone is
+// the seam, X samples wide, and the members overlap across it.
+//
+// This is where position and continuity are stamped and nowhere else, which is
+// what lets the seek's pre-roll drive fill directly: it wants the samples
+// without the bookkeeping, since a pre-rolled frame is one nobody is ever told
+// the position of.
 func (c *concat) ReadChunk(dst *audio.Buffer) error {
 	switch {
 	case c.closed:
@@ -794,14 +975,53 @@ func (c *concat) ReadChunk(dst *audio.Buffer) error {
 	case dst.Cap() == 0:
 		return waxerr.New(waxerr.CodeInvalidRequest, "waxflow: zero-capacity chunk buffer")
 	}
+	if err := c.fill(dst); err != nil {
+		return err
+	}
+	dst.Pos = c.pos
+	// A pure override, never an OR with what the member said. A freshly
+	// opened or seeked member's own first chunk can carry Discont, and
+	// passing that through would stamp a discontinuity at the seam. That
+	// is the one thing this whole primitive exists to avoid: it drains
+	// the downstream resampler to end-of-stream and re-anchors, which
+	// both re-creates the seam and changes the timeline's output length
+	// from ceil((nA+nB)*L/M) to ceil(nA*L/M)+ceil(nB*L/M).
+	//
+	// A crossfade needs the override for the same reason and more of it: a
+	// zone's chunks are the incoming member's freshly opened first chunks,
+	// which is precisely the case above, so the override is what makes the
+	// blend invisible downstream rather than something a crossfade works
+	// around.
+	dst.Discont = c.discont
+	c.discont = false
+	c.pos += int64(dst.N)
+	return nil
+}
+
+// fill puts the timeline's next samples in dst, opening members, capturing
+// tails and mixing zones as the geometry requires. It answers what comes next;
+// ReadChunk owns what position and continuity to stamp on it (ADR-0006's
+// boundary), and the seek's pre-roll drives this without any of that.
+//
+// io.EOF means the timeline is spent.
+func (c *concat) fill(dst *audio.Buffer) error {
 	for c.cur < len(c.members) {
 		if c.med == nil {
 			if err := c.open(c.cur); err != nil {
 				return err
 			}
 		}
+		// The open member has arrived at its own tail zone. Capturing it is
+		// what ends this member, so there is no ordinary read left to do.
+		n := c.bound()
+		if n == 0 {
+			if err := c.captureTail(); err != nil {
+				return err
+			}
+			continue
+		}
 		dst.N = 0
-		err := c.readMember(dst)
+		err := c.readBounded(dst, n)
 		if err == io.EOF {
 			if err := c.advance(); err != nil {
 				return err
@@ -814,17 +1034,9 @@ func (c *concat) ReadChunk(dst *audio.Buffer) error {
 		if err := c.count(dst.N); err != nil {
 			return err
 		}
-		dst.Pos = c.pos
-		// A pure override, never an OR with what the member said. A freshly
-		// opened or seeked member's own first chunk can carry Discont, and
-		// passing that through would stamp a discontinuity at the seam. That
-		// is the one thing this whole primitive exists to avoid: it drains
-		// the downstream resampler to end-of-stream and re-anchors, which
-		// both re-creates the seam and changes the timeline's output length
-		// from ceil((nA+nB)*L/M) to ceil(nA*L/M)+ceil(nB*L/M).
-		dst.Discont = c.discont
-		c.discont = false
-		c.pos += int64(dst.N)
+		if c.blend != nil {
+			c.mixBlend(dst)
+		}
 		return nil
 	}
 	return io.EOF
@@ -854,6 +1066,7 @@ func (c *concat) SeekSample(target int64) (int64, error) {
 	pos, err := c.seekTo(target)
 	if err != nil {
 		c.closeMember()
+		c.releaseBlend()
 		c.unpositioned = true
 		return 0, err
 	}
@@ -864,6 +1077,9 @@ func (c *concat) SeekSample(target int64) (int64, error) {
 // seekTo is SeekSample's body, split out so every failure inside it lands on
 // the one latch above rather than each error path having to remember.
 func (c *concat) seekTo(target int64) (int64, error) {
+	// A blend describes where the stream was, and a seek is what makes that
+	// wrong. Dropped before anything else, so no path below has to remember.
+	c.releaseBlend()
 	total := c.starts[len(c.members)]
 	if target >= total {
 		// Past the end lands at the end of stream, as a single Media does.
@@ -875,6 +1091,13 @@ func (c *concat) seekTo(target int64) (int64, error) {
 		return total, nil
 	}
 	i := c.memberAt(target)
+	off := target - c.starts[i]
+	// Inside member i's head zone, which is member i-1's tail: those samples
+	// are a blend of two members, so they cannot be had by positioning one.
+	// Unreachable at Crossfade 0, where no member has a head zone.
+	if i > 0 && off < c.opts.Crossfade {
+		return c.seekIntoBlend(i, off)
+	}
 	if c.med == nil || c.cur != i {
 		if err := c.closeMember(); err != nil {
 			return 0, err
@@ -885,7 +1108,7 @@ func (c *concat) seekTo(target int64) (int64, error) {
 	} else if err := c.buildChain(); err != nil {
 		return 0, err
 	}
-	landed, err := c.seekMember(target - c.starts[i])
+	landed, err := c.seekBody(off)
 	if err != nil {
 		return 0, err
 	}
@@ -895,10 +1118,136 @@ func (c *concat) seekTo(target int64) (int64, error) {
 	return c.pos, nil
 }
 
+// seekBody positions the open member at local and holds the landing to the
+// member's body: the part of it that is its own audio rather than a zone.
+//
+// The refusal is what container.Seeker's contract makes necessary. A member
+// may land past the ask when its first sync point lies beyond the target, and
+// seekMember reports that rather than pretending; with a crossfade, a landing
+// past the body is a landing inside the member's own tail zone, where the next
+// read would capture a tail shorter than X and blend it against a zone that
+// declared X. The result is audio, so nothing downstream would notice.
+//
+// Landing exactly at the body is legal and needs no case of its own: bound()
+// returns 0 there and the ordinary capture, advance and blend produce the zone.
+// Unreachable at Crossfade 0, where the body is the whole member.
+func (c *concat) seekBody(local int64) (int64, error) {
+	landed, err := c.seekMember(local)
+	if err != nil {
+		return 0, err
+	}
+	if body := c.lens[c.cur] - c.tailOf(c.cur); landed > body {
+		return 0, waxerr.New(waxerr.CodeSourceUnreadable, fmt.Sprintf(
+			"waxflow: timeline member %d could not be positioned before its crossfade zone: "+
+				"a seek to %d landed at %d, past the %d samples that are the member's own",
+			c.cur, local, landed, body))
+	}
+	return landed, nil
+}
+
+// seekIntoBlend positions inside member i's head zone, off frames into it.
+//
+// The zone's samples come from two members and a curve, so it lands at the
+// zone's start and pre-rolls: member i-1 is opened and read to its tail, which
+// is captured exactly as a continuous read would capture it, and then off
+// frames of the zone are pumped through fill and discarded. Seeking both sides
+// into the middle of the zone would be the alternative, and this is cheaper as
+// well as more honest.
+//
+// # What is exact here, and what is not
+//
+// The incoming member's half is bit-identical whether the zone is reached
+// continuously or by this seek, unconditionally: member i is opened here and
+// read from its own sample 0, which is exactly what advance would have done.
+// That is what lazy opening buys (ADR-0009).
+//
+// The outgoing member's half is exact only on a uniform timeline. Member i-1
+// is opened fresh and seeked to its body's end, so buildChain builds a cold
+// chain and seekMember's back-off primes it by a frame or two. On a resampled
+// member the FIR window is still zero-filled, and that transient lands at gain
+// cos(0) = 1.0, at exactly zone[0], the one frame the curve promises is the
+// outgoing member's own sample. A continuous read reaches that frame with a
+// warm chain, so the two differ. A uniform timeline has no chain to be cold
+// (see buildChain), which is both the gapless album and the two-slice declick,
+// so it is every caller there is today.
+//
+// Priming the outgoing member is possible and is not worth it: it would be a
+// new invariant for one case, and the consumer that would notice already
+// primes. The segmented restart is exact even here, and for a reason worth
+// keeping straight: its priming window (primeStarts) reaches back at least the
+// chain's own prime before the first kept sample, which dwarfs any FIR window,
+// so the cold-chain transient at zone[0] is discarded before p0 rather than
+// served.
+func (c *concat) seekIntoBlend(i int, off int64) (int64, error) {
+	if err := c.closeMember(); err != nil {
+		return 0, err
+	}
+	if err := c.open(i - 1); err != nil {
+		return 0, err
+	}
+	// seekBody refuses a landing past the body, and a member seek never lands
+	// short, so this lands exactly at the body's end: the tail captured below
+	// is the full X the zone declares.
+	landed, err := c.seekBody(c.lens[i-1] - c.opts.Crossfade)
+	if err != nil {
+		return 0, err
+	}
+	c.local = landed
+	// Captures i-1's tail and opens i, which is what makes the zone below the
+	// same zone a continuous read produces.
+	if err := c.captureTail(); err != nil {
+		return 0, err
+	}
+	if err := c.preRoll(off); err != nil {
+		return 0, err
+	}
+	c.pos = c.starts[i] + off
+	c.discont = true
+	return c.pos, nil
+}
+
+// preRoll pumps n frames of the timeline through fill and discards them.
+//
+// It is dropOutput's twin one level up, and the level is the whole point: it
+// drives fill rather than a chain, because a zone's samples come from two
+// members and a curve, and no chain knows about any of them. The two pre-rolls
+// do not know about each other either, which is what keeps dropOutput and
+// seekMember member-level concerns below the blend.
+//
+// A right-sized buffer can never over-read past the target, so no carry
+// survives the seek. The loop needs no zero-progress guard for the same reason
+// dropOutput's does not: fill cannot answer with an empty chunk that is not
+// io.EOF, since readMember refuses one.
+func (c *concat) preRoll(n int64) error {
+	for n > 0 {
+		buf := audio.Get(c.fmt, int(min(n, int64(audio.StandardChunk))))
+		err := c.fill(buf)
+		got := int64(buf.N)
+		audio.Put(buf)
+		switch {
+		case err == io.EOF:
+			return waxerr.New(waxerr.CodeInternal,
+				fmt.Sprintf("waxflow: timeline member %d ended inside a crossfade seek pre-roll", c.cur))
+		case err != nil:
+			return err
+		}
+		n -= got
+	}
+	return nil
+}
+
 // memberAt returns the member holding timeline sample target, which must be
 // inside the timeline. It searches for the first member ending past the
 // target rather than the last one starting at or before it, so a zero-length
 // member (an odd but legal header) is skipped rather than selected.
+//
+// With a crossfade, starts[i+1] is no longer where member i ends: it ends at
+// starts[i+1]+X, overlapping its successor by the zone they share. The search
+// is right anyway, because what it actually computes is the last member that
+// has begun at or before the target, and that is unaffected by where members
+// end. A target inside a zone selects the later of the two members, which is
+// the answer rather than a rounding of it: the zone is that member's head, and
+// its head is where a seek into the zone has to start from (see seekIntoBlend).
 func (c *concat) memberAt(target int64) int {
 	return sort.Search(len(c.members), func(i int) bool { return target < c.starts[i+1] })
 }
@@ -970,6 +1319,228 @@ func (c *concat) readMember(dst *audio.Buffer) error {
 			"waxflow: timeline member %d returned no frames and no error; io.EOF is the only empty answer", c.cur))
 	}
 	return err
+}
+
+// tailOf is member i's tail zone: X samples for every member but the last,
+// which has no seam after it to blend across. Its twin, the head zone, is X
+// for every member but the first, and it is not a function of its own because
+// the head zone is not a thing this member reads: it is the previous member's
+// tail, arriving as the blend.
+func (c *concat) tailOf(i int) int64 {
+	if i >= len(c.members)-1 {
+		return 0
+	}
+	return c.opts.Crossfade
+}
+
+// bound is how many frames the next read may take, or -1 for no bound at all.
+// It is the one place the zone geometry is read.
+//
+// The two bounded cases are disjoint, and that is the fit rule doing the work
+// rather than luck. head+tail <= L means a member's tail zone starts at or
+// after its head zone ends (equality lands them adjacent, with no body
+// between), so at any moment at most one of them is in flight: while the blend
+// is live the read is bounded by what is left of it, and once it is spent the
+// read is bounded by the member's own tail zone. There is never a third case
+// where a frame belongs to both.
+//
+// The -1 is absent rather than computed, and structurally so. Cap() == Stride,
+// so bounding a read means a right-sized audio.Get plus a CopyFrames, and a
+// bound computed for a member with no tail zone would put the last chunk of
+// every member of every butt-joined timeline through that copy. A timeline at
+// Crossfade 0 has no tail zones anywhere, so it takes today's path for the
+// same reason it always did: there is nothing to bound (ADR-0009's zero-copy
+// case).
+func (c *concat) bound() int64 {
+	if c.blend != nil {
+		return int64(c.blend.N - c.blendOff)
+	}
+	tail := c.tailOf(c.cur)
+	if tail == 0 {
+		return -1
+	}
+	return c.lens[c.cur] - tail - c.local
+}
+
+// readBounded reads the open member's next chunk, holding it to n frames. n is
+// bound()'s answer, taken as a parameter rather than re-read: fill has already
+// established it is not 0 (that case is the tail capture, not a read), and a
+// bound is a fact about one moment, so the caller that acted on it is the
+// caller that should hand it over rather than ask twice and hope.
+//
+// A bound at or above dst's capacity is no bound: the read cannot reach it, so
+// it fills dst directly and the copy is skipped. That keeps the body of a
+// crossfaded member as zero-copy as a butt-joined one, and leaves the scratch
+// for the one chunk per zone edge that genuinely has to stop short. A
+// right-sized audio.Get can never over-read, because Get sets Stride to
+// exactly the frames asked for (the same property dropOutput's scratch rests
+// on).
+func (c *concat) readBounded(dst *audio.Buffer, n int64) error {
+	if n < 0 || n >= int64(dst.Cap()) {
+		return c.readMember(dst)
+	}
+	buf := audio.Get(c.fmt, int(n))
+	err := c.readMember(buf)
+	if err == nil {
+		audio.CopyFrames(dst, 0, buf, 0, buf.N)
+		dst.N = buf.N
+	}
+	audio.Put(buf)
+	return err
+}
+
+// captureTail reads the open member's tail zone into a blend buffer and opens
+// the next member, whose head zone that buffer now is.
+//
+// The two are one step on purpose. A blend belongs to the member about to
+// open, so publishing it before the advance would leave a failed advance's
+// next read mixing a member into its own tail.
+//
+// It reads the member's rest to io.EOF rather than a count, which is what
+// keeps both of the timeline's existing length checks firing unchanged. The
+// buffer cannot overflow, and the reason is worth following: capture begins at
+// local == L-X, so blend.N == local - (L-X) throughout, and count's own
+// ceiling (local <= L) is therefore blend.N <= X. The bounds check and the
+// length check are the same check, and count runs first, so it refuses exactly
+// the read that would overrun the buffer. A member that instead ends early
+// inside its own tail reaches advance's "delivered %d, declared %d" rather
+// than blending against uninitialized frames.
+//
+// All of which rests on where capture begins, so that is checked rather than
+// assumed. fill arrives here only on bound() == 0, which is the body's end by
+// construction; seekIntoBlend arrives here from a member seek, and a member is
+// a caller's Media whose seek can land wherever it likes. A landing short of
+// the body would silently break the identity above and overflow the buffer,
+// and audio.CopyFrames bounds its offsets by Stride only as a contract on this
+// caller: the overrun would corrupt each channel into the next one's region
+// and panic on the last. The whole point of the identity is that no other
+// check stands behind it.
+func (c *concat) captureTail() error {
+	x := c.tailOf(c.cur)
+	if want := c.lens[c.cur] - x; c.local != want {
+		return waxerr.New(waxerr.CodeSourceUnreadable, fmt.Sprintf(
+			"waxflow: timeline member %d is at sample %d, not the %d where its crossfade zone begins; "+
+				"its seek landed somewhere the member's own headers say it should not have", c.cur, c.local, want))
+	}
+	blend := audio.Get(c.fmt, int(x))
+	// One scratch for the whole capture: it is the same size every pass, so a
+	// fresh one per chunk would be a pool round-trip per 4096 frames to hand
+	// back exactly what it just took.
+	buf := audio.Get(c.fmt, audio.StandardChunk)
+	defer audio.Put(buf)
+	for {
+		buf.N = 0
+		err := c.readMember(buf)
+		if err == io.EOF {
+			break
+		}
+		if err == nil {
+			err = c.count(buf.N)
+		}
+		if err != nil {
+			audio.Put(blend)
+			return err
+		}
+		audio.CopyFrames(blend, blend.N, buf, 0, buf.N)
+		blend.N += buf.N
+	}
+	if err := c.advance(); err != nil {
+		audio.Put(blend)
+		return err
+	}
+	c.blend, c.blendOff = blend, 0
+	return nil
+}
+
+// mixBlend blends the captured tail into dst, which holds the incoming
+// member's head zone, and retires the buffer when it is spent.
+func (c *concat) mixBlend(dst *audio.Buffer) {
+	blendFrames(dst, c.blend, c.blendOff, int(c.opts.Crossfade))
+	c.blendOff += dst.N
+	if c.blendOff >= c.blend.N {
+		c.releaseBlend()
+	}
+}
+
+// releaseBlend drops the blend buffer. It is called on exhaustion, on Close,
+// and at the top of every seek, because a blend describes a position and a
+// seek is what makes that position wrong.
+func (c *concat) releaseBlend() {
+	if c.blend != nil {
+		audio.Put(c.blend)
+		c.blend = nil
+	}
+	c.blendOff = 0
+}
+
+// blendFrames mixes out's frames (the outgoing member's tail, from frame off)
+// into dst (the incoming member's head) with an equal-power curve, in place.
+// x is the zone's full width; off is how far into it dst's first frame lies.
+//
+// Unexported, and not in dsp/gain, which is where a gain curve would look like
+// it belongs. That package's convention is per-channel []float32 with no
+// buffers and no strides; this takes two strided audio.Buffers, in either
+// domain, and saturates at the envelope's rails. It cannot be a chain stage
+// either, because a uniform member has no chain (see buildChain) and that is
+// exactly the case a gapless album hits. ADR-0002: exported surface is cheap
+// to add and expensive to remove, and there is one caller.
+//
+// cos out and sin in, so the two gains square to one and uncorrelated material
+// holds its level across the zone where a linear fade dips 3 dB. t runs [0,1)
+// over the zone and reaches 1 only at the frame after it, which is the
+// half-open interval the zone is: the zone's first frame is the outgoing
+// member's own sample exactly, and the first frame past it is the incoming
+// member's. That is what makes a declick a declick, and it is also why there
+// is no dither here. This is a mix at the working depth rather than a
+// reduction to a shallower one, and dither would deny the zone's first frame
+// the exactness the endpoints promise.
+func blendFrames(dst, out *audio.Buffer, off, x int) {
+	n, chans := dst.N, dst.Fmt.Channels
+	// The domain branch is hoisted rather than per-sample, and the gains are
+	// computed per frame rather than per sample: they do not depend on the
+	// channel, so stereo halves the trigonometry and 8-channel divides it by
+	// eight.
+	if dst.Fmt.Type == audio.Float {
+		// Float is deliberately not clamped. audio.Buffer says float is
+		// nominal, and convertStage's own doc says the output quantizer
+		// absorbs the overshoot. The asymmetry with the int path below is the
+		// tree's, not this function's.
+		for k := 0; k < n; k++ {
+			sin, cos := math.Sincos(float64(off+k) / float64(x) * (math.Pi / 2))
+			gi, go_ := float32(sin), float32(cos)
+			for ch := 0; ch < chans; ch++ {
+				d, o := &dst.F[ch*dst.Stride+k], out.F[ch*out.Stride+off+k]
+				*d = o*go_ + *d*gi
+			}
+		}
+		return
+	}
+	// The rails, and the rounding, are dither.Quantize's own (NewQuantizer
+	// sets lo/hi to exactly these; Quantize applies them after a
+	// math.Floor(x+0.5)). There is no audio.Buffer contract that an int sample
+	// fits its bit depth, so this is the anchor that exists: the quantizer is
+	// the only producer of int samples in the pipeline, and a crossfade is the
+	// first one that is not it, so it inherits the obligation.
+	//
+	// It is a real overflow and not a theoretical one. An equal-power blend of
+	// correlated material peaks at +3 dB (two identical signals at 0.707 each
+	// reach 1.414 where they meet), and for an Int/16 envelope delivered to
+	// FLAC, NewChain inserts nothing between here and the encoder.
+	scale := math.Ldexp(1, dst.Fmt.BitDepth-1)
+	lo, hi := -scale, scale-1
+	for k := 0; k < n; k++ {
+		sin, cos := math.Sincos(float64(off+k) / float64(x) * (math.Pi / 2))
+		for ch := 0; ch < chans; ch++ {
+			d := &dst.I[ch*dst.Stride+k]
+			v := math.Floor(float64(out.I[ch*out.Stride+off+k])*cos + float64(*d)*sin + 0.5)
+			if v < lo {
+				v = lo
+			} else if v > hi {
+				v = hi
+			}
+			*d = int32(v)
+		}
+	}
 }
 
 // seekMember positions the open member at local, its own position on the
@@ -1046,7 +1617,7 @@ func (c *concat) dropOutput(n int64) error {
 // is not exact.
 func (c *concat) count(n int) error {
 	c.local += int64(n)
-	if want := c.starts[c.cur+1] - c.starts[c.cur]; c.local > want {
+	if want := c.lens[c.cur]; c.local > want {
 		return waxerr.New(waxerr.CodeSourceUnreadable, fmt.Sprintf(
 			"waxflow: timeline member %d holds more audio than the %d samples its headers declared", c.cur, want))
 	}
@@ -1055,7 +1626,7 @@ func (c *concat) count(n int) error {
 
 // advance closes the finished member and moves to the next.
 func (c *concat) advance() error {
-	if want := c.starts[c.cur+1] - c.starts[c.cur]; c.local != want {
+	if want := c.lens[c.cur]; c.local != want {
 		return waxerr.New(waxerr.CodeSourceUnreadable, fmt.Sprintf(
 			"waxflow: timeline member %d delivered %d samples, its headers declared %d", c.cur, c.local, want))
 	}

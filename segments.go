@@ -12,7 +12,6 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/dsp"
-	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -168,11 +167,13 @@ func (e *Engine) PlanSegments(track container.Track, opts TranscodeOptions, segS
 // track ConcatTrack computes, with the versions the synthetic track cannot
 // name prepended.
 //
-// opts and segSeconds mean what they mean for PlanSegments, and
-// opts.ResampleProfile must be the profile the matching Concat is built with
-// (see ConcatOptions.Profile).
-func (e *Engine) PlanSegmentsTimeline(tracks []container.Track, opts TranscodeOptions, segSeconds float64) (*SegmentPlan, error) {
-	env, err := ConcatTrack(tracks)
+// opts and segSeconds mean what they mean for PlanSegments. copts must be the
+// options the matching Concat is built with, both fields of them: see
+// ConcatOptions, whose convention paragraph is what keeps this plan and that
+// run describing the same audio.
+func (e *Engine) PlanSegmentsTimeline(tracks []container.Track, copts ConcatOptions,
+	opts TranscodeOptions, segSeconds float64) (*SegmentPlan, error) {
+	env, err := ConcatTrack(tracks, copts)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +181,7 @@ func (e *Engine) PlanSegmentsTimeline(tracks []container.Track, opts TranscodeOp
 	if err != nil {
 		return nil, err
 	}
-	extra, err := timelineVersions(tracks, env.Fmt, opts.ResampleProfile)
+	extra, err := timelineVersions(tracks, env.Fmt, copts)
 	if err != nil {
 		return nil, err
 	}
@@ -202,13 +203,18 @@ func (e *Engine) PlanSegmentsTimeline(tracks []container.Track, opts TranscodeOp
 // envelope: a 44.1 kHz member of a 48 kHz timeline delivered to a 48 kHz
 // output resamples through a profile the key never mentions.
 //
+// A crossfade is the third, and it is not a node's revision at all: the blend
+// happens inside the timeline rather than in any chain, so nothing else in the
+// key can name it. Two timelines over identical members, one butt-joined and
+// one blended, are different audio out of the same code.
+//
 // The entries are prepended rather than replacing the synthetic pcm entry.
 // Replacing would mean knowing which entry the plan's decode version is,
 // which is fragile in exactly the way this is not; over-keying is safe, and
 // under-keying is the sin. Both lists are deduplicated (there are about
 // seven decoders, and a queue holds few distinct formats), so a
 // thousand-member timeline still keys on a handful of entries.
-func timelineVersions(tracks []container.Track, env audio.Format, profile resample.Profile) ([]string, error) {
+func timelineVersions(tracks []container.Track, env audio.Format, copts ConcatOptions) ([]string, error) {
 	var out []string
 	seen := map[string]bool{}
 	add := func(v string) {
@@ -216,6 +222,13 @@ func timelineVersions(tracks []container.Track, env audio.Format, profile resamp
 			seen[v] = true
 			out = append(out, v)
 		}
+	}
+	// Only when nonzero, which is what keeps every timeline cache entry
+	// written before crossfades existed valid: every one of them was
+	// butt-joined, and a butt-join emits no entry now exactly as it emitted
+	// none then.
+	if copts.Crossfade != 0 {
+		add(crossfadeVersion(copts.Crossfade))
 	}
 	normalized := map[audio.Format]bool{}
 	for _, t := range tracks {
@@ -227,7 +240,7 @@ func timelineVersions(tracks []container.Track, env audio.Format, profile resamp
 		// The same throwaway-chain trick buildPlanCore uses: build what the
 		// run will build, read its versions off, and release it, so the two
 		// cannot describe different processing.
-		chain, err := dsp.NewChain(dsp.NewSource(eofReader{}, t.Fmt), concatSpec(env, ConcatOptions{Profile: profile}))
+		chain, err := dsp.NewChain(dsp.NewSource(eofReader{}, t.Fmt), concatSpec(env, copts))
 		if err != nil {
 			return nil, err
 		}
@@ -238,6 +251,16 @@ func timelineVersions(tracks []container.Track, env audio.Format, profile resamp
 	}
 	return out, nil
 }
+
+// crossfadeVersion is a blended timeline's cache entry, in the shape
+// resample-hq-1 already uses: what was done, and the revision of how.
+//
+// It carries the length as well as the revision because the length is part of
+// what was done, not a parameter of it: a 512-sample blend and a 48000-sample
+// one are different audio out of the same code, and a key that named only the
+// revision would serve one caller's segments to the other. No comma, so
+// strings.Join(versions, ",") stays unambiguous.
+func crossfadeVersion(x int64) string { return fmt.Sprintf("xfade-%d-1", x) }
 
 // primeStarts computes a run's two priming starts on the output timeline:
 // pChain is the first sample fed to the DSP chain, pEnc the first fed to the

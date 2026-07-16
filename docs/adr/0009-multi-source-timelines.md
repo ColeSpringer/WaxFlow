@@ -26,8 +26,9 @@ source's.
 ### The primitive is a lazy concat in the engine
 
 `Concat([]ConcatSource, ConcatOptions) format.Media` sequences members into
-one Media whose sample `len(a)` is `b`'s sample 0. Members open on demand and
-close on advance, so a queue of any length costs one file descriptor.
+one Media whose sample `len(a)` is `b`'s sample 0, unless a crossfade is asked
+for. Members open on demand and close on advance, so a queue of any length
+costs one file descriptor.
 
 Lazy opening is the design and not an optimization. It makes planning and
 running symmetric (both are driven by the members' `container.Track` alone),
@@ -50,6 +51,43 @@ until a cache entry holds segments at the wrong rate.
 The synthetic track carries `Delay = 0, Padding = 0`. This is load-bearing:
 `format.Media` already delivered trimmed PCM, so both trims happened inside
 each member. A nonzero trim here would make a downstream consumer trim twice.
+
+### A crossfade is an option, and zero is not a value
+
+`ConcatOptions.Crossfade` makes the seam a zone of X samples where member i's
+tail and member i+1's head are the same region of the timeline, blended
+equal-power. That conditionalizes the sentence above, which is the primitive's
+own definition, so it is worth saying exactly what stays true: at `Crossfade:
+0` sample `len(a)` is `b`'s sample 0 exactly, and the zero value is what every
+caller that does not ask gets.
+
+**There is no nonzero default and there will not be one.** A gapless album must
+never blend: the seam a crossfade would smear is the artifact this primitive
+exists to deliver intact. A blend is an editorial decision about material (a
+declick between two takes, a play queue of unrelated tracks), so it is a thing
+a caller asks for, never one the library decides on their behalf.
+
+The length identity is `sum(L) - (N-1)X`, and it is the whole of what the plan
+and the run must agree about: one zone per seam, N-1 seams, subtracted after
+every member's own ceil so the sum-of-ceils normalization is untouched. Both
+resolve it through `ConcatTrack`, which is why that function takes the options.
+
+Two bounds, both refused there so a plan and a run refuse identically. **Fit**:
+`head + tail <= L` for every member, which is the exact rule rather than `2X <=
+L` because the edge members carry one zone, and which makes N=1 pass with no
+special case. **Memory**: `maxCrossfadeBytes = 16 MiB`, derived rather than
+chosen. `audio/pool.go`'s top size class is 4 Mi samples, and `Get` sizes on
+`frames * Channels`, so `X*ch*4 <= 16 MiB` is exactly the largest blend the
+pool will hold; one sample more and every seam of every timeline becomes a
+16 MB allocate-and-discard.
+
+**The digest is untouched, and that is what keeps the identity section above
+true.** The server never crossfades: the HTTP surface has no way to ask for
+one, and `timelineOptions` is the single place that says so. A digest covering
+the members alone is therefore still a complete identity, because there is no
+second timeline the same members could name. The day something does thread a
+crossfade to the wire is the day the digest has to cover it, and that is the
+question to answer then rather than now.
 
 ### Advisory lengths are enforced, not trusted
 

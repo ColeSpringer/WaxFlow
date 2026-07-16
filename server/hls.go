@@ -295,7 +295,10 @@ func (req *hlsRequest) tracks() []container.Track {
 //
 // The span narrows the track through the same funnel planHLSVariant uses, so
 // the duration the TTL is sized from is the duration the playlist promises.
-func hlsDuration(desc hls.Descriptor, tracks []container.Track) (float64, error) {
+// copts is what the timeline is built with for the same reason: a crossfade
+// shortens the stream, and a TTL sized from a length nothing delivers is one
+// more way for the plan and the run to disagree.
+func hlsDuration(desc hls.Descriptor, tracks []container.Track, copts waxflow.ConcatOptions) (float64, error) {
 	if desc.Tl == "" {
 		track := tracks[0]
 		if sp := descSpan(desc); sp.narrowed() {
@@ -306,7 +309,7 @@ func hlsDuration(desc hls.Descriptor, tracks []container.Track) (float64, error)
 		}
 		return DurationSeconds(track.Samples, track.Fmt.Rate), nil
 	}
-	env, err := waxflow.ConcatTrack(tracks)
+	env, err := waxflow.ConcatTrack(tracks, copts)
 	if err != nil {
 		return 0, err
 	}
@@ -396,7 +399,7 @@ func (s *Server) planHLSVariant(desc hls.Descriptor, tracks []container.Track, m
 	// track can name. See PlanSegmentsTimeline.
 	var plan *waxflow.SegmentPlan
 	if desc.Tl != "" {
-		plan, err = s.eng.PlanSegmentsTimeline(tracks, opts, desc.SegDur)
+		plan, err = s.eng.PlanSegmentsTimeline(tracks, s.timelineOptions(), opts, desc.SegDur)
 	} else {
 		// The span narrows the track before it is planned, which is what
 		// makes a virtual track a stream in its own right: its segment 0 is
@@ -544,7 +547,7 @@ func (s *Server) handleHLSMaster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tracks := req.tracks()
-	duration, err := hlsDuration(desc, tracks)
+	duration, err := hlsDuration(desc, tracks, s.timelineOptions())
 	if err != nil {
 		s.writeError(w, err)
 		return
@@ -828,7 +831,7 @@ func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool,
 		return s.logHLSWorker(ref, rungName(true), len(members), start,
 			s.runHLSRemuxWorker(ctx, members[0], opts, rmx, variant, start, publish))
 	}
-	med, err := s.openHLSMedia(ctx, members, tl, sp, opts)
+	med, err := s.openHLSMedia(ctx, members, tl, sp)
 	if err != nil {
 		return err
 	}
@@ -860,7 +863,7 @@ func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool,
 // first read the moment the client disconnected, which is precisely what
 // read-behind exists not to do.
 func (s *Server) openHLSMedia(ctx context.Context, members []hlsSource, tl bool,
-	sp span, opts waxflow.TranscodeOptions) (format.Media, error) {
+	sp span) (format.Media, error) {
 	if !tl {
 		med, err := s.openMember(ctx, members[0])
 		if err != nil || !sp.narrowed() {
@@ -882,7 +885,7 @@ func (s *Server) openHLSMedia(ctx context.Context, members []hlsSource, tl bool,
 			Open:  func() (format.Media, error) { return s.openMember(ctx, m) },
 		}
 	}
-	return waxflow.Concat(srcs, waxflow.ConcatOptions{Profile: opts.ResampleProfile})
+	return waxflow.Concat(srcs, s.timelineOptions())
 }
 
 // openMember resolves one source, enforces the identity the plan was made
@@ -1037,7 +1040,7 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string
 			return hls.Descriptor{}, 0, err
 		}
 	}
-	duration, err := hlsDuration(out, tracks)
+	duration, err := hlsDuration(out, tracks, s.timelineOptions())
 	if err != nil {
 		return hls.Descriptor{}, 0, err
 	}

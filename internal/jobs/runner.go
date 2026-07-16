@@ -1001,6 +1001,13 @@ func (r *Runner) runMerge(ctx context.Context, j *Job) error {
 			Open:  func() (format.Media, error) { return r.openMemberMedia(ctx, req, i) },
 		}
 	}
+	// The daemon's profile and no crossfade, which is what the server plans a
+	// merge's envelope with (its timelineOptions). The two are separate
+	// literals because this package cannot see the server's, and they agree
+	// because a merge has no crossfade to disagree about: nothing on the wire
+	// asks for one. Thread a crossfade to a job and this is the second place it
+	// has to reach, or the 201 validates an envelope of sum-(N-1)X while this
+	// delivers the full sum.
 	med, err := waxflow.Concat(members, waxflow.ConcatOptions{Profile: r.cfg.Profile})
 	if err != nil {
 		return err
