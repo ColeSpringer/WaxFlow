@@ -19,15 +19,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 340
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: fuzz every target for 20 minutes
         run: bash scripts/fuzz.sh 20m
       - name: upload fuzz logs and any reproducers
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-soak-findings
           path: |
@@ -42,12 +42,12 @@ jobs:
   differential:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg flac
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: testdata/vectors
           key: vectors-${{ hashFiles('internal/testutil/vectors.go') }}
@@ -64,11 +64,11 @@ jobs:
   client-browser:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - run: npm install playwright && npx playwright install --with-deps chromium
@@ -83,11 +83,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: bench-baseline.txt
           key: bench-baseline-${{ github.run_id }}
@@ -102,7 +102,7 @@ jobs:
             echo "no baseline yet; tonight's run becomes it" | tee benchstat.txt
           fi
           cp bench-current.txt bench-baseline.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bench-nightly
           path: |
@@ -117,8 +117,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - run: make soak
@@ -136,12 +136,12 @@ jobs:
   encoder-quality:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             testdata/vectors
@@ -152,7 +152,7 @@ jobs:
       - run: make encoder-quality QUALITY_REPORT=quality-report.html AAC_QUALITY_REPORT=aac-quality-report.html OPUS_QUALITY_REPORT=opus-quality-report.html OPUS_SPEECH_QUALITY_REPORT=opus-speech-quality-report.html
       - name: upload the encoder-quality reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: encoder-quality-report
           path: |
