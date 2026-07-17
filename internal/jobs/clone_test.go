@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/colespringer/waxflow"
 )
 
 // ptrTo returns a pointer to v, a fresh one per call. The fixture's pointers
@@ -90,10 +92,11 @@ func TestJobCloneIsDeep(t *testing.T) {
 		Type:          TypeTimeline,
 		State:         StateDone,
 		Request: Request{
-			Type:      TypeTimeline,
-			Srcs:      []string{"a.flac", "b.flac"},
-			SourceIDs: []string{"1-1", "2-2"},
-			Cuts:      []int64{100, 200},
+			Type:         TypeTimeline,
+			Srcs:         []string{"a.flac", "b.flac"},
+			SourceIDs:    []string{"1-1", "2-2"},
+			Cuts:         []int64{100, 200},
+			MemberTitles: []string{"One", "Two"},
 		},
 		Created:  started,
 		Started:  &started,
@@ -111,7 +114,13 @@ func TestJobCloneIsDeep(t *testing.T) {
 			AppliedGainDB:  ptrTo(3.75),
 			Silence:        &SilenceSummary{Spans: 3},
 		},
-		Timeline: &Timeline{Tl: "digest", Members: 2},
+		Timeline: &Timeline{
+			Tl: "digest", Members: 2,
+			// Boundaries is a slice, so the struct copy clone makes of Timeline
+			// is not a deep copy of it: a fixture that leaves it nil cannot
+			// catch clone sharing its backing array.
+			Boundaries: []waxflow.MemberBoundary{{OffsetSamples: 5, DurationSamples: 100}},
+		},
 		Progress: &Progress{Phase: "measure"},
 		Warnings: []string{"w"},
 	}
@@ -122,6 +131,7 @@ func TestJobCloneIsDeep(t *testing.T) {
 	assertRefFieldsSet(t, "Job", *orig)
 	assertRefFieldsSet(t, "Job.Request", orig.Request)
 	assertRefFieldsSet(t, "Job.Analysis", *orig.Analysis)
+	assertRefFieldsSet(t, "Job.Timeline", *orig.Timeline)
 
 	c := orig.clone()
 	assertNoSharedPointers(t, "Job.Analysis", *orig.Analysis, *c.Analysis)
@@ -130,6 +140,7 @@ func TestJobCloneIsDeep(t *testing.T) {
 	c.Request.Srcs[0] = "scribbled"
 	c.Request.SourceIDs[0] = "scribbled"
 	c.Request.Cuts[0] = -1
+	c.Request.MemberTitles[0] = "scribbled"
 	c.Warnings[0] = "scribbled"
 	*c.Started = epoch
 	*c.Finished = epoch
@@ -141,6 +152,7 @@ func TestJobCloneIsDeep(t *testing.T) {
 	*c.Analysis.AppliedGainDB = 99
 	c.Analysis.Silence.Spans = 99
 	c.Timeline.Tl = "scribbled"
+	c.Timeline.Boundaries[0].OffsetSamples = 99
 	c.Progress.Phase = "scribbled"
 
 	// Independent checks, not a switch: a switch reports only its first
@@ -154,6 +166,9 @@ func TestJobCloneIsDeep(t *testing.T) {
 	}
 	if orig.Request.Cuts[0] != 100 {
 		t.Error("clone shares Request.Cuts' backing array with the stored job")
+	}
+	if orig.Request.MemberTitles[0] != "One" {
+		t.Error("clone shares Request.MemberTitles' backing array with the stored job")
 	}
 	if orig.Warnings[0] != "w" {
 		t.Error("clone shares Warnings' backing array with the stored job")
@@ -187,6 +202,9 @@ func TestJobCloneIsDeep(t *testing.T) {
 	}
 	if orig.Timeline.Tl != "digest" {
 		t.Error("clone shares the Timeline pointer")
+	}
+	if orig.Timeline.Boundaries[0].OffsetSamples != 5 {
+		t.Error("clone shares Timeline.Boundaries' backing array with the stored job")
 	}
 	if orig.Progress.Phase != "measure" {
 		t.Error("clone shares the Progress pointer")

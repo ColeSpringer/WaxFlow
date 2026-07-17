@@ -142,6 +142,74 @@ func TestTimelineEndToEnd(t *testing.T) {
 	}
 }
 
+// TestTimelineBoundaries pins A17: the mint reports per-member sample offsets
+// and durations at the envelope rate, so a client need not re-probe every
+// member to know where each one lands. The server never crossfades, so the
+// members tile exactly: boundaries[0] starts at 0, each starts where the last
+// ends, and the last one's end is the whole timeline's length.
+func TestTimelineBoundaries(t *testing.T) {
+	env, refs := timelineEnv(t) // 1 s, 0.5 s, 1.5 s at 48 kHz
+	tl := mintTimeline(t, env, refs)
+
+	if tl.EnvelopeRate != 48000 {
+		t.Fatalf("envelopeRate = %d, want 48000 (the members' common rate)", tl.EnvelopeRate)
+	}
+	if len(tl.Boundaries) != len(refs) {
+		t.Fatalf("got %d boundaries, want one per member (%d)", len(tl.Boundaries), len(refs))
+	}
+	if tl.Boundaries[0].OffsetSamples != 0 {
+		t.Fatalf("boundaries[0].offsetSamples = %d, want 0", tl.Boundaries[0].OffsetSamples)
+	}
+	wantDurations := []int64{48000, 24000, 72000}
+	for i, want := range wantDurations {
+		if tl.Boundaries[i].DurationSamples != want {
+			t.Errorf("boundaries[%d].durationSamples = %d, want %d",
+				i, tl.Boundaries[i].DurationSamples, want)
+		}
+	}
+	// With no crossfade the members tile: each starts where the previous ended.
+	for i := 0; i+1 < len(tl.Boundaries); i++ {
+		got := tl.Boundaries[i+1].OffsetSamples
+		want := tl.Boundaries[i].OffsetSamples + tl.Boundaries[i].DurationSamples
+		if got != want {
+			t.Errorf("boundaries[%d].offsetSamples = %d, want %d (the previous member's end); "+
+				"without a crossfade the members must tile", i+1, got, want)
+		}
+	}
+	// The last member's end is the whole timeline: durationSeconds * envelopeRate.
+	last := tl.Boundaries[len(tl.Boundaries)-1]
+	end := last.OffsetSamples + last.DurationSamples
+	if want := int64(tl.DurationSeconds * float64(tl.EnvelopeRate)); end != want {
+		t.Fatalf("the last member ends at sample %d, but durationSeconds*envelopeRate is %d: "+
+			"the boundaries and the reported length disagree", end, want)
+	}
+}
+
+// TestTimelineBoundariesMixedRate pins that offsets normalize to the envelope
+// rate rather than any one member's: a 44.1 kHz member in a 48 kHz timeline is
+// reported at its resampled length, so a consumer reads one clock.
+func TestTimelineBoundariesMixedRate(t *testing.T) {
+	env, _ := timelineEnv(t)
+	// A 44.1 kHz member alongside a 48 kHz one: the envelope rate is 48 kHz.
+	if err := os.WriteFile(filepath.Join(env.root, "tl-44.wav"), rampWAV(t, 44100, 2, 44100), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.root, "tl-48.wav"), rampWAV(t, 48000, 2, 48000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tl := mintTimeline(t, env, []string{"lib/tl-44.wav", "lib/tl-48.wav"})
+
+	if tl.EnvelopeRate != 48000 {
+		t.Fatalf("envelopeRate = %d, want 48000 (the higher member rate)", tl.EnvelopeRate)
+	}
+	// One second at 44.1 kHz resampled to 48 kHz is 48000 samples, so the second
+	// member starts there rather than at the source's 44100.
+	if got := tl.Boundaries[1].OffsetSamples; got != 48000 {
+		t.Fatalf("member 1 starts at sample %d, want 48000 (member 0 resampled to the envelope rate), "+
+			"not its source length 44100", got)
+	}
+}
+
 // TestTimelineIdentityIs410 pins that a tl= URL is exactly as honest as a
 // src= one. The digest covers its members' identities, so a member replaced
 // on disk cannot match the digest minted against it, and the URL must 410

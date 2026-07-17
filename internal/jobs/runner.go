@@ -970,6 +970,14 @@ func (r *Runner) writeMedia(ctx context.Context, j *Job, med format.Media, name 
 	}, nil
 }
 
+// mp4ProgressiveContainer mirrors the server's container override for the flat
+// (moov+mdat) MP4 form: validateMergeRequest stamps it on an mp4-family merge's
+// request, and it is the one output shape that carries a QuickTime chapter text
+// track. It is a wire string, spelled the same by the CLI's --container flag,
+// so it is re-declared here rather than exported from the engine, matching the
+// server's own re-declaration.
+const mp4ProgressiveContainer = "progressive"
+
 // runMerge concatenates the request's members into one output.
 //
 // It is the timeline primitive with a file on the end, and that is the point
@@ -989,8 +997,15 @@ func (r *Runner) runMerge(ctx context.Context, j *Job) error {
 	if r.cfg.MeasureTrack == nil {
 		return waxerr.New(waxerr.CodeInvalidRequest, "jobs: merges are not configured on this daemon")
 	}
+	// An mp4-family merge writes a QuickTime chapter text track, one chapter per
+	// member; the server picked this container for exactly that shape, the only
+	// one that carries the track. Only then are per-member titles read and
+	// chapters computed, so a non-mp4 merge pays no per-member metadata reads
+	// and gets no ignored chapters.
+	wantChapters := req.Container == mp4ProgressiveContainer
 	measure := r.progressFunc(ctx, j.ID, "measure")
 	tracks := make([]container.Track, len(req.Srcs))
+	tagTitles := make([]string, len(req.Srcs))
 	for i := range req.Srcs {
 		if err := ctx.Err(); err != nil {
 			return waxerr.Wrap(waxerr.CodeCanceled, "merge canceled", err)
@@ -1000,11 +1015,30 @@ func (r *Runner) runMerge(ctx context.Context, j *Job) error {
 			return err
 		}
 		track, err := r.cfg.MeasureTrack(f)
-		f.Close()
 		if err != nil {
+			f.Close()
 			return err
 		}
 		tracks[i] = track
+		// Read the member's TITLE while the handle is open, for the chapter it
+		// will stamp. Best-effort: a read error warns and the title falls
+		// through to the request field or the generated fallback, never failing
+		// the merge (the metadata post-pass is best-effort too). The container
+		// probe exposes chapters but not tags, so a tag title needs a mapper; a
+		// daemon with none simply has no tag titles.
+		//
+		// Skipped when the request already names this member, since mergeTitle
+		// prefers a non-empty request title: the tag would be parsed only to be
+		// discarded. A fully-titled merge then does no per-member metadata reads.
+		haveReqTitle := i < len(req.MemberTitles) && req.MemberTitles[i] != ""
+		if wantChapters && !haveReqTitle && r.cfg.Meta != nil {
+			if info, err := r.cfg.Meta.Read(ctx, f, f.Ext, meta.ReadOptions{}); err != nil {
+				r.warn(j.ID, fmt.Sprintf("member %d: reading title: %v", i, err))
+			} else if vs := info.Tags["TITLE"]; len(vs) > 0 {
+				tagTitles[i] = vs[0]
+			}
+		}
+		f.Close()
 		measure(int64(i+1), int64(len(req.Srcs)))
 	}
 
@@ -1022,17 +1056,36 @@ func (r *Runner) runMerge(ctx context.Context, j *Job) error {
 	// asks for one. Thread a crossfade to a job and this is the second place it
 	// has to reach, or the 201 validates an envelope of sum-(N-1)X while this
 	// delivers the full sum.
-	med, err := waxflow.Concat(members, waxflow.ConcatOptions{Profile: r.cfg.Profile})
+	//
+	// One copts (not one layout) is handed to both Concat and the chapter
+	// offsets: ConcatOptions' convention is that the plan and the run take the
+	// same options, and here Concat is the run and the offsets must match it.
+	// Both walk concatLayout independently over the same tracks and copts, so
+	// the seams ConcatBoundaries reports are exactly the ones Concat plays. The
+	// second walk is header arithmetic with no I/O, once per job; the funnel is
+	// what makes it agree rather than merely happen to.
+	copts := waxflow.ConcatOptions{Profile: r.cfg.Profile}
+	med, err := waxflow.Concat(members, copts)
 	if err != nil {
 		return err
 	}
 	defer med.Close()
 
-	// Gain is zero and there are no tags: a merge takes neither field, since
-	// both are per-track answers and this has N tracks in and one file out.
-	// The server refuses them at creation; this is only where that shows.
+	// Gain is zero and there are no source tags: a merge takes neither field,
+	// since both are per-track answers and this has N tracks in and one file
+	// out. The server refuses them at creation; this is only where that shows.
 	opts := req.TranscodeOptions(0, r.cfg.Profile)
 	opts.Progress = r.progressFunc(ctx, j.ID, "transcode")
+	if wantChapters {
+		// One chapter per member, at the member's start on the concatenated
+		// timeline. The offsets come from the same ConcatBoundaries the timeline
+		// path plans through, so a marker lands exactly where its seam does.
+		chapters, err := mergeChapters(tracks, copts, req.MemberTitles, tagTitles)
+		if err != nil {
+			return err
+		}
+		opts.Chapters = chapters
+	}
 	plan, err := r.cfg.Engine.PlanTranscode(med.Info().Default(), opts)
 	if err != nil {
 		return err
@@ -1043,6 +1096,46 @@ func (r *Runner) runMerge(ctx context.Context, j *Job) error {
 	}
 	r.store.update(j.ID, false, func(job *Job) { job.Outputs = []Output{*out} })
 	return nil
+}
+
+// mergeChapters is a merge's QuickTime chapter list: one chapter per member, at
+// the member's start on the concatenated timeline, titled by mergeTitle.
+//
+// The offsets come from ConcatBoundaries, the same walk the timeline path plans
+// through, converted to a clock with waxflow.SampleTime (the overflow-safe
+// converter a long audiobook needs; a naive n*Second/rate overflows past about
+// 53 hours). A merge always butt-joins, so the offsets are the plain prefix
+// sum. Chapters are emitted start-only (End zero): the muxer gives each chapter
+// the next one's start as its end, and the movie end for the last, so a
+// start-only list is correct for every member, not only the tail.
+func mergeChapters(tracks []container.Track, copts waxflow.ConcatOptions, reqTitles, tagTitles []string) ([]container.Chapter, error) {
+	boundaries, env, err := waxflow.ConcatBoundaries(tracks, copts)
+	if err != nil {
+		return nil, err
+	}
+	chapters := make([]container.Chapter, len(boundaries))
+	for i, b := range boundaries {
+		chapters[i] = container.Chapter{
+			Start: waxflow.SampleTime(b.OffsetSamples, env.Rate),
+			Title: mergeTitle(i, reqTitles, tagTitles),
+		}
+	}
+	return chapters, nil
+}
+
+// mergeTitle resolves member i's chapter title by the A18 precedence: the
+// request's title if non-empty, else the member's TITLE tag, else a generated
+// "Chapter N" (1-based). An empty request entry does not force a blank title;
+// the precedence cannot express "deliberately blank", so it falls through to
+// the tag or the fallback.
+func mergeTitle(i int, reqTitles, tagTitles []string) string {
+	if i < len(reqTitles) && reqTitles[i] != "" {
+		return reqTitles[i]
+	}
+	if i < len(tagTitles) && tagTitles[i] != "" {
+		return tagTitles[i]
+	}
+	return fmt.Sprintf("Chapter %d", i+1)
 }
 
 // splitProgressAt places a piece's own progress on the source's timeline: the

@@ -124,6 +124,19 @@ type Request struct {
 	// mints nothing and its product is a file.
 	Srcs []string `json:"srcs,omitempty"`
 
+	// MemberTitles are optional per-member chapter titles for a merge,
+	// index-aligned to Srcs. An mp4-family merge stamps a QuickTime chapter
+	// text track, one chapter per member; a non-empty MemberTitles[i] is that
+	// chapter's title, winning over the member's own TITLE tag. An empty or
+	// absent entry falls through to the tag, then to a generated "Chapter N".
+	// Merge-only, and read only when the merge resolves to the mp4-progressive
+	// container (the one output shape that carries a chapter text track).
+	//
+	// The json key is titles, matching the wire body's field: the Go name is
+	// MemberTitles for clarity beside Srcs, but the persisted and wire key is
+	// one string, the same ch/Channels split the other fields use.
+	MemberTitles []string `json:"titles,omitempty"`
+
 	// Cuts are a split job's cut points, as sample offsets on the source's
 	// own timeline, strictly ascending. Split-only.
 	//
@@ -318,6 +331,13 @@ type Timeline struct {
 	Members int `json:"members"`
 	// DurationSeconds is the concatenated timeline's length.
 	DurationSeconds float64 `json:"durationSeconds"`
+	// EnvelopeRate is the timeline's normalized sample rate, the rate
+	// Boundaries' sample offsets are measured on.
+	EnvelopeRate int `json:"envelopeRate"`
+	// Boundaries are the per-member sample offsets and durations on the
+	// envelope timeline, so the 202 job body carries the same shape the 201
+	// fast path returns. Derived from the measured members, not identity.
+	Boundaries []waxflow.MemberBoundary `json:"boundaries"`
 }
 
 // Progress is the running job's position, updated in memory and
@@ -375,20 +395,27 @@ type Job struct {
 //
 // The struct copy is not a deep copy, and every reference field below is here
 // because of that. Request in particular used to be safe to copy by value and
-// no longer is: Srcs, SourceIDs, and Cuts are slices, so a shallow copy would
-// hand a caller the stored job's own backing arrays. TestJobCloneIsDeep is the
-// guard, and its checks are hand-written because what they must catch is a
-// field that was added and forgotten here: a reflective deep-copy check would
-// be this function written a second time.
+// no longer is: Srcs, SourceIDs, Cuts, and MemberTitles are slices, so a
+// shallow copy would hand a caller the stored job's own backing arrays.
+// TestJobCloneIsDeep is the guard, and its checks are hand-written because what
+// they must catch is a field that was added and forgotten here: a reflective
+// deep-copy check would be this function written a second time.
 func (j *Job) clone() *Job {
 	c := *j
 	c.Request.Srcs = slices.Clone(j.Request.Srcs)
 	c.Request.SourceIDs = slices.Clone(j.Request.SourceIDs)
 	c.Request.Cuts = slices.Clone(j.Request.Cuts)
+	c.Request.MemberTitles = slices.Clone(j.Request.MemberTitles)
 	// Output holds no reference field of its own, so cloning the slice is
 	// the whole of it; a pointer added to Output would need a loop here.
 	c.Outputs = slices.Clone(j.Outputs)
-	c.Timeline = clonePtr(j.Timeline)
+	if j.Timeline != nil {
+		// Timeline carries a slice (Boundaries), so clonePtr's shallow copy
+		// would hand out the stored job's backing array; clone it too.
+		tl := *j.Timeline
+		tl.Boundaries = slices.Clone(j.Timeline.Boundaries)
+		c.Timeline = &tl
+	}
 	c.Started = clonePtr(j.Started)
 	c.Finished = clonePtr(j.Finished)
 	c.Error = clonePtr(j.Error)

@@ -57,8 +57,8 @@ func (s *Server) timelineOptions() waxflow.ConcatOptions {
 // slow album into an album that cannot be timelined at all, which is the
 // functional gap the job avoids.
 //
-// Both answers carry the same three values, so a client's two paths converge:
-// the finished job's timeline field is this response's body.
+// Both answers carry the same values, so a client's two paths converge: the
+// finished job's timeline field is this response's body.
 func (s *Server) handleTimelineCreate(w http.ResponseWriter, r *http.Request) {
 	var body TimelineRequest
 	if err := decodeJSONBody(w, r, &body); err != nil {
@@ -107,6 +107,8 @@ func (s *Server) handleTimelineCreate(w http.ResponseWriter, r *http.Request) {
 		Tl:              tl.Tl,
 		Members:         tl.Members,
 		DurationSeconds: tl.DurationSeconds,
+		EnvelopeRate:    tl.EnvelopeRate,
+		Boundaries:      tl.Boundaries,
 	})
 }
 
@@ -159,8 +161,9 @@ func (s *Server) mintTimeline(ctx context.Context, refs []string, progress func(
 //
 // It is the one path both the fast handler and the job run through, so a
 // timeline minted either way is the same timeline: the digest is a function
-// of the members alone, and the duration comes from the same ConcatTrack the
-// stream will later plan through.
+// of the members alone, and the duration and boundaries come from the same
+// concatLayout the stream will later plan through (ConcatBoundaries here,
+// ConcatTrack in the segment plan, one funnel).
 func (s *Server) mintTimelineFrom(ctx context.Context, srcs []*source.File, progress func(done, total int64)) (*jobs.Timeline, error) {
 	members := make([]timeline.Member, len(srcs))
 	tracks := make([]container.Track, len(srcs))
@@ -183,12 +186,23 @@ func (s *Server) mintTimelineFrom(ctx context.Context, srcs []*source.File, prog
 	}
 	// Planning the envelope now is what makes a mint mean something: a queue
 	// whose members cannot be concatenated (a member laid out for other
-	// speakers, say) fails here rather than at the first segment request.
-	env, err := waxflow.ConcatTrack(tracks, s.timelineOptions())
+	// speakers, say) fails here rather than at the first segment request. The
+	// boundaries fall out of the same walk, so the response can report where
+	// each member lands with no extra measurement.
+	boundaries, env, err := waxflow.ConcatBoundaries(tracks, s.timelineOptions())
 	if err != nil {
 		return nil, err
 	}
-	duration := DurationSeconds(env.Samples, env.Fmt.Rate)
+	// The timeline's length is where the last member ends: it carries no tail
+	// zone, so its end (offset + duration) is starts[N], the same total
+	// ConcatTrack projects. Deriving it from the boundaries keeps every
+	// reported length reading one concatLayout.
+	var total int64
+	if n := len(boundaries); n > 0 {
+		last := boundaries[n-1]
+		total = last.OffsetSamples + last.DurationSamples
+	}
+	duration := DurationSeconds(total, env.Rate)
 	// The store's rule is that a timeline outlives every URL minted against
 	// it. No URL exists yet, so the floor is what a default-TTL URL for this
 	// much audio would carry; /sign and every segment read extend it from
@@ -197,7 +211,13 @@ func (s *Server) mintTimelineFrom(ctx context.Context, srcs []*source.File, prog
 	if err != nil {
 		return nil, err
 	}
-	return &jobs.Timeline{Tl: digest, Members: len(members), DurationSeconds: duration}, nil
+	return &jobs.Timeline{
+		Tl:              digest,
+		Members:         len(members),
+		DurationSeconds: duration,
+		EnvelopeRate:    env.Rate,
+		Boundaries:      boundaries,
+	}, nil
 }
 
 // timelineNeedsJob reports whether minting these members would be slow

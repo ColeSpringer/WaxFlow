@@ -321,7 +321,7 @@ type TimelineSrc struct {
 
 // TimelineResponse is POST /hls/timeline's 201 body. A mint that had to
 // measure a member answers 202 with a job instead, and the job's timeline
-// field carries the same three values.
+// field carries the same values.
 type TimelineResponse struct {
 	SchemaVersion int `json:"schemaVersion"`
 	// Tl is the timeline's digest: what a tl= parameter names.
@@ -330,6 +330,15 @@ type TimelineResponse struct {
 	Members int `json:"members"`
 	// DurationSeconds is the concatenated timeline's length.
 	DurationSeconds float64 `json:"durationSeconds"`
+	// EnvelopeRate is the timeline's normalized sample rate (the maximum
+	// member rate), the rate Boundaries' sample offsets are measured on.
+	EnvelopeRate int `json:"envelopeRate"`
+	// Boundaries are the per-member sample offsets and durations on the
+	// envelope timeline, in order. They are derived from the measured members,
+	// not part of the timeline's identity, so the digest does not cover them.
+	// Offsets overlap under a crossfade; see waxflow.MemberBoundary. Today the
+	// server never crossfades, so at mint the members tile exactly.
+	Boundaries []waxflow.MemberBoundary `json:"boundaries"`
 }
 
 // SignRequest is the POST /sign body.

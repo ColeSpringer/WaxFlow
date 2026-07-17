@@ -67,7 +67,7 @@ or `waxflow sign`.
 | Method and path | Auth | Purpose |
 |---|---|---|
 | `GET /ping` | none | liveness (Docker HEALTHCHECK): `{"status":"ok","schemaVersion":1}` |
-| `GET /version` | key | `{"schemaVersion":1,"version":"v0.4.0"}` |
+| `GET /version` | key | `{"schemaVersion":1,"version":"v1.0.0"}`; `version` is the build's `git describe` stamp (a tag, a tag-commit-SHA, or `dev` for a plain `go build`), not a fixed constant |
 | `GET /caps` | key | capability discovery (see below) |
 | `GET/POST /probe` | key | container/track/warning report for a source |
 | `POST /sign` | key | mint a signed playback URL |
@@ -386,7 +386,10 @@ Mint the queue first, then sign a master against the digest:
     POST /hls/timeline
     {"srcs": [{"src": "lib/Album/01.flac"}, {"src": "lib/Album/02.flac"}]}
 
-    201 {"schemaVersion": 1, "tl": "kJ3n...pQ", "members": 2, "durationSeconds": 2998.5}
+    201 {"schemaVersion": 1, "tl": "kJ3n...pQ", "members": 2, "durationSeconds": 2500,
+         "envelopeRate": 44100,
+         "boundaries": [{"offsetSamples": 0, "durationSamples": 66150000},
+                        {"offsetSamples": 66150000, "durationSamples": 44100000}]}
 
     POST /sign
     {"path": "/hls/master.m3u8", "params": {"tl": "kJ3n...pQ", "format": "opus", "gain": "off"}}
@@ -414,6 +417,19 @@ Things worth knowing before you build on it:
   and bit depths are converted to the envelope no member loses information
   reaching (the maximum of each). A uniform queue, which is what a gapless
   album is, is passed through untouched and costs nothing.
+- **`boundaries` say where each member lands.** `envelopeRate` is the
+  timeline's normalized rate (the maximum member rate), and each
+  `boundaries[i]` gives that member's `offsetSamples` (its start on the
+  timeline) and `durationSamples` (its own length), both on that clock, so
+  a client need not probe the members itself. They are derived from the
+  measured members, not part of the identity, so the digest does not cover
+  them. Today the server never crossfades, so the members tile exactly:
+  `offsetSamples[i+1] == offsetSamples[i] + durationSamples[i]`, and the
+  last member's end is `durationSeconds * envelopeRate`. The fields are
+  offsets and durations rather than a tiling assumption on purpose: a
+  render crossfade (should one ever ride the wire) makes consecutive
+  members overlap, so `offsetSamples + durationSamples` can exceed the next
+  member's `offsetSamples`. Build on the offsets, not on the tiling.
 - **`202` means the mint had to measure.** A timeline's positions are a
   prefix sum, so every member's length is measured rather than read off
   its headers. That is a sub-millisecond walk for formats whose demuxer
@@ -421,7 +437,7 @@ Things worth knowing before you build on it:
   scan for MP3. When a cold queue needs enough of the latter to be worth
   it, the response is `202` with a job instead of `201` with a digest;
   poll `GET /jobs/{id}` or follow its events, and the finished job's
-  `timeline` field carries the same three values the `201` body would. The
+  `timeline` field carries the same values the `201` body would. The
   cost is once per file, so the same queue mints in one round trip
   afterwards.
 - **`404 not-found` on a timeline means re-mint it.** A stored timeline
@@ -455,15 +471,17 @@ is:
 
     {
       "schemaVersion": 1,
-      "inputs": ["flac", "wav", "aiff", "ogg", "mp4", "adts", "mp3"],
-      "decoders": ["pcm", "flac", "mp3", "alac", "aac-lc"],
+      "inputs": ["flac", "wav", "aiff", "ogg", "mp4", "mka", "adts", "mp3"],
+      "decoders": ["pcm", "flac", "mp3", "alac", "aac-lc", "vorbis", "opus"],
       "outputs": [{"name": "wav", "live": true, "exts": ["wav", "wave", "rf64", "bw64"]},
+                   {"name": "opus", "live": true, "exts": ["opus"]},
+                   {"name": "vorbis", "live": true, "exts": ["ogg", "oga"]},
                    {"name": "aiff", "live": false, "exts": ["aif", "aiff", "aifc", "afc"]},
                    {"name": "flac", "live": true, "exts": ["flac"]},
                    {"name": "mp3", "live": true, "exts": ["mp3", "mpga"]},
                    {"name": "aac", "live": true, "exts": ["m4a", "aac"]},
                    {"name": "alac", "live": true, "exts": []}],
-      "delivery": {"progressive": true, "hls": true, "hlsFormats": ["opus", "flac", "alac", "aac"],
+      "delivery": {"progressive": true, "hls": true, "hlsFormats": ["opus", "flac", "aac", "alac"],
                    "jobs": false, "uploads": false, "pid": false,
                    "timelines": true, "maxTimelineMembers": 1000},
       "profiles": {
@@ -568,10 +586,11 @@ range, true peak, sample peak) without producing audio.
 
 Each field belongs to a specific set of job types, and a field on a type
 that does not take it is a 400 rather than a field silently ignored at
-run time: `srcs` is merge-only, `cuts` and `cue` split-only (and exclusive
-with each other), the silence fields analyze-only, `gain` and `loudness`
-transcode-only, and the shaping parameters belong to transcode, merge, and
-split. `src` is required by every type but merge, which refuses it.
+run time: `srcs` and `titles` are merge-only, `cuts` and `cue` split-only
+(and exclusive with each other), the silence fields analyze-only, `gain`
+and `loudness` transcode-only, and the shaping parameters belong to
+transcode, merge, and split. `src` is required by every type but merge,
+which refuses it.
 
 ### Merge and split
 
@@ -629,7 +648,9 @@ track be", against that track's own measurement or its own ReplayGain
 tags; a merge has N tracks in and one file out and a split one in and N
 out, so either would have to apply one source's number to things it does
 not describe. Normalize with a transcode job after the cut, where the
-numbers name what they measure. Neither carries tags or chapters yet.
+numbers name what they measure. Neither carries source tags, and a split
+carries no chapters; an mp4-family merge stamps chapter markers, one per
+member (below).
 
 An mp4-family merge (`alac`, `aac`) writes the **flat** MP4 form by
 default, `container: "progressive"`, which is what the job document will
@@ -639,6 +660,19 @@ the row default only because `/stream` needs a container that streams, and
 a job writes to a seekable file where the flat form's back-patch applies.
 An explicit `container` wins, which also means a merge cannot ask for the
 fragmented form: omitting the field is how you get the flat one.
+
+That chapter text track is one chapter per member, at the member's start
+on the concatenated timeline (the same boundaries `POST /hls/timeline`
+reports). Title them with the optional `titles`, a string per member
+index-aligned to `srcs` (a title per member, or none, else a 400). A
+member's chapter title is its `titles` entry when non-empty, else the
+member's own `TITLE` tag when a metadata mapper is wired, else a generated
+`Chapter N`. An empty `titles[i]` does not force a blank title: it falls
+through to the tag or the generated name, since the precedence cannot spell
+"deliberately blank". A title past the text track's per-entry byte cap is
+truncated on a rune boundary. Chapters are stamped only on the
+flat/progressive form (the one that carries the track), so a merge to any
+other format writes none and reads no per-member titles.
 
 A fifth type, `timeline`, appears in `GET /jobs` but cannot be created
 here: `POST /hls/timeline` creates one on its own when a cold queue needs

@@ -195,6 +195,25 @@ type TimelineResponse struct {
 	Members int `json:"members"`
 	// DurationSeconds is the concatenated timeline's length.
 	DurationSeconds float64 `json:"durationSeconds"`
+	// EnvelopeRate is the timeline's normalized sample rate (the maximum
+	// member rate), the rate Boundaries' sample offsets are measured on.
+	EnvelopeRate int `json:"envelopeRate"`
+	// Boundaries are the per-member sample offsets and durations on the
+	// envelope timeline, in order, so a client need not probe the members
+	// itself to know where each one lands. They are derived, not part of the
+	// timeline's identity, so the digest does not cover them.
+	Boundaries []MemberBoundary `json:"boundaries"`
+}
+
+// MemberBoundary is one member's place on a concatenated timeline, mirroring
+// waxflow.MemberBoundary. Both fields are in samples at the envelope rate.
+// OffsetSamples is the member's actual start; DurationSamples is its own raw
+// normalized length. Under a crossfade consecutive members overlap, so
+// OffsetSamples + DurationSamples can exceed the next member's OffsetSamples;
+// only without one do the members tile exactly.
+type MemberBoundary struct {
+	OffsetSamples   int64 `json:"offsetSamples"`
+	DurationSamples int64 `json:"durationSamples"`
 }
 
 // SignRequest is the POST /sign body; Params carries the playback

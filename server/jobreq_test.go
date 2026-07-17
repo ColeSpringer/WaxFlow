@@ -133,7 +133,7 @@ func populatedJobRequest() jobRequest {
 	// every field at once, which no job may. What it checks is the mapping,
 	// and a body missing a field checks the mapping of that field not at all.
 	return jobRequest{
-		Type: "transcode", Src: "x", Srcs: []string{"x"}, Cuts: []int64{1}, Cue: "x",
+		Type: "transcode", Src: "x", Srcs: []string{"x"}, Titles: []string{"x"}, Cuts: []int64{1}, Cue: "x",
 		Format: "x", Container: "x",
 		Rate: 1, Ch: 1, Bits: 1, Bitrate: 1, Gain: "x", Loudness: "x", FLACLevel: 1,
 		Silence: true, SilenceThresholdDB: -60, SilenceMinSeconds: 0.25,

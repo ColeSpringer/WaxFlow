@@ -5,8 +5,8 @@ Self-hosted, **pure-Go**, on-the-fly audio transcoding for the Wax family
 stream, tuned for time-to-first-audio, sample-exact seeking, and flaky
 mobile networks. No ffmpeg at runtime, ever (`CGO_ENABLED=0`).
 
-The codecs (Opus, MP3, AAC-LC, FLAC, ALAC, and WAV encoders, plus a wider
-decoder set) are written from scratch for Go 1.26 and published as public,
+The codecs (Opus, MP3, AAC-LC, Vorbis, FLAC, ALAC, and WAV encoders, plus a
+wider decoder set) are written from scratch for Go 1.26 and published as public,
 **stdlib-only** packages under this module, CI-enforced by `make depcheck`,
 so anyone can import them.
 
@@ -22,8 +22,10 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   corpora), MP3 (psychoacoustic model, joint stereo, CBR and VBR, LAME
   gapless tag), AAC-LC (window switching, TNS, M/S, two-loop
   quantization; at parity with ffmpeg's native encoder on the ODG-proxy
-  gate), FLAC (levels 0-8, smaller than `flac -5` at level 5), ALAC
-  (bit-exact round trip), and WAV/AIFF PCM.
+  gate), Vorbis (product-lattice VQ residue books, perceptual
+  coupled-stereo classification; ODG-proxy gate green), FLAC (levels 0-8,
+  smaller than `flac -5` at level 5), ALAC (bit-exact round trip), and
+  WAV/AIFF PCM.
 - **Decoders / inputs**: FLAC (bit-exact on the IETF suite), WAV, AIFF,
   MP3, AAC-LC and ALAC in MP4/M4A/M4B, ADTS, Opus (all RFC 6716/8251
   conformance vectors pass), Vorbis, Ogg, Matroska/WebM. Sample-exact
@@ -191,7 +193,7 @@ replaced content still dies with `410 source-changed`.
 
 ## Non-goals for v1.0
 
-Video; HE-AAC/SBR/xHE; Vorbis/WMA/APE/WavPack **encoding**; WMA/APE/WavPack
+Video; HE-AAC/SBR/xHE; WMA/APE/WavPack **encoding**; WMA/APE/WavPack
 decoding; DASH manifests (the CMAF segments are already DASH-compatible);
 DRM/HLS-AES; Opus PLC; CD ripping; any database (WaxBin owns cataloging);
 tag *editing* (WaxLabel owns it; WaxFlow only maps and passes metadata);

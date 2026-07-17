@@ -72,6 +72,10 @@ type jobField struct {
 // Driving every (type, field) pair is what makes a missing clause fail here.
 var jobFields = []jobField{
 	{"srcs", `"srcs":["lib/sine.wav","lib/sine.wav"]`, []string{"merge"}},
+	// Per-member chapter titles: merge's alone, one per member. A two-title
+	// spelling matches the two-member merge base above, so a type that does not
+	// own it refuses a well-formed value rather than a malformed one.
+	{"titles", `"titles":["Intro","Chapter Two"]`, []string{"merge"}},
 	{"cuts", `"cuts":[1000]`, []string{"split"}},
 	// cue is split's other way of saying cuts. It is owned by split alone
 	// for the same reason cuts is, and the two being exclusive of each

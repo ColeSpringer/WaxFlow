@@ -480,6 +480,109 @@ func TestConcatCrossfadeStartsOverlap(t *testing.T) {
 	}
 }
 
+// TestConcatBoundaries pins the exported boundary contract A17 puts on the
+// wire, so a consumer built on it is not surprised when a crossfade lands.
+// OffsetSamples is an actual timeline position and DurationSamples is the raw
+// per-member length: at X=0 they tile (offset[i+1] == offset[i] + duration[i]),
+// and under a crossfade of X they OVERLAP by exactly X.
+func TestConcatBoundaries(t *testing.T) {
+	lens := []int64{1000, 2000, 3000}
+	tracks := make([]container.Track, len(lens))
+	for i, l := range lens {
+		tracks[i] = container.Track{Codec: codec.PCM, Fmt: stereo48, Samples: l, SamplesExact: true, Default: true}
+	}
+
+	t.Run("butt-join tiles", func(t *testing.T) {
+		bounds, env, err := ConcatBoundaries(tracks, ConcatOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if env.Rate != 48000 {
+			t.Fatalf("envelope rate %d, want 48000", env.Rate)
+		}
+		if bounds[0].OffsetSamples != 0 {
+			t.Fatalf("boundaries[0].OffsetSamples = %d, want 0", bounds[0].OffsetSamples)
+		}
+		for i, l := range lens {
+			if bounds[i].DurationSamples != l {
+				t.Errorf("boundaries[%d].DurationSamples = %d, want %d", i, bounds[i].DurationSamples, l)
+			}
+		}
+		for i := 0; i+1 < len(bounds); i++ {
+			if got, want := bounds[i+1].OffsetSamples, bounds[i].OffsetSamples+bounds[i].DurationSamples; got != want {
+				t.Errorf("without a crossfade member %d starts at %d, want %d (the previous one's end): the members must tile",
+					i+1, got, want)
+			}
+		}
+	})
+
+	t.Run("crossfade overlaps", func(t *testing.T) {
+		const x = 256
+		bounds, _, err := ConcatBoundaries(tracks, ConcatOptions{Crossfade: x})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Durations stay the raw per-member lengths, untouched by the blend.
+		for i, l := range lens {
+			if bounds[i].DurationSamples != l {
+				t.Errorf("boundaries[%d].DurationSamples = %d, want the raw %d", i, bounds[i].DurationSamples, l)
+			}
+		}
+		for i := 0; i+1 < len(bounds); i++ {
+			end := bounds[i].OffsetSamples + bounds[i].DurationSamples
+			if end <= bounds[i+1].OffsetSamples {
+				t.Errorf("member %d ends at %d and member %d starts at %d; a crossfade shares that region, so they must overlap",
+					i, end, i+1, bounds[i+1].OffsetSamples)
+			}
+			if got, want := bounds[i+1].OffsetSamples, end-x; got != want {
+				t.Errorf("member %d starts at %d, want %d (X before the previous member's end)", i+1, got, want)
+			}
+		}
+	})
+
+	t.Run("offsets and durations are at the envelope rate", func(t *testing.T) {
+		// A 44.1 kHz member of a 48 kHz timeline is reported at its resampled
+		// length, so a consumer never has to know a member's own rate: both the
+		// offset and the duration sit on the envelope's clock.
+		mixed := []container.Track{
+			{Codec: codec.PCM, Fmt: stereo44, Samples: 44100, SamplesExact: true, Default: true},
+			{Codec: codec.PCM, Fmt: stereo48, Samples: 48000, SamplesExact: true, Default: true},
+		}
+		bounds, env, err := ConcatBoundaries(mixed, ConcatOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if env.Rate != 48000 {
+			t.Fatalf("envelope rate %d, want 48000", env.Rate)
+		}
+		want := concatMemberSamples(mixed[0], env)
+		if bounds[0].DurationSamples != want {
+			t.Fatalf("the 44.1 kHz member reports %d samples, want its 48 kHz length %d", bounds[0].DurationSamples, want)
+		}
+		if bounds[1].OffsetSamples != want {
+			t.Fatalf("member 1 starts at %d, want %d (the resampled member 0 length)", bounds[1].OffsetSamples, want)
+		}
+	})
+
+	t.Run("surfaces concatLayout's refusals", func(t *testing.T) {
+		// The funnel is only as honest as its error path: a caller handed
+		// (nil, {}, nil) for an unbuildable timeline would read a zero envelope
+		// and no boundaries as success. concatLayout refuses these; the wrapper
+		// must not swallow the refusal.
+		if _, _, err := ConcatBoundaries(nil, ConcatOptions{}); err == nil {
+			t.Error("an empty timeline returned no error")
+		}
+		if _, _, err := ConcatBoundaries(tracks, ConcatOptions{Crossfade: -1}); err == nil {
+			t.Error("a negative crossfade returned no error")
+		}
+		// Longer than the shortest member (1000 samples): refused by
+		// checkCrossfade inside concatLayout, which the wrapper must relay.
+		if _, _, err := ConcatBoundaries(tracks, ConcatOptions{Crossfade: 100000}); err == nil {
+			t.Error("a crossfade longer than the shortest member returned no error")
+		}
+	})
+}
+
 // TestConcatButtJoinTakesNoBound pins the zero-copy claim at the only level it
 // is observable.
 //

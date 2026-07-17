@@ -4,6 +4,7 @@
 package server_test
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -12,10 +13,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxflow/audio"
+	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/jobs"
 	"github.com/colespringer/waxflow/server"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // rampFrames is lib/ramp.wav's length: 4 s of stereo s16 at 48 kHz. It is the
@@ -203,6 +207,88 @@ func TestMergeSelectsProgressiveMP4(t *testing.T) {
 			t.Fatalf("outputs = %+v, want one adts", job.Outputs)
 		}
 	})
+}
+
+// TestMergeJobStampsChapters is A18 over the wire: an mp4-family merge with a
+// titles field writes a QuickTime chapter text track, one chapter per member at
+// its boundary, titled by the request. Members are whole-second so the offsets
+// land on whole chapter ticks and round-trip through the muxer exactly.
+//
+// It reads the chapters off the downloaded file, not off the job, because the
+// point is the bytes a client gets: a titles field the runner accepted but the
+// muxer dropped would pass a job-shape check and fail here.
+func TestMergeJobStampsChapters(t *testing.T) {
+	env := jobsEnv(t)
+	lens := []int{48000, 96000} // 1 s, 2 s at 48 kHz
+	refs := make([]string, len(lens))
+	for i, n := range lens {
+		name := fmt.Sprintf("chap-%d.wav", i)
+		if err := os.WriteFile(filepath.Join(env.root, name), rampWAV(t, 48000, 2, n), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		refs[i] = "lib/" + name
+	}
+	body, err := json.Marshal(map[string]any{
+		"type": "merge", "srcs": refs, "format": "alac", "titles": []string{"Opening", "Closing"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := createJob(t, env, string(body))
+	job := awaitJob(t, env, id)
+	if len(job.Outputs) != 1 {
+		t.Fatalf("merge made %d outputs, want 1", len(job.Outputs))
+	}
+	raw := readBody(t, env.get(t, "/jobs/"+id+"/result", nil))
+	info, err := format.Probe(bytes.NewReader(raw), job.Outputs[0].Container, nil)
+	if err != nil {
+		t.Fatalf("probing the merged output: %v", err)
+	}
+	if len(info.Chapters) != len(refs) {
+		t.Fatalf("merged output carries %d chapters, want one per member (%d)", len(info.Chapters), len(refs))
+	}
+	wantTitles := []string{"Opening", "Closing"}
+	wantStarts := []time.Duration{0, time.Second}
+	for i, ch := range info.Chapters {
+		if ch.Title != wantTitles[i] {
+			t.Errorf("chapter %d title = %q, want the request's %q", i, ch.Title, wantTitles[i])
+		}
+		if ch.Start != wantStarts[i] {
+			t.Errorf("chapter %d starts at %v, want %v (the member's boundary)", i, ch.Start, wantStarts[i])
+		}
+	}
+}
+
+// TestMergeRejectsMismatchedTitles pins the titles alignment rule at creation:
+// a title per member, or none. A count between the two would leave which member
+// each title belongs to a guess at run time, so it is a 400 rather than a job
+// that stamps the wrong labels.
+func TestMergeRejectsMismatchedTitles(t *testing.T) {
+	env := jobsEnv(t)
+	resp := env.postJSON(t, "/jobs",
+		`{"type":"merge","srcs":["lib/sine.wav","lib/sine.wav"],"format":"alac","titles":["only one"]}`)
+	wantEnvelope(t, resp, http.StatusBadRequest, waxerr.CodeInvalidRequest)
+}
+
+// TestMergeRejectsTitlesWithoutAChapterTrack pins that titles are refused at
+// creation when the merge's output cannot carry a chapter track, rather than
+// accepted and silently dropped. A field the request carries but the output
+// cannot honor is a 400 where the caller can still fix it, the way a lossless
+// bitrate is. It covers both a non-mp4 format and an mp4 format forced into a
+// non-mp4 container, since either would write no chapters.
+func TestMergeRejectsTitlesWithoutAChapterTrack(t *testing.T) {
+	env := jobsEnv(t)
+	for _, tc := range []struct{ name, body string }{
+		{"a non-mp4 format",
+			`{"type":"merge","srcs":["lib/sine.wav","lib/sine.wav"],"format":"flac","titles":["A","B"]}`},
+		{"an mp4 format in a non-mp4 container",
+			`{"type":"merge","srcs":["lib/sine.wav","lib/sine.wav"],"format":"aac","container":"adts","bitrate":96,"titles":["A","B"]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := env.postJSON(t, "/jobs", tc.body)
+			wantEnvelope(t, resp, http.StatusBadRequest, waxerr.CodeInvalidRequest)
+		})
+	}
 }
 
 // hasBox reports whether raw's top-level box list holds a box of this type. It

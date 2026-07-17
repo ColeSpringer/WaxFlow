@@ -74,7 +74,11 @@ type jobRequest struct {
 	Type string   `json:"type"`
 	Src  string   `json:"src"`
 	Srcs []string `json:"srcs,omitempty"`
-	Cuts []int64  `json:"cuts,omitempty"`
+	// Titles are optional per-member chapter titles for a merge, index-aligned
+	// to Srcs. They stamp the QuickTime chapter track of an mp4-family merge,
+	// overriding each member's own TITLE tag; see validateMergeRequest.
+	Titles []string `json:"titles,omitempty"`
+	Cuts   []int64  `json:"cuts,omitempty"`
 	// Cue is a source reference naming a CUE sheet whose track boundaries
 	// are this split's cut points, exclusive with Cuts. It resolves through
 	// the same resolver src does, so a sheet can be uploaded
@@ -111,6 +115,7 @@ func requestFrom(body jobRequest) *jobs.Request {
 		Type:               jobs.Type(body.Type),
 		Src:                body.Src,
 		Srcs:               slices.Clone(body.Srcs),
+		MemberTitles:       slices.Clone(body.Titles),
 		Cuts:               slices.Clone(body.Cuts),
 		Format:             body.Format,
 		Container:          body.Container,
@@ -200,6 +205,9 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 		if len(body.Srcs) > 0 {
 			return bad("srcs applies to merge jobs")
 		}
+	}
+	if req.Type != jobs.TypeMerge && len(body.Titles) > 0 {
+		return bad("titles applies to merge jobs")
 	}
 	if req.Type != jobs.TypeSplit && len(body.Cuts) > 0 {
 		return bad("cuts applies to split jobs")
@@ -371,6 +379,14 @@ const mp4ProgressiveContainer = "progressive"
 // since the measure pass is the slow part. runMerge already proves one at a
 // time suffices.
 func (s *Server) validateMergeRequest(ctx context.Context, body jobRequest, req *jobs.Request) (*jobs.Request, error) {
+	// Titles are index-aligned to the members, so the only shapes that mean
+	// anything are none and one-per-member. A short or long list would leave
+	// the alignment to guesswork at run time, which is the silent-mismatch this
+	// refuses. A blank entry is legal: it falls through to the tag or fallback.
+	if n := len(body.Titles); n != 0 && n != len(body.Srcs) {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+			"titles has %d entries but the merge has %d members; a title per member, or none", n, len(body.Srcs)))
+	}
 	tracks := make([]container.Track, len(body.Srcs))
 	req.SourceIDs = make([]string, len(body.Srcs))
 	for i, ref := range body.Srcs {
@@ -416,6 +432,21 @@ func (s *Server) validateMergeRequest(ctx context.Context, body jobRequest, req 
 		if _, err := s.eng.PlanTranscode(env, req.TranscodeOptions(0, s.profile)); err != nil {
 			return nil, err
 		}
+	}
+	// Titles write a QuickTime chapter track, which only the flat MP4 form
+	// carries. If the resolved output is not that form the runner drops them, so
+	// refuse here rather than accept a field that will be silently inert, the
+	// way a lossless bitrate is refused (checkOutputShape): a field the request
+	// carries but the output cannot honor is a 400 where the caller can still
+	// fix it, not a clean success that quietly did less. The container is final
+	// by now (the block above settled the mp4-family default), and the test is
+	// the same one the runner gates on, so the two agree on which merges carry
+	// chapters.
+	if len(body.Titles) > 0 && req.Container != mp4ProgressiveContainer {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest,
+			"titles write a QuickTime chapter track, which only the flat MP4 form carries; this merge's "+
+				"format and container produce none, so the titles would be dropped. Merge to an mp4-family "+
+				"format (alac, or aac without an explicit container) to get chapters")
 	}
 	return req, nil
 }

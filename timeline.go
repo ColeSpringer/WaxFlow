@@ -130,10 +130,10 @@ func spanChapters(chapters []container.Chapter, from, limit int64, rate int) []c
 	if len(chapters) == 0 || rate <= 0 {
 		return nil
 	}
-	start := sampleTime(from, rate)
+	start := SampleTime(from, rate)
 	end := time.Duration(-1)
 	if limit >= 0 {
-		end = sampleTime(from+limit, rate)
+		end = SampleTime(from+limit, rate)
 	}
 	var out []container.Chapter
 	for i, ch := range chapters {
@@ -178,14 +178,17 @@ func chapterEnd(chapters []container.Chapter, i int) time.Duration {
 	return -1
 }
 
-// sampleTime is sample n's position on a stream's clock at rate.
+// SampleTime is sample n's position on a stream's clock at rate. It is the
+// shared overflow-safe sample-to-duration converter: Slice's chapter retiming
+// here and a merge's chapter offsets (internal/jobs) both place samples on a
+// clock, and both must round the same way.
 //
 // The division is split so the whole-second part stays exact at any stream
 // length: the direct n*time.Second/rate overflows an int64 past about 53
 // hours at 48 kHz, and a long file is exactly the kind that carries chapters.
 // What is left rounds toward zero, below the nanosecond the Duration itself
 // resolves.
-func sampleTime(n int64, rate int) time.Duration {
+func SampleTime(n int64, rate int) time.Duration {
 	sec, rem := n/int64(rate), n%int64(rate)
 	return time.Duration(sec)*time.Second + time.Duration(rem)*time.Second/time.Duration(rate)
 }
@@ -616,6 +619,95 @@ type ConcatOptions struct {
 // which is the wire field's name and not an identifier in the tree.)
 const maxCrossfadeBytes = 16 << 20
 
+// concatLayout is the single walk every timeline-shape function reads from,
+// so the length a plan projects, the offsets a run seeks to, and the
+// boundaries the wire reports are one arithmetic rather than three copies of
+// it that agree only by inspection. ConcatTrack reads env+total, Concat reads
+// starts+lens to rebase positions, and ConcatBoundaries maps starts+lens onto
+// the wire.
+//
+// It owns the whole of what a timeline's shape is: the envelope format, the
+// per-member normalized lengths, the crossfade refusals, and the start
+// recurrence. The rationale for each of those choices lives on ConcatTrack,
+// the public function whose returned track this produces.
+//
+// starts has len(tracks)+1 entries: starts[i] is member i's first sample and
+// starts[len(tracks)] is the whole timeline's length, which equals total.
+// lens[i] is member i's own normalized length; under a crossfade the two
+// differ, since starts[i+1]-starts[i] is lens[i]-X while member i still
+// occupies lens[i] samples (see the concat struct's field docs).
+func concatLayout(tracks []container.Track, opts ConcatOptions) (env audio.Format, lens, starts []int64, total int64, err error) {
+	if len(tracks) == 0 {
+		return audio.Format{}, nil, nil, 0, waxerr.New(waxerr.CodeInvalidRequest,
+			"waxflow: a timeline needs at least one member")
+	}
+	env = audio.Format{Type: audio.Int}
+	for i, t := range tracks {
+		if err := t.Fmt.Valid(); err != nil {
+			return audio.Format{}, nil, nil, 0, waxerr.Wrap(waxerr.CodeUnsupportedFormat,
+				fmt.Sprintf("waxflow: timeline member %d", i), err)
+		}
+		if t.Samples < 0 {
+			return audio.Format{}, nil, nil, 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+				"waxflow: timeline member %d has no declared length; measure it before planning a timeline", i))
+		}
+		env.Rate = max(env.Rate, t.Fmt.Rate)
+		env.Channels = max(env.Channels, t.Fmt.Channels)
+		env.BitDepth = max(env.BitDepth, t.Fmt.BitDepth)
+		if t.Fmt.Type == audio.Float {
+			env.Type = audio.Float
+		}
+	}
+	if env.Type == audio.Float {
+		env.BitDepth = 32
+	}
+	env.Layout = audio.DefaultLayout(env.Channels)
+
+	// The envelope's layout has to be the conventional one, because that is
+	// the only layout the mix node targets: a member with fewer channels is
+	// mixed up to audio.DefaultLayout(env.Channels), so any other envelope
+	// layout would be one no normalized member could reach. A member that
+	// already has the envelope's channel count runs no mix and keeps its own
+	// layout, so its layout has to match already. That is true of every
+	// layout the decoders produce; a WAVEFORMATEXTENSIBLE mask naming some
+	// other pair of speakers is the one case it is not, and it is refused by
+	// name rather than relabelled, since calling a back-left channel
+	// front-right is a silent lie about what the file says it holds.
+	for i, t := range tracks {
+		if t.Fmt.Channels == env.Channels && t.Fmt.Layout != env.Layout {
+			return audio.Format{}, nil, nil, 0, waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
+				"waxflow: timeline member %d lays its %d channels out as %v, not the conventional %v; "+
+					"a timeline normalizes channel counts, not speaker assignments",
+				i, t.Fmt.Channels, t.Fmt.Layout, env.Layout))
+		}
+	}
+
+	lens = make([]int64, len(tracks))
+	starts = make([]int64, len(tracks)+1)
+	for i, t := range tracks {
+		lens[i] = concatMemberSamples(t, env)
+		total += lens[i]
+		// The next member begins where this one's tail zone does, which is X
+		// before this one ends: the two share that region. The last member
+		// carries no tail, so it contributes its whole length and starts[N] is
+		// the total below. Running starts[i+1] = starts[i] + lens[i] - X through
+		// the last hop instead would leave the timeline X short of its own track.
+		tail := int64(0)
+		if i < len(tracks)-1 {
+			tail = opts.Crossfade
+		}
+		starts[i+1] = starts[i] + lens[i] - tail
+	}
+	if err := checkCrossfade(lens, env, opts.Crossfade); err != nil {
+		return audio.Format{}, nil, nil, 0, err
+	}
+	// One zone per seam, and there are N-1 seams. Subtracted after every
+	// member's own ceil, so the sum-of-ceils the members produce is untouched;
+	// starts[N] already carries the same subtraction, so the two agree.
+	total -= int64(len(tracks)-1) * opts.Crossfade
+	return env, lens, starts, total, nil
+}
+
 // ConcatTrack computes the synthetic track a Concat of these members
 // presents: the common (envelope) format, the summed normalized length, and
 // no gapless trims. It is a pure function of the headers, so planning and
@@ -652,78 +744,70 @@ const maxCrossfadeBytes = 16 << 20
 // why concatenation is sample-exact, and a nonzero trim here would make a
 // downstream consumer trim a second time.
 //
-// It takes the options because it is the single funnel and a crossfade
-// changes the length: opts.Crossfade shortens the total by X per seam, and
-// every refusal a crossfade needs lives here so that planning a timeline and
-// running one refuse the same requests for the same reasons.
+// It takes the options because concatLayout is the single funnel and a
+// crossfade changes the length: opts.Crossfade shortens the total by X per
+// seam, and every refusal a crossfade needs lives in concatLayout so that
+// planning a timeline and running one refuse the same requests for the same
+// reasons.
 func ConcatTrack(tracks []container.Track, opts ConcatOptions) (container.Track, error) {
-	if len(tracks) == 0 {
-		return container.Track{}, waxerr.New(waxerr.CodeInvalidRequest,
-			"waxflow: a timeline needs at least one member")
-	}
-	env := audio.Format{Type: audio.Int}
-	for i, t := range tracks {
-		if err := t.Fmt.Valid(); err != nil {
-			return container.Track{}, waxerr.Wrap(waxerr.CodeUnsupportedFormat,
-				fmt.Sprintf("waxflow: timeline member %d", i), err)
-		}
-		if t.Samples < 0 {
-			return container.Track{}, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
-				"waxflow: timeline member %d has no declared length; measure it before planning a timeline", i))
-		}
-		env.Rate = max(env.Rate, t.Fmt.Rate)
-		env.Channels = max(env.Channels, t.Fmt.Channels)
-		env.BitDepth = max(env.BitDepth, t.Fmt.BitDepth)
-		if t.Fmt.Type == audio.Float {
-			env.Type = audio.Float
-		}
-	}
-	if env.Type == audio.Float {
-		env.BitDepth = 32
-	}
-	env.Layout = audio.DefaultLayout(env.Channels)
-
-	// The envelope's layout has to be the conventional one, because that is
-	// the only layout the mix node targets: a member with fewer channels is
-	// mixed up to audio.DefaultLayout(env.Channels), so any other envelope
-	// layout would be one no normalized member could reach. A member that
-	// already has the envelope's channel count runs no mix and keeps its own
-	// layout, so its layout has to match already. That is true of every
-	// layout the decoders produce; a WAVEFORMATEXTENSIBLE mask naming some
-	// other pair of speakers is the one case it is not, and it is refused by
-	// name rather than relabelled, since calling a back-left channel
-	// front-right is a silent lie about what the file says it holds.
-	for i, t := range tracks {
-		if t.Fmt.Channels == env.Channels && t.Fmt.Layout != env.Layout {
-			return container.Track{}, waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
-				"waxflow: timeline member %d lays its %d channels out as %v, not the conventional %v; "+
-					"a timeline normalizes channel counts, not speaker assignments",
-				i, t.Fmt.Channels, t.Fmt.Layout, env.Layout))
-		}
-	}
-
-	lens := make([]int64, len(tracks))
-	var total int64
-	for i, t := range tracks {
-		lens[i] = concatMemberSamples(t, env)
-		total += lens[i]
-	}
-	if err := checkCrossfade(lens, env, opts.Crossfade); err != nil {
+	env, _, _, total, err := concatLayout(tracks, opts)
+	if err != nil {
 		return container.Track{}, err
 	}
-	// One zone per seam, and there are N-1 seams. Subtracted after every
-	// member's own ceil, so the sum-of-ceils the members produce is untouched.
-	total -= int64(len(tracks)-1) * opts.Crossfade
+	return concatSynthetic(env, total), nil
+}
+
+// concatSynthetic is the track ConcatTrack returns and the track a Concat
+// reports as its own, built in one place so the two cannot describe different
+// audio. Samples is authoritative rather than advisory, so SamplesExact is
+// honest: Concat holds every member to its declared length and fails the run
+// instead of delivering some other count.
+func concatSynthetic(env audio.Format, total int64) container.Track {
 	return container.Track{
-		Codec: codec.PCM,
-		Fmt:   env,
-		// Samples is authoritative rather than advisory, so SamplesExact is
-		// honest: Concat holds every member to its declared length and fails
-		// the run instead of delivering some other count.
+		Codec:        codec.PCM,
+		Fmt:          env,
 		Samples:      total,
 		SamplesExact: true,
 		Default:      true,
-	}, nil
+	}
+}
+
+// MemberBoundary is one member's place on a concatenated timeline. Both fields
+// are in samples at the envelope rate (the timeline's normalized rate,
+// reported alongside as the envelope rate). OffsetSamples is the member's
+// actual start on the timeline; DurationSamples is its own raw normalized
+// length.
+//
+// Under a crossfade of X, consecutive members OVERLAP: member i occupies
+// [OffsetSamples, OffsetSamples+DurationSamples), which runs X past where
+// member i+1 begins, so OffsetSamples+DurationSamples can exceed the next
+// member's OffsetSamples and sum(DurationSamples) is total + (N-1)X, not total.
+// Only at X=0 do the members tile without overlap.
+type MemberBoundary struct {
+	OffsetSamples   int64 `json:"offsetSamples"`
+	DurationSamples int64 `json:"durationSamples"`
+}
+
+// ConcatBoundaries reports where each member lands on the concatenated
+// timeline and how long it is, from the members' headers alone (no decode, no
+// open), plus the envelope format the offsets are measured on. It reads the
+// same concatLayout ConcatTrack and Concat read, so a boundary reported here
+// is the position the run actually plays.
+//
+// The offsets are actual timeline positions and overlap under a crossfade; see
+// MemberBoundary for the contract, which is pinned from the first release so a
+// consumer does not build on a meaning that changes when a crossfade is
+// threaded to the wire.
+func ConcatBoundaries(tracks []container.Track, opts ConcatOptions) ([]MemberBoundary, audio.Format, error) {
+	env, lens, starts, _, err := concatLayout(tracks, opts)
+	if err != nil {
+		return nil, audio.Format{}, err
+	}
+	bounds := make([]MemberBoundary, len(tracks))
+	for i := range tracks {
+		bounds[i] = MemberBoundary{OffsetSamples: starts[i], DurationSamples: lens[i]}
+	}
+	return bounds, env, nil
 }
 
 // checkCrossfade holds a crossfade to what the members and the envelope can
@@ -845,34 +929,18 @@ func Concat(members []ConcatSource, opts ConcatOptions) (format.Media, error) {
 		}
 		tracks[i] = members[i].Track
 	}
-	env, err := ConcatTrack(tracks, opts)
+	env, lens, starts, total, err := concatLayout(tracks, opts)
 	if err != nil {
 		return nil, err
-	}
-	starts := make([]int64, len(members)+1)
-	lens := make([]int64, len(members))
-	for i, t := range tracks {
-		lens[i] = concatMemberSamples(t, env.Fmt)
-		// The next member begins where this one's tail zone does, which is X
-		// before this one ends: the two share that region. The subtraction is
-		// this member's tail, so the last member (which has none) contributes
-		// its whole length and starts[N] is the total ConcatTrack computed.
-		// Running the naive starts[i+1] = starts[i] + lens[i] - X through the
-		// last hop instead would leave the timeline X short of its own track.
-		tail := int64(0)
-		if i < len(members)-1 {
-			tail = opts.Crossfade
-		}
-		starts[i+1] = starts[i] + lens[i] - tail
 	}
 	return &concat{
 		members: members,
 		tracks:  tracks,
 		opts:    opts,
-		fmt:     env.Fmt,
+		fmt:     env,
 		starts:  starts,
 		lens:    lens,
-		info:    &format.Info{Container: concatContainer, Tracks: []container.Track{env}},
+		info:    &format.Info{Container: concatContainer, Tracks: []container.Track{concatSynthetic(env, total)}},
 	}, nil
 }
 
