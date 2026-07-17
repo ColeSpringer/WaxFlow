@@ -3,8 +3,8 @@ module github.com/colespringer/waxflow/resolver
 go 1.26
 
 require (
-	github.com/colespringer/waxbin v0.0.0-20260714191434-6e2b7c2ffead
-	github.com/colespringer/waxflow v0.0.0-00010101000000-000000000000
+	github.com/colespringer/waxbin v0.0.0-20260717005251-9b4ccad6d8f7
+	github.com/colespringer/waxflow v0.0.0-20260716152333-d6c56fdb679e
 	github.com/colespringer/waxflow/cli v0.0.0-00010101000000-000000000000
 )
 
