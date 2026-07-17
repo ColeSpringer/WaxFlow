@@ -74,13 +74,14 @@ type Config struct {
 	AllowedOrigins []string
 
 	// Resolver opens source references. Nil means no roots (every source
-	// resolves not-found); the resolver flavor injects its own.
+	// resolves not-found); a build with a catalog resolver injects its
+	// own.
 	Resolver source.Resolver
 
-	// PIDSources advertises pid:<ULID> source support in /caps. The
-	// resolver flavor sets it when a catalog is wired; whether pid refs
-	// actually resolve is Resolver's business, this flag only keeps the
-	// capability surface honest.
+	// PIDSources advertises pid:<ULID> source support in /caps. A build
+	// with a catalog resolver sets it when a catalog is wired; whether
+	// pid refs actually resolve is Resolver's business, this flag only
+	// keeps the capability surface honest.
 	PIDSources bool
 
 	// SigningKeys enable signed playback URLs. Empty disables sig auth

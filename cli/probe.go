@@ -56,10 +56,10 @@ func newProbeCmd(flavor Flavor) *cobra.Command {
 // openSourceRef opens a probe/transcode input and returns it with its
 // extension hint. A plain argument is a local file path; a
 // source-scheme argument (pid:<ULID>, upload:<id>) resolves through the
-// same chain the daemon uses, so the resolver flavor probes and
-// transcodes straight from catalog references. Only those two literal
-// schemes get resolver treatment; everything else stays a filesystem
-// path (Windows drive letters also contain a colon).
+// same chain the daemon uses, so a build with a catalog resolver probes
+// and transcodes straight from catalog references. Only those two
+// literal schemes get resolver treatment; everything else stays a
+// filesystem path (Windows drive letters also contain a colon).
 //
 // cfg and logger are needed only for scheme-shaped args. Callers that
 // already resolved them (transcode) pass them in; nil resolves them on
@@ -82,7 +82,7 @@ func openSourceRef(cmd *cobra.Command, flavor Flavor, arg string, cfg *config.Co
 			return nil, "", nil, err
 		}
 	}
-	resolver, closeResolver, err := flavor.openResolver(*cfg, logger, false)
+	resolver, closeResolver, err := flavor.openResolver(cmd.Context(), *cfg, logger, false)
 	if err != nil {
 		return nil, "", nil, err
 	}

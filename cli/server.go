@@ -30,6 +30,13 @@ func newServerCmd(version string, flavor Flavor) *cobra.Command {
 		Short: "Run the WaxFlow daemon",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Signals are bound before anything opens, not just around
+			// serve: a Flavor's resolver can do real I/O at open time (a
+			// catalog's schema check, a connection pool), and a daemon
+			// wedged there must still answer Ctrl-C.
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+
 			cfg, err := resolveConfig(cmd)
 			if err != nil {
 				return err
@@ -42,7 +49,7 @@ func newServerCmd(version string, flavor Flavor) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			srvCfg, cleanup, err := buildServerConfig(cfg, version, logger, flavor)
+			srvCfg, cleanup, err := buildServerConfig(ctx, cfg, version, logger, flavor)
 			if err != nil {
 				return err
 			}
@@ -64,8 +71,6 @@ func newServerCmd(version string, flavor Flavor) *cobra.Command {
 			}
 			defer stopDebug()
 
-			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-			defer stop()
 			return serve(ctx, ln, srv, cfg, logger, version)
 		},
 	}
@@ -75,10 +80,10 @@ func newServerCmd(version string, flavor Flavor) *cobra.Command {
 }
 
 // buildServerConfig maps the file/env/flag configuration onto the server
-// package's dependencies: the resolver chain (roots plus the flavor's
+// package's dependencies: the resolver chain (roots plus the Flavor's
 // schemes), signing keys (auto-generated into dataDir on first run), and
 // resolved directories.
-func buildServerConfig(cfg config.Config, version string, logger *slog.Logger, flavor Flavor) (server.Config, func(), error) {
+func buildServerConfig(ctx context.Context, cfg config.Config, version string, logger *slog.Logger, flavor Flavor) (server.Config, func(), error) {
 	nop := func() {}
 	dataDir, err := cfg.ResolvedDataDir()
 	if err != nil {
@@ -104,7 +109,7 @@ func buildServerConfig(cfg config.Config, version string, logger *slog.Logger, f
 		signingKeys[i] = server.SigningKey{ID: k.ID, Secret: k.Secret}
 	}
 
-	resolver, closeResolver, err := flavor.openResolver(cfg, logger, true)
+	resolver, closeResolver, err := flavor.openResolver(ctx, cfg, logger, true)
 	if err != nil {
 		return server.Config{}, nop, err
 	}
@@ -124,6 +129,15 @@ func buildServerConfig(cfg config.Config, version string, logger *slog.Logger, f
 		return server.Config{}, nop, waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating scratchDir", err)
 	}
 
+	// A configured catalogDB is the inference for pid support, and it is
+	// exact for a resolver keyed on catalogDB. A resolver that knows
+	// better overrides it rather than let /caps guess at an out-of-tree
+	// build's schemes.
+	pidSources := cfg.CatalogDB != ""
+	if r, ok := resolver.(PIDSourceReporter); ok {
+		pidSources = r.PIDSources()
+	}
+
 	return server.Config{
 		Addr:                 cfg.ResolvedAddr(),
 		APIKeys:              cfg.APIKeys,
@@ -131,7 +145,7 @@ func buildServerConfig(cfg config.Config, version string, logger *slog.Logger, f
 		MetricsKey:           cfg.MetricsKey,
 		AllowedOrigins:       cfg.AllowedOrigins,
 		Resolver:             resolver,
-		PIDSources:           cfg.CatalogDB != "",
+		PIDSources:           pidSources,
 		SigningKeys:          signingKeys,
 		CacheDir:             cacheDir,
 		CacheMaxBytes:        cfg.ResolvedCacheMaxBytes(),

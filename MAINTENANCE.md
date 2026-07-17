@@ -136,12 +136,22 @@ across the ~30 targets; run it on a spare box, not CI).
 
 ## Release checklist (grows over time)
 
-- [ ] `make check` green (fmt, vet, functional + race passes, the cli /
-      resolver / oracletest module suites, depcheck)
+- [ ] `make check` green (fmt, vet, functional + race passes, the module
+      suites `test-cli` / `test-oracle` / `test-example`, depcheck)
 - [ ] `THIRD-PARTY-NOTICES.md` audited against the reference ledger
 - [ ] Root `go.mod` require block still empty (the v1.0 structural
-      guarantee; new dependencies belong in the cli, resolver, or
-      oracletest modules)
+      guarantee; new dependencies belong in the cli or oracletest
+      modules)
+- [ ] **No module here requires a module that requires waxflow.** This is
+      what keeps waxflow a leaf and the empty require block above
+      structural rather than aspirational. `resolver/` was the only one
+      that ever did (it required waxbin), and it was dropped 2026-07-17;
+      its last commit is `8bc7751` ("Update itemPIDs function to include
+      empty userPID in query"), so recovering that code is `git show
+      8bc7751:resolver/resolver.go`, not archaeology. Adding such a
+      module reopens the cycle risk this closed; the existing convention
+      that a new `go.mod` entry needs justification is where that gets
+      caught
 - [ ] `make soak` on a quiet box: streaming soak clean (no goroutine or
       heap growth), TTFA p95 targets met; update the README performance
       section if the numbers moved
@@ -151,30 +161,6 @@ across the ~30 targets; run it on a spare box, not CI).
       `make client-e2e` (automated browser cells) plus the manual
       checklists in docs/client-matrix.md (Apple, ExoPlayer, mpv);
       update the /caps profiles if any cell changed
-- [ ] `resolver/go.mod`: bump the waxbin pseudo-version (WaxBin publishes no
-      tags, so `@latest` resolves off its default branch). Never ship a
-      resolver behind the WaxBin whose catalog it reads: it opens read-only
-      and never migrates, so an older catalog is fine but a newer one is
-      refused outright (`catalog schema vN is newer than this build
-      supports`), failing `resolver.Open` at startup. Ahead is inert and safe
-- [ ] If WaxBin has started requiring WaxFlow (M26's analyze seams are what
-      unblock that), re-read `resolver/waxbin_e2e_test.go`'s result before
-      trusting it. `resolver/go.mod` ends with
-      `replace github.com/colespringer/waxflow => ../`, and a `replace` in the
-      main module applies build-wide rather than to that module's own imports:
-      so once waxbin requires waxflow, a resolver build resolves *waxbin's*
-      waxflow dependency to this local tree too, and that e2e test stops
-      testing waxbin against a released waxflow entirely. An incompatibility
-      between them would pass CI here and surface only downstream. There is no
-      way to scope a `replace`; verifying the pairing means building waxbin
-      outside this module
-
-  The tripwire it sits next to: there is no module cycle today (waxbin ->
-  waxflow root, waxflow/resolver -> waxbin, and `resolver` is a separate
-  module), and there is one the moment waxbin imports anything under
-  `waxflow/resolver`. Worth stating because the root module's empty require
-  block above is a declared v1.0 structural guarantee, and it holds only while
-  the dependency points at the root.
 - [ ] Tag `vX.Y.Z` pushed -> `release.yml` publishes binaries + SHA256SUMS +
       multi-arch image to ghcr.io
 - [ ] Container smoke: `docker run` + HEALTHCHECK healthy

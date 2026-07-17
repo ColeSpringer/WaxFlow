@@ -7,16 +7,10 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # the "stdlib-only codecs" promise.
 PUBLIC_PKGS := . ./waxerr ./audio ./dsp/... ./codec/... ./container/... ./format ./source ./server ./client
 
-.PHONY: build build-waxbin test test-race test-cli test-resolver test-oracle vet fmt fmt-check depcheck check docker docker-waxbin clean verify-vectors goldens bench encoder-quality fuzz opus-tools client-e2e hls-e2e soak
+.PHONY: build test test-race test-cli test-oracle test-example vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench encoder-quality fuzz opus-tools client-e2e hls-e2e soak
 
 build:
 	cd cli && CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o ../bin/waxflow ./cmd/waxflow
-
-# The WaxBin resolver flavor: the identical CLI with pid:<ULID> source
-# support, built from the nested resolver/ module (which is what keeps
-# WaxBin's SQLite dependency out of the main module's tree).
-build-waxbin:
-	cd resolver && CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o ../bin/waxflow-waxbin ./cmd/waxflow
 
 # The default loop: the whole suite without the race detector. The codecs and
 # DSP are single-goroutine numeric code, so -race there is a many-fold
@@ -37,18 +31,24 @@ test-race:
 
 # The nested modules: ./... at the root stops at their go.mod
 # boundaries, so each gets its own vet+test here and a dedicated CI
-# step. cli is the cobra/waxlabel binary module, resolver the WaxBin
-# flavor (race included: the poll loop is concurrent), oracletest the
+# step. cli is the cobra/waxlabel binary module, oracletest the
 # third-party-oracle tests (waxlabel round trips, go-mp3 differential)
 # that keep the root module's require block empty.
 test-cli:
 	cd cli && go vet ./... && go test -race -timeout 10m ./...
 
-test-resolver:
-	cd resolver && go vet ./... && go test -race -timeout 10m ./...
-
 test-oracle:
 	cd oracletest && go vet ./... && go test -timeout 10m ./...
+
+# The out-of-prefix canary, and the worked example a consumer copies.
+# Its module path is deliberately not under $(MODULE)/, so Go's internal
+# rule applies to it exactly as to any third-party module: it builds a
+# waxflow CLI through the cli.Flavor seam, and if that seam ever widens
+# back to an internal type this is the only thing in the tree that can
+# fail. The compile is the check; the test runs because an example that
+# has never executed is a poor reference.
+test-example:
+	cd examples/catalogcli && go vet ./... && go test -timeout 10m ./...
 
 vet:
 	go vet ./...
@@ -68,7 +68,7 @@ depcheck:
 		echo "$$bad"; exit 1; fi; \
 	echo "depcheck ok: public tree ($(PUBLIC_PKGS)) is stdlib-only"
 
-check: fmt-check vet test test-race test-cli test-resolver test-oracle depcheck
+check: fmt-check vet test test-race test-cli test-oracle test-example depcheck
 
 # Fetch the SHA-256-pinned conformance vectors into testdata/vectors
 # (CI-cached, never committed). Vector-gated tests self-skip until run;
@@ -150,10 +150,6 @@ hls-e2e: client-e2e
 
 docker:
 	docker build --build-arg VERSION=$(VERSION) -t waxflow:$(VERSION) .
-
-docker-waxbin:
-	docker build --build-arg VERSION=$(VERSION) --build-arg MAIN_PKG=./resolver/cmd/waxflow \
-		-t waxflow:$(VERSION)-waxbin .
 
 clean:
 	rm -rf bin dist

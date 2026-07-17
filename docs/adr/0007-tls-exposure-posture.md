@@ -23,7 +23,7 @@ make plaintext exposure the accidental default.
   posture, never a default on `0.0.0.0`.
 - The default `addr` is `127.0.0.1:4418`; only deployment layers (compose
   files) widen it to `0.0.0.0`.
-- Container hardening rides in the compose base layer: `cap_drop: [ALL]`,
+- Container hardening rides in `compose.yaml`: `cap_drop: [ALL]`,
   `no-new-privileges`, read-only rootfs with tmpfs scratch, non-root UID
   10001, distroless static runtime with no OS layer.
 

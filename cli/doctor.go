@@ -43,9 +43,10 @@ type doctorReport struct {
 // newDoctorCmd diagnoses the local environment a daemon would run in:
 // configuration resolves, every configured root opens and reads, the
 // cache/data/scratch directories accept writes, the WaxBin catalog opens
-// (flavor builds with catalogDB set), a quick self-bench confirms the box
-// transcodes faster than realtime, and the absence of ffmpeg is confirmed
-// to be fine. It never contacts a running daemon; that is `waxflow ping`.
+// (builds with a catalog resolver and catalogDB set), a quick self-bench
+// confirms the box transcodes faster than realtime, and the absence of
+// ffmpeg is confirmed to be fine. It never contacts a running daemon;
+// that is `waxflow ping`.
 func newDoctorCmd(flavor Flavor) *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
@@ -65,7 +66,7 @@ func newDoctorCmd(flavor Flavor) *cobra.Command {
 			checks := []doctorCheck{configCheck(cmd)}
 			checks = append(checks, rootChecks(cfg)...)
 			checks = append(checks, dirChecks(cfg)...)
-			checks = append(checks, catalogCheck(cfg, flavor, logger))
+			checks = append(checks, catalogCheck(cmd.Context(), cfg, flavor, logger))
 			checks = append(checks, benchChecks(cfg)...)
 			checks = append(checks, ffmpegCheck())
 
@@ -222,24 +223,27 @@ func writableDirCheck(name, dir string) doctorCheck {
 	return doctorCheck{Name: name, Status: "ok", Detail: dir + " writable"}
 }
 
-// catalogCheck opens the WaxBin catalog when one is configured. The
-// stock build fails loudly here, the same refusal the daemon gives; the
-// resolver flavor actually opens the database read-only (daemon=false,
-// so no poll goroutine starts).
-func catalogCheck(cfg config.Config, flavor Flavor, logger *slog.Logger) doctorCheck {
+// catalogCheck opens the WaxBin catalog when one is configured. A build
+// without a catalog resolver fails loudly here, the same refusal the
+// daemon gives; one with a resolver actually opens the database
+// read-only (daemon=false, so no background goroutine starts).
+func catalogCheck(ctx context.Context, cfg config.Config, flavor Flavor, logger *slog.Logger) doctorCheck {
 	if cfg.CatalogDB == "" {
 		detail := "no catalogDB configured"
 		if flavor.OpenResolver == nil {
-			detail += " (pid: sources need the waxbin flavor)"
+			detail += " (pid: sources need a build with a catalog resolver)"
 		}
 		return doctorCheck{Name: "catalog", Status: "skip", Detail: detail}
 	}
-	_, closeFn, err := flavor.openResolver(cfg, logger, false)
+	_, closeFn, err := flavor.openResolver(ctx, cfg, logger, false)
 	if err != nil {
 		return doctorCheck{Name: "catalog", Status: "fail", Detail: err.Error(), err: err}
 	}
 	closeFn()
-	return doctorCheck{Name: "catalog", Status: "ok", Detail: cfg.CatalogDB + " opens read-only"}
+	// How the catalog is opened (read-only, a pool, a lock) is the
+	// resolver's business, and it is out of tree; this check only knows
+	// that it accepted the configured catalog.
+	return doctorCheck{Name: "catalog", Status: "ok", Detail: cfg.CatalogDB + " opens"}
 }
 
 // benchChecks transcodes a short synthesized WAV through the same engine

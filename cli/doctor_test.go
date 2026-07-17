@@ -80,8 +80,8 @@ func TestDoctorFailsOnCatalogDBWithoutFlavor(t *testing.T) {
 	if !strings.Contains(out, "FAIL") || !strings.Contains(out, "catalog") {
 		t.Errorf("output missing FAIL catalog line:\n%s", out)
 	}
-	if !strings.Contains(out, "waxbin flavor") {
-		t.Errorf("catalog failure should point at the waxbin flavor:\n%s", out)
+	if !strings.Contains(out, "catalog resolver") {
+		t.Errorf("catalog failure should point at the missing catalog resolver:\n%s", out)
 	}
 }
 

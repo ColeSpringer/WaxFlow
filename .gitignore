@@ -1,6 +1,8 @@
 # build artifacts
 /bin/
 /dist/
+# `go build` in the example module drops its binary beside the source
+/examples/catalogcli/catalogcli
 
 # test/profile droppings
 *.test

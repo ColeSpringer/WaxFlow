@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -52,12 +51,12 @@ func (f fakePIDResolver) Resolve(ctx context.Context, ref string) (*source.File,
 
 func TestFlavorVersionOutput(t *testing.T) {
 	var out, errOut strings.Builder
-	code := ExecuteFlavor("test", []string{"version"}, &out, &errOut, Flavor{Name: "waxbin"})
+	code := ExecuteFlavor("test", []string{"version"}, &out, &errOut, Flavor{Name: "catalog"})
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr: %s", code, errOut.String())
 	}
-	if !strings.HasPrefix(out.String(), "waxflow-waxbin test ") {
-		t.Errorf("output = %q, want prefix %q", out.String(), "waxflow-waxbin test ")
+	if !strings.HasPrefix(out.String(), "waxflow-catalog test ") {
+		t.Errorf("output = %q, want prefix %q", out.String(), "waxflow-catalog test ")
 	}
 }
 
@@ -69,8 +68,8 @@ func TestStockBuildRefusesCatalogDB(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit = %d, want 2 (invalid-request); stderr: %s", code, stderr)
 	}
-	if !strings.Contains(stderr, "waxbin flavor") {
-		t.Errorf("stderr = %q, want a pointer at the waxbin flavor", stderr)
+	if !strings.Contains(stderr, "catalog resolver") {
+		t.Errorf("stderr = %q, want a pointer at the missing catalog resolver", stderr)
 	}
 }
 
@@ -86,12 +85,24 @@ func TestFlavorSignsPIDSource(t *testing.T) {
 	}
 	t.Setenv("WAXFLOW_DATA_DIR", dataDir)
 	flavor := Flavor{
-		Name: "waxbin",
-		OpenResolver: func(_ config.Config, next source.Resolver, _ *slog.Logger, daemon bool) (source.Resolver, io.Closer, error) {
-			if daemon {
+		Name: "catalog",
+		OpenResolver: func(_ context.Context, o ResolverOptions) (source.Resolver, io.Closer, error) {
+			if o.Daemon {
 				t.Error("sign is a one-shot command; daemon must be false")
 			}
-			return fakePIDResolver{next: next, path: path}, nil, nil
+			// The rest of ResolverOptions is contract too: an
+			// implementation that defaults a missing MaxBytes or Logger
+			// would never notice the CLI dropping them.
+			if o.MaxBytes <= 0 {
+				t.Errorf("MaxBytes = %d, want the resolved source cap", o.MaxBytes)
+			}
+			if o.Logger == nil {
+				t.Error("Logger is nil; the godoc promises it never is")
+			}
+			if o.Next == nil {
+				t.Error("Next is nil; implementations delegate to it")
+			}
+			return fakePIDResolver{next: o.Next, path: path}, nil, nil
 		},
 	}
 	var out, errOut strings.Builder
@@ -104,6 +115,104 @@ func TestFlavorSignsPIDSource(t *testing.T) {
 		if !strings.Contains(url, want) {
 			t.Errorf("minted URL missing %q: %s", want, url)
 		}
+	}
+}
+
+// TestFlavorNilResolverIsAnError pins the refusal for a broken
+// out-of-tree implementation: returning no resolver and no error must
+// surface as a named error, not a nil-interface panic at first use.
+func TestFlavorNilResolverIsAnError(t *testing.T) {
+	t.Setenv("WAXFLOW_DATA_DIR", t.TempDir())
+	flavor := Flavor{
+		Name: "broken",
+		OpenResolver: func(context.Context, ResolverOptions) (source.Resolver, io.Closer, error) {
+			return nil, nil, nil
+		},
+	}
+	var out, errOut strings.Builder
+	code := ExecuteFlavor("test", []string{"sign", "--src", "pid:01ARZ3NDEKTSV4RRFFQ69G5FAV"}, &out, &errOut, flavor)
+	if code == 0 {
+		t.Fatalf("exit = 0 with a nil resolver; stdout: %s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "nil resolver") {
+		t.Errorf("stderr = %q, want it to name the nil resolver", errOut.String())
+	}
+}
+
+// pidReporter is a resolver that declares its pid support outright,
+// the way an out-of-tree build not keyed on catalogDB must.
+type pidReporter struct {
+	source.Resolver
+	pid bool
+}
+
+func (p pidReporter) PIDSources() bool { return p.pid }
+
+// TestBuildServerConfigPIDSources pins what /caps advertises: the
+// catalogDB inference by default, and the resolver's own answer when it
+// has one.
+func TestBuildServerConfigPIDSources(t *testing.T) {
+	tests := []struct {
+		name      string
+		catalogDB string
+		resolver  func(next source.Resolver) source.Resolver
+		want      bool
+	}{
+		{
+			name:     "no catalogDB, no reporter: inferred off",
+			resolver: func(next source.Resolver) source.Resolver { return next },
+			want:     false,
+		},
+		{
+			name:      "catalogDB set, no reporter: inferred on",
+			catalogDB: "/tmp/waxbin.db",
+			resolver:  func(next source.Resolver) source.Resolver { return next },
+			want:      true,
+		},
+		{
+			// The case the inference cannot reach: pid served from
+			// somewhere that is not catalogDB.
+			name:     "no catalogDB, reporter says yes: advertised",
+			resolver: func(next source.Resolver) source.Resolver { return pidReporter{next, true} },
+			want:     true,
+		},
+		{
+			name:      "catalogDB set, reporter says no: not advertised",
+			catalogDB: "/tmp/waxbin.db",
+			resolver:  func(next source.Resolver) source.Resolver { return pidReporter{next, false} },
+			want:      false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("WAXFLOW_DATA_DIR", filepath.Join(dir, "data"))
+			t.Setenv("WAXFLOW_CACHE_DIR", filepath.Join(dir, "cache"))
+			t.Setenv("WAXFLOW_SCRATCH_DIR", filepath.Join(dir, "scratch"))
+			cfg, err := config.Load("", os.LookupEnv)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.CatalogDB = tc.catalogDB
+			logger, err := newLogger(&strings.Builder{}, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			flavor := Flavor{
+				Name: "catalog",
+				OpenResolver: func(_ context.Context, o ResolverOptions) (source.Resolver, io.Closer, error) {
+					return tc.resolver(o.Next), nil, nil
+				},
+			}
+			srvCfg, cleanup, err := buildServerConfig(context.Background(), cfg, "test", logger, flavor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cleanup()
+			if srvCfg.PIDSources != tc.want {
+				t.Errorf("PIDSources = %v, want %v", srvCfg.PIDSources, tc.want)
+			}
+		})
 	}
 }
 

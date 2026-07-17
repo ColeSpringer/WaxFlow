@@ -18,8 +18,8 @@
 //
 // The codec/DSP tree is stdlib-only, enforced in CI by `make depcheck`
 // and structurally by this module's empty require block; the CLI/daemon
-// binary (cobra + waxlabel) lives in the nested cli/ module, the WaxBin
-// resolver flavor in resolver/, and third-party-oracle tests in
-// oracletest/. See docs/adr/ for the architecture decision records that
-// pin the invariants this module promises.
+// binary (cobra + waxlabel) lives in the nested cli/ module, and the
+// third-party-oracle tests in oracletest/. See docs/adr/ for the
+// architecture decision records that pin the invariants this module
+// promises.
 package waxflow

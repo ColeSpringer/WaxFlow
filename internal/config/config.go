@@ -75,13 +75,21 @@ type Config struct {
 	Roots []Root `json:"roots"`
 
 	// CatalogDB is the path of a WaxBin catalog database, opened
-	// read-only to resolve pid:<ULID> source references. Only the WaxBin
-	// resolver flavor serves it; the stock build refuses it loudly,
-	// rather than silently ignoring a capability the operator asked for,
-	// everywhere configuration is resolved: the server, sign, and any
-	// one-shot given a pid: or upload: ref. One-shots on plain paths
-	// never read configuration at all (a broken config file must not
-	// fail probing a local file), so they neither honor nor refuse it.
+	// read-only to resolve pid:<ULID> source references. No build here
+	// resolves them: this field is the hand-off point to the code that
+	// does. It exists so a build injecting a catalog resolver through
+	// cli.Flavor reads its catalog path from the family's normal
+	// precedence chain (flag > env > JSON file) instead of reinventing
+	// configuration; cli.ResolverOptions.CatalogDB is what carries it
+	// across the seam.
+	//
+	// A build without such a resolver refuses a configured CatalogDB
+	// loudly, rather than silently ignoring a capability the operator
+	// asked for, everywhere configuration is resolved: the server, sign,
+	// and any one-shot given a pid: or upload: ref. One-shots on plain
+	// paths never read configuration at all (a broken config file must
+	// not fail probing a local file), so they neither honor nor refuse
+	// it.
 	CatalogDB string `json:"catalogDB"`
 
 	// APIKeys are the control-API keys. With none configured, a

@@ -48,8 +48,8 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   audio library; its `go.mod` has an **empty require block**, so
   importing `codec/flac` (or any public package) pulls in nothing.
   The CLI/daemon binary lives in the nested `cli/` module (cobra +
-  waxlabel), the WaxBin flavor in `resolver/`, and the tests that need
-  third-party oracles in `oracletest/`.
+  waxlabel), the tests that need third-party oracles in `oracletest/`,
+  and a worked example of extending the CLI in `examples/catalogcli/`.
 
 ## Performance
 
@@ -112,7 +112,7 @@ Precedence: **flag > `WAXFLOW_*` env > JSON config file > default**
 | `addr` | `WAXFLOW_ADDR` | `127.0.0.1:4418` | listen address (compose widens to `0.0.0.0`) |
 | `logLevel` | `WAXFLOW_LOG_LEVEL` | `info` | `debug`\|`info`\|`warn`\|`error` |
 | `roots` | `WAXFLOW_ROOTS` | none | named library roots; JSON `[{"name","path"}]`, env `name=path,name2=path2`; each opened via `os.Root` (no escape, symlinks confined), files validated regular and size-capped |
-| `catalogDB` | `WAXFLOW_CATALOG_DB` | none | WaxBin catalog SQLite path, opened read-only for `pid:<ULID>` source references. Waxbin flavor only: the stock server refuses to start with it set (one-shots on plain paths never read config, so they neither honor nor refuse it) |
+| `catalogDB` | `WAXFLOW_CATALOG_DB` | none | WaxBin catalog path for `pid:<ULID>` source references, read by a build that injects a catalog resolver (see [`pid:` sources](#pid-sources)). No build here serves it: this server refuses to start with it set (one-shots on plain paths never read config, so they neither honor nor refuse it) |
 | `apiKeys` | `WAXFLOW_API_KEYS` | none | control-API keys (comma-separated in env). **Fail closed**: required on a non-loopback `addr` unless `allowUnauthenticated` |
 | `allowUnauthenticated` | `WAXFLOW_ALLOW_UNAUTHENTICATED` | `false` | explicit opt-in to keyless on non-loopback |
 | `sourceMaxBytes` | `WAXFLOW_SOURCE_MAX_BYTES` | 4 GiB | per-source open cap |
@@ -158,9 +158,10 @@ Precedence: **flag > `WAXFLOW_*` env > JSON config file > default**
 - `waxflow cache stats|gc`: inspect or evict a running daemon's cache
 - `waxflow doctor`: check the local environment a daemon needs: config
   resolves, every root opens and reads, the cache/data/scratch dirs
-  accept writes, the WaxBin catalog opens (flavor builds), a quick
-  self-bench transcodes faster than realtime, and the absence of ffmpeg
-  is confirmed to be fine (`--json` for the machine shape)
+  accept writes, the WaxBin catalog opens (builds with a catalog
+  resolver), a quick self-bench transcodes faster than realtime, and the
+  absence of ffmpeg is confirmed to be fine (`--json` for the machine
+  shape)
 - `waxflow ping`: liveness probe; the container HEALTHCHECK
 - `waxflow version`: version and build info
 - `waxflow exit-codes`: print the documented exit-code contract (0 ok,
@@ -169,29 +170,24 @@ Precedence: **flag > `WAXFLOW_*` env > JSON config file > default**
 
 The HTTP surface is documented in [docs/api.md](docs/api.md).
 
-## WaxBin resolver flavor
+## `pid:` sources
 
-`ghcr.io/colespringer/waxflow:latest-waxbin` (or `make build-waxbin`) is
-the identical CLI with one addition: `pid:<ULID>` source references
-resolve against a WaxBin catalog. Point `catalogDB` at WaxBin's
-database (created by WaxBin first; opened read-only, never taking
-WaxBin's write lock) and every surface that accepts a source reference
-accepts `pid:`: `/stream`, `/probe`, `/sign`, jobs, HLS, plus `waxflow
-probe|transcode|sign` on the command line. `/caps` reports it as
-`delivery.pid`.
+`pid:<ULID>` names an item in a WaxBin catalog. **No build here resolves
+one**: WaxFlow ships no catalog code and no database dependency, so every
+build in this repo answers `pid:` with `501 unsupported-source`.
 
-Resolved paths are cached and the catalog's change feed is polled every
-5 seconds, so a rename or move by WaxBin's organizer is picked up
-within one poll (a stale path self-heals immediately on the next
-request). Signed URLs pin bytes, not locations: a rename does not kill
-them, while replaced content still dies with `410 source-changed`.
-`compose.full.yaml` runs this flavor against WaxBin's volumes; note the
-catalog directory mounts writable because SQLite WAL readers write
-read-marks into the `-shm` sidecar, even though the database itself is
-opened read-only.
+A build that wants them injects a catalog resolver through the
+`cli.Flavor` seam (`cli/root.go`), whose `OpenResolver` hook wraps the
+library roots with extra source schemes; `catalogDB` is the configuration
+field carried across it. `examples/catalogcli/` is a working CLI built
+that way, and the module to copy from. Once such a build resolves `pid:`,
+every surface that takes a source reference accepts it (`/stream`,
+`/probe`, `/sign`, jobs, HLS, plus `waxflow probe|transcode|sign`), and
+`/caps` reports `delivery.pid`.
 
-The flavor lives in the nested module `resolver/`, which is what keeps
-WaxBin's SQLite dependency out of the main module's tree.
+What holds regardless of who resolves them: signed URLs pin bytes, not
+locations, so a catalog rename or move does not kill a minted URL, while
+replaced content still dies with `410 source-changed`.
 
 ## Non-goals for v1.0
 
@@ -209,8 +205,8 @@ make check           # gofmt + vet + test + test-race + nested modules + depchec
 make test            # root-module suite, no race detector (the fast default loop)
 make test-race       # race detector over the root module (heavy numeric suites self-skip)
 make test-cli        # the cli module (cobra CLI + waxlabel mapper), race included
-make test-resolver   # the WaxBin resolver flavor module, race included
 make test-oracle     # the third-party-oracle tests (waxlabel round trips, go-mp3)
+make test-example    # examples/catalogcli: the out-of-prefix cli.Flavor canary
 make soak            # 30m streaming soak + load + TTFA percentiles (nightly-scale)
 make client-e2e      # browser client-matrix cells via Playwright (gated tooling)
 make docker          # local image build

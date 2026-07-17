@@ -4,26 +4,16 @@ FROM golang:1.26-bookworm AS build
 WORKDIR /src
 COPY go.mod ./
 COPY cli/go.mod cli/go.sum cli/
-COPY resolver/go.mod resolver/go.sum resolver/
 RUN --mount=type=cache,target=/go/pkg/mod cd cli && go mod download
 COPY . .
 ARG VERSION=dev
-# MAIN_PKG selects the entry point: ./cli/cmd/waxflow (stock) or
-# ./resolver/cmd/waxflow (the "-waxbin" flavor). Both mains live in
-# nested modules (the root module is the dependency-free codec tree),
-# so each builds from inside its own directory and downloads its own
-# dependencies (cheap via the cache mount).
-ARG MAIN_PKG=./cli/cmd/waxflow
+# The binary lives in the nested cli/ module (the root module is the
+# dependency-free codec tree), so it builds from inside that directory.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    case "${MAIN_PKG}" in \
-      ./resolver/*) cd resolver && go mod download && pkg=".${MAIN_PKG#./resolver}" ;; \
-      ./cli/*) cd cli && pkg=".${MAIN_PKG#./cli}" ;; \
-      *) pkg="${MAIN_PKG}" ;; \
-    esac && \
-    CGO_ENABLED=0 go build -trimpath \
+    cd cli && CGO_ENABLED=0 go build -trimpath \
     -ldflags "-s -w -X main.version=${VERSION}" \
-    -o /out/waxflow ${pkg}
+    -o /out/waxflow ./cmd/waxflow
 # Pre-owned state dirs: distroless has no shell to mkdir/chown, and named
 # volumes inherit the image directory's ownership (UID 10001, see below).
 RUN mkdir -p /out/state/data /out/state/cache && chown -R 10001:10001 /out/state

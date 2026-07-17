@@ -46,11 +46,11 @@ jobs:
 
   # The nested modules: ./... at the root stops at their go.mod
   # boundaries, so each builds and tests here. cli carries the cobra
-  # CLI plus the waxlabel mapper, resolver the WaxBin flavor (its suite
-  # includes the real-WaxBin integration tests; the catalog is authored
-  # through the waxbin library over temp files, no external services),
-  # and oracletest the third-party-oracle tests that keep the root
-  # module's require block empty.
+  # CLI plus the waxlabel mapper, oracletest the third-party-oracle
+  # tests that keep the root module's require block empty, and
+  # examples/catalogcli the out-of-prefix canary over the cli.Flavor
+  # seam (its module path sits outside the waxflow prefix, so it is the
+  # only thing here that fails if that seam widens to an internal type).
   nested-modules:
     runs-on: ubuntu-latest
     steps:
@@ -59,10 +59,9 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
       - run: make test-cli
-      - run: make test-resolver
       - run: make test-oracle
+      - run: make test-example
       - run: make build
-      - run: make build-waxbin
 
   cross-compile:
     runs-on: ubuntu-latest
@@ -94,14 +93,6 @@ jobs:
           push: false
           build-args: |
             VERSION=ci
-      - name: build waxbin flavor image (no push)
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          push: false
-          build-args: |
-            VERSION=ci
-            MAIN_PKG=./resolver/cmd/waxflow
 
   # ffmpeg is a TEST ORACLE only, never a runtime dependency.
   # WAXFLOW_REQUIRE_FFMPEG=1 and WAXFLOW_REQUIRE_FLAC=1 escalate the

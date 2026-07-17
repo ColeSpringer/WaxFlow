@@ -4,12 +4,12 @@
 //
 //	<root>/<relative/path>   a file under a configured library root
 //	upload:<id>              a spooled one-shot upload (with the job store)
-//	pid:<ULID>               a WaxBin catalog identifier (resolver flavor)
+//	pid:<ULID>               a WaxBin catalog identifier (catalog resolver)
 //
-// The Resolver interface is public so the nested resolver module can
-// implement the pid form against a WaxBin catalog; the main module ships
-// Roots, which serves the first form and rejects the schemes it does not
-// know with waxerr.CodeUnsupportedSource (HTTP 501).
+// The Resolver interface is public so a build that injects a catalog
+// resolver can implement the pid form against a WaxBin catalog; this
+// module ships Roots, which serves the first form and rejects the
+// schemes it does not know with waxerr.CodeUnsupportedSource (HTTP 501).
 //
 // Every resolved file carries an Identity (size plus mtime in
 // nanoseconds), the same identity that signed URLs embed (ADR-0003) and
@@ -132,7 +132,7 @@ func unsupportedScheme(s string) error {
 	case "upload":
 		return waxerr.New(waxerr.CodeUnsupportedSource, "source: upload references need the daemon's upload spool (uploads are disabled here)")
 	case "pid":
-		return waxerr.New(waxerr.CodeUnsupportedSource, "source: pid references require the WaxBin resolver flavor")
+		return waxerr.New(waxerr.CodeUnsupportedSource, "source: pid references require a build with a catalog resolver")
 	default:
 		return waxerr.New(waxerr.CodeUnsupportedSource, fmt.Sprintf("source: unknown source scheme %q", s))
 	}

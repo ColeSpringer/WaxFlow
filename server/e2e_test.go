@@ -305,7 +305,7 @@ func TestAuthMatrix(t *testing.T) {
 	wantEnvelope(t, resp, http.StatusUnauthorized, waxerr.CodeUnauthorized)
 }
 
-// downCatalog stands in for the resolver flavor with an unreachable
+// downCatalog stands in for a catalog resolver with an unreachable
 // catalog: every resolve fails catalog-unavailable.
 type downCatalog struct{}
 

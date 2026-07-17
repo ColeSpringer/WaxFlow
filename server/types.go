@@ -284,7 +284,7 @@ type CapsDelivery struct {
 	Jobs       bool     `json:"jobs"`
 	Uploads    bool     `json:"uploads"`
 	// PID: pid:<ULID> source references resolve against a WaxBin
-	// catalog (the resolver flavor with catalogDB configured).
+	// catalog (a catalog resolver with catalogDB configured).
 	PID bool `json:"pid"`
 	// Timelines: POST /hls/timeline mints multi-source timelines, which the
 	// tl= parameter then streams gaplessly. MaxTimelineMembers bounds one.

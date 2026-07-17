@@ -126,9 +126,9 @@ byte-identical to `waxflow probe --json`.
 
 Source references (`src`): `<root>/<relative/path>` under a configured
 library root; `upload:<id>` for a spooled one-shot upload (POST
-/uploads); `pid:<ULID>` for a WaxBin catalog item, served by the waxbin
-flavor with `catalogDB` configured (`delivery.pid` in `/caps`) and `501
-unsupported-source` everywhere else. A pid reference re-resolves to the
+/uploads); `pid:<ULID>` for a WaxBin catalog item, served by a build with
+a catalog resolver and `catalogDB` configured (`delivery.pid` in
+`/caps`) and `501 unsupported-source` everywhere else. A pid reference re-resolves to the
 item's current path on every request, so catalog renames and moves are
 transparent: the source identity pins bytes, not locations.
 
@@ -486,7 +486,8 @@ Capability-gated: only what works is listed. `delivery.jobs` and
 `delivery.uploads` report whether this daemon runs with a job store and
 an upload spool (the CLI daemon always does; a bare library embedding
 may not). `delivery.pid` reports whether `pid:<ULID>` source references
-resolve against a WaxBin catalog (the waxbin flavor with `catalogDB`).
+resolve against a WaxBin catalog (a build with a catalog resolver and
+`catalogDB`).
 `delivery.timelines` reports whether `POST /hls/timeline` and the `tl`
 parameter are served, and `maxTimelineMembers` bounds one timeline.
 
