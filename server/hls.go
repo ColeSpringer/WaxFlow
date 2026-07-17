@@ -94,8 +94,13 @@ type hlsRequest struct {
 	// plan points at its embedded SegmentPlan when it is set, so the playlist,
 	// the key, and the worker all read one shape.
 	remux *waxflow.RemuxSegmentPlan
-	key   cache.Key
-	meta  cache.Meta
+	// cut is the cut rung, between rung 2 and rung 3, when a spanned variant can be
+	// served by moving the source's own packets, nil otherwise. Like remux, plan
+	// points at its embedded SegmentPlan, so one shape reaches the playlist, key,
+	// and worker; a variant is at most one of remux or cut (a span declines remux).
+	cut  *waxflow.CutSegmentPlan
+	key  cache.Key
+	meta cache.Meta
 	// exp is the request's own signature expiry (unix seconds), 0 when
 	// key-authed; child URLs inherit it so one minting governs the whole
 	// playback session's lifetime.
@@ -157,7 +162,7 @@ func (s *Server) prepareHLS(r *http.Request) (*hlsRequest, error) {
 		m = s.readMeta(r.Context(), req.srcs[0], false)
 		rmx = req.srcs[0]
 	}
-	if req.opts, req.plan, req.remux, err = s.planHLSVariant(desc, req.tracks(), m, rmx); err != nil {
+	if req.opts, req.plan, req.remux, req.cut, err = s.planHLSVariant(desc, req.tracks(), m, rmx); err != nil {
 		return nil, err
 	}
 	if req.plan.Segments > maxPlaylistSegments {
@@ -359,9 +364,9 @@ func (s *Server) measureSamples(src *source.File) (int64, error) {
 // reason to pay for a packet walk, and the rung it would find changes nothing
 // it prints.
 func (s *Server) planHLSVariant(desc hls.Descriptor, tracks []container.Track, m *meta.Info,
-	rmx *source.File) (waxflow.TranscodeOptions, *waxflow.SegmentPlan, *waxflow.RemuxSegmentPlan, error) {
-	fail := func(err error) (waxflow.TranscodeOptions, *waxflow.SegmentPlan, *waxflow.RemuxSegmentPlan, error) {
-		return waxflow.TranscodeOptions{}, nil, nil, err
+	rmx *source.File) (waxflow.TranscodeOptions, *waxflow.SegmentPlan, *waxflow.RemuxSegmentPlan, *waxflow.CutSegmentPlan, error) {
+	fail := func(err error) (waxflow.TranscodeOptions, *waxflow.SegmentPlan, *waxflow.RemuxSegmentPlan, *waxflow.CutSegmentPlan, error) {
+		return waxflow.TranscodeOptions{}, nil, nil, nil, err
 	}
 	if desc.Bitrate != 0 {
 		if lossy, known := waxflow.LossyFormat(desc.Format); known && !lossy {
@@ -411,35 +416,46 @@ func (s *Server) planHLSVariant(desc hls.Descriptor, tracks []container.Track, m
 		}
 		plan, err = s.eng.PlanSegmentsTimeline(tracks, s.timelineOptions(crossfade), opts, desc.SegDur)
 	} else {
-		// The span narrows the track before it is planned, which is what
-		// makes a virtual track a stream in its own right: its segment 0 is
-		// the span's first sample and its segment count covers to-from, not
-		// the whole rip. Planning the file's track and bounding afterward
-		// would promise a playlist the span cannot fill.
-		track := tracks[0]
-		spanned := descSpan(desc).narrowed()
-		if spanned {
-			if track, err = waxflow.SpanTrack(track, descSpan(desc).from, descSpan(desc).end()); err != nil {
-				return fail(err)
-			}
-		}
-		// Ladder rung 2, the segmented spelling: rewrite the container around
-		// the source's own packets. This is where format=opus on an Opus source
-		// stops re-encoding, which is the case that motivated the rung.
-		//
-		// The two declines are structural and neither is visible to the engine,
-		// which is handed a track and options. A timeline cannot remux: one
-		// fMP4 timeline carries one edit list, and per-member delay and padding
-		// cannot be trimmed at a seam where the packets overlap. A span cannot
-		// remux: cutting at an arbitrary sample means cutting mid-packet. Both
-		// always take rung 3.
+		// The full source track, measured exact for a span (resolveMember). The
+		// rungs below plan from it directly; only the transcode fallback narrows it
+		// to a virtual track, because only a decode addresses the span by re-timing.
+		src := tracks[0]
+		sp := descSpan(desc)
+		spanned := sp.narrowed()
+
+		// Ladder rung 2, the segmented spelling: rewrite the container around the
+		// source's own packets. This is where format=opus on an Opus source stops
+		// re-encoding, which is the case that motivated the rung. A timeline cannot
+		// remux (one fMP4 edit list cannot trim per-member seams) and a span cannot
+		// remux (cutting at an arbitrary sample means cutting mid-packet); both are
+		// structural declines the engine, handed a track and options, cannot see.
 		if rmx != nil && !spanned {
-			rp, err := s.remuxSegmentPlanFor(rmx, track, opts, desc.SegDur)
+			rp, err := s.remuxSegmentPlanFor(rmx, src, opts, desc.SegDur)
 			if err != nil {
 				return fail(err)
 			}
 			if rp != nil {
-				return opts, &rp.SegmentPlan, rp, nil
+				return opts, &rp.SegmentPlan, rp, nil, nil
+			}
+		}
+		// The cut rung, the segmented spelling: a span served by moving the
+		// source's own packets, no decode. It sits below remux (a span declines
+		// remux) and above the transcode fallback, and like the progressive cut it
+		// is reached only with a source-matching format, since format=auto resolves
+		// to a codec the source is not. Its declines all fall through to the
+		// transcode below; see cutSegmentPlanFor.
+		if rmx != nil && spanned {
+			if cp := s.cutSegmentPlanFor(rmx, src, opts, sp, desc.SegDur); cp != nil {
+				return opts, &cp.SegmentPlan, nil, cp, nil
+			}
+		}
+		// Rung 3: decode, DSP, encode. The span narrows the track first, which is
+		// what makes a virtual track a stream in its own right: its segment 0 is the
+		// span's first sample and its count covers to-from, not the whole rip.
+		track := src
+		if spanned {
+			if track, err = waxflow.SpanTrack(track, sp.from, sp.end()); err != nil {
+				return fail(err)
 			}
 		}
 		plan, err = s.eng.PlanSegments(track, opts, desc.SegDur)
@@ -447,7 +463,7 @@ func (s *Server) planHLSVariant(desc hls.Descriptor, tracks []container.Track, m
 	if err != nil {
 		return fail(err)
 	}
-	return opts, plan, nil, nil
+	return opts, plan, nil, nil, nil
 }
 
 // remuxSegmentPlanFor tries the segmented remux rung for one variant, returning
@@ -476,6 +492,50 @@ func (s *Server) remuxSegmentPlanFor(src *source.File, track container.Track,
 		return nil, nil
 	}
 	return s.eng.PlanRemuxSegments(track, opts, segDur, grid)
+}
+
+// cutSegmentPlanFor tries the segmented cut rung for one spanned variant,
+// returning nil when the span must fall through to a transcode. It is the HLS
+// sibling of the progressive cutPlanFor, and it swallows every decline the same
+// way: a cut is a pure optimization below rung 3, so nothing it learns turns a
+// request the transcode fallback would serve into a failure. In particular
+// PlanCutSegments's stricter validation (validateCutSpans over SpanTrack) can
+// error on a degenerate span the fallback serves as an empty stream, so that
+// error is swallowed, not propagated. The fallback re-validates the span through
+// SpanTrack and reports a genuinely bad one there.
+//
+// The gates run header-cheap first: a codec off the allowlist answers before the
+// packet-grid walk, so no spanned request pays for a walk it cannot use. gridFor
+// is the same per-identity memo remuxSegmentPlanFor uses. Every decline is logged
+// at Debug naming its reason, because a caller asking why an Opus span re-encoded
+// on the HLS path has no other signal.
+func (s *Server) cutSegmentPlanFor(src *source.File, track container.Track,
+	opts waxflow.TranscodeOptions, sp span, segDur float64) *waxflow.CutSegmentPlan {
+	decline := func(reason string, args ...any) *waxflow.CutSegmentPlan {
+		kv := make([]any, 0, 4+len(args))
+		kv = append(kv, "reason", reason, "src", src.Ref)
+		kv = append(kv, args...)
+		s.log.Debug("hls cut declined", kv...)
+		return nil
+	}
+	if !waxflow.Cuttable(track) {
+		return decline("the codec is not on the cut allowlist", "codec", track.Codec)
+	}
+	grid, err := s.gridFor(src)
+	if err != nil {
+		return decline("the packet grid could not be measured", "err", err)
+	}
+	if grid <= 0 {
+		return decline("the source's packet durations vary, so there is no grid to cut on")
+	}
+	cp, err := s.eng.PlanCutSegments(track, opts, []waxflow.Span{{From: sp.from, To: sp.end()}}, grid, segDur)
+	if err != nil {
+		return decline("PlanCutSegments refused the span", "err", err)
+	}
+	if cp == nil {
+		return decline("no cut serves these options (gap, tail, or destination)")
+	}
+	return cp
 }
 
 // descSpan is the descriptor's span in the server's own spelling.
@@ -592,7 +652,7 @@ func (s *Server) handleHLSMaster(w http.ResponseWriter, r *http.Request) {
 	var variants []hls.MasterVariant
 	for _, kbps := range desc.Ladder() {
 		vdesc := desc.Variant(kbps)
-		_, plan, _, err := s.planHLSVariant(vdesc, tracks, m, nil)
+		_, plan, _, _, err := s.planHLSVariant(vdesc, tracks, m, nil)
 		if err != nil {
 			s.writeError(w, err) // one bad rung fails the master honestly
 			return
@@ -683,6 +743,9 @@ func (s *Server) handleHLSInit(w http.ResponseWriter, r *http.Request) {
 // about what describes the segments. A remuxed variant's header carries the
 // source's own sample entry; a transcoded one's carries the encoder's.
 func (s *Server) initSegmentFor(req *hlsRequest) ([]byte, error) {
+	if req.cut != nil {
+		return s.eng.CutInitSegment(req.cut)
+	}
 	if req.remux != nil {
 		return s.eng.RemuxInitSegment(req.remux)
 	}
@@ -752,7 +815,7 @@ func segmentName(n int64) string { return fmt.Sprintf("seg-%d.m4s", n) }
 func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64, func(int64), func(error)) (context.CancelFunc, error) {
 	// The worker outlives the request; capture values, never req.srcs.
 	members, tl := req.members, req.desc.Tl != ""
-	opts, plan, key, rmx := req.opts, req.plan, req.key, req.remux
+	opts, plan, key, rmx, cut := req.opts, req.plan, req.key, req.remux, req.cut
 	sp := descSpan(req.desc)
 	xfade := req.desc.CrossfadeSeconds
 	return func(start int64, notify func(int64), exit func(error)) (context.CancelFunc, error) {
@@ -772,7 +835,7 @@ func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64,
 			defer s.store.Unpin(key)
 			defer release()
 			defer cancel()
-			exit(s.runHLSWorker(ctx, members, tl, sp, xfade, opts, plan, rmx, variant, start, notify))
+			exit(s.runHLSWorker(ctx, members, tl, sp, xfade, opts, plan, rmx, cut, variant, start, notify))
 		}()
 		return cancel, nil
 	}
@@ -828,12 +891,49 @@ func (s *Server) runHLSRemuxWorker(ctx context.Context, m hlsSource, opts waxflo
 	return err
 }
 
+// runHLSCutWorker is one variant worker on the cut rung: a span of the source's
+// own packets, resegmented, with no decoder and no encoder. It is the segmented
+// sibling of the progressive cut worker and the mirror of runHLSRemuxWorker,
+// re-resolving and re-checking identity for the same reason (a worker outlives
+// its request and cannot borrow a handle). It takes one source by construction: a
+// timeline never reaches the cut rung.
+//
+// The span, grid, and source length are the plan's own, threaded to CutSegments
+// so the worker cuts on the boundaries and against the length the cache key was
+// computed for. The init segment is the cut's, carrying the synthesized trims the
+// source never had.
+func (s *Server) runHLSCutWorker(ctx context.Context, m hlsSource, opts waxflow.TranscodeOptions, sp span,
+	plan *waxflow.CutSegmentPlan, variant *cache.Variant, start int64, publish func(mp4.Segment) error) error {
+	src, err := s.resolver.Resolve(ctx, m.Ref)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	if src.ID != m.ID {
+		return waxerr.New(waxerr.CodeSourceChanged, "source changed while starting the worker")
+	}
+	if !variant.Has("init.mp4") {
+		init, err := s.eng.CutInitSegment(plan)
+		if err != nil {
+			return err
+		}
+		if err := variant.WriteFile("init.mp4", init); err != nil {
+			return err
+		}
+	}
+	s.met.Cuts.Add(1)
+	_, err = s.eng.CutSegments(ctx, src, m.Ext, opts,
+		[]waxflow.Span{{From: sp.from, To: sp.end()}}, plan.Grid, plan.SourceSamples,
+		waxflow.SegmentedOptions{SegmentSamples: plan.SegmentSamples, StartSegment: start}, publish)
+	return err
+}
+
 // runHLSWorker is one variant worker: its own input, opened afresh, the init
 // header if the variant lacks one, then segments from start to end of
 // stream, each published atomically and announced.
 func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool, sp span, xfadeSeconds float64,
 	opts waxflow.TranscodeOptions, plan *waxflow.SegmentPlan, rmx *waxflow.RemuxSegmentPlan,
-	variant *cache.Variant, start int64, notify func(int64)) error {
+	cut *waxflow.CutSegmentPlan, variant *cache.Variant, start int64, notify func(int64)) error {
 	publish := func(seg mp4.Segment) error {
 		if err := variant.WriteFile(segmentName(seg.Index), seg.Data); err != nil {
 			return err
@@ -849,6 +949,13 @@ func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool,
 	if rmx != nil {
 		return s.logHLSWorker(ref, rungName(rungRemux), len(members), start,
 			s.runHLSRemuxWorker(ctx, members[0], opts, rmx, variant, start, publish))
+	}
+	// The cut rung, between rung 2 and rung 3, chosen at plan time for a span whose
+	// codec survives being moved. Passed rather than re-derived for the same reason
+	// remux is.
+	if cut != nil {
+		return s.logHLSWorker(ref, rungName(rungCut), len(members), start,
+			s.runHLSCutWorker(ctx, members[0], opts, sp, cut, variant, start, publish))
 	}
 	med, err := s.openHLSMedia(ctx, members, tl, sp, xfadeSeconds)
 	if err != nil {
@@ -1078,7 +1185,7 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string
 		// remux rung no source for the same reason: a mint validates that some
 		// rung can serve the variant, and rung 3 always can wherever rung 2
 		// could, so paying for a packet walk here would buy nothing.
-		if _, _, _, err := s.planHLSVariant(out.Variant(kbps), tracks, nil, nil); err != nil {
+		if _, _, _, _, err := s.planHLSVariant(out.Variant(kbps), tracks, nil, nil); err != nil {
 			return hls.Descriptor{}, 0, err
 		}
 	}

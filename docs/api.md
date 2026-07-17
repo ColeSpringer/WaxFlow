@@ -304,9 +304,12 @@ served by moving the source's own packets into a new stream: no decode, no
 re-encode, no generation loss. The head and tail land exactly where asked, since
 their snap-to-packet slop becomes the stream's gapless trims. It needs a
 source-matching format, because `format=auto` resolves to `wav` and would
-transcode, so a span that must not re-encode names its codec explicitly. Today
-it is progressive `/stream` only; a spanned HLS request still transcodes.
-`waxflow_cut_total` in `/metrics` counts the pipelines it served.
+transcode, so a span that must not re-encode names its codec explicitly. It
+serves both progressive `/stream` and segmented HLS: over HLS each media segment
+holds the kept access units, and a worker restarted at a mid-stream segment
+reproduces a continuous run's segment bytes exactly, since the packets are the
+source's own and need no priming. `waxflow_cut_total` in `/metrics` counts the
+pipelines it served, on either surface.
 
 Transmux declines, and the request then tries the cut (for a span) before
 falling to a transcode, whenever the codec would not survive (`track.Codec` is
@@ -318,10 +321,11 @@ overlap), or `maxBitRate` is set (this rung reads headers, and a source's real
 bit rate is in its packets). Over HLS it also declines a source whose packet
 durations vary, since there is then no grid to lay segment boundaries on.
 `waxflow_remux_total` counts the pipelines it served. The cut declines in turn
-(a codec off the Opus/AAC-LC allowlist, `maxBitRate` set, or a snapped window
-the destination cannot express) and falls to a transcode of the same span, so a
-span is always served: zero-generation when it can be, sample-exact through the
-decoder when it cannot.
+(a codec off the Opus/AAC-LC allowlist, `maxBitRate` set, a snapped window the
+destination cannot express, or over HLS a source whose packet durations vary and
+so give no grid to lay segment boundaries on) and falls to a transcode of the
+same span, so a span is always served: zero-generation when it can be,
+sample-exact through the decoder when it cannot.
 
 **Live transcode responses**: `200` chunked, `Accept-Ranges: none`,
 `Cache-Control: no-store`, `X-Accel-Buffering: no`, plus hints

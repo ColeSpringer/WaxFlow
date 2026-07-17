@@ -474,6 +474,9 @@ func (e *Engine) RemuxInitSegment(plan *RemuxSegmentPlan) ([]byte, error) {
 // because it is built from the same bytes.
 func (e *Engine) RemuxSegments(ctx context.Context, src container.Source, hint string, opts TranscodeOptions,
 	segOpts SegmentedOptions, emit func(mp4.Segment) error) (*SegmentedResult, error) {
+	if err := validateSegOpts(segOpts); err != nil {
+		return nil, err
+	}
 	demux, info, err := format.OpenDemuxer(src, hint, nil)
 	if err != nil {
 		return nil, err
@@ -488,22 +491,59 @@ func (e *Engine) RemuxSegments(ctx context.Context, src container.Source, hint s
 			fmt.Sprintf("waxflow: a %s source cannot be remuxed to %s with these options; transcode it",
 				track.Codec, opts.Format))
 	}
+	e.log.Debug("segmented remux started", "container", info.Container, "codec", track.Codec,
+		"out", opts.Format, "segment", segOpts.StartSegment, "segSamples", segOpts.SegmentSamples)
+	res, err := e.segmentWalk(ctx, demux, rp.Track, track.ID, segOpts, emit)
+	if err != nil {
+		return nil, err
+	}
+	e.log.Debug("segmented remux finished", "samples", res.Samples, "segments", res.Segments)
+	return res, nil
+}
+
+// validateSegOpts rejects segment options no run can honor: a non-positive
+// segment length, a negative start, or a start whose product with the length
+// overflows the sample timeline. Both segmented entry points call it before
+// opening a source, so an invalid request fails on its own inputs rather than
+// paying for a container open and a plan first.
+func validateSegOpts(segOpts SegmentedOptions) error {
 	switch {
 	case segOpts.SegmentSamples <= 0:
-		return nil, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: segmenter needs a positive SegmentSamples")
+		return waxerr.New(waxerr.CodeInvalidRequest, "waxflow: segmenter needs a positive SegmentSamples")
 	case segOpts.StartSegment < 0:
-		return nil, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: negative StartSegment")
+		return waxerr.New(waxerr.CodeInvalidRequest, "waxflow: negative StartSegment")
 	case segOpts.StartSegment > (1<<62)/int64(segOpts.SegmentSamples):
-		return nil, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: StartSegment overflows the sample timeline")
+		return waxerr.New(waxerr.CodeInvalidRequest, "waxflow: StartSegment overflows the sample timeline")
 	}
-	seg, err := mp4.NewSegmenter(rp.Track, &mp4.SegmenterOptions{
+	return nil
+}
+
+// segmentWalk is the demuxer-walk core shared by RemuxSegments and CutSegments:
+// the segmenter, the seek to the restart point, the one-behind buffering that
+// lets a short final packet through while rejecting a short interior one, and the
+// grid recheck. It takes an already-opened demuxer, the normalized track to build
+// the segmenter from (a plan's ID-0 track), and the source track ID the walk
+// filters on.
+//
+// The two rungs differ only in what they hand it. RemuxSegments hands it the
+// source demuxer directly; CutSegments hands it a seekable Cut view of the same,
+// whose retimed packets are the source's own bytes. Because the walk is identical,
+// a cut segment laid on the grid is identical in structure to a remux segment, so
+// the player-side Opus pre-roll handling the segmenter inherits is inherited by
+// the cut too rather than reinvented.
+func (e *Engine) segmentWalk(ctx context.Context, demux container.Demuxer, segTrack container.Track,
+	walkTrackID int, segOpts SegmentedOptions, emit func(mp4.Segment) error) (*SegmentedResult, error) {
+	// segOpts is validated by the caller (validateSegOpts) before the source open,
+	// so a bad request fails on its own inputs first; NewSegmenter re-guards the
+	// length and start it can express.
+	seg, err := mp4.NewSegmenter(segTrack, &mp4.SegmenterOptions{
 		SegmentSamples: segOpts.SegmentSamples, StartSegment: segOpts.StartSegment,
 	})
 	if err != nil {
 		return nil, err
 	}
 	p0 := segOpts.StartSegment * int64(segOpts.SegmentSamples)
-	pos, err := seekPackets(demux, track.ID, p0)
+	pos, err := seekPackets(demux, walkTrackID, p0)
 	if err != nil {
 		return nil, err
 	}
@@ -513,8 +553,6 @@ func (e *Engine) RemuxSegments(ctx context.Context, src container.Source, hint s
 		res.Segments++
 		return emit(s)
 	}
-	e.log.Debug("segmented remux started", "container", info.Container, "codec", track.Codec,
-		"out", opts.Format, "segment", segOpts.StartSegment, "segSamples", segOpts.SegmentSamples)
 
 	// The grid is re-checked here rather than trusted from the plan, and it is
 	// free: the walk is happening anyway. A plan computed against a different
@@ -565,7 +603,7 @@ func (e *Engine) RemuxSegments(ctx context.Context, src container.Source, hint s
 		have = false
 		return seg.WritePacket(held, emitSeg)
 	}
-	decoded, err := copyPackets(ctx, demux, track.ID, func(pkt container.Packet) error {
+	decoded, err := copyPackets(ctx, demux, walkTrackID, func(pkt container.Packet) error {
 		if pos < p0 {
 			pos += pkt.Dur
 			return nil // still walking up to the restart point
@@ -592,7 +630,6 @@ func (e *Engine) RemuxSegments(ctx context.Context, src container.Source, hint s
 		return nil, err
 	}
 	res.Samples = decoded
-	e.log.Debug("segmented remux finished", "samples", res.Samples, "segments", res.Segments)
 	return res, nil
 }
 
