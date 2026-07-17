@@ -99,7 +99,9 @@ func buildCatalog(t *testing.T, files map[string][]byte) (lib *waxbin.Library, r
 // itemPIDs maps each cataloged file's base name onto its item PID.
 func itemPIDs(t *testing.T, lib *waxbin.Library) map[string]model.PID {
 	t.Helper()
-	items, err := lib.Query(context.Background(), query.New(query.EntityItems).Build())
+	// This selection has no per-user field, so it is not scoped by user; an
+	// empty userPID satisfies the signature without narrowing the results.
+	items, err := lib.Query(context.Background(), query.New(query.EntityItems).Build(), "")
 	if err != nil {
 		t.Fatalf("query items: %v", err)
 	}
