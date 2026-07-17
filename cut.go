@@ -1,6 +1,7 @@
 package waxflow
 
 import (
+	"context"
 	"fmt"
 	"io"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/codec/opus"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -140,6 +142,21 @@ var cutCodecs = map[codec.ID]cutCodec{
 	// lives in the container's edit list rather than in the ASC, so there is
 	// nothing to reprime.
 	codec.AACLC: {preroll: aac.EncoderDelay},
+}
+
+// Cuttable reports whether track's codec is one whose packets survive being
+// moved within a stream, which is the premise the cut rung rests on. It is the
+// exported form of the cutCodecs membership test, so a caller can skip the
+// packet-grid walk for a codec no cut could ever serve.
+//
+// It answers only the codec question, which is the cheap one: a true here does
+// not promise the cut will be taken, since a sub-grid gap, an unanswerable tail,
+// or a destination that cannot signal the trims still declines inside PlanCut.
+// It is the fast negative, not a guarantee of the positive. See cutCodecs for
+// why the set is an allowlist rather than a lossless rule.
+func Cuttable(track container.Track) bool {
+	_, ok := cutCodecs[track.Codec]
+	return ok
 }
 
 // cutWindow is a kept range of the source's decode timeline. A to of -1 means
@@ -769,3 +786,59 @@ func cutTrimsExpressible(containerName string, delay, padding int64) bool {
 // Skipping PlanCut and calling RemuxDemuxer straight is what the destination
 // decline cannot protect: PlanCut is where it lives, because a decline is a
 // planning answer.
+
+// CutStream cuts src's existing packets to spans and rewrites the container
+// around them, opening the source itself: the run half of the cut rung, and the
+// packet-move sibling of Remux. No decode, no DSP, no encode, so no generation
+// loss; the output holds the kept access units byte for byte, retimed to be
+// contiguous.
+//
+// opts and spans must be a pair PlanCut accepted; a request it declines is an
+// error here rather than a silent re-encode, for the reason Remux gives about
+// PlanRemux: a caller reaching this directly has already chosen the rung, and a
+// fallback it did not ask for would be the wrong kind of help. The ladder calls
+// PlanCut first and falls through on its own.
+//
+// grid is the source's packet duration from Engine.PacketGrid, and samples is
+// the source's exact length, both threaded in from the plan rather than
+// re-measured here, so the bytes this delivers are the ones the plan and the
+// cache key were computed against. It is the assembly recipe above, minus the
+// plan step, in one call: the engine owns the open-and-assemble exactly as it
+// does for Remux.
+//
+// samples is the one thing a fresh header open cannot know and the plan can. An
+// undeclared-length source (AAC-LC in ADTS) reports Samples -1 from its headers,
+// while the plan measured the true length off the same source. That length is
+// not cosmetic: the muxer's init segment encodes it (an fMP4 moov duration), so
+// running from the header's -1 would write a stream whose own duration disagrees
+// with the plan's advertised one. Everything else on the track (codec, config,
+// trims, track ID) a fresh open reads identically, so only the measured length
+// is patched over it. Pass a negative samples to take the header's length as-is,
+// which is what a source that declares its own length already has.
+func (e *Engine) CutStream(ctx context.Context, src container.Source, hint string, dst io.Writer,
+	opts TranscodeOptions, spans []Span, grid int, samples int64) (*TranscodeResult, error) {
+	demux, info, err := format.OpenDemuxer(src, hint, nil)
+	if err != nil {
+		return nil, err
+	}
+	track := info.Default()
+	if samples >= 0 {
+		// The plan's measured length over the header's, the mirror of grid: the
+		// tail arithmetic and the init segment both read it, and plan and run must
+		// read the same one. See computeCut's decodedEnd and the ToEnd branch.
+		track.Samples, track.SamplesExact = samples, true
+	}
+	// CutTrack's track, not a plan's, and for the same reason RemuxDemuxer takes
+	// the demuxer's own track: the walk filters on the source's track ID, which
+	// CutTrack preserves, while a plan normalizes it to 0. There is no
+	// demux.Close, mirroring Remux; the source.File owns the handle.
+	cut, _, err := CutTrack(track, spans, grid)
+	if err != nil {
+		return nil, err
+	}
+	cutDemux, err := Cut(demux, track, spans, grid)
+	if err != nil {
+		return nil, err
+	}
+	return e.RemuxDemuxer(ctx, cutDemux, cut, dst, opts)
+}

@@ -133,7 +133,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 				s.met.Degradations.Add(1)
 				entry = cache.NewMemEntry(s.cfg.RingBytes, meta)
 			}
-			s.startPipeline(s.baseCtx, entry, req.p.src, req.src.ID, req.src.Ext, req.opts, req.p.span, req.remux != nil, release, false)
+			s.startPipeline(s.baseCtx, entry, req.p.src, req.src.ID, req.src.Ext, req.opts, req.p.span, req.rung(), req.cutGrid, req.cutSamples, release, false)
 			armed = true
 			return entry, nil
 		})
@@ -161,13 +161,44 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	s.writeError(w, waxerr.New(waxerr.CodeInternal, "stream slot flapping"))
 }
 
+// rung names which step of the decision ladder a pipeline runs, so the run
+// executes the bytes the plan chose and the cache key was computed for. Direct
+// play never reaches a pipeline, so it has no member here: only the three rungs
+// that spawn one do.
+type rung int
+
+const (
+	rungTranscode rung = iota // rung 3: decode, DSP, encode.
+	rungRemux                 // rung 2: rewrite the container around the source's packets.
+	rungCut                   // between the two: move a span of the source's packets.
+)
+
+// rung reports which ladder rung planTranscode chose for this request. It reads
+// the two plan pointers the shared back half set, so the pipeline cannot drift
+// from the plan the cache key and response headers were built from.
+func (req *streamRequest) rung() rung {
+	switch {
+	case req.remux != nil:
+		return rungRemux
+	case req.cut != nil:
+		return rungCut
+	default:
+		return rungTranscode
+	}
+}
+
 // startPipeline runs the transcode into entry on its own goroutine. Live
 // pipelines pass the server's base context, not the request's: the
 // read-behind model finishes the encode (and the cache entry) even when
 // the first client leaves. Sync one-shots pass their request context to
 // die with it.
+//
+// grid and cutSamples are the source's packet grid and exact length, meaningful
+// only for rungCut and threaded in from the plan so the run cuts on the same
+// boundaries and writes the same length the plan keyed; the other rungs ignore
+// them.
 func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, ref string, id source.Identity, hint string,
-	opts waxflow.TranscodeOptions, sp span, remux bool, release func(), sync bool) {
+	opts waxflow.TranscodeOptions, sp span, r rung, grid int, cutSamples int64, release func(), sync bool) {
 	if sync {
 		s.met.SessionsSync.Add(1)
 	} else {
@@ -192,9 +223,9 @@ func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, ref stri
 			entry.Fail(waxerr.New(waxerr.CodeSourceChanged, "source changed while starting the pipeline"))
 			return
 		}
-		res, err := s.transcodeSpan(ctx, src, hint, entry, opts, sp, remux)
+		res, err := s.transcodeSpan(ctx, src, hint, entry, opts, sp, r, grid, cutSamples)
 		if err != nil {
-			s.log.Warn("pipeline failed", "src", ref, "rung", rungName(remux), "err", err)
+			s.log.Warn("pipeline failed", "src", ref, "rung", rungName(r), "err", err)
 			entry.Fail(err)
 			return
 		}
@@ -206,37 +237,41 @@ func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, ref stri
 		if entry.FileBacked() && entry.Degraded() {
 			s.met.Degradations.Add(1)
 		}
-		s.log.Debug("pipeline finished", "src", ref, "rung", rungName(remux),
+		s.log.Debug("pipeline finished", "src", ref, "rung", rungName(r),
 			"samples", res.Samples, "degraded", entry.Degraded())
 	}()
 }
 
 // rungName spells the decision ladder's rung for a log line, so a session can
 // be filtered by which one served it. Direct play never reaches a pipeline (it
-// serves the file straight from the handler), so only the two that do are named
-// here; waxflow_direct_play_total counts the other.
-func rungName(remux bool) string {
-	if remux {
+// serves the file straight from the handler), so only the three that do are
+// named here; waxflow_direct_play_total counts the other.
+func rungName(r rung) string {
+	switch r {
+	case rungRemux:
 		return "remux"
+	case rungCut:
+		return "cut"
+	default:
+		return "transcode"
 	}
-	return "transcode"
 }
 
 // transcodeSpan runs the request's chosen rung, bounding the source to the
 // request's span when it has one.
 //
-// remux selects ladder rung 2, which the plan already decided: it is passed
-// rather than re-derived so the bytes served are the ones the cache key and the
-// response headers were computed for. A remux never has a span (rung 2 declines
-// them, since cutting at an arbitrary sample means cutting mid-packet), so the
-// two branches cannot both apply.
+// r selects the ladder rung the plan already decided: it is passed rather than
+// re-derived so the bytes served are the ones the cache key and the response
+// headers were computed for. A remux never has a span (rung 2 declines them,
+// since cutting at an arbitrary sample means cutting mid-packet); the cut always
+// has one (it is the span's own rung); a plain transcode may have either.
 //
 // A request with no span takes Engine.Transcode untouched, which is not
 // merely an optimization: it keeps every existing progressive stream on the
 // exact path it has always taken, so nothing about the common case depends
 // on the span machinery being right.
 //
-// A spanned request opens the stream itself so it can wrap the Media, since
+// A spanned transcode opens the stream itself so it can wrap the Media, since
 // Transcode's convenience of opening and closing internally is the one
 // thing a wrapper cannot borrow. The slice owns the Media and closes it,
 // which is why only the slice is deferred here.
@@ -246,10 +281,19 @@ func rungName(remux bool) string {
 // arithmetic that served t= on a whole file serves t= inside a virtual
 // track with no special case.
 func (s *Server) transcodeSpan(ctx context.Context, src *source.File, hint string, dst io.Writer,
-	opts waxflow.TranscodeOptions, sp span, remux bool) (*waxflow.TranscodeResult, error) {
-	if remux {
+	opts waxflow.TranscodeOptions, sp span, r rung, grid int, cutSamples int64) (*waxflow.TranscodeResult, error) {
+	switch r {
+	case rungRemux:
 		s.met.Remuxes.Add(1)
 		return s.eng.Remux(ctx, src, hint, dst, opts)
+	case rungCut:
+		// The single-window progressive cut: the span is one [from, to) range,
+		// so the run is always one Span. grid and cutSamples were measured at
+		// plan time and carried in, so the boundaries the run snaps to and the
+		// length its init segment writes are the keyed ones.
+		s.met.Cuts.Add(1)
+		return s.eng.CutStream(ctx, src, hint, dst, opts,
+			[]waxflow.Span{{From: sp.from, To: sp.end()}}, grid, cutSamples)
 	}
 	if !sp.narrowed() {
 		return s.eng.Transcode(ctx, src, hint, dst, opts)

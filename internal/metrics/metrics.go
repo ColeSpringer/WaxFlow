@@ -33,6 +33,11 @@ type Metrics struct {
 	// does not add to it: the question this answers is how much work the rung
 	// saved, and a hit did no work on any rung.
 	Remuxes atomic.Uint64
+	// Cuts counts pipelines served by moving a span of the source's own packets
+	// to a new stream (the cut rung, between transmux and transcode), progressive
+	// and segmented alike. It counts pipelines rather than requests for the same
+	// reason Remuxes does: a cache hit did no work on any rung.
+	Cuts atomic.Uint64
 	// AdmissionRejects counts 503s from saturated pools.
 	AdmissionRejects atomic.Uint64
 	// Degradations counts sessions downgraded to ring-fed streaming by
@@ -109,6 +114,10 @@ func (m *Metrics) WritePrometheus(w io.Writer, version string, g Gauges) {
 	p("# HELP waxflow_remux_total Pipelines served by rewriting the container around the source's own packets.\n")
 	p("# TYPE waxflow_remux_total counter\n")
 	p("waxflow_remux_total %d\n", m.Remuxes.Load())
+
+	p("# HELP waxflow_cut_total Pipelines served by moving a span of the source's own packets to a new stream.\n")
+	p("# TYPE waxflow_cut_total counter\n")
+	p("waxflow_cut_total %d\n", m.Cuts.Load())
 
 	p("# HELP waxflow_hls_segments_total HLS media segments served.\n")
 	p("# TYPE waxflow_hls_segments_total counter\n")

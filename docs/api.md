@@ -228,7 +228,9 @@ Parameters (unknown parameter names are rejected):
       /stream?src=rip.flac&from=10804500&to=18744300&t=30   30 s into it
 
   A span with no rate change is bit-exact: the same samples a split job
-  writes for the same cut points. A **resampled** span is primed rather
+  writes for the same cut points. An Opus or AAC-LC span requested in its
+  own `format` goes further and skips the decoder altogether, moving the
+  source's own packets (the cut rung below). A **resampled** span is primed rather
   than started cold, which matters because HLS Opus is always 48 kHz and a
   CUE rip is 44.1 kHz, so a virtual track is resampled by construction.
   Unlike a file, a span has real audio ahead of its own first sample, and
@@ -277,7 +279,7 @@ Parameters (unknown parameter names are rejected):
   hold under the cap, so a cap on it is `415` rather than silently
   unenforced.
 
-**Decision ladder (v1)**, three rungs, cheapest first:
+**Decision ladder (v1)**, cheapest first:
 
 1. **Direct play.** The source already satisfies the request (`format=auto`
    or a matching container, no `container` override, no transforming
@@ -295,16 +297,31 @@ Parameters (unknown parameter names are rejected):
    `format=opus` on an Opus file over HLS.
 3. **Transcode.** Anything else: decode, DSP, encode.
 
-Rung 2 declines, and falls to rung 3, whenever the codec would not survive
-(`track.Codec` is not the output format's), any parameter transforms samples
-(`rate`, `ch`, `bits`, `gain`, `dynamics`, `t=`, `bitrate`/`q`), the request
-names a span (`from`/`to` cut at an arbitrary sample, which means
-mid-packet), the URL names a timeline (one fMP4 timeline carries one edit
-list, and the packets at a seam overlap), or `maxBitRate` is set (this rung
-reads headers, and a source's real bit rate is in its packets). Over HLS it
-also declines a source whose packet durations vary, since there is then no
-grid to lay segment boundaries on. `waxflow_remux_total` in `/metrics`
-counts the pipelines it served.
+**The cut** sits between transmux and transcode for a `from`/`to` span. When
+the source codec survives being repositioned (Opus or AAC-LC) and the requested
+`format` matches it (`format=opus`, or `format=aac` for AAC-LC), the span is
+served by moving the source's own packets into a new stream: no decode, no
+re-encode, no generation loss. The head and tail land exactly where asked, since
+their snap-to-packet slop becomes the stream's gapless trims. It needs a
+source-matching format, because `format=auto` resolves to `wav` and would
+transcode, so a span that must not re-encode names its codec explicitly. Today
+it is progressive `/stream` only; a spanned HLS request still transcodes.
+`waxflow_cut_total` in `/metrics` counts the pipelines it served.
+
+Transmux declines, and the request then tries the cut (for a span) before
+falling to a transcode, whenever the codec would not survive (`track.Codec` is
+not the output format's), any parameter transforms samples (`rate`, `ch`,
+`bits`, `gain`, `dynamics`, `t=`, `bitrate`/`q`), the request names a span
+(`from`/`to` cut at an arbitrary sample, which means mid-packet), the URL names
+a timeline (one fMP4 timeline carries one edit list, and the packets at a seam
+overlap), or `maxBitRate` is set (this rung reads headers, and a source's real
+bit rate is in its packets). Over HLS it also declines a source whose packet
+durations vary, since there is then no grid to lay segment boundaries on.
+`waxflow_remux_total` counts the pipelines it served. The cut declines in turn
+(a codec off the Opus/AAC-LC allowlist, `maxBitRate` set, or a snapped window
+the destination cannot express) and falls to a transcode of the same span, so a
+span is always served: zero-generation when it can be, sample-exact through the
+decoder when it cannot.
 
 **Live transcode responses**: `200` chunked, `Accept-Ranges: none`,
 `Cache-Control: no-store`, `X-Accel-Buffering: no`, plus hints

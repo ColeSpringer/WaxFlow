@@ -847,7 +847,7 @@ func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool,
 	// writes are the ones the playlist's segment count and the cache key were
 	// computed for.
 	if rmx != nil {
-		return s.logHLSWorker(ref, rungName(true), len(members), start,
+		return s.logHLSWorker(ref, rungName(rungRemux), len(members), start,
 			s.runHLSRemuxWorker(ctx, members[0], opts, rmx, variant, start, publish))
 	}
 	med, err := s.openHLSMedia(ctx, members, tl, sp, xfadeSeconds)
@@ -867,7 +867,7 @@ func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool,
 	_, err = s.eng.TranscodeSegmentsMedia(ctx, med, opts,
 		waxflow.SegmentedOptions{SegmentSamples: plan.SegmentSamples, StartSegment: start},
 		publish)
-	return s.logHLSWorker(ref, rungName(false), len(members), start, err)
+	return s.logHLSWorker(ref, rungName(rungTranscode), len(members), start, err)
 }
 
 // openHLSMedia opens a worker's input: the source itself for a single-track

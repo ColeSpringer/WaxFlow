@@ -40,8 +40,22 @@ type streamRequest struct {
 	// rewriting the container around the source's own packets, nil when it
 	// cannot and the request takes rung 3. plan points at its embedded
 	// TranscodePlan when it is set, so everything downstream reads one shape.
-	remux     *waxflow.RemuxPlan
-	canonical string
+	remux *waxflow.RemuxPlan
+	// cut is the ladder's rung between transmux and transcode: a span served by
+	// moving the source's own packets rather than re-encoding them. nil when the
+	// request is not a span, its codec is off the cut allowlist, or the cut
+	// otherwise declines. plan points at its embedded TranscodePlan when set,
+	// exactly as remux does, so everything downstream reads one shape.
+	cut *waxflow.CutPlan
+	// cutGrid is the source's packet grid and cutSamples its exact measured
+	// length, both captured when the cut is planned and threaded to the run so
+	// the bytes delivered match the bytes keyed. cutGrid is 0 and cutSamples -1
+	// when the cut rung was not taken. cutSamples matters for an undeclared-length
+	// source (ADTS): the plan measured it, and the run's init segment must carry
+	// the same length rather than the header's -1.
+	cutGrid    int
+	cutSamples int64
+	canonical  string
 }
 
 // Close releases the request's source handle.
@@ -106,6 +120,9 @@ func (s *Server) prepareSource(ctx context.Context, q url.Values, sigAuthed bool
 		from:   int64(p.t * float64(track.Fmt.Rate)),
 		gainDB: p.gain.resolveDB(m, p.dynamics),
 		meta:   m,
+		// -1, not the zero value: cutSamples threads to CutStream as "the source's
+		// own header length" when no cut set it, and 0 would zero the run's track.
+		cutSamples: -1,
 	}, nil
 }
 
@@ -146,9 +163,14 @@ func (s *Server) planTranscode(req *streamRequest) error {
 	}
 	// Ladder rung 2: rewrite the container around the source's own packets.
 	// Rung 1 (directPlayable) already declined, or we would not be here, so
-	// this is the cheapest remaining answer whenever the codec survives.
+	// this is the cheapest remaining answer whenever the codec survives. A span
+	// declines rung 2 (it cuts mid-packet), so the cut rung sits below it: the
+	// same packet-move answer, filtered to the span, for a source whose codec
+	// survives being repositioned. Anything neither serves takes rung 3.
 	if req.remux = s.remuxPlanFor(req); req.remux != nil {
 		req.plan = &req.remux.TranscodePlan
+	} else if req.cut = s.cutPlanFor(req); req.cut != nil {
+		req.plan = &req.cut.TranscodePlan
 	} else {
 		plan, err := s.eng.PlanTranscode(req.track, req.opts)
 		if err != nil {
@@ -214,4 +236,81 @@ func (s *Server) remuxPlanFor(req *streamRequest) *waxflow.RemuxPlan {
 		return nil
 	}
 	return rp
+}
+
+// cutPlanFor returns the ladder's cut plan for a prepared request, or nil when
+// the request must fall through to a transcode. It is reached only after
+// remuxPlanFor declined, which for a span it always does, since the cut IS the
+// spanned answer this rung adds below rung 2.
+//
+// The gates run header-cheap first: a non-span, a bit-rate cap, a codec off the
+// allowlist, all answer before the packet-grid walk, so no request pays for a
+// walk it cannot use. gridFor is the same per-identity memo the segmented remux
+// uses; this is its first progressive caller.
+//
+// Two facts about the track it plans from. It is the full source track from
+// trackFor, not req.track: a spanned req.track is the SpanTrack'd virtual track,
+// whose Delay and Padding are zeroed and whose codec config is the source's
+// un-rewritten one, none of which a packet-move cut can work from. The source
+// track was already measured exactly by prepareSource on the span branch, so
+// trackFor is a memo hit rather than a second probe.
+//
+// PlanCut's errors are swallowed, not propagated, exactly as remuxPlanFor
+// swallows PlanRemux's, and the reason is sharper here: validateCutSpans is
+// stricter than SpanTrack (a zero-length span that rung 3 serves as an empty 200
+// PlanCut refuses), so surfacing the error would turn a request the ladder
+// serves today into a new 400. A nil return preserves the fall-through contract.
+//
+// Every decline is logged at Debug naming its reason, because a caller asking
+// "why did my Opus span re-encode" has no other signal: the swallow is correct
+// but silent, and PlanCut's own six Debug reasons do not cover this function's
+// early gates. See the reachability note in the API docs: the cut is reached
+// only with a source-matching format (format=opus, or format=aac for AAC-LC),
+// since format=auto may resolve to a codec the source is not.
+func (s *Server) cutPlanFor(req *streamRequest) *waxflow.CutPlan {
+	if !req.p.span.narrowed() {
+		return nil // not a span: there is nothing for this rung to cut.
+	}
+	decline := func(reason string, args ...any) *waxflow.CutPlan {
+		kv := make([]any, 0, 4+len(args))
+		kv = append(kv, "reason", reason, "src", req.p.src)
+		kv = append(kv, args...)
+		s.log.Debug("cut declined", kv...)
+		return nil
+	}
+	if req.p.maxBitRate > 0 {
+		// The same decline remuxPlanFor makes: this rung reads headers, and a
+		// source's real bit rate is in its packets, so it cannot promise a cap.
+		return decline("a bit rate cap cannot be promised by a packet-move rung")
+	}
+	track, err := s.trackFor(req.src, true)
+	if err != nil {
+		// prepareSource already measured this on the span branch, so an error
+		// here is not expected; decline rather than fail, and let the transcode
+		// rung report it if it recurs.
+		return decline("the source track could not be measured", "err", err)
+	}
+	if !waxflow.Cuttable(track) {
+		return decline("the codec is not on the cut allowlist", "codec", track.Codec)
+	}
+	grid, err := s.gridFor(req.src)
+	if err != nil {
+		return decline("the packet grid could not be measured", "err", err)
+	}
+	if grid <= 0 {
+		return decline("the source's packet durations vary, so there is no grid to cut on")
+	}
+	plan, err := s.eng.PlanCut(track, req.opts,
+		[]waxflow.Span{{From: req.p.span.from, To: req.p.span.end()}}, grid)
+	if err != nil {
+		return decline("PlanCut refused the span", "err", err)
+	}
+	if plan == nil {
+		return decline("no cut serves these options (gap, tail, or destination)")
+	}
+	req.cutGrid = grid
+	// The measured length the plan cut from, so the run's init segment carries it
+	// rather than the header's -1 for an undeclared-length source (ADTS).
+	req.cutSamples = track.Samples
+	return plan
 }
