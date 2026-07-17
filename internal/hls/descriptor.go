@@ -89,6 +89,20 @@ type Descriptor struct {
 	// track boundary of a gapless album.
 	From int64 `json:"from,omitempty"`
 	To   int64 `json:"to,omitempty"`
+	// CrossfadeSeconds blends each timeline seam over this many seconds,
+	// equal-power; 0 (the default) is a butt-join, exactly as before crossfade
+	// existed on the wire. It is seconds rather than samples because a client
+	// cannot know the envelope rate (the maximum member rate) and so cannot
+	// express the blend in samples; the server converts it once the members are
+	// measured (waxflow.CrossfadeSamples).
+	//
+	// It rides the descriptor as a rendering option, not a timeline-identity
+	// input (ADR-0009): the tl= digest covers the members alone, so two renders
+	// of one timeline that differ only by crossfade share a digest and are kept
+	// apart downstream by the cache key (crossfadeVersion). A crossfade is
+	// meaningless on a single source, which has no seam, so it is exclusive with
+	// Src exactly as a span is exclusive with Tl.
+	CrossfadeSeconds float64 `json:"crossfadeSeconds,omitempty"`
 }
 
 // Encode serializes the descriptor as base64url JSON for the v=
@@ -185,6 +199,18 @@ func DecodeDescriptor(s string) (Descriptor, error) {
 		// have to address the timeline's own envelope, which is not what
 		// these samples mean.
 		return bad("names a tl and a span; a span bounds one source")
+	case d.CrossfadeSeconds < 0:
+		// Non-negative here; finiteness is guarded server-side before Encode,
+		// because JSON carries no NaN or Inf (the decoder rejects an overflowing
+		// number outright) and Marshal would panic on one, so neither can reach a
+		// decoded descriptor.
+		return bad("crossfadeSeconds %g is negative", d.CrossfadeSeconds)
+	case d.CrossfadeSeconds > 0 && d.Src != "":
+		// The mirror of the span rule above: a crossfade blends a seam between
+		// two members, and a single source has none. Refused rather than
+		// silently ignored, so a caller who spelled it on the wrong URL learns
+		// it did nothing.
+		return bad("names a src and a crossfade; a crossfade blends a timeline's seams")
 	}
 	for _, b := range d.Bitrates {
 		if b <= 0 {

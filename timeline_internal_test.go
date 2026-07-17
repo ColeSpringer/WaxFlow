@@ -2,6 +2,7 @@ package waxflow
 
 import (
 	"io"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -579,6 +580,75 @@ func TestConcatBoundaries(t *testing.T) {
 		// checkCrossfade inside concatLayout, which the wrapper must relay.
 		if _, _, err := ConcatBoundaries(tracks, ConcatOptions{Crossfade: 100000}); err == nil {
 			t.Error("a crossfade longer than the shortest member returned no error")
+		}
+	})
+}
+
+// TestCrossfadeSamples pins the seconds-to-envelope-samples conversion the wire
+// depends on: a crossfade is spelled in seconds because a caller cannot know the
+// envelope rate, and the plan and the run agree only if they both convert it the
+// same way, on that rate.
+func TestCrossfadeSamples(t *testing.T) {
+	mk := func(f audio.Format, samples int64) container.Track {
+		return container.Track{Codec: codec.PCM, Fmt: f, Samples: samples, SamplesExact: true, Default: true}
+	}
+	// Long members, so the fit rule never intrudes on the conversion itself.
+	stereo := []container.Track{mk(stereo48, 1<<30), mk(stereo48, 1<<30)}
+	// A 44.1 kHz member beside a 48 kHz one: the envelope rate is the maximum,
+	// 48 kHz, so the crossfade is counted on 48 kHz and not on either member's
+	// own rate.
+	mixed := []container.Track{mk(stereo44, 1<<30), mk(stereo48, 1<<30)}
+
+	t.Run("counts on the envelope rate", func(t *testing.T) {
+		got, err := CrossfadeSamples(stereo, 0.5)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != 24000 {
+			t.Errorf("0.5 s at 48 kHz = %d samples, want 24000", got)
+		}
+		if got, _ := CrossfadeSamples(mixed, 0.5); got != 24000 {
+			t.Errorf("0.5 s of a mixed-rate timeline = %d, want 24000 (the 48 kHz envelope), not 22050", got)
+		}
+	})
+
+	t.Run("a non-positive seconds is a butt-join", func(t *testing.T) {
+		for _, sec := range []float64{0, -1, -0.001} {
+			if got, err := CrossfadeSamples(stereo, sec); err != nil || got != 0 {
+				t.Errorf("CrossfadeSamples(%v) = (%d, %v), want (0, nil): a non-positive crossfade is a butt-join", sec, got, err)
+			}
+		}
+		// A butt-join needs no envelope, so an empty timeline is not an error
+		// on this path: it is the members the render will refuse, not here.
+		if got, err := CrossfadeSamples(nil, 0); err != nil || got != 0 {
+			t.Errorf("CrossfadeSamples(nil, 0) = (%d, %v), want (0, nil)", got, err)
+		}
+	})
+
+	t.Run("rounds to the nearest sample", func(t *testing.T) {
+		// 100.7 and 100.2 samples' worth of seconds at 48 kHz: the round is what
+		// keeps the plan and the run from splitting on a sub-sample.
+		if got, _ := CrossfadeSamples(stereo, 100.7/48000); got != 101 {
+			t.Errorf("100.7 samples rounded to %d, want 101", got)
+		}
+		if got, _ := CrossfadeSamples(stereo, 100.2/48000); got != 100 {
+			t.Errorf("100.2 samples rounded to %d, want 100", got)
+		}
+	})
+
+	t.Run("an absurd seconds clamps rather than wraps", func(t *testing.T) {
+		// The refusal is checkCrossfade's, so the converter must hand it a value
+		// too large to blend rather than a silently wrapped small one.
+		if got, err := CrossfadeSamples(stereo, 1e300); err != nil || got != math.MaxInt64 {
+			t.Errorf("CrossfadeSamples(1e300) = (%d, %v), want (MaxInt64, nil)", got, err)
+		}
+	})
+
+	t.Run("surfaces the layout refusal for a blend", func(t *testing.T) {
+		// A crossfade needs an envelope, so an unbuildable timeline is refused
+		// here rather than read as a zero count.
+		if _, err := CrossfadeSamples(nil, 0.5); err == nil {
+			t.Error("a crossfade of an empty timeline returned no error")
 		}
 	})
 }

@@ -360,7 +360,7 @@ session.
 
 | Path | Purpose |
 |---|---|
-| `GET /hls/master.m3u8?v=...` | master playlist: one rung per ladder bitrate with `BANDWIDTH` and `CODECS` (`Opus`, `fLaC`, `alac`, `mp4a.40.2`). With an API key, raw parameters (`src`, `format`, `bitrate` or `bitrates`, `bits`, `rate`, `ch`, `gain`, `dynamics`, `segDur`) also work; the daemon builds the descriptor. |
+| `GET /hls/master.m3u8?v=...` | master playlist: one rung per ladder bitrate with `BANDWIDTH` and `CODECS` (`Opus`, `fLaC`, `alac`, `mp4a.40.2`). With an API key, raw parameters (`src`, `format`, `bitrate` or `bitrates`, `bits`, `rate`, `ch`, `gain`, `dynamics`, `segDur`, and `crossfadeSeconds` for a `tl` timeline) also work; the daemon builds the descriptor. |
 | `GET /hls/media.m3u8?v=...` | variant VOD playlist: `EXT-X-VERSION:7`, `EXT-X-MAP`, `EXT-X-INDEPENDENT-SEGMENTS`, every segment listed with its exact duration, `EXT-X-ENDLIST`. Unknown source lengths are measured (frame-index walk), never estimated. |
 | `GET /hls/init.mp4?v=...` | the CMAF init header (codec config; the edit list carries encoder delay and the exact length) |
 | `GET /hls/seg/{n}.m4s?v=...` | media segment n (0-based). Cached segments serve with ranges and strong ETags; misses wait on the variant worker (within a 3-segment lookahead) or restart it at n. |
@@ -423,13 +423,30 @@ Things worth knowing before you build on it:
   timeline) and `durationSamples` (its own length), both on that clock, so
   a client need not probe the members itself. They are derived from the
   measured members, not part of the identity, so the digest does not cover
-  them. Today the server never crossfades, so the members tile exactly:
+  them. With no crossfade the members tile exactly:
   `offsetSamples[i+1] == offsetSamples[i] + durationSamples[i]`, and the
-  last member's end is `durationSeconds * envelopeRate`. The fields are
-  offsets and durations rather than a tiling assumption on purpose: a
-  render crossfade (should one ever ride the wire) makes consecutive
-  members overlap, so `offsetSamples + durationSamples` can exceed the next
-  member's `offsetSamples`. Build on the offsets, not on the tiling.
+  last member's end is `durationSeconds * envelopeRate`. Under a crossfade
+  the members overlap, so `offsetSamples + durationSamples` can exceed the
+  next member's `offsetSamples`. Build on the offsets, not on the tiling.
+- **`crossfadeSeconds` blends the seams, and is a render option.** Pass it
+  in the mint body to shape this response's `durationSeconds` and
+  `boundaries`: an equal-power blend of `crossfadeSeconds` at each of the
+  `members - 1` seams shortens the timeline by `(members - 1) *
+  crossfadeSeconds`. Then pass the **same** value on the signed
+  `master.m3u8` you build, exactly as you pass `format`, because the mint's
+  boundaries reflect the crossfade minted with and a stream rendered with a
+  different one disagrees with them. It is a render option, not identity:
+  the digest covers the members alone, so a queue minted with two different
+  crossfades keeps one `tl` and the two renders are kept apart by the cache.
+  Omit it (or send `0`) for a gapless butt-join, which is the default and
+  what a gapless album needs. It is refused on a single `src` URL (which has
+  no seam, being one file rather than a queue), when it is longer than the
+  shortest member can carry, or when it exceeds the largest blend buffer
+  (tens of seconds, the one bound that applies to a timeline of any length).
+  A one-member timeline is not refused for want of a seam, though: it has zero
+  seams, so an ordinary crossfade meets none of them (a butt-join), which lets
+  a queue-driven client send one render config whatever the queue length. Only
+  the blend-buffer bound can still refuse it.
 - **`202` means the mint had to measure.** A timeline's positions are a
   prefix sum, so every member's length is measured rather than read off
   its headers. That is a sub-millisecond walk for formats whose demuxer

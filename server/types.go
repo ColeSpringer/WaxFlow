@@ -312,6 +312,15 @@ type UploadResponse struct {
 // second endpoint.
 type TimelineRequest struct {
 	Srcs []TimelineSrc `json:"srcs"`
+	// CrossfadeSeconds blends each seam over this many seconds when the timeline
+	// is rendered; 0 (the default) is a gapless butt-join. It shapes this
+	// response's durationSeconds and boundaries only, and is not part of the
+	// timeline's identity: the digest covers the members alone, so two mints of
+	// one queue at different crossfades share a tl=. A client that mints with a
+	// crossfade must also pass the same crossfadeSeconds on the signed
+	// master.m3u8 it builds, since the boundaries here reflect the value minted
+	// with; see waxflow.MemberBoundary and ADR-0009.
+	CrossfadeSeconds float64 `json:"crossfadeSeconds,omitempty"`
 }
 
 // TimelineSrc is one member of a timeline request.

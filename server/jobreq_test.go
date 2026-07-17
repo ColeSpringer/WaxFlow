@@ -59,6 +59,9 @@ func TestJobRequestCoverage(t *testing.T) {
 			"is, and it is the reason that carries across rather than the field: a client that " +
 			"could name its members' identities could name the ones it wished were true, so a " +
 			"merge would concatenate whatever it was handed and call it unchanged",
+		"crossfadeSeconds": "a timeline-job field, set from the POST /hls/timeline body " +
+			"(TimelineRequest), not the /jobs wire body: a timeline is not a /jobs type, so " +
+			"jobRequest has no seam to blend and never carries it",
 	}
 
 	// Wire fields with no domain counterpart, and why. This direction needs

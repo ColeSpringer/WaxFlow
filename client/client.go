@@ -179,6 +179,13 @@ type CapsDelivery struct {
 // TimelineRequest is the POST /hls/timeline body: a play queue, in order.
 type TimelineRequest struct {
 	Srcs []TimelineSrc `json:"srcs"`
+	// CrossfadeSeconds blends each seam over this many seconds when the timeline
+	// is rendered; 0 (the default) is a gapless butt-join. It shapes the mint's
+	// durationSeconds and boundaries only and is not part of the identity, so two
+	// mints of one queue at different crossfades share a tl. A client that mints
+	// with a crossfade must pass the same crossfadeSeconds on the signed
+	// master.m3u8 it builds, since the boundaries reflect the value minted with.
+	CrossfadeSeconds float64 `json:"crossfadeSeconds,omitempty"`
 }
 
 // TimelineSrc is one member of a timeline request.
@@ -291,8 +298,10 @@ func (c *Client) Sign(ctx context.Context, req SignRequest) (*SignResponse, erro
 	return &v, nil
 }
 
-// CreateTimeline mints a multi-source timeline and returns the digest a tl=
-// parameter names, for a signed /hls/master.m3u8 over a whole play queue.
+// CreateTimeline mints a multi-source timeline from a play queue and returns
+// the digest a tl= parameter names, for a signed /hls/master.m3u8 over the whole
+// queue. It takes the request whole, like Sign, so the members and an optional
+// CrossfadeSeconds ride one value the wire mirrors.
 //
 // A member whose headers cannot declare an exact length has to be measured,
 // which means decoding it; the daemon then answers with a job rather than a
@@ -300,14 +309,15 @@ func (c *Client) Sign(ctx context.Context, req SignRequest) (*SignResponse, erro
 // FLACs, of tagged MP3s, or any queue minted before (the daemon memoizes per
 // file) returns the digest directly.
 //
+// A crossfade rides the response, not the digest: the returned boundaries and
+// duration reflect req.CrossfadeSeconds, but the render must pass the same
+// crossfadeSeconds on the master.m3u8 it signs, since the digest covers the
+// members alone. See TimelineRequest.CrossfadeSeconds.
+//
 // This package has no jobs surface, so following the job is GET /jobs/{id}
 // or its event stream; the finished job's timeline field carries the same
 // values this returns.
-func (c *Client) CreateTimeline(ctx context.Context, srcs []string) (tl *TimelineResponse, jobID string, err error) {
-	req := TimelineRequest{Srcs: make([]TimelineSrc, len(srcs))}
-	for i, src := range srcs {
-		req.Srcs[i] = TimelineSrc{Src: src}
-	}
+func (c *Client) CreateTimeline(ctx context.Context, req TimelineRequest) (tl *TimelineResponse, jobID string, err error) {
 	var v struct {
 		TimelineResponse
 		// The 202 body is the job, whose id is all this package can use.

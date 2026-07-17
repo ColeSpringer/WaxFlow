@@ -5,6 +5,7 @@
 package server_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -207,6 +208,260 @@ func TestTimelineBoundariesMixedRate(t *testing.T) {
 	if got := tl.Boundaries[1].OffsetSamples; got != 48000 {
 		t.Fatalf("member 1 starts at sample %d, want 48000 (member 0 resampled to the envelope rate), "+
 			"not its source length 44100", got)
+	}
+}
+
+// postTimeline posts a queue and returns the raw response, for callers that
+// assert on the status themselves.
+func postTimeline(t *testing.T, env *testEnv, req client.TimelineRequest) *http.Response {
+	t.Helper()
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return env.postJSON(t, "/hls/timeline", string(body))
+}
+
+// mintTimelineXfade posts a queue with a crossfade and returns the decoded 201.
+func mintTimelineXfade(t *testing.T, env *testEnv, refs []string, seconds float64) client.TimelineResponse {
+	t.Helper()
+	resp := postTimeline(t, env, client.TimelineRequest{Srcs: timelineSrcsOf(refs), CrossfadeSeconds: seconds})
+	raw := readBody(t, resp)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /hls/timeline (crossfade %v) = %d, want 201: %s", seconds, resp.StatusCode, raw)
+	}
+	var v client.TimelineResponse
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+// TestTimelineCrossfadeReshapesResponse pins A16 at the mint: crossfadeSeconds
+// shapes the response's duration and boundaries. A crossfade of X at each of the
+// N-1 seams shortens the timeline by (N-1)X, the members' raw durations are
+// unchanged, and their offsets overlap by X.
+func TestTimelineCrossfadeReshapesResponse(t *testing.T) {
+	env, refs := timelineEnv(t) // 48000, 24000, 72000 samples at 48 kHz
+	const seconds = 0.1
+	const x = 4800 // round(0.1 * 48000)
+	tl := mintTimelineXfade(t, env, refs, seconds)
+
+	// sum(members) - (N-1)X = 144000 - 2*4800 = 134400 samples = 2.8 s.
+	if want := (144000.0 - 2*float64(x)) / 48000.0; tl.DurationSeconds != want {
+		t.Fatalf("durationSeconds = %v, want %v (sum - (N-1)X)", tl.DurationSeconds, want)
+	}
+	wantDur := []int64{48000, 24000, 72000}
+	wantOff := []int64{0, 48000 - x, 48000 - x + 24000 - x} // 0, 43200, 62400
+	for i := range refs {
+		if tl.Boundaries[i].DurationSamples != wantDur[i] {
+			t.Errorf("boundaries[%d].durationSamples = %d, want the raw %d (a blend does not shorten a member)",
+				i, tl.Boundaries[i].DurationSamples, wantDur[i])
+		}
+		if tl.Boundaries[i].OffsetSamples != wantOff[i] {
+			t.Errorf("boundaries[%d].offsetSamples = %d, want %d", i, tl.Boundaries[i].OffsetSamples, wantOff[i])
+		}
+	}
+	// Consecutive members overlap: the crossfade shares the seam region.
+	for i := 0; i+1 < len(tl.Boundaries); i++ {
+		end := tl.Boundaries[i].OffsetSamples + tl.Boundaries[i].DurationSamples
+		if end <= tl.Boundaries[i+1].OffsetSamples {
+			t.Errorf("member %d ends at %d but member %d starts at %d; a crossfade must overlap them",
+				i, end, i+1, tl.Boundaries[i+1].OffsetSamples)
+		}
+	}
+}
+
+// TestTimelineCrossfadeKeepsOneDigest pins the identity decision A16 records in
+// ADR-0009: a crossfade is a render option, not part of the timeline's identity.
+// The same members minted with and without a crossfade name one tl=; only the
+// response the mint shapes differs.
+func TestTimelineCrossfadeKeepsOneDigest(t *testing.T) {
+	env, refs := timelineEnv(t)
+	plain := mintTimeline(t, env, refs)
+	faded := mintTimelineXfade(t, env, refs, 0.1)
+	if faded.Tl != plain.Tl {
+		t.Fatalf("crossfade changed the digest (%q vs %q); it is a render option, not identity", faded.Tl, plain.Tl)
+	}
+	if !(faded.DurationSeconds < plain.DurationSeconds) {
+		t.Fatalf("the crossfade did not take: faded duration %v is not shorter than plain %v",
+			faded.DurationSeconds, plain.DurationSeconds)
+	}
+}
+
+// TestTimelineCrossfadeMintRefusals pins that a crossfade the members cannot
+// carry, or a nonsensical one, is refused at the mint where the client can act
+// on it rather than at the first segment request.
+func TestTimelineCrossfadeMintRefusals(t *testing.T) {
+	env, refs := timelineEnv(t)
+	for _, tc := range []struct {
+		name    string
+		seconds float64
+	}{
+		{"a negative crossfade", -1},
+		{"a crossfade longer than the shortest member can carry", 100},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := postTimeline(t, env, client.TimelineRequest{Srcs: timelineSrcsOf(refs), CrossfadeSeconds: tc.seconds})
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("mint with a %v s crossfade = %d, want 400: %s", tc.seconds, resp.StatusCode, readBody(t, resp))
+			}
+		})
+	}
+}
+
+// renderTimeline drives a signed master to its media playlist and returns the
+// playlist's promised length and segment 0's bytes, so two renders of one
+// timeline can be compared.
+func renderTimeline(t *testing.T, env *testEnv, masterURL string) (totalSeconds float64, seg0 []byte) {
+	t.Helper()
+	master := readBody(t, keyless(t, env, masterURL))
+	var mediaURL string
+	for _, l := range playlistLines(master) {
+		if l != "" && l[0] != '#' {
+			mediaURL = "/hls/" + l
+		}
+	}
+	if mediaURL == "" {
+		t.Fatalf("no variant in the master playlist: %s", master)
+	}
+	_, segURIs, extinf := mediaURIs(t, readBody(t, keyless(t, env, mediaURL)))
+	for _, d := range extinf {
+		totalSeconds += d
+	}
+	if len(segURIs) == 0 {
+		t.Fatal("media playlist has no segments")
+	}
+	resp := keyless(t, env, "/hls/"+segURIs[0])
+	seg0 = readBody(t, resp)
+	if resp.StatusCode != 200 || len(seg0) == 0 {
+		t.Fatalf("segment 0 = %d (%d bytes)", resp.StatusCode, len(seg0))
+	}
+	return totalSeconds, seg0
+}
+
+// TestTimelineCrossfadeRender pins the render half of A16: the signed master
+// carries crossfadeSeconds, the media playlist promises the shortened length,
+// and the crossfaded render does not collide in the cache with the butt-joined
+// one. The two renders share one tl= and one canonical parameter set, so only
+// the crossfadeVersion the plan folds into the cache key keeps them apart; if it
+// did not, the faded render would serve the plain render's cached segment.
+func TestTimelineCrossfadeRender(t *testing.T) {
+	env, refs := timelineEnv(t)
+	tl := mintTimeline(t, env, refs)
+
+	// segDur 2 s puts both seams (at 1 s and 1.5 s) inside segment 0, so the
+	// blend is observable there.
+	base := map[string]string{"tl": tl.Tl, "format": "opus", "gain": "off", "segDur": "2"}
+	faded := map[string]string{"tl": tl.Tl, "format": "opus", "gain": "off", "segDur": "2", "crossfadeSeconds": "0.2"}
+
+	plainTotal, plainSeg0 := renderTimeline(t, env, mintHLS(t, env, base))
+	fadedTotal, fadedSeg0 := renderTimeline(t, env, mintHLS(t, env, faded))
+
+	// A 0.2 s blend at 2 seams shortens the timeline by ~0.4 s.
+	if !(fadedTotal < plainTotal-0.3) {
+		t.Fatalf("faded playlist promises %.3f s, plain %.3f s; a 0.2 s crossfade at 2 seams should shorten it ~0.4 s",
+			fadedTotal, plainTotal)
+	}
+	if bytes.Equal(plainSeg0, fadedSeg0) {
+		t.Fatal("the crossfaded and butt-joined renders returned identical segment 0 bytes: " +
+			"either the blend did not apply or the cache key did not separate the two renders of one tl=")
+	}
+}
+
+// TestTimelineCrossfadeSignRefusals pins that an invalid crossfade in a
+// URL-minting request is refused at sign time, not served: an oversized one on a
+// timeline (refused at plan time by checkCrossfade), and any crossfade on a
+// single source (which has no seam).
+func TestTimelineCrossfadeSignRefusals(t *testing.T) {
+	env, refs := timelineEnv(t)
+	tl := mintTimeline(t, env, refs)
+	c, err := client.New(env.ts.URL, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		params map[string]string
+	}{
+		{"a crossfade longer than the shortest member is refused at plan time",
+			map[string]string{"tl": tl.Tl, "format": "opus", "gain": "off", "crossfadeSeconds": "100"}},
+		{"a crossfade on a single source is refused",
+			map[string]string{"src": refs[0], "format": "opus", "crossfadeSeconds": "0.1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := c.Sign(t.Context(), client.SignRequest{Path: "/hls/master.m3u8", Params: tc.params})
+			switch {
+			case err == nil:
+				t.Fatal("signing accepted an invalid crossfade")
+			case waxerr.CodeOf(err) != waxerr.CodeInvalidRequest:
+				t.Fatalf("refusal was %v, want an invalid-request", waxerr.CodeOf(err))
+			}
+		})
+	}
+}
+
+// TestTimelineCrossfadeSingleMemberIsButtJoin pins a deliberate N=1 edge: a
+// one-member timeline accepts a crossfade and applies it to its zero seams (a
+// butt-join) rather than refusing it. This is the engine's documented N=1
+// handling (checkCrossfade "makes N=1 pass with no special case") surfaced on
+// the wire, and it is on purpose: a queue-driven client sends one render for a
+// queue of any length, so a crossfade that happens to meet a single-track queue
+// must no-op, not 400. It differs from a single src= URL, which refuses a
+// crossfade because that is a different kind of URL (one file, no seam by type,
+// not a timeline with a count of one).
+func TestTimelineCrossfadeSingleMemberIsButtJoin(t *testing.T) {
+	env, refs := timelineEnv(t)
+	one := refs[:1]
+	plain := mintTimeline(t, env, one)
+	faded := mintTimelineXfade(t, env, one, 0.5)
+	if faded.Tl != plain.Tl {
+		t.Fatalf("a crossfade changed a one-member timeline's digest (%q vs %q)", faded.Tl, plain.Tl)
+	}
+	if len(faded.Boundaries) != 1 {
+		t.Fatalf("got %d boundaries, want 1", len(faded.Boundaries))
+	}
+	if faded.DurationSeconds != plain.DurationSeconds {
+		t.Errorf("a crossfade shortened a seamless one-member timeline: %v vs %v (there is no seam to blend)",
+			faded.DurationSeconds, plain.DurationSeconds)
+	}
+	// The one bound that still applies at N=1 is the blend buffer: an absurd
+	// crossfade is refused even with no seam, which is why the no-op is scoped to
+	// "for want of a seam" and not "never refused".
+	resp := postTimeline(t, env, client.TimelineRequest{Srcs: timelineSrcsOf(one), CrossfadeSeconds: 100})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("an oversized crossfade on a one-member timeline = %d, want 400 (the blend-buffer bound "+
+			"applies at any length): %s", resp.StatusCode, readBody(t, resp))
+	}
+}
+
+// TestClientCreateTimelineCrossfade pins that the Go client can actually mint a
+// crossfaded timeline: CreateTimeline takes the request whole (like Sign), so
+// its CrossfadeSeconds reaches the wire and the response reflects it. The field
+// on TimelineRequest would be unreachable through the client without this.
+func TestClientCreateTimelineCrossfade(t *testing.T) {
+	env, refs := timelineEnv(t)
+	c, err := client.New(env.ts.URL, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tl, jobID, err := c.CreateTimeline(t.Context(), client.TimelineRequest{
+		Srcs: timelineSrcsOf(refs), CrossfadeSeconds: 0.1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if jobID != "" || tl == nil {
+		t.Fatalf("CreateTimeline returned job %q / tl %v, want an inline digest", jobID, tl)
+	}
+	if len(tl.Boundaries) != len(refs) {
+		t.Fatalf("got %d boundaries, want one per member (%d)", len(tl.Boundaries), len(refs))
+	}
+	// The crossfade took: consecutive members overlap (a butt-join would tile).
+	end0 := tl.Boundaries[0].OffsetSamples + tl.Boundaries[0].DurationSamples
+	if tl.Boundaries[1].OffsetSamples >= end0 {
+		t.Errorf("member 1 starts at %d and member 0 ends at %d; the client's crossfade did not reach the wire",
+			tl.Boundaries[1].OffsetSamples, end0)
 	}
 }
 

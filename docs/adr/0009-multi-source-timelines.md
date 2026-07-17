@@ -82,12 +82,24 @@ pool will hold; one sample more and every seam of every timeline becomes a
 16 MB allocate-and-discard.
 
 **The digest is untouched, and that is what keeps the identity section above
-true.** The server never crossfades: the HTTP surface has no way to ask for
-one, and `timelineOptions` is the single place that says so. A digest covering
-the members alone is therefore still a complete identity, because there is no
-second timeline the same members could name. The day something does thread a
-crossfade to the wire is the day the digest has to cover it, and that is the
-question to answer then rather than now.
+true.** A crossfade is a rendering option, not a timeline-identity input: it
+rides the signed HLS descriptor and the `POST /hls/timeline` request beside
+`from`/`to`/`format`, and the digest covers the members alone. That digest is
+still a complete identity, because two renders of one timeline that differ only
+by crossfade are the same members and are separated downstream by the cache key
+(`crossfadeVersion`, which `timelineVersions` already emits for a nonzero
+crossfade), not by a second digest. The plan and the run agree because both read
+one signed descriptor and convert its seconds to envelope samples the same way
+(`waxflow.CrossfadeSamples`), which is the property storing the samples would
+have bought, obtained by signing the descriptor instead. `timelineOptions` is
+the single construction site that carries the render's crossfade to both.
+
+*Amended by A16 (2026-07-17):* the original text left the wire crossfade as a
+question to answer later, "the day something does thread a crossfade to the wire
+is the day the digest has to cover it." A16 threaded it and answered it the
+other way, rendering over identity: the digest still does not cover the
+crossfade, because the cache key already keeps two blends of one timeline apart
+and the store holds one entry for both.
 
 ### Advisory lengths are enforced, not trusted
 

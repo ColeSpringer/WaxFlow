@@ -24,6 +24,19 @@ func TestDescriptorRoundTrip(t *testing.T) {
 	}
 }
 
+// TestDescriptorCrossfadeRoundTrip pins that a timeline's crossfade survives the
+// wire form, so a signed URL carries the blend the mint was asked for.
+func TestDescriptorCrossfadeRoundTrip(t *testing.T) {
+	d := Descriptor{Tl: strings.Repeat("a", 43), Format: "opus", CrossfadeSeconds: 0.25}
+	got, err := DecodeDescriptor(d.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CrossfadeSeconds != 0.25 {
+		t.Fatalf("crossfadeSeconds round-tripped to %v, want 0.25", got.CrossfadeSeconds)
+	}
+}
+
 func TestDescriptorLadder(t *testing.T) {
 	d := Descriptor{Src: "s", ID: "i", Format: "opus", Bitrates: []int{64, 96, 160}}
 	got, err := DecodeDescriptor(d.Encode())
@@ -61,6 +74,9 @@ func TestDescriptorRejections(t *testing.T) {
 		"zero-ladder-rung": enc(`{"ver":1,"src":"s","id":"i","format":"opus","bitrates":[96,0]}`),
 		"both-bitrates":    enc(`{"ver":1,"src":"s","id":"i","format":"opus","bitrate":96,"bitrates":[64]}`),
 		"oversized":        enc(`{"ver":1,"src":"` + strings.Repeat("a", maxDescriptorBytes) + `","id":"i","format":"opus"}`),
+		"neg-crossfade":    enc(`{"ver":1,"src":"s","id":"i","format":"opus","crossfadeSeconds":-1}`),
+		// A crossfade blends a timeline's seam; a single source has none.
+		"src-and-crossfade": enc(`{"ver":1,"src":"s","id":"i","format":"opus","crossfadeSeconds":0.5}`),
 	}
 	for name, v := range cases {
 		if _, err := DecodeDescriptor(v); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {

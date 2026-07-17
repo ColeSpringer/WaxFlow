@@ -400,7 +400,7 @@ func (s *Server) validateMergeRequest(ctx context.Context, body jobRequest, req 
 	// Planning the envelope now is what makes a 201 mean something: a queue
 	// whose members cannot be concatenated (one laid out for other speakers,
 	// say) fails here rather than after the caller has waited for the encode.
-	env, err := waxflow.ConcatTrack(tracks, s.timelineOptions())
+	env, err := waxflow.ConcatTrack(tracks, s.timelineOptions(0))
 	if err != nil {
 		return nil, err
 	}

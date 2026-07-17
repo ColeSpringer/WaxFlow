@@ -475,3 +475,45 @@ func TestTimelineJobResultIsItsDigest(t *testing.T) {
 		t.Errorf("result timeline = %+v, want 2 members and a real duration", tl)
 	}
 }
+
+// TestTimelineCrossfadeThroughJob pins that the 202 async mint threads the
+// crossfade too, so a cold queue that becomes a job shapes the same
+// crossfade-shortened response the inline fast path would. The sync path pins
+// the exact arithmetic (TestTimelineCrossfadeReshapesResponse); here it is
+// enough to prove the crossfade reached the job's mint, which the members
+// overlapping shows (a butt-join would tile them exactly).
+func TestTimelineCrossfadeThroughJob(t *testing.T) {
+	env := newTestEnv(t, func(cfg *server.Config) {
+		cfg.JobsDir = filepath.Join(t.TempDir(), "jobs")
+		cfg.TimelineDir = filepath.Join(t.TempDir(), "timelines")
+	})
+	raw, err := os.ReadFile("../testdata/noise-cbr320.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.root, "noise.mp3"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resp := env.postJSON(t, "/hls/timeline",
+		`{"srcs":[{"src":"lib/noise.mp3"},{"src":"lib/noise.mp3"}],"crossfadeSeconds":0.01}`)
+	b := readBody(t, resp)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Skipf("the cold MP3 queue minted inline (%d), so there is no timeline job to check: %s",
+			resp.StatusCode, b)
+	}
+	var created jobs.Job
+	if err := json.Unmarshal(b, &created); err != nil {
+		t.Fatal(err)
+	}
+	job := awaitJob(t, env, created.ID)
+	tl := job.Timeline
+	if tl == nil || len(tl.Boundaries) != 2 {
+		t.Fatalf("the finished crossfaded timeline job carries no boundaries: %+v", job)
+	}
+	end0 := tl.Boundaries[0].OffsetSamples + tl.Boundaries[0].DurationSamples
+	if tl.Boundaries[1].OffsetSamples >= end0 {
+		t.Errorf("member 1 starts at %d and member 0 ends at %d; the async job's members tile instead of "+
+			"overlapping, so the crossfade did not thread through the job",
+			tl.Boundaries[1].OffsetSamples, end0)
+	}
+}

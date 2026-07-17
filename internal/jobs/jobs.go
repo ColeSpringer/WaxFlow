@@ -124,6 +124,15 @@ type Request struct {
 	// mints nothing and its product is a file.
 	Srcs []string `json:"srcs,omitempty"`
 
+	// CrossfadeSeconds is a timeline job's per-seam blend in seconds, carried so
+	// the 202 async mint shapes the same durationSeconds and boundaries the 201
+	// fast path returns. It is a rendering option, not part of the members that
+	// make the digest, so it never changes what tl= the job produces; a slow
+	// queue and a fast one with the same members and crossfade name one timeline.
+	// Timeline-only, and set from the POST /hls/timeline body rather than the
+	// /jobs wire body (a timeline is not a /jobs type).
+	CrossfadeSeconds float64 `json:"crossfadeSeconds,omitempty"`
+
 	// MemberTitles are optional per-member chapter titles for a merge,
 	// index-aligned to Srcs. An mp4-family merge stamps a QuickTime chapter
 	// text track, one chapter per member; a non-empty MemberTitles[i] is that

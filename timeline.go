@@ -810,6 +810,43 @@ func ConcatBoundaries(tracks []container.Track, opts ConcatOptions) ([]MemberBou
 	return bounds, env, nil
 }
 
+// CrossfadeSamples converts a crossfade expressed in seconds into the envelope
+// samples ConcatOptions.Crossfade carries. The wire spells a crossfade in
+// seconds because a caller cannot know the envelope rate (the maximum member
+// rate) before the members are measured, and so cannot express the blend in the
+// samples the option wants; this is where the two meet.
+//
+// The rate is read from the same concatLayout ConcatTrack, Concat, and
+// ConcatBoundaries read, so a crossfade converted here is measured on exactly
+// the rate the run blends on. That is what lets a plan and a run convert one
+// signed number the same way and never come to disagree about how long the seam
+// is: the envelope is a pure function of the members' formats, which are pinned,
+// so the count is deterministic for a given set of members. The result is
+// rounded to the nearest sample.
+//
+// A non-positive (or NaN) seconds is a butt-join, the zero the default every
+// timeline that does not ask for a blend gets. An absurdly large seconds is
+// clamped to the int64 ceiling rather than wrapped, so it reaches checkCrossfade
+// as the refusal it is ("more than this timeline can blend") instead of a
+// silently wrapped small value: the fit and memory bounds are checkCrossfade's
+// to enforce inside ConcatTrack, not this converter's.
+func CrossfadeSamples(tracks []container.Track, seconds float64) (int64, error) {
+	if !(seconds > 0) {
+		// False for <=0 and for NaN. Validation refuses a NaN upstream, but
+		// guarding it here keeps a bad value from ever reaching the conversion.
+		return 0, nil
+	}
+	env, _, _, _, err := concatLayout(tracks, ConcatOptions{})
+	if err != nil {
+		return 0, err
+	}
+	x := math.Round(seconds * float64(env.Rate))
+	if x >= float64(math.MaxInt64) {
+		return math.MaxInt64, nil
+	}
+	return int64(x), nil
+}
+
 // checkCrossfade holds a crossfade to what the members and the envelope can
 // actually carry: a legal length, a blend that fits one pooled buffer, and a
 // zone that fits every member it lands on.

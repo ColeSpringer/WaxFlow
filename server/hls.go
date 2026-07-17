@@ -56,7 +56,7 @@ var hlsParamNames = map[string]bool{
 var hlsMintParamNames = map[string]bool{
 	"src": true, "tl": true, "format": true, "bitrate": true, "bitrates": true,
 	"bits": true, "rate": true, "ch": true, "gain": true, "dynamics": true,
-	"segDur": true, "from": true, "to": true,
+	"segDur": true, "from": true, "to": true, "crossfadeSeconds": true,
 }
 
 // hlsSource is one resolved source as a worker needs it. Workers outlive
@@ -399,7 +399,17 @@ func (s *Server) planHLSVariant(desc hls.Descriptor, tracks []container.Track, m
 	// track can name. See PlanSegmentsTimeline.
 	var plan *waxflow.SegmentPlan
 	if desc.Tl != "" {
-		plan, err = s.eng.PlanSegmentsTimeline(tracks, s.timelineOptions(), opts, desc.SegDur)
+		// The descriptor spells the crossfade in seconds; convert it on the
+		// members' fixed formats, exactly as the run's Concat will (openHLSMedia),
+		// so the plan's length and the run's cannot disagree. A crossfade too long
+		// for the members is refused here at plan time (checkCrossfade inside
+		// ConcatTrack), so an oversized or tampered value 400s rather than serving
+		// a playlist the stream cannot fill.
+		var crossfade int64
+		if crossfade, err = waxflow.CrossfadeSamples(tracks, desc.CrossfadeSeconds); err != nil {
+			return fail(err)
+		}
+		plan, err = s.eng.PlanSegmentsTimeline(tracks, s.timelineOptions(crossfade), opts, desc.SegDur)
 	} else {
 		// The span narrows the track before it is planned, which is what
 		// makes a virtual track a stream in its own right: its segment 0 is
@@ -547,7 +557,15 @@ func (s *Server) handleHLSMaster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tracks := req.tracks()
-	duration, err := hlsDuration(desc, tracks, s.timelineOptions())
+	crossfade, err := waxflow.CrossfadeSamples(tracks, desc.CrossfadeSeconds)
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	// The TTL is sized from the delivered duration, which a crossfade shortens;
+	// hlsDuration reads the same copts the variants plan with so the lifetime and
+	// the playlists agree about how long the stream is.
+	duration, err := hlsDuration(desc, tracks, s.timelineOptions(crossfade))
 	if err != nil {
 		s.writeError(w, err)
 		return
@@ -736,6 +754,7 @@ func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64,
 	members, tl := req.members, req.desc.Tl != ""
 	opts, plan, key, rmx := req.opts, req.plan, req.key, req.remux
 	sp := descSpan(req.desc)
+	xfade := req.desc.CrossfadeSeconds
 	return func(start int64, notify func(int64), exit func(error)) (context.CancelFunc, error) {
 		release, ok := s.pools.AcquireLive()
 		if !ok {
@@ -753,7 +772,7 @@ func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64,
 			defer s.store.Unpin(key)
 			defer release()
 			defer cancel()
-			exit(s.runHLSWorker(ctx, members, tl, sp, opts, plan, rmx, variant, start, notify))
+			exit(s.runHLSWorker(ctx, members, tl, sp, xfade, opts, plan, rmx, variant, start, notify))
 		}()
 		return cancel, nil
 	}
@@ -812,7 +831,7 @@ func (s *Server) runHLSRemuxWorker(ctx context.Context, m hlsSource, opts waxflo
 // runHLSWorker is one variant worker: its own input, opened afresh, the init
 // header if the variant lacks one, then segments from start to end of
 // stream, each published atomically and announced.
-func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool, sp span,
+func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool, sp span, xfadeSeconds float64,
 	opts waxflow.TranscodeOptions, plan *waxflow.SegmentPlan, rmx *waxflow.RemuxSegmentPlan,
 	variant *cache.Variant, start int64, notify func(int64)) error {
 	publish := func(seg mp4.Segment) error {
@@ -831,7 +850,7 @@ func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool,
 		return s.logHLSWorker(ref, rungName(true), len(members), start,
 			s.runHLSRemuxWorker(ctx, members[0], opts, rmx, variant, start, publish))
 	}
-	med, err := s.openHLSMedia(ctx, members, tl, sp)
+	med, err := s.openHLSMedia(ctx, members, tl, sp, xfadeSeconds)
 	if err != nil {
 		return err
 	}
@@ -862,8 +881,11 @@ func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool,
 // returned, so a request context threaded in here would kill a member's
 // first read the moment the client disconnected, which is precisely what
 // read-behind exists not to do.
+// xfadeSeconds is the descriptor's crossfade, converted here on the members the
+// same way planHLSVariant did, so plan and run describe one blended length. It
+// is ignored for a single-track stream, which has no seam.
 func (s *Server) openHLSMedia(ctx context.Context, members []hlsSource, tl bool,
-	sp span) (format.Media, error) {
+	sp span, xfadeSeconds float64) (format.Media, error) {
 	if !tl {
 		med, err := s.openMember(ctx, members[0])
 		if err != nil || !sp.narrowed() {
@@ -879,13 +901,22 @@ func (s *Server) openHLSMedia(ctx context.Context, members []hlsSource, tl bool,
 		return sl, nil
 	}
 	srcs := make([]waxflow.ConcatSource, len(members))
+	tracks := make([]container.Track, len(members))
 	for i, m := range members {
 		srcs[i] = waxflow.ConcatSource{
 			Track: m.Track,
 			Open:  func() (format.Media, error) { return s.openMember(ctx, m) },
 		}
+		tracks[i] = m.Track
 	}
-	return waxflow.Concat(srcs, s.timelineOptions())
+	// The run converts the descriptor's crossfade the same way the plan did
+	// (planHLSVariant), on the same members, so the blended length the worker
+	// delivers is the one the playlist promised.
+	crossfade, err := waxflow.CrossfadeSamples(tracks, xfadeSeconds)
+	if err != nil {
+		return nil, err
+	}
+	return waxflow.Concat(srcs, s.timelineOptions(crossfade))
 }
 
 // openMember resolves one source, enforces the identity the plan was made
@@ -981,6 +1012,17 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string
 	if d.Ch, err = atoi("ch"); err != nil {
 		return hls.Descriptor{}, 0, err
 	}
+	if v := params["crossfadeSeconds"]; v != "" {
+		if d.CrossfadeSeconds, err = strconv.ParseFloat(v, 64); err != nil {
+			return bad("crossfadeSeconds %q: want seconds", v)
+		}
+		// Guard before Encode: json.Marshal rejects a NaN or Inf float, so an
+		// unvalidated one would panic rather than 400. This is the same rule the
+		// descriptor decode applies, applied a step earlier on the raw value.
+		if err := checkCrossfadeSeconds(d.CrossfadeSeconds); err != nil {
+			return hls.Descriptor{}, 0, err
+		}
+	}
 	if v := params["segDur"]; v != "" {
 		if d.SegDur, err = strconv.ParseFloat(v, 64); err != nil {
 			return bad("segDur %q: want seconds", v)
@@ -1040,7 +1082,11 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string
 			return hls.Descriptor{}, 0, err
 		}
 	}
-	duration, err := hlsDuration(out, tracks, s.timelineOptions())
+	crossfade, err := waxflow.CrossfadeSamples(tracks, out.CrossfadeSeconds)
+	if err != nil {
+		return hls.Descriptor{}, 0, err
+	}
+	duration, err := hlsDuration(out, tracks, s.timelineOptions(crossfade))
 	if err != nil {
 		return hls.Descriptor{}, 0, err
 	}
