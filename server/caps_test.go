@@ -69,6 +69,31 @@ func TestDeliveryProfilesAreHonest(t *testing.T) {
 	}
 }
 
+// TestCutFormatsAreHonest pins the /caps cut advertisement to the same
+// discipline as the profiles: delivery.cutFormats is non-empty and every
+// format on it is one this build actually serves (a live output row), so the
+// wire never offers a cut the daemon cannot take. The source-of-truth list and
+// its dual-surface reachability live in waxflow.TestCutFormatsIsHonest; this
+// keeps the wire shape mechanically inside the build's live outputs.
+func TestCutFormatsAreHonest(t *testing.T) {
+	caps := buildCaps(true, true, true, true)
+
+	if len(caps.Delivery.CutFormats) == 0 {
+		t.Fatal("delivery.cutFormats is empty; this build serves the cut rung and must advertise it")
+	}
+	live := map[string]bool{}
+	for _, o := range waxflow.Outputs() {
+		if o.Live {
+			live[o.Name] = true
+		}
+	}
+	for _, f := range caps.Delivery.CutFormats {
+		if !live[f] {
+			t.Errorf("cutFormats advertises %q, which has no live output row", f)
+		}
+	}
+}
+
 // TestCapsDSPIsHonest pins the /caps DSP slot to the same discipline as
 // TestDeliveryProfilesAreHonest: every advertised value must be one the
 // daemon actually accepts, and every advertised number must be the one the

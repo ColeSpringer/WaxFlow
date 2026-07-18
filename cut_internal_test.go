@@ -3,6 +3,7 @@ package waxflow
 import (
 	"io"
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
@@ -591,6 +592,68 @@ func TestCutCodecsIsAnAllowlist(t *testing.T) {
 				t.Errorf("code = %v, want a decline: rung 3 serves %v correctly", got, tc.id)
 			}
 		})
+	}
+}
+
+// TestCutFormatsIsHonest is the source of truth for the /caps
+// delivery.cutFormats advertisement: it pins the exact list and proves every
+// name on it is reachable on both surfaces the cut serves. The server- and
+// client-side wire tests defer here, so the advertisement cannot drift from
+// what the rung actually does.
+func TestCutFormatsIsHonest(t *testing.T) {
+	got := CutFormats()
+	if want := []string{"opus", "aac"}; !slices.Equal(got, want) {
+		t.Fatalf("CutFormats() = %v, want %v", got, want)
+	}
+
+	// Index the output table by name so a returned name can be checked against
+	// its own row's codec and surfaces.
+	byName := map[string]output{}
+	for _, o := range outputs {
+		byName[o.name] = o
+	}
+	segmented := map[string]bool{}
+	for _, name := range SegmentedFormats() {
+		segmented[name] = true
+	}
+	for _, name := range got {
+		o, ok := byName[name]
+		if !ok {
+			t.Fatalf("CutFormats() returned %q, which is not an output format", name)
+		}
+		if !Cuttable(container.Track{Codec: o.codecID}) {
+			t.Errorf("%q is advertised for cut but its codec %v is not Cuttable", name, o.codecID)
+		}
+		if !o.live {
+			t.Errorf("%q is advertised for cut but has no live progressive form", name)
+		}
+		if !segmented[name] {
+			t.Errorf("%q is advertised for cut but has no segmented (HLS) form", name)
+		}
+	}
+
+	// Divergence guard: the set of cuttable output formats that are live must
+	// equal the set that are segmented. Today both are {opus, aac}. The day a
+	// cuttable codec lands that is live-but-not-segmented (or the reverse), this
+	// fires, forcing a conscious choice (split cutFormats per surface, or accept
+	// the conservative single-surface exclusion CutFormats already makes) rather
+	// than silently over- or under-advertising one surface.
+	var cuttableLive, cuttableSegmented []string
+	for _, o := range outputs {
+		if _, ok := cutCodecs[o.codecID]; !ok {
+			continue
+		}
+		if o.live {
+			cuttableLive = append(cuttableLive, o.name)
+		}
+		if o.hls != nil {
+			cuttableSegmented = append(cuttableSegmented, o.name)
+		}
+	}
+	if !slices.Equal(cuttableLive, cuttableSegmented) {
+		t.Errorf("cuttable formats diverge across surfaces: live=%v segmented=%v; "+
+			"CutFormats() advertises only the intersection, so one surface is now under- or over-served",
+			cuttableLive, cuttableSegmented)
 	}
 }
 

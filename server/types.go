@@ -281,6 +281,14 @@ type CapsDelivery struct {
 	HLS         bool `json:"hls"`
 	// HLSFormats are the output formats with a segmented (fMP4) form.
 	HLSFormats []string `json:"hlsFormats,omitempty"`
+	// CutFormats are the output formats the cut rung serves without
+	// re-encoding; a from/to span requested as one of these is delivered by
+	// moving the source's packets, on both /stream and HLS. Cut is a built-in
+	// engine capability the honesty tests keep non-empty, so this build never
+	// omits the field despite omitempty: a client seeing it absent should read
+	// that as a server too old to advertise cut (fall back to inferring), not as
+	// an offer of no cuts.
+	CutFormats []string `json:"cutFormats,omitempty"`
 	Jobs       bool     `json:"jobs"`
 	Uploads    bool     `json:"uploads"`
 	// PID: pid:<ULID> source references resolve against a WaxBin
@@ -345,8 +353,8 @@ type TimelineResponse struct {
 	// Boundaries are the per-member sample offsets and durations on the
 	// envelope timeline, in order. They are derived from the measured members,
 	// not part of the timeline's identity, so the digest does not cover them.
-	// Offsets overlap under a crossfade; see waxflow.MemberBoundary. Today the
-	// server never crossfades, so at mint the members tile exactly.
+	// Offsets overlap under a crossfade; see waxflow.MemberBoundary. Without a
+	// crossfade the members tile exactly.
 	Boundaries []waxflow.MemberBoundary `json:"boundaries"`
 }
 
@@ -402,6 +410,7 @@ func buildCaps(jobs, uploads, pid, timelines bool) Caps {
 			Progressive: true,
 			HLS:         true,
 			HLSFormats:  waxflow.SegmentedFormats(),
+			CutFormats:  waxflow.CutFormats(),
 			Jobs:        jobs,
 			Uploads:     uploads,
 			PID:         pid,

@@ -11,8 +11,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
+	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/client"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/waxerr"
@@ -145,7 +147,7 @@ func TestTimelineEndToEnd(t *testing.T) {
 
 // TestTimelineBoundaries pins A17: the mint reports per-member sample offsets
 // and durations at the envelope rate, so a client need not re-probe every
-// member to know where each one lands. The server never crossfades, so the
+// member to know where each one lands. This mint requests no crossfade, so the
 // members tile exactly: boundaries[0] starts at 0, each starts where the last
 // ends, and the last one's end is the whole timeline's length.
 func TestTimelineBoundaries(t *testing.T) {
@@ -626,5 +628,16 @@ func TestTimelineCapsAreHonest(t *testing.T) {
 	}
 	if caps.Delivery.MaxTimelineMembers != 1000 {
 		t.Fatalf("maxTimelineMembers = %d, want the enforced 1000", caps.Delivery.MaxTimelineMembers)
+	}
+
+	// The cut/HLS wire coverage rides this enabled-daemon client scaffold rather
+	// than standing up a second one: this is the only place a real client.Caps()
+	// over HTTP proves the newly-mirrored client Delivery.CutFormats and
+	// Delivery.HLSFormats carry the right JSON tags and survive the wire.
+	if want := waxflow.CutFormats(); !slices.Equal(caps.Delivery.CutFormats, want) {
+		t.Errorf("delivery.cutFormats = %v over the wire, want %v", caps.Delivery.CutFormats, want)
+	}
+	if want := waxflow.SegmentedFormats(); !slices.Equal(caps.Delivery.HLSFormats, want) {
+		t.Errorf("delivery.hlsFormats = %v over the wire, want %v", caps.Delivery.HLSFormats, want)
 	}
 }

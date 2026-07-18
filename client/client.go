@@ -164,8 +164,17 @@ type CapsOutput struct {
 type CapsDelivery struct {
 	Progressive bool `json:"progressive"`
 	HLS         bool `json:"hls"`
-	Jobs        bool `json:"jobs"`
-	Uploads     bool `json:"uploads"`
+	// HLSFormats are the output formats with a segmented (fMP4) form.
+	HLSFormats []string `json:"hlsFormats,omitempty"`
+	// CutFormats are the output formats the cut rung serves without
+	// re-encoding; a from/to span requested as one of these is delivered by the
+	// daemon moving the source's packets, on both /stream and HLS. A daemon new
+	// enough to advertise cut always sends a non-empty list, so this field
+	// absent means a server too old to advertise cut: fall back to inferring cut
+	// availability, do not read it as an offer of no cuts.
+	CutFormats []string `json:"cutFormats,omitempty"`
+	Jobs       bool     `json:"jobs"`
+	Uploads    bool     `json:"uploads"`
 	// PID: the daemon resolves pid:<ULID> source references against a
 	// WaxBin catalog (a build with a catalog resolver).
 	PID bool `json:"pid"`

@@ -304,7 +304,10 @@ served by moving the source's own packets into a new stream: no decode, no
 re-encode, no generation loss. The head and tail land exactly where asked, since
 their snap-to-packet slop becomes the stream's gapless trims. It needs a
 source-matching format, because `format=auto` resolves to `wav` and would
-transcode, so a span that must not re-encode names its codec explicitly. It
+transcode, so a span that must not re-encode names its codec explicitly. A
+client can feature-detect the formats that engage this rung from `/caps`
+`delivery.cutFormats` instead of inferring cut availability from the source
+codec plus a source-matching `format=`. It
 serves both progressive `/stream` and segmented HLS: over HLS each media segment
 holds the kept access units, and a worker restarted at a mid-stream segment
 reproduces a continuous run's segment bytes exactly, since the packets are the
@@ -389,9 +392,10 @@ session.
 Segments are `styp` + `moof`+`mdat` fragments, boundaries snapped to
 whole encoder frames (`segDur` is a target; the playlist carries exact
 durations), all sync samples, decode timeline in sample units. Formats
-with a segmented form: `opus`, `flac`, `alac`, `aac` (see `/caps`
-`delivery.hlsFormats`). A `410 source-changed` means the file changed
-since minting: re-mint and reload.
+with a segmented form: `opus`, `flac`, `aac`, `alac` (see `/caps`
+`delivery.hlsFormats`); of these, `opus` and `aac` also cut over HLS without
+re-encoding (see `/caps` `delivery.cutFormats`). A `410 source-changed` means
+the file changed since minting: re-mint and reload.
 
 ### Multi-source timelines (`tl`)
 
@@ -520,6 +524,7 @@ is:
                    {"name": "aac", "live": true, "exts": ["m4a", "aac"]},
                    {"name": "alac", "live": true, "exts": []}],
       "delivery": {"progressive": true, "hls": true, "hlsFormats": ["opus", "flac", "aac", "alac"],
+                   "cutFormats": ["opus", "aac"],
                    "jobs": false, "uploads": false, "pid": false,
                    "timelines": true, "maxTimelineMembers": 1000},
       "profiles": {

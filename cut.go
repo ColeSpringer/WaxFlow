@@ -159,6 +159,23 @@ func Cuttable(track container.Track) bool {
 	return ok
 }
 
+// CutFormats lists the output formats the cut rung serves without
+// re-encoding, in table order. A format qualifies only where the cut is
+// reachable on every surface it may be asked for: its codec is in the cut
+// allowlist, it has a live progressive form (/stream can serve it), and it
+// has a segmented (HLS) form. So the one flat list is honest on both
+// surfaces. A client names one of these (with a from/to span) to reach the
+// cut; format=auto never does. Today: opus and aac.
+func CutFormats() []string {
+	var names []string
+	for _, o := range outputs {
+		if _, ok := cutCodecs[o.codecID]; ok && o.live && o.hls != nil {
+			names = append(names, o.name)
+		}
+	}
+	return names
+}
+
 // cutWindow is a kept range of the source's decode timeline. A to of -1 means
 // "to the end of the stream", which is what a ToEnd span becomes: the walk keeps
 // every packet from from onward, and the arithmetic resolves the length from the
