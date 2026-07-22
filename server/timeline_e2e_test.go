@@ -16,6 +16,7 @@ import (
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/client"
+	"github.com/colespringer/waxflow/dsp/silence"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -639,5 +640,8 @@ func TestTimelineCapsAreHonest(t *testing.T) {
 	}
 	if want := waxflow.SegmentedFormats(); !slices.Equal(caps.Delivery.HLSFormats, want) {
 		t.Errorf("delivery.hlsFormats = %v over the wire, want %v", caps.Delivery.HLSFormats, want)
+	}
+	if want := silence.Version; caps.DSP.SilenceDetector != want {
+		t.Errorf("dsp.silenceDetector = %q over the wire, want %q", caps.DSP.SilenceDetector, want)
 	}
 }

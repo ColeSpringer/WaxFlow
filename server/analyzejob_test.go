@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxflow/client"
 	"github.com/colespringer/waxflow/internal/jobs"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/waxerr"
@@ -500,4 +502,187 @@ func TestJobFieldsCoversEveryField(t *testing.T) {
 				"for the wrong type would go unchecked", tag)
 		}
 	}
+}
+
+// TestClientJobsLifecycle drives the whole jobs surface through the client
+// package, which is what makes docs/api.md's reference-consumer claim true
+// for jobs: create an analyze job, poll it to done, fetch the result, read
+// the event stream to its terminal event (the one pin of SSE framing through
+// the client), delete, and classify an unknown id by its typed code. The
+// typed-error half is the claim a raw-HTTP bridge cannot make: every failure
+// here must come back as a waxerr code, not a status to re-parse.
+func TestClientJobsLifecycle(t *testing.T) {
+	env := jobsEnv(t)
+	c, err := client.New(env.ts.URL, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+
+	created, err := c.CreateJob(ctx, client.JobRequest{Type: "analyze", Src: "lib/sine.wav", Silence: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == "" || created.Type != "analyze" || created.SchemaVersion != jobs.SchemaVersion {
+		t.Fatalf("created job = %+v, want an analyze job with an id at schema %d", created, jobs.SchemaVersion)
+	}
+	if created.Request.Src != "lib/sine.wav" || !created.Request.Silence {
+		t.Fatalf("echoed request = %+v; the client's fields did not survive the round trip", created.Request)
+	}
+	if created.Request.SourceID == "" {
+		t.Error("echoed request carries no sourceId; the echo-only mirror is missing or mistagged")
+	}
+
+	// Poll through the client to done, the loop every daemon manager runs.
+	deadline := time.Now().Add(10 * time.Second)
+	var job *client.Job
+	for {
+		if job, err = c.Job(ctx, created.ID); err != nil {
+			t.Fatal(err)
+		}
+		if job.State == "done" {
+			break
+		}
+		if job.State == "failed" || job.State == "canceled" {
+			t.Fatalf("job landed on %s: %+v", job.State, job.Error)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job still %s after 10s", job.State)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// The pointer mirrors are presence: a done analyze job has all three.
+	if job.Finished == nil {
+		t.Error("done job has a nil Finished; the pointer mirror lost the timestamp")
+	}
+	if job.Analysis == nil || job.Analysis.Silence == nil {
+		t.Fatalf("done job carries no silence summary: %+v", job.Analysis)
+	}
+	if job.Analysis.Silence.Version == "" {
+		t.Error("silence summary carries no detector version")
+	}
+
+	// The listing mirrors the server's envelope and holds the job.
+	list, err := c.Jobs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list.SchemaVersion != 1 {
+		t.Errorf("jobs list schemaVersion = %d, want 1", list.SchemaVersion)
+	}
+	if !slices.ContainsFunc(list.Jobs, func(j *client.Job) bool { return j.ID == created.ID }) {
+		t.Fatalf("Jobs() does not list %s", created.ID)
+	}
+
+	// The result through the client is byte-identical to a raw GET.
+	resp, err := c.JobResult(ctx, created.ID, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	viaClient := readBody(t, resp)
+	if want := readBody(t, env.get(t, "/jobs/"+created.ID+"/result", nil)); !bytes.Equal(viaClient, want) {
+		t.Fatalf("JobResult differs from a raw GET:\n client: %s\n    raw: %s", viaClient, want)
+	}
+
+	// The event stream: SSE headers, "event: job" framing, data lines that
+	// decode as job documents, and the stream ending on its own after the
+	// terminal event (on a done job the daemon replays the terminal snapshot
+	// and closes, so reading to EOF is bounded and proves the ending).
+	evCtx, evCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer evCancel()
+	ev, err := c.JobEvents(evCtx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ct := ev.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("events Content-Type = %q, want text/event-stream", ct)
+	}
+	stream := readBody(t, ev)
+	if !bytes.Contains(stream, []byte("event: job\ndata: ")) {
+		t.Fatalf("event stream carries no event: job frame: %q", stream)
+	}
+	var last client.Job
+	for _, line := range strings.Split(string(stream), "\n") {
+		if data, ok := strings.CutPrefix(line, "data: "); ok {
+			if err := json.Unmarshal([]byte(data), &last); err != nil {
+				t.Fatalf("event data does not decode as a job document: %v\n%s", err, data)
+			}
+		}
+	}
+	if last.ID != created.ID || last.State != "done" {
+		t.Fatalf("the stream's last event is job %q in state %q, want %s done", last.ID, last.State, created.ID)
+	}
+
+	// The result endpoint serves ranges, and WithHTTPClient can bring a
+	// range-requesting transport (a resumable download), so a 206 is a
+	// success JobResult must pass through, not an envelope to decode. The
+	// default transport never asks for one, which is why reaching this
+	// takes a header-injecting round tripper.
+	ranged, err := client.New(env.ts.URL, testKey,
+		client.WithHTTPClient(&http.Client{Transport: rangeInjector{next: http.DefaultTransport}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	part, err := ranged.JobResult(ctx, created.ID, -1)
+	if err != nil {
+		t.Fatalf("ranged JobResult: %v", err)
+	}
+	if part.StatusCode != http.StatusPartialContent {
+		t.Fatalf("ranged JobResult = %d, want 206", part.StatusCode)
+	}
+	if got := readBody(t, part); !bytes.Equal(got, viaClient[:10]) {
+		t.Fatalf("ranged JobResult = %q, want the full result's first 10 bytes %q", got, viaClient[:10])
+	}
+
+	if err := c.DeleteJob(ctx, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Job(ctx, created.ID); waxerr.CodeOf(err) != waxerr.CodeNotFound {
+		t.Fatalf("fetching a deleted job errs %v, want code %s", err, waxerr.CodeNotFound)
+	}
+
+	// The typed-error claim, on every surface an unknown id can reach.
+	if _, err := c.JobResult(ctx, "01NOSUCHJOB", -1); waxerr.CodeOf(err) != waxerr.CodeNotFound {
+		t.Fatalf("unknown job's result errs %v, want code %s", err, waxerr.CodeNotFound)
+	}
+	if err := c.DeleteJob(ctx, "01NOSUCHJOB"); waxerr.CodeOf(err) != waxerr.CodeNotFound {
+		t.Fatalf("deleting an unknown job errs %v, want code %s", err, waxerr.CodeNotFound)
+	}
+
+	// An empty id is refused client-side before it can misroute: "/jobs/"
+	// is not a job URL, and the mux's path cleaning would turn
+	// "/jobs//result" into a lookup of a job literally named "result",
+	// whose not-found would read as the daemon's word on a job that was
+	// never named.
+	for name, call := range map[string]func() error{
+		"Job":       func() error { _, err := c.Job(ctx, ""); return err },
+		"DeleteJob": func() error { return c.DeleteJob(ctx, "") },
+		"JobResult": func() error { _, err := c.JobResult(ctx, "", -1); return err },
+		"JobEvents": func() error { _, err := c.JobEvents(ctx, ""); return err },
+	} {
+		if err := call(); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+			t.Errorf("%s with an empty id errs %v, want code %s", name, err, waxerr.CodeInvalidRequest)
+		}
+	}
+
+	// A context the caller ended reports canceled, not a fabricated
+	// network failure: a slow daemon and an unreachable one need
+	// different operator responses.
+	gone, cancelGone := context.WithCancel(ctx)
+	cancelGone()
+	if _, err := c.Jobs(gone); waxerr.CodeOf(err) != waxerr.CodeCanceled {
+		t.Errorf("a canceled ctx errs %v, want code %s", err, waxerr.CodeCanceled)
+	}
+}
+
+// rangeInjector adds a fixed 10-byte Range header to every request,
+// standing in for the resumable-download transport a caller could bring
+// through WithHTTPClient. It clones before writing, per the RoundTripper
+// contract.
+type rangeInjector struct{ next http.RoundTripper }
+
+func (r rangeInjector) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.Header.Set("Range", "bytes=0-9")
+	return r.next.RoundTrip(req)
 }

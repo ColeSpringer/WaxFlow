@@ -6,6 +6,7 @@ import (
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/dsp/gain"
+	"github.com/colespringer/waxflow/dsp/silence"
 )
 
 // TestDeliveryProfilesAreHonest pins the /caps profile contract: the
@@ -157,6 +158,16 @@ func TestCapsDSPIsHonest(t *testing.T) {
 	}
 	if dsp.TruePeakCeilingDB != gain.DefaultCeilingDB {
 		t.Errorf("truePeakCeilingDb = %v, but the limiter uses %v", dsp.TruePeakCeilingDB, gain.DefaultCeilingDB)
+	}
+
+	// The detector version must be the one the silence maps carry, not a
+	// copy that can drift; empty would leave a map cache nothing to
+	// invalidate against.
+	if dsp.SilenceDetector == "" {
+		t.Error("silenceDetector is empty; a caller caching silence maps has nothing to invalidate against")
+	}
+	if dsp.SilenceDetector != silence.Version {
+		t.Errorf("silenceDetector = %q, but the detector is at %q", dsp.SilenceDetector, silence.Version)
 	}
 
 	// deliveryProfiles must stay orthogonal: profiles are about client

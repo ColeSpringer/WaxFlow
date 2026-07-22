@@ -4,6 +4,7 @@ import (
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/dsp/gain"
+	"github.com/colespringer/waxflow/dsp/silence"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/timeline"
@@ -193,6 +194,20 @@ type CapsDSP struct {
 	// Loudness lists the loudness surfaces, which are jobs-only: WaxFlow
 	// cannot measure a live stream, so exact measurement is a second pass.
 	Loudness []string `json:"loudness"`
+	// SilenceDetector is the silence detector's algorithm revision, the
+	// same value a silence map carries in its version field
+	// (silence.Version). A caller that persists maps invalidates by
+	// inequality: a cached map whose version differs from this went stale
+	// with a detector upgrade, learned here without running a job to find
+	// out. Advertised even when delivery.jobs is false, exactly as
+	// loudness already is: the dsp slot describes the build's signal
+	// path, not this daemon's enabled routes. A build with the field
+	// always sends it non-empty (TestCapsDSPIsHonest), so a client
+	// seeing it absent or empty should read a server too old to
+	// advertise the detector and fall back to the maps' own version
+	// fields, not conclude that every cached map is stale; the
+	// cutFormats advertisement carries the same rule.
+	SilenceDetector string `json:"silenceDetector"`
 	// TruePeakCeilingDB is the limiter's ceiling in dBTP, which every
 	// gain- or dynamics-engaged output is held under.
 	TruePeakCeilingDB float64 `json:"truePeakCeilingDb"`
@@ -425,6 +440,7 @@ func buildCaps(jobs, uploads, pid, timelines bool) Caps {
 			GainMaxVoiceDB:    gainCeilingFor(gain.PresetVoice),
 			Dynamics:          dynamicsSpellings(),
 			Loudness:          []string{"analyze"},
+			SilenceDetector:   silence.Version,
 			TruePeakCeilingDB: gain.DefaultCeilingDB,
 		},
 		Profiles: make(map[string]CapsProfile, len(deliveryProfiles)),

@@ -560,6 +560,7 @@ capability instead of sniffing a version:
       "gainMaxDb": 12, "gainMaxVoiceDb": 24,
       "dynamics": ["off", "voice"],
       "loudness": ["analyze"],
+      "silenceDetector": "silence-1",
       "truePeakCeilingDb": -1
     }
 
@@ -570,6 +571,16 @@ about it. **Read both ceilings, not one.** The clamp on positive gain
 depends on `dynamics` (see /stream), so `gainMaxDb` alone does not tell
 you whether `gain=16` is legal. `loudness` is jobs-only by construction:
 a live stream cannot be measured before it is served.
+`silenceDetector` is the silence detector's algorithm revision, the same
+value a silence map's own `version` field carries (see Silence
+detection): a caller that persists maps invalidates any whose version
+differs, without running a job to find out. Like `loudness`, it is
+advertised even when `delivery.jobs` is false, because the dsp slot
+describes the build's signal path, not this daemon's enabled routes. A
+daemon new enough to have the field always sends it non-empty, so absent
+(or empty) means a server too old to advertise the detector: fall back
+to reading versions off the maps themselves, do not read it as every
+cached map being stale (the same rule `cutFormats` states).
 
 `dsp` is deliberately orthogonal to `profiles`. Profiles are about what a
 client can decode; dynamics is server-side and client-agnostic, so no
@@ -605,6 +616,10 @@ by `uploadMaxBytes` each and `scratchMaxBytes` together.
 Async full-file work that outlives any request, persisted under
 `dataDir/jobs`: completed results survive daemon restarts, and a job
 interrupted mid-run restarts cleanly from zero on the next start.
+
+The `client` package wraps the whole surface (`client.CreateJob`,
+`Job`, `Jobs`, `DeleteJob`, `JobResult`, `JobEvents`), with envelope
+errors decoded to waxerr codes like every other method.
 
 `POST /jobs` with a JSON body:
 
@@ -787,7 +802,9 @@ event. It is `silence.json`:
 Spans are half-open (`toSample` exclusive) and carry both spellings.
 The samples are the exact ones, and are what a cut-point list wants;
 the seconds are the convenience. `version` is the detector revision: a
-caller caching the map needs it to know when the map went stale.
+caller caching the map needs it to know when the map went stale, and
+`/caps` advertises the current one as `dsp.silenceDetector`, so a cached
+map whose `version` differs can be invalidated without re-running a job.
 Detection matches ffmpeg's `silencedetect` exactly (a frame is silent
 when every channel is strictly inside the threshold band), which is what
 lets the differential test assert span counts rather than approximate
@@ -815,17 +832,17 @@ the live pool is saturated: interactive streams always win.
 `GET /jobs` lists all jobs (`{"schemaVersion": 1, "jobs": [...]}`).
 `DELETE /jobs/{id}` cancels the job if running and removes it (204).
 
-`GET /jobs/{id}/events` is a server-sent event stream: one `event: job`
-per state or progress update, each `data:` line a full job document,
-ending after the terminal event (comment heartbeats every 15 s keep
-proxies from timing it out).
+`GET /jobs/{id}/events` is a server-sent event stream (`client.JobEvents`):
+one `event: job` per state or progress update, each `data:` line a full
+job document, ending after the terminal event (comment heartbeats every
+15 s keep proxies from timing it out).
 
-`GET /jobs/{id}/result/{n}` serves the job's nth output file (real
-`Content-Length`, full ranges, strong per-output `ETag`,
-`Content-Disposition: attachment`): a transcode's or a merge's audio, one
-piece of a split, or an analyze job's `silence.json`. An index the job
-does not have is a 404. A queued or running job answers 400, a failed one
-replays its error envelope.
+`GET /jobs/{id}/result/{n}` serves the job's nth output file
+(`client.JobResult`; real `Content-Length`, full ranges, strong
+per-output `ETag`, `Content-Disposition: attachment`): a transcode's or
+a merge's audio, one piece of a split, or an analyze job's
+`silence.json`. An index the job does not have is a 404. A queued or
+running job answers 400, a failed one replays its error envelope.
 
 `GET /jobs/{id}/result`, no index, answers **only where it cannot be
 wrong**: the single output of a job that has one, and a 400 naming the
