@@ -313,6 +313,13 @@ type CapsDelivery struct {
 	// tl= parameter then streams gaplessly. MaxTimelineMembers bounds one.
 	Timelines          bool `json:"timelines"`
 	MaxTimelineMembers int  `json:"maxTimelineMembers,omitempty"`
+	// TimelineMemberWindows: timeline members take from/to sample windows,
+	// so a client-computed span of one source (a CUE-carved track) joins a
+	// gapless timeline as a member in its own right. A client routes by this
+	// field's presence: a daemon too old to have it 400s a windowed member
+	// as an unknown field, so absent means fall back (per-item URLs), not
+	// "windows without advertising them".
+	TimelineMemberWindows bool `json:"timelineMemberWindows,omitempty"`
 }
 
 // UploadResponse is the POST /uploads body.
@@ -331,8 +338,9 @@ type UploadResponse struct {
 // TimelineRequest is the POST /hls/timeline body: a play queue, in order.
 //
 // Each member is an object rather than a bare string so the shape has room
-// to grow (a span of one file is the obvious next member kind) without a
-// second endpoint.
+// to grow without a second endpoint, and the growth it anticipated arrived:
+// a member now carries an optional From/To window beside its Src, so a span
+// of one file joins a queue as a member in its own right.
 type TimelineRequest struct {
 	Srcs []TimelineSrc `json:"srcs"`
 	// CrossfadeSeconds blends each seam over this many seconds when the timeline
@@ -349,6 +357,15 @@ type TimelineRequest struct {
 // TimelineSrc is one member of a timeline request.
 type TimelineSrc struct {
 	Src string `json:"src"`
+	// From and To bound the member to the sample window [From, To) of its
+	// own source, with /stream's span semantics exactly: source samples, To
+	// exclusive, 0 (or absent) running to the end, the zero pair the whole
+	// file. A window that does not fit the measured source is refused, never
+	// clamped. Unlike crossfadeSeconds, the window is part of the timeline's
+	// identity: it says which samples are this member, so two windowings of
+	// one file are two timelines with two digests.
+	From int64 `json:"from,omitempty"`
+	To   int64 `json:"to,omitempty"`
 }
 
 // TimelineResponse is POST /hls/timeline's 201 body. A mint that had to
@@ -447,6 +464,7 @@ func buildCaps(jobs, uploads, pid, timelines bool) Caps {
 	}
 	if timelines {
 		caps.Delivery.MaxTimelineMembers = timeline.MaxMembers
+		caps.Delivery.TimelineMemberWindows = true
 	}
 	for _, id := range format.Decoders() {
 		caps.Decoders = append(caps.Decoders, string(id))

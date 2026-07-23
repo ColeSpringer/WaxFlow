@@ -69,6 +69,22 @@ type Member struct {
 	// inside the digest, which is what makes the digest an identity rather
 	// than a name: a member that changes on disk cannot keep its timeline.
 	ID string `json:"id"`
+	// From and To bound the member to the sample window [From, To) of its
+	// own source: To is exclusive, 0 runs to the end, and the zero pair is
+	// the whole file. Stored verbatim as declared rather than resolved to
+	// the measured end, so the mint stays pure of measurement and the same
+	// body names the same digest whichever path minted it.
+	//
+	// The window is inside the digest, and that is the opposite call from
+	// the crossfade by the same doctrine: a crossfade renders a timeline, a
+	// window says which samples are this member, so it is content identity
+	// (two windowings of one file are two timelines). omitempty is what
+	// keeps every whole-file member's canonical JSON, and therefore every
+	// pre-window digest, stored document, and tl: cache identity,
+	// byte-identical: Digest marshals struct field order, so these fields
+	// are appended after ID and never reordered.
+	From int64 `json:"from,omitempty"`
+	To   int64 `json:"to,omitempty"`
 }
 
 // doc is the stored document.
@@ -365,6 +381,20 @@ func checkMembers(members []Member) error {
 		if m.Src == "" || m.ID == "" {
 			return waxerr.New(waxerr.CodeInvalidRequest,
 				fmt.Sprintf("timeline: member %d has no source reference or no identity", i))
+		}
+		// Window sanity, guarding Put and load alike: the store must never
+		// hold a window no source could satisfy, whether it arrived through a
+		// handler or through a hand edit the digest re-check would also catch.
+		switch {
+		case m.From < 0:
+			return waxerr.New(waxerr.CodeInvalidRequest,
+				fmt.Sprintf("timeline: member %d has a negative window start %d", i, m.From))
+		case m.To < 0:
+			return waxerr.New(waxerr.CodeInvalidRequest,
+				fmt.Sprintf("timeline: member %d has a negative window end %d", i, m.To))
+		case m.To > 0 && m.To <= m.From:
+			return waxerr.New(waxerr.CodeInvalidRequest,
+				fmt.Sprintf("timeline: member %d window [%d, %d) ends before it starts", i, m.From, m.To))
 		}
 	}
 	return nil

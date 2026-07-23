@@ -48,9 +48,10 @@ type Config struct {
 	// its identity rules belong to the server, and a job here is only the
 	// async wrapper the measuring needs. The runner supplies the progress
 	// callback so a cold mint of a long queue reports where it is, and passes
-	// the request's crossfade so the async mint shapes the same duration and
-	// boundaries the sync path would.
-	MintTimeline func(ctx context.Context, srcs []string, crossfadeSeconds float64, progress func(done, total int64)) (*Timeline, error)
+	// the request's crossfade and member spans so the async mint shapes the
+	// same duration and boundaries, and mints the same digest, the sync path
+	// would.
+	MintTimeline func(ctx context.Context, srcs []string, spans []MemberSpan, crossfadeSeconds float64, progress func(done, total int64)) (*Timeline, error)
 	// MeasureTrack reports a source's default track with an authoritative
 	// length, walking the source when its headers cannot declare one. Nil
 	// disables merge jobs.
@@ -570,7 +571,7 @@ func (r *Runner) runTimeline(ctx context.Context, j *Job) error {
 	if r.cfg.MintTimeline == nil {
 		return waxerr.New(waxerr.CodeInvalidRequest, "jobs: timelines are not configured on this daemon")
 	}
-	tl, err := r.cfg.MintTimeline(ctx, j.Request.Srcs, j.Request.CrossfadeSeconds, r.progressFunc(ctx, j.ID, "measure"))
+	tl, err := r.cfg.MintTimeline(ctx, j.Request.Srcs, j.Request.Spans, j.Request.CrossfadeSeconds, r.progressFunc(ctx, j.ID, "measure"))
 	if err != nil {
 		return err
 	}

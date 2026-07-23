@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -66,10 +67,24 @@ type hlsSource struct {
 	Ref string
 	ID  source.Identity
 	Ext string
-	// Track is the probed, measured track the plan was computed from. A
-	// timeline hands it back to Concat, so the run's members are declared by
-	// exactly what the plan projected: plan and run cannot disagree about a
-	// member's format or length, because the number is not computed twice.
+	// From and To are a timeline member's stored sample window on its own
+	// source (the zero pair is the whole file). The worker outlives the
+	// request and rebuilds its input from these values: openHLSMedia slices
+	// the member's media by them at open, matching the narrowed Track below.
+	From int64
+	To   int64
+	// SrcSamples is the source's own pre-narrow total, measured whenever
+	// this member can be sliced (a timeline member, or a spanned single
+	// source). The worker re-anchors a freshly opened member's advisory
+	// declaration to it before slicing, so the run's bound check runs
+	// against the same total the mint and the plan validated the window on;
+	// see sliceMeasured.
+	SrcSamples int64
+	// Track is the probed, measured track the plan was computed from (for a
+	// windowed member, already narrowed through SpanTrack). A timeline hands
+	// it back to Concat, so the run's members are declared by exactly what
+	// the plan projected: plan and run cannot disagree about a member's
+	// format or length, because the number is not computed twice.
 	Track container.Track
 }
 
@@ -223,8 +238,8 @@ func (s *Server) resolveHLSSources(ctx context.Context, req *hlsRequest) error {
 			return err
 		}
 	}
-	for _, ref := range refs {
-		if err := s.resolveMember(ctx, req, ref, tl); err != nil {
+	for i, ref := range refs {
+		if err := s.resolveMember(ctx, req, i, ref, tl); err != nil {
 			return err
 		}
 	}
@@ -250,7 +265,7 @@ func (s *Server) resolveHLSSources(ctx context.Context, req *hlsRequest) error {
 // also undo the point of opening members lazily: the timeline exists so a queue
 // of any length costs one descriptor, and eagerly holding them here is exactly
 // what Concat is built not to do.
-func (s *Server) resolveMember(ctx context.Context, req *hlsRequest, ref timeline.Member, tl bool) error {
+func (s *Server) resolveMember(ctx context.Context, req *hlsRequest, i int, ref timeline.Member, tl bool) error {
 	want, err := source.ParseIdentity(ref.ID)
 	if err != nil {
 		return err
@@ -273,7 +288,27 @@ func (s *Server) resolveMember(ctx context.Context, req *hlsRequest, ref timelin
 	if err != nil {
 		return err
 	}
-	req.members = append(req.members, hlsSource{Ref: ref.Src, ID: f.ID, Ext: f.Ext, Track: track})
+	// The pre-narrow total, recorded so the worker can re-anchor a freshly
+	// opened member's advisory declaration to the measure the window was
+	// validated against (sliceMeasured). Whenever a member is sliced, the
+	// exact branch above ran, so this is measured in every consulted case.
+	srcSamples := track.Samples
+	// A timeline member's own stored window narrows its track through the
+	// same funnel the mint used (narrowMemberTrack), so the plan reads the
+	// window's length and the two refuse identically. The re-check against
+	// the freshly measured track is not redundant with the mint's: the
+	// identity check above pins the bytes, not the measure, and the track
+	// memo is deliberately re-derived per binary revision while the store is
+	// durable, so a window minted valid under an old measure must fail here,
+	// loudly, rather than desync the prefix sum (or, for the empty-window
+	// shape from == total, mint the zero-sample member nothing downstream
+	// pins). Corruption is not the concern: a hand-edited window fails
+	// load's digest re-check before it ever resolves.
+	if track, err = narrowMemberTrack(i, track, span{from: ref.From, to: ref.To}); err != nil {
+		return err
+	}
+	req.members = append(req.members, hlsSource{Ref: ref.Src, ID: f.ID, Ext: f.Ext,
+		From: ref.From, To: ref.To, SrcSamples: srcSamples, Track: track})
 	if !tl {
 		// The metadata read that resolves tag-based gain still needs it, and
 		// req.Close owns it from here.
@@ -994,25 +1029,19 @@ func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool,
 func (s *Server) openHLSMedia(ctx context.Context, members []hlsSource, tl bool,
 	sp span, xfadeSeconds float64) (format.Media, error) {
 	if !tl {
-		med, err := s.openMember(ctx, members[0])
-		if err != nil || !sp.narrowed() {
-			return med, err
-		}
-		// The slice takes ownership, so a failure here has to close what it
-		// did not take.
-		sl, err := waxflow.Slice(med, sp.from, sp.end())
-		if err != nil {
-			med.Close()
-			return nil, err
-		}
-		return sl, nil
+		return s.openSlicedMember(ctx, members[0], sp)
 	}
 	srcs := make([]waxflow.ConcatSource, len(members))
 	tracks := make([]container.Track, len(members))
 	for i, m := range members {
+		// A windowed member opens as its window (its own stored From/To; the
+		// zero pair passes through untouched), so the media Concat reads
+		// matches the narrowed track the plan projected.
 		srcs[i] = waxflow.ConcatSource{
 			Track: m.Track,
-			Open:  func() (format.Media, error) { return s.openMember(ctx, m) },
+			Open: func() (format.Media, error) {
+				return s.openSlicedMember(ctx, m, span{from: m.From, to: m.To})
+			},
 		}
 		tracks[i] = m.Track
 	}
@@ -1024,6 +1053,71 @@ func (s *Server) openHLSMedia(ctx context.Context, members []hlsSource, tl bool,
 		return nil, err
 	}
 	return waxflow.Concat(srcs, s.timelineOptions(crossfade))
+}
+
+// remeasured is a Media whose declared info is replaced; sliceMeasured is
+// its only constructor and carries the rationale.
+type remeasured struct {
+	format.Media
+	info *format.Info
+}
+
+func (m remeasured) Info() *format.Info { return m.info }
+
+// sliceMeasured bounds med to sp for a run whose plan validated the window
+// against srcSamples, the source's measured total (negative means unknown,
+// and leaves the declaration alone).
+//
+// Slice re-derives its track from the media it is handed, and a freshly
+// opened media declares its header total, which for an advisory container
+// can sit under the audio it holds (Matroska's by up to a millisecond; see
+// SpanTrack's bound note). The mint and the plan validated the window
+// against the measured total, so without re-anchoring, a window edge inside
+// that gap would refuse here at every open: the playlist would mint and its
+// segments would fail, permanently, which is the exact "problems surface at
+// the mint" promise inverted. Replacing the declared count with the measure
+// puts one total under the mint, the plan, and the run.
+//
+// The refusal this bound gave a lying source is not lost, it moves to
+// delivery, where its real teeth always were: a bounded slice that runs dry
+// fails endOfSource by name, and a timeline member is held to its recorded
+// length on advance. Slice takes ownership of med; on error this closes
+// what it did not take.
+func sliceMeasured(med format.Media, sp span, srcSamples int64) (format.Media, error) {
+	if info := med.Info(); srcSamples >= 0 && info.Default().Samples != srcSamples {
+		patched := *info
+		patched.Tracks = slices.Clone(info.Tracks)
+		// The default track is the one Slice spans; mirror Default's pick.
+		idx := 0
+		for i, t := range patched.Tracks {
+			if t.Default {
+				idx = i
+				break
+			}
+		}
+		patched.Tracks[idx].Samples = srcSamples
+		// Honest rather than optimistic: srcSamples comes from an exact
+		// trackFor, whose contract is an authoritative length.
+		patched.Tracks[idx].SamplesExact = true
+		med = remeasured{Media: med, info: &patched}
+	}
+	sl, err := waxflow.Slice(med, sp.from, sp.end())
+	if err != nil {
+		med.Close()
+		return nil, err
+	}
+	return sl, nil
+}
+
+// openSlicedMember opens m, bounded to sp when sp narrows it: a timeline
+// member's own stored window, or the descriptor span on a single source.
+// The zero span opens the member untouched.
+func (s *Server) openSlicedMember(ctx context.Context, m hlsSource, sp span) (format.Media, error) {
+	med, err := s.openMember(ctx, m)
+	if err != nil || !sp.narrowed() {
+		return med, err
+	}
+	return sliceMeasured(med, sp, m.SrcSamples)
 }
 
 // openMember resolves one source, enforces the identity the plan was made

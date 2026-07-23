@@ -83,7 +83,7 @@ func (s *Server) handleTimelineCreate(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err)
 		return
 	}
-	refs, err := timelineRefs(body)
+	refs, spans, err := timelineRefs(body)
 	if err != nil {
 		s.writeError(w, err)
 		return
@@ -94,7 +94,9 @@ func (s *Server) handleTimelineCreate(w http.ResponseWriter, r *http.Request) {
 	// crossfade shares the sync/async split below with an un-concatenatable queue:
 	// a 400 on the synchronous path but a failed job on the 202 path, one input
 	// with two failure modes by cache warmth. That asymmetry is inherent to
-	// deferring the measure, not new to the crossfade.
+	// deferring the measure, not new to the crossfade: a member window's fit
+	// against the measured source (SpanTrack's refusal) splits the same way,
+	// while its internal sense (timelineRefs above) is refused on both paths.
 	if err := checkCrossfadeSeconds(body.CrossfadeSeconds); err != nil {
 		s.writeError(w, err)
 		return
@@ -116,7 +118,8 @@ func (s *Server) handleTimelineCreate(w http.ResponseWriter, r *http.Request) {
 		// is the honest degradation: the work is the same either way, and
 		// refusing would turn a slow album into an album that cannot be
 		// timelined at all, which is the failure this split exists to avoid.
-		j, err := s.jobs.Create(jobs.Request{Type: jobs.TypeTimeline, Srcs: refs, CrossfadeSeconds: body.CrossfadeSeconds})
+		j, err := s.jobs.Create(jobs.Request{Type: jobs.TypeTimeline, Srcs: refs,
+			Spans: jobSpans(spans), CrossfadeSeconds: body.CrossfadeSeconds})
 		if err != nil {
 			s.writeError(w, err)
 			return
@@ -126,7 +129,7 @@ func (s *Server) handleTimelineCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	// The handles are already open and identity-checked, so the mint reuses
 	// them rather than resolving every member a second time.
-	tl, err := s.mintTimelineFrom(r.Context(), srcs, body.CrossfadeSeconds, nil)
+	tl, err := s.mintTimelineFrom(r.Context(), srcs, spans, body.CrossfadeSeconds, nil)
 	if err != nil {
 		s.writeError(w, err)
 		return
@@ -143,20 +146,78 @@ func (s *Server) handleTimelineCreate(w http.ResponseWriter, r *http.Request) {
 
 // mintTimelineJob is the runner's MintTimeline hook. It binds the job's own
 // context, which is the runner's and not a request's, exactly as a live
-// pipeline binds the server's base context. crossfadeSeconds is the request's,
-// carried on the job so the 202 path shapes the same duration and boundaries the
-// 201 fast path returns.
-func (s *Server) mintTimelineJob(ctx context.Context, refs []string, crossfadeSeconds float64, progress func(done, total int64)) (*jobs.Timeline, error) {
+// pipeline binds the server's base context. crossfadeSeconds and spans are
+// the request's, carried on the job so the 202 path shapes the same duration
+// and boundaries, and mints the same digest, the 201 fast path returns.
+func (s *Server) mintTimelineJob(ctx context.Context, refs []string, spans []jobs.MemberSpan, crossfadeSeconds float64, progress func(done, total int64)) (*jobs.Timeline, error) {
 	if s.timelines == nil {
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat, "multi-source timelines are not enabled on this daemon")
 	}
-	return s.mintTimeline(ctx, refs, crossfadeSeconds, progress)
+	sps, err := spansFromJob(len(refs), spans)
+	if err != nil {
+		return nil, err
+	}
+	return s.mintTimeline(ctx, refs, sps, crossfadeSeconds, progress)
 }
 
-// timelineRefs validates the body and flattens it to source references.
-func timelineRefs(body TimelineRequest) ([]string, error) {
-	bad := func(format string, args ...any) ([]string, error) {
-		return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(format, args...))
+// checkMemberWindow is the wire-level sanity check on one member's window,
+// parseSpan's sibling for the timeline body, with one deliberate divergence:
+// to == 0 is valid here (the open end, one spelling with absent under
+// omitempty), where the query form refuses to=0 because an absent parameter
+// already spells it. The full case table: from < 0 refused; to < 0 refused;
+// to > 0 && to <= from refused (which covers to == from); to == 0 valid;
+// from == 0 valid, so {0, 0} is the whole file and digests identically to an
+// unwindowed member. Whether the window fits the measured source is
+// SpanTrack's call at mint, refuse-don't-clamp as everywhere.
+func checkMemberWindow(i int, from, to int64) error {
+	bad := func(format string, args ...any) error {
+		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(format, args...))
+	}
+	switch {
+	case from < 0:
+		return bad("member %d: from %d: want a non-negative sample offset on the source timeline", i, from)
+	case to < 0:
+		return bad("member %d: to %d: want a non-negative sample offset on the source timeline", i, to)
+	case to > 0 && to <= from:
+		return bad("member %d: span [%d, %d) ends before it starts", i, from, to)
+	}
+	return nil
+}
+
+// narrowMemberTrack applies member i's window to its measured track, in one
+// place for the mint (mintTimelineFrom) and the per-request resolve
+// (resolveMember) so the two refuse identically. SpanTrack refusals are
+// wrapped to name the member, because a thousand-member queue's caller needs
+// to know which window does not describe its source.
+//
+// The zero-sample refusal closes the one shape that passes both
+// checkMemberWindow and SpanTrack, {from: measured length, to: 0}: no window
+// may put zero samples into ConcatBoundaries, segment planning, and memberAt,
+// which is an unpinned degenerate state. It fires only for a narrowed member
+// on purpose, and the scope is a decision rather than an accident: a
+// degenerate whole-file source (an empty file) keeps its pre-existing
+// behavior, and /stream's rung 3 deliberately serves an empty span as a valid
+// empty stream, so zero is a timeline-member rule, not a SpanTrack one.
+func narrowMemberTrack(i int, track container.Track, sp span) (container.Track, error) {
+	if !sp.narrowed() {
+		return track, nil
+	}
+	out, err := waxflow.SpanTrack(track, sp.from, sp.end())
+	if err != nil {
+		return container.Track{}, waxerr.Wrap(waxerr.CodeOf(err), fmt.Sprintf("member %d", i), err)
+	}
+	if out.Samples == 0 {
+		return container.Track{}, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("member %d: window is empty on this source", i))
+	}
+	return out, nil
+}
+
+// timelineRefs validates the body and flattens it to source references plus
+// per-member windows, index-aligned (the zero span is the whole file).
+func timelineRefs(body TimelineRequest) ([]string, []span, error) {
+	bad := func(format string, args ...any) ([]string, []span, error) {
+		return nil, nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(format, args...))
 	}
 	switch {
 	case len(body.Srcs) == 0:
@@ -166,29 +227,83 @@ func timelineRefs(body TimelineRequest) ([]string, error) {
 			len(body.Srcs), timeline.MaxMembers)
 	}
 	refs := make([]string, len(body.Srcs))
+	spans := make([]span, len(body.Srcs))
 	for i, m := range body.Srcs {
 		if m.Src == "" {
 			return bad("member %d has no src", i)
 		}
+		if err := checkMemberWindow(i, m.From, m.To); err != nil {
+			return nil, nil, err
+		}
 		refs[i] = m.Src
+		spans[i] = span{from: m.From, to: m.To}
 	}
-	return refs, nil
+	return refs, spans, nil
+}
+
+// jobSpans converts the parsed windows for a timeline job's request, nil when
+// no member is narrowed: a whole-file queue's job document stays byte-identical
+// to a pre-window one, the same stability omitempty buys the stored timeline.
+func jobSpans(spans []span) []jobs.MemberSpan {
+	narrowed := false
+	for _, sp := range spans {
+		if sp.narrowed() {
+			narrowed = true
+			break
+		}
+	}
+	if !narrowed {
+		return nil
+	}
+	out := make([]jobs.MemberSpan, len(spans))
+	for i, sp := range spans {
+		out[i] = jobs.MemberSpan{From: sp.from, To: sp.to}
+	}
+	return out
+}
+
+// spansFromJob converts a job's member spans back to the mint's own, re-running
+// checkMemberWindow: job.json is durable state a hand edit can reach, and a
+// negative To must fail the job loudly rather than slide into SpanTrack's ToEnd.
+// A non-empty list must match Srcs member for member, refused otherwise in the
+// same loud voice. The titles precedent tolerates a length mismatch by design,
+// and that is right for cosmetic titles and wrong for identity-bearing spans,
+// where misalignment would window the wrong members.
+func spansFromJob(members int, spans []jobs.MemberSpan) ([]span, error) {
+	if len(spans) == 0 {
+		return nil, nil
+	}
+	if len(spans) != members {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+			"timeline job carries %d spans for %d members; spans are index-aligned with srcs, all or none",
+			len(spans), members))
+	}
+	out := make([]span, len(spans))
+	for i, sp := range spans {
+		if err := checkMemberWindow(i, sp.From, sp.To); err != nil {
+			return nil, err
+		}
+		out[i] = span{from: sp.From, to: sp.To}
+	}
+	return out, nil
 }
 
 // mintTimeline resolves the references and mints. It is the job's entry
 // point, which has only the references the request was created from; the
 // handler has open handles already and calls mintTimelineFrom directly.
-func (s *Server) mintTimeline(ctx context.Context, refs []string, crossfadeSeconds float64, progress func(done, total int64)) (*jobs.Timeline, error) {
+func (s *Server) mintTimeline(ctx context.Context, refs []string, spans []span, crossfadeSeconds float64, progress func(done, total int64)) (*jobs.Timeline, error) {
 	srcs, err := s.resolveAll(ctx, refs)
 	if err != nil {
 		return nil, err
 	}
 	defer closeAll(srcs)
-	return s.mintTimelineFrom(ctx, srcs, crossfadeSeconds, progress)
+	return s.mintTimelineFrom(ctx, srcs, spans, crossfadeSeconds, progress)
 }
 
 // mintTimelineFrom probes and measures every member, then stores the timeline
-// and reports what it named. The caller owns the handles; progress may be nil.
+// and reports what it named. The caller owns the handles; progress may be nil,
+// and spans may be nil (every member its whole file) or index-aligned with
+// srcs, already sanity-checked by checkMemberWindow.
 //
 // It is the one path both the fast handler and the job run through, so a
 // timeline minted either way is the same timeline: the digest is a function
@@ -201,7 +316,11 @@ func (s *Server) mintTimeline(ctx context.Context, refs []string, crossfadeSecon
 // is untouched and two mints of one queue at different crossfades name one tl=;
 // see timelineOptions. A client that mints with a crossfade must render with the
 // same one, since the boundaries it reads back reflect the value passed here.
-func (s *Server) mintTimelineFrom(ctx context.Context, srcs []*source.File, crossfadeSeconds float64, progress func(done, total int64)) (*jobs.Timeline, error) {
+// A member's window is the opposite: it narrows the member's track before
+// anything downstream reads it, and it joins the stored member and the digest,
+// as declared (To 0 stays 0 rather than resolving to the measured end, so the
+// mint stays pure of measurement and the same body names the same digest).
+func (s *Server) mintTimelineFrom(ctx context.Context, srcs []*source.File, spans []span, crossfadeSeconds float64, progress func(done, total int64)) (*jobs.Timeline, error) {
 	members := make([]timeline.Member, len(srcs))
 	tracks := make([]container.Track, len(srcs))
 	for i, f := range srcs {
@@ -215,8 +334,15 @@ func (s *Server) mintTimelineFrom(ctx context.Context, srcs []*source.File, cros
 		if err != nil {
 			return nil, err
 		}
+		var sp span
+		if spans != nil {
+			sp = spans[i]
+		}
+		if track, err = narrowMemberTrack(i, track, sp); err != nil {
+			return nil, err
+		}
 		tracks[i] = track
-		members[i] = timeline.Member{Src: f.Ref, ID: f.ID.String()}
+		members[i] = timeline.Member{Src: f.Ref, ID: f.ID.String(), From: sp.from, To: sp.to}
 		if progress != nil {
 			progress(int64(i+1), int64(len(srcs)))
 		}

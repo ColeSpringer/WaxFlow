@@ -97,6 +97,7 @@ func TestJobCloneIsDeep(t *testing.T) {
 			SourceIDs:    []string{"1-1", "2-2"},
 			Cuts:         []int64{100, 200},
 			MemberTitles: []string{"One", "Two"},
+			Spans:        []MemberSpan{{From: 10, To: 20}, {}},
 		},
 		Created:  started,
 		Started:  &started,
@@ -141,6 +142,7 @@ func TestJobCloneIsDeep(t *testing.T) {
 	c.Request.SourceIDs[0] = "scribbled"
 	c.Request.Cuts[0] = -1
 	c.Request.MemberTitles[0] = "scribbled"
+	c.Request.Spans[0].From = -1
 	c.Warnings[0] = "scribbled"
 	*c.Started = epoch
 	*c.Finished = epoch
@@ -169,6 +171,9 @@ func TestJobCloneIsDeep(t *testing.T) {
 	}
 	if orig.Request.MemberTitles[0] != "One" {
 		t.Error("clone shares Request.MemberTitles' backing array with the stored job")
+	}
+	if orig.Request.Spans[0].From != 10 {
+		t.Error("clone shares Request.Spans' backing array with the stored job")
 	}
 	if orig.Warnings[0] != "w" {
 		t.Error("clone shares Warnings' backing array with the stored job")

@@ -439,8 +439,9 @@ func createJob(t *testing.T, env *testEnv, body string) string {
 	return j.ID
 }
 
-// awaitJob polls until the job is done, failing on any other terminal state.
-func awaitJob(t *testing.T, env *testEnv, id string) *jobs.Job {
+// awaitJobTerminal polls until the job reaches any terminal state, for the
+// tests whose expected outcome is a failure as much as for the happy path.
+func awaitJobTerminal(t *testing.T, env *testEnv, id string) *jobs.Job {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -451,17 +452,24 @@ func awaitJob(t *testing.T, env *testEnv, id string) *jobs.Job {
 		if err != nil {
 			t.Fatalf("decoding job %s: %v", id, err)
 		}
-		switch j.State {
-		case jobs.StateDone:
+		if j.State.Terminal() {
 			return &j
-		case jobs.StateFailed, jobs.StateCanceled:
-			t.Fatalf("job %s landed on %s: %+v", id, j.State, j.Error)
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("job %s still %s after 10s", id, j.State)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// awaitJob polls until the job is done, failing on any other terminal state.
+func awaitJob(t *testing.T, env *testEnv, id string) *jobs.Job {
+	t.Helper()
+	j := awaitJobTerminal(t, env, id)
+	if j.State != jobs.StateDone {
+		t.Fatalf("job %s landed on %s: %+v", id, j.State, j.Error)
+	}
+	return j
 }
 
 // TestJobFieldsCoversEveryField guards the guard: jobFields only pins what it

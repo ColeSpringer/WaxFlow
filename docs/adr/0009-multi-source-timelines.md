@@ -135,6 +135,20 @@ timeline are different things, not two spellings of one fact (the way
 unchanged and keeps ADR-0003's "regenerates from nothing but this URL"
 guarantee whole for the 99% of URLs that gain nothing from a store.
 
+*Amended by A23 (2026-07-22):* a member now carries an optional `from`/`to`
+sample window of its own source (the virtual-track span joined to a queue, so
+a CUE carve plays gaplessly inside a timeline), and the window is **inside**
+the digest, the opposite call from the crossfade by the same doctrine. A
+crossfade renders a timeline; a window says which samples are this member, so
+it is content identity, and two windowings of one file are two timelines with
+two digests. Windows are stored verbatim as declared (`to: 0` stays the open
+end rather than resolving to the measured length), which keeps the mint pure
+of measurement, and `omitempty` keeps every whole-file member's canonical
+JSON, and therefore every pre-window digest, stored document, and `tl:` cache
+identity, byte-identical. The descriptor is untouched: `from`/`to` on a `tl`
+URL stays refused, because a member's window is source samples and lives per
+member in the store, while a descriptor span would address the envelope.
+
 ### The plan carries what the synthetic track cannot
 
 `PlanSegments` over a synthetic `codec.PCM` track would name `pcm`'s decoder

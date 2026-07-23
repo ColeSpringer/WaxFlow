@@ -12,11 +12,14 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/client"
 	"github.com/colespringer/waxflow/dsp/silence"
+	"github.com/colespringer/waxflow/internal/timeline"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -568,22 +571,43 @@ func TestTimelineAndSrcAreExclusive(t *testing.T) {
 
 // TestTimelineMintRejects pins the mint's own gate: a queue that cannot be
 // timelined fails at the mint, where the client is still listening, rather
-// than at the first segment request minutes into playback.
+// than at the first segment request minutes into playback. The window rows
+// name the member in the message (want), because a thousand-member queue's
+// caller needs to know which member's window is nonsense; the past-the-end
+// row is SpanTrack's refuse-don't-clamp reaching the wire, and the empty
+// window is the one shape that passes both the sanity check and SpanTrack
+// ({from: measured length, to: 0}) and is refused by the mint itself.
 func TestTimelineMintRejects(t *testing.T) {
-	env, _ := timelineEnv(t)
+	env, _ := timelineEnv(t) // tl-0.wav holds 48000 samples
 	for _, tc := range []struct {
 		name string
 		body string
+		want string // required substring of the refusal, "" for any
 	}{
-		{"an empty queue", `{"srcs":[]}`},
-		{"a member with no src", `{"srcs":[{"src":""}]}`},
-		{"a member that does not resolve", `{"srcs":[{"src":"lib/nope.wav"}]}`},
+		{"an empty queue", `{"srcs":[]}`, ""},
+		{"a member with no src", `{"srcs":[{"src":""}]}`, ""},
+		{"a member that does not resolve", `{"srcs":[{"src":"lib/nope.wav"}]}`, ""},
+		{"a negative window start", `{"srcs":[{"src":"lib/tl-0.wav","from":-1}]}`,
+			"member 0: from -1"},
+		{"a negative window end", `{"srcs":[{"src":"lib/tl-0.wav","to":-1}]}`,
+			"member 0: to -1"},
+		{"a window ending before its start", `{"srcs":[{"src":"lib/tl-0.wav","from":200,"to":100}]}`,
+			"member 0: span [200, 100) ends before it starts"},
+		{"a window ending at its start", `{"srcs":[{"src":"lib/tl-0.wav","from":100,"to":100}]}`,
+			"member 0: span [100, 100) ends before it starts"},
+		{"a window past the measured end", `{"srcs":[{"src":"lib/tl-0.wav","to":48001}]}`,
+			"past the source's 48000 samples"},
+		{"an empty window at the measured end", `{"srcs":[{"src":"lib/tl-0.wav","from":48000}]}`,
+			"member 0: window is empty on this source"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := env.postJSON(t, "/hls/timeline", tc.body)
+			body := readBody(t, resp)
 			if resp.StatusCode < 400 {
-				t.Fatalf("POST /hls/timeline = %d, want a refusal: %s",
-					resp.StatusCode, readBody(t, resp))
+				t.Fatalf("POST /hls/timeline = %d, want a refusal: %s", resp.StatusCode, body)
+			}
+			if tc.want != "" && !strings.Contains(string(body), tc.want) {
+				t.Fatalf("the refusal does not name the problem: want %q in %s", tc.want, body)
 			}
 		})
 	}
@@ -643,5 +667,335 @@ func TestTimelineCapsAreHonest(t *testing.T) {
 	}
 	if want := silence.Version; caps.DSP.SilenceDetector != want {
 		t.Errorf("dsp.silenceDetector = %q over the wire, want %q", caps.DSP.SilenceDetector, want)
+	}
+	// An enabled daemon advertises member windows, so a CUE-driven client
+	// routes by capability (absent = older daemon, per-item fallback).
+	if !caps.Delivery.TimelineMemberWindows {
+		t.Error("/caps does not advertise timelineMemberWindows on a daemon that serves them")
+	}
+}
+
+// mintTimelineSrcs posts a queue of full member objects (windows included)
+// and returns the decoded 201, the windowed sibling of mintTimeline.
+func mintTimelineSrcs(t *testing.T, env *testEnv, srcs []client.TimelineSrc) client.TimelineResponse {
+	t.Helper()
+	resp := postTimeline(t, env, client.TimelineRequest{Srcs: srcs})
+	raw := readBody(t, resp)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /hls/timeline = %d, want 201: %s", resp.StatusCode, raw)
+	}
+	var v client.TimelineResponse
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+// fetchVariant drives a signed master to its media playlist and returns the
+// playlist body plus the init's and every segment's bytes, so two renders can
+// be compared segment for segment.
+func fetchVariant(t *testing.T, env *testEnv, masterURL string) (media, init []byte, segs [][]byte) {
+	t.Helper()
+	master := readBody(t, keyless(t, env, masterURL))
+	var mediaURL string
+	for _, l := range playlistLines(master) {
+		if l != "" && l[0] != '#' {
+			mediaURL = "/hls/" + l
+		}
+	}
+	if mediaURL == "" {
+		t.Fatalf("no variant in the master playlist: %s", master)
+	}
+	media = readBody(t, keyless(t, env, mediaURL))
+	initURI, segURIs, _ := mediaURIs(t, media)
+	if initURI == "" || len(segURIs) == 0 {
+		t.Fatalf("media playlist has no init or no segments: %s", media)
+	}
+	init = readBody(t, keyless(t, env, "/hls/"+initURI))
+	for i, u := range segURIs {
+		resp := keyless(t, env, "/hls/"+u)
+		body := readBody(t, resp)
+		if resp.StatusCode != 200 || len(body) == 0 {
+			t.Fatalf("segment %d = %d (%d bytes)", i, resp.StatusCode, len(body))
+		}
+		segs = append(segs, body)
+	}
+	return media, init, segs
+}
+
+// TestTimelineWindowedMembersTileOneFile is A23's headline gapless claim,
+// TestSpansJoinGaplessly extended into timelines: two windows tiling one file
+// are the whole file, delivered as one continuous stream. The split falls at
+// a CD-frame-style offset that is not a whole second (137 * 588 samples),
+// which is exactly where a seconds-based window would drop or repeat a sample.
+//
+// Byte equality against the whole-file timeline is the honest assertion, not
+// an over-tight one: the encoders are deterministic, both timelines carry the
+// same envelope and segment plan, and the members butt-join within one source
+// at one rate, so any difference is a real seam.
+func TestTimelineWindowedMembersTileOneFile(t *testing.T) {
+	env, _ := timelineEnv(t)
+	const frames = 4 * 48000
+	const boundary = 137 * 588 // 80556: 1.678...s at 48 kHz, no round number
+	if err := os.WriteFile(filepath.Join(env.root, "tile.wav"), rampWAV(t, 48000, 2, frames), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tlA := mintTimelineSrcs(t, env, []client.TimelineSrc{
+		{Src: "lib/tile.wav", From: 0, To: boundary},
+		{Src: "lib/tile.wav", From: boundary}, // open end: to the end of the source
+	})
+	tlB := mintTimelineSrcs(t, env, []client.TimelineSrc{{Src: "lib/tile.wav"}})
+
+	if tlA.DurationSeconds != tlB.DurationSeconds {
+		t.Fatalf("the tiling windows sum to %v s, the whole file to %v s",
+			tlA.DurationSeconds, tlB.DurationSeconds)
+	}
+	params := func(tl string) map[string]string {
+		return map[string]string{"tl": tl, "format": "opus", "gain": "off", "segDur": "1"}
+	}
+	mediaA, initA, segsA := fetchVariant(t, env, mintHLS(t, env, params(tlA.Tl)))
+	mediaB, initB, segsB := fetchVariant(t, env, mintHLS(t, env, params(tlB.Tl)))
+
+	for _, l := range playlistLines(mediaA) {
+		if l == "#EXT-X-DISCONTINUITY" {
+			t.Fatalf("the windowed timeline marks a discontinuity; two windows tiling one file are continuous: %s", mediaA)
+		}
+	}
+	_, _, extA := mediaURIs(t, mediaA)
+	_, _, extB := mediaURIs(t, mediaB)
+	var totalA, totalB float64
+	for _, d := range extA {
+		totalA += d
+	}
+	for _, d := range extB {
+		totalB += d
+	}
+	if totalA != totalB {
+		t.Fatalf("the windowed playlist promises %.6f s, the whole-file one %.6f s", totalA, totalB)
+	}
+	if len(segsA) != len(segsB) {
+		t.Fatalf("the windowed render has %d segments, the whole-file one %d", len(segsA), len(segsB))
+	}
+	if !bytes.Equal(initA, initB) {
+		t.Error("the init segments differ; one file windowed into tiles is not the same stream as the file")
+	}
+	for i := range segsA {
+		if !bytes.Equal(segsA[i], segsB[i]) {
+			t.Errorf("segment %d differs between the tiled and whole-file renders; "+
+				"the windows do not join gaplessly", i)
+		}
+	}
+}
+
+// TestTimelineWindowDigestIsDistinct pins the identity decision: a window says
+// which samples are this member, so it joins the digest, the opposite call
+// from crossfade by the same doctrine (ADR-0009's A23 amendment). Re-minting
+// the same windowed body is idempotent, exactly as for whole files.
+func TestTimelineWindowDigestIsDistinct(t *testing.T) {
+	env, refs := timelineEnv(t)
+	whole := mintTimeline(t, env, refs[:1])
+	windowed := mintTimelineSrcs(t, env, []client.TimelineSrc{{Src: refs[0], From: 4800, To: 24000}})
+	if windowed.Tl == whole.Tl {
+		t.Fatalf("a windowed member kept the whole-file digest %q; a window is content identity", whole.Tl)
+	}
+	if again := mintTimelineSrcs(t, env, []client.TimelineSrc{{Src: refs[0], From: 4800, To: 24000}}); again.Tl != windowed.Tl {
+		t.Fatalf("re-minting the same windowed body gave %q, want %q", again.Tl, windowed.Tl)
+	}
+}
+
+// TestTimelineWindowBoundaries pins that the mint's reported shape reads the
+// spanned lengths: durations are window lengths (an open To running to the
+// measured end), offsets are their prefix sum, and durationSeconds and
+// envelopeRate follow.
+func TestTimelineWindowBoundaries(t *testing.T) {
+	env, refs := timelineEnv(t) // 48000, 24000, 72000 samples at 48 kHz
+	tl := mintTimelineSrcs(t, env, []client.TimelineSrc{
+		{Src: refs[0], From: 4800, To: 28800}, // 24000 samples
+		{Src: refs[1]},                        // whole file: 24000
+		{Src: refs[2], From: 36000},           // open end: 72000 - 36000 = 36000
+	})
+	if tl.EnvelopeRate != 48000 {
+		t.Fatalf("envelopeRate = %d, want 48000", tl.EnvelopeRate)
+	}
+	if want := 84000.0 / 48000.0; tl.DurationSeconds != want {
+		t.Fatalf("durationSeconds = %v, want %v (the windows' sum)", tl.DurationSeconds, want)
+	}
+	wantDur := []int64{24000, 24000, 36000}
+	wantOff := []int64{0, 24000, 48000}
+	for i := range wantDur {
+		if tl.Boundaries[i].DurationSamples != wantDur[i] {
+			t.Errorf("boundaries[%d].durationSamples = %d, want the window's %d",
+				i, tl.Boundaries[i].DurationSamples, wantDur[i])
+		}
+		if tl.Boundaries[i].OffsetSamples != wantOff[i] {
+			t.Errorf("boundaries[%d].offsetSamples = %d, want %d", i, tl.Boundaries[i].OffsetSamples, wantOff[i])
+		}
+	}
+}
+
+// TestTimelineCrossfadeFitsSpannedMembers pins that a crossfade is held to the
+// window, not the file: checkCrossfade reads the members' lengths after
+// SpanTrack narrowed them, so a blend the whole file could carry is refused
+// when the window cannot.
+func TestTimelineCrossfadeFitsSpannedMembers(t *testing.T) {
+	env, refs := timelineEnv(t) // member 0 holds 48000 samples
+	// 0.1 s at 48 kHz is 4800 samples of tail zone; a 2400-sample window
+	// cannot carry it, though its whole file could.
+	resp := postTimeline(t, env, client.TimelineRequest{
+		Srcs:             []client.TimelineSrc{{Src: refs[0], To: 2400}, {Src: refs[2]}},
+		CrossfadeSeconds: 0.1,
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("a crossfade longer than the window = %d, want 400: %s", resp.StatusCode, readBody(t, resp))
+	}
+	if whole := mintTimelineXfade(t, env, []string{refs[0], refs[2]}, 0.1); len(whole.Boundaries) != 2 {
+		t.Fatalf("the same crossfade on the whole pair did not mint: %+v", whole)
+	}
+	// A window that fits blends: consecutive members overlap by the zone.
+	tl := postTimeline(t, env, client.TimelineRequest{
+		Srcs:             []client.TimelineSrc{{Src: refs[0], To: 24000}, {Src: refs[2]}},
+		CrossfadeSeconds: 0.1,
+	})
+	raw := readBody(t, tl)
+	if tl.StatusCode != http.StatusCreated {
+		t.Fatalf("a crossfade the window carries = %d, want 201: %s", tl.StatusCode, raw)
+	}
+	var v client.TimelineResponse
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatal(err)
+	}
+	end0 := v.Boundaries[0].OffsetSamples + v.Boundaries[0].DurationSamples
+	if v.Boundaries[1].OffsetSamples >= end0 {
+		t.Errorf("member 1 starts at %d and member 0's window ends at %d; the crossfade did not overlap them",
+			v.Boundaries[1].OffsetSamples, end0)
+	}
+}
+
+// TestClientCreateTimelineWindows pins that the client's TimelineSrc windows
+// reach the wire and the response reflects them, the TestClientCreateTimelineCrossfade
+// pattern: without this the fields would be dead weight on the client type.
+func TestClientCreateTimelineWindows(t *testing.T) {
+	env, refs := timelineEnv(t)
+	c, err := client.New(env.ts.URL, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tl, jobID, err := c.CreateTimeline(t.Context(), client.TimelineRequest{
+		Srcs: []client.TimelineSrc{{Src: refs[0], From: 4800, To: 28800}, {Src: refs[1]}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if jobID != "" || tl == nil {
+		t.Fatalf("CreateTimeline returned job %q / tl %v, want an inline digest", jobID, tl)
+	}
+	if got := tl.Boundaries[0].DurationSamples; got != 24000 {
+		t.Errorf("boundaries[0].durationSamples = %d, want the window's 24000; "+
+			"the client's window did not reach the wire", got)
+	}
+}
+
+// TestTimelineStoredEmptyWindowRefusedAtResolve pins resolveMember's own
+// empty-window refusal, the resolve-side twin of the mint's. The mint refuses
+// an empty window against the length it measured, but that refusal does not
+// survive the one thing the store does and the measure does not: a binary
+// upgrade. The identity pins bytes, not header interpretation, and measured
+// lengths are deliberately re-derived per revision, so a window minted valid
+// (from == the old measure's total) can meet a shorter measure as exactly
+// from == total, which SpanTrack permits and which yields a zero-sample
+// member nothing downstream pins.
+//
+// The fixture stands in for that stored past: a correctly content-addressed
+// document written into the store before boot, because every honest API
+// refuses to mint it against today's measure and a hand-tampered one dies at
+// load's digest re-check (TestLoadRejectsTamperedWindow). The library file's
+// mtime is pinned so the stored identity matches the resolved one, exactly
+// as it would across a real upgrade.
+func TestTimelineStoredEmptyWindowRefusedAtResolve(t *testing.T) {
+	tlDir := filepath.Join(t.TempDir(), "timelines")
+	if err := os.MkdirAll(tlDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const frames = 48000
+	wav := rampWAV(t, 48000, 2, frames)
+	mtime := time.Unix(1700000000, 123456789)
+	members := []timeline.Member{
+		{Src: "lib/short.wav", ID: fmt.Sprintf("%d-%d", len(wav), mtime.UnixNano()), From: frames},
+		{Src: "lib/short.wav", ID: fmt.Sprintf("%d-%d", len(wav), mtime.UnixNano())},
+	}
+	doc, err := json.Marshal(struct {
+		SchemaVersion int               `json:"schemaVersion"`
+		Expires       time.Time         `json:"expires"`
+		Members       []timeline.Member `json:"members"`
+	}{1, time.Now().Add(time.Hour), members})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := timeline.Digest(members)
+	if err := os.WriteFile(filepath.Join(tlDir, digest+".json"), doc, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env := newTestEnv(t, func(cfg *server.Config) { cfg.TimelineDir = tlDir })
+	path := filepath.Join(env.root, "short.wav")
+	if err := os.WriteFile(path, wav, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := client.New(env.ts.URL, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Sign(t.Context(), client.SignRequest{Path: "/hls/master.m3u8",
+		Params: map[string]string{"tl": digest, "format": "opus", "gain": "off"}})
+	switch {
+	case err == nil:
+		t.Fatal("a stored timeline whose window is empty on today's measure planned anyway; " +
+			"the zero-sample member reached HLS planning unrefused")
+	case waxerr.CodeOf(err) != waxerr.CodeInvalidRequest:
+		t.Fatalf("refusal was %v, want an invalid-request", waxerr.CodeOf(err))
+	case !strings.Contains(err.Error(), "member 0: window is empty on this source"):
+		t.Fatalf("the refusal does not name the member and the emptiness: %v", err)
+	}
+}
+
+// TestTimelineWindowedMixedRate pins the envelope arithmetic for a windowed
+// member that resamples: the window is source samples, its normalized length
+// is the resampler's own output count, and the segments serve. The first
+// samples of such a member prime cold (concat consults no Headroomer), the
+// same status quo as crossfade-seek exactness; the motivating CUE carve is
+// same-file, hence uniform, hence exact, so the transient is bounded and
+// documented rather than fixed here.
+func TestTimelineWindowedMixedRate(t *testing.T) {
+	env, _ := timelineEnv(t)
+	if err := os.WriteFile(filepath.Join(env.root, "tl-44.wav"), rampWAV(t, 44100, 2, 44100), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tl := mintTimelineSrcs(t, env, []client.TimelineSrc{
+		{Src: "lib/tl-44.wav", To: 22050}, // 0.5 s at 44.1k: 24000 envelope samples
+		{Src: "lib/tl-0.wav"},             // 48000 samples at 48k
+	})
+	if tl.EnvelopeRate != 48000 {
+		t.Fatalf("envelopeRate = %d, want 48000", tl.EnvelopeRate)
+	}
+	if got := tl.Boundaries[0].DurationSamples; got != 24000 {
+		t.Fatalf("the 22050-sample window at 44.1k normalizes to %d envelope samples, want 24000", got)
+	}
+	if got := tl.Boundaries[1].OffsetSamples; got != 24000 {
+		t.Fatalf("member 1 starts at %d, want 24000 (the window's resampled length)", got)
+	}
+	if want := 72000.0 / 48000.0; tl.DurationSeconds != want {
+		t.Fatalf("durationSeconds = %v, want %v", tl.DurationSeconds, want)
+	}
+	// The render must actually serve: the windowed member opens mid-worker
+	// through Slice, resampling to the envelope.
+	_, _, segs := fetchVariant(t, env, mintHLS(t, env,
+		map[string]string{"tl": tl.Tl, "format": "opus", "gain": "off"}))
+	if len(segs) == 0 {
+		t.Fatal("the mixed-rate windowed timeline served no segments")
 	}
 }

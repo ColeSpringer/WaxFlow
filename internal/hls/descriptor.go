@@ -194,10 +194,12 @@ func DecodeDescriptor(s string) (Descriptor, error) {
 	case d.To > 0 && d.To <= d.From:
 		return bad("span [%d, %d) ends before it starts", d.From, d.To)
 	case d.Tl != "" && (d.From > 0 || d.To > 0):
-		// A span narrows one file; a timeline is several. Spanning a
-		// timeline would be a coherent thing to want one day, but it would
-		// have to address the timeline's own envelope, which is not what
-		// these samples mean.
+		// A span narrows one file; a timeline is several. These fields stay
+		// refused on a tl even now that a timeline's members carry windows of
+		// their own: a member's window is source samples, stored per member
+		// inside the timeline (timeline.Member.From/To, part of the digest),
+		// while a descriptor-level span here would have to address the
+		// timeline's own envelope, which is not what these samples mean.
 		return bad("names a tl and a span; a span bounds one source")
 	case d.CrossfadeSeconds < 0:
 		// Non-negative here; finiteness is guarded server-side before Encode,

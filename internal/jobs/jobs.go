@@ -133,6 +133,17 @@ type Request struct {
 	// /jobs wire body (a timeline is not a /jobs type).
 	CrossfadeSeconds float64 `json:"crossfadeSeconds,omitempty"`
 
+	// Spans are a timeline job's per-member sample windows, index-aligned
+	// with Srcs; empty means every member is its whole file. Timeline-only,
+	// and set from the POST /hls/timeline body exactly as CrossfadeSeconds
+	// is; unlike the crossfade they are identity, not rendering (a window
+	// joins the digest the job mints), so they ride the job only to survive
+	// the 202. The mint hook re-validates them, including that a non-empty
+	// list matches Srcs member for member: titles tolerate a length mismatch
+	// because a title is cosmetic, and a span must not, because a misaligned
+	// window would silently window the wrong members.
+	Spans []MemberSpan `json:"spans,omitempty"`
+
 	// MemberTitles are optional per-member chapter titles for a merge,
 	// index-aligned to Srcs. An mp4-family merge stamps a QuickTime chapter
 	// text track, one chapter per member; a non-empty MemberTitles[i] is that
@@ -206,6 +217,14 @@ func (req Request) SplitSpans(total int64) ([][2]int64, error) {
 		prev = c
 	}
 	return append(spans, [2]int64{prev, waxflow.ToEnd}), nil
+}
+
+// MemberSpan is one timeline member's sample window on its own source: To is
+// exclusive, 0 runs to the end, and the zero value is the whole file, the
+// same spelling the timeline store's Member and the wire body use.
+type MemberSpan struct {
+	From int64 `json:"from,omitempty"`
+	To   int64 `json:"to,omitempty"`
 }
 
 // ErrInfo is a terminal failure, in the envelope vocabulary.
@@ -415,6 +434,7 @@ func (j *Job) clone() *Job {
 	c.Request.SourceIDs = slices.Clone(j.Request.SourceIDs)
 	c.Request.Cuts = slices.Clone(j.Request.Cuts)
 	c.Request.MemberTitles = slices.Clone(j.Request.MemberTitles)
+	c.Request.Spans = slices.Clone(j.Request.Spans)
 	// Output holds no reference field of its own, so cloning the slice is
 	// the whole of it; a pointer added to Output would need a loop here.
 	c.Outputs = slices.Clone(j.Outputs)

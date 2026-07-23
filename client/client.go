@@ -237,6 +237,12 @@ type CapsDelivery struct {
 	Timelines bool `json:"timelines"`
 	// MaxTimelineMembers bounds one timeline's member count.
 	MaxTimelineMembers int `json:"maxTimelineMembers,omitempty"`
+	// TimelineMemberWindows: timeline members take From/To sample windows,
+	// so a client-computed span of one source (a CUE-carved track) can join
+	// a gapless timeline. Absent means a daemon too old to have the field,
+	// which 400s a windowed member as an unknown field: route by presence
+	// and fall back (per-item URLs) rather than trying.
+	TimelineMemberWindows bool `json:"timelineMemberWindows,omitempty"`
 }
 
 // TimelineRequest is the POST /hls/timeline body: a play queue, in order.
@@ -254,6 +260,16 @@ type TimelineRequest struct {
 // TimelineSrc is one member of a timeline request.
 type TimelineSrc struct {
 	Src string `json:"src"`
+	// From and To bound the member to the sample window [From, To) of its
+	// own source, with /stream's span semantics: source samples, To
+	// exclusive, 0 (or absent) running to the end, the zero pair the whole
+	// file. A window that does not fit the measured source is refused, never
+	// clamped. Unlike CrossfadeSeconds the window is identity: two
+	// windowings of one file are two timelines with two digests. Send only
+	// when the daemon advertises delivery.timelineMemberWindows; an older
+	// daemon 400s the field as unknown.
+	From int64 `json:"from,omitempty"`
+	To   int64 `json:"to,omitempty"`
 }
 
 // TimelineResponse is POST /hls/timeline's 201 body.
@@ -327,12 +343,12 @@ type CacheGCResponse struct {
 //
 // Echo-only, daemon-set (leave zero on create; the daemon refuses each
 // with a 400 there, since unknown create fields are errors): SourceID,
-// SourceIDs, and CrossfadeSeconds. The identity pins are computed
+// SourceIDs, CrossfadeSeconds, and Spans. The identity pins are computed
 // server-side so a client cannot send the ones it wishes were true, and
-// a timeline job's crossfade is set from the POST /hls/timeline body (a
-// timeline is not a /jobs type; see CreateTimeline). A fetched job's
-// Request carries them set, so zero them before reusing one as a
-// create body.
+// a timeline job's crossfade and member windows are set from the POST
+// /hls/timeline body (a timeline is not a /jobs type; see
+// CreateTimeline). A fetched job's Request carries them set, so zero
+// them before reusing one as a create body.
 //
 // Create-only, never echoed: Cue. It resolves into Cuts at validation,
 // so the document carries the boundaries the 201 accepted and an edit
@@ -390,6 +406,17 @@ type JobRequest struct {
 
 	// CrossfadeSeconds is a timeline job's per-seam blend. Echo-only.
 	CrossfadeSeconds float64 `json:"crossfadeSeconds,omitempty"`
+	// Spans are a timeline job's per-member sample windows, index-aligned
+	// with Srcs (empty means every member is its whole file). Echo-only.
+	Spans []MemberSpan `json:"spans,omitempty"`
+}
+
+// MemberSpan is one timeline member's sample window on its own source, as a
+// timeline job's request echoes it: To exclusive, 0 running to the end, the
+// zero value the whole file (TimelineSrc's From/To semantics).
+type MemberSpan struct {
+	From int64 `json:"from,omitempty"`
+	To   int64 `json:"to,omitempty"`
 }
 
 // JobOutput describes one of a finished job's product files, which

@@ -227,6 +227,10 @@ Parameters (unknown parameter names are rejected):
       /stream?src=rip.flac&from=10804500&to=18744300        the virtual track
       /stream?src=rip.flac&from=10804500&to=18744300&t=30   30 s into it
 
+  A span can also join a play queue: a timeline member takes the same
+  `from`/`to` window, so consecutive carves of one rip play gaplessly
+  inside a multi-source timeline (see Multi-source timelines).
+
   A span with no rate change is bit-exact: the same samples a split job
   writes for the same cut points. An Opus or AAC-LC span requested in its
   own `format` goes further and skips the decoder altogether, moving the
@@ -406,15 +410,18 @@ playlist, one init header, and one edit list, with no
 `EXT-X-DISCONTINUITY` anywhere, because a concatenated timeline really is
 continuous.
 
-Mint the queue first, then sign a master against the digest:
+Mint the queue first, then sign a master against the digest. A member may be
+a whole file or a `from`/`to` sample window of one (here, the virtual track
+from the `/stream` example, joined to a queue):
 
     POST /hls/timeline
-    {"srcs": [{"src": "lib/Album/01.flac"}, {"src": "lib/Album/02.flac"}]}
+    {"srcs": [{"src": "lib/Album/01.flac"},
+              {"src": "lib/rip.flac", "from": 10804500, "to": 18744300}]}
 
-    201 {"schemaVersion": 1, "tl": "kJ3n...pQ", "members": 2, "durationSeconds": 2500,
+    201 {"schemaVersion": 1, "tl": "kJ3n...pQ", "members": 2, "durationSeconds": 1680.0408163265306,
          "envelopeRate": 44100,
          "boundaries": [{"offsetSamples": 0, "durationSamples": 66150000},
-                        {"offsetSamples": 66150000, "durationSamples": 44100000}]}
+                        {"offsetSamples": 66150000, "durationSamples": 7939800}]}
 
     POST /sign
     {"path": "/hls/master.m3u8", "params": {"tl": "kJ3n...pQ", "format": "opus", "gain": "off"}}
@@ -442,6 +449,25 @@ Things worth knowing before you build on it:
   and bit depths are converted to the envelope no member loses information
   reaching (the maximum of each). A uniform queue, which is what a gapless
   album is, is passed through untouched and costs nothing.
+- **Members take `from`/`to` sample windows.** A member may bound itself
+  to a sample range of its own source: the virtual-track span (`/stream`'s
+  `from`/`to`, with its exact semantics), joined to the queue as a member
+  in its own right, so a client-computed CUE carve plays gaplessly inside
+  a timeline. Source samples, `to` exclusive, `0` (or absent) running to
+  the end; samples rather than seconds for the span's reason (a CUE
+  boundary at 245.32 s is not exactly representable in binary, and a
+  timeline puts that error at every seam); a window that does not fit the
+  measured source is a `400`, never clamped. The identity rule is the
+  opposite of `crossfadeSeconds`' and worth internalizing: a window says
+  *which samples are this member*, so it joins the digest, and two
+  windowings of one file are two timelines with two `tl`s. Consecutive
+  windows tiling one file join gaplessly, byte-identically to streaming
+  the file whole. One nuance: a windowed member that must **resample** to
+  the envelope primes cold at its first samples (the same status quo as
+  crossfade-seek exactness), while the motivating same-file carve is
+  uniform and exact. Send windows only when `/caps`
+  `delivery.timelineMemberWindows` is true: an older daemon `400`s them
+  as unknown fields, so absent means fall back to per-item URLs.
 - **`boundaries` say where each member lands.** `envelopeRate` is the
   timeline's normalized rate (the maximum member rate), and each
   `boundaries[i]` gives that member's `offsetSamples` (its start on the
@@ -526,7 +552,8 @@ is:
       "delivery": {"progressive": true, "hls": true, "hlsFormats": ["opus", "flac", "aac", "alac"],
                    "cutFormats": ["opus", "aac"],
                    "jobs": false, "uploads": false, "pid": false,
-                   "timelines": true, "maxTimelineMembers": 1000},
+                   "timelines": true, "maxTimelineMembers": 1000,
+                   "timelineMemberWindows": true},
       "profiles": {
         "apple-native": {
           "delivery": "hls",
@@ -551,6 +578,10 @@ resolve against a WaxBin catalog (a build with a catalog resolver and
 `catalogDB`).
 `delivery.timelines` reports whether `POST /hls/timeline` and the `tl`
 parameter are served, and `maxTimelineMembers` bounds one timeline.
+`delivery.timelineMemberWindows` reports that timeline members take
+`from`/`to` sample windows; route by its presence, because a daemon too
+old to have it `400`s a windowed member as an unknown field (fall back to
+per-item URLs rather than trying).
 
 `dsp` is the signal-processing surface, so a format policy routes by
 capability instead of sniffing a version:

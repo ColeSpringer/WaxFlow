@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxflow/audio"
+	"github.com/colespringer/waxflow/client"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/jobs"
 	"github.com/colespringer/waxflow/server"
@@ -427,20 +428,7 @@ func TestSignedIndexedResult(t *testing.T) {
 // decision it was. /result means the job's product, and an analyze job has
 // served its numbers there all along.
 func TestTimelineJobResultIsItsDigest(t *testing.T) {
-	env := newTestEnv(t, func(cfg *server.Config) {
-		cfg.JobsDir = filepath.Join(t.TempDir(), "jobs")
-		cfg.TimelineDir = filepath.Join(t.TempDir(), "timelines")
-	})
-	// An MP3 is the queue that becomes a job: its length is not authoritative
-	// from its headers and its demuxer indexes, which is the daemon's own test
-	// for measuring being expensive enough to be worth a job.
-	raw, err := os.ReadFile("../testdata/noise-cbr320.mp3")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(env.root, "noise.mp3"), raw, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	env := mp3TimelineEnv(t)
 	resp := env.postJSON(t, "/hls/timeline", `{"srcs":[{"src":"lib/noise.mp3"},{"src":"lib/noise.mp3"}]}`)
 	b := readBody(t, resp)
 	if resp.StatusCode != http.StatusAccepted {
@@ -483,17 +471,7 @@ func TestTimelineJobResultIsItsDigest(t *testing.T) {
 // enough to prove the crossfade reached the job's mint, which the members
 // overlapping shows (a butt-join would tile them exactly).
 func TestTimelineCrossfadeThroughJob(t *testing.T) {
-	env := newTestEnv(t, func(cfg *server.Config) {
-		cfg.JobsDir = filepath.Join(t.TempDir(), "jobs")
-		cfg.TimelineDir = filepath.Join(t.TempDir(), "timelines")
-	})
-	raw, err := os.ReadFile("../testdata/noise-cbr320.mp3")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(env.root, "noise.mp3"), raw, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	env := mp3TimelineEnv(t)
 	resp := env.postJSON(t, "/hls/timeline",
 		`{"srcs":[{"src":"lib/noise.mp3"},{"src":"lib/noise.mp3"}],"crossfadeSeconds":0.01}`)
 	b := readBody(t, resp)
@@ -515,5 +493,102 @@ func TestTimelineCrossfadeThroughJob(t *testing.T) {
 		t.Errorf("member 1 starts at %d and member 0 ends at %d; the async job's members tile instead of "+
 			"overlapping, so the crossfade did not thread through the job",
 			tl.Boundaries[1].OffsetSamples, end0)
+	}
+}
+
+// mp3TimelineEnv is a jobs-and-timelines daemon with the cold MP3 fixture in
+// its library: the one input whose exact-length walk is expensive enough to
+// send a timeline mint down the 202 path.
+func mp3TimelineEnv(t *testing.T) *testEnv {
+	t.Helper()
+	env := newTestEnv(t, func(cfg *server.Config) {
+		cfg.JobsDir = filepath.Join(t.TempDir(), "jobs")
+		cfg.TimelineDir = filepath.Join(t.TempDir(), "timelines")
+	})
+	raw, err := os.ReadFile("../testdata/noise-cbr320.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.root, "noise.mp3"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return env
+}
+
+// TestTimelineWindowsThroughJob pins that the 202 async mint threads the
+// member windows too: a cold windowed queue's job carries the spans, the
+// finished boundaries reflect them, and a warm sync re-mint of the same body
+// answers 201 with the very digest the job minted, which is the whole
+// same-body-same-digest claim across the split.
+func TestTimelineWindowsThroughJob(t *testing.T) {
+	env := mp3TimelineEnv(t)
+	const from = 1000
+	body := fmt.Sprintf(`{"srcs":[{"src":"lib/noise.mp3","from":%d},{"src":"lib/noise.mp3"}]}`, from)
+	resp := env.postJSON(t, "/hls/timeline", body)
+	b := readBody(t, resp)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Skipf("the cold MP3 queue minted inline (%d), so there is no timeline job to check: %s",
+			resp.StatusCode, b)
+	}
+	var created jobs.Job
+	if err := json.Unmarshal(b, &created); err != nil {
+		t.Fatal(err)
+	}
+	if len(created.Request.Spans) != 2 || created.Request.Spans[0].From != from {
+		t.Fatalf("the job's request carries spans %+v, want the body's windows", created.Request.Spans)
+	}
+	job := awaitJob(t, env, created.ID)
+	tl := job.Timeline
+	if tl == nil || len(tl.Boundaries) != 2 {
+		t.Fatalf("the finished windowed timeline job carries no boundaries: %+v", job)
+	}
+	// Both members read one source at one rate, so the whole-file member is
+	// exactly the windowed one plus the trimmed samples, whatever the
+	// fixture's length is.
+	if got := tl.Boundaries[1].DurationSamples - tl.Boundaries[0].DurationSamples; got != from {
+		t.Errorf("the whole-file member is %d samples longer than the windowed one, want %d; "+
+			"the job's mint did not window member 0", got, from)
+	}
+	// Warm re-mint of the same body: the measure is memoized now, so the sync
+	// path answers, and it must name the digest the job minted.
+	warm := env.postJSON(t, "/hls/timeline", body)
+	wb := readBody(t, warm)
+	if warm.StatusCode != http.StatusCreated {
+		t.Fatalf("the warm re-mint = %d, want 201: %s", warm.StatusCode, wb)
+	}
+	var again client.TimelineResponse
+	if err := json.Unmarshal(wb, &again); err != nil {
+		t.Fatal(err)
+	}
+	if again.Tl != tl.Tl {
+		t.Errorf("the warm sync mint named %q, the job %q; the two paths minted different timelines "+
+			"from one body", again.Tl, tl.Tl)
+	}
+}
+
+// TestTimelineWindowOutOfRangeFailsJob is the async half of the window-fit
+// asymmetry the sync tests cannot reach: an out-of-range window on a cold
+// queue passes the cheap sanity check (it is internally sensible), rides the
+// 202, and must fail the job with SpanTrack's refusal once the member is
+// measured, not mint a clamped timeline.
+func TestTimelineWindowOutOfRangeFailsJob(t *testing.T) {
+	env := mp3TimelineEnv(t)
+	resp := env.postJSON(t, "/hls/timeline",
+		`{"srcs":[{"src":"lib/noise.mp3","from":1099511627776},{"src":"lib/noise.mp3"}]}`)
+	b := readBody(t, resp)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Skipf("the cold MP3 queue minted inline (%d), so there is no timeline job to check: %s",
+			resp.StatusCode, b)
+	}
+	var created jobs.Job
+	if err := json.Unmarshal(b, &created); err != nil {
+		t.Fatal(err)
+	}
+	j := awaitJobTerminal(t, env, created.ID)
+	if j.State != jobs.StateFailed {
+		t.Fatalf("an out-of-range window landed the job on %s, want failed: %+v", j.State, j.Timeline)
+	}
+	if j.Error == nil || !strings.Contains(j.Error.Message, "past the source's") {
+		t.Fatalf("the failure does not carry SpanTrack's refusal: %+v", j.Error)
 	}
 }

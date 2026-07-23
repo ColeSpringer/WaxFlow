@@ -56,12 +56,29 @@ func TestDigestIsIdentity(t *testing.T) {
 		{"the order changed, which is a different timeline",
 			[]Member{{Src: "b.flac", ID: "3-4"}, {Src: "a.flac", ID: "1-2"}}},
 		{"a member was dropped", []Member{{Src: "a.flac", ID: "1-2"}}},
+		{"a window was added, which names different samples of the same file",
+			[]Member{{Src: "a.flac", ID: "1-2", From: 100, To: 200}, {Src: "b.flac", ID: "3-4"}}},
+		{"a window's end moved, so the member is a different track",
+			[]Member{{Src: "a.flac", ID: "1-2", To: 300}, {Src: "b.flac", ID: "3-4"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if Digest(tc.in) == d {
 				t.Fatal("the digest did not change, so the old cache key would survive the change")
 			}
 		})
+	}
+}
+
+// TestDigestUnchangedForWholeFileMembers pins the literal pre-window digest,
+// computed on main before Member gained From/To. Whole-file members marshal
+// without the window fields (omitempty), so every digest, stored document,
+// and tl: cache identity minted before the change must survive it
+// byte-identically; a drift here orphans all of them at once.
+func TestDigestUnchangedForWholeFileMembers(t *testing.T) {
+	got := Digest([]Member{{Src: "a.flac", ID: "1-2"}, {Src: "b.flac", ID: "3-4"}})
+	if want := "J8nqSMd1b9sKJGl38axuitrabpSbf1S5oNFxC7Jjq8M"; got != want {
+		t.Fatalf("a whole-file timeline digests to %q, want the pre-window %q; "+
+			"every stored timeline and tl: cache entry is now orphaned", got, want)
 	}
 }
 
@@ -111,7 +128,11 @@ func TestPutIsIdempotent(t *testing.T) {
 
 func TestMembersRoundTrip(t *testing.T) {
 	s := testStore(t)
-	want := []Member{{Src: "a.flac", ID: "1-2"}, {Src: "b.flac", ID: "3-4"}}
+	// One windowed member among whole-file ones: the window must survive the
+	// round trip verbatim (To 0 staying 0, not resolving to anything), and
+	// the load path's content-address re-check must pass over a document
+	// whose canonical JSON now carries window fields.
+	want := []Member{{Src: "a.flac", ID: "1-2"}, {Src: "b.flac", ID: "3-4", From: 4410, To: 88200}, {Src: "c.flac", ID: "5-6", From: 100}}
 	digest, err := s.Put(want, later())
 	if err != nil {
 		t.Fatal(err)
@@ -127,6 +148,28 @@ func TestMembersRoundTrip(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("member %d read back as %+v, want %+v", i, got[i], want[i])
 		}
+	}
+}
+
+// TestPutRefusesBadWindows pins the store's own window sanity, which guards
+// Put and load alike: a window no source could satisfy must never be stored,
+// whichever door it arrived through.
+func TestPutRefusesBadWindows(t *testing.T) {
+	s := testStore(t)
+	for _, tc := range []struct {
+		name string
+		m    Member
+	}{
+		{"a negative start", Member{Src: "a.flac", ID: "1-2", From: -1}},
+		{"a negative end", Member{Src: "a.flac", ID: "1-2", To: -1}},
+		{"an end before its start", Member{Src: "a.flac", ID: "1-2", From: 200, To: 100}},
+		{"an end equal to its start", Member{Src: "a.flac", ID: "1-2", From: 100, To: 100}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := s.Put([]Member{tc.m}, later()); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+				t.Fatalf("Put stored a member with %s: %v", tc.name, err)
+			}
+		})
 	}
 }
 
@@ -296,6 +339,32 @@ func TestLoadRejectsTamperedMembers(t *testing.T) {
 	}
 	if _, err := s.Members(digest); waxerr.CodeOf(err) != waxerr.CodeNotFound {
 		t.Fatalf("a tampered timeline was served under its old digest: %v", err)
+	}
+}
+
+// TestLoadRejectsTamperedWindow is the same check for the window fields: they
+// are inside the digest, so a stored From edited by hand cannot keep its
+// timeline. Without this a tampered window would quietly serve different
+// samples under the identity minted for the original ones.
+func TestLoadRejectsTamperedWindow(t *testing.T) {
+	s := testStore(t)
+	digest, err := s.Put([]Member{{Src: "a.flac", ID: "1-2", From: 100, To: 200}}, later())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(s.path(digest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := strings.Replace(string(raw), `"from":100`, `"from":101`, 1)
+	if tampered == string(raw) {
+		t.Fatal("the fixture did not actually change")
+	}
+	if err := os.WriteFile(s.path(digest), []byte(tampered), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Members(digest); waxerr.CodeOf(err) != waxerr.CodeNotFound {
+		t.Fatalf("a timeline with a tampered window was served under its old digest: %v", err)
 	}
 }
 

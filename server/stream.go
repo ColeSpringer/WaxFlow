@@ -298,13 +298,21 @@ func (s *Server) transcodeSpan(ctx context.Context, src *source.File, hint strin
 	if !sp.narrowed() {
 		return s.eng.Transcode(ctx, src, hint, dst, opts)
 	}
+	// The plan validated the window against the measured total (prepareSource
+	// measures on the span branch), so the run slices against the same number
+	// rather than the freshly opened header's advisory one; see sliceMeasured.
+	// A memo hit rather than a second walk, exactly as the cut planner's
+	// trackFor is.
+	track, err := s.trackFor(src, true)
+	if err != nil {
+		return nil, err
+	}
 	med, err := s.eng.OpenStream(src, hint)
 	if err != nil {
 		return nil, err
 	}
-	sl, err := waxflow.Slice(med, sp.from, sp.end())
+	sl, err := sliceMeasured(med, sp, track.Samples)
 	if err != nil {
-		med.Close()
 		return nil, err
 	}
 	defer sl.Close()

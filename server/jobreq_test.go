@@ -13,6 +13,7 @@ import (
 
 	"github.com/colespringer/waxflow/internal/jobs"
 	"github.com/colespringer/waxflow/source"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // jsonTag returns a struct field's json name, ignoring options.
@@ -62,6 +63,9 @@ func TestJobRequestCoverage(t *testing.T) {
 		"crossfadeSeconds": "a timeline-job field, set from the POST /hls/timeline body " +
 			"(TimelineRequest), not the /jobs wire body: a timeline is not a /jobs type, so " +
 			"jobRequest has no seam to blend and never carries it",
+		"spans": "a timeline-job field for the same reason crossfadeSeconds is: per-member " +
+			"windows are set from the POST /hls/timeline body's TimelineSrc from/to and ride " +
+			"the job only to survive the 202",
 	}
 
 	// Wire fields with no domain counterpart, and why. This direction needs
@@ -153,6 +157,38 @@ func TestJobRequestPopulatedIsExhaustive(t *testing.T) {
 			t.Errorf("the populated jobRequest literal leaves %s zero, so TestJobRequestCoverage "+
 				"does not actually check its mapping", v.Type().Field(i).Name)
 		}
+	}
+}
+
+// TestJobSpanConversionRefusesLoudly pins the timeline job entry's hardening:
+// job.json is durable state a hand edit can reach, so the spans it carries are
+// re-validated on the way back into the mint rather than trusted. A negative To
+// must fail the job, not slide into SpanTrack's ToEnd; and a list whose length
+// matches neither zero nor the member count is refused, where the titles
+// precedent tolerates the mismatch, because a misaligned identity-bearing span
+// would window the wrong members (or index past the list).
+func TestJobSpanConversionRefusesLoudly(t *testing.T) {
+	if sps, err := spansFromJob(2, nil); err != nil || sps != nil {
+		t.Fatalf("no spans should convert to no spans: %v, %v", sps, err)
+	}
+	good, err := spansFromJob(2, []jobs.MemberSpan{{From: 10, To: 20}, {}})
+	if err != nil || len(good) != 2 || good[0] != (span{from: 10, to: 20}) {
+		t.Fatalf("an aligned span list did not convert: %v, %v", good, err)
+	}
+	for _, tc := range []struct {
+		name  string
+		spans []jobs.MemberSpan
+	}{
+		{"fewer spans than members", []jobs.MemberSpan{{From: 1}}},
+		{"more spans than members", []jobs.MemberSpan{{}, {}, {}}},
+		{"a negative To", []jobs.MemberSpan{{From: 10, To: -1}, {}}},
+		{"an end before its start", []jobs.MemberSpan{{From: 20, To: 10}, {}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := spansFromJob(2, tc.spans); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+				t.Fatalf("spansFromJob(2, %+v) = %v, want a loud invalid-request", tc.spans, err)
+			}
+		})
 	}
 }
 
