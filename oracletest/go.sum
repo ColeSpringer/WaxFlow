@@ -1,5 +1,5 @@
-github.com/colespringer/waxlabel v1.0.0 h1:XU+xRo+PO3olXrit1xyngZWKwoOfwUDCJCv4SzcnS/I=
-github.com/colespringer/waxlabel v1.0.0/go.mod h1:vNfr3pXMymG1dBnoMJc7/1JFdtmHBP+8Jhz5dYlriyA=
+github.com/colespringer/waxlabel v1.2.0 h1:QJEQ6o6pdcMUv9a7aH13tQii7uY08PntOb1MmlMwXCw=
+github.com/colespringer/waxlabel v1.2.0/go.mod h1:vNfr3pXMymG1dBnoMJc7/1JFdtmHBP+8Jhz5dYlriyA=
 github.com/hajimehoshi/go-mp3 v0.3.4 h1:NUP7pBYH8OguP4diaTZ9wJbUbk3tC0KlfzsEpWmYj68=
 github.com/hajimehoshi/go-mp3 v0.3.4/go.mod h1:fRtZraRFcWb0pu7ok0LqyFhCUrPeMsGRSVop0eemFmo=
 github.com/hajimehoshi/oto/v2 v2.3.1/go.mod h1:seWLbgHH7AyUMYKfKYT9pg7PhUu9/SisyJvNTT+ASQo=

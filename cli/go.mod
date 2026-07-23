@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/colespringer/waxflow v0.0.0-00010101000000-000000000000
-	github.com/colespringer/waxlabel v1.0.0
+	github.com/colespringer/waxlabel v1.2.0
 	github.com/spf13/cobra v1.10.2
 )
 
