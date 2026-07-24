@@ -65,7 +65,13 @@ func newServerCmd(version string, flavor Flavor) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer srv.Close()
+			// Close tears down the server's goroutines and stores at shutdown.
+			// Any error is logged, not fatal: the process is on its way out.
+			defer func() {
+				if err := srv.Close(); err != nil {
+					logger.Warn("server teardown failed", "err", err)
+				}
+			}()
 
 			ln, err := net.Listen("tcp", cfg.ResolvedAddr())
 			if err != nil {
@@ -249,9 +255,17 @@ func startDebugListener(cfg config.Config, logger *slog.Logger) (func(), error) 
 		return nil, waxerr.Wrap(waxerr.CodeInternal, "debug listen", err)
 	}
 	dsrv := &http.Server{Handler: dmux, ReadHeaderTimeout: 5 * time.Second}
-	go dsrv.Serve(ln)
+	go func() {
+		if err := dsrv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
+			logger.Warn("debug listener stopped", "err", err)
+		}
+	}()
 	logger.Info("debug listener up", "addr", ln.Addr().String())
-	return func() { dsrv.Close() }, nil
+	return func() {
+		if err := dsrv.Close(); err != nil {
+			logger.Warn("debug listener close failed", "err", err)
+		}
+	}, nil
 }
 
 // serve runs the daemon on ln until ctx is canceled, then drains

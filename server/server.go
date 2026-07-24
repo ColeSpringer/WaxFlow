@@ -13,6 +13,7 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -471,12 +472,19 @@ func (s *Server) Close() error {
 		s.cancel()
 		s.wg.Wait()
 		if s.jobs != nil {
+			// Runner.Close has no error return: the restart contract leaves
+			// running jobs persisted for the next start to requeue, so
+			// teardown only cancels and waits. Nothing to fold into closeErr.
 			s.jobs.Close()
 		}
+		var uploadsErr error
 		if s.uploads != nil {
-			s.uploads.Close()
+			uploadsErr = s.uploads.Close()
 		}
-		s.closeErr = s.store.Close()
+		// Join both stores: each returns nil today, but keeping the join means
+		// a later fallible close surfaces here instead of being masked by the
+		// other. Do not collapse this to a single s.store.Close().
+		s.closeErr = errors.Join(uploadsErr, s.store.Close())
 	})
 	return s.closeErr
 }

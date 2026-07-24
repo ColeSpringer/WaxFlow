@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -136,6 +137,47 @@ func TestFlavorNilResolverIsAnError(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "nil resolver") {
 		t.Errorf("stderr = %q, want it to name the nil resolver", errOut.String())
+	}
+}
+
+// countingCloser records how many times it was closed, so a test can tell
+// a leak from a double close.
+type countingCloser struct{ n int }
+
+func (c *countingCloser) Close() error { c.n++; return nil }
+
+// TestFlavorHandleIsClosedOnOpenError pins the cleanup for the other
+// broken shape: an implementation that fails after opening its handle and
+// returns the handle anyway. Both failure paths must close it rather than
+// leak the catalog's file lock for the rest of the command, which for
+// doctor runs every remaining check.
+func TestFlavorHandleIsClosedOnOpenError(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		resolver source.Resolver
+		err      error
+	}{
+		{"error", nil, errors.New("catalog schema check failed")},
+		{"nil resolver, no error", nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("WAXFLOW_DATA_DIR", t.TempDir())
+			handle := &countingCloser{}
+			flavor := Flavor{
+				Name: "broken",
+				OpenResolver: func(context.Context, ResolverOptions) (source.Resolver, io.Closer, error) {
+					return tc.resolver, handle, tc.err
+				},
+			}
+			var out, errOut strings.Builder
+			code := ExecuteFlavor("test", []string{"sign", "--src", "pid:01ARZ3NDEKTSV4RRFFQ69G5FAV"}, &out, &errOut, flavor)
+			if code == 0 {
+				t.Fatalf("exit = 0 from a failing OpenResolver; stdout: %s", out.String())
+			}
+			if handle.n != 1 {
+				t.Errorf("handle closed %d times, want exactly 1", handle.n)
+			}
+		})
 	}
 }
 

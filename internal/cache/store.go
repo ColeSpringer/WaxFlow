@@ -59,6 +59,7 @@ type Store struct {
 
 	janitorStop chan struct{}
 	janitorWG   sync.WaitGroup
+	closeOnce   sync.Once
 }
 
 // Open opens (creating if needed) the cache at dir and rebuilds the
@@ -425,9 +426,12 @@ func (s *Store) janitor() {
 }
 
 // Close stops the janitor. In-flight entries are owned by their pipelines
-// and finish independently.
+// and finish independently. Close is idempotent, so the store keeps the
+// promise Server.Close makes to its callers.
 func (s *Store) Close() error {
-	close(s.janitorStop)
-	s.janitorWG.Wait()
+	s.closeOnce.Do(func() {
+		close(s.janitorStop)
+		s.janitorWG.Wait()
+	})
 	return nil
 }

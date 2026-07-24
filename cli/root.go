@@ -33,7 +33,11 @@ type Flavor struct {
 	// sign, probe, transcode, split, and doctor.
 	//
 	// The returned Closer, which may be nil, is closed after the
-	// resolver's last use. An implementation that is present but
+	// resolver's last use. Return a plain nil on error, having cleaned up
+	// what was opened: a Closer returned alongside an error is closed
+	// rather than leaked, so handing back one already closed is a double
+	// close. A typed-nil pointer in a non-nil interface is not a nil
+	// Closer and will be called. An implementation that is present but
 	// unconfigured owns the refusal for its own schemes: it returns a
 	// resolver that answers them with a message naming what is missing,
 	// rather than passing them down to opts.Next and the stock
@@ -197,6 +201,22 @@ func (f Flavor) openResolver(ctx context.Context, cfg config.Config, logger *slo
 	return resolver, cleanup, err
 }
 
+// logClose closes c and reports a failure rather than dropping it. Every
+// close in the resolver chain is diagnostic, never fatal: on the rollback
+// paths the construction error being returned is the real story, and a
+// Warn cannot mask it. A nil interface is a no-op, which is what an absent
+// optional closer looks like; a typed-nil pointer inside a non-nil
+// interface still calls through, the same exposure as the closer != nil
+// guards this replaces, and Flavor.OpenResolver documents the contract.
+func logClose(logger *slog.Logger, what string, c io.Closer) {
+	if c == nil {
+		return
+	}
+	if err := c.Close(); err != nil {
+		logger.Warn(what+" close failed", "err", err)
+	}
+}
+
 // openResolverWithRoots is openResolver plus the inner *source.Roots it
 // opens regardless of flavor, so the server can hand that same live handle
 // to a root-reload closure (the whole chain delegates to it by pointer). A
@@ -209,11 +229,11 @@ func (f Flavor) openResolverWithRoots(ctx context.Context, cfg config.Config, lo
 	}
 	if f.OpenResolver == nil {
 		if cfg.CatalogDB != "" {
-			roots.Close()
+			logClose(logger, "roots", roots)
 			return nil, nil, nil, waxerr.New(waxerr.CodeInvalidRequest,
 				"catalogDB is set but this build has no catalog resolver; pid: sources need a build that injects one")
 		}
-		return roots, roots, func() { roots.Close() }, nil
+		return roots, roots, func() { logClose(logger, "roots", roots) }, nil
 	}
 	resolver, closer, err := f.OpenResolver(ctx, ResolverOptions{
 		CatalogDB: cfg.CatalogDB,
@@ -223,25 +243,28 @@ func (f Flavor) openResolverWithRoots(ctx context.Context, cfg config.Config, lo
 		Daemon:    daemon,
 	})
 	if err != nil {
-		roots.Close()
+		// A failing implementation should not hand back a live handle, but
+		// the seam is out of tree: close what it returned rather than leak
+		// it for the rest of the command. doctor is the case that shows,
+		// since it keeps running its remaining checks after this one fails.
+		logClose(logger, "resolver", closer)
+		logClose(logger, "roots", roots)
 		return nil, nil, nil, err
 	}
 	if resolver == nil {
 		// Out-of-tree implementations reach here, so a broken one gets a
 		// named error rather than a nil-interface panic at the first
-		// Resolve.
-		if closer != nil {
-			closer.Close()
-		}
-		roots.Close()
+		// Resolve. The closer is a third-party handle (a catalog DB), the
+		// one close in this chain that fails in practice, so this rollback
+		// reports it the same way the teardown closure does.
+		logClose(logger, "resolver", closer)
+		logClose(logger, "roots", roots)
 		return nil, nil, nil, waxerr.New(waxerr.CodeInternal,
 			"cli: Flavor.OpenResolver returned a nil resolver and no error")
 	}
 	return resolver, roots, func() {
-		if closer != nil {
-			closer.Close()
-		}
-		roots.Close()
+		logClose(logger, "resolver", closer)
+		logClose(logger, "roots", roots)
 	}, nil
 }
 
