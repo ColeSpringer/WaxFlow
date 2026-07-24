@@ -1,9 +1,7 @@
 # WaxFlow
 
-Self-hosted, **pure-Go**, on-the-fly audio transcoding for the Wax family
-(WaxTap, WaxBin, WaxLabel, WaxSeal): request -> decode -> DSP -> encode ->
-stream, tuned for time-to-first-audio, sample-exact seeking, and flaky
-mobile networks. No ffmpeg at runtime, ever (`CGO_ENABLED=0`).
+Self-hosted, **pure-Go**, on-the-fly audio transcoding: request -> decode -> DSP -> encode -> stream, tuned for time-to-first-audio, sample-exact seeking, and flaky
+mobile networks.
 
 The codecs (Opus, MP3, AAC-LC, Vorbis, FLAC, ALAC, and WAV encoders, plus a
 wider decoder set) are written from scratch for Go 1.26 and published as public,
@@ -133,6 +131,19 @@ Precedence: **flag > `WAXFLOW_*` env > JSON config file > default**
 | `debugAddr` | `WAXFLOW_DEBUG_ADDR` | off | loopback-only pprof listener |
 | `paceBurstSeconds` / `paceFactor` | `WAXFLOW_PACE_*` | 30 / 2.0 | read-behind delivery pacing (factor 0 disables) |
 | `demo` | `WAXFLOW_DEMO` | `false` | serve the browser test page at `/demo` (dev only) |
+
+**Runtime root reload.** A daemon configured through the JSON `roots` (not
+`WAXFLOW_ROOTS`) serves `POST /roots/reload`, which re-reads the config and
+reconciles its live library roots so a root added at runtime streams
+without a restart. It reconciles only what the resolver owns (the roots and
+`sourceMaxBytes`); every other setting still needs a restart. It is wired
+only when a reload could do something, a config file is set and
+`WAXFLOW_ROOTS` is not pinning roots, so env-only and no-config deployments
+report `delivery.rootsReload: false` in `/caps` and keep serving new roots
+by direct download. The integration contract for a caller that adds a root
+(WaxDeck): write the root into the sidecar's JSON config **atomically**
+(write a temp file, then rename), then `POST /roots/reload`; the atomic
+write keeps a reload from reading a half-written file and `400`ing.
 
 ## CLI
 

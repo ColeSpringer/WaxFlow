@@ -84,6 +84,16 @@ type Config struct {
 	// keeps the capability surface honest.
 	PIDSources bool
 
+	// ReloadRoots re-reads configuration and reconciles the live library
+	// roots to match, so a runtime-added root streams without a restart.
+	// It enables POST /roots/reload and delivery.rootsReload in /caps; nil
+	// (a direct embedder, or a build where a reload could not do anything)
+	// disables the endpoint and reports the capability off. The CLI wires
+	// it only for a file-configured daemon whose roots are not pinned by
+	// WAXFLOW_ROOTS. It runs under the endpoint's API-key gate, so it may
+	// re-read the filesystem and mutate the resolver's roots in place.
+	ReloadRoots func() (source.ReloadResult, error)
+
 	// SigningKeys enable signed playback URLs. Empty disables sig auth
 	// and POST /sign.
 	SigningKeys []SigningKey
@@ -425,6 +435,9 @@ func (s *Server) routes() {
 		// The indexed form is the same handler: a job with one output answers
 		// on both, and the bare path refuses only where it would have to guess.
 		mux.HandleFunc("GET /jobs/{id}/result/{n}", s.handleJobResult)
+	}
+	if s.cfg.ReloadRoots != nil {
+		mux.HandleFunc("POST /roots/reload", s.requireKey(s.handleRootsReload))
 	}
 	mux.HandleFunc("GET /art", s.handleArt)
 	mux.HandleFunc("HEAD /art", s.handleArt)

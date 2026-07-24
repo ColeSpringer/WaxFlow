@@ -43,8 +43,11 @@ type Flavor struct {
 	// opts.Daemon is false: the command resolves one reference and
 	// tears down, so nothing outlives it.
 	//
-	// The resolver it returns may implement PIDSourceReporter to say
-	// what /caps advertises.
+	// The resolver it returns may implement PIDSourceReporter to say what
+	// /caps advertises, and ReloadableResolver to be reconciled by a root
+	// reload. Only the returned resolver is inspected for either, so a
+	// resolver that wraps another must implement and forward the ones the
+	// inner resolver needs.
 	OpenResolver func(ctx context.Context, opts ResolverOptions) (source.Resolver, io.Closer, error)
 }
 
@@ -65,6 +68,29 @@ type PIDSourceReporter interface {
 	PIDSources() bool
 }
 
+// ReloadableResolver, when implemented by the resolver an OpenResolver
+// returns, is reconciled by a root reload (POST /roots/reload) alongside the
+// library roots: it receives the re-read source cap, so a build that caps
+// its own sources -- a catalog resolver enforcing the cap on the pid: files
+// it opens itself -- stays in step with a changed sourceMaxBytes instead of
+// holding the value it snapshotted at open. This is what makes a reload's
+// "byte-for-byte as a restart" promise hold for a Flavor build, not only the
+// stock one.
+//
+// Optional. A resolver that only delegates to ResolverOptions.Next needs
+// nothing: Next is the reconciled roots, which enforce the live cap on their
+// own sources. maxBytes is the resolved per-source cap, defaulted exactly as
+// ResolverOptions.MaxBytes was.
+//
+// It is called with no library lock held and concurrently with in-flight
+// Resolve calls, so an implementation must synchronize the field it updates
+// (an atomic, say). Only the resolver OpenResolver returned is checked, as
+// with PIDSourceReporter: a resolver that wraps another must implement this
+// and forward when the inner one caps its own sources.
+type ReloadableResolver interface {
+	ReloadSourceMaxBytes(maxBytes int64)
+}
+
 // ResolverOptions carries what an OpenResolver implementation needs from
 // the resolved configuration. Every field is exported or stdlib, so a
 // Flavor is constructible from any module.
@@ -75,12 +101,22 @@ type ResolverOptions struct {
 	CatalogDB string
 
 	// MaxBytes caps each resolved source file, the cap the library
-	// roots enforce on theirs.
+	// roots enforce on theirs. It is the value at open: a Flavor that caps
+	// its own sources on it (rather than delegating to Next, whose roots a
+	// reload reconciles in place) should implement ReloadableResolver to
+	// stay in step with a runtime sourceMaxBytes change; without that, the
+	// copied value is a restart-only snapshot.
 	MaxBytes int64
 
 	// Next serves every reference the implementation does not claim:
 	// the configured library roots. Implementations delegate rather
 	// than answer not-found.
+	//
+	// Next is live-mutable: a root reload (POST /roots/reload) mutates
+	// the roots it points at in place, so an implementation must delegate
+	// through the held Next reference and never snapshot its resolvable
+	// set, or a runtime-added root would be invisible to this build's
+	// resolver until restart.
 	Next source.Resolver
 
 	// Logger is never nil.
@@ -153,22 +189,31 @@ Configuration precedence: flag > WAXFLOW_* environment > JSON config file
 
 // openResolver builds the source-resolution chain every ref-taking
 // command shares: the configured roots, wrapped by the Flavor's schemes
-// when present. The returned close func tears the whole chain down. A
-// configured catalogDB with no resolver to serve it is refused loudly:
-// the operator asked for pid: sources and this build cannot deliver
-// them.
+// when present. The returned close func tears the whole chain down. It is
+// the thin wrapper for the commands (sign, probe, doctor) that do not need
+// the inner roots handle; server calls openResolverWithRoots.
 func (f Flavor) openResolver(ctx context.Context, cfg config.Config, logger *slog.Logger, daemon bool) (source.Resolver, func(), error) {
+	resolver, _, cleanup, err := f.openResolverWithRoots(ctx, cfg, logger, daemon)
+	return resolver, cleanup, err
+}
+
+// openResolverWithRoots is openResolver plus the inner *source.Roots it
+// opens regardless of flavor, so the server can hand that same live handle
+// to a root-reload closure (the whole chain delegates to it by pointer). A
+// configured catalogDB with no resolver to serve it is refused loudly: the
+// operator asked for pid: sources and this build cannot deliver them.
+func (f Flavor) openResolverWithRoots(ctx context.Context, cfg config.Config, logger *slog.Logger, daemon bool) (source.Resolver, *source.Roots, func(), error) {
 	roots, err := source.OpenRoots(configRoots(cfg), cfg.ResolvedSourceMaxBytes())
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if f.OpenResolver == nil {
 		if cfg.CatalogDB != "" {
 			roots.Close()
-			return nil, nil, waxerr.New(waxerr.CodeInvalidRequest,
+			return nil, nil, nil, waxerr.New(waxerr.CodeInvalidRequest,
 				"catalogDB is set but this build has no catalog resolver; pid: sources need a build that injects one")
 		}
-		return roots, func() { roots.Close() }, nil
+		return roots, roots, func() { roots.Close() }, nil
 	}
 	resolver, closer, err := f.OpenResolver(ctx, ResolverOptions{
 		CatalogDB: cfg.CatalogDB,
@@ -179,7 +224,7 @@ func (f Flavor) openResolver(ctx context.Context, cfg config.Config, logger *slo
 	})
 	if err != nil {
 		roots.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if resolver == nil {
 		// Out-of-tree implementations reach here, so a broken one gets a
@@ -189,10 +234,10 @@ func (f Flavor) openResolver(ctx context.Context, cfg config.Config, logger *slo
 			closer.Close()
 		}
 		roots.Close()
-		return nil, nil, waxerr.New(waxerr.CodeInternal,
+		return nil, nil, nil, waxerr.New(waxerr.CodeInternal,
 			"cli: Flavor.OpenResolver returned a nil resolver and no error")
 	}
-	return resolver, func() {
+	return resolver, roots, func() {
 		if closer != nil {
 			closer.Close()
 		}
@@ -200,15 +245,26 @@ func (f Flavor) openResolver(ctx context.Context, cfg config.Config, logger *slo
 	}, nil
 }
 
-// resolveConfig applies the family precedence. config.Load resolves
-// env > file > default; flag overrides land here, last.
-func resolveConfig(cmd *cobra.Command) (config.Config, error) {
+// resolveConfigPath resolves the config file path from the --config flag,
+// falling back to WAXFLOW_CONFIG. resolveConfig reads it to load the
+// config; server reads it to build the reload closure over the same file.
+func resolveConfigPath(cmd *cobra.Command) (string, error) {
 	path, err := cmd.Flags().GetString("config")
 	if err != nil {
-		return config.Config{}, err
+		return "", err
 	}
 	if path == "" {
 		path = os.Getenv("WAXFLOW_CONFIG")
+	}
+	return path, nil
+}
+
+// resolveConfig applies the family precedence. config.Load resolves
+// env > file > default; flag overrides land here, last.
+func resolveConfig(cmd *cobra.Command) (config.Config, error) {
+	path, err := resolveConfigPath(cmd)
+	if err != nil {
+		return config.Config{}, err
 	}
 	cfg, err := config.Load(path, os.LookupEnv)
 	if err != nil {

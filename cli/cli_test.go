@@ -204,7 +204,7 @@ func TestBuildServerConfigPIDSources(t *testing.T) {
 					return tc.resolver(o.Next), nil, nil
 				},
 			}
-			srvCfg, cleanup, err := buildServerConfig(context.Background(), cfg, "test", logger, flavor)
+			srvCfg, cleanup, err := buildServerConfig(context.Background(), cfg, "", "test", logger, flavor)
 			if err != nil {
 				t.Fatal(err)
 			}

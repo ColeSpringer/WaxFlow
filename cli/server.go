@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -41,6 +42,12 @@ func newServerCmd(version string, flavor Flavor) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// The config file path drives the reload closure: a reload
+			// re-reads this exact file so it produces what a restart would.
+			path, err := resolveConfigPath(cmd)
+			if err != nil {
+				return err
+			}
 			if demo {
 				cfg.Demo = true
 			}
@@ -49,7 +56,7 @@ func newServerCmd(version string, flavor Flavor) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			srvCfg, cleanup, err := buildServerConfig(ctx, cfg, version, logger, flavor)
+			srvCfg, cleanup, err := buildServerConfig(ctx, cfg, path, version, logger, flavor)
 			if err != nil {
 				return err
 			}
@@ -82,8 +89,9 @@ func newServerCmd(version string, flavor Flavor) *cobra.Command {
 // buildServerConfig maps the file/env/flag configuration onto the server
 // package's dependencies: the resolver chain (roots plus the Flavor's
 // schemes), signing keys (auto-generated into dataDir on first run), and
-// resolved directories.
-func buildServerConfig(ctx context.Context, cfg config.Config, version string, logger *slog.Logger, flavor Flavor) (server.Config, func(), error) {
+// resolved directories. path is the config file the daemon loaded, threaded
+// through so the root-reload closure can re-read it.
+func buildServerConfig(ctx context.Context, cfg config.Config, path string, version string, logger *slog.Logger, flavor Flavor) (server.Config, func(), error) {
 	nop := func() {}
 	dataDir, err := cfg.ResolvedDataDir()
 	if err != nil {
@@ -109,7 +117,7 @@ func buildServerConfig(ctx context.Context, cfg config.Config, version string, l
 		signingKeys[i] = server.SigningKey{ID: k.ID, Secret: k.Secret}
 	}
 
-	resolver, closeResolver, err := flavor.openResolver(ctx, cfg, logger, true)
+	resolver, roots, closeResolver, err := flavor.openResolverWithRoots(ctx, cfg, logger, true)
 	if err != nil {
 		return server.Config{}, nop, err
 	}
@@ -138,6 +146,48 @@ func buildServerConfig(ctx context.Context, cfg config.Config, version string, l
 		pidSources = r.PIDSources()
 	}
 
+	// Wire the root reload only when it could actually do something: a
+	// config file is set (so there is something to re-read) and
+	// WAXFLOW_ROOTS is not pinning roots (it replaces file roots wholesale
+	// and is read once at process start, so a reload could never reflect a
+	// file edit). Otherwise ReloadRoots stays nil, /caps reports
+	// rootsReload:false, and the endpoint 404s, so a client learns support
+	// at probe time instead of after a 200 that changed nothing. The
+	// WAXFLOW_ROOTS set-but-empty == unset rule mirrors config.Load exactly.
+	var reloadRoots func() (source.ReloadResult, error)
+	if path != "" {
+		if v, ok := os.LookupEnv("WAXFLOW_ROOTS"); !ok || strings.TrimSpace(v) == "" {
+			reloadRoots = func() (source.ReloadResult, error) {
+				fresh, err := config.Load(path, os.LookupEnv) // same precedence + Validate as startup
+				if err != nil {
+					// config.Load maps a missing file to not-found (404). For a
+					// reload that is a bad request, not a resource lookup, and a
+					// 404 would be indistinguishable from the endpoint being
+					// unwired; report every config problem as invalid-request
+					// (400), the documented contract.
+					if waxerr.CodeOf(err) == waxerr.CodeNotFound {
+						err = waxerr.Wrap(waxerr.CodeInvalidRequest, "reload: config file unavailable", err)
+					}
+					return source.ReloadResult{}, err
+				}
+				maxBytes := fresh.ResolvedSourceMaxBytes()
+				res, err := roots.Reload(configRoots(fresh), maxBytes)
+				if err != nil {
+					return res, err
+				}
+				// Reconcile a Flavor resolver's own source cap too, so a build
+				// that caps its own sources (a catalog resolver's pid: files)
+				// stays in step with sourceMaxBytes rather than holding the
+				// open-time snapshot. The stock build's resolver is the roots
+				// themselves, reconciled above, and implements nothing here.
+				if rr, ok := resolver.(ReloadableResolver); ok {
+					rr.ReloadSourceMaxBytes(maxBytes)
+				}
+				return res, nil
+			}
+		}
+	}
+
 	return server.Config{
 		Addr:                 cfg.ResolvedAddr(),
 		APIKeys:              cfg.APIKeys,
@@ -146,6 +196,7 @@ func buildServerConfig(ctx context.Context, cfg config.Config, version string, l
 		AllowedOrigins:       cfg.AllowedOrigins,
 		Resolver:             resolver,
 		PIDSources:           pidSources,
+		ReloadRoots:          reloadRoots,
 		SigningKeys:          signingKeys,
 		CacheDir:             cacheDir,
 		CacheMaxBytes:        cfg.ResolvedCacheMaxBytes(),

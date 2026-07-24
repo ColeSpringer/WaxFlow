@@ -11,6 +11,7 @@ import (
 	"github.com/colespringer/waxflow/cli"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/source"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 const testPID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
@@ -61,6 +62,46 @@ func TestSignResolvesPIDThroughCatalog(t *testing.T) {
 			t.Errorf("minted URL missing %q: %s", want, out)
 		}
 	}
+}
+
+// TestCatalogReloadSourceMaxBytes demonstrates cli.ReloadableResolver: a
+// root reload hands the catalog a re-read source cap, and its own pid:
+// sources honor the new value at once, no restart. This is the pattern a
+// build that caps its own sources copies so a runtime sourceMaxBytes change
+// reaches them too.
+func TestCatalogReloadSourceMaxBytes(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	track := filepath.Join(dir, "track.wav")
+	if err := os.WriteFile(track, []byte("0123456789"), 0o644); err != nil { // 10 bytes
+		t.Fatal(err)
+	}
+	roots, err := source.OpenRoots(nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer roots.Close()
+	cat, err := openCatalog(ctx, cli.ResolverOptions{
+		CatalogDB: newCatalog(t, testPID, track),
+		Next:      roots,
+		MaxBytes:  4, // below the 10-byte source
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cat.Close()
+
+	// Over the cap: refused.
+	if _, err := cat.Resolve(ctx, "pid:"+testPID); waxerr.CodeOf(err) != waxerr.CodePayloadTooLarge {
+		t.Fatalf("resolve under the 4-byte cap = %v, want payload-too-large", err)
+	}
+	// A reload raises the cap; the same pid source now resolves.
+	cat.ReloadSourceMaxBytes(1 << 20)
+	f, err := cat.Resolve(ctx, "pid:"+testPID)
+	if err != nil {
+		t.Fatalf("resolve after reload = %v, want success", err)
+	}
+	f.Close()
 }
 
 // TestUnconfiguredCatalogOwnsRefusal pins the rule cli.Flavor documents:

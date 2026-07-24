@@ -77,6 +77,7 @@ or `waxflow sign`.
 | `GET /hls/media.m3u8`, `/hls/init.mp4`, `/hls/seg/{n}.m4s` | key or sig | HLS variant playlist, init header, media segments |
 | `POST /hls/timeline` | key | mint a multi-source timeline (a play queue) into a `tl` digest |
 | `GET /cache/stats`, `POST /cache/gc` | key | cache operations |
+| `POST /roots/reload` | key | reconcile library roots from the re-read config (present only when wired; see `delivery.rootsReload`) |
 | `GET /metrics` | key or metricsKey | Prometheus text exposition |
 | `GET /demo` | none (dev mode only, `demo: true`) | browser test page |
 | `POST /uploads`, `DELETE /uploads/{id}` | key | spool one-shot sources; reference as `src=upload:<id>` |
@@ -553,7 +554,7 @@ is:
                    "cutFormats": ["opus", "aac"],
                    "jobs": false, "uploads": false, "pid": false,
                    "timelines": true, "maxTimelineMembers": 1000,
-                   "timelineMemberWindows": true},
+                   "timelineMemberWindows": true, "rootsReload": true},
       "profiles": {
         "apple-native": {
           "delivery": "hls",
@@ -582,6 +583,11 @@ parameter are served, and `maxTimelineMembers` bounds one timeline.
 `from`/`to` sample windows; route by its presence, because a daemon too
 old to have it `400`s a windowed member as an unknown field (fall back to
 per-item URLs rather than trying).
+`delivery.rootsReload` reports whether `POST /roots/reload` is served (see
+that endpoint): `true` only for a file-configured daemon whose roots are
+not pinned by `WAXFLOW_ROOTS`. It is always sent (`true` or `false`), so a
+client detects support before calling; absent means a server too old to
+advertise it.
 
 `dsp` is the signal-processing surface, so a format policy routes by
 capability instead of sniffing a version:
@@ -908,6 +914,41 @@ It also sweeps stored timelines past their expiry, which is why the last
 field is there: timelines are not cache entries and free no cache bytes,
 so they are counted apart, but they are too small and too rarely minted
 to be worth a janitor of their own.
+
+## POST /roots/reload
+
+Re-reads the daemon's configuration and reconciles its live library roots
+to match, so a root added at runtime streams without a restart. Empty
+body; returns
+
+    {"schemaVersion":1,"added":["B"],"removed":[],"changed":[],"roots":["A","B"]}
+
+`added`, `removed`, and `changed` report what moved (`changed` is a root
+whose name stayed but whose path was re-pointed); `roots` is the full set
+after the reload, in configuration order. All four are always arrays.
+
+The reconcile scope is exactly the fields the resolver owns, the library
+`roots` and `sourceMaxBytes`, so a reload loads byte-for-byte what a
+restart would. Everything else (`addr`, cache, slots, TLS, ...) belongs to
+subsystems built once at startup and still needs a restart. A new root is
+opened, a dropped one closed, and a re-pointed one swapped; in-flight
+streams already resolved from a removed or re-pointed root run to
+completion, later requests for a removed root `404`. A bad config edit
+(missing or unreadable file, unopenable path, invalid or duplicate root
+name) is refused synchronously as `400 invalid-request` with nothing
+changed, so the caller learns at once instead of after a `200` that did
+nothing; a wired endpoint never answers `404`, so that status
+unambiguously means the endpoint is not served here. To avoid a reload
+racing a half-written file, the writer updates the config **atomically**
+(write a temp file, then rename).
+
+The endpoint exists only when a reload could actually do something: the
+daemon has a config file and `WAXFLOW_ROOTS` is not pinning roots (that
+env variable replaces file roots wholesale and is read once at startup, so
+a reload could never reflect a file edit). Otherwise the route `404`s and
+`delivery.rootsReload` is `false`, so a client detects support at
+capability-probe time. An env-only or no-config deployment keeps serving
+runtime-added roots by direct download instead.
 
 ## GET /metrics
 

@@ -320,6 +320,13 @@ type CapsDelivery struct {
 	// as an unknown field, so absent means fall back (per-item URLs), not
 	// "windows without advertising them".
 	TimelineMemberWindows bool `json:"timelineMemberWindows,omitempty"`
+	// RootsReload: POST /roots/reload re-reads the config and reconciles the
+	// live library roots, so a runtime-added root streams without a restart.
+	// Wired only for a file-configured daemon whose roots are not pinned by
+	// WAXFLOW_ROOTS; an env-only or no-config deployment reports false and
+	// 404s the endpoint. Always sent (true or false), so a client detects
+	// support at probe time; absent means a server too old to advertise it.
+	RootsReload bool `json:"rootsReload"`
 }
 
 // UploadResponse is the POST /uploads body.
@@ -432,9 +439,31 @@ type CacheGCResponse struct {
 	TimelinesRemoved int `json:"timelinesRemoved,omitempty"`
 }
 
+// RootsReloadResponse is the POST /roots/reload body: the reconcile delta.
+// The name lists map 1:1 from source.ReloadResult (kept off the wire, as
+// ProbeJSON keeps format.Info off it). Added, Removed, and Changed report
+// what moved; Roots is the full set after the reload, in configuration
+// order. All four are always arrays, never null, so an empty delta is still
+// iterable.
+type RootsReloadResponse struct {
+	SchemaVersion int      `json:"schemaVersion"`
+	Added         []string `json:"added"`
+	Removed       []string `json:"removed"`
+	Changed       []string `json:"changed"`
+	Roots         []string `json:"roots"`
+}
+
+// capsFlags carries the optional-surface toggles buildCaps needs. Named
+// fields rather than positional bools so a new capability cannot be
+// transposed into the wrong slot at the call site (the same "impossible to
+// write wrong" intent the caps comments state).
+type capsFlags struct {
+	jobs, uploads, pid, timelines, rootsReload bool
+}
+
 // buildCaps assembles Caps from the capability-gated tables plus the
 // configured optional surfaces.
-func buildCaps(jobs, uploads, pid, timelines bool) Caps {
+func buildCaps(f capsFlags) Caps {
 	caps := Caps{
 		SchemaVersion: 1,
 		Inputs:        format.Inputs(),
@@ -443,10 +472,11 @@ func buildCaps(jobs, uploads, pid, timelines bool) Caps {
 			HLS:         true,
 			HLSFormats:  waxflow.SegmentedFormats(),
 			CutFormats:  waxflow.CutFormats(),
-			Jobs:        jobs,
-			Uploads:     uploads,
-			PID:         pid,
-			Timelines:   timelines,
+			Jobs:        f.jobs,
+			Uploads:     f.uploads,
+			PID:         f.pid,
+			Timelines:   f.timelines,
+			RootsReload: f.rootsReload,
 		},
 		DSP: CapsDSP{
 			// Derived from the parsers rather than restated, so an
@@ -462,7 +492,7 @@ func buildCaps(jobs, uploads, pid, timelines bool) Caps {
 		},
 		Profiles: make(map[string]CapsProfile, len(deliveryProfiles)),
 	}
-	if timelines {
+	if f.timelines {
 		caps.Delivery.MaxTimelineMembers = timeline.MaxMembers
 		caps.Delivery.TimelineMemberWindows = true
 	}

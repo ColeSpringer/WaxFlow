@@ -18,7 +18,13 @@ import (
 )
 
 func (s *Server) handleCaps(w http.ResponseWriter, _ *http.Request) {
-	s.writeJSON(w, http.StatusOK, buildCaps(s.jobs != nil, s.uploads != nil, s.cfg.PIDSources, s.timelines != nil))
+	s.writeJSON(w, http.StatusOK, buildCaps(capsFlags{
+		jobs:        s.jobs != nil,
+		uploads:     s.uploads != nil,
+		pid:         s.cfg.PIDSources,
+		timelines:   s.timelines != nil,
+		rootsReload: s.cfg.ReloadRoots != nil,
+	}))
 }
 
 // probeRequest is the POST /probe body; GET uses src and strict query

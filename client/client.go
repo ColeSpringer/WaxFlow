@@ -243,6 +243,13 @@ type CapsDelivery struct {
 	// which 400s a windowed member as an unknown field: route by presence
 	// and fall back (per-item URLs) rather than trying.
 	TimelineMemberWindows bool `json:"timelineMemberWindows,omitempty"`
+	// RootsReload: the daemon serves POST /roots/reload, reconciling its
+	// live library roots from a re-read config so a runtime-added root
+	// streams without a restart. Wired only for a file-configured daemon
+	// (WAXFLOW_ROOTS-pinned or no-config deployments report false). Sent
+	// non-omitempty to mirror the server: false is a real answer (server too
+	// new to omit it), absent means a server too old to advertise it.
+	RootsReload bool `json:"rootsReload"`
 }
 
 // TimelineRequest is the POST /hls/timeline body: a play queue, in order.

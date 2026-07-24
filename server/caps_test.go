@@ -17,7 +17,7 @@ import (
 // docs/client-matrix.md; this keeps the wire shape mechanically inside
 // the build's capabilities.
 func TestDeliveryProfilesAreHonest(t *testing.T) {
-	caps := buildCaps(true, true, true, true)
+	caps := buildCaps(capsFlags{jobs: true, uploads: true, pid: true, timelines: true})
 
 	want := []string{"android-exoplayer", "apple-native", "desktop-mpv", "hls-js"}
 	var got []string
@@ -77,7 +77,7 @@ func TestDeliveryProfilesAreHonest(t *testing.T) {
 // its dual-surface reachability live in waxflow.TestCutFormatsIsHonest; this
 // keeps the wire shape mechanically inside the build's live outputs.
 func TestCutFormatsAreHonest(t *testing.T) {
-	caps := buildCaps(true, true, true, true)
+	caps := buildCaps(capsFlags{jobs: true, uploads: true, pid: true, timelines: true})
 
 	if len(caps.Delivery.CutFormats) == 0 {
 		t.Fatal("delivery.cutFormats is empty; this build serves the cut rung and must advertise it")
@@ -109,7 +109,7 @@ func TestCutFormatsAreHonest(t *testing.T) {
 // to learn whether gain=16 is legal, which is the exact failure the slot
 // exists to prevent.
 func TestCapsDSPIsHonest(t *testing.T) {
-	dsp := buildCaps(true, true, true, true).DSP
+	dsp := buildCaps(capsFlags{jobs: true, uploads: true, pid: true, timelines: true}).DSP
 
 	if len(dsp.GainModes) == 0 || len(dsp.Dynamics) == 0 || len(dsp.Loudness) == 0 {
 		t.Fatalf("DSP slot advertises nothing: %+v", dsp)
@@ -172,7 +172,7 @@ func TestCapsDSPIsHonest(t *testing.T) {
 
 	// deliveryProfiles must stay orthogonal: profiles are about client
 	// decoder support, dynamics is server-side and client-agnostic.
-	for name, p := range buildCaps(true, true, true, true).Profiles {
+	for name, p := range buildCaps(capsFlags{jobs: true, uploads: true, pid: true, timelines: true}).Profiles {
 		if slices.Contains(p.Progressive, "voice") || slices.Contains(p.HLS, "voice") {
 			t.Errorf("profile %q lists a dynamics preset among its formats; the two are orthogonal", name)
 		}

@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/colespringer/waxflow/cli"
 	"github.com/colespringer/waxflow/source"
@@ -63,9 +64,13 @@ func openResolver(ctx context.Context, opts cli.ResolverOptions) (source.Resolve
 // catalog resolves pid:<ULID> against the stub catalog and delegates
 // every other reference to the library roots.
 type catalog struct {
-	dir      string
-	next     source.Resolver
-	maxBytes int64
+	dir  string
+	next source.Resolver
+	// maxBytes caps the pid: sources this resolver opens itself. It is
+	// atomic because a root reload (cli.ReloadableResolver) can rewrite it
+	// while Resolve reads it; root references delegate to next, whose roots
+	// enforce their own reconciled cap.
+	maxBytes atomic.Int64
 	log      *slog.Logger
 }
 
@@ -99,7 +104,9 @@ func openCatalog(ctx context.Context, opts cli.ResolverOptions) (*catalog, error
 	// resolution, so a background goroutine has no one to serve. This
 	// stub caches nothing and has nothing to start.
 	log.Debug("catalog opened", "dir", opts.CatalogDB, "daemon", opts.Daemon)
-	return &catalog{dir: opts.CatalogDB, next: opts.Next, maxBytes: maxBytes, log: log}, nil
+	cat := &catalog{dir: opts.CatalogDB, next: opts.Next, log: log}
+	cat.maxBytes.Store(maxBytes)
+	return cat, nil
 }
 
 func (c *catalog) Resolve(ctx context.Context, ref string) (*source.File, error) {
@@ -124,12 +131,24 @@ func (c *catalog) Resolve(ctx context.Context, ref string) (*source.File, error)
 	if err != nil {
 		return nil, err
 	}
-	if f.ID.Size > c.maxBytes {
+	if maxBytes := c.maxBytes.Load(); f.ID.Size > maxBytes {
 		f.Close()
 		return nil, waxerr.New(waxerr.CodePayloadTooLarge,
-			fmt.Sprintf("catalogcli: %d bytes exceeds the %d-byte source cap", f.ID.Size, c.maxBytes))
+			fmt.Sprintf("catalogcli: %d bytes exceeds the %d-byte source cap", f.ID.Size, maxBytes))
 	}
 	return f, nil
+}
+
+// ReloadSourceMaxBytes implements cli.ReloadableResolver: a root reload
+// hands the catalog the re-read source cap so its own pid: sources stay in
+// step with a changed sourceMaxBytes, instead of the value snapshotted at
+// open. Stored atomically because Resolve reads it concurrently. Root
+// references need nothing: they delegate to next, the reconciled roots.
+func (c *catalog) ReloadSourceMaxBytes(maxBytes int64) {
+	if maxBytes <= 0 {
+		maxBytes = source.DefaultMaxBytes
+	}
+	c.maxBytes.Store(maxBytes)
 }
 
 // Close releases what openCatalog opened. The CLI closes it after the
