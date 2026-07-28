@@ -15,7 +15,7 @@ var _ codec.Encoder = (*Encoder)(nil)
 // ADR-0004 cache key. It composes the psychoacoustic model's revision, so
 // retuning dsp/psy invalidates exactly these streams. Bump it whenever a change
 // alters the produced bytes.
-const EncoderVersion = "vorbis-enc-7+" + psy.Version
+const EncoderVersion = "vorbis-enc-8+" + psy.Version
 
 // encVendor is the fixed vendor string the standalone encoder stamps into the
 // comment header, so deterministic-mode output stays byte-identical. In the

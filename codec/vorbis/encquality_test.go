@@ -81,6 +81,12 @@ func musicish(rate, n, ch int, seed int64) [][]float32 {
 func TestVorbisEncoderQuality(t *testing.T) {
 	testutil.EncoderQualityGate(t)
 	testutil.FFmpeg(t)
+	// Our leg is decoded by libvorbis below, before FFmpegVorbisEncodeFile's own
+	// skip would be reached, so the decoder has to be required here or an ffmpeg
+	// without libvorbis hard-fails instead of skipping.
+	if !testutil.HaveLibVorbisDecoder(t) {
+		t.Skip("ffmpeg libvorbis decoder not available")
+	}
 	const rate = 44100
 	for _, ch := range []int{1, 2} {
 		f := audio.Format{Rate: rate, Channels: ch, Layout: audio.DefaultLayout(ch), Type: audio.Float, BitDepth: 32}
@@ -106,14 +112,20 @@ func TestVorbisEncoderQuality(t *testing.T) {
 			ogg := testutil.OggVorbisFile(id, comment, setup, packets, granules, tr.Samples)
 			ourPath := filepath.Join(t.TempDir(), "ours.ogg")
 			os.WriteFile(ourPath, ogg, 0o644)
-			ourDec := testutil.FFmpegDecodeF32(t, ourPath)
+			// Decode with libvorbis, the reference decoder, matching the corpus
+			// gate in tests/. Reading these numbers back through ffmpeg's native
+			// decoder charged our stereo encodes ~0.3 ODG of that decoder's own
+			// coupled-stereo defect (F1) while libvorbis's baseline encodes never
+			// reached the same path, so the logged stereo delta was biased against
+			// us by a decoder bug rather than measuring the encoder.
+			ourDec := testutil.FFmpegDecodeF32Codec(t, ourPath, "libvorbis")
 			ourODG := testutil.ODGProxy(ref, ourDec, rate, ch)
 
-			// libvorbis at the matching -q point.
+			// libvorbis at the matching -q point, decoded by libvorbis.
 			refPath := testutil.FFmpegVorbisEncodeFile(t, wav, q)
 			refInfo, _ := os.Stat(refPath)
 			refKbps := float64(refInfo.Size()*8) / float64(n) * float64(rate) / 1000
-			refDec := testutil.FFmpegDecodeF32(t, refPath)
+			refDec := testutil.FFmpegDecodeF32Codec(t, refPath, "libvorbis")
 			refODG := testutil.ODGProxy(ref, refDec, rate, ch)
 
 			t.Logf("ch=%d q=%.0f  ours: ODG=%.3f %.0fkbps | libvorbis: ODG=%.3f %.0fkbps | dODG=%+.3f",

@@ -38,7 +38,7 @@ func TestVorbisRealAudioQuality(t *testing.T) {
 		t.Skip("set WAXFLOW_REAL_AUDIO_DIR to a directory of real .wav files")
 	}
 	testutil.FFmpeg(t)
-	if !testutil.HaveLibVorbis(t) {
+	if !testutil.HaveLibVorbis(t) || !testutil.HaveLibVorbisDecoder(t) {
 		t.Skip("ffmpeg libvorbis not available")
 	}
 

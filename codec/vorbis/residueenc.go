@@ -1,7 +1,5 @@
 package vorbis
 
-import "math"
-
 // Residue encoding: the inverse of residue.go. The encoder normalizes each
 // channel's spectrum by its floor curve, classifies each partition against the
 // masking threshold, and codes it at the class's precision, matching the
@@ -107,16 +105,26 @@ func magAngle(isMag bool, ang []float32) []float32 {
 // book quantizes the remaining error.
 //
 // A non-nil ang is the coupled angle residue, supplied only for the magnitude
-// channel. On a line where the angle magnitude exceeds this channel's (the
-// anti-phase case), a magnitude that the whole cascade rounds to zero would flip
-// the decoder's decouple branch and invert the angle channel. To prevent that
-// without derailing the refinement cascade, the sign-preserving nudge is applied
-// only on the last pass (lastPass) and only where the earlier passes have
-// reconstructed nothing yet (the running value still equals the original), i.e.
-// exactly the lines a plain cascade would leave at zero. Everywhere else plain
+// channel. The decoder picks its decouple branch from the sign of the
+// RECONSTRUCTED magnitude, so the line to defend is one whose cascade lands the
+// magnitude on the lattice zero while the angle survives quantization: our own
+// decoder loses the angle's sign there, and ffmpeg's vectorized inverse coupling
+// negates the angle channel outright. The sign-preserving nudge is applied
+// exactly on those lines, and only on the last pass (lastPass) where the earlier
+// passes have reconstructed nothing yet (the running value still equals the
+// original), since a value the earlier passes already resolved carries the
+// correct sign and forcing it here would only add error. Everywhere else plain
 // nearest quantization is used, so a coupled magnitude reconstructs as accurately
 // as an uncoupled channel and the finer classes actually reach their promised
 // precision.
+//
+// Testing the reconstruction rather than the inputs matters in both directions.
+// The earlier proxy, |angle| > |magnitude|, missed the tie |A| == |M| that a
+// masked angle-side channel produces on every line it touches (b == 0 gives
+// A = -M or +M exactly), where half a coarse step rounds the negative magnitude
+// onto zero and the positive angle up to the next point; and it fired on lines
+// where both channels round to zero anyway, forcing a magnitude to one step and
+// inventing crosstalk on a pair that should have stayed silent.
 func emitResidueVectors(w *bitWriter, book *encBook, prevs []*encBook, resid []float32, off, partSize, n2 int, ang []float32, lastPass bool) {
 	dim := book.dimensions
 	var vec [maxBookVecDim]float64
@@ -125,23 +133,37 @@ func emitResidueVectors(w *bitWriter, book *encBook, prevs []*encBook, resid []f
 		for k := 0; k < dim; k++ {
 			bin := off + i + k
 			v := 0.0
-			if bin >= 0 && bin < n2 {
+			inRange := bin >= 0 && bin < n2
+			if inRange {
 				v = float64(resid[bin])
 			}
-			antiPhase := ang != nil && bin >= 0 && bin < n2 && math.Abs(float64(ang[bin])) > math.Abs(v)
 			orig := v
 			for _, pb := range prevs {
 				v -= pb.latValue(pb.latIndex(v))
 			}
-			// Nudge only when this is the final pass and the cascade so far has
-			// added nothing (orig unchanged): a value the earlier passes already
-			// resolved carries the correct sign, and forcing it here would just
-			// add error.
-			sp[k] = lastPass && antiPhase && v == orig
+			sp[k] = lastPass && v == orig && ang != nil && inRange &&
+				book.latValue(book.latIndex(v)) == 0 &&
+				cascadeValue(book, prevs, float64(ang[bin])) != 0
 			vec[k] = v
 		}
 		book.emit(w, book.vectorEntry(vec[:dim], sp[:dim]))
 	}
+}
+
+// cascadeValue reconstructs x the way a channel coded by prevs-then-book decodes
+// it: each pass quantizes what the passes before it left over, and the decoder
+// sums their lattice points. The coupled angle shares the magnitude's class, and
+// so its book chain (deriveCoupledClasses gives the pair one class, or skips the
+// angle on a partition where it is all zero), so this answers what the decoder
+// will hold in the angle slot for the line the magnitude is deciding on.
+func cascadeValue(book *encBook, prevs []*encBook, x float64) float64 {
+	total := 0.0
+	for _, pb := range prevs {
+		r := pb.latValue(pb.latIndex(x))
+		total += r
+		x -= r
+	}
+	return total + book.latValue(book.latIndex(x))
 }
 
 // normalizeResidue divides a channel's spectrum by its floor curve into dst.

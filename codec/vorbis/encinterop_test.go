@@ -20,6 +20,9 @@ import (
 // without ffmpeg.
 func TestEncodeFFmpegDecode(t *testing.T) {
 	testutil.FFmpeg(t)
+	if !testutil.HaveLibVorbisDecoder(t) {
+		t.Skip("ffmpeg libvorbis decoder not available")
+	}
 	const rate = 44100
 	for _, ch := range []int{1, 2} {
 		f := audio.Format{Rate: rate, Channels: ch, Layout: audio.DefaultLayout(ch), Type: audio.Float, BitDepth: 32}

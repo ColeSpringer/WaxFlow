@@ -49,6 +49,22 @@ func EncoderQualityGate(t testing.TB) {
 // FFmpeg returns the ffmpeg path, skipping or failing per the policy.
 func FFmpeg(t testing.TB) string { return tool(t, "ffmpeg") }
 
+// HaveFFmpeg reports whether ffmpeg is installed, for a test that still has work
+// to do without it and so must not take FFmpeg's blanket skip (a gate whose own
+// in-process leg is the part that always runs, with the oracle decoders added
+// when they are there). WAXFLOW_REQUIRE_FFMPEG=1 still escalates absence to a
+// failure, so the dedicated differential job cannot silently thin out.
+func HaveFFmpeg(t testing.TB) bool {
+	t.Helper()
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		if os.Getenv("WAXFLOW_REQUIRE_FFMPEG") == "1" {
+			t.Fatal("ffmpeg required by WAXFLOW_REQUIRE_FFMPEG=1 but not installed")
+		}
+		return false
+	}
+	return true
+}
+
 // FFprobe returns the ffprobe path, skipping or failing per the policy.
 func FFprobe(t testing.TB) string { return tool(t, "ffprobe") }
 
@@ -87,15 +103,31 @@ func FFmpegDecodeF32(t testing.TB, path string) []float32 {
 // FFmpegDecodeF32Codec decodes with a specific ffmpeg decoder (e.g. "libvorbis").
 // ffmpeg's default Vorbis decoder is its own native one, which is flagged
 // experimental (trac.ffmpeg.org ticket 10571) and mis-decodes some legal
-// coupled streams; selecting libvorbis pins the reference decoder so a stream is
-// tested against libvorbis itself, not ffmpeg's experimental reimplementation.
+// coupled streams: its vectorized inverse coupling negates the angle channel on
+// any line stored as a zero magnitude with a nonzero angle, where its own C
+// fallback (reachable with -cpuflags 0) and the spec do not. Selecting libvorbis
+// pins the reference decoder so a stream is tested against libvorbis itself, not
+// ffmpeg's experimental reimplementation. Scoring OUR streams, prefer this over
+// FFmpegDecodeF32 for exactly that reason; a gate that wants to prove what a
+// libavcodec-based player hears should call FFmpegDecodeF32 deliberately, as
+// TestVorbisCoupledStereo does.
 func FFmpegDecodeF32Codec(t testing.TB, path, decoder string) []float32 {
 	return ffmpegDecodeF32(t, path, decoder)
 }
 
-func ffmpegDecodeF32(t testing.TB, path, decoder string) []float32 {
+// FFmpegDecodeF32NoSIMD decodes with ffmpeg's default decoder and -cpuflags 0,
+// which disables runtime SIMD dispatch and reaches libavcodec's plain C
+// implementations. Paired with FFmpegDecodeF32 it separates a defect in a
+// vectorized kernel from one in the decoder proper, which is how the Vorbis
+// coupled-stereo defect behind F1 was pinned to ffmpeg's vectorized inverse
+// coupling.
+func FFmpegDecodeF32NoSIMD(t testing.TB, path string) []float32 {
+	return ffmpegDecodeF32(t, path, "", "-cpuflags", "0")
+}
+
+func ffmpegDecodeF32(t testing.TB, path, decoder string, pre ...string) []float32 {
 	t.Helper()
-	args := []string{"-v", "error"}
+	args := append([]string{"-v", "error"}, pre...)
 	if decoder != "" {
 		args = append(args, "-c:a", decoder)
 	}

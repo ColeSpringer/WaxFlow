@@ -154,7 +154,29 @@ deterministic-mode tests cover on every platform.
 - >= **40x** realtime (matching MP3; a long-block-plus-psy pipeline).
 - Decode with libvorbis, not ffmpeg's *native* Vorbis decoder: the native
   decoder is experimental (trac.ffmpeg.org/10571) and mis-decodes some legal
-  coupled streams, so the tests pin `-c:a libvorbis`.
+  coupled streams, so the tests pin `-c:a libvorbis`. The specific defect is
+  known and narrow: its **vectorized** inverse coupling branches on
+  `magnitude >= 0` where its own C fallback and the spec branch on
+  `magnitude > 0`, so a line stored as a zero magnitude with a nonzero angle
+  comes back with the angle channel negated. Running ffmpeg with `-cpuflags 0`
+  decodes those streams correctly, which is how the two paths were separated.
+  We no longer emit that representation (see `coupleForward`), so ffmpeg's
+  native decoder now agrees with libvorbis on our output.
+- Coupled stereo has its own gate, `TestVorbisCoupledStereo` in `tests/`, because
+  the ODG corpus above cannot see coupling defects: its material is mono,
+  broadband or near-dual-mono, which keeps the angle residue small. The gate runs
+  decorrelated, anti-phase and opposite-direction-sweep stereo, at both q6 and q1
+  (q1 is where allocation lands on the single-pass noise and coarse classes, the
+  ones with no refinement pass to walk a bad magnitude back), through four
+  decoder legs: ours, libvorbis, ffmpeg-native, and ffmpeg-native under
+  `-cpuflags 0`. It scores each leg per channel against its own source channel,
+  since a coupling defect lands on one channel and leaves the other exact, and it
+  scores the legs **against each other**, which is what actually pins F1: that
+  defect was correct decoders reading different audio out of the same bytes, not
+  a stream anyone failed to decode. The two ffmpeg legs differ only in SIMD
+  dispatch, so their agreement is what proves the vectorized inverse coupling was
+  reached and is happy; without that leg the gate would go green on a runner
+  whose ffmpeg never leaves the C fallback.
 - Status: the encoder MEETS the ODG gate. At -q4 the corpus mean is **+0.52** vs
   libvorbis with every track at or above libvorbis (worst per-track +0.00): a
   peak-envelope floor plus a perceptual mask floor fixed tonal, block switching

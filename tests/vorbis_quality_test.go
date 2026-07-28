@@ -29,6 +29,11 @@ import (
 func TestVorbisEncoderQuality(t *testing.T) {
 	testutil.EncoderQualityGate(t) // not part of the default loop; `make encoder-quality`
 	testutil.FFmpeg(t)
+	// Both legs are read back through libvorbis, so require the decoder up front
+	// rather than hard-failing on the first decode.
+	if !testutil.HaveLibVorbisDecoder(t) {
+		t.Skip("ffmpeg libvorbis decoder not available")
+	}
 
 	const rate = 44100
 	const quality = 4.0 // libvorbis -q4 is ~128 kbps stereo, the gate point
