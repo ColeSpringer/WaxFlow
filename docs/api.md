@@ -918,8 +918,8 @@ to be worth a janitor of their own.
 ## POST /roots/reload
 
 Re-reads the daemon's configuration and reconciles its live library roots
-to match, so a root added at runtime streams without a restart. Empty
-body; returns
+to match, so a root added at runtime streams without a restart
+(`client.ReloadRoots`). Empty body; returns
 
     {"schemaVersion":1,"added":["B"],"removed":[],"changed":[],"roots":["A","B"]}
 
@@ -948,7 +948,10 @@ env variable replaces file roots wholesale and is read once at startup, so
 a reload could never reflect a file edit). Otherwise the route `404`s and
 `delivery.rootsReload` is `false`, so a client detects support at
 capability-probe time. An env-only or no-config deployment keeps serving
-runtime-added roots by direct download instead.
+runtime-added roots by direct download instead. `client.ReloadRoots`
+should be gated on `delivery.rootsReload` rather than on the status it
+gets back: an unwired daemon's `404` and a proxy that lost the route are
+not distinguishable from the client side.
 
 ## GET /metrics
 

@@ -141,18 +141,23 @@ func setupAAC(t *trackEntry) (codecSetup, error) {
 	if err != nil {
 		return codecSetup{}, err
 	}
-	// ParseASC leaves Channels 0 for an in-band PCE and refuses more than two
-	// otherwise, because the decoder emits channels in bitstream order with no
-	// WAV remap. Fill from the Audio element only within that mono/stereo
-	// support, so a PCE track the container claims is multichannel is refused
-	// (Format().Valid fails on 0 channels) rather than decoded out of order.
+	// ParseASC leaves Channels 0 for an in-band PCE, whose element order the
+	// decoder cannot know. Fill from the Audio element only up to stereo, the
+	// two shapes where every element order agrees; past that Format refuses,
+	// so a PCE track the container claims is multichannel is rejected by name
+	// rather than decoded into the wrong speakers. A stated configuration
+	// (1-6) carries its own count and layout and needs no fill-in.
 	if cfg.Channels == 0 && t.channels >= 1 && t.channels <= 2 {
 		cfg.Channels = t.channels
+	}
+	f, err := cfg.Format()
+	if err != nil {
+		return codecSetup{}, err
 	}
 	return codecSetup{
 		id:             codec.AACLC,
 		config:         t.codecPriv,
-		fmt:            cfg.Format(),
+		fmt:            f,
 		aacFrameLength: cfg.FrameLength,
 		warning:        cfg.SBRWarning(),
 	}, nil

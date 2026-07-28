@@ -301,6 +301,17 @@ func (m *Meter) Integrated() float64 {
 	// The relative gate sits 10 LU below the power mean of the
 	// absolute-gated blocks: a factor 10 in power, the loudness offset
 	// cancelling on both sides of the comparison.
+	//
+	// Strictly greater, which is BS.1770-4's own formula; Range uses >=,
+	// which is what libebur128 and ffmpeg use at both gates (ffmpeg's
+	// f_ebur128.c carries a comment on the same split: "example code in
+	// EBU 3342 is >= but formula in BS.1770 specs is >"). The asymmetry
+	// here is inherited rather than reasoned, and it is left alone rather
+	// than tidied because it cannot change a reading: it takes a block
+	// power exactly equal to a mean divided by ten, in float64, to
+	// separate the two, and unifying them would still spend a Version
+	// bump (ADR-0004) invalidating every stored measurement to move
+	// nothing.
 	thresh := sum / float64(len(m.blocks)) / 10
 	var gated float64
 	var n int
@@ -316,8 +327,15 @@ func (m *Meter) Integrated() float64 {
 	return loudnessOffset + 10*math.Log10(gated/float64(n))
 }
 
-// Range returns the loudness range (LRA) in LU per EBU Tech 3342.
-// Returns 0 when there is not enough audio.
+// Range returns the loudness range (LRA) in LU per EBU Tech 3342,
+// verified against the document's four test cases (see
+// TestEBUTech3342Vectors).
+//
+// Returns 0 when there is not enough audio to have a range, which covers
+// two cases that both mean "no answer" rather than "no spread": under 3 s
+// of input completes no short-term window at all, and a single surviving
+// window has nothing to take a spread across. Callers reporting LRA on
+// short material should read it as absent, not as zero dynamic range.
 func (m *Meter) Range() float64 {
 	if len(m.st) == 0 {
 		return 0
@@ -326,7 +344,8 @@ func (m *Meter) Range() float64 {
 	for _, p := range m.st {
 		sum += p
 	}
-	// Tech 3342 gates 20 LU below the power mean, a factor 100.
+	// Tech 3342 gates 20 LU below the power mean, a factor 100. The
+	// comparison is >= where Integrated's is >; see the note there.
 	thresh := sum / float64(len(m.st)) / 100
 	gated := make([]float64, 0, len(m.st))
 	for _, p := range m.st {
@@ -345,6 +364,17 @@ func (m *Meter) Range() float64 {
 
 // percentileIndex is the nearest-rank index into n sorted values,
 // index = round(f*(n-1)), the libebur128 convention.
+//
+// ffmpeg's ebur128 filter ranks differently, and that is the larger half
+// of why the two disagree on real material: it bins every short-term
+// loudness into a fixed 0.01 LU histogram (floored, and the gate position
+// floored onto the same grid), then walks the bins until the cumulative
+// count reaches round(f*n) -- one rank off this, against a quantized
+// value. Both differences are small where the distribution is smooth
+// through the percentile and grow where it is steep, which is why
+// synthetic material agrees to a fraction of an LU while real music can
+// separate by half of one. Neither is more correct: Tech 3342 specifies
+// the quantity to +-1 LU and the vectors are what settle conformance.
 func percentileIndex(n int, f float64) int {
 	return int(f*float64(n-1) + 0.5)
 }

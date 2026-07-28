@@ -170,6 +170,18 @@ func NewEncoder(f audio.Format, opts *EncoderOptions) (*Encoder, error) {
 		return nil, err
 	}
 	if want := si.PCMFormat(); f != want {
+		if f.Layout != want.Layout && f.Rate == want.Rate && f.Channels == want.Channels &&
+			f.Type == want.Type && f.BitDepth == want.BitDepth {
+			// Only the layout differs, and audio.Format.String does not
+			// print it, so naming the two formats would print the same
+			// text twice. FLAC fixes the speaker assignment per channel
+			// count (four channels are quad), so a layout it does not name
+			// has nowhere to be stored: AAC's 4.0, a centre and a back
+			// centre, is the one that reaches here.
+			return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
+				fmt.Sprintf("flac: cannot encode channel layout %v (FLAC assigns %d channels as %v)",
+					f.Layout, f.Channels, want.Layout))
+		}
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 			fmt.Sprintf("flac: cannot encode format %v (nearest encodable is %v)", f, want))
 	}

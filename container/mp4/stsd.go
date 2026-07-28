@@ -193,6 +193,9 @@ func (d *Demuxer) setMP4A(t *track, children []byte, rate, channels int) error {
 	}
 	// The ASC is authoritative for rate and channels; fall back to the
 	// sample entry only when the ASC left channels implicit (config 0).
+	// That fallback is why the sample entry's channelcount is read at all:
+	// a multichannel mp4a conventionally writes 2 there, so for a stated
+	// configuration it is a field that lies and the ASC wins.
 	if cfg.Channels == 0 {
 		cfg.Channels = channels
 	}
@@ -202,10 +205,14 @@ func (d *Demuxer) setMP4A(t *track, children []byte, rate, channels int) error {
 	// alternate audio track we never select would otherwise warn about audio
 	// nobody decodes. selectAudio emits it for the chosen track, which is what
 	// mka does.
+	f, err := cfg.Format()
+	if err != nil {
+		return err
+	}
 	t.note = cfg.SBRWarning()
 	t.codec = codec.AACLC
 	t.codecConfig = append([]byte(nil), asc...)
-	t.fmt = cfg.Format()
+	t.fmt = f
 	return nil
 }
 

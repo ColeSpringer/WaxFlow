@@ -183,16 +183,26 @@ func (d *Demuxer) readBrands(b box) {
 func (d *Demuxer) selectAudio(tracks []*track) error {
 	var audio *track
 	var foundCodecs []string
+	var stsdErr error
+	named := 0 // entries in foundCodecs that are a codec name, not "unknown"
 	for _, t := range tracks {
 		if t.handler != "soun" {
 			continue
 		}
 		if t.codec == "" {
+			// A sound track with no codec failed to parse its sample
+			// description or carried none we could read; parseStbl deferred
+			// the reason here rather than rejecting a file whose other audio
+			// track is fine.
+			if stsdErr == nil {
+				stsdErr = t.stsdErr
+			}
 			foundCodecs = append(foundCodecs, "unknown")
 			continue
 		}
 		if !decodableAudio(t.codec) {
 			foundCodecs = append(foundCodecs, string(t.codec))
+			named++
 			continue
 		}
 		if audio == nil {
@@ -200,7 +210,20 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		}
 	}
 	if audio == nil {
-		if len(foundCodecs) > 0 {
+		// The deferred reason is the specific one: it says why this file is
+		// refused ("aac: audio object type 1 is not AAC-LC"), where "found:
+		// unknown" only says that something in a box we already read did not
+		// come out. It replaces the list when the list holds nothing else,
+		// and rides alongside it when the file also carries a codec we can
+		// name, since "there is also an mp3 track in here" is the actionable
+		// half of that case.
+		switch {
+		case stsdErr != nil && named == 0:
+			return stsdErr
+		case stsdErr != nil:
+			return waxerr.Wrap(waxerr.CodeUnsupportedFormat,
+				fmt.Sprintf("mp4: no decodable audio track (found: %s)", joinNames(foundCodecs)), stsdErr)
+		case len(foundCodecs) > 0:
 			return malformed("no decodable audio track (found: %s)", joinNames(foundCodecs))
 		}
 		return malformed("no audio track")

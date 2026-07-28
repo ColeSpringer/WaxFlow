@@ -62,8 +62,15 @@ type Decoder struct {
 	cfg      Config
 	fmt      audio.Format
 	rateIdx  int
-	channels int
 	frameLen int
+	// slots routes each element in the frame's channel sequence to its
+	// output channel (waveSlots). Its length is the output channel count,
+	// which is why there is no separate field for that: one source for
+	// both cannot drift from the other. elems is the element type expected
+	// at each of those positions, or nil where the routing is the identity
+	// and the order cannot matter.
+	slots []int
+	elems []int
 
 	buf      *audio.Buffer
 	ch       [audio.MaxChannels]channelData
@@ -88,9 +95,42 @@ func NewDecoder(cfg Config, f audio.Format) (*Decoder, error) {
 	if rateIdx < 0 || rateIdx >= len(swbOffsetLong) {
 		return nil, malformed("sample rate %d has no scalefactor-band table", cfg.SampleRate)
 	}
-	d := &Decoder{cfg: cfg, fmt: f, rateIdx: rateIdx, channels: f.Channels,
-		frameLen: int(cfg.FrameLength), pnsState: 0x1f2e3d4c}
+	slots := waveSlots(cfg.ChannelConfig, f.Channels)
+	if len(slots) != f.Channels {
+		return nil, malformed("channel configuration %d with %d channels has no known element order",
+			cfg.ChannelConfig, f.Channels)
+	}
+	elems := channelElements(cfg.ChannelConfig)
+	if elems != nil && len(elems) != len(slots) {
+		return nil, malformed("channel configuration %d maps %d elements onto %d channels",
+			cfg.ChannelConfig, len(elems), len(slots))
+	}
+	d := &Decoder{cfg: cfg, fmt: f, rateIdx: rateIdx,
+		frameLen: int(cfg.FrameLength), slots: slots, elems: elems, pnsState: 0x1f2e3d4c}
 	return d, nil
+}
+
+// checkElement rejects an element that is not the one Table 1.19 puts at
+// this position in the channel sequence. Positions are routed by index
+// (see channelElements), so a deviant order would write every channel
+// somewhere plausible and wrong rather than fail.
+func (d *Decoder) checkElement(pos int, tag uint32) error {
+	if d.elems == nil {
+		// Mono and stereo route through the identity, so their element
+		// order is unconstrained here on purpose. An LFE is not an order
+		// question though: these layouts carry no low-frequency channel,
+		// so there is nowhere for one to land but a full-range front
+		// channel, at the full-range level.
+		if tag == elLFE {
+			return malformed("channel configuration %d has no LFE channel", d.cfg.ChannelConfig)
+		}
+		return nil
+	}
+	if d.elems[pos] == int(tag) {
+		return nil
+	}
+	return malformed("channel configuration %d codes %s at channel %d, found %s",
+		d.cfg.ChannelConfig, elementName(d.elems[pos]), pos, elementName(int(tag)))
 }
 
 // Decode decodes one access unit and emits one 1024-frame buffer.
@@ -100,12 +140,14 @@ func (d *Decoder) Decode(pkt []byte, emit func(*audio.Buffer) error) error {
 		d.buf = audio.Get(d.fmt, d.frameLen)
 	}
 	d.buf.N = d.frameLen
-	for c := 0; c < d.channels; c++ {
+	for c := 0; c < len(d.slots); c++ {
 		clear(d.buf.ChanF(c)[:d.frameLen])
 	}
 
 	r := newBitReader(pkt)
-	outCh := 0
+	// elem walks the frame's channel sequence; d.slots turns that position
+	// into the output channel, which past stereo is not the same number.
+	elem := 0
 	for {
 		if r.left() < 3 {
 			break
@@ -114,8 +156,11 @@ func (d *Decoder) Decode(pkt []byte, emit func(*audio.Buffer) error) error {
 		switch tag {
 		case elSCE, elLFE:
 			r.read(4) // element_instance_tag
-			if outCh >= d.channels {
+			if elem >= len(d.slots) {
 				return malformed("more channels in bitstream than configured")
+			}
+			if err := d.checkElement(elem, tag); err != nil {
+				return err
 			}
 			cd := &d.ch[0]
 			if err := d.decodeChannelData(r, cd, false); err != nil {
@@ -123,17 +168,24 @@ func (d *Decoder) Decode(pkt []byte, emit func(*audio.Buffer) error) error {
 			}
 			d.dequant(cd)
 			d.applyPNS(cd)
-			d.finishChannel(cd, outCh)
-			outCh++
+			d.finishChannel(cd, d.slots[elem])
+			elem++
 		case elCPE:
 			r.read(4) // element_instance_tag
-			if outCh+2 > d.channels {
+			if elem+2 > len(d.slots) {
 				return malformed("channel pair exceeds configured channels")
 			}
-			if err := d.decodePair(r, outCh); err != nil {
+			if err := d.checkElement(elem, tag); err != nil {
 				return err
 			}
-			outCh += 2
+			// The pair's two output slots are passed explicitly: a coupled
+			// pair is adjacent in the bitstream but need not be adjacent in
+			// WAVE order (configuration 6 sends L/R to 0 and 1, then Ls/Rs to
+			// 4 and 5, straddling the LFE).
+			if err := d.decodePair(r, d.slots[elem], d.slots[elem+1]); err != nil {
+				return err
+			}
+			elem += 2
 		case elDSE:
 			skipDSE(r)
 		case elPCE:
@@ -149,7 +201,7 @@ func (d *Decoder) Decode(pkt []byte, emit func(*audio.Buffer) error) error {
 		if r.overrun() {
 			return malformed("access unit overruns packet")
 		}
-		if outCh >= d.channels {
+		if elem >= len(d.slots) {
 			// Remaining elements (fill, padding) do not add audio.
 			break
 		}
@@ -159,8 +211,10 @@ done:
 }
 
 // decodePair decodes a channel-pair element, applying the shared window and
-// M/S stereo before the per-channel filterbank.
-func (d *Decoder) decodePair(r *bitReader, outCh int) error {
+// M/S stereo before the per-channel filterbank. leftCh and rightCh are the
+// output channels the pair's two members land in, which need not be
+// adjacent.
+func (d *Decoder) decodePair(r *bitReader, leftCh, rightCh int) error {
 	common := r.bit() != 0
 	var shared icsInfo
 	msMask := 0
@@ -200,8 +254,8 @@ func (d *Decoder) decodePair(r *bitReader, outCh int) error {
 		applyMS(left, right, msMask, &msUsed)
 	}
 	applyIntensity(left, right, msMask, &msUsed)
-	d.finishChannel(left, outCh)
-	d.finishChannel(right, outCh+1)
+	d.finishChannel(left, leftCh)
+	d.finishChannel(right, rightCh)
 	return nil
 }
 

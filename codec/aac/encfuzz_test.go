@@ -33,7 +33,11 @@ func FuzzEncode(f *testing.F) {
 		if err != nil {
 			t.Fatalf("our own ASC does not parse: %v", err)
 		}
-		d, err := NewDecoder(cfg, cfg.Format())
+		df, err := cfg.Format()
+		if err != nil {
+			t.Fatal(err)
+		}
+		d, err := NewDecoder(cfg, df)
 		if err != nil {
 			t.Fatal(err)
 		}

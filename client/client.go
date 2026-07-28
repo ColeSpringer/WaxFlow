@@ -343,6 +343,24 @@ type CacheGCResponse struct {
 	TimelinesRemoved int `json:"timelinesRemoved,omitempty"`
 }
 
+// RootsReloadResponse is the POST /roots/reload body: the reconcile
+// delta. Added, Removed, and Changed report what moved (Changed is a
+// root whose name stayed but whose path was re-pointed); Roots is the
+// full set after the reload, in configuration order.
+//
+// The daemon renders all four as arrays, never null, so an empty delta
+// is still iterable. They are not normalized after decoding: encoding/json
+// already yields a non-nil empty slice for [], and ranging over a nil
+// slice is fine in Go, so normalizing would only paper over a daemon that
+// stopped honouring that contract.
+type RootsReloadResponse struct {
+	SchemaVersion int      `json:"schemaVersion"`
+	Added         []string `json:"added"`
+	Removed       []string `json:"removed"`
+	Changed       []string `json:"changed"`
+	Roots         []string `json:"roots"`
+}
+
 // JobRequest is the POST /jobs body and, equally, the request a job
 // document echoes back: one type serves both directions, so the
 // asymmetries between them are per-field facts rather than two
@@ -652,6 +670,25 @@ func (c *Client) CacheStats(ctx context.Context) (*CacheStatsResponse, error) {
 func (c *Client) CacheGC(ctx context.Context) (*CacheGCResponse, error) {
 	var v CacheGCResponse
 	if err := c.postJSON(ctx, "/cache/gc", nil, &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+// ReloadRoots reconciles the daemon's live library roots against its
+// re-read configuration, returning the delta.
+//
+// Caps.Delivery.RootsReload is the discovery mechanism, and callers
+// should gate on it rather than probing: the route is registered only
+// when a reload could do something, and an unwired daemon falls through
+// to its catch-all, which answers CodeNotFound. That is the same code a
+// wired daemon behind a proxy that lost the route would produce, and
+// decodeEnvelope will not read daemon semantics out of a proxy's own
+// error page, so a 404 here does not distinguish "not served" from "not
+// reached". The capability flag does.
+func (c *Client) ReloadRoots(ctx context.Context) (*RootsReloadResponse, error) {
+	var v RootsReloadResponse
+	if err := c.postJSON(ctx, "/roots/reload", nil, &v); err != nil {
 		return nil, err
 	}
 	return &v, nil

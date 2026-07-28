@@ -104,7 +104,10 @@ func (d *Demuxer) parse() error {
 	if err != nil {
 		return err
 	}
-	f := cfg.Format()
+	f, err := cfg.Format()
+	if err != nil {
+		return err
+	}
 	if err := f.Valid(); err != nil {
 		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "adts: unusable format", err)
 	}

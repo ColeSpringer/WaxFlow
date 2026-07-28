@@ -22,6 +22,16 @@ type track struct {
 	// is the one chosen. Empty for a track with nothing to say.
 	note string
 
+	// stsdErr is why parseStsd failed on this track, deferred rather than
+	// propagated. Failing the open outright would reject a file that also
+	// carries a decodable audio track, which opens today; but the failure is
+	// exactly what would have set codec, so without this the track arrives at
+	// selectAudio indistinguishable from one with no sample description at
+	// all, and the codec layer's reason ("audio object type 1 is not
+	// AAC-LC") is lost behind "found: unknown". selectAudio surfaces it only
+	// when nothing at all was selectable.
+	stsdErr error
+
 	st sampleTable
 
 	// First edit-list entry: a nonzero media time is the encoder-delay

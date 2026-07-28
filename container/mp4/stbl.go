@@ -56,12 +56,26 @@ func (d *Demuxer) parseStbl(t *track, body []byte, depth int) error {
 		haveStsd  bool
 		haveStsz  bool
 		parseErr  error
+		stsdErr   error
 	)
 	err := walkBoxes(body, func(typ string, payload []byte) error {
+		if stsdErr != nil {
+			// The sample description failed, so this track has no codec and
+			// is going to be discarded. stsd leads the box order in practice,
+			// so stopping here is what keeps a rejected track from allocating
+			// a sample-size table for nobody.
+			return nil
+		}
 		switch typ {
 		case "stsd":
 			haveStsd = true
-			return d.parseStsd(t, payload, depth+1)
+			// Held back rather than returned: stsd is the box that sets
+			// t.codec, so a failure here makes isAudio below false and the
+			// error would be dropped whole, leaving selectAudio to report
+			// "unknown" where the codec layer had a reason. Handled after the
+			// walk so the audio-track rule still applies.
+			stsdErr = d.parseStsd(t, payload, depth+1)
+			return nil
 		case "stts":
 			stts, parseErr = parseStts(payload)
 		case "stsc":
@@ -83,6 +97,22 @@ func (d *Demuxer) parseStbl(t *track, body []byte, depth int) error {
 	})
 	isAudio := t.handler == "soun" && t.codec != ""
 	isText := t.handler == "text" || t.handler == "sbtl"
+	if stsdErr != nil {
+		// Keep the reason for selectAudio, which reports it when no track at
+		// all was selectable.
+		t.stsdErr = stsdErr
+		if isAudio {
+			// Damaged audio we would otherwise decode stays fatal, and this
+			// is reachable: every setter in stsd.go assigns t.codec only once
+			// it has succeeded, but walkBoxes rejects a malformed box on its
+			// own, so a first sample entry that parsed cleanly followed by a
+			// truncated second one arrives here with the codec set.
+			return stsdErr
+		}
+		// No codec means no sample map worth building, for a sound track or
+		// a text one.
+		return nil
+	}
 	if err != nil {
 		// A damaged sample table in the audio track we would decode is fatal,
 		// but a broken stco/stsz in a sibling video or text track must not

@@ -18,6 +18,16 @@ import (
 // prints one decimal, so its values carry up to 0.05 quantization; the
 // tolerances absorb that plus genuine implementation differences (LRA
 // percentile convention, the true-peak interpolator design).
+//
+// The 0.5 LU on range is an empirical bound over the signals below, not
+// a property of either meter, and it is not the correctness gate: that
+// is TestEBUTech3342Vectors, which measures the four EBU Tech 3342 cases
+// against their specified results at the document's own +-1 LU. Real
+// material can separate the two implementations by more than the numbers
+// here -- around 0.6 LU has been reported -- for the structural reasons
+// percentileIndex describes, and that is conformant on both sides. So a
+// failure here means one of them moved, not that either is wrong; widen
+// this only with a signal in hand that shows why.
 func TestFFmpegDifferential(t *testing.T) {
 	ffmpeg := testutil.FFmpeg(t)
 
@@ -36,6 +46,18 @@ func TestFFmpegDifferential(t *testing.T) {
 		{"noise and sine stereo 44k", 44100, [][]float32{
 			amNoise(44100, 12*44100, 7),
 			toneOverNoise(44100, 12*44100, 9),
+		}},
+		// A wide, smooth loudness distribution, and roughly twice the
+		// range of the cases above. It was added expecting the opposite
+		// of what it found: a smooth distribution makes the percentile
+		// ranks *insensitive*, since a one-rank shift barely moves a
+		// value on a smooth CDF, and this case agrees more closely than
+		// any other here. It stays as the wide-range regression guard,
+		// and as the evidence that the delta does not simply grow with
+		// the range.
+		{"wide sweep stereo 48k", 48000, [][]float32{
+			sweepNoise(48000, 30*48000, 11),
+			sweepNoise(48000, 30*48000, 13),
 		}},
 	}
 	for _, c := range cases {
@@ -106,6 +128,26 @@ func sineMix(rate, frames int) []float32 {
 			0.3*math.Sin(2*math.Pi*3001*tsec) +
 			0.2*math.Sin(2*math.Pi*211*tsec)
 		out[i] = float32(env * v)
+	}
+	return out
+}
+
+// sweepNoise is low-passed noise whose level walks continuously across
+// roughly 35 LU, with a slow drift and a faster ripple so no level is
+// held long enough to build a plateau.
+func sweepNoise(rate, frames int, seed int64) []float32 {
+	rng := rand.New(rand.NewSource(seed))
+	out := make([]float32, frames)
+	var lp float64
+	for i := range out {
+		w := rng.Float64()*2 - 1
+		lp += 0.25 * (w - lp)
+		tsec := float64(i) / float64(rate)
+		// A drift over the whole take plus a ripple, in dB, so the level
+		// moves through every value rather than settling on a few.
+		db := -34 + 16*math.Sin(2*math.Pi*0.008*tsec) +
+			5*math.Sin(2*math.Pi*0.037*tsec+2)
+		out[i] = float32(3 * lp * math.Pow(10, db/20))
 	}
 	return out
 }

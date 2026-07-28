@@ -18,7 +18,11 @@ func aacSampleEntry(t container.Track) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if want := cfg.Format(); t.Fmt.Rate != want.Rate || t.Fmt.Channels != want.Channels ||
+	want, err := cfg.Format()
+	if err != nil {
+		return nil, err
+	}
+	if t.Fmt.Rate != want.Rate || t.Fmt.Channels != want.Channels ||
 		t.Fmt.Type != want.Type || t.Fmt.BitDepth != want.BitDepth {
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 			fmt.Sprintf("mp4: track format %v does not match the AudioSpecificConfig (%v)", t.Fmt, want))

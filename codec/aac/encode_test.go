@@ -49,11 +49,15 @@ func decodeAll(t *testing.T, asc []byte, pkts [][]byte) [][]float32 {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dec, err := NewDecoder(cfg, cfg.Format())
+	f, err := cfg.Format()
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := make([][]float32, cfg.Format().Channels)
+	dec, err := NewDecoder(cfg, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([][]float32, f.Channels)
 	for _, pkt := range pkts {
 		err := dec.Decode(pkt, func(b *audio.Buffer) error {
 			for c := range out {

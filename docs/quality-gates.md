@@ -50,6 +50,51 @@ it re-baselines every gate in the same PR.
 | Opus | all opus_testvectors 01-12 pass RFC 6716 section 6 (ported opus_compare, both decode rates, against the RFC 8251 regenerated references; the 2012 originals are stale for hybrid/transition vectors and fail even current libopus); Ogg bisection seek exact after 80 ms pre-roll; >=150x realtime |
 | Vorbis | vs ffmpeg: RMS < 1e-4 FS, max < 1e-3 FS; >=80x realtime |
 
+## Loudness meter
+
+Conformance is the gate, not agreement with another implementation.
+`TestEBUTech3342Vectors` measures the four EBU Tech 3342 loudness-range
+cases and checks them against the document's stated results at its own
++-1 LU tolerance; all four land on their specified value exactly
+(10 / 5 / 20 / 15 LU). The BS.1770 integrated anchors (a 0 dBFS 997 Hz
+sine in one channel of a stereo meter reading -3.01 LKFS, the same tone
+at -18 dBFS in both reading -18.0) are pinned at 44.1, 48 and 96 kHz.
+
+`TestFFmpegDifferential` compares integrated, range and true peak against
+ffmpeg's `ebur128` filter on synthesized signals, at 0.15 LU / 0.5 LU /
+0.3 dB. Those are empirical bounds over those signals, not properties of
+either meter, and the range one in particular should not be read as a
+promise: **real material can separate the two by more, and both remain
+conformant.** An independent test of WaxTap v3.0 measured a 0.58 LU
+difference on real music and attributed it to WaxFlow; the vectors above
+say the meter is right, and the mechanism is structural.
+
+Two differences, both read out of ffmpeg's `libavfilter/f_ebur128.c`
+rather than assumed:
+
+- ffmpeg bins every short-term loudness into a fixed histogram at
+  1/100 LU (`HIST_GRAIN 100`), flooring each value onto that grid, and
+  floors the relative-gate position onto the same grid so the gate can
+  admit blocks an exact comparison excludes. WaxFlow sorts the exact
+  float64 powers.
+- The percentile rank differs by one. ffmpeg walks bins until the
+  cumulative count reaches `round(f*n)`; WaxFlow indexes the sorted
+  array at `round(f*(n-1))`, the libebur128 convention.
+
+Both are invisible where the distribution is smooth through the 10th and
+95th percentiles and grow where it is steep, which is why every synthetic
+signal tried agrees to under 0.25 LU while real music, with distinct loud
+and quiet passages, can separate by half an LU. Tech 3342 specifies the
+quantity to +-1 LU; neither ranking is more correct than the other.
+
+One related asymmetry is deliberate and documented in place: the
+integrated relative gate compares strictly greater (BS.1770-4's formula)
+where the range gate compares greater-or-equal (libebur128's and
+ffmpeg's, at both of theirs). It cannot change a reading -- separating
+the two takes a block power exactly equal to a mean divided by ten in
+float64 -- and unifying them would spend a `loudness.Version` bump,
+invalidating every externally stored measurement, to move nothing.
+
 ## Encoder gates
 
 Every encoder, always: validity (above) plus golden-stream byte-exactness in
