@@ -15,6 +15,7 @@ import (
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/format"
 )
 
 // transcodeMKA runs a WAV source to the given format+container and returns the
@@ -82,6 +83,40 @@ func TestTranscodeMKALossy(t *testing.T) {
 			defer audio.Put(got)
 			if got.N != frames {
 				t.Fatalf("decoded %d frames, want %d (gapless trim failed)", got.N, frames)
+			}
+		})
+	}
+}
+
+// TestMKACutToTheVeryEnd enforces the no-rounding Duration decision end to end.
+// Writing a Duration arms SpanTrack's past-the-end refusal, which an unknown
+// length left disabled, so a Duration rounded to the millisecond would
+// under-report and turn the last cut in the file into a refusal.
+func TestMKACutToTheVeryEnd(t *testing.T) {
+	e := waxflow.New()
+	const frames = 9111 // 189.8125 ms at 48 kHz: not a whole millisecond
+	cfg := pcm.Config{Encoding: pcm.SignedInt, Bits: 16}
+
+	for _, f := range []string{"wav", "flac"} {
+		t.Run(f, func(t *testing.T) {
+			wav, src := makeWAV(t, cfg, 2, frames, 37)
+			defer audio.Put(src)
+			mkaBytes, _ := transcodeMKA(t, e, wav, f, "mka")
+
+			_, info, err := format.OpenDemuxer(container.BytesSource(mkaBytes), "", nil)
+			if err != nil {
+				t.Fatalf("reopen: %v", err)
+			}
+			track := info.Default()
+			if track.Samples != frames {
+				t.Fatalf("track declares %d samples, source had %d", track.Samples, frames)
+			}
+			if _, err := waxflow.SpanTrack(track, frames/2, frames); err != nil {
+				t.Errorf("cut ending at the declared total was refused: %v", err)
+			}
+			// And the refusal is armed, not absent.
+			if _, err := waxflow.SpanTrack(track, frames/2, frames+1); err == nil {
+				t.Error("cut past the declared total was accepted; the refusal is disabled")
 			}
 		})
 	}

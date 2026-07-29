@@ -304,9 +304,19 @@ func (cq *chanQuant) rateSearch(budget int) int {
 
 // quantizeChannel runs the two loops and assembles the channel's final
 // scalefactors, codebooks, and quantized values, ready for writeICSBody.
-func (cq *chanQuant) quantizeChannel(budget int) {
+//
+// budget is soft: the reservoir absorbs a frame that runs over it, which lets a
+// hard frame borrow from easy ones. hardCap is this channel's share of the
+// 6144-bit-per-channel access-unit ceiling, and no solution may exceed it.
+func (cq *chanQuant) quantizeChannel(budget, hardCap int) {
+	if hardCap < 0 {
+		hardCap = 0
+	}
 	if budget < 0 {
 		budget = 0
+	}
+	if budget > hardCap {
+		budget = hardCap
 	}
 	bestDelta := -1
 	bestScore := math.Inf(1)
@@ -341,6 +351,15 @@ func (cq *chanQuant) quantizeChannel(budget int) {
 				b.amp++
 			}
 		}
+	}
+	// bestDelta was scored against the amplification state of the round that
+	// found it, and assemble runs against the final one; amplification only
+	// raises costs, so it can have grown since. Checked against the hard cap,
+	// not the budget, since the reservoir absorbs a soft overshoot. The
+	// fallback is the last round's delta, which rateSearch fitted at exactly
+	// the state assemble uses (the loop breaks before amplifying).
+	if bestDelta < 0 || cq.totalBits(bestDelta) > hardCap {
+		bestDelta = delta
 	}
 	cq.assemble(bestDelta)
 }

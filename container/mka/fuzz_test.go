@@ -19,12 +19,13 @@ func fixture(t testing.TB, name string) []byte {
 	return b
 }
 
-// FuzzDemux exercises the EBML parser, the block/lacing splitter, and the
-// seek paths. EBML nesting is an attack surface, so the invariants are: no
-// panic, no unbounded work, accepted tracks are well-formed, packet production
-// is bounded by the input size, and seeks never overshoot the target.
+// FuzzDemux exercises the EBML parser, the block/lacing splitter, the Cues
+// parser, and the seek paths. EBML nesting is an attack surface, so the
+// invariants are: no panic, no unbounded work, accepted tracks are well-formed,
+// packet production is bounded by the input size, and seeks never overshoot the
+// target. seed-cues.mka is the only seed carrying a Cues index.
 func FuzzDemux(f *testing.F) {
-	for _, name := range []string{"seed-opus.webm", "seed-flac.mka", "seed-pcm.mka"} {
+	for _, name := range []string{"seed-opus.webm", "seed-flac.mka", "seed-pcm.mka", "seed-cues.mka"} {
 		full := fixture(f, name)
 		f.Add(full)
 		f.Add(full[:len(full)/2])

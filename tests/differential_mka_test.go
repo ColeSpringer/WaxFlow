@@ -9,6 +9,7 @@ package waxflow_test
 
 import (
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -63,6 +64,17 @@ func TestMKADifferentialLossless(t *testing.T) {
 			if idx := testutil.DiffI32(testutil.Interleave(src), want); idx != -1 {
 				t.Errorf("ffmpeg decode of our %s-in-mka differs at %d", format, idx)
 			}
+
+			// This returned N/A before the muxer wrote a Duration. A lossless
+			// track has no CodecDelay, so the Duration is exact; anything
+			// looser than a fraction of a millisecond would test nothing.
+			dur := testutil.FFprobeFormatDuration(t, path)
+			if dur < 0 {
+				t.Fatal("ffprobe reports no container duration")
+			}
+			if want := float64(frames) / 48000; math.Abs(dur-want) > 1e-4 {
+				t.Errorf("ffprobe duration = %.6f s, want %.6f", dur, want)
+			}
 		})
 	}
 }
@@ -100,6 +112,19 @@ func TestMKADifferentialLossy(t *testing.T) {
 			got := len(testutil.FFmpegDecodeF32(t, path)) / 2 // stereo
 			if d := got - frames; d < -2048 || d > 2048 {
 				t.Errorf("ffmpeg decoded %d frames, want ~%d", got, frames)
+			}
+
+			// The reference is the source length, not ffmpeg's own Duration:
+			// its Matroska muxer writes the raw stream length, overshooting by
+			// the pre-skip plus tail trim, about 8 ms on these fixtures. 2 ms
+			// is tight because writing the raw length is the tempting mistake
+			// and a looser gate would pass it.
+			dur := testutil.FFprobeFormatDuration(t, path)
+			if dur < 0 {
+				t.Fatal("ffprobe reports no container duration")
+			}
+			if want := float64(frames) / 48000; math.Abs(dur-want) > 2e-3 {
+				t.Errorf("ffprobe duration = %.6f s, want %.6f (the presentation length, not the raw one)", dur, want)
 			}
 		})
 	}

@@ -4,12 +4,11 @@
 // and streams block frames from the clusters as codec packets.
 //
 // Seeking uses a frame-counted cluster index rather than the container's
-// Cues: a block timestamp is stored at millisecond granularity and so cannot
-// name a sample position, whereas format.Media's decode-and-discard pre-roll
-// needs the exact decoder-output position of the cluster it restarts on. The
-// index (offset to cumulative sample count) is built by walking the blocks
-// once, sample-exact; Cues and other metadata elements are tolerated and
-// skipped. That same walk yields the exact decoder-output total gapless needs.
+// Cues: a block timestamp is millisecond-granular and cannot name a sample
+// position, whereas format.Media's pre-roll needs the exact decoder-output
+// position of the cluster it restarts on. That same walk yields the exact
+// total gapless needs. Cues bound how far the walk runs rather than supplying
+// a position, so a wrong index can only make a landing earlier, never wrong.
 //
 // Gapless trims come from the track's CodecDelay (front) and the last
 // block's DiscardPadding (end), mapped onto Track.Delay/Padding so
@@ -61,6 +60,14 @@ const (
 	// raw-total pass), the backstop behind the segment-size bound. It clears a
 	// day of the finest Opus frames (2.5 ms) with headroom.
 	maxFrames = 1 << 26
+	// maxCuePoints bounds the Cues index on both sides. One entry per cluster
+	// clears days of audio. Past it both sides halve the index and double their
+	// stride, giving a coarse index of the whole file rather than a fine index
+	// of its front.
+	maxCuePoints = 1 << 16
+	// maxCuesElement bounds the Cues element read, tighter than the header cap
+	// because Cues is read on a live seek rather than at open.
+	maxCuesElement = 8 << 20
 )
 
 // Matroska element IDs, as they appear on the wire (the length-descriptor
@@ -94,7 +101,16 @@ const (
 	idChannels     = 0x9F
 	idBitDepth     = 0x6264
 
-	idCues = 0x1C53BB6B // parsed only as a top-level boundary; see the doc
+	idCues               = 0x1C53BB6B
+	idCuePoint           = 0xBB
+	idCueTime            = 0xB3
+	idCueTrackPositions  = 0xB7
+	idCueTrack           = 0xF7
+	idCueClusterPosition = 0xF1
+
+	// idVoid marks reserved or abandoned space; the muxer writes one where a
+	// value it reserved never arrived.
+	idVoid = 0xEC
 
 	idCluster        = 0x1F43B675
 	idTimestamp      = 0xE7 // Cluster Timestamp (a.k.a. Timecode)

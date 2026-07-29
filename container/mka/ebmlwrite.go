@@ -67,6 +67,34 @@ func appendUint(dst []byte, id uint32, v uint64) []byte {
 	return appendElement(dst, id, beUintBytes(v))
 }
 
+// appendUintFixed appends an unsigned-integer element whose body is exactly
+// width bytes rather than beUintBytes's minimal encoding. Matroska permits any
+// width in 1..8, and a fixed one is what makes a reserved slot patchable in
+// place: the element must not change length when the value does.
+func appendUintFixed(dst []byte, id uint32, v uint64, width int) []byte {
+	if width < 1 || width > 8 {
+		panic("mka: appendUintFixed width outside 1..8")
+	}
+	var full [8]byte
+	binary.BigEndian.PutUint64(full[:], v)
+	return appendElement(dst, id, full[8-width:])
+}
+
+// maxVoidSpan is the largest span appendVoid emits: past a 126-byte body the
+// size vint widens to two bytes and the arithmetic below changes.
+const maxVoidSpan = 128
+
+// appendVoid appends a Void element occupying exactly total bytes, which is
+// what a reserved slot degrades to when its value never arrives.
+func appendVoid(dst []byte, total int) []byte {
+	if total < 2 || total > maxVoidSpan {
+		panic("mka: appendVoid span outside 2..128")
+	}
+	dst = appendID(dst, idVoid)
+	dst = appendVint(dst, uint64(total-2))
+	return append(dst, make([]byte, total-2)...)
+}
+
 // appendString appends a UTF-8 / ASCII string element.
 func appendString(dst []byte, id uint32, s string) []byte {
 	return appendElement(dst, id, []byte(s))

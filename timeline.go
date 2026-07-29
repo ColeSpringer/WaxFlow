@@ -236,8 +236,10 @@ func SpanTrack(track container.Track, from, to int64) (container.Track, error) {
 	// refusal for exactly the sources a split is usually pointed at: WAV and
 	// FLAC leave it false because their totals can lie, not because they are
 	// approximate. Gating here would trade a real refusal on the common case
-	// for a narrow one on Matroska, whose advisory total can sit up to a
-	// millisecond under the audio it has.
+	// for a narrow one on Matroska, whose advisory total a third-party muxer
+	// can put on either side of the audio it has. Matroska this library wrote
+	// is not in that group: its Duration round-trips to the exact sample count,
+	// so a cut ending at the declared total is accepted, not refused by a hair.
 	if total >= 0 {
 		if from > total {
 			return container.Track{}, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(

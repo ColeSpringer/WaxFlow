@@ -232,6 +232,12 @@ func (e *Encoder) CodecConfig() []byte { return e.asc[:] }
 // channel access-unit ceiling.
 const maxSample = 8.0
 
+// auCeilingSlack is held back from the 6144-bit-per-channel access unit when
+// the rate loop's hard cap is computed. totalBits and overheadBits predict the
+// writer rather than being it, and run under it by up to 84 bits; this clears
+// that with room to spare. encodeFrame's post-assembly passes are the backstop.
+const auCeilingSlack = 256
+
 // Encode buffers src and emits an access unit for every whole source
 // block that becomes available.
 func (e *Encoder) Encode(src *audio.Buffer, emit func(codec.Packet) error) error {
@@ -442,29 +448,59 @@ func (e *Encoder) encodeFrame(emit func(codec.Packet) error) error {
 	if spectral < 0 {
 		spectral = 0
 	}
+	// The spectral ceiling the rate loop may never cross, as against the target
+	// above, which it may. The target is already well under it, so neither this
+	// clamp nor quantizeChannel's fires today. They are not dead: the fallback
+	// quantizeChannel takes on a stale candidate only fits the hard cap because
+	// the budget it was fitted to is capped. Raise 0.93 and they start working.
+	hard := 6144*e.channels - overhead - auCeilingSlack
+	if hard < 0 {
+		hard = 0
+	}
+	spectral = min(spectral, hard)
 
-	// Split the spectral budget by perceptual demand.
+	// Resolved once, so the corrective passes keep the same channel balance.
+	frac := 0.5
 	if e.channels == 2 {
-		dl, dr := e.cq[0].demand, e.cq[1].demand
-		frac := 0.5
-		if dl+dr > 0 {
+		if dl, dr := e.cq[0].demand, e.cq[1].demand; dl+dr > 0 {
 			frac = min(max(dl/(dl+dr), 0.2), 0.8)
 		}
-		e.cq[0].quantizeChannel(int(float64(spectral) * frac))
-		e.cq[1].quantizeChannel(spectral - int(float64(spectral)*frac))
-	} else {
-		e.cq[0].quantizeChannel(spectral)
 	}
+	// build quantizes both channels and assembles the unit. The hard cap splits
+	// like the budget, so the channels' caps still sum to the frame's.
+	build := func(spectral, hard int) {
+		if e.channels == 2 {
+			lSpectral, lHard := int(float64(spectral)*frac), int(float64(hard)*frac)
+			e.cq[0].quantizeChannel(lSpectral, lHard)
+			e.cq[1].quantizeChannel(spectral-lSpectral, hard-lHard)
+			e.w.reset()
+			e.writeCPE(seq, groupLen, maxSfb, msMask)
+		} else {
+			e.cq[0].quantizeChannel(spectral, hard)
+			e.w.reset()
+			e.writeSCE(seq, groupLen, maxSfb)
+		}
+		e.w.writeBits(3, elEND)
+		e.w.align()
+	}
+	build(spectral, hard)
 
-	// Assemble the access unit.
-	e.w.reset()
-	if e.channels == 2 {
-		e.writeCPE(seq, groupLen, maxSfb, msMask)
-	} else {
-		e.writeSCE(seq, groupLen, maxSfb)
+	// Enforce the ceiling on the bytes emitted, not on the estimate the rate
+	// loop worked from: the estimates run under the writer, so drift in them
+	// must fail on the frame that caused it rather than silently emit a unit a
+	// conforming decoder cannot buffer. No frame reaches this today.
+	//
+	// The first pass cuts the budget by the overshoot it measured, the second
+	// cuts it to nothing, which zeroes every band. Bounded at three passes.
+	ceiling := 6144 * e.channels
+	for pass := 1; e.w.bitLen() > ceiling && pass <= 2; pass++ {
+		if pass == 1 {
+			spectral = max(0, spectral-(e.w.bitLen()-ceiling)-auCeilingSlack)
+		} else {
+			spectral = 0
+		}
+		build(spectral, spectral)
 	}
-	e.w.writeBits(3, elEND)
-	e.w.align()
 
 	e.reservoir += e.meanBits - float64(e.w.bitLen())
 	if e.reservoir > float64(6144*e.channels) {

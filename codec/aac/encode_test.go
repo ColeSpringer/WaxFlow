@@ -2,6 +2,7 @@ package aac
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"testing"
 
@@ -273,6 +274,74 @@ func TestAACEncoderOptionValidation(t *testing.T) {
 	for i, f := range bad {
 		if _, err := NewEncoder(f, nil); err == nil {
 			t.Errorf("format %d accepted", i)
+		}
+	}
+}
+
+// TestAACEncodeAUCeiling holds the rate loop to the spec's hard limit: an
+// access unit may not exceed 6144 bits per channel, whatever the reservoir,
+// the bit rate, or how hard the frame is.
+//
+// The loop is where this can go wrong, and it is not obvious from reading it.
+// rateSearch fits a candidate to the budget at one amplification state, and the
+// loop then remembers the best-scoring candidate across rounds while band
+// amplification keeps raising costs. Assembling a candidate from an earlier
+// round against the final amplification state emits a frame nobody sized: the
+// case below overshot by 475 bits, enough to break the ceiling and to make a
+// conforming decoder's input buffer underrun.
+//
+// The signal is deliberately awkward: a three-byte pattern at a high mono bit
+// rate, which is what the encode fuzzer found. Ordinary program material stays
+// far enough under the budget that the stale candidate never shows.
+func TestAACEncodeAUCeiling(t *testing.T) {
+	pattern := []byte{0xE2, 0x00, 0x0D}
+	// The block count matters and is not incidental: the overshoot needs the
+	// reservoir the first three frames leave behind, which lets the fourth (the
+	// Finish flush) ask for the full 93%-of-ceiling budget. A longer run spends
+	// the reservoir down and never gets close.
+	for _, blocks := range []int{3, 6} {
+		for _, ch := range []int{1, 2} {
+			bitrate := 184000
+			name := fmt.Sprintf("ch%d/%dblk", ch, blocks)
+			t.Run(name, func(t *testing.T) {
+				fm := audio.Format{Rate: 44100, Channels: ch, Layout: audio.DefaultLayout(ch),
+					Type: audio.Float, BitDepth: 32}
+				e, err := NewEncoder(fm, &EncoderOptions{Bitrate: bitrate})
+				if err != nil {
+					t.Fatal(err)
+				}
+				ceiling := 6144 * ch
+				worst := 0
+				check := func(p codec.Packet) error {
+					bits := len(p.Data) * 8
+					worst = max(worst, bits)
+					if bits > ceiling {
+						t.Fatalf("access unit of %d bits exceeds the %d-bit ceiling", bits, ceiling)
+					}
+					return nil
+				}
+				buf := audio.Get(fm, frameLen)
+				defer audio.Put(buf)
+				for blk := 0; blk < blocks; blk++ {
+					buf.N = frameLen
+					for c := 0; c < ch; c++ {
+						dst := buf.ChanF(c)
+						for i := range dst {
+							b := pattern[(blk*frameLen+i*ch+c)%len(pattern)]
+							dst[i] = (float32(b) - 127.5) / 127.5
+						}
+					}
+					if err := e.Encode(buf, check); err != nil {
+						t.Fatalf("Encode: %v", err)
+					}
+				}
+				if _, err := e.Finish(check); err != nil {
+					t.Fatalf("Finish: %v", err)
+				}
+				// A run that never approached the ceiling would pass whatever the
+				// loop did, so say how close it got.
+				t.Logf("worst access unit %d of %d bits", worst, ceiling)
+			})
 		}
 	}
 }

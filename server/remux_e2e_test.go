@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
 // TestRemuxServesTheMiddleRung drives the ladder's new rung end to end:
@@ -126,5 +128,54 @@ func TestRemuxDeclinedUnderABitrateCap(t *testing.T) {
 	}
 	if got := env.srv.Metrics().Remuxes.Load(); got != before {
 		t.Fatalf("remux_total moved to %d under a bit rate cap it cannot promise", got)
+	}
+}
+
+// TestStreamMatroskaIsTheStreamingColumn pins what a non-seekable destination
+// gets: a Duration and a SeekHead naming Info and Tracks, but no Cues and an
+// unknown-size Segment. The HTTP path writes to a *cache.Entry, which has no
+// Seek, and is the only caller reaching a plain io.Writer: the CLI has no
+// stdout destination.
+func TestStreamMatroskaIsTheStreamingColumn(t *testing.T) {
+	env := newTestEnv(t, nil)
+	resp := env.get(t, "/stream?src=lib/album/track.flac&format=flac&container=mka", nil)
+	body := readBody(t, resp)
+	if resp.StatusCode != 200 {
+		t.Fatalf("request = %d", resp.StatusCode)
+	}
+
+	seg, definite := testutil.EBMLSegment(t, body)
+	if definite {
+		t.Error("the Segment carries a definite size; a streaming destination cannot back-patch one")
+	}
+
+	var haveCues bool
+	var targets []uint32
+	testutil.EBMLChildren(t, seg, func(e testutil.EBMLElement) {
+		switch e.ID {
+		case testutil.EBMLIDCues:
+			haveCues = true
+		case testutil.EBMLIDSeekHead:
+			targets = append(targets, testutil.EBMLSeekTargets(t, seg[e.Start:e.End])...)
+		case testutil.EBMLIDInfo:
+			if _, ok := testutil.EBMLFind(t, seg[e.Start:e.End], testutil.EBMLIDDuration); !ok {
+				t.Error("no Info > Duration; the projected length needs no rewind to write")
+			}
+		}
+	})
+	if haveCues {
+		t.Error("a Cues index was written to a stream whose SeekHead cannot point at it")
+	}
+	want := map[uint32]bool{testutil.EBMLIDInfo: false, testutil.EBMLIDTracks: false}
+	for _, id := range targets {
+		if _, ok := want[id]; !ok {
+			t.Errorf("SeekHead names %#x, which a streaming muxer cannot resolve", id)
+		}
+		want[id] = true
+	}
+	for id, seen := range want {
+		if !seen {
+			t.Errorf("SeekHead has no entry for %#x", id)
+		}
 	}
 }

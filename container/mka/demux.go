@@ -2,6 +2,7 @@ package mka
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
@@ -47,16 +48,28 @@ type Demuxer struct {
 	haveFirstCluster bool
 
 	// clusterIndex maps each cluster's start offset to the exact cumulative
-	// sample position at its first frame, frame-counted by ensureWalk. Seeks
-	// land on an indexed cluster, sample-exact, because the container's
-	// millisecond block timestamps cannot express a sample position. The walk
-	// also yields the gapless raw total and DiscardPadding sum.
-	clusterIndex   []clusterPos
-	walked         bool
-	rawTotal       int64
-	paddingNS      int64
-	recording      bool  // ensureWalk is building the index
+	// sample position at its first frame, frame-counted by walk. Seeks land on
+	// an indexed cluster, sample-exact, because the container's millisecond
+	// block timestamps cannot express a sample position. The full walk also
+	// yields the gapless raw total and DiscardPadding sum.
+	clusterIndex []clusterPos
+	walked       bool // the full walk has run; rawTotal and paddingNS are whole
+	rawTotal     int64
+	paddingNS    int64
+	recording    bool // walk is building the index
+
+	// In-flight walk state, carried across calls so a bounded walk extends the
+	// index rather than restarting. walkedTo is always a cluster boundary.
 	walkCumulative int64 // running sample count during the index walk
+	walkPaddingNS  int64 // running DiscardPadding sum, committed only by a full walk
+	walkFrames     int   // running frame count, against maxFrames
+	walkLimit      int64
+	walkedTo       int64
+	walkStopped    bool // the walk in progress hit walkLimit rather than the end
+
+	// Cues, parsed lazily on the first seek. Byte offsets only; see seekWalk.
+	cues         []cueEntry
+	cuesResolved bool
 
 	// Reading state: the frame iterator's cursor over clusters and blocks.
 	w              srcwin.Window
@@ -86,6 +99,7 @@ func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 		timestampScale: defaultTimestampScale,
 		seekPositions:  map[uint32]int64{},
 		w:              srcwin.New(src, src.Size(), "mka: reading block data"),
+		walkLimit:      -1,
 	}
 	if opts != nil {
 		d.opts = *opts
@@ -278,7 +292,7 @@ func (d *Demuxer) parseSegmentChild(e element) error {
 // follows the media data).
 func (d *Demuxer) resolveDeferred() error {
 	if len(d.entries) == 0 {
-		if err := d.readViaSeek(idTracks, d.parseTracksAt); err != nil {
+		if err := d.readViaSeek(idTracks, maxHeaderElement, d.parseTracksAt); err != nil {
 			return err
 		}
 	}
@@ -289,8 +303,8 @@ func (d *Demuxer) resolveDeferred() error {
 }
 
 // readViaSeek reads the element the SeekHead placed at id's position, if any,
-// and hands its body to parse.
-func (d *Demuxer) readViaSeek(id uint32, parse func([]byte) error) error {
+// and hands its body to parse. cap bounds the allocation.
+func (d *Demuxer) readViaSeek(id uint32, cap int64, parse func([]byte) error) error {
 	off, ok := d.seekPositions[id]
 	if !ok || off < d.segmentDataOff || off >= d.segmentEnd {
 		return nil
@@ -299,7 +313,7 @@ func (d *Demuxer) readViaSeek(id uint32, parse func([]byte) error) error {
 	if err != nil || e.id != id || e.unknownSize {
 		return nil // a bad SeekHead pointer is tolerated, not fatal
 	}
-	body, err := d.readBytes(e.dataOff, e.size, maxHeaderElement)
+	body, err := d.readBytes(e.dataOff, e.size, cap)
 	if err != nil {
 		return err
 	}
@@ -307,6 +321,108 @@ func (d *Demuxer) readViaSeek(id uint32, parse func([]byte) error) error {
 }
 
 func (d *Demuxer) parseTracksAt(body []byte) error { return d.parseTracks(body) }
+
+// cueEntry is one index point: a cluster's timestamp and its byte offset.
+type cueEntry struct {
+	time int64
+	off  int64
+}
+
+// resolveCues parses the Cues index on first use. Nothing about reading it may
+// fail a seek: the index is an optimization, so a bad one leaves it empty and
+// the walk unbounded, exactly as a file with no Cues. Raising would also make
+// the outcome depend on call order, since cuesResolved latches before the read.
+func (d *Demuxer) resolveCues() {
+	if d.cuesResolved {
+		return
+	}
+	d.cuesResolved = true
+	_ = d.readViaSeek(idCues, maxCuesElement, d.parseCues)
+}
+
+// parseCues reads the Cues index: one entry per CuePoint naming the selected
+// track, as an absolute cluster offset, sorted by time.
+//
+// Past maxCuePoints the index is thinned rather than truncated, as recordCue
+// does. Truncating in file order would leave a head-only index, where every
+// seek past the retained part finds no bound at all.
+//
+// Offsets are range-checked but not read back; cueLimit checks the one entry a
+// seek picks. Checking all of them would cost a scattered read apiece on the
+// first seek, and would discard the whole index over one stale offset.
+func (d *Demuxer) parseCues(body []byte) error {
+	var out []cueEntry
+	seen, stride := 0, 1
+	err := walkElements(body, func(id uint32, data []byte) error {
+		if id != idCuePoint {
+			return nil
+		}
+		e, ok := d.parseCuePoint(data)
+		if !ok {
+			return nil
+		}
+		if seen%stride == 0 {
+			if len(out) == maxCuePoints {
+				for i := 0; i < maxCuePoints/2; i++ {
+					out[i] = out[2*i]
+				}
+				out = out[:maxCuePoints/2]
+				stride *= 2
+			}
+			out = append(out, e)
+		}
+		seen++
+		return nil
+	})
+	if err != nil {
+		return nil // a damaged index is dropped, not raised
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].time < out[j].time })
+	d.cues = out
+	return nil
+}
+
+// parseCuePoint reads one CuePoint's time and its cluster position for the
+// selected track. One omitting CueTrack is taken; a single-track file often
+// writes none.
+func (d *Demuxer) parseCuePoint(body []byte) (cueEntry, bool) {
+	var e cueEntry
+	haveTime, havePos := false, false
+	_ = walkElements(body, func(id uint32, data []byte) error {
+		switch id {
+		case idCueTime:
+			if v := int64(beUint(data)); v >= 0 {
+				e.time, haveTime = v, true
+			}
+		case idCueTrackPositions:
+			if havePos {
+				return nil
+			}
+			var track uint64
+			pos := int64(-1)
+			haveTrack := false
+			_ = walkElements(data, func(cid uint32, cdata []byte) error {
+				switch cid {
+				case idCueTrack:
+					track, haveTrack = beUint(cdata), true
+				case idCueClusterPosition:
+					pos = int64(beUint(cdata))
+				}
+				return nil
+			})
+			if pos >= 0 && (!haveTrack || track == d.sel.number) {
+				// A position near int64's ceiling wraps the sum negative,
+				// which the range check below rejects.
+				e.off, havePos = d.segmentDataOff+pos, true
+			}
+		}
+		return nil
+	})
+	if !haveTime || !havePos || e.off < d.segmentDataOff || e.off >= d.segmentEnd {
+		return cueEntry{}, false
+	}
+	return e, true
+}
 
 // parseSeekHead records the byte positions SeekHead advertises for Tracks,
 // Info, and Cues. Positions are relative to the segment's data start.

@@ -54,8 +54,15 @@ func wavBytes(t *testing.T, cfg pcm.Config, buf *audio.Buffer) []byte {
 	return ws.b
 }
 
-// muxPCM encodes buf as PCM into m, header to trailer.
+// muxPCM encodes buf as PCM into m, header to trailer, declaring its length.
 func muxPCM(t *testing.T, cfg pcm.Config, buf *audio.Buffer, m container.Muxer) {
+	t.Helper()
+	muxPCMSamples(t, cfg, buf, m, int64(buf.N))
+}
+
+// muxPCMSamples is muxPCM with the declared length spelled out, so a fixture
+// can pass the -1 an engine uses for an unknown source length.
+func muxPCMSamples(t *testing.T, cfg pcm.Config, buf *audio.Buffer, m container.Muxer, samples int64) {
 	t.Helper()
 	f := buf.Fmt
 	enc, err := pcm.NewEncoder(cfg, f)
@@ -63,7 +70,7 @@ func muxPCM(t *testing.T, cfg pcm.Config, buf *audio.Buffer, m container.Muxer) 
 		t.Fatal(err)
 	}
 	track := container.Track{Codec: codec.PCM, CodecConfig: enc.CodecConfig(),
-		Fmt: f, Samples: int64(buf.N), Default: true}
+		Fmt: f, Samples: samples, Default: true}
 	if err := m.Begin([]container.Track{track}); err != nil {
 		t.Fatal(err)
 	}
@@ -586,16 +593,10 @@ func TestSplitRejects(t *testing.T) {
 	}
 }
 
-// underDeclaredMKA writes a Matroska file that holds frames samples and says
-// it holds fewer, which is not a corruption but the shape the format has: its
-// Duration is advisory and lands on a millisecond, so a rip whose length is
-// not a whole number of them declares the millisecond below and the demuxer
-// leaves SamplesExact false to say so. Our own muxer writes no Duration at
-// all (an unknown length declares nothing, and nothing cannot be wrong), so
-// the element is spliced into its Info afterward.
-//
-// It is the source a split has to survive: the declaration is not what the
-// file holds, which is why the CLI measures rather than trusts it.
+// underDeclaredMKA writes a Matroska file that holds frames samples and says it
+// holds fewer, which the format allows: a Duration is advisory, so a muxer that
+// rounds it down declares less audio than it wrote. Our muxer does not round,
+// so the value is rewritten afterward. It is the source a split has to survive.
 func underDeclaredMKA(t *testing.T, rate, channels, frames int) []byte {
 	t.Helper()
 	cfg, f := pcm16Format(rate, channels)
@@ -604,49 +605,33 @@ func underDeclaredMKA(t *testing.T, rate, channels, frames int) []byte {
 	var b bytes.Buffer
 	muxPCM(t, cfg, buf, mka.NewMuxer(&b, nil))
 
-	// A millisecond short of the true length: the value a muxer that
-	// truncates its Duration writes. What the demuxer makes of it is the
-	// demuxer's arithmetic, so the caller probes for the declared length
+	// A millisecond short of the true length. What the demuxer makes of it is
+	// the demuxer's arithmetic, so the caller probes for the declared length
 	// rather than predicting it here.
 	ms := math.Floor(float64(frames)/float64(rate)*1000) - 1
-	return spliceMKADuration(t, b.Bytes(), ms)
+	return rewriteMKADuration(t, b.Bytes(), ms)
 }
 
-// spliceMKADuration adds a Duration element (ticks of the 1 ms
-// TimestampScale the muxer writes) to the Info element of raw.
-func spliceMKADuration(t *testing.T, raw []byte, ticks float64) []byte {
+// rewriteMKADuration overwrites the Duration in Info. The element is a fixed
+// eleven bytes, so this changes no length and needs no splice.
+func rewriteMKADuration(t *testing.T, raw []byte, ticks float64) []byte {
 	t.Helper()
-	// The Segment header, and so Info, is at the head of the file, ahead of
-	// any cluster: bounding the search keeps it off audio that happens to
-	// spell the same four bytes.
+	// Bound the search to the header, off audio that spells the same bytes.
+	// The anchor is the Duration's ID plus its size vint, not Info's own ID,
+	// which also appears earlier as a SeekHead SeekID payload.
 	const headWindow = 512
-	idInfo := []byte{0x15, 0x49, 0xA9, 0x66}
-	at := bytes.Index(raw[:min(headWindow, len(raw))], idInfo)
+	head := raw[:min(headWindow, len(raw))]
+	dur := []byte{0x44, 0x89, 0x88}
+	at := bytes.Index(head, dur)
 	if at < 0 {
-		t.Fatal("no Info element in the muxed header")
+		t.Fatal("no Info > Duration in the muxed header to rewrite")
 	}
-	sizeAt := at + len(idInfo)
-	// The muxer's Info is well under 127 bytes, so its size is a one-byte
-	// vint (the 0x80 marker plus the length) and so is the grown one.
-	size := raw[sizeAt]
-	if size&0x80 == 0 {
-		t.Fatalf("Info size %#x is not the one-byte vint this splice rewrites", size)
+	if bytes.Contains(head[at+len(dur):], dur) {
+		t.Fatal("more than one Duration-shaped run in the header; the anchor is ambiguous")
 	}
-	body := int(size &^ 0x80)
-
-	dur := []byte{0x44, 0x89, 0x88} // Duration, an 8-byte payload
-	dur = binary.BigEndian.AppendUint64(dur, math.Float64bits(ticks))
-	if body+len(dur) > 0x7F {
-		t.Fatalf("Info grows to %d bytes, past what a one-byte vint says", body+len(dur))
-	}
-
-	bodyAt := sizeAt + 1
-	out := make([]byte, 0, len(raw)+len(dur))
-	out = append(out, raw[:sizeAt]...)
-	out = append(out, byte(0x80|(body+len(dur))))
-	out = append(out, raw[bodyAt:bodyAt+body]...)
-	out = append(out, dur...)
-	return append(out, raw[bodyAt+body:]...)
+	out := append([]byte(nil), raw...)
+	binary.BigEndian.PutUint64(out[at+len(dur):], math.Float64bits(ticks))
+	return out
 }
 
 // TestSplitMeasuresAnUnderDeclaredSource is the last piece's whole problem: a
@@ -709,12 +694,10 @@ func TestSplitMeasuresAnUnderDeclaredSource(t *testing.T) {
 	}
 }
 
-// TestSplitMeasuresASourceWithNoDeclaredLength: a container is free to
-// declare no length at all (our own Matroska muxer writes none: the length is
-// not known when the header goes out, and an unknown length declared as a
-// number would be a lie where silence is the truth). Every cut point is
-// checked against the source's length, so trusting that non-answer refuses
-// every cut in the list against a source of -1 samples.
+// TestSplitMeasuresASourceWithNoDeclaredLength: a container is free to declare
+// no length at all, which our Matroska muxer does when it has no projection and
+// cannot seek back to fill one in. Every cut point is checked against the
+// source's length, so trusting that non-answer refuses every cut in the list.
 func TestSplitMeasuresASourceWithNoDeclaredLength(t *testing.T) {
 	dir := t.TempDir()
 	const actual = 100_000
@@ -722,7 +705,7 @@ func TestSplitMeasuresASourceWithNoDeclaredLength(t *testing.T) {
 	buf := testutil.Ramp(f, actual)
 	defer audio.Put(buf)
 	var b bytes.Buffer
-	muxPCM(t, cfg, buf, mka.NewMuxer(&b, nil))
+	muxPCMSamples(t, cfg, buf, mka.NewMuxer(&b, nil), -1)
 	src := filepath.Join(dir, "rip.mka")
 	if err := os.WriteFile(src, b.Bytes(), 0o644); err != nil {
 		t.Fatal(err)

@@ -15,7 +15,11 @@
 # New Fuzz* functions are picked up automatically.
 #
 # Usage: scripts/fuzz.sh [fuzztime]      (default 20m per target)
-# Env:   FUZZ_LOG_DIR   directory for per-target logs (default ./fuzz-logs)
+# Env:   FUZZTIME       per-target budget when no argument is given. The
+#                       Makefile passes it as the argument, so honoring it here
+#                       too means `FUZZTIME=60s scripts/fuzz.sh` does what it
+#                       reads like rather than silently taking the 20m default.
+#        FUZZ_LOG_DIR   directory for per-target logs (default ./fuzz-logs)
 
 set -u
 
@@ -38,7 +42,7 @@ if [ ! -f go.mod ]; then
 	exit 1
 fi
 
-fuzztime="${1:-20m}"
+fuzztime="${1:-${FUZZTIME:-20m}}"
 log_dir="${FUZZ_LOG_DIR:-fuzz-logs}"
 mkdir -p "$log_dir"
 

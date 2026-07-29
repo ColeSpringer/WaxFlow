@@ -201,13 +201,51 @@ func FFprobeFile(t testing.TB, path string) FFprobeInfo {
 	return info
 }
 
-// FFmpegGenerate synthesizes a fixture file with ffmpeg (sine source) at
+// FFprobeFormatDuration is the container-level duration ffprobe reports in
+// seconds, or -1 when the container declares none.
+//
+// It is separate from FFprobeFile rather than another field on FFprobeInfo:
+// that type is scoped to stream fields and shared by several differential
+// tests, where a format-level duration would be meaningless. This is the
+// number `ffprobe -show_entries format=duration` prints, which for Matroska is
+// the Info > Duration element read verbatim, with no CodecDelay or
+// DiscardPadding adjustment applied.
+func FFprobeFormatDuration(t testing.TB, path string) float64 {
+	t.Helper()
+	raw := run(t, FFprobe(t), "-v", "error", "-show_format", "-of", "json", path)
+	var doc struct {
+		Format struct {
+			Duration string `json:"duration"`
+		} `json:"format"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parsing ffprobe output: %v\n%s", err, raw)
+	}
+	if doc.Format.Duration == "" || doc.Format.Duration == "N/A" {
+		return -1
+	}
+	d, err := strconv.ParseFloat(doc.Format.Duration, 64)
+	if err != nil {
+		t.Fatalf("ffprobe format duration %q: %v", doc.Format.Duration, err)
+	}
+	return d
+}
+
+// FFmpegGenerate synthesizes a short fixture file with ffmpeg (sine source) at
 // the given rate, channel count, and output codec, for decode
 // differentials against an independent implementation.
 func FFmpegGenerate(t testing.TB, path string, rate, channels int, acodec string, extra ...string) {
 	t.Helper()
+	FFmpegGenerateDuration(t, path, 0.25, rate, channels, acodec, extra...)
+}
+
+// FFmpegGenerateDuration is FFmpegGenerate with the source length spelled out,
+// for a fixture that needs to be long enough to have interesting structure
+// (several clusters, a seek index with entries to skip).
+func FFmpegGenerateDuration(t testing.TB, path string, seconds float64, rate, channels int, acodec string, extra ...string) {
+	t.Helper()
 	args := []string{"-v", "error", "-y",
-		"-f", "lavfi", "-i", fmt.Sprintf("sine=frequency=440:sample_rate=%d:duration=0.25", rate),
+		"-f", "lavfi", "-i", fmt.Sprintf("sine=frequency=440:sample_rate=%d:duration=%g", rate, seconds),
 		"-ac", strconv.Itoa(channels), "-c:a", acodec,
 	}
 	args = append(args, extra...)

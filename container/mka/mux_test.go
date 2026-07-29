@@ -9,13 +9,17 @@ import (
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
-// muxToBytes runs a track and packets through the muxer and returns the file.
-func muxToBytes(t *testing.T, track container.Track, opts *MuxerOptions, pkts []codec.Packet, trailer codec.Trailer) []byte {
+// memWS aliases the shared in-memory io.WriteSeeker rather than redeclaring it
+// the way seven other packages here do.
+type memWS = testutil.MemWriteSeeker
+
+// runMuxer drives one track and its packets through the muxer on w.
+func runMuxer(t *testing.T, w io.Writer, track container.Track, opts *MuxerOptions, pkts []codec.Packet, trailer codec.Trailer) {
 	t.Helper()
-	var buf bytes.Buffer
-	m := NewMuxer(&buf, opts)
+	m := NewMuxer(w, opts)
 	if err := m.Begin([]container.Track{track}); err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
@@ -27,7 +31,23 @@ func muxToBytes(t *testing.T, track container.Track, opts *MuxerOptions, pkts []
 	if err := m.End(trailer); err != nil {
 		t.Fatalf("End: %v", err)
 	}
+}
+
+// muxToBytes muxes on a plain io.Writer: no Cues, no back-patch.
+func muxToBytes(t *testing.T, track container.Track, opts *MuxerOptions, pkts []codec.Packet, trailer codec.Trailer) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	runMuxer(t, &buf, track, opts, pkts, trailer)
 	return buf.Bytes()
+}
+
+// muxToSeekable muxes on an io.WriteSeeker, so the Cues, the patched Duration
+// and the definite Segment size are all exercised.
+func muxToSeekable(t *testing.T, track container.Track, opts *MuxerOptions, pkts []codec.Packet, trailer codec.Trailer) []byte {
+	t.Helper()
+	w := &memWS{}
+	runMuxer(t, w, track, opts, pkts, trailer)
+	return w.Buf
 }
 
 // readAll drains a demuxer's packets into copied payloads.
@@ -47,20 +67,25 @@ func readAll(t *testing.T, d *Demuxer) [][]byte {
 	}
 }
 
-// TestMuxPCMRoundTrip mux/demuxes raw PCM: payloads and format survive.
+// TestMuxPCMRoundTrip mux/demuxes raw PCM: payloads, format and the declared
+// length all survive. The length is deliberately not a whole millisecond, so
+// this fails the moment anyone rounds the Duration.
 func TestMuxPCMRoundTrip(t *testing.T) {
+	const frames = 4801 // 100.0208... ms at 48 kHz
 	f := audio.Format{Rate: 48000, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
-	track := container.Track{Codec: codec.PCM, Fmt: f, Default: true}
-	// Each packet is 480 stereo int16 frames (1920 bytes) of distinct data.
+	track := container.Track{Codec: codec.PCM, Fmt: f, Samples: frames, Default: true}
+	// 480 frames a packet, with a short final one for the odd tail.
 	var pkts []codec.Packet
-	for i := 0; i < 6; i++ {
-		data := make([]byte, 480*4)
+	for i, left := 0, frames; left > 0; i++ {
+		n := min(left, 480)
+		data := make([]byte, n*4)
 		for j := range data {
 			data[j] = byte(i*7 + j)
 		}
-		pkts = append(pkts, codec.Packet{Data: data, PTS: int64(i * 480), Dur: 480})
+		pkts = append(pkts, codec.Packet{Data: data, PTS: int64(frames - left), Dur: int64(n)})
+		left -= n
 	}
-	file := muxToBytes(t, track, nil, pkts, codec.Trailer{Samples: 6 * 480})
+	file := muxToBytes(t, track, nil, pkts, codec.Trailer{Samples: frames})
 
 	d, err := NewDemuxer(container.BytesSource(file), nil)
 	if err != nil {
@@ -69,6 +94,12 @@ func TestMuxPCMRoundTrip(t *testing.T) {
 	tr := d.Tracks()[0]
 	if tr.Codec != codec.PCM || tr.Fmt.Rate != 48000 || tr.Fmt.Channels != 2 || tr.Fmt.BitDepth != 16 {
 		t.Errorf("track = %+v", tr)
+	}
+	if tr.Samples != frames {
+		t.Errorf("Samples = %d, want %d recovered exactly from Duration", tr.Samples, frames)
+	}
+	if tr.SamplesExact {
+		t.Error("SamplesExact = true; a Duration is advisory, not a truncation instruction")
 	}
 	got := readAll(t, d)
 	if len(got) != len(pkts) {
@@ -130,12 +161,17 @@ func TestMuxOpusGapless(t *testing.T) {
 // (fixed TrackUID, fixed app strings, no DateUTC).
 func TestMuxDeterministic(t *testing.T) {
 	f := audio.Format{Rate: 44100, Channels: 1, Layout: audio.DefaultLayout(1), Type: audio.Int, BitDepth: 16}
+	// Samples unset is 0, not the -1 sentinel, and the muxer reads <= 0 as
+	// unknown, so no Duration is written. That is intended, not an accident.
 	track := container.Track{Codec: codec.PCM, Fmt: f, Default: true}
 	pkts := []codec.Packet{{Data: bytes.Repeat([]byte{1, 2}, 256), Dur: 256, PTS: 0}}
 	a := muxToBytes(t, track, nil, pkts, codec.Trailer{})
 	b := muxToBytes(t, track, nil, pkts, codec.Trailer{})
 	if !bytes.Equal(a, b) {
 		t.Error("muxer output is not deterministic")
+	}
+	if _, ok := infoDuration(t, a); ok {
+		t.Error("a track declaring no length got a Duration")
 	}
 }
 
