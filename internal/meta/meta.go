@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/dsp/gain"
 )
 
 // Info is one source's extracted metadata.
@@ -272,6 +273,31 @@ func parseGainValue(v string) (float64, error) {
 // track gain (the gain that brings the track to the -18 LUFS reference).
 func ReplayGainGainDB(integratedLUFS float64) float64 {
 	return replayGainRef - integratedLUFS
+}
+
+// ProjectLoudness projects an output's loudness and true peak from the source
+// measurement plus the applied gain, for outputs that cannot be measured back
+// (fragmented MP4, and Ogg, whose tags are written at Begin). limited says the
+// encode chain's true-peak limiter is engaged; it runs for positive gain and
+// for a downmix whose matrix can sum past unity, so a downmix must pass it even
+// at negative gain (analyze measures the raw fold, so srcTruePeakDB can already
+// exceed the ceiling).
+//
+// Both results are one-sided, in opposite directions. The loudness is an upper
+// bound whenever the limiter engages, since its attenuation is not modelled
+// (around 1 LU on 27 dB-crest content, less on real music). The peak is a real
+// bound, and only because the limiter converges: it used to overshoot its own
+// ceiling by up to 1.8 dB.
+func ProjectLoudness(srcLUFS, srcTruePeakDB, gainDB float64, limited bool) (lufs, truePeakDB float64) {
+	lufs = math.Inf(-1)
+	if !math.IsInf(srcLUFS, -1) {
+		lufs = srcLUFS + gainDB
+	}
+	truePeakDB = srcTruePeakDB + gainDB
+	if limited {
+		truePeakDB = min(truePeakDB, gain.DefaultCeilingDB)
+	}
+	return lufs, truePeakDB
 }
 
 // ReplayGainTags renders the RG2 track tags from a measurement: the gain

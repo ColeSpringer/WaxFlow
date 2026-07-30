@@ -100,9 +100,16 @@ func TestTranscodeOggVorbisRoundTrip(t *testing.T) {
 
 // TestOggVorbisDifferential proves our Ogg-Vorbis output is a real file that
 // ffmpeg's reference libvorbis decoder accepts and agrees with on length. The
-// length agreement is the granulepos-convention gate: the final page granule
-// carries the firstBlock/2 priming shift, so libvorbis end-trims to exactly the
-// source length (a wrong shift would leave the decode short or long by ~1024).
+// length agreement is the granulepos-convention gate: a page granule is the
+// cumulative decoded output, so the final one is the source length exactly and
+// libvorbis end-trims there.
+//
+// Two independent readings, because they fail differently. The decoded frame
+// count catches a decoder that hands back the wrong number of samples; the
+// container duration catches a file that merely *reports* the wrong length,
+// which is what players and ffprobe show and what the WaxTap report saw as a
+// 21-23 ms overlong track. The old muxer was off by one long block (1024) and
+// only the second reading would have caught it, since the round trip cancelled.
 func TestOggVorbisDifferential(t *testing.T) {
 	testutil.FFmpeg(t)
 	e := waxflow.New()
@@ -131,12 +138,20 @@ func TestOggVorbisDifferential(t *testing.T) {
 	if ref.CodecName != "vorbis" || ref.SampleRate != 48000 || ref.Channels != 2 {
 		t.Errorf("ffprobe = %+v, want vorbis/48000/2", ref)
 	}
+	// The container duration is granulepos-derived and printed to microseconds,
+	// so 1 ms is three orders of margin under the 21-23 ms a one-block granule
+	// error produces, while staying slack enough not to chase ffmpeg's rounding.
+	const wantSecs = float64(frames) / 48000
+	if d := testutil.FFprobeFormatDuration(t, path); math.Abs(d-wantSecs) > 1e-3 {
+		t.Errorf("ffprobe duration %.6f s, want %.6f s (granulepos is the reported length)", d, wantSecs)
+	}
 	// Decode with libvorbis (not ffmpeg's experimental native Vorbis decoder).
 	dec := testutil.FFmpegDecodeF32Codec(t, path, "libvorbis")
 	decFrames := len(dec) / f.Channels
-	// libvorbis reports the trimmed length exactly; a small tolerance absorbs
-	// any single-block edge rounding without letting a lost/extra block through.
-	if diff := decFrames - frames; diff < -64 || diff > 64 {
+	// libvorbis reports the trimmed length exactly; the tolerance absorbs edge
+	// rounding only. The errors guarded against are 128 and 1024, an order of
+	// magnitude outside it.
+	if diff := decFrames - frames; diff < -8 || diff > 8 {
 		t.Errorf("libvorbis decoded %d frames, want ~%d (granulepos end-trim off by %d)", decFrames, frames, diff)
 	}
 	// The libvorbis-decoded audio must match the source within a lossy bound,

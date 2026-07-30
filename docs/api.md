@@ -189,7 +189,22 @@ Parameters (unknown parameter names are rejected):
   reach a -14 LUFS target in one pass under +12. Declaring the source is
   speech raises the ceiling to +24. Both bounds are taste rather than
   safety: the true-peak limiter is what makes either one safe, and a
-  dynamics preset always engages it, so the higher ceiling cannot clip.
+  dynamics preset always engages it.
+
+  What the limiter guarantees, precisely: for any legal `gain`, the PCM it
+  emits holds `truePeakCeilingDb` as measured by its own 4x detector. Two
+  caveats worth budgeting for, because measuring the output will show them:
+
+  - **Any other detector may read slightly higher.** `/analyze` measures
+    with a different 4x design and reads about 0.04 dB over on broadband
+    transients; that is detector disagreement, not headroom lost. It also
+    follows BS.1770-4's rate schedule (4x below 96 kHz, 2x to 192 kHz,
+    none above), so at high rates it is not measuring the same quantity
+    the limiter bounds.
+  - **Lossy output is bounded at the encoder's input.** For `wav` and
+    `flac` the guarantee reaches the file (dither adds below it). For
+    `opus`, `vorbis`, `aac` and `mp3` a decoder can reconstruct a true
+    peak a few tenths of a dB above what the encoder was handed.
 
   A `dynamics` request never direct-plays: unlike `gain=track` on an
   untagged file, which resolves to 0 dB and is a genuine no-op, a preset

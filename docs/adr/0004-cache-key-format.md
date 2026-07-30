@@ -54,3 +54,30 @@ same source identity.
   golden-stream tests catch unbumped changes by failing byte-comparison.
 - Cache entries are never shared across `cacheSchemaVersion` bumps; no
   migration code, ever.
+- **Known gap: there is no container or muxer term.** `nodeVersions` covers
+  decoder, DSP nodes and encoder, so a change to how a muxer frames the same
+  encoded packets alters output bytes with nothing in the key to notice, and
+  every cached response keeps serving the old bytes until eviction. This is
+  the demuxer gap named above, seen from the write side, and it is the same
+  standing PR question.
+
+  Found by the Ogg-Vorbis granulepos fix (2026-07-29), which changed only
+  `container/ogg/muxmap.go`. The workaround was to borrow the nearest
+  encoder term, `vorbis.EncoderVersion`, with a comment at the constant
+  saying so. It is the narrowest lever available, not a precise one, and it
+  errs in both directions:
+
+  - It **over-invalidates**: Vorbis-in-Matroska shares the encoder term, so
+    those entries drop even though the mka muxer did not change and their
+    bytes are identical. The cost is one re-encode per entry, no
+    correctness risk.
+  - It **under-covers** in general: a change to a muxer that carries several
+    codecs has no single encoder term to borrow, and nothing narrower than a
+    schema bump would work.
+
+  The fix is to add a container term to the tuple. It is deliberately not
+  done yet, because adding an element to the joined version string
+  invalidates *everything* on first deploy, which is the same practical cost
+  as a `cacheSchemaVersion` bump; the value is precision for every muxer
+  change after this one. Land it with the next schema bump rather than
+  spending a full invalidation on its own.

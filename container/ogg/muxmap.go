@@ -17,9 +17,9 @@ import (
 //
 // The per-packet hook is load-bearing, not cosmetic. Every encoder stamps
 // pkt.Dur and the muxer accumulated it generically, which is right for Opus and
-// FLAC but not Ogg-Vorbis, whose granulepos carries a firstBlock/2 priming
-// shift that depends on the runtime first-block size. Routing accumulation
-// through writePacket lets each mapping own that accounting.
+// FLAC but not Ogg-Vorbis, whose per-packet output length telescopes across
+// block-size changes and can only be read off the packet itself. Routing
+// accumulation through writePacket lets each mapping own that accounting.
 type muxMapping interface {
 	codecID() codec.ID
 	// writeHeaders emits the codec's header pages (identification, comment) via
@@ -81,9 +81,8 @@ func (opusMuxMapping) endGranule(trailer codec.Trailer) int64 {
 
 // flacMuxMapping writes the Xiph FLAC-in-Ogg mapping (version 1): an
 // identification BOS page carrying STREAMINFO, then a VORBIS_COMMENT page, then
-// audio pages whose granule is the running sample count (FLAC self-times, so
-// granuleShift is 0). It reuses the existing FLAC encoder; no Vorbis encoder is
-// involved.
+// audio pages whose granule is the running sample count (FLAC self-times). It
+// reuses the existing FLAC encoder; no Vorbis encoder is involved.
 type flacMuxMapping struct{}
 
 func (flacMuxMapping) codecID() codec.ID { return codec.FLAC }
@@ -113,27 +112,26 @@ func (flacMuxMapping) writeHeaders(cfg []byte, tags []container.Tag, vendor stri
 
 func (flacMuxMapping) writePacket(pkt container.Packet) (int64, error) { return pkt.Dur, nil }
 
-// endGranule is the true length: FLAC self-times (granuleShift 0), so the final
-// page granule is just the sample total, which the demuxer reads back as the
-// stream length when STREAMINFO carries none.
+// endGranule is the true length: FLAC self-times, so the final page granule is
+// just the sample total, which the demuxer reads back as the stream length when
+// STREAMINFO carries none.
 func (flacMuxMapping) endGranule(trailer codec.Trailer) int64 { return trailer.Samples }
 
 // vorbisMuxMapping writes the Ogg-Vorbis mapping (Vorbis I spec section A.2):
 // an identification BOS page, then a page carrying the comment and setup headers
 // together (the standard libvorbis layout), then audio pages. Vorbis timing
-// accumulates and its granulepos carries a firstBlock/2 priming shift, so this
-// mapping owns the per-packet granule accounting rather than trusting pkt.Dur:
-// the first (priming) audio packet advances the granule by firstBlock/2 (the
-// half-block the decoder consumes but never emits), and each later packet by the
-// (prevBlock+block)/4 telescoping increment. The muxer never sees tags on the
-// encoder side; this mapping rebuilds the comment header from vendor+tags exactly
-// as the Opus mapping rebuilds OpusTags.
+// accumulates, so this mapping owns the per-packet granule accounting rather
+// than trusting pkt.Dur: the first (priming) audio packet emits nothing and
+// advances the granule by 0, and each later packet by the (prevBlock+block)/4
+// telescoping increment. granulepos is thus the decoded output count, matching
+// libvorbis. The muxer never sees tags on the encoder side; this mapping rebuilds
+// the comment header from vendor+tags exactly as the Opus mapping rebuilds
+// OpusTags.
 type vorbisMuxMapping struct {
-	cfg        vorbis.Config
-	modeBits   int
-	haveCfg    bool
-	firstBlock int // first audio packet's block size, for the priming shift
-	prevBlock  int // previous audio packet's block size, 0 before the first
+	cfg       vorbis.Config
+	modeBits  int
+	haveCfg   bool
+	prevBlock int // previous audio packet's block size, 0 before the first
 }
 
 func (m *vorbisMuxMapping) codecID() codec.ID { return codec.Vorbis }
@@ -173,10 +171,10 @@ func (m *vorbisMuxMapping) writeHeaders(cfg []byte, tags []container.Tag, vendor
 }
 
 // writePacket returns pkt's granule increment. The first audio packet primes the
-// decoder overlap and emits nothing, but advances the granule by firstBlock/2
-// (the demuxer's granuleShift), so the granule timeline stays firstBlock/2 ahead
-// of the decoded output the way real Ogg-Vorbis granulepos does; from the second
-// packet on the increment is the (prevBlock+block)/4 the decoder actually emits.
+// decoder overlap and emits nothing, so it advances the granule by 0; from the
+// second packet on the increment is the (prevBlock+block)/4 the decoder actually
+// emits. Every page granule is therefore the cumulative decoded output through
+// that page's last completed packet, which is what libvorbis writes.
 func (m *vorbisMuxMapping) writePacket(pkt container.Packet) (int64, error) {
 	if !m.haveCfg {
 		return 0, waxerr.New(waxerr.CodeInternal, "ogg: vorbis writePacket before writeHeaders")
@@ -186,21 +184,18 @@ func (m *vorbisMuxMapping) writePacket(pkt container.Packet) (int64, error) {
 		return 0, waxerr.New(waxerr.CodeUnsupportedFormat, "ogg: not a valid Vorbis audio packet")
 	}
 	var inc int64
-	if m.prevBlock == 0 {
-		m.firstBlock = block
-		inc = int64(block / 2) // the priming half-block shift
-	} else {
+	if m.prevBlock != 0 {
 		inc = int64(m.prevBlock+block) / 4
 	}
 	m.prevBlock = block
 	return inc, nil
 }
 
-// endGranule is the true length plus the priming shift: the final page granule
-// the decoder end-trims to, so the demuxer recovers Samples exactly as
-// lastGranule - firstBlock/2 (finalizeTrack in mapvorbis.go).
+// endGranule is the true length: the final page granule the decoder end-trims
+// to, in the same output timeline the intermediate page granules use, so the
+// demuxer recovers Samples as lastGranule (finalizeTrack in mapvorbis.go).
 func (m *vorbisMuxMapping) endGranule(trailer codec.Trailer) int64 {
-	return trailer.Samples + int64(m.firstBlock/2)
+	return trailer.Samples
 }
 
 // emitHeaderPages frames whole header packets into Ogg pages via emit, packing as

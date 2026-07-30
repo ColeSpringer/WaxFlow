@@ -57,14 +57,6 @@ type mapping interface {
 	// Opus (RFC 7845).
 	preroll() int64
 
-	// granuleShift is how far the page granule timeline leads the decoder's
-	// raw output timeline. Vorbis emits nothing for its priming packet, so its
-	// output starts firstBlock/2 samples after granule 0; Opus and FLAC emit
-	// from granule 0, so their shift is 0. finalizeTrack subtracts it from the
-	// length, and accumulating seeks convert granule anchors to output
-	// positions with it.
-	granuleShift() int64
-
 	// resetTiming clears any stateful per-packet timing (Vorbis block-size
 	// tracking) after a seek restart.
 	resetTiming()

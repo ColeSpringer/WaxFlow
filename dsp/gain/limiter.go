@@ -21,7 +21,10 @@ import (
 // constant is the right one to bump for that even so: it is in the cache
 // key exactly when the limiter is in the chain, which is exactly when the
 // bytes change.
-const LimiterVersion = "limiter-2"
+//
+// limiter-3 replaces the one-pole attack with the min-hold envelope on
+// Limiter. Output bytes change wherever the limiter engages.
+const LimiterVersion = "limiter-3"
 
 // limiterRelease is the gain-recovery time constant: 50 ms to climb back
 // after a peak passes. It is the limiter's slow pole, so it sets Horizon.
@@ -33,24 +36,28 @@ const limiterRelease = 50 * time.Millisecond
 const DefaultCeilingDB = -1.0
 
 // Limiter is a look-ahead true-peak limiter: peaks are detected on a 4x
-// oversampled estimate (BS.1770-4 style polyphase interpolation), the
-// gain ramps down over a 5 ms look-ahead window before each peak arrives
-// and releases over 50 ms after it passes, all channels sharing one gain
-// so the stereo image cannot shift. A final sample-domain clamp at the
-// ceiling turns the residual smoothing error (about 2 percent worst case)
-// into a hard guarantee.
+// oversampled estimate (BS.1770-4 style), the gain falls before each peak
+// arrives over a 5 ms look-ahead window and releases over 50 ms after it
+// passes, all channels sharing one gain so the stereo image cannot shift.
 //
-// Latency is fully compensated: output sample n is input sample n times
-// its gain, so positions map one to one and an impulse stays exactly
-// where it was. When the signal never exceeds the ceiling the gain holds
-// at exactly 1 and the limiter is bit-transparent.
+// The ceiling holds by construction. With L the look-ahead window and
+// r[k] = min(1, ceil/peak[k]):
 //
-// The limiter is deterministic and not safe for concurrent use.
+//	m[n]    = min of r[k] over k in [n, n+L]        // min-hold
+//	gRel[n] = min(m[n], gRel[n-1] + (1-gRel[n-1])*aRel)
+//	g[n]    = sum of h[d]*gRel[n-d] over d in [0, L]
+//
+// h is non-negative, sums to 1, and its support fits inside L (two cascaded
+// box averages), so every tap was already constrained by the peak at n:
+// g[n] <= r[n] = ceil/peak[n], at every sample. The sample clamp below is a
+// float-rounding backstop and is inert. See docs/quality-gates.md.
+//
+// Latency is fully compensated, and an under-ceiling signal passes through
+// bit-exactly. Deterministic, not safe for concurrent use.
 type Limiter struct {
 	channels int
 	ceil     float64
 	look     int // look-ahead window W in frames
-	aAtk     float64
 	aRel     float64
 
 	// 4x interpolator phases 1..3 (phase 0 is the sample itself). Fixed
@@ -70,8 +77,65 @@ type Limiter struct {
 	deque    []maxEntry // sliding-max candidates, values decreasing
 	dqHead   int
 	pushed   int64 // absolute index up to which peaks were offered to the deque
-	g        float64
+	gRel     float64
+	box1     boxAvg // the two cascaded box averages that make up h
+	box2     boxAvg
+	primed   bool // the smoother's pre-stream history has been filled
 	draining bool
+
+	clamped int // samples the ceiling clamp modified; inert by construction
+}
+
+// boxAvg is a running box average, the building block of the gain smoother.
+// The sum is fixed point because an int64 sum is exact, making the average a
+// pure function of the window's contents: a float64 running sum drifts with
+// history, which leaves a restarted segment permanently a few ulps off the
+// continuous run it must rejoin. See TestLimiterSettlerRejoin.
+type boxAvg struct {
+	ring []int64
+	sum  int64
+	idx  int
+}
+
+// boxScale is the smoother's fixed-point unit: a 2^-40 quantum on a gain in
+// [0, 1], five orders below float32 output resolution.
+const boxScale = 1 << 40
+
+// maxLimiterRate bounds the accepted rate (ADR-0005). audio.Format.Valid
+// rejects only a non-positive one and RIFF carries 32 bits, but past ~3.28 MHz
+// the len(ring)*boxScale divisor wraps negative and silently inverts the gain.
+const maxLimiterRate = 1 << 20
+
+// quantizeGain maps a gain in [0, 1] onto the fixed-point grid, rounding down
+// so q(v) <= v and the ceiling bound survives quantization.
+func quantizeGain(v float64) int64 {
+	switch {
+	case v <= 0:
+		return 0
+	case v >= 1:
+		return boxScale
+	}
+	return int64(v * boxScale) // truncates toward zero
+}
+
+// fill sets the whole window to v, so the next step returns v (quantized).
+func (b *boxAvg) fill(v float64) {
+	q := quantizeGain(v)
+	for i := range b.ring {
+		b.ring[i] = q
+	}
+	b.sum = q * int64(len(b.ring))
+	b.idx = 0
+}
+
+func (b *boxAvg) step(v float64) float64 {
+	q := quantizeGain(v)
+	b.sum += q - b.ring[b.idx]
+	b.ring[b.idx] = q
+	if b.idx++; b.idx == len(b.ring) {
+		b.idx = 0
+	}
+	return float64(b.sum) / float64(int64(len(b.ring))*boxScale)
 }
 
 type maxEntry struct {
@@ -95,6 +159,10 @@ func NewLimiter(rate, channels int, ceilingDB float64) (*Limiter, error) {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("gain: limiter channel count %d must be positive", channels))
 	}
+	if rate > maxLimiterRate {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("gain: limiter rate %d above the %d ceiling", rate, maxLimiterRate))
+	}
 	if ceilingDB > 0 {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("gain: limiter ceiling %+.2f dB is above full scale", ceilingDB))
@@ -104,10 +172,12 @@ func NewLimiter(rate, channels int, ceilingDB float64) (*Limiter, error) {
 		ceil:     FromDB(ceilingDB),
 		look:     max(rate/200, 32), // 5 ms
 	}
-	// Attack settles to within e^-4 (2 percent) of the required gain by
-	// the time the peak arrives; release takes limiterRelease to recover.
-	l.aAtk = 1 - math.Exp(-4/float64(l.look))
 	l.aRel = 1 - math.Exp(-1/(limiterRelease.Seconds()*float64(rate)))
+	// Two boxes of look/2+1 taps cascade to a triangular kernel spanning
+	// delays 0..look, which is what keeps the bound inside the window.
+	box := l.look/2 + 1
+	l.box1.ring = make([]int64, box)
+	l.box2.ring = make([]int64, box)
 	l.designInterp()
 
 	capFrames := l.look + interpTaps + 4096
@@ -121,9 +191,9 @@ func NewLimiter(rate, channels int, ceilingDB float64) (*Limiter, error) {
 }
 
 // Horizon reports the pre-roll a restarted run needs before its output
-// rejoins a continuous run's bit-exactly (the dsp.Settler capability): 2 s,
-// from the 50 ms release. See Compressor.Horizon for the derivation, which
-// is the same one; the attack pole is far faster and never binds.
+// rejoins a continuous run's bit-exactly (dsp.Settler): 2 s, from the 50 ms
+// release. See Compressor.Horizon; the smoother's 5 ms of history sits far
+// inside it.
 func (l *Limiter) Horizon() time.Duration {
 	return time.Duration(settleTimeConstants * float64(limiterRelease))
 }
@@ -133,7 +203,10 @@ func (l *Limiter) Reset() {
 	l.start, l.base, l.have, l.pk, l.pushed = 0, 0, 0, 0, 0
 	l.deque = l.deque[:0]
 	l.dqHead = 0
-	l.g = 1
+	l.gRel = 1
+	// The boxes are filled by the first emit, from gRel[0].
+	l.primed = false
+	l.clamped = 0
 	l.draining = false
 }
 
@@ -291,24 +364,36 @@ func (l *Limiter) emit(dst [][]float32, off, space int, draining bool) (produced
 			l.dqHead = 0
 		}
 
-		required := 1.0
+		// The deque head is the largest peak in [n, n+look], so this is m[n].
+		m := 1.0
 		if env := float64(l.deque[l.dqHead].v); env > l.ceil {
-			required = l.ceil / env
+			m = l.ceil / env
 		}
-		if required < l.g {
-			l.g += (required - l.g) * l.aAtk
+		// gRel falls to the min-hold at once, recovers at the release pole.
+		if rel := l.gRel + (1-l.gRel)*l.aRel; rel < m {
+			l.gRel = rel
 		} else {
-			l.g += (required - l.g) * l.aRel
+			l.gRel = m
+		}
+
+		// The smoother's pre-stream history is fictitious. Unity breaks the
+		// bound (the taps hold g[0] near 1 while gRel has already fallen);
+		// gRel[0] == m[0] is the smallest gain required in [0, look], so it is
+		// at or below r[n] for every n the history can reach.
+		if !l.primed {
+			l.box1.fill(l.gRel)
+			l.box2.fill(l.gRel)
+			l.primed = true
 		}
 
 		i := int(n - l.start)
-		g := float32(l.g)
+		g := float32(l.box2.step(l.box1.step(l.gRel)))
 		for c := range l.buf {
 			v := l.buf[c][i] * g
 			if v > ceil {
-				v = ceil
+				v, l.clamped = ceil, l.clamped+1
 			} else if v < -ceil {
-				v = -ceil
+				v, l.clamped = -ceil, l.clamped+1
 			}
 			dst[c][off+produced] = v
 		}

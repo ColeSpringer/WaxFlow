@@ -15,7 +15,6 @@ type vorbisMapping struct {
 	haveCfg            bool
 	modeBits           int
 	prevBlock          int // previous packet's block size, 0 before the first
-	firstBlock         int // first audio packet's block size, for granuleShift
 }
 
 func (m *vorbisMapping) codecID() codec.ID { return codec.Vorbis }
@@ -63,15 +62,12 @@ func (m *vorbisMapping) finalizeTrack(lastGranule func() int64) (container.Track
 	if err := f.Valid(); err != nil {
 		return container.Track{}, err
 	}
-	// The granule timeline leads the decoder output by firstBlock/2 (the
-	// priming half-block the decoder never emits), so the playable length is
-	// the final granule minus that shift.
+	// A Vorbis page granule is the cumulative decoded output through that
+	// page's last completed packet (the priming packet emits nothing and
+	// advances it by 0), so the final granule is the playable length.
 	samples := int64(-1)
 	if lg := lastGranule(); lg >= 0 {
-		samples = lg - m.granuleShift()
-		if samples < 0 {
-			samples = 0
-		}
+		samples = lg
 	}
 	return container.Track{
 		Codec:        codec.Vorbis,
@@ -94,9 +90,6 @@ func (m *vorbisMapping) packetTiming(pkt []byte, running int64) (pts, dur int64,
 	if !valid {
 		return 0, 0, false, false
 	}
-	if m.firstBlock == 0 {
-		m.firstBlock = block
-	}
 	if m.prevBlock != 0 {
 		dur = int64(m.prevBlock+block) / 4
 	}
@@ -110,8 +103,5 @@ func (m *vorbisMapping) selfTiming() bool { return false }
 // overlap before the first delivered sample.
 func (m *vorbisMapping) preroll() int64 { return int64(m.cfg.LongBlock()) }
 
-func (m *vorbisMapping) granuleShift() int64 { return int64(m.firstBlock / 2) }
-
-// resetTiming clears the block-size accumulator for a seek restart; firstBlock
-// is a stream property set once at parse and is left intact.
+// resetTiming clears the block-size accumulator for a seek restart.
 func (m *vorbisMapping) resetTiming() { m.prevBlock = 0 }

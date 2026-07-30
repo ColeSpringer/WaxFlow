@@ -87,7 +87,6 @@ func (m *flacMapping) packetTiming(pkt []byte, _ int64) (pts, dur int64, sync, o
 	return m.num.Start(fi), int64(fi.BlockSize), true, true
 }
 
-func (m *flacMapping) selfTiming() bool    { return true }
-func (m *flacMapping) preroll() int64      { return 0 }
-func (m *flacMapping) granuleShift() int64 { return 0 }
-func (m *flacMapping) resetTiming()        {}
+func (m *flacMapping) selfTiming() bool { return true }
+func (m *flacMapping) preroll() int64   { return 0 }
+func (m *flacMapping) resetTiming()     {}

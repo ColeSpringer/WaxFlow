@@ -481,25 +481,11 @@ func (r *Runner) warn(id, note string) {
 	}
 }
 
-// deriveOutputLoudness projects the output's loudness and true peak
-// from the source measurement and the applied gain, for outputs the
-// engine cannot decode back (fragmented MP4). A linear gain shifts both
-// numbers exactly; when the encode chain's true-peak limiter is engaged
-// (limited), it caps the projected peak at the ceiling. The limiter runs
-// for positive gain and also for a downmix whose matrix can sum past unity,
-// so a downmix measurement must pass limited even when the gain is negative:
-// analyze runs the raw fold with no limiter, so src.TruePeakDB can already
-// sit above the ceiling the encode holds.
+// deriveOutputLoudness projects the output's loudness and true peak for outputs
+// the engine cannot decode back (fragmented MP4). See meta.ProjectLoudness for
+// the projection and the direction each result errs in.
 func deriveOutputLoudness(src *waxflow.AnalyzeResult, gainDB float64, limited bool) (lufs, truePeakDB float64) {
-	lufs = math.Inf(-1)
-	if !math.IsInf(src.IntegratedLUFS, -1) {
-		lufs = src.IntegratedLUFS + gainDB
-	}
-	truePeakDB = src.TruePeakDB + gainDB
-	if limited {
-		truePeakDB = min(truePeakDB, gain.DefaultCeilingDB)
-	}
-	return lufs, truePeakDB
+	return meta.ProjectLoudness(src.IntegratedLUFS, src.TruePeakDB, gainDB, limited)
 }
 
 // analysisOf maps an engine measurement onto the wire shape.

@@ -626,15 +626,12 @@ func (d *Demuxer) seekSelfTiming(sample int64) (int64, error) {
 }
 
 // seekAccumulating seeks a mapping whose positions accumulate (Vorbis, Opus).
-// It works in the granule timeline (where page positions are authoritative)
-// and converts to the decoder's output timeline with the mapping's granule
-// shift. It lands a pre-roll before the target so decode reconverges: the
-// restart page's first packet is consumed (priming), and output begins at its
-// start.
+// It works in the granule timeline, where page positions are authoritative and
+// which for both mappings is the decoder's output timeline. It lands a pre-roll
+// before the target so decode reconverges: the restart page's first packet is
+// consumed (priming), and output begins at its start.
 func (d *Demuxer) seekAccumulating(sample int64) (int64, error) {
-	shift := d.mapping.granuleShift()
-	granuleTarget := sample + shift
-	searchGranule := granuleTarget - d.mapping.preroll()
+	searchGranule := sample - d.mapping.preroll()
 	if searchGranule < 0 {
 		searchGranule = 0
 	}
@@ -670,7 +667,7 @@ func (d *Demuxer) seekAccumulating(sample int64) (int64, error) {
 			if d.endsPage() && d.page.granule >= 0 {
 				ends = append(ends, d.page.granule)
 				anchored = true
-				if d.page.granule > granuleTarget {
+				if d.page.granule > sample {
 					break // enough to bracket the target
 				}
 			} else {
@@ -686,8 +683,12 @@ func (d *Demuxer) seekAccumulating(sample int64) (int64, error) {
 		}
 		// landed (output timeline) = the first delivered packet's start. The
 		// decoder consumes that packet as priming; its output begins here.
+		// The clamp is for a start that resolvePositions could not anchor:
+		// an unanchored end[0] falls back to 0, and Opus (unlike Vorbis, whose
+		// resetTiming zeroes durs[0]) carries a real duration there, so
+		// starts[0] can come out negative.
 		starts := resolvePositions(durs, ends)
-		landed := starts[0] - shift
+		landed := starts[0]
 		if landed < 0 {
 			landed = 0
 		}

@@ -2,7 +2,9 @@ package ogg
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"testing"
@@ -69,67 +71,186 @@ func muxVorbis(t *testing.T, f audio.Format, cfg []byte, packets [][]byte, tr co
 	return out.Bytes()
 }
 
-// TestMuxVorbisRoundTrip is the Ogg-Vorbis acceptance gate: a mux->demux round trip
-// of real Vorbis packets recovers the true sample count exactly (SamplesExact),
-// which only holds when the muxer's granulepos accounting carries the
-// firstBlock/2 priming shift the demuxer subtracts back off. It also confirms
-// every audio packet survives the framing byte-identically and in order.
-func TestMuxVorbisRoundTrip(t *testing.T) {
-	for _, ch := range []int{1, 2} {
-		f := audio.Format{Rate: 48000, Channels: ch, Layout: audio.DefaultLayout(ch), Type: audio.Float, BitDepth: 32}
-		const n = 24000 // half a second: several long blocks plus a partial tail
-		src := make([][]float32, ch)
-		for c := 0; c < ch; c++ {
-			src[c] = make([]float32, n)
-			freq := 440.0 * float64(c+1)
-			for i := range src[c] {
-				src[c][i] = 0.3 * float32(math.Sin(2*math.Pi*freq*float64(i)/48000))
-			}
-		}
-		packets, cfg, tr := encodeVorbis(t, f, src)
-		if tr.Samples != n {
-			t.Fatalf("ch=%d: encoder trailer Samples = %d, want %d", ch, tr.Samples, n)
-		}
-		stream := muxVorbis(t, f, cfg, packets, tr, nil)
-		// The muxer has no clock and a fixed serial, so re-muxing the same
-		// packets must be byte-identical (deterministic output).
-		if again := muxVorbis(t, f, cfg, packets, tr, nil); !bytes.Equal(stream, again) {
-			t.Errorf("ch=%d: muxer output is not deterministic", ch)
-		}
+// oggPage is one page as seen by a raw scan of a muxed stream: its granule and
+// how many packets it completed (a lacing value below 255 ends a packet).
+type oggPage struct {
+	granule   int64
+	completed int
+}
 
-		d, err := NewDemuxer(container.BytesSource(stream), nil)
+// scanPages parses a whole Ogg stream's page headers without the demuxer, so
+// granulepos can be asserted as a wire property rather than through the code
+// that reads it back.
+func scanPages(t *testing.T, stream []byte) []oggPage {
+	t.Helper()
+	var out []oggPage
+	for off := 0; off+headerLen <= len(stream); {
+		if !bytes.HasPrefix(stream[off:], []byte("OggS")) {
+			t.Fatalf("no page capture pattern at offset %d", off)
+		}
+		nsegs := int(stream[off+26])
+		lacing := stream[off+headerLen : off+headerLen+nsegs]
+		body := 0
+		completed := 0
+		for _, l := range lacing {
+			body += int(l)
+			if l < 255 {
+				completed++
+			}
+		}
+		out = append(out, oggPage{
+			granule:   int64(binary.LittleEndian.Uint64(stream[off+6:])),
+			completed: completed,
+		})
+		off += headerLen + nsegs + body
+	}
+	return out
+}
+
+// TestMuxVorbisRoundTrip is the Ogg-Vorbis acceptance gate. The primary check
+// is at the page level, on the wire: granulepos is non-decreasing, the final
+// page equals the true sample count, and every intermediate page equals the
+// cumulative decoded output through its last completed packet.
+//
+// The last two matter because the old gate checked only the demuxed length,
+// which held while the muxer added a priming shift the demuxer subtracted back
+// off: the two cancelled on a round trip and every file WaxFlow wrote was 1024
+// samples long to everyone else. A demux-only assertion cannot see that.
+func TestMuxVorbisRoundTrip(t *testing.T) {
+	// n=1..2048 is under a couple of blocks, where the end-trim final granule
+	// can land below an earlier page's granule if packets spill across pages.
+	// n=24000 is several long blocks plus a partial tail and cannot see it.
+	for _, n := range []int{1, 100, 2047, 2048, 24000} {
+		for _, ch := range []int{1, 2} {
+			t.Run(fmt.Sprintf("n%d_ch%d", n, ch), func(t *testing.T) {
+				muxVorbisRoundTrip(t, n, ch)
+			})
+		}
+	}
+}
+
+func muxVorbisRoundTrip(t *testing.T, n, ch int) {
+	f := audio.Format{Rate: 48000, Channels: ch, Layout: audio.DefaultLayout(ch), Type: audio.Float, BitDepth: 32}
+	src := make([][]float32, ch)
+	for c := 0; c < ch; c++ {
+		src[c] = make([]float32, n)
+		freq := 440.0 * float64(c+1)
+		for i := range src[c] {
+			src[c][i] = 0.3 * float32(math.Sin(2*math.Pi*freq*float64(i)/48000))
+		}
+	}
+	packets, cfg, tr := encodeVorbis(t, f, src)
+	if tr.Samples != int64(n) {
+		t.Fatalf("encoder trailer Samples = %d, want %d", tr.Samples, n)
+	}
+	stream := muxVorbis(t, f, cfg, packets, tr, nil)
+	// The muxer has no clock and a fixed serial, so re-muxing the same
+	// packets must be byte-identical (deterministic output).
+	if again := muxVorbis(t, f, cfg, packets, tr, nil); !bytes.Equal(stream, again) {
+		t.Errorf("muxer output is not deterministic")
+	}
+
+	checkVorbisPageGranules(t, stream, cfg, packets, int64(n))
+
+	d, err := NewDemuxer(container.BytesSource(stream), nil)
+	if err != nil {
+		t.Fatalf("NewDemuxer: %v", err)
+	}
+	track := d.Tracks()[0]
+	if track.Codec != codec.Vorbis {
+		t.Fatalf("demuxed codec %q, want vorbis", track.Codec)
+	}
+	if !track.SamplesExact || track.Samples != int64(n) {
+		t.Errorf("demuxed Samples = %d exact=%v, want %d exact (gapless round trip)", track.Samples, track.SamplesExact, n)
+	}
+	if track.Fmt.Channels != ch || track.Fmt.Rate != 48000 {
+		t.Errorf("demuxed format %dch %dHz", track.Fmt.Channels, track.Fmt.Rate)
+	}
+	// Every audio packet must survive framing byte-for-byte and in order.
+	var pkt container.Packet
+	for i := 0; ; i++ {
+		err := d.ReadPacket(&pkt)
+		if errors.Is(err, io.EOF) {
+			if i != len(packets) {
+				t.Fatalf("demuxed %d packets, want %d", i, len(packets))
+			}
+			break
+		}
 		if err != nil {
-			t.Fatalf("ch=%d: NewDemuxer: %v", ch, err)
+			t.Fatalf("ReadPacket %d: %v", i, err)
 		}
-		track := d.Tracks()[0]
-		if track.Codec != codec.Vorbis {
-			t.Fatalf("ch=%d: demuxed codec %q, want vorbis", ch, track.Codec)
+		if i >= len(packets) {
+			t.Fatalf("demuxed more than %d packets", len(packets))
 		}
-		if !track.SamplesExact || track.Samples != n {
-			t.Errorf("ch=%d: demuxed Samples = %d exact=%v, want %d exact (gapless round trip)", ch, track.Samples, track.SamplesExact, n)
+		if !bytes.Equal(pkt.Data, packets[i]) {
+			t.Fatalf("packet %d differs after mux round trip", i)
 		}
-		if track.Fmt.Channels != ch || track.Fmt.Rate != 48000 {
-			t.Errorf("ch=%d: demuxed format %dch %dHz", ch, track.Fmt.Channels, track.Fmt.Rate)
+	}
+}
+
+// checkVorbisPageGranules asserts the three page-granule properties against the
+// cumulative decoded output computed independently from the packets' own block
+// sizes: the priming packet emits nothing, and each later packet emits
+// (prevBlock+block)/4.
+func checkVorbisPageGranules(t *testing.T, stream, cfg []byte, packets [][]byte, samples int64) {
+	t.Helper()
+	c, err := vorbis.ParseConfig(cfg)
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	modeBits := vorbis.ModeBits(c)
+	cum := make([]int64, len(packets)) // cum[i] = output through packet i
+	prev := 0
+	for i, p := range packets {
+		block, ok := vorbis.PacketBlockSize(c, modeBits, p)
+		if !ok {
+			t.Fatalf("packet %d has no valid block size", i)
 		}
-		// Every audio packet must survive framing byte-for-byte and in order.
-		var pkt container.Packet
-		for i := 0; ; i++ {
-			err := d.ReadPacket(&pkt)
-			if errors.Is(err, io.EOF) {
-				if i != len(packets) {
-					t.Fatalf("ch=%d: demuxed %d packets, want %d", ch, i, len(packets))
-				}
-				break
+		if i > 0 {
+			cum[i] = cum[i-1] + int64(prev+block)/4
+		}
+		prev = block
+	}
+
+	pages := scanPages(t, stream)
+	if len(pages) < 3 {
+		t.Fatalf("stream has %d pages, want at least 3 (BOS, headers, audio)", len(pages))
+	}
+	// Property 1: non-decreasing across every page.
+	for i := 1; i < len(pages); i++ {
+		if pages[i].granule < pages[i-1].granule {
+			t.Errorf("page %d granule %d < page %d granule %d (granulepos must be non-decreasing)",
+				i, pages[i].granule, i-1, pages[i-1].granule)
+		}
+	}
+	// Property 2: the final page carries the true sample count.
+	if got := pages[len(pages)-1].granule; got != samples {
+		t.Errorf("final page granule = %d, want %d (the true sample count)", got, samples)
+	}
+	// Property 3: each audio page's granule is the cumulative output through
+	// its last completed packet. Header packets precede the audio ones, so the
+	// audio index only starts advancing once the header pages are behind us.
+	done := 0               // packets completed so far, headers included
+	const headerPackets = 3 // identification, comment, setup
+	for i, p := range pages {
+		done += p.completed
+		audioDone := done - headerPackets
+		if audioDone <= 0 {
+			if p.granule != 0 {
+				t.Errorf("page %d completes no audio packet but carries granule %d, want 0", i, p.granule)
 			}
-			if err != nil {
-				t.Fatalf("ch=%d: ReadPacket %d: %v", ch, i, err)
-			}
-			if i >= len(packets) {
-				t.Fatalf("ch=%d: demuxed more than %d packets", ch, len(packets))
-			}
-			if !bytes.Equal(pkt.Data, packets[i]) {
-				t.Fatalf("ch=%d: packet %d differs after mux round trip", ch, i)
-			}
+			continue
+		}
+		if audioDone > len(packets) {
+			t.Fatalf("page %d completes audio packet %d, past the %d encoded", i, audioDone, len(packets))
+		}
+		want := cum[audioDone-1]
+		if i == len(pages)-1 {
+			want = samples // the final page carries the end trim, checked above
+		}
+		if p.granule != want {
+			t.Errorf("page %d granule = %d, want %d (cumulative output through audio packet %d)",
+				i, p.granule, want, audioDone-1)
 		}
 	}
 }

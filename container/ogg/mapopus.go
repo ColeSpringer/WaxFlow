@@ -176,6 +176,4 @@ func (m *opusMapping) selfTiming() bool { return false }
 // SILK/CELT state to reconverge after a seek.
 func (m *opusMapping) preroll() int64 { return 3840 }
 
-func (m *opusMapping) granuleShift() int64 { return 0 }
-
 func (m *opusMapping) resetTiming() {}

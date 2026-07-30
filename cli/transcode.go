@@ -248,7 +248,9 @@ with true-peak limiting, dither).`,
 				// (the same estimate the MP4 path patches in).
 				rg, outLUFS := predictedRG(srcRes, gainDB, peakLimited)
 				tags = append(tags, rg...)
-				fmt.Fprintf(cmd.ErrOrStderr(), "loudness: output %.2f LUFS, %s / %s\n",
+				// Labelled as an estimate: analyzeOutputRG prints the same
+				// shape from a real measurement.
+				fmt.Fprintf(cmd.ErrOrStderr(), "loudness: output ~%.2f LUFS (estimated), %s / %s\n",
 					outLUFS, rg[0].Value, rg[1].Value)
 			}
 			var chapters []container.Chapter
@@ -361,24 +363,12 @@ with true-peak limiting, dither).`,
 // plus the applied gain for fragmented MP4, which has no read path
 // (exact for lossless ALAC, within the encoder's fraction of a dB for
 // AAC; the encode's limiter caps the derived peak).
-// predictedRG estimates the output ReplayGain from the source loudness analysis
-// and the gain being applied: after normalization the output sits at
-// srcLUFS+gain, and its true peak follows the gain, clamped to the ceiling when
-// the encode chain limits (limited). The limiter engages for positive gain and
-// for a downmix whose matrix can sum past unity, so a downmix estimate must
-// pass limited even for negative gain: analyze runs the raw fold with no
-// limiter, so srcRes.TruePeakDB can already exceed the ceiling. It is the
-// estimate the MP4 path patches into its placeholders and the value the Ogg
-// path embeds at Begin (Ogg cannot be patched afterward).
+// predictedRG estimates the output ReplayGain from the source analysis and the
+// applied gain, for the Ogg path (whose tags are written at Begin) and the MP4
+// placeholders. See meta.ProjectLoudness for the projection and the direction
+// each result errs in.
 func predictedRG(srcRes *waxflow.AnalyzeResult, gainDB float64, limited bool) (rg []container.Tag, outLUFS float64) {
-	outLUFS = math.Inf(-1)
-	if !math.IsInf(srcRes.IntegratedLUFS, -1) {
-		outLUFS = srcRes.IntegratedLUFS + gainDB
-	}
-	outTP := srcRes.TruePeakDB + gainDB
-	if limited {
-		outTP = min(outTP, gain.DefaultCeilingDB)
-	}
+	outLUFS, outTP := meta.ProjectLoudness(srcRes.IntegratedLUFS, srcRes.TruePeakDB, gainDB, limited)
 	return meta.ReplayGainTags(outLUFS, outTP), outLUFS
 }
 

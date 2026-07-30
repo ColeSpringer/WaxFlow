@@ -208,8 +208,12 @@ type CapsDSP struct {
 	// fields, not conclude that every cached map is stale; the
 	// cutFormats advertisement carries the same rule.
 	SilenceDetector string `json:"silenceDetector"`
-	// TruePeakCeilingDB is the limiter's ceiling in dBTP, which every
-	// gain- or dynamics-engaged output is held under.
+	// TruePeakCeilingDB is the limiter's ceiling in dBTP, which every gain-
+	// or dynamics-engaged output is held under as measured by the limiter's
+	// own 4x detector. Measuring the delivered file can read slightly over:
+	// /analyze uses a different detector (~0.04 dB apart, and BS.1770-4's
+	// rate schedule rather than always 4x), and for lossy formats the bound
+	// is on the encoder's input. See docs/api.md.
 	TruePeakCeilingDB float64 `json:"truePeakCeilingDb"`
 }
 

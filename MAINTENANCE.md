@@ -122,6 +122,17 @@ curve does arithmetic, not that the arithmetic sounds right.
    again: the constant exists to invalidate caches, but it is also the
    flag that the curve moved and nobody has heard it yet.
 
+A `LimiterVersion` bump does not carry the same marker by default, and the
+`limiter-3` rebuild is the precedent. It replaced the one-pole attack with a
+min-hold plus a smoothed envelope, so the resulting gain is smoother than the
+old one, more conservative everywhere, and provably at or below the ceiling
+where the old one was not. Every audible difference is in the direction of
+less distortion, which makes it a defect fix rather than a voicing change. The
+distinction that matters: a design that reaches the ceiling by *notching* the
+gain at individual peaks would introduce a new artifact class and would owe the
+listen, whatever its measurements said. Record the reasoning when bumping, so
+the next bump is not decided by precedent alone.
+
 ## Fuzzing posture
 
 Every parser (demuxers, packet decoders, probe, the HLS descriptor, the

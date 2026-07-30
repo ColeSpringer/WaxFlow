@@ -2,7 +2,12 @@ package oracletest
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/jfreymuth/oggvorbis"
@@ -10,6 +15,8 @@ import (
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/vorbis"
+	"github.com/colespringer/waxflow/container"
+	waxformat "github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/testutil"
 )
 
@@ -115,4 +122,56 @@ func bestShapeNRMSE(test, ref []float32, ch, maxOff int) float64 {
 		}
 	}
 	return math.Sqrt(best)
+}
+
+// TestVorbisShortStreamLength pins the property TestOggVorbisEngineShortStream
+// asserts but cannot prove on its own: on a single-audio-page libvorbis stream,
+// the declared granulepos is the real length and ffmpeg's decode is 128 frames
+// short. The engine must agree with the independent decoder, not with ffmpeg.
+func TestVorbisShortStreamLength(t *testing.T) {
+	ff := testutil.FFmpeg(t)
+	path := filepath.Join(t.TempDir(), "short.ogg")
+	out, err := exec.Command(ff, "-v", "error", "-y", "-f", "lavfi",
+		"-i", "sine=frequency=440:sample_rate=44100:duration=0.25",
+		"-ac", "2", "-c:a", "libvorbis", "-q:a", "5", path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ffmpeg gen: %v\n%s", err, out)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oracle, format, err := oggvorbis.ReadAll(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("jfreymuth/oggvorbis rejected the stream: %v", err)
+	}
+	oracleFrames := len(oracle) / format.Channels
+
+	med, err := waxformat.Open(container.BytesSource(raw), "ogg", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	tr := med.Info().Tracks[0]
+	mine := 0
+	buf := audio.Get(tr.Fmt, audio.StandardChunk)
+	defer audio.Put(buf)
+	for {
+		err := med.ReadChunk(buf)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("ReadChunk: %v", err)
+		}
+		mine += buf.N
+	}
+	t.Logf("oracle %d frames, engine %d, declared granulepos %d", oracleFrames, mine, tr.Samples)
+	if mine != oracleFrames {
+		t.Errorf("engine decoded %d frames, oracle %d: the declared length must be delivered", mine, oracleFrames)
+	}
+	if tr.Samples != int64(oracleFrames) {
+		t.Errorf("track Samples %d, oracle decoded %d", tr.Samples, oracleFrames)
+	}
 }

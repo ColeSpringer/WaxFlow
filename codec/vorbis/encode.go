@@ -15,7 +15,14 @@ var _ codec.Encoder = (*Encoder)(nil)
 // ADR-0004 cache key. It composes the psychoacoustic model's revision, so
 // retuning dsp/psy invalidates exactly these streams. Bump it whenever a change
 // alters the produced bytes.
-const EncoderVersion = "vorbis-enc-8+" + psy.Version
+//
+// vorbis-enc-9 is borrowed for a muxer change, not an encoder one: the Ogg
+// granulepos convention changed (container/ogg/muxmap.go). The cache key tuple
+// has no container term, so this is the narrowest lever that invalidates Vorbis
+// output without touching FLAC-in-Ogg or Opus-in-Ogg. It over-invalidates by
+// one case, Vorbis-in-Matroska, whose bytes did not change; that costs a
+// re-encode per entry and nothing else. See ADR-0004 for the proper fix.
+const EncoderVersion = "vorbis-enc-9+" + psy.Version
 
 // encVendor is the fixed vendor string the standalone encoder stamps into the
 // comment header, so deterministic-mode output stays byte-identical. In the

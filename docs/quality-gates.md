@@ -95,6 +95,54 @@ the two takes a block power exactly equal to a mean divided by ten in
 float64 -- and unifying them would spend a `loudness.Version` bump,
 invalidating every externally stored measurement, to move nothing.
 
+## True-peak limiter
+
+The gate is a property, not a number: **for any legal `GainDB`, the true peak
+of the PCM the limiter emits is at or below `gain.DefaultCeilingDB`, as
+measured at 4x per BS.1770-4.** The 4x qualifier is load-bearing in both
+directions: 4x under-reads true inter-sample peaks against an 8x or 16x
+detector, so an unqualified claim would state a property neither detector in
+this repo can verify.
+
+The property is structural. The gain is a min-hold over the look-ahead window
+smoothed by a non-negative kernel of unit mass whose support fits inside that
+window, so every tap contributing to the gain at sample `n` was already
+constrained by the peak at `n`. See the `gain.Limiter` type doc for the
+derivation; it is three lines.
+
+Two assertions back it, at two tolerances, because they answer different
+questions (`dsp/gain/limiter_ceiling_test.go`):
+
+- **Internal**, and the real gate: re-run the limiter's own 4x interpolator
+  over the limiter's output. That is exactly the quantity the construction
+  bounds. Its tolerance is `ceilEpsilon(look)`, which is not slop but a
+  measured law: an interpolated point reconstructs the gain-*modulated* signal,
+  so what leaks through is the gain's curvature across the interpolator's 16
+  taps, and it falls as 1/look². Worst measured excess is 0.013 dB at 8 kHz and
+  0.0002 dB at 48 kHz. The same assertion is what checks the sample clamp stays
+  inert, since a firing clamp flat-tops the waveform and a flat top is what an
+  interpolating detector reads as an over-ceiling peak.
+- **External**, loose on purpose: `dsp/loudness`'s independently designed 4x
+  detector (12 taps at Kaiser beta 6 against the limiter's 16 at 3.67). The two
+  disagree by ~0.04 dB on broadband transients, so its bound is 0.20 dB. It
+  does not need to be tight; the defect it exists to catch was 1.80 dB.
+
+`FuzzLimiterCeiling` is what backs the word "any" over random crest, gain, rate
+and chunking. Two hand-built fixtures cannot establish a universal, and the
+sentence above is a universal.
+
+`tests.TestTranscodeGainTruePeakCeiling` mirrors the harness the WaxTap v3.0
+report used to attribute its F2 finding here (`Engine.Transcode` with a
+positive `GainDB`, then `Engine.Analyze`), and logs the loudness shortfall per
+row so the cost of holding the ceiling is a recorded number rather than a
+guess: it saturates around 1.2 LU at 27 dB crest, less on real music.
+
+Scope: the guarantee is on the PCM the limiter emits, which for `wav` and
+`flac` is the delivered file (dither contributes below it). For the lossy
+formats it is the encoder's input, and a decoder can reconstruct a true peak a
+few tenths of a dB above what the encoder was handed. `docs/api.md` and
+`/caps`'s `truePeakCeilingDb` both carry that caveat.
+
 ## Encoder gates
 
 Every encoder, always: validity (above) plus golden-stream byte-exactness in

@@ -28,12 +28,21 @@ import (
 // because segments must agree with each other and with a restarted worker
 // within one stream.)
 //
+// The muxer half of that reasoning was wrong, and remux-2 is the correction. A
+// framing change is not always "merely older bytes that still decode
+// identically": the Ogg-Vorbis granulepos fix changed what the muxer writes for
+// the stream's length, so cached remuxes kept reporting a duration ~21 ms long.
+// The encoder-side lever for that fix (vorbis.EncoderVersion) is not in this
+// rung's key at all, by the design above, so this constant is the only one that
+// can invalidate them. Bump it for a muxer change that alters what a file says
+// about itself, not merely how it is framed.
+//
 // What is left is the gapless trailer this rung synthesizes from the input
 // track, and that is not merely older bytes: a bug there writes a wrong
 // iTunSMPB or a wrong edit list, and wrong gapless metadata is wrong playback.
 // That is the one thing here that needs a version, so it is the one that has
 // one.
-const RemuxVersion = "remux-1"
+const RemuxVersion = "remux-2"
 
 // RemuxPlan describes what a remux would produce, computed from the source
 // track's headers alone.
