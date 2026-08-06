@@ -95,11 +95,11 @@ func (m *Manager) Segment(ctx context.Context, key string, n int64, ops Ops) err
 	// slow volume, must not stall every variant), so by the time the lock
 	// is held its answer can be stale: the worker may have written n,
 	// advanced, even exited in between. Every destructive or terminal
-	// branch below therefore re-establishes the truth first — from the
+	// branch below therefore re-establishes the truth first - from the
 	// manager's own lock-consistent bookkeeping where possible (notify
 	// happens strictly after the segment write, and the variant is pinned
 	// against eviction while its worker runs, so start <= n < next proves
-	// the file exists), and by re-checking Has otherwise — so a stale stat
+	// the file exists), and by re-checking Has otherwise - so a stale stat
 	// can never 404 a written segment, kill a healthy worker, or spawn a
 	// redundant one.
 	spawns := 0

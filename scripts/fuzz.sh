@@ -70,7 +70,7 @@ for pkg in $pkgs; do
 	for target in $(printf '%s\n' "$listing" | grep '^Fuzz' || true); do
 		log="$log_dir/${pkg_safe}_${target}.log"
 
-		group "fuzz $target ($fuzztime) — $pkg"
+		group "fuzz $target ($fuzztime) - $pkg"
 		# tee so progress still streams to the console while we keep the full
 		# output for classification; PIPESTATUS[0] is go test's real exit code.
 		go test -run '^$' -fuzz "^${target}\$" -fuzztime "$fuzztime" -v "$pkg" 2>&1 | tee "$log"
@@ -78,7 +78,7 @@ for pkg in $pkgs; do
 		endgroup
 
 		if [ "$rc" -eq 0 ]; then
-			echo "ok   $target — completed $fuzztime with no findings"
+			echo "ok   $target - completed $fuzztime with no findings"
 			continue
 		fi
 
@@ -102,7 +102,7 @@ for pkg in $pkgs; do
 		# The benign -fuzztime artifact also prints "--- FAIL", so it MUST be
 		# classified before the generic seed/corpus check below.
 		if grep -q "context deadline exceeded" "$log"; then
-			warn "$target hit the -fuzztime shutdown artifact (no reproducer) — not a finding, treating as pass"
+			warn "$target hit the -fuzztime shutdown artifact (no reproducer) - not a finding, treating as pass"
 			continue
 		fi
 
