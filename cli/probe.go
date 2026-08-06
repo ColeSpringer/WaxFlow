@@ -147,7 +147,14 @@ func printProbe(cmd *cobra.Command, info *format.Info, m *meta.Info) {
 	w := cmd.OutOrStdout()
 	fmt.Fprintf(w, "container: %s\n", info.Container)
 	for _, t := range info.Tracks {
-		fmt.Fprintf(w, "track %d:   %s %s", t.ID, t.Codec, t.Fmt)
+		// The source's own depth where it differs from the pipeline's, which
+		// is float64 sources and nothing else. --json reports the same number
+		// (server.ProbeJSON), and the two must not disagree about one file.
+		f := t.Fmt
+		if t.SourceBitDepth != 0 {
+			f.BitDepth = t.SourceBitDepth
+		}
+		fmt.Fprintf(w, "track %d:   %s %s", t.ID, t.Codec, f)
 		if t.Fmt.Layout != 0 {
 			fmt.Fprintf(w, " [%s]", t.Fmt.Layout)
 		}
@@ -158,18 +165,32 @@ func printProbe(cmd *cobra.Command, info *format.Info, m *meta.Info) {
 			fmt.Fprintln(w, "samples:   unknown")
 		}
 	}
+	// Tags resolve exactly as --json resolves them (server.ProbeJSON): the
+	// mapper wins where it read any, the container's own are the fallback.
+	// Reading only the mapper here is what let `probe frag.m4a` print no
+	// title while `probe --json frag.m4a` reported one for the same file.
+	tags, chapters := info.Tags, info.Chapters
 	if m != nil {
-		for _, key := range []string{"TITLE", "ARTIST", "ALBUM"} {
-			if vs := m.Tags[key]; len(vs) > 0 {
-				fmt.Fprintf(w, "%-10s %s\n", strings.ToLower(key)+":", strings.Join(vs, "; "))
-			}
+		if len(m.Tags) > 0 {
+			tags = m.Tags
 		}
 		if len(m.Chapters) > 0 {
-			fmt.Fprintf(w, "chapters:  %d\n", len(m.Chapters))
+			chapters = m.Chapters
 		}
-		if m.HasPictures {
-			fmt.Fprintln(w, "art:       embedded")
+	}
+	for _, key := range []string{"TITLE", "ARTIST", "ALBUM"} {
+		if vs := tags[key]; len(vs) > 0 {
+			fmt.Fprintf(w, "%-10s %s\n", strings.ToLower(key)+":", strings.Join(vs, "; "))
 		}
+	}
+	if len(chapters) > 0 {
+		fmt.Fprintf(w, "chapters:  %d\n", len(chapters))
+	}
+	// Art has no container fallback, deliberately: /art serves only what a
+	// mapper hands it, so reporting one the container merely saw would
+	// promise a payload nothing can produce. Same rule as hasArt on the wire.
+	if m != nil && m.HasPictures {
+		fmt.Fprintln(w, "art:       embedded")
 	}
 	for _, warn := range info.Warnings {
 		fmt.Fprintf(w, "warning:   %s\n", warn)

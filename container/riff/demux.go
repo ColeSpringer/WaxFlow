@@ -252,6 +252,14 @@ func (d *Demuxer) parse() error {
 		Samples:     samples,
 		Default:     true,
 	}
+	// audio.Format carries floats as float32, so a 64-bit float source
+	// decodes at BitDepth 32. The file's own depth is not lost, it just has
+	// nowhere in the format to live; recorded here so probe reports what the
+	// source holds rather than what the pipeline runs on. Integer depths need
+	// no such note: ValidBits already puts the source depth in Fmt.BitDepth.
+	if cfg.Encoding == pcm.Float && cfg.Bits != f.BitDepth {
+		d.track.SourceBitDepth = cfg.Bits
+	}
 	return nil
 }
 

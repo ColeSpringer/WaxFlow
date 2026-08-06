@@ -40,19 +40,30 @@ type trackCache struct {
 
 type trackEntry struct {
 	track container.Track
-	used  int64 // clock value at last access; the LRU order
+	// tags are the container's own tags from the same probe, memoized here
+	// rather than in a memo of their own: one probe answers both, they share
+	// an identity and so an invalidation, and the alternative is a second
+	// probe on the path this exists to keep off the wire. Read-only by
+	// contract, like format.Info's own map.
+	tags map[string][]string
+	used int64 // clock value at last access; the LRU order
 }
 
 func (c *trackCache) get(key string) (container.Track, bool) {
+	t, _, ok := c.getWithTags(key)
+	return t, ok
+}
+
+func (c *trackCache) getWithTags(key string) (container.Track, map[string][]string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.entries[key]
 	if !ok {
-		return container.Track{}, false
+		return container.Track{}, nil, false
 	}
 	c.clock++
 	e.used = c.clock
-	return e.track, true
+	return e.track, e.tags, true
 }
 
 // put stores t, except that it never downgrades a measured entry to an
@@ -65,7 +76,7 @@ func (c *trackCache) get(key string) (container.Track, bool) {
 // timeline request pay for it again. Neither caller is served a wrong track
 // either way, since each returns its own flight's result; this is only about
 // which one the memo keeps.
-func (c *trackCache) put(key string, t container.Track) {
+func (c *trackCache) put(key string, t container.Track, tags map[string][]string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.entries == nil {
@@ -73,13 +84,19 @@ func (c *trackCache) put(key string, t container.Track) {
 	}
 	if e, exists := c.entries[key]; exists {
 		if e.track.SamplesExact && !t.SamplesExact {
+			// The advisory write loses the track, but not the tags: they do
+			// not differ between an exact probe and an advisory one, and the
+			// kept entry may have been written before this file grew any.
+			if len(e.tags) == 0 {
+				e.tags = tags
+			}
 			return
 		}
 	} else if len(c.entries) >= trackCacheCap {
 		c.evictOldestLocked()
 	}
 	c.clock++
-	c.entries[key] = &trackEntry{track: t, used: c.clock}
+	c.entries[key] = &trackEntry{track: t, tags: tags, used: c.clock}
 }
 
 // evictOldestLocked drops the least recently used entry: a linear scan, run
@@ -184,7 +201,7 @@ func (s *Server) trackFor(src *source.File, exact bool) (container.Track, error)
 			// entry, and what stops a measured track being measured again.
 			track.SamplesExact = true
 		}
-		s.trackCache.put(key, track)
+		s.trackCache.put(key, track, info.Tags)
 		return track, nil
 	})
 }
@@ -198,4 +215,26 @@ func (s *Server) trackIsExact(src *source.File) bool {
 		return t.SamplesExact
 	}
 	return false
+}
+
+// containerTagsFor returns the tags the container parsed off src's header,
+// memoized beside its track. It is the HLS path's half of the fold prepareSource
+// makes from its own probe: gain=track resolves against REPLAYGAIN_* tags, so
+// without it the same source answers one gain on /stream and another on
+// /hls/master.m3u8 whenever the tag library cannot read the file.
+//
+// A miss fills the memo through trackFor rather than probing separately, so the
+// two facts keep coming from one probe. The advisory form is asked for because
+// this needs no length at all; an exact caller has already populated the entry
+// in every case that wanted one.
+func (s *Server) containerTagsFor(src *source.File) map[string][]string {
+	key := identityString(src.Ref, src.ID)
+	if _, tags, ok := s.trackCache.getWithTags(key); ok {
+		return tags
+	}
+	if _, err := s.trackFor(src, false); err != nil {
+		return nil
+	}
+	_, tags, _ := s.trackCache.getWithTags(key)
+	return tags
 }

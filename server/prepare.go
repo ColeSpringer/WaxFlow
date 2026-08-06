@@ -109,7 +109,12 @@ func (s *Server) prepareSource(ctx context.Context, q url.Values, sigAuthed bool
 			return nil, err
 		}
 	}
-	m := s.readMeta(ctx, src, false)
+	// The container's own tags are the floor and the mapper's win over them,
+	// the same resolution ProbeJSON makes and for the same reason: without it
+	// a daemon nobody wired a mapper into embeds no tags at all onto a stream
+	// whose source plainly carries them. readMeta answers nil for exactly that
+	// daemon, which the fold reads as a floor to build on.
+	m := meta.WithContainerTags(s.readMeta(ctx, src, false), info.Tags)
 	return &streamRequest{
 		p:     p,
 		src:   src,

@@ -1,7 +1,9 @@
 package waxflow_test
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"slices"
 	"strings"
 	"testing"
@@ -12,6 +14,7 @@ import (
 	"github.com/colespringer/waxflow/codec/opus"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -189,28 +192,29 @@ func TestChannelRefusalNamesTheRemedy(t *testing.T) {
 	}
 	track := info.Default()
 
-	for _, format := range []string{"aac", "alac", "mp3"} {
-		t.Run(format, func(t *testing.T) {
-			_, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: format})
-			if err == nil {
-				t.Fatal("a 6-channel source planned onto a 1-2 channel encoder")
+	// alac is the row that still refuses, and after C1 it is the only one: a
+	// lossless output that silently drops four channels is a lie about what
+	// it holds, while the lossy rows fold (TestWideSourceChannelPolicy).
+	t.Run("alac", func(t *testing.T) {
+		_, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "alac"})
+		if err == nil {
+			t.Fatal("a 6-channel source planned onto a 1-2 channel encoder")
+		}
+		// The wrap must not cost the error its class.
+		if code := waxerr.CodeOf(err); code != waxerr.CodeUnsupportedFormat {
+			t.Errorf("code = %s, want %s", code, waxerr.CodeUnsupportedFormat)
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "channel count to 2") {
+			t.Errorf("message %q does not name the remedy", msg)
+		}
+		// The engine is the public module; no boundary owns this string.
+		for _, leak := range []string{"--channels", "ch=", "Channels:"} {
+			if strings.Contains(msg, leak) {
+				t.Errorf("message %q leaks a boundary's vocabulary (%q)", msg, leak)
 			}
-			// The wrap must not cost the error its class.
-			if code := waxerr.CodeOf(err); code != waxerr.CodeUnsupportedFormat {
-				t.Errorf("code = %s, want %s", code, waxerr.CodeUnsupportedFormat)
-			}
-			msg := err.Error()
-			if !strings.Contains(msg, "channel count to 2") {
-				t.Errorf("message %q does not name the remedy", msg)
-			}
-			// The engine is the public module; no boundary owns this string.
-			for _, leak := range []string{"--channels", "ch=", "Channels:"} {
-				if strings.Contains(msg, leak) {
-					t.Errorf("message %q leaks a boundary's vocabulary (%q)", msg, leak)
-				}
-			}
-		})
-	}
+		}
+	})
 
 	// An explicit request keeps the encoder's own message: naming the same
 	// option back at the caller would be noise.
@@ -242,6 +246,125 @@ func TestChannelRefusalNamesTheRemedy(t *testing.T) {
 				t.Errorf("an unrelated refusal was given a channel hint: %v", err)
 			}
 		})
+	}
+}
+
+// TestWideSourceChannelPolicy pins C1: the writer-side table's rule for a
+// source wider than the output can hold, when the caller asked for no
+// particular width. The split is lossy against lossless, not one encoder
+// against another; before this, only opus folded, so the same 5.1 source
+// served as Opus and 415'd as AAC.
+func TestWideSourceChannelPolicy(t *testing.T) {
+	const frames = 4096
+	cfg := pcm.Config{Encoding: pcm.SignedInt, Bits: 16}
+	wav, src := makeWAV(t, cfg, 6, frames, 11)
+	defer audio.Put(src)
+
+	e := waxflow.New()
+	info, err := e.Probe(container.BytesSource(wav), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	track := info.Default()
+
+	cases := []struct {
+		format string
+		want   int // 0 means the row refuses
+	}{
+		{"opus", 2}, {"mp3", 2}, {"aac", 2},
+		{"alac", 0},
+		{"vorbis", 6}, {"flac", 6}, {"wav", 6}, {"aiff", 6},
+	}
+	for _, tt := range cases {
+		t.Run(tt.format, func(t *testing.T) {
+			plan, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: tt.format})
+			if tt.want == 0 {
+				if err == nil {
+					t.Fatalf("%s planned a 6-channel source; lossless must refuse rather than discard", tt.format)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", tt.format, err)
+			}
+			if plan.Format.Channels != tt.want {
+				t.Errorf("%s resolved to %d channels, want %d", tt.format, plan.Format.Channels, tt.want)
+			}
+		})
+	}
+
+	// An explicit request is never overridden, in either direction: mono
+	// stays mono on a row that would have folded to stereo.
+	plan, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "aac", Channels: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Format.Channels != 1 {
+		t.Errorf("an explicit Channels 1 resolved to %d", plan.Format.Channels)
+	}
+}
+
+// TestImplicitDownmixIsAnnouncedPerRun pins the other half of C1: a fold the
+// caller never asked for is visible without opting in, and it is announced
+// once per transcode rather than once per process.
+//
+// The per-process trap is the reason the notice cannot live in the plan:
+// PlanTranscode memoizes cores per (format, options), so a scripted
+// conversion of 500 identically shaped 5.1 files would warn on the first and
+// go silent for the other 499, which is exactly the failure C1 exists to end.
+func TestImplicitDownmixIsAnnouncedPerRun(t *testing.T) {
+	const frames = 4096
+	cfg := pcm.Config{Encoding: pcm.SignedInt, Bits: 16}
+	wav, src := makeWAV(t, cfg, 6, frames, 11)
+	defer audio.Put(src)
+
+	var logged bytes.Buffer
+	// Default level, so this also pins Warn rather than Debug.
+	e := waxflow.New(waxflow.WithLogger(slog.New(slog.NewTextHandler(&logged, nil))))
+
+	for i := range 2 {
+		var out bytes.Buffer
+		if _, err := e.Transcode(context.Background(), container.BytesSource(wav), "wav", &out,
+			waxflow.TranscodeOptions{Format: "aac"}); err != nil {
+			t.Fatalf("run %d: %v", i, err)
+		}
+		med, err := e.OpenStream(container.BytesSource(out.Bytes()), "m4a")
+		if err != nil {
+			t.Fatalf("run %d: reopening the output: %v", i, err)
+		}
+		got := med.Info().Default().Fmt.Channels
+		med.Close()
+		if got != 2 {
+			t.Fatalf("run %d: output has %d channels, want the stereo fold", i, got)
+		}
+	}
+	if n := strings.Count(logged.String(), "downmixed to fit the output format"); n != 2 {
+		t.Errorf("two folds announced %d times, want 2:\n%s", n, logged.String())
+	}
+
+	// The segmented path folds through the same hook, so it must announce it
+	// too: the claim that /stream and HLS behave alike was true of the audio
+	// and false of the log until this call existed.
+	logged.Reset()
+	if _, err := e.TranscodeSegments(context.Background(), container.BytesSource(wav), "wav",
+		waxflow.TranscodeOptions{Format: "aac"},
+		waxflow.SegmentedOptions{SegmentSamples: 1024 * 8},
+		func(mp4.Segment) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(logged.String(), "downmixed to fit the output format"); n != 1 {
+		t.Errorf("the segmented path announced the fold %d times, want 1:\n%s", n, logged.String())
+	}
+
+	// A fold the caller asked for is not news.
+	logged.Reset()
+	var out bytes.Buffer
+	if _, err := e.Transcode(context.Background(), container.BytesSource(wav), "wav", &out,
+		waxflow.TranscodeOptions{Format: "aac", Channels: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(logged.String(), "downmixed") {
+		t.Errorf("an explicit channel request was reported as a surprise:\n%s", logged.String())
 	}
 }
 

@@ -129,6 +129,7 @@ func bestShapeNRMSE(test, ref []float32, ch, maxOff int) float64 {
 // the declared granulepos is the real length and ffmpeg's decode is 128 frames
 // short. The engine must agree with the independent decoder, not with ffmpeg.
 func TestVorbisShortStreamLength(t *testing.T) {
+	testutil.FFmpegEncoder(t, "libvorbis")
 	ff := testutil.FFmpeg(t)
 	path := filepath.Join(t.TempDir(), "short.ogg")
 	out, err := exec.Command(ff, "-v", "error", "-y", "-f", "lavfi",

@@ -229,6 +229,44 @@ func WithoutReplayGain(info *Info) *Info {
 	return &out
 }
 
+// WithContainerTags folds a container's own tags into a mapper's Info as
+// the floor: the mapper's values win for every key it read, and the
+// container fills in the keys it has none for (a shallow copy; the map is
+// rebuilt). It is format.Info.Tags reaching the transfer, the same
+// argument format.Info.Chapters already makes, and it matters most where
+// the tag library refuses the file outright and returns nothing at all.
+//
+// A nil info with tags to carry becomes one. Nil means "no mapper spoke"
+// (none wired, or a read that failed), which is exactly the case the
+// fallback exists for, so nil is a floor to build on rather than a veto.
+// Whether tags are wanted at all is the caller's gate, not this one:
+// --no-tags skips the call, and TestNoTagsSuppressesTheContainerFallback
+// pins that. Nil in and nothing to say stays nil, so an untagged source
+// through a mapperless daemon still produces no Info.
+//
+// Callers fold before dropping ReplayGain, never after: the container
+// carries the four REPLAYGAIN_* keys too, so a later fold would put the
+// source's stale values back onto an output whose gain just changed.
+func WithContainerTags(info *Info, tags map[string][]string) *Info {
+	if len(tags) == 0 {
+		return info
+	}
+	out := Info{}
+	if info != nil {
+		out = *info
+	}
+	out.Tags = make(map[string][]string, len(out.Tags)+len(tags))
+	for k, v := range tags {
+		out.Tags[k] = v
+	}
+	if info != nil {
+		for k, v := range info.Tags {
+			out.Tags[k] = v
+		}
+	}
+	return &out
+}
+
 // replayGainRef is the ReplayGain 2 reference loudness in LUFS.
 const replayGainRef = -18
 

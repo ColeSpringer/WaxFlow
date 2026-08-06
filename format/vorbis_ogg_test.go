@@ -125,6 +125,7 @@ func alignedRMS(mine, ref []float32, ch, maxOff int) (int, float64) {
 // the shift this engine used to subtract, so the test passed on a decoder that
 // truncated every real Vorbis file's tail. Do not shorten it for suite speed.
 func TestOggVorbisEngineDifferential(t *testing.T) {
+	testutil.FFmpegEncoder(t, "libvorbis")
 	dir := t.TempDir()
 	for _, tc := range []struct {
 		name     string
@@ -167,6 +168,7 @@ func TestOggVorbisEngineDifferential(t *testing.T) {
 // oracletest pins against an independent decoder. Checked here against the
 // declared granulepos, and against ffmpeg only for sample values.
 func TestOggVorbisEngineShortStream(t *testing.T) {
+	testutil.FFmpegEncoder(t, "libvorbis")
 	dir := t.TempDir()
 	path := filepath.Join(dir, "short.ogg")
 	testutil.FFmpegGenerateDuration(t, path, 0.25, 44100, 2, "libvorbis", "-q:a", "5")
@@ -195,6 +197,7 @@ func TestOggVorbisEngineShortStream(t *testing.T) {
 // the negative-landing clamp absorbs any error in the landing arithmetic. Only
 // the mid-stream landings a large fixture produces caught the granule slip.
 func TestOggVorbisSeek(t *testing.T) {
+	testutil.FFmpegEncoder(t, "libvorbis")
 	ff := testutil.FFmpeg(t)
 	dir := t.TempDir()
 

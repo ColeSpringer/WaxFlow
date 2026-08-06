@@ -15,6 +15,7 @@ var (
 	_ container.Seeker    = (*Demuxer)(nil)
 	_ container.Warner    = (*Demuxer)(nil)
 	_ container.Chapterer = (*Demuxer)(nil)
+	_ container.Tagger    = (*Demuxer)(nil)
 )
 
 // DemuxerOptions configures parsing.
@@ -40,6 +41,7 @@ type Demuxer struct {
 	sel      *track // the selected audio track's parsed detail
 	brands   []string
 	chapters []Chapter
+	tags     map[string][]string // ilst tags, canonical keys
 	warnings []container.Warning
 
 	movieTimescale int64     // mvhd timescale (ticks per second)
@@ -284,6 +286,11 @@ func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
 
 // Chapters returns parsed chapter markers, nil when the file carries none.
 func (d *Demuxer) Chapters() []Chapter { return d.chapters }
+
+// Tags returns the ilst tags, nil when the file carries none. The map is
+// the demuxer's own and must not be mutated; format.Info hands it on to
+// read-only consumers.
+func (d *Demuxer) Tags() map[string][]string { return d.tags }
 
 // Brands returns the ftyp brands, for diagnostics.
 func (d *Demuxer) Brands() []string { return d.brands }

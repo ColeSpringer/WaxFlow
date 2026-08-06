@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/colespringer/waxflow/container"
 )
@@ -178,18 +179,121 @@ func (d *Demuxer) parseMeta(payload []byte, depth int) {
 	})
 }
 
-// parseILST scans the item list for the iTunSMPB freeform atom.
+// ilstTextKeys maps the iTunes text atoms onto canonical tag keys. It is
+// the inverse of muxmeta.go's ilstText and bounded by it: what the muxer
+// writes is what the demuxer reads back.
+var ilstTextKeys = map[string]string{
+	"\xa9nam": "TITLE",
+	"\xa9ART": "ARTIST",
+	"\xa9alb": "ALBUM",
+	"aART":    "ALBUMARTIST",
+	"\xa9wrt": "COMPOSER",
+	"\xa9gen": "GENRE",
+	"\xa9day": "RECORDINGDATE",
+	"\xa9cmt": "COMMENT",
+	"\xa9lyr": "LYRICS",
+}
+
+// ilstFreeformKeys are the freeform (----:com.apple.iTunes:KEY) names read
+// back as tags: the ReplayGain fields, muxmeta.go's ilstFreeform. iTunSMPB
+// is freeform too but is muxer-owned gapless state, not tag data, and is
+// handled separately in parseFreeform.
+var ilstFreeformKeys = map[string]bool{
+	"REPLAYGAIN_TRACK_GAIN": true,
+	"REPLAYGAIN_TRACK_PEAK": true,
+	"REPLAYGAIN_ALBUM_GAIN": true,
+	"REPLAYGAIN_ALBUM_PEAK": true,
+}
+
+// parseILST reads the item list: the descriptive text atoms, the trkn/disk
+// number pairs, and the freeform atoms (ReplayGain, plus the iTunSMPB
+// gapless descriptor). Tolerance is the parseUdta contract: a malformed
+// item is skipped, never an error, since none of it gates playback.
 func (d *Demuxer) parseILST(body []byte) {
 	_ = walkBoxes(body, func(typ string, payload []byte) error {
-		if typ == "----" {
+		switch {
+		case typ == "----":
 			d.parseFreeform(payload)
+		case typ == "trkn":
+			d.addNumberPair(payload, "TRACKNUMBER", "TRACKTOTAL")
+		case typ == "disk":
+			d.addNumberPair(payload, "DISCNUMBER", "DISCTOTAL")
+		default:
+			if key, ok := ilstTextKeys[typ]; ok {
+				if v, ok := itemText(payload); ok {
+					d.addTag(key, v)
+				}
+			}
 		}
 		return nil
 	})
 }
 
-// parseFreeform reads a '----' freeform atom, extracting the iTunSMPB
-// gapless descriptor when present.
+// addTag records one canonical tag value, in file order.
+func (d *Demuxer) addTag(key, value string) {
+	if value == "" {
+		return
+	}
+	if d.tags == nil {
+		d.tags = make(map[string][]string)
+	}
+	d.tags[key] = append(d.tags[key], value)
+}
+
+// itemText reads an ilst item's text value: its data box's UTF-8 payload.
+// The type indicator must say UTF-8 (1), which is what every writer of
+// these atoms sets; a binary payload read as text would land mojibake in
+// the tag map.
+//
+// Multi-valued keys are not split back apart. The muxer joins them with
+// "; " because an ilst data atom holds a single string, so what the file
+// carries is one value, and splitting on a separator a value may itself
+// contain would invent fields the file does not have.
+func itemText(body []byte) (string, bool) {
+	var out string
+	var ok bool
+	_ = walkBoxes(body, func(typ string, p []byte) error {
+		// data box: type_indicator(4) locale(4) value.
+		if typ == "data" && !ok && len(p) >= 8 && be32(p) == 1 {
+			if s := strings.TrimRight(string(p[8:]), "\x00"); utf8.ValidString(s) {
+				out, ok = s, true
+			}
+		}
+		return nil
+	})
+	return out, ok
+}
+
+// addNumberPair reads a trkn/disk atom back into its two canonical keys:
+// a raw data box holding a 16-bit index then a 16-bit total, either of
+// which is absent when it is zero (the muxer writes no atom at all when
+// both are).
+//
+// The type indicator must say binary (0), the same gate itemText applies
+// for text. This reader runs on every MP4 input, not only files this
+// muxer wrote, and a writer that stored trkn as UTF-8 ("3/9") is not
+// hypothetical: read as big-endian words those bytes become a track
+// number in the thousands, which would then become the container-tag
+// floor and get embedded onto the output. A shape this cannot read is
+// skipped, per the tolerance contract, rather than guessed at.
+func (d *Demuxer) addNumberPair(body []byte, numKey, totalKey string) {
+	_ = walkBoxes(body, func(typ string, p []byte) error {
+		if typ != "data" || len(p) < 14 || be32(p) != 0 {
+			return nil
+		}
+		payload := p[8:]
+		if n := be16(payload[2:]); n != 0 {
+			d.addTag(numKey, strconv.Itoa(int(n)))
+		}
+		if t := be16(payload[4:]); t != 0 {
+			d.addTag(totalKey, strconv.Itoa(int(t)))
+		}
+		return nil
+	})
+}
+
+// parseFreeform reads a '----' freeform atom: the iTunSMPB gapless
+// descriptor, or one of the ReplayGain tag keys.
 func (d *Demuxer) parseFreeform(body []byte) {
 	var name string
 	var data []byte
@@ -207,8 +311,17 @@ func (d *Demuxer) parseFreeform(body []byte) {
 		}
 		return nil
 	})
-	if name == "iTunSMPB" && data != nil {
+	if data == nil {
+		return
+	}
+	if name == "iTunSMPB" {
 		d.parseSMPB(string(data))
+		return
+	}
+	if ilstFreeformKeys[name] {
+		if s := strings.TrimRight(string(data), "\x00"); utf8.ValidString(s) {
+			d.addTag(name, s)
+		}
 	}
 }
 

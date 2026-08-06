@@ -94,6 +94,29 @@ or filtered at any seam.`,
 				return err
 			}
 			track := info.Default()
+			// The options field cannot say "level 0" with a plain 0 (that
+			// selects the encoder default), so the flag's 0 maps to the
+			// sentinel. The flag's own default is the encoder default spelled
+			// out, which is what leaves an explicit 0 a level and not a guess.
+			optLevel := flacLevel
+			if optLevel == 0 {
+				optLevel = waxflow.FLACLevelFastest
+			}
+			// A piece is a file, so an mp4-family output takes the flat MP4
+			// form unless the caller named a container: the engine's own rule,
+			// shared with transcode and with every job type. Decided before the
+			// extension is derived below, though progressive is the row's own
+			// MP4 and does not rename the file either way.
+			if containerName == "" {
+				plan, perr := e.PlanTranscode(track, waxflow.TranscodeOptions{
+					Format:    outFormat,
+					FLACLevel: optLevel,
+				})
+				if perr != nil {
+					return perr
+				}
+				containerName = waxflow.FileOutputContainer(containerName, plan)
+			}
 			// A cut list is meaningless against a length the headers only
 			// guess at: every piece is checked against the total. Measure
 			// rather than trust, the same call a timeline's mint makes for the
@@ -153,14 +176,6 @@ or filtered at any seam.`,
 				return waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating the output directory", err)
 			}
 
-			// The options field cannot say "level 0" with a plain 0 (that
-			// selects the encoder default), so the flag's 0 maps to the
-			// sentinel. The flag's own default is the encoder default spelled
-			// out, which is what leaves an explicit 0 a level and not a guess.
-			optLevel := flacLevel
-			if optLevel == 0 {
-				optLevel = waxflow.FLACLevelFastest
-			}
 			// TRACKTOTAL counts the disc's own tracks, and a lead-in piece is
 			// not one of them: it is the audio before track 1 and carries
 			// track 0 (see cuePieces).
@@ -172,7 +187,7 @@ or filtered at any seam.`,
 				e: e, log: logger, src: src, hint: srcHint,
 				outFormat: outFormat, container: containerName,
 				flacLevel: optLevel, force: force, ofN: ofN,
-				mapper: label.New(),
+				mapper: label.New(), containerTags: info.Tags,
 			}
 			if !noTags {
 				sp.readMeta(cmd)
@@ -391,10 +406,14 @@ type splitter struct {
 	// time, tagInfo carries what a tag list cannot (art again, for the
 	// formats whose muxer does not embed it) through the post-pass. All
 	// three are empty under --no-tags.
-	mapper    label.Mapper
-	tagInfo   *meta.Info
-	albumTags []container.Tag
-	art       *container.Picture
+	//
+	// containerTags are the source's own tags as the demuxer parsed them,
+	// the floor readMeta folds the mapper's over.
+	mapper        label.Mapper
+	containerTags map[string][]string
+	tagInfo       *meta.Info
+	albumTags     []container.Tag
+	art           *container.Picture
 }
 
 // readMeta reads the album's metadata off the source, once for the whole
@@ -407,9 +426,17 @@ type splitter struct {
 func (s *splitter) readMeta(cmd *cobra.Command) {
 	m, err := s.mapper.Read(cmd.Context(), s.src, s.hint, meta.ReadOptions{Pictures: true})
 	if err != nil {
-		return
+		// The container fallback below does not go through the mapper, so a
+		// read that failed outright must not take with it the tags the demuxer
+		// already parsed off the header.
+		m = &meta.Info{Warnings: []string{"metadata unread: " + err.Error()}}
 	}
 	logMetaRead(s.log, m)
+	// The container's own tags are the floor and the mapper's win over them,
+	// folded here (where the mapper's arrive) and so before the ReplayGain
+	// drop below: the container carries the four REPLAYGAIN_* keys too, and a
+	// later fold would put the rip's album values back onto every piece.
+	m = meta.WithContainerTags(m, s.containerTags)
 	// The album's ReplayGain measures the whole rip, and a piece is not it:
 	// the tags would tell a player to adjust a piece by a number nothing
 	// measured. A fresh measurement is what --loudness is for, on the piece.
@@ -442,9 +469,7 @@ func withoutTimeline(info *meta.Info) *meta.Info {
 // the reasons kept there: the MP4 muxers embed an ilst in moov, and the Ogg
 // muxer embeds the comment header at Begin.
 func (s *splitter) embedsTags() bool {
-	isMP4 := s.outFormat == "alac" ||
-		(s.outFormat == "aac" && (s.container == "" || s.container == "progressive"))
-	return isMP4 || s.container == "ogg"
+	return isMP4Container(s.outFormat, s.container) || s.container == "ogg"
 }
 
 // writePiece transcodes one span of the source to its own file.

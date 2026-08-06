@@ -78,19 +78,25 @@ func decodeStream(t *testing.T, raw []byte) ([]float32, audio.Format) {
 }
 
 func TestDecodeDifferentialSmoke(t *testing.T) {
+	// encoder names the ffmpeg build option a row needs. libmp3lame and
+	// libshine are portable libraries, but whether a given ffmpeg was built
+	// with either is a packaging choice, so a row self-skips rather than
+	// failing on a machine whose ffmpeg simply omits it.
 	cases := []struct {
-		name string
-		args []string
+		name    string
+		encoder string
+		args    []string
 	}{
-		{"mpeg1-cbr128.mp3", []string{"-ac", "2", "-c:a", "libmp3lame", "-b:a", "128k"}},
-		{"mpeg1-cbr320-mono.mp3", []string{"-ac", "1", "-c:a", "libmp3lame", "-b:a", "320k"}},
-		{"mpeg1-vbr.mp3", []string{"-ac", "2", "-c:a", "libmp3lame", "-q:a", "4"}},
-		{"mpeg2-22050.mp3", []string{"-ac", "2", "-ar", "22050", "-c:a", "libmp3lame", "-b:a", "64k"}},
-		{"mpeg25-8000.mp3", []string{"-ac", "1", "-ar", "8000", "-c:a", "libmp3lame", "-b:a", "16k"}},
-		{"mpeg1-shine.mp3", []string{"-ac", "2", "-c:a", "libshine", "-b:a", "128k"}},
+		{"mpeg1-cbr128.mp3", "libmp3lame", []string{"-ac", "2", "-c:a", "libmp3lame", "-b:a", "128k"}},
+		{"mpeg1-cbr320-mono.mp3", "libmp3lame", []string{"-ac", "1", "-c:a", "libmp3lame", "-b:a", "320k"}},
+		{"mpeg1-vbr.mp3", "libmp3lame", []string{"-ac", "2", "-c:a", "libmp3lame", "-q:a", "4"}},
+		{"mpeg2-22050.mp3", "libmp3lame", []string{"-ac", "2", "-ar", "22050", "-c:a", "libmp3lame", "-b:a", "64k"}},
+		{"mpeg25-8000.mp3", "libmp3lame", []string{"-ac", "1", "-ar", "8000", "-c:a", "libmp3lame", "-b:a", "16k"}},
+		{"mpeg1-shine.mp3", "libshine", []string{"-ac", "2", "-c:a", "libshine", "-b:a", "128k"}},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
+			testutil.FFmpegEncoder(t, tt.encoder)
 			path := generate(t, tt.name, tt.args...)
 			raw, err := os.ReadFile(path)
 			if err != nil {

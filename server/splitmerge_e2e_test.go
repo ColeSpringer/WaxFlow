@@ -181,17 +181,32 @@ func TestMergeSelectsProgressiveMP4(t *testing.T) {
 		}
 	})
 
-	// The contrast, and the reason the case above proves anything: a transcode
-	// job of the same format keeps the row's fragmented default, so the flat
-	// form is a decision merge makes and not just what this daemon always does.
-	t.Run("a transcode job keeps the fragmented default", func(t *testing.T) {
+	// Every job type that writes a file takes the same rule, not merge alone:
+	// a transcode job used to keep the row's fragmented default, which left it
+	// with no chapter track, an estimated ReplayGain where a measurement was
+	// available, and an output no tag rewriter can edit.
+	t.Run("a transcode job is flat too", func(t *testing.T) {
 		id := createJob(t, env, `{"type":"transcode","src":"lib/ramp.wav","format":"alac"}`)
 		job := awaitJob(t, env, id)
-		if job.Request.Container != "" {
-			t.Errorf("request container = %q, want the row default", job.Request.Container)
+		if job.Request.Container != "progressive" {
+			t.Errorf("request container = %q, want progressive", job.Request.Container)
+		}
+		if raw := readBody(t, env.get(t, "/jobs/"+id+"/result", nil)); hasBox(t, raw, "moof") {
+			t.Error("the transcoded MP4 carries fragments; a file output is the flat form")
+		}
+	})
+
+	// The contrast, and the reason the cases above prove anything: the
+	// fragmented form is still reachable by naming it, so flat is a decision
+	// the rule makes rather than the only shape this daemon can write.
+	t.Run("the fragmented form is still reachable", func(t *testing.T) {
+		id := createJob(t, env, `{"type":"transcode","src":"lib/ramp.wav","format":"alac","container":"fragmented"}`)
+		job := awaitJob(t, env, id)
+		if job.Request.Container != "fragmented" {
+			t.Errorf("request container = %q, want the caller's fragmented", job.Request.Container)
 		}
 		if raw := readBody(t, env.get(t, "/jobs/"+id+"/result", nil)); !hasBox(t, raw, "moof") {
-			t.Error("the transcoded MP4 has no fragments, so the merge case above proves nothing")
+			t.Error("an explicitly fragmented job produced no fragments")
 		}
 	})
 

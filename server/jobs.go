@@ -315,10 +315,35 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 	if err := s.checkOutputShape(req); err != nil {
 		return nil, err
 	}
-	if _, err := s.eng.PlanTranscode(info.Default(), req.TranscodeOptions(0, s.profile)); err != nil {
+	plan, err := s.eng.PlanTranscode(info.Default(), req.TranscodeOptions(0, s.profile))
+	if err != nil {
+		return nil, err
+	}
+	// A transcode or split job writes files, so it takes the flat MP4 form
+	// unless the caller named a container, exactly as a merge does below and a
+	// CLI transcode does. This used to reach merges only, which left the other
+	// two job types writing a fragmented .m4a: no chapter track, an estimated
+	// ReplayGain where a measurement was available, and an output no tag
+	// rewriter can edit. Settled here so the stored request says what will be
+	// produced rather than the runner meaning something else.
+	if err := s.applyFileOutputContainer(req, info.Default(), plan); err != nil {
 		return nil, err
 	}
 	return req, nil
+}
+
+// applyFileOutputContainer settles a job's container through the engine's own
+// rule and re-plans when it changed the answer, so what was validated is what
+// will be written. The re-plan is not ceremony: it is what proves the chosen
+// form is one this format can actually produce.
+func (s *Server) applyFileOutputContainer(req *jobs.Request, track container.Track, plan *waxflow.TranscodePlan) error {
+	resolved := waxflow.FileOutputContainer(req.Container, plan)
+	if resolved == req.Container {
+		return nil
+	}
+	req.Container = resolved
+	_, err := s.eng.PlanTranscode(track, req.TranscodeOptions(0, s.profile))
+	return err
 }
 
 // checkOutputShape validates the shaping fields every audio-writing job
@@ -358,9 +383,9 @@ func (s *Server) checkOutputShape(req *jobs.Request) error {
 }
 
 // mp4ProgressiveContainer is the container override that selects the flat
-// (moov+mdat) MP4 form. The engine's own constant is unexported and this is a
-// wire value either way, spelled the same by the CLI's --container flag.
-const mp4ProgressiveContainer = "progressive"
+// (moov+mdat) MP4 form, aliased from the engine so the wire value has one
+// definition rather than one per package.
+const mp4ProgressiveContainer = waxflow.ContainerProgressive
 
 // validateMergeRequest resolves, measures, and plans a merge's members. It
 // pins their identities as it goes, which is where the merge's source-changed
@@ -423,15 +448,13 @@ func (s *Server) validateMergeRequest(ctx context.Context, body jobRequest, req 
 	// caller to know the word "progressive" to get an M4B that opens is a
 	// worse API than picking the form that works.
 	//
-	// The engine is asked whether this is MP4 rather than a format name being
-	// matched here: the plan's media type is the same answer runTranscode's
-	// own MP4 branch reads, so a new mp4-family row is covered without this
-	// knowing it exists.
-	if req.Container == "" && plan.MediaType == "audio/mp4" {
-		req.Container = mp4ProgressiveContainer
-		if _, err := s.eng.PlanTranscode(env, req.TranscodeOptions(0, s.profile)); err != nil {
-			return nil, err
-		}
+	// The rule itself is the engine's (waxflow.FileOutputContainer), which is
+	// what keeps this, the transcode/split path, and the CLI from drifting: it
+	// was reimplemented per caller until one of the three was missed. It asks
+	// the plan's media type rather than matching a format name, so a new
+	// mp4-family row is covered without any caller knowing it exists.
+	if err := s.applyFileOutputContainer(req, env, plan); err != nil {
+		return nil, err
 	}
 	// Titles write a QuickTime chapter track, which only the flat MP4 form
 	// carries. If the resolved output is not that form the runner drops them, so

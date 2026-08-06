@@ -36,6 +36,22 @@ type Chapterer interface {
 	Chapters() []Chapter
 }
 
+// Tagger is implemented by demuxers that parse embedded tags, the same
+// capability gate as Chapterer and for the same reason: a container with
+// no tag form has nothing to answer and does not implement it.
+//
+// Tags is a field read, so asking is free: a demuxer that implements this
+// resolved its tags during the header parse. Keys use the same canonical
+// uppercase vocabulary Tag does, values in file order.
+//
+// Cover art is deliberately not here. A picture is megabytes, so it cannot
+// be held per demuxer on the streaming path; serving it needs an opt-in
+// accessor rather than a field read, which is the same reason
+// meta.ReadOptions.Pictures exists.
+type Tagger interface {
+	Tags() map[string][]string
+}
+
 // Picture is embedded cover art for muxers that can embed it.
 type Picture struct {
 	MIME string

@@ -224,6 +224,11 @@ func (d *Demuxer) parse() error {
 		Samples:     samples,
 		Default:     true,
 	}
+	// FL64 decodes to float32 like every other float source, so the file's
+	// own depth has nowhere in audio.Format to live; see the riff demuxer.
+	if cfg.Encoding == pcm.Float && cfg.Bits != f.BitDepth {
+		d.track.SourceBitDepth = cfg.Bits
+	}
 	return nil
 }
 

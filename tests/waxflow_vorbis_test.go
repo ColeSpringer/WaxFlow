@@ -111,7 +111,10 @@ func TestTranscodeOggVorbisRoundTrip(t *testing.T) {
 // 21-23 ms overlong track. The old muxer was off by one long block (1024) and
 // only the second reading would have caught it, since the round trip cancelled.
 func TestOggVorbisDifferential(t *testing.T) {
-	testutil.FFmpeg(t)
+	// The reference decoder, not just ffmpeg: this reads our own stream back
+	// through libvorbis rather than ffmpeg's experimental native decoder, so a
+	// build without libvorbis has no oracle here.
+	testutil.FFmpegDecoder(t, "libvorbis")
 	e := waxflow.New()
 	const frames = 24000
 	wav, f, interleaved := vorbisTestWAV(t, frames)

@@ -102,9 +102,27 @@ type ProbeMetadata struct {
 func ProbeJSON(info *format.Info, m *ProbeMetadata) ProbeInfo {
 	out := ProbeInfo{SchemaVersion: 1, Container: info.Container, Warnings: info.Warnings}
 	if m != nil {
-		out.Tags = m.Tags
 		out.HasArt = m.HasArt
 		out.HasLyrics = m.HasLyrics
+	}
+	// Tags resolve exactly as chapters do below, and for the same reason: the
+	// mapper wins when it read some, the container's own are the fallback, and
+	// without the fallback a daemon embedded by anyone who injects no mapper
+	// reports no tags for a file that plainly has them.
+	//
+	// HasArt takes no such fallback. It is documented as what /art can serve,
+	// and /art serves only what the mapper hands it, so flipping it true from a
+	// covr atom the container saw would promise a payload the endpoint then
+	// 404s. See docs/api.md.
+	// Through TagSummary either way, so the two branches answer the same
+	// shape: it drops LYRICS (a sheet is many KB, served whole by /lyrics and
+	// reported by hasLyrics) and copies the map, which matters because
+	// info.Tags is the demuxer's own and callers must not alias it. The
+	// fallback assigning it raw put a whole lyric sheet inside "tags" beside a
+	// hasLyrics of false and a /lyrics that 404s.
+	out.Tags = (&meta.Info{Tags: info.Tags}).TagSummary()
+	if m != nil && len(m.Tags) > 0 {
+		out.Tags = m.Tags
 	}
 	// The mapper's chapters win when a mapper is wired, since that is where
 	// this surface has always read them and a richer tag library may know
@@ -124,6 +142,16 @@ func ProbeJSON(info *format.Info, m *ProbeMetadata) ProbeInfo {
 		})
 	}
 	for _, t := range info.Tracks {
+		// The source's own depth wins where it differs from the pipeline's,
+		// which is float64 sources and nothing else: probe describes the file,
+		// and a 64-bit float wav reporting bitDepth 32 describes the decoder.
+		// sampleType is the float discriminator and always has been, so a
+		// consumer testing bitDepth == 32 for "float" was reading the wrong
+		// field; see docs/api.md.
+		depth := t.Fmt.BitDepth
+		if t.SourceBitDepth != 0 {
+			depth = t.SourceBitDepth
+		}
 		out.Tracks = append(out.Tracks, ProbeTrack{
 			ID:              t.ID,
 			Codec:           string(t.Codec),
@@ -131,7 +159,7 @@ func ProbeJSON(info *format.Info, m *ProbeMetadata) ProbeInfo {
 			Channels:        t.Fmt.Channels,
 			Layout:          t.Fmt.Layout.String(),
 			SampleType:      t.Fmt.Type.String(),
-			BitDepth:        t.Fmt.BitDepth,
+			BitDepth:        depth,
 			Samples:         t.Samples,
 			DurationSeconds: DurationSeconds(t.Samples, t.Fmt.Rate),
 			Default:         t.Default,

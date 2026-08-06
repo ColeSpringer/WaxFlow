@@ -49,9 +49,16 @@ tagging a release that touches HLS:
      ends with `EXT-X-ENDLIST`.
    - `EXT-X-MAP` init segment fetches and parses (no "failed to parse
      segment as fMP4" errors).
-   - Measured segment durations within tolerance of `EXTINF` (our
-     EXTINF values are exact by construction; a violation means a
-     muxer/plan bug, not a tolerance issue).
+   - Measured segment durations within tolerance of `EXTINF`. Every
+     interior segment is exact by construction. On a priming-carrying
+     rung the first and last segments declare a few ms less than a
+     validator measures off the boxes, because EXTINF is the
+     presentation timeline and the boxes are the decode one; the
+     difference is exactly the priming the init segment's edit list
+     already tells the player to discard. See the EXTINF note below.
+     RFC 8216 allows 0.5 s, so this is three orders of magnitude inside
+     tolerance, but it is the one place a measured/declared difference
+     is expected rather than a defect.
    - `BANDWIDTH` at or above the measured peak per variant (ours is a
      deliberate upper bound: CBR rate or PCM wire rate plus overhead).
    - `CODECS` strings accepted (`Opus`, `fLaC`, `alac`).
@@ -61,13 +68,32 @@ tagging a release that touches HLS:
    - Audio-only streams warn about missing video attributes; ignore.
    - The final segment is short (the tail remainder); that is legal and
      expected.
-   - EXTINF values are decode durations (what validators measure per
-     segment), so per-segment checks agree exactly, but for Opus their
-     sum exceeds the edit-list presentation duration by the encoder
-     delay plus the flushed tail padding (at most ~22 ms). Every
-     priming-carrying HLS stream (AAC included) has this property;
-     clipping EXTINF to presentation instead would make the per-segment
-     measurements disagree.
+   - EXTINF values are **presentation** durations: each segment's decode
+     span intersected with the presentation window the init segment's
+     edit list declares. Two properties follow, and both are pinned by
+     `TestPresentationDurationSumsToTheTrack`:
+
+     1. They sum to the source's true length exactly in samples (and to
+        within the playlist's own `%.5f` rounding, 5e-6 s per segment,
+        in seconds), so a player deriving a total duration from EXTINF
+        gets the right one.
+     2. Every prefix sums to the real presentation start of the next
+        segment, which is what a player seeks with.
+
+     They were decode durations until v1.0, and that got **both** wrong:
+     the total overshot by the encoder delay plus the flushed tail
+     padding (~23 ms on a 30 s AAC rung, almost all of it the head
+     delay), and every prefix ran ahead of the media timeline by exactly
+     the delay, so the playlist and the edit list disagreed about where
+     each segment starts. Presentation durations align them.
+
+     The visible consequence is the per-segment note above: a validator
+     measuring decode duration off the boxes reads the first and last
+     segments a few ms longer than EXTINF declares. That difference is
+     the priming, and the edit list is what resolves it; a player that
+     honors the edit list (which fMP4 requires) sees no discrepancy at
+     all. Lossless rungs (FLAC, ALAC) carry no delay, so decode and
+     presentation coincide and nothing changed for them.
 5. Play each master in Safari and in AVPlayer (an iOS device or
    simulator): start, seek far ahead, seek back, play to the end. The
    client matrix records the outcomes per format and feeds the

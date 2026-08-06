@@ -24,7 +24,7 @@ func trackWithSamples(n int64) container.Track {
 func TestTrackCacheEvictsLeastRecentlyUsed(t *testing.T) {
 	var c trackCache
 	for i := range trackCacheCap {
-		c.put(strconv.Itoa(i), trackWithSamples(int64(i)))
+		c.put(strconv.Itoa(i), trackWithSamples(int64(i)), nil)
 	}
 	// Key "0" is the oldest-inserted. Touch it, so it is also the most
 	// recently used: the two policies now disagree about it.
@@ -32,7 +32,7 @@ func TestTrackCacheEvictsLeastRecentlyUsed(t *testing.T) {
 		t.Fatal("key 0 missing before eviction")
 	}
 	// Insert at capacity, forcing one eviction.
-	c.put("new", trackWithSamples(-1))
+	c.put("new", trackWithSamples(-1), nil)
 
 	if _, ok := c.get("0"); !ok {
 		t.Error("evicted the most recently used entry: the policy is oldest-inserted, not LRU")
@@ -50,7 +50,7 @@ func TestTrackCacheGetReturnsStoredTrack(t *testing.T) {
 	if _, ok := c.get("absent"); ok {
 		t.Error("zero-value cache reported a hit")
 	}
-	c.put("k", trackWithSamples(42))
+	c.put("k", trackWithSamples(42), nil)
 	got, ok := c.get("k")
 	if !ok {
 		t.Fatal("miss after put")
@@ -68,7 +68,7 @@ func TestTrackCacheBoundHolds(t *testing.T) {
 	// Enough past the cap to force many evictions, but not so far that the
 	// linear evict scan (O(cap) per insert once full) dominates the suite.
 	for i := range trackCacheCap + 500 {
-		c.put(strconv.Itoa(i), trackWithSamples(int64(i)))
+		c.put(strconv.Itoa(i), trackWithSamples(int64(i)), nil)
 	}
 	if len(c.entries) > trackCacheCap {
 		t.Errorf("cache grew to %d entries past the %d cap", len(c.entries), trackCacheCap)

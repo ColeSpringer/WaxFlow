@@ -195,6 +195,7 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 	defer chain.Release()
 
 	f := chain.Format()
+	e.logImplicitDownmix(opts, srcTrack.Fmt, f)
 	enc, err := row.encode(f, opts)
 	if err != nil {
 		return nil, err
@@ -766,18 +767,12 @@ var outputs = []output{
 		headerBytes: 512,
 		codecID:     codec.Opus,
 		adjust: func(spec *dsp.ChainSpec, src audio.Format, _ TranscodeOptions) {
-			// Opus decodes at 48 kHz and encodes float; more than two channels
-			// downmix to stereo by default (the lossy-output convention). An
-			// explicit channel request is never overridden: 1 and 2 are
-			// honored, and anything else fails loudly in the chain or the
-			// encoder rather than being silently rewritten.
+			// Opus decodes at 48 kHz and encodes float.
 			spec.Rate = opus.SampleRate
 			spec.Float = true
 			spec.BitDepth = 0
 			spec.FrameSize = 960 // 20 ms at 48 kHz, the encoder-native frame
-			if spec.Channels == 0 && src.Channels > 2 {
-				spec.Channels = 2
-			}
+			foldWideToStereo(spec, src)
 		},
 		plan: func(f audio.Format, opts TranscodeOptions) (string, int, int, error) {
 			eopts, err := opusEncoderOptions(opts)
@@ -1001,7 +996,7 @@ var outputs = []output{
 		lossy:       true,
 		mediaType:   "audio/mpeg",
 		codecID:     codec.MP3,
-		adjust: func(spec *dsp.ChainSpec, _ audio.Format, _ TranscodeOptions) {
+		adjust: func(spec *dsp.ChainSpec, src audio.Format, _ TranscodeOptions) {
 			// MP3 encodes float32 in native frames: two granules (MPEG-1) or
 			// one (MPEG-2/2.5), which the framer resolves from the rate. The
 			// lossy path always runs in the float domain, so any integer
@@ -1009,6 +1004,7 @@ var outputs = []output{
 			spec.FrameSize = 1152
 			spec.BitDepth = 0
 			spec.Float = true
+			foldWideToStereo(spec, src)
 		},
 		plan: func(f audio.Format, opts TranscodeOptions) (string, int, int, error) {
 			eo, err := mp3EncoderOptions(opts)
@@ -1045,14 +1041,20 @@ var outputs = []output{
 		// (the anticipated disambiguation): the extension overwhelmingly
 		// means AAC in the wild. The bare .aac extension implies the
 		// ADTS container at the CLI boundary.
-		exts:      []string{"m4a", "aac"},
+		//
+		// m4b is the audiobook spelling of the same file and already reads
+		// (format/registry.go); it answers here so `transcode in.flac
+		// out.m4b` infers a format rather than demanding --format. It stays
+		// after m4a, which is what an m4a-or-m4b output is written as
+		// (OutputExt takes the first).
+		exts:      []string{"m4a", "aac", "m4b"},
 		live:      true,
 		lossy:     true,
 		mediaType: "audio/mp4",
 		// headerBytes approximates the fMP4 init header (ftyp+moov).
 		headerBytes: 700,
 		codecID:     codec.AACLC,
-		adjust: func(spec *dsp.ChainSpec, _ audio.Format, _ TranscodeOptions) {
+		adjust: func(spec *dsp.ChainSpec, src audio.Format, _ TranscodeOptions) {
 			// AAC-LC encodes float32 in 1024-sample frames. The lossy path
 			// always runs in the float domain, so any integer depth request
 			// is dropped. The rate is not snapped: the encoder accepts the
@@ -1061,6 +1063,7 @@ var outputs = []output{
 			spec.FrameSize = 1024
 			spec.BitDepth = 0
 			spec.Float = true
+			foldWideToStereo(spec, src)
 		},
 		plan: func(f audio.Format, opts TranscodeOptions) (string, int, int, error) {
 			if _, err := aacContainerMediaType(opts.Container); err != nil {
@@ -1090,7 +1093,7 @@ var outputs = []output{
 			if opts.Container == "adts" {
 				return adts.NewMuxer(dst), nil
 			}
-			if opts.Container == mp4Progressive {
+			if opts.Container == ContainerProgressive {
 				return mp4.NewProgressiveMuxer(dst, mp4MuxerOptions(opts)), nil
 			}
 			return mp4.NewMuxer(dst, mp4MuxerOptions(opts)), nil
@@ -1143,19 +1146,19 @@ var outputs = []output{
 			return alac.NewEncoder(f, nil)
 		},
 		mux: func(_ container.Track, opts TranscodeOptions, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
-			if opts.Container == mp4Progressive {
+			if opts.Container == ContainerProgressive {
 				return mp4.NewProgressiveMuxer(dst, mp4MuxerOptions(opts)), nil
 			}
 			return mp4.NewMuxer(dst, mp4MuxerOptions(opts)), nil
 		},
-		// ALAC's only alternate form is progressive (flat) MP4; the default is
-		// fragmented CMAF.
+		// ALAC rides only in MP4, so its overrides are the two box shapes:
+		// progressive (flat) and fragmented (CMAF, the row's default).
 		container: func(name string) (string, error) {
-			if name == mp4Progressive {
-				return "audio/mp4", nil
+			if name == ContainerProgressive || name == ContainerFragmented {
+				return mp4MediaType, nil
 			}
 			return "", waxerr.New(waxerr.CodeInvalidRequest,
-				fmt.Sprintf("waxflow: alac container %q: want progressive (or empty for fMP4)", name))
+				fmt.Sprintf("waxflow: alac container %q: want progressive or fragmented", name))
 		},
 		hls: &hlsOutput{
 			codecs: "alac",
@@ -1166,35 +1169,119 @@ var outputs = []output{
 	},
 }
 
+// logImplicitDownmix says out loud that the chain folded channels the caller
+// never asked to lose, at Warn rather than Debug: the default level is info,
+// and a scripted conversion that quietly halves a 5.1 master should not need a
+// flag to find out.
+//
+// Here rather than in buildPlanCore, which is package-level with no logger
+// and, worse, memoized: PlanTranscode caches cores per (format, options), so a
+// warning there would fire on the first of 500 identically shaped files and
+// stay silent for the other 499. Every run-side entry point calls this, which
+// is why it is a method and not four copies: the segmented path folds through
+// the same adjust hook and used to say nothing at all.
+func (e *Engine) logImplicitDownmix(opts TranscodeOptions, src, out audio.Format) {
+	if opts.Channels == 0 && out.Channels < src.Channels {
+		e.log.Warn("downmixed to fit the output format",
+			"format", opts.Format, "source", src.Channels, "out", out.Channels)
+	}
+}
+
+// foldWideToStereo is the lossy rows' channel policy, in one place because
+// it is a policy and not an encoder detail: a source wider than the encoder
+// can hold folds to stereo when the caller asked for no particular width.
+//
+// The split it draws is lossy against lossless, not one encoder against
+// another. opus, mp3 and aac are all 1-2 channel encoders, and a listener
+// asking for a lossy delivery of a 5.1 film has already accepted that audio
+// is being discarded; refusing the request outright serves nobody, and it
+// used to be that only opus folded while mp3 and aac 415'd the same request.
+// alac is the counterexample and stays a refusal: a lossless output that
+// silently drops four channels is a lie about what it holds. flac and vorbis
+// hold multichannel natively and never reach here.
+//
+// An explicit channel request is never overridden: 1 and 2 are honored, and
+// anything else fails loudly in the chain or the encoder rather than being
+// silently rewritten. The fold itself is dsp/mix's BS.775 matrix with the
+// chain's true-peak limiter behind it, unchanged; this decides only when it
+// engages. Engine.TranscodeMedia logs the folds nobody asked for.
+func foldWideToStereo(spec *dsp.ChainSpec, src audio.Format) {
+	if spec.Channels == 0 && src.Channels > 2 {
+		spec.Channels = 2
+	}
+}
+
 // aacContainerMediaType resolves the aac row's container override:
-// empty selects progressive fragmented MP4 (the default, with gapless
-// edit-list signaling), "adts" the raw elementary stream (no gapless
-// signaling at all, which is why it is the opt-out and not the default).
+// empty selects fragmented MP4 (the row's default, with gapless edit-list
+// signaling), "adts" the raw elementary stream (no gapless signaling at
+// all, which is why it is the opt-out and not the default).
 func aacContainerMediaType(name string) (string, error) {
 	switch name {
 	case "":
-		return "audio/mp4", nil
+		return mp4MediaType, nil
 	case "adts":
 		return "audio/aac", nil
-	case mp4Progressive:
-		// Flat MP4 (moov+mdat): the same media type as fragmented, a
-		// different box shape (and not a streaming form).
-		return "audio/mp4", nil
+	case ContainerProgressive, ContainerFragmented:
+		// The two MP4 box shapes: flat (moov+mdat) and fragmented (CMAF).
+		// Same media type, same codec, different layout; only progressive
+		// back-patches, so only it is not a streaming form.
+		return mp4MediaType, nil
 	}
 	// AAC also rides in Matroska (A_AAC), though not WebM (Opus/Vorbis only).
 	if mt, ok := matroskaContainer(name, false); ok {
 		return mt, nil
 	}
 	return "", waxerr.New(waxerr.CodeInvalidRequest,
-		fmt.Sprintf("waxflow: aac container %q: want adts, progressive, or mka (or empty for fMP4)", name))
+		fmt.Sprintf("waxflow: aac container %q: want adts, progressive, fragmented, or mka", name))
 }
 
-// mp4Progressive is the Container override that selects the flat (non-
-// fragmented) MP4 form on the aac and alac rows, the ".m4a most players
-// expect." The default (empty) container stays the fragmented CMAF form, which
-// streams; progressive back-patches its header, so it needs a seekable
-// destination and is not live.
-const mp4Progressive = "progressive"
+// ContainerProgressive and ContainerFragmented are the TranscodeOptions.
+// Container overrides naming the two MP4 box shapes. Progressive is the flat
+// moov+mdat form, "the .m4a most players expect"; it back-patches its header,
+// so it needs a seekable destination and is not live. Fragmented is the CMAF
+// form /stream and HLS deliver, and it is the aac and alac rows' default (the
+// empty override).
+//
+// Fragmented is spellable even though it is the default because the empty
+// override no longer reaches it everywhere: a file output takes the flat form
+// (FileOutputContainer), which would otherwise leave the delivery form with no
+// name a caller could ask for.
+//
+// Exported because four packages spell them: the CLI's --container flag, the
+// job request's container field, the /stream query parameter, and this table.
+// They were restated per boundary until the empty-to-progressive rule was
+// reimplemented three times and one of the three was missed, which is what
+// FileOutputContainer below now prevents by construction.
+const (
+	ContainerProgressive = "progressive"
+	ContainerFragmented  = "fragmented"
+)
+
+// mp4MediaType is what an mp4-family output's plan reports. The file-output
+// rule keys on it rather than on a format name, so a new mp4-family row is
+// covered without the rule knowing it exists.
+const mp4MediaType = "audio/mp4"
+
+// FileOutputContainer resolves the container a file output should be written
+// with: the caller's explicit choice, or the flat MP4 form when the plan says
+// this is an mp4-family output and the caller expressed no preference.
+//
+// A file can satisfy the back-patch the flat header needs, streaming buys it
+// nothing, and it is the only form that carries a QuickTime chapter track or
+// that a tag rewriter can edit afterwards. Delivery keeps the fragmented
+// default, which is where it belongs.
+//
+// It lives here rather than at each boundary because every writer of a file
+// needs it: `waxflow transcode`, `waxflow split`, and all of the transcode,
+// split and merge job types. Pass the plan taken from the caller's own options
+// and re-plan when this changes the answer, so the plan and the run agree
+// about what was asked for.
+func FileOutputContainer(requested string, plan *TranscodePlan) string {
+	if requested == "" && plan != nil && plan.MediaType == mp4MediaType {
+		return ContainerProgressive
+	}
+	return requested
+}
 
 // containerLive reports the effective liveness of a transcode: a Container
 // override can select a muxer whose NeedsSeek differs from the row's default.
@@ -1205,7 +1292,7 @@ const mp4Progressive = "progressive"
 // first) from offering the progressive form, while /caps still advertises the
 // row's default streamability.
 func containerLive(rowLive bool, container string) bool {
-	if container == mp4Progressive {
+	if container == ContainerProgressive {
 		return false
 	}
 	return rowLive
@@ -1494,10 +1581,10 @@ const outputExtFallback = "bin"
 
 // containerExt maps a Container override to the extension its wrapper is
 // written with, reporting false for one that does not rename the file at all:
-// the empty default, and mp4Progressive, which is the row's own MP4 in a flat
-// box shape rather than a second container. The rest are the shared override
-// names (the matroskaContainer set, aac's adts, flac's ogg), resolved in one
-// place for the same reason those are: one wrapper serves many rows.
+// the empty default, and ContainerProgressive/ContainerFragmented, which are the row's own
+// MP4 in two box shapes rather than a second container. The rest are the shared
+// override names (the matroskaContainer set, aac's adts, flac's ogg), resolved
+// in one place for the same reason those are: one wrapper serves many rows.
 func containerExt(name string) (ext string, ok bool) {
 	switch name {
 	case "adts":

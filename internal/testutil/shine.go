@@ -20,13 +20,16 @@ import (
 
 // Shine returns the ffmpeg path if its libshine encoder is available,
 // skipping or failing per the policy.
+//
+// The membership test is haveCodec's listing parse, not `ffmpeg -h
+// encoder=libshine`: that command exits 0 whether or not the encoder exists
+// (it prints "Codec 'libshine' is not recognized by FFmpeg" and succeeds), so
+// the check it looks like it is making it does not make. This gate answered
+// "yes" on every machine with ffmpeg for as long as it was written that way.
 func Shine(t testing.TB) string {
 	t.Helper()
 	path, err := exec.LookPath("ffmpeg")
-	if err == nil {
-		err = exec.Command(path, "-hide_banner", "-h", "encoder=libshine").Run()
-	}
-	if err != nil {
+	if err != nil || !haveCodecQuiet("-encoders", "libshine") {
 		if os.Getenv("WAXFLOW_REQUIRE_SHINE") == "1" {
 			t.Fatal("ffmpeg libshine required by WAXFLOW_REQUIRE_SHINE=1 but not available")
 		}
@@ -50,14 +53,11 @@ func ShineEncodeFile(t testing.TB, wavPath string, kbps int) string {
 
 // HaveLAME reports whether ffmpeg carries libmp3lame. LAME is an
 // informational reference column in the quality report, never a gate, so
-// absence is a false, not a skip.
+// absence is a false, not a skip: this deliberately does not escalate under
+// WAXFLOW_REQUIRE_FFMPEG, which is why it does not go through haveCodec.
 func HaveLAME(t testing.TB) bool {
 	t.Helper()
-	path, err := exec.LookPath("ffmpeg")
-	if err != nil {
-		return false
-	}
-	return exec.Command(path, "-hide_banner", "-h", "encoder=libmp3lame").Run() == nil
+	return haveCodecQuiet("-encoders", "libmp3lame")
 }
 
 // LAMEEncodeFile encodes a WAV file to CBR MP3 with libmp3lame and returns

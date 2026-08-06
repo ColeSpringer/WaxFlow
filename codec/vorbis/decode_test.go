@@ -134,6 +134,7 @@ func TestDecodeDifferential(t *testing.T) {
 		{"stereo48k", 2, 48000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			testutil.FFmpegEncoder(t, "libvorbis")
 			testutil.FFmpegGenerate(t, path, tc.rate, tc.channels, "libvorbis", "-q:a", "5")
 			data, err := os.ReadFile(path)
 			if err != nil {

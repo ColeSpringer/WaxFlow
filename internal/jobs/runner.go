@@ -705,11 +705,31 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 	}
 	defer src.Close()
 
+	// Probe before the metadata read rather than after: its Info carries the
+	// container's own tags and chapters, which both the tag fold below and the
+	// options further down need, and it fixes the output's identity fields
+	// (media type, container) for the plan. Creation validated this same plan,
+	// so failures here mean the source itself changed shape.
+	probe, err := r.cfg.Engine.Probe(src, src.Ext, nil)
+	if err != nil {
+		return err
+	}
+
 	var info *meta.Info
 	if r.cfg.Meta != nil {
 		mi, err := r.cfg.Meta.Read(ctx, src, src.Ext, meta.ReadOptions{Pictures: true})
-		if err != nil {
+		switch {
+		case err != nil && ctx.Err() != nil:
+			// Cancellation is the job being stopped, not a metadata problem.
 			return err
+		case err != nil:
+			// Metadata is best-effort and the audio is fine, so a mapper that
+			// failed outright warns rather than killing a transcode. It must
+			// not take the container's tags with it either: those are already
+			// parsed and the fold below still has them. The CLI reached the
+			// same answer for the same reason.
+			r.warn(j.ID, "metadata unread: "+err.Error())
+			mi = &meta.Info{}
 		}
 		info = mi
 		for _, w := range info.Warnings {
@@ -721,6 +741,31 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 			r.log.Debug("job metadata", "id", j.ID, "note", n)
 		}
 	}
+	// The container's own tags are the floor and the mapper's win over them,
+	// the same resolution opts.Chapters makes below and GET /probe makes on
+	// the wire. A daemon with no mapper wired leaves info nil, which the fold
+	// reads as a floor to build on. Folded here, before the ReplayGain drop:
+	// the container carries the four REPLAYGAIN_* keys too, and a later fold
+	// would put the source's stale values back onto a gained output.
+	info = meta.WithContainerTags(info, probe.Tags)
+
+	// Planned before the loudness pass, because the measurement's basis is the
+	// plan's resolved channel count. Gain is the one option still unresolved
+	// here and it shapes no field this reads, so it lands on opts afterwards
+	// rather than forcing a second plan.
+	opts := req.TranscodeOptions(0, r.cfg.Profile)
+	plan, err := r.cfg.Engine.PlanTranscode(probe.Default(), opts)
+	if err != nil {
+		return err
+	}
+	isMP4 := plan.MediaType == "audio/mp4"
+	// The two meanings isMP4 used to carry, which have diverged: both MP4
+	// forms embed tags at Begin and so need the fixed-width placeholders, but
+	// only the fragmented one cannot be decoded back, which is the condition
+	// for deriving the output's ReplayGain instead of measuring it. A request
+	// naming the flat form (as every merge does) writes a file the engine
+	// reads back perfectly well, and used to get an estimate anyway.
+	fragmentedMP4 := isMP4 && opts.Container != mp4ProgressiveContainer
 
 	analyzeLoudness := req.Loudness == "analyze"
 	var gainDB float64
@@ -734,7 +779,12 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 			// encode meters. The stored Analysis.Channels then reports this
 			// measurement basis, not the source count, which is what makes
 			// IntegratedLUFS + AppliedGainDB land on the RG reference.
-			Channels: req.Channels,
+			//
+			// The basis is the plan's resolved width, not the ch field: a
+			// lossy row that cannot hold the source layout folds to stereo on
+			// its own, and a request-keyed measurement sees none of it and
+			// meters channels the encode never encodes.
+			Channels: plan.Format.Channels,
 		})
 		if err != nil {
 			return err
@@ -754,22 +804,15 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 		}
 	}
 
-	// Probe before the options rather than after: it fixes the output's
-	// identity fields (media type, container) for the plan below, and it
-	// carries the container's own chapters, which the options need. Creation
-	// validated this same plan, so failures here mean the source itself
-	// changed shape.
-	probe, err := r.cfg.Engine.Probe(src, src.Ext, nil)
-	if err != nil {
-		return err
-	}
-
 	dropRG := gainDB != 0 || analyzeLoudness
 	tagInfo := info
 	if dropRG {
 		tagInfo = meta.WithoutReplayGain(info)
 	}
-	opts := req.TranscodeOptions(gainDB, r.cfg.Profile)
+	// The resolved gain and the per-call payloads land on the options the plan
+	// was taken from, so what runs is what was planned: PlanTranscode
+	// normalizes the payloads away, and gain shapes no field the plan reports.
+	opts.GainDB = gainDB
 	opts.Tags = meta.FullTags(tagInfo)
 	// The container's own chapters are the floor, and the mapper's win when a
 	// mapper is wired and read some: a richer tag library may know forms the
@@ -789,11 +832,6 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 		}
 	}
 
-	plan, err := r.cfg.Engine.PlanTranscode(probe.Default(), opts)
-	if err != nil {
-		return err
-	}
-	isMP4 := plan.MediaType == "audio/mp4"
 	if analyzeLoudness && isMP4 {
 		// Fixed-width placeholders for the MP4 muxer to embed at Begin;
 		// the measured values patch in place after the encode. Only the
@@ -824,7 +862,7 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 	var rg []container.Tag
 	if analyzeLoudness {
 		var outLUFS, outTP float64
-		if isMP4 {
+		if fragmentedMP4 {
 			// There is no fragmented-MP4 read path, so the output cannot
 			// be decoded back; derive its values from the source
 			// measurement instead: exact for lossless ALAC, within the
@@ -833,8 +871,12 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 			// past unity), and caps the derived peak at its ceiling; pass
 			// that so a negative-gain downmix's peak is capped rather than
 			// reading back the raw fold's overshoot.
+			//
+			// The downmix test reads the plan's resolved width, not the ch
+			// field: a fold the row applied on its own is invisible to the
+			// request, and missing it publishes a peak the limiter clamped.
 			limited := gainDB > 0 || opts.Dynamics != gain.PresetOff ||
-				(req.Channels != 0 && req.Channels < probe.Default().Fmt.Channels)
+				plan.Format.Channels < probe.Default().Fmt.Channels
 			outLUFS, outTP = deriveOutputLoudness(srcRes, gainDB, limited)
 		} else {
 			// Measure the finished output so the written ReplayGain

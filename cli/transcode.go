@@ -21,6 +21,19 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
+// isMP4Container reports whether an output written by format with this
+// container override goes through the mp4 muxer: the one path that embeds tags
+// in moov at Begin and so takes the mp4-specific ReplayGain patch. AAC also
+// rides in adts (elementary) and mka (Matroska), which are NOT MP4: patching
+// those as MP4 would fail and delete the output. ALAC is always MP4.
+func isMP4Container(format, container string) bool {
+	if format == "alac" {
+		return true
+	}
+	return format == "aac" && (container == "" ||
+		container == waxflow.ContainerProgressive || container == waxflow.ContainerFragmented)
+}
+
 func newTranscodeCmd(flavor Flavor) *cobra.Command {
 	var formatName, containerName string
 	var force bool
@@ -130,6 +143,64 @@ with true-peak limiting, dither).`,
 				}
 			}
 
+			e := waxflow.New(waxflow.WithLogger(logger))
+
+			// The options fields cannot say "level 0" or "complexity 0"
+			// with a plain 0 (that selects the default), so the flags' 0
+			// maps to the sentinels.
+			optLevel := flacLevel
+			if optLevel == 0 {
+				optLevel = waxflow.FLACLevelFastest
+			}
+			optComplexity := opusComplexity
+			if optComplexity == 0 {
+				optComplexity = waxflow.OpusComplexityLowest
+			}
+
+			// One probe of the source, read before anything is created on
+			// disk. Three things downstream need it and each used to fetch
+			// (or skip) its own: the container's own tags for the metadata
+			// fallback, the track the output form is planned from, and the
+			// source layout the loudness pass measures against.
+			srcInfo, err := e.Probe(src, srcHint, nil)
+			if err != nil {
+				return err
+			}
+			srcTrack := srcInfo.Default()
+
+			opts := waxflow.TranscodeOptions{
+				Format:          outFormat,
+				Container:       containerName,
+				Rate:            rate,
+				Channels:        channels,
+				BitDepth:        bits,
+				Dynamics:        gain.Preset(dynamics),
+				Shaping:         shaping,
+				ResampleProfile: profile,
+				FLACLevel:       optLevel,
+				MP3Bitrate:      mp3Bitrate * 1000,
+				MP3VBR:          mp3VBR,
+				OpusBitrate:     opusBitrate * 1000,
+				OpusComplexity:  optComplexity,
+				OpusVBR:         opusVBR,
+				OpusSignal:      opusSignal,
+				AACBitrate:      aacBitrate * 1000,
+			}
+			plan, err := e.PlanTranscode(srcTrack, opts)
+			if err != nil {
+				return err
+			}
+			// A file output takes the flat MP4 form unless the caller named a
+			// container. The rule is the engine's, shared with split and with
+			// every job type, and the re-plan is what proves the form it chose
+			// is one this format can produce.
+			if c := waxflow.FileOutputContainer(containerName, plan); c != containerName {
+				containerName, opts.Container = c, c
+				if plan, err = e.PlanTranscode(srcTrack, opts); err != nil {
+					return err
+				}
+			}
+
 			// The output is created exclusively at its final path, or,
 			// under --force, staged in the same directory and renamed
 			// into place only after the transcode succeeds. Overwriting
@@ -154,54 +225,47 @@ with true-peak limiting, dither).`,
 				return waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating output", err)
 			}
 
-			// The options fields cannot say "level 0" or "complexity 0"
-			// with a plain 0 (that selects the default), so the flags' 0
-			// maps to the sentinels.
-			optLevel := flacLevel
-			if optLevel == 0 {
-				optLevel = waxflow.FLACLevelFastest
-			}
-			optComplexity := opusComplexity
-			if optComplexity == 0 {
-				optComplexity = waxflow.OpusComplexityLowest
-			}
-
-			e := waxflow.New(waxflow.WithLogger(logger))
-
 			// The file-output passthrough matrix: full tags, chapters,
 			// and art flow onto the output (the MP4 muxer embeds them;
 			// every other format gets the mapping post-pass below).
 			mapper := label.New()
 			var info *meta.Info
 			if !noTags {
-				if m, merr := mapper.Read(cmd.Context(), src, srcHint, meta.ReadOptions{Pictures: true}); merr == nil {
-					info = m
-					logMetaRead(logger, m)
+				m, merr := mapper.Read(cmd.Context(), src, srcHint, meta.ReadOptions{Pictures: true})
+				if merr != nil {
+					// The container fallback below does not go through the
+					// mapper, so a read that failed outright must not take with
+					// it the tags the demuxer already parsed off the header.
+					// Reported rather than silently dropped, which is what a
+					// failure here used to be.
+					m = &meta.Info{Warnings: []string{"metadata unread: " + merr.Error()}}
 				}
+				logMetaRead(logger, m)
+				// Folded where the mapper's own tags arrive, and so before the
+				// ReplayGain drop below rather than after it: the container
+				// carries the four REPLAYGAIN_* keys too, and a later fold would
+				// put the source's stale values back onto a gained output.
+				info = meta.WithContainerTags(m, srcInfo.Tags)
 			}
 			analyzeLoudness := loudness == "analyze"
 			var srcRes *waxflow.AnalyzeResult
 			var peakLimited bool
 			if analyzeLoudness {
-				// The predicted-output peak below (predictedRG / analyzeOutputRG)
-				// must be clamped to the ceiling whenever the encode chain's
-				// true-peak limiter is engaged: positive gain, a dynamics preset,
-				// or a downmix whose matrix can sum past unity. Probe the source
-				// channel count so a downmix is detected too, not just positive
-				// gain; analyze runs the raw fold with no limiter, so its true
-				// peak can sit above the ceiling the encode holds. The probe is
-				// best-effort (only the estimate rides on it, never the encode),
-				// and runs on the fresh source before the analyze consumes it.
-				var srcChannels int
-				if channels != 0 {
-					if pb, perr := e.Probe(src, srcHint, nil); perr == nil {
-						srcChannels = pb.Default().Fmt.Channels
-					}
-				}
-				// Measure after the same downmix the encode will apply, so the
-				// two-pass gain (and the predictedRG derived from this) lands on
-				// the audio the encode meters, not the wider source layout.
-				res, aerr := e.Analyze(cmd.Context(), src, srcHint, waxflow.AnalyzeOptions{Channels: channels})
+				// Both the measurement and the predicted peak key on the width
+				// the encode actually produces, which is the plan's resolved
+				// channel count and not the --channels flag: a lossy row that
+				// cannot hold the source layout folds to stereo on its own, and
+				// a flag-keyed test sees none of it.
+				//
+				// Measuring on that basis is what puts the two-pass gain on the
+				// audio the encode meters. Clamping on it is what keeps the
+				// predicted peak (predictedRG / analyzeOutputRG) at the ceiling
+				// whenever the chain's true-peak limiter is engaged: positive
+				// gain, a dynamics preset, or a downmix whose matrix can sum
+				// past unity. Analyze runs the raw fold with no limiter, so its
+				// true peak can sit above the ceiling the encode holds.
+				outChannels := plan.Format.Channels
+				res, aerr := e.Analyze(cmd.Context(), src, srcHint, waxflow.AnalyzeOptions{Channels: outChannels})
 				if aerr != nil {
 					out.Close()
 					os.Remove(writePath)
@@ -214,7 +278,7 @@ with true-peak limiting, dither).`,
 				fmt.Fprintf(cmd.ErrOrStderr(), "loudness: source %.2f LUFS, applying %+.2f dB\n",
 					res.IntegratedLUFS, gainDB)
 				peakLimited = gainDB > 0 || gain.Preset(dynamics) != gain.PresetOff ||
-					(channels != 0 && srcChannels != 0 && channels < srcChannels)
+					outChannels < srcTrack.Fmt.Channels
 			}
 			dropRG := gainDB != 0 || analyzeLoudness
 			tagInfo := info
@@ -227,14 +291,15 @@ with true-peak limiting, dither).`,
 			// mapping post-pass, and embedding unity placeholders there
 			// would ship wrong ReplayGain whenever that post-pass is
 			// skipped (--no-tags) or fails.
-			//
-			// isMP4 must mean "written by the mp4 muxer" (fragmented default or
-			// progressive), the only path that embeds tags in moov and takes the
-			// mp4-specific ReplayGain patch. AAC also rides in adts (elementary)
-			// and mka (Matroska), which are NOT MP4: patching them as MP4 would
-			// fail and delete the output. ALAC is always MP4.
-			isMP4 := outFormat == "alac" ||
-				(outFormat == "aac" && (containerName == "" || containerName == "progressive"))
+			isMP4 := isMP4Container(outFormat, containerName)
+			// The two meanings isMP4 used to carry, which have diverged: both
+			// MP4 forms embed tags at Begin and so need the fixed-width
+			// placeholders, but only the fragmented one cannot be decoded back,
+			// which is the condition for deriving the output's ReplayGain
+			// instead of measuring it. With a file output now flat by default,
+			// keeping them as one predicate would publish an estimate where a
+			// measurement is there for the reading.
+			fragmentedMP4 := isMP4 && containerName != waxflow.ContainerProgressive
 			switch {
 			case analyzeLoudness && isMP4:
 				// Unity placeholders, patched with the measured RG by
@@ -264,28 +329,14 @@ with true-peak limiting, dither).`,
 				}
 			}
 
-			res, err := e.Transcode(cmd.Context(), src, srcHint, out, waxflow.TranscodeOptions{
-				Format:          outFormat,
-				Container:       containerName,
-				Rate:            rate,
-				Channels:        channels,
-				BitDepth:        bits,
-				GainDB:          gainDB,
-				Dynamics:        gain.Preset(dynamics),
-				Shaping:         shaping,
-				ResampleProfile: profile,
-				FLACLevel:       optLevel,
-				MP3Bitrate:      mp3Bitrate * 1000,
-				MP3VBR:          mp3VBR,
-				OpusBitrate:     opusBitrate * 1000,
-				OpusComplexity:  optComplexity,
-				OpusVBR:         opusVBR,
-				OpusSignal:      opusSignal,
-				AACBitrate:      aacBitrate * 1000,
-				Tags:            tags,
-				Chapters:        chapters,
-				Art:             art,
-			})
+			// The per-call payloads and the measured gain land on the options
+			// the plan was taken from, so what runs is what was planned. None
+			// of them shape a plan: PlanTranscode normalizes the payloads away
+			// and gain changes no output field the container default or the
+			// resolved width above read.
+			opts.GainDB = gainDB
+			opts.Tags, opts.Chapters, opts.Art = tags, chapters, art
+			res, err := e.Transcode(cmd.Context(), src, srcHint, out, opts)
 			if err != nil {
 				out.Close()
 				// A failed transcode leaves no half-written artifact;
@@ -306,7 +357,7 @@ with true-peak limiting, dither).`,
 				// Ogg already embedded its predicted RG at Begin (it cannot be
 				// patched); mp4 patches its placeholders here, and post-pass
 				// formats get their measured values written below.
-				if rg, err = analyzeOutputRG(cmd, e, writePath, extHint(outPath), isMP4, srcRes, gainDB, peakLimited); err != nil {
+				if rg, err = analyzeOutputRG(cmd, e, writePath, extHint(outPath), isMP4, fragmentedMP4, srcRes, gainDB, peakLimited); err != nil {
 					os.Remove(writePath)
 					return err
 				}
@@ -340,7 +391,7 @@ with true-peak limiting, dither).`,
 	// hand-written list had already fallen a format behind.
 	cmd.Flags().StringVar(&formatName, "format", "",
 		fmt.Sprintf("output format: %s (default: from output extension)", strings.Join(waxflow.OutputFormats(), ", ")))
-	cmd.Flags().StringVar(&containerName, "container", "", "container override where the format has one: adts for aac, progressive for aac/alac (flat non-streaming MP4), mka/webm for opus/aac/flac/wav, ogg for flac (default: the format's native container; a bare .aac output implies adts)")
+	cmd.Flags().StringVar(&containerName, "container", "", "container override where the format has one: adts for aac, progressive/fragmented for aac/alac (flat vs CMAF MP4), mka/webm for opus/aac/flac/wav, ogg for flac (default: the format's native container; a bare .aac output implies adts, and an mp4-family file output is progressive, the form players and taggers expect)")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite the output if it exists")
 	cmd.Flags().IntVar(&rate, "rate", 0, "output sample rate in Hz (default: source rate)")
 	cmd.Flags().IntVar(&channels, "channels", 0, "output channel count: 1 or 2 (default: source layout)")
@@ -362,12 +413,6 @@ with true-peak limiting, dither).`,
 	return cmd
 }
 
-// analyzeOutputRG returns (after patching MP4 headers in place) the
-// ReplayGain tags for the finished output: measured from the file where
-// the engine can decode it back, derived from the source measurement
-// plus the applied gain for fragmented MP4, which has no read path
-// (exact for lossless ALAC, within the encoder's fraction of a dB for
-// AAC; the encode's limiter caps the derived peak).
 // predictedRG estimates the output ReplayGain from the source analysis and the
 // applied gain, for the Ogg path (whose tags are written at Begin) and the MP4
 // placeholders. See meta.ProjectLoudness for the projection and the direction
@@ -377,7 +422,18 @@ func predictedRG(srcRes *waxflow.AnalyzeResult, gainDB float64, limited bool) (r
 	return meta.ReplayGainTags(outLUFS, outTP), outLUFS
 }
 
-func analyzeOutputRG(cmd *cobra.Command, e *waxflow.Engine, path, hint string, isMP4 bool, srcRes *waxflow.AnalyzeResult, gainDB float64, limited bool) ([]container.Tag, error) {
+// analyzeOutputRG returns (after patching MP4 headers in place) the
+// ReplayGain tags for the finished output: measured from the file where
+// the engine can decode it back, derived from the source measurement
+// plus the applied gain for fragmented MP4, which has no read path
+// (exact for lossless ALAC, within the encoder's fraction of a dB for
+// AAC; the encode's limiter caps the derived peak).
+//
+// The two MP4 flags are separate because they answer different questions:
+// isMP4 says the muxer embedded fixed-width placeholders to patch, which
+// both forms do, and fragmented says the output cannot be read back, which
+// only the fragmented one is.
+func analyzeOutputRG(cmd *cobra.Command, e *waxflow.Engine, path, hint string, isMP4, fragmented bool, srcRes *waxflow.AnalyzeResult, gainDB float64, limited bool) ([]container.Tag, error) {
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "reopening output", err)
@@ -385,9 +441,9 @@ func analyzeOutputRG(cmd *cobra.Command, e *waxflow.Engine, path, hint string, i
 	defer f.Close()
 	var rg []container.Tag
 	var outLUFS float64
-	if isMP4 {
-		// The MP4 output edit list already normalized to the target; the RG is
-		// predicted from the source and gain, then patched into placeholders.
+	if fragmented {
+		// No read path, so the RG is predicted from the source and gain and
+		// then patched into the placeholders.
 		rg, outLUFS = predictedRG(srcRes, gainDB, limited)
 	} else {
 		fsrc, err := container.FileSource(f)

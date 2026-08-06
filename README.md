@@ -156,10 +156,14 @@ write keeps a reload from reading a half-written file and `400`ing.
 - `waxflow transcode <in> <out>`: local one-shot file-to-file transcode
   through the same engine the daemon uses (`--format wav|aiff|flac|mp3|aac|alac|opus|vorbis`,
   `--flac-level`, `--mp3-bitrate`, default from the output extension;
-  `--force` to overwrite). Metadata (tags, chapters, cover art, lyrics)
-  passes through onto the output automatically (`--no-tags` to skip);
-  `--loudness analyze` measures the source, applies the exact gain to
-  the ReplayGain reference, and writes measured RG tags on the output
+  `--force` to overwrite). An mp4-family output (`.m4a`, `.m4b`, alac)
+  is written flat: a file can satisfy the header back-patch that form
+  needs, and it is the shape players and taggers expect. The fragmented
+  (CMAF) form is for delivery, and `/stream` and HLS keep it. Metadata
+  (tags, chapters, cover art, lyrics) passes through onto the output
+  automatically (`--no-tags` to skip); `--loudness analyze` measures the
+  source, applies the exact gain to the ReplayGain reference, and writes
+  measured RG tags on the output
 - `waxflow split <in> <dir>`: cut a single-file rip into one output per
   track, from a CUE sheet (`--cue album.cue`) or explicit source-sample
   offsets (`--at`). Cut points are samples either way: a sheet's `MM:SS:FF`

@@ -771,7 +771,7 @@ func cutTrimsExpressible(containerName string, delay, padding int64) bool {
 		// cut rewrote) and the end trim in the final page's granule. Matroska
 		// carries both outright, as CodecDelay and DiscardPadding.
 		return true
-	case mp4Progressive:
+	case ContainerProgressive:
 		// The flat muxer writes its edit list at End, when it knows everything,
 		// so it can express either trim.
 		return true

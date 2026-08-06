@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"io"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -785,4 +786,125 @@ func TestDynamicsReducesRangeEndToEnd(t *testing.T) {
 	// the preset brings down, so its sign is a property of the content
 	// rather than of the preset: a reading with hot passages lands quieter
 	// and a uniformly quiet one lands louder. The range is the claim.
+}
+
+// TestPresentationDurationSumsToTheTrack pins U4's arithmetic: the EXTINF
+// timeline is the presentation one, so its durations sum to exactly the
+// track's playable length in samples. The decode timeline SegmentDuration
+// reports overshoots by the encoder delay plus the tail rounding, which is
+// what made a player derive a duration 23 ms long on AAC.
+//
+// The exactness lives in samples. The playlist prints %.5f seconds, so the
+// rendered sum carries up to 5e-6 s of rounding per segment; that is asserted
+// separately (server/hls_e2e_test.go) and bounded rather than demanded exact.
+func TestPresentationDurationSumsToTheTrack(t *testing.T) {
+	const rate = 48000
+	f := audio.Format{Rate: rate, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
+	e := waxflow.New()
+
+	for _, format := range waxflow.SegmentedFormats() {
+		for _, tc := range []struct {
+			name       string
+			frames     int
+			segSeconds float64
+		}{
+			// A whole number of segments, a ragged tail, and the single-segment
+			// case, which is the one where the shrink moves TARGETDURATION: the
+			// only segment is both the first and the last.
+			{"many segments", 10 * rate, 1},
+			{"ragged tail", 10*rate + 7919, 1},
+			{"one segment", rate + 1000, 10},
+		} {
+			t.Run(format+"/"+tc.name, func(t *testing.T) {
+				plan, err := e.PlanSegments(pcmTrack(f, tc.frames), waxflow.TranscodeOptions{Format: format}, tc.segSeconds)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var presentation, decode int64
+				for n := range plan.Segments {
+					// The prefix sum is what a player seeks with: EXTINF over
+					// segments 0..n-1 is where it believes segment n starts.
+					// That must be segment n's real presentation time, which
+					// is its decode start minus the delay the init segment's
+					// edit list tells the player to discard.
+					//
+					// This is the property that makes the presentation
+					// timeline the correct one rather than merely the shorter
+					// one: with decode durations the prefix sum ran ahead of
+					// the media timeline by exactly Delay, for every segment
+					// after the first.
+					if want := max(0, n*int64(plan.SegmentSamples)-plan.Delay); presentation != want {
+						t.Errorf("EXTINF prefix through segment %d = %d, want the presentation start %d",
+							n, presentation, want)
+					}
+					presentation += plan.PresentationDuration(n)
+					decode += plan.SegmentDuration(n)
+				}
+				if presentation != plan.Samples {
+					t.Errorf("presentation durations sum to %d, want the track's %d samples",
+						presentation, plan.Samples)
+				}
+				if decode != plan.TotalDecodeSamples {
+					t.Errorf("decode durations sum to %d, want %d: SegmentDuration must stay decode truth",
+						decode, plan.TotalDecodeSamples)
+				}
+				// A format whose row declares no delay has nothing to trim, so
+				// the two timelines coincide; one that does must differ, or the
+				// method is not being exercised where it matters.
+				if (plan.Delay > 0) != (decode > presentation) {
+					t.Errorf("delay %d but decode %d vs presentation %d", plan.Delay, decode, presentation)
+				}
+			})
+		}
+	}
+	// Out of range answers -1 like SegmentDuration, rather than 0, which a
+	// caller cannot tell from an empty segment.
+	plan, err := e.PlanSegments(pcmTrack(f, rate), waxflow.TranscodeOptions{Format: "aac"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int64{-1, plan.Segments} {
+		if got := plan.PresentationDuration(n); got != -1 {
+			t.Errorf("PresentationDuration(%d) = %d, want -1", n, got)
+		}
+	}
+}
+
+// TestSegmentDurationBelowPrimingIsRefused pins the degenerate case
+// PresentationDuration would otherwise answer 0 for. A segment no longer than
+// the encoder's priming has no playable audio in it at all: the edit list
+// discards the whole of segment 0, so its EXTINF is zero and a player is
+// handed a segment that presents nothing. AAC primes exactly 1024 samples and
+// snapSegmentSamples floors at one frame, so any segDur under ~23 ms reaches
+// it, and segDur is otherwise only checked for being non-negative.
+func TestSegmentDurationBelowPrimingIsRefused(t *testing.T) {
+	f := audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
+	e := waxflow.New()
+
+	_, err := e.PlanSegments(pcmTrack(f, 44100), waxflow.TranscodeOptions{Format: "aac"}, 0.02)
+	if err == nil {
+		t.Fatal("a segment no longer than the AAC priming planned; segment 0 would present nothing")
+	}
+	if code := waxerr.CodeOf(err); code != waxerr.CodeInvalidRequest {
+		t.Errorf("code = %s, want %s", code, waxerr.CodeInvalidRequest)
+	}
+	if !strings.Contains(err.Error(), "segDur") && !strings.Contains(err.Error(), "segment duration") {
+		t.Errorf("message %q does not name the parameter to fix", err)
+	}
+
+	// One frame past the priming is legal, and its first segment presents
+	// something: the refusal is a floor, not a rounding up of the default.
+	plan, err := e.PlanSegments(pcmTrack(f, 44100), waxflow.TranscodeOptions{Format: "aac"}, 2*1024.0/44100)
+	if err != nil {
+		t.Fatalf("two frames of segment: %v", err)
+	}
+	if got := plan.PresentationDuration(0); got <= 0 {
+		t.Errorf("segment 0 presents %d samples", got)
+	}
+
+	// A row with no encoder priming has no floor to apply: FLAC's whole
+	// timeline is presentation, so a one-frame segment is merely small.
+	if _, err := e.PlanSegments(pcmTrack(f, 44100), waxflow.TranscodeOptions{Format: "flac"}, 0.001); err != nil {
+		t.Errorf("a tiny FLAC segment was refused, but FLAC carries no priming: %v", err)
+	}
 }

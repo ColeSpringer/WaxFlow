@@ -104,6 +104,31 @@ func (p *SegmentPlan) SegmentDuration(n int64) int64 {
 	return p.TotalDecodeSamples - (p.Segments-1)*int64(p.SegmentSamples)
 }
 
+// PresentationDuration returns segment n's playable duration in samples: its
+// decode span intersected with the presentation window the init segment's
+// edit list declares, [Delay, Delay+Samples). The durations then sum to
+// exactly Samples, which is what a player deriving a total duration from
+// EXTINF should see.
+//
+// It is a second method rather than a change to SegmentDuration, which stays
+// decode-timeline truth: the segment count, the workers, and the segmenter's
+// tfdt all measure the decode timeline, and the segments themselves do not
+// move. Only the playlist text does.
+//
+// A format whose row declares no encoder delay (FLAC, ALAC) takes
+// totalDecodeSamples' delay == 0 early return, so TotalDecodeSamples equals
+// Samples and the intersection is the identity. All three rungs read the same
+// two fields: a transcode plan takes Delay from its row, a remux plan from the
+// source's own pre-skip, and the cut rung embeds a remux plan.
+func (p *SegmentPlan) PresentationDuration(n int64) int64 {
+	d := p.SegmentDuration(n)
+	if d < 0 {
+		return -1
+	}
+	start := n * int64(p.SegmentSamples)
+	return max(0, min(start+d, p.Delay+p.Samples)-max(start, p.Delay))
+}
+
 // PlanSegments plans the segmented form of a transcode of track. opts is
 // the per-variant output selection (FromSample must be zero: segments own
 // the timeline); segSeconds is the target segment duration, 0 for the
@@ -132,6 +157,18 @@ func (e *Engine) PlanSegments(track container.Track, opts TranscodeOptions, segS
 	segSamples, err := snapSegmentSamples(segSeconds, plan.Format.Rate, plan.FrameSize)
 	if err != nil {
 		return nil, err
+	}
+	// A segment no longer than the encoder's priming has no playable audio in
+	// it at all: the edit list discards the whole of segment 0, so its EXTINF
+	// is zero and a player is handed a segment that presents nothing. The
+	// request is degenerate rather than unlucky (AAC primes 1024 samples and
+	// snapSegmentSamples floors at one frame, so any segDur under ~23 ms
+	// reaches it), and it is refused here where segDur can still be corrected.
+	if row.hls.delay > 0 && int64(segSamples) <= row.hls.delay {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("waxflow: segment duration %g s is %d samples, no longer than %s's %d-sample encoder priming; "+
+				"the first segment would present nothing",
+				segSeconds, segSamples, opts.Format, row.hls.delay))
 	}
 	sp := &SegmentPlan{
 		TranscodePlan:      *plan,
@@ -513,6 +550,11 @@ func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, o
 	}
 	defer chain.Release()
 	f := chain.Format()
+	// The segmented path folds through the same adjust hook as a progressive
+	// transcode, so a fold nobody asked for has to be as visible here. It said
+	// nothing at all until this call, which made the claim that /stream and
+	// HLS behave alike true of the audio and false of the log.
+	e.logImplicitDownmix(opts, srcTrack.Fmt, f)
 
 	// Output-timeline positions: p0 is the first kept sample, pChain the
 	// first fed to the chain, pEnc the first fed to the encoder.

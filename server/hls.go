@@ -174,7 +174,12 @@ func (s *Server) prepareHLS(r *http.Request) (*hlsRequest, error) {
 	var m *meta.Info
 	var rmx *source.File
 	if desc.Tl == "" {
-		m = s.readMeta(r.Context(), req.srcs[0], false)
+		// Folded exactly as prepareSource folds it, and for the reason that
+		// matters here: gain=track resolves against REPLAYGAIN_* tags, so
+		// without the container floor the same source answers one gain on
+		// /stream and another on /hls/master.m3u8 whenever the tag library
+		// cannot read the file (or none is wired at all).
+		m = meta.WithContainerTags(s.readMeta(r.Context(), req.srcs[0], false), s.containerTagsFor(req.srcs[0]))
 		rmx = req.srcs[0]
 	}
 	if req.opts, req.plan, req.remux, req.cut, err = s.planHLSVariant(desc, req.tracks(), m, rmx); err != nil {
@@ -719,8 +724,12 @@ func (s *Server) handleHLSMedia(w http.ResponseWriter, r *http.Request) {
 	for n := range segments {
 		path := fmt.Sprintf("/hls/seg/%d.m4s", n)
 		segments[n] = hls.MediaSegment{
-			URI:     fmt.Sprintf("seg/%d.m4s?%s", n, s.hlsChildQuery(path, req.desc, exp)),
-			Seconds: float64(plan.SegmentDuration(int64(n))) / rate,
+			URI: fmt.Sprintf("seg/%d.m4s?%s", n, s.hlsChildQuery(path, req.desc, exp)),
+			// The presentation timeline, not the decode one: EXTINF is what a
+			// player sums into a total duration, and the decode span overshoots
+			// it by the encoder delay plus the tail rounding (23 ms on AAC,
+			// almost all of it the head). The segments themselves are unchanged.
+			Seconds: float64(plan.PresentationDuration(int64(n))) / rate,
 		}
 	}
 	initURI := "init.mp4?" + s.hlsChildQuery("/hls/init.mp4", req.desc, exp)

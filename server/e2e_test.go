@@ -29,6 +29,7 @@ import (
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/riff"
+	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/source"
@@ -1151,6 +1152,88 @@ func TestProbeRejectsUnknownParameters(t *testing.T) {
 	}
 }
 
+// TestProbeReportsSourceBitDepth pins U3 on the wire: audio.Format carries
+// floats as float32, so a 64-bit float source used to probe as bitDepth 32,
+// describing the decoder rather than the file. sampleType is, and always was,
+// the float discriminator; bitDepth now says what the source holds.
+func TestProbeReportsSourceBitDepth(t *testing.T) {
+	env := newTestEnv(t, nil)
+	for _, fixture := range []string{"sine-f64.wav", "sine-f32.wav", "sine-s16.wav"} {
+		b, err := os.ReadFile(filepath.Join("..", "testdata", fixture))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(env.root, fixture), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		fixture    string
+		sampleType string
+		depth      int
+	}{
+		{"sine-f64.wav", "float", 64},
+		{"sine-f32.wav", "float", 32},
+		{"sine-s16.wav", "int", 16},
+	}
+	for _, tt := range cases {
+		t.Run(tt.fixture, func(t *testing.T) {
+			resp := env.get(t, "/probe?src=lib/"+tt.fixture, nil)
+			if resp.StatusCode != 200 {
+				t.Fatalf("GET /probe = %d", resp.StatusCode)
+			}
+			var doc server.ProbeInfo
+			if err := json.Unmarshal(readBody(t, resp), &doc); err != nil {
+				t.Fatal(err)
+			}
+			if len(doc.Tracks) != 1 {
+				t.Fatalf("%d tracks", len(doc.Tracks))
+			}
+			if got := doc.Tracks[0].BitDepth; got != tt.depth {
+				t.Errorf("bitDepth = %d, want %d", got, tt.depth)
+			}
+			if got := doc.Tracks[0].SampleType; got != tt.sampleType {
+				t.Errorf("sampleType = %q, want %q", got, tt.sampleType)
+			}
+		})
+	}
+}
+
+// TestProbeReadsContainerTagsWithoutAMapper pins B1's embedder case: this
+// daemon has no mapper wired, exactly like one anybody else embeds, and used
+// to report no tags at all for a file that plainly carries them. Chapters
+// already fell back this way; tags now do too. hasArt does not, and must not:
+// it reports what /art can serve, and /art needs the mapper.
+func TestProbeReadsContainerTagsWithoutAMapper(t *testing.T) {
+	env := newTestEnv(t, nil)
+	b, err := os.ReadFile(filepath.Join("..", "testdata", "chapters.m4b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.root, "chapters.m4b"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resp := env.get(t, "/probe?src=lib/chapters.m4b", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET /probe = %d", resp.StatusCode)
+	}
+	var doc server.ProbeInfo
+	if err := json.Unmarshal(readBody(t, resp), &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"TITLE", "ARTIST", "ALBUM"} {
+		if len(doc.Tags[key]) == 0 {
+			t.Errorf("no %s; the container fallback did not run (tags: %v)", key, doc.Tags)
+		}
+	}
+	if len(doc.Chapters) == 0 {
+		t.Error("no chapters; the fixture is not the metadata-rich one this needs")
+	}
+	if doc.HasArt {
+		t.Error("hasArt is true with no mapper wired, so /art would 404 on it")
+	}
+}
+
 // TestMethodNotAllowed pins C6: a path that exists under another method
 // answers 405 with the route table's Allow list; one that does not stays 404.
 func TestMethodNotAllowed(t *testing.T) {
@@ -1392,4 +1475,173 @@ func TestDynamicsRejectsUnknownPreset(t *testing.T) {
 	env := newTestEnv(t, nil)
 	resp := env.get(t, "/stream?src=lib/sine.wav&format=wav&dynamics=loud", nil)
 	wantEnvelope(t, resp, http.StatusBadRequest, waxerr.CodeInvalidRequest)
+}
+
+// TestWideSourceServesLossyDelivery pins C1 on the delivery surfaces: a 5.1
+// source asked for as AAC used to 415, because only the opus row folded a
+// too-wide layout while mp3 and aac refused it. Both /stream and HLS run the
+// same plan through the same adjust hook, so both start working together;
+// the test says so rather than leaving the HLS half to be assumed.
+func TestWideSourceServesLossyDelivery(t *testing.T) {
+	env := newTestEnv(t, nil)
+	b, err := os.ReadFile(filepath.Join("..", "testdata", "sine-5_1-s16.flac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.root, "surround.flac"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// name, not format: the format package is imported in this file, and a
+	// loop variable shadowing it compiles only until someone needs it inside.
+	for _, name := range []string{"aac", "mp3", "opus"} {
+		t.Run(name, func(t *testing.T) {
+			resp := env.get(t, "/stream?src=lib/surround.flac&format="+name, nil)
+			if resp.StatusCode != 200 {
+				t.Fatalf("GET /stream = %d, want 200 (body: %s)", resp.StatusCode, readBody(t, resp))
+			}
+			resp.Body.Close()
+		})
+	}
+	// HLS plans through PlanSegments, which plans through PlanTranscode, so
+	// the fold reaches the segmented rungs too.
+	resp := env.get(t, "/hls/master.m3u8?src=lib/surround.flac&format=aac", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET /hls/master.m3u8 = %d, want 200 (body: %s)", resp.StatusCode, readBody(t, resp))
+	}
+	resp.Body.Close()
+
+	// alac is the lossless counterexample and still refuses: dropping four
+	// channels without saying so is not something a lossless output does.
+	wantEnvelope(t, env.get(t, "/stream?src=lib/surround.flac&format=alac", nil),
+		415, waxerr.CodeUnsupportedFormat)
+}
+
+// TestStreamEmbedsContainerTagsWithoutAMapper is the delivery half of B1's
+// embedder case, and the one the probe test does not reach: /probe resolves
+// tags in ProbeJSON, while a live stream embeds them through the transcode
+// options. This daemon wires no mapper, exactly like one anybody else embeds,
+// so every tag on the output came off the container.
+func TestStreamEmbedsContainerTagsWithoutAMapper(t *testing.T) {
+	env := newTestEnv(t, nil)
+	b, err := os.ReadFile(filepath.Join("..", "testdata", "chapters.m4b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.root, "chapters.m4b"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// AAC, so the delivered bytes are fragmented MP4 with an ilst the mp4
+	// demuxer reads straight back. Every other live format embeds its tags in
+	// a form no demuxer here parses (only mp4 implements container.Tagger), so
+	// this is the one rung that closes the loop inside this module.
+	resp := env.get(t, "/stream?src=lib/chapters.m4b&format=aac", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET /stream = %d", resp.StatusCode)
+	}
+	body := readBody(t, resp)
+	info, err := format.Probe(container.BytesSource(body), "m4a", nil)
+	if err != nil {
+		t.Fatalf("probing the streamed output: %v", err)
+	}
+	for _, key := range []string{"TITLE", "ARTIST", "ALBUM"} {
+		if len(info.Tags[key]) == 0 {
+			t.Errorf("the delivered stream carries no %s (tags: %v)", key, info.Tags)
+		}
+	}
+}
+
+// TestHLSResolvesGainFromContainerTags pins that both delivery surfaces
+// resolve tag-based gain from the same tags. /stream folded the container's in
+// and the HLS path did not, so a source whose ReplayGain only the demuxer can
+// read played at one level progressively and another through HLS: same track,
+// same request, two loudnesses depending on which URL the client picked.
+func TestHLSResolvesGainFromContainerTags(t *testing.T) {
+	env := newTestEnv(t, nil)
+	// A fragmented MP4 with ReplayGain in its ilst: the tag library refuses to
+	// parse the container at all, so these tags exist only through the demuxer.
+	var buf bytes.Buffer
+	raw, err := os.ReadFile(filepath.Join(env.root, "ramp.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := waxflow.New().Transcode(t.Context(), container.BytesSource(raw), "wav", &buf,
+		waxflow.TranscodeOptions{Format: "aac", Tags: []container.Tag{
+			{Key: "REPLAYGAIN_TRACK_GAIN", Value: "-06.00 dB"},
+			{Key: "REPLAYGAIN_TRACK_PEAK", Value: "0.500000"},
+		}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.root, "gained.m4a"), buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The cache key embeds the resolved gain, so two surfaces resolving
+	// different gains for one source produce different keys. Comparing the
+	// planned gain directly is not reachable from here; the audible proof is
+	// that both refuse to differ, which the descriptor's own gain field shows.
+	resp := env.get(t, "/probe?src=lib/gained.m4a", nil)
+	var doc server.ProbeInfo
+	if err := json.Unmarshal(readBody(t, resp), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Tags["REPLAYGAIN_TRACK_GAIN"]) == 0 {
+		t.Fatal("the fixture carries no container-readable ReplayGain")
+	}
+
+	// Both surfaces accept gain=track on it and serve; the HLS one used to
+	// silently resolve 0 dB because it never saw the tags.
+	if r := env.get(t, "/stream?src=lib/gained.m4a&format=flac&gain=track", nil); r.StatusCode != 200 {
+		t.Fatalf("GET /stream = %d", r.StatusCode)
+	} else {
+		r.Body.Close()
+	}
+	desc := hlsDescriptorFor(t, env, map[string]string{"src": "lib/gained.m4a", "format": "flac", "gain": "track"})
+	if r := env.get(t, "/hls/media.m3u8?v="+desc, nil); r.StatusCode != 200 {
+		t.Fatalf("GET /hls/media.m3u8 = %d", r.StatusCode)
+	} else {
+		r.Body.Close()
+	}
+	// The first HLS segment is the audible check: with the tags seen, the
+	// -6 dB track gain is applied, so it cannot be byte-identical to the same
+	// segment served with gain=off.
+	segOn := readBody(t, env.get(t, "/hls/seg/0.m4s?v="+desc, nil))
+	descOff := hlsDescriptorFor(t, env, map[string]string{"src": "lib/gained.m4a", "format": "flac", "gain": "off"})
+	segOff := readBody(t, env.get(t, "/hls/seg/0.m4s?v="+descOff, nil))
+	if len(segOn) == 0 || bytes.Equal(segOn, segOff) {
+		t.Error("gain=track and gain=off produced identical HLS segments; the container's ReplayGain never reached the plan")
+	}
+}
+
+// TestProbeFallbackExcludesLyrics pins the container tags through the same
+// summary the mapper's go through. The fallback assigned info.Tags raw, so a
+// source with a lyrics atom returned the whole sheet inside "tags" beside a
+// hasLyrics of false and a /lyrics that 404s.
+func TestProbeFallbackExcludesLyrics(t *testing.T) {
+	env := newTestEnv(t, nil)
+	var buf bytes.Buffer
+	raw, err := os.ReadFile(filepath.Join(env.root, "ramp.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := waxflow.New().Transcode(t.Context(), container.BytesSource(raw), "wav", &buf,
+		waxflow.TranscodeOptions{Format: "aac", Tags: []container.Tag{
+			{Key: "TITLE", Value: "Sung"},
+			{Key: "LYRICS", Value: strings.Repeat("a line of the sheet\n", 200)},
+		}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.root, "sung.m4a"), buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var doc server.ProbeInfo
+	if err := json.Unmarshal(readBody(t, env.get(t, "/probe?src=lib/sung.m4a", nil)), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Tags["TITLE"]) == 0 {
+		t.Fatal("the container fallback did not run, so this test proves nothing")
+	}
+	if vs := doc.Tags["LYRICS"]; len(vs) != 0 {
+		t.Errorf("the probe body carries a %d-byte lyric sheet inside tags", len(vs[0]))
+	}
 }

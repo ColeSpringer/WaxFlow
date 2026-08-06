@@ -418,3 +418,191 @@ func TestPatchFreeformPastFixedWindow(t *testing.T) {
 		t.Fatal("patched value did not land past the old fixed window")
 	}
 }
+
+// tagRoundTripCases is the tag set the read-back tests write and expect
+// back: every atom shape the muxer emits, which is what bounds the reader.
+// The text keys cover ilstText, trkn and disk cover the number pairs, and
+// the ReplayGain key covers the freeform walk.
+var tagRoundTripCases = []container.Tag{
+	{Key: "TITLE", Value: "Chaptered Book"},
+	{Key: "ARTIST", Value: "A Narrator"},
+	{Key: "ALBUM", Value: "An Album"},
+	{Key: "ALBUMARTIST", Value: "An Album Artist"},
+	{Key: "COMPOSER", Value: "A Composer"},
+	{Key: "GENRE", Value: "Audiobook"},
+	{Key: "RECORDINGDATE", Value: "2026"},
+	{Key: "COMMENT", Value: "A comment"},
+	{Key: "LYRICS", Value: "A lyric sheet"},
+	{Key: "TRACKNUMBER", Value: "3"},
+	{Key: "TRACKTOTAL", Value: "9"},
+	{Key: "DISCNUMBER", Value: "1"},
+	{Key: "DISCTOTAL", Value: "2"},
+	{Key: "REPLAYGAIN_TRACK_GAIN", Value: "-03.10 dB"},
+}
+
+// wantTags asserts a demuxer read back exactly the tags written, by key and
+// value, and nothing extra: an ilst reader that invents a key (iTunSMPB read
+// as tag data, say) is as wrong as one that drops one.
+func wantTags(t *testing.T, got map[string][]string, want []container.Tag) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Errorf("read %d keys, wrote %d: %v", len(got), len(want), got)
+	}
+	for _, w := range want {
+		vs := got[w.Key]
+		if len(vs) != 1 || vs[0] != w.Value {
+			t.Errorf("%s = %v, want [%q]", w.Key, vs, w.Value)
+		}
+	}
+}
+
+// TestFragmentedTagsSurvive is the chapter test's sibling for tags, and the
+// case that matters most: the tag library refuses to parse a fragmented movie
+// at all, so its ilst is the only tag source there is. The muxer writes the
+// same ilst into a fragmented moov as into a flat one, and nothing read it.
+func TestFragmentedTagsSurvive(t *testing.T) {
+	src := metaTone(alac.FrameSize * 3)
+	defer audio.Put(src)
+	var out bytes.Buffer
+	muxALACMeta(t, &out, src, &MuxerOptions{Tags: tagRoundTripCases})
+
+	d, err := NewDemuxer(container.BytesSource(out.Bytes()), nil)
+	if err != nil {
+		t.Fatalf("NewDemuxer: %v", err)
+	}
+	if !d.fragmented {
+		t.Fatal("the fixture is not fragmented; this test is not covering the case that needs it")
+	}
+	wantTags(t, d.Tags(), tagRoundTripCases)
+}
+
+// TestProgressiveTagsSurvive is the flat-movie sibling, so the reader is not
+// fragmented-only: a file output is the flat form, and its tags used to be
+// dropped exactly as the fragmented one's were.
+func TestProgressiveTagsSurvive(t *testing.T) {
+	track, pkts := opusTrackFor(0, 960*10, 10)
+	sb := &seekBuf{}
+	m := NewProgressiveMuxer(sb, &MuxerOptions{Tags: tagRoundTripCases})
+	if err := m.Begin([]container.Track{track}); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	for _, p := range pkts {
+		if err := m.WritePacket(container.Packet{Track: 0, Packet: p}); err != nil {
+			t.Fatalf("WritePacket: %v", err)
+		}
+	}
+	if err := m.End(codec.Trailer{Samples: 960 * 10}); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+
+	d, err := NewDemuxer(container.BytesSource(sb.b), nil)
+	if err != nil {
+		t.Fatalf("NewDemuxer: %v", err)
+	}
+	if d.fragmented {
+		t.Fatal("the fixture is fragmented; this test covers the flat form")
+	}
+	wantTags(t, d.Tags(), tagRoundTripCases)
+}
+
+// TestTagsIgnoreITunSMPB pins the one freeform atom that is not tag data:
+// iTunSMPB is muxer-owned gapless state, and reading it back as a tag would
+// stamp it onto every output the passthrough touches.
+func TestTagsIgnoreITunSMPB(t *testing.T) {
+	// A seekable destination: the atom is written only where its fields can
+	// be patched at End, which is the file path.
+	path := filepath.Join(t.TempDir(), "smpb.m4a")
+	fh, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	muxAACMeta(t, fh, 4096, -1, &MuxerOptions{Tags: []container.Tag{{Key: "TITLE", Value: "T"}}})
+	if err := fh.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte("iTunSMPB")) {
+		t.Fatal("the fixture carries no iTunSMPB, so this test proves nothing")
+	}
+	d, err := NewDemuxer(container.BytesSource(raw), nil)
+	if err != nil {
+		t.Fatalf("NewDemuxer: %v", err)
+	}
+	if _, ok := d.Tags()["iTunSMPB"]; ok {
+		t.Error("iTunSMPB read back as a tag")
+	}
+	if !d.smpbOK {
+		t.Error("iTunSMPB stopped being parsed as gapless state")
+	}
+}
+
+// TestTagsToleratesDamage pins the parseUdta contract on the tag half:
+// malformed metadata yields no tags, never an error, since none of it gates
+// playback. The truncation lands inside the ilst, past the audio's own boxes.
+func TestTagsToleratesDamage(t *testing.T) {
+	src := metaTone(alac.FrameSize)
+	defer audio.Put(src)
+	var out bytes.Buffer
+	muxALACMeta(t, &out, src, &MuxerOptions{Tags: []container.Tag{{Key: "TITLE", Value: "Title Value"}}})
+	raw := out.Bytes()
+	i := bytes.Index(raw, []byte("\xa9nam"))
+	if i < 0 {
+		t.Fatal("no title atom in the fixture")
+	}
+	// A data box declaring more bytes than the ilst holds.
+	raw[i+4] = 0xFF
+	if _, err := NewDemuxer(container.BytesSource(raw), nil); err != nil {
+		t.Fatalf("a malformed ilst failed the parse: %v", err)
+	}
+}
+
+// TestTagsRefuseTextNumberPairs pins the trkn/disk type-indicator gate. This
+// reader runs on every MP4 input, not only files this muxer wrote, and a
+// writer that stored trkn as UTF-8 is not hypothetical. Read as big-endian
+// words those bytes are a track number in the thousands, which would then
+// become the container-tag floor and be embedded onto the output.
+func TestTagsRefuseTextNumberPairs(t *testing.T) {
+	src := metaTone(alac.FrameSize)
+	defer audio.Put(src)
+	var out bytes.Buffer
+	muxALACMeta(t, &out, src, &MuxerOptions{Tags: []container.Tag{
+		{Key: "TRACKNUMBER", Value: "3"}, {Key: "TRACKTOTAL", Value: "9"},
+	}})
+	raw := out.Bytes()
+
+	// The muxer's own binary atom reads back.
+	d, err := NewDemuxer(container.BytesSource(raw), nil)
+	if err != nil {
+		t.Fatalf("NewDemuxer: %v", err)
+	}
+	if got := d.Tags()["TRACKNUMBER"]; len(got) != 1 || got[0] != "3" {
+		t.Fatalf("TRACKNUMBER = %v, want [3]; the fixture is not exercising trkn", got)
+	}
+
+	// Flip the data box's type indicator from binary (0) to UTF-8 (1), which
+	// is what a text-writing tagger emits. The payload is no longer a pair of
+	// words and must not be read as one.
+	i := bytes.Index(raw, []byte("trkn"))
+	if i < 0 {
+		t.Fatal("no trkn atom in the fixture")
+	}
+	j := bytes.Index(raw[i:], []byte("data"))
+	if j < 0 {
+		t.Fatal("no data box inside trkn")
+	}
+	raw[i+j+4+3] = 1 // the low byte of the 32-bit type indicator
+
+	d, err = NewDemuxer(container.BytesSource(raw), nil)
+	if err != nil {
+		t.Fatalf("NewDemuxer after the flip: %v", err)
+	}
+	if got := d.Tags()["TRACKNUMBER"]; len(got) != 0 {
+		t.Errorf("a text-typed trkn was read as binary: TRACKNUMBER = %v", got)
+	}
+	if got := d.Tags()["TRACKTOTAL"]; len(got) != 0 {
+		t.Errorf("a text-typed trkn was read as binary: TRACKTOTAL = %v", got)
+	}
+}

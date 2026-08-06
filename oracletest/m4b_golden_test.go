@@ -66,6 +66,37 @@ func TestGoldenM4BChapters(t *testing.T) {
 			t.Errorf("output lacks %q", want)
 		}
 	}
+	// Present is not the same as readable, and the difference is how B1
+	// shipped: these atoms were asserted by substring for a release and
+	// nothing ever read one back. Both routes are exercised, because they
+	// answer differently on this file and the difference is the finding.
+	//
+	// The tag library refuses a fragmented movie during parse and so reaches
+	// none of its own ilst reader, which is why WaxFlow reads tags off the
+	// container too. The container path must recover them.
+	back, err := label.New().Read(ctx, container.BytesSource(got), "m4b", meta.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(back.Tags) > 0 {
+		t.Logf("the tag library now reads fragmented MP4 (%d keys); the container fallback stays the floor", len(back.Tags))
+	}
+	probed, err := waxflow.New().Probe(container.BytesSource(got), "m4b", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{
+		"TITLE":  "Chaptered Book",
+		"ARTIST": info.Tags["ARTIST"][0],
+		"ALBUM":  info.Tags["ALBUM"][0],
+	} {
+		if vs := probed.Tags[key]; len(vs) != 1 || vs[0] != want {
+			t.Errorf("container read back %s = %v, want [%q]", key, vs, want)
+		}
+	}
+	if len(probed.Chapters) != 3 {
+		t.Errorf("container read back %d chapters, want 3", len(probed.Chapters))
+	}
 	// iTunSMPB carries the exact numbers: the encoder delay, the padding
 	// to a whole frame count, and the trimmed length End patched in.
 	smpb := got[bytes.Index(got, []byte("iTunSMPB")):]

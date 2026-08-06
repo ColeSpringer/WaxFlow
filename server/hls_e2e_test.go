@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -117,14 +118,24 @@ func TestHLSEndToEnd(t *testing.T) {
 	if initURI == "" || len(segURIs) != 2 {
 		t.Fatalf("init %q, %d segments (want 2):\n%s", initURI, len(segURIs), media)
 	}
-	// EXTINF durations sum to the decode total: 4 s plus the flushed
-	// padding frame.
+	// EXTINF is the presentation timeline, so the durations sum to the
+	// source's true length rather than to the decode total, which overshoots
+	// it by the encoder delay plus the tail rounding. The exactness is in
+	// samples; the playlist prints %.5f, so the rendered sum carries up to
+	// 5e-6 s of rounding per segment and is bounded by that rather than
+	// demanded equal.
 	var sum float64
 	for _, d := range extinf {
 		sum += d
 	}
-	if sum < 4.0 || sum > 4.05 {
-		t.Fatalf("EXTINF sum %.5f, want just over 4 s", sum)
+	if tol := float64(len(extinf)) * 5e-6; math.Abs(sum-4.0) > tol {
+		t.Fatalf("EXTINF sum %.5f, want 4 s within %.5f", sum, tol)
+	}
+	// TARGETDURATION still covers the longest segment it lists.
+	for _, d := range extinf {
+		if d > 4 {
+			t.Fatalf("EXTINF %.5f exceeds the declared TARGETDURATION 4", d)
+		}
 	}
 
 	// Init header, twice: computed then cached, byte-identical.
@@ -492,5 +503,40 @@ func TestHLSConcurrentFetch(t *testing.T) {
 	}
 	if got := int(env.srv.Metrics().SessionsHLS.Load()); got > len(segURIs) {
 		t.Fatalf("%d workers for %d in-order-ish segments", got, len(segURIs))
+	}
+}
+
+// TestSingleSegmentTargetDuration is the one place U4 moves a number a player
+// reads directly. TARGETDURATION is a ceiling over the EXTINF values, and the
+// shrink can only touch the first segment and the last; in a multi-segment
+// playlist the maximum sits on an interior segment and does not move. With a
+// single segment the only one is both, so the ceiling follows it down: a 4 s
+// source through a delayed codec listed 4.02 s and declared 5.
+func TestSingleSegmentTargetDuration(t *testing.T) {
+	env := newTestEnv(t, nil)
+	for _, name := range []string{"opus", "aac", "flac"} {
+		t.Run(name, func(t *testing.T) {
+			desc := hlsDescriptorFor(t, env, map[string]string{
+				"src": "lib/ramp.wav", "format": name, "segDur": "10",
+			})
+			resp := env.get(t, "/hls/media.m3u8?v="+desc, nil)
+			body := readBody(t, resp)
+			if resp.StatusCode != 200 {
+				t.Fatalf("media = %d: %s", resp.StatusCode, body)
+			}
+			_, segURIs, extinf := mediaURIs(t, body)
+			if len(segURIs) != 1 {
+				t.Fatalf("%d segments at segDur 10 on a 4 s source, want 1:\n%s", len(segURIs), body)
+			}
+			if math.Abs(extinf[0]-4.0) > 5e-6 {
+				t.Errorf("EXTINF %.5f, want the source's 4 s", extinf[0])
+			}
+			// The whole line, newline included: a bare Contains also passes
+			// for :40 or :45, and this test exists to prove the ceiling
+			// followed the single segment down from 5 to 4.
+			if !bytes.Contains(body, []byte("#EXT-X-TARGETDURATION:4\n")) {
+				t.Errorf("TARGETDURATION did not follow the single segment down:\n%s", body)
+			}
+		})
 	}
 }

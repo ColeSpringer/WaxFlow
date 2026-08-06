@@ -107,20 +107,32 @@ would otherwise return the opposite of what was asked.
       "warnings": ["..."]
     }
 
-With metadata mapping (the CLI daemon always has it), the body also
-carries the source's tag summary when present: `tags` (canonical
-uppercase keys to value lists, ReplayGain included; the lyric sheet is
-excluded, `hasLyrics` plus `GET /lyrics` cover it), `hasArt`, and
-`hasLyrics`.
+The body also carries the source's tag summary when present: `tags`
+(canonical uppercase keys to value lists, ReplayGain included; the lyric
+sheet is excluded, `hasLyrics` plus `GET /lyrics` cover it), `hasArt`,
+and `hasLyrics`.
 
-`chapters` (`[{"startSeconds", "endSeconds", "title"}]`) needs **no**
-mapper: a container that parses chapters surfaces them either way, so a
-daemon embedded without one still reports them. A mapper's chapters win
-when one is wired, since a tag library may know forms the container
-package does not. `endSeconds` is omitted for the start-only chapter
-forms (Nero `chpl`) that mean "until the next chapter, or end of
-stream"; a caller deriving a span from chapter *n* reads it when present
-and chapter *n+1*'s `startSeconds` when not.
+`tags` and `chapters` (`[{"startSeconds", "endSeconds", "title"}]`) both
+need **no** mapper: a container that parses them surfaces them either
+way, so a daemon embedded without one still reports what the file
+carries. A mapper's values win when one is wired, since a tag library may
+know forms and containers the container package does not. `endSeconds` is
+omitted for the start-only chapter forms (Nero `chpl`) that mean "until
+the next chapter, or end of stream"; a caller deriving a span from
+chapter *n* reads it when present and chapter *n+1*'s `startSeconds` when
+not.
+
+`hasArt` and `GET /art` do still need a mapper, and that is deliberate
+rather than an oversight: `hasArt` reports what `/art` **can serve**, and
+`/art` serves only what the mapper hands it, so reporting `true` from a
+cover-art atom the container merely saw would promise a payload the
+endpoint then 404s. Text tags are what the container fallback covers.
+
+`bitDepth` is the depth the **source** stores samples at. It is not
+always the depth the pipeline decodes to: the signal path is float32, so
+a 64-bit float source decodes at 32 bits and reports `bitDepth: 64`.
+`sampleType` (`"int"` or `"float"`) is the float discriminator; a client
+must not infer one from a depth.
 
 `warnings` lists input damage the tolerant parser worked around; `strict`
 turns damage into errors. `samples: -1` means unknown length. This is
@@ -163,6 +175,27 @@ Parameters (unknown parameter names are rejected):
   `bits=0`, `maxBitRate=0`, and a bare `rate=` are 400, because zero is
   not a rate, a channel count, a depth, or a cap. The same rule holds on
   the HLS master form.
+
+  "Keeps the source's" has one exception, and it is the lossy/lossless
+  split rather than a per-encoder quirk. A source wider than the output
+  format can hold (5.1 to `aac`, `mp3` or `opus`, none of which encode
+  more than two channels) is **downmixed to stereo** with a BS.775
+  matrix, on `/stream` and on HLS alike, and the daemon logs it at
+  `warn`. Lossless outputs refuse instead: `alac` answers 415, because
+  a lossless file that silently dropped four channels would be lying
+  about what it holds. `flac`, `vorbis`, `wav` and `aiff` carry
+  multichannel natively and are untouched. An explicit `ch` is never
+  overridden in either direction.
+
+  The fold is the re-encoding rung's, which is the only rung that can
+  fold: direct play ships the source's own bytes and a container rewrite
+  moves the source's own packets, so both deliver the source's layout
+  whatever it is. A 5.1 AAC file requested as `format=aac` is therefore
+  served as 5.1, by packet move, while the same content as FLAC is
+  re-encoded and folded. That is not a special case to remember, it is
+  what those rungs are; `ch=2` asks for stereo specifically and gets it
+  from every rung, because a channel count the source does not already
+  have declines the passthrough rungs by construction.
 - `gain`: `off`, `track` (default), `album`, or an explicit `+/-dB`
   number. `track` and `album` resolve against the source's ReplayGain
   2 tags (Opus `R128_*` tags convert from the -23 LUFS reference), fall
@@ -287,8 +320,8 @@ Parameters (unknown parameter names are rejected):
 
   | format | `container=` |
   |---|---|
-  | `aac` | `adts`, `progressive`, `mka` (empty is fragmented MP4) |
-  | `alac` | `progressive` (empty is fragmented MP4) |
+  | `aac` | `adts`, `progressive`, `fragmented`, `mka` (empty is fragmented MP4) |
+  | `alac` | `progressive`, `fragmented` (empty is fragmented MP4) |
   | `flac` | `mka`, `ogg` (empty is native FLAC) |
   | `opus` | `mka`, `webm` (empty is Ogg) |
   | `vorbis` | `mka`, `webm` (empty is Ogg) |
@@ -300,7 +333,15 @@ Parameters (unknown parameter names are rejected):
   flattens the MP4 boxes (`moov`+`mdat`, the `.m4a` most players expect)
   and back-patches its header, so it needs a seekable destination and is
   not a streaming form: `/stream` refuses it and a job output takes it.
-  `webm` is Opus and Vorbis only, which is webm's audio subset.
+  `container=fragmented` names the CMAF form explicitly. It is what the
+  empty override already means on `/stream` and HLS, and it exists because
+  the empty override no longer means it everywhere: every **file** output
+  rewrites empty to `progressive`, since a file can satisfy the back-patch
+  and streaming buys it nothing. That is all three job types (transcode,
+  split, merge) plus `waxflow transcode` and `waxflow split`, through one
+  engine-side rule so the set cannot drift. Naming `fragmented` is how a
+  file output asks for the delivery form anyway. `webm` is Opus and Vorbis
+  only, which is webm's audio subset.
 - `maxBitRate`: a kbit/s cap for the decision ladder. For direct play the
   cap is checked against whole-file bytes over duration (tags and
   embedded art included): direct play ships the entire file, so the wire
@@ -572,7 +613,7 @@ is:
                    {"name": "aiff", "live": false, "exts": ["aif", "aiff", "aifc", "afc"]},
                    {"name": "flac", "live": true, "exts": ["flac"]},
                    {"name": "mp3", "live": true, "exts": ["mp3", "mpga"]},
-                   {"name": "aac", "live": true, "exts": ["m4a", "aac"]},
+                   {"name": "aac", "live": true, "exts": ["m4a", "aac", "m4b"]},
                    {"name": "alac", "live": true, "exts": []}],
       "delivery": {"progressive": true, "hls": true, "hlsFormats": ["opus", "flac", "aac", "alac"],
                    "cutFormats": ["opus", "aac"],

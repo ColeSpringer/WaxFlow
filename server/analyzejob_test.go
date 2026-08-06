@@ -694,3 +694,46 @@ func (r rangeInjector) RoundTrip(req *http.Request) (*http.Response, error) {
 	req.Header.Set("Range", "bytes=0-9")
 	return r.next.RoundTrip(req)
 }
+
+// TestLoudnessMeasuresTheResolvedWidth pins the server half of C1's trap.
+// Both the measurement basis and the limiter test used to key on the request's
+// ch field, which sees an explicit downmix and not an implicit one. A lossy
+// row folds a too-wide source on its own now, so a request-keyed measurement
+// meters channels the encode never encodes and Analysis.Channels, which is
+// documented as the measurement basis, misstates it.
+func TestLoudnessMeasuresTheResolvedWidth(t *testing.T) {
+	env := jobsEnv(t)
+	// Two seconds, so the gated integrated loudness has whole blocks to
+	// measure: the committed 5.1 fixture is 0.35 s and reports -Inf.
+	if err := os.WriteFile(filepath.Join(env.root, "surround.wav"),
+		rampWAV(t, 48000, 6, 2*48000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The implicit fold: aac holds no 5.1, and the request says nothing.
+	implicit := awaitJob(t, env, createJob(t, env,
+		`{"type":"transcode","src":"lib/surround.wav","format":"aac","loudness":"analyze"}`))
+	if implicit.Analysis == nil {
+		t.Fatal("no analysis on the folded job")
+	}
+	if implicit.Analysis.Channels != 2 {
+		t.Errorf("analysis.channels = %d, want 2: the encode meters the fold, and this field "+
+			"is documented as the basis the numbers were measured on", implicit.Analysis.Channels)
+	}
+
+	// The explicit spelling of the same fold must land on the same numbers,
+	// which is what says the basis is the resolved width and not the field.
+	explicit := awaitJob(t, env, createJob(t, env,
+		`{"type":"transcode","src":"lib/surround.wav","format":"aac","ch":2,"loudness":"analyze"}`))
+	if explicit.Analysis == nil {
+		t.Fatal("no analysis on the explicit job")
+	}
+	if *implicit.Analysis.IntegratedLUFS != *explicit.Analysis.IntegratedLUFS {
+		t.Errorf("implicit fold measured %v LUFS, explicit %v; the two are the same encode",
+			*implicit.Analysis.IntegratedLUFS, *explicit.Analysis.IntegratedLUFS)
+	}
+	if implicit.Analysis.ReplayGainTrackPeak != explicit.Analysis.ReplayGainTrackPeak {
+		t.Errorf("implicit fold published peak %q, explicit %q; the limiter ran either way",
+			implicit.Analysis.ReplayGainTrackPeak, explicit.Analysis.ReplayGainTrackPeak)
+	}
+}

@@ -158,6 +158,22 @@ architecture and skip elsewhere (`codec/vorbis.goldenEncodeArch`). What the
 ADR-0004 cache key rests on is a build reproducing its own bytes, which the
 deterministic-mode tests cover on every platform.
 
+**Where the baselines run.** The reference encoders these gates score against
+are ffmpeg *build options*, not platform facts, and a given ffmpeg may omit
+any of them. Ubuntu's build carries the lot, which is why `make
+encoder-quality` is a Linux/CI target (the nightly job). It sets
+`WAXFLOW_REQUIRE_*` for each oracle, so a baseline going missing there fails
+the job rather than quietly dropping a gate.
+
+On macOS, Homebrew's ffmpeg has **no libshine at all** and no way to get one:
+there is no `shine` formula, `ffmpeg-full` omits it too, and Homebrew dropped
+`--with-*` build options years ago. So the MP3 baseline gate cannot run
+locally on a Mac, and `make check` does not need it to: the gate self-skips
+with a message naming what is missing. Run it in CI, or in a Linux container.
+Homebrew's ffmpeg also omits **libvorbis**, which the Vorbis differential and
+quality gates use; `brew install ffmpeg-full` supplies that one (it is
+keg-only, so point the oracles at it explicitly or put it ahead on PATH).
+
 ### FLAC
 - `decode(encode(x)) == x` bit-exact on all suites, levels 0-8.
 - `flac -t` accepts every output; streamable-subset compliant.

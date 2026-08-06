@@ -417,10 +417,10 @@ func TestJobLoudnessAnalyzeRG(t *testing.T) {
 		t.Fatalf("analyzed output reads %s from the reference, want ~0", gainVals[0])
 	}
 
-	t.Run("fragmented mp4 output derives and patches", func(t *testing.T) {
-		// The engine cannot decode its own fragmented MP4 back, so the
-		// output values derive from the source measurement and patch the
-		// placeholder atoms in place.
+	t.Run("flat mp4 output measures and patches", func(t *testing.T) {
+		// A job writes a file, so an mp4-family output is the flat form,
+		// which the engine reads back: the values are measured off the
+		// finished file and patched into the placeholder atoms.
 		j := decodeJob(t, env.postJSON(t, "/jobs", map[string]any{
 			"type": "transcode", "src": "lib/ramp.wav", "format": "aac", "loudness": "analyze",
 		}), http.StatusCreated)
@@ -429,14 +429,18 @@ func TestJobLoudnessAnalyzeRG(t *testing.T) {
 			t.Fatalf("aac job ended %s: %+v", done.State, done.Error)
 		}
 		a := done.Analysis
-		// Derivation contract: output loudness is the source measurement
-		// plus the applied gain, which lands exactly on the reference, so
-		// the derived gain tag is exactly zero (the lossy delta is not
-		// measurable without an fMP4 read path, by design). The peak tag
-		// is the patch witness: its derived value cannot equal the
-		// placeholder for a non-silent source.
-		if a.ReplayGainTrackGain != "+00.00 dB" {
-			t.Fatalf("derived RG gain %q, want the reference exactly", a.ReplayGainTrackGain)
+		// Measured, so the gain tag carries the lossy encode's own delta
+		// from the reference rather than the exact zero a derivation
+		// produces by construction. Near zero, because the two-pass gain
+		// put it there; not exactly zero, because a real measurement of a
+		// lossy encode is not. The peak tag is the patch witness: its
+		// value cannot equal the placeholder for a non-silent source.
+		var outGain float64
+		if _, err := fmt.Sscanf(a.ReplayGainTrackGain, "%f dB", &outGain); err != nil {
+			t.Fatal(err)
+		}
+		if math.Abs(outGain) > 0.2 {
+			t.Fatalf("measured RG gain %q, want ~0 from the reference", a.ReplayGainTrackGain)
 		}
 		if a.ReplayGainTrackPeak == "" || a.ReplayGainTrackPeak == meta.FormatPeak(0) {
 			t.Fatalf("derived RG peak %q", a.ReplayGainTrackPeak)
@@ -447,6 +451,33 @@ func TestJobLoudnessAnalyzeRG(t *testing.T) {
 		}
 		if !bytes.Contains(result, []byte("iTunSMPB")) {
 			t.Fatal("output lacks the gapless atom")
+		}
+	})
+
+	t.Run("fragmented mp4 output derives and patches", func(t *testing.T) {
+		// The derive path is still reachable, and still the only answer for
+		// the form it serves: the engine cannot decode its own fragmented MP4
+		// back, so the values come from the source measurement plus the
+		// applied gain. That lands exactly on the reference by construction,
+		// which is what tells this apart from the measured case above.
+		j := decodeJob(t, env.postJSON(t, "/jobs", map[string]any{
+			"type": "transcode", "src": "lib/ramp.wav", "format": "aac",
+			"container": "fragmented", "loudness": "analyze",
+		}), http.StatusCreated)
+		done := waitJob(t, env, j.ID)
+		if done.State != jobs.StateDone || done.Analysis == nil {
+			t.Fatalf("fragmented aac job ended %s: %+v", done.State, done.Error)
+		}
+		a := done.Analysis
+		if a.ReplayGainTrackGain != "+00.00 dB" {
+			t.Fatalf("derived RG gain %q, want the reference exactly", a.ReplayGainTrackGain)
+		}
+		if a.ReplayGainTrackPeak == "" || a.ReplayGainTrackPeak == meta.FormatPeak(0) {
+			t.Fatalf("derived RG peak %q", a.ReplayGainTrackPeak)
+		}
+		result := readBody(t, env.get(t, "/jobs/"+j.ID+"/result", nil))
+		if !bytes.Contains(result, []byte(a.ReplayGainTrackPeak)) {
+			t.Fatalf("output lacks the patched RG peak %q", a.ReplayGainTrackPeak)
 		}
 	})
 }

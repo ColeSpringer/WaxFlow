@@ -403,8 +403,10 @@ func TestOutputTable(t *testing.T) {
 		{"mp3", "mp3"}, {".MP3", "mp3"}, {"mpga", "mp3"},
 		// m4a moved from alac to aac when the AAC encoder landed (the
 		// anticipated disambiguation); alac keeps no extension and is
-		// selected by name.
+		// selected by name. m4b is the audiobook spelling of the same
+		// file and answers the same format.
 		{"alac", ""}, {"m4a", "aac"}, {".M4A", "aac"}, {"aac", "aac"},
+		{"m4b", "aac"}, {".M4B", "aac"},
 		{"xyz", ""}, {"", ""},
 	}
 	for _, tt := range tests {
@@ -431,11 +433,13 @@ func TestOutputExt(t *testing.T) {
 		// alac claims no extension (aac took m4a) and writes an m4a all the
 		// same. The read direction cannot say so and does not have to.
 		{"alac", "", "m4a"},
-		// progressive is the row's own MP4 flattened, not a second container,
-		// so the file keeps its name: naming the override instead is the
-		// foo.progressive download this exists to stop.
+		// progressive and fragmented are the row's own MP4 in two box shapes,
+		// not second containers, so the file keeps its name either way: naming
+		// the override instead is the foo.progressive download this stops.
 		{"aac", "progressive", "m4a"},
 		{"alac", "progressive", "m4a"},
+		{"aac", "fragmented", "m4a"},
+		{"alac", "fragmented", "m4a"},
 		// A real second wrapper renames the file.
 		{"aac", "adts", "aac"},
 		{"wav", "mka", "mka"},

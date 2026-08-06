@@ -58,6 +58,31 @@ func writeWAV(t *testing.T, path string, frames int) {
 	}
 }
 
+// writeFragmentedMP4 transcodes a source into the fragmented (CMAF) MP4 form,
+// which a CLI file output no longer takes by default (it is the flat form; see
+// newTranscodeCmd) and which waxlabel refuses to parse. That refusal is what
+// makes it the fixture for an unreadable-metadata source. Built through the
+// engine rather than `--container fragmented` so this fixture does not depend
+// on the flag some of these tests are about.
+func writeFragmentedMP4(t *testing.T, in, path string) {
+	t.Helper()
+	raw, err := os.ReadFile(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	// The empty Container is the aac row's own default: fragmented.
+	_, err = waxflow.New().Transcode(t.Context(), container.BytesSource(raw), "wav", out,
+		waxflow.TranscodeOptions{Format: "aac"})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // writeSineWAV writes a WAV fixture with the given wire depth and a
 // 997 Hz half-scale sine.
 func writeSineWAV(t *testing.T, path string, rate, channels, bits, frames int) {
@@ -686,11 +711,13 @@ func TestMetadataReadRoutesThroughTheLogger(t *testing.T) {
 	}
 
 	// A source the mapper cannot read at all is a real warning, so it shows
-	// by default. Our own fragmented MP4 is one.
+	// by default. Our own fragmented MP4 is one, and it takes the engine to
+	// build: a CLI file output is the flat form now (see newTranscodeCmd),
+	// which waxlabel reads perfectly well. Delivery still produces the
+	// fragmented form, so the warning path is live for anything read back
+	// off /stream or an HLS segment.
 	frag := filepath.Join(dir, "frag.m4a")
-	if code, _, errOut := run(t, "transcode", in, frag); code != 0 {
-		t.Fatalf("building the fragmented fixture: exit %d, stderr: %s", code, errOut)
-	}
+	writeFragmentedMP4(t, in, frag)
 	_, _, errOut = run(t, "transcode", frag, filepath.Join(dir, "fromfrag.flac"))
 	if !strings.Contains(errOut, "warning=") {
 		t.Errorf("an unreadable source warned nothing at the default level:\n%s", errOut)

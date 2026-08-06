@@ -40,6 +40,16 @@ type Info struct {
 	// server embedded by anyone else silently dropped them. A capability
 	// gate the demuxer already satisfies costs nothing to ask.
 	Chapters []container.Chapter
+	// Tags are the source's embedded tags under canonical uppercase keys
+	// (TITLE, ARTIST, REPLAYGAIN_TRACK_GAIN, ...), nil when the container
+	// carries none or cannot hold them.
+	//
+	// Read here for the same reason as Chapters, and it is the same gap:
+	// the mapper route reaches a transcode only through an injected
+	// mapper, so a server embedded by anyone else silently dropped every
+	// tag a file plainly carried. Cover art is not here; see
+	// container.Tagger.
+	Tags map[string][]string
 	// Warnings describe input damage the tolerant parser worked around.
 	Warnings []string
 }
@@ -180,6 +190,9 @@ func buildInfo(name string, demux container.Demuxer) *Info {
 	info := &Info{Container: name, Tracks: demux.Tracks()}
 	if c, ok := demux.(container.Chapterer); ok {
 		info.Chapters = c.Chapters()
+	}
+	if t, ok := demux.(container.Tagger); ok {
+		info.Tags = t.Tags()
 	}
 	if w, ok := demux.(container.Warner); ok {
 		for _, warn := range w.Warnings() {

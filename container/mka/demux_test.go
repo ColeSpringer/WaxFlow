@@ -62,8 +62,13 @@ func runFFmpeg(t *testing.T, args ...string) {
 
 // gen encodes a two-second 440 Hz sine into a Matroska/WebM fixture, forcing
 // short clusters so seeks and Cues cross cluster boundaries.
+//
+// The one funnel every fixture goes through, so the encoder gate lives here:
+// a row naming an ffmpeg build option this ffmpeg lacks (libvorbis is the
+// common one) skips rather than failing the whole corpus.
 func gen(t *testing.T, dir string, s spec) string {
 	t.Helper()
+	testutil.FFmpegEncoder(t, s.acodec)
 	path := filepath.Join(dir, s.name)
 	args := []string{"-v", "error", "-y", "-f", "lavfi",
 		"-i", fmt.Sprintf("sine=frequency=440:sample_rate=%d:duration=2.0", s.srcRate),
