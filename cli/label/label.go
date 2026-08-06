@@ -16,6 +16,24 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
+// sourceLint names the warnings that describe the source file rather than
+// this transfer: WaxFlow reads a merged tag view and writes a fresh output,
+// so a stray legacy block or an inherited encoder stamp costs it nothing.
+// They become meta.Info.Notes, logged at Debug.
+//
+// Kept small on purpose. Anything that might mean a value did not survive as
+// the source held it stays a Warning, WarnNumericGenre included (it fires
+// when "(17)" resolved to a name, so the output says GENRE=Rock). waxlabel's
+// own LintSeverity is not used: it is calibrated for a tagger editing in
+// place, and ranks four of these as warnings. An unlisted code stays a
+// Warning, which is the safe direction.
+var sourceLint = map[waxlabel.WarningCode]bool{
+	waxlabel.WarnInheritedEncoder: true,
+	waxlabel.WarnStrayLeadingID3:  true,
+	waxlabel.WarnTrailingID3v1:    true,
+	waxlabel.WarnLegacyAPE:        true,
+}
+
 // Mapper is the waxlabel-backed meta.Mapper.
 type Mapper struct{}
 
@@ -45,6 +63,10 @@ func (Mapper) Read(ctx context.Context, src container.Source, hint string, opts 
 		info.Chapters = append(info.Chapters, container.Chapter{Start: ch.Start, End: ch.End, Title: ch.Title})
 	}
 	for _, w := range doc.Warnings() {
+		if sourceLint[w.Code] {
+			info.Notes = append(info.Notes, w.String())
+			continue
+		}
 		info.Warnings = append(info.Warnings, w.String())
 	}
 	for _, sl := range doc.SyncedLyrics() {

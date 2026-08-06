@@ -42,8 +42,18 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		req.Src = r.URL.Query().Get("src")
-		req.Strict = boolish(r.URL.Query().Get("strict"))
+		q := r.URL.Query()
+		// The same closed surface POST enforces via DisallowUnknownFields.
+		// strict inverts the tolerance policy, so a misspelled stict=1 would
+		// silently answer the opposite of what was asked.
+		for k := range q {
+			if !probeParamNames[k] {
+				s.writeError(w, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("unknown parameter %q", k)))
+				return
+			}
+		}
+		req.Src = q.Get("src")
+		req.Strict = boolish(q.Get("strict"))
 	}
 	if req.Src == "" {
 		s.writeError(w, waxerr.New(waxerr.CodeInvalidRequest, "src is required"))

@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/colespringer/waxflow/internal/config"
+	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -191,6 +192,18 @@ Configuration precedence: flag > WAXFLOW_* environment > JSON config file
 	return root
 }
 
+// usageArgs types an Args validator's error as a usage mistake, the way
+// SetFlagErrorFunc does for flags. cobra has no hook for Args, so an
+// unwrapped one exits 1 (internal) instead of 2.
+func usageArgs(v cobra.PositionalArgs) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if err := v(cmd, args); err != nil {
+			return waxerr.Wrap(waxerr.CodeInvalidRequest, "usage", err)
+		}
+		return nil
+	}
+}
+
 // openResolver builds the source-resolution chain every ref-taking
 // command shares: the configured roots, wrapped by the Flavor's schemes
 // when present. The returned close func tears the whole chain down. It is
@@ -315,4 +328,19 @@ func newLogger(w io.Writer, cfg config.Config) (*slog.Logger, error) {
 		return nil, err
 	}
 	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: lvl})), nil
+}
+
+// logMetaRead reports a metadata read through the logger --log-level
+// configures, so warnings can be quieted without --no-tags dropping the
+// metadata too. Notes are source lint (see meta.Info.Notes) and sit at Debug.
+func logMetaRead(logger *slog.Logger, info *meta.Info) {
+	if info == nil {
+		return
+	}
+	for _, w := range info.Warnings {
+		logger.Warn("metadata", "warning", w)
+	}
+	for _, n := range info.Notes {
+		logger.Debug("metadata", "note", n)
+	}
 }

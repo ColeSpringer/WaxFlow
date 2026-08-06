@@ -12,10 +12,12 @@ import (
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/audio"
+	"github.com/colespringer/waxflow/cli/label"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/riff"
+	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/testutil"
 )
 
@@ -616,6 +618,87 @@ func TestTranscodeCommandErrors(t *testing.T) {
 	code, _, errOut := run(t, "transcode", in, filepath.Join(dir, "out.afc"))
 	if code != 0 {
 		t.Errorf(".afc transcode exit = %d, want 0; stderr: %s", code, errOut)
+	}
+}
+
+// TestTranscodeCreatesOutputDirectory pins C7: transcode creates its
+// output's parent, as split does.
+func TestTranscodeCreatesOutputDirectory(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	writeWAV(t, in, 4096)
+
+	out := filepath.Join(dir, "a", "b", "out.flac")
+	if code, _, errOut := run(t, "transcode", in, out); code != 0 {
+		t.Fatalf("exit = %d into a missing directory, want 0; stderr: %s", code, errOut)
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Fatalf("output not written: %v", err)
+	}
+	// --force stages a .tmp sibling, so it takes the same path.
+	forced := filepath.Join(dir, "c", "out.flac")
+	if code, _, errOut := run(t, "transcode", "--force", in, forced); code != 0 {
+		t.Fatalf("--force exit = %d, want 0; stderr: %s", code, errOut)
+	}
+
+	// A refused transcode leaves nothing behind, the directory included.
+	for _, args := range [][]string{
+		{"transcode", "--loudness", "bogus", in, filepath.Join(dir, "d", "out.flac")},
+		{"transcode", "--loudness", "analyze", "--gain", "3", in, filepath.Join(dir, "e", "out.flac")},
+	} {
+		if code, _, _ := run(t, args...); code != 2 {
+			t.Errorf("%v exit = %d, want 2 (invalid)", args, code)
+		}
+	}
+	for _, sub := range []string{"d", "e"} {
+		if _, err := os.Stat(filepath.Join(dir, sub)); err == nil {
+			t.Errorf("a refused transcode left the directory %s behind", sub)
+		}
+	}
+}
+
+// TestMetadataReadRoutesThroughTheLogger pins U1: the metadata read goes
+// through the logger --log-level configures, and warnings outrank source
+// lint.
+func TestMetadataReadRoutesThroughTheLogger(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	writeWAV(t, in, 4096)
+
+	// An encoder stamp: about whatever produced the file, not this transfer.
+	stamped := filepath.Join(dir, "stamped.flac")
+	if code, _, errOut := run(t, "transcode", in, stamped); code != 0 {
+		t.Fatalf("building the stamped fixture: exit %d, stderr: %s", code, errOut)
+	}
+	err := label.New().Apply(t.Context(), stamped,
+		&meta.Info{Tags: map[string][]string{"ENCODER": {"Lavf58.29.100"}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, errOut := run(t, "transcode", stamped, filepath.Join(dir, "quiet.flac"))
+	if strings.Contains(errOut, "msg=metadata") {
+		t.Errorf("source lint surfaced at the default level:\n%s", errOut)
+	}
+	_, _, errOut = run(t, "transcode", "--log-level", "debug", stamped, filepath.Join(dir, "loud.flac"))
+	if !strings.Contains(errOut, "note=") {
+		t.Errorf("--log-level debug produced no note:\n%s", errOut)
+	}
+
+	// A source the mapper cannot read at all is a real warning, so it shows
+	// by default. Our own fragmented MP4 is one.
+	frag := filepath.Join(dir, "frag.m4a")
+	if code, _, errOut := run(t, "transcode", in, frag); code != 0 {
+		t.Fatalf("building the fragmented fixture: exit %d, stderr: %s", code, errOut)
+	}
+	_, _, errOut = run(t, "transcode", frag, filepath.Join(dir, "fromfrag.flac"))
+	if !strings.Contains(errOut, "warning=") {
+		t.Errorf("an unreadable source warned nothing at the default level:\n%s", errOut)
+	}
+	// --log-level error silences it; --no-tags was previously the only lever.
+	_, _, errOut = run(t, "transcode", "--log-level", "error", frag, filepath.Join(dir, "hushed.flac"))
+	if strings.Contains(errOut, "msg=metadata") {
+		t.Errorf("--log-level error did not silence the metadata warning:\n%s", errOut)
 	}
 }
 

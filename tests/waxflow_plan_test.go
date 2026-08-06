@@ -3,6 +3,7 @@ package waxflow_test
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow"
@@ -169,6 +170,78 @@ func TestPlanTranscode(t *testing.T) {
 	}
 	if _, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "wav", GainDB: 999}); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
 		t.Fatalf("wild gain: %v", err)
+	}
+}
+
+// TestChannelRefusalNamesTheRemedy pins U2: when the request never asked for
+// a channel count, a 1-2 channel encoder's refusal carries the remedy, in
+// option vocabulary rather than any boundary's spelling.
+func TestChannelRefusalNamesTheRemedy(t *testing.T) {
+	const frames = 4096
+	cfg := pcm.Config{Encoding: pcm.SignedInt, Bits: 16}
+	wav, src := makeWAV(t, cfg, 6, frames, 11)
+	defer audio.Put(src)
+
+	e := waxflow.New()
+	info, err := e.Probe(container.BytesSource(wav), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	track := info.Default()
+
+	for _, format := range []string{"aac", "alac", "mp3"} {
+		t.Run(format, func(t *testing.T) {
+			_, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: format})
+			if err == nil {
+				t.Fatal("a 6-channel source planned onto a 1-2 channel encoder")
+			}
+			// The wrap must not cost the error its class.
+			if code := waxerr.CodeOf(err); code != waxerr.CodeUnsupportedFormat {
+				t.Errorf("code = %s, want %s", code, waxerr.CodeUnsupportedFormat)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "channel count to 2") {
+				t.Errorf("message %q does not name the remedy", msg)
+			}
+			// The engine is the public module; no boundary owns this string.
+			for _, leak := range []string{"--channels", "ch=", "Channels:"} {
+				if strings.Contains(msg, leak) {
+					t.Errorf("message %q leaks a boundary's vocabulary (%q)", msg, leak)
+				}
+			}
+		})
+	}
+
+	// An explicit request keeps the encoder's own message: naming the same
+	// option back at the caller would be noise.
+	_, err = e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "aac", Channels: 6})
+	if err == nil {
+		t.Fatal("explicit Channels=6 planned onto aac")
+	}
+	if strings.Contains(err.Error(), "channel count to 2") {
+		t.Errorf("explicit request got the hint anyway: %v", err)
+	}
+
+	// Both rows below hold 6 channels natively and validate their own options
+	// before the encoder, so the failure has nothing to do with channels. The
+	// (Channels == 0 && source > 2) gate alone fires on both. A bad rate is
+	// the wrong probe here: it fails in dsp.NewChain, never reaching row.plan.
+	for _, tc := range []struct {
+		name string
+		opts waxflow.TranscodeOptions
+	}{
+		{"flac level", waxflow.TranscodeOptions{Format: "flac", FLACLevel: 99}},
+		{"opus signal", waxflow.TranscodeOptions{Format: "opus", OpusSignal: "bogus"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := e.PlanTranscode(track, tc.opts)
+			if err == nil {
+				t.Fatal("an invalid encoder option planned")
+			}
+			if strings.Contains(err.Error(), "channel count to 2") {
+				t.Errorf("an unrelated refusal was given a channel hint: %v", err)
+			}
+		})
 	}
 }
 

@@ -29,7 +29,7 @@ func newServerCmd(version string, flavor Flavor) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "server",
 		Short: "Run the WaxFlow daemon",
-		Args:  cobra.NoArgs,
+		Args:  usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Signals are bound before anything opens, not just around
 			// serve: a Flavor's resolver can do real I/O at open time (a

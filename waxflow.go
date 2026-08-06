@@ -574,6 +574,18 @@ func buildPlanCore(in audio.Format, opts TranscodeOptions) (*planCore, error) {
 	f := chain.Format()
 	version, bytesPerFrame, bitRate, err := row.plan(f, opts)
 	if err != nil {
+		// Encoder channel refusals surface here in the encoder's own words,
+		// which name no remedy to a caller who never asked for a channel
+		// count. Phrased in option vocabulary, not any boundary's spelling:
+		// this is the public engine. %w keeps the encoder's code.
+		//
+		// planAcceptsStereo is load-bearing, not belt and braces: rows that
+		// hold multichannel natively validate their own options first, so a
+		// bad --flac-level on a 5.1 source lands here with nothing to do
+		// with channels.
+		if opts.Channels == 0 && in.Channels > 2 && planAcceptsStereo(row, f, opts) {
+			return nil, fmt.Errorf("%w; set the output channel count to 2", err)
+		}
 		return nil, err
 	}
 	l, m := chain.Ratio()
@@ -594,6 +606,16 @@ func buildPlanCore(in audio.Format, opts TranscodeOptions) (*planCore, error) {
 		headerBytes:   row.headerBytes,
 		frameSize:     spec.FrameSize,
 	}, nil
+}
+
+// planAcceptsStereo reports whether row.plan would have succeeded at stereo:
+// "would asking for a channel count have helped?", put to the encoder rather
+// than guessed from the error text. Failure path only.
+func planAcceptsStereo(row *output, f audio.Format, opts TranscodeOptions) bool {
+	f.Channels = 2
+	f.Layout = audio.DefaultLayout(2)
+	_, _, _, err := row.plan(f, opts)
+	return err == nil
 }
 
 // output is one row of the writer-side capability table, the analog of

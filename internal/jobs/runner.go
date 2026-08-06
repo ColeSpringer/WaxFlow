@@ -715,6 +715,11 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 		for _, w := range info.Warnings {
 			r.warn(j.ID, w)
 		}
+		// Notes describe the source, not this transfer, so they stay off the
+		// client-visible Job.Warnings.
+		for _, n := range info.Notes {
+			r.log.Debug("job metadata", "id", j.ID, "note", n)
+		}
 	}
 
 	analyzeLoudness := req.Loudness == "analyze"

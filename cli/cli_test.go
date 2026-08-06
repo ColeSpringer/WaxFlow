@@ -277,6 +277,16 @@ func TestUsageErrorsExitInvalid(t *testing.T) {
 	}{
 		{"unknown flag", []string{"version", "--nope"}},
 		{"unknown command", []string{"nope"}},
+		// Args validators have no cobra error hook; unwrapped they exit 1.
+		{"probe with no args", []string{"probe"}},
+		{"transcode with one arg", []string{"transcode", "in.flac"}},
+		{"split with one arg", []string{"split", "in.flac"}},
+		// NoArgs passes today only because its message starts with
+		// "unknown command"; wrapping drops that dependence.
+		{"too many args", []string{"version", "extra"}},
+		// A group needs a RunE too: cobra answers a command with no RunE
+		// with help and exit 0, before ValidateArgs.
+		{"unknown subcommand of a group", []string{"cache", "bogus"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

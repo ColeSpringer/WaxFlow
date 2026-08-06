@@ -39,8 +39,15 @@ type Info struct {
 	// Synced are the timed-lyrics sets (unsynced lyrics ride in Tags
 	// under LYRICS).
 	Synced []SyncedLyrics
-	// Warnings are non-fatal notes from the metadata parse.
+	// Warnings are non-fatal notes bearing on this transfer: something the
+	// source carried that may not survive onto the output, or metadata
+	// that could not be read at all.
 	Warnings []string
+	// Notes describe the source itself and cost the transfer nothing (an
+	// inherited encoder stamp, a legacy tag block beside the native one).
+	// Split out because they fire on most acquired files, which is how a
+	// real warning comes to be ignored. Debug-level.
+	Notes []string
 }
 
 // Picture is one embedded image.

@@ -27,7 +27,7 @@ func newProbeCmd(flavor Flavor) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "probe <file>",
 		Short: "Identify an audio file and print its stream parameters",
-		Args:  cobra.ExactArgs(1),
+		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			src, hint, cleanup, err := openSourceRef(cmd, flavor, args[0], nil, nil)
 			if err != nil {

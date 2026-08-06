@@ -21,7 +21,7 @@ func newPingCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ping",
 		Short: "Check liveness of a running waxflow daemon",
-		Args:  cobra.NoArgs,
+		Args:  usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := resolveConfig(cmd)
 			if err != nil {

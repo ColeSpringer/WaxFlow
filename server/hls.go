@@ -1183,14 +1183,21 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string
 		d.Format = waxflow.SegmentedFormats()[0]
 	}
 	var err error
+	// Absent is how "keep the source's value" is spelled, as on /stream. The
+	// master form copies the query key by key, so a bare rate= arrives
+	// present and empty.
 	atoi := func(name string) (int, error) {
-		v := params[name]
-		if v == "" {
+		v, ok := params[name]
+		if !ok {
 			return 0, nil
 		}
+		if v == "" {
+			return 0, waxerr.New(waxerr.CodeInvalidRequest,
+				fmt.Sprintf("%s is present but empty; omit it to keep the source's value", name))
+		}
 		n, err := strconv.Atoi(v)
-		if err != nil || n < 0 {
-			return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("%s %q: want a non-negative integer", name, v))
+		if err != nil || n <= 0 {
+			return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("%s %q: want a positive integer", name, v))
 		}
 		return n, nil
 	}

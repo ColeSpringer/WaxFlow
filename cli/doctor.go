@@ -52,7 +52,7 @@ func newDoctorCmd(flavor Flavor) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check the local environment a waxflow daemon needs",
-		Args:  cobra.NoArgs,
+		Args:  usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := resolveConfig(cmd)
 			if err != nil {

@@ -14,7 +14,7 @@ func newExitCodesCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "exit-codes",
 		Short: "Print the documented CLI exit-code contract",
-		Args:  cobra.NoArgs,
+		Args:  usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 			fmt.Fprintln(w, "EXIT\tCLASS\tERROR CODES")

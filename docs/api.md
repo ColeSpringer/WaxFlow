@@ -24,6 +24,9 @@ Conventions:
   payload-too-large, 415 unsupported-format, 416 (range refusal, code
   invalid-request), 501 unsupported-source, 503 overloaded (with
   `Retry-After: 2`) and catalog-unavailable, 500 the rest.
+- A path that exists under other methods answers **405** with an `Allow`
+  header listing them, and code `invalid-request` (no code maps to 405).
+  A path no endpoint claims stays 404 `not-found`.
 
 ## Authentication
 
@@ -89,7 +92,9 @@ or `waxflow sign`.
 ## GET /probe, POST /probe
 
 `GET /probe?src=<ref>[&strict=1]` or `POST /probe` with
-`{"src": "<ref>", "strict": false}`.
+`{"src": "<ref>", "strict": false}`. Both forms reject names they do not
+know: `src` and `strict` are the whole surface, and a misspelled `strict`
+would otherwise return the opposite of what was asked.
 
     {
       "schemaVersion": 1,
@@ -123,7 +128,7 @@ byte-identical to `waxflow probe --json`.
 
 ## GET /stream
 
-    /stream?src=<ref>&format=auto|wav|flac|alac|mp3|aac|opus&rate=&ch=&bits=16|24&bitrate=|q=&container=&gain=&dynamics=&t=&from=&to=&track=&maxBitRate=
+    /stream?src=<ref>&format=auto|wav|flac|alac|mp3|aac|opus|vorbis&rate=&ch=&bits=16|24&bitrate=|q=&container=&gain=&dynamics=&t=&from=&to=&track=&maxBitRate=
 
 Source references (`src`): `<root>/<relative/path>` under a configured
 library root; `upload:<id>` for a spooled one-shot upload (POST
@@ -153,7 +158,11 @@ Parameters (unknown parameter names are rejected):
   and unknown up front. CBR MP3 and Opus carry a size estimate. Completed
   cache entries serve with exact sizes like any other.
 - `rate`, `ch`, `bits`: output sample rate, channel count (1 or 2), bit
-  depth (16 or 24, dithered when reducing). Absent keeps the source's.
+  depth (16 or 24, dithered when reducing). **Absent** keeps the source's;
+  omitting the parameter is the only spelling of that. `rate=0`, `ch=0`,
+  `bits=0`, `maxBitRate=0`, and a bare `rate=` are 400, because zero is
+  not a rate, a channel count, a depth, or a cap. The same rule holds on
+  the HLS master form.
 - `gain`: `off`, `track` (default), `album`, or an explicit `+/-dB`
   number. `track` and `album` resolve against the source's ReplayGain
   2 tags (Opus `R128_*` tags convert from the -23 LUFS reference), fall

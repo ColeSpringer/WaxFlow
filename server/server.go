@@ -11,6 +11,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -450,16 +451,97 @@ func (s *Server) routes() {
 	if s.cfg.Demo {
 		mux.HandleFunc("GET /demo", s.handleDemo)
 	}
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		s.writeEnvelope(w, http.StatusNotFound, waxerr.CodeNotFound,
-			fmt.Sprintf("no such endpoint: %s %s", r.Method, r.URL.Path))
-	})
+	// No "/" catch-all: it would match every path for every method and mask
+	// the mux's own 405, which is the answer ServeHTTP delegates to.
 	s.mux = mux
 }
 
-// ServeHTTP implements http.Handler.
+// ServeHTTP implements http.Handler. The routes above are method patterns,
+// so the mux already computes 404 vs 405 and the Allow list; delegating
+// keeps a method list from drifting away from the routes beside it.
+//
+// An empty pattern is the mux's own no-match path. It classifies only: a
+// real route goes through mux.ServeHTTP, because Handler drops the wildcard
+// bindings and r.PathValue("seg"/"id") would come back empty. That second
+// tree walk is the cost. Wrapping every ResponseWriter instead would save it
+// and put an interposer under http.ResponseController's Flush and
+// SetWriteDeadline for the life of every response.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// "OPTIONS *" is not a path; the mux answers it before routing.
+	if r.RequestURI != "*" {
+		if h, pattern := s.mux.Handler(r); pattern == "" {
+			s.serveNoRoute(w, r, h)
+			return
+		}
+	}
 	s.mux.ServeHTTP(w, r)
+}
+
+// serveNoRoute runs the mux's own no-match handler against a recorder and
+// re-emits its answer as the JSON envelope.
+func (s *Server) serveNoRoute(w http.ResponseWriter, r *http.Request, h http.Handler) {
+	rec := &envelopeRecorder{}
+	h.ServeHTTP(rec, r)
+	if rec.status == 0 {
+		rec.status = http.StatusOK
+	}
+	allow := rec.header.Get("Allow")
+	// "OPTIONS /hls/" is a preflight over the whole subtree, not a claim that
+	// every path under it is a resource, so OPTIONS alone is no route: with
+	// timelines off, POST /hls/timeline must be 404 and not 405.
+	if rec.status == http.StatusMethodNotAllowed && allow == http.MethodOptions {
+		rec.status = http.StatusNotFound
+	}
+	switch rec.status {
+	case http.StatusNotFound:
+		s.writeEnvelope(w, http.StatusNotFound, waxerr.CodeNotFound,
+			fmt.Sprintf("no such endpoint: %s %s", r.Method, r.URL.Path))
+	case http.StatusMethodNotAllowed:
+		// No waxerr.Code maps to 405, so the status is explicit, as the 416
+		// range refusal already does.
+		if allow != "" {
+			w.Header().Set("Allow", allow)
+		}
+		s.writeEnvelope(w, http.StatusMethodNotAllowed, waxerr.CodeInvalidRequest,
+			fmt.Sprintf("method not allowed: %s %s", r.Method, r.URL.Path))
+	default:
+		// A cleaned-path redirect lands here; replayed so a 307 does not
+		// become a 404.
+		for k, v := range rec.header {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(rec.status)
+		_, _ = w.Write(rec.body.Bytes())
+	}
+}
+
+// envelopeRecorder buffers the mux's plain-text 404 and 405 so serveNoRoute
+// can re-dress them as the envelope. Safe to buffer because nothing on a
+// real route reaches it.
+type envelopeRecorder struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func (rec *envelopeRecorder) Header() http.Header {
+	if rec.header == nil {
+		rec.header = make(http.Header)
+	}
+	return rec.header
+}
+
+func (rec *envelopeRecorder) WriteHeader(status int) {
+	if rec.status == 0 {
+		rec.status = status
+	}
+}
+
+func (rec *envelopeRecorder) Write(b []byte) (int, error) {
+	if rec.status == 0 {
+		rec.status = http.StatusOK
+	}
+	return rec.body.Write(b)
 }
 
 // Close stops pipeline goroutines, the job workers, the upload janitor,

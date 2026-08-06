@@ -181,7 +181,7 @@ func (s *Server) planTranscode(req *streamRequest) error {
 	plan := req.plan
 	if !plan.Live {
 		return waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("%s has no streaming form; request it as a job output once jobs land", plan.Container))
+			fmt.Sprintf("%s has no streaming form; request it as a job output (POST /jobs)", plan.Container))
 	}
 	if kbit := req.p.maxBitRate; kbit > 0 {
 		// A plan without a bit rate (VBR lossless: the output size is

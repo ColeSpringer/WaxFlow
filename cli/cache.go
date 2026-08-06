@@ -17,6 +17,11 @@ func newCacheCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cache",
 		Short: "Inspect or garbage-collect a running daemon's transcode cache",
+		Args:  usageArgs(cobra.NoArgs),
+		// Needed for the validator to run at all: cobra answers a command
+		// with no RunE with help and exit 0 before it reaches ValidateArgs,
+		// so `cache bogus` would succeed.
+		RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
 	}
 	cmd.PersistentFlags().String("addr", "", "daemon address host:port (default "+config.DefaultAddr+")")
 	cmd.PersistentFlags().String("api-key", "", "API key (default: first configured apiKeys entry)")
@@ -44,7 +49,7 @@ func newCacheStatsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "stats",
 		Short: "Print cache entry count, bytes, and hit counters",
-		Args:  cobra.NoArgs,
+		Args:  usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cl, err := cacheClient(cmd)
 			if err != nil {
@@ -71,7 +76,7 @@ func newCacheGCCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "gc",
 		Short: "Run cache eviction now",
-		Args:  cobra.NoArgs,
+		Args:  usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cl, err := cacheClient(cmd)
 			if err != nil {

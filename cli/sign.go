@@ -33,7 +33,7 @@ signing secret the daemon holds: signingSecret from configuration, or the
 secret persisted under dataDir on the daemon's first run. The source is
 resolved against the configured roots to embed its identity, so a URL
 minted here dies with 410 source-changed if the file changes.`,
-		Args: cobra.NoArgs,
+		Args: usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := resolveConfig(cmd)
 			if err != nil {

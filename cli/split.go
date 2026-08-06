@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -56,7 +57,7 @@ the sheet names, and that one sample is a click at every track join.
 The cut is sample-exact and, to a lossless output at the source's own rate,
 bit-exact: the pieces rejoin into the original with nothing lost, repeated,
 or filtered at any seam.`,
-		Args: cobra.ExactArgs(2),
+		Args: usageArgs(cobra.ExactArgs(2)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			switch {
 			case cueFile == "" && len(atFlag) == 0:
@@ -168,7 +169,7 @@ or filtered at any seam.`,
 				ofN--
 			}
 			sp := splitter{
-				e: e, src: src, hint: srcHint,
+				e: e, log: logger, src: src, hint: srcHint,
 				outFormat: outFormat, container: containerName,
 				flacLevel: optLevel, force: force, ofN: ofN,
 				mapper: label.New(),
@@ -377,6 +378,7 @@ func atPieces(at []string, total int64) ([]piece, error) {
 // and its path rather than a dozen arguments in a row.
 type splitter struct {
 	e         *waxflow.Engine
+	log       *slog.Logger
 	src       container.Source
 	hint      string
 	outFormat string
@@ -407,9 +409,7 @@ func (s *splitter) readMeta(cmd *cobra.Command) {
 	if err != nil {
 		return
 	}
-	for _, warn := range m.Warnings {
-		fmt.Fprintf(cmd.ErrOrStderr(), "metadata: %s\n", warn)
-	}
+	logMetaRead(s.log, m)
 	// The album's ReplayGain measures the whole rip, and a piece is not it:
 	// the tags would tell a player to adjust a piece by a number nothing
 	// measured. A fresh measurement is what --loudness is for, on the piece.

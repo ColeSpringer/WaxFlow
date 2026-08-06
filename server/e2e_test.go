@@ -1098,11 +1098,21 @@ func TestParameterValidation(t *testing.T) {
 		status int
 		code   waxerr.Code
 	}{
-		{"src=lib/sine.wav&chanels=1", 400, waxerr.CodeInvalidRequest},                   // unknown param
-		{"src=lib/sine.wav&bits=8", 400, waxerr.CodeInvalidRequest},                      // outside 16|24
-		{"src=lib/sine.wav&t=-3", 400, waxerr.CodeInvalidRequest},                        // negative seek
-		{"src=lib/sine.wav&t=1e18", 400, waxerr.CodeInvalidRequest},                      // beyond the seek bound
-		{"src=lib/sine.wav&track=-5", 400, waxerr.CodeInvalidRequest},                    // explicit negative track
+		{"src=lib/sine.wav&chanels=1", 400, waxerr.CodeInvalidRequest}, // unknown param
+		{"src=lib/sine.wav&bits=8", 400, waxerr.CodeInvalidRequest},    // outside 16|24
+		{"src=lib/sine.wav&t=-3", 400, waxerr.CodeInvalidRequest},      // negative seek
+		{"src=lib/sine.wav&t=1e18", 400, waxerr.CodeInvalidRequest},    // beyond the seek bound
+		{"src=lib/sine.wav&track=-5", 400, waxerr.CodeInvalidRequest},  // explicit negative track
+		// The defaults are 0, so an explicit zero needs a presence check.
+		{"src=lib/sine.wav&rate=0", 400, waxerr.CodeInvalidRequest},
+		{"src=lib/sine.wav&ch=0", 400, waxerr.CodeInvalidRequest},
+		{"src=lib/sine.wav&bits=0", 400, waxerr.CodeInvalidRequest},
+		{"src=lib/sine.wav&maxBitRate=0", 400, waxerr.CodeInvalidRequest},
+		{"src=lib/sine.wav&rate=", 400, waxerr.CodeInvalidRequest}, // present but empty
+		// track keeps its own rule (0 is legal) but reports empty the same way.
+		{"src=lib/sine.wav&track=", 400, waxerr.CodeInvalidRequest},
+		// bitrate too, so /stream and the HLS mint cannot disagree.
+		{"src=lib/sine.wav&format=mp3&bitrate=", 400, waxerr.CodeInvalidRequest},
 		{"src=lib/sine.wav&gain=loud", 400, waxerr.CodeInvalidRequest},                   // bad gain
 		{"src=lib/sine.wav&bitrate=128", 415, waxerr.CodeUnsupportedFormat},              // bitrate needs an explicit lossy format
 		{"src=lib/sine.wav&format=flac&bitrate=128", 415, waxerr.CodeUnsupportedFormat},  // bitrate on lossless output
@@ -1124,6 +1134,87 @@ func TestParameterValidation(t *testing.T) {
 			resp := env.get(t, "/stream?"+tc.query, nil)
 			wantEnvelope(t, resp, tc.status, tc.code)
 		})
+	}
+}
+
+func TestProbeRejectsUnknownParameters(t *testing.T) {
+	env := newTestEnv(t, nil)
+	// strict inverts the tolerance policy, so a typo answers the opposite.
+	for _, q := range []string{"src=lib/sine.wav&bogus=1", "src=lib/sine.wav&stict=1"} {
+		t.Run(q, func(t *testing.T) {
+			wantEnvelope(t, env.get(t, "/probe?"+q, nil), 400, waxerr.CodeInvalidRequest)
+		})
+	}
+	// The two it does know still work.
+	if resp := env.get(t, "/probe?src=lib/sine.wav&strict=1", nil); resp.StatusCode != 200 {
+		t.Fatalf("strict=1 = %d, want 200 (body: %s)", resp.StatusCode, readBody(t, resp))
+	}
+}
+
+// TestMethodNotAllowed pins C6: a path that exists under another method
+// answers 405 with the route table's Allow list; one that does not stays 404.
+func TestMethodNotAllowed(t *testing.T) {
+	env := newTestEnv(t, nil)
+
+	resp := env.req(t, http.MethodPost, "/caps", nil)
+	wantEnvelope(t, resp, http.StatusMethodNotAllowed, waxerr.CodeInvalidRequest)
+	// GET implies HEAD in the mux's accounting, which is where this comes from.
+	if allow := resp.Header.Get("Allow"); allow != "GET, HEAD" {
+		t.Errorf("Allow = %q, want %q", allow, "GET, HEAD")
+	}
+
+	// /stream takes GET, HEAD and OPTIONS, so DELETE is a 405.
+	resp = env.req(t, http.MethodDelete, "/stream", nil)
+	wantEnvelope(t, resp, http.StatusMethodNotAllowed, waxerr.CodeInvalidRequest)
+	if allow := resp.Header.Get("Allow"); allow != "GET, HEAD, OPTIONS" {
+		t.Errorf("Allow = %q, want %q", allow, "GET, HEAD, OPTIONS")
+	}
+
+	// A path no route claims is still not-found, under any method.
+	for _, m := range []string{http.MethodGet, http.MethodPost} {
+		wantEnvelope(t, env.req(t, m, "/nope", nil), http.StatusNotFound, waxerr.CodeNotFound)
+	}
+
+	// The preflight covers the whole /hls/ subtree; alone it is not a route.
+	resp = env.req(t, http.MethodPost, "/hls/nothing-here", nil)
+	wantEnvelope(t, resp, http.StatusNotFound, waxerr.CodeNotFound)
+	if allow := resp.Header.Get("Allow"); allow != "" {
+		t.Errorf("Allow = %q on a 404, want none", allow)
+	}
+}
+
+// TestDelegatedRoutingPreservesRealRoutes guards what the delegation could
+// break: a registered OPTIONS handler, and the path-cleaning redirect.
+func TestDelegatedRoutingPreservesRealRoutes(t *testing.T) {
+	env := newTestEnv(t, nil)
+
+	// A registered pattern, so it reaches the preflight, not the 405.
+	if resp := env.req(t, http.MethodOptions, "/stream", nil); resp.StatusCode != http.StatusNoContent {
+		t.Errorf("OPTIONS /stream = %d, want 204 (body: %s)", resp.StatusCode, readBody(t, resp))
+	}
+
+	// The recorder must replay these rather than rewrite them: the mux
+	// reports no pattern when the cleaned path matches nothing either.
+	client := *env.ts.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	for _, tc := range []struct{ path, want string }{
+		{"//caps", "/caps"}, // cleaned path matches
+		{"//nope", "/nope"}, // cleaned path matches nothing
+	} {
+		req, err := http.NewRequest(http.MethodGet, env.ts.URL+tc.path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-API-Key", testKey)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := readBody(t, resp)
+		if resp.StatusCode/100 != 3 || resp.Header.Get("Location") != tc.want {
+			t.Errorf("GET %s = %d %q, want a redirect to %q (body: %s)",
+				tc.path, resp.StatusCode, resp.Header.Get("Location"), tc.want, body)
+		}
 	}
 }
 

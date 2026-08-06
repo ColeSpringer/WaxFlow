@@ -255,6 +255,12 @@ var streamParamNames = map[string]bool{
 	"id": true, sign.ParamExp: true, sign.ParamKID: true, sign.ParamSig: true,
 }
 
+// probeParamNames is the closed parameter surface of GET /probe, the same
+// rule streamParamNames states. POST /probe has always been strict
+// (decodeJSONBody rejects unknown fields); the GET branch read the two it
+// knew and ignored the rest.
+var probeParamNames = map[string]bool{"src": true, "strict": true}
+
 // span is a request's sample window over the source timeline: the virtual
 // track A11 asks for, one offset range of one file served as a stream in
 // its own right.
@@ -307,7 +313,7 @@ type streamParams struct {
 	t          float64 // seconds; samples are derived after probe
 	span       span    // source-sample window; the zero value is the whole source
 	track      int     // -1 when absent
-	maxBitRate int     // kbit/s cap for the decision ladder; 0 none
+	maxBitRate int     // kbit/s cap for the decision ladder; 0 (absent) is no cap, an explicit 0 is refused
 	bitrate    int     // lossy output bit rate in kbit/s; 0 selects the default
 	container  string  // container override ("adts"); "" selects the format default
 	identity   string  // id= parameter, "" when absent
@@ -360,11 +366,34 @@ func parseStreamParams(q url.Values, defaultGain gainSpec) (*streamParams, error
 	if p.maxBitRate, err = intParam(q, "maxBitRate", 0); err != nil {
 		return nil, err
 	}
-	if p.rate < 0 || p.ch < 0 || p.bits < 0 || p.maxBitRate < 0 {
-		return bad("rate, ch, bits, and maxBitRate must be non-negative")
+	// These four default to 0 meaning "keep the source's value", so intParam
+	// cannot tell absent from an explicit zero. Omitting the parameter is the
+	// only spelling of the default, as with track below and to=0 in
+	// parseSpan. Empty is refused separately: "must be positive" would name a
+	// value the request does not contain.
+	for _, np := range []struct {
+		name string
+		val  int
+	}{{"rate", p.rate}, {"ch", p.ch}, {"bits", p.bits}, {"maxBitRate", p.maxBitRate}} {
+		if !q.Has(np.name) {
+			continue
+		}
+		if q.Get(np.name) == "" {
+			return bad("%s is present but empty; omit it to keep the source's value", np.name)
+		}
+		if np.val <= 0 {
+			return bad("%s must be positive; omit it to keep the source's value", np.name)
+		}
 	}
-	if q.Has("track") && p.track < 0 {
-		return bad("track must be non-negative")
+	// track has its own message: 0 is a legal track, so it refuses at
+	// negative.
+	if q.Has("track") {
+		if q.Get("track") == "" {
+			return bad("track is present but empty; omit it to take the source's default track")
+		}
+		if p.track < 0 {
+			return bad("track must be non-negative")
+		}
 	}
 	switch p.bits {
 	case 0, 16, 24:
@@ -376,6 +405,12 @@ func parseStreamParams(q url.Values, defaultGain gainSpec) (*streamParams, error
 	// Lossy quality selection: q= is a named preset, bitrate= an explicit
 	// kbit/s rate, mutually exclusive. Whether the resolved output can honor
 	// them is checked after format resolution (planTranscode).
+	//
+	// bitrate takes the empty-value rule too, or it and the HLS mint (whose
+	// atoi refuses an empty one) answer the same URL differently.
+	if q.Has("bitrate") && q.Get("bitrate") == "" {
+		return bad("bitrate is present but empty; omit it to take the format's default")
+	}
 	if q.Get("q") != "" && q.Get("bitrate") != "" {
 		return bad("q and bitrate are mutually exclusive")
 	}

@@ -91,9 +91,11 @@ curl http://localhost:4418/ping
 curl -H "X-API-Key: $WAXFLOW_API_KEYS" http://localhost:4418/caps
 ```
 
-Put music under `./library` (or set `WAXFLOW_LIBRARY=/path/to/music`)
-and stream: mint a URL with `POST /sign`, or try the dev demo page
-(`--demo`). Or from source (Go 1.26.3):
+Put music under `./library`, or point the compose bind mount elsewhere
+with `WAXFLOW_LIBRARY=/path/to/music`, and stream: mint a URL with `POST
+/sign`, or try the dev demo page (`--demo`). `WAXFLOW_LIBRARY` is
+compose's variable for that mount, not a daemon setting; the daemon reads
+`roots` / `WAXFLOW_ROOTS`. Or from source (Go 1.26.3):
 
 ```sh
 make build
@@ -152,7 +154,7 @@ write keeps a reload from reading a half-written file and `400`ing.
   (`--json` for the schemaVersion'd machine shape, identical to `GET
   /probe`; `--strict` to treat tolerated input damage as errors)
 - `waxflow transcode <in> <out>`: local one-shot file-to-file transcode
-  through the same engine the daemon uses (`--format wav|aiff|flac|mp3|aac|alac|opus`,
+  through the same engine the daemon uses (`--format wav|aiff|flac|mp3|aac|alac|opus|vorbis`,
   `--flac-level`, `--mp3-bitrate`, default from the output extension;
   `--force` to overwrite). Metadata (tags, chapters, cover art, lyrics)
   passes through onto the output automatically (`--no-tags` to skip);

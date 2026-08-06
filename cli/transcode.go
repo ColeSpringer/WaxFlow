@@ -49,7 +49,7 @@ output is a bit-exact container rewrite; a lossy input is still decoded
 and re-encoded, which costs a generation. --rate, --channels, --bits and
 --gain insert only the DSP nodes they need (resampling, downmix, gain
 with true-peak limiting, dither).`,
-		Args: cobra.ExactArgs(2),
+		Args: usageArgs(cobra.ExactArgs(2)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := resolveConfig(cmd)
 			if err != nil {
@@ -101,6 +101,17 @@ with true-peak limiting, dither).`,
 				}
 			}
 
+			// Before anything is created on disk: a refused transcode must
+			// not leave a directory tree behind. split orders its own
+			// MkdirAll after validation for the same reason.
+			if loudness != "" && loudness != "analyze" {
+				return waxerr.New(waxerr.CodeInvalidRequest,
+					fmt.Sprintf("loudness %q: want analyze (or omit)", loudness))
+			}
+			if loudness == "analyze" && gainDB != 0 {
+				return waxerr.New(waxerr.CodeInvalidRequest, "--loudness analyze replaces --gain; drop one")
+			}
+
 			src, srcHint, cleanup, err := openSourceRef(cmd, flavor, args[0], &cfg, logger)
 			if err != nil {
 				return err
@@ -130,24 +141,17 @@ with true-peak limiting, dither).`,
 			if force {
 				writePath = fmt.Sprintf("%s.tmp-%d", outPath, os.Getpid())
 			}
+			// Created rather than required, as split does. Both write paths
+			// (final, and the staged .tmp under --force) sit here.
+			if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+				return waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating the output directory", err)
+			}
 			out, err := os.OpenFile(writePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 			if err != nil {
 				if !force && errors.Is(err, os.ErrExist) {
 					return waxerr.Wrap(waxerr.CodeInvalidRequest, "output exists (use --force to overwrite)", err)
 				}
 				return waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating output", err)
-			}
-
-			if loudness != "" && loudness != "analyze" {
-				out.Close()
-				os.Remove(writePath)
-				return waxerr.New(waxerr.CodeInvalidRequest,
-					fmt.Sprintf("loudness %q: want analyze (or omit)", loudness))
-			}
-			if loudness == "analyze" && gainDB != 0 {
-				out.Close()
-				os.Remove(writePath)
-				return waxerr.New(waxerr.CodeInvalidRequest, "--loudness analyze replaces --gain; drop one")
 			}
 
 			// The options fields cannot say "level 0" or "complexity 0"
@@ -172,9 +176,7 @@ with true-peak limiting, dither).`,
 			if !noTags {
 				if m, merr := mapper.Read(cmd.Context(), src, srcHint, meta.ReadOptions{Pictures: true}); merr == nil {
 					info = m
-					for _, warn := range m.Warnings {
-						fmt.Fprintf(cmd.ErrOrStderr(), "metadata: %s\n", warn)
-					}
+					logMetaRead(logger, m)
 				}
 			}
 			analyzeLoudness := loudness == "analyze"
@@ -334,7 +336,10 @@ with true-peak limiting, dither).`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&formatName, "format", "", "output format: wav, aiff, flac, mp3, aac, alac, or opus (default: from output extension)")
+	// Derived from the output table, like the inference error above: the
+	// hand-written list had already fallen a format behind.
+	cmd.Flags().StringVar(&formatName, "format", "",
+		fmt.Sprintf("output format: %s (default: from output extension)", strings.Join(waxflow.OutputFormats(), ", ")))
 	cmd.Flags().StringVar(&containerName, "container", "", "container override where the format has one: adts for aac, progressive for aac/alac (flat non-streaming MP4), mka/webm for opus/aac/flac/wav, ogg for flac (default: the format's native container; a bare .aac output implies adts)")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite the output if it exists")
 	cmd.Flags().IntVar(&rate, "rate", 0, "output sample rate in Hz (default: source rate)")
