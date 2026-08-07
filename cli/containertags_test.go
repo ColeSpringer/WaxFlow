@@ -15,10 +15,19 @@ import (
 )
 
 // writeTaggedFragmentedMP4 builds the source these tests need: a fragmented
-// (CMAF) MP4 carrying a full ilst. It is the shape the tag library refuses to
-// parse, so every tag that reaches an output from it came off the container,
-// which is what B1 added and what these tests pin. The engine writes it
-// directly because the tag set has to be chosen here, which no flag does.
+// (CMAF) MP4 carrying a full ilst. Both readers see it, the mapper and the
+// demuxer, so what these tests pin is the transfer end to end on a mapper-wired
+// route, not the container fallback in isolation. The tag library used to
+// refuse this shape at parse, which is the premise they were written on; it
+// reads it as of v1.4.0, and every route in cli/ wires label.New().
+//
+// The fallback alone is exercised where nothing else can exercise it:
+// server/e2e_test.go's TestProbeReadsContainerTagsWithoutAMapper, whose daemon
+// has no mapper wired, for tags and for art both. There is no mapper-free lever
+// in cli/ (--no-tags disables tags, not the mapper), so that is the coverage.
+//
+// The engine writes the fixture directly because the tag set has to be chosen
+// here, which no flag does.
 func writeTaggedFragmentedMP4(t *testing.T, in, path string, tags []container.Tag, art *container.Picture) {
 	t.Helper()
 	raw, err := os.ReadFile(in)
@@ -62,8 +71,8 @@ func probeJSON(t *testing.T, path string) server.ProbeInfo {
 	return doc
 }
 
-// sourceTags is the tag set the container-fallback tests carry, one of each
-// atom shape the mp4 muxer writes.
+// sourceTags is the tag set these tests carry, one of each atom shape the mp4
+// muxer writes.
 var sourceTags = []container.Tag{
 	{Key: "TITLE", Value: "A Title"},
 	{Key: "ARTIST", Value: "An Artist"},
@@ -71,20 +80,20 @@ var sourceTags = []container.Tag{
 	{Key: "TRACKNUMBER", Value: "4"},
 }
 
-// TestContainerTagsReachTheOutput is B1 end to end: a source the tag library
-// cannot read still carries its tags onto a transcode, because the demuxer
-// parsed them off the header and the transfer folds them in.
-func TestContainerTagsReachTheOutput(t *testing.T) {
+// TestFragmentedSourceTagsReachTheOutput is the transfer end to end on the
+// container shape most likely to lose it: a fragmented MP4, whose ilst sits in
+// the initial movie box and whose samples live in fragments. Its tags must come
+// off the source and land on a transcode of a different format.
+func TestFragmentedSourceTagsReachTheOutput(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.wav")
 	writeWAV(t, in, 8192)
 	frag := filepath.Join(dir, "frag.m4a")
 	writeTaggedFragmentedMP4(t, in, frag, sourceTags, nil)
 
-	// The premise: the container sees the tags, and probe reports them with
-	// no mapper in the picture.
+	// The premise: the tags really are readable off the source.
 	if got := probeJSON(t, frag).Tags; len(got["TITLE"]) != 1 || got["TITLE"][0] != "A Title" {
-		t.Fatalf("probe read no container tags off the fragmented source: %v", got)
+		t.Fatalf("probe read no tags off the fragmented source: %v", got)
 	}
 
 	out := filepath.Join(dir, "out.flac")
@@ -99,9 +108,10 @@ func TestContainerTagsReachTheOutput(t *testing.T) {
 	}
 }
 
-// TestNoTagsSuppressesTheContainerFallback pins the flag against the new
-// source of tags: --no-tags means no tags, not "no tags the mapper found".
-func TestNoTagsSuppressesTheContainerFallback(t *testing.T) {
+// TestNoTagsSuppressesEverySourceOfTags pins the flag against every reader
+// that could supply one: --no-tags means no tags, not "no tags the mapper
+// found" and not "no tags the container found". Both see this fixture.
+func TestNoTagsSuppressesEverySourceOfTags(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.wav")
 	writeWAV(t, in, 8192)
@@ -118,9 +128,12 @@ func TestNoTagsSuppressesTheContainerFallback(t *testing.T) {
 }
 
 // TestGainedTranscodeDropsRecoveredReplayGain is the fold-order case, and the
-// one a naive implementation gets wrong: the container carries the four
+// one a naive implementation gets wrong: the source carries the four
 // REPLAYGAIN_* keys too, so folding them in after the ReplayGain drop would
-// put the source's stale numbers onto an output whose gain just changed.
+// put its stale numbers onto an output whose gain just changed. The drop has to
+// happen whichever reader supplied them, which is why the fixture is one both
+// read: the mapper projects the keys off the `----` freeform atoms the mp4
+// muxer writes them as, and the demuxer reads the same ilst.
 func TestGainedTranscodeDropsRecoveredReplayGain(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.wav")
@@ -131,7 +144,7 @@ func TestGainedTranscodeDropsRecoveredReplayGain(t *testing.T) {
 		{Key: "REPLAYGAIN_TRACK_PEAK", Value: "0.777000"},
 	}, sourceTags...), nil)
 
-	// The premise: those values really are on the source, via the container.
+	// The premise: those values really are recoverable off the source.
 	if got := probeJSON(t, frag).Tags["REPLAYGAIN_TRACK_GAIN"]; len(got) != 1 || got[0] != "-07.77 dB" {
 		t.Fatalf("the fixture carries no recoverable ReplayGain: %v", got)
 	}
@@ -154,7 +167,7 @@ func TestGainedTranscodeDropsRecoveredReplayGain(t *testing.T) {
 
 // TestMeasuredReplayGainBeatsTheRecoveredOne is the same fold order under
 // --loudness analyze, where the output must carry what was measured rather
-// than what the source said.
+// than what the source said, again whichever reader recovered it.
 func TestMeasuredReplayGainBeatsTheRecoveredOne(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.wav")
@@ -178,11 +191,13 @@ func TestMeasuredReplayGainBeatsTheRecoveredOne(t *testing.T) {
 	}
 }
 
-// TestContainerArtIsNotAdvertised pins the one surface the fallback
-// deliberately does not cover. hasArt reports what /art can serve, and /art
-// serves only what a mapper hands it, so a covr atom the container saw must
-// not flip it: hasArt true beside a 404 is worse than the omission.
-func TestContainerArtIsNotAdvertised(t *testing.T) {
+// TestFragmentedSourceAdvertisesItsArt is the half a fragmented source used to
+// lose outright. hasArt reports what /art can serve, and /art serves what the
+// mapper hands it; the mapper reads this file's covr now, so hasArt must be
+// true and the promise must be one /art can keep. oracletest proves the bytes
+// arrive (a picture is too large to hold per demuxer, so cli/ only sees the
+// flag).
+func TestFragmentedSourceAdvertisesItsArt(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.wav")
 	writeWAV(t, in, 8192)
@@ -192,10 +207,10 @@ func TestContainerArtIsNotAdvertised(t *testing.T) {
 
 	doc := probeJSON(t, frag)
 	if len(doc.Tags) == 0 {
-		t.Fatal("the fixture lost its tags, so this test is not covering the fallback")
+		t.Fatal("the fixture lost its tags, so this test is not reading the source it thinks")
 	}
-	if doc.HasArt {
-		t.Error("hasArt went true off a covr atom the container saw; /art has nothing to serve")
+	if !doc.HasArt {
+		t.Error("hasArt is false on a source carrying a covr atom both readers can see")
 	}
 }
 
@@ -370,11 +385,10 @@ func TestLoudnessMeasuresTheResolvedWidth(t *testing.T) {
 	}
 }
 
-// TestSplitCarriesContainerTags covers the fourth fold site. split reads its
-// metadata once for the whole rip and stamps every piece with it, so a source
-// the tag library cannot parse used to leave every piece untagged: the same
-// B1 gap as transcode's, through a different path.
-func TestSplitCarriesContainerTags(t *testing.T) {
+// TestSplitCarriesTheSourceTags covers the fourth fold site. split reads its
+// metadata once for the whole rip and stamps every piece with it, which is a
+// different path from transcode's and pinned separately for that reason.
+func TestSplitCarriesTheSourceTags(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.wav")
 	writeWAV(t, in, 48000)
@@ -406,7 +420,7 @@ func TestSplitCarriesContainerTags(t *testing.T) {
 		}
 	}
 
-	// --no-tags suppresses the container fallback here too. It is scoped to
+	// --no-tags suppresses the source's tags here too. It is scoped to
 	// the source's metadata, which is what the flag says: a piece still
 	// carries the TRACKNUMBER/TRACKTOTAL the cut list gives it, since those
 	// describe the split's own product and were never read off the source.
@@ -430,8 +444,8 @@ func TestSplitCarriesContainerTags(t *testing.T) {
 
 // TestProbeTextAndJSONAgreeOnTags pins the two spellings of one probe against
 // each other on the tag half, as TestProbeReportsSourceBitDepth does on the
-// depth half. printProbe read tags only from the mapper, so a source the tag
-// library cannot parse printed no title while --json reported one.
+// depth half. printProbe read tags only from the mapper while --json also folded
+// the container's in, so the two could report different tag sets for one file.
 func TestProbeTextAndJSONAgreeOnTags(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.wav")
@@ -441,7 +455,7 @@ func TestProbeTextAndJSONAgreeOnTags(t *testing.T) {
 
 	doc := probeJSON(t, frag)
 	if len(doc.Tags["TITLE"]) == 0 {
-		t.Fatal("--json read no container tags, so this test proves nothing")
+		t.Fatal("--json read no tags at all, so this test proves nothing")
 	}
 	code, out, errOut := run(t, "probe", frag)
 	if code != 0 {

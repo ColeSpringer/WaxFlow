@@ -456,10 +456,11 @@ func wantTags(t *testing.T, got map[string][]string, want []container.Tag) {
 	}
 }
 
-// TestFragmentedTagsSurvive is the chapter test's sibling for tags, and the
-// case that matters most: the tag library refuses to parse a fragmented movie
-// at all, so its ilst is the only tag source there is. The muxer writes the
-// same ilst into a fragmented moov as into a flat one, and nothing read it.
+// TestFragmentedTagsSurvive is the chapter test's sibling for tags, on the
+// form delivery actually serves: the muxer writes the same ilst into a
+// fragmented moov as into a flat one, and nothing read it back. It is also
+// the tag source a mapper-less embedder has for this shape, since the
+// post-pass never rewrites a fragmented movie.
 func TestFragmentedTagsSurvive(t *testing.T) {
 	src := metaTone(alac.FrameSize * 3)
 	defer audio.Put(src)

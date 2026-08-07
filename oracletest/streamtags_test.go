@@ -28,6 +28,11 @@ import (
 // and seekable (a file, where flacn back-patches STREAMINFO with a
 // trailing SEEKTABLE and mpa back-patches the exact Xing/TOC), since
 // the two lay the metadata out differently.
+//
+// The aac and alac cells skipped until the tag library learned to read a
+// fragmented movie (the mux is fragmented in both forms). They cover the
+// MP4 ilst path through the cross-implementation reader, which is the one
+// thing the m4b golden and the jobs e2e cannot do for it.
 func TestStreamTagsWaxlabelRoundTrip(t *testing.T) {
 	f := audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
 	wav, _ := synthWAV(t, f, 44100)
@@ -74,13 +79,6 @@ func TestStreamTagsWaxlabelRoundTrip(t *testing.T) {
 				raw := transcode(t, format, seekable)
 				doc, err := waxlabel.Parse(t.Context(), container.BytesSource(raw))
 				if err != nil {
-					if format == "aac" || format == "alac" {
-						// waxlabel cannot parse fragmented MP4 (the
-						// recorded finding; the mux is fragmented in
-						// both forms); the m4b golden and the jobs e2e
-						// cover the MP4 ilst path instead.
-						t.Skipf("waxlabel cannot parse the fragmented %s output: %v", format, err)
-					}
 					t.Fatalf("waxlabel.Parse: %v", err)
 				}
 				fields := doc.Fields()

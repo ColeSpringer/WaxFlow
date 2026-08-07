@@ -1229,7 +1229,43 @@ func TestProbeReadsContainerTagsWithoutAMapper(t *testing.T) {
 	if len(doc.Chapters) == 0 {
 		t.Error("no chapters; the fixture is not the metadata-rich one this needs")
 	}
-	if doc.HasArt {
+
+	// hasArt needs its own fixture: chapters.m4b carries no covr at all, so
+	// asserting false on it would pass however the fallback behaved. This one
+	// has a picture the demuxer can see, and the answer must still be false,
+	// because /art serves only what a mapper hands it and there is no mapper
+	// here. hasArt true beside a 404 is worse than the omission.
+	raw, err := os.ReadFile(filepath.Join(env.root, "sine.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var arty bytes.Buffer
+	if _, err := waxflow.New().Transcode(t.Context(), container.BytesSource(raw), "wav", &arty,
+		waxflow.TranscodeOptions{
+			Format: "aac",
+			Tags:   []container.Tag{{Key: "TITLE", Value: "Arty"}},
+			Art:    &container.Picture{MIME: "image/jpeg", Data: []byte("\xff\xd8\xff\xe0not really a jpeg")},
+		}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(arty.Bytes(), []byte("covr")) {
+		t.Fatal("the art fixture carries no covr atom, so hasArt cannot be under test")
+	}
+	if err := os.WriteFile(filepath.Join(env.root, "arty.m4a"), arty.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resp = env.get(t, "/probe?src=lib/arty.m4a", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET /probe = %d", resp.StatusCode)
+	}
+	var art server.ProbeInfo
+	if err := json.Unmarshal(readBody(t, resp), &art); err != nil {
+		t.Fatal(err)
+	}
+	if len(art.Tags["TITLE"]) == 0 {
+		t.Error("the art fixture lost its tags, so the fallback is not running on it")
+	}
+	if art.HasArt {
 		t.Error("hasArt is true with no mapper wired, so /art would 404 on it")
 	}
 }
@@ -1558,8 +1594,8 @@ func TestStreamEmbedsContainerTagsWithoutAMapper(t *testing.T) {
 // same request, two loudnesses depending on which URL the client picked.
 func TestHLSResolvesGainFromContainerTags(t *testing.T) {
 	env := newTestEnv(t, nil)
-	// A fragmented MP4 with ReplayGain in its ilst: the tag library refuses to
-	// parse the container at all, so these tags exist only through the demuxer.
+	// A fragmented MP4 with ReplayGain in its ilst. This daemon wires no mapper
+	// (server/ cannot import one), so the demuxer is the only tag source here.
 	var buf bytes.Buffer
 	raw, err := os.ReadFile(filepath.Join(env.root, "ramp.wav"))
 	if err != nil {

@@ -6,10 +6,12 @@ package label
 
 import (
 	"context"
+	"errors"
 	"sort"
 
 	waxlabel "github.com/colespringer/waxlabel"
 	"github.com/colespringer/waxlabel/tag"
+	wlerr "github.com/colespringer/waxlabel/waxerr"
 
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/internal/meta"
@@ -27,11 +29,16 @@ import (
 // own LintSeverity is not used: it is calibrated for a tagger editing in
 // place, and ranks four of these as warnings. An unlisted code stays a
 // Warning, which is the safe direction.
+//
+// WarnFragmented clears the bar because a fragmented MP4's tags read exactly:
+// what degrades is the duration and the essence digest, which Read does not
+// consume, and the refused write is one WaxFlow never asks for.
 var sourceLint = map[waxlabel.WarningCode]bool{
 	waxlabel.WarnInheritedEncoder: true,
 	waxlabel.WarnStrayLeadingID3:  true,
 	waxlabel.WarnTrailingID3v1:    true,
 	waxlabel.WarnLegacyAPE:        true,
+	waxlabel.WarnFragmented:       true,
 }
 
 // Mapper is the waxlabel-backed meta.Mapper.
@@ -42,9 +49,9 @@ var _ meta.Mapper = Mapper{}
 // New returns the waxlabel-backed mapper.
 func New() Mapper { return Mapper{} }
 
-// Read parses src's metadata. Formats waxlabel cannot read (our own
-// fragmented MP4, Ogg FLAC) yield an empty Info with a warning: metadata
-// stays best-effort, the audio pipeline owns hard errors.
+// Read parses src's metadata. Formats waxlabel cannot read (Ogg FLAC) yield
+// an empty Info with a warning: metadata stays best-effort, the audio
+// pipeline owns hard errors.
 func (Mapper) Read(ctx context.Context, src container.Source, hint string, opts meta.ReadOptions) (*meta.Info, error) {
 	doc, err := waxlabel.Parse(ctx, src)
 	if err != nil {
@@ -99,6 +106,9 @@ func (Mapper) Read(ctx context.Context, src container.Source, hint string, opts 
 func (Mapper) Apply(ctx context.Context, path string, info *meta.Info, extra []container.Tag) error {
 	doc, err := waxlabel.ParseFile(ctx, path)
 	if err != nil {
+		if canceled(err) {
+			return waxerr.Wrap(waxerr.CodeCanceled, "meta: metadata read canceled", err)
+		}
 		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "meta: output not taggable", err)
 	}
 	ed := doc.Edit()
@@ -148,10 +158,35 @@ func (Mapper) Apply(ctx context.Context, path string, info *meta.Info, extra []c
 	}
 	plan, err := ed.Prepare()
 	if err != nil {
-		return waxerr.Wrap(waxerr.CodeInternal, "meta: metadata plan", err)
+		// Two unrelated failures land here. The write refusals (a fragmented
+		// MP4, an iloc or saio the codec cannot patch, a chapter count past the
+		// format's limit) mean this output cannot hold the metadata, the same
+		// answer ParseFile's refusal gives above. Everything else is the
+		// metadata itself being unwritable anywhere (a NUL byte or invalid
+		// UTF-8 in a value, usually straight off the source), and calling that
+		// an unsupported output blames the wrong file.
+		//
+		// No cancellation check: Prepare takes no context and does no I/O.
+		if errors.Is(err, wlerr.ErrFragmented) ||
+			errors.Is(err, wlerr.ErrUnsupportedFormat) ||
+			errors.Is(err, wlerr.ErrUnsupportedTag) {
+			return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "meta: output cannot take the metadata", err)
+		}
+		return waxerr.Wrap(waxerr.CodeInvalidRequest, "meta: metadata is not writable", err)
 	}
 	if _, _, err := plan.Execute(ctx, waxlabel.SaveBack()); err != nil {
+		if canceled(err) {
+			return waxerr.Wrap(waxerr.CodeCanceled, "meta: metadata write canceled", err)
+		}
 		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "meta: metadata write", err)
 	}
 	return nil
+}
+
+// canceled reports whether err is the context giving out rather than the work
+// failing. It tests the error instead of ctx.Err() so that a real failure
+// racing a Ctrl-C keeps its own code and its own explanation: a disk-full
+// SaveBack is output-unwritable even if the signal lands first.
+func canceled(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }

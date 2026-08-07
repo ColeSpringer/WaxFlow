@@ -221,7 +221,8 @@ func (s *Server) trackIsExact(src *source.File) bool {
 // memoized beside its track. It is the HLS path's half of the fold prepareSource
 // makes from its own probe: gain=track resolves against REPLAYGAIN_* tags, so
 // without it the same source answers one gain on /stream and another on
-// /hls/master.m3u8 whenever the tag library cannot read the file.
+// /hls/master.m3u8 whenever the tag library cannot read the file (or none is
+// wired at all, which is this daemon in every server/ test).
 //
 // A miss fills the memo through trackFor rather than probing separately, so the
 // two facts keep coming from one probe. The advisory form is asked for because

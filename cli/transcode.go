@@ -364,9 +364,11 @@ with true-peak limiting, dither).`,
 			}
 			// embedsTags names the outputs whose muxer already wrote the tags at
 			// mux time, so the post-pass must skip them to avoid a redundant (or
-			// conflicting) second write. The MP4 muxers embed an ilst in moov;
-			// the Ogg muxer embeds the comment header at Begin (and the label
-			// mapper has no Ogg-FLAC writer anyway). Every other output, incl.
+			// conflicting) second write. The MP4 muxers embed an ilst in moov,
+			// which is also the only way the fragmented form gets tags at all:
+			// the mapper reads that shape but refuses to rewrite it. The Ogg
+			// muxer embeds the comment header at Begin (and the label mapper has
+			// no Ogg-FLAC writer anyway). Every other output, incl.
 			// Matroska (.mka/.webm), defers to the post-pass: the mka muxer
 			// accepts Tags but does not emit them (see container/mka.MuxerOptions),
 			// so if it ever starts writing tags at Begin, add its containers here.

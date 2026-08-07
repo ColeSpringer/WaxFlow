@@ -32,8 +32,19 @@ func TestGoldenM4BChapters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(info.Chapters) != 3 || len(info.Tags["TITLE"]) == 0 {
-		t.Fatalf("fixture metadata: %d chapters, tags %v", len(info.Chapters), info.Tags)
+	if len(info.Chapters) != 3 {
+		t.Fatalf("fixture metadata: %d chapters, want 3", len(info.Chapters))
+	}
+	// The descriptive tags both read-back routes are held to, resolved once so
+	// the fixture guard and the assertions cannot disagree about which keys
+	// have to exist: a regenerated fixture missing one reports that here
+	// instead of panicking on an index deep in the comparison below.
+	wantTags := map[string]string{"TITLE": "Chaptered Book"}
+	for _, key := range []string{"ARTIST", "ALBUM"} {
+		if len(info.Tags[key]) == 0 {
+			t.Fatalf("fixture is missing %s: tags %v", key, info.Tags)
+		}
+		wantTags[key] = info.Tags[key][0]
 	}
 
 	out := filepath.Join(t.TempDir(), "out.m4b")
@@ -68,28 +79,31 @@ func TestGoldenM4BChapters(t *testing.T) {
 	}
 	// Present is not the same as readable, and the difference is how B1
 	// shipped: these atoms were asserted by substring for a release and
-	// nothing ever read one back. Both routes are exercised, because they
-	// answer differently on this file and the difference is the finding.
+	// nothing ever read one back. Both routes are exercised, because a
+	// regression can reach one and not the other.
 	//
-	// The tag library refuses a fragmented movie during parse and so reaches
-	// none of its own ilst reader, which is why WaxFlow reads tags off the
-	// container too. The container path must recover them.
+	// The tag library reads a fragmented movie as of v1.4.0, so it is held to
+	// the same three tags and the same chapter count the container path is
+	// below. Values rather than a count: a count passes on partial metadata,
+	// which is exactly the regression a new upstream reader could introduce,
+	// and the chapters are the half this test exists for.
 	back, err := label.New().Read(ctx, container.BytesSource(got), "m4b", meta.ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(back.Tags) > 0 {
-		t.Logf("the tag library now reads fragmented MP4 (%d keys); the container fallback stays the floor", len(back.Tags))
+	for key, want := range wantTags {
+		if vs := back.Tags[key]; len(vs) != 1 || vs[0] != want {
+			t.Errorf("the tag library read back %s = %v, want [%q]", key, vs, want)
+		}
+	}
+	if len(back.Chapters) != 3 {
+		t.Errorf("the tag library read back %d chapters, want 3", len(back.Chapters))
 	}
 	probed, err := waxflow.New().Probe(container.BytesSource(got), "m4b", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for key, want := range map[string]string{
-		"TITLE":  "Chaptered Book",
-		"ARTIST": info.Tags["ARTIST"][0],
-		"ALBUM":  info.Tags["ALBUM"][0],
-	} {
+	for key, want := range wantTags {
 		if vs := probed.Tags[key]; len(vs) != 1 || vs[0] != want {
 			t.Errorf("container read back %s = %v, want [%q]", key, vs, want)
 		}

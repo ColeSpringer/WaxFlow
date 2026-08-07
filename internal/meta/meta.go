@@ -10,7 +10,8 @@
 // the engine owns); jobs and CLI file outputs get the full set (tags,
 // pictures, chapters, synced lyrics) written onto the finished file by
 // Mapper.Apply, except MP4 outputs, whose metadata the mp4 muxer embeds
-// at Begin because the mapper cannot rewrite fragmented MP4.
+// at Begin because the mapper refuses to rewrite a fragmented MP4 (it
+// reads one fine; the rewrite is what it will not do).
 package meta
 
 import (
@@ -234,13 +235,14 @@ func WithoutReplayGain(info *Info) *Info {
 // container fills in the keys it has none for (a shallow copy; the map is
 // rebuilt). It is format.Info.Tags reaching the transfer, the same
 // argument format.Info.Chapters already makes, and it matters most where
-// the tag library refuses the file outright and returns nothing at all.
+// no mapper spoke at all: see the Tagger doc in container/metadata.go for
+// why that is now the case it exists for.
 //
 // A nil info with tags to carry becomes one. Nil means "no mapper spoke"
 // (none wired, or a read that failed), which is exactly the case the
 // fallback exists for, so nil is a floor to build on rather than a veto.
 // Whether tags are wanted at all is the caller's gate, not this one:
-// --no-tags skips the call, and TestNoTagsSuppressesTheContainerFallback
+// --no-tags skips the call, and TestNoTagsSuppressesEverySourceOfTags
 // pins that. Nil in and nothing to say stays nil, so an untagged source
 // through a mapperless daemon still produces no Info.
 //

@@ -58,31 +58,6 @@ func writeWAV(t *testing.T, path string, frames int) {
 	}
 }
 
-// writeFragmentedMP4 transcodes a source into the fragmented (CMAF) MP4 form,
-// which a CLI file output no longer takes by default (it is the flat form; see
-// newTranscodeCmd) and which waxlabel refuses to parse. That refusal is what
-// makes it the fixture for an unreadable-metadata source. Built through the
-// engine rather than `--container fragmented` so this fixture does not depend
-// on the flag some of these tests are about.
-func writeFragmentedMP4(t *testing.T, in, path string) {
-	t.Helper()
-	raw, err := os.ReadFile(in)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer out.Close()
-	// The empty Container is the aac row's own default: fragmented.
-	_, err = waxflow.New().Transcode(t.Context(), container.BytesSource(raw), "wav", out,
-		waxflow.TranscodeOptions{Format: "aac"})
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
 // writeSineWAV writes a WAV fixture with the given wire depth and a
 // 997 Hz half-scale sine.
 func writeSineWAV(t *testing.T, path string, rate, channels, bits, frames int) {
@@ -710,20 +685,22 @@ func TestMetadataReadRoutesThroughTheLogger(t *testing.T) {
 		t.Errorf("--log-level debug produced no note:\n%s", errOut)
 	}
 
-	// A source the mapper cannot read at all is a real warning, so it shows
-	// by default. Our own fragmented MP4 is one, and it takes the engine to
-	// build: a CLI file output is the flat form now (see newTranscodeCmd),
-	// which waxlabel reads perfectly well. Delivery still produces the
-	// fragmented form, so the warning path is live for anything read back
-	// off /stream or an HLS segment.
-	frag := filepath.Join(dir, "frag.m4a")
-	writeFragmentedMP4(t, in, frag)
-	_, _, errOut = run(t, "transcode", frag, filepath.Join(dir, "fromfrag.flac"))
+	// A source the mapper cannot read at all is a real warning, so it shows by
+	// default. Ogg FLAC is the case: the tag library's Ogg parser takes
+	// \x01vorbis and OpusHead only, and container/ogg implements no Tagger, so
+	// nothing softens it. cli/transcode.go records the same gap from the write
+	// side.
+	unread := filepath.Join(dir, "unread.oga")
+	if code, _, errOut := run(t, "transcode", "--format", "flac", "--container", "ogg",
+		in, unread); code != 0 {
+		t.Fatalf("building the Ogg-FLAC fixture: exit %d, stderr: %s", code, errOut)
+	}
+	_, _, errOut = run(t, "transcode", unread, filepath.Join(dir, "fromunread.flac"))
 	if !strings.Contains(errOut, "warning=") {
 		t.Errorf("an unreadable source warned nothing at the default level:\n%s", errOut)
 	}
 	// --log-level error silences it; --no-tags was previously the only lever.
-	_, _, errOut = run(t, "transcode", "--log-level", "error", frag, filepath.Join(dir, "hushed.flac"))
+	_, _, errOut = run(t, "transcode", "--log-level", "error", unread, filepath.Join(dir, "hushed.flac"))
 	if strings.Contains(errOut, "msg=metadata") {
 		t.Errorf("--log-level error did not silence the metadata warning:\n%s", errOut)
 	}

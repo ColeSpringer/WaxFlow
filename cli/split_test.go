@@ -777,9 +777,9 @@ func TestSplitCarriesCoverArt(t *testing.T) {
 		pieces []string
 	}{
 		{"flac, through the metadata post-pass", nil, []string{"01.flac", "02.flac"}},
-		// Progressive rather than the fragmented default only because the tag
-		// library cannot read a moof back; the art rides the same options
-		// field into both.
+		// Progressive spelled out rather than left to the default (which
+		// already picks it for a file output), so the cell pins the flat form
+		// it reads back. The art rides the same options field into both forms.
 		{"alac, embedded by the muxer", []string{"--format", "alac", "--container", "progressive"},
 			[]string{"01.m4a", "02.m4a"}},
 	} {

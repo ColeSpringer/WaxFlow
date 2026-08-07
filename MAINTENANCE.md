@@ -145,31 +145,6 @@ Budgets: CI smoke 45 s/target, nightly 20 m/target, and a release soak
 via `make fuzz FUZZTIME=160m` (about 80 hours of aggregate fuzzing
 across the ~30 targets; run it on a spare box, not CI).
 
-## Upstream asks (open)
-
-Things WaxFlow works around that belong upstream. They outlive any one
-release, so they live here rather than in a plan.
-
-- **waxlabel: move the fragmented-MP4 rejection from parse to write.**
-  The package doc states the constraint honestly as a write one:
-  "Fragmented MP4 is not writable: a top-level moof, or a moov declaring
-  movie fragments via mvex, is rejected during parse"
-  (`internal/mp4/mp4.go:20-21`). The preservation-first rewriter really
-  does need chunk-offset tables and mdat ranges to splice safely, so
-  refusing the *edit* is right; enforcing it in `parse`
-  (`internal/mp4/parse.go:62-63, 83-84`) is stricter than that reason
-  supports, and it costs a read-only caller every tag the file carries,
-  including through waxlabel's own perfectly good ilst reader.
-
-  WaxFlow no longer depends on this: `container.Tagger` reads ilst tags
-  off the container, and every consumer folds them under the mapper's
-  (`internal/meta.WithContainerTags`). The fix would be purely additive
-  here, since the mapper wins wherever it returns tags. Cover art is the
-  part still missing on a fragmented source: `hasArt` and `/art` report
-  what the mapper can serve, and a picture is too large to hold per
-  demuxer on the streaming path, so closing that means either this
-  upstream change or an opt-in `covr` accessor in `container/mp4`.
-
 ## Release checklist (grows over time)
 
 - [ ] `make check` green (fmt, vet, functional + race passes, the module
