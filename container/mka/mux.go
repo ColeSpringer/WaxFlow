@@ -263,8 +263,9 @@ func (m *Muxer) finish(trailer codec.Trailer) error {
 	}
 	if m.durOff >= 0 {
 		// The trailer wins over the projection Begin wrote. A projection that
-		// missed is not an error, unlike flacn and riff: a Matroska Duration is
-		// advisory, so failing the file over a drift would be the wrong trade.
+		// missed is not an error, unlike the FLAC and WAV muxers: a Matroska
+		// Duration is advisory, so failing the file over a drift would be the
+		// wrong trade.
 		if n := finalSamples(trailer, m.rawSamples); n > 0 {
 			if err := m.patch(m.durOff, appendFloat(nil, idDuration, durationTicks(n, m.rate))); err != nil {
 				return err

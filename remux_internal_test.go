@@ -140,7 +140,7 @@ func TestRemuxableIsDerived(t *testing.T) {
 // choice (RIFF little-endian, AIFF big-endian, Matroska signed 8-bit), and the
 // difference lives in CodecConfig where a codec.ID comparison cannot see it.
 // Without this, format=wav on an AIFF source planned as a remux and then died in
-// the muxer with "riff: WAV is little-endian" - a request that worked before
+// the muxer with "wav: WAV is little-endian" - a request that worked before
 // this rung existed.
 //
 // Declining costs nothing, which is why it is the right answer rather than a

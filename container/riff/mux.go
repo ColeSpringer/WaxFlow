@@ -68,17 +68,17 @@ func (m *Muxer) NeedsSeek() bool { return false }
 // Begin validates the track and writes headers.
 func (m *Muxer) Begin(tracks []container.Track) error {
 	if m.began {
-		return waxerr.New(waxerr.CodeInternal, "riff: Begin called twice")
+		return waxerr.New(waxerr.CodeInternal, "wav: Begin called twice")
 	}
 	if len(tracks) != 1 {
-		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("riff: muxers are single-track, got %d", len(tracks)))
+		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("wav: muxers are single-track, got %d", len(tracks)))
 	}
 	t := tracks[0]
 	if t.Codec != codec.PCM {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("riff: cannot mux codec %q (WAV holds PCM)", t.Codec))
+		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("wav: cannot mux codec %q (WAV holds PCM)", t.Codec))
 	}
 	if t.Delay != 0 || t.Padding != 0 {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, "riff: WAV cannot signal gapless trims")
+		return waxerr.New(waxerr.CodeUnsupportedFormat, "wav: WAV cannot signal gapless trims")
 	}
 	cfg, err := pcm.ParseConfig(t.CodecConfig)
 	if err != nil {
@@ -91,7 +91,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 		return err
 	}
 	if t.Fmt.Rate > size32Unknown {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("riff: rate %d does not fit WAV", t.Fmt.Rate))
+		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("wav: rate %d does not fit WAV", t.Fmt.Rate))
 	}
 	m.cfg = cfg
 	m.fmt = t.Fmt
@@ -106,7 +106,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 		// every header shape plus the pad byte with room to spare.
 		if t.Samples > (math.MaxInt64-4096)/int64(m.frameBytes) {
 			return waxerr.New(waxerr.CodeUnsupportedFormat,
-				fmt.Sprintf("riff: track length %d samples overflows the size projection", t.Samples))
+				fmt.Sprintf("wav: track length %d samples overflows the size projection", t.Samples))
 		}
 		m.projected = t.Samples * int64(m.frameBytes)
 	}
@@ -124,7 +124,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 // checkWireConfig rejects wire encodings WAV cannot hold.
 func (m *Muxer) checkWireConfig(cfg pcm.Config) error {
 	bad := func(msg string) error {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, "riff: "+msg)
+		return waxerr.New(waxerr.CodeUnsupportedFormat, "wav: "+msg)
 	}
 	if cfg.BigEndian {
 		return bad("WAV is little-endian")
@@ -254,7 +254,7 @@ func (m *Muxer) writeFmt() error {
 	}
 	byteRate := int64(m.fmt.Rate) * int64(m.frameBytes)
 	if byteRate > size32Unknown {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, "riff: byte rate does not fit WAV")
+		return waxerr.New(waxerr.CodeUnsupportedFormat, "wav: byte rate does not fit WAV")
 	}
 	parts := [][]byte{
 		[]byte(idFmt), u32(uint32(m.fmtPayloadSize())),
@@ -279,13 +279,13 @@ func (m *Muxer) writeFmt() error {
 // WritePacket appends raw interleaved PCM bytes.
 func (m *Muxer) WritePacket(pkt container.Packet) error {
 	if !m.began || m.ended {
-		return waxerr.New(waxerr.CodeInternal, "riff: WritePacket outside Begin/End")
+		return waxerr.New(waxerr.CodeInternal, "wav: WritePacket outside Begin/End")
 	}
 	if pkt.Track != 0 {
-		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("riff: no track %d", pkt.Track))
+		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("wav: no track %d", pkt.Track))
 	}
 	if len(pkt.Data)%m.frameBytes != 0 {
-		return waxerr.New(waxerr.CodeInternal, "riff: packet is not whole frames")
+		return waxerr.New(waxerr.CodeInternal, "wav: packet is not whole frames")
 	}
 	if err := m.write(pkt.Data); err != nil {
 		return err
@@ -300,15 +300,15 @@ func (m *Muxer) WritePacket(pkt container.Packet) error {
 // projection that the actual stream missed is an error.
 func (m *Muxer) End(trailer codec.Trailer) error {
 	if !m.began || m.ended {
-		return waxerr.New(waxerr.CodeInternal, "riff: End outside Begin")
+		return waxerr.New(waxerr.CodeInternal, "wav: End outside Begin")
 	}
 	m.ended = true
 	if trailer.Delay != 0 || trailer.Padding != 0 {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, "riff: WAV cannot signal gapless trims")
+		return waxerr.New(waxerr.CodeUnsupportedFormat, "wav: WAV cannot signal gapless trims")
 	}
 	if trailer.Samples >= 0 && trailer.Samples != m.frames {
 		return waxerr.New(waxerr.CodeInternal,
-			fmt.Sprintf("riff: trailer says %d samples, wrote %d", trailer.Samples, m.frames))
+			fmt.Sprintf("wav: trailer says %d samples, wrote %d", trailer.Samples, m.frames))
 	}
 	dataBytes := m.frames * int64(m.frameBytes)
 	if dataBytes%2 == 1 {
@@ -321,10 +321,10 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 	if m.ws == nil {
 		if m.projected >= 0 && dataBytes != m.projected {
 			return waxerr.New(waxerr.CodeInternal,
-				fmt.Sprintf("riff: headers projected %d data bytes, wrote %d (unseekable output)", m.projected, dataBytes))
+				fmt.Sprintf("wav: headers projected %d data bytes, wrote %d (unseekable output)", m.projected, dataBytes))
 		}
 		if !m.rf64 && riffBytes > m.limit {
-			return waxerr.New(waxerr.CodeInternal, "riff: output crossed the RIFF size limit on an unseekable writer")
+			return waxerr.New(waxerr.CodeInternal, "wav: output crossed the RIFF size limit on an unseekable writer")
 		}
 		return nil
 	}
@@ -366,7 +366,7 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 	}
 	// Leave the writer positioned at the end of the file.
 	if _, err := m.ws.Seek(m.off, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "riff: seeking to end", err)
+		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "wav: seeking to end", err)
 	}
 	return nil
 }
@@ -376,7 +376,7 @@ func (m *Muxer) write(parts ...[]byte) error {
 		n, err := m.w.Write(p)
 		m.off += int64(n)
 		if err != nil {
-			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "riff: write", err)
+			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "wav: write", err)
 		}
 	}
 	return nil
@@ -385,11 +385,11 @@ func (m *Muxer) write(parts ...[]byte) error {
 // patch rewrites bytes at an absolute offset on the seekable writer.
 func (m *Muxer) patch(off int64, parts ...[]byte) error {
 	if _, err := m.ws.Seek(off, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "riff: seek for patch", err)
+		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "wav: seek for patch", err)
 	}
 	for _, p := range parts {
 		if _, err := m.ws.Write(p); err != nil {
-			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "riff: patch", err)
+			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "wav: patch", err)
 		}
 	}
 	return nil

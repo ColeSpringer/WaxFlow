@@ -138,7 +138,7 @@ func (e *Engine) PlanRemux(track container.Track, opts TranscodeOptions) (*Remux
 // with the same samples and correct framing, which rung 2 could not do without
 // growing a per-container wire-format table for a codec that gains nothing from
 // it. Without this, `format=wav` on an AIFF source planned as a remux and then
-// died in the muxer with "riff: WAV is little-endian", a request that had worked
+// died in the muxer with "wav: WAV is little-endian", a request that had worked
 // before this rung existed.
 func codecSurvives(src, out codec.ID) bool {
 	return src == out && src != codec.PCM

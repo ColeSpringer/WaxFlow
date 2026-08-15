@@ -76,7 +76,7 @@ func DefaultConfig(f audio.Format) (pcm.Config, error) {
 		cfg.ValidBits = f.BitDepth
 	}
 	if err := cfg.Validate(); err != nil {
-		return pcm.Config{}, waxerr.Wrap(waxerr.CodeUnsupportedFormat, "riff: no wav encoding for format", err)
+		return pcm.Config{}, waxerr.Wrap(waxerr.CodeUnsupportedFormat, "wav: no wav encoding for format", err)
 	}
 	return cfg, nil
 }

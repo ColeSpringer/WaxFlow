@@ -252,7 +252,7 @@ func TestPlanRemuxDeclinesEveryShapingOption(t *testing.T) {
 // TestRemuxDeclinesPCMAcrossContainers is the regression test for a request this
 // rung broke: format=wav on an AIFF source. Both tracks are codec.PCM, so a
 // codec.ID comparison alone plans it as a remux, and it then dies in the muxer
-// with "riff: WAV is little-endian".
+// with "wav: WAV is little-endian".
 //
 // PCM's packet is not a container-independent access unit the way a real codec's
 // is: its wire layout (endianness, 8-bit signedness) is the container's choice

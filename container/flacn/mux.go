@@ -96,17 +96,17 @@ func (m *Muxer) NeedsSeek() bool { return false }
 // and the SEEKTABLE reservation.
 func (m *Muxer) Begin(tracks []container.Track) error {
 	if m.began {
-		return waxerr.New(waxerr.CodeInternal, "flacn: Begin called twice")
+		return waxerr.New(waxerr.CodeInternal, "flac: Begin called twice")
 	}
 	if len(tracks) != 1 {
-		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("flacn: muxers are single-track, got %d", len(tracks)))
+		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("flac: muxers are single-track, got %d", len(tracks)))
 	}
 	t := tracks[0]
 	if t.Codec != codec.FLAC {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("flacn: cannot mux codec %q", t.Codec))
+		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("flac: cannot mux codec %q", t.Codec))
 	}
 	if t.Delay != 0 || t.Padding != 0 {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, "flacn: FLAC signals no gapless trims (lossless streams have none)")
+		return waxerr.New(waxerr.CodeUnsupportedFormat, "flac: FLAC signals no gapless trims (lossless streams have none)")
 	}
 	si, err := flac.ParseStreamInfo(t.CodecConfig)
 	if err != nil {
@@ -114,7 +114,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	}
 	if want := si.PCMFormat(); t.Fmt != want {
 		return waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("flacn: track format %v does not match STREAMINFO (want %v)", t.Fmt, want))
+			fmt.Sprintf("flac: track format %v does not match the STREAMINFO to write (want %v)", t.Fmt, want))
 	}
 	// The encoder cannot know the stream length; the engine's projection
 	// arrives via the track, so fold it into the header when STREAMINFO
@@ -179,13 +179,13 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 // the seek table.
 func (m *Muxer) WritePacket(pkt container.Packet) error {
 	if !m.began || m.ended {
-		return waxerr.New(waxerr.CodeInternal, "flacn: WritePacket outside Begin/End")
+		return waxerr.New(waxerr.CodeInternal, "flac: WritePacket outside Begin/End")
 	}
 	if pkt.Track != 0 {
-		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("flacn: no track %d", pkt.Track))
+		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("flac: no track %d", pkt.Track))
 	}
 	if len(pkt.Data) == 0 || pkt.Dur <= 0 || pkt.Dur > flac.MaxBlockSize {
-		return waxerr.New(waxerr.CodeInternal, fmt.Sprintf("flacn: packet of %d bytes, %d samples", len(pkt.Data), pkt.Dur))
+		return waxerr.New(waxerr.CodeInternal, fmt.Sprintf("flac: packet of %d bytes, %d samples", len(pkt.Data), pkt.Dur))
 	}
 	if m.points != nil && pkt.PTS >= m.target && len(m.points) < cap(m.points) {
 		m.points = append(m.points, seekRec{sample: pkt.PTS, off: m.off - m.firstFrame, dur: pkt.Dur})
@@ -209,21 +209,21 @@ func (m *Muxer) WritePacket(pkt container.Packet) error {
 // stand, and a known-length projection the stream missed is an error.
 func (m *Muxer) End(trailer codec.Trailer) error {
 	if !m.began || m.ended {
-		return waxerr.New(waxerr.CodeInternal, "flacn: End outside Begin")
+		return waxerr.New(waxerr.CodeInternal, "flac: End outside Begin")
 	}
 	m.ended = true
 	if trailer.Delay != 0 || trailer.Padding != 0 {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, "flacn: FLAC signals no gapless trims")
+		return waxerr.New(waxerr.CodeUnsupportedFormat, "flac: FLAC signals no gapless trims")
 	}
 	if trailer.Samples >= 0 && trailer.Samples != m.samples {
 		return waxerr.New(waxerr.CodeInternal,
-			fmt.Sprintf("flacn: trailer says %d samples, wrote %d", trailer.Samples, m.samples))
+			fmt.Sprintf("flac: trailer says %d samples, wrote %d", trailer.Samples, m.samples))
 	}
 
 	if m.ws == nil {
 		if m.wroteTotal != 0 && m.wroteTotal != m.samples {
 			return waxerr.New(waxerr.CodeInternal,
-				fmt.Sprintf("flacn: header promised %d samples, wrote %d (unseekable output)", m.wroteTotal, m.samples))
+				fmt.Sprintf("flac: header promised %d samples, wrote %d (unseekable output)", m.wroteTotal, m.samples))
 		}
 		return nil
 	}
@@ -261,7 +261,7 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 		m.filled = len(m.points)
 	}
 	if _, err := m.ws.Seek(m.off, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "flacn: seeking to end", err)
+		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "flac: seeking to end", err)
 	}
 	return nil
 }
@@ -271,7 +271,7 @@ func (m *Muxer) write(parts ...[]byte) error {
 		n, err := m.w.Write(p)
 		m.off += int64(n)
 		if err != nil {
-			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "flacn: write", err)
+			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "flac: write", err)
 		}
 	}
 	return nil
@@ -280,11 +280,11 @@ func (m *Muxer) write(parts ...[]byte) error {
 // patch rewrites bytes at an absolute offset on the seekable writer.
 func (m *Muxer) patch(off int64, parts ...[]byte) error {
 	if _, err := m.ws.Seek(off, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "flacn: seek for patch", err)
+		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "flac: seek for patch", err)
 	}
 	for _, p := range parts {
 		if _, err := m.ws.Write(p); err != nil {
-			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "flacn: patch", err)
+			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "flac: patch", err)
 		}
 	}
 	return nil

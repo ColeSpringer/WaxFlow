@@ -61,7 +61,7 @@ func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 }
 
 func malformed(format string, args ...any) error {
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "riff: "+fmt.Sprintf(format, args...))
+	return waxerr.New(waxerr.CodeUnsupportedFormat, "wav: "+fmt.Sprintf(format, args...))
 }
 
 // warn records tolerated damage, or fails in strict mode.
@@ -78,7 +78,7 @@ func (d *Demuxer) parse() error {
 	size := d.src.Size()
 	var head [12]byte
 	if err := container.ReadFull(d.src, head[:], 0); err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "riff: reading header", err)
+		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "wav: reading header", err)
 	}
 	if !Match(head[:]) {
 		return malformed("not a RIFF/WAVE file")
@@ -104,7 +104,7 @@ func (d *Demuxer) parse() error {
 		}
 		var hdr [8]byte
 		if err := container.ReadFull(d.src, hdr[:], off); err != nil {
-			return waxerr.Wrap(waxerr.CodeSourceUnreadable, "riff: reading chunk header", err)
+			return waxerr.Wrap(waxerr.CodeSourceUnreadable, "wav: reading chunk header", err)
 		}
 		id := string(hdr[:4])
 		chunkSize := int64(le.Uint32(hdr[4:]))
@@ -122,7 +122,7 @@ func (d *Demuxer) parse() error {
 			}
 			var p [ds64Payload]byte
 			if err := container.ReadFull(d.src, p[:], off+8); err != nil {
-				return waxerr.Wrap(waxerr.CodeSourceUnreadable, "riff: reading ds64", err)
+				return waxerr.Wrap(waxerr.CodeSourceUnreadable, "wav: reading ds64", err)
 			}
 			ds64DataSize = le.Uint64(p[8:])
 			ds64SampleCount = le.Uint64(p[16:])
@@ -151,7 +151,7 @@ func (d *Demuxer) parse() error {
 			}
 			payload := make([]byte, n)
 			if err := container.ReadFull(d.src, payload, off+8); err != nil {
-				return waxerr.Wrap(waxerr.CodeSourceUnreadable, "riff: reading fmt", err)
+				return waxerr.Wrap(waxerr.CodeSourceUnreadable, "wav: reading fmt", err)
 			}
 			var err error
 			cfg, rate, channels, layout, err = d.parseFmt(payload, off)
@@ -243,7 +243,7 @@ func (d *Demuxer) parse() error {
 	}
 	f := cfg.PCMFormat(rate, channels, layout)
 	if err := f.Valid(); err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "riff: unusable format", err)
+		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "wav: unusable format", err)
 	}
 	d.track = container.Track{
 		Codec:       codec.PCM,
@@ -372,7 +372,7 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 	}
 	d.readBuf = d.readBuf[:need]
 	if err := container.ReadFull(d.src, d.readBuf, d.dataOff+d.pos*int64(d.frameBytes)); err != nil {
-		return waxerr.Wrap(waxerr.CodeSourceUnreadable, "riff: reading data", err)
+		return waxerr.Wrap(waxerr.CodeSourceUnreadable, "wav: reading data", err)
 	}
 	*pkt = container.Packet{
 		Track:  0,
@@ -387,10 +387,10 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 // the next ReadPacket returns io.EOF.
 func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	if track != 0 {
-		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("riff: no track %d", track))
+		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("wav: no track %d", track))
 	}
 	if sample < 0 {
-		return 0, waxerr.New(waxerr.CodeInvalidRequest, "riff: negative seek target")
+		return 0, waxerr.New(waxerr.CodeInvalidRequest, "wav: negative seek target")
 	}
 	if sample > d.track.Samples {
 		sample = d.track.Samples

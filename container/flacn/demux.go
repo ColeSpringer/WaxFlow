@@ -91,7 +91,7 @@ type Demuxer struct {
 // the first frame. The returned Demuxer implements container.Seeker and
 // container.Warner.
 func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
-	d := &Demuxer{src: src, w: srcwin.New(src, src.Size(), "flacn: reading frame data")}
+	d := &Demuxer{src: src, w: srcwin.New(src, src.Size(), "flac: reading frame data")}
 	if opts != nil {
 		d.opts = *opts
 	}
@@ -102,7 +102,7 @@ func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 }
 
 func malformed(format string, args ...any) error {
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "flacn: "+fmt.Sprintf(format, args...))
+	return waxerr.New(waxerr.CodeUnsupportedFormat, "flac: "+fmt.Sprintf(format, args...))
 }
 
 // warn records tolerated damage, or fails in strict mode.
@@ -119,7 +119,7 @@ func (d *Demuxer) parse() error {
 	size := d.src.Size()
 	var head [4]byte
 	if err := container.ReadFull(d.src, head[:], 0); err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "flacn: reading marker", err)
+		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "flac: reading marker", err)
 	}
 	if !Match(head[:]) {
 		return malformed("not a FLAC file")
@@ -138,7 +138,7 @@ func (d *Demuxer) parse() error {
 		}
 		var hdr [4]byte
 		if err := container.ReadFull(d.src, hdr[:], off); err != nil {
-			return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "flacn: reading metadata block header", err)
+			return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "flac: reading metadata block header", err)
 		}
 		last = hdr[0]&0x80 != 0
 		typ := int(hdr[0] & 0x7F)
@@ -164,7 +164,7 @@ func (d *Demuxer) parse() error {
 			}
 			siRaw = make([]byte, flac.StreamInfoLen)
 			if err := container.ReadFull(d.src, siRaw, off+4); err != nil {
-				return waxerr.Wrap(waxerr.CodeSourceUnreadable, "flacn: reading STREAMINFO", err)
+				return waxerr.Wrap(waxerr.CodeSourceUnreadable, "flac: reading STREAMINFO", err)
 			}
 			var err error
 			if d.si, err = flac.ParseStreamInfo(siRaw); err != nil {
@@ -188,7 +188,7 @@ func (d *Demuxer) parse() error {
 
 	f := d.si.PCMFormat()
 	if err := f.Valid(); err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "flacn: unusable format", err)
+		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "flac: unusable format", err)
 	}
 	samples := d.si.Samples
 	if samples == 0 {
@@ -258,7 +258,7 @@ func (d *Demuxer) parseSeekTable(off, length int64) error {
 	}
 	raw := make([]byte, points*18)
 	if err := container.ReadFull(d.src, raw, off); err != nil {
-		return waxerr.Wrap(waxerr.CodeSourceUnreadable, "flacn: reading SEEKTABLE", err)
+		return waxerr.Wrap(waxerr.CodeSourceUnreadable, "flac: reading SEEKTABLE", err)
 	}
 	d.seekTable = make([]seekPoint, 0, points)
 	for i := int64(0); i < points; i++ {
@@ -514,7 +514,7 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 		if d.w.Err() != nil {
 			return d.w.Err()
 		}
-		return waxerr.New(waxerr.CodeSourceUnreadable, "flacn: reading frame data")
+		return waxerr.New(waxerr.CodeSourceUnreadable, "flac: reading frame data")
 	}
 	*pkt = container.Packet{
 		Track: 0,
@@ -536,10 +536,10 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 // numbers narrows the range.
 func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	if track != 0 {
-		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("flacn: no track %d", track))
+		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("flac: no track %d", track))
 	}
 	if sample < 0 {
-		return 0, waxerr.New(waxerr.CodeInvalidRequest, "flacn: negative seek target")
+		return 0, waxerr.New(waxerr.CodeInvalidRequest, "flac: negative seek target")
 	}
 	if d.empty {
 		return 0, nil // nothing to land on; reads stay EOF

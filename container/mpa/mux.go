@@ -98,14 +98,14 @@ func (m *Muxer) NeedsSeek() bool { return false }
 // frame is deferred to the first packet, whose header is its template.
 func (m *Muxer) Begin(tracks []container.Track) error {
 	if m.began {
-		return waxerr.New(waxerr.CodeInternal, "mpa: Begin called twice")
+		return waxerr.New(waxerr.CodeInternal, "mp3: Begin called twice")
 	}
 	if len(tracks) != 1 {
-		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("mpa: muxers are single-track, got %d", len(tracks)))
+		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("mp3: muxers are single-track, got %d", len(tracks)))
 	}
 	t := tracks[0]
 	if t.Codec != codec.MP3 {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("mpa: cannot mux codec %q", t.Codec))
+		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("mp3: cannot mux codec %q", t.Codec))
 	}
 	m.samples = t.Samples
 	m.rate = t.Fmt.Rate
@@ -123,18 +123,18 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 // header) followed by the audio frame.
 func (m *Muxer) WritePacket(pkt container.Packet) error {
 	if !m.began || m.ended {
-		return waxerr.New(waxerr.CodeInternal, "mpa: WritePacket outside Begin/End")
+		return waxerr.New(waxerr.CodeInternal, "mp3: WritePacket outside Begin/End")
 	}
 	if pkt.Track != 0 {
-		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("mpa: no track %d", pkt.Track))
+		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("mp3: no track %d", pkt.Track))
 	}
 	if len(pkt.Data) < mp3.HeaderLen {
-		return waxerr.New(waxerr.CodeInternal, fmt.Sprintf("mpa: packet of %d bytes", len(pkt.Data)))
+		return waxerr.New(waxerr.CodeInternal, fmt.Sprintf("mp3: packet of %d bytes", len(pkt.Data)))
 	}
 	if !m.wroteInfo {
 		h, err := mp3.ParseHeader(pkt.Data)
 		if err != nil {
-			return waxerr.Wrap(waxerr.CodeInternal, "mpa: first packet header", err)
+			return waxerr.Wrap(waxerr.CodeInternal, "mp3: first packet header", err)
 		}
 		copy(m.hdr[:], pkt.Data[:mp3.HeaderLen])
 		m.h = h
@@ -180,7 +180,7 @@ func (m *Muxer) WritePacket(pkt container.Packet) error {
 // when the writer is seekable.
 func (m *Muxer) End(trailer codec.Trailer) error {
 	if !m.began || m.ended {
-		return waxerr.New(waxerr.CodeInternal, "mpa: End outside Begin")
+		return waxerr.New(waxerr.CodeInternal, "mp3: End outside Begin")
 	}
 	m.ended = true
 	if m.ws == nil || m.infoLen == 0 {
@@ -198,13 +198,13 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 		return nil // unbuildable now (should not happen); leave the projection
 	}
 	if _, err := m.ws.Seek(m.id3Len, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mpa: seek for patch", err)
+		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp3: seek for patch", err)
 	}
 	if _, err := m.ws.Write(info); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mpa: patch", err)
+		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp3: patch", err)
 	}
 	if _, err := m.ws.Seek(m.off, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mpa: seeking to end", err)
+		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp3: seeking to end", err)
 	}
 	return nil
 }
@@ -251,7 +251,7 @@ func (m *Muxer) write(b []byte) error {
 	n, err := m.w.Write(b)
 	m.off += int64(n)
 	if err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mpa: write", err)
+		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp3: write", err)
 	}
 	return nil
 }

@@ -30,8 +30,8 @@ type Window struct {
 }
 
 // New returns a Window over src reading [0, dataEnd), wrapping read
-// failures with the owner's package prefix (for example "flacn: reading
-// frame data").
+// failures with the owner's public container name (for example "flac:
+// reading frame data"), since these messages reach users verbatim.
 func New(src container.Source, dataEnd int64, errWrap string) Window {
 	return Window{src: src, dataEnd: dataEnd, errWrap: errWrap}
 }

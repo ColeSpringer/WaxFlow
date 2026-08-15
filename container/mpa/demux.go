@@ -78,7 +78,7 @@ type Demuxer struct {
 // positions on the first audio frame. The returned Demuxer implements
 // container.Seeker and container.Warner.
 func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
-	d := &Demuxer{src: src, w: srcwin.New(src, src.Size(), "mpa: reading frame data")}
+	d := &Demuxer{src: src, w: srcwin.New(src, src.Size(), "mp3: reading frame data")}
 	if opts != nil {
 		d.opts = *opts
 	}
@@ -93,7 +93,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	msg := fmt.Sprintf(format, args...)
 	if d.opts.Strict {
 		return waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("mpa: %s (at offset %d)", msg, off))
+			fmt.Sprintf("mp3: %s (at offset %d)", msg, off))
 	}
 	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg})
 	return nil
@@ -116,7 +116,7 @@ func (d *Demuxer) parse() error {
 	// weaken every sync heuristic here. Diagnose the head directly
 	// (the candidate scan below treats unsized frames as junk).
 	if fh, err := mp3.ParseHeader(d.w.BytesAt(off, mp3.HeaderLen)); err == nil && fh.Size() == 0 {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, "mpa: free-format stream")
+		return waxerr.New(waxerr.CodeUnsupportedFormat, "mp3: free-format stream")
 	}
 
 	// Find the first frame: parse at off, else bounded junk scan.
@@ -125,7 +125,7 @@ func (d *Demuxer) parse() error {
 		if d.w.Err() != nil {
 			return d.w.Err()
 		}
-		return waxerr.New(waxerr.CodeUnsupportedFormat, "mpa: no Layer III frames found")
+		return waxerr.New(waxerr.CodeUnsupportedFormat, "mp3: no Layer III frames found")
 	}
 	if first != off {
 		if err := d.warn(off, "%d unparsable bytes before the first frame", first-off); err != nil {
@@ -148,7 +148,7 @@ func (d *Demuxer) parse() error {
 					if d.w.Err() != nil {
 						return d.w.Err()
 					}
-					return waxerr.New(waxerr.CodeUnsupportedFormat, "mpa: no audio frames after the VBR tag")
+					return waxerr.New(waxerr.CodeUnsupportedFormat, "mp3: no audio frames after the VBR tag")
 				}
 			}
 			h = fh
@@ -169,7 +169,7 @@ func (d *Demuxer) parse() error {
 
 	f := h.PCMFormat()
 	if err := f.Valid(); err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "mpa: unusable format", err)
+		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "mp3: unusable format", err)
 	}
 
 	samples, delay, padding := int64(-1), int64(0), int64(0)
@@ -373,7 +373,7 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 		if d.w.Err() != nil {
 			return d.w.Err()
 		}
-		return waxerr.New(waxerr.CodeSourceUnreadable, "mpa: indexed frame vanished")
+		return waxerr.New(waxerr.CodeSourceUnreadable, "mp3: indexed frame vanished")
 	}
 	d.w.Trim(off)
 	data := d.w.BytesAt(off, h.Size())
@@ -381,7 +381,7 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 		if d.w.Err() != nil {
 			return d.w.Err()
 		}
-		return waxerr.New(waxerr.CodeSourceUnreadable, "mpa: reading frame data")
+		return waxerr.New(waxerr.CodeSourceUnreadable, "mp3: reading frame data")
 	}
 	*pkt = container.Packet{
 		Track: 0,
@@ -419,10 +419,10 @@ func syncFrame(h mp3.Header, frame []byte) bool {
 // sample-exact regardless of the backoff depth.
 func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	if track != 0 {
-		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("mpa: no track %d", track))
+		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("mp3: no track %d", track))
 	}
 	if sample < 0 {
-		return 0, waxerr.New(waxerr.CodeInvalidRequest, "mpa: negative seek target")
+		return 0, waxerr.New(waxerr.CodeInvalidRequest, "mp3: negative seek target")
 	}
 	target := sample / d.spf
 	lastNo, err := d.frameNo(target)
