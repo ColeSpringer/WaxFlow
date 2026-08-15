@@ -16,6 +16,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/internal/cue"
 	"github.com/colespringer/waxflow/internal/meta"
+	"github.com/colespringer/waxflow/internal/posixfs"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -187,7 +188,7 @@ or filtered at any seam.`,
 				e: e, log: logger, src: src, hint: srcHint,
 				outFormat: outFormat, container: containerName,
 				flacLevel: optLevel, force: force, ofN: ofN,
-				mapper: label.New(), containerTags: info.Tags,
+				mapper: label.NewLogged(logger), containerTags: info.Tags,
 			}
 			if !noTags {
 				sp.readMeta(cmd)
@@ -537,7 +538,7 @@ func (s *splitter) writePiece(cmd *cobra.Command, path string, p piece) error {
 		}
 	}
 	if s.force && writePath != path {
-		if err := os.Rename(writePath, path); err != nil {
+		if err := posixfs.Replace(writePath, path); err != nil {
 			os.Remove(writePath)
 			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "renaming output into place", err)
 		}

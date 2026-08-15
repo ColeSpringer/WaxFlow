@@ -919,7 +919,9 @@ func TestTimelineStoredEmptyWindowRefusedAtResolve(t *testing.T) {
 	}
 	const frames = 48000
 	wav := rampWAV(t, 48000, 2, frames)
-	mtime := time.Unix(1700000000, 123456789)
+	// 100ns-aligned nanos: NTFS stores times at 100ns resolution, and the
+	// member ID must match what the server reads back off the file.
+	mtime := time.Unix(1700000000, 123456700)
 	members := []timeline.Member{
 		{Src: "lib/short.wav", ID: fmt.Sprintf("%d-%d", len(wav), mtime.UnixNano()), From: frames},
 		{Src: "lib/short.wav", ID: fmt.Sprintf("%d-%d", len(wav), mtime.UnixNano())},

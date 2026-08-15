@@ -18,6 +18,7 @@ import (
 	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/internal/meta"
+	"github.com/colespringer/waxflow/internal/posixfs"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -228,7 +229,7 @@ with true-peak limiting, dither).`,
 			// The file-output passthrough matrix: full tags, chapters,
 			// and art flow onto the output (the MP4 muxer embeds them;
 			// every other format gets the mapping post-pass below).
-			mapper := label.New()
+			mapper := label.NewLogged(logger)
 			var info *meta.Info
 			if !noTags {
 				m, merr := mapper.Read(cmd.Context(), src, srcHint, meta.ReadOptions{Pictures: true})
@@ -379,7 +380,7 @@ with true-peak limiting, dither).`,
 				}
 			}
 			if force {
-				if err := os.Rename(writePath, outPath); err != nil {
+				if err := posixfs.Replace(writePath, outPath); err != nil {
 					os.Remove(writePath)
 					return waxerr.Wrap(waxerr.CodeOutputUnwritable, "replacing output", err)
 				}

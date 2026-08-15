@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/colespringer/waxflow/internal/posixfs"
 	"github.com/colespringer/waxflow/internal/ulid"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -136,7 +137,7 @@ func (s *store) persistLocked(j *Job) error {
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: writing job", err)
 	}
-	if err := os.Rename(tmp, filepath.Join(dir, jobFile)); err != nil {
+	if err := posixfs.Replace(tmp, filepath.Join(dir, jobFile)); err != nil {
 		os.Remove(tmp)
 		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: promoting job", err)
 	}

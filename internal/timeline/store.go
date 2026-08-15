@@ -32,6 +32,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/colespringer/waxflow/internal/posixfs"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -414,7 +415,10 @@ func (s *Store) removeFile(digest string) {
 }
 
 func (s *Store) load(digest string) (doc, error) {
-	f, err := os.Open(s.path(digest))
+	// posixfs.Open, not os.Open: Members loads outside the store lock, so
+	// this hold can overlap a Put rewriting the same digest (Touch's extend
+	// path), and a plain Windows open would block that Replace.
+	f, err := posixfs.Open(s.path(digest))
 	if err != nil {
 		return doc{}, err
 	}
@@ -450,7 +454,7 @@ func (s *Store) writeLocked(digest string, exp time.Time, members []Member) erro
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "timeline: writing a timeline", err)
 	}
-	if err := os.Rename(tmp, s.path(digest)); err != nil {
+	if err := posixfs.Replace(tmp, s.path(digest)); err != nil {
 		os.Remove(tmp)
 		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "timeline: promoting a timeline", err)
 	}

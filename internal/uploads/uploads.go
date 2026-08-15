@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/colespringer/waxflow/internal/posixfs"
 	"github.com/colespringer/waxflow/internal/ulid"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -198,7 +199,7 @@ func (s *Store) Put(r io.Reader, name string) (*Item, error) {
 	// payload without a sidecar as debris, so a crash between the two
 	// renames cannot resurrect a half-registered upload.
 	payload := filepath.Join(s.dir, id)
-	if err := os.Rename(tmp, payload); err != nil {
+	if err := posixfs.Replace(tmp, payload); err != nil {
 		os.Remove(tmp)
 		return nil, waxerr.Wrap(waxerr.CodeInternal, "uploads: publishing spool file", err)
 	}
@@ -265,7 +266,7 @@ func (s *Store) writeSidecar(id string, sc sidecar) error {
 		os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, filepath.Join(s.dir, id+".json")); err != nil {
+	if err := posixfs.Replace(tmp, filepath.Join(s.dir, id+".json")); err != nil {
 		os.Remove(tmp)
 		return err
 	}

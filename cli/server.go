@@ -213,7 +213,7 @@ func buildServerConfig(ctx context.Context, cfg config.Config, path string, vers
 		UploadMaxBytes:       cfg.ResolvedUploadMaxBytes(),
 		ScratchMaxBytes:      cfg.ResolvedScratchMaxBytes(),
 		UploadTTL:            uploadTTL,
-		Meta:                 label.New(),
+		Meta:                 label.NewLogged(logger),
 		LiveSlots:            cfg.ResolvedLiveSlots(),
 		JobSlots:             cfg.ResolvedJobSlots(),
 		DefaultGain:          cfg.ResolvedDefaultGain(),

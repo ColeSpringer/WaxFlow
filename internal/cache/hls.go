@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/colespringer/waxflow/internal/posixfs"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -54,7 +55,7 @@ func (s *Store) HLS(key Key, meta Meta) (*Variant, error) {
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "cache: writing variant meta", err)
 	}
-	if err := os.Rename(tmp, filepath.Join(dir, "meta.json")); err != nil {
+	if err := posixfs.Replace(tmp, filepath.Join(dir, "meta.json")); err != nil {
 		os.Remove(tmp)
 		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "cache: publishing variant meta", err)
 	}
@@ -107,7 +108,7 @@ func (v *Variant) WriteFile(name string, data []byte) error {
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "cache: writing variant file", err)
 	}
-	if err := os.Rename(tmp, final); err != nil {
+	if err := posixfs.Replace(tmp, final); err != nil {
 		os.Remove(tmp)
 		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "cache: publishing variant file", err)
 	}
@@ -152,7 +153,7 @@ func (v *Variant) Open(name string) (*Cached, bool) {
 		return nil, false
 	}
 
-	f, err := os.Open(filepath.Join(v.dir, name))
+	f, err := posixfs.Open(filepath.Join(v.dir, name))
 	if err != nil {
 		// Not-yet-written segments are the normal miss; only the variant
 		// itself evaporating warrants dropping the index entry, and that

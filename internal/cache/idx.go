@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/colespringer/waxflow/internal/posixfs"
 )
 
 // IdxStore is the source-index sidecar cache (plan section 10): probe
@@ -64,7 +66,10 @@ func (s *IdxStore) Load(identity string) []byte {
 	if err != nil || fi.Size() > maxIdxBlob {
 		return nil
 	}
-	blob, err := os.ReadFile(path)
+	// posixfs.ReadFile, not os.ReadFile: Load is lock-free, so this brief
+	// hold can overlap a Save's Replace of the same blob, and a plain
+	// Windows open would block that rename for the hold's duration.
+	blob, err := posixfs.ReadFile(path)
 	if err != nil {
 		return nil
 	}
@@ -95,7 +100,7 @@ func (s *IdxStore) Save(identity string, blob []byte) {
 		os.Remove(tmp)
 		return
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := posixfs.Replace(tmp, path); err != nil {
 		os.Remove(tmp)
 		return
 	}

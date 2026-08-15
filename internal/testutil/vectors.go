@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/colespringer/waxflow/internal/posixfs"
 )
 
 // Vector is one SHA-256-pinned external conformance vector. Pinning is
@@ -282,7 +284,7 @@ func fetchOne(path string, v Vector) error {
 	if got := hex.EncodeToString(h.Sum(nil)); got != v.SHA256 {
 		return fmt.Errorf("digest mismatch: got %s, pinned %s", got, v.SHA256)
 	}
-	return os.Rename(tmp.Name(), path)
+	return posixfs.Replace(tmp.Name(), path)
 }
 
 func fileSHA256(path string) (string, error) {

@@ -145,6 +145,42 @@ func TestBadTagValueIsNotBlamedOnTheOutput(t *testing.T) {
 	}
 }
 
+// TestOversizedPictureIsARefusalNotBadMetadata pins the bucket for a picture
+// the destination format cannot store. FLAC caps a metadata block at 16 MiB,
+// so a larger cover is the same shape as a chapter count past the format's
+// limit: well-formed metadata this output cannot take (unsupported), not
+// metadata that is wrong in itself (invalid request). The tag library agrees
+// since v1.4.1, which classifies ErrPictureTooLarge with the write refusals.
+func TestOversizedPictureIsARefusalNotBadMetadata(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "sine-s16.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "out.flac")
+	writeFLAC(t, raw, path)
+
+	err = label.New().Apply(t.Context(), path,
+		&meta.Info{Pictures: []meta.Picture{{MIME: "image/png", Front: true, Data: oversizedPNG()}}}, nil)
+	if err == nil {
+		t.Fatal("Apply embedded a picture past FLAC's block limit; this cell covers nothing")
+	}
+	if got := waxerr.CodeOf(err); got != waxerr.CodeUnsupportedFormat {
+		t.Errorf("code = %q, want %q (%v)", got, waxerr.CodeUnsupportedFormat, err)
+	}
+}
+
+// oversizedPNG is a real PNG signature and IHDR on a body past FLAC's 16 MiB
+// block limit: the picture sniff accepts it, only the FLAC write refuses it.
+func oversizedPNG() []byte {
+	data := make([]byte, 17<<20)
+	copy(data, "\x89PNG\r\n\x1a\n")        // signature
+	copy(data[8:], "\x00\x00\x00\x0dIHDR") // IHDR length + type
+	copy(data[16:], "\x00\x00\x00\x10"+    // width 16
+		"\x00\x00\x00\x10"+ // height 16
+		"\x08\x02\x00\x00\x00") // 8-bit RGB
+	return data
+}
+
 // writeFLAC builds a taggable output: an ordinary flat file the mapper
 // rewrites without complaint, so a refusal is about the metadata.
 func writeFLAC(t *testing.T, wav []byte, path string) {

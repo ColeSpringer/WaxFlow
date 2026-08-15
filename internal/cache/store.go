@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/colespringer/waxflow/internal/posixfs"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -74,9 +75,10 @@ func Open(dir string, opts Options) (*Store, error) {
 		log:       opts.Logger,
 		now:       time.Now,
 		createFile: func(path string) (entryFile, error) {
-			// O_RDWR, not O_WRONLY: read-behind readers ReadAt this same
-			// descriptor while the pipeline appends.
-			return os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644)
+			// posixfs.Create, not os.OpenFile: promote renames this file
+			// while the descriptor stays open, which Windows permits only
+			// with delete sharing.
+			return posixfs.Create(path)
 		},
 		index:       make(map[Key]*indexEntry),
 		writing:     make(map[Key]*Entry),
@@ -196,7 +198,7 @@ func (s *Store) Lookup(key Key) *Cached {
 	meta := ie.meta
 	s.mu.Unlock()
 
-	f, err := os.Open(path)
+	f, err := posixfs.Open(path)
 	if err != nil {
 		// The entry evaporated behind our back (manual deletion, another
 		// process): drop it and report a miss.
@@ -273,7 +275,7 @@ func (s *Store) promote(e *Entry, meta *Meta) error {
 	if err := e.file.Sync(); err != nil {
 		return err
 	}
-	if err := os.Rename(e.tmpPath, e.finalPath); err != nil {
+	if err := posixfs.Replace(e.tmpPath, e.finalPath); err != nil {
 		return err
 	}
 	meta.CreatedAt = s.now()
@@ -285,7 +287,7 @@ func (s *Store) promote(e *Entry, meta *Meta) error {
 	if err := os.WriteFile(metaTmp, b, 0o644); err != nil {
 		return err
 	}
-	if err := os.Rename(metaTmp, filepath.Join(e.dir, "meta.json")); err != nil {
+	if err := posixfs.Replace(metaTmp, filepath.Join(e.dir, "meta.json")); err != nil {
 		os.Remove(metaTmp)
 		return err
 	}

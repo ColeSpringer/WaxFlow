@@ -371,46 +371,51 @@ func TestTranscodeCommand(t *testing.T) {
 		t.Errorf("output = %q", out)
 	}
 
-	// The output must decode bit-exactly back to the source ramp.
-	f, err := os.Open(outPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	src, err := container.FileSource(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	med, err := waxflow.New().OpenStream(src, "aiff")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer med.Close()
-	info := med.Info()
-	if info.Container != "aiff" || info.Default().Samples != 4800 {
-		t.Fatalf("output probe = %+v", info)
-	}
-	fm := info.Default().Fmt
-	dst := audio.Get(fm, audio.StandardChunk)
-	defer audio.Put(dst)
-	pos := int64(0)
-	for {
-		err := med.ReadChunk(dst)
+	// The output must decode bit-exactly back to the source ramp. Scoped so
+	// the file handle is released before the --force leg below: a Windows
+	// os.Open takes no FILE_SHARE_DELETE, so a handle still open here blocks
+	// the forced replace of outPath and fails a leg that is about the CLI.
+	func() {
+		f, err := os.Open(outPath)
 		if err != nil {
-			break
+			t.Fatal(err)
 		}
-		for c := 0; c < fm.Channels; c++ {
-			for i, v := range dst.ChanI(c) {
-				if want := testutil.RampAtI(fm, c, pos+int64(i)); v != want {
-					t.Fatalf("ch%d sample %d = %d, want %d", c, pos+int64(i), v, want)
+		defer f.Close()
+		src, err := container.FileSource(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		med, err := waxflow.New().OpenStream(src, "aiff")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer med.Close()
+		info := med.Info()
+		if info.Container != "aiff" || info.Default().Samples != 4800 {
+			t.Fatalf("output probe = %+v", info)
+		}
+		fm := info.Default().Fmt
+		dst := audio.Get(fm, audio.StandardChunk)
+		defer audio.Put(dst)
+		pos := int64(0)
+		for {
+			err := med.ReadChunk(dst)
+			if err != nil {
+				break
+			}
+			for c := 0; c < fm.Channels; c++ {
+				for i, v := range dst.ChanI(c) {
+					if want := testutil.RampAtI(fm, c, pos+int64(i)); v != want {
+						t.Fatalf("ch%d sample %d = %d, want %d", c, pos+int64(i), v, want)
+					}
 				}
 			}
+			pos += int64(dst.N)
 		}
-		pos += int64(dst.N)
-	}
-	if pos != 4800 {
-		t.Fatalf("decoded %d frames, want 4800", pos)
-	}
+		if pos != 4800 {
+			t.Fatalf("decoded %d frames, want 4800", pos)
+		}
+	}()
 
 	// Existing output without --force refuses; with --force succeeds.
 	code, _, _ = run(t, "transcode", in, outPath)

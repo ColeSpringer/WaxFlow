@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -175,7 +176,9 @@ func TestLoadOrCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != 0o600 {
+	// Windows has no POSIX mode bits: Go reports 0666 for any writable
+	// file there, so the permission promise is only checkable elsewhere.
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("secret file mode = %v, want 0600", fi.Mode().Perm())
 	}
 	k2, err := LoadOrCreate(path)

@@ -7,6 +7,7 @@ package label
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sort"
 
 	waxlabel "github.com/colespringer/waxlabel"
@@ -42,12 +43,20 @@ var sourceLint = map[waxlabel.WarningCode]bool{
 }
 
 // Mapper is the waxlabel-backed meta.Mapper.
-type Mapper struct{}
+type Mapper struct {
+	log *slog.Logger
+}
 
 var _ meta.Mapper = Mapper{}
 
-// New returns the waxlabel-backed mapper.
+// New returns the waxlabel-backed mapper. Its demoted notes (see NewLogged)
+// go to slog.Default.
 func New() Mapper { return Mapper{} }
+
+// NewLogged returns the mapper with log receiving the notes Apply demotes
+// rather than fails on: a write whose bytes landed but whose post-commit
+// step then failed.
+func NewLogged(log *slog.Logger) Mapper { return Mapper{log: log} }
 
 // Read parses src's metadata. Formats waxlabel cannot read (Ogg FLAC) yield
 // an empty Info with a warning: metadata stays best-effort, the audio
@@ -103,7 +112,7 @@ func (Mapper) Read(ctx context.Context, src container.Source, hint string, opts 
 // extra tags (which win over same-keyed info tags). Values or fields the
 // output format cannot hold are waxlabel plan warnings, not errors: the
 // transfer is preservation-first and best-effort by design.
-func (Mapper) Apply(ctx context.Context, path string, info *meta.Info, extra []container.Tag) error {
+func (m Mapper) Apply(ctx context.Context, path string, info *meta.Info, extra []container.Tag) error {
 	doc, err := waxlabel.ParseFile(ctx, path)
 	if err != nil {
 		if canceled(err) {
@@ -159,22 +168,42 @@ func (Mapper) Apply(ctx context.Context, path string, info *meta.Info, extra []c
 	plan, err := ed.Prepare()
 	if err != nil {
 		// Two unrelated failures land here. The write refusals (a fragmented
-		// MP4, an iloc or saio the codec cannot patch, a chapter count past the
-		// format's limit) mean this output cannot hold the metadata, the same
-		// answer ParseFile's refusal gives above. Everything else is the
-		// metadata itself being unwritable anywhere (a NUL byte or invalid
-		// UTF-8 in a value, usually straight off the source), and calling that
-		// an unsupported output blames the wrong file.
+		// MP4, an iloc or saio the codec cannot patch, a chapter count or
+		// picture size past the format's limit) mean this output cannot hold
+		// the metadata, the same answer ParseFile's refusal gives above.
+		// Everything else is the metadata itself being unwritable anywhere (a
+		// NUL byte or invalid UTF-8 in a value, usually straight off the
+		// source), and calling that an unsupported output blames the wrong
+		// file.
 		//
 		// No cancellation check: Prepare takes no context and does no I/O.
 		if errors.Is(err, wlerr.ErrFragmented) ||
 			errors.Is(err, wlerr.ErrUnsupportedFormat) ||
-			errors.Is(err, wlerr.ErrUnsupportedTag) {
+			errors.Is(err, wlerr.ErrUnsupportedTag) ||
+			errors.Is(err, wlerr.ErrPictureTooLarge) {
 			return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "meta: output cannot take the metadata", err)
 		}
 		return waxerr.Wrap(waxerr.CodeInvalidRequest, "meta: metadata is not writable", err)
 	}
-	if _, _, err := plan.Execute(ctx, waxlabel.SaveBack()); err != nil {
+	if _, res, err := plan.Execute(ctx, waxlabel.SaveBack()); err != nil {
+		// Committed with an error means the bytes landed and only a step after
+		// the rename failed (the directory fsync; waxlabel v1.4.1 documents the
+		// quadrant and spends the plan). The tags are on the file, so failing
+		// here would report a write that happened as one that did not; the
+		// durability caveat is worth a log line but not an error, since
+		// WaxFlow's own output writes never fsync at all.
+		//
+		// Checked before canceled for the same reason canceled tests the error
+		// and not ctx.Err(): the real outcome wins over the racing signal, and
+		// here the real outcome is a landed write.
+		if res.Committed {
+			log := m.log
+			if log == nil {
+				log = slog.Default()
+			}
+			log.Warn("meta: metadata write committed, a post-commit step failed", "path", path, "err", err)
+			return nil
+		}
 		if canceled(err) {
 			return waxerr.Wrap(waxerr.CodeCanceled, "meta: metadata write canceled", err)
 		}

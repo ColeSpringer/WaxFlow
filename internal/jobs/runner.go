@@ -19,6 +19,7 @@ import (
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/admission"
 	"github.com/colespringer/waxflow/internal/meta"
+	"github.com/colespringer/waxflow/internal/posixfs"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -166,7 +167,10 @@ func (r *Runner) OutputFile(j *Job, n int) (*os.File, error) {
 	if p == "" {
 		return nil, waxerr.New(waxerr.CodeNotFound, "jobs: no such output")
 	}
-	f, err := os.Open(p)
+	// posixfs.Open, not os.Open: a Delete racing this serve removes the
+	// job's directory, and a plain Windows open would block that removal
+	// until the client disconnects.
+	f, err := posixfs.Open(p)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeInternal, "jobs: opening output", err)
 	}

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/colespringer/waxflow/internal/posixfs"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -140,7 +141,7 @@ func publishSecret(path string, secret []byte) (bool, error) {
 		// Hard links unsupported here (exFAT, some network mounts):
 		// rename still gives crash-atomicity, only the concurrent
 		// first-creation race loses its guard.
-		if rerr := os.Rename(tmp.Name(), path); rerr != nil {
+		if rerr := posixfs.Replace(tmp.Name(), path); rerr != nil {
 			return fail(rerr)
 		}
 		return true, nil

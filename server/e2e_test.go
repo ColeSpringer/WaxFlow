@@ -962,12 +962,22 @@ func TestDegradedCacheNeverKillsPlayback(t *testing.T) {
 	want := engineReference(t, filepath.Join(env.root, "album", "track.flac"), waxflow.TranscodeOptions{Format: "wav"})
 
 	// Break the cache volume after startup: entry creation fails, the
-	// session runs ring-fed, playback still completes byte-exact.
+	// session runs ring-fed, playback still completes byte-exact. The
+	// version dir becomes a regular file, not a read-only dir: Windows
+	// ignores a directory's read-only bit for creation inside it (and root
+	// ignores modes entirely), so chmod only broke the volume on some
+	// platforms while this breaks MkdirAll on all of them.
 	v1 := filepath.Join(env.cache, "v1")
-	if err := os.Chmod(v1, 0o555); err != nil {
+	if err := os.RemoveAll(v1); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Chmod(v1, 0o755) })
+	if err := os.WriteFile(v1, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		os.Remove(v1)
+		os.MkdirAll(v1, 0o755)
+	})
 
 	resp := env.get(t, "/stream?src=lib/album/track.flac&format=wav", nil)
 	body := readBody(t, resp)
