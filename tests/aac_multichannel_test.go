@@ -414,29 +414,49 @@ func TestAACMultichannelADTS(t *testing.T) {
 // full length and full loudness -- precisely the silent failure the
 // channel map exists to prevent -- so the stream is refused by name until
 // something settles which reading a file means.
+//
+// Only the older ffmpeg builds write configuration 7 for a side-pair 7.1.
+// Newer ones signal it as 12, which ADTS's 3-bit field cannot hold at all, so
+// there is no fixture to be had on those and this test skips. The refusal
+// itself is pinned without an encoder in codec/aac.
 func TestAACConfig7Refused(t *testing.T) {
 	dir := t.TempDir()
-	gen := func(name string, extra ...string) string {
+	ffmpeg := testutil.FFmpeg(t)
+	run := func(name string, args ...string) (string, error) {
 		path := filepath.Join(dir, name)
-		args := []string{"-v", "error", "-y",
-			"-f", "lavfi", "-i", "sine=frequency=300:duration=1:sample_rate=48000",
-			"-af", "pan=7.1|FL=c0|FR=c0|FC=c0|LFE=c0|BL=c0|BR=c0|SL=c0|SR=c0",
-			"-c:a", "aac", "-b:a", "448k"}
-		args = append(append(args, extra...), path)
-		if out, err := exec.Command(testutil.FFmpeg(t), args...).CombinedOutput(); err != nil {
-			t.Fatalf("generating %s: %v\n%s", name, err, out)
+		out, err := exec.Command(ffmpeg, append(args, path)...).CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("%w\n%s", err, out)
 		}
-		return path
+		return path, nil
 	}
-	adts := gen("7.1.aac", "-f", "adts")
-	m4a := gen("7.1.m4a")
+	// The MP4 is the encode and the ADTS is that same stream copied out of it,
+	// so the pair carries one encoder decision instead of two that have to be
+	// assumed equal. It is also the order that keeps the two failures apart:
+	// anything wrong with the arguments themselves fails here, where it cannot
+	// be mistaken for the configuration skip below.
+	m4a, err := run("7.1.m4a", "-v", "error", "-y",
+		"-f", "lavfi", "-i", "sine=frequency=300:duration=1:sample_rate=48000",
+		"-af", "pan=7.1|FL=c0|FR=c0|FC=c0|LFE=c0|BL=c0|BR=c0|SL=c0|SR=c0",
+		"-c:a", "aac", "-b:a", "448k")
+	if err != nil {
+		t.Fatalf("generating 7.1.m4a: %v", err)
+	}
+	// Newer ffmpeg signals this layout as configuration 12, which ADTS's
+	// 3-bit field cannot hold, so the copy is refused outright and the build
+	// has no configuration 7 to offer at all.
+	adts, err := run("7.1.aac", "-v", "error", "-y", "-i", m4a, "-c", "copy", "-f", "adts")
+	if err != nil {
+		t.Skipf("this ffmpeg will not write its 7.1 as ADTS, so it has no "+
+			"configuration 7 to refuse: %v", err)
+	}
 
-	// Guard the premise. If a future ffmpeg stops writing configuration 7
-	// for this layout the fixtures stop exercising the refusal, and the
-	// test would go green for the wrong reason. The ADTS header carries the
-	// field in the clear, where the MP4 buries it in an esds descriptor
-	// chain; the encoder makes the choice once, so reading it here covers
-	// both files.
+	// Guard the premise. An ffmpeg that stops writing configuration 7 for
+	// this layout leaves fixtures that no longer exercise the refusal, and
+	// the test would go green for the wrong reason, so it skips instead. The
+	// ADTS header carries the field in the clear, where the MP4 buries it in
+	// an esds descriptor chain; the two are one stream, so reading it here
+	// covers both files.
 	raw, err := os.ReadFile(adts)
 	if err != nil {
 		t.Fatal(err)
@@ -447,7 +467,7 @@ func TestAACConfig7Refused(t *testing.T) {
 	// syncword(12) id(1) layer(2) protection_absent(1) profile(2)
 	// sampling_frequency_index(4) private(1) channel_configuration(3)
 	if got := int(raw[2]&1)<<2 | int(raw[3]>>6); got != 7 {
-		t.Fatalf("fixture declares channel configuration %d, want 7", got)
+		t.Skipf("this ffmpeg declares channel configuration %d for its 7.1, not 7", got)
 	}
 
 	for _, tc := range []struct{ path, hint string }{{adts, "aac"}, {m4a, "m4a"}} {

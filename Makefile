@@ -1,3 +1,28 @@
+# Every recipe here is POSIX. Make resolves SHELL to a full path when it finds
+# a shell on PATH (Git Bash, msys2) and leaves a bare name when it does not, in
+# which case it falls back to cmd.exe and the recipes die on the first POSIX
+# construct. Only that case is repointed, at the shell Git for Windows ships.
+# It has to be the launcher in bin/: usr/bin/sh.exe runs without the POSIX
+# utilities on PATH, so depcheck's grep pipeline exits 0 having run no grep.
+# The ? stands in for a space in the wildcards, since make splits their
+# argument on spaces and both "Program Files" and a profile name can hold one.
+ifeq ($(OS),Windows_NT)
+ifeq ($(findstring /,$(SHELL))$(findstring \,$(SHELL)),)
+WIN_EMPTY :=
+WIN_SPACE := $(WIN_EMPTY) $(WIN_EMPTY)
+WIN_LOCALGIT := $(subst \,/,$(LOCALAPPDATA))/Programs/Git
+ifneq ($(wildcard C:/Program?Files/Git/bin/sh.exe),)
+SHELL := C:/Program Files/Git/bin/sh.exe
+else ifneq ($(wildcard C:/Program?Files?(x86)/Git/bin/sh.exe),)
+SHELL := C:/Program Files (x86)/Git/bin/sh.exe
+else ifneq ($(wildcard $(subst $(WIN_SPACE),?,$(WIN_LOCALGIT))/bin/sh.exe),)
+SHELL := $(WIN_LOCALGIT)/bin/sh.exe
+else
+$(error no POSIX shell found; install Git for Windows, run make from Git Bash, or pass SHELL=/path/to/sh.exe)
+endif
+endif
+endif
+
 MODULE  := github.com/colespringer/waxflow
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)

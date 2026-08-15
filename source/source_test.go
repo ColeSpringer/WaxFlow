@@ -3,8 +3,10 @@ package source
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -92,18 +94,35 @@ func TestResolveErrors(t *testing.T) {
 		}
 	}
 
-	// A colon after the first slash is a filename, not a scheme.
-	if err := os.WriteFile(filepath.Join(dir, "sub", "b:c.wav"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
+	// A colon after the first slash is a filename, not a scheme. Windows has
+	// no such filename (a colon there opens an alternate data stream, and
+	// os.Root refuses the path outright), so there the claim is checked as
+	// far as it goes: the ref reached the filesystem, which is what the
+	// openat PathError under the code proves. A ref turned away while it was
+	// still being parsed as a scheme would carry no such error.
+	if runtime.GOOS == "windows" {
+		f, err := r.Resolve(context.Background(), "lib/sub/b:c.wav")
+		var pathErr *fs.PathError
+		switch {
+		case err == nil:
+			f.Close()
+			t.Error("Resolve of a colon-bearing name succeeded")
+		case !errors.As(err, &pathErr):
+			t.Errorf("colon-in-path ref = %v, want the filesystem's own refusal", err)
+		}
+	} else {
+		if err := os.WriteFile(filepath.Join(dir, "sub", "b:c.wav"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		f, err := r.Resolve(context.Background(), "lib/sub/b:c.wav")
+		if err != nil {
+			t.Fatalf("colon-in-path ref failed: %v", err)
+		}
+		f.Close()
 	}
-	f, err := r.Resolve(context.Background(), "lib/sub/b:c.wav")
-	if err != nil {
-		t.Fatalf("colon-in-path ref failed: %v", err)
-	}
-	f.Close()
 
 	// Within-root symlinks stay allowed (in-place libraries use them).
-	f, err = r.Resolve(context.Background(), "lib/inside")
+	f, err := r.Resolve(context.Background(), "lib/inside")
 	if err != nil {
 		t.Fatalf("within-root symlink failed: %v", err)
 	}

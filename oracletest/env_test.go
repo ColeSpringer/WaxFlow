@@ -109,6 +109,11 @@ func newTestEnv(t *testing.T, mutate func(*server.Config)) *testEnv {
 		Resolver:    roots,
 		CacheDir:    cacheDir,
 		Version:     "test",
+		// A fixed live pool, never the NumCPU-derived default: a /stream
+		// pipeline holds its slot until the transcode finishes, so on a 3-CPU
+		// runner (2 slots) a test firing three in a row 503s on the third and
+		// passes on every roomier machine.
+		LiveSlots: 8,
 	}
 	if mutate != nil {
 		mutate(&cfg)

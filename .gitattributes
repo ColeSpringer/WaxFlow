@@ -1,0 +1,22 @@
+# LF in the repository and LF in the working tree, on every platform. The tree
+# is gofmt-checked and built on Linux images, and a CRLF checkout would leave a
+# Windows editor rewriting whole files it only meant to touch a line of.
+* text=auto eol=lf
+
+# The media fixtures, named rather than left to the text/binary heuristic: a
+# byte-exact decode fixture is the last thing that should depend on a guess.
+*.aac  binary
+*.aifc binary
+*.aiff binary
+*.flac binary
+*.m4a  binary
+*.m4b  binary
+*.m4s  binary
+*.mka  binary
+*.mp3  binary
+*.mp4  binary
+*.oga  binary
+*.ogg  binary
+*.opus binary
+*.wav  binary
+*.webm binary
