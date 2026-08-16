@@ -485,6 +485,23 @@ func (r *Runner) warn(id, note string) {
 	}
 }
 
+// warnClipping attaches the engine's level note as a job warning, named for
+// the output when the job writes several (a split's pieces would otherwise
+// be indistinguishable). Warning, not failure: the level is a property of
+// the audio, and the job did what was asked. The decision and the numbers
+// live on waxflow.TranscodeResult.LevelNote, so every surface reports the
+// same cases the same way.
+func (r *Runner) warnClipping(id, output string, res *waxflow.TranscodeResult) {
+	note := res.LevelNote()
+	if note == "" {
+		return
+	}
+	if output != "" {
+		note += " in " + output
+	}
+	r.warn(id, note)
+}
+
 // deriveOutputLoudness projects the output's loudness and true peak for outputs
 // the engine cannot decode back (fragmented MP4). See meta.ProjectLoudness for
 // the projection and the direction each result errs in.
@@ -862,6 +879,11 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 	if err != nil {
 		return err
 	}
+	// A warning, not a field: the count is already on the engine result, and
+	// mirroring it onto Output would churn the client type and the goldens
+	// for a number this job's own warning list can carry. No output name: a
+	// transcode job writes one file, so the note needs no address.
+	r.warnClipping(j.ID, "", res)
 
 	var rg []container.Tag
 	if analyzeLoudness {
@@ -990,6 +1012,7 @@ func (r *Runner) writeMedia(ctx context.Context, j *Job, med format.Media, name 
 	if err != nil {
 		return nil, err
 	}
+	r.warnClipping(j.ID, name, res)
 	if err := f.Sync(); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: output sync", err)
 	}

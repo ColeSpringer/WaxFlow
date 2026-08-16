@@ -238,7 +238,8 @@ func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, ref stri
 			s.met.Degradations.Add(1)
 		}
 		s.log.Debug("pipeline finished", "src", ref, "rung", rungName(r),
-			"samples", res.Samples, "degraded", entry.Degraded())
+			"samples", res.Samples, "clipped", res.ClippedSamples, "truePeak", res.TruePeak,
+			"degraded", entry.Degraded())
 	}()
 }
 

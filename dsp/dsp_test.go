@@ -262,6 +262,218 @@ func TestWidenExact(t *testing.T) {
 	}
 }
 
+// TestChainClipped: K planted overs per channel reach the caller as
+// exactly K per channel, and a chain that never requantizes reports none.
+// Only a float source can carry an over at all, which is why the count
+// lives on the one node that crosses into the integer domain.
+func TestChainClipped(t *testing.T) {
+	in := audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Float, BitDepth: 32}
+	const frames, overs = 4096, 17
+	src := sineBuf(in, frames, 997, 0.5)
+	defer audio.Put(src)
+	for ch := 0; ch < in.Channels; ch++ {
+		s := src.ChanF(ch)
+		for i := 0; i < overs; i++ {
+			s[i*7] = 1.5
+		}
+	}
+
+	c, err := NewChain(NewSource(newMemSource(src, 500), in), ChainSpec{BitDepth: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Release()
+	if got := c.Clipped(); got != 0 {
+		t.Errorf("Clipped() = %d before the run, want 0", got)
+	}
+	audio.Put(readAll(t, c, frames))
+	if want := int64(overs * in.Channels); c.Clipped() != want {
+		t.Errorf("Clipped() = %d, want %d (%d overs on each of %d channels)",
+			c.Clipped(), want, overs, in.Channels)
+	}
+
+	// A float output quantizes nothing, so the same overs pass through
+	// untouched and there is nothing to report. The source is INT here on
+	// purpose: a float source asking for float builds an empty chain, where
+	// Clipped() returns 0 whatever the implementation does and the assertion
+	// cannot fail. An int source with Float set pushes convertStage and no
+	// quantizer, which is a chain with stages to walk and none to count.
+	iSrc := sineBuf(intFormat(44100, 2, 16), frames, 997, 0.9)
+	defer audio.Put(iSrc)
+	passthru, err := NewChain(NewSource(newMemSource(iSrc, 500), iSrc.Fmt), ChainSpec{Float: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer passthru.Release()
+	if len(passthru.stages) == 0 {
+		t.Fatal("the float-output chain has no stages; this case cannot discriminate")
+	}
+	audio.Put(readAll(t, passthru, frames))
+	if got := passthru.Clipped(); got != 0 {
+		t.Errorf("float output: Clipped() = %d, want 0", got)
+	}
+}
+
+// TestChainClippedCountsResamplerOvershoot pins the behavior the doc
+// comments got wrong first time round: a legal integer source, which cannot
+// hold a sample past full scale, still reports clipping when a rate
+// conversion sits in front of the quantizer.
+//
+// A windowed-sinc resampler rings on steep material, and nothing in the
+// chain catches it: the limiter joins only for positive gain, dynamics, or a
+// downmix past unity. The overshoot is real signal and clamping it is real
+// distortion, so the count is right to include it. What was wrong was the
+// documentation promising a nonzero count meant a too-loud source.
+func TestChainClippedCountsResamplerOvershoot(t *testing.T) {
+	in := intFormat(44100, 2, 16)
+	const frames = 44100
+	src := audio.Get(in, frames)
+	defer audio.Put(src)
+	src.N = frames
+	for c := 0; c < in.Channels; c++ {
+		s := src.ChanI(c)
+		for i := range s {
+			// A square wave at the rails: legal by construction, since an
+			// int16 cannot exceed its own range.
+			if (i/25)%2 == 0 {
+				s[i] = 32767
+			} else {
+				s[i] = -32768
+			}
+		}
+	}
+
+	c, err := NewChain(NewSource(newMemSource(src, 4096), in), ChainSpec{Rate: 48000, BitDepth: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Release()
+	audio.Put(readAll(t, c, 48000+4096))
+	if c.Clipped() == 0 {
+		t.Error("a resampled full-scale square reported no clipping; either the resampler " +
+			"stopped overshooting or the count stopped seeing the chain's output")
+	}
+
+	// The control: the same source at its own rate builds no resampler, so
+	// nothing overshoots and nothing is reported.
+	flat, err := NewChain(NewSource(newMemSource(src, 4096), in), ChainSpec{BitDepth: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer flat.Release()
+	audio.Put(readAll(t, flat, frames))
+	if got := flat.Clipped(); got != 0 {
+		t.Errorf("no rate change: Clipped() = %d, want 0", got)
+	}
+}
+
+// TestChainTruePeak: the output tap reads the waveform between samples,
+// which Clipped cannot see. The fixture's stored samples sit at 0.85 with
+// 1.2 between them, so a chain counting nothing still reports over 1.
+func TestChainTruePeak(t *testing.T) {
+	const frames = 8192
+	hot := func(f audio.Format) *audio.Buffer {
+		b := audio.Get(f, frames)
+		b.N = frames
+		for ch := 0; ch < f.Channels; ch++ {
+			for i := 0; i < frames; i++ {
+				v := 1.2 * math.Sin(math.Pi/2*float64(i)+math.Pi/4)
+				if f.Type == audio.Int {
+					b.ChanI(ch)[i] = int32(math.RoundToEven(v * float64(int64(1)<<(f.BitDepth-1))))
+				} else {
+					b.ChanF(ch)[i] = float32(v)
+				}
+			}
+		}
+		return b
+	}
+	fSrc := hot(audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Float, BitDepth: 32})
+	defer audio.Put(fSrc)
+	iSrc := hot(intFormat(44100, 2, 16))
+	defer audio.Put(iSrc)
+
+	assertPeak := func(t *testing.T, c *Chain) {
+		t.Helper()
+		audio.Put(readAll(t, c, frames))
+		if got := c.TruePeak(); got < 1.1 || got > 1.3 {
+			t.Errorf("TruePeak() = %.4f, want about 1.2", got)
+		}
+		if got := c.Clipped(); got != 0 {
+			t.Errorf("Clipped() = %d, want 0; no stored sample is over", got)
+		}
+	}
+
+	t.Run("int output", func(t *testing.T) {
+		// The meter reads the post-quantize integer chunks, proving
+		// quantization preserves the between-sample overs.
+		c, err := NewChain(NewSource(newMemSource(fSrc, 500), fSrc.Fmt), ChainSpec{BitDepth: 16, MeterTruePeak: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Release()
+		if !c.Quantized() {
+			t.Fatal("Quantized() = false on a float-to-int chain")
+		}
+		assertPeak(t, c)
+	})
+
+	t.Run("float output", func(t *testing.T) {
+		c, err := NewChain(NewSource(newMemSource(iSrc, 500), iSrc.Fmt), ChainSpec{Float: true, MeterTruePeak: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Release()
+		if c.Quantized() {
+			t.Fatal("Quantized() = true on a float-output chain")
+		}
+		assertPeak(t, c)
+	})
+
+	t.Run("tap without stages", func(t *testing.T) {
+		// A float passthrough builds no stages; the tap lives on ReadChunk,
+		// so it measures anyway and puts nothing on the version list, which
+		// is what keeps cache keys (ADR-0004) unmoved.
+		c, err := NewChain(NewSource(newMemSource(fSrc, 500), fSrc.Fmt), ChainSpec{MeterTruePeak: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Release()
+		if len(c.stages) != 0 {
+			t.Fatal("the zero-spec chain grew stages; this case cannot discriminate the tap from a node")
+		}
+		if len(c.Versions()) != 0 {
+			t.Errorf("the meter put versions on the chain: %v", c.Versions())
+		}
+		assertPeak(t, c)
+	})
+
+	t.Run("integer pass unmetered", func(t *testing.T) {
+		// A pure integer pass re-derives nothing, so it is not measured
+		// (see ChainSpec.MeterTruePeak) and pays no meter cost.
+		c, err := NewChain(NewSource(newMemSource(iSrc, 500), iSrc.Fmt), ChainSpec{MeterTruePeak: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Release()
+		audio.Put(readAll(t, c, frames))
+		if got := c.TruePeak(); got != 0 {
+			t.Errorf("TruePeak() = %.4f on an integer pass, want 0", got)
+		}
+	})
+
+	t.Run("meter off", func(t *testing.T) {
+		c, err := NewChain(NewSource(newMemSource(fSrc, 500), fSrc.Fmt), ChainSpec{BitDepth: 16})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Release()
+		audio.Put(readAll(t, c, frames))
+		if got := c.TruePeak(); got != 0 {
+			t.Errorf("TruePeak() = %.4f without MeterTruePeak, want 0", got)
+		}
+	})
+}
+
 // TestChainEndToEnd is the flagship conversion: 96k/24 stereo to 44.1k/16 with
 // dither. Sample count follows the rate ratio exactly, the tone
 // survives at level, and the noise floor sits where 16-bit TPDF puts it.

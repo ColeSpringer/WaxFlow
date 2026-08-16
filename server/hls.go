@@ -888,12 +888,26 @@ func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64,
 // logHLSWorker records a finished worker and passes its error through, so both
 // rungs report the same way and a session can be filtered by which one ran it.
 func (s *Server) logHLSWorker(ref, rung string, members int, start int64, err error) error {
+	return s.logHLSWorkerResult(ref, rung, members, start, nil, err)
+}
+
+// logHLSWorkerResult is logHLSWorker with the run's result, for the rung
+// that has one. A variant worker has no caller to warn, so the log line is
+// the whole surface; the clipped/truePeak keys appear only when the rung
+// measured (the count spans the priming feed, hence per worker, not summed).
+func (s *Server) logHLSWorkerResult(ref, rung string, members int, start int64,
+	res *waxflow.SegmentedResult, err error) error {
 	if err != nil {
 		s.log.Warn("hls worker failed", "src", ref, "rung", rung, "members", members, "start", start, "err", err)
-	} else {
-		s.log.Debug("hls worker finished", "src", ref, "rung", rung, "members", members, "start", start)
+		return err
 	}
-	return err
+	if res == nil {
+		s.log.Debug("hls worker finished", "src", ref, "rung", rung, "members", members, "start", start)
+		return nil
+	}
+	s.log.Debug("hls worker finished", "src", ref, "rung", rung, "members", members,
+		"start", start, "clipped", res.ClippedSamples, "truePeak", res.TruePeak)
+	return nil
 }
 
 // runHLSRemuxWorker is one variant worker on the ladder's middle rung: the
@@ -1015,10 +1029,10 @@ func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool,
 			return err
 		}
 	}
-	_, err = s.eng.TranscodeSegmentsMedia(ctx, med, opts,
+	res, err := s.eng.TranscodeSegmentsMedia(ctx, med, opts,
 		waxflow.SegmentedOptions{SegmentSamples: plan.SegmentSamples, StartSegment: start},
 		publish)
-	return s.logHLSWorker(ref, rungName(rungTranscode), len(members), start, err)
+	return s.logHLSWorkerResult(ref, rungName(rungTranscode), len(members), start, res, err)
 }
 
 // openHLSMedia opens a worker's input: the source itself for a single-track

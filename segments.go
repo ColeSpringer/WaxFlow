@@ -464,6 +464,16 @@ type SegmentedResult struct {
 	Samples int64
 	// Segments is the number of segments this run emitted.
 	Segments int64
+	// ClippedSamples counts samples the integer output could not carry; see
+	// TranscodeResult.ClippedSamples. It spans everything this run fed the
+	// chain, the discarded priming included, so a worker starting mid-stream
+	// counts pre-roll that belongs to the previous segment: sum the counts
+	// of a variant's workers and the overlap is counted twice.
+	ClippedSamples int64
+	// TruePeak is the output's true-peak level, linear, 1.0 = full scale;
+	// see TranscodeResult.TruePeak. It spans the priming feed like the
+	// count, but workers' maxima combine by max without double counting.
+	TruePeak float64
 }
 
 // TranscodeSegments decodes src and emits numbered CMAF media segments:
@@ -526,6 +536,8 @@ func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, o
 	if row.adjust != nil {
 		row.adjust(&spec, srcTrack.Fmt, opts)
 	}
+	// A run meters its output, exactly as TranscodeMedia does.
+	spec.MeterTruePeak = true
 	frame := spec.FrameSize
 	if frame <= 0 {
 		return nil, waxerr.New(waxerr.CodeInternal,
@@ -679,7 +691,10 @@ func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, o
 	// length counts from where the encoder started, not from the chain's
 	// earlier pre-roll start.
 	res.Samples = pEnc + trailer.Samples
-	e.log.Debug("segmented transcode finished", "samples", res.Samples, "segments", res.Segments)
+	res.ClippedSamples = chain.Clipped()
+	res.TruePeak = chain.TruePeak()
+	e.log.Debug("segmented transcode finished", "samples", res.Samples, "segments", res.Segments,
+		"clipped", res.ClippedSamples, "truePeak", res.TruePeak)
 	return res, nil
 }
 

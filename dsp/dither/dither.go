@@ -101,6 +101,7 @@ type Quantizer struct {
 	scale   float64
 	lo, hi  float64
 	errs    [][5]float64 // per-channel shaping history, newest first
+	clipped int64        // samples seen beyond full scale, cumulative
 }
 
 // splitmix64 is the SplittableRandom finalizer (Steele, Lea and Flood,
@@ -174,7 +175,9 @@ func NewQuantizer(bits, channels int, shaping Shaping, seed uint64) (*Quantizer,
 
 // Reset clears the shaping history for a new stream segment. The dither
 // itself has no state to clear: it is a function of position, so it needs
-// no reset and cannot drift.
+// no reset and cannot drift. The clip count is not cleared either: it
+// measures the material, not the segment, and a caller reads it once at
+// the end of the run.
 func (q *Quantizer) Reset() {
 	for c := range q.errs {
 		q.errs[c] = [5]float64{}
@@ -184,10 +187,17 @@ func (q *Quantizer) Reset() {
 // Bits returns the target depth.
 func (q *Quantizer) Bits() int { return q.bits }
 
+// Clipped reports how many samples arrived beyond full scale, cumulative
+// and per channel sample; see dsp.Chain.Clipped for what reaches this node.
+// Strict pre-dither overs only, so the count is identical under every seed
+// and shaping: exactly +1.0 is excluded (one LSB over only because two's
+// complement is asymmetric), as are dither-pushed rail landings and NaN.
+func (q *Quantizer) Clipped() int64 { return q.clipped }
+
 // Quantize converts channel ch of src into dst, sample for sample. The
-// slices must have equal length. Out-of-range input clamps to the
-// integer range; NaN quantizes to 0 rather than poisoning the shaping
-// history.
+// slices must have equal length. Out-of-range input is confined to the
+// integer range and counted (see Clipped); NaN quantizes to 0 rather
+// than poisoning the shaping history.
 func (q *Quantizer) Quantize(dst []int32, src []float32, ch int, pos int64) {
 	if len(dst) != len(src) {
 		panic("dither: dst and src length mismatch")
@@ -205,13 +215,23 @@ func (q *Quantizer) Quantize(dst []int32, src []float32, ch int, pos int64) {
 			}
 			continue
 		}
-		// Cap gross overs (infinities included) at twice full scale: the
-		// output clamps to the rails either way, but w must stay finite
-		// or the feedback error turns NaN and poisons the loop forever.
-		if v > 2*q.scale {
-			v = 2 * q.scale
-		} else if v < -2*q.scale {
-			v = -2 * q.scale
+		// Count the over, then cap a gross one (infinities included) at
+		// twice full scale: the output clamps to the rails either way, but
+		// w must stay finite or the feedback error turns NaN and poisons
+		// the loop forever. The cap is nested inside the over test because
+		// it can only fire on an over, which keeps an in-range sample to
+		// two compares and the two thresholds in one place. The test is
+		// strict; see Clipped.
+		if v > q.scale {
+			q.clipped++
+			if v > 2*q.scale {
+				v = 2 * q.scale
+			}
+		} else if v < -q.scale {
+			q.clipped++
+			if v < -2*q.scale {
+				v = -2 * q.scale
+			}
 		}
 		w := v
 		if q.shaping == Shaped {

@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -21,6 +22,21 @@ import (
 	"github.com/colespringer/waxflow/internal/posixfs"
 	"github.com/colespringer/waxflow/waxerr"
 )
+
+// clippingNote prints the engine's level note on stderr with the CLI's
+// remedy attached; waxflow.TranscodeResult.LevelNote owns the decision, so
+// every command that writes audio reports the same cases the same way.
+func clippingNote(w io.Writer, res *waxflow.TranscodeResult) {
+	note := res.LevelNote()
+	if note == "" {
+		return
+	}
+	remedy := "; lower the level with --gain"
+	if strings.HasPrefix(note, "clipping: ") {
+		remedy = "; lower the level with --gain or choose a float output"
+	}
+	fmt.Fprintf(w, "%s%s\n", note, remedy)
+}
 
 // isMP4Container reports whether an output written by format with this
 // container override goes through the mp4 muxer: the one path that embeds tags
@@ -385,6 +401,7 @@ with true-peak limiting, dither).`,
 					return waxerr.Wrap(waxerr.CodeOutputUnwritable, "replacing output", err)
 				}
 			}
+			clippingNote(cmd.ErrOrStderr(), res)
 			fmt.Fprintf(cmd.OutOrStdout(), "wrote %s: %s %d samples (%.3fs)\n",
 				outPath, res.Format, res.Samples, durationSeconds(res.Samples, res.Format.Rate))
 			return nil

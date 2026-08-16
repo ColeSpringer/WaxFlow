@@ -42,11 +42,13 @@ package dsp
 
 import (
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/dsp/dither"
 	"github.com/colespringer/waxflow/dsp/gain"
+	"github.com/colespringer/waxflow/dsp/loudness"
 	"github.com/colespringer/waxflow/dsp/mix"
 	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/waxerr"
@@ -180,6 +182,13 @@ type ChainSpec struct {
 	// Profile selects the resampler quality profile; empty means
 	// resample.HQ.
 	Profile resample.Profile
+	// MeterTruePeak taps a true-peak meter on the output, read back via
+	// Chain.TruePeak. Measurement only: no stage, no version, no sample
+	// change; ~1.4 ms per second of 48 kHz stereo (BenchmarkPeakMeterProcess).
+	// Only chains that produce new samples meter (float output or a
+	// quantizer); a pure integer pass stays unmeasured. Analyze runs its
+	// own meter and leaves this off.
+	MeterTruePeak bool
 	// FrameSize appends a framer that re-chunks output to exactly this
 	// many frames per chunk (the encoder-native size); 0 omits it.
 	FrameSize int
@@ -195,6 +204,14 @@ type Chain struct {
 	versions []string
 	l, m     int           // output/input rate ratio, reduced; 1/1 when unchanged
 	horizon  time.Duration // max Settler horizon over the pushed kernels
+
+	// The optional output tap (ChainSpec.MeterTruePeak), fed by ReadChunk
+	// rather than a stage so it cannot disturb node insertion or versions.
+	// meterI or meterF (matching the output domain) is per-chunk view scratch.
+	meter     *loudness.PeakMeter
+	meterBits int
+	meterI    [][]int32
+	meterF    [][]float32
 }
 
 // NewChain builds the processing chain from src's format to the spec,
@@ -328,6 +345,7 @@ func NewChain(src Stage, spec ChainSpec) (*Chain, error) {
 		c.push(newPump(c.out, cur, limiterOps{lim}), gain.LimiterVersion)
 	}
 
+	quantized := false
 	switch {
 	case outInt && cur.Type == audio.Float:
 		shaping := spec.Shaping
@@ -344,6 +362,7 @@ func NewChain(src Stage, spec ChainSpec) (*Chain, error) {
 		}
 		cur = withType(cur, audio.Int, outDepth)
 		c.push(&quantizeStage{up: c.out, fmt: cur, q: q}, dither.Version)
+		quantized = true
 	case outInt && outDepth > cur.BitDepth:
 		shift := outDepth - cur.BitDepth
 		cur = withType(cur, audio.Int, outDepth)
@@ -352,6 +371,20 @@ func NewChain(src Stage, spec ChainSpec) (*Chain, error) {
 
 	if spec.FrameSize > 0 {
 		c.push(&framerStage{up: c.out, fmt: cur, size: spec.FrameSize}, "")
+	}
+
+	if spec.MeterTruePeak && (quantized || cur.Type == audio.Float) {
+		m, err := loudness.NewPeakMeter(cur.Rate, cur.Channels)
+		if err != nil {
+			return nil, err
+		}
+		c.meter = m
+		if cur.Type == audio.Int {
+			c.meterBits = cur.BitDepth
+			c.meterI = make([][]int32, cur.Channels)
+		} else {
+			c.meterF = make([][]float32, cur.Channels)
+		}
 	}
 	return c, nil
 }
@@ -400,7 +433,9 @@ func (c *Chain) Horizon() time.Duration { return c.horizon }
 // Format returns the chain's output format.
 func (c *Chain) Format() audio.Format { return c.out.Format() }
 
-// ReadChunk pulls the next processed chunk (Stage contract).
+// ReadChunk pulls the next processed chunk (Stage contract) and feeds the
+// true-peak tap: successful chunks measure, EOF drains the interpolator
+// tail, and a source re-fed after EOF (a seek) resumes measurement.
 func (c *Chain) ReadChunk(dst *audio.Buffer) error {
 	if dst.Fmt != c.out.Format() {
 		return waxerr.New(waxerr.CodeInvalidRequest,
@@ -409,7 +444,24 @@ func (c *Chain) ReadChunk(dst *audio.Buffer) error {
 	if dst.Cap() == 0 {
 		return waxerr.New(waxerr.CodeInvalidRequest, "dsp: zero-capacity chunk buffer")
 	}
-	return c.out.ReadChunk(dst)
+	err := c.out.ReadChunk(dst)
+	if c.meter != nil {
+		switch {
+		case err == io.EOF:
+			c.meter.Flush()
+		case err == nil && c.meterI != nil:
+			for ch := range c.meterI {
+				c.meterI[ch] = dst.ChanI(ch)
+			}
+			c.meter.ProcessInt(c.meterI, c.meterBits)
+		case err == nil:
+			for ch := range c.meterF {
+				c.meterF[ch] = dst.ChanF(ch)
+			}
+			c.meter.Process(c.meterF)
+		}
+	}
+	return err
 }
 
 // Ratio returns the chain's output/input rate ratio in lowest terms,
@@ -431,6 +483,44 @@ func (c *Chain) OutputSamples(in int64) int64 {
 // Versions lists the algorithm revisions of every sample-affecting node
 // in chain order, for the cache key (ADR-0004).
 func (c *Chain) Versions() []string { return c.versions }
+
+// Clipped reports how many samples reached the quantizer beyond full scale
+// (per channel sample; dither.Quantizer.Clipped has the exact criterion),
+// read after the run. Not proof of a too-loud source: gain and resampler
+// overshoot land here too, uncaught upstream since the limiter only joins
+// for positive gain, dynamics, or a downmix past unity. Sample domain: an
+// over that exists only between samples shows up in TruePeak instead.
+func (c *Chain) Clipped() int64 {
+	var n int64
+	for _, s := range c.stages {
+		if qs, ok := s.(*quantizeStage); ok {
+			n += qs.q.Clipped()
+		}
+	}
+	return n
+}
+
+// Quantized reports whether the chain holds a quantizer, the one node
+// that can clip.
+func (c *Chain) Quantized() bool {
+	for _, s := range c.stages {
+		if _, ok := s.(*quantizeStage); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// TruePeak reports the output's largest true-peak magnitude, linear with
+// 1.0 full scale (BS.1770-4 Annex 2, the analyzer's own interpolator),
+// read after the run. It sees the waveform between samples, which Clipped
+// cannot. 0 when unmetered (see ChainSpec.MeterTruePeak) or silent.
+func (c *Chain) TruePeak() float64 {
+	if c.meter == nil {
+		return 0
+	}
+	return c.meter.Peak()
+}
 
 // Release returns all stage scratch buffers to the pool. The chain must
 // not be used afterward.

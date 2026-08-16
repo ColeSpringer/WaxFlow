@@ -212,6 +212,57 @@ func TestClampAndNaN(t *testing.T) {
 	}
 }
 
+// TestClippedCount pins the count's population: strict overs and infinities
+// in, the legal rails and NaN out. Every shaping and both seeds must agree
+// exactly, or the count is reporting the dither rather than the signal.
+func TestClippedCount(t *testing.T) {
+	src := []float32{
+		0, 0.5, -0.5, 0.999, -0.999, // in range
+		1, -1, // the rails themselves: asymmetry, not an over
+		1.5, -1.5, 2, -2, // four overs
+		float32(math.Inf(1)), float32(math.Inf(-1)), // two more
+		float32(math.NaN()), // an anomaly, counted nowhere
+	}
+	const want = 6
+
+	for _, shaping := range []Shaping{None, TPDF, Shaped} {
+		for _, seed := range []uint64{DefaultSeed, 0xC0FFEE} {
+			q, err := NewQuantizer(16, 1, shaping, seed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dst := make([]int32, len(src))
+			q.Quantize(dst, src, 0, 0)
+			if got := q.Clipped(); got != want {
+				t.Errorf("%v/seed %d: Clipped() = %d, want %d", shaping, seed, got, want)
+			}
+			// Cumulative, and Reset is the shaping clear, not a counter clear.
+			q.Reset()
+			q.Quantize(dst, src, 0, int64(len(src)))
+			if got := q.Clipped(); got != 2*want {
+				t.Errorf("%v/seed %d: Clipped() = %d after a second pass and a Reset, want %d",
+					shaping, seed, got, 2*want)
+			}
+		}
+	}
+}
+
+// TestClippedIsPerChannel: each channel is clamped separately, so each is
+// counted separately.
+func TestClippedIsPerChannel(t *testing.T) {
+	q, err := NewQuantizer(16, 2, TPDF, DefaultSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := []float32{1.5, 1.5, 1.5}
+	dst := make([]int32, len(src))
+	q.Quantize(dst, src, 0, 0)
+	q.Quantize(dst, src, 1, 0)
+	if got := q.Clipped(); got != 6 {
+		t.Errorf("Clipped() = %d for 3 over frames across 2 channels, want 6", got)
+	}
+}
+
 // TestShapedAnomalyRecovery: NaN and infinite samples must not poison
 // the noise-shaping feedback loop. A NaN quantizes to 0 and advances the
 // history with zero error; infinities clamp to the rails with a bounded

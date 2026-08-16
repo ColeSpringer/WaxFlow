@@ -196,10 +196,12 @@ or filtered at any seam.`,
 
 			for _, p := range pieces {
 				name := pieceName(p, ext)
-				if err := sp.writePiece(cmd, filepath.Join(outDir, name), p); err != nil {
+				res, err := sp.writePiece(cmd, filepath.Join(outDir, name), p)
+				if err != nil {
 					return fmt.Errorf("%s: %w", name, err)
 				}
 				fmt.Fprintf(cmd.ErrOrStderr(), "%s\n", name)
+				clippingNote(cmd.ErrOrStderr(), res)
 			}
 			return nil
 		},
@@ -473,8 +475,10 @@ func (s *splitter) embedsTags() bool {
 	return isMP4Container(s.outFormat, s.container) || s.container == "ogg"
 }
 
-// writePiece transcodes one span of the source to its own file.
-func (s *splitter) writePiece(cmd *cobra.Command, path string, p piece) error {
+// writePiece transcodes one span of the source to its own file. It returns
+// the engine's result so the caller can report on the piece, which is how a
+// clipped piece gets the same note a plain transcode of it would print.
+func (s *splitter) writePiece(cmd *cobra.Command, path string, p piece) (*waxflow.TranscodeResult, error) {
 	writePath := path
 	if s.force {
 		writePath = fmt.Sprintf("%s.tmp-%d", path, os.Getpid())
@@ -482,14 +486,14 @@ func (s *splitter) writePiece(cmd *cobra.Command, path string, p piece) error {
 	out, err := os.OpenFile(writePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		if !s.force && os.IsExist(err) {
-			return waxerr.Wrap(waxerr.CodeInvalidRequest, "output exists (use --force to overwrite)", err)
+			return nil, waxerr.Wrap(waxerr.CodeInvalidRequest, "output exists (use --force to overwrite)", err)
 		}
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating output", err)
+		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating output", err)
 	}
-	fail := func(err error) error {
+	fail := func(err error) (*waxflow.TranscodeResult, error) {
 		out.Close()
 		os.Remove(writePath)
-		return err
+		return nil, err
 	}
 
 	// Each piece opens the source afresh. A single Media cannot serve them
@@ -513,18 +517,19 @@ func (s *splitter) writePiece(cmd *cobra.Command, path string, p piece) error {
 		tags = replaceTag(tags, "TITLE", p.title)
 	}
 
-	if _, err := s.e.TranscodeMedia(cmd.Context(), sl, out, waxflow.TranscodeOptions{
+	res, err := s.e.TranscodeMedia(cmd.Context(), sl, out, waxflow.TranscodeOptions{
 		Format:    s.outFormat,
 		Container: s.container,
 		FLACLevel: s.flacLevel,
 		Tags:      tags,
 		Art:       s.art,
-	}); err != nil {
+	})
+	if err != nil {
 		return fail(err)
 	}
 	if err := out.Close(); err != nil {
 		os.Remove(writePath)
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "closing output", err)
+		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "closing output", err)
 	}
 
 	// Post-pass on the finished piece, for the outputs whose muxer did not
@@ -540,10 +545,10 @@ func (s *splitter) writePiece(cmd *cobra.Command, path string, p piece) error {
 	if s.force && writePath != path {
 		if err := posixfs.Replace(writePath, path); err != nil {
 			os.Remove(writePath)
-			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "renaming output into place", err)
+			return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "renaming output into place", err)
 		}
 	}
-	return nil
+	return res, nil
 }
 
 // replaceTag sets key to value, dropping whatever the album carried: a

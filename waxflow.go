@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 
@@ -126,6 +127,38 @@ type TranscodeResult struct {
 	Format audio.Format
 	// Container is the output container name.
 	Container string
+	// ClippedSamples counts samples that reached the quantizer beyond full
+	// scale: channel samples, not frames, against Samples*Format.Channels.
+	// Gain and resampler overshoot land here too (see dsp.Chain.Clipped).
+	// Zero for float outputs and copy rungs; the concat timeline's own
+	// clamps sit upstream and go uncounted.
+	ClippedSamples int64
+	// TruePeak is the output's true-peak level, linear, 1.0 = full scale;
+	// AnalyzeResult.TruePeakDB is 20*log10 of it. Lossy outputs measure the
+	// encoder's input. Zero for copy rungs, pure integer passes, silence.
+	TruePeak float64
+	// Quantized reports whether a quantizer ran (float cut to integer).
+	// It gates the true-peak note; see LevelNote.
+	Quantized bool
+}
+
+// LevelNote returns the one warning line the level fields warrant, or "":
+// the clip count, else the true peak when a quantizer ran and only the
+// waveform between samples is over. Copy and float paths stay silent, so
+// the note cannot nag on every pass. Callers may append remedies.
+func (r *TranscodeResult) LevelNote() string {
+	switch {
+	case r == nil:
+		return ""
+	case r.ClippedSamples > 0:
+		return fmt.Sprintf("clipping: %d of %d output samples exceeded full scale",
+			r.ClippedSamples, r.Samples*int64(r.Format.Channels))
+	case r.Quantized && r.TruePeak > 1:
+		return fmt.Sprintf("true peak: %+.2f dBTP; no stored sample is over, "+
+			"but the waveform between samples crosses full scale and playback can clip it",
+			20*math.Log10(r.TruePeak))
+	}
+	return ""
 }
 
 // Transcode decodes src and writes it to dst in the requested output
@@ -188,6 +221,9 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 	if row.adjust != nil {
 		row.adjust(&spec, srcTrack.Fmt, opts)
 	}
+	// A run meters its output; specFor leaves this off so the plan's
+	// throwaway chains and Analyze (which runs its own meter) do not.
+	spec.MeterTruePeak = true
 	chain, err := dsp.NewChain(dsp.NewSource(med, srcTrack.Fmt), spec)
 	if err != nil {
 		return nil, err
@@ -266,8 +302,10 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 	if err := mux.End(trailer); err != nil {
 		return nil, err
 	}
-	e.log.Debug("transcode finished", "samples", trailer.Samples)
-	return &TranscodeResult{Samples: trailer.Samples, Format: f, Container: containerName}, nil
+	clipped, truePeak := chain.Clipped(), chain.TruePeak()
+	e.log.Debug("transcode finished", "samples", trailer.Samples, "clipped", clipped, "truePeak", truePeak)
+	return &TranscodeResult{Samples: trailer.Samples, Format: f, Container: containerName,
+		ClippedSamples: clipped, TruePeak: truePeak, Quantized: chain.Quantized()}, nil
 }
 
 // resolveContainer resolves a Container override against a row: the name the
