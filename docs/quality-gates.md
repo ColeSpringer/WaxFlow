@@ -166,6 +166,12 @@ encoder-quality` is a Linux/CI target (the nightly job). It sets
 `WAXFLOW_REQUIRE_*` for each oracle, so a baseline going missing there fails
 the job rather than quietly dropping a gate.
 
+The exception is **libfdk_aac**, which is non-free: no distribution ffmpeg
+ships it, so `WAXFLOW_REQUIRE_FFMPEG` deliberately does not demand it and the
+HE-AAC fresh-encode differentials gate on `WAXFLOW_REQUIRE_FDK=1` instead.
+Without fdk they skip and the committed `codec/aac/testdata` fixtures carry the
+HE-AAC differential, which is what runs in CI.
+
 On macOS, Homebrew's ffmpeg has **no libshine at all** and no way to get one:
 there is no `shine` formula, `ffmpeg-full` omits it too, and Homebrew dropped
 `--with-*` build options years ago. So the MP3 baseline gate cannot run

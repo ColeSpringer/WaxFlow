@@ -1,24 +1,34 @@
 package testutil
 
 import (
+	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
 )
 
-// libfdk_aac is the HE-AAC encoder reference. It is non-free, so most stock
-// ffmpeg builds omit it and these oracles self-skip; WAXFLOW_REQUIRE_FFMPEG=1
-// escalates absence to a failure on machines that promise it (the libvorbis
-// policy). The committed HE-AAC fixtures under codec/aac/testdata were
-// produced with libfdk so the differential suite runs offline everywhere;
-// these helpers exist for regenerating them and for CI runs that carry fdk.
+// libfdk_aac is the HE-AAC encoder reference. It is non-free, so no
+// distribution ffmpeg ships it: absence escalates under WAXFLOW_REQUIRE_FDK=1
+// only, never WAXFLOW_REQUIRE_FFMPEG, which no CI ffmpeg could satisfy. The
+// committed fixtures under codec/aac/testdata were made with libfdk, so the
+// differential suite runs offline everywhere.
 
-// HaveFDK reports whether ffmpeg carries the libfdk_aac encoder.
-func HaveFDK(t testing.TB) bool { return haveCodec(t, "-encoders", "libfdk_aac") }
+// HaveFDK reports whether ffmpeg carries the libfdk_aac encoder, failing
+// instead under WAXFLOW_REQUIRE_FDK=1.
+func HaveFDK(t testing.TB) bool {
+	t.Helper()
+	if haveCodecQuiet("-encoders", "libfdk_aac") {
+		return true
+	}
+	if os.Getenv("WAXFLOW_REQUIRE_FDK") == "1" {
+		t.Fatal("ffmpeg libfdk_aac required by WAXFLOW_REQUIRE_FDK=1 but not available")
+	}
+	return false
+}
 
 // FFmpegFDKEncodeFile encodes wav with libfdk_aac at the given bitrate and
 // profile ("aac_he" or "aac_he_v2") into dir, returning the output path.
-// format is "m4a" or "adts". Skips (or fails under WAXFLOW_REQUIRE_FFMPEG=1)
+// format is "m4a" or "adts". Skips (or fails under WAXFLOW_REQUIRE_FDK=1)
 // when this build has no libfdk_aac.
 func FFmpegFDKEncodeFile(t testing.TB, dir, wav string, kbps int, profile, format string) string {
 	t.Helper()

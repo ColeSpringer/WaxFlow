@@ -62,8 +62,8 @@ func haveCodec(t testing.TB, listing, codec string) bool {
 }
 
 // haveCodecQuiet is the membership test itself, without the require policy, for
-// the callers that own their own (Shine's WAXFLOW_REQUIRE_SHINE, HaveLAME's
-// deliberate lack of one).
+// the callers that own their own (Shine's WAXFLOW_REQUIRE_SHINE, HaveFDK's
+// WAXFLOW_REQUIRE_FDK, HaveLAME's deliberate lack of one).
 //
 // It parses the listing rather than asking `ffmpeg -h encoder=NAME`, which looks
 // like a membership test and is not one: for a codec ffmpeg does not have it
