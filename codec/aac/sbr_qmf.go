@@ -143,3 +143,21 @@ func (s *qmfSynthesizer64) synthesize(inRe, inIm []float32, out []float32) {
 		out[j] = acc
 	}
 }
+
+// synthesizeDown is the downsampled (single-rate) synthesis: one slot's
+// lower 32 subbands become 32 time samples at the core rate. The spec's
+// decimated bank is algebraically this bank's output taken at every
+// second sample, because the downsampled prototype is the full window's
+// even polyphase and every fold offset is even; running the full bank
+// and decimating trades a small constant for zero extra tables and
+// phase constants. Bands 32 and up are outside the decimated Nyquist and
+// are cleared (in the caller's scratch) so decimation cannot alias them.
+func (s *qmfSynthesizer64) synthesizeDown(inRe, inIm []float32, out []float32) {
+	clear(inRe[32:64])
+	clear(inIm[32:64])
+	var tmp [64]float32
+	s.synthesize(inRe, inIm, tmp[:])
+	for j := range 32 {
+		out[j] = tmp[2*j]
+	}
+}

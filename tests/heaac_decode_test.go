@@ -316,8 +316,8 @@ func TestHEAACADTSRemux(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := info.Default()
-	if tr.Codec != codec.AACLC || tr.Fmt.Rate != 22050 {
-		t.Errorf("adts reads back as %q at %d Hz, want the aac-lc core at 22050 until ADTS SBR detection lands",
+	if tr.Codec != codec.HEAAC || tr.Fmt.Rate != 44100 {
+		t.Errorf("adts reads back as %q at %d Hz, want he-aac at 44100: the implicit form is what the first-frame probe detects",
 			tr.Codec, tr.Fmt.Rate)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
 	"github.com/colespringer/waxflow/waxerr"
@@ -240,10 +241,18 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "mp4: unusable audio format", err)
 	}
 	if audio.codec == codec.AACLC {
-		d.seekPreroll = 1 // one frame of IMDCT overlap history
+		d.seekPreroll = 1024 // one frame of IMDCT overlap history
 	}
 	if audio.codec == codec.HEAAC {
-		d.seekPreroll = 2 // IMDCT overlap plus the SBR QMF/adjuster history
+		// IMDCT overlap plus the SBR QMF/adjuster history rebuild in two
+		// AUs, but the PS layer needs its header and parameter refresh
+		// too: fdk repeats them about every half second, so a cold seek
+		// pre-rolls that far. The samples-domain constant covers every AU
+		// shape the ID spans (2048 dual-rate, 1024 downsampled). (The SBR
+		// noise and sinusoid PHASE free-runs from the stream head in every
+		// decoder and is not recoverable by any preroll; the v2 seek gate
+		// documents that.)
+		d.seekPreroll = aac.HESeekPreroll
 	}
 
 	var delay, padding, samples int64
@@ -348,6 +357,12 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	if sample < 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, "mp4: negative seek target")
 	}
+	// Both paths back the target off by the preroll in the sample domain,
+	// so the fragmented walk pre-rolls the same distance the progressive
+	// one does.
+	if d.seekPreroll > 0 {
+		sample = max(sample-d.seekPreroll, 0)
+	}
 	if d.fragmented {
 		return d.seekFragmented(sample)
 	}
@@ -357,9 +372,6 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	}
 	idx := st.sampleAt(sample)
 	idx = st.syncAtOrBefore(idx)
-	if d.seekPreroll > 0 {
-		idx = st.syncAtOrBefore(max(idx-d.seekPreroll, 0))
-	}
 	d.cur = idx
 	pts, _ := st.timeOf(idx)
 	return pts, nil

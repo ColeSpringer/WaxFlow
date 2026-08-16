@@ -25,8 +25,12 @@ func (d *Demuxer) gapless(t *track) (delay, padding, samples int64) {
 		samples = d.smpbTotal
 		// Some encoders write HE-AAC gapless fields in core (1024) units,
 		// half the output timeline. When the three fields add up to exactly
-		// half the raw track duration, they are half-units: rescale.
-		if t.codec == codec.HEAAC {
+		// half the raw track duration, they are half-units: rescale. Keyed
+		// on the doubled timeline, not the codec ID alone: downsampled SBR
+		// is also codec.HEAAC but decodes 1024 samples per AU, the same
+		// units the tag uses, and a half-sum there is a coincidence this
+		// heuristic must not double.
+		if t.codec == codec.HEAAC && t.perAU == 2048 {
 			if sum := delay + d.smpbPad + samples; sum > 0 && sum*2 == totalRaw {
 				delay *= 2
 				samples *= 2

@@ -8,6 +8,7 @@ import (
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/format"
@@ -64,6 +65,28 @@ type RemuxPlan struct {
 	Track container.Track
 }
 
+// remuxCodecs resolves the CODECS attribute a segmented remux advertises.
+// For the AAC family it comes from the track's own AudioSpecificConfig,
+// not the resolved row: RFC 6381 wants the stream's signaling, and a copy
+// moves the stream unchanged. PS names mp4a.40.29, SBR mp4a.40.5, and
+// that covers the shapes the rows alone cannot see (an AOT-29 stereo-core
+// track rides the plain aac row because this decoder takes only its base
+// layer, but the copied esds still says AOT 29). Everything else keeps
+// the row's static string.
+func remuxCodecs(row *output, track container.Track) string {
+	if row.codecID == codec.AACLC || row.codecID == codec.HEAAC {
+		if cfg, err := aac.ParseASC(track.CodecConfig); err == nil {
+			switch {
+			case cfg.PS:
+				return "mp4a.40.29"
+			case cfg.SBR:
+				return "mp4a.40.5"
+			}
+		}
+	}
+	return row.hls.codecs
+}
+
 // remuxRow resolves the output row a remux of track under the named format
 // runs as. It is outputRow plus one family redirect: format=aac on an HE-AAC
 // source resolves to the he-aac row, so every aac copy path keeps copying HE
@@ -109,6 +132,18 @@ func (e *Engine) PlanRemux(track container.Track, opts TranscodeOptions) (*Remux
 	}
 	if !codecSurvives(track.Codec, row.codecID) || !remuxable(opts, track.Fmt) || !gaplessSurvives(track) {
 		return nil, nil
+	}
+	if containerName == "adts" && row.codecID == codec.HEAAC {
+		// Downsampled (single-rate) SBR has no ADTS form: implicit
+		// signalling implies the dual rate, so re-framing these units would
+		// change their legal meaning. The muxer refuses in Begin as the
+		// backstop; declining here at plan time lets the ladder fall through
+		// to the transcode rung instead of committing to one that cannot
+		// serve.
+		if cfg, err := aac.ParseASC(track.CodecConfig); err == nil && cfg.SBR &&
+			cfg.ExtensionRate == cfg.SampleRate {
+			return nil, nil
+		}
 	}
 	// The muxed track is the source's, normalized the way Transcode normalizes
 	// the one it builds: muxers are single-track, so the packet the loop writes
@@ -459,7 +494,7 @@ func (e *Engine) PlanRemuxSegments(track container.Track, opts TranscodeOptions,
 		// it did not, and the init segment's edit list must describe the packets
 		// it actually has.
 		Delay:              track.Delay,
-		Codecs:             row.hls.codecs,
+		Codecs:             remuxCodecs(row, track),
 		TotalDecodeSamples: -1,
 		Segments:           -1,
 	}

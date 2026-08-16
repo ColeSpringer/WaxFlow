@@ -71,9 +71,19 @@ Entries follow this format:
 > smoothing constants) are normative spec data (Tables 4.A.85-4.A.90 and
 > 4.6.18's constants), recorded in the same black-box parameter pass with
 > the faad2 (GPL-2) and FFmpeg (LGPL) restatements of those tables as
-> cross-checks. No decoder logic was taken from either; SBR behavior was
-> verified against ffmpeg's decoder output only. PS and enhanced SBR
-> remain out of scope.
+> cross-checks. The HE-AAC v2 parametric stereo stage
+> (`codec/aac/ps_*.go`) follows the identical pattern: original code
+> written against ISO 14496-3 8.6.4, with `ps_tables.go` carrying the
+> normative spec data (the PS parameter codebooks as canonical
+> value/length listings, the IID/ICC quantizer values, the hybrid filter
+> prototypes of Tables 8.32-8.35, the band maps of Tables 8.44-8.49, and
+> the decorrelator constants of 8.6.4.6.4), recorded in the same
+> black-box parameter pass with the FFmpeg restatement as the
+> cross-check; the mixing matrices and phase tables are derived from
+> those listings by the spec's formulas at init. No decoder logic was
+> taken from either project; SBR and PS behavior was verified against
+> ffmpeg's decoder output only. Enhanced SBR remains out of scope by
+> deliberate keep-out.
 
 > **codec/aac encoder**: original code written against ISO/IEC 14496-3
 > (the informative encoder annex for the two-loop quantizer structure)

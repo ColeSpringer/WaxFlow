@@ -1,22 +1,27 @@
-// Package aac implements AAC-LC and HE-AAC v1 decoders (ISO/IEC 14496-3),
-// written from the specification and Bosi/Goldberg (clean-room: AAC
-// reference decoders were behavioral references only, never opened while
-// implementing; the QMF and SBR parameter tables are spec data).
+// Package aac implements AAC-LC, HE-AAC v1, and HE-AAC v2 decoders
+// (ISO/IEC 14496-3), written from the specification and Bosi/Goldberg
+// (clean-room: AAC reference decoders were behavioral references only,
+// never opened while implementing; the QMF and SBR/PS parameter tables
+// are spec data).
 //
 // An explicitly signalled SBR config (audioObjectType 5 wrapping AAC-LC,
 // extension rate exactly double the core rate) decodes the full HE-AAC v1
 // stream: the core at the base rate plus the spectral-band-replicated high
-// band, 2048 output samples per access unit at the extension rate. Those
-// tracks carry codec.HEAAC (see TrackID). Classic spectral-patching SBR
-// only: enhanced SBR (harmonic transposition, pre-flattening) is a
-// deliberate keep-out, and its extension payloads are skipped by length.
+// band, 2048 output samples per access unit at the extension rate. An
+// explicit PS config (audioObjectType 29 over the mono core it is defined
+// on) decodes HE-AAC v2: the same chain plus parametric stereo, a stereo
+// pair at the extension rate. Both carry codec.HEAAC (see TrackID).
+// Classic spectral-patching SBR only: enhanced SBR (harmonic
+// transposition, pre-flattening) is a deliberate keep-out, and its
+// extension payloads are skipped by length.
 //
-// Explicit PS (audioObjectType 29) still decodes the AAC-LC base layer at
-// the base rate with a warning, as does downsampled SBR (extension rate
-// equal to the core rate). Implicit PS hiding inside an AOT-5 stream's SBR
-// extension decodes as v1 at the full rate, permanently: that is
-// spec-legal v1-decoder behavior, and it keeps those files from changing
-// shape twice as later stages land. No gain control, no LTP.
+// Downsampled SBR (extension rate equal to the core rate) decodes too:
+// the chain runs in its dual-rate QMF domain and the synthesis decimates
+// back to the core rate, 1024 samples per access unit. Implicit PS hiding
+// inside an AOT-5 stream's SBR extension decodes as v1 at the full rate,
+// permanently: that is spec-legal v1-decoder behavior, and it keeps those
+// files from changing shape twice as later stages land. No gain control,
+// no LTP.
 //
 // Channel configurations 1 through 6 decode, remapped from AAC's
 // centre-outward element order to WAVE channel order. Configuration 7, the
@@ -32,13 +37,13 @@
 //
 // The remaining limitations are signalled where they can be. Explicit
 // signalling (a hierarchical AOT-5/29 ASC or the 0x2b7 sync extension, the
-// forms an M4A's esds carries) sets Config.SBR; the configs still decoded
-// base-layer-only (PS, downsampled SBR) carry an SBRWarning for a demuxer
-// to record. Implicit signalling, where the ASC says AOT 2 and SBR lives in
-// the bitstream, is how ADTS carries HE-AAC because ADTS has no ASC at all;
-// it cannot be detected without parsing the extension payload, so an
-// implicitly signalled source decodes its base layer at the core rate with
-// no warning.
+// forms an M4A's esds carries) sets Config.SBR; the shapes still decoded
+// base-layer-only (PS over a non-mono core, odd extension rates, 960-frame
+// SBR) carry an SBRWarning for a demuxer to record. Implicit signalling,
+// where the ASC says AOT 2 and SBR lives in the bitstream, is how ADTS
+// carries HE-AAC because ADTS has no ASC at all; detecting it takes the
+// full syntax parse DetectSBR runs, which the adts demuxer applies to the
+// stream head so those sources open at their real rate and width too.
 package aac
 
 import (
@@ -61,9 +66,13 @@ const Version = "aac-dec-2"
 const HEVersion = "aac-hedec-1"
 
 // HESeekPreroll is the decode restart distance for HE-AAC in output
-// samples: two AUs, covering the IMDCT overlap and the SBR QMF and
-// adjuster histories.
-const HESeekPreroll = 4096
+// samples: twelve AUs (about half a second). The IMDCT overlap and the
+// SBR QMF/adjuster histories rebuild in two, but the v2 parametric layer
+// resynchronizes only at a PS header and a freshly frequency-coded
+// parameter set, which fdk repeats about every half second. The SBR
+// noise and sinusoid phase indexes free-run from the stream head in
+// every decoder and are beyond any preroll; the v2 seek gate says so.
+const HESeekPreroll = 12 * 2048
 
 // Audio object types (ISO/IEC 14496-3 Table 1.17). LC is the only core
 // object decoded; SBR and PS wrap it.
@@ -101,10 +110,11 @@ type Config struct {
 	ASC           []byte
 	// SBR reports that the ASC explicitly signalled SBR (audioObjectType 5
 	// or the sync extension) or PS (29), and PS narrows that to the latter.
-	// When heDecode holds (v1: no PS, doubled rate, 1024 frames) the high
-	// band is synthesized and the decoder emits ExtensionRate; the other
-	// shapes decode the base layer at SampleRate, and SBRWarning names the
-	// limitation for a demuxer to record.
+	// When heDecode holds (doubled rate, 1024 frames, and for PS the mono
+	// core) the high band is synthesized and the decoder emits
+	// ExtensionRate, stereo when psDecode holds; the other shapes decode
+	// the base layer at SampleRate, and SBRWarning names the limitation
+	// for a demuxer to record.
 	SBR bool
 	PS  bool
 	// ExtensionRate is the output rate an SBR/PS config declares, or 0 for
@@ -230,11 +240,30 @@ func ParseASC(b []byte) (Config, error) {
 }
 
 // heDecode reports whether the SBR high band is decoded for this config:
-// explicit SBR without PS, extension rate exactly double the core rate (the
-// upsampled form), on the one frame length the decoder takes. Explicit PS
-// and downsampled SBR keep the warned base-layer path for now.
+// explicit SBR at the doubled extension rate (the usual dual-rate form)
+// or at the core rate itself (downsampled SBR, where the same chain
+// synthesizes decimated), on the one frame length the decoder takes.
+// Explicit PS joins when it wraps the mono core it is defined over (v2);
+// PS on any other channel shape keeps the warned base-layer path.
 func (c Config) heDecode() bool {
-	return c.SBR && !c.PS && c.ExtensionRate == 2*c.SampleRate && c.FrameLength == 1024
+	if !c.SBR || c.FrameLength != 1024 {
+		return false
+	}
+	if c.ExtensionRate != 2*c.SampleRate && c.ExtensionRate != c.SampleRate {
+		return false
+	}
+	return !c.PS || c.ChannelConfig == 1
+}
+
+// psDecode reports whether parametric stereo decode is active: explicit
+// PS riding a decoded v1 chain over the mono core it widens to stereo.
+func (c Config) psDecode() bool { return c.PS && c.heDecode() }
+
+// downsampledSBR reports the single-rate form: the SBR chain still runs
+// in its dual-rate QMF domain, but synthesis decimates back to the core
+// rate, 1024 samples per access unit.
+func (c Config) downsampledSBR() bool {
+	return c.heDecode() && c.ExtensionRate == c.SampleRate
 }
 
 // TrackID resolves the codec identity a demuxer should stamp on a track
@@ -250,18 +279,21 @@ func TrackID(cfg Config) codec.ID {
 }
 
 // OutputSamplesPerAU is the decoded frame length per access unit: 2048 at
-// the extension rate when SBR decode is active, else the core frame length.
+// the extension rate when dual-rate SBR decode is active, else the core
+// frame length (plain LC, and downsampled SBR's decimated synthesis).
 func (c Config) OutputSamplesPerAU() int {
-	if c.heDecode() {
+	if c.heDecode() && !c.downsampledSBR() {
 		return 2 * c.FrameLength
 	}
 	return c.FrameLength
 }
 
 // SBRWarning returns the note a demuxer should record for an explicitly
-// signalled SBR/PS config this decoder still band-limits, or "" when there
-// is nothing to warn about: decoded HE-AAC v1 warns no more. Explicit PS
-// and downsampled SBR still decode the base layer only, so a demuxer that
+// signalled SBR/PS config this decoder still band-limits, or "" when
+// there is nothing to warn about: decoded HE-AAC v1, v2, and downsampled
+// SBR warn no more. What remains warned is the shapes heDecode refuses:
+// PS over a non-mono core, an extension rate that is neither the core
+// rate nor its double, and the 960-sample frame length. A demuxer that
 // carries warnings records this one, which is what makes the limitation
 // visible at runtime rather than only in the package doc.
 func (c Config) SBRWarning() string {
@@ -431,6 +463,13 @@ func (c Config) Format() (audio.Format, error) {
 		// SBR decode emits at the doubled extension rate; the warned
 		// base-layer paths keep reporting the rate they actually decode at.
 		rate = c.ExtensionRate
+	}
+	if c.psDecode() {
+		// Parametric stereo widens the mono core to a stereo pair; the
+		// core's own channel shape stays in Channels for the element
+		// routing.
+		ch = 2
+		layout = audio.FrontLeft | audio.FrontRight
 	}
 	return audio.Format{
 		Rate:     rate,

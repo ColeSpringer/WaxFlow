@@ -96,14 +96,14 @@ func TestESBRKeepOut(t *testing.T) {
 		limiterBands: 2, limiterGains: 2, interpolFreq: 1, smoothingMode: 1,
 	}
 	parse := func(payload []byte) (*sbrElement, int, bool) {
-		el := newSBRElement(1, 48000)
+		el := newSBRElement(1, 48000, false, false)
 		el.applyHeader(h)
 		if !el.haveTbl {
 			t.Fatal("no tables")
 		}
 		el.beginFrame()
 		r := newBitReader(payload)
-		ok := el.parseSBRData(r)
+		ok := el.parseSBRData(r, len(payload)*8)
 		return el, r.pos, ok
 	}
 

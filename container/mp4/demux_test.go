@@ -296,30 +296,38 @@ func TestBuildSyncDeduplicates(t *testing.T) {
 
 // TestGaplessHEAACHalfUnits pins the iTunSMPB half-unit detector: it fires
 // exactly when the tag's three fields sum to half the raw track duration
-// (a tag written in core 1024-sample units), and never on a tag consistent
-// with the output timeline. A consistent full-unit tag sums to totalRaw
-// itself, so the two cannot collide; a zero-pad tag (this muxer's own
-// progressive output) sums short of totalRaw and stays untouched too.
+// (a tag written in core 1024-sample units) on a doubled (2048/AU)
+// timeline, and never on a tag consistent with the output timeline. A
+// consistent full-unit tag sums to totalRaw itself, so the two cannot
+// collide; a zero-pad tag (this muxer's own progressive output) sums
+// short of totalRaw and stays untouched too. A downsampled-SBR track is
+// codec.HEAAC with 1024-sample AUs, the same units the tag uses, so a
+// coincidental half-sum there must not double anything.
 func TestGaplessHEAACHalfUnits(t *testing.T) {
 	const totalRaw = 139264 // 68 AUs * 2048 output samples
 	for _, tc := range []struct {
 		name                string
+		perAU               int64
 		delay, pad, total   int64
 		wantDelay, wantSamp int64
 	}{
 		// fdk-style trims written in core units: 2529+953+66150 = 69632,
 		// exactly half of 139264. Delay and length double; padding is
 		// re-derived from the doubled pair.
-		{"half units rescale", 2529, 953, 66150, 5058, 132300},
+		{"half units rescale", 2048, 2529, 953, 66150, 5058, 132300},
 		// The same trims in output units sum to totalRaw: untouched.
-		{"full units untouched", 5058, 1906, 132300, 5058, 132300},
+		{"full units untouched", 2048, 5058, 1906, 132300, 5058, 132300},
 		// A zero pad field with full-unit delay and length (the progressive
 		// muxer's shape): sums short of totalRaw, untouched.
-		{"zero pad untouched", 5058, 0, 132300, 5058, 132300},
+		{"zero pad untouched", 2048, 5058, 0, 132300, 5058, 132300},
+		// A downsampled track whose tag happens to describe half the raw
+		// duration (an mdat extended without retagging): already in output
+		// units, so doubling would corrupt both trims.
+		{"downsampled coincidence untouched", 1024, 2529, 953, 66150, 2529, 66150},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := &Demuxer{smpbOK: true, smpbDelay: tc.delay, smpbPad: tc.pad, smpbTotal: tc.total}
-			tr := &track{codec: codec.HEAAC, fmt: audio.Format{Rate: 44100}}
+			tr := &track{codec: codec.HEAAC, perAU: tc.perAU, fmt: audio.Format{Rate: 44100}}
 			tr.st.totalDur = totalRaw
 			delay, padding, samples := d.gapless(tr)
 			if delay != tc.wantDelay || samples != tc.wantSamp {

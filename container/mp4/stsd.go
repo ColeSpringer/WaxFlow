@@ -213,6 +213,7 @@ func (d *Demuxer) setMP4A(t *track, children []byte, rate, channels int) error {
 	t.codec = aac.TrackID(cfg)
 	t.codecConfig = append([]byte(nil), asc...)
 	t.fmt = f
+	t.perAU = int64(cfg.OutputSamplesPerAU())
 	return nil
 }
 

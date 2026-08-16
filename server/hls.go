@@ -400,10 +400,11 @@ func (s *Server) measureSamples(src *source.File) (int64, error) {
 // HLS cannot drift. tracks is the single source's track, or the timeline's
 // members' tracks in order.
 // rmx is the source to try the remux rung against, nil to skip it. The rung
-// changes what a plan prints (an HE-AAC copy answers mp4a.40.5 where the
-// transcode rung answers an LC re-encode), so every path that prints a plan
-// passes the source; only mint-time validation, which prints nothing and
-// needs any rung to answer, skips the packet walk.
+// changes what a plan prints (an HE-AAC copy answers the stream's own
+// signalling, mp4a.40.5 or mp4a.40.29, where the transcode rung answers an
+// LC re-encode), so every path that prints a plan passes the source; only
+// mint-time validation, which prints nothing and needs any rung to answer,
+// skips the packet walk.
 func (s *Server) planHLSVariant(desc hls.Descriptor, tracks []container.Track, m *meta.Info,
 	rmx *source.File) (waxflow.TranscodeOptions, *waxflow.SegmentPlan, *waxflow.RemuxSegmentPlan, *waxflow.CutSegmentPlan, error) {
 	fail := func(err error) (waxflow.TranscodeOptions, *waxflow.SegmentPlan, *waxflow.RemuxSegmentPlan, *waxflow.CutSegmentPlan, error) {
@@ -689,7 +690,7 @@ func (s *Server) handleHLSMaster(w http.ResponseWriter, r *http.Request) {
 	// Folded exactly as prepareHLS folds it, remux source included: the
 	// master's CODECS and BANDWIDTH must come from the same rung the media
 	// path will serve, or an HE-AAC copy advertises mp4a.40.2 in the master
-	// while the segments carry AOT-5 packets.
+	// while the segments carry AOT-5 or AOT-29 packets.
 	var m *meta.Info
 	var rmx *source.File
 	if desc.Tl == "" {

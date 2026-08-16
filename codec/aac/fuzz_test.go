@@ -20,6 +20,7 @@ import (
 //	1..6  AAC-LC channel configuration 1..6
 //	7..12 explicit hierarchical SBR, channel configuration 1..6
 //	13    AAC-LC stereo with the 0x2b7 sync-extension SBR signalling
+//	14    explicit AOT-29 (HE-AAC v2): PS over the mono SBR chain
 func FuzzDecode(f *testing.F) {
 	f.Add([]byte{0x00}, uint8(2))
 	f.Add([]byte{0x21, 0x00, 0x00}, uint8(2))       // CPE tag start
@@ -36,9 +37,13 @@ func FuzzDecode(f *testing.F) {
 	f.Add([]byte{0x00, 0x00, 0xC1, 0x00, 0xE0}, uint8(7))              // mono SBR: SCE, FIL, END
 	f.Add([]byte{0x00, 0x20, 0x20, 0x60, 0xC2, 0xD6, 0x00}, uint8(12)) // 5.1 SBR: a FIL right after the LFE
 	f.Add([]byte{0x21, 0x00, 0x00, 0xC0, 0x00}, uint8(13))             // sync-extension-signalled stereo
+	// The v2 shape: PS payloads ride the SBR extended-data block of a
+	// mono SCE's fill.
+	f.Add([]byte{0x00, 0x00, 0xC1, 0x00, 0xE0}, uint8(14))       // mono SCE, FIL, END under PS
+	f.Add([]byte{0x00, 0x00, 0xC2, 0xD6, 0x00, 0x00}, uint8(14)) // FIL with ext 13 under PS
 
 	f.Fuzz(func(t *testing.T, data []byte, configSel uint8) {
-		sel := int(configSel % 14)
+		sel := int(configSel % 15)
 		var asc []byte
 		switch {
 		case sel == 0:
@@ -47,8 +52,10 @@ func FuzzDecode(f *testing.F) {
 			asc = ascForFuzz(sel)
 		case sel <= 12:
 			asc = ascSBRForFuzz(sel - 6)
-		default:
+		case sel == 13:
 			asc = ascSyncExtForFuzz(2)
+		default:
+			asc = ascPSForFuzz()
 		}
 		cfg, err := ParseASC(asc)
 		if err != nil {
@@ -93,6 +100,12 @@ func ascSBRForFuzz(chanConfig int) []byte {
 	bits <<= 3         // GASpecificConfig flags
 	bits <<= 7         // pad to 32 bits
 	return []byte{byte(bits >> 24), byte(bits >> 16), byte(bits >> 8), byte(bits)}
+}
+
+// ascPSForFuzz builds the explicit AOT-29 (HE-AAC v2) config over the
+// mono core at 24000/48000: fdk's own hierarchical form.
+func ascPSForFuzz() []byte {
+	return []byte{0xEB, 0x09, 0x88, 0x00}
 }
 
 // ascSyncExtForFuzz builds the backward-compatible form: a plain AAC-LC

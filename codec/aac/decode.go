@@ -54,7 +54,7 @@ type channelData struct {
 	pnsSeed    uint32
 }
 
-// Decoder decodes AAC-LC and HE-AAC v1 access units into planar float
+// Decoder decodes AAC-LC and HE-AAC v1/v2 access units into planar float
 // buffers. Each packet is one frame: 1024 samples, or 2048 at the doubled
 // rate when SBR decode is active. The IMDCT's overlap (and the SBR QMF
 // state) makes frame N depend on frame N-1, so Reset clears that state
@@ -80,10 +80,13 @@ type Decoder struct {
 	pnsState uint32                 // perceptual-noise PRNG state
 
 	// SBR state, nil/unused for plain LC. Core samples land in stage
-	// (per output channel) instead of the output buffer; each SCE/CPE
+	// (per core channel) instead of the output buffer; each SCE/CPE
 	// gets a persistent sbrElement, keyed by its position in the frame's
 	// element sequence, that upsamples staging into the output buffer.
+	// psActive marks the v2 shape: the single SCE's element widens its
+	// mono chain into output channels 0 and 1.
 	sbrActive bool
+	psActive  bool
 	outLen    int
 	stage     [audio.MaxChannels][]float32
 	sbrEls    []*sbrElement
@@ -105,10 +108,19 @@ func NewDecoder(cfg Config, f audio.Format) (*Decoder, error) {
 	if rateIdx < 0 || rateIdx >= len(swbOffsetLong) {
 		return nil, malformed("sample rate %d has no scalefactor-band table", cfg.SampleRate)
 	}
-	slots := waveSlots(cfg.ChannelConfig, f.Channels)
-	if len(slots) != f.Channels {
+	// The element routing covers the CORE channels; PS widens the output
+	// to a stereo pair past it, so the two counts differ exactly there.
+	coreCh := f.Channels
+	if cfg.psDecode() {
+		if f.Channels != 2 {
+			return nil, malformed("parametric stereo decodes to 2 channels, format says %d", f.Channels)
+		}
+		coreCh = cfg.Channels
+	}
+	slots := waveSlots(cfg.ChannelConfig, coreCh)
+	if len(slots) != coreCh {
 		return nil, malformed("channel configuration %d with %d channels has no known element order",
-			cfg.ChannelConfig, f.Channels)
+			cfg.ChannelConfig, coreCh)
 	}
 	elems := channelElements(cfg.ChannelConfig)
 	if elems != nil && len(elems) != len(slots) {
@@ -118,9 +130,10 @@ func NewDecoder(cfg Config, f audio.Format) (*Decoder, error) {
 	d := &Decoder{cfg: cfg, fmt: f, rateIdx: rateIdx,
 		frameLen: int(cfg.FrameLength), slots: slots, elems: elems, pnsState: 0x1f2e3d4c}
 	d.sbrActive = cfg.heDecode()
+	d.psActive = cfg.psDecode()
 	d.outLen = cfg.OutputSamplesPerAU()
 	if d.sbrActive {
-		for c := 0; c < f.Channels; c++ {
+		for c := 0; c < coreCh; c++ {
 			d.stage[c] = make([]float32, d.frameLen)
 		}
 	}
@@ -136,7 +149,10 @@ func (d *Decoder) sbrElem(idx, chans int) *sbrElement {
 	if el := d.sbrEls[idx]; el != nil && el.chans == chans {
 		return el
 	}
-	el := newSBRElement(chans, d.cfg.ExtensionRate)
+	// The SBR band tables always derive in the dual-rate QMF domain, even
+	// for downsampled synthesis (the element decimates on the way out).
+	el := newSBRElement(chans, 2*d.cfg.SampleRate, d.psActive && chans == 1,
+		d.cfg.downsampledSBR())
 	d.sbrEls[idx] = el
 	return el
 }
@@ -172,7 +188,7 @@ func (d *Decoder) Decode(pkt []byte, emit func(*audio.Buffer) error) error {
 		d.buf = audio.Get(d.fmt, d.outLen)
 	}
 	d.buf.N = d.outLen
-	for c := 0; c < len(d.slots); c++ {
+	for c := 0; c < d.fmt.Channels; c++ {
 		clear(d.buf.ChanF(c)[:d.outLen])
 	}
 
@@ -312,7 +328,7 @@ func (d *Decoder) decodeSBRFrame(r *bitReader) error {
 		if pend == nil {
 			return
 		}
-		pend.process(pendIn[:pend.chans], pendOut[:pend.chans])
+		pend.process(pendIn[:pend.chans], pendOut[:pend.outChans()])
 		pend = nil
 	}
 	for {
@@ -354,6 +370,11 @@ func (d *Decoder) decodeSBRFrame(r *bitReader) error {
 			pendFill = tag == elSCE
 			pendIn[0] = d.stage[outCh]
 			pendOut[0] = d.buf.ChanF(outCh)[:d.outLen]
+			if el.ps != nil {
+				// The PS element widens its mono chain in place: channel 0
+				// is the core's slot, channel 1 the pair it synthesizes.
+				pendOut[1] = d.buf.ChanF(1)[:d.outLen]
+			}
 			elem++
 			elIdx++
 		case elCPE:

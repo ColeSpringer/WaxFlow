@@ -23,7 +23,11 @@ import (
 // no encoder, so no revision of any of them can change its bytes; what it does
 // synthesize is a set of trims and a rewritten codec config, and wrong gapless
 // metadata is wrong playback rather than merely older bytes.
-const CutVersion = "cut-1"
+//
+// cut-2: the HE-AAC decode preroll (aac.HESeekPreroll) grew from 4096 to
+// 24576 samples, and the preroll picks each span's first kept packet, so
+// the same request now cuts different bytes on HE-AAC sources.
+const CutVersion = "cut-2"
 
 // Span is a kept sample range [From, To) of a source's own track timeline.
 // ToEnd means to the end of the track.

@@ -3,7 +3,11 @@
 // profile, sampling-frequency index, channel configuration, frame length)
 // followed by one raw_data_block, which is handed to the AAC decoder as a
 // packet. The AudioSpecificConfig is synthesized from the first frame's
-// header, since ADTS transports no out-of-band config.
+// header, since ADTS transports no out-of-band config; because that header
+// only ever describes the AAC-LC core, the first frame is probed for the
+// implicit SBR (and PS) signalling that makes a stream HE-AAC, and a hit
+// upgrades the track to the doubled rate (and the v2 stereo pair) with an
+// explicit hierarchical ASC as its CodecConfig.
 //
 // ADTS carries no gapless signaling at all, so streams play from the first
 // sample including encoder priming; this is why format=aac defaults to
@@ -27,8 +31,10 @@ const (
 	maxResync = 1 << 20
 	// maxID3Tags bounds leading ID3v2 tag skipping.
 	maxID3Tags = 8
-	// samplesPerFrame is the AAC-LC frame length; ADTS never carries the
-	// 960-sample variant.
+	// samplesPerFrame is the AAC-LC core frame length; ADTS never carries
+	// the 960-sample variant. The demuxer's per-frame output length can be
+	// the doubled 2048 for a detected HE-AAC stream; the muxer writes core
+	// frames, so this constant is its gate.
 	samplesPerFrame = 1024
 )
 

@@ -22,8 +22,10 @@ var _ container.Muxer = (*Muxer)(nil)
 // HE-AAC tracks mux too, as the implicit form: ADTS has no ASC to carry
 // explicit SBR signalling, so the header states the core LC layer at the
 // core rate and the SBR extension rides inside the payload, which is how
-// ADTS has always carried HE-AAC. Reading such a stream back identifies
-// the core layer only (the package doc's samplesPerFrame note).
+// ADTS has always carried HE-AAC. The demuxer's first-frame probe is what
+// identifies such a stream on the way back in. Downsampled SBR is the one
+// HE shape refused: implicit signalling implies the dual rate, so its
+// units cannot be re-framed honestly.
 type Muxer struct {
 	w            io.Writer
 	rateIdx      int
@@ -63,6 +65,14 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	if cfg.FrameLength != samplesPerFrame {
 		return waxerr.New(waxerr.CodeUnsupportedFormat,
 			fmt.Sprintf("adts: %d-sample frames; ADTS carries only the %d-sample form", cfg.FrameLength, samplesPerFrame))
+	}
+	if cfg.SBR && cfg.ExtensionRate == cfg.SampleRate {
+		// Implicit signalling is ADTS's only HE form, and implicit means
+		// dual-rate by convention: these access units re-framed here would
+		// legally decode at double their real rate. fdk refuses the same
+		// combination on the encode side.
+		return waxerr.New(waxerr.CodeUnsupportedFormat,
+			"adts: downsampled (single-rate) SBR has no ADTS form; implicit signalling implies the dual rate")
 	}
 	m.rateIdx = rateIndex(cfg.SampleRate)
 	m.channels = cfg.ChannelConfig

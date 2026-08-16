@@ -46,6 +46,7 @@ it re-baselines every gate in the same PR.
 | FLAC | bit-exact on the full IETF/Xiph suite; sample-exact seek; >=300x realtime |
 | MP3 | vs ffmpeg: RMS < 1e-4 FS, max < 1e-3 FS; LAME gapless sample-count invariant; sample-exact seek at 100 random offsets in VBR; >=150x realtime |
 | AAC-LC | vs ffmpeg: RMS < 2^-13 FS; iTunes (iTunSMPB) gapless invariant; edit-list seek exact; >=150x realtime |
+| HE-AAC v1/v2 | vs ffmpeg on fdk-encoded fixtures: RMS < 2^-13 FS across explicit m4a (v1, v2, downsampled SBR) and implicit ADTS; seeks land sample-exact, the tail within the same gate for v1 and within 0.02 for v2 (the SBR noise and sinusoid phase free-runs from the stream head in every decoder, so a mid-stream join reproduces it differently forever; the parametric layer itself resynchronizes inside the 12-AU preroll); the realtime floor is ratcheted with the encoder stage's first bench pass |
 | ALAC | bit-exact vs ffmpeg; >=100x realtime |
 | Opus | all opus_testvectors 01-12 pass RFC 6716 section 6 (ported opus_compare, both decode rates, against the RFC 8251 regenerated references; the 2012 originals are stale for hybrid/transition vectors and fail even current libopus); Ogg bisection seek exact after 80 ms pre-roll; >=150x realtime |
 | Vorbis | vs ffmpeg: RMS < 1e-4 FS, max < 1e-3 FS; >=80x realtime |

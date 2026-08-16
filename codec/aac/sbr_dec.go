@@ -80,10 +80,38 @@ type sbrElement struct {
 	pendingReset  bool
 
 	ch [2]sbrChanState
+
+	// ps widens this element's mono chain to stereo when the config
+	// signalled explicit PS; nil otherwise, and ps_data found in the
+	// extension stream is then skipped (implicit PS decodes as v1).
+	ps *psDec
+
+	// sawSBR/sawPS record that an SBR fill extension (and a PS payload
+	// inside it) appeared, whether or not anything consumed it: DetectSBR
+	// reads them to resolve implicit ADTS signalling.
+	sawSBR, sawPS bool
+
+	// downsampled selects the single-rate synthesis: the chain runs in the
+	// dual-rate QMF domain either way, and the output decimates to 32
+	// samples per slot.
+	downsampled bool
 }
 
-func newSBRElement(chans, sbrRate int) *sbrElement {
-	return &sbrElement{chans: chans, sbrRate: sbrRate, kxPrev: 64}
+func newSBRElement(chans, sbrRate int, ps, downsampled bool) *sbrElement {
+	el := &sbrElement{chans: chans, sbrRate: sbrRate, kxPrev: 64, downsampled: downsampled}
+	if ps {
+		el.ps = &psDec{}
+	}
+	return el
+}
+
+// outChans is the element's output channel count: the core channels, or
+// the stereo pair PS widens the mono core to.
+func (el *sbrElement) outChans() int {
+	if el.ps != nil {
+		return 2
+	}
+	return el.chans
 }
 
 // applyHeader installs a newly received sbr_header. A change in any
@@ -186,6 +214,11 @@ func (el *sbrElement) process(in, out [][]float32) {
 		// never applied it.
 		el.pendingReset = true
 	}
+	if el.ps != nil {
+		el.processPS(kxCur, mCur, lTemp[0], out)
+		el.kxPrev, el.mPrev = kxCur, mCur
+		return
+	}
 	for c := 0; c < el.chans; c++ {
 		st := &el.ch[c]
 		var xr, xi [64]float32
@@ -207,10 +240,71 @@ func (el *sbrElement) process(in, out [][]float32) {
 				xr[k] = st.yRe[src][k]
 				xi[k] = st.yIm[src][k]
 			}
-			st.syn.synthesize(xr[:], xi[:], out[c][64*l:64*l+64])
+			if el.downsampled {
+				st.syn.synthesizeDown(xr[:], xi[:], out[c][32*l:32*l+32])
+			} else {
+				st.syn.synthesize(xr[:], xi[:], out[c][64*l:64*l+64])
+			}
 		}
 	}
 	el.kxPrev, el.mPrev = kxCur, mCur
+}
+
+// processPS is the v2 tail of process: the mono chain's spectrum is
+// assembled over 38 slots (32 plus the hybrid filter's lookahead, exactly
+// the slots the persistent QMF buffers already hold), widened by the PS
+// machinery, and synthesized through the two banks. Until ps_data has
+// arrived (or after a damaged payload dropped it) the element emits dual
+// mono, the spec's answer for a v2 decoder holding no parameters; the
+// right bank is fed either way so a mid-stream start is seamless.
+func (el *sbrElement) processPS(kxCur, mCur, lTemp int, out [][]float32) {
+	st := &el.ch[0]
+	ps := el.ps
+	for l := range 38 {
+		kx, m := kxCur, mCur
+		if l < lTemp {
+			kx, m = el.kxPrev, el.mPrev
+		}
+		kx = min(kx, 64)
+		m = min(m, 64-kx)
+		src := l + sbrTHFAdj
+		row := &ps.xBuf[l]
+		*row = [64][2]float32{}
+		for k := 0; k < kx && k < 32; k++ {
+			row[k][0] = st.xlowRe[src][k]
+			row[k][1] = st.xlowIm[src][k]
+		}
+		if l < sbrSlots {
+			for k := kx; k < kx+m; k++ {
+				row[k][0] = st.yRe[src][k]
+				row[k][1] = st.yIm[src][k]
+			}
+		}
+	}
+	widened := ps.data.start
+	if widened {
+		ps.apply(min(kxCur+mCur, 64))
+	}
+	var lr, li, rr, ri [64]float32
+	for l := range sbrSlots {
+		for k := range 64 {
+			lr[k], li[k] = ps.xBuf[l][k][0], ps.xBuf[l][k][1]
+		}
+		if widened {
+			for k := range 64 {
+				rr[k], ri[k] = ps.rBuf[l][k][0], ps.rBuf[l][k][1]
+			}
+		} else {
+			rr, ri = lr, li
+		}
+		if el.downsampled {
+			st.syn.synthesizeDown(lr[:], li[:], out[0][32*l:32*l+32])
+			ps.syn.synthesizeDown(rr[:], ri[:], out[1][32*l:32*l+32])
+		} else {
+			st.syn.synthesize(lr[:], li[:], out[0][64*l:64*l+64])
+			ps.syn.synthesize(rr[:], ri[:], out[1][64*l:64*l+64])
+		}
+	}
 }
 
 // shiftBuffers carries the analysis and adjuster tails across the frame
@@ -237,6 +331,12 @@ func (st *sbrChanState) shiftBuffers() {
 func (el *sbrElement) resetForSeek() {
 	for c := range el.ch {
 		el.ch[c].clear()
+	}
+	if el.ps != nil {
+		// The PS parameter state survives like the header: delta-time
+		// coding anchors on it, and the container's pre-roll re-reads the
+		// frames that rebuild the signal path cleared here.
+		el.ps.clearSignal()
 	}
 	el.kxPrev, el.mPrev = 64, 0
 	el.dataOK = false

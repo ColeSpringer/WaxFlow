@@ -25,8 +25,9 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   smaller than `flac -5` at level 5), ALAC (bit-exact round trip), and
   WAV/AIFF PCM.
 - **Decoders / inputs**: FLAC (bit-exact on the IETF suite), WAV, AIFF,
-  MP3, AAC-LC and ALAC in MP4/M4A/M4B, ADTS, Opus (all RFC 6716/8251
-  conformance vectors pass), Vorbis, Ogg, Matroska/WebM. Sample-exact
+  MP3, AAC-LC, HE-AAC v1 and v2 (SBR+PS, ffmpeg-differential-verified),
+  and ALAC in MP4/M4A/M4B, ADTS (implicit HE-AAC detected), Opus (all
+  RFC 6716/8251 conformance vectors pass), Vorbis, Ogg, Matroska/WebM. Sample-exact
   seeking everywhere, gapless honored per format (LAME tag, iTunSMPB,
   edit lists, Ogg pre-skip/end-trim, Matroska CodecDelay).
 - **DSP**: Kaiser windowed-sinc resampling (`hq`/`fast`), BS.775
@@ -210,8 +211,9 @@ replaced content still dies with `410 source-changed`.
 
 ## Non-goals for v1.0
 
-Video; HE-AAC **encoding**, HE-AAC v2/PS, enhanced SBR, and xHE (HE-AAC
-v1 SBR *decode* ships); WMA/APE/WavPack **encoding**; WMA/APE/WavPack
+Video; HE-AAC **encoding**, enhanced SBR, and xHE (HE-AAC v1 and v2
+*decode* ships, downsampled SBR and ADTS implicit signalling included);
+WMA/APE/WavPack **encoding**; WMA/APE/WavPack
 decoding; DASH manifests (the CMAF segments are already DASH-compatible);
 DRM/HLS-AES; Opus PLC; CD ripping; any database (WaxBin owns cataloging);
 tag *editing* (WaxLabel owns it; WaxFlow only maps and passes metadata);

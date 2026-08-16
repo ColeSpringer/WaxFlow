@@ -436,23 +436,56 @@ func parseAddHarmonic(r *bitReader, t *sbrFreqTables, fd *sbrFrameData) {
 	}
 }
 
-// skipSBRExtendedData consumes the trailing bs_extended_data block whole:
-// the PS payload it can carry stays unparsed for now, and every unknown
-// extension id (enhanced SBR included) is skipped by this same length.
-func skipSBRExtendedData(r *bitReader) {
+// parseSBRExtendedData consumes the trailing bs_extended_data block. The
+// PS payload (extension id 2) routes to the element's PS state when the
+// config signalled explicit PS; with no PS state, and for every other
+// extension id (enhanced SBR included), the block is skipped by its
+// declared length. It reports whether the block stayed inside the fill
+// element: the declared byte count comes from the stream, and one that
+// runs past fillEnd would otherwise hand the next element's entropy-coded
+// bits to the PS parser as parameter grids, so the read is clamped and
+// the lie fails the payload like any other damage.
+func (el *sbrElement) parseSBRExtendedData(r *bitReader, fillEnd int) bool {
 	if r.bit() == 0 {
-		return
+		return true
 	}
 	cnt := int(r.read(4))
 	if cnt == 15 {
 		cnt += int(r.read(8))
 	}
-	r.skip(cnt * 8)
+	end := r.pos + cnt*8
+	ok := end <= fillEnd
+	end = min(end, fillEnd)
+	bits := end - r.pos
+	// The spec's own consumption rule: another extension follows while at
+	// least 8 bits remain, so conformant padding is under a byte and the
+	// loop cannot re-enter on it.
+	for bits > 7 {
+		id := int(r.read(2))
+		bits -= 2
+		if id != extensionIDPS {
+			break // unknown id: no length of its own, skip the block
+		}
+		// Seen is recorded even when nothing parses it: implicit-signalling
+		// detection (DetectSBR) is what turns an ADTS stream stereo.
+		el.sawPS = true
+		if el.ps == nil {
+			break
+		}
+		used, psOK := el.ps.data.parse(r, bits)
+		if !psOK {
+			break
+		}
+		bits -= used
+	}
+	r.pos = end
+	return ok
 }
 
 // parseSBRData reads sbr_data for the element's channel count (the
-// single-channel and channel-pair element syntaxes).
-func (el *sbrElement) parseSBRData(r *bitReader) bool {
+// single-channel and channel-pair element syntaxes). fillEnd is the fill
+// element's bit end, bounding the trailing extended-data block.
+func (el *sbrElement) parseSBRData(r *bitReader, fillEnd int) bool {
 	t := &el.tbl
 	if el.chans == 1 {
 		if r.bit() != 0 {
@@ -463,7 +496,9 @@ func (el *sbrElement) parseSBRData(r *bitReader) bool {
 		if !parseSBRChannel(r, t, el.hdr, fd, &el.ch[0]) {
 			return false
 		}
-		skipSBRExtendedData(r)
+		if !el.parseSBRExtendedData(r, fillEnd) {
+			return false
+		}
 		return !r.overrun()
 	}
 	if r.bit() != 0 {
@@ -523,7 +558,9 @@ func (el *sbrElement) parseSBRData(r *bitReader) bool {
 	}
 	parseAddHarmonic(r, t, fd0)
 	parseAddHarmonic(r, t, fd1)
-	skipSBRExtendedData(r)
+	if !el.parseSBRExtendedData(r, fillEnd) {
+		return false
+	}
 	return !r.overrun()
 }
 
@@ -551,6 +588,7 @@ func (el *sbrElement) parsePayload(r *bitReader, end int) {
 	default:
 		return // some other extension: skipped by length in parseFill
 	}
+	el.sawSBR = true
 	if r.bit() != 0 {
 		hdr := parseSBRHeader(r)
 		el.applyHeader(hdr)
@@ -558,9 +596,11 @@ func (el *sbrElement) parsePayload(r *bitReader, end int) {
 	if !el.haveHdr || !el.haveTbl {
 		return // no header yet: the element keeps concealing
 	}
-	// The delta anchors update while the payload parses; snapshot them so a
-	// rejected payload cannot leave garbage for the next frame's delta-time
-	// references to anchor on.
+	// The delta anchors (and the PS parameter state, which the extended
+	// block mutates on the way through) update while the payload parses;
+	// snapshot them so a rejected payload cannot leave garbage for the next
+	// frame's delta-time references to anchor on, or a latched PS start
+	// widening the element with grids the frame was rejected over.
 	var savedEnv [2][64]int32
 	var savedNoise [2][5]int32
 	var savedRes [2]int
@@ -569,7 +609,11 @@ func (el *sbrElement) parsePayload(r *bitReader, end int) {
 		savedNoise[c] = el.ch[c].prevNoise
 		savedRes[c] = el.ch[c].prevRes
 	}
-	if el.parseSBRData(r) && r.pos <= end {
+	var savedPS psData
+	if el.ps != nil {
+		savedPS = el.ps.data
+	}
+	if el.parseSBRData(r, end) && r.pos <= end {
 		el.dataOK = true
 	} else {
 		el.dataOK = false
@@ -577,6 +621,9 @@ func (el *sbrElement) parsePayload(r *bitReader, end int) {
 			el.ch[c].prevEnv = savedEnv[c]
 			el.ch[c].prevNoise = savedNoise[c]
 			el.ch[c].prevRes = savedRes[c]
+		}
+		if el.ps != nil {
+			el.ps.data = savedPS
 		}
 	}
 }

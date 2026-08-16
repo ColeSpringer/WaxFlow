@@ -16,6 +16,11 @@ type track struct {
 	codec       codec.ID
 	codecConfig []byte
 	fmt         audio.Format
+	// perAU is the decoded output samples per access unit for AAC-family
+	// tracks (1024 for LC and downsampled SBR, 2048 for dual-rate HE), 0
+	// elsewhere; it is what distinguishes a doubled timeline from the
+	// codec ID alone, which spans both shapes.
+	perAU int64
 
 	// note is a decoder-limitation Warning for this track (an HE-AAC band
 	// limit), recorded at parse and emitted by selectAudio only if this track

@@ -32,6 +32,7 @@ Operationally:
 | container/mpa | ISO 11172-3 (spec); Xing/Info/VBRI and LAME-tag layout (documented interchange formats) | none |
 | dsp/psy | ISO 11172-3 Annex D model 2 and ISO 13818-7 Annex B (spec, informative psychoacoustic model); Terhardt ATH approximation and the bark scale (published formulas) | none |
 | codec/aac (encoder) | ISO 14496-3 (spec, incl. the informative encoder annex's two-loop structure); Bosi/Goldberg (textbook); forward Huffman tables, band boundaries, and windows derived in code from the decoder's already-attributed tables (no new source) | ffmpeg's native AAC encoder reached only as a binary quality oracle (never opened; the ODG-proxy gate) |
+| codec/aac (SBR/PS decode) | ISO 14496-3 4.6.18 and 8.6.4 (spec); normative parameter tables recorded per ADR-0001's parameter provision (see THIRD-PARTY-NOTICES) | ffmpeg's AAC decoder as the differential oracle and as a source of behavioral facts (validity bounds, header state-machine rules, the QMF restart modulation confirmed tap-for-tap against an instrumented build); table restatements as parameter cross-checks: faad2 and FFmpeg for the SBR tables, FFmpeg alone for the PS tables; no decoder logic taken |
 | container/adts (muxer) | ISO 14496-3 1.A (spec); the write-side inverse of the demuxer's header parser | none |
 | container/mp4 (esds writer) | ISO 14496-1 section 7.2.6 descriptors (spec); the write-side inverse of the demuxer's parser | none |
 
@@ -53,15 +54,35 @@ advice.
   and decoder ("fdk-aac-free") for Fedora in 2017, and distributions
   have shipped LC codecs since. ffmpeg has shipped a native AAC-LC
   encoder in default builds for years.
-- The actively licensed parts of the Via/Fraunhofer AAC pool concern
-  the later extensions: SBR/HE-AAC, PS, ELD, xHE/USAC. The encoder
-  produces LC only, and PS, enhanced SBR, and xHE remain out of scope,
-  but the HE-AAC v1 SBR **decoder** (2026-08) postdates this review and
-  is not covered by its LC-only reasoning.
-- Action, OPEN as of 2026-08-16: the SBR decode landing triggers the
-  redo-this-review rule this section set for itself; do that review
-  before a release ships the SBR decoder. PS/xHE would trigger it
-  again.
+- **SBR/PS review, recorded 2026-08-15** (the redo this section's
+  self-trigger demanded before HE-AAC decode ships; same class of
+  good-faith analysis that cleared LC):
+  - Classic SBR's essential patents are expired. The core Coding
+    Technologies/Dolby family (priority 1997-06-10): US7283955 expired
+    2021-01-05. The 2002-era refinement family (EP1408484, adaptive
+    noise floor) is expired. The last known straggler, US8935156
+    ("Enhancing performance of SBR"), expired 2026-03-09, five months
+    before this entry.
+  - PS's essential patents are expired. The canonical Philips family
+    (Breebaart/Schuijers, priority 2002-07): US7542896 lapsed
+    fee-related, term end 2025-05-26 at the latest. The v2 spec froze
+    in 2004; nothing essential to it outlives 2026 by more than
+    administrative term adjustment.
+  - The live mines are **enhanced SBR**: Dolby holds active patents to
+    2039 (US11810590, US11810591, US11810592, US11862185, US11289106;
+    priority 2018) covering harmonic transposition, pre-flattening, and
+    eSBR signaling. Post-spec filings cannot be essential to the
+    2003/2004 codec. Keep-out rule: implement classic spectral-patching
+    SBR per ISO/IEC 14496-3 only, never eSBR, and skip its extension
+    payloads. The keep-out is executable, not aspirational:
+    `codec/aac/sbr_esbr_test.go` proves an eSBR extension id is skipped
+    by length with output identical to the classic-only decode.
+  - Context: Via LA still licenses the pool list, as it did for AAC-LC
+    years after LC essentials expired (Red Hat cleared LC in 2017;
+    ffmpeg ships it by default; no enforcement since).
+- The HE-AAC v1 and v2 decoders (SBR, PS, downsampled SBR, ADTS
+  implicit signalling; 2026-08) ship under that review. xHE/USAC and
+  any HE-AAC *encoder* would trigger a redo.
 
 ## Listening-test protocol
 

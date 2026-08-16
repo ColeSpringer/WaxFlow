@@ -12,7 +12,7 @@ import (
 // DSP.
 func buildTestElement(t *testing.T) *sbrElement {
 	t.Helper()
-	el := newSBRElement(1, 48000)
+	el := newSBRElement(1, 48000, false, false)
 	h := sbrHeader{
 		ampRes: 1, startFreq: 12, stopFreq: 9, xoverBand: 0,
 		freqScale: 2, alterScale: 1, noiseBands: 3,

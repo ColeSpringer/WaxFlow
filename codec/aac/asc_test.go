@@ -82,23 +82,27 @@ func TestParseASCImplicitMatchesExplicit(t *testing.T) {
 }
 
 // TestTrackIDAndOutputShape pins the codec identity and per-AU output
-// length each signaling form resolves to at this stage: explicit v1 is
-// codec.HEAAC at the extension rate with 2048-sample AUs; explicit PS
-// (AOT 29) keeps the whole legacy LC path until stage 2b; an implicit
-// (bare LC) config is LC.
+// length each signaling form resolves to: explicit v1 is codec.HEAAC at
+// the extension rate with 2048-sample AUs; explicit PS over the mono core
+// it is defined on (v2) likewise, widened to stereo; explicit PS over a
+// stereo core is a shape PS does not define, so it keeps the warned LC
+// base-layer path; an implicit (bare LC) config is LC.
 func TestTrackIDAndOutputShape(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		asc     []byte
 		id      string
 		rate    int
+		chans   int
 		perAU   int
 		warning bool
 	}{
-		{"explicit v1", []byte{0x2B, 0x11, 0x88}, "he-aac", 48000, 2048, false},
-		{"fdk 44100 v1", []byte{0x2B, 0x92, 0x08, 0x00}, "he-aac", 44100, 2048, false},
-		{"explicit ps", []byte{0xEB, 0x11, 0x88}, "aac-lc", 24000, 1024, true},
-		{"plain lc", []byte{0x13, 0x10}, "aac-lc", 24000, 1024, false},
+		{"explicit v1", []byte{0x2B, 0x11, 0x88}, "he-aac", 48000, 2, 2048, false},
+		{"fdk 44100 v1", []byte{0x2B, 0x92, 0x08, 0x00}, "he-aac", 44100, 2, 2048, false},
+		// 11101 0110 0001 0011 00010 0: AOT 29, core 24000 mono, ext 48000.
+		{"explicit ps v2", []byte{0xEB, 0x09, 0x88}, "he-aac", 48000, 2, 2048, false},
+		{"explicit ps stereo core", []byte{0xEB, 0x11, 0x88}, "aac-lc", 24000, 2, 1024, true},
+		{"plain lc", []byte{0x13, 0x10}, "aac-lc", 24000, 2, 1024, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, err := ParseASC(tc.asc)
@@ -114,6 +118,9 @@ func TestTrackIDAndOutputShape(t *testing.T) {
 			}
 			if f.Rate != tc.rate {
 				t.Errorf("Format rate = %d, want %d", f.Rate, tc.rate)
+			}
+			if f.Channels != tc.chans {
+				t.Errorf("Format channels = %d, want %d", f.Channels, tc.chans)
 			}
 			if got := cfg.OutputSamplesPerAU(); got != tc.perAU {
 				t.Errorf("OutputSamplesPerAU = %d, want %d", got, tc.perAU)

@@ -5,11 +5,40 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
 )
+
+// TestStrictOpenSurvivesUndecodableFirstFrame pins that the SBR probe
+// never escalates under Strict: framing-clean files whose first payload
+// does not decode kept strict-probing (and remuxing) before implicit
+// detection existed, and must keep doing so. The failure stays visible
+// as a warning.
+func TestStrictOpenSurvivesUndecodableFirstFrame(t *testing.T) {
+	// Valid 24000 mono LC framing; the payload's leading CCE element tag
+	// fails the decode.
+	frame := []byte{0xFF, 0xF1, 0x58, 0x40, 0x01, 0x3F, 0xFC, 0x40, 0x00}
+	raw := append(append([]byte(nil), frame...), frame...)
+	d, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true})
+	if err != nil {
+		t.Fatalf("strict open must survive a payload the probe cannot decode: %v", err)
+	}
+	if got := d.Tracks()[0].Codec; got != codec.AACLC {
+		t.Errorf("codec = %q, want the aac-lc fallback", got)
+	}
+	found := false
+	for _, w := range d.Warnings() {
+		if strings.Contains(w.Msg, "SBR probe failed") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the probe failure must stay visible as a warning, got %v", d.Warnings())
+	}
+}
 
 func fixture(t testing.TB, name string) []byte {
 	t.Helper()

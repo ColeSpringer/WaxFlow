@@ -213,7 +213,7 @@ func TestMuxHEAACImplicit(t *testing.T) {
 	}
 	tr := d.Tracks()[0]
 	if tr.Codec != codec.AACLC {
-		t.Errorf("codec = %q; implicit ADTS reads as the core layer until ADTS SBR detection lands", tr.Codec)
+		t.Errorf("codec = %q; this stub payload does not decode, so the probe falls back to the LC core", tr.Codec)
 	}
 	if tr.Fmt.Rate != 24000 {
 		t.Errorf("rate = %d, want the 24000 core rate in the ADTS header", tr.Fmt.Rate)
