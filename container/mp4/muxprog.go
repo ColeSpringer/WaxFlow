@@ -200,7 +200,7 @@ func (m *ProgressiveMuxer) End(trailer codec.Trailer) error {
 	// iTunes iTunSMPB gapless atom, written with the trailer's exact delay and
 	// length (no placeholder or back-patch, since moov is written last).
 	var smpb []byte
-	if m.track.Codec == codec.AACLC && trailer.Delay > 0 {
+	if (m.track.Codec == codec.AACLC || m.track.Codec == codec.HEAAC) && trailer.Delay > 0 {
 		smpb = freeformAtom("iTunSMPB", smpbPayload(trailer.Delay, max(trailer.Samples, 0)))
 	}
 	udta := udtaBox(m.opts.Tags, m.opts.Chapters, m.opts.Art, smpb)

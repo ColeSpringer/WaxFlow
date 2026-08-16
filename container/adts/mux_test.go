@@ -180,3 +180,54 @@ func TestMuxFFmpegTNSDifferential(t *testing.T) {
 		t.Fatalf("SNR %.1f dB below 15", snr)
 	}
 }
+
+// TestMuxHEAACImplicit pins the HE-AAC form ADTS can carry: the header
+// states the core LC layer at the core rate (explicit SBR signalling needs
+// an ASC, which ADTS does not have), the payload rides through untouched,
+// and reading the stream back identifies the core layer only.
+func TestMuxHEAACImplicit(t *testing.T) {
+	sbrASC := []byte{0x2B, 0x11, 0x88} // AOT 5: 24000 core, 48000 extension, stereo
+	f := audio.Format{Rate: 48000, Channels: 2, Layout: audio.DefaultLayout(2),
+		Type: audio.Float, BitDepth: 32}
+	track := container.Track{Codec: codec.HEAAC, CodecConfig: sbrASC, Fmt: f, Samples: 8192}
+
+	var out bytes.Buffer
+	mux := adts.NewMuxer(&out)
+	if err := mux.Begin([]container.Track{track}); err != nil {
+		t.Fatalf("Begin refused an HE-AAC track: %v", err)
+	}
+	payloads := [][]byte{{0x21, 0x1B, 0x80, 0x00}, {0x21, 0x1B, 0x80, 0x01}}
+	for i, p := range payloads {
+		pkt := codec.Packet{Data: p, PTS: int64(i * 2048), Dur: 2048, Sync: true}
+		if err := mux.WritePacket(container.Packet{Track: 0, Packet: pkt}); err != nil {
+			t.Fatalf("WritePacket: %v", err)
+		}
+	}
+	if err := mux.End(codec.Trailer{Samples: 8192}); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+
+	d, err := adts.NewDemuxer(container.BytesSource(out.Bytes()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := d.Tracks()[0]
+	if tr.Codec != codec.AACLC {
+		t.Errorf("codec = %q; implicit ADTS reads as the core layer until ADTS SBR detection lands", tr.Codec)
+	}
+	if tr.Fmt.Rate != 24000 {
+		t.Errorf("rate = %d, want the 24000 core rate in the ADTS header", tr.Fmt.Rate)
+	}
+	var pkt container.Packet
+	for i := 0; ; i++ {
+		if err := d.ReadPacket(&pkt); err != nil {
+			if i != len(payloads) {
+				t.Errorf("read %d packets, wrote %d", i, len(payloads))
+			}
+			break
+		}
+		if !bytes.Equal(pkt.Data, payloads[i]) {
+			t.Errorf("packet %d payload mismatch", i)
+		}
+	}
+}

@@ -293,3 +293,41 @@ func TestBuildSyncDeduplicates(t *testing.T) {
 		}
 	}
 }
+
+// TestGaplessHEAACHalfUnits pins the iTunSMPB half-unit detector: it fires
+// exactly when the tag's three fields sum to half the raw track duration
+// (a tag written in core 1024-sample units), and never on a tag consistent
+// with the output timeline. A consistent full-unit tag sums to totalRaw
+// itself, so the two cannot collide; a zero-pad tag (this muxer's own
+// progressive output) sums short of totalRaw and stays untouched too.
+func TestGaplessHEAACHalfUnits(t *testing.T) {
+	const totalRaw = 139264 // 68 AUs * 2048 output samples
+	for _, tc := range []struct {
+		name                string
+		delay, pad, total   int64
+		wantDelay, wantSamp int64
+	}{
+		// fdk-style trims written in core units: 2529+953+66150 = 69632,
+		// exactly half of 139264. Delay and length double; padding is
+		// re-derived from the doubled pair.
+		{"half units rescale", 2529, 953, 66150, 5058, 132300},
+		// The same trims in output units sum to totalRaw: untouched.
+		{"full units untouched", 5058, 1906, 132300, 5058, 132300},
+		// A zero pad field with full-unit delay and length (the progressive
+		// muxer's shape): sums short of totalRaw, untouched.
+		{"zero pad untouched", 5058, 0, 132300, 5058, 132300},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &Demuxer{smpbOK: true, smpbDelay: tc.delay, smpbPad: tc.pad, smpbTotal: tc.total}
+			tr := &track{codec: codec.HEAAC, fmt: audio.Format{Rate: 44100}}
+			tr.st.totalDur = totalRaw
+			delay, padding, samples := d.gapless(tr)
+			if delay != tc.wantDelay || samples != tc.wantSamp {
+				t.Errorf("delay/samples = %d/%d, want %d/%d", delay, samples, tc.wantDelay, tc.wantSamp)
+			}
+			if delay+padding+samples != totalRaw {
+				t.Errorf("trims sum to %d, want totalRaw %d", delay+padding+samples, totalRaw)
+			}
+		})
+	}
+}

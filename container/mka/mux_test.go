@@ -187,3 +187,41 @@ func TestMuxWebMRejectsFLAC(t *testing.T) {
 		t.Error("webm + FLAC accepted; want rejection")
 	}
 }
+
+// TestMuxHEAACAudioRates pins the Matroska SBR convention on the Audio
+// element: SamplingFrequency states the core rate, OutputSamplingFrequency
+// the decoded rate (mkvmerge's and ffmpeg's convention), and the round
+// trip keeps the track at the output rate because the CodecPrivate ASC
+// stays authoritative.
+func TestMuxHEAACAudioRates(t *testing.T) {
+	sbrASC := []byte{0x2B, 0x11, 0x88} // AOT 5: 24000 core, 48000 extension, stereo
+	f := audio.Format{Rate: 48000, Channels: 2, Layout: audio.DefaultLayout(2),
+		Type: audio.Float, BitDepth: 32}
+	track := container.Track{Codec: codec.HEAAC, CodecConfig: sbrASC, Fmt: f,
+		Samples: 4096, Default: true}
+	pkts := []codec.Packet{
+		{Data: []byte{1, 2, 3}, PTS: 0, Dur: 2048, Sync: true},
+		{Data: []byte{4, 5, 6}, PTS: 2048, Dur: 2048, Sync: true},
+	}
+	data := muxToSeekable(t, track, nil, pkts, codec.Trailer{Samples: 4096})
+
+	if want := appendFloat(nil, idSamplingFreq, 24000); !bytes.Contains(data, want) {
+		t.Error("Audio element does not state the 24000 core rate as SamplingFrequency")
+	}
+	if want := appendFloat(nil, idOutputFreq, 48000); !bytes.Contains(data, want) {
+		t.Error("Audio element carries no OutputSamplingFrequency for the 48000 decoded rate")
+	}
+
+	d, err := NewDemuxer(container.BytesSource(data), nil)
+	if err != nil {
+		t.Fatalf("NewDemuxer: %v", err)
+	}
+	tr := d.Tracks()[0]
+	if tr.Codec != codec.HEAAC || tr.Fmt.Rate != 48000 {
+		t.Errorf("round trip: codec %q rate %d, want he-aac at 48000", tr.Codec, tr.Fmt.Rate)
+	}
+	got := readAll(t, d)
+	if len(got) != len(pkts) || !bytes.Equal(got[0], pkts[0].Data) || !bytes.Equal(got[1], pkts[1].Data) {
+		t.Errorf("payloads did not survive the round trip")
+	}
+}

@@ -6,6 +6,7 @@ import (
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/waxerr"
@@ -575,10 +576,22 @@ func (m *Muxer) trackEntry(t container.Track, codecID string, priv []byte) []byt
 
 // audioBody builds the Audio element: sampling frequency and channel count for
 // every codec, plus bit depth for PCM (where the Audio element is the only
-// place the sample width is declared).
+// place the sample width is declared). An HE-AAC track follows the Matroska
+// SBR convention (mkvmerge's and ffmpeg's): SamplingFrequency states the core
+// rate and OutputSamplingFrequency the decoded rate, with the ASC in
+// CodecPrivate staying authoritative for readers that parse it.
 func (m *Muxer) audioBody(t container.Track) []byte {
 	var a []byte
-	a = appendFloat(a, idSamplingFreq, float64(t.Fmt.Rate))
+	rate := t.Fmt.Rate
+	if t.Codec == codec.HEAAC {
+		if cfg, err := aac.ParseASC(t.CodecConfig); err == nil && cfg.SampleRate > 0 {
+			rate = cfg.SampleRate
+		}
+	}
+	a = appendFloat(a, idSamplingFreq, float64(rate))
+	if rate != t.Fmt.Rate {
+		a = appendFloat(a, idOutputFreq, float64(t.Fmt.Rate))
+	}
 	a = appendUint(a, idChannels, uint64(t.Fmt.Channels))
 	if t.Codec == codec.PCM {
 		a = appendUint(a, idBitDepth, uint64(pcmContainerBits(t.Fmt)))
@@ -620,7 +633,7 @@ func matroskaCodecID(id codec.ID, f audio.Format) (string, error) {
 		return "A_VORBIS", nil
 	case codec.FLAC:
 		return "A_FLAC", nil
-	case codec.AACLC:
+	case codec.AACLC, codec.HEAAC:
 		return "A_AAC", nil
 	case codec.PCM:
 		if f.Type == audio.Float {
@@ -629,7 +642,7 @@ func matroskaCodecID(id codec.ID, f audio.Format) (string, error) {
 		return "A_PCM/INT/LIT", nil
 	}
 	return "", waxerr.New(waxerr.CodeUnsupportedFormat,
-		"mka: cannot mux codec "+string(id)+" (opus, vorbis, flac, aac-lc, pcm)")
+		"mka: cannot mux codec "+string(id)+" (opus, vorbis, flac, aac-lc, he-aac, pcm)")
 }
 
 // codecPrivate builds the CodecPrivate blob for the codec from the encoder's
@@ -648,7 +661,7 @@ func codecPrivate(id codec.ID, cfg []byte) ([]byte, error) {
 			return nil, waxerr.New(waxerr.CodeUnsupportedFormat, "mka: Vorbis track has no codec config")
 		}
 		return cfg, nil
-	case codec.AACLC:
+	case codec.AACLC, codec.HEAAC:
 		if len(cfg) == 0 {
 			return nil, waxerr.New(waxerr.CodeUnsupportedFormat, "mka: AAC track has no AudioSpecificConfig")
 		}

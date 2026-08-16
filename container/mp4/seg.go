@@ -232,7 +232,7 @@ func sampleEntryFor(t container.Track) ([]byte, error) {
 		return opusSampleEntry(t)
 	case codec.FLAC:
 		return flacSampleEntry(t)
-	case codec.AACLC:
+	case codec.AACLC, codec.HEAAC:
 		return aacSampleEntry(t)
 	case codec.ALAC:
 		cfg, err := alac.ParseMagicCookie(t.CodecConfig)
@@ -250,7 +250,7 @@ func sampleEntryFor(t container.Track) ([]byte, error) {
 		return alacSampleEntry(t.Fmt, cfg.Cookie), nil
 	}
 	return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
-		fmt.Sprintf("mp4: cannot segment codec %q (opus, flac, alac, aac-lc)", t.Codec))
+		fmt.Sprintf("mp4: cannot segment codec %q (opus, flac, alac, aac-lc, he-aac)", t.Codec))
 }
 
 // opusSampleEntry wraps the OpusHead fields in an 'Opus' entry with a

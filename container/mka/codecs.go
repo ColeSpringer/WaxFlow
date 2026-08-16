@@ -155,10 +155,10 @@ func setupAAC(t *trackEntry) (codecSetup, error) {
 		return codecSetup{}, err
 	}
 	return codecSetup{
-		id:             codec.AACLC,
+		id:             aac.TrackID(cfg),
 		config:         t.codecPriv,
 		fmt:            f,
-		aacFrameLength: cfg.FrameLength,
+		aacFrameLength: cfg.OutputSamplesPerAU(),
 		warning:        cfg.SBRWarning(),
 	}, nil
 }
@@ -176,6 +176,8 @@ func (s codecSetup) preRoll() int64 {
 		}
 	case codec.AACLC:
 		return 1024 // one IMDCT frame of overlap history
+	case codec.HEAAC:
+		return aac.HESeekPreroll
 	}
 	return 0
 }
@@ -254,9 +256,9 @@ func (d *Demuxer) frameSamples(data []byte) int64 {
 			return 0
 		}
 		return int64(n)
-	case codec.AACLC:
-		// The ASC's frame length (1024, or 960 with the short-frame flag), so
-		// the count tracks whatever the track declares rather than assuming.
+	case codec.AACLC, codec.HEAAC:
+		// The ASC's per-AU output length: the frame length (1024, or 960
+		// with the short-frame flag), doubled when SBR decode is active.
 		if d.setup.aacFrameLength > 0 {
 			return int64(d.setup.aacFrameLength)
 		}

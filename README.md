@@ -210,7 +210,8 @@ replaced content still dies with `410 source-changed`.
 
 ## Non-goals for v1.0
 
-Video; HE-AAC/SBR/xHE; WMA/APE/WavPack **encoding**; WMA/APE/WavPack
+Video; HE-AAC **encoding**, HE-AAC v2/PS, enhanced SBR, and xHE (HE-AAC
+v1 SBR *decode* ships); WMA/APE/WavPack **encoding**; WMA/APE/WavPack
 decoding; DASH manifests (the CMAF segments are already DASH-compatible);
 DRM/HLS-AES; Opus PLC; CD ripping; any database (WaxBin owns cataloging);
 tag *editing* (WaxLabel owns it; WaxFlow only maps and passes metadata);

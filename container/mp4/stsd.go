@@ -210,7 +210,7 @@ func (d *Demuxer) setMP4A(t *track, children []byte, rate, channels int) error {
 		return err
 	}
 	t.note = cfg.SBRWarning()
-	t.codec = codec.AACLC
+	t.codec = aac.TrackID(cfg)
 	t.codecConfig = append([]byte(nil), asc...)
 	t.fmt = f
 	return nil

@@ -143,7 +143,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 		}
 		entry = alacSampleEntry(t.Fmt, cfg.Cookie)
 		defaultDur = alac.FrameSize
-	case codec.AACLC:
+	case codec.AACLC, codec.HEAAC:
 		if t.Delay < 0 || t.Padding < 0 {
 			return waxerr.New(waxerr.CodeInvalidRequest, "mp4: negative gapless trims")
 		}
@@ -153,7 +153,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 			return err
 		}
 		cfg, _ := aac.ParseASC(t.CodecConfig)
-		defaultDur = cfg.FrameLength
+		defaultDur = cfg.OutputSamplesPerAU()
 		// The edit list carries the encoder priming up front, plus the
 		// exact length when the engine projected one; End refines the
 		// length from the trailer when the writer can seek.
@@ -163,7 +163,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 		m.delay = t.Delay
 		m.knownLen = t.Samples
 	default:
-		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("mp4: cannot mux codec %q (alac, aac-lc)", t.Codec))
+		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("mp4: cannot mux codec %q (alac, aac-lc, he-aac)", t.Codec))
 	}
 
 	m.rate = t.Fmt.Rate
@@ -181,7 +181,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	// the job path. Live streams keep the edit list's delay-only (or
 	// projected-length) signaling.
 	var smpb []byte
-	if t.Codec == codec.AACLC && m.ws != nil && t.Delay > 0 {
+	if (t.Codec == codec.AACLC || t.Codec == codec.HEAAC) && m.ws != nil && t.Delay > 0 {
 		smpb = freeformAtom("iTunSMPB", smpbPayload(t.Delay, max(t.Samples, 0)))
 	}
 	udta := udtaBox(m.opts.Tags, m.opts.Chapters, m.opts.Art, smpb)

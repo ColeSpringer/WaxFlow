@@ -1,11 +1,22 @@
-// Package aac implements an AAC-LC decoder (ISO/IEC 14496-3), written from
-// the specification and Bosi/Goldberg (clean-room: AAC reference decoders
-// were behavioral references only, never opened while implementing).
+// Package aac implements AAC-LC and HE-AAC v1 decoders (ISO/IEC 14496-3),
+// written from the specification and Bosi/Goldberg (clean-room: AAC
+// reference decoders were behavioral references only, never opened while
+// implementing; the QMF and SBR parameter tables are spec data).
 //
-// Scope is Low Complexity only: no SBR, no PS, no gain control, no LTP. An
-// AudioSpecificConfig announcing SBR or PS decodes its AAC-LC base layer at
-// the base sample rate; the high band is not synthesized (documented
-// limitation, not a silent one).
+// An explicitly signalled SBR config (audioObjectType 5 wrapping AAC-LC,
+// extension rate exactly double the core rate) decodes the full HE-AAC v1
+// stream: the core at the base rate plus the spectral-band-replicated high
+// band, 2048 output samples per access unit at the extension rate. Those
+// tracks carry codec.HEAAC (see TrackID). Classic spectral-patching SBR
+// only: enhanced SBR (harmonic transposition, pre-flattening) is a
+// deliberate keep-out, and its extension payloads are skipped by length.
+//
+// Explicit PS (audioObjectType 29) still decodes the AAC-LC base layer at
+// the base rate with a warning, as does downsampled SBR (extension rate
+// equal to the core rate). Implicit PS hiding inside an AOT-5 stream's SBR
+// extension decodes as v1 at the full rate, permanently: that is
+// spec-legal v1-decoder behavior, and it keeps those files from changing
+// shape twice as later stages land. No gain control, no LTP.
 //
 // Channel configurations 1 through 6 decode, remapped from AAC's
 // centre-outward element order to WAVE channel order. Configuration 7, the
@@ -19,21 +30,22 @@
 // deviant order would reroute rather than fail. The encoder stays mono and
 // stereo.
 //
-// That limitation is signalled where it can be. Explicit hierarchical
-// signalling (audioObjectType 5 or 29 in the ASC, which is how an M4A's esds
-// carries HE-AAC) sets Config.SBR, and a demuxer that carries warnings emits
-// one. Implicit signalling, where the ASC says AOT 2 and SBR lives in the
-// bitstream, is how ADTS carries HE-AAC because ADTS has no ASC at all; it
-// cannot be detected without parsing the extension payload, which would be
-// implementing part of the non-goal. So an implicitly signalled source decodes
-// its base layer with no warning. Both paths agree on the rate they report:
-// the rate the base layer actually codes at.
+// The remaining limitations are signalled where they can be. Explicit
+// signalling (a hierarchical AOT-5/29 ASC or the 0x2b7 sync extension, the
+// forms an M4A's esds carries) sets Config.SBR; the configs still decoded
+// base-layer-only (PS, downsampled SBR) carry an SBRWarning for a demuxer
+// to record. Implicit signalling, where the ASC says AOT 2 and SBR lives in
+// the bitstream, is how ADTS carries HE-AAC because ADTS has no ASC at all;
+// it cannot be detected without parsing the extension payload, so an
+// implicitly signalled source decodes its base layer at the core rate with
+// no warning.
 package aac
 
 import (
 	"fmt"
 
 	"github.com/colespringer/waxflow/audio"
+	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -43,7 +55,18 @@ import (
 // the rescaled sample timing, and so the decoded output for those sources.
 const Version = "aac-dec-2"
 
-// Audio object types (ISO/IEC 14496-3 Table 1.17). Only LC is decoded.
+// HEVersion is the cache-key version for codec.HEAAC sources, separate from
+// Version so the SBR decode landing invalidates exactly the HE sources'
+// cached transcodes and no LC ones.
+const HEVersion = "aac-hedec-1"
+
+// HESeekPreroll is the decode restart distance for HE-AAC in output
+// samples: two AUs, covering the IMDCT overlap and the SBR QMF and
+// adjuster histories.
+const HESeekPreroll = 4096
+
+// Audio object types (ISO/IEC 14496-3 Table 1.17). LC is the only core
+// object decoded; SBR and PS wrap it.
 const (
 	aotAACMain = 1
 	aotAACLC   = 2
@@ -76,16 +99,18 @@ type Config struct {
 	ChannelConfig int
 	FrameLength   int // 1024, or 960 with the short-frame flag
 	ASC           []byte
-	// SBR reports that the ASC explicitly signalled SBR (audioObjectType 5)
-	// or PS (29) wrapping the base object type, and PS narrows that to the
-	// latter. The base layer decodes at SampleRate and the high band is not
-	// synthesized, so a demuxer that can carry warnings should emit one.
+	// SBR reports that the ASC explicitly signalled SBR (audioObjectType 5
+	// or the sync extension) or PS (29), and PS narrows that to the latter.
+	// When heDecode holds (v1: no PS, doubled rate, 1024 frames) the high
+	// band is synthesized and the decoder emits ExtensionRate; the other
+	// shapes decode the base layer at SampleRate, and SBRWarning names the
+	// limitation for a demuxer to record.
 	SBR bool
 	PS  bool
-	// ExtensionRate is the doubled output rate an SBR/PS config declares, or
-	// 0 for none. It is what the source would play at with a full HE-AAC
-	// decoder, and is carried only so a warning can name it; it is never the
-	// rate this decoder emits.
+	// ExtensionRate is the output rate an SBR/PS config declares, or 0 for
+	// none. For decoded v1 configs it is the rate this decoder emits; for
+	// the base-layer-only shapes it is what a full HE-AAC decoder would
+	// emit, carried so the warning can name it.
 	ExtensionRate int
 }
 
@@ -135,6 +160,30 @@ func ParseASC(b []byte) (Config, error) {
 	if r.read(1) != 0 { // frameLengthFlag (GASpecificConfig)
 		frameLen = 960
 	}
+	if r.read(1) != 0 { // dependsOnCoreCoder
+		r.read(14) // coreCoderDelay
+	}
+	extFlag := r.read(1)
+	// Backward-compatible explicit signalling (ISO/IEC 14496-3 1.6.6): an
+	// AAC-LC config followed by a sync extension announcing SBR (and, with
+	// the second sync word, PS). This is the other way an esds says HE-AAC,
+	// and the one the conformance streams use; the hierarchical AOT-5 form
+	// was unwrapped above. Config 0 carries a PCE here instead, so the
+	// extension cannot be located and the search is skipped.
+	if !sbr && chanConfig != 0 && extFlag == 0 {
+		if r.left() >= 16 && r.read(11) == 0x2b7 {
+			if r.objectType() == aotSBR && r.read(1) != 0 {
+				er, err := r.samplingRate()
+				if err != nil {
+					return Config{}, err
+				}
+				sbr, extRate = true, er
+				if r.left() >= 12 && r.read(11) == 0x548 && r.read(1) != 0 {
+					ps = true
+				}
+			}
+		}
+	}
 
 	channels := 0
 	if chanConfig >= 1 && chanConfig < len(channelConfigs) {
@@ -180,14 +229,43 @@ func ParseASC(b []byte) (Config, error) {
 	}, nil
 }
 
+// heDecode reports whether the SBR high band is decoded for this config:
+// explicit SBR without PS, extension rate exactly double the core rate (the
+// upsampled form), on the one frame length the decoder takes. Explicit PS
+// and downsampled SBR keep the warned base-layer path for now.
+func (c Config) heDecode() bool {
+	return c.SBR && !c.PS && c.ExtensionRate == 2*c.SampleRate && c.FrameLength == 1024
+}
+
+// TrackID resolves the codec identity a demuxer should stamp on a track
+// with this config: codec.HEAAC when the SBR high band is decoded (the
+// routing key for remux matching, seek prerolls, and cache keys), else
+// codec.AACLC. Centralized so each stage's capability flip is one edit
+// shared by every container.
+func TrackID(cfg Config) codec.ID {
+	if cfg.heDecode() {
+		return codec.HEAAC
+	}
+	return codec.AACLC
+}
+
+// OutputSamplesPerAU is the decoded frame length per access unit: 2048 at
+// the extension rate when SBR decode is active, else the core frame length.
+func (c Config) OutputSamplesPerAU() int {
+	if c.heDecode() {
+		return 2 * c.FrameLength
+	}
+	return c.FrameLength
+}
+
 // SBRWarning returns the note a demuxer should record for an explicitly
-// signalled SBR/PS config, or "" when there is nothing to warn about. The
-// package decodes the base layer only, so the output is band-limited against
-// what a full HE-AAC decoder would produce. A demuxer that carries warnings
-// records this one, which is what makes the limitation visible at runtime
-// rather than only in the package doc.
+// signalled SBR/PS config this decoder still band-limits, or "" when there
+// is nothing to warn about: decoded HE-AAC v1 warns no more. Explicit PS
+// and downsampled SBR still decode the base layer only, so a demuxer that
+// carries warnings records this one, which is what makes the limitation
+// visible at runtime rather than only in the package doc.
 func (c Config) SBRWarning() string {
-	if !c.SBR {
+	if !c.SBR || c.heDecode() {
 		return ""
 	}
 	name := "SBR"
@@ -348,8 +426,14 @@ func (c Config) Format() (audio.Format, error) {
 	default:
 		return audio.Format{}, malformed("channel configuration %d is not supported", c.ChannelConfig)
 	}
+	rate := c.SampleRate
+	if c.heDecode() {
+		// SBR decode emits at the doubled extension rate; the warned
+		// base-layer paths keep reporting the rate they actually decode at.
+		rate = c.ExtensionRate
+	}
 	return audio.Format{
-		Rate:     c.SampleRate,
+		Rate:     rate,
 		Channels: ch,
 		Layout:   layout,
 		Type:     audio.Float,
@@ -362,6 +446,9 @@ type ascReader struct {
 	data []byte
 	pos  int
 }
+
+// left reports the bits remaining in the config.
+func (r *ascReader) left() int { return len(r.data)*8 - r.pos }
 
 func (r *ascReader) read(n uint) uint32 {
 	var v uint32

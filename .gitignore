@@ -6,6 +6,7 @@
 
 # test/profile droppings
 *.test
+*.test.exe
 *.out
 *.prof
 

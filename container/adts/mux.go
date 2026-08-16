@@ -5,18 +5,25 @@ import (
 	"io"
 
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
 var _ container.Muxer = (*Muxer)(nil)
 
-// Muxer writes one AAC-LC track as an ADTS elementary stream: each
-// access unit gets the fixed 7-byte header (no CRC) and nothing else.
-// ADTS has no gapless signaling, so the trailer is accepted and
-// discarded; streams decode from the first sample including encoder
-// priming. This container is the format=aac legacy opt-out; progressive
-// fMP4 is the default for exactly this reason.
+// Muxer writes one AAC track as an ADTS elementary stream: each access
+// unit gets the fixed 7-byte header (no CRC) and nothing else. ADTS has
+// no gapless signaling, so the trailer is accepted and discarded; streams
+// decode from the first sample including encoder priming. This container
+// is the format=aac legacy opt-out; progressive fMP4 is the default for
+// exactly this reason.
+//
+// HE-AAC tracks mux too, as the implicit form: ADTS has no ASC to carry
+// explicit SBR signalling, so the header states the core LC layer at the
+// core rate and the SBR extension rides inside the payload, which is how
+// ADTS has always carried HE-AAC. Reading such a stream back identifies
+// the core layer only (the package doc's samplesPerFrame note).
 type Muxer struct {
 	w            io.Writer
 	rateIdx      int
@@ -40,26 +47,45 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("adts: muxers are single-track, got %d", len(tracks)))
 	}
 	t := tracks[0]
-	if t.Codec != codec.AACLC {
+	if t.Codec != codec.AACLC && t.Codec != codec.HEAAC {
 		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("adts: cannot mux codec %q", t.Codec))
 	}
 	if len(t.CodecConfig) < 2 {
 		return waxerr.New(waxerr.CodeInvalidRequest, "adts: track carries no AudioSpecificConfig")
 	}
-	aot := int(t.CodecConfig[0] >> 3)
-	if aot != 2 {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("adts: audio object type %d is not AAC-LC", aot))
+	// ParseASC rather than fixed bit positions, so the hierarchical AOT-5
+	// and sync-extension HE forms land on the same core fields as plain LC
+	// (its first samplingFrequencyIndex is the core rate in every form).
+	cfg, err := aac.ParseASC(t.CodecConfig)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "adts: track's AudioSpecificConfig", err)
 	}
-	m.rateIdx = int(t.CodecConfig[0]&0x7)<<1 | int(t.CodecConfig[1]>>7)
-	m.channels = int(t.CodecConfig[1]>>3) & 0xF
-	if m.rateIdx >= 13 {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("adts: sampling frequency index %d", m.rateIdx))
+	if cfg.FrameLength != samplesPerFrame {
+		return waxerr.New(waxerr.CodeUnsupportedFormat,
+			fmt.Sprintf("adts: %d-sample frames; ADTS carries only the %d-sample form", cfg.FrameLength, samplesPerFrame))
+	}
+	m.rateIdx = rateIndex(cfg.SampleRate)
+	m.channels = cfg.ChannelConfig
+	if m.rateIdx < 0 {
+		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("adts: no sampling frequency index for %d Hz", cfg.SampleRate))
 	}
 	if m.channels < 1 || m.channels > 7 {
 		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("adts: channel configuration %d", m.channels))
 	}
 	m.began = true
 	return nil
+}
+
+// rateIndex maps a core sample rate to its samplingFrequencyIndex (Table
+// 1.16), or -1. Indexes 13+ are reserved or escape codes ADTS cannot state.
+func rateIndex(rate int) int {
+	for i, r := range [13]int{96000, 88200, 64000, 48000, 44100, 32000,
+		24000, 22050, 16000, 12000, 11025, 8000, 7350} {
+		if r == rate {
+			return i
+		}
+	}
+	return -1
 }
 
 // WritePacket frames one access unit.

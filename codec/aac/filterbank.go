@@ -17,7 +17,12 @@ func (d *Decoder) finishChannel(cd *channelData, outCh int) {
 		planLong.imdct(cd.spec[:1024], z[:])
 		longWindowApply(&z, &cur, info.windowSequence, prevShape, curShape)
 	}
+	// SBR streams stage the core samples for the QMF chain; plain LC
+	// writes the output buffer directly.
 	out := d.buf.ChanF(outCh)[:1024]
+	if d.sbrActive {
+		out = d.stage[outCh]
+	}
 	ov := &d.overlap[outCh]
 	// AAC dequantization yields integer-PCM-scale samples; normalize to the
 	// pipeline's [-1, 1] float convention.

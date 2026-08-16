@@ -422,6 +422,8 @@ func decodeVersion(id codec.ID) string {
 		return mp3.Version
 	case codec.AACLC:
 		return aac.Version
+	case codec.HEAAC:
+		return aac.HEVersion
 	case codec.Opus:
 		return opus.Version
 	case codec.Vorbis:
@@ -732,6 +734,12 @@ type output struct {
 	// hls describes the format's segmented CMAF form; nil means the format
 	// has none and cannot serve HLS.
 	hls *hlsOutput
+	// remuxOnly marks a row that exists so remux can carry its codec while
+	// no encoder produces it: outputRow still resolves it by name, but the
+	// Outputs/OutputFormats enumerations (and so /caps) omit it, keeping
+	// them honest about what the engine can encode. The flag drops when
+	// the encoder lands.
+	remuxOnly bool
 }
 
 // hlsOutput is the writer-side table's segmented-delivery column: what an
@@ -1146,6 +1154,55 @@ var outputs = []output{
 		},
 	},
 	{
+		// he-aac is remux-only until its encoder lands: the row exists so a
+		// copyable HE-AAC source keeps its identity through remux (PlanRemux
+		// redirects a format=aac request here when the track is HE-AAC)
+		// instead of silently degrading to a lossy LC re-encode. exts stays
+		// empty (.m4a resolves to the aac row) and the file it writes is an
+		// ordinary .m4a, the alac precedent.
+		name:        "he-aac",
+		exts:        []string{},
+		writeExt:    "m4a",
+		live:        true,
+		lossy:       true,
+		mediaType:   "audio/mp4",
+		headerBytes: 700,
+		codecID:     codec.HEAAC,
+		remuxOnly:   true,
+		plan: func(audio.Format, TranscodeOptions) (string, int, int, error) {
+			return "", 0, 0, waxerr.New(waxerr.CodeUnsupportedFormat,
+				"waxflow: no HE-AAC encoder yet; he-aac sources remux (format=aac copies them), transcodes encode aac")
+		},
+		encode: func(audio.Format, TranscodeOptions) (codec.Encoder, error) {
+			return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
+				"waxflow: no HE-AAC encoder yet; he-aac sources remux (format=aac copies them), transcodes encode aac")
+		},
+		mux: func(_ container.Track, opts TranscodeOptions, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
+			if isMatroska(opts.Container) {
+				return mkaMuxer(dst, opts), nil
+			}
+			if opts.Container == "adts" {
+				return adts.NewMuxer(dst), nil
+			}
+			if opts.Container == ContainerProgressive {
+				return mp4.NewProgressiveMuxer(dst, mp4MuxerOptions(opts)), nil
+			}
+			return mp4.NewMuxer(dst, mp4MuxerOptions(opts)), nil
+		},
+		container: aacContainerMediaType,
+		// The segmented column carries the correct CODECS string for HE
+		// content, so segmented remux keeps working and the master playlist
+		// stops calling HE content mp4a.40.2. delay and encode belong to the
+		// encoder and land with it.
+		hls: &hlsOutput{
+			codecs: "mp4a.40.5",
+			encode: func(audio.Format, TranscodeOptions, int64) (codec.Encoder, error) {
+				return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
+					"waxflow: no HE-AAC encoder yet; he-aac sources remux (format=aac copies them), transcodes encode aac")
+			},
+		},
+	},
+	{
 		name: "alac",
 		// exts is empty since the aac row claimed m4a: ALAC output is
 		// reachable by naming the format explicitly. It still writes an m4a,
@@ -1492,7 +1549,7 @@ func flacLevel(opts TranscodeOptions) (int, error) {
 // streaming form.
 func DefaultLiveFormat() string {
 	for _, o := range outputs {
-		if o.live {
+		if o.live && !o.remuxOnly {
 			return o.name
 		}
 	}
@@ -1507,22 +1564,30 @@ type OutputInfo struct {
 	Live bool
 }
 
-// Outputs lists the registered output formats, in table order.
+// Outputs lists the registered output formats, in table order. Remux-only
+// rows are omitted: they advertise nothing the engine can encode.
 func Outputs() []OutputInfo {
-	infos := make([]OutputInfo, len(outputs))
-	for i, o := range outputs {
+	infos := make([]OutputInfo, 0, len(outputs))
+	for _, o := range outputs {
+		if o.remuxOnly {
+			continue
+		}
 		// The copy starts from a non-nil empty slice so a format with no
 		// extensions (alac since aac claimed m4a) marshals as [] not null.
-		infos[i] = OutputInfo{Name: o.name, Exts: append([]string{}, o.exts...), Live: o.live}
+		infos = append(infos, OutputInfo{Name: o.name, Exts: append([]string{}, o.exts...), Live: o.live})
 	}
 	return infos
 }
 
-// OutputFormats lists the registered output format names, in table order.
+// OutputFormats lists the registered output format names, in table order,
+// omitting remux-only rows like Outputs does.
 func OutputFormats() []string {
-	names := make([]string, len(outputs))
-	for i, o := range outputs {
-		names[i] = o.name
+	names := make([]string, 0, len(outputs))
+	for _, o := range outputs {
+		if o.remuxOnly {
+			continue
+		}
+		names = append(names, o.name)
 	}
 	return names
 }
@@ -1546,6 +1611,11 @@ func LossyFormat(name string) (lossy, known bool) {
 func OutputFormatForExt(ext string) string {
 	ext = strings.ToLower(strings.TrimPrefix(ext, "."))
 	for _, o := range outputs {
+		if o.remuxOnly {
+			// A remux-only row claims no extensions today; the skip keeps
+			// that true if one ever grows them.
+			continue
+		}
 		for _, e := range o.exts {
 			if e == ext {
 				return o.name

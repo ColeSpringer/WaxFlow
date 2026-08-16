@@ -15,47 +15,50 @@ import (
 // AOT 2 (AAC-LC base). This is how an M4A's esds carries HE-AAC.
 var sbrASC = []byte{0x2B, 0x11, 0x88}
 
-// muxHEAAC writes a minimal fragmented MP4 whose track declares the SBR config
-// above. The packet payloads are not real AAC: nothing here decodes them, and
-// the demuxer reads the sample table and the esds rather than the bitstream.
-func muxHEAAC(t *testing.T) []byte {
+// psASC is the same config wrapped as AOT 29 (PS): only the leading object
+// type differs, plus the canonical trailing GASpecificConfig byte. PS still
+// decodes the base layer only, so this is the config that keeps warning.
+var psASC = []byte{0xEB, 0x11, 0x88, 0x00}
+
+// muxSBRSignalled writes a minimal MP4 whose track declares the given SBR
+// config, at the rate and AU length ParseASC resolves for it (the muxer
+// cross-checks the track format against the ASC). The packet payloads are
+// not real AAC: nothing here decodes them, and the demuxer reads the sample
+// table and the esds rather than the bitstream.
+func muxSBRSignalled(t *testing.T, asc []byte, id codec.ID, rate, dur int) []byte {
 	t.Helper()
-	// The core rate the base layer codes at, which is what ParseASC reports and
-	// what the muxer cross-checks the track format against.
-	f := audio.Format{Rate: 24000, Channels: 2, Layout: audio.DefaultLayout(2),
+	f := audio.Format{Rate: rate, Channels: 2, Layout: audio.DefaultLayout(2),
 		Type: audio.Float, BitDepth: 32}
 	var out bytes.Buffer
 	m := NewMuxer(&out, nil)
 	track := container.Track{
-		Codec: codec.AACLC, CodecConfig: sbrASC, Fmt: f,
-		Samples: 4096, Default: true,
+		Codec: id, CodecConfig: asc, Fmt: f,
+		Samples: int64(4 * dur), Default: true,
 	}
 	if err := m.Begin([]container.Track{track}); err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
 	for i := range 4 {
 		pkt := codec.Packet{Data: bytes.Repeat([]byte{byte(i + 1)}, 64),
-			PTS: int64(i * 1024), Dur: 1024, Sync: true}
+			PTS: int64(i * dur), Dur: int64(dur), Sync: true}
 		if err := m.WritePacket(container.Packet{Track: 0, Packet: pkt}); err != nil {
 			t.Fatalf("WritePacket: %v", err)
 		}
 	}
-	if err := m.End(codec.Trailer{Samples: 4096}); err != nil {
+	if err := m.End(codec.Trailer{Samples: int64(4 * dur)}); err != nil {
 		t.Fatalf("End: %v", err)
 	}
 	return out.Bytes()
 }
 
-// TestStrictAcceptsExplicitHEAAC is a regression test for a real defect: the
-// HE-AAC band-limit note was first routed through warn(), which escalates to a
-// hard error under Strict. That made `probe --strict` reject a perfectly valid
-// HE-AAC file as malformed.
-//
-// Strict exists to turn real-world mess into errors for conformance runs. An
-// HE-AAC file is not mess: it is conformant, and the limitation is ours. So the
-// note must be recorded without escalating.
+// TestStrictAcceptsExplicitHEAAC pins the decode-side identity of an
+// explicitly signalled HE-AAC v1 file: the track is codec.HEAAC at the
+// 48000 extension rate, and no band-limit warning appears in either mode
+// (the high band is synthesized now). The test predates the SBR decoder as
+// a regression test for warn-vs-note escalation under Strict; what it holds
+// today is that a conformant HE-AAC file probes clean.
 func TestStrictAcceptsExplicitHEAAC(t *testing.T) {
-	data := muxHEAAC(t)
+	data := muxSBRSignalled(t, sbrASC, codec.HEAAC, 48000, 2048)
 
 	for _, strict := range []bool{false, true} {
 		name := "tolerant"
@@ -71,24 +74,62 @@ func TestStrictAcceptsExplicitHEAAC(t *testing.T) {
 			if len(tracks) != 1 {
 				t.Fatalf("tracks = %d, want 1", len(tracks))
 			}
-			if got := tracks[0].Fmt.Rate; got != 24000 {
-				t.Errorf("rate = %d, want the 24000 core rate", got)
+			if got := tracks[0].Codec; got != codec.HEAAC {
+				t.Errorf("codec = %q, want %q", got, codec.HEAAC)
 			}
-			// The note must survive in both modes: silently dropping it under
-			// strict would be the opposite failure, since strict callers are
-			// the ones most interested in it.
+			if got := tracks[0].Fmt.Rate; got != 48000 {
+				t.Errorf("rate = %d, want the 48000 extension rate", got)
+			}
+			for _, w := range d.Warnings() {
+				if strings.Contains(w.Msg, "high band") {
+					t.Errorf("HE-AAC v1 decode still warns (strict=%v): %q", strict, w.Msg)
+				}
+			}
+		})
+	}
+}
+
+// TestStrictKeepsPSWarning is the note-vs-warn coverage the v1 decode did
+// not retire: explicit PS (AOT 29) still decodes the base layer only, so
+// its band-limit note must be recorded in both modes, name both rates, and
+// never escalate to an error under Strict. This is the original regression
+// this file was born for (warn() under Strict rejected a conformant file),
+// now pinned on the config that still warns.
+func TestStrictKeepsPSWarning(t *testing.T) {
+	data := muxSBRSignalled(t, psASC, codec.AACLC, 24000, 1024)
+
+	for _, strict := range []bool{false, true} {
+		name := "tolerant"
+		if strict {
+			name = "strict"
+		}
+		t.Run(name, func(t *testing.T) {
+			d, err := NewDemuxer(container.BytesSource(data), &DemuxerOptions{Strict: strict})
+			if err != nil {
+				t.Fatalf("a conformant PS file was rejected (strict=%v): %v", strict, err)
+			}
+			tracks := d.Tracks()
+			if len(tracks) != 1 {
+				t.Fatalf("tracks = %d, want 1", len(tracks))
+			}
+			if got := tracks[0].Codec; got != codec.AACLC {
+				t.Errorf("codec = %q, want %q (PS decodes its base layer)", got, codec.AACLC)
+			}
+			if got := tracks[0].Fmt.Rate; got != 24000 {
+				t.Errorf("rate = %d, want the 24000 base rate", got)
+			}
 			var msgs []string
 			for _, w := range d.Warnings() {
 				msgs = append(msgs, w.Msg)
 			}
 			joined := strings.Join(msgs, " | ")
-			if !strings.Contains(joined, "high band not synthesized") {
+			if !strings.Contains(joined, "high band") {
 				t.Errorf("no band-limit warning recorded (strict=%v); warnings: %q", strict, joined)
 			}
 			// It should name both rates: what the file would play at with a
-			// full HE-AAC decoder, and what we actually decode.
+			// full HE-AAC v2 decoder, and what we actually decode.
 			if !strings.Contains(joined, "48000") || !strings.Contains(joined, "24000") {
-				t.Errorf("warning should name the 48000 extension rate and the 24000 core rate; got %q", joined)
+				t.Errorf("warning should name the 48000 extension rate and the 24000 base rate; got %q", joined)
 			}
 		})
 	}

@@ -80,3 +80,79 @@ func TestParseASCImplicitMatchesExplicit(t *testing.T) {
 		t.Error("implicit ASC must not claim SBR: it is not detectable from the config")
 	}
 }
+
+// TestTrackIDAndOutputShape pins the codec identity and per-AU output
+// length each signaling form resolves to at this stage: explicit v1 is
+// codec.HEAAC at the extension rate with 2048-sample AUs; explicit PS
+// (AOT 29) keeps the whole legacy LC path until stage 2b; an implicit
+// (bare LC) config is LC.
+func TestTrackIDAndOutputShape(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		asc     []byte
+		id      string
+		rate    int
+		perAU   int
+		warning bool
+	}{
+		{"explicit v1", []byte{0x2B, 0x11, 0x88}, "he-aac", 48000, 2048, false},
+		{"fdk 44100 v1", []byte{0x2B, 0x92, 0x08, 0x00}, "he-aac", 44100, 2048, false},
+		{"explicit ps", []byte{0xEB, 0x11, 0x88}, "aac-lc", 24000, 1024, true},
+		{"plain lc", []byte{0x13, 0x10}, "aac-lc", 24000, 1024, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := ParseASC(tc.asc)
+			if err != nil {
+				t.Fatalf("ParseASC: %v", err)
+			}
+			if got := string(TrackID(cfg)); got != tc.id {
+				t.Errorf("TrackID = %q, want %q", got, tc.id)
+			}
+			f, err := cfg.Format()
+			if err != nil {
+				t.Fatalf("Format: %v", err)
+			}
+			if f.Rate != tc.rate {
+				t.Errorf("Format rate = %d, want %d", f.Rate, tc.rate)
+			}
+			if got := cfg.OutputSamplesPerAU(); got != tc.perAU {
+				t.Errorf("OutputSamplesPerAU = %d, want %d", got, tc.perAU)
+			}
+			if got := cfg.SBRWarning() != ""; got != tc.warning {
+				t.Errorf("SBRWarning present = %v, want %v", got, tc.warning)
+			}
+		})
+	}
+}
+
+// TestParseASCSyncExtension pins the backward-compatible signaling form the
+// conformance streams use: a plain LC config followed by the 0x2b7 sync
+// extension carrying AOT 5 and the extension rate. It must resolve to the
+// same identity as the hierarchical form.
+func TestParseASCSyncExtension(t *testing.T) {
+	var w sbrTestBits
+	w.put(2, 5)      // AOT 2 (LC)
+	w.put(6, 4)      // sfIdx 6 = 24000
+	w.put(2, 4)      // chanCfg 2
+	w.put(0, 3)      // GASpecificConfig: frameLen 0, dependsOnCore 0, extFlag 0
+	w.put(0x2b7, 11) // sync extension
+	w.put(5, 5)      // AOT 5 (SBR)
+	w.put(1, 1)      // sbrPresent
+	w.put(3, 4)      // extSfIdx 3 = 48000
+	w.w.align()
+	asc := append([]byte(nil), w.w.buf...)
+
+	cfg, err := ParseASC(asc)
+	if err != nil {
+		t.Fatalf("ParseASC(sync-ext): %v", err)
+	}
+	if !cfg.SBR || cfg.PS {
+		t.Errorf("SBR/PS = %v/%v, want true/false", cfg.SBR, cfg.PS)
+	}
+	if cfg.SampleRate != 24000 || cfg.ExtensionRate != 48000 {
+		t.Errorf("rates = %d/%d, want 24000/48000", cfg.SampleRate, cfg.ExtensionRate)
+	}
+	if got := string(TrackID(cfg)); got != "he-aac" {
+		t.Errorf("TrackID = %q, want he-aac", got)
+	}
+}

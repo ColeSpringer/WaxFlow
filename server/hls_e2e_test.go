@@ -540,3 +540,48 @@ func TestSingleSegmentTargetDuration(t *testing.T) {
 		})
 	}
 }
+
+// TestHLSMasterAdvertisesHECopy pins the master playlist against the rung
+// the media path serves: a remux-eligible HE-AAC source under format=aac
+// resolves to the he-aac row (mp4a.40.5), and the master must say so.
+// Before the master planned with the remux source, it advertised the
+// transcode rung's mp4a.40.2 while the segments carried AOT-5 packets.
+func TestHLSMasterAdvertisesHECopy(t *testing.T) {
+	env := newTestEnv(t, nil)
+	fixture, err := os.ReadFile(filepath.Join("..", "codec", "aac", "testdata", "fdk_he_v1.m4a"))
+	if err != nil {
+		t.Fatalf("reading the committed HE-AAC fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(env.root, "he.m4a"), fixture, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	masterURL := mintHLS(t, env, map[string]string{"src": "lib/he.m4a", "format": "aac"})
+	resp := keyless(t, env, masterURL)
+	master := readBody(t, resp)
+	if resp.StatusCode != 200 {
+		t.Fatalf("master = %d: %s", resp.StatusCode, master)
+	}
+	if !bytes.Contains(master, []byte(`CODECS="mp4a.40.5"`)) {
+		t.Fatalf("master does not advertise the HE-AAC copy as mp4a.40.5: %s", master)
+	}
+	if bytes.Contains(master, []byte(`mp4a.40.2`)) {
+		t.Fatalf("master still advertises an LC re-encode for an HE copy: %s", master)
+	}
+
+	// The media playlist behind it serves the same variant.
+	var mediaRef string
+	for _, l := range playlistLines(master) {
+		if !strings.HasPrefix(l, "#") {
+			mediaRef = l
+			break
+		}
+	}
+	if mediaRef == "" {
+		t.Fatalf("master lists no variant: %s", master)
+	}
+	resp = keyless(t, env, "/hls/"+mediaRef)
+	if media := readBody(t, resp); resp.StatusCode != 200 {
+		t.Fatalf("media playlist behind the HE master = %d: %s", resp.StatusCode, media)
+	}
+}

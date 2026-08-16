@@ -606,7 +606,7 @@ is:
     {
       "schemaVersion": 1,
       "inputs": ["flac", "wav", "aiff", "ogg", "mp4", "mka", "adts", "mp3"],
-      "decoders": ["pcm", "flac", "mp3", "alac", "aac-lc", "vorbis", "opus"],
+      "decoders": ["pcm", "flac", "mp3", "alac", "aac-lc", "he-aac", "vorbis", "opus"],
       "outputs": [{"name": "wav", "live": true, "exts": ["wav", "wave", "rf64", "bw64"]},
                    {"name": "opus", "live": true, "exts": ["opus"]},
                    {"name": "vorbis", "live": true, "exts": ["ogg", "oga"]},

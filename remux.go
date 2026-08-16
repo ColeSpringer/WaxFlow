@@ -64,6 +64,24 @@ type RemuxPlan struct {
 	Track container.Track
 }
 
+// remuxRow resolves the output row a remux of track under the named format
+// runs as. It is outputRow plus one family redirect: format=aac on an HE-AAC
+// source resolves to the he-aac row, so every aac copy path keeps copying HE
+// sources under their own identity instead of silently declining into a
+// lossy LC re-encode. The rows share the container set by design; a request
+// with shaping options still falls through to a transcode, which for
+// format=aac encodes LC, as it should.
+func remuxRow(track container.Track, format string) (*output, error) {
+	row, err := outputRow(format)
+	if err != nil {
+		return nil, err
+	}
+	if row.codecID == codec.AACLC && track.Codec == codec.HEAAC {
+		return outputRow("he-aac")
+	}
+	return row, nil
+}
+
 // PlanRemux reports whether opts can be served by rewriting track's container
 // around its existing packets, and how. It is the ladder's middle rung, between
 // serving the original bytes and a full re-encode: the codec must survive
@@ -81,7 +99,7 @@ type RemuxPlan struct {
 // row's hls column, so Opus-in-WebM to Opus-in-fMP4 is just this rung with
 // format=opus on the segmented path. Remux connects outputs that already exist.
 func (e *Engine) PlanRemux(track container.Track, opts TranscodeOptions) (*RemuxPlan, error) {
-	row, err := outputRow(opts.Format)
+	row, err := remuxRow(track, opts.Format)
 	if err != nil {
 		return nil, err
 	}
@@ -407,7 +425,7 @@ type RemuxSegmentPlan struct {
 // since there is then no grid to snap to. That is the real decline, and it is
 // the one PacketGrid reports.
 func (e *Engine) PlanRemuxSegments(track container.Track, opts TranscodeOptions, segSeconds float64, grid int) (*RemuxSegmentPlan, error) {
-	row, err := outputRow(opts.Format)
+	row, err := remuxRow(track, opts.Format)
 	if err != nil {
 		return nil, err
 	}
@@ -707,7 +725,7 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 			fmt.Sprintf("waxflow: a %s source cannot be remuxed to %s with these options; transcode it",
 				track.Codec, opts.Format))
 	}
-	row, err := outputRow(opts.Format)
+	row, err := remuxRow(track, opts.Format)
 	if err != nil {
 		return nil, err
 	}

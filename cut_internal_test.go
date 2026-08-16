@@ -548,7 +548,7 @@ func TestCutTrackSamplesExact(t *testing.T) {
 // names what actually breaks, because the reasons are not interchangeable and
 // one of them was wrong in an earlier draft of this work.
 func TestCutCodecsIsAnAllowlist(t *testing.T) {
-	for _, tc := range []struct {
+	rows := []struct {
 		id   codec.ID
 		in   bool
 		why  string
@@ -556,6 +556,10 @@ func TestCutCodecsIsAnAllowlist(t *testing.T) {
 	}{
 		{codec.Opus, true, "position-independent packets, and the pre-skip is rewritable", 960},
 		{codec.AACLC, true, "position-independent frames; priming rides the container's edit list", 1024},
+		{codec.HEAAC, true, "the same frame independence as AAC-LC, but head-bound: only spans " +
+			"keeping AU zero are served, because the SBR header rides the leading fills and a " +
+			"mid-stream slice would decode with a muted high band " +
+			"(TestCutOfHEAACMatchesFullDecode measures the served case)", 2048},
 		{codec.MP3, false, "the bit reservoir: a frame's main data may begin inside earlier frames, " +
 			"and an unsatisfied reference decodes to silence rather than erroring", 1152},
 		{codec.FLAC, false, "a multi-span cut leaves a gap in the frame ordinals, and the boundary " +
@@ -574,7 +578,8 @@ func TestCutCodecsIsAnAllowlist(t *testing.T) {
 			"anyway, because a rule holding by accident of another rule is one waiting to break", 1024},
 		{codec.PCM, false, "already out at codecSurvives: its packet is raw samples whose wire " +
 			"layout is the container's choice", 1},
-	} {
+	}
+	for _, tc := range rows {
 		t.Run(string(tc.id), func(t *testing.T) {
 			_, ok := cutCodecs[tc.id]
 			if ok != tc.in {
@@ -592,6 +597,18 @@ func TestCutCodecsIsAnAllowlist(t *testing.T) {
 				t.Errorf("code = %v, want a decline: rung 3 serves %v correctly", got, tc.id)
 			}
 		})
+	}
+
+	// The reverse direction: every cutCodecs entry must have a row above, so
+	// the next codec cannot land in the map and ride through unpinned.
+	listed := map[codec.ID]bool{}
+	for _, tc := range rows {
+		listed[tc.id] = true
+	}
+	for id := range cutCodecs {
+		if !listed[id] {
+			t.Errorf("cutCodecs[%v] has no allowlist row in this test; add one naming why it is in", id)
+		}
 	}
 }
 

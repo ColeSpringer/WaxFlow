@@ -9,6 +9,7 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
+	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
 )
 
@@ -20,8 +21,19 @@ func (d *Demuxer) gapless(t *track) (delay, padding, samples int64) {
 	totalRaw := t.st.totalDur
 
 	if d.smpbOK {
-		delay = clamp(d.smpbDelay, 0, totalRaw)
+		delay = d.smpbDelay
 		samples = d.smpbTotal
+		// Some encoders write HE-AAC gapless fields in core (1024) units,
+		// half the output timeline. When the three fields add up to exactly
+		// half the raw track duration, they are half-units: rescale.
+		if t.codec == codec.HEAAC {
+			if sum := delay + d.smpbPad + samples; sum > 0 && sum*2 == totalRaw {
+				delay *= 2
+				samples *= 2
+				d.note(0, "mp4: iTunSMPB in core half-units; rescaled to the output rate")
+			}
+		}
+		delay = clamp(delay, 0, totalRaw)
 		if samples < 0 || samples > totalRaw-delay {
 			samples = totalRaw - delay
 		}
@@ -339,9 +351,10 @@ func (d *Demuxer) parseSMPB(s string) {
 	if e1 != nil || e2 != nil || e3 != nil || delay < 0 || padding < 0 || total < 0 {
 		return
 	}
-	// padding is validated above but not retained: gapless derives it from
-	// totalRaw, delay, and the true sample count.
-	d.smpbDelay, d.smpbTotal, d.smpbOK = delay, total, true
+	// padding is retained only for the HE-AAC half-unit sanity check;
+	// gapless still derives the effective padding from totalRaw, delay,
+	// and the true sample count.
+	d.smpbDelay, d.smpbPad, d.smpbTotal, d.smpbOK = delay, padding, total, true
 }
 
 // parseChpl reads a Nero chapter list. Times are 100-nanosecond units.

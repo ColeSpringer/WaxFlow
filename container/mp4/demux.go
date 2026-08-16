@@ -49,6 +49,7 @@ type Demuxer struct {
 
 	// iTunes iTunSMPB gapless fields, in samples; valid only when smpbOK.
 	smpbDelay int64
+	smpbPad   int64
 	smpbTotal int64
 	smpbOK    bool
 
@@ -241,6 +242,9 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 	if audio.codec == codec.AACLC {
 		d.seekPreroll = 1 // one frame of IMDCT overlap history
 	}
+	if audio.codec == codec.HEAAC {
+		d.seekPreroll = 2 // IMDCT overlap plus the SBR QMF/adjuster history
+	}
 
 	var delay, padding, samples int64
 	var exact bool
@@ -272,7 +276,7 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 // fragmented path, and their decoders are registered).
 func decodableAudio(id codec.ID) bool {
 	switch id {
-	case codec.ALAC, codec.AACLC, codec.Opus, codec.FLAC:
+	case codec.ALAC, codec.AACLC, codec.HEAAC, codec.Opus, codec.FLAC:
 		return true
 	}
 	return false

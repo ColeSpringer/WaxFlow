@@ -19,6 +19,7 @@ const (
 	ALAC   ID = "alac"
 	MP3    ID = "mp3"
 	AACLC  ID = "aac-lc"
+	HEAAC  ID = "he-aac"
 	Opus   ID = "opus"
 	Vorbis ID = "vorbis"
 )

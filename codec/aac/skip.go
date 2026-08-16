@@ -14,12 +14,19 @@ func skipDSE(r *bitReader) {
 	r.skip(count * 8)
 }
 
-// skipFIL skips a fill_element and its extension payload (4.4.2.9).
-func skipFIL(r *bitReader) {
+// filCount reads a fill_element's escaped length nibble (4.4.2.9),
+// shared by the skip below and the SBR loop's payload routing.
+func filCount(r *bitReader) int {
 	count := int(r.read(4))
 	if count == 15 {
 		count += int(r.read(8)) - 1
 	}
+	return count
+}
+
+// skipFIL skips a fill_element and its extension payload (4.4.2.9).
+func skipFIL(r *bitReader) {
+	count := filCount(r)
 	r.skip(count * 8)
 }
 

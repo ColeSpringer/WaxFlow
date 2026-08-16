@@ -54,11 +54,14 @@ advice.
   have shipped LC codecs since. ffmpeg has shipped a native AAC-LC
   encoder in default builds for years.
 - The actively licensed parts of the Via/Fraunhofer AAC pool concern
-  the later extensions: SBR/HE-AAC, PS, ELD, xHE/USAC. All are
-  explicitly out of WaxFlow's scope (the decoder rejects or decodes
-  only the LC base layer; the encoder produces LC only).
-- Action if scope ever grows toward SBR/PS/xHE: redo this review
-  first; those toolsets remain licensed.
+  the later extensions: SBR/HE-AAC, PS, ELD, xHE/USAC. The encoder
+  produces LC only, and PS, enhanced SBR, and xHE remain out of scope,
+  but the HE-AAC v1 SBR **decoder** (2026-08) postdates this review and
+  is not covered by its LC-only reasoning.
+- Action, OPEN as of 2026-08-16: the SBR decode landing triggers the
+  redo-this-review rule this section set for itself; do that review
+  before a release ships the SBR decoder. PS/xHE would trigger it
+  again.
 
 ## Listening-test protocol
 

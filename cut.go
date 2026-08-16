@@ -140,8 +140,10 @@ var cutCodecs = map[codec.ID]cutCodec{
 	},
 	// AAC-LC's priming is one frame of MDCT history (aac.EncoderDelay), and it
 	// lives in the container's edit list rather than in the ASC, so there is
-	// nothing to reprime.
+	// nothing to reprime. HE-AAC adds the SBR chain's history on top, and its
+	// priming likewise lives in the container.
 	codec.AACLC: {preroll: aac.EncoderDelay},
+	codec.HEAAC: {preroll: aac.HESeekPreroll},
 }
 
 // Cuttable reports whether track's codec is one whose packets survive being
@@ -169,7 +171,10 @@ func Cuttable(track container.Track) bool {
 func CutFormats() []string {
 	var names []string
 	for _, o := range outputs {
-		if _, ok := cutCodecs[o.codecID]; ok && o.live && o.hls != nil {
+		// A remux-only row is not advertised (Outputs() precedent); its
+		// sources reach the cut through the family redirect on the row a
+		// client can name (format=aac cuts an HE-AAC source).
+		if _, ok := cutCodecs[o.codecID]; ok && o.live && o.hls != nil && !o.remuxOnly {
 			names = append(names, o.name)
 		}
 	}
@@ -366,6 +371,17 @@ func computeCut(track container.Track, spans []Span, grid int) (*cutResult, erro
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
 			"waxflow: %s packets do not survive being moved within the stream, so this source cannot be cut without re-encoding",
 			track.Codec))
+	}
+	// An HE-AAC cut must keep the stream head: the SBR header rides in the
+	// payload fills at the encoder's cadence, and file-oriented encoders
+	// write exactly one, at the first AU. A slice that drops it hands a
+	// fresh decoder no header, and the high band conceals to a muted
+	// upsample for the rest of the file with no error anywhere. Keeping AU
+	// zero makes a cut never decode worse than its source; rung 3 serves a
+	// mid-stream slice with the header it read on the way.
+	if track.Codec == codec.HEAAC && spans[0].From > 0 {
+		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
+			"waxflow: an HE-AAC cut must start at sample 0 (the SBR header lives in the leading access units; a mid-stream slice would play with a muted high band)")
 	}
 	if grid <= 0 {
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
@@ -775,10 +791,11 @@ func cutTrimsExpressible(containerName string, delay, padding int64) bool {
 		// The flat muxer writes its edit list at End, when it knows everything,
 		// so it can express either trim.
 		return true
-	case "aac":
-		// The fragmented muxer, whose edit list is written at Begin from the
-		// track's delay. With no delay to write one from, a padding arriving at
-		// End has nowhere to go and the muxer says so.
+	case "aac", "he-aac":
+		// The fragmented muxer (both rows' default), whose edit list is
+		// written at Begin from the track's delay. With no delay to write one
+		// from, a padding arriving at End has nowhere to go and the muxer
+		// says so.
 		return delay > 0
 	}
 	return false

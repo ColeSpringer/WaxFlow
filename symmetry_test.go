@@ -30,18 +30,28 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	// symmetryGaps is the allowlist: the asymmetries that are known-open and
 	// deliberately deferred. Each entry is deleted by the change that lands its
 	// capability, so the list is the burn-down checklist and is empty once
-	// every codec encodes+decodes and every container demuxes+muxes. Every gap
-	// has since closed, so the list is now empty: the guard is a pure ratchet
-	// that fails the moment a new codec or container ships half-symmetric.
-	symmetryGaps := map[string]string{}
+	// every codec encodes+decodes and every container demuxes+muxes.
+	symmetryGaps := map[string]string{
+		"he-aac-encode": "the HE-AAC encoder lands at stage 3a and drops the row's remuxOnly flag",
+	}
 
 	decodes := map[codec.ID]bool{}
 	for _, id := range format.Decoders() {
 		decodes[id] = true
 	}
+	// A remux-only row carries no encoder: its codec counts as decode-only
+	// until the flag drops.
 	encodes := map[codec.ID]bool{}
 	for _, o := range outputs {
-		encodes[o.codecID] = true
+		if !o.remuxOnly {
+			encodes[o.codecID] = true
+		}
+	}
+
+	// codecGaps names, per codec, the allowlist entry that excuses its
+	// decoder-without-encoder imbalance in the codec-level loop below.
+	codecGaps := map[codec.ID]string{
+		codec.HEAAC: "he-aac-encode",
 	}
 
 	// open reports, for each named gap, whether it is still open, computed from
@@ -49,6 +59,7 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	open := map[string]bool{
 		// A codec with a decoder but no encoder-bearing outputs row.
 		"vorbis-encode": decodes[codec.Vorbis] && !encodes[codec.Vorbis],
+		"he-aac-encode": decodes[codec.HEAAC] && !encodes[codec.HEAAC],
 		// The mka package demuxes but has no muxer wired into any output row's
 		// container override (opus/aac/flac/pcm reach it once the mka muxer lands).
 		"mka-mux": !containerWritable("mka") && !containerWritable("webm"),
@@ -88,6 +99,14 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	// nobody thought to add a named predicate for it.
 	for id := range decodes {
 		if !encodes[id] {
+			// The excuse must be listed and its predicate live: keying on
+			// the name alone would let one open entry excuse any codec
+			// someone later maps to it.
+			if gap, ok := codecGaps[id]; ok {
+				if _, listed := symmetryGaps[gap]; listed && open[gap] {
+					continue
+				}
+			}
 			t.Errorf("codec %q decodes but has no encoder (add an outputs row or an allowlist entry)", id)
 		}
 	}
@@ -174,6 +193,7 @@ var rowDefaultContainer = map[string]string{
 // records the burn-down here.
 var mp4DemuxCodecs = map[codec.ID]bool{
 	codec.AACLC: true,
+	codec.HEAAC: true,
 	codec.ALAC:  true,
 	// The demuxer learned the fragmented form (moof/traf/trun) and
 	// the dOps/dfLa sample entries the segmenter writes, so it reads back the

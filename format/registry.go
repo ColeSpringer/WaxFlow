@@ -180,13 +180,10 @@ var decoders = []struct {
 		}
 		return alac.NewDecoder(cfg, t.Fmt)
 	}},
-	{codec.AACLC, func(t container.Track) (codec.Decoder, error) {
-		cfg, err := aac.ParseASC(t.CodecConfig)
-		if err != nil {
-			return nil, err
-		}
-		return aac.NewDecoder(cfg, t.Fmt)
-	}},
+	// Both AAC identities share one constructor: the ASC alone decides
+	// whether the SBR stage runs.
+	{codec.AACLC, newAACDecoder},
+	{codec.HEAAC, newAACDecoder},
 	{codec.Vorbis, func(t container.Track) (codec.Decoder, error) {
 		cfg, err := vorbis.ParseConfig(t.CodecConfig)
 		if err != nil {
@@ -222,4 +219,14 @@ func newDecoder(t container.Track) (codec.Decoder, error) {
 	}
 	return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 		fmt.Sprintf("format: no decoder registered for codec %q", t.Codec))
+}
+
+// newAACDecoder builds the decoder both AAC identities share: the parsed
+// ASC alone decides whether the SBR stage runs.
+func newAACDecoder(t container.Track) (codec.Decoder, error) {
+	cfg, err := aac.ParseASC(t.CodecConfig)
+	if err != nil {
+		return nil, err
+	}
+	return aac.NewDecoder(cfg, t.Fmt)
 }

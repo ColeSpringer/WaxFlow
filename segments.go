@@ -407,11 +407,12 @@ func totalDecodeSamples(samples, delay, frame int64) int64 {
 }
 
 // SegmentedFormats lists the output formats with a segmented (HLS) form,
-// in table order.
+// in table order. Remux-only rows are omitted (their hls column serves the
+// segmented remux of their sources, not a requestable transcode).
 func SegmentedFormats() []string {
 	var names []string
 	for _, o := range outputs {
-		if o.hls != nil {
+		if o.hls != nil && !o.remuxOnly {
 			names = append(names, o.name)
 		}
 	}

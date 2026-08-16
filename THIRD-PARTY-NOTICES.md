@@ -63,8 +63,17 @@ Entries follow this format:
 > 14496-3), extracted as a data-only table from *FFmpeg*'s `aactab.c`
 > (LGPL) in a separate analysis pass per the ADR-0001 provision that
 > permits parameter tables. No decoder logic was taken. Perceptual noise
-> substitution is filled with local noise (non-reproducible by design);
-> SBR/PS are out of scope.
+> substitution is filled with local noise (non-reproducible by design).
+> The HE-AAC v1 SBR decode stage (`codec/aac/sbr_*.go`) is likewise
+> original code written against ISO 14496-3 4.6.18; its parameter tables
+> in `sbr_tables.go` (the SBR envelope/noise Huffman pair tables, the
+> 640-tap QMF prototype window, the noise phasor table, the limiter and
+> smoothing constants) are normative spec data (Tables 4.A.85-4.A.90 and
+> 4.6.18's constants), recorded in the same black-box parameter pass with
+> the faad2 (GPL-2) and FFmpeg (LGPL) restatements of those tables as
+> cross-checks. No decoder logic was taken from either; SBR behavior was
+> verified against ffmpeg's decoder output only. PS and enhanced SBR
+> remain out of scope.
 
 > **codec/aac encoder**: original code written against ISO/IEC 14496-3
 > (the informative encoder annex for the two-loop quantizer structure)

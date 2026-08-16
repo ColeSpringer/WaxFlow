@@ -98,6 +98,7 @@ const (
 	idSeekPreRoll  = 0x56BB
 	idAudio        = 0xE1
 	idSamplingFreq = 0xB5
+	idOutputFreq   = 0x78B5
 	idChannels     = 0x9F
 	idBitDepth     = 0x6264
 

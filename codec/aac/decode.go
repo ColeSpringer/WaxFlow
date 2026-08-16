@@ -54,10 +54,11 @@ type channelData struct {
 	pnsSeed    uint32
 }
 
-// Decoder decodes AAC-LC access units into planar float buffers. Each
-// packet is one 1024-sample frame; the IMDCT's overlap makes frame N depend
-// on frame N-1, so Reset clears the overlap after a seek and the container
-// pre-rolls one frame.
+// Decoder decodes AAC-LC and HE-AAC v1 access units into planar float
+// buffers. Each packet is one frame: 1024 samples, or 2048 at the doubled
+// rate when SBR decode is active. The IMDCT's overlap (and the SBR QMF
+// state) makes frame N depend on frame N-1, so Reset clears that state
+// after a seek and the container pre-rolls.
 type Decoder struct {
 	cfg      Config
 	fmt      audio.Format
@@ -77,6 +78,15 @@ type Decoder struct {
 	overlap  [audio.MaxChannels][1024]float64
 	prevWin  [audio.MaxChannels]int // previous window_shape per output channel
 	pnsState uint32                 // perceptual-noise PRNG state
+
+	// SBR state, nil/unused for plain LC. Core samples land in stage
+	// (per output channel) instead of the output buffer; each SCE/CPE
+	// gets a persistent sbrElement, keyed by its position in the frame's
+	// element sequence, that upsamples staging into the output buffer.
+	sbrActive bool
+	outLen    int
+	stage     [audio.MaxChannels][]float32
+	sbrEls    []*sbrElement
 }
 
 // NewDecoder returns a Decoder for a stream. The track format must be what
@@ -107,7 +117,28 @@ func NewDecoder(cfg Config, f audio.Format) (*Decoder, error) {
 	}
 	d := &Decoder{cfg: cfg, fmt: f, rateIdx: rateIdx,
 		frameLen: int(cfg.FrameLength), slots: slots, elems: elems, pnsState: 0x1f2e3d4c}
+	d.sbrActive = cfg.heDecode()
+	d.outLen = cfg.OutputSamplesPerAU()
+	if d.sbrActive {
+		for c := 0; c < f.Channels; c++ {
+			d.stage[c] = make([]float32, d.frameLen)
+		}
+	}
 	return d, nil
+}
+
+// sbrElem returns the persistent SBR element at a position in the frame's
+// element sequence, rebuilding it if the stream changes its element shape.
+func (d *Decoder) sbrElem(idx, chans int) *sbrElement {
+	for len(d.sbrEls) <= idx {
+		d.sbrEls = append(d.sbrEls, nil)
+	}
+	if el := d.sbrEls[idx]; el != nil && el.chans == chans {
+		return el
+	}
+	el := newSBRElement(chans, d.cfg.ExtensionRate)
+	d.sbrEls[idx] = el
+	return el
 }
 
 // checkElement rejects an element that is not the one Table 1.19 puts at
@@ -133,18 +164,25 @@ func (d *Decoder) checkElement(pos int, tag uint32) error {
 		d.cfg.ChannelConfig, elementName(d.elems[pos]), pos, elementName(int(tag)))
 }
 
-// Decode decodes one access unit and emits one 1024-frame buffer.
+// Decode decodes one access unit and emits one frame buffer: 1024 samples,
+// or 2048 at the extension rate when SBR decode is active.
 func (d *Decoder) Decode(pkt []byte, emit func(*audio.Buffer) error) error {
-	if d.buf == nil || d.buf.Cap() < d.frameLen || d.buf.Fmt != d.fmt {
+	if d.buf == nil || d.buf.Cap() < d.outLen || d.buf.Fmt != d.fmt {
 		audio.Put(d.buf)
-		d.buf = audio.Get(d.fmt, d.frameLen)
+		d.buf = audio.Get(d.fmt, d.outLen)
 	}
-	d.buf.N = d.frameLen
+	d.buf.N = d.outLen
 	for c := 0; c < len(d.slots); c++ {
-		clear(d.buf.ChanF(c)[:d.frameLen])
+		clear(d.buf.ChanF(c)[:d.outLen])
 	}
 
 	r := newBitReader(pkt)
+	if d.sbrActive {
+		if err := d.decodeSBRFrame(r); err != nil {
+			return err
+		}
+		return emit(d.buf)
+	}
 	// elem walks the frame's channel sequence; d.slots turns that position
 	// into the output channel, which past stereo is not the same number.
 	elem := 0
@@ -259,15 +297,141 @@ func (d *Decoder) decodePair(r *bitReader, leftCh, rightCh int) error {
 	return nil
 }
 
-// Drain is a no-op: each access unit emits its full 1024-sample frame, and
-// the trailing filterbank overlap belongs to no further frame.
+// decodeSBRFrame is the SBR-configured element loop. Unlike the LC loop it
+// runs past the filled channel slots, consuming fill, data, and end
+// elements, because the SBR payload rides in a fill element after the
+// channel element it extends. Core samples land in staging; each element's
+// SBR machine then writes the doubled-rate output, with a zero high band
+// when its fill is missing or damaged (concealment keeps the AU shape).
+func (d *Decoder) decodeSBRFrame(r *bitReader) error {
+	elem, elIdx := 0, 0
+	var pend *sbrElement
+	var pendFill bool
+	var pendIn, pendOut [2][]float32
+	flush := func() {
+		if pend == nil {
+			return
+		}
+		pend.process(pendIn[:pend.chans], pendOut[:pend.chans])
+		pend = nil
+	}
+	for {
+		if r.left() < 3 {
+			break
+		}
+		tag := r.read(3)
+		// Once every channel slot is filled the LC loop stops reading, so
+		// its acceptance envelope includes AUs with trailing junk. This loop
+		// must keep reading (the last element's SBR payload is still ahead),
+		// so it matches that envelope the other way: junk past the last slot
+		// ends the frame rather than failing an AU LC would have emitted.
+		full := elem >= len(d.slots)
+		switch tag {
+		case elSCE, elLFE:
+			flush()
+			if full {
+				return nil
+			}
+			r.read(4) // element_instance_tag
+			if err := d.checkElement(elem, tag); err != nil {
+				return err
+			}
+			cd := &d.ch[0]
+			if err := d.decodeChannelData(r, cd, false); err != nil {
+				return err
+			}
+			d.dequant(cd)
+			d.applyPNS(cd)
+			outCh := d.slots[elem]
+			d.finishChannel(cd, outCh)
+			el := d.sbrElem(elIdx, 1)
+			el.beginFrame()
+			pend = el
+			// The LFE cannot carry SBR data, so its element permanently
+			// conceals (a pure QMF upsample) and a fill after it is not its
+			// payload: routing one in would activate a high band the spec
+			// says the LFE does not have.
+			pendFill = tag == elSCE
+			pendIn[0] = d.stage[outCh]
+			pendOut[0] = d.buf.ChanF(outCh)[:d.outLen]
+			elem++
+			elIdx++
+		case elCPE:
+			flush()
+			if full {
+				return nil
+			}
+			r.read(4) // element_instance_tag
+			if elem+2 > len(d.slots) {
+				return malformed("channel pair exceeds configured channels")
+			}
+			if err := d.checkElement(elem, tag); err != nil {
+				return err
+			}
+			leftCh, rightCh := d.slots[elem], d.slots[elem+1]
+			if err := d.decodePair(r, leftCh, rightCh); err != nil {
+				return err
+			}
+			el := d.sbrElem(elIdx, 2)
+			el.beginFrame()
+			pend = el
+			pendFill = true
+			pendIn[0], pendIn[1] = d.stage[leftCh], d.stage[rightCh]
+			pendOut[0] = d.buf.ChanF(leftCh)[:d.outLen]
+			pendOut[1] = d.buf.ChanF(rightCh)[:d.outLen]
+			elem += 2
+			elIdx++
+		case elDSE:
+			skipDSE(r)
+		case elPCE:
+			skipPCE(r)
+		case elFIL:
+			count := filCount(r)
+			if pend != nil && pendFill {
+				pend.parseFill(r, count)
+			} else {
+				r.skip(count * 8)
+			}
+		case elEND:
+			r.byteAlign()
+			flush()
+			return nil
+		default: // CCE
+			if full {
+				flush()
+				return nil
+			}
+			return malformed("unsupported element type %d", tag)
+		}
+		if r.overrun() {
+			if full {
+				flush()
+				return nil
+			}
+			return malformed("access unit overruns packet")
+		}
+	}
+	flush()
+	return nil
+}
+
+// Drain is a no-op: each access unit emits its full frame, and the
+// trailing filterbank overlap belongs to no further frame.
 func (d *Decoder) Drain(func(*audio.Buffer) error) error { return nil }
 
-// Reset clears the filterbank overlap and window history after a seek.
+// Reset clears the filterbank overlap, window history, and SBR channel
+// state after a seek. Parsed SBR headers and band tables survive: they
+// repeat only every half second or so, and dropping them would mute the
+// high band until the next one.
 func (d *Decoder) Reset() {
 	for c := range d.overlap {
 		d.overlap[c] = [1024]float64{}
 		d.prevWin[c] = shapeSine
+	}
+	for _, el := range d.sbrEls {
+		if el != nil {
+			el.resetForSeek()
+		}
 	}
 }
 
