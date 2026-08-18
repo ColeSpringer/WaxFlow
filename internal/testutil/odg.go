@@ -28,6 +28,11 @@ import "math"
 const (
 	odgWindow = 2048
 	odgHop    = 1024
+	// odgMaxLag bounds the alignment search. It must cover the largest
+	// unsignaled priming a gated encoder ships: HE-AAC's is 3010 output
+	// samples (and libfdk's runs past 5000), which is what moved this
+	// from its original 3000.
+	odgMaxLag = 6000
 )
 
 // ODGProxy returns the ODG-proxy of a coded signal (test) against its
@@ -41,7 +46,7 @@ func ODGProxy(ref, test []float32, rate, channels int) float64 {
 		return -4 // unmeasurable (empty/short output): fail closed, not open
 	}
 	// Align test to ref: find the lag minimizing early-segment error.
-	lag := alignLag(r, t, 3000)
+	lag := alignLag(r, t, odgMaxLag)
 	if lag > 0 {
 		if lag >= len(t) {
 			return -4
@@ -99,7 +104,7 @@ func ODGBandNMR(ref, test []float32, rate, channels int) []BandStat {
 	if len(r) < odgWindow || len(t) < odgWindow {
 		return nil
 	}
-	if lag := alignLag(r, t, 3000); lag > 0 && lag < len(t) {
+	if lag := alignLag(r, t, odgMaxLag); lag > 0 && lag < len(t) {
 		t = t[lag:]
 	}
 	n := min(len(r), len(t))
@@ -313,23 +318,45 @@ func downmixMono(x []float32, channels int) []float32 {
 	return out
 }
 
-// alignLag finds the shift of t against r (0..maxLag) minimizing mean square
-// error over an early window, recovering the encoder plus codec delay.
+// alignLag finds the shift of t against r (0..maxLag) minimizing mean
+// square error over a window, recovering the encoder plus codec delay.
+//
+// The window starts past the stream head and spans several times the
+// old 4000 samples, both load-bearing: every codec's first frames carry
+// warm-up distortion (cold psychoacoustics, an SBR chain priming its
+// QMF and envelope state), and a head-anchored window on sparse content
+// fits the one distorted onset it contains instead of the stream (the
+// HE-AAC 48k transient item measured 22 samples late that way, which
+// reads as -4 ODG on perfectly aligned audio). Ties additionally break
+// toward the SMALLEST lag within 5% of the minimum error: on periodic
+// content a lag one signal period past the true delay scores nearly the
+// same, and near-equal errors mean the window cannot distinguish the
+// lags, so the smaller one is the physical priming.
 func alignLag(r, t []float32, maxLag int) int {
-	const win = 4000
-	best, bestErr := 0, math.Inf(1)
-	end := min(win, len(r))
-	for lag := 0; lag < maxLag && lag+end <= len(t); lag++ {
+	skip := min(4000, max(0, len(r)-8000))
+	win := min(12000, len(r)-skip)
+	errAt := func(lag int) float64 {
 		var e float64
-		for i := 0; i < end; i++ {
+		for i := skip; i < skip+win; i++ {
 			d := float64(r[i]) - float64(t[lag+i])
 			e += d * d
 		}
-		if e < bestErr {
-			bestErr, best = e, lag
+		return e
+	}
+	bestErr := math.Inf(1)
+	n := 0
+	for lag := 0; lag < maxLag && lag+skip+win <= len(t); lag++ {
+		if e := errAt(lag); e < bestErr {
+			bestErr = e
+		}
+		n = lag + 1
+	}
+	for lag := 0; lag < n; lag++ {
+		if errAt(lag) <= bestErr*1.05 {
+			return lag
 		}
 	}
-	return best
+	return 0
 }
 
 func hann(n int) []float64 {

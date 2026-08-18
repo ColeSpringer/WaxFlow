@@ -31,9 +31,7 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	// deliberately deferred. Each entry is deleted by the change that lands its
 	// capability, so the list is the burn-down checklist and is empty once
 	// every codec encodes+decodes and every container demuxes+muxes.
-	symmetryGaps := map[string]string{
-		"he-aac-encode": "the HE-AAC encoder lands at stage 3a and drops the row's remuxOnly flag",
-	}
+	symmetryGaps := map[string]string{}
 
 	decodes := map[codec.ID]bool{}
 	for _, id := range format.Decoders() {
@@ -50,9 +48,7 @@ func TestCodecContainerSymmetry(t *testing.T) {
 
 	// codecGaps names, per codec, the allowlist entry that excuses its
 	// decoder-without-encoder imbalance in the codec-level loop below.
-	codecGaps := map[codec.ID]string{
-		codec.HEAAC: "he-aac-encode",
-	}
+	codecGaps := map[codec.ID]string{}
 
 	// open reports, for each named gap, whether it is still open, computed from
 	// the live tables so the predicate tracks the real code and cannot go stale.
@@ -182,6 +178,7 @@ var rowDefaultContainer = map[string]string{
 	"flac":   "flac",
 	"mp3":    "mp3",
 	"aac":    "mp4",
+	"he-aac": "mp4",
 	"alac":   "mp4",
 	"vorbis": "ogg",
 }

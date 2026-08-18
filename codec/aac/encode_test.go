@@ -345,3 +345,51 @@ func TestAACEncodeAUCeiling(t *testing.T) {
 		}
 	}
 }
+
+// TestEncodeSilentChannelDPCM pins the assemble-stage DPCM repair: a
+// digitally silent channel beside a very quiet one at a generous
+// per-channel budget spreads coded scalefactors past the +-60 codeword
+// range, the clamp moves a band to a scalefactor where it re-quantizes
+// to zero, and the pre-fix writer then anchored the next delta on a band
+// it never wrote (panic: index out of range in writeSFDelta). Every AU
+// must also still decode.
+func TestEncodeSilentChannelDPCM(t *testing.T) {
+	for _, bitrate := range []int{64000, 320000, 1000000} {
+		fm := audio.Format{Rate: 24000, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Float, BitDepth: 32}
+		e, err := NewEncoder(fm, &EncoderOptions{Bitrate: bitrate})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := ParseASC(e.CodecConfig())
+		if err != nil {
+			t.Fatal(err)
+		}
+		df, err := cfg.Format()
+		if err != nil {
+			t.Fatal(err)
+		}
+		d, err := NewDecoder(cfg, df)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check := func(p codec.Packet) error {
+			return d.Decode(p.Data, func(*audio.Buffer) error { return nil })
+		}
+		buf := audio.Get(fm, 1024)
+		for blk := 0; blk < 8; blk++ {
+			buf.N = 1024
+			clear(buf.ChanF(0)[:1024])
+			for i := range buf.ChanF(1)[:1024] {
+				buf.ChanF(1)[i] = float32(0.01 * math.Sin(2*math.Pi*3000*float64(blk*1024+i)/24000))
+			}
+			if err := e.Encode(buf, check); err != nil {
+				t.Fatalf("bitrate %d: Encode: %v", bitrate, err)
+			}
+		}
+		if _, err := e.Finish(check); err != nil {
+			t.Fatalf("bitrate %d: Finish: %v", bitrate, err)
+		}
+		audio.Put(buf)
+		d.Release()
+	}
+}

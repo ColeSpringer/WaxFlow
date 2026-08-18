@@ -391,7 +391,7 @@ func (onlyWriter) Write(p []byte) (int, error) { return len(p), nil }
 // TestOutputTable pins the writer-side capability table: names, extension
 // mapping (both spellings), and its agreement with the read-side exts.
 func TestOutputTable(t *testing.T) {
-	if got := waxflow.OutputFormats(); len(got) != 8 || got[0] != "wav" || got[1] != "opus" || got[2] != "vorbis" || got[3] != "aiff" || got[4] != "flac" || got[5] != "mp3" || got[6] != "aac" || got[7] != "alac" {
+	if got := waxflow.OutputFormats(); len(got) != 9 || got[0] != "wav" || got[1] != "opus" || got[2] != "vorbis" || got[3] != "aiff" || got[4] != "flac" || got[5] != "mp3" || got[6] != "aac" || got[7] != "he-aac" || got[8] != "alac" {
 		t.Errorf("OutputFormats() = %v", got)
 	}
 	tests := []struct{ ext, want string }{

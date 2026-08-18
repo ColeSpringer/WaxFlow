@@ -386,8 +386,11 @@ func (cq *chanQuant) assemble(delta int) {
 			}
 			continue
 		}
-		// Clamp into the DPCM's +-60 reach of the previous coded band
-		// (unreachable under ampMax 30, but the wire format must hold).
+		// Clamp into the DPCM's +-60 reach of the previous coded band.
+		// This fires on real LC content (a near-silent channel at a high
+		// per-channel budget spreads coded bands' scalefactors past 60;
+		// TestEncodeSilentChannelDPCM pins it), not only at the HE core's
+		// post-fill budgets.
 		if prevSf >= 0 {
 			if sf < prevSf-60 {
 				sf = prevSf - 60
@@ -395,8 +398,21 @@ func (cq *chanQuant) assemble(delta int) {
 				sf = prevSf + 60
 			}
 		}
+		// The clamp moved sf, so re-memoize there. A band that quantizes
+		// to zero at the clamped sf must leave the DPCM chain entirely:
+		// the writer skips cb-0 bands, so anchoring the next band's clamp
+		// on this one would break the +-60 reach it just enforced.
+		m = cq.bandAt(bi, sf)
+		if m.zero || m.cb == 0 {
+			b.cb = 0
+			b.sf = 0
+			for i := 0; i < b.n; i++ {
+				cq.q[b.off+i] = 0
+			}
+			continue
+		}
 		b.sf = sf
-		b.cb = int(cq.bandAt(bi, sf).cb)
+		b.cb = int(m.cb)
 		if firstCoded {
 			cq.globalGain = sf
 			firstCoded = false

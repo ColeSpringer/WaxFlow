@@ -3,8 +3,8 @@
 Self-hosted, **pure-Go**, on-the-fly audio transcoding: request -> decode -> DSP -> encode -> stream, tuned for time-to-first-audio, sample-exact seeking, and flaky
 mobile networks.
 
-The codecs (Opus, MP3, AAC-LC, Vorbis, FLAC, ALAC, and WAV encoders, plus a
-wider decoder set) are written from scratch for Go 1.26 and published as public,
+The codecs (Opus, MP3, AAC-LC, HE-AAC v1, Vorbis, FLAC, ALAC, and WAV encoders,
+plus a wider decoder set) are written from scratch for Go 1.26 and published as public,
 **stdlib-only** packages under this module, CI-enforced by `make depcheck`,
 so anyone can import them.
 
@@ -20,7 +20,10 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   corpora), MP3 (psychoacoustic model, joint stereo, CBR and VBR, LAME
   gapless tag), AAC-LC (window switching, TNS, M/S, two-loop
   quantization; at parity with ffmpeg's native encoder on the ODG-proxy
-  gate), Vorbis (product-lattice VQ residue books, perceptual
+  gate), HE-AAC v1 (SBR over a half-rate AAC-LC core: transient-aware
+  envelope grids, tonality-driven noise floors and inverse filtering,
+  coupled stereo; explicit signalling in M4A, implicit in ADTS),
+  Vorbis (product-lattice VQ residue books, perceptual
   coupled-stereo classification; ODG-proxy gate green), FLAC (levels 0-8,
   smaller than `flac -5` at level 5), ALAC (bit-exact round trip), and
   WAV/AIFF PCM.
@@ -155,7 +158,7 @@ write keeps a reload from reading a half-written file and `400`ing.
   (`--json` for the schemaVersion'd machine shape, identical to `GET
   /probe`; `--strict` to treat tolerated input damage as errors)
 - `waxflow transcode <in> <out>`: local one-shot file-to-file transcode
-  through the same engine the daemon uses (`--format wav|aiff|flac|mp3|aac|alac|opus|vorbis`,
+  through the same engine the daemon uses (`--format wav|aiff|flac|mp3|aac|he-aac|alac|opus|vorbis`,
   `--flac-level`, `--mp3-bitrate`, default from the output extension;
   `--force` to overwrite). An mp4-family output (`.m4a`, `.m4b`, alac)
   is written flat: a file can satisfy the header back-patch that form
@@ -211,8 +214,9 @@ replaced content still dies with `410 source-changed`.
 
 ## Non-goals for v1.0
 
-Video; HE-AAC **encoding**, enhanced SBR, and xHE (HE-AAC v1 and v2
-*decode* ships, downsampled SBR and ADTS implicit signalling included);
+Video; HE-AAC **v2 encoding**, enhanced SBR, and xHE (v1 and v2 *decode*
+ships, downsampled SBR and ADTS implicit signalling included, and v1
+*encoding* ships as `format=he-aac`);
 WMA/APE/WavPack **encoding**; WMA/APE/WavPack
 decoding; DASH manifests (the CMAF segments are already DASH-compatible);
 DRM/HLS-AES; Opus PLC; CD ripping; any database (WaxBin owns cataloging);

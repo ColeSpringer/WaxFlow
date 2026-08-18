@@ -140,7 +140,7 @@ byte-identical to `waxflow probe --json`.
 
 ## GET /stream
 
-    /stream?src=<ref>&format=auto|wav|flac|alac|mp3|aac|opus|vorbis&rate=&ch=&bits=16|24&bitrate=|q=&container=&gain=&dynamics=&t=&from=&to=&track=&maxBitRate=
+    /stream?src=<ref>&format=auto|wav|flac|alac|mp3|aac|he-aac|opus|vorbis&rate=&ch=&bits=16|24&bitrate=|q=&container=&gain=&dynamics=&t=&from=&to=&track=&maxBitRate=
 
 Source references (`src`): `<root>/<relative/path>` under a configured
 library root; `upload:<id>` for a spooled one-shot upload (POST
@@ -160,7 +160,10 @@ Parameters (unknown parameter names are rejected):
   default, `bitrate`/`q` select it); `aac` an AAC-LC stream in
   progressive fragmented MP4 (`audio/mp4`, 128 kbit/s default,
   `bitrate`/`q` select it; the init header's edit list carries the
-  gapless trims); `opus` an Ogg-Opus stream (`audio/ogg`, 96 kbit/s
+  gapless trims); `he-aac` an HE-AAC v1 stream in the same wrappers
+  (64 kbit/s default, output rates 32/44.1/48 kHz; a copyable HE-AAC
+  source under `format=aac` remuxes rather than re-encoding, so
+  `he-aac` is for encoding *to* SBR); `opus` an Ogg-Opus stream (`audio/ogg`, 96 kbit/s
   default, `bitrate`/`q` select it) from the full Opus encoder: SILK,
   hybrid, and CELT modes with analyser-driven speech/music selection.
   Other formats
@@ -368,8 +371,10 @@ Parameters (unknown parameter names are rejected):
 3. **Transcode.** Anything else: decode, DSP, encode.
 
 **The cut** sits between transmux and transcode for a `from`/`to` span. When
-the source codec survives being repositioned (Opus or AAC-LC) and the requested
-`format` matches it (`format=opus`, or `format=aac` for AAC-LC), the span is
+the source codec survives being repositioned (Opus or AAC-LC; HE-AAC cuts
+exist but only for spans keeping the stream head, so they go unadvertised)
+and the requested `format` matches it (`format=opus`, or `format=aac` for
+AAC-LC), the span is
 served by moving the source's own packets into a new stream: no decode, no
 re-encode, no generation loss. The head and tail land exactly where asked, since
 their snap-to-packet slop becomes the stream's gapless trims. It needs a
@@ -454,7 +459,7 @@ session.
 
 | Path | Purpose |
 |---|---|
-| `GET /hls/master.m3u8?v=...` | master playlist: one rung per ladder bitrate with `BANDWIDTH` and `CODECS` (`Opus`, `fLaC`, `alac`, `mp4a.40.2`; an HE-AAC remux advertises its own signalling, `mp4a.40.5` or `mp4a.40.29`). With an API key, raw parameters (`src`, `format`, `bitrate` or `bitrates`, `bits`, `rate`, `ch`, `gain`, `dynamics`, `segDur`, and `crossfadeSeconds` for a `tl` timeline) also work; the daemon builds the descriptor. |
+| `GET /hls/master.m3u8?v=...` | master playlist: one rung per ladder bitrate with `BANDWIDTH` and `CODECS` (`Opus`, `fLaC`, `alac`, `mp4a.40.2`; `format=he-aac` encodes and advertises `mp4a.40.5`, and an HE-AAC remux advertises its own signalling, `mp4a.40.5` or `mp4a.40.29`). With an API key, raw parameters (`src`, `format`, `bitrate` or `bitrates`, `bits`, `rate`, `ch`, `gain`, `dynamics`, `segDur`, and `crossfadeSeconds` for a `tl` timeline) also work; the daemon builds the descriptor. |
 | `GET /hls/media.m3u8?v=...` | variant VOD playlist: `EXT-X-VERSION:7`, `EXT-X-MAP`, `EXT-X-INDEPENDENT-SEGMENTS`, every segment listed with its exact duration, `EXT-X-ENDLIST`. Unknown source lengths are measured (frame-index walk), never estimated. |
 | `GET /hls/init.mp4?v=...` | the CMAF init header (codec config; the edit list carries encoder delay and the exact length) |
 | `GET /hls/seg/{n}.m4s?v=...` | media segment n (0-based). Cached segments serve with ranges and strong ETags; misses wait on the variant worker (within a 3-segment lookahead) or restart it at n. |
@@ -614,8 +619,9 @@ is:
                    {"name": "flac", "live": true, "exts": ["flac"]},
                    {"name": "mp3", "live": true, "exts": ["mp3", "mpga"]},
                    {"name": "aac", "live": true, "exts": ["m4a", "aac", "m4b"]},
+                   {"name": "he-aac", "live": true, "exts": []},
                    {"name": "alac", "live": true, "exts": []}],
-      "delivery": {"progressive": true, "hls": true, "hlsFormats": ["opus", "flac", "aac", "alac"],
+      "delivery": {"progressive": true, "hls": true, "hlsFormats": ["opus", "flac", "aac", "he-aac", "alac"],
                    "cutFormats": ["opus", "aac"],
                    "jobs": false, "uploads": false, "pid": false,
                    "timelines": true, "maxTimelineMembers": 1000,

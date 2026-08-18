@@ -32,6 +32,19 @@ it re-baselines every gate in the same PR.
   `internal/testutil` (0 = imperceptible, -4 = very annoying). Gates
   compare *deltas between encoders on the identical metric version*, so a
   metric revision re-baselines both sides in one PR, never silently.
+  Revision 2026-08-18 (the HE-AAC stage), three alignment changes in one
+  re-baseline: the search bound `odgMaxLag` grew 3000 -> 6000 (HE-AAC
+  primes at 3010 and libfdk past 5000); a smallest-lag-within-5%
+  tie-break, because the wider bound let periodic corpus items align one
+  signal period late (that lag is genuinely equivalent over the scored
+  overlap on periodic synthetic content); and the error window moved off
+  the stream head (skip 4000, span 12000, was the first 4000), because a
+  head-anchored window measures codec warm-up, and on sparse content it
+  fit the one distorted onset it contained -- the reference encoder's
+  own transient cell read -3.9 from a 22-sample misalignment while the
+  audio was fine. Both sides of every gate are scored on the revised
+  metric; the recorded per-cell movements are in this change's history,
+  and every pre-existing gate still passes with margin.
 - **opus_compare**: the RFC 6716 section 6 comparison tool ported into
   `internal/testutil`; quality score Q <= 100, vectors pass at Q >= 0 (the
   tool's own pass bar, weighted error <= 0.277). The decoder currently
@@ -46,7 +59,7 @@ it re-baselines every gate in the same PR.
 | FLAC | bit-exact on the full IETF/Xiph suite; sample-exact seek; >=300x realtime |
 | MP3 | vs ffmpeg: RMS < 1e-4 FS, max < 1e-3 FS; LAME gapless sample-count invariant; sample-exact seek at 100 random offsets in VBR; >=150x realtime |
 | AAC-LC | vs ffmpeg: RMS < 2^-13 FS; iTunes (iTunSMPB) gapless invariant; edit-list seek exact; >=150x realtime |
-| HE-AAC v1/v2 | vs ffmpeg on fdk-encoded fixtures: RMS < 2^-13 FS across explicit m4a (v1, v2, downsampled SBR) and implicit ADTS; seeks land sample-exact, the tail within the same gate for v1 and within 0.02 for v2 (the SBR noise and sinusoid phase free-runs from the stream head in every decoder, so a mid-stream join reproduces it differently forever; the parametric layer itself resynchronizes inside the 12-AU preroll); the realtime floor is ratcheted with the encoder stage's first bench pass |
+| HE-AAC v1/v2 | vs ffmpeg on fdk-encoded fixtures: RMS < 2^-13 FS across explicit m4a (v1, v2, downsampled SBR) and implicit ADTS; seeks land sample-exact, the tail within the same gate for v1 and within 0.02 for v2 (the SBR noise and sinusoid phase free-runs from the stream head in every decoder, so a mid-stream join reproduces it differently forever; the parametric layer itself resynchronizes inside the 12-AU preroll); the realtime floor is under Performance floors, ratcheted at the encoder stage's bench pass |
 | ALAC | bit-exact vs ffmpeg; >=100x realtime |
 | Opus | all opus_testvectors 01-12 pass RFC 6716 section 6 (ported opus_compare, both decode rates, against the RFC 8251 regenerated references; the 2012 originals are stale for hybrid/transition vectors and fail even current libopus); Ogg bisection seek exact after 80 ms pre-roll; >=150x realtime |
 | Vorbis | vs ffmpeg: RMS < 1e-4 FS, max < 1e-3 FS; >=80x realtime |
@@ -226,6 +239,40 @@ keg-only, so point the oracles at it explicitly or put it ahead on PATH).
 - Plays in AVFoundation and ExoPlayer (client matrix).
 - >= **20x** realtime.
 
+### HE-AAC v1
+- ODG-proxy at **48 and 64 kbps** on the shared corpus plus bright items
+  whose upper octaves exercise the SBR band: corpus mean >= **libfdk_aac
+  mean - 0.4** and no track > **0.7** below fdk, judged **at each
+  bitrate separately** (a win at one bitrate must not offset a loss at
+  another). Known deficits past the allowance are recorded per (track,
+  bitrate) in the test's burn-down ledger, each with its own measured
+  bound; the test fails when an entry has clearly closed, so the ledger
+  is debt on record, never concealment. One entry today: the transient
+  track at 48 kbps (-0.93, bound 1.3; the same cell reads -0.08 at 64k),
+  pointing at the half-rate core's click handling at ~22 kb/s per
+  channel (SBR-side tuning measured neutral), closed by future core
+  transient work. fdk is
+  best-in-class (a harder bar than the LC gate's ffmpeg-native
+  reference, hence the wider allowance) and non-free; the leg reaches it
+  through an ffmpeg built with libfdk_aac or through `scripts/fdkenc`
+  (a tiny CLI over the library's own API; build line in its source)
+  named by `WAXFLOW_FDKENC`, self-skips without either, and escalates
+  under `WAXFLOW_REQUIRE_FDK=1` (set it wherever a route is expected to
+  exist; the stock-ffmpeg CI has none, so its runs judge the offline
+  legs only). First judged 2026-08-18 (after the review round's encoder
+  and metric fixes): mean -0.13 at 48k, **+0.10 above fdk** at 64k;
+  every cell but the ledgered one within 0.31.
+- Offline legs, every run: ffmpeg's decode of our stream agrees with our
+  own within the AAC RMS gate (cross-decoder conformance on our own
+  bitstream); the QMF band-energy round trip holds the high band present
+  and level-correct within 6 dB; and the ODG mean stays within **0.7** of
+  our own AAC-LC at 64 kbps, a catastrophe net only, because an NMR-based
+  proxy structurally punishes parametric replication (band-center sines,
+  phase-random patches) that fdk pays for identically.
+- The measured encode-decode delay is pinned at exactly
+  **HEEncoderDelay (3010)** output samples under both decoders.
+- >= **20x** realtime.
+
 ### MP3 quality, VBR + joint stereo
 - ODG-proxy at 128 kbps: corpus mean >= **Shine mean + 0.3** (measurably
   better); no track below Shine - 0.1.
@@ -340,13 +387,17 @@ keg-only, so point the oracles at it explicitly or put it ahead on PATH).
 ## Performance floors (ratchets, may only rise)
 
 Portable build, per core: decode FLAC >=**300x** / MP3 >=150x /
-AAC >=**150x** / Opus >=**150x** / Vorbis >=80x; encode FLAC >=**150x** /
-ALAC >=80x / MP3 >=40x / AAC >=20x / Opus >=**30x**; resampler HQ
->=200x. The bolded floors were ratcheted at the v1.0 bench pass against
-the post-FFT measurements (decode FLAC 537-934x, AAC 260x, Opus
-289-522x; encode FLAC 230-250x at level 5, Opus 55-67x), leaving 2x or
-more headroom for slower CI runners. Watched by the nightly `bench` job
-(benchstat against the previous night's numbers, cache-carried).
+AAC >=**150x** / HE-AAC >=**150x** / Opus >=**150x** / Vorbis >=80x;
+encode FLAC >=**150x** / ALAC >=80x / MP3 >=40x / AAC >=20x /
+HE-AAC >=**20x** / Opus >=**30x**; resampler HQ >=200x. The bolded
+floors were ratcheted at the v1.0 bench pass against the post-FFT
+measurements (decode FLAC 537-934x, AAC 260x, Opus 289-522x; encode FLAC
+230-250x at level 5, Opus 55-67x), leaving 2x or more headroom for
+slower CI runners; the HE-AAC pair was ratcheted at the encoder stage's
+first bench pass (decode 357x, encode 39x on the noise worst case after
+the review round's per-AU headers and gate legs landed).
+Watched by the nightly `bench` job (benchstat against the previous
+night's numbers, cache-carried).
 
 The floors are triaged from that job's numbers, not asserted by the default
 suite: a shared runner measures its own scheduling noise as much as the codec,

@@ -1,8 +1,8 @@
-// Package aac implements AAC-LC, HE-AAC v1, and HE-AAC v2 decoders
-// (ISO/IEC 14496-3), written from the specification and Bosi/Goldberg
-// (clean-room: AAC reference decoders were behavioral references only,
-// never opened while implementing; the QMF and SBR/PS parameter tables
-// are spec data).
+// Package aac implements AAC-LC, HE-AAC v1, and HE-AAC v2 decoders and
+// AAC-LC and HE-AAC v1 encoders (ISO/IEC 14496-3), written from the
+// specification and Bosi/Goldberg (clean-room: AAC reference codecs were
+// behavioral references only, never opened while implementing; the QMF
+// and SBR/PS parameter tables are spec data).
 //
 // An explicitly signalled SBR config (audioObjectType 5 wrapping AAC-LC,
 // extension rate exactly double the core rate) decodes the full HE-AAC v1
@@ -32,8 +32,11 @@
 // full-length, full-loudness file that is simply the wrong audio. For the
 // same reason a multichannel frame's element sequence is checked against
 // the one Table 1.19 fixes, since the remap routes by position and a
-// deviant order would reroute rather than fail. The encoder stays mono and
-// stereo.
+// deviant order would reroute rather than fail. The encoders stay mono
+// and stereo: Encoder produces AAC-LC, and HEEncoder wraps it into
+// HE-AAC v1 (an SBR fill extension over a half-rate core, explicitly
+// signalled by its AOT-5 config, implicitly by its in-band fills when
+// the stream is re-framed as ADTS).
 //
 // The remaining limitations are signalled where they can be. Explicit
 // signalling (a hierarchical AOT-5/29 ASC or the 0x2b7 sync extension, the

@@ -1154,11 +1154,11 @@ var outputs = []output{
 		},
 	},
 	{
-		// he-aac is remux-only until its encoder lands: the row exists so a
-		// copyable HE-AAC source keeps its identity through remux (PlanRemux
-		// redirects a format=aac request here when the track is HE-AAC)
-		// instead of silently degrading to a lossy LC re-encode. exts stays
-		// empty (.m4a resolves to the aac row) and the file it writes is an
+		// he-aac encodes HE-AAC v1 (SBR over a half-rate AAC-LC core) and
+		// keeps copyable HE-AAC sources their identity through remux
+		// (PlanRemux redirects a format=aac request here when the track is
+		// HE-AAC). exts stays empty (.m4a and format=auto resolve to the aac
+		// row; this format is reached by name) and the file it writes is an
 		// ordinary .m4a, the alac precedent.
 		name:        "he-aac",
 		exts:        []string{},
@@ -1168,14 +1168,37 @@ var outputs = []output{
 		mediaType:   "audio/mp4",
 		headerBytes: 700,
 		codecID:     codec.HEAAC,
-		remuxOnly:   true,
-		plan: func(audio.Format, TranscodeOptions) (string, int, int, error) {
-			return "", 0, 0, waxerr.New(waxerr.CodeUnsupportedFormat,
-				"waxflow: no HE-AAC encoder yet; he-aac sources remux (format=aac copies them), transcodes encode aac")
+		adjust: func(spec *dsp.ChainSpec, src audio.Format, opts TranscodeOptions) {
+			// One AU is 2048 output samples. The encoder accepts three
+			// dual-rate pairs, so a rateless request snaps the source onto
+			// them (the opus row's precedent for a narrow rate set: a whole
+			// hi-res or low-rate library must degrade to a resample, not
+			// 415); an explicit rate= is honored and validated at plan time.
+			spec.FrameSize = 2 * 1024
+			spec.BitDepth = 0
+			spec.Float = true
+			if opts.Rate == 0 {
+				if snapped := aac.HESnapRate(src.Rate); snapped != src.Rate {
+					spec.Rate = snapped
+				}
+			}
+			foldWideToStereo(spec, src)
 		},
-		encode: func(audio.Format, TranscodeOptions) (codec.Encoder, error) {
-			return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
-				"waxflow: no HE-AAC encoder yet; he-aac sources remux (format=aac copies them), transcodes encode aac")
+		plan: func(f audio.Format, opts TranscodeOptions) (string, int, int, error) {
+			if _, err := aacContainerMediaType(opts.Container); err != nil {
+				return "", 0, 0, err
+			}
+			bitrate, err := aac.HEPlanBitrate(f, &aac.EncoderOptions{Bitrate: opts.AACBitrate})
+			if err != nil {
+				return "", 0, 0, err
+			}
+			return aac.HEEncoderVersion, 0, bitrate, nil
+		},
+		encode: func(f audio.Format, opts TranscodeOptions) (codec.Encoder, error) {
+			if _, err := aacContainerMediaType(opts.Container); err != nil {
+				return nil, err
+			}
+			return aac.NewHEEncoder(f, &aac.EncoderOptions{Bitrate: opts.AACBitrate})
 		},
 		mux: func(_ container.Track, opts TranscodeOptions, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 			if isMatroska(opts.Container) {
@@ -1190,15 +1213,11 @@ var outputs = []output{
 			return mp4.NewMuxer(dst, mp4MuxerOptions(opts)), nil
 		},
 		container: aacContainerMediaType,
-		// The segmented column carries the correct CODECS string for HE
-		// content, so segmented remux keeps working and the master playlist
-		// stops calling HE content mp4a.40.2. delay and encode belong to the
-		// encoder and land with it.
 		hls: &hlsOutput{
 			codecs: "mp4a.40.5",
-			encode: func(audio.Format, TranscodeOptions, int64) (codec.Encoder, error) {
-				return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
-					"waxflow: no HE-AAC encoder yet; he-aac sources remux (format=aac copies them), transcodes encode aac")
+			delay:  aac.HEEncoderDelay,
+			encode: func(f audio.Format, opts TranscodeOptions, _ int64) (codec.Encoder, error) {
+				return aac.NewHEEncoder(f, &aac.EncoderOptions{Bitrate: opts.AACBitrate})
 			},
 		},
 	},

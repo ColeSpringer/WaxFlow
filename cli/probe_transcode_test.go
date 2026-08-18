@@ -740,3 +740,59 @@ func TestTranscodeOpusComplexityZero(t *testing.T) {
 		t.Error("--opus-complexity 0 produced the default's bytes: the lowest setting is unreachable")
 	}
 }
+
+// TestTranscodeHEAAC covers the he-aac CLI surface: a bare .aac output
+// implies ADTS like it does for aac (it once wrote a progressive MP4 into
+// the .aac file), the default bitrate is the encoder's 64 kb/s rather
+// than an unconditional flag default (whose 128 made the documented
+// default unreachable and encoded outside both gate-judged points), and
+// the mp4-family ReplayGain post-pass reaches he-aac MP4s (the format
+// check once named only aac and alac, so he-aac files got no RG at all).
+func TestTranscodeHEAAC(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	writeWAV(t, in, 48000)
+
+	adtsOut := filepath.Join(dir, "out.aac")
+	code, _, errOut := run(t, "transcode", "--format", "he-aac", in, adtsOut)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, errOut)
+	}
+	if got := probeOutput(t, adtsOut); got.container != "adts" || got.codec != "he-aac" {
+		t.Errorf(".aac output = %+v, want adts/he-aac", got)
+	}
+
+	defOut := filepath.Join(dir, "def.m4a")
+	if code, _, errOut := run(t, "transcode", "--format", "he-aac", in, defOut); code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, errOut)
+	}
+	hiOut := filepath.Join(dir, "hi.m4a")
+	if code, _, errOut := run(t, "transcode", "--format", "he-aac", "--aac-bitrate", "128", in, hiOut); code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, errOut)
+	}
+	defSize, hiSize := fileBytes(t, defOut), fileBytes(t, hiOut)
+	if hiSize < defSize*3/2 {
+		t.Errorf("128k output (%d bytes) not clearly larger than the default (%d bytes): the 64k default is not reaching the encoder", hiSize, defSize)
+	}
+
+	rgOut := filepath.Join(dir, "rg.m4a")
+	if code, _, errOut := run(t, "transcode", "--format", "he-aac", "--loudness", "analyze", in, rgOut); code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, errOut)
+	}
+	data, err := os.ReadFile(rgOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte("REPLAYGAIN_TRACK_GAIN")) {
+		t.Error("he-aac MP4 + --loudness analyze output is missing its ReplayGain tag")
+	}
+}
+
+func fileBytes(t *testing.T, path string) int64 {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.Size()
+}

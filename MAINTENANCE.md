@@ -33,6 +33,7 @@ Operationally:
 | dsp/psy | ISO 11172-3 Annex D model 2 and ISO 13818-7 Annex B (spec, informative psychoacoustic model); Terhardt ATH approximation and the bark scale (published formulas) | none |
 | codec/aac (encoder) | ISO 14496-3 (spec, incl. the informative encoder annex's two-loop structure); Bosi/Goldberg (textbook); forward Huffman tables, band boundaries, and windows derived in code from the decoder's already-attributed tables (no new source) | ffmpeg's native AAC encoder reached only as a binary quality oracle (never opened; the ODG-proxy gate) |
 | codec/aac (SBR/PS decode) | ISO 14496-3 4.6.18 and 8.6.4 (spec); normative parameter tables recorded per ADR-0001's parameter provision (see THIRD-PARTY-NOTICES) | ffmpeg's AAC decoder as the differential oracle and as a source of behavioral facts (validity bounds, header state-machine rules, the QMF restart modulation confirmed tap-for-tap against an instrumented build); table restatements as parameter cross-checks: faad2 and FFmpeg for the SBR tables, FFmpeg alone for the PS tables; no decoder logic taken |
+| codec/aac (SBR encode) | ISO 14496-3 4.6.18 (spec, band tables and payload syntax shared with the decode entry above); the encoder-side 64-band QMF analysis, extraction heuristics, and grid logic written from the spec's decoder semantics (what the adjuster does with each field decides what to put in it); forward Huffman tables derived in code from the decoder's trees (no new source) | libfdk_aac reached only as a binary quality oracle where the nightly's ffmpeg carries it (never opened, bespoke license); ffmpeg's decoder as the cross-decoder conformance oracle on our own streams |
 | container/adts (muxer) | ISO 14496-3 1.A (spec); the write-side inverse of the demuxer's header parser | none |
 | container/mp4 (esds writer) | ISO 14496-1 section 7.2.6 descriptors (spec); the write-side inverse of the demuxer's parser | none |
 
@@ -81,15 +82,19 @@ advice.
     years after LC essentials expired (Red Hat cleared LC in 2017;
     ffmpeg ships it by default; no enforcement since).
 - The HE-AAC v1 and v2 decoders (SBR, PS, downsampled SBR, ADTS
-  implicit signalling; 2026-08) ship under that review. xHE/USAC and
-  any HE-AAC *encoder* would trigger a redo.
+  implicit signalling; 2026-08) ship under that review, and so does the
+  HE-AAC v1 *encoder* (2026-08): it emits classic spectral-patching SBR
+  only, no eSBR tool exists to signal, and the expired families above
+  cover the encode direction of the same technology. xHE/USAC or a PS
+  (v2) encoder would trigger a redo.
 
 ## Listening-test protocol
 
 The nightly encoder-quality harness (`make encoder-quality`, the
 `encoder-quality` job in `nightly.yml`) is the objective gate: it encodes
 the corpus with our encoder and the reference baseline (Shine for MP3,
-ffmpeg's native aac for AAC-LC, libopus via the reference tools for
+ffmpeg's native aac for AAC-LC, libfdk_aac for HE-AAC where the nightly's
+ffmpeg carries it, libopus via the reference tools for
 Opus), scores both with the ODG-proxy (`internal/testutil/odg.go`, a
 bark-band noise-to-mask ratio) or opus_compare, and fails when our corpus
 mean falls below the baseline or any track drops more than the per-codec

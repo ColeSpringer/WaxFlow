@@ -94,6 +94,11 @@ type Encoder struct {
 	reservoir float64
 	avgPE     float64
 
+	// SBR side chain, nil for plain LC. When set, each frame pulls its
+	// fill-element payload before budgeting, counts its exact cost into
+	// the frame overhead, and writes the fill before END.
+	sbr *sbrEnc
+
 	// Per-frame scratch.
 	spec  [2][1024]float64
 	cq    [2]chanQuant
@@ -352,6 +357,25 @@ func (e *Encoder) encodeFrame(emit func(codec.Packet) error) error {
 	}
 	seq := e.windowSeq(shortNow, shortNext)
 
+	// The SBR payload for this AU rides in-band, so its exact cost joins
+	// the overhead below and the spectral budget shrinks by it. meanBits
+	// stays the full per-AU rate: charging the side bits there too would
+	// subtract them twice and deliver 3-11% under the requested rate.
+	var sbrPayload *bitWriter
+	sbrOverhead := 0
+	if e.sbr != nil {
+		sbrPayload = e.sbr.payloadFor(e.outFrames)
+		if (sbrPayload.bitLen()+7)/8 > maxFILPayloadBytes {
+			// Unrepresentable in the fill element's escaped count; the
+			// decoder conceals this frame's high band instead of parsing a
+			// desynchronized element stream. See maxFILPayloadBytes.
+			sbrPayload = nil
+		}
+	}
+	if sbrPayload != nil {
+		sbrOverhead = filBits(sbrPayload.bitLen())
+	}
+
 	groupLen := longGroup
 	swb := e.swbLong
 	maxSfb := e.maxSfbLong
@@ -440,10 +464,18 @@ func (e *Encoder) encodeFrame(emit func(codec.Packet) error) error {
 	}
 	target := e.meanBits * difficulty
 	target = math.Min(target, e.meanBits+math.Max(e.reservoir, 0)*0.5)
+	if e.sbr != nil && e.reservoir < 0 {
+		// The HE operating points sit low enough that demanding content
+		// can outrun the mean for long stretches; a depleted reservoir
+		// must push back or the ABR contract fails by half again. LC keeps
+		// its historical no-repayment behavior (its rates never pinned the
+		// reservoir; changing its output would be an encoder revision).
+		target = math.Min(target, e.meanBits+e.reservoir*0.25)
+	}
 	target = math.Max(target, e.meanBits*0.3)
 	target = math.Min(target, float64(6144*e.channels)*0.93)
 
-	overhead := e.overheadBits(seq, maxSfb, msMask, len(groupLen))
+	overhead := e.overheadBits(seq, maxSfb, msMask, len(groupLen)) + sbrOverhead
 	spectral := int(target) - overhead
 	if spectral < 0 {
 		spectral = 0
@@ -454,6 +486,18 @@ func (e *Encoder) encodeFrame(emit func(codec.Packet) error) error {
 	// quantizeChannel takes on a stale candidate only fits the hard cap because
 	// the budget it was fitted to is capped. Raise 0.93 and they start working.
 	hard := 6144*e.channels - overhead - auCeilingSlack
+	if e.sbr != nil {
+		// The quantizer's best-scored fallback may exceed the soft budget
+		// up to this cap (quantizeChannel's contract). At LC rates that
+		// slack is modest; at HE rates the whole spec ceiling is many
+		// times the frame budget, so an uncapped fallback overshoots every
+		// frame and no reservoir can hold the mean. Bound the overshoot to
+		// a quarter frame. (A larger allowance for short-window frames was
+		// tried and measured WORSE on the transient quality leg: the loan's
+		// repayment squeezes the steady frames that follow harder than the
+		// extra attack bits help.)
+		hard = min(hard, spectral+int(e.meanBits*0.25))
+	}
 	if hard < 0 {
 		hard = 0
 	}
@@ -479,6 +523,9 @@ func (e *Encoder) encodeFrame(emit func(codec.Packet) error) error {
 			e.cq[0].quantizeChannel(spectral, hard)
 			e.w.reset()
 			e.writeSCE(seq, groupLen, maxSfb)
+		}
+		if sbrPayload != nil {
+			writeFIL(&e.w, sbrPayload)
 		}
 		e.w.writeBits(3, elEND)
 		e.w.align()

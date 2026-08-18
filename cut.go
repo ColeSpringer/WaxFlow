@@ -81,6 +81,12 @@ type cutCodec struct {
 	// leaving it to the container. Nil for a codec whose config says nothing
 	// about priming, which is every codec but Opus.
 	reprime func(cfg []byte, delay int64) ([]byte, error)
+	// headOnly marks a codec whose cuts must start at sample 0 (computeCut
+	// enforces it). Such a codec still cuts, but CutFormats does not
+	// advertise it: a client reading delivery.cutFormats expects an
+	// arbitrary from/to span to engage the rung, and for a head-only codec
+	// most spans silently fall through to a re-encode instead.
+	headOnly bool
 }
 
 // cutCodecs is the set of codecs whose packets survive being moved to a
@@ -147,7 +153,10 @@ var cutCodecs = map[codec.ID]cutCodec{
 	// nothing to reprime. HE-AAC adds the SBR chain's history on top, and its
 	// priming likewise lives in the container.
 	codec.AACLC: {preroll: aac.EncoderDelay},
-	codec.HEAAC: {preroll: aac.HESeekPreroll},
+	// headOnly: an HE-AAC cut must keep the stream head (computeCut's
+	// refusal explains why), so most spans a client would ask for fall
+	// through to a re-encode.
+	codec.HEAAC: {preroll: aac.HESeekPreroll, headOnly: true},
 }
 
 // Cuttable reports whether track's codec is one whose packets survive being
@@ -168,17 +177,20 @@ func Cuttable(track container.Track) bool {
 // CutFormats lists the output formats the cut rung serves without
 // re-encoding, in table order. A format qualifies only where the cut is
 // reachable on every surface it may be asked for: its codec is in the cut
-// allowlist, it has a live progressive form (/stream can serve it), and it
-// has a segmented (HLS) form. So the one flat list is honest on both
-// surfaces. A client names one of these (with a from/to span) to reach the
-// cut; format=auto never does. Today: opus and aac.
+// allowlist WITHOUT the head-only restriction (a head-anchored codec cuts,
+// but advertising it would promise arbitrary spans it silently re-encodes),
+// it has a live progressive form (/stream can serve it), and it has a
+// segmented (HLS) form. So the one flat list is honest on both surfaces. A
+// client names one of these (with a from/to span) to reach the cut;
+// format=auto never does. Today: opus and aac (he-aac cuts head-anchored
+// spans when asked, unadvertised).
 func CutFormats() []string {
 	var names []string
 	for _, o := range outputs {
 		// A remux-only row is not advertised (Outputs() precedent); its
 		// sources reach the cut through the family redirect on the row a
 		// client can name (format=aac cuts an HE-AAC source).
-		if _, ok := cutCodecs[o.codecID]; ok && o.live && o.hls != nil && !o.remuxOnly {
+		if cc, ok := cutCodecs[o.codecID]; ok && !cc.headOnly && o.live && o.hls != nil && !o.remuxOnly {
 			names = append(names, o.name)
 		}
 	}
@@ -708,13 +720,14 @@ func cutStraddle(start, end, at int64) error {
 // A decline's reason is not actionable: the caller's answer to every one of them
 // is the same re-encode, so the reason is a debugging aid rather than a
 // control-flow input, and a bare nil is the shape the ladder is built on. But
-// this rung declines for six distinct reasons and a caller asking why an Opus
+// this rung declines for seven distinct reasons and a caller asking why an Opus
 // cut is re-encoding has no other signal, so each is logged at Debug on its way
 // out. The prose lives on the error path, where RemuxDemuxer names it.
 //
-// The six: a codec off the allowlist, no grid, a sub-grid gap, an unanswerable
-// tail, a source whose Delay or grid is outside the timeline this rung computes
-// in, and a codec config the reprime cannot rewrite. The last is worth naming
+// The seven: a codec off the allowlist, no grid, a sub-grid gap, an
+// unanswerable tail, a source whose Delay or grid is outside the timeline this
+// rung computes in, an HE-AAC span that does not keep the stream head, and a
+// codec config the reprime cannot rewrite. The last is worth naming
 // because it looks like it should be an error and is not: a config this rung
 // cannot parse is one the demuxer built and the decoder still can, so the honest
 // answer is to hand the request to a rung that decodes rather than to refuse it

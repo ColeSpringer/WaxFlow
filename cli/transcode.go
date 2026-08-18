@@ -40,14 +40,15 @@ func clippingNote(w io.Writer, res *waxflow.TranscodeResult) {
 
 // isMP4Container reports whether an output written by format with this
 // container override goes through the mp4 muxer: the one path that embeds tags
-// in moov at Begin and so takes the mp4-specific ReplayGain patch. AAC also
-// rides in adts (elementary) and mka (Matroska), which are NOT MP4: patching
-// those as MP4 would fail and delete the output. ALAC is always MP4.
+// in moov at Begin and so takes the mp4-specific ReplayGain patch. The AAC
+// family also rides in adts (elementary) and mka (Matroska), which are NOT
+// MP4: patching those as MP4 would fail and delete the output. ALAC is
+// always MP4.
 func isMP4Container(format, container string) bool {
 	if format == "alac" {
 		return true
 	}
-	return format == "aac" && (container == "" ||
+	return (format == "aac" || format == "he-aac") && (container == "" ||
 		container == waxflow.ContainerProgressive || container == waxflow.ContainerFragmented)
 }
 
@@ -126,7 +127,7 @@ with true-peak limiting, dither).`,
 			if containerName == "" {
 				if _, c, ok := waxflow.OutputContainerForExt(ext); ok {
 					containerName = c
-				} else if outFormat == "aac" && ext == "aac" {
+				} else if (outFormat == "aac" || outFormat == "he-aac") && ext == "aac" {
 					containerName = "adts"
 				}
 			}
@@ -411,7 +412,7 @@ with true-peak limiting, dither).`,
 	// hand-written list had already fallen a format behind.
 	cmd.Flags().StringVar(&formatName, "format", "",
 		fmt.Sprintf("output format: %s (default: from output extension)", strings.Join(waxflow.OutputFormats(), ", ")))
-	cmd.Flags().StringVar(&containerName, "container", "", "container override where the format has one: adts for aac, progressive/fragmented for aac/alac (flat vs CMAF MP4), mka/webm for opus/aac/flac/wav, ogg for flac (default: the format's native container; a bare .aac output implies adts, and an mp4-family file output is progressive, the form players and taggers expect)")
+	cmd.Flags().StringVar(&containerName, "container", "", "container override where the format has one: adts for aac/he-aac, progressive/fragmented for aac/he-aac/alac (flat vs CMAF MP4), mka/webm for opus/aac/flac/wav, ogg for flac (default: the format's native container; a bare .aac output implies adts, and an mp4-family file output is progressive, the form players and taggers expect)")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite the output if it exists")
 	cmd.Flags().IntVar(&rate, "rate", 0, "output sample rate in Hz (default: source rate)")
 	cmd.Flags().IntVar(&channels, "channels", 0, "output channel count: 1 or 2 (default: source layout)")
@@ -427,7 +428,7 @@ with true-peak limiting, dither).`,
 	cmd.Flags().IntVar(&opusComplexity, "opus-complexity", 5, "Opus encoder complexity 0-10, quality vs speed (opus output only)")
 	cmd.Flags().BoolVar(&opusVBR, "opus-vbr", false, "encode Opus at variable bit rate around --opus-bitrate (opus output only)")
 	cmd.Flags().StringVar(&opusSignal, "opus-signal", "auto", "Opus content hint: auto, voice, or music (opus output only)")
-	cmd.Flags().IntVar(&aacBitrate, "aac-bitrate", 128, "AAC target bit rate in kbit/s (aac output only)")
+	cmd.Flags().IntVar(&aacBitrate, "aac-bitrate", 0, "AAC target bit rate in kbit/s (aac and he-aac outputs; default: the encoder's, 128 for aac and 64 for he-aac)")
 	cmd.Flags().StringVar(&loudness, "loudness", "", "analyze: two-pass loudness (exact gain to the ReplayGain reference, measured RG tags on the output); the gain is measured after any --channels downmix")
 	cmd.Flags().BoolVar(&noTags, "no-tags", false, "skip the metadata passthrough (tags, chapters, art)")
 	return cmd

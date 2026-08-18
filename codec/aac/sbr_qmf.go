@@ -19,15 +19,14 @@ import (
 // bands are hard-replaced at the crossover. Twiddles are designed in
 // float64 and rounded once, and the kernels avoid FMA, so output is a pure
 // function of input on every platform. The encoder-side 64-band analysis
-// and the downsampled 32-band synthesis were pruned as dead code; recover
-// them from git when a stage needs them.
+// (sbr_encqmf.go) shares the prototype and its post-twiddle covers this
+// bank's: e^(-j*pi*(2k+1)/256) at 32 bands is that table's lower half.
 
 var (
 	qmfPlan64  = fft.NewPlan(64)
 	qmfPlan128 = fft.NewPlan(128)
 
 	qmfAnaPre32  [64][2]float32  // e^(-j*pi*n/64), conjugated pre-twiddle
-	qmfAnaPost32 [32][2]float32  // e^(-j*pi*(2k+1)/256), applied to conj(FFT)
 	qmfSynPre64  [64][2]float32  // e^(+j*255*pi*k/128), applied to conj(X)
 	qmfSynPost64 [128][2]float32 // (1/64)*e^(j*(pi*n/128 - 255*pi/256))
 )
@@ -36,10 +35,6 @@ func init() {
 	for n := range 64 {
 		s, c := math.Sincos(math.Pi * float64(n) / 64)
 		qmfAnaPre32[n] = [2]float32{float32(c), float32(-s)}
-	}
-	for k := range 32 {
-		s, c := math.Sincos(-math.Pi * float64(2*k+1) / 256)
-		qmfAnaPost32[k] = [2]float32{float32(c), float32(s)}
 	}
 	for k := range 64 {
 		s, c := math.Sincos(255 * math.Pi * float64(k) / 128)
@@ -100,7 +95,7 @@ func (a *qmfAnalyzer32) analyze(in []float32, outRe, outIm []float32) {
 	}
 	qmfPlan64.Transform(fr[:], fi[:], sr[:], si[:])
 	for k := range 32 {
-		c, d := qmfAnaPost32[k][0], qmfAnaPost32[k][1]
+		c, d := qmfAnaPost64[k][0], qmfAnaPost64[k][1]
 		outRe[k] = fr[k]*c + fi[k]*d
 		outIm[k] = fr[k]*d - fi[k]*c
 	}
