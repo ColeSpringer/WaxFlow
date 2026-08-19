@@ -38,7 +38,7 @@ func newSplitCmd(flavor Flavor) *cobra.Command {
 	var cueFile string
 	var atFlag []string
 	var formatName, containerName string
-	var flacLevel int
+	var flacLevel, wavpackLevel int
 	var force bool
 	var noTags bool
 	var dryRun bool
@@ -187,7 +187,8 @@ or filtered at any seam.`,
 			sp := splitter{
 				e: e, log: logger, src: src, hint: srcHint,
 				outFormat: outFormat, container: containerName,
-				flacLevel: optLevel, force: force, ofN: ofN,
+				flacLevel: optLevel, wavpackLevel: wavpackLevel,
+				force: force, ofN: ofN,
 				mapper: label.NewLogged(logger), containerTags: info.Tags,
 			}
 			if !noTags {
@@ -211,6 +212,7 @@ or filtered at any seam.`,
 	cmd.Flags().StringVar(&formatName, "format", "", "output format (default: flac, which keeps the split lossless)")
 	cmd.Flags().StringVar(&containerName, "container", "", "container override where the format has one")
 	cmd.Flags().IntVar(&flacLevel, "flac-level", 5, "FLAC compression level 0-8, size vs speed (flac output only)")
+	cmd.Flags().IntVar(&wavpackLevel, "wavpack-level", 0, "WavPack compression level: 1 fast, 2 normal, 3 high, 4 very high (wavpack output only; default: the encoder's, 2)")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing outputs")
 	cmd.Flags().BoolVar(&noTags, "no-tags", false, "do not carry the source's metadata onto the pieces")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the pieces and their sample ranges without writing anything")
@@ -395,15 +397,16 @@ func atPieces(at []string, total int64) ([]piece, error) {
 // piece does not vary, resolved once, so that writing one takes the piece
 // and its path rather than a dozen arguments in a row.
 type splitter struct {
-	e         *waxflow.Engine
-	log       *slog.Logger
-	src       container.Source
-	hint      string
-	outFormat string
-	container string
-	flacLevel int
-	force     bool
-	ofN       int
+	e            *waxflow.Engine
+	log          *slog.Logger
+	src          container.Source
+	hint         string
+	outFormat    string
+	container    string
+	flacLevel    int
+	wavpackLevel int
+	force        bool
+	ofN          int
 
 	// The metadata half: albumTags and art ride onto every piece at mux
 	// time, tagInfo carries what a tag list cannot (art again, for the
@@ -468,11 +471,9 @@ func withoutTimeline(info *meta.Info) *meta.Info {
 
 // embedsTags reports whether the piece's muxer writes the tags itself, which
 // is what the metadata post-pass has to skip so it does not write them a
-// second time (or a conflicting one). It is the transcode command's set, for
-// the reasons kept there: the MP4 muxers embed an ilst in moov, and the Ogg
-// muxer embeds the comment header at Begin.
+// second time (or a conflicting one).
 func (s *splitter) embedsTags() bool {
-	return isMP4Container(s.outFormat, s.container) || s.container == "ogg"
+	return waxflow.OutputEmbedsTags(s.outFormat, s.container)
 }
 
 // writePiece transcodes one span of the source to its own file. It returns
@@ -518,11 +519,12 @@ func (s *splitter) writePiece(cmd *cobra.Command, path string, p piece) (*waxflo
 	}
 
 	res, err := s.e.TranscodeMedia(cmd.Context(), sl, out, waxflow.TranscodeOptions{
-		Format:    s.outFormat,
-		Container: s.container,
-		FLACLevel: s.flacLevel,
-		Tags:      tags,
-		Art:       s.art,
+		Format:       s.outFormat,
+		Container:    s.container,
+		FLACLevel:    s.flacLevel,
+		WavPackLevel: s.wavpackLevel,
+		Tags:         tags,
+		Art:          s.art,
 	})
 	if err != nil {
 		return fail(err)

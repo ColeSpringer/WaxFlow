@@ -13,6 +13,7 @@ import (
 	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/flacn"
+	"github.com/colespringer/waxflow/container/internal/apev2"
 )
 
 // fixture loads a committed testdata file.
@@ -268,6 +269,31 @@ func appendedID3v2() []byte {
 	body := make([]byte, 10)
 	tag := append([]byte("ID3\x04\x00\x10\x00\x00\x00\x0A"), body...)
 	return append(tag, []byte("3DI\x04\x00\x10\x00\x00\x00\x0A")...)
+}
+
+// TestTagThatSpellsID3v1 pins the trailer peel's order, the sibling of the
+// same test in container/wv. "APETAGEX" spells TAG at bytes three to five, so
+// an APEv2 tag of exactly 131 bytes puts that T where the ID3v1 probe looks:
+// probing ID3v1 first peeled 128 bytes out of the middle of the tag, left
+// three bytes of it standing where audio should end, and dropped the frames
+// before them as trailing garbage -- 1611 samples gone, with STREAMINFO still
+// reporting the full length so nothing in the report showed it either. The tag
+// is sized to that length deliberately and the size is asserted, so a value
+// edited later cannot quietly stop covering the case.
+func TestTagThatSpellsID3v1(t *testing.T) {
+	tag := apev2.Build([]apev2.Tag{{Key: "TITLE",
+		Value: "01234567890123456789012345678901234567890123456789012"}})
+	if len(tag) != 131 {
+		t.Fatalf("the fixture tag renders to %d bytes; this test needs exactly 131", len(tag))
+	}
+	tagged := append(append([]byte(nil), fixture(t, "sine-s16.flac")...), tag...)
+	d, err := flacn.NewDemuxer(container.BytesSource(tagged), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, samples := walk(t, d); samples != 15435 {
+		t.Fatalf("walked %d samples, want 15435 (audio lost to the trailer)", samples)
+	}
 }
 
 // TestTrailingTags verifies the last frame survives every recognized

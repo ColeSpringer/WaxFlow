@@ -106,6 +106,9 @@ type Request struct {
 	// FLACLevel is the FLAC compression level (1..8, -1 for 0); 0 keeps
 	// the encoder default.
 	FLACLevel int `json:"flacLevel,omitempty"`
+	// WavPackLevel is the WavPack compression level (1 fast through 4 very
+	// high); 0 keeps the encoder default.
+	WavPackLevel int `json:"wavpackLevel,omitempty"`
 
 	// Silence adds the silence map to an analyze job, from the same
 	// decode the loudness measurement runs on. Analyze-only.

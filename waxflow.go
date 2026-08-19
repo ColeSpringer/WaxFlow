@@ -28,6 +28,7 @@ import (
 	"github.com/colespringer/waxflow/container/mpa"
 	"github.com/colespringer/waxflow/container/ogg"
 	"github.com/colespringer/waxflow/container/riff"
+	"github.com/colespringer/waxflow/container/wv"
 	"github.com/colespringer/waxflow/dsp"
 	"github.com/colespringer/waxflow/dsp/dither"
 	"github.com/colespringer/waxflow/dsp/gain"
@@ -467,6 +468,7 @@ type planOpts struct {
 	GainDB          float64
 	Dynamics        gain.Preset
 	FLACLevel       int
+	WavPackLevel    int
 	MP3Bitrate      int
 	MP3VBR          bool
 	OpusBitrate     int
@@ -492,6 +494,7 @@ func planOptsOf(opts TranscodeOptions) planOpts {
 		GainDB:          opts.GainDB,
 		Dynamics:        opts.Dynamics,
 		FLACLevel:       opts.FLACLevel,
+		WavPackLevel:    opts.WavPackLevel,
 		MP3Bitrate:      opts.MP3Bitrate,
 		MP3VBR:          opts.MP3VBR,
 		OpusBitrate:     opts.OpusBitrate,
@@ -1314,6 +1317,58 @@ var outputs = []output{
 			},
 		},
 	},
+	{
+		name:      "wavpack",
+		exts:      []string{"wv"},
+		live:      true,
+		mediaType: "audio/x-wavpack",
+		// headerBytes stays 0: size estimates are gated on a fixed
+		// bytesPerFrame, which VBR lossless lacks. A .wv file has no
+		// pre-audio header to account for either.
+		codecID: codec.WavPack,
+		adjust: func(spec *dsp.ChainSpec, src audio.Format, opts TranscodeOptions) {
+			spec.FrameSize = wavpack.BlockSamples
+			if opts.BitDepth != 0 {
+				return // explicit depth; plan validates it against WavPack's set
+			}
+			// WavPack holds integer PCM at 8/16/24/32 bits. A float source
+			// with no depth requested quantizes to 24, which carries the whole
+			// float32 mantissa; an integer source at another depth snaps up to
+			// the nearest container width, losslessly widened.
+			if src.Type == audio.Float {
+				spec.BitDepth = 24
+			} else if d := wavpackSnapDepth(src.BitDepth); d != src.BitDepth {
+				spec.BitDepth = d
+			}
+			// No fold to stereo: WavPack here is a lossless output, and one
+			// that silently dropped four channels would be lying about what it
+			// holds (the alac rule, not the lossy rows').
+		},
+		plan: func(f audio.Format, opts TranscodeOptions) (string, int, int, error) {
+			level, err := wavpackLevel(opts)
+			if err != nil {
+				return "", 0, 0, err
+			}
+			if _, err := wavpack.NewEncoder(f, &wavpack.EncoderOptions{Level: level}); err != nil {
+				return "", 0, 0, err
+			}
+			return wavpack.EncoderVersion(level), 0, 0, nil
+		},
+		encode: func(f audio.Format, opts TranscodeOptions) (codec.Encoder, error) {
+			level, err := wavpackLevel(opts)
+			if err != nil {
+				return nil, err
+			}
+			return wavpack.NewEncoder(f, &wavpack.EncoderOptions{Level: level})
+		},
+		mux: func(_ container.Track, opts TranscodeOptions, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
+			return wv.NewMuxer(dst, &wv.MuxerOptions{Tags: opts.Tags}), nil
+		},
+		// container stays nil: the only other wrapper WavPack rides in is
+		// Matroska's A_WAVPACK4, which our mka muxer does not write, so any
+		// override is refused rather than silently ignored.
+		// hls stays nil: WavPack has no CMAF/HLS segmented form.
+	},
 }
 
 // logImplicitDownmix says out loud that the chain folded channels the caller
@@ -1402,7 +1457,40 @@ func aacContainerMediaType(name string) (string, error) {
 const (
 	ContainerProgressive = "progressive"
 	ContainerFragmented  = "fragmented"
+	// ContainerOgg is the flac row's Ogg wrapper override.
+	ContainerOgg = "ogg"
 )
+
+// OutputEmbedsTags reports whether the muxer for a (format, container) pair
+// writes the track's tags itself, so a tagging post-pass must skip that output
+// rather than write a second, conflicting set over the top.
+//
+// Three do. The MP4 muxers embed an ilst in moov, which is also the only way
+// the fragmented form gets tags at all: the mapper reads that shape but
+// refuses to rewrite it. The Ogg muxer embeds the comment header at Begin.
+// The WavPack muxer writes the APEv2 block after the audio, which is likewise
+// the only way a .wv gets tags, since waxlabel cannot identify the format and
+// a post-pass on one fails rather than adding anything. Every other output,
+// incl. Matroska (.mka/.webm), defers to the post-pass: the mka muxer accepts
+// Tags but does not emit them (see container/mka.MuxerOptions), so if it ever
+// starts writing them at Begin, add it here.
+//
+// Exported for the same reason the container names above are: three callers
+// need it (the CLI's transcode and split, the job runner), each had spelled it
+// out separately, and the job runner's spelling had fallen a format behind.
+// WavPack is keyed on the format because its row has no container of its own,
+// which is what made a container-keyed predicate silently never fire.
+func OutputEmbedsTags(format, container string) bool {
+	switch {
+	case format == "wavpack", container == ContainerOgg:
+		return true
+	case format == "alac":
+		return true
+	case format == "aac", format == "he-aac":
+		return container == "" || container == ContainerProgressive || container == ContainerFragmented
+	}
+	return false
+}
 
 // mp4MediaType is what an mp4-family output's plan reports. The file-output
 // rule keys on it rather than on a format name, so a new mp4-family row is
@@ -1594,6 +1682,37 @@ func flacLevel(opts TranscodeOptions) (int, error) {
 	}
 	return 0, waxerr.New(waxerr.CodeInvalidRequest,
 		fmt.Sprintf("waxflow: FLAC level %d outside -1..8", opts.FLACLevel))
+}
+
+// wavpackLevel resolves TranscodeOptions.WavPackLevel: the zero value keeps
+// the encoder default (normal), and the four named levels pass through. Unlike
+// the FLAC scale this needs no sentinel, since WavPack's levels are named
+// modes numbered from one rather than a range starting at zero.
+func wavpackLevel(opts TranscodeOptions) (int, error) {
+	switch {
+	case opts.WavPackLevel == WavPackLevelDefault:
+		return wavpack.DefaultEncoderLevel, nil
+	case opts.WavPackLevel >= WavPackLevelFast && opts.WavPackLevel <= WavPackLevelVeryHigh:
+		return opts.WavPackLevel, nil
+	}
+	return 0, waxerr.New(waxerr.CodeInvalidRequest,
+		fmt.Sprintf("waxflow: WavPack level %d outside %d..%d",
+			opts.WavPackLevel, WavPackLevelFast, WavPackLevelVeryHigh))
+}
+
+// wavpackSnapDepth rounds an integer bit depth up to the nearest WavPack
+// container width. It is the identity on those widths, so a source already at
+// one needs no override.
+func wavpackSnapDepth(d int) int {
+	switch {
+	case d <= 8:
+		return 8
+	case d <= 16:
+		return 16
+	case d <= 24:
+		return 24
+	}
+	return 32
 }
 
 // DefaultLiveFormat returns the output format that format=auto resolves

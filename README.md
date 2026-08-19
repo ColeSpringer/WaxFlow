@@ -3,8 +3,8 @@
 Self-hosted, **pure-Go**, on-the-fly audio transcoding: request -> decode -> DSP -> encode -> stream, tuned for time-to-first-audio, sample-exact seeking, and flaky
 mobile networks.
 
-The codecs (Opus, MP3, AAC-LC, HE-AAC v1, Vorbis, FLAC, ALAC, and WAV encoders,
-plus a wider decoder set) are written from scratch for Go 1.26 and published as public,
+The codecs (Opus, MP3, AAC-LC, HE-AAC v1, Vorbis, FLAC, ALAC, WavPack, and WAV
+encoders, plus a wider decoder set) are written from scratch for Go 1.26 and published as public,
 **stdlib-only** packages under this module, CI-enforced by `make depcheck`,
 so anyone can import them.
 
@@ -27,14 +27,17 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   in M4A, implicit in ADTS),
   Vorbis (product-lattice VQ residue books, perceptual
   coupled-stereo classification; ODG-proxy gate green), FLAC (levels 0-8,
-  smaller than `flac -5` at level 5), ALAC (bit-exact round trip), and
+  smaller than `flac -5` at level 5), ALAC (bit-exact round trip),
+  WavPack (four compression levels, each a wider search over candidate
+  decorrelation cascades; at parity with libwavpack on the official
+  suite's own audio, and ahead of it at the fast setting), and
   WAV/AIFF PCM.
 - **Decoders / inputs**: FLAC (bit-exact on the IETF suite), WAV, AIFF,
   MP3, AAC-LC, HE-AAC v1 and v2 (SBR+PS, ffmpeg-differential-verified),
   and ALAC in MP4/M4A/M4B, ADTS (implicit HE-AAC detected), Opus (all
   RFC 6716/8251 conformance vectors pass), Vorbis, Ogg, Matroska/WebM,
   WavPack (bit-exact on the official test suite: 8- to 32-bit integers,
-  the three stereo block modes, APEv2 tags). Sample-exact
+  the three stereo block modes, APEv2 tags; encodes too). Sample-exact
   seeking everywhere, gapless honored per format (LAME tag, iTunSMPB,
   edit lists, Ogg pre-skip/end-trim, Matroska CodecDelay).
 - **DSP**: Kaiser windowed-sinc resampling (`hq`/`fast`), BS.775
@@ -162,8 +165,8 @@ write keeps a reload from reading a half-written file and `400`ing.
   (`--json` for the schemaVersion'd machine shape, identical to `GET
   /probe`; `--strict` to treat tolerated input damage as errors)
 - `waxflow transcode <in> <out>`: local one-shot file-to-file transcode
-  through the same engine the daemon uses (`--format wav|aiff|flac|mp3|aac|he-aac|alac|opus|vorbis`,
-  `--flac-level`, `--mp3-bitrate`, default from the output extension;
+  through the same engine the daemon uses (`--format wav|aiff|flac|mp3|aac|he-aac|alac|opus|vorbis|wavpack`,
+  `--flac-level`, `--wavpack-level`, `--mp3-bitrate`, default from the output extension;
   `--force` to overwrite). An mp4-family output (`.m4a`, `.m4b`, alac)
   is written flat: a file can satisfy the header back-patch that form
   needs, and it is the shape players and taggers expect. The fragmented
@@ -171,7 +174,9 @@ write keeps a reload from reading a half-written file and `400`ing.
   (tags, chapters, cover art, lyrics) passes through onto the output
   automatically (`--no-tags` to skip); `--loudness analyze` measures the
   source, applies the exact gain to the ReplayGain reference, and writes
-  measured RG tags on the output
+  measured RG tags on the output. Ogg-FLAC and WavPack outputs get a
+  projection there rather than a measurement, and say so: their muxer
+  takes its tags before the encode and cannot be patched afterward.
 - `waxflow split <in> <dir>`: cut a single-file rip into one output per
   track, from a CUE sheet (`--cue album.cue`) or explicit source-sample
   offsets (`--at`). Cut points are samples either way: a sheet's `MM:SS:FF`
@@ -222,8 +227,8 @@ Video; enhanced SBR and xHE (HE-AAC v1 and v2 *decode* ships,
 downsampled SBR and ADTS implicit signalling included, and v1/v2
 *encoding* ships as `format=he-aac`, v2 behind `hev2`);
 WMA/APE **encoding**; WMA/APE
-decoding; WavPack **encoding** (decoding ships; hybrid, float, DSD, and
-more than two channels are refused by name); DASH manifests (the CMAF segments are already DASH-compatible);
+decoding; WavPack hybrid, float, DSD, and more than two channels (encode
+and decode both refuse them by name); DASH manifests (the CMAF segments are already DASH-compatible);
 DRM/HLS-AES; Opus PLC; CD ripping; any database (WaxBin owns cataloging);
 tag *editing* (WaxLabel owns it; WaxFlow only maps and passes metadata);
 Icecast/radio ingest; waveform peaks (WaxBin has them);
@@ -249,6 +254,8 @@ make goldens         # regenerate muxer golden files (review the diff)
   ADR-0001 (clean-room policy) before touching codec code.
 - Encoder/decoder acceptance thresholds are pinned in
   [docs/quality-gates.md](docs/quality-gates.md); gates only ratchet up.
+- Defects that are understood but deliberately unfixed, with the reason,
+  are in [docs/deferred-work.md](docs/deferred-work.md).
 - ffmpeg is a **test oracle only** (differential CI job), never a runtime
   dependency.
 - Releases are tag-driven: pushing `vX.Y.Z` publishes binaries + SHA256SUMS

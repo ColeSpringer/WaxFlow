@@ -152,6 +152,22 @@ var aliases = map[string]string{
 	"RECORD DATE":  "RECORDINGDATE",
 }
 
+// apeSpelling is the write direction of aliases: the APEv2 spellings for the
+// canonical keys whose names, not merely whose case, differ from it. Writing
+// the canonical name instead puts the field where no reader looks -- ffmpeg's
+// APEv2 converter lists exactly these four, and the reference tools and
+// foobar2000 spell them the same way. Keys that differ only in case are left
+// alone; readers fold case, and there is no evidence to spend a table on.
+//
+// RECORDINGDATE has two aliases pointing at it and only one way back: Year is
+// the documented APEv2 key, and Record Date the rarer synonym.
+var apeSpelling = map[string]string{
+	"TRACKNUMBER":   "Track",
+	"DISCNUMBER":    "Disc",
+	"RECORDINGDATE": "Year",
+	"ALBUMARTIST":   "Album Artist",
+}
+
 // canonical uppercases an item key and maps it onto the canonical vocabulary,
 // returning "" for a key no muxer could write back. The accepted range is
 // container.ValidTagKey's, restated rather than imported: this package sits
@@ -170,4 +186,95 @@ func canonical(key string) string {
 		return alias
 	}
 	return up
+}
+
+// Tag is one item to write. It mirrors container.Tag without importing it, for
+// the same reason canonical restates ValidTagKey: this package sits under
+// container and the two fields cost less than the dependency.
+type Tag struct {
+	Key   string
+	Value string
+}
+
+// maxWriteBytes bounds a rendered tag. The engine passes a small descriptive
+// set; anything past this is dropped rather than growing a file's trailer
+// without limit.
+const maxWriteBytes = 48 << 10
+
+// Build renders tags as a whole APEv2 block: header, items, footer. It returns
+// nil when nothing renders, which is the caller's signal to write no trailer at
+// all rather than an empty one.
+//
+// The header is optional in the format and written anyway: a reader peeling
+// trailers backward finds the footer's declared extent, and a header at the
+// other end of it is what confirms that extent rather than trusting it. Size
+// and StartsTag are the reading half of exactly that.
+func Build(tags []Tag) []byte {
+	// An APEv2 key is unique within a tag: a multi-valued field is one item
+	// whose values are NUL-separated, which is the form Parse reads back. One
+	// item per value instead is not merely non-canonical but lossy, since a
+	// reader looking the key up by name returns the first match and never sees
+	// the rest. Grouping is by the canonical name, so two source spellings of
+	// one field (YEAR and RECORDINGDATE) merge rather than emitting the
+	// duplicate key the format forbids. First-seen order is kept, since map
+	// iteration would break byte determinism.
+	type item struct {
+		key    string
+		values []string
+	}
+	var grouped []item
+	at := make(map[string]int, len(tags))
+	for _, t := range tags {
+		name := canonical(t.Key)
+		if name == "" || t.Value == "" {
+			continue
+		}
+		if i, ok := at[name]; ok {
+			grouped[i].values = append(grouped[i].values, t.Value)
+			continue
+		}
+		key := name
+		if spelled, ok := apeSpelling[name]; ok {
+			key = spelled
+		}
+		at[name] = len(grouped)
+		grouped = append(grouped, item{key: key, values: []string{t.Value}})
+	}
+
+	items, count := []byte(nil), uint32(0)
+	for _, g := range grouped {
+		value := strings.Join(g.values, "\x00")
+		if len(items)+FooterLen+9+len(g.key)+len(value) > maxWriteBytes {
+			// Skip just the item that does not fit: one oversized value must
+			// not erase the small descriptive tags after it.
+			continue
+		}
+		items = binary.LittleEndian.AppendUint32(items, uint32(len(value)))
+		items = binary.LittleEndian.AppendUint32(items, 0) // UTF-8 text
+		items = append(items, g.key...)
+		items = append(items, 0)
+		items = append(items, value...)
+		count++
+	}
+	if count == 0 {
+		return nil
+	}
+	// The size field covers the items and the footer, not the header, which is
+	// what Size reads back.
+	size := uint32(len(items) + FooterLen)
+	out := preamble(size, count, flagHasHeader|flagIsHeader)
+	out = append(out, items...)
+	return append(out, preamble(size, count, flagHasHeader)...)
+}
+
+// preamble renders the 32-byte structure that opens and closes a tag; the two
+// differ only in the header bit.
+func preamble(size, count, flags uint32) []byte {
+	b := make([]byte, 0, FooterLen)
+	b = append(b, "APETAGEX"...)
+	b = binary.LittleEndian.AppendUint32(b, 2000) // APEv2
+	b = binary.LittleEndian.AppendUint32(b, size)
+	b = binary.LittleEndian.AppendUint32(b, count)
+	b = binary.LittleEndian.AppendUint32(b, flags)
+	return append(b, make([]byte, 8)...) // reserved
 }

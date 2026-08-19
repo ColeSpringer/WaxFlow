@@ -212,6 +212,58 @@ keg-only, so point the oracles at it explicitly or put it ahead on PATH).
 - Size: corpus total <= **1.05x** ffmpeg's ALAC encoder.
 - >= **80x** realtime.
 
+### WavPack
+- `decode(encode(x)) == x` bit-exact at every level, depth (8/16/24/32),
+  and channel count, including the paths a plain fixture never reaches:
+  the shift field for a source narrower than its container, the extension
+  stream for one wider than the coder's range, dual-mono blocks coded
+  false-stereo, and a stream that switches between the two mid-file.
+- Two independent decoders read our files back: ffmpeg's, sample-for-sample
+  with `ffprobe` agreeing on the shape, and **libwavpack's own** via
+  `wvunpack -v` (its stream verification) plus a decode compared against the
+  source. The second is not redundant. A decoder only reads the header
+  fields it needs, and both ours and ffmpeg's ignore the block magnitude
+  field; a 32-bit stream that stated the nominal depth there round-tripped
+  through both of them perfectly and was refused outright by the reference.
+  `wvunpack` is the only reader that checks everything we write, so it is
+  the gate 32-bit output is held to.
+- Levels are search breadth, not a fixed cascade: each level tries a
+  superset of the previous one's candidate decorrelation chains and keeps
+  the smallest per block. Candidates are scored by **coding them**, so the
+  ladder is ordered **to the byte** across shapes and depths, not within a
+  tolerance: a deeper level runs the shallower one's candidates and cannot
+  come out larger. Scoring by a proxy for coded length instead cost up to
+  4% on a sustained tone at the default level, which the old within-1%
+  wording accommodated rather than caught.
+- Each of the four per-block optimizations (false stereo, the joint-stereo
+  matrix, the LSB shift, the 32-bit extension) has a test asserting its flag
+  **fires** on material that should trigger it. Joint stereo shipped
+  disabled on every block a stream ever contained, and round-trip, ffmpeg
+  and `wvunpack -v` all passed throughout: a stream that never takes an
+  optimization is still a correct stream.
+- A digitally silent block costs the blocks after it **nothing**: silence is
+  dual-mono, so it crosses into the false-stereo coding mode and back, and
+  the two modes' carried state is held side by side rather than rebuilt.
+  Rebuilding cost the following blocks up to 7%, and leading silence,
+  trailing silence and inter-track gaps are ordinary things for a stream to
+  contain.
+- Size against **libwavpack** at the matching setting, on the real audio of
+  the official suite (8 files, 8- to 32-bit, mono and stereo): **-2.0%** at
+  fast, **-0.1%** at normal, **+0.5%** at high, **+1.0%** at very high.
+  Parity at the default, ahead at the shallow end, and about a percent
+  behind where the reference's own analysis goes deeper than our candidate
+  pool reaches. Not a pinned gate (a lossless codec's gate is
+  bit-exactness), recorded so a regression has a number to fail against.
+- The synthetic corpus is kept for the tonal cases real music underweights,
+  and is **not** the size reference: on pure partials the same encoder reads
+  14-19% ahead of libwavpack, which says more about the signal than about
+  either encoder.
+- >= **50x** realtime at the default level (162x measured on the noise worst
+  case, 296x on a tone; very high is about 61x). Scoring candidates by
+  coding them is also what made this roughly twice as fast as scoring them
+  by a log-magnitude proxy, since that proxy's table search was the hottest
+  loop in the encoder.
+
 ### Opus: CELT/music
 - Every bitstream decodes via libopus AND our decoder; the harness carries
   the range coder's final state per packet, so the reference decoder
@@ -439,7 +491,7 @@ Portable build, per core: decode FLAC >=**300x** / MP3 >=150x /
 AAC >=**150x** / HE-AAC >=**150x** / Opus >=**150x** / Vorbis >=80x /
 WavPack >=**200x**;
 encode FLAC >=**150x** / ALAC >=80x / MP3 >=40x / AAC >=20x /
-HE-AAC >=**20x** / Opus >=**30x**; resampler HQ >=200x. The bolded
+HE-AAC >=**20x** / Opus >=**30x** / WavPack >=**50x**; resampler HQ >=200x. The bolded
 floors were ratcheted at the v1.0 bench pass against the post-FFT
 measurements (decode FLAC 537-934x, AAC 260x, Opus 289-522x; encode FLAC
 230-250x at level 5, Opus 55-67x), leaving 2x or more headroom for
@@ -447,7 +499,13 @@ slower CI runners; the HE-AAC pair was ratcheted at the encoder stage's
 first bench pass (decode 357x, encode 39x on the noise worst case after
 the review round's per-AU headers and gate legs landed).
 Watched by the nightly `bench` job (benchstat against the previous
-night's numbers, cache-carried).
+night's numbers, cache-carried). The WavPack encode floor is for the
+default level, which is where the delivery path runs; the deeper levels
+buy their size with search breadth and are the offline-job regime (very
+high measures a bit over a third of the default's factor). It is left at
+50x rather than ratcheted to the encoder's current 162x worst case,
+because that speedup came from a change made for size, and a floor set
+against it would be ratcheting on a number nothing was tuned for.
 
 The floors are triaged from that job's numbers, not asserted by the default
 suite: a shared runner measures its own scheduling noise as much as the codec,

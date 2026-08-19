@@ -706,6 +706,7 @@ func (req Request) TranscodeOptions(gainDB float64, profile resample.Profile) wa
 		BitDepth:        req.Bits,
 		GainDB:          gainDB,
 		FLACLevel:       req.FLACLevel,
+		WavPackLevel:    req.WavPackLevel,
 		MP3Bitrate:      req.Bitrate * 1000,
 		OpusBitrate:     req.Bitrate * 1000,
 		AACBitrate:      req.Bitrate * 1000,
@@ -788,6 +789,9 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 	// naming the flat form (as every merge does) writes a file the engine
 	// reads back perfectly well, and used to get an estimate anyway.
 	fragmentedMP4 := isMP4 && opts.Container != mp4ProgressiveContainer
+	// The engine owns which muxers write their own tags; those outputs skip
+	// the mapping post-pass below and take their ReplayGain up front.
+	embedsTags := waxflow.OutputEmbedsTags(opts.Format, opts.Container)
 
 	analyzeLoudness := req.Loudness == "analyze"
 	var gainDB float64
@@ -854,7 +858,16 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 		}
 	}
 
-	if analyzeLoudness && isMP4 {
+	// The true-peak limiter engages for positive gain or a downmix (its matrix
+	// can sum past unity) and caps the peak at its ceiling, so a derived peak
+	// has to be capped too rather than reading back the raw fold's overshoot.
+	// The downmix test reads the plan's resolved width, not the request's ch
+	// field: a fold the row applied on its own is invisible to the request,
+	// and missing it publishes a peak the limiter clamped.
+	peakLimited := gainDB > 0 || opts.Dynamics != gain.PresetOff ||
+		plan.Format.Channels < probe.Default().Fmt.Channels
+	switch {
+	case analyzeLoudness && isMP4:
 		// Fixed-width placeholders for the MP4 muxer to embed at Begin;
 		// the measured values patch in place after the encode. Only the
 		// MP4 path patches, so only it gets placeholders: any other
@@ -865,6 +878,16 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 		opts.Tags = append(opts.Tags,
 			container.Tag{Key: "REPLAYGAIN_TRACK_GAIN", Value: meta.FormatGain(0)},
 			container.Tag{Key: "REPLAYGAIN_TRACK_PEAK", Value: meta.FormatPeak(0)})
+	case analyzeLoudness && embedsTags:
+		// Ogg and WavPack take their tags at Begin and cannot be patched
+		// afterward, and the post-pass that would otherwise carry the
+		// measured values is skipped for them. Since the source's own
+		// ReplayGain was just stripped, writing nothing here would leave the
+		// output worse off than untouched, so embed the projection now. The
+		// measurement still runs below and still reaches the job's Analysis;
+		// only the file gets the estimate.
+		outLUFS, outTP := deriveOutputLoudness(srcRes, gainDB, peakLimited)
+		opts.Tags = append(opts.Tags, meta.ReplayGainTags(outLUFS, outTP)...)
 	}
 
 	outName := "out." + outputExt(opts)
@@ -898,13 +921,7 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 			// past unity), and caps the derived peak at its ceiling; pass
 			// that so a negative-gain downmix's peak is capped rather than
 			// reading back the raw fold's overshoot.
-			//
-			// The downmix test reads the plan's resolved width, not the ch
-			// field: a fold the row applied on its own is invisible to the
-			// request, and missing it publishes a peak the limiter clamped.
-			limited := gainDB > 0 || opts.Dynamics != gain.PresetOff ||
-				plan.Format.Channels < probe.Default().Fmt.Channels
-			outLUFS, outTP = deriveOutputLoudness(srcRes, gainDB, limited)
+			outLUFS, outTP = deriveOutputLoudness(srcRes, gainDB, peakLimited)
 		} else {
 			// Measure the finished output so the written ReplayGain
 			// values describe exactly the bytes a player gets (the
@@ -942,14 +959,15 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 
 	// The mapping post-pass writes the full set (tags, pictures,
 	// chapters, synced lyrics, measured ReplayGain) onto formats the
-	// mapper can rewrite; MP4 already got everything at Begin plus the
-	// patches above. A post-pass failure is a warning, not a dead job:
+	// mapper can rewrite; the outputs whose muxer embedded them itself
+	// (MP4, which also took the patches above, and Ogg and WavPack) are
+	// skipped, since a second write there conflicts or fails. A post-pass failure is a warning, not a dead job:
 	// the audio is finished and correct. The job context applies here
 	// like everywhere else: the mapper's write is atomic, a shutdown
 	// leaves the job running on disk to rerun from zero (post-pass
 	// included), and a delete is discarding the directory anyway, so an
 	// interrupted Apply never loses anything a rerun does not redo.
-	if r.cfg.Meta != nil && !isMP4 && tagInfo != nil {
+	if r.cfg.Meta != nil && !embedsTags && tagInfo != nil {
 		if err := r.cfg.Meta.Apply(ctx, outPath, tagInfo, rg); err != nil {
 			r.warn(j.ID, "metadata post-pass: "+err.Error())
 		}

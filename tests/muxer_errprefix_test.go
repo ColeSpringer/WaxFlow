@@ -14,6 +14,7 @@ import (
 	"github.com/colespringer/waxflow/container/mpa"
 	"github.com/colespringer/waxflow/container/ogg"
 	"github.com/colespringer/waxflow/container/riff"
+	"github.com/colespringer/waxflow/container/wv"
 )
 
 // Muxer refusals travel to end users as verbatim text just like demuxer
@@ -34,6 +35,7 @@ func TestMuxerErrorsUsePublicContainerNames(t *testing.T) {
 		{"mka", func(d io.Writer) container.Muxer { return mka.NewMuxer(d, nil) }},
 		{"adts", func(d io.Writer) container.Muxer { return adts.NewMuxer(d) }},
 		{"mp3", func(d io.Writer) container.Muxer { return mpa.NewMuxer(d, &mpa.MuxerOptions{}) }},
+		{"wavpack", func(d io.Writer) container.Muxer { return wv.NewMuxer(d, nil) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.build(io.Discard).Begin(nil)

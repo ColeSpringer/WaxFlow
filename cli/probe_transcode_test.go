@@ -847,3 +847,109 @@ func fileBytes(t *testing.T, path string) int64 {
 	}
 	return fi.Size()
 }
+
+// TestTranscodeWavPackLoudnessEmbedsRG is the Ogg-FLAC case above for the
+// other output whose muxer takes its tags at Begin. There was no wavpack arm
+// in the pre-embed switch, so --loudness analyze applied the gain, spent a
+// second full decode measuring the output, and handed the result to a mapper
+// that cannot write a .wv: the values were printed as if recorded and then
+// dropped. Since the source's own ReplayGain is stripped whenever a gain is
+// applied, that left the output strictly worse off than doing nothing.
+func TestTranscodeWavPackLoudnessEmbedsRG(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	out := filepath.Join(dir, "out.wv")
+	writeWAV(t, in, 48000)
+
+	code, _, errOut := run(t, "transcode", "--loudness", "analyze", in, out)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, errOut)
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := waxflow.New().Probe(container.BytesSource(raw), "wv", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"REPLAYGAIN_TRACK_GAIN", "REPLAYGAIN_TRACK_PEAK"} {
+		if len(info.Tags[key]) != 1 {
+			t.Errorf("output carries %s = %v, want one value", key, info.Tags[key])
+		}
+	}
+}
+
+// TestTranscodeWavPack drives the wavpack output through the real command:
+// extension inference from .wv, the level flag, its validation, and a
+// bit-exact ramp round trip, which is the whole promise of a lossless output.
+func TestTranscodeWavPack(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	writeWAV(t, in, 4800)
+
+	outPath := filepath.Join(dir, "out.wv")
+	code, out, errOut := run(t, "transcode", in, outPath, "--wavpack-level", "3")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, errOut)
+	}
+	if !strings.Contains(out, "4800 samples") {
+		t.Errorf("output = %q", out)
+	}
+	// The post-pass skip is keyed on the format, since the wavpack row has no
+	// container of its own: keyed on the container it never fired, and every
+	// run printed "output not taggable" while the mux had already written the
+	// tags. Exit code and stdout both looked fine, which is why this asserts
+	// on stderr.
+	if strings.Contains(errOut, "post-pass") {
+		t.Errorf("a format whose muxer writes its own tags ran the post-pass anyway: %s", errOut)
+	}
+
+	f, err := os.Open(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	src, err := container.FileSource(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	med, err := waxflow.New().OpenStream(src, "wv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	info := med.Info()
+	if info.Container != "wavpack" || info.Default().Samples != 4800 {
+		t.Fatalf("output probe = %+v", info)
+	}
+	fm := info.Default().Fmt
+	dst := audio.Get(fm, audio.StandardChunk)
+	defer audio.Put(dst)
+	pos := int64(0)
+	for {
+		err := med.ReadChunk(dst)
+		if err != nil {
+			break
+		}
+		for c := 0; c < fm.Channels; c++ {
+			for i, v := range dst.ChanI(c) {
+				if want := testutil.RampAtI(fm, c, pos+int64(i)); v != want {
+					t.Fatalf("ch%d sample %d = %d, want %d", c, pos+int64(i), v, want)
+				}
+			}
+		}
+		pos += int64(dst.N)
+	}
+	if pos != 4800 {
+		t.Fatalf("decoded %d frames, want 4800", pos)
+	}
+
+	code, _, errOut = run(t, "transcode", in, filepath.Join(dir, "bad.wv"), "--wavpack-level", "9")
+	if code != 2 {
+		t.Errorf("level 9 exit = %d, want 2 (invalid), stderr: %s", code, errOut)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "bad.wv")); err == nil {
+		t.Error("failed transcode left an output file behind")
+	}
+}

@@ -88,17 +88,18 @@ type jobRequest struct {
 	// Request: the job is its cut points, so re-reading a sheet at run time
 	// would let an edit between creation and execution change what the job
 	// was accepted as.
-	Cue       string `json:"cue,omitempty"`
-	Format    string `json:"format,omitempty"`
-	Container string `json:"container,omitempty"`
-	Rate      int    `json:"rate,omitempty"`
-	Ch        int    `json:"ch,omitempty"`
-	Bits      int    `json:"bits,omitempty"`
-	Bitrate   int    `json:"bitrate,omitempty"`
-	HEv2      bool   `json:"hev2,omitempty"`
-	Gain      string `json:"gain,omitempty"`
-	Loudness  string `json:"loudness,omitempty"`
-	FLACLevel int    `json:"flacLevel,omitempty"`
+	Cue          string `json:"cue,omitempty"`
+	Format       string `json:"format,omitempty"`
+	Container    string `json:"container,omitempty"`
+	Rate         int    `json:"rate,omitempty"`
+	Ch           int    `json:"ch,omitempty"`
+	Bits         int    `json:"bits,omitempty"`
+	Bitrate      int    `json:"bitrate,omitempty"`
+	HEv2         bool   `json:"hev2,omitempty"`
+	Gain         string `json:"gain,omitempty"`
+	Loudness     string `json:"loudness,omitempty"`
+	FLACLevel    int    `json:"flacLevel,omitempty"`
+	WavPackLevel int    `json:"wavpackLevel,omitempty"`
 
 	Silence            bool    `json:"silence,omitempty"`
 	SilenceThresholdDB float64 `json:"silenceThresholdDb,omitempty"`
@@ -128,6 +129,7 @@ func requestFrom(body jobRequest) *jobs.Request {
 		Gain:               body.Gain,
 		Loudness:           body.Loudness,
 		FLACLevel:          body.FLACLevel,
+		WavPackLevel:       body.WavPackLevel,
 		Silence:            body.Silence,
 		SilenceThresholdDB: body.SilenceThresholdDB,
 		SilenceMinSeconds:  body.SilenceMinSeconds,
@@ -254,7 +256,7 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 	if req.Type == jobs.TypeAnalyze {
 		if body.Format != "" || body.Container != "" || body.Rate != 0 || body.Ch != 0 ||
 			body.Bits != 0 || body.Bitrate != 0 || body.HEv2 || body.Gain != "" ||
-			body.Loudness != "" || body.FLACLevel != 0 {
+			body.Loudness != "" || body.FLACLevel != 0 || body.WavPackLevel != 0 {
 			return bad("type analyze takes src and the silence fields")
 		}
 		// A threshold with no silence:true would be silently ignored, which

@@ -31,10 +31,7 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	// deliberately deferred. Each entry is deleted by the change that lands its
 	// capability, so the list is the burn-down checklist and is empty once
 	// every codec encodes+decodes and every container demuxes+muxes.
-	symmetryGaps := map[string]string{
-		"wavpack-encode": "the WavPack encoder and its outputs row land in the next stage",
-		"wv-mux":         "the .wv muxer lands with the encoder, in the next stage",
-	}
+	symmetryGaps := map[string]string{}
 
 	decodes := map[codec.ID]bool{}
 	for _, id := range format.Decoders() {
@@ -52,13 +49,10 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	// codecGaps names, per codec, the allowlist entry that excuses its
 	// decoder-without-encoder imbalance in the codec-level loop below;
 	// containerGaps does the same, per input container, for the
-	// demuxer-without-muxer loop.
-	codecGaps := map[codec.ID]string{
-		codec.WavPack: "wavpack-encode",
-	}
-	containerGaps := map[string]string{
-		"wavpack": "wv-mux",
-	}
+	// demuxer-without-muxer loop. Both are empty: every codec that decodes
+	// also encodes, and every container that demuxes is muxed back.
+	codecGaps := map[codec.ID]string{}
+	containerGaps := map[string]string{}
 
 	// open reports, for each named gap, whether it is still open, computed from
 	// the live tables so the predicate tracks the real code and cannot go stale.
@@ -220,15 +214,16 @@ func codecWritesContainer(id codec.ID, container string) bool {
 // write side reconciles against the read side. Rows reach other containers
 // through their Container override, checked separately.
 var rowDefaultContainer = map[string]string{
-	"wav":    "wav",
-	"opus":   "ogg",
-	"aiff":   "aiff",
-	"flac":   "flac",
-	"mp3":    "mp3",
-	"aac":    "mp4",
-	"he-aac": "mp4",
-	"alac":   "mp4",
-	"vorbis": "ogg",
+	"wav":     "wav",
+	"opus":    "ogg",
+	"aiff":    "aiff",
+	"flac":    "flac",
+	"mp3":     "mp3",
+	"aac":     "mp4",
+	"he-aac":  "mp4",
+	"alac":    "mp4",
+	"vorbis":  "ogg",
+	"wavpack": "wavpack",
 }
 
 // mp4DemuxCodecs is the set of codecs the mp4 demuxer reads. It is the one

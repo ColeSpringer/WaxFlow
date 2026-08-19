@@ -209,10 +209,15 @@ func (d *Demuxer) parse() error {
 func (d *Demuxer) stripTrailers() error {
 	end := d.w.DataEnd()
 	for range maxTrailers {
-		if e := end - id3v1Len; e >= 0 && string(d.w.BytesAt(e, 3)) == "TAG" {
-			end = e
-			continue
-		}
+		// APEv2 is tried first because it is the stronger recognition: an
+		// eight-byte magic with a length behind it, against ID3v1's three
+		// bytes at a fixed offset. The order is not a preference but a
+		// correctness fix, since "APETAGEX" spells TAG at bytes three to
+		// five: an APEv2 tag of exactly 131 bytes puts that T where the
+		// ID3v1 probe looks, and peeling 128 bytes off the middle of it
+		// leaves three bytes of tag standing where audio should end. When
+		// the two really are stacked, ID3v1 comes last and the APEv2 probe
+		// finds nothing, so this order costs that case nothing.
 		if e := end - apev2.FooterLen; e >= 0 {
 			n, hasHeader := apev2.Size(d.w.BytesAt(e, apev2.FooterLen))
 			// The tag has to leave a block behind it, and when its footer
@@ -228,6 +233,10 @@ func (d *Demuxer) stripTrailers() error {
 					continue
 				}
 			}
+		}
+		if e := end - id3v1Len; e >= 0 && string(d.w.BytesAt(e, 3)) == "TAG" {
+			end = e
+			continue
 		}
 		break
 	}

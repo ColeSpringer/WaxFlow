@@ -540,6 +540,7 @@ func TestSplitPieceExtension(t *testing.T) {
 	}{
 		{"flac in matroska", []string{"--container", "mka"}, "01.mka"},
 		{"alac", []string{"--format", "alac"}, "01.m4a"},
+		{"wavpack", []string{"--format", "wavpack"}, "01.wv"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out := filepath.Join(dir, tc.name)
@@ -563,6 +564,39 @@ func TestSplitPieceExtension(t *testing.T) {
 				t.Errorf("%s does not hold what its name says: %v", tc.want, err)
 			}
 		})
+	}
+}
+
+// TestSplitWavPackWritesItsOwnTags pins the post-pass skip. The wv muxer
+// writes the APEv2 block itself, and waxlabel cannot identify a .wv at all, so
+// a post-pass over one fails and prints a warning on every piece while adding
+// nothing. The tags still have to arrive, which is the other half of the
+// claim: skipping the pass is only correct because the mux already did it.
+func TestSplitWavPackWritesItsOwnTags(t *testing.T) {
+	dir := t.TempDir()
+	raw := rampWAVBytes(t, 44100, 2, 100_000)
+	wav := filepath.Join(dir, "in.wav")
+	if err := os.WriteFile(wav, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "pieces")
+	code, _, errOut := run(t, "split", wav, out, "--format", "wavpack", "--at", "50000")
+	if code != 0 {
+		t.Fatalf("split exit = %d: %s", code, errOut)
+	}
+	if strings.Contains(errOut, "post-pass") {
+		t.Errorf("a format whose muxer writes its own tags ran the post-pass anyway: %s", errOut)
+	}
+	piece, err := os.ReadFile(filepath.Join(out, "02.wv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := waxflow.New().Probe(container.BytesSource(piece), "wv", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Tags["TRACKNUMBER"]; len(got) != 1 || got[0] != "2" {
+		t.Errorf("piece 2 carries TRACKNUMBER %v, want [2]; the mux wrote no tags", got)
 	}
 }
 

@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"bytes"
+	"encoding/binary"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,4 +72,45 @@ func WvUnpackVerify(t testing.TB, path string) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("wvunpack -v %s: %v\n%s", path, err, errOut.String())
 	}
+}
+
+// WvUnpackDecodeFile decodes a .wv with the reference decoder and returns the
+// data chunk of the WAV it writes.
+//
+// It is the strongest check available on an encoder: `wvunpack -v` says the
+// reference accepts the stream, and this says the samples it gets back are the
+// ones that went in. Neither our decoder nor ffmpeg's reads every header field,
+// so a block can be wrong in a way both of them shrug off; the reference reads
+// all of it.
+func WvUnpackDecodeFile(t testing.TB, path string) []byte {
+	t.Helper()
+	out := filepath.Join(t.TempDir(), "wvunpack.wav")
+	var errOut bytes.Buffer
+	cmd := exec.Command(WvUnpackTool(t), "-y", "-q", path, "-o", out)
+	cmd.Stderr = &errOut
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("wvunpack %s: %v\n%s", path, err, errOut.String())
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return WAVData(t, raw)
+}
+
+// WAVData returns a canonical WAV's data chunk.
+func WAVData(t testing.TB, raw []byte) []byte {
+	t.Helper()
+	for i := 12; i+8 <= len(raw); {
+		n := int(binary.LittleEndian.Uint32(raw[i+4:]))
+		if string(raw[i:i+4]) == "data" {
+			if i+8+n > len(raw) {
+				t.Fatalf("WAV data chunk of %d bytes overruns the %d-byte file", n, len(raw))
+			}
+			return raw[i+8 : i+8+n]
+		}
+		i += 8 + n + n&1
+	}
+	t.Fatal("WAV has no data chunk")
+	return nil
 }

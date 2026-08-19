@@ -77,13 +77,22 @@ func synth(b *audio.Buffer, seed uint64) {
 }
 
 // makeWAV builds an in-memory WAV with the given wire config and returns
-// the file plus the source-of-truth buffer.
+// the file plus the source-of-truth buffer. Its samples are full-scale white
+// noise, which is the right default for a codec test (nothing about it is
+// predictable, so nothing hides behind a lucky signal) and the wrong one for a
+// compression measurement, which wants makeWAVOf.
 func makeWAV(t *testing.T, cfg pcm.Config, channels, frames int, seed uint64) ([]byte, *audio.Buffer) {
+	t.Helper()
+	return makeWAVOf(t, cfg, channels, frames, func(b *audio.Buffer) { synth(b, seed) })
+}
+
+// makeWAVOf is makeWAV with the caller's own material.
+func makeWAVOf(t *testing.T, cfg pcm.Config, channels, frames int, fill func(*audio.Buffer)) ([]byte, *audio.Buffer) {
 	t.Helper()
 	f := cfg.PCMFormat(48000, channels, audio.DefaultLayout(channels))
 	src := audio.Get(f, frames)
 	src.N = frames
-	synth(src, seed)
+	fill(src)
 
 	enc, err := pcm.NewEncoder(cfg, f)
 	if err != nil {
@@ -391,7 +400,7 @@ func (onlyWriter) Write(p []byte) (int, error) { return len(p), nil }
 // TestOutputTable pins the writer-side capability table: names, extension
 // mapping (both spellings), and its agreement with the read-side exts.
 func TestOutputTable(t *testing.T) {
-	if got := waxflow.OutputFormats(); len(got) != 9 || got[0] != "wav" || got[1] != "opus" || got[2] != "vorbis" || got[3] != "aiff" || got[4] != "flac" || got[5] != "mp3" || got[6] != "aac" || got[7] != "he-aac" || got[8] != "alac" {
+	if got := waxflow.OutputFormats(); len(got) != 10 || got[0] != "wav" || got[1] != "opus" || got[2] != "vorbis" || got[3] != "aiff" || got[4] != "flac" || got[5] != "mp3" || got[6] != "aac" || got[7] != "he-aac" || got[8] != "alac" || got[9] != "wavpack" {
 		t.Errorf("OutputFormats() = %v", got)
 	}
 	tests := []struct{ ext, want string }{
@@ -407,6 +416,7 @@ func TestOutputTable(t *testing.T) {
 		// file and answers the same format.
 		{"alac", ""}, {"m4a", "aac"}, {".M4A", "aac"}, {"aac", "aac"},
 		{"m4b", "aac"}, {".M4B", "aac"},
+		{"wv", "wavpack"}, {".WV", "wavpack"},
 		{"xyz", ""}, {"", ""},
 	}
 	for _, tt := range tests {
@@ -430,6 +440,7 @@ func TestOutputExt(t *testing.T) {
 		{"flac", "", "flac"},
 		{"mp3", "", "mp3"},
 		{"aac", "", "m4a"},
+		{"wavpack", "", "wv"},
 		// alac claims no extension (aac took m4a) and writes an m4a all the
 		// same. The read direction cannot say so and does not have to.
 		{"alac", "", "m4a"},

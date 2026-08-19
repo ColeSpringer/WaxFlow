@@ -1697,3 +1697,30 @@ func TestProbeFallbackExcludesLyrics(t *testing.T) {
 		t.Errorf("the probe body carries a %d-byte lyric sheet inside tags", len(vs[0]))
 	}
 }
+
+// TestStreamTranscodeWavPack is the delivery half of the WavPack encoder: the
+// row is live, so /stream must serve it whole, with the media type the
+// registry answers to on the way back in and no size hint (VBR lossless has
+// none). The engine reference is the same-parameters transcode, so a stream
+// that differs by a byte is a delivery-path bug rather than an encoder one.
+func TestStreamTranscodeWavPack(t *testing.T) {
+	env := newTestEnv(t, nil)
+	want := engineReference(t, filepath.Join(env.root, "sine.wav"), waxflow.TranscodeOptions{Format: "wavpack"})
+
+	resp := env.get(t, "/stream?src=lib/sine.wav&format=wavpack", nil)
+	body := readBody(t, resp)
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "audio/x-wavpack" {
+		t.Fatalf("live transcode = %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	if got := resp.Header.Get("X-Estimated-Content-Length"); got != "" {
+		t.Fatalf("size hint %q on a VBR stream, want none (size is signal-dependent)", got)
+	}
+	if !bytes.Equal(body, want) {
+		t.Fatalf("streamed %d bytes, engine produced %d", len(body), len(want))
+	}
+	// A lossless output takes no bit rate, and the refusal is the
+	// unsupported-format one every lossless row gets rather than a bad-request.
+	if resp := env.get(t, "/stream?src=lib/sine.wav&format=wavpack&bitrate=128", nil); resp.StatusCode != 415 {
+		t.Errorf("bitrate on a lossless format = %d, want 415", resp.StatusCode)
+	}
+}

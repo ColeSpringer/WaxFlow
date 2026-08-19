@@ -242,7 +242,7 @@ func (s *blockState) unpackBlock(h BlockHeader, block []byte, out []int32) (int,
 			decorrMonoPass(&s.terms[i], buf)
 		}
 		for _, v := range buf {
-			crc = crc*3 + uint32(v)
+			crc = crcMono(crc, v)
 		}
 	} else {
 		for i := range s.terms[:s.nterm] {
@@ -254,7 +254,7 @@ func (s *blockState) unpackBlock(h BlockHeader, block []byte, out []int32) (int,
 				buf[i+1] -= buf[i] >> 1
 				buf[i] += buf[i+1]
 			}
-			crc += (crc << 3) + (uint32(buf[i]) << 1) + uint32(buf[i]) + uint32(buf[i+1])
+			crc = crcStereo(crc, buf[i], buf[i+1])
 		}
 	}
 	if err := s.fixup(buf); err != nil {
@@ -446,7 +446,7 @@ func (s *blockState) fixup(buf []int32) error {
 				}
 				v = synthesizeLowBits(v, zeros, ones, dups)
 				buf[i] = v
-				crc = crc*9 + uint32(v&0xffff)*3 + uint32((v>>16)&0xffff)
+				crc = crcExtension(crc, v)
 			}
 			if crc != s.crcWVX {
 				return malformed("block at sample %d fails its extension CRC", s.h.BlockIndex)

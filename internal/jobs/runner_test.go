@@ -1283,6 +1283,63 @@ func TestFIFOSingleSlot(t *testing.T) {
 	}
 }
 
+// failingMapper stands in for the real waxlabel mapper on a format it cannot
+// identify: every Apply is an error. That is exactly what a .wv gets, so a job
+// targeting one must not call it at all.
+type failingMapper struct{ calls int }
+
+func (m *failingMapper) Read(context.Context, container.Source, string, meta.ReadOptions) (*meta.Info, error) {
+	return &meta.Info{Tags: map[string][]string{"TITLE": {"job"}}}, nil
+}
+
+func (m *failingMapper) Apply(context.Context, string, *meta.Info, []container.Tag) error {
+	m.calls++
+	return waxerr.New(waxerr.CodeUnsupportedFormat, "meta: output not taggable")
+}
+
+// TestWavPackJobSkipsPostPass pins the third call site of the embeds-tags
+// rule. The CLI's transcode and split both skip the mapping post-pass for the
+// outputs whose muxer wrote the tags itself; the job runner gated only on MP4,
+// so every wavpack job called a mapper that cannot identify a .wv and finished
+// with the failure in its warnings. The tags still have to arrive, which is
+// the other half of the claim: skipping the pass is only correct because the
+// mux already did it.
+func TestWavPackJobSkipsPostPass(t *testing.T) {
+	res, ref, srcID := openLib(t)
+	m := &failingMapper{}
+	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, Meta: m})
+
+	j, err := r.Create(Request{
+		Type: TypeTranscode, Src: ref, SourceID: srcID,
+		Format: "wavpack", Loudness: "analyze",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := waitJob(t, r, j.ID, StateDone)
+	if m.calls != 0 {
+		t.Errorf("the post-pass ran %d times on a format whose muxer writes its own tags", m.calls)
+	}
+	for _, w := range done.Warnings {
+		if strings.Contains(w, "post-pass") {
+			t.Errorf("job warned %q", w)
+		}
+	}
+	// And the measured loudness reaches both the job and the file: the
+	// analysis carries the measurement, the file the projection the muxer
+	// could take at Begin.
+	if done.Analysis == nil || done.Analysis.ReplayGainTrackGain == "" {
+		t.Fatalf("analysis: %+v", done.Analysis)
+	}
+	raw, err := os.ReadFile(r.OutputPath(done, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte("REPLAYGAIN_TRACK_GAIN")) {
+		t.Error("wavpack output carries no ReplayGain, and no post-pass can add it later")
+	}
+}
+
 // TestLoudnessAnalyzeNonMP4OmitsPlaceholders pins the placeholder
 // gating: only the MP4 path patches ReplayGain placeholders after the
 // encode, so a non-MP4 output must never embed them at the muxer. With

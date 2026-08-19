@@ -44,12 +44,14 @@ const (
 	flagMono         = 0x4        // one channel of data in this block
 	flagHybrid       = 0x8        // hybrid (lossy or wvc-corrected) mode
 	flagJointStereo  = 0x10       // mid/side matrix applied
+	flagCrossDecorr  = 0x20       // the cascade includes cross-channel passes
 	flagFloatData    = 0x80       // IEEE 32-bit float samples
 	flagInt32Data    = 0x100      // extended integer handling
 	flagInitialBlock = 0x800      // first block of a multichannel segment
 	flagFinalBlock   = 0x1000     // last block of a multichannel segment
 	flagShiftLSB     = 13         // shift amount, 5 bits
 	flagShiftMask    = 0x1f << 13 // zero LSBs stripped before coding
+	flagMagLSB       = 18         // magnitude of the largest sample, 5 bits
 	flagSrateLSB     = 23         // sample-rate index, 4 bits
 	flagSrateMask    = 0xf << 23
 	flagFalseStereo  = 0x40000000 // stereo block whose two channels are equal
@@ -200,6 +202,37 @@ func ParseBlockHeader(b []byte) (BlockHeader, error) {
 	return h, nil
 }
 
+// MaxSamples is the longest stream a block header can state, and so the
+// longest one this package writes. The field is forty bits, but the reference
+// skips every value whose low word would collide with the unknown-length
+// escape and a reader subtracts that skip back off, so the largest count that
+// survives the round trip is 257 short of the field's range rather than one.
+// libwavpack's own cap is the same number for the same reason.
+const MaxSamples = 1<<40 - 257
+
+// MaxRate is the largest sample rate a block can state. Rates outside the
+// fifteen-entry table ride in a sample-rate sub-block, three bytes wide up to
+// this point and four beyond it, with the top bit of the fourth reserved.
+const MaxRate = 1<<31 - 1
+
+// The block CRC's recurrences, one definition each rather than one per
+// direction. Both the encoder and the decoder fold every sample of a block
+// into these, over the samples as they stand after the joint-stereo matrix is
+// undone and before the shift and extension are restored; the extension
+// stream carries its own over the samples it completes. A round trip already
+// catches a divergence (the decoder checks the field it recomputes), but only
+// because the two are the same arithmetic, and that is easier to keep true
+// with nothing to keep in step.
+func crcMono(crc uint32, v int32) uint32 { return crc*3 + uint32(v) }
+
+func crcStereo(crc uint32, l, r int32) uint32 {
+	return crc + (crc << 3) + (uint32(l) << 1) + uint32(l) + uint32(r)
+}
+
+func crcExtension(crc uint32, v int32) uint32 {
+	return crc*9 + uint32(v&0xffff)*3 + uint32((v>>16)&0xffff)
+}
+
 // Audio reports whether the block carries samples; blocks with none hold only
 // metadata (a RIFF trailer, an MD5 signature) and are not packets.
 func (h BlockHeader) Audio() bool { return h.BlockSamples > 0 }
@@ -299,8 +332,8 @@ func (c Config) Format() audio.Format {
 // Validate checks a Config against what this decoder covers.
 func (c Config) Validate() error {
 	switch {
-	case c.Rate <= 0:
-		return malformed("sample rate %d", c.Rate)
+	case c.Rate <= 0 || c.Rate > MaxRate:
+		return malformed("sample rate %d outside 1..%d", c.Rate, MaxRate)
 	case c.Channels < 1 || c.Channels > 2:
 		return unsupported("%d channels: only mono and stereo are supported", c.Channels)
 	case c.BitDepth != 8 && c.BitDepth != 16 && c.BitDepth != 24 && c.BitDepth != 32:

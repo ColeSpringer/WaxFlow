@@ -434,11 +434,15 @@ func (d *Demuxer) findEnd() (end int64, next flac.FrameInfo, nextOK bool, err er
 // re-checks the frame checksum after each peel, so a false recognition
 // costs a retry, never data.
 func (d *Demuxer) stripTrailer(start, end int64) (int64, bool) {
-	if e := end - 128; e >= start+2 {
-		if string(d.w.BytesAt(e, 3)) == "TAG" {
-			return e, true
-		}
-	}
+	// APEv2 goes first because it is the stronger recognition, an eight-byte
+	// magic with a length behind it against ID3v1's three bytes at a fixed
+	// offset, and because the two collide: "APETAGEX" spells TAG at bytes
+	// three to five, so an APEv2 tag of exactly 131 bytes puts that T where
+	// the ID3v1 probe looks. Peeling 128 bytes out of the middle of one
+	// leaves three bytes standing that no later peel recognizes, and the
+	// frames before them are dropped as trailing garbage. Stacked tags put
+	// ID3v1 last, where the APEv2 probe finds nothing, so the order costs
+	// that case nothing.
 	if e := end - 32; e >= start+2 {
 		if f := d.w.BytesAt(e, 32); len(f) == 32 && string(f[:8]) == "APETAGEX" {
 			// Size covers items plus this footer; a set header flag adds
@@ -450,6 +454,11 @@ func (d *Demuxer) stripTrailer(start, end int64) (int64, bool) {
 			if total >= 32 && end-total >= start+2 {
 				return end - total, true
 			}
+		}
+	}
+	if e := end - 128; e >= start+2 {
+		if string(d.w.BytesAt(e, 3)) == "TAG" {
+			return e, true
 		}
 	}
 	if e := end - 10; e >= start+2 {

@@ -57,6 +57,7 @@ func newTranscodeCmd(flavor Flavor) *cobra.Command {
 	var force bool
 	var rate, channels, bits int
 	var flacLevel int
+	var wavpackLevel int
 	var mp3Bitrate int
 	var mp3VBR bool
 	var opusBitrate int
@@ -197,6 +198,7 @@ with true-peak limiting, dither).`,
 				Shaping:         shaping,
 				ResampleProfile: profile,
 				FLACLevel:       optLevel,
+				WavPackLevel:    wavpackLevel,
 				MP3Bitrate:      mp3Bitrate * 1000,
 				MP3VBR:          mp3VBR,
 				OpusBitrate:     opusBitrate * 1000,
@@ -320,6 +322,12 @@ with true-peak limiting, dither).`,
 			// keeping them as one predicate would publish an estimate where a
 			// measurement is there for the reading.
 			fragmentedMP4 := isMP4 && containerName != waxflow.ContainerProgressive
+			// The engine owns which muxers write their own tags; the
+			// post-pass below skips those outputs.
+			embedsTags := waxflow.OutputEmbedsTags(outFormat, containerName)
+			// Of those, the ones that cannot be patched after the encode have
+			// to embed their ReplayGain before it, from an estimate.
+			predictsRG := embedsTags && !isMP4
 			switch {
 			case analyzeLoudness && isMP4:
 				// Unity placeholders, patched with the measured RG by
@@ -327,12 +335,15 @@ with true-peak limiting, dither).`,
 				tags = append(tags,
 					container.Tag{Key: "REPLAYGAIN_TRACK_GAIN", Value: meta.FormatGain(0)},
 					container.Tag{Key: "REPLAYGAIN_TRACK_PEAK", Value: meta.FormatPeak(0)})
-			case analyzeLoudness && containerName == "ogg":
-				// The Ogg muxer embeds the comment header at Begin and cannot be
-				// patched afterward, and the post-pass is skipped for Ogg, so the
-				// measured RG would otherwise be computed and dropped. Embed the
-				// RG predicted from the source loudness and the applied gain now
-				// (the same estimate the MP4 path patches in).
+			case analyzeLoudness && predictsRG:
+				// The Ogg muxer embeds the comment header at Begin and the
+				// WavPack muxer takes its tags there, and neither can be
+				// patched afterward; the post-pass is skipped for both, so the
+				// measured RG would otherwise be computed and dropped. Since
+				// meta.WithoutReplayGain has already stripped the source's own,
+				// writing nothing here is strictly worse than doing nothing at
+				// all. Embed the RG predicted from the source loudness and the
+				// applied gain now (the same estimate the MP4 path patches in).
 				rg, outLUFS := predictedRG(srcRes, gainDB, peakLimited)
 				tags = append(tags, rg...)
 				// Labelled as an estimate: analyzeOutputRG prints the same
@@ -373,26 +384,15 @@ with true-peak limiting, dither).`,
 			// --loudness analyze, and the full metadata set for formats
 			// the mapper can rewrite (MP4 got everything at Begin).
 			var rg []container.Tag
-			if analyzeLoudness && containerName != "ogg" {
-				// Ogg already embedded its predicted RG at Begin (it cannot be
-				// patched); mp4 patches its placeholders here, and post-pass
-				// formats get their measured values written below.
+			if analyzeLoudness && !predictsRG {
+				// Ogg and WavPack already embedded their predicted RG at Begin
+				// (neither can be patched); mp4 patches its placeholders here,
+				// and post-pass formats get their measured values written below.
 				if rg, err = analyzeOutputRG(cmd, e, writePath, extHint(outPath), isMP4, fragmentedMP4, srcRes, gainDB, peakLimited); err != nil {
 					os.Remove(writePath)
 					return err
 				}
 			}
-			// embedsTags names the outputs whose muxer already wrote the tags at
-			// mux time, so the post-pass must skip them to avoid a redundant (or
-			// conflicting) second write. The MP4 muxers embed an ilst in moov,
-			// which is also the only way the fragmented form gets tags at all:
-			// the mapper reads that shape but refuses to rewrite it. The Ogg
-			// muxer embeds the comment header at Begin (and the label mapper has
-			// no Ogg-FLAC writer anyway). Every other output, incl.
-			// Matroska (.mka/.webm), defers to the post-pass: the mka muxer
-			// accepts Tags but does not emit them (see container/mka.MuxerOptions),
-			// so if it ever starts writing tags at Begin, add its containers here.
-			embedsTags := isMP4 || containerName == "ogg"
 			if !noTags && !embedsTags && tagInfo != nil {
 				if aerr := mapper.Apply(cmd.Context(), writePath, tagInfo, rg); aerr != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "metadata: post-pass failed: %v\n", aerr)
@@ -424,6 +424,7 @@ with true-peak limiting, dither).`,
 	cmd.Flags().StringVar(&profileName, "resample-profile", "hq", "resampler quality: hq or fast")
 	cmd.Flags().StringVar(&ditherName, "dither", "tpdf", "dither when reducing depth: tpdf, shaped, or off")
 	cmd.Flags().IntVar(&flacLevel, "flac-level", 5, "FLAC compression level 0-8, size vs speed (flac output only)")
+	cmd.Flags().IntVar(&wavpackLevel, "wavpack-level", 0, "WavPack compression level: 1 fast, 2 normal, 3 high, 4 very high (wavpack output only; default: the encoder's, 2)")
 	cmd.Flags().IntVar(&mp3Bitrate, "mp3-bitrate", 128, "MP3 bit rate in kbit/s: constant, or the quality anchor under --mp3-vbr (mp3 output only)")
 	cmd.Flags().BoolVar(&mp3VBR, "mp3-vbr", false, "encode MP3 at variable bit rate anchored at --mp3-bitrate (mp3 output only)")
 	cmd.Flags().IntVar(&opusBitrate, "opus-bitrate", 96, "Opus target bit rate in kbit/s (opus output only)")

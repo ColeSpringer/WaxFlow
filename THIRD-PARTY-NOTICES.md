@@ -214,6 +214,23 @@ Entries follow this format:
 > reference `wavpack` and `wvunpack` binaries additionally serve as test-only
 > fixture generators and oracles; they never enter the runtime pipeline.
 
+> **codec/wavpack encoder**: original, and deliberately not a port. The
+> encoding side of a lossless codec is under no obligation to match the
+> reference byte for byte, so only the parts the *bitstream* fixes are
+> mirrored, and they are mirrored from our own decoder rather than from
+> libwavpack: the forward decorrelation passes are the algebraic inverses of
+> the ported decode passes, and the entropy writer is the inverse of the
+> ported reader, which is what makes the pair verifiable by round trip. The
+> weight and log quantizers (`store_weight`, and the log form that
+> `wp_exp2s` reads) are the two places the encoder must produce exactly what
+> the decoder's tables consume; `store_weight` is the reference's, and the
+> log direction is computed by searching the ported exponential table rather
+> than porting the reference's second table. Everything else is a design
+> choice of ours with no counterpart in the reference: the block length, the
+> candidate cascades each compression level searches, the adaptation rate,
+> the cost proxy that scores a candidate, the joint-stereo and false-stereo
+> decisions, and the container writer.
+
 > **internal/testutil opus_compare**: `internal/testutil/opuscompare.go` is
 > a Go port of *libopus*'s `src/opus_compare.c` (BSD-3-Clause),
 > https://gitlab.xiph.org/xiph/opus, the RFC 6716 section 6 decoder

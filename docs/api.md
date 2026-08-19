@@ -140,7 +140,7 @@ byte-identical to `waxflow probe --json`.
 
 ## GET /stream
 
-    /stream?src=<ref>&format=auto|wav|flac|alac|mp3|aac|he-aac|opus|vorbis&rate=&ch=&bits=16|24&bitrate=|q=&hev2=&container=&gain=&dynamics=&t=&from=&to=&track=&maxBitRate=
+    /stream?src=<ref>&format=auto|wav|flac|alac|wavpack|mp3|aac|he-aac|opus|vorbis&rate=&ch=&bits=16|24&bitrate=|q=&hev2=&container=&gain=&dynamics=&t=&from=&to=&track=&maxBitRate=
 
 Source references (`src`): `<root>/<relative/path>` under a configured
 library root; `upload:<id>` for a spooled one-shot upload (POST
@@ -167,7 +167,14 @@ Parameters (unknown parameter names are rejected):
   (parametric stereo over a mono SBR core, 32 kbit/s default, stereo
   sources only); `opus` an Ogg-Opus stream (`audio/ogg`, 96 kbit/s
   default, `bitrate`/`q` select it) from the full Opus encoder: SILK,
-  hybrid, and CELT modes with analyser-driven speech/music selection.
+  hybrid, and CELT modes with analyser-driven speech/music selection;
+  `wavpack` a lossless native .wv stream (`audio/x-wavpack`), whose
+  compression level is a job or CLI parameter rather than a /stream one,
+  like FLAC's. Its metadata is an APEv2 block after the audio, written by
+  the muxer itself rather than by the tagging post-pass: text tags only,
+  under APEv2's own key spellings (`Track`, `Year`, `Album Artist`), with
+  multi-valued fields NUL-joined into one item per key as the format
+  requires. Cover art and chapters do not survive a .wv output.
   Other formats
   join as encoders land (`/caps` is the truth). `aiff` exists for jobs but
   has no streaming form: 415. Live FLAC and ALAC streams omit the size hints
@@ -186,9 +193,9 @@ Parameters (unknown parameter names are rejected):
   format can hold (5.1 to `aac`, `mp3` or `opus`, none of which encode
   more than two channels) is **downmixed to stereo** with a BS.775
   matrix, on `/stream` and on HLS alike, and the daemon logs it at
-  `warn`. Lossless outputs refuse instead: `alac` answers 415, because
-  a lossless file that silently dropped four channels would be lying
-  about what it holds. `flac`, `vorbis`, `wav` and `aiff` carry
+  `warn`. Lossless outputs refuse instead: `alac` and `wavpack` answer
+  415, because a lossless file that silently dropped four channels would
+  be lying about what it holds. `flac`, `vorbis`, `wav` and `aiff` carry
   multichannel natively and are untouched. An explicit `ch` is never
   overridden in either direction.
 
@@ -631,7 +638,8 @@ is:
                    {"name": "mp3", "live": true, "exts": ["mp3", "mpga"]},
                    {"name": "aac", "live": true, "exts": ["m4a", "aac", "m4b"]},
                    {"name": "he-aac", "live": true, "exts": []},
-                   {"name": "alac", "live": true, "exts": []}],
+                   {"name": "alac", "live": true, "exts": []},
+                   {"name": "wavpack", "live": true, "exts": ["wv"]}],
       "delivery": {"progressive": true, "hls": true, "hlsFormats": ["opus", "flac", "aac", "he-aac", "alac"],
                    "cutFormats": ["opus", "aac"],
                    "jobs": false, "uploads": false, "pid": false,
@@ -752,13 +760,17 @@ errors decoded to waxerr codes like every other method.
 
 Transcode jobs take the /stream shaping parameters (`format` required,
 plus `container`, `rate`, `ch`, `bits`, `bitrate`, `hev2`, `gain`,
-`flacLevel`)
+`flacLevel`, `wavpackLevel`)
 and, unlike /stream, may target non-streaming formats (`aiff`): job
 outputs are seekable files, so every muxer back-patch applies (exact WAV
 sizes, FLAC seek tables, the MP4 `iTunSMPB` gapless atom). `loudness:
 "analyze"` selects the two-pass form: measure the source, apply the
 exact gain to the ReplayGain reference (replacing `gain`), and write
-measured `REPLAYGAIN_TRACK_*` tags describing the finished output.
+measured `REPLAYGAIN_TRACK_*` tags describing the finished output. Two
+outputs get a projection there instead of a measurement, because their
+muxer takes its tags before the encode and cannot be patched after it:
+Ogg-FLAC and WavPack. The job's `analysis` still carries the measurement
+in both cases; only the file carries the estimate.
 Analyze jobs measure EBU R128 loudness (integrated LUFS, loudness
 range, true peak, sample peak) without producing audio.
 

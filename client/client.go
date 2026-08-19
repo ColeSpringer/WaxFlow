@@ -421,9 +421,10 @@ type JobRequest struct {
 	// Gain and Loudness are transcode-only. Loudness "analyze" selects
 	// the two-pass form (measure, apply the exact ReplayGain-reference
 	// gain, tag the output) and replaces Gain.
-	Gain      string `json:"gain,omitempty"`
-	Loudness  string `json:"loudness,omitempty"`
-	FLACLevel int    `json:"flacLevel,omitempty"`
+	Gain         string `json:"gain,omitempty"`
+	Loudness     string `json:"loudness,omitempty"`
+	FLACLevel    int    `json:"flacLevel,omitempty"`
+	WavPackLevel int    `json:"wavpackLevel,omitempty"`
 
 	// Silence adds the silence map to an analyze job; the two parameters
 	// shape it and are refused without Silence true. Analyze-only.

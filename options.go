@@ -3,6 +3,7 @@ package waxflow
 import (
 	"log/slog"
 
+	"github.com/colespringer/waxflow/codec/wavpack"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/dsp/dither"
 	"github.com/colespringer/waxflow/dsp/gain"
@@ -109,6 +110,13 @@ type TranscodeOptions struct {
 	// the default. Levels trade encode speed for size and never affect
 	// decoded audio.
 	FLACLevel int
+	// WavPackLevel selects the WavPack compression level for wavpack
+	// output: WavPackLevelFast through WavPackLevelVeryHigh literally, and
+	// WavPackLevelDefault (the zero value) for the encoder default, which
+	// is normal. Levels choose how deep a decorrelation cascade each block
+	// runs: they trade encode speed for size and never affect decoded
+	// audio.
+	WavPackLevel int
 	// MP3Bitrate selects the constant bit rate in bits per second for mp3
 	// output; the zero value uses the encoder default (128000). It must be
 	// a legal Layer III CBR rate for the output sample rate. Under MP3VBR
@@ -194,6 +202,22 @@ const (
 	FLACLevelDefault = 0
 	// FLACLevelFastest selects FLAC level 0.
 	FLACLevelFastest = -1
+)
+
+// WavPackLevel spellings. WavPack's levels are named modes rather than a
+// numeric scale, and they are numbered from one, so the zero value means the
+// default with no sentinel needed.
+const (
+	// WavPackLevelDefault keeps the encoder's default level (normal).
+	WavPackLevelDefault = 0
+	// WavPackLevelFast is the shallowest cascade: fastest, largest.
+	WavPackLevelFast = wavpack.LevelFast
+	// WavPackLevelNormal is the default cascade.
+	WavPackLevelNormal = wavpack.LevelNormal
+	// WavPackLevelHigh spends more passes for a smaller file.
+	WavPackLevelHigh = wavpack.LevelHigh
+	// WavPackLevelVeryHigh is the deepest cascade: smallest, slowest.
+	WavPackLevelVeryHigh = wavpack.LevelVeryHigh
 )
 
 // OpusComplexity spellings whose meaning the zero value cannot carry.
