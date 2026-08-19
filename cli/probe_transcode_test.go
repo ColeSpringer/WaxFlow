@@ -14,6 +14,7 @@ import (
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/cli/label"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/riff"
@@ -785,6 +786,56 @@ func TestTranscodeHEAAC(t *testing.T) {
 	}
 	if !bytes.Contains(data, []byte("REPLAYGAIN_TRACK_GAIN")) {
 		t.Error("he-aac MP4 + --loudness analyze output is missing its ReplayGain tag")
+	}
+}
+
+// TestTranscodeHEAACv2 covers --he-v2: the flag reaches the engine (the
+// output stores an AOT-29 config and rides the 32 kb/s default, clearly
+// smaller than v1's 64), and a mono chain under the flag is refused by
+// name rather than silently downgraded.
+func TestTranscodeHEAACv2(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	writeWAV(t, in, 48000)
+
+	v2Out := filepath.Join(dir, "v2.m4a")
+	if code, _, errOut := run(t, "transcode", "--format", "he-aac", "--he-v2", in, v2Out); code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, errOut)
+	}
+	f, err := os.Open(v2Out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	src, err := container.FileSource(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := waxflow.New().Probe(src, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := aac.ParseASC(info.Default().CodecConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.PS || info.Default().Fmt.Channels != 2 {
+		t.Errorf("--he-v2 output = PS %v %v, want an explicit AOT-29 stereo pair", cfg.PS, info.Default().Fmt)
+	}
+
+	v1Out := filepath.Join(dir, "v1.m4a")
+	if code, _, errOut := run(t, "transcode", "--format", "he-aac", in, v1Out); code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, errOut)
+	}
+	if v1, v2 := fileBytes(t, v1Out), fileBytes(t, v2Out); v1 < v2*3/2 {
+		t.Errorf("v1 default (%d bytes) not clearly larger than v2 (%d): the 32k v2 default is not reaching the encoder", v1, v2)
+	}
+
+	if code, _, errOut := run(t, "transcode", "--format", "he-aac", "--he-v2", "--channels", "1", in,
+		filepath.Join(dir, "mono.m4a")); code == 0 {
+		t.Error("--he-v2 with a mono chain succeeded, want a named refusal")
+	} else if !strings.Contains(errOut, "stereo") {
+		t.Errorf("the mono refusal does not name the constraint: %s", errOut)
 	}
 }
 

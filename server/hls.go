@@ -56,8 +56,8 @@ var hlsParamNames = map[string]bool{
 // one timeline.
 var hlsMintParamNames = map[string]bool{
 	"src": true, "tl": true, "format": true, "bitrate": true, "bitrates": true,
-	"bits": true, "rate": true, "ch": true, "gain": true, "dynamics": true,
-	"segDur": true, "from": true, "to": true, "crossfadeSeconds": true,
+	"hev2": true, "bits": true, "rate": true, "ch": true, "gain": true,
+	"dynamics": true, "segDur": true, "from": true, "to": true, "crossfadeSeconds": true,
 }
 
 // hlsSource is one resolved source as a worker needs it. Workers outlive
@@ -189,7 +189,7 @@ func (s *Server) prepareHLS(r *http.Request) (*hlsRequest, error) {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("segment duration yields %d segments (max %d); raise segDur", req.plan.Segments, maxPlaylistSegments))
 	}
-	canonical := canonicalHLSParams(req.plan, req.opts.GainDB, req.opts.Dynamics, descSpan(desc))
+	canonical := canonicalHLSParams(req.plan, req.opts.GainDB, req.opts.Dynamics, descSpan(desc), req.opts.HEAACv2)
 	identity := hlsIdentity(desc, req.members)
 	req.key = cache.NewKey(identity, canonical, req.plan.Versions)
 	req.meta = cache.Meta{
@@ -416,6 +416,9 @@ func (s *Server) planHLSVariant(desc hls.Descriptor, tracks []container.Track, m
 				fmt.Sprintf("bitrate applies to lossy output; %s is lossless", desc.Format)))
 		}
 	}
+	if err := checkHEv2Format(desc.HEv2, desc.Format); err != nil {
+		return fail(err)
+	}
 	g, err := parseGain(desc.Gain, s.defaultGain)
 	if err != nil {
 		return fail(err)
@@ -439,6 +442,8 @@ func (s *Server) planHLSVariant(desc hls.Descriptor, tracks []container.Track, m
 		ResampleProfile: s.profile,
 		MP3Bitrate:      desc.Bitrate * 1000,
 		OpusBitrate:     desc.Bitrate * 1000,
+		AACBitrate:      desc.Bitrate * 1000,
+		HEAACv2:         desc.HEv2,
 	}
 	// The timeline plan is not the single-source plan over a synthetic
 	// track: it also carries the members' decoder revisions and the
@@ -587,9 +592,9 @@ func descSpan(desc hls.Descriptor) span { return span{from: desc.From, to: desc.
 // core canonicalParams shares, plus the segment length that pins the
 // numbering. The hls prefix keeps the key space disjoint from progressive
 // entries.
-func canonicalHLSParams(plan *waxflow.SegmentPlan, gainDB float64, dyn gain.Preset, sp span) string {
+func canonicalHLSParams(plan *waxflow.SegmentPlan, gainDB float64, dyn gain.Preset, sp span, hev2 bool) string {
 	return fmt.Sprintf("hls&%s&segSamples=%d",
-		canonicalCore(&plan.TranscodePlan, gainDB, dyn, sp), plan.SegmentSamples)
+		canonicalCore(&plan.TranscodePlan, gainDB, dyn, sp, hev2), plan.SegmentSamples)
 }
 
 // hlsChildExp is the expiry child URLs (media playlists, init, segments)
@@ -1265,6 +1270,18 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string
 	if v := params["segDur"]; v != "" {
 		if d.SegDur, err = strconv.ParseFloat(v, 64); err != nil {
 			return bad("segDur %q: want seconds", v)
+		}
+	}
+	// Present-but-empty refuses, the same rule /stream applies (and atoi
+	// above applies to the numeric params): a client templating
+	// hev2=${flag} into an empty value would otherwise mint, and POST
+	// /sign would sign, a silently downgraded v1 ladder.
+	if v, ok := params["hev2"]; ok {
+		if v == "" {
+			return bad("hev2 is present but empty; omit it to encode HE-AAC v1")
+		}
+		if d.HEv2, err = strconv.ParseBool(v); err != nil {
+			return bad("hev2 %q: want a boolean", v)
 		}
 	}
 	if v := params["bitrates"]; v != "" {

@@ -55,9 +55,9 @@ func BenchmarkEncodeNoise128(b *testing.B) {
 // The HE-AAC encode floor is 20x realtime per core (docs/quality-gates.md,
 // ratcheted from the plan's 10x at the first bench pass): the QMF
 // analysis, tonality solves, and the 2:1 resampled core all run per frame.
-func benchHEEncode(b *testing.B, src *audio.Buffer, bitrate int) {
+func benchHEEncode(b *testing.B, src *audio.Buffer, opts aac.EncoderOptions) {
 	defer audio.Put(src)
-	enc, err := aac.NewHEEncoder(src.Fmt, &aac.EncoderOptions{Bitrate: bitrate})
+	enc, err := aac.NewHEEncoder(src.Fmt, &opts)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -89,9 +89,22 @@ func heBenchFormat() audio.Format {
 }
 
 func BenchmarkHEEncodeSine64(b *testing.B) {
-	benchHEEncode(b, testutil.Sine(heBenchFormat(), 10*4096, 997, 0.8), 64000)
+	benchHEEncode(b, testutil.Sine(heBenchFormat(), 10*4096, 997, 0.8), aac.EncoderOptions{Bitrate: 64000})
 }
 
 func BenchmarkHEEncodeNoise64(b *testing.B) {
-	benchHEEncode(b, testutil.Noise(heBenchFormat(), 10*4096, 42), 64000)
+	benchHEEncode(b, testutil.Noise(heBenchFormat(), 10*4096, 42), aac.EncoderOptions{Bitrate: 64000})
+}
+
+// The v2 path adds the PS front end (two full-rate analyses, the hybrid
+// extraction, the downmix, one synthesis) ahead of a mono core; it runs
+// against the same 20x floor as v1.
+func BenchmarkHEv2EncodeSine32(b *testing.B) {
+	benchHEEncode(b, testutil.Sine(heBenchFormat(), 10*4096, 997, 0.8),
+		aac.EncoderOptions{Bitrate: 32000, ParametricStereo: true})
+}
+
+func BenchmarkHEv2EncodeNoise32(b *testing.B) {
+	benchHEEncode(b, testutil.Noise(heBenchFormat(), 10*4096, 42),
+		aac.EncoderOptions{Bitrate: 32000, ParametricStereo: true})
 }

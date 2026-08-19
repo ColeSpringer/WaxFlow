@@ -93,6 +93,8 @@ type Request struct {
 	Bits      int    `json:"bits,omitempty"`
 	// Bitrate is the lossy output bit rate in kbit/s.
 	Bitrate int `json:"bitrate,omitempty"`
+	// HEv2 selects HE-AAC v2 for he-aac output, as on /stream.
+	HEv2 bool `json:"hev2,omitempty"`
 	// Gain is the gain parameter as /stream spells it (off, track,
 	// album, or a dB number); empty means the daemon default. Ignored
 	// when Loudness is analyze.

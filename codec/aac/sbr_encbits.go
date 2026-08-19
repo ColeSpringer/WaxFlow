@@ -244,9 +244,10 @@ type sbrEncAnchors struct {
 
 // serializeSBRData emits sbr_single_channel_element or
 // sbr_channel_pair_element (always coupled) into w: everything between
-// the header flag and the extension padding.
+// the header flag and the extension padding. A non-nil ps carries its
+// frame's ps_data in the extended-data block (v2's mono element).
 func serializeSBRData(w *bitWriter, t *sbrFreqTables, chans int,
-	fd *[2]sbrFrameData, anch *[2]sbrEncAnchors) {
+	fd *[2]sbrFrameData, anch *[2]sbrEncAnchors, ps *psEnc) {
 	if chans == 1 {
 		w.writeBits(1, 0) // bs_data_extra
 		writeSBRGrid(w, &fd[0].grid)
@@ -255,7 +256,11 @@ func serializeSBRData(w *bitWriter, t *sbrFreqTables, chans int,
 		writeSBREnvelope(w, t, &fd[0], &anch[0].prevEnv, &anch[0].prevRes, false)
 		writeSBRNoise(w, t, &fd[0], &anch[0].prevNoise, false)
 		writeSBRAddHarmonic(w, t, &fd[0])
-		w.writeBits(1, 0) // bs_extended_data
+		if ps != nil {
+			ps.appendPSExtension(w)
+		} else {
+			w.writeBits(1, 0) // bs_extended_data
+		}
 		return
 	}
 	w.writeBits(1, 0) // bs_data_extra
@@ -276,7 +281,7 @@ func serializeSBRData(w *bitWriter, t *sbrFreqTables, chans int,
 // serializeSBRPayload renders one frame's whole fill-element payload
 // (extension type, header when due, sbr_data) into w, from its start.
 func serializeSBRPayload(w *bitWriter, hdr sbrHeader, sendHeader bool,
-	t *sbrFreqTables, chans int, fd *[2]sbrFrameData, anch *[2]sbrEncAnchors) {
+	t *sbrFreqTables, chans int, fd *[2]sbrFrameData, anch *[2]sbrEncAnchors, ps *psEnc) {
 	w.writeBits(4, extSBRData)
 	if sendHeader {
 		w.writeBits(1, 1)
@@ -284,16 +289,34 @@ func serializeSBRPayload(w *bitWriter, hdr sbrHeader, sendHeader bool,
 	} else {
 		w.writeBits(1, 0)
 	}
-	serializeSBRData(w, t, chans, fd, anch)
+	serializeSBRData(w, t, chans, fd, anch, ps)
 }
 
 // maxFILPayloadBytes is the largest payload the fill element's escaped
 // count can declare: 14 + 255. The worst reachable SBR payload under the
-// current band derivations is ~216 bytes (measured by enumeration), so
-// the ceiling only guards a future derivation change; encodeFrame drops
-// the fill (one concealed frame) rather than let writeFIL's 8-bit escape
-// wrap and desynchronize the whole access unit.
+// current band derivations is ~216 bytes (measured by enumeration), and
+// v2's ps_data can add up to ~83 more, so unlike the v1-only days the
+// ceiling is no longer unreachable in principle (measured v2 peaks run
+// 42-56 bytes total; only adversarial worst-case coding on every band at
+// once approaches it). encodeFrame drops the fill (one concealed frame,
+// with the delta-time mirrors rolled back) rather than let writeFIL's
+// 8-bit escape wrap and desynchronize the whole access unit.
 const maxFILPayloadBytes = 14 + 255
+
+// writeEscapedCount emits a 4-bit count with an 8-bit escape. The two
+// spec forms differ by one and are trivial to cross (which once cost
+// every >=14-byte ps_data its whole SBR payload): the fill element's
+// count (4.4.2.9, filCount's mirror) totals 15 + esc - 1, so base is
+// 14, while the SBR extended-data block's bs_extension_size (4.6.18.3.1,
+// parseSBRExtendedData's mirror) totals 15 + esc, base 15.
+func writeEscapedCount(w *bitWriter, count, base int) {
+	if count < 15 {
+		w.writeBits(4, uint64(count))
+		return
+	}
+	w.writeBits(4, 15)
+	w.writeBits(8, uint64(count-base))
+}
 
 // writeFIL wraps a rendered payload in a fill element: the escaped byte
 // count, the payload bits, and zero padding to the declared count. The
@@ -303,12 +326,7 @@ func writeFIL(w *bitWriter, payload *bitWriter) {
 	bits := payload.bitLen()
 	count := (bits + 7) / 8
 	w.writeBits(3, elFIL)
-	if count < 15 {
-		w.writeBits(4, uint64(count))
-	} else {
-		w.writeBits(4, 15)
-		w.writeBits(8, uint64(count-14))
-	}
+	writeEscapedCount(w, count, 14)
 	for _, b := range payload.buf {
 		w.writeBits(8, uint64(b))
 	}

@@ -709,6 +709,7 @@ func (req Request) TranscodeOptions(gainDB float64, profile resample.Profile) wa
 		MP3Bitrate:      req.Bitrate * 1000,
 		OpusBitrate:     req.Bitrate * 1000,
 		AACBitrate:      req.Bitrate * 1000,
+		HEAACv2:         req.HEv2,
 		ResampleProfile: profile,
 	}
 }

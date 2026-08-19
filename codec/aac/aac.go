@@ -1,8 +1,8 @@
 // Package aac implements AAC-LC, HE-AAC v1, and HE-AAC v2 decoders and
-// AAC-LC and HE-AAC v1 encoders (ISO/IEC 14496-3), written from the
-// specification and Bosi/Goldberg (clean-room: AAC reference codecs were
-// behavioral references only, never opened while implementing; the QMF
-// and SBR/PS parameter tables are spec data).
+// encoders (ISO/IEC 14496-3), written from the specification and
+// Bosi/Goldberg (clean-room: AAC reference codecs were behavioral
+// references only, never opened while implementing; the QMF and SBR/PS
+// parameter tables are spec data).
 //
 // An explicitly signalled SBR config (audioObjectType 5 wrapping AAC-LC,
 // extension rate exactly double the core rate) decodes the full HE-AAC v1
@@ -36,7 +36,10 @@
 // and stereo: Encoder produces AAC-LC, and HEEncoder wraps it into
 // HE-AAC v1 (an SBR fill extension over a half-rate core, explicitly
 // signalled by its AOT-5 config, implicitly by its in-band fills when
-// the stream is re-framed as ADTS).
+// the stream is re-framed as ADTS) or, under
+// EncoderOptions.ParametricStereo, HE-AAC v2 (the stereo pair folded
+// into a phase-aligned mono downmix with ps_data riding the SBR
+// extension, an AOT-29 stream; stereo input only).
 //
 // The remaining limitations are signalled where they can be. Explicit
 // signalling (a hierarchical AOT-5/29 ASC or the 0x2b7 sync extension, the

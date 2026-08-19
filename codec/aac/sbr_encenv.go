@@ -35,9 +35,12 @@ type sbrEnc struct {
 	hdr sbrHeader
 	tbl sbrFreqTables
 
+	// The analysis rings are allocated per channel (newSBREncFrom): a
+	// mono element, which is every v2 encoder, would otherwise carry a
+	// dead 65 KB second channel.
 	ana    [2]qmfAnalyzer64
-	ringRe [2][sbrEncRing][64]float32
-	ringIm [2][sbrEncRing][64]float32
+	ringRe [2]*[sbrEncRing][64]float32
+	ringIm [2]*[sbrEncRing][64]float32
 	pushed int64 // abs index of the next slot to be analyzed
 
 	anch     [2]sbrEncAnchors
@@ -54,6 +57,15 @@ type sbrEnc struct {
 
 	fd      [2]sbrFrameData
 	payload bitWriter
+
+	// Snapshots of the delta-time mirrors taken at the top of payloadFor,
+	// so a dropped payload can roll the encoder back (see rollbackPayload).
+	snapAnch    [2]sbrEncAnchors
+	snapRefresh int
+
+	// ps carries the v2 parametric-stereo extractor for a mono element
+	// whose ps_data rides the extension stream; nil for v1.
+	ps *psEnc
 }
 
 // sbrRefreshInterval is the delta-refresh repetition in access units
@@ -78,6 +90,10 @@ func newSBREnc(extRate, chans, bitrate int) (*sbrEnc, error) {
 // newSBREncFrom builds the extractor over already-derived parameters.
 func newSBREncFrom(chans int, hdr sbrHeader, tbl sbrFreqTables) *sbrEnc {
 	s := &sbrEnc{chans: chans, hdr: hdr, tbl: tbl}
+	for c := 0; c < chans; c++ {
+		s.ringRe[c] = new([sbrEncRing][64]float32)
+		s.ringIm[c] = new([sbrEncRing][64]float32)
+	}
 	for k := range s.srcOf {
 		s.srcOf[k] = patchSource(&s.tbl, k)
 	}
@@ -740,8 +756,37 @@ func (s *sbrEnc) buildFrame(au int64) bool {
 // element's scratch writer and returns it. The caller (the core encoder's
 // frame loop) writes it via writeFIL before the END element.
 func (s *sbrEnc) payloadFor(au int64) *bitWriter {
+	// ps_data is defined on sbr_single_channel_element only; the pair
+	// branch of the serializer has no extension writer, so a coupled
+	// element with a ps set would ship a legal CPE stream whose AOT-29
+	// config promises parametric stereo it never carries. Programmer
+	// error, caught here rather than shipped.
+	if s.ps != nil && s.chans != 1 {
+		panic("aac: parametric stereo requires a mono SBR element")
+	}
+	s.snapAnch = s.anch
+	s.snapRefresh = s.refreshCountdown
 	sendHeader := s.buildFrame(au)
+	if s.ps != nil {
+		s.ps.buildFrame(au)
+	}
 	s.payload.reset()
-	serializeSBRPayload(&s.payload, s.hdr, sendHeader, &s.tbl, s.chans, &s.fd, &s.anch)
+	serializeSBRPayload(&s.payload, s.hdr, sendHeader, &s.tbl, s.chans, &s.fd, &s.anch, s.ps)
 	return &s.payload
+}
+
+// rollbackPayload restores the delta-time mirrors (envelope and noise
+// anchors, the refresh countdown) to their state before the last
+// payloadFor, the encoder-side twin of parsePayload's rollback: a
+// caller that drops the rendered payload (the fill-element size
+// ceiling) hands the decoder a concealed frame, and the decoder keeps
+// its anchors through concealment, so the encoder must too or every
+// delta-time frame until the next refresh decodes against the wrong
+// references. ps_data carries no cross-frame state (freq-coded every
+// frame) and the signal-side smoothers (invfPrev, bwState, sineHold)
+// stay advanced: they mirror smoothed decoder state that reconverges,
+// not exact anchors.
+func (s *sbrEnc) rollbackPayload() {
+	s.anch = s.snapAnch
+	s.refreshCountdown = s.snapRefresh
 }

@@ -126,6 +126,14 @@ type TranscodeOptions struct {
 	// frames are variable-size, so the encoder holds the long-term mean
 	// at the target with a bit reservoir.
 	AACBitrate int
+	// HEAACv2 selects HE-AAC v2 (parametric stereo over a mono SBR core,
+	// an AOT-29 stream) for he-aac output, and drops the zero-AACBitrate
+	// default to 32000. Selection is explicit rather than
+	// bitrate-automatic: an auto threshold would silently switch stereo
+	// coding technology across a bitrate boundary. Stereo sources only;
+	// a mono source is refused at plan time (encode v1 instead). Other
+	// formats ignore it.
+	HEAACv2 bool
 	// OpusComplexity gates the Opus encoder's analysis depth: 1 through 10
 	// literally, OpusComplexityDefault (the zero value) for the encoder
 	// default (5), and OpusComplexityLowest for complexity 0, which needs a

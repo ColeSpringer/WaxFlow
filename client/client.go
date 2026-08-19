@@ -416,6 +416,8 @@ type JobRequest struct {
 	Bits      int    `json:"bits,omitempty"`
 	// Bitrate is the lossy output bit rate in kbit/s.
 	Bitrate int `json:"bitrate,omitempty"`
+	// HEv2 selects HE-AAC v2 for he-aac output, as on /stream.
+	HEv2 bool `json:"hev2,omitempty"`
 	// Gain and Loudness are transcode-only. Loudness "analyze" selects
 	// the two-pass form (measure, apply the exact ReplayGain-reference
 	// gain, tag the output) and replaces Gain.

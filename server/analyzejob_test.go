@@ -91,6 +91,11 @@ var jobFields = []jobField{
 	{"ch", `"ch":1`, []string{"transcode", "merge", "split"}},
 	{"bits", `"bits":16`, []string{"transcode", "merge", "split"}},
 	{"bitrate", `"bitrate":128`, []string{"transcode", "merge", "split"}},
+	// hev2 follows bitrate's ownership: any type that encodes can ask for
+	// v2. Its he-aac-only rule is a format conflict like bitrate's
+	// lossless one, which this table cannot express; validateJobRequest
+	// carries it.
+	{"hev2", `"hev2":true`, []string{"transcode", "merge", "split"}},
 	// Gain and loudness stop at transcode: both answer "how loud is this one
 	// track", which a merge (N in, one out) and a split (one in, N out) have
 	// no honest way to apply.

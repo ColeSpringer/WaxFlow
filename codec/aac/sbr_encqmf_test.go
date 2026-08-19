@@ -38,7 +38,3 @@ func TestQMFEncoderAnalysisReconstruction(t *testing.T) {
 			snr, qmfEncPairDelay, bestSNR, best)
 	}
 }
-
-// qmfEncPairDelay is the analysis64+synthesis64 chain delay in samples,
-// pinned by the reconstruction test above.
-const qmfEncPairDelay = 577

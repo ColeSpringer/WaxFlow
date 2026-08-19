@@ -30,9 +30,11 @@ const (
 	odgHop    = 1024
 	// odgMaxLag bounds the alignment search. It must cover the largest
 	// unsignaled priming a gated encoder ships: HE-AAC's is 3010 output
-	// samples (and libfdk's runs past 5000), which is what moved this
-	// from its original 3000.
-	odgMaxLag = 6000
+	// samples, libfdk's v1 runs past 5000 (which moved this from its
+	// original 3000), and libfdk's HE-AAC v2 primes about 7100 (which
+	// moved it from 6000; the LC/MP3/Vorbis and HE v1 gates were
+	// re-measured with no drift, as at the previous raise).
+	odgMaxLag = 8000
 )
 
 // ODGProxy returns the ODG-proxy of a coded signal (test) against its

@@ -131,6 +131,24 @@ func parseDynamics(v string) (gain.Preset, error) {
 		fmt.Sprintf("dynamics %q: want %s", v, strings.Join(dynamicsSpellings(), ", ")))
 }
 
+// checkHEv2Format is the hev2 policy, shared by /stream, the HLS
+// descriptor, and jobs so the three surfaces cannot drift: the flag
+// selects a coding technology only the he-aac row has, and any other
+// KNOWN format refuses it rather than silently encoding v1 under a v2
+// request. An unregistered name falls through to the plan's own
+// unsupported-format error, the LossyFormat pattern: refusing here
+// would blame hev2 for a format that does not exist at all.
+func checkHEv2Format(hev2 bool, format string) error {
+	if !hev2 || format == "he-aac" {
+		return nil
+	}
+	if _, known := waxflow.LossyFormat(format); !known {
+		return nil
+	}
+	return waxerr.New(waxerr.CodeUnsupportedFormat,
+		fmt.Sprintf("hev2 applies to he-aac output; this request names %s", format))
+}
+
 // maxSeekSeconds bounds t=. Beyond any real recording, and small enough
 // that t times any registered rate stays far inside int64: the Go spec
 // leaves out-of-range float-to-int conversion implementation-specific,
@@ -251,7 +269,7 @@ func parseGain(v string, dflt gainSpec) (gainSpec, error) {
 var streamParamNames = map[string]bool{
 	"src": true, "format": true, "rate": true, "ch": true, "bits": true,
 	"gain": true, "dynamics": true, "t": true, "track": true, "maxBitRate": true,
-	"bitrate": true, "q": true, "container": true, "from": true, "to": true,
+	"bitrate": true, "q": true, "hev2": true, "container": true, "from": true, "to": true,
 	"id": true, sign.ParamExp: true, sign.ParamKID: true, sign.ParamSig: true,
 }
 
@@ -315,6 +333,7 @@ type streamParams struct {
 	track      int     // -1 when absent
 	maxBitRate int     // kbit/s cap for the decision ladder; 0 (absent) is no cap, an explicit 0 is refused
 	bitrate    int     // lossy output bit rate in kbit/s; 0 selects the default
+	hev2       bool    // HE-AAC v2 selection; he-aac output only
 	container  string  // container override ("adts"); "" selects the format default
 	identity   string  // id= parameter, "" when absent
 }
@@ -428,6 +447,15 @@ func parseStreamParams(q url.Values, defaultGain gainSpec) (*streamParams, error
 			return bad("bitrate must be a positive kbit/s value")
 		}
 	}
+	// hev2 is boolean; like the format check on bitrate, whether the
+	// resolved output can honor it is planTranscode's call.
+	if v := q.Get("hev2"); v != "" {
+		if p.hev2, err = strconv.ParseBool(v); err != nil {
+			return bad("hev2 %q: want a boolean", v)
+		}
+	} else if q.Has("hev2") {
+		return bad("hev2 is present but empty; omit it to encode HE-AAC v1")
+	}
 	if p.gain, err = parseGain(q.Get("gain"), defaultGain); err != nil {
 		return nil, err
 	}
@@ -512,10 +540,14 @@ func identityString(ref string, id source.Identity) string {
 // same rule: two different windows of one file are two different streams,
 // so a key that does not name the window would serve one span's bytes for
 // another's request. Both surfaces carry a span, so both must name it.
-func canonicalCore(plan *waxflow.TranscodePlan, gainDB float64, dyn gain.Preset, sp span) string {
-	return fmt.Sprintf("container=%s&rate=%d&ch=%d&type=%s&bits=%d&bitrate=%d&gain=%s&dynamics=%s&from=%d&to=%d",
+// hev2 is the resolved HEAACv2 option (only ever true for he-aac output,
+// which refuses it elsewhere): v1 and v2 at one explicit bitrate share
+// every plan-visible value, so without this term they would share an
+// entry across two different codecs.
+func canonicalCore(plan *waxflow.TranscodePlan, gainDB float64, dyn gain.Preset, sp span, hev2 bool) string {
+	return fmt.Sprintf("container=%s&rate=%d&ch=%d&type=%s&bits=%d&bitrate=%d&hev2=%t&gain=%s&dynamics=%s&from=%d&to=%d",
 		plan.Container, plan.Format.Rate, plan.Format.Channels, plan.Format.Type,
-		plan.Format.BitDepth, plan.BitRate, strconv.FormatFloat(gainDB, 'g', -1, 64), dynSpelling(dyn),
+		plan.Format.BitDepth, plan.BitRate, hev2, strconv.FormatFloat(gainDB, 'g', -1, 64), dynSpelling(dyn),
 		sp.from, sp.end())
 }
 
@@ -527,6 +559,6 @@ func canonicalCore(plan *waxflow.TranscodePlan, gainDB float64, dyn gain.Preset,
 // says which samples are this track, the seek says where inside it playback
 // begins. Spelling both from= would put the term in one key twice, and the
 // names now match the wire (from/to are parameters, the seek is t=).
-func canonicalParams(plan *waxflow.TranscodePlan, gainDB float64, dyn gain.Preset, sp span, seek int64) string {
-	return fmt.Sprintf("%s&seek=%d", canonicalCore(plan, gainDB, dyn, sp), seek)
+func canonicalParams(plan *waxflow.TranscodePlan, gainDB float64, dyn gain.Preset, sp span, hev2 bool, seek int64) string {
+	return fmt.Sprintf("%s&seek=%d", canonicalCore(plan, gainDB, dyn, sp, hev2), seek)
 }

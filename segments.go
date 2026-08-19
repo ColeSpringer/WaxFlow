@@ -170,11 +170,15 @@ func (e *Engine) PlanSegments(track container.Track, opts TranscodeOptions, segS
 				"the first segment would present nothing",
 				segSeconds, segSamples, opts.Format, row.hls.delay))
 	}
+	codecs := row.hls.codecs
+	if row.hls.codecsFor != nil {
+		codecs = row.hls.codecsFor(opts)
+	}
 	sp := &SegmentPlan{
 		TranscodePlan:      *plan,
 		SegmentSamples:     segSamples,
 		Delay:              row.hls.delay,
-		Codecs:             row.hls.codecs,
+		Codecs:             codecs,
 		TotalDecodeSamples: -1,
 		Segments:           -1,
 	}

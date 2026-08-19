@@ -273,6 +273,45 @@ keg-only, so point the oracles at it explicitly or put it ahead on PATH).
   **HEEncoderDelay (3010)** output samples under both decoders.
 - >= **20x** realtime.
 
+### HE-AAC v2
+- ODG-proxy at **24 and 32 kbps** on the stereo corpus items plus two
+  wide-image items (per-band alternating pans with drift, a shared bed
+  under decorrelated noise: the shared corpus's stereo items are all
+  R = k*L, which exercises none of the parameter layer, so without
+  these the gate could not see a broken rotation, ICC sign, or
+  decorrelator at all). The v1 gate's shape at v2's operating points:
+  corpus mean >= **libfdk_aac aac_he_v2 mean - 0.4** and no track >
+  **0.7** below fdk, judged at each bitrate separately, with the same
+  per-(track, bitrate) burn-down ledger. Two entries today, both the v1
+  ledger's core-bound transient cell at v2's budgets: -1.30 at 24k
+  (bound 1.6) and -0.84 at 32k (bound 1.1). Core-bound is supported by
+  two experiments recorded in the code: a mono-v1-vs-fdk-v1 A/B reads
+  wider than the v2 deltas (the PS layer narrows the gap it rides on),
+  and netting a nominal ps_data cost out of the crossover budget moved
+  these cells under 0.1 while costing the rest of the corpus more.
+  Both close with the v1 entry's core transient work. First judged
+  2026-08-18 (re-judged after the extension-size fix and rotation
+  rework, same transient cells): mean -0.19 at 24k, -0.03 at 32k;
+  bright-tonal and wide-pan beat fdk at 32k.
+- Offline legs, every run: the v2 mean stays within **0.4** of our own
+  HE-AAC v1 at the same total bitrate (v2 exists because the
+  mono-core-plus-parameters trade wins at low rates, so losing it means
+  the downmix or parameter layer is broken, not "parametric is hard");
+  the stereo image itself is gated codec-side, because the
+  mono-downmixing proxy cannot see it: both channels within 3 dB and
+  the image within 2 dB at three pan ratios, a hard pan lands the
+  saturated 25 dB IID step, full and HALF-coherent anti-phase pairs
+  reconstruct at level with the right correlation sign (the
+  half-coherent bed is the shape where a blended rotation once targeted
+  the zero vector and lost about 2 dB), and an uncorrelated pair comes
+  back at level, decorrelated.
+- The v2 delay is pinned at the same **HEEncoderDelay (3010)**: the PS
+  front end is delay-compensated by construction and the pin tests
+  prove it on both output channels under both decoders.
+- >= **20x** realtime (measured 50-73x on the noise worst case across
+  the stage's rounds: the mono core is cheaper than v1's stereo pair by
+  more than the front end costs).
+
 ### MP3 quality, VBR + joint stereo
 - ODG-proxy at 128 kbps: corpus mean >= **Shine mean + 0.3** (measurably
   better); no track below Shine - 0.1.

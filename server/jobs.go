@@ -95,6 +95,7 @@ type jobRequest struct {
 	Ch        int    `json:"ch,omitempty"`
 	Bits      int    `json:"bits,omitempty"`
 	Bitrate   int    `json:"bitrate,omitempty"`
+	HEv2      bool   `json:"hev2,omitempty"`
 	Gain      string `json:"gain,omitempty"`
 	Loudness  string `json:"loudness,omitempty"`
 	FLACLevel int    `json:"flacLevel,omitempty"`
@@ -123,6 +124,7 @@ func requestFrom(body jobRequest) *jobs.Request {
 		Channels:           body.Ch,
 		Bits:               body.Bits,
 		Bitrate:            body.Bitrate,
+		HEv2:               body.HEv2,
 		Gain:               body.Gain,
 		Loudness:           body.Loudness,
 		FLACLevel:          body.FLACLevel,
@@ -251,8 +253,8 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 
 	if req.Type == jobs.TypeAnalyze {
 		if body.Format != "" || body.Container != "" || body.Rate != 0 || body.Ch != 0 ||
-			body.Bits != 0 || body.Bitrate != 0 || body.Gain != "" || body.Loudness != "" ||
-			body.FLACLevel != 0 {
+			body.Bits != 0 || body.Bitrate != 0 || body.HEv2 || body.Gain != "" ||
+			body.Loudness != "" || body.FLACLevel != 0 {
 			return bad("type analyze takes src and the silence fields")
 		}
 		// A threshold with no silence:true would be silently ignored, which
@@ -378,6 +380,9 @@ func (s *Server) checkOutputShape(req *jobs.Request) error {
 			return waxerr.New(waxerr.CodeUnsupportedFormat,
 				fmt.Sprintf("bitrate applies to lossy output; %s is lossless", req.Format))
 		}
+	}
+	if err := checkHEv2Format(req.HEv2, req.Format); err != nil {
+		return err
 	}
 	return nil
 }

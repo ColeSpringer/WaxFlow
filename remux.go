@@ -78,9 +78,9 @@ func remuxCodecs(row *output, track container.Track) string {
 		if cfg, err := aac.ParseASC(track.CodecConfig); err == nil {
 			switch {
 			case cfg.PS:
-				return "mp4a.40.29"
+				return codecsHEv2
 			case cfg.SBR:
-				return "mp4a.40.5"
+				return codecsHEv1
 			}
 		}
 	}

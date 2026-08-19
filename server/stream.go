@@ -502,6 +502,13 @@ func directPlayable(req *streamRequest) bool {
 		return false
 	case p.bitrate != 0:
 		return false // bitrate/q asks for a lossy re-encode, not the original
+	case p.hev2:
+		// The same species as bitrate: hev2 asks for a specific encode, so
+		// the original bytes are never the answer. Falling through also
+		// lets planTranscode's he-aac-only refusal fire; without this
+		// clause a direct-playable source served its own bytes with the
+		// flag silently ignored.
+		return false
 	case p.container != "":
 		// A container override names a wrapper other than the one the format
 		// delivers by default, and direct play delivers the file in the wrapper

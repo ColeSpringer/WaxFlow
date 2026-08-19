@@ -48,6 +48,12 @@ type EncoderOptions struct {
 	// with a bit reservoir (ABR), which is what both fMP4 and ADTS
 	// carry naturally.
 	Bitrate int
+	// ParametricStereo selects HE-AAC v2 for NewHEEncoder: the stereo
+	// input is folded into a phase-aligned mono downmix coded by a mono
+	// SCE core, with the stereo image carried as ps_data inside the SBR
+	// extension (an AOT-29 stream). Stereo input only; NewEncoder
+	// (AAC-LC) ignores it.
+	ParametricStereo bool
 }
 
 // Encoder is an AAC-LC encoder producing raw access units (one packet
@@ -368,7 +374,11 @@ func (e *Encoder) encodeFrame(emit func(codec.Packet) error) error {
 		if (sbrPayload.bitLen()+7)/8 > maxFILPayloadBytes {
 			// Unrepresentable in the fill element's escaped count; the
 			// decoder conceals this frame's high band instead of parsing a
-			// desynchronized element stream. See maxFILPayloadBytes.
+			// desynchronized element stream, and the encoder's delta-time
+			// mirrors roll back to match the concealment (the decoder
+			// keeps its anchors through a concealed frame). See
+			// maxFILPayloadBytes.
+			e.sbr.rollbackPayload()
 			sbrPayload = nil
 		}
 	}

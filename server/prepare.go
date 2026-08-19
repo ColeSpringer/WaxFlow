@@ -149,6 +149,11 @@ func (s *Server) planTranscode(req *streamRequest) error {
 				fmt.Sprintf("bitrate/q apply to lossy output; %s is lossless", outFormat))
 		}
 	}
+	// The refusal also keeps the cache key's hev2 term honest: true only
+	// where it shaped the stream.
+	if err := checkHEv2Format(req.p.hev2, outFormat); err != nil {
+		return err
+	}
 	req.opts = waxflow.TranscodeOptions{
 		Format:          outFormat,
 		Container:       req.p.container,
@@ -162,6 +167,7 @@ func (s *Server) planTranscode(req *streamRequest) error {
 		MP3Bitrate:      req.p.bitrate * 1000,
 		OpusBitrate:     req.p.bitrate * 1000,
 		AACBitrate:      req.p.bitrate * 1000,
+		HEAACv2:         req.p.hev2,
 		// The live passthrough: the minimal descriptive set, embedded by
 		// muxers with a stream-form tag representation.
 		Tags: meta.MinimalTags(req.meta),
@@ -202,7 +208,7 @@ func (s *Server) planTranscode(req *streamRequest) error {
 					kbit, plan.BitRate/1000))
 		}
 	}
-	req.canonical = canonicalParams(plan, req.gainDB, req.p.dynamics, req.p.span, req.from)
+	req.canonical = canonicalParams(plan, req.gainDB, req.p.dynamics, req.p.span, req.opts.HEAACv2, req.from)
 	if len(req.opts.Tags) > 0 {
 		req.canonical += "&tags=" + tagsFingerprint(req.opts.Tags)
 	}

@@ -468,6 +468,7 @@ type planOpts struct {
 	MP3VBR          bool
 	OpusBitrate     int
 	AACBitrate      int
+	HEAACv2         bool
 	OpusComplexity  int
 	OpusVBR         bool
 	OpusSignal      string
@@ -492,6 +493,7 @@ func planOptsOf(opts TranscodeOptions) planOpts {
 		MP3VBR:          opts.MP3VBR,
 		OpusBitrate:     opts.OpusBitrate,
 		AACBitrate:      opts.AACBitrate,
+		HEAACv2:         opts.HEAACv2,
 		OpusComplexity:  opts.OpusComplexity,
 		OpusVBR:         opts.OpusVBR,
 		OpusSignal:      opts.OpusSignal,
@@ -748,6 +750,11 @@ type output struct {
 type hlsOutput struct {
 	// codecs is the RFC 6381 CODECS attribute value for master playlists.
 	codecs string
+	// codecsFor resolves an option-dependent CODECS value; nil rows use
+	// the static field. The he-aac row's encode splits on HEAACv2
+	// (mp4a.40.5 against mp4a.40.29); remuxed sources resolve from their
+	// own ASC in remuxCodecs instead.
+	codecsFor func(opts TranscodeOptions) string
 	// delay is the encoder delay in output samples. It rides in the init
 	// segment's edit list and shifts the decode timeline: packet j holds
 	// input samples [j*F-delay, (j+1)*F-delay).
@@ -758,6 +765,20 @@ type hlsOutput struct {
 	// absolute position, so a worker restarted mid-stream must say where
 	// it stands; the other codecs ignore it.
 	encode func(f audio.Format, opts TranscodeOptions, startSample int64) (codec.Encoder, error)
+}
+
+// The AAC family's RFC 6381 CODECS strings, shared by the rows below and
+// the remux path's own-signalling override (remuxCodecs).
+const (
+	codecsAACLC = "mp4a.40.2"
+	codecsHEv1  = "mp4a.40.5"
+	codecsHEv2  = "mp4a.40.29"
+)
+
+// heEncOpts maps the engine options onto the HE encoder's, the one
+// literal the he-aac row's plan, encode, and segmented columns share.
+func heEncOpts(opts TranscodeOptions) *aac.EncoderOptions {
+	return &aac.EncoderOptions{Bitrate: opts.AACBitrate, ParametricStereo: opts.HEAACv2}
 }
 
 var outputs = []output{
@@ -1146,7 +1167,7 @@ var outputs = []output{
 		},
 		container: aacContainerMediaType,
 		hls: &hlsOutput{
-			codecs: "mp4a.40.2",
+			codecs: codecsAACLC,
 			delay:  aac.EncoderDelay,
 			encode: func(f audio.Format, opts TranscodeOptions, _ int64) (codec.Encoder, error) {
 				return aac.NewEncoder(f, &aac.EncoderOptions{Bitrate: opts.AACBitrate})
@@ -1188,9 +1209,12 @@ var outputs = []output{
 			if _, err := aacContainerMediaType(opts.Container); err != nil {
 				return "", 0, 0, err
 			}
-			bitrate, err := aac.HEPlanBitrate(f, &aac.EncoderOptions{Bitrate: opts.AACBitrate})
+			bitrate, err := aac.HEPlanBitrate(f, heEncOpts(opts))
 			if err != nil {
 				return "", 0, 0, err
+			}
+			if opts.HEAACv2 {
+				return aac.HEV2EncoderVersion, 0, bitrate, nil
 			}
 			return aac.HEEncoderVersion, 0, bitrate, nil
 		},
@@ -1198,7 +1222,7 @@ var outputs = []output{
 			if _, err := aacContainerMediaType(opts.Container); err != nil {
 				return nil, err
 			}
-			return aac.NewHEEncoder(f, &aac.EncoderOptions{Bitrate: opts.AACBitrate})
+			return aac.NewHEEncoder(f, heEncOpts(opts))
 		},
 		mux: func(_ container.Track, opts TranscodeOptions, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 			if isMatroska(opts.Container) {
@@ -1214,10 +1238,16 @@ var outputs = []output{
 		},
 		container: aacContainerMediaType,
 		hls: &hlsOutput{
-			codecs: "mp4a.40.5",
-			delay:  aac.HEEncoderDelay,
+			codecs: codecsHEv1,
+			codecsFor: func(opts TranscodeOptions) string {
+				if opts.HEAACv2 {
+					return codecsHEv2
+				}
+				return codecsHEv1
+			},
+			delay: aac.HEEncoderDelay,
 			encode: func(f audio.Format, opts TranscodeOptions, _ int64) (codec.Encoder, error) {
-				return aac.NewHEEncoder(f, &aac.EncoderOptions{Bitrate: opts.AACBitrate})
+				return aac.NewHEEncoder(f, heEncOpts(opts))
 			},
 		},
 	},

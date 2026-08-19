@@ -140,7 +140,7 @@ byte-identical to `waxflow probe --json`.
 
 ## GET /stream
 
-    /stream?src=<ref>&format=auto|wav|flac|alac|mp3|aac|he-aac|opus|vorbis&rate=&ch=&bits=16|24&bitrate=|q=&container=&gain=&dynamics=&t=&from=&to=&track=&maxBitRate=
+    /stream?src=<ref>&format=auto|wav|flac|alac|mp3|aac|he-aac|opus|vorbis&rate=&ch=&bits=16|24&bitrate=|q=&hev2=&container=&gain=&dynamics=&t=&from=&to=&track=&maxBitRate=
 
 Source references (`src`): `<root>/<relative/path>` under a configured
 library root; `upload:<id>` for a spooled one-shot upload (POST
@@ -163,7 +163,9 @@ Parameters (unknown parameter names are rejected):
   gapless trims); `he-aac` an HE-AAC v1 stream in the same wrappers
   (64 kbit/s default, output rates 32/44.1/48 kHz; a copyable HE-AAC
   source under `format=aac` remuxes rather than re-encoding, so
-  `he-aac` is for encoding *to* SBR); `opus` an Ogg-Opus stream (`audio/ogg`, 96 kbit/s
+  `he-aac` is for encoding *to* SBR), or HE-AAC v2 under `hev2=1`
+  (parametric stereo over a mono SBR core, 32 kbit/s default, stereo
+  sources only); `opus` an Ogg-Opus stream (`audio/ogg`, 96 kbit/s
   default, `bitrate`/`q` select it) from the full Opus encoder: SILK,
   hybrid, and CELT modes with analyser-driven speech/music selection.
   Other formats
@@ -313,6 +315,12 @@ Parameters (unknown parameter names are rejected):
   `aac`, `opus`); on a lossless output they are `415`. A `bitrate`/`q` request
   forces a re-encode (never direct-play), and the resolved bit rate is
   part of the cache key, so two rates never share an entry.
+- `hev2`: boolean, selects HE-AAC v2 (parametric stereo, `mp4a.40.29`)
+  for `format=he-aac`; any other format is `415`. Selection is explicit
+  rather than bitrate-automatic, and the flag is part of the cache key:
+  v1 and v2 at one bitrate are two different codecs and never share an
+  entry. Mono sources are refused (encode v1 instead); the v2 default
+  bitrate is 32 kbit/s.
 - `container`: overrides the format's packaging where an alternative
   exists. It requires an explicit `format`, and a name the format cannot
   produce is `400` rather than a silent fall back to the default form.
@@ -440,6 +448,9 @@ session state. Descriptor schema (version 1):
      "ch":2, "gain":"track", "dynamics":"off", "segDur":4,
      "from":10804500, "to":18744300}
 
+A `he-aac` descriptor may also carry `"hev2":true` (HE-AAC v2 selection;
+the field is omitted when false, and refused on other formats).
+
 `from`/`to` are the virtual-track span: samples on the source timeline,
 `to` exclusive and omitted for the end. They mint from `from=`/`to=`
 parameters exactly as `/stream` spells them, and they are `int64` samples
@@ -459,7 +470,7 @@ session.
 
 | Path | Purpose |
 |---|---|
-| `GET /hls/master.m3u8?v=...` | master playlist: one rung per ladder bitrate with `BANDWIDTH` and `CODECS` (`Opus`, `fLaC`, `alac`, `mp4a.40.2`; `format=he-aac` encodes and advertises `mp4a.40.5`, and an HE-AAC remux advertises its own signalling, `mp4a.40.5` or `mp4a.40.29`). With an API key, raw parameters (`src`, `format`, `bitrate` or `bitrates`, `bits`, `rate`, `ch`, `gain`, `dynamics`, `segDur`, and `crossfadeSeconds` for a `tl` timeline) also work; the daemon builds the descriptor. |
+| `GET /hls/master.m3u8?v=...` | master playlist: one rung per ladder bitrate with `BANDWIDTH` and `CODECS` (`Opus`, `fLaC`, `alac`, `mp4a.40.2`; `format=he-aac` encodes and advertises `mp4a.40.5`, or `mp4a.40.29` under `hev2`, and an HE-AAC remux advertises its own signalling, `mp4a.40.5` or `mp4a.40.29`). With an API key, raw parameters (`src`, `format`, `bitrate` or `bitrates`, `hev2`, `bits`, `rate`, `ch`, `gain`, `dynamics`, `segDur`, and `crossfadeSeconds` for a `tl` timeline) also work; the daemon builds the descriptor. |
 | `GET /hls/media.m3u8?v=...` | variant VOD playlist: `EXT-X-VERSION:7`, `EXT-X-MAP`, `EXT-X-INDEPENDENT-SEGMENTS`, every segment listed with its exact duration, `EXT-X-ENDLIST`. Unknown source lengths are measured (frame-index walk), never estimated. |
 | `GET /hls/init.mp4?v=...` | the CMAF init header (codec config; the edit list carries encoder delay and the exact length) |
 | `GET /hls/seg/{n}.m4s?v=...` | media segment n (0-based). Cached segments serve with ranges and strong ETags; misses wait on the variant worker (within a 3-segment lookahead) or restart it at n. |
@@ -498,8 +509,8 @@ from the `/stream` example, joined to a queue):
     {"path": "/hls/master.m3u8", "params": {"tl": "kJ3n...pQ", "format": "opus", "gain": "off"}}
 
 `tl` and `src` are exclusive: a URL names one stream or one timeline.
-Everything else (`format`, `bitrate`/`bitrates`, `bits`, `rate`, `ch`,
-`dynamics`, `segDur`) means what it means for a single source.
+Everything else (`format`, `bitrate`/`bitrates`, `hev2`, `bits`, `rate`,
+`ch`, `dynamics`, `segDur`) means what it means for a single source.
 
 Things worth knowing before you build on it:
 
@@ -740,7 +751,8 @@ errors decoded to waxerr codes like every other method.
     {"type": "split", "src": "lib/album.flac", "format": "flac", "cue": "lib/album.cue"}
 
 Transcode jobs take the /stream shaping parameters (`format` required,
-plus `container`, `rate`, `ch`, `bits`, `bitrate`, `gain`, `flacLevel`)
+plus `container`, `rate`, `ch`, `bits`, `bitrate`, `hev2`, `gain`,
+`flacLevel`)
 and, unlike /stream, may target non-streaming formats (`aiff`): job
 outputs are seekable files, so every muxer back-patch applies (exact WAV
 sizes, FLAC seek tables, the MP4 `iTunSMPB` gapless atom). `loudness:

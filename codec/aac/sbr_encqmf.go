@@ -36,6 +36,12 @@ func init() {
 // is no doubling; the reconstruction test proves a doubled window comes
 // back at twice the input), so the table is shared rather than restated.
 
+// qmfEncPairDelay is the analysis64+synthesis64 chain delay in samples,
+// pinned by the reconstruction test. The v2 front end discards exactly
+// this many synthesized samples so its downmix realigns with the input
+// timeline and v1's delay contract carries over unchanged.
+const qmfEncPairDelay = 577
+
 // qmfAnalyzer64 is the encoder's 64-band analysis bank. The delay line
 // keeps x(0) as the newest sample.
 type qmfAnalyzer64 struct {

@@ -57,6 +57,10 @@ type Descriptor struct {
 	// Bitrates is the master-playlist ladder in kbit/s; only master URLs
 	// carry it, and each variant gets one entry as its Bitrate.
 	Bitrates []int `json:"bitrates,omitempty"`
+	// HEv2 selects HE-AAC v2 for a he-aac variant (parametric stereo,
+	// mp4a.40.29). It shapes the samples and the CODECS string, so it is
+	// part of the variant's identity like Bitrate.
+	HEv2 bool `json:"hev2,omitempty"`
 	// Bits selects the lossless output bit depth (16 or 24), 0 keeps.
 	Bits int `json:"bits,omitempty"`
 	// Rate resamples to this rate in Hz, 0 keeps (the encoder may still

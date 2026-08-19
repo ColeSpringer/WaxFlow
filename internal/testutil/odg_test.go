@@ -64,3 +64,37 @@ func TestODGProxyFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+// TestAlignLagFindsTruePriming pins the alignment search at the primings
+// the gated encoders actually ship (HE-AAC's 3010, libfdk v1's ~5058 and
+// v2's ~7106), on both aperiodic and purely periodic content. The
+// periodic case is what makes odgMaxLag raises safe to reason about: a
+// wider search window can only displace the true lag if a later one is
+// strictly 5% better (alignLag returns the SMALLEST lag within
+// tolerance), so a period-aliased equal-error lag must lose. Before this
+// pin the only evidence a maxLag change moved no gate was prose.
+func TestAlignLagFindsTruePriming(t *testing.T) {
+	const n = 44100
+	aperiodic := make([]float32, n)
+	periodic := make([]float32, n)
+	seed := uint64(9)
+	for i := range aperiodic {
+		seed = seed*6364136223846793005 + 1442695040888963407
+		env := 0.5 + 0.5*math.Sin(2*math.Pi*3.1*float64(i)/44100)
+		aperiodic[i] = float32(env*0.3*math.Sin(2*math.Pi*440*float64(i)/44100) +
+			0.05*(2*float64(seed>>11)/float64(1<<53)-1))
+		periodic[i] = float32(0.3 * math.Sin(2*math.Pi*441*float64(i)/44100)) // exact 100-sample period
+	}
+	for _, content := range []struct {
+		name string
+		ref  []float32
+	}{{"aperiodic", aperiodic}, {"periodic", periodic}} {
+		for _, priming := range []int{3010, 5058, 7106} {
+			test := make([]float32, priming+n)
+			copy(test[priming:], content.ref)
+			if got := alignLag(content.ref, test, odgMaxLag); got != priming {
+				t.Errorf("%s content, priming %d: alignLag found %d", content.name, priming, got)
+			}
+		}
+	}
+}

@@ -1,4 +1,5 @@
 go test fuzz v1
 []byte("001")
-byte('F')
+byte(0x46)
+bool(false)
 bool(false)

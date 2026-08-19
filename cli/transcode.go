@@ -64,6 +64,7 @@ func newTranscodeCmd(flavor Flavor) *cobra.Command {
 	var opusVBR bool
 	var opusSignal string
 	var aacBitrate int
+	var heV2 bool
 	var gainDB float64
 	var dynamics dynamicsFlag
 	var profileName, ditherName string
@@ -203,6 +204,7 @@ with true-peak limiting, dither).`,
 				OpusVBR:         opusVBR,
 				OpusSignal:      opusSignal,
 				AACBitrate:      aacBitrate * 1000,
+				HEAACv2:         heV2,
 			}
 			plan, err := e.PlanTranscode(srcTrack, opts)
 			if err != nil {
@@ -428,7 +430,8 @@ with true-peak limiting, dither).`,
 	cmd.Flags().IntVar(&opusComplexity, "opus-complexity", 5, "Opus encoder complexity 0-10, quality vs speed (opus output only)")
 	cmd.Flags().BoolVar(&opusVBR, "opus-vbr", false, "encode Opus at variable bit rate around --opus-bitrate (opus output only)")
 	cmd.Flags().StringVar(&opusSignal, "opus-signal", "auto", "Opus content hint: auto, voice, or music (opus output only)")
-	cmd.Flags().IntVar(&aacBitrate, "aac-bitrate", 0, "AAC target bit rate in kbit/s (aac and he-aac outputs; default: the encoder's, 128 for aac and 64 for he-aac)")
+	cmd.Flags().IntVar(&aacBitrate, "aac-bitrate", 0, "AAC target bit rate in kbit/s (aac and he-aac outputs; default: the encoder's, 128 for aac, 64 for he-aac, 32 under --he-v2)")
+	cmd.Flags().BoolVar(&heV2, "he-v2", false, "encode HE-AAC v2: parametric stereo over a mono SBR core, for low-rate stereo (he-aac output only; stereo sources)")
 	cmd.Flags().StringVar(&loudness, "loudness", "", "analyze: two-pass loudness (exact gain to the ReplayGain reference, measured RG tags on the output); the gain is measured after any --channels downmix")
 	cmd.Flags().BoolVar(&noTags, "no-tags", false, "skip the metadata passthrough (tags, chapters, art)")
 	return cmd

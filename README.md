@@ -20,9 +20,11 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   corpora), MP3 (psychoacoustic model, joint stereo, CBR and VBR, LAME
   gapless tag), AAC-LC (window switching, TNS, M/S, two-loop
   quantization; at parity with ffmpeg's native encoder on the ODG-proxy
-  gate), HE-AAC v1 (SBR over a half-rate AAC-LC core: transient-aware
-  envelope grids, tonality-driven noise floors and inverse filtering,
-  coupled stereo; explicit signalling in M4A, implicit in ADTS),
+  gate), HE-AAC v1 and v2 (SBR over a half-rate AAC-LC core:
+  transient-aware envelope grids, tonality-driven noise floors and
+  inverse filtering, coupled stereo; v2 adds parametric stereo over a
+  phase-aligned mono downmix, selected explicitly; explicit signalling
+  in M4A, implicit in ADTS),
   Vorbis (product-lattice VQ residue books, perceptual
   coupled-stereo classification; ODG-proxy gate green), FLAC (levels 0-8,
   smaller than `flac -5` at level 5), ALAC (bit-exact round trip), and
@@ -214,9 +216,9 @@ replaced content still dies with `410 source-changed`.
 
 ## Non-goals for v1.0
 
-Video; HE-AAC **v2 encoding**, enhanced SBR, and xHE (v1 and v2 *decode*
-ships, downsampled SBR and ADTS implicit signalling included, and v1
-*encoding* ships as `format=he-aac`);
+Video; enhanced SBR and xHE (HE-AAC v1 and v2 *decode* ships,
+downsampled SBR and ADTS implicit signalling included, and v1/v2
+*encoding* ships as `format=he-aac`, v2 behind `hev2`);
 WMA/APE/WavPack **encoding**; WMA/APE/WavPack
 decoding; DASH manifests (the CMAF segments are already DASH-compatible);
 DRM/HLS-AES; Opus PLC; CD ripping; any database (WaxBin owns cataloging);

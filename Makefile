@@ -150,6 +150,7 @@ opus-tools:
 QUALITY_REPORT ?= quality-report.html
 AAC_QUALITY_REPORT ?= aac-quality-report.html
 HEAAC_QUALITY_REPORT ?= heaac-quality-report.html
+HEAACV2_QUALITY_REPORT ?= heaacv2-quality-report.html
 OPUS_QUALITY_REPORT ?= opus-quality-report.html
 OPUS_SPEECH_QUALITY_REPORT ?= opus-speech-quality-report.html
 encoder-quality:
@@ -159,6 +160,8 @@ encoder-quality:
 		go test -run TestAACEncoderQuality -count=1 -v ./tests
 	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_QUALITY_REPORT=$(HEAAC_QUALITY_REPORT) \
 		go test -run TestHEAACEncoderQuality -count=1 -v ./tests
+	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_QUALITY_REPORT=$(HEAACV2_QUALITY_REPORT) \
+		go test -run TestHEAACv2EncoderQuality -count=1 -v ./tests
 	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_OPUS_TOOLS=1 WAXFLOW_REQUIRE_VECTORS=1 WAXFLOW_QUALITY_REPORT=$(OPUS_QUALITY_REPORT) \
 		go test -run 'TestOpusEncoderQuality$$' -count=1 -timeout 30m -v ./tests
 	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_OPUS_TOOLS=1 WAXFLOW_REQUIRE_VECTORS=1 WAXFLOW_QUALITY_REPORT=$(OPUS_SPEECH_QUALITY_REPORT) \

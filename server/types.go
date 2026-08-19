@@ -352,6 +352,12 @@ type CapsDelivery struct {
 	// as an unknown field, so absent means fall back (per-item URLs), not
 	// "windows without advertising them".
 	TimelineMemberWindows bool `json:"timelineMemberWindows,omitempty"`
+	// HEv2: the hev2 parameter selects HE-AAC v2 for he-aac output on
+	// /stream, the HLS mint, and jobs. A client routes by this field's
+	// presence, the TimelineMemberWindows convention: a daemon too old to
+	// have it 400s hev2 as an unknown parameter, so absent means do not
+	// send the flag, not "v2 without advertising it".
+	HEv2 bool `json:"hev2,omitempty"`
 	// RootsReload: POST /roots/reload re-reads the config and reconciles the
 	// live library roots, so a runtime-added root streams without a restart.
 	// Wired only for a file-configured daemon whose roots are not pinned by
@@ -508,6 +514,7 @@ func buildCaps(f capsFlags) Caps {
 			Uploads:     f.uploads,
 			PID:         f.pid,
 			Timelines:   f.timelines,
+			HEv2:        true,
 			RootsReload: f.rootsReload,
 		},
 		DSP: CapsDSP{
