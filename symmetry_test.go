@@ -31,7 +31,10 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	// deliberately deferred. Each entry is deleted by the change that lands its
 	// capability, so the list is the burn-down checklist and is empty once
 	// every codec encodes+decodes and every container demuxes+muxes.
-	symmetryGaps := map[string]string{}
+	symmetryGaps := map[string]string{
+		"wavpack-encode": "the WavPack encoder and its outputs row land in the next stage",
+		"wv-mux":         "the .wv muxer lands with the encoder, in the next stage",
+	}
 
 	decodes := map[codec.ID]bool{}
 	for _, id := range format.Decoders() {
@@ -47,15 +50,25 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	}
 
 	// codecGaps names, per codec, the allowlist entry that excuses its
-	// decoder-without-encoder imbalance in the codec-level loop below.
-	codecGaps := map[codec.ID]string{}
+	// decoder-without-encoder imbalance in the codec-level loop below;
+	// containerGaps does the same, per input container, for the
+	// demuxer-without-muxer loop.
+	codecGaps := map[codec.ID]string{
+		codec.WavPack: "wavpack-encode",
+	}
+	containerGaps := map[string]string{
+		"wavpack": "wv-mux",
+	}
 
 	// open reports, for each named gap, whether it is still open, computed from
 	// the live tables so the predicate tracks the real code and cannot go stale.
 	open := map[string]bool{
 		// A codec with a decoder but no encoder-bearing outputs row.
-		"vorbis-encode": decodes[codec.Vorbis] && !encodes[codec.Vorbis],
-		"he-aac-encode": decodes[codec.HEAAC] && !encodes[codec.HEAAC],
+		"vorbis-encode":  decodes[codec.Vorbis] && !encodes[codec.Vorbis],
+		"he-aac-encode":  decodes[codec.HEAAC] && !encodes[codec.HEAAC],
+		"wavpack-encode": decodes[codec.WavPack] && !encodes[codec.WavPack],
+		// The wv package demuxes but has no muxer wired into any output row.
+		"wv-mux": !containerWritten("wavpack"),
 		// The mka package demuxes but has no muxer wired into any output row's
 		// container override (opus/aac/flac/pcm reach it once the mka muxer lands).
 		"mka-mux": !containerWritable("mka") && !containerWritable("webm"),
@@ -111,6 +124,41 @@ func TestCodecContainerSymmetry(t *testing.T) {
 			t.Errorf("codec %q encodes but has no decoder", id)
 		}
 	}
+
+	// Container-level reconciliation, the same shape one level up: every
+	// registered input driver should have an output row that writes its
+	// container back, except where an allowlisted gap explains it. This is the
+	// half that catches a new demuxer nobody wrote a named predicate for.
+	for _, name := range format.Inputs() {
+		if containerWritten(name) {
+			continue
+		}
+		if gap, ok := containerGaps[name]; ok {
+			if _, listed := symmetryGaps[gap]; listed && open[gap] {
+				continue
+			}
+		}
+		t.Errorf("container %q demuxes but nothing muxes it (add a muxer or an allowlist entry)", name)
+	}
+}
+
+// containerWritten reports whether any output row muxes into the named input
+// container, by its default muxer or through a Container override. It is
+// rowWritesContainer asked from the read side: which container, rather than
+// which row.
+func containerWritten(name string) bool {
+	for i := range outputs {
+		o := &outputs[i]
+		if rowDefaultContainer[o.name] == name {
+			return true
+		}
+		if o.container != nil {
+			if _, err := o.container(name); err == nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // containerWritable reports whether any output row can mux into the named

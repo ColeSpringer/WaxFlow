@@ -165,7 +165,7 @@ func TestPlanTranscode(t *testing.T) {
 	}
 
 	// Plan validation mirrors Transcode validation.
-	if _, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "wavpack"}); waxerr.CodeOf(err) != waxerr.CodeUnsupportedFormat {
+	if _, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "nosuchformat"}); waxerr.CodeOf(err) != waxerr.CodeUnsupportedFormat {
 		t.Fatalf("unknown format: %v", err)
 	}
 	if _, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "wav", FromSample: -5}); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {

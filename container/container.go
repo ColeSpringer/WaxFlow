@@ -130,11 +130,13 @@ type Track struct {
 	// it false so a mismatch stays a tolerated oddity rather than a truncation.
 	SamplesExact bool
 	// SourceBitDepth is the depth the source stores samples at when that
-	// differs from Fmt.BitDepth, 0 when the two agree. It exists for the
-	// one case where they can: audio.Format carries floats as float32, so
-	// a 64-bit float source decodes at BitDepth 32 and probing it reports
-	// a number the file does not hold. The pipeline reads Fmt.BitDepth as
-	// before; only reporting surfaces prefer this.
+	// differs from Fmt.BitDepth, 0 when the two agree. Two cases reach it.
+	// audio.Format carries floats as float32, so a 64-bit float source
+	// decodes at BitDepth 32 and probing it reports a number the file does
+	// not hold. And a WavPack stream that stripped constant zero LSBs codes
+	// a narrower depth than the word width its samples come back in, so a
+	// 20-bit source decodes in 24-bit words. The pipeline reads Fmt.BitDepth
+	// as before; only reporting surfaces prefer this.
 	SourceBitDepth int
 	// Default marks the container's designated default track.
 	Default bool

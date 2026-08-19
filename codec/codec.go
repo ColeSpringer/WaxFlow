@@ -14,14 +14,15 @@ import "github.com/colespringer/waxflow/audio"
 type ID string
 
 const (
-	PCM    ID = "pcm"
-	FLAC   ID = "flac"
-	ALAC   ID = "alac"
-	MP3    ID = "mp3"
-	AACLC  ID = "aac-lc"
-	HEAAC  ID = "he-aac"
-	Opus   ID = "opus"
-	Vorbis ID = "vorbis"
+	PCM     ID = "pcm"
+	FLAC    ID = "flac"
+	ALAC    ID = "alac"
+	MP3     ID = "mp3"
+	AACLC   ID = "aac-lc"
+	HEAAC   ID = "he-aac"
+	Opus    ID = "opus"
+	Vorbis  ID = "vorbis"
+	WavPack ID = "wavpack"
 )
 
 // Packet is one compressed unit as a codec defines it: a FLAC frame, an

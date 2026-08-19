@@ -63,6 +63,7 @@ it re-baselines every gate in the same PR.
 | ALAC | bit-exact vs ffmpeg; >=100x realtime |
 | Opus | all opus_testvectors 01-12 pass RFC 6716 section 6 (ported opus_compare, both decode rates, against the RFC 8251 regenerated references; the 2012 originals are stale for hybrid/transition vectors and fail even current libopus); Ogg bisection seek exact after 80 ms pre-roll; >=150x realtime |
 | Vorbis | vs ffmpeg: RMS < 1e-4 FS, max < 1e-3 FS; >=80x realtime |
+| WavPack | bit-exact vs ffmpeg on the official WavPack test suite (every bit depth 8 to 32, the three stereo block modes, redundant-LSB and non-standard-rate files, all four speed modes) and on fixtures from both ffmpeg's encoder and the reference `wavpack` CLI; every out-of-scope shape refused by name (hybrid, float, DSD, more than two channels, and stream versions outside 4.02 to 4.16); the suite's pre-4.0 samples never reach the decoder at all, since they carry the source WAV header and resolve as RIFF; sample-exact seek; >=200x realtime |
 
 ## Loudness meter
 
@@ -435,7 +436,8 @@ keg-only, so point the oracles at it explicitly or put it ahead on PATH).
 ## Performance floors (ratchets, may only rise)
 
 Portable build, per core: decode FLAC >=**300x** / MP3 >=150x /
-AAC >=**150x** / HE-AAC >=**150x** / Opus >=**150x** / Vorbis >=80x;
+AAC >=**150x** / HE-AAC >=**150x** / Opus >=**150x** / Vorbis >=80x /
+WavPack >=**200x**;
 encode FLAC >=**150x** / ALAC >=80x / MP3 >=40x / AAC >=20x /
 HE-AAC >=**20x** / Opus >=**30x**; resampler HQ >=200x. The bolded
 floors were ratcheted at the v1.0 bench pass against the post-FFT

@@ -18,6 +18,7 @@ import (
 	"github.com/colespringer/waxflow/codec/opus"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/codec/vorbis"
+	"github.com/colespringer/waxflow/codec/wavpack"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/adts"
 	"github.com/colespringer/waxflow/container/aiff"
@@ -428,6 +429,8 @@ func decodeVersion(id codec.ID) string {
 		return opus.Version
 	case codec.Vorbis:
 		return vorbis.Version
+	case codec.WavPack:
+		return wavpack.Version
 	default:
 		// Unregistered codecs cannot decode, so no cached bytes exist to
 		// go stale; keep their plans keyed distinctly all the same.

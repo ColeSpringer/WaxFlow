@@ -11,6 +11,7 @@ import (
 	"github.com/colespringer/waxflow/codec/opus"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/codec/vorbis"
+	"github.com/colespringer/waxflow/codec/wavpack"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/adts"
 	"github.com/colespringer/waxflow/container/aiff"
@@ -20,6 +21,7 @@ import (
 	"github.com/colespringer/waxflow/container/mpa"
 	"github.com/colespringer/waxflow/container/ogg"
 	"github.com/colespringer/waxflow/container/riff"
+	"github.com/colespringer/waxflow/container/wv"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -113,6 +115,16 @@ var drivers = []driver{
 			return adts.NewDemuxer(src, &adts.DemuxerOptions{Strict: opts != nil && opts.Strict})
 		},
 	},
+	{
+		name:      "wavpack",
+		match:     wv.Match,
+		need:      4,
+		exts:      []string{"wv"},
+		mediaType: "audio/x-wavpack",
+		open: func(src container.Source, opts *Options) (container.Demuxer, error) {
+			return wv.NewDemuxer(src, &wv.DemuxerOptions{Strict: opts != nil && opts.Strict})
+		},
+	},
 	// The MPEG sync word stays last: it is twelve set bits anywhere in a
 	// window, which false-positives on other formats' payloads.
 	{
@@ -184,6 +196,13 @@ var decoders = []struct {
 	// whether the SBR stage runs.
 	{codec.AACLC, newAACDecoder},
 	{codec.HEAAC, newAACDecoder},
+	{codec.WavPack, func(t container.Track) (codec.Decoder, error) {
+		cfg, err := wavpack.ParseConfig(t.CodecConfig)
+		if err != nil {
+			return nil, err
+		}
+		return wavpack.NewDecoder(cfg, t.Fmt)
+	}},
 	{codec.Vorbis, func(t container.Track) (codec.Decoder, error) {
 		cfg, err := vorbis.ParseConfig(t.CodecConfig)
 		if err != nil {

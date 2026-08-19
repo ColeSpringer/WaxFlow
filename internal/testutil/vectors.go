@@ -169,6 +169,15 @@ var Vectors = []Vector{
 	{Name: "opus/corpus/sample18r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample18r.wav", SHA256: "8c8992f75ad19d4c6bcc08451f10e24ad4cf079edb0f6274678bf45d4346a42d"},
 	{Name: "opus/corpus/sample19r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample19r.wav", SHA256: "449a991ff64548a542ead06731df08985144dac90d5331fc80fe072165c6be0a"},
 	{Name: "opus/corpus/sample20r.wav", URL: "https://media.xiph.org/audio/HA_2011/sample20r.wav", SHA256: "959d38211f5e6318a7dc47dae8f7f3b3be6d5397c22ee73db17ab376402b6515"},
+	// The official WavPack test suite (wavpack.com, "Decennial update 2.0",
+	// dated 2017-01-31), the WavPack decoder's acceptance gate: every bit
+	// depth the format allows, the three stereo block modes, redundant-LSB
+	// files, a non-standard sample rate, the four speed modes, one sample per
+	// stream version back to 1998, hybrid streams at eleven bitrates, and
+	// deliberately corrupted files. Pinned as the upstream zip and read
+	// member by member by the conformance test; it is large, so it is fetched
+	// and CI-cached like the Opus tarballs rather than committed.
+	{Name: "wavpack/test_suite.zip", URL: "https://www.rarewares.org/wavpack/test_suite.zip", SHA256: "cfeee02f6f873f10da127603898546b03d9a1f7d3db1fbd0395b6c526696d675"},
 	// The Opus speech-quality corpus source: the McGill TSP Speech Database
 	// 48 kHz set (Peter Kabal, BSD-2-Clause; hosted by the McGill MMSP lab
 	// since the late 1990s), ~1400 short studio-recorded Harvard sentences

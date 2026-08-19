@@ -199,6 +199,21 @@ Entries follow this format:
 > verified through the reference decoder with per-packet range-coder
 > final-state checks.
 
+> **codec/wavpack decoder**: a clean-room port of the *WavPack* reference
+> decoder (BSD-3-Clause), https://github.com/dbry/WavPack, 5.9.0. A lossless
+> decoder has to reproduce the reference bit for bit, so the parts that define
+> the bitstream are ported faithfully: the median-adaptive entropy decoder and
+> its escape forms (`read_words.c`), the decorrelation passes with their two
+> weight-application forms and the clipped cross-channel update
+> (`unpack.c`, the `apply_weight`/`update_weight` macros in
+> `wavpack_local.h`), the metadata sub-block handlers (`decorr_utils.c`,
+> `entropy_utils.c`), the fixed-point exponential table (`entropy_utils.c`),
+> and the block sync predicate (`open_utils.c`, `read_next_header`). The
+> bitstream reader, the block walk and its boundary confirmation, the
+> container demuxer, and the codec.Decoder integration are original. The
+> reference `wavpack` and `wvunpack` binaries additionally serve as test-only
+> fixture generators and oracles; they never enter the runtime pipeline.
+
 > **internal/testutil opus_compare**: `internal/testutil/opuscompare.go` is
 > a Go port of *libopus*'s `src/opus_compare.c` (BSD-3-Clause),
 > https://gitlab.xiph.org/xiph/opus, the RFC 6716 section 6 decoder

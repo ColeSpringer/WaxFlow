@@ -1584,8 +1584,9 @@ func TestStreamEmbedsContainerTagsWithoutAMapper(t *testing.T) {
 	}
 	// AAC, so the delivered bytes are fragmented MP4 with an ilst the mp4
 	// demuxer reads straight back. Every other live format embeds its tags in
-	// a form no demuxer here parses (only mp4 implements container.Tagger), so
-	// this is the one rung that closes the loop inside this module.
+	// a form no demuxer here parses (mp4 is the only container on the write
+	// side whose demuxer implements container.Tagger), so this is the one rung
+	// that closes the loop inside this module.
 	resp := env.get(t, "/stream?src=lib/chapters.m4b&format=aac", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("GET /stream = %d", resp.StatusCode)
