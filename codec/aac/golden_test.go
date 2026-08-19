@@ -58,15 +58,15 @@ func TestEncoderGoldenBytes(t *testing.T) {
 		want string
 	}{
 		{"lc-stereo-128", 2, false, false, 128000,
-			"20b9d0966d8e43c834363cb23f2ed02395b62cf43bfdb9686beaaac3b94fd976"},
+			"0dcbecfdd529481f81c6620ae4147a2b8b4797a6168335f277786156f9fc322d"},
 		{"he-mono-64", 1, true, false, 64000,
-			"7daad116e64bd7d6cd18139a94f88df4308c5733af7e307509e09c011cedcf5a"},
+			"6654e9e89659809fe5b8f5b9b2df608b054f32762e39cf636ddb30d7186c7206"},
 		{"he-stereo-64", 2, true, false, 64000,
-			"fcac7117ad3069098a5fedff53f21af833350fe177b05f98807ecfc5a134a912"},
+			"f896e1804b032fe7aee2b53f668afc201d106847e49f6e4a979c8f467aa95583"},
 		{"he-stereo-32", 2, true, false, 32000,
-			"6a32160dce9d1b074ec18d042289d3aa90112476ddb61c3dbfa605d964eb3423"},
+			"ddda508b3eece10e4b6198b47768dd6a87a006dc5c585d77df15ddf07c056aab"},
 		{"hev2-stereo-32", 2, true, true, 32000,
-			"03edd7cf9ea7d664fd60e5926b908cfe2523a835e33b915fcd4d94c8179ee964"},
+			"21882a5efcdcbbbe9b5623758ca55d2c13822e7c15680482ccc0e1b440fe6605"},
 	} {
 		f := audio.Format{Rate: 48000, Channels: tc.ch, Layout: audio.DefaultLayout(tc.ch), Type: audio.Float, BitDepth: 32}
 		h := sha256.New()

@@ -2,6 +2,7 @@ package vorbis
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
@@ -22,7 +23,7 @@ var _ codec.Encoder = (*Encoder)(nil)
 // output without touching FLAC-in-Ogg or Opus-in-Ogg. It over-invalidates by
 // one case, Vorbis-in-Matroska, whose bytes did not change; that costs a
 // re-encode per entry and nothing else. See ADR-0004 for the proper fix.
-const EncoderVersion = "vorbis-enc-9+" + psy.Version
+const EncoderVersion = "vorbis-enc-10+" + psy.Version
 
 // encVendor is the fixed vendor string the standalone encoder stamps into the
 // comment header, so deterministic-mode output stays byte-identical. In the
@@ -151,7 +152,7 @@ func NewEncoder(f audio.Format, opts *EncoderOptions) (*Encoder, error) {
 		offsetDB: qualityToOffsetDB(quality),
 		long:     long,
 		short:    short,
-		attack:   psy.NewAttackDetector(attackRatio),
+		attack:   psy.NewAttackDetector(attackRatio, int(math.Round(0.018*float64(cfg.rate)*attackSubWindows/float64(short)))),
 	}
 	e.fwd[slotLong] = newMDCTForward(long)
 	e.fwd[slotShort] = newMDCTForward(short)
@@ -607,7 +608,8 @@ func (e *Encoder) ensureBuffered(end int64) {
 // Block-switching tuning.
 const (
 	// attackRatio fires the transient detector on a sub-window that jumps this
-	// many times above the running level.
+	// many times above the previous sub-window's energy (an ~18 ms refractory
+	// keeps pulse trains at pitch rate to their onset; see psy.AttackDetector).
 	attackRatio = 4.0
 	// attackSubWindows splits a short-block scan window for onset localization.
 	attackSubWindows = 4

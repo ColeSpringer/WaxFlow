@@ -185,7 +185,7 @@ func TestATHFloor(t *testing.T) {
 }
 
 func TestAttackDetector(t *testing.T) {
-	d := NewAttackDetector(0)
+	d := NewAttackDetector(0, 0)
 	// Silence block establishes (no) history.
 	if a, _ := d.Scan(make([]float32, 1024), 8); a {
 		t.Fatal("attack on silence")
@@ -200,11 +200,66 @@ func TestAttackDetector(t *testing.T) {
 		t.Fatalf("burst: attack=%v pos=%d, want true 5", a, pos)
 	}
 	// Steady tone: one attack on onset at most, then quiet.
-	d2 := NewAttackDetector(0)
+	d2 := NewAttackDetector(0, 0)
 	s := sine(1000, 44100, 1024, 0.5, 0)
 	d2.Scan(s, 8)
 	if a, _ := d2.Scan(s, 8); a {
 		t.Fatal("attack on steady tone")
+	}
+}
+
+// TestAttackDetectorReattack pins the previous-sub-window reference: a
+// second burst arriving while the first one still decays is a jump
+// against the decay's local level, even split across Scan calls.
+func TestAttackDetectorReattack(t *testing.T) {
+	d := NewAttackDetector(0, 0)
+	x := make([]float32, 1024)
+	// Burst decaying through subs 0-3, second burst at sub 4.
+	for i := 0; i < 512; i++ {
+		x[i] = 0.5 * float32(math.Exp(-float64(i)/150))
+	}
+	for i := 512; i < 512+96; i++ {
+		x[i] = 0.5
+	}
+	if a, pos := d.Scan(x[:512], 4); !a || pos != 0 {
+		t.Fatalf("first burst: attack=%v pos=%d, want true 0", a, pos)
+	}
+	if a, pos := d.Scan(x[512:], 4); !a || pos != 0 {
+		t.Fatalf("re-attack during decay: attack=%v pos=%d, want true 0", a, pos)
+	}
+}
+
+// TestAttackDetectorRefractory pins the pitch/rhythm split: jumps inside
+// the refractory reset the clock without reporting, so a pulse train at
+// pitch rate reads as its onset only.
+func TestAttackDetectorRefractory(t *testing.T) {
+	d := NewAttackDetector(0, 4)
+	x := make([]float32, 1024)
+	// Pulses every two sub-windows: subs 0, 2, 4, 6.
+	for _, s := range []int{0, 2, 4, 6} {
+		for i := s * 128; i < s*128+64; i++ {
+			x[i] = 0.5
+		}
+	}
+	a, pos := d.Scan(x, 8)
+	if !a || pos != 0 {
+		t.Fatalf("train onset: attack=%v pos=%d, want true 0", a, pos)
+	}
+	// The train continues: every pulse is inside the refractory of the
+	// previous one, so no further attack is reported.
+	if a, _ := d.Scan(x, 8); a {
+		t.Fatal("attack re-reported inside the refractory of a continuing train")
+	}
+	// After the train stops, a pulse clear of the refractory reports.
+	if a, _ := d.Scan(make([]float32, 1024), 8); a {
+		t.Fatal("attack on silence after the train")
+	}
+	y := make([]float32, 1024)
+	for i := 3 * 128; i < 3*128+64; i++ {
+		y[i] = 0.5
+	}
+	if a, pos := d.Scan(y, 8); !a || pos != 3 {
+		t.Fatalf("isolated pulse after quiet: attack=%v pos=%d, want true 3", a, pos)
 	}
 }
 

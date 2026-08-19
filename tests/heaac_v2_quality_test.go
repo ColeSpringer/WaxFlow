@@ -111,22 +111,12 @@ func TestHEAACv2EncoderQuality(t *testing.T) {
 	}
 	// The burn-down ledger, the v1 gate's shape: cells past the standard
 	// allowance carry their own bounds and fail as stale when they close.
-	heaacV2KnownDeficits := map[deficitKey]float64{
-		// Transient reproduction, the v1 ledger's core-bound cell at v2's
-		// budgets: measured -1.30 at 24k and -0.84 at 32k (2026-08-18).
-		// Isolated to the shared mono core, not the new PS layer, by two
-		// experiments: the same item downmixed to mono through v1 against
-		// fdk's v1 mono reads -1.24 at 24k and -1.14 at 29k, wider than
-		// the v2 deltas (so the v2 layer narrows the gap it rides on); and
-		// netting a nominal 3 kb/s ps_data cost out of the crossover
-		// budget, the side-info-squeeze hypothesis, moved these cells
-		// under 0.1 while costing the rest of the corpus more (recorded at
-		// hePlanParams). Closing them is the core-encoder transient work
-		// the v1 entry names (LC-affecting, its own version bump); all
-		// three ledger cells close together.
-		{"transient", 24}: 1.6,
-		{"transient", 32}: 1.1,
-	}
+	// Empty since the core's deferred window decision (aac-enc-2) landed:
+	// the two transient cells (-1.30 at 24k, -0.84 at 32k, both proven
+	// core-bound by the mono A/B recorded at hePlanParams) measure -0.19
+	// and +0.20 now; all three ledger cells closed together with the v1
+	// entry, as its note predicted.
+	heaacV2KnownDeficits := map[deficitKey]float64{}
 
 	for _, kbps := range []int{24, 32} {
 		t.Run(fmt.Sprintf("%dk", kbps), func(t *testing.T) {

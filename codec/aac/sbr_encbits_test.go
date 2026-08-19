@@ -63,6 +63,11 @@ func TestSBRPayloadRoundTrip(t *testing.T) {
 
 		// 40 frames of input: tones across the band, a noise bed, and a
 		// hard burst two thirds in (a transient grid somewhere mid-run).
+		// The feed interleaves with the pulls at the real pipeline's
+		// cadence (AU m is pulled once the feed reaches slot 32(m+2), the
+		// deferred core's timing); pushing everything up front would read
+		// slots the ring had already recycled, which the readers now
+		// refuse.
 		const frames = 40
 		seed := uint64(12345)
 		noise := func() float32 {
@@ -70,23 +75,27 @@ func TestSBRPayloadRoundTrip(t *testing.T) {
 			return float32(2*float64(seed>>11)/float64(1<<53) - 1)
 		}
 		var slot [2][64]float32
-		for n := 0; n < frames*2048; n++ {
-			v := 0.3*math.Sin(2*math.Pi*440*float64(n)/48000) +
-				0.2*math.Sin(2*math.Pi*9000*float64(n)/48000) +
-				0.1*math.Sin(2*math.Pi*14000*float64(n)/48000)
-			v += 0.02 * float64(noise())
-			if n >= 26*2048 && n < 26*2048+400 {
-				v += 0.7 * float64(noise())
-			}
-			for c := 0; c < chans; c++ {
-				slot[c][n%64] = float32(v)
-				if n%64 == 63 {
-					s.pushSlot(c, slot[c][:])
+		n := 0
+		pushTo := func(target int64) {
+			for ; s.pushed < target && n < frames*2048; n++ {
+				v := 0.3*math.Sin(2*math.Pi*440*float64(n)/48000) +
+					0.2*math.Sin(2*math.Pi*9000*float64(n)/48000) +
+					0.1*math.Sin(2*math.Pi*14000*float64(n)/48000)
+				v += 0.02 * float64(noise())
+				if n >= 26*2048 && n < 26*2048+400 {
+					v += 0.7 * float64(noise())
+				}
+				for c := 0; c < chans; c++ {
+					slot[c][n%64] = float32(v)
+					if n%64 == 63 {
+						s.pushSlot(c, slot[c][:])
+					}
 				}
 			}
 		}
 
 		for au := int64(0); au < frames; au++ {
+			pushTo(32 * (au + 2))
 			payload := s.payloadFor(au)
 			want := make([]sbrFrameData, chans)
 			for c := 0; c < chans; c++ {

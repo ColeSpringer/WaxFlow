@@ -116,16 +116,13 @@ func TestHEAACEncoderQuality(t *testing.T) {
 		name string
 		kbps int
 	}
-	heaacKnownDeficits := map[deficitKey]float64{
-		// Transient reproduction at the lowest gated rate: measured -0.93
-		// under fdk (2026-08-18, after the metric's alignment fixes; the
-		// same cell reads -0.08 at 64k). SBR-side tuning did not move it
-		// (crossover moves were A/B-neutral, a short-window bit loan was
-		// worse), which points at the half-rate core's click handling at
-		// ~22 kb/s a channel; closing it is core-encoder transient work,
-		// LC-affecting with its own version bump.
-		{"transient", 48}: 1.3,
-	}
+	// Empty since the core's deferred window decision (aac-enc-2) landed:
+	// the transient cell had measured -0.93 at 48k because an attack in
+	// the first ~448 samples of a core block was coded at full weight by
+	// the preceding LONG_START window's flat region (the shorts start at
+	// offset 448, so the switch fired one frame too late); it measures
+	// -0.09 now, and the same work closed the v2 ledger's two cells.
+	heaacKnownDeficits := map[deficitKey]float64{}
 
 	for _, kbps := range []int{48, 64} {
 		t.Run(fmt.Sprintf("%dk", kbps), func(t *testing.T) {

@@ -3,6 +3,7 @@ package aac
 import (
 	"fmt"
 	"math"
+	"slices"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
@@ -15,7 +16,7 @@ var _ codec.Encoder = (*Encoder)(nil)
 // EncoderVersion identifies the encode algorithm revision for cache keys
 // (ADR-0004). It composes the psychoacoustic model's revision: retuning
 // dsp/psy changes these streams too.
-const EncoderVersion = "aac-enc-1+" + psy.Version
+const EncoderVersion = "aac-enc-2+" + psy.Version
 
 // EncoderDelay is the codec priming in output samples: one frame of
 // zeros ahead of the first real sample, so frame 0's MDCT window (which
@@ -74,22 +75,36 @@ type Encoder struct {
 	maxSfbLong  int
 	maxSfbShort int
 
-	// Input pipeline: pending holds not-yet-complete source blocks;
-	// hist slides three whole blocks (m-2, m-1, m). AU m windows blocks
-	// m-1 and m (hist[1024:3072]): decoder output block m is the FIRST
-	// half of AU m's window, which puts the first real sample at output
-	// position 1024, the declared EncoderDelay. Block m doubles as the
-	// window-decision lookahead.
+	// Input pipeline: pending holds not-yet-complete source blocks; hist
+	// slides three whole blocks. The encoder runs one block deferred:
+	// when block m arrives, it first encodes the AU windowing blocks
+	// m-2 and m-1 (hist[1024:3072] before the shift), so the window
+	// decision sees attacks one whole block past the AU's window, then
+	// shifts m in. Decoder output block is the FIRST half of each AU's
+	// window, which puts the first real sample at output position 1024,
+	// the declared EncoderDelay: deferral moves only when an AU is
+	// emitted relative to Encode calls, never the output timeline.
 	pending   [2][]float32
 	hist      [2][3 * frameLen]float32
 	inSamples int64
 	outFrames int64
+	// primed marks that a block has been shifted into hist, so the next
+	// push has a deferred AU to encode (the first arriving block
+	// completes none).
+	primed bool
 
-	// Window decision state.
-	det        [2]*psy.AttackDetector
-	attackPrev [2]attackInfo // attack in the previous source block
-	attackCur  [2]attackInfo // attack in the just-arrived source block
-	prevSeq    int
+	// Window decision state: attack info for the AU's output block, its
+	// lookahead (second window) block, and the block after that. Each
+	// block is scanned as two half-block detector calls (identical
+	// arithmetic to one call, the level state carries), so an attack in
+	// each half is reported even when the other half attacks first; the
+	// halves are the shorts' coverage split, so each half belongs to
+	// exactly one AU's decision.
+	det       [2]*psy.AttackDetector
+	attackOut [2]blockAttacks
+	attackLA  [2]blockAttacks
+	attackNew [2]blockAttacks
+	prevSeq   int
 
 	// Psychoacoustics, per channel.
 	psyLong  [2]*psy.Model
@@ -117,6 +132,12 @@ type Encoder struct {
 type attackInfo struct {
 	attack bool
 	pos    int
+}
+
+// blockAttacks is one source block's attack report: the first attack in
+// each half, pos in 8ths of the whole block (early 0-3, late 4-7).
+type blockAttacks struct {
+	early, late attackInfo
 }
 
 // NewEncoder returns an Encoder for f, which must be float32 with 1 or
@@ -200,7 +221,10 @@ func NewEncoder(f audio.Format, opts *EncoderOptions) (*Encoder, error) {
 		if err != nil {
 			return nil, err
 		}
-		e.det[c] = psy.NewAttackDetector(0)
+		// The refractory (~18 ms in 128-sample sub-windows) keeps pulse
+		// trains at pitch rate from reading as one attack per pulse; see
+		// psy.AttackDetector.
+		e.det[c] = psy.NewAttackDetector(0, int(math.Round(0.018*float64(f.Rate)/128)))
 	}
 
 	e.meanBits = float64(bitrate) * frameLen / float64(f.Rate)
@@ -250,7 +274,8 @@ const maxSample = 8.0
 const auCeilingSlack = 256
 
 // Encode buffers src and emits an access unit for every whole source
-// block that becomes available.
+// block that becomes available, running one block behind the input (the
+// deferred window decision); Finish flushes the remainder.
 func (e *Encoder) Encode(src *audio.Buffer, emit func(codec.Packet) error) error {
 	if src.Fmt != e.fmt {
 		return waxerr.New(waxerr.CodeUnsupportedFormat,
@@ -285,20 +310,36 @@ func appendSanitized(dst, src []float32) []float32 {
 	return dst
 }
 
-// pushBlock consumes one whole source block from the FIFO and encodes
-// the AU it completes: AU m needs blocks m-2 and m-1 for its window and
-// block m's attack status for the LONG_START lookahead.
+// pushBlock consumes one whole source block from the FIFO. The arriving
+// block is scanned for attacks first, then the AU one block behind it is
+// encoded (its window is hist[1024:3072] before the shift), so a window
+// decision always sees attacks a whole block past the AU it covers; an
+// attack early in a block can then make the AU whose short windows reach
+// into that block EIGHT_SHORT before it is emitted. The first arriving
+// block completes no AU.
 func (e *Encoder) pushBlock(emit func(codec.Packet) error) error {
+	for c := 0; c < e.channels; c++ {
+		aE, pE := e.det[c].Scan(e.pending[c][:frameLen/2], 4)
+		aL, pL := e.det[c].Scan(e.pending[c][frameLen/2:frameLen], 4)
+		e.attackNew[c] = blockAttacks{
+			early: attackInfo{attack: aE, pos: pE},
+			late:  attackInfo{attack: aL, pos: pL + 4},
+		}
+	}
+	var err error
+	if e.primed {
+		err = e.encodeFrame(emit)
+	}
 	for c := 0; c < e.channels; c++ {
 		h := &e.hist[c]
 		copy(h[:2*frameLen], h[frameLen:])
 		copy(h[2*frameLen:], e.pending[c][:frameLen])
 		e.pending[c] = append(e.pending[c][:0], e.pending[c][frameLen:]...)
-		e.attackPrev[c] = e.attackCur[c]
-		a, pos := e.det[c].Scan(h[2*frameLen:], 8)
-		e.attackCur[c] = attackInfo{attack: a, pos: pos}
+		e.attackOut[c] = e.attackLA[c]
+		e.attackLA[c] = e.attackNew[c]
 	}
-	return e.encodeFrame(emit)
+	e.primed = true
+	return err
 }
 
 // windowSeq runs the window-sequence state machine for the AU being
@@ -321,47 +362,102 @@ func (e *Encoder) windowSeq(shortNow, shortNext bool) int {
 	}
 }
 
-// grouping maps a transient position (8ths of the previous source
-// block, which is the first half of the AU's window) onto the
-// short-window grouping: windows before the attack, the attack window
-// alone, and the tail. Short window i spans window offsets
-// [448+128i, 704+128i); an attack at block offset 128p+64 lands there
-// around i = p-3.
-func grouping(pos int) []int {
-	win := pos - 3
-	if win < 0 {
-		win = 0
+// groupingFor maps the attack windows to isolate (unsorted, possibly
+// duplicated; up to one per channel per covering half) onto the
+// short-window grouping: windows before an attack group together, each
+// attack window stands alone, the tail groups. With no attack window
+// (a bridging short between two attack frames) all eight windows share
+// one group. Four isolated windows produce at most eight groups
+// (maxWindowGroups): each attack costs its own group plus at most one
+// separator, and four separated attacks span the whole frame, leaving
+// no tail.
+//
+// Short window i spans window offsets [448+128i, 704+128i). An attack
+// in the output block at offset 128p+64 (p >= 4, this AU's shortNow
+// clause) lands in window p-3; one in the lookahead block at that
+// offset (p <= 3) lands in window p+5, clamped to 7.
+func groupingFor(wins []int) []int {
+	slices.Sort(wins)
+	g := make([]int, 0, 2*len(wins)+1)
+	pos := 0
+	for _, w := range wins {
+		if w < pos || w > 7 {
+			continue
+		}
+		if w > pos {
+			g = append(g, w-pos)
+		}
+		g = append(g, 1)
+		pos = w + 1
 	}
-	if win > 7 {
-		win = 7
+	if pos == 0 {
+		return []int{8}
 	}
-	switch {
-	case win == 0:
-		return []int{1, 7}
-	case win == 7:
-		return []int{7, 1}
-	default:
-		return []int{win, 1, 7 - win}
+	if pos < 8 {
+		g = append(g, 8-pos)
 	}
+	return g
 }
 
 var longGroup = []int{1}
 
-// encodeFrame encodes one access unit from the history window.
+// encodeFrame encodes one access unit from the history window
+// (hist[1024:3072], blocks the shift has not yet retired).
+//
+// The switch clauses follow the short windows' reach: this AU's eight
+// shorts cover its output block from offset 448 on plus the first 576
+// samples of the lookahead block, so an attack in the output block's
+// late half or the lookahead block's early half makes THIS AU short,
+// and one in the lookahead block's late half makes the NEXT one short
+// (LONG_START now). The half-block reports mean a second attack in a
+// block is seen even when its other half attacked first (two clicks in
+// one block put a real attack in each neighbor AU's territory). The
+// clauses shift index-for-index between consecutive frames, so
+// shortNext here IS shortNow next frame: a LONG_START is always
+// followed by its EIGHT_SHORT and every attack the detector reports
+// lands inside some frame's short windows. Before the deferred
+// decision an attack early in a block after quiet frames was coded at
+// full weight by the preceding LONG_START's flat region instead, the
+// HE quality ledger's core-bound transient deficit.
 func (e *Encoder) encodeFrame(emit func(codec.Packet) error) error {
 	shortNow := false
 	shortNext := false
-	attackPos := 0
+	// Attack windows to isolate, one candidate per channel per covering
+	// half: output-block late half -> window pos-3, lookahead early
+	// half -> window pos+5 (clamped; both are the window whose span
+	// begins right after the onset's sub-window starts).
+	var atkWins [4]int
+	nWins := 0
+	bridge7 := false
 	for c := 0; c < e.channels; c++ {
-		if e.attackPrev[c].attack {
-			if !shortNow {
-				attackPos = e.attackPrev[c].pos
-			}
+		if a := e.attackOut[c].late; a.attack {
 			shortNow = true
+			atkWins[nWins] = a.pos - 3
+			nWins++
 		}
-		shortNext = shortNext || e.attackCur[c].attack
+		if a := e.attackLA[c].early; a.attack {
+			shortNow = true
+			atkWins[nWins] = min(a.pos+5, 7)
+			nWins++
+		}
+		if a := e.attackLA[c].late; a.attack {
+			shortNext = true
+			// Only a pos-4 onset (offset 512..640) reaches back into
+			// window 7's span (lookahead offsets 320..576); later ones
+			// are wholly the next AU's.
+			bridge7 = bridge7 || a.pos == 4
+		}
+		if a := e.attackNew[c].early; a.attack {
+			shortNext = true
+		}
 	}
 	seq := e.windowSeq(shortNow, shortNext)
+	if seq == eightShort && nWins == 0 && bridge7 {
+		// Bridging short whose lookahead attack's first samples fall in
+		// the last window: keep it out of the steady group.
+		atkWins[0] = 7
+		nWins = 1
+	}
 
 	// The SBR payload for this AU rides in-band, so its exact cost joins
 	// the overhead below and the spectral budget shrinks by it. meanBits
@@ -390,7 +486,7 @@ func (e *Encoder) encodeFrame(emit func(codec.Packet) error) error {
 	swb := e.swbLong
 	maxSfb := e.maxSfbLong
 	if seq == eightShort {
-		groupLen = grouping(attackPos)
+		groupLen = groupingFor(atkWins[:nWins])
 		swb = e.swbShort
 		maxSfb = e.maxSfbShort
 	}
@@ -807,9 +903,11 @@ func (e *Encoder) writeCPE(seq int, groupLen []int, maxSfb, msMask int) {
 	e.writeICSBody(1, nil)
 }
 
-// Finish pads the tail to a whole block, encodes it, then encodes one
-// final block so every real sample is covered by two overlapping
-// windows, and reports the gapless trailer.
+// Finish pads the tail to a whole block, encodes it, then pushes two
+// final zero blocks: the first is the block that covers every real
+// sample with two overlapping windows, the second only flushes the
+// deferred AU and enters no emitted window. The trailer is unchanged by
+// the deferral: the AU sequence is identical, one push later.
 func (e *Encoder) Finish(emit func(codec.Packet) error) (codec.Trailer, error) {
 	if n := len(e.pending[0]); n > 0 {
 		for c := 0; c < e.channels; c++ {
@@ -819,11 +917,18 @@ func (e *Encoder) Finish(emit func(codec.Packet) error) (codec.Trailer, error) {
 			return codec.Trailer{}, err
 		}
 	}
-	for c := 0; c < e.channels; c++ {
-		e.pending[c] = append(e.pending[c][:0], make([]float32, frameLen)...)
-	}
-	if err := e.pushBlock(emit); err != nil {
-		return codec.Trailer{}, err
+	for i := 0; i < 2; i++ {
+		for c := 0; c < e.channels; c++ {
+			if cap(e.pending[c]) < frameLen {
+				e.pending[c] = make([]float32, frameLen)
+			} else {
+				e.pending[c] = e.pending[c][:frameLen]
+				clear(e.pending[c])
+			}
+		}
+		if err := e.pushBlock(emit); err != nil {
+			return codec.Trailer{}, err
+		}
 	}
 	for c := 0; c < e.channels; c++ {
 		e.pending[c] = e.pending[c][:0]

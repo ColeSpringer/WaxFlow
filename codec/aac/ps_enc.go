@@ -20,16 +20,18 @@ import "math"
 const psEncBands = 20
 
 // psEncRing is the L/R analysis ring in slots. The live span (newest
-// pushed minus oldest read at payload-build time) measures 108 slots,
-// not the ~85 a naive tally of the 44-slot window plus the 9-slot QMF
-// pair offset suggests: frontEnd pushes a WHOLE input chunk (up to 32
-// slots) into the rings before drainDM feeds any of its mono output to
-// the core, so a full chunk's slots ride on top of the pipeline offset.
-// The 20-slot headroom therefore rests on two chops staying at 2048:
-// Encode's min(2*frameLen, ...) input step and drainDM's identical feed
-// step. Raising either without growing the ring lets buildFrame read
-// slots the current chunk already overwrote.
-const psEncRing = 128
+// pushed minus oldest read at payload-build time) measured 108 slots at
+// ring 128, not the ~85 a naive tally of the 44-slot window plus the
+// 9-slot QMF pair offset suggests: frontEnd pushes a WHOLE input chunk
+// (up to 32 slots) into the rings before drainDM feeds any of its mono
+// output to the core, so a full chunk's slots ride on top of the
+// pipeline offset. The core's deferred window decision holds each AU one
+// block past its window, another 32 slots of span (~140; at 128 the
+// overwrite surfaced as chunk-dependent AU bytes). The span still rests
+// on two chops staying at 2048 (Encode's min(2*frameLen, ...) input
+// step and drainDM's identical feed step), and the readers' ringGuard
+// panics on an overrun instead of reading a wrapped slot.
+const psEncRing = 192
 
 // Downmix smoothing constants: the leaky per-band accumulators weight
 // louder slots more and settle in a few slots (750 slots/s), fast enough
@@ -195,6 +197,7 @@ func (p *psEnc) buildFrame(au int64) {
 			if abs < 0 || abs >= p.pushed {
 				continue
 			}
+			ringGuard(p.pushed, abs, psEncRing)
 			idx := abs % psEncRing
 			for b := range 3 {
 				in[b][j] = [2]float32{p.ringRe[c][idx][b], p.ringIm[c][idx][b]}
@@ -220,6 +223,7 @@ func (p *psEnc) buildFrame(au int64) {
 				if abs < 0 || abs >= p.pushed {
 					continue
 				}
+				ringGuard(p.pushed, abs, psEncRing)
 				idx := abs % psEncRing
 				band := k - 7
 				l = [2]float32{p.ringRe[0][idx][band], p.ringIm[0][idx][band]}

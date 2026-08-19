@@ -74,8 +74,9 @@ func HESnapRate(rate int) int {
 }
 
 // hePlanParams is the shared plan-time half of NewHEEncoder: every
-// validation and derived parameter, none of the allocations (the slot
-// ring alone is ~130 KB, and the plan path runs per request).
+// validation and derived parameter, none of the allocations (the
+// analysis slot rings alone are ~190 KB for a stereo v1 element, ~290 KB
+// with the v2 front end, and the plan path runs per request).
 func hePlanParams(f audio.Format, opts *EncoderOptions) (bitrate int, hdr sbrHeader, tbl sbrFreqTables, err error) {
 	if err := f.Valid(); err != nil {
 		return 0, hdr, tbl, err
@@ -271,10 +272,11 @@ func (e *HEEncoder) emitWrap(emit func(codec.Packet) error) func(codec.Packet) e
 // 2:1 resampled core, emitting an access unit per completed core block.
 //
 // Input of any length is accepted: it is processed internally in
-// frame-sized steps, because the slot ring holds a bounded lookback
-// (~74 slots between the newest analysis and the oldest slot a pending
-// payload reads) and analyzing a large buffer in one go before the core
-// drained it would overwrite slots the next AU's extraction still needs.
+// frame-sized steps, because the analysis slot rings hold a bounded
+// lookback (the live spans and their derivation live on sbrEncRing and
+// psEncRing) and analyzing a large buffer in one go before the core
+// drained it would overwrite slots a pending AU's extraction still
+// needs; the readers' ringGuard panics if that invariant ever breaks.
 // The engine's framer happens to deliver exactly frame-sized chunks, but
 // this is an exported method and the bound is enforced here, not assumed.
 func (e *HEEncoder) Encode(src *audio.Buffer, emit func(codec.Packet) error) error {
@@ -477,10 +479,13 @@ func (e *HEEncoder) Finish(emit func(codec.Packet) error) (codec.Trailer, error)
 	if err := e.feedCore(nil, emit); err != nil {
 		return codec.Trailer{}, err
 	}
-	// The core's own Finish pads its tail and adds one zero block, which
-	// covers a 2048-sample delay; this encoder declares more (the SBR
-	// chain), so the last real samples may need one more flush AU to
-	// exist in the decode at all.
+	// The core's own Finish pads its tail and pushes two zero blocks
+	// (the second only flushes its deferred AU and enters no emitted
+	// window), which covers a 2048-sample delay; this encoder declares
+	// more (the SBR chain), so the last real samples may need one more
+	// flush AU to exist in the decode at all. The aus estimate below is
+	// the core's emitted count: blocks fed plus one, unchanged by the
+	// deferral (the first fed block completes no AU).
 	nCore := resample.OutputLen(e.inSamples, e.fmt.Rate, e.core.rate)
 	aus := (nCore+frameLen-1)/frameLen + 1
 	if aus*2*frameLen-e.inSamples-HEEncoderDelay < 0 {

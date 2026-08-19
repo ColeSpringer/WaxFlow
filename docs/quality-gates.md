@@ -247,21 +247,30 @@ keg-only, so point the oracles at it explicitly or put it ahead on PATH).
   another). Known deficits past the allowance are recorded per (track,
   bitrate) in the test's burn-down ledger, each with its own measured
   bound; the test fails when an entry has clearly closed, so the ledger
-  is debt on record, never concealment. One entry today: the transient
-  track at 48 kbps (-0.93, bound 1.3; the same cell reads -0.08 at 64k),
-  pointing at the half-rate core's click handling at ~22 kb/s per
-  channel (SBR-side tuning measured neutral), closed by future core
-  transient work. fdk is
-  best-in-class (a harder bar than the LC gate's ffmpeg-native
-  reference, hence the wider allowance) and non-free; the leg reaches it
-  through an ffmpeg built with libfdk_aac or through `scripts/fdkenc`
-  (a tiny CLI over the library's own API; build line in its source)
-  named by `WAXFLOW_FDKENC`, self-skips without either, and escalates
-  under `WAXFLOW_REQUIRE_FDK=1` (set it wherever a route is expected to
+  is debt on record, never concealment. fdk is best-in-class (a harder
+  bar than the LC gate's ffmpeg-native reference, hence the wider
+  allowance) and non-free; the leg reaches it through an ffmpeg built
+  with libfdk_aac or through `scripts/fdkenc` (a tiny CLI over the
+  library's own API; build line in its source) named by
+  `WAXFLOW_FDKENC`, self-skips without either, and escalates under
+  `WAXFLOW_REQUIRE_FDK=1` (set it wherever a route is expected to
   exist; the stock-ffmpeg CI has none, so its runs judge the offline
-  legs only). First judged 2026-08-18 (after the review round's encoder
-  and metric fixes): mean -0.13 at 48k, **+0.10 above fdk** at 64k;
-  every cell but the ledgered one within 0.31.
+  legs only).
+  The ledger is empty: its one entry, the transient track at 48 kbps
+  (-0.93, bound 1.3), closed with the core's deferred window decision
+  (aac-enc-2). The cause was structural, not budgetary: the eight short
+  windows start at block offset 448, and the switch fired one frame too
+  late, so an attack in the first ~448 samples of a block after quiet
+  frames was coded at full weight by the preceding LONG_START window's
+  flat region, its quantization noise smeared over the long transform's
+  ~70 ms support. The encoder now holds each AU one block past its
+  window before deciding (emission timing only; the output mapping,
+  delay, and the 3010 pin are unchanged), scans attacks per half-block
+  against the previous sub-window under an ~18 ms refractory (rolls
+  report every stroke, pulse trains at pitch rate report their onset),
+  so every detected attack lands inside some frame's short windows.
+  Re-judged 2026-08-18: mean -0.03 at 48k, **+0.20 above fdk** at 64k;
+  the transient cell reads -0.08 at 48k and +0.70 at 64k.
 - Offline legs, every run: ffmpeg's decode of our stream agrees with our
   own within the AAC RMS gate (cross-decoder conformance on our own
   bitstream); the QMF band-energy round trip holds the high band present
@@ -282,17 +291,15 @@ keg-only, so point the oracles at it explicitly or put it ahead on PATH).
   decorrelator at all). The v1 gate's shape at v2's operating points:
   corpus mean >= **libfdk_aac aac_he_v2 mean - 0.4** and no track >
   **0.7** below fdk, judged at each bitrate separately, with the same
-  per-(track, bitrate) burn-down ledger. Two entries today, both the v1
-  ledger's core-bound transient cell at v2's budgets: -1.30 at 24k
-  (bound 1.6) and -0.84 at 32k (bound 1.1). Core-bound is supported by
-  two experiments recorded in the code: a mono-v1-vs-fdk-v1 A/B reads
-  wider than the v2 deltas (the PS layer narrows the gap it rides on),
-  and netting a nominal ps_data cost out of the crossover budget moved
-  these cells under 0.1 while costing the rest of the corpus more.
-  Both close with the v1 entry's core transient work. First judged
-  2026-08-18 (re-judged after the extension-size fix and rotation
-  rework, same transient cells): mean -0.19 at 24k, -0.03 at 32k;
-  bright-tonal and wide-pan beat fdk at 32k.
+  per-(track, bitrate) burn-down ledger. The ledger is empty: its two
+  entries, the v1 ledger's core-bound transient cell at v2's budgets
+  (-1.30 at 24k, bound 1.6; -0.84 at 32k, bound 1.1; core-bound proven
+  by the mono A/B and crossover experiments recorded in the test),
+  closed together with the v1 entry under the core's deferred window
+  decision (aac-enc-2), as the entries predicted. Re-judged 2026-08-18:
+  mean -0.01 at 24k, **+0.10 above fdk** at 32k; the transient cell
+  reads -0.16 at 24k and +0.23 at 32k, and bright-tonal and wide-pan
+  still beat fdk at 32k.
 - Offline legs, every run: the v2 mean stays within **0.4** of our own
   HE-AAC v1 at the same total bitrate (v2 exists because the
   mono-core-plus-parameters trade wins at low rates, so losing it means
@@ -379,12 +386,14 @@ keg-only, so point the oracles at it explicitly or put it ahead on PATH).
   dispatch, so their agreement is what proves the vectorized inverse coupling was
   reached and is happy; without that leg the gate would go green on a runner
   whose ffmpeg never leaves the C fallback.
-- Status: the encoder MEETS the ODG gate. At -q4 the corpus mean is **+0.52** vs
+- Status: the encoder MEETS the ODG gate. At -q4 the corpus mean is **+0.54** vs
   libvorbis with every track at or above libvorbis (worst per-track +0.00): a
   peak-envelope floor plus a perceptual mask floor fixed tonal, block switching
   fixed transient pre-echo, and square-polar stereo coupling (per-channel type-1
   residues, coupling applied at the mapping layer) with demand-driven allocation
-  carries stereo material at or above libvorbis. The +0.52 is smaller than the
+  carries stereo material at or above libvorbis. The +0.54 (re-measured
+  after the shared attack detector moved to a previous-sub-window
+  reference with an ~18 ms refractory, vorbis-enc-10) is smaller than the
   ~+1.0 reported when the proxy's ATH cap was 40 dB: tightening the cap to 15 dB
   (see the ODG-proxy note above) removed an over-generous sub-bass and top-octave
   discount that had inflated the margin, so this is the honest gain from the

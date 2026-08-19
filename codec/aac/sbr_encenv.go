@@ -25,8 +25,24 @@ import "math"
 
 // sbrEncRing is the analysis slot ring length: frame m reads back to abs
 // slot 32(m-1)-24 (transient trailing window) while the input feed runs
-// ahead to about 32(m+1), a span of ~90 slots.
-const sbrEncRing = 128
+// ahead to about 32(m+2) (the core's deferred window decision holds each
+// AU one block past its window), a span of ~120 slots. The readers'
+// ringGuard turns a span overrun into a panic instead of a silent
+// wrong-slot read, so the headroom here is margin, not the only line of
+// defense.
+const sbrEncRing = 192
+
+// ringGuard panics when a read at abs would land on a slot the feed has
+// already overwritten. The live span between the newest pushed slot and
+// the oldest read is a structural invariant (the ring constants size it
+// from the feed chop and the deferred pull), and breaking it must fail
+// on the frame that did rather than read a newer slot as history; the
+// only symptom otherwise is a byte diff in a chunk-invariance test.
+func ringGuard(pushed, abs int64, ring int) {
+	if pushed-abs > int64(ring) {
+		panic("aac: analysis slot ring span exceeded (slot overwritten before read)")
+	}
+}
 
 // sbrEnc is the SBR side of one HE-AAC encoder element (SCE or CPE).
 type sbrEnc struct {
@@ -182,6 +198,7 @@ func (s *sbrEnc) slotEnergy(abs int64) float64 {
 	if abs < 0 || abs >= s.pushed {
 		return 0
 	}
+	ringGuard(s.pushed, abs, sbrEncRing)
 	idx := abs % sbrEncRing
 	var e float64
 	for c := 0; c < s.chans; c++ {
@@ -205,6 +222,7 @@ func (s *sbrEnc) bandEnergy(ch int, s0, s1 int64, lo, hi int) float64 {
 		if abs < 0 || abs >= s.pushed {
 			continue
 		}
+		ringGuard(s.pushed, abs, sbrEncRing)
 		idx := abs % sbrEncRing
 		re, im := &s.ringRe[ch][idx], &s.ringIm[ch][idx]
 		for k := lo; k < hi && k < 64; k++ {
@@ -225,6 +243,7 @@ func (s *sbrEnc) tonality(ch, k int, s0, s1 int64) float64 {
 		if abs < 0 || abs >= s.pushed {
 			return 0, 0
 		}
+		ringGuard(s.pushed, abs, sbrEncRing)
 		idx := abs % sbrEncRing
 		return float64(s.ringRe[ch][idx][k]), float64(s.ringIm[ch][idx][k])
 	}
