@@ -272,6 +272,41 @@ func TestTrailingGarbage(t *testing.T) {
 	}
 }
 
+// TestAppendedID3v2IsNotAudio covers the third trailer taggers write, the one
+// only a footer makes findable from behind. apen and flacn already peeled it
+// and wv did not, so the same tag on a .wv left twenty bytes standing inside
+// the block walk's extent, drawing a "trailing bytes are not a block" warning
+// rather than being recognized.
+func TestAppendedID3v2IsNotAudio(t *testing.T) {
+	// Header, ten bytes of body, matching footer.
+	tag := []byte{'I', 'D', '3', 4, 0, 0x10, 0, 0, 0, 10}
+	tag = append(tag, make([]byte, 10)...)
+	tag = append(tag, '3', 'D', 'I', 4, 0, 0x10, 0, 0, 0, 10)
+	raw := append(append([]byte(nil), fixture(t, "sine-s16.wv")...), tag...)
+
+	// Non-strict, so an unrecognized trailer lands in the warning list rather
+	// than coming back as an error: the list is the assertion.
+	d, err := wv.NewDemuxer(container.BytesSource(raw), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, samples := walk(t, d); samples != 15435 {
+		t.Fatalf("walked %d samples, want 15435", samples)
+	}
+	if w := d.Warnings(); len(w) != 0 {
+		t.Errorf("an appended ID3v2 tag is a trailer, not damage: %v", w)
+	}
+
+	// And strict mode must not refuse a file for carrying one.
+	ds, err := wv.NewDemuxer(container.BytesSource(raw), &wv.DemuxerOptions{Strict: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, samples := walk(t, ds); samples != 15435 {
+		t.Fatalf("strict mode walked %d samples, want 15435", samples)
+	}
+}
+
 // TestTruncatedTail checks a file whose last block is cut short: the whole
 // blocks before it still decode, and the partial one is dropped.
 func TestTruncatedTail(t *testing.T) {

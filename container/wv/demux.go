@@ -9,8 +9,8 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/wavpack"
 	"github.com/colespringer/waxflow/container"
-	"github.com/colespringer/waxflow/container/internal/apev2"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
+	"github.com/colespringer/waxflow/container/internal/trailer"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -27,9 +27,6 @@ const (
 	maxResync = 1 << 20
 	// seekWindow is the bisection cutoff: below this span, walk blocks.
 	seekWindow = 128 << 10
-	// maxTrailers bounds trailing-tag peeling at end of stream; tags stack,
-	// APEv2 then ID3v1 being the classic pair.
-	maxTrailers = 8
 	// maxMetaBlocks bounds the run of sample-free blocks the header walk will
 	// step over on its way to the first audio block. Real files hold at most
 	// one; the reference decoder gives up after sixteen.
@@ -37,8 +34,6 @@ const (
 	// maxTailScan bounds the backward scan that recovers the length of a
 	// stream whose header never learned it.
 	maxTailScan = 1 << 22
-	// id3v1Len is the fixed size of a trailing ID3v1 tag.
-	id3v1Len = 128
 	// maxProbe bounds one bisection probe's scan for a block header. A block
 	// is under a megabyte (SyncOK), so a probe landing just past one block's
 	// start finds the next inside this; without the bound a probe over a
@@ -202,44 +197,16 @@ func (d *Demuxer) parse() error {
 	return d.w.Err()
 }
 
-// stripTrailers peels recognized non-audio structures off the end of the
-// file (an APEv2 tag, an ID3v1 tag, and the two stacked), shrinking the
-// window's data end so the block walk never runs into them. The APEv2 block
-// is also where the track's tags come from.
+// stripTrailers peels the tags a tagger appended after the audio, shrinking
+// the window's data end so the block walk never runs into them. The APEv2
+// block is also where the track's tags come from.
 func (d *Demuxer) stripTrailers() error {
-	end := d.w.DataEnd()
-	for range maxTrailers {
-		// APEv2 is tried first because it is the stronger recognition: an
-		// eight-byte magic with a length behind it, against ID3v1's three
-		// bytes at a fixed offset. The order is not a preference but a
-		// correctness fix, since "APETAGEX" spells TAG at bytes three to
-		// five: an APEv2 tag of exactly 131 bytes puts that T where the
-		// ID3v1 probe looks, and peeling 128 bytes off the middle of it
-		// leaves three bytes of tag standing where audio should end. When
-		// the two really are stacked, ID3v1 comes last and the APEv2 probe
-		// finds nothing, so this order costs that case nothing.
-		if e := end - apev2.FooterLen; e >= 0 {
-			n, hasHeader := apev2.Size(d.w.BytesAt(e, apev2.FooterLen))
-			// The tag has to leave a block behind it, and when its footer
-			// claims a header, the header has to be there: a declared length
-			// is otherwise an unverified instruction to drop audio.
-			if n > 0 && end-n >= wavpack.BlockHeaderLen {
-				tag := d.w.BytesAt(end-n, int(n))
-				if int64(len(tag)) == n && (!hasHeader || apev2.StartsTag(tag)) {
-					if d.tags == nil {
-						d.tags = apev2.Parse(tag)
-					}
-					end -= n
-					continue
-				}
-			}
-		}
-		if e := end - id3v1Len; e >= 0 && string(d.w.BytesAt(e, 3)) == "TAG" {
-			end = e
-			continue
-		}
-		break
-	}
+	// A tag has to leave a whole block behind it. NUL padding is not peeled:
+	// this pass has nothing to confirm a recognition against, and a block
+	// declares its own length, so trailing zeros end the walk on their own.
+	end, tags := trailer.PeelAll(&d.w, trailer.APEv2|trailer.ID3v1|trailer.ID3v2,
+		wavpack.BlockHeaderLen, d.w.DataEnd())
+	d.tags = tags
 	// No warning here, unlike the FLAC demuxer: a tag after the audio is the
 	// normal shape of a .wv file rather than damage recovered from, and
 	// warning would make strict mode reject every tagged WavPack file.

@@ -14,6 +14,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/flacn"
 	"github.com/colespringer/waxflow/container/internal/apev2"
+	"github.com/colespringer/waxflow/container/internal/trailer"
 )
 
 // fixture loads a committed testdata file.
@@ -358,6 +359,34 @@ func TestTrailingTags(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestStackedTrailersReachTheBound pins what the shared bound buys here. The
+// loop is check-then-peel, so the peel that uncovers the real end is only
+// worth anything if the check runs once more after it: at trailer.Max stacked
+// tags the last frame must still confirm, and one past the bound it must not.
+func TestStackedTrailersReachTheBound(t *testing.T) {
+	raw := fixture(t, "sine-s16.flac")
+	for _, c := range []struct {
+		tags int
+		want int64
+	}{{trailer.Max, 15435}, {trailer.Max + 1, 0}} {
+		out := append([]byte(nil), raw...)
+		for range c.tags {
+			out = append(out, apeTag(false)...)
+		}
+		d, err := flacn.NewDemuxer(container.BytesSource(out), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, samples := walk(t, d)
+		if c.want != 0 && samples != c.want {
+			t.Errorf("%d stacked tags: walked %d samples, want %d", c.tags, samples, c.want)
+		}
+		if c.want == 0 && samples == 15435 {
+			t.Errorf("%d stacked tags: walked the whole stream past the bound", c.tags)
+		}
+	}
 }
 
 // emptyFLAC builds a metadata-only stream: fLaC marker plus a lone

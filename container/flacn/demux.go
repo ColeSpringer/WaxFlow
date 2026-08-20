@@ -10,6 +10,7 @@ import (
 	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
+	"github.com/colespringer/waxflow/container/internal/trailer"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -35,9 +36,6 @@ const (
 	maxResync = 1 << 20
 	// seekWindow is the bisection cutoff: below this span, walk frames.
 	seekWindow = 128 << 10
-	// maxTrailers bounds trailing-tag peeling at end of stream (tags
-	// stack: APEv2 then ID3v1 is a classic).
-	maxTrailers = 8
 )
 
 // Metadata block types (RFC 9639 section 8).
@@ -398,12 +396,14 @@ func (d *Demuxer) findEnd() (end int64, next flac.FrameInfo, nextOK bool, err er
 	}
 
 	// End of data: the last frame must checksum to exactly here, after
-	// peeling any recognized trailing tags (taggers bolt ID3v1, APEv2,
-	// and appended ID3v2 onto FLAC files; NUL padding shows up too, and
-	// tags stack). dataEnd shrinks permanently only once a peel is
-	// confirmed by the checksum.
+	// peeling any recognized trailing tags. Every peel is provisional,
+	// dataEnd shrinking only once the checksum confirms it, so a false
+	// recognition costs a retry rather than data.
 	end = d.w.DataEnd()
-	for range maxTrailers {
+	// Check first, peel second, and check once more after the last peel: the
+	// peel that uncovers the real end is the one the bound would otherwise
+	// spend without ever validating it.
+	for i := 0; ; i++ {
 		if d.tailChecks(crc, crcPos, end) {
 			if end != d.w.DataEnd() {
 				if werr := d.warn(end, "%d trailing tag or padding bytes ignored", d.w.DataEnd()-end); werr != nil {
@@ -413,7 +413,14 @@ func (d *Demuxer) findEnd() (end int64, next flac.FrameInfo, nextOK bool, err er
 			}
 			return end, flac.FrameInfo{}, false, nil
 		}
-		stripped, ok := d.stripTrailer(start, end)
+		if i == trailer.Max {
+			break
+		}
+		// The floor is the frame's own start plus its two checksum bytes.
+		// NUL padding is peeled here and nowhere else: it has no magic to
+		// recognize, and this is the only caller that confirms a peel.
+		stripped, _, ok := trailer.Peel(&d.w, trailer.APEv2|trailer.ID3v1|trailer.ID3v2|trailer.Padding,
+			start+2, end)
 		if !ok {
 			break
 		}
@@ -426,63 +433,6 @@ func (d *Demuxer) findEnd() (end int64, next flac.FrameInfo, nextOK bool, err er
 		return 0, flac.FrameInfo{}, false, werr
 	}
 	return -1, flac.FrameInfo{}, false, nil
-}
-
-// stripTrailer recognizes one trailing non-FLAC structure ending at end
-// and returns the end without it: an ID3v1 tag, an APEv2 tag (with its
-// optional header), an appended ID3v2 tag, or NUL padding. The caller
-// re-checks the frame checksum after each peel, so a false recognition
-// costs a retry, never data.
-func (d *Demuxer) stripTrailer(start, end int64) (int64, bool) {
-	// APEv2 goes first because it is the stronger recognition, an eight-byte
-	// magic with a length behind it against ID3v1's three bytes at a fixed
-	// offset, and because the two collide: "APETAGEX" spells TAG at bytes
-	// three to five, so an APEv2 tag of exactly 131 bytes puts that T where
-	// the ID3v1 probe looks. Peeling 128 bytes out of the middle of one
-	// leaves three bytes standing that no later peel recognizes, and the
-	// frames before them are dropped as trailing garbage. Stacked tags put
-	// ID3v1 last, where the APEv2 probe finds nothing, so the order costs
-	// that case nothing.
-	if e := end - 32; e >= start+2 {
-		if f := d.w.BytesAt(e, 32); len(f) == 32 && string(f[:8]) == "APETAGEX" {
-			// Size covers items plus this footer; a set header flag adds
-			// an equally sized preamble.
-			total := int64(binary.LittleEndian.Uint32(f[12:16]))
-			if binary.LittleEndian.Uint32(f[20:24])&(1<<31) != 0 {
-				total += 32
-			}
-			if total >= 32 && end-total >= start+2 {
-				return end - total, true
-			}
-		}
-	}
-	if e := end - 128; e >= start+2 {
-		if string(d.w.BytesAt(e, 3)) == "TAG" {
-			return e, true
-		}
-	}
-	if e := end - 10; e >= start+2 {
-		if f := d.w.BytesAt(e, 10); len(f) == 10 && string(f[:3]) == "3DI" &&
-			(f[6]|f[7]|f[8]|f[9])&0x80 == 0 {
-			// An appended ID3v2 tag: header, syncsafe-sized body, footer.
-			size := int64(f[6])<<21 | int64(f[7])<<14 | int64(f[8])<<7 | int64(f[9])
-			if total := size + 20; end-total >= start+2 {
-				return end - total, true
-			}
-		}
-	}
-	if n := min(int64(64<<10), end-(start+2)); n > 0 {
-		if tail := d.w.BytesAt(end-n, int(n)); int64(len(tail)) == n {
-			i := int64(len(tail))
-			for i > 0 && tail[i-1] == 0 {
-				i--
-			}
-			if i < n {
-				return end - (n - i), true
-			}
-		}
-	}
-	return end, false
 }
 
 // tailChecks reports whether [d.off, end) checksums as a complete frame,

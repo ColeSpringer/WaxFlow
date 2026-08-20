@@ -1,13 +1,12 @@
 // Package apev2 parses APEv2 tags: the key/value block WavPack and Monkey's
-// Audio files carry, almost always appended after the audio. The demuxers for
-// those formats both need to find the block (to keep it out of the audio
-// stream) and to read it (to surface tags), so the two halves share one
-// parser here.
+// Audio files carry, almost always appended after the audio. Finding the block
+// (to keep it out of the audio stream) and reading it (to surface tags) are
+// two halves of the same knowledge, so they share one parser here; the
+// trailer package does the finding on top of Size and StartsTag.
 //
-// The flacn and mpa demuxers only ever need to recognize the block's extent,
-// which they do inline while peeling trailers; they are deliberately not
-// rewritten onto this package, since a recognizer that must not allocate is a
-// different job from a parser.
+// The mpa demuxer is deliberately not rewritten onto this package. It walks a
+// trailer forward from where frames stopped parsing and accepts a truncated
+// tag, so what it needs is "a block starts here", not the extent Size answers.
 package apev2
 
 import (

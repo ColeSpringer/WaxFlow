@@ -10,9 +10,9 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/ape"
 	"github.com/colespringer/waxflow/container"
-	"github.com/colespringer/waxflow/container/internal/apev2"
 	"github.com/colespringer/waxflow/container/internal/id3"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
+	"github.com/colespringer/waxflow/container/internal/trailer"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -38,14 +38,6 @@ const (
 	// maxSeekTableBytes bounds the seek table. Four million entries is a
 	// hundred hours of the shortest frames the format uses.
 	maxSeekTableBytes = 16 << 20
-	// maxTrailers bounds trailing-tag peeling at end of stream; tags stack,
-	// APEv2 then ID3v1 being the classic pair.
-	maxTrailers = 8
-	// id3v1Len is the fixed size of a trailing ID3v1 tag.
-	id3v1Len = 128
-	// id3v2FooterLen is the size of an appended ID3v2 tag's footer, and of the
-	// header it mirrors.
-	id3v2FooterLen = 10
 	// frameSlack is how far past its last byte a frame is read. The range
 	// coder runs a few bytes ahead of the values it has produced, so the
 	// reference hands it the same slack; past the end of the audio the bytes
@@ -216,53 +208,16 @@ func (d *Demuxer) nextMagic(from, limit int64) (int64, bool) {
 	return 0, false
 }
 
-// stripTrailers peels recognized non-audio structures off the end of the file
-// (an APEv2 tag, an ID3v1 tag, and the two stacked), shrinking the window's
-// data end so the frame extents never run into them. The APEv2 block is also
-// where the track's tags come from.
+// stripTrailers peels the tags a tagger appended after the audio, shrinking
+// the window's data end so the frame extents never run into them. The APEv2
+// block is also where the track's tags come from.
 func (d *Demuxer) stripTrailers() error {
-	end := d.w.DataEnd()
-	for range maxTrailers {
-		// APEv2 is tried first because it is the stronger recognition, and
-		// because "APETAGEX" spells TAG at bytes three to five: a tag of
-		// exactly 131 bytes would otherwise have its middle peeled off as an
-		// ID3v1 tag. A real stacked pair puts ID3v1 last, where the APEv2
-		// probe finds nothing, so the order costs that case nothing.
-		if e := end - apev2.FooterLen; e >= 0 {
-			n, hasHeader := apev2.Size(d.w.BytesAt(e, apev2.FooterLen))
-			// A declared length that would eat the file is an instruction to
-			// drop audio, so the tag has to leave something behind it, and a
-			// footer that claims a header has to have one.
-			if n > 0 && end-n > 0 {
-				tag := d.w.BytesAt(end-n, int(n))
-				if int64(len(tag)) == n && (!hasHeader || apev2.StartsTag(tag)) {
-					if d.tags == nil {
-						d.tags = apev2.Parse(tag)
-					}
-					end -= n
-					continue
-				}
-			}
-		}
-		if e := end - id3v1Len; e >= 0 && string(d.w.BytesAt(e, 3)) == "TAG" {
-			end = e
-			continue
-		}
-		// An appended ID3v2 tag: header, syncsafe-sized body, footer. Only a
-		// tag with a footer can be found from behind, which is exactly the
-		// case that puts one here.
-		if e := end - id3v2FooterLen; e >= 0 {
-			if f := d.w.BytesAt(e, id3v2FooterLen); len(f) == id3v2FooterLen && string(f[:3]) == "3DI" &&
-				(f[6]|f[7]|f[8]|f[9])&0x80 == 0 {
-				size := int64(f[6])<<21 | int64(f[7])<<14 | int64(f[8])<<7 | int64(f[9])
-				if total := size + 2*id3v2FooterLen; total > 0 && end-total > 0 {
-					end -= total
-					continue
-				}
-			}
-		}
-		break
-	}
+	// The tag has to leave something behind it, which is all the floor can say
+	// here: the file header has not been found yet. NUL padding is not peeled
+	// either, since the last frame runs to the end of the audio and the range
+	// coder's own trailing bytes can be zeros.
+	end, tags := trailer.PeelAll(&d.w, trailer.APEv2|trailer.ID3v1|trailer.ID3v2, 1, d.w.DataEnd())
+	d.tags = tags
 	// No warning: a tag after the audio is the normal shape of a .ape file
 	// rather than damage recovered from, and warning would make strict mode
 	// reject every tagged one.
