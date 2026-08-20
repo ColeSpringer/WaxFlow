@@ -32,7 +32,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # the "stdlib-only codecs" promise.
 PUBLIC_PKGS := . ./waxerr ./audio ./dsp/... ./codec/... ./container/... ./format ./source ./server ./client
 
-.PHONY: build test test-race test-cli test-oracle test-example vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench encoder-quality fuzz opus-tools client-e2e hls-e2e soak
+.PHONY: build test test-race test-cli test-oracle test-example vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench encoder-quality fuzz opus-tools ape-tools client-e2e hls-e2e soak
 
 build:
 	cd cli && CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o ../bin/waxflow ./cmd/waxflow
@@ -136,6 +136,46 @@ opus-tools:
 	cp testdata/tools/opus-build/opus_demo testdata/tools/opus-build/opus_compare $(OPUS_TOOLS_DIR)/
 	rm -rf testdata/tools/opus-build
 	@echo "built $(OPUS_TOOLS_DIR)/{opus_demo,opus_compare}"
+
+# Build the reference Monkey's Audio console tool (`mac`) from the pinned SDK
+# source into testdata/tools (CI-cached, never committed). It is the only APE
+# encoder there is -- ffmpeg decodes the format but does not write it, and no
+# distribution packages the tool -- so the APE fixtures and the reference-tool
+# differentials come from here. A test-time oracle only, never a runtime
+# dependency. Tests that need it self-skip until this has run;
+# WAXFLOW_REQUIRE_MAC=1 escalates.
+APE_TOOLS_VERSION := mac-13.25
+APE_TOOLS_DIR := testdata/tools/$(APE_TOOLS_VERSION)
+# The SDK picks its file-I/O backend and its wide-character entry point from a
+# platform define, so the build needs one of three spellings. These are
+# recursively expanded on purpose: only the ape-tools recipe reads them, and an
+# immediate assignment would fork uname on every make invocation.
+APE_TOOLS_UNAME = $(shell uname -s)
+APE_TOOLS_WINDOWS = $(findstring MINGW,$(APE_TOOLS_UNAME))$(findstring MSYS,$(APE_TOOLS_UNAME))$(findstring CYGWIN,$(APE_TOOLS_UNAME))
+APE_TOOLS_CXXFLAGS = $(if $(APE_TOOLS_WINDOWS),-DPLATFORM_WINDOWS -municode,$(if $(findstring Darwin,$(APE_TOOLS_UNAME)),-DPLATFORM_APPLE,-DPLATFORM_LINUX))
+APE_TOOLS_IO_SRC = $(if $(APE_TOOLS_WINDOWS),Source/Shared/WinFileIO.cpp,Source/Shared/StdLibFileIO.cpp)
+APE_TOOLS_EXE = $(if $(APE_TOOLS_WINDOWS),.exe,)
+ape-tools:
+	@if [ -x "$(APE_TOOLS_DIR)/mac$(APE_TOOLS_EXE)" ]; then \
+		echo "$(APE_TOOLS_DIR)/mac$(APE_TOOLS_EXE) is already built"; exit 0; \
+	fi; \
+	set -e; \
+	go run ./internal/testutil/cmd/vectorfetch ape/MAC_1325_SDK.zip; \
+	rm -rf testdata/tools/ape-build; \
+	mkdir -p testdata/tools/ape-build $(APE_TOOLS_DIR); \
+	( cd testdata/tools/ape-build && unzip -q ../../vectors/ape/MAC_1325_SDK.zip ); \
+	( cd testdata/tools/ape-build && $(CXX) -O2 -std=c++11 -w $(APE_TOOLS_CXXFLAGS) \
+		-ISource/MACLib -ISource/MACLib/Old -ISource/Shared -IShared -ISource/Console \
+		Source/MACLib/*.cpp Source/MACLib/Old/*.cpp \
+		Source/Shared/BufferIO.cpp Source/Shared/CharacterHelper.cpp \
+		Source/Shared/CircleBuffer.cpp Source/Shared/CPUFeatures.cpp \
+		Source/Shared/CRC.cpp Source/Shared/GlobalFunctions.cpp \
+		Source/Shared/MemoryIO.cpp Source/Shared/Semaphore.cpp \
+		Source/Shared/Thread.cpp Source/Shared/WholeFileIO.cpp $(APE_TOOLS_IO_SRC) \
+		Source/Console/Console.cpp -o mac$(APE_TOOLS_EXE) -lpthread ); \
+	cp testdata/tools/ape-build/mac$(APE_TOOLS_EXE) $(APE_TOOLS_DIR)/; \
+	rm -rf testdata/tools/ape-build; \
+	echo "built $(APE_TOOLS_DIR)/mac$(APE_TOOLS_EXE)"
 
 # Encoder-quality gates: encode a corpus with our lossy encoders and the
 # reference baselines, score both (ODG-proxy vs Shine for MP3 and vs

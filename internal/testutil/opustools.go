@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"testing"
 )
@@ -34,9 +35,9 @@ func OpusTools(t testing.TB) (opusDemo, opusCompare string) {
 		if dir == "" {
 			continue
 		}
-		demo := filepath.Join(dir, "opus_demo")
-		compare := filepath.Join(dir, "opus_compare")
-		if fileExecutable(demo) && fileExecutable(compare) {
+		demo, demoOK := toolIn(dir, "opus_demo")
+		compare, compareOK := toolIn(dir, "opus_compare")
+		if demoOK && compareOK {
 			return demo, compare
 		}
 	}
@@ -52,9 +53,25 @@ func OpusTools(t testing.TB) (opusDemo, opusCompare string) {
 	return "", ""
 }
 
-func fileExecutable(path string) bool {
-	fi, err := os.Stat(path)
-	return err == nil && fi.Mode().IsRegular() && fi.Mode()&0o111 != 0
+// toolIn looks for a built tool in dir, under the name it has on this
+// platform. Windows has no executable bit and spells the name with .exe, so
+// checking only the mode would skip a tool that is sitting right there.
+func toolIn(dir, name string) (string, bool) {
+	names := []string{name}
+	if runtime.GOOS == "windows" {
+		names = []string{name + ".exe", name}
+	}
+	for _, n := range names {
+		path := filepath.Join(dir, n)
+		fi, err := os.Stat(path)
+		if err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		if runtime.GOOS == "windows" || fi.Mode()&0o111 != 0 {
+			return path, true
+		}
+	}
+	return "", false
 }
 
 // WriteOpusBitstream writes packets in the opus_demo bitstream form: a

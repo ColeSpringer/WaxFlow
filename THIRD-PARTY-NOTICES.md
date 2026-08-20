@@ -235,6 +235,24 @@ Entries follow this format:
 > the cost proxy that scores a candidate, the joint-stereo and false-stereo
 > decisions, and the container writer.
 
+> **codec/ape decoder**: a clean-room port of the *Monkey's Audio* reference
+> decoder (BSD-3-Clause), https://monkeysaudio.com, SDK 13.25. A lossless
+> decoder has to reproduce the reference bit for bit, so the parts that define
+> the bitstream are ported faithfully: the range decoder and its two symbol
+> models (`UnBitArray.cpp` and `Old/UnBitArrayOld.cpp`, with the model tables
+> and the magnitude ladder from `UnBitArrayBase.h`), the neural filter's dot
+> product, sign-sign weight update, and step quantizers (`NNFilterGeneric.cpp`,
+> `NNFilterCommon.h`), the adaptive predictor and its first-order lift
+> (`NewPredictor.cpp`, `ScaledFirstOrderFilter.h`), the interim 24-bit variant
+> (`Interim.h`), the file header layouts (`APEHeader.cpp`, `MACLib.h`), the
+> frame driver's special-code handling and CRC finalization
+> (`APEDecompressCore.cpp`), and the mid/side inverse and sample packing
+> (`Prepare.cpp`). The bit reader, the packet model, the container demuxer, and
+> the codec.Decoder integration are original. The reference `mac` console tool
+> additionally serves as a test-only fixture generator and oracle, built from
+> the pinned SDK source by `make ape-tools`; it never enters the runtime
+> pipeline.
+
 > **internal/testutil opus_compare**: `internal/testutil/opuscompare.go` is
 > a Go port of *libopus*'s `src/opus_compare.c` (BSD-3-Clause),
 > https://gitlab.xiph.org/xiph/opus, the RFC 6716 section 6 decoder

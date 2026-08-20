@@ -13,6 +13,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/codec/alac"
+	"github.com/colespringer/waxflow/codec/ape"
 	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/codec/opus"
@@ -440,6 +441,8 @@ func decodeVersion(id codec.ID) string {
 		return vorbis.Version
 	case codec.WavPack:
 		return wavpack.Version
+	case codec.APE:
+		return ape.Version
 	default:
 		// Unregistered codecs cannot decode, so no cached bytes exist to
 		// go stale; keep their plans keyed distinctly all the same.

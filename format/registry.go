@@ -6,6 +6,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/codec/alac"
+	"github.com/colespringer/waxflow/codec/ape"
 	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/codec/opus"
@@ -15,6 +16,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/adts"
 	"github.com/colespringer/waxflow/container/aiff"
+	"github.com/colespringer/waxflow/container/apen"
 	"github.com/colespringer/waxflow/container/flacn"
 	"github.com/colespringer/waxflow/container/mka"
 	"github.com/colespringer/waxflow/container/mp4"
@@ -116,6 +118,16 @@ var drivers = []driver{
 		},
 	},
 	{
+		name:      "ape",
+		match:     apen.Match,
+		need:      apen.MatchNeed,
+		exts:      []string{"ape"},
+		mediaType: "audio/x-ape",
+		open: func(src container.Source, opts *Options) (container.Demuxer, error) {
+			return apen.NewDemuxer(src, &apen.DemuxerOptions{Strict: opts != nil && opts.Strict})
+		},
+	},
+	{
 		name:      "wavpack",
 		match:     wv.Match,
 		need:      4,
@@ -202,6 +214,13 @@ var decoders = []struct {
 			return nil, err
 		}
 		return wavpack.NewDecoder(cfg, t.Fmt)
+	}},
+	{codec.APE, func(t container.Track) (codec.Decoder, error) {
+		cfg, err := ape.ParseConfig(t.CodecConfig)
+		if err != nil {
+			return nil, err
+		}
+		return ape.NewDecoder(cfg, t.Fmt)
 	}},
 	{codec.Vorbis, func(t container.Track) (codec.Decoder, error) {
 		cfg, err := vorbis.ParseConfig(t.CodecConfig)

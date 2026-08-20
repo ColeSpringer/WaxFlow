@@ -302,7 +302,15 @@ func (m *media) stash(b *audio.Buffer) error {
 	}
 	m.compact()
 	if m.carry == nil || m.carry.Cap()-m.carry.N < rest {
-		grown := audio.Get(m.track.Fmt, max(m.carryLen()+rest, audio.StandardChunk))
+		// Geometric, not exact-fit: a decoder that hands a long unit out in
+		// ordinary chunks (APE emits a frame 4096 frames at a time, and a
+		// frame runs to a quarter of a minute) would otherwise regrow and
+		// recopy the whole carry once per chunk.
+		want := max(m.carryLen()+rest, audio.StandardChunk)
+		if m.carry != nil {
+			want = max(want, 2*m.carry.Cap())
+		}
+		grown := audio.Get(m.track.Fmt, want)
 		if old := m.carry; old != nil {
 			grown.N = m.carryLen()
 			audio.CopyFrames(grown, 0, old, m.carryOff, grown.N)

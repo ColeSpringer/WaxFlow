@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxflow/internal/posixfs"
 )
@@ -178,6 +179,12 @@ var Vectors = []Vector{
 	// member by member by the conformance test; it is large, so it is fetched
 	// and CI-cached like the Opus tarballs rather than committed.
 	{Name: "wavpack/test_suite.zip", URL: "https://www.rarewares.org/wavpack/test_suite.zip", SHA256: "cfeee02f6f873f10da127603898546b03d9a1f7d3db1fbd0395b6c526696d675"},
+	// The Monkey's Audio SDK (BSD-3-Clause), which the APE decoder is ported
+	// from and which `make ape-tools` builds the reference `mac` console tool
+	// out of. No distribution packages that tool and ffmpeg has no APE
+	// encoder, so it is the only way to generate a .ape at all: a test-time
+	// oracle and fixture generator, never a runtime dependency.
+	{Name: "ape/MAC_1325_SDK.zip", URL: "https://monkeysaudio.com/files/MAC_1325_SDK.zip", SHA256: "0c4c82e60f42fee8deaf4facc28a56a9f84b7afcc5631a7d2c581f8e8ea33cb4"},
 	// The Opus speech-quality corpus source: the McGill TSP Speech Database
 	// 48 kHz set (Peter Kabal, BSD-2-Clause; hosted by the McGill MMSP lab
 	// since the late 1990s), ~1400 short studio-recorded Harvard sentences
@@ -265,11 +272,33 @@ func Fetch(w io.Writer, dir string, vectors []Vector) error {
 	return nil
 }
 
+// fetchClient bounds a fetch that stalls. The overall timeout is generous
+// because the largest pinned vector is a 183 MB archive, but a host that
+// accepts the connection and then says nothing must not hang a CI job until
+// the runner's own ceiling: the header and handshake timeouts are what turn
+// that into a failure in seconds.
+var fetchClient = &http.Client{
+	Timeout: 30 * time.Minute,
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		TLSHandshakeTimeout:   30 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+	},
+}
+
 func fetchOne(path string, v Vector) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	resp, err := http.Get(v.URL)
+	req, err := http.NewRequest(http.MethodGet, v.URL, nil)
+	if err != nil {
+		return err
+	}
+	// Name the fetcher: Go's default headers are enough of a bot signature
+	// that at least one of the pinned hosts answers them with a 406.
+	req.Header.Set("User-Agent", "waxflow-vectorfetch/1 (+https://github.com/colespringer/waxflow)")
+	req.Header.Set("Accept", "*/*")
+	resp, err := fetchClient.Do(req)
 	if err != nil {
 		return err
 	}

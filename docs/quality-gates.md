@@ -63,6 +63,7 @@ it re-baselines every gate in the same PR.
 | ALAC | bit-exact vs ffmpeg; >=100x realtime |
 | Opus | all opus_testvectors 01-12 pass RFC 6716 section 6 (ported opus_compare, both decode rates, against the RFC 8251 regenerated references; the 2012 originals are stale for hybrid/transition vectors and fail even current libopus); Ogg bisection seek exact after 80 ms pre-roll; >=150x realtime |
 | Vorbis | vs ffmpeg: RMS < 1e-4 FS, max < 1e-3 FS; >=80x realtime |
+| APE (Monkey's Audio) | bit-exact against the samples the reference encoder was handed AND against ffmpeg's decode of the same file, across every compression level, 8/16/24-bit, mono and stereo, the silent and pseudo-stereo special frames, a non-standard rate, and a multi-frame stream with a short final frame; the committed fixtures re-check the same thing with no tools installed; every out-of-scope shape refused by name (32-bit, floating point, more than two channels, stream versions outside 3950 to 3990); frame-granular seek, exact at the frame it lands on; >=100x realtime at the default compression level. **Recorded deficit:** the 3950..3989 bitstream (a different entropy coder, and below 3980 a different header form and weight quantizer) ships UNFIXTURED. No encoder in circulation writes those versions -- the reference tool has written 3990 since 2003 and no old build is distributed any more -- and there is no APE conformance corpus, so nothing can generate one. What limits the exposure is the format itself: every frame carries a CRC over its own samples, so a mistake in those paths is a refusal rather than wrong audio. The header form IS tested, against headers built by hand in `codec/ape/ape_test.go`. |
 | WavPack | bit-exact vs ffmpeg on the official WavPack test suite (every bit depth 8 to 32, the three stereo block modes, redundant-LSB and non-standard-rate files, all four speed modes) and on fixtures from both ffmpeg's encoder and the reference `wavpack` CLI; every out-of-scope shape refused by name (hybrid, float, DSD, more than two channels, and stream versions outside 4.02 to 4.16); the suite's pre-4.0 samples never reach the decoder at all, since they carry the source WAV header and resolve as RIFF; sample-exact seek; >=200x realtime |
 
 ## Loudness meter
@@ -211,6 +212,25 @@ keg-only, so point the oracles at it explicitly or put it ahead on PATH).
 - `decode(encode(x)) == x` bit-exact; ffmpeg demuxes and decodes our fMP4.
 - Size: corpus total <= **1.05x** ffmpeg's ALAC encoder.
 - >= **80x** realtime.
+
+### APE (Monkey's Audio)
+- There is no second encoder and no conformance corpus: ffmpeg decodes the
+  format but does not write it, and no distribution packages the reference
+  tool. `make ape-tools` builds it from the SHA-256-pinned SDK source, the
+  same way the libopus tools are built, and the CI differential job runs it
+  under `WAXFLOW_REQUIRE_MAC=1`.
+- Two things are asserted per cell, and they fail differently. Against the
+  **source samples**, which proves the decode. Against **ffmpeg's decode of
+  the same file**, which proves the file is what we think it is and would
+  catch a fixture generated from the wrong bytes.
+- The committed fixtures hold signals `internal/testutil` rebuilds from a
+  seed, so the bit-exact assertion also runs with no encoder, no ffmpeg and
+  no network. Regenerating them (`go generate ./codec/ape`) is not a
+  re-baselining: the same assertions hold afterward or the file is wrong.
+- The committed set spans all five levels and all three depths, enforced by
+  `TestFixturesCoverTheCascades`, because the level IS the filter cascade: a
+  set that drifted to one level would leave four of the five chains resting
+  entirely on a tool nobody has installed.
 
 ### WavPack
 - `decode(encode(x)) == x` bit-exact at every level, depth (8/16/24/32),
@@ -489,7 +509,7 @@ keg-only, so point the oracles at it explicitly or put it ahead on PATH).
 
 Portable build, per core: decode FLAC >=**300x** / MP3 >=150x /
 AAC >=**150x** / HE-AAC >=**150x** / Opus >=**150x** / Vorbis >=80x /
-WavPack >=**200x**;
+WavPack >=**200x** / APE >=**100x**;
 encode FLAC >=**150x** / ALAC >=80x / MP3 >=40x / AAC >=20x /
 HE-AAC >=**20x** / Opus >=**30x** / WavPack >=**50x**; resampler HQ >=200x. The bolded
 floors were ratcheted at the v1.0 bench pass against the post-FFT
@@ -506,6 +526,14 @@ high measures a bit over a third of the default's factor). It is left at
 50x rather than ratcheted to the encoder's current 162x worst case,
 because that speedup came from a change made for size, and a floor set
 against it would be ratcheting on a number nothing was tuned for.
+The APE decode floor is likewise for the default compression level, which
+is what encoders have written by default since the format existed. There
+the level is not search breadth but filter taps, and they are the decode
+cost too: measured on pink noise the five levels run 430x / 267x / 149x /
+62x / 15x, so the deepest one decodes a frame of its own 26-second length
+in under two seconds and still plays back an order of magnitude faster
+than realtime. A floor stated against the deepest level would be a floor
+on a setting almost no file uses.
 
 The floors are triaged from that job's numbers, not asserted by the default
 suite: a shared runner measures its own scheduling noise as much as the codec,

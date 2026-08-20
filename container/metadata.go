@@ -49,11 +49,12 @@ type Chapterer interface {
 // accessor rather than a field read, which is the same reason
 // meta.ReadOptions.Pictures exists.
 //
-// This is not dead code, though it can read that way: container/mp4 and
-// container/wv implement it, and the tag library now reads every MP4 shape, so
-// on a mapper-wired route the fold rarely has anything left to add. What it
-// still serves is an embedder that wires no mapper at all, where it is the
-// only tag source there is; for a .wv it is the only one either way.
+// This is not dead code, though it can read that way: container/mp4,
+// container/wv, and container/apen implement it, and the tag library now reads
+// every MP4 shape, so on a mapper-wired route the fold rarely has anything left
+// to add. What it still serves is an embedder that wires no mapper at all,
+// where it is the only tag source there is; for a .wv or a .ape it is the only
+// one either way.
 //
 // Keep the keys a mapper would also produce. Nothing enforces it: the fold
 // gives the mapper priority per key, so an atom exposed here under a spelling

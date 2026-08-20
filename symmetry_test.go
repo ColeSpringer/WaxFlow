@@ -31,7 +31,10 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	// deliberately deferred. Each entry is deleted by the change that lands its
 	// capability, so the list is the burn-down checklist and is empty once
 	// every codec encodes+decodes and every container demuxes+muxes.
-	symmetryGaps := map[string]string{}
+	symmetryGaps := map[string]string{
+		"ape-encode": "the APE encoder and its outputs row land in the next stage",
+		"apen-mux":   "the .ape muxer lands with the encoder, in the next stage",
+	}
 
 	decodes := map[codec.ID]bool{}
 	for _, id := range format.Decoders() {
@@ -49,10 +52,13 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	// codecGaps names, per codec, the allowlist entry that excuses its
 	// decoder-without-encoder imbalance in the codec-level loop below;
 	// containerGaps does the same, per input container, for the
-	// demuxer-without-muxer loop. Both are empty: every codec that decodes
-	// also encodes, and every container that demuxes is muxed back.
-	codecGaps := map[codec.ID]string{}
-	containerGaps := map[string]string{}
+	// demuxer-without-muxer loop.
+	codecGaps := map[codec.ID]string{
+		codec.APE: "ape-encode",
+	}
+	containerGaps := map[string]string{
+		"ape": "apen-mux",
+	}
 
 	// open reports, for each named gap, whether it is still open, computed from
 	// the live tables so the predicate tracks the real code and cannot go stale.
@@ -61,8 +67,11 @@ func TestCodecContainerSymmetry(t *testing.T) {
 		"vorbis-encode":  decodes[codec.Vorbis] && !encodes[codec.Vorbis],
 		"he-aac-encode":  decodes[codec.HEAAC] && !encodes[codec.HEAAC],
 		"wavpack-encode": decodes[codec.WavPack] && !encodes[codec.WavPack],
+		"ape-encode":     decodes[codec.APE] && !encodes[codec.APE],
 		// The wv package demuxes but has no muxer wired into any output row.
 		"wv-mux": !containerWritten("wavpack"),
+		// The apen package demuxes but has no muxer wired into any output row.
+		"apen-mux": !containerWritten("ape"),
 		// The mka package demuxes but has no muxer wired into any output row's
 		// container override (opus/aac/flac/pcm reach it once the mka muxer lands).
 		"mka-mux": !containerWritable("mka") && !containerWritable("webm"),

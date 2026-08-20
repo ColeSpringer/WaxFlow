@@ -23,6 +23,7 @@ const (
 	Opus    ID = "opus"
 	Vorbis  ID = "vorbis"
 	WavPack ID = "wavpack"
+	APE     ID = "ape"
 )
 
 // Packet is one compressed unit as a codec defines it: a FLAC frame, an

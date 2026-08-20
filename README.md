@@ -37,7 +37,8 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   and ALAC in MP4/M4A/M4B, ADTS (implicit HE-AAC detected), Opus (all
   RFC 6716/8251 conformance vectors pass), Vorbis, Ogg, Matroska/WebM,
   WavPack (bit-exact on the official test suite: 8- to 32-bit integers,
-  the three stereo block modes, APEv2 tags; encodes too). Sample-exact
+  the three stereo block modes, APEv2 tags; encodes too), Monkey's Audio
+  (all five compression levels, 8/16/24-bit, APEv2 tags). Sample-exact
   seeking everywhere, gapless honored per format (LAME tag, iTunSMPB,
   edit lists, Ogg pre-skip/end-trim, Matroska CodecDelay).
 - **DSP**: Kaiser windowed-sinc resampling (`hq`/`fast`), BS.775
@@ -226,9 +227,10 @@ replaced content still dies with `410 source-changed`.
 Video; enhanced SBR and xHE (HE-AAC v1 and v2 *decode* ships,
 downsampled SBR and ADTS implicit signalling included, and v1/v2
 *encoding* ships as `format=he-aac`, v2 behind `hev2`);
-WMA/APE **encoding**; WMA/APE
-decoding; WavPack hybrid, float, DSD, and more than two channels (encode
-and decode both refuse them by name); DASH manifests (the CMAF segments are already DASH-compatible);
+WMA/APE **encoding**; WMA
+decoding; APE stream versions before 3.95, 32-bit and floating-point APE,
+and more than two APE channels; WavPack hybrid, float, DSD, and more than
+two channels (encode and decode both refuse them by name); DASH manifests (the CMAF segments are already DASH-compatible);
 DRM/HLS-AES; Opus PLC; CD ripping; any database (WaxBin owns cataloging);
 tag *editing* (WaxLabel owns it; WaxFlow only maps and passes metadata);
 Icecast/radio ingest; waveform peaks (WaxBin has them);

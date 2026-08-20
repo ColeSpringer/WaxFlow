@@ -57,6 +57,8 @@ var fixtures = []struct {
 	{"noise-s16.flac", "flac", codec.FLAC, 44100, 2, audio.Int, 16, 15435},
 	{"sine-s16.oga", "ogg", codec.FLAC, 44100, 2, audio.Int, 16, 15435},
 	{"noise-s24.oga", "ogg", codec.FLAC, 48000, 2, audio.Int, 24, 16800},
+	{"sine-s16.ape", "ape", codec.APE, 44100, 2, audio.Int, 16, 22050},
+	{"noise-s16.ape", "ape", codec.APE, 44100, 2, audio.Int, 16, 22050},
 }
 
 func fixtureSource(t testing.TB, name string) container.Source {
