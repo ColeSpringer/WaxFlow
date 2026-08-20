@@ -231,6 +231,65 @@ keg-only, so point the oracles at it explicitly or put it ahead on PATH).
   `TestFixturesCoverTheCascades`, because the level IS the filter cascade: a
   set that drifted to one level would leave four of the five chains resting
   entirely on a tool nobody has installed.
+- **Encode**: `decode(encode(x)) == x` bit-exact at every written level
+  (1000/2000/3000), depth (8/16/24) and channel count, with a final frame
+  shorter than the rest, which is the only frame whose block count the file
+  header states separately.
+- Two independent readers take our files back: ffmpeg's decoder
+  sample-for-sample with `ffprobe` agreeing on the shape, and the reference
+  tool's own `mac -v` plus a `mac -d` decode compared against the source.
+  The second is not redundant: `-v` recomputes the file MD5, which covers
+  the frame data, the format header and the whole seek table, and no decoder
+  here reads any of that.
+- Our coded frames are the reference encoder's coded frames, **byte for
+  byte**, at every depth, channel count and level
+  (`TestAPEEncodeMatchesTheReferenceFrames`). Nothing in the format fixes an
+  encoder's choices, so this is not required for correctness; what it buys
+  is that a drift anywhere in the predictor, the filter's step quantizer,
+  the range coder's carry handling or the mid/side matrix fails at the first
+  byte it touches rather than as a fraction of a percent of size.
+- Both per-frame optimizations (the silent frame and the pseudo-stereo
+  frame, each of which codes no values at all) have a test asserting they
+  **fire** on material that should trigger them. A stream that never takes
+  one is still a correct stream, so nothing else would notice.
+- The byte comparison is run against the special frames too, one silent
+  channel at a time. That is the only place the reference's channel-order
+  quirk shows: it reads the pair as (R, L) and keys LEFT_SILENCE off the
+  SECOND channel, so a frame whose channel 0 is silent carries the RIGHT
+  bit. Decoders act only when both bits are set, so a transposed pair is
+  invisible to every round trip and to ffmpeg; only the reference's own
+  bytes catch it, at byte 7.
+- A .ape truncated exactly at a frame's first byte is **refused**, not read
+  as a frame of no bytes. Only the last frame can produce one, since the
+  seek table's synthetic end entry is the only one that can equal its
+  predecessor, and a zero-length frame is impossible (a CRC word plus the
+  coder's four-byte flush is nine bytes). Before it was refused the demuxer
+  emitted a packet its own decoder would not parse, and the muxer inherited
+  that through the same parse, so a transmux of a short file died mid-write.
+- The **levels are not monotone in size**, and that is the format rather
+  than a defect: on synthesized material the 64-tap cascade loses to the
+  16-tap one by about half a percent at every length measured, and the
+  reference encoder does the same thing on the same input. The gate asserts
+  what holds everywhere measured -- both filtered levels beat the fast
+  level, which runs no filter at all -- and the byte-identity above is the
+  stronger claim anyway.
+- A .ape asked for as APE takes the **transmux** rung: the frames move
+  through byte for byte and only the header, the seek table and the file MD5
+  are rebuilt, pinned on files from both encoders. The reference-encoded arm
+  is the one that matters, because its frames share the word at each frame
+  boundary where ours start on one; a muxer that could only lay down its own
+  encoder's output fails on every .ape in existence, which is what it did
+  until the packet learned to state its frame's byte length.
+- Nothing narrows on the way in: a 32-bit integer source is refused by name
+  rather than losing eight bits, which is the channel rule applied to depth.
+  Every other lossless output here carries 32-bit through, so a quiet narrow
+  would make this the one row that drops data without saying so.
+- The two deepest levels (extra high, insane) **decode** and are not
+  written, refused by name. Their cascades cost 256 and 1552 taps a sample
+  in both directions, which puts the decode side into the offline regime for
+  a fraction of a percent.
+- >= **100x** realtime at the default level (251x measured on the noise
+  worst case, 277x on a tone; the high level is about 137x).
 
 ### WavPack
 - `decode(encode(x)) == x` bit-exact at every level, depth (8/16/24/32),
@@ -511,7 +570,8 @@ Portable build, per core: decode FLAC >=**300x** / MP3 >=150x /
 AAC >=**150x** / HE-AAC >=**150x** / Opus >=**150x** / Vorbis >=80x /
 WavPack >=**200x** / APE >=**100x**;
 encode FLAC >=**150x** / ALAC >=80x / MP3 >=40x / AAC >=20x /
-HE-AAC >=**20x** / Opus >=**30x** / WavPack >=**50x**; resampler HQ >=200x. The bolded
+HE-AAC >=**20x** / Opus >=**30x** / WavPack >=**50x** / APE >=**100x**;
+resampler HQ >=200x. The bolded
 floors were ratcheted at the v1.0 bench pass against the post-FFT
 measurements (decode FLAC 537-934x, AAC 260x, Opus 289-522x; encode FLAC
 230-250x at level 5, Opus 55-67x), leaving 2x or more headroom for
@@ -533,7 +593,10 @@ cost too: measured on pink noise the five levels run 430x / 267x / 149x /
 62x / 15x, so the deepest one decodes a frame of its own 26-second length
 in under two seconds and still plays back an order of magnitude faster
 than realtime. A floor stated against the deepest level would be a floor
-on a setting almost no file uses.
+on a setting almost no file uses. The APE **encode** floor is for the same
+default level and for the three levels the encoder writes; there is no search
+over candidates here, so encode and decode cost track each other and the high
+level measures about 137x.
 
 The floors are triaged from that job's numbers, not asserted by the default
 suite: a shared runner measures its own scheduling noise as much as the codec,

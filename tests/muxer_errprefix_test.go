@@ -8,6 +8,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/adts"
 	"github.com/colespringer/waxflow/container/aiff"
+	"github.com/colespringer/waxflow/container/apen"
 	"github.com/colespringer/waxflow/container/flacn"
 	"github.com/colespringer/waxflow/container/mka"
 	"github.com/colespringer/waxflow/container/mp4"
@@ -36,6 +37,7 @@ func TestMuxerErrorsUsePublicContainerNames(t *testing.T) {
 		{"adts", func(d io.Writer) container.Muxer { return adts.NewMuxer(d) }},
 		{"mp3", func(d io.Writer) container.Muxer { return mpa.NewMuxer(d, &mpa.MuxerOptions{}) }},
 		{"wavpack", func(d io.Writer) container.Muxer { return wv.NewMuxer(d, nil) }},
+		{"ape", func(d io.Writer) container.Muxer { return apen.NewMuxer(d, nil) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.build(io.Discard).Begin(nil)

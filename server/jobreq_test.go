@@ -143,7 +143,7 @@ func populatedJobRequest() jobRequest {
 		Type: "transcode", Src: "x", Srcs: []string{"x"}, Titles: []string{"x"}, Cuts: []int64{1}, Cue: "x",
 		Format: "x", Container: "x",
 		Rate: 1, Ch: 1, Bits: 1, Bitrate: 1, HEv2: true, Gain: "x", Loudness: "x",
-		FLACLevel: 1, WavPackLevel: 1,
+		FLACLevel: 1, WavPackLevel: 1, APELevel: 1000,
 		Silence: true, SilenceThresholdDB: -60, SilenceMinSeconds: 0.25,
 	}
 }

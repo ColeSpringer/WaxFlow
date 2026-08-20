@@ -100,6 +100,7 @@ type jobRequest struct {
 	Loudness     string `json:"loudness,omitempty"`
 	FLACLevel    int    `json:"flacLevel,omitempty"`
 	WavPackLevel int    `json:"wavpackLevel,omitempty"`
+	APELevel     int    `json:"apeLevel,omitempty"`
 
 	Silence            bool    `json:"silence,omitempty"`
 	SilenceThresholdDB float64 `json:"silenceThresholdDb,omitempty"`
@@ -130,6 +131,7 @@ func requestFrom(body jobRequest) *jobs.Request {
 		Loudness:           body.Loudness,
 		FLACLevel:          body.FLACLevel,
 		WavPackLevel:       body.WavPackLevel,
+		APELevel:           body.APELevel,
 		Silence:            body.Silence,
 		SilenceThresholdDB: body.SilenceThresholdDB,
 		SilenceMinSeconds:  body.SilenceMinSeconds,
@@ -256,7 +258,8 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 	if req.Type == jobs.TypeAnalyze {
 		if body.Format != "" || body.Container != "" || body.Rate != 0 || body.Ch != 0 ||
 			body.Bits != 0 || body.Bitrate != 0 || body.HEv2 || body.Gain != "" ||
-			body.Loudness != "" || body.FLACLevel != 0 || body.WavPackLevel != 0 {
+			body.Loudness != "" || body.FLACLevel != 0 || body.WavPackLevel != 0 ||
+			body.APELevel != 0 {
 			return bad("type analyze takes src and the silence fields")
 		}
 		// A threshold with no silence:true would be silently ignored, which

@@ -69,7 +69,11 @@ func NewDecoder(cfg Config, f audio.Format) (*Decoder, error) {
 
 // Decode decodes one frame and emits it.
 func (d *Decoder) Decode(pkt []byte, emit func(*audio.Buffer) error) error {
-	blocks, skip, data, err := ParseFrameHeader(pkt)
+	// The frame's own byte length is in the header too, and this decoder does
+	// not read it: it stops when it has produced the block count, and running
+	// past the coded bytes is what the reader's own slack allowance reports.
+	// The field is there for a writer, which has to know where a frame stops.
+	blocks, skip, _, data, err := ParseFrameHeader(pkt)
 	if err != nil {
 		return err
 	}

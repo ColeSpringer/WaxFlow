@@ -20,6 +20,17 @@
 #                       too means `FUZZTIME=60s scripts/fuzz.sh` does what it
 #                       reads like rather than silently taking the 20m default.
 #        FUZZ_LOG_DIR   directory for per-target logs (default ./fuzz-logs)
+#        FUZZ_PARALLEL  workers per target; unset lets Go use one per core.
+#
+# On worker count and memory: the engine's footprint grows with run length and
+# scales with worker count, in steps rather than smoothly. Measured on a
+# 24-core box, one target over five minutes reached 5.1 GB across its workers
+# with the largest at 1.9 GB, and it is the engine rather than any one target
+# (the heaviest reading came from the oldest target in the tree). Targets run
+# one at a time here, so that is the whole footprint, and it is fine on an
+# ordinary machine. FUZZ_PARALLEL is the lever if a box has many cores and
+# little memory; CI runners have few enough cores that the default already
+# bounds them.
 
 set -u
 
@@ -53,6 +64,13 @@ pkgs=$(go list ./...) || {
 
 status=0
 
+# Unquoted on use, so an unset FUZZ_PARALLEL expands to nothing and Go keeps
+# its own default rather than being handed an empty flag.
+parallel=""
+if [ -n "${FUZZ_PARALLEL:-}" ]; then
+	parallel="-parallel $FUZZ_PARALLEL"
+fi
+
 for pkg in $pkgs; do
 	# Compile the test binary and list its fuzz targets. A compile/list error
 	# must fail the job, not be swallowed into a false green.
@@ -73,7 +91,7 @@ for pkg in $pkgs; do
 		group "fuzz $target ($fuzztime) - $pkg"
 		# tee so progress still streams to the console while we keep the full
 		# output for classification; PIPESTATUS[0] is go test's real exit code.
-		go test -run '^$' -fuzz "^${target}\$" -fuzztime "$fuzztime" -v "$pkg" 2>&1 | tee "$log"
+		go test -run '^$' -fuzz "^${target}\$" -fuzztime "$fuzztime" $parallel -v "$pkg" 2>&1 | tee "$log"
 		rc=${PIPESTATUS[0]}
 		endgroup
 

@@ -65,7 +65,7 @@ func walk(t *testing.T, d *apen.Demuxer) (frames int, samples int64) {
 		if pkt.Dur <= 0 || len(pkt.Data) <= ape.FrameHeaderLen || !pkt.Sync {
 			t.Fatalf("bad packet: dur=%d len=%d sync=%v", pkt.Dur, len(pkt.Data), pkt.Sync)
 		}
-		blocks, skip, _, err := ape.ParseFrameHeader(pkt.Data)
+		blocks, skip, n, data, err := ape.ParseFrameHeader(pkt.Data)
 		if err != nil {
 			t.Fatalf("frame %d header: %v", frames, err)
 		}
@@ -74,6 +74,12 @@ func walk(t *testing.T, d *apen.Demuxer) (frames int, samples int64) {
 		}
 		if skip < 0 || skip > 3 {
 			t.Fatalf("frame %d: alignment skip %d", frames, skip)
+		}
+		// The frame's own run has to fit inside the payload, since a writer
+		// reads exactly that many bytes back out of it.
+		if n <= 0 || skip+n > len(data) {
+			t.Fatalf("frame %d: %d coded bytes past a %d-byte skip in a %d-byte payload",
+				frames, n, skip, len(data))
 		}
 		next += pkt.Dur
 		frames++

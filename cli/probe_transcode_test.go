@@ -953,3 +953,108 @@ func TestTranscodeWavPack(t *testing.T) {
 		t.Error("failed transcode left an output file behind")
 	}
 }
+
+// TestTranscodeAPE drives the ape output through the real command: extension
+// inference from .ape, the level flag, its validation, a bit-exact ramp round
+// trip, and the post-pass skip its muxer earns by writing the APEv2 block
+// itself. It is TestTranscodeWavPack for the other lossless row whose muxer
+// owns its tags; the two differ in that a .ape needs a seekable destination,
+// which a file is.
+func TestTranscodeAPE(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	writeWAV(t, in, 4800)
+
+	outPath := filepath.Join(dir, "out.ape")
+	code, out, errOut := run(t, "transcode", in, outPath, "--ape-level", "3000")
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, errOut)
+	}
+	if !strings.Contains(out, "4800 samples") {
+		t.Errorf("output = %q", out)
+	}
+	if strings.Contains(errOut, "post-pass") {
+		t.Errorf("a format whose muxer writes its own tags ran the post-pass anyway: %s", errOut)
+	}
+
+	f, err := os.Open(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	src, err := container.FileSource(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	med, err := waxflow.New().OpenStream(src, "ape")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	info := med.Info()
+	if info.Container != "ape" || info.Default().Samples != 4800 {
+		t.Fatalf("output probe = %+v", info)
+	}
+	fm := info.Default().Fmt
+	dst := audio.Get(fm, audio.StandardChunk)
+	defer audio.Put(dst)
+	pos := int64(0)
+	for {
+		err := med.ReadChunk(dst)
+		if err != nil {
+			break
+		}
+		for c := 0; c < fm.Channels; c++ {
+			for i, v := range dst.ChanI(c) {
+				if want := testutil.RampAtI(fm, c, pos+int64(i)); v != want {
+					t.Fatalf("ch%d sample %d = %d, want %d", c, pos+int64(i), v, want)
+				}
+			}
+		}
+		pos += int64(dst.N)
+	}
+	if pos != 4800 {
+		t.Fatalf("decoded %d frames, want 4800", pos)
+	}
+
+	// The format's two deepest levels decode here and are not written, so the
+	// flag has to refuse them the same way it refuses a number off the scale.
+	for _, level := range []string{"9", "4000"} {
+		code, _, errOut = run(t, "transcode", in, filepath.Join(dir, "bad"+level+".ape"), "--ape-level", level)
+		if code != 2 {
+			t.Errorf("level %s exit = %d, want 2 (invalid), stderr: %s", level, code, errOut)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "bad"+level+".ape")); err == nil {
+			t.Errorf("failed transcode at level %s left an output file behind", level)
+		}
+	}
+}
+
+// TestTranscodeAPELoudnessEmbedsRG is TestTranscodeWavPackLoudnessEmbedsRG for
+// the other output whose muxer takes its tags at Begin: a row missing from the
+// pre-embed switch measures the output and drops the result, leaving a file
+// with no ReplayGain at all because the source's own was stripped.
+func TestTranscodeAPELoudnessEmbedsRG(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	out := filepath.Join(dir, "out.ape")
+	writeWAV(t, in, 48000)
+
+	code, _, errOut := run(t, "transcode", "--loudness", "analyze", in, out)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, errOut)
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := waxflow.New().Probe(container.BytesSource(raw), "ape", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"REPLAYGAIN_TRACK_GAIN", "REPLAYGAIN_TRACK_PEAK"} {
+		if len(info.Tags[key]) != 1 {
+			t.Errorf("output carries %s = %v, want one value", key, info.Tags[key])
+		}
+	}
+}

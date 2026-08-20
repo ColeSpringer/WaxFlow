@@ -291,6 +291,16 @@ func (d *Demuxer) readSeekTable() error {
 		switch {
 		case d.seek[i+1] < d.seek[i]:
 			return malformed("frame %d ends at %d, before its start at %d", i, d.seek[i+1], d.seek[i])
+		case d.seek[i+1] == d.seek[i]:
+			// A frame is never empty: it opens with a CRC word and closes
+			// with the range coder's four-byte flush, so the shortest one the
+			// format can express is nine bytes. This is what a file truncated
+			// exactly at its last frame's first byte looks like, since the
+			// table's synthetic end entry then ties with the one before it,
+			// and it is the only way an entry can equal its predecessor.
+			// Refusing here is what keeps the packet the demuxer emits one
+			// the decoder can parse.
+			return malformed("frame %d holds no bytes: the audio ends where it starts, at %d", i, d.seek[i])
 		case d.seek[i+1] > d.w.DataEnd():
 			return malformed("frame %d runs to %d, past the %d bytes of audio", i, d.seek[i+1], d.w.DataEnd())
 		case d.seek[i+1]-d.seek[i] > maxFrame:
@@ -345,7 +355,7 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 		d.pkt = make([]byte, n)
 	}
 	d.pkt = d.pkt[:n]
-	ape.PutFrameHeader(d.pkt, blocks, skip)
+	ape.PutFrameHeader(d.pkt, blocks, skip, int(d.seek[i+1]-d.seek[i]))
 	if err := container.ReadFull(d.src, d.pkt[ape.FrameHeaderLen:], from); err != nil {
 		return waxerr.Wrap(waxerr.CodeSourceUnreadable, "ape: reading frame data", err)
 	}

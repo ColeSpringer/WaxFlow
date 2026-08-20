@@ -1,6 +1,6 @@
 package ape
 
-// The neural filter, ported from the reference decoder. It is a sign-sign LMS
+// The neural filter, ported from the reference. It is a sign-sign LMS
 // adaptive filter: predict the next residual from a window of past ones, then
 // nudge every weight by a quantized step whose sign follows the prediction
 // error. The compression level chooses how many of these run in series and how
@@ -128,6 +128,40 @@ func (f *nnFilter) decompress(in int32) int32 {
 
 	f.updateDelta(out)
 	f.input.set(0, saturateInt16(out))
+	f.input.increment()
+	f.deltaM.increment()
+	return out
+}
+
+// compress turns one residual into the residual of the stage above it, which
+// is decompress with the prediction subtracted rather than added. The two
+// swap which of the pair (in, out) drives the weight update and which is
+// remembered, and that swap is the whole inverse.
+func (f *nnFilter) compress(in int32) int32 {
+	hist, m := f.input.history(), f.m
+	m = m[:len(hist)]
+	var dot int32
+	for j, v := range hist {
+		dot += int32(v) * int32(m[j])
+	}
+	// No interim branch: those accumulators belong to a spell of 24-bit
+	// encoders this package reads and does not write.
+	out := in - (dot+f.round)>>f.shift
+
+	delta := f.deltaM.history()[:len(m)]
+	switch {
+	case out < 0:
+		for j := range m {
+			m[j] += delta[j]
+		}
+	case out > 0:
+		for j := range m {
+			m[j] -= delta[j]
+		}
+	}
+
+	f.updateDelta(in)
+	f.input.set(0, saturateInt16(in))
 	f.input.increment()
 	f.deltaM.increment()
 	return out

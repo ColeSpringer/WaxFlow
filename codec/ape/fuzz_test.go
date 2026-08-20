@@ -23,14 +23,14 @@ func FuzzDecode(f *testing.F) {
 	}
 	at := int64(binary.LittleEndian.Uint32(raw[h.SeekTableOffset:]))
 	frame := make([]byte, FrameHeaderLen+len(raw[at:]))
-	PutFrameHeader(frame, h.FinalFrameBlocks, 0)
+	PutFrameHeader(frame, h.FinalFrameBlocks, 0, len(raw[at:]))
 	copy(frame[FrameHeaderLen:], raw[at:])
 	f.Add(frame, uint8(1), uint8(1), uint8(1))
 	f.Add(frame[:FrameHeaderLen+64], uint8(1), uint8(1), uint8(4))
 	f.Add(frame[:FrameHeaderLen], uint8(0), uint8(0), uint8(0))
 	// A frame header with the special-code flag set: the silence and
 	// pseudo-stereo paths decode no values at all.
-	f.Add(append(headerBytes(64, 0), 0x80, 0, 0, 0, 4, 0, 0, 0), uint8(1), uint8(1), uint8(2))
+	f.Add(append(headerBytes(64, 0, 8), 0x80, 0, 0, 0, 4, 0, 0, 0), uint8(1), uint8(1), uint8(2))
 
 	f.Fuzz(func(t *testing.T, data []byte, chanSel, depthSel, levelSel uint8) {
 		cfg := Config{
@@ -47,7 +47,7 @@ func FuzzDecode(f *testing.F) {
 		}
 		defer d.Release()
 		declared := 0
-		if blocks, _, _, err := ParseFrameHeader(data); err == nil {
+		if blocks, _, _, _, err := ParseFrameHeader(data); err == nil {
 			declared = blocks
 		}
 		seen := 0
@@ -68,8 +68,8 @@ func FuzzDecode(f *testing.F) {
 // which no encoder still in circulation writes and which therefore has no
 // fixture: the hostile-input invariants are what can be asserted about it.
 func FuzzDecodeOldStream(f *testing.F) {
-	f.Add(append(headerBytes(64, 0), 0, 0, 0, 0))
-	f.Add(append(headerBytes(1000, 2), 0xff, 0xff, 0xff, 0xff, 0xff, 0xff))
+	f.Add(append(headerBytes(64, 0, 4), 0, 0, 0, 0))
+	f.Add(append(headerBytes(1000, 2, 4), 0xff, 0xff, 0xff, 0xff, 0xff, 0xff))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		cfg := Config{FileVersion: 3970, CompressionLevel: LevelHigh, BlocksPerFrame: 73728 * 4,
@@ -80,7 +80,7 @@ func FuzzDecodeOldStream(f *testing.F) {
 		}
 		defer d.Release()
 		declared := 0
-		if blocks, _, _, err := ParseFrameHeader(data); err == nil {
+		if blocks, _, _, _, err := ParseFrameHeader(data); err == nil {
 			declared = blocks
 		}
 		seen := 0
@@ -95,9 +95,9 @@ func FuzzDecodeOldStream(f *testing.F) {
 }
 
 // headerBytes is a bare frame header, the seed corpus's building block.
-func headerBytes(blocks, skip int) []byte {
+func headerBytes(blocks, skip, bytes int) []byte {
 	b := make([]byte, FrameHeaderLen)
-	PutFrameHeader(b, blocks, skip)
+	PutFrameHeader(b, blocks, skip, bytes)
 	return b
 }
 

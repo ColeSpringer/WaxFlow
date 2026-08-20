@@ -376,7 +376,7 @@ func (onlyWriter) Write(p []byte) (int, error) { return len(p), nil }
 // TestOutputTable pins the writer-side capability table: names, extension
 // mapping (both spellings), and its agreement with the read-side exts.
 func TestOutputTable(t *testing.T) {
-	if got := waxflow.OutputFormats(); len(got) != 10 || got[0] != "wav" || got[1] != "opus" || got[2] != "vorbis" || got[3] != "aiff" || got[4] != "flac" || got[5] != "mp3" || got[6] != "aac" || got[7] != "he-aac" || got[8] != "alac" || got[9] != "wavpack" {
+	if got := waxflow.OutputFormats(); len(got) != 11 || got[0] != "wav" || got[1] != "opus" || got[2] != "vorbis" || got[3] != "aiff" || got[4] != "flac" || got[5] != "mp3" || got[6] != "aac" || got[7] != "he-aac" || got[8] != "alac" || got[9] != "wavpack" || got[10] != "ape" {
 		t.Errorf("OutputFormats() = %v", got)
 	}
 	tests := []struct{ ext, want string }{
@@ -393,6 +393,7 @@ func TestOutputTable(t *testing.T) {
 		{"alac", ""}, {"m4a", "aac"}, {".M4A", "aac"}, {"aac", "aac"},
 		{"m4b", "aac"}, {".M4B", "aac"},
 		{"wv", "wavpack"}, {".WV", "wavpack"},
+		{"ape", "ape"}, {".APE", "ape"},
 		{"xyz", ""}, {"", ""},
 	}
 	for _, tt := range tests {

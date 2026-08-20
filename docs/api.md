@@ -176,8 +176,12 @@ Parameters (unknown parameter names are rejected):
   multi-valued fields NUL-joined into one item per key as the format
   requires. Cover art and chapters do not survive a .wv output.
   Other formats
-  join as encoders land (`/caps` is the truth). `aiff` exists for jobs but
-  has no streaming form: 415. Live FLAC and ALAC streams omit the size hints
+  join as encoders land (`/caps` is the truth). `aiff` and `ape` exist for
+  jobs but have no streaming form: 415. Monkey's Audio has no streaming form
+  at all, not merely an inconvenient one -- a .ape opens with a seek table
+  that is its only index, and with totals nothing knows until the audio has
+  gone out. It carries its metadata the same way `wavpack` does, as an APEv2
+  block the muxer writes after the audio. Live FLAC and ALAC streams omit the size hints
   and byte-rate pacing: a lossless encoder's output size is signal-dependent
   and unknown up front. CBR MP3 and Opus carry a size estimate. Completed
   cache entries serve with exact sizes like any other.
@@ -193,9 +197,12 @@ Parameters (unknown parameter names are rejected):
   format can hold (5.1 to `aac`, `mp3` or `opus`, none of which encode
   more than two channels) is **downmixed to stereo** with a BS.775
   matrix, on `/stream` and on HLS alike, and the daemon logs it at
-  `warn`. Lossless outputs refuse instead: `alac` and `wavpack` answer
-  415, because a lossless file that silently dropped four channels would
-  be lying about what it holds. `flac`, `vorbis`, `wav` and `aiff` carry
+  `warn`. Lossless outputs refuse instead: `alac`, `wavpack` and `ape`
+  answer 415, because a lossless file that silently dropped four channels
+  would be lying about what it holds. `ape` applies the same rule to depth:
+  it holds 8, 16 and 24-bit, and a 32-bit source is refused rather than
+  narrowed, since every other lossless output here carries 32-bit through.
+  An explicit `bits=24` still converts it, because then the caller asked. `flac`, `vorbis`, `wav` and `aiff` carry
   multichannel natively and are untouched. An explicit `ch` is never
   overridden in either direction.
 
@@ -639,7 +646,8 @@ is:
                    {"name": "aac", "live": true, "exts": ["m4a", "aac", "m4b"]},
                    {"name": "he-aac", "live": true, "exts": []},
                    {"name": "alac", "live": true, "exts": []},
-                   {"name": "wavpack", "live": true, "exts": ["wv"]}],
+                   {"name": "wavpack", "live": true, "exts": ["wv"]},
+                   {"name": "ape", "live": false, "exts": ["ape"]}],
       "delivery": {"progressive": true, "hls": true, "hlsFormats": ["opus", "flac", "aac", "he-aac", "alac"],
                    "cutFormats": ["opus", "aac"],
                    "jobs": false, "uploads": false, "pid": false,
@@ -760,17 +768,18 @@ errors decoded to waxerr codes like every other method.
 
 Transcode jobs take the /stream shaping parameters (`format` required,
 plus `container`, `rate`, `ch`, `bits`, `bitrate`, `hev2`, `gain`,
-`flacLevel`, `wavpackLevel`)
-and, unlike /stream, may target non-streaming formats (`aiff`): job
+`flacLevel`, `wavpackLevel`, `apeLevel`)
+and, unlike /stream, may target non-streaming formats (`aiff`, `ape`): job
 outputs are seekable files, so every muxer back-patch applies (exact WAV
-sizes, FLAC seek tables, the MP4 `iTunSMPB` gapless atom). `loudness:
+sizes, FLAC seek tables, the MP4 `iTunSMPB` gapless atom, the Monkey's Audio
+seek table and file MD5). `loudness:
 "analyze"` selects the two-pass form: measure the source, apply the
 exact gain to the ReplayGain reference (replacing `gain`), and write
-measured `REPLAYGAIN_TRACK_*` tags describing the finished output. Two
+measured `REPLAYGAIN_TRACK_*` tags describing the finished output. Three
 outputs get a projection there instead of a measurement, because their
 muxer takes its tags before the encode and cannot be patched after it:
-Ogg-FLAC and WavPack. The job's `analysis` still carries the measurement
-in both cases; only the file carries the estimate.
+Ogg-FLAC, WavPack, and Monkey's Audio. The job's `analysis` still carries
+the measurement in every case; only the file carries the estimate.
 Analyze jobs measure EBU R128 loudness (integrated LUFS, loudness
 range, true peak, sample peak) without producing audio.
 

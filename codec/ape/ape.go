@@ -1,14 +1,18 @@
-// Package ape implements a Monkey's Audio (APE) decoder. It is a clean-room
-// port of the reference Monkey's Audio SDK decoder (see THIRD-PARTY-NOTICES.md):
-// the range coder and its two models, the cascaded neural filters, and the
-// adaptive predictor, so decodes are bit-exact.
+// Package ape implements a Monkey's Audio (APE) decoder and encoder, ported
+// from the reference Monkey's Audio SDK (see THIRD-PARTY-NOTICES.md): the
+// range coder and its two models, the cascaded neural filters, and the
+// adaptive predictor, so decodes are bit-exact and encodes come out as the
+// reference's own bytes.
 //
-// Scope is stream versions 3.95 and later (3950..3990, which is every version
-// the format has had since 2001 and what every encoder in circulation writes)
-// in 8, 16, and 24-bit integer, mono and stereo, at all five compression
-// levels. Anything else is refused by name: 32-bit and floating-point streams,
-// more than two channels, and the pre-3950 bitstreams, which are a different
-// codec sharing the same magic.
+// Decode scope is stream versions 3.95 and later (3950..3990, which is every
+// version the format has had since 2001 and what every encoder in circulation
+// writes) in 8, 16, and 24-bit integer, mono and stereo, at all five
+// compression levels. Anything else is refused by name: 32-bit and
+// floating-point streams, more than two channels, and the pre-3950
+// bitstreams, which are a different codec sharing the same magic.
+//
+// Encode writes version 3990 at the three shallower levels; see
+// MaxEncodeLevel for why the two deepest ones are read and not written.
 //
 // A frame is the unit of decoding and a sync point: it re-primes the range
 // coder, flushes the predictors and filters, and ends with a CRC over the
@@ -477,33 +481,48 @@ func ParseConfig(b []byte) (Config, error) {
 // FrameHeaderLen is the size of the header a packet carries ahead of a frame's
 // coded bytes.
 //
-// An APE frame states neither its length nor its block count: the file header
-// and the seek table hold both, and a codec.Packet is bytes and nothing else,
-// so the container writes them here. The alignment skip is the second of them
-// because the range coder reads 32-bit words anchored at the start of the
-// frame data, and a frame begins wherever in a word the one before it ended.
-const FrameHeaderLen = 8
+// An APE frame states none of its own dimensions: not its block count, not its
+// byte length, not where in a 32-bit word it starts. The file header and the
+// seek table hold all three, and a codec.Packet is bytes and nothing else, so
+// the container writes them here.
+//
+// The three are separate facts. Blocks is how many samples decoding produces.
+// Skip is where in the leading word the frame's first byte sits, because the
+// range coder reads 32-bit words anchored at the start of the frame data and a
+// frame begins wherever in a word the one before it ended. Bytes is the
+// frame's own coded length, which is shorter than the payload: a decoder reads
+// a few bytes past the values it has produced, so the packet carries slack
+// behind the frame, and only a writer needs to know where the frame really
+// stops.
+const FrameHeaderLen = 12
 
-// PutFrameHeader writes a frame's block count and alignment skip into the
-// first FrameHeaderLen bytes of b.
-func PutFrameHeader(b []byte, blocks, skip int) {
+// PutFrameHeader writes a frame's block count, alignment skip, and coded byte
+// length into the first FrameHeaderLen bytes of b.
+func PutFrameHeader(b []byte, blocks, skip, bytes int) {
 	binary.LittleEndian.PutUint32(b[0:], uint32(blocks))
 	binary.LittleEndian.PutUint32(b[4:], uint32(skip))
+	binary.LittleEndian.PutUint32(b[8:], uint32(bytes))
 }
 
 // ParseFrameHeader reads back what PutFrameHeader wrote and returns the
-// frame's coded bytes.
-func ParseFrameHeader(pkt []byte) (blocks, skip int, data []byte, err error) {
+// frame's coded bytes. data begins at the word boundary below the frame, so
+// the frame's own run is the logical bytes [skip, skip+bytes) of it.
+func ParseFrameHeader(pkt []byte) (blocks, skip, bytes int, data []byte, err error) {
 	if len(pkt) < FrameHeaderLen {
-		return 0, 0, nil, malformed("frame header of %d bytes, want %d", len(pkt), FrameHeaderLen)
+		return 0, 0, 0, nil, malformed("frame header of %d bytes, want %d", len(pkt), FrameHeaderLen)
 	}
 	blocks = int(binary.LittleEndian.Uint32(pkt[0:]))
 	skip = int(binary.LittleEndian.Uint32(pkt[4:]))
-	if blocks <= 0 || blocks > maxBlocksPerFrame {
-		return 0, 0, nil, malformed("frame of %d blocks", blocks)
+	bytes = int(binary.LittleEndian.Uint32(pkt[8:]))
+	data = pkt[FrameHeaderLen:]
+	switch {
+	case blocks <= 0 || blocks > maxBlocksPerFrame:
+		return 0, 0, 0, nil, malformed("frame of %d blocks", blocks)
+	case skip < 0 || skip > 3:
+		return 0, 0, 0, nil, malformed("frame alignment skip of %d bytes, want 0..3", skip)
+	case bytes <= 0 || skip+bytes > len(data):
+		return 0, 0, 0, nil, malformed("frame of %d bytes past a %d-byte skip, in a %d-byte packet",
+			bytes, skip, len(data))
 	}
-	if skip < 0 || skip > 3 {
-		return 0, 0, nil, malformed("frame alignment skip of %d bytes, want 0..3", skip)
-	}
-	return blocks, skip, pkt[FrameHeaderLen:], nil
+	return blocks, skip, bytes, data, nil
 }

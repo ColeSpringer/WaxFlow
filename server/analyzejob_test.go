@@ -103,6 +103,7 @@ var jobFields = []jobField{
 	{"loudness", `"loudness":"analyze"`, []string{"transcode"}},
 	{"flacLevel", `"flacLevel":5`, []string{"transcode", "merge", "split"}},
 	{"wavpackLevel", `"wavpackLevel":3`, []string{"transcode", "merge", "split"}},
+	{"apeLevel", `"apeLevel":3000`, []string{"transcode", "merge", "split"}},
 	{"silence", `"silence":true`, []string{"analyze"}},
 	{"silenceThresholdDb", `"silenceThresholdDb":-60`, []string{"analyze"}},
 	{"silenceMinSeconds", `"silenceMinSeconds":0.3`, []string{"analyze"}},

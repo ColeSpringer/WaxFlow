@@ -54,6 +54,32 @@ func APETool(t testing.TB) string {
 	return ""
 }
 
+// HaveAPETool reports whether the reference tool is available, for a test that
+// has something to check without it and more to check with it. It follows the
+// same policy as APETool: WAXFLOW_REQUIRE_MAC=1 turns absence into a failure
+// rather than a quiet loss of coverage.
+func HaveAPETool(t testing.TB) bool {
+	t.Helper()
+	for _, dir := range []string{
+		os.Getenv("WAXFLOW_APE_TOOLS"),
+		filepath.Join(VectorsDir(), "..", "tools", apeToolsVersion),
+	} {
+		if dir == "" {
+			continue
+		}
+		if _, ok := toolIn(dir, "mac"); ok {
+			return true
+		}
+	}
+	if _, err := exec.LookPath("mac"); err == nil {
+		return true
+	}
+	if os.Getenv("WAXFLOW_REQUIRE_MAC") == "1" {
+		t.Fatal("mac required by WAXFLOW_REQUIRE_MAC=1 but not found (run `make ape-tools`)")
+	}
+	return false
+}
+
 // APEEncodeFile runs the reference encoder on a WAV input at the given
 // compression level (1000 fast to 5000 insane) and returns the .ape path. The
 // output lands beside the input, named for the cell so one source can feed
@@ -85,6 +111,28 @@ func APEVerifyFile(t testing.TB, path string) {
 	if err != nil {
 		t.Fatalf("mac -v %s: %v\n%s%s", path, err, errOut.String(), stdout)
 	}
+}
+
+// APEDecodeFile runs the reference decoder on a .ape and returns the WAV it
+// writes. It is the second half of the reference-tool gate: mac -v checks a
+// stream against its stored MD5 and frame CRCs, which says the bytes are
+// intact, while this one says they decode to the audio we meant.
+func APEDecodeFile(t testing.TB, apePath string) []byte {
+	t.Helper()
+	out := apePath + ".decoded.wav"
+	t.Cleanup(func() { os.Remove(out) })
+	var errOut bytes.Buffer
+	cmd := exec.Command(APETool(t), apePath, out, "-d")
+	cmd.Stderr = &errOut
+	stdout, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("mac -d %s: %v\n%s%s", apePath, err, errOut.String(), stdout)
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
 
 // WriteWAV writes interleaved int samples as a canonical PCM WAV, the input

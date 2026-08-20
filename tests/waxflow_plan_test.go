@@ -370,7 +370,7 @@ func TestImplicitDownmixIsAnnouncedPerRun(t *testing.T) {
 
 func TestOutputsTable(t *testing.T) {
 	outs := waxflow.Outputs()
-	if len(outs) != 10 || outs[0].Name != "wav" || !outs[0].Live ||
+	if len(outs) != 11 || outs[0].Name != "wav" || !outs[0].Live ||
 		outs[1].Name != "opus" || !outs[1].Live ||
 		outs[2].Name != "vorbis" || !outs[2].Live ||
 		outs[3].Name != "aiff" || outs[3].Live ||
@@ -379,7 +379,8 @@ func TestOutputsTable(t *testing.T) {
 		outs[6].Name != "aac" || !outs[6].Live ||
 		outs[7].Name != "he-aac" || !outs[7].Live ||
 		outs[8].Name != "alac" || !outs[8].Live ||
-		outs[9].Name != "wavpack" || !outs[9].Live {
+		outs[9].Name != "wavpack" || !outs[9].Live ||
+		outs[10].Name != "ape" || outs[10].Live {
 		t.Fatalf("Outputs() = %+v", outs)
 	}
 }

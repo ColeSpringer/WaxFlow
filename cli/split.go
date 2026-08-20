@@ -38,7 +38,7 @@ func newSplitCmd(flavor Flavor) *cobra.Command {
 	var cueFile string
 	var atFlag []string
 	var formatName, containerName string
-	var flacLevel, wavpackLevel int
+	var flacLevel, wavpackLevel, apeLevel int
 	var force bool
 	var noTags bool
 	var dryRun bool
@@ -187,7 +187,7 @@ or filtered at any seam.`,
 			sp := splitter{
 				e: e, log: logger, src: src, hint: srcHint,
 				outFormat: outFormat, container: containerName,
-				flacLevel: optLevel, wavpackLevel: wavpackLevel,
+				flacLevel: optLevel, wavpackLevel: wavpackLevel, apeLevel: apeLevel,
 				force: force, ofN: ofN,
 				mapper: label.NewLogged(logger), containerTags: info.Tags,
 			}
@@ -213,6 +213,7 @@ or filtered at any seam.`,
 	cmd.Flags().StringVar(&containerName, "container", "", "container override where the format has one")
 	cmd.Flags().IntVar(&flacLevel, "flac-level", 5, "FLAC compression level 0-8, size vs speed (flac output only)")
 	cmd.Flags().IntVar(&wavpackLevel, "wavpack-level", 0, "WavPack compression level: 1 fast, 2 normal, 3 high, 4 very high (wavpack output only; default: the encoder's, 2)")
+	cmd.Flags().IntVar(&apeLevel, "ape-level", 0, "Monkey's Audio compression level: 1000 fast, 2000 normal, 3000 high (ape output only; default: the encoder's, 2000)")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing outputs")
 	cmd.Flags().BoolVar(&noTags, "no-tags", false, "do not carry the source's metadata onto the pieces")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the pieces and their sample ranges without writing anything")
@@ -405,6 +406,7 @@ type splitter struct {
 	container    string
 	flacLevel    int
 	wavpackLevel int
+	apeLevel     int
 	force        bool
 	ofN          int
 
@@ -523,6 +525,7 @@ func (s *splitter) writePiece(cmd *cobra.Command, path string, p piece) (*waxflo
 		Container:    s.container,
 		FLACLevel:    s.flacLevel,
 		WavPackLevel: s.wavpackLevel,
+		APELevel:     s.apeLevel,
 		Tags:         tags,
 		Art:          s.art,
 	})

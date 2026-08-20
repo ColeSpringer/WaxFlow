@@ -425,6 +425,7 @@ type JobRequest struct {
 	Loudness     string `json:"loudness,omitempty"`
 	FLACLevel    int    `json:"flacLevel,omitempty"`
 	WavPackLevel int    `json:"wavpackLevel,omitempty"`
+	APELevel     int    `json:"apeLevel,omitempty"`
 
 	// Silence adds the silence map to an analyze job; the two parameters
 	// shape it and are refused without Silence true. Analyze-only.

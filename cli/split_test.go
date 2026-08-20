@@ -541,6 +541,7 @@ func TestSplitPieceExtension(t *testing.T) {
 		{"flac in matroska", []string{"--container", "mka"}, "01.mka"},
 		{"alac", []string{"--format", "alac"}, "01.m4a"},
 		{"wavpack", []string{"--format", "wavpack"}, "01.wv"},
+		{"ape", []string{"--format", "ape"}, "01.ape"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out := filepath.Join(dir, tc.name)
@@ -1010,5 +1011,38 @@ func TestSplitCueMultiFileRefused(t *testing.T) {
 	}
 	if !strings.Contains(errOut, "already separate") {
 		t.Errorf("stderr = %q", errOut)
+	}
+}
+
+// TestSplitAPEWritesItsOwnTags is TestSplitWavPackWritesItsOwnTags for the
+// other lossless row whose muxer owns its APEv2 block. The two are separate
+// tests because the skip is keyed on the format name: a row added without an
+// arm there prints "output not taggable" on every piece while the mux has
+// already written the tags, which is the failure that looks like success.
+func TestSplitAPEWritesItsOwnTags(t *testing.T) {
+	dir := t.TempDir()
+	raw := rampWAVBytes(t, 44100, 2, 100_000)
+	wav := filepath.Join(dir, "in.wav")
+	if err := os.WriteFile(wav, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "pieces")
+	code, _, errOut := run(t, "split", wav, out, "--format", "ape", "--at", "50000")
+	if code != 0 {
+		t.Fatalf("split exit = %d: %s", code, errOut)
+	}
+	if strings.Contains(errOut, "post-pass") {
+		t.Errorf("a format whose muxer writes its own tags ran the post-pass anyway: %s", errOut)
+	}
+	piece, err := os.ReadFile(filepath.Join(out, "02.ape"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := waxflow.New().Probe(container.BytesSource(piece), "ape", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Tags["TRACKNUMBER"]; len(got) != 1 || got[0] != "2" {
+		t.Errorf("piece 2 carries TRACKNUMBER %v, want [2]; the mux wrote no tags", got)
 	}
 }

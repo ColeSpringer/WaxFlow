@@ -3,6 +3,7 @@ package waxflow
 import (
 	"log/slog"
 
+	"github.com/colespringer/waxflow/codec/ape"
 	"github.com/colespringer/waxflow/codec/wavpack"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/dsp/dither"
@@ -117,6 +118,14 @@ type TranscodeOptions struct {
 	// runs: they trade encode speed for size and never affect decoded
 	// audio.
 	WavPackLevel int
+	// APELevel selects the Monkey's Audio compression level for ape
+	// output: APELevelFast, APELevelNormal, or APELevelHigh literally, and
+	// APELevelDefault (the zero value) for the encoder default, which is
+	// normal. Levels choose the filter cascade each frame runs through:
+	// they trade encode and decode speed for size and never affect decoded
+	// audio. The format's two deeper levels decode here but are not
+	// written; see ape.MaxEncodeLevel.
+	APELevel int
 	// MP3Bitrate selects the constant bit rate in bits per second for mp3
 	// output; the zero value uses the encoder default (128000). It must be
 	// a legal Layer III CBR rate for the output sample rate. Under MP3VBR
@@ -218,6 +227,22 @@ const (
 	WavPackLevelHigh = wavpack.LevelHigh
 	// WavPackLevelVeryHigh is the deepest cascade: smallest, slowest.
 	WavPackLevelVeryHigh = wavpack.LevelVeryHigh
+)
+
+// APELevel spellings. Monkey's Audio names its levels in thousands, which is
+// the vocabulary the format itself uses in the file header, so the option
+// carries those numbers rather than a scale of its own; zero is not one of
+// them, so the default needs no sentinel.
+const (
+	// APELevelDefault keeps the encoder's default level (normal).
+	APELevelDefault = 0
+	// APELevelFast is the shallowest cascade: no filter at all, fastest,
+	// largest.
+	APELevelFast = ape.LevelFast
+	// APELevelNormal is the default cascade, a 16-tap filter.
+	APELevelNormal = ape.LevelNormal
+	// APELevelHigh runs a 64-tap filter for a smaller file.
+	APELevelHigh = ape.LevelHigh
 )
 
 // OpusComplexity spellings whose meaning the zero value cannot carry.

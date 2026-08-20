@@ -317,25 +317,42 @@ func TestConfigRoundTrip(t *testing.T) {
 }
 
 func TestFrameHeaderRoundTrip(t *testing.T) {
-	pkt := make([]byte, FrameHeaderLen+3)
-	PutFrameHeader(pkt, 4321, 2)
-	copy(pkt[FrameHeaderLen:], "abc")
-	blocks, skip, data, err := ParseFrameHeader(pkt)
+	pkt := make([]byte, FrameHeaderLen+8)
+	PutFrameHeader(pkt, 4321, 2, 3)
+	copy(pkt[FrameHeaderLen:], "abcdefgh")
+	blocks, skip, n, data, err := ParseFrameHeader(pkt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if blocks != 4321 || skip != 2 || string(data) != "abc" {
-		t.Errorf("blocks=%d skip=%d data=%q", blocks, skip, data)
+	if blocks != 4321 || skip != 2 || n != 3 || string(data) != "abcdefgh" {
+		t.Errorf("blocks=%d skip=%d bytes=%d data=%q", blocks, skip, n, data)
+	}
+	// withPayload is a header plus n bytes behind it, which is what the
+	// length checks need: a header alone has an empty payload, so every
+	// length past zero fails it for the wrong reason.
+	withPayload := func(blocks, skip, bytes, payload int) []byte {
+		return append(headerBytes(blocks, skip, bytes), make([]byte, payload)...)
 	}
 	for name, bad := range map[string][]byte{
-		"short":            pkt[:4],
-		"zero blocks":      headerBytes(0, 0),
-		"huge blocks":      headerBytes(1<<30, 0),
-		"skip past a word": headerBytes(1, 4),
+		"short":                          pkt[:4],
+		"zero blocks":                    withPayload(0, 0, 1, 4),
+		"huge blocks":                    withPayload(1<<30, 0, 1, 4),
+		"skip past a word":               withPayload(1, 4, 1, 8),
+		"zero bytes":                     withPayload(1, 0, 0, 4),
+		"a frame longer than its packet": withPayload(1, 0, 8, 4),
+		// The skip is what pushes this one past the end; the length alone
+		// would fit.
+		"a skip that pushes it past the end": withPayload(1, 3, 2, 4),
+		"no payload at all":                  headerBytes(1, 0, 1),
 	} {
-		if _, _, _, err := ParseFrameHeader(bad); err == nil {
+		if _, _, _, _, err := ParseFrameHeader(bad); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+	// A frame that exactly fills its payload is the boundary the muxer walks
+	// to, so it has to be accepted rather than caught by the check above.
+	if _, _, _, _, err := ParseFrameHeader(withPayload(1, 2, 6, 8)); err != nil {
+		t.Errorf("a frame ending exactly at the end of its packet: %v", err)
 	}
 }
 

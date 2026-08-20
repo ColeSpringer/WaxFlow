@@ -253,6 +253,22 @@ Entries follow this format:
 > the pinned SDK source by `make ape-tools`; it never enters the runtime
 > pipeline.
 
+> **codec/ape encoder**: a port of the same SDK's encoding side, and unlike
+> the WavPack encoder that is deliberate. Monkey's Audio fixes nothing about
+> an encoder's choices, but it also offers an encoder no choices to make: a
+> compression level names one filter cascade, there is nothing to search over,
+> and the coding is the decoder's arithmetic run the other way. So the parts
+> ported are the ones that had a forward form to port: the range encoder with
+> its deferred carry and its flush (`BitArray.cpp`), the predictor's and the
+> neural filter's compress paths (`NewPredictor.cpp`, `NNFilterGeneric.cpp`),
+> the mid/side matrix, sample packing and CRC finalization, and the
+> silent-frame and pseudo-stereo special codes (`Prepare.cpp`), and the file
+> header, seek table and file-MD5 layout (`APECompressCreate.cpp`). The
+> outcome is that the coded frames are the reference's coded frames byte for
+> byte, which the tests assert. What is ours: the frame accumulator, the
+> packet's own frame header, the muxer's word packer and its seek-table
+> reservation policy, and the codec.Encoder integration.
+
 > **internal/testutil opus_compare**: `internal/testutil/opuscompare.go` is
 > a Go port of *libopus*'s `src/opus_compare.c` (BSD-3-Clause),
 > https://gitlab.xiph.org/xiph/opus, the RFC 6716 section 6 decoder

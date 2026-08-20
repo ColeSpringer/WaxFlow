@@ -707,6 +707,7 @@ func (req Request) TranscodeOptions(gainDB float64, profile resample.Profile) wa
 		GainDB:          gainDB,
 		FLACLevel:       req.FLACLevel,
 		WavPackLevel:    req.WavPackLevel,
+		APELevel:        req.APELevel,
 		MP3Bitrate:      req.Bitrate * 1000,
 		OpusBitrate:     req.Bitrate * 1000,
 		AACBitrate:      req.Bitrate * 1000,

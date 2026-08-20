@@ -1,10 +1,10 @@
 package ape
 
-// The predictor, ported from the reference decoder. It is the inverse of the
-// encoder's three stages, run back to front: the neural cascade first, then a
-// short adaptive filter over the channel's own history and the other channel's,
-// then a fixed first-order lift. Each channel has its own predictor and every
-// frame flushes both, which is what makes a frame independently decodable.
+// The predictor, ported from the reference. Three stages: a fixed first-order
+// lift, a short adaptive filter over the channel's own history and the other
+// channel's, then the neural cascade. Decoding runs them back to front. Each
+// channel has its own predictor and every frame flushes both, which is what
+// makes a frame independently decodable.
 
 // predWindow is the predictor's roll-buffer stride, and predHistory the
 // samples it keeps behind the cursor.
@@ -215,6 +215,68 @@ func (p *predictor) decompress(a, b int32) int32 {
 	p.predB.increment()
 	p.adaptA.increment()
 	p.adaptB.increment()
+	return out
+}
+
+// compress turns one sample into one coded residual: decompress read back to
+// front. b is the other channel's sample for this block, as it is there.
+//
+// The two run the same arithmetic on the same state in the same order, so
+// anything that wraps here wraps identically on the way back. The one
+// asymmetry worth naming is the neural cascade: it goes on last and comes off
+// first, which is why the loop below runs forward and decompress's runs
+// backward.
+func (p *predictor) compress(a, b int32) int32 {
+	nA := p.stage1A.compress(a)
+
+	pa, pb := p.predA.window(), p.predB.window()
+	pa[now] = p.lastA
+	pa[now-1] = pa[now] - pa[now-1]
+	pb[now] = p.stage1B.compress(b)
+	pb[now-1] = pb[now] - pb[now-1]
+
+	predA := pa[now]*p.mA[0] + pa[now-1]*p.mA[1] + pa[now-2]*p.mA[2] + pa[now-3]*p.mA[3]
+	predB := pb[now]*p.mB[0] + pb[now-1]*p.mB[1] + pb[now-2]*p.mB[2] +
+		pb[now-3]*p.mB[3] + pb[now-4]*p.mB[4]
+	out := nA - (predA+predB>>1)>>10
+
+	aa, ab := p.adaptA.window(), p.adaptB.window()
+	aa[now] = adaptStep(pa[now])
+	aa[now-1] = adaptStep(pa[now-1])
+	ab[now] = adaptStep(pb[now])
+	ab[now-1] = adaptStep(pb[now-1])
+
+	// The direction is the residual's sign, as it is in decompress: there the
+	// residual arrives from the coder, here it has just been computed.
+	var dir int32
+	switch {
+	case out < 0:
+		dir = 1
+	case out > 0:
+		dir = -1
+	}
+	p.mA[0] += aa[now] * dir
+	p.mA[1] += aa[now-1] * dir
+	p.mA[2] += aa[now-2] * dir
+	p.mA[3] += aa[now-3] * dir
+	p.mB[0] += ab[now] * dir
+	p.mB[1] += ab[now-1] * dir
+	p.mB[2] += ab[now-2] * dir
+	p.mB[3] += ab[now-3] * dir
+	p.mB[4] += ab[now-4] * dir
+
+	p.lastA = nA
+
+	p.predA.increment()
+	p.predB.increment()
+	p.adaptA.increment()
+	p.adaptB.increment()
+
+	for _, f := range p.nn {
+		if f != nil {
+			out = f.compress(out)
+		}
+	}
 	return out
 }
 

@@ -58,6 +58,7 @@ func newTranscodeCmd(flavor Flavor) *cobra.Command {
 	var rate, channels, bits int
 	var flacLevel int
 	var wavpackLevel int
+	var apeLevel int
 	var mp3Bitrate int
 	var mp3VBR bool
 	var opusBitrate int
@@ -199,6 +200,7 @@ with true-peak limiting, dither).`,
 				ResampleProfile: profile,
 				FLACLevel:       optLevel,
 				WavPackLevel:    wavpackLevel,
+				APELevel:        apeLevel,
 				MP3Bitrate:      mp3Bitrate * 1000,
 				MP3VBR:          mp3VBR,
 				OpusBitrate:     opusBitrate * 1000,
@@ -337,8 +339,9 @@ with true-peak limiting, dither).`,
 					container.Tag{Key: "REPLAYGAIN_TRACK_PEAK", Value: meta.FormatPeak(0)})
 			case analyzeLoudness && predictsRG:
 				// The Ogg muxer embeds the comment header at Begin and the
-				// WavPack muxer takes its tags there, and neither can be
-				// patched afterward; the post-pass is skipped for both, so the
+				// WavPack and Monkey's Audio muxers take their tags there, and
+				// none can be patched afterward; the post-pass is skipped for
+				// all of them, so the
 				// measured RG would otherwise be computed and dropped. Since
 				// meta.WithoutReplayGain has already stripped the source's own,
 				// writing nothing here is strictly worse than doing nothing at
@@ -425,6 +428,7 @@ with true-peak limiting, dither).`,
 	cmd.Flags().StringVar(&ditherName, "dither", "tpdf", "dither when reducing depth: tpdf, shaped, or off")
 	cmd.Flags().IntVar(&flacLevel, "flac-level", 5, "FLAC compression level 0-8, size vs speed (flac output only)")
 	cmd.Flags().IntVar(&wavpackLevel, "wavpack-level", 0, "WavPack compression level: 1 fast, 2 normal, 3 high, 4 very high (wavpack output only; default: the encoder's, 2)")
+	cmd.Flags().IntVar(&apeLevel, "ape-level", 0, "Monkey's Audio compression level: 1000 fast, 2000 normal, 3000 high (ape output only; default: the encoder's, 2000)")
 	cmd.Flags().IntVar(&mp3Bitrate, "mp3-bitrate", 128, "MP3 bit rate in kbit/s: constant, or the quality anchor under --mp3-vbr (mp3 output only)")
 	cmd.Flags().BoolVar(&mp3VBR, "mp3-vbr", false, "encode MP3 at variable bit rate anchored at --mp3-bitrate (mp3 output only)")
 	cmd.Flags().IntVar(&opusBitrate, "opus-bitrate", 96, "Opus target bit rate in kbit/s (opus output only)")

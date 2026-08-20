@@ -3,8 +3,8 @@
 Self-hosted, **pure-Go**, on-the-fly audio transcoding: request -> decode -> DSP -> encode -> stream, tuned for time-to-first-audio, sample-exact seeking, and flaky
 mobile networks.
 
-The codecs (Opus, MP3, AAC-LC, HE-AAC v1, Vorbis, FLAC, ALAC, WavPack, and WAV
-encoders, plus a wider decoder set) are written from scratch for Go 1.26 and published as public,
+The codecs (Opus, MP3, AAC-LC, HE-AAC v1, Vorbis, FLAC, ALAC, WavPack, Monkey's
+Audio, and WAV encoders, plus a wider decoder set) are written from scratch for Go 1.26 and published as public,
 **stdlib-only** packages under this module, CI-enforced by `make depcheck`,
 so anyone can import them.
 
@@ -30,15 +30,17 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   smaller than `flac -5` at level 5), ALAC (bit-exact round trip),
   WavPack (four compression levels, each a wider search over candidate
   decorrelation cascades; at parity with libwavpack on the official
-  suite's own audio, and ahead of it at the fast setting), and
-  WAV/AIFF PCM.
+  suite's own audio, and ahead of it at the fast setting), Monkey's
+  Audio (three compression levels; the coded frames are the reference
+  encoder's frames, byte for byte), and WAV/AIFF PCM.
 - **Decoders / inputs**: FLAC (bit-exact on the IETF suite), WAV, AIFF,
   MP3, AAC-LC, HE-AAC v1 and v2 (SBR+PS, ffmpeg-differential-verified),
   and ALAC in MP4/M4A/M4B, ADTS (implicit HE-AAC detected), Opus (all
   RFC 6716/8251 conformance vectors pass), Vorbis, Ogg, Matroska/WebM,
   WavPack (bit-exact on the official test suite: 8- to 32-bit integers,
   the three stereo block modes, APEv2 tags; encodes too), Monkey's Audio
-  (all five compression levels, 8/16/24-bit, APEv2 tags). Sample-exact
+  (all five compression levels, 8/16/24-bit, APEv2 tags; encodes the
+  first three). Sample-exact
   seeking everywhere, gapless honored per format (LAME tag, iTunSMPB,
   edit lists, Ogg pre-skip/end-trim, Matroska CodecDelay).
 - **DSP**: Kaiser windowed-sinc resampling (`hq`/`fast`), BS.775
@@ -166,8 +168,8 @@ write keeps a reload from reading a half-written file and `400`ing.
   (`--json` for the schemaVersion'd machine shape, identical to `GET
   /probe`; `--strict` to treat tolerated input damage as errors)
 - `waxflow transcode <in> <out>`: local one-shot file-to-file transcode
-  through the same engine the daemon uses (`--format wav|aiff|flac|mp3|aac|he-aac|alac|opus|vorbis|wavpack`,
-  `--flac-level`, `--wavpack-level`, `--mp3-bitrate`, default from the output extension;
+  through the same engine the daemon uses (`--format wav|aiff|flac|mp3|aac|he-aac|alac|opus|vorbis|wavpack|ape`,
+  `--flac-level`, `--wavpack-level`, `--ape-level`, `--mp3-bitrate`, default from the output extension;
   `--force` to overwrite). An mp4-family output (`.m4a`, `.m4b`, alac)
   is written flat: a file can satisfy the header back-patch that form
   needs, and it is the shape players and taggers expect. The fragmented
@@ -175,7 +177,7 @@ write keeps a reload from reading a half-written file and `400`ing.
   (tags, chapters, cover art, lyrics) passes through onto the output
   automatically (`--no-tags` to skip); `--loudness analyze` measures the
   source, applies the exact gain to the ReplayGain reference, and writes
-  measured RG tags on the output. Ogg-FLAC and WavPack outputs get a
+  measured RG tags on the output. Ogg-FLAC, WavPack, and Monkey's Audio outputs get a
   projection there rather than a measurement, and say so: their muxer
   takes its tags before the encode and cannot be patched afterward.
 - `waxflow split <in> <dir>`: cut a single-file rip into one output per
@@ -221,20 +223,6 @@ every surface that takes a source reference accepts it (`/stream`,
 What holds regardless of who resolves them: signed URLs pin bytes, not
 locations, so a catalog rename or move does not kill a minted URL, while
 replaced content still dies with `410 source-changed`.
-
-## Non-goals for v1.0
-
-Video; enhanced SBR and xHE (HE-AAC v1 and v2 *decode* ships,
-downsampled SBR and ADTS implicit signalling included, and v1/v2
-*encoding* ships as `format=he-aac`, v2 behind `hev2`);
-WMA/APE **encoding**; WMA
-decoding; APE stream versions before 3.95, 32-bit and floating-point APE,
-and more than two APE channels; WavPack hybrid, float, DSD, and more than
-two channels (encode and decode both refuse them by name); DASH manifests (the CMAF segments are already DASH-compatible);
-DRM/HLS-AES; Opus PLC; CD ripping; any database (WaxBin owns cataloging);
-tag *editing* (WaxLabel owns it; WaxFlow only maps and passes metadata);
-Icecast/radio ingest; waveform peaks (WaxBin has them);
-distributed cache; two-pass loudness on live streams (jobs only).
 
 ## Development
 

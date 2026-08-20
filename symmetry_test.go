@@ -31,10 +31,7 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	// deliberately deferred. Each entry is deleted by the change that lands its
 	// capability, so the list is the burn-down checklist and is empty once
 	// every codec encodes+decodes and every container demuxes+muxes.
-	symmetryGaps := map[string]string{
-		"ape-encode": "the APE encoder and its outputs row land in the next stage",
-		"apen-mux":   "the .ape muxer lands with the encoder, in the next stage",
-	}
+	symmetryGaps := map[string]string{}
 
 	decodes := map[codec.ID]bool{}
 	for _, id := range format.Decoders() {
@@ -53,12 +50,8 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	// decoder-without-encoder imbalance in the codec-level loop below;
 	// containerGaps does the same, per input container, for the
 	// demuxer-without-muxer loop.
-	codecGaps := map[codec.ID]string{
-		codec.APE: "ape-encode",
-	}
-	containerGaps := map[string]string{
-		"ape": "apen-mux",
-	}
+	codecGaps := map[codec.ID]string{}
+	containerGaps := map[string]string{}
 
 	// open reports, for each named gap, whether it is still open, computed from
 	// the live tables so the predicate tracks the real code and cannot go stale.
@@ -233,6 +226,7 @@ var rowDefaultContainer = map[string]string{
 	"alac":    "mp4",
 	"vorbis":  "ogg",
 	"wavpack": "wavpack",
+	"ape":     "ape",
 }
 
 // mp4DemuxCodecs is the set of codecs the mp4 demuxer reads. It is the one

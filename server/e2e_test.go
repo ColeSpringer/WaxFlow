@@ -1135,6 +1135,7 @@ func TestParameterValidation(t *testing.T) {
 		{"src=lib/sine.wav&q=huge", 400, waxerr.CodeInvalidRequest},                      // bad q preset
 		{"src=lib/sine.wav&format=mp3&q=low&bitrate=96", 400, waxerr.CodeInvalidRequest}, // q and bitrate together
 		{"src=lib/sine.wav&format=aiff", 415, waxerr.CodeUnsupportedFormat},              // no streaming form
+		{"src=lib/sine.wav&format=ape", 415, waxerr.CodeUnsupportedFormat},               // seek table and totals are written last
 		{"src=lib/sine.wav&maxBitRate=64", 415, waxerr.CodeUnsupportedFormat},            // cap unsatisfiable
 		// A cap on VBR lossless output cannot be promised, so it is
 		// refused rather than silently unenforced.

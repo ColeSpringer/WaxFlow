@@ -23,6 +23,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/adts"
 	"github.com/colespringer/waxflow/container/aiff"
+	"github.com/colespringer/waxflow/container/apen"
 	"github.com/colespringer/waxflow/container/flacn"
 	"github.com/colespringer/waxflow/container/mka"
 	"github.com/colespringer/waxflow/container/mp4"
@@ -480,6 +481,7 @@ type planOpts struct {
 	Dynamics        gain.Preset
 	FLACLevel       int
 	WavPackLevel    int
+	APELevel        int
 	MP3Bitrate      int
 	MP3VBR          bool
 	OpusBitrate     int
@@ -506,6 +508,7 @@ func planOptsOf(opts TranscodeOptions) planOpts {
 		Dynamics:        opts.Dynamics,
 		FLACLevel:       opts.FLACLevel,
 		WavPackLevel:    opts.WavPackLevel,
+		APELevel:        opts.APELevel,
 		MP3Bitrate:      opts.MP3Bitrate,
 		MP3VBR:          opts.MP3VBR,
 		OpusBitrate:     opts.OpusBitrate,
@@ -1380,6 +1383,68 @@ var outputs = []output{
 		// override is refused rather than silently ignored.
 		// hls stays nil: WavPack has no CMAF/HLS segmented form.
 	},
+	{
+		name: "ape",
+		exts: []string{"ape"},
+		// live: false. A .ape opens with a seek table that is the format's
+		// only index (a frame carries neither its length nor its position),
+		// and with totals nothing knows until the audio has gone out. There
+		// is no streaming form to degrade to, so a live response cannot
+		// carry one; the muxer's NeedsSeek says the same thing.
+		live:      false,
+		mediaType: "audio/x-ape",
+		// headerBytes stays 0: size estimates are gated on a fixed
+		// bytesPerFrame, which VBR lossless lacks.
+		codecID: codec.APE,
+		adjust: func(spec *dsp.ChainSpec, src audio.Format, opts TranscodeOptions) {
+			spec.FrameSize = ape.BlocksPerFrame
+			if opts.BitDepth != 0 {
+				return // explicit depth; plan validates it against APE's set
+			}
+			// Monkey's Audio holds integer PCM at 8, 16, and 24 bits. A float
+			// source with no depth requested quantizes to 24, which carries
+			// the whole float32 mantissa; an integer source at another depth
+			// snaps up to the nearest width, losslessly widened.
+			//
+			// A 32-bit integer source is left alone and refused by the
+			// encoder, which is the same rule the channel policy below
+			// follows: this codec covers no 32-bit mode, and every other
+			// lossless row here carries 32-bit through, so quietly dropping
+			// eight bits would make this the one output that loses data
+			// without saying so. A caller who wants it asks for --bits 24.
+			if src.Type == audio.Float {
+				spec.BitDepth = 24
+			} else if d := apeSnapDepth(src.BitDepth); d != src.BitDepth {
+				spec.BitDepth = d
+			}
+			// No fold to stereo: this is a lossless output, and one that
+			// silently dropped channels would be lying about what it holds
+			// (the alac rule, not the lossy rows'). APE holds one or two
+			// channels here, so anything wider is refused by the encoder.
+		},
+		plan: func(f audio.Format, opts TranscodeOptions) (string, int, int, error) {
+			level, err := apeLevel(opts)
+			if err != nil {
+				return "", 0, 0, err
+			}
+			if _, err := ape.NewEncoder(f, &ape.EncoderOptions{Level: level}); err != nil {
+				return "", 0, 0, err
+			}
+			return ape.EncoderVersion(level), 0, 0, nil
+		},
+		encode: func(f audio.Format, opts TranscodeOptions) (codec.Encoder, error) {
+			level, err := apeLevel(opts)
+			if err != nil {
+				return nil, err
+			}
+			return ape.NewEncoder(f, &ape.EncoderOptions{Level: level})
+		},
+		mux: func(_ container.Track, opts TranscodeOptions, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
+			return apen.NewMuxer(dst, &apen.MuxerOptions{Tags: opts.Tags}), nil
+		},
+		// container stays nil: Monkey's Audio rides in nothing else here.
+		// hls stays nil: it has no CMAF/HLS segmented form.
+	},
 }
 
 // logImplicitDownmix says out loud that the chain folded channels the caller
@@ -1476,24 +1541,26 @@ const (
 // writes the track's tags itself, so a tagging post-pass must skip that output
 // rather than write a second, conflicting set over the top.
 //
-// Three do. The MP4 muxers embed an ilst in moov, which is also the only way
+// Four do. The MP4 muxers embed an ilst in moov, which is also the only way
 // the fragmented form gets tags at all: the mapper reads that shape but
 // refuses to rewrite it. The Ogg muxer embeds the comment header at Begin.
-// The WavPack muxer writes the APEv2 block after the audio, which is likewise
-// the only way a .wv gets tags, since waxlabel cannot identify the format and
-// a post-pass on one fails rather than adding anything. Every other output,
-// incl. Matroska (.mka/.webm), defers to the post-pass: the mka muxer accepts
-// Tags but does not emit them (see container/mka.MuxerOptions), so if it ever
-// starts writing them at Begin, add it here.
+// The WavPack and Monkey's Audio muxers write the APEv2 block after the audio,
+// which is likewise the only way a .wv or a .ape gets tags, since waxlabel
+// cannot identify either format and a post-pass on one fails rather than
+// adding anything. Every other output, incl. Matroska (.mka/.webm), defers to
+// the post-pass: the mka muxer accepts Tags but does not emit them (see
+// container/mka.MuxerOptions), so if it ever starts writing them at Begin, add
+// it here.
 //
 // Exported for the same reason the container names above are: three callers
 // need it (the CLI's transcode and split, the job runner), each had spelled it
 // out separately, and the job runner's spelling had fallen a format behind.
-// WavPack is keyed on the format because its row has no container of its own,
-// which is what made a container-keyed predicate silently never fire.
+// WavPack and Monkey's Audio are keyed on the format because their rows have
+// no container of their own, which is what made a container-keyed predicate
+// silently never fire.
 func OutputEmbedsTags(format, container string) bool {
 	switch {
-	case format == "wavpack", container == ContainerOgg:
+	case format == "wavpack", format == "ape", container == ContainerOgg:
 		return true
 	case format == "alac":
 		return true
@@ -1709,6 +1776,45 @@ func wavpackLevel(opts TranscodeOptions) (int, error) {
 	return 0, waxerr.New(waxerr.CodeInvalidRequest,
 		fmt.Sprintf("waxflow: WavPack level %d outside %d..%d",
 			opts.WavPackLevel, WavPackLevelFast, WavPackLevelVeryHigh))
+}
+
+// apeLevel resolves TranscodeOptions.APELevel: the zero value keeps the
+// encoder default (normal), and the three written levels pass through. The
+// format's own vocabulary counts in thousands, so zero is outside it and the
+// default needs no sentinel. The two deeper levels decode but are not
+// written, and ape.NewEncoder says so by name.
+func apeLevel(opts TranscodeOptions) (int, error) {
+	switch {
+	case opts.APELevel == APELevelDefault:
+		return ape.DefaultEncoderLevel, nil
+	case opts.APELevel >= APELevelFast && opts.APELevel <= APELevelHigh && opts.APELevel%1000 == 0:
+		return opts.APELevel, nil
+	case opts.APELevel > APELevelHigh && opts.APELevel <= ape.LevelInsane && opts.APELevel%1000 == 0:
+		// The likeliest wrong answer, since the format documents five levels
+		// and this writes three. Say which half of that it is.
+		return 0, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("waxflow: APE level %d decodes but is not written; want %d, %d, or %d",
+				opts.APELevel, APELevelFast, APELevelNormal, APELevelHigh))
+	}
+	return 0, waxerr.New(waxerr.CodeInvalidRequest,
+		fmt.Sprintf("waxflow: APE level %d is not one of %d, %d, or %d",
+			opts.APELevel, APELevelFast, APELevelNormal, APELevelHigh))
+}
+
+// apeSnapDepth rounds an integer bit depth up to the nearest Monkey's Audio
+// width. It is the identity on those widths, so a source already at one needs
+// no override, and it is the identity above them too: nothing here narrows a
+// source, so a 32-bit one reaches the encoder and is refused by name.
+func apeSnapDepth(d int) int {
+	switch {
+	case d <= 8:
+		return 8
+	case d <= 16:
+		return 16
+	case d <= 24:
+		return 24
+	}
+	return d
 }
 
 // wavpackSnapDepth rounds an integer bit depth up to the nearest WavPack

@@ -109,6 +109,9 @@ type Request struct {
 	// WavPackLevel is the WavPack compression level (1 fast through 4 very
 	// high); 0 keeps the encoder default.
 	WavPackLevel int `json:"wavpackLevel,omitempty"`
+	// APELevel is the Monkey's Audio compression level (1000 fast, 2000
+	// normal, 3000 high); 0 keeps the encoder default.
+	APELevel int `json:"apeLevel,omitempty"`
 
 	// Silence adds the silence map to an analyze job, from the same
 	// decode the loudness measurement runs on. Analyze-only.
