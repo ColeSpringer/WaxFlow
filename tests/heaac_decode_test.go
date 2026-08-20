@@ -187,7 +187,7 @@ func TestHEAACRemuxFamilyRedirect(t *testing.T) {
 		waxflow.TranscodeOptions{Format: "aac", Container: "progressive"}); err != nil {
 		t.Fatalf("mka -> m4a: %v", err)
 	}
-	gotM4A := payloads(t, m4a.b, "m4a")
+	gotM4A := payloads(t, m4a.Buf, "m4a")
 	if len(gotM4A) != len(want) {
 		t.Fatalf("m4a remux moved %d packets, source had %d", len(gotM4A), len(want))
 	}
@@ -197,7 +197,7 @@ func TestHEAACRemuxFamilyRedirect(t *testing.T) {
 		}
 	}
 	// And the round trip keeps the gapless trims.
-	_, info2, err := format.OpenDemuxer(container.BytesSource(m4a.b), "m4a", nil)
+	_, info2, err := format.OpenDemuxer(container.BytesSource(m4a.Buf), "m4a", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

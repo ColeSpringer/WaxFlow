@@ -54,6 +54,7 @@ const (
 	flagMagLSB       = 18         // magnitude of the largest sample, 5 bits
 	flagSrateLSB     = 23         // sample-rate index, 4 bits
 	flagSrateMask    = 0xf << 23
+	flagHasChecksum  = 0x10000000 // the block carries a checksum sub-block
 	flagFalseStereo  = 0x40000000 // stereo block whose two channels are equal
 	flagDSD          = 0x80000000 // 1-bit DSD audio
 
@@ -75,6 +76,7 @@ const (
 	idChannelInfo   = 0xd
 	idSampleRate    = 0x27
 	idWVXNew        = 0x2c
+	idBlockChecksum = 0x2f
 
 	idOddSize = 0x40 // the payload is one byte shorter than its word count
 	idLarge   = 0x80 // the word count is three bytes, not one
@@ -259,25 +261,26 @@ func (h BlockHeader) BytesPerSample() int { return int(h.Flags&flagBytesStored) 
 // them.
 func (h BlockHeader) shift() uint { return uint(h.Flags&flagShiftMask) >> flagShiftLSB }
 
-// walkMeta calls fn for each metadata sub-block in the block body. Sub-blocks
-// of every class are handed over; fn decides what it wants. The walk stops at
-// the first sub-block that does not fit, matching the reference, which treats
-// a short tail as the end of the metadata rather than as damage: the block's
-// own CRC is what catches a stream that really is broken.
-func walkMeta(block []byte, fn func(id byte, data []byte) error) error {
+// walkMeta calls fn for each metadata sub-block in the block body, with its
+// payload and where that payload starts in block. Sub-blocks of every class are
+// handed over; fn decides what it wants. The walk stops at the first sub-block
+// that does not fit, matching the reference, which treats a short tail as the
+// end of the metadata rather than as damage: the block's own CRC is what
+// catches a stream that really is broken.
+func walkMeta(block []byte, fn func(id byte, data []byte, off int) error) error {
 	if len(block) < BlockHeaderLen {
 		return nil
 	}
-	b := block[BlockHeaderLen:]
+	b, at := block[BlockHeaderLen:], BlockHeaderLen
 	for len(b) >= 2 {
 		id, n := b[0], int(b[1])<<1
-		b = b[2:]
+		b, at = b[2:], at+2
 		if id&idLarge != 0 {
 			if len(b) < 2 {
 				return nil
 			}
 			n += int(b[0])<<9 + int(b[1])<<17
-			b = b[2:]
+			b, at = b[2:], at+2
 			id &^= idLarge
 		}
 		if id&idOddSize != 0 {
@@ -288,7 +291,7 @@ func walkMeta(block []byte, fn func(id byte, data []byte) error) error {
 			n--
 		}
 		if n == 0 {
-			if err := fn(id, nil); err != nil {
+			if err := fn(id, nil, at); err != nil {
 				return err
 			}
 			continue
@@ -296,10 +299,10 @@ func walkMeta(block []byte, fn func(id byte, data []byte) error) error {
 		if len(b) < n+n&1 {
 			return nil
 		}
-		if err := fn(id, b[:n]); err != nil {
+		if err := fn(id, b[:n], at); err != nil {
 			return err
 		}
-		b = b[n+n&1:]
+		b, at = b[n+n&1:], at+n+n&1
 	}
 	return nil
 }
@@ -405,7 +408,7 @@ func ProbeBlock(block []byte) (Config, error) {
 	if idx := (h.Flags & flagSrateMask) >> flagSrateLSB; idx < uint32(len(srateTable)) {
 		cfg.Rate = srateTable[idx]
 	}
-	err = walkMeta(block, func(id byte, data []byte) error {
+	err = walkMeta(block, func(id byte, data []byte, _ int) error {
 		switch id {
 		case idSampleRate:
 			if len(data) == 3 || len(data) == 4 {

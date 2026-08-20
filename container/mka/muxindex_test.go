@@ -6,13 +6,15 @@ package mka
 
 import (
 	"encoding/binary"
-	"errors"
+	"io"
 	"math"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/muxseek"
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
 // readElemAt parses the element header at off. An unknown or overrunning size
@@ -510,7 +512,7 @@ func TestDurationTicksRoundTrip(t *testing.T) {
 // that loses its phase leaves the index dense at one end and sparse at the
 // other, which is worse than a coarse index everywhere.
 func TestMuxCueCapHalves(t *testing.T) {
-	m := &Muxer{ws: &memWS{}, cueStride: 1}
+	m := &Muxer{patch: muxseek.New(&memWS{}, "mka"), cueStride: 1}
 	const clusters = maxCuePoints*3 + 17
 	for i := 0; i < clusters; i++ {
 		m.off = int64(i) * 1000
@@ -544,55 +546,40 @@ func TestMuxCueCapHalves(t *testing.T) {
 	}
 }
 
-// pipeWS satisfies io.WriteSeeker the way *os.File does for a pipe: the method
-// is there whether or not the object can seek.
-type pipeWS struct{ b []byte }
-
-func (p *pipeWS) Write(b []byte) (int, error) { p.b = append(p.b, b...); return len(b), nil }
-
-func (p *pipeWS) Seek(int64, int) (int64, error) { return 0, errors.New("illegal seek") }
-
 // TestMuxPipeLandsInTheStreamingColumn: seekability is probed, not inferred.
 // Trusting the type assertion writes the whole Cues element before the first
 // patch fails, leaving the reader a stream with an index nothing points at.
 func TestMuxPipeLandsInTheStreamingColumn(t *testing.T) {
 	track, pkts := pcmCase(t, 1200, 1200*480)
-	w := &pipeWS{}
+	w := &testutil.PipeWriteSeeker{}
 	// runMuxer fails on an End error, which is the other half: the muxer must
 	// not need the seek it cannot have.
 	runMuxer(t, w, track, nil, pkts, codec.Trailer{Samples: 1200 * 480})
 
-	if _, _, ok := segChild(t, w.b, idCues); ok {
+	if _, _, ok := segChild(t, w.Buf, idCues); ok {
 		t.Error("a writer whose Seek fails got a Cues element")
 	}
-	if _, _, definite := segment(t, w.b); definite {
+	if _, _, definite := segment(t, w.Buf); definite {
 		t.Error("a writer whose Seek fails got a definite Segment size")
 	}
-	if _, ok := infoDuration(t, w.b); !ok {
+	if _, ok := infoDuration(t, w.Buf); !ok {
 		t.Error("the projected Duration was dropped; it needs no seek")
 	}
 }
 
 // TestMuxSeekableAtNonZeroStart writes through a writer already positioned past
-// the beginning: patch offsets are absolute, so taking header-buffer indices for
-// file offsets would patch whatever sits in front.
+// the beginning: every patch offset is into the stream, so taking one for a
+// file offset would rewrite whatever sits in front. The shared helper pins the
+// stream against the same one written at zero and checks what is in front of
+// it; the structural assertions below are this muxer's own, since a Matroska
+// Segment states its own size and positions.
 func TestMuxSeekableAtNonZeroStart(t *testing.T) {
-	const base = 97
-	w := &memWS{}
-	w.SeekTo(base)
-	for i := range w.Buf {
-		w.Buf[i] = 0xAA // recognizable, so a stray patch shows up
-	}
 	const frames = 4801
 	track, pkts := pcmCase(t, 12, -1)
-	runMuxer(t, w, track, nil, pkts, codec.Trailer{Samples: frames})
+	file := testutil.MuxAtOffset(t, 97, func(w io.Writer) {
+		runMuxer(t, w, track, nil, pkts, codec.Trailer{Samples: frames})
+	})
 
-	for i, v := range w.Buf[:base] {
-		if v != 0xAA {
-			t.Fatalf("byte %d ahead of the stream was overwritten (%#x)", i, v)
-		}
-	}
-	file := w.Buf[base:]
 	ticks, ok := infoDuration(t, file)
 	if !ok {
 		t.Fatal("no Duration")

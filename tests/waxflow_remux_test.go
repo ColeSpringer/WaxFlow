@@ -30,7 +30,7 @@ func remuxFixture(t *testing.T, opts waxflow.TranscodeOptions, frames int) []byt
 	if _, err := e.Transcode(context.Background(), container.BytesSource(raw), "wav", ws, opts); err != nil {
 		t.Fatalf("building the %s fixture: %v", opts.Format, err)
 	}
-	return ws.b
+	return ws.Buf
 }
 
 // payloads walks a container and returns every packet's payload, copied.

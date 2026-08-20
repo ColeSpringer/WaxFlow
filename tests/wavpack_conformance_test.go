@@ -24,6 +24,7 @@ import (
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/audio"
+	"github.com/colespringer/waxflow/codec/wavpack"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/waxerr"
@@ -342,4 +343,50 @@ func TestWavPackSuiteCorruption(t *testing.T) {
 			t.Fatal("decoded no samples")
 		}
 	})
+}
+
+// TestWavPackSuiteBlockChecksums recomputes the reference encoder's own block
+// checksum over the reference encoder's own blocks. Our encoder agreeing with
+// our own fold proves nothing about whether libwavpack agrees, on the
+// arithmetic or on which bytes it covers, and `wvunpack -v` refuses a block
+// whose stored value does not match.
+//
+// Both widths the reference writes are here. The narrow two-byte form is not
+// hypothetical: fifteen members of this suite carry it, and it is what the
+// remux rung would have to restate when a hybrid or multichannel source's
+// blocks pass through the muxer's length patch.
+func TestWavPackSuiteBlockChecksums(t *testing.T) {
+	for _, name := range []string{
+		"bit_depths/12bit.wv",            // the four-byte form
+		"hybrid_bitrates/128kbps.wv",     // the two-byte form
+		"num_channels/multichannel-6.wv", // the two-byte form, several blocks a frame
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw := suiteFile(t, name)
+			blocks := 0
+			// The walk stops at the tag block every suite member ends with,
+			// which is not a WavPack block and not this test's business.
+			for off := int64(0); wavpack.Match(raw[off:]); blocks++ {
+				h, err := wavpack.ParseBlockHeader(raw[off:])
+				if err != nil {
+					t.Fatalf("block %d at byte %d: %v", blocks, off, err)
+				}
+				if off+h.Size > int64(len(raw)) {
+					t.Fatalf("block %d declares %d bytes, %d remain", blocks, h.Size, int64(len(raw))-off)
+				}
+				ok, present := wavpack.VerifyBlockChecksum(raw[off : off+h.Size])
+				if !present {
+					t.Fatalf("block %d carries no checksum; this member can no longer check the fold", blocks)
+				}
+				if !ok {
+					t.Errorf("block %d at byte %d: our fold disagrees with the stored checksum", blocks, off)
+				}
+				off += h.Size
+			}
+			if blocks == 0 {
+				t.Fatal("no blocks walked")
+			}
+			t.Logf("%d blocks checked", blocks)
+		})
+	}
 }

@@ -458,5 +458,5 @@ func buildWAVFrom(t *testing.T, cfg pcm.Config, src *audio.Buffer) []byte {
 	if err := m.End(trailer); err != nil {
 		t.Fatal(err)
 	}
-	return ws.b
+	return ws.Buf
 }

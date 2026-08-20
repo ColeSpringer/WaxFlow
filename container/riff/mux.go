@@ -9,6 +9,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/muxseek"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -25,13 +26,14 @@ type MuxerOptions struct {
 // Muxer writes one PCM track as a WAV file. NeedsSeek reports false: a
 // plain io.Writer receives a compliant stream (RIFF with streaming-size
 // placeholders when the length is unknown, RF64 when a known length
-// projects past the RIFF limit). An io.WriteSeeker upgrades the result:
+// projects past the RIFF limit). A destination that can seek upgrades the
+// result:
 // headers are back-patched with exact sizes at End, including a
 // RIFF-to-RF64 rewrite when the output turned out to cross the limit
 // (the 28-byte JUNK reservation becomes the ds64 chunk).
 type Muxer struct {
 	w     io.Writer
-	ws    io.WriteSeeker // nil when w cannot seek
+	patch muxseek.Patcher
 	limit int64
 
 	cfg        pcm.Config
@@ -53,9 +55,6 @@ type Muxer struct {
 // NewMuxer returns a WAV muxer writing to w.
 func NewMuxer(w io.Writer, opts *MuxerOptions) *Muxer {
 	m := &Muxer{w: w, limit: size32Unknown}
-	if ws, ok := w.(io.WriteSeeker); ok {
-		m.ws = ws
-	}
 	if opts != nil && opts.SizeLimit > 0 {
 		m.limit = opts.SizeLimit
 	}
@@ -70,6 +69,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	if m.began {
 		return waxerr.New(waxerr.CodeInternal, "wav: Begin called twice")
 	}
+	m.patch = muxseek.New(m.w, "wav")
 	if len(tracks) != 1 {
 		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("wav: muxers are single-track, got %d", len(tracks)))
 	}
@@ -173,7 +173,7 @@ func (m *Muxer) writeHeaders() error {
 			u64(riffProj), u64(proj), u64(uint64(projFrames(m.projected, m.frameBytes))), u32(0)); err != nil {
 			return err
 		}
-	} else if m.ws != nil {
+	} else if m.patch.Seekable() {
 		m.junkOff = m.off
 		if err := m.write([]byte(idJUNK), u32(ds64Payload), make([]byte, ds64Payload)); err != nil {
 			return err
@@ -209,7 +209,7 @@ func (m *Muxer) writeHeaders() error {
 // hasDS64Region reports whether the output carries the 28-byte ds64/JUNK
 // region: always for RF64, and on seekable writers as the reservation for
 // a possible RIFF-to-RF64 rewrite.
-func (m *Muxer) hasDS64Region() bool { return m.rf64 || m.ws != nil }
+func (m *Muxer) hasDS64Region() bool { return m.rf64 || m.patch.Seekable() }
 
 // headerOverhead is the byte count of everything before the data payload
 // plus the data chunk header. It only depends on the wire config and the
@@ -318,7 +318,7 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 	}
 	riffBytes := m.off - 8
 
-	if m.ws == nil {
+	if !m.patch.Seekable() {
 		if m.projected >= 0 && dataBytes != m.projected {
 			return waxerr.New(waxerr.CodeInternal,
 				fmt.Sprintf("wav: headers projected %d data bytes, wrote %d (unseekable output)", m.projected, dataBytes))
@@ -334,41 +334,38 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 		// Rewrite in place: RIFF becomes RF64 and the JUNK reservation
 		// becomes the ds64 chunk.
 		m.rf64 = true
-		if err := m.patch(0, []byte(idRF64)); err != nil {
+		if err := m.patch.At(0, []byte(idRF64)); err != nil {
 			return err
 		}
-		if err := m.patch(m.junkOff, []byte(idDS64)); err != nil {
+		if err := m.patch.At(m.junkOff, []byte(idDS64)); err != nil {
 			return err
 		}
 	}
 	if m.rf64 {
-		if err := m.patch(4, u32(size32Unknown)); err != nil {
+		if err := m.patch.At(4, u32(size32Unknown)); err != nil {
 			return err
 		}
-		if err := m.patch(m.junkOff+8, u64(uint64(riffBytes)), u64(uint64(dataBytes)), u64(uint64(m.frames))); err != nil {
+		if err := m.patch.At(m.junkOff+8, u64(uint64(riffBytes)), u64(uint64(dataBytes)), u64(uint64(m.frames))); err != nil {
 			return err
 		}
-		if err := m.patch(m.dataOff+4, u32(size32Unknown)); err != nil {
+		if err := m.patch.At(m.dataOff+4, u32(size32Unknown)); err != nil {
 			return err
 		}
 	} else {
-		if err := m.patch(4, u32(uint32(riffBytes))); err != nil {
+		if err := m.patch.At(4, u32(uint32(riffBytes))); err != nil {
 			return err
 		}
-		if err := m.patch(m.dataOff+4, u32(uint32(dataBytes))); err != nil {
+		if err := m.patch.At(m.dataOff+4, u32(uint32(dataBytes))); err != nil {
 			return err
 		}
 	}
 	if m.factOff != 0 {
-		if err := m.patch(m.factOff, u32(clamp32(m.frames))); err != nil {
+		if err := m.patch.At(m.factOff, u32(clamp32(m.frames))); err != nil {
 			return err
 		}
 	}
 	// Leave the writer positioned at the end of the file.
-	if _, err := m.ws.Seek(m.off, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "wav: seeking to end", err)
-	}
-	return nil
+	return m.patch.Resume(m.off)
 }
 
 func (m *Muxer) write(parts ...[]byte) error {
@@ -377,19 +374,6 @@ func (m *Muxer) write(parts ...[]byte) error {
 		m.off += int64(n)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "wav: write", err)
-		}
-	}
-	return nil
-}
-
-// patch rewrites bytes at an absolute offset on the seekable writer.
-func (m *Muxer) patch(off int64, parts ...[]byte) error {
-	if _, err := m.ws.Seek(off, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "wav: seek for patch", err)
-	}
-	for _, p := range parts {
-		if _, err := m.ws.Write(p); err != nil {
-			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "wav: patch", err)
 		}
 	}
 	return nil

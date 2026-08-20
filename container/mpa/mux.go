@@ -8,6 +8,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/muxseek"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -17,8 +18,8 @@ var _ container.Muxer = (*Muxer)(nil)
 // Xing/Info metadata frame with a LAME-format gapless extension. NeedsSeek
 // reports false: the leading frame is written on the first packet using the
 // engine's projected sample count, so a plain io.Writer already carries exact
-// gapless trims for a known-length transcode. An io.WriteSeeker refines them
-// at End with the encoder's exact trailer, covering the unknown-length case.
+// gapless trims for a known-length transcode. A destination that can seek
+// refines them at End with the encoder's exact trailer, covering the unknown-length case.
 //
 // CBR streams carry the "Info" marker (constant rate, no seek table). VBR
 // streams carry "Xing" with the frame count, stream byte count, and the
@@ -32,9 +33,9 @@ var _ container.Muxer = (*Muxer)(nil)
 // demuxer, ffmpeg, browsers) recognize the tag and skip the frame as audio,
 // so the gapless delay and padding apply to the audio frames alone.
 type Muxer struct {
-	w    io.Writer
-	ws   io.WriteSeeker // nil when w cannot seek
-	opts MuxerOptions
+	w     io.Writer
+	patch muxseek.Patcher
+	opts  MuxerOptions
 
 	samples int64 // engine's projected input sample count, -1 unknown
 	rate    int
@@ -81,9 +82,6 @@ const tocSampleCap = 2048
 // NewMuxer returns an MP3 muxer writing to w.
 func NewMuxer(w io.Writer, opts *MuxerOptions) *Muxer {
 	m := &Muxer{w: w, stride: 1}
-	if ws, ok := w.(io.WriteSeeker); ok {
-		m.ws = ws
-	}
 	if opts != nil {
 		m.opts = *opts
 	}
@@ -100,6 +98,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	if m.began {
 		return waxerr.New(waxerr.CodeInternal, "mp3: Begin called twice")
 	}
+	m.patch = muxseek.New(m.w, "mp3")
 	if len(tracks) != 1 {
 		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("mp3: muxers are single-track, got %d", len(tracks)))
 	}
@@ -183,7 +182,7 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 		return waxerr.New(waxerr.CodeInternal, "mp3: End outside Begin")
 	}
 	m.ended = true
-	if m.ws == nil || m.infoLen == 0 {
+	if !m.patch.Seekable() || m.infoLen == 0 {
 		return nil // no metadata frame to back-patch; the projection stands
 	}
 	// Rebuild the metadata frame with the exact trailer, audio-frame
@@ -197,16 +196,10 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 	if info == nil || len(info) != m.infoLen {
 		return nil // unbuildable now (should not happen); leave the projection
 	}
-	if _, err := m.ws.Seek(m.id3Len, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp3: seek for patch", err)
+	if err := m.patch.At(m.id3Len, info); err != nil {
+		return err
 	}
-	if _, err := m.ws.Write(info); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp3: patch", err)
-	}
-	if _, err := m.ws.Seek(m.off, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp3: seeking to end", err)
-	}
-	return nil
+	return m.patch.Resume(m.off)
 }
 
 // measureTOC builds the Xing 100-point seek table from the sampled frame

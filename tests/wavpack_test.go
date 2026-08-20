@@ -283,7 +283,7 @@ func TestWavPackTranscodeRoundTrip(t *testing.T) {
 	if res.ClippedSamples != 0 {
 		t.Errorf("a lossless int chain clipped %d samples", res.ClippedSamples)
 	}
-	got, err := decodeAllDynamic(t, container.BytesSource(out.b), "flac")
+	got, err := decodeAllDynamic(t, container.BytesSource(out.Buf), "flac")
 	if err != nil {
 		t.Fatal(err)
 	}

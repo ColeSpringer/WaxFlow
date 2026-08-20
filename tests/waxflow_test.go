@@ -15,36 +15,12 @@ import (
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/riff"
+	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-type memWS struct {
-	b   []byte
-	pos int64
-}
-
-func (w *memWS) Write(p []byte) (int, error) {
-	if need := w.pos + int64(len(p)); need > int64(len(w.b)) {
-		grown := make([]byte, need)
-		copy(grown, w.b)
-		w.b = grown
-	}
-	copy(w.b[w.pos:], p)
-	w.pos += int64(len(p))
-	return len(p), nil
-}
-
-func (w *memWS) Seek(off int64, whence int) (int64, error) {
-	switch whence {
-	case io.SeekStart:
-		w.pos = off
-	case io.SeekCurrent:
-		w.pos += off
-	case io.SeekEnd:
-		w.pos = int64(len(w.b)) + off
-	}
-	return w.pos, nil
-}
+// memWS aliases the shared in-memory io.WriteSeeker.
+type memWS = testutil.MemWriteSeeker
 
 // synth fills a buffer with deterministic pseudo-random samples spanning
 // the format's full range, extremes included.
@@ -117,7 +93,7 @@ func makeWAVOf(t *testing.T, cfg pcm.Config, channels, frames int, fill func(*au
 	if err := m.End(trailer); err != nil {
 		t.Fatal(err)
 	}
-	return ws.b, src
+	return ws.Buf, src
 }
 
 // readAll decodes a container file back to one buffer via the facade.
@@ -217,7 +193,7 @@ func TestTranscodeBitExactRoundTrips(t *testing.T) {
 			}
 			// AIFF -> WAV.
 			wavOut := &memWS{}
-			res, err = e.Transcode(context.Background(), container.BytesSource(aiffOut.b), "", wavOut, waxflow.TranscodeOptions{Format: "wav"})
+			res, err = e.Transcode(context.Background(), container.BytesSource(aiffOut.Buf), "", wavOut, waxflow.TranscodeOptions{Format: "wav"})
 			if err != nil {
 				t.Fatalf("aiff->wav: %v", err)
 			}
@@ -225,7 +201,7 @@ func TestTranscodeBitExactRoundTrips(t *testing.T) {
 				t.Fatalf("aiff->wav samples = %d, want %d", res.Samples, frames)
 			}
 
-			got := readAll(t, e, wavOut.b, frames)
+			got := readAll(t, e, wavOut.Buf, frames)
 			defer audio.Put(got)
 			equalPCM(t, src, got)
 		})
@@ -265,11 +241,11 @@ func TestTranscodeFLACRoundTrips(t *testing.T) {
 				t.Fatalf("wav->flac samples = %d, want %d", res.Samples, frames)
 			}
 			wavOut := &memWS{}
-			if _, err := e.Transcode(context.Background(), container.BytesSource(flacOut.b), "", wavOut, waxflow.TranscodeOptions{Format: "wav"}); err != nil {
+			if _, err := e.Transcode(context.Background(), container.BytesSource(flacOut.Buf), "", wavOut, waxflow.TranscodeOptions{Format: "wav"}); err != nil {
 				t.Fatalf("flac->wav: %v", err)
 			}
 
-			got := readAll(t, e, wavOut.b, frames)
+			got := readAll(t, e, wavOut.Buf, frames)
 			defer audio.Put(got)
 			equalPCM(t, src, got)
 		})
@@ -288,7 +264,7 @@ func TestTranscodeFLACRoundTrips(t *testing.T) {
 		if res.Format.Type != audio.Int || res.Format.BitDepth != 24 {
 			t.Fatalf("float source encoded as %v, want int24", res.Format)
 		}
-		got := readAll(t, e, out.b, 4321)
+		got := readAll(t, e, out.Buf, 4321)
 		audio.Put(got)
 	})
 
@@ -336,19 +312,19 @@ func TestTranscodeRF64RoundTrip(t *testing.T) {
 	if err := m.End(trailer); err != nil {
 		t.Fatal(err)
 	}
-	if string(ws.b[:4]) != "RF64" {
-		t.Fatalf("fixture header = %q, want RF64", ws.b[:4])
+	if string(ws.Buf[:4]) != "RF64" {
+		t.Fatalf("fixture header = %q, want RF64", ws.Buf[:4])
 	}
 
 	e := waxflow.New()
-	info, err := e.Probe(container.BytesSource(ws.b), "", &waxflow.ProbeOptions{Strict: true})
+	info, err := e.Probe(container.BytesSource(ws.Buf), "", &waxflow.ProbeOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if info.Container != "wav" || info.Default().Samples != frames {
 		t.Fatalf("RF64 probe = %+v", info)
 	}
-	got := readAll(t, e, ws.b, frames)
+	got := readAll(t, e, ws.Buf, frames)
 	defer audio.Put(got)
 	equalPCM(t, src, got)
 }

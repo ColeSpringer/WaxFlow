@@ -84,11 +84,11 @@ func TestTranscodeOggVorbisRoundTrip(t *testing.T) {
 	if res.Samples != frames {
 		t.Fatalf("Samples = %d, want %d (gapless exact)", res.Samples, frames)
 	}
-	if len(out.b) < 4 || string(out.b[:4]) != "OggS" {
+	if len(out.Buf) < 4 || string(out.Buf[:4]) != "OggS" {
 		t.Fatalf("output is not an Ogg stream")
 	}
 
-	got := readAll(t, e, out.b, frames)
+	got := readAll(t, e, out.Buf, frames)
 	defer audio.Put(got)
 	if got.N != frames {
 		t.Errorf("decoded %d frames, want %d", got.N, frames)
@@ -194,7 +194,7 @@ func TestTranscodeVorbisMatroska(t *testing.T) {
 			if res.Samples != frames {
 				t.Fatalf("Samples = %d, want %d (gapless exact)", res.Samples, frames)
 			}
-			got := readAll(t, e, out.b, frames)
+			got := readAll(t, e, out.Buf, frames)
 			defer audio.Put(got)
 			if got.N != frames {
 				t.Errorf("decoded %d frames, want %d", got.N, frames)

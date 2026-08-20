@@ -34,7 +34,7 @@ func TestGoldenMuxOutputs(t *testing.T) {
 			if tt.seekable {
 				ws := &memWS{}
 				muxPackets(t, ws, pkts, tr, samples, tt.rate, tt.channels)
-				raw = ws.buf
+				raw = ws.Buf
 			} else {
 				var buf bytes.Buffer
 				muxPackets(t, &buf, pkts, tr, samples, tt.rate, tt.channels)

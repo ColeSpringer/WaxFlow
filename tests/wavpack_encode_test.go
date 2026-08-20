@@ -17,8 +17,11 @@ import (
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/audio"
+	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/pcm"
+	"github.com/colespringer/waxflow/codec/wavpack"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/wv"
 	"github.com/colespringer/waxflow/internal/testutil"
 )
 
@@ -47,7 +50,7 @@ func encodeWavPack(t *testing.T, e *waxflow.Engine, wav []byte, opts waxflow.Tra
 	if res.Container != "wavpack" || res.Format.Type != audio.Int {
 		t.Fatalf("result = %+v", res)
 	}
-	return out.b
+	return out.Buf
 }
 
 // TestWavPackEncodeRoundTrip is the lossless gate: what comes back out of our
@@ -367,11 +370,11 @@ func TestWavPackRemuxMovesBlocks(t *testing.T) {
 	}
 	// The blocks are the source's, byte for byte: the whole file is, since a
 	// .wv file is nothing but its blocks and the length was already right.
-	if !bytes.Equal(out.b, raw) {
+	if !bytes.Equal(out.Buf, raw) {
 		t.Errorf("remuxed file is %d bytes, source was %d; a WavPack-to-WavPack "+
-			"remux rewrites nothing but the length", len(out.b), len(raw))
+			"remux rewrites nothing but the length", len(out.Buf), len(raw))
 	}
-	got := readAll(t, e, out.b, frames)
+	got := readAll(t, e, out.Buf, frames)
 	defer audio.Put(got)
 	equalPCM(t, src, got)
 }
@@ -455,5 +458,76 @@ func TestWavPackEncodeReferenceAccepts(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// TestWavPackMuxUnknownLengthReferenceAccepts closes the gap the cells above
+// leave: they all transcode a source whose length the engine knows, so the
+// muxer's first block promises the right total from the start and End has
+// nothing to correct. A source with no length exercises the other half, where
+// the total is written twice and the block checksum covering it has to be
+// restated both times or `wvunpack -v` refuses the file.
+func TestWavPackMuxUnknownLengthReferenceAccepts(t *testing.T) {
+	testutil.WvUnpackTool(t) // skips unless the reference tools are installed
+	const frames = 30011
+	wav, src := makeWAV(t, pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, 2, frames, 4242)
+	defer audio.Put(src)
+
+	enc, err := wavpack.NewEncoder(src.Fmt, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "unknown-length.wv")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	m := wv.NewMuxer(f, nil)
+	track := container.Track{Codec: codec.WavPack, CodecConfig: enc.CodecConfig(),
+		Fmt: src.Fmt, Samples: -1, Default: true} // the length nobody knows yet
+	if err := m.Begin([]container.Track{track}); err != nil {
+		t.Fatal(err)
+	}
+	emit := func(p codec.Packet) error {
+		return m.WritePacket(container.Packet{Track: 0, Packet: p})
+	}
+	chunk := audio.Get(src.Fmt, enc.FrameSize())
+	defer audio.Put(chunk)
+	for off := 0; off < src.N; off += enc.FrameSize() {
+		n := min(enc.FrameSize(), src.N-off)
+		audio.CopyFrames(chunk, 0, src, off, n)
+		chunk.N = n
+		if err := enc.Encode(chunk, emit); err != nil {
+			t.Fatal(err)
+		}
+	}
+	trailer, err := enc.Finish(emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.End(trailer); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	testutil.WvUnpackVerify(t, path)
+	if got, want := testutil.WvUnpackDecodeFile(t, path), testutil.WAVData(t, wav); !bytes.Equal(got, want) {
+		t.Fatalf("the reference decoder got %d bytes back, %d went in", len(got), len(want))
+	}
+	// And the length the muxer could only learn at End reached the header.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := wavpack.ParseBlockHeader(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.TotalSamples != frames {
+		t.Errorf("the first block states %d samples, want the back-patched %d", h.TotalSamples, frames)
 	}
 }

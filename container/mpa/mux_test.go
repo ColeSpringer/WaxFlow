@@ -10,35 +10,11 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
-// memWS is an in-memory io.WriteSeeker for exercising the back-patch path.
-type memWS struct {
-	buf []byte
-	pos int64
-}
-
-func (m *memWS) Write(p []byte) (int, error) {
-	end := m.pos + int64(len(p))
-	if end > int64(len(m.buf)) {
-		m.buf = append(m.buf, make([]byte, end-int64(len(m.buf)))...)
-	}
-	copy(m.buf[m.pos:end], p)
-	m.pos = end
-	return len(p), nil
-}
-
-func (m *memWS) Seek(off int64, whence int) (int64, error) {
-	switch whence {
-	case io.SeekStart:
-		m.pos = off
-	case io.SeekCurrent:
-		m.pos += off
-	case io.SeekEnd:
-		m.pos = int64(len(m.buf)) + off
-	}
-	return m.pos, nil
-}
+// memWS aliases the shared in-memory io.WriteSeeker.
+type memWS = testutil.MemWriteSeeker
 
 // encodeTone runs a tone through the encoder and returns its packets, the
 // gapless trailer, and the real input sample count.
@@ -117,7 +93,7 @@ func TestMuxGaplessTag(t *testing.T) {
 			if seekable {
 				ws := &memWS{}
 				muxPackets(t, ws, pkts, tr, samples, rate, channels)
-				out = ws.buf
+				out = ws.Buf
 			} else {
 				var b bytes.Buffer
 				muxPackets(t, &b, pkts, tr, samples, rate, channels)
@@ -214,5 +190,43 @@ func TestMuxLowBitrateTag(t *testing.T) {
 	}
 	if d.Tracks()[0].Codec != codec.MP3 {
 		t.Errorf("track codec %q, want mp3", d.Tracks()[0].Codec)
+	}
+}
+
+// TestMuxAtANonZeroStart writes into a destination the caller had already
+// written to. The Info frame is patched at the offset the ID3 header ends,
+// which is an offset into the stream, not into the file.
+func TestMuxAtANonZeroStart(t *testing.T) {
+	const rate, channels, n = 44100, 2, 40000
+	pkts, tr, samples := encodeTone(t, rate, channels, 128000, n)
+	raw := testutil.MuxAtOffset(t, 97, func(w io.Writer) {
+		muxPackets(t, w, pkts, tr, samples, rate, channels)
+	})
+	d, err := NewDemuxer(container.BytesSource(raw), nil)
+	if err != nil {
+		t.Fatalf("NewDemuxer: %v", err)
+	}
+	// The demuxer adds the 529-sample decoder delay to the tag value.
+	if track, want := d.Tracks()[0], int64(mp3.EncoderDelay+529); track.Delay != want || track.Samples != samples {
+		t.Errorf("read back delay %d samples %d, want %d and %d", track.Delay, track.Samples, want, samples)
+	}
+}
+
+// TestMuxPipeKeepsTheProjection: seekability is probed, not inferred. *os.File
+// has Seek for a pipe too, and a muxer that trusted the method set would fail
+// at End over a patch the projected Info frame did not need.
+func TestMuxPipeKeepsTheProjection(t *testing.T) {
+	const rate, channels, n = 44100, 2, 20000
+	pkts, tr, samples := encodeTone(t, rate, channels, 128000, n)
+	w := &testutil.PipeWriteSeeker{}
+	muxPackets(t, w, pkts, tr, samples, rate, channels)
+	d, err := NewDemuxer(container.BytesSource(w.Buf), nil)
+	if err != nil {
+		t.Fatalf("NewDemuxer: %v", err)
+	}
+	// The projected length is the other half of the tag, and on this path
+	// nothing downstream corrects it.
+	if track, want := d.Tracks()[0], int64(mp3.EncoderDelay+529); track.Delay != want || track.Samples != samples {
+		t.Errorf("read back delay %d samples %d, want %d and %d", track.Delay, track.Samples, want, samples)
 	}
 }

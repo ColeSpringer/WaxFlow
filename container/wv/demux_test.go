@@ -388,3 +388,53 @@ func TestUnknownTotalWithUnscannableTail(t *testing.T) {
 		t.Fatal("the tail scan did not terminate")
 	}
 }
+
+// TestSeekOverAHoleLandsAtOrBeforeTheTarget: a block header states its own
+// position and its own sample count, and nothing in the header is checksummed,
+// so a damaged stream can leave a hole between one block's end and the next
+// one's start. A target inside that hole is contained by no block at all, and
+// the Seeker contract is to land at or before it: the caller decodes forward
+// from the landing and discards, so it can recover from landing early and
+// cannot recover from landing late. Found by FuzzDemux.
+func TestSeekOverAHoleLandsAtOrBeforeTheTarget(t *testing.T) {
+	raw := append([]byte(nil), fixture(t, "sine-s16.wv")...)
+	h, err := wavpack.ParseBlockHeader(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Shrink the first block's sample count. Its index stays 0 and the second
+	// block's stays 7717, so the timeline now holds nothing from 549 to 7717.
+	// The checksum is restated over the edit, leaving the hole as the one
+	// thing wrong with the stream.
+	const covered, hole = 549, 7717
+	binary.LittleEndian.PutUint32(raw[20:], covered)
+	wavpack.UpdateBlockChecksum(raw[:h.Size])
+
+	d, err := wv.NewDemuxer(container.BytesSource(raw), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		target, want int64
+	}{
+		{100, 0},           // inside the first block, as always
+		{1000, 0},          // inside the hole: the block before it
+		{hole, hole},       // the first sample the second block does hold
+		{hole + 500, hole}, // inside the second block
+	} {
+		landed, err := d.SeekSample(0, tt.target)
+		if err != nil {
+			t.Fatalf("seek to %d: %v", tt.target, err)
+		}
+		if landed != tt.want {
+			t.Errorf("seek to %d landed at %d, want %d", tt.target, landed, tt.want)
+		}
+		var pkt container.Packet
+		if err := d.ReadPacket(&pkt); err != nil {
+			t.Fatalf("read after seek to %d: %v", tt.target, err)
+		}
+		if pkt.PTS != landed {
+			t.Errorf("post-seek packet at %d, want the landing %d", pkt.PTS, landed)
+		}
+	}
+}

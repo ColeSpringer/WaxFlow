@@ -1,6 +1,7 @@
 package wavpack
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -668,9 +669,15 @@ func TestEncodeMetadataFraming(t *testing.T) {
 		block = appendMeta(block, byte(0x10+i), p)
 	}
 	seen := 0
-	err := walkMeta(block, func(id byte, data []byte) error {
+	err := walkMeta(block, func(id byte, data []byte, off int) error {
 		if int(id) != 0x10+seen {
 			t.Fatalf("sub-block %d has id %#x", seen, id)
+		}
+		// The offset is what the checksum's covered range is measured from,
+		// and its two non-trivial steps are here: the large form's four-byte
+		// header, and the pad byte an odd payload carries.
+		if got := block[off : off+len(data)]; !bytes.Equal(got, data) {
+			t.Fatalf("sub-block %d is reported at offset %d, which holds other bytes", seen, off)
 		}
 		want := payloads[seen]
 		if len(data) != len(want) {
@@ -705,5 +712,70 @@ func TestEncodeTotalSamplesPatch(t *testing.T) {
 	}
 	if h.TotalSamples != 1000 {
 		t.Errorf("patched total = %d, want 1000", h.TotalSamples)
+	}
+}
+
+// TestEncodeWritesBlockChecksums: every block carries an ID_BLOCK_CHECKSUM
+// sub-block over its own bytes, and flags it in the header. It pins the wiring
+// only, since it recomputes with the same fold the encoder used; what pins the
+// fold itself against libwavpack is TestBlockChecksumMatchesTheReference and
+// the suite walk in tests/, which run over the reference's own blocks.
+func TestEncodeWritesBlockChecksums(t *testing.T) {
+	f := fmtOf(44100, 2, 16)
+	chans := [][]int32{signal("noise", 5000, 16, 1), signal("sine", 5000, 16, 2)}
+	for i, blk := range encodeAll(t, f, LevelNormal, chans, 2048) {
+		h, err := ParseBlockHeader(blk)
+		if err != nil {
+			t.Fatalf("block %d: %v", i, err)
+		}
+		if h.Flags&flagHasChecksum == 0 {
+			t.Errorf("block %d does not flag a checksum", i)
+			continue
+		}
+		stored := append([]byte(nil), blk...)
+		if !UpdateBlockChecksum(blk) {
+			t.Errorf("block %d flags a checksum it does not carry", i)
+			continue
+		}
+		if off, width := checksumOffset(blk); !bytes.Equal(blk, stored) {
+			t.Errorf("block %d stored % x, its bytes check out to % x",
+				i, stored[off:off+width], blk[off:off+width])
+		}
+	}
+}
+
+// TestChecksumStaysInsideItsBlock: the walk that finds a block's checksum is
+// bounded by the block's own declared length and keeps the first match. The
+// muxer patches one block of a stream it holds all of, so a walk that ran past
+// the declared length would take whatever follows for this block's checksum
+// and rewrite four bytes of it with a fold over the wrong range, leaving the
+// block it was asked about stale.
+func TestChecksumStaysInsideItsBlock(t *testing.T) {
+	f := fmtOf(44100, 2, 16)
+	blocks := encodeAll(t, f, LevelNormal, [][]int32{signal("noise", 2048, 16, 3), signal("sine", 2048, 16, 4)}, 2048)
+	blk := blocks[0]
+	// Whatever follows in the stream, standing in for it: a sub-block chain
+	// carrying a checksum of its own, which is what the block after this one
+	// ends with.
+	tail := appendMeta(nil, idBlockChecksum, []byte{1, 2, 3, 4})
+	stream := append(append([]byte(nil), blk...), tail...)
+
+	// Clobber the block's stored value first, so a walk that found nothing at
+	// all would fail here rather than pass on bytes that were already right.
+	off, width := checksumOffset(stream)
+	if off < 0 || off >= len(blk) {
+		t.Fatalf("the checksum was found at %d, outside the block's %d bytes", off, len(blk))
+	}
+	for i := range width {
+		stream[off+i] ^= 0xff
+	}
+	if !UpdateBlockChecksum(stream) {
+		t.Fatal("no checksum found in a stream that starts with one")
+	}
+	if !bytes.Equal(stream[:len(blk)], blk) {
+		t.Error("the block did not come back to what the encoder wrote")
+	}
+	if !bytes.Equal(stream[len(blk):], tail) {
+		t.Error("bytes past the block's declared length were rewritten")
 	}
 }

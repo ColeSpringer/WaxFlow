@@ -36,7 +36,7 @@ func TestFragmentedMP4ReadBack(t *testing.T) {
 			t.Fatalf("Samples = %d, want %d", res.Samples, frames)
 		}
 		// Re-read the fragmented MP4 through the production demuxer.
-		got := readAll(t, e, out.b, frames)
+		got := readAll(t, e, out.Buf, frames)
 		defer audio.Put(got)
 		equalPCM(t, src, got)
 	})
@@ -53,7 +53,7 @@ func TestFragmentedMP4ReadBack(t *testing.T) {
 		if res.Samples != frames {
 			t.Fatalf("Samples = %d, want %d", res.Samples, frames)
 		}
-		got := readAll(t, e, out.b, frames)
+		got := readAll(t, e, out.Buf, frames)
 		defer audio.Put(got)
 		if got.N != frames {
 			t.Fatalf("decoded %d frames, want %d (fragmented gapless trim failed)", got.N, frames)
@@ -73,7 +73,7 @@ func TestFragmentedMP4Probe(t *testing.T) {
 		waxflow.TranscodeOptions{Format: "aac"}); err != nil {
 		t.Fatalf("transcode: %v", err)
 	}
-	info, err := e.Probe(container.BytesSource(out.b), "", nil)
+	info, err := e.Probe(container.BytesSource(out.Buf), "", nil)
 	if err != nil {
 		t.Fatalf("probe fragmented mp4: %v", err)
 	}

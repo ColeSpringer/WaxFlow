@@ -88,7 +88,7 @@ func TestMuxTagsRoundTrip(t *testing.T) {
 		enc := encodeTagged(t, src, 5, w, int64(src.N), tags)
 		wp := &memWS{}
 		encodeStream(t, src, 5, wp, int64(src.N))
-		raw, plain := w.b, wp.b
+		raw, plain := w.Buf, wp.Buf
 
 		si := decodeStream(t, raw, src) // demuxer skips the block, samples intact
 		if si.MD5 != enc.MD5() {

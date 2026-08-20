@@ -109,7 +109,7 @@ func TestTranscodeFloatOutputReportsNoClipping(t *testing.T) {
 	// Zero because the overs SURVIVED, not because nothing looked. Reading
 	// them back out of the written file is what makes "choose a float
 	// output" real advice rather than a way to silence the count.
-	med, err := format.Open(container.BytesSource(out.b), "wav", nil)
+	med, err := format.Open(container.BytesSource(out.Buf), "wav", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestRemuxReportsNoClipping(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	res, err = e.Remux(context.Background(), container.BytesSource(flac.b), "flac", &out,
+	res, err = e.Remux(context.Background(), container.BytesSource(flac.Buf), "flac", &out,
 		waxflow.TranscodeOptions{Format: "flac", Container: "mka"})
 	if err != nil {
 		t.Fatal(err)
@@ -198,7 +198,7 @@ func clipFixtureAAC(t *testing.T, e *waxflow.Engine) []byte {
 	if res.ClippedSamples != 0 {
 		t.Errorf("a float-fed lossy encode reported %d clipped samples, want 0", res.ClippedSamples)
 	}
-	return out.b
+	return out.Buf
 }
 
 // TestCutReportsNoClipping pins the same on the cut rung, which needs its own
@@ -392,7 +392,7 @@ func TestClippingDropsTruePeakNotLoudness(t *testing.T) {
 	// loudness is unmoved, the clamp being confined to a few samples. The
 	// transcode's own TruePeak must agree with an analysis of the file it
 	// wrote exactly: same samples, same interpolator.
-	back, err := e.Analyze(context.Background(), container.BytesSource(out.b), "flac", waxflow.AnalyzeOptions{})
+	back, err := e.Analyze(context.Background(), container.BytesSource(out.Buf), "flac", waxflow.AnalyzeOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

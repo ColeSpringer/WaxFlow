@@ -31,7 +31,7 @@ func transcodeMKA(t *testing.T, e *waxflow.Engine, wav []byte, format, cont stri
 	if res.Container != cont {
 		t.Errorf("Container = %q, want %q", res.Container, cont)
 	}
-	return out.b, res
+	return out.Buf, res
 }
 
 // TestTranscodeMKALossless pins the lossless MKA paths: an integer WAV survives

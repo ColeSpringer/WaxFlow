@@ -503,6 +503,17 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	lastOff, lastH := d.off, d.cur
 	for d.valid {
 		if d.cur.Audio() {
+			// A block answers the seek by containing the target, not merely
+			// by ending after it. Nothing checksums a block header, so a
+			// damaged stream can leave a hole in the timeline, and the block
+			// past a hole ends after a target inside it while starting later
+			// than one already walked over. Landing early is recoverable (the
+			// caller decodes forward and discards), landing late is not; the
+			// walk stops there, since bisect already takes positions as
+			// ordered.
+			if d.pos(d.cur) > sample {
+				break
+			}
 			if d.pos(d.cur)+int64(d.cur.BlockSamples) > sample {
 				return d.pos(d.cur), nil
 			}

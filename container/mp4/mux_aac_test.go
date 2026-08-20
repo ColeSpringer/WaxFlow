@@ -216,3 +216,35 @@ func TestElstDurOffset(t *testing.T) {
 		t.Fatalf("media_time after the duration = %d, want %d", got, mediaTime)
 	}
 }
+
+// TestMuxAtANonZeroStart writes into a destination the caller had already
+// written to. The edit-list duration and the iTunSMPB payload are patched
+// where the moov put them, at offsets into the stream rather than the file.
+func TestMuxAtANonZeroStart(t *testing.T) {
+	const n = 8192
+	raw := testutil.MuxAtOffset(t, 97, func(w io.Writer) {
+		muxAAC(t, w, n, -1)
+	})
+	if dur, _ := elstEntry(t, raw); dur == 0 {
+		t.Error("the edit list kept its unknown duration")
+	}
+	d, err := NewDemuxer(container.BytesSource(raw), nil)
+	if err != nil {
+		t.Fatalf("NewDemuxer: %v", err)
+	}
+	if tr := d.Tracks()[0]; tr.Codec != codec.AACLC || tr.Samples <= 0 {
+		t.Errorf("read back as %+v", tr)
+	}
+}
+
+// TestMuxPipeSkipsTheGaplessAtom: seekability is probed, not inferred.
+// *os.File has Seek for a pipe too, and a muxer that trusted the method set
+// would write the iTunSMPB template and then fail to fill it, leaving a
+// gapless atom claiming zero padding over a whole encode.
+func TestMuxPipeSkipsTheGaplessAtom(t *testing.T) {
+	w := &testutil.PipeWriteSeeker{}
+	muxAAC(t, w, 8192, -1)
+	if bytes.Contains(w.Buf, []byte("iTunSMPB")) {
+		t.Error("a writer whose Seek fails got an iTunSMPB atom it could never fill")
+	}
+}

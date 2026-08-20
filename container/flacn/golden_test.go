@@ -43,7 +43,7 @@ func TestGoldenMuxOutputs(t *testing.T) {
 			if tt.seekable {
 				ws := &memWS{}
 				encodeStream(t, src, tt.level, ws, int64(src.N))
-				raw = ws.b
+				raw = ws.Buf
 			} else {
 				var buf bytes.Buffer
 				encodeStream(t, src, tt.level, &buf, int64(src.N))

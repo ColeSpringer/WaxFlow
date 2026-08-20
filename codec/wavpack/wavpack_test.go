@@ -1,6 +1,7 @@
 package wavpack
 
 import (
+	"bytes"
 	"encoding/binary"
 	"math"
 	"os"
@@ -299,6 +300,96 @@ func TestRestoreWeightRoundsLikeReference(t *testing.T) {
 	}{{0, 0}, {1, 8}, {127, 1024}, {-1, -8}, {-128, -1024}, {64, 516}} {
 		if got := restoreWeight(tc.stored); got != tc.want {
 			t.Errorf("restoreWeight(%d) = %d, want %d", tc.stored, got, tc.want)
+		}
+	}
+}
+
+// TestBlockChecksumMatchesTheReference recomputes a reference encoder's own
+// checksum over its own block. Our encoder writing what our own fold computes
+// proves nothing about whether libwavpack agrees on the fold or on which bytes
+// it covers; this is the only check that does.
+func TestBlockChecksumMatchesTheReference(t *testing.T) {
+	block := firstBlock(t)
+	h, err := ParseBlockHeader(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Flags&flagHasChecksum == 0 {
+		t.Fatal("the fixture carries no block checksum, so it can no longer check the fold")
+	}
+	// Clobbered first, so a function that wrote nothing at all fails here
+	// rather than passing on the bytes that were already right.
+	ours := append([]byte(nil), block...)
+	off, width := checksumOffset(ours)
+	if off < 0 {
+		t.Fatal("no checksum sub-block in a block whose flags say it has one")
+	}
+	for i := range width {
+		ours[off+i] ^= 0xff
+	}
+	if !UpdateBlockChecksum(ours) {
+		t.Fatal("UpdateBlockChecksum found nothing to rewrite")
+	}
+	if !bytes.Equal(ours[off:off+width], block[off:off+width]) {
+		t.Errorf("recomputed % x, the reference stored % x", ours[off:off+width], block[off:off+width])
+	}
+}
+
+// TestBlockChecksumCoversTheHeader pins what the muxer depends on: the fold
+// runs over the header too, so patching the total-samples field there leaves
+// the stored checksum stale until it is recomputed.
+func TestBlockChecksumCoversTheHeader(t *testing.T) {
+	block := append([]byte(nil), firstBlock(t)...)
+	off, width := checksumOffset(block)
+	if off < 0 {
+		t.Fatal("the fixture carries no block checksum")
+	}
+	before := append([]byte(nil), block[off:off+width]...)
+	block[11] ^= 0xff // the total-samples field, which the muxer rewrites
+	UpdateBlockChecksum(block)
+	if bytes.Equal(block[off:off+width], before) {
+		t.Error("editing the header left the checksum alone; a patched block would go out stale")
+	}
+}
+
+// TestSetTotalSamplesRoundTrip pins the writer of the total-samples field
+// against the header parser that reads it back, at the boundaries where the
+// two could disagree, and pins that the checksum covering the field is
+// restated with it.
+//
+// The field is not simply the count's high and low words: the writer skips
+// every value whose low word would collide with the unknown-length escape and
+// the reader subtracts that skip back off, which is what keeps a length of
+// exactly 2^32-1 distinguishable from "unknown". It is also what puts the
+// largest writable count 257 short of the forty-bit field's range rather than
+// one, since past that the skip carries into a ninth bit of the high byte and
+// the byte wraps to zero. MaxSamples is that bound, and a longer stream states
+// the escape rather than a wrapped number.
+func TestSetTotalSamplesRoundTrip(t *testing.T) {
+	block := append([]byte(nil), firstBlock(t)...)
+	const escape = int64(0xffffffff)
+	for _, n := range []int64{-1, 0, 1, escape - 1, escape, escape + 1, escape + 2,
+		2 * escape, 2*escape + 1, MaxSamples - 1, MaxSamples, MaxSamples + 1} {
+		if err := SetTotalSamples(block, n); err != nil {
+			t.Fatalf("%d: %v", n, err)
+		}
+		h, err := ParseBlockHeader(block)
+		if err != nil {
+			t.Fatalf("%d: %v", n, err)
+		}
+		want := n
+		if n > MaxSamples {
+			want = -1
+		}
+		if h.TotalSamples != want {
+			t.Errorf("wrote %d, header reads back %d (want %d)", n, h.TotalSamples, want)
+		}
+		restated := append([]byte(nil), block...)
+		if !UpdateBlockChecksum(restated) {
+			t.Fatal("the fixture carries no block checksum")
+		}
+		if !bytes.Equal(restated, block) {
+			t.Errorf("%d: the stored checksum does not match the block it was written into", n)
 		}
 	}
 }

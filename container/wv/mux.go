@@ -1,7 +1,6 @@
 package wv
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
 
@@ -9,6 +8,7 @@ import (
 	"github.com/colespringer/waxflow/codec/wavpack"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/internal/apev2"
+	"github.com/colespringer/waxflow/internal/muxseek"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -32,12 +32,13 @@ type MuxerOptions struct {
 // corrects it at End when the destination can seek. A plain writer that
 // promised a length it did not deliver is an error rather than a quiet lie.
 type Muxer struct {
-	w    io.Writer
-	ws   io.WriteSeeker // nil when w cannot seek
-	opts MuxerOptions
+	w     io.Writer
+	patch muxseek.Patcher
+	opts  MuxerOptions
 
-	promised int64 // the total written into the first block, -1 for the escape
-	off      int64 // bytes written so far
+	promised int64  // the total written into the first block, -1 for the escape
+	first    []byte // the first block as written, for the length patch
+	off      int64  // bytes written so far
 	samples  int64
 	blocks   int
 
@@ -47,9 +48,6 @@ type Muxer struct {
 // NewMuxer returns a WavPack muxer writing to w.
 func NewMuxer(w io.Writer, opts *MuxerOptions) *Muxer {
 	m := &Muxer{w: w, promised: -1}
-	if ws, ok := w.(io.WriteSeeker); ok {
-		m.ws = ws
-	}
 	if opts != nil {
 		m.opts = *opts
 	}
@@ -65,6 +63,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	if m.began {
 		return waxerr.New(waxerr.CodeInternal, "wavpack: Begin called twice")
 	}
+	m.patch = muxseek.New(m.w, "wavpack")
 	if len(tracks) != 1 {
 		return waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("wavpack: muxers are single-track, got %d", len(tracks)))
@@ -94,8 +93,9 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	return nil
 }
 
-// WritePacket appends one whole block. The first block's total-samples field is
-// rewritten on the way past, since that is the copy readers consult.
+// WritePacket appends one whole block. The first block is rewritten with the
+// promised length on the way past, since that is the copy readers consult, and
+// kept, because End restates the same field over the whole block again.
 func (m *Muxer) WritePacket(pkt container.Packet) error {
 	if !m.began || m.ended {
 		return waxerr.New(waxerr.CodeInternal, "wavpack: WritePacket outside Begin/End")
@@ -116,10 +116,11 @@ func (m *Muxer) WritePacket(pkt container.Packet) error {
 			fmt.Sprintf("wavpack: packet of %d samples holds a %d-sample block", pkt.Dur, h.BlockSamples))
 	}
 	if m.blocks == 0 {
-		var head [wavpack.BlockHeaderLen]byte
-		copy(head[:], pkt.Data)
-		putTotal(head[11:16], m.promised)
-		if err := m.write(head[:], pkt.Data[wavpack.BlockHeaderLen:]); err != nil {
+		m.first = append(m.first[:0], pkt.Data...)
+		if err := wavpack.SetTotalSamples(m.first, m.promised); err != nil {
+			return err
+		}
+		if err := m.write(m.first); err != nil {
 			return err
 		}
 	} else if err := m.write(pkt.Data); err != nil {
@@ -160,7 +161,7 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 	if m.promised == m.samples {
 		return nil
 	}
-	if m.ws == nil {
+	if !m.patch.Seekable() {
 		if m.promised < 0 {
 			// No length was promised, so the escape the blocks carry is
 			// already the truth: a live stream states no length.
@@ -169,43 +170,16 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 		return waxerr.New(waxerr.CodeInternal,
 			fmt.Sprintf("wavpack: header promised %d samples, wrote %d (unseekable output)", m.promised, m.samples))
 	}
-	total := int64(-1)
-	if m.samples <= wavpack.MaxSamples {
-		total = m.samples
+	// The whole block goes back out rather than the length field alone: the
+	// block checksum covers that field and lands at the far end of the block,
+	// so the two rewrites bracket everything between them anyway.
+	if err := wavpack.SetTotalSamples(m.first, m.samples); err != nil {
+		return err
 	}
-	var field [5]byte
-	putTotal(field[:], total)
-	// Bytes 11 through 15 are the split total-samples field; the byte before
-	// them is the block index's high byte, which nothing here changes.
-	if _, err := m.ws.Seek(11, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "wavpack: seek for patch", err)
+	if err := m.patch.At(0, m.first); err != nil {
+		return err
 	}
-	if _, err := m.ws.Write(field[:]); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "wavpack: patch", err)
-	}
-	if _, err := m.ws.Seek(m.off, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "wavpack: seeking to end", err)
-	}
-	return nil
-}
-
-// putTotal renders the five-byte total-samples field: its high byte followed
-// by its low word, the order they sit in at bytes 11 through 15 of a block
-// header. A negative total writes the all-ones escape.
-//
-// The halves are not simply the high and low words of the count. The reference
-// skips every value whose low word would collide with the escape and the
-// reader subtracts the high byte back off, which is what keeps a length of
-// exactly 2^32-1 distinguishable from "unknown".
-func putTotal(field []byte, total int64) {
-	if total < 0 {
-		field[0] = 0
-		binary.LittleEndian.PutUint32(field[1:], 0xffffffff)
-		return
-	}
-	total += total / 0xffffffff
-	field[0] = byte(total >> 32)
-	binary.LittleEndian.PutUint32(field[1:], uint32(total))
+	return m.patch.Resume(m.off)
 }
 
 // muxTags converts the engine's tags to the writer's, dropping keys no reader

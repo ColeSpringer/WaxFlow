@@ -225,8 +225,12 @@ Entries follow this format:
 > `wp_exp2s` reads) are the two places the encoder must produce exactly what
 > the decoder's tables consume; `store_weight` is the reference's, and the
 > log direction is computed by searching the ported exponential table rather
-> than porting the reference's second table. Everything else is a design
-> choice of ours with no counterpart in the reference: the block length, the
+> than porting the reference's second table. The block checksum is a third:
+> its fold, the bytes it covers, and the two widths the reference stores it
+> in are all fixed by what `wvunpack -v` will accept, and they were
+> established by matching the values libwavpack had already written into the
+> pinned test suite. Everything else is a design choice of ours with no
+> counterpart in the reference: the block length, the
 > candidate cascades each compression level searches, the adaptation rate,
 > the cost proxy that scores a candidate, the joint-stereo and false-stereo
 > decisions, and the container writer.

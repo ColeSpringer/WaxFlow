@@ -33,7 +33,7 @@ func TestProgressiveOutputRoundTrip(t *testing.T) {
 		if res.Container != "progressive" || res.Samples != frames {
 			t.Fatalf("result = %+v", res)
 		}
-		got := readAll(t, e, out.b, frames)
+		got := readAll(t, e, out.Buf, frames)
 		defer audio.Put(got)
 		equalPCM(t, src, got)
 	})
@@ -46,7 +46,7 @@ func TestProgressiveOutputRoundTrip(t *testing.T) {
 			waxflow.TranscodeOptions{Format: "aac", Container: "progressive"}); err != nil {
 			t.Fatalf("transcode aac/progressive: %v", err)
 		}
-		got := readAll(t, e, out.b, frames)
+		got := readAll(t, e, out.Buf, frames)
 		defer audio.Put(got)
 		if got.N != frames {
 			t.Fatalf("decoded %d frames, want %d (progressive gapless trim failed)", got.N, frames)

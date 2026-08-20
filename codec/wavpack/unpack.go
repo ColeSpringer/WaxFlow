@@ -278,7 +278,7 @@ func (s *blockState) unpackBlock(h BlockHeader, block []byte, out []int32) (int,
 // lets a stream carry an encoder signature or a RIFF wrapper we ignore.
 func (s *blockState) readMetadata(block []byte) error {
 	mono := s.h.Mono()
-	return walkMeta(block, func(id byte, data []byte) error {
+	return walkMeta(block, func(id byte, data []byte, _ int) error {
 		switch id {
 		case idDecorrTerms:
 			return s.readDecorrTerms(data, mono)

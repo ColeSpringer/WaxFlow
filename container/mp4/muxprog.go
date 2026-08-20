@@ -9,6 +9,7 @@ import (
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/muxseek"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -37,9 +38,9 @@ var _ container.Muxer = (*ProgressiveMuxer)(nil)
 // The text track is the muxer's own, synthesized here rather than accepted as
 // an input track, which is why the single-track contract still holds.
 type ProgressiveMuxer struct {
-	w    io.Writer
-	ws   io.WriteSeeker
-	opts MuxerOptions
+	w     io.Writer
+	patch muxseek.Patcher
+	opts  MuxerOptions
 
 	track container.Track
 	rate  int
@@ -48,20 +49,17 @@ type ProgressiveMuxer struct {
 	ended bool
 
 	off         int64 // bytes written
-	mdatSizeOff int64 // file offset of the mdat 64-bit largesize field
-	mdatStart   int64 // file offset of the mdat payload (the single chunk offset)
+	mdatSizeOff int64 // stream offset of the mdat 64-bit largesize field
+	mdatStart   int64 // stream offset of the mdat payload (the single chunk offset)
 
 	durs, sizes []uint32
 	dataBytes   int64
 }
 
 // NewProgressiveMuxer returns a progressive MP4 muxer writing to w, which must
-// be an io.WriteSeeker (NeedsSeek is true).
+// be a destination it can seek (NeedsSeek is true).
 func NewProgressiveMuxer(w io.Writer, opts *MuxerOptions) *ProgressiveMuxer {
 	m := &ProgressiveMuxer{w: w, mdatSizeOff: -1}
-	if ws, ok := w.(io.WriteSeeker); ok {
-		m.ws = ws
-	}
 	if opts != nil {
 		m.opts = *opts
 	}
@@ -77,10 +75,11 @@ func (m *ProgressiveMuxer) Begin(tracks []container.Track) error {
 	if m.began {
 		return waxerr.New(waxerr.CodeInternal, "mp4: Begin called twice")
 	}
+	m.patch = muxseek.New(m.w, "mp4")
 	if len(tracks) != 1 {
 		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("mp4: muxers are single-track, got %d", len(tracks)))
 	}
-	if m.ws == nil {
+	if !m.patch.Seekable() {
 		return waxerr.New(waxerr.CodeInvalidRequest, "mp4: progressive output requires a seekable destination")
 	}
 	t := tracks[0]
@@ -185,14 +184,11 @@ func (m *ProgressiveMuxer) End(trailer codec.Trailer) error {
 	// Back-patch the mdat largesize (the 16-byte header plus the payload).
 	var size [8]byte
 	binary.BigEndian.PutUint64(size[:], uint64(16+m.dataBytes+textBytes))
-	if _, err := m.ws.Seek(m.mdatSizeOff, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp4: mdat size seek", err)
+	if err := m.patch.Field("mdat size").At(m.mdatSizeOff, size[:]); err != nil {
+		return err
 	}
-	if _, err := m.ws.Write(size[:]); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp4: mdat size patch", err)
-	}
-	if _, err := m.ws.Seek(m.off, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp4: seek to end", err)
+	if err := m.patch.Resume(m.off); err != nil {
+		return err
 	}
 
 	// Metadata rides in the moov user-data box, built at End with the exact
@@ -208,11 +204,14 @@ func (m *ProgressiveMuxer) End(trailer codec.Trailer) error {
 	return m.write(moov)
 }
 
+// write appends to the stream and advances m.off, counting what went out
+// before the error is checked (see the fragmented muxer's write).
 func (m *ProgressiveMuxer) write(b []byte) error {
-	if _, err := m.w.Write(b); err != nil {
+	n, err := m.w.Write(b)
+	m.off += int64(n)
+	if err != nil {
 		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp4: write", err)
 	}
-	m.off += int64(len(b))
 	return nil
 }
 

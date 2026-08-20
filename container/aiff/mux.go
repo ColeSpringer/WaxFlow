@@ -8,6 +8,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/muxseek"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -15,11 +16,11 @@ var _ container.Muxer = (*Muxer)(nil)
 
 // Muxer writes one PCM track as AIFF (big-endian integers) or AIFF-C
 // (floats). NeedsSeek reports true: AIFF has no streaming form, so the
-// FORM size, COMM frame count, and SSND size are back-patched at End and
-// the writer must be an io.WriteSeeker.
+// FORM size, COMM frame count, and SSND size are back-patched at End, so
+// Begin refuses a destination it cannot seek.
 type Muxer struct {
-	w  io.Writer
-	ws io.WriteSeeker
+	w     io.Writer
+	patch muxseek.Patcher
 
 	cfg        pcm.Config
 	fmt        audio.Format
@@ -36,15 +37,10 @@ type Muxer struct {
 	ended  bool
 }
 
-// NewMuxer returns an AIFF muxer writing to w. Begin fails unless w
-// implements io.WriteSeeker; callers should check NeedsSeek and provide a
-// file.
+// NewMuxer returns an AIFF muxer writing to w. Begin fails unless w can
+// actually seek; callers should check NeedsSeek and provide a file.
 func NewMuxer(w io.Writer) *Muxer {
-	m := &Muxer{w: w}
-	if ws, ok := w.(io.WriteSeeker); ok {
-		m.ws = ws
-	}
-	return m
+	return &Muxer{w: w}
 }
 
 // NeedsSeek reports true: AIFF cannot be written to a plain stream.
@@ -55,7 +51,8 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	if m.began {
 		return waxerr.New(waxerr.CodeInternal, "aiff: Begin called twice")
 	}
-	if m.ws == nil {
+	m.patch = muxseek.New(m.w, "aiff")
+	if !m.patch.Seekable() {
 		return waxerr.New(waxerr.CodeInvalidRequest, "aiff: output requires a seekable destination (AIFF has no streaming form)")
 	}
 	if len(tracks) != 1 {
@@ -215,19 +212,16 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 	if m.off-8 > size32Max {
 		return waxerr.New(waxerr.CodeUnsupportedFormat, "aiff: output exceeds AIFF's 4 GiB limit (use WAV, which upgrades to RF64)")
 	}
-	if err := m.patch(m.formOff, u32be(uint32(m.off-8))); err != nil {
+	if err := m.patch.At(m.formOff, u32be(uint32(m.off-8))); err != nil {
 		return err
 	}
-	if err := m.patch(m.framesOff, u32be(uint32(m.frames))); err != nil {
+	if err := m.patch.At(m.framesOff, u32be(uint32(m.frames))); err != nil {
 		return err
 	}
-	if err := m.patch(m.ssndOff+4, u32be(uint32(8+dataBytes))); err != nil {
+	if err := m.patch.At(m.ssndOff+4, u32be(uint32(8+dataBytes))); err != nil {
 		return err
 	}
-	if _, err := m.ws.Seek(m.off, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "aiff: seeking to end", err)
-	}
-	return nil
+	return m.patch.Resume(m.off)
 }
 
 func (m *Muxer) write(parts ...[]byte) error {
@@ -236,18 +230,6 @@ func (m *Muxer) write(parts ...[]byte) error {
 		m.off += int64(n)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "aiff: write", err)
-		}
-	}
-	return nil
-}
-
-func (m *Muxer) patch(off int64, parts ...[]byte) error {
-	if _, err := m.ws.Seek(off, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "aiff: seek for patch", err)
-	}
-	for _, p := range parts {
-		if _, err := m.ws.Write(p); err != nil {
-			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "aiff: patch", err)
 		}
 	}
 	return nil

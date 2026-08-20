@@ -59,7 +59,7 @@ func muxChapterTrack(t *testing.T, chapters []container.Chapter, track container
 	if err := m.End(trailer); err != nil {
 		t.Fatalf("End: %v", err)
 	}
-	return sb.b
+	return sb.Buf
 }
 
 // flacTrackAt builds a synthetic FLAC track at rate plus npkt packets. The

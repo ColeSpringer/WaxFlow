@@ -11,6 +11,7 @@ import (
 	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/codec/alac"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/muxseek"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -58,9 +59,9 @@ type MuxerOptions struct {
 // init bytes stand as written: full gapless when the length was known,
 // delay-only otherwise (the capability matrix's live fMP4 cell).
 type Muxer struct {
-	w    io.Writer
-	ws   io.WriteSeeker // nil when w cannot seek
-	opts MuxerOptions
+	w     io.Writer
+	patch muxseek.Patcher
+	opts  MuxerOptions
 
 	rate     int
 	fragTgt  int
@@ -93,9 +94,6 @@ type Muxer struct {
 // NewMuxer returns a fragmented MP4 muxer writing to w.
 func NewMuxer(w io.Writer, opts *MuxerOptions) *Muxer {
 	m := &Muxer{w: w, seq: 1, elstDurOff: -1, smpbOff: -1}
-	if ws, ok := w.(io.WriteSeeker); ok {
-		m.ws = ws
-	}
 	if opts != nil {
 		m.opts = *opts
 		m.fragTgt = opts.FragmentSamples
@@ -111,6 +109,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	if m.began {
 		return waxerr.New(waxerr.CodeInternal, "mp4: Begin called twice")
 	}
+	m.patch = muxseek.New(m.w, "mp4")
 	if len(tracks) != 1 {
 		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("mp4: muxers are single-track, got %d", len(tracks)))
 	}
@@ -181,7 +180,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	// the job path. Live streams keep the edit list's delay-only (or
 	// projected-length) signaling.
 	var smpb []byte
-	if (t.Codec == codec.AACLC || t.Codec == codec.HEAAC) && m.ws != nil && t.Delay > 0 {
+	if (t.Codec == codec.AACLC || t.Codec == codec.HEAAC) && m.patch.Seekable() && t.Delay > 0 {
 		smpb = freeformAtom("iTunSMPB", smpbPayload(t.Delay, max(t.Samples, 0)))
 	}
 	udta := udtaBox(m.opts.Tags, m.opts.Chapters, m.opts.Art, smpb)
@@ -280,42 +279,27 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 	// With a seekable writer, refine the edit list's duration to the
 	// encoder's exact sample count (the projected or unknown length
 	// Begin wrote becomes exact, completing the gapless signaling).
-	if m.ws != nil && m.elstDurOff >= 0 && trailer.Samples > 0 && trailer.Samples != m.knownLen {
+	if m.patch.Seekable() && m.elstDurOff >= 0 && trailer.Samples > 0 && trailer.Samples != m.knownLen {
 		var dur [8]byte
 		binary.BigEndian.PutUint64(dur[:], uint64(trailer.Samples))
-		if err := m.patch(m.elstDurOff, dur[:], "elst"); err != nil {
+		if err := m.patch.Field("elst").At(m.elstDurOff, dur[:]); err != nil {
 			return err
 		}
 	}
 	// Fill the iTunSMPB padding and exact length (fixed-width hex, so the
 	// header never moves). Together with the edit list this makes the
 	// seekable AAC output a full gapless cell.
-	if m.ws != nil && m.smpbOff >= 0 {
+	if m.patch.Seekable() && m.smpbOff >= 0 {
 		pad := fmt.Sprintf("%08X", uint32(trailer.Padding))
 		length := fmt.Sprintf("%016X", uint64(max(trailer.Samples, 0)))
-		if err := m.patch(m.smpbOff+smpbPaddingOff, []byte(pad), "iTunSMPB"); err != nil {
+		if err := m.patch.Field("iTunSMPB").At(m.smpbOff+smpbPaddingOff, []byte(pad)); err != nil {
 			return err
 		}
-		if err := m.patch(m.smpbOff+smpbLengthOff, []byte(length), "iTunSMPB"); err != nil {
+		if err := m.patch.Field("iTunSMPB").At(m.smpbOff+smpbLengthOff, []byte(length)); err != nil {
 			return err
 		}
 	}
-	return nil
-}
-
-// patch overwrites len(b) bytes at off and restores the write position to
-// the stream end.
-func (m *Muxer) patch(off int64, b []byte, what string) error {
-	if _, err := m.ws.Seek(off, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp4: "+what+" seek", err)
-	}
-	if _, err := m.ws.Write(b); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp4: "+what+" patch", err)
-	}
-	if _, err := m.ws.Seek(m.off, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp4: seeking to end", err)
-	}
-	return nil
+	return m.patch.Resume(m.off)
 }
 
 // flush writes the accumulated fragment as a moof+mdat pair and resets the
@@ -334,11 +318,16 @@ func (m *Muxer) flush() error {
 	return nil
 }
 
+// write appends to the stream and advances m.off. The count is added before
+// the error is checked: m.off is where the patcher takes the stream to end, so
+// a short write must not leave it naming a position the destination never
+// reached.
 func (m *Muxer) write(b []byte) error {
-	if _, err := m.w.Write(b); err != nil {
+	n, err := m.w.Write(b)
+	m.off += int64(n)
+	if err != nil {
 		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp4: write", err)
 	}
-	m.off += int64(len(b))
 	return nil
 }
 

@@ -228,7 +228,7 @@ func TestHLSReadBackTranscode(t *testing.T) {
 	if res.Samples != frames {
 		t.Errorf("transcoded %d samples, want %d", res.Samples, frames)
 	}
-	back := readAll(t, e, out.b, frames)
+	back := readAll(t, e, out.Buf, frames)
 	defer audio.Put(back)
 	equalPCM(t, src, back)
 }

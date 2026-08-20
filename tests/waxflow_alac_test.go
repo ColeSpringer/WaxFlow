@@ -130,7 +130,7 @@ func decodeALAC(t *testing.T, e *waxflow.Engine, wav []byte, wantFmt audio.Forma
 		t.Fatalf("samples = %d, want %d", res.Samples, frames)
 	}
 
-	r := fmp4Reader{data: out.b}
+	r := fmp4Reader{data: out.Buf}
 	cfg, err := alac.ParseMagicCookie(r.cookie(t))
 	if err != nil {
 		t.Fatalf("cookie: %v", err)

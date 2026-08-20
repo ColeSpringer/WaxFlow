@@ -13,37 +13,12 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-// memWS is an in-memory io.WriteSeeker for exercising the back-patch path.
-type memWS struct {
-	b   []byte
-	pos int64
-}
-
-func (w *memWS) Write(p []byte) (int, error) {
-	if need := w.pos + int64(len(p)); need > int64(len(w.b)) {
-		grown := make([]byte, need)
-		copy(grown, w.b)
-		w.b = grown
-	}
-	copy(w.b[w.pos:], p)
-	w.pos += int64(len(p))
-	return len(p), nil
-}
-
-func (w *memWS) Seek(off int64, whence int) (int64, error) {
-	switch whence {
-	case io.SeekStart:
-		w.pos = off
-	case io.SeekCurrent:
-		w.pos += off
-	case io.SeekEnd:
-		w.pos = int64(len(w.b)) + off
-	}
-	return w.pos, nil
-}
+// memWS aliases the shared in-memory io.WriteSeeker.
+type memWS = testutil.MemWriteSeeker
 
 // onlyWriter hides Seek from a writer, forcing the streaming path.
 type onlyWriter struct{ w io.Writer }
@@ -163,7 +138,7 @@ func TestMuxDemuxRoundTrip(t *testing.T) {
 				} else {
 					ws := &memWS{}
 					muxWAV(t, ws, tt.cfg, f, wire, announce, nil)
-					raw = ws.b
+					raw = ws.Buf
 				}
 
 				track, data, warns := demuxAll(t, container.BytesSource(raw), &DemuxerOptions{Strict: true})
@@ -204,7 +179,7 @@ func TestRF64AutoWriteKnownLength(t *testing.T) {
 			if name == "seekable" {
 				ws := &memWS{}
 				muxWAV(t, ws, cfg, f, wire, frames, opts)
-				raw = ws.b
+				raw = ws.Buf
 			} else {
 				var buf bytes.Buffer
 				muxWAV(t, onlyWriter{&buf}, cfg, f, wire, frames, opts)
@@ -236,13 +211,13 @@ func TestRF64RewriteUnknownLength(t *testing.T) {
 
 	ws := &memWS{}
 	muxWAV(t, ws, cfg, f, wire, -1, &MuxerOptions{SizeLimit: 512})
-	if string(ws.b[:4]) != "RF64" {
-		t.Fatalf("header = %q, want RF64 after rewrite", ws.b[:4])
+	if string(ws.Buf[:4]) != "RF64" {
+		t.Fatalf("header = %q, want RF64 after rewrite", ws.Buf[:4])
 	}
-	if string(ws.b[12:16]) != "ds64" {
-		t.Fatalf("reservation = %q, want ds64 after rewrite", ws.b[12:16])
+	if string(ws.Buf[12:16]) != "ds64" {
+		t.Fatalf("reservation = %q, want ds64 after rewrite", ws.Buf[12:16])
 	}
-	track, data, _ := demuxAll(t, container.BytesSource(ws.b), &DemuxerOptions{Strict: true})
+	track, data, _ := demuxAll(t, container.BytesSource(ws.Buf), &DemuxerOptions{Strict: true})
 	if track.Samples != 500 || !bytes.Equal(data, wire) {
 		t.Error("RF64 rewrite did not round-trip")
 	}
@@ -250,8 +225,8 @@ func TestRF64RewriteUnknownLength(t *testing.T) {
 	// Same shape but under the limit: stays RIFF, JUNK stays JUNK.
 	ws = &memWS{}
 	muxWAV(t, ws, cfg, f, wire, -1, nil)
-	if string(ws.b[:4]) != "RIFF" || string(ws.b[12:16]) != "JUNK" {
-		t.Errorf("header/reservation = %q/%q, want RIFF/JUNK", ws.b[:4], ws.b[12:16])
+	if string(ws.Buf[:4]) != "RIFF" || string(ws.Buf[12:16]) != "JUNK" {
+		t.Errorf("header/reservation = %q/%q, want RIFF/JUNK", ws.Buf[:4], ws.Buf[12:16])
 	}
 }
 
@@ -288,7 +263,7 @@ func TestSeekSample(t *testing.T) {
 	ws := &memWS{}
 	muxWAV(t, ws, cfg, f, wire, frames, nil)
 
-	d, err := NewDemuxer(container.BytesSource(ws.b), nil)
+	d, err := NewDemuxer(container.BytesSource(ws.Buf), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +305,7 @@ func TestExtensibleLayoutRoundTrip(t *testing.T) {
 	ws := &memWS{}
 	muxWAV(t, ws, cfg, f, wire, 64, nil)
 
-	track, data, _ := demuxAll(t, container.BytesSource(ws.b), &DemuxerOptions{Strict: true})
+	track, data, _ := demuxAll(t, container.BytesSource(ws.Buf), &DemuxerOptions{Strict: true})
 	if track.Fmt.Layout != layout {
 		t.Errorf("layout = %v, want %v", track.Fmt.Layout, layout)
 	}
@@ -348,10 +323,10 @@ func TestOddDataSizePads(t *testing.T) {
 	wire := wireBytes(cfg, 1, 33, 6) // odd byte count
 	ws := &memWS{}
 	muxWAV(t, ws, cfg, f, wire, 33, nil)
-	if len(ws.b)%2 != 0 {
-		t.Errorf("file length %d is odd; data chunk must be padded", len(ws.b))
+	if len(ws.Buf)%2 != 0 {
+		t.Errorf("file length %d is odd; data chunk must be padded", len(ws.Buf))
 	}
-	track, data, _ := demuxAll(t, container.BytesSource(ws.b), &DemuxerOptions{Strict: true})
+	track, data, _ := demuxAll(t, container.BytesSource(ws.Buf), &DemuxerOptions{Strict: true})
 	if track.Samples != 33 || !bytes.Equal(data, wire) {
 		t.Error("odd-sized payload did not round-trip")
 	}
@@ -363,10 +338,10 @@ func TestDemuxRejectsUnsupported(t *testing.T) {
 	cfg := pcm.Config{Encoding: pcm.SignedInt, Bits: 16}
 	f := cfg.PCMFormat(8000, 1, audio.DefaultLayout(1))
 	muxWAV(t, ws, cfg, f, wireBytes(cfg, 1, 10, 8), 10, nil)
-	fmtOff := bytes.Index(ws.b, []byte("fmt "))
-	le.PutUint16(ws.b[fmtOff+8:], 0x0002)
+	fmtOff := bytes.Index(ws.Buf, []byte("fmt "))
+	le.PutUint16(ws.Buf[fmtOff+8:], 0x0002)
 
-	_, err := NewDemuxer(container.BytesSource(ws.b), nil)
+	_, err := NewDemuxer(container.BytesSource(ws.Buf), nil)
 	if !errors.Is(err, waxerr.ErrUnsupportedFormat) {
 		t.Errorf("ADPCM demux error = %v, want unsupported-format", err)
 	}
@@ -382,7 +357,7 @@ func TestDemuxClampsTruncatedData(t *testing.T) {
 	wire := wireBytes(cfg, 2, 100, 9)
 	ws := &memWS{}
 	muxWAV(t, ws, cfg, f, wire, 100, nil)
-	cut := ws.b[:len(ws.b)-37] // truncate mid-frame
+	cut := ws.Buf[:len(ws.Buf)-37] // truncate mid-frame
 
 	track, _, warns := demuxAll(t, container.BytesSource(cut), nil)
 	if track.Samples >= 100 {
@@ -405,13 +380,13 @@ func TestDS64HugeDataSizeClamped(t *testing.T) {
 	wire := wireBytes(cfg, 2, 300, 21)
 	ws := &memWS{}
 	muxWAV(t, ws, cfg, f, wire, 300, &MuxerOptions{SizeLimit: 128}) // forces RF64
-	if string(ws.b[:4]) != "RF64" {
+	if string(ws.Buf[:4]) != "RF64" {
 		t.Fatal("fixture is not RF64")
 	}
 	// ds64 payload starts at offset 20: riffSize, then dataSize at +8.
-	le.PutUint64(ws.b[20+8:], 0xFFFFFFFFFFFFFFF0)
+	le.PutUint64(ws.Buf[20+8:], 0xFFFFFFFFFFFFFFF0)
 
-	track, data, warns := demuxAll(t, container.BytesSource(ws.b), nil)
+	track, data, warns := demuxAll(t, container.BytesSource(ws.Buf), nil)
 	if track.Samples != 300 || !bytes.Equal(data, wire) {
 		t.Error("huge ds64 size did not clamp to the real payload")
 	}
@@ -424,7 +399,7 @@ func TestDS64HugeDataSizeClamped(t *testing.T) {
 	if !found {
 		t.Errorf("expected a clamp warning, got %v", warns)
 	}
-	if _, err := NewDemuxer(container.BytesSource(ws.b), &DemuxerOptions{Strict: true}); err == nil {
+	if _, err := NewDemuxer(container.BytesSource(ws.Buf), &DemuxerOptions{Strict: true}); err == nil {
 		t.Error("strict demux of a lying ds64 must fail")
 	}
 }
@@ -437,10 +412,10 @@ func TestRateBoundIsPlatformIndependent(t *testing.T) {
 	f := cfg.PCMFormat(48000, 1, audio.DefaultLayout(1))
 	ws := &memWS{}
 	muxWAV(t, ws, cfg, f, wireBytes(cfg, 1, 10, 22), 10, nil)
-	fmtOff := bytes.Index(ws.b, []byte("fmt "))
-	le.PutUint32(ws.b[fmtOff+8+4:], 0x80000000) // nSamplesPerSec = 2^31
+	fmtOff := bytes.Index(ws.Buf, []byte("fmt "))
+	le.PutUint32(ws.Buf[fmtOff+8+4:], 0x80000000) // nSamplesPerSec = 2^31
 
-	_, err := NewDemuxer(container.BytesSource(ws.b), nil)
+	_, err := NewDemuxer(container.BytesSource(ws.Buf), nil)
 	if !errors.Is(err, waxerr.ErrUnsupportedFormat) {
 		t.Errorf("2^31 rate error = %v, want unsupported-format", err)
 	}
@@ -510,5 +485,97 @@ func TestMuxRejects(t *testing.T) {
 func TestNeedsSeek(t *testing.T) {
 	if NewMuxer(&memWS{}, nil).NeedsSeek() {
 		t.Error("WAV muxer must not require seeking (it has a streaming form)")
+	}
+}
+
+// TestMuxAtANonZeroStart writes into a destination the caller had already
+// written to. Every size patch states an offset into the stream, not into the
+// file; the RF64 rewrite is the sharp case, since it patches byte 0.
+func TestMuxAtANonZeroStart(t *testing.T) {
+	cfg := pcm.Config{Encoding: pcm.SignedInt, Bits: 16}
+	f := cfg.PCMFormat(48000, 2, audio.DefaultLayout(2))
+	const frames = 500
+	wire := wireBytes(cfg, 2, frames, 3)
+	for _, tt := range []struct {
+		name string
+		opts *MuxerOptions
+	}{
+		{"riff", nil},
+		{"rf64 rewrite", &MuxerOptions{SizeLimit: 512}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := testutil.MuxAtOffset(t, 97, func(w io.Writer) {
+				muxWAV(t, w, cfg, f, wire, -1, tt.opts)
+			})
+			track, data, _ := demuxAll(t, container.BytesSource(raw), &DemuxerOptions{Strict: true})
+			if track.Samples != frames {
+				t.Errorf("read back %d frames, want %d", track.Samples, frames)
+			}
+			if !bytes.Equal(data, wire) {
+				t.Error("the payload did not survive the offset write")
+			}
+		})
+	}
+}
+
+// TestMuxPipeLandsInTheStreamingColumn: seekability is probed, not inferred.
+// *os.File has Seek for a pipe too, and a muxer that trusted the method set
+// would reserve the JUNK region for an RF64 rewrite it cannot perform, then
+// fail at End with the whole stream already out.
+func TestMuxPipeLandsInTheStreamingColumn(t *testing.T) {
+	cfg := pcm.Config{Encoding: pcm.SignedInt, Bits: 16}
+	f := cfg.PCMFormat(48000, 2, audio.DefaultLayout(2))
+	const frames = 500
+	wire := wireBytes(cfg, 2, frames, 9)
+	w := &testutil.PipeWriteSeeker{}
+	muxWAV(t, w, cfg, f, wire, frames, nil)
+	if string(w.Buf[12:16]) == "JUNK" {
+		t.Error("a writer whose Seek fails got the ds64 reservation")
+	}
+	track, data, _ := demuxAll(t, container.BytesSource(w.Buf), &DemuxerOptions{Strict: true})
+	if track.Samples != frames || !bytes.Equal(data, wire) {
+		t.Errorf("read back %d frames of %d bytes", track.Samples, len(data))
+	}
+}
+
+// TestMuxProbesAtBegin: the destination is probed when the muxer starts
+// writing, not when it is constructed. A caller that writes its own preamble
+// between the two would otherwise leave the muxer recording a start of zero
+// and patching the preamble instead of its own header, which for a stream that
+// crosses the RIFF limit means the RF64 rewrite lands on the caller's first
+// four bytes.
+func TestMuxProbesAtBegin(t *testing.T) {
+	cfg := pcm.Config{Encoding: pcm.SignedInt, Bits: 16}
+	f := cfg.PCMFormat(48000, 2, audio.DefaultLayout(2))
+	cfgBytes, err := cfg.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const frames = 500
+	wire := wireBytes(cfg, 2, frames, 11)
+	preamble := bytes.Repeat([]byte{0xAA}, 97)
+
+	w := &testutil.MemWriteSeeker{}
+	m := NewMuxer(w, &MuxerOptions{SizeLimit: 512}) // constructed against an empty destination
+	if _, err := w.Write(preamble); err != nil {
+		t.Fatal(err)
+	}
+	track := container.Track{Codec: codec.PCM, CodecConfig: cfgBytes, Fmt: f, Samples: -1, Default: true}
+	if err := m.Begin([]container.Track{track}); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if err := m.WritePacket(container.Packet{Packet: codec.Packet{Data: wire, Dur: frames, Sync: true}}); err != nil {
+		t.Fatalf("WritePacket: %v", err)
+	}
+	if err := m.End(codec.Trailer{Samples: frames}); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+
+	if !bytes.Equal(w.Buf[:len(preamble)], preamble) {
+		t.Fatalf("the caller's preamble was overwritten: % x", w.Buf[:8])
+	}
+	track, data, _ := demuxAll(t, container.BytesSource(w.Buf[len(preamble):]), &DemuxerOptions{Strict: true})
+	if track.Samples != frames || !bytes.Equal(data, wire) {
+		t.Errorf("read back %d frames of %d bytes", track.Samples, len(data))
 	}
 }

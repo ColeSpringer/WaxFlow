@@ -7,42 +7,24 @@ import (
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
-// seekBuf is a minimal in-memory io.WriteSeeker for the progressive muxer,
-// which back-patches the mdat size.
-type seekBuf struct {
-	b   []byte
-	pos int64
-}
-
-func (s *seekBuf) Write(p []byte) (int, error) {
-	end := s.pos + int64(len(p))
-	if end > int64(len(s.b)) {
-		s.b = append(s.b, make([]byte, end-int64(len(s.b)))...)
-	}
-	copy(s.b[s.pos:], p)
-	s.pos = end
-	return len(p), nil
-}
-
-func (s *seekBuf) Seek(off int64, whence int) (int64, error) {
-	switch whence {
-	case io.SeekStart:
-		s.pos = off
-	case io.SeekCurrent:
-		s.pos += off
-	case io.SeekEnd:
-		s.pos = int64(len(s.b)) + off
-	}
-	return s.pos, nil
-}
+// seekBuf aliases the shared in-memory io.WriteSeeker.
+type seekBuf = testutil.MemWriteSeeker
 
 // muxProgressive runs a track and packets through the progressive muxer.
 func muxProgressive(t *testing.T, track container.Track, pkts []codec.Packet, trailer codec.Trailer) []byte {
 	t.Helper()
 	sb := &seekBuf{}
-	m := NewProgressiveMuxer(sb, nil)
+	muxProgressiveTo(t, sb, track, pkts, trailer)
+	return sb.Buf
+}
+
+// muxProgressiveTo is muxProgressive on a caller's destination.
+func muxProgressiveTo(t *testing.T, w io.Writer, track container.Track, pkts []codec.Packet, trailer codec.Trailer) {
+	t.Helper()
+	m := NewProgressiveMuxer(w, nil)
 	if err := m.Begin([]container.Track{track}); err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
@@ -54,7 +36,6 @@ func muxProgressive(t *testing.T, track container.Track, pkts []codec.Packet, tr
 	if err := m.End(trailer); err != nil {
 		t.Fatalf("End: %v", err)
 	}
-	return sb.b
 }
 
 // TestProgressiveRoundTrip pins the progressive muxer against the progressive
@@ -131,5 +112,40 @@ func TestProgressiveNeedsSeek(t *testing.T) {
 	track, _ := opusTrackFor(312, 960, 1)
 	if err := m.Begin([]container.Track{track}); err == nil {
 		t.Error("Begin on a non-seekable writer accepted; want rejection")
+	}
+}
+
+// TestProgressiveMuxAtANonZeroStart writes into a destination the caller had
+// already written to. The mdat largesize is patched at the offset the header
+// left it, which is a file offset only when the movie starts the file.
+func TestProgressiveMuxAtANonZeroStart(t *testing.T) {
+	const preSkip, padding = 312, 100
+	track, pkts := opusTrackFor(preSkip, 8*960-preSkip-padding, 8)
+	trailer := codec.Trailer{Samples: 8*960 - preSkip - padding, Delay: preSkip, Padding: padding}
+	raw := testutil.MuxAtOffset(t, 97, func(w io.Writer) {
+		muxProgressiveTo(t, w, track, pkts, trailer)
+	})
+	d, err := NewDemuxer(container.BytesSource(raw), nil)
+	if err != nil {
+		t.Fatalf("NewDemuxer: %v", err)
+	}
+	if tr := d.Tracks()[0]; tr.Codec != codec.Opus || tr.Delay != preSkip {
+		t.Errorf("read back as %+v", tr)
+	}
+}
+
+// TestProgressiveMuxRefusesAPipe: seekability is probed, not inferred.
+// *os.File has Seek for a pipe too, and the progressive layout puts the moov
+// after the samples, so trusting the method set buffers a whole movie before
+// the mdat patch fails.
+func TestProgressiveMuxRefusesAPipe(t *testing.T) {
+	track, _ := opusTrackFor(312, 8*960-312, 8)
+	w := &testutil.PipeWriteSeeker{}
+	m := NewProgressiveMuxer(w, nil)
+	if err := m.Begin([]container.Track{track}); err == nil {
+		t.Fatal("a writer whose Seek fails was accepted")
+	}
+	if len(w.Buf) != 0 {
+		t.Errorf("%d bytes were written to a destination that cannot be finished", len(w.Buf))
 	}
 }

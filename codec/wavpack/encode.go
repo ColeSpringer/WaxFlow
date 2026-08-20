@@ -143,7 +143,7 @@ func (l levelSets) list(mono bool) [][]int {
 // (ADR-0004): compressed bytes for the same input must never change without a
 // bump. The level is part of it because it changes the bytes while leaving the
 // decoded samples untouched.
-func EncoderVersion(level int) string { return fmt.Sprintf("wvenc-3-l%d", level) }
+func EncoderVersion(level int) string { return fmt.Sprintf("wvenc-4-l%d", level) }
 
 // EncoderOptions configures the encoder. A nil pointer selects
 // DefaultEncoderLevel; a non-nil one uses Level literally.
@@ -419,8 +419,16 @@ func (e *Encoder) packBlock(samps []int32, n int) []byte {
 	if sent != 0 {
 		body = appendMeta(body, idWVXBitstream, e.xw.buf)
 	}
+	// The checksum covers everything ahead of it, the header included, so its
+	// sub-block goes last and its value is filled once the header is written.
+	// The slot is the last checksumBytes of the block by construction, so this
+	// states where it is rather than walking the chain to find it again.
+	var slot [checksumBytes]byte
+	body = appendMeta(body, idBlockChecksum, slot[:])
+	flags |= flagHasChecksum
 	e.block = body
 	e.header(body, n, flags, crc)
+	writeChecksum(body, len(body)-checksumBytes, checksumBytes)
 	return body
 }
 

@@ -34,7 +34,7 @@ func TestGoldenMuxOutputs(t *testing.T) {
 			f := tt.cfg.PCMFormat(48000, tt.channels, audio.DefaultLayout(tt.channels))
 			ws := &memWS{}
 			muxWAV(t, ws, tt.cfg, f, wireBytes(tt.cfg, tt.channels, tt.frames, 99), int64(tt.frames), tt.opts)
-			compareGolden(t, filepath.Join("testdata", tt.name), ws.b, *update)
+			compareGolden(t, filepath.Join("testdata", tt.name), ws.Buf, *update)
 		})
 	}
 }

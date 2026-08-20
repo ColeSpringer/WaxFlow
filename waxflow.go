@@ -34,6 +34,7 @@ import (
 	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/internal/muxseek"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -175,8 +176,10 @@ func (r *TranscodeResult) LevelNote() string {
 // engine does not yet have. A positive FromSample seeks sample-exact before
 // the first chunk (the HTTP t= parameter, converted at the boundary).
 // Output formats whose muxer needs to back-patch headers (AIFF, exact
-// WAV sizes) want dst to be an io.WriteSeeker; WAV falls back to a
-// compliant streaming form on a plain writer.
+// WAV sizes) want a dst that can really seek, which is probed rather than
+// read off the method set: an *os.File on a pipe carries io.WriteSeeker and
+// cannot seek. WAV falls back to a compliant streaming form on one that
+// cannot; AIFF refuses.
 func (e *Engine) Transcode(ctx context.Context, src container.Source, hint string, dst io.Writer, opts TranscodeOptions) (*TranscodeResult, error) {
 	med, err := e.OpenStream(src, hint)
 	if err != nil {
@@ -338,11 +341,16 @@ func resolveContainer(row *output, name string) (containerName, mediaType string
 // back-patching muxer needs a seekable destination (a file). It is checked
 // before any work starts on a doomed output, in one place so no muxer, and
 // no rung of the ladder, re-invents the guard.
+//
+// It probes rather than asserting the type, for the reason the muxers do:
+// *os.File carries io.WriteSeeker for a pipe too, and a guard that took the
+// method set for the capability would pass the doomed output straight through
+// to the muxer it exists to spare.
 func checkSeekable(mux container.Muxer, dst io.Writer, format string) error {
 	if !mux.NeedsSeek() {
 		return nil
 	}
-	if _, ok := dst.(io.WriteSeeker); !ok {
+	if !muxseek.CanSeek(dst) {
 		return waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("waxflow: %s output requires a seekable destination", format))
 	}

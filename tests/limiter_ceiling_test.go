@@ -72,7 +72,7 @@ func TestTranscodeGainTruePeakCeiling(t *testing.T) {
 			waxflow.TranscodeOptions{Format: "wav", GainDB: gainDB}); err != nil {
 			t.Fatalf("transcode at %+.2f dB: %v", gainDB, err)
 		}
-		res, err := e.Analyze(context.Background(), container.BytesSource(out.b), "wav", waxflow.AnalyzeOptions{})
+		res, err := e.Analyze(context.Background(), container.BytesSource(out.Buf), "wav", waxflow.AnalyzeOptions{})
 		if err != nil {
 			t.Fatalf("analyze at %+.2f dB: %v", gainDB, err)
 		}

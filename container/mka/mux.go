@@ -9,6 +9,7 @@ import (
 	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/muxseek"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -69,7 +70,8 @@ type MuxerOptions struct {
 // Muxer writes one audio track as Matroska (.mka/.mkv) or WebM. NeedsSeek
 // reports false: a plain io.Writer gets a compliant stream with an unknown-size
 // Segment, a Duration from the projected length, and a SeekHead naming Info and
-// Tracks. An io.WriteSeeker also gets the Duration repatched to the trailer, a
+// Tracks. A destination that can seek also gets the Duration repatched to the
+// trailer, a
 // Cues index with a SeekHead entry pointing at it, and a definite Segment size.
 // Output is deterministic (fixed TrackUID and app strings, no DateUTC).
 //
@@ -83,7 +85,7 @@ type MuxerOptions struct {
 // gapless read path.
 type Muxer struct {
 	w     io.Writer
-	ws    io.WriteSeeker // nil when w cannot seek
+	patch muxseek.Patcher
 	opts  MuxerOptions
 	begun bool
 	ended bool
@@ -94,7 +96,7 @@ type Muxer struct {
 
 	off int64 // bytes written so far
 
-	// Back-patch anchors, absolute file offsets, -1 when absent.
+	// Back-patch anchors, offsets into the stream, -1 when absent.
 	segDataOff int64
 	segSizeOff int64
 	durOff     int64
@@ -136,15 +138,6 @@ func NewMuxer(w io.Writer, opts *MuxerOptions) *Muxer {
 		cueSeekOff: -1,
 		cueStride:  1,
 	}
-	if ws, ok := w.(io.WriteSeeker); ok {
-		// *os.File satisfies io.WriteSeeker for a pipe too, so probe rather
-		// than trust the method set: a pipe would fail at the first patch,
-		// after the Cues had already gone out. The probe also gives the
-		// writer's starting offset, which the absolute patch offsets need.
-		if at, err := ws.Seek(0, io.SeekCurrent); err == nil && at >= 0 {
-			m.ws, m.off = ws, at
-		}
-	}
 	if opts != nil {
 		m.opts = *opts
 	}
@@ -162,6 +155,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	if m.begun {
 		return waxerr.New(waxerr.CodeInternal, "mka: Begin called twice")
 	}
+	m.patch = muxseek.New(m.w, "mka")
 	if len(tracks) != 1 {
 		return waxerr.New(waxerr.CodeInvalidRequest, "mka: muxers are single-track")
 	}
@@ -250,7 +244,7 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 // finish appends the Cues index and back-patches the slots Begin reserved. A
 // plain io.Writer already has a complete stream and returns untouched.
 func (m *Muxer) finish(trailer codec.Trailer) error {
-	if m.ws == nil {
+	if !m.patch.Seekable() {
 		return nil
 	}
 	cuesPos := int64(-1)
@@ -268,7 +262,7 @@ func (m *Muxer) finish(trailer codec.Trailer) error {
 		// Duration is advisory, so failing the file over a drift would be the
 		// wrong trade.
 		if n := finalSamples(trailer, m.rawSamples); n > 0 {
-			if err := m.patch(m.durOff, appendFloat(nil, idDuration, durationTicks(n, m.rate))); err != nil {
+			if err := m.patch.At(m.durOff, appendFloat(nil, idDuration, durationTicks(n, m.rate))); err != nil {
 				return err
 			}
 		}
@@ -277,10 +271,10 @@ func (m *Muxer) finish(trailer codec.Trailer) error {
 		if cuesPos >= 0 {
 			var v [8]byte
 			binary.BigEndian.PutUint64(v[:], uint64(cuesPos))
-			if err := m.patch(m.cueSeekOff+seekPosValueOff, v[:]); err != nil {
+			if err := m.patch.At(m.cueSeekOff+seekPosValueOff, v[:]); err != nil {
 				return err
 			}
-		} else if err := m.patch(m.cueSeekOff, appendVoid(nil, seekEntryLen)); err != nil {
+		} else if err := m.patch.At(m.cueSeekOff, appendVoid(nil, seekEntryLen)); err != nil {
 			return err
 		}
 	}
@@ -289,16 +283,13 @@ func (m *Muxer) finish(trailer codec.Trailer) error {
 		var v [8]byte
 		binary.BigEndian.PutUint64(v[:], uint64(size))
 		v[0] = 0x01
-		if err := m.patch(m.segSizeOff, v[:]); err != nil {
+		if err := m.patch.At(m.segSizeOff, v[:]); err != nil {
 			return err
 		}
 	}
 	// Leave the writer at EOF; the jobs runner reopens the output for
 	// post-passes.
-	if _, err := m.ws.Seek(m.off, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mka: seeking to end", err)
-	}
-	return nil
+	return m.patch.Resume(m.off)
 }
 
 // finalSamples is the presentation length for Duration: the trailer when it
@@ -371,7 +362,7 @@ func (m *Muxer) flushCluster() error {
 // drops every other entry and doubles the stride, so a long file gets a coarser
 // index rather than an unbounded slice.
 func (m *Muxer) recordCue() {
-	if m.ws == nil {
+	if !m.patch.Seekable() {
 		return
 	}
 	if m.clusters%m.cueStride == 0 {
@@ -432,7 +423,7 @@ func (m *Muxer) ebmlHeader() []byte {
 
 // appendSegmentHeader appends the Segment element opened with an unknown size,
 // followed by its SeekHead, Info, and Tracks children. Recorded offsets are
-// absolute: m.off is where the writer started, dst is what has been built since.
+// into the stream: m.off is what has gone out, dst what has been built since.
 func (m *Muxer) appendSegmentHeader(dst []byte, t container.Track, codecID string, priv []byte) []byte {
 	dst = appendID(dst, idSegment)
 	m.segSizeOff = m.off + int64(len(dst))
@@ -479,7 +470,7 @@ const (
 // returned bytes, or -1. Positions are relative to the segment's data start.
 func (m *Muxer) seekHead(infoLen int64) (elem []byte, cueSlot int) {
 	n := 2
-	if m.ws != nil {
+	if m.patch.Seekable() {
 		n = 3
 	}
 	// Measure from an empty body of the right size, rather than assuming the
@@ -489,7 +480,7 @@ func (m *Muxer) seekHead(infoLen int64) (elem []byte, cueSlot int) {
 	body = appendSeekEntry(body, idInfo, uint64(shLen))
 	body = appendSeekEntry(body, idTracks, uint64(shLen+infoLen))
 	cueSlot = -1
-	if m.ws != nil {
+	if m.patch.Seekable() {
 		cueSlot = len(body)
 		body = appendSeekEntry(body, idCues, 0)
 	}
@@ -527,7 +518,7 @@ func (m *Muxer) infoElement(t container.Track) (elem []byte, durSlot int) {
 		// slot is still recorded, since End repatches it from the trailer.
 		durSlot = len(body)
 		body = appendFloat(body, idDuration, durationTicks(t.Samples, m.rate))
-	case m.ws != nil:
+	case m.patch.Seekable():
 		durSlot = len(body)
 		body = appendVoid(body, durationLen)
 	}
@@ -607,18 +598,6 @@ func (m *Muxer) write(b []byte) error {
 	m.off += int64(n)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mka: write", err)
-	}
-	return nil
-}
-
-// patch rewrites bytes at an absolute offset. It leaves m.off alone; finish
-// restores the stream position.
-func (m *Muxer) patch(off int64, b []byte) error {
-	if _, err := m.ws.Seek(off, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mka: seek for patch", err)
-	}
-	if _, err := m.ws.Write(b); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "mka: patch", err)
 	}
 	return nil
 }

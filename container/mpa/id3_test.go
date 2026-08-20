@@ -171,7 +171,7 @@ func TestMuxID3RoundTrip(t *testing.T) {
 				wsT, wsP := &memWS{}, &memWS{}
 				muxWith(t, wsT, pkts, tr, samples, rate, channels, tagOpts)
 				muxWith(t, wsP, pkts, tr, samples, rate, channels, plainOpts)
-				tagged, plain = wsT.buf, wsP.buf
+				tagged, plain = wsT.Buf, wsP.Buf
 			} else {
 				var bT, bP bytes.Buffer
 				muxWith(t, &bT, pkts, tr, samples, rate, channels, tagOpts)
@@ -220,7 +220,7 @@ func TestMuxVBRXingAfterID3(t *testing.T) {
 	ws := &memWS{}
 	muxWith(t, ws, pkts, tr, samples, rate, channels,
 		&MuxerOptions{Delay: mp3.EncoderDelay, VBR: true, Tags: tags})
-	out := ws.buf
+	out := ws.Buf
 
 	if !bytes.HasPrefix(out, []byte("ID3")) {
 		t.Fatal("output does not start with the ID3 tag")

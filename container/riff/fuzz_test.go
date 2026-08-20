@@ -37,7 +37,7 @@ func FuzzDemux(f *testing.F) {
 		if err := m.End(codec.Trailer{Samples: int64(frames)}); err != nil {
 			f.Fatal(err)
 		}
-		return ws.b
+		return ws.Buf
 	}
 	f.Add(seed(pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, 2, 64, 64, nil))
 	f.Add(seed(pcm.Config{Encoding: pcm.Float, Bits: 32}, 1, 40, 40, nil))

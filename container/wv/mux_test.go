@@ -10,6 +10,7 @@ import (
 	"github.com/colespringer/waxflow/codec/wavpack"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/wv"
+	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -80,31 +81,8 @@ func writeAll(t testing.TB, dst io.Writer, track container.Track, pkts []contain
 	}
 }
 
-// seekBuf is an in-memory io.WriteSeeker, the file destination's stand-in.
-type seekBuf struct {
-	b   []byte
-	pos int64
-}
-
-func (s *seekBuf) Write(p []byte) (int, error) {
-	if grow := s.pos + int64(len(p)) - int64(len(s.b)); grow > 0 {
-		s.b = append(s.b, make([]byte, grow)...)
-	}
-	copy(s.b[s.pos:], p)
-	s.pos += int64(len(p))
-	return len(p), nil
-}
-
-func (s *seekBuf) Seek(off int64, whence int) (int64, error) {
-	switch whence {
-	case io.SeekCurrent:
-		off += s.pos
-	case io.SeekEnd:
-		off += int64(len(s.b))
-	}
-	s.pos = off
-	return off, nil
-}
+// seekBuf aliases the shared in-memory io.WriteSeeker.
+type seekBuf = testutil.MemWriteSeeker
 
 // firstTotal reads the total-samples field out of a written stream's first
 // block, which is the copy every reader consults.
@@ -162,15 +140,27 @@ func TestMuxPatchesAnUnknownLength(t *testing.T) {
 
 	var file seekBuf
 	writeAll(t, &file, track, pkts, nil)
-	if got := firstTotal(t, file.b); got != n {
+	if got := firstTotal(t, file.Buf); got != n {
 		t.Errorf("seekable output states %d samples, want the back-patched %d", got, n)
 	}
-	if int64(len(file.b)) != file.pos {
+	if int64(len(file.Buf)) != file.Pos() {
 		t.Errorf("the muxer left the writer at %d of %d bytes; a patch must seek back to the end",
-			file.pos, len(file.b))
+			file.Pos(), len(file.Buf))
 	}
-	if !bytes.Equal(plain.Bytes()[16:], file.b[16:]) {
-		t.Error("the two destinations produced different audio; only the length field may differ")
+	// The two destinations differ only where the length is stated: the first
+	// block's total-samples field, and the checksum covering the header it
+	// sits in. Restating one on the other has to reproduce it exactly.
+	same := append([]byte(nil), plain.Bytes()...)
+	h, err := wavpack.ParseBlockHeader(same)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy(same[11:16], file.Buf[11:16])
+	if !wavpack.UpdateBlockChecksum(same[:h.Size]) {
+		t.Fatal("the first block carries no checksum")
+	}
+	if !bytes.Equal(same, file.Buf) {
+		t.Error("the two destinations produced different audio; only the stated length may differ")
 	}
 }
 
@@ -183,7 +173,7 @@ func TestMuxCorrectsAWrongProjection(t *testing.T) {
 
 	var file seekBuf
 	writeAll(t, &file, track, pkts, nil)
-	if got := firstTotal(t, file.b); got != n {
+	if got := firstTotal(t, file.Buf); got != n {
 		t.Errorf("first block states %d samples, want the corrected %d", got, n)
 	}
 
@@ -371,6 +361,94 @@ func TestMuxRefuses(t *testing.T) {
 			if err := run(wv.NewMuxer(io.Discard, nil)); err == nil {
 				t.Fatal("the muxer accepted it")
 			}
+		})
+	}
+}
+
+// TestMuxAtANonZeroStart writes into a destination the caller had already
+// written to. The total-samples patch lands at byte 11 of the stream, which is
+// byte 11 of the file only when the stream starts there.
+func TestMuxAtANonZeroStart(t *testing.T) {
+	const n = 12000
+	track, pkts := muxBlocks(t, n, -1)
+	raw := testutil.MuxAtOffset(t, 97, func(w io.Writer) {
+		writeAll(t, w, track, pkts, nil)
+	})
+	if got := firstTotal(t, raw); got != n {
+		t.Errorf("first block states %d samples, want the back-patched %d", got, n)
+	}
+	d, err := wv.NewDemuxer(container.BytesSource(raw), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr := d.Tracks()[0]; tr.Samples != n {
+		t.Errorf("read back as %d samples, want %d", tr.Samples, n)
+	}
+}
+
+// TestMuxPipeStatesNoLength: seekability is probed, not inferred. *os.File has
+// Seek for a pipe too, and a muxer that trusted the method set would fail the
+// whole encode at End over a patch it never needed: with no length to promise,
+// the escape the blocks already carry is the truth.
+func TestMuxPipeStatesNoLength(t *testing.T) {
+	const n = 6000
+	track, pkts := muxBlocks(t, n, -1)
+	w := &testutil.PipeWriteSeeker{}
+	writeAll(t, w, track, pkts, nil)
+	if got := firstTotal(t, w.Buf); got != -1 {
+		t.Errorf("first block states %d samples; an unknown length must stay the escape", got)
+	}
+	d, err := wv.NewDemuxer(container.BytesSource(w.Buf), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr := d.Tracks()[0]; tr.Samples != n {
+		t.Errorf("scanned length %d, want %d", tr.Samples, n)
+	}
+}
+
+// checkBlockChecksums recomputes every block's stored checksum from the bytes
+// that went out, and fails on any that no longer matches. It walks the whole
+// stream, so a caller must pass an untagged one.
+func checkBlockChecksums(t *testing.T, raw []byte) {
+	t.Helper()
+	for off, i := 0, 0; off < len(raw); i++ {
+		h, err := wavpack.ParseBlockHeader(raw[off:])
+		if err != nil {
+			t.Fatalf("block %d at byte %d: %v", i, off, err)
+		}
+		ok, present := wavpack.VerifyBlockChecksum(raw[off : off+int(h.Size)])
+		if !present {
+			t.Fatalf("block %d carries no checksum", i)
+		}
+		if !ok {
+			t.Errorf("block %d stores a checksum its own bytes do not produce", i)
+		}
+		off += int(h.Size)
+	}
+}
+
+// TestMuxPatchKeepsTheBlockChecksum: the muxer rewrites the first block's
+// total-samples field, and the block's checksum covers the header that field
+// sits in. Writing the length without recomputing the checksum leaves a block
+// the reference refuses, on every file we write.
+func TestMuxPatchKeepsTheBlockChecksum(t *testing.T) {
+	const n = 12000
+	for _, tt := range []struct {
+		name      string
+		projected int64
+	}{
+		{"projected", n},     // written into the first block on the way past
+		{"back-patched", -1}, // corrected at End, once the length is known
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			track, pkts := muxBlocks(t, n, tt.projected)
+			var file seekBuf
+			writeAll(t, &file, track, pkts, nil)
+			if got := firstTotal(t, file.Buf); got != n {
+				t.Fatalf("first block states %d samples, want %d", got, n)
+			}
+			checkBlockChecksums(t, file.Buf)
 		})
 	}
 }

@@ -496,7 +496,7 @@ func TestProgressiveTagsSurvive(t *testing.T) {
 		t.Fatalf("End: %v", err)
 	}
 
-	d, err := NewDemuxer(container.BytesSource(sb.b), nil)
+	d, err := NewDemuxer(container.BytesSource(sb.Buf), nil)
 	if err != nil {
 		t.Fatalf("NewDemuxer: %v", err)
 	}

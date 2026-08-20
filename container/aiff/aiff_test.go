@@ -13,36 +13,12 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-type memWS struct {
-	b   []byte
-	pos int64
-}
-
-func (w *memWS) Write(p []byte) (int, error) {
-	if need := w.pos + int64(len(p)); need > int64(len(w.b)) {
-		grown := make([]byte, need)
-		copy(grown, w.b)
-		w.b = grown
-	}
-	copy(w.b[w.pos:], p)
-	w.pos += int64(len(p))
-	return len(p), nil
-}
-
-func (w *memWS) Seek(off int64, whence int) (int64, error) {
-	switch whence {
-	case io.SeekStart:
-		w.pos = off
-	case io.SeekCurrent:
-		w.pos += off
-	case io.SeekEnd:
-		w.pos = int64(len(w.b)) + off
-	}
-	return w.pos, nil
-}
+// memWS aliases the shared in-memory io.WriteSeeker.
+type memWS = testutil.MemWriteSeeker
 
 func wireBytes(cfg pcm.Config, channels, frames int, seed uint64) []byte {
 	rng := rand.New(rand.NewPCG(seed, seed))
@@ -164,11 +140,11 @@ func TestMuxDemuxRoundTrip(t *testing.T) {
 				if tt.cfg.Encoding == pcm.Float {
 					wantForm = "AIFC"
 				}
-				if string(ws.b[8:12]) != wantForm {
-					t.Fatalf("form = %q, want %q", ws.b[8:12], wantForm)
+				if string(ws.Buf[8:12]) != wantForm {
+					t.Fatalf("form = %q, want %q", ws.Buf[8:12], wantForm)
 				}
 
-				track, data, _ := demuxAll(t, container.BytesSource(ws.b), &DemuxerOptions{Strict: true})
+				track, data, _ := demuxAll(t, container.BytesSource(ws.Buf), &DemuxerOptions{Strict: true})
 				if track.Fmt != f {
 					t.Errorf("format = %v, want %v", track.Fmt, f)
 				}
@@ -257,7 +233,7 @@ func TestSeekSample(t *testing.T) {
 	ws := &memWS{}
 	muxAIFF(t, ws, cfg, f, wire, frames)
 
-	d, err := NewDemuxer(container.BytesSource(ws.b), nil)
+	d, err := NewDemuxer(container.BytesSource(ws.Buf), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,16 +306,16 @@ func TestCOMMFramesDisagreeWithSSND(t *testing.T) {
 	muxAIFF(t, ws, cfg, f, wire, 100)
 
 	// Inflate the COMM frame count past what SSND holds.
-	commOff := bytes.Index(ws.b, []byte("COMM"))
-	be.PutUint32(ws.b[commOff+8+2:], 150)
-	track, _, warns := demuxAll(t, container.BytesSource(ws.b), nil)
+	commOff := bytes.Index(ws.Buf, []byte("COMM"))
+	be.PutUint32(ws.Buf[commOff+8+2:], 150)
+	track, _, warns := demuxAll(t, container.BytesSource(ws.Buf), nil)
 	if track.Samples != 100 {
 		t.Errorf("samples = %d, want clamp to 100", track.Samples)
 	}
 	if len(warns) == 0 {
 		t.Error("expected a clamp warning")
 	}
-	if _, err := NewDemuxer(container.BytesSource(ws.b), &DemuxerOptions{Strict: true}); err == nil {
+	if _, err := NewDemuxer(container.BytesSource(ws.Buf), &DemuxerOptions{Strict: true}); err == nil {
 		t.Error("strict demux of disagreeing counts must fail")
 	}
 }
@@ -415,11 +391,52 @@ func TestOddPayloadPads(t *testing.T) {
 	wire := wireBytes(cfg, 1, 33, 6)
 	ws := &memWS{}
 	muxAIFF(t, ws, cfg, f, wire, 33)
-	if len(ws.b)%2 != 0 {
-		t.Errorf("file length %d is odd; SSND must be padded", len(ws.b))
+	if len(ws.Buf)%2 != 0 {
+		t.Errorf("file length %d is odd; SSND must be padded", len(ws.Buf))
 	}
-	track, data, _ := demuxAll(t, container.BytesSource(ws.b), &DemuxerOptions{Strict: true})
+	track, data, _ := demuxAll(t, container.BytesSource(ws.Buf), &DemuxerOptions{Strict: true})
 	if track.Samples != 33 || !bytes.Equal(data, wire) {
 		t.Error("odd payload did not round-trip")
+	}
+}
+
+// TestMuxAtANonZeroStart writes into a destination the caller had already
+// written to. The FORM size, COMM frame count, and SSND size are all patched
+// at offsets into the stream, not into the file.
+func TestMuxAtANonZeroStart(t *testing.T) {
+	cfg := pcm.Config{Encoding: pcm.SignedInt, Bits: 16, BigEndian: true}
+	f := cfg.PCMFormat(8000, 2, audio.DefaultLayout(2))
+	const frames = 900
+	wire := wireBytes(cfg, 2, frames, 7)
+	raw := testutil.MuxAtOffset(t, 97, func(w io.Writer) {
+		muxAIFF(t, w, cfg, f, wire, frames)
+	})
+	track, data, _ := demuxAll(t, container.BytesSource(raw), &DemuxerOptions{Strict: true})
+	if track.Samples != frames {
+		t.Errorf("read back %d frames, want %d", track.Samples, frames)
+	}
+	if !bytes.Equal(data, wire) {
+		t.Error("the payload did not survive the offset write")
+	}
+}
+
+// TestMuxRefusesAPipe: seekability is probed, not inferred. *os.File has Seek
+// for a pipe too, and AIFF has no streaming form, so trusting the method set
+// writes a whole file whose FORM and SSND sizes stay zero.
+func TestMuxRefusesAPipe(t *testing.T) {
+	cfg := pcm.Config{Encoding: pcm.SignedInt, Bits: 16, BigEndian: true}
+	f := cfg.PCMFormat(8000, 1, audio.DefaultLayout(1))
+	cfgBytes, err := cfg.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &testutil.PipeWriteSeeker{}
+	m := NewMuxer(w)
+	track := container.Track{Codec: codec.PCM, CodecConfig: cfgBytes, Fmt: f, Samples: 100, Default: true}
+	if err := m.Begin([]container.Track{track}); err == nil {
+		t.Fatal("a writer whose Seek fails was accepted")
+	}
+	if len(w.Buf) != 0 {
+		t.Errorf("%d bytes were written to a destination that cannot be finished", len(w.Buf))
 	}
 }

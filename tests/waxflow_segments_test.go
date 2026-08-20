@@ -407,8 +407,8 @@ func TestSegmentedResampledRestart(t *testing.T) {
 	e := waxflow.New()
 	opts := waxflow.TranscodeOptions{Format: "opus"}
 	segSamples := 48000
-	full, _ := collectSegments(t, e, ws.b, opts, segSamples, 0)
-	tail, _ := collectSegments(t, e, ws.b, opts, segSamples, 1)
+	full, _ := collectSegments(t, e, ws.Buf, opts, segSamples, 0)
+	tail, _ := collectSegments(t, e, ws.Buf, opts, segSamples, 1)
 	if len(tail) != len(full)-1 {
 		t.Fatalf("restart yielded %d segments, want %d", len(tail), len(full)-1)
 	}
@@ -583,7 +583,7 @@ func ampWAV(t *testing.T, frames int, amp func(i int) float64) []byte {
 	if err := m.End(tr); err != nil {
 		t.Fatal(err)
 	}
-	return ws.b
+	return ws.Buf
 }
 
 // assertRestartMatches runs the stream continuously and again restarted at

@@ -43,7 +43,13 @@ import (
 // iTunSMPB or a wrong edit list, and wrong gapless metadata is wrong playback.
 // That is the one thing here that needs a version, so it is the one that has
 // one.
-const RemuxVersion = "remux-2"
+//
+// remux-3 is the same argument for WavPack. The muxer patches the first
+// block's stream length, a block checksum covers the header that field sits
+// in, and until now the patch left that checksum stale: `wvunpack -v` refuses
+// the files this rung produced whenever a source's length was unknown or a cut
+// changed it. Nothing but this constant can invalidate them.
+const RemuxVersion = "remux-3"
 
 // RemuxPlan describes what a remux would produce, computed from the source
 // track's headers alone.

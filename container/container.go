@@ -213,11 +213,12 @@ type Warner interface {
 // design; track selection happens upstream in the engine, and End takes
 // that track's Trailer for gapless finalization.
 //
-// A muxer whose NeedsSeek reports true requires its writer to implement
-// io.WriteSeeker for header back-patching; the engine gives jobs a file
-// and refuses live streams. Muxers with NeedsSeek false write a compliant
-// stream to a plain io.Writer and use seekability, when present, only to
-// improve the result (exact sizes instead of streaming placeholders).
+// A muxer whose NeedsSeek reports true requires a writer it can seek for
+// header back-patching; the engine gives jobs a file and refuses live
+// streams. Muxers with NeedsSeek false write a compliant stream to a plain
+// io.Writer and use seekability, when present, only to improve the result
+// (exact sizes instead of streaming placeholders). Seekability is probed,
+// not read off the method set (see internal/muxseek).
 //
 // WritePacket must not retain pkt.Data past the call: it writes the payload
 // through, or copies what it holds. This is the reciprocal of the Demuxer

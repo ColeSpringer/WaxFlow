@@ -34,7 +34,7 @@ func TestTranscodeFromSample(t *testing.T) {
 	if res.Samples != frames-from {
 		t.Fatalf("output samples = %d, want %d", res.Samples, frames-from)
 	}
-	got := readAll(t, e, out.b, frames-from)
+	got := readAll(t, e, out.Buf, frames-from)
 	defer audio.Put(got)
 	for c := 0; c < 2; c++ {
 		want := src.ChanI(c)[from:]

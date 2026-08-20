@@ -41,7 +41,7 @@ func TestTranscodeOggFLACRoundTrip(t *testing.T) {
 			if res.Samples != frames {
 				t.Fatalf("Samples = %d, want %d", res.Samples, frames)
 			}
-			got := readAll(t, e, out.b, frames)
+			got := readAll(t, e, out.Buf, frames)
 			defer audio.Put(got)
 			equalPCM(t, src, got)
 		})

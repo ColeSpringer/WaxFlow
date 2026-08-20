@@ -15,35 +15,8 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-// memWS is an in-memory io.WriteSeeker for exercising the back-patch
-// path.
-type memWS struct {
-	b   []byte
-	pos int64
-}
-
-func (w *memWS) Write(p []byte) (int, error) {
-	if need := w.pos + int64(len(p)); need > int64(len(w.b)) {
-		grown := make([]byte, need)
-		copy(grown, w.b)
-		w.b = grown
-	}
-	copy(w.b[w.pos:], p)
-	w.pos += int64(len(p))
-	return len(p), nil
-}
-
-func (w *memWS) Seek(off int64, whence int) (int64, error) {
-	switch whence {
-	case io.SeekStart:
-		w.pos = off
-	case io.SeekCurrent:
-		w.pos += off
-	case io.SeekEnd:
-		w.pos = int64(len(w.b)) + off
-	}
-	return w.pos, nil
-}
+// memWS aliases the shared in-memory io.WriteSeeker.
+type memWS = testutil.MemWriteSeeker
 
 func muxFmt(rate, channels, bits int) audio.Format {
 	return audio.Format{
@@ -150,7 +123,7 @@ func TestMuxRoundTripSeekable(t *testing.T) {
 
 	w := &memWS{}
 	enc := encodeStream(t, src, 5, w, int64(src.N))
-	si := decodeStream(t, w.b, src)
+	si := decodeStream(t, w.Buf, src)
 
 	if si.Samples != int64(src.N) {
 		t.Errorf("STREAMINFO samples %d, want %d", si.Samples, src.N)
@@ -201,7 +174,7 @@ func TestMuxUnknownLength(t *testing.T) {
 	// totals at End.
 	w := &memWS{}
 	encodeStream(t, src, 2, w, -1)
-	si = decodeStream(t, w.b, src)
+	si = decodeStream(t, w.Buf, src)
 	if si.Samples != int64(src.N) {
 		t.Errorf("patched STREAMINFO samples %d, want %d", si.Samples, src.N)
 	}
@@ -218,7 +191,7 @@ func TestMuxSeekTable(t *testing.T) {
 
 	// The table must parse: type 3, 18-byte points, real points sorted
 	// and placeholders trailing.
-	raw := w.b
+	raw := w.Buf
 	if string(raw[:4]) != "fLaC" {
 		t.Fatal("missing stream marker")
 	}
@@ -292,7 +265,7 @@ func TestMuxSeekPointOnShortFrame(t *testing.T) {
 	w := &memWS{}
 	encodeStream(t, src, 5, w, int64(src.N))
 
-	hdr := w.b[8+flac.StreamInfoLen:]
+	hdr := w.Buf[8+flac.StreamInfoLen:]
 	size := int(hdr[1])<<16 | int(hdr[2])<<8 | int(hdr[3])
 	if size != 2*18 {
 		t.Fatalf("SEEKTABLE of %d bytes, want 2 points", size)
@@ -301,7 +274,7 @@ func TestMuxSeekPointOnShortFrame(t *testing.T) {
 	points := 0
 	var lastSample, lastLen uint64
 	for ; points < size/18; points++ {
-		b := w.b[off+points*18:]
+		b := w.Buf[off+points*18:]
 		sample := binary.BigEndian.Uint64(b)
 		if sample == ^uint64(0) {
 			break
@@ -398,4 +371,61 @@ func TestMuxRejects(t *testing.T) {
 	if err := mux.End(codec.Trailer{Delay: 1}); err == nil {
 		t.Error("trailer with trims accepted")
 	}
+}
+
+// TestMuxAtANonZeroStart writes into a destination the caller had already
+// written to. STREAMINFO is patched eight bytes into the stream and the seek
+// table at the offset the reservation took; both are file offsets only when
+// the stream starts the file.
+func TestMuxAtANonZeroStart(t *testing.T) {
+	f := muxFmt(44100, 2, 16)
+	// Long enough to reserve seek points, which the projected length sizes.
+	src := testutil.Sine(f, 44100*11, 220, 0.6)
+	defer audio.Put(src)
+
+	raw := testutil.MuxAtOffset(t, 97, func(w io.Writer) {
+		encodeStream(t, src, 2, w, int64(src.N))
+	})
+	si := decodeStream(t, raw, src)
+	if si.Samples != int64(src.N) {
+		t.Errorf("patched STREAMINFO samples %d, want %d", si.Samples, src.N)
+	}
+	if si.MinFrame == 0 || si.MaxFrame == 0 {
+		t.Error("STREAMINFO frame bounds were never patched")
+	}
+}
+
+// TestMuxPipeLandsInTheStreamingColumn: seekability is probed, not inferred.
+// *os.File has Seek for a pipe too, and a muxer that trusted the method set
+// would reserve a seek table it cannot fill, then fail at End with the whole
+// stream already out.
+func TestMuxPipeLandsInTheStreamingColumn(t *testing.T) {
+	f := muxFmt(44100, 2, 16)
+	src := testutil.Sine(f, 44100*11, 220, 0.6)
+	defer audio.Put(src)
+
+	w := &testutil.PipeWriteSeeker{}
+	encodeStream(t, src, 2, w, int64(src.N))
+	if hasSeekTable(t, w.Buf) {
+		t.Error("a writer whose Seek fails got a seek table it could never fill")
+	}
+	if si := decodeStream(t, w.Buf, src); si.Samples != int64(src.N) {
+		t.Errorf("STREAMINFO samples %d, want the projected %d", si.Samples, src.N)
+	}
+}
+
+// hasSeekTable reports whether the stream carries a SEEKTABLE metadata block.
+func hasSeekTable(t *testing.T, raw []byte) bool {
+	t.Helper()
+	for i := 4; i+4 <= len(raw); {
+		last, typ, n := raw[i]&0x80 != 0, raw[i]&0x7f, int(raw[i+1])<<16|int(raw[i+2])<<8|int(raw[i+3])
+		if typ == 3 {
+			return true
+		}
+		if last {
+			return false
+		}
+		i += 4 + n
+	}
+	return false
 }

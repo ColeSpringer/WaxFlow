@@ -98,7 +98,7 @@ func TestMuxXingVBR(t *testing.T) {
 			if seekable {
 				ws := &memWS{}
 				muxVBR(t, ws, pkts, tr, samples, rate, channels)
-				out = ws.buf
+				out = ws.Buf
 			} else {
 				var b bytes.Buffer
 				muxVBR(t, &b, pkts, tr, samples, rate, channels)
@@ -210,7 +210,7 @@ func TestMuxXingVBRLongStream(t *testing.T) {
 		t.Fatalf("stride %d: the sampler never compacted", mux.stride)
 	}
 
-	out := ws.buf
+	out := ws.Buf
 	h, err := mp3.ParseHeader(out)
 	if err != nil {
 		t.Fatal(err)

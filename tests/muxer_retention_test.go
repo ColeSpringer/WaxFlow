@@ -140,7 +140,7 @@ func runMuxer(t *testing.T, build func(io.Writer, container.Track) container.Mux
 	if err := m.End(trailer); err != nil {
 		t.Fatal(err)
 	}
-	return ws.b
+	return ws.Buf
 }
 
 // demuxAll returns a container's default track and every one of its packets,

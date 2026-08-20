@@ -191,7 +191,7 @@ func TestHEAACv2FragmentedSeek(t *testing.T) {
 		t.Fatalf("fragmenting the fixture: %v", err)
 	}
 
-	med, err := waxflow.New().OpenStream(container.BytesSource(frag.b), "m4a")
+	med, err := waxflow.New().OpenStream(container.BytesSource(frag.Buf), "m4a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestHEAACv2FragmentedSeek(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "he2frag.m4a")
-	if err := os.WriteFile(path, frag.b, 0o666); err != nil {
+	if err := os.WriteFile(path, frag.Buf, 0o666); err != nil {
 		t.Fatal(err)
 	}
 	ref := testutil.FFmpegDecodeF32(t, path)
@@ -274,7 +274,7 @@ func TestHEAACv2RemuxKeepsIdentity(t *testing.T) {
 		waxflow.TranscodeOptions{Format: "aac", Container: "progressive"}); err != nil {
 		t.Fatalf("mka -> m4a: %v", err)
 	}
-	got := payloads(t, m4a.b, "m4a")
+	got := payloads(t, m4a.Buf, "m4a")
 	if len(got) != len(want) {
 		t.Fatalf("round trip moved %d packets, source had %d", len(got), len(want))
 	}
@@ -283,7 +283,7 @@ func TestHEAACv2RemuxKeepsIdentity(t *testing.T) {
 			t.Fatalf("packet %d changed in the round trip", i)
 		}
 	}
-	_, info2, err := format.OpenDemuxer(container.BytesSource(m4a.b), "m4a", nil)
+	_, info2, err := format.OpenDemuxer(container.BytesSource(m4a.Buf), "m4a", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

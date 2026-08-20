@@ -8,6 +8,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/muxseek"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -51,15 +52,15 @@ type MuxerOptions struct {
 
 // Muxer writes one FLAC track as a native FLAC stream. NeedsSeek
 // reports false: a plain io.Writer receives a compliant stream whose
-// STREAMINFO carries the totals known up front and zeros elsewhere. An
-// io.WriteSeeker upgrades the result: STREAMINFO is back-patched at End
+// STREAMINFO carries the totals known up front and zeros elsewhere. A
+// destination that can seek upgrades the result: STREAMINFO is back-patched at End
 // with exact totals, frame size bounds, and the MD5 signature, and a
 // SEEKTABLE sized from the projected length is reserved at Begin and
 // filled as frames pass.
 type Muxer struct {
-	w    io.Writer
-	ws   io.WriteSeeker // nil when w cannot seek
-	opts MuxerOptions
+	w     io.Writer
+	patch muxseek.Patcher
+	opts  MuxerOptions
 
 	si         flac.StreamInfo
 	wroteTotal int64 // sample total written into the header at Begin
@@ -80,9 +81,6 @@ type Muxer struct {
 // NewMuxer returns a FLAC muxer writing to w.
 func NewMuxer(w io.Writer, opts *MuxerOptions) *Muxer {
 	m := &Muxer{w: w}
-	if ws, ok := w.(io.WriteSeeker); ok {
-		m.ws = ws
-	}
 	if opts != nil {
 		m.opts = *opts
 	}
@@ -98,6 +96,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	if m.began {
 		return waxerr.New(waxerr.CodeInternal, "flac: Begin called twice")
 	}
+	m.patch = muxseek.New(m.w, "flac")
 	if len(tracks) != 1 {
 		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("flac: muxers are single-track, got %d", len(tracks)))
 	}
@@ -127,7 +126,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	m.wroteTotal = si.Samples
 	m.began = true
 
-	table := m.ws != nil && si.Samples > 0
+	table := m.patch.Seekable() && si.Samples > 0
 	vc := vorbisCommentBlock(m.opts.Tags)
 	head := [4]byte{0x80} // STREAMINFO, last metadata block
 	if table || vc != nil {
@@ -220,7 +219,7 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 			fmt.Sprintf("flac: trailer says %d samples, wrote %d", trailer.Samples, m.samples))
 	}
 
-	if m.ws == nil {
+	if !m.patch.Seekable() {
 		if m.wroteTotal != 0 && m.wroteTotal != m.samples {
 			return waxerr.New(waxerr.CodeInternal,
 				fmt.Sprintf("flac: header promised %d samples, wrote %d (unseekable output)", m.wroteTotal, m.samples))
@@ -241,7 +240,7 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 	if err != nil {
 		return err
 	}
-	if err := m.patch(8, body); err != nil {
+	if err := m.patch.At(8, body); err != nil {
 		return err
 	}
 
@@ -255,15 +254,12 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 			binary.BigEndian.PutUint64(b[8:], uint64(p.off))
 			b[16], b[17] = byte(p.dur>>8), byte(p.dur)
 		}
-		if err := m.patch(m.seekOff+int64(m.filled)*18, buf); err != nil {
+		if err := m.patch.At(m.seekOff+int64(m.filled)*18, buf); err != nil {
 			return err
 		}
 		m.filled = len(m.points)
 	}
-	if _, err := m.ws.Seek(m.off, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "flac: seeking to end", err)
-	}
-	return nil
+	return m.patch.Resume(m.off)
 }
 
 func (m *Muxer) write(parts ...[]byte) error {
@@ -272,19 +268,6 @@ func (m *Muxer) write(parts ...[]byte) error {
 		m.off += int64(n)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "flac: write", err)
-		}
-	}
-	return nil
-}
-
-// patch rewrites bytes at an absolute offset on the seekable writer.
-func (m *Muxer) patch(off int64, parts ...[]byte) error {
-	if _, err := m.ws.Seek(off, io.SeekStart); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "flac: seek for patch", err)
-	}
-	for _, p := range parts {
-		if _, err := m.ws.Write(p); err != nil {
-			return waxerr.Wrap(waxerr.CodeOutputUnwritable, "flac: patch", err)
 		}
 	}
 	return nil
