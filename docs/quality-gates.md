@@ -175,6 +175,13 @@ architecture and skip elsewhere (`codec/vorbis.goldenEncodeArch`). What the
 ADR-0004 cache key rests on is a build reproducing its own bytes, which the
 deterministic-mode tests cover on every platform.
 
+The same pin covers the one *decoder* golden that hashes samples instead of
+scoring them against a tolerance, the toolless committed-fixture digest in
+`codec/wma` (`wantDigestArch`): arm64 contracts the IMDCT rotations and the
+overlap-add, and `math.Pow` reaches a different `Exp`/`Log` there, which is an
+ulp on some samples and a different hash. Everything else in the decoder table
+is a differential with a tolerance and gates on every architecture.
+
 **Where the baselines run.** The reference encoders these gates score against
 are ffmpeg *build options*, not platform facts, and a given ffmpeg may omit
 any of them. Ubuntu's build carries the lot, which is why `make
