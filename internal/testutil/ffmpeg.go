@@ -252,3 +252,43 @@ func FFmpegGenerateDuration(t testing.TB, path string, seconds float64, rate, ch
 	args = append(args, path)
 	run(t, FFmpeg(t), args...)
 }
+
+// FFprobePacket is one demuxed packet as ffprobe reports it: the container's
+// own framing, in the stream's time base, before any decoding.
+type FFprobePacket struct {
+	// PTS and Dur are in the stream time base (milliseconds for ASF).
+	PTS  int64
+	Dur  int64
+	Size int
+}
+
+// FFprobePackets lists the first audio stream's packets. It is the oracle for
+// a demuxer whose codec has no decoder yet: packet count, sizes, and
+// presentation times are the whole of what a demuxer produces, and ffprobe
+// reports all three without decoding a sample.
+func FFprobePackets(t testing.TB, path string) []FFprobePacket {
+	t.Helper()
+	raw := run(t, FFprobe(t), "-v", "error", "-select_streams", "a:0",
+		"-show_packets", "-show_entries", "packet=pts,duration,size", "-of", "json", path)
+	var doc struct {
+		Packets []struct {
+			PTS  *int64 `json:"pts"`
+			Dur  *int64 `json:"duration"`
+			Size string `json:"size"`
+		} `json:"packets"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parsing ffprobe output: %v\n%s", err, raw)
+	}
+	out := make([]FFprobePacket, len(doc.Packets))
+	for i, p := range doc.Packets {
+		out[i].Size, _ = strconv.Atoi(p.Size)
+		if p.PTS != nil {
+			out[i].PTS = *p.PTS
+		}
+		if p.Dur != nil {
+			out[i].Dur = *p.Dur
+		}
+	}
+	return out
+}

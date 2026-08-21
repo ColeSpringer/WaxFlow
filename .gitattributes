@@ -8,6 +8,7 @@
 *.aac  binary
 *.aifc binary
 *.aiff binary
+*.ape  binary
 *.flac binary
 *.m4a  binary
 *.m4b  binary
@@ -20,3 +21,5 @@
 *.opus binary
 *.wav  binary
 *.webm binary
+*.wma  binary
+*.wv   binary

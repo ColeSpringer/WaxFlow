@@ -24,6 +24,10 @@ const (
 	Vorbis  ID = "vorbis"
 	WavPack ID = "wavpack"
 	APE     ID = "ape"
+	// WMA covers Windows Media Audio 1 and 2 under one ID: the version rides
+	// in the track's WAVEFORMATEX config, so a second ID would double the
+	// registry, caps, and cache-key bookkeeping for what the config carries.
+	WMA ID = "wma"
 )
 
 // Packet is one compressed unit as a codec defines it: a FLAC frame, an
