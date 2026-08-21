@@ -1,9 +1,13 @@
 # Third-party notices
 
-Attributions for permissively licensed (Tier A) code studied closely or
-ported into WaxFlow, per [ADR-0001](docs/adr/0001-clean-room-policy.md).
-Module dependencies (e.g. spf13/cobra) carry their own licenses in the
-module cache and are not vendored here.
+Attributions for code studied closely or ported into WaxFlow, per
+[ADR-0001](docs/adr/0001-clean-room-policy.md). Almost every entry below is
+permissively licensed (Tier A) source. The exception is **codec/wma**, whose
+parameter tables are extracted from a copyleft project under the ADR's
+provision for data-only artifacts, because the format has no published
+specification to restate; that entry states the difference and its reasoning
+in full. Module dependencies (e.g. spf13/cobra) carry their own licenses in
+the module cache and are not vendored here.
 
 Entries follow this format:
 
@@ -268,6 +272,36 @@ Entries follow this format:
 > byte, which the tests assert. What is ours: the frame accumulator, the
 > packet's own frame header, the muxer's word packer and its seek-table
 > reservation policy, and the codec.Encoder integration.
+
+> **codec/wma parameter tables**: the ADR-0001 black-box PARAMETER
+> artifact, and the one in this tree with no normative document behind
+> it. Microsoft never published a WMA bitstream specification, so unlike
+> the AAC and SBR tables, which are ISO data that *FFmpeg* merely
+> restates, the files `codec/wma/tables_coef.go`, `tables_exp.go` and
+> `tables_bands.go` have *FFmpeg* (LGPL-2.1-or-later),
+> https://github.com/FFmpeg/FFmpeg, n9.0, commit
+> d32b387f2b0a484599d4587d651891f0c63c4238, as their primary source: the
+> coefficient Huffman books and their run/level ladders, the noise-gain
+> book, the LSP codebook and the tabulated v2 exponent bands from
+> `libavcodec/wmadata.h`, the critical-band edges from
+> `libavcodec/wma_freqs.c` (published Bark-scale data), and the
+> scalefactor book WMA reuses for VLC-coded exponents from
+> `libavcodec/aactab.c` (ISO/IEC 14496-3 data, and byte-identical to the
+> copy `codec/aac/tables_hcb.go` already carries, which was extracted
+> independently; `TestScalefactorBookMatchesTheAACCopy` checks that
+> element-wise rather than leaving it a claim). They are **data only**:
+> codeword, length, width and
+> coefficient values, with no decoder logic of any kind. The extraction
+> is mechanical and auditable rather than transcribed:
+> `codec/wma/tablesgen_test.go` parses each upstream file under a
+> SHA-256 pin and emits the Go tables, so a reviewer can re-run it and
+> diff. It runs under a build tag and needs a checked-out FFmpeg tree, so
+> it is never part of an ordinary build. The behavioural analysis from
+> the same pass is in `docs/notes/wma-bitstream.md` and
+> `docs/notes/wma-oracle-corpus.md`; the stage that implements the
+> decoder consumes those notes and these tables and does not open
+> FFmpeg. The `ffmpeg` binary additionally serves as a test-only fixture
+> generator and differential oracle.
 
 > **internal/testutil opus_compare**: `internal/testutil/opuscompare.go` is
 > a Go port of *libopus*'s `src/opus_compare.c` (BSD-3-Clause),

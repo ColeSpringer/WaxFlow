@@ -75,8 +75,12 @@ test-oracle:
 test-example:
 	cd examples/catalogcli && go vet ./... && go test -timeout 10m ./...
 
+# The second pass type-checks the build-tagged table extractor, which nothing
+# else in the tree compiles. Without it a drifted pin or a broken parser
+# surfaces only when someone attempts the audit THIRD-PARTY-NOTICES promises.
 vet:
 	go vet ./...
+	go vet -tags wmatablesgen ./codec/wma/
 
 fmt:
 	gofmt -w .

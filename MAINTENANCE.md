@@ -14,9 +14,10 @@ Operationally:
 2. **Tier B work** (LGPL/GPL: LAME, Shine and its Go ports, ffmpeg, faad):
    never open while implementing the corresponding component. Behavioral
    analysis happens in separate, dedicated passes whose only outputs are
-   black-box artifacts (behavioral notes and parameter tables under
-   `docs/notes/`, test vectors under `testdata/`) which implementation
-   sessions then consume. No line-by-line porting, ever.
+   black-box artifacts (behavioral notes under `docs/notes/`, parameter
+   tables as data-only Go files beside the codec they serve, test vectors
+   under `testdata/`) which implementation sessions then consume. No
+   line-by-line porting, ever.
 3. Tier B *binaries* are permitted as test oracles (differential CI jobs).
 4. Every PR affirms the checklist in `.github/pull_request_template.md`.
 
@@ -41,6 +42,7 @@ Operationally:
 | codec/ape (encoder) | the same SDK 13.25 (BSD-3-Clause): the range encoder with its deferred carry and flush, the predictor's and neural filter's compress paths, the mid/side matrix and CRC finalization, the two special-frame codes, and the file header / seek table / file-MD5 layout, ported because Monkey's Audio offers an encoder no choices to make (a level names one cascade; there is nothing to search over) and the ported form is byte-identical to the reference. Frame accumulation, the packet's own frame header, the muxer's word packer and its seek-table reservation policy are ours | round trip through our decoder at every written level/depth/channel count, ffmpeg's decoder on the same files, `mac -v` plus a `mac -d` decode as the strict gate (the only reader that checks the file MD5 over the header and seek table), and a byte-for-byte comparison of our coded frames against the reference encoder's |
 | container/apen | the APE file layout as documented in the reference headers (Tier A) | none |
 | container/asf | the Advanced Systems Format specification (published: the GUID object tree, the File and Stream Properties layouts, the data packet's error-correction and payload-parsing headers with their length-type encoding, the compressed-payload form, and the Simple Index Object); WAVEFORMATEX as documented (Tier A) | ffmpeg's ASF demuxer reached only as the `ffprobe -show_packets` differential oracle (never opened) |
+| codec/wma (analysis artifacts) | the published Bark-scale critical-band edges (`criticalFreqs`); ISO/IEC 14496-3's scalefactor Huffman book, which WMA reuses for VLC-coded exponents and which `codec/aac` already carries. Neither describes the bitstream: no WMA specification was ever published, which is why this row's Tier B column carries the format description that every other row takes from a spec | the dedicated analysis pass of 2026-08-20, whose only outputs are `docs/notes/wma-bitstream.md` (superframe and block layout, extradata flags, frame and block sizes, both exponent strategies, run/level coding, the noise model and its history-dependent index, the filterbank, the v1/v2 deltas, and an implementability checklist), `docs/notes/wma-oracle-corpus.md` (the 16-cell ffmpeg corpus with its coverage matrix, the paths an ffmpeg corpus cannot reach, and the measured delay, oracle noise floor and seek cost), and the data-only tables in `codec/wma/tables_*.go`, extracted mechanically from FFmpeg n9.0 under a SHA-256 pin by `codec/wma/tablesgen_test.go` (see THIRD-PARTY-NOTICES). No decoder logic was taken. The stage that implements the decoder consumes the notes and the tables and does not open FFmpeg; this row exists so that separation is auditable in history, since the notes land before the implementation starts |
 | container/adts (muxer) | ISO 14496-3 1.A (spec); the write-side inverse of the demuxer's header parser | none |
 | container/mp4 (esds writer) | ISO 14496-1 section 7.2.6 descriptors (spec); the write-side inverse of the demuxer's parser | none |
 
