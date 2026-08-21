@@ -28,7 +28,7 @@ var errEndOfPacket = errors.New("vorbis: end of packet")
 
 // Version is the decoder's cache-key version constant (ADR-0004): bump on
 // any change that alters decoded samples.
-const Version = "vorbis-dec-1"
+const Version = "vorbis-dec-2"
 
 // Hostile-input caps. Vorbis setup data is attacker-controlled, so every
 // count is bounded before allocation (ADR-0005 invariants).

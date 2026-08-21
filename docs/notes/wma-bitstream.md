@@ -142,6 +142,14 @@ and emit nothing. It arises as F == 0 with a carry pending, or F == 1 with
 none. `n < 0` is damage, which is F == 0 with no carry pending. A packet that
 reaches `n == 0` with a byte or less of payload left is damage too.
 
+The `n < 0` rule holds for a LINEAR decode only. After a seek the decoder has
+no carry but the stream does, so a landing on a packet that only continues an
+earlier frame produces exactly that shape and is not damage: nothing there is
+decodable, the frame in progress is not the reader's to finish, and the next
+packet's own frames resynchronise the walk. A reader that refuses it turns a
+file that plays into a file that will not seek, since a demuxer offering every
+media object as a landing will hand it one.
+
 Whatever follows the last complete frame is carried into the next packet, and
 the carry is not byte-aligned: the bit position within the first carried byte
 has to be remembered alongside the bytes, or the next packet resumes the
@@ -334,9 +342,12 @@ curve[i] = (p + q) ^ (-1/4)
 ```
 
 The maximum over the block is the maximum exponent. The `^(-1/4)` is
-ordinarily done with an exponent/mantissa table and linear interpolation;
-that is a speed choice, not part of the format, but it is a *precision* choice
-too, so a differential against a reference will show a small floor from it.
+sometimes done with an exponent/mantissa table and linear interpolation, but
+measured on ffmpeg 9.0 (noise-off LSP streams, WMA-in-WAV wrap) its float
+path agrees with the exact power to about 6e-7 relative with no structure in
+p+q, so there is no coarse table there to match. What a differential does
+show is a floor near 1e-6 relative from per-bin float rounding order on this
+path, which is where the LSP corpus cells' misses come from.
 
 ### The one entry that looks wrong
 
@@ -545,6 +556,16 @@ zeros on both sides.
 When exponents were reused from a longer or shorter block, indexing them takes
 the ratio between the block the exponents were decoded at and the current
 one, not the current block size alone.
+
+Measured 2026-08-21 (ffmpeg 9.0, hand-built streams through a WMA-in-WAV
+wrap): ffmpeg follows this rule exactly in the coded span at every block-size
+ratio, but inside the NOISE regions of a reuse block it reads the resampled
+curve one source bin behind, in both the per-bin fill and the band powers
+behind the noise gains. The one reuse-at-a-different-length block Microsoft's
+encoder writes (its startup frame) therefore decodes about 1.4 percent off
+against ffmpeg however faithfully this rule is followed.
+codec/wma/synthdiff_test.go pins the divergence and notices if ffmpeg stops
+producing it; the ms-22050 msDeficits entry carries the corpus-side number.
 
 **Mid/side** is undone on the coefficients, before the inverse transform: a
 butterfly `(a, b) -> (a+b, a-b)`, channel 0 carrying the mid and channel 1 the

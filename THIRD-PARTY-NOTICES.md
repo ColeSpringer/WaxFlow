@@ -302,6 +302,14 @@ Entries follow this format:
 > decoder consumes those notes and these tables and does not open
 > FFmpeg. The `ffmpeg` binary additionally serves as a test-only fixture
 > generator and differential oracle.
+>
+> The decoder in `codec/wma` was written in that later stage, from those
+> notes and these tables and nothing else. It is not a port: no FFmpeg
+> source was open while it was written, and the two are structured
+> differently (the transform is built on this tree's shared `dsp/fft`
+> kernel, and the reader is its own). Where the notes turned out to be
+> silent on a combination, the decoder refuses it by name rather than
+> guessing at FFmpeg's behaviour.
 
 > **internal/testutil opus_compare**: `internal/testutil/opuscompare.go` is
 > a Go port of *libopus*'s `src/opus_compare.c` (BSD-3-Clause),

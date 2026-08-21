@@ -40,9 +40,14 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   WavPack (bit-exact on the official test suite: 8- to 32-bit integers,
   the three stereo block modes, APEv2 tags; encodes too), Monkey's Audio
   (all five compression levels, 8/16/24-bit, APEv2 tags; encodes the
-  first three). Sample-exact
+  first three), and Windows Media Audio 1 and 2 in ASF (mono and stereo,
+  8-48 kHz; **decode only, and encoding it is a non-goal**: nothing plays
+  WMA that does not also play a format this tree writes better).
+  Sample-exact
   seeking everywhere, gapless honored per format (LAME tag, iTunSMPB,
-  edit lists, Ogg pre-skip/end-trim, Matroska CodecDelay).
+  edit lists, Ogg pre-skip/end-trim, Matroska CodecDelay). WMA Pro,
+  Lossless and Voice share the container and are different codecs; they
+  are refused by name.
 - **DSP**: Kaiser windowed-sinc resampling (`hq`/`fast`), BS.775
   downmix, gain with true-peak limiting, TPDF and shaped dither, EBU
   R128 / BS.1770-4 loudness (differential-verified against ffmpeg).

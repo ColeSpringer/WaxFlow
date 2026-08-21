@@ -16,7 +16,7 @@ var _ codec.Encoder = (*Encoder)(nil)
 // EncoderVersion identifies the encode algorithm revision for cache keys
 // (ADR-0004). It composes the psychoacoustic model's revision: retuning
 // dsp/psy changes these streams too.
-const EncoderVersion = "aac-enc-2+" + psy.Version
+const EncoderVersion = "aac-enc-3+" + psy.Version
 
 // EncoderDelay is the codec priming in output samples: one frame of
 // zeros ahead of the first real sample, so frame 0's MDCT window (which

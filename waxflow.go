@@ -422,33 +422,17 @@ type TranscodePlan struct {
 // requires of every sample-affecting node; the encoder version alone only
 // covers outputs. The plan core stays codec-independent (it is keyed and
 // cached on the decoded PCM format), so this composes per call.
+//
+// The mapping itself lives in format's decoder registry, beside the
+// constructor for each codec, rather than in a switch here: a second table
+// naming the same codecs is a table that can be short one.
 func decodeVersion(id codec.ID) string {
-	switch id {
-	case codec.PCM:
-		return pcm.Version
-	case codec.FLAC:
-		return flac.Version
-	case codec.ALAC:
-		return alac.Version
-	case codec.MP3:
-		return mp3.Version
-	case codec.AACLC:
-		return aac.Version
-	case codec.HEAAC:
-		return aac.HEVersion
-	case codec.Opus:
-		return opus.Version
-	case codec.Vorbis:
-		return vorbis.Version
-	case codec.WavPack:
-		return wavpack.Version
-	case codec.APE:
-		return ape.Version
-	default:
-		// Unregistered codecs cannot decode, so no cached bytes exist to
-		// go stale; keep their plans keyed distinctly all the same.
-		return "dec:" + string(id)
+	if v := format.DecoderVersion(id); v != "" {
+		return v
 	}
+	// Unregistered codecs cannot decode, so no cached bytes exist to go
+	// stale; keep their plans keyed distinctly all the same.
+	return "dec:" + string(id)
 }
 
 // eofReader satisfies dsp.Reader for plan-only chains, which are built

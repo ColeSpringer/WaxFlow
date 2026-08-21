@@ -20,7 +20,7 @@ func FuzzProbe(f *testing.F) {
 	f.Add([]byte("FORM\x00\x00\x00\x12AIFF"), "")
 	f.Add([]byte("ID3\x04\x00\x00\x00\x00\x00\x0aRIFF"), "")
 	f.Add([]byte{}, "wav")
-	for _, name := range []string{"sine-s16.flac", "sine-s16.oga", "sine-s16.wv", "sine-s16.ape"} {
+	for _, name := range []string{"sine-s16.flac", "sine-s16.oga", "sine-s16.wv", "sine-s16.ape", "sine-s16.wma"} {
 		raw, err := os.ReadFile(filepath.Join("..", "testdata", name))
 		if err != nil {
 			f.Fatal(err)

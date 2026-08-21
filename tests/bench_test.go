@@ -1,6 +1,7 @@
 package waxflow_test
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -84,4 +85,30 @@ func BenchmarkEngineDecodeFLACVector01(b *testing.B) {
 		b.Skip("vector not fetched (run `make verify-vectors`)")
 	}
 	benchOpenAndDecode(b, path, "flac")
+}
+
+// BenchmarkEngineDecodeVorbis. The Vorbis decode floor in docs/quality-gates.md
+// had no benchmark behind it at all, so it was a number nothing measured. No
+// Ogg Vorbis fixture is committed (the two .oga files here are Ogg FLAC), so
+// the input is encoded once with this tree's own encoder and then decoded
+// repeatedly, which is what the floor is about.
+func BenchmarkEngineDecodeVorbis(b *testing.B) {
+	src, err := os.ReadFile(repoPath("testdata", "noise-s16.flac"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	path := filepath.Join(b.TempDir(), "noise.ogg")
+	out, err := os.Create(path)
+	if err != nil {
+		b.Fatal(err)
+	}
+	_, err = waxflow.New().Transcode(context.Background(), container.BytesSource(src), "", out,
+		waxflow.TranscodeOptions{Format: "vorbis"})
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		b.Fatalf("encoding the fixture: %v", err)
+	}
+	benchOpenAndDecode(b, path, "ogg")
 }

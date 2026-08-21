@@ -110,7 +110,12 @@ func TestDemuxTrack(t *testing.T) {
 			if tr.Codec != codec.WMA {
 				t.Errorf("codec = %q, want %q", tr.Codec, codec.WMA)
 			}
-			want := audio.Format{Rate: tc.rate, Channels: tc.channels, Type: audio.Float, BitDepth: 32}
+			// The layout is not decorative: a format without one is "unknown",
+			// and an encoder that assigns channels by name refuses it. It has
+			// to match what codec/wma's Config.Format produces from the same
+			// WAVEFORMATEX.
+			want := audio.Format{Rate: tc.rate, Channels: tc.channels,
+				Layout: audio.DefaultLayout(tc.channels), Type: audio.Float, BitDepth: 32}
 			if tr.Fmt != want {
 				t.Errorf("format = %v, want %v", tr.Fmt, want)
 			}

@@ -205,7 +205,7 @@ func bytesEqual(a, b []byte) bool {
 // length-prefixed packets). Regenerate it and bump EncoderVersion whenever a
 // deliberate bitstream change lands on amd64, the architecture it is pinned
 // to; see TestEncodeGolden for why it is not portable.
-const goldenEncodeHash uint64 = 0x5eddd0c4df9f5062
+const goldenEncodeHash uint64 = 0x343a156c99ba207d
 
 // goldenEncodeArch is the architecture goldenEncodeHash was taken on, and the
 // only one that asserts it. Verified to hold at both GOAMD64=v1 (the CI

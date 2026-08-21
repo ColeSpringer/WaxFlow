@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/wma"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
 	"github.com/colespringer/waxflow/waxerr"
@@ -599,7 +600,9 @@ func (d *Demuxer) parseFileProperties(b []byte, off int64) error {
 
 // streamProperties field offsets within the object body.
 const (
+	spErrorType   = 16
 	spTypeDataLen = 40
+	spErrDataLen  = 44
 	spFlags       = 48
 	spLen         = 54
 )
@@ -629,8 +632,45 @@ func (d *Demuxer) parseStreamProperties(b []byte, off int64) error {
 		if w, ok := parseWaveFormat(b[spLen : spLen+tsLen]); ok {
 			s.wfx, s.haveWFX = w, true
 		}
+		if err := d.checkErrorCorrection(b, off, s.number, tsLen); err != nil {
+			return err
+		}
 	}
 	d.streams = append(d.streams, s)
+	return nil
+}
+
+// checkErrorCorrection refuses a stream whose payloads are interleaved.
+//
+// Audio Spread spreads one stream's audio across `span` packets so a lost
+// packet costs a little of many chunks instead of all of one, and the reader
+// has to put them back. Nothing here descrambles, and the failure is silent
+// rather than loud: the payloads are the right length and arrive in the right
+// order, so they reach the decoder looking like a stream and come out as
+// full-length noise. Neither encoder this tree can drive writes span > 1
+// (ffmpeg writes Audio Spread with span 1, which is the identity), so there is
+// no fixture to verify a descrambler against and a named refusal is what this
+// build can honestly offer.
+func (d *Demuxer) checkErrorCorrection(b []byte, off int64, number int, tsLen int64) error {
+	typ := guidAt(b[spErrorType:])
+	if typ == guidNoErrorCorrection || typ == (guid{}) {
+		return nil
+	}
+	ecLen := int64(le.Uint32(b[spErrDataLen:]))
+	at := spLen + tsLen
+	if typ != guidAudioSpread {
+		// Some other scheme, or none named. Unrecognized does not mean
+		// interleaved, so this is a warning rather than a refusal.
+		d.note(off+spErrorType, "stream %d uses error correction %v, which this build does not interpret", number, typ)
+		return nil
+	}
+	// Audio Spread's correction data opens with a one-byte span.
+	if ecLen < 1 || at+1 > int64(len(b)) {
+		return d.warn(off+spErrDataLen, "stream %d declares Audio Spread with %d bytes of correction data", number, ecLen)
+	}
+	if span := b[at]; span > 1 {
+		return malformed("stream %d interleaves its payload across %d packets (ASF Audio Spread), which this build does not undo", number, span)
+	}
 	return nil
 }
 
@@ -697,10 +737,23 @@ func (d *Demuxer) streamKinds() string {
 }
 
 // wireTrack builds the container track for the selected stream.
+//
+// The codec's own configuration check runs here, before a track exists, which
+// is where every other container in this tree puts it (container/wv probes a
+// block, apen and adts parse their config objects, mka calls cfg.Format).
+// Without it a header claiming six channels, 96 kHz, or nBlockAlign zero came
+// back from Probe as a playable WMA track with a 5.1 layout and a duration,
+// and the server's track cache remembered it that way; the refusals that name
+// those shapes live in the decoder and only run once a decode starts.
 func (d *Demuxer) wireTrack(s stream, id codec.ID, name string) error {
 	f := trackFormat(s.wfx)
 	if err := f.Valid(); err != nil {
 		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "wma: unusable format", err)
+	}
+	if id == codec.WMA {
+		if _, err := wma.ParseConfig(s.wfx.raw); err != nil {
+			return err
+		}
 	}
 	d.sel = s
 	d.track = container.Track{

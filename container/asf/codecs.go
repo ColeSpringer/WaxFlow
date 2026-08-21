@@ -92,10 +92,16 @@ func asfCodecID(tag uint16) (codec.ID, string) {
 // decodes in the float domain, so the WAVEFORMATEX bit depth (always 16 for
 // the tags here, and a fiction the encoder writes rather than a property of
 // the coded data) does not reach it.
+//
+// The layout matters even though WAVEFORMATEX's channel mask does not reach
+// here: a format without one is "unknown", and the encoders that assign
+// channels by name refuse it. This has to be the same layout codec/wma's
+// Config.Format produces, which TestTrackFormatMatchesTheCodec pins.
 func trackFormat(w waveFormat) audio.Format {
 	return audio.Format{
 		Rate:     w.rate,
 		Channels: w.channels,
+		Layout:   audio.DefaultLayout(w.channels),
 		Type:     audio.Float,
 		BitDepth: 32,
 	}

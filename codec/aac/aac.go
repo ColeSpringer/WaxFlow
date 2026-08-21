@@ -64,12 +64,12 @@ import (
 // any change that alters decoded samples. aac-dec-2 stopped halving the rate
 // of an explicitly signalled SBR/PS config, which changes the reported rate,
 // the rescaled sample timing, and so the decoded output for those sources.
-const Version = "aac-dec-2"
+const Version = "aac-dec-3"
 
 // HEVersion is the cache-key version for codec.HEAAC sources, separate from
 // Version so the SBR decode landing invalidates exactly the HE sources'
 // cached transcodes and no LC ones.
-const HEVersion = "aac-hedec-1"
+const HEVersion = "aac-hedec-2"
 
 // HESeekPreroll is the decode restart distance for HE-AAC in output
 // samples: twelve AUs (about half a second). The IMDCT overlap and the

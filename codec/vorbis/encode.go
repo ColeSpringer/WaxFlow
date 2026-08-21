@@ -23,7 +23,7 @@ var _ codec.Encoder = (*Encoder)(nil)
 // output without touching FLAC-in-Ogg or Opus-in-Ogg. It over-invalidates by
 // one case, Vorbis-in-Matroska, whose bytes did not change; that costs a
 // re-encode per entry and nothing else. See ADR-0004 for the proper fix.
-const EncoderVersion = "vorbis-enc-10+" + psy.Version
+const EncoderVersion = "vorbis-enc-11+" + psy.Version
 
 // encVendor is the fixed vendor string the standalone encoder stamps into the
 // comment header, so deterministic-mode output stays byte-identical. In the

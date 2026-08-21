@@ -13,10 +13,12 @@ import (
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/codec/vorbis"
 	"github.com/colespringer/waxflow/codec/wavpack"
+	"github.com/colespringer/waxflow/codec/wma"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/adts"
 	"github.com/colespringer/waxflow/container/aiff"
 	"github.com/colespringer/waxflow/container/apen"
+	"github.com/colespringer/waxflow/container/asf"
 	"github.com/colespringer/waxflow/container/flacn"
 	"github.com/colespringer/waxflow/container/mka"
 	"github.com/colespringer/waxflow/container/mp4"
@@ -137,6 +139,19 @@ var drivers = []driver{
 			return wv.NewDemuxer(src, &wv.DemuxerOptions{Strict: opts != nil && opts.Strict})
 		},
 	},
+	{
+		// ASF is the container and WMA the codec inside it, but the driver
+		// name is the one users say. The magic is the 16-byte Header Object
+		// GUID, so it needs no ordering care.
+		name:      "wma",
+		match:     asf.Match,
+		need:      asf.MatchNeed,
+		exts:      []string{"wma", "asf"},
+		mediaType: "audio/x-ms-wma",
+		open: func(src container.Source, opts *Options) (container.Demuxer, error) {
+			return asf.NewDemuxer(src, &asf.DemuxerOptions{Strict: opts != nil && opts.Strict})
+		},
+	},
 	// The MPEG sync word stays last: it is twelve set bits anywhere in a
 	// window, which false-positives on other formats' payloads.
 	{
@@ -176,28 +191,33 @@ func MediaTypeFor(name string) string {
 
 // decoders is the codec registry: one table drives both wiring and the
 // Decoders capability list, so the two cannot drift.
+// decoders is the decoder registry. Each row carries its package's cache-key
+// version constant (ADR-0004) beside its constructor, so the two cannot drift:
+// the engine reads the version from here rather than from a second table of
+// its own, and a codec registered without one fails to compile.
 var decoders = []struct {
-	id    codec.ID
-	build func(t container.Track) (codec.Decoder, error)
+	id      codec.ID
+	version string
+	build   func(t container.Track) (codec.Decoder, error)
 }{
-	{codec.PCM, func(t container.Track) (codec.Decoder, error) {
+	{codec.PCM, pcm.Version, func(t container.Track) (codec.Decoder, error) {
 		cfg, err := pcm.ParseConfig(t.CodecConfig)
 		if err != nil {
 			return nil, err
 		}
 		return pcm.NewDecoder(cfg, t.Fmt)
 	}},
-	{codec.FLAC, func(t container.Track) (codec.Decoder, error) {
+	{codec.FLAC, flac.Version, func(t container.Track) (codec.Decoder, error) {
 		si, err := flac.ParseStreamInfo(t.CodecConfig)
 		if err != nil {
 			return nil, err
 		}
 		return flac.NewDecoder(si, t.Fmt)
 	}},
-	{codec.MP3, func(t container.Track) (codec.Decoder, error) {
+	{codec.MP3, mp3.Version, func(t container.Track) (codec.Decoder, error) {
 		return mp3.NewDecoder(t.Fmt)
 	}},
-	{codec.ALAC, func(t container.Track) (codec.Decoder, error) {
+	{codec.ALAC, alac.Version, func(t container.Track) (codec.Decoder, error) {
 		cfg, err := alac.ParseMagicCookie(t.CodecConfig)
 		if err != nil {
 			return nil, err
@@ -206,30 +226,41 @@ var decoders = []struct {
 	}},
 	// Both AAC identities share one constructor: the ASC alone decides
 	// whether the SBR stage runs.
-	{codec.AACLC, newAACDecoder},
-	{codec.HEAAC, newAACDecoder},
-	{codec.WavPack, func(t container.Track) (codec.Decoder, error) {
+	{codec.AACLC, aac.Version, newAACDecoder},
+	{codec.HEAAC, aac.HEVersion, newAACDecoder},
+	{codec.WavPack, wavpack.Version, func(t container.Track) (codec.Decoder, error) {
 		cfg, err := wavpack.ParseConfig(t.CodecConfig)
 		if err != nil {
 			return nil, err
 		}
 		return wavpack.NewDecoder(cfg, t.Fmt)
 	}},
-	{codec.APE, func(t container.Track) (codec.Decoder, error) {
+	{codec.APE, ape.Version, func(t container.Track) (codec.Decoder, error) {
 		cfg, err := ape.ParseConfig(t.CodecConfig)
 		if err != nil {
 			return nil, err
 		}
 		return ape.NewDecoder(cfg, t.Fmt)
 	}},
-	{codec.Vorbis, func(t container.Track) (codec.Decoder, error) {
+	{codec.WMA, wma.Version, func(t container.Track) (codec.Decoder, error) {
+		// One decoder row for both versions: the WAVEFORMATEX the track
+		// carries is what discriminates 0x0160 from 0x0161, so a second codec
+		// ID would double the registry, caps and cache-key bookkeeping for
+		// what the config already says.
+		cfg, err := wma.ParseConfig(t.CodecConfig)
+		if err != nil {
+			return nil, err
+		}
+		return wma.NewDecoder(cfg, t.Fmt)
+	}},
+	{codec.Vorbis, vorbis.Version, func(t container.Track) (codec.Decoder, error) {
 		cfg, err := vorbis.ParseConfig(t.CodecConfig)
 		if err != nil {
 			return nil, err
 		}
 		return vorbis.NewDecoder(cfg, t.Fmt)
 	}},
-	{codec.Opus, func(t container.Track) (codec.Decoder, error) {
+	{codec.Opus, opus.Version, func(t container.Track) (codec.Decoder, error) {
 		cfg, err := opus.ParseOpusHead(t.CodecConfig)
 		if err != nil {
 			return nil, err
@@ -239,6 +270,17 @@ var decoders = []struct {
 }
 
 // Decoders lists the codecs with registered decoders, in registry order.
+// DecoderVersion is the registered decoder's cache-key version for id, or ""
+// when nothing decodes it. It is the one place that mapping lives.
+func DecoderVersion(id codec.ID) string {
+	for i := range decoders {
+		if decoders[i].id == id {
+			return decoders[i].version
+		}
+	}
+	return ""
+}
+
 func Decoders() []codec.ID {
 	ids := make([]codec.ID, len(decoders))
 	for i := range decoders {

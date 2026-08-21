@@ -1,15 +1,15 @@
-// Package wma will decode Windows Media Audio v1 (wFormatTag 0x0160) and v2
-// (0x0161). The analysis artifacts landed first: this package currently
-// carries parameter tables and nothing that reads a bitstream.
+// Package wma decodes Windows Media Audio v1 (wFormatTag 0x0160) and v2
+// (0x0161), the two codecs carried by ASF files that container/asf reads.
 //
 // Provenance: WMA has no published bitstream specification, so unlike every
-// other codec here the tables below are not a restatement of a normative
-// document. They are the black-box parameter artifact ADR-0001 provides for,
-// extracted mechanically from FFmpeg's data files in the dedicated analysis
-// pass that also produced docs/notes/wma-bitstream.md. The extraction is
-// tablesgen_test.go, which pins each upstream file by SHA-256. No decoder
-// logic was taken, and the session that writes the decoder consumes the notes
-// and these tables only. Licensing is recorded in THIRD-PARTY-NOTICES.md.
+// other codec here the tables in this file are not a restatement of a
+// normative document. They are the black-box parameter artifact ADR-0001
+// provides for, extracted mechanically from FFmpeg's data files in the
+// dedicated analysis pass that also produced docs/notes/wma-bitstream.md. The
+// extraction is tablesgen_test.go, which pins each upstream file by SHA-256.
+// No decoder logic was taken, and the session that wrote the decoder consumed
+// the notes and these tables only. Licensing is recorded in
+// THIRD-PARTY-NOTICES.md.
 package wma
 
 //go:generate go test -tags wmatablesgen -run ^TestGenerateTables$ -count=1

@@ -16,22 +16,34 @@ import (
 // test reconciles the tables and fails on any asymmetry that is not recorded
 // in the allowlist below.
 //
-// The allowlist is the burn-down list. Each entry names a known-open
-// gap and the work that closes it. The check is bidirectional, so it is a
-// ratchet, not just a filter:
+// The allowlist holds two kinds of entry and the difference matters. Most are
+// DEFERRALS: a known-open gap and the work that closes it, deleted by the
+// change that lands the capability. A few are DECISIONS, named in
+// symmetryNonGoals: capabilities this tree has chosen not to have, which no
+// future change is expected to delete. The check is bidirectional either way,
+// so it is a ratchet rather than a filter:
 //
 //   - an open gap that is NOT allowlisted fails (new drift: fix it or record it);
-//   - an allowlisted gap that has CLOSED fails (delete the stale entry).
+//   - an allowlisted gap that has CLOSED fails -- for a deferral that means
+//     deleting the stale entry, and for a decision it means someone landed the
+//     capability without revisiting the decision, which is the louder of the two.
 //
-// So the change that lands a capability must also delete its allowlist entry,
-// and the list is empty once every codec encodes+decodes and every container
-// demuxes+muxes.
+// So the deferrals burn down to nothing and the decisions stay, and neither can
+// go stale without failing here.
 func TestCodecContainerSymmetry(t *testing.T) {
-	// symmetryGaps is the allowlist: the asymmetries that are known-open and
-	// deliberately deferred. Each entry is deleted by the change that lands its
-	// capability, so the list is the burn-down checklist and is empty once
-	// every codec encodes+decodes and every container demuxes+muxes.
-	symmetryGaps := map[string]string{}
+	// symmetryGaps is the allowlist: every asymmetry that is known-open,
+	// whether deferred or decided against.
+	symmetryGaps := map[string]string{
+		"wma-encode": "WMA encoding is a non-goal (README non-goals); decode-only by decision",
+		"asf-mux":    "ASF muxing is a non-goal; it exists only to carry WMA, which we do not encode",
+	}
+	// symmetryNonGoals marks the entries above that are decisions rather than
+	// deferrals, so a closed one reads as "revisit the decision" instead of
+	// "tidy up the list". Nothing plays WMA that does not also play something
+	// this tree writes better, and the only available WMA encoder is ffmpeg's,
+	// which is too weak to score one against: it emits a flat exponent curve
+	// and never noise-fills a band.
+	symmetryNonGoals := map[string]bool{"wma-encode": true, "asf-mux": true}
 
 	decodes := map[codec.ID]bool{}
 	for _, id := range format.Decoders() {
@@ -50,14 +62,15 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	// decoder-without-encoder imbalance in the codec-level loop below;
 	// containerGaps does the same, per input container, for the
 	// demuxer-without-muxer loop.
-	codecGaps := map[codec.ID]string{}
-	containerGaps := map[string]string{}
+	codecGaps := map[codec.ID]string{codec.WMA: "wma-encode"}
+	containerGaps := map[string]string{"wma": "asf-mux"}
 
 	// open reports, for each named gap, whether it is still open, computed from
 	// the live tables so the predicate tracks the real code and cannot go stale.
 	open := map[string]bool{
 		// A codec with a decoder but no encoder-bearing outputs row.
 		"vorbis-encode":  decodes[codec.Vorbis] && !encodes[codec.Vorbis],
+		"wma-encode":     decodes[codec.WMA] && !encodes[codec.WMA],
 		"he-aac-encode":  decodes[codec.HEAAC] && !encodes[codec.HEAAC],
 		"wavpack-encode": decodes[codec.WavPack] && !encodes[codec.WavPack],
 		"ape-encode":     decodes[codec.APE] && !encodes[codec.APE],
@@ -65,6 +78,8 @@ func TestCodecContainerSymmetry(t *testing.T) {
 		"wv-mux": !containerWritten("wavpack"),
 		// The apen package demuxes but has no muxer wired into any output row.
 		"apen-mux": !containerWritten("ape"),
+		// The asf package demuxes but nothing muxes ASF.
+		"asf-mux": !containerWritten("wma"),
 		// The mka package demuxes but has no muxer wired into any output row's
 		// container override (opus/aac/flac/pcm reach it once the mka muxer lands).
 		"mka-mux": !containerWritable("mka") && !containerWritable("webm"),
@@ -85,6 +100,9 @@ func TestCodecContainerSymmetry(t *testing.T) {
 		switch {
 		case isOpen && !listed:
 			t.Errorf("symmetry gap %q is open but not in the allowlist: close it or record it with the change that will", name)
+		case !isOpen && listed && symmetryNonGoals[name]:
+			t.Errorf("symmetry gap %q was recorded as a decision, not a deferral, and something closed it anyway (%s); "+
+				"revisit the decision and its README non-goal rather than only deleting the entry", name, symmetryGaps[name])
 		case !isOpen && listed:
 			t.Errorf("symmetry gap %q has closed; delete its allowlist entry (%s)", name, symmetryGaps[name])
 		}
@@ -94,6 +112,11 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	for name := range symmetryGaps {
 		if _, ok := open[name]; !ok {
 			t.Errorf("allowlist entry %q names no known symmetry predicate", name)
+		}
+	}
+	for name := range symmetryNonGoals {
+		if _, ok := symmetryGaps[name]; !ok {
+			t.Errorf("%q is marked a non-goal but is not in the allowlist", name)
 		}
 	}
 

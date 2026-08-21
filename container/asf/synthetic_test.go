@@ -11,6 +11,7 @@ package asf_test
 import (
 	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow/container"
@@ -28,7 +29,9 @@ type builder struct {
 	prerollMS  uint64
 	playHNS    uint64
 	streamNum  byte
-	packets    [][]byte
+	// ecSpan, when set, declares Audio Spread error correction with this span.
+	ecSpan  byte
+	packets [][]byte
 }
 
 func newBuilder() *builder {
@@ -64,10 +67,26 @@ func (b *builder) streamProperties() []byte {
 	le.PutUint16(wfx[14:], 16)
 	body := make([]byte, 54)
 	copy(body, guidAudioMedia)
+	copy(body[16:], guidNoErrorCorrectionBytes)
 	le.PutUint32(body[40:], uint32(len(wfx)))
 	le.PutUint16(body[48:], uint16(b.streamNum))
-	return object(guidStreamProperties, append(body, wfx...))
+	tail := append(body, wfx...)
+	if b.ecSpan > 0 {
+		// Audio Spread, whose correction data opens with the span.
+		copy(tail[16:32], guidAudioSpreadBytes)
+		ec := []byte{b.ecSpan, 0, 0, 0, 0, 0, 0}
+		le.PutUint32(tail[44:], uint32(len(ec)))
+		tail = append(tail, ec...)
+	}
+	return object(guidStreamProperties, tail)
 }
+
+// The error-correction GUIDs, spelled here too so the synthetic files do not
+// borrow them from the package they exercise.
+var (
+	guidNoErrorCorrectionBytes = []byte{0x00, 0x57, 0xFB, 0x20, 0x55, 0x5B, 0xCF, 0x11, 0xA8, 0xFD, 0x00, 0x80, 0x5F, 0x5C, 0x44, 0x2B}
+	guidAudioSpreadBytes       = []byte{0x50, 0xCD, 0xC3, 0xBF, 0x8F, 0x61, 0xCF, 0x11, 0x8B, 0xB2, 0x00, 0xAA, 0x00, 0xB4, 0xE2, 0x20}
+)
 
 // guidAudioMedia is spelled here too, so the synthetic files do not borrow the
 // stream type from the package they exercise.
@@ -771,5 +790,68 @@ func TestPayloadWithNoReplicatedData(t *testing.T) {
 		if err := ds.ReadPacket(&pkt); err == nil || errors.Is(err, io.EOF) {
 			t.Errorf("strict mode accepted a file it can read nothing out of (%v)", err)
 		}
+	}
+}
+
+// TestAudioSpreadIsRefused. Audio Spread interleaves a stream's payload across
+// `span` packets, and nothing here puts it back. The failure without a check
+// is the quiet kind: every payload is the right length and arrives in the
+// right order, so the decoder gets what looks like a stream and turns it into
+// full-length noise, or trips a bounds refusal that names the wrong thing.
+// Stage 10 is what made it reachable -- before a decoder was registered, this
+// demuxer shipped unregistered and nobody could hand a scrambled payload to
+// one -- and neither fixture generator can produce it, since ffmpeg writes
+// Audio Spread with span 1.
+func TestAudioSpreadIsRefused(t *testing.T) {
+	build := func(span byte) []byte {
+		b := newBuilder()
+		b.blockAlign = 4
+		b.ecSpan = span
+		b.playHNS = b.prerollMS*10_000 + 10_000_000
+		b.packet(0, 1, 0, 4, uint32(b.prerollMS), []byte{1, 2, 3, 4})
+		return b.build()
+	}
+	// Span 1 is the identity, which is what ffmpeg writes on every file.
+	if _, err := asf.NewDemuxer(container.BytesSource(build(1)), &asf.DemuxerOptions{Strict: true}); err != nil {
+		t.Errorf("Audio Spread with span 1 refused: %v", err)
+	}
+	_, err := asf.NewDemuxer(container.BytesSource(build(4)), &asf.DemuxerOptions{Strict: true})
+	if err == nil {
+		t.Fatal("a stream interleaved across 4 packets was accepted")
+	}
+	if !strings.Contains(err.Error(), "Audio Spread") {
+		t.Errorf("refusal %q does not name what it refuses", err)
+	}
+}
+
+// TestOutOfScopeWMAHeadersAreRefusedAtProbe. The refusals that name these
+// shapes live in codec/wma's Validate, which runs when a decoder is built --
+// after Probe has already returned a playable track and the server's track
+// cache has remembered it. Every other container in this tree checks the codec
+// configuration while wiring the track; this one did not, so a six-channel
+// 0x0161 header came back as a WMA track with a 5.1 layout and a duration.
+func TestOutOfScopeWMAHeadersAreRefusedAtProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		rate, ch, ba int
+		want         string
+	}{
+		{"six channels", 44100, 6, 743, "channels"},
+		{"rate past the ceiling", 96000, 2, 743, "50000"},
+		{"zero block align", 44100, 2, 0, "nBlockAlign"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBuilder()
+			b.rate, b.channels, b.blockAlign = tc.rate, tc.ch, tc.ba
+			b.playHNS = b.prerollMS*10_000 + 10_000_000
+			b.packet(0, 1, 0, 4, uint32(b.prerollMS), []byte{1, 2, 3, 4})
+			_, err := asf.NewDemuxer(container.BytesSource(b.build()), nil)
+			if err == nil {
+				t.Fatal("the header was wired as a playable track")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("refusal %q does not name %q", err, tc.want)
+			}
+		})
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/wma"
 )
 
 // TestGUIDWireOrder pins each GUID literal against the canonical text its
@@ -27,6 +28,8 @@ func TestGUIDWireOrder(t *testing.T) {
 		{guidContentEncryption, "2211B3FB-BD23-11D2-B4B7-00A0C955FC6E"},
 		{guidExtendedContentEncryption, "298AE614-2622-4C17-B935-DAE07EE9289C"},
 		{guidAdvancedContentEncryption, "43058533-6981-49E6-9B74-AD12CB86D58C"},
+		{guidNoErrorCorrection, "20FB5700-5B55-11CF-A8FD-00805F5C442B"},
+		{guidAudioSpread, "BFC3CD50-618F-11CF-8BB2-00AA00B4E220"},
 		{guidAudioMedia, "F8699E40-5B4D-11CF-A8FD-00805F5C442B"},
 		{guidVideoMedia, "BC19EFC0-5B4D-11CF-A8FD-00805F5C442B"},
 		{guidCommandMedia, "59DACFC0-59E6-11D0-A3AC-00A0C90348F6"},
@@ -126,5 +129,27 @@ func TestParseWaveFormat(t *testing.T) {
 	}
 	if _, ok := parseWaveFormat(b[:17]); ok {
 		t.Error("parseWaveFormat accepted a structure shorter than its fixed fields")
+	}
+}
+
+// TestTrackFormatMatchesTheCodec pins the agreement trackFormat's own comment
+// claims, which was pinned by nothing: the name was written down before the
+// test was. The two are computed independently -- this file from the
+// WAVEFORMATEX, codec/wma from its parsed Config -- and a decoder built on a
+// track whose format is not its own is refused, so a disagreement here is a
+// file that probes and will not play.
+func TestTrackFormatMatchesTheCodec(t *testing.T) {
+	for _, tc := range []struct {
+		rate, channels int
+	}{
+		{8000, 1}, {16000, 2}, {22050, 1}, {32000, 2}, {44100, 1}, {44100, 2}, {48000, 2},
+	} {
+		w := waveFormat{tag: 0x0161, rate: tc.rate, channels: tc.channels, blockAlign: 743}
+		cfg := wma.Config{V2: true, Rate: tc.rate, Channels: tc.channels, BitRate: 128000, BlockAlign: 743}
+		// Spelled field by field: audio.Format's String renders neither the
+		// layout nor the bit depth, and the layout is the field this catches.
+		if got, want := trackFormat(w), cfg.Format(); got != want {
+			t.Errorf("%dHz %dch: the container builds %+v, the codec builds %+v", tc.rate, tc.channels, got, want)
+		}
 	}
 }

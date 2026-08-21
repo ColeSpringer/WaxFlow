@@ -11,20 +11,18 @@ import (
 //
 //	X[k] = fwdScale * Σ_{n=0}^{N-1} xw[n] cos((2π/N)(n+n0)(k+1/2)), n0 = (N/2+1)/2
 //
-// with xw the analysis-windowed block. Writing cos as a real part and
-// factoring the (n+n0)(k+1/2) product gives a pre-twiddle, one length-N DFT,
-// and a post-twiddle:
+// with xw the analysis-windowed block. It runs through the same N/4-point
+// DCT-IV the decoder's inverse uses (codec/aac/imdct.go carries the
+// derivation): the kernel's symmetries fold the N windowed samples onto N/2 --
+// the time-domain aliasing the window pairs cancel on overlap-add -- and what
+// is left is X[k] = fwdScale * DCT-IV(u)[k], one N/4-point complex DFT between
+// two rotations by exp(-2*pi*i*(j + 1/8)/N).
 //
-//	h[n] = xw[n] * exp(-iπn/N)
-//	H    = DFT_-[h]                       (the dsp/fft forward, e^{-2πi jk/N})
-//	X[k] = fwdScale * Re{ C[k] * conj(H[k]) }, C[k] = exp(i(πn0/N)(2k+1))
-//	     = fwdScale * (cRe[k]*H.re[k] + cIm[k]*H.im[k])
-//
-// The decoder computes its inverse with a private +sign FFT; the encoder uses
+// The decoder computes its inverse with a private float64 FFT; the encoder uses
 // dsp/fft here on purpose (the plan's "second FFT path"): its fixed float32
 // op order with no FMA makes the forward transform a pure function of its
-// input, which the deterministic-mode/golden gate needs. Unifying the decoder
-// onto dsp/fft is optional later cleanup, out of scope here.
+// input, which the deterministic-mode/golden gate needs. The rotations and the
+// fold below are plain float32 multiplies and adds for the same reason.
 
 // fwdScale is the analysis normalization. The decoder's inverse carries no 1/N
 // (vorbisScale == 1), so the forward holds it all. The single-block operator
@@ -40,38 +38,35 @@ func fwdScale(n int) float64 { return 4.0 / float64(n) }
 // (single-threaded), so the FFT scratch lives here rather than being passed per
 // call the way the shared decoder plans take it.
 type mdctForward struct {
-	n            int
-	plan         *fft.Plan
-	preRe, preIm []float32 // pre-twiddle exp(-iπn/N), length n
-	cRe, cIm     []float32 // post-twiddle C[k]*fwdScale, length n/2
-	inRe, inIm   []float32 // FFT input scratch, length n
-	outRe, outIm []float32 // FFT output scratch, length n
+	n    int // the time-domain length
+	m    int // n/4, the DFT length
+	n2   int // n/2, the DCT-IV length and the coefficient count
+	plan *fft.Plan
+	// rotRe/rotIm is exp(-2*pi*i*(j + 1/8)/n), the rotation the DCT-IV applies
+	// before and after its FFT; one table serves both passes.
+	rotRe, rotIm []float32
+	scale        float32
+	u            []float32 // the folded block, length n/2
+	inRe, inIm   []float32 // FFT input scratch, length n/4
+	outRe, outIm []float32 // FFT output scratch, length n/4
 }
 
 func newMDCTForward(n int) *mdctForward {
 	m := &mdctForward{
-		n:     n,
-		plan:  fft.NewPlan(n),
-		preRe: make([]float32, n),
-		preIm: make([]float32, n),
-		cRe:   make([]float32, n/2),
-		cIm:   make([]float32, n/2),
-		inRe:  make([]float32, n),
-		inIm:  make([]float32, n),
-		outRe: make([]float32, n),
-		outIm: make([]float32, n),
+		n: n, m: n / 4, n2: n / 2,
+		plan:  fft.NewPlan(n / 4),
+		rotRe: make([]float32, n/4),
+		rotIm: make([]float32, n/4),
+		scale: float32(fwdScale(n)),
+		u:     make([]float32, n/2),
+		inRe:  make([]float32, n/4),
+		inIm:  make([]float32, n/4),
+		outRe: make([]float32, n/4),
+		outIm: make([]float32, n/4),
 	}
-	for i := 0; i < n; i++ {
-		a := math.Pi * float64(i) / float64(n)
-		m.preRe[i] = float32(math.Cos(a))
-		m.preIm[i] = float32(-math.Sin(a))
-	}
-	n0 := (float64(n)/2 + 1) / 2
-	s := fwdScale(n)
-	for k := 0; k < n/2; k++ {
-		a := math.Pi * n0 / float64(n) * float64(2*k+1)
-		m.cRe[k] = float32(s * math.Cos(a))
-		m.cIm[k] = float32(s * math.Sin(a))
+	for j := 0; j < n/4; j++ {
+		a := 2 * math.Pi * (float64(j) + 0.125) / float64(n)
+		m.rotRe[j], m.rotIm[j] = float32(math.Cos(a)), float32(-math.Sin(a))
 	}
 	return m
 }
@@ -94,14 +89,29 @@ func fullWindow(n int) []float32 {
 // n/2). The caller applies the window; keeping it out mirrors the decoder's
 // split of imdct from applyWindow and lets block switching pick the window.
 func (m *mdctForward) forward(windowed []float32, spec []float32) {
-	n := m.n
-	for i := 0; i < n; i++ {
-		x := windowed[i]
-		m.inRe[i] = x * m.preRe[i]
-		m.inIm[i] = x * m.preIm[i]
+	n2, q := m.n2, m.m
+	// The TDAC fold: every input position outside [0, n/2) lands back inside
+	// it with a sign, which is the aliasing the window pairs cancel.
+	u := m.u
+	for j := 0; j < q; j++ {
+		u[j] = -windowed[3*q-1-j] - windowed[j+3*q]
+	}
+	for j := q; j < n2; j++ {
+		u[j] = windowed[j-q] - windowed[3*q-1-j]
+	}
+	// Pre-rotation, the n/4-point DFT, then post-rotation: one complex output
+	// carries C[2k] in its real part and C[n2-1-2k] in its imaginary part.
+	for j := 0; j < q; j++ {
+		x1, x2 := u[2*j], u[n2-1-2*j]
+		c, s := m.rotRe[j], m.rotIm[j]
+		m.inRe[j] = x1*c - x2*s
+		m.inIm[j] = x2*c + x1*s
 	}
 	m.plan.Transform(m.outRe, m.outIm, m.inRe, m.inIm)
-	for k := 0; k < n/2; k++ {
-		spec[k] = m.cRe[k]*m.outRe[k] + m.cIm[k]*m.outIm[k]
+	for k := 0; k < q; k++ {
+		re, im := m.outRe[k], m.outIm[k]
+		c, s := m.rotRe[k], m.rotIm[k]
+		spec[2*k] = m.scale * (re*c - im*s)
+		spec[n2-1-2*k] = -m.scale * (im*c + re*s)
 	}
 }
