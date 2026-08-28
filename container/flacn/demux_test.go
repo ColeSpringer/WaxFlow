@@ -282,8 +282,11 @@ func appendedID3v2() []byte {
 // is sized to that length deliberately and the size is asserted, so a value
 // edited later cannot quietly stop covering the case.
 func TestTagThatSpellsID3v1(t *testing.T) {
-	tag := apev2.Build([]apev2.Tag{{Key: "TITLE",
+	tag, err := apev2.Build([]apev2.Tag{{Key: "TITLE",
 		Value: "01234567890123456789012345678901234567890123456789012"}})
+	if err != nil {
+		t.Fatalf("apev2.Build: %v", err)
+	}
 	if len(tag) != 131 {
 		t.Fatalf("the fixture tag renders to %d bytes; this test needs exactly 131", len(tag))
 	}

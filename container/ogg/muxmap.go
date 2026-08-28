@@ -2,6 +2,7 @@ package ogg
 
 import (
 	"encoding/binary"
+	"fmt"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/flac"
@@ -61,13 +62,19 @@ func (opusMuxMapping) writeHeaders(cfg []byte, tags []container.Tag, vendor stri
 	if len(cfg) < 19 || string(cfg[:8]) != "OpusHead" {
 		return waxerr.New(waxerr.CodeUnsupportedFormat, "ogg: track CodecConfig is not an OpusHead")
 	}
+	// The comment is built before anything is emitted: a refusal here must
+	// leave the destination untouched rather than stranding a BOS page in
+	// front of a stream that never arrives.
+	comment, err := buildComment("OpusTags", vendor, tags)
+	if err != nil {
+		return err
+	}
 	// BOS page: OpusHead alone.
 	if err := emit(cfg, lacing(len(cfg)), 0, flagBOS); err != nil {
 		return err
 	}
 	// Second page: the OpusTags comment header (the "OpusTags" magic followed
 	// by the Vorbis-comment body).
-	comment := buildComment("OpusTags", vendor, tags)
 	return emit(comment, lacing(len(comment)), 0, 0)
 }
 
@@ -92,6 +99,12 @@ func (flacMuxMapping) writeHeaders(cfg []byte, tags []container.Tag, vendor stri
 	if len(cfg) != flac.StreamInfoLen {
 		return waxerr.New(waxerr.CodeUnsupportedFormat, "ogg: FLAC CodecConfig is not a STREAMINFO block")
 	}
+	// Built before the identification page is emitted, so a refusal leaves the
+	// destination untouched.
+	body, err := buildComment("", vendor, tags)
+	if err != nil {
+		return err
+	}
 	// Identification packet (the inverse of flacMapping.parseID): the mapping
 	// header 0x7F"FLAC" version 1.0, the count of following header packets (1,
 	// the comment), the native "fLaC" marker, then the STREAMINFO metadata
@@ -105,7 +118,6 @@ func (flacMuxMapping) writeHeaders(cfg []byte, tags []container.Tag, vendor stri
 	// Comment packet: a VORBIS_COMMENT metadata block (type 4) marked as the
 	// last block. The body is the plain Vorbis-comment structure, no magic and
 	// no framing bit (FLAC metadata blocks carry neither).
-	body := buildComment("", vendor, tags)
 	comment := append([]byte{0x84, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}, body...)
 	return emit(comment, lacing(len(comment)), 0, 0)
 }
@@ -151,6 +163,15 @@ func (m *vorbisMuxMapping) writeHeaders(cfg []byte, tags []container.Tag, vendor
 	if err != nil {
 		return err
 	}
+	// Rebuild the comment header from vendor+tags: type byte 0x03, the "vorbis"
+	// signature, the Vorbis-comment structure, then the framing bit (a
+	// byte-aligned 0x01), matching the encoder's commentHeader byte-for-byte.
+	// Built before anything is emitted, so a refusal leaves the destination
+	// untouched rather than stranding a BOS page in front of nothing.
+	body, err := buildComment("", vendor, tags)
+	if err != nil {
+		return err
+	}
 	m.cfg = c
 	m.modeBits = vorbis.ModeBits(c)
 	m.haveCfg = true
@@ -160,10 +181,7 @@ func (m *vorbisMuxMapping) writeHeaders(cfg []byte, tags []container.Tag, vendor
 	if err := emit(id, lacing(len(id)), 0, flagBOS); err != nil {
 		return err
 	}
-	// Rebuild the comment header from vendor+tags: type byte 0x03, the "vorbis"
-	// signature, the Vorbis-comment structure, then the framing bit (a
-	// byte-aligned 0x01), matching the encoder's commentHeader byte-for-byte.
-	comment := append([]byte{0x03, 'v', 'o', 'r', 'b', 'i', 's'}, buildComment("", vendor, tags)...)
+	comment := append([]byte{0x03, 'v', 'o', 'r', 'b', 'i', 's'}, body...)
 	comment = append(comment, 0x01)
 	// The comment and setup headers share the next page(s), spilling only if
 	// setup is large enough to overflow one page's 255x255-byte segment table.
@@ -234,11 +252,14 @@ func emitHeaderPages(pkts [][]byte,
 
 // buildComment builds a Vorbis-comment structure: an optional magic prefix
 // (OpusTags for Opus; empty for a bare FLAC metadata-block body), the vendor
-// string, and the KEY=value user comments, dropping invalid keys and any
-// comment that would push the header past its single-page budget. This is the
+// string, and the KEY=value user comments, dropping invalid keys. This is the
 // exact byte layout the old inline OpusTags builder produced, factored out so
 // Opus stays byte-identical and FLAC reuses it.
-func buildComment(magic, vendor string, tags []container.Tag) []byte {
+//
+// A comment that would push the header past its single-page budget is an error
+// rather than a skip, for the reason apev2.Build refuses one: writing the page
+// without it reports a tag the stream does not carry.
+func buildComment(magic, vendor string, tags []container.Tag) ([]byte, error) {
 	out := make([]byte, 0, len(magic)+4+len(vendor)+4)
 	out = append(out, magic...)
 	out = binary.LittleEndian.AppendUint32(out, uint32(len(vendor)))
@@ -251,16 +272,17 @@ func buildComment(magic, vendor string, tags []container.Tag) []byte {
 			continue
 		}
 		c := t.Key + "=" + t.Value
-		if len(out)+4+len(c) > maxTagsPageBytes {
-			// Skip just the comment that does not fit: one oversized value
-			// (hostile or merely huge lyrics) must not erase the small
-			// descriptive tags after it.
-			continue
+		// The whole header's size, not this value's: a comment can overflow by
+		// being large or by being the one that crossed a running total.
+		if need := len(out) + 4 + len(c); need > maxTagsPageBytes {
+			return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
+				fmt.Sprintf("ogg: %s does not fit: the comment header would need %d bytes, over its %d-byte limit",
+					t.Key, need, maxTagsPageBytes))
 		}
 		out = binary.LittleEndian.AppendUint32(out, uint32(len(c)))
 		out = append(out, c...)
 		count++
 	}
 	binary.LittleEndian.PutUint32(out[countAt:], count)
-	return out
+	return out, nil
 }

@@ -309,7 +309,14 @@ with true-peak limiting, dither).`,
 			if dropRG {
 				tagInfo = meta.WithoutReplayGain(info)
 			}
-			tags := meta.FullTags(tagInfo)
+			// The source's own tags, not tags this run named: one too large
+			// for the output is dropped with a note rather than failing the
+			// transcode. See meta.EmbeddableTags.
+			tags, droppedTags := meta.EmbeddableTags(meta.FullTags(tagInfo))
+			for _, key := range droppedTags {
+				fmt.Fprintf(cmd.ErrOrStderr(),
+					"metadata: tag %s is too large for the output and was not embedded\n", key)
+			}
 			// Only the MP4 path patches placeholders after the encode;
 			// any other format gets its measured values through the
 			// mapping post-pass, and embedding unity placeholders there

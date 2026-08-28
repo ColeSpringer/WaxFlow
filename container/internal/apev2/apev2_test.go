@@ -180,7 +180,10 @@ func TestBuildParseRoundTrip(t *testing.T) {
 		{Key: "with=equals", Value: "dropped"}, // no reader could ask for it
 		{Key: "EMPTY", Value: ""},              // nothing to say
 	}
-	blob := Build(tags)
+	blob, err := Build(tags)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
 	if blob == nil {
 		t.Fatal("Build produced nothing for four writable tags")
 	}
@@ -225,7 +228,10 @@ func TestBuildSpellsAPEv2Keys(t *testing.T) {
 		"TITLE":         "TITLE", // no APEv2 spelling of its own; case is not a difference
 	}
 	for canon, spelled := range want {
-		blob := Build([]Tag{{Key: canon, Value: "v"}})
+		blob, err := Build([]Tag{{Key: canon, Value: "v"}})
+		if err != nil {
+			t.Fatalf("Build: %v", err)
+		}
 		if !bytes.Contains(blob, append([]byte(spelled), 0)) {
 			t.Errorf("%s was not written as %q", canon, spelled)
 		}
@@ -245,13 +251,16 @@ func TestBuildSpellsAPEv2Keys(t *testing.T) {
 // but us. Two spellings of one field merge for the same reason, since the
 // alternative is the duplicate key the format forbids.
 func TestBuildMergesMultipleValues(t *testing.T) {
-	blob := Build([]Tag{
+	blob, err := Build([]Tag{
 		{Key: "ARTIST", Value: "A"},
 		{Key: "ARTIST", Value: "B"},
 		{Key: "ARTIST", Value: "C"},
 		{Key: "YEAR", Value: "1999"},
 		{Key: "RECORDINGDATE", Value: "2001"},
 	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
 	if n := binary.LittleEndian.Uint32(blob[len(blob)-FooterLen+16:]); n != 2 {
 		t.Errorf("the footer declares %d items, want 2 (one per key)", n)
 	}
@@ -272,22 +281,81 @@ func TestBuildMergesMultipleValues(t *testing.T) {
 // after the audio is a structure every reader then has to peel for nothing.
 func TestBuildDropsEverything(t *testing.T) {
 	for _, tags := range [][]Tag{nil, {}, {{Key: "bad=key", Value: "x"}}, {{Key: "TITLE", Value: ""}}} {
-		if got := Build(tags); got != nil {
+		got, err := Build(tags)
+		if err != nil {
+			t.Errorf("Build(%v): %v", tags, err)
+		}
+		if got != nil {
 			t.Errorf("Build(%v) produced %d bytes, want nothing", tags, len(got))
 		}
 	}
 }
 
-// TestBuildCapsSize pins the write cap: one oversized value is skipped, and
-// the small descriptive tags after it still land.
-func TestBuildCapsSize(t *testing.T) {
+// TestBuildRefusesOversized pins the write cap as a refusal: a value that does
+// not fit the block fails the whole render rather than being skipped, since a
+// block written without it is a file missing a tag the caller asked to embed.
+// The error names the key and the cap so the caller knows what to trim.
+func TestBuildRefusesOversized(t *testing.T) {
 	tags := []Tag{
 		{Key: "TITLE", Value: "kept"},
 		{Key: "HUGE", Value: strings.Repeat("x", maxWriteBytes)},
 		{Key: "ARTIST", Value: "also kept"},
 	}
-	got := Parse(Build(tags))
-	if len(got) != 2 || got["TITLE"][0] != "kept" || got["ARTIST"][0] != "also kept" {
-		t.Errorf("read back %v, want the two small tags", got)
+	got, err := Build(tags)
+	if err == nil {
+		t.Fatalf("Build rendered %d bytes over an oversized value, want a refusal", len(got))
+	}
+	if got != nil {
+		t.Errorf("a refused Build returned %d bytes, want nil", len(got))
+	}
+	for _, want := range []string{"HUGE", "49152"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+}
+
+// TestBuildFillsToTheCap checks the bound is the block's, not one value's: tags
+// that exactly reach maxWriteBytes render, and one byte more is refused. A cap
+// applied off by a whole footer would pass the refusal test above and still be
+// wrong here.
+func TestBuildFillsToTheCap(t *testing.T) {
+	// 9 bytes of item overhead (4 size, 4 flags, 1 NUL) plus the key, and the
+	// header and footer the block carries either way.
+	fit := maxWriteBytes - 2*FooterLen - 9 - len("HUGE")
+	blob, err := Build([]Tag{{Key: "HUGE", Value: strings.Repeat("x", fit)}})
+	if err != nil {
+		t.Fatalf("a value filling the block exactly was refused: %v", err)
+	}
+	if len(blob) != maxWriteBytes {
+		t.Errorf("the full block rendered %d bytes, want %d", len(blob), maxWriteBytes)
+	}
+	if got := Parse(blob); len(got["HUGE"]) != 1 || len(got["HUGE"][0]) != fit {
+		t.Error("the full block did not read back")
+	}
+	if _, err := Build([]Tag{{Key: "HUGE", Value: strings.Repeat("x", fit+1)}}); err == nil {
+		t.Error("one byte past the cap rendered anyway")
+	}
+}
+
+// TestBuildOwnsKeyFiltering pins that Build alone decides which keys are
+// writable. The two muxers used to run container.ValidTagKey over their tags
+// before handing them here, which was canonical's rule written a second time
+// and free to drift from it; this is what makes dropping that pass safe. The
+// keys below are the three canonical rejects: the separator a reader would
+// split on, a control byte, and a key past the length it accepts.
+func TestBuildOwnsKeyFiltering(t *testing.T) {
+	blob, err := Build([]Tag{
+		{Key: "TITLE", Value: "Kept"},
+		{Key: "with=equals", Value: "no reader could ask for it"},
+		{Key: "nul\x00key", Value: "nor this"},
+		{Key: strings.Repeat("K", 256), Value: "nor a key past 255 bytes"},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	got := Parse(blob)
+	if len(got) != 1 || len(got["TITLE"]) != 1 || got["TITLE"][0] != "Kept" {
+		t.Errorf("read back %v, want the one writable tag", got)
 	}
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // Canned-packet parameters for the tag tests, the shape
@@ -175,25 +176,57 @@ func TestMuxOpusTagsRoundTrip(t *testing.T) {
 }
 
 // TestMuxOpusTagsCap pins the header cap: a comment that would push the
-// OpusTags packet past maxTagsPageBytes is dropped, later comments that
-// still fit survive, the count field matches the comments actually
-// written, and the stream still parses.
+// OpusTags packet past maxTagsPageBytes is refused rather than dropped, since
+// a stream written without it carries no sign that a tag went missing. Invalid
+// keys are still skipped: those name a field no reader could ask for, so there
+// is nothing to refuse on the caller's behalf.
 func TestMuxOpusTagsCap(t *testing.T) {
-	t.Run("oversized dropped", func(t *testing.T) {
+	t.Run("oversized refused", func(t *testing.T) {
 		tags := []container.Tag{
 			{Key: "TITLE", Value: "Kept"},
 			{Key: "LYRICS", Value: strings.Repeat("x", maxTagsPageBytes)},
 			{Key: "ALBUM", Value: "After The Break"},
 		}
-		stream, _, samples := muxCannedOpus(t, &MuxerOptions{Tags: tags}, 20)
-		_, comments := opusTagsComments(t, stream)
-		if len(comments) != 2 || comments[0] != "TITLE=Kept" || comments[1] != "ALBUM=After The Break" {
-			t.Errorf("comments %q, want the oversized comment alone dropped", comments)
+		m := NewMuxer(&bytes.Buffer{}, &MuxerOptions{Tags: tags})
+		track := container.Track{Codec: codec.Opus, CodecConfig: muxOpusHead(tagTestPreSkip)}
+		err := m.Begin([]container.Track{track})
+		if err == nil {
+			t.Fatal("Begin wrote a comment header missing an oversized tag")
 		}
-		trk, pkts := demuxAll(t, stream)
-		if trk.Samples != samples || len(pkts) != 20 {
-			t.Errorf("capped stream demuxed %d packets with %d samples, want 20 and %d",
-				len(pkts), trk.Samples, samples)
+		for _, want := range []string{"LYRICS", "49152"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %q", err, want)
+			}
+		}
+		if code := waxerr.CodeOf(err); code != waxerr.CodeUnsupportedFormat {
+			t.Errorf("refusal carries code %q, want %q", code, waxerr.CodeUnsupportedFormat)
+		}
+	})
+	t.Run("fills to the cap", func(t *testing.T) {
+		// The bound is the comment header's, so pin it from both sides: a
+		// value that makes the header exactly maxTagsPageBytes is written, and
+		// one byte more is refused. Without the second half a cap applied a
+		// few bytes short would pass the refusal case above and still be wrong.
+		//
+		// The header is the "OpusTags" magic, the vendor length and string,
+		// the comment count, then each comment's length and its KEY=value.
+		const fixed = len("OpusTags") + 4 + len("WaxFlow") + 4 + 4 + len("LYRICS=")
+		fit := maxTagsPageBytes - fixed
+		tags := []container.Tag{{Key: "LYRICS", Value: strings.Repeat("x", fit)}}
+		stream, _, _ := muxCannedOpus(t, &MuxerOptions{Tags: tags}, 20)
+		_, comments := opusTagsComments(t, stream)
+		if len(comments) != 1 || len(comments[0]) != len("LYRICS=")+fit {
+			t.Errorf("a comment filling the header exactly did not survive (%d comments)", len(comments))
+		}
+		if n := opusTagsPacketLen(t, stream); n != maxTagsPageBytes {
+			t.Errorf("the full comment header is %d bytes, want exactly %d", n, maxTagsPageBytes)
+		}
+
+		m := NewMuxer(&bytes.Buffer{}, &MuxerOptions{Tags: []container.Tag{
+			{Key: "LYRICS", Value: strings.Repeat("x", fit+1)}}})
+		track := container.Track{Codec: codec.Opus, CodecConfig: muxOpusHead(tagTestPreSkip)}
+		if err := m.Begin([]container.Track{track}); err == nil {
+			t.Error("one byte past the cap was written anyway")
 		}
 	})
 	t.Run("invalid keys skipped", func(t *testing.T) {
@@ -225,4 +258,22 @@ func TestMuxOpusTagsCap(t *testing.T) {
 			t.Errorf("demuxed %d packets, want 20", len(pkts))
 		}
 	})
+}
+
+// opusTagsPacketLen is the byte length of the OpusTags packet, read off the
+// comment page's segment table. It is what maxTagsPageBytes bounds, so a test
+// pinning that bound has to measure it rather than the value it was built from.
+func opusTagsPacketLen(t *testing.T, stream []byte) int {
+	t.Helper()
+	offs := pageOffsets(stream)
+	if len(offs) < 2 {
+		t.Fatalf("%d pages, want at least the two headers", len(offs))
+	}
+	p := stream[offs[1]:]
+	nseg := int(p[26])
+	n := 0
+	for _, s := range p[27 : 27+nseg] {
+		n += int(s)
+	}
+	return n
 }

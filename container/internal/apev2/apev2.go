@@ -12,6 +12,7 @@ package apev2
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"strings"
 )
 
@@ -189,26 +190,36 @@ func canonical(key string) string {
 
 // Tag is one item to write. It mirrors container.Tag without importing it, for
 // the same reason canonical restates ValidTagKey: this package sits under
-// container and the two fields cost less than the dependency.
+// container and the two fields cost less than the dependency. The dependency is
+// not notional: container/internal/trailer reads tags through here and imports
+// none of container, audio, codec or waxerr, which is what it would gain.
 type Tag struct {
 	Key   string
 	Value string
 }
 
 // maxWriteBytes bounds a rendered tag. The engine passes a small descriptive
-// set; anything past this is dropped rather than growing a file's trailer
-// without limit.
+// set; a tag that would grow a file's trailer past this is refused rather than
+// written, since there is no larger block to fall back on. Callers that project
+// a source's tags onto an output trim to meta.EmbeddableTags first, so this
+// refuses what a caller named, not what a file happened to carry.
 const maxWriteBytes = 48 << 10
 
 // Build renders tags as a whole APEv2 block: header, items, footer. It returns
 // nil when nothing renders, which is the caller's signal to write no trailer at
 // all rather than an empty one.
 //
+// A tag that does not fit the block is an error, not a skip. Skipping it writes
+// a file missing metadata the caller asked to embed and reports success, so the
+// loss reaches whoever reads the file back rather than whoever asked for it.
+// The caller's answer is to trim the value and retry, which it can only do if
+// it is told.
+//
 // The header is optional in the format and written anyway: a reader peeling
 // trailers backward finds the footer's declared extent, and a header at the
 // other end of it is what confirms that extent rather than trusting it. Size
 // and StartsTag are the reading half of exactly that.
-func Build(tags []Tag) []byte {
+func Build(tags []Tag) ([]byte, error) {
 	// An APEv2 key is unique within a tag: a multi-valued field is one item
 	// whose values are NUL-separated, which is the form Parse reads back. One
 	// item per value instead is not merely non-canonical but lossy, since a
@@ -243,10 +254,17 @@ func Build(tags []Tag) []byte {
 	items, count := []byte(nil), uint32(0)
 	for _, g := range grouped {
 		value := strings.Join(g.values, "\x00")
-		if len(items)+FooterLen+9+len(g.key)+len(value) > maxWriteBytes {
-			// Skip just the item that does not fit: one oversized value must
-			// not erase the small descriptive tags after it.
-			continue
+		// Both preambles count: the block carries a header as well as a
+		// footer, so a cap counting one of them lets the block run 32 bytes
+		// past the size the refusal below quotes.
+		//
+		// The size reported is the whole block's, not this value's: an item
+		// can overflow by being large or by being the one that crossed a
+		// running total, and quoting a 30 KB value against a 48 KB cap reads
+		// as a contradiction in the second case.
+		if need := 2*FooterLen + len(items) + 9 + len(g.key) + len(value); need > maxWriteBytes {
+			return nil, fmt.Errorf("%s does not fit: the APEv2 tag block would need %d bytes, over its %d-byte limit",
+				g.key, need, maxWriteBytes)
 		}
 		items = binary.LittleEndian.AppendUint32(items, uint32(len(value)))
 		items = binary.LittleEndian.AppendUint32(items, 0) // UTF-8 text
@@ -256,14 +274,14 @@ func Build(tags []Tag) []byte {
 		count++
 	}
 	if count == 0 {
-		return nil
+		return nil, nil
 	}
 	// The size field covers the items and the footer, not the header, which is
 	// what Size reads back.
 	size := uint32(len(items) + FooterLen)
 	out := preamble(size, count, flagHasHeader|flagIsHeader)
 	out = append(out, items...)
-	return append(out, preamble(size, count, flagHasHeader)...)
+	return append(out, preamble(size, count, flagHasHeader)...), nil
 }
 
 // preamble renders the 32-byte structure that opens and closes a tag; the two

@@ -106,6 +106,10 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 // maxTagsPageBytes bounds a comment header so it stays a single page (the
 // segment table caps a page at 255*255 payload bytes) and keeps the pre-audio
 // headers small for time-to-first-audio.
+//
+// It is the smallest of the tag caps, which is why meta.EmbeddableTags trims a
+// projected source tag set to it: a value that fits here fits every embedding
+// output.
 const maxTagsPageBytes = 48 << 10
 
 // WritePacket adds a packet to the page being batched, first flushing that page

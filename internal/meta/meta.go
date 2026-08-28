@@ -377,3 +377,49 @@ func FormatPeak(linear float64) string {
 	linear = min(max(linear, 0), 9.999999)
 	return fmt.Sprintf("%.6f", linear)
 }
+
+// maxEmbeddableTagBytes is the smallest tag block any embedding muxer writes
+// (container/ogg's comment header). A tag set that fits this fits every one of
+// them, so it is the budget a projected set is trimmed to.
+const maxEmbeddableTagBytes = 48 << 10
+
+// embedFixedOverhead and embedItemOverhead bound the framing the writers add
+// around a tag set: the largest fixed preamble is APEv2's header plus footer,
+// and the largest per-item cost is an ID3v2 frame header plus its encoding
+// byte. Both are upper bounds, so a set that fits here fits each writer's own
+// accounting.
+const (
+	embedFixedOverhead = 64
+	embedItemOverhead  = 11
+)
+
+// EmbeddableTags trims a tag set projected from a source down to what every
+// muxer that embeds tags can hold, returning the kept tags and the keys it
+// dropped, in order.
+//
+// The muxers refuse a tag that does not fit rather than skipping it, because a
+// caller that named a tag must not be told the write succeeded without it. That
+// is the right answer for a caller's own tags and the wrong one here: these are
+// a source's tags carried forward, and a file whose lyric sheet is larger than
+// an Ogg comment header must still transcode. Losing a tag the output cannot
+// hold is the same class of fact as cover art not surviving a .wv output, so
+// the projection absorbs it. Callers report the dropped keys; the point is that
+// the decision is made here, where it is a projection, rather than inside a
+// muxer where nobody could see it.
+//
+// Tags are walked in order and each is kept if it still fits, which is what the
+// muxers themselves used to do: one oversized value does not erase the small
+// descriptive tags around it.
+func EmbeddableTags(tags []container.Tag) (kept []container.Tag, dropped []string) {
+	used := embedFixedOverhead
+	for _, t := range tags {
+		need := embedItemOverhead + len(t.Key) + len(t.Value)
+		if used+need > maxEmbeddableTagBytes {
+			dropped = append(dropped, t.Key)
+			continue
+		}
+		used += need
+		kept = append(kept, t)
+	}
+	return kept, dropped
+}

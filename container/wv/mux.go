@@ -42,6 +42,10 @@ type Muxer struct {
 	samples  int64
 	blocks   int
 
+	// tag is the APEv2 trailer, rendered at Begin so an oversized tag refuses
+	// before the audio is encoded rather than after.
+	tag []byte
+
 	began, ended bool
 }
 
@@ -88,6 +92,9 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	// escape, which every reader must handle anyway.
 	if t.Samples >= 0 && t.Samples <= wavpack.MaxSamples {
 		m.promised = t.Samples
+	}
+	if m.tag, err = apev2.Build(muxTags(m.opts.Tags)); err != nil {
+		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "wavpack", err)
 	}
 	m.began = true
 	return nil
@@ -153,8 +160,8 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 		return waxerr.New(waxerr.CodeUnsupportedFormat,
 			"wavpack: WavPack cannot hold a stream with no samples")
 	}
-	if tag := apev2.Build(muxTags(m.opts.Tags)); tag != nil {
-		if err := m.write(tag); err != nil {
+	if m.tag != nil {
+		if err := m.write(m.tag); err != nil {
 			return err
 		}
 	}
@@ -182,14 +189,17 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 	return m.patch.Resume(m.off)
 }
 
-// muxTags converts the engine's tags to the writer's, dropping keys no reader
-// could ask for.
+// muxTags converts the engine's tags to the writer's. container/apen holds the
+// same five lines, deliberately: sharing them would cost apev2 the container
+// import that container/internal/trailer is free of today, which is the trade
+// apev2.Tag itself documents.
+//
+// Keys are not filtered here. apev2.Build drops the ones no reader could ask
+// for, and a pass over them first would be that rule written twice.
 func muxTags(tags []container.Tag) []apev2.Tag {
-	out := make([]apev2.Tag, 0, len(tags))
-	for _, t := range tags {
-		if container.ValidTagKey(t.Key) {
-			out = append(out, apev2.Tag{Key: t.Key, Value: t.Value})
-		}
+	out := make([]apev2.Tag, len(tags))
+	for i, t := range tags {
+		out[i] = apev2.Tag{Key: t.Key, Value: t.Value}
 	}
 	return out
 }

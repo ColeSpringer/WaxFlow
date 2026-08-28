@@ -29,9 +29,6 @@ const (
 // hold.
 const maxSeekEntries = maxSeekTableBytes / 4
 
-// maxTagBytes bounds the APEv2 block, matching the demuxer's own trailer cap.
-const maxTagBytes = 16 << 20
-
 // packChunk is how many bytes the word packer buffers before writing. Frames
 // run to megabytes, and the packer walks them a byte at a time.
 const packChunk = 32 << 10
@@ -68,6 +65,10 @@ type Muxer struct {
 	// the stored source header (none here), then the frame data, then the
 	// format header and the seek table.
 	md5 hash.Hash
+
+	// tag is the APEv2 trailer, rendered at Begin so an oversized tag refuses
+	// before the audio is encoded rather than after.
+	tag []byte
 
 	off          int64 // bytes written so far
 	frameDataOff int64
@@ -131,6 +132,9 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	m.cfg = cfg
 	m.entries = reserveEntries(t.Samples, cfg.BlocksPerFrame)
 	m.seek = make([]uint32, 0, m.entries)
+	if m.tag, err = apev2.Build(muxTags(m.opts.Tags)); err != nil {
+		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "ape", err)
+	}
 	m.began = true
 	return m.writeHeaders()
 }
@@ -342,12 +346,8 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 	m.word, m.wordN = [4]byte{}, 0
 	frameDataBytes := m.off - m.frameDataOff
 
-	if tag := apev2.Build(muxTags(m.opts.Tags)); tag != nil {
-		if len(tag) > maxTagBytes {
-			return waxerr.New(waxerr.CodeUnsupportedFormat,
-				fmt.Sprintf("ape: tag block of %d bytes exceeds the %d-byte bound", len(tag), maxTagBytes))
-		}
-		if err := m.write(tag); err != nil {
+	if m.tag != nil {
+		if err := m.write(m.tag); err != nil {
 			return err
 		}
 	}
@@ -396,14 +396,17 @@ func (m *Muxer) descriptor(frameDataBytes int64) []byte {
 	return desc[:]
 }
 
-// muxTags converts the engine's tags to the writer's, dropping keys no reader
-// could ask for.
+// muxTags converts the engine's tags to the writer's. container/wv holds the
+// same five lines, deliberately: sharing them would cost apev2 the container
+// import that container/internal/trailer is free of today, which is the trade
+// apev2.Tag itself documents.
+//
+// Keys are not filtered here. apev2.Build drops the ones no reader could ask
+// for, and a pass over them first would be that rule written twice.
 func muxTags(tags []container.Tag) []apev2.Tag {
-	out := make([]apev2.Tag, 0, len(tags))
-	for _, t := range tags {
-		if container.ValidTagKey(t.Key) {
-			out = append(out, apev2.Tag{Key: t.Key, Value: t.Value})
-		}
+	out := make([]apev2.Tag, len(tags))
+	for i, t := range tags {
+		out[i] = apev2.Tag{Key: t.Key, Value: t.Value}
 	}
 	return out
 }

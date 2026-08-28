@@ -449,7 +449,14 @@ func (s *splitter) readMeta(cmd *cobra.Command) {
 	// the tags would tell a player to adjust a piece by a number nothing
 	// measured. A fresh measurement is what --loudness is for, on the piece.
 	s.tagInfo = withoutTimeline(meta.WithoutReplayGain(m))
-	s.albumTags = meta.FullTags(s.tagInfo)
+	// Trimmed to what an embedding muxer holds: these are the rip's own tags,
+	// so one too large for a piece's output is dropped rather than failing
+	// every piece. See meta.EmbeddableTags.
+	albumTags, droppedTags := meta.EmbeddableTags(meta.FullTags(s.tagInfo))
+	s.albumTags = albumTags
+	for _, key := range droppedTags {
+		s.log.Warn("tag too large for the output, not embedded", "key", key)
+	}
 	if p := s.tagInfo.FrontPicture(); p != nil {
 		s.art = &container.Picture{MIME: p.MIME, Data: p.Data}
 	}

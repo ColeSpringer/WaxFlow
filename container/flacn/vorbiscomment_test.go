@@ -3,6 +3,7 @@ package flacn
 import (
 	"bytes"
 	"encoding/binary"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow/container"
@@ -24,10 +25,34 @@ func TestVorbisCommentBlockLayout(t *testing.T) {
 		want = binary.LittleEndian.AppendUint32(want, uint32(len(c)))
 		want = append(want, c...)
 	}
-	if got := vorbisCommentBlock(tags); !bytes.Equal(got, want) {
+	got, err := vorbisCommentBlock(tags)
+	if err != nil {
+		t.Fatalf("vorbisCommentBlock: %v", err)
+	}
+	if !bytes.Equal(got, want) {
 		t.Errorf("block bytes\n got % x\nwant % x", got, want)
 	}
-	if got := vorbisCommentBlock(nil); got != nil {
-		t.Errorf("no tags rendered %d bytes, want nil", len(got))
+	if got, err := vorbisCommentBlock(nil); err != nil || got != nil {
+		t.Errorf("no tags rendered %d bytes (err %v), want nil", len(got), err)
+	}
+}
+
+// TestVorbisCommentBlockRefusesOversized pins the cap as a refusal: a comment
+// that does not fit fails the render rather than being skipped, so a FLAC file
+// never comes back missing a tag the caller asked to embed.
+func TestVorbisCommentBlockRefusesOversized(t *testing.T) {
+	tags := []container.Tag{
+		{Key: "TITLE", Value: "kept"},
+		{Key: "LYRICS", Value: strings.Repeat("x", maxCommentBytes)},
+	}
+	got, err := vorbisCommentBlock(tags)
+	if err == nil {
+		t.Fatalf("rendered %d bytes over an oversized comment, want a refusal", len(got))
+	}
+	if got != nil {
+		t.Errorf("a refused render returned %d bytes, want nil", len(got))
+	}
+	if !strings.Contains(err.Error(), "LYRICS") {
+		t.Errorf("error %q does not name the key", err)
 	}
 }

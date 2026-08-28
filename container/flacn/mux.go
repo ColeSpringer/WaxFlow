@@ -124,10 +124,15 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	}
 	m.si = si
 	m.wroteTotal = si.Samples
-	m.began = true
 
 	table := m.patch.Seekable() && si.Samples > 0
-	vc := vorbisCommentBlock(m.opts.Tags)
+	// Before began: a Begin that refuses leaves the muxer unstarted, the way
+	// every other check above it does.
+	vc, err := vorbisCommentBlock(m.opts.Tags)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "flac", err)
+	}
+	m.began = true
 	head := [4]byte{0x80} // STREAMINFO, last metadata block
 	if table || vc != nil {
 		head[0] = 0x00
@@ -274,7 +279,7 @@ func (m *Muxer) write(parts ...[]byte) error {
 }
 
 // maxCommentBytes bounds the VORBIS_COMMENT block body. The engine passes
-// a minimal tag set; comments past the cap are dropped rather than growing
+// a minimal tag set; a comment past the cap is refused rather than growing
 // the pre-audio headers without limit (the block length field itself only
 // holds 24 bits).
 const maxCommentBytes = 48 << 10
@@ -282,9 +287,13 @@ const maxCommentBytes = 48 << 10
 // vorbisCommentBlock renders tags as a VORBIS_COMMENT body (RFC 9639
 // section 8.6: little-endian lengths, UTF-8 KEY=value comments), nil for
 // no tags.
-func vorbisCommentBlock(tags []container.Tag) []byte {
+//
+// A comment that does not fit is an error rather than a skip, for the reason
+// apev2.Build refuses one: writing the block without it reports a tag the file
+// does not carry.
+func vorbisCommentBlock(tags []container.Tag) ([]byte, error) {
 	if len(tags) == 0 {
-		return nil
+		return nil, nil
 	}
 	const vendor = "WaxFlow"
 	body := binary.LittleEndian.AppendUint32(nil, uint32(len(vendor)))
@@ -297,15 +306,16 @@ func vorbisCommentBlock(tags []container.Tag) []byte {
 			continue
 		}
 		c := t.Key + "=" + t.Value
-		if len(body)+4+len(c) > maxCommentBytes {
-			// Skip just the comment that does not fit: one oversized
-			// value must not erase the small descriptive tags after it.
-			continue
+		// The whole block's size, not this value's: a comment can overflow by
+		// being large or by being the one that crossed a running total.
+		if need := len(body) + 4 + len(c); need > maxCommentBytes {
+			return nil, fmt.Errorf("%s does not fit: the VORBIS_COMMENT block would need %d bytes, over its %d-byte limit",
+				t.Key, need, maxCommentBytes)
 		}
 		body = binary.LittleEndian.AppendUint32(body, uint32(len(c)))
 		body = append(body, c...)
 		count++
 	}
 	binary.LittleEndian.PutUint32(body[countAt:], count)
-	return body
+	return body, nil
 }

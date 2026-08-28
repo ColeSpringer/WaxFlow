@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // syncsafe decodes a 4-byte ID3 syncsafe integer.
@@ -97,7 +99,10 @@ func TestID3v2TagRender(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b := id3v2Tag(tc.tags)
+			b, err := id3v2Tag(tc.tags)
+			if err != nil {
+				t.Fatalf("id3v2Tag: %v", err)
+			}
 			if tc.want == nil {
 				if b != nil {
 					t.Fatalf("rendered %d bytes, want nil", len(b))
@@ -153,7 +158,7 @@ func TestMuxID3RoundTrip(t *testing.T) {
 		{Key: "TITLE", Value: "Stream Title"},
 		{Key: "ARTIST", Value: "Stream Artist"},
 	}
-	id3Len := len(id3v2Tag(tags))
+	id3Len := len(mustID3(t, tags))
 	if id3Len == 0 {
 		t.Fatal("tags rendered no ID3 tag")
 	}
@@ -215,7 +220,7 @@ func TestMuxVBRXingAfterID3(t *testing.T) {
 	const rate, channels, n = 44100, 2, 40000
 	pkts, tr, samples := encodeVBR(t, rate, channels, 128000, n)
 	tags := []container.Tag{{Key: "TITLE", Value: "VBR Title"}}
-	id3Len := len(id3v2Tag(tags))
+	id3Len := len(mustID3(t, tags))
 
 	ws := &memWS{}
 	muxWith(t, ws, pkts, tr, samples, rate, channels,
@@ -238,5 +243,83 @@ func TestMuxVBRXingAfterID3(t *testing.T) {
 	}
 	if got, want := binary.BigEndian.Uint32(out[off+12:]), uint32(len(out)-id3Len); got != want {
 		t.Errorf("byte count %d, want %d (file size minus the ID3 tag)", got, want)
+	}
+}
+
+// mustID3 renders a tag that is expected to fit; a refusal means the test's
+// own tags stopped fitting.
+func mustID3(t *testing.T, tags []container.Tag) []byte {
+	t.Helper()
+	b, err := id3v2Tag(tags)
+	if err != nil {
+		t.Fatalf("id3v2Tag: %v", err)
+	}
+	return b
+}
+
+// TestID3RefusesOversized pins the cap as a refusal: a frame that does not fit
+// fails the render rather than being skipped, so an MP3 never comes back
+// missing a tag the caller asked to embed. Begin surfaces it, which puts the
+// refusal before the audio rather than after it.
+func TestID3RefusesOversized(t *testing.T) {
+	tags := []container.Tag{
+		{Key: "TITLE", Value: "Kept"},
+		{Key: "ARTIST", Value: strings.Repeat("x", maxID3Bytes)},
+	}
+	got, err := id3v2Tag(tags)
+	if err == nil {
+		t.Fatalf("rendered %d bytes over an oversized frame, want a refusal", len(got))
+	}
+	if got != nil {
+		t.Errorf("a refused render returned %d bytes, want nil", len(got))
+	}
+	if !strings.Contains(err.Error(), "ARTIST") {
+		t.Errorf("error %q does not name the key", err)
+	}
+
+	m := NewMuxer(&memWS{}, &MuxerOptions{Tags: tags})
+	track := container.Track{Codec: codec.MP3, Fmt: audio.Format{Rate: 44100, Channels: 2}}
+	if err := m.Begin([]container.Track{track}); err == nil {
+		t.Error("Begin wrote a tag missing an oversized frame")
+	} else if code := waxerr.CodeOf(err); code != waxerr.CodeUnsupportedFormat {
+		t.Errorf("refusal carries code %q, want %q", code, waxerr.CodeUnsupportedFormat)
+	}
+}
+
+// TestID3FillsToTheCap pins that maxID3Bytes bounds the whole tag, header
+// included. The check ran over the frames alone, which let the rendered tag
+// stand 10 bytes past the limit its own refusal quotes: the same defect the
+// APEv2 writer had with its second preamble. A value that renders the tag to
+// exactly the cap is written, and one byte more is refused.
+func TestID3FillsToTheCap(t *testing.T) {
+	// The tag header, then the frame's own header and its encoding byte.
+	const fixed = id3HeaderLen + id3FrameHeaderLen + 1
+	fit := maxID3Bytes - fixed
+	tag, err := id3v2Tag([]container.Tag{{Key: "ARTIST", Value: strings.Repeat("x", fit)}})
+	if err != nil {
+		t.Fatalf("a value filling the tag exactly was refused: %v", err)
+	}
+	if len(tag) != maxID3Bytes {
+		t.Errorf("the full tag rendered %d bytes, want %d", len(tag), maxID3Bytes)
+	}
+	if _, err := id3v2Tag([]container.Tag{
+		{Key: "ARTIST", Value: strings.Repeat("x", fit+1)}}); err == nil {
+		t.Error("one byte past the cap rendered anyway")
+	}
+}
+
+// TestID3RefusalNamesThePair checks a TRCK/TPOS overflow names both keys the
+// frame packs. Blaming TRACKNUMBER for a length TRACKTOTAL owns sends the
+// caller to trim the wrong field.
+func TestID3RefusalNamesThePair(t *testing.T) {
+	_, err := id3v2Tag([]container.Tag{
+		{Key: "TRACKNUMBER", Value: "1"},
+		{Key: "TRACKTOTAL", Value: strings.Repeat("9", maxID3Bytes)},
+	})
+	if err == nil {
+		t.Fatal("an oversized TRACKTOTAL rendered")
+	}
+	if !strings.Contains(err.Error(), "TRACKTOTAL") {
+		t.Errorf("error %q does not name TRACKTOTAL, the field that overflowed", err)
 	}
 }

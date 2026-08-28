@@ -170,7 +170,9 @@ func (s *Server) planTranscode(req *streamRequest) error {
 		HEAACv2:         req.p.hev2,
 		// The live passthrough: the minimal descriptive set, embedded by
 		// muxers with a stream-form tag representation.
-		Tags: meta.MinimalTags(req.meta),
+		// Trimmed for the reason internal/jobs does it: a source's own tags
+		// carried onto a stream must not turn an oversized one into a refusal.
+		Tags: embeddableTags(req.meta),
 	}
 	// Ladder rung 2: rewrite the container around the source's own packets.
 	// Rung 1 (directPlayable) already declined, or we would not be here, so
@@ -324,4 +326,14 @@ func (s *Server) cutPlanFor(req *streamRequest) *waxflow.CutPlan {
 	// rather than the header's -1 for an undeclared-length source (ADTS).
 	req.cutSamples = track.Samples
 	return plan
+}
+
+// embeddableTags is MinimalTags trimmed to what the stream's muxer can embed.
+// A /stream request names no tags of its own, so every tag here is the
+// source's and a value too large for the comment header is dropped rather than
+// refused. Nothing is logged: the streaming path drops the same tags on every
+// request for the same source, and a per-request line would say it every time.
+func embeddableTags(info *meta.Info) []container.Tag {
+	tags, _ := meta.EmbeddableTags(meta.MinimalTags(info))
+	return tags
 }

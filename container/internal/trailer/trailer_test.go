@@ -26,10 +26,21 @@ func tagged(tail []byte) ([]byte, int64) {
 	return b, int64(len(audio))
 }
 
+// buildTag renders an APEv2 block for a fixture. Every fixture here is a few
+// dozen bytes, so a refusal means the test's own tags stopped fitting.
+func buildTag(t *testing.T, tags ...apev2.Tag) []byte {
+	t.Helper()
+	b, err := apev2.Build(tags)
+	if err != nil {
+		t.Fatalf("apev2.Build: %v", err)
+	}
+	return b
+}
+
 // apeFooterOnly renders the shape the reference tagger writes: items and a
 // footer, no header.
-func apeFooterOnly() []byte {
-	full := apev2.Build([]apev2.Tag{{Key: "TITLE", Value: "footer only"}})
+func apeFooterOnly(t *testing.T) []byte {
+	full := buildTag(t, apev2.Tag{Key: "TITLE", Value: "footer only"})
 	body := full[apev2.FooterLen : len(full)-apev2.FooterLen]
 	foot := append([]byte(nil), full[len(full)-apev2.FooterLen:]...)
 	foot[23] &^= 0x80 // the has-header flag, top bit of the little-endian flags
@@ -59,8 +70,8 @@ func TestPeelRecognizesEveryTrailer(t *testing.T) {
 		want Kind
 		tail []byte
 	}{
-		"apev2, footer only": {APEv2, apeFooterOnly()},
-		"apev2 with header":  {APEv2, apev2.Build([]apev2.Tag{{Key: "TITLE", Value: "x"}})},
+		"apev2, footer only": {APEv2, apeFooterOnly(t)},
+		"apev2 with header":  {APEv2, buildTag(t, apev2.Tag{Key: "TITLE", Value: "x"})},
 		"id3v1":              {ID3v1, id3v1()},
 		"appended id3v2":     {ID3v2, appendedID3v2(300)},
 		"nul padding":        {Padding, make([]byte, 300)},
@@ -109,8 +120,8 @@ func TestPaddingIsOptIn(t *testing.T) {
 // The tag is sized to that length deliberately and the size is asserted, so a
 // value edited later cannot quietly stop covering the case.
 func TestTagThatSpellsID3v1(t *testing.T) {
-	tag := apev2.Build([]apev2.Tag{{Key: "TITLE",
-		Value: "01234567890123456789012345678901234567890123456789012"}})
+	tag := buildTag(t, apev2.Tag{Key: "TITLE",
+		Value: "01234567890123456789012345678901234567890123456789012"})
 	if len(tag) != 131 {
 		t.Fatalf("the fixture tag renders to %d bytes; this test needs exactly 131", len(tag))
 	}
@@ -138,7 +149,7 @@ func TestFloorBoundsThePeel(t *testing.T) {
 // footer claiming a header is claiming 32 bytes more than its items, and if
 // they are not the header, they are audio.
 func TestAPEv2HeaderMustBeThere(t *testing.T) {
-	full := apev2.Build([]apev2.Tag{{Key: "TITLE", Value: "x"}})
+	full := buildTag(t, apev2.Tag{Key: "TITLE", Value: "x"})
 	b, _ := tagged(full[apev2.FooterLen:]) // the header dropped, the claim kept
 	if start, _, ok := Peel(window(t, b), APEv2, 1, int64(len(b))); ok {
 		t.Fatalf("peeled to %d on a footer whose header is not there", start)
@@ -149,7 +160,7 @@ func TestAPEv2HeaderMustBeThere(t *testing.T) {
 // 32 bytes are a header, so the tag starts here rather than ending here and
 // there is nothing behind it to peel.
 func TestAPEv2HeaderIsNotAFooter(t *testing.T) {
-	full := apev2.Build([]apev2.Tag{{Key: "TITLE", Value: "x"}})
+	full := buildTag(t, apev2.Tag{Key: "TITLE", Value: "x"})
 	b, _ := tagged(full[:apev2.FooterLen])
 	if start, _, ok := Peel(window(t, b), APEv2, 1, int64(len(b))); ok {
 		t.Fatalf("peeled to %d on an APEv2 header read as a footer", start)
@@ -160,8 +171,8 @@ func TestAPEv2HeaderIsNotAFooter(t *testing.T) {
 // and then bolted an ID3v1 onto. The tags come from the outermost APEv2 block,
 // the one written last.
 func TestPeelAllStacksAndReadsTheOutermostTag(t *testing.T) {
-	inner := apev2.Build([]apev2.Tag{{Key: "TITLE", Value: "inner"}})
-	outer := apev2.Build([]apev2.Tag{{Key: "TITLE", Value: "outer"}})
+	inner := buildTag(t, apev2.Tag{Key: "TITLE", Value: "inner"})
+	outer := buildTag(t, apev2.Tag{Key: "TITLE", Value: "outer"})
 	b, want := tagged(append(append(append([]byte(nil), inner...), outer...), id3v1()...))
 
 	start, tags := PeelAll(window(t, b), APEv2|ID3v1, 1, int64(len(b)))

@@ -840,7 +840,16 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 	// was taken from, so what runs is what was planned: PlanTranscode
 	// normalizes the payloads away, and gain shapes no field the plan reports.
 	opts.GainDB = gainDB
-	opts.Tags = meta.FullTags(tagInfo)
+	// Trimmed to what an embedding muxer can hold: these are the source's own
+	// tags, not tags this request named, so one oversized value must not fail
+	// the job. The dropped keys reach the client as warnings rather than
+	// vanishing, which is the whole point of trimming here instead of leaving
+	// the muxer to skip them.
+	tags, droppedTags := meta.EmbeddableTags(meta.FullTags(tagInfo))
+	opts.Tags = tags
+	for _, key := range droppedTags {
+		r.warn(j.ID, "tag "+key+" is too large for the output and was not embedded")
+	}
 	// The container's own chapters are the floor, and the mapper's win when a
 	// mapper is wired and read some: a richer tag library may know forms the
 	// container package does not. GET /probe resolves the same two sources the

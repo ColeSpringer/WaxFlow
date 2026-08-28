@@ -108,8 +108,12 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	}
 	m.samples = t.Samples
 	m.rate = t.Fmt.Rate
+	id3, err := id3v2Tag(m.opts.Tags)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "mp3", err)
+	}
 	m.began = true
-	if id3 := id3v2Tag(m.opts.Tags); id3 != nil {
+	if id3 != nil {
 		if err := m.write(id3); err != nil {
 			return err
 		}

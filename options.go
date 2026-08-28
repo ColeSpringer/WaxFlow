@@ -188,6 +188,17 @@ type TranscodeOptions struct {
 	// ignore them; a finished file gets full metadata from the mapping
 	// post-pass instead. Tags never change the plan: callers keying
 	// cached bytes must fold the tag values into their own key.
+	// WavPack and Monkey's Audio take them too, as the APEv2 block they
+	// write after the audio.
+	//
+	// Every muxer that bounds its tag block refuses a value that does not
+	// fit, failing the transcode with waxerr.CodeUnsupportedFormat naming
+	// the key, rather than writing an output that quietly lacks it. The
+	// refusal comes before the encode, so it costs nothing to retry with
+	// the value trimmed. Those bounds sit at each format's own read or
+	// field limit, so tags read off a source can always be written back;
+	// Ogg is the exception, capping its comment header at 48 KiB to keep
+	// the pre-audio headers small. MP4 sets no bound at all.
 	Tags []container.Tag
 	// Chapters embeds chapter markers. Only the MP4 muxer represents
 	// them (Nero chpl); the mapping post-pass covers finished files of
