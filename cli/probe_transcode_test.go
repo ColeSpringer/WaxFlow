@@ -691,22 +691,36 @@ func TestMetadataReadRoutesThroughTheLogger(t *testing.T) {
 		t.Errorf("--log-level debug produced no note:\n%s", errOut)
 	}
 
-	// A source the mapper cannot read at all is a real warning, so it shows by
-	// default. Ogg FLAC is the case: the tag library's Ogg parser takes
-	// \x01vorbis and OpusHead only, and container/ogg implements no Tagger, so
-	// nothing softens it. cli/transcode.go records the same gap from the write
-	// side.
-	unread := filepath.Join(dir, "unread.oga")
-	if code, _, errOut := run(t, "transcode", "--format", "flac", "--container", "ogg",
-		in, unread); code != 0 {
-		t.Fatalf("building the Ogg-FLAC fixture: exit %d, stderr: %s", code, errOut)
+	// A real metadata warning shows by default. A chained Ogg is the case:
+	// the tag library reads the first link best-effort and warns, and the
+	// warning is earned here, since WaxFlow's demuxer likewise decodes only
+	// the first link, so the rest of the chain survives onto the output in
+	// neither audio nor tags. Concatenating one file with itself makes both
+	// links share the muxer's fixed serial, which a spec-clean chain would
+	// not; the tag library's chain check counts beginning-of-stream pages
+	// rather than serials, so it flags this shape too, and it is the shape a
+	// cat of real WaxFlow outputs actually produces.
+	link := filepath.Join(dir, "link.ogg")
+	if code, _, errOut := run(t, "transcode", in, link); code != 0 {
+		t.Fatalf("building the Ogg link fixture: exit %d, stderr: %s", code, errOut)
 	}
-	_, _, errOut = run(t, "transcode", unread, filepath.Join(dir, "fromunread.flac"))
-	if !strings.Contains(errOut, "warning=") {
-		t.Errorf("an unreadable source warned nothing at the default level:\n%s", errOut)
+	raw, err := os.ReadFile(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chained := filepath.Join(dir, "chained.ogg")
+	if err := os.WriteFile(chained, bytes.Repeat(raw, 2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errOut := run(t, "transcode", chained, filepath.Join(dir, "fromchained.flac"))
+	if code != 0 {
+		t.Fatalf("transcoding the chained fixture failed (exit %d), so the warning below would be about the failure, not the read: %s", code, errOut)
+	}
+	if !strings.Contains(errOut, "msg=metadata") || !strings.Contains(errOut, "chained") {
+		t.Errorf("a chained source raised no chained-stream metadata warning at the default level:\n%s", errOut)
 	}
 	// --log-level error silences it; --no-tags was previously the only lever.
-	_, _, errOut = run(t, "transcode", "--log-level", "error", unread, filepath.Join(dir, "hushed.flac"))
+	_, _, errOut = run(t, "transcode", "--log-level", "error", chained, filepath.Join(dir, "hushed.flac"))
 	if strings.Contains(errOut, "msg=metadata") {
 		t.Errorf("--log-level error did not silence the metadata warning:\n%s", errOut)
 	}

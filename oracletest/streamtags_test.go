@@ -21,18 +21,23 @@ import (
 	"github.com/colespringer/waxflow/container"
 )
 
-// TestStreamTagsWaxlabelRoundTrip transcodes to each stream-taggable
-// live format with embedded tags and reads them back through waxlabel:
-// Ogg OpusTags, FLAC VORBIS_COMMENT, MP3 ID3v2, and MP4 ilst. Both
+// TestStreamTagsWaxlabelRoundTrip transcodes to each tag-embedding
+// format with embedded tags and reads them back through waxlabel:
+// Ogg OpusTags, FLAC VORBIS_COMMENT (native and in Ogg), MP3 ID3v2,
+// MP4 ilst, and the WavPack and Monkey's Audio APEv2 trailer. Both
 // muxer forms run: streaming (a plain writer, the live-stream shape)
 // and seekable (a file, where flacn back-patches STREAMINFO with a
 // trailing SEEKTABLE and mpa back-patches the exact Xing/TOC), since
-// the two lay the metadata out differently.
+// the two lay the metadata out differently. Monkey's Audio runs
+// seekable only: its muxer back-patches the descriptor, so it has no
+// streaming form at all.
 //
 // The aac and alac cells skipped until the tag library learned to read a
-// fragmented movie (the mux is fragmented in both forms). They cover the
-// MP4 ilst path through the cross-implementation reader, which is the one
-// thing the m4b golden and the jobs e2e cannot do for it.
+// fragmented movie (the mux is fragmented in both forms), and the Ogg-FLAC,
+// wavpack, and ape cells until it learned those formats. Each covers its
+// muxer's tag block through the cross-implementation reader, which is the
+// one thing the structural muxer tests cannot do for it; for the APEv2
+// trailer it is the only external reader exercising our writer at all.
 func TestStreamTagsWaxlabelRoundTrip(t *testing.T) {
 	f := audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
 	wav, _ := synthWAV(t, f, 44100)
@@ -41,9 +46,9 @@ func TestStreamTagsWaxlabelRoundTrip(t *testing.T) {
 		{Key: "ARTIST", Value: "Stream Artist"},
 	}
 
-	transcode := func(t *testing.T, format string, seekable bool) []byte {
+	transcode := func(t *testing.T, format, containerName string, seekable bool) []byte {
 		t.Helper()
-		opts := waxflow.TranscodeOptions{Format: format, Tags: tags}
+		opts := waxflow.TranscodeOptions{Format: format, Container: containerName, Tags: tags}
 		if !seekable {
 			var out bytes.Buffer
 			if _, err := waxflow.New().Transcode(context.Background(), container.BytesSource(wav), "", &out, opts); err != nil {
@@ -69,14 +74,29 @@ func TestStreamTagsWaxlabelRoundTrip(t *testing.T) {
 		return raw
 	}
 
-	for _, format := range []string{"opus", "flac", "mp3", "aac", "alac"} {
+	for _, tc := range []struct {
+		name, format, container string
+		seekableOnly            bool
+	}{
+		{name: "opus", format: "opus"},
+		{name: "flac", format: "flac"},
+		{name: "oggflac", format: "flac", container: waxflow.ContainerOgg},
+		{name: "mp3", format: "mp3"},
+		{name: "aac", format: "aac"},
+		{name: "alac", format: "alac"},
+		{name: "wavpack", format: "wavpack"},
+		{name: "ape", format: "ape", seekableOnly: true},
+	} {
 		for _, seekable := range []bool{false, true} {
-			name := format + "/streaming"
+			if tc.seekableOnly && !seekable {
+				continue
+			}
+			name := tc.name + "/streaming"
 			if seekable {
-				name = format + "/seekable"
+				name = tc.name + "/seekable"
 			}
 			t.Run(name, func(t *testing.T) {
-				raw := transcode(t, format, seekable)
+				raw := transcode(t, tc.format, tc.container, seekable)
 				doc, err := waxlabel.Parse(t.Context(), container.BytesSource(raw))
 				if err != nil {
 					t.Fatalf("waxlabel.Parse: %v", err)

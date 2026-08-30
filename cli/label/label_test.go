@@ -66,6 +66,16 @@ func TestFragmentedIsANoteNotAWarning(t *testing.T) {
 	if !slices.ContainsFunc(info.Notes, func(n string) bool { return strings.Contains(n, "fragmented") }) {
 		t.Errorf("no fragmented note: %v", info.Notes)
 	}
+	// The muxer's own iTunSMPB freeform draws the tag library's
+	// invalid-tag-key code, and it is machine state WaxFlow rewrites itself,
+	// so it must land beside the fragmented note rather than spend a warning
+	// on every MP4 source. The fixture carries the atom because it is an AAC
+	// encode onto a seekable *os.File; the fragmented muxer writes no
+	// iTunSMPB on a pure stream, so this cell would go vacuous if the helper
+	// ever switched to a pipe.
+	if !slices.ContainsFunc(info.Notes, func(n string) bool { return strings.Contains(n, "iTunSMPB") }) {
+		t.Errorf("no iTunSMPB machine-key note: %v", info.Notes)
+	}
 	if len(info.Warnings) != 0 {
 		t.Errorf("a readable fragmented source warned: %v", info.Warnings)
 	}
@@ -179,6 +189,26 @@ func oversizedPNG() []byte {
 		"\x00\x00\x00\x10"+ // height 16
 		"\x08\x02\x00\x00\x00") // 8-bit RGB
 	return data
+}
+
+// TestUnreadableMetadataIsAWarningNotAnError pins the fallback Read promises:
+// a source whose metadata cannot be parsed yields an empty Info carrying a
+// warning, never an error, because audio must still flow. The tag library
+// reads every format WaxFlow decodes, so only damage or junk reaches this
+// branch, which is why the fixture is plain garbage rather than any real
+// container.
+func TestUnreadableMetadataIsAWarningNotAnError(t *testing.T) {
+	info, err := label.New().Read(t.Context(),
+		container.BytesSource([]byte("no signature any codec claims")), "bin", meta.ReadOptions{})
+	if err != nil {
+		t.Fatalf("an unreadable source errored: %v", err)
+	}
+	if len(info.Warnings) != 1 || !strings.Contains(info.Warnings[0], "metadata unread") {
+		t.Errorf("warnings = %v, want one saying metadata unread", info.Warnings)
+	}
+	if len(info.Tags) != 0 {
+		t.Errorf("tags = %v off an unreadable source, want none", info.Tags)
+	}
 }
 
 // writeFLAC builds a taggable output: an ordinary flat file the mapper

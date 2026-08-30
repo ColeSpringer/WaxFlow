@@ -359,3 +359,68 @@ func TestBuildOwnsKeyFiltering(t *testing.T) {
 		t.Errorf("read back %v, want the one writable tag", got)
 	}
 }
+
+// TestParseAliasesMatchTheMapper pins the read-side spellings the tag library
+// also folds. Both readers now speak for a .wv or .ape source: the mapper's
+// view wins per key and the Tagger fold fills in the keys it lacks, so a
+// spelling the two fold differently surfaces as two tags carrying one value,
+// written back as two items. The cases are the item names real APEv2 taggers
+// write whose canonical key is not just the name uppercased.
+func TestParseAliasesMatchTheMapper(t *testing.T) {
+	for native, canon := range map[string]string{
+		"Date":                    "RECORDINGDATE",
+		"OriginalYear":            "ORIGINALDATE",
+		"Publisher":               "LABEL",
+		"Catalog":                 "CATALOGNUMBER",
+		"MUSICBRAINZ_ALBUMSTATUS": "RELEASESTATUS",
+		"MUSICBRAINZ_ALBUMTYPE":   "RELEASETYPE",
+	} {
+		got := Parse(build(true, item{key: native, value: "v"}))
+		if vs := got[canon]; len(vs) != 1 || vs[0] != "v" {
+			t.Errorf("item %q read back as %v, want it under %s (the mapper's key)", native, got, canon)
+		}
+	}
+}
+
+// TestBuildDropsReservedItemNames pins the specification's four forbidden item
+// names. Each is the magic another structure is found by, so writing one
+// plants a false signature inside the tag block of the very file readers scan
+// for it. They are a representability rule like the charset above, not a size
+// refusal: the format cannot hold them, so Build skips them. The comparison is
+// on the canonical uppercase form, which is also how APEv2 readers compare
+// keys. Mixed-case spellings pin that fold.
+func TestBuildDropsReservedItemNames(t *testing.T) {
+	blob, err := Build([]Tag{
+		{Key: "TITLE", Value: "Kept"},
+		{Key: "TAG", Value: "an ID3v1 trailer's magic"},
+		{Key: "id3", Value: "an ID3v2 header's magic"},
+		{Key: "OggS", Value: "an Ogg page's magic"},
+		{Key: "MP+", Value: "a Musepack stream's magic"},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	got := Parse(blob)
+	if len(got) != 1 || len(got["TITLE"]) != 1 || got["TITLE"][0] != "Kept" {
+		t.Errorf("read back %v, want the one writable tag", got)
+	}
+	// The footer count is the structural half: Parse folding a leaked item
+	// away would hide it, a count of 1 cannot. The byte scan is the belt on
+	// top; NUL-terminated needles can in principle match inside a multi-value
+	// payload, but the only kept value here is "Kept".
+	if n := binary.LittleEndian.Uint32(blob[len(blob)-FooterLen+16:]); n != 1 {
+		t.Errorf("the footer declares %d items, want 1 (TITLE alone)", n)
+	}
+	for _, magic := range []string{"TAG", "ID3", "OGGS", "MP+"} {
+		if bytes.Contains(blob, append([]byte(magic), 0)) {
+			t.Errorf("the block carries an item named %q", magic)
+		}
+	}
+	// Reading stays unchanged: a foreign file already carrying one keeps its
+	// value visible, the same as the reference reader, so a transfer can still
+	// see what the file holds even though no WaxFlow writer will re-emit it.
+	foreign := build(true, item{key: "TAG", value: "already on disk"})
+	if v := Parse(foreign)["TAG"]; len(v) != 1 || v[0] != "already on disk" {
+		t.Errorf("a file-borne reserved item read back as %v", v)
+	}
+}

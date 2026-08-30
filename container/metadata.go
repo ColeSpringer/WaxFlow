@@ -50,11 +50,10 @@ type Chapterer interface {
 // meta.ReadOptions.Pictures exists.
 //
 // This is not dead code, though it can read that way: container/mp4,
-// container/wv, and container/apen implement it, and the tag library now reads
-// every MP4 shape, so on a mapper-wired route the fold rarely has anything left
-// to add. What it still serves is an embedder that wires no mapper at all,
-// where it is the only tag source there is; for a .wv or a .ape it is the only
-// one either way.
+// container/wv, and container/apen implement it, and the tag library reads
+// every format WaxFlow decodes, so on a mapper-wired route the fold rarely has
+// anything left to add. What it still serves is an embedder that wires no
+// mapper at all, where it is the only tag source there is.
 //
 // Keep the keys a mapper would also produce. Nothing enforces it: the fold
 // gives the mapper priority per key, so an atom exposed here under a spelling

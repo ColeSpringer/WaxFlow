@@ -568,11 +568,12 @@ func TestSplitPieceExtension(t *testing.T) {
 	}
 }
 
-// TestSplitWavPackWritesItsOwnTags pins the post-pass skip. The wv muxer
-// writes the APEv2 block itself, and waxlabel cannot identify a .wv at all, so
-// a post-pass over one fails and prints a warning on every piece while adding
-// nothing. The tags still have to arrive, which is the other half of the
-// claim: skipping the pass is only correct because the mux already did it.
+// TestSplitWavPackWritesItsOwnTags pins the mux half of the wavpack tag
+// contract: the wv muxer writes the APEv2 block itself, so the pieces carry
+// their tags with no post-pass. The stderr check can catch only a FAILING
+// post-pass, and a wrongly-run one now succeeds silently (the tag library
+// rewrites APEv2 fine), so the skip itself is pinned where it lives, by
+// TestOutputEmbedsTags in the engine.
 func TestSplitWavPackWritesItsOwnTags(t *testing.T) {
 	dir := t.TempDir()
 	raw := rampWAVBytes(t, 44100, 2, 100_000)
@@ -1017,8 +1018,9 @@ func TestSplitCueMultiFileRefused(t *testing.T) {
 // TestSplitAPEWritesItsOwnTags is TestSplitWavPackWritesItsOwnTags for the
 // other lossless row whose muxer owns its APEv2 block. The two are separate
 // tests because the skip is keyed on the format name: a row added without an
-// arm there prints "output not taggable" on every piece while the mux has
-// already written the tags, which is the failure that looks like success.
+// arm there reruns the tag rewrite over every piece the mux already tagged,
+// which is the failure that looks like success. Each format's arm is pinned
+// by TestOutputEmbedsTags in the engine.
 func TestSplitAPEWritesItsOwnTags(t *testing.T) {
 	dir := t.TempDir()
 	raw := rampWAVBytes(t, 44100, 2, 100_000)

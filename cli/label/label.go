@@ -9,6 +9,7 @@ import (
 	"errors"
 	"log/slog"
 	"sort"
+	"strings"
 
 	waxlabel "github.com/colespringer/waxlabel"
 	"github.com/colespringer/waxlabel/tag"
@@ -29,7 +30,11 @@ import (
 // when "(17)" resolved to a name, so the output says GENRE=Rock). waxlabel's
 // own LintSeverity is not used: it is calibrated for a tagger editing in
 // place, and ranks four of these as warnings. An unlisted code stays a
-// Warning, which is the safe direction.
+// Warning, which is the safe direction. That rule is also why the tempting
+// geometry codes stay out: trailing-bytes covers a WAV or AIFF ID3v1 trailer
+// whose tags the library preserves but does not read, and unknown-chunk-size
+// means every chunk after the sentinel-sized one went unread, so either can
+// mean tags this transfer will not carry.
 //
 // WarnFragmented clears the bar because a fragmented MP4's tags read exactly:
 // what degrades is the duration and the essence digest, which Read does not
@@ -40,6 +45,29 @@ var sourceLint = map[waxlabel.WarningCode]bool{
 	waxlabel.WarnTrailingID3v1:    true,
 	waxlabel.WarnLegacyAPE:        true,
 	waxlabel.WarnFragmented:       true,
+}
+
+// machineKeyLint spots an invalid-tag-key warning about an iTunes machine tag
+// (iTunSMPB, iTunNORM, iTunMOVI, iTunes_CDDB_*). Only MP4 freeforms draw the
+// warning for these: that store keeps their mixed-case spelling, which fails
+// the canonical key syntax, while every other route (a TXXX description, a
+// Vorbis or APE item) uppercases the same name into a valid custom key and
+// carries it without a word. As a warning it would fire on most MP4 sources
+// (iTunes rips and WaxFlow's own seekable AAC outputs all carry iTunSMPB)
+// about names that travel silently everywhere else, and the two that matter,
+// gapless and SoundCheck state, are values WaxFlow re-derives rather than
+// inherits. Any other invalid-tag-key stays a warning: that value really does
+// not survive onto the output.
+//
+// The offending native name lives only in the message prose (the code is
+// keyless by design), so this matches the ": name" tail. If the wording
+// changes upstream these fall back to warnings, which is noisy but not lossy.
+func machineKeyLint(w waxlabel.Warning) bool {
+	if w.Code != waxlabel.WarnInvalidTagKey {
+		return false
+	}
+	_, name, ok := strings.Cut(w.Message, ": ")
+	return ok && strings.HasPrefix(name, "iTun")
 }
 
 // Mapper is the waxlabel-backed meta.Mapper.
@@ -58,9 +86,10 @@ func New() Mapper { return Mapper{} }
 // step then failed.
 func NewLogged(log *slog.Logger) Mapper { return Mapper{log: log} }
 
-// Read parses src's metadata. Formats waxlabel cannot read (Ogg FLAC) yield
-// an empty Info with a warning: metadata stays best-effort, the audio
-// pipeline owns hard errors.
+// Read parses src's metadata. Every format WaxFlow decodes is one waxlabel
+// reads, so a parse failure means damaged metadata, not a format gap; such a
+// source yields an empty Info with a warning: metadata stays best-effort, the
+// audio pipeline owns hard errors.
 func (Mapper) Read(ctx context.Context, src container.Source, hint string, opts meta.ReadOptions) (*meta.Info, error) {
 	doc, err := waxlabel.Parse(ctx, src)
 	if err != nil {
@@ -79,7 +108,7 @@ func (Mapper) Read(ctx context.Context, src container.Source, hint string, opts 
 		info.Chapters = append(info.Chapters, container.Chapter{Start: ch.Start, End: ch.End, Title: ch.Title})
 	}
 	for _, w := range doc.Warnings() {
-		if sourceLint[w.Code] {
+		if sourceLint[w.Code] || machineKeyLint(w) {
 			info.Notes = append(info.Notes, w.String())
 			continue
 		}

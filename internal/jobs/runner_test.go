@@ -1283,9 +1283,11 @@ func TestFIFOSingleSlot(t *testing.T) {
 	}
 }
 
-// failingMapper stands in for the real waxlabel mapper on a format it cannot
-// identify: every Apply is an error. That is exactly what a .wv gets, so a job
-// targeting one must not call it at all.
+// failingMapper counts Apply calls and fails each one, so a post-pass that
+// should have been skipped shows up twice: in the count, and as the failure
+// in the job's warnings. The count is the load-bearing half: the real mapper
+// now rewrites a .wv or .ape fine, so a wrongly-run pass over one would
+// succeed and warn nothing.
 type failingMapper struct{ calls int }
 
 func (m *failingMapper) Read(context.Context, container.Source, string, meta.ReadOptions) (*meta.Info, error) {
@@ -1299,11 +1301,12 @@ func (m *failingMapper) Apply(context.Context, string, *meta.Info, []container.T
 
 // TestWavPackJobSkipsPostPass pins the third call site of the embeds-tags
 // rule. The CLI's transcode and split both skip the mapping post-pass for the
-// outputs whose muxer wrote the tags itself; the job runner gated only on MP4,
-// so every wavpack job called a mapper that cannot identify a .wv and finished
-// with the failure in its warnings. The tags still have to arrive, which is
-// the other half of the claim: skipping the pass is only correct because the
-// mux already did it.
+// outputs whose muxer wrote the tags itself; the job runner gated only on
+// MP4, so every wavpack job ran the post-pass, which in the days the mapper
+// could not identify a .wv finished with the failure in its warnings. The
+// mock's call count is what detects that regression today. The tags still
+// have to arrive, which is the other half of the claim: skipping the pass is
+// only correct because the mux already did it.
 func TestWavPackJobSkipsPostPass(t *testing.T) {
 	res, ref, srcID := openLib(t)
 	m := &failingMapper{}

@@ -195,7 +195,8 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 // apev2.Tag itself documents.
 //
 // Keys are not filtered here. apev2.Build drops the ones no reader could ask
-// for, and a pass over them first would be that rule written twice.
+// for and the item names the specification reserves, and a pass over them
+// first would be those rules written twice.
 func muxTags(tags []container.Tag) []apev2.Tag {
 	out := make([]apev2.Tag, len(tags))
 	for i, t := range tags {

@@ -144,12 +144,25 @@ func Parse(tag []byte) map[string][]string {
 // aliases maps the APEv2 spellings that differ from the canonical uppercase
 // vocabulary onto it. Everything else passes through uppercased, which is
 // already correct for the common fields and for REPLAYGAIN_*.
+//
+// The set must fold what the tag library folds for the same items, because
+// both readers speak for a .wv or .ape source: the mapper's view wins per key
+// and the Tagger fold fills in the keys it lacks, so a spelling only one side
+// folds surfaces as two tags carrying one value (see the Tagger doc in
+// container/metadata.go). The entries below TRACK..RECORD DATE exist for that
+// agreement; keep them matching the library's APE and shared alias tables.
 var aliases = map[string]string{
-	"TRACK":        "TRACKNUMBER",
-	"DISC":         "DISCNUMBER",
-	"YEAR":         "RECORDINGDATE",
-	"ALBUM ARTIST": "ALBUMARTIST",
-	"RECORD DATE":  "RECORDINGDATE",
+	"TRACK":                   "TRACKNUMBER",
+	"DISC":                    "DISCNUMBER",
+	"YEAR":                    "RECORDINGDATE",
+	"ALBUM ARTIST":            "ALBUMARTIST",
+	"RECORD DATE":             "RECORDINGDATE",
+	"DATE":                    "RECORDINGDATE",
+	"ORIGINALYEAR":            "ORIGINALDATE",
+	"PUBLISHER":               "LABEL",
+	"CATALOG":                 "CATALOGNUMBER",
+	"MUSICBRAINZ_ALBUMSTATUS": "RELEASESTATUS",
+	"MUSICBRAINZ_ALBUMTYPE":   "RELEASETYPE",
 }
 
 // apeSpelling is the write direction of aliases: the APEv2 spellings for the
@@ -167,6 +180,15 @@ var apeSpelling = map[string]string{
 	"RECORDINGDATE": "Year",
 	"ALBUMARTIST":   "Album Artist",
 }
+
+// reservedItemNames are the canonical forms of the item names the APEv2
+// specification forbids (ID3, TAG, OggS, MP+): each is the magic another
+// structure is found by, so an item wearing one plants a false signature
+// inside the tag block of the very file readers scan for it. APEv2 keys
+// compare case-insensitively, so the uppercase form is the whole comparison.
+// Build skips them like any other key the format cannot hold; Parse still
+// reads one off a file that carries it, since the value is real either way.
+var reservedItemNames = map[string]bool{"ID3": true, "TAG": true, "OGGS": true, "MP+": true}
 
 // canonical uppercases an item key and maps it onto the canonical vocabulary,
 // returning "" for a key no muxer could write back. The accepted range is
@@ -236,7 +258,7 @@ func Build(tags []Tag) ([]byte, error) {
 	at := make(map[string]int, len(tags))
 	for _, t := range tags {
 		name := canonical(t.Key)
-		if name == "" || t.Value == "" {
+		if name == "" || reservedItemNames[name] || t.Value == "" {
 			continue
 		}
 		if i, ok := at[name]; ok {

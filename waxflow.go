@@ -1528,10 +1528,13 @@ const (
 // Four do. The MP4 muxers embed an ilst in moov, which is also the only way
 // the fragmented form gets tags at all: the mapper reads that shape but
 // refuses to rewrite it. The Ogg muxer embeds the comment header at Begin.
-// The WavPack and Monkey's Audio muxers write the APEv2 block after the audio,
-// which is likewise the only way a .wv or a .ape gets tags, since waxlabel
-// cannot identify either format and a post-pass on one fails rather than
-// adding anything. Every other output, incl. Matroska (.mka/.webm), defers to
+// The WavPack and Monkey's Audio muxers write the APEv2 block after the
+// audio, so their tags are on the file before a post-pass could run and the
+// skip keeps one writer per block. The skip is also what keeps cover art off
+// those outputs: the muxers take none, and the pass that could now add it is
+// the one being skipped. Lifting that is a routing decision to take
+// deliberately, with the rewrite per piece it costs, not by deleting an arm
+// here. Every other output, incl. Matroska (.mka/.webm), defers to
 // the post-pass: the mka muxer accepts Tags but does not emit them (see
 // container/mka.MuxerOptions), so if it ever starts writing them at Begin, add
 // it here.
