@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/flac"
@@ -239,7 +240,141 @@ func (d *Demuxer) parse() error {
 	d.varBit = fi.Variable
 	d.num = d.si.Numbering(fi)
 	d.off, d.cur, d.valid = d.firstFrame, fi, true
+	return d.verifyLength()
+}
+
+// verifyLength checks STREAMINFO's declared total against the frames the file
+// actually carries, and reports what a read will deliver instead.
+//
+// The total is the encoder's back-patched claim, written once the input ran
+// out. A file cut short afterwards still carries it, so taking it on trust
+// hands every caller a duration no read can reach, and hands strict mode a
+// damaged file it has nothing to object to. An intact file settles the
+// question from its closing frame alone; see deliverableEnd for what a
+// damaged one costs.
+func (d *Demuxer) verifyLength() error {
+	if d.si.Samples <= 0 || d.empty {
+		return nil // no claim to check; an unknown length is already -1
+	}
+	end, ok := d.deliverableEnd()
+	if !ok || end >= d.si.Samples {
+		// A tail too damaged to locate is the read path's to report, and a
+		// stream longer than its declared total is the tolerated disagreement
+		// it has always been. Only a shortfall is this check's business.
+		return d.w.Err()
+	}
+	if err := d.warn(d.firstFrame,
+		"STREAMINFO declares %d samples but the frames end at %d", d.si.Samples, end); err != nil {
+		return err
+	}
+	d.track.Samples = end
 	return nil
+}
+
+// deliverableEnd returns the sample index one past the last frame a read can
+// deliver, which is what verifies STREAMINFO's declared total.
+//
+// An undamaged stream is settled by tailBacks without any of the walking
+// below, and that is the whole cost in the common case. Only a file whose tail
+// will not confirm pays for the measurement, which bisects to the closing
+// window and then advances frame by frame, since only a checksummed boundary
+// proves a frame is whole. A last frame whose end never confirms is the one
+// the file stops inside, and the audio ends where that frame began.
+//
+// The pass is a measurement and leaves nothing behind: the warnings it records
+// are dropped, the trailers findEnd confirms and peels are unpeeled, the
+// position is put back, and strict mode is off throughout. All of that is
+// read-time damage which a read reports when it reaches it, and which strict
+// mode refuses there. Were any of it left standing, a tagged file would be
+// refused at open and the peel would consume the very damage the read is meant
+// to find. The one thing this pass may object to is the length, which
+// verifyLength warns about itself.
+func (d *Demuxer) deliverableEnd() (int64, bool) {
+	strict, saved, dataEnd := d.opts.Strict, len(d.warnings), d.w.DataEnd()
+	off0, cur0, valid0 := d.off, d.cur, d.valid
+	d.opts.Strict = false
+	defer func() {
+		d.opts.Strict = strict
+		d.warnings = d.warnings[:saved]
+		d.w.SetDataEnd(dataEnd)
+		// The walk ends past the audio; reads start where it began.
+		d.off, d.cur, d.valid = off0, cur0, valid0
+	}()
+
+	if d.tailBacks() {
+		return d.si.Samples, true
+	}
+	off, fi, ok := d.bisect(math.MaxInt64) // no target: land on the last window
+	if !ok {
+		return 0, false
+	}
+	d.off, d.cur, d.valid = off, fi, true
+	for {
+		d.w.Trim(d.off)
+		end, next, nextOK, err := d.findEnd()
+		if err != nil || d.w.Err() != nil {
+			return 0, false
+		}
+		if end < 0 {
+			return d.num.Start(d.cur), true // stops inside this frame
+		}
+		if !nextOK {
+			return d.num.Start(d.cur) + int64(d.cur.BlockSize), true // clean end
+		}
+		d.off, d.cur = end, next
+	}
+}
+
+// tailBacks reports whether the frames really do reach STREAMINFO's declared
+// total, cheaply enough for every undamaged file to pay it and nothing more.
+//
+// The last frame of an intact stream begins exactly one block short of the
+// total, so a header in the closing window saying so, whose frame then
+// checksums to the end of the data, settles the question: only the real thing
+// gets both halves right. Reading the sample number off the header is what
+// keeps this cheap, since it rejects the sync bytes a payload spells without
+// checksumming anything, and the one candidate that survives costs a single
+// frame's CRC instead of the window's.
+//
+// A false negative is harmless: it falls through to the measurement, which is
+// exact. So this may only ever answer "confirmed", never "truncated".
+func (d *Demuxer) tailBacks() bool {
+	lo := max(d.firstFrame, d.w.DataEnd()-seekWindow)
+	for hi := d.w.DataEnd(); hi > lo; {
+		from := max(lo, hi-srcwin.Chunk)
+		buf := d.w.BytesAt(from, int(hi-from))
+		if len(buf) == 0 {
+			return false
+		}
+		for rel := len(buf); ; {
+			i := bytes.LastIndexByte(buf[:rel], 0xFF)
+			if i < 0 {
+				break
+			}
+			rel = i
+			cand := from + int64(i)
+			hdr := d.w.BytesAt(cand, flac.MaxFrameHeaderLen)
+			if !flac.SyncOK(hdr) {
+				continue
+			}
+			fi, err := flac.ParseFrameHeader(hdr)
+			if err != nil || !d.consistent(fi) ||
+				d.num.Start(fi)+int64(fi.BlockSize) != d.si.Samples {
+				continue
+			}
+			d.off, d.cur, d.valid = cand, fi, true
+			// A complete frame with nothing after it: findEnd peels any
+			// trailing tag on the way, which the caller unpeels.
+			if end, _, nextOK, err := d.findEnd(); err == nil && end >= 0 && !nextOK {
+				return true
+			}
+		}
+		if from == lo {
+			break // the whole window is scanned
+		}
+		hi = from + 1 // overlap by one, for a sync byte on the chunk edge
+	}
+	return false
 }
 
 // parseSeekTable reads up to maxSeekPoints seek points, dropping

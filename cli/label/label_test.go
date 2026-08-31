@@ -1,12 +1,15 @@
 package label_test
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/cli/label"
@@ -223,5 +226,111 @@ func writeFLAC(t *testing.T, wav []byte, path string) {
 	if _, err := waxflow.New().Transcode(t.Context(), container.BytesSource(wav), "wav", out,
 		waxflow.TranscodeOptions{Format: "flac"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// writeWavPack builds an output whose metadata store is APEv2: no chapter or
+// synced-lyrics store at all, and a Cover Art convention with exactly two item
+// names. It is the destination that exercises every unstorable-field branch.
+func writeWavPack(t *testing.T, path string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "sine-s16.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	if _, err := waxflow.New().Transcode(t.Context(), container.BytesSource(raw), "wav", out,
+		waxflow.TranscodeOptions{Format: "wavpack"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// smallPNG is a real signature and IHDR on a body every format can store, the
+// complement of oversizedPNG: here the picture is fine and only the
+// destination's slot count is at issue.
+func smallPNG() []byte {
+	data := make([]byte, 64)
+	copy(data, "\x89PNG\r\n\x1a\n")
+	copy(data[8:], "\x00\x00\x00\x0dIHDR")
+	copy(data[16:], "\x00\x00\x00\x10"+
+		"\x00\x00\x00\x10"+
+		"\x08\x02\x00\x00\x00")
+	return data
+}
+
+// TestUnstorableFieldIsDroppedNotFailed pins Apply's best-effort contract
+// against the fields an output has no store for. A source carrying chapters,
+// synced lyrics, or more covers than APE's two Cover Art item names must not
+// fail a finished transcode: the storable part applies and the rest is a plan
+// warning, which is the answer a cross-format copy gives.
+//
+// waxlabel v1.6.1 made the third cover a hard refusal (before it, the APE
+// writer's backstop dropped it), so without the drop option a three-picture
+// source silently became a failed metadata pass on every .wv/.ape output. The
+// chapter and lyric branches were refusals before that release too.
+func TestUnstorableFieldIsDroppedNotFailed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		info *meta.Info
+	}{
+		{"chapters", &meta.Info{Chapters: []container.Chapter{{Start: 0, End: time.Second, Title: "one"}}}},
+		{"synced lyrics", &meta.Info{Synced: []meta.SyncedLyrics{{
+			Language: "eng", Lines: []meta.SyncedLine{{Time: 0, Text: "la"}},
+		}}}},
+		{"a cover past the slots", &meta.Info{Pictures: []meta.Picture{
+			{MIME: "image/png", Front: true, Data: smallPNG()},
+			{MIME: "image/png", Data: smallPNG()},
+			{MIME: "image/png", Data: smallPNG()},
+		}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "out.wv")
+			writeWavPack(t, path)
+			tc.info.Tags = map[string][]string{"TITLE": {"survives"}}
+			if err := label.New().Apply(t.Context(), path, tc.info, nil); err != nil {
+				t.Fatalf("Apply failed on a field WavPack cannot store: %v", err)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := label.New().Read(t.Context(), container.BytesSource(raw), "wv",
+				meta.ReadOptions{Pictures: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The storable part of the same edit has to land, or "dropped the
+			// unstorable field" would be indistinguishable from writing nothing.
+			if got := info.Tags["TITLE"]; !slices.Equal(got, []string{"survives"}) {
+				t.Errorf("TITLE = %v, want [survives]", got)
+			}
+			if tc.name == "a cover past the slots" && len(info.Pictures) != 2 {
+				t.Errorf("pictures = %d, want 2 (both Cover Art slots filled)", len(info.Pictures))
+			}
+		})
+	}
+}
+
+// TestUnstorableDropIsLogged pins the drop's visibility. Apply returns only an
+// error, so a field it drops is invisible to the caller; the log is the one
+// channel left, and NewLogged is documented to carry exactly these notes.
+func TestUnstorableDropIsLogged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.wv")
+	writeWavPack(t, path)
+
+	var buf bytes.Buffer
+	m := label.NewLogged(slog.New(slog.NewTextHandler(&buf, nil)))
+	if err := m.Apply(t.Context(), path, &meta.Info{
+		Chapters: []container.Chapter{{Start: 0, End: time.Second, Title: "one"}},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := buf.String(); !strings.Contains(got, "metadata dropped") ||
+		!strings.Contains(got, "chapters") {
+		t.Errorf("dropped chapters were not logged; got %q", got)
 	}
 }

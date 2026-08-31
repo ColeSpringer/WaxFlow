@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 
 	"github.com/colespringer/waxflow/codec"
@@ -178,6 +179,19 @@ func (d *Demuxer) parse() error {
 	samples := int64(-1)
 	if h.BlockIndex == 0 && h.TotalSamples >= 0 {
 		samples = h.TotalSamples
+		// The total is a claim the first block carries, back-patched once the
+		// input ran out; a file cut short afterwards still carries it. Left
+		// unchecked it hands every caller a duration no read can reach, and
+		// strict mode a damaged file it has nothing to object to. Only a
+		// shortfall is this check's business: a stream running past its
+		// declared total is the tolerated disagreement it has always been.
+		if end, ok := d.deliverableEnd(); ok && end-d.initialIndex < samples {
+			if err := d.warn(off, "the header declares %d samples but the blocks end at %d",
+				samples, end-d.initialIndex); err != nil {
+				return err
+			}
+			samples = end - d.initialIndex
+		}
 	} else if end, ok := d.scanTail(); ok {
 		samples = end - d.initialIndex
 	}
@@ -252,6 +266,54 @@ func (d *Demuxer) scanTail() (int64, bool) {
 		hi = from + int64(len(magic)) - 1
 	}
 	return 0, false
+}
+
+// deliverableEnd returns the sample index one past the last block a read can
+// deliver, which is what verifies the header's declared total.
+//
+// The tail scan answers it outright for an intact stream, whose blocks tile
+// exactly onto the end of the audio, and that is the whole cost in the common
+// case. A stream cut mid-block has no such tiling and the scan declines, so the
+// fallback walks: bisection to the closing window, then block by block to the
+// last one whose bytes are all there (blockAt refuses a block running past the
+// data end, so a partial one is never counted).
+//
+// The walk is a measurement and leaves nothing behind: its warnings are
+// dropped and strict mode is off for the duration. The damage it crosses is
+// read-time damage, which a read reports when it reaches it and strict mode
+// refuses there; escalating it here would refuse a merely-resynced file at
+// open. The length is the one thing this pass objects to, and parse warns
+// about that itself.
+func (d *Demuxer) deliverableEnd() (int64, bool) {
+	if end, ok := d.scanTail(); ok {
+		return end, true
+	}
+	strict, saved := d.opts.Strict, len(d.warnings)
+	off0, cur0, valid0 := d.off, d.cur, d.valid
+	d.opts.Strict = false
+	defer func() {
+		d.opts.Strict = strict
+		d.warnings = d.warnings[:saved]
+		// The walk ends past the audio; reads start where it began.
+		d.off, d.cur, d.valid = off0, cur0, valid0
+	}()
+
+	off, h, ok := d.bisect(math.MaxInt64) // no target: land on the last window
+	if !ok {
+		return 0, false
+	}
+	d.off, d.cur, d.valid = off, h, true
+	end, found := int64(0), false
+	for d.valid {
+		if d.cur.Audio() {
+			end, found = d.cur.BlockIndex+int64(d.cur.BlockSamples), true
+		}
+		d.w.Trim(d.off)
+		if err := d.advance(); err != nil {
+			return 0, false
+		}
+	}
+	return end, found
 }
 
 // tilesToEnd reports whether the blocks from off tile exactly to end. It is

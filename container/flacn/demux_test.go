@@ -3,6 +3,7 @@ package flacn_test
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -498,5 +499,67 @@ func TestReadErrorPropagates(t *testing.T) {
 			}
 			return
 		}
+	}
+}
+
+// TestTruncatedStreamReportsWhatItCanDeliver pins the probe against a file
+// that promises more audio than it holds. STREAMINFO's total is the encoder's
+// back-patched claim, and a file cut short still carries it, so reporting it
+// unchecked hands every caller a duration no read can reach and lets strict
+// mode pass the damage. The declared total is checked against the frames that
+// are actually there, and the track reports what a read delivers.
+func TestTruncatedStreamReportsWhatItCanDeliver(t *testing.T) {
+	raw := fixture(t, "sine-s16.flac")
+	// One byte is the case the cheap confirmation is blind to on its own: the
+	// closing frame's header is still there claiming the declared total, and
+	// only checksumming that frame shows it never completes. The larger cuts
+	// take whole frames with them.
+	for _, cut := range []int{1, 500, 4000} {
+		t.Run(fmt.Sprint(cut, " bytes short"), func(t *testing.T) {
+			short := raw[:len(raw)-cut]
+
+			d, err := flacn.NewDemuxer(container.BytesSource(short), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			declared := d.Tracks()[0].Samples
+			if declared >= 15435 {
+				t.Errorf("samples = %d, still the declared total of a file cut short", declared)
+			}
+			if len(d.Warnings()) == 0 {
+				t.Error("a length the file cannot deliver was reported without a warning")
+			}
+			// The probe's number is only worth anything if a read agrees with
+			// it, and the read has to start from the beginning: the check runs
+			// to the end of the file and must leave the demuxer where it was.
+			if _, walked := walk(t, d); walked != declared {
+				t.Errorf("probe reported %d samples, a read delivered %d", declared, walked)
+			}
+
+			// Strict mode exists to refuse exactly this.
+			if _, err := flacn.NewDemuxer(container.BytesSource(short),
+				&flacn.DemuxerOptions{Strict: true}); err == nil {
+				t.Error("strict mode accepted a file that cannot deliver its declared length")
+			}
+		})
+	}
+}
+
+// TestIntactStreamKeepsItsDeclaredTotal is the other half: the length check
+// must be exact, not approximate. An undamaged file's frames end on the
+// declared sample, so the check has to stay silent and change nothing.
+func TestIntactStreamKeepsItsDeclaredTotal(t *testing.T) {
+	d, err := flacn.NewDemuxer(container.BytesSource(fixture(t, "sine-s16.flac")), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := d.Tracks()[0].Samples; got != 15435 {
+		t.Errorf("samples = %d, want the declared 15435", got)
+	}
+	if w := d.Warnings(); len(w) != 0 {
+		t.Errorf("clean file warned: %v", w)
+	}
+	if _, walked := walk(t, d); walked != 15435 {
+		t.Errorf("walked %d samples", walked)
 	}
 }

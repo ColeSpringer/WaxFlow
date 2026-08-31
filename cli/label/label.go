@@ -60,7 +60,10 @@ var sourceLint = map[waxlabel.WarningCode]bool{
 // not survive onto the output.
 //
 // The offending native name lives only in the message prose (the code is
-// keyless by design), so this matches the ": name" tail. If the wording
+// keyless by design), so this reads it off the first ": ". The library builds
+// every one of these warnings from one fixed phrase carrying exactly one, and
+// the name is the whole remainder, so cutting there takes a name containing
+// ": " intact where cutting at the last would slice through it. If the wording
 // changes upstream these fall back to warnings, which is noisy but not lossy.
 func machineKeyLint(w waxlabel.Warning) bool {
 	if w.Code != waxlabel.WarnInvalidTagKey {
@@ -82,8 +85,8 @@ var _ meta.Mapper = Mapper{}
 func New() Mapper { return Mapper{} }
 
 // NewLogged returns the mapper with log receiving the notes Apply demotes
-// rather than fails on: a write whose bytes landed but whose post-commit
-// step then failed.
+// rather than fails on: a field the output has no store for, and a write whose
+// bytes landed but whose post-commit step then failed.
 func NewLogged(log *slog.Logger) Mapper { return Mapper{log: log} }
 
 // Read parses src's metadata. Every format WaxFlow decodes is one waxlabel
@@ -194,7 +197,14 @@ func (m Mapper) Apply(ctx context.Context, path string, info *meta.Info, extra [
 			ed.Set(key, t.Value)
 		}
 	}
-	plan, err := ed.Prepare()
+	// WithAllowUnsupportedDrop makes a field the output has no store for (chapters
+	// or synced lyrics on WavPack, a cover past APE's two Cover Art slots) a plan
+	// warning instead of a hard error, which is the best-effort contract above:
+	// a finished transcode should not fail because the source carried a field the
+	// destination cannot hold. It is the same choice a cross-format copy makes,
+	// and what waxlabel's own CLI passes for set. The refusals that survive it
+	// still mean the output cannot take the metadata, so the buckets below stand.
+	plan, err := ed.Prepare(waxlabel.WithAllowUnsupportedDrop())
 	if err != nil {
 		// Two unrelated failures land here. The write refusals (a fragmented
 		// MP4, an iloc or saio the codec cannot patch, a chapter count or
@@ -214,6 +224,17 @@ func (m Mapper) Apply(ctx context.Context, path string, info *meta.Info, extra [
 		}
 		return waxerr.Wrap(waxerr.CodeInvalidRequest, "meta: metadata is not writable", err)
 	}
+	// The drops the option above allows are losses the caller cannot see, since
+	// Apply reports only an error. Log them: NewLogged exists for exactly the
+	// notes Apply demotes rather than fails on.
+	for _, w := range plan.Report().Warnings {
+		switch w.Code {
+		case waxlabel.WarnChaptersUnsupported, waxlabel.WarnSyncedLyricsUnsupported,
+			waxlabel.WarnPictureUnsupported:
+			m.logger().Warn("meta: metadata dropped, the output cannot hold it",
+				"path", path, "warning", w.String())
+		}
+	}
 	if _, res, err := plan.Execute(ctx, waxlabel.SaveBack()); err != nil {
 		// Committed with an error means the bytes landed and only a step after
 		// the rename failed (the directory fsync; waxlabel v1.4.1 documents the
@@ -226,11 +247,7 @@ func (m Mapper) Apply(ctx context.Context, path string, info *meta.Info, extra [
 		// and not ctx.Err(): the real outcome wins over the racing signal, and
 		// here the real outcome is a landed write.
 		if res.Committed {
-			log := m.log
-			if log == nil {
-				log = slog.Default()
-			}
-			log.Warn("meta: metadata write committed, a post-commit step failed", "path", path, "err", err)
+			m.logger().Warn("meta: metadata write committed, a post-commit step failed", "path", path, "err", err)
 			return nil
 		}
 		if canceled(err) {
@@ -239,6 +256,14 @@ func (m Mapper) Apply(ctx context.Context, path string, info *meta.Info, extra [
 		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "meta: metadata write", err)
 	}
 	return nil
+}
+
+// logger resolves the mapper's log, defaulting to slog.Default.
+func (m Mapper) logger() *slog.Logger {
+	if m.log == nil {
+		return slog.Default()
+	}
+	return m.log
 }
 
 // canceled reports whether err is the context giving out rather than the work

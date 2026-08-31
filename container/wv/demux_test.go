@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -471,5 +472,72 @@ func TestSeekOverAHoleLandsAtOrBeforeTheTarget(t *testing.T) {
 		if pkt.PTS != landed {
 			t.Errorf("post-seek packet at %d, want the landing %d", pkt.PTS, landed)
 		}
+	}
+}
+
+// TestTruncatedTailCorrectsTheDeclaredTotal pins the probe against a .wv whose
+// header promises more audio than the blocks hold. The total is back-patched
+// by the encoder onto the first block, so a file cut short still carries it;
+// TestTruncatedTail already shows the read stopping early, and this is the
+// other half of that fact reaching the caller who only probes.
+func TestTruncatedTailCorrectsTheDeclaredTotal(t *testing.T) {
+	full := fixture(t, "seek-mono.wv")
+	// A few bytes only clip the sample-free block the stream signs off with,
+	// which carries no audio, so the declared total still stands and the probe
+	// must leave it alone. Past that the cut takes audio blocks with it.
+	for _, tc := range []struct {
+		cut        int
+		losesAudio bool
+	}{{1, false}, {5, false}, {100, true}, {500, true}, {4000, true}} {
+		t.Run(fmt.Sprint(tc.cut, " bytes short"), func(t *testing.T) {
+			short := full[:len(full)-tc.cut]
+
+			d, err := wv.NewDemuxer(container.BytesSource(short), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			declared := d.Tracks()[0].Samples
+			// The one invariant that holds at every depth: a length the probe
+			// reports is a length a read delivers. The scan runs to the end of
+			// the file, so this also pins that it puts the position back.
+			if _, walked := walk(t, d); walked != declared {
+				t.Errorf("probe reported %d samples, a read delivered %d", declared, walked)
+			}
+			if !tc.losesAudio {
+				if declared != 40000 {
+					t.Errorf("samples = %d, want the declared 40000 kept", declared)
+				}
+				return
+			}
+			if declared >= 40000 {
+				t.Errorf("samples = %d, still the declared total of a file cut short", declared)
+			}
+			if len(d.Warnings()) == 0 {
+				t.Error("a length the file cannot deliver was reported without a warning")
+			}
+			if _, err := wv.NewDemuxer(container.BytesSource(short),
+				&wv.DemuxerOptions{Strict: true}); err == nil {
+				t.Error("strict mode accepted a file that cannot deliver its declared length")
+			}
+		})
+	}
+}
+
+// TestIntactStreamKeepsItsDeclaredTotal is the check's other half: an
+// undamaged stream's blocks tile to exactly the declared total, so verifying
+// it must stay silent and change nothing.
+func TestIntactStreamKeepsItsDeclaredTotal(t *testing.T) {
+	d, err := wv.NewDemuxer(container.BytesSource(fixture(t, "seek-mono.wv")), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := d.Tracks()[0].Samples; got != 40000 {
+		t.Errorf("samples = %d, want the declared 40000", got)
+	}
+	if w := d.Warnings(); len(w) != 0 {
+		t.Errorf("clean file warned: %v", w)
+	}
+	if _, walked := walk(t, d); walked != 40000 {
+		t.Errorf("walked %d samples", walked)
 	}
 }

@@ -145,40 +145,80 @@ func Parse(tag []byte) map[string][]string {
 // vocabulary onto it. Everything else passes through uppercased, which is
 // already correct for the common fields and for REPLAYGAIN_*.
 //
-// The set must fold what the tag library folds for the same items, because
-// both readers speak for a .wv or .ape source: the mapper's view wins per key
-// and the Tagger fold fills in the keys it lacks, so a spelling only one side
-// folds surfaces as two tags carrying one value (see the Tagger doc in
-// container/metadata.go). The entries below TRACK..RECORD DATE exist for that
-// agreement; keep them matching the library's APE and shared alias tables.
+// The set must fold exactly what the tag library folds for the same items,
+// because both readers speak for a .wv or .ape source: the mapper's view wins
+// per key and the Tagger fold fills in the keys it lacks, so a spelling only
+// one side folds surfaces as two tags carrying one value (see the Tagger doc
+// in container/metadata.go). The agreement runs both ways. Folding a spelling
+// the library leaves alone splits the value just as folding one less does,
+// which is why there is no entry for "Record Date": the library reads it as
+// the custom key of that name, so this must too.
+//
+// The library resolves an APE item name through its APE convention table and
+// then the shared alias table every codec reads through (internal/mapping/ape.go
+// and tag/aliases.go). Mirror both when either moves.
 var aliases = map[string]string{
-	"TRACK":                   "TRACKNUMBER",
-	"DISC":                    "DISCNUMBER",
-	"YEAR":                    "RECORDINGDATE",
-	"ALBUM ARTIST":            "ALBUMARTIST",
-	"RECORD DATE":             "RECORDINGDATE",
-	"DATE":                    "RECORDINGDATE",
-	"ORIGINALYEAR":            "ORIGINALDATE",
-	"PUBLISHER":               "LABEL",
-	"CATALOG":                 "CATALOGNUMBER",
+	// Bare and separated user spellings.
+	"TRACK":        "TRACKNUMBER",
+	"DISC":         "DISCNUMBER",
+	"YEAR":         "RECORDINGDATE",
+	"ALBUM ARTIST": "ALBUMARTIST",
+	"ALBUM_ARTIST": "ALBUMARTIST",
+	"DJ MIXER":     "DJMIXER",
+	"DJ_MIXER":     "DJMIXER",
+	"DJ-MIXER":     "DJMIXER",
+	// Dates. The library folds the Vorbis spellings and the Matroska native
+	// ones onto the same three keys.
+	"DATE":          "RECORDINGDATE",
+	"ORIGINALYEAR":  "ORIGINALDATE",
+	"DATE_RECORDED": "RECORDINGDATE",
+	"DATE_RELEASED": "RELEASEDATE",
+	"DATE_RELEASE":  "RELEASEDATE",
+	"DATE_ORIGINAL": "ORIGINALDATE",
+	"ORIGINAL_DATE": "ORIGINALDATE",
+	// Totals. TRACKTOTAL and DISCTOTAL need no entry; they uppercase onto
+	// themselves.
+	"TOTALTRACKS": "TRACKTOTAL",
+	"TOTALDISCS":  "DISCTOTAL",
+	"PART_NUMBER": "TRACKNUMBER",
+	"TOTAL_PARTS": "TRACKTOTAL",
+	"TOTAL_DISCS": "DISCTOTAL",
+	// Label and catalogue.
+	"PUBLISHER":      "LABEL",
+	"ORGANIZATION":   "LABEL",
+	"CATALOG":        "CATALOGNUMBER",
+	"CATALOG_NUMBER": "CATALOGNUMBER",
+	// Roles and the rest.
+	"LEAD_PERFORMER": "ARTIST",
+	"REMIXED_BY":     "REMIXER",
+	"CONTENT_GROUP":  "GROUPING",
+	"ENCODED_BY":     "ENCODEDBY",
+	"UNSYNCEDLYRICS": "LYRICS",
+	// The legacy Picard spellings, still the current APE convention.
 	"MUSICBRAINZ_ALBUMSTATUS": "RELEASESTATUS",
 	"MUSICBRAINZ_ALBUMTYPE":   "RELEASETYPE",
 }
 
 // apeSpelling is the write direction of aliases: the APEv2 spellings for the
 // canonical keys whose names, not merely whose case, differ from it. Writing
-// the canonical name instead puts the field where no reader looks -- ffmpeg's
-// APEv2 converter lists exactly these four, and the reference tools and
-// foobar2000 spell them the same way. Keys that differ only in case are left
-// alone; readers fold case, and there is no evidence to spend a table on.
+// the canonical name instead puts the field where no reader looks, and these
+// are the names ffmpeg's APEv2 converter, the reference tools, foobar2000 and
+// the tag library's own APE writer agree on. Keys that differ only in case are
+// left alone; readers fold case, and there is no evidence to spend a table on.
 //
-// RECORDINGDATE has two aliases pointing at it and only one way back: Year is
-// the documented APEv2 key, and Record Date the rarer synonym.
+// Several aliases point at RECORDINGDATE and only one leads back: Year is the
+// documented APEv2 key, the rest are synonyms.
 var apeSpelling = map[string]string{
 	"TRACKNUMBER":   "Track",
 	"DISCNUMBER":    "Disc",
 	"RECORDINGDATE": "Year",
 	"ALBUMARTIST":   "Album Artist",
+	// Catalog is the fifth: reading "Catalog" onto CATALOGNUMBER without it
+	// would write the canonical name back, which is neither what the tag
+	// library's own APE writer emits nor what foobar2000 looks for. A read
+	// alias whose key has no convention (ORGANIZATION onto LABEL) needs no row;
+	// there the canonical name is already the written one.
+	"CATALOGNUMBER": "Catalog",
 }
 
 // reservedItemNames are the canonical forms of the item names the APEv2

@@ -213,19 +213,25 @@ func TestBuildParseRoundTrip(t *testing.T) {
 
 // TestBuildSpellsAPEv2Keys pins the write direction of the alias table. The
 // canonical vocabulary is Vorbis comment's; APEv2's differs by more than case
-// for four fields, and writing the canonical name puts each of them where no
-// reader looks -- ffmpeg's APEv2 converter lists exactly these four, and the
-// reference tools and foobar2000 spell them the same way. Build used to
-// compute the canonical name only to test it and then write the caller's raw
-// key, so a .wv carried TRACKNUMBER, RECORDINGDATE and ALBUMARTIST where a
-// wavpack-written one carries Track, Year and Album Artist.
+// for a handful of fields, and writing the canonical name puts each of them
+// where no reader looks: ffmpeg's APEv2 converter, the reference tools,
+// foobar2000 and the tag library's own APE writer all spell them this way.
+// Build used to compute the canonical name only to test it and then write the
+// caller's raw key, so a .wv carried TRACKNUMBER, RECORDINGDATE and ALBUMARTIST
+// where a wavpack-written one carries Track, Year and Album Artist.
+//
+// A read alias earns a row here only when its key's APEv2 name differs by more
+// than case: Catalog does, LABEL (which ORGANIZATION and PUBLISHER fold onto)
+// does not.
 func TestBuildSpellsAPEv2Keys(t *testing.T) {
 	want := map[string]string{
 		"TRACKNUMBER":   "Track",
 		"DISCNUMBER":    "Disc",
 		"RECORDINGDATE": "Year",
 		"ALBUMARTIST":   "Album Artist",
+		"CATALOGNUMBER": "Catalog",
 		"TITLE":         "TITLE", // no APEv2 spelling of its own; case is not a difference
+		"LABEL":         "LABEL",
 	}
 	for canon, spelled := range want {
 		blob, err := Build([]Tag{{Key: canon, Value: "v"}})
@@ -367,6 +373,10 @@ func TestBuildOwnsKeyFiltering(t *testing.T) {
 // written back as two items. The cases are the item names real APEv2 taggers
 // write whose canonical key is not just the name uppercased.
 func TestParseAliasesMatchTheMapper(t *testing.T) {
+	// Every spelling the library resolves through its APE convention table or
+	// the shared alias table, with the canonical key it resolves to. Anything
+	// the library folds and this does not splits one value across two keys;
+	// the cases below the blank line are the ones a bare uppercase would miss.
 	for native, canon := range map[string]string{
 		"Date":                    "RECORDINGDATE",
 		"OriginalYear":            "ORIGINALDATE",
@@ -374,10 +384,37 @@ func TestParseAliasesMatchTheMapper(t *testing.T) {
 		"Catalog":                 "CATALOGNUMBER",
 		"MUSICBRAINZ_ALBUMSTATUS": "RELEASESTATUS",
 		"MUSICBRAINZ_ALBUMTYPE":   "RELEASETYPE",
+
+		"Track": "TRACKNUMBER", "Disc": "DISCNUMBER", "Year": "RECORDINGDATE",
+		"Album Artist": "ALBUMARTIST", "ALBUM_ARTIST": "ALBUMARTIST",
+		"DJ MIXER": "DJMIXER", "DJ_MIXER": "DJMIXER", "DJ-MIXER": "DJMIXER",
+		"TOTALTRACKS": "TRACKTOTAL", "TOTALDISCS": "DISCTOTAL",
+		"PART_NUMBER": "TRACKNUMBER", "TOTAL_PARTS": "TRACKTOTAL",
+		"TOTAL_DISCS": "DISCTOTAL", "ORGANIZATION": "LABEL",
+		"CATALOG_NUMBER": "CATALOGNUMBER", "LEAD_PERFORMER": "ARTIST",
+		"DATE_RECORDED": "RECORDINGDATE", "DATE_RELEASED": "RELEASEDATE",
+		"DATE_RELEASE": "RELEASEDATE", "DATE_ORIGINAL": "ORIGINALDATE",
+		"ORIGINAL_DATE": "ORIGINALDATE", "ENCODED_BY": "ENCODEDBY",
+		"REMIXED_BY": "REMIXER", "CONTENT_GROUP": "GROUPING",
+		"UNSYNCEDLYRICS": "LYRICS",
 	} {
 		got := Parse(build(true, item{key: native, value: "v"}))
 		if vs := got[canon]; len(vs) != 1 || vs[0] != "v" {
 			t.Errorf("item %q read back as %v, want it under %s (the mapper's key)", native, got, canon)
+		}
+	}
+}
+
+// TestParseFoldsNoMoreThanTheMapper is the agreement's other direction. A
+// spelling this folds and the library does not splits the value exactly as a
+// spelling only the library folds does, so the table may not run ahead either.
+// "Record Date" is the case that was: the library has no entry for it in
+// either table and reads it as the custom key of that name.
+func TestParseFoldsNoMoreThanTheMapper(t *testing.T) {
+	for _, native := range []string{"Record Date"} {
+		got := Parse(build(true, item{key: native, value: "v"}))
+		if vs := got["RECORD DATE"]; len(vs) != 1 || vs[0] != "v" {
+			t.Errorf("item %q read back as %v, want it under its own name like the mapper", native, got)
 		}
 	}
 }
