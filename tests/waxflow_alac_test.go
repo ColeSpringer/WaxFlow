@@ -211,3 +211,34 @@ func TestTranscodeALACRoundTrips(t *testing.T) {
 		audio.Put(got)
 	})
 }
+
+// TestALACWidenedDepthCostsOnlyTheRawBytes is the engine-level face of the
+// codec test of the same name: asking for a deeper depth than the source has
+// (BitDepth 24 on a 16-bit file) widens by a zero-filled shift, and those
+// zero low bytes must ride the stream raw. The whole pipeline is on the
+// hook here, not just the encoder: a widening that put anything but zeros
+// in the new byte would also break this. Before the encoder adopted the
+// reference's shift-off policy this same request came out more than twice
+// the 16-bit encode.
+func TestALACWidenedDepthCostsOnlyTheRawBytes(t *testing.T) {
+	e := waxflow.New()
+	const frames = 3*alac.FrameSize + 1500
+	wav, src := makeWAVOf(t, pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, 2, frames, partials)
+	defer audio.Put(src)
+
+	size := func(depth int) int {
+		out := &memWS{}
+		if _, err := e.Transcode(context.Background(), container.BytesSource(wav), "wav", out,
+			waxflow.TranscodeOptions{Format: "alac", Container: "progressive", BitDepth: depth}); err != nil {
+			t.Fatalf("transcode at depth %d: %v", depth, err)
+		}
+		return len(out.Buf)
+	}
+	base := size(0) // keeps the source's 16 bits
+	wide := size(24)
+	raw := 2 * frames // one raw low byte per sample per channel
+	if grew := wide - base; grew < raw || grew > raw+512 {
+		t.Errorf("24-bit encode of a 16-bit source grew %d bytes over the 16-bit encode's %d; "+
+			"the widening adds %d raw low bytes and nothing else should move", grew, base, raw)
+	}
+}

@@ -206,26 +206,45 @@ func TestEncodeDifferential(t *testing.T) {
 		cfg    pcm.Config
 		out    string
 		outExt string
+		tone   bool
+		mono   bool
 	}{
-		{"s16 to aiff", pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, "aiff", "aiff"},
-		{"s24 to aiff", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, "aiff", "aiff"},
-		{"f32 to wav", pcm.Config{Encoding: pcm.Float, Bits: 32}, "wav", "wav"},
-		{"u8 to aiff", pcm.Config{Encoding: pcm.UnsignedInt, Bits: 8}, "aiff", "aiff"},
-		{"s24 to wav", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, "wav", "wav"},
-		{"s16 to flac", pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, "flac", "flac"},
-		{"s24 to flac", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, "flac", "flac"},
-		{"s16 to alac", pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, "alac", "m4a"},
-		{"s24 to alac", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, "alac", "m4a"},
-		// 32-bit exercises the wasted-byte shift path (the coded high part is
-		// 24-bit); ffmpeg decodes it, unlike the full-width form it rejects.
-		{"s32 to alac", pcm.Config{Encoding: pcm.SignedInt, Bits: 32}, "alac", "m4a"},
+		{"s16 to aiff", pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, "aiff", "aiff", false, false},
+		{"s24 to aiff", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, "aiff", "aiff", false, false},
+		{"f32 to wav", pcm.Config{Encoding: pcm.Float, Bits: 32}, "wav", "wav", false, false},
+		{"u8 to aiff", pcm.Config{Encoding: pcm.UnsignedInt, Bits: 8}, "aiff", "aiff", false, false},
+		{"s24 to wav", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, "wav", "wav", false, false},
+		{"s16 to flac", pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, "flac", "flac", false, false},
+		{"s24 to flac", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, "flac", "flac", false, false},
+		{"s16 to alac", pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, "alac", "m4a", false, false},
+		// The deep ALAC depths shift low bytes into the raw region (one at
+		// 24-bit, two at 32) and their noise frames take the verbatim escape
+		// at 24-bit and 32-bit mono, so each depth runs twice: noise reaches
+		// the escape (or, for the 32-bit stereo pair, the compressed form the
+		// encoder holds it to for ffmpeg's sake) and the tone reaches the
+		// shifted Golomb-coded form, and ffmpeg has to take them all back.
+		// The mono 32-bit case is the escape shape ffmpeg does decode at that
+		// width, which is what scopes the encoder's no-escape rule to stereo.
+		{"s24 to alac", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, "alac", "m4a", false, false},
+		{"s24 tone to alac", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, "alac", "m4a", true, false},
+		{"s32 to alac", pcm.Config{Encoding: pcm.SignedInt, Bits: 32}, "alac", "m4a", false, false},
+		{"s32 tone to alac", pcm.Config{Encoding: pcm.SignedInt, Bits: 32}, "alac", "m4a", true, false},
+		{"s32 mono to alac", pcm.Config{Encoding: pcm.SignedInt, Bits: 32}, "alac", "m4a", false, true},
 	}
 	const frames = 4801
 	e := waxflow.New()
 	for _, tt := range matrix {
 		t.Run(tt.name, func(t *testing.T) {
-			f := tt.cfg.PCMFormat(48000, 2, audio.DefaultLayout(2))
+			ch := 2
+			if tt.mono {
+				ch = 1
+			}
+			f := tt.cfg.PCMFormat(48000, ch, audio.DefaultLayout(ch))
 			src := testutil.Noise(f, frames, 23)
+			if tt.tone {
+				audio.Put(src)
+				src = testutil.Sine(f, frames, 440, 0.8)
+			}
 			defer audio.Put(src)
 			wav := buildWAVFrom(t, tt.cfg, src)
 
@@ -246,7 +265,7 @@ func TestEncodeDifferential(t *testing.T) {
 			}
 
 			ref := testutil.FFprobeFile(t, outPath)
-			if ref.SampleRate != 48000 || ref.Channels != 2 || (ref.Samples >= 0 && ref.Samples != frames) {
+			if ref.SampleRate != 48000 || ref.Channels != ch || (ref.Samples >= 0 && ref.Samples != frames) {
 				t.Errorf("ffprobe on our output = %+v", ref)
 			}
 			if f.Type == audio.Int {

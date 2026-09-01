@@ -219,6 +219,23 @@ keg-only, so point the oracles at it explicitly or put it ahead on PATH).
 ### ALAC
 - `decode(encode(x)) == x` bit-exact; ffmpeg demuxes and decodes our fMP4.
 - Size: corpus total <= **1.05x** ffmpeg's ALAC encoder.
+- The shift-off policy is the reference encoder's (nothing through 20-bit,
+  one byte at 24, two at 32) and is pinned per depth, because losslessness
+  cannot see it: any choice round-trips, but unshifted 24-bit residuals
+  outgrow the Golomb kb cap and pay the 9-ones escape on loud material. A
+  16-bit signal widened to 24 or 32 bits costs **exactly the raw low bytes**
+  over its own 16-bit encode (an identity the tests assert per frame, not a
+  bound), where it used to cost up to 14 bits a sample.
+- **One deliberate divergence from the reference**: a 32-bit stereo frame
+  never takes the uncompressed escape, because ffmpeg (through 8.0.1) does
+  not implement the uncompressed stereo pair at 32 bits and fails the
+  decode (32-bit mono works, as do 16/20/24 both ways). Full-range 32-bit
+  stereo noise therefore stays compressed at a measured **17.5%** over its
+  raw size (37.6 bits a sample; the CPE side channel codes a bit wider than
+  the samples, which is most of the overhead). Every escape ffmpeg can read
+  remains reachable -- 32-bit mono included, held by its own differential
+  cell -- with its header carrying no shift, exactly as the reference
+  writes it.
 - >= **80x** realtime.
 
 ### APE (Monkey's Audio)
@@ -281,6 +298,19 @@ keg-only, so point the oracles at it explicitly or put it ahead on PATH).
   what holds everywhere measured -- both filtered levels beat the fast
   level, which runs no filter at all -- and the byte-identity above is the
   stronger claim anyway.
+- **24-bit widened from 16 is large, and that is the format too.** Monkey's
+  Audio has no wasted-bits mechanism (no field in a frame can say "the low
+  byte is always zero"), and the neural cascade's int16 history saturates
+  against residuals 256x its width, so a zero-shifted 16-bit signal costs
+  about eight to ten extra bits a sample -- measured 1.9x the 16-bit file on
+  tonal material and about 4x on quiet material, where FLAC, WavPack and
+  (since the shift fix) ALAC pay only their raw low bytes or nothing. The
+  cost is the reference encoder's own, byte for byte:
+  `TestAPEEncodeMatchesTheReferenceOnWidenedInput` pins our frames to its on
+  exactly this signal class, so a future "fix" that shrinks them has by
+  definition stopped writing what Monkey's Audio writes. A caller who wants
+  a small 24-bit file of 16-bit audio wants a different format, not a
+  different encoder.
 - A .ape asked for as APE takes the **transmux** rung: the frames move
   through byte for byte and only the header, the seek table and the file MD5
   are rebuilt, pinned on files from both encoders. The reference-encoded arm

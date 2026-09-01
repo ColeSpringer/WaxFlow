@@ -27,9 +27,9 @@ func TestGoldenMuxOutputs(t *testing.T) {
 	}{
 		// 16-bit stereo across two-plus fragments (compressed CPE, mixRes).
 		{"golden-s16-stereo.m4a", fmtFor(44100, 2, 16), alac.FrameSize*2 + 500, alac.FrameSize},
-		// 24-bit mono, single fragment (compressed SCE).
+		// 24-bit mono, single fragment (compressed SCE, one byte shifted off).
 		{"golden-s24-mono.m4a", fmtFor(48000, 1, 24), 3000, 0},
-		// 32-bit stereo (verbatim escape frames).
+		// 32-bit stereo (compressed CPE, two bytes shifted off).
 		{"golden-s32-stereo.m4a", fmtFor(48000, 2, 32), 2500, 0},
 	}
 	for _, tt := range cases {

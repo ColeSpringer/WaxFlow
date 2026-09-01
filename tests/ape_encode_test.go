@@ -797,3 +797,63 @@ func TestAPEEncodeMatchesTheReferenceOnSpecialFrames(t *testing.T) {
 		})
 	}
 }
+
+// TestAPEEncodeMatchesTheReferenceOnWidenedInput pins the byte comparison on
+// the one signal class where APE's size is a known sore spot: a 16-bit signal
+// widened to 24 bits by a zero-filled shift, which is what a deeper requested
+// depth makes of a 16-bit source. Monkey's Audio has no wasted-bits
+// mechanism, and the neural cascade's int16 history saturates against the
+// 256x residuals, so the format pays about nine extra bits a sample here
+// where FLAC and WavPack pay nothing -- roughly four times the 16-bit file on
+// quiet material. That cost is the reference encoder's own, not this port's,
+// and this test is the proof: the frames match its byte for byte, so any
+// future "fix" that shrinks them has by definition stopped writing what
+// Monkey's Audio writes.
+func TestAPEEncodeMatchesTheReferenceOnWidenedInput(t *testing.T) {
+	testutil.APETool(t)
+	e := waxflow.New()
+	dir := t.TempDir()
+	const frames = ape.BlocksPerFrame + 9000
+
+	// partials at 16-bit scale shifted up a byte: the exact widening the
+	// pipeline's depth conversion applies.
+	widened := func(b *audio.Buffer) {
+		f16 := b.Fmt
+		f16.BitDepth = 16
+		t16 := audio.Get(f16, b.N)
+		defer audio.Put(t16)
+		t16.N = b.N
+		partials(t16)
+		for c := range b.Fmt.Channels {
+			d, s := b.ChanI(c), t16.ChanI(c)
+			for i := range d {
+				d[i] = s[i] << 8
+			}
+		}
+	}
+	wav, src := makeWAVOf(t, pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, 2, frames, widened)
+	defer audio.Put(src)
+	ours := apeCodedFrames(t, encodeAPE(t, e, wav, waxflow.TranscodeOptions{}))
+
+	srcWav := filepath.Join(dir, "widened.wav")
+	if err := os.WriteFile(srcWav, wav, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	refRaw, err := os.ReadFile(testutil.APEEncodeFile(t, srcWav, "widened.ape", waxflow.APELevelNormal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := apeCodedFrames(t, refRaw)
+	if len(ours) != len(want) {
+		t.Fatalf("wrote %d frames, the reference wrote %d", len(ours), len(want))
+	}
+	for i := range want {
+		n := min(len(ours[i]), len(want[i]))
+		if i < len(want)-1 && len(ours[i]) != len(want[i]) {
+			t.Fatalf("frame %d is %d bytes, the reference's %d", i, len(ours[i]), len(want[i]))
+		}
+		if d := firstDiff(ours[i][:n], want[i][:n]); d != n {
+			t.Fatalf("frame %d differs from the reference's at byte %d of %d", i, d, n)
+		}
+	}
+}

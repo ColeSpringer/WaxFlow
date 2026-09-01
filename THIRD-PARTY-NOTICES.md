@@ -52,9 +52,12 @@ Entries follow this format:
 > (Apache-2.0): adaptive Golomb encode with the derived escape
 > (ag_enc.c), the forward adaptive-FIR predictor run in lockstep with
 > the decoder's adaptation (dp_enc.c / pc_block), the forward mixer
-> (matrix_enc.c / mix), and the magic-cookie layout. Ported faithfully
-> so decode(encode(x)) is bit-exact and third-party decoders accept the
-> output; the mixRes search, verbatim fallback policy, and muxer
+> (matrix_enc.c / mix), the per-depth shift-off policy (ALACEncoder.cpp:
+> one low byte at 24-bit, two at 32), and the magic-cookie layout.
+> Ported faithfully so decode(encode(x)) is bit-exact and third-party
+> decoders accept the output; the mixRes search, verbatim fallback
+> policy (including its 32-bit stereo exception, where the reference
+> escapes and we stay compressed for ffmpeg's sake), and muxer
 > integration are original.
 
 > **codec/aac decoder**: the decode logic (raw_data_block, ICS, section

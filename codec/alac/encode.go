@@ -36,8 +36,9 @@ const (
 
 // EncoderVersion is the encoder's algorithm revision for cache keys
 // (ADR-0004): the compressed bytes for a given input must not change
-// without a bump.
-const EncoderVersion = "alacenc-1"
+// without a bump. 2 adopted the reference's shift-off policy for 24- and
+// 32-bit input, which changed those depths' bytes.
+const EncoderVersion = "alacenc-2"
 
 // EncoderOptions configures the encoder. It is currently empty: ALAC is
 // lossless with no bitstream-visible quality knob (unlike FLAC levels or
@@ -63,9 +64,7 @@ type Encoder struct {
 	chanBits uint // predictor/Golomb channel width (coded depth, +1 for a CPE side)
 	// bytesShifted is how many low bytes are stripped from each sample and
 	// stored raw in the shift region, leaving a narrower high part to code.
-	// It is 0 for 16/20/24-bit and 1 for 32-bit, where coding the full width
-	// would need a 33-bit CPE side channel that overflows int32, the Golomb
-	// escape's 32-bit window, and third-party decoders (ffmpeg rejects it).
+	// The reference's choice per depth: 0 up to 20-bit, 1 at 24, 2 at 32.
 	bytesShifted int
 
 	pos      int64
@@ -124,10 +123,16 @@ func NewEncoder(f audio.Format, _ *EncoderOptions) (*Encoder, error) {
 	}
 
 	e := &Encoder{fmt: f, cfg: cfg}
-	// 32-bit strips its low byte into the shift region so the coded high part
-	// is 24-bit (a CPE side then fits in 25 bits, the same width as native
-	// 24-bit that every decoder handles). 16/20/24-bit code the full width.
-	if f.BitDepth == 32 {
+	// The shift-off choice is the reference encoder's. 32-bit must shift
+	// (matrixing the full width would need a 33-bit side channel), and two
+	// bytes leave a 16-bit high part the Golomb coder handles well. 24-bit
+	// shifts one byte for size alone: unshifted, its residuals outgrow the
+	// kb cap and pay the coder's escape on loud material, which made a
+	// 24-bit encode of widened 16-bit audio more than twice the 16-bit one.
+	switch f.BitDepth {
+	case 32:
+		e.bytesShifted = 2
+	case 24:
 		e.bytesShifted = 1
 	}
 	sideBit := uint(0)
@@ -209,10 +214,21 @@ func (e *Encoder) Encode(src *audio.Buffer, emit func(codec.Packet) error) error
 }
 
 // encodeFrame assembles one frame into e.w: a channel element, then the
-// frame stop tag, byte-aligned. The compressed form is written first; for
-// 16/20/24-bit the smaller of it and the uncompressed escape form is kept,
-// but a shifted (32-bit) stream stays compressed because the escape element
-// codes the full un-shifted width, which is exactly what shifting avoids.
+// frame stop tag, byte-aligned. The compressed form is written first and
+// the uncompressed escape form replaces it when no larger: the escape codes
+// the full un-shifted width with no shift region, so for a shifted depth the
+// comparison is raw samples against coded high part plus raw low bytes, and
+// full-range noise still comes out ahead escaping.
+//
+// The one shape that never escapes is a 32-bit stereo pair. ffmpeg
+// (through 8.0.1) does not implement the uncompressed pair at 32 bits and
+// fails the whole decode on it (32-bit mono works, as do 16 and 24 both
+// ways), and a file some decoders cannot read is worse than one a sixth
+// larger on noise, which is what the compressed form measures there over
+// the escape. The reference encoder does escape on that shape; this is a
+// deliberate divergence, scoped to exactly the shape ffmpeg refuses, and
+// it is why the escape gate below tests it rather than trusting the size
+// comparison.
 func (e *Encoder) encodeFrame(src *audio.Buffer) {
 	n := src.N
 	stereo := e.fmt.Channels == 2
@@ -234,7 +250,7 @@ func (e *Encoder) encodeFrame(src *audio.Buffer) {
 	} else {
 		e.writeMonoCompressed(n)
 	}
-	if e.bytesShifted == 0 && e.w.bitLen() >= 3+verbatimElemBits(n, e.fmt.Channels, e.fmt.BitDepth) {
+	if !(e.fmt.BitDepth == 32 && stereo) && e.w.bitLen() >= 3+verbatimElemBits(n, e.fmt.Channels, e.fmt.BitDepth) {
 		e.w.reset() // verbatim is no larger; prefer it
 		e.writeVerbatimFrame(n, tag)
 	}
@@ -265,12 +281,16 @@ func verbatimElemBits(n, channels, bitDepth int) int {
 }
 
 // writeElementHeader emits the common per-element header (the inverse of the
-// decoder's elementHeader). The escape (uncompressed) form carries no shift,
-// so a shifted stream never takes it.
+// decoder's elementHeader). An escape element states no shift: it carries the
+// samples at the plain depth, so its header's shift bits are zero whatever
+// the compressed form would have used, as the reference writes it.
 func (e *Encoder) writeElementHeader(n int, escape bool) {
 	e.w.writeBits(4, 0)  // elementInstanceTag
 	e.w.writeBits(12, 0) // reserved
-	hdr := uint64(e.bytesShifted) << 1
+	var hdr uint64
+	if !escape {
+		hdr = uint64(e.bytesShifted) << 1
+	}
 	if n < FrameSize {
 		hdr |= 8 // partialFrame
 	}

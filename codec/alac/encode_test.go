@@ -91,8 +91,11 @@ func fillNoise(b *audio.Buffer, seed uint64) {
 
 // fillSine writes a compressible tone (a smooth signal the predictor
 // tracks), so the compressed path and the mixRes search are exercised.
+// The amplitude math is int64: 1<<31 overflows int32 and would flip the
+// waveform's sign at depth 32, with the out-of-range peaks then landing
+// wherever the platform's float-to-int conversion puts them.
 func fillSine(b *audio.Buffer, seed uint64) {
-	amp := float64(int32(1)<<(b.Fmt.BitDepth-1)) - 1
+	amp := float64(int64(1)<<(b.Fmt.BitDepth-1) - 1)
 	for c := 0; c < b.Fmt.Channels; c++ {
 		s := b.ChanI(c)
 		freq := 0.01 + 0.003*float64(c) + 0.0001*float64(seed%7)
@@ -142,52 +145,176 @@ func TestEncodeRoundTrip(t *testing.T) {
 	}
 }
 
-// frameEscape reads the escape bit of the first element in an ALAC frame
-// (element tag 3, elementInstanceTag 4, reserved 12, then the 4-bit header
-// whose low bit is escape).
-func frameEscape(pkt []byte) bool {
+// frameHeader reads the first element's 4-bit header in an ALAC frame
+// (element tag 3, elementInstanceTag 4, reserved 12, then partialFrame,
+// bytesShifted, and the escape bit).
+func frameHeader(pkt []byte) (bytesShifted uint32, escape bool) {
 	r := &bitReader{data: pkt, validBits: len(pkt) * 8}
 	r.read(3)
 	r.read(4)
 	r.read(12)
-	return r.read(4)&1 != 0
+	hdr := r.read(4)
+	return hdr >> 1 & 3, hdr&1 != 0
+}
+
+// encodeOneFrame encodes one full frame at the given depth and returns the
+// packet bytes.
+func encodeOneFrame(t *testing.T, depth, ch int, fill func(*audio.Buffer, uint64)) []byte {
+	t.Helper()
+	f := audio.Format{Rate: 44100, Channels: ch, Layout: audio.DefaultLayout(ch), Type: audio.Int, BitDepth: depth}
+	src := audio.Get(f, FrameSize)
+	defer audio.Put(src)
+	src.N = FrameSize
+	fill(src, 5)
+	enc, err := NewEncoder(f, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pkt []byte
+	if err := enc.Encode(src, func(p codec.Packet) error {
+		pkt = append([]byte(nil), p.Data...)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return pkt
 }
 
 // TestCompressedVsVerbatimChoice pins the size-driven escape decision, which
 // losslessness alone cannot exercise (both branches decode identically):
 // incompressible full-range noise takes the uncompressed escape element,
-// while a compressible tone stays in the Golomb-coded form.
+// while a compressible tone stays in the Golomb-coded form. At 24 bits the
+// compressed form carries the shift region on top of the coded high part,
+// so full-range noise exceeds its own raw width there too; the escape must
+// stay reachable, and its header must carry no shift (the reference writes
+// escapes at the plain depth, shift bits zero, and decoders read them that
+// way). The 32-bit stereo pair is the exception and never escapes, ffmpeg
+// lacking the uncompressed pair at that width; 32-bit mono escapes as the
+// reference does. See encodeFrame.
 func TestCompressedVsVerbatimChoice(t *testing.T) {
-	f := audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
 	cases := []struct {
 		name       string
+		depth, ch  int
 		fill       func(*audio.Buffer, uint64)
 		wantEscape bool
 	}{
-		{"noise takes verbatim", fillNoise, true},
-		{"tone takes compressed", fillSine, false},
+		{"16-bit noise takes verbatim", 16, 2, fillNoise, true},
+		{"16-bit tone takes compressed", 16, 2, fillSine, false},
+		{"24-bit noise takes verbatim", 24, 2, fillNoise, true},
+		{"24-bit tone takes compressed", 24, 2, fillSine, false},
+		{"32-bit stereo noise stays compressed", 32, 2, fillNoise, false},
+		{"32-bit mono noise takes verbatim", 32, 1, fillNoise, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			src := audio.Get(f, FrameSize)
-			defer audio.Put(src)
-			src.N = FrameSize
-			tc.fill(src, 5)
-			enc, err := NewEncoder(f, nil)
-			if err != nil {
-				t.Fatal(err)
+			pkt := encodeOneFrame(t, tc.depth, tc.ch, tc.fill)
+			shift, escape := frameHeader(pkt)
+			if escape != tc.wantEscape {
+				t.Errorf("escape bit = %v, want %v", escape, tc.wantEscape)
 			}
-			var pkt []byte
-			if err := enc.Encode(src, func(p codec.Packet) error {
-				pkt = append([]byte(nil), p.Data...)
-				return nil
-			}); err != nil {
-				t.Fatal(err)
-			}
-			if got := frameEscape(pkt); got != tc.wantEscape {
-				t.Errorf("escape bit = %v, want %v", got, tc.wantEscape)
+			if escape && shift != 0 {
+				t.Errorf("escape header carries shift %d, the reference writes 0", shift)
 			}
 		})
+	}
+}
+
+// TestShiftPolicyMatchesTheReference pins the per-depth shift-off choice to
+// the reference encoder's: nothing at 16 and 20 bits, one byte at 24, two at
+// 32 ("24-bit mode really improves with one byte shifted off"; 32-bit cannot
+// be matrixed at full width). Losslessness cannot see the choice, since any
+// shift round-trips; what it decides is size. Unshifted, a 24-bit stream's
+// residuals outgrow the Golomb parameter's kb cap and pay the 9-ones escape
+// on loud material, which is what made a 24-bit encode of widened 16-bit
+// audio more than twice the 16-bit encode.
+func TestShiftPolicyMatchesTheReference(t *testing.T) {
+	want := map[int]uint32{16: 0, 20: 0, 24: 1, 32: 2}
+	for depth, wantShift := range want {
+		for _, ch := range []int{1, 2} {
+			t.Run(itoa(depth)+"-bit/"+itoa(ch)+"ch", func(t *testing.T) {
+				pkt := encodeOneFrame(t, depth, ch, fillSine)
+				shift, escape := frameHeader(pkt)
+				if escape {
+					t.Fatal("tone frame took the escape; the shift choice is unobservable")
+				}
+				if shift != wantShift {
+					t.Errorf("bytesShifted = %d, want %d", shift, wantShift)
+				}
+			})
+		}
+	}
+}
+
+// TestWidenedDepthCostsOnlyTheRawBytes is the size property behind the shift:
+// a 16-bit signal widened to a deeper depth (low bytes all zero) must cost
+// exactly the raw low bytes on top of its own 16-bit encode. With the shift
+// in place this is an identity, not an approximation: the coded high part IS
+// the 16-bit stream (same channel width, same residuals, same headers), and
+// the shift region adds its bytes verbatim. Without the shift the widened
+// residuals drag the Golomb coder into its escape and the cost has no bound
+// worth stating, which is how this was found (a 24-bit APE/ALAC encode of
+// widened 16-bit audio several times its 16-bit size).
+func TestWidenedDepthCostsOnlyTheRawBytes(t *testing.T) {
+	for _, ch := range []int{1, 2} {
+		for _, tc := range []struct {
+			depth int
+			shift uint // widen by this many bits; shifted bytes = shift/8
+		}{{24, 8}, {32, 16}} {
+			t.Run(itoa(tc.depth)+"-bit/"+itoa(ch)+"ch", func(t *testing.T) {
+				n := FrameSize + 1517 // a full frame plus a partial one
+				f16 := audio.Format{Rate: 44100, Channels: ch, Layout: audio.DefaultLayout(ch), Type: audio.Int, BitDepth: 16}
+				fw := f16
+				fw.BitDepth = tc.depth
+
+				src16 := audio.Get(f16, n)
+				defer audio.Put(src16)
+				src16.N = n
+				fillSine(src16, 9)
+				srcW := audio.Get(fw, n)
+				defer audio.Put(srcW)
+				srcW.N = n
+				for c := 0; c < ch; c++ {
+					w, s := srcW.ChanI(c), src16.ChanI(c)
+					for i := 0; i < n; i++ {
+						w[i] = s[i] << tc.shift
+					}
+				}
+
+				sizes := func(f audio.Format, src *audio.Buffer) []int {
+					enc, err := NewEncoder(f, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					frame := audio.Get(f, FrameSize)
+					defer audio.Put(frame)
+					var out []int
+					for off := 0; off < src.N; off += FrameSize {
+						m := min(FrameSize, src.N-off)
+						frame.N = m
+						for c := 0; c < f.Channels; c++ {
+							copy(frame.ChanI(c), src.I[c*src.Stride+off:c*src.Stride+off+m])
+						}
+						if err := enc.Encode(frame, func(p codec.Packet) error {
+							out = append(out, len(p.Data))
+							return nil
+						}); err != nil {
+							t.Fatal(err)
+						}
+					}
+					return out
+				}
+				got16 := sizes(f16, src16)
+				gotW := sizes(fw, srcW)
+				raw := int(tc.shift) / 8 * ch
+				for i := range got16 {
+					m := min(FrameSize, n-i*FrameSize)
+					if want := got16[i] + m*raw; gotW[i] != want {
+						t.Errorf("frame %d: %d-bit packet is %d bytes, want the 16-bit packet's %d plus %d raw low bytes = %d",
+							i, tc.depth, gotW[i], got16[i], m*raw, want)
+					}
+				}
+			})
+		}
 	}
 }
 
