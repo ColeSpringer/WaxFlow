@@ -79,6 +79,14 @@ func BenchmarkEngineDecodeHEAAC(b *testing.B) {
 	benchOpenAndDecode(b, repoPath("codec", "aac", "testdata", "fdk_he_v1.m4a"), "m4a")
 }
 
+func BenchmarkEngineDecodeMusepackSV8(b *testing.B) {
+	benchOpenAndDecode(b, repoPath("testdata", "sine-s16.mpc"), "")
+}
+
+func BenchmarkEngineDecodeMusepackSV7(b *testing.B) {
+	benchOpenAndDecode(b, repoPath("testdata", "noise-s16.mpc"), "")
+}
+
 func BenchmarkEngineDecodeFLACVector01(b *testing.B) {
 	path := filepath.Join(testutil.VectorsDir(), "flac", "subset", "01 - blocksize 4096.flac")
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {

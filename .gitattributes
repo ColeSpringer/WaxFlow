@@ -16,6 +16,7 @@
 *.mka  binary
 *.mp3  binary
 *.mp4  binary
+*.mpc  binary
 *.oga  binary
 *.ogg  binary
 *.opus binary

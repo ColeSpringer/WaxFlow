@@ -314,6 +314,35 @@ Entries follow this format:
 > silent on a combination, the decoder refuses it by name rather than
 > guessing at FFmpeg's behaviour.
 
+> **codec/musepack decoder and container/mpc**: a clean-room port of
+> *libmpcdec* from the Musepack Development Team's musepack_src_r475
+> (BSD-3-Clause, Copyright (c) 2005-2009, The Musepack Development Team),
+> https://www.musepack.net. The decoder is the format's own, so the parts that
+> define what a stream means are ported faithfully and the decode comes out
+> bit-identical to its float build: the SV7 Huffman books and the SV8
+> canonical books with their symbol tables (`huffman.c`), both frame syntaxes
+> with their scalefactor and mid/side state machines and the requantisation
+> pass (`mpc_decoder.c`), the requantisation coefficients, offsets and the
+> scalefactor table's construction (`requant.c`), the polyphase synthesis with
+> its fast DCT, window and noise generator (`synth_filter.c`), the header
+> field layouts and the replay gain conversions (`streaminfo.c`), the
+> variable-length size, Golomb, log and enumeration codes
+> (`mpc_bits_reader.c`; the enumeration and log tables are computed here from
+> binomial coefficients rather than transcribed), and on the container side
+> the SV7 word order, the last-frame tail and decay-frame rule, the SV8 packet
+> framing, the seek table's code and sign rule and the chapter search
+> (`mpc_demux.c`). Original: the bit reader, the packet model and the
+> realignment of SV7 frames into byte-aligned packets, the state scanners, the
+> seek index, the demuxer and the codec.Decoder integration. The synthesis is
+> a second copy of the MPEG-1 filterbank beside codec/mp3's, kept separate so
+> the reference's arithmetic order is reproduced exactly and a shipped codec
+> stays untouched. The encoders in the same tarball (mpcenc, libmpcenc,
+> libmpcpsy) and mppenc 1.16 are LGPL and were never opened: `make mpc-tools`
+> builds them as test-time fixture generators only, beside the BSD `mpcdec`,
+> `mpc2sv8` and `mpccut` tools and `scripts/mpcdecraw`, which is our own code
+> linking libmpcdec to dump its float output for the differential. None of
+> them enters the runtime pipeline.
+
 > **internal/testutil opus_compare**: `internal/testutil/opuscompare.go` is
 > a Go port of *libopus*'s `src/opus_compare.c` (BSD-3-Clause),
 > https://gitlab.xiph.org/xiph/opus, the RFC 6716 section 6 decoder

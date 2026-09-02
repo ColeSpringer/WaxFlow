@@ -23,6 +23,7 @@ func TestFixtureSeekSampleExact(t *testing.T) {
 		"sine-5_1-s16.flac", "noise-s16.flac",
 		"sine-s16.oga", "noise-s24.oga",
 		"sine-s16.ape", "noise-s16.ape",
+		"sine-s16.mpc", "noise-s16.mpc",
 	} {
 		t.Run(name, func(t *testing.T) {
 			src := fixtureSource(t, name)

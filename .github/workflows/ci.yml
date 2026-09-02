@@ -127,7 +127,11 @@ jobs:
       # has no APE encoder, so the only APE encoder there is gets built from
       # the pinned SDK source here.
       - run: make ape-tools
-      - run: WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_REQUIRE_FLAC=1 WAXFLOW_REQUIRE_WAVPACK=1 WAXFLOW_REQUIRE_MAC=1 WAXFLOW_REQUIRE_VECTORS=1 go test -timeout 30m ./...
+      # The Musepack reference tools: both encoders the format has ever had,
+      # the reference decoder's float output and the repacker and cutter, built
+      # from the pinned tarballs the same way.
+      - run: make mpc-tools
+      - run: WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_REQUIRE_FLAC=1 WAXFLOW_REQUIRE_WAVPACK=1 WAXFLOW_REQUIRE_MAC=1 WAXFLOW_REQUIRE_MPC=1 WAXFLOW_REQUIRE_VECTORS=1 go test -timeout 30m ./...
 
   # 45s per fuzz target; nightly.yml runs the long soak. Finds every
   # native Fuzz* target automatically. scripts/fuzz.sh classifies outcomes so

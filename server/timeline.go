@@ -408,9 +408,13 @@ func (s *Server) mintTimelineFrom(ctx context.Context, srcs []*source.File, span
 // What is slow is a format whose walk must scan every frame header to build
 // an index, which reads the whole file. container.Indexer is exactly the
 // tree's mark for that: a demuxer implements it when its index is expensive
-// enough to be worth persisting, and MP3 is the only one that does. So a cold
-// MP3 queue, which the walk reads end to end, becomes a job, and a FLAC album
-// or any queue already measured mints in one round trip.
+// enough to be worth persisting. MP3 does, and so does Musepack, whose index
+// is the seek scanner's state cache; but a Musepack track's length is exact
+// from the header walk at open (the one uncounted shape is measured by parsing
+// its last block, and only a damaged one stays advisory), so the gate below
+// never fires for it. A cold MP3 queue, which the walk reads end to end,
+// becomes a job, and a FLAC album or any queue already measured mints in one
+// round trip.
 func (s *Server) timelineNeedsJob(srcs []*source.File) (bool, error) {
 	for _, f := range srcs {
 		if s.trackIsExact(f) {

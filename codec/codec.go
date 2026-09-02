@@ -28,6 +28,9 @@ const (
 	// in the track's WAVEFORMATEX config, so a second ID would double the
 	// registry, caps, and cache-key bookkeeping for what the config carries.
 	WMA ID = "wma"
+	// Musepack covers stream versions 7 and 8 under one ID for the same
+	// reason: the version rides in the track's config.
+	Musepack ID = "musepack"
 )
 
 // Packet is one compressed unit as a codec defines it: a FLAC frame, an

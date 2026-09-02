@@ -46,6 +46,8 @@ Operationally:
 | codec/wma (decoder) | `docs/notes/wma-bitstream.md` and `docs/notes/wma-oracle-corpus.md`, the ADR-0001 analysis artifacts the row above records, plus the data-only tables beside them. NOTHING ELSE: this stage did not open FFmpeg, and the separation is auditable in history because the notes were merged before it started. There is no specification to cite, so the notes ARE the description of record; where the implementation found them silent (v1 with variable block lengths, and stereo v1 with a bit reservoir) it refuses the combination by name rather than inventing behaviour, and the gap is written down instead of guessed at | two encoders and one decoder. The `ffmpeg` binary generates most fixtures and decodes all of them as the differential oracle; WINDOWS' OWN encoder, driven through Media Foundation by `scripts/wmfenc`, generates the rest. The second one is not a convenience: ffmpeg's WMA encoder is measurably narrow (a flat exponent curve, no noise fill, both channels always coded, no flags2 bit past the first, no bit rate under 24 kbit/s), and Microsoft's reaches the bit reservoir, variable block lengths, LSP exponents, noise fill and the tabulated band tables that it cannot. Scoring Microsoft's output with ffmpeg's decoder keeps the encoder and the oracle independent. Both are test-time only. What neither reaches, and the one defect the second one found, are named in docs/quality-gates.md |
 | container/adts (muxer) | ISO 14496-3 1.A (spec); the write-side inverse of the demuxer's header parser | none |
 | container/mp4 (esds writer) | ISO 14496-1 section 7.2.6 descriptors (spec); the write-side inverse of the demuxer's parser | none |
+| codec/musepack (decoder) | libmpcdec from musepack_src_r475 (BSD-3-Clause), the format's own decoder: the SV7 and SV8 Huffman books and their canonical decoding, both frame syntaxes and the scalefactor state machines, the requantisation tables, the noise generator, the polyphase synthesis and its window, and the header field conversions, ported faithfully because a decode has to match the reference's own output (see THIRD-PARTY-NOTICES); the enumeration, log and Golomb codes computed from their definitions rather than transcribed; the SV8 packet specification as mirrored at mutagen-specs.readthedocs.io; the tarball and mppenc 1.16 SHA-256-pinned so `make mpc-tools` builds the reference tools | mpcenc (in the same tarball) and mppenc 1.16 are LGPL and reached as encoder binaries only, never opened; ffmpeg's mpc7/mpc8 decoders as the secondary differential oracle, whose noise-substitution level is recorded as a measured divergence in docs/quality-gates.md |
+| container/mpc | libmpcdec's demuxer (BSD-3-Clause): the SV7 word order, the tail count and decay-frame rule, the SV8 packet framing, the seek table's code and sign rule, and the chapter search; the SV8 specification for the packet keys | ffmpeg's two Musepack demuxers reached only through `ffprobe -show_packets` (never opened) |
 
 ## AAC patent-status review
 
@@ -97,6 +99,16 @@ advice.
   only, no eSBR tool exists to signal, and the expired families above
   cover the encode direction of the same technology. xHE/USAC or a PS
   (v2) encoder would trigger a redo.
+
+## Musepack patent-status note
+
+**Recorded 2026-09-01, when the Musepack decoder was registered.** A
+good-faith engineering note, not legal advice. Musepack is MPEG-1 Layer II
+machinery (the 32-band polyphase filterbank, the 36-sample subband frame)
+with its own quantisation and entropy coding. The Layer II patents expired
+worldwide by 2017, the format's authors have always stated it to be
+patent-free, and no licensing pool ever existed for it. Decode only; the
+encoder side is a non-goal and would change nothing here anyway.
 
 ## Listening-test protocol
 

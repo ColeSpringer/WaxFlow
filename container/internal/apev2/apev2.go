@@ -102,6 +102,18 @@ func Parse(tag []byte) map[string][]string {
 		items = items[FooterLen:]
 	}
 
+	return parseItems(items, count)
+}
+
+// ParseItems reads a bare run of APEv2 items: no header, no footer, no count,
+// which is how a Musepack SV8 chapter packet carries its tag. The run is
+// parsed until it ends or the item cap is reached.
+func ParseItems(items []byte) map[string][]string {
+	return parseItems(items, maxItems)
+}
+
+// parseItems reads up to count items off the front of items.
+func parseItems(items []byte, count int) map[string][]string {
 	out := map[string][]string{}
 	for range count {
 		if len(items) < 8 {

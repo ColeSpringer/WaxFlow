@@ -194,6 +194,24 @@ var Vectors = []Vector{
 	// concatenated to one ~15 s item per speaker. Fetched at test time and
 	// cached like the tarballs; never committed.
 	{Name: "opus/speech/tsp48k.zip", URL: "https://www.mmsp.ece.mcgill.ca/Documents/Data/TSP-Speech-Database/48k.zip", SHA256: "9cfb3a3a13014c8ff90770a5d1923f376da73ac927b9100f09826f60cf06cf43"},
+	// The Musepack reference sources (musepack.net), which the decoder is
+	// ported from and which `make mpc-tools` builds the reference tools out
+	// of: libmpcdec and the mpcdec, mpc2sv8 and mpccut tools in the r475
+	// tarball may be ported (see THIRD-PARTY-NOTICES); the encoders (mpcenc in
+	// the same tarball, mppenc 1.16 for SV7) may not be opened and are built as
+	// binaries only. ffmpeg has no Musepack encoder and no distribution
+	// packages these, so they are the only way to generate a .mpc at all:
+	// test-time fixture generators and oracles, never a runtime dependency.
+	// The mppenc tarball is bzip2, which the fetcher extracts itself
+	// (-extract) because not every box has the tool.
+	{Name: "musepack/musepack_src_r475.tar.gz", URL: "https://files.musepack.net/source/musepack_src_r475.tar.gz", SHA256: "a4b1742f997f83e1056142d556a8c20845ba764b70365ff9ccf2e3f81c427b2b"},
+	{Name: "musepack/mppenc-1.16.tar.bz2", URL: "https://files.musepack.net/source/mppenc-1.16.tar.bz2", SHA256: "f90781856ca7b6ce1ec7033321fadbcd04fe264d0349c20b49ad05f7cb2655ad"},
+	// The one real-world Musepack pair in the open: ffmpeg's FATE suite files,
+	// the same recording as SV7 (mppenc 1.15) and SV8 (mpcenc 1.30.0). Both
+	// decode to 524277 samples in libmpcdec; the suite's own .pcm references
+	// are ffmpeg's decodes and are not fetched, since they are not independent.
+	{Name: "musepack/inside-mp7.mpc", URL: "https://fate-suite.ffmpeg.org/musepack/inside-mp7.mpc", SHA256: "0e23d692f39d3c874286ef0b479ec8d1d1586fdcf93b906dee316fc11b694301"},
+	{Name: "musepack/inside-mp8.mpc", URL: "https://fate-suite.ffmpeg.org/musepack/inside-mp8.mpc", SHA256: "62ee2237bd95e7704d9835abb6bcca694e5a29ba8ea76d34cb6ecdac0e8b5fac"},
 }
 
 // OpusSpeechCorpus returns the speech-gate items: a name per speaker and the

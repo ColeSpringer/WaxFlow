@@ -32,7 +32,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # the "stdlib-only codecs" promise.
 PUBLIC_PKGS := . ./waxerr ./audio ./dsp/... ./codec/... ./container/... ./format ./source ./server ./client
 
-.PHONY: build test test-race test-cli test-oracle test-example vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench encoder-quality fuzz opus-tools ape-tools client-e2e hls-e2e soak
+.PHONY: build test test-race test-cli test-oracle test-example vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench encoder-quality fuzz opus-tools ape-tools mpc-tools client-e2e hls-e2e soak
 
 build:
 	cd cli && CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o ../bin/waxflow ./cmd/waxflow
@@ -81,6 +81,7 @@ test-example:
 vet:
 	go vet ./...
 	go vet -tags wmatablesgen ./codec/wma/
+	go vet -tags mpcfixtures ./codec/musepack/
 
 fmt:
 	gofmt -w .
@@ -180,6 +181,54 @@ ape-tools:
 	cp testdata/tools/ape-build/mac$(APE_TOOLS_EXE) $(APE_TOOLS_DIR)/; \
 	rm -rf testdata/tools/ape-build; \
 	echo "built $(APE_TOOLS_DIR)/mac$(APE_TOOLS_EXE)"
+
+# Build the Musepack reference tools from the pinned source tarballs into
+# testdata/tools (CI-cached, never committed): mpcenc (SV8) and mppenc 1.16
+# (SV7) as the only encoders the format has, mpcdec, mpc2sv8 (the lossless
+# SV7-to-SV8 repacker), mpccut (the only writer of a nonzero beginning
+# silence), and scripts/mpcdecraw, our dumper of libmpcdec's float output.
+# ffmpeg has no Musepack encoder and no distribution packages these. Test-time
+# oracles only, never a runtime dependency; tests self-skip until this has run
+# and WAXFLOW_REQUIRE_MPC=1 escalates. Built with $(CC) directly: the trees'
+# cmake files predate CMake 4 and the cmake-built mppenc crashes on every
+# encode. -fcommon covers the tentative definitions GCC 10 stopped merging,
+# -fpermissive the pointer-type mismatches GCC 14 made errors. The mppenc
+# tarball is bzip2, which the fetcher unpacks itself. On Windows (MSYS2) each
+# tool is attempted and a failure leaves the rest to build; tests that need a
+# missing tool skip.
+MPC_TOOLS_VERSION := musepack-r475
+MPPENC_VERSION := mppenc-1.16
+MPC_TOOLS_DIR := testdata/tools/$(MPC_TOOLS_VERSION)
+MPPENC_DIR := testdata/tools/$(MPPENC_VERSION)
+MPC_BUILD := testdata/tools/mpc-build
+MPC_CFLAGS := -O2 -w -fcommon -fpermissive
+MPC_TOLERATE = $(if $(APE_TOOLS_WINDOWS),|| echo "skipped: did not build on this host",)
+mpc-tools:
+	@built=1; for t in mpcdec mpcdecraw mpcenc mpc2sv8 mpccut; do \
+		[ -x "$(MPC_TOOLS_DIR)/$$t$(APE_TOOLS_EXE)" ] || built=0; done; \
+	[ -x "$(MPPENC_DIR)/mppenc$(APE_TOOLS_EXE)" ] || built=0; \
+	if [ "$$built" = 1 ]; then \
+		echo "$(MPC_TOOLS_DIR) and $(MPPENC_DIR) are already built"; exit 0; \
+	fi; \
+	set -e; \
+	rm -rf $(MPC_BUILD); \
+	mkdir -p $(MPC_BUILD)/out $(MPC_TOOLS_DIR) $(MPPENC_DIR); \
+	go run ./internal/testutil/cmd/vectorfetch -extract $(MPC_BUILD) musepack/musepack_src_r475.tar.gz musepack/mppenc-1.16.tar.bz2; \
+	cp scripts/mpcdecraw/mpcdecraw.c $(MPC_BUILD)/musepack_src_r475/; \
+	( cd $(MPC_BUILD)/musepack_src_r475 && \
+		$(CC) $(MPC_CFLAGS) -Iinclude -Ilibwavformat libmpcdec/*.c common/crc32.c libwavformat/output.c mpcdec/mpcdec.c -o ../out/mpcdec$(APE_TOOLS_EXE) -lm && \
+		$(CC) $(MPC_CFLAGS) -Iinclude -Ilibmpcdec libmpcdec/*.c common/crc32.c mpcdecraw.c -o ../out/mpcdecraw$(APE_TOOLS_EXE) -lm && \
+		( $(CC) $(MPC_CFLAGS) -DFAST_MATH -DCVD_FASTLOG -Iinclude -Ilibmpcpsy -Ilibmpcenc libmpcpsy/*.c libmpcenc/*.c common/crc32.c common/fastmath.c common/tags.c mpcenc/*.c -o ../out/mpcenc$(APE_TOOLS_EXE) -lm $(MPC_TOLERATE) ) && \
+		( $(CC) $(MPC_CFLAGS) -DFAST_MATH -DCVD_FASTLOG -Iinclude -Ilibmpcdec -Ilibmpcenc libmpcdec/*.c libmpcenc/*.c common/crc32.c mpc2sv8/mpc2sv8.c -o ../out/mpc2sv8$(APE_TOOLS_EXE) -lm $(MPC_TOLERATE) ) && \
+		( $(CC) $(MPC_CFLAGS) -DFAST_MATH -DCVD_FASTLOG -Iinclude -Ilibmpcdec -Ilibmpcenc libmpcdec/*.c libmpcenc/*.c common/crc32.c mpccut/mpccut.c -o ../out/mpccut$(APE_TOOLS_EXE) -lm $(MPC_TOLERATE) ) ); \
+	( cd $(MPC_BUILD)/mppenc-1.16 && \
+		( $(CC) $(MPC_CFLAGS) -DMPP_ENCODER -DFAST_MATH -DCVD_FASTLOG src/*.c -o ../out/mppenc$(APE_TOOLS_EXE) -lm $(MPC_TOLERATE) ) ); \
+	for t in mpcdec mpcdecraw mpcenc mpc2sv8 mpccut; do \
+		if [ -x "$(MPC_BUILD)/out/$$t$(APE_TOOLS_EXE)" ]; then cp "$(MPC_BUILD)/out/$$t$(APE_TOOLS_EXE)" $(MPC_TOOLS_DIR)/; fi; \
+	done; \
+	if [ -x "$(MPC_BUILD)/out/mppenc$(APE_TOOLS_EXE)" ]; then cp "$(MPC_BUILD)/out/mppenc$(APE_TOOLS_EXE)" $(MPPENC_DIR)/; fi; \
+	rm -rf $(MPC_BUILD); \
+	echo "built $(MPC_TOOLS_DIR)/{mpcdec,mpcdecraw,mpcenc,mpc2sv8,mpccut} and $(MPPENC_DIR)/mppenc"
 
 # Encoder-quality gates: encode a corpus with our lossy encoders and the
 # reference baselines, score both (ODG-proxy vs Shine for MP3 and vs

@@ -9,6 +9,7 @@ import (
 	"github.com/colespringer/waxflow/codec/ape"
 	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/codec/mp3"
+	"github.com/colespringer/waxflow/codec/musepack"
 	"github.com/colespringer/waxflow/codec/opus"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/codec/vorbis"
@@ -23,6 +24,7 @@ import (
 	"github.com/colespringer/waxflow/container/mka"
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/container/mpa"
+	"github.com/colespringer/waxflow/container/mpc"
 	"github.com/colespringer/waxflow/container/ogg"
 	"github.com/colespringer/waxflow/container/riff"
 	"github.com/colespringer/waxflow/container/wv"
@@ -152,6 +154,18 @@ var drivers = []driver{
 			return asf.NewDemuxer(src, &asf.DemuxerOptions{Strict: opts != nil && opts.Strict})
 		},
 	},
+	{
+		// Above the mp3 row for a reason beyond habit: the mp3 sniff scans its
+		// window for a sync pair, and a Musepack body can contain one.
+		name:      "musepack",
+		match:     mpc.Match,
+		need:      mpc.MatchNeed,
+		exts:      []string{"mpc", "mp+", "mpp"},
+		mediaType: "audio/x-musepack",
+		open: func(src container.Source, opts *Options) (container.Demuxer, error) {
+			return mpc.NewDemuxer(src, &mpc.DemuxerOptions{Strict: opts != nil && opts.Strict})
+		},
+	},
 	// The MPEG sync word stays last: it is twelve set bits anywhere in a
 	// window, which false-positives on other formats' payloads.
 	{
@@ -252,6 +266,14 @@ var decoders = []struct {
 			return nil, err
 		}
 		return wma.NewDecoder(cfg, t.Fmt)
+	}},
+	{codec.Musepack, musepack.Version, func(t container.Track) (codec.Decoder, error) {
+		// One row for both stream versions: the config carries the version.
+		cfg, err := musepack.ParseConfig(t.CodecConfig)
+		if err != nil {
+			return nil, err
+		}
+		return musepack.NewDecoder(cfg, t.Fmt)
 	}},
 	{codec.Vorbis, vorbis.Version, func(t container.Track) (codec.Decoder, error) {
 		cfg, err := vorbis.ParseConfig(t.CodecConfig)

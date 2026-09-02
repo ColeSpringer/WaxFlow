@@ -40,9 +40,13 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   WavPack (bit-exact on the official test suite: 8- to 32-bit integers,
   the three stereo block modes, APEv2 tags; encodes too), Monkey's Audio
   (all five compression levels, 8/16/24-bit, APEv2 tags; encodes the
-  first three), and Windows Media Audio 1 and 2 in ASF (mono and stereo,
+  first three), Windows Media Audio 1 and 2 in ASF (mono and stereo,
   8-48 kHz; **decode only, and encoding it is a non-goal**: nothing plays
-  WMA that does not also play a format this tree writes better).
+  WMA that does not also play a format this tree writes better), and
+  Musepack SV7 and SV8 (bit-identical to the reference decoder's float
+  output; true gapless, noise substitution, APEv2 tags, SV8 chapters and
+  ReplayGain; **decode only, and encoding it is a non-goal** for the same
+  reason, the only encoder in existence being LGPL).
   Sample-exact
   seeking everywhere, gapless honored per format (LAME tag, iTunSMPB,
   edit lists, Ogg pre-skip/end-trim, Matroska CodecDelay). WMA Pro,
@@ -98,7 +102,7 @@ release with `make soak`):
   pinned floor in [docs/quality-gates.md](docs/quality-gates.md) by a
   wide margin (Opus encode 55-67x realtime, decode 274-514x; MP3 encode
   50-69x, decode ~200x; FLAC encode ~200x, decode 490-870x; AAC encode
-  20-68x, decode ~240x).
+  20-68x, decode ~240x; Musepack decode 690-1900x).
 
 ## Quick start
 
