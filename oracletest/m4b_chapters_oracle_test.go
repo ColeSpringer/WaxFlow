@@ -7,9 +7,7 @@ package oracletest
 
 import (
 	"context"
-	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -19,32 +17,6 @@ import (
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/testutil"
 )
-
-// ffprobeChapters is the subset of `ffprobe -show_chapters` these cells read.
-type ffprobeChapters struct {
-	Chapters []struct {
-		StartTime string `json:"start_time"`
-		EndTime   string `json:"end_time"`
-		Tags      struct {
-			Title string `json:"title"`
-		} `json:"tags"`
-	} `json:"chapters"`
-}
-
-// probeChapters runs ffprobe -show_chapters over a file.
-func probeChapters(t *testing.T, path string) ffprobeChapters {
-	t.Helper()
-	ffprobe := testutil.FFprobe(t) // skips, or fails under WAXFLOW_REQUIRE_FFMPEG=1
-	out, err := exec.Command(ffprobe, "-v", "error", "-show_chapters", "-of", "json", path).Output()
-	if err != nil {
-		t.Fatalf("ffprobe -show_chapters %s: %v", path, err)
-	}
-	var doc ffprobeChapters
-	if err := json.Unmarshal(out, &doc); err != nil {
-		t.Fatalf("parsing ffprobe output: %v\n%s", err, out)
-	}
-	return doc
-}
 
 // TestFFprobeReadsProgressiveChapterTrack is the third-party proof that the
 // text chapter track is a real track and not a shape only we can read. It
@@ -86,17 +58,17 @@ func TestFFprobeReadsProgressiveChapterTrack(t *testing.T) {
 	}
 	stripChpl(t, out)
 
-	got := probeChapters(t, out)
-	if len(got.Chapters) != len(info.Chapters) {
-		t.Fatalf("ffprobe read %d chapters from the text track, want %d", len(got.Chapters), len(info.Chapters))
+	got := testutil.FFprobeChapters(t, out)
+	if len(got) != len(info.Chapters) {
+		t.Fatalf("ffprobe read %d chapters from the text track, want %d", len(got), len(info.Chapters))
 	}
-	for i, ch := range got.Chapters {
-		if want := info.Chapters[i].Title; ch.Tags.Title != want {
-			t.Errorf("chapter %d title = %q, want %q", i, ch.Tags.Title, want)
+	for i, ch := range got {
+		if want := info.Chapters[i].Title; ch.Title != want {
+			t.Errorf("chapter %d title = %q, want %q", i, ch.Title, want)
 		}
 		// A start ffprobe can time at all means the stts chained; the exact
 		// value is the round trip's business, pinned in container/mp4.
-		if ch.StartTime == "" || ch.EndTime == "" {
+		if ch.Start < 0 || ch.End < 0 {
 			t.Errorf("chapter %d has no timing: %+v", i, ch)
 		}
 	}

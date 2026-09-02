@@ -4,7 +4,6 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf16"
-	"unicode/utf8"
 
 	"github.com/colespringer/waxflow/container"
 )
@@ -177,14 +176,13 @@ func (d *Demuxer) addTag(key, value string) {
 	d.tags[key] = append(d.tags[key], value)
 }
 
-// utf16Text decodes a UTF-16LE string, dropping the trailing NUL every ASF
-// writer includes in the declared length. An odd trailing byte is ignored, and
-// unpaired surrogates come back as the replacement rune, so the result is
-// always valid UTF-8.
-func utf16Text(b []byte) string {
-	if len(b) > maxTagBytes {
-		return ""
-	}
+// utf16String decodes a UTF-16LE string up to the trailing NUL every ASF
+// writer includes in the declared length, verbatim. An odd trailing byte is
+// ignored, and unpaired surrogates come back as the replacement rune, so the
+// result is always valid UTF-8. A marker description is read through it: a
+// chapter title is copied as it stands, so a reader of the same file through
+// the tag library or ffprobe sees the same title.
+func utf16String(b []byte) string {
 	units := make([]uint16, 0, len(b)/2)
 	for i := 0; i+1 < len(b); i += 2 {
 		u := le.Uint16(b[i:])
@@ -193,9 +191,14 @@ func utf16Text(b []byte) string {
 		}
 		units = append(units, u)
 	}
-	s := string(utf16.Decode(units))
-	if !utf8.ValidString(s) {
+	return string(utf16.Decode(units))
+}
+
+// utf16Text is utf16String for a tag value: one past the tag cap is dropped,
+// and the text is trimmed, since a tagger's padding is not part of a field.
+func utf16Text(b []byte) string {
+	if len(b) > maxTagBytes {
 		return ""
 	}
-	return strings.TrimSpace(s)
+	return strings.TrimSpace(utf16String(b))
 }

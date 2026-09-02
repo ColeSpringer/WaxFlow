@@ -117,10 +117,10 @@ need **no** mapper: a container that parses them surfaces them either
 way, so a daemon embedded without one still reports what the file
 carries. A mapper's values win when one is wired, since a tag library may
 know forms and containers the container package does not. `endSeconds` is
-omitted for the start-only chapter forms (Nero `chpl`) that mean "until
-the next chapter, or end of stream"; a caller deriving a span from
-chapter *n* reads it when present and chapter *n+1*'s `startSeconds` when
-not.
+omitted for the start-only chapter forms (Nero `chpl`, Musepack SV8
+chapter packets, ASF markers) that mean "until the next chapter, or end
+of stream"; a caller deriving a span from chapter *n* reads it when
+present and chapter *n+1*'s `startSeconds` when not.
 
 `hasArt` and `GET /art` do still need a mapper, and that is deliberate
 rather than an oversight: `hasArt` reports what `/art` **can serve**, and

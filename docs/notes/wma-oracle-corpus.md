@@ -129,10 +129,10 @@ tests that consume it rather than here: this table is the specification for
 it, with every derived column already computed so nothing has to be re-derived
 by hand.
 
-They do not replace the five `.wma` files already in
+They do not replace the six `.wma` files already in
 `container/asf/testdata`, which have a different job: they pin container
-shapes (a fragmented layout, a tagged file, a mono 8 kHz file) for the
-demuxer, and they predate this corpus. Do not promote them into a decoder
+shapes (a fragmented layout, a tagged file, a mono 8 kHz file, a chaptered
+file) for the demuxer, and all but the chaptered one predate this corpus. Do not promote them into a decoder
 gate. All three of their configurations are 44.1 kHz or 8 kHz at one bit rate,
 and **all four of their stereo files are false stereo** (`max|L-R|` measured
 as exactly 0), which is harmless for a demuxer that never looks at a sample

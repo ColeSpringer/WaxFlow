@@ -139,11 +139,14 @@ func spanChapters(chapters []container.Chapter, from, limit int64, rate int) []c
 	for i, ch := range chapters {
 		// Begins at or after the window's end, or is over before its start:
 		// outside either way. The far test is skipped for an unbounded
-		// window, which has no far end to be past.
+		// window, which has no far end to be past. A start-only chapter that
+		// begins exactly where the window does is inside it even when the
+		// next chapter shares its instant, so a span from the top of a file
+		// lists what a probe of the file lists.
 		if end >= 0 && ch.Start >= end {
 			continue
 		}
-		if e := chapterEnd(chapters, i); e >= 0 && e <= start {
+		if e := chapterEnd(chapters, i); e >= 0 && e <= start && !(ch.End == 0 && ch.Start == start) {
 			continue
 		}
 		ch.Start = max(ch.Start-start, 0)

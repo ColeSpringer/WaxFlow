@@ -19,6 +19,7 @@ func FuzzDemux(f *testing.F) {
 	f.Add(full[:60])
 	f.Add(fixture(f, "frag.wma"))
 	f.Add(fixture(f, "tagged.wma"))
+	f.Add(fixture(f, "chapters.wma"))
 	f.Add(fixture(f, "mono-8k.wma"))
 	f.Add(appendSimpleIndex(fixture(f, "mono-8k.wma"), 8, 1_000_0000))
 	f.Add(guidHeader)
@@ -35,6 +36,17 @@ func FuzzDemux(f *testing.F) {
 			}
 			if track.SamplesExact {
 				t.Fatal("ASF states milliseconds; no track from it is sample-exact")
+			}
+			// The Chapterer contract: start order, the start-only form, no
+			// negative time, and a list the cap bounds.
+			chs := d.Chapters()
+			if len(chs) > 1<<16 {
+				t.Fatalf("%d chapters from %d bytes", len(chs), len(data))
+			}
+			for i, ch := range chs {
+				if ch.Start < 0 || ch.End != 0 || (i > 0 && ch.Start < chs[i-1].Start) {
+					t.Fatalf("chapter %d = %+v breaks the Chapterer contract", i, ch)
+				}
 			}
 			// A media object needs at least a length byte and a byte of its
 			// own, so production is bounded by the input either way.

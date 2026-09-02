@@ -1,10 +1,8 @@
 package mp4
 
 import (
-	"cmp"
 	"math"
 	"math/bits"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -423,7 +421,7 @@ func (d *Demuxer) resolveChapters(tracks []*track, audio *track) {
 			d.chapters = chapters
 		}
 	}
-	slices.SortStableFunc(d.chapters, func(a, b Chapter) int { return cmp.Compare(a.Start, b.Start) })
+	container.SortChapters(d.chapters)
 }
 
 // chapterTrack finds the text track holding chapter titles: one referenced

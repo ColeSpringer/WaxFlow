@@ -15,10 +15,11 @@ import (
 )
 
 var (
-	_ container.Demuxer = (*Demuxer)(nil)
-	_ container.Seeker  = (*Demuxer)(nil)
-	_ container.Warner  = (*Demuxer)(nil)
-	_ container.Tagger  = (*Demuxer)(nil)
+	_ container.Demuxer   = (*Demuxer)(nil)
+	_ container.Seeker    = (*Demuxer)(nil)
+	_ container.Warner    = (*Demuxer)(nil)
+	_ container.Tagger    = (*Demuxer)(nil)
+	_ container.Chapterer = (*Demuxer)(nil)
 )
 
 // DemuxerOptions configures parsing.
@@ -66,6 +67,13 @@ type Demuxer struct {
 	track    container.Track
 	tags     map[string][]string
 	warnings []container.Warning
+	// chapters is the Marker Object's list, read as stored and moved onto
+	// the playback timeline once the pre-roll is known; markerObject and
+	// markersOff record that one was read and where, for the reports the
+	// projection raises after the walk.
+	chapters     []container.Chapter
+	markerObject bool
+	markersOff   int64
 
 	sel             stream
 	streams         []stream
@@ -131,8 +139,8 @@ type Demuxer struct {
 }
 
 // NewDemuxer parses an ASF header and positions on the first data packet. The
-// returned Demuxer implements container.Seeker, container.Warner, and
-// container.Tagger.
+// returned Demuxer implements container.Seeker, container.Warner,
+// container.Tagger, and container.Chapterer.
 func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 	d := &Demuxer{src: src, size: src.Size()}
 	if opts != nil {
@@ -175,6 +183,10 @@ func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
 
 // Tags returns the canonical tags parsed from the header's two tag objects.
 func (d *Demuxer) Tags() map[string][]string { return d.tags }
+
+// Chapters returns the Marker Object's entries as chapters, resolved during
+// the header parse, in start order; nil when the file carries none.
+func (d *Demuxer) Chapters() []container.Chapter { return d.chapters }
 
 // ReadPacket delivers the next media object. Data is borrowed until the next
 // call, the container.Demuxer contract's own bound: the following call shifts
@@ -495,6 +507,9 @@ func (d *Demuxer) parse() error {
 	if err := d.walkHeader(body); err != nil {
 		return err
 	}
+	if err := d.resolveChapters(); err != nil {
+		return err
+	}
 	if err := d.selectStream(); err != nil {
 		return err
 	}
@@ -547,6 +562,10 @@ func (d *Demuxer) walkHeader(body []byte) error {
 			d.parseContentDescription(payload)
 		case guidExtendedContentDescription:
 			d.parseExtendedContentDescription(payload)
+		case guidMarker:
+			if err := d.parseMarkers(payload, bodyOff); err != nil {
+				return err
+			}
 		case guidContentEncryption, guidExtendedContentEncryption:
 			d.encrypted = true
 		case guidHeaderExtension:

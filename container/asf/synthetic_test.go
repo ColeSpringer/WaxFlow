@@ -30,8 +30,12 @@ type builder struct {
 	playHNS    uint64
 	streamNum  byte
 	// ecSpan, when set, declares Audio Spread error correction with this span.
-	ecSpan  byte
-	packets [][]byte
+	ecSpan byte
+	// lead and extra are further header children, laid before and after the
+	// two the builder always writes, for the objects whose reading must not
+	// depend on where the File Properties Object sits.
+	lead, extra [][]byte
+	packets     [][]byte
 }
 
 func newBuilder() *builder {
@@ -93,11 +97,24 @@ var (
 var guidAudioMedia = []byte{0x40, 0x9E, 0x69, 0xF8, 0x4D, 0x5B, 0xCF, 0x11, 0xA8, 0xFD, 0x00, 0x80, 0x5F, 0x5C, 0x44, 0x2B}
 
 func (b *builder) build() []byte {
-	children := append(b.fileProperties(), b.streamProperties()...)
+	var children []byte
+	count := 0
+	add := func(o []byte) {
+		children = append(children, o...)
+		count++
+	}
+	for _, o := range b.lead {
+		add(o)
+	}
+	add(b.fileProperties())
+	add(b.streamProperties())
+	for _, o := range b.extra {
+		add(o)
+	}
 	header := make([]byte, 30, 30+len(children))
 	copy(header, guidHeader)
 	le.PutUint64(header[16:], uint64(30+len(children)))
-	le.PutUint32(header[24:], 2)
+	le.PutUint32(header[24:], uint32(count))
 	header[28], header[29] = 1, 2
 	header = append(header, children...)
 

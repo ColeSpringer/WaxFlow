@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"strconv"
 	"testing"
+	"time"
 )
 
 // tool resolves an oracle binary, applying the skip-or-require policy.
@@ -153,11 +154,19 @@ type FFprobeInfo struct {
 	Samples int64
 }
 
+// probeJSON runs ffprobe with args over path and decodes its JSON into doc.
+func probeJSON(t testing.TB, path string, doc any, args ...string) {
+	t.Helper()
+	args = append(append([]string{"-v", "error"}, args...), "-of", "json", path)
+	raw := run(t, FFprobe(t), args...)
+	if err := json.Unmarshal(raw, doc); err != nil {
+		t.Fatalf("parsing ffprobe output: %v\n%s", err, raw)
+	}
+}
+
 // FFprobeFile probes the first audio stream with ffprobe.
 func FFprobeFile(t testing.TB, path string) FFprobeInfo {
 	t.Helper()
-	raw := run(t, FFprobe(t), "-v", "error", "-select_streams", "a:0",
-		"-show_streams", "-of", "json", path)
 	var doc struct {
 		Streams []struct {
 			CodecName        string `json:"codec_name"`
@@ -168,9 +177,7 @@ func FFprobeFile(t testing.TB, path string) FFprobeInfo {
 			DurationTS       *int64 `json:"duration_ts"`
 		} `json:"streams"`
 	}
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		t.Fatalf("parsing ffprobe output: %v\n%s", err, raw)
-	}
+	probeJSON(t, path, &doc, "-select_streams", "a:0", "-show_streams")
 	if len(doc.Streams) == 0 {
 		t.Fatalf("ffprobe found no audio stream in %s", path)
 	}
@@ -212,15 +219,12 @@ func FFprobeFile(t testing.TB, path string) FFprobeInfo {
 // DiscardPadding adjustment applied.
 func FFprobeFormatDuration(t testing.TB, path string) float64 {
 	t.Helper()
-	raw := run(t, FFprobe(t), "-v", "error", "-show_format", "-of", "json", path)
 	var doc struct {
 		Format struct {
 			Duration string `json:"duration"`
 		} `json:"format"`
 	}
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		t.Fatalf("parsing ffprobe output: %v\n%s", err, raw)
-	}
+	probeJSON(t, path, &doc, "-show_format")
 	if doc.Format.Duration == "" || doc.Format.Duration == "N/A" {
 		return -1
 	}
@@ -253,6 +257,62 @@ func FFmpegGenerateDuration(t testing.TB, path string, seconds float64, rate, ch
 	run(t, FFmpeg(t), args...)
 }
 
+// FFprobeChapter is one chapter as ffprobe reports it, exact: the tick count
+// and time base it prints beside its six-decimal rendering, so a differential
+// compares on the container's own grid. Start or End is -1 when ffprobe prints
+// none. The end it does print is not always one the file stored: for a
+// start-only form (ASF markers, Nero chpl) libavformat synthesizes it from
+// the next chapter's start or the duration, so an oracle for such a form
+// compares starts and titles only.
+type FFprobeChapter struct {
+	Start time.Duration
+	End   time.Duration
+	Title string
+}
+
+// FFprobeChapters lists a file's chapters as ffprobe reads them, on the
+// playback timeline (for ASF, the pre-roll already subtracted). It is the
+// oracle for a container's chapter markers, read without decoding a sample.
+func FFprobeChapters(t testing.TB, path string) []FFprobeChapter {
+	t.Helper()
+	var doc struct {
+		Chapters []struct {
+			TimeBase string `json:"time_base"`
+			Start    *int64 `json:"start"`
+			End      *int64 `json:"end"`
+			Tags     struct {
+				Title string `json:"title"`
+			} `json:"tags"`
+		} `json:"chapters"`
+	}
+	probeJSON(t, path, &doc, "-show_chapters")
+	out := make([]FFprobeChapter, len(doc.Chapters))
+	for i, c := range doc.Chapters {
+		out[i] = FFprobeChapter{Start: -1, End: -1, Title: c.Tags.Title}
+		if c.Start != nil {
+			out[i].Start = ticksToDuration(t, *c.Start, c.TimeBase)
+		}
+		if c.End != nil {
+			out[i].End = ticksToDuration(t, *c.End, c.TimeBase)
+		}
+	}
+	return out
+}
+
+// ticksToDuration converts a tick count in an ffprobe "num/den" time base to
+// a duration: exact for every base whose tick is a whole number of
+// nanoseconds, to the nanosecond otherwise.
+func ticksToDuration(t testing.TB, ticks int64, base string) time.Duration {
+	t.Helper()
+	var num, den int64
+	if _, err := fmt.Sscanf(base, "%d/%d", &num, &den); err != nil || num <= 0 || den <= 0 {
+		t.Fatalf("ffprobe time base %q", base)
+	}
+	// Whole seconds first, so the product stays in range for any real file.
+	sec, rem := (ticks*num)/den, (ticks*num)%den
+	return time.Duration(sec)*time.Second + time.Duration(rem*int64(time.Second)/den)
+}
+
 // FFprobePacket is one demuxed packet as ffprobe reports it: the container's
 // own framing, in the stream's time base, before any decoding.
 type FFprobePacket struct {
@@ -268,8 +328,6 @@ type FFprobePacket struct {
 // reports all three without decoding a sample.
 func FFprobePackets(t testing.TB, path string) []FFprobePacket {
 	t.Helper()
-	raw := run(t, FFprobe(t), "-v", "error", "-select_streams", "a:0",
-		"-show_packets", "-show_entries", "packet=pts,duration,size", "-of", "json", path)
 	var doc struct {
 		Packets []struct {
 			PTS  *int64 `json:"pts"`
@@ -277,9 +335,7 @@ func FFprobePackets(t testing.TB, path string) []FFprobePacket {
 			Size string `json:"size"`
 		} `json:"packets"`
 	}
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		t.Fatalf("parsing ffprobe output: %v\n%s", err, raw)
-	}
+	probeJSON(t, path, &doc, "-select_streams", "a:0", "-show_packets", "-show_entries", "packet=pts,duration,size")
 	out := make([]FFprobePacket, len(doc.Packets))
 	for i, p := range doc.Packets {
 		out[i].Size, _ = strconv.Atoi(p.Size)

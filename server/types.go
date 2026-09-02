@@ -60,9 +60,10 @@ type ProbeInfo struct {
 type ProbeChapter struct {
 	StartSeconds float64 `json:"startSeconds"`
 	// EndSeconds is the chapter's end, absent for the start-only chapter
-	// forms (Nero chpl) that mean "until the next chapter, or end of
-	// stream". A caller deriving a span from a chapter reads this when it
-	// is there and the next chapter's start when it is not.
+	// forms (Nero chpl, Musepack SV8 chapter packets, ASF markers) that mean
+	// "until the next chapter, or end of stream". A caller deriving a span
+	// from a chapter reads this when it is there and the next chapter's
+	// start when it is not.
 	EndSeconds float64 `json:"endSeconds,omitempty"`
 	Title      string  `json:"title,omitempty"`
 }

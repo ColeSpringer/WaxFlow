@@ -9,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
@@ -241,6 +243,37 @@ func TestDemuxTags(t *testing.T) {
 		if _, ok := want[key]; !ok {
 			t.Errorf("unexpected tag %s = %q", key, got[key])
 		}
+	}
+}
+
+// TestDemuxChapters reads the Marker Object ffmpeg wrote into chapters.wma
+// from an input's chapter list. The fixture is two seconds of a 440 Hz sine
+// as 8 kHz mono wmav2 at 32 kbit/s, written by ffmpeg 8.0.1 from an
+// ffmetadata file with chapters at 0, 500 and 1250 ms titled Intro, Mïddle
+// and Coda:
+//
+//	ffmpeg -f lavfi -i sine=frequency=440:sample_rate=8000:duration=2 \
+//	    -f ffmetadata -i chapters.ffmeta -map 0:a -map_metadata 1 \
+//	    -c:a wmav2 -b:a 32k chapters.wma
+//
+// The stored times carry the 3.1 s pre-roll ffmpeg's muxer adds, one title
+// reaches past ASCII, and no entry has an end. A file with no Marker Object
+// has no chapters rather than an empty list.
+func TestDemuxChapters(t *testing.T) {
+	d := open(t, fixture(t, "chapters.wma"))
+	want := []container.Chapter{
+		{Start: 0, Title: "Intro"},
+		{Start: 500 * time.Millisecond, Title: "Mïddle"},
+		{Start: 1250 * time.Millisecond, Title: "Coda"},
+	}
+	if got := d.Chapters(); !slices.Equal(got, want) {
+		t.Errorf("chapters = %+v, want %+v", got, want)
+	}
+	if w := d.Warnings(); len(w) != 0 {
+		t.Errorf("warnings %v", w)
+	}
+	if got := open(t, fixture(t, "sine-wmav2.wma")).Chapters(); got != nil {
+		t.Errorf("a file with no Marker Object has chapters %+v", got)
 	}
 }
 
@@ -641,7 +674,7 @@ func TestTruncatedFileIsToleratedThenRefused(t *testing.T) {
 // TestStrictAcceptsACleanFile is the other side of it: strict exists to reject
 // real-world mess, so a well-formed file must sail through unchanged.
 func TestStrictAcceptsACleanFile(t *testing.T) {
-	for _, name := range []string{"sine-wmav2.wma", "sine-wmav1.wma", "mono-8k.wma", "frag.wma", "tagged.wma"} {
+	for _, name := range []string{"sine-wmav2.wma", "sine-wmav1.wma", "mono-8k.wma", "frag.wma", "tagged.wma", "chapters.wma"} {
 		d, err := asf.NewDemuxer(container.BytesSource(fixture(t, name)), &asf.DemuxerOptions{Strict: true})
 		if err != nil {
 			t.Fatalf("%s: strict mode refused a clean file: %v", name, err)
@@ -758,20 +791,48 @@ func TestHeaderSizeLies(t *testing.T) {
 // Object, as a slice of raw so a patch writes through. t may be nil, for use
 // inside a patch closure.
 func headerObject(t *testing.T, raw []byte, want []byte) []byte {
-	for off := int64(30); off+24 <= int64(len(raw)); {
-		size := int64(le.Uint64(raw[off+16:]))
-		if size < 24 || off+size > int64(len(raw)) {
-			break
-		}
-		if bytes.Equal(raw[off:off+16], want) {
-			return raw[off : off+size]
-		}
-		off += size
+	if off, size, ok := headerObjectAt(raw, want); ok {
+		return raw[off : off+size]
 	}
 	if t != nil {
 		t.Fatalf("no object %x in the header", want)
 	}
 	panic("no such header object")
+}
+
+// headerObjectAt locates the object with the given GUID inside the Header
+// Object: its offset in raw and its size.
+func headerObjectAt(raw []byte, want []byte) (off, size int64, ok bool) {
+	for off = 30; off+24 <= int64(len(raw)); {
+		size = int64(le.Uint64(raw[off+16:]))
+		if size < 24 || off+size > int64(len(raw)) {
+			break
+		}
+		if bytes.Equal(raw[off:off+16], want) {
+			return off, size, true
+		}
+		off += size
+	}
+	return 0, 0, false
+}
+
+// markerEntries returns the offset in raw of every entry of the Marker
+// Object, walking by the description lengths as the reader does.
+func markerEntries(t *testing.T, raw []byte) []int {
+	t.Helper()
+	off, size, ok := headerObjectAt(raw, guidMarker)
+	if !ok {
+		t.Fatal("no Marker Object in the header")
+	}
+	body, end := int(off)+24, int(off+size)
+	count := int(le.Uint32(raw[body+16:]))
+	p := body + 24 + int(le.Uint16(raw[body+22:]))
+	var out []int
+	for i := 0; i < count && p+30 <= end; i++ {
+		out = append(out, p)
+		p += 30 + int(le.Uint32(raw[p+26:]))*2
+	}
+	return out
 }
 
 // headerBody is headerObject past its 24-byte GUID and size.

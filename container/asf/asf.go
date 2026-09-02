@@ -63,6 +63,10 @@ const (
 	// maxTagBytes bounds one tag value, and maxTags the whole tag map.
 	maxTagBytes = 1 << 16
 	maxTags     = 1 << 10
+	// maxMarkers bounds the Marker Object walk, entries kept or not: the
+	// chapters a WMA audiobook carries. One every few seconds clears the
+	// longest of them; past it the list is cut with a note.
+	maxMarkers = 1 << 16
 	// maxIndexEntries bounds the Simple Index Object. One entry per second
 	// clears days of audio; past it the index is dropped and seeking falls
 	// back to bisection, which needs no table at all.

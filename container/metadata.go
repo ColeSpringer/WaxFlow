@@ -1,6 +1,10 @@
 package container
 
-import "time"
+import (
+	"cmp"
+	"slices"
+	"time"
+)
 
 // Tag is one canonical metadata field for muxers that can embed tags in
 // their stream form. Keys use the uppercase Vorbis/Picard vocabulary
@@ -14,12 +18,21 @@ type Tag struct {
 }
 
 // Chapter is one chapter marker for muxers (and demuxers) that carry
-// chapters. End is zero for start-only chapter forms (Nero chpl), which
-// players read as "until the next chapter, or end of stream".
+// chapters. End is zero for the start-only chapter forms (Nero chpl, Musepack
+// SV8 chapter packets, ASF markers), which players read as "until the next
+// chapter, or end of stream".
 type Chapter struct {
 	Start time.Duration
 	End   time.Duration
 	Title string
+}
+
+// SortChapters puts chs in the order Chapterer promises: by start, stably, so
+// chapters sharing a start keep the order their container stored them in.
+// Every demuxer with a chapter form sorts through it, since a container may
+// let a writer leave its list unsorted.
+func SortChapters(chs []Chapter) {
+	slices.SortStableFunc(chs, func(a, b Chapter) int { return cmp.Compare(a.Start, b.Start) })
 }
 
 // Chapterer is implemented by demuxers that parse chapter markers, in the

@@ -1,10 +1,8 @@
 package mpc
 
 import (
-	"cmp"
 	"fmt"
 	"math"
-	"slices"
 	"time"
 
 	"github.com/colespringer/waxflow/codec/musepack"
@@ -141,6 +139,6 @@ func (d *Demuxer) readChapters() error {
 			}
 		}
 	}
-	slices.SortStableFunc(d.chapters, func(a, b container.Chapter) int { return cmp.Compare(a.Start, b.Start) })
+	container.SortChapters(d.chapters)
 	return nil
 }

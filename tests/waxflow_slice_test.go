@@ -569,6 +569,47 @@ func TestSliceChapters(t *testing.T) {
 			},
 		},
 	}
+	// The start-only form at the window's edges. Two chapters sharing the
+	// window's start make the first one empty, and it is still inside: a
+	// span from the top of a file lists what a probe of it lists. One that
+	// runs out exactly at the window's start is still outside.
+	cases = append(cases,
+		struct {
+			name     string
+			from, to int64
+			in, want []container.Chapter
+		}{
+			name: "a start-only tie at the window start survives",
+			from: 0, to: to,
+			in: []container.Chapter{
+				{Start: 0, Title: "empty"},
+				{Start: 0, Title: "first"},
+				{Start: ms(1400), Title: "inside"},
+			},
+			want: []container.Chapter{
+				{Start: 0, Title: "empty"},
+				{Start: 0, Title: "first"},
+				{Start: ms(1400), Title: "inside"},
+			},
+		},
+		struct {
+			name     string
+			from, to int64
+			in, want []container.Chapter
+		}{
+			name: "a start-only chapter ending at the window start is outside",
+			from: from, to: to,
+			in: []container.Chapter{
+				{Start: ms(600), Title: "before"},
+				{Start: ms(1000), Title: "at"},
+				{Start: ms(1400), Title: "inside"},
+			},
+			want: []container.Chapter{
+				{Start: 0, Title: "at"},
+				{Start: ms(400), Title: "inside"},
+			},
+		},
+	)
 
 	const frames = 200_000
 	cfg := pcm.Config{Bits: 16}

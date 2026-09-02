@@ -361,10 +361,20 @@ with true-peak limiting, dither).`,
 				fmt.Fprintf(cmd.ErrOrStderr(), "loudness: output ~%.2f LUFS (estimated), %s / %s\n",
 					outLUFS, rg[0].Value, rg[1].Value)
 			}
+			// The container's own chapters are the floor and the mapper's win
+			// when it read some, the resolution the job runner and GET /probe
+			// make (internal/jobs/runner.go): a mapper read that failed must
+			// not cost the output the chapters the demuxer already parsed
+			// off the header, and --no-tags skips every source of them.
 			var chapters []container.Chapter
 			var art *container.Picture
+			if !noTags {
+				chapters = srcInfo.Chapters
+			}
 			if tagInfo != nil {
-				chapters = tagInfo.Chapters
+				if len(tagInfo.Chapters) > 0 {
+					chapters = tagInfo.Chapters
+				}
 				if p := tagInfo.FrontPicture(); p != nil {
 					art = &container.Picture{MIME: p.MIME, Data: p.Data}
 				}

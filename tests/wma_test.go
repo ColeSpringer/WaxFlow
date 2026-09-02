@@ -19,9 +19,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/audio"
@@ -266,5 +268,28 @@ func TestWMAExtensionHints(t *testing.T) {
 
 	if got := format.MediaTypeFor("wma"); got != "audio/x-ms-wma" {
 		t.Errorf("media type %q, want audio/x-ms-wma", got)
+	}
+}
+
+// TestWMAChaptersReachTheProbe: the Marker Object ffmpeg wrote into
+// chapters.wma surfaces through the engine's Info as chapters, titles and
+// starts on the playback timeline, with no mapper wired. The pre-roll is the
+// thing to get wrong: the stored times carry it and the probe must not.
+func TestWMAChaptersReachTheProbe(t *testing.T) {
+	raw, err := os.ReadFile(repoPath("container", "asf", "testdata", "chapters.wma"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	want := []container.Chapter{
+		{Start: 0, Title: "Intro"},
+		{Start: 500 * time.Millisecond, Title: "Mïddle"},
+		{Start: 1250 * time.Millisecond, Title: "Coda"},
+	}
+	if !slices.Equal(info.Chapters, want) {
+		t.Errorf("chapters %+v, want %+v", info.Chapters, want)
 	}
 }

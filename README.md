@@ -41,8 +41,9 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   the three stereo block modes, APEv2 tags; encodes too), Monkey's Audio
   (all five compression levels, 8/16/24-bit, APEv2 tags; encodes the
   first three), Windows Media Audio 1 and 2 in ASF (mono and stereo,
-  8-48 kHz; **decode only, and encoding it is a non-goal**: nothing plays
-  WMA that does not also play a format this tree writes better), and
+  8-48 kHz, tags and Marker Object chapters; **decode only, and encoding
+  it is a non-goal**: nothing plays WMA that does not also play a format
+  this tree writes better), and
   Musepack SV7 and SV8 (bit-identical to the reference decoder's float
   output; true gapless, noise substitution, APEv2 tags, SV8 chapters and
   ReplayGain; **decode only, and encoding it is a non-goal** for the same
