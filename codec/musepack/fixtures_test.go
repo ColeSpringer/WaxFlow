@@ -24,6 +24,11 @@ type mpcFixture struct {
 	repackOf string // the SV7 fixture this is the lossless mpc2sv8 repack of
 	cutOf    string // the SV8 fixture this is an mpccut cut of
 	cutFrom  int64
+	// seed built the cell's source noise and is frozen: the committed stream
+	// encodes exactly that noise. The values began as the length of the
+	// fixture's absolute path, so they look arbitrary; deriving one from the
+	// checkout again would rebuild a different signal on a different machine.
+	seed uint64
 	// minCorr is the tool-free gate for a noise cell: the correlation floor
 	// its decode holds against the source, set from the measurement with
 	// headroom; the value measured on 2026-09-01 stands beside each floor. A
@@ -39,7 +44,7 @@ func (f mpcFixture) samples() []int32 {
 	fm := intFormat(f.rate, f.channels)
 	switch f.signal {
 	case "noise":
-		return scaled(interleave(testutil.Noise(fm, f.frames, uint64(len(f.path)))), 0.5)
+		return scaled(interleave(testutil.Noise(fm, f.frames, f.seed)), 0.5)
 	default:
 		return interleave(testutil.Sine(fm, f.frames, 440, 0.7))
 	}
@@ -58,37 +63,37 @@ func containerFixture(name string) string {
 // the lossless repacks that pin the two readers against each other.
 var mpcFixtures = []mpcFixture{
 	{path: codecFixture("sv7-standard.mpc"), sv7: true, rate: 44100, channels: 2, frames: 12000},
-	{path: codecFixture("sv7-thumb.mpc"), sv7: true, args: []string{"--thumb"}, rate: 44100, channels: 2, frames: 23740, signal: "noise", minCorr: 0.4},         // measured 0.47
-	{path: codecFixture("sv7-braindead.mpc"), sv7: true, args: []string{"--braindead"}, rate: 44100, channels: 2, frames: 12520, signal: "noise", minCorr: 0.9}, // measured 0.98
+	{path: codecFixture("sv7-thumb.mpc"), sv7: true, args: []string{"--thumb"}, rate: 44100, channels: 2, frames: 23740, signal: "noise", seed: 70, minCorr: 0.4},         // measured 0.47
+	{path: codecFixture("sv7-braindead.mpc"), sv7: true, args: []string{"--braindead"}, rate: 44100, channels: 2, frames: 12520, signal: "noise", seed: 74, minCorr: 0.9}, // measured 0.98
 	{path: codecFixture("sv7-32k.mpc"), sv7: true, rate: 32000, channels: 2, frames: 11520},
-	{path: codecFixture("sv7-37800.mpc"), sv7: true, rate: 37800, channels: 2, frames: 20000, signal: "noise", minCorr: 0.85}, // measured 0.95
+	{path: codecFixture("sv7-37800.mpc"), sv7: true, rate: 37800, channels: 2, frames: 20000, signal: "noise", seed: 70, minCorr: 0.85}, // measured 0.95
 	{path: codecFixture("sv7-48k.mpc"), sv7: true, rate: 48000, channels: 2, frames: 30000},
 	{path: codecFixture("sv7-mono.mpc"), sv7: true, rate: 44100, channels: 1, frames: 23740},
-	{path: codecFixture("sv7-pns.mpc"), sv7: true, args: []string{"--pns", "0.25"}, rate: 44100, channels: 2, frames: 23740, signal: "noise", minCorr: 0.65}, // measured 0.77
-	{path: codecFixture("sv7-ms-off.mpc"), sv7: true, args: []string{"--ms", "0"}, rate: 44100, channels: 2, frames: 12520, signal: "noise", minCorr: 0.8},   // measured 0.90
+	{path: codecFixture("sv7-pns.mpc"), sv7: true, args: []string{"--pns", "0.25"}, rate: 44100, channels: 2, frames: 23740, signal: "noise", seed: 68, minCorr: 0.65}, // measured 0.77
+	{path: codecFixture("sv7-ms-off.mpc"), sv7: true, args: []string{"--ms", "0"}, rate: 44100, channels: 2, frames: 12520, signal: "noise", seed: 71, minCorr: 0.8},   // measured 0.90
 	{path: codecFixture("sv8-stereo.mpc"), rate: 44100, channels: 2, frames: 20000},
-	{path: codecFixture("sv8-mono.mpc"), rate: 44100, channels: 1, frames: 20000, signal: "noise", minCorr: 0.8}, // measured 0.90
-	{path: codecFixture("sv8-32k.mpc"), rate: 32000, channels: 2, frames: 12000, signal: "noise", minCorr: 0.85}, // measured 0.95
+	{path: codecFixture("sv8-mono.mpc"), rate: 44100, channels: 1, frames: 20000, signal: "noise", seed: 69, minCorr: 0.8}, // measured 0.90
+	{path: codecFixture("sv8-32k.mpc"), rate: 32000, channels: 2, frames: 12000, signal: "noise", seed: 68, minCorr: 0.85}, // measured 0.95
 	{path: codecFixture("sv8-37800.mpc"), rate: 37800, channels: 2, frames: 12520},
-	{path: codecFixture("sv8-48k.mpc"), rate: 48000, channels: 2, frames: 23740, signal: "noise", minCorr: 0.75},                                         // measured 0.87
-	{path: codecFixture("sv8-frames0.mpc"), args: []string{"--num_frames", "0"}, rate: 44100, channels: 2, frames: 20000, signal: "noise", minCorr: 0.8}, // measured 0.90
+	{path: codecFixture("sv8-48k.mpc"), rate: 48000, channels: 2, frames: 23740, signal: "noise", seed: 68, minCorr: 0.75},                                         // measured 0.87
+	{path: codecFixture("sv8-frames0.mpc"), args: []string{"--num_frames", "0"}, rate: 44100, channels: 2, frames: 20000, signal: "noise", seed: 72, minCorr: 0.8}, // measured 0.90
 	{path: codecFixture("sv8-no-st.mpc"), args: []string{"--no_st"}, rate: 44100, channels: 2, frames: 20000},
-	{path: codecFixture("sv8-q0-pns.mpc"), args: []string{"--quality", "0"}, rate: 44100, channels: 2, frames: 30000, signal: "noise", minCorr: 0.15}, // measured 0.21
-	{path: codecFixture("sv8-q10.mpc"), args: []string{"--quality", "10"}, rate: 44100, channels: 2, frames: 20000, signal: "noise", minCorr: 0.95},   // measured 0.99
-	{path: codecFixture("sv8-no-ei.mpc"), args: []string{"--no_ei"}, rate: 44100, channels: 2, frames: 20000, signal: "noise", minCorr: 0.8},          // measured 0.89
-	{path: codecFixture("sv8-thumb.mpc"), args: []string{"--thumb"}, rate: 44100, channels: 2, frames: 30000, signal: "noise", minCorr: 0.4},          // measured 0.49
+	{path: codecFixture("sv8-q0-pns.mpc"), args: []string{"--quality", "0"}, rate: 44100, channels: 2, frames: 30000, signal: "noise", seed: 71, minCorr: 0.15}, // measured 0.21
+	{path: codecFixture("sv8-q10.mpc"), args: []string{"--quality", "10"}, rate: 44100, channels: 2, frames: 20000, signal: "noise", seed: 68, minCorr: 0.95},   // measured 0.99
+	{path: codecFixture("sv8-no-ei.mpc"), args: []string{"--no_ei"}, rate: 44100, channels: 2, frames: 20000, signal: "noise", seed: 70, minCorr: 0.8},          // measured 0.89
+	{path: codecFixture("sv8-thumb.mpc"), args: []string{"--thumb"}, rate: 44100, channels: 2, frames: 30000, signal: "noise", seed: 70, minCorr: 0.4},          // measured 0.49
 	{path: codecFixture("sv8-blocks.mpc"), args: []string{"--num_frames", "1"}, rate: 44100, channels: 2, frames: 12000},
 	{path: codecFixture("sv8-cut.mpc"), rate: 44100, channels: 2, frames: 12000, cutOf: codecFixture("sv8-blocks.mpc"), cutFrom: 5000},
 	{path: codecFixture("sv8-repack.mpc"), rate: 44100, channels: 2, frames: 12000, repackOf: codecFixture("sv7-standard.mpc")},
 	{path: codecFixture("sv8-repack-pns.mpc"), rate: 44100, channels: 2, frames: 23740, signal: "noise", repackOf: codecFixture("sv7-pns.mpc"), minCorr: 0.65}, // measured 0.77
 	{path: containerFixture("tagged.mpc"), sv7: true, rate: 44100, channels: 2, frames: 8000,
 		tags: []string{"Artist=Wax Test", "Album=Fixtures", "Title=Tagged", "Year=2026", "Track=3"}, id3v1: true},
-	{path: containerFixture("seek.mpc"), args: []string{"--num_frames", "1"}, rate: 44100, channels: 2, frames: 30000, signal: "noise", minCorr: 0.8},                        // measured 0.89
-	{path: containerFixture("seek-pns.mpc"), args: []string{"--quality", "0", "--num_frames", "1"}, rate: 44100, channels: 2, frames: 30000, signal: "noise", minCorr: 0.15}, // measured 0.21
-	{path: containerFixture("seek-sv7.mpc"), sv7: true, args: []string{"--thumb", "--pns", "0.25"}, rate: 44100, channels: 2, frames: 92160, signal: "noise", minCorr: 0.45}, // measured 0.56
+	{path: containerFixture("seek.mpc"), args: []string{"--num_frames", "1"}, rate: 44100, channels: 2, frames: 30000, signal: "noise", seed: 64, minCorr: 0.8},                        // measured 0.89
+	{path: containerFixture("seek-pns.mpc"), args: []string{"--quality", "0", "--num_frames", "1"}, rate: 44100, channels: 2, frames: 30000, signal: "noise", seed: 68, minCorr: 0.15}, // measured 0.21
+	{path: containerFixture("seek-sv7.mpc"), sv7: true, args: []string{"--thumb", "--pns", "0.25"}, rate: 44100, channels: 2, frames: 92160, signal: "noise", seed: 68, minCorr: 0.45}, // measured 0.56
 	{path: containerFixture("gapless-sv7.mpc"), sv7: true, rate: 44100, channels: 2, frames: 23740},
 	{path: repoPath("testdata", "sine-s16.mpc"), rate: 44100, channels: 2, frames: 22050},
-	{path: repoPath("testdata", "noise-s16.mpc"), sv7: true, rate: 44100, channels: 2, frames: 22050, signal: "noise", minCorr: 0.8}, // measured 0.90
+	{path: repoPath("testdata", "noise-s16.mpc"), sv7: true, rate: 44100, channels: 2, frames: 22050, signal: "noise", seed: 55, minCorr: 0.8}, // measured 0.90
 }
 
 // fixtureByPath looks a fixture up by its base name.

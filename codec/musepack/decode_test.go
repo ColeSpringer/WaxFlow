@@ -2,6 +2,8 @@ package musepack_test
 
 import (
 	"math"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -56,6 +58,30 @@ func TestFixturesTrackTheirSource(t *testing.T) {
 				}
 			} else if rms > sineMaxRMS {
 				t.Errorf("rms error %.4g FS against the source, want <= %.3g", rms, sineMaxRMS)
+			}
+		})
+	}
+}
+
+// TestSourceDoesNotDependOnTheCheckout pins every noise cell to its frozen
+// seed. The sources above are rebuilt rather than stored, so anything the
+// rebuild reads from the machine makes the gate compare a decode against
+// noise the encoder never saw, and it holds only where the repository
+// happens to sit. Moving a fixture deeper must not move its signal.
+func TestSourceDoesNotDependOnTheCheckout(t *testing.T) {
+	for _, f := range mpcFixtures {
+		// A repack or a cut rebuilds its origin's signal, checked there.
+		if f.signal != "noise" || f.repackOf != "" || f.cutOf != "" {
+			continue
+		}
+		t.Run(f.name(), func(t *testing.T) {
+			if f.seed == 0 {
+				t.Fatal("a noise fixture needs the seed its source was built from in the table")
+			}
+			moved := f
+			moved.path = filepath.Join(filepath.Dir(f.path), "deeper", f.name())
+			if !slices.Equal(moved.source(), f.source()) {
+				t.Error("the source changed when the fixture moved: the rebuild reads the path")
 			}
 		})
 	}

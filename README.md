@@ -10,7 +10,7 @@ so anyone can import them.
 
 ## Status
 
-**v1.0 feature-complete.** Everything below is tested, capability-gated
+Everything below is tested, capability-gated
 (`/caps` never advertises what does not work), and held to the pinned
 gates in [docs/quality-gates.md](docs/quality-gates.md).
 
