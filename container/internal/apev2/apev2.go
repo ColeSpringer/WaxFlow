@@ -105,11 +105,39 @@ func Parse(tag []byte) map[string][]string {
 	return parseItems(items, count)
 }
 
-// ParseItems reads a bare run of APEv2 items: no header, no footer, no count,
-// which is how a Musepack SV8 chapter packet carries its tag. The run is
-// parsed until it ends or the item cap is reached.
-func ParseItems(items []byte) map[string][]string {
-	return parseItems(items, maxItems)
+// RecordLen is a header or footer record less its 8-byte preamble: version,
+// size, item count, flags and the reserved word.
+const RecordLen = FooterLen - 8
+
+// ParseHeaderRecord reads a header record stored without its preamble, the
+// form a Musepack SV8 chapter tag puts in front of its items. Version 1000 or
+// 2000 and the flag that marks a header rather than a footer identify one;
+// anything else is not a record. It returns the item count the record
+// states, which bounds ParseItems over the bytes that follow it.
+func ParseHeaderRecord(b []byte) (count int, ok bool) {
+	if len(b) < RecordLen {
+		return 0, false
+	}
+	if v := binary.LittleEndian.Uint32(b[0:4]); v != 1000 && v != 2000 {
+		return 0, false
+	}
+	if binary.LittleEndian.Uint32(b[12:16])&flagIsHeader == 0 {
+		return 0, false
+	}
+	return int(binary.LittleEndian.Uint32(b[8:12])), true
+}
+
+// ParseItems reads a run of APEv2 items with nothing around them: no
+// preamble, no header, no footer. count is the item count a header record
+// elsewhere stated and bounds the walk, which also ends where the bytes do:
+// zero reads nothing, and a count outside the item cap is read as the cap. A
+// Musepack SV8 chapter packet carries its tag this way, the header record
+// (minus the preamble) in front of the items.
+func ParseItems(items []byte, count int) map[string][]string {
+	if count < 0 || count > maxItems {
+		count = maxItems
+	}
+	return parseItems(items, count)
 }
 
 // parseItems reads up to count items off the front of items.

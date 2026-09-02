@@ -199,7 +199,10 @@ var Vectors = []Vector{
 	// of: libmpcdec and the mpcdec, mpc2sv8 and mpccut tools in the r475
 	// tarball may be ported (see THIRD-PARTY-NOTICES); the encoders (mpcenc in
 	// the same tarball, mppenc 1.16 for SV7) may not be opened and are built as
-	// binaries only. ffmpeg has no Musepack encoder and no distribution
+	// binaries only, as is mpcchap, the chapter editor in the same tarball,
+	// against scripts/mpcchap's stub of the cue-sheet library it links (the
+	// only writer of chapter packets; the fixture generator runs it). ffmpeg
+	// has no Musepack encoder and no distribution
 	// packages these, so they are the only way to generate a .mpc at all:
 	// test-time fixture generators and oracles, never a runtime dependency.
 	// The mppenc tarball is bzip2, which the fetcher extracts itself

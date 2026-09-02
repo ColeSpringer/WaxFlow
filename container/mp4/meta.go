@@ -1,8 +1,10 @@
 package mp4
 
 import (
+	"cmp"
 	"math"
 	"math/bits"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -410,14 +412,18 @@ func (d *Demuxer) parseChpl(payload []byte) {
 // having no samples. chpl is in the udta, which a fragmented moov carries like
 // any other, and the fragmented muxer writes one. Skipping this whole resolve
 // for a fragmented file threw away chapters the file plainly held.
+//
+// Either list ends up in start order, stable, as the Chapterer contract
+// promises: the text track's samples are timed in sequence, but a chpl box
+// lists entries in whatever order its writer gave them.
 func (d *Demuxer) resolveChapters(tracks []*track, audio *track) {
+	d.chapters = d.chplChapters
 	if ct := d.chapterTrack(tracks, audio); ct != nil {
 		if chapters := d.readTextChapters(ct); len(chapters) > 0 {
 			d.chapters = chapters
-			return
 		}
 	}
-	d.chapters = d.chplChapters
+	slices.SortStableFunc(d.chapters, func(a, b Chapter) int { return cmp.Compare(a.Start, b.Start) })
 }
 
 // chapterTrack finds the text track holding chapter titles: one referenced

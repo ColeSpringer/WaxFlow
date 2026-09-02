@@ -15,7 +15,7 @@ import (
 // production, packets the decoder can parse, and seeks that never come back
 // past their target.
 func FuzzDemux(f *testing.F) {
-	for _, name := range []string{"seek.mpc", "seek-sv7.mpc", "tagged.mpc", "gapless-sv7.mpc"} {
+	for _, name := range []string{"seek.mpc", "seek-sv7.mpc", "tagged.mpc", "gapless-sv7.mpc", "chapters.mpc"} {
 		raw := fixture(f, name)
 		f.Add(raw)
 		f.Add(raw[:len(raw)/2])

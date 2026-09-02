@@ -32,6 +32,12 @@ type Chapter struct {
 // not free, and an mp4 chapter text track is why: its chapters live in a
 // sample table, which costs one read each. That is the reason they are
 // resolved once, with the header, rather than per caller.
+//
+// Chapters are in start order, stable where starts tie, so a caller may
+// take chapter n's end from chapter n+1's start; a demuxer sorts what its
+// container let a writer leave unsorted. The slice is the demuxer's own and
+// must not be mutated; format.Info hands it on to read-only consumers, the
+// same rule as Tags.
 type Chapterer interface {
 	Chapters() []Chapter
 }

@@ -24,6 +24,10 @@ type mpcFixture struct {
 	repackOf string // the SV7 fixture this is the lossless mpc2sv8 repack of
 	cutOf    string // the SV8 fixture this is an mpccut cut of
 	cutFrom  int64
+	// chaptersOf is the SV8 fixture this is a copy of, and chapters the
+	// mpcchap .ini chapter file written into it (or into a fresh encode).
+	chaptersOf string
+	chapters   string
 	// seed built the cell's source noise and is frozen: the committed stream
 	// encodes exactly that noise. The values began as the length of the
 	// fixture's absolute path, so they look arbitrary; deriving one from the
@@ -59,8 +63,9 @@ func containerFixture(name string) string {
 // and stereo, the profiles that reach each quantiser path, noise substitution,
 // mid/side off, both block shapes, a stream with no seek table and one with no
 // encoder info, source lengths in all three SV7 tail regimes (N mod 1152 at
-// most 671, above 671, exactly 0), a cut with a nonzero beginning silence, and
-// the lossless repacks that pin the two readers against each other.
+// most 671, above 671, exactly 0), a cut with a nonzero beginning silence, the
+// lossless repacks that pin the two readers against each other, and a chapter
+// run the reference chapter editor wrote.
 var mpcFixtures = []mpcFixture{
 	{path: codecFixture("sv7-standard.mpc"), sv7: true, rate: 44100, channels: 2, frames: 12000},
 	{path: codecFixture("sv7-thumb.mpc"), sv7: true, args: []string{"--thumb"}, rate: 44100, channels: 2, frames: 23740, signal: "noise", seed: 70, minCorr: 0.4},         // measured 0.47
@@ -92,9 +97,18 @@ var mpcFixtures = []mpcFixture{
 	{path: containerFixture("seek-pns.mpc"), args: []string{"--quality", "0", "--num_frames", "1"}, rate: 44100, channels: 2, frames: 30000, signal: "noise", seed: 68, minCorr: 0.15}, // measured 0.21
 	{path: containerFixture("seek-sv7.mpc"), sv7: true, args: []string{"--thumb", "--pns", "0.25"}, rate: 44100, channels: 2, frames: 92160, signal: "noise", seed: 68, minCorr: 0.45}, // measured 0.56
 	{path: containerFixture("gapless-sv7.mpc"), sv7: true, rate: 44100, channels: 2, frames: 23740},
+	{path: containerFixture("chapters.mpc"), rate: 44100, channels: 2, frames: 20000, chaptersOf: codecFixture("sv8-stereo.mpc"), chapters: chapterINI},
 	{path: repoPath("testdata", "sine-s16.mpc"), rate: 44100, channels: 2, frames: 22050},
 	{path: repoPath("testdata", "noise-s16.mpc"), sv7: true, rate: 44100, channels: 2, frames: 22050, signal: "noise", seed: 55, minCorr: 0.8}, // measured 0.90
 }
+
+// chapterINI is the mpcchap chapter file behind chapters.mpc: a title alone,
+// three items (the editor writes them in ascending value length, so the title
+// lands last), an upper-case key, and a chapter with no items, which the
+// editor writes with no tag bytes at all. The sections are out of start
+// order, and the editor writes the run in section order, so the committed
+// run is unsorted and the reader's start order is pinned on a real file.
+const chapterINI = "[0]\nTitle=Intro\n\n[16000]\nTITLE=Coda\n\n[8000]\nTitle=Middle\nArtist=A\nTrack=2/3\n\n[19000]\ngain=0\npeak=0\n"
 
 // fixtureByPath looks a fixture up by its base name.
 func fixtureByPath(path string) (mpcFixture, bool) {
@@ -116,6 +130,9 @@ func (f mpcFixture) source() []int32 {
 	case f.cutOf != "":
 		o, _ := fixtureByPath(f.cutOf)
 		return o.samples()[int(f.cutFrom)*o.channels:]
+	case f.chaptersOf != "":
+		o, _ := fixtureByPath(f.chaptersOf)
+		return o.samples()
 	}
 	return f.samples()
 }

@@ -15,8 +15,7 @@ package waxflow_test
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
-	"hash/crc32"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -205,58 +204,26 @@ func TestMusepackTagsReachTheProbe(t *testing.T) {
 	}
 }
 
-// TestMusepackChaptersReachTheProbe: an SV8 chapter run surfaces through the
-// engine's Info as chapters with their titles and start times.
+// TestMusepackChaptersReachTheProbe: the chapter run the reference chapter
+// editor wrote into chapters.mpc surfaces through the engine's Info as
+// chapters with their titles and start times, the untitled one included.
 func TestMusepackChaptersReachTheProbe(t *testing.T) {
-	// A minimal SV8 stream: a stream header for ten frames, ten one-frame
-	// blocks of arbitrary payload (the probe decodes nothing), two chapters,
-	// the end marker.
-	varint := func(v uint64) []byte {
-		var out []byte
-		for shift := 63; shift > 0; shift -= 7 {
-			if v>>uint(shift) != 0 || len(out) > 0 {
-				out = append(out, byte(v>>uint(shift))&0x7F|0x80)
-			}
-		}
-		return append(out, byte(v)&0x7F)
-	}
-	packet := func(key string, payload []byte) []byte {
-		size := uint64(2 + len(payload))
-		size += uint64(len(varint(size + 1)))
-		return append(append([]byte(key), varint(size)...), payload...)
-	}
-	sh := []byte{8}
-	sh = append(sh, varint(10*1152)...)
-	sh = append(sh, varint(0)...)
-	// freq 0 (44100), max band 20 (19 in 5 bits), 2 channels (1 in 4 bits),
-	// no MS, block power 0: 000 10011 0001 0 000 as two bytes.
-	sh = append(sh, 0b00010011, 0b00010000)
-	sh = append(binary.BigEndian.AppendUint32(nil, crc32.ChecksumIEEE(sh)), sh...)
-	chapter := func(sample uint64, title string) []byte {
-		p := append(varint(sample), 0, 0, 0, 0)
-		item := binary.LittleEndian.AppendUint32(nil, uint32(len(title)))
-		item = binary.LittleEndian.AppendUint32(item, 0)
-		item = append(item, "Title\x00"...)
-		item = append(item, title...)
-		return packet("CT", append(p, item...))
-	}
-	stream := append([]byte("MPCK"), packet("SH", sh)...)
-	for i := 0; i < 10; i++ {
-		stream = append(stream, packet("AP", []byte{1, 2, 3, 4, 5, 6, 7, 8})...)
-	}
-	stream = append(stream, chapter(0, "Intro")...)
-	stream = append(stream, chapter(4410, "Verse")...)
-	stream = append(stream, packet("SE", nil)...)
-
-	info, err := waxflow.New().Probe(container.BytesSource(stream), "", nil)
+	raw := mpcFixture(t, "container", "mpc", "testdata", "chapters.mpc")
+	info, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
-	if len(info.Chapters) != 2 || info.Chapters[0].Title != "Intro" || info.Chapters[1].Title != "Verse" {
-		t.Fatalf("chapters %+v", info.Chapters)
+	want := []struct {
+		title string
+		start float64 // seconds
+	}{{"Intro", 0}, {"Middle", 8000.0 / 44100}, {"Coda", 16000.0 / 44100}, {"", 19000.0 / 44100}}
+	if len(info.Chapters) != len(want) {
+		t.Fatalf("chapters %+v, want %d", info.Chapters, len(want))
 	}
-	if s := info.Chapters[1].Start.Seconds(); s < 0.099 || s > 0.101 {
-		t.Errorf("second chapter starts at %v, want 0.1 s", info.Chapters[1].Start)
+	for i, w := range want {
+		if ch := info.Chapters[i]; ch.Title != w.title || math.Abs(ch.Start.Seconds()-w.start) > 1e-6 {
+			t.Errorf("chapter %d = %+v, want %q at %.4f s", i, ch, w.title, w.start)
+		}
 	}
 }
 

@@ -3,6 +3,7 @@ package mpc_test
 import (
 	"io"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/musepack"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/apev2"
 	"github.com/colespringer/waxflow/container/mpc"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -502,7 +504,7 @@ func TestReplayGain(t *testing.T) {
 // the end marker; a run interrupted by another packet is not seen.
 func TestChapters(t *testing.T) {
 	sh := sv8Header{count: 10 * 1152, freq: 0, maxBand: 20, channels: 2, blockPwr: 0}
-	ct := func(sample uint64, title string) []byte { return sv8Packet("CT", ctPayload(t, sample, title)) }
+	ct := func(sample uint64, title string) []byte { return sv8Packet("CT", ctPayload(sample, title)) }
 	blocks := func(n int) [][]byte {
 		var out [][]byte
 		for i := 0; i < n; i++ {
@@ -510,12 +512,54 @@ func TestChapters(t *testing.T) {
 		}
 		return out
 	}
-	// Chapters before SE, after the last audio block.
-	tail := append(blocks(11), ct(0, "one"), ct(3000, "two"), sv8Packet("SE", nil))
-	d := open(t, buildSV8(append([][]byte{sv8Packet("SH", shPayload(sh))}, tail...)...), true)
+	// Chapters before SE, after the last audio block: a title alone, the
+	// three-item tag the editor writes with the title last (here under an
+	// upper-case key), a chapter with no tag at all, and a record whose item
+	// count stops short of the title, which the reference's reader leaves
+	// unread and this one does too. A strict demuxer that opens has no
+	// warnings by construction, so the tolerant open is the one that checks
+	// the run drew none.
+	tail := append(blocks(11),
+		ct(0, "one"),
+		sv8Packet("CT", ctPayloadTag(3000, ctTag([2]string{"Artist", "A"}, [2]string{"Track", "2/3"}, [2]string{"TITLE", "two"}))),
+		sv8Packet("CT", ctPayloadTag(6000, nil)),
+		sv8Packet("CT", ctPayloadTag(9000, countOf(1, ctTag([2]string{"Artist", "A"}, [2]string{"Title", "unread"})))),
+		sv8Packet("SE", nil))
+	raw := buildSV8(append([][]byte{sv8Packet("SH", shPayload(sh))}, tail...)...)
+	d := open(t, raw, false)
 	chapters := d.Chapters()
-	if len(chapters) != 2 || chapters[0].Title != "one" || chapters[1].Title != "two" || chapters[1].Start.Seconds() < 0.068 || chapters[1].Start.Seconds() > 0.069 {
+	if len(chapters) != 4 || chapters[0].Title != "one" || chapters[1].Title != "two" || chapters[2].Title != "" || chapters[3].Title != "" {
 		t.Errorf("chapters %+v", chapters)
+	}
+	if len(chapters) == 4 && (chapters[1].Start.Seconds() < 0.068 || chapters[1].Start.Seconds() > 0.069) {
+		t.Errorf("second chapter starts at %v, want 3000 samples", chapters[1].Start)
+	}
+	if w := d.Warnings(); len(w) != 0 {
+		t.Errorf("warnings %v on a run the editor writes", w)
+	}
+	open(t, raw, true)
+	// A tag that does not start with a header record is nothing the editor
+	// writes: too short for one, bare items, a full tag with its preamble,
+	// zero bytes. The chapter is listed untitled with a warning, the run goes
+	// on, and strict mode refuses it.
+	bare := ctTag([2]string{"Title", "bare items, long enough to pass for a record"})[24:]
+	full, err := apev2.Build([]apev2.Tag{{Key: "TITLE", Value: "full"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tag := range map[string][]byte{"short": {1, 2, 3}, "bare items": bare, "preambled": full, "zeros": make([]byte, 40)} {
+		malformed := append(blocks(11), sv8Packet("CT", ctPayloadTag(0, tag)), ct(3000, "after"), sv8Packet("SE", nil))
+		raw := buildSV8(append([][]byte{sv8Packet("SH", shPayload(sh))}, malformed...)...)
+		d = open(t, raw, false)
+		if got := d.Chapters(); len(got) != 2 || got[0].Title != "" || got[1].Title != "after" {
+			t.Errorf("%s: chapters %+v", name, got)
+		}
+		if w := d.Warnings(); len(w) != 1 || !strings.Contains(w[0].Msg, "header record") {
+			t.Errorf("%s: warnings %v, want one about the header record", name, w)
+		}
+		if _, err := mpc.NewDemuxer(container.BytesSource(raw), &mpc.DemuxerOptions{Strict: true}); err == nil {
+			t.Errorf("%s: strict mode accepted a chapter tag with no header record", name)
+		}
 	}
 	// A run interrupted by an audio block is not the run before SE.
 	mid := append([][]byte{sv8Packet("SH", shPayload(sh))}, blocks(5)...)
@@ -552,6 +596,106 @@ func TestChapters(t *testing.T) {
 	if len(chapters) != 1 || chapters[0].Title != "after st" {
 		t.Errorf("chapters after the seek table: %+v", chapters)
 	}
+}
+
+// TestChapterStartBounds: a start the sample arithmetic cannot hold is
+// skipped with a warning (the header's own count bound), a start past the end
+// of the stream is kept with a warning, as the editor writes it, and a run
+// longer than the chapter cap is cut with a warning rather than passed off as
+// complete. Strict mode refuses each.
+func TestChapterStartBounds(t *testing.T) {
+	sh := sv8Header{count: 10 * 1152, freq: 0, maxBand: 20, channels: 2, blockPwr: 0}
+	stream := func(run ...[]byte) []byte {
+		packets := [][]byte{sv8Packet("SH", shPayload(sh))}
+		for i := 0; i < 11; i++ {
+			packets = append(packets, sv8Packet("AP", apBlock(8+i)))
+		}
+		return buildSV8(append(append(packets, run...), sv8Packet("SE", nil))...)
+	}
+	huge := stream(sv8Packet("CT", ctPayload(1<<41, "beyond")), sv8Packet("CT", ctPayload(0, "kept")))
+	d := open(t, huge, false)
+	if got := d.Chapters(); len(got) != 1 || got[0].Title != "kept" {
+		t.Errorf("chapters with a start beyond the bound: %+v", got)
+	}
+	if w := d.Warnings(); len(w) != 1 || !strings.Contains(w[0].Msg, "bound") {
+		t.Errorf("warnings %v, want one about the bound", w)
+	}
+	past := stream(sv8Packet("CT", ctPayload(0, "first")), sv8Packet("CT", ctPayload(20000, "past")))
+	d = open(t, past, false)
+	if got := d.Chapters(); len(got) != 2 || got[1].Title != "past" {
+		t.Errorf("chapters with a start past the end: %+v", got)
+	}
+	if w := d.Warnings(); len(w) != 1 || !strings.Contains(w[0].Msg, "past the end") {
+		t.Errorf("warnings %v, want one about the end of the stream", w)
+	}
+	var run [][]byte
+	for i := 0; i <= 1024; i++ {
+		run = append(run, sv8Packet("CT", ctPayloadTag(uint64(i), nil)))
+	}
+	d = open(t, stream(run...), false)
+	if got := d.Chapters(); len(got) != 1024 {
+		t.Errorf("%d chapters past the cap", len(got))
+	}
+	if w := d.Warnings(); len(w) != 1 || !strings.Contains(w[0].Msg, "1024") {
+		t.Errorf("warnings %v, want one about the cap", w)
+	}
+	for name, raw := range map[string][]byte{"beyond the bound": huge, "past the end": past, "over the cap": stream(run...)} {
+		if _, err := mpc.NewDemuxer(container.BytesSource(raw), &mpc.DemuxerOptions{Strict: true}); err == nil {
+			t.Errorf("strict mode accepted a chapter %s", name)
+		}
+	}
+}
+
+// TestChaptersStartOrder: the editor writes the run in its .ini's order, so a
+// run can be unsorted; the chapters come back in start order, stable, so two
+// sharing a start keep their file order. The API's span rule (a chapter ends
+// where the next starts) and the mp4 chapter track need starts that advance,
+// and the tag library sorts the same way.
+func TestChaptersStartOrder(t *testing.T) {
+	sh := sv8Header{count: 10 * 1152, freq: 0, maxBand: 20, channels: 2, blockPwr: 0}
+	packets := [][]byte{sv8Packet("SH", shPayload(sh))}
+	for i := 0; i < 11; i++ {
+		packets = append(packets, sv8Packet("AP", apBlock(8+i)))
+	}
+	packets = append(packets,
+		sv8Packet("CT", ctPayload(6000, "third")),
+		sv8Packet("CT", ctPayload(0, "first")),
+		sv8Packet("CT", ctPayload(3000, "second a")),
+		sv8Packet("CT", ctPayload(3000, "second b")),
+		sv8Packet("SE", nil))
+	var got []string
+	for _, ch := range open(t, buildSV8(packets...), true).Chapters() {
+		got = append(got, ch.Title)
+	}
+	if want := []string{"first", "second a", "second b", "third"}; !slices.Equal(got, want) {
+		t.Errorf("chapters %q, want %q", got, want)
+	}
+}
+
+// TestChaptersFixture reads the run the reference chapter editor wrote into
+// chapters.mpc (docs/notes/musepack-chapters.md): the titles sit behind the
+// APEv2 header record it writes without the preamble, one chapter carries
+// three items with the title last, one has no tag at all.
+func TestChaptersFixture(t *testing.T) {
+	raw := fixture(t, "chapters.mpc")
+	d := open(t, raw, false)
+	want := []struct {
+		title string
+		start float64 // seconds; the .ini lists these out of order
+	}{{"Intro", 0}, {"Middle", 8000.0 / 44100}, {"Coda", 16000.0 / 44100}, {"", 19000.0 / 44100}}
+	got := d.Chapters()
+	if len(got) != len(want) {
+		t.Fatalf("chapters %+v, want %d", got, len(want))
+	}
+	for i, w := range want {
+		if got[i].Title != w.title || math.Abs(got[i].Start.Seconds()-w.start) > 1e-6 || got[i].End != 0 {
+			t.Errorf("chapter %d = %+v, want %q at %.4f s", i, got[i], w.title, w.start)
+		}
+	}
+	if w := d.Warnings(); len(w) != 0 {
+		t.Errorf("warnings %v", w)
+	}
+	open(t, raw, true)
 }
 
 // TestBeginningSilence pins the SV8 field only mpccut writes: the cut fixture

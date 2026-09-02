@@ -24,3 +24,4 @@ row for the same pass, and `THIRD-PARTY-NOTICES.md` carries the attribution.
 |---|---|---|
 | `wma-bitstream.md` | `codec/wma` | 2026-08-20 |
 | `wma-oracle-corpus.md` | `codec/wma` | 2026-08-20 |
+| `musepack-chapters.md` | `container/mpc` | 2026-09-02 |

@@ -1,8 +1,10 @@
 package mpc
 
 import (
+	"cmp"
 	"fmt"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/colespringer/waxflow/codec/musepack"
@@ -40,13 +42,27 @@ func (d *Demuxer) Tags() map[string][]string {
 	return out
 }
 
-// Chapters returns the SV8 chapter markers, resolved during the header parse.
+// Chapters returns the SV8 chapter markers, resolved during the header parse,
+// in start order.
 func (d *Demuxer) Chapters() []container.Chapter { return d.chapters }
+
+// maxChapterStart bounds a chapter's start sample: the bound the stream
+// header's own count carries (sv8.go), past which the sample arithmetic
+// overflows.
+const maxChapterStart = 1 << 40
 
 // readChapters reads the CT run the reference reads: the packets right after
 // the seek table an SO packet points at, or else the run of CT packets
 // ending at the end marker. A CT run interrupted by any other packet is not
 // seen, which matches the reference rather than the spec's wider promise.
+//
+// The run is written in the order the editor's .ini listed the chapters, so
+// it can be unsorted. The chapters are returned in start order, which the
+// Chapterer contract promises: a caller derives a chapter's end from the next
+// chapter's start and the mp4 chapter track needs starts that advance. The
+// sort is stable so the order is a function of the file alone, the same
+// answer the tag library gives. The spec's "presented in file order" is a
+// player's rule and differs only on such a run.
 func (d *Demuxer) readChapters() error {
 	s := &d.sv8
 	at := s.ctAt
@@ -83,14 +99,48 @@ func (d *Demuxer) readChapters() error {
 			}
 			break
 		}
+		pkt := at
+		at += int64(blk.hdrLen) + blk.payload
+		if sample > maxChapterStart {
+			if err := d.warn(pkt, "chapter start %d is past the %d-sample bound, skipped", sample, uint64(maxChapterStart)); err != nil {
+				return err
+			}
+			continue
+		}
+		// The editor warns about a start past the end and writes it anyway;
+		// a stream of unknown length has no end to be past.
+		if end := s.count - s.begSilence; s.count != 0 && sample > end {
+			if err := d.warn(pkt, "chapter starts at sample %d, past the end of the stream at %d", sample, end); err != nil {
+				return err
+			}
+		}
 		ch := container.Chapter{Start: time.Duration(float64(sample) / rate * float64(time.Second))}
-		// The gain and peak (two 16-bit fields) are followed by raw APEv2
-		// items without preamble or footer.
-		if items := apev2.ParseItems(p[n+4:]); len(items["TITLE"]) > 0 {
-			ch.Title = items["TITLE"][0]
+		// Behind the gain and peak (two 16-bit fields) sits the tag: the
+		// APEv2 header record without its preamble, then the items, no
+		// footer, as the reference chapter editor writes it
+		// (docs/notes/musepack-chapters.md). An untitled chapter carries no
+		// tag bytes at all. The spec also allows the record as a footer
+		// behind the items; no writer does that, and a tag not led by a
+		// header record is reported rather than guessed at.
+		if tag := p[n+4:]; len(tag) > 0 {
+			count, ok := apev2.ParseHeaderRecord(tag)
+			if !ok {
+				if err := d.warn(pkt, "chapter tag does not start with an APEv2 header record, chapter listed untitled"); err != nil {
+					return err
+				}
+			} else if items := apev2.ParseItems(tag[apev2.RecordLen:], count); len(items["TITLE"]) > 0 {
+				ch.Title = items["TITLE"][0]
+			}
 		}
 		d.chapters = append(d.chapters, ch)
-		at += int64(blk.hdrLen) + blk.payload
 	}
+	if len(d.chapters) == maxChapters {
+		if blk, ok := d.sv8Header(at); ok && blk.key == "CT" {
+			if err := d.warn(at, "more than %d chapter packets, the rest are not read", maxChapters); err != nil {
+				return err
+			}
+		}
+	}
+	slices.SortStableFunc(d.chapters, func(a, b container.Chapter) int { return cmp.Compare(a.Start, b.Start) })
 	return nil
 }

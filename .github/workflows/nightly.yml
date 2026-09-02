@@ -52,7 +52,7 @@ jobs:
           path: |
             testdata/vectors
             testdata/tools
-          key: vectors-${{ hashFiles('internal/testutil/vectors.go') }}
+          key: vectors-${{ hashFiles('internal/testutil/vectors.go', 'Makefile') }}
       - run: make verify-vectors
       - run: make ape-tools
       # The Musepack reference tools: both encoders the format has ever had,
@@ -153,7 +153,7 @@ jobs:
           path: |
             testdata/vectors
             testdata/tools
-          key: quality-${{ hashFiles('internal/testutil/vectors.go') }}
+          key: quality-${{ hashFiles('internal/testutil/vectors.go', 'Makefile') }}
       - run: go run ./internal/testutil/cmd/vectorfetch opus/corpus/ opus/speech/
       - run: make opus-tools
       - run: make encoder-quality QUALITY_REPORT=quality-report.html AAC_QUALITY_REPORT=aac-quality-report.html HEAAC_QUALITY_REPORT=heaac-quality-report.html HEAACV2_QUALITY_REPORT=heaacv2-quality-report.html OPUS_QUALITY_REPORT=opus-quality-report.html OPUS_SPEECH_QUALITY_REPORT=opus-speech-quality-report.html

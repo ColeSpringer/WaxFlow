@@ -70,8 +70,9 @@ func TestFixturesTrackTheirSource(t *testing.T) {
 // happens to sit. Moving a fixture deeper must not move its signal.
 func TestSourceDoesNotDependOnTheCheckout(t *testing.T) {
 	for _, f := range mpcFixtures {
-		// A repack or a cut rebuilds its origin's signal, checked there.
-		if f.signal != "noise" || f.repackOf != "" || f.cutOf != "" {
+		// A repack, a cut or a chaptered copy rebuilds its origin's signal,
+		// checked there.
+		if f.signal != "noise" || f.repackOf != "" || f.cutOf != "" || f.chaptersOf != "" {
 			continue
 		}
 		t.Run(f.name(), func(t *testing.T) {

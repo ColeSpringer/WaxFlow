@@ -461,3 +461,22 @@ func TestBuildDropsReservedItemNames(t *testing.T) {
 		t.Errorf("a file-borne reserved item read back as %v", v)
 	}
 }
+
+// TestParseItemsCount: the count a header record states bounds the walk, zero
+// reads nothing, and a count outside the cap reads up to the cap.
+func TestParseItemsCount(t *testing.T) {
+	tag := build(false, item{key: "Artist", value: "A"}, item{key: "Title", value: "T"})
+	items := tag[:len(tag)-FooterLen]
+	for _, tc := range []struct {
+		count int
+		want  int
+	}{{0, 0}, {1, 1}, {2, 2}, {3, 2}, {-1, 2}, {maxItems + 1, 2}} {
+		got := ParseItems(items, tc.count)
+		if len(got) != tc.want {
+			t.Errorf("count %d read %d items %v, want %d", tc.count, len(got), got, tc.want)
+		}
+		if tc.want == 1 && got["ARTIST"] == nil {
+			t.Errorf("count 1 read %v, want the first item", got)
+		}
+	}
+}

@@ -121,7 +121,7 @@ jobs:
           path: |
             testdata/vectors
             testdata/tools
-          key: vectors-${{ hashFiles('internal/testutil/vectors.go') }}
+          key: vectors-${{ hashFiles('internal/testutil/vectors.go', 'Makefile') }}
       - run: make verify-vectors
       # No distribution packages the Monkey's Audio console tool and ffmpeg
       # has no APE encoder, so the only APE encoder there is gets built from

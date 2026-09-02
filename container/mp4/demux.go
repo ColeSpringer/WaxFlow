@@ -297,7 +297,8 @@ func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track}
 // Warnings returns damage tolerated during parsing.
 func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
 
-// Chapters returns parsed chapter markers, nil when the file carries none.
+// Chapters returns parsed chapter markers in start order, nil when the file
+// carries none. The slice is the demuxer's own and must not be mutated.
 func (d *Demuxer) Chapters() []Chapter { return d.chapters }
 
 // Tags returns the ilst tags, nil when the file carries none. The map is

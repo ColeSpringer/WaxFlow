@@ -572,6 +572,27 @@ func TestFragmentedChaptersSurvive(t *testing.T) {
 	wantChapters(t, d.Chapters(), want)
 }
 
+// TestChplChaptersReadInStartOrder pins the Chapterer contract on the chpl
+// path: the box lists chapters in the order the writer gave, and a writer may
+// give them unsorted, so the demuxer sorts them by start, stably. The
+// fragmented movie is the one that reads through chpl alone.
+func TestChplChaptersReadInStartOrder(t *testing.T) {
+	src := metaTone(alac.FrameSize * 3)
+	defer audio.Put(src)
+	sorted := chaptersFor(3)
+	unsorted := []container.Chapter{sorted[2], sorted[0], sorted[1]}
+	var out bytes.Buffer
+	muxALACMeta(t, &out, src, &MuxerOptions{Chapters: unsorted})
+	if !bytes.Contains(out.Bytes(), chplBox(unsorted)) {
+		t.Fatal("the muxer did not write the chpl box in the order given; this test is not covering the read")
+	}
+	d, err := NewDemuxer(container.BytesSource(out.Bytes()), nil)
+	if err != nil {
+		t.Fatalf("NewDemuxer: %v", err)
+	}
+	wantChapters(t, d.Chapters(), sorted)
+}
+
 // findBoxForTest returns the payload of the first box of the given type among
 // body's immediate children. walkBoxes does not recurse, so neither does this:
 // reaching a nested box means calling it once per level (a trak's elst is

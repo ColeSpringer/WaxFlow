@@ -9,7 +9,7 @@ package musepack_test
 // which is wired to `go test -tags mpcfixtures -run ^TestGenerateFixtures$`.
 // It needs the reference tools from `make mpc-tools`: mpcenc and mppenc are
 // the only Musepack encoders there are, mpc2sv8 the only repacker, mpccut the
-// only writer of a beginning silence.
+// only writer of a beginning silence, mpcchap the only writer of chapters.
 //
 // The committed fixtures exist so the decoder has a gate on a machine with no
 // tools at all: every one of them holds a signal internal/testutil can
@@ -31,8 +31,14 @@ func TestGenerateFixtures(t *testing.T) {
 		t.Fatal("the Musepack reference tools are required (run `make mpc-tools`)")
 	}
 	tmp := t.TempDir()
+	for _, f := range mpcFixtures {
+		if f.chapters != "" {
+			testutil.MPCChapTool(t) // resolved before anything is written
+			break
+		}
+	}
 	// Derived fixtures need their origin written first, which the table's
-	// order provides: every origin precedes its repack or cut.
+	// order provides: every origin precedes its repack, cut or copy.
 	for _, f := range mpcFixtures {
 		if err := os.MkdirAll(filepath.Dir(f.path), 0o755); err != nil {
 			t.Fatal(err)
@@ -42,6 +48,14 @@ func TestGenerateFixtures(t *testing.T) {
 			testutil.MPC2SV8File(t, f.repackOf, f.path)
 		case f.cutOf != "":
 			testutil.MPCCutFile(t, f.cutOf, f.path, f.cutFrom, 0)
+		case f.chaptersOf != "":
+			raw, err := os.ReadFile(f.chaptersOf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(f.path, raw, 0o644); err != nil {
+				t.Fatal(err)
+			}
 		default:
 			wav := filepath.Join(tmp, f.name()+".wav")
 			testutil.WriteWAV(t, wav, intFormat(f.rate, f.channels), f.samples())
@@ -54,22 +68,25 @@ func TestGenerateFixtures(t *testing.T) {
 			} else {
 				testutil.MPCEncodeFile(t, wav, f.path, args...)
 			}
-			if f.id3v1 {
-				// mppenc writes no ID3v1, so the stacked-trailer shape real
-				// taggers leave is appended here.
-				raw, err := os.ReadFile(f.path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				tag := make([]byte, 128)
-				copy(tag, "TAG")
-				copy(tag[3:], "Tagged")
-				copy(tag[33:], "Wax Test")
-				copy(tag[63:], "Fixtures")
-				copy(tag[93:], "2026")
-				if err := os.WriteFile(f.path, append(raw, tag...), 0o644); err != nil {
-					t.Fatal(err)
-				}
+		}
+		if f.chapters != "" {
+			testutil.MPCChapFile(t, f.path, f.chapters)
+		}
+		if f.id3v1 {
+			// mppenc writes no ID3v1, so the stacked-trailer shape real
+			// taggers leave is appended here.
+			raw, err := os.ReadFile(f.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tag := make([]byte, 128)
+			copy(tag, "TAG")
+			copy(tag[3:], "Tagged")
+			copy(tag[33:], "Wax Test")
+			copy(tag[63:], "Fixtures")
+			copy(tag[93:], "2026")
+			if err := os.WriteFile(f.path, append(raw, tag...), 0o644); err != nil {
+				t.Fatal(err)
 			}
 		}
 		fi, err := os.Stat(f.path)

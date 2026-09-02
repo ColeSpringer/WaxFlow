@@ -13,7 +13,6 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/musepack"
 	"github.com/colespringer/waxflow/container"
-	"github.com/colespringer/waxflow/container/internal/apev2"
 	"github.com/colespringer/waxflow/container/mpc"
 	"github.com/colespringer/waxflow/internal/testutil"
 )
@@ -314,17 +313,50 @@ func eiPayload(profile int, pns bool, major, minor, build byte) []byte {
 	return w.buf
 }
 
-// ctPayload builds a chapter packet: the start sample, gain and peak, then
-// raw APEv2 items.
-func ctPayload(t testing.TB, sample uint64, title string) []byte {
-	t.Helper()
-	tag, err := apev2.Build([]apev2.Tag{{Key: "TITLE", Value: title}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	items := tag[apev2.FooterLen : len(tag)-apev2.FooterLen]
+// ctPayload builds a chapter packet the way the reference chapter editor
+// writes one with a title alone: the start sample, a zero gain and peak, then
+// the tag. ctPayloadTag takes any tag, ctTag renders one.
+func ctPayload(sample uint64, title string) []byte {
+	return ctPayloadTag(sample, ctTag([2]string{"Title", title}))
+}
+
+// ctPayloadTag builds a chapter packet around a rendered tag. A nil tag is an
+// untitled chapter, which the editor writes with no tag bytes at all.
+func ctPayloadTag(sample uint64, tag []byte) []byte {
 	out := append(varint(sample), 0, 0, 0, 0)
-	return append(out, items...)
+	return append(out, tag...)
+}
+
+// ctTag renders items as the chapter tag the editor writes (see
+// docs/notes/musepack-chapters.md): the APEv2 header record without its
+// preamble (version 2000, the items' byte size, their count, the has-header
+// and is-header flags, a reserved word), then the items, no footer. The
+// editor orders items by ascending value length; callers pass that order when
+// it matters.
+func ctTag(items ...[2]string) []byte {
+	if len(items) == 0 {
+		return nil
+	}
+	var body []byte
+	for _, it := range items {
+		body = binary.LittleEndian.AppendUint32(body, uint32(len(it[1])))
+		body = binary.LittleEndian.AppendUint32(body, 0)
+		body = append(body, it[0]...)
+		body = append(body, 0)
+		body = append(body, it[1]...)
+	}
+	head := make([]byte, 24)
+	binary.LittleEndian.PutUint32(head[0:4], 2000)
+	binary.LittleEndian.PutUint32(head[4:8], uint32(len(body)))
+	binary.LittleEndian.PutUint32(head[8:12], uint32(len(items)))
+	binary.LittleEndian.PutUint32(head[12:16], 0xA0000000)
+	return append(head, body...)
+}
+
+// countOf rewrites the item count a rendered chapter tag's record states.
+func countOf(count uint32, tag []byte) []byte {
+	binary.LittleEndian.PutUint32(tag[8:12], count)
+	return tag
 }
 
 // apBlock is an audio block payload of n arbitrary bytes; the demuxer never

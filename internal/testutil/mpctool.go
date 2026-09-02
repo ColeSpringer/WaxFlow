@@ -18,8 +18,11 @@ import (
 // reached as built binaries only and never opened, per the clean-room policy.
 // The decode oracle is libmpcdec's own float output through scripts/mpcdecraw,
 // built against the pinned library, beside mpc2sv8 (the lossless SV7-to-SV8
-// repacker) and mpccut (the only writer of a nonzero beginning silence).
-// `make mpc-tools` builds all of them into testdata/tools.
+// repacker), mpccut (the only writer of a nonzero beginning silence) and
+// mpcchap (the chapter editor, the only writer of chapter packets, run as a
+// binary the same way). `make mpc-tools` builds all of them into
+// testdata/tools. Only the fixture generator needs mpcchap, and it resolves
+// the tool itself, so HaveMPCTools does not gate the oracles on it.
 //
 // Same policy as the other tool oracles: tests self-skip when a tool is
 // missing, and WAXFLOW_REQUIRE_MPC=1 (the CI differential job) escalates
@@ -87,6 +90,9 @@ func MPC2SV8Tool(t testing.TB) string { return mpcTool(t, "mpc2sv8") }
 
 // MPCCutTool locates mpccut, the SV8 stream cutter.
 func MPCCutTool(t testing.TB) string { return mpcTool(t, "mpccut") }
+
+// MPCChapTool locates mpcchap, the SV8 chapter editor.
+func MPCChapTool(t testing.TB) string { return mpcTool(t, "mpcchap") }
 
 // HaveMPCTools reports whether every Musepack reference tool is available,
 // for a test that has something to check without them and more to check with
@@ -226,6 +232,18 @@ func MPCCutFile(t testing.TB, in, out string, from, to int64) {
 		args = append(args, "-e", strconv.FormatInt(to, 10))
 	}
 	runMPC(t, MPCCutTool(t), append(args, in, out)...)
+}
+
+// MPCChapFile writes the chapters an .ini chapter file describes into an SV8
+// stream in place, replacing any run it had: a section per chapter, named by
+// its start sample, whose keys other than gain and peak become the tag items.
+func MPCChapFile(t testing.TB, path, ini string) {
+	t.Helper()
+	iniPath := filepath.Join(t.TempDir(), "chapters.ini")
+	if err := os.WriteFile(iniPath, []byte(ini), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runMPC(t, MPCChapTool(t), path, iniPath)
 }
 
 // MPCToolsDescription names the tool set for skip messages.
