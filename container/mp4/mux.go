@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/codec/alac"
@@ -140,7 +139,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 			return waxerr.New(waxerr.CodeUnsupportedFormat,
 				fmt.Sprintf("mp4: track format %v does not match the ALAC cookie (%v)", t.Fmt, want))
 		}
-		entry = alacSampleEntry(t.Fmt, cfg.Cookie)
+		entry = alacSampleEntry(cfg)
 		defaultDur = alac.FrameSize
 	case codec.AACLC, codec.HEAAC:
 		if t.Delay < 0 || t.Padding < 0 {
@@ -428,29 +427,12 @@ func stblBox(entry []byte) []byte {
 }
 
 // alacSampleEntry builds the 'alac' AudioSampleEntry wrapping the magic
-// cookie. The cookie is authoritative for rate and depth; the legacy 16.16
-// sample-rate field and samplesize are cosmetic (our demuxer and ffmpeg both
-// read the cookie), so samplesize stays 16 and the rate is written best
-// effort.
-func alacSampleEntry(f audio.Format, cookie []byte) []byte {
-	inner := makeFullBox("alac", 0, 0, cookie)
-	// The 16.16 fixed-point field holds only a 16-bit integer part, so rates
-	// at or above 65536 (96/176.4/192 kHz hi-res ALAC) are clamped rather
-	// than left to wrap into the fractional bits and read back as garbage.
-	// The cookie carries the true rate and is authoritative.
-	sampleRate := uint32(f.Rate)
-	if sampleRate > 0xFFFF {
-		sampleRate = 0xFFFF
-	}
-	// makeBox concatenates its parts, so the AudioSampleEntry header fields go
-	// straight in ahead of the child cookie box, no intermediate slice.
-	return makeBox("alac",
-		make([]byte, 6), u16(1), // reserved, data_reference_index
-		u16(0), u16(0), u32(0), // version, revision, vendor
-		u16(uint16(f.Channels)), u16(16), // channelcount, samplesize
-		u16(0), u16(0), // compressionID, packetsize
-		u32(sampleRate<<16), // samplerate 16.16
-		inner)
+// cookie. The cookie is authoritative for rate and depth in every reader
+// (ours and ffmpeg's included); the header fields repeat what it says.
+func alacSampleEntry(cfg alac.Config) []byte {
+	inner := makeFullBox("alac", 0, 0, cfg.Cookie)
+	h := sampleEntryHeader{channels: cfg.Channels, depth: cfg.BitDepth, rate16: clampRate16(cfg.SampleRate)}
+	return audioSampleEntry("alac", h, inner)
 }
 
 // trexBox declares the fragment defaults: one sample description, the

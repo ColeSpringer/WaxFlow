@@ -4,10 +4,10 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/alac"
 	"github.com/colespringer/waxflow/codec/flac"
+	"github.com/colespringer/waxflow/codec/opus"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -15,7 +15,9 @@ import (
 // SegmenterVersion identifies the segment and init-header box layout for
 // the ADR-0004 cache key: cached segments regenerate when this bumps, so
 // a box-layout fix can never serve stale segments next to fresh ones.
-const SegmenterVersion = "mp4-seg-3"
+// mp4-seg-4: the init header's sample entry carries the codec's depth and
+// agrees with dOps on rate (both refused by Chromium's MSE parser before).
+const SegmenterVersion = "mp4-seg-4"
 
 // maxSegmentPayload bounds one segment's mdat payload. A segment is a
 // single moof+mdat pair (see Segmenter), and the most extreme legal
@@ -247,7 +249,7 @@ func sampleEntryFor(t container.Track) ([]byte, error) {
 		if t.Delay != 0 {
 			return nil, waxerr.New(waxerr.CodeUnsupportedFormat, "mp4: ALAC signals no encoder delay")
 		}
-		return alacSampleEntry(t.Fmt, cfg.Cookie), nil
+		return alacSampleEntry(cfg), nil
 	}
 	return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 		fmt.Sprintf("mp4: cannot segment codec %q (opus, flac, alac, aac-lc, he-aac)", t.Codec))
@@ -257,6 +259,17 @@ func sampleEntryFor(t container.Track) ([]byte, error) {
 // 'dOps' box (Opus-in-ISOBMFF). Only channel mapping family 0 (mono and
 // stereo single-stream) is produced, matching the encoder; note dOps is
 // big-endian where OpusHead is little-endian.
+//
+// The entry's samplerate is 48000 as the mapping requires, and dOps's
+// InputSampleRate is written as 48000 too rather than copied from the
+// header. RFC 7845 makes that field informational (the rate of the PCM
+// that went into the encoder, never a playback rate), but Chromium
+// refuses the init segment unless it equals the entry's, so a remuxed
+// source whose header says 44100 (every CD-sourced opusenc file) would be
+// unplayable over MSE. The original does not survive a round trip: this
+// package's demuxer rebuilds OpusHead from dOps, so an fMP4 read back
+// hands 48000 on to the Ogg and Matroska muxers. Nothing interprets the
+// value, and the only Opus fMP4 written here is HLS output, never a source.
 func opusSampleEntry(t container.Track) ([]byte, error) {
 	head := t.CodecConfig
 	if len(head) != 19 || string(head[:8]) != "OpusHead" || head[8] != 1 {
@@ -264,7 +277,6 @@ func opusSampleEntry(t container.Track) ([]byte, error) {
 	}
 	channels := int(head[9])
 	preSkip := binary.LittleEndian.Uint16(head[10:])
-	inputRate := binary.LittleEndian.Uint32(head[12:])
 	outputGain := binary.LittleEndian.Uint16(head[16:])
 	if family := head[18]; family != 0 {
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
@@ -274,6 +286,10 @@ func opusSampleEntry(t container.Track) ([]byte, error) {
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 			fmt.Sprintf("mp4: track has %d channels, OpusHead %d", t.Fmt.Channels, channels))
 	}
+	if t.Fmt.Rate != opus.SampleRate {
+		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
+			fmt.Sprintf("mp4: opus track at %d Hz; Opus decodes at %d", t.Fmt.Rate, opus.SampleRate))
+	}
 	if int64(preSkip) != t.Delay {
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 			fmt.Sprintf("mp4: track delay %d disagrees with OpusHead pre-skip %d", t.Delay, preSkip))
@@ -282,10 +298,11 @@ func opusSampleEntry(t container.Track) ([]byte, error) {
 		[]byte{0},              // Version
 		[]byte{byte(channels)}, // OutputChannelCount
 		u16(preSkip),
-		u32(inputRate),
+		u32(opus.SampleRate), // InputSampleRate, normalized (see above)
 		u16(outputGain),
 		[]byte{0}) // ChannelMappingFamily
-	return audioSampleEntry("Opus", t.Fmt, dops), nil
+	h := sampleEntryHeader{channels: channels, depth: 16, rate16: clampRate16(opus.SampleRate)}
+	return audioSampleEntry("Opus", h, dops), nil
 }
 
 // flacSampleEntry wraps the STREAMINFO block in an 'fLaC' entry with a
@@ -307,23 +324,61 @@ func flacSampleEntry(t container.Track) ([]byte, error) {
 	dfla := makeFullBox("dfLa", 0, 0,
 		[]byte{0x80, 0, 0, flac.StreamInfoLen}, // last-block flag, type STREAMINFO, 24-bit length
 		t.CodecConfig)
-	return audioSampleEntry("fLaC", t.Fmt, dfla), nil
+	h := sampleEntryHeader{channels: si.Channels, depth: si.Bits, rate16: flacRate16(si.Rate)}
+	return audioSampleEntry("fLaC", h, dfla), nil
 }
 
-// audioSampleEntry assembles a generic AudioSampleEntry of the given type
-// around the codec-specific child box. samplesize stays the conventional
-// 16 and the legacy 16.16 rate field clamps like alacSampleEntry's: the
-// codec config box is authoritative for both.
-func audioSampleEntry(typ string, f audio.Format, child []byte) []byte {
-	sampleRate := uint32(f.Rate)
-	if sampleRate > 0xFFFF {
-		sampleRate = 0xFFFF
-	}
+// sampleEntryHeader is the AudioSampleEntry's own fields, the ones beside
+// the codec config box. Keyed, so a call cannot transpose two counts.
+type sampleEntryHeader struct {
+	channels int
+	depth    int    // samplesize, in bits
+	rate16   uint32 // samplerate as 16.16 fixed point
+}
+
+// audioSampleEntry assembles an AudioSampleEntry of the given type around
+// the codec-specific child box. Strict fMP4 consumers cross-check the
+// header against that box: FLAC-in-ISOBMFF says channelcount and
+// samplesize shall equal STREAMINFO's, and Chromium's MSE parser refuses
+// an init segment whose FLAC entry disagrees with its dfLa, so the
+// lossless codecs pass their config's depth. Opus and AAC pass 16: the
+// Opus mapping fixes it, AAC carries the conventional value (it has no
+// PCM depth), and Chromium accepts only 8, 16, 24, or 32 there whatever
+// the codec.
+func audioSampleEntry(typ string, h sampleEntryHeader, child []byte) []byte {
 	return makeBox(typ,
 		make([]byte, 6), u16(1), // reserved, data_reference_index
 		u16(0), u16(0), u32(0), // version, revision, vendor
-		u16(uint16(f.Channels)), u16(16), // channelcount, samplesize
+		u16(uint16(h.channels)), u16(uint16(h.depth)), // channelcount, samplesize
 		u16(0), u16(0), // compressionID, packetsize
-		u32(sampleRate<<16), // samplerate 16.16
+		u32(h.rate16), // samplerate 16.16
 		child)
+}
+
+// clampRate16 is the 16.16 samplerate for the entries whose config box is
+// where every decoder reads the rate (ALAC's cookie, AAC's ASC): the rate
+// itself when it fits, else saturated at 65535. No spec prescribes a
+// substitute for those entries, and a metadata reader that takes the field
+// verbatim (waxlabel does for ALAC) is better handed an obviously saturated
+// value than a plausible wrong one.
+func clampRate16(rate int) uint32 {
+	if rate > 0xFFFF {
+		rate = 0xFFFF
+	}
+	return uint32(rate) << 16
+}
+
+// flacRate16 is the fLaC entry's 16.16 samplerate per FLAC-in-ISOBMFF: the
+// rate itself when it fits, otherwise the greatest whole halving that does
+// (48000.0 for 96 and 192 kHz, 44100.0 for 88.2 and 176.4), and the spec's
+// 65535.0 fallback for a rate with no such halving. Readers take the true
+// rate from STREAMINFO, as the spec requires of them.
+func flacRate16(rate int) uint32 {
+	for rate > 0xFFFF {
+		if rate%2 != 0 {
+			return clampRate16(rate)
+		}
+		rate /= 2
+	}
+	return uint32(rate) << 16
 }

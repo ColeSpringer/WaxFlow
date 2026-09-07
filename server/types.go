@@ -279,6 +279,9 @@ var deliveryProfiles = map[string]CapsProfile{
 		Progressive: []string{"opus", "flac", "mp3", "aac", "wav"},
 		HLS:         []string{"opus", "flac", "aac"},
 		Basis:       "automated: hls.js + <audio> in Chromium (make client-e2e, nightly)",
+		Notes: []string{
+			"hls flac plays at 8, 16, 24, and 32 bits only (Chromium's MP4 parser); ask for bits=16 or bits=24 on a 12- or 20-bit source",
+		},
 	},
 	// AVPlayer and Safari. HLS is Apple's own guaranteed-supported
 	// path (fMP4 for FLAC/ALAC/Opus per the HLS authoring spec);

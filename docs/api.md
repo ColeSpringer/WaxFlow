@@ -663,7 +663,8 @@ is:
         },
         "hls-js": {"delivery": "hls", "progressive": ["opus", "flac", "mp3", "aac", "wav"],
                    "hls": ["opus", "flac", "aac"],
-                   "basis": "automated: hls.js + <audio> in Chromium (make client-e2e, nightly)"},
+                   "basis": "automated: hls.js + <audio> in Chromium (make client-e2e, nightly)",
+                   "notes": ["hls flac plays at 8, 16, 24, and 32 bits only (Chromium's MP4 parser); ask for bits=16 or bits=24 on a 12- or 20-bit source"]},
         "android-exoplayer": {"...": "..."},
         "desktop-mpv": {"...": "..."}
       }

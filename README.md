@@ -255,7 +255,9 @@ make goldens         # regenerate muxer golden files (review the diff)
 - Encoder/decoder acceptance thresholds are pinned in
   [docs/quality-gates.md](docs/quality-gates.md); gates only ratchet up.
 - Defects that are understood but deliberately unfixed, with the reason,
-  are in [docs/deferred-work.md](docs/deferred-work.md).
+  are in [docs/deferred-work.md](docs/deferred-work.md); what WaxFlow
+  wants from the sibling Wax repos it depends on is in
+  [docs/upstream-requests.md](docs/upstream-requests.md).
 - ffmpeg is a **test oracle only** (differential CI job), never a runtime
   dependency.
 - Releases are tag-driven: pushing `vX.Y.Z` publishes binaries + SHA256SUMS

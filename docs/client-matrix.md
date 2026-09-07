@@ -43,6 +43,16 @@ HLS is the CMAF/fMP4 variant surface.
 | Timeline (`tl=`, gapless queue) | automated | vendor-doc | vendor-doc | manual |
 | Span (`from=`/`to=`, virtual track) | automated | vendor-doc | vendor-doc | manual |
 
+The HLS flac cell runs twice, from a 16-bit and from a 24-bit source
+(`hls:flac24`). FLAC keeps a lossless source's depth, and the init
+header's sample entry has to declare it: Chromium's MP4 parser refuses an
+fLaC entry whose samplesize disagrees with STREAMINFO at the first
+append, so a 16-bit-only cell would pass a header that lies about every
+hi-res library. The same parser accepts only 8, 16, 24, and 32 as a
+sample size, so 12- and 20-bit FLAC cannot play over MSE in Chromium
+however the header reads; a caller with such a source asks for `bits=16`
+or `bits=24` (see docs/hls-validation.md).
+
 The timeline cell is the multi-source surface (`POST /hls/timeline` then a
 master signed against the `tl` digest). It is HLS, so nothing about it is
 new to a client: it is one media playlist, one init segment, and one edit
@@ -85,7 +95,10 @@ touches delivery. Record client versions and outcomes here.
    {"path":"/hls/master.m3u8","params":{"src":...,"format":...}}`, play
    in Safari and in AVPlayer (device or simulator): start, seek far
    ahead, seek back, play to the end. `mediastreamvalidator` details
-   live in docs/hls-validation.md.
+   live in docs/hls-validation.md. Run `alac` from a 24-bit and from a
+   20-bit source too: the sample entry now carries the cookie's depth
+   (ffmpeg writes the same), and Apple's is the one client family that
+   decodes ALAC and the one CI cannot drive.
 2. Progressive Ogg-Opus (Safari 18.4+): `GET /stream?...format=opus` in
    an `<audio>` tag and as a bare URL; must start and survive a `t=`
    seek issued as a fresh URL.

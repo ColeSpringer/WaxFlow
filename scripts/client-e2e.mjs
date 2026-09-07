@@ -20,7 +20,8 @@
 // target passes ./bin/waxflow; the `go run -C cli` default is a convenience
 // whose wrapper process does not reliably forward SIGTERM to the
 // daemon, so prefer a built binary); CLIENT_E2E_CELLS narrows the run
-// to a comma-separated list like "hls:opus,progressive:mp3".
+// to a comma-separated list of cell names, surface:format unless the
+// cell carries its own name, like "hls:opus,progressive:mp3,hls:flac24".
 
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -37,6 +38,12 @@ const CELLS = [
   { surface: "hls", format: "opus" },
   { surface: "hls", format: "aac" },
   { surface: "hls", format: "flac" },
+  // The same rung from a 24-bit source. FLAC keeps a lossless source's
+  // depth, and the init header's sample entry has to say so: Chromium's
+  // MP4 parser refuses an fLaC entry whose samplesize disagrees with
+  // STREAMINFO at the first append, so a 16-bit-only cell would pass a
+  // header that lies about every hi-res library.
+  { surface: "hls", format: "flac", src: "test24.wav", name: "flac24" },
   { surface: "progressive", format: "opus" },
   { surface: "progressive", format: "mp3" },
   { surface: "progressive", format: "aac" },
@@ -76,13 +83,16 @@ const TIMELINE_SEAM = TIMELINE_TRACKS[0];
 const only = process.env.CLIENT_E2E_CELLS
   ? new Set(process.env.CLIENT_E2E_CELLS.split(","))
   : null;
-const cells = CELLS.filter((c) => !only || only.has(`${c.surface}:${c.format}`));
+const cellName = (c) => `${c.surface}:${c.name || c.format}`;
+const cells = CELLS.filter((c) => !only || only.has(cellName(c)));
 
-// A 6 s 48 kHz stereo 16-bit sine WAV, written directly: no external
-// tools needed to make a fixture.
-function makeWAV(seconds = 6, rate = 48000, channels = 2) {
+// A 6 s 48 kHz stereo sine WAV at 16 or 24 bits, written directly: no
+// external tools needed to make a fixture.
+function makeWAV(seconds = 6, rate = 48000, channels = 2, bits = 16) {
+  if (bits !== 16 && bits !== 24) throw new Error(`makeWAV: ${bits}-bit fixtures are not written here`);
   const frames = seconds * rate;
-  const dataLen = frames * channels * 2;
+  const width = bits / 8;
+  const dataLen = frames * channels * width;
   const buf = Buffer.alloc(44 + dataLen);
   buf.write("RIFF", 0);
   buf.writeUInt32LE(36 + dataLen, 4);
@@ -91,14 +101,15 @@ function makeWAV(seconds = 6, rate = 48000, channels = 2) {
   buf.writeUInt16LE(1, 20); // PCM
   buf.writeUInt16LE(channels, 22);
   buf.writeUInt32LE(rate, 24);
-  buf.writeUInt32LE(rate * channels * 2, 28);
-  buf.writeUInt16LE(channels * 2, 32);
-  buf.writeUInt16LE(16, 34);
+  buf.writeUInt32LE(rate * channels * width, 28);
+  buf.writeUInt16LE(channels * width, 32);
+  buf.writeUInt16LE(bits, 34);
   buf.write("data", 36);
   buf.writeUInt32LE(dataLen, 40);
+  const amp = 12000 * (1 << (bits - 16));
   for (let i = 0; i < frames; i++) {
-    const v = Math.round(Math.sin((2 * Math.PI * 440 * i) / rate) * 12000);
-    for (let c = 0; c < channels; c++) buf.writeInt16LE(v, 44 + (i * channels + c) * 2);
+    const v = Math.round(Math.sin((2 * Math.PI * 440 * i) / rate) * amp);
+    for (let c = 0; c < channels; c++) buf.writeIntLE(v, 44 + (i * channels + c) * width, width);
   }
   return buf;
 }
@@ -154,7 +165,7 @@ async function runCell(page, base, cell) {
     await page.fill("#hlsTo", String(SPAN_TO));
     await page.click("#hlsPlay");
   } else if (cell.surface === "hls") {
-    await page.fill("#src", "lib/test.wav");
+    await page.fill("#src", `lib/${cell.src || "test.wav"}`);
     await page.selectOption("#hlsFormat", cell.format);
     await page.click("#hlsPlay");
   } else {
@@ -219,11 +230,12 @@ async function runCell(page, base, cell) {
 }
 
 // Hard watchdog: a hung browser launch or player must fail the run,
-// not pin it (the worst cell budget is 30 s and there are few cells).
+// not pin it. Thirteen cells at their 30 s budget (two waits for the
+// timeline cells) come to about 8 minutes, so 15 keeps a margin.
 const watchdog = setTimeout(() => {
-  console.error("client-e2e FAILED: 10-minute watchdog fired");
+  console.error("client-e2e FAILED: 15-minute watchdog fired");
   process.exit(1);
-}, 10 * 60 * 1000);
+}, 15 * 60 * 1000);
 watchdog.unref();
 
 const work = mkdtempSync(join(tmpdir(), "waxflow-client-e2e-"));
@@ -232,6 +244,7 @@ const cache = join(work, "cache");
 const data = join(work, "data");
 for (const d of [root, cache, data]) mkdirSync(d, { recursive: true });
 writeFileSync(join(root, "test.wav"), makeWAV());
+writeFileSync(join(root, "test24.wav"), makeWAV(6, 48000, 2, 24));
 // The span fixture is 44.1 kHz on purpose: HLS opus is always 48 kHz, so a
 // span of it is resampled by construction, which is the CUE-rip case and
 // the one where a span's first samples come out of a filter window that
@@ -276,7 +289,7 @@ try {
   });
 
   for (const cell of cells) {
-    const name = `${cell.surface}:${cell.format}`;
+    const name = cellName(cell);
     pageErr = null;
     try {
       await runCell(page, base, cell);

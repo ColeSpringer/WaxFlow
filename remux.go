@@ -49,7 +49,15 @@ import (
 // in, and until now the patch left that checksum stale: `wvunpack -v` refuses
 // the files this rung produced whenever a source's length was unknown or a cut
 // changed it. Nothing but this constant can invalidate them.
-const RemuxVersion = "remux-3"
+//
+// remux-4: the mp4 sample entry carries the ALAC cookie's depth where it wrote
+// a conventional 16, a statement about the file by the rule above even though
+// every decoder reads the cookie. A remux is a packet copy, so regenerating
+// costs a copy, not an encode. The transcode rung's progressive outputs get no
+// lever for the same change (ADR-0004's known gap: no muxer term), and none is
+// borrowed: no reader takes the entry's depth over the cookie, so those files
+// play and report identically.
+const RemuxVersion = "remux-4"
 
 // RemuxPlan describes what a remux would produce, computed from the source
 // track's headers alone.

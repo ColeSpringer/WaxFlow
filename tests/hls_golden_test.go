@@ -31,20 +31,28 @@ func pcmTrack(f audio.Format, frames int) container.Track {
 // `make goldens` and review the diff.
 func TestGoldenSegments(t *testing.T) {
 	const frames = 50000 // ~1.04 s at 48 kHz: one full segment plus a tail
-	raw, src := makeWAV(t, pcm.Config{Bits: 16}, 2, frames, 41)
 	e := waxflow.New()
 
 	cases := []struct {
 		name       string
+		bits       int
 		opts       waxflow.TranscodeOptions
 		segSamples int
+		initOnly   bool
 	}{
-		{"opus", waxflow.TranscodeOptions{Format: "opus"}, 48000},
-		{"flac", waxflow.TranscodeOptions{Format: "flac"}, 45056},
-		{"aac", waxflow.TranscodeOptions{Format: "aac"}, 48128},
+		{"opus", 16, waxflow.TranscodeOptions{Format: "opus"}, 48000, false},
+		{"flac", 16, waxflow.TranscodeOptions{Format: "flac"}, 45056, false},
+		{"aac", 16, waxflow.TranscodeOptions{Format: "aac"}, 48128, false},
+		// A 24-bit source pins the init header at a depth other than the
+		// conventional 16 the sample entry used to carry: the field
+		// Chromium checks against STREAMINFO. The segments are the
+		// encoder's bytes at that depth, which the codec's own tests pin,
+		// so only the init is kept.
+		{"flac24", 24, waxflow.TranscodeOptions{Format: "flac"}, 45056, true},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
+			raw, src := makeWAV(t, pcm.Config{Bits: tt.bits}, 2, frames, 41)
 			plan, err := e.PlanSegments(pcmTrack(src.Fmt, frames), tt.opts, float64(tt.segSamples)/48000)
 			if err != nil {
 				t.Fatal(err)
@@ -57,6 +65,9 @@ func TestGoldenSegments(t *testing.T) {
 				t.Fatal(err)
 			}
 			checkGolden(t, fmt.Sprintf("hls-%s-init.mp4", tt.name), init)
+			if tt.initOnly {
+				return
+			}
 			segs, _ := collectSegments(t, e, raw, tt.opts, tt.segSamples, 0)
 			if int64(len(segs)) != plan.Segments {
 				t.Fatalf("%d segments, plan promised %d", len(segs), plan.Segments)

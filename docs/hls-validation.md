@@ -21,6 +21,23 @@ mostly for the parts that cannot be automated on Linux.
   continuous run's decode timeline exactly; FLAC restarts are
   byte-identical, Opus restarts are primed (~100 ms) and
   timing-identical.
+- **Sample-entry agreement**: the init header's AudioSampleEntry is held
+  to the cross-checks Chromium's MSE parser makes before it accepts an
+  init segment (`container/mp4/sampleentry_test.go`): channelcount and
+  samplesize equal to STREAMINFO's for FLAC, channelcount and samplerate
+  equal to dOps's for Opus, a samplesize of 8/16/24/32 for every codec.
+  A header that lies is refused at the first append in every
+  Chromium-based browser, whatever the segments hold. The samplesize is
+  the codec's declared depth (STREAMINFO bits, the ALAC cookie's). The
+  16.16 samplerate of a FLAC entry follows the encapsulation spec past
+  65535 Hz (48000.0 for 96 and 192 kHz, 65535.0 when no whole halving
+  fits); the ALAC and AAC entries saturate at 65535 instead, since no
+  spec prescribes a substitute there and a reader that takes the field
+  verbatim (waxlabel does for ALAC) is better served by an obviously
+  saturated value than a plausible wrong one. The Opus entry writes
+  48000 for dOps's InputSampleRate whatever the source header said,
+  because Chromium refuses the init segment unless it equals the
+  entry's 48000.
 - **ffprobe/ffmpeg differential** (gated, `WAXFLOW_REQUIRE_FFMPEG=1` in
   the differential job): init+segments concatenations probe as the right
   codec and decode fully; each single segment after the init header is
@@ -66,6 +83,11 @@ tagging a release that touches HLS:
      variants.
 4. Known-acceptable notes:
    - Audio-only streams warn about missing video attributes; ignore.
+   - FLAC at 12 or 20 bits cannot play over MSE in Chromium at all: its
+     stream parser accepts only 8, 16, 24, and 32 as a sample size, and
+     the FLAC mapping requires the field to equal STREAMINFO's. Such a
+     source needs `bits=16` or `bits=24` on the mint (24 widens 20-bit
+     losslessly). Native .flac and every other client are unaffected.
    - The final segment is short (the tail remainder); that is legal and
      expected.
    - EXTINF values are **presentation** durations: each segment's decode

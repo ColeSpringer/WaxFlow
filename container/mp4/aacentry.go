@@ -27,7 +27,8 @@ func aacSampleEntry(t container.Track) ([]byte, error) {
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 			fmt.Sprintf("mp4: track format %v does not match the AudioSpecificConfig (%v)", t.Fmt, want))
 	}
-	return audioSampleEntry("mp4a", t.Fmt, esdsBox(t.CodecConfig)), nil
+	h := sampleEntryHeader{channels: t.Fmt.Channels, depth: 16, rate16: clampRate16(t.Fmt.Rate)}
+	return audioSampleEntry("mp4a", h, esdsBox(t.CodecConfig)), nil
 }
 
 // esdsBox assembles the MPEG-4 descriptor chain: an ES_Descriptor
