@@ -21,7 +21,7 @@
 // whose wrapper process does not reliably forward SIGTERM to the
 // daemon, so prefer a built binary); CLIENT_E2E_CELLS narrows the run
 // to a comma-separated list of cell names, surface:format unless the
-// cell carries its own name, like "hls:opus,progressive:mp3,hls:flac24".
+// cell carries its own name, like "hls:opus,progressive:mp3,hls:flac20".
 
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -44,6 +44,13 @@ const CELLS = [
   // STREAMINFO at the first append, so a 16-bit-only cell would pass a
   // header that lies about every hi-res library.
   { surface: "hls", format: "flac", src: "test24.wav", name: "flac24" },
+  // And from a 20-bit source, which Chromium's MP4 parser cannot play as
+  // coded: it takes only 8, 16, 24, and 32 as a sample size, and the FLAC
+  // mapping requires the field to equal STREAMINFO's, so there is no header
+  // that works. The mint widens the source to 24 bits instead (lossless: a
+  // left shift of zero-padded LSBs), which is what this cell proves reached
+  // a real player. It fails on a daemon built before that rule.
+  { surface: "hls", format: "flac", src: "test20.wav", name: "flac20" },
   { surface: "progressive", format: "opus" },
   { surface: "progressive", format: "mp3" },
   { surface: "progressive", format: "aac" },
@@ -86,12 +93,16 @@ const only = process.env.CLIENT_E2E_CELLS
 const cellName = (c) => `${c.surface}:${c.name || c.format}`;
 const cells = CELLS.filter((c) => !only || only.has(cellName(c)));
 
-// A 6 s 48 kHz stereo sine WAV at 16 or 24 bits, written directly: no
+// A 6 s 48 kHz stereo sine WAV at 16, 20, or 24 bits, written directly: no
 // external tools needed to make a fixture.
+//
+// 20 bits is the odd one and is the shape a real 20-bit rip has: the samples
+// sit left-justified in 24-bit words, wBitsPerSample says 20, and the reader
+// reports a 20-bit track (24-bit container, 20 valid bits).
 function makeWAV(seconds = 6, rate = 48000, channels = 2, bits = 16) {
-  if (bits !== 16 && bits !== 24) throw new Error(`makeWAV: ${bits}-bit fixtures are not written here`);
+  if (bits !== 16 && bits !== 20 && bits !== 24) throw new Error(`makeWAV: ${bits}-bit fixtures are not written here`);
   const frames = seconds * rate;
-  const width = bits / 8;
+  const width = bits === 20 ? 3 : bits / 8;
   const dataLen = frames * channels * width;
   const buf = Buffer.alloc(44 + dataLen);
   buf.write("RIFF", 0);
@@ -107,8 +118,10 @@ function makeWAV(seconds = 6, rate = 48000, channels = 2, bits = 16) {
   buf.write("data", 36);
   buf.writeUInt32LE(dataLen, 40);
   const amp = 12000 * (1 << (bits - 16));
+  // The left-justification for 20-in-24; every other depth fills its word.
+  const justify = bits === 20 ? 16 : 1;
   for (let i = 0; i < frames; i++) {
-    const v = Math.round(Math.sin((2 * Math.PI * 440 * i) / rate) * amp);
+    const v = Math.round(Math.sin((2 * Math.PI * 440 * i) / rate) * amp) * justify;
     for (let c = 0; c < channels; c++) buf.writeIntLE(v, 44 + (i * channels + c) * width, width);
   }
   return buf;
@@ -131,6 +144,21 @@ async function waitForPing(base, deadlineMS) {
 // hls.js error and no <audio> element error.
 const PLAYER_ID = { hls: "hlsPlayer", progressive: "player", timeline: "tlPlayer", span: "hlsPlayer" };
 
+// fatalRE matches an hls.js fatal in the demo page's log. The page renders it
+// with JSON.stringify(v, null, 2), so the colon is followed by a space and a
+// needle of '"fatal":true' matches nothing: the browser cells' only report of
+// an hls.js fatal was silently dead until this became a regexp.
+//
+// It is not the arm that fires most: both proofs of the fatal race reported
+// through the media element's own error instead, which carries Chromium's
+// parser text and is the better message anyway. Two reasons the log can be
+// empty of a fatal that happened, and both are the page's: show() replaces
+// #out rather than appending, so a later event overwrites an earlier fatal,
+// and the media element sets error before hls.js has finished reporting. So
+// this arm is the backstop for a fatal that sets no media error, a segment
+// fetch failing being the common one.
+const fatalRE = /"fatal":\s*true/;
+
 // health reads the player's state and throws on anything a working cell
 // cannot show: a self-pause, a media element error, an hls.js fatal.
 async function health(page, playerID, what) {
@@ -146,8 +174,49 @@ async function health(page, playerID, what) {
   }, playerID);
   if (state.paused) throw new Error(`player paused itself ${what}`);
   if (state.mediaError) throw new Error(`media element error code ${state.mediaError} ${what}`);
-  if (state.out.includes('"fatal":true')) throw new Error(`hls.js fatal error ${what}: ${state.out}`);
+  if (fatalRE.test(state.out)) throw new Error(`hls.js fatal error ${what}: ${state.out}`);
   return state;
+}
+
+// waitProgress waits for a progress predicate, racing it against a watch for
+// the signs that this stream is not going to play at all.
+//
+// Without the race an init segment the browser refuses outright fails as
+// "waitForFunction: Timeout 30000ms exceeded" after half a minute, naming
+// nothing, when hls.js had already said exactly what it refused within a
+// second. The cell failed either way; the diagnosis was the loss.
+//
+// The two waits are separate rather than one combined predicate because
+// their outcomes differ in kind: the progress one resolving is the cell
+// passing, and the fatal one resolving is the cell failing with a message to
+// print. The fatal watch is given a longer budget and its own rejection is
+// swallowed, so a clean 30 s with nothing refused still fails as the progress
+// timeout it is rather than as a race the watchdog happened to win.
+async function waitProgress(page, playerID, predicate, arg, what) {
+  const progress = page.waitForFunction(predicate, arg, { timeout: 30000 });
+  const fatal = page
+    .waitForFunction(
+      (id) => {
+        const out = document.getElementById("out").textContent;
+        // Kept in step with fatalRE above; this half runs in the page, where
+        // that binding does not exist.
+        const at = out.search(/"fatal":\s*true/);
+        if (at >= 0) return `hls.js fatal: ${out.slice(Math.max(0, at - 500), at + 200)}`;
+        const p = document.getElementById(id);
+        if (p.error) return `media element error code ${p.error.code}: ${p.error.message}`;
+        return null;
+      },
+      playerID,
+      { timeout: 35000 },
+    )
+    .then((h) => h.jsonValue())
+    .catch(() => null);
+  // The loser is abandoned, so its later rejection must not surface as an
+  // unhandled one when the next cell navigates the page.
+  progress.catch(() => {});
+  const reason = await Promise.race([progress.then(() => null), fatal]);
+  if (reason) throw new Error(`${reason} (${what})`);
+  await progress;
 }
 
 async function runCell(page, base, cell) {
@@ -173,10 +242,12 @@ async function runCell(page, base, cell) {
     await page.selectOption("#format", cell.format);
     await page.click("#play");
   }
-  await page.waitForFunction(
+  await waitProgress(
+    page,
+    playerID,
     (id) => document.getElementById(id).currentTime > 2,
     playerID,
-    { timeout: 30000 },
+    "waiting for 2 s of playback",
   );
   const state = await health(page, playerID, "during playback");
 
@@ -221,16 +292,18 @@ async function runCell(page, base, cell) {
     },
     [playerID, seekTo],
   );
-  await page.waitForFunction(
+  await waitProgress(
+    page,
+    playerID,
     ([id, past]) => document.getElementById(id).currentTime > past,
     [playerID, TIMELINE_SEAM + 1],
-    { timeout: 30000 },
+    `playing through the ${TIMELINE_SEAM}s track boundary`,
   );
   await health(page, playerID, `after seeking across the ${TIMELINE_SEAM}s track boundary`);
 }
 
 // Hard watchdog: a hung browser launch or player must fail the run,
-// not pin it. Thirteen cells at their 30 s budget (two waits for the
+// not pin it. Fourteen cells at their 30 s budget (two waits for the
 // timeline cells) come to about 8 minutes, so 15 keeps a margin.
 const watchdog = setTimeout(() => {
   console.error("client-e2e FAILED: 15-minute watchdog fired");
@@ -245,6 +318,7 @@ const data = join(work, "data");
 for (const d of [root, cache, data]) mkdirSync(d, { recursive: true });
 writeFileSync(join(root, "test.wav"), makeWAV());
 writeFileSync(join(root, "test24.wav"), makeWAV(6, 48000, 2, 24));
+writeFileSync(join(root, "test20.wav"), makeWAV(6, 48000, 2, 20));
 // The span fixture is 44.1 kHz on purpose: HLS opus is always 48 kHz, so a
 // span of it is resampled by construction, which is the CUE-rip case and
 // the one where a span's first samples come out of a filter window that

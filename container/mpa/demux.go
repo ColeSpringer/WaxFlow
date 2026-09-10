@@ -178,8 +178,8 @@ func (d *Demuxer) parse() error {
 		// trims and the length are adopted together or not at all: the
 		// back trim is only expressible through a known length, and a
 		// front-trim-only stream would be neither raw nor gapless.
-		delay = tag.delay + decoderDelay
-		padding = max(tag.padding-decoderDelay, 0)
+		delay = tag.delay + DecoderDelay
+		padding = max(tag.padding-DecoderDelay, 0)
 		samples = max(tag.frames*d.spf-delay-padding, 0)
 	} else if hasTag && tag.frames > 0 {
 		samples = tag.frames * d.spf

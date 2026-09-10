@@ -129,3 +129,41 @@ constructs a `server.Config` and compiles today. That gap is known and
 accepted: promoting the metadata mapper is a much larger permanent
 commitment, worth making only when an embedder asks. The canary guards
 the seam it was built for, not the whole surface.
+
+## Amendment (2026-09-10): `cue` joins the public tree
+
+`internal/cue` moves to `cue`. WaxBin keeps its own CUE parser, whose
+formula for frames-to-samples is the one this package exists to replace
+(a CD frame is 1/75 s, which no `time.Duration` holds exactly, so a
+sheet routed through one lands its cut points up to a sample off at
+every track boundary of a gapless album). Two parsers means two answers
+to the same sheet, which is the failure this package was built out of
+in the first place, when the daemon and the CLI each had a copy.
+
+The move is one direction only, which is why the package was internal
+first: the promise added here cannot be withdrawn.
+
+The surface exported for it is deliberately smaller than the package's
+old internal one, because publishing changed which callers exist:
+
+- **`Parse` is syntactic.** It refuses a line it cannot read (a missing
+  operand, a `TRACK` indexed against no `FILE`, an `INDEX` outside a
+  track, a timestamp that is not one or that the arithmetic cannot
+  hold) and nothing else.
+- **`File.Starts` holds the splitting invariants** that `Parse` used to:
+  every track has an `INDEX 01`, and starts ascend strictly. `Cuts`
+  calls `Starts`, so every splitting path in this repo refuses exactly
+  what it refused before, at the same point in the same words.
+
+The split is what a reader needs. A consumer listing a sheet's titles or
+reading `REM DATE` has no stake in whether the tracks could be cut, and
+refusing the whole sheet over a start-less track (which real sheets
+carry, on a data track of a mixed-mode disc) would push that consumer
+back to its own parser. It filters on `Track.Start`'s second return
+instead.
+
+`Sheet.Rems`/`Track.Rems` and the `Rem` lookup are added for the same
+reason: `REM` is the format's only extension point, so the metadata CUE
+has no command for lives there, and a parser that drops it is not one a
+reader can use. The lines are kept as read; which keys mean anything is
+the reader's call.

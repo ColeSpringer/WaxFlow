@@ -343,8 +343,13 @@ func TestSampleEntriesSatisfyMSE(t *testing.T) {
 // TestMSERuleNamesTheUnplayableFLACDepths pins the documented limit rather
 // than hiding it: 12- and 20-bit FLAC entries are correct (samplesize is
 // STREAMINFO's, as the spec requires) and still fail Chromium's parser,
-// which takes only 8, 16, 24, and 32. The remedy is the caller's (`bits=`),
-// and the hls-js caps profile says so.
+// which takes only 8, 16, 24, and 32.
+//
+// This is the box layer, and it has no remedy to apply: the entry declares
+// what the track is. The remedy is a rung up, where PlanSegments widens such
+// a source to the next depth the parser takes
+// (TestSegmentsWidenUnplayableFLACDepths), so these entries are the ones an
+// HLS mint no longer produces. A caller naming `bits=12` still gets one.
 func TestMSERuleNamesTheUnplayableFLACDepths(t *testing.T) {
 	for _, depth := range []int{12, 20} {
 		init, err := InitSegment(flacTrackDepth(t, 44100, depth))

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.waxflow.apple-e2e.smoke</string>
+  <key>CFBundleName</key>
+  <string>waxflow-apple-smoke</string>
+  <!-- The ATS exception the smoke probe exists to test the need for: it
+       permits plain-http loads to loopback and local names, which is what a
+       daemon started in the same CI job is. Embedded into the binary with
+       -sectcreate __TEXT __info_plist, since a command-line tool has no
+       bundle to carry it. -->
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsLocalNetworking</key>
+    <true/>
+  </dict>
+</dict>
+</plist>

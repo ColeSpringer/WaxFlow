@@ -30,9 +30,9 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # The public, stdlib-only tree (ADR-0002). Grows as public packages land; every
 # new public package MUST be added here. depcheck is the CI gate behind
 # the "stdlib-only codecs" promise.
-PUBLIC_PKGS := . ./waxerr ./audio ./dsp/... ./codec/... ./container/... ./format ./source ./server ./client
+PUBLIC_PKGS := . ./waxerr ./audio ./dsp/... ./codec/... ./container/... ./cue ./format ./source ./server ./client
 
-.PHONY: build test test-race test-cli test-oracle test-example test-386 vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench encoder-quality fuzz opus-tools ape-tools mpc-tools client-e2e hls-e2e soak
+.PHONY: build test test-race test-cli test-oracle test-example test-386 vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench encoder-quality fuzz opus-tools ape-tools mpc-tools client-e2e apple-smoke hls-e2e soak
 
 build:
 	cd cli && CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o ../bin/waxflow ./cmd/waxflow
@@ -291,6 +291,15 @@ encoder-quality:
 # install chromium`.
 client-e2e: build
 	WAXFLOW_BIN=./bin/waxflow node scripts/client-e2e.mjs
+
+# The AVPlayer spike (macOS only): does AVPlayer advance on a machine with no
+# audio output, and does App Transport Security block plain-http loopback from
+# a command-line Swift binary? Two answers, one run. It is a spike ahead of the
+# Apple cells of docs/client-matrix.md, not a test, so it is not in `check` and
+# runs on demand: `make apple-smoke` locally, or the apple-smoke workflow on a
+# macos-latest runner.
+apple-smoke: build
+	WAXFLOW_BIN=./bin/waxflow node scripts/apple-e2e/smoke.mjs
 
 # The old name, kept as an alias.
 hls-e2e: client-e2e

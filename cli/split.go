@@ -14,7 +14,7 @@ import (
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/cli/label"
 	"github.com/colespringer/waxflow/container"
-	"github.com/colespringer/waxflow/internal/cue"
+	"github.com/colespringer/waxflow/cue"
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/posixfs"
 	"github.com/colespringer/waxflow/waxerr"

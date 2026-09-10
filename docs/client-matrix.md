@@ -49,9 +49,9 @@ header's sample entry has to declare it: Chromium's MP4 parser refuses an
 fLaC entry whose samplesize disagrees with STREAMINFO at the first
 append, so a 16-bit-only cell would pass a header that lies about every
 hi-res library. The same parser accepts only 8, 16, 24, and 32 as a
-sample size, so 12- and 20-bit FLAC cannot play over MSE in Chromium
-however the header reads; a caller with such a source asks for `bits=16`
-or `bits=24` (see docs/hls-validation.md).
+sample size, so an HLS mint widens a 12- or 20-bit source to 16 or 24
+bits, losslessly, and re-encodes it rather than remuxing; `hls:flac20`
+is the cell over a 20-bit source (see docs/hls-validation.md).
 
 The timeline cell is the multi-source surface (`POST /hls/timeline` then a
 master signed against the `tl` digest). It is HLS, so nothing about it is
@@ -110,9 +110,19 @@ touches delivery. Record client versions and outcomes here.
    source; confirm full seek (byte ranges work on completed/direct
    responses).
 
+Automating this list on a hosted macOS runner is the plan, and it is
+blocked on two facts about such a runner rather than on the harness:
+whether AVPlayer advances with no audio output device, and whether App
+Transport Security lets a command-line Swift binary load plain http from
+loopback. `scripts/apple-e2e/smoke.swift` and the `apple-smoke` workflow
+(manual dispatch, `macos-latest`) answer both in one run, building the
+probe with and without an embedded `NSAllowsLocalNetworking` plist. The
+harness shape follows from the answers; until they are in, the list above
+stands as manual.
+
 Outcome log (append per run):
 
-- (none yet; first run pending Apple hardware)
+- (none yet; first run pending Apple hardware or the `apple-smoke` job)
 
 ## Manual checklist: Android Media3/ExoPlayer
 

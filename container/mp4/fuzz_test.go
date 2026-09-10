@@ -18,7 +18,9 @@ import (
 // panic, no unbounded work, accepted tracks are well-formed, and seeks
 // never overshoot.
 func FuzzDemux(f *testing.F) {
-	for _, name := range []string{"alac-stereo.m4a", "alac-mono-tail.m4a"} {
+	// mp3.mov is in the list for its own sample entry: a '.mp3' fourcc in a
+	// version 1 entry, which reaches the offsets the esds path never does.
+	for _, name := range []string{"alac-stereo.m4a", "alac-mono-tail.m4a", "mp3.mp4", "mp3.mov"} {
 		full := fixture(f, name)
 		f.Add(full)
 		f.Add(full[:len(full)/2])

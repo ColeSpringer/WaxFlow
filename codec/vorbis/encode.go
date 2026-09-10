@@ -17,12 +17,11 @@ var _ codec.Encoder = (*Encoder)(nil)
 // retuning dsp/psy invalidates exactly these streams. Bump it whenever a change
 // alters the produced bytes.
 //
-// vorbis-enc-9 is borrowed for a muxer change, not an encoder one: the Ogg
-// granulepos convention changed (container/ogg/muxmap.go). The cache key tuple
-// has no container term, so this is the narrowest lever that invalidates Vorbis
-// output without touching FLAC-in-Ogg or Opus-in-Ogg. It over-invalidates by
-// one case, Vorbis-in-Matroska, whose bytes did not change; that costs a
-// re-encode per entry and nothing else. See ADR-0004 for the proper fix.
+// vorbis-enc-9 was borrowed for a muxer change, not an encoder one: the Ogg
+// granulepos convention changed (container/ogg/muxmap.go) and the cache key
+// tuple had no container term, so this was the narrowest lever available. It
+// has one now (ogg.MuxerVersion, ADR-0004's 2026-09-10 amendment), so the next
+// such change bumps that instead and this constant is the encoder's again.
 const EncoderVersion = "vorbis-enc-11+" + psy.Version
 
 // encVendor is the fixed vendor string the standalone encoder stamps into the

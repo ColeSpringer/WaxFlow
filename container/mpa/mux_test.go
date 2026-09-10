@@ -230,3 +230,83 @@ func TestMuxPipeKeepsTheProjection(t *testing.T) {
 		t.Errorf("read back delay %d samples %d, want %d and %d", track.Delay, track.Samples, want, samples)
 	}
 }
+
+// TestTagTrimsConventions pins the two conversions and both their edges,
+// which is where the round trip is not one.
+//
+// The LAME extension's fields hold the encoder's share of the head trim and
+// leave every reader to add DecoderDelay back, so a caller holding a decoded
+// trim (container.Track's convention) has to have it converted. The edges are
+// what the unit test is for: neither can be reached from the fixtures, and
+// each of them silently loses audio if it goes the other way.
+func TestTagTrimsConventions(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		decoded            bool
+		delay, padding     int
+		wantDelay, wantPad int
+	}{
+		// An encoder's trims are the tag's fields already; nothing moves.
+		{"encoder", false, mp3.EncoderDelay, 461, mp3.EncoderDelay, 461},
+		// A demuxer's are decoded counts, so DecoderDelay comes off the head
+		// and goes onto the tail: the reader does the inverse of both.
+		{"remux", true, 1105, 461, 1105 - DecoderDelay, 461 + DecoderDelay},
+		// A zero tail is the ordinary case and has to survive the round trip
+		// rather than reading back as DecoderDelay of real audio.
+		{"remux-no-tail", true, 1105, 0, 1105 - DecoderDelay, DecoderDelay},
+		// The head-trim floor: the tag cannot state less than DecoderDelay of
+		// total trim, so a source claiming none (an MP3 in an MP4 with no
+		// edit list) clamps at zero rather than wrapping negative.
+		{"remux-no-head", true, 0, 0, 0, DecoderDelay},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewMuxer(nil, &MuxerOptions{DecodedTrims: tc.decoded})
+			delay, padding := m.tagTrims(tc.delay, tc.padding)
+			if delay != tc.wantDelay || padding != tc.wantPad {
+				t.Errorf("tagTrims(%d, %d) = %d, %d; want %d, %d",
+					tc.delay, tc.padding, delay, padding, tc.wantDelay, tc.wantPad)
+			}
+		})
+	}
+}
+
+// TestGaplessFieldsFallIndependently holds the LAME extension's two 12-bit
+// fields to failing separately.
+//
+// They are packed into three shared bytes, which is why they used to be
+// written under one guard, and a padding past 4095 therefore cost the head
+// trim too. That trade is backwards: the head trim is the larger and the more
+// audible of the two, and adding DecoderDelay to the padding under
+// DecodedTrims moved the cliff down to 3566, so it is also reachable.
+func TestGaplessFieldsFallIndependently(t *testing.T) {
+	const delay = mp3.EncoderDelay
+	// MPEG-1 Layer III, 128 kbit/s, 44.1 kHz, stereo, no CRC: a 417-byte
+	// frame, which holds the whole Xing/LAME layout with room to spare.
+	m := NewMuxer(nil, &MuxerOptions{})
+	raw := [mp3.HeaderLen]byte{0xFF, 0xFB, 0x90, 0x00}
+	h, err := mp3.ParseHeader(raw[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both, as Begin sets them: the parsed header for the arithmetic and the
+	// raw bytes the emitted frame's own header is built from.
+	m.h, m.hdr = h, raw
+	frame := m.buildInfoFrame(delay, 1<<12, 40, nil, 0)
+	if frame == nil {
+		t.Fatal("buildInfoFrame returned nil for a frame that holds the layout")
+	}
+	got, err := mp3.ParseHeader(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tag, ok := parseVBRTag(got, frame)
+	if !ok {
+		t.Fatal("the metadata frame carries no readable tag")
+	}
+	if tag.delay != delay {
+		t.Errorf("delay = %d, want %d: an unwritable padding must not cost the head trim", tag.delay, delay)
+	}
+	if tag.padding != 0 {
+		t.Errorf("padding = %d, want 0: 4096 does not fit a 12-bit field", tag.padding)
+	}
+}

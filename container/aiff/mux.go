@@ -14,6 +14,12 @@ import (
 
 var _ container.Muxer = (*Muxer)(nil)
 
+// MuxerVersion is this muxer's term in the ADR-0004 cache key: a cached
+// output of it regenerates when this bumps. Bump it for a change to what
+// gets written around unchanged encoded packets, which is the one kind of
+// change no encoder or DSP version can notice.
+const MuxerVersion = "aiff-mux-1"
+
 // Muxer writes one PCM track as AIFF (big-endian integers) or AIFF-C
 // (floats). NeedsSeek reports true: AIFF has no streaming form, so the
 // FORM size, COMM frame count, and SSND size are back-patched at End, so

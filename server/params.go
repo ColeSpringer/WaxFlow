@@ -290,7 +290,7 @@ var probeParamNames = map[string]bool{"src": true, "strict": true}
 // content identity. A CUE boundary at 245.32 s is not exactly representable
 // in binary, and 245.32*44100 floors to 10818611 rather than 10818612,
 // putting a one-sample error at every track boundary of a gapless album.
-// That is the exact failure the CD-frame arithmetic in internal/cue exists
+// That is the exact failure the CD-frame arithmetic in the cue package exists
 // to prevent, and seconds here would quietly undo it.
 //
 // So the two coexist with different jobs and compose: from and to are

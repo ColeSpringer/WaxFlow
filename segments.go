@@ -9,6 +9,7 @@ import (
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/dsp"
@@ -129,15 +130,62 @@ func (p *SegmentPlan) PresentationDuration(n int64) int64 {
 	return max(0, min(start+d, p.Delay+p.Samples)-max(start, p.Delay))
 }
 
+// segmentBitDepth applies the segmented form's depth rule to opts: a FLAC
+// source at a depth no MSE parser accepts is widened to the next one that is,
+// which is lossless.
+//
+// Chromium's MP4 stream parser takes only 8, 16, 24 and 32 as an audio sample
+// size, and for FLAC it requires the entry's field to equal STREAMINFO's, so a
+// 12- or 20-bit FLAC track is unplayable over Media Source Extensions however
+// the header is written: the playlist and every segment answer 200 and the
+// browser refuses the first append. There is no header to write differently,
+// so the audio moves instead. Widening is a left shift of zero-padded LSBs,
+// which FLAC's wasted-bits coding takes straight back out, so the segments
+// carry the same audio at about the same size.
+//
+// What it costs is the remux rung: that rung copies the source's own packets
+// and cannot widen anything, so remuxable sees a depth request that is not the
+// source's and declines, and the variant transcodes. Only the depths that had
+// no playable form pay it.
+//
+// FLAC only, and the segmented path only. The other codecs' sample entries
+// carry a clamped depth instead, which is legal for them because their
+// decoders read the format from the codec config and Chromium does not check
+// the two against each other; FLAC's rule is that it does. Progressive
+// /stream is untouched, since it hands the file to a native decoder and those
+// play 20-bit FLAC.
+func segmentBitDepth(opts TranscodeOptions, src audio.Format) TranscodeOptions {
+	if opts.Format != "flac" || opts.BitDepth != 0 || src.Type != audio.Int {
+		return opts
+	}
+	switch src.BitDepth {
+	case 8, 16, 24, 32:
+		return opts
+	}
+	// The accepted depths are the whole-byte ones, so the next one up is the
+	// depth rounded to a whole byte: pcm.ContainerBits, which is the same
+	// question asked on the read side (a 20-bit WAV's samples sit in 24-bit
+	// words). Spelling it out here got a sub-8-bit source wrong, widening it
+	// to 16 where 8 is both accepted and enough.
+	opts.BitDepth = pcm.ContainerBits(src.BitDepth)
+	return opts
+}
+
 // PlanSegments plans the segmented form of a transcode of track. opts is
 // the per-variant output selection (FromSample must be zero: segments own
 // the timeline); segSeconds is the target segment duration, 0 for the
 // default. A plan that succeeds guarantees TranscodeSegments and
 // InitSegment accept the same options.
+//
+// The depth rule (segmentBitDepth) is applied here rather than asked of the
+// caller, and the same rule is applied at every other segmented entry point
+// off the same source format, so no rung of the ladder can plan one depth and
+// run another.
 func (e *Engine) PlanSegments(track container.Track, opts TranscodeOptions, segSeconds float64) (*SegmentPlan, error) {
 	if opts.FromSample != 0 {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: segmented transcodes have no FromSample; segments address time")
 	}
+	opts = segmentBitDepth(opts, track.Fmt)
 	row, err := outputRow(opts.Format)
 	if err != nil {
 		return nil, err
@@ -536,6 +584,10 @@ func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, o
 		return nil, err
 	}
 	srcTrack := med.Info().Default()
+	// The same rule PlanSegments applied, off the same source format (a
+	// timeline's Media reports the envelope track ConcatTrack computes), so
+	// the run encodes the depth the plan and the init header promised.
+	opts = segmentBitDepth(opts, srcTrack.Fmt)
 
 	spec := specFor(opts)
 	if row.adjust != nil {

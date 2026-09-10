@@ -96,7 +96,7 @@ func TestCueFrameDurationRouteIsLossy(t *testing.T) {
 // The stamp below is not arbitrary: (2049638230412173*60)*75 is 2693 past
 // MaxInt64, so before the bound existed ParseTime returned a large negative
 // frame count and a nil error, and that negative reached Samples and
-// validate as though it were a position in the file. Atoi cannot catch it,
+// Starts as though it were a position in the file. Atoi cannot catch it,
 // because the value fits an int fine; only the multiply is out of range.
 //
 // The wanted frame count is written out rather than computed, since
@@ -146,6 +146,10 @@ func TestParseTimeMinutesBound(t *testing.T) {
 // overflow went unrefused. Track 1 has no predecessor to be measured
 // against, so nothing stands between the wrap and a cut point except the
 // bound this is here to pin.
+//
+// The bound stays in Parse rather than moving to Starts with the splitting
+// invariants: a stamp the arithmetic cannot hold is not a position at all,
+// so no reader of the sheet should see it, splitting or not.
 func TestParseTimeOverflowSheetRefused(t *testing.T) {
 	in := "FILE \"a.flac\" WAVE\n" +
 		"  TRACK 01 AUDIO\n    INDEX 01 2049638230412173:00:00\n" +
@@ -164,21 +168,36 @@ func TestParseTimeOverflowSheetRefused(t *testing.T) {
 	}
 }
 
-// TestParseStartsMustAscend pins strict ascent, and the frame-0 case that
-// the sentinel it replaced only ever handled by luck.
+// TestStartsMustAscend pins strict ascent, and the frame-0 case that the
+// sentinel it replaced only ever handled by luck.
 //
-// Equal starts are the interesting half: they parsed here and then failed
-// at jobs.SplitSpans, which refuses a zero-sample piece, so one sheet got
-// two answers depending on which caller read it. The CLI's answer was an
-// empty file written without complaint.
-func TestParseStartsMustAscend(t *testing.T) {
+// Equal starts are the interesting half: they got past this package and
+// then failed at jobs.SplitSpans, which refuses a zero-sample piece, so one
+// sheet got two answers depending on which caller read it. The CLI's answer
+// was an empty file written without complaint.
+//
+// The refusal is Starts' now rather than Parse's, and the parse in between
+// is asserted rather than skipped: the sheet is readable and the arithmetic
+// is what fails, which is the whole point of the split.
+func TestStartsMustAscend(t *testing.T) {
 	equal := "FILE \"a.flac\" WAVE\n" +
 		"  TRACK 01 AUDIO\n    INDEX 01 01:00:00\n" +
 		"  TRACK 02 AUDIO\n    INDEX 01 01:00:00\n"
-	if _, err := Parse([]byte(equal)); err == nil {
-		t.Fatalf("Parse accepted two tracks sharing an INDEX 01; that names a zero-sample piece")
+	sheet, err := Parse([]byte(equal))
+	if err != nil {
+		t.Fatalf("Parse(two tracks sharing an INDEX 01): %v; the sheet is readable", err)
+	}
+	if _, err := sheet.Files[0].Starts(44100); err == nil {
+		t.Fatalf("Starts accepted two tracks sharing an INDEX 01; that names a zero-sample piece")
 	} else if !strings.Contains(err.Error(), "have to ascend") {
-		t.Errorf("Parse error = %v, want it to name the ascending rule", err)
+		t.Errorf("Starts error = %v, want it to name the ascending rule", err)
+	} else if got := waxerr.CodeOf(err); got != waxerr.CodeInvalidRequest {
+		t.Errorf("Starts code = %v, want CodeInvalidRequest", got)
+	}
+	// Cuts is the funnel both splitting callers use, so it has to refuse
+	// what Starts refuses rather than only what it checks itself.
+	if _, err := sheet.Files[0].Cuts(44100); err == nil {
+		t.Errorf("Cuts accepted a file whose Starts refused")
 	}
 
 	// A first track at frame 0 is the overwhelmingly common sheet. It has no
@@ -186,25 +205,28 @@ func TestParseStartsMustAscend(t *testing.T) {
 	zero := "FILE \"a.flac\" WAVE\n" +
 		"  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n" +
 		"  TRACK 02 AUDIO\n    INDEX 01 01:00:00\n"
-	sheet, err := Parse([]byte(zero))
+	sheet, err = Parse([]byte(zero))
 	if err != nil {
 		t.Fatalf("Parse(track 1 at frame 0): %v", err)
 	}
 	if start, ok := sheet.Files[0].Tracks[0].Start(); !ok || start != 0 {
 		t.Errorf("track 1 start = %d (%v), want frame 0", start, ok)
 	}
+	if _, err := sheet.Files[0].Starts(44100); err != nil {
+		t.Errorf("Starts(track 1 at frame 0): %v", err)
+	}
 }
 
-// TestValidateNeverIndexesBeforeTheFirstTrack holds the ascent loop to
+// TestStartsNeverIndexesBeforeTheFirstTrack holds the ascent loop to
 // reporting a predecessor it actually has.
 //
 // The loop used to name the offender as f.Tracks[ti-1], which at ti == 0 is
 // f.Tracks[-1] and a panic. ParseTime's bound removes the only way to reach
-// it from wire bytes today, so this drives validate through a hand-built
+// it from wire bytes today, so this drives Starts through a hand-built
 // Sheet: the loop must not be able to index -1 whatever Start returns, and
 // a bound in another function is not that guarantee.
-func TestValidateNeverIndexesBeforeTheFirstTrack(t *testing.T) {
-	sheet := &Sheet{Files: []File{{
+func TestStartsNeverIndexesBeforeTheFirstTrack(t *testing.T) {
+	f := &File{
 		Name: "a.flac",
 		Tracks: []Track{
 			// Near the bottom of the int range, which is what a wrapped
@@ -213,11 +235,11 @@ func TestValidateNeverIndexesBeforeTheFirstTrack(t *testing.T) {
 			{Number: 1, Indexes: []Index{{Number: 1, Frame: math.MinInt + 2492}}},
 			{Number: 2, Indexes: []Index{{Number: 1, Frame: 4500}}},
 		},
-	}}}
+	}
 	// A negative first start is what a wrapped ParseTime produced. Whatever
-	// validate makes of it, it must return rather than panic.
-	if err := validate(sheet); err != nil && waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
-		t.Errorf("validate code = %v, want CodeInvalidRequest", waxerr.CodeOf(err))
+	// Starts makes of it, it must return rather than panic.
+	if _, err := f.Starts(44100); err != nil && waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+		t.Errorf("Starts code = %v, want CodeInvalidRequest", waxerr.CodeOf(err))
 	}
 }
 
@@ -279,16 +301,17 @@ func TestParseBasic(t *testing.T) {
 	}
 }
 
+// TestParseRejects covers what Parse itself refuses: syntax, which is a
+// line it cannot read at all. What a splitter cannot use is
+// TestStartsRejects.
 func TestParseRejects(t *testing.T) {
 	for _, tc := range []struct{ name, in, want string }{
 		{"track before file", "TRACK 01 AUDIO\n", "before any FILE"},
 		{"index outside track", "FILE \"a.flac\" WAVE\nINDEX 01 00:00:00\n", "outside a TRACK"},
-		{"no index 01", "FILE \"a.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 00 00:00:00\n", "no INDEX 01"},
 		{"bad frame count", "FILE \"a.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:75\n", "a second holds 75"},
 		{"bad seconds", "FILE \"a.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:60:00\n", "a minute holds 60"},
 		{"not a timestamp", "FILE \"a.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 01 nope\n", "not MM:SS:FF"},
 		{"unterminated quote", "TITLE \"unclosed\nFILE \"a.flac\" WAVE\n", "unterminated"},
-		{"descending tracks", "FILE \"a.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 01 05:00:00\nTRACK 02 AUDIO\nINDEX 01 01:00:00\n", "have to ascend"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Parse([]byte(tc.in))
@@ -297,6 +320,38 @@ func TestParseRejects(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("Parse error = %v, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestStartsRejects covers the other half of the split: a sheet Parse reads
+// and a splitter cannot use.
+//
+// Each cell asserts both halves, because either one alone would pass while
+// the change that moved the check was half made: a refusal at Parse would
+// satisfy a Starts-only assertion by never getting there, and a check
+// deleted outright would satisfy a Parse-only one.
+func TestStartsRejects(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"no index 01", "FILE \"a.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 00 00:00:00\n", "no INDEX 01"},
+		{"descending tracks", "FILE \"a.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 01 05:00:00\nTRACK 02 AUDIO\nINDEX 01 01:00:00\n", "have to ascend"},
+		{"no tracks", "FILE \"a.flac\" WAVE\n", "names no tracks"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sheet, err := Parse([]byte(tc.in))
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v; this is a sheet, just not a splittable one", tc.in, err)
+			}
+			_, err = sheet.Files[0].Starts(44100)
+			if err == nil {
+				t.Fatalf("Starts succeeded, want an error mentioning %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Starts error = %v, want it to mention %q", err, tc.want)
+			}
+			if got := waxerr.CodeOf(err); got != waxerr.CodeInvalidRequest {
+				t.Errorf("Starts code = %v, want CodeInvalidRequest", got)
 			}
 		})
 	}
@@ -328,6 +383,112 @@ func TestParseSkipsUnknown(t *testing.T) {
 	}
 	if len(tr.Flags) != 1 || tr.Flags[0] != "DCP" {
 		t.Errorf("flags = %v", tr.Flags)
+	}
+}
+
+// TestRem covers the keys WaxBin reads out of a sheet: REM is the format's
+// comment command and its only extension point, so the disc metadata CUE
+// has no command for (GENRE, DATE) is written there and nowhere else.
+func TestRem(t *testing.T) {
+	sheet, err := Parse([]byte(sheetBasic))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for _, tc := range []struct{ key, want string }{
+		{"GENRE", "Rock"},
+		{"DATE", "1997"},
+		// Rippers disagree about case, and a reader asking for a key it
+		// knows should not have to guess which one wrote the sheet.
+		{"genre", "Rock"},
+		{"Date", "1997"},
+	} {
+		got, ok := sheet.Rem(tc.key)
+		if !ok || got != tc.want {
+			t.Errorf("sheet.Rem(%q) = %q, %v; want %q, true", tc.key, got, ok, tc.want)
+		}
+	}
+	if got, ok := sheet.Rem("REPLAYGAIN_ALBUM_GAIN"); ok {
+		t.Errorf("sheet.Rem of an absent key = %q, true", got)
+	}
+	// The quotes are the sheet's syntax, not part of the value, and a
+	// multi-token value keeps its spacing: both are what a reader compares
+	// against.
+	if got, _ := sheet.Rem("GENRE"); strings.Contains(got, `"`) {
+		t.Errorf("sheet.Rem(GENRE) = %q, want the quotes stripped", got)
+	}
+	if len(sheet.Rems) != 2 {
+		t.Errorf("sheet.Rems = %v, want the two lines before the first TRACK", sheet.Rems)
+	}
+}
+
+// TestRemLevels pins which level a REM lands on, which decides whether an
+// album ReplayGain value can be read as a track's.
+//
+// The keys below differ by one word and are both real: every ripper that
+// writes ReplayGain writes both, the album value at the sheet level and the
+// track value inside the track, so folding the levels together would let
+// one be answered with the other.
+func TestRemLevels(t *testing.T) {
+	in := "REM GENRE \"Rock\"\n" +
+		"REM REPLAYGAIN_ALBUM_GAIN -7.11 dB\n" +
+		"FILE \"a.flac\" WAVE\n" +
+		"  TRACK 01 AUDIO\n" +
+		"    REM REPLAYGAIN_TRACK_GAIN -8.24 dB\n" +
+		"    INDEX 01 00:00:00\n" +
+		"  TRACK 02 AUDIO\n" +
+		"    REM\n" +
+		"    INDEX 01 01:00:00\n"
+	sheet, err := Parse([]byte(in))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	// A REM after a FILE but before its first TRACK still has no track
+	// open, so the sheet level is where the pre-track lines go and nowhere
+	// else: the album gain must not be visible as track 1's.
+	if got, ok := sheet.Rem("REPLAYGAIN_ALBUM_GAIN"); !ok || got != "-7.11 dB" {
+		t.Errorf("sheet.Rem(album gain) = %q, %v; want %q", got, ok, "-7.11 dB")
+	}
+	if got, ok := sheet.Rem("REPLAYGAIN_TRACK_GAIN"); ok {
+		t.Errorf("sheet.Rem(track gain) = %q, true; a track REM is not the sheet's", got)
+	}
+	tr := sheet.Files[0].Tracks[0]
+	if got, ok := tr.Rem("REPLAYGAIN_TRACK_GAIN"); !ok || got != "-8.24 dB" {
+		t.Errorf("track 1 Rem(track gain) = %q, %v; want %q", got, ok, "-8.24 dB")
+	}
+	if got, ok := tr.Rem("GENRE"); ok {
+		t.Errorf("track 1 Rem(GENRE) = %q, true; a sheet REM is not a track's", got)
+	}
+	// A REM between one FILE and the next file's first TRACK also has no
+	// track open, so it lands on the sheet. Pinned because the doc says so
+	// rather than because it is desirable: on a multi-FILE sheet a per-file
+	// key is answered as the disc's, and first-match ordering is what keeps
+	// that from overriding a real disc-level line.
+	multi := "REM DATE 1997\n" +
+		"FILE \"01.flac\" WAVE\n" +
+		"  REM DATE 2003\n" +
+		"  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n"
+	ms, err := Parse([]byte(multi))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got, _ := ms.Rem("DATE"); got != "1997" {
+		t.Errorf("sheet.Rem(DATE) = %q, want the disc's 1997 ahead of the file's", got)
+	}
+	if len(ms.Rems) != 2 {
+		t.Errorf("sheet.Rems = %v, want both lines read with no track open", ms.Rems)
+	}
+	if got := ms.Files[0].Tracks[0].Rems; len(got) != 0 {
+		t.Errorf("track 1 Rems = %v; a line before TRACK is not the track's", got)
+	}
+
+	// A bare REM is a blank comment line. It carries no key, so it is
+	// dropped rather than stored as one with an empty name that Rem("")
+	// would then answer.
+	if got := sheet.Files[0].Tracks[1].Rems; len(got) != 0 {
+		t.Errorf("track 2 Rems = %v, want none from a bare REM", got)
+	}
+	if got, ok := sheet.Files[0].Tracks[1].Rem(""); ok {
+		t.Errorf("track 2 Rem(\"\") = %q, true", got)
 	}
 }
 
@@ -522,25 +683,30 @@ func FuzzParseCue(f *testing.F) {
 			}
 			return
 		}
-		// A sheet that parsed must be one a splitter can act on: every
-		// track has a start, starts ascend strictly within a file, and no
-		// start converts to a negative sample offset. Those are validate's
-		// own postconditions, checked here against arbitrary input rather
-		// than the fixtures.
+		// Parse is syntactic, so a sheet coming out of it promises nothing
+		// about its tracks; the postcondition is Starts', and it is an
+		// either-or: for every file, either Starts refuses it or the offsets
+		// it returns are ones a splitter can act on. Checked against
+		// arbitrary input rather than the fixtures.
+		//
+		// A start that converts to a negative sample offset is the shape the
+		// ParseTime bound exists to stop, and it stays asserted here on the
+		// accepted path, since a negative that ascends from a more negative
+		// one would satisfy the ordering rule alone.
 		for fi := range sheet.Files {
 			file := &sheet.Files[fi]
-			first, prevStart := true, 0
-			for _, tr := range file.Tracks {
-				start, ok := tr.Start()
-				if !ok {
-					t.Fatalf("track %d parsed with no INDEX 01", tr.Number)
-				}
-				if !first && start <= prevStart {
-					t.Fatalf("track %d starts at %d, which does not advance past %d", tr.Number, start, prevStart)
-				}
-				first, prevStart = false, start
-				if Samples(start, 44100) < 0 {
-					t.Fatalf("track %d start %d frames converts to a negative sample offset", tr.Number, start)
+			starts, err := file.Starts(44100)
+			if err == nil {
+				first, prevStart := true, int64(0)
+				for i, start := range starts {
+					if !first && start <= prevStart {
+						t.Fatalf("track %d starts at sample %d, which does not advance past %d",
+							file.Tracks[i].Number, start, prevStart)
+					}
+					first, prevStart = false, start
+					if start < 0 {
+						t.Fatalf("track %d converts to sample offset %d", file.Tracks[i].Number, start)
+					}
 				}
 			}
 			// Cuts is the list a caller divides the file by, so hold it to

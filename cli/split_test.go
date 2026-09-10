@@ -145,7 +145,7 @@ func cueRip(t *testing.T, dir string, frameStarts []int) (wav, sheet string, sam
 }
 
 // TestSplitCueRejoinsGaplessly is M24a's end-to-end proof, and the reason
-// internal/cue exists at all: a real CUE sheet drives a real split, and the
+// the cue package exists at all: a real CUE sheet drives a real split, and the
 // pieces rejoin into the original bit for bit.
 //
 // The boundaries are deliberately on CD frames that are not whole seconds
@@ -319,7 +319,7 @@ func TestCuePieces(t *testing.T) {
 			{from: 250 * 588, to: waxflow.ToEnd, title: "Track 3", number: 3},
 		},
 	}, {
-		// The shape internal/cue's own sheetBasic fixture has.
+		// The shape the cue package's own sheetBasic fixture has.
 		name:   "track 1 past frame 0",
 		starts: []int{33, 412},
 		want: []piece{

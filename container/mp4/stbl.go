@@ -5,6 +5,9 @@ import (
 	"math/bits"
 	"slices"
 	"sort"
+
+	"github.com/colespringer/waxflow/audio"
+	"github.com/colespringer/waxflow/codec/mp3"
 )
 
 // sampleTable is a track's flattened sample map: per-sample file offset and
@@ -30,6 +33,67 @@ type sampleTable struct {
 	// sync holds the 0-based sync sample indices in ascending order; nil
 	// means every sample is a sync point (the audio norm).
 	sync []int64
+}
+
+// The Layer III seek backoff, container/mpa's rule restated for a sample
+// table. Both halves exist because a frame is not independently decodable.
+const (
+	// mp3SeekPreroll is the samples half: three frames for the filterbank's
+	// IMDCT overlap and synthesis window, counted at the longest frame MPEG
+	// audio has (1152 samples), so a 576-sample MPEG-2 stream backs off six
+	// frames rather than three. Overshooting costs discarded decode.
+	mp3SeekPreroll = 3 * 1152
+	// mp3ReservoirBytes is the bytes half: a frame's main data may begin up
+	// to 511 bytes before its own header, so the frames a landing skips have
+	// to carry at least that much main data before the reservoir is
+	// trustworthy. The 64-byte margin is container/mpa's.
+	mp3ReservoirBytes = 511 + 64
+	// mp3BackoffFrames bounds the walk. At the smallest compliant frame (24
+	// bytes, 8 kbit/s at 24 kHz) the main data left after the overhead is
+	// about 9 bytes, so 64 frames is what the reservoir's reach can actually
+	// need; the cap is twice that, and it is what stops a crafted table of
+	// one-byte samples making every seek walk to the top of the file. Hitting
+	// it is not a failure: the decoder answers an unsatisfiable reservoir
+	// reference with silence and recovers as the frames refill it.
+	mp3BackoffFrames = 128
+)
+
+// mp3FrameOverhead is what a frame spends ahead of its main data: a 4-byte
+// header, the CRC when present, and the side info.
+//
+// It is computed from the track rather than fixed, and the fixed version was
+// wrong in a way that mattered: MPEG-1 stereo's 32-byte side info is the
+// largest of four (mono is 17, and MPEG-2/2.5 is 9 or 17), so charging every
+// frame 38 bytes credits nothing at all to any stream whose frames are
+// smaller than that, and mp3Backoff then walks to the start of the file. An 8
+// kbit/s frame is 24 bytes.
+//
+// The CRC is assumed present because the sample entry does not say, and
+// overstating the overhead undercounts each frame's contribution, which backs
+// off further: the safe direction. Only the MPEG-1-or-not distinction reaches
+// SideInfoLen, and Layer III defines MPEG-1 at 32 kHz and above alone.
+func mp3FrameOverhead(f audio.Format) int64 {
+	h := mp3.Header{Channels: f.Channels, Version: mp3.MPEG2}
+	if f.Rate >= 32000 {
+		h.Version = mp3.MPEG1
+	}
+	return int64(mp3.HeaderLen + 2 + h.SideInfoLen())
+}
+
+// mp3Backoff walks back from idx until the frames in between carry enough
+// main data to satisfy any bit-reservoir reference at idx itself.
+//
+// The caller has already backed the target off by mp3SeekPreroll, so this
+// covers the reservoir alone: the frames it skips are the ones that refill it
+// before the filterbank frames begin.
+func (s *sampleTable) mp3Backoff(idx, overhead int64) int64 {
+	land := idx
+	cover := int64(0)
+	for n := 0; land > 0 && cover < mp3ReservoirBytes && n < mp3BackoffFrames; n++ {
+		land--
+		cover += max(int64(s.sizes[land])-overhead, 0)
+	}
+	return land
 }
 
 // stscEntry is one sample-to-chunk run.

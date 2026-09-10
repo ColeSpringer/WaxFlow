@@ -9,6 +9,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/mka"
 	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/format"
 )
@@ -323,8 +324,12 @@ func TestRemuxPlanNamesNoCodecVersion(t *testing.T) {
 	if plan == nil {
 		t.Fatal("PlanRemux declined a plain container rewrite")
 	}
-	if len(plan.Versions) != 1 || plan.Versions[0] != waxflow.RemuxVersion {
-		t.Errorf("remux Versions = %v, want exactly [%s]", plan.Versions, waxflow.RemuxVersion)
+	// The trailer synthesis and the muxer, and nothing else: no decoder and
+	// no encoder ran, so no revision of either can reach these bytes.
+	if len(plan.Versions) != 2 || plan.Versions[0] != waxflow.RemuxVersion ||
+		plan.Versions[1] != mka.MuxerVersion {
+		t.Errorf("remux Versions = %v, want exactly [%s %s]", plan.Versions,
+			waxflow.RemuxVersion, mka.MuxerVersion)
 	}
 	// The plan must promise the source's own format, not a chain's output.
 	if plan.Format != track.Fmt {

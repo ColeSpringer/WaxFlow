@@ -15,6 +15,15 @@ import (
 
 var _ container.Muxer = (*Muxer)(nil)
 
+// MuxerVersion is this muxer's term in the ADR-0004 cache key: a cached
+// output of it regenerates when this bumps. Bump it for a change to what
+// gets written around unchanged encoded packets, which is the one kind of
+// change no encoder or DSP version can notice.
+//
+// One constant covers the Matroska and WebM forms: they are one muxer
+// under a DocType flag.
+const MuxerVersion = "mka-mux-1"
+
 // Write-side element IDs, the header and track-entry elements the demuxer does
 // not itself parse (or parses only on read) but a valid file needs. The
 // read-side IDs live in mka.go.

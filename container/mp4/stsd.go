@@ -8,12 +8,13 @@ import (
 	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/codec/alac"
 	"github.com/colespringer/waxflow/codec/flac"
+	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/codec/opus"
 )
 
 // parseStsd parses the sample description box, reading the first audio
-// sample entry into the track. ALAC, AAC-LC, Opus, and FLAC are wired; an
-// entry of any other format leaves t.codec set to the format name so
+// sample entry into the track. ALAC, AAC-LC, Opus, FLAC, and MP3 are wired;
+// an entry of any other format leaves t.codec set to the format name so
 // selectAudio can report it.
 func (d *Demuxer) parseStsd(t *track, payload []byte, depth int) error {
 	if depth > maxDepth {
@@ -92,6 +93,11 @@ func (d *Demuxer) parseAudioSampleEntry(t *track, format string, body []byte, de
 		return d.setOpus(t, children)
 	case "fLaC":
 		return d.setFLAC(t, children)
+	case ".mp3":
+		// The fourcc QuickTime writes for MPEG audio, in a version 1 entry
+		// with no esds: what the entry says is all there is, which is enough.
+		// See setMP3.
+		return d.setMP3(t, sampleRate, channels)
 	default:
 		t.codec = codec.ID(format) // an unknown but named audio codec
 		return nil
@@ -233,6 +239,9 @@ func (d *Demuxer) setMP4A(t *track, children []byte, rate, channels int) error {
 	if err != nil {
 		return err
 	}
+	if isMP3ObjectType(objType) {
+		return d.setMP3(t, rate, channels)
+	}
 	if !isAACObjectType(objType) {
 		t.codec = codec.ID(objectTypeName(objType))
 		return nil
@@ -267,6 +276,25 @@ func (d *Demuxer) setMP4A(t *track, children []byte, rate, channels int) error {
 	t.codecConfig = append([]byte(nil), asc...)
 	t.fmt = f
 	t.perAU = int64(cfg.OutputSamplesPerAU())
+	return nil
+}
+
+// setMP3 wires an MP3 track from the sample entry alone.
+//
+// There is no codec configuration to read and none to carry: an MPEG audio
+// frame states its own version, rate, channel mode, and bit rate in its
+// four-byte header, so the decoder needs nothing from the container, and the
+// esds an mp4a entry wraps this in carries no DecoderSpecificInfo either. The
+// entry's rate and channel count are the container's claim about the stream,
+// which is what every other codec here takes them for.
+//
+// The format is the one mp3.Header.PCMFormat returns rather than one built
+// here, because it is the decoder's output that has to be described: Layer III
+// reconstruction is floating point, so the lossy convention applies and the
+// entry's samplesize (conventionally 16) is not the output depth.
+func (d *Demuxer) setMP3(t *track, rate, channels int) error {
+	t.codec = codec.MP3
+	t.fmt = mp3.Header{Rate: rate, Channels: channels}.PCMFormat()
 	return nil
 }
 
@@ -392,11 +420,26 @@ func isAACObjectType(ot byte) bool {
 	return false
 }
 
-// objectTypeName names an object type indication for diagnostics.
-func objectTypeName(ot byte) string {
+// isMP3ObjectType reports whether an object type indication names MPEG audio.
+// 0x69 is MPEG-2 Layer III and 0x6B MPEG-1 Layer III; both are the same
+// bitstream to a decoder that reads each frame's own header, which is what
+// codec/mp3 does, so they are one arm.
+func isMP3ObjectType(ot byte) bool {
 	switch ot {
 	case 0x69, 0x6B:
-		return "mp3"
+		return true
+	}
+	return false
+}
+
+// objectTypeName names an object type indication for diagnostics: what the
+// "no decodable audio track (found: ...)" refusal says it skipped.
+//
+// MPEG audio (0x69, 0x6B) is deliberately absent. It used to be here, and it
+// is decoded now, so setMP4A takes it before this is reached; leaving the arm
+// would be a name nothing can produce.
+func objectTypeName(ot byte) string {
+	switch ot {
 	case 0xA9:
 		return "dts"
 	case 0xA5, 0xA6:

@@ -16,6 +16,18 @@ import (
 
 var _ container.Muxer = (*Muxer)(nil)
 
+// MuxerVersion is this muxer's term in the ADR-0004 cache key: a cached
+// output of it regenerates when this bumps. Bump it for a change to what
+// gets written around unchanged encoded packets, which is the one kind of
+// change no encoder or DSP version can notice.
+//
+// One constant covers both stream muxers, NewMuxer (fragmented, the
+// default container) and NewProgressiveMuxer (moov-first), because they
+// share the sample entries and the movie boxes that a change here would
+// be about; a revision to either bumps it. SegmenterVersion is separate
+// and keys the HLS form.
+const MuxerVersion = "mp4-mux-1"
+
 // trackID is the single audio track's ID in the produced movie.
 const trackID = 1
 

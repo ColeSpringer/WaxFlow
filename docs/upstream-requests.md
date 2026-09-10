@@ -13,8 +13,26 @@ same change; do not bury it in a progress note.
 
 ## WaxLabel
 
-None open. The sample-entry rate request retired with waxlabel v1.7.0,
-which reads the rate from the codec config box (the ALAC cookie, the
-`dfLa` STREAMINFO, the AAC ASC and the ADTS frame header) instead of the
-16.16 field that cannot hold it. The cells in oracletest's
-`waxlabel_rate_test.go` pin the fixed behaviour.
+### `AudioTrack.Codec` is the raw fourcc for MP3 in QuickTime
+
+**What:** a `.mov` whose audio sample entry carries QuickTime's `.mp3`
+fourcc reads back as `Codec: ".mp3"` with an empty `CodecProfile`. The
+same stream in an `mp4a`/`esds` entry reads `Codec: "MP3"`. waxlabel's own
+doc comment on the field says the canonical name belongs in `Codec` and
+the container's spelling in `CodecProfile` (naming the `mp4a` fourcc as
+the example), so the wanted reading is `Codec: "MP3"`,
+`CodecProfile: ".mp3"`.
+
+**Why it matters here:** it is the one thing two readers of the same file
+disagree about now that WaxFlow decodes MP3 in MP4. A consumer routing on
+`Codec` sees a codec name no other container produces, and a `.mov` is
+the only place it appears.
+
+**Workaround WaxFlow runs on:** none needed. WaxFlow reads the fourcc
+itself (`container/mp4`'s `.mp3` arm) and never reads waxlabel's codec
+name for its own decisions; this is an agreement gap, not a defect
+WaxFlow works around.
+
+**The test that will notice the fix:** oracletest's
+`TestWaxlabelAgreesMP3InMP4`, whose `mp3.mov` cell accepts either name
+today and says which one it saw.

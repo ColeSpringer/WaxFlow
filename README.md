@@ -34,7 +34,8 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   Audio (three compression levels; the coded frames are the reference
   encoder's frames, byte for byte), and WAV/AIFF PCM.
 - **Decoders / inputs**: FLAC (bit-exact on the IETF suite), WAV, AIFF,
-  MP3, AAC-LC, HE-AAC v1 and v2 (SBR+PS, ffmpeg-differential-verified),
+  MP3 (bare, and in MP4/M4A and QuickTime `.mov`), AAC-LC, HE-AAC v1 and
+  v2 (SBR+PS, ffmpeg-differential-verified),
   and ALAC in MP4/M4A/M4B, ADTS (implicit HE-AAC detected), Opus (all
   RFC 6716/8251 conformance vectors pass), Vorbis, Ogg, Matroska/WebM,
   WavPack (bit-exact on the official test suite: 8- to 32-bit integers,

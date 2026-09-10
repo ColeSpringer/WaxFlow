@@ -14,6 +14,18 @@ import (
 
 var _ container.Muxer = (*Muxer)(nil)
 
+// MuxerVersion is this muxer's term in the ADR-0004 cache key: a cached
+// output of it regenerates when this bumps. Bump it for a change to what
+// gets written around unchanged encoded packets, which is the one kind of
+// change no encoder or DSP version can notice.
+//
+// mpa-mux-2: the LAME extension's trims are written in the tag's own
+// convention on a remux too (MuxerOptions.DecodedTrims), where the head trim
+// used to gain DecoderDelay samples per generation and a tail trim shorter
+// than that was dropped. Encoded output is byte-identical; every remuxed MP3
+// carried wrong gapless metadata and regenerates.
+const MuxerVersion = "mpa-mux-2"
+
 // Muxer writes one MP3 track as a bare Layer III elementary stream led by a
 // Xing/Info metadata frame with a LAME-format gapless extension. NeedsSeek
 // reports false: the leading frame is written on the first packet using the
@@ -59,10 +71,24 @@ type Muxer struct {
 
 // MuxerOptions configures writing.
 type MuxerOptions struct {
-	// Delay is the encoder's gapless delay in samples (mp3.Encoder.Delay),
-	// used to size the metadata frame's LAME extension before the exact
-	// trailer arrives at End. Zero is a valid delay (a packet remux).
+	// Delay is the gapless head trim in samples, used to size the metadata
+	// frame's LAME extension before the exact trailer arrives at End.
+	// DecodedTrims says which convention it is in. Zero is a valid delay.
 	Delay int
+	// DecodedTrims says Delay and the End trailer's trims are decoded-sample
+	// counts, which is container.Track's and codec.Trailer's convention: the
+	// samples a decoder drops from each end. The LAME tag's own fields are
+	// not that. They state the encoder's share alone and leave every reader
+	// to add the fixed DecoderDelay back, so the muxer converts.
+	//
+	// An encoder's trims arrive in the tag's convention already
+	// (mp3.EncoderDelay is defined as the encoder half, and this package's
+	// demuxer adds the 529 back when it reads one), so an encode leaves this
+	// false. A remux's trims come from a demuxer, which has already added
+	// it, and sets it. Without it a remuxed file's head trim grows by 529
+	// samples every generation and a tail trim shorter than that is lost
+	// outright, which is silently wrong playback rather than a failure.
+	DecodedTrims bool
 	// VBR selects the "Xing" metadata form (frame count, byte count, and
 	// the 100-point TOC) for a variable-bit-rate stream; the default
 	// "Info" form marks constant rate.
@@ -291,6 +317,34 @@ const (
 // buildInfoFrame constructs the leading metadata frame: a valid silent
 // frame carrying the "Info" (CBR) or "Xing" (VBR) marker, the audio-frame
 // count, for VBR the stream byte count and TOC, and, when it fits, a
+// tagTrims converts the caller's trims into the LAME tag's own fields. See
+// MuxerOptions.DecodedTrims.
+//
+// A head trim under DecoderDelay clamps at zero, which is as close as the
+// field gets: it states the encoder's share, and that cannot be negative. So
+// a source claiming a head trim of, say, 100 decoded samples is written as 0
+// and read back as 529, and the common case of that is real rather than
+// hypothetical: an MP3 in an MP4 with no edit list probes with Delay 0
+// (container/mp4's gapless), and a remux of it declares 529.
+//
+// That is the right answer even though it is not a round trip. The 529 is
+// Layer III's own decoder latency: decoded sample 529 is the frame's first
+// input sample, so a container claiming a zero head trim is claiming its
+// decoder emits input sample 0 first, which no Layer III decoder does. The
+// clamp writes what the format can say and the reader restores the latency
+// the format defines. What it costs is that Track.Samples shrinks by 529
+// across such a remux, which the round-trip test states rather than asserts
+// away.
+func (m *Muxer) tagTrims(delay, padding int) (int, int) {
+	if !m.opts.DecodedTrims {
+		return delay, padding
+	}
+	return max(delay-DecoderDelay, 0), max(padding+DecoderDelay, 0)
+}
+
+// buildInfoFrame constructs the leading metadata frame: a valid silent
+// frame carrying the "Info" (CBR) or "Xing" (VBR) marker, the audio-frame
+// count, for VBR the stream byte count and TOC, and, when it fits, a
 // LAME-format extension with the gapless delay and padding at the offsets
 // the demuxer reads (parseVBRTag). The header bytes come from m.h (the
 // first audio frame's header; VBR swaps in xingHeader's rate). It returns
@@ -302,6 +356,10 @@ const (
 // form carries the linear neutral guess); bytes is the total stream size,
 // 0 when unknown.
 func (m *Muxer) buildInfoFrame(delay, padding, frames int, toc []byte, bytes int64) []byte {
+	// Both callers hand over the caller's convention, so the conversion is
+	// here rather than at each: Begin's projection and End's exact trailer
+	// have to produce the same frame length or the back-patch is refused.
+	delay, padding = m.tagTrims(delay, padding)
 	h := m.h
 	size := h.Size()
 	off := mp3.HeaderLen + h.SideInfoLen() // protection forced off: no CRC slot
@@ -347,11 +405,23 @@ func (m *Muxer) buildInfoFrame(delay, padding, frames int, toc []byte, bytes int
 	if p+24 <= size {
 		copy(frame[p:], "WaxFlow01") // 9-byte encoder tag, prefix "WaxF"
 		// The 12 LAME info field bytes after the tag stay zero.
-		if delay >= 0 && delay < 1<<12 && padding >= 0 && padding < 1<<12 {
-			frame[p+21] = byte(delay >> 4)
-			frame[p+22] = byte((delay&0xF)<<4 | (padding>>8)&0xF)
-			frame[p+23] = byte(padding)
+		// The two trims share three bytes but not each other's fate. Each
+		// field is 12 bits, and a value past that cannot be written; losing
+		// the head trim because the tail did not fit would trade a leading
+		// 1105-sample gap for a trailing one that is usually smaller, and
+		// DecodedTrims made that cliff easier to reach by adding
+		// DecoderDelay to the padding before it is measured. So an
+		// unrepresentable padding writes as zero, which leaks the tail, and
+		// the delay it has nothing to do with still lands.
+		if delay < 0 || delay >= 1<<12 {
+			delay = 0
 		}
+		if padding < 0 || padding >= 1<<12 {
+			padding = 0
+		}
+		frame[p+21] = byte(delay >> 4)
+		frame[p+22] = byte((delay&0xF)<<4 | (padding>>8)&0xF)
+		frame[p+23] = byte(padding)
 	}
 	return frame
 }

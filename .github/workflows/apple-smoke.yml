@@ -1,0 +1,49 @@
+name: apple-smoke
+
+# The AVPlayer spike, on demand only.
+#
+# It is not nightly and not on push, because it is not a test: it is one
+# question put to a hosted macOS runner ahead of building the Apple cells of
+# docs/client-matrix.md on top of the answer. Two unknowns, settled in one run
+# (scripts/apple-e2e/smoke.swift says which):
+#
+#   1. Does AVPlayer advance with no audio output device? A hosted runner has
+#      no speakers and no logged-in audio session.
+#   2. Does App Transport Security block plain-http loopback from a
+#      command-line Swift binary, which has no bundle Info.plist to declare an
+#      exception in? The job builds the probe twice, plain and with an
+#      embedded NSAllowsLocalNetworking plist, and runs both.
+#
+# Green means at least one build played, and the log says which. Red at exit 1
+# means neither did, and the printed AVFoundation errors are the finding. Red
+# at exit 2 means the probe never ran, which is a problem with this job rather
+# than an answer about AVPlayer.
+#
+# Delete this workflow once the real harness lands: the answer belongs in
+# docs/client-matrix.md's outcome log, not in a runnable spike.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26.3"
+
+jobs:
+  smoke:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: toolchain versions
+        run: |
+          sw_vers
+          swiftc --version
+          node --version
+      - run: make build
+      - run: WAXFLOW_BIN=./bin/waxflow node scripts/apple-e2e/smoke.mjs

@@ -83,11 +83,15 @@ tagging a release that touches HLS:
      variants.
 4. Known-acceptable notes:
    - Audio-only streams warn about missing video attributes; ignore.
-   - FLAC at 12 or 20 bits cannot play over MSE in Chromium at all: its
+   - FLAC at 12 or 20 bits cannot play over MSE in Chromium as coded: its
      stream parser accepts only 8, 16, 24, and 32 as a sample size, and
-     the FLAC mapping requires the field to equal STREAMINFO's. Such a
-     source needs `bits=16` or `bits=24` on the mint (24 widens 20-bit
-     losslessly). Native .flac and every other client are unaffected.
+     the FLAC mapping requires the field to equal STREAMINFO's. So an HLS
+     mint widens such a source to 16 or 24 bits, which is lossless (a
+     left shift of zero-padded LSBs, which FLAC's wasted-bits coding
+     takes back out). What it costs is the remux rung: those variants
+     re-encode instead of copying packets. `bits=` still overrides, in
+     both directions. Native .flac and progressive `/stream` are
+     unaffected and keep the source's own depth.
    - The final segment is short (the tail remainder); that is legal and
      expected.
    - EXTINF values are **presentation** durations: each segment's decode

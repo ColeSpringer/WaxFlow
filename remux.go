@@ -22,7 +22,7 @@ import (
 // is deliberate rather than an oversight. A remux runs no decoder, no DSP, and
 // no encoder, so no revision of any of them can change its bytes; keying on
 // them would invalidate remuxes for fixes that cannot reach them. The
-// progressive muxers carry no version constants at all, which is equally
+// progressive muxers carried no version constants at all, which was equally
 // deliberate: a whole-file cache entry is self-consistent, so a framing change
 // leaves older entries as merely older bytes that still decode identically.
 // (The segmented form inherits mp4.SegmenterVersion for free, which exists
@@ -57,6 +57,12 @@ import (
 // lever for the same change (ADR-0004's known gap: no muxer term), and none is
 // borrowed: no reader takes the entry's depth over the cookie, so those files
 // play and report identically.
+//
+// That gap is closed (ADR-0004's 2026-09-10 amendment): every progressive
+// muxer carries a MuxerVersion now, and a remux plan names its container's
+// beside this constant. So this one narrows to what it always described best,
+// the gapless trailer this rung synthesizes, and a muxer change bumps the
+// muxer's own term instead of borrowing this.
 const RemuxVersion = "remux-4"
 
 // RemuxPlan describes what a remux would produce, computed from the source
@@ -144,6 +150,10 @@ func (e *Engine) PlanRemux(track container.Track, opts TranscodeOptions) (*Remux
 	if err != nil {
 		return nil, err
 	}
+	muxV, err := muxerVersion(containerName)
+	if err != nil {
+		return nil, err
+	}
 	if !codecSurvives(track.Codec, row.codecID) || !remuxable(opts, track.Fmt) || !gaplessSurvives(track) {
 		return nil, nil
 	}
@@ -170,7 +180,7 @@ func (e *Engine) PlanRemux(track container.Track, opts TranscodeOptions) (*Remux
 			Container: containerName,
 			MediaType: mediaType,
 			Live:      containerLive(row.live, opts.Container),
-			Versions:  []string{RemuxVersion},
+			Versions:  []string{RemuxVersion, muxV},
 			Samples:   track.Samples,
 			// BytesPerFrame, FrameSize, BitRate, and EstimatedBytes stay at
 			// their unknown values. The source's packets have a bit rate, but
@@ -484,7 +494,11 @@ func (e *Engine) PlanRemuxSegments(track container.Track, opts TranscodeOptions,
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 			fmt.Sprintf("waxflow: %s has no segmented (HLS) form (available: %s)", opts.Format, strings.Join(SegmentedFormats(), ", ")))
 	}
-	rp, err := e.PlanRemux(track, opts)
+	// The segmented depth rule, applied before the rung is asked, which is
+	// what makes it decline: a 20-bit FLAC has to be widened for MSE, and this
+	// rung copies packets and cannot widen anything, so remuxable sees a depth
+	// request that is not the source's. See segmentBitDepth.
+	rp, err := e.PlanRemux(track, segmentBitDepth(opts, track.Fmt))
 	if err != nil || rp == nil {
 		return nil, err
 	}
@@ -558,7 +572,11 @@ func (e *Engine) RemuxSegments(ctx context.Context, src container.Source, hint s
 		return nil, err
 	}
 	track := info.Default()
-	rp, err := e.PlanRemux(track, opts)
+	// The same depth rule PlanRemuxSegments applies, off the same source
+	// format. Without it this accepts exactly the remux the plan declines: a
+	// 20-bit FLAC would have its own packets laid into segments a browser
+	// cannot append, past a plan that said the variant would be transcoded.
+	rp, err := e.PlanRemux(track, segmentBitDepth(opts, track.Fmt))
 	if err != nil {
 		return nil, err
 	}

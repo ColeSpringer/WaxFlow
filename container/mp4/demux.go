@@ -6,6 +6,7 @@ import (
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/aac"
+	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
 	"github.com/colespringer/waxflow/waxerr"
@@ -58,6 +59,9 @@ type Demuxer struct {
 	// so the decoder's inter-frame state (AAC's IMDCT overlap) converges;
 	// format.Media discards the difference for a sample-exact seek.
 	seekPreroll int64
+	// mp3Overhead is what one Layer III frame spends ahead of its main data,
+	// for the bit-reservoir half of the backoff. Set only for an MP3 track.
+	mp3Overhead int64
 
 	cur int64 // next sample index ReadPacket delivers
 
@@ -186,8 +190,15 @@ func (d *Demuxer) readBrands(b box) {
 	}
 }
 
-// selectAudio picks the sound track carrying a codec we decode, builds its
-// container.Track, and resolves gapless trims and chapters.
+// selectAudio picks the FIRST sound track carrying a codec we decode, builds
+// its container.Track, and resolves gapless trims and chapters.
+//
+// First rather than best: there is no codec preference, so which track a
+// multi-audio movie delivers is the file's ordering, and every codec added to
+// decodableAudio can therefore change the answer for a movie that carries it
+// ahead of one already decoded. That is the policy rather than an oversight —
+// a preference order would be this package inventing one — and a caller that
+// needs a particular track selects it itself.
 func (d *Demuxer) selectAudio(tracks []*track) error {
 	var audio *track
 	var foundCodecs []string
@@ -245,6 +256,13 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		d.note(0, "%s", audio.note)
 	}
 
+	if audio.codec == codec.MP3 {
+		// Before Valid, so the format that gets validated is the one that
+		// will be decoded with.
+		if err := d.mp3AdoptFrameFormat(audio); err != nil {
+			return err
+		}
+	}
 	if err := audio.fmt.Valid(); err != nil {
 		return container.UnusableFormat("mp4", audio.fmt, err)
 	}
@@ -261,6 +279,18 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		// decoder and is not recoverable by any preroll; the v2 seek gate
 		// documents that.)
 		d.seekPreroll = aac.HESeekPreroll
+	}
+	if audio.codec == codec.MP3 {
+		// Layer III frames are not independently decodable, whatever the
+		// sample table says by carrying no stss: the filterbank keeps IMDCT
+		// overlap and synthesis-window history, and the bit reservoir lets a
+		// frame's main data begin up to 511 BYTES before its own header. The
+		// first is a fixed number of samples and lives here; the second is
+		// not (six frames at 32 kbit/s, one at 320), so SeekSample extends
+		// the landing off the sample table's own byte sizes, which is what
+		// container/mpa does with its index.
+		d.seekPreroll = mp3SeekPreroll
+		d.mp3Overhead = mp3FrameOverhead(audio.fmt)
 	}
 
 	var delay, padding, samples int64
@@ -291,10 +321,12 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 
 // decodableAudio reports whether the demuxer decodes a codec: ALAC and AAC-LC
 // (progressive) plus Opus and FLAC (their sample entries are read for the
-// fragmented path, and their decoders are registered).
+// fragmented path, and their decoders are registered), and MP3, which an mp4a
+// entry carries under object type 0x69/0x6B and QuickTime writes as its own
+// '.mp3' fourcc.
 func decodableAudio(id codec.ID) bool {
 	switch id {
-	case codec.ALAC, codec.AACLC, codec.HEAAC, codec.Opus, codec.FLAC:
+	case codec.ALAC, codec.AACLC, codec.HEAAC, codec.Opus, codec.FLAC, codec.MP3:
 		return true
 	}
 	return false
@@ -382,9 +414,67 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	}
 	idx := st.sampleAt(sample)
 	idx = st.syncAtOrBefore(idx)
+	if d.sel.codec == codec.MP3 {
+		// The bytes half of the backoff, which seekPreroll cannot express.
+		// The fragmented path has no sample table to measure it on and gets
+		// the samples half alone; nothing writes MP3 into a fragmented movie,
+		// and a landing there is still sample-exact through the pre-roll
+		// format.Media runs, just with a few frames of settling audible in
+		// the discarded region rather than before it.
+		idx = st.mp3Backoff(idx, d.mp3Overhead)
+	}
 	d.cur = idx
 	pts, _ := st.timeOf(idx)
 	return pts, nil
+}
+
+// mp3AdoptFrameFormat lets the first frame's own header decide the track's
+// format, and warns when it disagrees with the sample entry.
+//
+// For MPEG audio the frame header is what the ASC is for AAC: the
+// authoritative statement of rate and channel count, where the sample entry
+// is a field that can be wrong. And unlike every other codec here, nothing
+// else can check it — an mp4a MP3 track's esds carries no
+// DecoderSpecificInfo and a '.mp3' entry carries nothing at all — so without
+// this the entry is adopted unread, and a file that misstates either opens,
+// probes plausibly, and then fails at the first packet, because codec/mp3
+// refuses a frame that disagrees with the track it was built for. That is the
+// right refusal in the wrong place: the file plays in every other decoder.
+//
+// A read that does not deliver is left alone rather than reported. This is a
+// cross-check on a track that already parsed from boxes, so a source that
+// cannot serve the first frame has a problem ReadPacket states better, and
+// the entry standing is exactly the behaviour that shipped before.
+func (d *Demuxer) mp3AdoptFrameFormat(t *track) error {
+	if d.fragmented || t.st.total == 0 {
+		return nil
+	}
+	off := t.st.offsets[0]
+	if int(t.st.sizes[0]) < mp3.HeaderLen {
+		return nil
+	}
+	d.w.Trim(off)
+	b := d.w.BytesAt(off, mp3.HeaderLen)
+	if len(b) != mp3.HeaderLen {
+		return nil
+	}
+	h, err := mp3.ParseHeader(b)
+	if err != nil {
+		return nil
+	}
+	got := h.PCMFormat()
+	if got == t.fmt {
+		return nil
+	}
+	// warn rather than note: an entry that disagrees with the frames it
+	// describes is a file deviating from its format, which is what riff's
+	// block-align and channel-mask disagreements are treated as too, so
+	// `--strict` refuses it and an ordinary read carries on with the truth.
+	if werr := d.warn(off, "sample entry says %v, the first frame says %v; the frame wins", t.fmt, got); werr != nil {
+		return werr
+	}
+	t.fmt = got
+	return nil
 }
 
 func joinNames(names []string) string {

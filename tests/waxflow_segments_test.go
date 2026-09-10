@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"math"
 	"strings"
@@ -906,5 +907,158 @@ func TestSegmentDurationBelowPrimingIsRefused(t *testing.T) {
 	// timeline is presentation, so a one-frame segment is merely small.
 	if _, err := e.PlanSegments(pcmTrack(f, 44100), waxflow.TranscodeOptions{Format: "flac"}, 0.001); err != nil {
 		t.Errorf("a tiny FLAC segment was refused, but FLAC carries no priming: %v", err)
+	}
+}
+
+// flacFixtureAtDepth builds a FLAC stream at depth bits, for the HLS depth
+// rule. The source is a 24-bit WAV the chain quantizes down, since nothing
+// writes a 12- or 20-bit WAV and the depth that matters is the FLAC track's.
+func flacFixtureAtDepth(t *testing.T, depth, frames int) []byte {
+	t.Helper()
+	raw, _ := makeWAV(t, pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, 2, frames, 7)
+	e := waxflow.New()
+	ws := &memWS{}
+	if _, err := e.Transcode(context.Background(), container.BytesSource(raw), "wav", ws,
+		waxflow.TranscodeOptions{Format: "flac", BitDepth: depth}); err != nil {
+		t.Fatalf("building the %d-bit FLAC fixture: %v", depth, err)
+	}
+	return ws.Buf
+}
+
+// TestSegmentsWidenUnplayableFLACDepths pins the HLS depth rule: a FLAC
+// source at a depth Chromium's MSE parser refuses is planned at the next
+// depth it accepts, which is lossless (a left shift of zero-padded LSBs that
+// FLAC's wasted-bits coding takes back out).
+//
+// Both halves are asserted per depth, because either alone would pass while
+// the rule was half applied. The widened depths must also stop remuxing: that
+// rung copies the source's packets and so cannot widen, and a rung that kept
+// being taken would carry the unplayable depth through to the segments while
+// the plan claimed otherwise. The unaffected depths must keep remuxing, which
+// is the assertion the remux rung's own lesson demands: an optimization rung
+// needs a test that it was TAKEN.
+func TestSegmentsWidenUnplayableFLACDepths(t *testing.T) {
+	e := waxflow.New()
+	for _, tc := range []struct {
+		src, want int
+		remux     bool
+	}{
+		{src: 12, want: 16, remux: false},
+		{src: 20, want: 24, remux: false},
+		{src: 16, want: 16, remux: true},
+		{src: 24, want: 24, remux: true},
+	} {
+		t.Run(fmt.Sprintf("%dbit", tc.src), func(t *testing.T) {
+			raw := flacFixtureAtDepth(t, tc.src, 100000)
+			track := probeTrack(t, raw, "flac")
+			if track.Fmt.BitDepth != tc.src {
+				t.Fatalf("fixture probes at %d bits, want %d", track.Fmt.BitDepth, tc.src)
+			}
+			opts := waxflow.TranscodeOptions{Format: "flac"}
+
+			plan, err := e.PlanSegments(track, opts, 1.0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.Format.BitDepth != tc.want {
+				t.Errorf("PlanSegments on a %d-bit source plans %d bits, want %d",
+					tc.src, plan.Format.BitDepth, tc.want)
+			}
+
+			grid, err := e.PacketGrid(container.BytesSource(raw), "flac")
+			if err != nil {
+				t.Fatal(err)
+			}
+			rp, err := e.PlanRemuxSegments(track, opts, 1.0, grid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (rp != nil) != tc.remux {
+				t.Errorf("the segmented remux rung was taken = %v on a %d-bit source, want %v",
+					rp != nil, tc.src, tc.remux)
+			}
+
+			// A caller who names the depth is obeyed, widened or not, which is
+			// also what makes the decline above the rule's own doing rather
+			// than something else about these fixtures.
+			explicit := waxflow.TranscodeOptions{Format: "flac", BitDepth: tc.src}
+			ex, err := e.PlanRemuxSegments(track, explicit, 1.0, grid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ex == nil {
+				t.Errorf("bits=%d on a %d-bit source declined the remux rung; an explicit depth is not widened",
+					tc.src, tc.src)
+			}
+		})
+	}
+}
+
+// initFLACSampleSize reads the samplesize field of an init segment's fLaC
+// sample entry, which is the field Chromium checks against STREAMINFO.
+func initFLACSampleSize(t *testing.T, init []byte) int {
+	t.Helper()
+	moov := find(init, "moov")
+	stsd := find(find(find(find(find(moov, "trak"), "mdia"), "minf"), "stbl"), "stsd")
+	if len(stsd) < 8 {
+		t.Fatal("no stsd in the init segment")
+	}
+	entry := find(stsd[8:], "fLaC") // past version/flags(4)+entry_count(4)
+	if len(entry) < 28 {
+		t.Fatalf("no fLaC sample entry (%d bytes)", len(entry))
+	}
+	return int(binary.BigEndian.Uint16(entry[18:20]))
+}
+
+// TestSegmentsWidenedRunMatchesThePlan closes the gap between the two: the
+// rule is applied at the plan and at the run off the same source format, so a
+// caller handing its original options to both cannot get segments encoded at a
+// depth the init header does not declare.
+//
+// The init header is where a mismatch would land, since Chromium checks the
+// entry's samplesize against STREAMINFO's: a 24-bit entry over 20-bit frames
+// is refused exactly as a 20-bit entry is, so the widening would have bought
+// nothing.
+func TestSegmentsWidenedRunMatchesThePlan(t *testing.T) {
+	raw := flacFixtureAtDepth(t, 20, 100000)
+	track := probeTrack(t, raw, "flac")
+	e := waxflow.New()
+	opts := waxflow.TranscodeOptions{Format: "flac"}
+	plan, err := e.PlanSegments(track, opts, 1.0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	init, err := e.InitSegment(plan, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := initFLACSampleSize(t, init); got != 24 {
+		t.Errorf("init segment declares %d bits, want the widened 24", got)
+	}
+
+	// The run is handed the caller's own options, unwidened, which is what
+	// makes this an assertion about the run applying the rule rather than
+	// about the plan having applied it.
+	var first *mp4.Segment
+	if _, err := e.TranscodeSegments(context.Background(), container.BytesSource(raw), "flac", opts,
+		waxflow.SegmentedOptions{SegmentSamples: plan.SegmentSamples},
+		func(sg mp4.Segment) error {
+			if first == nil {
+				c := sg
+				first = &c
+			}
+			return nil
+		}); err != nil {
+		t.Fatal(err)
+	}
+	if first == nil {
+		t.Fatal("the run emitted no segments")
+	}
+	fi, err := flac.ParseFrameHeader(parseSegment(t, first.Data).packets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Bits != 24 {
+		t.Errorf("the first frame codes %d bits, want the widened 24", fi.Bits)
 	}
 }

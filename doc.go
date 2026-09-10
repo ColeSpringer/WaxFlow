@@ -11,6 +11,7 @@
 //	dsp/...       - resample, mix, gain, dither, loudness, psy, fft
 //	codec/...     - pcm, flac, alac, mp3, aac, opus, vorbis, wavpack, ape, wma, musepack
 //	container/... - riff, aiff, ogg, mp4, mka, adts, mpa, flacn, wv, apen, asf, mpc
+//	cue           - CUE sheet parsing (CD-frame track boundaries)
 //	format        - probe + registry + Open
 //	source        - source-ref model + Resolver interface
 //	server        - HTTP service

@@ -528,6 +528,15 @@ func (s *Server) remuxSegmentPlanFor(src *source.File, track container.Track,
 	opts waxflow.TranscodeOptions, segDur float64) (*waxflow.RemuxSegmentPlan, error) {
 	// An error is not this rung's to report; PlanSegments is about to hit the
 	// same one with the same words.
+	//
+	// The options here are the request's, not the widened ones the engine's
+	// segmented entry points apply (segmentBitDepth), so this check passes
+	// for a 12- or 20-bit FLAC that PlanRemuxSegments then declines, and the
+	// walk below is paid for nothing. That is accepted rather than fixed:
+	// exporting the depth rule to spare it would put a permanent function on
+	// the public surface (ADR-0002) for one source shape whose next step is a
+	// full re-encode of the same file anyway. The answer is right either way,
+	// which is what this check is for.
 	if rp, err := s.eng.PlanRemux(track, opts); err != nil || rp == nil {
 		return nil, nil
 	}

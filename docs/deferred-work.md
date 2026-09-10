@@ -5,56 +5,6 @@ change that found them. Each entry says where it lives, what it is, why it
 waits, and what found it. Things that need a sibling Wax repo go to
 docs/upstream-requests.md instead.
 
-## The cache key has no muxer term, so the sample-entry fix reaches cached progressive transcodes only on eviction
-
-**Where:** ADR-0004 (the "known gap" paragraph), `TranscodePlan.Versions`
-in `waxflow.go`, `RemuxVersion` in `remux.go`, `mp4.SegmenterVersion`.
-
-**What:** the fMP4 sample-entry fix (2026-09-06) changed what the mp4
-muxers write in the init header and the progressive moov: the codec's
-depth in `samplesize`, dOps agreeing with the entry on rate. Segmented
-output regenerates through `mp4.SegmenterVersion` (mp4-seg-4) and remuxes
-through `RemuxVersion` (remux-4), but a cached progressive *transcode* of
-ALAC has no version term that changed, so it keeps its old bytes (a
-16-bit entry over a 24-bit cookie) until the entry is evicted.
-
-**Why it is deferred rather than fixed:** ADR-0004 already names the
-missing container term and the reason it waits: adding an element to the
-joined version string invalidates every entry on first deploy, the same
-practical cost as a schema bump, so it lands with the next schema bump
-rather than spending a full invalidation on its own. Borrowing the ALAC
-encoder's version instead would re-encode every cached ALAC output for a
-field every reader (our demuxer, ffmpeg, Apple, waxlabel since v1.4.2)
-ignores in favour of the cookie.
-
-**Found by:** the third-party review of the sample-entry fix (2026-09-06).
-
-## 12- and 20-bit FLAC mints an HLS stream Chromium cannot play
-
-**Where:** `container/mp4/seg.go` (`flacSampleEntry`), the `hls-js` note
-in `server/types.go`, `TestMSERuleNamesTheUnplayableFLACDepths`.
-
-**What:** Chromium's MP4 stream parser accepts only 8, 16, 24, and 32 as
-an audio sample size, and its FLAC mapping requires the field to equal
-STREAMINFO's, so a FLAC track at 12 or 20 bits is unplayable over Media
-Source Extensions however the header is written. WaxFlow writes the
-header the FLAC-in-ISOBMFF spec requires and mints the stream anyway: the
-playlist, init header, and every segment answer 200, and the browser
-refuses the first append. The `hls-js` caps profile, docs/client-matrix.md,
-and docs/hls-validation.md tell a caller with such a source to ask for
-`bits=16` or `bits=24` (24 widens 20-bit losslessly).
-
-**Why it is deferred rather than fixed:** there is no cheap correct fix.
-Widening at the transcode rung would not cover the remux rung, which
-copies a 20-bit source's packets unchanged, so it would need a remux
-eligibility rule too. Refusing the mint would break the clients that do
-play those depths (native FLAC and every other family). The honest fix is
-a consumer-aware depth policy (a mint that knows it is for hls-js widens),
-which is a design change with its own API surface, and no real library
-has asked for it: 20-bit FLAC exists, 12-bit barely. Revisit when one does.
-
-**Found by:** the third-party review of the sample-entry fix (2026-09-06).
-
 ## ALAC sample entries at 20 and 24 bits are unverified on Apple clients
 
 **Where:** `container/mp4/mux.go` (`alacSampleEntry`), item 1 of the
@@ -74,20 +24,32 @@ and delete this entry when it has run.
 
 **Found by:** the third-party review of the sample-entry fix (2026-09-06).
 
-## The browser e2e names an init-header refusal only as a 30 s timeout
+## Four muxers carry a cache-key version with no golden bytes behind it
 
-**Where:** `scripts/client-e2e.mjs` (`runCell`).
+**Where:** `MuxerVersion` in `container/{ogg,wv,apen,adts}`, the
+`goldens` target in the Makefile, ADR-0004's 2026-09-10 amendment.
 
-**What:** a cell waits up to 30 s for `currentTime` to pass 2 s and only
-then reads the player's health, so an init segment the browser refuses
-outright (the pre-fix 24-bit FLAC header) fails as
-`page.waitForFunction: Timeout 30000ms exceeded` rather than as the
-hls.js fatal that was available within a second. The cell still fails,
-which is its job; it was proved on a daemon built from the pre-fix tree.
+**What:** the container term added to the cache key rests on a bump
+being remembered, and what catches a forgotten one is a golden byte
+comparison. `TestGoldenMuxOutputs` covers riff, aiff, flacn, mpa, mka
+and mp4. The ogg, wv, apen and adts muxers have no golden, so a change
+to what they write around unchanged packets reaches review with nothing
+failing. Ogg is the one that stings: the granulepos fix (2026-07-29)
+that motivated the term in the first place was an ogg muxer change, and
+a repeat of it would still be caught by nothing. Their round-trip and
+differential tests assert what the bytes mean, not what they are, so a
+framing change that stays correct passes them.
 
-**Why it is deferred rather than fixed:** racing the progress wait
-against a fatal-error watch is a small harness change that wants its own
-verification run against a deliberately broken daemon, and this change
-already carried one.
+**Why it is deferred rather than fixed:** four new golden fixtures with
+their own regeneration story, and the two that matter are not
+straightforward. Ogg's muxer batches packets into pages by a size and
+duration target, so a golden pins the batching policy as much as the
+framing and would fail on a deliberate retune; the wv and apen muxers
+back-patch a header and write an APEv2 block whose content includes
+nothing time-varying but whose layout has never been byte-pinned. Doing
+it properly means deciding per muxer what the golden is allowed to
+constrain, which is a larger piece of work than the term that exposed
+the gap.
 
-**Found by:** proving the `hls:flac24` cell had teeth (2026-09-06).
+**Found by:** the third-party review of the cache-key muxer term
+(2026-09-10).

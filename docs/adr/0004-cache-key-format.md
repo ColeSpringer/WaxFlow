@@ -81,3 +81,65 @@ same source identity.
   as a `cacheSchemaVersion` bump; the value is precision for every muxer
   change after this one. Land it with the next schema bump rather than
   spending a full invalidation on its own.
+
+## Amendment (2026-09-10): the container term, added
+
+The known gap above is closed. `nodeVersions` gains a fourth element, so
+the tuple is `[decoder, dsp..., encoder, muxer]`:
+
+- Every progressive muxing container package carries a `MuxerVersion`
+  constant, spelled `<name>-mux-<n>`: `adts`, `aiff`, `apen`, `flacn`,
+  `mka`, `mp4`, `mpa`, `ogg`, `riff`, `wv`. All start at `-1` except
+  `mpa`, which ships at `mpa-mux-2` because the same change that added
+  the term also fixed what that muxer writes.
+  `waxflow.muxerVersion` maps a resolved container name onto its
+  package's constant, keyed on the same name `output.mux` branches on so
+  the term cannot name a muxer other than the one that ran.
+- A remux plan carries `[RemuxVersion, muxer]`, and a progressive cut
+  appends `CutVersion` to that. `RemuxVersion` keeps only what it always
+  described best, the gapless trailer this rung synthesizes; a muxer
+  change bumps the muxer's own term instead of borrowing it.
+- Segmented plans are unchanged: their muxer *is* the segmenter, and
+  `mp4.SegmenterVersion` already keys it. They do inherit the progressive
+  term through the transcode plan they embed, and the term they inherit
+  is the one their FORMAT's progressive container resolves to, not
+  mp4's: an HLS FLAC plan carries `flacn.MuxerVersion` and an HLS Opus
+  plan `ogg.MuxerVersion`, muxers that never run for a CMAF output,
+  while `mp4.MuxerVersion` reaches an HLS key only for the aac, he-aac
+  and alac rows, whose progressive container is MP4 too. So the
+  inherited term over-invalidates for every segmented format and covers
+  nothing that `mp4.SegmenterVersion` does not already cover. That is
+  accepted rather than trimmed: the event is rare, the cost is one
+  re-encode per entry, and stripping the last element of an inherited
+  slice is a second version-assembly path that could disagree with the
+  first. It is imprecise, not unsafe — the segmented form has no
+  under-covered muxer.
+- One `mp4.MuxerVersion` covers both `NewMuxer` (fragmented) and
+  `NewProgressiveMuxer` (moov-first), because they share the sample
+  entries and movie boxes a change here would be about; a revision to
+  either bumps it.
+
+`cacheSchemaVersion` is *not* bumped. The layout does not change and the
+key already moves, so every cached progressive and HLS entry misses once
+after deploy and regenerates on demand; the size-bounded GC ages the
+orphans out. That one-time full invalidation is the cost the gap
+paragraph above was waiting to spend, and it is spent here rather than
+saved for a schema bump that may not come: the sample-entry fix
+(2026-09-06) had already shipped bytes that cached progressive ALAC
+transcodes were not regenerating.
+
+The residual risk is the same standing PR question, moved: forgetting to
+bump a `MuxerVersion` on a framing change.
+`TestMuxerVersionNamesTheMuxerThatRuns` cannot see that — it checks which
+term is used, not whether it was bumped.
+
+What catches an unbumped change is a golden byte comparison, and six of
+the ten packages have one (`TestGoldenMuxOutputs` over riff, aiff,
+flacn, mpa, mka, mp4; see the `goldens` target). Four do not: `ogg`,
+`wv`, `apen`, `adts`. `ogg` is the gap that stings, since the
+granulepos fix that motivated this whole term was an ogg muxer change,
+and a repeat of it would still reach review with nothing failing. Those
+four are covered only by their round-trip and differential tests, which
+assert what the bytes mean rather than what they are, so a framing
+change that stays correct passes them. Adding goldens there is the
+follow-up this amendment names and does not do.

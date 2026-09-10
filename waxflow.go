@@ -339,6 +339,46 @@ func resolveContainer(row *output, name string) (containerName, mediaType string
 	return name, mt, nil
 }
 
+// muxerVersion is ADR-0004's container term: the cache-key version of the
+// muxer that writes a resolved container name.
+//
+// It is keyed on that name rather than declared per output row because the
+// name is what row.mux itself branches on, so this cannot name a muxer
+// other than the one that would run for the same options.
+// TestMuxerVersionNamesTheMuxerThatRuns holds it to that against the
+// constructed muxers rather than against this list.
+//
+// An unrecognized name is a wiring bug, not a bad request: every caller
+// resolves through resolveContainer first, which refuses a name the row
+// cannot honor. Refusing here rather than returning a placeholder is the
+// point, since a placeholder would key two different muxers alike.
+func muxerVersion(containerName string) (string, error) {
+	switch containerName {
+	case "wav":
+		return riff.MuxerVersion, nil
+	case "aiff":
+		return aiff.MuxerVersion, nil
+	case "opus", "vorbis", "ogg":
+		return ogg.MuxerVersion, nil
+	case "flac":
+		return flacn.MuxerVersion, nil
+	case "mp3":
+		return mpa.MuxerVersion, nil
+	case "adts":
+		return adts.MuxerVersion, nil
+	case "aac", "he-aac", "alac", ContainerProgressive, ContainerFragmented:
+		return mp4.MuxerVersion, nil
+	case "wavpack":
+		return wv.MuxerVersion, nil
+	case "ape":
+		return apen.MuxerVersion, nil
+	case "mka", "webm":
+		return mka.MuxerVersion, nil
+	}
+	return "", waxerr.New(waxerr.CodeInternal,
+		fmt.Sprintf("waxflow: container %q has no muxer version", containerName))
+}
+
 // checkSeekable enforces the one capability bit Muxer exposes: a
 // back-patching muxer needs a seekable destination (a file). It is checked
 // before any work starts on a doomed output, in one place so no muxer, and
@@ -390,11 +430,13 @@ type TranscodePlan struct {
 	// Live reports whether the container has a streaming form (a muxer
 	// that does not need a seekable destination).
 	Live bool
-	// Versions are the version constants of every sample-affecting node,
-	// source decoder, then DSP chain, then encoder, for the cache key:
-	// a decoder revision must invalidate cached transcodes of
-	// that codec's sources just as an encoder revision invalidates its
-	// outputs.
+	// Versions are the version constants of every node whose revision can
+	// change the output bytes, in pipeline order: source decoder, DSP
+	// chain, encoder, muxer. A decoder revision must invalidate cached
+	// transcodes of that codec's sources just as an encoder revision
+	// invalidates its outputs, and the muxer term (ADR-0004's 2026-09-10
+	// amendment) covers the one change the others cannot see: the same
+	// encoded packets framed differently.
 	Versions []string
 	// Samples is the projected output length from FromSample to the end,
 	// -1 when the source length is unknown.
@@ -640,12 +682,16 @@ func buildPlanCore(in audio.Format, opts TranscodeOptions) (*planCore, error) {
 	if err != nil {
 		return nil, err
 	}
+	muxV, err := muxerVersion(containerName)
+	if err != nil {
+		return nil, err
+	}
 	return &planCore{
 		format:        f,
 		container:     containerName,
 		mediaType:     mediaType,
 		live:          containerLive(row.live, opts.Container),
-		versions:      append(chain.Versions(), version),
+		versions:      append(chain.Versions(), version, muxV),
 		l:             l,
 		m:             m,
 		bytesPerFrame: bytesPerFrame,
@@ -1099,11 +1145,20 @@ var outputs = []output{
 			return mp3.NewEncoder(f, eo)
 		},
 		// The Xing header's delay reads off the track rather than the encoder,
-		// which is the same number by construction (Transcode stamps track.Delay
-		// from the encoder) and is also the one a remux has: the source's own
-		// LAME-tag delay, carried across.
-		mux: func(t container.Track, opts TranscodeOptions, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
-			return mpa.NewMuxer(dst, &mpa.MuxerOptions{Delay: int(t.Delay), VBR: opts.MP3VBR, Tags: opts.Tags}), nil
+		// which for a transcode is the same number by construction (Transcode
+		// stamps track.Delay from the encoder) and for a remux is the source's,
+		// carried across. What differs between the two is which convention that
+		// number is in, and nil enc is the discriminator, as it is for FLAC's
+		// MD5: an encoder's delay is the LAME field's own encoder-side share,
+		// while a demuxer's has the fixed 529-sample decoder latency already
+		// added. See mpa.MuxerOptions.DecodedTrims.
+		mux: func(t container.Track, opts TranscodeOptions, enc codec.Encoder, dst io.Writer) (container.Muxer, error) {
+			return mpa.NewMuxer(dst, &mpa.MuxerOptions{
+				Delay:        int(t.Delay),
+				DecodedTrims: enc == nil,
+				VBR:          opts.MP3VBR,
+				Tags:         opts.Tags,
+			}), nil
 		},
 	},
 	{

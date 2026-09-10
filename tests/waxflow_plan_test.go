@@ -14,7 +14,9 @@ import (
 	"github.com/colespringer/waxflow/codec/opus"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/adts"
 	"github.com/colespringer/waxflow/container/mp4"
+	"github.com/colespringer/waxflow/container/riff"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -91,17 +93,23 @@ func TestPlanTranscode(t *testing.T) {
 		t.Fatalf("resampling plan must carry DSP node versions, got %v", plan.Versions)
 	}
 
-	// The same options with no conversion carry exactly the source decoder
-	// and the encoder version (both pcm here).
+	// The same options with no conversion carry exactly the source decoder,
+	// the encoder version (both pcm here), and the muxer's.
 	base, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "wav"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(base.Versions) != 2 || base.Samples != frames {
+	if len(base.Versions) != 3 || base.Samples != frames {
 		t.Fatalf("baseline plan = %+v", base)
 	}
 	if base.Versions[0] != pcm.Version {
 		t.Fatalf("baseline versions %v must lead with the source decoder", base.Versions)
+	}
+	// And it ends with the container's, which is the term that covers a
+	// change to how the same encoded packets are framed (ADR-0004's
+	// 2026-09-10 amendment).
+	if got := base.Versions[len(base.Versions)-1]; got != riff.MuxerVersion {
+		t.Fatalf("baseline versions %v must end with the muxer's %s", base.Versions, riff.MuxerVersion)
 	}
 
 	// A compressed source leads with its codec's decoder version, so a
@@ -365,6 +373,45 @@ func TestImplicitDownmixIsAnnouncedPerRun(t *testing.T) {
 	}
 	if strings.Contains(logged.String(), "downmixed") {
 		t.Errorf("an explicit channel request was reported as a surprise:\n%s", logged.String())
+	}
+}
+
+// TestPlanVersionsSplitByContainer is the point of the muxer term: two
+// outputs of one format that share every codec and DSP node still key
+// separately, because the bytes differ in framing alone.
+//
+// The pair is chosen so that nothing else can be doing the work: format=aac
+// with no override is fragmented MP4 and with container=adts is a bare
+// elementary stream, same encoder, same chain, same source. Before the term
+// existed these two plans carried identical Versions.
+func TestPlanVersionsSplitByContainer(t *testing.T) {
+	cfg := pcm.Config{Encoding: pcm.SignedInt, Bits: 16}
+	wav, src := makeWAV(t, cfg, 2, 4096, 7)
+	defer audio.Put(src)
+	track := probeTrack(t, wav, "wav")
+	e := waxflow.New()
+
+	frag, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "aac"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "aac", Container: "adts"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Equal(frag.Versions, stream.Versions) {
+		t.Fatalf("fragmented and adts aac plans share cache versions %v", frag.Versions)
+	}
+	if got, want := frag.Versions[len(frag.Versions)-1], mp4.MuxerVersion; got != want {
+		t.Errorf("fragmented aac keys on muxer %q, want %q", got, want)
+	}
+	if got, want := stream.Versions[len(stream.Versions)-1], adts.MuxerVersion; got != want {
+		t.Errorf("adts aac keys on muxer %q, want %q", got, want)
+	}
+	// Everything ahead of the muxer term is the same node set, which is what
+	// makes the difference above the muxer's alone.
+	if !slices.Equal(frag.Versions[:len(frag.Versions)-1], stream.Versions[:len(stream.Versions)-1]) {
+		t.Errorf("the two plans differ before the muxer term: %v against %v", frag.Versions, stream.Versions)
 	}
 }
 

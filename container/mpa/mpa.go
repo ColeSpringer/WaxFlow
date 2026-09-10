@@ -54,11 +54,17 @@ const maxLeadingJunk = 8 << 10
 // two maximum-size frames.
 const MatchNeed = maxLeadingJunk + 2*1441 + mp3.HeaderLen
 
-// decoderDelay is the fixed Layer III decoder latency in samples
+// DecoderDelay is the fixed Layer III decoder latency in samples
 // (528 plus 1) that gapless trims add to the encoder delay signaled in
 // the LAME tag; every mainstream decoder applies the same constant, so
 // trimmed output lines up across implementations.
-const decoderDelay = 529
+//
+// It is exported because it is the difference between the two conventions a
+// caller of this package may be holding: the LAME tag states the encoder's
+// share alone, while container.Track and codec.Trailer state the samples a
+// decoder drops. MuxerOptions.DecodedTrims is how a caller says which it
+// has.
+const DecoderDelay = 529
 
 // vbrTag is a parsed Xing, Info, or VBRI metadata frame: the fields the
 // demuxer consumes today. The tags carry more (byte counts, TOCs, a CBR

@@ -12,6 +12,12 @@ import (
 
 var _ container.Muxer = (*Muxer)(nil)
 
+// MuxerVersion is this muxer's term in the ADR-0004 cache key: a cached
+// output of it regenerates when this bumps. Bump it for a change to what
+// gets written around unchanged encoded packets, which is the one kind of
+// change no encoder or DSP version can notice.
+const MuxerVersion = "adts-mux-1"
+
 // Muxer writes one AAC track as an ADTS elementary stream: each access
 // unit gets the fixed 7-byte header (no CRC) and nothing else. ADTS has
 // no gapless signaling, so the trailer is accepted and discarded; streams

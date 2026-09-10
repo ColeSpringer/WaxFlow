@@ -764,7 +764,10 @@ func (e *Engine) PlanCut(track container.Track, opts TranscodeOptions, spans []S
 			"outContainer", rp.Container, "delay", cut.Delay, "padding", cut.Padding)
 		return nil, nil
 	}
-	rp.Versions = []string{RemuxVersion, CutVersion}
+	// Appended rather than replaced: PlanRemux put the destination muxer's
+	// term there (ADR-0004's container term), and a progressive cut writes
+	// through that muxer like any other remux does.
+	rp.Versions = append(rp.Versions, CutVersion)
 	return &CutPlan{RemuxPlan: *rp, Landed: landed}, nil
 }
 
