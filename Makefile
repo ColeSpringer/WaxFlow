@@ -32,7 +32,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # the "stdlib-only codecs" promise.
 PUBLIC_PKGS := . ./waxerr ./audio ./dsp/... ./codec/... ./container/... ./format ./source ./server ./client
 
-.PHONY: build test test-race test-cli test-oracle test-example vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench encoder-quality fuzz opus-tools ape-tools mpc-tools client-e2e hls-e2e soak
+.PHONY: build test test-race test-cli test-oracle test-example test-386 vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench encoder-quality fuzz opus-tools ape-tools mpc-tools client-e2e hls-e2e soak
 
 build:
 	cd cli && CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o ../bin/waxflow ./cmd/waxflow
@@ -82,6 +82,22 @@ vet:
 	go vet ./...
 	go vet -tags wmatablesgen ./codec/wma/
 	go vet -tags mpcfixtures ./codec/musepack/
+
+# The 32-bit pass. Go's int is 32 bits there, so a constant or a conversion
+# that is fine here stops compiling or silently wraps: a uint32 field read into
+# an int, a 2^32 ceiling written as an untyped constant, a test value built
+# from MaxInt64. The whole tree stopped building for 386 without anyone
+# noticing, which is what this exists to prevent. vet covers every module and
+# is the fast half; the test run is the slow half and there is no race
+# detector on 386.
+test-386:
+	GOARCH=386 go vet ./...
+	cd cli && GOARCH=386 go vet ./...
+	cd oracletest && GOARCH=386 go vet ./...
+	cd examples/catalogcli && GOARCH=386 go vet ./...
+	GOARCH=386 go test -timeout 30m ./...
+	cd cli && GOARCH=386 go test -timeout 10m ./...
+	cd oracletest && GOARCH=386 go test -timeout 10m ./...
 
 fmt:
 	gofmt -w .

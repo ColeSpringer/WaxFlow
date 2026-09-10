@@ -102,6 +102,7 @@ func Slice(med format.Media, from, to int64) (format.Media, error) {
 		Tracks:    []container.Track{spanned},
 		Chapters:  spanChapters(in.Chapters, from, s.limit, track.Fmt.Rate),
 		Warnings:  in.Warnings,
+		Notes:     in.Notes,
 	}
 	return s, nil
 }
@@ -257,7 +258,10 @@ func SpanTrack(track container.Track, from, to int64) (container.Track, error) {
 	out := track
 	switch {
 	case to >= 0:
-		out.Samples, out.SamplesExact = to-from, true
+		// A bounded span's length is the caller's own arithmetic, so it is
+		// exact however the source stated its total; an open-ended one
+		// inherits whatever the source's claim was worth.
+		out.Samples, out.SamplesExact, out.SamplesAdvisory = to-from, true, false
 	case total >= 0:
 		out.Samples = total - from
 	}
@@ -539,6 +543,28 @@ type ConcatSource struct {
 	// to this declaration: one that opens in a different format, or delivers
 	// a different number of samples, fails the run rather than silently
 	// desyncing every position after it.
+	//
+	// Its length must be one the decode will match (Samples >= 0 and not
+	// SamplesAdvisory), because that is the declaration the run enforces. A
+	// container that only rounds a duration into a sample count is refused
+	// when the timeline is planned, not when the seam breaks; measure such a
+	// member first and hand the measured length here.
+	//
+	// The measurement that always works is to read the member to io.EOF and
+	// count what it delivers:
+	//
+	//	track.Samples, track.SamplesAdvisory = counted, false
+	//
+	// Nothing is truncated, so nothing is lost, and it costs a full decode.
+	//
+	// A seek past any length is the cheap alternative, since a landing is
+	// clamped to the end of stream, but it does not produce the same number:
+	// a container that seeks by time lands under what its own decode goes on
+	// to deliver (ASF by up to a millisecond, since its index is in packet
+	// presentation times). A member measured that way has to be bound to the
+	// landing as well, by opening it through Slice over a Media whose Info
+	// reports the measured length. That is what the daemon does, and why its
+	// album mode accepts sources a library caller's does not.
 	Track container.Track
 	// Open opens the member's decodable media. Concat calls it when the
 	// timeline reaches this member and closes the result on advance, so a
@@ -652,9 +678,23 @@ func concatLayout(tracks []container.Track, opts ConcatOptions) (env audio.Forma
 			return audio.Format{}, nil, nil, 0, waxerr.Wrap(waxerr.CodeUnsupportedFormat,
 				fmt.Sprintf("waxflow: timeline member %d", i), err)
 		}
-		if t.Samples < 0 {
+		// An advisory length is refused here rather than at the seam it would
+		// break. The run enforces each member's declared length (count and
+		// advance), so a member whose container only rounded it fails minutes
+		// into a decode with a message about the file, when the cause is that
+		// nobody measured it. This is the only place that can say so. ASF and
+		// a Matroska falling back to Info Duration are the two that reach it;
+		// every caller inside this tree already measures (the daemon's
+		// trackFor, the merge runner's MeasureTrack, cli split), which is why
+		// the gap only ever bit a library consumer.
+		if t.Samples < 0 || t.SamplesAdvisory {
+			what := "has no declared length"
+			if t.Samples >= 0 {
+				what = fmt.Sprintf("declares an advisory length (%d samples) rounded from a duration", t.Samples)
+			}
 			return audio.Format{}, nil, nil, 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
-				"waxflow: timeline member %d has no declared length; measure it before planning a timeline", i))
+				"waxflow: timeline member %d %s; measure it before planning a timeline "+
+					"(read it to the end and count what it delivers)", i, what))
 		}
 		env.Rate = max(env.Rate, t.Fmt.Rate)
 		env.Channels = max(env.Channels, t.Fmt.Channels)
@@ -754,6 +794,11 @@ func concatLayout(tracks []container.Track, opts ConcatOptions) (env audio.Forma
 // seam, and every refusal a crossfade needs lives in concatLayout so that
 // planning a timeline and running one refuse the same requests for the same
 // reasons.
+//
+// Every member's length has to be one its decode will match, and a member
+// whose container only rounded a duration into one is refused here rather
+// than at the seam it would break; see ConcatSource.Track for how to measure
+// one.
 func ConcatTrack(tracks []container.Track, opts ConcatOptions) (container.Track, error) {
 	env, _, _, total, err := concatLayout(tracks, opts)
 	if err != nil {
@@ -1728,7 +1773,7 @@ func (c *concat) dropOutput(n int64) error {
 func (c *concat) count(n int) error {
 	c.local += int64(n)
 	if want := c.lens[c.cur]; c.local > want {
-		return waxerr.New(waxerr.CodeSourceUnreadable, fmt.Sprintf(
+		return waxerr.New(waxerr.CodeMalformedInput, fmt.Sprintf(
 			"waxflow: timeline member %d holds more audio than the %d samples its headers declared", c.cur, want))
 	}
 	return nil
@@ -1737,7 +1782,9 @@ func (c *concat) count(n int) error {
 // advance closes the finished member and moves to the next.
 func (c *concat) advance() error {
 	if want := c.lens[c.cur]; c.local != want {
-		return waxerr.New(waxerr.CodeSourceUnreadable, fmt.Sprintf(
+		// Malformed input, not an I/O failure: the bytes were fetched fine and
+		// the file's own declaration is what does not describe them.
+		return waxerr.New(waxerr.CodeMalformedInput, fmt.Sprintf(
 			"waxflow: timeline member %d delivered %d samples, its headers declared %d", c.cur, c.local, want))
 	}
 	if err := c.closeMember(); err != nil {

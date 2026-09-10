@@ -21,7 +21,6 @@ package musepack
 
 import (
 	"encoding/binary"
-	"fmt"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/waxerr"
@@ -57,15 +56,19 @@ const (
 // table has eight entries, the last four zero: an index there is refused.
 var Rates = [8]int{44100, 48000, 37800, 32000}
 
+// malformed reports bytes that deviate from this format: truncated,
+// inconsistent, or out of range. See [waxerr.Malformed] for the rule that
+// divides it from unsupported.
 func malformed(format string, args ...any) error {
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "musepack: "+fmt.Sprintf(format, args...))
+	return waxerr.Malformed("musepack: ", format, args...)
 }
 
-// unsupported names a stream shape this decoder deliberately does not cover.
-// Same error as malformed; the two names exist so the message can say whether
-// the file is broken or merely outside our scope.
+// unsupported names a well-formed stream this build does not cover. It is a
+// different answer from malformed and carries a different code: the file is
+// fine and we are not, which is a thing a caller can act on. See
+// [waxerr.Malformed] for the rule.
 func unsupported(format string, args ...any) error {
-	return malformed(format, args...)
+	return waxerr.Unsupported("musepack: ", format, args...)
 }
 
 // MatchNeed is how many bytes Match wants: the file magic.

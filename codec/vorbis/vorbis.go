@@ -14,7 +14,6 @@ package vorbis
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/waxerr"
@@ -51,8 +50,19 @@ const (
 	maxBlockLog  = 13
 )
 
+// malformed reports bytes that deviate from this format: truncated,
+// inconsistent, or out of range. See [waxerr.Malformed] for the rule that
+// divides it from unsupported.
 func malformed(format string, args ...any) error {
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "vorbis: "+fmt.Sprintf(format, args...))
+	return waxerr.Malformed("vorbis: ", format, args...)
+}
+
+// unsupported names a well-formed stream this build does not cover. It is a
+// different answer from malformed and carries a different code: the file is
+// fine and we are not, which is a thing a caller can act on. See
+// [waxerr.Malformed] for the rule.
+func unsupported(format string, args ...any) error {
+	return waxerr.Unsupported("vorbis: ", format, args...)
 }
 
 // bitReader reads Vorbis's little-endian bit packing: the first bit of a

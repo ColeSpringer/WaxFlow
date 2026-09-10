@@ -27,7 +27,6 @@ package ape
 
 import (
 	"encoding/binary"
-	"fmt"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/waxerr"
@@ -114,16 +113,19 @@ const (
 	maxChannels = 2
 )
 
+// malformed reports bytes that deviate from this format: truncated,
+// inconsistent, or out of range. See [waxerr.Malformed] for the rule that
+// divides it from unsupported.
 func malformed(format string, args ...any) error {
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "ape: "+fmt.Sprintf(format, args...))
+	return waxerr.Malformed("ape: ", format, args...)
 }
 
-// unsupported names a stream shape this decoder deliberately does not cover.
-// It is the same error as malformed, since a caller can act on neither; the
-// two names exist so the message can say whether the file is broken or merely
-// outside our scope.
+// unsupported names a well-formed stream this build does not cover. It is a
+// different answer from malformed and carries a different code: the file is
+// fine and we are not, which is a thing a caller can act on. See
+// [waxerr.Malformed] for the rule.
 func unsupported(format string, args ...any) error {
-	return malformed(format, args...)
+	return waxerr.Unsupported("ape: ", format, args...)
 }
 
 // MatchNeed is how many bytes Match wants: the file magic.
@@ -334,7 +336,9 @@ func (h Header) validate() error {
 		return unsupported("floating-point streams are not supported")
 	case h.BitsPerSample != 8 && h.BitsPerSample != 16 && h.BitsPerSample != 24:
 		return unsupported("%d-bit samples: only 8, 16, and 24-bit are supported", h.BitsPerSample)
-	case h.Channels < 1 || h.Channels > maxChannels:
+	case h.Channels < 1:
+		return malformed("%d channels", h.Channels)
+	case h.Channels > maxChannels:
 		return unsupported("%d channels: only mono and stereo are supported", h.Channels)
 	case h.Rate <= 0:
 		return malformed("sample rate %d", h.Rate)
@@ -425,7 +429,9 @@ func (c Config) Validate() error {
 		return unsupported("stream version %d is past the supported %d", c.FileVersion, MaxFileVersion)
 	case c.BitsPerSample != 8 && c.BitsPerSample != 16 && c.BitsPerSample != 24:
 		return unsupported("%d-bit samples: only 8, 16, and 24-bit are supported", c.BitsPerSample)
-	case c.Channels < 1 || c.Channels > maxChannels:
+	case c.Channels < 1:
+		return malformed("%d channels", c.Channels)
+	case c.Channels > maxChannels:
 		return unsupported("%d channels: only mono and stereo are supported", c.Channels)
 	case c.Rate <= 0:
 		return malformed("sample rate %d", c.Rate)

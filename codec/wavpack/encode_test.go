@@ -474,9 +474,14 @@ func TestEncodeWideSampleRate(t *testing.T) {
 		}
 		roundTrip(t, f, LevelNormal, chans, 2048)
 	}
-	// And the bound is stated rather than left to overflow the field.
-	if _, err := NewEncoder(fmtOf(MaxRate+1, 2, 16), nil); err == nil {
-		t.Errorf("a rate above MaxRate (%d) was accepted", MaxRate)
+	// And the bound is stated rather than left to overflow the field. Built
+	// through an int64: MaxRate is 2^31-1, so on a 32-bit build no int can
+	// hold a rate above it and the constant would not compile. There the type
+	// is the bound, and there is nothing to hand the encoder.
+	if tooHigh := int64(MaxRate) + 1; tooHigh <= math.MaxInt {
+		if _, err := NewEncoder(fmtOf(int(tooHigh), 2, 16), nil); err == nil {
+			t.Errorf("a rate above MaxRate (%d) was accepted", MaxRate)
+		}
 	}
 }
 

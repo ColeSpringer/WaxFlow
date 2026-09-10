@@ -17,13 +17,18 @@ Conventions:
 
 - Codes: `invalid-request unauthorized signature-invalid
   signature-expired source-changed not-found unsupported-format
-  unsupported-source payload-too-large source-unreadable output-unwritable
-  overloaded canceled catalog-unavailable internal`.
+  unsupported-source malformed-input payload-too-large source-unreadable
+  output-unwritable overloaded canceled catalog-unavailable internal`.
+- `unsupported-format` and `malformed-input` are different answers and are
+  worth telling apart: the first is a well-formed stream this build does not
+  cover (a codec it has no decoder for, a spec its encoders cannot produce),
+  which a client can act on by asking for something else; the second is a file
+  whose bytes deviate from their own format, which nothing can convert.
 - Status mapping: 400 invalid-request, 401 unauthorized, 403
   signature-invalid/expired, 404 not-found, 410 source-changed, 413
   payload-too-large, 415 unsupported-format, 416 (range refusal, code
-  invalid-request), 501 unsupported-source, 503 overloaded (with
-  `Retry-After: 2`) and catalog-unavailable, 500 the rest.
+  invalid-request), 422 malformed-input, 501 unsupported-source, 503
+  overloaded (with `Retry-After: 2`) and catalog-unavailable, 500 the rest.
 - A path that exists under other methods answers **405** with an `Allow`
   header listing them, and code `invalid-request` (no code maps to 405).
   A path no endpoint claims stays 404 `not-found`.
@@ -104,7 +109,8 @@ would otherwise return the opposite of what was asked.
         "layout": "FL|FR", "sampleType": "int", "bitDepth": 16,
         "samples": 2205, "durationSeconds": 0.05, "default": true
       }],
-      "warnings": ["..."]
+      "warnings": ["..."],
+      "notes": ["..."]
     }
 
 The body also carries the source's tag summary when present: `tags`
@@ -134,8 +140,14 @@ a 64-bit float source decodes at 32 bits and reports `bitDepth: 64`.
 `sampleType` (`"int"` or `"float"`) is the float discriminator; a client
 must not infer one from a depth.
 
-`warnings` lists input damage the tolerant parser worked around; `strict`
-turns damage into errors. `samples: -1` means unknown length. This is
+`warnings` lists input damage the tolerant parser worked around, and
+`strict` turns damage into errors. `notes` is the other half and is never
+damage: what this build did with a file that is perfectly well formed, such
+as ignoring a stream it cannot use, capping a chapter list at its own limit,
+rescaling a timeline whose timescale is not the sample rate, or reporting a
+band it does not synthesize. `strict` never refuses over a note, which is the
+whole reason the two are separate fields; a client leading with "input
+damage" wants `warnings` alone. `samples: -1` means unknown length. This is
 byte-identical to `waxflow probe --json`.
 
 ## GET /stream

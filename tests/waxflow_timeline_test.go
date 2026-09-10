@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -24,6 +25,7 @@ import (
 	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/hls"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // wavFrom renders a buffer as a WAV, so a test can cut one continuous signal
@@ -1453,5 +1455,143 @@ func assertSegmentTailMatches(t *testing.T, full, tail []mp4.Segment, startAt in
 			t.Fatalf("restarted segment %d differs from the continuous run (%d bytes vs %d)",
 				s.Index, len(s.Data), len(cont.Data))
 		}
+	}
+}
+
+// TestConcatRefusesAnAdvisoryMember pins the refusal that closes the gap
+// between a length a container states and a length a timeline can add up.
+//
+// ASF is the format that opens it: it declares a play duration in time, not
+// samples, so Samples is set and SamplesAdvisory is too. Concat used to
+// accept such a member and fail at the seam, minutes into a decode, with a
+// message about the file ("delivered N samples, its headers declared M"),
+// when the cause was that nobody had measured it. The refusal is at plan
+// time and names the remedy, and both remedies ConcatSource.Track documents
+// are exercised here, because they do not produce the same number.
+func TestConcatRefusesAnAdvisoryMember(t *testing.T) {
+	e := waxflow.New()
+	names := []string{"sine-wmav2.wma", "mono-8k.wma"}
+	raws := make([][]byte, len(names))
+	tracks := make([]container.Track, len(names))
+	srcs := make([]waxflow.ConcatSource, len(names))
+	for i, name := range names {
+		raw, err := os.ReadFile(repoPath("container", "asf", "testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		raws[i] = raw
+		info, err := e.Probe(container.BytesSource(raw), "wma", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tracks[i] = info.Default()
+		if !tracks[i].SamplesAdvisory {
+			t.Fatalf("%s is not advisory; this cell covers nothing", name)
+		}
+		srcs[i] = waxflow.ConcatSource{
+			Track: tracks[i],
+			Open:  func() (format.Media, error) { return e.OpenStream(container.BytesSource(raw), "wma") },
+		}
+	}
+
+	_, err := waxflow.Concat(srcs, waxflow.ConcatOptions{})
+	if err == nil {
+		t.Fatal("Concat accepted a member whose length its container only rounded")
+	}
+	if got := waxerr.CodeOf(err); got != waxerr.CodeInvalidRequest {
+		t.Errorf("code = %q, want %q (%v)", got, waxerr.CodeInvalidRequest, err)
+	}
+	// The message has to name the remedy: a caller who cannot tell what to do
+	// about the refusal is no better off than one who hit it at the seam.
+	if !strings.Contains(err.Error(), "measure it before planning a timeline") {
+		t.Errorf("refusal does not name measurement: %v", err)
+	}
+	// ConcatTrack plans from the same walk, so it refuses identically. A
+	// caller that planned a length and only then failed to build the timeline
+	// would have promised a duration it cannot deliver.
+	if _, err := waxflow.ConcatTrack(tracks, waxflow.ConcatOptions{}); err == nil {
+		t.Error("ConcatTrack planned a timeline Concat refuses")
+	}
+
+	t.Run("counted", func(t *testing.T) {
+		// The exact remedy: read each member and count. Nothing is truncated,
+		// so the timeline carries every sample the members decode.
+		ms := slices.Clone(srcs)
+		for i := range ms {
+			n := countMedia(t, openWMA(t, e, raws[i]))
+			ms[i].Track.Samples, ms[i].Track.SamplesAdvisory = n, false
+		}
+		checkTimelineDelivers(t, ms)
+	})
+
+	t.Run("a seek landing is not the count", func(t *testing.T) {
+		// Why the doc on ConcatSource.Track names reading over seeking. ASF
+		// indexes by packet presentation time, so a landing past the end is
+		// the last packet's rounded time plus what the pre-roll then decoded,
+		// which is under what a straight read of the same member delivers.
+		// A member measured that way and handed over unbounded overruns its
+		// own declaration at the seam.
+		med := openWMA(t, e, raws[0])
+		landed, err := med.SeekSample(math.MaxInt64)
+		med.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		counted := countMedia(t, openWMA(t, e, raws[0]))
+		if landed >= counted {
+			t.Errorf("seek landed at %d and the read counted %d; the doc's warning no longer describes this container", landed, counted)
+		}
+	})
+}
+
+// openWMA opens one of the committed .wma fixtures.
+func openWMA(t *testing.T, e *waxflow.Engine, raw []byte) format.Media {
+	t.Helper()
+	med, err := e.OpenStream(container.BytesSource(raw), "wma")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return med
+}
+
+// countMedia reads a Media to end of stream and returns the frames it
+// delivered, closing it.
+func countMedia(t *testing.T, med format.Media) int64 {
+	t.Helper()
+	defer med.Close()
+	buf := audio.Get(med.Info().Default().Fmt, audio.StandardChunk)
+	defer audio.Put(buf)
+	var total int64
+	for {
+		err := med.ReadChunk(buf)
+		total += int64(buf.N)
+		if err == io.EOF {
+			return total
+		}
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+	}
+}
+
+// checkTimelineDelivers builds a timeline from measured members and holds it
+// to the length its own plan promised. The 8 kHz member resamples up to the
+// envelope, so that length is the projected sum rather than the raw one.
+func checkTimelineDelivers(t *testing.T, ms []waxflow.ConcatSource) {
+	t.Helper()
+	tracks := make([]container.Track, len(ms))
+	for i := range ms {
+		tracks[i] = ms[i].Track
+	}
+	planned, err := waxflow.ConcatTrack(tracks, waxflow.ConcatOptions{})
+	if err != nil {
+		t.Fatalf("ConcatTrack after measuring: %v", err)
+	}
+	med, err := waxflow.Concat(ms, waxflow.ConcatOptions{})
+	if err != nil {
+		t.Fatalf("Concat after measuring: %v", err)
+	}
+	if got := countMedia(t, med); got != planned.Samples {
+		t.Errorf("the timeline delivered %d samples, promised %d", got, planned.Samples)
 	}
 }

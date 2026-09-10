@@ -101,6 +101,9 @@ func TestMuxPCMRoundTrip(t *testing.T) {
 	if tr.SamplesExact {
 		t.Error("SamplesExact = true; a Duration is advisory, not a truncation instruction")
 	}
+	if !tr.SamplesAdvisory {
+		t.Error("SamplesAdvisory = false; a Duration is rounded from a time, whatever it round-trips to here")
+	}
 	got := readAll(t, d)
 	if len(got) != len(pkts) {
 		t.Fatalf("read %d packets, wrote %d", len(got), len(pkts))

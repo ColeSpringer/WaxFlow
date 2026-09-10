@@ -93,22 +93,27 @@ func TestHeaderRefusals(t *testing.T) {
 	cases := map[string]struct {
 		mutate func() []byte
 		want   string
+		code   waxerr.Code
 	}{
 		"32-bit": {
 			func() []byte { return withHeaderField(t, raw, offBits, 2, 32) },
 			"only 8, 16, and 24-bit",
+			waxerr.CodeUnsupportedFormat,
 		},
 		"float": {
 			func() []byte { return withHeaderField(t, raw, offFormatFlags, 2, flagFloatingPoint) },
 			"floating-point",
+			waxerr.CodeUnsupportedFormat,
 		},
 		"multichannel": {
 			func() []byte { return withHeaderField(t, raw, offChannels, 2, 6) },
 			"only mono and stereo",
+			waxerr.CodeUnsupportedFormat,
 		},
 		"zero channels": {
 			func() []byte { return withHeaderField(t, raw, offChannels, 2, 0) },
-			"only mono and stereo",
+			"0 channels",
+			waxerr.CodeMalformedInput,
 		},
 		"old bitstream": {
 			func() []byte {
@@ -117,6 +122,7 @@ func TestHeaderRefusals(t *testing.T) {
 				return out
 			},
 			"different codec",
+			waxerr.CodeUnsupportedFormat,
 		},
 		"future bitstream": {
 			func() []byte {
@@ -125,26 +131,32 @@ func TestHeaderRefusals(t *testing.T) {
 				return out
 			},
 			"past the supported",
+			waxerr.CodeUnsupportedFormat,
 		},
 		"unknown level": {
 			func() []byte { return withHeaderField(t, raw, offLevel, 2, 2500) },
 			"compression level",
+			waxerr.CodeUnsupportedFormat,
 		},
 		"no frames": {
 			func() []byte { return withHeaderField(t, raw, offTotalFrames, 4, 0) },
 			"never finalized",
+			waxerr.CodeMalformedInput,
 		},
 		"zero rate": {
 			func() []byte { return withHeaderField(t, raw, offRate, 4, 0) },
 			"sample rate",
+			waxerr.CodeMalformedInput,
 		},
 		"frame longer than the level allows": {
 			func() []byte { return withHeaderField(t, raw, offBlocksPerFrame, 4, 2_000_000) },
 			"exceeds",
+			waxerr.CodeMalformedInput,
 		},
 		"final frame longer than a frame": {
 			func() []byte { return withHeaderField(t, raw, offFinalBlocks, 4, 100_000) },
 			"final frame",
+			waxerr.CodeMalformedInput,
 		},
 		"not a Monkey's Audio file": {
 			func() []byte {
@@ -153,6 +165,7 @@ func TestHeaderRefusals(t *testing.T) {
 				return out
 			},
 			"not a Monkey's Audio file",
+			waxerr.CodeMalformedInput,
 		},
 	}
 	for name, tc := range cases {
@@ -164,8 +177,13 @@ func TestHeaderRefusals(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error %q does not mention %q", err, tc.want)
 			}
-			if code := waxerr.CodeOf(err); code != waxerr.CodeUnsupportedFormat {
-				t.Errorf("code = %v, want %v", code, waxerr.CodeUnsupportedFormat)
+			// The code is per case on purpose: a stream shape this build
+			// declines (float, 32-bit, six channels, a 3.9x bitstream) is
+			// unsupported, and a header that states something no file may
+			// state is malformed. The two used to be one code, and a
+			// consumer could not tell a broken rip from an out-of-scope one.
+			if code := waxerr.CodeOf(err); code != tc.code {
+				t.Errorf("code = %v, want %v", code, tc.code)
 			}
 		})
 	}

@@ -64,7 +64,13 @@ func newMedia(info *Info, demux container.Demuxer) (Media, error) {
 	// the length is authoritative (SamplesExact): a declared-total mismatch in
 	// an untrimmed advisory format (a lying FLAC STREAMINFO, say) stays a
 	// tolerated oddity, not a truncation.
-	if (track.SamplesExact || track.Delay > 0 || track.Padding > 0) && track.Samples >= 0 {
+	//
+	// SamplesAdvisory vetoes it outright, and that is not redundant with the
+	// clause above: a Matroska track whose Opus CodecDelay sets Delay but
+	// whose length fell back to the millisecond Info Duration satisfies
+	// Delay > 0 while carrying a rounded total, and capping the decode there
+	// would clip the tail by whatever the rounding was worth.
+	if !track.SamplesAdvisory && (track.SamplesExact || track.Delay > 0 || track.Padding > 0) && track.Samples >= 0 {
 		m.rawEnd = track.Delay + track.Samples
 	}
 	m.stashFn = m.stash

@@ -198,7 +198,11 @@ func TestTranscodeFlagErrors(t *testing.T) {
 	if code != 2 {
 		t.Errorf("Inf gain exit = %d, want 2 (invalid)", code)
 	}
-	code, _, _ = run(t, "transcode", in, filepath.Join(dir, "g.wav"), "--rate", "9223372036854775807")
+	// MaxInt32 rather than MaxInt64: --rate is an int flag, so on a 32-bit
+	// build the larger value fails at flag parsing (exit 2, invalid) instead
+	// of reaching the rate policy. This one parses on both widths and is
+	// refused by the policy on both, which is the class the cell is about.
+	code, _, _ = run(t, "transcode", in, filepath.Join(dir, "g.wav"), "--rate", "2147483647")
 	if code != 5 {
 		t.Errorf("extreme rate exit = %d, want 5 (unsupported)", code)
 	}

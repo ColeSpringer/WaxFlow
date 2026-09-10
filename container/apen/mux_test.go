@@ -414,8 +414,8 @@ func TestTruncationAtAFrameBoundaryIsRefused(t *testing.T) {
 			}
 			t.Fatalf("cut at frame %d's first byte was accepted", i)
 		}
-		if code := waxerr.CodeOf(err); code != waxerr.CodeUnsupportedFormat {
-			t.Errorf("cut at frame %d: code = %v, want %v", i, code, waxerr.CodeUnsupportedFormat)
+		if code := waxerr.CodeOf(err); code != waxerr.CodeMalformedInput {
+			t.Errorf("cut at frame %d: code = %v, want %v", i, code, waxerr.CodeMalformedInput)
 		}
 	}
 	// One byte further in is a different file: the last frame is short rather

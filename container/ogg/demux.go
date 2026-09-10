@@ -131,8 +131,19 @@ func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 	return d, nil
 }
 
+// malformed reports bytes that deviate from this format: truncated,
+// inconsistent, or out of range. See [waxerr.Malformed] for the rule that
+// divides it from unsupported.
 func malformed(format string, args ...any) error {
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "ogg: "+fmt.Sprintf(format, args...))
+	return waxerr.Malformed("ogg: ", format, args...)
+}
+
+// unsupported names a well-formed stream this build does not cover. It is a
+// different answer from malformed and carries a different code: the file is
+// fine and we are not, which is a thing a caller can act on. See
+// [waxerr.Malformed] for the rule.
+func unsupported(format string, args ...any) error {
+	return waxerr.Unsupported("ogg: ", format, args...)
 }
 
 // warn records tolerated damage, or fails in strict mode.
@@ -141,8 +152,15 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg})
+	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
 	return nil
+}
+
+// note records a Warning that Strict must not escalate: this build doing
+// something with a well-formed file that a caller should know about, rather
+// than damage in the file. See [container.Note].
+func (d *Demuxer) note(off int64, format string, args ...any) {
+	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
 }
 
 // readPage reads and CRC-checks the page at off. It does not resync; callers
@@ -270,9 +288,10 @@ func (d *Demuxer) advancePage() (bool, error) {
 			if p.flags&flagBOS == 0 {
 				continue // concurrent stream, not ours
 			}
-			if werr := d.warn(p.off, "chained stream ignored"); werr != nil {
-				return false, werr
-			}
+			// A chained stream is a well-formed Ogg carrying a second
+			// logical bitstream this build plays none of; the file is not
+			// damaged for having one, so Strict must not refuse it.
+			d.note(p.off, "chained stream ignored")
 			return false, nil
 		}
 		d.page = p
@@ -417,12 +436,10 @@ func (d *Demuxer) parse() error {
 		if len(found) == 0 {
 			return malformed("no streams")
 		}
-		return malformed("no supported stream (found: %s)", joinNames(found))
+		return unsupported("no supported stream (found: %s)", joinNames(found))
 	}
 	if len(found) > 0 {
-		if err := d.warn(0, "ignoring %d additional stream(s): %s", len(found), joinNames(found)); err != nil {
-			return err
-		}
+		d.note(0, "ignoring %d additional stream(s): %s", len(found), joinNames(found))
 	}
 
 	// Consume header packets, then find the first audio packet.

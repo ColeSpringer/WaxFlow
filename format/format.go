@@ -51,7 +51,14 @@ type Info struct {
 	// container.Tagger.
 	Tags map[string][]string
 	// Warnings describe input damage the tolerant parser worked around.
+	// Damage only: what this build did with a well-formed file is in Notes.
 	Warnings []string
+	// Notes describe what this build did with a file that is not damaged: a
+	// stream it ignored, a list it capped, a timeline it rescaled, a band it
+	// does not synthesize. Strict mode never refuses over one of these, which
+	// is the whole reason they are not Warnings; a caller showing "input
+	// damage" wants Warnings alone.
+	Notes []string
 }
 
 // Default returns the container's designated default track, or the first
@@ -196,10 +203,14 @@ func buildInfo(name string, demux container.Demuxer) *Info {
 	}
 	if w, ok := demux.(container.Warner); ok {
 		for _, warn := range w.Warnings() {
+			msg := warn.Msg
 			if warn.Offset >= 0 {
-				info.Warnings = append(info.Warnings, fmt.Sprintf("%s (offset %d)", warn.Msg, warn.Offset))
+				msg = fmt.Sprintf("%s (offset %d)", warn.Msg, warn.Offset)
+			}
+			if warn.Kind == container.Note {
+				info.Notes = append(info.Notes, msg)
 			} else {
-				info.Warnings = append(info.Warnings, warn.Msg)
+				info.Warnings = append(info.Warnings, msg)
 			}
 		}
 	}

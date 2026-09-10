@@ -17,8 +17,12 @@ import (
 // iTunSMPB tag first (exact priming, padding, and length), then an edit
 // list (media_time as priming), else no trim. format.Media consumes
 // Delay/Padding/Samples to deliver the trimmed timeline and to map seeks.
-func (d *Demuxer) gapless(t *track) (delay, padding, samples int64) {
+func (d *Demuxer) gapless(t *track) (delay, padding, samples int64, advisory bool) {
 	totalRaw := t.st.totalDur
+	// A length taken from totalRaw inherits its rounding; one stated by
+	// iTunSMPB or an edit list segment does not, which is why this is set
+	// per assignment rather than once from t.st.rescaled.
+	fromRaw := false
 
 	if d.smpbOK {
 		delay = d.smpbDelay
@@ -39,10 +43,10 @@ func (d *Demuxer) gapless(t *track) (delay, padding, samples int64) {
 		}
 		delay = clamp(delay, 0, totalRaw)
 		if samples < 0 || samples > totalRaw-delay {
-			samples = totalRaw - delay
+			samples, fromRaw = totalRaw-delay, true
 		}
 		padding = totalRaw - delay - samples
-		return delay, padding, samples
+		return delay, padding, samples, fromRaw && t.st.rescaled
 	}
 
 	// A nonzero edit-list media_time is the encoder-delay priming. The
@@ -57,16 +61,16 @@ func (d *Demuxer) gapless(t *track) (delay, padding, samples int64) {
 		if haveSeg {
 			samples = seg
 		} else {
-			samples = totalRaw - delay
+			samples, fromRaw = totalRaw-delay, true
 		}
 		if samples < 0 || samples > totalRaw-delay {
-			samples = totalRaw - delay
+			samples, fromRaw = totalRaw-delay, true
 		}
 		padding = totalRaw - delay - samples
-		return delay, padding, samples
+		return delay, padding, samples, fromRaw && t.st.rescaled
 	}
 
-	return 0, 0, totalRaw
+	return 0, 0, totalRaw, t.st.rescaled
 }
 
 // editListTrims rescales a track's first real edit into gapless trims in output

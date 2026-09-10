@@ -408,15 +408,20 @@ func TestCutTrackRefusesSpansThatOverflowTheTimeline(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		delay int64
-		grid  int
+		grid  int64
 	}{
 		{"a delay past the ceiling", math.MaxInt64 - 1000, 1024},
-		{"a delay at the ceiling", 1 << 61, 1024},
+		{"a delay at the ceiling", maxCutSample, 1024},
 		{"a negative delay", -1, 1024},
-		{"a grid past the ceiling", 1024, 1 << 61},
+		{"a grid past the ceiling", 1024, maxCutSample},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cut, _, err := CutTrack(aacTrack(tc.delay, -1), []Span{{0, 500}}, tc.grid)
+			if tc.grid > math.MaxInt {
+				// A grid is an int, so on a 32-bit build nothing can reach the
+				// ceiling and the type is the guard.
+				t.Skip("no int on this build can hold a grid past maxCutSample")
+			}
+			cut, _, err := CutTrack(aacTrack(tc.delay, -1), []Span{{0, 500}}, int(tc.grid))
 			if err == nil {
 				t.Fatalf("CutTrack accepted delay=%d grid=%d and synthesized Samples=%d Padding=%d",
 					tc.delay, tc.grid, cut.Samples, cut.Padding)

@@ -72,7 +72,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg})
+	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
 	return nil
 }
 
@@ -80,7 +80,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 // convention): warn is for framing mess; a probe that cannot decode a
 // payload says nothing about framing, and the file still remuxes.
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...)})
+	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
 }
 
 func (d *Demuxer) parse() error {
@@ -104,7 +104,7 @@ func (d *Demuxer) parse() error {
 		// A frame carrying multiple raw_data_blocks would need to be split
 		// into one packet per block; we deliver one block per frame, so
 		// refuse rather than undercount the timeline.
-		return malformed("%d raw_data_blocks per frame is unsupported", h.blocks+1)
+		return unsupported("%d raw_data_blocks per frame is unsupported", h.blocks+1)
 	}
 	if first != off {
 		if err := d.warn(off, "%d unparsable bytes before the first frame", first-off); err != nil {
@@ -182,7 +182,7 @@ func (d *Demuxer) parse() error {
 		return err
 	}
 	if err := f.Valid(); err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "adts: unusable format", err)
+		return container.UnusableFormat("adts", f, err)
 	}
 	d.spf = int64(cfg.OutputSamplesPerAU())
 	d.preFrames = 1 // one frame of IMDCT overlap history

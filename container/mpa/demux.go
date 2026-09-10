@@ -92,10 +92,9 @@ func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	msg := fmt.Sprintf(format, args...)
 	if d.opts.Strict {
-		return waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("mp3: %s (at offset %d)", msg, off))
+		return waxerr.Malformed("mp3: ", "%s (at offset %d)", msg, off)
 	}
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg})
+	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
 	return nil
 }
 
@@ -125,7 +124,7 @@ func (d *Demuxer) parse() error {
 		if d.w.Err() != nil {
 			return d.w.Err()
 		}
-		return waxerr.New(waxerr.CodeUnsupportedFormat, "mp3: no Layer III frames found")
+		return waxerr.Malformed("mp3: ", "no Layer III frames found")
 	}
 	if first != off {
 		if err := d.warn(off, "%d unparsable bytes before the first frame", first-off); err != nil {
@@ -148,7 +147,7 @@ func (d *Demuxer) parse() error {
 					if d.w.Err() != nil {
 						return d.w.Err()
 					}
-					return waxerr.New(waxerr.CodeUnsupportedFormat, "mp3: no audio frames after the VBR tag")
+					return waxerr.Malformed("mp3: ", "no audio frames after the VBR tag")
 				}
 			}
 			h = fh
@@ -169,7 +168,7 @@ func (d *Demuxer) parse() error {
 
 	f := h.PCMFormat()
 	if err := f.Valid(); err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "mp3: unusable format", err)
+		return container.UnusableFormat("mp3", f, err)
 	}
 
 	samples, delay, padding := int64(-1), int64(0), int64(0)

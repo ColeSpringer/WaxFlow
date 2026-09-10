@@ -195,4 +195,7 @@ func printProbe(cmd *cobra.Command, info *format.Info, m *meta.Info) {
 	for _, warn := range info.Warnings {
 		fmt.Fprintf(w, "warning:   %s\n", warn)
 	}
+	for _, note := range info.Notes {
+		fmt.Fprintf(w, "note:      %s\n", note)
+	}
 }

@@ -134,6 +134,7 @@ or filtered at any seam.`,
 				// declared one is how a split comes to check its cut points
 				// against the first and its pieces against the second.
 				track.Samples, track.SamplesExact = measured, true
+				track.SamplesAdvisory = false
 			}
 
 			var pieces []piece

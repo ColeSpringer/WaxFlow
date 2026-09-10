@@ -160,7 +160,10 @@ func (c Config) MarshalBinary() ([]byte, error) {
 // ParseConfig decodes a Track.CodecConfig produced by MarshalBinary.
 func ParseConfig(b []byte) (Config, error) {
 	if len(b) != 5 || b[0] != configVersion {
-		return Config{}, waxerr.New(waxerr.CodeUnsupportedFormat, "pcm: malformed codec config")
+		// Not malformed input: this blob is what MarshalBinary wrote for a
+		// demuxer, never bytes off a file, so a version or length that does
+		// not round-trip is a Track nobody in this tree built.
+		return Config{}, waxerr.New(waxerr.CodeUnsupportedFormat, "pcm: codec config is not one this package wrote")
 	}
 	c := Config{
 		Encoding:  Encoding(b[1]),

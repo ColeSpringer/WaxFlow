@@ -18,7 +18,6 @@ package wavpack
 
 import (
 	"encoding/binary"
-	"fmt"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/waxerr"
@@ -105,17 +104,19 @@ const (
 	maxTerm = 8
 )
 
+// malformed reports bytes that deviate from this format: truncated,
+// inconsistent, or out of range. See [waxerr.Malformed] for the rule that
+// divides it from unsupported.
 func malformed(format string, args ...any) error {
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "wavpack: "+fmt.Sprintf(format, args...))
+	return waxerr.Malformed("wavpack: ", format, args...)
 }
 
-// unsupported names a stream shape this decoder deliberately does not cover.
-// It is deliberately the same error as malformed, since callers can act on
-// neither: the two names exist so a reader can tell at the call site whether
-// the file is broken or merely outside our scope, which is what the message
-// then has to say.
+// unsupported names a well-formed stream this build does not cover. It is a
+// different answer from malformed and carries a different code: the file is
+// fine and we are not, which is a thing a caller can act on. See
+// [waxerr.Malformed] for the rule.
 func unsupported(format string, args ...any) error {
-	return malformed(format, args...)
+	return waxerr.Unsupported("wavpack: ", format, args...)
 }
 
 // BlockHeader is a parsed 32-byte WavPack block header.

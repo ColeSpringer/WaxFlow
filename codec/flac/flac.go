@@ -12,8 +12,6 @@
 package flac
 
 import (
-	"fmt"
-
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -51,8 +49,11 @@ type StreamInfo struct {
 	MD5 [16]byte
 }
 
+// malformed reports bytes that deviate from this format: truncated,
+// inconsistent, or out of range. See [waxerr.Malformed] for the rule that
+// divides it from unsupported.
 func malformed(format string, args ...any) error {
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "flac: "+fmt.Sprintf(format, args...))
+	return waxerr.Malformed("flac: ", format, args...)
 }
 
 // ParseStreamInfo parses a 34-byte STREAMINFO block body.

@@ -8,12 +8,18 @@
 // ASF names positions in milliseconds, not samples, so unlike the formats
 // whose frames can be counted this container cannot state an exact sample
 // position for anything: Track.Samples comes from the File Properties Object's
-// play duration and SamplesExact stays false, and a packet's PTS is its
-// millisecond presentation time converted at the track rate. That is also why
-// seeking lands on a packet boundary at or before the target and backs up far
-// enough to cover a whole media object: WMA's bit reservoir carries state
-// across super-frames, so the landing owes the decoder run-up, and
-// format.Media's pre-roll takes it from there.
+// play duration, and a packet's PTS is its millisecond presentation time
+// converted at the track rate. The track says so with both length flags:
+// SamplesExact stays false, since the decode must not be trimmed to a rounded
+// total, and SamplesAdvisory is set, since no arithmetic may add the total up.
+// Measured across ffmpeg's and Media Foundation's encoders, the declared total
+// lands on either side of what the packets hold, by up to a millisecond and a
+// frame. That is also why seeking lands on a packet boundary at or before the
+// target and backs up far enough to cover a whole media object: WMA's bit
+// reservoir carries state across super-frames, so the landing owes the decoder
+// run-up, and format.Media's pre-roll takes it from there. A seek past the end
+// therefore lands under what a straight read delivers, which is why measuring
+// one of these tracks means reading it, not seeking it.
 //
 // The package is named asf rather than wma because ASF is the container and
 // WMA the codec inside it (the flacn and wv precedent). The public container
@@ -30,7 +36,6 @@
 package asf
 
 import (
-	"fmt"
 	"math"
 
 	"github.com/colespringer/waxflow/waxerr"
@@ -114,8 +119,19 @@ func Match(head []byte) bool {
 
 // malformed builds a parse error under the public container name. These
 // messages reach users verbatim.
+// malformed reports bytes that deviate from this format: truncated,
+// inconsistent, or out of range. See [waxerr.Malformed] for the rule that
+// divides it from unsupported.
 func malformed(format string, args ...any) error {
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "wma: "+fmt.Sprintf(format, args...))
+	return waxerr.Malformed("wma: ", format, args...)
+}
+
+// unsupported names a well-formed stream this build does not cover. It is a
+// different answer from malformed and carries a different code: the file is
+// fine and we are not, which is a thing a caller can act on. See
+// [waxerr.Malformed] for the rule.
+func unsupported(format string, args ...any) error {
+	return waxerr.Unsupported("wma: ", format, args...)
 }
 
 // msToSamples converts a millisecond position to a sample count at rate,

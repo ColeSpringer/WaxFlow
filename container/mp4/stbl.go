@@ -21,6 +21,11 @@ type sampleTable struct {
 	runDelta []int64 // per-sample output duration within the run
 	runCount []int64 // samples in the run
 	totalDur int64   // total output samples across all runs (raw timeline)
+	// rescaled reports that totalDur was converted from a media timescale that
+	// is not the codec rate, so it is a rounded total rather than a counted
+	// one: the conversion floors each run and the sum carries every floor. A
+	// length derived from it is advisory, and gapless says so.
+	rescaled bool
 
 	// sync holds the 0-based sync sample indices in ascending order; nil
 	// means every sample is a sync point (the audio norm).
@@ -228,8 +233,13 @@ done:
 func (d *Demuxer) buildTimeBase(st *sampleTable, stts []sttsEntry, timescale, rate int64) {
 	rescale := timescale > 0 && rate > 0 && timescale != rate
 	if rescale {
-		_ = d.warn(0, "media timescale %d differs from sample rate %d; timing rescaled", timescale, rate)
+		// A note, not damage: a timescale that is not the codec rate is legal
+		// and common, and this is what the demuxer did about it. It was the
+		// tree's only discarded warn return, because the strict escalation it
+		// would otherwise cause was wrong.
+		d.note(0, "media timescale %d differs from sample rate %d; timing rescaled", timescale, rate)
 	}
+	st.rescaled = rescale
 	var sample, pts int64
 	for _, e := range stts {
 		if sample >= st.total {

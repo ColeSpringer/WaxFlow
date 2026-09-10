@@ -44,7 +44,14 @@ type ProbeInfo struct {
 	SchemaVersion int          `json:"schemaVersion"`
 	Container     string       `json:"container"`
 	Tracks        []ProbeTrack `json:"tracks"`
-	Warnings      []string     `json:"warnings,omitempty"`
+	// Warnings is input damage the tolerant parser worked around. Damage
+	// only: what this build did with a well-formed file is in Notes, so a
+	// client leading with "input damage" can read this field alone.
+	Warnings []string `json:"warnings,omitempty"`
+	// Notes is what this build did with a file that is not damaged: a stream
+	// it ignored, a list it capped, a timeline it rescaled, a band it does not
+	// synthesize. `probe --strict` never refuses over one of these.
+	Notes []string `json:"notes,omitempty"`
 
 	// Tags is the canonical tag summary (TITLE, ARTIST, REPLAYGAIN_*, ...).
 	Tags map[string][]string `json:"tags,omitempty"`
@@ -101,7 +108,7 @@ type ProbeMetadata struct {
 // ProbeJSON maps a format.Info (and, when metadata was read, its
 // summary) onto the wire shape.
 func ProbeJSON(info *format.Info, m *ProbeMetadata) ProbeInfo {
-	out := ProbeInfo{SchemaVersion: 1, Container: info.Container, Warnings: info.Warnings}
+	out := ProbeInfo{SchemaVersion: 1, Container: info.Container, Warnings: info.Warnings, Notes: info.Notes}
 	if m != nil {
 		out.HasArt = m.HasArt
 		out.HasLyrics = m.HasLyrics

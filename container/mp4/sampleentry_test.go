@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
@@ -12,6 +14,7 @@ import (
 	"github.com/colespringer/waxflow/codec/alac"
 	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // The AudioSampleEntry header carries channelcount, samplesize, and a 16.16
@@ -189,8 +192,9 @@ func TestProgressiveALACEntryDepth(t *testing.T) {
 	file := muxProgressive(t, track, pkts, codec.Trailer{Samples: alac.FrameSize})
 	typ, entry := initEntry(t, file)
 	channels, depth, rate16 := entryFields(entry)
-	if typ != "alac" || depth != 24 || channels != 2 || rate16 != 48000<<16 {
-		t.Errorf("entry %q = %d ch, %d bits, rate %#x; want alac, 2 ch, 24 bits, %#x", typ, channels, depth, rate16, 48000<<16)
+	const want16 = uint32(48000) << 16
+	if typ != "alac" || depth != 24 || channels != 2 || rate16 != want16 {
+		t.Errorf("entry %q = %d ch, %d bits, rate %#x; want alac, 2 ch, 24 bits, %#x", typ, channels, depth, rate16, want16)
 	}
 }
 
@@ -370,4 +374,138 @@ func TestMSERuleCatchesALyingEntry(t *testing.T) {
 	if err := mseAccepts(typ, lying); err == nil {
 		t.Error("a 16-bit samplesize over a 24-bit STREAMINFO passed the MSE rule")
 	}
+}
+
+// v2SoundEntry builds a QuickTime version 2 audio sample description. The v0
+// field positions carry the constants the layout mandates (3 channels, 16
+// bits, a 1.0 rate) and the real values live in the struct that follows, so a
+// reader that takes the v0 positions gets three plausible lies.
+func v2SoundEntry(typ string, rate float64, channels, depth uint32, child []byte) []byte {
+	return makeBox(typ,
+		make([]byte, 6), u16(1), // reserved, data_reference_index
+		u16(2), u16(0), u32(0), // version 2, revision, vendor
+		u16(3), u16(16), // always3, always16
+		u16(0xFFFE), u16(0), // alwaysMinus2, always0
+		u32(1<<16),                  // always65536: 1.0 in 16.16
+		u32(72),                     // sizeOfStructOnly
+		u64(math.Float64bits(rate)), // audioSampleRate
+		u32(channels),               // numAudioChannels
+		u32(0x7F000000),             // always7F000000
+		u32(depth),                  // constBitsPerChannel
+		u32(0), u32(0), u32(0),      // formatSpecificFlags, constBytesPerAudioPacket, constLPCMFramesPerAudioPacket
+		child)
+}
+
+// v2SoundEntryPadded is the same entry with extra bytes between the struct and
+// the children, and sizeOfStructOnly raised to say so. A reader that assumes
+// the minimum struct size starts the children inside the padding.
+func v2SoundEntryPadded(typ string, rate float64, channels, depth uint32, pad int, child []byte) []byte {
+	entry := v2SoundEntry(typ, rate, channels, depth, append(make([]byte, pad), child...))
+	binary.BigEndian.PutUint32(entry[8+28:], uint32(72+pad))
+	return entry
+}
+
+// TestVersion2SoundEntryReadsItsOwnLayout pins the version 2 field positions.
+// ffmpeg writes this entry into a hi-res .mov, and reading it at the v0
+// offsets yields the constants above rather than the file's real values.
+func TestVersion2SoundEntryReadsItsOwnLayout(t *testing.T) {
+	entry := v2SoundEntry("lpcm", 192000, 6, 24, nil)
+	body := entry[8:] // strip the box header, as walkBoxes does
+
+	// What a v0 reader would have taken, so the cell fails if the fixture
+	// ever stops being a trap.
+	if ch, depth, rate16 := entryFields(body); ch != 3 || depth != 16 || rate16>>16 != 1 {
+		t.Fatalf("the v0 positions hold %d ch / %d bits / %d Hz, want the v2 constants 3 / 16 / 1", ch, depth, rate16>>16)
+	}
+
+	rate, channels, bits, err := v2SoundFields("lpcm", body)
+	if err != nil {
+		t.Fatalf("v2SoundFields: %v", err)
+	}
+	if rate != 192000 || channels != 6 || bits != 24 {
+		t.Errorf("v2SoundFields = %d Hz / %d ch / %d bits, want 192000 / 6 / 24", rate, channels, bits)
+	}
+}
+
+// TestVersion2SoundEntryFeedsTheChannelFallback runs the version 2 entry
+// through the parser that consumes it. An mp4a whose ASC leaves the channel
+// configuration implicit is the one path where the entry's channel count
+// reaches the track format, so it is where a v0 read of a v2 entry would
+// surface: as three channels instead of one.
+func TestVersion2SoundEntryFeedsTheChannelFallback(t *testing.T) {
+	// AOT 2, sfIdx 4 (44100), channelConfiguration 0.
+	implicitASC := []byte{0x12, 0x00}
+	entry := v2SoundEntry("mp4a", 44100, 1, 0, esdsBox(implicitASC))
+
+	var tr track
+	if err := (&Demuxer{}).parseAudioSampleEntry(&tr, "mp4a", entry[8:], 1); err != nil {
+		t.Fatalf("parseAudioSampleEntry: %v", err)
+	}
+	if tr.codec != codec.AACLC {
+		t.Fatalf("codec = %v, want %v", tr.codec, codec.AACLC)
+	}
+	if tr.fmt.Channels != 1 {
+		t.Errorf("track channels = %d, want 1 from the version 2 entry (3 is the v0 position's constant)", tr.fmt.Channels)
+	}
+	if tr.fmt.Rate != 44100 {
+		t.Errorf("track rate = %d, want 44100 from the ASC", tr.fmt.Rate)
+	}
+
+	// The same entry with a longer struct: the children start where
+	// sizeOfStructOnly says, not at the minimum. Reading the fixed 64 here
+	// lands inside the padding and reports "no esds".
+	padded := v2SoundEntryPadded("mp4a", 44100, 1, 0, 24, esdsBox(implicitASC))
+	var pt track
+	if err := (&Demuxer{}).parseAudioSampleEntry(&pt, "mp4a", padded[8:], 1); err != nil {
+		t.Fatalf("parseAudioSampleEntry on a padded version 2 entry: %v", err)
+	}
+	if pt.codec != codec.AACLC || pt.fmt.Channels != 1 {
+		t.Errorf("padded entry gave codec %v / %d channels, want %v / 1", pt.codec, pt.fmt.Channels, codec.AACLC)
+	}
+}
+
+// TestVersion2SoundEntryRefusesDamage covers the fields a version 2 entry can
+// state impossibly. A truncated struct is the important one: the entry
+// declares a layout it does not contain, which a length-tolerant read would
+// turn into a silent zero.
+func TestVersion2SoundEntryRefusesDamage(t *testing.T) {
+	full := v2SoundEntry("lpcm", 48000, 2, 16, nil)[8:]
+	cases := []struct {
+		name string
+		body []byte
+		want string
+	}{
+		{"truncated", full[:len(full)-1], "truncated"},
+		{"zero-channels", withU32(full, 40, 0), "channels"},
+		{"nan-rate", withU64(full, 32, math.Float64bits(math.NaN())), "Hz"},
+		{"absurd-rate", withU64(full, 32, math.Float64bits(1e300)), "Hz"},
+		{"absurd-depth", withU32(full, 48, 4096), "bits per channel"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, err := v2SoundFields("lpcm", tc.body)
+			if err == nil {
+				t.Fatal("v2SoundFields accepted the entry")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not name %q", err, tc.want)
+			}
+			if got := waxerr.CodeOf(err); got != waxerr.CodeMalformedInput {
+				t.Errorf("code = %q, want %q", got, waxerr.CodeMalformedInput)
+			}
+		})
+	}
+}
+
+// withU32 and withU64 return a copy of body with one field overwritten.
+func withU32(body []byte, off int, v uint32) []byte {
+	out := append([]byte(nil), body...)
+	binary.BigEndian.PutUint32(out[off:], v)
+	return out
+}
+
+func withU64(body []byte, off int, v uint64) []byte {
+	out := append([]byte(nil), body...)
+	binary.BigEndian.PutUint64(out[off:], v)
+	return out
 }

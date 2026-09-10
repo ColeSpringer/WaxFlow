@@ -4,7 +4,6 @@ package wma
 
 import (
 	"encoding/binary"
-	"fmt"
 	"math"
 
 	"github.com/colespringer/waxflow/audio"
@@ -63,18 +62,31 @@ const (
 	// derived from the bit rate, so an absurd rate for the frame length would
 	// otherwise ask for a field wider than the bit reader's word.
 	maxOffsetBits = 24
+	// maxWireField bounds the two 32-bit WAVEFORMATEX fields this parser puts
+	// in an int. Go's int is 32 bits on a 32-bit build, so without this the
+	// conversion wraps and the same file parses to a different rate and bit
+	// rate depending on the word size: a rate above 2^31 comes back negative
+	// (refused, but as damage rather than as a rate past MaxRate), and
+	// nAvgBytesPerSec times eight can wrap to a small positive number that
+	// passes every check below. Nothing real is anywhere near it -- the
+	// highest WMA bit rate that exists is under a megabit -- so this only ever
+	// catches a crafted file, and it catches it the same way on both widths.
+	maxWireField = 1 << 27
 )
 
+// malformed reports bytes that deviate from this format: truncated,
+// inconsistent, or out of range. See [waxerr.Malformed] for the rule that
+// divides it from unsupported.
 func malformed(format string, args ...any) error {
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "wma: "+fmt.Sprintf(format, args...))
+	return waxerr.Malformed("wma: ", format, args...)
 }
 
-// unsupported names a stream shape this decoder deliberately does not cover.
-// It is the same error as malformed, since a caller can act on neither; the
-// two names exist so the call site says whether the file is broken or merely
-// outside our scope.
+// unsupported names a well-formed stream this build does not cover. It is a
+// different answer from malformed and carries a different code: the file is
+// fine and we are not, which is a thing a caller can act on. See
+// [waxerr.Malformed] for the rule.
 func unsupported(format string, args ...any) error {
-	return malformed(format, args...)
+	return waxerr.Unsupported("wma: ", format, args...)
 }
 
 // Config is the stream shape a WMA track decodes to: everything the codec
@@ -123,10 +135,19 @@ func ParseConfig(b []byte) (Config, error) {
 			len(b), waveFormatLen)
 	}
 	tag := binary.LittleEndian.Uint16(b)
+	// Bounded in the width they were read at, before either becomes an int;
+	// see maxWireField for what that costs on a 32-bit build.
+	rate, byteRate := binary.LittleEndian.Uint32(b[4:]), binary.LittleEndian.Uint32(b[8:])
+	if rate > maxWireField {
+		return Config{}, malformed("WAVEFORMATEX states %d Hz, which is not a rate a file has", rate)
+	}
+	if byteRate > maxWireField {
+		return Config{}, malformed("WAVEFORMATEX states %d bytes/s, which is not a rate a file has", byteRate)
+	}
 	c := Config{
-		Rate:       int(binary.LittleEndian.Uint32(b[4:])),
+		Rate:       int(rate),
 		Channels:   int(binary.LittleEndian.Uint16(b[2:])),
-		BitRate:    int(binary.LittleEndian.Uint32(b[8:])) * 8,
+		BitRate:    int(byteRate) * 8,
 		BlockAlign: int(binary.LittleEndian.Uint16(b[12:])),
 	}
 	switch tag {
@@ -169,7 +190,9 @@ func ParseConfig(b []byte) (Config, error) {
 // derived quantities below divide by the first and step by the second.
 func (c Config) Validate() error {
 	switch {
-	case c.Channels < 1 || c.Channels > 2:
+	case c.Channels < 1:
+		return malformed("%d channels", c.Channels)
+	case c.Channels > 2:
 		return unsupported("%d channels: Windows Media Audio 1 and 2 are mono or stereo", c.Channels)
 	case c.Rate <= 0:
 		return malformed("sample rate %d", c.Rate)

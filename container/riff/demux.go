@@ -60,8 +60,19 @@ func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 	return d, nil
 }
 
+// malformed reports bytes that deviate from this format: truncated,
+// inconsistent, or out of range. See [waxerr.Malformed] for the rule that
+// divides it from unsupported.
 func malformed(format string, args ...any) error {
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "wav: "+fmt.Sprintf(format, args...))
+	return waxerr.Malformed("wav: ", format, args...)
+}
+
+// unsupported names a well-formed stream this build does not cover. It is a
+// different answer from malformed and carries a different code: the file is
+// fine and we are not, which is a thing a caller can act on. See
+// [waxerr.Malformed] for the rule.
+func unsupported(format string, args ...any) error {
+	return waxerr.Unsupported("wav: ", format, args...)
 }
 
 // warn records tolerated damage, or fails in strict mode.
@@ -70,7 +81,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg})
+	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
 	return nil
 }
 
@@ -78,7 +89,7 @@ func (d *Demuxer) parse() error {
 	size := d.src.Size()
 	var head [12]byte
 	if err := container.ReadFull(d.src, head[:], 0); err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "wav: reading header", err)
+		return container.ShortRead("wav: reading header", err)
 	}
 	if !Match(head[:]) {
 		return malformed("not a RIFF/WAVE file")
@@ -104,7 +115,7 @@ func (d *Demuxer) parse() error {
 		}
 		var hdr [8]byte
 		if err := container.ReadFull(d.src, hdr[:], off); err != nil {
-			return waxerr.Wrap(waxerr.CodeSourceUnreadable, "wav: reading chunk header", err)
+			return container.ShortRead("wav: reading chunk header", err)
 		}
 		id := string(hdr[:4])
 		chunkSize := int64(le.Uint32(hdr[4:]))
@@ -122,7 +133,7 @@ func (d *Demuxer) parse() error {
 			}
 			var p [ds64Payload]byte
 			if err := container.ReadFull(d.src, p[:], off+8); err != nil {
-				return waxerr.Wrap(waxerr.CodeSourceUnreadable, "wav: reading ds64", err)
+				return container.ShortRead("wav: reading ds64", err)
 			}
 			ds64DataSize = le.Uint64(p[8:])
 			ds64SampleCount = le.Uint64(p[16:])
@@ -151,7 +162,7 @@ func (d *Demuxer) parse() error {
 			}
 			payload := make([]byte, n)
 			if err := container.ReadFull(d.src, payload, off+8); err != nil {
-				return waxerr.Wrap(waxerr.CodeSourceUnreadable, "wav: reading fmt", err)
+				return container.ShortRead("wav: reading fmt", err)
 			}
 			var err error
 			cfg, rate, channels, layout, err = d.parseFmt(payload, off)
@@ -243,7 +254,7 @@ func (d *Demuxer) parse() error {
 	}
 	f := cfg.PCMFormat(rate, channels, layout)
 	if err := f.Valid(); err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "wav: unusable format", err)
+		return container.UnusableFormat("wav", f, err)
 	}
 	d.track = container.Track{
 		Codec:       codec.PCM,
@@ -272,8 +283,11 @@ func (d *Demuxer) parseFmt(b []byte, off int64) (cfg pcm.Config, rate, channels 
 	blockAlign := int(le.Uint16(b[12:]))
 	bits := int(le.Uint16(b[14:]))
 
-	if channels < 1 || channels > audio.MaxChannels {
-		return cfg, 0, 0, 0, malformed("%d channels (supported: 1..%d)", channels, audio.MaxChannels)
+	if channels < 1 {
+		return cfg, 0, 0, 0, malformed("%d channels", channels)
+	}
+	if channels > audio.MaxChannels {
+		return cfg, 0, 0, 0, unsupported("%d channels (supported: 1..%d)", channels, audio.MaxChannels)
 	}
 	// Bound in int64 so acceptance does not depend on the platform's int
 	// width (a rate above MaxInt32 would wrap negative on 32-bit builds).
@@ -335,7 +349,7 @@ func (d *Demuxer) parseFmt(b []byte, off int64) (cfg pcm.Config, rate, channels 
 		}
 		cfg = pcm.Config{Encoding: pcm.Float, Bits: bits}
 	default:
-		return cfg, 0, 0, 0, malformed("format tag 0x%04X (only integer and float PCM are supported)", tag)
+		return cfg, 0, 0, 0, unsupported("format tag 0x%04X (only integer and float PCM are supported)", tag)
 	}
 	if err := cfg.Validate(); err != nil {
 		return cfg, 0, 0, 0, err
@@ -372,7 +386,7 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 	}
 	d.readBuf = d.readBuf[:need]
 	if err := container.ReadFull(d.src, d.readBuf, d.dataOff+d.pos*int64(d.frameBytes)); err != nil {
-		return waxerr.Wrap(waxerr.CodeSourceUnreadable, "wav: reading data", err)
+		return container.ShortRead("wav: reading data", err)
 	}
 	*pkt = container.Packet{
 		Track:  0,

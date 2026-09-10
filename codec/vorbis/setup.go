@@ -214,11 +214,16 @@ func (c *Config) parseID(pkt []byte) error {
 	r := newBitReader(pkt[7:])
 	c.Version = r.read(32)
 	if c.Version != 0 {
-		return malformed("unsupported bitstream version %d", c.Version)
+		// Vorbis I fixes this field at 0, so a nonzero one is a stream that
+		// does not conform rather than one this build declines to decode.
+		return malformed("bitstream version %d, which Vorbis I fixes at 0", c.Version)
 	}
 	c.Channels = int(r.read(8))
-	if c.Channels < 1 || c.Channels > maxChannels {
-		return malformed("%d channels outside 1..%d", c.Channels, maxChannels)
+	if c.Channels < 1 {
+		return malformed("%d channels", c.Channels)
+	}
+	if c.Channels > maxChannels {
+		return unsupported("%d channels; this build mixes at most %d", c.Channels, maxChannels)
 	}
 	c.Rate = int(r.read(32))
 	if c.Rate <= 0 {

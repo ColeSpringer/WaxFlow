@@ -215,7 +215,12 @@ func TestFLACSubsetProbeClean(t *testing.T) {
 // TestFLACUncommon covers the uncommon set: extreme-but-valid files
 // decode bit-exactly; mid-stream format changes (which RFC 9639 lets a
 // decoder reject, and the fixed-format pipeline must) fail cleanly; the
-// marker-less multicast captures are identified as unsupported.
+// marker-less multicast captures are refused as damage.
+//
+// Every refusal here is malformed-input, not unsupported-format: a stream
+// whose format changes mid-file and a capture with no fLaC marker are both
+// files that deviate from what they claim to be, and neither is a thing a
+// caller converts its way out of.
 func TestFLACUncommon(t *testing.T) {
 	bitExact := []string{
 		"05 - 32bps audio", "06 - samplerate 768kHz", "07 - 15 bit per sample",
@@ -241,8 +246,8 @@ func TestFLACUncommon(t *testing.T) {
 				audio.Put(buf)
 				t.Fatal("expected a clean rejection, decoded successfully")
 			}
-			if code := waxerr.CodeOf(err); code != waxerr.CodeUnsupportedFormat {
-				t.Errorf("error code = %v, want %v (%v)", code, waxerr.CodeUnsupportedFormat, err)
+			if code := waxerr.CodeOf(err); code != waxerr.CodeMalformedInput {
+				t.Errorf("error code = %v, want %v (%v)", code, waxerr.CodeMalformedInput, err)
 			}
 		})
 	}
@@ -316,8 +321,8 @@ func TestFLACFaulty(t *testing.T) {
 				audio.Put(buf)
 				t.Fatal("expected a clean rejection, decoded successfully")
 			}
-			if code := waxerr.CodeOf(err); code != waxerr.CodeUnsupportedFormat {
-				t.Errorf("error code = %v, want %v (%v)", code, waxerr.CodeUnsupportedFormat, err)
+			if code := waxerr.CodeOf(err); code != waxerr.CodeMalformedInput {
+				t.Errorf("error code = %v, want %v (%v)", code, waxerr.CodeMalformedInput, err)
 			}
 		})
 	}

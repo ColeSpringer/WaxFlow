@@ -47,8 +47,7 @@ func NewDecoder(cfg Config, f audio.Format) (*Decoder, error) {
 func (d *Decoder) Decode(pkt []byte, emit func(*audio.Buffer) error) error {
 	fb := d.cfg.BytesPerFrame(d.fmt.Channels)
 	if len(pkt)%fb != 0 {
-		return waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("pcm: packet of %d bytes is not a whole number of %d-byte frames", len(pkt), fb))
+		return waxerr.Malformed("pcm: ", "packet of %d bytes is not a whole number of %d-byte frames", len(pkt), fb)
 	}
 	for len(pkt) > 0 {
 		frames := len(pkt) / fb

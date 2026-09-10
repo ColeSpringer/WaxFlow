@@ -113,14 +113,53 @@ func ilstBox(tags []container.Tag, art *container.Picture, smpb []byte) []byte {
 		}
 	}
 	if art != nil && len(art.Data) > 0 {
-		flag := uint32(13) // JPEG
-		if strings.Contains(art.MIME, "png") {
-			flag = 14
-		}
-		out = append(out, itemAtom("covr", dataAtom(flag, art.Data))...)
+		out = append(out, itemAtom("covr", dataAtom(covrType(art.MIME, art.Data), art.Data))...)
 	}
 	out = append(out, smpb...)
 	return out
+}
+
+// covrType maps a cover onto the ilst well-known type the covr data atom
+// carries. Only four image types have one; anything else (a HEIF, AVIF, JXL or
+// WebP cover, or bytes no sniff recognized) goes out as 0, raw binary, which is
+// what TagLib writes for a type it cannot name. Typing an arbitrary image as
+// JPEG would make every reader parse it as one.
+//
+// The MIME decides when it names one of the four, and the bytes decide when it
+// does not: container.Picture carries no MIME on the paths that read art out of
+// a container that stores none, and a JPEG handed over unlabelled must not go
+// out as raw binary just because nobody filled the field in.
+func covrType(mime string, data []byte) uint32 {
+	base, _, _ := strings.Cut(mime, ";")
+	switch strings.ToLower(strings.TrimSpace(base)) {
+	case "image/gif":
+		return 12
+	case "image/jpeg", "image/jpg":
+		return 13
+	case "image/png":
+		return 14
+	case "image/bmp", "image/x-ms-bmp":
+		return 27
+	}
+	return sniffCovrType(data)
+}
+
+// sniffCovrType reads the magic of the four types ilst can name, and returns 0
+// for everything else. Deliberately not a general image sniffer: a type ilst
+// has no number for is 0 whatever it is, so recognizing more would change no
+// answer.
+func sniffCovrType(data []byte) uint32 {
+	switch {
+	case len(data) >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF:
+		return 13 // JPEG SOI + the first marker
+	case len(data) >= 8 && string(data[:8]) == "\x89PNG\r\n\x1a\n":
+		return 14
+	case len(data) >= 6 && (string(data[:6]) == "GIF87a" || string(data[:6]) == "GIF89a"):
+		return 12
+	case len(data) >= 2 && data[0] == 'B' && data[1] == 'M':
+		return 27
+	}
+	return 0
 }
 
 // itemAtom wraps a data atom in its ilst item box.
@@ -129,7 +168,7 @@ func itemAtom(atom string, data []byte) []byte {
 }
 
 // dataAtom builds the ilst value carrier: type flag (1 UTF-8 text, 0 raw
-// binary, 13 JPEG, 14 PNG), a zero locale, then the payload.
+// binary, 12 GIF, 13 JPEG, 14 PNG, 27 BMP), a zero locale, then the payload.
 func dataAtom(flag uint32, payload []byte) []byte {
 	return makeBox("data", u32(flag), u32(0), payload)
 }

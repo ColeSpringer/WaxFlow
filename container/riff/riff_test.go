@@ -346,8 +346,10 @@ func TestDemuxRejectsUnsupported(t *testing.T) {
 		t.Errorf("ADPCM demux error = %v, want unsupported-format", err)
 	}
 
-	if _, err := NewDemuxer(container.BytesSource([]byte("not a wav file at all")), nil); !errors.Is(err, waxerr.ErrUnsupportedFormat) {
-		t.Errorf("garbage demux error = %v, want unsupported-format", err)
+	// The ADPCM case above is a well-formed WAV holding a codec this build
+	// has no decoder for; junk is not a WAV at all, which is damage.
+	if _, err := NewDemuxer(container.BytesSource([]byte("not a wav file at all")), nil); !errors.Is(err, waxerr.ErrMalformedInput) {
+		t.Errorf("garbage demux error = %v, want malformed-input", err)
 	}
 }
 
@@ -416,8 +418,8 @@ func TestRateBoundIsPlatformIndependent(t *testing.T) {
 	le.PutUint32(ws.Buf[fmtOff+8+4:], 0x80000000) // nSamplesPerSec = 2^31
 
 	_, err := NewDemuxer(container.BytesSource(ws.Buf), nil)
-	if !errors.Is(err, waxerr.ErrUnsupportedFormat) {
-		t.Errorf("2^31 rate error = %v, want unsupported-format", err)
+	if !errors.Is(err, waxerr.ErrMalformedInput) {
+		t.Errorf("2^31 rate error = %v, want malformed-input", err)
 	}
 }
 

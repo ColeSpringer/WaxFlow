@@ -655,6 +655,58 @@ samples fewer at 44.1 kHz, because the muxer's duration accounting is coarser
 than a sample. Neither number is the source length. So: do not trim the tail
 to the declared length, and do not treat a decode that overruns it as damage.
 
+### Addendum, 2026-09-09: the head trim is pinned, and it is not per file
+
+The measurement this section asked for is done. It was made against Windows'
+own encoder and decoder (`scripts/wmfenc/wmfenc.ps1` and
+`scripts/wmfdec/wmfdec.ps1`, both Media Foundation's `MediaTranscoder` over
+`powershell.exe` interop) alongside ffmpeg 8.0.1, on seeded noise at every
+frame length, by normalised cross-correlation against the source.
+
+**The lead-in differs per encoder.** An ffmpeg-encoded file carries one frame
+of lead-in; a Media Foundation file carries two. Measured at 8, 16, 22.05, 32
+and 44.1 kHz, the second frame is exactly one `frameLen` at every one of them.
+Windows' decoder matches: it drops one frame from an ffmpeg file and two from
+its own, and its output is otherwise **bit-identical** to this decoder's
+(correlation 1.0000 at the aligning lag). ffmpeg's decoder drops two always,
+which is one too many for its own encoder's files.
+
+**Nothing in the file says which.** Every candidate was tested by construction
+rather than reasoned about, each time by rebuilding a stream around ffmpeg's
+own frames and asking Windows what it dropped:
+
+| varied | result |
+|---|---|
+| the extradata's first dword (0 against Media Foundation's 17 frames), both directions | no change |
+| container: the same Media Foundation frames rewrapped as WMA-in-WAV (RIFF 0x0161) | still two |
+| ASF preroll, play duration, Extended Stream Properties | absent from the WAV, still two |
+| `flags2` bit 1, the bit reservoir: a hand-built superframe stream around ffmpeg's frames | **one**, so the reservoir is not the carrier |
+| `flags2` bits 1 and 2, then the whole word set to a real Media Foundation value (0x0017) | still one |
+| frames per superframe, 1 against 5 | no change |
+| a silent frame prepended to an ffmpeg stream | Windows keeps it, so it is not leading-silence trimming either |
+
+**What is actually happening.** Media Foundation's encoder prepends one frame
+of coded digital silence and records nothing about it: frame 0 decodes to a
+peak of 5.4e-5, frame 1 is the short-block attack window (block lengths
+7/8/10) as the signal arrives, and the source begins at frame 2. Windows' own
+decoder hides that by trimming leading silence, which is a heuristic and a
+lossy one: given an ffmpeg encode of a source that genuinely begins with 46 ms
+of digital silence, Windows deleted it, in ASF and in WMA-in-WAV both.
+
+So the fixed one-frame skip stands, and it is the faithful reading rather than
+a default: it removes exactly what the MDCT owes and keeps everything the
+stream codes, including a source's own leading silence. Matching Windows would
+mean adopting its silence trim; matching ffmpeg would mean cutting 46 ms of
+real audio off every ffmpeg-encoded file. Neither is a trade worth making, and
+neither is derivable from the bytes.
+
+The same measurement settles the tail. `Track.SamplesExact` stays false, and
+`Track.SamplesAdvisory` is now set beside it: the declared total is rounded
+from a duration and no arithmetic may rely on it. Trimming a decode to it
+would be unsound in exactly the Media Foundation case, since the declared
+duration is measured from source sample 0 while the decode begins one frame
+earlier, and that offset is the number just shown to be unknowable.
+
 ## 12. What v1 and v2 actually differ on
 
 | | v1 (0x0160) | v2 (0x0161) |

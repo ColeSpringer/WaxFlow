@@ -57,8 +57,19 @@ func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 	return d, nil
 }
 
+// malformed reports bytes that deviate from this format: truncated,
+// inconsistent, or out of range. See [waxerr.Malformed] for the rule that
+// divides it from unsupported.
 func malformed(format string, args ...any) error {
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "aiff: "+fmt.Sprintf(format, args...))
+	return waxerr.Malformed("aiff: ", format, args...)
+}
+
+// unsupported names a well-formed stream this build does not cover. It is a
+// different answer from malformed and carries a different code: the file is
+// fine and we are not, which is a thing a caller can act on. See
+// [waxerr.Malformed] for the rule.
+func unsupported(format string, args ...any) error {
+	return waxerr.Unsupported("aiff: ", format, args...)
 }
 
 func (d *Demuxer) warn(off int64, format string, args ...any) error {
@@ -66,15 +77,22 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg})
+	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
 	return nil
+}
+
+// note records a Warning that Strict must not escalate: this build doing
+// something with a well-formed file that a caller should know about, rather
+// than damage in the file. See [container.Note].
+func (d *Demuxer) note(off int64, format string, args ...any) {
+	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
 }
 
 func (d *Demuxer) parse() error {
 	size := d.src.Size()
 	var head [12]byte
 	if err := container.ReadFull(d.src, head[:], 0); err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "aiff: reading header", err)
+		return container.ShortRead("aiff: reading header", err)
 	}
 	if !Match(head[:]) {
 		return malformed("not an AIFF/AIFF-C file")
@@ -97,7 +115,7 @@ func (d *Demuxer) parse() error {
 		}
 		var hdr [8]byte
 		if err := container.ReadFull(d.src, hdr[:], off); err != nil {
-			return waxerr.Wrap(waxerr.CodeSourceUnreadable, "aiff: reading chunk header", err)
+			return container.ShortRead("aiff: reading chunk header", err)
 		}
 		id := string(hdr[:4])
 		chunkSize := int64(be.Uint32(hdr[4:]))
@@ -129,7 +147,7 @@ func (d *Demuxer) parse() error {
 			}
 			payload := make([]byte, n)
 			if err := container.ReadFull(d.src, payload, off+8); err != nil {
-				return waxerr.Wrap(waxerr.CodeSourceUnreadable, "aiff: reading COMM", err)
+				return container.ShortRead("aiff: reading COMM", err)
 			}
 			var err error
 			cfg, rate, channels, commFrames, err = d.parseCOMM(payload, aifc, off)
@@ -149,7 +167,7 @@ func (d *Demuxer) parse() error {
 			}
 			var ssnd [8]byte
 			if err := container.ReadFull(d.src, ssnd[:], off+8); err != nil {
-				return waxerr.Wrap(waxerr.CodeSourceUnreadable, "aiff: reading SSND header", err)
+				return container.ShortRead("aiff: reading SSND header", err)
 			}
 			dataStart := int64(be.Uint32(ssnd[:])) // alignment offset
 			d.dataOff = off + 8 + 8 + dataStart
@@ -215,7 +233,7 @@ func (d *Demuxer) parse() error {
 	}
 	f := cfg.PCMFormat(rate, channels, audio.DefaultLayout(channels))
 	if err := f.Valid(); err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "aiff: unusable format", err)
+		return container.UnusableFormat("aiff", f, err)
 	}
 	d.track = container.Track{
 		Codec:       codec.PCM,
@@ -239,17 +257,20 @@ func (d *Demuxer) parseCOMM(b []byte, aifc bool, off int64) (cfg pcm.Config, rat
 	bits := int(int16(be.Uint16(b[6:])))
 	rateF := fromExt80(b[8:18])
 
-	if channels < 1 || channels > audio.MaxChannels {
-		return cfg, 0, 0, 0, malformed("%d channels (supported: 1..%d)", channels, audio.MaxChannels)
+	if channels < 1 {
+		return cfg, 0, 0, 0, malformed("%d channels", channels)
+	}
+	if channels > audio.MaxChannels {
+		return cfg, 0, 0, 0, unsupported("%d channels (supported: 1..%d)", channels, audio.MaxChannels)
 	}
 	if math.IsNaN(rateF) || rateF <= 0 || rateF > math.MaxInt32 {
 		return cfg, 0, 0, 0, malformed("sample rate %v", rateF)
 	}
 	rate = int(math.Round(rateF))
 	if float64(rate) != rateF {
-		if werr := d.warn(off, "non-integer sample rate %v rounded to %d", rateF, rate); werr != nil {
-			return cfg, 0, 0, 0, werr
-		}
+		// AIFF stores the rate as an 80-bit extended float, so a fractional
+		// one is a value the format allows and this pipeline rounds.
+		d.note(off, "non-integer sample rate %v rounded to %d", rateF, rate)
 	}
 
 	comp := compNONE
@@ -285,7 +306,7 @@ func (d *Demuxer) parseCOMM(b []byte, aifc bool, off int64) (cfg pcm.Config, rat
 	case compFl64, compFL64:
 		cfg = pcm.Config{Encoding: pcm.Float, Bits: 64, BigEndian: true}
 	default:
-		return cfg, 0, 0, 0, malformed("compression type %q (only PCM types are supported)", comp)
+		return cfg, 0, 0, 0, unsupported("compression type %q (only PCM types are supported)", comp)
 	}
 	if err := cfg.Validate(); err != nil {
 		return cfg, 0, 0, 0, err
@@ -316,7 +337,7 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 	}
 	d.readBuf = d.readBuf[:need]
 	if err := container.ReadFull(d.src, d.readBuf, d.dataOff+d.pos*int64(d.frameBytes)); err != nil {
-		return waxerr.Wrap(waxerr.CodeSourceUnreadable, "aiff: reading SSND data", err)
+		return container.ShortRead("aiff: reading SSND data", err)
 	}
 	*pkt = container.Packet{
 		Track:  0,

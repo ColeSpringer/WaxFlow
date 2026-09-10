@@ -325,8 +325,10 @@ func TestWavPackSuiteCorruption(t *testing.T) {
 			audio.Put(got)
 			t.Fatal("a file with corrupt audio decoded without error")
 		}
-		if code := waxerr.CodeOf(err); code != waxerr.CodeUnsupportedFormat {
-			t.Errorf("error code = %v, want unsupported-format", code)
+		// Corrupt audio is damage, which is the other answer from the
+		// out-of-scope refusals TestWavPackSuiteRefusals pins.
+		if code := waxerr.CodeOf(err); code != waxerr.CodeMalformedInput {
+			t.Errorf("error code = %v, want malformed-input", code)
 		}
 		if !errors.Is(err, io.EOF) && !strings.Contains(err.Error(), "wavpack: ") {
 			t.Errorf("error %q does not carry the wavpack prefix", err)

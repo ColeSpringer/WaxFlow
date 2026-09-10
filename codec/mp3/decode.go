@@ -75,11 +75,10 @@ func (d *Decoder) Decode(pkt []byte, emit func(*audio.Buffer) error) error {
 		return err
 	}
 	if got := h.PCMFormat(); got != d.f {
-		return waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("mp3: frame format %v disagrees with the track's %v", got, d.f))
+		return malformed("frame format %v disagrees with the track's %v", got, d.f)
 	}
 	if len(pkt) > maxFrameLen {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, "mp3: oversized frame packet")
+		return malformed("oversized frame packet")
 	}
 
 	spf := h.SamplesPerFrame()

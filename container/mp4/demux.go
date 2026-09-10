@@ -96,7 +96,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg})
+	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
 	return nil
 }
 
@@ -109,7 +109,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 // `probe --strict` reject valid HE-AAC files as malformed, which is why this
 // path exists and why it cannot fail.
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...)})
+	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
 }
 
 // parse scans the top-level boxes, reads moov into memory, builds the
@@ -151,9 +151,13 @@ func (d *Demuxer) parse() error {
 		off = b.off + b.size
 	}
 	if !sawFtyp {
-		if err := d.warn(0, "no ftyp box"); err != nil {
-			return err
-		}
+		// Reached only through an extension hint, since Match requires an ftyp
+		// to sniff at all. So the caller has said this is an MP4-family file
+		// and the first box is not ftyp: a QuickTime .mov, which the format
+		// does not require one of, or a damaged .m4a. Nothing here can tell
+		// them apart, and calling it damage refuses every conformant .mov, so
+		// this reports what the demuxer saw and leaves the judgement out.
+		d.note(0, "no ftyp box")
 	}
 	if moov == nil {
 		return malformed("no moov box")
@@ -225,12 +229,16 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		case stsdErr != nil && named == 0:
 			return stsdErr
 		case stsdErr != nil:
-			return waxerr.Wrap(waxerr.CodeUnsupportedFormat,
+			// The deferred reason keeps its own code: a stsd this build
+			// declines (an object type it has no decoder for) is
+			// unsupported, a truncated one is damage, and the wrap must not
+			// flatten the two into one answer.
+			return waxerr.Wrap(waxerr.CodeOf(stsdErr),
 				fmt.Sprintf("mp4: no decodable audio track (found: %s)", joinNames(foundCodecs)), stsdErr)
 		case len(foundCodecs) > 0:
-			return malformed("no decodable audio track (found: %s)", joinNames(foundCodecs))
+			return unsupported("no decodable audio track (found: %s)", joinNames(foundCodecs))
 		}
-		return malformed("no audio track")
+		return unsupported("no audio track")
 	}
 	d.sel = audio
 	if audio.note != "" {
@@ -238,7 +246,7 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 	}
 
 	if err := audio.fmt.Valid(); err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "mp4: unusable audio format", err)
+		return container.UnusableFormat("mp4", audio.fmt, err)
 	}
 	if audio.codec == codec.AACLC {
 		d.seekPreroll = 1024 // one frame of IMDCT overlap history
@@ -256,7 +264,7 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 	}
 
 	var delay, padding, samples int64
-	var exact bool
+	var exact, advisory bool
 	if d.fragmented {
 		// The fragmented sample tables are empty; gapless comes from the init
 		// edit list, and the length is authoritative (SamplesExact) when the
@@ -264,17 +272,18 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		delay, samples, exact = d.fragmentedGapless(audio)
 		d.fragOff = d.fragStart
 	} else {
-		delay, padding, samples = d.gapless(audio)
+		delay, padding, samples, advisory = d.gapless(audio)
 	}
 	d.track = container.Track{
-		Codec:        audio.codec,
-		CodecConfig:  audio.codecConfig,
-		Fmt:          audio.fmt,
-		Samples:      samples,
-		Delay:        delay,
-		Padding:      padding,
-		SamplesExact: exact,
-		Default:      true,
+		Codec:           audio.codec,
+		CodecConfig:     audio.codecConfig,
+		Fmt:             audio.fmt,
+		Samples:         samples,
+		Delay:           delay,
+		Padding:         padding,
+		SamplesExact:    exact,
+		SamplesAdvisory: advisory,
+		Default:         true,
 	}
 	d.resolveChapters(tracks, audio)
 	return nil

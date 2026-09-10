@@ -4,7 +4,6 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/container"
-	"github.com/colespringer/waxflow/waxerr"
 )
 
 // flacMapping decodes the Xiph FLAC-in-Ogg mapping (version 1). FLAC self-times:
@@ -27,7 +26,7 @@ func (m *flacMapping) parseID(pkt []byte) (int, error) {
 		return 0, malformed("FLAC identification packet of %d bytes, want %d", len(pkt), want)
 	}
 	if pkt[5] != 1 {
-		return 0, malformed("unsupported Ogg-FLAC mapping version %d.%d", pkt[5], pkt[6])
+		return 0, unsupported("unsupported Ogg-FLAC mapping version %d.%d", pkt[5], pkt[6])
 	}
 	headerPackets := int(pkt[7])<<8 | int(pkt[8])
 	if string(pkt[9:13]) != "fLaC" {
@@ -58,7 +57,7 @@ func (m *flacMapping) isAudio(pkt []byte) bool { return flac.SyncOK(pkt) }
 func (m *flacMapping) finalizeTrack(lastGranule func() int64) (container.Track, error) {
 	f := m.si.PCMFormat()
 	if err := f.Valid(); err != nil {
-		return container.Track{}, waxerr.Wrap(waxerr.CodeUnsupportedFormat, "ogg: unusable format", err)
+		return container.Track{}, container.UnusableFormat("ogg", f, err)
 	}
 	samples := m.si.Samples
 	if samples == 0 {

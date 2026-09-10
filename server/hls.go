@@ -1133,8 +1133,10 @@ func sliceMeasured(med format.Media, sp span, srcSamples int64) (format.Media, e
 		}
 		patched.Tracks[idx].Samples = srcSamples
 		// Honest rather than optimistic: srcSamples comes from an exact
-		// trackFor, whose contract is an authoritative length.
+		// trackFor, whose contract is an authoritative length, so the rounded
+		// claim it may have replaced goes with it.
 		patched.Tracks[idx].SamplesExact = true
+		patched.Tracks[idx].SamplesAdvisory = false
 		med = remeasured{Media: med, info: &patched}
 	}
 	sl, err := waxflow.Slice(med, sp.from, sp.end())

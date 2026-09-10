@@ -60,7 +60,7 @@ func (m *vorbisMapping) finalizeTrack(lastGranule func() int64) (container.Track
 	}
 	f := m.cfg.Format()
 	if err := f.Valid(); err != nil {
-		return container.Track{}, err
+		return container.Track{}, container.UnusableFormat("ogg", f, err)
 	}
 	// A Vorbis page granule is the cumulative decoded output through that
 	// page's last completed packet (the priming packet emits nothing and

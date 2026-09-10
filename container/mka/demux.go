@@ -116,7 +116,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg})
+	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
 	return nil
 }
 
@@ -125,7 +125,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 // See mp4's note, which exists for the same reason: Strict rejects mess, and an
 // HE-AAC config is not mess.
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...)})
+	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
 }
 
 // readBytes reads n bytes at off into a fresh buffer, bounded by a cap so a
@@ -569,16 +569,16 @@ func (d *Demuxer) selectTrack() error {
 	}
 	if chosen == nil {
 		if len(found) > 0 {
-			return malformed("no decodable audio track (found: %s)", joinNames(found))
+			return unsupported("no decodable audio track (found: %s)", joinNames(found))
 		}
-		return malformed("no audio track")
+		return unsupported("no audio track")
 	}
 	setup, err := resolveCodec(chosen)
 	if err != nil {
 		return err
 	}
 	if err := setup.fmt.Valid(); err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "mka: unusable audio format", err)
+		return container.UnusableFormat("mka", setup.fmt, err)
 	}
 	if setup.warning != "" {
 		d.note(0, "%s", setup.warning)
@@ -606,7 +606,7 @@ func (d *Demuxer) finalizeTrack() error {
 	}
 
 	samples := int64(-1)
-	exact := false
+	exact, advisory := false, false
 	if (d.sel.codecDelay > 0 || d.needsGaplessWalk()) && d.haveFirstCluster {
 		// A gapless track needs the exact decoder-output total to place the end
 		// trim. Opus signals it with CodecDelay (front) plus DiscardPadding
@@ -625,18 +625,19 @@ func (d *Demuxer) finalizeTrack() error {
 		}
 		exact = true
 	} else if dur := d.durationSamples(rate); dur >= 0 {
-		samples = dur
+		samples, advisory = dur, true
 	}
 
 	d.track = container.Track{
-		ID:           0,
-		Codec:        d.setup.id,
-		CodecConfig:  d.setup.config,
-		Fmt:          d.setup.fmt,
-		Samples:      samples,
-		Delay:        delay,
-		SamplesExact: exact,
-		Default:      true,
+		ID:              0,
+		Codec:           d.setup.id,
+		CodecConfig:     d.setup.config,
+		Fmt:             d.setup.fmt,
+		Samples:         samples,
+		Delay:           delay,
+		SamplesExact:    exact,
+		SamplesAdvisory: advisory,
+		Default:         true,
 	}
 	d.resetReading(d.firstClusterOff)
 	return nil

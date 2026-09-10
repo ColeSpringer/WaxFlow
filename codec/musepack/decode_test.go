@@ -285,7 +285,7 @@ func TestFrameMustConsumeItsDeclaredBits(t *testing.T) {
 		if err == nil {
 			t.Fatalf("a frame declaring %d bits more than it holds decoded clean", delta)
 		}
-		if waxerr.CodeOf(err) != waxerr.CodeUnsupportedFormat || !strings.HasPrefix(err.Error(), "musepack: ") {
+		if waxerr.CodeOf(err) != waxerr.CodeMalformedInput || !strings.HasPrefix(err.Error(), "musepack: ") {
 			t.Errorf("error %q lost its code or prefix", err)
 		}
 		dec.Release()

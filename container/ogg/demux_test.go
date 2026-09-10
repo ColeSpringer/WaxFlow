@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow/codec"
@@ -606,4 +607,90 @@ func TestDamagedPageResync(t *testing.T) {
 			return
 		}
 	}
+}
+
+// TestChainedStreamIsANoteNotDamage: an Ogg file may carry several logical
+// bitstreams end to end, and this build plays the first. That is the format
+// working as specified, so the remark is a Note and strict mode reads
+// straight through it. It used to be a warning, which made `probe --strict`
+// call a conformant chained file malformed.
+//
+// The branch is reachable only when the first stream's last page carries no
+// end-of-stream flag: with one, the walk stops there and never looks at what
+// follows. So the fixture's final page is rebuilt without it, which is the
+// shape (a chain whose first stream was cut) that reaches the code at all.
+func TestChainedStreamIsANoteNotDamage(t *testing.T) {
+	raw := fixture(t, "noise-s24.oga")
+	chained := append(dropFinalEOS(t, raw),
+		buildPage(flagBOS, 0, 0x5EC0, 0, []byte("second stream header"))...)
+
+	for _, strict := range []bool{false, true} {
+		d, err := NewDemuxer(container.BytesSource(chained), &DemuxerOptions{Strict: strict})
+		if err != nil {
+			t.Fatalf("strict=%v refused a chained Ogg at open: %v", strict, err)
+		}
+		var pkt container.Packet
+		for {
+			err := d.ReadPacket(&pkt)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("strict=%v refused a chained Ogg while reading: %v", strict, err)
+			}
+		}
+		var found bool
+		for _, w := range d.Warnings() {
+			if strings.Contains(w.Msg, "chained") {
+				found = true
+				if w.Kind != container.Note {
+					t.Errorf("strict=%v: the chain remark is Kind %v, want Note", strict, w.Kind)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("strict=%v: no remark about the chained stream (%v)", strict, d.Warnings())
+		}
+	}
+
+	// The other kind still behaves: a damaged page is Damage and strict
+	// refuses it. Without this the cell could pass by calling everything a
+	// note.
+	damaged := append([]byte(nil), raw...)
+	damaged[len(damaged)/2] ^= 0xff
+	d, err := NewDemuxer(container.BytesSource(damaged), &DemuxerOptions{Strict: true})
+	if err == nil {
+		var pkt container.Packet
+		for err == nil {
+			err = d.ReadPacket(&pkt)
+		}
+	}
+	if err == nil || err == io.EOF {
+		t.Error("strict mode read a corrupted page clean")
+	}
+}
+
+// dropFinalEOS returns raw with its last page rebuilt without the
+// end-of-stream flag, so a reader walks past it into whatever follows.
+func dropFinalEOS(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	var off, last int
+	for off+headerLen <= len(raw) {
+		n := int(raw[off+26])
+		size := headerLen + n
+		for _, l := range raw[off+headerLen : off+headerLen+n] {
+			size += int(l)
+		}
+		last = off
+		off += size
+	}
+	n := int(raw[last+26])
+	lacing := raw[last+headerLen : last+headerLen+n]
+	body := raw[last+headerLen+n : off]
+	rebuilt := buildPageRaw(raw[last+5]&^flagEOS,
+		int64(binary.LittleEndian.Uint64(raw[last+6:])),
+		binary.LittleEndian.Uint32(raw[last+14:]),
+		binary.LittleEndian.Uint32(raw[last+18:]),
+		lacing, body)
+	return append(append([]byte(nil), raw[:last]...), rebuilt...)
 }

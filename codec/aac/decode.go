@@ -102,7 +102,7 @@ func NewDecoder(cfg Config, f audio.Format) (*Decoder, error) {
 		return nil, malformed("object type %d is not AAC-LC", cfg.ObjectType)
 	}
 	if cfg.FrameLength != 1024 {
-		return nil, malformed("frame length %d unsupported (only 1024)", cfg.FrameLength)
+		return nil, unsupported("frame length %d unsupported (only 1024)", cfg.FrameLength)
 	}
 	rateIdx := samplingIndex(cfg.SampleRate)
 	if rateIdx < 0 || rateIdx >= len(swbOffsetLong) {
@@ -250,7 +250,7 @@ func (d *Decoder) Decode(pkt []byte, emit func(*audio.Buffer) error) error {
 			r.byteAlign()
 			goto done
 		default: // CCE
-			return malformed("unsupported element type %d", tag)
+			return unsupported("unsupported element type %d", tag)
 		}
 		if r.overrun() {
 			return malformed("access unit overruns packet")
@@ -422,7 +422,7 @@ func (d *Decoder) decodeSBRFrame(r *bitReader) error {
 				flush()
 				return nil
 			}
-			return malformed("unsupported element type %d", tag)
+			return unsupported("unsupported element type %d", tag)
 		}
 		if r.overrun() {
 			if full {

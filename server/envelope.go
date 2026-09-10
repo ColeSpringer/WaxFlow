@@ -35,6 +35,11 @@ func statusFor(code waxerr.Code) int {
 		return http.StatusUnsupportedMediaType
 	case waxerr.CodeUnsupportedSource:
 		return http.StatusNotImplemented
+	case waxerr.CodeMalformedInput:
+		// 422, not 415: the media type is one this server handles, and the
+		// entity is what it cannot process. 415 told a client to send a
+		// different format when the file it sent was simply broken.
+		return http.StatusUnprocessableEntity
 	case waxerr.CodeOverloaded, waxerr.CodeCatalogUnavailable:
 		return http.StatusServiceUnavailable
 	default:

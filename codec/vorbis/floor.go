@@ -349,5 +349,5 @@ func clampDB(y int) int {
 // it. Rejecting with a clear error is the honest, safe posture; a correct
 // floor 0 plus a synthetic conformance vector is a clean follow-up.
 func parseFloor0(*bitReader, []codebook) (floor, error) {
-	return nil, malformed("floor 0 (LSP) is not supported")
+	return nil, unsupported("floor 0 (LSP) is not supported")
 }

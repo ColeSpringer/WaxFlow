@@ -139,8 +139,11 @@ func TestProbeHintTiebreak(t *testing.T) {
 	// the driver then reports its own structural error.
 	raw := buildFile(t, "wav", 10)
 	copy(raw, "JUNK")
-	if _, err := Probe(container.BytesSource(raw), ".wav", nil); !errors.Is(err, waxerr.ErrUnsupportedFormat) {
-		t.Errorf("err = %v, want unsupported-format from the hinted driver", err)
+	// The hinted driver read the bytes and they are not its format, which is
+	// damage; the unhinted path below never gets that far and reports the
+	// generic "unrecognized input" instead.
+	if _, err := Probe(container.BytesSource(raw), ".wav", nil); !errors.Is(err, waxerr.ErrMalformedInput) {
+		t.Errorf("err = %v, want malformed-input from the hinted driver", err)
 	}
 	// Without a hint the generic unrecognized error surfaces.
 	_, err := Probe(container.BytesSource(raw), "", nil)

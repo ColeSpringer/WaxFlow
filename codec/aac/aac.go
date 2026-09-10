@@ -130,8 +130,19 @@ type Config struct {
 	ExtensionRate int
 }
 
+// malformed reports bytes that deviate from this format: truncated,
+// inconsistent, or out of range. See [waxerr.Malformed] for the rule that
+// divides it from unsupported.
 func malformed(format string, args ...any) error {
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "aac: "+fmt.Sprintf(format, args...))
+	return waxerr.Malformed("aac: ", format, args...)
+}
+
+// unsupported names a well-formed stream this build does not cover. It is a
+// different answer from malformed and carries a different code: the file is
+// fine and we are not, which is a thing a caller can act on. See
+// [waxerr.Malformed] for the rule.
+func unsupported(format string, args ...any) error {
+	return waxerr.Unsupported("aac: ", format, args...)
 }
 
 // ParseASC parses an AudioSpecificConfig, resolving the AAC-LC base rate,
@@ -169,7 +180,7 @@ func ParseASC(b []byte) (Config, error) {
 	if aot != aotAACLC {
 		// Main/SSR/LTP are not decoded, but the container still needs a
 		// coherent format; report the object type honestly.
-		return Config{}, malformed("audio object type %d is not AAC-LC", aot)
+		return Config{}, unsupported("audio object type %d is not AAC-LC", aot)
 	}
 
 	frameLen := 1024
@@ -213,7 +224,7 @@ func ParseASC(b []byte) (Config, error) {
 		// back a format with no channels, leaving the caller to report
 		// something generic about a count instead of the configuration that
 		// caused it.
-		return Config{}, malformed("channel configuration %d is not supported", chanConfig)
+		return Config{}, unsupported("channel configuration %d is not supported", chanConfig)
 	}
 	if chanConfig == 7 {
 		// Configuration 7 is refused because the field disagrees with the
@@ -227,7 +238,7 @@ func ParseASC(b []byte) (Config, error) {
 		// this whole channel map exists to prevent. Nothing else needs it:
 		// configuration 6 is the multichannel case that occurs, and real 7.1
 		// otherwise arrives as configuration 0 with a program config element.
-		return Config{}, malformed("channel configuration 7 is not supported: the specification and the common encoder convention disagree on its channel order")
+		return Config{}, unsupported("channel configuration 7 is not supported: the specification and the common encoder convention disagree on its channel order")
 	}
 	if rate <= 0 {
 		return Config{}, malformed("sampling frequency index reserved")
@@ -462,7 +473,7 @@ func (c Config) Format() (audio.Format, error) {
 		channelLayouts[c.ChannelConfig] != 0:
 		layout = channelLayouts[c.ChannelConfig]
 	default:
-		return audio.Format{}, malformed("channel configuration %d is not supported", c.ChannelConfig)
+		return audio.Format{}, unsupported("channel configuration %d is not supported", c.ChannelConfig)
 	}
 	rate := c.SampleRate
 	if c.heDecode() {

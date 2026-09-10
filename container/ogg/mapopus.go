@@ -28,11 +28,15 @@ func (m *opusMapping) parseID(pkt []byte) (int, error) {
 		return 0, malformed("OpusHead identification header malformed")
 	}
 	if version := pkt[8]; version&0xF0 != 0 {
-		return 0, malformed("unsupported OpusHead version %d", version)
+		return 0, unsupported("unsupported OpusHead version %d", version)
 	}
 	m.channels = int(pkt[9])
-	if m.channels < 1 || m.channels > audio.MaxChannels {
+	if m.channels < 1 {
 		return 0, malformed("OpusHead channel count %d", m.channels)
+	}
+	if m.channels > audio.MaxChannels {
+		return 0, unsupported("OpusHead channel count %d; this build mixes at most %d",
+			m.channels, audio.MaxChannels)
 	}
 	m.preSkip = int64(binary.LittleEndian.Uint16(pkt[10:]))
 	// The output gain (pkt[16:18]) rides along in head -> Track.CodecConfig, so
@@ -65,15 +69,15 @@ func (m *opusMapping) parseID(pkt []byte) (int, error) {
 		// carries self-delimited sub-packets), a permuted or 255 (silent)
 		// table entry needs output routing; neither is implemented.
 		if streams != 1 || coupled != m.channels-1 {
-			return 0, malformed("OpusHead family 1 with %d streams (%d coupled) for %d channels is multistream; mono and stereo single-stream only", streams, coupled, m.channels)
+			return 0, unsupported("OpusHead family 1 with %d streams (%d coupled) for %d channels is multistream; mono and stereo single-stream only", streams, coupled, m.channels)
 		}
 		for i := 0; i < m.channels; i++ {
 			if int(pkt[21+i]) != i {
-				return 0, malformed("OpusHead family 1 channel table %v is not the identity mapping", pkt[21:21+m.channels])
+				return 0, unsupported("OpusHead family 1 channel table %v is not the identity mapping", pkt[21:21+m.channels])
 			}
 		}
 	default:
-		return 0, malformed("OpusHead channel mapping family %d unsupported", m.family)
+		return 0, unsupported("OpusHead channel mapping family %d unsupported", m.family)
 	}
 	m.head = append([]byte(nil), pkt...)
 	return 1, nil // OpusTags comment header follows
@@ -104,7 +108,7 @@ func (m *opusMapping) finalizeTrack(lastGranule func() int64) (container.Track, 
 		BitDepth: 32,
 	}
 	if err := f.Valid(); err != nil {
-		return container.Track{}, err
+		return container.Track{}, container.UnusableFormat("ogg", f, err)
 	}
 	samples := int64(-1)
 	if lg := lastGranule(); lg >= 0 {

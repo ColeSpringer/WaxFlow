@@ -601,8 +601,9 @@ func TestChapters(t *testing.T) {
 // TestChapterStartBounds: a start the sample arithmetic cannot hold is
 // skipped with a warning (the header's own count bound), a start past the end
 // of the stream is kept with a warning, as the editor writes it, and a run
-// longer than the chapter cap is cut with a warning rather than passed off as
-// complete. Strict mode refuses each.
+// longer than the chapter cap is cut with a note rather than passed off as
+// complete. Strict refuses the first two, which are lengths the file states
+// impossibly; the chapter cap is this build's own, so strict reads through it.
 func TestChapterStartBounds(t *testing.T) {
 	sh := sv8Header{count: 10 * 1152, freq: 0, maxBand: 20, channels: 2, blockPwr: 0}
 	stream := func(run ...[]byte) []byte {
@@ -639,10 +640,20 @@ func TestChapterStartBounds(t *testing.T) {
 	if w := d.Warnings(); len(w) != 1 || !strings.Contains(w[0].Msg, "1024") {
 		t.Errorf("warnings %v, want one about the cap", w)
 	}
-	for name, raw := range map[string][]byte{"beyond the bound": huge, "past the end": past, "over the cap": stream(run...)} {
+	// A chapter start the file states impossibly is damage and strict refuses
+	// it. The count cap is ours, not the format's, so a file with more
+	// chapters than this build reads is not damaged for having them and
+	// strict must accept it.
+	for name, raw := range map[string][]byte{"beyond the bound": huge, "past the end": past} {
 		if _, err := mpc.NewDemuxer(container.BytesSource(raw), &mpc.DemuxerOptions{Strict: true}); err == nil {
 			t.Errorf("strict mode accepted a chapter %s", name)
 		}
+	}
+	if _, err := mpc.NewDemuxer(container.BytesSource(stream(run...)), &mpc.DemuxerOptions{Strict: true}); err != nil {
+		t.Errorf("strict mode refused a file with more chapters than this build reads: %v", err)
+	}
+	if w := d.Warnings(); len(w) != 1 || w[0].Kind != container.Note {
+		t.Errorf("the cap remark is %v, want one Note", w)
 	}
 }
 
@@ -790,20 +801,21 @@ func TestRefusals(t *testing.T) {
 	cases := map[string]struct {
 		raw  []byte
 		want string
+		code waxerr.Code
 	}{
-		"SV4":            {append([]byte("MP+\x04"), make([]byte, 64)...), "Musepack SV4 is not supported"},
-		"SV6":            {append([]byte("MP+\x06"), make([]byte, 64)...), "Musepack SV6 is not supported"},
-		"three channels": {buildSV8(sv8Packet("SH", shPayload(sv8Header{count: 1000, maxBand: 20, channels: 3})), sv8Packet("AP", apBlock(4)), sv8Packet("SE", nil)), "3 channels"},
-		"bad SH CRC":     {buildSV8(sv8Packet("SH", badCRC), sv8Packet("AP", apBlock(4)), sv8Packet("SE", nil)), "CRC"},
-		"reserved rate":  {buildSV8(sv8Packet("SH", shPayload(sv8Header{count: 1000, freq: 5, maxBand: 20, channels: 2})), sv8Packet("AP", apBlock(4)), sv8Packet("SE", nil)), "reserved"},
-		"no SH":          {buildSV8(sv8Packet("RG", rgPayload(1, 0, 0, 0, 0)), sv8Packet("AP", apBlock(4)), sv8Packet("SE", nil)), "no stream header"},
-		"SH version 7":   {buildSV8(sv8Packet("SH", func() []byte { p := shPayload(sh); p[4] = 7; return p }()), sv8Packet("AP", apBlock(4))), ""},
+		"SV4":            {append([]byte("MP+\x04"), make([]byte, 64)...), "Musepack SV4 is not supported", waxerr.CodeUnsupportedFormat},
+		"SV6":            {append([]byte("MP+\x06"), make([]byte, 64)...), "Musepack SV6 is not supported", waxerr.CodeUnsupportedFormat},
+		"three channels": {buildSV8(sv8Packet("SH", shPayload(sv8Header{count: 1000, maxBand: 20, channels: 3})), sv8Packet("AP", apBlock(4)), sv8Packet("SE", nil)), "3 channels", waxerr.CodeUnsupportedFormat},
+		"bad SH CRC":     {buildSV8(sv8Packet("SH", badCRC), sv8Packet("AP", apBlock(4)), sv8Packet("SE", nil)), "CRC", waxerr.CodeMalformedInput},
+		"reserved rate":  {buildSV8(sv8Packet("SH", shPayload(sv8Header{count: 1000, freq: 5, maxBand: 20, channels: 2})), sv8Packet("AP", apBlock(4)), sv8Packet("SE", nil)), "reserved", waxerr.CodeMalformedInput},
+		"no SH":          {buildSV8(sv8Packet("RG", rgPayload(1, 0, 0, 0, 0)), sv8Packet("AP", apBlock(4)), sv8Packet("SE", nil)), "no stream header", waxerr.CodeMalformedInput},
+		"SH version 7":   {buildSV8(sv8Packet("SH", func() []byte { p := shPayload(sh); p[4] = 7; return p }()), sv8Packet("AP", apBlock(4))), "", waxerr.CodeMalformedInput},
 		"oversized varint": {append([]byte("MPCK"), append([]byte("SH"), []byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01}...)...),
-			"no whole packet"},
-		"last frame past a frame": {buildSV7(sv7Header{frames: 1, maxBand: 20, gapless: true, last: 1200}, []sv7Frame{randomFrame(1, 40)}, 1200, nil), "more than a frame holds"},
-		"max band 0":              {buildSV7(sv7Header{frames: 1, maxBand: 0, gapless: true, last: 480}, []sv7Frame{randomFrame(1, 40)}, 480, nil), "max band"},
-		"junk":                    {[]byte("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"), "not a Musepack stream"},
-		"oversized SH packet":     {buildSV8(sv8Packet("SH", make([]byte, mpc.MaxHeaderPacketForTest+1))), "exceeds"},
+			"no whole packet", waxerr.CodeMalformedInput},
+		"last frame past a frame": {buildSV7(sv7Header{frames: 1, maxBand: 20, gapless: true, last: 1200}, []sv7Frame{randomFrame(1, 40)}, 1200, nil), "more than a frame holds", waxerr.CodeMalformedInput},
+		"max band 0":              {buildSV7(sv7Header{frames: 1, maxBand: 0, gapless: true, last: 480}, []sv7Frame{randomFrame(1, 40)}, 480, nil), "max band", waxerr.CodeMalformedInput},
+		"junk":                    {[]byte("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"), "not a Musepack stream", waxerr.CodeMalformedInput},
+		"oversized SH packet":     {buildSV8(sv8Packet("SH", make([]byte, mpc.MaxHeaderPacketForTest+1))), "exceeds", waxerr.CodeMalformedInput},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -817,8 +829,11 @@ func TestRefusals(t *testing.T) {
 			if c.want != "" && !strings.Contains(err.Error(), c.want) {
 				t.Errorf("error %q does not name %q", err, c.want)
 			}
-			if waxerr.CodeOf(err) != waxerr.CodeUnsupportedFormat {
-				t.Errorf("code %v, want %v", waxerr.CodeOf(err), waxerr.CodeUnsupportedFormat)
+			// Per case: an SV this build does not read and a channel count
+			// past its scope are unsupported; a bad CRC, a reserved rate
+			// index and a truncated packet are damage.
+			if got := waxerr.CodeOf(err); got != c.code {
+				t.Errorf("code %v, want %v", got, c.code)
 			}
 		})
 	}

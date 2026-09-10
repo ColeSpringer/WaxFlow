@@ -100,8 +100,11 @@ func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 	return d, nil
 }
 
+// malformed reports bytes that deviate from this format: truncated,
+// inconsistent, or out of range. See [waxerr.Malformed] for the rule that
+// divides it from unsupported.
 func malformed(format string, args ...any) error {
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "flac: "+fmt.Sprintf(format, args...))
+	return waxerr.Malformed("flac: ", format, args...)
 }
 
 // warn records tolerated damage, or fails in strict mode.
@@ -110,15 +113,22 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg})
+	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
 	return nil
+}
+
+// note records a Warning that Strict must not escalate: this build doing
+// something with a well-formed file that a caller should know about, rather
+// than damage in the file. See [container.Note].
+func (d *Demuxer) note(off int64, format string, args ...any) {
+	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
 }
 
 func (d *Demuxer) parse() error {
 	size := d.src.Size()
 	var head [4]byte
 	if err := container.ReadFull(d.src, head[:], 0); err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "flac: reading marker", err)
+		return container.ShortRead("flac: reading marker", err)
 	}
 	if !Match(head[:]) {
 		return malformed("not a FLAC file")
@@ -137,7 +147,7 @@ func (d *Demuxer) parse() error {
 		}
 		var hdr [4]byte
 		if err := container.ReadFull(d.src, hdr[:], off); err != nil {
-			return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "flac: reading metadata block header", err)
+			return container.ShortRead("flac: reading metadata block header", err)
 		}
 		last = hdr[0]&0x80 != 0
 		typ := int(hdr[0] & 0x7F)
@@ -163,7 +173,7 @@ func (d *Demuxer) parse() error {
 			}
 			siRaw = make([]byte, flac.StreamInfoLen)
 			if err := container.ReadFull(d.src, siRaw, off+4); err != nil {
-				return waxerr.Wrap(waxerr.CodeSourceUnreadable, "flac: reading STREAMINFO", err)
+				return container.ShortRead("flac: reading STREAMINFO", err)
 			}
 			var err error
 			if d.si, err = flac.ParseStreamInfo(siRaw); err != nil {
@@ -187,7 +197,7 @@ func (d *Demuxer) parse() error {
 
 	f := d.si.PCMFormat()
 	if err := f.Valid(); err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "flac: unusable format", err)
+		return container.UnusableFormat("flac", f, err)
 	}
 	samples := d.si.Samples
 	if samples == 0 {
@@ -391,7 +401,7 @@ func (d *Demuxer) parseSeekTable(off, length int64) error {
 	}
 	raw := make([]byte, points*18)
 	if err := container.ReadFull(d.src, raw, off); err != nil {
-		return waxerr.Wrap(waxerr.CodeSourceUnreadable, "flac: reading SEEKTABLE", err)
+		return container.ShortRead("flac: reading SEEKTABLE", err)
 	}
 	d.seekTable = make([]seekPoint, 0, points)
 	for i := int64(0); i < points; i++ {
@@ -541,9 +551,9 @@ func (d *Demuxer) findEnd() (end int64, next flac.FrameInfo, nextOK bool, err er
 	for i := 0; ; i++ {
 		if d.tailChecks(crc, crcPos, end) {
 			if end != d.w.DataEnd() {
-				if werr := d.warn(end, "%d trailing tag or padding bytes ignored", d.w.DataEnd()-end); werr != nil {
-					return 0, flac.FrameInfo{}, false, werr
-				}
+				// Where taggers put an ID3v1 or APE trailer: bytes after the
+				// last frame that the file is entitled to carry.
+				d.note(end, "%d trailing tag or padding bytes ignored", d.w.DataEnd()-end)
 				d.w.SetDataEnd(end)
 			}
 			return end, flac.FrameInfo{}, false, nil

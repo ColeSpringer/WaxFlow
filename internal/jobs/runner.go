@@ -1271,9 +1271,12 @@ func splitProgressAt(base, span, done, pieceTotal int64) int64 {
 // job directory.
 //
 // The server holds a split's cuts to this same rule at creation. What the two
-// share is that rule, not a number: each fills an absent length and neither
-// overrides a declared one, so they answer alike without consulting each
-// other. The measuring is a memo hit rather than a second walk of the file:
+// share is that rule, not a number: each fills a length the source does not
+// really state and neither overrides one it does, so they answer alike without
+// consulting each other. An advisory length counts as not stated: it is a
+// duration rounded into samples (ASF, a Matroska Info Duration), not a claim
+// about content, so filling it contradicts nothing. That is the distinction
+// the paragraph above draws for a lying header and this one inherits. The measuring is a memo hit rather than a second walk of the file:
 // the pass that measured this source to validate the cuts filled it, keyed by
 // source identity.
 //
@@ -1291,14 +1294,15 @@ func (r *Runner) splitLength(src *source.File) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if samples := info.Default().Samples; samples >= 0 || r.cfg.MeasureTrack == nil {
+	track := info.Default()
+	if samples := track.Samples; (samples >= 0 && !track.SamplesAdvisory) || r.cfg.MeasureTrack == nil {
 		return samples, nil
 	}
-	track, err := r.cfg.MeasureTrack(src)
+	measured, err := r.cfg.MeasureTrack(src)
 	if err != nil {
 		return 0, err
 	}
-	return track.Samples, nil
+	return measured.Samples, nil
 }
 
 // runSplit cuts the source at the request's cut points, one output per piece.

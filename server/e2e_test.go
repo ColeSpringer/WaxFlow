@@ -1725,3 +1725,79 @@ func TestStreamTranscodeWavPack(t *testing.T) {
 		t.Errorf("bitrate on a lossless format = %d, want 415", resp.StatusCode)
 	}
 }
+
+// TestDamagedSourceIs422 pins the status split the malformed-input code
+// exists for. A file whose bytes deviate from their own format used to answer
+// 415, which tells a client the media type is wrong and to send a different
+// one; the type was never the problem. 422 says the entity cannot be
+// processed, which is the truth and is the one a client can act on (re-rip,
+// re-download) instead of re-encoding.
+func TestDamagedSourceIs422(t *testing.T) {
+	env := newTestEnv(t, nil)
+	good, err := os.ReadFile(filepath.Join(env.root, "sine.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A RIFF header naming a chunk that runs past the file: readable enough to
+	// pick the wav driver, broken enough that it cannot be parsed.
+	damaged := append([]byte(nil), good[:64]...)
+	if err := os.WriteFile(filepath.Join(env.root, "damaged.wav"), damaged, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{
+		"/probe?src=lib/damaged.wav",
+		"/stream?src=lib/damaged.wav&format=flac",
+	} {
+		t.Run(path, func(t *testing.T) {
+			wantEnvelope(t, env.get(t, path, nil), http.StatusUnprocessableEntity, waxerr.CodeMalformedInput)
+		})
+	}
+
+	// The other half of the split, so the cell cannot pass by turning every
+	// refusal into 422: a well-formed source the output policy declines still
+	// answers 415.
+	wantEnvelope(t, env.get(t, "/stream?src=lib/sine.wav&format=flac&bitrate=128", nil),
+		http.StatusUnsupportedMediaType, waxerr.CodeUnsupportedFormat)
+}
+
+// TestProbeReportsNotesSeparately pins the wire shape of the kind split. A
+// caller leading with "input damage" reads `warnings`; what this build did
+// with a well-formed file is `notes`, and `strict` never refuses over one.
+// Before the split both arrived under `warnings`, so a client could not tell a
+// broken rip from a QuickTime file that simply has no ftyp box.
+func TestProbeReportsNotesSeparately(t *testing.T) {
+	env := newTestEnv(t, nil)
+	b, err := os.ReadFile(filepath.Join("..", "testdata", "chapters.m4b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy(b[4:8], "xxxx") // no recognizable ftyp; legal for QuickTime
+	if err := os.WriteFile(filepath.Join(env.root, "noftyp.m4b"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, q := range []string{"", "&strict=true"} {
+		resp := env.get(t, "/probe?src=lib/noftyp.m4b"+q, nil)
+		body := readBody(t, resp)
+		if resp.StatusCode != 200 {
+			t.Fatalf("GET /probe%s = %d: %s", q, resp.StatusCode, body)
+		}
+		var doc server.ProbeInfo
+		if err := json.Unmarshal(body, &doc); err != nil {
+			t.Fatal(err)
+		}
+		if len(doc.Notes) == 0 || !strings.Contains(doc.Notes[0], "ftyp") {
+			t.Errorf("probe%s notes = %v, want one naming the missing ftyp", q, doc.Notes)
+		}
+		if len(doc.Warnings) != 0 {
+			t.Errorf("probe%s warnings = %v, want none", q, doc.Warnings)
+		}
+		// The field is omitempty on both sides, so an intact file must not
+		// carry either key; otherwise "notes" would just be a second name for
+		// "warnings".
+		if strings.Contains(string(body), `"warnings"`) {
+			t.Errorf("probe%s body carries a warnings key: %s", q, body)
+		}
+	}
+}

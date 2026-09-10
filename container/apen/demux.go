@@ -92,8 +92,11 @@ func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 	return d, nil
 }
 
+// malformed reports bytes that deviate from this format: truncated,
+// inconsistent, or out of range. See [waxerr.Malformed] for the rule that
+// divides it from unsupported.
 func malformed(format string, args ...any) error {
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "ape: "+fmt.Sprintf(format, args...))
+	return waxerr.Malformed("ape: ", format, args...)
 }
 
 // warn records tolerated damage, or fails in strict mode.
@@ -102,7 +105,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	w := container.Warning{Offset: off, Msg: msg}
+	w := container.Warning{Offset: off, Msg: msg, Kind: container.Damage}
 	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
 		d.warnings = append(d.warnings, w)
 	}
@@ -126,7 +129,7 @@ func (d *Demuxer) parse() error {
 	cfg := hdr.Config()
 	f := cfg.Format()
 	if err := f.Valid(); err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "ape: unusable format", err)
+		return container.UnusableFormat("ape", f, err)
 	}
 	blob, err := cfg.MarshalBinary()
 	if err != nil {

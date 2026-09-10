@@ -95,6 +95,7 @@ func TestExitCodes(t *testing.T) {
 		{"catalog-unavailable", waxerr.New(waxerr.CodeCatalogUnavailable, ""), 4},
 		{"unsupported-format", waxerr.New(waxerr.CodeUnsupportedFormat, ""), 5},
 		{"unsupported-source", waxerr.New(waxerr.CodeUnsupportedSource, ""), 5},
+		{"malformed-input", waxerr.New(waxerr.CodeMalformedInput, ""), 9},
 		{"canceled", waxerr.New(waxerr.CodeCanceled, ""), 6},
 		{"context cancellation", context.Canceled, 6},
 		{"unauthorized", waxerr.New(waxerr.CodeUnauthorized, ""), 7},
@@ -129,5 +130,33 @@ func TestExitContractComplete(t *testing.T) {
 	}
 	if len(seen) != len(waxerr.Codes()) {
 		t.Errorf("exit contract classifies %d codes, %d are defined", len(seen), len(waxerr.Codes()))
+	}
+}
+
+// TestConstructorsCarryTheirOwnCode pins the pair that keeps the two answers
+// apart. They exist because several packages aliased one helper to the other
+// while both produced unsupported-format, and nothing could tell: a builder
+// that returns the wrong code reads identically at the call site.
+func TestConstructorsCarryTheirOwnCode(t *testing.T) {
+	m := waxerr.Malformed("flac: ", "%s of %d bytes", "block", 7)
+	if got := waxerr.CodeOf(m); got != waxerr.CodeMalformedInput {
+		t.Errorf("Malformed code = %q, want %q", got, waxerr.CodeMalformedInput)
+	}
+	if got := m.Error(); got != "flac: block of 7 bytes" {
+		t.Errorf("Malformed message = %q", got)
+	}
+	if !errors.Is(m, waxerr.ErrMalformedInput) {
+		t.Error("Malformed does not match ErrMalformedInput")
+	}
+	if errors.Is(m, waxerr.ErrUnsupportedFormat) {
+		t.Error("Malformed matches ErrUnsupportedFormat; the two codes are not interchangeable")
+	}
+
+	u := waxerr.Unsupported("wma: ", "%d channels", 6)
+	if got := waxerr.CodeOf(u); got != waxerr.CodeUnsupportedFormat {
+		t.Errorf("Unsupported code = %q, want %q", got, waxerr.CodeUnsupportedFormat)
+	}
+	if !errors.Is(u, waxerr.ErrUnsupportedFormat) || errors.Is(u, waxerr.ErrMalformedInput) {
+		t.Error("Unsupported classifies as malformed input")
 	}
 }

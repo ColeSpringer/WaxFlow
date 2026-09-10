@@ -165,12 +165,13 @@ func pcmCase(t *testing.T, packets int, samples int64) (container.Track, []codec
 // TestMuxLayoutConstants pins the fixed widths the back-patches depend on: a
 // patch at the wrong offset is invisible until a reader chokes.
 func TestMuxLayoutConstants(t *testing.T) {
-	entry := appendSeekEntry(nil, idCues, 0x0102030405)
+	const seekPos = uint64(0x0102030405)
+	entry := appendSeekEntry(nil, idCues, seekPos)
 	if len(entry) != seekEntryLen {
 		t.Fatalf("a Seek entry is %d bytes, seekEntryLen says %d", len(entry), seekEntryLen)
 	}
-	if got := beUint(entry[seekPosValueOff : seekPosValueOff+8]); got != 0x0102030405 {
-		t.Errorf("SeekPosition value at +%d reads %#x, want %#x", seekPosValueOff, got, 0x0102030405)
+	if got := beUint(entry[seekPosValueOff : seekPosValueOff+8]); got != seekPos {
+		t.Errorf("SeekPosition value at +%d reads %#x, want %#x", seekPosValueOff, got, seekPos)
 	}
 	if got := len(appendFloat(nil, idDuration, 1)); got != durationLen {
 		t.Errorf("a Duration element is %d bytes, durationLen says %d", got, durationLen)

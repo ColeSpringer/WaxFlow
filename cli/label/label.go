@@ -204,7 +204,14 @@ func (m Mapper) Apply(ctx context.Context, path string, info *meta.Info, extra [
 	// destination cannot hold. It is the same choice a cross-format copy makes,
 	// and what waxlabel's own CLI passes for set. The refusals that survive it
 	// still mean the output cannot take the metadata, so the buckets below stand.
-	plan, err := ed.Prepare(waxlabel.WithAllowUnsupportedDrop())
+	//
+	// WithUnrecognizedPictures is the same contract for a cover whose bytes no
+	// sniffer names. Since waxlabel v1.7.0 an added picture is validated at
+	// Prepare, which is right for a tagger authoring an edit and wrong here:
+	// every picture above came off the source, so refusing one would fail a
+	// finished transcode over art the input already carried. waxlabel's own
+	// transfer engine opts out for the same reason.
+	plan, err := ed.Prepare(waxlabel.WithAllowUnsupportedDrop(), waxlabel.WithUnrecognizedPictures())
 	if err != nil {
 		// Two unrelated failures land here. The write refusals (a fragmented
 		// MP4, an iloc or saio the codec cannot patch, a chapter count or

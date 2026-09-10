@@ -90,10 +90,17 @@ func TestWMAProbeAndDecode(t *testing.T) {
 			if tr.Fmt.Type != audio.Float {
 				t.Errorf("format type %v, want float", tr.Fmt.Type)
 			}
-			// ASF states milliseconds, so its length is advisory: a decode
-			// must not be trimmed to it and must not be damage for missing it.
+			// ASF states a duration, not a sample count, so its length is
+			// advisory: a decode must not be trimmed to it and must not be
+			// damage for missing it. Both flags say so, and they say
+			// different things: SamplesExact is a truncation instruction,
+			// SamplesAdvisory a claim about precision, and only the second
+			// is what stops a timeline building a prefix sum on it.
 			if tr.SamplesExact {
 				t.Error("SamplesExact is set; ASF cannot state a sample-exact length")
+			}
+			if !tr.SamplesAdvisory {
+				t.Error("SamplesAdvisory is clear; ASF rounds its length from a duration")
 			}
 			if tr.Delay != 0 || tr.Padding != 0 {
 				t.Errorf("gapless trims %d/%d; WMA carries none", tr.Delay, tr.Padding)

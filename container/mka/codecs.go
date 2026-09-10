@@ -84,7 +84,7 @@ func resolveCodec(t *trackEntry) (codecSetup, error) {
 	case codec.PCM:
 		return setupPCM(t)
 	default:
-		return codecSetup{}, malformed("codec %q is not one this build decodes", t.codecID)
+		return codecSetup{}, unsupported("codec %q is not one this build decodes", t.codecID)
 	}
 }
 
@@ -194,7 +194,7 @@ func setupPCM(t *trackEntry) (codecSetup, error) {
 	case "A_PCM/FLOAT/IEEE":
 		enc = pcm.Float
 	default:
-		return codecSetup{}, malformed("unsupported PCM flavor %q", t.codecID)
+		return codecSetup{}, unsupported("unsupported PCM flavor %q", t.codecID)
 	}
 	if t.bitDepth == 0 {
 		return codecSetup{}, malformed("PCM track has no BitDepth")
@@ -202,10 +202,17 @@ func setupPCM(t *trackEntry) (codecSetup, error) {
 	c := pcm.Config{Encoding: enc, Bits: t.bitDepth, BigEndian: t.codecID == "A_PCM/INT/BIG"}
 	cfgBytes, err := c.MarshalBinary()
 	if err != nil {
-		return codecSetup{}, waxerr.Wrap(waxerr.CodeUnsupportedFormat, "mka: unusable PCM config", err)
+		// The depth came out of the file's Audio element, so the code follows
+		// the reason: a depth this build does not carry is unsupported, and a
+		// depth no PCM stream may state is damage.
+		return codecSetup{}, waxerr.Wrap(waxerr.CodeOf(err), "mka: unusable PCM config", err)
 	}
-	if t.channels < 1 || t.channels > audio.MaxChannels {
+	if t.channels < 1 {
 		return codecSetup{}, malformed("PCM track with %d channels", t.channels)
+	}
+	if t.channels > audio.MaxChannels {
+		return codecSetup{}, unsupported("PCM track with %d channels; this build mixes at most %d",
+			t.channels, audio.MaxChannels)
 	}
 	f := c.PCMFormat(t.rate, t.channels, audio.DefaultLayout(t.channels))
 	return codecSetup{

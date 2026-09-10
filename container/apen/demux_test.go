@@ -310,8 +310,8 @@ func TestRefusals(t *testing.T) {
 			if err == nil {
 				t.Fatal("accepted")
 			}
-			if code := waxerr.CodeOf(err); code != waxerr.CodeUnsupportedFormat && code != waxerr.CodeSourceUnreadable {
-				t.Errorf("code = %v", code)
+			if code := waxerr.CodeOf(err); code != waxerr.CodeMalformedInput && code != waxerr.CodeSourceUnreadable {
+				t.Errorf("code = %v, want malformed-input or source-unreadable", code)
 			}
 		})
 	}

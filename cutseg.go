@@ -48,8 +48,8 @@ func (e *Engine) PlanCutSegments(track container.Track, opts TranscodeOptions, s
 	if err != nil {
 		// The seam, exactly as PlanCut maps it: CutTrack cannot express a decline
 		// through its signature, so a CodeUnsupportedFormat becomes the ladder's
-		// (nil, nil) and a CodeInvalidRequest propagates as an error rung 3 would
-		// hit identically.
+		// (nil, nil), while a CodeInvalidRequest or a CodeMalformedInput
+		// propagates as an error rung 3 would hit identically.
 		if waxerr.CodeOf(err) == waxerr.CodeUnsupportedFormat {
 			e.log.Debug("segmented cut declined", "codec", track.Codec, "grid", grid, "reason", err)
 			return nil, nil
@@ -124,7 +124,7 @@ func (e *Engine) CutSegments(ctx context.Context, src container.Source, hint str
 		// The plan's measured length over the header's, the mirror of CutStream: the
 		// cut arithmetic reads it (see computeCut's decodedEnd), and plan and run
 		// must read the same one or their windows drift.
-		track.Samples, track.SamplesExact = samples, true
+		track.Samples, track.SamplesExact, track.SamplesAdvisory = samples, true, false
 	}
 	cutTrack, _, err := CutTrack(track, spans, grid)
 	if err != nil {

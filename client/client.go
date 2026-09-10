@@ -113,7 +113,11 @@ type ProbeInfo struct {
 	SchemaVersion int          `json:"schemaVersion"`
 	Container     string       `json:"container"`
 	Tracks        []ProbeTrack `json:"tracks"`
-	Warnings      []string     `json:"warnings,omitempty"`
+	// Warnings is input damage the daemon's parser worked around; Notes is
+	// what it did with a file that is not damaged (a stream it ignored, a
+	// list it capped, a band it does not synthesize).
+	Warnings []string `json:"warnings,omitempty"`
+	Notes    []string `json:"notes,omitempty"`
 
 	// Metadata summary, present when the daemon maps metadata and the
 	// source carries it.

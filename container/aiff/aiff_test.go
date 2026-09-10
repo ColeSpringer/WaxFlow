@@ -440,3 +440,45 @@ func TestMuxRefusesAPipe(t *testing.T) {
 		t.Errorf("%d bytes were written to a destination that cannot be finished", len(w.Buf))
 	}
 }
+
+// TestFractionalRateIsANoteNotDamage: AIFF stores the sample rate as an
+// 80-bit extended float, so a fractional one is a value the format allows and
+// this pipeline rounds. It used to be a warning, which made `probe --strict`
+// call such a file malformed; it is a Note now and strict reads it.
+func TestFractionalRateIsANoteNotDamage(t *testing.T) {
+	var b bytes.Buffer
+	b.WriteString("FORM")
+	b.Write(u32be(0)) // patched below
+	b.WriteString("AIFF")
+	b.WriteString("COMM")
+	b.Write(u32be(18))
+	b.Write(u16be(1)) // mono
+	b.Write(u32be(2)) // frames
+	b.Write(u16be(16))
+	rate := toExt80(44100.5)
+	b.Write(rate[:])
+	b.WriteString("SSND")
+	b.Write(u32be(8 + 4))
+	b.Write(u32be(0))
+	b.Write(u32be(0))
+	b.Write([]byte{0, 1, 0, 2})
+	raw := b.Bytes()
+	be.PutUint32(raw[4:], uint32(len(raw)-8))
+
+	for _, strict := range []bool{false, true} {
+		d, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: strict})
+		if err != nil {
+			t.Fatalf("strict=%v refused a fractional sample rate: %v", strict, err)
+		}
+		if got := d.Tracks()[0].Fmt.Rate; got != 44101 {
+			t.Errorf("rate = %d, want 44101 (rounded)", got)
+		}
+		ws := d.Warnings()
+		if len(ws) != 1 || !strings.Contains(ws[0].Msg, "non-integer") {
+			t.Fatalf("warnings = %v, want one about the rounding", ws)
+		}
+		if ws[0].Kind != container.Note {
+			t.Errorf("the rounding remark is Kind %v, want Note", ws[0].Kind)
+		}
+	}
+}

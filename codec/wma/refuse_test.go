@@ -51,27 +51,36 @@ func TestConfigRefusals(t *testing.T) {
 		name string
 		cfg  []byte
 		want string
+		code waxerr.Code
 	}{
-		{"rate above the ceiling", wfx(0x161, 2, 96000, 16000, 743, v2Extra(1)), "above the 50000 Hz"},
-		{"zero rate", wfx(0x161, 2, 0, 16000, 743, v2Extra(1)), "sample rate 0"},
-		{"three channels", wfx(0x161, 3, 44100, 16000, 743, v2Extra(1)), "3 channels"},
-		{"no channels", wfx(0x161, 0, 44100, 16000, 743, v2Extra(1)), "0 channels"},
-		{"zero block align", wfx(0x161, 2, 44100, 16000, 0, v2Extra(1)), "nBlockAlign is 0"},
-		{"zero byte rate", wfx(0x161, 2, 44100, 0, 743, v2Extra(1)), "nAvgBytesPerSec is 0"},
-		{"wma pro tag", wfx(0x162, 2, 44100, 16000, 743, v2Extra(1)), "0x0162 is not Windows Media Audio 1 or 2"},
-		{"pcm tag", wfx(0x0001, 2, 44100, 16000, 743, nil), "0x0001 is not Windows Media Audio 1 or 2"},
-		{"short config", []byte{0x61, 0x01}, "want at least the 18-byte"},
+		{"rate above the ceiling", wfx(0x161, 2, 96000, 16000, 743, v2Extra(1)), "above the 50000 Hz", waxerr.CodeUnsupportedFormat},
+		{"zero rate", wfx(0x161, 2, 0, 16000, 743, v2Extra(1)), "sample rate 0", waxerr.CodeMalformedInput},
+		{"three channels", wfx(0x161, 3, 44100, 16000, 743, v2Extra(1)), "3 channels", waxerr.CodeUnsupportedFormat},
+		{"no channels", wfx(0x161, 0, 44100, 16000, 743, v2Extra(1)), "0 channels", waxerr.CodeMalformedInput},
+		{"zero block align", wfx(0x161, 2, 44100, 16000, 0, v2Extra(1)), "nBlockAlign is 0", waxerr.CodeMalformedInput},
+		{"zero byte rate", wfx(0x161, 2, 44100, 0, 743, v2Extra(1)), "nAvgBytesPerSec is 0", waxerr.CodeMalformedInput},
+		{"wma pro tag", wfx(0x162, 2, 44100, 16000, 743, v2Extra(1)), "0x0162 is not Windows Media Audio 1 or 2", waxerr.CodeUnsupportedFormat},
+		{"pcm tag", wfx(0x0001, 2, 44100, 16000, 743, nil), "0x0001 is not Windows Media Audio 1 or 2", waxerr.CodeUnsupportedFormat},
+		{"short config", []byte{0x61, 0x01}, "want at least the 18-byte", waxerr.CodeMalformedInput},
 		// v1 plus variable block lengths has no coherent reference behaviour:
 		// the band layout is computed into one slot and indexed from another,
 		// which agree only because every real v1 file has one block size.
-		{"v1 with variable block lengths", wfx(0x160, 1, 44100, 4000, 185, v1Extra(0x0005)), "Windows Media Audio 1 with variable block lengths"},
+		{"v1 with variable block lengths", wfx(0x160, 1, 44100, 4000, 185, v1Extra(0x0005)), "Windows Media Audio 1 with variable block lengths", waxerr.CodeUnsupportedFormat},
 		// Stereo v1 aligns per channel slot, and an align is relative to the
 		// buffer a frame is read from; a reservoir moves frames between
 		// buffers, so the two together have no defined meaning.
-		{"stereo v1 with a reservoir", wfx(0x160, 2, 44100, 8000, 371, v1Extra(0x0003)), "stereo Windows Media Audio 1 with a bit reservoir"},
+		{"stereo v1 with a reservoir", wfx(0x160, 2, 44100, 8000, 371, v1Extra(0x0003)), "stereo Windows Media Audio 1 with a bit reservoir", waxerr.CodeUnsupportedFormat},
 		// A bit rate absurd for the frame length asks for a superframe offset
-		// field wider than the bit reader's word.
-		{"absurd bit rate", wfx(0x161, 1, 8000, 1<<30, 4096, v2Extra(3)), "superframe offset field"},
+		// field wider than the bit reader's word. The value stays inside what
+		// an int holds on a 32-bit build, so this cell reaches that check on
+		// both widths rather than tripping the wire-field bound first.
+		{"absurd bit rate", wfx(0x161, 1, 8000, 1<<25, 4096, v2Extra(3)), "superframe offset field", waxerr.CodeMalformedInput},
+		// Past what either field can mean, and past what an int holds on a
+		// 32-bit build. Bounded before the conversion, so both widths refuse
+		// the same file the same way instead of one of them wrapping the
+		// value into something that passes.
+		{"rate past the wire bound", wfx(0x161, 1, 1<<28, 16000, 743, v2Extra(1)), "which is not a rate a file has", waxerr.CodeMalformedInput},
+		{"byte rate past the wire bound", wfx(0x161, 1, 8000, 1<<30, 4096, v2Extra(3)), "bytes/s, which is not a rate", waxerr.CodeMalformedInput},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := wma.ParseConfig(tc.cfg)
@@ -81,8 +90,12 @@ func TestConfigRefusals(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error %q does not name %q", err, tc.want)
 			}
-			if got := waxerr.CodeOf(err); got != waxerr.CodeUnsupportedFormat {
-				t.Errorf("code %q, want %q", got, waxerr.CodeUnsupportedFormat)
+			// Per case: a shape the decoder declines (three channels, a WMA
+			// Pro tag, v1 with variable blocks) is unsupported, and a
+			// WAVEFORMATEX that states something no file may state is
+			// malformed. Both used to be one code.
+			if got := waxerr.CodeOf(err); got != tc.code {
+				t.Errorf("code %q, want %q", got, tc.code)
 			}
 		})
 	}

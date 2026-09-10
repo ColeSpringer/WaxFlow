@@ -90,7 +90,9 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	if err := t.Fmt.Valid(); err != nil {
 		return err
 	}
-	if t.Fmt.Rate > size32Unknown {
+	// Compared as an int64: size32Unknown is 2^32-1 and Rate is an int, which
+	// is 32 bits on a 32-bit build, where the untyped constant does not fit.
+	if int64(t.Fmt.Rate) > size32Unknown {
 		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("wav: rate %d does not fit WAV", t.Fmt.Rate))
 	}
 	m.cfg = cfg

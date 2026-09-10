@@ -63,6 +63,20 @@ jobs:
       - run: make test-example
       - run: make build
 
+  # The 32-bit word size, which no release target has and every other job
+  # therefore misses. Go's int is 32 bits there, so a uint32 field read into an
+  # int wraps and a 2^32 constant stops compiling; the whole tree had stopped
+  # building for 386 before anyone ran it. vet is what covers the test files,
+  # which go build does not compile, so the target runs both.
+  word-size:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: make test-386
+
   cross-compile:
     runs-on: ubuntu-latest
     steps:

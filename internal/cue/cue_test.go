@@ -2,6 +2,7 @@ package cue
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -112,8 +113,16 @@ func TestParseTimeMinutesBound(t *testing.T) {
 	if got := waxerr.CodeOf(err); got != waxerr.CodeInvalidRequest {
 		t.Errorf("ParseTime(%q) code = %v, want CodeInvalidRequest", overflows, got)
 	}
-	if !strings.Contains(err.Error(), "addresses at most") {
-		t.Errorf("ParseTime(%q) error = %v, want it to name the bound", overflows, err)
+	// Which refusal names it depends on the word size: an int holds
+	// 2049638230412173 on a 64-bit build, so the value reaches the bound
+	// check, while on a 32-bit one Atoi refuses the field first. Both are
+	// correct and both are invalid-request; only the wording differs, so the
+	// bound's own message is pinned on a value that reaches it either way.
+	const pastTheBound = "1000000:00:00"
+	if _, err := ParseTime(pastTheBound); err == nil {
+		t.Errorf("ParseTime(%q) was accepted; MM past maxMinutes cannot be a position", pastTheBound)
+	} else if !strings.Contains(err.Error(), "addresses at most") {
+		t.Errorf("ParseTime(%q) error = %v, want it to name the bound", pastTheBound, err)
 	}
 
 	// The bound is only defensible if it still admits the long single-file
@@ -198,7 +207,10 @@ func TestValidateNeverIndexesBeforeTheFirstTrack(t *testing.T) {
 	sheet := &Sheet{Files: []File{{
 		Name: "a.flac",
 		Tracks: []Track{
-			{Number: 1, Indexes: []Index{{Number: 1, Frame: -9223372036854773116}}},
+			// Near the bottom of the int range, which is what a wrapped
+			// ParseTime produces. Written relative to MinInt so it is a value
+			// an int holds on a 32-bit build too.
+			{Number: 1, Indexes: []Index{{Number: 1, Frame: math.MinInt + 2492}}},
 			{Number: 2, Indexes: []Index{{Number: 1, Frame: 4500}}},
 		},
 	}}}

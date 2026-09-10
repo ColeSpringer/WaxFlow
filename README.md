@@ -211,7 +211,7 @@ write keeps a reload from reading a half-written file and `400`ing.
 - `waxflow version`: version and build info
 - `waxflow exit-codes`: print the documented exit-code contract (0 ok,
   1 internal, 2 invalid, 3 not-found, 4 io, 5 unsupported, 6 canceled,
-  7 unauthorized, 8 overloaded)
+  7 unauthorized, 8 overloaded, 9 malformed)
 
 The HTTP surface is documented in [docs/api.md](docs/api.md).
 

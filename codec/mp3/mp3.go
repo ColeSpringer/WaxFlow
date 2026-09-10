@@ -113,8 +113,11 @@ type Header struct {
 	Protected bool
 }
 
+// malformed reports bytes that deviate from this format: truncated,
+// inconsistent, or out of range. See [waxerr.Malformed] for the rule that
+// divides it from unsupported.
 func malformed(format string, args ...any) error {
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "mp3: "+fmt.Sprintf(format, args...))
+	return waxerr.Malformed("mp3: ", format, args...)
 }
 
 // bitrateKbps is the Layer III bit rate table, in kbit/s: one row for

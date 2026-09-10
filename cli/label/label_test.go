@@ -334,3 +334,49 @@ func TestUnstorableDropIsLogged(t *testing.T) {
 		t.Errorf("dropped chapters were not logged; got %q", got)
 	}
 }
+
+// TestUnrecognizedCoverIsCarriedNotRefused pins the carry contract for a
+// cover whose bytes no image sniffer names. waxlabel v1.7.0 validates every
+// added picture at Prepare and refuses one it cannot recognize, which is the
+// right default for a tagger authoring an edit: the caller almost certainly
+// handed it the wrong file. Apply is not authoring, it is carrying what the
+// source already held, so it opts out the way waxlabel's own transfer engine
+// does. Without the opt-out a source with an exotic or mislabeled cover fails
+// the metadata pass of a transcode that otherwise succeeded.
+func TestUnrecognizedCoverIsCarriedNotRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.flac")
+	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "sine-s16.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFLAC(t, raw, path)
+
+	junk := []byte("this is not an image, and no sniffer will say it is")
+	if err := label.New().Apply(t.Context(), path, &meta.Info{
+		Tags:     map[string][]string{"TITLE": {"survives"}},
+		Pictures: []meta.Picture{{MIME: "image/jpeg", Front: true, Data: junk}},
+	}, nil); err != nil {
+		t.Fatalf("Apply refused a cover the source already carried: %v", err)
+	}
+
+	out, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := label.New().Read(t.Context(), container.BytesSource(out), "flac",
+		meta.ReadOptions{Pictures: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Tags["TITLE"]; !slices.Equal(got, []string{"survives"}) {
+		t.Errorf("TITLE = %v, want [survives]", got)
+	}
+	if len(info.Pictures) != 1 || !bytes.Equal(info.Pictures[0].Data, junk) {
+		t.Fatalf("pictures = %d, want the one carried cover back", len(info.Pictures))
+	}
+	// The declared MIME does not survive: the bytes are the authority, and
+	// they say nothing, so the cover is stored as raw binary.
+	if got := info.Pictures[0].MIME; got != "application/octet-stream" {
+		t.Errorf("cover MIME = %q, want application/octet-stream", got)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"github.com/colespringer/waxflow/codec/opus"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // runCut assembles the rung the way a caller does: measure the grid, plan,
@@ -326,5 +327,50 @@ func TestCutOfAACToFMP4(t *testing.T) {
 	}
 	if plan.Samples >= 96000 {
 		t.Errorf("plan.Samples = %d, want the cut length", plan.Samples)
+	}
+}
+
+// TestCutOfADamagedSourceIsMalformedNotADecline pins the one thing the cut
+// ladder's decline seam must not swallow.
+//
+// PlanCut maps CutTrack's unsupported-format onto (nil, nil), which is the
+// ladder's way of saying "this rung cannot serve this, try the next one".
+// Damage is not that, and neither is a bad request. A source whose bytes
+// deviate from their format fails every rung, so declining it only spends a
+// full transcode to arrive at the same refusal, under a status (415) that
+// tells the client to send a different format.
+func TestCutOfADamagedSourceIsMalformedNotADecline(t *testing.T) {
+	src := remuxFixture(t, waxflow.TranscodeOptions{Format: "opus"}, 96000)
+	e := waxflow.New()
+
+	// Truncated inside the first page's lacing table, which is what a partial
+	// download leaves behind. The grid probe is the first thing a cut-eligible
+	// request runs, so that is where the damage surfaces and the request stops.
+	if _, err := e.PacketGrid(container.BytesSource(src[:30]), "opus"); err == nil {
+		t.Fatal("the grid probe read a truncated Ogg clean; this cell covers nothing")
+	} else if got := waxerr.CodeOf(err); got != waxerr.CodeMalformedInput {
+		t.Errorf("grid probe code = %q, want %q (%v)", got, waxerr.CodeMalformedInput, err)
+	}
+
+	// And the seam itself only declines on unsupported-format. A span the
+	// source cannot hold is invalid-request, and PlanCut must propagate it
+	// rather than hand the request to a rung that would refuse it identically.
+	// Without this the cell above would pass on a PlanCut that swallowed
+	// everything, since it never reaches one.
+	_, info, err := format.OpenDemuxer(container.BytesSource(src), "opus", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	track := info.Default()
+	past := []waxflow.Span{{From: 0, To: track.Samples + 1}}
+	plan, err := e.PlanCut(track, waxflow.TranscodeOptions{Format: "opus", Container: "mka"}, past, 960)
+	if err == nil {
+		t.Fatalf("PlanCut accepted a span past the source (plan=%v); a decline here loses the reason", plan)
+	}
+	if plan != nil {
+		t.Error("PlanCut returned both a plan and an error")
+	}
+	if got := waxerr.CodeOf(err); got != waxerr.CodeInvalidRequest {
+		t.Errorf("span-past-the-end code = %q, want %q (%v)", got, waxerr.CodeInvalidRequest, err)
 	}
 }

@@ -2,6 +2,7 @@ package mp4
 
 import (
 	"encoding/binary"
+	"math"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/aac"
@@ -56,7 +57,21 @@ func (d *Demuxer) parseAudioSampleEntry(t *track, format string, body []byte, de
 	case 1:
 		childOff = 28 + 16 // samplesPerPacket, bytesPerPacket, bytesPerFrame, bytesPerSample
 	case 2:
+		rate, ch, bits, err := v2SoundFields(format, body)
+		if err != nil {
+			return err
+		}
+		sampleRate, channels, bitsPerSample = rate, ch, bits
+		// The version 2 struct states its own size, which is where the
+		// extensions begin: measured from the start of the sample entry, so
+		// including the 8-byte box header this body no longer has. Taking the
+		// fixed 64 instead would start the children mid-struct on an entry
+		// that carries more than the fields above, and the codec config would
+		// read as absent. Bounded both ways, since the field is the file's.
 		childOff = 28 + 36
+		if sz := int(be32(body[28:32])); sz-8 > childOff && sz-8 <= len(body) {
+			childOff = sz - 8
+		}
 	}
 	if childOff > len(body) {
 		childOff = len(body)
@@ -83,6 +98,44 @@ func (d *Demuxer) parseAudioSampleEntry(t *track, format string, body []byte, de
 	}
 }
 
+// The bounds v2SoundFields sanity-checks its fields against. They are wide
+// enough that no real file is refused (the point of a version 2 entry is a
+// rate the 16.16 field cannot hold) and narrow enough that the conversions
+// below stay in range on a 32-bit int. What a track may actually carry is
+// audio.Format's business, and it refuses with its own words.
+const (
+	v2MaxRate     = 1 << 24
+	v2MaxChannels = 255
+	v2MaxDepth    = 64
+)
+
+// v2SoundFields reads a QuickTime version 2 sound description, which puts
+// constants (3 channels, 16 bits, a 1.0 rate) in the v0 field positions and
+// carries the real values in its own struct: a float64 rate at 32, a 32-bit
+// channel count at 40, and constBitsPerChannel at 48. The depth is meaningful
+// for LPCM only and reads 0 for a compressed codec, which is the same "unknown"
+// the caller already handles.
+func v2SoundFields(format string, body []byte) (rate, channels, bits int, err error) {
+	// The v2 struct runs to 64 bytes; an entry that declares version 2 and
+	// stops inside it is damage, not a short entry with no children.
+	if len(body) < 28+36 {
+		return 0, 0, 0, malformed("version 2 audio sample entry %q truncated (%d bytes)", format, len(body))
+	}
+	hz := math.Float64frombits(be64(body[32:40]))
+	if !(hz >= 1 && hz <= v2MaxRate) {
+		return 0, 0, 0, malformed("version 2 audio sample entry %q declares a %v Hz rate", format, hz)
+	}
+	ch := be32(body[40:44])
+	if ch == 0 || ch > v2MaxChannels {
+		return 0, 0, 0, malformed("version 2 audio sample entry %q declares %d channels", format, ch)
+	}
+	depth := be32(body[48:52])
+	if depth > v2MaxDepth {
+		return 0, 0, 0, malformed("version 2 audio sample entry %q declares %d bits per channel", format, depth)
+	}
+	return int(math.Round(hz)), int(ch), int(depth), nil
+}
+
 // setOpus reads the 'dOps' box (Opus-in-ISOBMFF) and rebuilds the OpusHead
 // codec config, the inverse of seg.go's opusSampleEntry. dOps is big-endian
 // where OpusHead is little-endian, so the fields are byte-swapped; only channel
@@ -98,7 +151,7 @@ func (d *Demuxer) setOpus(t *track, children []byte) error {
 		return malformed("dOps box truncated (%d bytes)", len(dops))
 	}
 	if family := dops[10]; family != 0 {
-		return malformed("Opus channel mapping family %d unsupported", family)
+		return unsupported("Opus channel mapping family %d unsupported", family)
 	}
 	head := make([]byte, 19)
 	copy(head, "OpusHead")

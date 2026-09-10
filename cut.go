@@ -292,8 +292,8 @@ func snapGridUp(x, g int64) int64 {
 // This returns errors throughout, including for the four conditions that are
 // really declines, because its signature has nowhere to put a (nil, nil).
 // PlanCut is what maps them back onto the ladder's published contract:
-// CodeUnsupportedFormat here becomes a decline there, and CodeInvalidRequest
-// propagates as an error. That split is the seam between "this rung cannot serve
+// CodeUnsupportedFormat here becomes a decline there, while CodeInvalidRequest
+// and CodeMalformedInput propagate as errors. That split is the seam between "this rung cannot serve
 // this" and "no rung can": an invalid span is one rung 3 would refuse
 // identically, and a codec off the allowlist is one rung 3 serves happily.
 func CutTrack(track container.Track, spans []Span, grid int) (container.Track, []Span, error) {
@@ -549,7 +549,7 @@ func computeCut(track container.Track, spans []Span, grid int) (*cutResult, erro
 	// declared, so it is exact by construction; a ToEnd one inherits whatever
 	// the source's own total was worth.
 	if !lastToEnd {
-		out.SamplesExact = true
+		out.SamplesExact, out.SamplesAdvisory = true, false
 	}
 	if cc.reprime != nil {
 		cfg, err := cc.reprime(track.CodecConfig, out.Delay)
@@ -728,12 +728,18 @@ func cutStraddle(start, end, at int64) error {
 // unanswerable tail, a source whose Delay or grid is outside the timeline this
 // rung computes in, an HE-AAC span that does not keep the stream head, and a
 // codec config the reprime cannot rewrite. The last is worth naming
-// because it looks like it should be an error and is not: a config this rung
-// cannot parse is one the demuxer built and the decoder still can, so the honest
-// answer is to hand the request to a rung that decodes rather than to refuse it
-// on everyone's behalf. Its own error code says CodeUnsupportedFormat for the
-// same reason every malformed-input path here does, and that is precisely what a
-// decline is made of.
+// because it looks like it should be an error and is not: a priming this rung
+// computed and OpusHead's 16-bit field cannot hold is this rung's limit, not
+// the file's, so the honest answer is to hand the request to a rung that
+// re-encodes rather than to refuse it on everyone's behalf, and
+// CodeUnsupportedFormat is exactly what a decline is made of.
+//
+// Only that code declines. A config that will not parse at all is different
+// and now errors: since the codes split it says CodeMalformedInput, and a
+// config the demuxer built and the decoder accepts does not reach that answer.
+// A damaged source errors for the same reason: falling through to rung 3 would
+// only fail there with the same words, several minutes of decoding later,
+// under a status that told the client to send a different format.
 func (e *Engine) PlanCut(track container.Track, opts TranscodeOptions, spans []Span, grid int) (*CutPlan, error) {
 	cut, landed, err := CutTrack(track, spans, grid)
 	if err != nil {
@@ -877,7 +883,7 @@ func (e *Engine) CutStream(ctx context.Context, src container.Source, hint strin
 		// The plan's measured length over the header's, the mirror of grid: the
 		// tail arithmetic and the init segment both read it, and plan and run must
 		// read the same one. See computeCut's decodedEnd and the ToEnd branch.
-		track.Samples, track.SamplesExact = samples, true
+		track.Samples, track.SamplesExact, track.SamplesAdvisory = samples, true, false
 	}
 	// CutTrack's track, not a plan's, and for the same reason RemuxDemuxer takes
 	// the demuxer's own track: the walk filters on the source's track ID, which

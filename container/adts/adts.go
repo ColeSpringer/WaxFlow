@@ -17,8 +17,6 @@
 package adts
 
 import (
-	"fmt"
-
 	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -68,8 +66,19 @@ type header struct {
 	blocks   int // number_of_raw_data_blocks_in_frame (0 means one block)
 }
 
+// malformed reports bytes that deviate from this format: truncated,
+// inconsistent, or out of range. See [waxerr.Malformed] for the rule that
+// divides it from unsupported.
 func malformed(format string, args ...any) error {
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "adts: "+fmt.Sprintf(format, args...))
+	return waxerr.Malformed("adts: ", format, args...)
+}
+
+// unsupported names a well-formed stream this build does not cover. It is a
+// different answer from malformed and carries a different code: the file is
+// fine and we are not, which is a thing a caller can act on. See
+// [waxerr.Malformed] for the rule.
+func unsupported(format string, args ...any) error {
+	return waxerr.Unsupported("adts: ", format, args...)
 }
 
 // parseHeader parses an ADTS header, validating the syncword, layer,
@@ -125,7 +134,7 @@ func (h header) config() (aac.Config, error) {
 	if cfg.Channels == 0 {
 		// channel_configuration 0 means the layout is carried in-band; ADTS
 		// gives no fallback, so treat it as unsupported rather than guess.
-		return aac.Config{}, malformed("channel configuration 0 (in-band PCE) is unsupported")
+		return aac.Config{}, unsupported("channel configuration 0 (in-band PCE) is unsupported")
 	}
 	return cfg, nil
 }

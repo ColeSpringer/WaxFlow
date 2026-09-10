@@ -159,14 +159,14 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	d.record(container.Warning{Offset: off, Msg: msg})
+	d.record(container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
 	return nil
 }
 
 // note records a Warning that Strict must not escalate: a limitation of this
 // build against a file that is well formed, rather than damage in the file.
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.record(container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...)})
+	d.record(container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
 }
 
 func (d *Demuxer) record(w container.Warning) {
@@ -608,7 +608,7 @@ func (d *Demuxer) parseFileProperties(b []byte, off int64) error {
 		// The spec requires the two to agree in a file; they differ only in a
 		// live stream, whose packets cannot be addressed by arithmetic and so
 		// can be neither walked past damage nor seeked.
-		return malformed("variable-size data packets (%d to %d bytes) are not a file this build reads", minPkt, maxPkt)
+		return unsupported("variable-size data packets (%d to %d bytes) are not a file this build reads", minPkt, maxPkt)
 	}
 	if minPkt == 0 || minPkt > maxPacketBytes {
 		return malformed("data packet size of %d bytes", minPkt)
@@ -688,7 +688,7 @@ func (d *Demuxer) checkErrorCorrection(b []byte, off int64, number int, tsLen in
 		return d.warn(off+spErrDataLen, "stream %d declares Audio Spread with %d bytes of correction data", number, ecLen)
 	}
 	if span := b[at]; span > 1 {
-		return malformed("stream %d interleaves its payload across %d packets (ASF Audio Spread), which this build does not undo", number, span)
+		return unsupported("stream %d interleaves its payload across %d packets (ASF Audio Spread), which this build does not undo", number, span)
 	}
 	return nil
 }
@@ -710,13 +710,13 @@ func (d *Demuxer) selectStream() error {
 		}
 	}
 	if len(audio) == 0 {
-		return malformed("no audio stream (the file carries %s)", d.streamKinds())
+		return unsupported("no audio stream (the file carries %s)", d.streamKinds())
 	}
 	// Encryption is checked ahead of the codec, since it is the more
 	// fundamental blocker: a DRM-protected file is unreadable whatever is
 	// inside it, and saying so beats naming a codec that is not the problem.
 	if d.encrypted {
-		return malformed("the file is encrypted (DRM), which this build cannot read")
+		return unsupported("the file is encrypted (DRM), which this build cannot read")
 	}
 	var named string
 	for _, s := range audio {
@@ -731,17 +731,17 @@ func (d *Demuxer) selectStream() error {
 			continue
 		}
 		if s.encrypted {
-			return malformed("%s stream %d is encrypted (DRM), which this build cannot read", name, s.number)
+			return unsupported("%s stream %d is encrypted (DRM), which this build cannot read", name, s.number)
 		}
 		return d.wireTrack(s, id, name)
 	}
 	if named != "" {
-		return malformed("%s is not a codec this build decodes", named)
+		return unsupported("%s is not a codec this build decodes", named)
 	}
 	if !audio[0].haveWFX {
 		return malformed("audio stream %d carries no WAVEFORMATEX", audio[0].number)
 	}
-	return malformed("audio format %#04x is not a codec this build decodes", audio[0].wfx.tag)
+	return unsupported("audio format %#04x is not a codec this build decodes", audio[0].wfx.tag)
 }
 
 // streamKinds names the stream types present, for the no-audio refusal.
@@ -767,7 +767,7 @@ func (d *Demuxer) streamKinds() string {
 func (d *Demuxer) wireTrack(s stream, id codec.ID, name string) error {
 	f := trackFormat(s.wfx)
 	if err := f.Valid(); err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "wma: unusable format", err)
+		return container.UnusableFormat("wma", f, err)
 	}
 	if id == codec.WMA {
 		if _, err := wma.ParseConfig(s.wfx.raw); err != nil {
@@ -781,10 +781,14 @@ func (d *Demuxer) wireTrack(s stream, id codec.ID, name string) error {
 		CodecConfig: append([]byte(nil), s.wfx.raw...),
 		Fmt:         f,
 		Samples:     d.declaredSamples(f.Rate),
-		// ASF states positions in milliseconds, so the declared length is a
-		// rounded total rather than a hard one the decoder must be trimmed to.
-		SamplesExact: false,
-		Default:      true,
+		// ASF states positions in time, not samples, so the declared length is
+		// a rounded total: not a hard one the decoder must be trimmed to
+		// (SamplesExact), and not one any arithmetic may rely on
+		// (SamplesAdvisory). Measured across both encoders' corpora it lands
+		// on either side of what the packets hold.
+		SamplesExact:    false,
+		SamplesAdvisory: true,
+		Default:         true,
 	}
 	// How many packets one media object spans, which sizes both the seek
 	// run-up and how long a resumed reader steps over fragments. A packet

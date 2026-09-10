@@ -211,8 +211,9 @@ func TestChplBoxLimits(t *testing.T) {
 	})
 }
 
-// TestIlstCovrFlags checks the covr data atom's type flag follows the
-// art MIME: 14 for PNG, 13 for JPEG (the default for anything else).
+// TestIlstCovrFlags checks the covr data atom's type flag follows the art
+// MIME: the four image types ilst has a well-known type for get it, and
+// anything else goes out as 0, raw binary, rather than being mislabeled JPEG.
 func TestIlstCovrFlags(t *testing.T) {
 	cases := []struct {
 		name string
@@ -221,14 +222,55 @@ func TestIlstCovrFlags(t *testing.T) {
 	}{
 		{"png", "image/png", 14},
 		{"jpeg", "image/jpeg", 13},
+		{"jpeg-with-parameter", "image/jpeg; charset=binary", 13},
+		{"gif", "image/gif", 12},
+		{"bmp", "image/bmp", 27},
+		{"uppercase", "IMAGE/PNG", 14},
+		{"webp", "image/webp", 0},
+		{"heif", "image/heif", 0},
+		{"unrecognized", "application/octet-stream", 0},
+		{"empty", "", 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Bytes no sniff recognizes, so the MIME is the only thing
+			// deciding; the unlabelled cases are the subtest below.
 			art := &container.Picture{MIME: tc.mime, Data: []byte{1, 2, 3, 4}}
 			got := ilstBox(nil, art, nil)
 			want := itemAtom("covr", dataAtom(tc.flag, art.Data))
 			if !bytes.Equal(got, want) {
 				t.Errorf("covr bytes\n got % x\nwant % x", got, want)
+			}
+		})
+	}
+
+	// A cover with no MIME is normal: container.Picture carries one only where
+	// the source stored one, and TranscodeOptions.Art is a caller's struct.
+	// The bytes decide there, or a JPEG handed over unlabelled would go out as
+	// raw binary and every reader that dispatches on the type would skip it.
+	sniffed := map[string]struct {
+		data []byte
+		flag uint32
+	}{
+		"jpeg bytes": {[]byte{0xFF, 0xD8, 0xFF, 0xE0, 0, 0}, 13},
+		"png bytes":  {[]byte("\x89PNG\r\n\x1a\n\x00\x00"), 14},
+		"gif bytes":  {[]byte("GIF89a\x01\x00"), 12},
+		"bmp bytes":  {[]byte("BM\x00\x00\x00\x00"), 27},
+		"junk bytes": {[]byte("not an image"), 0},
+	}
+	for name, tc := range sniffed {
+		t.Run(name, func(t *testing.T) {
+			art := &container.Picture{Data: tc.data}
+			want := itemAtom("covr", dataAtom(tc.flag, art.Data))
+			if got := ilstBox(nil, art, nil); !bytes.Equal(got, want) {
+				t.Errorf("covr bytes\n got % x\nwant % x", got, want)
+			}
+			// A MIME that names one of the four still wins over the bytes:
+			// nothing about the sniff makes the label advisory.
+			labelled := &container.Picture{MIME: "image/png", Data: tc.data}
+			wantPNG := itemAtom("covr", dataAtom(14, tc.data))
+			if got := ilstBox(nil, labelled, nil); !bytes.Equal(got, wantPNG) {
+				t.Errorf("a declared image/png did not win over the bytes")
 			}
 		})
 	}

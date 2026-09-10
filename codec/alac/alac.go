@@ -13,8 +13,6 @@
 package alac
 
 import (
-	"fmt"
-
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -50,8 +48,19 @@ type Config struct {
 	Cookie []byte
 }
 
+// malformed reports bytes that deviate from this format: truncated,
+// inconsistent, or out of range. See [waxerr.Malformed] for the rule that
+// divides it from unsupported.
 func malformed(format string, args ...any) error {
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "alac: "+fmt.Sprintf(format, args...))
+	return waxerr.Malformed("alac: ", format, args...)
+}
+
+// unsupported names a well-formed stream this build does not cover. It is a
+// different answer from malformed and carries a different code: the file is
+// fine and we are not, which is a thing a caller can act on. See
+// [waxerr.Malformed] for the rule.
+func unsupported(format string, args ...any) error {
+	return waxerr.Unsupported("alac: ", format, args...)
 }
 
 // ParseMagicCookie parses the 24-byte ALACSpecificConfig at the head of b
@@ -81,7 +90,7 @@ func ParseMagicCookie(b []byte) (Config, error) {
 	case c.FrameLength == 0 || c.FrameLength > maxFrameLength:
 		return Config{}, malformed("frame length %d outside 1..%d", c.FrameLength, maxFrameLength)
 	case c.Channels < 1 || c.Channels > 2:
-		return Config{}, malformed("channel count %d: only mono and stereo are supported", c.Channels)
+		return Config{}, unsupported("channel count %d: only mono and stereo are supported", c.Channels)
 	case c.SampleRate <= 0:
 		return Config{}, malformed("sample rate %d", c.SampleRate)
 	}

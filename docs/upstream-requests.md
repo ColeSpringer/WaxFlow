@@ -13,21 +13,8 @@ same change; do not bury it in a progress note.
 
 ## WaxLabel
 
-- **The MP4 sample entry's samplerate is read verbatim for ALAC and
-  FLAC.** The AudioSampleEntry's 16.16 field cannot hold a rate past
-  65535 Hz, so a hi-res file's entry never carries the true rate: WaxFlow
-  writes 65535 for ALAC (the magic cookie carries 96000) and, as the
-  FLAC-in-ISOBMFF spec requires, the greatest whole halving for FLAC
-  (48000 for 96 and 192 kHz), a value the same spec says a reader MUST
-  override from the STREAMINFO in the `dfLa` box. waxlabel v1.6.2 reports
-  the field as it finds it: `SampleRate` 65535 for a 96 kHz ALAC and
-  48000 for a 96 kHz FLAC-in-MP4 (`ffmpeg` writes 0 for such an ALAC and
-  waxlabel would report that). Wanted: `SampleRate` from the ALAC cookie,
-  the way `BitsPerSample` has come from it since v1.4.2, and from the
-  `dfLa` STREAMINFO for `fLaC` entries. Shipped workaround: none needed
-  inside WaxFlow (its own demuxer reads the config boxes); the wrong
-  rate reaches only a waxlabel consumer reading a WaxFlow-produced hi-res
-  ALAC or FLAC-in-MP4 file, such as a catalog scan of a job output.
-  `TestWaxlabelReadsTheSampleEntryRateVerbatim` (oracletest) pins the
-  present behaviour and fails the day waxlabel fixes it, which is the cue
-  to retire this entry and flip that cell to the true rate.
+None open. The sample-entry rate request retired with waxlabel v1.7.0,
+which reads the rate from the codec config box (the ALAC cookie, the
+`dfLa` STREAMINFO, the AAC ASC and the ADTS frame header) instead of the
+16.16 field that cannot hold it. The cells in oracletest's
+`waxlabel_rate_test.go` pin the fixed behaviour.

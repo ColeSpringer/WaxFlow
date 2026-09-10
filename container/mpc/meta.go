@@ -81,6 +81,10 @@ func (d *Demuxer) readChapters() error {
 			break
 		}
 		if blk.payload > maxHeaderPacket {
+			// Damage, not a cap of ours: blk.payload is a length the file
+			// states, and a varint that decodes to more than a chapter packet
+			// can hold is a corrupt one. The chapter-count cap below is the
+			// one that is genuinely ours.
 			if err := d.warn(at, "chapter packet of %d bytes exceeds the %d-byte bound, skipped", blk.payload, maxHeaderPacket); err != nil {
 				return err
 			}
@@ -134,9 +138,8 @@ func (d *Demuxer) readChapters() error {
 	}
 	if len(d.chapters) == maxChapters {
 		if blk, ok := d.sv8Header(at); ok && blk.key == "CT" {
-			if err := d.warn(at, "more than %d chapter packets, the rest are not read", maxChapters); err != nil {
-				return err
-			}
+			// Our own cap again: the file is entitled to as many as it likes.
+			d.note(at, "more than %d chapter packets, the rest are not read", maxChapters)
 		}
 	}
 	container.SortChapters(d.chapters)

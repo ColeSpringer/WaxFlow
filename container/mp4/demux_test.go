@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
@@ -141,19 +142,37 @@ func TestTruncationTolerated(t *testing.T) {
 	}
 }
 
-// TestStrictRejectsMissingFtyp checks strict mode turns the tolerated
-// missing-ftyp warning into an error.
-func TestStrictRejectsMissingFtyp(t *testing.T) {
+// TestMissingFtypIsANoteNotDamage: an MP4-family file whose first box is not
+// ftyp reaches this demuxer only by extension hint (Match requires one), and
+// there it is either a QuickTime .mov, which needs no ftyp, or a damaged
+// .m4a. The demuxer cannot tell which, so refusing under strict refused every
+// conformant .mov; the remark is a Note now and strict reads through it.
+//
+// The fixture is an .m4a with its ftyp mangled, because that is the only
+// shape this package has: the two are indistinguishable here by construction,
+// which is the reason the remark cannot be damage.
+func TestMissingFtypIsANoteNotDamage(t *testing.T) {
 	full := fixture(t, "alac-stereo.m4a")
-	// Corrupt the ftyp type so it is no longer recognized; tolerant mode
-	// warns, strict mode fails.
+	// Corrupt the ftyp type so it is no longer recognized.
 	mangled := append([]byte(nil), full...)
 	copy(mangled[4:8], "xxxx")
-	if _, err := NewDemuxer(container.BytesSource(mangled), &DemuxerOptions{Strict: true}); err == nil {
-		t.Error("strict mode accepted a file with no ftyp")
-	}
-	if _, err := NewDemuxer(container.BytesSource(mangled), nil); err != nil {
-		t.Errorf("tolerant mode rejected a missing ftyp: %v", err)
+	for _, strict := range []bool{false, true} {
+		d, err := NewDemuxer(container.BytesSource(mangled), &DemuxerOptions{Strict: strict})
+		if err != nil {
+			t.Fatalf("strict=%v rejected a file with no ftyp: %v", strict, err)
+		}
+		var found bool
+		for _, w := range d.Warnings() {
+			if strings.Contains(w.Msg, "ftyp") {
+				found = true
+				if w.Kind != container.Note {
+					t.Errorf("strict=%v: the ftyp remark is Kind %v, want Note", strict, w.Kind)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("strict=%v: no remark about the missing ftyp", strict)
+		}
 	}
 }
 
@@ -216,7 +235,7 @@ func TestGaplessSMPBNoOverflow(t *testing.T) {
 	d := &Demuxer{smpbOK: true, smpbDelay: 1, smpbTotal: math.MaxInt64}
 	tr := &track{fmt: audio.Format{Rate: 44100}}
 	tr.st.totalDur = 40000
-	delay, padding, samples := d.gapless(tr)
+	delay, padding, samples, _ := d.gapless(tr)
 	if samples < 0 || samples > tr.st.totalDur {
 		t.Fatalf("samples = %d, out of range for totalRaw %d", samples, tr.st.totalDur)
 	}
@@ -233,14 +252,17 @@ func TestGaplessSMPBNoOverflow(t *testing.T) {
 func TestGaplessEditListNoOverflow(t *testing.T) {
 	d := &Demuxer{movieTimescale: 1}
 	tr := &track{
-		fmt:        audio.Format{Rate: math.MaxUint32},
+		// MaxInt32 rather than MaxUint32: Format.Rate is an int, which is 32
+		// bits on a 32-bit build, and any rate above 1 already overflows the
+		// products this cell is about.
+		fmt:        audio.Format{Rate: math.MaxInt32},
 		hasEdit:    true,
 		editMedia:  math.MaxInt64,
 		editSegDur: math.MaxInt64,
 		timescale:  1,
 	}
 	tr.st.totalDur = 40000
-	delay, padding, samples := d.gapless(tr)
+	delay, padding, samples, _ := d.gapless(tr)
 	if delay < 0 || delay > tr.st.totalDur {
 		t.Fatalf("delay = %d, out of range for totalRaw %d", delay, tr.st.totalDur)
 	}
@@ -329,12 +351,48 @@ func TestGaplessHEAACHalfUnits(t *testing.T) {
 			d := &Demuxer{smpbOK: true, smpbDelay: tc.delay, smpbPad: tc.pad, smpbTotal: tc.total}
 			tr := &track{codec: codec.HEAAC, perAU: tc.perAU, fmt: audio.Format{Rate: 44100}}
 			tr.st.totalDur = totalRaw
-			delay, padding, samples := d.gapless(tr)
+			delay, padding, samples, _ := d.gapless(tr)
 			if delay != tc.wantDelay || samples != tc.wantSamp {
 				t.Errorf("delay/samples = %d/%d, want %d/%d", delay, samples, tc.wantDelay, tc.wantSamp)
 			}
 			if delay+padding+samples != totalRaw {
 				t.Errorf("trims sum to %d, want totalRaw %d", delay+padding+samples, totalRaw)
+			}
+		})
+	}
+}
+
+// TestRescaledTimescaleMakesTheLengthAdvisory: an mdhd timescale that is not
+// the codec rate makes every stts run round on conversion, so the total the
+// sample table sums is a rounded number rather than a counted one. A timeline
+// that built a prefix sum on it would fail at the seam, several minutes into a
+// decode, blaming the file; the flag is what turns that into a refusal at plan
+// time. A track whose length comes from iTunSMPB or an edit list segment is
+// stated rather than derived, so it keeps its exactness.
+func TestRescaledTimescaleMakesTheLengthAdvisory(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		timescale int64
+		advisory  bool
+	}{
+		{"timescale is the rate", 44100, false},
+		{"timescale is not the rate", 600, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &Demuxer{}
+			tr := &track{fmt: audio.Format{Rate: 44100}}
+			tr.st.total = 3
+			d.buildTimeBase(&tr.st, []sttsEntry{{count: 3, delta: 1024}}, tc.timescale, 44100)
+			_, _, _, advisory := d.gapless(tr)
+			if advisory != tc.advisory {
+				t.Errorf("advisory = %v, want %v (totalDur %d)", advisory, tc.advisory, tr.st.totalDur)
+			}
+
+			// A stated length is not derived from the rounded total, so it
+			// stays exact whatever the timescale did.
+			d2 := &Demuxer{smpbOK: true, smpbDelay: 0, smpbTotal: 1}
+			if _, _, _, adv := d2.gapless(tr); adv {
+				t.Error("a length stated by iTunSMPB was marked advisory")
 			}
 		})
 	}

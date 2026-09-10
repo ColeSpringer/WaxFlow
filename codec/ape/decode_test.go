@@ -207,8 +207,8 @@ func TestFrameCRCFailureKeepsItsErrorShape(t *testing.T) {
 	if err == nil {
 		t.Fatal("a corrupted frame decoded clean")
 	}
-	if code := waxerr.CodeOf(err); code != waxerr.CodeUnsupportedFormat {
-		t.Errorf("code = %v, want %v", code, waxerr.CodeUnsupportedFormat)
+	if code := waxerr.CodeOf(err); code != waxerr.CodeMalformedInput {
+		t.Errorf("code = %v, want %v", code, waxerr.CodeMalformedInput)
 	}
 	if !strings.HasPrefix(err.Error(), "ape: ") {
 		t.Errorf("error %q lost its container name", err)

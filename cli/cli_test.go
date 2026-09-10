@@ -263,7 +263,7 @@ func TestExitCodesCommand(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	for _, want := range []string{"overloaded", "signature-expired", "unsupported-format", "EXIT"} {
+	for _, want := range []string{"overloaded", "signature-expired", "unsupported-format", "malformed-input", "EXIT"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}

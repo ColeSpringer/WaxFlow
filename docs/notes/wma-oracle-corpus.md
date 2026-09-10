@@ -231,6 +231,41 @@ length nor the coded capacity, which is why `SamplesExact` is false, why a
 decode must not be trimmed to it, and why a decode that overruns or falls
 short of it is not damage.
 
+### Addendum, 2026-09-09: a second encoder, and a second decoder
+
+Windows' own encoder and decoder were reached from a WSL session through
+`powershell.exe` interop: `scripts/wmfenc/wmfenc.ps1` for the encode and
+`scripts/wmfdec/wmfdec.ps1` for the decode.
+ffmpeg here is 8.0.1, the Ubuntu package. Source: seeded broadband noise plus
+a chirp, synthesized in Go, two seconds, mono.
+
+**Head alignment**, cross-correlation lag against the source; positive means
+the decode carries that many extra samples before source sample 0:
+
+| encoder / decoder | WaxFlow | ffmpeg 8.0.1 | Windows |
+|---|---|---|---|
+| ffmpeg, 8 / 16 / 22.05 / 32 / 44.1 kHz | 0 | -frameLen | 0 |
+| Media Foundation, same rates | +frameLen | 0 | 0 |
+
+So a Media Foundation file carries one more frame of lead-in than an ffmpeg
+one at every frame length, and both reference decoders hide it by different
+means. `wma-bitstream.md` section 11's addendum has the experiments that
+identify it (the encoder prepends a frame of coded silence) and shows that
+nothing in the file distinguishes the two.
+
+**Declared against delivered.** Across five ffmpeg cells and seven Media
+Foundation cells, this decoder delivers at least the declared count and never
+more than one frame plus one millisecond past it. ffmpeg's muxer declares the
+source length floored to a millisecond; Media Foundation's declares the source
+plus up to a frame of encoder tail, measured from source sample 0 rather than
+from the start of the coded stream.
+
+**A seek past the end is not the length.** On `container/asf/testdata/
+sine-wmav2.wma`, `SeekSample` past any target lands at 90075 while a straight
+read delivers 90112: the index is in packet presentation times, so the landing
+carries that rounding. Measuring one of these tracks means reading it. The
+cell is `TestConcatRefusesAnAdvisoryMember` in tests/.
+
 ## 6. Two things about the oracle itself
 
 **`-cpuflags 0` changes the answer, `-flags +bitexact` does not.** Scalar and

@@ -113,7 +113,7 @@ func (d *Decoder) Decode(pkt []byte, emit func(*audio.Buffer) error) error {
 			r.byteAlign()
 			channelIndex = numChannels
 		default: // CCE, PCE
-			return malformed("unsupported element type %d", tag)
+			return unsupported("unsupported element type %d", tag)
 		}
 	}
 	if r.overrun() {

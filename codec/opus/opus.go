@@ -11,14 +11,24 @@ package opus
 
 import (
 	"encoding/binary"
-	"fmt"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
+// malformed reports bytes that deviate from this format: truncated,
+// inconsistent, or out of range. See [waxerr.Malformed] for the rule that
+// divides it from unsupported.
 func malformed(format string, args ...any) error {
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "opus: "+fmt.Sprintf(format, args...))
+	return waxerr.Malformed("opus: ", format, args...)
+}
+
+// unsupported names a well-formed stream this build does not cover. It is a
+// different answer from malformed and carries a different code: the file is
+// fine and we are not, which is a thing a caller can act on. See
+// [waxerr.Malformed] for the rule.
+func unsupported(format string, args ...any) error {
+	return waxerr.Unsupported("opus: ", format, args...)
 }
 
 // SampleRate is Opus's fixed decode rate; every stream decodes to 48 kHz
@@ -56,7 +66,12 @@ func SetPreSkip(head []byte, n int) ([]byte, error) {
 		return nil, err
 	}
 	if n < 0 || n > 65535 {
-		return nil, malformed("pre-skip %d does not fit OpusHead's 16-bit field", n)
+		// Unsupported, not damage: the head handed in is fine and the caller's
+		// requested pre-skip is what the field cannot express. The cut rung
+		// reads the difference, and a malformed answer here would make it
+		// blame the file for its own arithmetic instead of declining to a rung
+		// that re-encodes.
+		return nil, unsupported("pre-skip %d does not fit OpusHead's 16-bit field", n)
 	}
 	out := make([]byte, len(head))
 	copy(out, head)
@@ -80,11 +95,15 @@ func ParseOpusHead(head []byte) (Config, error) {
 		return c, malformed("not an OpusHead header")
 	}
 	if head[8]&0xF0 != 0 {
-		return c, malformed("unsupported OpusHead version %d", head[8])
+		return c, unsupported("unsupported OpusHead version %d", head[8])
 	}
 	c.Channels = int(head[9])
-	if c.Channels < 1 || c.Channels > audio.MaxChannels {
+	if c.Channels < 1 {
 		return c, malformed("OpusHead channel count %d", c.Channels)
+	}
+	if c.Channels > audio.MaxChannels {
+		return c, unsupported("OpusHead channel count %d; this build mixes at most %d",
+			c.Channels, audio.MaxChannels)
 	}
 	c.PreSkip = int(binary.LittleEndian.Uint16(head[10:]))
 	c.Gain = int16(binary.LittleEndian.Uint16(head[16:]))

@@ -191,5 +191,5 @@ func readErr(w *srcwin.Window, what string) error {
 	if err := w.Err(); err != nil {
 		return err
 	}
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "mka: "+what+" runs past end of data")
+	return waxerr.Malformed("mka: ", "%s runs past end of data", what)
 }

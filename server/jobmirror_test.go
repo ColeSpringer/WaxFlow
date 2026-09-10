@@ -44,6 +44,14 @@ func fillNonZero(t *testing.T, v reflect.Value, n *int) {
 		s := reflect.MakeSlice(v.Type(), 1, 1)
 		fillNonZero(t, s.Index(0), n)
 		v.Set(s)
+	case reflect.Map:
+		m := reflect.MakeMap(v.Type())
+		key := reflect.New(v.Type().Key()).Elem()
+		fillNonZero(t, key, n)
+		val := reflect.New(v.Type().Elem()).Elem()
+		fillNonZero(t, val, n)
+		m.SetMapIndex(key, val)
+		v.Set(m)
 	case reflect.String:
 		*n++
 		v.SetString(fmt.Sprintf("v%d", *n))
@@ -118,4 +126,14 @@ func TestClientJobMirrorsCoverTheWire(t *testing.T) {
 	// measurement pointers marshal as null for digital silence, and a
 	// value-typed mirror field would silently read them as 0.
 	roundTripEqual(t, "zero analysis", &jobs.Analysis{}, &client.JobAnalysis{})
+
+	// The probe body mirrors the same way, and it is where the fields most
+	// recently moved: warnings is damage only now, notes is what this build
+	// did with a well-formed file, and a mirror missing the second would drop
+	// half of what a probe says.
+	var pi server.ProbeInfo
+	n = 0
+	fillNonZero(t, reflect.ValueOf(&pi).Elem(), &n)
+	roundTripEqual(t, "populated probe", pi, &client.ProbeInfo{})
+	roundTripEqual(t, "zero probe", server.ProbeInfo{}, &client.ProbeInfo{})
 }

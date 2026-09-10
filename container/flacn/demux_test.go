@@ -303,7 +303,12 @@ func TestTagThatSpellsID3v1(t *testing.T) {
 
 // TestTrailingTags verifies the last frame survives every recognized
 // trailer shape (taggers bolt these onto FLAC files), including stacked
-// tags, and that strict mode refuses them all.
+// tags, and that none of them is damage.
+//
+// A tagger's trailer is where taggers put an ID3v1 or APE block, on a file
+// that is otherwise exactly what it claims to be; strict mode used to refuse
+// them all, which called a normally-tagged FLAC malformed. The remark is a
+// Note now and strict reads straight through.
 func TestTrailingTags(t *testing.T) {
 	raw := fixture(t, "sine-s16.flac")
 	trailers := map[string][]byte{
@@ -324,24 +329,23 @@ func TestTrailingTags(t *testing.T) {
 			if _, samples := walk(t, d); samples != 15435 {
 				t.Fatalf("walked %d samples (last frame lost to the trailer)", samples)
 			}
-			if len(d.Warnings()) == 0 {
-				t.Fatal("no warning about the trailer")
+			ws := d.Warnings()
+			if len(ws) == 0 {
+				t.Fatal("no remark about the trailer")
+			}
+			for _, w := range ws {
+				if w.Kind != container.Note {
+					t.Errorf("remark %q is Kind %v, want Note", w.Msg, w.Kind)
+				}
 			}
 
-			// Strict mode refuses the trailer at read time.
+			// Strict mode reads straight through, and to the same end.
 			d, err = flacn.NewDemuxer(container.BytesSource(tagged), &flacn.DemuxerOptions{Strict: true})
 			if err != nil {
 				t.Fatal(err)
 			}
-			var pkt container.Packet
-			for {
-				err := d.ReadPacket(&pkt)
-				if err == io.EOF {
-					t.Fatal("strict mode silently accepted trailing junk")
-				}
-				if err != nil {
-					break // expected
-				}
+			if _, samples := walk(t, d); samples != 15435 {
+				t.Fatalf("strict walked %d samples, want the same 15435", samples)
 			}
 		})
 	}

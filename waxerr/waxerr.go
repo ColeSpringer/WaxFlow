@@ -8,6 +8,7 @@ package waxerr
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
 // Code is a machine-readable, kebab-case error code. Codes are part of the
@@ -25,6 +26,7 @@ const (
 	CodeNotFound           Code = "not-found"
 	CodeUnsupportedFormat  Code = "unsupported-format"
 	CodeUnsupportedSource  Code = "unsupported-source"
+	CodeMalformedInput     Code = "malformed-input"
 	CodePayloadTooLarge    Code = "payload-too-large"
 	CodeSourceUnreadable   Code = "source-unreadable"
 	CodeOutputUnwritable   Code = "output-unwritable"
@@ -46,6 +48,7 @@ func Codes() []Code {
 		CodeNotFound,
 		CodeUnsupportedFormat,
 		CodeUnsupportedSource,
+		CodeMalformedInput,
 		CodePayloadTooLarge,
 		CodeSourceUnreadable,
 		CodeOutputUnwritable,
@@ -54,6 +57,44 @@ func Codes() []Code {
 		CodeCatalogUnavailable,
 		CodeInternal,
 	}
+}
+
+// Malformed and Unsupported build the two errors every demuxer and decoder in
+// the tree has to tell apart, and they exist as a pair so that no package can
+// quietly alias one to the other (several did, before the codes split).
+//
+// The rule, and it is the whole rule:
+//
+//   - Malformed is for bytes that deviate from their own format: truncated,
+//     inconsistent, out of range, a field that contradicts another. The file
+//     is broken. Strict mode escalates a tolerated oddity to this.
+//   - Unsupported is for a well-formed stream this build does not cover: a
+//     codec it has no decoder for, a channel configuration outside its scope,
+//     a spec an encoder cannot produce. The file is fine; we are not.
+//
+// A caller can act on the second (convert it, ask for something else) and not
+// on the first, which is why they carry different HTTP statuses and different
+// exit classes.
+//
+// The prefix is a separate parameter rather than part of format, and that is
+// load-bearing: go vet only recognizes a printf wrapper when the format string
+// reaches the printf call unmodified, so folding the package name into it
+// ("flac: "+format) turns off argument checking at every call site downstream.
+// Split this way, both this function and the one-line package helpers that
+// forward to it are checked. A package helper is still one line:
+//
+//	func malformed(format string, args ...any) error {
+//		return waxerr.Malformed("flac: ", format, args...)
+//	}
+func Malformed(prefix, format string, args ...any) error {
+	return New(CodeMalformedInput, prefix+fmt.Sprintf(format, args...))
+}
+
+// Unsupported names a well-formed stream outside this build's scope. See
+// [Malformed] for the rule that divides the two, and for why the prefix is
+// its own parameter.
+func Unsupported(prefix, format string, args ...any) error {
+	return New(CodeUnsupportedFormat, prefix+fmt.Sprintf(format, args...))
 }
 
 // Error is the boundary error: it carries a Code across package boundaries
@@ -110,6 +151,7 @@ var (
 	ErrNotFound           = New(CodeNotFound, "")
 	ErrUnsupportedFormat  = New(CodeUnsupportedFormat, "")
 	ErrUnsupportedSource  = New(CodeUnsupportedSource, "")
+	ErrMalformedInput     = New(CodeMalformedInput, "")
 	ErrPayloadTooLarge    = New(CodePayloadTooLarge, "")
 	ErrOverloaded         = New(CodeOverloaded, "")
 	ErrCanceled           = New(CodeCanceled, "")
@@ -145,7 +187,7 @@ type ExitClass struct {
 // ExitContract returns the CLI exit-code contract, in exit-code order:
 //
 //	0 ok, 1 internal, 2 invalid, 3 not-found, 4 io, 5 unsupported,
-//	6 canceled, 7 unauthorized, 8 overloaded.
+//	6 canceled, 7 unauthorized, 8 overloaded, 9 malformed.
 //
 // This table is the single source of truth: Code.ExitCode derives from it
 // and `waxflow exit-codes` prints it. Every defined Code appears in exactly
@@ -161,6 +203,7 @@ func ExitContract() []ExitClass {
 		{Exit: 6, Name: "canceled", Codes: []Code{CodeCanceled}},
 		{Exit: 7, Name: "unauthorized", Codes: []Code{CodeUnauthorized, CodeSignatureInvalid, CodeSignatureExpired}},
 		{Exit: 8, Name: "overloaded", Codes: []Code{CodeOverloaded}},
+		{Exit: 9, Name: "malformed", Codes: []Code{CodeMalformedInput}},
 	}
 }
 

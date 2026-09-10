@@ -18,8 +18,6 @@
 package mp4
 
 import (
-	"fmt"
-
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -72,8 +70,19 @@ func Match(head []byte) bool {
 // MatchNeed is how many leading bytes Match inspects.
 const MatchNeed = 8
 
+// malformed reports bytes that deviate from this format: truncated,
+// inconsistent, or out of range. See [waxerr.Malformed] for the rule that
+// divides it from unsupported.
 func malformed(format string, args ...any) error {
-	return waxerr.New(waxerr.CodeUnsupportedFormat, "mp4: "+fmt.Sprintf(format, args...))
+	return waxerr.Malformed("mp4: ", format, args...)
+}
+
+// unsupported names a well-formed stream this build does not cover. It is a
+// different answer from malformed and carries a different code: the file is
+// fine and we are not, which is a thing a caller can act on. See
+// [waxerr.Malformed] for the rule.
+func unsupported(format string, args ...any) error {
+	return waxerr.Unsupported("mp4: ", format, args...)
 }
 
 func be16(b []byte) uint16 {

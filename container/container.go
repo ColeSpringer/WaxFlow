@@ -13,6 +13,7 @@ package container
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 
@@ -108,6 +109,20 @@ func ReadFull(src io.ReaderAt, p []byte, off int64) error {
 	}
 }
 
+// ShortRead classifies a [ReadFull] failure on a demuxer's own structure. The
+// two cases wear the same error type and mean opposite things: a source that
+// ended early is a file too short for what it declares, which is damage a
+// caller cannot convert away, while anything else is the bytes not being
+// fetchable at all, which says nothing about the file. Wrapping both as one
+// code told an operator to re-rip a healthy file whose disk had a bad day, and
+// told a monitoring dashboard that a truncated upload was an I/O incident.
+func ShortRead(msg string, err error) error {
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return waxerr.Wrap(waxerr.CodeMalformedInput, msg, err)
+	}
+	return waxerr.Wrap(waxerr.CodeSourceUnreadable, msg, err)
+}
+
 // Track describes one elementary stream in a container.
 type Track struct {
 	// ID is the track identifier that packets reference: a demuxer must
@@ -129,6 +144,28 @@ type Track struct {
 	// it); formats whose declared total can lie (a bad FLAC STREAMINFO) leave
 	// it false so a mismatch stays a tolerated oddity rather than a truncation.
 	SamplesExact bool
+	// SamplesAdvisory marks Samples as a rounded total the decode is not
+	// expected to match: fit for a duration to display, unfit for arithmetic
+	// that has to add up. It and SamplesExact are mutually exclusive, since
+	// one says to trim the decode to this number and the other says not to
+	// trust it; a measurement that sets the first clears the second. It is a claim about precision, which is what
+	// SamplesExact is not (that one is a truncation instruction). WAV and FLAC
+	// leave both false: their totals are counted, not rounded, and a total
+	// that disagrees with the stream is damage rather than imprecision.
+	//
+	// Two containers state a duration in a time unit and have no sample count
+	// at all: ASF, in 100-nanosecond ticks its own muxer accumulates from
+	// millisecond-truncated packet times, and Matroska when it falls back to
+	// the Info Duration. Measured on the ASF corpus, the declared total lands
+	// on either side of the audio the packets hold, by up to a millisecond and
+	// a frame; it is neither the source length nor the coded capacity, and no
+	// reading of the file improves on it.
+	//
+	// Two things read it. A timeline refuses such a member, since a prefix sum
+	// cannot survive the drift; measure it first (see ConcatSource.Track). And
+	// format.Media will not cap a decode at a rounded total, which it would
+	// otherwise do for a track that also signals a gapless trim.
+	SamplesAdvisory bool
 	// SourceBitDepth is the depth the source stores samples at when that
 	// differs from Fmt.BitDepth, 0 when the two agree. Two cases reach it.
 	// audio.Format carries floats as float32, so a 64-bit float source
@@ -140,6 +177,33 @@ type Track struct {
 	SourceBitDepth int
 	// Default marks the container's designated default track.
 	Default bool
+}
+
+// UnusableFormat wraps an [audio.Format] Valid failure on a format a demuxer
+// read out of a file, and picks the code Valid cannot.
+//
+// Valid answers one question with one code, and a file asks two. A format past
+// this build's caps (more channels than the pipeline mixes, an integer depth
+// wider than it carries) is a stream we decline: unsupported-format, and a
+// caller can act on it. A rate of zero, no channels at all, or a layout that
+// contradicts the channel count is the file stating something no format
+// allows: malformed-input, and nobody can act on it. Valid's own
+// invalid-request belongs to a caller-supplied format and never to a file's.
+func UnusableFormat(prefix string, f audio.Format, err error) error {
+	// Walked in the order [audio.Format.Valid] checks, so the code always
+	// describes the failure the message names. Deciding from the shape alone
+	// would classify {Rate: 0, Channels: 9} as unsupported while the message
+	// said "rate 0 must be positive".
+	code := waxerr.CodeMalformedInput
+	switch {
+	case f.Rate <= 0, f.Channels < 1:
+	case f.Channels > audio.MaxChannels:
+		code = waxerr.CodeUnsupportedFormat
+	case f.Layout != 0 && f.Layout.Count() != f.Channels:
+	case f.Type == audio.Int && f.BitDepth > 32:
+		code = waxerr.CodeUnsupportedFormat
+	}
+	return waxerr.Wrap(code, prefix+": unusable format", err)
 }
 
 // Packet is a codec packet routed to a track.
@@ -187,20 +251,39 @@ type Indexer interface {
 	RestoreIndex(blob []byte) bool
 }
 
-// Warning is a structured note about input this decoder accepted but a caller
-// should know about, surfaced through probe results. That covers two kinds:
-// tolerated damage (a truncated table, a sample running past end of file), and
-// a limitation of this decoder against a file that is perfectly well formed
-// (an HE-AAC config whose high band is not synthesized).
-//
-// The distinction matters to strict mode, which escalates the first kind and
-// not the second: strict exists to reject real-world mess for conformance runs,
-// so it must not reject a conformant file merely because a codec is scoped
-// below it.
+// WarningKind separates the two things a demuxer has to say about a file it
+// accepted. Strict mode escalates one and not the other, and a probe reports
+// them under different names, so the kind is carried rather than inferred from
+// wording.
+type WarningKind int
+
+const (
+	// Damage is the file deviating from its own format in a way this demuxer
+	// worked around: a truncated table, a duplicate chunk, a sample running
+	// past the end. Strict mode escalates it to an error, because strict
+	// exists to reject real-world mess for conformance runs.
+	//
+	// It is the zero value on purpose: a Warning built out of tree without
+	// naming a kind lands on the side that gets escalated rather than the one
+	// that is silently tolerated.
+	Damage WarningKind = iota
+	// Note is the file being well formed and this build doing something with
+	// it a caller should know: ignoring a stream it cannot use, capping a list
+	// at its own limit, rescaling a timeline, or synthesizing less than the
+	// codec describes. Strict never escalates a Note, since refusing a
+	// conformant file because a decoder is scoped below it would say the file
+	// is broken when it is not.
+	Note
+)
+
+// Warning is a structured remark about input this demuxer accepted but a
+// caller should know about, surfaced through probe results. Kind says which of
+// the two it is; see [WarningKind].
 type Warning struct {
 	// Offset is the byte position of the oddity, -1 when not localized.
 	Offset int64
 	Msg    string
+	Kind   WarningKind
 }
 
 // Warner is implemented by demuxers that record Warnings: tolerated damage, or

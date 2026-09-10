@@ -199,7 +199,9 @@ func (s *Server) trackFor(src *source.File, exact bool) (container.Track, error)
 			// now authoritative and saying so is honest rather than a
 			// convenience: it is what lets a later exact caller reuse this
 			// entry, and what stops a measured track being measured again.
-			track.SamplesExact = true
+			// It also stops being a rounded claim, which is what lets a
+			// timeline accept an ASF or Matroska member the library refuses.
+			track.SamplesExact, track.SamplesAdvisory = true, false
 		}
 		s.trackCache.put(key, track, info.Tags)
 		return track, nil
