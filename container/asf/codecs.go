@@ -3,6 +3,9 @@ package asf
 import (
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/wma"
+	"github.com/colespringer/waxflow/codec/wmalossless"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // waveFormat is the WAVEFORMATEX a Stream Properties Object carries as its
@@ -80,7 +83,7 @@ func asfCodecID(tag uint16) (codec.ID, string) {
 	case tagWMAPro, tagWMAProSPDIF:
 		return "", "Windows Media Audio Pro"
 	case tagWMALossless:
-		return "", "Windows Media Audio Lossless"
+		return codec.WMALossless, "Windows Media Audio Lossless"
 	case tagWMAVoice, tagWMAVoice9:
 		return "", "Windows Media Audio Voice"
 	default:
@@ -88,21 +91,70 @@ func asfCodecID(tag uint16) (codec.ID, string) {
 	}
 }
 
-// trackFormat builds the pipeline format for a recognized audio stream. WMA
-// decodes in the float domain, so the WAVEFORMATEX bit depth (always 16 for
-// the tags here, and a fiction the encoder writes rather than a property of
-// the coded data) does not reach it.
+// codecSetup is what a recognized audio stream resolves to: the decoder to
+// build and the format it emits.
+type codecSetup struct {
+	id  codec.ID
+	fmt audio.Format
+	// syncOK reports whether a decoder can begin at a media object. Nil when
+	// every object is one, which is the case for WMA v1/v2: a super-frame is
+	// where that decoder restarts and what the bit reservoir carries across
+	// one is what the seek run-up covers.
+	syncOK func([]byte) bool
+	// frameLen is the sample grid a decode resumes on, or 0 when a landing is
+	// wherever the object says it is. ASF states presentation times in
+	// milliseconds, so an object's own time is up to a millisecond off the
+	// sample the decoder will actually produce first; for a codec that resumes
+	// on a frame boundary the true landing is the nearest one, and reporting
+	// the object's time instead leaves the caller's pre-roll short by the
+	// difference. Measured on the corpus: 48 and 58 samples, against frames of
+	// 2048 and 4096.
+	frameLen int
+}
+
+// resolveCodec builds the setup for a recognized audio stream, in the shape
+// container/mka's resolveCodec has. The codec's own configuration check runs
+// here, before a track exists, which is where every other container in this
+// tree puts it: without it a header claiming six channels, 96 kHz, or
+// nBlockAlign zero came back from Probe as a playable track with a duration,
+// and the server's track cache remembered it that way.
 //
-// The layout matters even though WAVEFORMATEX's channel mask does not reach
-// here: a format without one is "unknown", and the encoders that assign
-// channels by name refuse it. This has to be the same layout codec/wma's
-// Config.Format produces, which TestTrackFormatMatchesTheCodec pins.
-func trackFormat(w waveFormat) audio.Format {
-	return audio.Format{
-		Rate:     w.rate,
-		Channels: w.channels,
-		Layout:   audio.DefaultLayout(w.channels),
-		Type:     audio.Float,
-		BitDepth: 32,
+// The format is taken FROM the parsed config rather than built beside it. That
+// is not tidiness: a format built independently is a second reading of the same
+// bytes, and the two readings can disagree on a field one of them takes from an
+// unobvious place, which for lossless is both the depth and the channel order.
+// A decoder is refused a track whose format is not its own, so a disagreement
+// there is a file that probes and will not play.
+func resolveCodec(id codec.ID, w waveFormat) (codecSetup, error) {
+	switch id {
+	case codec.WMA:
+		cfg, err := wma.ParseConfig(w.raw)
+		if err != nil {
+			return codecSetup{}, fromCodec(err)
+		}
+		return codecSetup{id: id, fmt: cfg.Format()}, nil
+	case codec.WMALossless:
+		cfg, err := wmalossless.ParseConfig(w.raw)
+		if err != nil {
+			return codecSetup{}, fromCodec(err)
+		}
+		// Lossless is the one codec here whose objects are not all start
+		// points: it produces nothing until a seekable tile, which the encoder
+		// emits about every four tenths of a second.
+		return codecSetup{
+			id: id, fmt: cfg.Format(),
+			syncOK:   wmalossless.PacketIsSync,
+			frameLen: cfg.SamplesPerFrame(),
+		}, nil
+	default:
+		return codecSetup{}, unsupported("codec %q is not one this build decodes", id)
 	}
+}
+
+// fromCodec gives a codec's own refusal this container's public name, which is
+// the one the user sees: the driver row this package lands under is named wma.
+// The code and the codec's text stay, so a caller still learns whether the file
+// is damaged or merely out of scope, and errors.Is still reaches the original.
+func fromCodec(err error) error {
+	return waxerr.Wrap(waxerr.CodeOf(err), "wma", err)
 }

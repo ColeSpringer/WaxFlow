@@ -498,7 +498,6 @@ func TestRefusalsNameWhatTheyFound(t *testing.T) {
 	}{
 		{"wma-pro", setFormatTag(0x0162), "Windows Media Audio Pro"},
 		{"wma-pro-spdif", setFormatTag(0x0164), "Windows Media Audio Pro"},
-		{"wma-lossless", setFormatTag(0x0163), "Windows Media Audio Lossless"},
 		{"wma-voice", setFormatTag(0x000A), "Windows Media Audio Voice"},
 		{"wma-voice-9", setFormatTag(0x000B), "Windows Media Audio Voice"},
 		{"unknown-codec", setFormatTag(0x0055), "audio format 0x0055"},
@@ -528,6 +527,27 @@ func TestRefusalsNameWhatTheyFound(t *testing.T) {
 				t.Errorf("error code = %q, want %q", code, waxerr.CodeUnsupportedFormat)
 			}
 		})
+	}
+}
+
+// TestLosslessTagOnAWMAv2HeaderIsDamage is the other half of the row this
+// build removed from the table above. WMA Lossless used to be refused by name
+// like Pro and Voice; now that it decodes, retyping a WMA v2 header as
+// lossless does not produce an unsupported stream but an inconsistent one, and
+// it has to say so: v2 carries ten codec extra bytes and lossless is defined
+// only with eighteen, so nothing can be read from it.
+func TestLosslessTagOnAWMAv2HeaderIsDamage(t *testing.T) {
+	raw := bytes.Clone(fixture(t, "sine-wmav2.wma"))
+	setFormatTag(0x0163)(raw)
+	_, err := asf.NewDemuxer(container.BytesSource(raw), nil)
+	if err == nil {
+		t.Fatal("accepted a WMA v2 header retyped as lossless")
+	}
+	if !strings.Contains(err.Error(), "codec extra bytes") {
+		t.Errorf("error %q does not say what is missing", err)
+	}
+	if code := waxerr.CodeOf(err); code != waxerr.CodeMalformedInput {
+		t.Errorf("error code = %q, want %q", code, waxerr.CodeMalformedInput)
 	}
 }
 

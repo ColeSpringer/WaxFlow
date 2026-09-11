@@ -44,16 +44,20 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   first three), Windows Media Audio 1 and 2 in ASF (mono and stereo,
   8-48 kHz, tags and Marker Object chapters; **decode only, and encoding
   it is a non-goal**: nothing plays WMA that does not also play a format
-  this tree writes better), and
+  this tree writes better), Windows Media Audio 9.2 Lossless
+  (bit-exact against the encoder's own input, 16- and 24-bit, stereo and
+  5.1 at 44.1 to 96 kHz; **decode only, and encoding it is a non-goal**
+  for the same reason, and because the only encoder for it is a Windows
+  component), and
   Musepack SV7 and SV8 (bit-identical to the reference decoder's float
   output; true gapless, noise substitution, APEv2 tags, SV8 chapters and
   ReplayGain; **decode only, and encoding it is a non-goal** for the same
   reason, the only encoder in existence being LGPL).
   Sample-exact
   seeking everywhere, gapless honored per format (LAME tag, iTunSMPB,
-  edit lists, Ogg pre-skip/end-trim, Matroska CodecDelay). WMA Pro,
-  Lossless and Voice share the container and are different codecs; they
-  are refused by name.
+  edit lists, Ogg pre-skip/end-trim, Matroska CodecDelay). WMA Pro and
+  Voice share the container and are different codecs; they are refused
+  by name.
 - **DSP**: Kaiser windowed-sinc resampling (`hq`/`fast`), BS.775
   downmix, gain with true-peak limiting, TPDF and shaped dither, EBU
   R128 / BS.1770-4 loudness (differential-verified against ffmpeg).

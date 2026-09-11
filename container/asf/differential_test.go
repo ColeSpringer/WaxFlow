@@ -24,6 +24,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/colespringer/waxflow/audio"
+	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/asf"
 	"github.com/colespringer/waxflow/internal/testutil"
@@ -156,6 +158,65 @@ func TestDemuxMatchesFFprobePackets(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestLosslessDemuxMatchesFFprobe is the same differential over the one codec
+// no tool here can generate. It runs against a committed fixture rather than a
+// built one, which is why it is a separate cell: FFmpeg decodes WMA Lossless
+// and cannot write it, so `corpus()` cannot produce a cell and this file would
+// otherwise cover the container's newest codec with nothing.
+func TestLosslessDemuxMatchesFFprobe(t *testing.T) {
+	if !testutil.HaveFFmpeg(t) {
+		t.Skip("ffmpeg not installed")
+	}
+	raw := fixture(t, "lossless-s16.wma")
+	path := filepath.Join(t.TempDir(), "lossless-s16.wma")
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := testutil.FFprobePackets(t, path)
+	if len(want) == 0 {
+		t.Fatal("ffprobe reported no packets")
+	}
+	d, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := d.Tracks()[0]
+	if tr.Codec != codec.WMALossless {
+		t.Fatalf("codec = %q, want %q", tr.Codec, codec.WMALossless)
+	}
+	if tr.Fmt.Type != audio.Int || tr.Fmt.BitDepth != 16 || tr.Fmt.Rate != 44100 || tr.Fmt.Channels != 2 {
+		t.Fatalf("format = %+v, want 44100 Hz stereo int16", tr.Fmt)
+	}
+	// The declared length is short of what the stream delivers, by the
+	// millisecond the container rounds by. Marking it advisory is what keeps a
+	// caller from trimming real audio away.
+	if !tr.SamplesAdvisory || tr.SamplesExact {
+		t.Errorf("length flags advisory=%v exact=%v, want advisory", tr.SamplesAdvisory, tr.SamplesExact)
+	}
+	var pkt container.Packet
+	for i := 0; ; i++ {
+		err := d.ReadPacket(&pkt)
+		if errors.Is(err, io.EOF) {
+			if i != len(want) {
+				t.Fatalf("%d packets, ffprobe reports %d", i, len(want))
+			}
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i >= len(want) {
+			t.Fatalf("packet %d past ffprobe's %d", i, len(want))
+		}
+		if len(pkt.Data) != want[i].Size {
+			t.Fatalf("packet %d is %d bytes, ffprobe reports %d", i, len(pkt.Data), want[i].Size)
+		}
+		if got := msOf(pkt.PTS, tr.Fmt.Rate); got != want[i].PTS {
+			t.Fatalf("packet %d is at %d ms, ffprobe reports %d ms", i, got, want[i].PTS)
+		}
 	}
 }
 

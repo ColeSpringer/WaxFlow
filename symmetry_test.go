@@ -34,10 +34,11 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	// symmetryGaps is the allowlist: every asymmetry that is known-open,
 	// whether deferred or decided against.
 	symmetryGaps := map[string]string{
-		"wma-encode":      "WMA encoding is a non-goal (README non-goals); decode-only by decision",
-		"asf-mux":         "ASF muxing is a non-goal; it exists only to carry WMA, which we do not encode",
-		"musepack-encode": "Musepack encoding is a non-goal (README non-goals); decode-only by decision",
-		"mpc-mux":         "Musepack muxing is a non-goal; the container exists only to carry a codec we do not encode",
+		"wma-encode":         "WMA encoding is a non-goal (README non-goals); decode-only by decision",
+		"asf-mux":            "ASF muxing is a non-goal; it exists only to carry WMA, which we do not encode",
+		"musepack-encode":    "Musepack encoding is a non-goal (README non-goals); decode-only by decision",
+		"wmalossless-encode": "WMA Lossless encoding is a non-goal (README non-goals); decode-only by decision",
+		"mpc-mux":            "Musepack muxing is a non-goal; the container exists only to carry a codec we do not encode",
 	}
 	// symmetryNonGoals marks the entries above that are decisions rather than
 	// deferrals, so a closed one reads as "revisit the decision" instead of
@@ -49,7 +50,15 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	// a format this tree writes better, and the only encoder in existence
 	// cannot be ported under the clean-room policy, so an encoder would be a
 	// from-scratch effort for no audience.
-	symmetryNonGoals := map[string]bool{"wma-encode": true, "asf-mux": true, "musepack-encode": true, "mpc-mux": true}
+	// WMA Lossless is the same decision again and the clearest case of it:
+	// FLAC, ALAC, WavPack and APE all already write lossless output nothing
+	// refuses, the only encoder for this one is a Windows component that
+	// cannot be ported at all, and an encoder would be a from-scratch effort
+	// aimed at players that all read something better.
+	symmetryNonGoals := map[string]bool{
+		"wma-encode": true, "asf-mux": true, "musepack-encode": true, "mpc-mux": true,
+		"wmalossless-encode": true,
+	}
 
 	decodes := map[codec.ID]bool{}
 	for _, id := range format.Decoders() {
@@ -68,19 +77,24 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	// decoder-without-encoder imbalance in the codec-level loop below;
 	// containerGaps does the same, per input container, for the
 	// demuxer-without-muxer loop.
-	codecGaps := map[codec.ID]string{codec.WMA: "wma-encode", codec.Musepack: "musepack-encode"}
+	codecGaps := map[codec.ID]string{
+		codec.WMA:         "wma-encode",
+		codec.Musepack:    "musepack-encode",
+		codec.WMALossless: "wmalossless-encode",
+	}
 	containerGaps := map[string]string{"wma": "asf-mux", "musepack": "mpc-mux"}
 
 	// open reports, for each named gap, whether it is still open, computed from
 	// the live tables so the predicate tracks the real code and cannot go stale.
 	open := map[string]bool{
 		// A codec with a decoder but no encoder-bearing outputs row.
-		"vorbis-encode":   decodes[codec.Vorbis] && !encodes[codec.Vorbis],
-		"wma-encode":      decodes[codec.WMA] && !encodes[codec.WMA],
-		"musepack-encode": decodes[codec.Musepack] && !encodes[codec.Musepack],
-		"he-aac-encode":   decodes[codec.HEAAC] && !encodes[codec.HEAAC],
-		"wavpack-encode":  decodes[codec.WavPack] && !encodes[codec.WavPack],
-		"ape-encode":      decodes[codec.APE] && !encodes[codec.APE],
+		"vorbis-encode":      decodes[codec.Vorbis] && !encodes[codec.Vorbis],
+		"wma-encode":         decodes[codec.WMA] && !encodes[codec.WMA],
+		"musepack-encode":    decodes[codec.Musepack] && !encodes[codec.Musepack],
+		"wmalossless-encode": decodes[codec.WMALossless] && !encodes[codec.WMALossless],
+		"he-aac-encode":      decodes[codec.HEAAC] && !encodes[codec.HEAAC],
+		"wavpack-encode":     decodes[codec.WavPack] && !encodes[codec.WavPack],
+		"ape-encode":         decodes[codec.APE] && !encodes[codec.APE],
 		// The wv package demuxes but has no muxer wired into any output row.
 		"wv-mux": !containerWritten("wavpack"),
 		// The apen package demuxes but has no muxer wired into any output row.

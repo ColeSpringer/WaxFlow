@@ -158,10 +158,108 @@ func TestWMATranscodes(t *testing.T) {
 	}
 }
 
-// TestWMARefusalsNameTheCodec: WMA Pro, Lossless and Voice are separate codecs
-// that share only the container. Registering the driver means a user who feeds
-// one now gets a refusal that says which it is, rather than the sniff table
+// TestWMALosslessIsLosslessEndToEnd is the property the codec exists for,
+// asserted through the public API rather than inside the package: a WMA
+// Lossless source transcoded to FLAC and decoded back gives the same samples
+// as decoding the source directly, with no tolerance anywhere.
+//
+// The codec's own gate compares against the encoder's input; this one compares
+// two paths through the pipeline, so it catches a stage between the decoder
+// and the muxer that is not sample-preserving. It uses a committed fixture
+// because no tool on any platform but Windows can write this format.
+func TestWMALosslessIsLosslessEndToEnd(t *testing.T) {
+	raw, err := os.ReadFile(repoPath("codec", "wmalossless", "testdata", "corpus", "ll-44100-2ch-16.wma"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No hint: the Header Object GUID is what resolves it, and the codec has
+	// to come out of the WAVEFORMATEX rather than out of a filename.
+	info, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	tr := info.Default()
+	if tr.Codec != "wmalossless" {
+		t.Fatalf("codec %q, want wmalossless", tr.Codec)
+	}
+	if tr.Fmt.Type != audio.Int || tr.Fmt.BitDepth != 16 {
+		t.Errorf("format %v, want the int domain at 16 bits", tr.Fmt)
+	}
+
+	direct, err := decodeAllDynamic(t, container.BytesSource(raw), "")
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	defer audio.Put(direct)
+
+	out := &memWS{}
+	if _, err := waxflow.New().Transcode(context.Background(), container.BytesSource(raw), "", out,
+		waxflow.TranscodeOptions{Format: "flac"}); err != nil {
+		t.Fatalf("transcode to flac: %v", err)
+	}
+	viaFLAC, err := decodeAllDynamic(t, container.BytesSource(out.Buf), "flac")
+	if err != nil {
+		t.Fatalf("decode the flac: %v", err)
+	}
+	defer audio.Put(viaFLAC)
+
+	if viaFLAC.N != direct.N {
+		t.Fatalf("the flac holds %d frames, the direct decode %d", viaFLAC.N, direct.N)
+	}
+	if viaFLAC.Fmt.Channels != direct.Fmt.Channels || viaFLAC.Fmt.BitDepth != direct.Fmt.BitDepth {
+		t.Fatalf("the flac is %v, the direct decode %v", viaFLAC.Fmt, direct.Fmt)
+	}
+	for ch := 0; ch < direct.Fmt.Channels; ch++ {
+		a, b := direct.ChanI(ch)[:direct.N], viaFLAC.ChanI(ch)[:viaFLAC.N]
+		for i := range a {
+			if a[i] != b[i] {
+				t.Fatalf("channel %d sample %d: through flac %d, direct %d", ch, i, b[i], a[i])
+			}
+		}
+	}
+}
+
+// TestWMALosslessSeekSampleExact is the engine-level seek gate for the one
+// codec here whose media objects are NOT all decoder start points.
+//
+// It is a separate cell from TestFixtureSeekSampleExact because its fixtures
+// live beside the codec rather than in the root testdata, and it exists
+// because the codec-level seek test cannot see this failure at all: that one
+// drives the decoder directly, and what broke was the container choosing a
+// landing the decoder could not begin at. The engine then reported a position
+// with no samples behind it, and three quarters of the 5.1 cell was
+// unreachable.
+func TestWMALosslessSeekSampleExact(t *testing.T) {
+	for _, name := range []string{"ll-44100-2ch-16", "ll-44100-2ch-24", "ll-48000-6ch-24"} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := os.ReadFile(repoPath("codec", "wmalossless", "testdata", "corpus", name+".wma"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			src := container.BytesSource(raw)
+			ref, err := decodeAllDynamic(t, src, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer audio.Put(ref)
+			med, err := waxflow.New().OpenStream(src, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer med.Close()
+			seekMatchesReference(t, med, ref, 50, 7)
+		})
+	}
+}
+
+// TestWMARefusalsNameTheCodec: WMA Pro and Voice are separate codecs that
+// share only the container. Registering the driver means a user who feeds one
+// now gets a refusal that says which it is, rather than the sniff table
 // declining to recognize the file at all.
+//
+// Lossless used to be on this list and is not any more: it decodes. What a
+// retyped v2 header gets now is the cell below, which is a different answer on
+// purpose.
 func TestWMARefusalsNameTheCodec(t *testing.T) {
 	dir := t.TempDir()
 	path := genWMA(t, dir, "src.wma", "sine=frequency=440:sample_rate=44100:duration=1", "wmav2", "128k", 2)
@@ -174,7 +272,6 @@ func TestWMARefusalsNameTheCodec(t *testing.T) {
 		want string
 	}{
 		{0x0162, "Windows Media Audio Pro"},
-		{0x0163, "Windows Media Audio Lossless"},
 		{0x000a, "Windows Media Audio Voice"},
 	} {
 		t.Run(fmt.Sprintf("%#04x", tc.tag), func(t *testing.T) {
@@ -190,6 +287,31 @@ func TestWMARefusalsNameTheCodec(t *testing.T) {
 				t.Errorf("code %q, want %q (a 415)", code, waxerr.CodeUnsupportedFormat)
 			}
 		})
+	}
+}
+
+// TestLosslessTagOnAWMAv2FileIsDamage is what the removed row became. A WMA v2
+// header retyped as lossless is not an unsupported stream but an inconsistent
+// one: v2 carries ten codec extra bytes, lossless is defined only with
+// eighteen, and the difference has to reach the caller as damage rather than
+// as "this build does not decode that", because the two mean different things
+// to anyone deciding what to do about the file.
+func TestLosslessTagOnAWMAv2FileIsDamage(t *testing.T) {
+	dir := t.TempDir()
+	path := genWMA(t, dir, "src.wma", "sine=frequency=440:sample_rate=44100:duration=1", "wmav2", "128k", 2)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = waxflow.New().Probe(container.BytesSource(retagWMA(t, raw, 0x0163)), "", nil)
+	if err == nil {
+		t.Fatal("accepted a WMA v2 header retyped as lossless")
+	}
+	if !strings.Contains(err.Error(), "codec extra bytes") {
+		t.Errorf("error %q does not say what is missing", err)
+	}
+	if code := waxerr.CodeOf(err); code != waxerr.CodeMalformedInput {
+		t.Errorf("code %q, want %q", code, waxerr.CodeMalformedInput)
 	}
 }
 

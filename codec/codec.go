@@ -31,6 +31,13 @@ const (
 	// Musepack covers stream versions 7 and 8 under one ID for the same
 	// reason: the version rides in the track's config.
 	Musepack ID = "musepack"
+	// WMALossless is its own ID rather than a version of WMA. The
+	// one-ID-per-package rule above covers versions of one codec that a config
+	// field discriminates; this is a different codec with a different
+	// bitstream, different gates and its own revision lifecycle, and a
+	// revision of one must not invalidate cached decodes of the other
+	// (ADR-0004).
+	WMALossless ID = "wmalossless"
 )
 
 // Packet is one compressed unit as a codec defines it: a FLAC frame, an

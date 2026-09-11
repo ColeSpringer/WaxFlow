@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/colespringer/waxflow/codec"
-	"github.com/colespringer/waxflow/codec/wma"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
 	"github.com/colespringer/waxflow/waxerr"
@@ -56,6 +55,12 @@ func (o *object) set(b []byte, pts int64) {
 // media object.
 type Demuxer struct {
 	opts DemuxerOptions
+	// syncOK reports whether a decoder can begin at a media object, from the
+	// codec that will decode it. Nil when every object is a start point.
+	syncOK func([]byte) bool
+	// syncFrameLen is the sample grid a resumed decode lands on, or 0 when the
+	// object's own presentation time is the answer. See codecSetup.
+	syncFrameLen int
 	// src backs the one-shot header and index reads; w is the streaming
 	// window the packet walk runs through. Keeping them apart is what stops a
 	// 16 MB header read from becoming the window every later packet read
@@ -210,11 +215,13 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 	d.emitted = true
 	*pkt = container.Packet{
 		Track: 0,
-		// Every media object is a sync point: ASF's key-frame bit is not set
-		// by every writer for audio (ffmpeg leaves it clear), and a WMA
-		// super-frame is where a decoder can restart. What the bit reservoir
-		// carries across super-frames is what the seek pre-roll covers.
-		Packet: codec.Packet{Data: d.cur.data, PTS: d.cur.pts, Dur: dur, Sync: true},
+		// ASF's own key-frame bit is not set by every writer for audio (ffmpeg
+		// leaves it clear), so the answer comes from the codec: for WMA v1/v2
+		// every super-frame is a restart and what the bit reservoir carries
+		// across one is what the seek run-up covers, while WMA Lossless
+		// produces nothing until a seekable tile and says which objects begin
+		// one in its own packet header.
+		Packet: codec.Packet{Data: d.cur.data, PTS: d.cur.pts, Dur: dur, Sync: d.objectIsSync()},
 	}
 	return nil
 }
@@ -415,6 +422,13 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	// immediately run out, which is what every other demuxer here does.
 	target := min(d.packetFor(samplesToMS(sample, d.track.Fmt.Rate)), d.packets-1)
 	landing := max(0, target-d.seekPreroll)
+	if d.syncOK != nil {
+		var err error
+		if landing, err = d.syncLanding(target, sample); err != nil {
+			d.err = err
+			return 0, err
+		}
+	}
 	d.rewind(landing)
 	if err := d.ensure(); err != nil {
 		d.err = err
@@ -435,9 +449,53 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 		}
 	}
 	if d.haveCur {
-		return d.cur.pts, nil
+		return d.landingPTS(d.cur.pts), nil
 	}
 	return 0, d.w.Err()
+}
+
+// objectIsSync reports whether the current object is one a decoder can begin
+// at. Without a codec predicate every object is, which is the answer for every
+// codec here but WMA Lossless.
+func (d *Demuxer) objectIsSync() bool {
+	return d.syncOK == nil || d.syncOK(d.cur.data)
+}
+
+// syncLanding walks back from the target to the newest object a decoder can
+// begin at, for a codec whose objects are not all start points.
+//
+// Backward rather than forward because a landing must not be past the target:
+// the caller pre-rolls from it by decoding and discarding, and a landing it
+// cannot decode from produces no samples at all, so the discard comes up short
+// and the position it reports has nothing behind it. That is the whole defect
+// this exists to close.
+//
+// It is bounded in practice by the encoder's spacing of seekable tiles, one
+// object in one to seven on stereo material and one in twenty-three to
+// twenty-nine on 5.1, and in the worst case by the start of the data. Only a
+// seek pays for it.
+func (d *Demuxer) syncLanding(target, sample int64) (int64, error) {
+	for i := target; i > 0; i-- {
+		d.rewind(i)
+		if err := d.ensure(); err != nil {
+			return 0, err
+		}
+		if d.haveCur && d.landingPTS(d.cur.pts) <= sample && d.syncOK(d.cur.data) {
+			return i, nil
+		}
+	}
+	return 0, nil
+}
+
+// landingPTS snaps an object's presentation time onto the grid a resumed
+// decode lands on. See Demuxer.syncFrameLen for why the object's own time is
+// not that grid.
+func (d *Demuxer) landingPTS(pts int64) int64 {
+	if d.syncFrameLen <= 0 {
+		return pts
+	}
+	n := int64(d.syncFrameLen)
+	return (pts + n/2) / n * n
 }
 
 // rewind puts the reader at the start of packet i, discarding the lookahead
@@ -765,14 +823,14 @@ func (d *Demuxer) streamKinds() string {
 // and the server's track cache remembered it that way; the refusals that name
 // those shapes live in the decoder and only run once a decode starts.
 func (d *Demuxer) wireTrack(s stream, id codec.ID, name string) error {
-	f := trackFormat(s.wfx)
+	setup, err := resolveCodec(id, s.wfx)
+	if err != nil {
+		return err
+	}
+	d.syncOK, d.syncFrameLen = setup.syncOK, setup.frameLen
+	f := setup.fmt
 	if err := f.Valid(); err != nil {
 		return container.UnusableFormat("wma", f, err)
-	}
-	if id == codec.WMA {
-		if _, err := wma.ParseConfig(s.wfx.raw); err != nil {
-			return err
-		}
 	}
 	d.sel = s
 	d.track = container.Track{

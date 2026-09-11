@@ -1,10 +1,13 @@
 package asf
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/wma"
+	"github.com/colespringer/waxflow/codec/wmalossless"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // TestGUIDWireOrder pins each GUID literal against the canonical text its
@@ -54,7 +57,7 @@ func TestCodecTable(t *testing.T) {
 		{0x0160, codec.WMA, "Windows Media Audio 1"},
 		{0x0161, codec.WMA, "Windows Media Audio 2"},
 		{0x0162, "", "Windows Media Audio Pro"},
-		{0x0163, "", "Windows Media Audio Lossless"},
+		{0x0163, codec.WMALossless, "Windows Media Audio Lossless"},
 		{0x0164, "", "Windows Media Audio Pro"},
 		{0x000A, "", "Windows Media Audio Voice"},
 		{0x000B, "", "Windows Media Audio Voice"},
@@ -133,24 +136,129 @@ func TestParseWaveFormat(t *testing.T) {
 	}
 }
 
-// TestTrackFormatMatchesTheCodec pins the agreement trackFormat's own comment
-// claims, which was pinned by nothing: the name was written down before the
-// test was. The two are computed independently -- this file from the
-// WAVEFORMATEX, codec/wma from its parsed Config -- and a decoder built on a
-// track whose format is not its own is refused, so a disagreement here is a
-// file that probes and will not play.
-func TestTrackFormatMatchesTheCodec(t *testing.T) {
+// TestResolveCodecTakesTheFormatFromTheCodec pins the agreement resolveCodec's
+// own comment claims. A decoder is refused a track whose format is not its own,
+// so a container that built the format beside the parse rather than out of it
+// would produce a file that probes and will not play; taking it from the config
+// makes the disagreement impossible, and this is what says so.
+func TestResolveCodecTakesTheFormatFromTheCodec(t *testing.T) {
 	for _, tc := range []struct {
 		rate, channels int
 	}{
 		{8000, 1}, {16000, 2}, {22050, 1}, {32000, 2}, {44100, 1}, {44100, 2}, {48000, 2},
 	} {
 		w := waveFormat{tag: 0x0161, rate: tc.rate, channels: tc.channels, blockAlign: 743}
-		cfg := wma.Config{V2: true, Rate: tc.rate, Channels: tc.channels, BitRate: 128000, BlockAlign: 743}
+		w.raw = wmav2WaveFormat(tc.rate, tc.channels, 743)
+		cfg, err := wma.ParseConfig(w.raw)
+		if err != nil {
+			t.Fatalf("%dHz %dch: %v", tc.rate, tc.channels, err)
+		}
+		setup, err := resolveCodec(codec.WMA, w)
+		if err != nil {
+			t.Fatalf("%dHz %dch: %v", tc.rate, tc.channels, err)
+		}
 		// Spelled field by field: audio.Format's String renders neither the
 		// layout nor the bit depth, and the layout is the field this catches.
-		if got, want := trackFormat(w), cfg.Format(); got != want {
-			t.Errorf("%dHz %dch: the container builds %+v, the codec builds %+v", tc.rate, tc.channels, got, want)
+		if setup.fmt != cfg.Format() {
+			t.Errorf("%dHz %dch: the container builds %+v, the codec builds %+v",
+				tc.rate, tc.channels, setup.fmt, cfg.Format())
 		}
 	}
+	// Lossless is the arm where the two could most easily drift: the depth and
+	// the layout come from the codec extra bytes rather than from the fixed
+	// WAVEFORMATEX fields, so a container that read either from the obvious
+	// place would build a plausible format the decoder then refuses.
+	for _, tc := range []struct {
+		rate, channels, bits int
+		mask                 uint32
+	}{
+		{44100, 2, 16, 0x03}, {44100, 2, 24, 0x03}, {48000, 6, 24, 0x3f},
+		{96000, 2, 24, 0x03}, {48000, 6, 24, 0}, {44100, 1, 16, 0},
+	} {
+		raw := losslessWaveFormat(tc.rate, tc.channels, tc.bits, tc.mask)
+		w, ok := parseWaveFormat(raw)
+		if !ok {
+			t.Fatalf("%dHz %dch: parseWaveFormat refused a lossless header", tc.rate, tc.channels)
+		}
+		cfg, err := wmalossless.ParseConfig(raw)
+		if err != nil {
+			t.Fatalf("%dHz %dch: %v", tc.rate, tc.channels, err)
+		}
+		setup, err := resolveCodec(codec.WMALossless, w)
+		if err != nil {
+			t.Fatalf("%dHz %dch: %v", tc.rate, tc.channels, err)
+		}
+		if setup.fmt != cfg.Format() {
+			t.Errorf("%dHz %dch %dbit mask %#x: the container builds %+v, the codec builds %+v",
+				tc.rate, tc.channels, tc.bits, tc.mask, setup.fmt, cfg.Format())
+		}
+	}
+}
+
+// TestResolveCodecErrorsCarryTheContainerName is the other half of
+// TestErrorsCarryThePublicContainerName, for the one path that reaches a
+// codec's own refusal: a config the decoder will not take. The prefix is
+// user-facing text and the driver row this package lands under is named wma,
+// so a bare codec error there names a package no user has heard of.
+func TestResolveCodecErrorsCarryTheContainerName(t *testing.T) {
+	// A lossless header with a WMA v2 sized extra block: ten bytes where the
+	// format defines eighteen.
+	raw := losslessWaveFormat(44100, 2, 16, 0x03)[:28]
+	le.PutUint16(raw[16:], 10)
+	w, ok := parseWaveFormat(raw)
+	if !ok {
+		t.Fatal("parseWaveFormat refused the header")
+	}
+	_, err := resolveCodec(codec.WMALossless, w)
+	if err == nil {
+		t.Fatal("accepted a config the codec refuses")
+	}
+	if !strings.HasPrefix(err.Error(), "wma: ") {
+		t.Errorf("error %q does not carry the public container name", err)
+	}
+	if !strings.Contains(err.Error(), "codec extra bytes") {
+		t.Errorf("error %q loses the codec's own reason", err)
+	}
+	if code := waxerr.CodeOf(err); code != waxerr.CodeMalformedInput {
+		t.Errorf("error code = %q, want the codec's own %q", code, waxerr.CodeMalformedInput)
+	}
+}
+
+// wmav2WaveFormat builds a WMA v2 WAVEFORMATEX with the ten extra bytes
+// ffmpeg's muxer writes.
+func wmav2WaveFormat(rate, channels, blockAlign int) []byte {
+	b := make([]byte, 28)
+	le.PutUint16(b, 0x0161)
+	le.PutUint16(b[2:], uint16(channels))
+	le.PutUint32(b[4:], uint32(rate))
+	le.PutUint32(b[8:], 16000)
+	le.PutUint16(b[12:], uint16(blockAlign))
+	le.PutUint16(b[14:], 16)
+	le.PutUint16(b[16:], 10)
+	le.PutUint16(b[22:], 1) // flags2: VLC exponents
+	return b
+}
+
+// losslessWaveFormat builds a WMA Lossless WAVEFORMATEX plus its 18 codec
+// extra bytes.
+//
+// wBitsPerSample is written as 16 whatever the real depth, which is NOT what
+// Windows does: it writes the depth into both fields, so the two agree on
+// every real file and a reader taking either one is right. Making them
+// disagree here is the point, because it is the only way to tell a reader that
+// takes the fixed field from one that takes the extra bytes, and only the
+// extra bytes are the format's answer.
+func losslessWaveFormat(rate, channels, bits int, mask uint32) []byte {
+	b := make([]byte, 36)
+	le.PutUint16(b, 0x0163)
+	le.PutUint16(b[2:], uint16(channels))
+	le.PutUint32(b[4:], uint32(rate))
+	le.PutUint32(b[8:], 144000)
+	le.PutUint16(b[12:], 13375)
+	le.PutUint16(b[14:], 16)
+	le.PutUint16(b[16:], 18)
+	le.PutUint16(b[18:], uint16(bits))
+	le.PutUint32(b[20:], mask)
+	le.PutUint16(b[32:], 0x01a1)
+	return b
 }

@@ -21,6 +21,12 @@ func FuzzDemux(f *testing.F) {
 	f.Add(fixture(f, "tagged.wma"))
 	f.Add(fixture(f, "chapters.wma"))
 	f.Add(fixture(f, "mono-8k.wma"))
+	// WMA Lossless, which is the one codec here whose track wiring parses a
+	// config, derives a format from it and installs a sync predicate. Without
+	// a seed that reaches 0x0163 the whole arm is unreachable from this
+	// fuzzer, including the Fmt.Valid() invariant below.
+	f.Add(fixture(f, "lossless-s16.wma"))
+	f.Add(fixture(f, "lossless-s16.wma")[:2000])
 	f.Add(appendSimpleIndex(fixture(f, "mono-8k.wma"), 8, 1_000_0000))
 	f.Add(guidHeader)
 

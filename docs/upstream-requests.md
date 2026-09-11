@@ -36,3 +36,28 @@ WaxFlow works around.
 **The test that will notice the fix:** oracletest's
 `TestWaxlabelAgreesMP3InMP4`, whose `mp3.mov` cell accepts either name
 today and says which one it saw.
+
+### `AudioTrack.BitsPerSample` reads WMA Lossless's decoration
+
+**What:** a WMA Lossless stream's real depth is in the codec extra bytes
+behind the `WAVEFORMATEX`, at extra offset 0; `wBitsPerSample` in the
+fixed part is decoration, and the only value any derived decoder reads is
+the extra one. waxlabel reads the fixed field. Windows' encoder writes
+the same value into both, so the two readings agree on every file that
+exists and the difference only shows on a header built to disagree: with
+`wBitsPerSample` patched to 16 on a 24-bit stream, waxlabel reports 16
+where the stream is 24.
+
+**Why it matters here:** a consumer sizing a buffer or choosing an output
+depth from waxlabel's number would be wrong by a factor of 256 on such a
+file, and nothing in the file is malformed. It is latent rather than
+live, since no encoder writes a disagreeing header.
+
+**Workaround WaxFlow runs on:** none needed. WaxFlow reads the extra
+bytes itself (`codec/wmalossless`'s `ParseConfig`) and never takes
+waxlabel's depth for its own decisions.
+
+**The test that will notice the fix:**
+`oracletest.TestBothReadersTakeTheDepthFromTheExtraBytes`, which pins
+waxlabel's answer as 16 today and fails when it becomes 24, so the fix
+cannot land without this entry being retired.
