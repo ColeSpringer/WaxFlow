@@ -161,17 +161,36 @@ func TestDemuxMatchesFFprobePackets(t *testing.T) {
 	}
 }
 
-// TestLosslessDemuxMatchesFFprobe is the same differential over the one codec
-// no tool here can generate. It runs against a committed fixture rather than a
-// built one, which is why it is a separate cell: FFmpeg decodes WMA Lossless
-// and cannot write it, so `corpus()` cannot produce a cell and this file would
-// otherwise cover the container's newest codec with nothing.
-func TestLosslessDemuxMatchesFFprobe(t *testing.T) {
+// TestCommittedDemuxMatchesFFprobe is the same differential over the two
+// codecs no tool here can generate. It runs against committed fixtures rather
+// than built ones, which is why it is a separate cell: FFmpeg decodes WMA
+// Lossless and WMA Pro and cannot write either, so `corpus()` cannot produce
+// a cell and this file would otherwise cover the container's newest codecs
+// with nothing.
+func TestCommittedDemuxMatchesFFprobe(t *testing.T) {
 	if !testutil.HaveFFmpeg(t) {
 		t.Skip("ffmpeg not installed")
 	}
-	raw := fixture(t, "lossless-s16.wma")
-	path := filepath.Join(t.TempDir(), "lossless-s16.wma")
+	for _, tc := range []struct {
+		name  string
+		codec codec.ID
+		fmt   audio.Format
+	}{
+		{"lossless-s16.wma", codec.WMALossless,
+			audio.Format{Rate: 44100, Channels: 2, Layout: audio.ChannelMask(0x03), Type: audio.Int, BitDepth: 16}},
+		{"pro-s16.wma", codec.WMAPro,
+			audio.Format{Rate: 44100, Channels: 2, Layout: audio.ChannelMask(0x03), Type: audio.Float, BitDepth: 32}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			committedDemuxMatchesFFprobe(t, tc.name, tc.codec, tc.fmt)
+		})
+	}
+}
+
+func committedDemuxMatchesFFprobe(t *testing.T, name string, id codec.ID, fm audio.Format) {
+	t.Helper()
+	raw := fixture(t, name)
+	path := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -184,11 +203,11 @@ func TestLosslessDemuxMatchesFFprobe(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := d.Tracks()[0]
-	if tr.Codec != codec.WMALossless {
-		t.Fatalf("codec = %q, want %q", tr.Codec, codec.WMALossless)
+	if tr.Codec != id {
+		t.Fatalf("codec = %q, want %q", tr.Codec, id)
 	}
-	if tr.Fmt.Type != audio.Int || tr.Fmt.BitDepth != 16 || tr.Fmt.Rate != 44100 || tr.Fmt.Channels != 2 {
-		t.Fatalf("format = %+v, want 44100 Hz stereo int16", tr.Fmt)
+	if tr.Fmt != fm {
+		t.Fatalf("format = %+v, want %+v", tr.Fmt, fm)
 	}
 	// The declared length is short of what the stream delivers, by the
 	// millisecond the container rounds by. Marking it advisory is what keeps a

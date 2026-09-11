@@ -5,6 +5,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/wma"
 	"github.com/colespringer/waxflow/codec/wmalossless"
+	"github.com/colespringer/waxflow/codec/wmapro"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -80,8 +81,13 @@ func asfCodecID(tag uint16) (codec.ID, string) {
 		return codec.WMA, "Windows Media Audio 1"
 	case tagWMAV2:
 		return codec.WMA, "Windows Media Audio 2"
-	case tagWMAPro, tagWMAProSPDIF:
-		return "", "Windows Media Audio Pro"
+	case tagWMAPro:
+		return codec.WMAPro, "Windows Media Audio Pro"
+	case tagWMAProSPDIF:
+		// Pro over S/PDIF. No reference decoder reads this tag, so nothing
+		// could verify a decode of one; it is named apart from the Pro this
+		// build decodes so the refusal does not read as a contradiction.
+		return "", "Windows Media Audio Pro over S/PDIF"
 	case tagWMALossless:
 		return codec.WMALossless, "Windows Media Audio Lossless"
 	case tagWMAVoice, tagWMAVoice9:
@@ -133,6 +139,17 @@ func resolveCodec(id codec.ID, w waveFormat) (codecSetup, error) {
 			return codecSetup{}, fromCodec(err)
 		}
 		return codecSetup{id: id, fmt: cfg.Format()}, nil
+	case codec.WMAPro:
+		cfg, err := wmapro.ParseConfig(w.raw)
+		if err != nil {
+			return codecSetup{}, fromCodec(err)
+		}
+		// Every media object is a decode start point here, measured at 65
+		// resume points across thirteen files, so there is no syncOK to
+		// supply. The frame length is still needed: an object's presentation
+		// time is in milliseconds and is not the first sample a decode resumed
+		// there produces.
+		return codecSetup{id: id, fmt: cfg.Format(), frameLen: cfg.SamplesPerFrame()}, nil
 	case codec.WMALossless:
 		cfg, err := wmalossless.ParseConfig(w.raw)
 		if err != nil {

@@ -27,3 +27,5 @@ row for the same pass, and `THIRD-PARTY-NOTICES.md` carries the attribution.
 | `musepack-chapters.md` | `container/mpc` | 2026-09-02 |
 | `wma-lossless-bitstream.md` | `codec/wmalossless` | 2026-09-10 |
 | `wma-lossless-oracle-corpus.md` | `codec/wmalossless` | 2026-09-10 |
+| `wma-pro-bitstream.md` | `codec/wmapro` | 2026-09-10 |
+| `wma-pro-oracle-corpus.md` | `codec/wmapro` | 2026-09-10 |

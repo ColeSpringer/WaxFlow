@@ -38,6 +38,11 @@ const (
 	// revision of one must not invalidate cached decodes of the other
 	// (ADR-0004).
 	WMALossless ID = "wmalossless"
+	// WMAPro is its own ID for the same reason: a different bitstream with a
+	// different table set, its own gates and its own revision lifecycle, and a
+	// Pro revision must not invalidate cached decodes of a v2 or a lossless
+	// source (ADR-0004).
+	WMAPro ID = "wmapro"
 )
 
 // Packet is one compressed unit as a codec defines it: a FLAC frame, an

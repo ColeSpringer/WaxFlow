@@ -252,14 +252,14 @@ func TestWMALosslessSeekSampleExact(t *testing.T) {
 	}
 }
 
-// TestWMARefusalsNameTheCodec: WMA Pro and Voice are separate codecs that
-// share only the container. Registering the driver means a user who feeds one
-// now gets a refusal that says which it is, rather than the sniff table
-// declining to recognize the file at all.
+// TestWMARefusalsNameTheCodec: WMA Voice is a separate codec that shares only
+// the container. Registering the driver means a user who feeds one now gets a
+// refusal that says which it is, rather than the sniff table declining to
+// recognize the file at all.
 //
-// Lossless used to be on this list and is not any more: it decodes. What a
-// retyped v2 header gets now is the cell below, which is a different answer on
-// purpose.
+// Lossless and Pro used to be on this list and are not any more: they decode.
+// What a retyped v2 header gets now is the cell below, which is a different
+// answer on purpose.
 func TestWMARefusalsNameTheCodec(t *testing.T) {
 	dir := t.TempDir()
 	path := genWMA(t, dir, "src.wma", "sine=frequency=440:sample_rate=44100:duration=1", "wmav2", "128k", 2)
@@ -271,8 +271,8 @@ func TestWMARefusalsNameTheCodec(t *testing.T) {
 		tag  uint16
 		want string
 	}{
-		{0x0162, "Windows Media Audio Pro"},
 		{0x000a, "Windows Media Audio Voice"},
+		{0x000b, "Windows Media Audio Voice"},
 	} {
 		t.Run(fmt.Sprintf("%#04x", tc.tag), func(t *testing.T) {
 			patched := retagWMA(t, raw, tc.tag)
@@ -290,28 +290,38 @@ func TestWMARefusalsNameTheCodec(t *testing.T) {
 	}
 }
 
-// TestLosslessTagOnAWMAv2FileIsDamage is what the removed row became. A WMA v2
-// header retyped as lossless is not an unsupported stream but an inconsistent
-// one: v2 carries ten codec extra bytes, lossless is defined only with
-// eighteen, and the difference has to reach the caller as damage rather than
-// as "this build does not decode that", because the two mean different things
-// to anyone deciding what to do about the file.
-func TestLosslessTagOnAWMAv2FileIsDamage(t *testing.T) {
+// TestDecodedTagOnAWMAv2FileIsDamage is what the removed rows became. A WMA v2
+// header retyped as lossless or as Pro is not an unsupported stream but an
+// inconsistent one: v2 carries ten codec extra bytes, both of those are
+// defined only with eighteen, and the difference has to reach the caller as
+// damage rather than as "this build does not decode that", because the two
+// mean different things to anyone deciding what to do about the file.
+func TestDecodedTagOnAWMAv2FileIsDamage(t *testing.T) {
 	dir := t.TempDir()
 	path := genWMA(t, dir, "src.wma", "sine=frequency=440:sample_rate=44100:duration=1", "wmav2", "128k", 2)
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = waxflow.New().Probe(container.BytesSource(retagWMA(t, raw, 0x0163)), "", nil)
-	if err == nil {
-		t.Fatal("accepted a WMA v2 header retyped as lossless")
-	}
-	if !strings.Contains(err.Error(), "codec extra bytes") {
-		t.Errorf("error %q does not say what is missing", err)
-	}
-	if code := waxerr.CodeOf(err); code != waxerr.CodeMalformedInput {
-		t.Errorf("code %q, want %q", code, waxerr.CodeMalformedInput)
+	for _, tc := range []struct {
+		name string
+		tag  uint16
+	}{
+		{"lossless", 0x0163},
+		{"pro", 0x0162},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := waxflow.New().Probe(container.BytesSource(retagWMA(t, raw, tc.tag)), "", nil)
+			if err == nil {
+				t.Fatalf("accepted a WMA v2 header retyped as %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), "codec extra bytes") {
+				t.Errorf("error %q does not say what is missing", err)
+			}
+			if code := waxerr.CodeOf(err); code != waxerr.CodeMalformedInput {
+				t.Errorf("code %q, want %q", code, waxerr.CodeMalformedInput)
+			}
+		})
 	}
 }
 
@@ -420,5 +430,90 @@ func TestWMAChaptersReachTheProbe(t *testing.T) {
 	}
 	if !slices.Equal(info.Chapters, want) {
 		t.Errorf("chapters %+v, want %+v", info.Chapters, want)
+	}
+}
+
+// TestWMAProProbeAndDecode is the integration layer for the third codec in
+// the container: the sniff table resolves the header with no filename, the
+// track built by container/asf drives codec/wmapro without either side
+// knowing about the other, and the pipeline reaches a real output format. The
+// codec's own differential lives beside the codec; this uses one of its
+// committed fixtures because no tool on any platform but Windows can write
+// this format.
+func TestWMAProProbeAndDecode(t *testing.T) {
+	raw, err := os.ReadFile(repoPath("codec", "wmapro", "testdata", "corpus", "pro-44100-2ch-16-128k.wma"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if info.Container != "wma" {
+		t.Errorf("container %q, want wma", info.Container)
+	}
+	tr := info.Default()
+	if tr.Codec != "wmapro" {
+		t.Fatalf("codec %q, want wmapro", tr.Codec)
+	}
+	if tr.Fmt.Rate != 44100 || tr.Fmt.Channels != 2 || tr.Fmt.Type != audio.Float || tr.Fmt.BitDepth != 32 {
+		t.Errorf("format %v, want 44100 Hz stereo float32", tr.Fmt)
+	}
+	if tr.SamplesExact || !tr.SamplesAdvisory {
+		t.Errorf("length flags exact=%v advisory=%v, want advisory: ASF rounds its length from a duration",
+			tr.SamplesExact, tr.SamplesAdvisory)
+	}
+	got, err := decodeAllDynamic(t, container.BytesSource(raw), "")
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	defer audio.Put(got)
+	// The source is 65536 frames and the decode is exactly that: the
+	// bitstream's own trims and the one frame of lead-in account for the
+	// encoder's delay with nothing left over, and the container's advisory
+	// length, which overshoots, trims nothing.
+	if got.N != 65536 {
+		t.Errorf("decoded %d frames, want 65536", got.N)
+	}
+	for _, format := range []string{"wav", "flac", "opus"} {
+		t.Run(format, func(t *testing.T) {
+			out := &memWS{}
+			res, err := waxflow.New().Transcode(context.Background(), container.BytesSource(raw), "", out,
+				waxflow.TranscodeOptions{Format: format})
+			if err != nil {
+				t.Fatalf("transcode to %s: %v", format, err)
+			}
+			if res.Samples <= 0 || len(out.Buf) == 0 {
+				t.Fatalf("%d samples written to %d bytes", res.Samples, len(out.Buf))
+			}
+		})
+	}
+}
+
+// TestWMAProSeekSampleExact is the engine-level seek gate. Every media object
+// is a decode start point for this codec, so what this pins is the other half
+// of a landing: that the container snaps an object's millisecond time onto the
+// frame grid a resumed decode actually lands on, and that the engine's pre-roll
+// covers the one frame of lead-in. The codec-level seek test cannot see either.
+func TestWMAProSeekSampleExact(t *testing.T) {
+	for _, name := range []string{"pro-44100-2ch-16-128k", "pro-48000-6ch-24-384k", "pro-96000-2ch-24-384k", "pro-44100-2ch-16-128k-tonal"} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := os.ReadFile(repoPath("codec", "wmapro", "testdata", "corpus", name+".wma"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			src := container.BytesSource(raw)
+			ref, err := decodeAllDynamic(t, src, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer audio.Put(ref)
+			med, err := waxflow.New().OpenStream(src, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer med.Close()
+			seekMatchesReference(t, med, ref, 50, 7)
+		})
 	}
 }

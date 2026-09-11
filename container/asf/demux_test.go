@@ -478,7 +478,7 @@ func TestSeekIgnoresAnIndexPointingPastTheTarget(t *testing.T) {
 func TestEncryptionIsRefusedAheadOfTheCodec(t *testing.T) {
 	raw := bytes.Clone(fixture(t, "sine-wmav2.wma"))
 	copy(headerObject(t, raw, guidCodecList), guidContentEncrypt)
-	le.PutUint16(headerBody(t, raw, guidStreamProperties)[54:], 0x0162) // WMA Pro
+	le.PutUint16(headerBody(t, raw, guidStreamProperties)[54:], 0x000A) // WMA Voice, still refused by name
 	_, err := asf.NewDemuxer(container.BytesSource(raw), nil)
 	if err == nil {
 		t.Fatal("accepted an encrypted file")
@@ -496,8 +496,7 @@ func TestRefusalsNameWhatTheyFound(t *testing.T) {
 		patch func(raw []byte)
 		want  string
 	}{
-		{"wma-pro", setFormatTag(0x0162), "Windows Media Audio Pro"},
-		{"wma-pro-spdif", setFormatTag(0x0164), "Windows Media Audio Pro"},
+		{"wma-pro-spdif", setFormatTag(0x0164), "Windows Media Audio Pro over S/PDIF"},
 		{"wma-voice", setFormatTag(0x000A), "Windows Media Audio Voice"},
 		{"wma-voice-9", setFormatTag(0x000B), "Windows Media Audio Voice"},
 		{"unknown-codec", setFormatTag(0x0055), "audio format 0x0055"},
@@ -530,24 +529,34 @@ func TestRefusalsNameWhatTheyFound(t *testing.T) {
 	}
 }
 
-// TestLosslessTagOnAWMAv2HeaderIsDamage is the other half of the row this
-// build removed from the table above. WMA Lossless used to be refused by name
-// like Pro and Voice; now that it decodes, retyping a WMA v2 header as
-// lossless does not produce an unsupported stream but an inconsistent one, and
-// it has to say so: v2 carries ten codec extra bytes and lossless is defined
+// TestDecodedTagOnAWMAv2HeaderIsDamage is the other half of the two rows this
+// build removed from the table above. WMA Lossless and WMA Pro used to be
+// refused by name like Voice; now that they decode, retyping a WMA v2 header
+// as either does not produce an unsupported stream but an inconsistent one,
+// and it has to say so: v2 carries ten codec extra bytes and both are defined
 // only with eighteen, so nothing can be read from it.
-func TestLosslessTagOnAWMAv2HeaderIsDamage(t *testing.T) {
-	raw := bytes.Clone(fixture(t, "sine-wmav2.wma"))
-	setFormatTag(0x0163)(raw)
-	_, err := asf.NewDemuxer(container.BytesSource(raw), nil)
-	if err == nil {
-		t.Fatal("accepted a WMA v2 header retyped as lossless")
-	}
-	if !strings.Contains(err.Error(), "codec extra bytes") {
-		t.Errorf("error %q does not say what is missing", err)
-	}
-	if code := waxerr.CodeOf(err); code != waxerr.CodeMalformedInput {
-		t.Errorf("error code = %q, want %q", code, waxerr.CodeMalformedInput)
+func TestDecodedTagOnAWMAv2HeaderIsDamage(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tag  uint16
+	}{
+		{"lossless", 0x0163},
+		{"pro", 0x0162},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := bytes.Clone(fixture(t, "sine-wmav2.wma"))
+			setFormatTag(tc.tag)(raw)
+			_, err := asf.NewDemuxer(container.BytesSource(raw), nil)
+			if err == nil {
+				t.Fatalf("accepted a WMA v2 header retyped as %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), "codec extra bytes") {
+				t.Errorf("error %q does not say what is missing", err)
+			}
+			if code := waxerr.CodeOf(err); code != waxerr.CodeMalformedInput {
+				t.Errorf("error code = %q, want %q", code, waxerr.CodeMalformedInput)
+			}
+		})
 	}
 }
 

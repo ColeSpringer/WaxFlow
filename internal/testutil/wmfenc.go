@@ -31,6 +31,11 @@ import (
 // all. It is a separate script because Media Foundation cannot write the
 // format either; the header there says why.
 //
+// The same script decodes (WMFDecode), which puts Windows' own DECODER in
+// reach as well. That one is not a fixture generator but a second oracle: two
+// implementations that agree on a file neither of them wrote is a much
+// stronger statement than agreeing with the program that made it.
+//
 // Windows only, and Windows PowerShell 5.1 only (the WinRT projections the
 // script needs are absent from pwsh). Absence escalates under
 // WAXFLOW_REQUIRE_WMFENC=1 and never under WAXFLOW_REQUIRE_FFMPEG, which no
@@ -122,17 +127,58 @@ func runWMF(t testing.TB, script, what, dst string, args ...string) {
 	}
 }
 
+// Media Foundation subtypes for the WMA family, as scripts/wmfenc/wmfenc.ps1
+// takes them: a MediaEncodingSubtypes name where one exists, a {GUID} where it
+// does not. Voice has no name, which is the whole reason the script accepts a
+// GUID at all.
+const (
+	SubtypeWMAV2  = "Wma8"
+	SubtypeWMAPro = "Wma9"
+)
+
 // WMFEncode encodes a WAV to WMA Standard v2 with Windows' own encoder. The
 // encoder chooses its own bit rate near the request and ignores it entirely at
 // low sample rates, so callers read back what they actually got rather than
 // asserting the request.
 func WMFEncode(t testing.TB, wav, out string, rate, channels, bitRate int) {
 	t.Helper()
+	WMFEncodeSubtype(t, wav, out, rate, channels, bitRate, 16, SubtypeWMAV2)
+}
+
+// WMFEncodeSubtype is WMFEncode for the rest of the family: SubtypeWMAPro, or
+// a {GUID} for a codec Media Foundation names no constant for.
+//
+// bits is the depth the encoder codes at, and it selects among the formats
+// Media Foundation offers rather than describing the source. It has to be
+// passed because MediaTranscoder RENEGOTIATES instead of refusing: every WMA
+// Pro format above 48 kHz is 24-bit, so a 96 kHz request at 16 bits comes back
+// as a 48 kHz file that looks like a successful encode. Callers read back what
+// they actually got.
+func WMFEncodeSubtype(t testing.TB, wav, out string, rate, channels, bitRate, bits int, subtype string) {
+	t.Helper()
 	in, dst := wmfPaths(t, wav, out)
-	runWMF(t, "wmfenc.ps1", fmt.Sprintf("%dHz %dch %d", rate, channels, bitRate), dst,
+	runWMF(t, "wmfenc.ps1", fmt.Sprintf("%s %dHz %dch %d %dbit", subtype, rate, channels, bitRate, bits), dst,
 		"-In", in, "-Out", dst,
 		"-Rate", strconv.Itoa(rate), "-Channels", strconv.Itoa(channels),
-		"-BitRate", strconv.Itoa(bitRate))
+		"-BitRate", strconv.Itoa(bitRate), "-Bits", strconv.Itoa(bits), "-Subtype", subtype)
+}
+
+// WMFDecode decodes a .wma to a PCM WAV with WINDOWS' OWN decoder, which is a
+// second oracle beside FFmpeg's and an independent one: where the two agree on
+// a file neither of them wrote, a disagreement with this decoder is this
+// decoder's.
+//
+// The output keeps the source's rate and channel count, so what comes back is
+// the decoder's own answer and not a resampler's. bits is the PCM width; 0
+// takes the script's default of 16.
+func WMFDecode(t testing.TB, wma, out string, bits int) {
+	t.Helper()
+	in, dst := wmfPaths(t, wma, out)
+	args := []string{"-Decode", "-In", in, "-Out", dst}
+	if bits != 0 {
+		args = append(args, "-Bits", strconv.Itoa(bits))
+	}
+	runWMF(t, "wmfenc.ps1", "decode "+filepath.Base(wma), dst, args...)
 }
 
 // WMFEncodeLossless encodes a WAV to WMA Lossless (wFormatTag 0x0163) with

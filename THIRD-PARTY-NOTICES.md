@@ -2,10 +2,11 @@
 
 Attributions for code studied closely or ported into WaxFlow, per
 [ADR-0001](docs/adr/0001-clean-room-policy.md). Almost every entry below is
-permissively licensed (Tier A) source. The exceptions are **codec/wma**,
-whose parameter tables are extracted from a copyleft project under the ADR's
-provision for data-only artifacts, because the format has no published
-specification to restate, and the **scripts/mpcchap** stub, which declares a
+permissively licensed (Tier A) source. The exceptions are **codec/wma** and
+**codec/wmapro**, whose parameter tables are extracted from a copyleft
+project under the ADR's provision for data-only artifacts, because neither
+format has a published specification to restate, and the **scripts/mpcchap**
+stub, which declares a
 copyleft library's API by name so a reference test tool can be built without
 it; each entry states the difference and its reasoning in full. Module dependencies (e.g. spf13/cobra) carry their own licenses in
 the module cache and are not vendored here.
@@ -314,6 +315,45 @@ Entries follow this format:
 > kernel, and the reader is its own). Where the notes turned out to be
 > silent on a combination, the decoder refuses it by name rather than
 > guessing at FFmpeg's behaviour.
+
+> **codec/wmapro parameter tables**: the same black-box PARAMETER
+> artifact as the entry above, for a different codec. WMA Pro
+> (`wFormatTag` 0x0162) has no published bitstream specification either,
+> so `codec/wmapro/tables_bands.go`, `tables_scale.go`, `tables_coef.go`
+> and `tables_decorr.go` have *FFmpeg* (LGPL-2.1-or-later),
+> https://github.com/FFmpeg/FFmpeg, n9.0, commit
+> d32b387f2b0a484599d4587d651891f0c63c4238, as their primary source: the
+> scale-factor books (DPCM and run-level) with the run and level a
+> run-level symbol names, the two run-level coefficient books, the 4-,
+> 2- and 1-element vector books, the default channel decorrelation
+> matrices, and the critical-band upper edges in Hz, all from
+> `libavcodec/wmaprodata.h`. The band edges are published Bark-scale
+> data; the books and the matrices are not. They are **data only**:
+> codeword, length, symbol, run and level values, with no decoder logic
+> of any kind, and nothing derived from them is tabulated here (the
+> per-block-size scale-factor band layout, the subwoofer cutoff and the
+> sine windows are all computed at run time from the edges, the block
+> size and the sample rate). The extraction is mechanical and auditable:
+> `codec/wmapro/tablesgen_test.go` parses the upstream file under a
+> SHA-256 pin and emits the Go tables, so a reviewer can re-run it and
+> diff. It runs under a build tag and needs a checked-out FFmpeg tree,
+> so it is never part of an ordinary build. The behavioural analysis
+> from the same pass is in `docs/notes/wma-pro-bitstream.md` and
+> `docs/notes/wma-pro-oracle-corpus.md`; the stage that implements the
+> decoder consumes those notes and these tables and does not open
+> FFmpeg. The `ffmpeg` binary additionally serves as a test-only
+> differential oracle, though not a fixture generator: it has no encoder
+> for this format, so the fixtures come from Windows' own encoder.
+>
+> The decoder in `codec/wmapro` was written in that later stage, from
+> those notes and these tables and nothing else. It is not a port: no
+> FFmpeg source was open while it was written, the checkouts the analysis
+> sessions had fetched were deleted from the machine before it began, and
+> the two are structured differently (the transform is built on this
+> tree's shared `dsp/fft` kernel, the reader is its own, and the walk is
+> organised around the notes' description rather than around any source
+> file). Where the notes mark a shape as undetermined, the decoder refuses
+> it by name rather than guessing at FFmpeg's behaviour.
 
 > **codec/musepack decoder and container/mpc**: a clean-room port of
 > *libmpcdec* from the Musepack Development Team's musepack_src_r475

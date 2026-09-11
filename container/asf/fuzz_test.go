@@ -27,6 +27,8 @@ func FuzzDemux(f *testing.F) {
 	// fuzzer, including the Fmt.Valid() invariant below.
 	f.Add(fixture(f, "lossless-s16.wma"))
 	f.Add(fixture(f, "lossless-s16.wma")[:2000])
+	f.Add(fixture(f, "pro-s16.wma"))
+	f.Add(fixture(f, "pro-s16.wma")[:2000])
 	f.Add(appendSimpleIndex(fixture(f, "mono-8k.wma"), 8, 1_000_0000))
 	f.Add(guidHeader)
 

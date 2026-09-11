@@ -434,7 +434,7 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 		d.err = err
 		return 0, err
 	}
-	if landing > 0 && (!d.haveCur || d.cur.pts > sample) {
+	if landing > 0 && (!d.haveCur || d.landingPTS(d.cur.pts) > sample) {
 		// The landing is checked against the position it actually produced,
 		// and a failed check restarts at the start of the data. Both cases
 		// are the same mistrust: a landing past the target breaks the Seeker
@@ -449,7 +449,19 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 		}
 	}
 	if d.haveCur {
-		return d.landingPTS(d.cur.pts), nil
+		// The snap rounds to the nearest grid point, which can be later than
+		// the object's own time. That never matters with a packet of
+		// pre-roll behind the target, and it matters at the first object of
+		// a stream that does not start on the grid: a seek before the start
+		// must not land later than where a linear read says the stream
+		// begins, so the landing never claims a position past both the
+		// target and the object's own time. Real files start at zero and
+		// are unaffected.
+		landed := d.landingPTS(d.cur.pts)
+		if landed > max(sample, d.cur.pts) {
+			landed = d.cur.pts
+		}
+		return landed, nil
 	}
 	return 0, d.w.Err()
 }
