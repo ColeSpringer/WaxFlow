@@ -418,6 +418,39 @@ var staleRuns = map[string][][2]int{
 	"voice-22050-20k": {{59, 61}, {119, 121}, {139, 140}, {159, 182}},
 }
 
+// narrowedRuns is the reference's SECOND defect, and this one is a version of
+// the reference rather than the reference itself. FFmpeg 7.0 and older compute
+// the denoise filter's energy index as a double and then narrow it to float
+// before truncating it to an int (av_clipf on a double argument). Upstream
+// removed the narrowing in 9876158e to quiet a compiler warning, without
+// noting that it moves the index, and 7.1 is the first release carrying it;
+// Ubuntu 24.04, which is what the CI differential job runs, ships 6.1.1.
+//
+// Measured over all eight fixtures, the narrowing changes the index exactly
+// ONCE: on voice-16000-16k, at superframe 31, where the index is
+// 28.999999561853929 and float rounds that to 29.0, so an old reference reads
+// row 29 of a table whose rows are 3.3 percent apart. The postfilter's memory
+// carries it into the next two superframes and it dies there, at 6.2e-05,
+// 4.3e-06 and 2.1e-07 against this decoder, which takes the index in float64
+// and so agrees with 7.1 and newer. Everywhere else the two versions are
+// bit-identical, which is why the cell keeps its one staleDeficits entry
+// instead of a second one for old oracles: measured, it comes out max 9.8e-06
+// and RMS 2.0e-07 outside these three superframes against either version.
+var narrowedRuns = map[string][][2]int{
+	"voice-16000-16k": {{31, 33}},
+}
+
+// skipRuns is what the differential leaves out of a cell: the carry defect's
+// runs always, and the narrowing's three superframes only on an oracle old
+// enough to have it, so a current one scores them at the same bound as the
+// rest of the file.
+func skipRuns(t testing.TB, name string) [][2]int {
+	if testutil.FFmpegAtLeast(t, 7, 1) {
+		return staleRuns[name]
+	}
+	return append(slices.Clone(staleRuns[name]), narrowedRuns[name]...)
+}
+
 // staleDeficits are the four cells scored outside the runs the reference gets
 // wrong, each at about twice its own measured figure rather than at one
 // class-wide bound, in the shape codec/wma's msDeficits has. They sit above
@@ -432,6 +465,41 @@ var staleDeficits = map[string]struct{ max, rms float64 }{
 	"voice-16000-12k": {1.2e-4, 2e-6},
 	"voice-16000-16k": {2e-5, 4e-7},
 	"voice-22050-20k": {9e-5, 1.6e-6},
+}
+
+// TestSkipTablesNameRealCells is the staleness check the per-cell tables need,
+// and it needs no oracle so it runs on every box. Three of the four fail loudly
+// by themselves on a key that stops naming a cell: an unskipped stale run blows
+// the differential, a dropped stalePoisoned entry fails the carry test against
+// a non-empty derived list, and a dropped staleDeficits entry puts the cell on
+// the tighter clean bound. narrowedRuns is the one that would go quiet, because
+// its effect is invisible on the oracle most boxes run. Measured by mutation: a
+// typo in its key leaves TestNarrowedRunsAreCleanOnACurrentOracle reporting PASS
+// with no subtest at all on 7.1 and newer, and fails the differential on an
+// older one at the 6.2e-05 the skip exists for, which reads as a decoder
+// regression rather than as a stale table.
+func TestSkipTablesNameRealCells(t *testing.T) {
+	named := make(map[string]bool, len(cells))
+	for _, c := range cells {
+		named[c.name] = true
+	}
+	check := func(table, key string) {
+		if !named[key] {
+			t.Errorf("%s names %q, which is no cell of this corpus: a skip keyed to a name nothing has is no skip at all", table, key)
+		}
+	}
+	for k := range stalePoisoned {
+		check("stalePoisoned", k)
+	}
+	for k := range staleRuns {
+		check("staleRuns", k)
+	}
+	for k := range staleDeficits {
+		check("staleDeficits", k)
+	}
+	for k := range narrowedRuns {
+		check("narrowedRuns", k)
+	}
 }
 
 // TestDecodeMatchesFFmpeg is the gate. FFmpeg has no encoder for this format,
@@ -452,7 +520,7 @@ func TestDecodeMatchesFFmpeg(t *testing.T) {
 			if len(got) != c.frames {
 				t.Errorf("decoded %d samples, want the source's %d", len(got), c.frames)
 			}
-			runs := staleRuns[c.name]
+			runs := skipRuns(t, c.name)
 			// FFmpeg's own length is the source's unless its LAST superframe
 			// is one of the poisoned ones, where it reads the sample count
 			// field out of stale bytes and so emits a whole superframe. Being
@@ -507,17 +575,28 @@ func checkGate(t *testing.T, n int, maxAbs, rms, wantMax, wantRMS float64) {
 
 // compare is the differential, with the named runs left out of it.
 func compare(got, ref []float32, runs [][2]int) (maxAbs, rms float64, n int) {
-	skip := func(s int) bool {
-		for _, r := range runs {
-			if s >= r[0] && s <= r[1] {
-				return true
-			}
+	return score(got, ref, func(s int) bool { return !inRuns(runs, s) })
+}
+
+// compareOnly is the differential over the named runs and nothing else, which
+// is what scores a skip instead of trusting it.
+func compareOnly(got, ref []float32, runs [][2]int) (maxAbs, rms float64, n int) {
+	return score(got, ref, func(s int) bool { return inRuns(runs, s) })
+}
+
+func inRuns(runs [][2]int, s int) bool {
+	for _, r := range runs {
+		if s >= r[0] && s <= r[1] {
+			return true
 		}
-		return false
 	}
+	return false
+}
+
+func score(got, ref []float32, keep func(superframe int) bool) (maxAbs, rms float64, n int) {
 	var sum float64
 	for i := range min(len(got), len(ref)) {
-		if skip(i / wmavoice.SuperframeSamples) {
+		if !keep(i / wmavoice.SuperframeSamples) {
 			continue
 		}
 		d := math.Abs(float64(got[i]) - float64(ref[i]))
@@ -529,6 +608,37 @@ func compare(got, ref []float32, runs [][2]int) (maxAbs, rms float64, n int) {
 		rms = math.Sqrt(sum / float64(n))
 	}
 	return maxAbs, rms, n
+}
+
+// TestNarrowedRunsAreCleanOnACurrentOracle is what gives narrowedRuns teeth.
+// The superframes it drops are ordinary audio and only an old oracle has
+// anything wrong with them, so on one carrying upstream's fix they are scored
+// ALONE, at the bound the clean cells hold to. A decoder error hiding inside
+// the skip fails here rather than passing on the runner that skips it.
+func TestNarrowedRunsAreCleanOnACurrentOracle(t *testing.T) {
+	if !testutil.HaveFFmpeg(t) {
+		t.Skip("ffmpeg not installed")
+	}
+	if !testutil.FFmpegAtLeast(t, 7, 1) {
+		t.Skip("this ffmpeg narrows the denoise index itself, so it cannot score the superframes narrowedRuns names")
+	}
+	for _, c := range cells {
+		runs, ok := narrowedRuns[c.name]
+		if !ok {
+			continue
+		}
+		t.Run(c.name, func(t *testing.T) {
+			path := corpusPath(t, c.name)
+			track, pkts := demux(t, path)
+			got := decodeAll(t, track, pkts)
+			ref := testutil.FFmpegDecodeF32NoSIMD(t, path)
+			maxAbs, rms, n := compareOnly(got, ref, runs)
+			if n == 0 {
+				t.Fatalf("scored nothing: %v names no superframe this cell has", runs)
+			}
+			checkGate(t, n, maxAbs, rms, gateCleanMax, gateCleanRMS)
+		})
+	}
 }
 
 // TestStaleCarryMatchesTheReferencesDefect is what makes the skip list above an
@@ -712,7 +822,7 @@ func TestMicrosoftCorpus(t *testing.T) {
 			// re-encode that moved them fails here, and that is the signal to
 			// measure the new file rather than to widen anything.
 			ref := testutil.FFmpegDecodeF32NoSIMD(t, wma)
-			maxAbs, rms, n := compare(got, ref, staleRuns[c.name])
+			maxAbs, rms, n := compare(got, ref, skipRuns(t, c.name))
 			wantMax, wantRMS := gateCleanMax, gateCleanRMS
 			if d, ok := staleDeficits[c.name]; ok {
 				wantMax, wantRMS = d.max, d.rms

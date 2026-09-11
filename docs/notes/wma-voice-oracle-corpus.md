@@ -14,7 +14,11 @@ and `--disable-asm`, so the pin and the box agree and nothing below depends on
 which one runs). Windows-side numbers come from the Windows Media Format SDK
 and Media Foundation on Windows 11 reached over `powershell.exe` interop. The
 identities (packet size, superframe count, exact sample count) are exact and
-portable; the floating-point figures are from these builds.
+portable; the floating-point figures are from these builds. A third build,
+`ffmpeg 6.1.1` (Ubuntu 24.04, which is what the CI differential job runs), is
+bit-identical to 8.0.1 on seven of the eight fixtures whole and differs on
+three superframes of the eighth, for the reason section 5's last subsection
+gives.
 
 ## 1. Which oracle answers which question
 
@@ -307,6 +311,40 @@ cell, absolute on a nominal full scale of 1.0:
 So **nothing can gate below about 4.3e-08 RMS or 2.3e-06 max**, because the
 oracle disagrees with itself by that much. Always pin `-cpuflags 0`.
 
+### The oracle's versions disagree too, in one place
+
+FFmpeg 7.0 and older compute the denoise filter's energy index as a double and
+then narrow it to float before truncating it to an int (`av_clipf` on a double
+argument). Upstream removed the narrowing in `9876158e` ("avcodec/wmavoice: use
+av_clipd for double values") to quiet a compiler warning, and 7.1 is the first
+release carrying it. That is not a footnote: Ubuntu 24.04 ships 6.1.1, which is
+what the CI differential job runs.
+
+*Measured*, with the reference instrumented to report every index the two
+spellings disagree on, the narrowing moves the index **exactly once** across
+all eight fixtures: on `voice-16000-16k` at superframe 31, where the value is
+28.999999561853929 and float rounds it to 29.0. One denoise coefficient of one
+frame then comes from row 29 of a table whose rows are 3.3% apart. The
+postfilter's memory carries that into the next two superframes and it dies
+there:
+
+| superframe | 6.1.1 against 8.0.1 |
+|---|---|
+| 31 | 6.296e-05 |
+| 32 | 4.157e-06 |
+| 33 | 2.980e-08 |
+
+Everywhere else the two are **bit-identical**, on that cell and on the other
+seven fixtures whole. Rebuilding 6.1.1 with that one line changed to `av_clipd`
+and nothing else makes the cell bit-identical as well, which is what pins the
+cause. A decoder that takes the index in float64 agrees with 7.1 and newer.
+
+So the three superframes are skipped by name on an oracle older than 7.1, the
+way section 6's runs are skipped on every oracle, and are scored like any other
+superframe on a newer one, where *measured* they come in at 6.0e-07 max and
+1.0e-07 RMS: inside the cell's own bound and below the floor the vectorised
+and scalar paths set above.
+
 ### Speed, for scale
 
 FFmpeg decodes `voice-22050-20k` (3.98 seconds of audio) in about 0.029 s on
@@ -584,3 +622,7 @@ why.
 - The four cells scored outside the reference's stale runs are gated per cell
   at about twice their own measured figure rather than at the class-wide
   2e-04 of the table above, each entry a ceiling and a floor.
+- The reference's VERSIONS disagree as well, which the CI runner's 6.1.1 found
+  after this pass closed: section 5's last subsection measures it, and
+  `narrowedRuns` beside `staleRuns` names the three superframes it costs on an
+  oracle older than 7.1.

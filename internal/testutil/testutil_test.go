@@ -155,3 +155,31 @@ func TestOracleAgainstKnownFile(t *testing.T) {
 		t.Error("decoded no samples")
 	}
 }
+
+// The oracle's release number decides whether codec/wmavoice skips the three
+// superframes FFmpeg 7.0 and older decode with a narrowed denoise index, so
+// the banners every packager writes have to parse. A banner with no release in
+// it must report ok false, which is what makes an unknown build take the tight
+// gate rather than the widened one.
+func TestParseFFmpegRelease(t *testing.T) {
+	for _, c := range []struct {
+		banner       string
+		major, minor int
+		ok           bool
+	}{
+		{"ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers", 6, 1, true},
+		{"ffmpeg version 8.0.1-3ubuntu2 Copyright (c) 2000-2025 the FFmpeg developers", 8, 0, true},
+		{"ffmpeg version 7.1 Copyright (c) 2000-2024 the FFmpeg developers", 7, 1, true},
+		{"ffmpeg version n7.1.1-6-g123456 Copyright (c) 2000-2024 the FFmpeg developers", 7, 1, true},
+		{"ffmpeg version 4.4.2-0ubuntu0.22.04.1 Copyright (c) 2000-2021 the FFmpeg developers", 4, 4, true},
+		{"ffmpeg version 9.0-full_build-www.gyan.dev Copyright (c) 2000-2025 the FFmpeg developers", 9, 0, true},
+		{"ffmpeg version N-119999-g1234567 Copyright (c) 2000-2026 the FFmpeg developers", 0, 0, false},
+		{"ffmpeg version", 0, 0, false},
+	} {
+		major, minor, ok := parseFFmpegRelease(c.banner)
+		if major != c.major || minor != c.minor || ok != c.ok {
+			t.Errorf("%q parsed as %d.%d (ok %v), want %d.%d (ok %v)",
+				c.banner, major, minor, ok, c.major, c.minor, c.ok)
+		}
+	}
+}

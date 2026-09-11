@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -68,6 +69,67 @@ func HaveFFmpeg(t testing.TB) bool {
 
 // FFprobe returns the ffprobe path, skipping or failing per the policy.
 func FFprobe(t testing.TB) string { return tool(t, "ffprobe") }
+
+// FFmpegAtLeast reports whether the installed ffmpeg is at least the given
+// release. The oracle has versions of its own, and one of them is load-bearing:
+// FFmpeg 7.0 and older narrow a double to float before truncating it to a table
+// index in the WMA Voice denoise filter, which moves that index on one corpus
+// cell (codec/wmavoice's narrowedRuns says where, and by how much).
+//
+// A build whose version string carries no release number, which is what a git
+// snapshot's "N-119999-g..." is, counts as at least anything asked for. An
+// unrecognised oracle gets the tight gate, so a disagreement arrives as a
+// failure to look at rather than as a silently widened bound.
+func FFmpegAtLeast(t testing.TB, major, minor int) bool {
+	t.Helper()
+	gotMajor, gotMinor, ok := ffmpegRelease(t)
+	if !ok {
+		return true
+	}
+	return gotMajor > major || (gotMajor == major && gotMinor >= minor)
+}
+
+// ffmpegRelease reads the release out of `ffmpeg -version`.
+func ffmpegRelease(t testing.TB) (major, minor int, ok bool) {
+	t.Helper()
+	return parseFFmpegRelease(string(run(t, FFmpeg(t), "-version")))
+}
+
+// parseFFmpegRelease takes the release number out of a version banner, whose
+// first line is "ffmpeg version 6.1.1-3ubuntu5 Copyright ...". Distributions
+// prefix the number with an "n" and suffix it with their own packaging
+// version; a git build carries no number at all, and reports ok false.
+func parseFFmpegRelease(banner string) (major, minor int, ok bool) {
+	f := strings.Fields(banner)
+	if len(f) < 3 {
+		return 0, 0, false
+	}
+	major, rest, ok := leadingInt(strings.TrimPrefix(f[2], "n"))
+	if !ok || !strings.HasPrefix(rest, ".") {
+		return 0, 0, false
+	}
+	minor, _, ok = leadingInt(rest[1:])
+	if !ok {
+		return 0, 0, false
+	}
+	return major, minor, true
+}
+
+// leadingInt reads the digits at the head of s and returns what follows them.
+func leadingInt(s string) (n int, rest string, ok bool) {
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return 0, "", false
+	}
+	n, err := strconv.Atoi(s[:i])
+	if err != nil {
+		return 0, "", false
+	}
+	return n, s[i:], true
+}
 
 // run executes an oracle command, failing the test on error.
 func run(t testing.TB, name string, args ...string) []byte {
