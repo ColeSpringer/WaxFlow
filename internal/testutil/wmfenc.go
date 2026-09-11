@@ -134,6 +134,10 @@ func runWMF(t testing.TB, script, what, dst string, args ...string) {
 const (
 	SubtypeWMAV2  = "Wma8"
 	SubtypeWMAPro = "Wma9"
+	// SubtypeWMAVoice is WAVE_FORMAT_WMAVOICE9 (0x000A) as a Media Foundation
+	// subtype GUID, built the way every WAVE_FORMAT_ subtype is: the tag in
+	// the first field of MFAudioFormat_Base.
+	SubtypeWMAVoice = "{0000000A-0000-0010-8000-00AA00389B71}"
 )
 
 // WMFEncode encodes a WAV to WMA Standard v2 with Windows' own encoder. The

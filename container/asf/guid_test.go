@@ -59,8 +59,8 @@ func TestCodecTable(t *testing.T) {
 		{0x0162, codec.WMAPro, "Windows Media Audio Pro"},
 		{0x0163, codec.WMALossless, "Windows Media Audio Lossless"},
 		{0x0164, "", "Windows Media Audio Pro over S/PDIF"},
-		{0x000A, "", "Windows Media Audio Voice"},
-		{0x000B, "", "Windows Media Audio Voice"},
+		{0x000A, codec.WMAVoice, "Windows Media Audio Voice"},
+		{0x000B, "", "Windows Media Audio Voice 10"},
 		{0x0055, "", ""}, // MP3 in ASF: recognized by nobody here, named by nobody
 	} {
 		id, name := asfCodecID(tc.tag)

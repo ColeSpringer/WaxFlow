@@ -52,17 +52,21 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   Windows Media Audio 9/10 Professional (differential-verified against
   ffmpeg on files Windows' own encoder wrote, 16- and 24-bit, stereo and
   5.1 at 44.1 to 96 kHz; **decode only, and encoding it is a non-goal**
-  for the same reasons as the other two), and
+  for the same reasons as the other two),
+  Windows Media Audio Voice (the CELP speech coder, differential-verified
+  the same way, mono at 8 to 22.05 kHz across the whole seven-format
+  envelope Windows' encoder offers; **decode only, and encoding it is a
+  non-goal** for the same reasons again), and
   Musepack SV7 and SV8 (bit-identical to the reference decoder's float
   output; true gapless, noise substitution, APEv2 tags, SV8 chapters and
   ReplayGain; **decode only, and encoding it is a non-goal** for the same
   reason, the only encoder in existence being LGPL).
   Sample-exact
   seeking everywhere, gapless honored per format (LAME tag, iTunSMPB,
-  edit lists, Ogg pre-skip/end-trim, Matroska CodecDelay). WMA Voice
-  shares the container and is a different codec; it is refused by name,
-  as is a WMA Pro stream that sets the low-bit-rate tool no decoder
-  outside Windows implements.
+  edit lists, Ogg pre-skip/end-trim, Matroska CodecDelay). A WMA Pro
+  stream that sets the low-bit-rate tool no decoder outside Windows
+  implements is refused by name, as is the second registered WMA Voice
+  tag (0x000B), which no reference decoder reads.
 - **DSP**: Kaiser windowed-sinc resampling (`hq`/`fast`), BS.775
   downmix, gain with true-peak limiting, TPDF and shaped dither, EBU
   R128 / BS.1770-4 loudness (differential-verified against ffmpeg).

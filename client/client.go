@@ -1,6 +1,6 @@
-// Package client is the Go API client for a WaxFlow daemon (WaxSeal
-// client/ precedent): thin typed wrappers over the HTTP surface
-// (control, playback, timelines, and the jobs lifecycle) plus an
+// Package client is the Go API client for a WaxFlow daemon:
+// thin typed wrappers over the HTTP surface (control,
+// playback, timelines, and the jobs lifecycle) plus an
 // offline signed-URL mint helper, so the users and CLI never
 // reimplement canonicalization or envelope decoding.
 //

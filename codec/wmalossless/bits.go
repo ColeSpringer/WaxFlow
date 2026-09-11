@@ -174,7 +174,7 @@ func (w *bitAppender) appendFrom(src []byte, at, n int) {
 	}
 	if at&7 == 0 {
 		// Both sides are byte aligned: copy whole bytes and leave the tail.
-		whole := n >> 3
+		whole := min(n>>3, len(src)-at>>3)
 		i := at >> 3
 		w.buf = append(w.buf, src[i:i+whole]...)
 		w.bits += whole << 3

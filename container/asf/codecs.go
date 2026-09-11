@@ -6,6 +6,7 @@ import (
 	"github.com/colespringer/waxflow/codec/wma"
 	"github.com/colespringer/waxflow/codec/wmalossless"
 	"github.com/colespringer/waxflow/codec/wmapro"
+	"github.com/colespringer/waxflow/codec/wmavoice"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -66,8 +67,8 @@ const (
 	tagWMAPro      = 0x0162
 	tagWMALossless = 0x0163
 	tagWMAProSPDIF = 0x0164
-	tagWMAVoice    = 0x000A
-	tagWMAVoice9   = 0x000B
+	tagWMAVoice9   = 0x000A
+	tagWMAVoice10  = 0x000B
 )
 
 // asfCodecID maps a wFormatTag onto a waxflow codec ID, in the shape mka's
@@ -90,8 +91,14 @@ func asfCodecID(tag uint16) (codec.ID, string) {
 		return "", "Windows Media Audio Pro over S/PDIF"
 	case tagWMALossless:
 		return codec.WMALossless, "Windows Media Audio Lossless"
-	case tagWMAVoice, tagWMAVoice9:
-		return "", "Windows Media Audio Voice"
+	case tagWMAVoice9:
+		return codec.WMAVoice, "Windows Media Audio Voice"
+	case tagWMAVoice10:
+		// The same coded layer under a second registered tag (mmreg.h's
+		// WAVE_FORMAT_WMAVOICE10). No reference decoder maps it, so nothing
+		// could check a decode of one; it is named apart from the Voice this
+		// build decodes so the refusal does not read as a contradiction.
+		return "", "Windows Media Audio Voice 10"
 	default:
 		return "", ""
 	}
@@ -116,6 +123,10 @@ type codecSetup struct {
 	// difference. Measured on the corpus: 48 and 58 samples, against frames of
 	// 2048 and 4096.
 	frameLen int
+	// runUp is how far before its target a seek lands, in samples, for a codec
+	// whose resumed decode converges rather than lands exact. The container
+	// backs the landing up by it and the caller's pre-roll discards the run.
+	runUp int
 }
 
 // resolveCodec builds the setup for a recognized audio stream, in the shape
@@ -150,6 +161,19 @@ func resolveCodec(id codec.ID, w waveFormat) (codecSetup, error) {
 		// time is in milliseconds and is not the first sample a decode resumed
 		// there produces.
 		return codecSetup{id: id, fmt: cfg.Format(), frameLen: cfg.SamplesPerFrame()}, nil
+	case codec.WMAVoice:
+		cfg, err := wmavoice.ParseConfig(w.raw)
+		if err != nil {
+			return codecSetup{}, fromCodec(err)
+		}
+		// Every media object is a decode start point, so there is no syncOK.
+		// The frame length is the 480-sample SUPERFRAME rather than the
+		// 160-sample frame: a resumed decode begins at the first superframe
+		// that starts in the packet, and an object's millisecond presentation
+		// time is not that sample. The run-up is the codec's: a resume
+		// converges rather than lands exact, so a seek backs up by the
+		// measured convergence and the discard covers it.
+		return codecSetup{id: id, fmt: cfg.Format(), frameLen: cfg.SamplesPerSuperframe(), runUp: wmavoice.SeekRunUp}, nil
 	case codec.WMALossless:
 		cfg, err := wmalossless.ParseConfig(w.raw)
 		if err != nil {

@@ -36,6 +36,10 @@ type builder struct {
 	// depend on where the File Properties Object sits.
 	lead, extra [][]byte
 	packets     [][]byte
+	// wfx, when set, is the whole WAVEFORMATEX to write in place of the WMA v2
+	// one the builder lays by default, so a file can carry another codec's
+	// stream: the Voice gap test wraps that codec's own packets.
+	wfx []byte
 }
 
 func newBuilder() *builder {
@@ -69,6 +73,9 @@ func (b *builder) streamProperties() []byte {
 	le.PutUint32(wfx[8:], 16000)
 	le.PutUint16(wfx[12:], uint16(b.blockAlign))
 	le.PutUint16(wfx[14:], 16)
+	if b.wfx != nil {
+		wfx = b.wfx
+	}
 	body := make([]byte, 54)
 	copy(body, guidAudioMedia)
 	copy(body[16:], guidNoErrorCorrectionBytes)

@@ -17,6 +17,7 @@ import (
 	"github.com/colespringer/waxflow/codec/wma"
 	"github.com/colespringer/waxflow/codec/wmalossless"
 	"github.com/colespringer/waxflow/codec/wmapro"
+	"github.com/colespringer/waxflow/codec/wmavoice"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/adts"
 	"github.com/colespringer/waxflow/container/aiff"
@@ -282,6 +283,13 @@ var decoders = []struct {
 			return nil, err
 		}
 		return wmapro.NewDecoder(cfg, t.Fmt)
+	}},
+	{codec.WMAVoice, wmavoice.Version, func(t container.Track) (codec.Decoder, error) {
+		cfg, err := wmavoice.ParseConfig(t.CodecConfig)
+		if err != nil {
+			return nil, err
+		}
+		return wmavoice.NewDecoder(cfg, t.Fmt)
 	}},
 	{codec.Musepack, musepack.Version, func(t container.Track) (codec.Decoder, error) {
 		// One row for both stream versions: the config carries the version.

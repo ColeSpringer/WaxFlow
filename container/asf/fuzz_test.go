@@ -29,6 +29,8 @@ func FuzzDemux(f *testing.F) {
 	f.Add(fixture(f, "lossless-s16.wma")[:2000])
 	f.Add(fixture(f, "pro-s16.wma"))
 	f.Add(fixture(f, "pro-s16.wma")[:2000])
+	f.Add(fixture(f, "voice-mono.wma"))
+	f.Add(fixture(f, "voice-mono.wma")[:1200])
 	f.Add(appendSimpleIndex(fixture(f, "mono-8k.wma"), 8, 1_000_0000))
 	f.Add(guidHeader)
 

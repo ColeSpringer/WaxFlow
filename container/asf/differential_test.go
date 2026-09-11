@@ -161,12 +161,12 @@ func TestDemuxMatchesFFprobePackets(t *testing.T) {
 	}
 }
 
-// TestCommittedDemuxMatchesFFprobe is the same differential over the two
+// TestCommittedDemuxMatchesFFprobe is the same differential over the three
 // codecs no tool here can generate. It runs against committed fixtures rather
 // than built ones, which is why it is a separate cell: FFmpeg decodes WMA
-// Lossless and WMA Pro and cannot write either, so `corpus()` cannot produce
+// Lossless, WMA Pro and WMA Voice and cannot write any of them, so `corpus()` cannot produce
 // a cell and this file would otherwise cover the container's newest codecs
-// with nothing.
+// with nothing. The same holds for WMA Voice: only Windows writes it.
 func TestCommittedDemuxMatchesFFprobe(t *testing.T) {
 	if !testutil.HaveFFmpeg(t) {
 		t.Skip("ffmpeg not installed")
@@ -180,6 +180,8 @@ func TestCommittedDemuxMatchesFFprobe(t *testing.T) {
 			audio.Format{Rate: 44100, Channels: 2, Layout: audio.ChannelMask(0x03), Type: audio.Int, BitDepth: 16}},
 		{"pro-s16.wma", codec.WMAPro,
 			audio.Format{Rate: 44100, Channels: 2, Layout: audio.ChannelMask(0x03), Type: audio.Float, BitDepth: 32}},
+		{"voice-mono.wma", codec.WMAVoice,
+			audio.Format{Rate: 16000, Channels: 1, Layout: audio.DefaultLayout(1), Type: audio.Float, BitDepth: 32}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			committedDemuxMatchesFFprobe(t, tc.name, tc.codec, tc.fmt)

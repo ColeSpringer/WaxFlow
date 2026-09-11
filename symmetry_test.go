@@ -39,6 +39,7 @@ func TestCodecContainerSymmetry(t *testing.T) {
 		"musepack-encode":    "Musepack encoding is a non-goal (README non-goals); decode-only by decision",
 		"wmalossless-encode": "WMA Lossless encoding is a non-goal (README non-goals); decode-only by decision",
 		"wmapro-encode":      "WMA Pro encoding is a non-goal (README non-goals); decode-only by decision",
+		"wmavoice-encode":    "WMA Voice encoding is a non-goal (README non-goals); decode-only by decision",
 		"mpc-mux":            "Musepack muxing is a non-goal; the container exists only to carry a codec we do not encode",
 	}
 	// symmetryNonGoals marks the entries above that are decisions rather than
@@ -60,7 +61,7 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	// aimed at players that all read something better.
 	symmetryNonGoals := map[string]bool{
 		"wma-encode": true, "asf-mux": true, "musepack-encode": true, "mpc-mux": true,
-		"wmalossless-encode": true, "wmapro-encode": true,
+		"wmalossless-encode": true, "wmapro-encode": true, "wmavoice-encode": true,
 	}
 
 	decodes := map[codec.ID]bool{}
@@ -85,6 +86,7 @@ func TestCodecContainerSymmetry(t *testing.T) {
 		codec.Musepack:    "musepack-encode",
 		codec.WMALossless: "wmalossless-encode",
 		codec.WMAPro:      "wmapro-encode",
+		codec.WMAVoice:    "wmavoice-encode",
 	}
 	containerGaps := map[string]string{"wma": "asf-mux", "musepack": "mpc-mux"}
 
@@ -97,6 +99,7 @@ func TestCodecContainerSymmetry(t *testing.T) {
 		"musepack-encode":    decodes[codec.Musepack] && !encodes[codec.Musepack],
 		"wmalossless-encode": decodes[codec.WMALossless] && !encodes[codec.WMALossless],
 		"wmapro-encode":      decodes[codec.WMAPro] && !encodes[codec.WMAPro],
+		"wmavoice-encode":    decodes[codec.WMAVoice] && !encodes[codec.WMAVoice],
 		"he-aac-encode":      decodes[codec.HEAAC] && !encodes[codec.HEAAC],
 		"wavpack-encode":     decodes[codec.WavPack] && !encodes[codec.WavPack],
 		"ape-encode":         decodes[codec.APE] && !encodes[codec.APE],

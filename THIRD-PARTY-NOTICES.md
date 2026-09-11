@@ -2,10 +2,11 @@
 
 Attributions for code studied closely or ported into WaxFlow, per
 [ADR-0001](docs/adr/0001-clean-room-policy.md). Almost every entry below is
-permissively licensed (Tier A) source. The exceptions are **codec/wma** and
-**codec/wmapro**, whose parameter tables are extracted from a copyleft
-project under the ADR's provision for data-only artifacts, because neither
-format has a published specification to restate, and the **scripts/mpcchap**
+permissively licensed (Tier A) source. The exceptions are **codec/wma**,
+**codec/wmapro** and **codec/wmavoice**, whose parameter tables are extracted
+from a copyleft project under the ADR's provision for data-only artifacts,
+because none of the three formats has a published specification to restate,
+and the **scripts/mpcchap**
 stub, which declares a
 copyleft library's API by name so a reference test tool can be built without
 it; each entry states the difference and its reasoning in full. Module dependencies (e.g. spf13/cobra) carry their own licenses in
@@ -354,6 +355,41 @@ Entries follow this format:
 > organised around the notes' description rather than around any source
 > file). Where the notes mark a shape as undetermined, the decoder refuses
 > it by name rather than guessing at FFmpeg's behaviour.
+
+> **codec/wmavoice parameter tables**: the same black-box PARAMETER
+> artifact as the two entries above, for a third codec. WMA Voice
+> (`wFormatTag` 0x000A) has no published bitstream specification either,
+> so `codec/wmavoice/tables_lsp.go`, `tables_gain.go`, `tables_pulse.go`,
+> `tables_interp.go` and `tables_denoise.go` have *FFmpeg*
+> (LGPL-2.1-or-later), https://github.com/FFmpeg/FFmpeg, n9.0, commit
+> d32b387f2b0a484599d4587d651891f0c63c4238, as their primary source: the
+> eight LSP vector-quantiser codebooks, the four LSP interpolation
+> coefficient sets, the two mean-LSF vectors, the comfort-noise codebook,
+> the four gain codebooks, the two adaptive-codebook interpolation
+> filters and the two postfilter tables, all from
+> `libavcodec/wmavoice_data.h`, plus one array of pitch-adaptive window
+> start offsets from `libavcodec/wmavoice.c`, which is where that one
+> lives upstream and which is the only thing read from that file. Two of
+> the tables are samplings of published closed forms (an exponential
+> magnitude ladder and a power law, both stated in the note) and ship
+> tabulated rather than computed because the values feed integer index
+> lookups; the codebooks and the filters are not published anywhere.
+> They are **data only**: codebook entries, gains, filter taps and
+> offsets, with no decoder logic of any kind, and nothing derived from
+> them is tabulated here (the pitch bounds, every derived field width,
+> the frame-type descriptor table, the frame-type codeword lengths, the
+> postfilter's phase table and its four transforms are all computed at
+> run time). The extraction is mechanical and auditable:
+> `codec/wmavoice/tablesgen_test.go` parses the two upstream files under
+> SHA-256 pins and emits the Go tables, so a reviewer can re-run it and
+> diff. It runs under a build tag and needs a checked-out FFmpeg tree, so
+> it is never part of an ordinary build. The behavioural analysis from
+> the same pass is in `docs/notes/wma-voice-bitstream.md` and
+> `docs/notes/wma-voice-oracle-corpus.md`; the stage that implements the
+> decoder consumes those notes and these tables and does not open
+> FFmpeg. The `ffmpeg` binary additionally serves as a test-only
+> differential oracle, though not a fixture generator: it has no encoder
+> for this format, so the fixtures come from Windows' own encoder.
 
 > **codec/musepack decoder and container/mpc**: a clean-room port of
 > *libmpcdec* from the Musepack Development Team's musepack_src_r475

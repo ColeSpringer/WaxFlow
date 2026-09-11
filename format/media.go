@@ -191,6 +191,12 @@ func (m *media) SeekSample(target int64) (int64, error) {
 		return 0, err
 	}
 	m.decoder.Reset()
+	// A decoder whose output depends on where the decode began is told its
+	// landing here. Only codec/wmavoice implements it, and there it is what
+	// makes a resumed decode converge to the linear one at all.
+	if p, ok := m.decoder.(codec.Positioner); ok {
+		p.SetPosition(landed)
+	}
 	m.carryOff = 0
 	if m.carry != nil {
 		m.carry.N = 0
@@ -277,6 +283,16 @@ func (m *media) fill(dst *audio.Buffer) error {
 		}
 		if pkt.Track != m.track.ID {
 			continue
+		}
+		if pkt.Discont {
+			// The container dropped something between this packet and the one
+			// before it. Nothing a decoder carries across packets survives a
+			// hole, so it restarts here as it does after a seek, and one whose
+			// output depends on where it began is told the landing.
+			m.decoder.Reset()
+			if p, ok := m.decoder.(codec.Positioner); ok {
+				p.SetPosition(pkt.PTS)
+			}
 		}
 		return m.decoder.Decode(pkt.Data, m.stashFn)
 	}

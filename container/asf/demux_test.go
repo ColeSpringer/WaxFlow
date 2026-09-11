@@ -478,7 +478,7 @@ func TestSeekIgnoresAnIndexPointingPastTheTarget(t *testing.T) {
 func TestEncryptionIsRefusedAheadOfTheCodec(t *testing.T) {
 	raw := bytes.Clone(fixture(t, "sine-wmav2.wma"))
 	copy(headerObject(t, raw, guidCodecList), guidContentEncrypt)
-	le.PutUint16(headerBody(t, raw, guidStreamProperties)[54:], 0x000A) // WMA Voice, still refused by name
+	le.PutUint16(headerBody(t, raw, guidStreamProperties)[54:], 0x0164) // Pro over S/PDIF, refused by name
 	_, err := asf.NewDemuxer(container.BytesSource(raw), nil)
 	if err == nil {
 		t.Fatal("accepted an encrypted file")
@@ -497,8 +497,10 @@ func TestRefusalsNameWhatTheyFound(t *testing.T) {
 		want  string
 	}{
 		{"wma-pro-spdif", setFormatTag(0x0164), "Windows Media Audio Pro over S/PDIF"},
-		{"wma-voice", setFormatTag(0x000A), "Windows Media Audio Voice"},
-		{"wma-voice-9", setFormatTag(0x000B), "Windows Media Audio Voice"},
+		// 0x000A is gone from this list: it decodes. What a retyped v2 header
+		// gets now is the damage cell below, which is a different answer on
+		// purpose.
+		{"wma-voice-10", setFormatTag(0x000B), "Windows Media Audio Voice 10"},
 		{"unknown-codec", setFormatTag(0x0055), "audio format 0x0055"},
 		{"video-only", func(raw []byte) {
 			copy(headerBody(nil, raw, guidStreamProperties), guidVideoMedia)
@@ -533,8 +535,9 @@ func TestRefusalsNameWhatTheyFound(t *testing.T) {
 // build removed from the table above. WMA Lossless and WMA Pro used to be
 // refused by name like Voice; now that they decode, retyping a WMA v2 header
 // as either does not produce an unsupported stream but an inconsistent one,
-// and it has to say so: v2 carries ten codec extra bytes and both are defined
-// only with eighteen, so nothing can be read from it.
+// and it has to say so: v2 carries ten codec extra bytes, and the three
+// codecs below are defined only with eighteen, eighteen and forty-six, so
+// nothing can be read from it.
 func TestDecodedTagOnAWMAv2HeaderIsDamage(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -542,6 +545,7 @@ func TestDecodedTagOnAWMAv2HeaderIsDamage(t *testing.T) {
 	}{
 		{"lossless", 0x0163},
 		{"pro", 0x0162},
+		{"voice", 0x000a},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := bytes.Clone(fixture(t, "sine-wmav2.wma"))

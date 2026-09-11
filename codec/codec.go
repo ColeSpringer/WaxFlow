@@ -43,17 +43,47 @@ const (
 	// Pro revision must not invalidate cached decodes of a v2 or a lossless
 	// source (ADR-0004).
 	WMAPro ID = "wmapro"
+	// WMAVoice is its own ID for the same reason again. It shares nothing with
+	// the other three but the container: a CELP speech coder rather than a
+	// transform codec, with its own table set, its own gates and its own
+	// revision lifecycle.
+	WMAVoice ID = "wmavoice"
 )
 
 // Packet is one compressed unit as a codec defines it: a FLAC frame, an
 // MP3 frame, an Opus packet, a run of PCM frames. PTS and Dur are sample
 // counts in the codec's output timeline; Sync marks packets a decoder can
 // start from after a seek.
+//
+// Discont marks a packet that does not follow the one delivered before it:
+// the container dropped something in between, as damage it chose to read
+// past. Nothing a decoder carries across packets survives a hole (a bit
+// reservoir, a carried superframe, an adaptive codebook's history), so the
+// format layer restarts the decoder there as it does after a seek, and tells
+// a Positioner where the packet lands.
 type Packet struct {
-	Data []byte
-	PTS  int64
-	Dur  int64
-	Sync bool
+	Data    []byte
+	PTS     int64
+	Dur     int64
+	Sync    bool
+	Discont bool
+}
+
+// Positioner is implemented by a decoder whose output depends on where the
+// decode began, so a resumed decode can be told its landing and produce what a
+// decode from the start would have produced there.
+//
+// codec/wmavoice is the only one, and it is not bookkeeping there: its
+// comfort-noise frames draw from a codebook at an offset that is a function of
+// the frame index since the decoder started, so a resumed decode that starts
+// counting at zero draws different noise in every silent passage, for good.
+// Decoders that do not implement this are unaffected; the format layer calls
+// it only when a decoder offers it.
+type Positioner interface {
+	// SetPosition names the output sample the next packet's first decoded
+	// sample carries. It is called after Reset and before the first packet of
+	// a resumed run.
+	SetPosition(sample int64)
 }
 
 // Trailer carries gapless finalization from an encoder to a muxer:

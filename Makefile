@@ -82,6 +82,7 @@ vet:
 	go vet ./...
 	go vet -tags wmatablesgen ./codec/wma/
 	go vet -tags wmaprotablesgen ./codec/wmapro/
+	go vet -tags wmavoicetablesgen ./codec/wmavoice/
 	go vet -tags mpcfixtures ./codec/musepack/
 
 # The 32-bit pass. Go's int is 32 bits there, so a constant or a conversion

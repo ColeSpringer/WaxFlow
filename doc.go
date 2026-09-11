@@ -10,7 +10,7 @@
 //	audio         - PCM model (planar buffers, formats, layouts)
 //	dsp/...       - resample, mix, gain, dither, loudness, psy, fft
 //	codec/...     - pcm, flac, alac, mp3, aac, opus, vorbis, wavpack, ape, wma,
-//	                wmalossless, wmapro, musepack
+//	                wmalossless, wmapro, wmavoice, musepack
 //	container/... - riff, aiff, ogg, mp4, mka, adts, mpa, flacn, wv, apen, asf, mpc
 //	cue           - CUE sheet parsing (CD-frame track boundaries)
 //	format        - probe + registry + Open

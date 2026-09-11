@@ -29,3 +29,5 @@ row for the same pass, and `THIRD-PARTY-NOTICES.md` carries the attribution.
 | `wma-lossless-oracle-corpus.md` | `codec/wmalossless` | 2026-09-10 |
 | `wma-pro-bitstream.md` | `codec/wmapro` | 2026-09-10 |
 | `wma-pro-oracle-corpus.md` | `codec/wmapro` | 2026-09-10 |
+| `wma-voice-bitstream.md` | `codec/wmavoice` | 2026-09-11 |
+| `wma-voice-oracle-corpus.md` | `codec/wmavoice` | 2026-09-11 |

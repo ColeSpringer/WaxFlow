@@ -41,6 +41,11 @@ type stream struct {
 type object struct {
 	data []byte
 	pts  int64
+	// gap says an object was dropped with a warning between this one and the
+	// one before it. It rides with the object rather than with the reader
+	// because the lookahead finds the drop while the previous object is still
+	// the one being handed out.
+	gap bool
 }
 
 // set copies b into the object's own buffer. The copy is what lets the
@@ -104,6 +109,13 @@ type Demuxer struct {
 	// gets a whole media object of run-up.
 	objectPackets int64
 	seekPreroll   int64
+	// runUp is the codec's own run-up in samples, for one whose resumed decode
+	// converges rather than lands exact (WMA Voice); zero for the rest.
+	runUp int64
+	// gap is set when an object is dropped with a warning and moves onto the
+	// next object that completes, which carries it out as Discont: the decoder
+	// restarts there, since what it held across the hole continues nothing.
+	gap bool
 
 	// Reading state: the packet cursor and the current packet's payload list.
 	cursor int64
@@ -221,7 +233,7 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 		// across one is what the seek run-up covers, while WMA Lossless
 		// produces nothing until a seekable tile and says which objects begin
 		// one in its own packet header.
-		Packet: codec.Packet{Data: d.cur.data, PTS: d.cur.pts, Dur: dur, Sync: d.objectIsSync()},
+		Packet: codec.Packet{Data: d.cur.data, PTS: d.cur.pts, Dur: dur, Sync: d.objectIsSync(), Discont: d.cur.gap},
 	}
 	return nil
 }
@@ -301,6 +313,7 @@ func (d *Demuxer) fetch(dst *object) (bool, error) {
 				dst.pts = d.lastPTS
 			}
 			d.lastPTS = dst.pts
+			dst.gap, d.gap = d.gap, false
 			return true, nil
 		}
 		if d.cursor >= d.packets {
@@ -329,6 +342,7 @@ func (d *Demuxer) absorb(p payload, dst *object) (bool, error) {
 	off := d.packetOff(d.cursor - 1)
 	if p.objSize == 0 || p.objSize > maxObjectBytes {
 		d.dropAssembly()
+		d.gap = true
 		return false, d.warn(off, "media object of %d bytes", p.objSize)
 	}
 	if p.objOff == 0 {
@@ -357,6 +371,7 @@ func (d *Demuxer) absorb(p payload, dst *object) (bool, error) {
 				// The tail of an object this reader never saw the head of.
 				return false, nil
 			}
+			d.gap = true
 			return false, d.warn(off, "media object %d fragment at offset %d does not continue the one in hand", p.objNum, p.objOff)
 		}
 		d.asm = append(d.asm, p.data...)
@@ -364,6 +379,7 @@ func (d *Demuxer) absorb(p payload, dst *object) (bool, error) {
 	}
 	if d.asmHave > int(d.asmSize) {
 		d.dropAssembly()
+		d.gap = true
 		return false, d.warn(off, "media object %d overruns its declared %d bytes", p.objNum, p.objSize)
 	}
 	if d.asmHave < int(d.asmSize) {
@@ -382,6 +398,7 @@ func (d *Demuxer) dropOpenAssembly(off int64) error {
 	}
 	missing := int(d.asmSize) - d.asmHave
 	d.dropAssembly()
+	d.gap = true
 	return d.warn(off, "media object %d is missing %d bytes and was dropped", d.asmNum, missing)
 }
 
@@ -422,6 +439,16 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	// immediately run out, which is what every other demuxer here does.
 	target := min(d.packetFor(samplesToMS(sample, d.track.Fmt.Rate)), d.packets-1)
 	landing := max(0, target-d.seekPreroll)
+	if d.runUp > 0 {
+		// A codec whose resumed decode converges rather than lands exact backs
+		// the landing up by its measured convergence, in time rather than in
+		// packets, and the pre-roll the caller discards covers the run.
+		early := int64(0)
+		if sample > d.runUp {
+			early = max(0, d.packetFor(samplesToMS(sample-d.runUp, d.track.Fmt.Rate))-d.seekPreroll)
+		}
+		landing = min(landing, early)
+	}
 	if d.syncOK != nil {
 		var err error
 		if landing, err = d.syncLanding(target, sample); err != nil {
@@ -523,6 +550,7 @@ func (d *Demuxer) rewind(i int64) {
 	}
 	d.haveCur, d.haveNxt = false, false
 	d.filled, d.emitted = false, false
+	d.gap = false // a seek is its own discontinuity, and the format layer handles it
 	d.lastPTS = 0
 	d.err = nil
 	// lastDur deliberately survives: it is the nominal length of a media
@@ -840,6 +868,7 @@ func (d *Demuxer) wireTrack(s stream, id codec.ID, name string) error {
 		return err
 	}
 	d.syncOK, d.syncFrameLen = setup.syncOK, setup.frameLen
+	d.runUp = int64(setup.runUp)
 	f := setup.fmt
 	if err := f.Valid(); err != nil {
 		return container.UnusableFormat("wma", f, err)
