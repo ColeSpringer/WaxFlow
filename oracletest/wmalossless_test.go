@@ -105,14 +105,9 @@ func TestBothReadersTakeTheDepthFromTheExtraBytes(t *testing.T) {
 	if got := info.Default().Fmt; got.BitDepth != 24 || got.Type != audio.Int {
 		t.Errorf("WaxFlow reports %v, want int24 from the extra bytes", got)
 	}
-	// waxlabel reads the FIXED field, so it answers 16 here where the stream
-	// is 24. That is an upstream divergence rather than a WaxFlow defect and
-	// it is latent, since no encoder writes a disagreeing header; it is filed
-	// in docs/upstream-requests.md. Pinned at today's answer so the entry
-	// cannot go stale: when waxlabel starts reading the extra bytes this cell
-	// fails and the request gets retired.
-	if got := waxlabelTrack(t, patched).BitsPerSample; got != 16 {
-		t.Errorf("waxlabel BitsPerSample = %d, want 16: it read the extra bytes, so "+
-			"retire the entry in docs/upstream-requests.md and flip this to 24", got)
+	// waxlabel takes the same answer from the same bytes since v1.8.0. This is
+	// the agreement pin: it fails on any reader that reads the fixed field.
+	if got := waxlabelTrack(t, patched).BitsPerSample; got != 24 {
+		t.Errorf("waxlabel BitsPerSample = %d, want 24 from the extra bytes", got)
 	}
 }

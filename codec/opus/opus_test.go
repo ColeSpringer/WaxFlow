@@ -194,3 +194,29 @@ func TestOpusPacketPad(t *testing.T) {
 		})
 	}
 }
+
+// TestCode3PaddingCannotWrap pins the padding accumulator against a packet
+// whose padding run is nothing but 255 continuation bytes. Each one adds 254
+// to a running total whose only bound was the packet's own length, so a packet
+// a few megabytes long carries the sum past MaxInt32 and it wraps negative
+// where int is 32 bits. A negative total then passes the "padding > len(body)"
+// check and the reslice below it runs off the end. The run has to END for that
+// to be reached, so the packet closes with a terminator and a byte of payload;
+// exhausting the buffer instead is caught by the loop's own length check. The
+// Ogg demuxer reassembles packets up to 16 MiB, so this length is reachable
+// from a file. Caught on 386 (make test-386); on 64-bit the sum does not wrap
+// and the packet is refused for overrunning.
+func TestCode3PaddingCannotWrap(t *testing.T) {
+	// One more continuation byte than a 32-bit int can hold at 254 each.
+	const conts = 1<<31/254 + 1
+	pkt := make([]byte, 0, conts+4)
+	pkt = append(pkt, 0xFF)      // TOC: CELT FB 20 ms, stereo, code 3
+	pkt = append(pkt, 0x40|0x01) // padded, one frame
+	for range conts {
+		pkt = append(pkt, 255)
+	}
+	pkt = append(pkt, 0, 0x99) // padding run ends, one byte of payload left
+	if _, err := splitPacket(pkt); err == nil {
+		t.Fatal("a padding run longer than a 32-bit int can count was accepted")
+	}
+}

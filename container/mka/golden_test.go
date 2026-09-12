@@ -1,16 +1,15 @@
 package mka
 
 import (
-	"bytes"
 	"encoding/binary"
 	"flag"
-	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files (make goldens)")
@@ -72,22 +71,7 @@ func TestGoldenMuxOutputs(t *testing.T) {
 			}
 			raw := mux(t, tt.track, tt.opts, tt.pkts, tt.trailer)
 			path := filepath.Join("testdata", "golden", tt.name)
-			if *update {
-				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, raw, 0o644); err != nil {
-					t.Fatal(err)
-				}
-				return
-			}
-			want, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatalf("missing golden %s (run `make goldens`): %v", path, err)
-			}
-			if !bytes.Equal(raw, want) {
-				t.Errorf("output differs from %s (%d vs %d bytes); if intentional, `make goldens` and review", path, len(raw), len(want))
-			}
+			testutil.Golden(t, path, raw, *update)
 		})
 	}
 }

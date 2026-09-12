@@ -501,7 +501,11 @@ func TestRefusalsNameWhatTheyFound(t *testing.T) {
 		// gets now is the damage cell below, which is a different answer on
 		// purpose.
 		{"wma-voice-10", setFormatTag(0x000B), "Windows Media Audio Voice 10"},
-		{"unknown-codec", setFormatTag(0x0055), "audio format 0x0055"},
+		// Named through the shared WAVE table: the file holds MP3, which this
+		// container has no decoder for, and saying so beats a bare tag.
+		{"unknown-codec", setFormatTag(0x0055), "MP3 (audio format 0x0055)"},
+		// No name for this one, so the tag is the whole answer.
+		{"unnamed-codec", setFormatTag(0x1234), "audio format 0x1234"},
 		{"video-only", func(raw []byte) {
 			copy(headerBody(nil, raw, guidStreamProperties), guidVideoMedia)
 		}, "no audio stream (the file carries video)"},

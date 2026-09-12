@@ -112,7 +112,7 @@ the tuple is `[decoder, dsp..., encoder, muxer]`:
   accepted rather than trimmed: the event is rare, the cost is one
   re-encode per entry, and stripping the last element of an inherited
   slice is a second version-assembly path that could disagree with the
-  first. It is imprecise, not unsafe — the segmented form has no
+  first. It is imprecise, not unsafe: the segmented form has no
   under-covered muxer.
 - One `mp4.MuxerVersion` covers both `NewMuxer` (fragmented) and
   `NewProgressiveMuxer` (moov-first), because they share the sample
@@ -130,16 +130,48 @@ transcodes were not regenerating.
 
 The residual risk is the same standing PR question, moved: forgetting to
 bump a `MuxerVersion` on a framing change.
-`TestMuxerVersionNamesTheMuxerThatRuns` cannot see that — it checks which
+`TestMuxerVersionNamesTheMuxerThatRuns` cannot see that; it checks which
 term is used, not whether it was bumped.
 
-What catches an unbumped change is a golden byte comparison, and six of
-the ten packages have one (`TestGoldenMuxOutputs` over riff, aiff,
-flacn, mpa, mka, mp4; see the `goldens` target). Four do not: `ogg`,
-`wv`, `apen`, `adts`. `ogg` is the gap that stings, since the
-granulepos fix that motivated this whole term was an ogg muxer change,
-and a repeat of it would still reach review with nothing failing. Those
-four are covered only by their round-trip and differential tests, which
-assert what the bytes mean rather than what they are, so a framing
-change that stays correct passes them. Adding goldens there is the
-follow-up this amendment names and does not do.
+What catches an unbumped change is a golden byte comparison, and all ten
+packages now have one (see the `goldens` target). Within a case, the
+golden constrains every byte: a paging retune that moves a page boundary
+changes bytes and so has to bump `MuxerVersion` anyway, and the golden
+failing is the reminder. Regeneration is `make goldens` plus a reviewed
+diff, and the failure message names the version bump as well as the
+command.
+
+Coverage is per case, not per muxer, so the cases are chosen to sit on
+the boundaries a retune would move: `ogg`'s Opus case packs packets that
+land a page exactly on the byte target and one byte past it, so the
+target is caught moving in either direction, and reaches the segment-table
+and granule caps on their own exact boundaries. Where one version term
+covers two writers it takes two cases: `mp4.MuxerVersion` covers the
+fragmented muxer and `NewProgressiveMuxer`, which share little beyond the
+sample entries, so each has its own golden. What no golden reaches is
+still real: the optional tag, chapter and cover-art boxes several muxers
+write are exercised by their own round-trip tests rather than pinned byte
+for byte, so a change confined to those would reach review with nothing
+failing.
+
+The goldens are compared on every architecture CI runs: amd64 under the
+race pass, arm64 on the macOS leg, and 386 through `make test-386`. That
+is the evidence behind them rather than a determinism argument, and the
+distinction matters, because `docs/quality-gates.md` records that
+byte-exactness is a within-a-build property and that a float encoder can
+legitimately differ in the last ulp across architectures. Two encoders
+are known to, and both are pinned to one architecture and skipped
+elsewhere (`codec/vorbis.goldenEncodeArch`, `codec/wma.wantDigestArch`).
+An encoder pinned that way must not feed a committed golden, which is why
+the `ogg` Vorbis case demuxes a committed libvorbis stream for its
+CodecConfig and packets and re-muxes those: it exercises the whole
+mapping without running our own encoder. The Opus case is canned packets;
+the FLAC, AAC, ALAC, WavPack and Monkey's Audio encoders behind the rest
+were already pinned this way before these goldens were added, and have
+held. If one ever stops holding, CI says so on the leg that disagrees,
+which is the point of comparing there.
+
+The one output too large to commit is `apen`'s unknown-length layout,
+whose seek-table reservation is 233 KB of zeros at this frame length. Its
+golden is the SHA-256 of the stream, kept in a file like any other so
+`make goldens` regenerates it.

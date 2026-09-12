@@ -1,14 +1,13 @@
 package riff
 
 import (
-	"bytes"
 	"flag"
-	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec/pcm"
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files (make goldens)")
@@ -34,27 +33,7 @@ func TestGoldenMuxOutputs(t *testing.T) {
 			f := tt.cfg.PCMFormat(48000, tt.channels, audio.DefaultLayout(tt.channels))
 			ws := &memWS{}
 			muxWAV(t, ws, tt.cfg, f, wireBytes(tt.cfg, tt.channels, tt.frames, 99), int64(tt.frames), tt.opts)
-			compareGolden(t, filepath.Join("testdata", tt.name), ws.Buf, *update)
+			testutil.Golden(t, filepath.Join("testdata", tt.name), ws.Buf, *update)
 		})
-	}
-}
-
-func compareGolden(t *testing.T, path string, got []byte, update bool) {
-	t.Helper()
-	if update {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, got, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
-	want, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("missing golden %s (run `make goldens`): %v", path, err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Errorf("output differs from %s (%d vs %d bytes); if intentional, `make goldens` and review", path, len(got), len(want))
 	}
 }

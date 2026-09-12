@@ -81,23 +81,7 @@ func TestGoldenSegments(t *testing.T) {
 
 func checkGolden(t *testing.T, name string, data []byte) {
 	t.Helper()
-	path := repoPath("testdata", "golden", "hls", name)
-	if *updateGoldens {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, data, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
-	want, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("missing golden %s (run `make goldens`): %v", path, err)
-	}
-	if !bytes.Equal(data, want) {
-		t.Errorf("output differs from %s (%d vs %d bytes); if intentional, `make goldens` and review", path, len(data), len(want))
-	}
+	testutil.Golden(t, repoPath("testdata", "golden", "hls", name), data, *updateGoldens)
 }
 
 // TestSegmentsFFprobe validates the produced init header and segments

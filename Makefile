@@ -133,7 +133,8 @@ fuzz:
 
 # Regenerate muxer golden files. Review the diff before committing.
 goldens:
-	go test -run TestGoldenMuxOutputs ./container/riff ./container/aiff ./container/flacn ./container/mpa ./container/mka ./container/mp4 -update
+	go test -run TestGolden ./container/riff ./container/aiff ./container/flacn ./container/mpa \
+		./container/mka ./container/mp4 ./container/ogg ./container/wv ./container/apen ./container/adts -update
 	go test -run TestGoldenSegments ./tests -update
 	cd oracletest && go test -run TestGoldenM4BChapters . -update
 

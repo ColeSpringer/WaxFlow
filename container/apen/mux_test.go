@@ -29,7 +29,14 @@ var muxFormat = audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayo
 // they belong to, with Samples as the caller's projection.
 func muxFrames(t testing.TB, n int, projected int64) (container.Track, []container.Packet) {
 	t.Helper()
-	enc, err := ape.NewEncoder(muxFormat, nil)
+	return muxFramesAt(t, n, projected, ape.DefaultEncoderLevel)
+}
+
+// muxFramesAt is muxFrames at a chosen compression level, for the golden,
+// which takes the fastest one so a long fixture stays cheap to encode.
+func muxFramesAt(t testing.TB, n int, projected int64, level int) (container.Track, []container.Packet) {
+	t.Helper()
+	enc, err := ape.NewEncoder(muxFormat, &ape.EncoderOptions{Level: level})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -216,12 +216,17 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 			if stsdErr == nil {
 				stsdErr = t.stsdErr
 			}
-			foundCodecs = append(foundCodecs, "unknown")
+			foundCodecs = append(foundCodecs, unnamedCodec)
 			continue
 		}
 		if !decodableAudio(t.codec) {
 			foundCodecs = append(foundCodecs, string(t.codec))
-			named++
+			// An esds object type nothing names reaches here with the same
+			// placeholder the branch above appends, and it is no more
+			// actionable for having come from a box that parsed.
+			if string(t.codec) != unnamedCodec {
+				named++
+			}
 			continue
 		}
 		if audio == nil {

@@ -1,14 +1,14 @@
 package mp4
 
 import (
-	"bytes"
 	"flag"
-	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
+	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/alac"
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files (make goldens)")
@@ -40,24 +40,25 @@ func TestGoldenMuxOutputs(t *testing.T) {
 			fillTone(src)
 			raw := muxALAC(t, src, tt.fragTgt)
 			path := filepath.Join("testdata", "golden", tt.name)
-			if *update {
-				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, raw, 0o644); err != nil {
-					t.Fatal(err)
-				}
-				return
-			}
-			want, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatalf("missing golden %s (run `make goldens`): %v", path, err)
-			}
-			if !bytes.Equal(raw, want) {
-				t.Errorf("output differs from %s (%d vs %d bytes); if intentional, `make goldens` and review", path, len(raw), len(want))
-			}
+			testutil.Golden(t, path, raw, *update)
 		})
 	}
+}
+
+// TestGoldenProgressiveMuxOutputs pins the OTHER writer mp4.MuxerVersion
+// stands for. NewProgressiveMuxer lays a flat moov-first movie with a real
+// sample table, which shares no box-writing code path with the fragmented
+// muxer above beyond the sample entries, so one golden cannot cover both and
+// one version term covers them both anyway. Regenerate with `make goldens`
+// and review the diff. The packets are canned, so the bytes are the muxer's
+// alone and the same on every architecture.
+func TestGoldenProgressiveMuxOutputs(t *testing.T) {
+	const preSkip, padding, npkt = 312, 100, 8
+	samples := int64(npkt*960 - preSkip - padding)
+	track, pkts := opusTrackFor(preSkip, samples, npkt)
+	raw := muxProgressive(t, track, pkts,
+		codec.Trailer{Samples: samples, Delay: preSkip, Padding: padding})
+	testutil.Golden(t, filepath.Join("testdata", "golden", "golden-progressive-opus.mp4"), raw, *update)
 }
 
 func fmtFor(rate, ch, depth int) audio.Format {

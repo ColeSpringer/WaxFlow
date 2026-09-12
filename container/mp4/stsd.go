@@ -10,6 +10,7 @@ import (
 	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/codec/opus"
+	"github.com/colespringer/waxflow/container/internal/codecname"
 )
 
 // parseStsd parses the sample description box, reading the first audio
@@ -99,7 +100,11 @@ func (d *Demuxer) parseAudioSampleEntry(t *track, format string, body []byte, de
 		// See setMP3.
 		return d.setMP3(t, sampleRate, channels)
 	default:
-		t.codec = codec.ID(format) // an unknown but named audio codec
+		// An audio codec this build has no decoder for. The label names it
+		// where a name is known and quotes the fourcc where none is, so the
+		// "found:" list a refusal prints cannot carry a raw NUL: an "ms"
+		// entry's last two bytes are a WAVE format tag, not text.
+		t.codec = codec.ID(codecname.Label(format))
 		return nil
 	}
 }
@@ -445,6 +450,13 @@ func objectTypeName(ot byte) string {
 	case 0xA5, 0xA6:
 		return "ac3"
 	default:
-		return "unknown"
+		return unnamedCodec
 	}
 }
+
+// unnamedCodec is what a track carries when nothing could name its codec: an
+// esds object type with no entry above, or a sound track whose sample
+// description failed to parse at all. selectAudio prints it in the "found:"
+// list like any other entry but must not count it as a name, since the whole
+// point of the count is whether the list says anything a caller can act on.
+const unnamedCodec = "unknown"

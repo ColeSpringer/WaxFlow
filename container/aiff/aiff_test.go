@@ -166,39 +166,42 @@ func TestMuxDemuxRoundTrip(t *testing.T) {
 	}
 }
 
+// buildAIFC hand-builds a mono AIFF-C of one compression type, for the
+// read-only types the muxer never writes. frames is COMM's numSampleFrames,
+// which several of those types count differently from the payload's length.
+func buildAIFC(comp string, bits int, payload []byte, frames uint32) []byte {
+	var b bytes.Buffer
+	b.WriteString("FORM")
+	b.Write(u32be(0)) // patched below
+	b.WriteString("AIFC")
+	b.WriteString("FVER")
+	b.Write(u32be(4))
+	b.Write(u32be(fverTimestamp))
+	b.WriteString("COMM")
+	b.Write(u32be(24))
+	b.Write(u16be(1)) // mono
+	b.Write(u32be(frames))
+	b.Write(u16be(uint16(bits)))
+	rate := toExt80(8000)
+	b.Write(rate[:])
+	b.WriteString(comp)
+	b.Write([]byte{0, 0})
+	b.WriteString("SSND")
+	b.Write(u32be(uint32(8 + len(payload))))
+	b.Write(u32be(0))
+	b.Write(u32be(0))
+	b.Write(payload)
+	raw := b.Bytes()
+	be.PutUint32(raw[4:], uint32(len(raw)-8))
+	return raw
+}
+
 // TestSowtAndRawDecode covers read-only compression types by hand-building
 // headers the muxer never writes.
 func TestSowtAndRawDecode(t *testing.T) {
-	build := func(comp string, bits int, payload []byte, frames uint32) []byte {
-		var b bytes.Buffer
-		b.WriteString("FORM")
-		b.Write(u32be(0)) // patched below
-		b.WriteString("AIFC")
-		b.WriteString("FVER")
-		b.Write(u32be(4))
-		b.Write(u32be(fverTimestamp))
-		b.WriteString("COMM")
-		b.Write(u32be(24))
-		b.Write(u16be(1)) // mono
-		b.Write(u32be(frames))
-		b.Write(u16be(uint16(bits)))
-		rate := toExt80(8000)
-		b.Write(rate[:])
-		b.WriteString(comp)
-		b.Write([]byte{0, 0})
-		b.WriteString("SSND")
-		b.Write(u32be(uint32(8 + len(payload))))
-		b.Write(u32be(0))
-		b.Write(u32be(0))
-		b.Write(payload)
-		raw := b.Bytes()
-		be.PutUint32(raw[4:], uint32(len(raw)-8))
-		return raw
-	}
-
 	t.Run("sowt", func(t *testing.T) {
 		payload := []byte{0x02, 0x01, 0xFE, 0xFF} // 0x0102, -2 little-endian
-		track, data, _ := demuxAll(t, container.BytesSource(build("sowt", 16, payload, 2)), &DemuxerOptions{Strict: true})
+		track, data, _ := demuxAll(t, container.BytesSource(buildAIFC("sowt", 16, payload, 2)), &DemuxerOptions{Strict: true})
 		cfg, _ := pcm.ParseConfig(track.CodecConfig)
 		if cfg.BigEndian || cfg.Bits != 16 {
 			t.Errorf("sowt config = %+v, want little-endian 16", cfg)
@@ -210,17 +213,30 @@ func TestSowtAndRawDecode(t *testing.T) {
 
 	t.Run("raw", func(t *testing.T) {
 		payload := []byte{0x80, 0x00, 0xFF}
-		track, _, _ := demuxAll(t, container.BytesSource(build("raw ", 8, payload, 3)), &DemuxerOptions{Strict: true})
+		track, _, _ := demuxAll(t, container.BytesSource(buildAIFC("raw ", 8, payload, 3)), &DemuxerOptions{Strict: true})
 		cfg, _ := pcm.ParseConfig(track.CodecConfig)
 		if cfg.Encoding != pcm.UnsignedInt {
 			t.Errorf("raw config = %+v, want unsigned", cfg)
 		}
 	})
 
+	// The refusal names the codec: an AIFF-C carrying a compression type this
+	// build has no decoder for is a well-formed file, so the refusal is the
+	// whole answer, and it uses the name the sibling reader gives the type.
 	t.Run("unknown compression", func(t *testing.T) {
-		_, err := NewDemuxer(container.BytesSource(build("ima4", 16, nil, 0)), nil)
-		if !errors.Is(err, waxerr.ErrUnsupportedFormat) {
-			t.Errorf("ima4 error = %v, want unsupported-format", err)
+		for _, tc := range []struct{ comp, want string }{
+			{"MAC3", `MAC3 (compression type "MAC3")`},
+			// No name for this one, so the type is the whole answer.
+			{"QDM2", `compression type "QDM2"`},
+		} {
+			_, err := NewDemuxer(container.BytesSource(buildAIFC(tc.comp, 16, nil, 0)), nil)
+			if !errors.Is(err, waxerr.ErrUnsupportedFormat) {
+				t.Errorf("%s error = %v, want unsupported-format", tc.comp, err)
+				continue
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("%s: %v does not name %q", tc.comp, err, tc.want)
+			}
 		}
 	})
 }

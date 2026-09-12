@@ -9,6 +9,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/codecname"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -306,7 +307,16 @@ func (d *Demuxer) parseCOMM(b []byte, aifc bool, off int64) (cfg pcm.Config, rat
 	case compFl64, compFL64:
 		cfg = pcm.Config{Encoding: pcm.Float, Bits: 64, BigEndian: true}
 	default:
-		return cfg, 0, 0, 0, unsupported("compression type %q (only PCM types are supported)", comp)
+		// Named where a name is known, so the refusal says what the file
+		// holds rather than only that it is not PCM. Scoped to the container:
+		// the arms above cover some spellings of a codec and not others (the
+		// PCM family's in24 and in32, and every uppercase spelling), so
+		// "this build has no decoder for it" would be false of the very
+		// codec this package decodes.
+		if name := codecname.Fourcc(comp); name != "" {
+			return cfg, 0, 0, 0, unsupported("this build does not read %s (compression type %q) from an AIFF-C", name, comp)
+		}
+		return cfg, 0, 0, 0, unsupported("this build does not read compression type %q from an AIFF-C", comp)
 	}
 	if err := cfg.Validate(); err != nil {
 		return cfg, 0, 0, 0, err

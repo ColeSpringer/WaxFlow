@@ -286,7 +286,14 @@ func splitCode3(body []byte, cfg tocConfig, stereo bool) ([]frame, error) {
 			p := int(body[0])
 			body = body[1:]
 			if p == 255 {
+				// Bounded as it accumulates, not only at the end: the loop
+				// runs once per byte of a packet that may be megabytes, and
+				// an unbounded sum wraps negative where int is 32 bits, which
+				// the check below would then pass.
 				padding += 254
+				if padding > len(body) {
+					return nil, malformed("code 3 padding %d overruns packet", padding)
+				}
 				continue
 			}
 			padding += p

@@ -18,7 +18,14 @@ import (
 // encodeADTS drives the AAC encoder into the ADTS muxer.
 func encodeADTS(t *testing.T, f audio.Format, src [][]float32) ([]byte, codec.Trailer) {
 	t.Helper()
-	enc, err := aac.NewEncoder(f, nil)
+	return encodeADTSAt(t, f, src, 0)
+}
+
+// encodeADTSAt is encodeADTS at a chosen bitrate (0 for the default), for the
+// golden, which states its target rather than inheriting one.
+func encodeADTSAt(t *testing.T, f audio.Format, src [][]float32, bitrate int) ([]byte, codec.Trailer) {
+	t.Helper()
+	enc, err := aac.NewEncoder(f, &aac.EncoderOptions{Bitrate: bitrate})
 	if err != nil {
 		t.Fatal(err)
 	}

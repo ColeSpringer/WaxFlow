@@ -9,6 +9,7 @@ import (
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/codecname"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -839,7 +840,14 @@ func (d *Demuxer) selectStream() error {
 	if !audio[0].haveWFX {
 		return malformed("audio stream %d carries no WAVEFORMATEX", audio[0].number)
 	}
-	return unsupported("audio format %#04x is not a codec this build decodes", audio[0].wfx.tag)
+	// Nothing in this package's own table names it, so fall through to the
+	// shared WAVE vocabulary, which covers the tags no ASF file is expected
+	// to carry but some do. Scoped to the container, since those are mostly
+	// codecs this same binary decodes out of some other one.
+	if name := codecname.WaveFormat(audio[0].wfx.tag); name != "" {
+		return unsupported("this build does not read %s (audio format %#04x) from an ASF", name, audio[0].wfx.tag)
+	}
+	return unsupported("this build does not read audio format %#04x from an ASF", audio[0].wfx.tag)
 }
 
 // streamKinds names the stream types present, for the no-audio refusal.
@@ -1002,7 +1010,9 @@ type br struct {
 }
 
 func (r *br) take(n int) []byte {
-	if n < 0 || !r.ok || r.p+n > len(r.b) {
+	// Subtraction, not a sum: n comes from the packet and r.p+n wraps
+	// negative where int is 32 bits.
+	if n < 0 || !r.ok || n > len(r.b)-r.p {
 		r.ok = false
 		return nil
 	}

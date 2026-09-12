@@ -526,7 +526,9 @@ func ParseFrameHeader(pkt []byte) (blocks, skip, bytes int, data []byte, err err
 		return 0, 0, 0, nil, malformed("frame of %d blocks", blocks)
 	case skip < 0 || skip > 3:
 		return 0, 0, 0, nil, malformed("frame alignment skip of %d bytes, want 0..3", skip)
-	case bytes <= 0 || skip+bytes > len(data):
+	// Subtraction, not a sum: bytes comes from the file and skip+bytes wraps
+	// negative where int is 32 bits.
+	case bytes <= 0 || bytes > len(data)-skip:
 		return 0, 0, 0, nil, malformed("frame of %d bytes past a %d-byte skip, in a %d-byte packet",
 			bytes, skip, len(data))
 	}

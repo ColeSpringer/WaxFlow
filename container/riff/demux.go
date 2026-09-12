@@ -9,6 +9,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/codecname"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -295,9 +296,6 @@ func (d *Demuxer) parseFmt(b []byte, off int64) (cfg pcm.Config, rate, channels 
 		return cfg, 0, 0, 0, malformed("sample rate %d", rate64)
 	}
 	rate = int(rate64)
-	if bits < 1 || bits > 64 {
-		return cfg, 0, 0, 0, malformed("%d bits per sample", bits)
-	}
 
 	validBits := 0
 	layout = audio.DefaultLayout(channels)
@@ -333,6 +331,14 @@ func (d *Demuxer) parseFmt(b []byte, off int64) (cfg pcm.Config, rate, channels 
 	containerBits := pcm.ContainerBits(bits)
 	switch tag {
 	case tagPCM:
+		// wBitsPerSample is PCM's own geometry, so it is judged here rather
+		// than ahead of the tag: a compressed tag writes 0 into the field
+		// legitimately (ffmpeg does for both MP2 and MP3), and calling such a
+		// header damaged would refuse a well-formed file with the wrong code
+		// and without naming what it holds.
+		if bits < 1 || bits > 64 {
+			return cfg, 0, 0, 0, malformed("%d bits per sample", bits)
+		}
 		cfg = pcm.Config{Encoding: pcm.SignedInt, Bits: containerBits}
 		if containerBits == 8 {
 			cfg.Encoding = pcm.UnsignedInt
@@ -349,7 +355,15 @@ func (d *Demuxer) parseFmt(b []byte, off int64) (cfg pcm.Config, rate, channels 
 		}
 		cfg = pcm.Config{Encoding: pcm.Float, Bits: bits}
 	default:
-		return cfg, 0, 0, 0, unsupported("format tag 0x%04X (only integer and float PCM are supported)", tag)
+		// Named where a name is known, so the refusal says what the file
+		// holds rather than only that it is not PCM. Scoped to the container
+		// rather than to the build: several of these tags name codecs this
+		// same binary decodes elsewhere (MP3 bare and in MP4, WMA in ASF), so
+		// "this build has no decoder for it" would be false.
+		if name := codecname.WaveFormat(tag); name != "" {
+			return cfg, 0, 0, 0, unsupported("this build does not read %s (format tag 0x%04X) from a WAV", name, tag)
+		}
+		return cfg, 0, 0, 0, unsupported("this build does not read format tag 0x%04X from a WAV", tag)
 	}
 	if err := cfg.Validate(); err != nil {
 		return cfg, 0, 0, 0, err

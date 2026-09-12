@@ -66,7 +66,10 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   edit lists, Ogg pre-skip/end-trim, Matroska CodecDelay). A WMA Pro
   stream that sets the low-bit-rate tool no decoder outside Windows
   implements is refused by name, as is the second registered WMA Voice
-  tag (0x000B), which no reference decoder reads.
+  tag (0x000B), which no reference decoder reads. A WAV, AIFF-C or
+  MP4/MOV payload in a codec this build does not decode is refused by
+  that codec's name too, the same name the sibling tag reader reports
+  for the same bytes.
 - **DSP**: Kaiser windowed-sinc resampling (`hq`/`fast`), BS.775
   downmix, gain with true-peak limiting, TPDF and shaped dither, EBU
   R128 / BS.1770-4 loudness (differential-verified against ffmpeg).

@@ -179,6 +179,15 @@ architecture and skip elsewhere (`codec/vorbis.goldenEncodeArch`). What the
 ADR-0004 cache key rests on is a build reproducing its own bytes, which the
 deterministic-mode tests cover on every platform.
 
+The container muxer goldens sit beside that rather than against it. They are
+committed files compared byte for byte on every architecture CI runs, and the
+encoders behind them (FLAC, AAC, ALAC, MP3, WavPack, Monkey's Audio) have held
+there. That is an observation about those
+encoders, not a promise about float code in general, which is why an encoder
+known to differ is kept out of them. ADR-0004 records the reasoning and the
+one case it forces, Ogg Vorbis, whose golden re-muxes a committed libvorbis
+stream rather than running our own encoder.
+
 The same pin covers the one *decoder* golden that hashes samples instead of
 scoring them against a tolerance, the toolless committed-fixture digest in
 `codec/wma` (`wantDigestArch`): arm64 contracts the IMDCT rotations and the

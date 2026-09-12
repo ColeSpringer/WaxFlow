@@ -158,7 +158,9 @@ func TestStsdErrorKeepsTheCodecNameList(t *testing.T) {
 	if err == nil {
 		t.Fatal("a file with no decodable audio track opened")
 	}
-	for _, want := range []string{"audio object type 1 is not AAC-LC", "ac-3"} {
+	// The list names the codec, not the fourcc that spelled it, which is the
+	// name the sibling tag reader gives the same entry.
+	for _, want := range []string{"audio object type 1 is not AAC-LC", "AC-3"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error = %q, want it to mention %q", err, want)
 		}

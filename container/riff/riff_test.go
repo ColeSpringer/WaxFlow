@@ -332,22 +332,45 @@ func TestOddDataSizePads(t *testing.T) {
 	}
 }
 
+// TestDemuxRejectsUnsupported checks the refusal names the codec. A WAV whose
+// fmt chunk carries a tag this build has no decoder for is a well-formed file,
+// so the refusal is the whole answer a caller gets: it has to say what the file
+// holds, in the name the sibling reader gives the same tag.
 func TestDemuxRejectsUnsupported(t *testing.T) {
-	// Build a header for MS-ADPCM (tag 2): structurally valid, not PCM.
-	ws := &memWS{}
-	cfg := pcm.Config{Encoding: pcm.SignedInt, Bits: 16}
-	f := cfg.PCMFormat(8000, 1, audio.DefaultLayout(1))
-	muxWAV(t, ws, cfg, f, wireBytes(cfg, 1, 10, 8), 10, nil)
-	fmtOff := bytes.Index(ws.Buf, []byte("fmt "))
-	le.PutUint16(ws.Buf[fmtOff+8:], 0x0002)
-
-	_, err := NewDemuxer(container.BytesSource(ws.Buf), nil)
-	if !errors.Is(err, waxerr.ErrUnsupportedFormat) {
-		t.Errorf("ADPCM demux error = %v, want unsupported-format", err)
+	// A structurally valid header, retagged: everything but the format tag
+	// still describes the PCM the fixture holds.
+	build := func(tag uint16) []byte {
+		t.Helper()
+		ws := &memWS{}
+		cfg := pcm.Config{Encoding: pcm.SignedInt, Bits: 16}
+		f := cfg.PCMFormat(8000, 1, audio.DefaultLayout(1))
+		muxWAV(t, ws, cfg, f, wireBytes(cfg, 1, 10, 8), 10, nil)
+		fmtOff := bytes.Index(ws.Buf, []byte("fmt "))
+		le.PutUint16(ws.Buf[fmtOff+8:], tag)
+		return ws.Buf
+	}
+	for _, tc := range []struct {
+		tag  uint16
+		want string
+	}{
+		{0x0002, "ADPCM (format tag 0x0002)"},
+		{0x0050, "MP2 (format tag 0x0050)"},
+		{0x0160, "WMA v1 (format tag 0x0160)"},
+		// No name for this one, so the tag is the whole answer.
+		{0x1234, "format tag 0x1234"},
+	} {
+		_, err := NewDemuxer(container.BytesSource(build(tc.tag)), nil)
+		if !errors.Is(err, waxerr.ErrUnsupportedFormat) {
+			t.Errorf("tag %#04x: error = %v, want unsupported-format", tc.tag, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("tag %#04x: %v does not name %q", tc.tag, err, tc.want)
+		}
 	}
 
-	// The ADPCM case above is a well-formed WAV holding a codec this build
-	// has no decoder for; junk is not a WAV at all, which is damage.
+	// The cases above are well-formed WAVs holding a codec this build has no
+	// decoder for; junk is not a WAV at all, which is damage.
 	if _, err := NewDemuxer(container.BytesSource([]byte("not a wav file at all")), nil); !errors.Is(err, waxerr.ErrMalformedInput) {
 		t.Errorf("garbage demux error = %v, want malformed-input", err)
 	}

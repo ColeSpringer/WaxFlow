@@ -3,7 +3,6 @@ package flacn_test
 import (
 	"bytes"
 	"flag"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -49,27 +48,7 @@ func TestGoldenMuxOutputs(t *testing.T) {
 				encodeStream(t, src, tt.level, &buf, int64(src.N))
 				raw = buf.Bytes()
 			}
-			compareGolden(t, filepath.Join("testdata", tt.name), raw, *update)
+			testutil.Golden(t, filepath.Join("testdata", tt.name), raw, *update)
 		})
-	}
-}
-
-func compareGolden(t *testing.T, path string, got []byte, update bool) {
-	t.Helper()
-	if update {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, got, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
-	want, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("missing golden %s (run `make goldens`): %v", path, err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Errorf("output differs from %s (%d vs %d bytes); if intentional, `make goldens` and review", path, len(got), len(want))
 	}
 }

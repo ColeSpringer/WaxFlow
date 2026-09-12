@@ -13,6 +13,7 @@ import (
 	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/internal/meta"
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
 // TestGoldenM4BChapters is the audiobook passthrough pin: an m4b with
@@ -128,20 +129,7 @@ func TestGoldenM4BChapters(t *testing.T) {
 		t.Errorf("iTunSMPB fields sum to %d, not whole AAC frames", total)
 	}
 
-	golden := filepath.Join("..", "testdata", "golden", "m4b-chapters.m4b")
-	if *updateGoldens {
-		if err := os.WriteFile(golden, got, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
-	want, err := os.ReadFile(golden)
-	if err != nil {
-		t.Fatalf("missing golden %s (run `make goldens`): %v", golden, err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Errorf("output differs from %s (%d vs %d bytes); if intentional, `make goldens` and review", golden, len(got), len(want))
-	}
+	testutil.Golden(t, filepath.Join("..", "testdata", "golden", "m4b-chapters.m4b"), got, *updateGoldens)
 }
 
 func parseHexField(t *testing.T, b []byte) int64 {

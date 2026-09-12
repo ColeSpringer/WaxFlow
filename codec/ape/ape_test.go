@@ -2,6 +2,7 @@ package ape
 
 import (
 	"encoding/binary"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -371,6 +372,13 @@ func TestFrameHeaderRoundTrip(t *testing.T) {
 	// to, so it has to be accepted rather than caught by the check above.
 	if _, _, _, _, err := ParseFrameHeader(withPayload(1, 2, 6, 8)); err != nil {
 		t.Errorf("a frame ending exactly at the end of its packet: %v", err)
+	}
+	// A file-derived length near the top of the range: skip+bytes wraps
+	// negative where int is 32 bits, and a negative total passes any check
+	// written as a sum. This is caught on 386 (make test-386) and is a plain
+	// bounds case everywhere else.
+	if _, _, _, _, err := ParseFrameHeader(withPayload(1, 3, math.MaxInt32-1, 4)); err == nil {
+		t.Error("a frame claiming MaxInt32 bytes past a 3-byte skip was accepted")
 	}
 }
 
