@@ -12,10 +12,30 @@ import (
 
 // sampleTable is a track's flattened sample map: per-sample file offset and
 // byte size, a run-encoded time base in output samples, and the sync set.
+//
+// A byte-linear codec takes a second representation instead (uniform, below):
+// its samples are all one size and one duration, so an index per chunk
+// answers every question the per-sample arrays do, at a cost the file's own
+// chunk count bounds rather than its sample count. The distinction matters
+// because a PCM sample is one FRAME: three minutes of 48 kHz stereo is 8.6
+// million of them, and a table with two entries each would be a hundred
+// megabytes of index over eight hundred bytes of chunk offsets.
 type sampleTable struct {
 	offsets []int64  // per-sample file offset
 	sizes   []uint32 // per-sample byte size
-	total   int64    // sample count (== len(offsets))
+	total   int64    // sample count (== len(offsets) unless uniform)
+
+	// The uniform representation. unitBytes and unitDur are the constant
+	// size and duration of one sample; chunkOff is each chunk's file offset
+	// and chunkFirst the index of its first sample, with a trailing sentinel
+	// equal to total so chunk k spans [chunkFirst[k], chunkFirst[k+1]).
+	// Samples within a chunk are contiguous, which is what the format
+	// guarantees and what lets one packet carry many of them.
+	uniform    bool
+	unitBytes  int64
+	unitDur    int64
+	chunkOff   []int64
+	chunkFirst []int64
 
 	// Time base in output samples (rescaled from mdhd ticks to the codec
 	// rate), run-encoded so uniform audio costs a handful of entries.
@@ -207,20 +227,209 @@ func (d *Demuxer) parseStbl(t *track, body []byte, depth int) error {
 		return nil // an incomplete text track simply yields no chapters
 	}
 
+	// One table per track, whatever the file offers. Nothing orders or limits
+	// the stbl boxes inside a minf, so this can run twice, and the two
+	// representations do not overwrite each other field for field: a uniform
+	// table left standing beside a flat one is read through a chunk index that
+	// no longer spans it, which is a packet the walk cannot advance past.
 	st := &t.st
+	*st = sampleTable{}
+
+	rate := t.timescale
+	if t.fmt.Rate > 0 {
+		rate = int64(t.fmt.Rate)
+	}
+	// isAudio is part of the gate, not just of the error handling: a chunk
+	// index leaves no per-sample offsets or sizes behind, and readTextChapters
+	// reads exactly those. A text track whose sample description happens to
+	// carry a PCM fourcc would otherwise open with a table whose two halves
+	// disagree, and the chapter walk would index arrays that are not there.
+	byteLinear := t.unitBytes > 0 && t.unitDur > 0
+	// What one frame lasts on the media clock, when a whole number of ticks
+	// can say it. The gate below needs that number rather than the unit's own
+	// duration, because the stts is written in the file's ticks and the file
+	// need not clock its samples at the sample rate: a 16000-tick clock over
+	// 8000 Hz audio writes 2 there, and the two statements agree. A timescale
+	// that is not a whole multiple of the rate cannot state a frame at all, so
+	// such a file is not a per-frame table and keeps the flat one.
+	perFrameTicks := int64(0)
+	if rate > 0 && t.timescale > 0 && t.timescale%rate == 0 {
+		perFrameTicks = t.timescale / rate
+	}
+	if isAudio && byteLinear && constSize == uint32(t.unitBytes) &&
+		perFrameTicks >= 1 && uniformStts(stts, perFrameTicks) {
+		// Byte-linear samples of a constant size, each lasting exactly the
+		// one frame it holds: the chunk index describes the whole table. A
+		// track excluded from this over its timescale alone would carry a
+		// per-frame index instead, and past maxSamples would be refused
+		// outright, which is why the clock is converted rather than required
+		// to be the rate.
+		if err := d.buildChunkIndex(st, t, sampleN, stsc, chunks); err != nil {
+			return err
+		}
+		// The time base comes from the same builder the flat path uses, and
+		// the unit's output duration is read back from it rather than assumed:
+		// the gate makes that conversion exact (the ticks per frame divide the
+		// timescale exactly), so it comes back as the unit's own duration, and
+		// reading it is what keeps the packet path honest if that ever stops
+		// being true. No sync set, here or below: a byte-linear sample is
+		// independently decodable, so every one is a sync point, which is what
+		// a nil set means, and an stss listing a subset of PCM frames says
+		// nothing true.
+		d.buildTimeBase(st, stts, t.timescale, rate)
+		if len(st.runDelta) > 0 {
+			st.unitDur = st.runDelta[0]
+		}
+		return nil
+	}
 	if err := d.flatten(st, sampleN, sizes, constSize, stsc, chunks); err != nil {
 		if isAudio {
 			return err
 		}
 		return nil
 	}
-	rate := t.timescale
-	if t.fmt.Rate > 0 {
-		rate = int64(t.fmt.Rate)
-	}
 	d.buildTimeBase(st, stts, t.timescale, rate)
-	buildSync(st, stss)
+	if !byteLinear {
+		buildSync(st, stss)
+	}
+	if isAudio && byteLinear && !st.rescaled {
+		// A byte-linear track states its length twice, in the time-to-sample
+		// table and in the bytes its samples occupy, and the two are the same
+		// number. A file where they are not has a length that cannot be read
+		// off either one, so it is named rather than believed: without this a
+		// crafted stts delta turns a tenth of a second of audio into a
+		// 27-hour track that --strict accepts. (The chunk-indexed path above
+		// cannot reach this: the two agreeing is its gate.)
+		//
+		// Skipped when the timeline was rescaled, where the two are not the
+		// same number by construction: the conversion floors every run, so
+		// totalDur is a rounded total and comparing an exact frame count
+		// against it would refuse well-formed files.
+		var payload int64
+		for _, sz := range st.sizes {
+			payload += int64(sz)
+		}
+		if frames := payload / t.unitBytes; frames != st.totalDur {
+			if err := d.warn(0, "sample table times %d frames, its samples hold %d", st.totalDur, frames); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
+}
+
+// uniformStts reports whether every time-to-sample run gives its samples the
+// duration one unit of this track lasts, in the media clock's own ticks. A
+// byte-linear track whose stts says anything else is describing a timeline the
+// chunk index cannot express, so it keeps the flattened table: correct either
+// way, and the per-sample arrays are what a non-uniform table costs.
+func uniformStts(stts []sttsEntry, ticks int64) bool {
+	if len(stts) == 0 || ticks < 1 {
+		return false
+	}
+	for _, e := range stts {
+		if e.delta != ticks {
+			return false
+		}
+	}
+	return true
+}
+
+// buildChunkIndex builds the uniform representation: one offset and one
+// first-sample index per chunk, plus a sentinel.
+//
+// It mirrors flatten's bounds, per chunk rather than per sample. A chunk that
+// would read past the end of the file keeps the whole units that fit and ends
+// the table with the same warning flatten gives, so a truncated source plays
+// what it holds. Memory is bounded by the chunk-offset box's own payload,
+// never by the sample count, which is the whole reason this path exists.
+func (d *Demuxer) buildChunkIndex(st *sampleTable, t *track, sampleN int64, stsc []stscEntry, chunks []int64) error {
+	if t.unitBytes < 1 || t.unitDur < 1 {
+		// The caller's gate establishes both, and the packet path divides by
+		// unitDur. Stated here too because the distance between the two is
+		// where a later edit puts a zero.
+		return malformed("byte-linear track with a %d-byte unit of %d samples", t.unitBytes, t.unitDur)
+	}
+	unitBytes := t.unitBytes
+	numChunks := int64(len(chunks))
+	// Sized by what the table can actually yield, not by what it declares:
+	// every chunk kept holds at least one sample, so the sample count bounds
+	// the chunk count as tightly as the chunk-offset box does. Capped again
+	// beyond that, because both of those are numbers the file chooses and the
+	// stsz sample cap no longer stands behind them: append grows to the real
+	// count, so a crafted table pays for the chunks it actually has and a real
+	// one reserves once.
+	capacity := min(numChunks, sampleN, maxReserveChunks)
+	offs := make([]int64, 0, capacity)
+	firsts := make([]int64, 0, capacity+1)
+	idx := int64(0)
+	truncated, truncAt := false, int64(0)
+	for k := 0; k < len(stsc) && idx < sampleN; k++ {
+		first := stsc[k].first
+		spc := stsc[k].spc
+		if first < 1 || first > numChunks+1 {
+			return malformed("stsc first_chunk %d outside 1..%d", first, numChunks+1)
+		}
+		last := numChunks
+		if k+1 < len(stsc) {
+			last = stsc[k+1].first - 1
+		}
+		if last > numChunks {
+			last = numChunks
+		}
+		for c := first; c <= last && idx < sampleN; c++ {
+			base := chunks[c-1]
+			n := min(spc, sampleN-idx)
+			if n == 0 {
+				// A chunk holding no samples reads no bytes, so its offset is
+				// not checked against anything: flatten never evaluates the
+				// bound for one either, and the two builders have to answer
+				// the same way about the same table.
+				continue
+			}
+			// base > d.size-bytes, not base+bytes > d.size: a co64 offset
+			// near 2^63 would overflow the sum and slip past the guard. The
+			// product cannot overflow, since sampleN is capped at what the
+			// file could hold at this unit size (parseStsz).
+			if base < 0 || base > d.size-n*unitBytes {
+				if base >= 0 && base < d.size {
+					if fit := (d.size - base) / unitBytes; fit > 0 {
+						offs = append(offs, base)
+						firsts = append(firsts, idx)
+						idx += fit
+					}
+				}
+				truncated, truncAt = true, base
+				goto done
+			}
+			offs = append(offs, base)
+			firsts = append(firsts, idx)
+			idx += n
+		}
+	}
+done:
+	if err := d.warnShortTable(truncated, truncAt, idx, sampleN); err != nil {
+		return err
+	}
+	st.uniform = true
+	st.unitBytes = unitBytes
+	st.unitDur = t.unitDur
+	st.chunkOff = offs
+	st.chunkFirst = append(firsts, idx)
+	st.total = idx
+	return nil
+}
+
+// chunkOf returns the index of the chunk holding sample idx, in a uniform
+// table.
+func (st *sampleTable) chunkOf(idx int64) int {
+	if len(st.chunkOff) == 0 {
+		return 0 // an empty table; total is 0 and no caller reads a chunk
+	}
+	// chunkFirst ends with the sentinel, so the search runs over the chunks
+	// themselves and the answer is the last one starting at or before idx.
+	k := sort.Search(len(st.chunkFirst), func(j int) bool { return st.chunkFirst[j] > idx }) - 1
+	return min(max(k, 0), len(st.chunkOff)-1)
 }
 
 // flatten builds the per-sample offset and size arrays from the
@@ -244,7 +453,7 @@ func (d *Demuxer) flatten(st *sampleTable, sampleN int64, sizes []uint32, constS
 	offsets := make([]int64, 0, sampleN)
 	outSizes := make([]uint32, 0, sampleN)
 	idx := int64(0)
-	truncated := int64(-1)
+	truncated, truncAt := false, int64(0)
 	for k := 0; k < len(stsc) && idx < sampleN; k++ {
 		first := stsc[k].first
 		spc := stsc[k].spc
@@ -265,7 +474,7 @@ func (d *Demuxer) flatten(st *sampleTable, sampleN int64, sizes []uint32, constS
 				// base > d.size-sz, not base+sz > d.size: a co64 offset near
 				// 2^63 would overflow the sum and slip past the guard.
 				if base < 0 || base > d.size-int64(sz) {
-					truncated = base
+					truncated, truncAt = true, base
 					goto done
 				}
 				offsets = append(offsets, base)
@@ -276,18 +485,31 @@ func (d *Demuxer) flatten(st *sampleTable, sampleN int64, sizes []uint32, constS
 		}
 	}
 done:
-	if truncated >= 0 {
-		if err := d.warn(truncated, "sample data runs past end of file, %d of %d samples kept", idx, sampleN); err != nil {
-			return err
-		}
-	} else if idx < sampleN {
-		if err := d.warn(0, "sample-to-chunk map yields %d of %d samples", idx, sampleN); err != nil {
-			return err
-		}
+	if err := d.warnShortTable(truncated, truncAt, idx, sampleN); err != nil {
+		return err
 	}
 	st.offsets = offsets
 	st.sizes = outSizes
 	st.total = idx
+	return nil
+}
+
+// warnShortTable reports a sample map that yielded fewer samples than the
+// table declared, in the two ways it can happen: a chunk whose data runs past
+// the end of the file, and a sample-to-chunk map that simply does not reach
+// them. Shared by both builders so the two cannot drift into saying the same
+// thing differently.
+//
+// truncated is a flag rather than a sentinel offset because a chunk offset can
+// legitimately be negative (a co64 entry past 2^63 reads that way), and a
+// sentinel of -1 reported that case as the wrong one of the two.
+func (d *Demuxer) warnShortTable(truncated bool, at, got, want int64) error {
+	switch {
+	case truncated:
+		return d.warn(at, "sample data runs past end of file, %d of %d samples kept", got, want)
+	case got < want:
+		return d.warn(0, "sample-to-chunk map yields %d of %d samples", got, want)
+	}
 	return nil
 }
 
@@ -492,9 +714,12 @@ func parseStsz(payload []byte, fileSize int64) (sizes []uint32, constSize uint32
 		if maxN := fileSize/int64(constSize) + 1; count > maxN {
 			count = maxN
 		}
-		if count > maxSamples {
-			return nil, 0, 0, malformed("stsz declares %d samples", count)
-		}
+		// No maxSamples refusal here, unlike the per-sample table below: a
+		// constant size is exactly the shape the chunk index reads without
+		// per-sample memory, and a PCM sample is one frame, so an hour of
+		// 48 kHz audio legitimately declares 173 million of them. The clamp
+		// above is what bounds this against a crafted count, and flatten
+		// keeps its own cap for the tracks that still need a flat table.
 		return nil, constSize, count, nil
 	}
 	if count > int64(len(rest))/4 {

@@ -1,6 +1,8 @@
 package mp4
 
 import (
+	"fmt"
+
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 )
@@ -22,9 +24,26 @@ type track struct {
 	// codec ID alone, which spans both shapes.
 	perAU int64
 
+	// unitBytes and unitDur describe a byte-linear codec's sample: how many
+	// bytes it occupies and how many output samples it decodes to, both
+	// constant for the whole track. Set by the stsd setter for PCM alone; zero
+	// for every codec whose samples differ in size or in length, which is the
+	// gate on the uniform sample table (see parseStbl). PCM's unit is one
+	// frame, so unitDur is 1 and unitBytes the frame's width across channels.
+	unitBytes int64
+	unitDur   int64
+
+	// sourceBits is the depth the file stores samples at when the pipeline
+	// cannot carry it: audio.Format holds floats as float32, so a 64-bit float
+	// track decodes at BitDepth 32 and the source's own depth would otherwise
+	// be lost. Zero when Fmt.BitDepth already is the source's. Decided by the
+	// stsd setter, which is where the wire config is known.
+	sourceBits int
+
 	// note is a decoder-limitation Warning for this track (an HE-AAC band
-	// limit), recorded at parse and emitted by selectAudio only if this track
-	// is the one chosen. Empty for a track with nothing to say.
+	// limit, a sample rate taken from the media timescale), recorded at parse
+	// and emitted by selectAudio only if this track is the one chosen. Empty
+	// for a track with nothing to say.
 	note string
 
 	// stsdErr is why parseStsd failed on this track, deferred rather than
@@ -55,6 +74,19 @@ type track struct {
 
 	// chapRefs are track_IDs referenced as chapter tracks ('chap' tref).
 	chapRefs []int
+}
+
+// addNote records a limitation of this track, which selectAudio emits only if
+// this is the track it chose. More than one can apply at once (a high-rate
+// multichannel PCM entry states neither its rate nor a layout this build
+// reads), so they accumulate rather than overwrite.
+func (t *track) addNote(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if t.note == "" {
+		t.note = msg
+		return
+	}
+	t.note += "; " + msg
 }
 
 // parseMoov walks the movie box, returning the parsed tracks. It records
@@ -155,13 +187,24 @@ func (d *Demuxer) parseMdia(t *track, body []byte, depth int) error {
 	if depth > maxDepth {
 		return malformed("box nesting deeper than %d", maxDepth)
 	}
-	return walkBoxes(body, func(typ string, payload []byte) error {
+	// Pre-scan for the two boxes the sample table is read against, the same
+	// way parseMoov pre-scans for mvex. minf holds the table; mdhd states the
+	// timescale it is timed in and hdlr says whether it is audio at all, and
+	// both are minf's SIBLINGS. Nothing orders siblings, so a movie that
+	// writes minf first would otherwise reach parseStbl with no timescale to
+	// rescale against and no handler to decide by, and the track would come
+	// out with an unrescaled timeline or no sample map at all.
+	_ = walkBoxes(body, func(typ string, payload []byte) error {
 		switch typ {
 		case "mdhd":
 			t.timescale, t.duration = mdhdTime(payload)
 		case "hdlr":
 			t.handler = hdlrType(payload)
-		case "minf":
+		}
+		return nil
+	})
+	return walkBoxes(body, func(typ string, payload []byte) error {
+		if typ == "minf" {
 			return d.parseMinf(t, payload, depth+1)
 		}
 		return nil

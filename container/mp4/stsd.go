@@ -14,9 +14,10 @@ import (
 )
 
 // parseStsd parses the sample description box, reading the first audio
-// sample entry into the track. ALAC, AAC-LC, Opus, FLAC, and MP3 are wired;
-// an entry of any other format leaves t.codec set to the format name so
-// selectAudio can report it.
+// sample entry into the track. ALAC, AAC-LC, Opus, FLAC, MP3, and
+// uncompressed PCM in both families' spellings are wired; an entry of any
+// other format leaves t.codec set to the format name so selectAudio can
+// report it.
 func (d *Demuxer) parseStsd(t *track, payload []byte, depth int) error {
 	if depth > maxDepth {
 		return malformed("box nesting deeper than %d", maxDepth)
@@ -78,11 +79,28 @@ func (d *Demuxer) parseAudioSampleEntry(t *track, format string, body []byte, de
 	if childOff > len(body) {
 		childOff = len(body)
 	}
-	children := body[childOff:]
+	raw := body[childOff:]
 
-	// Unwrap a QuickTime 'wave' box, which nests the codec extension.
-	if wave := findChild(children, "wave"); wave != nil {
+	// Unwrap a QuickTime 'wave' box, which nests the codec extension. The
+	// list as it stands is kept too: an uncompressed entry can carry boxes
+	// both inside the wrapper ('enda') and beside it ('srat').
+	children := raw
+	if wave := findChild(raw, "wave"); wave != nil {
 		children = wave
+	}
+
+	// Uncompressed audio is taken ahead of the switch, because it is spelled
+	// two ways that a switch on the fourcc cannot both express: an "ms" entry
+	// names its codec with a WAVE format tag rather than a fourcc, and the
+	// fourccs proper are matched case-insensitively, as the reference reader
+	// matches them. Every other "ms" tag falls to the default arm below, which
+	// names it. See stsdpcm.go.
+	pcmEnt := pcmEntry{format: format, canon: pcmFourcc(format), body: body,
+		children: children, raw: raw, version: version, channels: channels,
+		samplesize: bitsPerSample, rate: sampleRate}
+	tag, isMS := codecname.QuickTimeWaveTag(format)
+	if pcmEnt.canon != "" || (isMS && isPCMWaveTag(tag)) {
+		return d.setPCM(t, pcmEnt)
 	}
 
 	switch format {

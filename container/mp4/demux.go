@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/codec/mp3"
@@ -64,6 +65,10 @@ type Demuxer struct {
 	mp3Overhead int64
 
 	cur int64 // next sample index ReadPacket delivers
+	// curChunk is the chunk d.cur currently falls in, for a uniform table.
+	// A hint, not state to trust: every read checks it against the index and
+	// searches again when it no longer holds.
+	curChunk int
 
 	// Fragmented (CMAF) reading state, populated when the movie carries an
 	// mvex box; the samples then live in moof+mdat fragments rather than the
@@ -200,7 +205,7 @@ func (d *Demuxer) readBrands(b box) {
 // a preference order would be this package inventing one — and a caller that
 // needs a particular track selects it itself.
 func (d *Demuxer) selectAudio(tracks []*track) error {
-	var audio *track
+	var sel *track
 	var foundCodecs []string
 	var stsdErr error
 	named := 0 // entries in foundCodecs that are a codec name, not "unknown"
@@ -219,6 +224,18 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 			foundCodecs = append(foundCodecs, unnamedCodec)
 			continue
 		}
+		if d.fragmented && t.unitBytes > 0 {
+			// Byte-linear samples in a fragmented movie. The fragment path is
+			// per-sample by construction, so a trun describing this track
+			// would carry one entry per FRAME, tens of thousands a second, and
+			// nothing writes one. Skipped here rather than refused after the
+			// pick: this track being unreadable must not take a movie's other,
+			// decodable audio track down with it, which is the rule the
+			// paragraph above states.
+			foundCodecs = append(foundCodecs, string(t.codec)+" in a fragmented movie")
+			named++
+			continue
+		}
 		if !decodableAudio(t.codec) {
 			foundCodecs = append(foundCodecs, string(t.codec))
 			// An esds object type nothing names reaches here with the same
@@ -229,11 +246,11 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 			}
 			continue
 		}
-		if audio == nil {
-			audio = t
+		if sel == nil {
+			sel = t
 		}
 	}
-	if audio == nil {
+	if sel == nil {
 		// The deferred reason is the specific one: it says why this file is
 		// refused ("aac: audio object type 1 is not AAC-LC"), where "found:
 		// unknown" only says that something in a box we already read did not
@@ -256,25 +273,25 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		}
 		return unsupported("no audio track")
 	}
-	d.sel = audio
-	if audio.note != "" {
-		d.note(0, "%s", audio.note)
+	d.sel = sel
+	if sel.note != "" {
+		d.note(0, "%s", sel.note)
 	}
 
-	if audio.codec == codec.MP3 {
+	if sel.codec == codec.MP3 {
 		// Before Valid, so the format that gets validated is the one that
 		// will be decoded with.
-		if err := d.mp3AdoptFrameFormat(audio); err != nil {
+		if err := d.mp3AdoptFrameFormat(sel); err != nil {
 			return err
 		}
 	}
-	if err := audio.fmt.Valid(); err != nil {
-		return container.UnusableFormat("mp4", audio.fmt, err)
+	if err := sel.fmt.Valid(); err != nil {
+		return container.UnusableFormat("mp4", sel.fmt, err)
 	}
-	if audio.codec == codec.AACLC {
+	if sel.codec == codec.AACLC {
 		d.seekPreroll = 1024 // one frame of IMDCT overlap history
 	}
-	if audio.codec == codec.HEAAC {
+	if sel.codec == codec.HEAAC {
 		// IMDCT overlap plus the SBR QMF/adjuster history rebuild in two
 		// AUs, but the PS layer needs its header and parameter refresh
 		// too: fdk repeats them about every half second, so a cold seek
@@ -285,7 +302,7 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		// documents that.)
 		d.seekPreroll = aac.HESeekPreroll
 	}
-	if audio.codec == codec.MP3 {
+	if sel.codec == codec.MP3 {
 		// Layer III frames are not independently decodable, whatever the
 		// sample table says by carrying no stss: the filterbank keeps IMDCT
 		// overlap and synthesis-window history, and the bit reservoir lets a
@@ -295,7 +312,7 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		// the landing off the sample table's own byte sizes, which is what
 		// container/mpa does with its index.
 		d.seekPreroll = mp3SeekPreroll
-		d.mp3Overhead = mp3FrameOverhead(audio.fmt)
+		d.mp3Overhead = mp3FrameOverhead(sel.fmt)
 	}
 
 	var delay, padding, samples int64
@@ -304,34 +321,35 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		// The fragmented sample tables are empty; gapless comes from the init
 		// edit list, and the length is authoritative (SamplesExact) when the
 		// edit list carries a segment duration.
-		delay, samples, exact = d.fragmentedGapless(audio)
+		delay, samples, exact = d.fragmentedGapless(sel)
 		d.fragOff = d.fragStart
 	} else {
-		delay, padding, samples, advisory = d.gapless(audio)
+		delay, padding, samples, advisory = d.gapless(sel)
 	}
 	d.track = container.Track{
-		Codec:           audio.codec,
-		CodecConfig:     audio.codecConfig,
-		Fmt:             audio.fmt,
+		Codec:           sel.codec,
+		CodecConfig:     sel.codecConfig,
+		Fmt:             sel.fmt,
 		Samples:         samples,
 		Delay:           delay,
 		Padding:         padding,
 		SamplesExact:    exact,
 		SamplesAdvisory: advisory,
+		SourceBitDepth:  sel.sourceBits,
 		Default:         true,
 	}
-	d.resolveChapters(tracks, audio)
+	d.resolveChapters(tracks, sel)
 	return nil
 }
 
 // decodableAudio reports whether the demuxer decodes a codec: ALAC and AAC-LC
 // (progressive) plus Opus and FLAC (their sample entries are read for the
-// fragmented path, and their decoders are registered), and MP3, which an mp4a
+// fragmented path, and their decoders are registered), MP3, which an mp4a
 // entry carries under object type 0x69/0x6B and QuickTime writes as its own
-// '.mp3' fourcc.
+// '.mp3' fourcc, and uncompressed PCM in either family's spelling.
 func decodableAudio(id codec.ID) bool {
 	switch id {
-	case codec.ALAC, codec.AACLC, codec.HEAAC, codec.Opus, codec.FLAC, codec.MP3:
+	case codec.ALAC, codec.AACLC, codec.HEAAC, codec.Opus, codec.FLAC, codec.MP3, codec.PCM:
 		return true
 	}
 	return false
@@ -368,6 +386,9 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 		}
 		return io.EOF
 	}
+	if st.uniform {
+		return d.readUniformPacket(pkt, st)
+	}
 	off := st.offsets[d.cur]
 	size := int(st.sizes[d.cur])
 	d.w.Trim(off)
@@ -390,6 +411,56 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 		},
 	}
 	d.cur++
+	return nil
+}
+
+// readUniformPacket delivers the next run of samples from a chunk-indexed
+// table.
+//
+// Many samples per packet, where the flat path delivers one: a byte-linear
+// sample is a single frame, so one per packet would be one per 20 microseconds
+// at 48 kHz, and the samples inside a chunk are contiguous by definition.
+// audio.StandardChunk is the pipeline's own working size, so this hands the
+// decoder the shape it wants, and a chunk boundary is the only thing that
+// shortens a packet.
+func (d *Demuxer) readUniformPacket(pkt *container.Packet, st *sampleTable) error {
+	// The cached chunk is a hint: checked against the index every time, and
+	// re-derived when it no longer holds (the first read, and after a seek).
+	k := d.curChunk
+	if k+1 >= len(st.chunkFirst) || d.cur < st.chunkFirst[k] || d.cur >= st.chunkFirst[k+1] {
+		k = st.chunkOf(d.cur)
+		d.curChunk = k
+	}
+	n := min(st.chunkFirst[k+1]-d.cur, max(int64(audio.StandardChunk)/st.unitDur, 1))
+	if n < 1 {
+		// Unreachable through a table this package built: chunkOf returns the
+		// chunk whose span contains d.cur, and ReadPacket has already checked
+		// d.cur against the total. Stated anyway because the failure it guards
+		// is not a bad packet but a walk that never advances, and the
+		// invariant behind it spans three functions.
+		return malformed("chunk index does not advance at sample %d of %d", d.cur, st.total)
+	}
+	off := st.chunkOff[k] + (d.cur-st.chunkFirst[k])*st.unitBytes
+	size := int(n * st.unitBytes)
+	d.w.Trim(off)
+	data := d.w.BytesAt(off, size)
+	if len(data) != size {
+		if d.w.Err() != nil {
+			return d.w.Err()
+		}
+		return waxerr.New(waxerr.CodeSourceUnreadable,
+			fmt.Sprintf("mp4: samples %d..%d truncated (want %d bytes at %d)", d.cur, d.cur+n, size, off))
+	}
+	*pkt = container.Packet{
+		Track: 0,
+		Packet: codec.Packet{
+			Data: data,
+			PTS:  d.cur * st.unitDur,
+			Dur:  n * st.unitDur,
+			Sync: true,
+		},
+	}
+	d.cur += n
 	return nil
 }
 
@@ -417,6 +488,12 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	if st.total == 0 {
 		return 0, nil
 	}
+	// A uniform table needs no branch of its own here, and had one: its single
+	// run makes sampleAt the identity on the sample index, its nil sync set
+	// makes syncAtOrBefore one too, and readUniformPacket re-derives the chunk
+	// when the cached one no longer holds. So the landing is the target
+	// itself, exactly, with no pre-roll to undo: a byte-linear frame carries
+	// no inter-frame state for one to converge.
 	idx := st.sampleAt(sample)
 	idx = st.syncAtOrBefore(idx)
 	if d.sel.codec == codec.MP3 {

@@ -36,7 +36,12 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
 - **Decoders / inputs**: FLAC (bit-exact on the IETF suite), WAV, AIFF,
   MP3 (bare, and in MP4/M4A and QuickTime `.mov`), AAC-LC, HE-AAC v1 and
   v2 (SBR+PS, ffmpeg-differential-verified),
-  and ALAC in MP4/M4A/M4B, ADTS (implicit HE-AAC detected), Opus (all
+  and ALAC in MP4/M4A/M4B, uncompressed PCM in MP4/MOV (QuickTime's
+  `sowt`/`twos`/`NONE`/`raw `/`in24`/`in32`/`fl32`/`fl64` fourccs, its
+  version 2 `lpcm` flags and its `ms` entries for WAVE format tags 1 and 3,
+  plus ISO `ipcm`/`fpcm`; **decode only, and
+  writing it there is a non-goal**, a WAV serving every such use better),
+  ADTS (implicit HE-AAC detected), Opus (all
   RFC 6716/8251 conformance vectors pass), Vorbis, Ogg, Matroska/WebM,
   WavPack (bit-exact on the official test suite: 8- to 32-bit integers,
   the three stereo block modes, APEv2 tags; encodes too), Monkey's Audio

@@ -1,8 +1,25 @@
 // Package mp4 demuxes ISO base media files (ISO/IEC 14496-12) and their
-// QuickTime kin: the .m4a/.m4b/.mp4 family carrying AAC-LC or ALAC audio.
-// It parses the moov box tree into per-track sample tables, selects the
-// audio track, and hands format.Media codec packets read straight from
-// mdat, with sample-exact seeking over the sample-to-chunk mapping.
+// QuickTime kin: the .m4a/.m4b/.mp4/.mov family carrying AAC-LC, HE-AAC,
+// ALAC, Opus, FLAC, MP3, or uncompressed PCM. It parses the moov box tree
+// into per-track sample tables, selects the audio track, and hands
+// format.Media codec packets read straight from mdat, with sample-exact
+// seeking over the sample-to-chunk mapping.
+//
+// PCM arrives in both families' spellings (QuickTime's sowt/twos/NONE/raw
+// fourccs, its in24/in32/fl32/fl64 set with an enda byte order, its version 2
+// lpcm flags word, its "ms" entries carrying WAVE format tag 1 or 3, and
+// ISO/IEC 23003-5's ipcm/fpcm with a pcmC box) and takes a
+// second sample-table representation, because a PCM sample is one FRAME: a
+// three-minute 48 kHz stereo track is 8.6 million of them, so the per-sample
+// offset and size arrays every other codec gets would be a hundred megabytes
+// of index. A byte-linear track is instead indexed per CHUNK, which is what
+// the file itself is sized by, and one packet carries a working chunk of
+// frames rather than one. The same shape makes its seeks exact with no
+// pre-roll. PCM in a FRAGMENTED movie is named and skipped rather than read:
+// that path is per-sample by construction and nothing writes one, so the track
+// leaves the candidate set and a movie carrying a codec we do decode beside it
+// still opens on that one. QuickTime's 'chan' channel layout is not read, so a
+// multichannel track plays in audio.DefaultLayout's order, and says so.
 //
 // Gapless trims come from the iTunes iTunSMPB tag or an edit list, mapped
 // onto Track.Delay/Padding so format.Media delivers the trimmed timeline.
@@ -39,6 +56,11 @@ const (
 	maxSamples = 1 << 26
 	// maxChapters bounds parsed chapter entries.
 	maxChapters = 1 << 16
+	// maxReserveChunks bounds what buildChunkIndex reserves up front. The
+	// chunk count it would otherwise size by is the file's own number, and
+	// append grows to the count the table really yields, so this costs a real
+	// file one reservation and costs a crafted one nothing.
+	maxReserveChunks = 1 << 16
 	// maxDescriptorLen bounds one esds descriptor payload.
 	maxDescriptorLen = 1 << 16
 )

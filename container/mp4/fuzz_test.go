@@ -20,11 +20,41 @@ import (
 func FuzzDemux(f *testing.F) {
 	// mp3.mov is in the list for its own sample entry: a '.mp3' fourcc in a
 	// version 1 entry, which reaches the offsets the esds path never does.
-	for _, name := range []string{"alac-stereo.m4a", "alac-mono-tail.m4a", "mp3.mp4", "mp3.mov"} {
+	//
+	// The three PCM files are in it for the paths a compressed track never
+	// takes. pcm-in24.mov reaches the version 1 packet-geometry fields, the
+	// wave/enda unwrap (and its NUL-typed terminator box), and the chunk index
+	// that replaces the flattened table; pcm-lpcm.mov reaches the version 2
+	// struct's flags word and its packing and interleave checks;
+	// pcm-ipcm-96k.mp4 reaches the pcmC parse and the zero rate field, so a
+	// mutation there lands on the timescale fallback. All three also reach
+	// parseStsz's constant-size arm, which no longer caps the declared count.
+	for _, name := range []string{"alac-stereo.m4a", "alac-mono-tail.m4a", "mp3.mp4", "mp3.mov",
+		"pcm-in24.mov", "pcm-lpcm.mov", "pcm-ipcm-96k.mp4"} {
 		full := fixture(f, name)
 		f.Add(full)
 		f.Add(full[:len(full)/2])
 		f.Add(full[:200])
+	}
+	// Hand-built movies, which the fixtures above cannot stand in for: ffmpeg
+	// writes mdat FIRST in a .mov, so every truncation of one of those files
+	// loses the moov and dies at "no moov box" before reaching a sample entry
+	// at all. These are a few hundred bytes each with the moov in front, so a
+	// mutation anywhere in one still reaches the table builders, and they are
+	// what a mutator can usefully edit: the sample entry, the chunk offsets and
+	// the sample counts are all within a byte or two of each other.
+	for _, seed := range [][]byte{
+		buildMovie(soundEntry("sowt", 2, 16, movieTimescale), 4, 64, 0),
+		buildMovie(soundEntry("sowt", 2, 16, movieTimescale), 4, 64, 7),
+		buildMovie(v1SoundEntry("in24", 1, 16, movieTimescale, 3, waveBox(endaBox(1))), 3, 64, 0),
+		buildMovie(lpcmEntry(float64(movieTimescale), 1, 24, lpcmSigned16LE, 3, 1), 3, 64, 0),
+		buildMovie(soundEntryWith("ipcm", 1, 16, 0, pcmCBox(1, 24), sratBox(movieTimescale)), 3, 64, 0),
+		// A chapter track whose sample description is an audio entry: the
+		// shape that reaches the chapter walk through the PCM setter.
+		withTextTrack(buildMovie(soundEntry("sowt", 2, 16, movieTimescale), 4, 64, 0)),
+	} {
+		f.Add(seed)
+		f.Add(seed[:len(seed)/2])
 	}
 	// A minimal ftyp so the sniffer accepts the input and the parser runs.
 	f.Add([]byte("\x00\x00\x00\x10ftypM4A \x00\x00\x00\x00M4A mp42"))

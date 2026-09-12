@@ -297,6 +297,13 @@ var mp4DemuxCodecs = map[codec.ID]bool{
 	// Opus and FLAC fMP4 it produces.
 	codec.Opus: true,
 	codec.FLAC: true,
+	// Read-only, like MP3 below it: no output row writes uncompressed audio
+	// into an MP4, and encoding it there is a non-goal (a WAV serves every
+	// such use better). The entry is here because the map is the record of
+	// what the demuxer reads, and the read set is what a reader gaining a
+	// codec has to state somewhere.
+	codec.PCM: true,
+	codec.MP3: true,
 }
 
 // mp4DemuxCoversMux reports whether every codec the mp4 muxer or segmenter
