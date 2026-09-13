@@ -4,14 +4,17 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/adpcm"
 	"github.com/colespringer/waxflow/codec/g711"
+	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/internal/codecname"
+	"github.com/colespringer/waxflow/container/internal/mpegframes"
 	"github.com/colespringer/waxflow/container/internal/waveformat"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -27,6 +30,11 @@ var (
 const (
 	maxChunks     = 1024
 	maxFmtPayload = 4096
+	// maxWarnings caps the tolerated-damage list. A chunk walk is bounded by
+	// maxChunks on its own; a frame-walked payload is not, since it reports
+	// one finding per damaged gap and a run of alternating frames and junk
+	// has one gap per frame.
+	maxWarnings = 64
 )
 
 // DemuxerOptions configures parsing.
@@ -43,9 +51,21 @@ type Demuxer struct {
 	opts DemuxerOptions
 
 	track    container.Track
-	payload  blockReader
+	payload  payload
 	warnings []container.Warning
-	readBuf  []byte
+}
+
+// payload is the walk over the data chunk. Two shapes reach it, and the
+// difference between them is not a detail of the walk but its whole
+// geometry: a flat array of fixed-size units, where position is arithmetic,
+// and a run of self-framing MPEG audio frames, where it is an index built by
+// walking. That is what earns a seam rather than a flag.
+type payload interface {
+	// ReadPacket yields the next run of payload, io.EOF past the end.
+	ReadPacket(pkt *container.Packet) error
+	// SeekSample repositions to the unit or frame holding a sample and
+	// reports the sample that unit starts on.
+	SeekSample(sample int64) (landed int64, err error)
 }
 
 // blockReader walks the data chunk as a run of equal units.
@@ -56,11 +76,14 @@ type Demuxer struct {
 // payload is a flat array of fixed-size units either way, and the sample
 // timeline is the unit index times what a unit decodes to.
 type blockReader struct {
+	src        container.Source
 	dataOff    int64
 	unitBytes  int64
 	unitFrames int64
 	units      int64
+	samples    int64 // the track's length, which a fact chunk can trim
 	pos        int64 // next unit to read
+	buf        []byte
 }
 
 // perPacket is how many units one packet carries: the pipeline's working
@@ -105,7 +128,10 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
+	w := container.Warning{Offset: off, Msg: msg, Kind: container.Damage}
+	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
+		d.warnings = append(d.warnings, w)
+	}
 	return nil
 }
 
@@ -131,6 +157,9 @@ type waveFormat struct {
 	// factIsLength marks a codec whose last unit over-produces, so the fact
 	// chunk's count is a hard length rather than a cross-check.
 	factIsLength bool
+	// codecDelay is MPEGLAYER3WAVEFORMAT's nCodecDelay, reported and never
+	// applied; see startMPEG.
+	codecDelay int
 }
 
 func (d *Demuxer) parse() error {
@@ -149,6 +178,7 @@ func (d *Demuxer) parse() error {
 		ds64SampleCount uint64
 		haveDS64        bool
 		fmtSeen         bool
+		dataOff         int64 = -1
 		dataBytes       int64 = -1
 		factSamples     int64 = -1
 		factSeen        bool
@@ -245,17 +275,17 @@ func (d *Demuxer) parse() error {
 				}
 				break
 			}
-			d.payload.dataOff = off + 8
+			dataOff = off + 8
 			switch {
 			case chunkSize == size32Unknown && haveDS64:
 				// ds64 sizes are 64-bit and file-supplied: bound against
 				// the file before converting, or a huge value wraps int64
 				// negative and dodges the clamp.
-				if ds64DataSize > uint64(size-d.payload.dataOff) {
+				if ds64DataSize > uint64(size-dataOff) {
 					if err := d.warn(off, "ds64 data size %d exceeds file, clamped", ds64DataSize); err != nil {
 						return err
 					}
-					dataBytes = size - d.payload.dataOff
+					dataBytes = size - dataOff
 				} else {
 					dataBytes = int64(ds64DataSize)
 				}
@@ -264,13 +294,13 @@ func (d *Demuxer) parse() error {
 				if err := d.warn(off, "streaming data size, clamped to end of file"); err != nil {
 					return err
 				}
-				dataBytes = size - d.payload.dataOff
+				dataBytes = size - dataOff
 				streamingData = true
-			case d.payload.dataOff+chunkSize > size:
+			case dataOff+chunkSize > size:
 				if err := d.warn(off, "data chunk size %d exceeds file, clamped", chunkSize); err != nil {
 					return err
 				}
-				dataBytes = size - d.payload.dataOff
+				dataBytes = size - dataOff
 			default:
 				dataBytes = chunkSize
 			}
@@ -301,10 +331,13 @@ func (d *Demuxer) parse() error {
 	if dataBytes < 0 {
 		return malformed("no data chunk")
 	}
+	if wf.codec == codec.MP3 {
+		return d.startMPEG(wf, dataOff, dataBytes, factSamples)
+	}
 
 	unitBytes := int64(wf.unitBytes)
 	if rem := dataBytes % unitBytes; rem != 0 {
-		if err := d.warn(d.payload.dataOff, "%d trailing bytes are not a whole %s, ignored", rem, unitName(wf)); err != nil {
+		if err := d.warn(dataOff, "%d trailing bytes are not a whole %s, ignored", rem, unitName(wf)); err != nil {
 			return err
 		}
 		dataBytes -= rem
@@ -312,7 +345,21 @@ func (d *Demuxer) parse() error {
 	units := dataBytes / unitBytes
 	capacity := units * int64(wf.unitFrames)
 	samples := capacity
-	exact := false
+	// Exact where a unit is one frame, which is PCM and G.711: the count is
+	// frames the payload holds (trailing bytes are warned and dropped) and
+	// the walk stops at exactly that many, so there is no room between the
+	// number and the decode for the two to differ. The AIFF sibling says the
+	// same about the same arithmetic, and saying it is what stops a caller
+	// that needs an authoritative length from decoding the file to find one:
+	// the daemon's "measuring this member costs a full scan" gate reads this
+	// flag beside the container.Indexer capability that a frame-walked
+	// payload brought to this type.
+	//
+	// A block codec stays false unless a fact chunk trimmed it, because there
+	// the flag answers a different question: whether the declared count was
+	// believed, which is the one thing about such a track a caller cannot
+	// derive for itself.
+	exact := wf.unitFrames == 1
 	switch {
 	case factSamples < 0:
 		// Nothing to compare against; the payload is the only statement of
@@ -358,9 +405,8 @@ func (d *Demuxer) parse() error {
 		}
 	}
 
-	d.payload.unitBytes = unitBytes
-	d.payload.unitFrames = int64(wf.unitFrames)
-	d.payload.units = units
+	d.payload = &blockReader{src: d.src, dataOff: dataOff, unitBytes: unitBytes,
+		unitFrames: int64(wf.unitFrames), units: units, samples: samples}
 	d.track = container.Track{
 		Codec:          wf.codec,
 		CodecConfig:    wf.config,
@@ -522,6 +568,32 @@ func (d *Demuxer) parseFmt(b []byte, off int64) (waveFormat, error) {
 			factIsLength: true,
 			sourceBits:   adpcm.SourceBitDepth,
 		}
+	case tagMP3:
+		// MPEGLAYER3WAVEFORMAT: a WAVEFORMATEX with twelve bytes behind it,
+		// of which this reader takes one field and takes it only to say what
+		// it is not doing with it. Everything a Layer III decoder needs is in
+		// the frames themselves, which is also why extra bytes that are
+		// missing or short are a finding about the file rather than a
+		// refusal, and why wID and the padding flags are not read: nothing
+		// they could say would change how the frames are walked.
+		//
+		// The format here is the chunk's claim about the stream, which
+		// startMPEG then puts against the first frame's own header.
+		wf = waveFormat{codec: codec.MP3, fmt: mp3.Header{Rate: rate, Channels: channels}.PCMFormat()}
+		if extensible {
+			// The extensible extra IS the extensible struct, so there is no
+			// MPEGLAYER3 header behind it to read. Nothing is lost: the
+			// fields it would hold are the ones not read anyway.
+			break
+		}
+		ex, _ := waveformat.Parse(b) // the 16-byte minimum is checked above
+		if len(ex.Extra) < mpegLayer3Extra {
+			if werr := d.warn(off, "MP3 fmt chunk carries %d extra bytes, want %d", len(ex.Extra), mpegLayer3Extra); werr != nil {
+				return wf, werr
+			}
+			break
+		}
+		wf.codecDelay = int(le.Uint16(ex.Extra[10:]))
 	default:
 		// Named where a name is known, so the refusal says what the file
 		// holds rather than only that it is not PCM. Scoped to the container
@@ -534,7 +606,11 @@ func (d *Demuxer) parseFmt(b []byte, off int64) (waveFormat, error) {
 		return wf, unsupported("this build does not read format tag 0x%04X from a WAV", tag)
 	}
 
-	if blockAlign != wf.unitBytes {
+	// Only where a unit exists to recompute. A frame-coded payload has none:
+	// its frames state their own lengths and nBlockAlign holds whatever the
+	// writer thought it meant (ffmpeg writes the frame's SAMPLE count there
+	// for MP3), so there is nothing to compare it against.
+	if wf.unitBytes != 0 && blockAlign != wf.unitBytes {
 		if werr := d.warn(off, "block align %d, computed %d; using computed", blockAlign, wf.unitBytes); werr != nil {
 			return wf, werr
 		}
@@ -543,6 +619,90 @@ func (d *Demuxer) parseFmt(b []byte, off int64) (waveFormat, error) {
 		return wf, container.UnusableFormat("wav", wf.fmt, err)
 	}
 	return wf, nil
+}
+
+// startMPEG builds the track for a data chunk holding MPEG audio frames.
+//
+// Nothing about this payload is byte-linear: a Layer III frame states its own
+// length in its own header and the next one begins where that says, so the
+// chunk is walked rather than divided and the fmt chunk's geometry fields
+// describe nothing this reader can use. What it does describe is the stream,
+// and that claim is worth checking against the stream itself.
+func (d *Demuxer) startMPEG(wf waveFormat, dataOff, dataBytes, factSamples int64) error {
+	// No trailer hook: the data chunk bounds the frames, so bytes inside it
+	// that are not frames are damage rather than the tag baggage a bare
+	// stream ends with.
+	walk := mpegframes.New(d.src, dataOff+dataBytes, mpegframes.Options{
+		Prefix: "wav: ",
+		Warn:   func(off int64, msg string) error { return d.warn(off, "%s", msg) },
+	})
+	tag, _, err := walk.Begin(dataOff)
+	if err != nil {
+		return err
+	}
+	f := walk.Header().PCMFormat()
+	if err := f.Valid(); err != nil {
+		return container.UnusableFormat("wav", f, err)
+	}
+	if f != wf.fmt {
+		// A decoder reads the frame, so the frame wins, and a header that
+		// disagrees with the stream it describes is the file deviating from
+		// its own format rather than something this build is choosing:
+		// damage, which --strict refuses and an ordinary read carries on
+		// with the truth. container/mp4 treats the same disagreement the
+		// same way.
+		if werr := d.warn(dataOff, "fmt chunk says %v, the first frame says %v; the frame wins", wf.fmt, f); werr != nil {
+			return werr
+		}
+	}
+
+	samples, delay, padding := tag.Gapless(walk.SamplesPerFrame())
+	advisory := false
+	if samples < 0 && factSamples > 0 {
+		// With no metadata frame the chunk's count is the only statement of
+		// the length there is, and it is a rounded one: it counts everything
+		// the frames decode to, encoder delay and tail padding included, and
+		// nothing in the file says where inside them the audio starts or
+		// stops. Advisory keeps it out of arithmetic that has to add up.
+		//
+		// Bounded both ways first. A zero is the one value the chunk cannot
+		// be telling the truth with, since the walk above already found a
+		// frame; and the payload's byte length bounds the frames it can hold
+		// whatever they are, which is the only cross-check available at O(1)
+		// here (the exact count is the walk the lazy index exists to avoid).
+		// Outside those the field is the file's to state.
+		ceiling := mpegframes.MaxFrames(dataBytes) * walk.SamplesPerFrame()
+		if factSamples > ceiling {
+			if werr := d.warn(0, "fact declares %d samples, more than %d bytes of frames can hold; ignored",
+				factSamples, dataBytes); werr != nil {
+				return werr
+			}
+		} else {
+			samples, advisory = factSamples, true
+		}
+	}
+	if delay == 0 && wf.codecDelay != 0 {
+		d.note(0, "nCodecDelay declares %d samples; trims come from a Xing or LAME frame, so it is not applied",
+			wf.codecDelay)
+	}
+	d.payload = walk.Reader()
+	d.track = container.Track{
+		Codec:   codec.MP3,
+		Fmt:     f,
+		Samples: samples,
+		Delay:   delay,
+		Padding: padding,
+		// SamplesExact stays false whichever of the two stated the length: a
+		// metadata frame and a fact chunk are both a writer's claim about
+		// frames neither of them counted, and neither is a truncation
+		// instruction. The chunk's is rounded on top of that, which is what
+		// advisory says; a metadata frame that states one states the trims
+		// with it, so the fact chunk is not a second opinion on the same
+		// number and is not compared against it.
+		SamplesAdvisory: advisory,
+		Default:         true,
+	}
+	return nil
 }
 
 // pcmConfig reads the two uncompressed tags' geometry.
@@ -601,28 +761,30 @@ func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track}
 // Warnings returns damage tolerated during parsing.
 func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
 
+// ReadPacket yields the next run of payload. Packet data is reused across
+// calls.
+func (d *Demuxer) ReadPacket(pkt *container.Packet) error { return d.payload.ReadPacket(pkt) }
+
 // ReadPacket yields the next run of units: up to audio.StandardChunk frames
-// of raw interleaved PCM, or the blocks that decode to about as many. Packet
-// data is reused across calls.
-func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
-	r := &d.payload
+// of raw interleaved PCM, or the blocks that decode to about as many.
+func (r *blockReader) ReadPacket(pkt *container.Packet) error {
 	remaining := r.units - r.pos
 	if remaining <= 0 {
 		return io.EOF
 	}
 	n := min(r.perPacket(), remaining)
 	need := int(n * r.unitBytes)
-	if cap(d.readBuf) < need {
-		d.readBuf = make([]byte, need)
+	if cap(r.buf) < need {
+		r.buf = make([]byte, need)
 	}
-	d.readBuf = d.readBuf[:need]
-	if err := container.ReadFull(d.src, d.readBuf, r.dataOff+r.pos*r.unitBytes); err != nil {
+	r.buf = r.buf[:need]
+	if err := container.ReadFull(r.src, r.buf, r.dataOff+r.pos*r.unitBytes); err != nil {
 		return container.ShortRead("wav: reading data", err)
 	}
 	*pkt = container.Packet{
 		Track: 0,
 		Packet: codec.Packet{
-			Data: d.readBuf,
+			Data: r.buf,
 			PTS:  r.pos * r.unitFrames,
 			Dur:  n * r.unitFrames,
 			// Every unit is independently decodable: a PCM frame trivially,
@@ -636,13 +798,14 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 	return nil
 }
 
-// SeekSample repositions to the unit holding the given sample.
+// SeekSample repositions to the unit or frame holding the given sample.
 //
-// Landing is exact for PCM and G.711, whose unit is one frame, and on the
-// block boundary at or before the target otherwise; format.Media decodes and
-// discards the remainder either way, so the delivered position is
-// sample-exact for all four codecs. Targets past the end land at the end and
-// the next ReadPacket returns io.EOF.
+// Landing is exact for PCM and G.711, whose unit is one frame; on the block
+// boundary at or before the target for the two ADPCM families; and further
+// back still for MP3, whose decoder needs the frames ahead of the target to
+// converge. format.Media decodes and discards the remainder in every case, so
+// the delivered position is sample-exact. Targets past the end land at the end
+// and the next ReadPacket returns io.EOF.
 func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	if track != 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("wav: no track %d", track))
@@ -650,11 +813,15 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	if sample < 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, "wav: negative seek target")
 	}
+	return d.payload.SeekSample(sample)
+}
+
+// SeekSample lands on the unit boundary at or before the target.
+func (r *blockReader) SeekSample(sample int64) (int64, error) {
 	// Clamped to the track's length and not to the payload's, which for a
 	// fact-trimmed block track is strictly larger: container.Seeker's landing
 	// is authoritative for its callers, and one past the end of the track is a
 	// position the track does not have.
-	r := &d.payload
-	r.pos = min(min(sample, d.track.Samples)/r.unitFrames, r.units)
+	r.pos = min(min(sample, r.samples)/r.unitFrames, r.units)
 	return r.pos * r.unitFrames, nil
 }

@@ -109,6 +109,23 @@ func (d *Demuxer) parseAudioSampleEntry(t *track, format string, body []byte, de
 	if pcmEnt.canon != "" || (isMS && isCodecWaveTag(tag)) {
 		return d.setCodec(t, pcmEnt)
 	}
+	// MP3 has two spellings here too, and neither reaches setCodec: its
+	// payload is self-framing rather than a run of fixed-size units, so there
+	// is no geometry to read out of an "ms" entry's WAVEFORMATEX and nothing
+	// for the uniform sample table to do. The fourcc form is in the switch
+	// below, beside the other codecs that state everything in their own
+	// bitstream.
+	//
+	// So the WAVEFORMATEX is not read at all, and the channel reconciliation
+	// setCodec does against it is not missing here: for MP3 both of them are
+	// claims that lose. mp3AdoptFrameFormat reads the first frame's own header
+	// at selection and warns when the entry disagrees, which is the same
+	// treatment the '.mp3' fourcc gets and a stronger cross-check than one
+	// header field against another. The version 2 fields are already folded
+	// in above, so a high rate reaches this as the entry's own.
+	if isMS && tag == waveTagMP3 {
+		return d.setMP3(t, sampleRate, channels)
+	}
 
 	switch format {
 	case "alac":

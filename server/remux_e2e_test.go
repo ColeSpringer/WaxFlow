@@ -183,21 +183,25 @@ func TestStreamMatroskaIsTheStreamingColumn(t *testing.T) {
 
 // TestCompressedSourcesAreNotDirectPlayed pins rung 1's codec gate.
 //
-// The .wav, .aiff and .mov containers all carry more than PCM now (G.711 and
-// both ADPCM families), and no general-purpose player decodes any of the four
-// from the file it is handed, so serving the original bytes ships something
-// the client cannot play and it reads as a broken file rather than a refusal.
+// The .wav, .aiff and .mov containers all carry more than PCM now (G.711,
+// both ADPCM families and MP3), and no general-purpose player decodes any of
+// them from the file it is handed, so serving the original bytes ships
+// something the client cannot play and it reads as a broken file rather than
+// a refusal.
 //
-// Both spellings are here because the first version of the gate tested the
-// container name and missed the second: the driver table calls one container
-// "mp4" for both .mp4 and .mov, so a .mov was direct-played while the .wav
-// beside it was not.
+// Both container spellings are here because the first version of the gate
+// tested the container name and missed the second: the driver table calls one
+// container "mp4" for both .mp4 and .mov, so a .mov was direct-played while
+// the .wav beside it was not. MP3 is here because it is the one codec whose
+// answer is neither the codec's nor the container's alone: bare and in an MP4
+// it is what every player expects, and in a WAV it is a payload that
+// container's demuxers decode PCM out of.
 //
 // The assertion is on the bytes rather than a metric: what makes this right is
 // that the response is PCM, and a response that merely took a different rung
 // could still be A-law.
 func TestCompressedSourcesAreNotDirectPlayed(t *testing.T) {
-	for _, name := range []string{"sine-alaw.wav", "ima4.mov"} {
+	for _, name := range []string{"sine-alaw.wav", "ima4.mov", "mp3.wav"} {
 		t.Run(name, func(t *testing.T) {
 			env := newTestEnv(t, nil)
 			source, err := os.ReadFile(filepath.Join(env.root, name))
@@ -212,8 +216,12 @@ func TestCompressedSourcesAreNotDirectPlayed(t *testing.T) {
 			if bytes.Equal(body, source) {
 				t.Fatal("the source was served as its own bytes")
 			}
-			if tag := wavFormatTag(t, body); tag != 0x0001 {
-				t.Errorf("served WAV carries format tag %#04x, want PCM's 0x0001", tag)
+			// Either uncompressed tag: a source whose decoder is integer
+			// comes back as 0x0001 and one whose decoder is float (MP3) as
+			// 0x0003, since the row writes what the decode produced. What
+			// the assertion is about is that neither is the source's.
+			if tag := wavFormatTag(t, body); tag != 0x0001 && tag != 0x0003 {
+				t.Errorf("served WAV carries format tag %#04x, want an uncompressed one", tag)
 			}
 		})
 	}

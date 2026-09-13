@@ -199,6 +199,35 @@ func TestMP3FrameOverhead(t *testing.T) {
 	}
 }
 
+// TestDemuxMP3FromAnMSEntry reads the fourth spelling, which no tool in
+// reach writes: QuickTime's "ms" escape hatch with MP3's WAVE format tag
+// behind it. waxlabel 1.8.0 names it, so a file carrying one is a file this
+// reader has to open rather than refuse by name.
+//
+// The entry is all there is to read. An "ms" entry's WAVEFORMATEX states
+// block geometry for the codecs that have some, and MP3 has none: its frames
+// state their own lengths and the sample table already holds the boundaries,
+// so the arm is the plain one the '.mp3' fourcc takes.
+func TestDemuxMP3FromAnMSEntry(t *testing.T) {
+	raw := buildMovie(soundEntry("ms\x00\x55", 1, 16, movieTimescale), 64, 32, 32)
+	d, err := NewDemuxer(container.BytesSource(raw), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := d.Tracks()[0]
+	if tr.Codec != codec.MP3 {
+		t.Fatalf("codec = %q, want mp3", tr.Codec)
+	}
+	want := audio.Format{Rate: movieTimescale, Channels: 1,
+		Layout: audio.DefaultLayout(1), Type: audio.Float, BitDepth: 32}
+	if tr.Fmt != want {
+		t.Errorf("format = %v, want %v", tr.Fmt, want)
+	}
+	if len(tr.CodecConfig) != 0 {
+		t.Errorf("codec config = %d bytes, want none", len(tr.CodecConfig))
+	}
+}
+
 // TestMP3SeekBacksOffForTheReservoir holds the seek to both halves of Layer
 // III's inter-frame state.
 //

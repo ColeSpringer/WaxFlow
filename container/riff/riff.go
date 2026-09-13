@@ -5,16 +5,19 @@
 // hours; decided here, not discovered in production).
 //
 // Reading covers integer and IEEE-float PCM (plain and
-// WAVE_FORMAT_EXTENSIBLE), G.711 A-law and mu-law, IMA ADPCM and Microsoft
-// ADPCM. Writing produces PCM only: the compressed tags are lossy codings of
-// exactly what a WAV already carries losslessly, so they are read because
-// files hold them and not written because nothing needs another one.
+// WAVE_FORMAT_EXTENSIBLE), G.711 A-law and mu-law, IMA ADPCM, Microsoft
+// ADPCM and MP3. Writing produces PCM only: the compressed tags are lossy
+// codings of exactly what a WAV already carries losslessly, so they are read
+// because files hold them and not written because nothing needs another one.
 // MP2 and WMA-in-WAV are refused by name.
 //
-// The payload is one flat array of fixed-size units whichever of those it
-// holds, which is what lets one walk serve all of them: a unit is a frame
-// for PCM and G.711 and a block for the two ADPCM families, and the sample
-// timeline is the unit index times what a unit decodes to.
+// The payload takes one of two shapes. All but one of those codings lay it
+// out as a flat array of fixed-size units, which is what lets one walk serve
+// them: a unit is a frame for PCM and G.711 and a block for the two ADPCM
+// families, and the sample timeline is the unit index times what a unit
+// decodes to. MP3 is the exception, since a Layer III frame states its own
+// length rather than taking one from the header; those frames are walked by
+// container/internal/mpegframes, which walks them wherever they are found.
 package riff
 
 import (
@@ -46,8 +49,14 @@ const (
 	tagALaw       = 0x0006
 	tagMuLaw      = 0x0007
 	tagIMAADPCM   = 0x0011
+	tagMP3        = 0x0055
 	tagExtensible = 0xFFFE
 )
+
+// mpegLayer3Extra is the cbSize region MPEGLAYER3WAVEFORMAT adds to a
+// WAVEFORMATEX: wID(2) fdwFlags(4) nBlockSize(2) nFramesPerBlock(2)
+// nCodecDelay(2).
+const mpegLayer3Extra = 12
 
 // guidTail is the constant remainder of the EXTENSIBLE SubFormat GUID
 // after the leading 16-bit format tag.

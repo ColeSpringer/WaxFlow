@@ -79,7 +79,7 @@ func rampWAV(t *testing.T, rate, channels, frames int) []byte {
 type testEnv struct {
 	ts    *httptest.Server
 	srv   *server.Server
-	root  string // library root with track.flac, sine.wav, sine-alaw.wav, ramp.wav
+	root  string // library root with track.flac, sine.wav, sine-alaw.wav, mp3.wav, ramp.wav
 	cache string
 }
 
@@ -92,11 +92,14 @@ func newTestEnv(t *testing.T, mutate func(*server.Config)) *testEnv {
 	for _, fixture := range []struct{ src, dst string }{
 		{"../testdata/sine-s16.flac", "album/track.flac"},
 		{"../testdata/sine-s16.wav", "sine.wav"},
-		// Two sources direct play must decline, one per container spelling:
-		// no general-purpose player decodes either codec from the file it is
-		// handed. See TestCompressedSourcesAreNotDirectPlayed.
+		// Three sources direct play must decline: no general-purpose player
+		// decodes any of these codecs from the file it is handed. One per
+		// container spelling, plus the one codec whose answer depends on the
+		// wrapper rather than on itself. See
+		// TestCompressedSourcesAreNotDirectPlayed.
 		{"../testdata/sine-alaw.wav", "sine-alaw.wav"},
 		{"../container/mp4/testdata/ima4.mov", "ima4.mov"},
+		{"../container/riff/testdata/mp3.wav", "mp3.wav"},
 	} {
 		b, err := os.ReadFile(fixture.src)
 		if err != nil {

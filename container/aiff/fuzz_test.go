@@ -12,6 +12,10 @@ import (
 	"github.com/colespringer/waxflow/container"
 )
 
+// minMPEGFrame is the smallest compliant Layer III frame (8 kbit/s at
+// 24 kHz), which bounds how many packets a frame-walked payload can yield.
+const minMPEGFrame = 24
+
 // FuzzDemux asserts the hostile-input invariants on arbitrary bytes: no
 // panics, errors instead of garbage tracks, and bounded packet reading.
 func FuzzDemux(f *testing.F) {
@@ -52,6 +56,11 @@ func FuzzDemux(f *testing.F) {
 	f.Add(buildAIFCn(compIMA4, 1, 4, make([]byte, adpcm.QuickTimeBlockBytes*3), 3))
 	f.Add(buildAIFCn(compIMA4, 2, 4, make([]byte, adpcm.QuickTimeBlockBytes*2*3), 3))
 	f.Add(buildAIFCn(compIn24, 1, 16, make([]byte, 48), 16))
+	// MP3, whose payload is not a flat array at all: the frames state their
+	// own lengths, so a mutation here edits a frame header rather than a
+	// geometry field and the walk has to resync from it.
+	f.Add(buildAIFCrate(compMP3, mp3Channels, 0, mp3Rate, mp3Payload(), mp3FrameCount))
+	f.Add(buildAIFCrate("ms\x00\x55", mp3Channels, 16, mp3Rate, mp3Payload(), mp3FrameCount))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		for _, strict := range []bool{false, true} {
@@ -63,10 +72,17 @@ func FuzzDemux(f *testing.F) {
 			if err := track.Fmt.Valid(); err != nil {
 				t.Fatalf("accepted track with invalid format: %v", err)
 			}
-			if track.Samples < 0 {
-				t.Fatalf("accepted track with negative sample count %d", track.Samples)
+			// Unknown is the one negative length a track may state, and only
+			// where nothing in the file counted the samples: a frame run with
+			// no metadata frame at the head of it.
+			units, byUnits := d.payload.(*blockReader)
+			if track.Samples < 0 && (byUnits || track.Samples != -1) {
+				t.Fatalf("accepted track with sample count %d", track.Samples)
 			}
 			maxPackets := int64(len(data))/int64(audio.StandardChunk) + 2
+			if !byUnits {
+				maxPackets = int64(len(data))/minMPEGFrame + 2 // one frame per packet
+			}
 			var pkt container.Packet
 			var got int64
 			for i := int64(0); ; i++ {
@@ -85,29 +101,48 @@ func FuzzDemux(f *testing.F) {
 				}
 				got += pkt.Dur
 			}
-			// The walk delivers whole UNITS, and for ima4 a unit is 64
-			// samples, so what is bounded is the payload rather than the
-			// declared length; COMM counts units, so the two agree here, and
-			// the check is written against the payload anyway because that is
-			// the property (no unbounded production from bounded input).
-			capacity := d.payload.units * d.payload.unitFrames
-			if got > capacity {
-				t.Fatalf("read %d samples from a payload holding %d", got, capacity)
+			if byUnits {
+				// The walk delivers whole UNITS, and for ima4 a unit is 64
+				// samples, so what is bounded is the payload rather than the
+				// declared length; COMM counts units, so the two agree here,
+				// and the check is written against the payload anyway because
+				// that is the property (no unbounded production from bounded
+				// input).
+				capacity := units.units * units.unitFrames
+				if got > capacity {
+					t.Fatalf("read %d samples from a payload holding %d", got, capacity)
+				}
+				if track.Samples > capacity {
+					t.Fatalf("track declares %d samples from a payload holding %d", track.Samples, capacity)
+				}
 			}
-			if track.Samples > capacity {
-				t.Fatalf("track declares %d samples from a payload holding %d", track.Samples, capacity)
-			}
-			// Seeking anywhere legal must land on a unit boundary at or before
-			// the target, or at zero for a decoder whose state crosses units.
+			// Seeking anywhere legal must land at or before the target: on a
+			// unit boundary where units are what the payload holds, at zero
+			// for a decoder whose state crosses units, and on the frame the
+			// reservoir backoff reaches for a frame run.
 			if track.Samples > 0 {
 				target := track.Samples / 2
-				want := target / d.payload.unitFrames * d.payload.unitFrames
-				if d.carryState {
-					want = 0
-				}
 				landed, err := d.SeekSample(0, target)
-				if err != nil || landed != want {
-					t.Fatalf("SeekSample(%d) = %d, %v; want %d", target, landed, err, want)
+				if err != nil {
+					// A frame walk builds its index on demand, so a seek is
+					// the call that reaches damage further down the payload,
+					// and under Strict it fails there rather than at open.
+					// That is the only way a seek may fail: a unit walk
+					// computes its landing, and a tolerant frame walk records
+					// the damage and carries on.
+					if byUnits || !strict {
+						t.Fatalf("SeekSample(%d): %v", target, err)
+					}
+					continue
+				}
+				if landed > target {
+					t.Fatalf("SeekSample(%d) landed at %d", target, landed)
+				}
+				switch {
+				case d.carryState && landed != 0:
+					t.Fatalf("SeekSample(%d) = %d, want 0 for a carry-state decoder", target, landed)
+				case byUnits && !d.carryState && landed != target/units.unitFrames*units.unitFrames:
+					t.Fatalf("SeekSample(%d) = %d, want the unit boundary at or before it", target, landed)
 				}
 			}
 		}

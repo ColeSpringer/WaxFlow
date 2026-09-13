@@ -12,6 +12,10 @@ import (
 	"github.com/colespringer/waxflow/container"
 )
 
+// minMPEGFrame is the smallest compliant Layer III frame (8 kbit/s at
+// 24 kHz), which bounds how many packets a frame-walked payload can yield.
+const minMPEGFrame = 24
+
 // FuzzDemux asserts the hostile-input invariants on arbitrary bytes: no
 // panics, no unbounded allocations, errors instead of garbage tracks, and
 // the strict progress guarantee (packet reading terminates in a bounded
@@ -55,6 +59,11 @@ func FuzzDemux(f *testing.F) {
 	f.Add(wavHeader(tagIMAADPCM, 2, 44100, 24, 4, imaExtra(17), make([]byte, 96), -1))
 	f.Add(wavHeader(tagMSADPCM, 1, 8000, 20, 4, msExtra(28, adpcm.DefaultCoefs), make([]byte, 80), 100))
 	f.Add(wavHeader(tagMSADPCM, 2, 44100, 32, 4, msExtra(20, adpcm.DefaultCoefs), make([]byte, 128), -1))
+	// MP3, whose payload is not a flat array at all: the frames state their
+	// own lengths, so a mutation here edits a frame header rather than a
+	// geometry field and the walk has to resync from it.
+	f.Add(fixtureBytes(f, "mp3.wav"))
+	f.Add(wavHeader(tagMP3, 1, 22050, 576, 0, mp3Extra(1393), nil, 23616))
 	f.Add([]byte("RIFF\xff\xff\xff\xffWAVE"))
 	f.Add([]byte("RF64\xff\xff\xff\xffWAVEds64"))
 
@@ -69,13 +78,20 @@ func FuzzDemux(f *testing.F) {
 			if err := track.Fmt.Valid(); err != nil {
 				t.Fatalf("accepted track with invalid format: %v", err)
 			}
-			if track.Samples < 0 {
-				t.Fatalf("accepted track with negative sample count %d", track.Samples)
+			// Unknown is the one negative length a track may state, and
+			// only where nothing in the file counted the samples: a frame
+			// run with no metadata frame and no fact chunk.
+			units, byUnits := d.payload.(*blockReader)
+			if track.Samples < 0 && (byUnits || track.Samples != -1) {
+				t.Fatalf("accepted track with sample count %d", track.Samples)
 			}
-			// Progress guarantee: every packet carries at least one frame
-			// of at least one byte, so this loop is bounded by the input
-			// size, packet by packet.
+			// Progress guarantee: every packet carries at least one unit,
+			// and the smallest unit either shape can deliver is bounded
+			// below, so this loop is bounded by the input size.
 			maxPackets := int64(len(data))/int64(audio.StandardChunk) + 2
+			if !byUnits {
+				maxPackets = int64(len(data))/minMPEGFrame + 2 // one frame per packet
+			}
 			var pkt container.Packet
 			var got int64
 			for i := int64(0); ; i++ {
@@ -94,30 +110,60 @@ func FuzzDemux(f *testing.F) {
 				}
 				got += pkt.Dur
 			}
-			// The walk delivers whole UNITS, which for a block codec is more
-			// than the track's length: the file's declared count can stop
-			// inside the last block, and format.Media trims there. What is
-			// bounded is the payload, which the declared length also cannot
-			// exceed.
-			capacity := d.payload.units * d.payload.unitFrames
-			if got > capacity {
-				t.Fatalf("read %d samples from a payload holding %d", got, capacity)
-			}
-			if track.Samples > capacity {
-				t.Fatalf("track declares %d samples from a payload holding %d", track.Samples, capacity)
+			if byUnits {
+				// The walk delivers whole UNITS, which for a block codec is
+				// more than the track's length: the file's declared count can
+				// stop inside the last block, and format.Media trims there.
+				// What is bounded is the payload, which the declared length
+				// also cannot exceed.
+				capacity := units.units * units.unitFrames
+				if got > capacity {
+					t.Fatalf("read %d samples from a payload holding %d", got, capacity)
+				}
+				if track.Samples > capacity {
+					t.Fatalf("track declares %d samples from a payload holding %d", track.Samples, capacity)
+				}
+			} else if track.Samples > 0 {
+				// A frame walk has no capacity to compare against without
+				// running the walk itself, but the payload's byte length still
+				// bounds it: nothing shorter than minMPEGFrame is a frame, so
+				// a declared length above that many frames' worth is one the
+				// file cannot be describing. This is the shape a fact chunk of
+				// four billion samples takes on a four-kilobyte payload.
+				ceiling := int64(len(data)) / minMPEGFrame * pkt.Dur
+				if pkt.Dur > 0 && track.Samples > ceiling {
+					t.Fatalf("track declares %d samples from %d bytes of frames (at most %d)",
+						track.Samples, len(data), ceiling)
+				}
 			}
 
 			// Seeking anywhere legal then reading must also terminate, and
-			// land on a unit boundary at or before the target.
+			// land at or before the target: on a unit boundary where units
+			// are what the payload holds, and on the frame the reservoir
+			// backoff reaches where it holds frames.
 			if track.Samples > 0 {
 				target := track.Samples / 2
-				want := target / d.payload.unitFrames * d.payload.unitFrames
 				landed, err := d.SeekSample(0, target)
-				if err != nil || landed != want {
-					t.Fatalf("SeekSample(%d) = %d, %v; want %d", target, landed, err, want)
+				if err != nil {
+					// A frame walk builds its index on demand, so a seek is
+					// the call that reaches damage further down the payload,
+					// and under Strict it fails there rather than at open.
+					// That is the only way a seek may fail: a unit walk
+					// computes its landing, and a tolerant frame walk records
+					// the damage and carries on.
+					if byUnits || !strict {
+						t.Fatalf("SeekSample(%d): %v", target, err)
+					}
+					continue
 				}
-				if err := d.ReadPacket(&pkt); err == nil && pkt.PTS != want {
-					t.Fatalf("post-seek PTS = %d, want %d", pkt.PTS, want)
+				if landed > target {
+					t.Fatalf("SeekSample(%d) landed at %d", target, landed)
+				}
+				if byUnits && landed != target/units.unitFrames*units.unitFrames {
+					t.Fatalf("SeekSample(%d) = %d, want the unit boundary at or before it", target, landed)
+				}
+				if err := d.ReadPacket(&pkt); err == nil && pkt.PTS != landed {
+					t.Fatalf("post-seek PTS = %d, want %d", pkt.PTS, landed)
 				}
 			}
 		}

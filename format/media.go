@@ -81,6 +81,15 @@ func newMedia(info *Info, demux container.Demuxer) (Media, error) {
 	// advertises container.Indexer, so a type assertion is an honest
 	// capability gate: consumers skip sidecar work for formats that
 	// would only ever answer nil.
+	//
+	// Two of them qualify per FILE rather than per format, and Go's method
+	// sets cannot say so: a WAV or an AIFF-C carrying MP3 frames has a frame
+	// index worth keeping and the same container carrying PCM has none, so
+	// container/riff and container/aiff advertise the capability always and
+	// answer nil and false for a byte-linear payload. A consumer that needs
+	// to know whether the walk is expensive reads Track.SamplesExact beside
+	// this (see the daemon's timelineNeedsJob), since a payload that states
+	// its own length from its byte count is exactly the one with no index.
 	if ix, ok := demux.(container.Indexer); ok {
 		return &indexableMedia{media: m, ix: ix}, nil
 	}

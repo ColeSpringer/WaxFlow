@@ -144,22 +144,31 @@ type Track struct {
 	// it); formats whose declared total can lie (a bad FLAC STREAMINFO) leave
 	// it false so a mismatch stays a tolerated oddity rather than a truncation.
 	SamplesExact bool
-	// SamplesAdvisory marks Samples as a rounded total the decode is not
-	// expected to match: fit for a duration to display, unfit for arithmetic
-	// that has to add up. It and SamplesExact are mutually exclusive, since
-	// one says to trim the decode to this number and the other says not to
-	// trust it; a measurement that sets the first clears the second. It is a claim about precision, which is what
-	// SamplesExact is not (that one is a truncation instruction). WAV and FLAC
-	// leave both false: their totals are counted, not rounded, and a total
+	// SamplesAdvisory marks Samples as a total the decode is not expected to
+	// match: fit for a duration to display, unfit for arithmetic that has to
+	// add up. It and SamplesExact are mutually exclusive, since one says to
+	// trim the decode to this number and the other says not to trust it; a
+	// measurement that sets the first clears the second. It is a claim about
+	// precision, which is what SamplesExact is not (that one is a truncation
+	// instruction). A FLAC leaves both false, and so does a WAV whose payload
+	// is byte-linear: their totals are counted, not estimated, and a total
 	// that disagrees with the stream is damage rather than imprecision.
 	//
-	// Two containers state a duration in a time unit and have no sample count
-	// at all: ASF, in 100-nanosecond ticks its own muxer accumulates from
+	// Three shapes reach it, for two different reasons. Two containers state a
+	// duration in a time unit and have no sample count at all: ASF, in
+	// 100-nanosecond ticks its own muxer accumulates from
 	// millisecond-truncated packet times, and Matroska when it falls back to
 	// the Info Duration. Measured on the ASF corpus, the declared total lands
 	// on either side of the audio the packets hold, by up to a millisecond and
 	// a frame; it is neither the source length nor the coded capacity, and no
 	// reading of the file improves on it.
+	//
+	// The third is a count that is exact about the wrong thing: a WAV carrying
+	// MP3 frames states its length in a fact chunk, which counts everything
+	// those frames decode to, encoder delay and tail padding included, while
+	// nothing in the file says where inside them the audio begins or ends. The
+	// number is not rounded and it is not the track's length either, which is
+	// the same practical answer: display it, do not sum it.
 	//
 	// Two things read it. A timeline refuses such a member, since a prefix sum
 	// cannot survive the drift; measure it first (see ConcatSource.Track). And

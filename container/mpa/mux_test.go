@@ -10,6 +10,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/mpegframes"
 	"github.com/colespringer/waxflow/internal/testutil"
 )
 
@@ -299,14 +300,14 @@ func TestGaplessFieldsFallIndependently(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tag, ok := parseVBRTag(got, frame)
+	tag, ok := mpegframes.ParseVBRTag(got, frame)
 	if !ok {
 		t.Fatal("the metadata frame carries no readable tag")
 	}
-	if tag.delay != delay {
-		t.Errorf("delay = %d, want %d: an unwritable padding must not cost the head trim", tag.delay, delay)
+	if tag.Delay != delay {
+		t.Errorf("delay = %d, want %d: an unwritable padding must not cost the head trim", tag.Delay, delay)
 	}
-	if tag.padding != 0 {
-		t.Errorf("padding = %d, want 0: 4096 does not fit a 12-bit field", tag.padding)
+	if tag.Padding != 0 {
+		t.Errorf("padding = %d, want 0: 4096 does not fit a 12-bit field", tag.Padding)
 	}
 }

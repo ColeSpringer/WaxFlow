@@ -524,16 +524,11 @@ func directPlayable(req *streamRequest) bool {
 		return false
 	case p.format != "auto" && p.format != req.info.Container:
 		return false
-	case companded(track.Codec):
-		// G.711 and the two ADPCM families, in whichever of the three
-		// containers carries them. No general-purpose player decodes any of
-		// them, so shipping the original bytes reads as a broken file rather
-		// than as a refusal, and the transcode rung serves the same audio as
-		// PCM. Keyed on the codec and not on the container, which is what the
-		// first version of this got wrong: the driver table names one
-		// container "mp4" for both .mp4 and .mov, so a container test that
-		// listed wav and aiff never fired for the .mov spelling of exactly
-		// these four codecs.
+	case !playableAsIs(track.Codec, req.info.Container):
+		// A coding no general-purpose player reads out of this container.
+		// Shipping the original bytes reads as a broken file rather than as
+		// a refusal, and the transcode rung serves the same audio in a form
+		// that plays.
 		return false
 	case p.rate != 0 && p.rate != track.Fmt.Rate:
 		return false
@@ -568,15 +563,31 @@ func directPlayable(req *streamRequest) bool {
 	return true
 }
 
-// companded reports whether a codec is one no general-purpose player decodes
-// from a file it is handed directly. It is the four this tree reads and does
-// not write: two G.711 laws and two ADPCM families.
-func companded(id codec.ID) bool {
+// playableAsIs reports whether a general-purpose player, handed this file as
+// it stands, decodes the audio in it. Two things land here: a codec this tree
+// reads and does not write, since a codec nothing writes is one nothing else
+// expects to meet, and a codec inside a wrapper whose readers only ever
+// carried PCM.
+func playableAsIs(id codec.ID, containerName string) bool {
 	switch id {
 	case codec.ALaw, codec.MuLaw, codec.IMAADPCM, codec.MSADPCM:
-		return true
+		// G.711 and the two ADPCM families, in whichever of the three
+		// containers carries them: no general-purpose player decodes any of
+		// them anywhere. Keyed on the codec and not on the container, which
+		// is what the first version of this got wrong: the driver table names
+		// one container "mp4" for both .mp4 and .mov, so a container test
+		// that listed wav and aiff never fired for the .mov spelling of
+		// exactly these four codecs.
+		return false
+	case codec.MP3:
+		// The other half of the same rule, and it needs the container,
+		// because MP3 is the one codec here whose answer differs by wrapper:
+		// bare and in an MP4 it is what every player expects, and inside a
+		// WAV or an AIFF-C it is a payload their demuxers decode PCM out of.
+		// A browser handed one plays silence or nothing at all.
+		return containerName != "wav" && containerName != "aiff"
 	}
-	return false
+	return true
 }
 
 // checkIdentity enforces ADR-0003 source identity: a signed URL must

@@ -47,6 +47,11 @@ const (
 	waveTagMuLaw = 0x0007
 )
 
+// waveTagMP3 is the one WAVE format tag an "ms" entry can name that this file
+// does not read: MP3's payload frames itself, so it is dispatched beside the
+// other bitstream codecs. It lives here because this is where the tags are.
+const waveTagMP3 = 0x0055
+
 // isCodecWaveTag reports whether a WAVE format tag names one of the codecs
 // here. The G.711 pair and the two ADPCM families all have one.
 func isCodecWaveTag(tag uint16) bool {

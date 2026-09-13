@@ -682,15 +682,16 @@ func concatLayout(tracks []container.Track, opts ConcatOptions) (env audio.Forma
 		// break. The run enforces each member's declared length (count and
 		// advance), so a member whose container only rounded it fails minutes
 		// into a decode with a message about the file, when the cause is that
-		// nobody measured it. This is the only place that can say so. ASF and
-		// a Matroska falling back to Info Duration are the two that reach it;
-		// every caller inside this tree already measures (the daemon's
-		// trackFor, the merge runner's MeasureTrack, cli split), which is why
-		// the gap only ever bit a library consumer.
+		// nobody measured it. This is the only place that can say so. ASF, a
+		// Matroska falling back to Info Duration, and a WAV carrying MP3
+		// frames are the three that reach it; every caller inside this tree
+		// already measures (the daemon's trackFor, the merge runner's
+		// MeasureTrack, cli split), which is why the gap only ever bit a
+		// library consumer.
 		if t.Samples < 0 || t.SamplesAdvisory {
 			what := "has no declared length"
 			if t.Samples >= 0 {
-				what = fmt.Sprintf("declares an advisory length (%d samples) rounded from a duration", t.Samples)
+				what = fmt.Sprintf("declares an advisory length (%d samples) the decode is not expected to match", t.Samples)
 			}
 			return audio.Format{}, nil, nil, 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
 				"waxflow: timeline member %d %s; measure it before planning a timeline "+

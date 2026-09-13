@@ -10,6 +10,7 @@ import (
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/mka"
+	"github.com/colespringer/waxflow/container/mpa"
 	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/format"
 )
@@ -93,6 +94,82 @@ func TestRemuxPayloadsAreByteIdentical(t *testing.T) {
 			t.Fatalf("packet %d changed: %d bytes out, %d in", i, len(got[i]), len(want[i]))
 		}
 	}
+}
+
+// TestMP3InWAVRemuxesToMP3 proves the rung was TAKEN for a wrapper this
+// stream added, which is the assertion an optimization rung needs: the
+// packets a WAV's data chunk holds are already the elementary stream's, so
+// `format=mp3` must copy them rather than decode and re-encode, and the bytes
+// are how that is visible.
+//
+// `format=wav` on the same source is the other half. An MP3 track does not
+// survive into a PCM row, so the rung has to decline and the request falls to
+// transcode; a rung that accepted it would write a WAV full of MP3 frames.
+func TestMP3InWAVRemuxesToMP3(t *testing.T) {
+	e := waxflow.New()
+	raw := wavMP3Bytes(t)
+	want := payloads(t, raw, "wav")
+	if len(want) == 0 {
+		t.Fatal("the WAV fixture demuxed to no packets")
+	}
+	in := probeTrack(t, raw, "wav")
+	plan, err := e.PlanRemux(in, waxflow.TranscodeOptions{Format: "mp3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan == nil {
+		t.Fatal("the remux rung declined an MP3-in-WAV source for format=mp3; the packets cross unchanged")
+	}
+	var out bytes.Buffer
+	if _, err := e.Remux(context.Background(), container.BytesSource(raw), "wav", &out,
+		waxflow.TranscodeOptions{Format: "mp3"}); err != nil {
+		t.Fatal(err)
+	}
+	// The muxer writes its own metadata frame at the head, which the reader
+	// consumes again, so the packet lists compare one to one.
+	outBytes := out.Bytes()
+	got := payloads(t, outBytes, "mp3")
+	if len(got) != len(want) {
+		t.Fatalf("remux moved %d packets, the source had %d", len(got), len(want))
+	}
+	for i := range want {
+		if !bytes.Equal(got[i], want[i]) {
+			t.Fatalf("packet %d changed: %d bytes out, %d in", i, len(got[i]), len(want[i]))
+		}
+	}
+
+	wavPlan, err := e.PlanRemux(in, waxflow.TranscodeOptions{Format: "wav"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wavPlan != nil {
+		t.Error("the remux rung accepted format=wav for an MP3 track; PCM output has to transcode")
+	}
+
+	// And what the trims cost across the hop, stated rather than asserted
+	// away, because it looks like a bug and is the format being asked to say
+	// something it cannot. A WAV states no trims at all, so the source track
+	// declares Delay 0; the LAME tag's field holds the ENCODER's share and
+	// every reader adds Layer III's fixed 529-sample decoder latency back, so
+	// the smallest head trim the tag can express is 529 and a zero is written
+	// as zero and read as 529. The kept length shrinks by the same amount.
+	// See mpa's tagTrims, where the clamp and its reason live; the shape
+	// predates this wrapper (an untagged bare .mp3 remuxes the same way).
+	back := probeTrack(t, outBytes, "mp3")
+	if back.Delay != mpa.DecoderDelay {
+		t.Errorf("remuxed head trim = %d, want %d: the LAME field cannot express a smaller one",
+			back.Delay, mpa.DecoderDelay)
+	}
+	if want := in.Samples - mpa.DecoderDelay; back.Samples != want {
+		t.Errorf("remuxed length = %d, want %d (the source's %d less the latency the tag restores)",
+			back.Samples, want, in.Samples)
+	}
+	// Padding is deliberately not asserted, and the reason is the other half
+	// of the same arithmetic: this writer cannot seek, so the metadata frame
+	// keeps the projection Begin wrote instead of the count End measures, and
+	// the projection pays for an over-estimated frame count with a larger end
+	// trim. The two cancel, which is why the length above is the same either
+	// way and is the field worth pinning.
 }
 
 // TestRemuxGaplessRoundTrip is the milestone's gate. Remux deliberately

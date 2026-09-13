@@ -406,15 +406,25 @@ func (s *Server) mintTimelineFrom(ctx context.Context, srcs []*source.File, span
 // three-minute track.
 //
 // What is slow is a format whose walk must scan every frame header to build
-// an index, which reads the whole file. container.Indexer is exactly the
-// tree's mark for that: a demuxer implements it when its index is expensive
-// enough to be worth persisting. MP3 does, and so does Musepack, whose index
-// is the seek scanner's state cache; but a Musepack track's length is exact
-// from the header walk at open (the one uncounted shape is measured by parsing
-// its last block, and only a damaged one stays advisory), so the gate below
-// never fires for it. A cold MP3 queue, which the walk reads end to end,
-// becomes a job, and a FLAC album or any queue already measured mints in one
-// round trip.
+// an index, which reads the whole file. container.Indexer is the tree's mark
+// for that: a demuxer implements it when its index is expensive enough to be
+// worth persisting. MP3 does, and so does Musepack, whose index is the seek
+// scanner's state cache; but a Musepack track's length is exact from the
+// header walk at open (the one uncounted shape is measured by parsing its last
+// block, and only a damaged one stays advisory), so the gate below never fires
+// for it. A cold MP3 queue, which the walk reads end to end, becomes a job,
+// and a FLAC album or any queue already measured mints in one round trip.
+//
+// The mark is not quite the whole gate, and the reason is worth naming because
+// the two halves cover for each other. A WAV or an AIFF-C can carry MP3
+// frames, and Go's method sets are static, so those two demuxers advertise the
+// capability for every file they open and answer nil for the byte-linear
+// payloads that are almost all of them. The exactness half is what keeps those
+// out: a payload whose unit is one frame states its length from its own byte
+// count, so it is exact and never reaches the second clause. What is left
+// mis-classified is an ADPCM WAV with no fact chunk, whose length is a
+// capacity rather than an adopted truncation and so not marked exact; it
+// becomes a job it does not need, which is the conservative direction.
 func (s *Server) timelineNeedsJob(srcs []*source.File) (bool, error) {
 	for _, f := range srcs {
 		if s.trackIsExact(f) {

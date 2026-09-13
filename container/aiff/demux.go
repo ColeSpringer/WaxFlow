@@ -4,14 +4,17 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/adpcm"
 	"github.com/colespringer/waxflow/codec/g711"
+	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/internal/codecname"
+	"github.com/colespringer/waxflow/container/internal/mpegframes"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -25,6 +28,11 @@ var (
 const (
 	maxChunks      = 1024
 	maxCommPayload = 512
+	// maxWarnings caps the tolerated-damage list. A chunk walk is bounded by
+	// maxChunks on its own; a frame-walked payload is not, since it reports
+	// one finding per damaged gap and a run of alternating frames and junk
+	// has one gap per frame.
+	maxWarnings = 64
 )
 
 // DemuxerOptions configures parsing.
@@ -39,13 +47,25 @@ type Demuxer struct {
 	opts DemuxerOptions
 
 	track   container.Track
-	payload blockReader
+	payload payload
 	// carryState marks a compression type whose decoder does not restart at a
 	// unit boundary, so a decode begun at one never converges to the linear
 	// decode. ima4 is the only one; see SeekSample.
 	carryState bool
 	warnings   []container.Warning
-	readBuf    []byte
+}
+
+// payload is the walk over the SSND chunk. Two shapes reach it, and the
+// difference between them is not a detail of the walk but its whole
+// geometry: a flat array of fixed-size units, where position is arithmetic,
+// and a run of self-framing MPEG audio frames, where it is an index built by
+// walking. That is what earns a seam rather than a flag.
+type payload interface {
+	// ReadPacket yields the next run of payload, io.EOF past the end.
+	ReadPacket(pkt *container.Packet) error
+	// SeekSample repositions to the unit or frame holding a sample and
+	// reports the sample that unit starts on.
+	SeekSample(sample int64) (landed int64, err error)
 }
 
 // blockReader walks the SSND payload as a run of equal units.
@@ -55,11 +75,14 @@ type Demuxer struct {
 // ima4. COMM's numSampleFrames counts units either way, which is the field's
 // real meaning and why one walk serves all of them.
 type blockReader struct {
+	src        container.Source
 	dataOff    int64
 	unitBytes  int64
 	unitFrames int64
 	units      int64
+	samples    int64 // the track's length; equal to units times unitFrames here
 	pos        int64 // next unit to read
+	buf        []byte
 }
 
 // perPacket is how many units one packet carries: the pipeline's working
@@ -118,7 +141,10 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
+	w := container.Warning{Offset: off, Msg: msg, Kind: container.Damage}
+	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
+		d.warnings = append(d.warnings, w)
+	}
 	return nil
 }
 
@@ -144,6 +170,7 @@ func (d *Demuxer) parse() error {
 		commSeen  bool
 		cf        commFormat
 		commUnits int64
+		dataOff   int64 = -1
 		dataBytes int64 = -1
 	)
 
@@ -208,16 +235,16 @@ func (d *Demuxer) parse() error {
 				return container.ShortRead("aiff: reading SSND header", err)
 			}
 			dataStart := int64(be.Uint32(ssnd[:])) // alignment offset
-			d.payload.dataOff = off + 8 + 8 + dataStart
+			dataOff = off + 8 + 8 + dataStart
 			dataBytes = chunkSize - 8 - dataStart
 			if dataBytes < 0 {
 				return malformed("SSND offset %d exceeds chunk", dataStart)
 			}
-			if d.payload.dataOff+dataBytes > size {
+			if dataOff+dataBytes > size {
 				if err := d.warn(off, "SSND data of %d bytes exceeds file, clamped", dataBytes); err != nil {
 					return err
 				}
-				dataBytes = size - d.payload.dataOff
+				dataBytes = size - dataOff
 				if dataBytes < 0 {
 					dataBytes = 0
 				}
@@ -243,10 +270,13 @@ func (d *Demuxer) parse() error {
 	if dataBytes < 0 {
 		return malformed("no SSND chunk")
 	}
+	if cf.codec == codec.MP3 {
+		return d.startMPEG(cf, dataOff, dataBytes, commUnits)
+	}
 
 	unitBytes := int64(cf.unitBytes)
 	if rem := dataBytes % unitBytes; rem != 0 {
-		if err := d.warn(d.payload.dataOff, "%d trailing bytes are not a whole %s, ignored", rem, unitName(cf)); err != nil {
+		if err := d.warn(dataOff, "%d trailing bytes are not a whole %s, ignored", rem, unitName(cf)); err != nil {
 			return err
 		}
 		dataBytes -= rem
@@ -259,19 +289,18 @@ func (d *Demuxer) parse() error {
 	units := commUnits
 	switch {
 	case available < commUnits:
-		if err := d.warn(d.payload.dataOff, "COMM declares %d %ss, SSND holds %d; clamped", commUnits, unitName(cf), available); err != nil {
+		if err := d.warn(dataOff, "COMM declares %d %ss, SSND holds %d; clamped", commUnits, unitName(cf), available); err != nil {
 			return err
 		}
 		units = available
 	case available > commUnits:
-		if err := d.warn(d.payload.dataOff, "SSND holds %d %ss beyond the %d COMM declares; extra ignored", available-commUnits, unitName(cf), commUnits); err != nil {
+		if err := d.warn(dataOff, "SSND holds %d %ss beyond the %d COMM declares; extra ignored", available-commUnits, unitName(cf), commUnits); err != nil {
 			return err
 		}
 	}
 
-	d.payload.unitBytes = unitBytes
-	d.payload.unitFrames = int64(cf.unitFrames)
-	d.payload.units = units
+	d.payload = &blockReader{src: d.src, dataOff: dataOff, unitBytes: unitBytes,
+		unitFrames: int64(cf.unitFrames), units: units, samples: units * int64(cf.unitFrames)}
 	d.carryState = cf.carryState
 	d.track = container.Track{
 		Codec:       cf.codec,
@@ -351,6 +380,13 @@ func (d *Demuxer) parseCOMM(b []byte, aifc bool, off int64) (commFormat, int64, 
 		}
 		cf = commFormat{codec: id, fmt: g711.Format(rate, channels, layout),
 			unitBytes: channels, unitFrames: 1, sourceBits: g711.SourceBitDepth}
+	case compMP3:
+		// Nothing here describes the stream: an MPEG audio frame states its
+		// own rate, channel mode and length in its own four-byte header, so
+		// COMM's sampleSize is not read and its numSampleFrames is not
+		// divided by anything. What the chunk does state is the container's
+		// claim, which startMPEG puts against the first frame's own header.
+		cf = commFormat{codec: codec.MP3, fmt: mp3.Header{Rate: rate, Channels: channels}.PCMFormat()}
 	case compIMA4:
 		// Apple's ima4 states no geometry anywhere: the type name fixes it at
 		// 34 bytes and 64 samples per channel, which is why the sample entry
@@ -394,6 +430,60 @@ func (d *Demuxer) parseCOMM(b []byte, aifc bool, off int64) (commFormat, int64, 
 		return cf, 0, container.UnusableFormat("aiff", cf.fmt, err)
 	}
 	return cf, units, nil
+}
+
+// startMPEG builds the track for an SSND payload holding MPEG audio frames.
+//
+// The length is the one thing the container cannot supply. COMM's
+// numSampleFrames counts frames for a byte-linear type and packets for a
+// packetized one, nothing defines which it counts here, and no writer exists
+// to measure: unknown is the honest answer, and a leading Xing or LAME frame
+// is the only thing in reach that improves on it.
+func (d *Demuxer) startMPEG(cf commFormat, dataOff, dataBytes, commUnits int64) error {
+	// No trailer hook: the SSND chunk bounds the frames, so bytes inside it
+	// that are not frames are damage rather than the tag baggage a bare
+	// stream ends with.
+	walk := mpegframes.New(d.src, dataOff+dataBytes, mpegframes.Options{
+		Prefix: "aiff: ",
+		Warn:   func(off int64, msg string) error { return d.warn(off, "%s", msg) },
+	})
+	tag, _, err := walk.Begin(dataOff)
+	if err != nil {
+		return err
+	}
+	f := walk.Header().PCMFormat()
+	if err := f.Valid(); err != nil {
+		return container.UnusableFormat("aiff", f, err)
+	}
+	if f != cf.fmt {
+		// A decoder reads the frame, so the frame wins, and a chunk that
+		// disagrees with the stream it describes is the file deviating from
+		// its own format: damage, which --strict refuses and an ordinary
+		// read carries on with the truth.
+		if werr := d.warn(dataOff, "COMM says %v, the first frame says %v; the frame wins", cf.fmt, f); werr != nil {
+			return werr
+		}
+	}
+
+	samples, delay, padding := tag.Gapless(walk.SamplesPerFrame())
+	if samples < 0 && commUnits > 0 {
+		d.note(0, "COMM declares %d sample frames; nothing defines whether that counts frames or packets "+
+			"for this compression type, so the length is unknown", commUnits)
+	}
+	d.payload = walk.Reader()
+	d.track = container.Track{
+		Codec:   codec.MP3,
+		Fmt:     f,
+		Samples: samples,
+		Delay:   delay,
+		Padding: padding,
+		// SamplesExact stays false, unlike every other compression type
+		// here. Those state their length in units this walk counts, so the
+		// number and the decode cannot differ; this one has a writer's
+		// metadata frame or nothing at all.
+		Default: true,
+	}
+	return nil
 }
 
 // pcmConfig maps an uncompressed compression type onto a wire config. raw is
@@ -447,28 +537,30 @@ func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track}
 // Warnings returns damage tolerated during parsing.
 func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
 
+// ReadPacket yields the next run of payload. Packet data is reused across
+// calls.
+func (d *Demuxer) ReadPacket(pkt *container.Packet) error { return d.payload.ReadPacket(pkt) }
+
 // ReadPacket yields the next run of units: up to audio.StandardChunk frames
-// of raw interleaved PCM, or the packets that decode to about as many. Packet
-// data is reused across calls.
-func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
-	r := &d.payload
+// of raw interleaved PCM, or the packets that decode to about as many.
+func (r *blockReader) ReadPacket(pkt *container.Packet) error {
 	remaining := r.units - r.pos
 	if remaining <= 0 {
 		return io.EOF
 	}
 	n := min(r.perPacket(), remaining)
 	need := int(n * r.unitBytes)
-	if cap(d.readBuf) < need {
-		d.readBuf = make([]byte, need)
+	if cap(r.buf) < need {
+		r.buf = make([]byte, need)
 	}
-	d.readBuf = d.readBuf[:need]
-	if err := container.ReadFull(d.src, d.readBuf, r.dataOff+r.pos*r.unitBytes); err != nil {
+	r.buf = r.buf[:need]
+	if err := container.ReadFull(r.src, r.buf, r.dataOff+r.pos*r.unitBytes); err != nil {
 		return container.ShortRead("aiff: reading SSND data", err)
 	}
 	*pkt = container.Packet{
 		Track: 0,
 		Packet: codec.Packet{
-			Data: d.readBuf,
+			Data: r.buf,
 			PTS:  r.pos * r.unitFrames,
 			Dur:  n * r.unitFrames,
 			// Every PCM frame is independently decodable. An ima4 packet is
@@ -483,11 +575,12 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 	return nil
 }
 
-// SeekSample repositions to the unit holding the given sample.
+// SeekSample repositions to the unit or frame holding the given sample.
 //
-// Landing is exact for every type but ima4, whose unit is 64 samples, and
-// format.Media decodes and discards the remainder, so the delivered position
-// is sample-exact either way.
+// Landing is exact for every type but ima4, whose unit is 64 samples, and MP3,
+// whose landing backs off far enough for the bit reservoir and the filterbank
+// to converge. format.Media decodes and discards the remainder, so the
+// delivered position is sample-exact in every case.
 //
 // ima4 lands at the start of the file whatever the target, which is not a
 // pessimisation but the only correct landing: Apple's layout carries the
@@ -504,13 +597,18 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	if sample < 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, "aiff: negative seek target")
 	}
-	r := &d.payload
 	if d.carryState {
-		r.pos = 0
-		return 0, nil
+		// Apple's ima4 layout carries the predictor across packets, so the
+		// only landing a decode converges from is the head of the stream.
+		sample = 0
 	}
+	return d.payload.SeekSample(sample)
+}
+
+// SeekSample lands on the unit boundary at or before the target.
+func (r *blockReader) SeekSample(sample int64) (int64, error) {
 	// Clamped to the track's length rather than the payload's; see the riff
 	// sibling, where the two can differ.
-	r.pos = min(min(sample, d.track.Samples)/r.unitFrames, r.units)
+	r.pos = min(min(sample, r.samples)/r.unitFrames, r.units)
 	return r.pos * r.unitFrames, nil
 }

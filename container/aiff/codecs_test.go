@@ -16,6 +16,13 @@ import (
 // buildAIFCn is buildAIFC with a channel count, which the compressed
 // compression types need: their unit spans every channel.
 func buildAIFCn(comp string, channels, bits int, payload []byte, frames uint32) []byte {
+	return buildAIFCrate(comp, channels, bits, 8000, payload, frames)
+}
+
+// buildAIFCrate is buildAIFCn at a stated sample rate, which the compression
+// types that carry their own framing need: their frames state a rate of their
+// own, and a COMM that disagrees is a different test.
+func buildAIFCrate(comp string, channels, bits, rate int, payload []byte, frames uint32) []byte {
 	var b bytes.Buffer
 	b.WriteString("FORM")
 	b.Write(u32be(0)) // patched below
@@ -28,8 +35,8 @@ func buildAIFCn(comp string, channels, bits int, payload []byte, frames uint32) 
 	b.Write(u16be(uint16(channels)))
 	b.Write(u32be(frames))
 	b.Write(u16be(uint16(bits)))
-	rate := toExt80(8000)
-	b.Write(rate[:])
+	ext := toExt80(float64(rate))
+	b.Write(ext[:])
 	b.WriteString(comp)
 	b.Write([]byte{0, 0})
 	b.WriteString("SSND")
