@@ -4,9 +4,17 @@
 // size fields (24-bit/96 kHz audiobooks overflow plain WAV at about two
 // hours; decided here, not discovered in production).
 //
-// Supported audio: integer and IEEE-float PCM, plain and
-// WAVE_FORMAT_EXTENSIBLE. Compressed WAV payloads (ADPCM, a-law) are out
-// of scope for the Wax family and rejected as unsupported.
+// Reading covers integer and IEEE-float PCM (plain and
+// WAVE_FORMAT_EXTENSIBLE), G.711 A-law and mu-law, IMA ADPCM and Microsoft
+// ADPCM. Writing produces PCM only: the compressed tags are lossy codings of
+// exactly what a WAV already carries losslessly, so they are read because
+// files hold them and not written because nothing needs another one.
+// MP2 and WMA-in-WAV are refused by name.
+//
+// The payload is one flat array of fixed-size units whichever of those it
+// holds, which is what lets one walk serve all of them: a unit is a frame
+// for PCM and G.711 and a block for the two ADPCM families, and the sample
+// timeline is the unit index times what a unit decodes to.
 package riff
 
 import (
@@ -29,9 +37,15 @@ const (
 	idFact = "fact"
 )
 
+// The WAVE format tags this package reads. Every other tag is refused by
+// name where a name is known; see container/internal/codecname.
 const (
 	tagPCM        = 0x0001
+	tagMSADPCM    = 0x0002
 	tagIEEEFloat  = 0x0003
+	tagALaw       = 0x0006
+	tagMuLaw      = 0x0007
+	tagIMAADPCM   = 0x0011
 	tagExtensible = 0xFFFE
 )
 

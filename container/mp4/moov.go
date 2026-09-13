@@ -32,6 +32,13 @@ type track struct {
 	// frame, so unitDur is 1 and unitBytes the frame's width across channels.
 	unitBytes int64
 	unitDur   int64
+	// carryState marks a codec whose decoder does not restart at a unit
+	// boundary, so a decode begun at one produces different samples from the
+	// linear decode there and never converges. Apple's ima4 is the only one:
+	// its block header restates the top nine bits of the predictor and
+	// nothing else. SeekSample refuses to start anywhere but the beginning
+	// for such a track; see stsdcodecs.go and demux.go.
+	carryState bool
 
 	// sourceBits is the depth the file stores samples at when the pipeline
 	// cannot carry it: audio.Format holds floats as float32, so a 64-bit float

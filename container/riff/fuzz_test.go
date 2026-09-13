@@ -7,6 +7,7 @@ import (
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/adpcm"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
 )
@@ -43,6 +44,17 @@ func FuzzDemux(f *testing.F) {
 	f.Add(seed(pcm.Config{Encoding: pcm.Float, Bits: 32}, 1, 40, 40, nil))
 	f.Add(seed(pcm.Config{Encoding: pcm.SignedInt, Bits: 32, ValidBits: 24}, 6, 16, 16, nil))
 	f.Add(seed(pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, 2, 300, 300, &MuxerOptions{SizeLimit: 128}))
+	// The compressed tags, which the muxer cannot write: their block geometry
+	// lives in the fmt chunk's extra bytes and their length in a fact chunk,
+	// so a mutation of one of these edits a block size, a samples-per-block
+	// count, a predictor table or a declared length, none of which a PCM seed
+	// carries at all.
+	f.Add(wavHeader(tagALaw, 1, 8000, 1, 8, nil, make([]byte, 64), 64))
+	f.Add(wavHeader(tagMuLaw, 2, 8000, 2, 8, nil, make([]byte, 64), -1))
+	f.Add(wavHeader(tagIMAADPCM, 1, 8000, 20, 4, imaExtra(33), make([]byte, 80), 100))
+	f.Add(wavHeader(tagIMAADPCM, 2, 44100, 24, 4, imaExtra(17), make([]byte, 96), -1))
+	f.Add(wavHeader(tagMSADPCM, 1, 8000, 20, 4, msExtra(28, adpcm.DefaultCoefs), make([]byte, 80), 100))
+	f.Add(wavHeader(tagMSADPCM, 2, 44100, 32, 4, msExtra(20, adpcm.DefaultCoefs), make([]byte, 128), -1))
 	f.Add([]byte("RIFF\xff\xff\xff\xffWAVE"))
 	f.Add([]byte("RF64\xff\xff\xff\xffWAVEds64"))
 
@@ -82,19 +94,30 @@ func FuzzDemux(f *testing.F) {
 				}
 				got += pkt.Dur
 			}
-			if got > track.Samples {
-				t.Fatalf("read %d samples from a track declaring %d", got, track.Samples)
+			// The walk delivers whole UNITS, which for a block codec is more
+			// than the track's length: the file's declared count can stop
+			// inside the last block, and format.Media trims there. What is
+			// bounded is the payload, which the declared length also cannot
+			// exceed.
+			capacity := d.payload.units * d.payload.unitFrames
+			if got > capacity {
+				t.Fatalf("read %d samples from a payload holding %d", got, capacity)
+			}
+			if track.Samples > capacity {
+				t.Fatalf("track declares %d samples from a payload holding %d", track.Samples, capacity)
 			}
 
-			// Seeking anywhere legal then reading must also terminate.
+			// Seeking anywhere legal then reading must also terminate, and
+			// land on a unit boundary at or before the target.
 			if track.Samples > 0 {
 				target := track.Samples / 2
+				want := target / d.payload.unitFrames * d.payload.unitFrames
 				landed, err := d.SeekSample(0, target)
-				if err != nil || landed != target {
-					t.Fatalf("SeekSample(%d) = %d, %v", target, landed, err)
+				if err != nil || landed != want {
+					t.Fatalf("SeekSample(%d) = %d, %v; want %d", target, landed, err, want)
 				}
-				if err := d.ReadPacket(&pkt); err == nil && pkt.PTS != target {
-					t.Fatalf("post-seek PTS = %d, want %d", pkt.PTS, target)
+				if err := d.ReadPacket(&pkt); err == nil && pkt.PTS != want {
+					t.Fatalf("post-seek PTS = %d, want %d", pkt.PTS, want)
 				}
 			}
 		}

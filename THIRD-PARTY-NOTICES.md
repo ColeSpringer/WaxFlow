@@ -43,6 +43,33 @@ Entries follow this format:
 > above). *Shine* (LGPL, Tier B) is used only as a black-box quality
 > oracle through `ffmpeg -c:a libshine`; its source was not consulted.
 
+> **codec/adpcm tables**: four tables of published specification data,
+> restated rather than ported from any implementation. The IMA step
+> table (89 entries) and step-index adjustment table (16 entries) are
+> the data of the IMA Digital Audio Special Interest Group's
+> *Recommended Practices for Enhancing Digital Audio Compatibility in
+> Multimedia Systems*, revision 3.00 (1992); the Microsoft adaptation
+> table (16 entries) and default predictor coefficient table (7 pairs)
+> are the data of Microsoft's *Multimedia Programming Interface and Data
+> Specifications 1.0* and the *Multimedia Data Standards Update*, which
+> define WAVE format tags 0x0011 and 0x0002. Both documents are
+> published format specifications, so this is spec data under ADR-0001's
+> Tier A provision and not an extraction from a copyleft project. The
+> decoders themselves are original code written against those documents
+> and against the QuickTime File Format specification for the `ima4`
+> packet layout; ffmpeg is the differential oracle and the fixture
+> generator only, and its source was not consulted. The two places the
+> documents are silent (the WAV layout's multiply form, and QuickTime's
+> predictor carry across blocks) were established black-box, by
+> measuring the reference binary's output against both candidate
+> readings.
+
+> **codec/g711**: no table is ported. ITU-T Recommendation G.711 (1988)
+> states the segment structure and the bit inversions of both laws, and
+> the 256-entry expansion tables are computed from that structure at
+> init; the tests check every code against a second closed form written
+> from the same text, so a transcription error has nowhere to hide.
+
 > **codec/alac decoder**: a clean-room port of Apple's *ALAC* reference
 > decoder (Apache-2.0), https://github.com/macosforge/alac. The adaptive
 > Golomb decode (ag_dec.c), the cascaded adaptive-FIR predictor

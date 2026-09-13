@@ -10,6 +10,7 @@ import (
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/audio"
+	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/format"
@@ -523,6 +524,17 @@ func directPlayable(req *streamRequest) bool {
 		return false
 	case p.format != "auto" && p.format != req.info.Container:
 		return false
+	case companded(track.Codec):
+		// G.711 and the two ADPCM families, in whichever of the three
+		// containers carries them. No general-purpose player decodes any of
+		// them, so shipping the original bytes reads as a broken file rather
+		// than as a refusal, and the transcode rung serves the same audio as
+		// PCM. Keyed on the codec and not on the container, which is what the
+		// first version of this got wrong: the driver table names one
+		// container "mp4" for both .mp4 and .mov, so a container test that
+		// listed wav and aiff never fired for the .mov spelling of exactly
+		// these four codecs.
+		return false
 	case p.rate != 0 && p.rate != track.Fmt.Rate:
 		return false
 	case p.ch != 0 && p.ch != track.Fmt.Channels:
@@ -554,6 +566,17 @@ func directPlayable(req *streamRequest) bool {
 		}
 	}
 	return true
+}
+
+// companded reports whether a codec is one no general-purpose player decodes
+// from a file it is handed directly. It is the four this tree reads and does
+// not write: two G.711 laws and two ADPCM families.
+func companded(id codec.ID) bool {
+	switch id {
+	case codec.ALaw, codec.MuLaw, codec.IMAADPCM, codec.MSADPCM:
+		return true
+	}
+	return false
 }
 
 // checkIdentity enforces ADR-0003 source identity: a signed URL must

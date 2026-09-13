@@ -1,16 +1,27 @@
 // Package aiff reads and writes AIFF and AIFF-C, the Apple/SGI audio
 // container. Reading covers the PCM compression types found in real
-// libraries: NONE and twos (big-endian integers), sowt (little-endian
-// integers), raw (offset-binary 8-bit), and fl32/fl64 floats. Writing
-// produces plain AIFF for big-endian integer PCM and AIFF-C for floats.
+// libraries (NONE and twos for big-endian integers, sowt for little-endian
+// ones, in24 and in32 at their own widths, raw for offset-binary 8-bit, and
+// fl32/fl64 floats) plus three compressed ones: G.711 alaw and ulaw, and
+// Apple's ima4 ADPCM. Writing produces plain AIFF for big-endian integer PCM
+// and AIFF-C for floats, and nothing compressed: those types are lossy
+// codings of what the container already carries losslessly.
+//
+// Compression types are matched case-insensitively, as the reference readers
+// match them: a file spelling one in capitals is the same file.
 //
 // Unlike WAV, AIFF has no streaming convention: FORM and SSND sizes and
 // the COMM frame count all live before the audio data, so the muxer
 // declares NeedsSeek and back-patches at End.
+//
+// One field changes meaning with the compression type, and it is the length:
+// COMM's numSampleFrames counts PACKETS for ima4, not frames, so a 125-packet
+// file declares 125 and holds 8000 samples.
 package aiff
 
 import (
 	"encoding/binary"
+	"strings"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec/pcm"
@@ -26,17 +37,54 @@ const (
 	idFVER = "FVER"
 )
 
-// Compression type FourCCs.
+// Compression type FourCCs, in the canonical spelling parseCOMM folds a
+// file's onto.
 const (
 	compNONE = "NONE"
 	compTwos = "twos"
 	compSowt = "sowt"
 	compRaw  = "raw "
+	compIn24 = "in24"
+	compIn32 = "in32"
 	compFl32 = "fl32"
-	compFL32 = "FL32"
 	compFl64 = "fl64"
-	compFL64 = "FL64"
+	compALaw = "alaw"
+	compULaw = "ulaw"
+	compIMA4 = "ima4"
 )
+
+// foldComp maps a compression type onto its canonical spelling, or returns
+// "" for one this package does not read. Case-insensitive, since AIFF-C
+// writers disagree about the case of every one of these and the reference
+// readers fold too; matching exactly would refuse a file every other reader
+// opens, and refuse it while naming the codec this package decodes.
+func foldComp(comp string) string {
+	switch strings.ToUpper(comp) {
+	case "NONE":
+		return compNONE
+	case "TWOS":
+		return compTwos
+	case "SOWT":
+		return compSowt
+	case "RAW ":
+		return compRaw
+	case "IN24":
+		return compIn24
+	case "IN32":
+		return compIn32
+	case "FL32":
+		return compFl32
+	case "FL64":
+		return compFl64
+	case "ALAW":
+		return compALaw
+	case "ULAW":
+		return compULaw
+	case "IMA4":
+		return compIMA4
+	}
+	return ""
+}
 
 // fverTimestamp is the one defined AIFF-C version (May 23, 1990).
 const fverTimestamp = 0xA2805140

@@ -24,6 +24,17 @@ func TestFixtureSeekSampleExact(t *testing.T) {
 		"sine-s16.oga", "noise-s24.oga",
 		"sine-s16.ape", "noise-s16.ape",
 		"sine-s16.mpc", "noise-s16.mpc",
+		// The companded and block-coded sources. G.711 lands exactly; the
+		// ADPCM ones land on a block and the engine's pre-roll covers the
+		// rest. The ima4 pair is the interesting one: its decoder carries
+		// state across blocks, so the demuxer restarts at the file's head and
+		// the pre-roll runs the whole linear decode, which is exactly the
+		// property this test states (the reference IS the linear decode).
+		"sine-alaw.wav", "sine-ulaw.wav",
+		"sine-ima.wav", "sine-ima-stereo.wav",
+		"sine-msadpcm.wav", "sine-msadpcm-stereo.wav",
+		"sine-alaw.aifc", "sine-ulaw.aifc",
+		"sine-ima4.aifc", "sine-ima4-stereo.aifc",
 	} {
 		t.Run(name, func(t *testing.T) {
 			src := fixtureSource(t, name)

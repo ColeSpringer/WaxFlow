@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"bytes"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -178,4 +179,63 @@ func TestStreamMatroskaIsTheStreamingColumn(t *testing.T) {
 			t.Errorf("SeekHead has no entry for %#x", id)
 		}
 	}
+}
+
+// TestCompressedSourcesAreNotDirectPlayed pins rung 1's codec gate.
+//
+// The .wav, .aiff and .mov containers all carry more than PCM now (G.711 and
+// both ADPCM families), and no general-purpose player decodes any of the four
+// from the file it is handed, so serving the original bytes ships something
+// the client cannot play and it reads as a broken file rather than a refusal.
+//
+// Both spellings are here because the first version of the gate tested the
+// container name and missed the second: the driver table calls one container
+// "mp4" for both .mp4 and .mov, so a .mov was direct-played while the .wav
+// beside it was not.
+//
+// The assertion is on the bytes rather than a metric: what makes this right is
+// that the response is PCM, and a response that merely took a different rung
+// could still be A-law.
+func TestCompressedSourcesAreNotDirectPlayed(t *testing.T) {
+	for _, name := range []string{"sine-alaw.wav", "ima4.mov"} {
+		t.Run(name, func(t *testing.T) {
+			env := newTestEnv(t, nil)
+			source, err := os.ReadFile(filepath.Join(env.root, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp := env.get(t, "/stream?src=lib/"+name+"&format=auto", nil)
+			body := readBody(t, resp)
+			if resp.StatusCode != 200 {
+				t.Fatalf("request = %d", resp.StatusCode)
+			}
+			if bytes.Equal(body, source) {
+				t.Fatal("the source was served as its own bytes")
+			}
+			if tag := wavFormatTag(t, body); tag != 0x0001 {
+				t.Errorf("served WAV carries format tag %#04x, want PCM's 0x0001", tag)
+			}
+		})
+	}
+}
+
+// wavFormatTag reads wFormatTag out of a WAV's fmt chunk.
+func wavFormatTag(t *testing.T, raw []byte) uint16 {
+	t.Helper()
+	for off := 12; off+8 <= len(raw); {
+		size := int(binary.LittleEndian.Uint32(raw[off+4:]))
+		if string(raw[off:off+4]) == "fmt " {
+			if off+10 > len(raw) {
+				t.Fatal("truncated fmt chunk")
+			}
+			return binary.LittleEndian.Uint16(raw[off+8:])
+		}
+		next := off + 8 + size + size&1
+		if next <= off {
+			break
+		}
+		off = next
+	}
+	t.Fatal("no fmt chunk in the served WAV")
+	return 0
 }

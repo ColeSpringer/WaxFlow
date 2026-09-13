@@ -224,14 +224,18 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 			foundCodecs = append(foundCodecs, unnamedCodec)
 			continue
 		}
-		if d.fragmented && t.unitBytes > 0 {
-			// Byte-linear samples in a fragmented movie. The fragment path is
+		if d.fragmented && t.unitDur == 1 && t.unitBytes > 0 {
+			// A per-FRAME sample in a fragmented movie. The fragment path is
 			// per-sample by construction, so a trun describing this track
-			// would carry one entry per FRAME, tens of thousands a second, and
-			// nothing writes one. Skipped here rather than refused after the
-			// pick: this track being unreadable must not take a movie's other,
-			// decodable audio track down with it, which is the rule the
-			// paragraph above states.
+			// would carry one entry per frame, tens of thousands a second, and
+			// nothing writes one. The gate is the unit's DURATION and not
+			// merely byte-linearity, which is what it used to be: an ADPCM
+			// sample is a block of dozens of frames, so its trun is an
+			// ordinary size, and ffmpeg writes such a movie for
+			// `-c:a adpcm_ima_qt -movflags empty_moov`. Skipped here rather
+			// than refused after the pick: this track being unreadable must
+			// not take a movie's other, decodable audio track down with it,
+			// which is the rule the paragraph above states.
 			foundCodecs = append(foundCodecs, string(t.codec)+" in a fragmented movie")
 			named++
 			continue
@@ -325,6 +329,15 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		d.fragOff = d.fragStart
 	} else {
 		delay, padding, samples, advisory = d.gapless(sel)
+		if sel.unitDur > 1 && !advisory {
+			// A block codec's decoder emits whole blocks, and the timeline
+			// ends inside the last one, so the sample table's total is a hard
+			// length rather than an observation: without it the decode runs
+			// up to a block past the length everything else reports. Not set
+			// where the timeline was rescaled, since the total is a rounded
+			// number there and trimming to it would cut real audio.
+			exact = true
+		}
 	}
 	d.track = container.Track{
 		Codec:           sel.codec,
@@ -349,7 +362,8 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 // '.mp3' fourcc, and uncompressed PCM in either family's spelling.
 func decodableAudio(id codec.ID) bool {
 	switch id {
-	case codec.ALAC, codec.AACLC, codec.HEAAC, codec.Opus, codec.FLAC, codec.MP3, codec.PCM:
+	case codec.ALAC, codec.AACLC, codec.HEAAC, codec.Opus, codec.FLAC, codec.MP3, codec.PCM,
+		codec.ALaw, codec.MuLaw, codec.IMAADPCM, codec.MSADPCM:
 		return true
 	}
 	return false
@@ -481,11 +495,29 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	if d.seekPreroll > 0 {
 		sample = max(sample-d.seekPreroll, 0)
 	}
+	if d.fragmented && d.sel.carryState {
+		// Ahead of the ordinary fragmented branch because the reason is the
+		// codec's and not the sample table's: the landing below applies here
+		// too, and the fragmented walk reaches it through its own restart.
+		return d.seekFragmented(0)
+	}
 	if d.fragmented {
 		return d.seekFragmented(sample)
 	}
 	st := &d.sel.st
 	if st.total == 0 {
+		return 0, nil
+	}
+	if d.sel.carryState {
+		// Apple's ima4: the decoder's predictor crosses block boundaries and a
+		// block header restates only its top nine bits, so a decode begun at
+		// any block but the first sits up to 127 LSB from the linear decode
+		// and stays there. Landing at the start is the only exact answer;
+		// format.Media then decodes and discards up to the target, which
+		// costs about a second per hour of stereo 44.1 kHz audio. Making that
+		// cheaper means checkpointing decoder state, never starting fresh at
+		// a block.
+		d.cur, d.curChunk = 0, 0
 		return 0, nil
 	}
 	// A uniform table needs no branch of its own here, and had one: its single

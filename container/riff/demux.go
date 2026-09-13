@@ -7,9 +7,12 @@ import (
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/adpcm"
+	"github.com/colespringer/waxflow/codec/g711"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/internal/codecname"
+	"github.com/colespringer/waxflow/container/internal/waveformat"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -34,17 +37,37 @@ type DemuxerOptions struct {
 	Strict bool
 }
 
-// Demuxer reads one PCM track from a WAV source.
+// Demuxer reads one audio track from a WAV source.
 type Demuxer struct {
 	src  container.Source
 	opts DemuxerOptions
 
-	track      container.Track
-	frameBytes int
+	track    container.Track
+	payload  blockReader
+	warnings []container.Warning
+	readBuf  []byte
+}
+
+// blockReader walks the data chunk as a run of equal units.
+//
+// A unit is whatever the codec addresses its payload by: one frame for PCM
+// and G.711, one block for the ADPCM families. That is the only difference
+// between them at this level, which is why one walk serves all four: the
+// payload is a flat array of fixed-size units either way, and the sample
+// timeline is the unit index times what a unit decodes to.
+type blockReader struct {
 	dataOff    int64
-	pos        int64 // next frame to read
-	warnings   []container.Warning
-	readBuf    []byte
+	unitBytes  int64
+	unitFrames int64
+	units      int64
+	pos        int64 // next unit to read
+}
+
+// perPacket is how many units one packet carries: the pipeline's working
+// size, in units, and never fewer than one. For PCM this is the same
+// audio.StandardChunk frames the reader has always delivered.
+func (r *blockReader) perPacket() int64 {
+	return max(int64(audio.StandardChunk)/r.unitFrames, 1)
 }
 
 // NewDemuxer parses the headers of a WAV source. The returned Demuxer
@@ -86,6 +109,30 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	return nil
 }
 
+// note records a Warning that Strict must not escalate: this build doing
+// something with a well-formed file that a caller should know about, rather
+// than damage in the file. See [container.Note].
+func (d *Demuxer) note(off int64, format string, args ...any) {
+	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
+}
+
+// waveFormat is what a fmt chunk resolves to: the codec, the configuration
+// blob its decoder takes, the pipeline format, and the geometry of one
+// addressable unit of payload.
+type waveFormat struct {
+	codec      codec.ID
+	config     []byte
+	fmt        audio.Format
+	unitBytes  int
+	unitFrames int
+	// sourceBits is Track.SourceBitDepth: the depth the file stores samples
+	// at where Fmt.BitDepth does not say it, 0 where it does.
+	sourceBits int
+	// factIsLength marks a codec whose last unit over-produces, so the fact
+	// chunk's count is a hard length rather than a cross-check.
+	factIsLength bool
+}
+
 func (d *Demuxer) parse() error {
 	size := d.src.Size()
 	var head [12]byte
@@ -102,10 +149,10 @@ func (d *Demuxer) parse() error {
 		ds64SampleCount uint64
 		haveDS64        bool
 		fmtSeen         bool
-		cfg             pcm.Config
-		rate, channels  int
-		layout          audio.ChannelMask
 		dataBytes       int64 = -1
+		factSamples     int64 = -1
+		factSeen        bool
+		wf              waveFormat
 		streamingData   bool
 	)
 
@@ -166,11 +213,31 @@ func (d *Demuxer) parse() error {
 				return container.ShortRead("wav: reading fmt", err)
 			}
 			var err error
-			cfg, rate, channels, layout, err = d.parseFmt(payload, off)
-			if err != nil {
+			if wf, err = d.parseFmt(payload, off); err != nil {
 				return err
 			}
 			fmtSeen = true
+		case idFact:
+			// The count of samples the stream decodes to. Optional for PCM
+			// and required for every other tag, which is what decides below
+			// whether it is read at all.
+			//
+			// A chunk too short or past the end of the file is passed over
+			// rather than reported: absent is a defined answer for every
+			// codec here, the generic walk below already names a chunk that
+			// runs off the end, and warning about the optional form would put
+			// "input damage" on PCM files that open everywhere.
+			if factSeen || chunkSize < 4 || off+8+4 > size {
+				break
+			}
+			var p [4]byte
+			if err := container.ReadFull(d.src, p[:], off+8); err != nil {
+				return container.ShortRead("wav: reading fact", err)
+			}
+			factSeen = true
+			if n := int64(le.Uint32(p[:])); n != size32Unknown {
+				factSamples = n
+			}
 		case idData:
 			if dataBytes >= 0 {
 				if err := d.warn(off, "extra data chunk ignored"); err != nil {
@@ -178,17 +245,17 @@ func (d *Demuxer) parse() error {
 				}
 				break
 			}
-			d.dataOff = off + 8
+			d.payload.dataOff = off + 8
 			switch {
 			case chunkSize == size32Unknown && haveDS64:
 				// ds64 sizes are 64-bit and file-supplied: bound against
 				// the file before converting, or a huge value wraps int64
 				// negative and dodges the clamp.
-				if ds64DataSize > uint64(size-d.dataOff) {
+				if ds64DataSize > uint64(size-d.payload.dataOff) {
 					if err := d.warn(off, "ds64 data size %d exceeds file, clamped", ds64DataSize); err != nil {
 						return err
 					}
-					dataBytes = size - d.dataOff
+					dataBytes = size - d.payload.dataOff
 				} else {
 					dataBytes = int64(ds64DataSize)
 				}
@@ -197,13 +264,13 @@ func (d *Demuxer) parse() error {
 				if err := d.warn(off, "streaming data size, clamped to end of file"); err != nil {
 					return err
 				}
-				dataBytes = size - d.dataOff
+				dataBytes = size - d.payload.dataOff
 				streamingData = true
-			case d.dataOff+chunkSize > size:
+			case d.payload.dataOff+chunkSize > size:
 				if err := d.warn(off, "data chunk size %d exceeds file, clamped", chunkSize); err != nil {
 					return err
 				}
-				dataBytes = size - d.dataOff
+				dataBytes = size - d.payload.dataOff
 			default:
 				dataBytes = chunkSize
 			}
@@ -235,76 +302,126 @@ func (d *Demuxer) parse() error {
 		return malformed("no data chunk")
 	}
 
-	d.frameBytes = cfg.BytesPerFrame(channels)
-	if rem := dataBytes % int64(d.frameBytes); rem != 0 {
-		if err := d.warn(d.dataOff, "%d trailing bytes are not a whole frame, ignored", rem); err != nil {
+	unitBytes := int64(wf.unitBytes)
+	if rem := dataBytes % unitBytes; rem != 0 {
+		if err := d.warn(d.payload.dataOff, "%d trailing bytes are not a whole %s, ignored", rem, unitName(wf)); err != nil {
 			return err
 		}
 		dataBytes -= rem
 	}
-	samples := dataBytes / int64(d.frameBytes)
-	if haveDS64 && ds64SampleCount != 0 && ds64SampleCount != uint64(samples) {
-		if err := d.warn(0, "ds64 sample count %d disagrees with data size (%d frames)", ds64SampleCount, samples); err != nil {
+	units := dataBytes / unitBytes
+	capacity := units * int64(wf.unitFrames)
+	samples := capacity
+	exact := false
+	switch {
+	case factSamples < 0:
+		// Nothing to compare against; the payload is the only statement of
+		// the length.
+	case wf.codec == codec.PCM:
+		// Ignored, deliberately. The format specification makes the chunk
+		// REQUIRED for every tag but PCM and optional for that one, so a PCM
+		// file's is a field writers fill in when they feel like it and get
+		// wrong when they do; the payload states the same number exactly.
+	case wf.factIsLength:
+		// The last block decodes whole and the stream ends inside it, so the
+		// count is a truncation instruction rather than an observation. It is
+		// believed only where it lands inside that last block, which is the
+		// only place a real one can land: a count further down than that
+		// describes blocks the file went to the trouble of coding and then
+		// disclaimed, and a zero or unpatched field would otherwise empty the
+		// track silently and call the answer exact.
+		switch {
+		case factSamples > capacity:
+			if err := d.warn(0, "fact declares %d samples, the data holds %d; clamped", factSamples, capacity); err != nil {
+				return err
+			}
+		case capacity-factSamples >= int64(wf.unitFrames):
+			if err := d.warn(0, "fact declares %d samples, %d short of the %d the data holds; ignored",
+				factSamples, capacity-factSamples, capacity); err != nil {
+				return err
+			}
+		default:
+			samples = factSamples
+			exact = true
+		}
+	case factSamples != capacity:
+		// A byte-linear payload states its own length exactly, and for a
+		// compressed tag the chunk is required rather than optional, so the
+		// two disagreeing is one of them being wrong.
+		if err := d.warn(0, "fact declares %d samples, the data holds %d", factSamples, capacity); err != nil {
+			return err
+		}
+	}
+	if haveDS64 && ds64SampleCount != 0 && ds64SampleCount != uint64(capacity) {
+		if err := d.warn(0, "ds64 sample count %d disagrees with data size (%d frames)", ds64SampleCount, capacity); err != nil {
 			return err
 		}
 	}
 
-	cfgBytes, err := cfg.MarshalBinary()
-	if err != nil {
-		return err
-	}
-	f := cfg.PCMFormat(rate, channels, layout)
-	if err := f.Valid(); err != nil {
-		return container.UnusableFormat("wav", f, err)
-	}
+	d.payload.unitBytes = unitBytes
+	d.payload.unitFrames = int64(wf.unitFrames)
+	d.payload.units = units
 	d.track = container.Track{
-		Codec:       codec.PCM,
-		CodecConfig: cfgBytes,
-		Fmt:         f,
-		Samples:     samples,
-		Default:     true,
-	}
-	// audio.Format carries floats as float32, so a 64-bit float source
-	// decodes at BitDepth 32. The file's own depth is not lost, it just has
-	// nowhere in the format to live; recorded here so probe reports what the
-	// source holds rather than what the pipeline runs on. Integer depths need
-	// no such note: ValidBits already puts the source depth in Fmt.BitDepth.
-	if cfg.Encoding == pcm.Float && cfg.Bits != f.BitDepth {
-		d.track.SourceBitDepth = cfg.Bits
+		Codec:          wf.codec,
+		CodecConfig:    wf.config,
+		Fmt:            wf.fmt,
+		Samples:        samples,
+		SamplesExact:   exact,
+		SourceBitDepth: wf.sourceBits,
+		Default:        true,
 	}
 	return nil
 }
 
-// parseFmt maps a fmt chunk payload onto a wire config and stream
-// parameters.
-func (d *Demuxer) parseFmt(b []byte, off int64) (cfg pcm.Config, rate, channels int, layout audio.ChannelMask, err error) {
+// unitName names a unit for a message, so a trailing-bytes warning says
+// which kind of boundary the file stopped short of.
+func unitName(wf waveFormat) string {
+	if wf.unitFrames > 1 {
+		return "block"
+	}
+	return "frame"
+}
+
+// parseFmt maps a fmt chunk payload onto a codec, its configuration, and the
+// geometry of one addressable unit.
+//
+// The per-tag arms own the fields whose meaning is the tag's. wBitsPerSample
+// is PCM's own geometry and reads 4 for ADPCM, 8 for G.711 and 0 for a
+// compressed tag that states nothing (ffmpeg writes 0 for MP2 and MP3), so
+// judging it ahead of the switch would refuse a well-formed file with the
+// wrong code and without naming what it holds. nBlockAlign is the same story:
+// for PCM it is a derived number this reader recomputes, and for the block
+// codecs it is the block size everything else is measured from.
+func (d *Demuxer) parseFmt(b []byte, off int64) (waveFormat, error) {
+	var wf waveFormat
 	tag := le.Uint16(b)
-	channels = int(le.Uint16(b[2:]))
+	channels := int(le.Uint16(b[2:]))
 	rate64 := int64(le.Uint32(b[4:]))
 	blockAlign := int(le.Uint16(b[12:]))
 	bits := int(le.Uint16(b[14:]))
 
 	if channels < 1 {
-		return cfg, 0, 0, 0, malformed("%d channels", channels)
+		return wf, malformed("%d channels", channels)
 	}
 	if channels > audio.MaxChannels {
-		return cfg, 0, 0, 0, unsupported("%d channels (supported: 1..%d)", channels, audio.MaxChannels)
+		return wf, unsupported("%d channels (supported: 1..%d)", channels, audio.MaxChannels)
 	}
 	// Bound in int64 so acceptance does not depend on the platform's int
 	// width (a rate above MaxInt32 would wrap negative on 32-bit builds).
 	if rate64 <= 0 || rate64 > math.MaxInt32 {
-		return cfg, 0, 0, 0, malformed("sample rate %d", rate64)
+		return wf, malformed("sample rate %d", rate64)
 	}
-	rate = int(rate64)
+	rate := int(rate64)
 
 	validBits := 0
-	layout = audio.DefaultLayout(channels)
-	if tag == tagExtensible {
+	layout := audio.DefaultLayout(channels)
+	extensible := tag == tagExtensible
+	if extensible {
 		if len(b) < 40 {
-			return cfg, 0, 0, 0, malformed("extensible fmt chunk of %d bytes, want 40", len(b))
+			return wf, malformed("extensible fmt chunk of %d bytes, want 40", len(b))
 		}
 		if bits%8 != 0 {
-			return cfg, 0, 0, 0, malformed("extensible container of %d bits is not whole bytes", bits)
+			return wf, malformed("extensible container of %d bits is not whole bytes", bits)
 		}
 		validBits = int(le.Uint16(b[18:]))
 		if validBits == 0 {
@@ -316,44 +433,95 @@ func (d *Demuxer) parseFmt(b []byte, off int64) (cfg pcm.Config, rate, channels 
 			// Common in the wild; keep the guessed default layout.
 		case mask.Count() != channels:
 			if werr := d.warn(off, "channel mask %v does not cover %d channels, ignored", mask, channels); werr != nil {
-				return cfg, 0, 0, 0, werr
+				return wf, werr
 			}
 		default:
 			layout = mask
 		}
 		subTag := le.Uint16(b[24:])
 		if [14]byte(b[26:40]) != guidTail {
-			return cfg, 0, 0, 0, malformed("unknown extensible subformat GUID")
+			return wf, malformed("unknown extensible subformat GUID")
 		}
 		tag = subTag
 	}
 
-	containerBits := pcm.ContainerBits(bits)
 	switch tag {
-	case tagPCM:
-		// wBitsPerSample is PCM's own geometry, so it is judged here rather
-		// than ahead of the tag: a compressed tag writes 0 into the field
-		// legitimately (ffmpeg does for both MP2 and MP3), and calling such a
-		// header damaged would refuse a well-formed file with the wrong code
-		// and without naming what it holds.
-		if bits < 1 || bits > 64 {
-			return cfg, 0, 0, 0, malformed("%d bits per sample", bits)
+	case tagPCM, tagIEEEFloat:
+		cfg, err := d.pcmConfig(tag, bits, validBits)
+		if err != nil {
+			return wf, err
 		}
-		cfg = pcm.Config{Encoding: pcm.SignedInt, Bits: containerBits}
-		if containerBits == 8 {
-			cfg.Encoding = pcm.UnsignedInt
+		blob, err := cfg.MarshalBinary()
+		if err != nil {
+			return wf, err
 		}
-		switch {
-		case validBits != 0 && validBits != containerBits:
-			cfg.ValidBits = validBits
-		case bits != containerBits:
-			cfg.ValidBits = bits // for example 20 valid bits in 24-bit words
+		wf = waveFormat{
+			codec: codec.PCM, config: blob,
+			fmt:       cfg.PCMFormat(rate, channels, layout),
+			unitBytes: cfg.BytesPerFrame(channels), unitFrames: 1,
 		}
-	case tagIEEEFloat:
-		if bits != 32 && bits != 64 {
-			return cfg, 0, 0, 0, malformed("%d-bit float", bits)
+		if cfg.Encoding == pcm.Float && cfg.Bits != wf.fmt.BitDepth {
+			// audio.Format carries floats as float32, so a 64-bit float source
+			// decodes at BitDepth 32. The file's own depth is not lost, it just
+			// has nowhere in the format to live; recorded here so probe reports
+			// what the source holds rather than what the pipeline runs on.
+			// Integer depths need no such note: ValidBits already puts the
+			// source depth in Fmt.BitDepth.
+			wf.sourceBits = cfg.Bits
 		}
-		cfg = pcm.Config{Encoding: pcm.Float, Bits: bits}
+	case tagALaw, tagMuLaw:
+		law := g711.ALaw
+		id := codec.ALaw
+		if tag == tagMuLaw {
+			law, id = g711.MuLaw, codec.MuLaw
+		}
+		// One byte per sample per channel, whatever the field says. A
+		// companding law has exactly one width, so a header stating another
+		// is describing a stream that does not exist rather than one this
+		// build cannot read: damage, and the samples are still where 8 bits
+		// put them. (AIFF-C is looser about the same field, and for a reason
+		// that does not apply here; see container/aiff.)
+		if bits != 8 {
+			if werr := d.warn(off, "%v declares %d bits per sample, which is 8 by definition", law, bits); werr != nil {
+				return wf, werr
+			}
+		}
+		wf = waveFormat{
+			codec: id,
+			fmt:   g711.Format(rate, channels, layout),
+			// A G.711 sample is one byte, so the payload is byte-linear the
+			// way PCM's is and a frame is the unit.
+			unitBytes: channels, unitFrames: 1,
+			sourceBits: g711.SourceBitDepth,
+		}
+	case tagIMAADPCM, tagMSADPCM:
+		if extensible {
+			// The extensible extra IS the extensible struct, so there is
+			// nowhere left for the block geometry these tags state.
+			return wf, unsupported("%s inside a WAVE_FORMAT_EXTENSIBLE header, which leaves no room for its block geometry",
+				codecname.WaveFormat(tag))
+		}
+		cfg, err := d.adpcmConfig(b, off)
+		if err != nil {
+			return wf, err
+		}
+		blob, err := cfg.MarshalBinary()
+		if err != nil {
+			return wf, err
+		}
+		id := codec.IMAADPCM
+		if tag == tagMSADPCM {
+			id = codec.MSADPCM
+		}
+		wf = waveFormat{
+			codec: id, config: blob,
+			fmt:       cfg.Format(rate, layout),
+			unitBytes: cfg.BlockBytes(), unitFrames: cfg.SamplesPerBlock,
+			// A block codec's length is the fact chunk's to state, since the
+			// last block over-produces past it.
+			factIsLength: true,
+			sourceBits:   adpcm.SourceBitDepth,
+		}
 	default:
 		// Named where a name is known, so the refusal says what the file
 		// holds rather than only that it is not PCM. Scoped to the container
@@ -361,57 +529,119 @@ func (d *Demuxer) parseFmt(b []byte, off int64) (cfg pcm.Config, rate, channels 
 		// same binary decodes elsewhere (MP3 bare and in MP4, WMA in ASF), so
 		// "this build has no decoder for it" would be false.
 		if name := codecname.WaveFormat(tag); name != "" {
-			return cfg, 0, 0, 0, unsupported("this build does not read %s (format tag 0x%04X) from a WAV", name, tag)
+			return wf, unsupported("this build does not read %s (format tag 0x%04X) from a WAV", name, tag)
 		}
-		return cfg, 0, 0, 0, unsupported("this build does not read format tag 0x%04X from a WAV", tag)
-	}
-	if err := cfg.Validate(); err != nil {
-		return cfg, 0, 0, 0, err
+		return wf, unsupported("this build does not read format tag 0x%04X from a WAV", tag)
 	}
 
-	if want := cfg.BytesPerFrame(channels); blockAlign != want {
-		if werr := d.warn(off, "block align %d, computed %d; using computed", blockAlign, want); werr != nil {
-			return cfg, 0, 0, 0, werr
+	if blockAlign != wf.unitBytes {
+		if werr := d.warn(off, "block align %d, computed %d; using computed", blockAlign, wf.unitBytes); werr != nil {
+			return wf, werr
 		}
 	}
-	return cfg, rate, channels, layout, nil
+	if err := wf.fmt.Valid(); err != nil {
+		return wf, container.UnusableFormat("wav", wf.fmt, err)
+	}
+	return wf, nil
 }
 
-// Tracks returns the single PCM track.
+// pcmConfig reads the two uncompressed tags' geometry.
+func (d *Demuxer) pcmConfig(tag uint16, bits, validBits int) (pcm.Config, error) {
+	var cfg pcm.Config
+	containerBits := pcm.ContainerBits(bits)
+	if tag == tagIEEEFloat {
+		if bits != 32 && bits != 64 {
+			return cfg, malformed("%d-bit float", bits)
+		}
+		cfg = pcm.Config{Encoding: pcm.Float, Bits: bits}
+		return cfg, cfg.Validate()
+	}
+	if bits < 1 || bits > 64 {
+		return cfg, malformed("%d bits per sample", bits)
+	}
+	cfg = pcm.Config{Encoding: pcm.SignedInt, Bits: containerBits}
+	if containerBits == 8 {
+		cfg.Encoding = pcm.UnsignedInt
+	}
+	switch {
+	case validBits != 0 && validBits != containerBits:
+		cfg.ValidBits = validBits
+	case bits != containerBits:
+		cfg.ValidBits = bits // for example 20 valid bits in 24-bit words
+	}
+	return cfg, cfg.Validate()
+}
+
+// adpcmConfig reads a block codec's geometry out of the fmt chunk, which is
+// a WAVEFORMATEX. The rules live in container/internal/waveformat, since a
+// QuickTime "ms" sample entry states the same geometry the same way; what is
+// local is where the findings land, at this chunk's offset and under this
+// package's Strict rule.
+func (d *Demuxer) adpcmConfig(b []byte, off int64) (adpcm.Config, error) {
+	ex, ok := waveformat.Parse(b)
+	if !ok {
+		return adpcm.Config{}, malformed("fmt chunk of %d bytes is not a WAVEFORMATEX", len(b))
+	}
+	cfg, found, err := waveformat.ADPCM(ex, "wav: ")
+	for _, f := range found {
+		if f.Note {
+			d.note(off, "%s", f.Msg)
+			continue
+		}
+		if werr := d.warn(off, "%s", f.Msg); werr != nil {
+			return cfg, werr
+		}
+	}
+	return cfg, err
+}
+
+// Tracks returns the single audio track.
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns damage tolerated during parsing.
 func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
 
-// ReadPacket yields up to audio.StandardChunk frames of raw interleaved
-// PCM. Packet data is reused across calls.
+// ReadPacket yields the next run of units: up to audio.StandardChunk frames
+// of raw interleaved PCM, or the blocks that decode to about as many. Packet
+// data is reused across calls.
 func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
-	remaining := d.track.Samples - d.pos
+	r := &d.payload
+	remaining := r.units - r.pos
 	if remaining <= 0 {
 		return io.EOF
 	}
-	frames := int64(audio.StandardChunk)
-	if frames > remaining {
-		frames = remaining
-	}
-	need := int(frames) * d.frameBytes
+	n := min(r.perPacket(), remaining)
+	need := int(n * r.unitBytes)
 	if cap(d.readBuf) < need {
 		d.readBuf = make([]byte, need)
 	}
 	d.readBuf = d.readBuf[:need]
-	if err := container.ReadFull(d.src, d.readBuf, d.dataOff+d.pos*int64(d.frameBytes)); err != nil {
+	if err := container.ReadFull(d.src, d.readBuf, r.dataOff+r.pos*r.unitBytes); err != nil {
 		return container.ShortRead("wav: reading data", err)
 	}
 	*pkt = container.Packet{
-		Track:  0,
-		Packet: codec.Packet{Data: d.readBuf, PTS: d.pos, Dur: frames, Sync: true},
+		Track: 0,
+		Packet: codec.Packet{
+			Data: d.readBuf,
+			PTS:  r.pos * r.unitFrames,
+			Dur:  n * r.unitFrames,
+			// Every unit is independently decodable: a PCM frame trivially,
+			// and an ADPCM block because its header restates the coder state.
+			// The one layout that does not restate it, Apple's ima4, is not a
+			// thing a WAV can carry.
+			Sync: true,
+		},
 	}
-	d.pos += frames
+	r.pos += n
 	return nil
 }
 
-// SeekSample repositions to the given sample. Every PCM frame is a sync
-// point, so landing is exact; targets past the end land at the end and
+// SeekSample repositions to the unit holding the given sample.
+//
+// Landing is exact for PCM and G.711, whose unit is one frame, and on the
+// block boundary at or before the target otherwise; format.Media decodes and
+// discards the remainder either way, so the delivered position is
+// sample-exact for all four codecs. Targets past the end land at the end and
 // the next ReadPacket returns io.EOF.
 func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	if track != 0 {
@@ -420,9 +650,11 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	if sample < 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, "wav: negative seek target")
 	}
-	if sample > d.track.Samples {
-		sample = d.track.Samples
-	}
-	d.pos = sample
-	return sample, nil
+	// Clamped to the track's length and not to the payload's, which for a
+	// fact-trimmed block track is strictly larger: container.Seeker's landing
+	// is authoritative for its callers, and one past the end of the track is a
+	// position the track does not have.
+	r := &d.payload
+	r.pos = min(min(sample, d.track.Samples)/r.unitFrames, r.units)
+	return r.pos * r.unitFrames, nil
 }

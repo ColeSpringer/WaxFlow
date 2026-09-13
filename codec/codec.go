@@ -48,6 +48,23 @@ const (
 	// transform codec, with its own table set, its own gates and its own
 	// revision lifecycle.
 	WMAVoice ID = "wmavoice"
+	// ALaw and MuLaw are the two G.711 companding laws, and they are two IDs
+	// rather than one with the law in a config. The WMA rule above puts a
+	// version in the config because nothing outside the decoder names the
+	// versions apart; here everything does. A WAVE format tag, an AIFF-C
+	// compression type, a QuickTime fourcc, ffprobe (pcm_alaw/pcm_mulaw) and
+	// waxlabel all state the law, so an ID that did not would be the only
+	// name in the chain that has to be unpacked to be read.
+	ALaw  ID = "alaw"
+	MuLaw ID = "mulaw"
+	// IMAADPCM and MSADPCM are the two 4-bit ADPCM families, separate for the
+	// WMALossless reason: different predictors, different block layouts and
+	// their own revision lifecycles, so a fix to one must not invalidate
+	// cached decodes of the other (ADR-0004). The IMA layouts (WAV and
+	// QuickTime) DO ride in the config, since they are one predictor written
+	// two ways and no name outside the container tells them apart.
+	IMAADPCM ID = "ima-adpcm"
+	MSADPCM  ID = "ms-adpcm"
 )
 
 // Packet is one compressed unit as a codec defines it: a FLAC frame, an

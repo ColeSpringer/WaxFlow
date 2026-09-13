@@ -158,7 +158,7 @@ func soundEntryWith(format string, channels, bits, rate int, children ...[]byte)
 func TestRefusalNamesTheSampleEntryFormat(t *testing.T) {
 	for _, tc := range []struct{ format, want string }{
 		{"MAC3", "MAC3"},
-		{"ms\x00\x02", "ADPCM (ms 0x0002)"},
+		{"ms\x00\x50", "MP2 (ms 0x0050)"},
 		// No name either way: the fourcc as it stands.
 		{"QDM2", "QDM2"},
 	} {

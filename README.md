@@ -41,6 +41,15 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   version 2 `lpcm` flags and its `ms` entries for WAVE format tags 1 and 3,
   plus ISO `ipcm`/`fpcm`; **decode only, and
   writing it there is a non-goal**, a WAV serving every such use better),
+  G.711 A-law and mu-law and both 4-bit ADPCM families (IMA/DVI in its WAV
+  and QuickTime `ima4` layouts, and Microsoft ADPCM), each bit-exact
+  against ffmpeg wherever the container spells it: a WAV format tag, an
+  AIFF-C compression type, or a QuickTime fourcc or `ms` entry in a
+  progressive or fragmented movie
+  (**decode only, and encoding any of them is a non-goal**: they are lossy
+  codings of exactly what a WAV already carries losslessly, so the only
+  reason to write one is a reader that takes nothing else, and every such
+  reader also takes PCM),
   ADTS (implicit HE-AAC detected), Opus (all
   RFC 6716/8251 conformance vectors pass), Vorbis, Ogg, Matroska/WebM,
   WavPack (bit-exact on the official test suite: 8- to 32-bit integers,
@@ -68,7 +77,11 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   reason, the only encoder in existence being LGPL).
   Sample-exact
   seeking everywhere, gapless honored per format (LAME tag, iTunSMPB,
-  edit lists, Ogg pre-skip/end-trim, Matroska CodecDelay). A WMA Pro
+  edit lists, Ogg pre-skip/end-trim, Matroska CodecDelay). One format
+  charges for that exactness: QuickTime `ima4` carries its predictor
+  across blocks and a block header restates only nine bits of it, so a
+  seek decodes from the file's start rather than from the block, at
+  roughly a second per hour of stereo 44.1 kHz audio. A WMA Pro
   stream that sets the low-bit-rate tool no decoder outside Windows
   implements is refused by name, as is the second registered WMA Voice
   tag (0x000B), which no reference decoder reads. A WAV, AIFF-C or

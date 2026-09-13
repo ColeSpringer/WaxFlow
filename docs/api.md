@@ -137,6 +137,10 @@ endpoint then 404s. Text tags are what the container fallback covers.
 `bitDepth` is the depth the **source** stores samples at. It is not
 always the depth the pipeline decodes to: the signal path is float32, so
 a 64-bit float source decodes at 32 bits and reports `bitDepth: 64`.
+The companded and block-coded codecs go the other way: a G.711 track
+reports `bitDepth: 8` and an IMA or MS ADPCM track `bitDepth: 4`, both
+with `sampleType: "int"`, while all three decode to 16-bit samples. Those
+are the numbers `ffprobe` puts in `bits_per_sample` for the same files.
 `sampleType` (`"int"` or `"float"`) is the float discriminator; a client
 must not infer one from a depth.
 
@@ -648,7 +652,7 @@ is:
     {
       "schemaVersion": 1,
       "inputs": ["flac", "wav", "aiff", "ogg", "mp4", "mka", "adts", "ape", "wavpack", "wma", "musepack", "mp3"],
-      "decoders": ["pcm", "flac", "mp3", "alac", "aac-lc", "he-aac", "wavpack", "ape", "wma", "wmalossless", "wmapro", "wmavoice", "musepack", "vorbis", "opus"],
+      "decoders": ["pcm", "alaw", "mulaw", "ima-adpcm", "ms-adpcm", "flac", "mp3", "alac", "aac-lc", "he-aac", "wavpack", "ape", "wma", "wmalossless", "wmapro", "wmavoice", "musepack", "vorbis", "opus"],
       "outputs": [{"name": "wav", "live": true, "exts": ["wav", "wave", "rf64", "bw64"]},
                    {"name": "opus", "live": true, "exts": ["opus"]},
                    {"name": "vorbis", "live": true, "exts": ["ogg", "oga"]},

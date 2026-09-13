@@ -62,9 +62,26 @@ func TestCutServesTheProgressiveRung(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); ct != "audio/ogg" {
 		t.Fatalf("Content-Type = %q, want audio/ogg", ct)
 	}
-	// A live cut is a fresh stream, not the file: no byte ranges.
-	if resp.Header.Get("Accept-Ranges") != "none" {
-		t.Fatalf("live cut Accept-Ranges = %q, want none", resp.Header.Get("Accept-Ranges"))
+	// A live cut is a fresh stream, not the file: no byte ranges. Two shapes
+	// are legal here and the response must be exactly one of them, which is
+	// why this is a switch rather than a condition: a cut this small can
+	// finish before the request attaches a reader (the entry frees itself
+	// once terminal with no reader, so serveStream's loop finds a COMPLETE
+	// entry on its next pass) and is then served from cache, with ranges.
+	// Anything else, including a response missing the header that tells the
+	// two apart, is a failure rather than a case this skips.
+	switch cc, ar := resp.Header.Get("Cache-Control"), resp.Header.Get("Accept-Ranges"); {
+	case cc == "no-store":
+		if ar != "none" {
+			t.Fatalf("live cut Accept-Ranges = %q, want none", ar)
+		}
+	case resp.Header.Get("ETag") != "":
+		if ar != "bytes" {
+			t.Fatalf("cached cut Accept-Ranges = %q, want bytes", ar)
+		}
+	default:
+		t.Fatalf("response is neither the live shape nor the cached one: "+
+			"Cache-Control=%q ETag=%q Accept-Ranges=%q", cc, resp.Header.Get("ETag"), ar)
 	}
 	// The body is a well-formed Ogg stream.
 	if len(body) < 4 || string(body[:4]) != "OggS" {

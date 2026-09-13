@@ -102,6 +102,13 @@ func (d *Demuxer) parseAudioSampleEntry(t *track, format string, body []byte, de
 	if pcmEnt.canon != "" || (isMS && isPCMWaveTag(tag)) {
 		return d.setPCM(t, pcmEnt)
 	}
+	// The companded and block-coded codecs are taken here too, and for the
+	// same two reasons: an "ms" entry names them with a format tag, and their
+	// fourccs are matched case-insensitively. See stsdcodecs.go.
+	pcmEnt.canon = codecFourcc(format)
+	if pcmEnt.canon != "" || (isMS && isCodecWaveTag(tag)) {
+		return d.setCodec(t, pcmEnt)
+	}
 
 	switch format {
 	case "alac":

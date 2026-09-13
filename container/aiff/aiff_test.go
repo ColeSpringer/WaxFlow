@@ -170,30 +170,7 @@ func TestMuxDemuxRoundTrip(t *testing.T) {
 // read-only types the muxer never writes. frames is COMM's numSampleFrames,
 // which several of those types count differently from the payload's length.
 func buildAIFC(comp string, bits int, payload []byte, frames uint32) []byte {
-	var b bytes.Buffer
-	b.WriteString("FORM")
-	b.Write(u32be(0)) // patched below
-	b.WriteString("AIFC")
-	b.WriteString("FVER")
-	b.Write(u32be(4))
-	b.Write(u32be(fverTimestamp))
-	b.WriteString("COMM")
-	b.Write(u32be(24))
-	b.Write(u16be(1)) // mono
-	b.Write(u32be(frames))
-	b.Write(u16be(uint16(bits)))
-	rate := toExt80(8000)
-	b.Write(rate[:])
-	b.WriteString(comp)
-	b.Write([]byte{0, 0})
-	b.WriteString("SSND")
-	b.Write(u32be(uint32(8 + len(payload))))
-	b.Write(u32be(0))
-	b.Write(u32be(0))
-	b.Write(payload)
-	raw := b.Bytes()
-	be.PutUint32(raw[4:], uint32(len(raw)-8))
-	return raw
+	return buildAIFCn(comp, 1, bits, payload, frames)
 }
 
 // TestSowtAndRawDecode covers read-only compression types by hand-building

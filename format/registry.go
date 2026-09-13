@@ -5,9 +5,11 @@ import (
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/aac"
+	"github.com/colespringer/waxflow/codec/adpcm"
 	"github.com/colespringer/waxflow/codec/alac"
 	"github.com/colespringer/waxflow/codec/ape"
 	"github.com/colespringer/waxflow/codec/flac"
+	"github.com/colespringer/waxflow/codec/g711"
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/codec/musepack"
 	"github.com/colespringer/waxflow/codec/opus"
@@ -224,6 +226,20 @@ var decoders = []struct {
 		}
 		return pcm.NewDecoder(cfg, t.Fmt)
 	}},
+	// The two G.711 laws take a row each, since each is a codec ID: the law
+	// is the identity rather than a configuration, so a track carries no
+	// config blob at all and the row's closure is where the law lives.
+	{codec.ALaw, g711.ALawVersion, func(t container.Track) (codec.Decoder, error) {
+		return g711.NewDecoder(g711.ALaw, t.Fmt)
+	}},
+	{codec.MuLaw, g711.MuLawVersion, func(t container.Track) (codec.Decoder, error) {
+		return g711.NewDecoder(g711.MuLaw, t.Fmt)
+	}},
+	// Both IMA layouts share this row: the layout rides in the config, the
+	// way WMA's version does, because no name outside the container tells the
+	// WAV and QuickTime spellings apart.
+	{codec.IMAADPCM, adpcm.IMAVersion, newADPCMDecoder},
+	{codec.MSADPCM, adpcm.MSVersion, newADPCMDecoder},
 	{codec.FLAC, flac.Version, func(t container.Track) (codec.Decoder, error) {
 		si, err := flac.ParseStreamInfo(t.CodecConfig)
 		if err != nil {
@@ -345,6 +361,28 @@ func newDecoder(t container.Track) (codec.Decoder, error) {
 	}
 	return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 		fmt.Sprintf("format: no decoder registered for codec %q", t.Codec))
+}
+
+// newADPCMDecoder builds the decoder both ADPCM identities share. The block
+// geometry in the track's config is what discriminates them, so one
+// constructor serves two rows the way newAACDecoder serves two.
+//
+// The layout is checked against the ID the row was chosen for, which is what
+// keeps the two IDs' cache keys honest: without it a track labelled MS ADPCM
+// carrying an IMA config would build an IMA decoder and key its output on the
+// MS revision, which is the drift per-ID versioning exists to prevent
+// (ADR-0004). No in-tree demuxer can produce that pairing; a future one, or a
+// track rebuilt from a sidecar, could.
+func newADPCMDecoder(t container.Track) (codec.Decoder, error) {
+	cfg, err := adpcm.ParseConfig(t.CodecConfig)
+	if err != nil {
+		return nil, err
+	}
+	if want := codec.MSADPCM; (cfg.Layout == adpcm.MS) != (t.Codec == want) {
+		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
+			fmt.Sprintf("format: track codec %q carries a %v config", t.Codec, cfg.Layout))
+	}
+	return adpcm.NewDecoder(cfg, t.Fmt)
 }
 
 // newAACDecoder builds the decoder both AAC identities share: the parsed

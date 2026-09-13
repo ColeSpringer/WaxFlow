@@ -8,6 +8,7 @@ import (
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/adpcm"
 	"github.com/colespringer/waxflow/container"
 )
 
@@ -29,8 +30,15 @@ func FuzzDemux(f *testing.F) {
 	// pcm-ipcm-96k.mp4 reaches the pcmC parse and the zero rate field, so a
 	// mutation there lands on the timescale fallback. All three also reach
 	// parseStsz's constant-size arm, which no longer caps the declared count.
+	//
+	// ima4.mov is in it for the block-coded paths nothing else reaches: a
+	// sample table whose units are blocks rather than frames, the short final
+	// stts run that makes the timeline end inside the last one, and the
+	// version 1 geometry fields ffmpeg writes as three zeros. ima4-frag.mov
+	// is the same codec with no sample table at all, which is the only seed
+	// that reaches the fragmented walk for a unit longer than a frame.
 	for _, name := range []string{"alac-stereo.m4a", "alac-mono-tail.m4a", "mp3.mp4", "mp3.mov",
-		"pcm-in24.mov", "pcm-lpcm.mov", "pcm-ipcm-96k.mp4"} {
+		"pcm-in24.mov", "pcm-lpcm.mov", "pcm-ipcm-96k.mp4", "ima4.mov", "ima4-frag.mov"} {
 		full := fixture(f, name)
 		f.Add(full)
 		f.Add(full[:len(full)/2])
@@ -52,6 +60,20 @@ func FuzzDemux(f *testing.F) {
 		// A chapter track whose sample description is an audio entry: the
 		// shape that reaches the chapter walk through the PCM setter.
 		withTextTrack(buildMovie(soundEntry("sowt", 2, 16, movieTimescale), 4, 64, 0)),
+		// The two "ms" block codecs, whose whole geometry is a WAVEFORMATEX
+		// inside the wave wrapper: a mutation of one of these edits a block
+		// size, a samples-per-block count or a predictor table, none of which
+		// any other seed here carries.
+		movie{entry: soundEntryWith("ms\x00\x11", 1, 4, movieTimescale,
+			waveBox(msADPCMAtom("ms\x00\x11", 0x0011, 1, movieTimescale, 20, 33, adpcm.DefaultCoefs))),
+			unitBytes: 20, frames: 8, sttsDelta: 33}.build(),
+		movie{entry: soundEntryWith("ms\x00\x02", 1, 4, movieTimescale,
+			waveBox(msADPCMAtom("ms\x00\x02", 0x0002, 1, movieTimescale, 20, 28, adpcm.DefaultCoefs))),
+			unitBytes: 20, frames: 8, sttsDelta: 28}.build(),
+		// The G.711 spelling that is a format tag rather than a fourcc.
+		movie{entry: soundEntryWith("ms\x00\x07", 2, 8, movieTimescale,
+			waveBox(msWaveAtom("ms\x00\x07", 0x0007, 2, movieTimescale, 8))),
+			unitBytes: 2, frames: 64}.build(),
 	} {
 		f.Add(seed)
 		f.Add(seed[:len(seed)/2])

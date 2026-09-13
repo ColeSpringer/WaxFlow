@@ -41,6 +41,8 @@ func TestCodecContainerSymmetry(t *testing.T) {
 		"wmapro-encode":      "WMA Pro encoding is a non-goal (README non-goals); decode-only by decision",
 		"wmavoice-encode":    "WMA Voice encoding is a non-goal (README non-goals); decode-only by decision",
 		"mpc-mux":            "Musepack muxing is a non-goal; the container exists only to carry a codec we do not encode",
+		"g711-encode":        "G.711 encoding is a non-goal (README non-goals); decode-only by decision",
+		"adpcm-encode":       "ADPCM encoding is a non-goal (README non-goals); decode-only by decision",
 	}
 	// symmetryNonGoals marks the entries above that are decisions rather than
 	// deferrals, so a closed one reads as "revisit the decision" instead of
@@ -59,9 +61,18 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	// refuses, the only encoder for this one is a Windows component that
 	// cannot be ported at all, and an encoder would be a from-scratch effort
 	// aimed at players that all read something better.
+	// G.711 and ADPCM are one decision covering four codec IDs, and a
+	// different one from the WMA family's: those are decode-only because
+	// nothing can encode them well, these because nothing should. All four
+	// are lossy compressions of exactly the material a WAV carries losslessly
+	// at two to four times the size, so the only reason to write one is to
+	// feed a reader that takes nothing else, and every such reader also takes
+	// PCM in the same container. The read side exists because files in these
+	// formats are out there; the write side would be a way to make more.
 	symmetryNonGoals := map[string]bool{
 		"wma-encode": true, "asf-mux": true, "musepack-encode": true, "mpc-mux": true,
 		"wmalossless-encode": true, "wmapro-encode": true, "wmavoice-encode": true,
+		"g711-encode": true, "adpcm-encode": true,
 	}
 
 	decodes := map[codec.ID]bool{}
@@ -87,6 +98,10 @@ func TestCodecContainerSymmetry(t *testing.T) {
 		codec.WMALossless: "wmalossless-encode",
 		codec.WMAPro:      "wmapro-encode",
 		codec.WMAVoice:    "wmavoice-encode",
+		codec.ALaw:        "g711-encode",
+		codec.MuLaw:       "g711-encode",
+		codec.IMAADPCM:    "adpcm-encode",
+		codec.MSADPCM:     "adpcm-encode",
 	}
 	containerGaps := map[string]string{"wma": "asf-mux", "musepack": "mpc-mux"}
 
@@ -100,9 +115,16 @@ func TestCodecContainerSymmetry(t *testing.T) {
 		"wmalossless-encode": decodes[codec.WMALossless] && !encodes[codec.WMALossless],
 		"wmapro-encode":      decodes[codec.WMAPro] && !encodes[codec.WMAPro],
 		"wmavoice-encode":    decodes[codec.WMAVoice] && !encodes[codec.WMAVoice],
-		"he-aac-encode":      decodes[codec.HEAAC] && !encodes[codec.HEAAC],
-		"wavpack-encode":     decodes[codec.WavPack] && !encodes[codec.WavPack],
-		"ape-encode":         decodes[codec.APE] && !encodes[codec.APE],
+		// Two codec IDs per entry: the gap is one decision, and an entry that
+		// closed for one law and not the other would be a half-landed encoder
+		// nobody meant to write.
+		"g711-encode": (decodes[codec.ALaw] && !encodes[codec.ALaw]) ||
+			(decodes[codec.MuLaw] && !encodes[codec.MuLaw]),
+		"adpcm-encode": (decodes[codec.IMAADPCM] && !encodes[codec.IMAADPCM]) ||
+			(decodes[codec.MSADPCM] && !encodes[codec.MSADPCM]),
+		"he-aac-encode":  decodes[codec.HEAAC] && !encodes[codec.HEAAC],
+		"wavpack-encode": decodes[codec.WavPack] && !encodes[codec.WavPack],
+		"ape-encode":     decodes[codec.APE] && !encodes[codec.APE],
 		// The wv package demuxes but has no muxer wired into any output row.
 		"wv-mux": !containerWritten("wavpack"),
 		// The apen package demuxes but has no muxer wired into any output row.
@@ -304,6 +326,12 @@ var mp4DemuxCodecs = map[codec.ID]bool{
 	// codec has to state somewhere.
 	codec.PCM: true,
 	codec.MP3: true,
+	// Read-only for the same reason, and named one law and one family at a
+	// time because that is how a sample entry spells them.
+	codec.ALaw:     true,
+	codec.MuLaw:    true,
+	codec.IMAADPCM: true,
+	codec.MSADPCM:  true,
 }
 
 // mp4DemuxCoversMux reports whether every codec the mp4 muxer or segmenter

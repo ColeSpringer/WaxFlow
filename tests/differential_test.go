@@ -19,6 +19,7 @@ import (
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/adpcm"
 	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
@@ -27,38 +28,87 @@ import (
 )
 
 // fixtures describes every committed testdata file.
+//
+// srcDepth is Track.SourceBitDepth: what the file stores a sample in where
+// Fmt.BitDepth does not say it (8 for G.711, 4 for both ADPCM families, 64
+// for a float64 source), and 0 where the two agree.
+//
+// tailPadded marks a source whose last block decodes past the length the
+// file declares, so our decode is a strict PREFIX of ffmpeg's: ffmpeg emits
+// whole blocks and ignores the count, and we trim to it. The differential
+// compares the prefix and bounds the excess by one block.
 var fixtures = []struct {
-	name      string
-	container string
-	codec     codec.ID
-	rate      int
-	channels  int
-	sampleTyp audio.SampleType
-	bitDepth  int
-	samples   int64
+	name       string
+	container  string
+	codec      codec.ID
+	rate       int
+	channels   int
+	sampleTyp  audio.SampleType
+	bitDepth   int
+	samples    int64
+	srcDepth   int
+	tailPadded bool
 }{
-	{"sine-u8.wav", "wav", codec.PCM, 44100, 1, audio.Int, 8, 2205},
-	{"sine-s16.wav", "wav", codec.PCM, 44100, 2, audio.Int, 16, 2205},
-	{"sine-s24.wav", "wav", codec.PCM, 48000, 2, audio.Int, 24, 2400},
-	{"sine-s32.wav", "wav", codec.PCM, 48000, 2, audio.Int, 32, 2400},
-	{"sine-f32.wav", "wav", codec.PCM, 48000, 2, audio.Float, 32, 2400},
-	{"sine-f64.wav", "wav", codec.PCM, 44100, 1, audio.Float, 32, 2205},
-	{"sine-5_1-s16.wav", "wav", codec.PCM, 48000, 6, audio.Int, 16, 2400},
-	{"sine-rf64.wav", "wav", codec.PCM, 44100, 2, audio.Int, 16, 2205},
-	{"sine-s16.aiff", "aiff", codec.PCM, 44100, 2, audio.Int, 16, 2205},
-	{"sine-s24.aiff", "aiff", codec.PCM, 48000, 2, audio.Int, 24, 2400},
-	{"sine-s8.aiff", "aiff", codec.PCM, 44100, 1, audio.Int, 8, 2205},
-	{"sine-f32.aiff", "aiff", codec.PCM, 48000, 2, audio.Float, 32, 2400},
-	{"sine-sowt.aiff", "aiff", codec.PCM, 44100, 2, audio.Int, 16, 2205},
-	{"sine-s16.flac", "flac", codec.FLAC, 44100, 2, audio.Int, 16, 15435},
-	{"sine-s24.flac", "flac", codec.FLAC, 48000, 2, audio.Int, 24, 16800},
-	{"sine-mono-s16.flac", "flac", codec.FLAC, 44100, 1, audio.Int, 16, 15435},
-	{"sine-5_1-s16.flac", "flac", codec.FLAC, 48000, 6, audio.Int, 16, 16800},
-	{"noise-s16.flac", "flac", codec.FLAC, 44100, 2, audio.Int, 16, 15435},
-	{"sine-s16.oga", "ogg", codec.FLAC, 44100, 2, audio.Int, 16, 15435},
-	{"noise-s24.oga", "ogg", codec.FLAC, 48000, 2, audio.Int, 24, 16800},
-	{"sine-s16.ape", "ape", codec.APE, 44100, 2, audio.Int, 16, 22050},
-	{"noise-s16.ape", "ape", codec.APE, 44100, 2, audio.Int, 16, 22050},
+	{"sine-u8.wav", "wav", codec.PCM, 44100, 1, audio.Int, 8, 2205, 0, false},
+	{"sine-s16.wav", "wav", codec.PCM, 44100, 2, audio.Int, 16, 2205, 0, false},
+	{"sine-s24.wav", "wav", codec.PCM, 48000, 2, audio.Int, 24, 2400, 0, false},
+	{"sine-s32.wav", "wav", codec.PCM, 48000, 2, audio.Int, 32, 2400, 0, false},
+	{"sine-f32.wav", "wav", codec.PCM, 48000, 2, audio.Float, 32, 2400, 0, false},
+	{"sine-f64.wav", "wav", codec.PCM, 44100, 1, audio.Float, 32, 2205, 64, false},
+	{"sine-5_1-s16.wav", "wav", codec.PCM, 48000, 6, audio.Int, 16, 2400, 0, false},
+	{"sine-rf64.wav", "wav", codec.PCM, 44100, 2, audio.Int, 16, 2205, 0, false},
+	{"sine-s16.aiff", "aiff", codec.PCM, 44100, 2, audio.Int, 16, 2205, 0, false},
+	{"sine-s24.aiff", "aiff", codec.PCM, 48000, 2, audio.Int, 24, 2400, 0, false},
+	{"sine-s8.aiff", "aiff", codec.PCM, 44100, 1, audio.Int, 8, 2205, 0, false},
+	{"sine-f32.aiff", "aiff", codec.PCM, 48000, 2, audio.Float, 32, 2400, 0, false},
+	{"sine-sowt.aiff", "aiff", codec.PCM, 44100, 2, audio.Int, 16, 2205, 0, false},
+	{"sine-s16.flac", "flac", codec.FLAC, 44100, 2, audio.Int, 16, 15435, 0, false},
+	{"sine-s24.flac", "flac", codec.FLAC, 48000, 2, audio.Int, 24, 16800, 0, false},
+	{"sine-mono-s16.flac", "flac", codec.FLAC, 44100, 1, audio.Int, 16, 15435, 0, false},
+	{"sine-5_1-s16.flac", "flac", codec.FLAC, 48000, 6, audio.Int, 16, 16800, 0, false},
+	{"noise-s16.flac", "flac", codec.FLAC, 44100, 2, audio.Int, 16, 15435, 0, false},
+	{"sine-s16.oga", "ogg", codec.FLAC, 44100, 2, audio.Int, 16, 15435, 0, false},
+	{"noise-s24.oga", "ogg", codec.FLAC, 48000, 2, audio.Int, 24, 16800, 0, false},
+	{"sine-s16.ape", "ape", codec.APE, 44100, 2, audio.Int, 16, 22050, 0, false},
+	{"noise-s16.ape", "ape", codec.APE, 44100, 2, audio.Int, 16, 22050, 0, false},
+	// G.711 and the two ADPCM families, one row per container spelling.
+	//
+	//	ffmpeg -f lavfi -i "sine=frequency=440:sample_rate=8000:duration=1" \
+	//	    -ac 1 -c:a pcm_alaw sine-alaw.wav
+	//	ffmpeg -f lavfi -i "sine=frequency=440:sample_rate=8000:duration=1" \
+	//	    -ac 1 -c:a pcm_mulaw sine-ulaw.wav
+	//	ffmpeg -f lavfi -i "sine=frequency=440:sample_rate=8000:duration=1" \
+	//	    -ac 1 -c:a adpcm_ima_wav sine-ima.wav
+	//	ffmpeg -f lavfi -i "sine=frequency=440:sample_rate=44100:duration=0.25" \
+	//	    -ac 2 -c:a adpcm_ima_wav sine-ima-stereo.wav
+	//	ffmpeg -f lavfi -i "sine=frequency=440:sample_rate=8000:duration=1" \
+	//	    -ac 1 -c:a adpcm_ms sine-msadpcm.wav
+	//	ffmpeg -f lavfi -i "sine=frequency=440:sample_rate=44100:duration=0.25" \
+	//	    -ac 2 -c:a adpcm_ms sine-msadpcm-stereo.wav
+	//	ffmpeg -f lavfi -i "sine=frequency=440:sample_rate=8000:duration=1" \
+	//	    -ac 1 -c:a pcm_alaw -f aiff sine-alaw.aifc
+	//	ffmpeg -f lavfi -i "sine=frequency=440:sample_rate=8000:duration=1" \
+	//	    -ac 1 -c:a pcm_mulaw -f aiff sine-ulaw.aifc
+	//	ffmpeg -f lavfi -i "sine=frequency=440:sample_rate=8000:duration=1" \
+	//	    -ac 1 -c:a adpcm_ima_qt -f aiff sine-ima4.aifc
+	//	ffmpeg -f lavfi -i "sine=frequency=440:sample_rate=44100:duration=0.25" \
+	//	    -ac 2 -c:a adpcm_ima_qt -f aiff sine-ima4-stereo.aifc
+	//
+	// (ffmpeg 8.0.1, Ubuntu.) The mono files are one second so the WAV block
+	// codecs get four whole blocks and a fact chunk that stops inside the
+	// last one, which is the length rule this reads and ffmpeg does not. The
+	// ima4 pair is not tail-padded: AIFF-C counts PACKETS in COMM, so its
+	// declared length lands on a block boundary by construction.
+	{"sine-alaw.wav", "wav", codec.ALaw, 8000, 1, audio.Int, 16, 8000, 8, false},
+	{"sine-ulaw.wav", "wav", codec.MuLaw, 8000, 1, audio.Int, 16, 8000, 8, false},
+	{"sine-ima.wav", "wav", codec.IMAADPCM, 8000, 1, audio.Int, 16, 8000, 4, true},
+	{"sine-ima-stereo.wav", "wav", codec.IMAADPCM, 44100, 2, audio.Int, 16, 11025, 4, true},
+	{"sine-msadpcm.wav", "wav", codec.MSADPCM, 8000, 1, audio.Int, 16, 8000, 4, true},
+	{"sine-msadpcm-stereo.wav", "wav", codec.MSADPCM, 44100, 2, audio.Int, 16, 11025, 4, true},
+	{"sine-alaw.aifc", "aiff", codec.ALaw, 8000, 1, audio.Int, 16, 8000, 8, false},
+	{"sine-ulaw.aifc", "aiff", codec.MuLaw, 8000, 1, audio.Int, 16, 8000, 8, false},
+	{"sine-ima4.aifc", "aiff", codec.IMAADPCM, 8000, 1, audio.Int, 16, 8000, 4, false},
+	{"sine-ima4-stereo.aifc", "aiff", codec.IMAADPCM, 44100, 2, audio.Int, 16, 11072, 4, false},
 }
 
 func fixtureSource(t testing.TB, name string) container.Source {
@@ -131,12 +181,50 @@ func TestFixturesProbe(t *testing.T) {
 			if d.Samples != tt.samples {
 				t.Errorf("samples = %d, want %d", d.Samples, tt.samples)
 			}
+			if d.SourceBitDepth != tt.srcDepth {
+				t.Errorf("source bit depth = %d, want %d", d.SourceBitDepth, tt.srcDepth)
+			}
 		})
 	}
 }
 
+// trimBlockPadding cuts ffmpeg's whole-block output down to the length this
+// tree decodes, after checking the excess is exactly block padding: present,
+// and smaller than one block. The block length comes from the track's own
+// codec config rather than from a number written here, so a fixture
+// regenerated at a different block size needs no edit.
+func trimBlockPadding(t *testing.T, name string, ours, want []int32) []int32 {
+	t.Helper()
+	info, err := waxflow.New().Probe(fixtureSource(t, name), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := info.Default()
+	cfg, err := adpcm.ParseConfig(d.CodecConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := cfg.SamplesPerBlock * d.Fmt.Channels
+	switch excess := len(want) - len(ours); {
+	case excess <= 0:
+		t.Fatalf("ffmpeg decoded %d samples and we decoded %d; a tail-padded source must give ffmpeg more",
+			len(want), len(ours))
+	case excess >= block:
+		t.Fatalf("ffmpeg decoded %d samples past our %d, which is a whole block of %d or more",
+			excess, len(ours), block)
+	}
+	return want[:len(ours)]
+}
+
 // TestFixturesDecodeDifferential compares our full decode of every
 // fixture against ffmpeg's, sample for sample.
+//
+// For a tail-padded source the comparison is against a PREFIX of ffmpeg's
+// output, and the excess is bounded rather than ignored: these codecs decode
+// whole blocks, the file's declared length ends inside the last one, and
+// ffmpeg emits the whole block. A prefix compare alone would pass a decode
+// that stopped anywhere, so the excess has to be real block padding: at
+// least one sample, and less than one block.
 func TestFixturesDecodeDifferential(t *testing.T) {
 	for _, tt := range fixtures {
 		t.Run(tt.name, func(t *testing.T) {
@@ -144,8 +232,12 @@ func TestFixturesDecodeDifferential(t *testing.T) {
 			got := decodeAll(t, fixtureSource(t, tt.name), "")
 			defer audio.Put(got)
 			if tt.sampleTyp == audio.Int {
+				ours := testutil.Interleave(got)
 				want := testutil.FFmpegDecodeS32(t, path)
-				if idx := testutil.DiffI32(testutil.Interleave(got), want); idx != -1 {
+				if tt.tailPadded {
+					want = trimBlockPadding(t, tt.name, ours, want)
+				}
+				if idx := testutil.DiffI32(ours, want); idx != -1 {
 					t.Errorf("first sample mismatch vs ffmpeg at interleaved index %d", idx)
 				}
 			} else {
@@ -187,8 +279,16 @@ func TestFixturesProbeAgreesWithFFprobe(t *testing.T) {
 			if ref.BitsPerRawSample != 0 {
 				refBits = ref.BitsPerRawSample
 			}
-			if tt.sampleTyp == audio.Int && d.Fmt.BitDepth != refBits {
-				t.Errorf("bit depth = %d, ffprobe says %d", d.Fmt.BitDepth, refBits)
+			// A companded or block-coded source decodes to 16 bits and stores
+			// 8 or 4, and ffprobe reports what it stores. SourceBitDepth is
+			// the field that carries the difference, so it is the one to
+			// compare where the track sets it.
+			ourBits := d.Fmt.BitDepth
+			if d.SourceBitDepth != 0 {
+				ourBits = d.SourceBitDepth
+			}
+			if tt.sampleTyp == audio.Int && ourBits != refBits {
+				t.Errorf("bit depth = %d, ffprobe says %d", ourBits, refBits)
 			}
 		})
 	}

@@ -353,7 +353,6 @@ func TestDemuxRejectsUnsupported(t *testing.T) {
 		tag  uint16
 		want string
 	}{
-		{0x0002, "ADPCM (format tag 0x0002)"},
 		{0x0050, "MP2 (format tag 0x0050)"},
 		{0x0160, "WMA v1 (format tag 0x0160)"},
 		// No name for this one, so the tag is the whole answer.
@@ -366,6 +365,16 @@ func TestDemuxRejectsUnsupported(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("tag %#04x: %v does not name %q", tc.tag, err, tc.want)
+		}
+	}
+
+	// An ADPCM tag is read now, so retagging a PCM header with one is not a
+	// well-formed file this build declines: it is a header missing the block
+	// geometry its own tag requires, which is damage and says so.
+	for _, tag := range []uint16{0x0002, 0x0011} {
+		_, err := NewDemuxer(container.BytesSource(build(tag)), nil)
+		if !errors.Is(err, waxerr.ErrMalformedInput) {
+			t.Errorf("tag %#04x with no extra bytes: error = %v, want malformed-input", tag, err)
 		}
 	}
 

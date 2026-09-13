@@ -245,19 +245,23 @@ func (d *Demuxer) parseStbl(t *track, body []byte, depth int) error {
 	// carry a PCM fourcc would otherwise open with a table whose two halves
 	// disagree, and the chapter walk would index arrays that are not there.
 	byteLinear := t.unitBytes > 0 && t.unitDur > 0
-	// What one frame lasts on the media clock, when a whole number of ticks
-	// can say it. The gate below needs that number rather than the unit's own
-	// duration, because the stts is written in the file's ticks and the file
-	// need not clock its samples at the sample rate: a 16000-tick clock over
-	// 8000 Hz audio writes 2 there, and the two statements agree. A timescale
-	// that is not a whole multiple of the rate cannot state a frame at all, so
-	// such a file is not a per-frame table and keeps the flat one.
-	perFrameTicks := int64(0)
+	// What one UNIT lasts on the media clock, when a whole number of ticks can
+	// say it. Two conversions, and both are load-bearing. The stts is written
+	// in the file's ticks and the file need not clock its samples at the
+	// sample rate (a 16000-tick clock over 8000 Hz audio writes 2 per frame),
+	// and a unit is not always one frame: an ima4 sample is a block of 64, so
+	// its stts run says 64 where a PCM one says 1. Taking the per-frame number
+	// alone let a crafted ima4 movie whose stts says 1 pass this gate, which
+	// then overwrote the unit's duration with it and reported a track a
+	// sixty-fourth of its real length, exact and unwarned. A timescale that is
+	// not a whole multiple of the rate cannot state a frame at all, so such a
+	// file is not a per-unit table and keeps the flat one.
+	unitTicks := int64(0)
 	if rate > 0 && t.timescale > 0 && t.timescale%rate == 0 {
-		perFrameTicks = t.timescale / rate
+		unitTicks = t.timescale / rate * t.unitDur
 	}
 	if isAudio && byteLinear && constSize == uint32(t.unitBytes) &&
-		perFrameTicks >= 1 && uniformStts(stts, perFrameTicks) {
+		unitTicks >= 1 && uniformStts(stts, unitTicks) {
 		// Byte-linear samples of a constant size, each lasting exactly the
 		// one frame it holds: the chunk index describes the whole table. A
 		// track excluded from this over its timescale alone would carry a
@@ -269,7 +273,7 @@ func (d *Demuxer) parseStbl(t *track, body []byte, depth int) error {
 		}
 		// The time base comes from the same builder the flat path uses, and
 		// the unit's output duration is read back from it rather than assumed:
-		// the gate makes that conversion exact (the ticks per frame divide the
+		// the gate makes that conversion exact (the ticks per unit divide the
 		// timescale exactly), so it comes back as the unit's own duration, and
 		// reading it is what keeps the packet path honest if that ever stops
 		// being true. No sync set, here or below: a byte-linear sample is
@@ -301,6 +305,13 @@ func (d *Demuxer) parseStbl(t *track, body []byte, depth int) error {
 		// 27-hour track that --strict accepts. (The chunk-indexed path above
 		// cannot reach this: the two agreeing is its gate.)
 		//
+		// "The same number" is exact only where a unit is one frame. A block
+		// codec's last block decodes whole and the timeline ends inside it,
+		// so the bytes hold up to one block MORE than the table times, and
+		// that is the file being well formed rather than damaged: ffmpeg
+		// writes a short final stts run for exactly this. Anything outside
+		// that window is still the contradiction above.
+		//
 		// Skipped when the timeline was rescaled, where the two are not the
 		// same number by construction: the conversion floors every run, so
 		// totalDur is a rounded total and comparing an exact frame count
@@ -309,7 +320,8 @@ func (d *Demuxer) parseStbl(t *track, body []byte, depth int) error {
 		for _, sz := range st.sizes {
 			payload += int64(sz)
 		}
-		if frames := payload / t.unitBytes; frames != st.totalDur {
+		frames := payload / t.unitBytes * t.unitDur
+		if frames < st.totalDur || frames-st.totalDur >= t.unitDur {
 			if err := d.warn(0, "sample table times %d frames, its samples hold %d", st.totalDur, frames); err != nil {
 				return err
 			}
