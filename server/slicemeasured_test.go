@@ -2,6 +2,9 @@ package server
 
 import (
 	"io"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -9,6 +12,7 @@ import (
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
 // stubMedia is a Media whose declared total and true audio length can
@@ -121,4 +125,68 @@ func TestSliceMeasuredReanchorsAdvisoryDeclarations(t *testing.T) {
 			t.Fatalf("the slice declares %d samples, want the declaration's %d", got, declared-1000)
 		}
 	})
+}
+
+// TestRemeasuredForwardsLiveWarnings pins the other thing the patched copy
+// must not freeze: Warnings and Notes are live on the inner media (see
+// format.Media), so the copy refreshes them on every call. A member damaged
+// past its head reports nothing at open and the skipped bytes once the read
+// has reached them, through the re-anchored media the same as through the
+// bare one.
+func TestRemeasuredForwardsLiveWarnings(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "testdata", "sine-untagged.mp3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	damaged := testutil.ZeroMiddle(raw, 2048)
+	e := waxflow.New()
+
+	// The measure, from a bare read, so the patch below has a total the
+	// declaration disagrees with.
+	bare, err := e.OpenStream(container.BytesSource(damaged), "mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	measured := drainCount(t, bare)
+	bare.Close()
+
+	med, err := e.OpenStream(container.BytesSource(damaged), "mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sl, err := sliceMeasured(med, span{from: 0}, measured)
+	if err != nil {
+		med.Close()
+		t.Fatal(err)
+	}
+	defer sl.Close()
+	info := sl.Info()
+	if got := info.Default().Samples; got != measured {
+		t.Fatalf("the re-anchored media declares %d samples, want the measured %d", got, measured)
+	}
+	if len(info.Warnings) != 0 {
+		t.Fatalf("warnings at open = %v, want none: the head is clean", info.Warnings)
+	}
+	drainCount(t, sl)
+	if !slices.ContainsFunc(sl.Info().Warnings, func(s string) bool { return strings.Contains(s, "unparsable bytes skipped") }) {
+		t.Errorf("warnings after the read = %v, want the skipped bytes forwarded through the patched copy", sl.Info().Warnings)
+	}
+}
+
+// drainCount reads med to its end and returns the frames delivered.
+func drainCount(t *testing.T, med format.Media) int64 {
+	t.Helper()
+	dst := audio.Get(med.Info().Default().Fmt, audio.StandardChunk)
+	defer audio.Put(dst)
+	var n int64
+	for {
+		err := med.ReadChunk(dst)
+		if err == io.EOF {
+			return n
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		n += int64(dst.N)
+	}
 }

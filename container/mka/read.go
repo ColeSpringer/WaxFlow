@@ -313,6 +313,77 @@ type clusterPos struct {
 // eagerly at open for a CodecDelay track, otherwise on the first seek.
 func (d *Demuxer) ensureWalk() error { return d.walk(-1) }
 
+var _ container.Walker = (*Demuxer)(nil)
+
+// Walk implements container.Walker: the full cluster walk, which a measure of
+// an advisory-length file runs anyway (its ceiling is past the last cue and
+// past the seconds cap, so cueLimit answers -1 and the walk runs whole). A
+// strict probe of such a file walks its clusters, by name.
+//
+// The walk drives the packet reader's own cursor and leaves it on the first
+// cluster, which is what a seek wants and a Walk mid-read must not: the
+// reader's state is saved around it and put back, so the next packet is the
+// one that would have come without the walk, as the frame walkers' Walk
+// already promises.
+func (d *Demuxer) Walk() error {
+	saved := d.saveReader()
+	err := d.ensureWalk()
+	d.restoreReader(saved)
+	if err == nil && d.Walked() {
+		d.adoptWalkedLength()
+	}
+	return err
+}
+
+// adoptWalkedLength puts a finished walk's exact total on a track whose
+// length was the advisory Info Duration: the strict probe that walked the
+// clusters reports what it measured. finalizeTrack does the same arithmetic
+// for the tracks it walks at open.
+func (d *Demuxer) adoptWalkedLength() {
+	if !d.track.SamplesAdvisory {
+		return
+	}
+	samples := d.rawTotal - d.track.Delay - nsToSamples(d.paddingNS, d.track.Fmt.Rate)
+	d.track.Samples, d.track.SamplesExact, d.track.SamplesAdvisory = max(samples, 0), true, false
+}
+
+// readerState is the packet reader's cursor, everything resetReading clears.
+// It is embedded in the Demuxer, so the fields are the reader's own and a
+// copy of the struct is a snapshot of the whole cursor.
+type readerState struct {
+	curOff         int64 // next element to read at the segment level
+	inCluster      bool
+	clusterEnd     int64
+	clusterCursor  int64
+	clusterUnknown bool
+
+	pending           []frameLoc
+	pendingIdx        int
+	running           int64 // accumulated output position (raw decoder timeline)
+	curBlockDiscardNS int64 // DiscardPadding of the block in pending, in ns
+
+	vorbisPrevBlock int
+}
+
+// saveReader snapshots the cursor; pending is cloned, since resetReading
+// truncates it in place.
+func (d *Demuxer) saveReader() readerState {
+	s := d.readerState
+	s.pending = append([]frameLoc(nil), d.pending...)
+	return s
+}
+
+func (d *Demuxer) restoreReader(s readerState) {
+	s.pending = append(d.pending[:0], s.pending...)
+	d.readerState = s
+}
+
+// Walked implements container.Walker: whether the full walk has reached the
+// end of the segment, which the open walk of a CodecDelay track counts as.
+// A walk that failed set walked (it runs once, even so) but not walkedTo,
+// and is not finished. Cues do not enter it, for the reason above.
+func (d *Demuxer) Walked() bool { return d.walked && d.walkedTo >= d.segmentEnd }
+
 // walk frame-counts blocks into the seek index up to limit, a segment-level
 // byte offset, or -1 for the whole stream. Reading is restored to the first
 // cluster afterward.

@@ -3,6 +3,7 @@ package riff
 import (
 	"bytes"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -221,24 +222,24 @@ func TestFactChunk(t *testing.T) {
 		if track.Samples != 4*spb {
 			t.Errorf("samples = %d, want the capacity %d", track.Samples, 4*spb)
 		}
-		if track.SamplesExact {
-			t.Error("a capacity is not a truncation instruction")
+		if !track.SamplesExact {
+			t.Error("a capacity a read delivers exactly is exact")
 		}
 	})
 
 	// A count more than one block short of the payload is not a truncation
 	// any encoder could have written: it disclaims blocks the file coded.
-	// Believing it would empty a track on a zero or unpatched field and call
-	// the answer exact.
+	// Believing it would empty a track on a zero or unpatched field. The
+	// capacity stays, and stays exact: the read delivers exactly that many.
 	t.Run("far below the capacity is ignored", func(t *testing.T) {
 		for _, fact := range []int64{0, 3, 99} {
 			raw := wavHeader(tagIMAADPCM, 1, 8000, blockAlign, 4, imaExtra(spb), blocks(4), fact)
 			track, _, warns := demuxAll(t, container.BytesSource(raw), nil)
 			if track.Samples != 4*spb {
-				t.Errorf("fact %d gave %d samples, want the capacity %d", fact, track.Samples, 4*spb)
+				t.Errorf("fact %d was believed: %d samples, want the capacity %d", fact, track.Samples, 4*spb)
 			}
-			if track.SamplesExact {
-				t.Errorf("fact %d was believed", fact)
+			if !track.SamplesExact {
+				t.Errorf("fact %d left the capacity inexact", fact)
 			}
 			if len(warns) == 0 {
 				t.Errorf("fact %d passed without a warning", fact)
@@ -246,8 +247,9 @@ func TestFactChunk(t *testing.T) {
 		}
 		// One block short is the boundary: still ignored.
 		raw := wavHeader(tagIMAADPCM, 1, 8000, blockAlign, 4, imaExtra(spb), blocks(4), int64(3*spb))
-		if track, _, _ := demuxAll(t, container.BytesSource(raw), nil); track.SamplesExact {
-			t.Error("a count exactly one block short was believed")
+		if track, _, _ := demuxAll(t, container.BytesSource(raw), nil); track.Samples != 4*spb || !track.SamplesExact {
+			t.Errorf("a count exactly one block short gave %d samples exact = %v, want the capacity %d and exact",
+				track.Samples, track.SamplesExact, 4*spb)
 		}
 		// One sample inside the last block is a real truncation.
 		raw = wavHeader(tagIMAADPCM, 1, 8000, blockAlign, 4, imaExtra(spb), blocks(4), int64(3*spb+1))
@@ -265,6 +267,9 @@ func TestFactChunk(t *testing.T) {
 		track, _, warns := demuxAll(t, container.BytesSource(raw), nil)
 		if track.Samples != 4*spb {
 			t.Errorf("samples = %d, want the capacity %d", track.Samples, 4*spb)
+		}
+		if !track.SamplesExact {
+			t.Error("a clamped count is the capacity, which is exact")
 		}
 		if len(warns) == 0 {
 			t.Error("a fact chunk past the capacity must warn")
@@ -336,6 +341,66 @@ func TestFactChunk(t *testing.T) {
 			t.Errorf("samples = %d, want the first fact's %d", track.Samples, 3*spb+5)
 		}
 	})
+}
+
+// TestLengthIsExact pins the claim a block codec's track makes about its own
+// length, at the sample level: every packet the walk delivers is decoded, and
+// the frames that come out must number exactly Samples. That is the
+// probe-equals-read invariant the FLAC and WavPack readers carry, and it is
+// what lets a caller that needs an authoritative length take the number
+// instead of decoding the file to find one. A fact chunk that was ignored
+// changes nothing, since the capacity is what the read delivers either way.
+func TestLengthIsExact(t *testing.T) {
+	const blockAlign = 20
+	for _, tc := range []struct {
+		name string
+		raw  []byte
+	}{
+		{"ima no fact", wavHeader(tagIMAADPCM, 1, 8000, blockAlign, 4, imaExtra(33), make([]byte, blockAlign*4), -1)},
+		{"ima ignored fact", wavHeader(tagIMAADPCM, 1, 8000, blockAlign, 4, imaExtra(33), make([]byte, blockAlign*4), 3)},
+		{"ms no fact", wavHeader(tagMSADPCM, 1, 8000, blockAlign, 4, msExtra(28, adpcm.DefaultCoefs), make([]byte, blockAlign*4), -1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, err := NewDemuxer(container.BytesSource(tc.raw), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			track := d.Tracks()[0]
+			if !track.SamplesExact {
+				t.Error("the track does not claim an exact length")
+			}
+			cfg, err := adpcm.ParseConfig(track.CodecConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dec, err := adpcm.NewDecoder(cfg, track.Fmt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer dec.Release()
+			var frames int64
+			count := func(b *audio.Buffer) error { frames += int64(b.N); return nil }
+			var pkt container.Packet
+			for {
+				err := d.ReadPacket(&pkt)
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := dec.Decode(pkt.Data, count); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := dec.Drain(count); err != nil {
+				t.Fatal(err)
+			}
+			if frames != track.Samples {
+				t.Errorf("the decode delivered %d frames, the track claims %d exactly", frames, track.Samples)
+			}
+		})
+	}
 }
 
 // TestTrailingPartialBlock pins what a data chunk that stops mid-block does:

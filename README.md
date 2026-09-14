@@ -41,7 +41,9 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   and ALAC in MP4/M4A/M4B, uncompressed PCM in MP4/MOV (QuickTime's
   `sowt`/`twos`/`NONE`/`raw `/`in24`/`in32`/`fl32`/`fl64` fourccs, its
   version 2 `lpcm` flags and its `ms` entries for WAVE format tags 1 and 3,
-  plus ISO `ipcm`/`fpcm`; **decode only, and
+  plus ISO `ipcm`/`fpcm`, with a multichannel track's layout read from the
+  file's own `chan` or `chnl` box and its channels reordered into the
+  pipeline's order where the file's order differs; **decode only, and
   writing it there is a non-goal**, a WAV serving every such use better),
   G.711 A-law and mu-law and both 4-bit ADPCM families (IMA/DVI in its WAV
   and QuickTime `ima4` layouts, and Microsoft ADPCM), each bit-exact
@@ -213,7 +215,10 @@ write keeps a reload from reading a half-written file and `400`ing.
 - `waxflow server`: run the daemon (`--demo` for the browser test page)
 - `waxflow probe <file>`: identify a file and print stream parameters
   (`--json` for the schemaVersion'd machine shape, identical to `GET
-  /probe`; `--strict` to treat tolerated input damage as errors)
+  /probe`; `--strict` to treat tolerated input damage as errors, which on a
+  frame-indexed payload such as MP3 or ADTS also walks it to its end so the
+  verdict covers the whole file; without it a probe reads headers, and
+  damage past the head is reported by the read that reaches it)
 - `waxflow transcode <in> <out>`: local one-shot file-to-file transcode
   through the same engine the daemon uses (`--format wav|aiff|flac|mp3|aac|he-aac|alac|opus|vorbis|wavpack|ape`,
   `--flac-level`, `--wavpack-level`, `--ape-level`, `--mp3-bitrate`, default from the output extension;

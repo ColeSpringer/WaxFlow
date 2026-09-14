@@ -27,6 +27,8 @@ const (
 	headerLen = 7
 	// maxResync bounds the scan for the next syncword after damage.
 	maxResync = 1 << 20
+	// maxWarnings caps the tolerated-damage list.
+	maxWarnings = 64
 	// maxID3Tags bounds leading ID3v2 tag skipping.
 	maxID3Tags = 8
 	// samplesPerFrame is the AAC-LC core frame length; ADTS never carries

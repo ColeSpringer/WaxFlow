@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
 	"sort"
 	"time"
 
@@ -326,6 +327,12 @@ type Headroomer interface {
 // keying a cache on it. Nothing slices a Concat today; the point is that if
 // something does, it gets no answer rather than a wrong one.
 //
+// A concatenated timeline's Warnings and Notes are the members' own, each
+// line prefixed with the member's index, gathered as the members are read:
+// they open lazily, one at a time, so the whole verdict exists only once the
+// timeline has been read to its end. A slice of a single file forwards its
+// media's, live.
+//
 // container.Indexer needs no forwarding either, for a different reason: the
 // engine wraps index restore and save around the Media inside OpenStream,
 // under this, and the save fires on Close, which this delegates. The
@@ -345,7 +352,14 @@ type slice struct {
 	closed  bool
 }
 
-func (s *slice) Info() *format.Info { return s.info }
+// Info returns the span's description. Warnings and Notes are live on the
+// inner media (see format.Media) and are refreshed from it on every call;
+// Tracks and Chapters were rebased onto the window once and stay.
+func (s *slice) Info() *format.Info {
+	in := s.med.Info()
+	s.info.Warnings, s.info.Notes = in.Warnings, in.Notes
+	return s.info
+}
 
 // Headroom is the audio ahead of the window: the samples between the inner
 // media's start and this span's, plus whatever the inner media can itself
@@ -1062,6 +1076,11 @@ type concat struct {
 	med   format.Media // nil when no member is open
 	chain *dsp.Chain   // nil when the open member needs no normalization
 
+	// found and noted are the finished members' Warnings and Notes, each
+	// line prefixed with its member's index, folded in as a member closes;
+	// Info adds the open member's live lists behind them.
+	found, noted []string
+
 	local   int64 // the open member's own position, on the envelope timeline
 	pos     int64 // timeline position of the next frame out
 	discont bool
@@ -1082,7 +1101,33 @@ type concat struct {
 	unpositioned bool
 }
 
-func (c *concat) Info() *format.Info { return c.info }
+// Info returns the timeline's description. Warnings and Notes are the
+// members' own lists as the timeline reaches them, each line prefixed with
+// the member's index: the finished members' as they were closed, and the
+// open member's live (see format.Media). A member not yet opened contributes
+// nothing, so the whole verdict exists once the timeline has been read to
+// its end, which is what a merge does. Tracks stay the synthetic envelope.
+func (c *concat) Info() *format.Info {
+	c.info.Warnings = append([]string(nil), c.found...)
+	c.info.Notes = append([]string(nil), c.noted...)
+	if c.med != nil {
+		in := c.med.Info()
+		c.info.Warnings = appendMemberLines(c.info.Warnings, c.cur, in.Warnings)
+		c.info.Notes = appendMemberLines(c.info.Notes, c.cur, in.Notes)
+	}
+	return c.info
+}
+
+// appendMemberLines appends a member's lines to dst under its index, once
+// each: a member closed and reopened by a seek reports the same findings.
+func appendMemberLines(dst []string, member int, lines []string) []string {
+	for _, l := range lines {
+		if line := fmt.Sprintf("member %d: %s", member, l); !slices.Contains(dst, line) {
+			dst = append(dst, line)
+		}
+	}
+	return dst
+}
 
 // Members reports the members' tracks (format.Composite).
 func (c *concat) Members() []container.Track {
@@ -1807,5 +1852,8 @@ func (c *concat) closeMember() error {
 	}
 	med := c.med
 	c.med = nil
+	in := med.Info()
+	c.found = appendMemberLines(c.found, c.cur, in.Warnings)
+	c.noted = appendMemberLines(c.noted, c.cur, in.Notes)
 	return med.Close()
 }

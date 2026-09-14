@@ -1107,7 +1107,29 @@ type remeasured struct {
 	info *format.Info
 }
 
-func (m remeasured) Info() *format.Info { return m.info }
+// Walk and Walked forward format.Walker, as closingMedia's do.
+func (m remeasured) Walk() error {
+	if w, ok := m.Media.(format.Walker); ok {
+		return w.Walk()
+	}
+	return nil
+}
+
+func (m remeasured) Walked() bool {
+	if w, ok := m.Media.(format.Walker); ok {
+		return w.Walked()
+	}
+	return true
+}
+
+// Info returns the patched description, its Warnings and Notes refreshed
+// from the inner media on every call: those two lists are live there (see
+// format.Media), and the copy holds the measured total, not a verdict.
+func (m remeasured) Info() *format.Info {
+	in := m.Media.Info()
+	m.info.Warnings, m.info.Notes = in.Warnings, in.Notes
+	return m.info
+}
 
 // sliceMeasured bounds med to sp for a run whose plan validated the window
 // against srcSamples, the source's measured total (negative means unknown,
@@ -1193,6 +1215,22 @@ func (s *Server) openMember(ctx context.Context, m hlsSource) (format.Media, err
 type closingMedia struct {
 	format.Media
 	f *source.File
+}
+
+// Walk and Walked forward format.Walker: embedding the interface promotes
+// nothing outside it, and this wraps one file.
+func (m closingMedia) Walk() error {
+	if w, ok := m.Media.(format.Walker); ok {
+		return w.Walk()
+	}
+	return nil
+}
+
+func (m closingMedia) Walked() bool {
+	if w, ok := m.Media.(format.Walker); ok {
+		return w.Walked()
+	}
+	return true
 }
 
 func (m closingMedia) Close() error {

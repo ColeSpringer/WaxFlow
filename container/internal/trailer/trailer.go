@@ -105,7 +105,7 @@ func PeelAll(w *srcwin.Window, want Kind, floor, end int64) (int64, map[string][
 			break
 		}
 		if kind == APEv2 && tags == nil {
-			tags = apev2.Parse(w.BytesAt(start, int(end-start)))
+			tags = apev2.Parse(w.Peek(start, int(end-start)))
 		}
 		end = start
 	}
@@ -118,13 +118,13 @@ func peelAPEv2(w *srcwin.Window, floor, end int64) (int64, bool) {
 	if e < floor {
 		return 0, false
 	}
-	n, hasHeader := apev2.Size(w.BytesAt(e, apev2.FooterLen))
+	n, hasHeader := apev2.Size(w.Peek(e, apev2.FooterLen))
 	if n <= 0 || end-n < floor {
 		return 0, false
 	}
 	// A footer that claims a header has to have one: the claim is worth 32
 	// bytes of extent, and if they are not the header, they are audio.
-	if hasHeader && !apev2.StartsTag(w.BytesAt(end-n, apev2.FooterLen)) {
+	if hasHeader && !apev2.StartsTag(w.Peek(end-n, apev2.FooterLen)) {
 		return 0, false
 	}
 	return end - n, true
@@ -132,7 +132,7 @@ func peelAPEv2(w *srcwin.Window, floor, end int64) (int64, bool) {
 
 func peelID3v1(w *srcwin.Window, floor, end int64) (int64, bool) {
 	e := end - id3v1Len
-	if e < floor || string(w.BytesAt(e, 3)) != "TAG" {
+	if e < floor || string(w.Peek(e, 3)) != "TAG" {
 		return 0, false
 	}
 	return e, true
@@ -144,7 +144,7 @@ func peelID3v2(w *srcwin.Window, floor, end int64) (int64, bool) {
 	if e < floor {
 		return 0, false
 	}
-	n := id3.SizeFromFooter(w.BytesAt(e, id3.HeaderLen))
+	n := id3.SizeFromFooter(w.Peek(e, id3.HeaderLen))
 	if n <= 0 || end-n < floor {
 		return 0, false
 	}
@@ -152,7 +152,7 @@ func peelID3v2(w *srcwin.Window, floor, end int64) (int64, bool) {
 	// bit, so the extent it declares is confirmed against the header it
 	// mirrors: without that, audio whose last ten bytes read like a footer
 	// takes the frames behind it with them.
-	if id3.Size(w.BytesAt(end-n, id3.HeaderLen)) != n {
+	if id3.Size(w.Peek(end-n, id3.HeaderLen)) != n {
 		return 0, false
 	}
 	return end - n, true
@@ -163,7 +163,7 @@ func peelPadding(w *srcwin.Window, floor, end int64) (int64, bool) {
 	if n <= 0 {
 		return 0, false
 	}
-	tail := w.BytesAt(end-n, int(n))
+	tail := w.Peek(end-n, int(n))
 	if int64(len(tail)) != n {
 		return 0, false
 	}

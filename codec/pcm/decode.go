@@ -37,6 +37,10 @@ func NewDecoder(cfg Config, f audio.Format) (*Decoder, error) {
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 			fmt.Sprintf("pcm: track format %v does not match wire config (want %v)", f, want))
 	}
+	if cfg.Order != nil && len(cfg.Order) != f.Channels {
+		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
+			fmt.Sprintf("pcm: channel order lists %d channels for a %d-channel track", len(cfg.Order), f.Channels))
+	}
 	return &Decoder{cfg: cfg, fmt: f}, nil
 }
 
@@ -82,13 +86,18 @@ func (d *Decoder) Release() {
 }
 
 // unpack de-interleaves data (a whole number of frames) into d.buf,
-// which already has N set.
+// which already has N set. Output channel c reads wire channel c, or
+// Order[c] when the config carries an order.
 func (d *Decoder) unpack(data []byte) {
 	ch := d.fmt.Channels
 	step := d.cfg.Bits / 8 * ch
 	shift := d.cfg.shift()
 	for c := 0; c < ch; c++ {
-		off := c * d.cfg.Bits / 8
+		src := c
+		if d.cfg.Order != nil {
+			src = int(d.cfg.Order[c])
+		}
+		off := src * d.cfg.Bits / 8
 		switch {
 		case d.cfg.Encoding == Float && d.cfg.Bits == 32:
 			dst := d.buf.ChanF(c)

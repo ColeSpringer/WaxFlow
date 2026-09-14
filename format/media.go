@@ -27,6 +27,8 @@ type media struct {
 	info    *Info
 	demux   container.Demuxer
 	seeker  container.Seeker // nil when the demuxer cannot seek
+	warner  container.Warner // nil when the demuxer records no warnings
+	walker  container.Walker // nil when the demuxer defers no walk
 	track   container.Track
 	decoder codec.Decoder
 
@@ -77,6 +79,12 @@ func newMedia(info *Info, demux container.Demuxer) (Media, error) {
 	if s, ok := demux.(container.Seeker); ok {
 		m.seeker = s
 	}
+	if w, ok := demux.(container.Warner); ok {
+		m.warner = w
+	}
+	if w, ok := demux.(container.Walker); ok {
+		m.walker = w
+	}
 	// Only demuxers that keep a persistable index yield a Media that
 	// advertises container.Indexer, so a type assertion is an honest
 	// capability gate: consumers skip sidecar work for formats that
@@ -105,7 +113,33 @@ type indexableMedia struct {
 func (m *indexableMedia) IndexSnapshot() []byte         { return m.ix.IndexSnapshot() }
 func (m *indexableMedia) RestoreIndex(blob []byte) bool { return m.ix.RestoreIndex(blob) }
 
-func (m *media) Info() *Info { return m.info }
+// Walk implements Walker: the demuxer's deferred walk, or nothing.
+func (m *media) Walk() error {
+	if m.walker == nil {
+		return nil
+	}
+	return m.walker.Walk()
+}
+
+// Walked implements Walker: the demuxer's own answer, and true when it defers
+// no walk, which is the honest answer for a length confirmed at open.
+func (m *media) Walked() bool {
+	return m.walker == nil || m.walker.Walked()
+}
+
+// Info returns the same *Info every time, with Warnings and Notes refolded
+// from the demuxer on each call: a lazy walk finds damage where the read
+// reaches it, so the lists are current as of the last read or seek (see
+// Media). No change counter guards the refold. Info is asked a handful of
+// times per open and never per chunk, and a length check would have a
+// blind spot: flacn truncates and refills its list during its length walk
+// and can land on the same length with different content.
+func (m *media) Info() *Info {
+	if m.warner != nil {
+		foldWarnings(m.info, m.warner.Warnings())
+	}
+	return m.info
+}
 
 func (m *media) Close() error {
 	if m.closed {

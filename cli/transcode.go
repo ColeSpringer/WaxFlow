@@ -38,6 +38,16 @@ func clippingNote(w io.Writer, res *waxflow.TranscodeResult) {
 	fmt.Fprintf(w, "%s%s\n", note, remedy)
 }
 
+// inputNotes prints the input damage the read worked around, one line per
+// finding, after the write: a frame-walked source finds its damage where the
+// read reaches it, so this is the first point the whole list exists. The
+// probe at the top of the command reports only what opening found.
+func inputNotes(w io.Writer, res *waxflow.TranscodeResult) {
+	for _, note := range res.InputWarnings {
+		fmt.Fprintf(w, "input damage: %s\n", note)
+	}
+}
+
 // isMP4Container reports whether an output written by format with this
 // container override goes through the mp4 muxer: the one path that embeds tags
 // in moov at Begin and so takes the mp4-specific ReplayGain patch. The AAC
@@ -425,6 +435,7 @@ with true-peak limiting, dither).`,
 				}
 			}
 			clippingNote(cmd.ErrOrStderr(), res)
+			inputNotes(cmd.ErrOrStderr(), res)
 			fmt.Fprintf(cmd.OutOrStdout(), "wrote %s: %s %d samples (%.3fs)\n",
 				outPath, res.Format, res.Samples, durationSeconds(res.Samples, res.Format.Rate))
 			return nil

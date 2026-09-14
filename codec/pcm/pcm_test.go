@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
@@ -41,10 +42,72 @@ func TestConfigMarshalRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got != tt.cfg {
+			if !got.Equal(tt.cfg) {
 				t.Errorf("round trip = %+v, want %+v", got, tt.cfg)
 			}
 		})
+	}
+}
+
+// TestConfigMarshalsToFiveBytesWithoutAnOrder is the cache-key pin. The blob
+// keys cached outputs (ADR-0004), so a config with no channel order, which is
+// every config any container built before the order existed, must marshal to
+// exactly the five bytes it always did, and an order spelled out as the
+// identity must marshal the same way.
+func TestConfigMarshalsToFiveBytesWithoutAnOrder(t *testing.T) {
+	for _, tt := range wireMatrix {
+		t.Run(tt.name, func(t *testing.T) {
+			var flags byte
+			if tt.cfg.BigEndian {
+				flags = 1
+			}
+			want := []byte{1, byte(tt.cfg.Encoding), byte(tt.cfg.Bits), byte(tt.cfg.ValidBits), flags}
+			b, err := tt.cfg.MarshalBinary()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(b, want) {
+				t.Errorf("blob = % X, want % X", b, want)
+			}
+			identity := tt.cfg
+			identity.Order = []uint8{0, 1, 2, 3}
+			b, err = identity.MarshalBinary()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(b, want) {
+				t.Errorf("identity order marshals to % X, want the five bytes % X", b, want)
+			}
+			got, err := ParseConfig(b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Order != nil {
+				t.Errorf("identity order parsed back as %v, want nil", got.Order)
+			}
+		})
+	}
+}
+
+// TestConfigOrderRoundTrips covers the one shape that grows the blob: a
+// permutation, which only a permuted QuickTime layout produces.
+func TestConfigOrderRoundTrips(t *testing.T) {
+	for _, order := range [][]uint8{{1, 0}, {0, 1, 4, 5, 2, 3}, {7, 6, 5, 4, 3, 2, 1, 0}} {
+		cfg := Config{Encoding: SignedInt, Bits: 24, BigEndian: true, Order: order}
+		b, err := cfg.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(b) != 5+len(order) {
+			t.Errorf("order %v marshals to %d bytes, want %d", order, len(b), 5+len(order))
+		}
+		got, err := ParseConfig(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !got.Equal(cfg) || !slices.Equal(got.Order, order) {
+			t.Errorf("round trip = %+v, want %+v", got, cfg)
+		}
 	}
 }
 
@@ -57,6 +120,13 @@ func TestConfigValidateRejects(t *testing.T) {
 		{Encoding: Float, Bits: 16},
 		{Encoding: Float, Bits: 32, ValidBits: 24},
 		{Encoding: Encoding(9), Bits: 16},
+		// An order is a permutation of the wire channels or nothing: a
+		// repeated channel, a channel past the end, and a channel count the
+		// pipeline cannot carry are all refused.
+		{Encoding: SignedInt, Bits: 16, Order: []uint8{0, 0}},
+		{Encoding: SignedInt, Bits: 16, Order: []uint8{0, 2}},
+		{Encoding: SignedInt, Bits: 16, Order: []uint8{0, 1, 2, 3, 4, 5, 6, 7, 8}},
+		{Encoding: SignedInt, Bits: 16, Order: []uint8{}},
 	}
 	for _, cfg := range bad {
 		if err := cfg.Validate(); err == nil {
@@ -68,6 +138,85 @@ func TestConfigValidateRejects(t *testing.T) {
 	}
 	if _, err := ParseConfig(nil); err == nil {
 		t.Error("ParseConfig(nil) must fail")
+	}
+	// A blob whose tail is not a permutation is not one MarshalBinary wrote.
+	if _, err := ParseConfig([]byte{1, 0, 16, 0, 0, 1}); err == nil {
+		t.Error("ParseConfig with a one-channel order must fail")
+	}
+	if _, err := ParseConfig([]byte{1, 0, 16, 0, 0, 2, 2}); err == nil {
+		t.Error("ParseConfig with a repeated wire channel must fail")
+	}
+}
+
+// TestDecodeAppliesTheOrder pins what the order means, for every width and
+// both byte orders: output channel c reads wire channel Order[c]. The packet
+// is the identity encoder's, so the wire holds channel 0's samples first, and
+// a decoder with order {2, 0, 1} must land them on output channel 1.
+func TestDecodeAppliesTheOrder(t *testing.T) {
+	order := []uint8{2, 0, 1}
+	for _, tt := range wireMatrix {
+		t.Run(tt.name, func(t *testing.T) {
+			f := tt.cfg.PCMFormat(48000, 3, audio.DefaultLayout(3))
+			enc, err := NewEncoder(tt.cfg, f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			src := audio.Get(f, 64)
+			defer audio.Put(src)
+			src.N = 64
+			fillTest(src, 7)
+			var wire []byte
+			if err := enc.Encode(src, func(p codec.Packet) error {
+				wire = append(wire, p.Data...)
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg := tt.cfg
+			cfg.Order = order
+			dec, err := NewDecoder(cfg, f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer dec.Release()
+			if err := dec.Decode(wire, func(b *audio.Buffer) error {
+				if b.N != 64 {
+					t.Fatalf("decoded %d frames, want 64", b.N)
+				}
+				for c := 0; c < 3; c++ {
+					want := int(order[c])
+					if f.Type == audio.Int {
+						if got, exp := b.ChanI(c), src.ChanI(want); !slices.Equal(got, exp) {
+							t.Errorf("output channel %d holds %v, want wire channel %d's %v", c, got[:4], want, exp[:4])
+						}
+					} else if got, exp := b.ChanF(c), src.ChanF(want); !slices.Equal(got, exp) {
+						t.Errorf("output channel %d holds %v, want wire channel %d's %v", c, got[:4], want, exp[:4])
+					}
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// TestOrderMustSpanTheTrack pins the two ways an order and a track can
+// disagree: the decoder refuses an order for a different channel count, and
+// the encoder refuses any order at all, the field being a decode-side mapping.
+func TestOrderMustSpanTheTrack(t *testing.T) {
+	cfg := Config{Encoding: SignedInt, Bits: 16, Order: []uint8{1, 0}}
+	f := cfg.PCMFormat(48000, 3, audio.DefaultLayout(3))
+	if _, err := NewDecoder(cfg, f); err == nil {
+		t.Error("NewDecoder accepted a two-channel order for a three-channel track")
+	}
+	f = cfg.PCMFormat(48000, 2, audio.DefaultLayout(2))
+	if _, err := NewDecoder(cfg, f); err != nil {
+		t.Errorf("NewDecoder refused a matching order: %v", err)
+	}
+	if _, err := NewEncoder(cfg, f); err == nil {
+		t.Error("NewEncoder accepted a channel order")
 	}
 }
 
@@ -318,5 +467,27 @@ func TestEncoderRejectsWrongBuffer(t *testing.T) {
 	other.N = 4
 	if err := enc.Encode(other, func(codec.Packet) error { return nil }); err == nil {
 		t.Error("Encode with mismatched buffer format must fail")
+	}
+}
+
+// TestEqualReadsAnExplicitIdentityAsNone: MarshalBinary drops a spelled-out
+// identity order and ParseConfig returns none, so the two spellings are one
+// config, and Equal says so.
+func TestEqualReadsAnExplicitIdentityAsNone(t *testing.T) {
+	spelled := Config{Encoding: SignedInt, Bits: 16, Order: []uint8{0, 1}}
+	blob, err := spelled.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseConfig(blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Order != nil || !spelled.Equal(parsed) || !parsed.Equal(spelled) {
+		t.Errorf("parsed = %+v, Equal(spelled, parsed) = %v: an explicit identity is the same config as none",
+			parsed, spelled.Equal(parsed))
+	}
+	if spelled.Equal(Config{Encoding: SignedInt, Bits: 16, Order: []uint8{1, 0}}) {
+		t.Error("a permuted order compares equal to the identity")
 	}
 }

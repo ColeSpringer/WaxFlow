@@ -98,9 +98,10 @@ func New(src container.Source, end int64, opts Options) *Walker {
 }
 
 // Bytes returns up to n bytes at off, clamped to the end of data, from the
-// walk's own read-ahead window. Owners read their surrounding structure
-// through it (leading tags, a trailer) rather than opening a second one.
-func (w *Walker) Bytes(off int64, n int) []byte { return w.w.BytesAt(off, n) }
+// walk's own window. Owners read their surrounding structure through it
+// (leading tags, a trailer) rather than opening a second one; those are
+// fixed structures read once, so the read is exact rather than a window.
+func (w *Walker) Bytes(off int64, n int) []byte { return w.w.Peek(off, n) }
 
 // DataEnd returns the logical end of frame data.
 func (w *Walker) DataEnd() int64 { return w.w.DataEnd() }
@@ -149,7 +150,7 @@ func (w *Walker) Begin(off int64) (VBRInfo, bool, error) {
 	// header; nothing ships them anymore and supporting them would
 	// weaken every sync heuristic here. Diagnose the head directly
 	// (the candidate scan below treats unsized frames as junk).
-	if fh, err := mp3.ParseHeader(w.w.BytesAt(off, mp3.HeaderLen)); err == nil && fh.Size() == 0 {
+	if fh, err := mp3.ParseHeader(w.w.Peek(off, mp3.HeaderLen)); err == nil && fh.Size() == 0 {
 		return none, false, waxerr.Unsupported(w.opts.Prefix, "free-format stream")
 	}
 
@@ -169,13 +170,15 @@ func (w *Walker) Begin(off int64) (VBRInfo, bool, error) {
 
 	// A Xing, Info, or VBRI frame is metadata, not audio: consume it.
 	tag, hasTag := none, false
-	if frame := w.w.BytesAt(first, h.Size()); len(frame) == h.Size() {
+	if frame := w.w.Peek(first, h.Size()); len(frame) == h.Size() {
 		if t, ok := ParseVBRTag(h, frame); ok {
 			tag, hasTag = t, true
 			first += int64(h.Size())
-			fh, err := mp3.ParseHeader(w.w.BytesAt(first, mp3.HeaderLen))
-			if err != nil || !h.Kin(fh) {
-				// Tag frame with no audio behind it (or damage): scan.
+			fh, err := mp3.ParseHeader(w.w.Peek(first, mp3.HeaderLen))
+			if err != nil || !h.Kin(fh) || fh.Size() == 0 {
+				// Tag frame with no audio behind it (or damage): scan. An
+				// unsized header is damage too: taken as the reference it
+				// would index a frame of no length that Frame cannot read.
 				var ok bool
 				first, fh, ok = w.nextCandidate(first, first+maxResync)
 				if !ok {
@@ -203,46 +206,116 @@ func (w *Walker) Begin(off int64) (VBRInfo, bool, error) {
 	return tag, hasTag, nil
 }
 
-// nextCandidate scans [from, limit) for a parsable, sized frame header;
-// when a reference header exists it must also be kin, and candidates are
-// confirmed by the header their size points at (end of data counts).
+// nextCandidate scans [from, limit) for a parsable, sized frame header; when
+// a reference header exists it must also be kin, and a candidate is confirmed
+// by the header its size points at (the end of data counts).
+//
+// The reads are exact, and a clean run costs the header and one frame: the
+// header at from is confirmed by one contiguous read of the frame with the
+// header behind it. Only junk pays a scan, in spans that start at 1 KiB and
+// double up to a window, so the bytes read stay within about twice the junk
+// and the reads grow with its length rather than its content: every sync
+// byte in a span is tried from the same view before more is asked for, and a
+// header straddling a span's end is tried from the start of the next. The
+// old loop asked for a whole window from every false candidate, and forward
+// extension turned that into a read per sync byte in the junk.
 func (w *Walker) nextCandidate(from, limit int64) (int64, mp3.Header, bool) {
 	limit = min(limit, w.w.DataEnd())
-	ref := w.hdr
-	haveRef := w.spf != 0
+	if from >= limit {
+		return 0, mp3.Header{}, false
+	}
+	if h, ok := w.confirmed(from, w.w.Peek(from, mp3.HeaderLen)); ok {
+		return from, h, true
+	}
+	span := int64(1 << 10)
 	for off := from; off < limit; {
-		buf := w.w.BytesAt(off, srcwin.Chunk)
-		if len(buf) == 0 {
+		// A candidate below limit may carry its header past it.
+		n := min(span, limit-off+mp3.HeaderLen-1)
+		buf := w.w.Peek(off, int(n))
+		if len(buf) < mp3.HeaderLen {
 			return 0, mp3.Header{}, false
 		}
-		i := bytes.IndexByte(buf, 0xFF)
-		if i < 0 {
-			off += int64(len(buf))
-			continue
-		}
-		cand := off + int64(i)
-		if cand >= limit {
-			return 0, mp3.Header{}, false
-		}
-		h, err := mp3.ParseHeader(w.w.BytesAt(cand, mp3.HeaderLen))
-		if err == nil && h.Size() != 0 && (!haveRef || ref.Kin(h)) {
-			next := cand + int64(h.Size())
-			if next >= w.w.DataEnd() {
-				return cand, h, true // runs to the end: nothing to confirm against
+		next := off + int64(len(buf))
+		for i := 0; i < len(buf); {
+			j := bytes.IndexByte(buf[i:], 0xFF)
+			if j < 0 {
+				break
 			}
-			nh, nerr := mp3.ParseHeader(w.w.BytesAt(next, mp3.HeaderLen))
-			if nerr == nil && h.Kin(nh) {
+			i += j
+			cand := off + int64(i)
+			if cand >= limit {
+				return 0, mp3.Header{}, false
+			}
+			if i+mp3.HeaderLen > len(buf) {
+				next = cand // straddles the span: the next span starts on it
+				break
+			}
+			if h, ok := w.confirmed(cand, buf[i:i+mp3.HeaderLen]); ok {
 				return cand, h, true
 			}
+			i++
 		}
-		off = cand + 1
+		if int64(len(buf)) < n {
+			return 0, mp3.Header{}, false // the data ended inside the span
+		}
+		off = next
+		span = min(span*2, srcwin.Chunk)
 	}
 	return 0, mp3.Header{}, false
 }
 
-// headerAt parses and validates the frame header at the exact offset.
+// confirmed parses the candidate header hdr found at off and confirms it by
+// the header its size points at, read in one exact read with the frame: the
+// read starts inside the window, so it extends it rather than rebasing, and
+// a candidate that is a frame costs the frame and nothing more.
+func (w *Walker) confirmed(off int64, hdr []byte) (mp3.Header, bool) {
+	h, err := mp3.ParseHeader(hdr)
+	if err != nil || h.Size() == 0 || (w.spf != 0 && !w.hdr.Kin(h)) {
+		return mp3.Header{}, false
+	}
+	next := off + int64(h.Size())
+	if next >= w.w.DataEnd() {
+		return h, true // runs to the end: nothing to confirm against
+	}
+	frame := w.w.Peek(off, h.Size()+mp3.HeaderLen)
+	if len(frame) < h.Size()+mp3.HeaderLen {
+		return mp3.Header{}, false
+	}
+	if nh, err := mp3.ParseHeader(frame[h.Size():]); err != nil || !h.Kin(nh) {
+		return mp3.Header{}, false
+	}
+	return h, true
+}
+
+// headerAt parses and validates the frame header at the exact offset. It is
+// the packet path's read: a miss loads a window of read-ahead, which is what
+// makes a linear walk cost one read per window.
 func (w *Walker) headerAt(off int64) (mp3.Header, bool) {
-	h, err := mp3.ParseHeader(w.w.BytesAt(off, mp3.HeaderLen))
+	return w.kin(w.w.BytesAt(off, mp3.HeaderLen))
+}
+
+// headerPeek is headerAt through an exact read, for the open path: a
+// restore's spread of probes costs a header each rather than a window each.
+func (w *Walker) headerPeek(off int64) (mp3.Header, bool) {
+	return w.kin(w.w.Peek(off, mp3.HeaderLen))
+}
+
+// headerAfter parses the header behind the frame at off, reading it with
+// the frame rather than on its own. The read starts inside the window and so
+// extends it in place; one starting at the next frame would rebase into
+// fresh storage at every window boundary the index walk crosses, which is a
+// window allocated per window walked on the measure pass.
+func (w *Walker) headerAfter(off int64, h mp3.Header) (mp3.Header, bool) {
+	b := w.w.BytesAt(off, h.Size()+mp3.HeaderLen)
+	if len(b) < h.Size()+mp3.HeaderLen {
+		return mp3.Header{}, false
+	}
+	return w.kin(b[h.Size():])
+}
+
+// kin parses a header and requires it sized and kin to the reference.
+func (w *Walker) kin(b []byte) (mp3.Header, bool) {
+	h, err := mp3.ParseHeader(b)
 	if err != nil || !w.hdr.Kin(h) || h.Size() == 0 {
 		return mp3.Header{}, false
 	}
@@ -254,6 +327,11 @@ func (w *Walker) headerAt(off int64) (mp3.Header, bool) {
 // cut off by the end of data is dropped with a warning. Once the walk
 // cannot continue (clean end, trailing tags, or damage), done latches and
 // the index is complete.
+//
+// The window is trimmed to the last indexed frame first. Nothing holds a
+// view across extend (Frame takes its own after its own Trim), and without
+// it a walk that never reads a packet, which is what a seek to the end or a
+// measure pass is, has nothing else keeping the window from growing.
 func (w *Walker) extend() (bool, error) {
 	if w.done {
 		return false, nil
@@ -266,6 +344,7 @@ func (w *Walker) extend() (bool, error) {
 		return false, nil
 	}
 	last := w.idx[len(w.idx)-1]
+	w.w.Trim(last)
 	h, ok := w.headerAt(last)
 	if !ok {
 		// The indexed frame itself went unreadable (shrinking source);
@@ -279,7 +358,7 @@ func (w *Walker) extend() (bool, error) {
 		return false, nil // the last frame ends exactly at (or is clamped by) dataEnd
 	}
 	cand := next
-	nh, ok := w.headerAt(next)
+	nh, ok := w.headerAfter(last, h)
 	if !ok {
 		// Damage: resync within bounds, or recognize a trailer and end.
 		cand, nh, ok = w.nextCandidate(next, next+maxResync)
@@ -312,6 +391,33 @@ func (w *Walker) extend() (bool, error) {
 func (w *Walker) recognizedTrailer(off int64) bool {
 	return w.opts.Trailer != nil && w.opts.Trailer(off)
 }
+
+// Complete finishes the walk: the index is extended until it stops growing,
+// each finding reported through the owner's hook as it is reached, and the
+// first error the hook returns ends it. A run already walked to its end
+// returns at once. Nothing is delivered, so the window slides behind the
+// walk at one window of residency whatever the run's length.
+func (w *Walker) Complete() error {
+	for {
+		grew, err := w.extend()
+		if err != nil {
+			return err
+		}
+		if !grew {
+			return nil
+		}
+	}
+}
+
+// Done reports whether the index reaches the end of the run, by a walk or by
+// a verified restore of a complete snapshot. A walk the hook refused on its
+// last arm (trailing bytes, a truncated final frame) is done too: there is
+// nothing past it to index. One refused in the middle of the run is not.
+func (w *Walker) Done() bool { return w.done }
+
+// Frames is the number of frames the index holds, the run's whole count
+// once Done.
+func (w *Walker) Frames() int64 { return int64(len(w.idx)) }
 
 // frameNo extends the index up to frame n and reports the highest frame
 // number available (which is n when the run is long enough).

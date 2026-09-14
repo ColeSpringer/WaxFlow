@@ -11,6 +11,10 @@
 // invisible (every byte still arrives, at every offset, correct) and costs
 // every demuxer in the tree at once.
 //
+// Two entry points read through it: BytesAt rounds a miss up to a whole Chunk
+// of read-ahead and is the packet path's; Peek loads exactly what it is asked
+// for and is the open path's, for the fixed structures a demuxer reads once.
+//
 // The package is internal to the container tree: it is plumbing shared
 // by demuxers, not API, and it must not become one (the v1.0 surface
 // audit prunes exactly this kind of helper when exported).
@@ -59,7 +63,28 @@ func (w *Window) SetDataEnd(end int64) { w.dataEnd = end }
 // end. A short or empty result means end of data or a read failure;
 // failures stick in Err. The view is full-capacity sliced: appending to
 // it cannot scribble over neighboring window bytes.
+//
+// A miss loads at least a whole Chunk, which is what makes a linear read
+// cost one window rather than one read per frame: this is the packet path's
+// entry point, and every per-packet loop in the tree reads through it.
 func (w *Window) BytesAt(off int64, n int) []byte {
+	return w.view(off, n, max(int64(n), Chunk))
+}
+
+// Peek returns up to n bytes starting at off with BytesAt's contract, but a
+// miss loads exactly those bytes: a forward one extends the window by what
+// is missing, a backward one rebases into a buffer of n. It is for the fixed
+// structures an open path reads once (a magic, a header, a tag size, one
+// frame), never for a per-packet loop: a Peek at the window's edge inside a
+// loop would turn one read per window into three, and BytesAt's round-up is
+// what the loop's cost rests on.
+func (w *Window) Peek(off int64, n int) []byte {
+	return w.view(off, n, int64(n))
+}
+
+// view serves [off, off+n) from the window, loading want bytes at off when
+// it is not resident; load clamps want to the data end.
+func (w *Window) view(off int64, n int, want int64) []byte {
 	if n <= 0 || off >= w.dataEnd || w.ioErr != nil {
 		return nil
 	}
@@ -70,7 +95,7 @@ func (w *Window) BytesAt(off int64, n int) []byte {
 		i := off - w.winOff
 		return w.win[i : i+int64(n) : i+int64(n)]
 	}
-	if err := w.load(off, n); err != nil {
+	if err := w.load(off, want); err != nil {
 		w.ioErr = err
 		return nil
 	}
@@ -78,9 +103,10 @@ func (w *Window) BytesAt(off int64, n int) []byte {
 	return w.win[i : i+int64(n) : i+int64(n)]
 }
 
-// load makes [off, off+n) resident. Forward extension grows in place so
-// earlier bytes of the current frame stay addressable; anything else rebases
-// the window into fresh storage.
+// load makes [off, off+want) resident, want being the read-ahead the entry
+// point chose (a whole Chunk for BytesAt, the exact request for Peek). Forward
+// extension grows in place so earlier bytes of the current frame stay
+// addressable; anything else rebases the window into fresh storage.
 //
 // Fresh storage on the rebase, and it is deliberate rather than the one
 // allocation left unswept. A caller may hold a view while reading elsewhere:
@@ -90,8 +116,7 @@ func (w *Window) BytesAt(off int64, n int) []byte {
 // still scanning, turning a sync search into garbage. A rebase is rare by
 // construction (a seek, not a step), so this costs one window per jump and buys
 // every caller the right to keep a view across an unrelated read.
-func (w *Window) load(off int64, n int) error {
-	want := max(int64(n), Chunk)
+func (w *Window) load(off, want int64) error {
 	if off+want > w.dataEnd {
 		want = w.dataEnd - off
 	}
@@ -125,6 +150,11 @@ func (w *Window) load(off int64, n int) error {
 	w.win, w.winOff = buf, off
 	return nil
 }
+
+// Resident reports the bytes the window holds and the storage behind them,
+// for the cost pins outside this package: an owner's walk must leave the
+// window bounded whatever the stream's length.
+func (w *Window) Resident() (n, capacity int) { return len(w.win), cap(w.win) }
 
 // Trim drops window bytes before off so the window tracks the stream
 // position instead of accreting the whole file. Views taken before a Trim do

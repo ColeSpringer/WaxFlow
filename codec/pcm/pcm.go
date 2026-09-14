@@ -10,6 +10,7 @@ package pcm
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/waxerr"
@@ -56,6 +57,40 @@ type Config struct {
 	// BigEndian selects byte order for multi-byte samples (AIFF is
 	// big-endian, WAV little-endian).
 	BigEndian bool
+	// Order maps output channels onto wire channels: output channel c reads
+	// wire channel Order[c]. Nil is the identity, which is every container's
+	// order except a QuickTime or ISO layout box that lists the file's
+	// channels in an order other than the WAVE one. It is a decode-side
+	// mapping (the encoder refuses it) and a permutation of 0..len-1, and it
+	// is marshaled only when it is not the identity, so a blob with no order
+	// is the same five bytes it always was.
+	Order []uint8
+}
+
+// Equal reports whether two configurations describe the same wire format,
+// orders included. Config holds a slice, so it is not comparable with ==.
+func (c Config) Equal(o Config) bool {
+	return c.Encoding == o.Encoding && c.Bits == o.Bits && c.ValidBits == o.ValidBits &&
+		c.BigEndian == o.BigEndian && slices.Equal(c.order(), o.order())
+}
+
+// order is Order with a spelled-out identity read as nil, the form
+// MarshalBinary writes and ParseConfig returns.
+func (c Config) order() []uint8 {
+	if c.identityOrder() {
+		return nil
+	}
+	return c.Order
+}
+
+// identityOrder reports whether Order is nil or spells out the identity.
+func (c Config) identityOrder() bool {
+	for i, w := range c.Order {
+		if int(w) != i {
+			return false
+		}
+	}
+	return true
 }
 
 // Validate reports whether the wire configuration is one this package
@@ -63,6 +98,18 @@ type Config struct {
 func (c Config) Validate() error {
 	bad := func(msg string) error {
 		return waxerr.New(waxerr.CodeUnsupportedFormat, "pcm: "+msg)
+	}
+	if c.Order != nil {
+		if len(c.Order) < 1 || len(c.Order) > audio.MaxChannels {
+			return bad(fmt.Sprintf("channel order lists %d channels (supported: 1..%d)", len(c.Order), audio.MaxChannels))
+		}
+		var seen [audio.MaxChannels]bool
+		for _, w := range c.Order {
+			if int(w) >= len(c.Order) || seen[w] {
+				return bad(fmt.Sprintf("channel order %v is not a permutation of the wire channels", c.Order))
+			}
+			seen[w] = true
+		}
 	}
 	switch c.Encoding {
 	case SignedInt:
@@ -145,7 +192,9 @@ const Version = "pcm-1"
 // configVersion versions the marshaled Config layout.
 const configVersion = 1
 
-// MarshalBinary encodes the Config for Track.CodecConfig.
+// MarshalBinary encodes the Config for Track.CodecConfig: five bytes, then
+// the channel order only when it is not the identity, so the blob (and the
+// cache key it is part of, ADR-0004) changes only for a permuted file.
 func (c Config) MarshalBinary() ([]byte, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
@@ -154,12 +203,18 @@ func (c Config) MarshalBinary() ([]byte, error) {
 	if c.BigEndian {
 		flags |= 1
 	}
-	return []byte{configVersion, byte(c.Encoding), byte(c.Bits), byte(c.ValidBits), flags}, nil
+	b := []byte{configVersion, byte(c.Encoding), byte(c.Bits), byte(c.ValidBits), flags}
+	if !c.identityOrder() {
+		b = append(b, c.Order...)
+	}
+	return b, nil
 }
 
 // ParseConfig decodes a Track.CodecConfig produced by MarshalBinary.
 func ParseConfig(b []byte) (Config, error) {
-	if len(b) != 5 || b[0] != configVersion {
+	// Five bytes, or five plus a permutation of at least two channels (a
+	// one-channel order is the identity and is never written).
+	if len(b) < 5 || len(b) == 6 || len(b) > 5+audio.MaxChannels || b[0] != configVersion {
 		// Not malformed input: this blob is what MarshalBinary wrote for a
 		// demuxer, never bytes off a file, so a version or length that does
 		// not round-trip is a Track nobody in this tree built.
@@ -170,6 +225,9 @@ func ParseConfig(b []byte) (Config, error) {
 		Bits:      int(b[2]),
 		ValidBits: int(b[3]),
 		BigEndian: b[4]&1 != 0,
+	}
+	if len(b) > 5 {
+		c.Order = slices.Clone(b[5:])
 	}
 	if err := c.Validate(); err != nil {
 		return Config{}, err

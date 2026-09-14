@@ -425,6 +425,9 @@ func frameOffsets(t testing.TB, payload []byte) []int {
 // open, which is what a lazily built index means: the frames past the head
 // are not looked at until something asks for them, so Strict fails at the
 // packet that reaches the damage. The bare stream behaves the same way.
+// A strict probe finishes that walk through container.Walker before its
+// verdict, so every row here refuses it; a tolerant walk leaves the finding
+// in Warnings.
 func TestMP3ToleratedDamage(t *testing.T) {
 	frames := mp3Payload(t)
 	offs := frameOffsets(t, frames)
@@ -463,6 +466,25 @@ func TestMP3ToleratedDamage(t *testing.T) {
 			if warns[0].Kind != container.Damage {
 				t.Errorf("kind = %v, want Damage", warns[0].Kind)
 			}
+			// A walk finishes the index without a read: under tolerance the
+			// finding lands in Warnings the same way, and Walked flips.
+			walked, err := NewDemuxer(container.BytesSource(raw), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if walked.Walked() && !tc.atOpen {
+				t.Error("Walked before any walk")
+			}
+			if err := walked.Walk(); err != nil {
+				t.Fatalf("a tolerant Walk failed: %v", err)
+			}
+			if !walked.Walked() {
+				t.Error("not Walked after Walk")
+			}
+			if ws := walked.Warnings(); len(ws) != 1 || ws[0].Msg != tc.want {
+				t.Errorf("warnings after Walk = %v, want %q", ws, tc.want)
+			}
+
 			strict, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true})
 			switch {
 			case tc.atOpen:
@@ -486,6 +508,14 @@ func TestMP3ToleratedDamage(t *testing.T) {
 					t.Fatalf("strict mode failed with %v, want malformed", err)
 				}
 				break
+			}
+			// The strict probe's path: Walk refuses with the same error.
+			strict, err = NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := strict.Walk(); !errors.Is(err, waxerr.ErrMalformedInput) {
+				t.Errorf("strict Walk returned %v, want malformed", err)
 			}
 		})
 	}
@@ -572,6 +602,12 @@ func TestByteLinearPayloadsHaveNoIndex(t *testing.T) {
 			}
 			if blob := d.IndexSnapshot(); blob != nil {
 				t.Errorf("snapshotted %d bytes", len(blob))
+			}
+			// The same per-file answer on container.Walker: the byte-linear
+			// payload has nothing to walk, and the short frame run was just
+			// walked to its end by the seek.
+			if err := d.Walk(); err != nil || !d.Walked() {
+				t.Errorf("Walk = %v, Walked = %v; want nil and true for a payload with nothing left to walk", err, d.Walked())
 			}
 			// On a demuxer that has not moved, so the refusal is the one
 			// being tested rather than the guard against restoring over a

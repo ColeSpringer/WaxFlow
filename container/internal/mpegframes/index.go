@@ -98,10 +98,11 @@ func (w *Walker) Restore(blob []byte) bool {
 	}
 	// Sample interior offsets as well as the endpoints: full validation
 	// would cost the walk the sidecar exists to avoid, but eight header
-	// probes catch gross interior corruption.
+	// probes catch gross interior corruption. Each probe is an exact read,
+	// so a restore costs nine headers rather than nine windows.
 	for i := 0; i <= idxProbes; i++ {
 		probe := idx[i*(len(idx)-1)/idxProbes]
-		if _, ok := w.headerAt(probe); !ok {
+		if _, ok := w.headerPeek(probe); !ok {
 			return false
 		}
 	}
@@ -111,7 +112,7 @@ func (w *Walker) Restore(blob []byte) bool {
 	// entry where a fresh walk drops it with a warning. The probe loop above
 	// has already parsed this header; what is new is its length.
 	last := idx[len(idx)-1]
-	h, ok := w.headerAt(last)
+	h, ok := w.headerPeek(last)
 	if !ok || last+int64(h.Size()) > w.w.DataEnd() {
 		return false
 	}
@@ -119,7 +120,7 @@ func (w *Walker) Restore(blob []byte) bool {
 		// Trust but verify: if a kin frame parses right after the last
 		// indexed frame, the run continues and done is a lie.
 		if next := last + int64(h.Size()); next <= w.w.DataEnd()-mp3.HeaderLen {
-			if _, more := w.headerAt(next); more {
+			if _, more := w.headerPeek(next); more {
 				done = false
 			}
 		}

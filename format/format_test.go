@@ -1,8 +1,13 @@
 package format
 
 import (
+	"bytes"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
@@ -11,6 +16,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/aiff"
 	"github.com/colespringer/waxflow/container/riff"
+	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -95,17 +101,27 @@ func buildFile(t testing.TB, kind string, frames int) []byte {
 func sampleAt(pos int64) int32 { return int32(pos%3000 - 1500) }
 
 func TestProbeIdentifies(t *testing.T) {
+	mp3InWAV, err := os.ReadFile(filepath.Join("..", "container", "riff", "testdata", "mp3.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
-		kind  string
-		codec codec.ID
+		name, kind string
+		raw        []byte
+		codec      codec.ID
+		samples    int64
+		rate       int
 	}{
-		{"wav", codec.PCM},
-		{"aiff", codec.PCM},
+		{"wav", "wav", buildFile(t, "wav", 500), codec.PCM, 500, 48000},
+		{"aiff", "aiff", buildFile(t, "aiff", 500), codec.PCM, 500, 48000},
+		// A frame-walked payload: a strict probe walks it to the end, and a
+		// clean one still probes clean. The fixture's fact chunk is its only
+		// statement of length, advisory (see container/riff).
+		{"mp3 in wav", "wav", mp3InWAV, codec.MP3, 23616, 22050},
 	}
 	for _, tt := range tests {
-		t.Run(tt.kind, func(t *testing.T) {
-			raw := buildFile(t, tt.kind, 500)
-			info, err := Probe(container.BytesSource(raw), "", &Options{Strict: true})
+		t.Run(tt.name, func(t *testing.T) {
+			info, err := Probe(container.BytesSource(tt.raw), "", &Options{Strict: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -113,7 +129,7 @@ func TestProbeIdentifies(t *testing.T) {
 				t.Errorf("container = %q, want %q", info.Container, tt.kind)
 			}
 			d := info.Default()
-			if d.Codec != tt.codec || d.Samples != 500 || d.Fmt.Rate != 48000 {
+			if d.Codec != tt.codec || d.Samples != tt.samples || d.Fmt.Rate != tt.rate {
 				t.Errorf("default track = %+v", d)
 			}
 			if len(info.Warnings) != 0 {
@@ -423,5 +439,195 @@ func TestMediaCloseIdempotent(t *testing.T) {
 	defer audio.Put(dst)
 	if err := med.ReadChunk(dst); err == nil {
 		t.Error("ReadChunk after Close must fail")
+	}
+}
+
+// damagedMP3 is the MP3 fixture with the middle of its frame run zeroed: the
+// head is clean, so opening finds nothing, and the walk that reaches the
+// middle finds the skipped bytes.
+func damagedMP3(t *testing.T) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "testdata", "sine-untagged.mp3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return testutil.ZeroMiddle(raw, 2048)
+}
+
+// damagedADTS is the ADTS fixture with junk spliced between two frames past
+// its head: the frame length is thirteen bits across bytes 3 to 5 of each
+// header, which is enough to step the first frames without a demuxer.
+func damagedADTS(t *testing.T) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "container", "adts", "testdata", "stereo.aac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := 0
+	for range 5 {
+		if off+7 > len(raw) {
+			t.Fatal("the ADTS fixture is shorter than five frames")
+		}
+		off += int(raw[off+3]&3)<<11 | int(raw[off+4])<<3 | int(raw[off+5])>>5
+	}
+	junk := bytes.Repeat([]byte{0x11}, 16)
+	return append(append(append([]byte(nil), raw[:off]...), junk...), raw[off:]...)
+}
+
+// drain reads med to its end.
+func drain(t *testing.T, med Media) {
+	t.Helper()
+	dst := audio.Get(med.Info().Default().Fmt, audio.StandardChunk)
+	defer audio.Put(dst)
+	for {
+		err := med.ReadChunk(dst)
+		if errors.Is(err, io.EOF) {
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestStrictProbeWalks pins what strict buys on a frame-walked payload: the
+// walk the demuxer defers is finished before the verdict, so damage past the
+// head refuses the probe. Open stays tolerant and lazy, which is the
+// existing contract restated: the read that reaches the damage returns it.
+func TestStrictProbeWalks(t *testing.T) {
+	for _, tc := range []struct {
+		name, hint string
+		raw        []byte
+	}{
+		{"mp3", "mp3", damagedMP3(t)},
+		{"adts", "aac", damagedADTS(t)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Probe(container.BytesSource(tc.raw), tc.hint, nil); err != nil {
+				t.Fatalf("a tolerant probe refused: %v", err)
+			}
+			_, err := Probe(container.BytesSource(tc.raw), tc.hint, &Options{Strict: true})
+			if !errors.Is(err, waxerr.ErrMalformedInput) {
+				t.Fatalf("strict probe error = %v, want malformed: the walk did not reach the damage", err)
+			}
+			med, err := Open(container.BytesSource(tc.raw), tc.hint, &Options{Strict: true})
+			if err != nil {
+				t.Fatalf("strict Open refused at open, before the read reached the damage: %v", err)
+			}
+			defer med.Close()
+			dst := audio.Get(med.Info().Default().Fmt, audio.StandardChunk)
+			defer audio.Put(dst)
+			for {
+				err := med.ReadChunk(dst)
+				if err == nil {
+					continue
+				}
+				if !errors.Is(err, waxerr.ErrMalformedInput) {
+					t.Fatalf("the strict read failed with %v, want malformed", err)
+				}
+				break
+			}
+		})
+	}
+}
+
+// TestWarningsFollowTheRead pins the Media-side seam: Info's Warnings are
+// live. Empty at open on a payload whose head is clean, and holding the
+// finding once a read, or a seek, has walked past the damage, through the
+// same *Info a caller took at open.
+func TestWarningsFollowTheRead(t *testing.T) {
+	for _, tc := range []struct {
+		name, hint string
+		raw        []byte
+	}{
+		{"mp3", "mp3", damagedMP3(t)},
+		{"adts", "aac", damagedADTS(t)},
+	} {
+		for _, how := range []string{"read", "seek"} {
+			t.Run(tc.name+" after a "+how, func(t *testing.T) {
+				med, err := Open(container.BytesSource(tc.raw), tc.hint, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer med.Close()
+				info := med.Info()
+				if len(info.Warnings) != 0 {
+					t.Fatalf("warnings at open = %v, want none: the head is clean", info.Warnings)
+				}
+				if how == "read" {
+					drain(t, med)
+				} else if _, err := med.SeekSample(1 << 40); err != nil {
+					t.Fatal(err)
+				}
+				if again := med.Info(); again != info {
+					t.Fatal("Info handed out a different *Info after the read")
+				}
+				if !slices.ContainsFunc(info.Warnings, func(s string) bool { return strings.Contains(s, "unparsable bytes skipped") }) {
+					t.Errorf("warnings after the %s = %v, want the skipped bytes", how, info.Warnings)
+				}
+			})
+		}
+	}
+}
+
+// count reads med to its end and returns the frames delivered.
+func count(t *testing.T, med Media) int64 {
+	t.Helper()
+	dst := audio.Get(med.Info().Default().Fmt, audio.StandardChunk)
+	defer audio.Put(dst)
+	var n int64
+	for {
+		err := med.ReadChunk(dst)
+		if errors.Is(err, io.EOF) {
+			return n
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		n += int64(dst.N)
+	}
+}
+
+// TestStrictProbeMeasures pins what the strict walk buys beyond the verdict:
+// a payload whose length the headers do not state (a bare MP3 with no
+// metadata frame, an ADTS stream) or state only as an advisory duration (a
+// Matroska file with no CodecDelay track) reports the walked count, exact,
+// and it is the count the decode delivers. The tolerant probe keeps saying
+// what the headers say.
+func TestStrictProbeMeasures(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, hint string
+	}{
+		{"mp3", filepath.Join("..", "testdata", "sine-untagged.mp3"), "mp3"},
+		{"adts", filepath.Join("..", "container", "adts", "testdata", "stereo.aac"), "aac"},
+		{"mka", filepath.Join("..", "container", "mka", "testdata", "seed-pcm.mka"), "mka"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := os.ReadFile(tc.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tolerant, err := Probe(container.BytesSource(raw), tc.hint, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := tolerant.Default(); d.SamplesExact {
+				t.Fatalf("the tolerant probe already reports an exact %d; this cell needs a header that does not", d.Samples)
+			}
+			strict, err := Probe(container.BytesSource(raw), tc.hint, &Options{Strict: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			med, err := Open(container.BytesSource(raw), tc.hint, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer med.Close()
+			got := count(t, med)
+			if d := strict.Default(); !d.SamplesExact || d.SamplesAdvisory || d.Samples != got {
+				t.Errorf("strict probe: samples = %d exact = %v advisory = %v, want the decode's %d, exact",
+					d.Samples, d.SamplesExact, d.SamplesAdvisory, got)
+			}
+		})
 	}
 }

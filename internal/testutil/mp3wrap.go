@@ -81,3 +81,29 @@ func WAVDataChunk(t testing.TB, raw []byte) []byte {
 	t.Fatal("no data chunk")
 	return nil
 }
+
+// WAVWithoutChunk returns raw with its first chunk named id dropped and the
+// RIFF size patched, walking the chunks the way WAVDataChunk does. It is
+// what turns a committed ADPCM fixture into the no-fact file a test needs
+// without a second fixture.
+func WAVWithoutChunk(t testing.TB, raw []byte, id string) []byte {
+	t.Helper()
+	le := binary.LittleEndian
+	for off := 12; off+8 <= len(raw); {
+		size := int64(le.Uint32(raw[off+4:]))
+		body := int64(off) + 8 + size
+		if body > int64(len(raw)) {
+			break
+		}
+		end := min(int(body+size&1), len(raw))
+		if string(raw[off:off+4]) == id {
+			out := append([]byte(nil), raw[:off]...)
+			out = append(out, raw[end:]...)
+			le.PutUint32(out[4:], uint32(len(out)-8))
+			return out
+		}
+		off = end
+	}
+	t.Fatalf("no %q chunk", id)
+	return nil
+}

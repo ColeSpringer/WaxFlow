@@ -18,8 +18,14 @@
 // pre-roll. PCM in a FRAGMENTED movie is named and skipped rather than read:
 // that path is per-sample by construction and nothing writes one, so the track
 // leaves the candidate set and a movie carrying a codec we do decode beside it
-// still opens on that one. QuickTime's 'chan' channel layout is not read, so a
-// multichannel track plays in audio.DefaultLayout's order, and says so.
+// still opens on that one. A multichannel track's layout is read from the
+// file's own box, QuickTime's 'chan' (a bitmap, a named layout tag, or
+// per-channel labels) or ISO's 'chnl' (speaker positions, or a CICP
+// configuration), and a file whose channels are not in the WAVE order is
+// reordered by the PCM decoder; a layout the box states and this build cannot
+// place on a WAVE position (a matrix-encoded pair, a wide pair, an explicit
+// angle, a chnl version 1 or an object-structured stream) plays in
+// audio.DefaultLayout's order and says so with a Note.
 //
 // Gapless trims come from the iTunes iTunSMPB tag or an edit list, mapped
 // onto Track.Delay/Padding so format.Media delivers the trimmed timeline.

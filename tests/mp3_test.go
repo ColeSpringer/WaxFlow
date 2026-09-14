@@ -8,10 +8,14 @@ package waxflow_test
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -263,23 +267,68 @@ func TestMP3ToleratedDamage(t *testing.T) {
 	})
 
 	t.Run("mid-stream junk", func(t *testing.T) {
-		// Overwrite a frame's sync in the middle; the walk should warn
-		// and resync at the next frame.
-		mangled := append([]byte(nil), clean...)
-		copy(mangled[len(mangled)/2:], []byte{0, 0, 0, 0})
-		info, err := waxflow.New().Probe(container.BytesSource(mangled), "mp3", nil)
+		// Zero a stretch in the middle, which takes at least one frame
+		// header with it; the walk warns and resyncs at the next frame.
+		// The head is clean, so a tolerant probe sees nothing; a strict
+		// probe walks the run and refuses; and an opened media's Info
+		// reports the finding only once a read has reached it.
+		mangled := testutil.ZeroMiddle(clean, 2048)
+		e := waxflow.New()
+		info, err := e.Probe(container.BytesSource(mangled), "mp3", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		_ = info
-		got, err := decodeAllDynamic(t, container.BytesSource(mangled), "mp3")
+		if len(info.Warnings) != 0 {
+			t.Errorf("a tolerant probe reports %v; it reads the head, which is clean", info.Warnings)
+		}
+		if _, err := e.Probe(container.BytesSource(mangled), "mp3", &waxflow.ProbeOptions{Strict: true}); !errors.Is(err, waxerr.ErrMalformedInput) {
+			t.Errorf("strict probe error = %v, want malformed", err)
+		}
+		med, err := e.OpenStream(container.BytesSource(mangled), "mp3")
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer med.Close()
+		live := med.Info()
+		if len(live.Warnings) != 0 {
+			t.Errorf("warnings at open = %v, want none", live.Warnings)
+		}
+		got := drainMedia(t, med, 30000)
 		n := got.N
 		audio.Put(got)
 		if n <= 0 {
 			t.Error("mid-stream damage killed the decode entirely")
+		}
+		// Asked again after the read: the lists are refolded on each Info
+		// call, into the same *Info the caller already holds.
+		if again := med.Info(); again != live {
+			t.Fatal("Info handed out a different *Info after the read")
+		}
+		if !slices.ContainsFunc(live.Warnings, func(s string) bool { return strings.Contains(s, "unparsable bytes skipped") }) {
+			t.Errorf("warnings after the read = %v, want the skipped bytes", live.Warnings)
+		}
+		// Both write rungs carry the read's verdict on the result: the
+		// decode rung through the media, the copy rung through the demuxer
+		// it walked.
+		for _, rung := range []struct {
+			name string
+			run  func(dst io.Writer) (*waxflow.TranscodeResult, error)
+		}{
+			{"decode", func(dst io.Writer) (*waxflow.TranscodeResult, error) {
+				return e.Transcode(context.Background(), container.BytesSource(mangled), "mp3", dst, waxflow.TranscodeOptions{Format: "wav"})
+			}},
+			{"copy", func(dst io.Writer) (*waxflow.TranscodeResult, error) {
+				return e.Remux(context.Background(), container.BytesSource(mangled), "mp3", dst, waxflow.TranscodeOptions{Format: "mp3"})
+			}},
+		} {
+			var out bytes.Buffer
+			res, err := rung.run(&out)
+			if err != nil {
+				t.Fatalf("%s rung: %v", rung.name, err)
+			}
+			if !slices.ContainsFunc(res.InputWarnings, func(s string) bool { return strings.Contains(s, "unparsable bytes skipped") }) {
+				t.Errorf("%s rung: input warnings = %v, want the skipped bytes", rung.name, res.InputWarnings)
+			}
 		}
 	})
 }
@@ -370,6 +419,9 @@ func TestMP3IndexSidecar(t *testing.T) {
 	}
 	if _, ok := med.(container.Indexer); !ok {
 		t.Fatal("engine media hides container.Indexer")
+	}
+	if _, ok := med.(format.Walker); !ok {
+		t.Fatal("engine media hides format.Walker")
 	}
 	first := readAt(med, 5_000_000)
 	defer audio.Put(first)

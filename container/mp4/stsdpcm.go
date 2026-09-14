@@ -129,6 +129,20 @@ func (d *Demuxer) setPCM(t *track, e pcmEntry) error {
 		// identical storage with two different blobs.
 		cfg.BigEndian = false
 	}
+	// The layout box, where the file carries one and has more than two
+	// channels to order (mono and stereo have one order each). A permuted
+	// order rides in the config, so the blob and the cache key change only
+	// for such a file; an adopted mask replaces the default layout.
+	layout := audio.DefaultLayout(channels)
+	if channels > 2 {
+		l, ok, err := d.channelLayout(t, e, channels)
+		if err != nil {
+			return err
+		}
+		if ok {
+			layout, cfg.Order = l.mask, l.order
+		}
+	}
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -139,15 +153,6 @@ func (d *Demuxer) setPCM(t *track, e pcmEntry) error {
 	rate, err := d.pcmRate(t, e)
 	if err != nil {
 		return err
-	}
-	if _, ok := e.child("chan"); ok && channels > 2 {
-		// The QuickTime 'chan' box states a channel layout, and is not read:
-		// the pipeline's layouts are the WAVE ones, mapping between the two is
-		// a table nothing in the tree needs yet, and a wrong layout is worse
-		// than a default one. Mono and stereo have only one order, so this is
-		// said only where the file stated an order that could differ from the
-		// one it will play in.
-		t.addNote("channel layout box not read; %d channels play in the default order", channels)
 	}
 	t.codec = codec.PCM
 	t.codecConfig = blob
@@ -160,7 +165,7 @@ func (d *Demuxer) setPCM(t *track, e pcmEntry) error {
 	if cfg.Encoding == pcm.Float && cfg.Bits != cfg.PCMFormat(rate, channels, 0).BitDepth {
 		t.sourceBits = cfg.Bits
 	}
-	t.fmt = cfg.PCMFormat(rate, channels, audio.DefaultLayout(channels))
+	t.fmt = cfg.PCMFormat(rate, channels, layout)
 	// One frame per unit, which is what makes the sample table uniform.
 	t.unitBytes = int64(cfg.BytesPerFrame(channels))
 	t.unitDur = 1

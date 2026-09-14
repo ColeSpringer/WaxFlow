@@ -568,7 +568,7 @@ func (d *Demuxer) mp3AdoptFrameFormat(t *track) error {
 		return nil
 	}
 	d.w.Trim(off)
-	b := d.w.BytesAt(off, mp3.HeaderLen)
+	b := d.w.Peek(off, mp3.HeaderLen)
 	if len(b) != mp3.HeaderLen {
 		return nil
 	}

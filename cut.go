@@ -647,6 +647,16 @@ type cutDemuxer struct {
 // track's packets, and the rung is single-track by construction (muxers are).
 func (c *cutDemuxer) Tracks() []container.Track { return []container.Track{c.cut} }
 
+// Warnings forwards the source's list: embedding the Demuxer interface
+// promotes nothing outside it, and the copy rung reads this through
+// container.Warner for the damage its walk found.
+func (c *cutDemuxer) Warnings() []container.Warning {
+	if w, ok := c.Demuxer.(container.Warner); ok {
+		return w.Warnings()
+	}
+	return nil
+}
+
 func (c *cutDemuxer) ReadPacket(pkt *container.Packet) error {
 	for {
 		if c.cur == len(c.windows) {

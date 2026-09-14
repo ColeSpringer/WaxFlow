@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 
@@ -35,7 +36,9 @@ func mp3Payload() []byte {
 	f := make([]byte, mp3FrameLen)
 	copy(f, []byte{0xFF, 0xFB, 0x90, 0x00})
 	for i := 4; i < len(f); i++ {
-		f[i] = byte(i)
+		if f[i] = byte(i); f[i] == 0xFF {
+			f[i] = 0
+		}
 	}
 	return bytes.Repeat(f, mp3FrameCount)
 }
@@ -225,6 +228,9 @@ func TestMP3SeekBacksOffForTheReservoir(t *testing.T) {
 // same wording the bare-stream reader uses for the same findings. Everything
 // but the leading one arrives during the walk, which is what a lazily built
 // index means.
+// A strict probe finishes that walk through container.Walker before its
+// verdict, so every row here refuses it; a tolerant walk leaves the finding
+// in Warnings.
 func TestMP3ToleratedDamage(t *testing.T) {
 	payload := mp3Payload()
 	junk := func(n int) []byte { return bytes.Repeat([]byte{0x11}, n) }
@@ -264,6 +270,25 @@ func TestMP3ToleratedDamage(t *testing.T) {
 			if !found {
 				t.Fatalf("warnings = %v, want a Damage saying %q", d.Warnings(), tc.want)
 			}
+			// A walk finishes the index without a read: under tolerance the
+			// finding lands in Warnings the same way, and Walked flips.
+			walked, err := NewDemuxer(container.BytesSource(raw), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if walked.Walked() && !tc.atOpen {
+				t.Error("Walked before any walk")
+			}
+			if err := walked.Walk(); err != nil {
+				t.Fatalf("a tolerant Walk failed: %v", err)
+			}
+			if !walked.Walked() {
+				t.Error("not Walked after Walk")
+			}
+			if !slices.ContainsFunc(walked.Warnings(), func(w container.Warning) bool { return w.Msg == tc.want }) {
+				t.Errorf("warnings after Walk = %v, want %q", walked.Warnings(), tc.want)
+			}
+
 			strict, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true})
 			if tc.atOpen {
 				if err == nil {
@@ -284,6 +309,14 @@ func TestMP3ToleratedDamage(t *testing.T) {
 					t.Fatalf("strict mode failed with %v, want malformed", err)
 				}
 				break
+			}
+			// The strict probe's path: Walk refuses with the same error.
+			strict, err = NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := strict.Walk(); !errors.Is(err, waxerr.ErrMalformedInput) {
+				t.Errorf("strict Walk returned %v, want malformed", err)
 			}
 		})
 	}
@@ -347,6 +380,12 @@ func TestByteLinearPayloadsHaveNoIndex(t *testing.T) {
 			}
 			if blob := d.IndexSnapshot(); blob != nil {
 				t.Errorf("snapshotted %d bytes", len(blob))
+			}
+			// The same per-file answer on container.Walker: the byte-linear
+			// payload has nothing to walk, and the short frame run was just
+			// walked to its end by the seek.
+			if err := d.Walk(); err != nil || !d.Walked() {
+				t.Errorf("Walk = %v, Walked = %v; want nil and true for a payload with nothing left to walk", err, d.Walked())
 			}
 			// On a demuxer that has not moved, so the refusal is the one
 			// being tested rather than the guard against restoring over a

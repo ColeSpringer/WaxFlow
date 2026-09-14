@@ -112,7 +112,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 }
 
 func (d *Demuxer) parse() error {
-	if !Match(d.w.BytesAt(0, 4)) {
+	if !Match(d.w.Peek(0, 4)) {
 		if d.w.Err() != nil {
 			return d.w.Err()
 		}
@@ -128,7 +128,7 @@ func (d *Demuxer) parse() error {
 	var h wavpack.BlockHeader
 	for i := 0; ; i++ {
 		var ok bool
-		h, ok = d.blockAt(off)
+		h, ok = d.blockPeek(off)
 		if !ok {
 			if d.w.Err() != nil {
 				return d.w.Err()
@@ -144,7 +144,7 @@ func (d *Demuxer) parse() error {
 		off += h.Size
 	}
 
-	block := d.w.BytesAt(off, int(h.Size))
+	block := d.w.Peek(off, int(h.Size))
 	if int64(len(block)) != h.Size {
 		if d.w.Err() != nil {
 			return d.w.Err()
@@ -344,8 +344,19 @@ func (d *Demuxer) tilesToEnd(off, end int64) bool {
 // starts there: the header parses and its declared length fits inside the
 // audio data. That is all a sequential step needs, because a WavPack block
 // carries its own length and the position it steps from was already trusted.
+// It is the packet path's read, with a window of read-ahead behind it.
 func (d *Demuxer) blockAt(off int64) (wavpack.BlockHeader, bool) {
-	buf := d.w.BytesAt(off, wavpack.BlockHeaderLen)
+	return d.block(off, d.w.BytesAt(off, wavpack.BlockHeaderLen))
+}
+
+// blockPeek is blockAt through an exact read, for the open path: the blocks
+// ahead of the first audio block are read once, and a window of read-ahead
+// there is one the tail scan pays again.
+func (d *Demuxer) blockPeek(off int64) (wavpack.BlockHeader, bool) {
+	return d.block(off, d.w.Peek(off, wavpack.BlockHeaderLen))
+}
+
+func (d *Demuxer) block(off int64, buf []byte) (wavpack.BlockHeader, bool) {
 	if len(buf) < wavpack.BlockHeaderLen || !wavpack.SyncOK(buf) {
 		return wavpack.BlockHeader{}, false
 	}

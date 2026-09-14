@@ -580,7 +580,7 @@ func samplesToMS(n int64, rate int) int64 {
 // parse reads the Header Object's children, locates the Data Object, selects
 // the audio stream, and wires the track.
 func (d *Demuxer) parse() error {
-	head := d.w.BytesAt(0, headerObjectLen)
+	head := d.w.Peek(0, headerObjectLen)
 	if len(head) < headerObjectLen || guidAt(head) != guidHeader {
 		if err := d.w.Err(); err != nil {
 			return err
@@ -944,7 +944,7 @@ func (d *Demuxer) declaredSamples(rate int) int64 {
 // parseData locates the Data Object, sizes the packet run, and reads the
 // Simple Index Object behind it when there is one.
 func (d *Demuxer) parseData(off int64) error {
-	b := d.w.BytesAt(off, dataObjectLen)
+	b := d.w.Peek(off, dataObjectLen)
 	if len(b) < dataObjectLen {
 		if err := d.w.Err(); err != nil {
 			return err

@@ -36,6 +36,13 @@ func NewEncoder(cfg Config, f audio.Format) (*Encoder, error) {
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 			fmt.Sprintf("pcm: input format %v does not match wire config (want %v)", f, want))
 	}
+	if cfg.Order != nil {
+		// The order says which wire channel an output channel reads. The
+		// encoder writes the pipeline's order and nothing asks it to write
+		// another, so an order here is a config built for the wrong direction.
+		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
+			"pcm: a channel order is a decode-side mapping; the encoder takes none")
+	}
 	return &Encoder{cfg: cfg, fmt: f}, nil
 }
 

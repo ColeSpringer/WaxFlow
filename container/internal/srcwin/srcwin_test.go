@@ -294,3 +294,97 @@ func TestBytesAtViewCannotScribbleOnItsNeighbours(t *testing.T) {
 }
 
 var _ container.Source = (*counted)(nil)
+
+// TestPeekLoadsExactly is the second entry point's contract: a Peek makes
+// resident exactly the bytes it asks for, whether that is a forward extension
+// or a rebase, and the read-ahead round-up stays BytesAt's alone. It is what
+// lets an open path read a magic or a header without paying a window for it.
+func TestPeekLoadsExactly(t *testing.T) {
+	src := &counted{size: 10 * Chunk}
+	w := New(src, src.size, "test: reading")
+
+	if got := w.Peek(0, 4); !equal(got, want(0, 4)) {
+		t.Fatal("Peek(0, 4) served the wrong bytes")
+	}
+	if src.reads != 1 || src.bytes != 4 || len(w.win) != 4 {
+		t.Errorf("Peek(0, 4) read %d bytes in %d reads and holds %d, want 4 in 1 holding 4", src.bytes, src.reads, len(w.win))
+	}
+
+	// A forward Peek extends by exactly the bytes past the window's end.
+	src.reads, src.bytes = 0, 0
+	if got := w.Peek(4, 417); !equal(got, want(4, 417)) {
+		t.Fatal("Peek(4, 417) served the wrong bytes")
+	}
+	if src.reads != 1 || src.bytes != 417 || len(w.win) != 421 {
+		t.Errorf("a forward Peek read %d bytes in %d reads and holds %d, want 417 in 1 holding 421", src.bytes, src.reads, len(w.win))
+	}
+	// A Peek inside the resident bytes reads nothing.
+	src.reads = 0
+	if got := w.Peek(2, 100); !equal(got, want(2, 100)) || src.reads != 0 {
+		t.Errorf("a resident Peek read %d times", src.reads)
+	}
+
+	// A backward Peek rebases into exactly n bytes.
+	src.reads, src.bytes = 0, 0
+	if got := w.Peek(5*Chunk, 16); !equal(got, want(5*Chunk, 16)) {
+		t.Fatal("Peek(5*Chunk, 16) served the wrong bytes")
+	}
+	if src.reads != 1 || src.bytes != 16 || len(w.win) != 16 || w.winOff != 5*Chunk {
+		t.Errorf("a rebasing Peek read %d bytes in %d reads and holds %d at %d, want 16 in 1 holding 16 at %d",
+			src.bytes, src.reads, len(w.win), w.winOff, 5*Chunk)
+	}
+
+	// A BytesAt on the same region then costs one read of about a window:
+	// read-ahead resumes where the exact read left off.
+	src.reads, src.bytes = 0, 0
+	if got := w.BytesAt(5*Chunk, 4096); !equal(got, want(5*Chunk, 4096)) {
+		t.Fatal("BytesAt after a Peek served the wrong bytes")
+	}
+	if src.reads != 1 || src.bytes != Chunk-16 {
+		t.Errorf("BytesAt after a Peek read %d bytes in %d reads, want %d in 1", src.bytes, src.reads, Chunk-16)
+	}
+
+	// The data end clamps a Peek the way it clamps BytesAt.
+	if got := w.Peek(src.size-2, 10); len(got) != 2 || !equal(got, want(src.size-2, 2)) {
+		t.Errorf("Peek past the end returned %d bytes, want 2", len(got))
+	}
+	if w.Err() != nil {
+		t.Fatalf("Err = %v after clean reads", w.Err())
+	}
+}
+
+// TestPeekThenLinearReadSettles is the trace an MP3 open leaves: two exact
+// reads for the head, then the packet walk. The walk must settle the window
+// at the same bounded size a walk with no Peek before it does, so the cost
+// pins above hold for every owner that opens through Peek.
+func TestPeekThenLinearReadSettles(t *testing.T) {
+	src := &counted{size: 1 << 30}
+	w := New(src, src.size, "test: reading")
+	w.Peek(0, 4)
+	w.Peek(4, 417)
+	const step = 24576
+
+	off := int64(0)
+	for ; off < 8*Chunk; off += step {
+		w.Trim(off)
+		w.BytesAt(off, step)
+	}
+	settled := cap(w.win)
+	changes := 0
+	for end := off + 16<<20; off < end; off += step {
+		w.Trim(off)
+		if got := w.BytesAt(off, step); len(got) != step {
+			t.Fatalf("view at %d is %d bytes", off, len(got))
+		}
+		if cap(w.win) != settled {
+			changes++
+			settled = cap(w.win)
+		}
+	}
+	if changes != 0 {
+		t.Errorf("the window was resized %d times while walking 16 MiB after a Peek", changes)
+	}
+	if settled > 4*Chunk {
+		t.Errorf("the window settled at %d bytes, want it bounded near %d", settled, Chunk)
+	}
+}

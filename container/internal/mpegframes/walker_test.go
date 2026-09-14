@@ -9,6 +9,8 @@ import (
 
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/srcwin"
+	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -29,7 +31,9 @@ func oneFrame() []byte {
 	f := make([]byte, frameLen)
 	copy(f, frameHeader)
 	for i := len(frameHeader); i < len(f); i++ {
-		f[i] = byte(i)
+		if f[i] = byte(i); f[i] == 0xFF {
+			f[i] = 0
+		}
 	}
 	return f
 }
@@ -398,5 +402,197 @@ func TestSmallIndexIsNotWorthKeeping(t *testing.T) {
 	collect(t, w)
 	if blob := w.Snapshot(); blob != nil {
 		t.Errorf("snapshotted %d bytes for a 64-frame run", len(blob))
+	}
+}
+
+// countedWalk begins a walk over data through a counting source, so a test
+// can pin what the walk asked the source for. Reads are pinned beside bytes
+// throughout: a scan that re-requests the same window after every false
+// candidate is invisible to a byte count.
+func countedWalk(t *testing.T, data []byte) (*Walker, *testutil.CountingSource) {
+	t.Helper()
+	src := &testutil.CountingSource{Src: container.BytesSource(data)}
+	w := New(src, src.Size(), (&walkOpts{}).options())
+	if _, _, err := w.Begin(0); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	return w, src
+}
+
+// TestBeginReadsTheHeadOnly pins the open cost of a clean run: the header,
+// one frame and the confirming header behind it, whatever the run's length.
+// A caller that opens and never reads a packet (a probe, the daemon's track
+// memo) pays for what it uses, which is under 2 KiB, not a window.
+func TestBeginReadsTheHeadOnly(t *testing.T) {
+	var reads []int
+	for _, n := range []int{2000, 4000} {
+		_, src := countedWalk(t, frames(n))
+		if src.Bytes > 2048 || src.Reads > 3 {
+			t.Errorf("Begin on %d frames read %d bytes in %d reads, want under 2048 in at most 3", n, src.Bytes, src.Reads)
+		}
+		reads = append(reads, src.Reads)
+	}
+	if reads[0] != reads[1] {
+		t.Errorf("Begin cost %d reads on 2000 frames and %d on 4000; the head costs the same at any length", reads[0], reads[1])
+	}
+}
+
+// TestJunkScanIsBoundedBySpans pins the scan a run led by junk pays: about
+// twice the junk plus one frame, in a number of reads that grows with the
+// junk's length and not with its content. Junk with a sync byte every hundred
+// bytes, which is what a JPEG looks like, costs the same reads as junk with
+// none; a scan that asked for a window after every false candidate would pay
+// a read per sync byte.
+func TestJunkScanIsBoundedBySpans(t *testing.T) {
+	junk := func(n int, syncs bool) []byte {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = 0x11
+			if syncs && i%100 == 0 {
+				b[i] = 0xFF // followed by 0x11, which is not a sync
+			}
+		}
+		return b
+	}
+	cost := func(j []byte) (reads int, bytes int64) {
+		w, src := countedWalk(t, append(j, frames(3)...))
+		if w.FirstFrame() != int64(len(j)) {
+			t.Fatalf("first frame at %d, want %d", w.FirstFrame(), len(j))
+		}
+		return src.Reads, src.Bytes
+	}
+	const big = 100 << 10
+	plainReads, plainBytes := cost(junk(big, false))
+	syncReads, _ := cost(junk(big, true))
+	if plainBytes > 2*big+frameLen+64 {
+		t.Errorf("scanning %d bytes of junk read %d bytes, want no more than about twice the junk plus a frame", big, plainBytes)
+	}
+	if syncReads != plainReads {
+		t.Errorf("junk with sync bytes cost %d reads, junk without cost %d; the reads must not depend on the content", syncReads, plainReads)
+	}
+	smallReads, _ := cost(junk(4<<10, true))
+	if smallReads >= plainReads {
+		t.Errorf("4 KiB of junk cost %d reads and 100 KiB cost %d; the reads grow with the junk's length", smallReads, plainReads)
+	}
+}
+
+// TestWalkCostsOneReadPerWindow pins the packet path's cost after the exact
+// open: the first frames cost about one window, a walk of several windows
+// stays at one read per window, and the window behind it stays bounded.
+func TestWalkCostsOneReadPerWindow(t *testing.T) {
+	const n = 2000 // 834 KB, over six windows
+	w, src := countedWalk(t, frames(n))
+	src.Reset()
+	for i := int64(0); i < 8; i++ {
+		if _, err := w.Frame(i); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if src.Reads > 1 || src.Bytes > srcwin.Chunk {
+		t.Errorf("the first frames read %d bytes in %d reads, want about one window in one read", src.Bytes, src.Reads)
+	}
+	src.Reset()
+	collect(t, w)
+	windows := (n*frameLen + srcwin.Chunk - 1) / srcwin.Chunk
+	if src.Reads > windows+2 {
+		t.Errorf("walking %d windows took %d reads, want about one per window", windows, src.Reads)
+	}
+	if resident, capacity := w.w.Resident(); resident > 2*srcwin.Chunk+frameLen || capacity > 3*srcwin.Chunk {
+		t.Errorf("the window holds %d bytes (capacity %d) after the walk, want it bounded near a window", resident, capacity)
+	}
+}
+
+// TestLandingLeavesTheWindowBounded is the measure pass: a seek to the end
+// walks the whole index, and the window must follow the walk rather than
+// accrete the run behind it.
+func TestLandingLeavesTheWindowBounded(t *testing.T) {
+	const n = 2000
+	w, src := countedWalk(t, frames(n))
+	src.Reset()
+	if _, err := w.Landing(n - 10); err != nil {
+		t.Fatal(err)
+	}
+	if resident, capacity := w.w.Resident(); resident > 2*srcwin.Chunk+frameLen || capacity > 3*srcwin.Chunk {
+		t.Errorf("the window holds %d bytes (capacity %d) after a landing near the end, want at most two windows", resident, capacity)
+	}
+	windows := (n*frameLen + srcwin.Chunk - 1) / srcwin.Chunk
+	if src.Reads > windows+2 {
+		t.Errorf("the landing walk took %d reads over %d windows", src.Reads, windows)
+	}
+}
+
+// TestRestoreProbesHeadersNotWindows pins the sidecar restore's cost: nine
+// spread header probes and the one behind the last entry, each an exact read
+// rather than a window.
+func TestRestoreProbesHeadersNotWindows(t *testing.T) {
+	data := frames(IdxMinFrames + 50)
+	w, _ := countedWalk(t, data)
+	collect(t, w)
+	blob := w.Snapshot()
+	if blob == nil {
+		t.Fatal("no snapshot after a full walk")
+	}
+	w2, src := countedWalk(t, data)
+	src.Reset()
+	if !w2.Restore(blob) {
+		t.Fatal("snapshot rejected by an identical source")
+	}
+	if src.Reads > idxProbes+2 || src.Bytes > 2048 {
+		t.Errorf("Restore read %d bytes in %d reads, want a header per probe", src.Bytes, src.Reads)
+	}
+}
+
+// TestCompleteFinishesTheWalk pins the strict probe's half of the walker:
+// Complete extends the index to the end of the run and reports each finding
+// through the hook exactly once, a hook that returns an error stops it at the
+// first finding, and Done says whether the index reaches the end: not after
+// Begin, yes after Complete, and yes after restoring a complete snapshot.
+func TestCompleteFinishesTheWalk(t *testing.T) {
+	data := frames(6)
+	copy(data[3*frameLen:], []byte{0, 0, 0, 0}) // the fourth frame's header
+
+	var o walkOpts
+	w, _, _ := begin(t, data, &o)
+	if w.Done() {
+		t.Fatal("Done before any walk")
+	}
+	if err := w.Complete(); err != nil {
+		t.Fatal(err)
+	}
+	if !w.Done() {
+		t.Error("not Done after Complete")
+	}
+	if len(o.msgs) != 1 || o.msgs[0] != "417 unparsable bytes skipped" {
+		t.Fatalf("findings = %v, want the skipped frame once", o.msgs)
+	}
+	if err := w.Complete(); err != nil || len(o.msgs) != 1 {
+		t.Errorf("a second Complete returned %v and left %d findings; a finished walk reports nothing again", err, len(o.msgs))
+	}
+	if got := collect(t, w); len(got) != 5 {
+		t.Errorf("walked %d frames after Complete, want the 5 that parse", len(got))
+	}
+
+	boom := errors.New("strict")
+	strict := walkOpts{fail: boom}
+	ws, _, _ := begin(t, data, &strict)
+	if err := ws.Complete(); !errors.Is(err, boom) {
+		t.Errorf("Complete under a refusing hook returned %v, want the hook's error", err)
+	}
+	if ws.Done() {
+		t.Error("a walk stopped by its hook claims to be Done")
+	}
+
+	// A restored complete snapshot is a finished walk.
+	long := frames(IdxMinFrames + 50)
+	full, _, _ := begin(t, long, &walkOpts{})
+	if err := full.Complete(); err != nil {
+		t.Fatal(err)
+	}
+	restored, _, _ := begin(t, long, &walkOpts{})
+	if !restored.Restore(full.Snapshot()) {
+		t.Fatal("snapshot rejected by an identical source")
+	}
+	if !restored.Done() {
+		t.Error("a restored complete index is not Done")
 	}
 }

@@ -153,7 +153,7 @@ func (d *Demuxer) parse() error {
 // findHeader locates the file header, allowing for a tag or padding in front
 // of it, and parses it.
 func (d *Demuxer) findHeader() (int64, ape.Header, error) {
-	from := id3.Size(d.w.BytesAt(0, 10))
+	from := id3.Size(d.w.Peek(0, 10))
 	limit := min(from+maxJunk, d.w.DataEnd())
 	var firstErr error
 	tries := 0
@@ -165,7 +165,7 @@ func (d *Demuxer) findHeader() (int64, ape.Header, error) {
 		if !ok {
 			break
 		}
-		if h, err := ape.ParseHeader(d.w.BytesAt(cand, ape.MaxHeaderLen)); err == nil {
+		if h, err := ape.ParseHeader(d.w.Peek(cand, ape.MaxHeaderLen)); err == nil {
 			return cand, h, nil
 		} else if firstErr == nil {
 			firstErr = err
@@ -186,6 +186,11 @@ func (d *Demuxer) findHeader() (int64, ape.Header, error) {
 // bytes it starts with are an ordinary word that a tag comment or a cover
 // image will spell.
 func (d *Demuxer) nextMagic(from, limit int64) (int64, bool) {
+	// The magic is where it belongs in every file that is not damaged, so
+	// that is tried with an exact read before the scan pays for a window.
+	if b := d.w.Peek(from, ape.MatchNeed); len(b) == ape.MatchNeed && ape.Match(b) {
+		return from, true
+	}
 	for off := from; off < limit; {
 		b := d.w.BytesAt(off, srcwin.Chunk)
 		// A window too short to hold the magic ends the scan, and it also
@@ -237,7 +242,7 @@ func (d *Demuxer) readSeekTable() error {
 	if int64(h.SeekTableEntries)*4 > maxSeekTableBytes {
 		return malformed("seek table of %d entries exceeds the %d-byte bound", h.SeekTableEntries, maxSeekTableBytes)
 	}
-	raw := d.w.BytesAt(d.base+h.SeekTableOffset, n*4)
+	raw := d.w.Peek(d.base+h.SeekTableOffset, n*4)
 	if len(raw) != n*4 {
 		if d.w.Err() != nil {
 			return d.w.Err()

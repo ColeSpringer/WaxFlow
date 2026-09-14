@@ -1076,3 +1076,55 @@ func TestTranscodeAPELoudnessEmbedsRG(t *testing.T) {
 		}
 	}
 }
+
+// damagedMP3 writes the MP3 fixture with the middle of its frame run zeroed
+// into dir: damage past the head, which a probe's header read cannot see.
+func damagedMP3(t *testing.T, dir string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "testdata", "sine-untagged.mp3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "damaged.mp3")
+	if err := os.WriteFile(path, testutil.ZeroMiddle(raw, 2048), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestProbeStrictWalksTheRun pins the flag's wiring: --strict reaches the
+// engine, whose strict probe walks a frame run to its end, so an MP3 damaged
+// past its head is refused as malformed (exit class 9) where the tolerant
+// probe reports a clean head.
+func TestProbeStrictWalksTheRun(t *testing.T) {
+	in := damagedMP3(t, t.TempDir())
+	if code, _, errOut := run(t, "probe", in); code != 0 {
+		t.Fatalf("tolerant probe exit = %d, want 0: %s", code, errOut)
+	}
+	code, _, errOut := run(t, "probe", "--strict", in)
+	if code != 9 {
+		t.Fatalf("strict probe exit = %d, want 9 (malformed): %s", code, errOut)
+	}
+	if !strings.Contains(errOut, "unparsable bytes skipped") {
+		t.Errorf("stderr = %q, want the skipped bytes named", errOut)
+	}
+}
+
+// TestTranscodeReportsInputDamage pins the summary's new line: the write
+// reads the whole source, so the damage the walk found on the way is printed
+// after it, where the probe at the top of the command could not see it.
+func TestTranscodeReportsInputDamage(t *testing.T) {
+	dir := t.TempDir()
+	in := damagedMP3(t, dir)
+	out := filepath.Join(dir, "out.wav")
+	code, stdout, errOut := run(t, "transcode", in, out)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, errOut)
+	}
+	if !strings.HasPrefix(stdout, "wrote ") {
+		t.Errorf("stdout = %q, want the summary line", stdout)
+	}
+	if !strings.Contains(errOut, "input damage: ") || !strings.Contains(errOut, "unparsable bytes skipped") {
+		t.Errorf("stderr = %q, want an input damage line naming the skipped bytes", errOut)
+	}
+}

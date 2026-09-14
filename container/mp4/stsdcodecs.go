@@ -95,7 +95,14 @@ func (d *Demuxer) setCodec(t *track, e pcmEntry) error {
 	if err != nil {
 		return err
 	}
-	layout := audio.DefaultLayout(channels)
+	// The layout box, read the way setPCM reads it, except that none of
+	// these decoders takes a channel order: a file whose channels are in
+	// the WAVE order adopts its layout, and a permuted one keeps the default
+	// and says so.
+	layout, err := d.codecLayout(t, e, channels)
+	if err != nil {
+		return err
+	}
 
 	switch {
 	case e.canon == "alaw" || (isMS && tag == waveTagALaw):

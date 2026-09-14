@@ -188,6 +188,33 @@ func TestFixturesProbe(t *testing.T) {
 	}
 }
 
+// TestADPCMWAVWithoutFactIsExact pins the block codecs' length claim at the
+// engine level: a WAV whose fact chunk is gone reports its capacity, says it
+// is exact, and the decode delivers exactly that many frames. The daemon's
+// job gate reads that flag, so this is what keeps a fact-less ADPCM file out
+// of a background job it does not need.
+func TestADPCMWAVWithoutFactIsExact(t *testing.T) {
+	raw, err := os.ReadFile(repoPath("testdata", "sine-ima.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = testutil.WAVWithoutChunk(t, raw, "fact")
+	info, err := waxflow.New().Probe(container.BytesSource(raw), "wav", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := info.Default()
+	if !d.SamplesExact {
+		t.Error("a fact-less block codec's capacity is not marked exact")
+	}
+	if d.Samples <= 8000 {
+		t.Errorf("samples = %d, want the whole-block capacity above the fixture's fact of 8000", d.Samples)
+	}
+	if got := decodeAll(t, container.BytesSource(raw), "wav"); int64(got.N) != d.Samples {
+		t.Errorf("probe says %d samples, the decode delivered %d", d.Samples, got.N)
+	}
+}
+
 // trimBlockPadding cuts ffmpeg's whole-block output down to the length this
 // tree decodes, after checking the excess is exactly block padding: present,
 // and smaller than one block. The block length comes from the track's own

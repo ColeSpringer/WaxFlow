@@ -155,7 +155,7 @@ func TestMuxDemuxRoundTrip(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if gotCfg != tt.cfg {
+				if !gotCfg.Equal(tt.cfg) {
 					t.Errorf("wire config = %+v, want %+v", gotCfg, tt.cfg)
 				}
 				if !bytes.Equal(data, wire) {

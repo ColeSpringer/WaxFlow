@@ -18,20 +18,6 @@ import (
 	"github.com/colespringer/waxflow/internal/testutil"
 )
 
-// countingSource wraps a Source and totals the bytes read through it.
-type countingSource struct {
-	src  container.Source
-	read int64
-}
-
-func (c *countingSource) ReadAt(p []byte, off int64) (int, error) {
-	n, err := c.src.ReadAt(p, off)
-	c.read += int64(n)
-	return n, err
-}
-
-func (c *countingSource) Size() int64 { return c.src.Size() }
-
 // cuesFixture is a 40 s seekable PCM file: ten clusters, ten cue points.
 func cuesFixture(t *testing.T) ([]byte, int64) {
 	t.Helper()
@@ -114,7 +100,7 @@ func stripCues(t *testing.T, file []byte) []byte {
 // the bytes served, and the demuxer.
 func landAll(t *testing.T, file []byte, targets []int64) ([]int64, int64, *Demuxer) {
 	t.Helper()
-	c := &countingSource{src: container.BytesSource(file)}
+	c := &testutil.CountingSource{Src: container.BytesSource(file)}
 	d, err := NewDemuxer(c, nil)
 	if err != nil {
 		t.Fatalf("NewDemuxer: %v", err)
@@ -127,7 +113,7 @@ func landAll(t *testing.T, file []byte, targets []int64) ([]int64, int64, *Demux
 		}
 		landed = append(landed, got)
 	}
-	return landed, c.read, d
+	return landed, c.Bytes, d
 }
 
 // TestCuesBoundTheWalk is the rung-was-taken proof: a shallow seek must land
@@ -315,7 +301,7 @@ func TestCuesFromFFmpegBoundTheWalk(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c := &countingSource{src: container.BytesSource(file)}
+	c := &testutil.CountingSource{Src: container.BytesSource(file)}
 	d, err := NewDemuxer(c, nil)
 	if err != nil {
 		t.Fatalf("NewDemuxer: %v", err)
@@ -336,7 +322,7 @@ func TestCuesFromFFmpegBoundTheWalk(t *testing.T) {
 	}
 
 	// The landing must match the unbounded walk's, and cost materially less.
-	ref := &countingSource{src: container.BytesSource(file)}
+	ref := &testutil.CountingSource{Src: container.BytesSource(file)}
 	rd, err := NewDemuxer(ref, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -351,10 +337,10 @@ func TestCuesFromFFmpegBoundTheWalk(t *testing.T) {
 	if got != want {
 		t.Errorf("bounded seek landed at %d, unbounded at %d", got, want)
 	}
-	if c.read*2 >= ref.read {
-		t.Errorf("bounded seek read %d bytes, unbounded read %d", c.read, ref.read)
+	if c.Bytes*2 >= ref.Bytes {
+		t.Errorf("bounded seek read %d bytes, unbounded read %d", c.Bytes, ref.Bytes)
 	}
-	t.Logf("%d cues, bounded read %d bytes, unbounded %d (%d-byte file)", len(d.cues), c.read, ref.read, len(file))
+	t.Logf("%d cues, bounded read %d bytes, unbounded %d (%d-byte file)", len(d.cues), c.Bytes, ref.Bytes, len(file))
 }
 
 // TestCuesVorbisRefusesTheBound pins the guard against a codec whose frame
@@ -449,13 +435,13 @@ func TestCuesWalkRetryAfterFailure(t *testing.T) {
 func TestCuesSeekToStartCostsNothing(t *testing.T) {
 	file, total := cuesFixture(t)
 
-	c := &countingSource{src: container.BytesSource(file)}
+	c := &testutil.CountingSource{Src: container.BytesSource(file)}
 	d, err := NewDemuxer(c, nil)
 	if err != nil {
 		t.Fatalf("NewDemuxer: %v", err)
 	}
 	d.resolveCues()
-	opened := c.read
+	opened := c.Bytes
 
 	landed, err := d.SeekSample(0, 0)
 	if err != nil {
@@ -465,7 +451,7 @@ func TestCuesSeekToStartCostsNothing(t *testing.T) {
 		t.Errorf("seek to 0 landed at %d", landed)
 	}
 	// A cluster here is ~770 KB, so reading one is unmistakable.
-	if walked := c.read - opened; walked > 4096 {
+	if walked := c.Bytes - opened; walked > 4096 {
 		t.Errorf("seeking to 0 read %d bytes; the bound should stop before the first cluster", walked)
 	}
 

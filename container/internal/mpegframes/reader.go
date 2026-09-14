@@ -80,6 +80,23 @@ func (r *Reader) SeekSample(sample int64) (int64, error) {
 	return land * r.w.spf, nil
 }
 
+// Walk implements the walking half of container.Walker for the owner: the
+// index is finished, and every finding on the way is reported as reached.
+func (r *Reader) Walk() error { return r.w.Complete() }
+
+// Walked implements the other half: whether the index already reaches the
+// end of the run.
+func (r *Reader) Walked() bool { return r.w.Done() }
+
+// Measured reports the run's length in samples once the index reaches its
+// end, and -1 before: a walked run is exactly its frames' worth.
+func (r *Reader) Measured() int64 {
+	if !r.w.Done() {
+		return -1
+	}
+	return r.w.Frames() * r.w.spf
+}
+
 // Snapshot implements the serializing half of container.Indexer.
 func (r *Reader) Snapshot() []byte { return r.w.Snapshot() }
 

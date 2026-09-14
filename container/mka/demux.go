@@ -71,20 +71,10 @@ type Demuxer struct {
 	cues         []cueEntry
 	cuesResolved bool
 
-	// Reading state: the frame iterator's cursor over clusters and blocks.
-	w              srcwin.Window
-	curOff         int64 // next element to read at the segment level
-	inCluster      bool
-	clusterEnd     int64
-	clusterCursor  int64
-	clusterUnknown bool
-
-	pending           []frameLoc
-	pendingIdx        int
-	running           int64 // accumulated output position (raw decoder timeline)
-	curBlockDiscardNS int64 // DiscardPadding of the block in pending, in ns
-
-	vorbisPrevBlock int
+	// Reading state: the frame iterator's cursor over clusters and blocks,
+	// one struct so a walk can save and restore it whole.
+	w srcwin.Window
+	readerState
 
 	warnings              []container.Warning
 	warnedNegativeDiscard bool // negative DiscardPadding is surfaced once per file

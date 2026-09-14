@@ -844,7 +844,12 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 	// reported from its encoder. Handing back the track's -1 would complete a
 	// cache entry with an unknown length that this run in fact measured.
 	e.log.Debug("remux finished", "samples", trailer.Samples)
-	return &TranscodeResult{Samples: trailer.Samples, Format: track.Fmt, Container: plan.Container}, nil
+	// The same list the decode rung carries, from the demuxer this walked:
+	// the copy read every packet, so the damage it found on the way is whole.
+	var found format.Info
+	format.RefreshWarnings(&found, demux)
+	return &TranscodeResult{Samples: trailer.Samples, Format: track.Fmt, Container: plan.Container,
+		InputWarnings: found.Warnings}, nil
 }
 
 // copyPackets walks demux and hands every packet of the given track to write,

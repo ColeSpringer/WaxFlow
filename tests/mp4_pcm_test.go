@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow"
@@ -28,21 +29,88 @@ import (
 var pcmInMP4Fixtures = []struct {
 	name  string
 	float bool
+	// permuted marks a file whose channels the decoder reorders: its output
+	// is not in the file's order and ffmpeg's decode is, so the two cannot be
+	// compared sample for sample. TestPCMInMP4PermutedOrderMatchesTheCanonicalFile
+	// scores such a file against its canonical twin instead.
+	permuted bool
+	// oracle is the ffmpeg release the differential needs, zero for any: 6.1
+	// refuses to open a chnl box whose positions are the 110 degree pair
+	// (measured on a build of 6.1.1), and 7.0 opens it.
+	oracle [2]int
 }{
-	{"pcm-in24.mov", false},
-	{"pcm-in24-chunks.mov", false},
-	{"pcm-in24le.mov", false},
-	{"pcm-sowt.mov", false},
-	{"pcm-twos.mov", false},
-	{"pcm-in32.mov", false},
-	{"pcm-raw.mov", false},
-	{"pcm-fl32.mov", true},
-	{"pcm-fl64.mov", true},
-	{"pcm-lpcm.mov", false},
-	{"pcm-ipcm.mp4", false},
-	{"pcm-ipcm-96k.mp4", false},
-	{"pcm-fpcm.mp4", true},
+	{name: "pcm-in24.mov"},
+	{name: "pcm-in24-chunks.mov"},
+	{name: "pcm-in24le.mov"},
+	{name: "pcm-sowt.mov"},
+	{name: "pcm-twos.mov"},
+	{name: "pcm-in32.mov"},
+	{name: "pcm-raw.mov"},
+	{name: "pcm-fl32.mov", float: true},
+	{name: "pcm-fl64.mov", float: true},
+	{name: "pcm-lpcm.mov"},
+	{name: "pcm-ipcm.mp4"},
+	{name: "pcm-ipcm-96k.mp4"},
+	{name: "pcm-fpcm.mp4", float: true},
+	// The layout fixtures; see pcmLayoutFixtures for what each carries.
+	{name: "pcm-51.mov"},
+	{name: "pcm-51side.mov"},
+	{name: "pcm-40.mov"},
+	{name: "pcm-71.mov"},
+	{name: "pcm-51-perm.mov", permuted: true},
+	{name: "pcm-71-perm.mov", permuted: true},
+	{name: "pcm-51.mp4"},
+	{name: "pcm-51side.mp4", oracle: [2]int{7, 0}},
+	{name: "pcm-71.mp4", oracle: [2]int{7, 0}},
+	{name: "pcm-51-perm.mp4", permuted: true},
 }
+
+// The tone each speaker position carries in the layout fixtures, the
+// spacing tests/aac_multichannel_test.go uses with 60 Hz on the LFE. The tone
+// is keyed to the POSITION, not to the channel index, so a permuted file
+// carries the same tone in the same speaker as its canonical twin and the
+// identity assertion is one assertion for both.
+var positionTones = map[audio.ChannelMask]float64{
+	audio.FrontLeft: 300, audio.FrontRight: 550, audio.FrontCenter: 800, audio.LowFrequency: 60,
+	audio.BackLeft: 1050, audio.BackRight: 1300, audio.SideLeft: 1550, audio.SideRight: 1800,
+	audio.BackCenter: 2050,
+}
+
+// pcmLayoutFixtures is the layout each fixture must report and the tone each
+// of OUR output channels must carry, in mask-bit order. Where a row's tones
+// are not the positions' own, the file's Ls Rs pair was generated as
+// ffmpeg's side pair and lands on WAVE's back pair here: that is decision 7,
+// a lone 110 degree pair (a named tag's, or chnl positions 4 and 5) is the
+// back pair in this tree and 5.1(side) to ffmpeg.
+var pcmLayoutFixtures = []struct {
+	name   string
+	layout audio.ChannelMask
+	tones  []float64
+	// lonePair marks the two rows above, which the ffprobe agreement folds.
+	lonePair bool
+	// probe is the ffmpeg release whose ffprobe reads the box as 8.0.1 does,
+	// zero for any. Measured on builds of 6.1.1, 7.0.2 and 7.1.1: a chnl
+	// 110 degree pair is refused by 6.1, named UNK by 7.0 and placed by 7.1;
+	// every chan shape and the other chnl positions are read by all three.
+	probe [2]int
+}{
+	{name: "pcm-51.mov", layout: fiveOne, tones: []float64{300, 550, 800, 60, 1050, 1300}},
+	{name: "pcm-51side.mov", layout: fiveOne, tones: []float64{300, 550, 800, 60, 1550, 1800}, lonePair: true},
+	{name: "pcm-40.mov", layout: audio.FrontLeft | audio.FrontRight | audio.FrontCenter | audio.BackCenter,
+		tones: []float64{300, 550, 800, 2050}},
+	{name: "pcm-71.mov", layout: sevenOne, tones: []float64{300, 550, 800, 60, 1050, 1300, 1550, 1800}},
+	{name: "pcm-51-perm.mov", layout: fiveOne, tones: []float64{300, 550, 800, 60, 1050, 1300}},
+	{name: "pcm-71-perm.mov", layout: sevenOne, tones: []float64{300, 550, 800, 60, 1050, 1300, 1550, 1800}},
+	{name: "pcm-51.mp4", layout: fiveOne, tones: []float64{300, 550, 800, 60, 1050, 1300}},
+	{name: "pcm-51side.mp4", layout: fiveOne, tones: []float64{300, 550, 800, 60, 1550, 1800}, lonePair: true, probe: [2]int{7, 1}},
+	{name: "pcm-71.mp4", layout: sevenOne, tones: []float64{300, 550, 800, 60, 1050, 1300, 1550, 1800}, probe: [2]int{7, 1}},
+	{name: "pcm-51-perm.mp4", layout: fiveOne, tones: []float64{300, 550, 800, 60, 1050, 1300}},
+}
+
+const (
+	fiveOne  = audio.FrontLeft | audio.FrontRight | audio.FrontCenter | audio.LowFrequency | audio.BackLeft | audio.BackRight
+	sevenOne = fiveOne | audio.SideLeft | audio.SideRight
+)
 
 func pcmInMP4(t *testing.T, name string) container.Source {
 	t.Helper()
@@ -58,7 +126,13 @@ func TestPCMInMP4MatchesFFmpeg(t *testing.T) {
 		t.Skip("ffmpeg not installed")
 	}
 	for _, f := range pcmInMP4Fixtures {
+		if f.permuted {
+			continue
+		}
 		t.Run(f.name, func(t *testing.T) {
+			if f.oracle != [2]int{} && !testutil.FFmpegAtLeast(t, f.oracle[0], f.oracle[1]) {
+				t.Skipf("ffmpeg before %d.%d cannot open this file's layout box", f.oracle[0], f.oracle[1])
+			}
 			path := repoPath("container", "mp4", "testdata", f.name)
 			got := decodeAll(t, pcmInMP4(t, f.name), "mp4")
 			defer audio.Put(got)
@@ -254,4 +328,154 @@ func spliceEnda(t *testing.T, raw []byte, little uint16) []byte {
 		t.Fatal("mdat follows moov in this fixture; the chunk offsets would need fixing")
 	}
 	return out
+}
+
+// TestPCMInMP4ChannelIdentity is the layout gate the fixtures were built for,
+// and it needs no oracle: every speaker position carries its own tone, so
+// the channel this tree labels with position P must carry P's tone above
+// every other tone in the file. A wrong mask, a wrong order, or an order the
+// decoder failed to apply all fail here, at full length, with every channel
+// present. The well-formed files also reach neither a Note nor a warning:
+// a permuted file plays in the pipeline's order with nothing left to say.
+func TestPCMInMP4ChannelIdentity(t *testing.T) {
+	for _, f := range pcmLayoutFixtures {
+		t.Run(f.name, func(t *testing.T) {
+			info, err := waxflow.New().Probe(pcmInMP4(t, f.name), "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(info.Notes) != 0 || len(info.Warnings) != 0 {
+				t.Errorf("notes %v, warnings %v; want none for a layout the file states", info.Notes, info.Warnings)
+			}
+			buf := decodeAll(t, pcmInMP4(t, f.name), "mp4")
+			defer audio.Put(buf)
+			if buf.Fmt.Layout != f.layout {
+				t.Fatalf("layout = %v, want %v", buf.Fmt.Layout, f.layout)
+			}
+			if buf.Fmt.Channels != len(f.tones) {
+				t.Fatalf("decoded %d channels, want %d", buf.Fmt.Channels, len(f.tones))
+			}
+			for c, tone := range f.tones {
+				ch := chanFloat(buf, c)
+				own := goertzel(ch, buf.Fmt.Rate, tone)
+				if own < 0.02 {
+					t.Errorf("channel %d has only %.4f at its own %g Hz, want a real tone", c, own, tone)
+					continue
+				}
+				for _, other := range f.tones {
+					if other == tone {
+						continue
+					}
+					if got := goertzel(ch, buf.Fmt.Rate, other); got >= own {
+						t.Errorf("channel %d carries %g Hz at %.4f, above its own %g Hz at %.4f: the layout is wrong",
+							c, other, got, tone, own)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestPCMInMP4PermutedOrderMatchesTheCanonicalFile is the reorder scored
+// against an independent writer: each permuted file is its canonical twin
+// through ffmpeg's channelmap filter, the same samples in another wire
+// order, so the two must decode sample for sample equal once the order is
+// applied. The channel identity test says each channel holds the right
+// tone; this says it holds the right samples.
+func TestPCMInMP4PermutedOrderMatchesTheCanonicalFile(t *testing.T) {
+	for _, tc := range []struct{ permuted, canonical string }{
+		{"pcm-51-perm.mov", "pcm-51.mov"},
+		{"pcm-51-perm.mp4", "pcm-51.mov"},
+		{"pcm-71-perm.mov", "pcm-71.mov"},
+	} {
+		t.Run(tc.permuted, func(t *testing.T) {
+			got := decodeAll(t, pcmInMP4(t, tc.permuted), "mp4")
+			defer audio.Put(got)
+			want := decodeAll(t, pcmInMP4(t, tc.canonical), "mp4")
+			defer audio.Put(want)
+			if got.Fmt != want.Fmt || got.N != want.N {
+				t.Fatalf("permuted decodes as %v / %d samples, canonical as %v / %d",
+					got.Fmt, got.N, want.Fmt, want.N)
+			}
+			for c := 0; c < got.Fmt.Channels; c++ {
+				if i := testutil.DiffI32(got.ChanI(c)[:got.N], want.ChanI(c)[:want.N]); i != -1 {
+					t.Errorf("channel %d sample %d: permuted %d, canonical %d",
+						c, i, got.ChanI(c)[i], want.ChanI(c)[i])
+				}
+			}
+		})
+	}
+}
+
+// TestPCMInMP4LayoutAgreesWithFFprobe compares the layout this tree reports
+// against ffprobe's channel_layout, as masks: ffprobe names a custom order
+// by the file's order and this tree by ascending mask bit, and the two are
+// the same speakers.
+//
+// One divergence is folded rather than adopted, and only on the rows that
+// carry it. ffmpeg reads a lone Ls Rs pair (a named tag such as MPEG_5_1_A,
+// or chnl positions 4 and 5) as its side pair and reports 5.1(side); this
+// tree reads it as the back pair, because every codec here lands 5.1 on
+// the back-pair mask and so does the WAV mask container/riff writes.
+// Apple's own header argues both ways (WAVE_5_1_B names the back-pair mask
+// separately, which within that family makes the lone pair the side one),
+// so this is a choice made for the pipeline, recorded in
+// docs/quality-gates.md. Description labels 5 and 6 are not folded: ffprobe
+// already reads those as the back pair, so pcm-51-perm.mov agrees as it is.
+func TestPCMInMP4LayoutAgreesWithFFprobe(t *testing.T) {
+	for _, f := range pcmLayoutFixtures {
+		t.Run(f.name, func(t *testing.T) {
+			if f.probe != [2]int{} && !testutil.FFmpegAtLeast(t, f.probe[0], f.probe[1]) {
+				t.Skipf("ffprobe before %d.%d does not place this file's chnl positions", f.probe[0], f.probe[1])
+			}
+			info, err := waxflow.New().Probe(pcmInMP4(t, f.name), "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ours := info.Default().Fmt.Layout
+			theirs := ffprobeLayout(t, testutil.FFprobeFile(t, repoPath("container", "mp4", "testdata", f.name)).ChannelLayout)
+			if f.lonePair && theirs&(audio.BackLeft|audio.BackRight) == 0 {
+				theirs = theirs&^(audio.SideLeft|audio.SideRight) | audio.BackLeft | audio.BackRight
+			}
+			if ours != theirs {
+				t.Errorf("layout = %v, ffprobe says %v", ours, theirs)
+			}
+		})
+	}
+}
+
+// ffprobeLayout reads ffprobe's channel_layout as a mask: a layout name from
+// the small table the fixtures need, or the "N channels (A+B+...)" form
+// ffmpeg 7 and later print for an order that has no name (6.1 prints the
+// name of the mask instead, which reads the same way).
+func ffprobeLayout(t *testing.T, s string) audio.ChannelMask {
+	t.Helper()
+	named := map[string]string{
+		"4.0":       "FL+FR+FC+BC",
+		"5.1":       "FL+FR+FC+LFE+BL+BR",
+		"5.1(side)": "FL+FR+FC+LFE+SL+SR",
+		"7.1":       "FL+FR+FC+LFE+BL+BR+SL+SR",
+	}
+	list, ok := named[s]
+	if !ok {
+		i := strings.Index(s, "(")
+		if i < 0 || !strings.HasSuffix(s, ")") {
+			t.Fatalf("ffprobe channel_layout %q is not one this test reads", s)
+		}
+		list = s[i+1 : len(s)-1]
+	}
+	var mask audio.ChannelMask
+	for _, name := range strings.Split(list, "+") {
+		bit := audio.ChannelMask(0)
+		for i := 0; i < 32; i++ {
+			if audio.ChannelMask(1<<i).String() == name {
+				bit = 1 << i
+			}
+		}
+		if bit == 0 {
+			t.Fatalf("ffprobe channel_layout %q names %q, which is no WAVE position", s, name)
+		}
+		mask |= bit
+	}
+	return mask
 }

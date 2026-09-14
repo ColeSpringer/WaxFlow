@@ -74,6 +74,13 @@ func FuzzDemux(f *testing.F) {
 		movie{entry: soundEntryWith("ms\x00\x07", 2, 8, movieTimescale,
 			waveBox(msWaveAtom("ms\x00\x07", 0x0007, 2, movieTimescale, 8))),
 			unitBytes: 2, frames: 64}.build(),
+		// The layout boxes: a chan bitmap, chan descriptions, chnl explicit
+		// positions and a chnl configuration with an omitted-channels map,
+		// each on a multichannel entry so a mutation reaches the fold.
+		buildMovie(soundEntryWith("sowt", 6, 16, movieTimescale, chanBox(1<<16, 0x3F)), 12, 64, 0),
+		buildMovie(soundEntryWith("sowt", 6, 16, movieTimescale, chanBox(0, 0, 1, 2, 5, 6, 3, 4)), 12, 64, 0),
+		buildMovie(soundEntryWith("ipcm", 6, 16, movieTimescale, pcmCBox(1, 16), chnlPositions(0, 1, 8, 9, 2, 3)), 12, 64, 0),
+		buildMovie(soundEntryWith("ipcm", 5, 16, movieTimescale, pcmCBox(1, 16), chnlDefined(6, 1<<5)), 10, 64, 0),
 	} {
 		f.Add(seed)
 		f.Add(seed[:len(seed)/2])

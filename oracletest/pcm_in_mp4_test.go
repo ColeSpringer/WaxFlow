@@ -50,6 +50,19 @@ func TestWaxlabelAgreesPCMInMP4(t *testing.T) {
 		{"pcm-ipcm.mp4", "PCM", "ipcm"},
 		{"pcm-ipcm-96k.mp4", "PCM", "ipcm"},
 		{"pcm-fpcm.mp4", "IEEE float", "fpcm"},
+		// The layout fixtures. waxlabel reports no layout, so these agree on
+		// everything but the one thing they were made for; the count is what
+		// a layout box could have moved.
+		{"pcm-51.mov", "PCM", "sowt"},
+		{"pcm-51side.mov", "PCM", "sowt"},
+		{"pcm-40.mov", "PCM", "sowt"},
+		{"pcm-71.mov", "PCM", "sowt"},
+		{"pcm-51-perm.mov", "PCM", "sowt"},
+		{"pcm-71-perm.mov", "PCM", "sowt"},
+		{"pcm-51.mp4", "PCM", "ipcm"},
+		{"pcm-51side.mp4", "PCM", "ipcm"},
+		{"pcm-71.mp4", "PCM", "ipcm"},
+		{"pcm-51-perm.mp4", "PCM", "ipcm"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw, err := os.ReadFile(filepath.Join("..", "container", "mp4", "testdata", tc.name))

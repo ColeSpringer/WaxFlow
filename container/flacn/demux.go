@@ -214,7 +214,7 @@ func (d *Demuxer) parse() error {
 	// Latch the first frame: it fixes the blocking strategy and the
 	// fixed-strategy constant block size that converts frame numbers to
 	// sample positions everywhere else.
-	fi, err := flac.ParseFrameHeader(d.w.BytesAt(off, flac.MaxFrameHeaderLen))
+	fi, err := flac.ParseFrameHeader(d.w.Peek(off, flac.MaxFrameHeaderLen))
 	if err != nil || !d.consistent(fi) {
 		if d.firstFrame >= d.w.DataEnd() {
 			// Zero frames and zero audio bytes: a legal stream (encoding

@@ -134,6 +134,11 @@ func (m *Muxer) checkWireConfig(cfg pcm.Config) error {
 	bad := func(msg string) error {
 		return waxerr.New(waxerr.CodeUnsupportedFormat, "wav: "+msg)
 	}
+	if cfg.Order != nil {
+		// A decode-side mapping: the packets are in the file's order and the
+		// header would claim the mask's, so a copy must not write them.
+		return bad("a permuted channel order cannot be copied; decode it instead")
+	}
 	if cfg.BigEndian {
 		return bad("WAV is little-endian")
 	}

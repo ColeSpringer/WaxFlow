@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 
@@ -124,6 +125,23 @@ func (m *indexSavingMedia) RestoreIndex(blob []byte) bool {
 	return m.ix != nil && m.ix.RestoreIndex(blob)
 }
 
+// Walk and Walked forward format.Walker the way the index pair is forwarded:
+// embedding the interface promotes nothing outside it, and the daemon's job
+// gate asks the media it opened through this engine.
+func (m *indexSavingMedia) Walk() error {
+	if w, ok := m.Media.(format.Walker); ok {
+		return w.Walk()
+	}
+	return nil
+}
+
+func (m *indexSavingMedia) Walked() bool {
+	if w, ok := m.Media.(format.Walker); ok {
+		return w.Walked()
+	}
+	return true
+}
+
 // TranscodeResult reports what Transcode produced.
 type TranscodeResult struct {
 	// Samples is the number of frames written.
@@ -145,6 +163,12 @@ type TranscodeResult struct {
 	// Quantized reports whether a quantizer ran (float cut to integer).
 	// It gates the true-peak note; see LevelNote.
 	Quantized bool
+	// InputWarnings is the input damage the read worked around, as the
+	// source's Info reports it once the whole stream has been read: a
+	// frame-walked payload finds its damage where the read reaches it, so
+	// the list is complete only now. Nil for a clean source and for a
+	// concatenated timeline, which carries no warnings of its own.
+	InputWarnings []string
 }
 
 // LevelNote returns the one warning line the level fields warrant, or "":
@@ -312,7 +336,8 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 	clipped, truePeak := chain.Clipped(), chain.TruePeak()
 	e.log.Debug("transcode finished", "samples", trailer.Samples, "clipped", clipped, "truePeak", truePeak)
 	return &TranscodeResult{Samples: trailer.Samples, Format: f, Container: containerName,
-		ClippedSamples: clipped, TruePeak: truePeak, Quantized: chain.Quantized()}, nil
+		ClippedSamples: clipped, TruePeak: truePeak, Quantized: chain.Quantized(),
+		InputWarnings: slices.Clone(med.Info().Warnings)}, nil
 }
 
 // resolveContainer resolves a Container override against a row: the name the

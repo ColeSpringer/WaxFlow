@@ -100,10 +100,16 @@ func newTestEnv(t *testing.T, mutate func(*server.Config)) *testEnv {
 		{"../testdata/sine-alaw.wav", "sine-alaw.wav"},
 		{"../container/mp4/testdata/ima4.mov", "ima4.mov"},
 		{"../container/riff/testdata/mp3.wav", "mp3.wav"},
+		// An MP3 damaged past its head: what a tolerant probe reports and a
+		// strict one refuses. See TestProbeStrictWalksAFrameRun.
+		{"../testdata/sine-untagged.mp3", "damaged.mp3"},
 	} {
 		b, err := os.ReadFile(fixture.src)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if fixture.dst == "damaged.mp3" {
+			b = testutil.ZeroMiddle(b, 2048)
 		}
 		if err := os.WriteFile(filepath.Join(root, fixture.dst), b, 0o644); err != nil {
 			t.Fatal(err)
@@ -1174,6 +1180,47 @@ func TestProbeRejectsUnknownParameters(t *testing.T) {
 	if resp := env.get(t, "/probe?src=lib/sine.wav&strict=1", nil); resp.StatusCode != 200 {
 		t.Fatalf("strict=1 = %d, want 200 (body: %s)", resp.StatusCode, readBody(t, resp))
 	}
+}
+
+// TestProbeStrictWalksAFrameRun pins the strict verdict on the wire. A
+// tolerant probe of an MP3 damaged past its head answers 200 with no
+// warnings, since opening reads the head and the head is clean; strict walks
+// the run to its end and answers 422, the status a malformed input maps to.
+func TestProbeStrictWalksAFrameRun(t *testing.T) {
+	env := newTestEnv(t, nil)
+	resp := env.get(t, "/probe?src=lib/damaged.mp3", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("tolerant probe = %d, want 200 (body: %s)", resp.StatusCode, readBody(t, resp))
+	}
+	var doc struct {
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal(readBody(t, resp), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Warnings) != 0 {
+		t.Errorf("tolerant probe warnings = %v, want none: a probe reads the head, which is clean", doc.Warnings)
+	}
+	wantEnvelope(t, env.get(t, "/probe?src=lib/damaged.mp3&strict=1", nil), 422, waxerr.CodeMalformedInput)
+}
+
+// TestStrictProbeTakesALiveSlot pins the admission side of the strict walk:
+// with the only live slot held, a strict probe answers 503 like a stream
+// would, while a tolerant probe of the same file, a header read, still
+// answers; the strict verdict returns once the slot is free.
+func TestStrictProbeTakesALiveSlot(t *testing.T) {
+	env := newTestEnv(t, func(c *server.Config) { c.LiveSlots = 1 })
+	release, ok := env.srv.HoldLiveSlot()
+	if !ok {
+		t.Fatal("could not take the only live slot")
+	}
+	t.Cleanup(release)
+	wantEnvelope(t, env.get(t, "/probe?src=lib/damaged.mp3&strict=1", nil), http.StatusServiceUnavailable, waxerr.CodeOverloaded)
+	if resp := env.get(t, "/probe?src=lib/damaged.mp3", nil); resp.StatusCode != 200 {
+		t.Fatalf("tolerant probe under load = %d, want 200 (body: %s)", resp.StatusCode, readBody(t, resp))
+	}
+	release()
+	wantEnvelope(t, env.get(t, "/probe?src=lib/damaged.mp3&strict=1", nil), 422, waxerr.CodeMalformedInput)
 }
 
 // TestProbeReportsSourceBitDepth pins U3 on the wire: audio.Format carries

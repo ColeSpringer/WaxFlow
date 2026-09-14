@@ -214,6 +214,10 @@ type FFprobeInfo struct {
 	// Samples is duration_ts, which equals the frame count for PCM
 	// containers (their stream timebase is 1/rate). -1 when absent.
 	Samples int64
+	// ChannelLayout is ffprobe's channel_layout string: a layout name
+	// ("5.1", "5.1(side)"), a custom order ("6 channels (FL+FR+BL+BR+FC+LFE)"
+	// on ffmpeg 7 and later), or "" when it reports none.
+	ChannelLayout string
 }
 
 // probeJSON runs ffprobe with args over path and decodes its JSON into doc.
@@ -237,6 +241,7 @@ func FFprobeFile(t testing.TB, path string) FFprobeInfo {
 			BitsPerSample    int    `json:"bits_per_sample"`
 			BitsPerRawSample string `json:"bits_per_raw_sample"`
 			DurationTS       *int64 `json:"duration_ts"`
+			ChannelLayout    string `json:"channel_layout"`
 		} `json:"streams"`
 	}
 	probeJSON(t, path, &doc, "-select_streams", "a:0", "-show_streams")
@@ -249,6 +254,7 @@ func FFprobeFile(t testing.TB, path string) FFprobeInfo {
 		Channels:      s.Channels,
 		BitsPerSample: s.BitsPerSample,
 		Samples:       -1,
+		ChannelLayout: s.ChannelLayout,
 	}
 	if s.SampleRate != "" {
 		rate, err := strconv.Atoi(s.SampleRate)

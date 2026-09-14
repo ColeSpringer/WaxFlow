@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
 // sliceOf opens raw and bounds it to [from, to). The Media owns the opened
@@ -639,5 +641,38 @@ func TestSliceChapters(t *testing.T) {
 				t.Errorf("chapters =\n\t%+v\nwant\n\t%+v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSliceForwardsLiveWarnings pins the wrapper's half of the live-warning
+// rule: a span copies its media's Info once and refreshes the two live lists
+// from it on every call, so damage the read reaches inside the window shows
+// through the span the way it shows on the media.
+func TestSliceForwardsLiveWarnings(t *testing.T) {
+	clean, err := os.ReadFile(repoPath("testdata", "sine-untagged.mp3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := waxflow.New()
+	med, err := e.OpenStream(container.BytesSource(testutil.ZeroMiddle(clean, 2048)), "mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sl, err := waxflow.Slice(med, 1152, waxflow.ToEnd)
+	if err != nil {
+		med.Close()
+		t.Fatal(err)
+	}
+	defer sl.Close()
+	info := sl.Info()
+	if len(info.Warnings) != 0 {
+		t.Fatalf("warnings at open = %v, want none: the head is clean", info.Warnings)
+	}
+	audio.Put(drainMedia(t, sl, 30000))
+	if again := sl.Info(); again != info {
+		t.Fatal("the span handed out a different *Info after the read")
+	}
+	if !slices.ContainsFunc(info.Warnings, func(s string) bool { return strings.Contains(s, "unparsable bytes skipped") }) {
+		t.Errorf("warnings after the read = %v, want the skipped bytes forwarded from the media", info.Warnings)
 	}
 }

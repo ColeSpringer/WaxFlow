@@ -191,7 +191,7 @@ func TestWidthStatingTypes(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := pcm.Config{Encoding: pcm.SignedInt, Bits: tc.bits, BigEndian: true}
-			if cfg != want {
+			if !cfg.Equal(want) {
 				t.Errorf("config = %+v, want %+v", cfg, want)
 			}
 			if track.Samples != 4 || len(data) != len(payload) {

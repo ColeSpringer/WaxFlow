@@ -48,6 +48,41 @@ import (
 //	ffmpeg -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=0.1" \
 //	    -ac 1 -c:a pcm_f32le -f mp4 pcm-fpcm.mp4
 //
+// The ten layout fixtures are 8 kHz, 0.1 s, 16-bit, with one tone per
+// speaker position (FL 300, FR 550, FC 800, LFE 60, BL 1050, BR 1300,
+// SL 1550, SR 1800, BC 2050 Hz), one lavfi sine input per channel joined
+// with an explicit map so the tone follows the position and not the input
+// index. For a layout L with channels c0..cN in ffmpeg's names:
+//
+//	ffmpeg -f lavfi -i "sine=frequency=<tone c0>:sample_rate=8000:duration=0.1" \
+//	    ... one -f lavfi -i per channel ... \
+//	    -filter_complex "[0:a]...[N:a]join=inputs=N+1:channel_layout=L:map=0.0-c0|...|N.0-cN[a]" \
+//	    -map "[a]" -c:a pcm_s16le -f <mov or mp4> <file>
+//
+//	pcm-51.mov       L=5.1        FL FR FC LFE BL BR     -f mov
+//	pcm-51side.mov   L=5.1(side)  FL FR FC LFE SL SR     -f mov
+//	pcm-40.mov       L=4.0        FL FR FC BC            -f mov
+//	pcm-71.mov       L=7.1        FL FR FC LFE BL BR SL SR   -f mov
+//	pcm-51.mp4       L=5.1        FL FR FC LFE BL BR     -f mp4
+//	pcm-51side.mp4   L=5.1(side)  FL FR FC LFE SL SR     -f mp4
+//	pcm-71.mp4       L=7.1        FL FR FC LFE BL BR SL SR   -f mp4
+//
+// and the permuted files are the canonical ones through channelmap:
+//
+//	ffmpeg -i pcm-51.mov -af "channelmap=map=FL|FR|BL|BR|FC|LFE:channel_layout=FL+FR+BL+BR+FC+LFE" \
+//	    -c:a pcm_s16le -f mov pcm-51-perm.mov
+//	ffmpeg -i pcm-71.mov -af "channelmap=map=FL|FR|FC|LFE|SL|SR|BL|BR:channel_layout=FL+FR+FC+LFE+SL+SR+BL+BR" \
+//	    -c:a pcm_s16le -f mov pcm-71-perm.mov
+//	ffmpeg -i pcm-51.mov -af "channelmap=map=FL|FR|BL|BR|FC|LFE:channel_layout=FL+FR+BL+BR+FC+LFE" \
+//	    -c:a pcm_s16le -f mp4 pcm-51-perm.mp4
+//
+// The box each carries, read back from the file: pcm-51.mov a chan bitmap
+// 0x3F, pcm-51side.mov the named tag MPEG_5_1_A (121<<16|6), pcm-40.mov a
+// bitmap 0x107, pcm-71.mov a bitmap 0x63F, pcm-51-perm.mov a chan with six
+// descriptions labelled 1 2 5 6 3 4, pcm-71-perm.mov the named tag
+// MPEG_7_1_C (128<<16|8); the four .mp4 files a chnl with explicit positions
+// 0 1 2 3 8 9, 0 1 2 3 4 5, 0 1 2 3 8 9 4 5 and 0 1 8 9 2 3.
+//
 // (ffmpeg 8.0.1, Ubuntu.) What each one is for: pcm-in24.mov is a version 1
 // QuickTime entry with the geometry in a wave/enda pair; pcm-in24le.mov is the
 // same with enda 1; in32 is the 32-bit integer of the same family; sowt and
@@ -66,24 +101,55 @@ type pcmFixture struct {
 	// srcDepth is the Track.SourceBitDepth expected, 0 for a track whose
 	// Fmt.BitDepth already carries the source's depth.
 	srcDepth int
+	// layout is the Fmt.Layout expected, 0 for the default of the count. A
+	// permuted file's order rides in cfg.
+	layout audio.ChannelMask
 }
 
 var pcmFixtures = []pcmFixture{
-	{"pcm-in24.mov", pcm.Config{Encoding: pcm.SignedInt, Bits: 24, BigEndian: true}, 8000, 1, 4000, 0},
-	{"pcm-in24-chunks.mov", pcm.Config{Encoding: pcm.SignedInt, Bits: 24, BigEndian: true}, 8000, 1, 4000, 0},
-	{"pcm-in24le.mov", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, 8000, 1, 800, 0},
-	{"pcm-sowt.mov", pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, 8000, 2, 800, 0},
-	{"pcm-twos.mov", pcm.Config{Encoding: pcm.SignedInt, Bits: 16, BigEndian: true}, 8000, 1, 800, 0},
-	{"pcm-in32.mov", pcm.Config{Encoding: pcm.SignedInt, Bits: 32, BigEndian: true}, 8000, 1, 800, 0},
-	{"pcm-raw.mov", pcm.Config{Encoding: pcm.UnsignedInt, Bits: 8}, 8000, 1, 800, 0},
-	{"pcm-fl32.mov", pcm.Config{Encoding: pcm.Float, Bits: 32}, 8000, 1, 800, 0},
+	{"pcm-in24.mov", pcm.Config{Encoding: pcm.SignedInt, Bits: 24, BigEndian: true}, 8000, 1, 4000, 0, 0},
+	{"pcm-in24-chunks.mov", pcm.Config{Encoding: pcm.SignedInt, Bits: 24, BigEndian: true}, 8000, 1, 4000, 0, 0},
+	{"pcm-in24le.mov", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, 8000, 1, 800, 0, 0},
+	{"pcm-sowt.mov", pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, 8000, 2, 800, 0, 0},
+	{"pcm-twos.mov", pcm.Config{Encoding: pcm.SignedInt, Bits: 16, BigEndian: true}, 8000, 1, 800, 0, 0},
+	{"pcm-in32.mov", pcm.Config{Encoding: pcm.SignedInt, Bits: 32, BigEndian: true}, 8000, 1, 800, 0, 0},
+	{"pcm-raw.mov", pcm.Config{Encoding: pcm.UnsignedInt, Bits: 8}, 8000, 1, 800, 0, 0},
+	{"pcm-fl32.mov", pcm.Config{Encoding: pcm.Float, Bits: 32}, 8000, 1, 800, 0, 0},
 	// audio.Format carries floats as float32, so a 64-bit source decodes at
 	// BitDepth 32 and its own depth rides in SourceBitDepth.
-	{"pcm-fl64.mov", pcm.Config{Encoding: pcm.Float, Bits: 64, BigEndian: true}, 8000, 1, 800, 64},
-	{"pcm-lpcm.mov", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, 96000, 1, 4800, 0},
-	{"pcm-ipcm.mp4", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, 48000, 1, 4800, 0},
-	{"pcm-ipcm-96k.mp4", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, 96000, 1, 9600, 0},
-	{"pcm-fpcm.mp4", pcm.Config{Encoding: pcm.Float, Bits: 32}, 48000, 1, 4800, 0},
+	{"pcm-fl64.mov", pcm.Config{Encoding: pcm.Float, Bits: 64, BigEndian: true}, 8000, 1, 800, 64, 0},
+	{"pcm-lpcm.mov", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, 96000, 1, 4800, 0, 0},
+	{"pcm-ipcm.mp4", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, 48000, 1, 4800, 0, 0},
+	{"pcm-ipcm-96k.mp4", pcm.Config{Encoding: pcm.SignedInt, Bits: 24}, 96000, 1, 9600, 0, 0},
+	{"pcm-fpcm.mp4", pcm.Config{Encoding: pcm.Float, Bits: 32}, 48000, 1, 4800, 0, 0},
+	// The layout fixtures, one per box shape ffmpeg writes. The QuickTime
+	// files carry a chan box (a bitmap, a named tag, descriptions) and the
+	// ISO ones a chnl box with explicit positions.
+	{"pcm-51.mov", s16le, 8000, 6, 800, 0, fiveOne},
+	// MPEG_5_1_A, a lone Ls Rs pair: the back pair here, 5.1(side) to ffmpeg.
+	{"pcm-51side.mov", s16le, 8000, 6, 800, 0, fiveOne},
+	// The case the default gets wrong: DefaultLayout(4) is quad.
+	{"pcm-40.mov", s16le, 8000, 4, 800, 0, audio.FrontLeft | audio.FrontRight | audio.FrontCenter | audio.BackCenter},
+	{"pcm-71.mov", s16le, 8000, 8, 800, 0, sevenOne},
+	// Descriptions L R Ls Rs C LFE, which the decoder reorders.
+	{"pcm-51-perm.mov", withOrder(s16le, 0, 1, 4, 5, 2, 3), 8000, 6, 800, 0, fiveOne},
+	// MPEG_7_1_C, the one permuted named tag an independent writer produces.
+	{"pcm-71-perm.mov", withOrder(s16le, 0, 1, 2, 3, 6, 7, 4, 5), 8000, 8, 800, 0, sevenOne},
+	{"pcm-51.mp4", s16le, 8000, 6, 800, 0, fiveOne},
+	// Positions 4 and 5, the 110 degree pair alone: the back pair here.
+	{"pcm-51side.mp4", s16le, 8000, 6, 800, 0, fiveOne},
+	// Positions 8 9 then 4 5: the side clause for chnl.
+	{"pcm-71.mp4", s16le, 8000, 8, 800, 0, sevenOne},
+	{"pcm-51-perm.mp4", withOrder(s16le, 0, 1, 4, 5, 2, 3), 8000, 6, 800, 0, fiveOne},
+}
+
+// s16le is the wire config of every layout fixture.
+var s16le = pcm.Config{Encoding: pcm.SignedInt, Bits: 16}
+
+// withOrder is cfg with a decode order.
+func withOrder(cfg pcm.Config, order ...uint8) pcm.Config {
+	cfg.Order = order
+	return cfg
 }
 
 // TestDemuxPCMFixtures pins the track every fixture opens as and walks its
@@ -102,12 +168,16 @@ func TestDemuxPCMFixtures(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseConfig: %v", err)
 			}
-			if cfg != f.cfg {
+			if !cfg.Equal(f.cfg) {
 				t.Errorf("wire config = %+v, want %+v", cfg, f.cfg)
 			}
-			want := f.cfg.PCMFormat(f.rate, f.channels, audio.DefaultLayout(f.channels))
+			layout := f.layout
+			if layout == 0 {
+				layout = audio.DefaultLayout(f.channels)
+			}
+			want := f.cfg.PCMFormat(f.rate, f.channels, layout)
 			if tr.Fmt != want {
-				t.Errorf("format = %v, want %v", tr.Fmt, want)
+				t.Errorf("format = %v (layout %v), want %v (layout %v)", tr.Fmt, tr.Fmt.Layout, want, layout)
 			}
 			if tr.Samples != f.frames {
 				t.Errorf("samples = %d, want %d", tr.Samples, f.frames)
@@ -452,6 +522,35 @@ func pcmCBox(formatFlags, bits byte) []byte {
 // sratBox states a sample rate the 16.16 field cannot hold.
 func sratBox(hz uint32) []byte { return makeFullBox("srat", 0, 0, u32(hz)) }
 
+// chanBox builds QuickTime's channel layout box, an AudioChannelLayout in a
+// FullBox: the layout tag, the bitmap, the description count, then a 20-byte
+// description per label with zero flags and coordinates.
+func chanBox(tag, bitmap uint32, labels ...uint32) []byte {
+	parts := [][]byte{u32(tag), u32(bitmap), u32(uint32(len(labels)))}
+	for _, l := range labels {
+		parts = append(parts, u32(l), u32(0), make([]byte, 12))
+	}
+	return makeFullBox("chan", 0, 0, parts...)
+}
+
+// chnlBox builds an ISO channel layout box of the given version around a
+// payload the caller lays out.
+func chnlBox(version byte, payload ...byte) []byte {
+	return makeFullBox("chnl", version, 0, payload)
+}
+
+// chnlPositions is a version 0 chnl stating one speaker position per
+// channel: stream_structure 1 (channel structured), definedLayout 0.
+func chnlPositions(pos ...byte) []byte {
+	return chnlBox(0, append([]byte{1, 0}, pos...)...)
+}
+
+// chnlDefined is a version 0 chnl naming a CICP ChannelConfiguration and the
+// channels of it the track omits.
+func chnlDefined(layout byte, omitted uint64) []byte {
+	return chnlBox(0, append([]byte{1, layout}, u64(omitted)...)...)
+}
+
 // lpcmEntry builds a version 2 'lpcm' sound description with its LPCM fields
 // filled: the formatSpecificFlags word, the bytes per packet, and the frames
 // per packet. v2SoundEntry writes zeros in all three.
@@ -668,7 +767,7 @@ func TestPCMEntrySpellings(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseConfig: %v", err)
 			}
-			if cfg != tc.cfg {
+			if !cfg.Equal(tc.cfg) {
 				t.Errorf("wire config = %+v, want %+v", cfg, tc.cfg)
 			}
 			want := tc.cfg.PCMFormat(tc.rate, tc.channels, audio.DefaultLayout(tc.channels))

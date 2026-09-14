@@ -35,7 +35,7 @@ func (d *Demuxer) parseIndex(from int64) error {
 	// the header, and a block some other tool bolted on the end is not a
 	// second opinion the container asked for.
 	for off := from; off+objectHeaderLen <= end; {
-		b := d.w.BytesAt(off, objectHeaderLen)
+		b := d.w.Peek(off, objectHeaderLen)
 		if len(b) < objectHeaderLen {
 			return d.w.Err()
 		}
@@ -58,7 +58,7 @@ func (d *Demuxer) parseIndex(from int64) error {
 // table drops it rather than failing the open: seeking falls back to bisecting
 // the packets themselves, which needs no table at all.
 func (d *Demuxer) readSimpleIndex(off, size int64) {
-	head := d.w.BytesAt(off+objectHeaderLen, siEntries)
+	head := d.w.Peek(off+objectHeaderLen, siEntries)
 	if len(head) < siEntries {
 		d.note(off, "Simple Index Object is too short to hold its own header; seeking bisects instead")
 		return
@@ -80,7 +80,7 @@ func (d *Demuxer) readSimpleIndex(off, size int64) {
 	index := make([]uint32, 0, count)
 	for i := int64(0); i < count; {
 		n := min(count-i, int64(srcwin.Chunk/siEntryLen))
-		b := d.w.BytesAt(base+i*siEntryLen, int(n*siEntryLen))
+		b := d.w.Peek(base+i*siEntryLen, int(n*siEntryLen))
 		if int64(len(b)) < n*siEntryLen {
 			d.note(base, "Simple Index Object is truncated at entry %d; seeking bisects instead", i)
 			return

@@ -345,21 +345,11 @@ func (d *Demuxer) parse() error {
 	units := dataBytes / unitBytes
 	capacity := units * int64(wf.unitFrames)
 	samples := capacity
-	// Exact where a unit is one frame, which is PCM and G.711: the count is
-	// frames the payload holds (trailing bytes are warned and dropped) and
-	// the walk stops at exactly that many, so there is no room between the
-	// number and the decode for the two to differ. The AIFF sibling says the
-	// same about the same arithmetic, and saying it is what stops a caller
-	// that needs an authoritative length from decoding the file to find one:
-	// the daemon's "measuring this member costs a full scan" gate reads this
-	// flag beside the container.Indexer capability that a frame-walked
-	// payload brought to this type.
-	//
-	// A block codec stays false unless a fact chunk trimmed it, because there
-	// the flag answers a different question: whether the declared count was
-	// believed, which is the one thing about such a track a caller cannot
-	// derive for itself.
-	exact := wf.unitFrames == 1
+	// Exact in every arm: the count is what a read delivers, a byte-linear
+	// payload by its frames and a block codec by unitFrames per unit. A fact
+	// inside the last block is a trim the flag makes format/media apply;
+	// whether a fact was believed is the warnings' business.
+	exact := true
 	switch {
 	case factSamples < 0:
 		// Nothing to compare against; the payload is the only statement of
@@ -389,7 +379,6 @@ func (d *Demuxer) parse() error {
 			}
 		default:
 			samples = factSamples
-			exact = true
 		}
 	case factSamples != capacity:
 		// A byte-linear payload states its own length exactly, and for a

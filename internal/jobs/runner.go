@@ -1,6 +1,8 @@
 package jobs
 
 import (
+	"strings"
+
 	"context"
 	"encoding/json"
 	"fmt"
@@ -421,6 +423,22 @@ type closingMedia struct {
 	f *source.File
 }
 
+// Walk and Walked forward format.Walker: embedding the interface promotes
+// nothing outside it, and this wraps one file.
+func (m closingMedia) Walk() error {
+	if w, ok := m.Media.(format.Walker); ok {
+		return w.Walk()
+	}
+	return nil
+}
+
+func (m closingMedia) Walked() bool {
+	if w, ok := m.Media.(format.Walker); ok {
+		return w.Walked()
+	}
+	return true
+}
+
 func (m closingMedia) Close() error {
 	err := m.Media.Close()
 	m.f.Close()
@@ -481,6 +499,45 @@ func (r *Runner) progressFunc(ctx context.Context, id, phase string) func(done, 
 // warn records a non-fatal note on the job.
 func (r *Runner) warn(id, note string) {
 	if j := r.store.update(id, false, func(job *Job) { job.Warnings = append(job.Warnings, note) }); j != nil {
+		r.notify(j, false)
+	}
+}
+
+// warnInput attaches the input damage the read worked around as job
+// warnings, one per finding, named for the output when the job writes
+// several and prefixed so a reader can tell it from the metadata warnings
+// folded at creation. It is the read's verdict, not the probe's: a
+// frame-walked payload finds its damage where the read reaches it, and the
+// engine result carries the list only once the whole source was read. A
+// finding is attached once per job: a split's later pieces open the same
+// source and seek past the earlier ones, so their reads carry every finding
+// before their window too, and the first output to surface one keeps it.
+func (r *Runner) warnInput(id, output string, res *waxflow.TranscodeResult) {
+	if len(res.InputWarnings) == 0 {
+		return
+	}
+	added := false
+	j := r.store.update(id, false, func(job *Job) {
+		seen := make(map[string]bool, len(job.Warnings)+len(res.InputWarnings))
+		for _, have := range job.Warnings {
+			if _, w, ok := strings.Cut(have, ": "); ok {
+				seen[w] = true
+			}
+		}
+		for _, w := range res.InputWarnings {
+			if seen[w] {
+				continue
+			}
+			seen[w] = true
+			note := "input damage: " + w
+			if output != "" {
+				note = "input damage in the source of " + output + ": " + w
+			}
+			job.Warnings = append(job.Warnings, note)
+			added = true
+		}
+	})
+	if added && j != nil {
 		r.notify(j, false)
 	}
 }
@@ -918,6 +975,7 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 	// for a number this job's own warning list can carry. No output name: a
 	// transcode job writes one file, so the note needs no address.
 	r.warnClipping(j.ID, "", res)
+	r.warnInput(j.ID, "", res)
 
 	var rg []container.Tag
 	if analyzeLoudness {
@@ -1042,6 +1100,7 @@ func (r *Runner) writeMedia(ctx context.Context, j *Job, med format.Media, name 
 		return nil, err
 	}
 	r.warnClipping(j.ID, name, res)
+	r.warnInput(j.ID, name, res)
 	if err := f.Sync(); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: output sync", err)
 	}

@@ -145,8 +145,18 @@ are the numbers `ffprobe` puts in `bits_per_sample` for the same files.
 must not infer one from a depth.
 
 `warnings` lists input damage the tolerant parser worked around, and
-`strict` turns damage into errors. `notes` is the other half and is never
-damage: what this build did with a file that is perfectly well formed, such
+`strict` turns damage into errors. On a frame-indexed payload (MP3, bare
+or in a WAV or AIFF-C; ADTS) `strict` also walks the payload to its end, so
+its verdict covers the whole file at the cost of reading it; without it a
+probe reads headers, and damage past the head of such a payload is reported
+by the read that reaches it (a transcode job lists it under `warnings` with
+an `input damage:` prefix once the write has read the file; a merge job
+prefixes each finding with the member it came from, `member 1:`). A strict
+probe takes a live slot for its walk, the way a stream does, so a daemon
+whose pool is full answers it `503 overloaded`; a tolerant probe takes none.
+A strict probe of a payload whose headers state no length, or only an
+advisory one, reports the walked length as exact. `notes` is the other half
+and is never damage: what this build did with a file that is perfectly well formed, such
 as ignoring a stream it cannot use, capping a chapter list at its own limit,
 rescaling a timeline whose timescale is not the sample rate, or reporting a
 band it does not synthesize. `strict` never refuses over a note, which is the
@@ -614,12 +624,14 @@ Things worth knowing before you build on it:
   prefix sum, so every member's length is measured rather than read off
   its headers. That is a sub-millisecond walk for formats whose demuxer
   can find its end from a table (FLAC, WAV, Ogg, mp4), and a whole-file
-  scan for MP3. When a cold queue needs enough of the latter to be worth
-  it, the response is `202` with a job instead of `201` with a digest;
-  poll `GET /jobs/{id}` or follow its events, and the finished job's
-  `timeline` field carries the same values the `201` body would. The
-  cost is once per file, so the same queue mints in one round trip
-  afterwards.
+  walk for a member whose demuxer defers one: MP3 (bare or in a WAV or
+  AIFF-C), ADTS, and a Matroska file whose length is only its Info
+  Duration. When a cold queue needs enough of the latter to be worth it,
+  the response is `202` with a job instead of `201` with a digest; poll
+  `GET /jobs/{id}` or follow its events, and the finished job's `timeline`
+  field carries the same values the `201` body would. The cost is once per
+  file, so the same queue mints in one round trip afterwards, and a member
+  whose index sidecar is already complete mints inline from the start.
 - **`404 not-found` on a timeline means re-mint it.** A stored timeline
   outlives every URL minted against it, so a correct client does not hit
   this during normal playback; it means the daemon's store was wiped or

@@ -65,6 +65,19 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
+	if req.Strict {
+		// A strict probe walks a frame-indexed payload to its end, a read of
+		// the whole file (bounded by the source size cap), so it takes a
+		// live slot the way a stream does and a burst of them is admitted
+		// the same way. A tolerant probe is a header read and takes none.
+		release, ok := s.pools.AcquireLive()
+		if !ok {
+			s.met.AdmissionRejects.Add(1)
+			s.writeError(w, waxerr.New(waxerr.CodeOverloaded, "live transcode slots are full"))
+			return
+		}
+		defer release()
+	}
 	info, err := s.eng.Probe(f, f.Ext, &waxflow.ProbeOptions{Strict: req.Strict})
 	if err != nil {
 		s.writeError(w, err)

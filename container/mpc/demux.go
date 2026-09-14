@@ -157,7 +157,7 @@ func (d *Demuxer) parse() error {
 // there is one, else within the junk allowance. A "MP+" with a stream version
 // this decoder refuses still counts as found, so the refusal can name it.
 func (d *Demuxer) findMagic() (int64, error) {
-	from := id3.Size(d.w.BytesAt(0, 10))
+	from := id3.Size(d.w.Peek(0, 10))
 	limit := min(from+maxJunk, d.w.DataEnd())
 	for off := from; off+4 <= limit; {
 		b := d.w.BytesAt(off, srcwin.Chunk)

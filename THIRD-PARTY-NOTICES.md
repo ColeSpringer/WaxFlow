@@ -70,6 +70,25 @@ Entries follow this format:
 > init; the tests check every code against a second closed form written
 > from the same text, so a transcription error has nowhere to hide.
 
+> **container/mp4 layout tables**: two tables of published specification
+> data, restated rather than ported from any implementation. The QuickTime
+> `chan` box's layout tags, channel labels and bitmap bits (`chan.go`) are
+> the values of Apple's public *CoreAudioTypes* header (the
+> AudioChannelLayoutTag, AudioChannelLabel and AudioChannelBitmap
+> enumerations, as shipped in the macOS SDK), each tag's channel order
+> taken from the header's own comment on it. The ISO `chnl` box's speaker
+> positions and channel configurations (`chnl.go`) are the data of the
+> OutputChannelPosition and ChannelConfiguration tables of ISO/IEC 23091-3
+> (coding-independent code points, audio; the successor of the withdrawn
+> ISO/IEC 23001-8 that ISO/IEC 14496-12 names), checked against the text of
+> the amendment that restates both tables (MAINTENANCE.md records the
+> sources and which rows files confirm besides). Both are
+> published format specifications, so this is spec data under ADR-0001's
+> Tier A provision and not an extraction from a copyleft project. The
+> readers themselves are original code written against those documents
+> and ISO/IEC 14496-12; ffmpeg is the fixture generator and the layout
+> oracle only, and its source was not consulted.
+
 > **codec/alac decoder**: a clean-room port of Apple's *ALAC* reference
 > decoder (Apache-2.0), https://github.com/macosforge/alac. The adaptive
 > Golomb decode (ag_dec.c), the cascaded adaptive-FIR predictor

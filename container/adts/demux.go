@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"slices"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/aac"
@@ -54,8 +55,8 @@ type Demuxer struct {
 }
 
 // NewDemuxer parses the stream head (ID3 tags, the first frame) and derives
-// the AudioSpecificConfig. The returned Demuxer implements container.Seeker
-// and container.Warner.
+// the AudioSpecificConfig. The returned Demuxer implements container.Seeker,
+// container.Warner and container.Walker.
 func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 	d := &Demuxer{src: src, w: srcwin.New(src, src.Size(), "adts: reading frame data")}
 	if opts != nil {
@@ -72,7 +73,12 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
+	// Capped and deduplicated like the MP3 readers' list: a stream with junk
+	// between every frame would otherwise grow it with the walk.
+	w := container.Warning{Offset: off, Msg: msg, Kind: container.Damage}
+	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
+		d.warnings = append(d.warnings, w)
+	}
 	return nil
 }
 
@@ -86,7 +92,7 @@ func (d *Demuxer) note(off int64, format string, args ...any) {
 func (d *Demuxer) parse() error {
 	off := int64(0)
 	for range maxID3Tags {
-		if n := id3.Size(d.w.BytesAt(off, 10)); n > 0 && off+n <= d.w.DataEnd() {
+		if n := id3.Size(d.w.Peek(off, 10)); n > 0 && off+n <= d.w.DataEnd() {
 			off += n
 		} else {
 			break
@@ -115,6 +121,9 @@ func (d *Demuxer) parse() error {
 	d.haveRef = true
 	d.firstFrame = first
 	d.idx = append(d.idx, first)
+	if first+int64(h.frameLen) >= d.w.DataEnd() {
+		d.done = true // one frame: the index is already whole
+	}
 
 	cfg, err := h.config()
 	if err != nil {
@@ -239,7 +248,15 @@ func (d *Demuxer) frameAt(off int64) (header, bool) {
 	if next >= d.w.DataEnd() {
 		return h, true // runs to the end: nothing to confirm against
 	}
-	if nh, ok := parseHeader(d.w.BytesAt(next, 9)); ok && h.kin(nh) {
+	// The confirming header is read with the frame, from an offset that is
+	// resident: a read starting inside the window extends it, where one
+	// starting past its end would rebase into fresh storage at every window
+	// boundary the index walk crosses.
+	b := d.w.BytesAt(off, h.frameLen+9)
+	if len(b) < h.frameLen+9 {
+		return header{}, false
+	}
+	if nh, ok := parseHeader(b[h.frameLen:]); ok && h.kin(nh) {
 		return h, true
 	}
 	return header{}, false
@@ -251,7 +268,10 @@ func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track}
 // Warnings returns damage tolerated during parsing.
 func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
 
-// extend grows the frame index by one and reports whether it did.
+// extend grows the frame index by one and reports whether it did. The
+// window is trimmed to the last indexed frame first, and the next header is
+// pulled in with that frame: a seek to the end walks the index without
+// reading a packet, and this is what keeps that walk at one window, sliding.
 func (d *Demuxer) extend() (bool, error) {
 	if d.done {
 		return false, nil
@@ -260,6 +280,7 @@ func (d *Demuxer) extend() (bool, error) {
 		return false, d.w.Err()
 	}
 	last := d.idx[len(d.idx)-1]
+	d.w.Trim(last)
 	h, ok := parseHeader(d.w.BytesAt(last, 9))
 	if !ok {
 		d.done = true
@@ -270,7 +291,22 @@ func (d *Demuxer) extend() (bool, error) {
 		d.done = true
 		return false, nil
 	}
-	if _, ok := d.frameAt(next); !ok {
+	// The sequential step trusts the length the last header states and
+	// parses the header it points at, kin to the reference; only the resync
+	// scan confirms a candidate by the header behind it. Confirming here
+	// too would drop the frame ahead of any junk along with the junk, since
+	// that frame's own successor is the junk. The header is read with the
+	// last frame so the read extends the window rather than rebasing at a
+	// boundary.
+	var nh header
+	ok = false
+	if b := d.w.BytesAt(last, h.frameLen+9); len(b) >= h.frameLen {
+		nh, ok = parseHeader(b[h.frameLen:])
+	}
+	if !ok || !d.ref.kin(nh) {
+		if d.w.Err() != nil {
+			return false, d.w.Err()
+		}
 		// Damage or trailing junk: resync within bounds, else end.
 		cand, _, ok := d.nextFrame(next, next+maxResync)
 		if !ok {
@@ -288,6 +324,30 @@ func (d *Demuxer) extend() (bool, error) {
 	d.idx = append(d.idx, next)
 	return true, nil
 }
+
+// Walk implements container.Walker: the frame index is driven to the end of
+// the stream, so junk between frames past the head reaches Warnings, or
+// under Strict the error, without a packet being read. A finished walk has
+// counted every frame, which is the length the stream itself never states,
+// so the track reports it exact from then on: a strict probe, which walks
+// before its snapshot, measures the file it refused to guess about.
+func (d *Demuxer) Walk() error {
+	for {
+		grew, err := d.extend()
+		if err != nil {
+			return err
+		}
+		if !grew {
+			if d.done {
+				d.track.Samples, d.track.SamplesExact = int64(len(d.idx))*d.spf, true
+			}
+			return nil
+		}
+	}
+}
+
+// Walked implements container.Walker: whether the index reaches the end.
+func (d *Demuxer) Walked() bool { return d.done }
 
 // frameNo extends the index up to frame n, returning the highest available.
 func (d *Demuxer) frameNo(n int64) (int64, error) {

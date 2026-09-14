@@ -21,7 +21,12 @@ import (
 // Options configures probing and opening.
 type Options struct {
 	// Strict turns tolerated input damage into errors (conformance tests,
-	// `waxflow probe --strict`). Playback paths stay tolerant.
+	// `waxflow probe --strict`). A strict Probe also finishes the payload
+	// walk a demuxer defers (container.Walker: the MP3 frame index, bare or
+	// in a WAV or AIFF-C; the ADTS frame index; a Matroska cluster walk
+	// behind an advisory length), so its verdict covers the whole file at
+	// the cost of reading it. Playback paths stay tolerant, and Open never
+	// walks: a read finds damage where it lies.
 	Strict bool
 }
 
@@ -81,11 +86,34 @@ func (i *Info) Default() container.Track {
 // and returns io.EOF at end of stream. Seeks land sample-exact: the
 // demuxer positions on a sync point at or before the target and Media
 // pre-rolls the remainder internally, decoding and discarding.
+//
+// Info's Warnings and Notes are live, and nothing else in it is: the two
+// lists are current as of the last ReadChunk or SeekSample, on the goroutine
+// that reads, because a demuxer whose walk is lazy finds damage where the
+// read reaches it. A caller that wants the whole verdict reads or seeks to
+// the end first and asks again; Tracks, Chapters and Tags are what opening
+// found. Probe's Info is a detached snapshot, complete under Strict.
 type Media interface {
 	Info() *Info
 	ReadChunk(dst *audio.Buffer) error
 	SeekSample(target int64) (landed int64, err error)
 	Close() error
+}
+
+// Walker is the per-file view of container.Walker on a Media: whether the
+// walk its demuxer defers has run, and running it. Every Media opened from a
+// single source implements it, answering nil and true when the demuxer defers
+// nothing, so a consumer that needs to know whether measuring the file costs
+// a full scan asks the file rather than a method set. A type assertion would
+// answer per format where the question is per file and per moment: the same
+// WAV demuxer walks for an MP3 payload and not for PCM, the same Matroska
+// demuxer walks for an advisory length and not for one it measured at open,
+// and an MP3 whose sidecar index restored complete walks for nothing. A
+// concatenated timeline and a slice do not implement it: a consumer opens
+// the member files one at a time.
+type Walker interface {
+	Walk() error
+	Walked() bool
 }
 
 // Composite is implemented by a Media assembled from several sources rather
@@ -128,6 +156,15 @@ func Probe(src container.Source, hint string, opts *Options) (*Info, error) {
 	demux, err := d.open(src, opts)
 	if err != nil {
 		return nil, err
+	}
+	// A strict verdict covers the whole file: the walk a demuxer defers is
+	// finished before the snapshot is taken, so what it found is in it.
+	if opts != nil && opts.Strict {
+		if w, ok := demux.(container.Walker); ok {
+			if err := w.Walk(); err != nil {
+				return nil, err
+			}
+		}
 	}
 	info := buildInfo(d.name, demux)
 	if len(info.Tracks) == 0 {
@@ -202,19 +239,38 @@ func buildInfo(name string, demux container.Demuxer) *Info {
 		info.Tags = t.Tags()
 	}
 	if w, ok := demux.(container.Warner); ok {
-		for _, warn := range w.Warnings() {
-			msg := warn.Msg
-			if warn.Offset >= 0 {
-				msg = fmt.Sprintf("%s (offset %d)", warn.Msg, warn.Offset)
-			}
-			if warn.Kind == container.Note {
-				info.Notes = append(info.Notes, msg)
-			} else {
-				info.Warnings = append(info.Warnings, msg)
-			}
-		}
+		foldWarnings(info, w.Warnings())
 	}
 	return info
+}
+
+// RefreshWarnings refolds info's Warnings and Notes from demux, for a caller
+// that drives a demuxer it opened through OpenDemuxer: the two lists are
+// live on a Media (see Media), and this is the same refresh for the packet
+// path, where damage past the head is found by the read that reaches it. A
+// demuxer that records no warnings leaves info as it was.
+func RefreshWarnings(info *Info, demux container.Demuxer) {
+	if w, ok := demux.(container.Warner); ok {
+		foldWarnings(info, w.Warnings())
+	}
+}
+
+// foldWarnings sets info's Warnings and Notes from a demuxer's list, into
+// fresh slices: an earlier holder of the old ones keeps them as they were.
+// Media.Info calls it on every call, which is what makes the lists live.
+func foldWarnings(info *Info, ws []container.Warning) {
+	info.Warnings, info.Notes = nil, nil
+	for _, warn := range ws {
+		msg := warn.Msg
+		if warn.Offset >= 0 {
+			msg = fmt.Sprintf("%s (offset %d)", warn.Msg, warn.Offset)
+		}
+		if warn.Kind == container.Note {
+			info.Notes = append(info.Notes, msg)
+		} else {
+			info.Warnings = append(info.Warnings, msg)
+		}
+	}
 }
 
 // resolve picks a driver: bounded sniff first (skipping a leading ID3v2

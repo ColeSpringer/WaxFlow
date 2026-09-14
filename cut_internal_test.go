@@ -824,3 +824,26 @@ func (d *gridDemuxer) ReadPacket(pkt *container.Packet) error {
 	d.pos += d.dur
 	return nil
 }
+
+// warnerDemuxer is a Demuxer that records warnings, for the forwarding pin.
+type warnerDemuxer struct {
+	container.Demuxer
+	ws []container.Warning
+}
+
+func (w *warnerDemuxer) Warnings() []container.Warning { return w.ws }
+
+// TestCutDemuxerForwardsWarnings pins that the cut view exposes its source's
+// container.Warner: embedding the Demuxer interface promotes nothing outside
+// it, and the copy rung's input-damage list is read through that assertion.
+func TestCutDemuxerForwardsWarnings(t *testing.T) {
+	ws := []container.Warning{{Offset: 7, Msg: "16 unparsable bytes skipped", Kind: container.Damage}}
+	c := &cutDemuxer{Demuxer: &warnerDemuxer{ws: ws}}
+	var w container.Warner = c
+	if got := w.Warnings(); len(got) != 1 || got[0] != ws[0] {
+		t.Errorf("Warnings = %v, want the source's %v", got, ws)
+	}
+	if got := (&cutDemuxer{Demuxer: &warnerDemuxer{}}).Warnings(); len(got) != 0 {
+		t.Errorf("Warnings = %v on a source with none", got)
+	}
+}

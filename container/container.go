@@ -301,6 +301,26 @@ type Warner interface {
 	Warnings() []Warning
 }
 
+// Walker is implemented by demuxers whose open defers a walk of the payload:
+// a frame index built lazily (MP3, bare or inside a WAV or an AIFF-C; ADTS)
+// or a cluster walk behind an advisory length (Matroska). Walk finishes that
+// walk through the owner's normal warn path, so under Strict damage past the
+// head becomes the malformed error and under tolerance it lands in Warnings.
+// Walked reports whether the walk has run to the end of the payload: a run
+// read to its end, a restored complete index, a walk taken at open. A walk
+// that ended early, refused under Strict or stopped by a read failure, is
+// not finished, and Walk called again stops at the same place. A finished
+// walk has measured the payload, and the track reports that length. A
+// strict probe calls Walk and the daemon's job gate reads Walked; they are
+// two views of one state on the same types, which is why one interface
+// carries both. A demuxer that confirms everything at open does not
+// implement it, and Open never calls Walk: a read finds damage where it
+// lies. Walk leaves the packet position where it was.
+type Walker interface {
+	Walk() error
+	Walked() bool
+}
+
 // Muxer writes one audio track to a container. Muxers are single-track by
 // design; track selection happens upstream in the engine, and End takes
 // that track's Trailer for gapless finalization.
