@@ -1,14 +1,17 @@
 package testutil
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -284,7 +287,7 @@ func Fetch(w io.Writer, dir string, vectors []Vector) error {
 			}
 			fmt.Fprintf(w, "refetch  %s (digest changed)\n", v.Name)
 		}
-		if err := fetchOne(path, v); err != nil {
+		if err := fetchOne(w, path, v); err != nil {
 			return fmt.Errorf("fetching %s: %w", v.Name, err)
 		}
 		fmt.Fprintf(w, "fetched  %s\n", v.Name)
@@ -293,13 +296,12 @@ func Fetch(w io.Writer, dir string, vectors []Vector) error {
 	return nil
 }
 
-// fetchClient bounds a fetch that stalls. The overall timeout is generous
-// because the largest pinned vector is a 183 MB archive, but a host that
-// accepts the connection and then says nothing must not hang a CI job until
-// the runner's own ceiling: the header and handshake timeouts are what turn
-// that into a failure in seconds.
+// fetchClient bounds a fetch that stalls: a host that accepts the connection
+// and then says nothing must not hang a CI job until the runner's own
+// ceiling, and the header and handshake timeouts are what turn that into a
+// failure in seconds. The overall deadline rides on the context instead, so
+// that it covers a vector rather than a request (fetchBudget).
 var fetchClient = &http.Client{
-	Timeout: 30 * time.Minute,
 	Transport: &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		TLSHandshakeTimeout:   30 * time.Second,
@@ -307,13 +309,99 @@ var fetchClient = &http.Client{
 	},
 }
 
-func fetchOne(path string, v Vector) error {
+// fetchAttempts, fetchRetryDelay, fetchRetryCap and fetchBudget bound the
+// repeats of one vector. A host that accepts a request and then drops the
+// connection must not sink the whole run: the list is a hundred-odd files
+// across half a dozen third-party hosts, and an aborted run also throws
+// away the CI cache of everything fetched before it. The delay doubles
+// between attempts, and a host that names its own Retry-After is heard out
+// up to the cap. The budget is generous because the largest pinned vector
+// is a 183 MB archive, and it covers every attempt together: a link slow
+// enough to spend it will not do better from byte zero, and four fresh
+// tries would outlast the CI job the retry is there to keep alive.
+var (
+	fetchAttempts   = 4
+	fetchRetryDelay = 2 * time.Second
+	fetchRetryCap   = time.Minute
+	fetchBudget     = 30 * time.Minute
+)
+
+// permanentError marks a failure a second attempt cannot fix: a status the
+// host will keep returning, or bytes that do not match the pin. A mismatch
+// is the supply-chain check doing its job and has to fail loudly rather
+// than be retried away: every pinned host frames its responses, so a
+// truncated transfer arrives as a read error, not as a short body.
+type permanentError struct{ err error }
+
+func (e permanentError) Error() string { return e.err.Error() }
+func (e permanentError) Unwrap() error { return e.err }
+
+// retryAfterError carries a host's own Retry-After beside a status worth
+// another attempt. The backoff cannot know how long a rate limit runs for;
+// the host does.
+type retryAfterError struct {
+	err   error
+	after time.Duration
+}
+
+func (e retryAfterError) Error() string { return e.err.Error() }
+func (e retryAfterError) Unwrap() error { return e.err }
+
+// retryAfter reads the header in either spelling, delta-seconds or an
+// HTTP-date. Anything else, a date already past included, reads as silence.
+func retryAfter(h http.Header) time.Duration {
+	v := h.Get("Retry-After")
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+		return time.Duration(secs) * time.Second
+	}
+	if when, err := http.ParseTime(v); err == nil {
+		if d := time.Until(when); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+// fetchOne downloads one vector, repeating a transient failure until the
+// attempts or the budget run out.
+func fetchOne(w io.Writer, path string, v Vector) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodGet, v.URL, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), fetchBudget)
+	defer cancel()
+	for attempt := 1; ; attempt++ {
+		err := fetchAttempt(ctx, path, v)
+		var permanent permanentError
+		if err == nil || errors.As(err, &permanent) {
+			return err
+		}
+		if attempt == fetchAttempts || ctx.Err() != nil {
+			return err
+		}
+		delay := fetchRetryDelay << (attempt - 1)
+		var wait retryAfterError
+		if errors.As(err, &wait) {
+			if d := min(wait.after, fetchRetryCap); d > delay {
+				delay = d
+			}
+		}
+		fmt.Fprintf(w, "retry    %s (attempt %d of %d failed: %v)\n", v.Name, attempt, fetchAttempts, err)
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(delay):
+		}
+	}
+}
+
+func fetchAttempt(ctx context.Context, path string, v Vector) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, v.URL, nil)
 	if err != nil {
-		return err
+		return permanentError{err}
 	}
 	// Name the fetcher: Go's default headers are enough of a bot signature
 	// that at least one of the pinned hosts answers them with a 406.
@@ -325,7 +413,11 @@ func fetchOne(path string, v Vector) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: %s", v.URL, resp.Status)
+		status := fmt.Errorf("GET %s: %s", v.URL, resp.Status)
+		if !retryableStatus(resp.StatusCode) {
+			return permanentError{status}
+		}
+		return retryAfterError{err: status, after: retryAfter(resp.Header)}
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".fetch-*")
 	if err != nil {
@@ -341,9 +433,22 @@ func fetchOne(path string, v Vector) error {
 		return err
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != v.SHA256 {
-		return fmt.Errorf("digest mismatch: got %s, pinned %s", got, v.SHA256)
+		return permanentError{fmt.Errorf("digest mismatch: got %s, pinned %s", got, v.SHA256)}
 	}
 	return posixfs.Replace(tmp.Name(), path)
+}
+
+// retryableStatus reports whether a status is the host asking for a later
+// attempt rather than refusing the request. The rest of the 5xx range is as
+// settled as a 404: 501 and 505 answer the request itself, not the moment.
+func retryableStatus(code int) bool {
+	switch code {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests,
+		http.StatusInternalServerError, http.StatusBadGateway,
+		http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return false
 }
 
 func fileSHA256(path string) (string, error) {
