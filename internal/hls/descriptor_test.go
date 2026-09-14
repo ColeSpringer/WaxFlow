@@ -75,6 +75,13 @@ func TestDescriptorRejections(t *testing.T) {
 		"both-bitrates":    enc(`{"ver":1,"src":"s","id":"i","format":"opus","bitrate":96,"bitrates":[64]}`),
 		"oversized":        enc(`{"ver":1,"src":"` + strings.Repeat("a", maxDescriptorBytes) + `","id":"i","format":"opus"}`),
 		"neg-crossfade":    enc(`{"ver":1,"src":"s","id":"i","format":"opus","crossfadeSeconds":-1}`),
+		// Decoding this would substitute U+FFFD and hand back a src naming a
+		// different file, so it is refused instead.
+		"not-utf8": enc("{\"ver\":1,\"src\":\"caf\xe9\",\"id\":\"i\",\"format\":\"opus\"}"),
+		// Fits the wire-form gate and blows the canonical one: json escapes
+		// every & as the six-byte \u0026.
+		"inflates-by-escaping": enc(`{"ver":1,"src":"s","id":"` +
+			strings.Repeat("&", maxDescriptorBytes/2) + `","format":"opus"}`),
 		// A crossfade blends a timeline's seam; a single source has none.
 		"src-and-crossfade": enc(`{"ver":1,"src":"s","id":"i","format":"opus","crossfadeSeconds":0.5}`),
 	}
@@ -83,6 +90,37 @@ func TestDescriptorRejections(t *testing.T) {
 			t.Errorf("%s: err %v, want invalid-request", name, err)
 		}
 	}
+}
+
+// TestDescriptorSizeRefusalsAreDistinct pins that the two size gates name
+// their own cause. One bounds the string that arrived and the other what it
+// decodes back to, and an operator reading a 400 cannot act on the difference
+// unless the message states it.
+func TestDescriptorSizeRefusalsAreDistinct(t *testing.T) {
+	wire := descriptorWithID(t, strings.Repeat("a", 2*maxDescriptorBytes))
+	canonical := descriptorWithID(t, strings.Repeat("&", maxDescriptorBytes/2))
+	_, wireErr := DecodeDescriptor(wire)
+	_, canonErr := DecodeDescriptor(canonical)
+	if wireErr == nil || canonErr == nil {
+		t.Fatalf("both must refuse: wire %v, canonical %v", wireErr, canonErr)
+	}
+	if wireErr.Error() == canonErr.Error() {
+		t.Fatalf("both gates say %q; the two causes are indistinguishable", wireErr)
+	}
+	if strings.Contains(wireErr.Error(), "canonical") {
+		t.Errorf("the wire-form refusal blames the canonical form: %v", wireErr)
+	}
+	if !strings.Contains(canonErr.Error(), "canonical") {
+		t.Errorf("the canonical-form refusal does not name the canonical form: %v", canonErr)
+	}
+}
+
+// descriptorWithID builds the wire form of a descriptor whose id is the
+// given filler, bypassing Encode so the filler reaches the decoder verbatim.
+func descriptorWithID(t *testing.T, id string) string {
+	t.Helper()
+	return base64.RawURLEncoding.EncodeToString(
+		[]byte(`{"ver":1,"src":"s","id":"` + id + `","format":"opus"}`))
 }
 
 func FuzzDecodeDescriptor(f *testing.F) {

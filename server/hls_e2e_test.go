@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -583,5 +584,42 @@ func TestHLSMasterAdvertisesHECopy(t *testing.T) {
 	resp = keyless(t, env, "/hls/"+mediaRef)
 	if media := readBody(t, resp); resp.StatusCode != 200 {
 		t.Fatalf("media playlist behind the HE master = %d: %s", resp.StatusCode, media)
+	}
+}
+
+// TestHLSMintRefusesNonUTF8Src pins that a source name the descriptor cannot
+// carry is refused at mint rather than silently rewritten. The descriptor
+// travels as JSON, and json.Marshal substitutes U+FFFD for every invalid byte,
+// so the round trip inside mintHLSDescriptor used to hand back a src naming a
+// file that does not exist. The second half measures rather than assumes that
+// the limit is the descriptor's and not the library's: /stream carries no JSON
+// and serves the same file.
+func TestHLSMintRefusesNonUTF8Src(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows paths are UTF-16; a name with invalid UTF-8 cannot be created")
+	}
+	env := newTestEnv(t, nil)
+	b, err := os.ReadFile(filepath.Join(env.root, "sine.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const name = "caf\xe9.wav"
+	if err := os.WriteFile(filepath.Join(env.root, name), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := url.QueryEscape("lib/" + name)
+
+	resp := env.get(t, "/hls/master.m3u8?src="+src, nil)
+	body := readBody(t, resp)
+	if resp.StatusCode != 400 {
+		t.Fatalf("non-UTF-8 src minted with %d: %s", resp.StatusCode, body)
+	}
+	if !bytes.Contains(body, []byte("not valid UTF-8")) {
+		t.Fatalf("the refusal does not state the UTF-8 rule: %s", body)
+	}
+
+	resp = env.get(t, "/stream?src="+src, nil)
+	if got := readBody(t, resp); resp.StatusCode != 200 {
+		t.Fatalf("/stream on the same file = %d: %s; the HLS refusal is the library's, not the descriptor's", resp.StatusCode, got)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
@@ -1263,6 +1264,14 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string
 		return bad("src or tl is required")
 	case d.Src != "" && d.Tl != "":
 		return bad("src and tl are exclusive: a URL names one stream or one timeline")
+	case !utf8.ValidString(d.Src):
+		// Guarded before Encode for the same reason as crossfadeSeconds below:
+		// the descriptor travels as JSON, and json.Marshal substitutes U+FFFD
+		// for every invalid byte, so the round trip would hand back a src
+		// naming a file other than the one just resolved. Stated here rather
+		// than left to surface as a 404 for a file that plainly exists. A
+		// non-UTF-8 name still streams over /stream, which carries no JSON.
+		return bad("src %q is not valid UTF-8, and an HLS source reference travels as JSON", d.Src)
 	}
 	if d.Format == "" {
 		d.Format = waxflow.SegmentedFormats()[0]

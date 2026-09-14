@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"unicode/utf8"
 
 	"github.com/colespringer/waxflow/internal/timeline"
 	"github.com/colespringer/waxflow/waxerr"
@@ -23,6 +24,10 @@ const DescriptorVersion = 1
 // maxDescriptorBytes bounds the decoded JSON: real descriptors are under
 // 300 bytes, and the parser must not inflate hostile input.
 const maxDescriptorBytes = 4096
+
+// maxDescriptorParam is maxDescriptorBytes in the base64url spelling the v=
+// parameter carries.
+const maxDescriptorParam = maxDescriptorBytes*4/3 + 4
 
 // Descriptor is the deserialized v= parameter: one variant's (or, with
 // Bitrates, one ladder's) complete output selection plus the source
@@ -150,12 +155,19 @@ func DecodeDescriptor(s string) (Descriptor, error) {
 	if s == "" {
 		return bad("missing")
 	}
-	if len(s) > maxDescriptorBytes*4/3+4 {
-		return bad("too large")
+	if len(s) > maxDescriptorParam {
+		return bad("is %d bytes, over the %d-byte limit", len(s), maxDescriptorParam)
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {
 		return bad("is not base64url: %v", err)
+	}
+	// Refused rather than decoded, because encoding/json substitutes U+FFFD for
+	// every invalid byte: a src would silently name a file other than the one
+	// spelled, which is the same class of quiet reinterpretation the
+	// unknown-field rule refuses.
+	if !utf8.Valid(raw) {
+		return bad("is not valid UTF-8")
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -225,6 +237,15 @@ func DecodeDescriptor(s string) (Descriptor, error) {
 	}
 	if len(d.Bitrates) > 0 && d.Bitrate != 0 {
 		return bad("carries both bitrate and bitrates")
+	}
+	// An accepted descriptor must survive its own canonical form, which the
+	// gate on the wire form cannot promise: json.Marshal escapes <, > and & as
+	// \u003c and friends, so a field can leave the decoder six times the size it
+	// entered. master.m3u8 re-encodes this descriptor into each child URL it
+	// mints, and a master whose children the next request refuses is a dead
+	// playlist.
+	if e := d.Encode(); len(e) > maxDescriptorParam {
+		return bad("expands to %d bytes in canonical form, over the %d-byte limit", len(e), maxDescriptorParam)
 	}
 	return d, nil
 }
