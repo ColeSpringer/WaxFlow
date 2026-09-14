@@ -21,7 +21,7 @@ import (
 
 // Flavor customizes the command tree for a build that adds source
 // schemes the stock binary cannot serve. The zero value is the stock
-// build. A build that resolves pid:<ULID> against a WaxBin catalog
+// build. A build that resolves pid:<ULID> against a catalog
 // injects one; no build in this repo does, so the seam is aimed at
 // modules outside it, and examples/catalogcli is a worked example.
 type Flavor struct {
