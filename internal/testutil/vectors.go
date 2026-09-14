@@ -184,7 +184,7 @@ var Vectors = []Vector{
 	// out of. No distribution packages that tool and ffmpeg has no APE
 	// encoder, so it is the only way to generate a .ape at all: a test-time
 	// oracle and fixture generator, never a runtime dependency.
-	{Name: "ape/MAC_1325_SDK.zip", URL: "https://monkeysaudio.com/files/MAC_1325_SDK.zip", SHA256: "0c4c82e60f42fee8deaf4facc28a56a9f84b7afcc5631a7d2c581f8e8ea33cb4"},
+	{Name: "ape/MAC_1326_SDK.zip", URL: "https://monkeysaudio.com/files/MAC_1326_SDK.zip", SHA256: "3fdb516db15cc754eb2db1d255e405a8142fbb115eccdf51b0fa07b84305b6ac"},
 	// The Opus speech-quality corpus source: the McGill TSP Speech Database
 	// 48 kHz set (Peter Kabal, BSD-2-Clause; hosted by the McGill MMSP lab
 	// since the late 1990s), ~1400 short studio-recorded Harvard sentences

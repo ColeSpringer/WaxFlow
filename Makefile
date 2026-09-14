@@ -169,6 +169,14 @@ opus-tools:
 	rm -rf testdata/tools/opus-build; \
 	echo "built $(OPUS_TOOLS_DIR)/{opus_demo,opus_compare}$(APE_TOOLS_EXE)"
 
+# GNU make defaults CXX to g++, which plenty of hosts do not install even
+# with a C++ compiler present (the other tool recipes use $(CC), whose default
+# cc is always there). Only the built-in default is repointed, so CXX from the
+# environment, the command line or a file still wins.
+ifeq ($(origin CXX),default)
+CXX := $(shell command -v g++ >/dev/null 2>&1 && echo g++ || echo c++)
+endif
+
 # Build the reference Monkey's Audio console tool (`mac`) from the pinned SDK
 # source into testdata/tools (CI-cached, never committed). It is the only APE
 # encoder there is -- ffmpeg decodes the format but does not write it, and no
@@ -176,7 +184,7 @@ opus-tools:
 # differentials come from here. A test-time oracle only, never a runtime
 # dependency. Tests that need it self-skip until this has run;
 # WAXFLOW_REQUIRE_MAC=1 escalates.
-APE_TOOLS_VERSION := mac-13.25
+APE_TOOLS_VERSION := mac-13.26
 APE_TOOLS_DIR := testdata/tools/$(APE_TOOLS_VERSION)
 # The SDK picks its file-I/O backend and its wide-character entry point from a
 # platform define, so the build needs one of three spellings. These are
@@ -192,10 +200,10 @@ ape-tools:
 		echo "$(APE_TOOLS_DIR)/mac$(APE_TOOLS_EXE) is already built"; exit 0; \
 	fi; \
 	set -e; \
-	go run ./internal/testutil/cmd/vectorfetch ape/MAC_1325_SDK.zip; \
+	go run ./internal/testutil/cmd/vectorfetch ape/MAC_1326_SDK.zip; \
 	rm -rf testdata/tools/ape-build; \
 	mkdir -p testdata/tools/ape-build $(APE_TOOLS_DIR); \
-	( cd testdata/tools/ape-build && unzip -q ../../vectors/ape/MAC_1325_SDK.zip ); \
+	( cd testdata/tools/ape-build && unzip -q ../../vectors/ape/MAC_1326_SDK.zip ); \
 	( cd testdata/tools/ape-build && $(CXX) -O2 -std=c++11 -w $(APE_TOOLS_CXXFLAGS) \
 		-ISource/MACLib -ISource/MACLib/Old -ISource/Shared -IShared -ISource/Console \
 		Source/MACLib/*.cpp Source/MACLib/Old/*.cpp \

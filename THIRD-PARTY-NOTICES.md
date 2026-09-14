@@ -292,7 +292,7 @@ Entries follow this format:
 > decisions, and the container writer.
 
 > **codec/ape decoder**: a clean-room port of the *Monkey's Audio* reference
-> decoder (BSD-3-Clause), https://monkeysaudio.com, SDK 13.25. A lossless
+> decoder (BSD-3-Clause), https://monkeysaudio.com, SDK 13.26. A lossless
 > decoder has to reproduce the reference bit for bit, so the parts that define
 > the bitstream are ported faithfully: the range decoder and its two symbol
 > models (`UnBitArray.cpp` and `Old/UnBitArrayOld.cpp`, with the model tables

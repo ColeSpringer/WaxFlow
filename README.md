@@ -259,8 +259,7 @@ The HTTP surface is documented in [docs/api.md](docs/api.md).
 
 ## `pid:` sources
 
-`pid:<ULID>` names an item in a WaxBin catalog. **No build here resolves
-one**: WaxFlow ships no catalog code and no database dependency, so every
+WaxFlow ships no catalog code and no database dependency, so every
 build in this repo answers `pid:` with `501 unsupported-source`.
 
 A build that wants them injects a catalog resolver through the

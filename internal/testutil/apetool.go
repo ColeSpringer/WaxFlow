@@ -24,7 +24,7 @@ import (
 
 // apeToolsVersion is the Monkey's Audio SDK release the console tool is built
 // from, matching the pinned source zip in Vectors.
-const apeToolsVersion = "mac-13.25"
+const apeToolsVersion = "mac-13.26"
 
 // APETool locates the reference `mac` console tool. No distribution packages
 // it, so `make ape-tools` builds it from the pinned SDK source into
