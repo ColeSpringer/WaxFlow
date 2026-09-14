@@ -593,21 +593,29 @@ func TestHLSMasterAdvertisesHECopy(t *testing.T) {
 // so the round trip inside mintHLSDescriptor used to hand back a src naming a
 // file that does not exist. The second half measures rather than assumes that
 // the limit is the descriptor's and not the library's: /stream carries no JSON
-// and serves the same file.
+// and serves the same file. That control needs a library holding the name,
+// which only Linux does.
 func TestHLSMintRefusesNonUTF8Src(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows paths are UTF-16; a name with invalid UTF-8 cannot be created")
-	}
 	env := newTestEnv(t, nil)
-	b, err := os.ReadFile(filepath.Join(env.root, "sine.wav"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	const name = "caf\xe9.wav"
-	if err := os.WriteFile(filepath.Join(env.root, name), b, 0o644); err != nil {
-		t.Fatal(err)
-	}
 	src := url.QueryEscape("lib/" + name)
+
+	// A file name is opaque bytes only on Linux. macOS rejects one that is not
+	// valid UTF-8 (EILSEQ from the write below), and Windows names files in
+	// UTF-16, where the byte becomes U+FFFD and the file created is not the
+	// file asked for. The refusal needs no file of its own, since mint reads
+	// the parameter before it resolves anything, so on those two it is checked
+	// without the control.
+	hasFile := runtime.GOOS == "linux"
+	if hasFile {
+		b, err := os.ReadFile(filepath.Join(env.root, "sine.wav"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(env.root, name), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	resp := env.get(t, "/hls/master.m3u8?src="+src, nil)
 	body := readBody(t, resp)
@@ -616,6 +624,9 @@ func TestHLSMintRefusesNonUTF8Src(t *testing.T) {
 	}
 	if !bytes.Contains(body, []byte("not valid UTF-8")) {
 		t.Fatalf("the refusal does not state the UTF-8 rule: %s", body)
+	}
+	if !hasFile {
+		return
 	}
 
 	resp = env.get(t, "/stream?src="+src, nil)
