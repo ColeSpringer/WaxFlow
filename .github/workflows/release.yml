@@ -8,16 +8,20 @@ on:
     tags: ["v*"]
 
 env:
-  GO_VERSION: "1.26.3"
+  GO_VERSION: "1.26.8"
   IMAGE: ghcr.io/colespringer/waxflow
 
+# Each job holds only the write it makes: the release upload, or the image
+# push.
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
   binaries:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -43,7 +47,7 @@ jobs:
             rm -rf build
           done
       - name: checksums
-        run: cd dist && sha256sum * > SHA256SUMS
+        run: cd dist && sha256sum -- * > SHA256SUMS
       - name: create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -53,6 +57,10 @@ jobs:
 
   image:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-qemu-action@v4

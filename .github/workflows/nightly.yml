@@ -5,42 +5,64 @@ on:
     - cron: "17 3 * * *"
   workflow_dispatch:
 
+# Nothing here writes to the repository. Cache and artifact uploads use the
+# runtime token, not this one.
+permissions:
+  contents: read
+
 env:
-  GO_VERSION: "1.26.3"
+  GO_VERSION: "1.26.8"
 
 jobs:
   # Long fuzz soak over every native fuzz target: 20 minutes per target
-  # nightly versus the 2-minute smoke in ci.yml. New Fuzz* functions are
-  # picked up automatically. scripts/fuzz.sh fails the job only on a real
-  # crasher (a reproducer written under testdata/fuzz), not on Go's benign
-  # end-of-run "context deadline exceeded"; a real finding is echoed into
-  # this log and uploaded below so it survives the ephemeral runner.
+  # nightly versus the 45-second smoke in ci.yml. The list is 52 targets,
+  # about 17 hours of fuzzing, and a hosted job dies at 6 hours, so it is
+  # sharded: scripts/fuzz.sh discovers every target and FUZZ_SHARD=k/N runs
+  # every Nth one, so the six shards cover the list once at about 3 hours
+  # each. Add a shard once a shard holds 12 targets: that is 4 hours of
+  # fuzzing against the 5-hour timeout. New Fuzz* functions are picked up
+  # automatically. scripts/fuzz.sh
+  # fails the job only on a real crasher (a reproducer written under
+  # testdata/fuzz), not on Go's benign end-of-run "context deadline
+  # exceeded"; a real finding is echoed into this log and uploaded below so
+  # it survives the ephemeral runner. The upload runs on a timeout too,
+  # since a cancelled job skips failure() steps.
   fuzz-soak:
     runs-on: ubuntu-latest
-    timeout-minutes: 340
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
-      - name: fuzz every target for 20 minutes
+      - name: fuzz every target in this shard for 20 minutes
         run: bash scripts/fuzz.sh 20m
+        env:
+          FUZZ_SHARD: ${{ matrix.shard }}/6
       - name: upload fuzz logs and any reproducers
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-soak-findings
+          name: fuzz-soak-findings-${{ matrix.shard }}
           path: |
             fuzz-logs/
             **/testdata/fuzz/**
           if-no-files-found: ignore
+          retention-days: 14
 
   # The full suite with the differential oracle and conformance vectors
   # required, so a broken comparison cannot hide behind a skip. The non-race
   # run enforces the oracles (all single-goroutine numeric); the race pass
   # (whole tree, heavy numeric suites self-skip) covers the concurrent code.
+  # ubuntu-24.04 is pinned for the reason ci.yml's differential job gives:
+  # apt's ffmpeg version is an oracle input, not a runner detail.
   differential:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -59,7 +81,10 @@ jobs:
       # the reference decoder's float output and the repacker and cutter, built
       # from the pinned tarballs the same way.
       - run: make mpc-tools
-      - run: WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_REQUIRE_FLAC=1 WAXFLOW_REQUIRE_WAVPACK=1 WAXFLOW_REQUIRE_MAC=1 WAXFLOW_REQUIRE_MPC=1 WAXFLOW_REQUIRE_VECTORS=1 go test -count=1 -timeout 30m ./...
+      # libopus's opus_demo, the reference decoder behind the codec/opus
+      # interop tests.
+      - run: make opus-tools
+      - run: WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_REQUIRE_FLAC=1 WAXFLOW_REQUIRE_WAVPACK=1 WAXFLOW_REQUIRE_MAC=1 WAXFLOW_REQUIRE_MPC=1 WAXFLOW_REQUIRE_OPUS_TOOLS=1 WAXFLOW_REQUIRE_VECTORS=1 go test -count=1 -timeout 30m ./...
       # -count=1 so the scheduled soak actually re-executes: without it the
       # cached GOCACHE (restored by setup-go) short-circuits an unchanged tree.
       - run: GOFLAGS=-count=1 make test-race
@@ -70,6 +95,7 @@ jobs:
   # (scripts/client-e2e.mjs; docs/client-matrix.md).
   client-browser:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -139,9 +165,11 @@ jobs:
   # built from the pinned source), enforce the docs/quality-gates.md gates,
   # and upload the HTML reports. libshine ships in Ubuntu's ffmpeg build;
   # the libopus tools are built by `make opus-tools` and cached alongside
-  # the pinned corpus.
+  # the pinned corpus. ubuntu-24.04 is pinned because the baselines are
+  # ffmpeg build options and versions, and 24.04's are the measured ones.
   encoder-quality:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7

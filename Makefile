@@ -126,7 +126,9 @@ verify-vectors:
 
 # Run every Fuzz* target and classify findings (scripts/fuzz.sh). Only a real
 # crasher fails; Go's end-of-run "context deadline exceeded" is treated as a
-# pass. Override the per-target budget with FUZZTIME (CI uses 2m/20m).
+# pass. Override the per-target budget with FUZZTIME (CI uses 45s, nightly
+# 20m, each split across parallel jobs with FUZZ_SHARD=k/N, which the script
+# reads from the environment).
 FUZZTIME ?= 30s
 fuzz:
 	./scripts/fuzz.sh $(FUZZTIME)
@@ -147,19 +149,25 @@ bench:
 # encoder-quality oracle, from the pinned source tarball into testdata/tools
 # (CI-cached, never committed). Requires a C toolchain; like ffmpeg this is a
 # test-time oracle only, never a runtime dependency. Tests that need the
-# tools self-skip until this has run; WAXFLOW_REQUIRE_OPUS_TOOLS=1 escalates.
+# tools self-skip until this has run; WAXFLOW_REQUIRE_OPUS_TOOLS=1 escalates
+# (the CI differential job sets it). A no-op once the binaries are there, so
+# a cache hit is not followed by a rebuild. The .exe suffix follows the ape
+# recipe's platform detection below, as the Musepack recipe does.
 OPUS_TOOLS_VERSION := opus-1.6.1
 OPUS_TOOLS_DIR := testdata/tools/$(OPUS_TOOLS_VERSION)
 opus-tools:
-	go run ./internal/testutil/cmd/vectorfetch opus/$(OPUS_TOOLS_VERSION).tar.gz
-	rm -rf testdata/tools/opus-build
-	mkdir -p testdata/tools/opus-build
-	tar -xzf testdata/vectors/opus/$(OPUS_TOOLS_VERSION).tar.gz -C testdata/tools/opus-build --strip-components=1
-	cd testdata/tools/opus-build && ./configure --disable-shared --disable-doc >/dev/null && $(MAKE) -s opus_demo opus_compare >/dev/null
-	mkdir -p $(OPUS_TOOLS_DIR)
-	cp testdata/tools/opus-build/opus_demo testdata/tools/opus-build/opus_compare $(OPUS_TOOLS_DIR)/
-	rm -rf testdata/tools/opus-build
-	@echo "built $(OPUS_TOOLS_DIR)/{opus_demo,opus_compare}"
+	@if [ -x "$(OPUS_TOOLS_DIR)/opus_demo$(APE_TOOLS_EXE)" ] && [ -x "$(OPUS_TOOLS_DIR)/opus_compare$(APE_TOOLS_EXE)" ]; then \
+		echo "$(OPUS_TOOLS_DIR)/{opus_demo,opus_compare}$(APE_TOOLS_EXE) are already built"; exit 0; \
+	fi; \
+	set -e; \
+	go run ./internal/testutil/cmd/vectorfetch opus/$(OPUS_TOOLS_VERSION).tar.gz; \
+	rm -rf testdata/tools/opus-build; \
+	mkdir -p testdata/tools/opus-build $(OPUS_TOOLS_DIR); \
+	tar -xzf testdata/vectors/opus/$(OPUS_TOOLS_VERSION).tar.gz -C testdata/tools/opus-build --strip-components=1; \
+	( cd testdata/tools/opus-build && ./configure --disable-shared --disable-doc >/dev/null && $(MAKE) -s opus_demo opus_compare >/dev/null ); \
+	cp testdata/tools/opus-build/opus_demo$(APE_TOOLS_EXE) testdata/tools/opus-build/opus_compare$(APE_TOOLS_EXE) $(OPUS_TOOLS_DIR)/; \
+	rm -rf testdata/tools/opus-build; \
+	echo "built $(OPUS_TOOLS_DIR)/{opus_demo,opus_compare}$(APE_TOOLS_EXE)"
 
 # Build the reference Monkey's Audio console tool (`mac`) from the pinned SDK
 # source into testdata/tools (CI-cached, never committed). It is the only APE
