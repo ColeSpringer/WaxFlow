@@ -205,7 +205,7 @@ func setupPCM(t *trackEntry) (codecSetup, error) {
 		// The depth came out of the file's Audio element, so the code follows
 		// the reason: a depth this build does not carry is unsupported, and a
 		// depth no PCM stream may state is damage.
-		return codecSetup{}, waxerr.Wrap(waxerr.CodeOf(err), "mka: unusable PCM config", err)
+		return codecSetup{}, waxerr.Annotate("mka: unusable PCM config", err)
 	}
 	if t.channels < 1 {
 		return codecSetup{}, malformed("PCM track with %d channels", t.channels)

@@ -10,6 +10,7 @@ import (
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // TestSliceNestedHeadroom pins that a span of a span reports and delivers
@@ -133,6 +134,10 @@ func TestSliceShortSourcePositionIsHonest(t *testing.T) {
 	// "ended -7000 samples into" is not.
 	if !strings.Contains(err.Error(), "ended 0 samples into a span that declared 6000") {
 		t.Fatalf("error = %v, want it to report an honest position within the span", err)
+	}
+	if got := waxerr.CodeOf(err); got != waxerr.CodeMalformedInput {
+		t.Fatalf("code = %s, want %s: a source that ended early is damage, not an I/O failure",
+			got, waxerr.CodeMalformedInput)
 	}
 }
 

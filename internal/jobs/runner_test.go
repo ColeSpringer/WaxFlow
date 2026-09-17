@@ -457,7 +457,7 @@ func TestSplitFillsAnAbsentLength(t *testing.T) {
 		failed := waitJob(t, r, j.ID, StateFailed)
 		// Not fatal: the state of the directory below is the harm, and it is
 		// worth reporting even when the job failed for the wrong reason.
-		// Unmeasured this fails as source-unreadable, deep in the encode
+		// Unmeasured this fails with the same code but deep in the encode
 		// ("the source ended 170500 samples into a span that declared
 		// 171500"), which is the shape of a bad cut list discovered far too
 		// late rather than refused.

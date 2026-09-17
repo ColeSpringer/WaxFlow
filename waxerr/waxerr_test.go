@@ -57,6 +57,33 @@ func TestAsTypeExtraction(t *testing.T) {
 	}
 }
 
+func TestAnnotateKeepsTheCode(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want waxerr.Code
+	}{
+		{"coded", waxerr.New(waxerr.CodeMalformedInput, "bad frame"), waxerr.CodeMalformedInput},
+		{"coded through fmt", fmt.Errorf("walk: %w", waxerr.New(waxerr.CodeSourceUnreadable, "read")), waxerr.CodeSourceUnreadable},
+		{"context", context.Canceled, waxerr.CodeCanceled},
+		{"unclassified", errors.New("raw"), waxerr.CodeInternal},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := waxerr.Annotate("measuring", tt.err)
+			if got.Code != tt.want {
+				t.Errorf("Code = %q, want %q", got.Code, tt.want)
+			}
+			if !errors.Is(got, tt.err) {
+				t.Error("the cause must stay visible to errors.Is")
+			}
+			if want := "measuring: " + tt.err.Error(); got.Error() != want {
+				t.Errorf("Error() = %q, want %q", got.Error(), want)
+			}
+		})
+	}
+}
+
 func TestCodeOf(t *testing.T) {
 	tests := []struct {
 		name string

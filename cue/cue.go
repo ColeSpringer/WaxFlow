@@ -566,7 +566,7 @@ func stringTarget(cmd string, sheet *Sheet, track *Track) *string {
 }
 
 func lineErr(line int, err error) error {
-	return waxerr.Wrap(waxerr.CodeOf(err), fmt.Sprintf("cue: line %d", line), err)
+	return waxerr.Annotate(fmt.Sprintf("cue: line %d", line), err)
 }
 
 // fields splits a CUE line into tokens: whitespace separated, except that

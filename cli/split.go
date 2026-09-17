@@ -15,6 +15,7 @@ import (
 	"github.com/colespringer/waxflow/cli/label"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/cue"
+	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/posixfs"
 	"github.com/colespringer/waxflow/waxerr"
@@ -237,9 +238,16 @@ func measureSamples(e *waxflow.Engine, src container.Source, hint string) (int64
 		return 0, err
 	}
 	defer med.Close()
+	return measureMedia(med)
+}
+
+// measureMedia is measureSamples on an open Media. The walk's own code is
+// kept: a damaged file fails it as malformed-input, and naming that
+// unreadable reported a bad disk.
+func measureMedia(med format.Media) (int64, error) {
 	total, err := med.SeekSample(measureCeiling)
 	if err != nil {
-		return 0, waxerr.Wrap(waxerr.CodeSourceUnreadable, "measuring the source", err)
+		return 0, waxerr.Annotate("measuring the source", err)
 	}
 	return total, nil
 }

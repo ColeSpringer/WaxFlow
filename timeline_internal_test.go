@@ -252,11 +252,10 @@ func TestConcatFailedSeekDoesNotDesync(t *testing.T) {
 	}
 }
 
-// shortSeekMedia lands before the ask. The Media contract permits landing
-// *past* a target (the first sync point may lie beyond it) and never short, so
-// this is a caller's Media breaking its contract, which is the same class as
-// stallMedia below and reachable the same way: a member's Open is a caller's
-// function returning a caller's Media.
+// shortSeekMedia lands before the ask. A format.Media lands short in exactly
+// one case, a target past its real end, so a member landing short of its own
+// body's end holds less audio than its headers declare: the truncated-file
+// case, reached here through a caller's Open the way stallMedia below is.
 type shortSeekMedia struct{ *fixedMedia }
 
 func (m *shortSeekMedia) SeekSample(target int64) (int64, error) {
@@ -291,16 +290,67 @@ func TestConcatCrossfadeRefusesAShortSeekLanding(t *testing.T) {
 	// Ten frames into member 1's head zone, which is member 0's tail: reaching
 	// it opens member 0 and seeks it to its body's end, and this member lands
 	// 100 frames short of that.
-	if _, err := med.SeekSample(n - x + 10); err == nil {
+	_, err = med.SeekSample(n - x + 10)
+	if err == nil {
 		t.Fatal("a member that landed short of its own crossfade zone captured a tail anyway; " +
 			"the blend buffer is sized at exactly the zone, so the extra frames run past it")
+	}
+	// A member holding less audio than its headers declare is damage, not a
+	// fetch that failed.
+	if got := waxerr.CodeOf(err); got != waxerr.CodeMalformedInput {
+		t.Errorf("code = %s, want %s", got, waxerr.CodeMalformedInput)
 	}
 	// The latch is the existing contract and it still holds: a failed seek
 	// leaves the timeline unpositioned rather than reading on from nowhere.
 	buf := audio.Get(stereo48, 128)
 	defer audio.Put(buf)
-	if err := med.ReadChunk(buf); err == nil {
-		t.Fatal("reading after the refused seek delivered samples")
+	// The latch's own refusal, not any error: a silent io.EOF would pass a
+	// nil check.
+	if err := med.ReadChunk(buf); err == nil || !strings.Contains(err.Error(), "position is unknown") {
+		t.Fatalf("reading after the refused seek: err = %v, want the unpositioned latch", err)
+	}
+}
+
+// longSeekMedia lands past the ask, which the Media contract permits: a
+// stream whose first sync point lies beyond the target starts there.
+type longSeekMedia struct{ *fixedMedia }
+
+func (m *longSeekMedia) SeekSample(target int64) (int64, error) {
+	return m.fixedMedia.SeekSample(target + 100)
+}
+
+// TestConcatCrossfadeRefusesALandingPastTheBody pins seekBody's refusal and
+// its code. A landing inside the member's own tail zone means the member has
+// no sync point where its declared length says its body is: the file does not
+// match its headers, which is damage rather than a read that failed.
+func TestConcatCrossfadeRefusesALandingPastTheBody(t *testing.T) {
+	const n, x = 1000, 256
+	open := func() (format.Media, error) { return &longSeekMedia{newFixedMedia(stereo48, n)}, nil }
+	track := container.Track{Codec: codec.PCM, Fmt: stereo48, Samples: n, SamplesExact: true, Default: true}
+	med, err := Concat([]ConcatSource{{Track: track, Open: open}, {Track: track, Open: open}}, ConcatOptions{Crossfade: x})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+
+	// Fifty frames before member 0's body ends: the landing is fifty past
+	// it, inside the tail zone.
+	_, err = med.SeekSample(n - x - 50)
+	if err == nil {
+		t.Fatal("a member that landed inside its own crossfade zone was positioned there anyway")
+	}
+	if !strings.Contains(err.Error(), "before its crossfade zone") {
+		t.Fatalf("error = %v, want seekBody's refusal", err)
+	}
+	if got := waxerr.CodeOf(err); got != waxerr.CodeMalformedInput {
+		t.Errorf("code = %s, want %s", got, waxerr.CodeMalformedInput)
+	}
+	buf := audio.Get(stereo48, 128)
+	defer audio.Put(buf)
+	// The latch's own refusal, not any error: a silent io.EOF would pass a
+	// nil check.
+	if err := med.ReadChunk(buf); err == nil || !strings.Contains(err.Error(), "position is unknown") {
+		t.Fatalf("reading after the refused seek: err = %v, want the unpositioned latch", err)
 	}
 }
 

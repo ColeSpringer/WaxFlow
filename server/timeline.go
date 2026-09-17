@@ -205,7 +205,7 @@ func narrowMemberTrack(i int, track container.Track, sp span) (container.Track, 
 	}
 	out, err := waxflow.SpanTrack(track, sp.from, sp.end())
 	if err != nil {
-		return container.Track{}, waxerr.Wrap(waxerr.CodeOf(err), fmt.Sprintf("member %d", i), err)
+		return container.Track{}, waxerr.Annotate(fmt.Sprintf("member %d", i), err)
 	}
 	if out.Samples == 0 {
 		return container.Track{}, waxerr.New(waxerr.CodeInvalidRequest,

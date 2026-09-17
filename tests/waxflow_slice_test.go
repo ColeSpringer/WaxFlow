@@ -17,6 +17,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/testutil"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // sliceOf opens raw and bounds it to [from, to). The Media owns the opened
@@ -324,11 +325,94 @@ func TestSliceShortSourceFails(t *testing.T) {
 		if err == io.EOF {
 			t.Fatal("a span whose source ended early returned io.EOF; it must fail rather than deliver a short stream")
 		}
-		if !strings.Contains(err.Error(), "do not describe this file") {
+		if !strings.Contains(err.Error(), "holds less audio than its headers declare") {
 			t.Fatalf("error = %v, want it to name the mismatch", err)
+		}
+		// The bytes were fetched fine; the file ending short of what it
+		// declares is damage, the same answer container.ShortRead gives.
+		if got := waxerr.CodeOf(err); got != waxerr.CodeMalformedInput {
+			t.Fatalf("code = %s, want %s: a source that ended early is damage, not an I/O failure",
+				got, waxerr.CodeMalformedInput)
 		}
 		return
 	}
+}
+
+// TestSliceBlindSpanOutrunningItsSourceIsABadRequest pins the other cause an
+// early end can have. A source that declared no total, or only an advisory
+// one, gave SpanTrack nothing to check the cut points against, so when the
+// audio runs out inside the span the file has not lied about anything: the
+// cut list is what reached past it, and nobody measured first. Blaming the
+// file there would send a user to re-rip a healthy disc.
+func TestSliceBlindSpanOutrunningItsSourceIsABadRequest(t *testing.T) {
+	const frames = 10000
+	cfg := pcm.Config{Bits: 16}
+	f := cfg.PCMFormat(48000, 1, audio.DefaultLayout(1))
+	whole := audio.Get(f, frames)
+	defer audio.Put(whole)
+	whole.N = frames
+	synth(whole, 9)
+	raw := wavFrom(t, cfg, whole)
+
+	for _, tc := range []struct {
+		name     string
+		samples  int64
+		advisory bool
+	}{
+		{"unknown total", -1, false},
+		{"advisory total", frames, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := waxflow.New()
+			med, err := e.OpenStream(container.BytesSource(raw), "wav")
+			if err != nil {
+				t.Fatal(err)
+			}
+			declaring := &declaringMedia{Media: med, samples: tc.samples, advisory: tc.advisory}
+			sl, err := waxflow.Slice(&truncatedMedia{Media: declaring, at: 4000}, 0, frames)
+			if err != nil {
+				med.Close()
+				t.Fatal(err)
+			}
+			defer sl.Close()
+
+			buf := audio.Get(f, audio.StandardChunk)
+			defer audio.Put(buf)
+			for {
+				err := sl.ReadChunk(buf)
+				if err == nil {
+					continue
+				}
+				if err == io.EOF {
+					t.Fatal("a span whose source ended early returned io.EOF")
+				}
+				if got := waxerr.CodeOf(err); got != waxerr.CodeInvalidRequest {
+					t.Fatalf("code = %s, want %s: the source declared nothing it could have lied about",
+						got, waxerr.CodeInvalidRequest)
+				}
+				if !strings.Contains(err.Error(), "never checked against a measured length") {
+					t.Fatalf("error = %v, want it to say the cut points went unchecked", err)
+				}
+				return
+			}
+		})
+	}
+}
+
+// declaringMedia reports a total of its own in place of the source's.
+type declaringMedia struct {
+	format.Media
+	samples  int64
+	advisory bool
+}
+
+func (m *declaringMedia) Info() *format.Info {
+	in := *m.Media.Info()
+	in.Tracks = slices.Clone(in.Tracks)
+	for i := range in.Tracks {
+		in.Tracks[i].Samples, in.Tracks[i].SamplesAdvisory = m.samples, m.advisory
+	}
+	return &in
 }
 
 // truncatedMedia ends the stream early while its Info still promises the

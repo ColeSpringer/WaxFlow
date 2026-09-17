@@ -197,5 +197,5 @@ func resolveCodec(id codec.ID, w waveFormat) (codecSetup, error) {
 // The code and the codec's text stay, so a caller still learns whether the file
 // is damaged or merely out of scope, and errors.Is still reaches the original.
 func fromCodec(err error) error {
-	return waxerr.Wrap(waxerr.CodeOf(err), "wma", err)
+	return waxerr.Annotate("wma", err)
 }

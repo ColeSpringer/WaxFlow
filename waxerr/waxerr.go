@@ -118,6 +118,15 @@ func Wrap(code Code, msg string, err error) *Error {
 	return &Error{Code: code, Msg: msg, Err: err}
 }
 
+// Annotate wraps err with msg and keeps its classification: the Code err
+// carries, or CodeCanceled for a context error, exactly as CodeOf reads it.
+// It adds context to a callee's error without re-coding it. An error with no
+// Code becomes CodeInternal, CodeOf's rule for the unclassified: an uncoded
+// error crossing a boundary is a bug to surface, not one to guess a code for.
+func Annotate(msg string, err error) *Error {
+	return Wrap(CodeOf(err), msg, err)
+}
+
 func (e *Error) Error() string {
 	switch {
 	case e.Msg != "" && e.Err != nil:

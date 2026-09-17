@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -27,6 +28,7 @@ import (
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/testutil"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // pcm16Format is the CD rip's own format at an arbitrary rate. A CUE rip is
@@ -1046,5 +1048,49 @@ func TestSplitAPEWritesItsOwnTags(t *testing.T) {
 	}
 	if got := info.Tags["TRACKNUMBER"]; len(got) != 1 || got[0] != "2" {
 		t.Errorf("piece 2 carries TRACKNUMBER %v, want [2]; the mux wrote no tags", got)
+	}
+}
+
+// measureFailMedia is a Media whose measuring seek fails with the error it
+// was given. The other methods are explicit so a widened measureMedia fails
+// the test instead of panicking on a nil embedded interface.
+type measureFailMedia struct{ err error }
+
+func (m *measureFailMedia) Info() *format.Info { return &format.Info{} }
+func (m *measureFailMedia) Close() error       { return nil }
+func (m *measureFailMedia) ReadChunk(*audio.Buffer) error {
+	return errors.New("measureFailMedia: read")
+}
+func (m *measureFailMedia) SeekSample(int64) (int64, error) { return 0, m.err }
+
+// TestMeasureKeepsTheWalkCode pins that measuring reports the walk's own
+// classification. A damaged file fails its exact-length walk as
+// malformed-input, and re-coding that as source-unreadable told the user
+// their disk was bad; the server's measure passes the walk's error through.
+// An error with no code is a walk that failed to classify, which is a
+// waxflow bug, and exit class internal is what says so.
+func TestMeasureKeepsTheWalkCode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want waxerr.Code
+	}{
+		{"malformed", waxerr.New(waxerr.CodeMalformedInput, "no page capture pattern"), waxerr.CodeMalformedInput},
+		{"unreadable", waxerr.New(waxerr.CodeSourceUnreadable, "reading page header"), waxerr.CodeSourceUnreadable},
+		{"canceled", context.Canceled, waxerr.CodeCanceled},
+		{"unclassified", errors.New("a walk that forgot its code"), waxerr.CodeInternal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := measureMedia(&measureFailMedia{err: tc.err})
+			if err == nil {
+				t.Fatal("a failed measure returned a length")
+			}
+			if got := waxerr.CodeOf(err); got != tc.want {
+				t.Errorf("code = %s, want %s", got, tc.want)
+			}
+			if !strings.Contains(err.Error(), "measuring the source") {
+				t.Errorf("error = %v, want it to say what was being done", err)
+			}
+		})
 	}
 }

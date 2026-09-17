@@ -86,7 +86,8 @@ func Slice(med format.Media, from, to int64) (format.Media, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &slice{med: med, from: from, limit: ToEnd, fmt: track.Fmt}
+	s := &slice{med: med, from: from, limit: ToEnd, fmt: track.Fmt,
+		blind: track.Samples < 0 || track.SamplesAdvisory}
 	// limit is the clamp; the track's Samples is what it advertises. They
 	// differ on purpose for the open-ended form: an explicit end is a
 	// declaration this holds the source to, while a slice that just trims
@@ -345,6 +346,9 @@ type slice struct {
 	from int64
 	// limit is the window's length, ToEnd for an unbounded one. See Slice.
 	limit int64
+	// blind marks a span whose cut points were checked against no length the
+	// source stood behind: its total was unknown or advisory. See endOfSource.
+	blind bool
 
 	pos     int64 // delivered-timeline position of the next frame out
 	started bool  // med has been positioned at from
@@ -500,13 +504,24 @@ func (s *slice) ReadChunk(dst *audio.Buffer) error {
 // a plan has already promised a segment count built from that number, and
 // delivering fewer produces the tail 404 that number exists to prevent.
 // Failing here names the real cause instead.
+//
+// Which cause depends on what the source declared. SpanTrack refuses a cut
+// past a declared total, so a source that declared one and still ended early
+// holds less audio than its headers say: malformed input, by
+// container.ShortRead's rule, not an I/O failure. One that declared nothing,
+// or only an advisory total, was checked against nothing, and the cut list is
+// what overran the audio: an invalid request, as the plan-time refusal of an
+// unmeasured timeline member is.
 func (s *slice) endOfSource() error {
-	if s.limit >= 0 && s.pos < s.limit {
-		return waxerr.New(waxerr.CodeSourceUnreadable, fmt.Sprintf(
-			"waxflow: the source ended %d samples into a span that declared %d; its cut points do not describe this file",
-			s.pos, s.limit))
+	if s.limit < 0 || s.pos >= s.limit {
+		return io.EOF
 	}
-	return io.EOF
+	msg := fmt.Sprintf("waxflow: the source ended %d samples into a span that declared %d; ", s.pos, s.limit)
+	if s.blind {
+		return waxerr.New(waxerr.CodeInvalidRequest,
+			msg+"its cut points were never checked against a measured length")
+	}
+	return waxerr.New(waxerr.CodeMalformedInput, msg+"the file holds less audio than its headers declare")
 }
 
 // SeekSample repositions to target on the window's own timeline.
@@ -1338,7 +1353,9 @@ func (c *concat) seekBody(local int64) (int64, error) {
 		return 0, err
 	}
 	if body := c.lens[c.cur] - c.tailOf(c.cur); landed > body {
-		return 0, waxerr.New(waxerr.CodeSourceUnreadable, fmt.Sprintf(
+		// Malformed input, as advance says: the member's first sync point
+		// lies past its whole body, so its declared length is not this stream's.
+		return 0, waxerr.New(waxerr.CodeMalformedInput, fmt.Sprintf(
 			"waxflow: timeline member %d could not be positioned before its crossfade zone: "+
 				"a seek to %d landed at %d, past the %d samples that are the member's own",
 			c.cur, local, landed, body))
@@ -1386,9 +1403,10 @@ func (c *concat) seekIntoBlend(i int, off int64) (int64, error) {
 	if err := c.open(i - 1); err != nil {
 		return 0, err
 	}
-	// seekBody refuses a landing past the body, and a member seek never lands
-	// short, so this lands exactly at the body's end: the tail captured below
-	// is the full X the zone declares.
+	// seekBody refuses a landing past the body, and a landing short of it
+	// means the stream ended first (a seek past a Media's real end lands at
+	// that end), which captureTail refuses. So this lands exactly at the
+	// body's end, and the tail captured below is the full X the zone declares.
 	landed, err := c.seekBody(c.lens[i-1] - c.opts.Crossfade)
 	if err != nil {
 		return 0, err
@@ -1619,7 +1637,9 @@ func (c *concat) readBounded(dst *audio.Buffer, n int64) error {
 func (c *concat) captureTail() error {
 	x := c.tailOf(c.cur)
 	if want := c.lens[c.cur] - x; c.local != want {
-		return waxerr.New(waxerr.CodeSourceUnreadable, fmt.Sprintf(
+		// Malformed input, as advance says: the member's headers do not
+		// describe the stream its seek found.
+		return waxerr.New(waxerr.CodeMalformedInput, fmt.Sprintf(
 			"waxflow: timeline member %d is at sample %d, not the %d where its crossfade zone begins; "+
 				"its seek landed somewhere the member's own headers say it should not have", c.cur, c.local, want))
 	}

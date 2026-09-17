@@ -179,7 +179,7 @@ func ADPCM(ex Ex, prefix string) (adpcm.Config, []Finding, error) {
 	}
 	cfg.SamplesPerBlock = cfg.BlockFrames()
 	if err := cfg.Validate(); err != nil {
-		return cfg, found, waxerr.Wrap(waxerr.CodeOf(err), strings.TrimSuffix(prefix, ": ")+": block geometry", err)
+		return cfg, found, waxerr.Annotate(strings.TrimSuffix(prefix, ": ")+": block geometry", err)
 	}
 	if declared != cfg.SamplesPerBlock {
 		found = append(found, Finding{Msg: fmt.Sprintf(
