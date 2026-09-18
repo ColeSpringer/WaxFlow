@@ -617,18 +617,47 @@ func TestMuxSeekableAtNonZeroStart(t *testing.T) {
 // encoder here emits it today, but codec.Trailer documents it as how a producer
 // that does not know the length stays silent, so a muxer writing a Duration
 // needs an answer: its own packet durations, less the trims.
+//
+// A packet that states its own trim is the second row: the run this falls back
+// on is the packet timeline, so an inner trim is already out of it and the
+// Duration is shorter by exactly the frames no reader will ever hear.
 func TestMuxDurationFromPacketsWhenTrailerIsUnknown(t *testing.T) {
 	const packets, dur = 6, 480
 	const delay, padding = 312, 100
-	track, pkts := pcmCase(t, packets, -1)
-	file := muxToSeekable(t, track, nil, pkts,
-		codec.Trailer{Samples: -1, Delay: delay, Padding: padding})
+	for _, tc := range []struct {
+		name   string
+		midPad int64
+	}{
+		{"no packet states a trim", 0},
+		{"a packet in the middle states one", 64},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			track, pkts := pcmCase(t, packets, -1)
+			ws := &memWS{}
+			m := NewMuxer(ws, nil)
+			if err := m.Begin([]container.Track{track}); err != nil {
+				t.Fatalf("Begin: %v", err)
+			}
+			for i, pk := range pkts {
+				p := container.Packet{Track: 0, Packet: pk}
+				if i == 2 {
+					p.Padding = tc.midPad
+				}
+				if err := m.WritePacket(p); err != nil {
+					t.Fatalf("WritePacket: %v", err)
+				}
+			}
+			if err := m.End(codec.Trailer{Samples: -1, Delay: delay, Padding: padding}); err != nil {
+				t.Fatalf("End: %v", err)
+			}
 
-	ticks, ok := infoDuration(t, file)
-	if !ok {
-		t.Fatal("no Duration written for a trailer that declares no length")
-	}
-	if want := durationTicks(packets*dur-delay-padding, 48000); ticks != want {
-		t.Errorf("Duration = %v ticks, want %v (the packets, less the trims)", ticks, want)
+			ticks, ok := infoDuration(t, ws.Buf)
+			if !ok {
+				t.Fatal("no Duration written for a trailer that declares no length")
+			}
+			if want := durationTicks(packets*dur-tc.midPad-delay-padding, 48000); ticks != want {
+				t.Errorf("Duration = %v ticks, want %v (the packets, less the trims)", ticks, want)
+			}
+		})
 	}
 }

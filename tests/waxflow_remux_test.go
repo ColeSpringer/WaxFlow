@@ -3,9 +3,15 @@ package waxflow_test
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
@@ -14,6 +20,7 @@ import (
 	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/testutil"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // remuxFixture transcodes a synthesized WAV to opts and returns the bytes, for
@@ -451,5 +458,373 @@ func TestRemuxTrackCarriesCodecConfig(t *testing.T) {
 	}
 	if !bytes.Equal(got.CodecConfig, in.CodecConfig) {
 		t.Errorf("CodecConfig changed across the remux:\n got %x\nwant %x", got.CodecConfig, in.CodecConfig)
+	}
+}
+
+// The mid-stream trim fixture: the block that states a DiscardPadding and how
+// much it trims. Block 8 puts it well inside the first cluster, so a copy meets
+// it early and a plan that declined it can be told from one that never got
+// there. server.MidTrimWebM builds the same shape from seed-opus.webm, whose
+// seven packets put the trim at block 2; see its comment for why the two are
+// separate builders.
+const (
+	midTrimBlock = 8
+	midTrimPad   = 480
+)
+
+// midTrimWebM builds an Opus-in-WebM whose block at midTrimBlock carries a
+// DiscardPadding, out of our own encoder's packets through our own muxer. It is the shape
+// mkvmerge leaves at an append seam, which no encoder in this tree produces.
+//
+// Every block holds one packet, because the muxer never laces, and that is
+// what lets ffmpeg be an oracle for the file: ffmpeg hands a laced block's
+// DiscardPadding to every lace and ignores one larger than the frame it rides
+// on, so only an unlaced block whose trim fits means the same thing to both
+// readers.
+//
+// declareLength writes the file through a seekable destination, so it carries
+// an Info Duration and a Cues index; without it the track declares no length
+// at all and the muxer writes no Duration element, which is the shape a plain
+// /stream used to plan from unwalked.
+func midTrimWebM(t *testing.T, declareLength bool) []byte {
+	t.Helper()
+	ogg := remuxFixture(t, waxflow.TranscodeOptions{Format: "opus"}, 48000)
+	demux, info, err := format.OpenDemuxer(container.BytesSource(ogg), "opus", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := info.Default()
+
+	track := src
+	track.ID, track.Default = 0, true
+	track.Samples = src.Samples - midTrimPad
+	// The Ogg source states its tail trim in the final page's granule, so the
+	// packets run past its declared end; that difference is the end trim the
+	// Matroska file has to state outright.
+	endPad := srcRawSamples(t, ogg) - src.Delay - src.Samples
+	if endPad <= 0 {
+		t.Fatalf("the Opus fixture has no tail padding (%d); this cell needs one", endPad)
+	}
+	buf := &bytes.Buffer{}
+	ws := &memWS{}
+	var w io.Writer = buf
+	if declareLength {
+		w = ws
+	} else {
+		track.Samples = -1
+	}
+	m := mka.NewMuxer(w, &mka.MuxerOptions{WebM: true})
+	if err := m.Begin([]container.Track{track}); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	var pkt container.Packet
+	for i := 0; ; i++ {
+		err := demux.ReadPacket(&pkt)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("ReadPacket %d: %v", i, err)
+		}
+		out := container.Packet{Packet: pkt.Packet}
+		if i == midTrimBlock {
+			out.Padding = midTrimPad
+		}
+		if err := m.WritePacket(out); err != nil {
+			t.Fatalf("WritePacket %d: %v", i, err)
+		}
+	}
+	if err := m.End(codec.Trailer{Samples: track.Samples, Delay: src.Delay, Padding: endPad}); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	if declareLength {
+		return ws.Buf
+	}
+	return buf.Bytes()
+}
+
+// srcRawSamples is the raw decode duration a container's packets add up to.
+func srcRawSamples(t *testing.T, raw []byte) int64 {
+	t.Helper()
+	demux, info, err := format.OpenDemuxer(container.BytesSource(raw), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := info.Default().ID
+	var pkt container.Packet
+	var total int64
+	for {
+		err := demux.ReadPacket(&pkt)
+		if err == io.EOF {
+			return total
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pkt.Track == id {
+			total += pkt.Dur - min(pkt.Padding, pkt.Dur)
+		}
+	}
+}
+
+// walkedTrack opens raw, finishes its deferred walk, and returns the track the
+// walk settled. It is what a measure leaves in the daemon's memo.
+func walkedTrack(t *testing.T, raw []byte, hint string) container.Track {
+	t.Helper()
+	med, err := format.Open(container.BytesSource(raw), hint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	w, ok := med.(format.Walker)
+	if !ok {
+		t.Fatalf("a %s Media defers no walk", hint)
+	}
+	if err := w.Walk(); err != nil {
+		t.Fatal(err)
+	}
+	return med.Info().Default()
+}
+
+// decodeWhole decodes a whole file to one interleaved float slice, with no
+// expected frame count to check against: these cells are measuring the count.
+func decodeWhole(t *testing.T, raw []byte, hint string) []float32 {
+	t.Helper()
+	med, err := format.Open(container.BytesSource(raw), hint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	f := med.Info().Default().Fmt
+	tmp := audio.Get(f, audio.StandardChunk)
+	defer audio.Put(tmp)
+	var out []float32
+	for {
+		err := med.ReadChunk(tmp)
+		if errors.Is(err, io.EOF) {
+			return out
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, testutil.InterleaveF(tmp)...)
+	}
+}
+
+// TestRemuxForwardsAMidStreamTrim: Matroska is the one output container that
+// states trims per packet, so a copy into it carries the source's inner trim
+// through and the output plays exactly what the source played.
+func TestRemuxForwardsAMidStreamTrim(t *testing.T) {
+	src := midTrimWebM(t, true)
+	want := decodeWhole(t, src, "webm")
+	e := waxflow.New()
+	for _, cont := range []string{"webm", "mka"} {
+		t.Run(cont, func(t *testing.T) {
+			demux, info, err := format.OpenDemuxer(container.BytesSource(src), "webm", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := &memWS{}
+			if _, err := e.RemuxDemuxer(context.Background(), demux, info.Default(), out,
+				waxflow.TranscodeOptions{Format: "opus", Container: cont}); err != nil {
+				t.Fatalf("RemuxDemuxer: %v", err)
+			}
+			// The trim survives as a trim, on the block that stated it.
+			copied := walkedTrack(t, out.Buf, cont)
+			if copied.MidPadding != midTrimPad {
+				t.Errorf("the copy reports MidPadding %d, want the source's %d",
+					copied.MidPadding, midTrimPad)
+			}
+			got := decodeWhole(t, out.Buf, cont)
+			if len(got) != len(want) {
+				t.Fatalf("the copy decodes to %d values, the source to %d", len(got), len(want))
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("the copy differs from the source at value %d", i)
+				}
+			}
+		})
+	}
+}
+
+// TestRemuxMidStreamTrimMatchesFFmpeg is the same claim against the reference
+// reader. The fixture's padded block is unlaced and its trim fits the frame,
+// which is the one shape ffmpeg and this tree agree about (see midTrimWebM).
+func TestRemuxMidStreamTrimMatchesFFmpeg(t *testing.T) {
+	testutil.FFmpeg(t)
+	src := midTrimWebM(t, true)
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "src.webm")
+	if err := os.WriteFile(srcPath, src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ours := decodeWhole(t, src, "webm")
+	if n := len(testutil.FFmpegDecodeF32(t, srcPath)); n != len(ours) {
+		t.Fatalf("ffmpeg decodes the source to %d values, we decode %d", n, len(ours))
+	}
+
+	e := waxflow.New()
+	demux, info, err := format.OpenDemuxer(container.BytesSource(src), "webm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := &memWS{}
+	if _, err := e.RemuxDemuxer(context.Background(), demux, info.Default(), out,
+		waxflow.TranscodeOptions{Format: "opus", Container: "webm"}); err != nil {
+		t.Fatalf("RemuxDemuxer: %v", err)
+	}
+	outPath := filepath.Join(dir, "out.webm")
+	if err := os.WriteFile(outPath, out.Buf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(testutil.FFmpegDecodeF32(t, outPath)); n != len(ours) {
+		t.Errorf("ffmpeg decodes the copy to %d values, the source to %d", n, len(ours))
+	}
+}
+
+// TestRemuxRefusesAMidStreamTrimItCannotCarry: an Ogg granule names one end
+// trim, so a copy into it would play the inner trim's frames as audio. Nothing
+// measured this source, so the plan could not know; the copy refuses on the
+// packet after the padded one and the message names the way past it.
+func TestRemuxRefusesAMidStreamTrimItCannotCarry(t *testing.T) {
+	src := midTrimWebM(t, true)
+	demux, info, err := format.OpenDemuxer(container.BytesSource(src), "webm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	track := info.Default()
+	if track.MidPadding != 0 {
+		t.Fatalf("the source arrives measured (MidPadding %d); this cell needs the unwalked shape", track.MidPadding)
+	}
+	e := waxflow.New()
+	var out bytes.Buffer
+	_, err = e.RemuxDemuxer(context.Background(), demux, track, &out,
+		waxflow.TranscodeOptions{Format: "opus"})
+	if err == nil {
+		t.Fatal("the copy into Ogg-Opus finished; the inner trim cannot be expressed there")
+	}
+	if code := waxerr.CodeOf(err); code != waxerr.CodeUnsupportedFormat {
+		t.Errorf("code = %v, want %v: %v", code, waxerr.CodeUnsupportedFormat, err)
+	}
+	for _, want := range []string{"trims 480 samples in the middle", "Matroska", "transcode"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not name %q: %v", want, err)
+		}
+	}
+}
+
+// TestPlanRemuxDeclinesAMeasuredMidStreamTrim: once a walk has found the inner
+// trim, the plan declines rather than letting the copy start and fail, and the
+// ladder falls through to the transcode rung. Matroska still plans, because it
+// can carry the trim.
+func TestPlanRemuxDeclinesAMeasuredMidStreamTrim(t *testing.T) {
+	track := walkedTrack(t, midTrimWebM(t, true), "webm")
+	if track.MidPadding != midTrimPad {
+		t.Fatalf("the walk found MidPadding %d, want %d", track.MidPadding, midTrimPad)
+	}
+	e := waxflow.New()
+	for _, tc := range []struct {
+		cont string
+		want bool
+	}{
+		{"", false},    // Ogg-Opus, the row's default: a granule names one end trim
+		{"mka", true},  // states trims per packet
+		{"webm", true}, // the same muxer
+	} {
+		name := tc.cont
+		if name == "" {
+			name = "default"
+		}
+		t.Run(name, func(t *testing.T) {
+			plan, err := e.PlanRemux(track, waxflow.TranscodeOptions{Format: "opus", Container: tc.cont})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (plan != nil) != tc.want {
+				t.Errorf("PlanRemux to %q returned %v, want planned=%v", tc.cont, plan != nil, tc.want)
+			}
+		})
+	}
+}
+
+// TestMeasuredMatroskaTrimDeclinesTheCopy is the other half of what a measured
+// Matroska track now carries: the final block's DiscardPadding reaches the
+// plan, not just the length.
+//
+// It changes an answer, which is the point. With the trim invisible, the copy
+// rung planned and then dropped it through remuxTrailer's unprimed rule (a
+// lossless codec has no priming to flush, and every FLAC muxer refuses a
+// nonzero one), so the trimmed frames played in the output. With it visible,
+// gaplessSurvives declines the rung and the transcode serves, which honours
+// the trim because it trims in PCM.
+func TestMeasuredMatroskaTrimDeclinesTheCopy(t *testing.T) {
+	const frames, endPad = 19200, 480
+	wav, _ := makeWAV(t, pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, 2, frames, 11)
+	e := waxflow.New()
+	plain := &memWS{}
+	if _, err := e.Transcode(context.Background(), container.BytesSource(wav), "wav", plain,
+		waxflow.TranscodeOptions{Format: "flac", Container: "mka"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The same packets, muxed again with an end trim on the final block. No
+	// encoder here writes one for a lossless codec; a third-party muxer can.
+	demux, info, err := format.OpenDemuxer(container.BytesSource(plain.Buf), "mka", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	track := info.Default()
+	track.ID, track.Default = 0, true
+	track.Samples = frames - endPad
+	out := &memWS{}
+	m := mka.NewMuxer(out, nil)
+	if err := m.Begin([]container.Track{track}); err != nil {
+		t.Fatal(err)
+	}
+	var pkt container.Packet
+	for {
+		err := demux.ReadPacket(&pkt)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := m.WritePacket(container.Packet{Packet: pkt.Packet}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.End(codec.Trailer{Samples: track.Samples, Padding: endPad}); err != nil {
+		t.Fatal(err)
+	}
+
+	measured := walkedTrack(t, out.Buf, "mka")
+	if measured.Padding != endPad {
+		t.Fatalf("the measure reports Padding %d, want the final block's %d", measured.Padding, endPad)
+	}
+	if measured.Samples != frames-endPad {
+		t.Errorf("the measure reports %d samples, want %d", measured.Samples, frames-endPad)
+	}
+	for _, cont := range []string{"", "mka"} {
+		plan, err := e.PlanRemux(measured, waxflow.TranscodeOptions{Format: "flac", Container: cont})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if plan != nil {
+			t.Errorf("PlanRemux to flac/%q planned a copy of a track carrying a trim no FLAC muxer writes", cont)
+		}
+	}
+
+	// The rung below it honours the trim, which is what makes the decline the
+	// right answer rather than merely a safe one.
+	dec := &memWS{}
+	res, err := e.Transcode(context.Background(), container.BytesSource(out.Buf), "mka", dec,
+		waxflow.TranscodeOptions{Format: "flac"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Samples != frames-endPad {
+		t.Errorf("the transcode delivered %d samples, want the trimmed %d", res.Samples, frames-endPad)
 	}
 }

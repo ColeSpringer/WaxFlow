@@ -34,12 +34,14 @@ type mapping interface {
 	isAudio(pkt []byte) bool
 
 	// finalizeTrack builds the Track once headers are done. lastGranule lazily
-	// yields the stream's final page granule (or -1 when unknown) via a
-	// multi-MiB tail scan; a mapping calls it only when the length is not
-	// otherwise known, so a FLAC stream with a declared total never pays for it.
-	// The mapping maps the granule to Samples and, where the codec signals
-	// gapless trims, Delay and Padding.
-	finalizeTrack(lastGranule func() int64) (container.Track, error)
+	// yields the stream's final page granule (or -1 when unknown) via a tail
+	// scan, one window in the common case; the mapping maps it to Samples and,
+	// where the codec signals gapless trims, Delay and Padding. r reports what
+	// the mapping made of a declared total that the granule disagrees with: a
+	// shortfall is damage (and a strict open refuses it), an overrun is the
+	// stream being internally inconsistent in a way this build believes the
+	// pages about.
+	finalizeTrack(lastGranule func() int64, r reporter) (container.Track, error)
 
 	// packetTiming returns a data packet's start sample and duration in the
 	// codec's output timeline, whether it is a seekable sync point, and whether
@@ -60,6 +62,15 @@ type mapping interface {
 	// resetTiming clears any stateful per-packet timing (Vorbis block-size
 	// tracking) after a seek restart.
 	resetTiming()
+}
+
+// reporter is the demuxer's warning pair, handed to a mapping that verifies a
+// declared length against the pages: warn records tolerated damage and fails a
+// strict open, note records a fact about a well-formed stream that Strict must
+// not escalate.
+type reporter interface {
+	warn(off int64, format string, args ...any) error
+	note(off int64, format string, args ...any)
 }
 
 // detectHeaders is parseID's sentinel for "consume header packets until the

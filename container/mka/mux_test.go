@@ -238,3 +238,74 @@ func TestMuxHEAACAudioRates(t *testing.T) {
 		t.Errorf("payloads did not survive the round trip")
 	}
 }
+
+// TestMuxForwardsPerPacketTrims: an mka-to-mka copy of the mid-padding fixture
+// through WritePacket reads back with both trims on the blocks that carried
+// them. Matroska is the one output container that can say this, which is why
+// it is the one destination the copy rungs allow such a source into.
+func TestMuxForwardsPerPacketTrims(t *testing.T) {
+	p := BuildMidPadding(t)
+	src, err := NewDemuxer(container.BytesSource(p.File), nil)
+	if err != nil {
+		t.Fatalf("NewDemuxer: %v", err)
+	}
+
+	track := src.Tracks()[0]
+	track.Samples = p.Samples()
+	var out bytes.Buffer
+	m := NewMuxer(&out, nil)
+	if err := m.Begin([]container.Track{track}); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	var pkt container.Packet
+	for {
+		err := src.ReadPacket(&pkt)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("ReadPacket: %v", err)
+		}
+		if err := m.WritePacket(container.Packet{Padding: pkt.Padding, Packet: pkt.Packet}); err != nil {
+			t.Fatalf("WritePacket: %v", err)
+		}
+	}
+	if err := m.End(codec.Trailer{Samples: p.Samples(), Padding: p.EndPad}); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+
+	back, err := NewDemuxer(container.BytesSource(out.Bytes()), nil)
+	if err != nil {
+		t.Fatalf("NewDemuxer of the copy: %v", err)
+	}
+	for i := 0; ; i++ {
+		err := back.ReadPacket(&pkt)
+		if err == io.EOF {
+			if i != p.Blocks {
+				t.Fatalf("the copy holds %d packets, the source %d", i, p.Blocks)
+			}
+			break
+		}
+		if err != nil {
+			t.Fatalf("ReadPacket %d of the copy: %v", i, err)
+		}
+		want := int64(0)
+		switch i {
+		case p.Mid:
+			want = p.MidPad
+		case p.Blocks - 1:
+			want = p.EndPad
+		}
+		if pkt.Padding != want {
+			t.Fatalf("copy packet %d: Padding = %d, want %d", i, pkt.Padding, want)
+		}
+	}
+	if err := back.Walk(); err != nil {
+		t.Fatalf("Walk of the copy: %v", err)
+	}
+	tr := back.Tracks()[0]
+	if tr.Samples != p.Samples() || tr.Padding != p.EndPad || tr.MidPadding != p.MidPad {
+		t.Errorf("the copy settles %d samples, Padding %d, MidPadding %d; the source settles %d/%d/%d",
+			tr.Samples, tr.Padding, tr.MidPadding, p.Samples(), p.EndPad, p.MidPad)
+	}
+}

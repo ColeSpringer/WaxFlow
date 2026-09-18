@@ -47,15 +47,16 @@ type streamRequest struct {
 	// otherwise declines. plan points at its embedded TranscodePlan when set,
 	// exactly as remux does, so everything downstream reads one shape.
 	cut *waxflow.CutPlan
-	// cutGrid is the source's packet grid and cutSamples its exact measured
-	// length, both captured when the cut is planned and threaded to the run so
-	// the bytes delivered match the bytes keyed. cutGrid is 0 and cutSamples -1
-	// when the cut rung was not taken. cutSamples matters for an undeclared-length
-	// source (ADTS): the plan measured it, and the run's init segment must carry
-	// the same length rather than the header's -1.
-	cutGrid    int
-	cutSamples int64
-	canonical  string
+	// cutGrid is the source's packet grid and cutTrack the measured track the
+	// cut was planned from, both captured when the cut is planned and threaded
+	// to the run so the bytes delivered match the bytes keyed. cutGrid is 0 and
+	// cutTrack's Samples -1 when the cut rung was not taken. The track matters
+	// for what a fresh header open cannot see: an undeclared length (ADTS), and
+	// the gapless trims a Matroska states per block, both of which the cut
+	// arithmetic reads. See waxflow.CutStream.
+	cutGrid   int
+	cutTrack  container.Track
+	canonical string
 }
 
 // Close releases the request's source handle.
@@ -82,12 +83,25 @@ func (s *Server) prepareSource(ctx context.Context, q url.Values, sigAuthed bool
 		return nil, err
 	}
 	track := info.Default()
-	// An advisory total is measured, because everything below plans from this
-	// track: plan.Samples is what X-Content-Duration advertises, the segmented
-	// route's count is derived from it, and the body's own Media is wrapped
-	// with this number (see stream.go), so the transcode projects what was
-	// advertised. Advertising an estimate beside audio the run measures a
-	// different way is the drift this closes.
+	// An advisory total, or none at all, is measured, because everything below
+	// plans from this track: plan.Samples is what X-Content-Duration
+	// advertises, the segmented route's count is derived from it, and the
+	// body's own Media is wrapped with this number (see stream.go), so the
+	// transcode projects what was advertised. Advertising an estimate beside
+	// audio the run measures a different way is the drift this closes.
+	//
+	// The absent case is narrower, and the narrowing is the point: only a
+	// container that states its trims per packet can hide a DiscardPadding
+	// inside its run, only a walk finds one, and without it the ladder plans a
+	// copy that then refuses mid-body. So a Matroska file with no Info Duration
+	// (it reports -1 with neither flag) is measured, and an untagged MP3 or a
+	// bare ADTS stream is not.
+	//
+	// Measuring those too would be free duration headers and a real cost: this
+	// runs before the direct-play rung, so every first play of a large
+	// lengthless file would read the whole thing to answer a question serving
+	// its own bytes never asks, and a walk that failed would fail a request
+	// that needed no length at all.
 	//
 	// It costs less than it reads. A cold stream of a Matroska Opus used to
 	// pay two walks, one to settle the track and one inside the transcode's
@@ -95,7 +109,7 @@ func (s *Server) prepareSource(ctx context.Context, q url.Values, sigAuthed bool
 	// source whose headers count is taken at its word here, as the playlist
 	// does; what a header on a pipe would otherwise commit is confirmed by the
 	// transcode itself.
-	if track.SamplesAdvisory {
+	if track.SamplesAdvisory || (track.Samples < 0 && waxflow.StatesTrimsPerPacket(info.Container)) {
 		if track, err = s.trackFor(src, true); err != nil {
 			src.Close()
 			return nil, err
@@ -144,9 +158,9 @@ func (s *Server) prepareSource(ctx context.Context, q url.Values, sigAuthed bool
 		from:   int64(p.t * float64(track.Fmt.Rate)),
 		gainDB: p.gain.resolveDB(m, p.dynamics),
 		meta:   m,
-		// -1, not the zero value: cutSamples threads to CutStream as "the source's
+		// -1, not the zero value: cutTrack threads to CutStream as "the source's
 		// own header length" when no cut set it, and 0 would zero the run's track.
-		cutSamples: -1,
+		cutTrack: container.Track{Samples: -1},
 	}, nil
 }
 
@@ -198,7 +212,9 @@ func (s *Server) planTranscode(req *streamRequest) error {
 	// this is the cheapest remaining answer whenever the codec survives. A span
 	// declines rung 2 (it cuts mid-packet), so the cut rung sits below it: the
 	// same packet-move answer, filtered to the span, for a source whose codec
-	// survives being repositioned. Anything neither serves takes rung 3.
+	// survives being repositioned. Anything neither serves takes rung 3, and a
+	// source whose walk found a trim inside the run always does outside a plain
+	// Matroska remux (see container.Track.MidPadding).
 	if req.remux = s.remuxPlanFor(req); req.remux != nil {
 		req.plan = &req.remux.TranscodePlan
 	} else if req.cut = s.cutPlanFor(req); req.cut != nil {
@@ -343,7 +359,7 @@ func (s *Server) cutPlanFor(req *streamRequest) *waxflow.CutPlan {
 	req.cutGrid = grid
 	// The measured length the plan cut from, so the run's init segment carries it
 	// rather than the header's -1 for an undeclared-length source (ADTS).
-	req.cutSamples = track.Samples
+	req.cutTrack = track
 	return plan
 }
 

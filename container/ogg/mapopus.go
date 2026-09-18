@@ -99,7 +99,7 @@ func (m *opusMapping) isAudio(pkt []byte) bool {
 	return len(pkt) > 0
 }
 
-func (m *opusMapping) finalizeTrack(lastGranule func() int64) (container.Track, error) {
+func (m *opusMapping) finalizeTrack(lastGranule func() int64, _ reporter) (container.Track, error) {
 	f := audio.Format{
 		Rate:     48000,
 		Channels: m.channels,

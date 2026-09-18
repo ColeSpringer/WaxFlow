@@ -819,3 +819,26 @@ func TestConcatTrackRejectsUnconventionalLayout(t *testing.T) {
 		t.Fatal("a member laid out for other speakers joined a timeline silently")
 	}
 }
+
+// A span confirms its own length, and is deliberately not a Walker: the two
+// interfaces answer different questions and a span's answers differ. Only half
+// of this can be a compile-time assertion, since Go cannot state that a type
+// does *not* implement an interface.
+var _ format.LengthConfirmer = (*slice)(nil)
+
+// TestSliceIsNotAWalker is the other half. format.Walker is the per-file view,
+// which a consumer (the daemon's job gate) reads as "one file I can measure";
+// forwarding it through a span would make that answer wrong for every span.
+func TestSliceIsNotAWalker(t *testing.T) {
+	f := audio.Format{Rate: 48000, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
+	med, err := Slice(newFixedMedia(f, 1000), 100, ToEnd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := med.(format.Walker); ok {
+		t.Error("a slice implements format.Walker; a job gate would read a span as a file it can measure")
+	}
+	if _, ok := med.(format.LengthConfirmer); !ok {
+		t.Error("a slice does not implement format.LengthConfirmer")
+	}
+}

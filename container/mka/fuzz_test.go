@@ -25,6 +25,8 @@ func fixture(t testing.TB, name string) []byte {
 // packet production is bounded by the input size, seeks never overshoot the
 // target, and a walk's settled length is the run the packets reported (a
 // tolerated hole in the payload shortens both sides, so they still agree).
+// The packets are stamped on the trimmed timeline, so the run they report is
+// what they deliver plus the final packet's own trim.
 // seed-cues.mka is the only seed carrying a Cues index.
 func FuzzDemux(f *testing.F) {
 	for _, name := range []string{"seed-opus.webm", "seed-flac.mka", "seed-pcm.mka", "seed-cues.mka"} {
@@ -57,7 +59,11 @@ func FuzzDemux(f *testing.F) {
 			// Every packet consumes input, so the count is bounded by the size.
 			maxPackets := len(data) + 16
 			var pkt container.Packet
-			var rawDur, padding int64
+			// rawDur is every frame's own length; kept is what the packets
+			// deliver, which is the timeline they are stamped on; lastPad and
+			// lastDur describe the final packet, whose trim is the only one
+			// that stays inside the run.
+			var rawDur, kept, lastPad, lastDur int64
 			clean := false
 			for i := 0; i < maxPackets; i++ {
 				err := d.ReadPacket(&pkt)
@@ -75,29 +81,41 @@ func FuzzDemux(f *testing.F) {
 					t.Fatalf("packet with negative padding %d", pkt.Padding)
 				}
 				rawDur += pkt.Dur
-				padding += pkt.Padding
+				kept += pkt.Dur - min(pkt.Padding, pkt.Dur)
+				lastPad, lastDur = pkt.Padding, pkt.Dur
 			}
 
 			// A read that reached the end inside the bound saw the whole
 			// payload, so a fresh demuxer's finished walk must settle on
 			// exactly what those packets add up to: the walk and the read
 			// convert each block's trim the same way, by construction.
+			//
+			// excess is a final trim past its own frame, which no frame can
+			// absorb and only the settled length can remove.
 			if clean && !strict {
 				w, err := NewDemuxer(container.BytesSource(data), nil)
 				if err == nil && w.Walk() == nil && w.Walked() {
 					tr := w.Tracks()[0]
-					if want := max(rawDur-tr.Delay-min(padding, rawDur), 0); tr.Samples != want {
-						t.Fatalf("walk settled %d, the packets hold %d (raw %d, delay %d, padding %d)",
-							tr.Samples, want, rawDur, tr.Delay, padding)
+					rawTotal := kept + min(lastPad, lastDur)
+					excess := lastPad - min(lastPad, lastDur)
+					if want := max(kept-tr.Delay-excess, 0); tr.Samples != want {
+						t.Fatalf("walk settled %d, the packets hold %d (kept %d, delay %d, final trim %d of %d)",
+							tr.Samples, want, kept, tr.Delay, lastPad, lastDur)
 					}
 					// A trim can never exceed the run it trims, however much
 					// the file's DiscardPaddings add up to, and a settled
 					// length can never exceed the samples the walk counted.
-					if tr.Padding < 0 || tr.Padding > rawDur {
-						t.Fatalf("settled padding %d against a raw run of %d", tr.Padding, rawDur)
+					if want := min(lastPad, rawTotal); tr.Padding != want {
+						t.Fatalf("settled padding %d, want the final packet's trim bounded by the run (%d)",
+							tr.Padding, want)
 					}
 					if tr.Samples < 0 || tr.Samples > rawDur {
 						t.Fatalf("settled length %d against a raw run of %d", tr.Samples, rawDur)
+					}
+					// The inner trims are real frames the packets held, so
+					// their sum cannot exceed what the frames decode to.
+					if tr.MidPadding < 0 || tr.MidPadding > rawDur {
+						t.Fatalf("settled mid padding %d against a raw run of %d", tr.MidPadding, rawDur)
 					}
 				}
 			}

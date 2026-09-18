@@ -214,7 +214,7 @@ func TestCutReportsNoClipping(t *testing.T) {
 	var cut bytes.Buffer
 	res, err := e.CutStream(context.Background(), container.BytesSource(m4a), "m4a", &cut,
 		waxflow.TranscodeOptions{Format: "aac"},
-		[]waxflow.Span{{From: 0, To: clipFrames / 2}}, grid, -1)
+		[]waxflow.Span{{From: 0, To: clipFrames / 2}}, grid, container.Track{Samples: -1})
 	if err != nil {
 		t.Fatal(err)
 	}

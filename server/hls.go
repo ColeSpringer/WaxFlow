@@ -412,10 +412,10 @@ func hlsIdentity(desc hls.Descriptor, members []hlsSource) string {
 // granules) is seeked past any possible end to find where the stream really
 // stops. Only a source whose positions are themselves rounded (ASF) is
 // decoded, since nothing cheaper is true; see countDecoded.
-func (s *Server) measureSamples(src *source.File) (int64, error) {
+func (s *Server) measureSamples(src *source.File) (container.Track, error) {
 	med, err := s.eng.OpenStream(src, src.Ext)
 	if err != nil {
-		return 0, err
+		return container.Track{}, err
 	}
 	defer med.Close()
 	return measureLength(med)
@@ -423,22 +423,44 @@ func (s *Server) measureSamples(src *source.File) (int64, error) {
 
 // measureLength is measureSamples over an already-opened Media, which is
 // where the four routes are chosen between and so where they are tested.
-func measureLength(med format.Media) (int64, error) {
+//
+// It returns the whole track and not just the count, because the walk route
+// settles more than a length: the trims a Matroska walk found are on the track
+// it refreshed and nowhere else, and the memo this fills is what the copy
+// rungs plan from (see container.Track.MidPadding). The other three routes
+// have nothing of their own to add, so they hand back the track they saw with
+// the count filled in.
+//
+// Every route returns a track that describes itself: the count is measured, so
+// it is exact and it is not advisory, whichever route found it. Handing back a
+// measured count still flagged advisory would be a track that contradicts
+// itself, and would leave every caller restamping the flags by hand.
+func measureLength(med format.Media) (container.Track, error) {
 	if t := med.Info().Default(); t.SamplesExact && t.Samples >= 0 {
-		return t.Samples, nil
+		return t, nil
 	}
 	if w, ok := med.(format.Walker); ok {
 		if err := w.Walk(); err != nil {
-			return 0, err
+			return container.Track{}, err
 		}
 		if t := med.Info().Default(); t.SamplesExact && t.Samples >= 0 {
-			return t.Samples, nil
+			return t, nil
 		}
 	}
-	if med.Info().Default().SamplesAdvisory {
-		return countDecoded(med)
+	t := med.Info().Default()
+	var n int64
+	var err error
+	if t.SamplesAdvisory {
+		n, err = countDecoded(med)
+	} else {
+		n, err = med.SeekSample(measureCeiling)
 	}
-	return med.SeekSample(measureCeiling)
+	if err != nil {
+		return container.Track{}, err
+	}
+	t.Samples = n
+	t.SamplesExact, t.SamplesAdvisory = true, false
+	return t, nil
 }
 
 // countDecoded reads med to the end and counts what it delivered. It is the
@@ -1082,7 +1104,7 @@ func (s *Server) runHLSCutWorker(ctx context.Context, m hlsSource, opts waxflow.
 	}
 	s.met.Cuts.Add(1)
 	_, err = s.eng.CutSegments(ctx, src, m.Ext, opts,
-		[]waxflow.Span{{From: sp.from, To: sp.end()}}, plan.Grid, plan.SourceSamples,
+		[]waxflow.Span{{From: sp.from, To: sp.end()}}, plan.Grid, plan.Source,
 		waxflow.SegmentedOptions{SegmentSamples: plan.SegmentSamples, StartSegment: start}, publish)
 	return err
 }

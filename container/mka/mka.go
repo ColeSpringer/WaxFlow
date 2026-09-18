@@ -10,10 +10,14 @@
 // total gapless needs. Cues bound how far the walk runs rather than supplying
 // a position, so a wrong index can only make a landing earlier, never wrong.
 //
-// Gapless trims come from the track's CodecDelay (front) and the last
-// block's DiscardPadding (end), mapped onto Track.Delay/Padding so
-// format.Media delivers the trimmed timeline. These are the Opus-in-WebM
-// gapless mechanism; other codecs rarely signal them.
+// Gapless trims come from the track's CodecDelay (front) and DiscardPadding
+// (end), mapped onto Track.Delay/Padding so format.Media delivers the trimmed
+// timeline. These are the Opus-in-WebM gapless mechanism; other codecs rarely
+// signal them. DiscardPadding is stated per block rather than per file, so any
+// block may carry one (mkvmerge writes one at each append seam): each rides on
+// its own block's last frame, the packet timeline excludes it, and only the
+// last block's is the track's end trim. The rest are reported as
+// Track.MidPadding, which the copy rungs decline on.
 //
 // EBML is a nesting attack surface, so the parser holds to the hostile-input
 // invariants: a fixed, shallow descent that never recurses on attacker-chosen

@@ -1,6 +1,8 @@
 package waxflow
 
 import (
+	"cmp"
+	"io"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
@@ -111,10 +113,10 @@ func TestRemuxTrailerDerivesPadding(t *testing.T) {
 // nothing to settle against there, so the trailer is the packets': the last
 // packet's trim, which is the only one an output container can carry.
 //
-// Summing every trim would shorten the output's end by a mid-stream trim's
-// worth while those frames still play in the middle, which is real audio lost.
-// The last-packet rule loses none, and the mid-stream frames playing in the
-// output is the recorded limitation.
+// A trim before the last is not missing from it, it is already out of the run
+// the copy counted (see container.Packet.Padding), so the arithmetic here
+// never sees one. A destination that cannot carry one never gets that far
+// either: the copy rungs decline such a source.
 func TestRemuxTrailerTakesThePacketsTrim(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -123,12 +125,14 @@ func TestRemuxTrailerTakesThePacketsTrim(t *testing.T) {
 		want  codec.Trailer
 	}{
 		{
-			// The mid-stream fixture's shape: a run whose final packet states
-			// 96 and a middle one 48. Only the 96 reaches the trailer.
-			name:  "a mid-stream trim does not shorten the end",
+			// The mid-stream fixture's shape: 500 blocks of 480 whose final
+			// packet states 96 and whose block 100 states 48. The copy counted
+			// 240000 less that 48, so the trailer takes the 96 off that and
+			// the inner trim's frames are in neither number.
+			name:  "a mid-stream trim is already out of the run",
 			track: container.Track{Codec: codec.PCM, Samples: -1},
-			run:   copiedRun{samples: 240000, lastPadding: 96, trimmed: true},
-			want:  codec.Trailer{Samples: 239904, Delay: 0, Padding: 96},
+			run:   copiedRun{samples: 239952, lastPadding: 96, trimmed: true},
+			want:  codec.Trailer{Samples: 239856, Delay: 0, Padding: 96},
 		},
 		{
 			// The Opus-in-WebM shape, un-measured: the header's advisory total
@@ -320,4 +324,190 @@ func TestRemuxableIgnoresKernelSelection(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPlanRemuxDeclinesInnerTrimsPerContainer is the destination half of the
+// rule, one row per container each row can write. Only a container that states
+// its trims per packet can carry a trim that is not at the end; a granule and
+// an edit list each name one end trim, and ADTS names none at all, so a copy
+// into any of them would play the trimmed frames back as audio.
+func TestPlanRemuxDeclinesInnerTrimsPerContainer(t *testing.T) {
+	f := audio.Format{Rate: 48000, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
+	e := New()
+	for _, tc := range []struct {
+		format, cont string
+		want         bool
+	}{
+		{"opus", "", false},
+		{"opus", "mka", true},
+		{"opus", "webm", true},
+		{"flac", "", false},
+		{"flac", "ogg", false},
+		{"flac", "mka", true},
+		{"aac", "progressive", false},
+		{"aac", "fragmented", false},
+		{"aac", "adts", false},
+		{"aac", "mka", true},
+	} {
+		t.Run(tc.format+"/"+cmp.Or(tc.cont, "default"), func(t *testing.T) {
+			track := container.Track{
+				Codec: codecOf(t, tc.format), Fmt: f, Samples: 48000, Default: true,
+			}
+			if plan, err := e.PlanRemux(track, TranscodeOptions{Format: tc.format, Container: tc.cont}); err != nil {
+				t.Fatalf("the control (no inner trim) errored: %v", err)
+			} else if plan == nil {
+				t.Fatalf("the control (no inner trim) declined; this row proves nothing")
+			}
+			track.MidPadding = 480
+			plan, err := e.PlanRemux(track, TranscodeOptions{Format: tc.format, Container: tc.cont})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (plan != nil) != tc.want {
+				t.Errorf("PlanRemux planned=%v with an inner trim, want %v", plan != nil, tc.want)
+			}
+		})
+	}
+}
+
+// codecOf is the codec an output row copies, for the table above.
+func codecOf(t *testing.T, format string) codec.ID {
+	t.Helper()
+	row, err := outputRow(format)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return row.codecID
+}
+
+// TestCopiedRunClampsAHostileTrim: RemuxDemuxer takes a caller's demuxer, so a
+// packet may state a trim no demuxer in this tree would. Neither the timeline
+// nor the trailer may come out of that longer than the run.
+//
+// A negative trim is the one that inverts: unclamped it *adds* to the run
+// through the subtraction, and reaches the trailer as a padding SettleLength's
+// uncapped arm then subtracts again, yielding a length past the samples the
+// packets held, marked exact.
+func TestCopiedRunClampsAHostileTrim(t *testing.T) {
+	const dur = 1000
+	for _, tc := range []struct {
+		name           string
+		pads           []int64
+		wantRun, wantP int64
+	}{
+		{"no trims", []int64{0, 0, 0}, 3 * dur, 0},
+		{"a negative final trim", []int64{0, 0, -500}, 3 * dur, 0},
+		{"a negative trim in the middle", []int64{0, -500, 0}, 3 * dur, 0},
+		// A final trim larger than its own frame is still the end trim: the
+		// settled length removes the excess, so it must not be clamped away.
+		{"an oversized final trim", []int64{0, 0, 1500}, 3 * dur, 1500},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &padDemuxer{dur: dur, pads: tc.pads}
+			run, err := copyPackets(t.Context(), d, 0, true, func(container.Packet) error { return nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			if run.samples != tc.wantRun {
+				t.Errorf("run.samples = %d, want %d", run.samples, tc.wantRun)
+			}
+			if run.lastPadding != tc.wantP {
+				t.Errorf("run.lastPadding = %d, want %d", run.lastPadding, tc.wantP)
+			}
+			tr := remuxTrailer(container.Track{Codec: codec.Opus, Samples: -1}, run)
+			if tr.Samples < 0 || tr.Samples > run.samples {
+				t.Errorf("trailer says %d samples against a run of %d", tr.Samples, run.samples)
+			}
+			if tr.Padding < 0 {
+				t.Errorf("trailer padding = %d", tr.Padding)
+			}
+		})
+	}
+}
+
+// padDemuxer yields fixed-duration packets with chosen trims, for the clamp
+// table above. It is a caller's demuxer, not one of this tree's.
+type padDemuxer struct {
+	dur  int64
+	pads []int64
+	i    int
+}
+
+func (d *padDemuxer) Tracks() []container.Track {
+	return []container.Track{{Codec: codec.Opus, Samples: -1, Default: true}}
+}
+
+func (d *padDemuxer) ReadPacket(pkt *container.Packet) error {
+	if d.i >= len(d.pads) {
+		return io.EOF
+	}
+	*pkt = container.Packet{Padding: d.pads[d.i], Packet: codec.Packet{Dur: d.dur, Sync: true}}
+	d.i++
+	return nil
+}
+
+// TestRemuxTrailerDropsTrimsTheCodecCannotCarry: SettleLength's capped arm
+// derives a padding whenever the run outlives the track's authoritative length,
+// which an Ogg-FLAC whose final page granule under-reports its own frames does
+// now that that length is verified. FLAC and ALAC muxers refuse a nonzero trim
+// outright, so handing one on would fail at End with the file already written.
+func TestRemuxTrailerDropsTrimsTheCodecCannotCarry(t *testing.T) {
+	// 48000 samples of packets behind a verified 47000: the settle would derive
+	// 1000 samples of padding.
+	track := container.Track{Codec: codec.FLAC, Samples: 47000, SamplesExact: true}
+	got := remuxTrailer(track, copiedRun{samples: 48000})
+	if got.Padding != 0 || got.Delay != 0 {
+		t.Errorf("trailer = %+v, want no trims: no FLAC muxer writes one", got)
+	}
+	if got.Samples != 48000 {
+		t.Errorf("trailer says %d samples, want the %d the packets hold", got.Samples, 48000)
+	}
+	// The same shape on a codec that can carry a trim keeps it.
+	opus := container.Track{Codec: codec.Opus, Samples: 47000, SamplesExact: true}
+	if o := remuxTrailer(opus, copiedRun{samples: 48000}); o.Padding != 1000 {
+		t.Errorf("opus trailer = %+v, want the derived 1000-sample trim", o)
+	}
+}
+
+// TestPlanRemuxSegmentsDeclinesInnerTrims: a segmented run always writes fMP4,
+// whatever Container the options name, and fMP4 states no trim per packet. The
+// progressive gate reads the resolved container name, so without a decline of
+// its own this rung accepted a Matroska container override and then met
+// segmentWalk's mid-copy refusal with the playlist already out.
+func TestPlanRemuxSegmentsDeclinesInnerTrims(t *testing.T) {
+	f := audio.Format{Rate: 48000, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Float, BitDepth: 32}
+	e := New()
+	for _, cont := range []string{"", "mka", "webm"} {
+		name := cmp.Or(cont, "default")
+		t.Run(name, func(t *testing.T) {
+			track := container.Track{
+				Codec: codec.Opus, CodecConfig: testOpusHead(312), Fmt: f,
+				Samples: 48000, Delay: 312, Default: true,
+			}
+			opts := TranscodeOptions{Format: "opus", Container: cont}
+			if plan, err := e.PlanRemuxSegments(track, opts, 4, 960); err != nil {
+				t.Fatalf("the control (no inner trim) errored: %v", err)
+			} else if plan == nil {
+				t.Fatal("the control (no inner trim) declined; this row proves nothing")
+			}
+			track.MidPadding = 480
+			plan, err := e.PlanRemuxSegments(track, opts, 4, 960)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan != nil {
+				t.Error("PlanRemuxSegments planned an fMP4 copy of a source with a trim inside the run")
+			}
+		})
+	}
+}
+
+// testOpusHead is a minimal OpusHead for a plan that has to parse one.
+func testOpusHead(preSkip int) []byte {
+	h := make([]byte, 19)
+	copy(h, "OpusHead")
+	h[8], h[9] = 1, 2
+	h[10], h[11] = byte(preSkip), byte(preSkip>>8)
+	h[12], h[13], h[14], h[15] = 0x80, 0xBB, 0, 0
+	return h
 }

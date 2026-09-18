@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -758,5 +759,184 @@ func TestSliceForwardsLiveWarnings(t *testing.T) {
 	}
 	if !slices.ContainsFunc(info.Warnings, func(s string) bool { return strings.Contains(s, "unparsable bytes skipped") }) {
 		t.Errorf("warnings after the read = %v, want the skipped bytes forwarded from the media", info.Warnings)
+	}
+}
+
+// walkCounter wraps a Media and counts the deferred walks run through it. It
+// is how a cell tells "the span confirmed its length" from "the span was
+// exact already": both end with the right number, and only one reads the file.
+type walkCounter struct {
+	format.Media
+	walks int
+}
+
+func (w *walkCounter) Walk() error {
+	w.walks++
+	return format.WalkMedia(w.Media)
+}
+
+func (w *walkCounter) Walked() bool { return format.MediaWalked(w.Media) }
+
+// truncatedMP3 is sine-cbr128.mp3 with n bytes taken off its tail: its Xing
+// frame count still declares 22050 samples and the frames no longer hold them.
+// It is the one shape a header on an unpatchable destination must not commit
+// to (see the confirmable-length rule in waxflow.go).
+func truncatedMP3(t *testing.T, n int) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "testdata", "sine-cbr128.mp3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw[:len(raw)-n]
+}
+
+// openCountedSlice opens raw through a walk counter and bounds it to
+// [from, to), returning the span and the counter.
+func openCountedSlice(t *testing.T, raw []byte, from, to int64) (format.Media, *walkCounter) {
+	t.Helper()
+	med, err := format.Open(container.BytesSource(raw), "mp3", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wc := &walkCounter{Media: med}
+	sl, err := waxflow.Slice(wc, from, to)
+	if err != nil {
+		med.Close()
+		t.Fatal(err)
+	}
+	return sl, wc
+}
+
+// TestSliceConfirmsItsOwnLength: an open-ended span of a source whose total is
+// a declaration (an MP3's Xing count) confirms that total before a header
+// commits to it.
+//
+// The destination is what makes it necessary. On a pipe the WAV header is the
+// length, written first and never revisited, so projecting a declared count the
+// frames cannot fill fails at End with the whole body already on the wire. The
+// span is not a file, so nothing about it answers format.Walker; what it
+// answers is format.LengthConfirmer, which runs the inner walk and re-derives
+// the window from what it found.
+func TestSliceConfirmsItsOwnLength(t *testing.T) {
+	const from = 1000
+	raw := truncatedMP3(t, 100)
+	e := waxflow.New()
+
+	// The numbers this rests on, read off the file rather than assumed.
+	whole, _ := openCountedSlice(t, raw, 0, waxflow.ToEnd)
+	declared := whole.Info().Default().Samples
+	if err := whole.(format.LengthConfirmer).ConfirmLength(); err != nil {
+		t.Fatal(err)
+	}
+	held := whole.Info().Default().Samples
+	whole.Close()
+	if held >= declared {
+		t.Fatalf("the fixture holds %d of its declared %d; this cell needs a truncated source", held, declared)
+	}
+
+	t.Run("a destination that cannot be patched", func(t *testing.T) {
+		sl, wc := openCountedSlice(t, raw, from, waxflow.ToEnd)
+		defer sl.Close()
+		var out bytes.Buffer
+		res, err := e.TranscodeMedia(context.Background(), sl, &out,
+			waxflow.TranscodeOptions{Format: "wav"})
+		if err != nil {
+			t.Fatalf("the span's projection was not confirmed: %v", err)
+		}
+		if want := held - from; res.Samples != want {
+			t.Errorf("the run delivered %d samples, want %d", res.Samples, want)
+		}
+		if got := probeTrack(t, out.Bytes(), "wav").Samples; got != res.Samples {
+			t.Errorf("the header declares %d samples, the run delivered %d", got, res.Samples)
+		}
+		if got := sl.Info().Default().Samples; got != held-from {
+			t.Errorf("the span reports %d samples, want the confirmed %d", got, held-from)
+		}
+		if wc.walks != 1 {
+			t.Errorf("the inner media was walked %d times, want exactly one", wc.walks)
+		}
+	})
+
+	t.Run("a destination that can be patched", func(t *testing.T) {
+		sl, wc := openCountedSlice(t, raw, from, waxflow.ToEnd)
+		defer sl.Close()
+		out := &memWS{}
+		res, err := e.TranscodeMedia(context.Background(), sl, out,
+			waxflow.TranscodeOptions{Format: "wav"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := held - from; res.Samples != want {
+			t.Errorf("the run delivered %d samples, want %d", res.Samples, want)
+		}
+		if got := probeTrack(t, out.Buf, "wav").Samples; got != res.Samples {
+			t.Errorf("the patched header declares %d samples, the run delivered %d", got, res.Samples)
+		}
+		// Nothing confirms a length a muxer can go back and fix: the header
+		// is a draft there, so the walk is a read this run does not owe.
+		if wc.walks != 0 {
+			t.Errorf("the inner media was walked %d times on a seekable destination, want none", wc.walks)
+		}
+	})
+}
+
+// TestSliceRefusesAWindowTheConfirmedSourceCannotCover: a span whose start lies
+// between the declared total and the real one is a cut list that does not
+// describe this file. The confirmation is where that is found, which is before
+// the muxer writes anything.
+func TestSliceRefusesAWindowTheConfirmedSourceCannotCover(t *testing.T) {
+	raw := truncatedMP3(t, 100)
+	whole, _ := openCountedSlice(t, raw, 0, waxflow.ToEnd)
+	declared := whole.Info().Default().Samples
+	if err := whole.(format.LengthConfirmer).ConfirmLength(); err != nil {
+		t.Fatal(err)
+	}
+	held := whole.Info().Default().Samples
+	whole.Close()
+
+	from := (held + declared) / 2
+	if from <= held || from > declared {
+		t.Fatalf("no start lies between the held %d and the declared %d", held, declared)
+	}
+	sl, _ := openCountedSlice(t, raw, from, waxflow.ToEnd)
+	defer sl.Close()
+	var out bytes.Buffer
+	_, err := waxflow.New().TranscodeMedia(context.Background(), sl, &out,
+		waxflow.TranscodeOptions{Format: "wav"})
+	if err == nil {
+		t.Fatal("the run finished over a window the source cannot cover")
+	}
+	if code := waxerr.CodeOf(err); code != waxerr.CodeMalformedInput {
+		t.Errorf("code = %v, want %v: %v", code, waxerr.CodeMalformedInput, err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("%d bytes were written before the refusal; it must come before Begin", out.Len())
+	}
+}
+
+// TestSliceConfirmsAnIntactSourceOnce: the same path over an intact file
+// confirms the declared count rather than changing it, reads the payload once,
+// and delivers the whole window.
+func TestSliceConfirmsAnIntactSourceOnce(t *testing.T) {
+	const from = 1000
+	raw := truncatedMP3(t, 0)
+	sl, wc := openCountedSlice(t, raw, from, waxflow.ToEnd)
+	defer sl.Close()
+	declared := sl.Info().Default().Samples
+
+	var out bytes.Buffer
+	res, err := waxflow.New().TranscodeMedia(context.Background(), sl, &out,
+		waxflow.TranscodeOptions{Format: "wav"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Samples != declared {
+		t.Errorf("the run delivered %d samples, the span declared %d", res.Samples, declared)
+	}
+	if got := probeTrack(t, out.Bytes(), "wav").Samples; got != declared {
+		t.Errorf("the header declares %d samples, want the declared %d", got, declared)
+	}
+	if wc.walks != 1 {
+		t.Errorf("the inner media was walked %d times, want exactly one", wc.walks)
 	}
 }

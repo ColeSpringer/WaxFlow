@@ -776,3 +776,55 @@ func TestTolerantProbeReadsHeaders(t *testing.T) {
 		t.Errorf("an un-measured read delivered %d frames, want the strict probe's %d", count, want.Samples)
 	}
 }
+
+// TestOggFLACProbeIsExact: an Ogg-FLAC's length is settled at open against the
+// stream's final page granule, in both directions, so a tolerant probe reports
+// it exact and the strict walk has nothing left to measure. It joins FLAC and
+// WavPack, whose opens verify their declared totals against the payload.
+//
+// The cost is the tail scan, which the open used to skip whenever STREAMINFO
+// declared a total. It reads one window from the end of the file, so it is
+// bounded by the file plus that window for a fixture smaller than one; what it
+// does not do is grow with the stream (container/ogg pins that separately).
+func TestOggFLACProbeIsExact(t *testing.T) {
+	// The first two declare total 0 (ffmpeg's shape) and settle from the
+	// granule; the third is `flac --ogg`'s, which declares a total the granule
+	// has to confirm. Both arms have to come out exact, or the flag would mean
+	// "ffmpeg wrote this".
+	for _, path := range []string{
+		filepath.Join("..", "testdata", "sine-s16.oga"),
+		filepath.Join("..", "testdata", "noise-s24.oga"),
+		filepath.Join("..", "container", "ogg", "testdata", "ref-flac.oga"),
+	} {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			name := filepath.Base(path)
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cs := &testutil.CountingSource{Src: container.BytesSource(raw)}
+			info, err := Probe(cs, "oga", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d := info.Default()
+			if !d.SamplesExact || d.SamplesAdvisory {
+				t.Errorf("tolerant probe: %d samples (exact %v advisory %v), want exact",
+					d.Samples, d.SamplesExact, d.SamplesAdvisory)
+			}
+			med, err := Open(container.BytesSource(raw), "oga", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer med.Close()
+			if got := count(t, med); int64(got) != d.Samples {
+				t.Errorf("the probe reports %d samples, a read delivers %d", d.Samples, got)
+			}
+			t.Logf("%s: %d bytes of %d in %d reads", name, cs.Bytes, len(raw), cs.Reads)
+			if want := int64(len(raw)) + 128<<10 + 64<<10; cs.Bytes > want {
+				t.Errorf("probing a %d-byte stream read %d bytes, want at most the file plus one tail window",
+					len(raw), cs.Bytes)
+			}
+		})
+	}
+}

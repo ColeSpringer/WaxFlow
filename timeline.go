@@ -6,6 +6,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/colespringer/waxflow/audio"
@@ -342,7 +343,10 @@ func SpanTrack(track container.Track, from, to int64) (container.Track, error) {
 	// happened inside it before a slice sees a sample. Passing the
 	// container's declaration through would make a downstream consumer trim
 	// a second time, against a stream that has no delay left to cut.
-	out.Delay, out.Padding = 0, 0
+	//
+	// MidPadding goes with them, for a reason one step further along: it
+	// describes the source's *packets*, and a span of a decoded view has none.
+	out.Delay, out.Padding, out.MidPadding = 0, 0, 0
 	// The source's own codec is kept, unlike a Concat's synthetic PCM
 	// envelope, and that is not cosmetic: the codec is what names the
 	// decoder revision in a plan's Versions, so a span of a FLAC keys on the
@@ -408,6 +412,13 @@ type Headroomer interface {
 // engine wraps index restore and save around the Media inside OpenStream,
 // under this, and the save fires on Close, which this delegates. The
 // sidecar keeps working through a slice without this knowing about it.
+//
+// format.Walker is deliberately not forwarded, and format.LengthConfirmer is
+// implemented instead. They answer different questions and a slice's answers
+// differ: Walker is the per-file view a job gate reads as "one file I can
+// measure", which a span is not, while the run that is about to write a length
+// into headers it cannot patch wants to know that this Media can make its own
+// declared length good, which a span can (see ConfirmLength).
 type slice struct {
 	med  format.Media
 	info *format.Info
@@ -433,6 +444,56 @@ func (s *slice) Info() *format.Info {
 	in := s.med.Info()
 	s.info.Warnings, s.info.Notes = in.Warnings, in.Notes
 	return s.info
+}
+
+// ConfirmLength implements format.LengthConfirmer: run whatever the inner
+// media defers, then re-derive this span's own track from what it found.
+//
+// The re-derivation is SpanTrack again, on the confirmed source, which is what
+// keeps this one rule rather than two. A bounded span comes back with the same
+// arithmetic it had; an open-ended one adopts the confirmed total less the
+// window's start, which is the number it was declaring on the source's word
+// before. A confirmed source that no longer covers the window is refused here,
+// before a header commits to it, with the same code the read-time overrun
+// gives: the file holds less audio than its headers declared.
+//
+// It clears blind, because after this the span's cut points have been checked
+// against a length the payload stands behind, which is exactly what blind
+// means the absence of (see endOfSource).
+func (s *slice) ConfirmLength() error {
+	declared := s.med.Info().Default().Samples
+	// An inner span confirms itself the same way, for Headroom's reason:
+	// nothing nests spans today, and the right answer for one is the same
+	// answer one level down rather than a guess.
+	if inner, ok := s.med.(format.LengthConfirmer); ok {
+		if err := inner.ConfirmLength(); err != nil {
+			return err
+		}
+	} else if !format.MediaWalked(s.med) {
+		if err := format.WalkMedia(s.med); err != nil {
+			return err
+		}
+	}
+	to := int64(ToEnd)
+	if s.limit >= 0 {
+		to = s.from + s.limit
+	}
+	confirmed := s.med.Info().Default()
+	spanned, err := SpanTrack(confirmed, s.from, to)
+	if err != nil {
+		end := "end"
+		if to >= 0 {
+			end = strconv.FormatInt(to, 10)
+		}
+		return waxerr.Wrap(waxerr.CodeMalformedInput, fmt.Sprintf(
+			"waxflow: the source holds %d samples, less than the %d its headers declared; the span [%d, %s) no longer fits",
+			confirmed.Samples, declared, s.from, end), err)
+	}
+	s.info.Tracks = []container.Track{spanned}
+	// Derived the way Slice derives it, not set to false: the confirmation may
+	// have found a source that still stands behind no length at all.
+	s.blind = confirmed.Samples < 0 || confirmed.SamplesAdvisory
+	return nil
 }
 
 // Headroom is the audio ahead of the window: the samples between the inner
@@ -664,6 +725,11 @@ type ConcatSource struct {
 	// landing as well, by opening it through Slice over a Media whose Info
 	// reports the measured length. That is what the daemon does, and why its
 	// album mode accepts sources a library caller's does not.
+	//
+	// It is also why a Concat implements no format.LengthConfirmer while a
+	// span does: confirming a member's length behind the caller's back would
+	// replace the declaration this field *is* with something the timeline
+	// found, which is the opposite of what the run enforces here.
 	Track container.Track
 	// Open opens the member's decodable media. Concat calls it when the
 	// timeline reaches this member and closes the result on advance, so a

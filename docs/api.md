@@ -162,18 +162,25 @@ Matroska track joins those payloads: reading one exactly means walking its
 clusters, which no open pays, so a tolerant probe reports the Info Duration
 instead, or `samples: -1` where the file states none, and a strict one walks.
 A read of such a file is gapless either way, because Matroska states its tail
-trim per block rather than as a total. `samplesExact` and `samplesAdvisory` say which kind
+trim per block rather than as a total. Any block may carry one, not just the
+last (mkvmerge writes one at each append seam); the timeline excludes the
+frames it names, so a seek across one lands exactly, and a packet copy of such
+a file into anything but Matroska, and any cut of it, is declined for the
+transcode rung, which trims in PCM. `samplesExact` and `samplesAdvisory` say which kind
 of number `samples` is: `samplesExact` a measured one, `samplesAdvisory` a
 rounded total fit for display and not for arithmetic that has to add up
 (ASF's ticks, a Matroska Info Duration, a WAV fact chunk over MP3 frames),
-and neither the headers' own count taken at its word. FLAC and WavPack report
-`samplesExact` from a tolerant probe: their opens verify the declared total
-against the payload in both directions, from one read of the tail, and report
-a shortfall as damage and an overrun as a note. A file whose measurement had
-to cross damage keeps the corrected length without the flag, since an
-authoritative length caps a decode and one walked past a hole should not.
-Ogg-FLAC does not verify at all yet (see `docs/deferred-work.md`). `notes` is the other
-half and is never damage: what this build did with a file that is perfectly well formed, such
+and neither the headers' own count taken at its word. FLAC, WavPack and
+Ogg-FLAC report `samplesExact` from a tolerant probe: their opens verify the
+declared total against the payload in both directions, from one read of the
+tail, and report a shortfall as damage and an overrun as a note. Ogg-FLAC
+checks STREAMINFO's total against the stream's final page granule, which is
+the muxer's own statement of the playable end on a CRC-verified page; a read
+finds any damage earlier in the file, where it is. A native FLAC or WavPack
+whose measurement had to cross damage keeps the corrected length without the
+flag, since an authoritative length caps a decode and one walked past a hole
+should not. `notes` is the other half and is never damage: what this build did
+with a file that is perfectly well formed, such
 as ignoring a stream it cannot use, capping a chapter list at its own limit,
 rescaling a timeline whose timescale is not the sample rate, or reporting a
 band it does not synthesize. `strict` never refuses over a note, which is the
@@ -463,12 +470,16 @@ not the output format's), any parameter transforms samples (`rate`, `ch`,
 `bits`, `gain`, `dynamics`, `t=`, `bitrate`/`q`), the request names a span
 (`from`/`to` cut at an arbitrary sample, which means mid-packet), the URL names
 a timeline (one fMP4 timeline carries one edit list, and the packets at a seam
-overlap), or `maxBitRate` is set (this rung reads headers, and a source's real
-bit rate is in its packets). Over HLS it also declines a source whose packet
+overlap), the source trims samples inside its run and the destination is not
+Matroska (only a container that states its trims per packet can carry one), or
+`maxBitRate` is set (this rung reads headers, and a source's real bit rate is
+in its packets). Over HLS it also declines a source whose packet
 durations vary, since there is then no grid to lay segment boundaries on.
 `waxflow_remux_total` counts the pipelines it served. The cut declines in turn
 (a codec off the Opus/AAC-LC allowlist, `maxBitRate` set, a snapped window the
-destination cannot express, or over HLS a source whose packet durations vary and
+destination cannot express, a source that trims samples inside its run, for
+every destination, since past such a trim its packets no longer sit on the grid
+the window snaps to, or over HLS a source whose packet durations vary and
 so give no grid to lay segment boundaries on) and falls to a transcode of the
 same span, so a span is always served: zero-generation when it can be,
 sample-exact through the decoder when it cannot.
@@ -477,10 +488,15 @@ sample-exact through the decoder when it cannot.
 `Cache-Control: no-store`, `X-Accel-Buffering: no`, plus hints
 `X-Content-Duration` (seconds) and `X-Estimated-Content-Length`. A source
 whose headers only estimate its length (ASF, Matroska) is measured once for
-that header, memoized per source; a source whose headers count is taken at its
-word. The measure is a hint, not a bound on the run: the body is whatever the
-file decodes to, so a source whose measure and whose decode disagree streams
-whole rather than being cut to the advertised number. Range
+that header, memoized per source, and so is a Matroska that states none at all,
+since only a walk finds a trim inside its run and the copy rungs plan from one.
+A source whose headers count is taken at its word, and one that states no length
+in a container that cannot hide a trim (an untagged MP3, a bare ADTS stream)
+sends no duration hint rather than reading the whole file to compute one before
+the first byte goes out. The measure is a hint, not a bound on the run: the
+body is whatever the file decodes to, so a source whose measure and whose
+decode disagree streams whole rather than being cut to the advertised number.
+Range
 policy per RFC 9110's permission to ignore: `Range: bytes=0-` gets the
 plain 200 full stream (Safari/AVPlayer attach it to everything); any
 nonzero offset gets `416` plus an envelope hinting at `t=`. Delivery

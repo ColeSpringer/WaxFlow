@@ -149,7 +149,11 @@ func goldenFLAC(t *testing.T) []byte {
 	}
 	var out bytes.Buffer
 	m := NewMuxer(&out, &MuxerOptions{Tags: []container.Tag{{Key: "TITLE", Value: "Golden"}}})
-	track := container.Track{Codec: codec.FLAC, CodecConfig: enc.CodecConfig(), Fmt: f}
+	// Samples set, so the golden pins the stamp: the mapping writes the run's
+	// projected length into STREAMINFO, and a track that declared nothing
+	// would have it write 0 and pin nothing. The destination is a
+	// bytes.Buffer, so End neither patches nor signs.
+	track := container.Track{Codec: codec.FLAC, CodecConfig: enc.CodecConfig(), Fmt: f, Samples: int64(src.N)}
 	if err := m.Begin([]container.Track{track}); err != nil {
 		t.Fatal(err)
 	}

@@ -132,6 +132,42 @@ type Walker interface {
 	Walked() bool
 }
 
+// LengthConfirmer is how a Media that is not a file confirms the length it
+// reports: run whatever the source underneath it defers, re-derive this
+// Media's own length from the result, and refuse when the confirmed source no
+// longer covers what this Media promised.
+//
+// It exists because Walker answers a different question. Walker is the per-file
+// view (see above), and a consumer reads it as "one file I can measure"; a
+// wrapper that forwarded it would tell a job gate that a span is a file. So the
+// two halves are split: Walker says what a file costs to measure, and this says
+// that a Media can make its own declared length good. A run that is about to
+// write a count into headers it cannot go back and patch asks for the second.
+//
+// A bounded span implements it and usually has nothing to do: its length is
+// its own arithmetic (see waxflow.SpanTrack), so only an open-ended span of a
+// source whose own total is a declaration takes the work. A concatenated
+// timeline does not implement it at all, and that is a contract rather than an
+// omission: waxflow.ConcatSource.Track makes the caller's declared length the
+// timeline's own, and the run holds each member to it, so confirming members
+// behind the caller's back would contradict what the timeline promises (see
+// ADR-0009). Measure the members first.
+type LengthConfirmer interface {
+	ConfirmLength() error
+}
+
+// A wrapper around a Media forwards this only when what it wraps implements
+// it, which is the opposite of the rule for Walker (see WalkMedia) and is not
+// an oversight. Walker's forwarding is safe unconditionally because Walked
+// answers true for a Media that defers nothing, so a wrapper over one reports
+// "already walked" and nothing acts. This interface has no such answer: merely
+// implementing it says there is confirming to do, and a run about to write a
+// header reads that as "do not commit the count". A wrapper that forwarded it
+// blindly would drop the projection from every source underneath it that had
+// nothing to confirm. Nothing in this tree wraps a span today, so nothing
+// forwards it; a wrapper that comes to needs a type assertion on what it wraps
+// rather than a method that always answers.
+
 // WalkMedia runs med's deferred walk, and nothing when it defers none.
 // MediaWalked reports whether that walk has run, true when there is none to
 // run. Together they are Walker asked of a Media that may or may not be one.

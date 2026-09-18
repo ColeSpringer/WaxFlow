@@ -20,15 +20,16 @@ type CutSegmentPlan struct {
 	// Landed is where the requested spans fell, one for one, on the source's own
 	// track timeline, exactly as CutPlan.Landed reports for the progressive cut.
 	Landed []Span
-	// Grid and SourceSamples are the source's packet grid and its exact length,
-	// threaded to CutSegments so the run cuts on the same boundaries and
-	// synthesizes the same track the plan (and so the cache key) was computed
-	// from. SourceSamples is the source's own length even when the run reopens a
-	// container that declares none (ADTS AAC-LC reports -1 from its headers), so
-	// the run does not compute a different cut than the plan promised. It is -1
-	// only when the plan itself was handed a lengthless track.
-	Grid          int
-	SourceSamples int64
+	// Grid is the source's packet grid and Source the measured track this plan
+	// was computed from, both threaded to CutSegments so the run cuts on the
+	// same boundaries and synthesizes the same track the plan (and so the cache
+	// key) was computed from. Source carries what a fresh header open cannot
+	// see: the length where the container declares none (ADTS AAC-LC reports -1
+	// from its headers) and the gapless trims where it states them per block
+	// (Matroska), both of which computeCut's arithmetic reads. Its Samples is
+	// -1 only when the plan itself was handed a lengthless track.
+	Grid   int
+	Source container.Track
 }
 
 // PlanCutSegments plans the segmented form of a cut: the HLS spelling of the cut
@@ -76,7 +77,7 @@ func (e *Engine) PlanCutSegments(track container.Track, opts TranscodeOptions, s
 		RemuxSegmentPlan: *rsp,
 		Landed:           landed,
 		Grid:             grid,
-		SourceSamples:    track.Samples,
+		Source:           track,
 	}, nil
 }
 
@@ -102,16 +103,17 @@ func (e *Engine) CutInitSegment(plan *CutSegmentPlan) ([]byte, error) {
 // and the fallback it did not ask for would be the wrong help. samples is the
 // source's exact length, threaded from the plan and patched over the reopened
 // header's, so an undeclared-length source (ADTS AAC-LC) cuts against the length
-// the plan measured rather than the -1 its headers report. Pass a negative
-// samples to take the header's own length, which a source that declares one
-// already has.
+// the plan measured rather than the -1 its headers report, and its trims, which
+// for a Matroska source live on the blocks. Pass a track whose Samples is
+// negative to take the header's own, which a source that declares one already
+// has. See CutStream and adoptMeasured.
 //
 // It opens the source, wraps it in a seekable Cut view, and hands that to the
 // same segmentWalk RemuxSegments uses, so a mid-stream restart reproduces a
 // continuous run's segment bytes for bytes. There is no demux.Close, mirroring
 // RemuxSegments: the source.File owns the handle.
 func (e *Engine) CutSegments(ctx context.Context, src container.Source, hint string, opts TranscodeOptions,
-	spans []Span, grid int, samples int64, segOpts SegmentedOptions, emit func(mp4.Segment) error) (*SegmentedResult, error) {
+	spans []Span, grid int, measured container.Track, segOpts SegmentedOptions, emit func(mp4.Segment) error) (*SegmentedResult, error) {
 	if err := validateSegOpts(segOpts); err != nil {
 		return nil, err
 	}
@@ -119,13 +121,11 @@ func (e *Engine) CutSegments(ctx context.Context, src container.Source, hint str
 	if err != nil {
 		return nil, err
 	}
-	track := info.Default()
-	if samples >= 0 {
-		// The plan's measured length over the header's, the mirror of CutStream: the
-		// cut arithmetic reads it (see computeCut's decodedEnd), and plan and run
-		// must read the same one or their windows drift.
-		track.Samples, track.SamplesExact, track.SamplesAdvisory = samples, true, false
-	}
+	// The plan's measured track over the header's, the mirror of CutStream: the
+	// cut arithmetic reads its length and its trims (see computeCut's
+	// decodedEnd), and plan and run must read the same ones or their windows
+	// drift.
+	track := adoptMeasured(info.Default(), measured)
 	cutTrack, _, err := CutTrack(track, spans, grid)
 	if err != nil {
 		return nil, err
@@ -237,7 +237,7 @@ func (c *cutSeekDemuxer) SeekSample(track int, outTarget int64) (int64, error) {
 	if i == len(c.windows) {
 		// Past every window: nothing remains to read. Park the cursor at the end so
 		// the next ReadPacket returns io.EOF, and report the target back unchanged.
-		c.cur, c.pos, c.out = len(c.windows), 0, outTarget
+		c.cur, c.pos, c.out, c.prevPad = len(c.windows), 0, outTarget, 0
 		return outTarget, nil
 	}
 	w := c.windows[i]
@@ -258,5 +258,9 @@ func (c *cutSeekDemuxer) SeekSample(track int, outTarget int64) (int64, error) {
 	// walk's own pos < p0 skip carries it the rest of the way to the boundary.
 	c.cur, c.pos = i, landed
 	c.out = outStart + max(0, landed-w.from)
+	// prevPad describes the packet before the cursor, and after a seek there is
+	// none: carrying the pre-seek packet's trim across would refuse the first
+	// packet the seek lands on for following a trim it does not follow.
+	c.prevPad = 0
 	return c.out, nil
 }

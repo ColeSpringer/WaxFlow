@@ -134,7 +134,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 				s.met.Degradations.Add(1)
 				entry = cache.NewMemEntry(s.cfg.RingBytes, meta)
 			}
-			s.startPipeline(s.baseCtx, entry, req.p.src, req.src.ID, req.src.Ext, req.opts, req.p.span, req.rung(), req.cutGrid, req.cutSamples, release, false)
+			s.startPipeline(s.baseCtx, entry, req.p.src, req.src.ID, req.src.Ext, req.opts, req.p.span, req.rung(), req.cutGrid, req.cutTrack, release, false)
 			armed = true
 			return entry, nil
 		})
@@ -194,12 +194,12 @@ func (req *streamRequest) rung() rung {
 // the first client leaves. Sync one-shots pass their request context to
 // die with it.
 //
-// grid and cutSamples are the source's packet grid and exact length, meaningful
+// grid and cutTrack are the source's packet grid and measured track, meaningful
 // only for rungCut and threaded in from the plan so the run cuts on the same
 // boundaries and writes the same length the plan keyed; the other rungs ignore
 // them.
 func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, ref string, id source.Identity, hint string,
-	opts waxflow.TranscodeOptions, sp span, r rung, grid int, cutSamples int64, release func(), sync bool) {
+	opts waxflow.TranscodeOptions, sp span, r rung, grid int, cutTrack container.Track, release func(), sync bool) {
 	if sync {
 		s.met.SessionsSync.Add(1)
 	} else {
@@ -224,7 +224,7 @@ func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, ref stri
 			entry.Fail(waxerr.New(waxerr.CodeSourceChanged, "source changed while starting the pipeline"))
 			return
 		}
-		res, err := s.transcodeSpan(ctx, src, hint, entry, opts, sp, r, grid, cutSamples)
+		res, err := s.transcodeSpan(ctx, src, hint, entry, opts, sp, r, grid, cutTrack)
 		if err != nil {
 			s.log.Warn("pipeline failed", "src", ref, "rung", rungName(r), "err", err)
 			entry.Fail(err)
@@ -283,19 +283,19 @@ func rungName(r rung) string {
 // arithmetic that served t= on a whole file serves t= inside a virtual
 // track with no special case.
 func (s *Server) transcodeSpan(ctx context.Context, src *source.File, hint string, dst io.Writer,
-	opts waxflow.TranscodeOptions, sp span, r rung, grid int, cutSamples int64) (*waxflow.TranscodeResult, error) {
+	opts waxflow.TranscodeOptions, sp span, r rung, grid int, cutTrack container.Track) (*waxflow.TranscodeResult, error) {
 	switch r {
 	case rungRemux:
 		s.met.Remuxes.Add(1)
 		return s.eng.Remux(ctx, src, hint, dst, opts)
 	case rungCut:
 		// The single-window progressive cut: the span is one [from, to) range,
-		// so the run is always one Span. grid and cutSamples were measured at
+		// so the run is always one Span. grid and cutTrack were measured at
 		// plan time and carried in, so the boundaries the run snaps to and the
 		// length its init segment writes are the keyed ones.
 		s.met.Cuts.Add(1)
 		return s.eng.CutStream(ctx, src, hint, dst, opts,
-			[]waxflow.Span{{From: sp.from, To: sp.end()}}, grid, cutSamples)
+			[]waxflow.Span{{From: sp.from, To: sp.end()}}, grid, cutTrack)
 	}
 	if !sp.narrowed() {
 		// The plan's measure is not pushed onto the run here, and the asymmetry

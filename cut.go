@@ -412,6 +412,21 @@ func computeCut(track container.Track, spans []Span, grid int) (*cutResult, erro
 			"waxflow: this source declares a %d-sample delay on a %d-sample grid, which is outside the timeline this rung can compute in",
 			track.Delay, grid))
 	}
+	// A trim inside the run declines for every destination, Matroska included,
+	// and for a reason the remux rung does not share: past the first inner trim
+	// every packet starts at a grid position minus the trims so far (a 960 grid
+	// and a 48-sample trim put packet 200 at 191952), so any window edge past it
+	// straddles a packet. PacketGrid cannot see it, because Dur is unchanged.
+	// Rung 3 decodes and cuts in PCM, where the grid does not exist.
+	//
+	// CodeUnsupportedFormat, so PlanCut reads it as a decline like the grid
+	// checks around it; the cut view refuses mid-walk for a source nothing
+	// measured first.
+	if track.MidPadding > 0 {
+		return nil, waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
+			"waxflow: this source trims %d samples inside the run, so its packets no longer sit on the %d-sample grid past that point; this cut cannot be made without re-encoding",
+			track.MidPadding, grid))
+	}
 	g := int64(grid)
 	n := len(spans)
 
@@ -588,6 +603,24 @@ func computeCut(track container.Track, spans []Span, grid int) (*cutResult, erro
 	return &cutResult{track: out, landed: landed, windows: windows}, nil
 }
 
+// adoptMeasured overlays onto a fresh header open the facts only a measurement
+// establishes: the length, and the gapless trims a container states per packet
+// rather than in its header (see container.Track.MidPadding). A measured track
+// whose Samples is negative measured nothing, so the header's own stands.
+//
+// It is one function because plan and run must agree field for field: the cut
+// windows, the trailer and the init segment all read these, and a run that
+// re-derived a subset of them would bound its spans differently from the plan
+// that was advertised and keyed.
+func adoptMeasured(track, measured container.Track) container.Track {
+	if measured.Samples < 0 {
+		return track
+	}
+	track.Samples, track.SamplesExact, track.SamplesAdvisory = measured.Samples, true, false
+	track.Padding, track.MidPadding = measured.Padding, measured.MidPadding
+	return track
+}
+
 // Cut returns a view of demux holding only track's packets that fall in spans,
 // retimed to be contiguous: the packet-domain sibling of Slice, and the input
 // side of a cut.
@@ -629,6 +662,7 @@ type cutDemuxer struct {
 	cur     int
 	pos     int64 // the next source packet's decode position
 	out     int64 // the next kept packet's output decode position
+	prevPad int64 // the previous source packet's own trim, if it stated one
 }
 
 // Tracks reports the cut's own track, which is the one the packets coming out of
@@ -671,6 +705,16 @@ func (c *cutDemuxer) ReadPacket(pkt *container.Packet) error {
 		if pkt.Track != c.track {
 			continue
 		}
+		// Something followed the previous packet, so its trim was an inner one.
+		// Past it the source's packets sit at a grid position minus the trims
+		// so far, so no window edge this cut computed lands on a packet
+		// boundary any more, and PacketGrid cannot see it because Dur is
+		// unchanged. PlanCut declines a source whose walk found one; this is
+		// the backstop for a source nothing measured first.
+		if c.prevPad > 0 {
+			return innerTrimRefusal(c.prevPad, cutTrimRemedy)
+		}
+		c.prevPad = pkt.Padding
 		start, end := c.pos, c.pos+pkt.Dur
 		c.pos = end
 		for c.cur < len(c.windows) && c.windows[c.cur].to >= 0 && start >= c.windows[c.cur].to {
@@ -869,35 +913,32 @@ func cutTrimsExpressible(containerName string, delay, padding int64) bool {
 // fallback it did not ask for would be the wrong kind of help. The ladder calls
 // PlanCut first and falls through on its own.
 //
-// grid is the source's packet duration from Engine.PacketGrid, and samples is
-// the source's exact length, both threaded in from the plan rather than
-// re-measured here, so the bytes this delivers are the ones the plan and the
+// grid is the source's packet duration from Engine.PacketGrid, and measured is
+// the source's measured track, both threaded in from the plan rather than
+// re-derived here, so the bytes this delivers are the ones the plan and the
 // cache key were computed against. It is the assembly recipe above, minus the
 // plan step, in one call: the engine owns the open-and-assemble exactly as it
 // does for Remux.
 //
-// samples is the one thing a fresh header open cannot know and the plan can. An
+// measured carries what a fresh header open cannot know and the plan can. An
 // undeclared-length source (AAC-LC in ADTS) reports Samples -1 from its headers,
 // while the plan measured the true length off the same source. That length is
 // not cosmetic: the muxer's init segment encodes it (an fMP4 moov duration), so
 // running from the header's -1 would write a stream whose own duration disagrees
-// with the plan's advertised one. Everything else on the track (codec, config,
-// trims, track ID) a fresh open reads identically, so only the measured length
-// is patched over it. Pass a negative samples to take the header's length as-is,
-// which is what a source that declares its own length already has.
+// with the plan's advertised one. A Matroska source's trims are the same kind of
+// fact for the same reason: they live on the blocks rather than in the header, so
+// only a walk finds them, and computeCut's decodedEnd reads the tail trim. Plan
+// and run must read one track or their windows drift. Everything else (codec,
+// config, delay, track ID) a fresh open reads identically. Pass a track whose
+// Samples is negative to take the header's own, which is what a source that
+// declares its length already has.
 func (e *Engine) CutStream(ctx context.Context, src container.Source, hint string, dst io.Writer,
-	opts TranscodeOptions, spans []Span, grid int, samples int64) (*TranscodeResult, error) {
+	opts TranscodeOptions, spans []Span, grid int, measured container.Track) (*TranscodeResult, error) {
 	demux, info, err := format.OpenDemuxer(src, hint, nil)
 	if err != nil {
 		return nil, err
 	}
-	track := info.Default()
-	if samples >= 0 {
-		// The plan's measured length over the header's, the mirror of grid: the
-		// tail arithmetic and the init segment both read it, and plan and run must
-		// read the same one. See computeCut's decodedEnd and the ToEnd branch.
-		track.Samples, track.SamplesExact, track.SamplesAdvisory = samples, true, false
-	}
+	track := adoptMeasured(info.Default(), measured)
 	// CutTrack's track, not a plan's, and for the same reason RemuxDemuxer takes
 	// the demuxer's own track: the walk filters on the source's track ID, which
 	// CutTrack preserves, while a plan normalizes it to 0. There is no

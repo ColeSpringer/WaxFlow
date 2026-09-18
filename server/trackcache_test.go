@@ -261,8 +261,8 @@ func TestMeasureLengthTakesTheCheapestRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != want {
-		t.Errorf("measured %d, the walk settles at %d", got, want)
+	if got.Samples != want {
+		t.Errorf("measured %d, the walk settles at %d", got.Samples, want)
 	}
 
 	// A Matroska Opus track takes the walk route: no open pays the cluster
@@ -291,8 +291,8 @@ func TestMeasureLengthTakesTheCheapestRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := strict.Default().Samples; n != want {
-		t.Errorf("measured %d, a strict probe walks to %d", n, want)
+	if want := strict.Default().Samples; n.Samples != want {
+		t.Errorf("measured %d, a strict probe walks to %d", n.Samples, want)
 	}
 	if cs.Reads == 0 {
 		t.Error("the measure read nothing; the walk it is supposed to take reads the clusters")
@@ -349,8 +349,8 @@ func TestMeasureAgreesWithTheDecodeOnARoundedContainer(t *testing.T) {
 		}
 		want += int64(buf.N)
 	}
-	if got != want {
-		t.Errorf("measured %d, a read of the same file delivers %d", got, want)
+	if got.Samples != want {
+		t.Errorf("measured %d, a read of the same file delivers %d", got.Samples, want)
 	}
 
 	// And the shortcut it declines is still wrong, so the route is doing work
@@ -451,5 +451,50 @@ func TestTimelineGateReadsTheHeadOfAWebMMember(t *testing.T) {
 	}
 	if !track.SamplesExact || track.Samples <= 0 {
 		t.Errorf("measured track = %d (exact %v), want the walk's count", track.Samples, track.SamplesExact)
+	}
+}
+
+// TestTrackForCarriesTheWalksTrims: a measured Matroska track brings the walk's
+// trim fields into the memo, not just its length. Everything below the memo
+// plans from that track, and the two copy rungs read exactly these two fields
+// (see container.Track.MidPadding).
+func TestTrackForCarriesTheWalksTrims(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "midtrim.webm")
+	want := MidTrimWebM(t, path, true)
+
+	roots, err := source.OpenRoots([]source.Root{{Name: "lib", Path: root}}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { roots.Close() })
+	f, err := roots.Resolve(context.Background(), "lib/midtrim.webm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+	s := &Server{eng: waxflow.New()}
+
+	probe, err := s.trackFor(f, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if probe.Padding != 0 || probe.MidPadding != 0 {
+		t.Fatalf("the unmeasured track already carries trims (%d/%d); no open walks",
+			probe.Padding, probe.MidPadding)
+	}
+
+	track, err := s.trackFor(f, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if track.Samples != want || !track.SamplesExact {
+		t.Errorf("measured %d samples (exact %v), want %d", track.Samples, track.SamplesExact, want)
+	}
+	if track.MidPadding != MidTrimPad {
+		t.Errorf("the memo carries MidPadding %d, want the walk's %d", track.MidPadding, MidTrimPad)
+	}
+	if track.Padding != MidTrimEndPad {
+		t.Errorf("the memo carries Padding %d, want the final block's %d", track.Padding, MidTrimEndPad)
 	}
 }

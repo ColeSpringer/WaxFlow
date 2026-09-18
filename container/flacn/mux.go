@@ -113,25 +113,45 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	if t.Delay != 0 || t.Padding != 0 {
 		return waxerr.New(waxerr.CodeUnsupportedFormat, "flac: FLAC signals no gapless trims (lossless streams have none)")
 	}
-	si, err := flac.ParseStreamInfo(t.CodecConfig)
+	srcSI, err := flac.ParseStreamInfo(t.CodecConfig)
 	if err != nil {
 		return err
 	}
+	si := srcSI
 	if want := si.PCMFormat(); t.Fmt != want {
 		return waxerr.New(waxerr.CodeUnsupportedFormat,
 			fmt.Sprintf("flac: track format %v does not match the STREAMINFO to write (want %v)", t.Fmt, want))
 	}
-	// The encoder cannot know the stream length; the engine's projection
-	// arrives via the track, so fold it into the header when STREAMINFO
-	// has none. The 36-bit field caps what it can say; longer streams
-	// stay 0 (unknown), which every reader must handle anyway.
-	if si.Samples == 0 && t.Samples > 0 && t.Samples < 1<<36 {
+	// The header claims the projection, never the source's STREAMINFO total.
+	// The encoder cannot know the stream length, so the engine's projection
+	// arrives via the track and is the only number that describes *this* run:
+	// a source's own total is a claim about a different one, its own, which a
+	// truncated source overstates and a cut shortens. Copying it across meant
+	// a remux of a source the open had shrunk declared a count the frames
+	// could not fill, and failed at End on a destination that cannot be
+	// patched (the daemon's live cache entry is one).
+	//
+	// The 36-bit field caps what it can say; longer streams and unknown ones
+	// stay 0, which every reader must handle anyway.
+	si.Samples = 0
+	if t.Samples > 0 && t.Samples < 1<<36 {
 		si.Samples = t.Samples
 	}
 	m.si = si
 	m.wroteTotal = si.Samples
 
-	table := m.patch.Seekable() && si.Samples > 0
+	// The seek table is sized from the best length in hand, which is not the
+	// same question as what the header may *declare*. A remux of a source whose
+	// projected length is unknown (an advisory Matroska, say) still has the
+	// source's own STREAMINFO total to size a table with, and sizing is a
+	// capacity decision: unfilled slots keep their placeholders, which stay
+	// legal. Gating the table on the projection instead would silently drop the
+	// table from every such remux.
+	tableSamples := si.Samples
+	if tableSamples == 0 {
+		tableSamples = srcSI.Samples
+	}
+	table := m.patch.Seekable() && tableSamples > 0
 	// Before began: a Begin that refuses leaves the muxer unstarted, the way
 	// every other check above it does.
 	vc, err := vorbisCommentBlock(m.opts.Tags)
@@ -164,7 +184,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 
 	if table {
 		m.interval = int64(seekInterval) * int64(si.Rate)
-		n := (si.Samples + m.interval - 1) / m.interval
+		n := (tableSamples + m.interval - 1) / m.interval
 		n = min(n, maxWriteSeekPoints)
 		m.points = make([]seekRec, 0, n)
 		size := n * 18

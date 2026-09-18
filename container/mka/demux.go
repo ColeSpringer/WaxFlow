@@ -49,22 +49,29 @@ type Demuxer struct {
 	// clusterIndex maps each cluster's start offset to the exact cumulative
 	// sample position at its first frame, frame-counted by walk. Seeks land on
 	// an indexed cluster, sample-exact, because the container's millisecond
-	// block timestamps cannot express a sample position. The full walk also
-	// yields the gapless raw total and DiscardPadding sum.
+	// block timestamps cannot express a sample position. Positions are on the
+	// timeline the reader delivers, so the walk subtracts each block's
+	// DiscardPadding as it passes it (see container.Packet.Padding). The full
+	// walk also yields the gapless raw total and the two trim totals.
 	clusterIndex []clusterPos
-	walked       bool // the full walk has run; rawTotal and padding are whole
+	walked       bool // the full walk has run; the three below are whole
 	rawTotal     int64
-	padding      int64 // summed DiscardPadding, in samples
+	padding      int64 // the last block's DiscardPadding, in samples
+	midPadding   int64 // the trims on blocks before the last, summed
+	midBlocks    int   // how many blocks those came from, for the Note
 	recording    bool  // walk is building the index
 
 	// In-flight walk state, carried across calls so a bounded walk extends the
 	// index rather than restarting. walkedTo is always a cluster boundary.
-	walkCumulative int64 // running sample count during the index walk
-	walkPadding    int64 // running DiscardPadding sum, committed only by a full walk
-	walkFrames     int   // running frame count, against maxFrames
-	walkLimit      int64
-	walkedTo       int64
-	walkStopped    bool // the walk in progress hit walkLimit rather than the end
+	walkCumulative  int64 // running sample count during the index walk
+	walkMid         int64 // running sum of the clamped trims seen so far
+	walkMidBlocks   int   // blocks that contributed to walkMid
+	walkLastPad     int64 // the newest block's own DiscardPadding, the end-trim candidate
+	walkLastClamped int64 // that trim clamped to the frame it rides on
+	walkFrames      int   // running frame count, against maxFrames
+	walkLimit       int64
+	walkedTo        int64
+	walkStopped     bool // the walk in progress hit walkLimit rather than the end
 
 	// Cues, parsed lazily on the first seek. Byte offsets only; see seekWalk.
 	cues         []cueEntry
@@ -75,8 +82,10 @@ type Demuxer struct {
 	w srcwin.Window
 	readerState
 
-	warnings              []container.Warning
-	warnedNegativeDiscard bool // negative DiscardPadding is surfaced once per file
+	warnings               []container.Warning
+	warnedNegativeDiscard  bool // negative DiscardPadding is surfaced once per file
+	warnedOversizedDiscard bool // one larger than the frame it rides on, likewise
+	notedMidPadding        bool // the inner-trim Note is recorded once per file
 }
 
 // NewDemuxer parses the segment header and positions on the first cluster.
@@ -602,8 +611,9 @@ func (d *Demuxer) finalizeTrack() error {
 		samples, advisory = dur, true
 	}
 
-	// Padding stays 0: no header element states the tail trim, and the blocks
-	// that do are payload. Walk sums them and settles the length.
+	// Padding and MidPadding stay 0: no header element states a trim, and the
+	// blocks that do are payload. Walk splits the last block's from the ones
+	// before it and settles the length.
 	d.track = container.Track{
 		ID:              0,
 		Codec:           d.setup.id,

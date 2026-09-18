@@ -211,16 +211,29 @@ func (s *Server) trackFor(src *source.File, exact bool) (container.Track, error)
 			// and an exact caller that got there first leaves a measured one
 			// behind for everybody. What this avoids is making that the
 			// deterministic answer for every advisory source.
-			if track.Samples, err = s.measureSamples(src); err != nil {
-				return container.Track{}, err
+			measured, merr := s.measureSamples(src)
+			if merr != nil {
+				return container.Track{}, merr
 			}
-			// The walk decoded to the true end of stream, so the length is
-			// now authoritative and saying so is honest rather than a
-			// convenience: it is what lets a later exact caller reuse this
-			// entry, and what stops a measured track being measured again.
-			// It also stops being a rounded claim, which is what lets a
-			// timeline accept an ASF or Matroska member the library refuses.
-			track.SamplesExact, track.SamplesAdvisory = true, false
+			// The length, and the two trim fields beside it, because a walk
+			// settles those too and this memo is what every plan reads. Two
+			// plan-time answers change with them, both intended: a
+			// FLAC-in-Matroska whose blocks carry a DiscardPadding declines
+			// the remux rung (gaplessSurvives) and takes the transcode rung,
+			// which honours the trim where the copy used to drop it through
+			// remuxTrailer's unprimed rule; and computeCut's decodedEnd for a
+			// Matroska source becomes the true decode end rather than the
+			// audio end it accidentally was, which is the shape an mp4 source
+			// already plans from.
+			// The measure's own flags come with it: it decoded to the true end
+			// of stream, so the length is authoritative and measureLength says
+			// so rather than leaving each caller to restamp. That is what lets
+			// a later exact caller reuse this entry, what stops a measured
+			// track being measured again, and what lets a timeline accept an
+			// ASF or Matroska member the library otherwise refuses.
+			track.Samples, track.SamplesExact, track.SamplesAdvisory =
+				measured.Samples, measured.SamplesExact, measured.SamplesAdvisory
+			track.Padding, track.MidPadding = measured.Padding, measured.MidPadding
 		}
 		s.trackCache.put(key, track, info.Tags)
 		return track, nil

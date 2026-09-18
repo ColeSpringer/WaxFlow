@@ -205,3 +205,56 @@ func TestCutSeekClampsAPreWindowLanding(t *testing.T) {
 			pkt.Data[0], pkt.PTS)
 	}
 }
+
+// trimmedSeekDemuxer is seekableGridDemuxer with a trim on one packet, so a
+// seek can be made to land right after it.
+type trimmedSeekDemuxer struct {
+	seekableGridDemuxer
+	padAt int
+	pad   int64
+}
+
+func (d *trimmedSeekDemuxer) ReadPacket(pkt *container.Packet) error {
+	i := d.i
+	if err := d.seekableGridDemuxer.ReadPacket(pkt); err != nil {
+		return err
+	}
+	if i == d.padAt {
+		pkt.Padding = d.pad
+	}
+	return nil
+}
+
+// TestCutSeekResetsTheTrimCursor: the inner-trim backstop refuses the packet
+// *after* a padded one, so the cursor it reads describes the packet before the
+// one being read. A seek leaves no such packet, and carrying the pre-seek one's
+// trim across would refuse the packet the seek landed on for following a trim
+// it does not follow.
+func TestCutSeekResetsTheTrimCursor(t *testing.T) {
+	const grid = 1024
+	track := aacTrack(0, 94*grid)
+	spans := []Span{{From: 0, To: 94 * grid}}
+	src := &trimmedSeekDemuxer{
+		seekableGridDemuxer: seekableGridDemuxer{gridDemuxer{n: 94, dur: grid}},
+		padAt:               3, pad: 48,
+	}
+	view, err := cutSeekable(src, track, spans, grid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Read past the padded packet so the cursor holds its trim, which is the
+	// state a seek has to clear.
+	var pkt container.Packet
+	for range 4 {
+		if err := view.ReadPacket(&pkt); err != nil {
+			t.Fatalf("priming read: %v", err)
+		}
+	}
+	sk := view.(container.Seeker)
+	if _, err := sk.SeekSample(0, 40*grid); err != nil {
+		t.Fatalf("SeekSample: %v", err)
+	}
+	if err := view.ReadPacket(&pkt); err != nil {
+		t.Errorf("the first packet after a seek was refused: %v", err)
+	}
+}

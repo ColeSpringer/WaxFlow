@@ -374,3 +374,158 @@ func TestCutOfADamagedSourceIsMalformedNotADecline(t *testing.T) {
 		t.Errorf("span-past-the-end code = %q, want %q (%v)", got, waxerr.CodeInvalidRequest, err)
 	}
 }
+
+// TestPlanCutDeclinesAMidStreamTrim: a cut declines a source with a trim
+// inside the run for every destination, Matroska included, which is where it
+// parts company with the remux rung. Past the trim the source's packets sit at
+// a grid position minus the trims so far, so every window edge past it
+// straddles a packet, and the grid the plan measured cannot see it.
+func TestPlanCutDeclinesAMidStreamTrim(t *testing.T) {
+	src := midTrimWebM(t, true)
+	track := walkedTrack(t, src, "webm")
+	if track.MidPadding != midTrimPad {
+		t.Fatalf("the walk found MidPadding %d, want %d", track.MidPadding, midTrimPad)
+	}
+	e := waxflow.New()
+	grid, err := e.PacketGrid(container.BytesSource(src), "webm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spans := []waxflow.Span{{From: 9600, To: 28800}}
+	for _, cont := range []string{"", "mka", "webm"} {
+		name := cont
+		if name == "" {
+			name = "default"
+		}
+		t.Run(name, func(t *testing.T) {
+			// The control: the same request on the same track without the trim
+			// plans, so the decline below is the trim's doing and not the span's.
+			clean := track
+			clean.MidPadding = 0
+			plan, err := e.PlanCut(clean, waxflow.TranscodeOptions{Format: "opus", Container: cont}, spans, grid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan == nil {
+				t.Fatal("the control declined; this row proves nothing")
+			}
+			plan, err = e.PlanCut(track, waxflow.TranscodeOptions{Format: "opus", Container: cont}, spans, grid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan != nil {
+				t.Errorf("PlanCut planned a cut of a source with a trim inside the run")
+			}
+		})
+	}
+}
+
+// TestCutRefusesAMidStreamTrimMidWalk is the backstop for a source nothing
+// measured first: the cut view refuses on the packet after the padded one,
+// rather than splicing a stream whose positions have drifted off the grid.
+func TestCutRefusesAMidStreamTrimMidWalk(t *testing.T) {
+	src := midTrimWebM(t, true)
+	e := waxflow.New()
+	grid, err := e.PacketGrid(container.BytesSource(src), "webm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	demux, info, err := format.OpenDemuxer(container.BytesSource(src), "webm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	track := info.Default()
+	if track.MidPadding != 0 {
+		t.Fatalf("the source arrives measured (MidPadding %d); this cell needs the unwalked shape", track.MidPadding)
+	}
+	cutDemux, err := waxflow.Cut(demux, track, []waxflow.Span{{From: 0, To: 28800}}, grid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pkt container.Packet
+	for i := 0; ; i++ {
+		err := cutDemux.ReadPacket(&pkt)
+		if err == io.EOF {
+			t.Fatal("the cut finished; the inner trim must stop it")
+		}
+		if err != nil {
+			if code := waxerr.CodeOf(err); code != waxerr.CodeUnsupportedFormat {
+				t.Fatalf("code = %v, want %v: %v", code, waxerr.CodeUnsupportedFormat, err)
+			}
+			if i != midTrimBlock+1 {
+				t.Errorf("refused on packet %d, want the one after the padded block (%d)", i, midTrimBlock+1)
+			}
+			return
+		}
+	}
+}
+
+// TestCutRunReadsThePlansTrack: a cut's plan and its run must compute from one
+// track, or the windows the run cuts are not the windows the plan advertised
+// and keyed.
+//
+// The fields that differ are the ones only a measurement establishes. A
+// Matroska states its tail trim on the last block, so a fresh header open
+// reports Padding 0 while the measured track carries the walk's; computeCut's
+// decodedEnd reads that trim, and a bounded span whose end lands near the
+// source's own is clamped by one track and not the other.
+func TestCutRunReadsThePlansTrack(t *testing.T) {
+	src := midTrimWebM(t, true)
+	measured := walkedTrack(t, src, "webm")
+	if measured.Padding == 0 {
+		t.Fatal("the measure found no tail trim; this cell needs one")
+	}
+	fresh := probeTrack(t, src, "webm")
+	if fresh.Padding != 0 {
+		t.Fatalf("a header open already reports Padding %d; the divergence this pins is gone", fresh.Padding)
+	}
+	// MidPadding would decline the cut, so the comparison runs on the track
+	// without it: the tail trim alone is what has to reach the run.
+	measured.MidPadding = 0
+
+	e := waxflow.New()
+	grid, err := e.PacketGrid(container.BytesSource(src), "webm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A span ending inside the source's final packet, which is where the two
+	// decodedEnds disagree: one clamps the tail to the decode end, the other to
+	// the audio end.
+	to := measured.Samples - 1
+	spans := []waxflow.Span{{From: 0, To: to}}
+
+	planned, _, err := waxflow.CutTrack(measured, spans, grid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What the run would compute from a fresh open with the plan's track
+	// overlaid, which is what CutStream does.
+	ran, _, err := waxflow.CutTrack(adoptForTest(fresh, measured), spans, grid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planned.Samples != ran.Samples || planned.Padding != ran.Padding || planned.Delay != ran.Delay {
+		t.Errorf("the plan computes %d samples (delay %d, padding %d) and the run %d (%d, %d)",
+			planned.Samples, planned.Delay, planned.Padding, ran.Samples, ran.Delay, ran.Padding)
+	}
+	// And the same overlay on a header-only track, which is what the run used
+	// to do, differs: the cell would pass by luck without it.
+	blind, _, err := waxflow.CutTrack(withSamples(fresh, measured.Samples), spans, grid)
+	if err == nil && blind.Padding == planned.Padding && blind.Samples == planned.Samples {
+		t.Error("the header-only track computes the same cut; this cell proves nothing")
+	}
+}
+
+// adoptForTest mirrors what CutStream overlays from the plan's measured track
+// onto a fresh header open.
+func adoptForTest(fresh, measured container.Track) container.Track {
+	fresh.Samples, fresh.SamplesExact, fresh.SamplesAdvisory = measured.Samples, true, false
+	fresh.Padding, fresh.MidPadding = measured.Padding, measured.MidPadding
+	return fresh
+}
+
+// withSamples is the older overlay: the length alone.
+func withSamples(fresh container.Track, samples int64) container.Track {
+	fresh.Samples, fresh.SamplesExact, fresh.SamplesAdvisory = samples, true, false
+	return fresh
+}

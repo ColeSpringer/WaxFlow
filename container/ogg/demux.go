@@ -489,16 +489,18 @@ func (d *Demuxer) parse() error {
 		break
 	}
 
-	// lastGranule is computed lazily: it is a multi-MiB tail scan, and a
-	// mapping only needs it when the length is not otherwise known (a FLAC
-	// STREAMINFO with a nonzero total skips it entirely, the common case).
+	// lastGranule is computed lazily, since a mapping may not need it at all.
+	// It reads one tail window in the common case and widens only when that
+	// window holds no page of this serial. Every mapping asks for it now: the
+	// FLAC one verifies its declared total against it (mapflac.go), where it
+	// used to skip the read whenever a total was declared.
 	lastGranule := func() int64 {
 		if d.empty {
 			return 0
 		}
 		return d.lastGranule()
 	}
-	track, err := d.mapping.finalizeTrack(lastGranule)
+	track, err := d.mapping.finalizeTrack(lastGranule, d)
 	if err != nil {
 		return err
 	}
@@ -779,15 +781,36 @@ func (d *Demuxer) bisect(target int64) (int64, error) {
 }
 
 // lastGranule scans the file tail for the final granule position of our serial.
+//
+// Pages are walked by following each one's own length, which is what keeps the
+// scan proportional to the window rather than to the pages in it: nextPageAt
+// reads a 64 KiB resync buffer per call, so asking it for every page of a
+// densely paged stream re-reads that window once per page. The first page in
+// the window still costs a resync, since the window starts mid-page; from there
+// the next page begins exactly where the last one ended, and only a stream with
+// damage or padding between pages falls back to scanning again.
 func (d *Demuxer) lastGranule() int64 {
 	for _, window := range []int64{maxPageSize + 64<<10, 1 << 20, 4 << 20} {
 		from := max(d.firstData, d.totalSize-window)
 		granule := int64(-1)
 		var p page
+		synced := false
 		for from < d.totalSize {
-			at, ok, err := d.nextPageAt(from, &p)
-			if err != nil || !ok {
-				break
+			at := from
+			if synced {
+				ok, err := d.readPage(from, &p)
+				if err != nil || !ok {
+					synced = false
+				}
+			}
+			if !synced {
+				var ok bool
+				var err error
+				at, ok, err = d.nextPageAt(from, &p)
+				if err != nil || !ok {
+					break
+				}
+				synced = true
 			}
 			if p.serial == d.serial && p.granule >= 0 {
 				granule = p.granule

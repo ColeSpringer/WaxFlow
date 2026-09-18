@@ -5,9 +5,12 @@ package container
 // the track's own codec emits before any gapless trim. The settled track is
 // what format.Media delivers from those samples, and it is exact.
 //
-// A container that signals its tail trim per packet (Packet.Padding) states
-// no total of its own: the caller sums those trims into t.Padding before
-// settling, and raw counts the trimmed frames like any other decoder output.
+// raw is counted on the packet timeline, which excludes every per-packet trim
+// but the last (see Packet.Padding). A container that signals its tail trim
+// per packet states no total of its own: the caller puts the final packet's
+// trim in t.Padding and the sum of the inner ones in t.MidPadding, which this
+// leaves alone. So raw counts the final trim's frames, like any other decoder
+// output past the audio, and the inner ones are already gone from both sides.
 //
 // One rule, three shapes, and the split between them is exactly the one
 // format.Media's raw-end cap makes (see rawEndFor): a capped decode delivers

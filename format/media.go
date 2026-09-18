@@ -150,6 +150,7 @@ func (m *media) Walk() error {
 		// would move the delivered timeline under the caller.
 		m.track.Samples = t.Samples
 		m.track.Padding = t.Padding
+		m.track.MidPadding = t.MidPadding
 		m.track.SamplesExact = t.SamplesExact
 		m.track.SamplesAdvisory = t.SamplesAdvisory
 		m.rawEnd = rawEndFor(m.track)
@@ -401,12 +402,12 @@ func (m *media) fill(dst *audio.Buffer) error {
 // reservoir or a decoder's own delay can carry output across a call), and no
 // codec Matroska carries breaks it today. What keeps the assumption honest is
 // where the trims actually sit: a DiscardPadding on the final block trims the
-// end of the stream whichever call emitted it, and the mid-stream case is
-// pinned sample by sample (container/mka's TestMidStreamDiscardPaddingRead
-// gives every sample its own raw index) against ffmpeg's own gapless output
-// for the real codecs (TestGaplessOpus, TestDemuxDecodeDifferential). A codec
-// that did lag would under-trim here, which the raw-end cap then corrects once
-// the track is settled.
+// end of the stream whichever call emitted it, and one in the middle is pinned
+// sample by sample (container/mka's TestMidStreamDiscardPaddingRead gives every
+// sample its own raw index) against ffmpeg's own gapless output for the real
+// codecs (TestGaplessOpus, TestDemuxDecodeDifferential). A codec that did lag
+// would under-trim here, which the raw-end cap then corrects once the track is
+// settled.
 func (m *media) decodeTrimmed(dst *audio.Buffer, pkt container.Packet) error {
 	sinkBefore, carryBefore := 0, m.carryLen()
 	if dst != nil {

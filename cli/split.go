@@ -134,8 +134,9 @@ or filtered at any seam.`,
 				// track: a measured length parked in a local next to a stale
 				// declared one is how a split comes to check its cut points
 				// against the first and its pieces against the second.
-				track.Samples, track.SamplesExact = measured, true
-				track.SamplesAdvisory = false
+				track.Samples, track.SamplesExact = measured.Samples, measured.SamplesExact
+				track.SamplesAdvisory = measured.SamplesAdvisory
+				track.Padding, track.MidPadding = measured.Padding, measured.MidPadding
 			}
 
 			var pieces []piece
@@ -230,12 +231,13 @@ or filtered at any seam.`,
 // the way.
 const measureCeiling = int64(1) << 61
 
-// measureSamples reads src to its end and returns the sample count it
-// actually holds.
-func measureSamples(e *waxflow.Engine, src container.Source, hint string) (int64, error) {
+// measureSamples reads src to its end and returns the settled track: the
+// sample count it actually holds, and whatever else the measuring route
+// settled beside it (see measureMedia).
+func measureSamples(e *waxflow.Engine, src container.Source, hint string) (container.Track, error) {
 	med, err := e.OpenStream(src, hint)
 	if err != nil {
-		return 0, err
+		return container.Track{}, err
 	}
 	defer med.Close()
 	return measureMedia(med)
@@ -247,25 +249,31 @@ func measureSamples(e *waxflow.Engine, src container.Source, hint string) (int64
 // with a deferred walk answers by finishing it (headers and hops), and only a
 // source whose length no walk settles is seeked past any possible end.
 //
+// It returns the track and not just the count, for measureLength's reason: a
+// walk settles the trims beside the length, and the copy rungs plan from them.
+//
 // The walk's own code is kept whichever route runs: a damaged file fails it
 // as malformed-input, and naming that unreadable reported a bad disk.
-func measureMedia(med format.Media) (int64, error) {
+func measureMedia(med format.Media) (container.Track, error) {
 	if t := med.Info().Default(); t.SamplesExact && t.Samples >= 0 {
-		return t.Samples, nil
+		return t, nil
 	}
 	if w, ok := med.(format.Walker); ok {
 		if err := w.Walk(); err != nil {
-			return 0, waxerr.Annotate("measuring the source", err)
+			return container.Track{}, waxerr.Annotate("measuring the source", err)
 		}
 		if t := med.Info().Default(); t.SamplesExact && t.Samples >= 0 {
-			return t.Samples, nil
+			return t, nil
 		}
 	}
 	total, err := med.SeekSample(measureCeiling)
 	if err != nil {
-		return 0, waxerr.Annotate("measuring the source", err)
+		return container.Track{}, waxerr.Annotate("measuring the source", err)
 	}
-	return total, nil
+	t := med.Info().Default()
+	t.Samples = total
+	t.SamplesExact, t.SamplesAdvisory = true, false
+	return t, nil
 }
 
 // pieceName is the output filename: the disc's own track number, zero

@@ -38,6 +38,11 @@ func (d *Demuxer) resetReading(off int64) {
 // block's last frame and nowhere else: after nextFrame took it, nothing is
 // left pending. The conversion is the walk's own, so the two agree by
 // construction rather than by a matching rounding rule.
+//
+// The position the packet is stamped with excludes the trims before it
+// (container.Packet.Padding): running advances by what the frame delivers, so
+// a read and a walk describe the same timeline and a seek across an inner trim
+// lands where it says.
 func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 	data, dur, sync, err := d.nextFrame()
 	if err != nil {
@@ -46,6 +51,10 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 	var pad int64
 	if d.pendingIdx >= len(d.pending) {
 		pad = nsToSamples(d.curBlockDiscardNS, d.setup.fmt.Rate)
+	}
+	clamped, err := d.clampBlockTrim(pad, dur, d.pending[d.pendingIdx-1].off)
+	if err != nil {
+		return err
 	}
 	*pkt = container.Packet{
 		Track:   0,
@@ -57,8 +66,34 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 			Sync: sync,
 		},
 	}
-	d.running += dur
+	d.running += dur - clamped
 	return nil
+}
+
+// clampBlockTrim bounds a block's DiscardPadding to the frame it rides on (the
+// block's last) and surfaces an oversized one once per file.
+//
+// The spec attaches the trim to the block's end, so one larger than that frame
+// would have to reach back into the frames before it, and nothing here can: a
+// laced block's earlier frames have already been delivered by the time the
+// trim is known. ffmpeg ignores such a trim outright (decode.c applies a
+// trailing discard only while it fits the frame); trimming what the frame does
+// hold is the smaller departure, and the warning says which frames were kept.
+func (d *Demuxer) clampBlockTrim(pad, lastDur, off int64) (int64, error) {
+	if pad <= lastDur {
+		return pad, nil
+	}
+	if !d.warnedOversizedDiscard {
+		// Latched after the warn, not before: in strict mode warn returns the
+		// refusal instead of recording it, and latching first would let a
+		// retried walk or a second read past the same block succeed where the
+		// first refused.
+		if err := d.warn(off, "DiscardPadding of %d samples on a block whose last frame holds %d; only the frame is trimmed", pad, lastDur); err != nil {
+			return 0, err
+		}
+		d.warnedOversizedDiscard = true
+	}
+	return lastDur, nil
 }
 
 // nextFrame returns the next selected-track frame's data, duration, and sync
@@ -292,10 +327,13 @@ func (d *Demuxer) loadBlockGroup(g element) (bool, error) {
 				// to the start of the block) but not honored here; the
 				// gapless total treats it as zero, surfaced once per file.
 				if !d.warnedNegativeDiscard {
-					d.warnedNegativeDiscard = true
+					// Latched after the warn, for clampBlockTrim's reason: a
+					// strict warn is a refusal, and latching first would let a
+					// second pass over the same block through.
 					if werr := d.warn(e.dataOff, "ignoring negative DiscardPadding"); werr != nil {
 						return false, werr
 					}
+					d.warnedNegativeDiscard = true
 				}
 				discardNS = 0
 			}
@@ -345,22 +383,37 @@ func (d *Demuxer) Walk() error {
 	return err
 }
 
-// adoptWalkedLength puts a finished walk's measurement on the track: the
-// DiscardPaddings it summed become the track's tail trim, and the raw total it
-// counted settles the length through the one delivery rule. No open measures,
-// so every mka track arrives here with the advisory Info Duration or nothing
-// at all. SettleLength is idempotent on its own output, so running twice
-// changes nothing.
+// adoptWalkedLength puts a finished walk's measurement on the track: the last
+// block's DiscardPadding becomes the track's tail trim, the trims on the
+// blocks before it become MidPadding, and the raw total settles the length
+// through the one delivery rule. No open measures, so every mka track arrives
+// here with the advisory Info Duration or nothing at all. SettleLength is
+// idempotent on its own output, so running twice changes nothing.
 //
-// The trim is clamped to the run it trims. A DiscardPadding is a signed 64-bit
-// element and a file may carry one per block, so the sum is a hostile input's
-// to choose: unclamped it can pass the raw total (a length of zero, which is
-// merely wrong) or wrap past it (a length *larger* than the samples the walk
-// counted, marked authoritative, which is the one a caller cannot defend
-// against). No stream can discard more than it holds, so that is the bound.
+// The tail trim is the final block's alone, not a sum, because that is the
+// only one an end trim can mean: the timeline already excludes the inner ones
+// (see container.Packet.Padding), so they are gone from the raw run and from
+// the settled length both, and folding them in here would shorten the end by
+// frames that play in the middle.
+//
+// It is still clamped to the run it trims. A DiscardPadding is a signed 64-bit
+// element, so one block's is a hostile input's to choose: unclamped it can
+// pass the raw total (a length of zero, which is merely wrong) or wrap past it
+// (a length *larger* than the samples the walk counted, marked authoritative,
+// which is the one a caller cannot defend against). No stream can discard more
+// than it holds, so that is the bound.
 func (d *Demuxer) adoptWalkedLength() {
 	d.track.Padding = min(max(d.padding, 0), d.rawTotal)
+	d.track.MidPadding = d.midPadding
 	d.track = container.SettleLength(d.track, d.rawTotal)
+	if d.midPadding > 0 && !d.notedMidPadding {
+		// A Note rather than a warning: the file is not damaged and the audio
+		// is right. It exists so a probe, and the transcode a copy rung
+		// declines into, can say why a lossy source was re-encoded.
+		d.notedMidPadding = true
+		d.note(0, "%d samples are trimmed inside the run by a DiscardPadding on %d of the blocks before the last",
+			d.midPadding, d.midBlocks)
+	}
 }
 
 // readerState is the packet reader's cursor, everything resetReading clears.
@@ -373,9 +426,12 @@ type readerState struct {
 	clusterCursor  int64
 	clusterUnknown bool
 
-	pending           []frameLoc
-	pendingIdx        int
-	running           int64 // accumulated output position (raw decoder timeline)
+	pending    []frameLoc
+	pendingIdx int
+	// running is the position the next packet is stamped with, on the timeline
+	// the reader delivers: each block's DiscardPadding comes off it as the
+	// block's last frame goes out (see container.Packet.Padding).
+	running           int64
 	curBlockDiscardNS int64 // DiscardPadding of the block in pending, in ns
 
 	vorbisPrevBlock int
@@ -404,9 +460,9 @@ func (d *Demuxer) Walked() bool { return d.walked && d.walkedTo >= d.segmentEnd 
 // byte offset, or -1 for the whole stream. Reading is restored to the first
 // cluster afterward.
 //
-// Only a walk that reached the end commits rawTotal, padding, and the walked
-// flag; a half-summed padding would leave the settled length covering audio
-// the walk has not seen.
+// Only a walk that reached the end commits rawTotal, the two trim totals, and
+// the walked flag: which block is the *last* is the whole of what separates an
+// end trim from an inner one, and a walk that stopped short does not know.
 //
 // A bounded walk extends rather than restarts, since clusterIndex is a correct
 // prefix and walkedTo is a cluster boundary. Restarting would make a scrub cost
@@ -436,8 +492,13 @@ func (d *Demuxer) walk(limit int64) error {
 	if d.walkedTo > 0 {
 		d.resetReading(d.walkedTo) // resume: the counters carry the prefix
 	} else {
+		// Every counter the loop below advances, or a retried walk counts the
+		// stretch a failed one already did twice. fail() drops walkedTo for
+		// exactly that reason, so this branch is the one a retry reaches.
 		d.walkCumulative = 0
-		d.walkPadding = 0
+		d.walkMid = 0
+		d.walkMidBlocks = 0
+		d.walkLastPad, d.walkLastClamped = 0, 0
 		d.walkFrames = 0
 		d.clusterIndex = d.clusterIndex[:0]
 		d.resetReading(d.firstClusterOff)
@@ -453,6 +514,7 @@ func (d *Demuxer) walk(limit int64) error {
 		if err != nil {
 			return fail(err)
 		}
+		var lastDur, lastOff int64
 		for d.pendingIdx < len(d.pending) {
 			f := d.pending[d.pendingIdx]
 			d.pendingIdx++
@@ -464,17 +526,41 @@ func (d *Demuxer) walk(limit int64) error {
 				return fail(derr)
 			}
 			d.walkCumulative += dur
+			lastDur, lastOff = dur, f.off
 		}
+		// The block's trim comes off the running position, so cluster anchors
+		// are the positions a read delivers. The newest block's trim is the
+		// end-trim candidate and stays out of walkMid until another block
+		// follows it, which is what makes walkMid the *inner* trims alone.
+		d.walkLastPad, d.walkLastClamped = 0, 0
 		if d.curBlockDiscardNS > 0 {
-			d.walkPadding += nsToSamples(d.curBlockDiscardNS, d.setup.fmt.Rate)
+			pad := nsToSamples(d.curBlockDiscardNS, d.setup.fmt.Rate)
+			clamped, werr := d.clampBlockTrim(pad, lastDur, lastOff)
+			if werr != nil {
+				return fail(werr)
+			}
+			d.walkCumulative -= clamped
+			d.walkLastPad, d.walkLastClamped = pad, clamped
+			if clamped > 0 {
+				d.walkMid += clamped
+				d.walkMidBlocks++
+			}
 		}
 	}
 	if d.walkStopped {
 		d.walkedTo = d.curOff
 	} else {
 		// The stream ended, so the counts are whole even if a bound was set.
-		d.rawTotal = d.walkCumulative
-		d.padding = d.walkPadding
+		// The final block's trim goes back into the raw run, since that is
+		// where SettleLength expects the end trim's frames to be; the inner
+		// ones stay out of both sides.
+		d.rawTotal = d.walkCumulative + d.walkLastClamped
+		d.padding = d.walkLastPad
+		d.midPadding = d.walkMid - d.walkLastClamped
+		d.midBlocks = d.walkMidBlocks
+		if d.walkLastClamped > 0 {
+			d.midBlocks--
+		}
 		d.walkedTo = d.segmentEnd
 		d.walked = true
 	}
@@ -506,6 +592,12 @@ const (
 // cueLimit is where the walk may stop when seeking to sample: the first indexed
 // cluster past the target, or -1 for no usable bound (walk it all). The raw
 // target is used, not the pre-roll-adjusted one, so the bound is never early.
+//
+// The target is a position on the trimmed timeline and the cue times are the
+// container's own, which count the trimmed frames, so the converted target
+// lands at or before the cue that holds it: the bound is at least as tight as
+// it was and still never early. Block timestamps continue from the trimmed end
+// after an mkvmerge seam, which is the case that puts a trim mid-file at all.
 func (d *Demuxer) cueLimit(sample int64) int64 {
 	d.resolveCues()
 	rate := int64(d.setup.fmt.Rate)

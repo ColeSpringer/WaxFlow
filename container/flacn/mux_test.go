@@ -429,3 +429,56 @@ func hasSeekTable(t *testing.T, raw []byte) bool {
 	}
 	return false
 }
+
+// TestMuxSeekTableSurvivesAnUnknownProjection: a remux whose projected length
+// is unknown still gets a seek table, sized from the source's own STREAMINFO.
+//
+// The two are different questions and were briefly one. What the header may
+// *declare* is the run's projection and never the source's total, because a
+// source's total describes a different run; how large a table to reserve is a
+// capacity decision, and unfilled points keep their placeholders, which stay
+// legal. Tying the table to the projection silently dropped it from every
+// remux of an advisory-length source.
+func TestMuxSeekTableSurvivesAnUnknownProjection(t *testing.T) {
+	f := muxFmt(44100, 2, 16)
+	const frames = 44100 * 25
+	src := testutil.Sine(f, frames, 220, 0.6)
+	defer audio.Put(src)
+
+	// A real stream first, so its STREAMINFO carries the count a remux of it
+	// would hand the muxer as CodecConfig.
+	whole := &memWS{}
+	encodeStream(t, src, 5, whole, int64(src.N))
+	si, err := flac.ParseStreamInfo(whole.Buf[8 : 8+flac.StreamInfoLen])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if si.Samples == 0 {
+		t.Fatal("the source's STREAMINFO declares no total; this cell needs one")
+	}
+
+	// The muxer alone, with a track that projects nothing: the copy rung's
+	// shape for an advisory source on a seekable destination.
+	w := &memWS{}
+	m := flacn.NewMuxer(w, nil)
+	track := container.Track{Codec: codec.FLAC, CodecConfig: whole.Buf[8 : 8+flac.StreamInfoLen],
+		Fmt: si.PCMFormat(), Samples: -1}
+	if err := m.Begin([]container.Track{track}); err != nil {
+		t.Fatal(err)
+	}
+	raw := w.Buf
+	if raw[4]&0x80 != 0 {
+		t.Fatal("STREAMINFO marked last: no SEEKTABLE was reserved for a source that stated its own length")
+	}
+	off := 8 + flac.StreamInfoLen
+	if got := raw[off]; got != 0x80|3 {
+		t.Fatalf("second block type %#x, want a SEEKTABLE", got)
+	}
+	// And the header still declares nothing, which is the rule the table's
+	// sizing must not have dragged with it.
+	if declared, err := flac.ParseStreamInfo(raw[8 : 8+flac.StreamInfoLen]); err != nil {
+		t.Fatal(err)
+	} else if declared.Samples != 0 {
+		t.Errorf("STREAMINFO declares %d samples for a run that projected none", declared.Samples)
+	}
+}

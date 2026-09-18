@@ -22,7 +22,7 @@ var _ container.Muxer = (*Muxer)(nil)
 //
 // One constant covers the Matroska and WebM forms: they are one muxer
 // under a DocType flag.
-const MuxerVersion = "mka-mux-1"
+const MuxerVersion = "mka-mux-2"
 
 // Write-side element IDs, the header and track-entry elements the demuxer does
 // not itself parse (or parses only on read) but a valid file needs. The
@@ -116,7 +116,11 @@ type Muxer struct {
 	clusters  int64 // clusters written, against which cueStride is measured
 	cueStride int64 // record one cue every cueStride clusters
 
-	rawSamples int64 // summed packet durations, the fallback for a -1 trailer
+	// rawSamples is the raw run the blocks written so far add up to, the
+	// fallback for a -1 trailer: each block advances it by what the reader
+	// delivers, and the final block's own trim goes back in (see
+	// container.Packet.Padding).
+	rawSamples int64
 
 	// Cluster accumulator: the buffered child elements (Timestamp + blocks)
 	// and the cluster's base time in milliseconds.
@@ -124,9 +128,9 @@ type Muxer struct {
 	clusterMs   int64
 	haveCluster bool
 
-	// The held packet, kept back one step so End can turn the last one into a
-	// BlockGroup carrying DiscardPadding.
-	pending     codec.Packet
+	// The held packet, kept back one step so End can give the last one the
+	// trailer's DiscardPadding rather than its own.
+	pending     container.Packet
 	havePending bool
 }
 
@@ -201,9 +205,15 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	return m.write(header)
 }
 
-// WritePacket appends one codec packet as a SimpleBlock. The newest packet is
-// held back one step (havePending) so End can emit the final one as a
-// BlockGroup with DiscardPadding; every earlier packet is a plain SimpleBlock.
+// WritePacket appends one packet as a block, with its own trim when it states
+// one. The newest packet is held back one step (havePending) so End can give
+// the final one the trailer's DiscardPadding rather than its own; an untrimmed
+// block is a plain SimpleBlock, a trimmed one a BlockGroup.
+//
+// Matroska is the one output container that states trims per packet, so it is
+// the one muxer that reads container.Packet.Padding: an mka-to-mka copy of a
+// source with an inner trim forwards it, and every other destination declines
+// such a source before a packet moves (see Track.MidPadding).
 func (m *Muxer) WritePacket(pkt container.Packet) error {
 	if !m.begun || m.ended {
 		return waxerr.New(waxerr.CodeInternal, "mka: WritePacket outside Begin/End")
@@ -212,21 +222,27 @@ func (m *Muxer) WritePacket(pkt container.Packet) error {
 		return waxerr.New(waxerr.CodeInvalidRequest, "mka: single-track muxer")
 	}
 	if m.havePending {
-		if err := m.emitBlock(m.pending, 0); err != nil {
+		pad := max(m.pending.Padding, 0)
+		if err := m.emitBlock(m.pending.Packet, samplesToNs(pad, m.rate)); err != nil {
 			return err
+		}
+		// The block advances the run by what it delivers: this one is followed,
+		// so it is not the end trim and its frames are not in the run.
+		if m.pending.Dur > 0 {
+			m.rawSamples += m.pending.Dur - min(pad, m.pending.Dur)
 		}
 	}
 	// Copy the payload: the demuxer/engine may reuse pkt.Data after the call,
 	// and this packet is held until the next WritePacket or End.
-	m.pending = codec.Packet{
-		Data: append([]byte(nil), pkt.Data...),
-		PTS:  pkt.PTS,
-		Dur:  pkt.Dur,
+	m.pending = container.Packet{
+		Padding: pkt.Padding,
+		Packet: codec.Packet{
+			Data: append([]byte(nil), pkt.Data...),
+			PTS:  pkt.PTS,
+			Dur:  pkt.Dur,
+		},
 	}
 	m.havePending = true
-	if pkt.Dur > 0 {
-		m.rawSamples += pkt.Dur
-	}
 	return nil
 }
 
@@ -238,9 +254,16 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 	}
 	m.ended = true
 	if m.havePending {
+		// The trailer's trim, not the packet's: the trailer is the engine's
+		// statement about the end of this run, which remuxTrailer derives from
+		// this very packet when the codec allows one. The final block's frames
+		// stay inside the raw run, which is where SettleLength expects them.
 		discardNS := samplesToNs(trailer.Padding, m.rate)
-		if err := m.emitBlock(m.pending, discardNS); err != nil {
+		if err := m.emitBlock(m.pending.Packet, discardNS); err != nil {
 			return err
+		}
+		if m.pending.Dur > 0 {
+			m.rawSamples += m.pending.Dur
 		}
 		m.havePending = false
 	}

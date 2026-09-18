@@ -64,7 +64,14 @@ import (
 // beside this constant. So this one narrows to what it always described best,
 // the gapless trailer this rung synthesizes, and a muxer change bumps the
 // muxer's own term instead of borrowing this.
-const RemuxVersion = "remux-4"
+//
+// remux-5 is the gapless trailer again, for a Matroska source whose blocks
+// carry a trim before the last: the run this rung counts now excludes those
+// frames, so the trailer it synthesizes is shorter by them, and the rung
+// declines such a source for every destination but Matroska rather than
+// copying the frames out as audio. A cached output of one was wrong on both
+// counts. Over-keying the sources that have no inner trim is safe (ADR-0004).
+const RemuxVersion = "remux-5"
 
 // RemuxPlan describes what a remux would produce, computed from the source
 // track's headers alone.
@@ -156,6 +163,17 @@ func (e *Engine) PlanRemux(track container.Track, opts TranscodeOptions) (*Remux
 		return nil, err
 	}
 	if !codecSurvives(track.Codec, row.codecID) || !remuxable(opts, track.Fmt) || !gaplessSurvives(track) {
+		return nil, nil
+	}
+	if track.MidPadding > 0 && !StatesTrimsPerPacket(containerName) {
+		// A trim inside the run, which only a container that states trims per
+		// packet can carry. An Ogg granule and an MP4 edit list each name one
+		// end trim, so a copy into either would play those frames back as
+		// audio. The transcode rung trims them in PCM instead.
+		//
+		// This is the plan-time answer; copyPackets refuses mid-copy for a
+		// source nothing measured first, since MidPadding is a walk's finding
+		// and a plan reads headers.
 		return nil, nil
 	}
 	if containerName == "adts" && row.codecID == codec.HEAAC {
@@ -345,11 +363,12 @@ func remuxable(opts TranscodeOptions, src audio.Format) bool {
 // A source that states its trims per packet (Matroska's DiscardPadding) states
 // no tail trim in its header at all, so the packets supply the one the header
 // is missing and the settle runs over it as over any other. It is the *final*
-// packet's trim, not the sum: an output container carries one end trim and
-// nothing else, so summing a mid-stream trim into it would shorten the output's
-// end by that much while the frames it names still play in the middle, which is
-// real audio lost. Keeping only the last one loses none, and the mid-stream
-// frames playing in the output is the recorded limitation.
+// packet's trim, and the inner ones are not missing from it, they are already
+// out of the run: the packet timeline excludes them (see
+// container.Packet.Padding), so the walk this settles never counted those
+// frames. An output container carries one end trim and nothing else, which is
+// why a source that has more than one never reaches here: the copy rungs
+// decline it and the transcode rung, which trims in PCM, serves instead.
 //
 // It fills a trim the header left at zero and never overrides one it stated:
 // a cut's track carries trims its own arithmetic computed, and the packets it
@@ -365,6 +384,17 @@ func remuxTrailer(t container.Track, run copiedRun) codec.Trailer {
 		t.Padding = run.lastPadding
 	}
 	s := container.SettleLength(t, run.samples)
+	if !gaplessSurvives(s) {
+		// The unprimed rule again, now against what the settle produced rather
+		// than what the packets said. SettleLength's capped arm derives a
+		// padding from the arithmetic whenever the run outlives the track's
+		// authoritative length, which an Ogg-FLAC whose final page granule
+		// under-reports its own frames does; handing that to a FLAC or ALAC
+		// muxer is a refusal at End with the whole file already written. The
+		// count the packets hold is the tolerant answer, and it is the one this
+		// rung gave before those lengths were verified at all.
+		return codec.Trailer{Samples: run.samples, Delay: 0, Padding: 0}
+	}
 	return codec.Trailer{Samples: s.Samples, Delay: s.Delay, Padding: s.Padding}
 }
 
@@ -523,6 +553,14 @@ func (e *Engine) PlanRemuxSegments(track container.Track, opts TranscodeOptions,
 	rp, err := e.PlanRemux(track, segmentBitDepth(opts, track.Fmt))
 	if err != nil || rp == nil {
 		return nil, err
+	}
+	if track.MidPadding > 0 {
+		// Stated here as well as in PlanRemux, because this rung's destination
+		// is not the one PlanRemux resolved: a segmented run always writes
+		// fMP4, whatever Container the options name, and fMP4 states no trim
+		// per packet. Without this a request that named a Matroska container
+		// passed PlanRemux's gate and then met segmentWalk's mid-copy refusal.
+		return nil, nil
 	}
 	if grid <= 0 {
 		return nil, nil
@@ -727,7 +765,11 @@ func (e *Engine) segmentWalk(ctx context.Context, demux container.Demuxer, segTr
 		have = false
 		return seg.WritePacket(held, emitSeg)
 	}
-	run, err := copyPackets(ctx, demux, walkTrackID, func(pkt container.Packet) error {
+	// false: fMP4 states no trim per packet, so a source with an inner trim is
+	// refused here rather than segmented with the frames playing. The position
+	// arithmetic below stays raw, which is the packet timeline exactly because
+	// nothing gets past an inner trim.
+	run, err := copyPackets(ctx, demux, walkTrackID, false, func(pkt container.Packet) error {
 		if pos < p0 {
 			pos += pkt.Dur
 			return nil // still walking up to the restart point
@@ -836,8 +878,8 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 	// payload; the transcode rung orders its own the same way. A walk changes
 	// only the length, which no check above it reads.
 	if !patchable {
-		if w := confirmableLength(track, demux); w != nil {
-			if err := w.Walk(); err != nil {
+		if confirm := confirmableLength(track, demux); confirm != nil {
+			if err := confirm(); err != nil {
 				return nil, err
 			}
 			for _, t := range demux.Tracks() {
@@ -878,8 +920,11 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 		"out", opts.Format, "outContainer", plan.Container, "samples", muxTrack.Samples)
 
 	var done int64
-	run, err := copyPackets(ctx, demux, track.ID, func(pkt container.Packet) error {
-		if err := mux.WritePacket(container.Packet{Track: 0, Packet: pkt.Packet}); err != nil {
+	run, err := copyPackets(ctx, demux, track.ID, StatesTrimsPerPacket(plan.Container), func(pkt container.Packet) error {
+		// Padding forwarded, not dropped: Matroska is the one destination that
+		// states trims per packet, and it is the only one this call lets an
+		// inner trim reach.
+		if err := mux.WritePacket(container.Packet{Track: 0, Padding: pkt.Padding, Packet: pkt.Packet}); err != nil {
 			return err
 		}
 		// Progress means the same thing on every rung, so a caller that gets
@@ -927,9 +972,11 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 // write must consume it before returning. Every muxer in the tree does (see
 // container.Muxer), which is why the rule is stated there rather than defended
 // with a copy here: a copy per packet would cost the rung its reason to exist.
-func copyPackets(ctx context.Context, demux container.Demuxer, track int, write func(container.Packet) error) (copiedRun, error) {
+func copyPackets(ctx context.Context, demux container.Demuxer, track int, perPacketTrims bool,
+	write func(container.Packet) error) (copiedRun, error) {
 	var pkt container.Packet
 	var run copiedRun
+	var prevPad int64 // the previous packet's trim, clamped to what it can mean
 	for {
 		if err := ctx.Err(); err != nil {
 			return copiedRun{}, waxerr.Wrap(waxerr.CodeCanceled, "remux canceled", err)
@@ -938,6 +985,10 @@ func copyPackets(ctx context.Context, demux container.Demuxer, track int, write 
 		// failure that happens to carry it (see container.Demuxer).
 		err := demux.ReadPacket(&pkt)
 		if err == io.EOF {
+			// The final packet's own trim goes back into the run: it is the
+			// track's end trim, which SettleLength takes off again. Every
+			// earlier one is already out of both sides.
+			run.samples += prevPad
 			return run, nil
 		}
 		if err != nil {
@@ -946,20 +997,62 @@ func copyPackets(ctx context.Context, demux container.Demuxer, track int, write 
 		if pkt.Track != track {
 			continue
 		}
-		run.samples += pkt.Dur
-		run.lastPadding = pkt.Padding
-		run.trimmed = run.trimmed || pkt.Padding > 0
+		// Something followed the previous packet, so its trim was an inner one
+		// after all. A destination that cannot state trims per packet would
+		// play those frames back as audio, so the copy stops here rather than
+		// finishing a file that is quietly wrong.
+		if prevPad > 0 && !perPacketTrims {
+			return copiedRun{}, innerTrimRefusal(prevPad, copyTrimRemedy)
+		}
+		// Two clamps, because the two consumers mean different things by the
+		// trim. The timeline's is bounded by the packet, since a trim cannot
+		// reach past the frame it rides on. The trailer's is bounded only below,
+		// since a final trim larger than its own frame is still the end trim
+		// and the settled length is what removes the excess. Both stop at zero:
+		// RemuxDemuxer takes a caller's demuxer, and a negative trim would
+		// otherwise lengthen the run rather than shorten it.
+		pad := max(pkt.Padding, 0)
+		run.samples += pkt.Dur - min(pad, pkt.Dur)
+		run.lastPadding = pad
+		run.trimmed = run.trimmed || pad > 0
+		prevPad = min(pad, pkt.Dur)
 		if err := write(pkt); err != nil {
 			return copiedRun{}, err
 		}
 	}
 }
 
+// innerTrimRefusal is what a packet copy says when it meets a trim in the
+// middle of the stream that it cannot carry. remedy names the way past it,
+// which differs by rung: a plain remux into Matroska carries such a trim, and
+// no cut does, because past one the source's packets no longer sit on the grid
+// a window snaps to.
+//
+// It is a mid-copy refusal, so the padded packet is already out, as with any
+// other (a straddling cut, a broken segment grid). The plan declines outright
+// for a source whose walk found one (see container.Track.MidPadding); this is
+// the backstop for a source nothing measured first.
+func innerTrimRefusal(pad int64, remedy string) error {
+	return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
+		"waxflow: this source trims %d samples in the middle of the stream (a Matroska DiscardPadding), which this rung cannot carry; %s",
+		pad, remedy))
+}
+
+// copyTrimRemedy and cutTrimRemedy are the two ways past an inner trim, stated
+// where the rung that meets one can name the right one.
+const (
+	copyTrimRemedy = "measure the source first and the plan declines this rung, write mka or webm, or transcode it"
+	cutTrimRemedy  = "measure the source first and the plan declines this rung, or transcode it (no destination can cut across such a trim)"
+)
+
 // copiedRun is what a packet walk observed: the decode duration it moved, and
 // what the source said about trims along the way.
 type copiedRun struct {
-	// samples is the raw decode duration, which counts every frame the packets
-	// hold, trimmed ones included.
+	// samples is the raw decode duration on the packet timeline, which is what
+	// SettleLength means by raw: every frame the packets deliver, plus the
+	// final packet's own trim and no other (see container.Packet.Padding). A
+	// copy never gets past an earlier one, so the two definitions only differ
+	// for a source this rung declined.
 	samples int64
 	// lastPadding is the final packet's own trim and trimmed whether any
 	// packet stated one. Only the last one can reach the output: an end trim

@@ -15,6 +15,7 @@ import (
 	"encoding/binary"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -354,11 +355,10 @@ func flacInMatroska(t *testing.T, frames, declared int64) []byte {
 	}
 	track := info.Default()
 	track.Samples, track.SamplesExact, track.SamplesAdvisory = declared, false, false
-	// A FLAC encoded onto a stream leaves its STREAMINFO total 0, and that is
-	// what makes the container's own number load-bearing: a muxer folds the
-	// projection in only where STREAMINFO has none (see flacn's Begin), so a
-	// blob carrying the true count would absorb the wrong estimate and this
-	// cell would pass on a build that committed it.
+	// A FLAC encoded onto a stream leaves its STREAMINFO total 0, which is what
+	// this blob is: the fixture keeps it for realism rather than for effect,
+	// since a FLAC muxer now claims the run's projection and never a source's
+	// own total (see flacn's Begin).
 	si, err := flac.ParseStreamInfo(track.CodecConfig)
 	if err != nil {
 		t.Fatalf("the FLAC source's STREAMINFO: %v", err)
@@ -397,9 +397,148 @@ func flacInMatroska(t *testing.T, frames, declared int64) []byte {
 	return out.Bytes()
 }
 
-// streamInfoTotal reads a FLAC file's declared total straight out of
-// STREAMINFO: the "fLaC" magic, a 4-byte metadata block header, then the block.
-func streamInfoTotal(t *testing.T, file []byte) int64 {
+// streamInfoTotal is streamInfoOf's most-asked field.
+func streamInfoTotal(t *testing.T, file []byte) int64 { return streamInfoOf(t, file).Samples }
+
+// oggFLACStreamInfo reads the STREAMINFO out of an Ogg-FLAC's BOS page: the
+// page header and its segment table, then the identification packet's 17 bytes
+// of preamble (the 0x7F"FLAC" signature, the version and header count, the
+// fLaC marker, and the metadata block header).
+func oggFLACStreamInfo(t *testing.T, file []byte) flac.StreamInfo {
+	t.Helper()
+	if len(file) < 27 || string(file[:4]) != "OggS" {
+		t.Fatalf("not an Ogg stream (%d bytes)", len(file))
+	}
+	si := 27 + int(file[26]) + 17
+	if si+34 > len(file) {
+		t.Fatal("the BOS page holds no STREAMINFO")
+	}
+	out, err := flac.ParseStreamInfo(file[si : si+34])
+	if err != nil {
+		t.Fatalf("the output's STREAMINFO: %v", err)
+	}
+	return out
+}
+
+// truncatedFLAC is sine-s16.flac with n bytes off its tail: STREAMINFO still
+// declares the whole thing and the frames no longer hold it, so the open
+// verifies, shrinks the track and warns.
+func truncatedFLAC(t *testing.T, n int) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(repoPath("testdata", "sine-s16.flac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw[:len(raw)-n]
+}
+
+// TestFLACHeadersClaimTheProjection: a FLAC header states what *this* run will
+// hold, never the total its source's headers declared.
+//
+// A source's total is a claim about a different run: a truncated source's
+// overstates what its own frames hold, and a cut's describes the whole rip.
+// Copying it across wrote an output that promised audio it did not carry,
+// which on a destination the muxer cannot patch failed at End with the file
+// already on the wire (the daemon's live cache entry is one such destination),
+// and in Ogg succeeded and produced a file the demuxer now reads as damaged.
+func TestFLACHeadersClaimTheProjection(t *testing.T) {
+	short := truncatedFLAC(t, 3000)
+	intactTotal := probeTrack(t, truncatedFLAC(t, 0), "flac").Samples
+	if got := probeTrack(t, short, "flac").Samples; got >= intactTotal {
+		t.Fatalf("the truncated fixture still reports %d of %d samples; this cell needs a shrunk track",
+			got, intactTotal)
+	}
+	e := waxflow.New()
+
+	t.Run("native flac on a pipe", func(t *testing.T) {
+		var out bytes.Buffer
+		res, err := e.Remux(context.Background(), container.BytesSource(short), "flac", &out,
+			waxflow.TranscodeOptions{Format: "flac"})
+		if err != nil {
+			t.Fatalf("remuxing a truncated FLAC to flac: %v", err)
+		}
+		if got := streamInfoTotal(t, out.Bytes()); got != res.Samples {
+			t.Errorf("STREAMINFO declares %d samples, the run wrote %d", got, res.Samples)
+		}
+	})
+
+	t.Run("ogg on a pipe", func(t *testing.T) {
+		var out bytes.Buffer
+		res, err := e.Remux(context.Background(), container.BytesSource(short), "flac", &out,
+			waxflow.TranscodeOptions{Format: "flac", Container: "ogg"})
+		if err != nil {
+			t.Fatalf("remuxing a truncated FLAC to ogg: %v", err)
+		}
+		if got := oggFLACStreamInfo(t, out.Bytes()).Samples; got != res.Samples {
+			t.Errorf("STREAMINFO declares %d samples, the run wrote %d", got, res.Samples)
+		}
+		// And the file reads back as sound rather than as damaged, which is
+		// what the demuxer's own verification now decides.
+		info, err := format.Probe(container.BytesSource(out.Bytes()), "oga", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d := info.Default(); !d.SamplesExact || d.Samples != res.Samples {
+			t.Errorf("a probe of the output reports %d samples (exact %v), want %d exact",
+				d.Samples, d.SamplesExact, res.Samples)
+		}
+		if len(info.Warnings) != 0 {
+			t.Errorf("our own Ogg-FLAC reads back damaged: %v", info.Warnings)
+		}
+	})
+
+	t.Run("an intact source to ogg on a pipe", func(t *testing.T) {
+		intact := truncatedFLAC(t, 0)
+		var out bytes.Buffer
+		res, err := e.Remux(context.Background(), container.BytesSource(intact), "flac", &out,
+			waxflow.TranscodeOptions{Format: "flac", Container: "ogg"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := oggFLACStreamInfo(t, out.Bytes()).Samples; got != res.Samples {
+			t.Errorf("STREAMINFO declares %d samples, the run wrote %d", got, res.Samples)
+		}
+	})
+}
+
+// TestOggFLACEndsSignedAndDeclared: a transcode onto a destination the muxer
+// can seek ends fully declared, the way the reference `flac --ogg` writes one.
+// The signature is the encoder's, patched in at End because it does not exist
+// until the encoder has seen every sample, and it is the same one the native
+// FLAC muxer writes for the same input.
+func TestOggFLACEndsSignedAndDeclared(t *testing.T) {
+	wav, err := os.ReadFile(repoPath("testdata", "sine-s16.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := waxflow.New()
+	oga := &testutil.MemWriteSeeker{}
+	res, err := e.Transcode(context.Background(), container.BytesSource(wav), "wav", oga,
+		waxflow.TranscodeOptions{Format: "flac", Container: "ogg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	si := oggFLACStreamInfo(t, oga.Buf)
+	if si.Samples != res.Samples {
+		t.Errorf("STREAMINFO declares %d samples, the run wrote %d", si.Samples, res.Samples)
+	}
+	if si.MD5 == ([16]byte{}) {
+		t.Error("the output is unsigned; a seekable destination gets the encoder's MD5")
+	}
+
+	native := &testutil.MemWriteSeeker{}
+	if _, err := e.Transcode(context.Background(), container.BytesSource(wav), "wav", native,
+		waxflow.TranscodeOptions{Format: "flac"}); err != nil {
+		t.Fatal(err)
+	}
+	if want := streamInfoOf(t, native.Buf).MD5; si.MD5 != want {
+		t.Errorf("the Ogg output's MD5 is %x, the native one's %x for the same input", si.MD5, want)
+	}
+}
+
+// streamInfoOf reads a native FLAC file's STREAMINFO: the "fLaC" magic, a
+// 4-byte metadata block header, then the block.
+func streamInfoOf(t *testing.T, file []byte) flac.StreamInfo {
 	t.Helper()
 	if len(file) < 4+4+34 || string(file[:4]) != "fLaC" {
 		t.Fatalf("not a FLAC stream (%d bytes)", len(file))
@@ -408,5 +547,95 @@ func streamInfoTotal(t *testing.T, file []byte) int64 {
 	if err != nil {
 		t.Fatalf("the output's STREAMINFO: %v", err)
 	}
-	return si.Samples
+	return si
+}
+
+// overDeclaringFLAC wraps a real FLAC demuxer and reports a confirmed length
+// the packets do not fill: the D4 shape (exact, walked, and still short), in
+// the one codec whose headers state a total.
+type overDeclaringFLAC struct {
+	container.Demuxer
+	track container.Track
+}
+
+func (d *overDeclaringFLAC) Tracks() []container.Track { return []container.Track{d.track} }
+func (d *overDeclaringFLAC) Walk() error               { return nil }
+func (d *overDeclaringFLAC) Walked() bool              { return true }
+
+// TestOggFLACProjectionMissIsPatchedOrRefused is D4 for the Ogg mapping, both
+// destinations. A header the muxer cannot go back and fix is a commitment, so
+// a confirmed count the run then misses is refused and reclassified as the
+// input's fault; one it can fix is simply corrected at End.
+func TestOggFLACProjectionMissIsPatchedOrRefused(t *testing.T) {
+	raw := truncatedFLAC(t, 0)
+	open := func() (*overDeclaringFLAC, int64) {
+		demux, info, err := format.OpenDemuxer(container.BytesSource(raw), "flac", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		track := info.Default()
+		held := track.Samples
+		track.Samples, track.SamplesExact, track.SamplesAdvisory = held+5000, true, false
+		return &overDeclaringFLAC{Demuxer: demux, track: track}, held
+	}
+	e := waxflow.New()
+
+	d, held := open()
+	var pipe bytes.Buffer
+	_, err := e.RemuxDemuxer(context.Background(), d, d.track, &pipe,
+		waxflow.TranscodeOptions{Format: "flac", Container: "ogg"})
+	if err == nil {
+		t.Fatal("a header promising 5000 samples the packets do not hold went out unchallenged")
+	}
+	if code := waxerr.CodeOf(err); code != waxerr.CodeMalformedInput {
+		t.Errorf("code = %v, want %v: %v", code, waxerr.CodeMalformedInput, err)
+	}
+
+	d, _ = open()
+	seek := &testutil.MemWriteSeeker{}
+	if _, err := e.RemuxDemuxer(context.Background(), d, d.track, seek,
+		waxflow.TranscodeOptions{Format: "flac", Container: "ogg"}); err != nil {
+		t.Fatalf("on a seekable destination: %v", err)
+	}
+	if got := oggFLACStreamInfo(t, seek.Buf).Samples; got != held {
+		t.Errorf("the patched output declares %d samples, the packets hold %d", got, held)
+	}
+}
+
+// TestOggFLACAcceptedByFlacTool runs the reference decoder over our stamped
+// Ogg-FLAC, written the two ways the service writes one: a seekable
+// destination (STREAMINFO back-patched, signature present and verified) and a
+// plain stream (the projection stands, the signature is the placeholder and
+// the tool accepts with a warning).
+func TestOggFLACAcceptedByFlacTool(t *testing.T) {
+	testutil.FlacTool(t)
+	wav, err := os.ReadFile(repoPath("testdata", "sine-s16.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := waxflow.New()
+	dir := t.TempDir()
+
+	seek := &testutil.MemWriteSeeker{}
+	if _, err := e.Transcode(context.Background(), container.BytesSource(wav), "wav", seek,
+		waxflow.TranscodeOptions{Format: "flac", Container: "ogg"}); err != nil {
+		t.Fatal(err)
+	}
+	var pipe bytes.Buffer
+	if _, err := e.Transcode(context.Background(), container.BytesSource(wav), "wav", &pipe,
+		waxflow.TranscodeOptions{Format: "flac", Container: "ogg"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		body []byte
+	}{{"seekable", seek.Buf}, {"streamed", pipe.Bytes()}} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(dir, tc.name+".oga")
+			if err := os.WriteFile(path, tc.body, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			testutil.FlacTest(t, path)
+		})
+	}
 }

@@ -244,8 +244,8 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 	// sits after the seek and changes nothing about what is read out.
 	patchable := muxseek.CanSeek(dst)
 	if !patchable {
-		if w := confirmableLength(srcTrack, med); w != nil {
-			if err := w.Walk(); err != nil {
+		if confirm := confirmableLength(srcTrack, med); confirm != nil {
+			if err := confirm(); err != nil {
 				return nil, err
 			}
 			srcTrack = med.Info().Default()
@@ -395,32 +395,44 @@ type lengthWalker interface {
 	Walked() bool
 }
 
-// confirmableLength returns src's deferred walk when t's length is a count
-// nothing has checked yet, and nil otherwise: declared by a header, not an
-// estimate, on a source whose own walk of the payload has not run.
+// confirmableLength returns the work that would confirm t's length when it is
+// a count nothing has checked yet, and nil otherwise: declared by a header, not
+// an estimate, on a source that has not yet checked it against the payload.
 //
 // It answers both halves at once (is this the shape, and what confirms it) so
-// no caller asserts the walk separately from the test that decided there is
-// one. A nil answer therefore means two things a caller treats alike: the
-// length needs no confirming, or nothing here can confirm it.
+// no caller asserts the confirmation separately from the test that decided
+// there is one. A nil answer therefore means two things a caller treats alike:
+// the length needs no confirming, or nothing here can confirm it.
 //
 // It is the one shape a header on an unpatchable destination must not commit
 // to. A Xing frame count is a claim the frames can contradict, and a run that
 // projects it writes a byte count the encoder then misses, failing at End with
-// the output's headers already on the wire. Walking first is the remedy, which
-// is why the deferred walk is part of the shape rather than a separate test: a
+// the output's headers already on the wire. Confirming first is the remedy,
+// which is why the work is part of the shape rather than a separate test: a
 // source with none has nothing better to offer than the number it declared, and
 // dropping that would cost every streamed WAV of an mp4 its exact sizes for a
 // mismatch nothing could have caught anyway.
 //
+// Two things can do the work, and they are one answer here because the caller
+// does one thing with either. A file answers with its own deferred walk
+// (lengthWalker, the two-method shape both domains expose). A Media that is not
+// a file answers with format.LengthConfirmer, which runs whatever is underneath
+// it and re-derives its own length from the result: an open-ended span of a
+// Xing-tagged MP3 is the shape that reaches it, since a bounded span's length
+// is its own arithmetic and is already exact. A concatenated timeline answers
+// neither, by the contract in ConcatSource.Track.
+//
 // The other lengths are fine as they are: an exact one is authoritative, an
 // advisory one projects nothing at all, and an absent one commits to nothing.
-func confirmableLength(t container.Track, src any) lengthWalker {
+func confirmableLength(t container.Track, src any) func() error {
 	if t.Samples < 0 || t.SamplesExact || t.SamplesAdvisory {
 		return nil
 	}
 	if w, ok := src.(lengthWalker); ok && !w.Walked() {
-		return w
+		return w.Walk
+	}
+	if c, ok := src.(format.LengthConfirmer); ok {
+		return c.ConfirmLength
 	}
 	return nil
 }
@@ -1210,18 +1222,19 @@ var outputs = []output{
 			if isMatroska(opts.Container) {
 				return mkaMuxer(dst, opts), nil
 			}
-			if opts.Container == "ogg" {
-				return ogg.NewMuxer(dst, &ogg.MuxerOptions{Tags: opts.Tags}), nil
-			}
-			mo := flacn.MuxerOptions{Tags: opts.Tags}
 			// The signature comes from the encoder or not at all, and this is the
 			// row the nil-enc contract exists for: a remux leaves it nil and the
 			// source's own STREAMINFO signature stands, which is right because
-			// the packets carry the same audio it was computed over.
+			// the packets carry the same audio it was computed over. Both FLAC
+			// muxers take it, since both write a STREAMINFO.
+			var md5 func() [16]byte
 			if fe, ok := enc.(*flac.Encoder); ok {
-				mo.MD5 = fe.MD5
+				md5 = fe.MD5
 			}
-			return flacn.NewMuxer(dst, &mo), nil
+			if opts.Container == "ogg" {
+				return ogg.NewMuxer(dst, &ogg.MuxerOptions{Tags: opts.Tags, MD5: md5}), nil
+			}
+			return flacn.NewMuxer(dst, &flacn.MuxerOptions{Tags: opts.Tags, MD5: md5}), nil
 		},
 		// FLAC rides in Matroska (A_FLAC) and Ogg (the Xiph FLAC-in-Ogg
 		// mapping), but not WebM (Opus/Vorbis only).
@@ -1823,6 +1836,18 @@ func matroskaContainer(name string, webmOK bool) (mediaType string, ok bool) {
 
 // isMatroska reports whether a Container override selects the MKA muxer.
 func isMatroska(name string) bool { return name == "mka" || name == "webm" }
+
+// StatesTrimsPerPacket reports whether a container states its gapless trims per
+// packet (container.Packet.Padding) rather than once in a header or a trailer.
+//
+// Matroska's DiscardPadding is the only one, and the question is worth a name
+// because three unrelated decisions turn on it and would otherwise each spell
+// "is this Matroska" in their own words: whether a packet copy may carry a trim
+// that is not at the end (PlanRemux), whether a muxer writes Packet.Padding at
+// all (container.Packet), and whether a source is worth measuring before it is
+// planned from, since only a walk finds such a trim and only such a container
+// can have one (the daemon's prepareSource).
+func StatesTrimsPerPacket(containerName string) bool { return isMatroska(containerName) }
 
 // mkaMuxer builds the Matroska/WebM muxer for a container override, selecting
 // the DocType from the requested name (webm vs mka).

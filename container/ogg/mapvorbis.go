@@ -54,7 +54,7 @@ func (m *vorbisMapping) isAudio(pkt []byte) bool {
 	return len(pkt) > 0 && pkt[0]&1 == 0
 }
 
-func (m *vorbisMapping) finalizeTrack(lastGranule func() int64) (container.Track, error) {
+func (m *vorbisMapping) finalizeTrack(lastGranule func() int64, _ reporter) (container.Track, error) {
 	if !m.haveCfg {
 		return container.Track{}, malformed("vorbis stream missing setup header")
 	}

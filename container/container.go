@@ -135,9 +135,27 @@ type Track struct {
 	// -1 when unknown.
 	Samples int64
 	// Delay and Padding are the container-signaled gapless trims
-	// (LAME tag, iTunSMPB, Opus pre-skip, edit lists), in samples.
+	// (LAME tag, iTunSMPB, Opus pre-skip, edit lists), in samples. For a
+	// container that states its trims per packet (Packet.Padding), Padding is
+	// the *last* packet's, which is the only one an end trim can mean.
 	Delay   int64
 	Padding int64
+	// MidPadding is the samples a walk found trimmed inside the run, by a
+	// per-packet trim on packets before the last (Packet.Padding). It is zero
+	// until a walk has run and on every container that states no trim per
+	// packet, which is all of them but Matroska.
+	//
+	// It is what a packet copy has to know and a trailer cannot say. The
+	// delivered audio is already right either way (a reader drops each
+	// packet's own trim in place), and the trims are already out of Samples,
+	// so nothing about the decoded stream needs this. What needs it is a rung
+	// that moves packets instead of samples: an output container carries one
+	// end trim, so a copy into anything but Matroska would play the trimmed
+	// frames back as audio, and a cut of such a source is off-grid past the
+	// first inner trim because every later packet starts at a grid position
+	// minus the trims so far. Both rungs decline on it and the transcode rung,
+	// which trims in PCM, serves instead.
+	MidPadding int64
 	// SamplesExact marks Samples as an authoritative length rather than a
 	// declared or advisory one: something read the payload and this is what it
 	// found. Where the decoder over-produces past it (Ogg-Vorbis and Ogg-Opus,
@@ -146,9 +164,10 @@ type Track struct {
 	//
 	// It is set by a measurement, never by a header alone. A demuxer that
 	// verifies its declared total against the payload at open sets it (flacn
-	// and wv scan their tail for the closing frame), and one that defers that
-	// work sets it when Walk finishes. A total nothing checked leaves it false,
-	// so a mismatch stays a tolerated oddity rather than a truncation.
+	// and wv scan their tail for the closing frame, Ogg-FLAC reads the final
+	// page granule), and one that defers that work sets it when Walk finishes.
+	// A total nothing checked leaves it false, so a mismatch stays a tolerated
+	// oddity rather than a truncation.
 	SamplesExact bool
 	// SamplesAdvisory marks Samples as a total the decode is not expected to
 	// match: fit for a duration to display, unfit for arithmetic that has to
@@ -238,13 +257,23 @@ type Packet struct {
 	// Padding is the number of samples at the end of this packet's decoded
 	// output that are not audio, stated by the container per packet
 	// (Matroska's DiscardPadding). A reader drops them from that packet's
-	// output, so delivery is gapless with no total in hand; a walk sums them
-	// into the track's Padding; a muxer ignores the field, since every output
-	// container carries the end trim in its trailer instead.
+	// output, so delivery is gapless with no total in hand.
 	//
-	// The raw decoder timeline (PTS, Dur, a walk's raw total) keeps counting
-	// the trimmed frames, as ffmpeg's packet duration does, so the length a
-	// walk settles is that total less the sum of these.
+	// The timeline excludes them: the next packet starts at
+	//
+	//	PTS + Dur - min(Padding, Dur)
+	//
+	// so a position a demuxer reports, a cluster anchor a walk stamps, and a
+	// landing a seek returns are all on the timeline the reader delivers, and
+	// a seek across an inner trim lands where it says. Dur stays the frame's
+	// own decoded length, which is what a decoder produces before the trim.
+	// A walk's raw total counts the *final* packet's trim and no other, since
+	// that one is the track's end trim and SettleLength takes it off again.
+	//
+	// A muxer writes it only if its container states trims per packet
+	// (Matroska's does); the rest never see one, because the copy rungs
+	// decline a source with an inner trim before a packet moves (see
+	// Track.MidPadding).
 	Padding int64
 	codec.Packet
 }

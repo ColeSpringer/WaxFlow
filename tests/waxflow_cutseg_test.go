@@ -13,10 +13,10 @@ import (
 
 // collectCutSegments runs a segmented cut and returns the segments it emitted.
 func collectCutSegments(t *testing.T, e *waxflow.Engine, raw []byte, hint string,
-	opts waxflow.TranscodeOptions, spans []waxflow.Span, grid int, samples int64, segSamples int, start int64) []mp4.Segment {
+	opts waxflow.TranscodeOptions, spans []waxflow.Span, grid int, source container.Track, segSamples int, start int64) []mp4.Segment {
 	t.Helper()
 	var segs []mp4.Segment
-	_, err := e.CutSegments(context.Background(), container.BytesSource(raw), hint, opts, spans, grid, samples,
+	_, err := e.CutSegments(context.Background(), container.BytesSource(raw), hint, opts, spans, grid, source,
 		waxflow.SegmentedOptions{SegmentSamples: segSamples, StartSegment: start},
 		func(s mp4.Segment) error {
 			segs = append(segs, s)
@@ -70,8 +70,8 @@ func TestPlanCutSegmentsMapsDeclinesAndErrors(t *testing.T) {
 	if plan == nil {
 		t.Fatal("PlanCutSegments declined a plain Opus cut it can serve")
 	}
-	if plan.Grid != grid || plan.SourceSamples != track.Samples {
-		t.Errorf("plan threads Grid=%d SourceSamples=%d, want %d and %d", plan.Grid, plan.SourceSamples, grid, track.Samples)
+	if plan.Grid != grid || plan.Source.Samples != track.Samples {
+		t.Errorf("plan threads Grid=%d Source.Samples=%d, want %d and %d", plan.Grid, plan.Source.Samples, grid, track.Samples)
 	}
 	if len(plan.Landed) != 1 {
 		t.Errorf("Landed = %v, want one span for one", plan.Landed)
@@ -120,14 +120,14 @@ func TestCutSegmentsRestartIsByteIdentical(t *testing.T) {
 	spans := []waxflow.Span{{From: 48000, To: 192000}}
 	plan, grid := planCutSegments(t, e, src, opts, spans, 1.0)
 
-	full := collectCutSegments(t, e, src, "opus", opts, spans, grid, plan.SourceSamples, plan.SegmentSamples, 0)
+	full := collectCutSegments(t, e, src, "opus", opts, spans, grid, plan.Source, plan.SegmentSamples, 0)
 	if int64(len(full)) != plan.Segments {
 		t.Fatalf("the run emitted %d segments, the plan promised %d", len(full), plan.Segments)
 	}
 	if len(full) < 3 {
 		t.Fatalf("the cut yielded %d segments; need several to restart into", len(full))
 	}
-	tail := collectCutSegments(t, e, src, "opus", opts, spans, grid, plan.SourceSamples, plan.SegmentSamples, 1)
+	tail := collectCutSegments(t, e, src, "opus", opts, spans, grid, plan.Source, plan.SegmentSamples, 1)
 	if len(tail) != len(full)-1 {
 		t.Fatalf("restart yielded %d segments, want %d", len(tail), len(full)-1)
 	}
@@ -166,7 +166,7 @@ func TestCutSegmentsAreTheSourcesOwnPackets(t *testing.T) {
 		t.Fatal(err)
 	}
 	whole := append([]byte(nil), init...)
-	for _, s := range collectCutSegments(t, e, src, "opus", opts, spans, grid, plan.SourceSamples, plan.SegmentSamples, 0) {
+	for _, s := range collectCutSegments(t, e, src, "opus", opts, spans, grid, plan.Source, plan.SegmentSamples, 0) {
 		whole = append(whole, s.Data...)
 	}
 
