@@ -425,19 +425,9 @@ type closingMedia struct {
 
 // Walk and Walked forward format.Walker: embedding the interface promotes
 // nothing outside it, and this wraps one file.
-func (m closingMedia) Walk() error {
-	if w, ok := m.Media.(format.Walker); ok {
-		return w.Walk()
-	}
-	return nil
-}
+func (m closingMedia) Walk() error { return format.WalkMedia(m.Media) }
 
-func (m closingMedia) Walked() bool {
-	if w, ok := m.Media.(format.Walker); ok {
-		return w.Walked()
-	}
-	return true
-}
+func (m closingMedia) Walked() bool { return format.MediaWalked(m.Media) }
 
 func (m closingMedia) Close() error {
 	err := m.Media.Close()
@@ -1310,14 +1300,13 @@ func splitProgressAt(base, span, done, pieceTotal int64) int64 {
 }
 
 // splitLength is the source length a split's cuts are resolved against: the
-// header's own, measured only when the header declares none.
+// header's own, measured only when the header declares none, and whether it
+// measured. runSplit adopts a measurement onto each piece's media, so the
+// bound that accepted the cuts is the bound the run enforces.
 //
 // Filling an absent length is the whole of the measuring, and overriding a
-// declared one is deliberately not. waxflow.Slice opens its own Media per
-// piece and bounds each explicit span end through SpanTrack against that
-// Media's declared track, with no seam to hand it a number measured out here.
-// A length measured in defiance of a header could then only widen what this
-// accepts into cuts Slice refuses anyway, moving a clear refusal at the funnel
+// declared one is deliberately not. A length measured in defiance of a header
+// could only widen what this accepts, moving a clear refusal at the funnel
 // three layers down for no gain: a source that under-declares keeps its extra
 // audio unaddressable either way, which is what a lying header buys and the
 // position SpanTrack already takes.
@@ -1335,9 +1324,10 @@ func splitProgressAt(base, span, done, pieceTotal int64) int64 {
 // consulting each other. An advisory length counts as not stated: it is a
 // duration rounded into samples (ASF, a Matroska Info Duration), not a claim
 // about content, so filling it contradicts nothing. That is the distinction
-// the paragraph above draws for a lying header and this one inherits. The measuring is a memo hit rather than a second walk of the file:
-// the pass that measured this source to validate the cuts filled it, keyed by
-// source identity.
+// the paragraph above draws for a lying header and this one inherits. The
+// measuring is a memo hit rather than a second walk of the file: the pass that
+// measured this source to validate the cuts filled it, keyed by source
+// identity.
 //
 // A daemon with no MeasureTrack leaves an absent length absent rather than
 // refusing the split, where a merge refuses outright. The asymmetry is the two
@@ -1348,20 +1338,20 @@ func splitProgressAt(base, span, done, pieceTotal int64) int64 {
 // and nothing can disagree with it: the server always wires the hook, so a nil
 // one means the server is not the caller and no validation of these cuts ran
 // anywhere.
-func (r *Runner) splitLength(src *source.File) (int64, error) {
+func (r *Runner) splitLength(src *source.File) (samples int64, measured bool, err error) {
 	info, err := r.cfg.Engine.Probe(src, src.Ext, nil)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	track := info.Default()
-	if samples := track.Samples; (samples >= 0 && !track.SamplesAdvisory) || r.cfg.MeasureTrack == nil {
-		return samples, nil
+	if (track.Samples >= 0 && !track.SamplesAdvisory) || r.cfg.MeasureTrack == nil {
+		return track.Samples, false, nil
 	}
-	measured, err := r.cfg.MeasureTrack(src)
+	m, err := r.cfg.MeasureTrack(src)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	return measured.Samples, nil
+	return m.Samples, true, nil
 }
 
 // runSplit cuts the source at the request's cut points, one output per piece.
@@ -1379,7 +1369,7 @@ func (r *Runner) runSplit(ctx context.Context, j *Job) error {
 		return err
 	}
 	defer src.Close()
-	srcSamples, err := r.splitLength(src)
+	srcSamples, measured, err := r.splitLength(src)
 	if err != nil {
 		return err
 	}
@@ -1420,6 +1410,17 @@ func (r *Runner) runSplit(ctx context.Context, j *Job) error {
 		med, err := r.cfg.Engine.OpenStream(src, src.Ext)
 		if err != nil {
 			return err
+		}
+		if measured {
+			// The bound the spans were cut against has to be the bound the run
+			// enforces: SpanTrack holds each piece to the track its own media
+			// declares, and an advisory container's declaration can sit under
+			// the audio it holds, so a piece inside that gap would refuse here
+			// with its predecessors already written. Only a length this
+			// actually measured is adopted; an embedder with no MeasureTrack
+			// got the declaration verbatim, and marking an estimate exact is
+			// the opposite of what that caller asked for.
+			med = waxflow.MeasuredMedia(med, srcSamples)
 		}
 		// Slice takes ownership, so a failure here closes what it did not take.
 		sl, err := waxflow.Slice(med, sp[0], sp[1])

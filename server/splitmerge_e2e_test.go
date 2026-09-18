@@ -607,3 +607,46 @@ func TestTimelineWindowOutOfRangeFailsJob(t *testing.T) {
 		t.Fatalf("the failure does not carry SpanTrack's refusal: %+v", j.Error)
 	}
 }
+
+// TestWebMTimelineMintTakesTheJobRoute pins the route a WebM Opus member takes
+// now that no open walks its clusters. The gate asks the file whether measuring
+// it is slow; a cluster walk is slow, so a cold mint answers 202 and the job
+// does the measuring. Once the memo holds that measurement the same body mints
+// inline, which is what makes the 202 a one-time cost rather than the route.
+//
+// docs/api.md lists these members among the slow ones; this is the cell that
+// holds the code to it.
+func TestWebMTimelineMintTakesTheJobRoute(t *testing.T) {
+	env := newTestEnv(t, func(cfg *server.Config) {
+		cfg.JobsDir = filepath.Join(t.TempDir(), "jobs")
+		cfg.TimelineDir = filepath.Join(t.TempDir(), "timelines")
+	})
+	body := `{"srcs":[{"src":"lib/seed.webm"},{"src":"lib/seed.webm"}]}`
+
+	cold := env.postJSON(t, "/hls/timeline", body)
+	raw := readBody(t, cold)
+	if cold.StatusCode != http.StatusAccepted {
+		t.Fatalf("a cold WebM mint = %d, want 202 (the cluster walk is the measure): %s", cold.StatusCode, raw)
+	}
+	var created jobs.Job
+	if err := json.Unmarshal(raw, &created); err != nil {
+		t.Fatal(err)
+	}
+	job := awaitJob(t, env, created.ID)
+	if job.Timeline == nil || job.Timeline.Tl == "" {
+		t.Fatalf("the finished timeline job carries no digest: %+v", job)
+	}
+
+	warm := env.postJSON(t, "/hls/timeline", body)
+	wb := readBody(t, warm)
+	if warm.StatusCode != http.StatusCreated {
+		t.Fatalf("the same body after the job = %d, want 201: %s", warm.StatusCode, wb)
+	}
+	var tl jobs.Timeline
+	if err := json.Unmarshal(wb, &tl); err != nil {
+		t.Fatalf("the inline mint is not a timeline: %v\n%s", err, wb)
+	}
+	if tl.Tl != job.Timeline.Tl {
+		t.Errorf("inline digest = %q, the job minted %q", tl.Tl, job.Timeline.Tl)
+	}
+}

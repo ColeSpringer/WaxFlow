@@ -50,3 +50,50 @@ func TestOpenReadsTheHeadAndOneTailWindow(t *testing.T) {
 		t.Errorf("opening the shorter stream cost %v (reads, bytes) and the longer %v; the open must not scale with the stream", costs[0], costs[1])
 	}
 }
+
+// TestZeroTotalSettlesFromTheTail is the streaming encoder's file: STREAMINFO
+// total 0, which is FLAC's "unknown", written by an encode whose length was
+// not known up front. The closing frame answers it, so the open reports a real
+// length instead of -1, and it costs the same one tail window an intact file's
+// confirmation pays.
+//
+// The bound is what makes the cell worth writing: settling a total-less file by
+// walking its frames would be correct and would cost the whole payload.
+func TestZeroTotalSettlesFromTheTail(t *testing.T) {
+	const n = 200000
+	src := audio.Get(muxFmt(44100, 2, 16), n)
+	defer audio.Put(src)
+	src.N = n
+	r := rand.New(rand.NewPCG(uint64(n), 7))
+	for c := range src.Fmt.Channels {
+		s := src.ChanI(c)
+		for j := range n {
+			s[j] = int32(r.IntN(1<<16)) - 1<<15
+		}
+	}
+	var buf bytes.Buffer
+	encodeStream(t, src, 0, &buf, -1) // unknown: the muxer writes total 0
+	raw := buf.Bytes()
+	if len(raw) < 2*srcwin.Chunk {
+		t.Fatalf("%d samples wrote %d bytes, want over two windows", n, len(raw))
+	}
+
+	cs := &testutil.CountingSource{Src: container.BytesSource(raw)}
+	d, err := flacn.NewDemuxer(cs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("%d bytes: %d bytes in %d reads", len(raw), cs.Bytes, cs.Reads)
+	tr := d.Tracks()[0]
+	if tr.Samples != n || !tr.SamplesExact {
+		t.Errorf("samples = %d (exact %v), want %d exact off the closing frame",
+			tr.Samples, tr.SamplesExact, n)
+	}
+	if w := d.Warnings(); len(w) != 0 {
+		t.Errorf("a total of 0 is not a claim, so nothing disagrees with it: %v", w)
+	}
+	if cs.Bytes > srcwin.Chunk+8192 {
+		t.Errorf("opening a %d-byte total-less stream read %d bytes, want one tail window plus the head",
+			len(raw), cs.Bytes)
+	}
+}

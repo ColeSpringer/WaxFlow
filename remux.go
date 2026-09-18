@@ -12,6 +12,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/internal/muxseek"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -337,11 +338,33 @@ func remuxable(opts TranscodeOptions, src audio.Format) bool {
 // Padding is the flush of the encoder's lookahead, so a codec with no priming
 // has none to flush: FLAC and ALAC declare Delay 0 and every muxer that writes
 // them refuses a nonzero trim outright. Deriving one there would turn a
-// container's own inconsistency (a FLAC whose STREAMINFO total disagrees with
-// its frames, which format.Media tolerates as an oddity) into a nonzero padding
-// and a muxer error at End, after a whole file had been written.
-func remuxTrailer(t container.Track, decoded int64) codec.Trailer {
-	s := container.SettleLength(t, decoded)
+// container's own inconsistency (an mp4 whose sample table disagrees with the
+// samples behind it, which format.Media tolerates as an oddity) into a nonzero
+// padding and a muxer error at End, after a whole file had been written.
+//
+// A source that states its trims per packet (Matroska's DiscardPadding) states
+// no tail trim in its header at all, so the packets supply the one the header
+// is missing and the settle runs over it as over any other. It is the *final*
+// packet's trim, not the sum: an output container carries one end trim and
+// nothing else, so summing a mid-stream trim into it would shorten the output's
+// end by that much while the frames it names still play in the middle, which is
+// real audio lost. Keeping only the last one loses none, and the mid-stream
+// frames playing in the output is the recorded limitation.
+//
+// It fills a trim the header left at zero and never overrides one it stated:
+// a cut's track carries trims its own arithmetic computed, and the packets it
+// forwards are the source's, so taking theirs would discard the cut's. And it
+// is subject to the unprimed rule above, which is what keeps a DiscardPadding
+// on a lossless track (nonsense a third-party muxer can still write) from
+// becoming a trailer every FLAC and ALAC muxer refuses, after the whole file
+// has been written.
+func remuxTrailer(t container.Track, run copiedRun) codec.Trailer {
+	if run.trimmed && t.Padding == 0 && gaplessSurvives(container.Track{
+		Codec: t.Codec, Padding: run.lastPadding,
+	}) {
+		t.Padding = run.lastPadding
+	}
+	s := container.SettleLength(t, run.samples)
 	return codec.Trailer{Samples: s.Samples, Delay: s.Delay, Padding: s.Padding}
 }
 
@@ -626,6 +649,14 @@ func validateSegOpts(segOpts SegmentedOptions) error {
 // the cut too rather than reinvented.
 func (e *Engine) segmentWalk(ctx context.Context, demux container.Demuxer, segTrack container.Track,
 	walkTrackID int, segOpts SegmentedOptions, emit func(mp4.Segment) error) (*SegmentedResult, error) {
+	// No confirm step here, and the reason is where the commitment actually
+	// lives: the length an init segment declares rides in its edit list, which
+	// mp4.InitSegment builds from the *plan's* track (see RemuxInitSegment),
+	// not from this one. segTrack reaches the segmenter only as a sample entry
+	// to validate, which reads no length at all, so confirming it here would
+	// walk the source to change nothing. The server hands a measured track to
+	// both.
+	//
 	// segOpts is validated by the caller (validateSegOpts) before the source open,
 	// so a bad request fails on its own inputs first; NewSegmenter re-guards the
 	// length and start it can express.
@@ -696,7 +727,7 @@ func (e *Engine) segmentWalk(ctx context.Context, demux container.Demuxer, segTr
 		have = false
 		return seg.WritePacket(held, emitSeg)
 	}
-	decoded, err := copyPackets(ctx, demux, walkTrackID, func(pkt container.Packet) error {
+	run, err := copyPackets(ctx, demux, walkTrackID, func(pkt container.Packet) error {
 		if pos < p0 {
 			pos += pkt.Dur
 			return nil // still walking up to the restart point
@@ -722,7 +753,7 @@ func (e *Engine) segmentWalk(ctx context.Context, demux container.Demuxer, segTr
 	if err := seg.End(emitSeg); err != nil {
 		return nil, err
 	}
-	res.Samples = decoded
+	res.Samples = run.samples
 	return res, nil
 }
 
@@ -780,8 +811,13 @@ func (e *Engine) Remux(ctx context.Context, src container.Source, hint string, d
 // PlanRemux's ID-0 normalization of it, so handing a plan's Track here would
 // filter out every packet of a source whose track ID is not 0 and write an
 // empty file. The caller owns demux.
+//
+// A dst the muxer cannot patch makes the output's declared length a
+// commitment, so a source length a header declared and nothing checked is
+// confirmed by walking the source first, exactly as the transcode rung does.
 func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, track container.Track,
 	dst io.Writer, opts TranscodeOptions) (*TranscodeResult, error) {
+	patchable := muxseek.CanSeek(dst)
 	plan, err := e.PlanRemux(track, opts)
 	if err != nil {
 		return nil, err
@@ -795,23 +831,54 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 	if err != nil {
 		return nil, err
 	}
+	// The confirm step sits here rather than above, so a request that was never
+	// going to work is refused on its own inputs before anything reads the
+	// payload; the transcode rung orders its own the same way. A walk changes
+	// only the length, which no check above it reads.
+	if !patchable {
+		if w := confirmableLength(track, demux); w != nil {
+			if err := w.Walk(); err != nil {
+				return nil, err
+			}
+			for _, t := range demux.Tracks() {
+				if t.ID == track.ID {
+					track = t
+					plan.Track.Samples = t.Samples
+					plan.Track.SamplesExact, plan.Track.SamplesAdvisory = t.SamplesExact, t.SamplesAdvisory
+					break
+				}
+			}
+		}
+	}
+	// The muxer's track takes the transcode's projection rule, for the same
+	// reasons in the same order: an advisory total is not a claim about content
+	// and declares nothing, and on a destination that cannot be patched a
+	// header commits, so a count nothing confirmed (the walk above could not,
+	// or there was none to run) declares nothing either. plan.Samples keeps the
+	// estimate, like the transcode's progressTotal: it is a denominator for
+	// progress and a hint for a caller, not a promise in a header.
+	//
+	// The trailer settles the real length from the packets afterwards, so this
+	// costs the output nothing a muxer could have written honestly.
+	muxTrack := plan.Track
+	muxTrack.Samples = projectedLength(muxTrack, demux, patchable)
 	// nil encoder: see output.mux. There is no encoder on this rung, which is
 	// what the whole seam exists to express.
-	mux, err := row.mux(plan.Track, opts, nil, dst)
+	mux, err := row.mux(muxTrack, opts, nil, dst)
 	if err != nil {
 		return nil, err
 	}
 	if err := checkSeekable(mux, dst, opts.Format); err != nil {
 		return nil, err
 	}
-	if err := mux.Begin([]container.Track{plan.Track}); err != nil {
+	if err := mux.Begin([]container.Track{muxTrack}); err != nil {
 		return nil, err
 	}
 	e.log.Debug("remux started", "codec", track.Codec,
-		"out", opts.Format, "outContainer", plan.Container, "samples", plan.Track.Samples)
+		"out", opts.Format, "outContainer", plan.Container, "samples", muxTrack.Samples)
 
 	var done int64
-	decoded, err := copyPackets(ctx, demux, track.ID, func(pkt container.Packet) error {
+	run, err := copyPackets(ctx, demux, track.ID, func(pkt container.Packet) error {
 		if err := mux.WritePacket(container.Packet{Track: 0, Packet: pkt.Packet}); err != nil {
 			return err
 		}
@@ -833,9 +900,9 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 	if err != nil {
 		return nil, err
 	}
-	trailer := remuxTrailer(plan.Track, decoded)
+	trailer := remuxTrailer(muxTrack, run)
 	if err := mux.End(trailer); err != nil {
-		return nil, err
+		return nil, missedProjection(patchable, muxTrack.Samples, trailer.Samples, err)
 	}
 	// The trailer's Samples, not the track's, and the difference only shows on a
 	// container that declares no length: the trailer resolves that from the walk
@@ -860,28 +927,43 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 // write must consume it before returning. Every muxer in the tree does (see
 // container.Muxer), which is why the rule is stated there rather than defended
 // with a copy here: a copy per packet would cost the rung its reason to exist.
-func copyPackets(ctx context.Context, demux container.Demuxer, track int, write func(container.Packet) error) (int64, error) {
+func copyPackets(ctx context.Context, demux container.Demuxer, track int, write func(container.Packet) error) (copiedRun, error) {
 	var pkt container.Packet
-	var samples int64
+	var run copiedRun
 	for {
 		if err := ctx.Err(); err != nil {
-			return 0, waxerr.Wrap(waxerr.CodeCanceled, "remux canceled", err)
+			return copiedRun{}, waxerr.Wrap(waxerr.CodeCanceled, "remux canceled", err)
 		}
 		// The bare io.EOF sentinel is the clean end; a wrapped one is an I/O
 		// failure that happens to carry it (see container.Demuxer).
 		err := demux.ReadPacket(&pkt)
 		if err == io.EOF {
-			return samples, nil
+			return run, nil
 		}
 		if err != nil {
-			return 0, err
+			return copiedRun{}, err
 		}
 		if pkt.Track != track {
 			continue
 		}
-		samples += pkt.Dur
+		run.samples += pkt.Dur
+		run.lastPadding = pkt.Padding
+		run.trimmed = run.trimmed || pkt.Padding > 0
 		if err := write(pkt); err != nil {
-			return 0, err
+			return copiedRun{}, err
 		}
 	}
+}
+
+// copiedRun is what a packet walk observed: the decode duration it moved, and
+// what the source said about trims along the way.
+type copiedRun struct {
+	// samples is the raw decode duration, which counts every frame the packets
+	// hold, trimmed ones included.
+	samples int64
+	// lastPadding is the final packet's own trim and trimmed whether any
+	// packet stated one. Only the last one can reach the output: an end trim
+	// is the only trim any output container carries.
+	lastPadding int64
+	trimmed     bool
 }

@@ -697,13 +697,16 @@ func TestWalkRefreshesTheMediaTrack(t *testing.T) {
 }
 
 // TestTolerantProbeReadsHeaders is the contract docs/api.md states and the
-// Matroska driver used to break: a tolerant probe reads headers. An Opus
-// track's exact gapless total needs every cluster walked, so opening one for
-// a probe read the whole file for a number the probe was not asked for.
+// Matroska driver used to break: a tolerant probe reads headers, and so does
+// an Open. An Opus track's exact gapless total needs every cluster walked, so
+// opening one read the whole file for a number the caller had not asked for.
 //
-// The advisory Info Duration is what it reports instead, which is the same
+// The advisory Info Duration is what both report instead, which is the same
 // answer an ASF or Matroska PCM probe has always given, and a strict probe
-// still walks and still measures.
+// still walks and still measures. What the Open no longer needs the total for
+// is the delivery: the tail trim rides on the block that carries it, so a read
+// of the un-measured media is the gapless one and a Walk settles the number
+// afterwards.
 func TestTolerantProbeReadsHeaders(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "container", "mka", "testdata", "seed-opus.webm"))
 	if err != nil {
@@ -732,16 +735,44 @@ func TestTolerantProbeReadsHeaders(t *testing.T) {
 	if cs.Bytes >= scs.Bytes {
 		t.Errorf("a tolerant probe read %d bytes and a strict one %d; the walk is not being deferred", cs.Bytes, scs.Bytes)
 	}
-	med, err := Open(container.BytesSource(raw), "webm", nil)
+	ocs := &testutil.CountingSource{Src: container.BytesSource(raw)}
+	med, err := Open(ocs, "webm", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer med.Close()
-	want := med.Info().Default()
-	if !want.SamplesExact {
-		t.Fatal("Open must keep measuring an Opus track: Media needs the total before the first read")
+	opened := med.Info().Default()
+	if opened.SamplesExact || !opened.SamplesAdvisory {
+		t.Errorf("Open measured the track (%d, exact %v): an open must not walk either",
+			opened.Samples, opened.SamplesExact)
 	}
-	if got := strict.Default(); !got.SamplesExact || got.Samples != want.Samples {
-		t.Errorf("strict probe: %d (exact %v), want Open's %d exact", got.Samples, got.SamplesExact, want.Samples)
+	if w, ok := med.(Walker); !ok || w.Walked() {
+		t.Errorf("Open reports Walked = %v, want a deferred walk", ok && w.Walked())
+	}
+	if ocs.Bytes >= scs.Bytes {
+		t.Errorf("an Open read %d bytes and a strict probe %d; the walk is not being deferred", ocs.Bytes, scs.Bytes)
+	}
+
+	// The strict probe's count is what the un-measured read delivers, which is
+	// the whole of what lets the open defer the walk.
+	want := strict.Default()
+	if !want.SamplesExact {
+		t.Fatal("a strict probe must measure an Opus track")
+	}
+	buf := audio.Get(opened.Fmt, audio.StandardChunk)
+	defer audio.Put(buf)
+	var count int64
+	for {
+		err := med.ReadChunk(buf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("ReadChunk: %v", err)
+		}
+		count += int64(buf.N)
+	}
+	if count != want.Samples {
+		t.Errorf("an un-measured read delivered %d frames, want the strict probe's %d", count, want.Samples)
 	}
 }

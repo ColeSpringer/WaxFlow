@@ -344,8 +344,8 @@ func TestCuesFromFFmpegBoundTheWalk(t *testing.T) {
 }
 
 // TestCuesVorbisRefusesTheBound pins the guard against a codec whose frame
-// duration depends on the previous block, which a resume would mis-time.
-// needsGaplessWalk also covers Vorbis today; this is what survives editing it.
+// duration depends on the previous block, which a resume would mis-time: a
+// Vorbis seek pays the whole walk rather than stopping at the cue bound.
 func TestCuesVorbisRefusesTheBound(t *testing.T) {
 	d := &Demuxer{}
 	d.setup.id = codec.Vorbis

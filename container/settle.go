@@ -5,6 +5,10 @@ package container
 // the track's own codec emits before any gapless trim. The settled track is
 // what format.Media delivers from those samples, and it is exact.
 //
+// A container that signals its tail trim per packet (Packet.Padding) states
+// no total of its own: the caller sums those trims into t.Padding before
+// settling, and raw counts the trimmed frames like any other decoder output.
+//
 // One rule, three shapes, and the split between them is exactly the one
 // format.Media's raw-end cap makes (see rawEndFor): a capped decode delivers
 // its declared length, an uncapped one delivers everything it decodes.
@@ -25,9 +29,13 @@ package container
 // its playable length in the final page granule with no Delay and no Padding
 // beside it, so the run decodes past it; treating that as a bare count would
 // lengthen every remux of one to the raw run and emit the encoder's tail as
-// audio. A FLAC or WAV leaves SamplesExact false precisely because its total
-// can lie, so it stays in the bare arm and never grows a padding out of a
-// container's own inconsistency.
+// audio. A count nothing has checked stays in the bare arm and never grows a
+// padding out of a container's own inconsistency: an MP3's Xing count and an
+// mp4's sample table leave the flag false for that reason. A FLAC or WavPack
+// whose open verified its declared total against the payload does set it and
+// does reach the capped arm, which is what a verified length is for; a caller
+// that must not synthesize a trim for such a codec says so itself (see
+// remuxTrailer's unprimed rule).
 //
 // Delay is never touched: a run shorter than the front trim delivers nothing
 // either way, and the trim is the codec's, not the run's.

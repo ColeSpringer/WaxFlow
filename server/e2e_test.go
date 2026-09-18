@@ -1912,13 +1912,102 @@ func TestProbeReportsNotesSeparately(t *testing.T) {
 	}
 }
 
-// TestStreamDurationIsWhatTheBodyHolds pins the other half of settling at
-// open. A non-span /stream plans from a tolerant probe, which for a Matroska
-// Opus source estimates the total, while the body is produced from an opened
-// Media, which walks and measures it. Advertising the estimate beside audio
-// measured a different way gives a player a seek bar longer than the stream.
-func TestStreamDurationIsWhatTheBodyHolds(t *testing.T) {
+// TestStreamOfAMeasuredAdvisorySourceIsWhole is the regression the plan's D5
+// walked into: a source whose measure and whose decode disagree.
+//
+// sine-s16.wma declares 22491, measures 22495 through a seek past the end, and
+// decodes to 22528. Handing the run the measure made the output's header
+// promise 22495 on a writer the muxer cannot patch; the encoder then produced
+// 22528 and the muxer refused at End, after the 200 and the first bytes had
+// already gone out. The status line is no help there, so this reads the body
+// back: a truncated stream is one whose bytes do not parse into the samples
+// its own header claims.
+func TestStreamOfAMeasuredAdvisorySourceIsWhole(t *testing.T) {
 	env := newTestEnv(t, nil)
+	for _, f := range []string{"wav", "flac"} {
+		t.Run(f, func(t *testing.T) {
+			resp := env.get(t, "/stream?src=lib/sine.wma&format="+f, nil)
+			body := readBody(t, resp)
+			if resp.StatusCode != 200 {
+				t.Fatalf("/stream = %d: %s", resp.StatusCode, body)
+			}
+			info, err := format.Probe(container.BytesSource(body), f, nil)
+			if err != nil {
+				t.Fatalf("the streamed %s does not parse: %v", f, err)
+			}
+
+			med, err := format.Open(container.BytesSource(body), f, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer med.Close()
+			buf := audio.Get(info.Default().Fmt, audio.StandardChunk)
+			defer audio.Put(buf)
+			var got int64
+			for {
+				err := med.ReadChunk(buf)
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					t.Fatalf("reading the streamed %s back: %v", f, err)
+				}
+				got += int64(buf.N)
+			}
+			// Against the source's own decode, not against the body's header:
+			// a probe of the body measures its payload, so it answers whatever
+			// is there and cannot say that something is missing. The source is
+			// the only thing that knows how much there should be.
+			if want := decodedFrames(t, "../testdata/sine-s16.wma", "wma"); got != want {
+				t.Errorf("the streamed %s holds %d samples, the source decodes to %d; the run was cut short",
+					f, got, want)
+			}
+		})
+	}
+}
+
+// decodedFrames is how many samples a file really decodes to, which is the
+// only authority on how much a stream of it should carry: a measure taken any
+// other way can disagree with it, and for sine-s16.wma it does.
+func decodedFrames(t *testing.T, path, hint string) int64 {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	med, err := format.Open(container.BytesSource(raw), hint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	buf := audio.Get(med.Info().Default().Fmt, audio.StandardChunk)
+	defer audio.Put(buf)
+	var n int64
+	for {
+		err := med.ReadChunk(buf)
+		if err == io.EOF {
+			return n
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		n += int64(buf.N)
+	}
+}
+
+// TestStreamDurationIsWhatTheBodyHolds pins one number under the plan and the
+// body. A non-span /stream plans from a probe, which for a Matroska Opus
+// source estimates the total; the body comes from an opened Media, which no
+// longer measures either. The plan measures once and hands the run that
+// measurement, so the header, the WAV's own declared size and the audio agree,
+// and nothing walks a second time.
+func TestStreamDurationIsWhatTheBodyHolds(t *testing.T) {
+	env := newTestEnv(t, func(cfg *server.Config) {
+		// For the memo check below, which reads the gate's verdict through a
+		// mint; the stream itself needs neither directory.
+		cfg.JobsDir = filepath.Join(t.TempDir(), "jobs")
+		cfg.TimelineDir = filepath.Join(t.TempDir(), "timelines")
+	})
 	resp := env.get(t, "/stream?src=lib/seed.webm&format=wav", nil)
 	body := readBody(t, resp)
 	if resp.StatusCode != 200 {
@@ -1941,5 +2030,26 @@ func TestStreamDurationIsWhatTheBodyHolds(t *testing.T) {
 	held := float64(back.Samples) / float64(back.Fmt.Rate)
 	if math.Abs(advertised-held) > 0.002 {
 		t.Errorf("advertised %.3fs, the body holds %.3fs", advertised, held)
+	}
+
+	// The body holds what the source holds, which for a Matroska is the
+	// measured count and not the Info Duration's estimate: the read is gapless
+	// without any total, because the tail trim rides on the block that carries
+	// it. The run projects nothing into the header here (an advisory source
+	// declares no length on a writer it cannot patch), so this asks the audio
+	// rather than the declaration.
+	measured := probeSeconds(t, env, "/probe?src=lib/seed.webm&strict=1")
+	if want := int64(measured*float64(back.Fmt.Rate) + 0.5); back.Samples != want {
+		t.Errorf("the streamed WAV holds %d samples, the source measures %d", back.Samples, want)
+	}
+
+	// The measure is memoized, so one request leaves the source exact for
+	// everybody. The gate is what says so from outside: it answers slow for a
+	// source it would have to walk, and a mint of a warm one runs inline.
+	mint := env.postJSON(t, "/hls/timeline", `{"srcs":[{"src":"lib/seed.webm"},{"src":"lib/seed.webm"}]}`)
+	mb := readBody(t, mint)
+	if mint.StatusCode != http.StatusCreated {
+		t.Errorf("a mint after the stream = %d, want 201: the stream's measure was not memoized: %s",
+			mint.StatusCode, mb)
 	}
 }

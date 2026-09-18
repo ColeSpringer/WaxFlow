@@ -33,13 +33,23 @@ func (d *Demuxer) resetReading(off int64) {
 
 // ReadPacket yields the next codec packet. Packet data aliases the read
 // window and is reused across calls.
+//
+// A block's DiscardPadding trims the end of the block, so it rides on the
+// block's last frame and nowhere else: after nextFrame took it, nothing is
+// left pending. The conversion is the walk's own, so the two agree by
+// construction rather than by a matching rounding rule.
 func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 	data, dur, sync, err := d.nextFrame()
 	if err != nil {
 		return err
 	}
+	var pad int64
+	if d.pendingIdx >= len(d.pending) {
+		pad = nsToSamples(d.curBlockDiscardNS, d.setup.fmt.Rate)
+	}
 	*pkt = container.Packet{
-		Track: 0,
+		Track:   0,
+		Padding: pad,
 		Packet: codec.Packet{
 			Data: data,
 			PTS:  d.running,
@@ -309,8 +319,8 @@ type clusterPos struct {
 }
 
 // ensureWalk frame-counts every block once, building the whole seek index and
-// recording the gapless raw total and DiscardPadding sum. It runs at most once:
-// eagerly at open for a CodecDelay track, otherwise on the first seek.
+// recording the gapless raw total and DiscardPadding sum. It runs at most once,
+// on the first seek or the first Walk; no open runs it.
 func (d *Demuxer) ensureWalk() error { return d.walk(-1) }
 
 var _ container.Walker = (*Demuxer)(nil)
@@ -335,20 +345,22 @@ func (d *Demuxer) Walk() error {
 	return err
 }
 
-// adoptWalkedLength puts a finished walk's exact total on a track whose
-// length was the advisory Info Duration, or was not stated at all: the strict
-// probe that walked the clusters reports what it measured. finalizeTrack does
-// the same arithmetic for the tracks it walks at open.
+// adoptWalkedLength puts a finished walk's measurement on the track: the
+// DiscardPaddings it summed become the track's tail trim, and the raw total it
+// counted settles the length through the one delivery rule. No open measures,
+// so every mka track arrives here with the advisory Info Duration or nothing
+// at all. SettleLength is idempotent on its own output, so running twice
+// changes nothing.
 //
-// The unstated case is not hypothetical: a file with no Info Duration opens at
-// -1, and so does every Opus or Vorbis track whose walk a tolerant probe
-// deferred when its file has none either.
+// The trim is clamped to the run it trims. A DiscardPadding is a signed 64-bit
+// element and a file may carry one per block, so the sum is a hostile input's
+// to choose: unclamped it can pass the raw total (a length of zero, which is
+// merely wrong) or wrap past it (a length *larger* than the samples the walk
+// counted, marked authoritative, which is the one a caller cannot defend
+// against). No stream can discard more than it holds, so that is the bound.
 func (d *Demuxer) adoptWalkedLength() {
-	if !d.track.SamplesAdvisory && d.track.Samples >= 0 {
-		return
-	}
-	d.track.Samples = d.walkedSamples(d.track.Delay, d.track.Fmt.Rate)
-	d.track.SamplesExact, d.track.SamplesAdvisory = true, false
+	d.track.Padding = min(max(d.padding, 0), d.rawTotal)
+	d.track = container.SettleLength(d.track, d.rawTotal)
 }
 
 // readerState is the packet reader's cursor, everything resetReading clears.
@@ -392,9 +404,9 @@ func (d *Demuxer) Walked() bool { return d.walked && d.walkedTo >= d.segmentEnd 
 // byte offset, or -1 for the whole stream. Reading is restored to the first
 // cluster afterward.
 //
-// Only a walk that reached the end commits rawTotal, paddingNS, and the walked
-// flag; a half-summed padding would leave finalizeTrack reading a total for
-// audio it has not seen.
+// Only a walk that reached the end commits rawTotal, padding, and the walked
+// flag; a half-summed padding would leave the settled length covering audio
+// the walk has not seen.
 //
 // A bounded walk extends rather than restarts, since clusterIndex is a correct
 // prefix and walkedTo is a cluster boundary. Restarting would make a scrub cost
@@ -425,7 +437,7 @@ func (d *Demuxer) walk(limit int64) error {
 		d.resetReading(d.walkedTo) // resume: the counters carry the prefix
 	} else {
 		d.walkCumulative = 0
-		d.walkPaddingNS = 0
+		d.walkPadding = 0
 		d.walkFrames = 0
 		d.clusterIndex = d.clusterIndex[:0]
 		d.resetReading(d.firstClusterOff)
@@ -454,7 +466,7 @@ func (d *Demuxer) walk(limit int64) error {
 			d.walkCumulative += dur
 		}
 		if d.curBlockDiscardNS > 0 {
-			d.walkPaddingNS += d.curBlockDiscardNS
+			d.walkPadding += nsToSamples(d.curBlockDiscardNS, d.setup.fmt.Rate)
 		}
 	}
 	if d.walkStopped {
@@ -462,7 +474,7 @@ func (d *Demuxer) walk(limit int64) error {
 	} else {
 		// The stream ended, so the counts are whole even if a bound was set.
 		d.rawTotal = d.walkCumulative
-		d.paddingNS = d.walkPaddingNS
+		d.padding = d.walkPadding
 		d.walkedTo = d.segmentEnd
 		d.walked = true
 	}
@@ -474,9 +486,9 @@ func (d *Demuxer) walk(limit int64) error {
 
 // boundedWalkSafe reports whether the walk may stop short and resume later.
 // resetReading clears vorbisPrevBlock and a Vorbis frame's duration depends on
-// the previous block's size, so a mid-file resume would mis-time it. This is a
-// condition rather than a circumstance of needsGaplessWalk putting Vorbis on
-// the eager walk, so editing that one cannot break this one silently.
+// the previous block's size, so a mid-file resume would mis-time it. Vorbis
+// therefore pays its whole walk on the first seek that needs one, where every
+// other codec pays only as far as the cue bound.
 func (d *Demuxer) boundedWalkSafe() bool {
 	return d.setup.id != codec.Vorbis // the one codec carrying inter-frame duration state
 }

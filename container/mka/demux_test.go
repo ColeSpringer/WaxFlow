@@ -82,9 +82,13 @@ func gen(t *testing.T, dir string, s spec) string {
 // decoded is a fully decoded fixture, interleaved for oracle comparison.
 type decoded struct {
 	track container.Track
-	i32   []int32   // populated for integer tracks (left-justified like ffmpeg s32)
-	f32   []float32 // populated for float tracks
-	count int       // frames
+	// walked is the track after the read finished and Walk settled it. No open
+	// measures a Matroska, so track is what the headers stated and this is what
+	// the payload holds; the read delivers the second number either way.
+	walked container.Track
+	i32    []int32   // populated for integer tracks (left-justified like ffmpeg s32)
+	f32    []float32 // populated for float tracks
+	count  int       // frames
 }
 
 // decodeAll opens a fixture through format.Open and reads it to end.
@@ -117,6 +121,13 @@ func decodeAll(t *testing.T, path string, strict bool) decoded {
 		} else {
 			out.f32 = append(out.f32, testutil.InterleaveF(tmp)...)
 		}
+	}
+	out.walked = out.track
+	if w, ok := med.(format.Walker); ok {
+		if err := w.Walk(); err != nil {
+			t.Fatalf("Walk: %v", err)
+		}
+		out.walked = med.Info().Default()
 	}
 	return out
 }
@@ -189,11 +200,14 @@ func TestDemuxDecodeDifferential(t *testing.T) {
 					t.Errorf("float PCM decode differs from ffmpeg: %v", d)
 				}
 			default: // lossy
-				// Only a gapless (CodecDelay) track has an authoritative length;
-				// otherwise Samples is the advisory millisecond Duration and the
-				// untrimmed decode legitimately runs a little past it.
-				if got.track.SamplesExact && int64(got.count) != got.track.Samples {
-					t.Errorf("decoded %d frames, track declares %d", got.count, got.track.Samples)
+				// Unconditional through the walk: a fresh open states the
+				// advisory millisecond Duration, which the untrimmed decode
+				// legitimately runs a little past, but a finished walk has
+				// counted the payload and must agree with what the read
+				// delivered from it, for every codec here.
+				if !got.walked.SamplesExact || int64(got.count) != got.walked.Samples {
+					t.Errorf("decoded %d frames, the walked track declares %d (exact %v)",
+						got.count, got.walked.Samples, got.walked.SamplesExact)
 				}
 				want := testutil.FFmpegDecodeF32(t, path)
 				// ffmpeg's decode may or may not trim the track's front CodecDelay
@@ -245,7 +259,10 @@ func lossyTolerance(id codec.ID) float64 {
 
 // TestGaplessOpus pins the Opus gapless contract: the decoded length equals
 // ffmpeg's, which applies the same CodecDelay (front) and DiscardPadding (end)
-// trims, and the track reports an exact length.
+// trims, with no walk at all, and a Walk afterwards reports that same count
+// exact. A fresh open states the advisory Info Duration, which runs past the
+// audio; the read is gapless anyway, because the trim rides on the block that
+// carries it.
 func TestGaplessOpus(t *testing.T) {
 	testutil.FFmpeg(t)
 	dir := t.TempDir()
@@ -256,18 +273,19 @@ func TestGaplessOpus(t *testing.T) {
 		t.Run(s.name, func(t *testing.T) {
 			path := gen(t, dir, s)
 			got := decodeAll(t, path, false)
-			if !got.track.SamplesExact {
-				t.Errorf("Opus track is not marked SamplesExact")
+			if got.track.SamplesExact {
+				t.Errorf("a fresh open marked the Opus track exact; no open walks the clusters")
 			}
 			if got.track.Delay <= 0 {
 				t.Errorf("Opus track has no CodecDelay (Delay = %d)", got.track.Delay)
 			}
-			if int64(got.count) != got.track.Samples {
-				t.Errorf("decoded %d frames, track declares %d", got.count, got.track.Samples)
-			}
 			want := len(testutil.FFmpegDecodeF32(t, path)) / s.channels
 			if got.count != want {
 				t.Errorf("decoded %d frames, ffmpeg %d (gapless mismatch)", got.count, want)
+			}
+			if !got.walked.SamplesExact || int64(got.count) != got.walked.Samples {
+				t.Errorf("after Walk: %d samples (exact %v), want the %d frames the read delivered",
+					got.walked.Samples, got.walked.SamplesExact, got.count)
 			}
 		})
 	}

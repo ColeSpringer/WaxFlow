@@ -3,7 +3,6 @@ package jobs
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -277,68 +276,90 @@ func writeSilenceWAV(t *testing.T, dir string) (ref string, want []waxflow.Silen
 	return "lib/silence.wav", want
 }
 
-// patchFLACTotalSamples rewrites STREAMINFO's 36-bit total_samples field in
-// place, leaving the audio frames alone: the file goes on holding every sample
-// it held, and only its header now says otherwise.
+// writeUndeclaredADTS writes an ADTS stream into dir under name, long enough
+// to split, and reports the ref plus what a walk of it measures.
 //
-// STREAMINFO is the first metadata block, so the packed
-// rate|channels|bits|total word sits at a fixed offset: the "fLaC" magic, a
-// 4-byte block header, then 10 bytes of block and frame sizes.
-func patchFLACTotalSamples(t *testing.T, path string, total int64) {
+// ADTS is the genuine absent-length source: its frames carry no total anywhere
+// and nothing short of counting them answers the question. A FLAC whose
+// STREAMINFO total is 0 used to serve here and no longer can, because the open
+// settles such a file from its closing frame.
+//
+// Concatenating the fixture is how the length is reached: ADTS frames are
+// self-delimiting, so a repeated stream is one longer stream.
+func writeUndeclaredADTS(t *testing.T, dir, name string, repeats int) (ref string, real int64) {
 	t.Helper()
-	raw, err := os.ReadFile(path)
+	one, err := os.ReadFile(filepath.Join("..", "..", "container", "adts", "testdata", "stereo.aac"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(raw) < 26 || string(raw[:4]) != "fLaC" {
-		t.Fatalf("%s is not a FLAC stream", path)
-	}
-	const off = 4 + 4 + 10
-	const mask = uint64(1)<<36 - 1
-	w := binary.BigEndian.Uint64(raw[off:])
-	binary.BigEndian.PutUint64(raw[off:], w&^mask|uint64(total)&mask)
-	if err := os.WriteFile(path, raw, 0o644); err != nil {
+	raw := bytes.Repeat(one, repeats)
+	if err := os.WriteFile(filepath.Join(dir, name), raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	e := waxflow.New()
+	info, err := e.Probe(container.BytesSource(raw), "aac", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if track := info.Default(); track.Samples >= 0 {
+		t.Fatalf("the fixture declares %d samples; this cell needs a source with no length at all",
+			track.Samples)
+	}
+	med, err := e.OpenStream(container.BytesSource(raw), "aac")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	if err := med.(format.Walker).Walk(); err != nil {
+		t.Fatal(err)
+	}
+	return "lib/" + name, med.Info().Default().Samples
 }
 
-// writeFLACDeclaring renders a FLAC into dir under name whose STREAMINFO
-// declares the given total, and reports the ref plus what the stream really
-// holds. declared is written verbatim, so 0 spells FLAC's own "unknown" and
-// any value short of the truth spells a header that under-declares.
+// writeDoubledMP3 writes a Xing-tagged MP3 twice over into dir under name, and
+// reports the ref, the count its leading tag declares, and the raw samples the
+// file really holds.
 //
-// Both shapes are real rather than contrived. FLAC never marks its length
-// exact, because a STREAMINFO total can lie and trusting it as a hard length
-// would truncate an otherwise good file, so the decoder reads every frame that
-// is actually there whatever the header claims. That is what makes the two
-// cases differ in kind: an absent length is a question nothing has answered,
-// while a wrong one is an answer the file is entitled to be held to.
-func writeFLACDeclaring(t *testing.T, dir, name string, declared int64) (ref string, real int64) {
+// Concatenation is how a real file comes to under-declare: the leading Xing
+// frame counts the first copy alone, and nothing in the format checks it, so
+// the header claims half of what the frames decode to. The second copy's own
+// tag frame is an ordinary silent MPEG frame to every reader downstream of it.
+func writeDoubledMP3(t *testing.T, dir, name string) (ref string, declared, real int64) {
 	t.Helper()
-	// A genuine FLAC first: patching a header is only honest over a stream
-	// that really holds the samples the patch denies.
-	wavDir := t.TempDir()
-	writeLongWAV(t, wavDir)
-	wav, err := os.ReadFile(filepath.Join(wavDir, "long.wav"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "sine-cbr128.mp3"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, name)
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
+	doubled := append(append([]byte(nil), raw...), raw...)
+	if err := os.WriteFile(filepath.Join(dir, name), doubled, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := waxflow.New()
+	info, err := e.Probe(container.BytesSource(doubled), "mp3", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := waxflow.New().Transcode(context.Background(), container.BytesSource(wav), "wav", f,
-		waxflow.TranscodeOptions{Format: "flac", FLACLevel: -1})
+	track := info.Default()
+	if track.Samples < 0 || track.SamplesExact || track.SamplesAdvisory {
+		t.Fatalf("the fixture's length is %d (exact %v advisory %v); this cell needs a declared "+
+			"count nothing verified", track.Samples, track.SamplesExact, track.SamplesAdvisory)
+	}
+	declared = track.Samples
+
+	// What the frames really decode to, which the walk settles: the declared
+	// audio plus everything past it, which the LAME trims turn into padding.
+	med, err := e.OpenStream(container.BytesSource(doubled), "mp3")
 	if err != nil {
-		f.Close()
 		t.Fatal(err)
 	}
-	if err := f.Close(); err != nil {
-		t.Fatal(err)
+	defer med.Close()
+	if w, ok := med.(format.Walker); ok {
+		if err := w.Walk(); err != nil {
+			t.Fatal(err)
+		}
 	}
-	patchFLACTotalSamples(t, path, declared)
-	return "lib/" + name, res.Samples
+	walked := med.Info().Default()
+	return "lib/" + name, declared, walked.Samples + walked.Padding
 }
 
 // measureTrack is the daemon's MeasureTrack hook in miniature: the declared
@@ -365,8 +386,7 @@ func measureTrack() func(*source.File) (container.Track, error) {
 }
 
 // TestSplitFillsAnAbsentLength covers the source a split has no number for at
-// all: an ADTS stream, or this FLAC whose STREAMINFO total is 0, which is how
-// FLAC spells "unknown".
+// all: an ADTS stream, whose frames state no total anywhere.
 //
 // Nothing bounds such a split unless it measures. waxflow.SpanTrack bounds an
 // explicit span end against the declared length and a track that declares
@@ -375,12 +395,13 @@ func measureTrack() func(*source.File) (container.Track, error) {
 // already written. Measuring is what turns that into a refusal.
 func TestSplitFillsAnAbsentLength(t *testing.T) {
 	// The fixture declares nothing and holds real samples; a cut past real is
-	// the one nothing but a measurement can catch.
-	const cut = int64(50_000)
+	// the one nothing but a measurement can catch. 27 copies of the ADTS
+	// fixture run past the cut with room for a second piece.
+	const cut, repeats = int64(50_000), 27
 
 	t.Run("it splits, and reports a real percent rather than an unknown one", func(t *testing.T) {
 		root := t.TempDir()
-		ref, real := writeFLACDeclaring(t, root, "undeclared.flac", 0)
+		ref, real := writeUndeclaredADTS(t, root, "undeclared.aac", repeats)
 		res := openRoots(t, root)
 		pools, release := saturatedPool(t)
 		r := openRunner(t, Config{
@@ -441,7 +462,7 @@ func TestSplitFillsAnAbsentLength(t *testing.T) {
 
 	t.Run("a cut past the real end is refused before any piece is written", func(t *testing.T) {
 		root := t.TempDir()
-		ref, real := writeFLACDeclaring(t, root, "undeclared.flac", 0)
+		ref, real := writeUndeclaredADTS(t, root, "undeclared.aac", repeats)
 		past := real + 1000
 		res := openRoots(t, root)
 		dir := t.TempDir()
@@ -494,10 +515,16 @@ func TestSplitFillsAnAbsentLength(t *testing.T) {
 // waxflow.SpanTrack would refuse the span for the same reason a layer further
 // down. A measurement here would overrule only the first two, and the caller
 // would trade a 400 for a 201 that fails at run.
+//
+// The source is an MP3 rather than a FLAC, and the difference is the whole
+// reason the rule still has something to govern. A FLAC's STREAMINFO total is
+// verified against the frames at open, in both directions, so it cannot reach
+// here under-declaring; an MP3's Xing count is not, and two files concatenated
+// are the everyday way one comes to hold twice what its leading tag says.
 func TestSplitRefusesAnUnderDeclaredCutConsistently(t *testing.T) {
-	const declared, cut = int64(100_000), int64(150_000)
+	const cut = int64(30_000)
 	root := t.TempDir()
-	ref, real := writeFLACDeclaring(t, root, "under.flac", declared)
+	ref, declared, real := writeDoubledMP3(t, root, "under.mp3")
 	// The cut has to fall in the gap between the lie and the truth, or this
 	// pins nothing: past the declared end, but over audio that is really there.
 	if cut <= declared || cut >= real {
@@ -517,6 +544,7 @@ func TestSplitRefusesAnUnderDeclaredCutConsistently(t *testing.T) {
 	if failed.Error == nil || failed.Error.Code != string(waxerr.CodeInvalidRequest) {
 		t.Fatalf("error = %+v, want %s", failed.Error, waxerr.CodeInvalidRequest)
 	}
+
 	// The message names the declared length, which is the number the API's own
 	// refusal quotes: the two answers have to be the same answer.
 	msg := failed.Error.Message

@@ -52,18 +52,11 @@ type driver struct {
 }
 
 // openOptions is what the driver table's open takes: the caller's Strict
-// policy, plus which of the three entry points asked.
-//
-// probe is the seam a header-only probe needs and nothing else does. It is
-// internal rather than a field on the public Options because the contract it
-// serves is a default, not a knob: docs/api.md says a tolerant probe reads
-// headers, and a public flag would leave the default violating that. Only
-// container/mka reads it today (its Opus and Vorbis tracks walk the clusters
-// inside their own constructor); every other row defers nothing at open, so
-// for them a probe and an open are the same call.
+// policy, and nothing else. A probe and an open are the same call on every
+// row, because no demuxer reads a payload at open: what a walk would confirm
+// is deferred to Walk on every one of them.
 type openOptions struct {
 	strict bool
-	probe  bool
 }
 
 // drivers is the explicit ordered magic table (no blank-import
@@ -128,7 +121,7 @@ var drivers = []driver{
 		exts:      []string{"mka", "mkv", "webm"},
 		mediaType: "audio/x-matroska",
 		open: func(src container.Source, o openOptions) (container.Demuxer, error) {
-			return mka.NewDemuxer(src, &mka.DemuxerOptions{Strict: o.strict, DeferWalk: o.probe})
+			return mka.NewDemuxer(src, &mka.DemuxerOptions{Strict: o.strict})
 		},
 	},
 	{

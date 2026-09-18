@@ -298,6 +298,21 @@ func (s *Server) transcodeSpan(ctx context.Context, src *source.File, hint strin
 			[]waxflow.Span{{From: sp.from, To: sp.end()}}, grid, cutSamples)
 	}
 	if !sp.narrowed() {
+		// The plan's measure is not pushed onto the run here, and the asymmetry
+		// with the spanned branch below is the whole of why: there the measure
+		// feeds waxflow.Slice, which bounds delivery to it, and here nothing
+		// would. waxflow.MeasuredMedia only changes what a media *declares*, so
+		// on its own it turns the projection into a promise the read does not
+		// keep: an advisory source whose measure and whose decode disagree
+		// (sine-s16.wma measures 22495 and decodes 22528) then writes 22495
+		// into a header it cannot patch and dies at End, after the 200 and the
+		// first bytes have gone out, with the cache entry permanently failed.
+		//
+		// So an unspanned run reads what the file holds and projects from the
+		// media's own declaration, as it always did. The cost is that an
+		// advisory source's streamed output carries a placeholder size rather
+		// than an exact one; X-Content-Duration still advertises the measure,
+		// and the body still holds what the source holds.
 		return s.eng.Transcode(ctx, src, hint, dst, opts)
 	}
 	// The plan validated the window against the measured total (prepareSource

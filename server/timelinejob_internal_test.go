@@ -32,9 +32,10 @@ func (c *memIndexCache) Drop(src container.Source) { delete(c.blobs, c.key(src))
 // measuring this member costs a full scan, as the member's own answer
 // through format.Walker: not exact and not yet walked. Both directions are
 // asserted on one container, since a gate that answered the same way for
-// both would be no gate; the two shapes that fell through the old Indexer
-// mark (ADTS, an advisory-length Matroska) take the job path; and a sidecar
-// restored complete mints inline.
+// both would be no gate; the shapes that fell through the old Indexer mark
+// (ADTS, an advisory-length Matroska, and an ASF whose rounded positions make
+// its measure a decode) take the job path; and a sidecar restored complete
+// mints inline.
 func TestTimelineJobGateAsksTheFile(t *testing.T) {
 	root := t.TempDir()
 	for _, f := range []struct{ src, dst string }{
@@ -44,6 +45,7 @@ func TestTimelineJobGateAsksTheFile(t *testing.T) {
 		{filepath.Join("..", "container", "adts", "testdata", "stereo.aac"), "stereo.aac"},
 		{filepath.Join("..", "container", "mka", "testdata", "seed-pcm.mka"), "pcm.mka"},
 		{filepath.Join("..", "container", "mka", "testdata", "seed-cues.mka"), "cues.mka"},
+		{filepath.Join("..", "testdata", "sine-s16.wma"), "sine.wma"},
 	} {
 		b, err := os.ReadFile(f.src)
 		if err != nil {
@@ -97,8 +99,9 @@ func TestTimelineJobGateAsksTheFile(t *testing.T) {
 		{"lib/ima-nofact.wav", false}, // a block codec: exact, whatever the fact chunk said
 		{"lib/stereo.aac", true},      // ADTS states no length; the index is the measure
 		{"lib/pcm.mka", true},         // an advisory Info Duration, and no walk at open
-		{"lib/cues.mka", false},       // Opus: walked at open, so exact and never asked
+		{"lib/cues.mka", true},        // Opus: the cluster walk is the measure, and no open pays it
 		{"lib/long.mp3", true},        // a cold bare MP3
+		{"lib/sine.wma", true},        // rounded positions: measuring it is a decode
 	} {
 		if slow := ask(tc.ref); slow != tc.slow {
 			t.Errorf("%s: needs a job = %v, want %v", tc.ref, slow, tc.slow)

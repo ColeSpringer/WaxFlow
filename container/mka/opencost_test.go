@@ -3,7 +3,9 @@ package mka_test
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
@@ -11,6 +13,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
 	"github.com/colespringer/waxflow/container/mka"
+	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/testutil"
 )
 
@@ -83,54 +86,54 @@ func openCounted(t *testing.T, raw []byte, o *mka.DemuxerOptions) (*mka.Demuxer,
 	return d, cs
 }
 
-// TestDeferWalkOpensOnTheHead is what a tolerant probe of a WebM Opus file
-// costs. Opening one walks every cluster for the exact gapless total, so a
-// probe that only wanted headers read the whole file; DeferWalk leaves the
-// walk to Walk or the first seek, and the open is a head read whatever the
-// stream's length.
+// TestOpenReadsTheHead is what opening a WebM Opus file costs. Opening one
+// used to walk every cluster for the exact gapless total, so anything that
+// only wanted headers read the whole file; the tail trim now rides on the
+// block that carries it, so the open is a head read whatever the stream's
+// length and only the number waits for Walk.
 //
 // Two lengths, because a bound that holds only for the shorter one is not a
 // bound: the cost must not scale with the stream.
-func TestDeferWalkOpensOnTheHead(t *testing.T) {
+func TestOpenReadsTheHead(t *testing.T) {
 	var costs [2][2]int64
 	for i, n := range []int{1500, 3000} {
 		raw := buildOpusFile(t, n, true)
 		if int64(len(raw)) < 2*srcwin.Chunk {
 			t.Fatalf("%d packets wrote %d bytes, want over two windows", n, len(raw))
 		}
-		d, cs := openCounted(t, raw, &mka.DemuxerOptions{DeferWalk: true})
+		d, cs := openCounted(t, raw, nil)
 		t.Logf("%d packets (%d bytes): %d bytes in %d reads", n, len(raw), cs.Bytes, cs.Reads)
 		if cs.Bytes > srcwin.Chunk {
-			t.Errorf("a deferred open of %d bytes read %d, want a head read", len(raw), cs.Bytes)
+			t.Errorf("an open of %d bytes read %d, want a head read", len(raw), cs.Bytes)
 		}
 		if d.Walked() {
-			t.Error("Walked is true after a deferred open")
+			t.Error("Walked is true after an open")
 		}
 		tr := d.Tracks()[0]
 		if !tr.SamplesAdvisory || tr.SamplesExact {
 			t.Errorf("track flags advisory=%v exact=%v, want the advisory Duration", tr.SamplesAdvisory, tr.SamplesExact)
 		}
-		if want := int64(n)*costPacketDur - costPreSkip - costPadding; tr.Samples != want {
-			t.Errorf("deferred length = %d, want the Duration's %d", tr.Samples, want)
+		want := int64(n)*costPacketDur - costPreSkip - costPadding
+		if tr.Samples != want {
+			t.Errorf("opened length = %d, want the Duration's %d", tr.Samples, want)
 		}
 		costs[i] = [2]int64{int64(cs.Reads), cs.Bytes}
 
-		// The default open is what this measures against: it walks, so it
-		// reads past one window, and its count is what the walk settles on.
-		full, fcs := openCounted(t, raw, nil)
-		if fcs.Bytes <= srcwin.Chunk {
-			t.Errorf("a default open read %d bytes; this cell cannot see the walk it is measuring", fcs.Bytes)
-		}
-		exact := full.Tracks()[0]
-		if !exact.SamplesExact {
-			t.Fatal("a default open of an Opus track must measure it")
-		}
+		// Anti-vacuous: the walk this open skipped is a whole-file read, so
+		// the same source reads past one window once Walk runs. Without this
+		// the cell above would pass on a demuxer that read nothing at all.
 		if err := d.Walk(); err != nil {
 			t.Fatalf("Walk: %v", err)
 		}
-		if got := d.Tracks()[0]; got.Samples != exact.Samples || !got.SamplesExact || got.SamplesAdvisory {
-			t.Errorf("after Walk: %d (exact %v advisory %v), want the default open's %d exact",
-				got.Samples, got.SamplesExact, got.SamplesAdvisory, exact.Samples)
+		if cs.Bytes <= srcwin.Chunk {
+			t.Errorf("open plus Walk read %d bytes; this cell cannot see the walk it is measuring", cs.Bytes)
+		}
+		if got := d.Tracks()[0]; got.Samples != want || !got.SamplesExact || got.SamplesAdvisory {
+			t.Errorf("after Walk: %d (exact %v advisory %v), want %d exact",
+				got.Samples, got.SamplesExact, got.SamplesAdvisory, want)
+		}
+		if got := d.Tracks()[0].Padding; got != costPadding {
+			t.Errorf("after Walk: Padding = %d, want the trailer's %d", got, costPadding)
 		}
 	}
 	if costs[0] != costs[1] {
@@ -138,33 +141,34 @@ func TestDeferWalkOpensOnTheHead(t *testing.T) {
 	}
 }
 
-// TestDeferWalkWithNoDuration is the shape the advisory fallback cannot
-// serve: a file with no Info Duration has nothing to report until the walk
-// runs, so the deferred track says -1 rather than guessing. Promoting it is
-// the bug the same walk used to leave behind, since adoptWalkedLength only
-// looked at the advisory flag.
-func TestDeferWalkWithNoDuration(t *testing.T) {
-	raw := buildOpusFile(t, 200, false)
-	d, _ := openCounted(t, raw, &mka.DemuxerOptions{DeferWalk: true})
+// TestOpenWithNoDuration is the shape the advisory fallback cannot serve: a
+// file with no Info Duration has nothing to report until the walk runs, so the
+// opened track says -1 rather than guessing. Promoting it is the bug the same
+// walk used to leave behind, since adoptWalkedLength only looked at the
+// advisory flag.
+func TestOpenWithNoDuration(t *testing.T) {
+	const n = 200
+	raw := buildOpusFile(t, n, false)
+	d, _ := openCounted(t, raw, nil)
 	if tr := d.Tracks()[0]; tr.Samples != -1 || tr.SamplesExact || tr.SamplesAdvisory {
-		t.Fatalf("deferred track = %d (exact %v advisory %v), want -1 with neither flag",
+		t.Fatalf("opened track = %d (exact %v advisory %v), want -1 with neither flag",
 			tr.Samples, tr.SamplesExact, tr.SamplesAdvisory)
 	}
-	full, _ := openCounted(t, raw, nil)
 	if err := d.Walk(); err != nil {
 		t.Fatal(err)
 	}
-	got, want := d.Tracks()[0], full.Tracks()[0]
-	if got.Samples != want.Samples || !got.SamplesExact {
-		t.Errorf("after Walk: %d (exact %v), want the default open's %d exact", got.Samples, got.SamplesExact, want.Samples)
+	got := d.Tracks()[0]
+	want := int64(n)*costPacketDur - costPreSkip - costPadding
+	if got.Samples != want || !got.SamplesExact {
+		t.Errorf("after Walk: %d (exact %v), want %d exact", got.Samples, got.SamplesExact, want)
 	}
 }
 
-// TestDeferWalkOnVorbis covers the other codec that walks at open, on a real
+// TestOpenOnVorbis covers the other codec that used to walk at open, on a real
 // encode: Vorbis carries no absolute sample count in its bitstream, so its
-// exact length is the walk's rawTotal minus the DiscardPadding tail, and a
-// probe of one paid for that walk exactly as an Opus probe did.
-func TestDeferWalkOnVorbis(t *testing.T) {
+// exact length is the walk's raw total minus the DiscardPadding tail, and an
+// open of one paid for that walk exactly as an Opus open did.
+func TestOpenOnVorbis(t *testing.T) {
 	dir := t.TempDir()
 	for _, s := range specs {
 		if s.codec != codec.Vorbis {
@@ -175,25 +179,87 @@ func TestDeferWalkOnVorbis(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			d, _ := openCounted(t, raw, &mka.DemuxerOptions{DeferWalk: true})
+			d, _ := openCounted(t, raw, nil)
 			if d.Walked() {
-				t.Error("Walked is true after a deferred open")
+				t.Error("Walked is true after an open")
 			}
 			if tr := d.Tracks()[0]; tr.SamplesExact {
-				t.Errorf("deferred track reports %d exact; the walk has not run", tr.Samples)
+				t.Errorf("opened track reports %d exact; the walk has not run", tr.Samples)
 			}
-			full, _ := openCounted(t, raw, nil)
 			if err := d.Walk(); err != nil {
 				t.Fatal(err)
 			}
-			got, want := d.Tracks()[0], full.Tracks()[0]
-			if !want.SamplesExact {
-				t.Fatal("a default open of a Vorbis track must measure it")
-			}
-			if got.Samples != want.Samples || !got.SamplesExact {
-				t.Errorf("after Walk: %d (exact %v), want the default open's %d exact",
-					got.Samples, got.SamplesExact, want.Samples)
+			got := d.Tracks()[0]
+			if !got.SamplesExact || got.Samples <= 0 {
+				t.Errorf("after Walk: %d (exact %v), want a measured length",
+					got.Samples, got.SamplesExact)
 			}
 		})
+	}
+}
+
+// TestReadDeliversTheGaplessRun is the contract the lazy open rests on: a read
+// with no walk delivers the gapless stream, not the raw one. The tail trim is a
+// DiscardPadding on the block that carries it, so it is dropped as that block
+// decodes, and the total the walk would have measured never enters it.
+//
+// Before the per-packet trim this delivered the encoder's tail as audio,
+// because the advisory total vetoes the raw-end cap.
+func TestReadDeliversTheGaplessRun(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "seed-opus.webm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	strict, err := format.Probe(container.BytesSource(raw), "", &format.Options{Strict: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strict.Default()
+	if !want.SamplesExact || want.Padding == 0 {
+		t.Fatalf("strict probe = %+v, want an exact length with a tail trim", want)
+	}
+
+	med, err := format.Open(container.BytesSource(raw), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	opened := med.Info().Default()
+	if !opened.SamplesAdvisory || opened.Samples <= want.Samples {
+		t.Errorf("opened track = %d (advisory %v), want the Info Duration's estimate over %d",
+			opened.Samples, opened.SamplesAdvisory, want.Samples)
+	}
+	w, ok := med.(format.Walker)
+	if !ok {
+		t.Fatal("a Matroska Media must implement format.Walker")
+	}
+	if w.Walked() {
+		t.Error("Walked is true after an open")
+	}
+
+	var count int64
+	buf := audio.Get(opened.Fmt, audio.StandardChunk)
+	defer audio.Put(buf)
+	for {
+		err := med.ReadChunk(buf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("ReadChunk: %v", err)
+		}
+		count += int64(buf.N)
+	}
+	if count != want.Samples {
+		t.Errorf("read delivered %d frames with no walk, want the gapless %d", count, want.Samples)
+	}
+
+	if err := w.Walk(); err != nil {
+		t.Fatal(err)
+	}
+	got := med.Info().Default()
+	if got.Samples != want.Samples || !got.SamplesExact || got.Padding != want.Padding {
+		t.Errorf("after Walk: %d samples (exact %v, padding %d), want %d (padding %d)",
+			got.Samples, got.SamplesExact, got.Padding, want.Samples, want.Padding)
 	}
 }

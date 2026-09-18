@@ -14,11 +14,13 @@ import (
 
 // rawDemuxer delivers exactly raw raw samples of one 16-bit mono track,
 // whatever its declared length claims: the source a settled length has to
-// agree with.
+// agree with. lastPadding rides on the final packet, the way a container that
+// states its tail trim per packet signals it.
 type rawDemuxer struct {
-	track container.Track
-	raw   int64
-	pos   int64
+	track       container.Track
+	raw         int64
+	lastPadding int64
+	pos         int64
 }
 
 func (d *rawDemuxer) Tracks() []container.Track { return []container.Track{d.track} }
@@ -28,13 +30,17 @@ func (d *rawDemuxer) ReadPacket(pkt *container.Packet) error {
 		return io.EOF
 	}
 	n := min(int64(1000), d.raw-d.pos)
-	*pkt = container.Packet{Track: 0, Packet: codec.Packet{
+	d.pos += n
+	pad := int64(0)
+	if d.pos >= d.raw {
+		pad = d.lastPadding
+	}
+	*pkt = container.Packet{Track: 0, Padding: pad, Packet: codec.Packet{
 		Data: make([]byte, n*2),
-		PTS:  d.pos,
+		PTS:  d.pos - n,
 		Dur:  n,
 		Sync: true,
 	}}
-	d.pos += n
 	return nil
 }
 
@@ -42,7 +48,13 @@ func (d *rawDemuxer) ReadPacket(pkt *container.Packet) error {
 // samples: the number a settled length is a claim about.
 func delivered(t *testing.T, track container.Track, raw int64) int64 {
 	t.Helper()
-	med, err := format.FromDemuxer("synthetic", &rawDemuxer{track: track, raw: raw})
+	return deliveredTrimmed(t, track, raw, 0)
+}
+
+// deliveredTrimmed is delivered with a per-packet trim on the last packet.
+func deliveredTrimmed(t *testing.T, track container.Track, raw, lastPadding int64) int64 {
+	t.Helper()
+	med, err := format.FromDemuxer("synthetic", &rawDemuxer{track: track, raw: raw, lastPadding: lastPadding})
 	if err != nil {
 		t.Fatalf("FromDemuxer: %v", err)
 	}
@@ -167,5 +179,62 @@ func TestSettleLengthAgreesWithTheUnsettledRead(t *testing.T) {
 				t.Errorf("settled to %d, the unsettled track delivered %d", after, before)
 			}
 		})
+	}
+}
+
+// TestPerPacketPaddingIsWhatTheReadDrops is the delivery half of a container
+// that states its tail trim per packet rather than as a total (Matroska's
+// DiscardPadding): the trim is dropped as the packet decodes, so the read is
+// gapless before anything has counted the payload, and settling with the same
+// trim folded in does not move it.
+//
+// The two arms are the before and after of a walk. Uncapped, because an
+// advisory total vetoes the raw-end cap, so the per-packet trim is the only
+// thing bounding the delivery; settled, because the cap then lands on the same
+// sample, which is what lets a Walk refresh a Media's track mid-read.
+func TestPerPacketPaddingIsWhatTheReadDrops(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		samples, delay int64
+		advisory       bool
+		raw, padding   int64
+	}{
+		{"advisory total, trimmed tail", 48100, 0, true, 48000, 648},
+		{"advisory total, primed and trimmed", 48100, 312, true, 48000, 648},
+		{"no total at all", -1, 312, false, 48000, 648},
+		{"the whole last packet trimmed", 48100, 0, true, 48000, 1000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := pcmTrack(tc.samples, tc.delay, 0, false, tc.advisory)
+			want := tc.raw - tc.delay - tc.padding
+			if got := deliveredTrimmed(t, in, tc.raw, tc.padding); got != want {
+				t.Errorf("an unsettled read delivered %d, want the raw run less both trims (%d)", got, want)
+			}
+			// What a walk does: the trims it summed become the track's
+			// Padding, then the run settles the length.
+			folded := in
+			folded.Padding = tc.padding
+			settled := container.SettleLength(folded, tc.raw)
+			if settled.Samples != want {
+				t.Errorf("settled to %d, the read delivered %d", settled.Samples, want)
+			}
+			if got := deliveredTrimmed(t, settled, tc.raw, tc.padding); got != want {
+				t.Errorf("a settled read delivered %d, want %d: the cap and the "+
+					"per-packet trim must land on the same sample", got, want)
+			}
+		})
+	}
+}
+
+// TestPerPacketPaddingCannotOutrunItsPacket is the bound on the trim: it drops
+// what this packet emitted and no more, so a file stating a trim longer than
+// the frames it rides on cannot reach back into audio already delivered.
+// Matroska's own DiscardPadding never exceeds its block, so this is the
+// hostile-input arm rather than a shape a real encoder writes.
+func TestPerPacketPaddingCannotOutrunItsPacket(t *testing.T) {
+	const raw, packet = 48000, 1000 // rawDemuxer's packet size
+	in := pcmTrack(-1, 0, 0, false, false)
+	if got, want := deliveredTrimmed(t, in, raw, 5*packet), int64(raw-packet); got != want {
+		t.Errorf("a trim of five packets on the last one delivered %d, want %d", got, want)
 	}
 }

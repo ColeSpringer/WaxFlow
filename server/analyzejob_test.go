@@ -745,29 +745,37 @@ func TestLoudnessMeasuresTheResolvedWidth(t *testing.T) {
 	}
 }
 
-// TestSplitBoundIsWhatTheRunEnforces closes the gap a tolerant probe opened.
-// A Matroska Opus file estimates its total at probe (the exact one is a
-// cluster walk) and measures it at open, and the estimate runs long. Checking
-// cuts against the estimate accepted a cut past the real end: a 201 here, then
-// a failure part way through the run with pieces already in the job directory
-// and no Output naming them.
+// TestSplitBoundIsWhatTheRunEnforces closes the gap an advisory total opened.
+// Such a source estimates its length in a time unit, and the estimate lands on
+// either side of the audio. Checking cuts against it went wrong in both
+// directions: an estimate that runs long accepted a cut past the real end (a
+// 201 here, then a failure part way through the run with pieces already in the
+// job directory and no Output naming them), and one that runs short refused a
+// cut the file can serve.
 //
-// The refusal must stay a refusal and the accepted cut must still run, or a
-// version that simply refused everything would satisfy the first half.
+// Both sides now measure and the run is handed the measurement, so one number
+// is under the bound and the run. The refusal must stay a refusal and the
+// accepted cuts must still run, or a version that simply refused everything
+// would satisfy the first half.
 func TestSplitBoundIsWhatTheRunEnforces(t *testing.T) {
 	for _, tc := range []struct {
 		name string
+		src  string
 		cut  int64
 		want int
 	}{
 		// seed.webm: the Info Duration estimates 6144 samples, the walk
-		// measures 5760.
-		{"a cut between the estimate and the measure", 5900, http.StatusBadRequest},
-		{"a cut inside the audio", 3000, http.StatusCreated},
+		// measures 5760, so the estimate runs long.
+		{"a cut past the measure", "lib/seed.webm", 5900, http.StatusBadRequest},
+		{"a cut inside the audio", "lib/seed.webm", 3000, http.StatusCreated},
+		// sine.wma: the declared duration estimates 22491 and the measure
+		// finds 22495, so the estimate runs short and this cut is one the
+		// file can serve. Bounding with the declaration refused it.
+		{"a cut past the estimate the file can serve", "lib/sine.wma", 22493, http.StatusCreated},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := jobsEnv(t) // cold: a warm memo would answer from an earlier run
-			body := fmt.Sprintf(`{"type":"split","src":"lib/seed.webm","format":"flac","cuts":[%d]}`, tc.cut)
+			body := fmt.Sprintf(`{"type":"split","src":%q,"format":"flac","cuts":[%d]}`, tc.src, tc.cut)
 			resp := env.postJSON(t, "/jobs", body)
 			if tc.want == http.StatusBadRequest {
 				wantEnvelope(t, resp, http.StatusBadRequest, waxerr.CodeInvalidRequest)

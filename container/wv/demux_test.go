@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,10 +72,11 @@ func TestDemuxPackets(t *testing.T) {
 	if tr.Codec != codec.WavPack || tr.Fmt.Rate != 44100 || tr.Fmt.Channels != 2 || tr.Fmt.BitDepth != 16 {
 		t.Fatalf("track = %+v", tr)
 	}
-	// SamplesExact stays false: every block declares its own count, so the
-	// decoder never over-produces and there is nothing to trim to.
-	if tr.Samples != 15435 || tr.SamplesExact {
-		t.Fatalf("samples = %d exact=%v, want 15435 and not exact", tr.Samples, tr.SamplesExact)
+	// Exact, because the length is measured from the blocks rather than taken
+	// off the header: the open verified the declared total against them in
+	// both directions.
+	if tr.Samples != 15435 || !tr.SamplesExact {
+		t.Fatalf("samples = %d exact=%v, want 15435 and exact", tr.Samples, tr.SamplesExact)
 	}
 	if !tr.Default {
 		t.Error("the only track is not the default")
@@ -512,6 +514,12 @@ func TestTruncatedTailCorrectsTheDeclaredTotal(t *testing.T) {
 			if declared >= 40000 {
 				t.Errorf("samples = %d, still the declared total of a file cut short", declared)
 			}
+			// Measured, not promised: format.Media caps a decode at an
+			// authoritative length, so a count arrived at by walking past
+			// damage must not become a hard end.
+			if d.Tracks()[0].SamplesExact {
+				t.Error("a length walked past damage was promised as authoritative")
+			}
 			if len(d.Warnings()) == 0 {
 				t.Error("a length the file cannot deliver was reported without a warning")
 			}
@@ -525,19 +533,64 @@ func TestTruncatedTailCorrectsTheDeclaredTotal(t *testing.T) {
 
 // TestIntactStreamKeepsItsDeclaredTotal is the check's other half: an
 // undamaged stream's blocks tile to exactly the declared total, so verifying
-// it must stay silent and change nothing.
+// it must stay silent and change nothing, and it reports the total exact
+// because the open measured the blocks rather than believing the header.
 func TestIntactStreamKeepsItsDeclaredTotal(t *testing.T) {
 	d, err := wv.NewDemuxer(container.BytesSource(fixture(t, "seek-mono.wv")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := d.Tracks()[0].Samples; got != 40000 {
-		t.Errorf("samples = %d, want the declared 40000", got)
+	tr := d.Tracks()[0]
+	if tr.Samples != 40000 {
+		t.Errorf("samples = %d, want the declared 40000", tr.Samples)
+	}
+	if !tr.SamplesExact {
+		t.Error("a total the open verified against the blocks is not marked exact")
 	}
 	if w := d.Warnings(); len(w) != 0 {
 		t.Errorf("clean file warned: %v", w)
 	}
 	if _, walked := walk(t, d); walked != 40000 {
 		t.Errorf("walked %d samples", walked)
+	}
+}
+
+// TestOverDeclaredTotalAdoptsTheBlocks is the direction the length check used
+// to let through. A header total short of the blocks is not a truncation
+// instruction, so a read delivers more than the probe promised and every caller
+// that sums lengths is wrong by the difference: the same invariant a shortfall
+// breaks, from the other side.
+//
+// It is a Note rather than a Warning: the file is not damaged, it is
+// internally inconsistent in a way this build simply believes the blocks
+// about, so strict mode has nothing to refuse.
+func TestOverDeclaredTotalAdoptsTheBlocks(t *testing.T) {
+	const real, short = int64(40000), int64(100)
+	raw := append([]byte(nil), fixture(t, "seek-mono.wv")...)
+	// total_samples is the second 32-bit field of the first block header,
+	// after the "wvpk" magic and the block size.
+	binary.LittleEndian.PutUint32(raw[12:], uint32(real-short))
+
+	d, err := wv.NewDemuxer(container.BytesSource(raw), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := d.Tracks()[0]
+	if tr.Samples != real || !tr.SamplesExact {
+		t.Errorf("samples = %d (exact %v), want the blocks' %d exact", tr.Samples, tr.SamplesExact, real)
+	}
+	if _, walked := walk(t, d); walked != real {
+		t.Errorf("walked %d samples, the track declares %d", walked, real)
+	}
+	ws := d.Warnings()
+	if len(ws) != 1 || ws[0].Kind != container.Note {
+		t.Fatalf("warnings = %+v, want one Note", ws)
+	}
+	if !strings.Contains(ws[0].Msg, "run to") {
+		t.Errorf("note %q does not say the blocks run past the declared total", ws[0].Msg)
+	}
+	// Strict never escalates a Note, so the file still opens.
+	if _, err := wv.NewDemuxer(container.BytesSource(raw), &wv.DemuxerOptions{Strict: true}); err != nil {
+		t.Errorf("strict refused a well-formed file over a Note: %v", err)
 	}
 }

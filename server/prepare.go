@@ -82,15 +82,24 @@ func (s *Server) prepareSource(ctx context.Context, q url.Values, sigAuthed bool
 		return nil, err
 	}
 	track := info.Default()
-	// A tolerant probe estimates where a Matroska Opus or Vorbis file's exact
-	// total is a cluster walk away, and everything below plans from this
-	// track: plan.Samples is what X-Content-Duration advertises, and the body
-	// comes from an opened Media, which does walk. Advertising the estimate
-	// beside audio measured a different way is the drift this closes, and it
-	// pays the same one walk the probe used to.
-	if track, err = s.settledAtOpen(src, track); err != nil {
-		src.Close()
-		return nil, err
+	// An advisory total is measured, because everything below plans from this
+	// track: plan.Samples is what X-Content-Duration advertises, the segmented
+	// route's count is derived from it, and the body's own Media is wrapped
+	// with this number (see stream.go), so the transcode projects what was
+	// advertised. Advertising an estimate beside audio the run measures a
+	// different way is the drift this closes.
+	//
+	// It costs less than it reads. A cold stream of a Matroska Opus used to
+	// pay two walks, one to settle the track and one inside the transcode's
+	// own open; now it pays this one, memoized, and a warm one pays none. A
+	// source whose headers count is taken at its word here, as the playlist
+	// does; what a header on a pipe would otherwise commit is confirmed by the
+	// transcode itself.
+	if track.SamplesAdvisory {
+		if track, err = s.trackFor(src, true); err != nil {
+			src.Close()
+			return nil, err
+		}
 	}
 	if p.track >= 0 && p.track != track.ID {
 		src.Close()
@@ -107,9 +116,9 @@ func (s *Server) prepareSource(ctx context.Context, q url.Values, sigAuthed bool
 		// The window is checked against the total, so the total has to be one
 		// that was measured: an under-declared source would refuse a span the
 		// file can serve, and an over-declared one would admit a span that
-		// dies part way through delivery. The measure is only on this branch,
-		// since an ordinary stream depends on no number and must not pay for a
-		// walk to be told it.
+		// dies part way through delivery. A source that counts its own samples
+		// reaches the measure only here, since an ordinary stream of one
+		// depends on no number and must not pay for a walk to be told it.
 		if track, err = s.trackFor(src, true); err != nil {
 			src.Close()
 			return nil, err

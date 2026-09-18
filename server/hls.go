@@ -7,13 +7,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/dsp/gain"
@@ -295,13 +295,12 @@ func (s *Server) resolveMember(ctx context.Context, req *hlsRequest, i int, ref 
 		return err
 	}
 	// A rounded total cannot be divided into segments. trackFor hands a
-	// non-exact caller the headers' number, and for ASF, for a Matroska whose
-	// length is only its Info Duration, and now for a Matroska Opus or Vorbis
-	// file a tolerant probe did not walk, that number is an estimate: taking
-	// it at its word is the tail 404 or early ENDLIST trackFor's own comment
-	// names. So a playlist asks again for a measured one. The re-ask is a memo
-	// hit whenever the first call already measured, and Phase 2's cheap
-	// measure is what makes it a walk rather than a decode.
+	// non-exact caller the headers' number, and for ASF and for a Matroska,
+	// which no open walks, that number is an estimate: taking it at its word
+	// is the tail 404 or early ENDLIST trackFor's own comment names. So a
+	// playlist asks again for a measured one. The re-ask is a memo hit
+	// whenever the first call already measured, and the cheap measure below is
+	// what makes it a walk rather than a decode.
 	if track.SamplesAdvisory {
 		if track, err = s.trackFor(f, true); err != nil {
 			return err
@@ -401,15 +400,18 @@ func hlsIdentity(desc hls.Descriptor, members []hlsSource) string {
 // measureSamples forces a source's exact length, by the cheapest route the
 // opened media offers.
 //
-// Three of them, in order. A demuxer that measured at open (an Opus or Vorbis
-// Matroska walks inside its constructor) has already answered, and the answer
-// is taken without touching it again; that arm is a fast path rather than a
-// separate route, since Walk on a finished walk is a no-op, and it is what
-// lets a test pin zero reads after the open. A demuxer with a deferred walk
-// (MP3, ADTS, a lazily walked Matroska) measures by finishing that walk, which
-// reads headers and hops. Only a source whose length no walk settles (FLAC,
-// WavPack, Ogg, ASF, whose demuxers bisect for it) is seeked past any possible
-// end to find where the stream really stops.
+// Four of them, in order of what they cost. A demuxer that settles its length
+// at open has already answered, and the answer is taken without touching it
+// again: a WAV's byte-linear payload, an Ogg last-page granule, and a FLAC or
+// WavPack whose open verified its declared total against the payload. That arm
+// is a fast path rather than a separate route, since Walk on a demuxer that
+// defers nothing is a no-op, and it is what lets a test pin zero reads after
+// the open. A demuxer with a deferred walk (MP3, ADTS, Matroska) measures by
+// finishing that walk, which reads headers and hops. A source that settles
+// neither way but names its positions exactly (mp4's sample table, Ogg-FLAC's
+// granules) is seeked past any possible end to find where the stream really
+// stops. Only a source whose positions are themselves rounded (ASF) is
+// decoded, since nothing cheaper is true; see countDecoded.
 func (s *Server) measureSamples(src *source.File) (int64, error) {
 	med, err := s.eng.OpenStream(src, src.Ext)
 	if err != nil {
@@ -420,7 +422,7 @@ func (s *Server) measureSamples(src *source.File) (int64, error) {
 }
 
 // measureLength is measureSamples over an already-opened Media, which is
-// where the three routes are chosen between and so where they are tested.
+// where the four routes are chosen between and so where they are tested.
 func measureLength(med format.Media) (int64, error) {
 	if t := med.Info().Default(); t.SamplesExact && t.Samples >= 0 {
 		return t.Samples, nil
@@ -433,7 +435,43 @@ func measureLength(med format.Media) (int64, error) {
 			return t.Samples, nil
 		}
 	}
+	if med.Info().Default().SamplesAdvisory {
+		return countDecoded(med)
+	}
 	return med.SeekSample(measureCeiling)
+}
+
+// countDecoded reads med to the end and counts what it delivered. It is the
+// only answer that is always right and the one that always costs the most, so
+// it is the last route and not the first.
+//
+// The seek past the end is a shortcut over this, and it is exact only while the
+// position a demuxer reports is exact: it answers where the landing claims to
+// be plus the frames decoded from there, so a container that names positions in
+// a time unit folds that rounding into the total. ASF does, and measured on
+// sine-s16.wma the shortcut comes back 33 samples under a read of the same
+// file. Those 33 are not cosmetic where this number is used: a timeline's
+// prefix sum carries the error into every member after it, a bounded slice
+// drops them, and an HLS playlist promises a tail it will not serve.
+//
+// SamplesAdvisory is the predicate because it is already the same fact. A
+// container earns the flag by stating a duration in a time unit instead of a
+// sample count (see container.Track), which is exactly the container whose
+// positions are rounded too.
+func countDecoded(med format.Media) (int64, error) {
+	buf := audio.Get(med.Info().Default().Fmt, audio.StandardChunk)
+	defer audio.Put(buf)
+	var n int64
+	for {
+		err := med.ReadChunk(buf)
+		if err == io.EOF {
+			return n, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+		n += int64(buf.N)
+	}
 }
 
 // planHLSVariant maps one variant descriptor onto engine options and its
@@ -1141,37 +1179,6 @@ func (s *Server) openHLSMedia(ctx context.Context, members []hlsSource, tl bool,
 	return waxflow.Concat(srcs, s.timelineOptions(crossfade))
 }
 
-// remeasured is a Media whose declared info is replaced; sliceMeasured is
-// its only constructor and carries the rationale.
-type remeasured struct {
-	format.Media
-	info *format.Info
-}
-
-// Walk and Walked forward format.Walker, as closingMedia's do.
-func (m remeasured) Walk() error {
-	if w, ok := m.Media.(format.Walker); ok {
-		return w.Walk()
-	}
-	return nil
-}
-
-func (m remeasured) Walked() bool {
-	if w, ok := m.Media.(format.Walker); ok {
-		return w.Walked()
-	}
-	return true
-}
-
-// Info returns the patched description, its Warnings and Notes refreshed
-// from the inner media on every call: those two lists are live there (see
-// format.Media), and the copy holds the measured total, not a verdict.
-func (m remeasured) Info() *format.Info {
-	in := m.Media.Info()
-	m.info.Warnings, m.info.Notes = in.Warnings, in.Notes
-	return m.info
-}
-
 // sliceMeasured bounds med to sp for a run whose plan validated the window
 // against srcSamples, the source's measured total (negative means unknown,
 // and leaves the declaration alone).
@@ -1192,25 +1199,7 @@ func (m remeasured) Info() *format.Info {
 // length on advance. Slice takes ownership of med; on error this closes
 // what it did not take.
 func sliceMeasured(med format.Media, sp span, srcSamples int64) (format.Media, error) {
-	if info := med.Info(); srcSamples >= 0 && info.Default().Samples != srcSamples {
-		patched := *info
-		patched.Tracks = slices.Clone(info.Tracks)
-		// The default track is the one Slice spans; mirror Default's pick.
-		idx := 0
-		for i, t := range patched.Tracks {
-			if t.Default {
-				idx = i
-				break
-			}
-		}
-		patched.Tracks[idx].Samples = srcSamples
-		// Honest rather than optimistic: srcSamples comes from an exact
-		// trackFor, whose contract is an authoritative length, so the rounded
-		// claim it may have replaced goes with it.
-		patched.Tracks[idx].SamplesExact = true
-		patched.Tracks[idx].SamplesAdvisory = false
-		med = remeasured{Media: med, info: &patched}
-	}
+	med = waxflow.MeasuredMedia(med, srcSamples)
 	sl, err := waxflow.Slice(med, sp.from, sp.end())
 	if err != nil {
 		med.Close()
@@ -1260,19 +1249,9 @@ type closingMedia struct {
 
 // Walk and Walked forward format.Walker: embedding the interface promotes
 // nothing outside it, and this wraps one file.
-func (m closingMedia) Walk() error {
-	if w, ok := m.Media.(format.Walker); ok {
-		return w.Walk()
-	}
-	return nil
-}
+func (m closingMedia) Walk() error { return format.WalkMedia(m.Media) }
 
-func (m closingMedia) Walked() bool {
-	if w, ok := m.Media.(format.Walker); ok {
-		return w.Walked()
-	}
-	return true
-}
+func (m closingMedia) Walked() bool { return format.MediaWalked(m.Media) }
 
 func (m closingMedia) Close() error {
 	err := m.Media.Close()

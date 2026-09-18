@@ -13,6 +13,7 @@ import (
 	"github.com/colespringer/waxflow/container/mpa"
 	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
 // remuxFixture transcodes a synthesized WAV to opts and returns the bytes, for
@@ -146,30 +147,40 @@ func TestMP3InWAVRemuxesToMP3(t *testing.T) {
 		t.Error("the remux rung accepted format=wav for an MP3 track; PCM output has to transcode")
 	}
 
-	// And what the trims cost across the hop, stated rather than asserted
-	// away, because it looks like a bug and is the format being asked to say
-	// something it cannot. A WAV states no trims at all, so the source track
-	// declares Delay 0; the LAME tag's field holds the ENCODER's share and
-	// every reader adds Layer III's fixed 529-sample decoder latency back, so
-	// the smallest head trim the tag can express is 529 and a zero is written
-	// as zero and read as 529. The kept length shrinks by the same amount.
-	// See mpa's tagTrims, where the clamp and its reason live; the shape
-	// predates this wrapper (an untagged bare .mp3 remuxes the same way).
+	// And what the length costs across the hop, on each kind of destination.
+	// A WAV carrying MP3 frames states its length in a fact chunk, which counts
+	// what those frames decode to and not where the audio inside them begins or
+	// ends: an advisory total. This writer cannot seek, so whatever the
+	// metadata frame declares at Begin is what stands, and an estimate stood
+	// there as a fact. Declaring nothing is the honest form, and it is what the
+	// muxer already writes for a source with no length at all.
 	back := probeTrack(t, outBytes, "mp3")
-	if back.Delay != mpa.DecoderDelay {
-		t.Errorf("remuxed head trim = %d, want %d: the LAME field cannot express a smaller one",
-			back.Delay, mpa.DecoderDelay)
+	if back.Samples != -1 {
+		t.Errorf("remuxed length on a pipe = %d, want none declared: the source's %d is an estimate "+
+			"and this writer cannot go back and correct it", back.Samples, in.Samples)
 	}
-	if want := in.Samples - mpa.DecoderDelay; back.Samples != want {
-		t.Errorf("remuxed length = %d, want %d (the source's %d less the latency the tag restores)",
-			back.Samples, want, in.Samples)
+
+	// The same remux onto a writer the muxer can patch declares the count End
+	// measured, so nothing is lost by not guessing at Begin.
+	seek := &testutil.MemWriteSeeker{}
+	if _, err := e.Remux(context.Background(), container.BytesSource(raw), "wav", seek,
+		waxflow.TranscodeOptions{Format: "mp3"}); err != nil {
+		t.Fatal(err)
 	}
-	// Padding is deliberately not asserted, and the reason is the other half
-	// of the same arithmetic: this writer cannot seek, so the metadata frame
-	// keeps the projection Begin wrote instead of the count End measures, and
-	// the projection pays for an over-estimated frame count with a larger end
-	// trim. The two cancel, which is why the length above is the same either
-	// way and is the field worth pinning.
+	// The LAME tag's head-trim field holds the ENCODER's share and every reader
+	// adds Layer III's fixed 529-sample decoder latency back, so the smallest
+	// trim it can express is 529: a zero is written as zero and read as 529,
+	// and the kept length is short by the same amount. See mpa's tagTrims,
+	// where the clamp and its reason live.
+	patched := probeTrack(t, seek.Buf, "mp3")
+	if patched.Delay != mpa.DecoderDelay {
+		t.Errorf("patched head trim = %d, want %d: the LAME field cannot express a smaller one",
+			patched.Delay, mpa.DecoderDelay)
+	}
+	if want := in.Samples - mpa.DecoderDelay; patched.Samples != want {
+		t.Errorf("patched length = %d, want %d (the source's %d less the latency the tag restores)",
+			patched.Samples, want, in.Samples)
+	}
 }
 
 // TestRemuxGaplessRoundTrip is the milestone's gate. Remux deliberately

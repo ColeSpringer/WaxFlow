@@ -95,9 +95,11 @@ func newMedia(info *Info, demux container.Demuxer) (Media, error) {
 // one that is not capped at all.
 //
 // The cap engages only when the container signaled trims, or when the length
-// is authoritative (SamplesExact): a declared-total mismatch in an untrimmed
-// advisory format (a lying FLAC STREAMINFO, say) stays a tolerated oddity,
-// not a truncation.
+// is authoritative (SamplesExact): a total nothing checked, in a format that
+// signals no trims, stays a tolerated oddity rather than a truncation. FLAC
+// and WavPack no longer reach that arm, since their opens verify the declared
+// total against the payload in both directions; an MP3's Xing count and an
+// mp4's sample table still do.
 //
 // SamplesAdvisory vetoes it outright, and that is not redundant with the
 // clause above: a Matroska track whose Opus CodecDelay sets Delay but whose
@@ -359,6 +361,8 @@ func (m *media) fill(dst *audio.Buffer) error {
 		err := m.demux.ReadPacket(&pkt)
 		if err == io.EOF {
 			m.eof = true
+			// Drain output belongs to no packet, so no per-packet trim
+			// applies to it; the raw-end cap is what bounds a flush.
 			return m.decoder.Drain(m.stashFn)
 		}
 		if err != nil {
@@ -377,8 +381,51 @@ func (m *media) fill(dst *audio.Buffer) error {
 				p.SetPosition(pkt.PTS)
 			}
 		}
-		return m.decoder.Decode(pkt.Data, m.stashFn)
+		if pkt.Padding <= 0 {
+			return m.decoder.Decode(pkt.Data, m.stashFn)
+		}
+		return m.decodeTrimmed(dst, pkt)
 	}
+}
+
+// decodeTrimmed decodes a packet the container says ends in frames that are
+// not audio (container.Packet.Padding) and drops them.
+//
+// It measures what this Decode put in each of the two places output can land
+// and unwinds from the back of them, so the trim can never reach into frames
+// an earlier packet emitted. The carry holds the later ones, since stash fills
+// the sink first and overflows into it, so it unwinds first.
+//
+// The frames it drops are assumed to be this packet's own. codec.Decoder does
+// not promise that (its Decode is explicitly not 1:1 with packets: a bit
+// reservoir or a decoder's own delay can carry output across a call), and no
+// codec Matroska carries breaks it today. What keeps the assumption honest is
+// where the trims actually sit: a DiscardPadding on the final block trims the
+// end of the stream whichever call emitted it, and the mid-stream case is
+// pinned sample by sample (container/mka's TestMidStreamDiscardPaddingRead
+// gives every sample its own raw index) against ffmpeg's own gapless output
+// for the real codecs (TestGaplessOpus, TestDemuxDecodeDifferential). A codec
+// that did lag would under-trim here, which the raw-end cap then corrects once
+// the track is settled.
+func (m *media) decodeTrimmed(dst *audio.Buffer, pkt container.Packet) error {
+	sinkBefore, carryBefore := 0, m.carryLen()
+	if dst != nil {
+		sinkBefore = dst.N
+	}
+	if err := m.decoder.Decode(pkt.Data, m.stashFn); err != nil {
+		return err
+	}
+	n := pkt.Padding
+	if drop := int(min(int64(m.carryLen()-carryBefore), n)); drop > 0 {
+		m.carry.N -= drop
+		n -= int64(drop)
+	}
+	if dst != nil {
+		if drop := int(min(int64(dst.N-sinkBefore), n)); drop > 0 {
+			dst.N -= drop
+		}
+	}
+	return nil
 }
 
 // stash receives borrowed decoder buffers (valid only during the call):

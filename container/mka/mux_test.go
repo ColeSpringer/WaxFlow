@@ -149,11 +149,21 @@ func TestMuxOpusGapless(t *testing.T) {
 	if tr.Delay != preSkip {
 		t.Errorf("Delay = %d, want %d", tr.Delay, preSkip)
 	}
+	// The exact total is a cluster walk away and no open pays it; the stream
+	// this builds is too short for the muxer to write a Duration, so the fresh
+	// open has nothing to state at all.
+	if err := d.Walk(); err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	tr = d.Tracks()[0]
 	if !tr.SamplesExact {
-		t.Error("SamplesExact = false, want true for a CodecDelay track")
+		t.Error("SamplesExact = false, want true after the walk")
 	}
 	if want := raw - preSkip - padding; tr.Samples != want {
 		t.Errorf("Samples = %d, want %d", tr.Samples, want)
+	}
+	if tr.Padding != padding {
+		t.Errorf("Padding = %d, want the trailer's %d", tr.Padding, padding)
 	}
 	if got := readAll(t, d); len(got) != len(pkts) {
 		t.Errorf("read %d packets, wrote %d", len(got), len(pkts))

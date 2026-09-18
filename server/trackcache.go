@@ -136,10 +136,10 @@ func (c *trackCache) evictOldestLocked() {
 // flag is not "measure when Samples < 0": an MP3 with a Xing header declares a
 // total from its headers and can still be wrong.
 //
-// A whole single source tolerates an advisory total (format.Media calls a
-// lying FLAC STREAMINFO an oddity rather than a truncation) because nothing
-// downstream of it depends on the number matching: the stream ends where the
-// samples end. The tolerance is the whole source's alone, and does not extend
+// A whole single source tolerates a total the headers only declared
+// (format.Media calls a lying Xing count an oddity rather than a truncation)
+// because nothing downstream of it depends on the number matching: the stream
+// ends where the samples end. The tolerance is the whole source's alone, and does not extend
 // to every single-source request. A span is validated against the total
 // (SpanTrack refuses to > total), so its callers ask for exact even though
 // they name one source: an under-declared length would refuse a span the file
@@ -194,14 +194,17 @@ func (s *Server) trackFor(src *source.File, exact bool) (container.Track, error)
 			// keeps repeats cheap; this memo keeps them free.
 			//
 			// An advisory total is not measured here, and the asymmetry with
-			// an absent one is deliberate. A non-exact caller asked for what
-			// the headers state, and two of them mean it: containerTagsFor
-			// wants no length at all, and a split job bounds its cuts with the
-			// declared total on purpose, because SpanTrack bounds the run with
-			// the same number read off a fresh open (see jobs.go). Measuring
-			// for them would let a cut between the two numbers take a 201 and
-			// fail mid-run. The caller that cannot use a rounded total asks
-			// for it by name (hls.go's playlist).
+			// an absent one is deliberate: a non-exact caller asked for what
+			// the headers state, and containerTagsFor wants no length at all.
+			// A caller that cannot use a rounded total asks for one by name,
+			// and the two that must do so also hand the run the number they
+			// got: a split job (jobs.go, and the runner's own splitLength) and
+			// a stream plan (prepare.go). Both measure an advisory source and
+			// then wrap the opened media with what they measured, so the bound
+			// checked before the run and the bound the run enforces are one
+			// number out of one memo. Filling in an absent length adds a bound
+			// where there was none, which is why that case does not wait to be
+			// asked.
 			//
 			// Not measuring here is not a promise that a non-exact caller
 			// never sees a measured number: the memo is one entry per source,
@@ -222,55 +225,6 @@ func (s *Server) trackFor(src *source.File, exact bool) (container.Track, error)
 		s.trackCache.put(key, track, info.Tags)
 		return track, nil
 	})
-}
-
-// openedTrack is the track a fresh Open of src reports. It is not a measure:
-// a demuxer that settles its length at open answers exactly, and one that does
-// not answers whatever its headers state.
-//
-// It exists because a tolerant probe and an open no longer always agree. A
-// Matroska Opus or Vorbis file estimates at probe (its exact total is a
-// cluster walk, which a probe does not pay) and measures at open, and the
-// difference matters wherever a number checked before a run has to match the
-// number the run itself enforces: SpanTrack holds every piece to the track its
-// own freshly opened Media declares. The asymmetry is what makes it worth an
-// open rather than a shrug. Too small a bound refuses a request the source
-// could serve, which is a 400 the caller sees; too large a one takes a 201 and
-// dies part way through with output already written.
-func (s *Server) openedTrack(src *source.File) (container.Track, map[string][]string, error) {
-	med, err := s.eng.OpenStream(src, src.Ext)
-	if err != nil {
-		return container.Track{}, nil, err
-	}
-	defer med.Close()
-	info := med.Info()
-	return info.Default(), info.Tags, nil
-}
-
-// settledAtOpen replaces an estimated track with the one a fresh Open reports,
-// when that open settled it. Only an advisory track can gain anything, so
-// every other source pays nothing, and a source whose open estimates too (ASF)
-// keeps the estimate both sides already agree on.
-func (s *Server) settledAtOpen(src *source.File, track container.Track) (container.Track, error) {
-	if !track.SamplesAdvisory {
-		return track, nil
-	}
-	key := identityString(src.Ref, src.ID)
-	if t, ok := s.trackCache.get(key); ok && t.SamplesExact {
-		return t, nil // an earlier open, or a measure, already settled it
-	}
-	opened, tags, err := s.openedTrack(src)
-	if err != nil {
-		return container.Track{}, err
-	}
-	if !opened.SamplesExact {
-		return track, nil
-	}
-	// With the tags, the way trackFor memoizes: an exact put replaces the
-	// entry outright, so handing it none would drop what containerTagsFor
-	// stored and make the next caller read the headers again.
-	s.trackCache.put(key, opened, tags)
-	return opened, nil
 }
 
 // trackIsExact reports whether src's track is already known to have an

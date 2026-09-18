@@ -408,9 +408,13 @@ func (s *Server) mintTimelineFrom(ctx context.Context, srcs []*source.File, span
 //
 // What is slow is a member whose demuxer deferred a walk of the payload and
 // has not run it: a frame index to build (MP3, bare or in a WAV or AIFF-C;
-// ADTS), or a cluster walk behind an advisory length (a Matroska file whose
-// length is only its Info Duration; its Cues do not help, since the measure's
-// ceiling is past the last one). The mark is the file's own answer through
+// ADTS), or a cluster walk behind an advisory length (a Matroska file, whose
+// Opus or Vorbis track no longer settles at open either; its Cues do not help,
+// since the measure's ceiling is past the last one). So is a member whose
+// container names its positions in a time unit rather than in samples (ASF):
+// no walk or seek can answer exactly there, so the measure is a decode, which
+// is the one cost this gate was written to keep out of a request. The mark is
+// the file's own answer through
 // format.Walker, whose doc says why it is a method and not a method set:
 // slow is "not exact and not yet walked". container.Indexer is not
 // consulted; it means only what its doc says, an index worth persisting. A
@@ -435,14 +439,20 @@ func (s *Server) timelineNeedsJob(srcs []*source.File) (bool, error) {
 			walked = w.Walked()
 		}
 		if track.SamplesExact {
-			// This open paid for the measurement (a Matroska Opus or Vorbis
-			// track walks its clusters inside its own constructor), so keep it:
-			// without the memo the mint measures the same file again, opening
-			// it and walking it a second time for a number already in hand.
+			// Nothing walks in a constructor, so this is a length the headers
+			// settled rather than one this open paid for. Memoizing it is still
+			// worth the line: without it the mint reopens the same file to be
+			// told a number already in hand.
 			s.trackCache.put(identityString(f.Ref, f.ID), track, info.Tags)
 		}
 		med.Close()
-		if !track.SamplesExact && !walked {
+		// Advisory beside not-walked, because measuring is expensive for two
+		// different reasons and the gate has to know about both. A deferred
+		// walk is a whole-file pass; a container whose positions are rounded
+		// (ASF) cannot be measured by any walk or seek at all and is decoded
+		// (see measureLength). Without this arm a cold timeline over a WMA
+		// minted inline and paid for that decode inside the request.
+		if !track.SamplesExact && (!walked || track.SamplesAdvisory) {
 			return true, nil
 		}
 	}

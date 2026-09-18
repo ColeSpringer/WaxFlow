@@ -99,7 +99,79 @@ func TestRemuxTrailerDerivesPadding(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := remuxTrailer(tc.track, tc.decoded); got != tc.want {
+			if got := remuxTrailer(tc.track, copiedRun{samples: tc.decoded}); got != tc.want {
+				t.Errorf("remuxTrailer = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRemuxTrailerTakesThePacketsTrim covers the source that states its trims
+// per packet and no total at all (Matroska's DiscardPadding). The header has
+// nothing to settle against there, so the trailer is the packets': the last
+// packet's trim, which is the only one an output container can carry.
+//
+// Summing every trim would shorten the output's end by a mid-stream trim's
+// worth while those frames still play in the middle, which is real audio lost.
+// The last-packet rule loses none, and the mid-stream frames playing in the
+// output is the recorded limitation.
+func TestRemuxTrailerTakesThePacketsTrim(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		track container.Track
+		run   copiedRun
+		want  codec.Trailer
+	}{
+		{
+			// The mid-stream fixture's shape: a run whose final packet states
+			// 96 and a middle one 48. Only the 96 reaches the trailer.
+			name:  "a mid-stream trim does not shorten the end",
+			track: container.Track{Codec: codec.PCM, Samples: -1},
+			run:   copiedRun{samples: 240000, lastPadding: 96, trimmed: true},
+			want:  codec.Trailer{Samples: 239904, Delay: 0, Padding: 96},
+		},
+		{
+			// The Opus-in-WebM shape, un-measured: the header's advisory total
+			// is not consulted at all, since the packets are the source that
+			// agrees with both conventions.
+			name:  "an advisory total does not enter it",
+			track: container.Track{Codec: codec.Opus, Samples: 6144, Delay: 312, SamplesAdvisory: true},
+			run:   copiedRun{samples: 6720, lastPadding: 648, trimmed: true},
+			want:  codec.Trailer{Samples: 5760, Delay: 312, Padding: 648},
+		},
+		{
+			// A trim longer than the audio behind it clamps rather than going
+			// negative; a muxer takes the length at its word.
+			name:  "a trim past the run clamps",
+			track: container.Track{Codec: codec.Opus, Samples: -1, Delay: 312},
+			run:   copiedRun{samples: 480, lastPadding: 480, trimmed: true},
+			want:  codec.Trailer{Samples: 0, Delay: 312, Padding: 480},
+		},
+		{
+			// A lossless codec has no lookahead to flush, and every muxer that
+			// writes one refuses a nonzero trim outright. A DiscardPadding on
+			// such a track is nonsense a third-party Matroska muxer can still
+			// write, and taking it would fail at End with the whole file
+			// already on the wire: the same rule the header-side arm applies,
+			// now that the header states no trim for anyone to check.
+			name:  "an unprimed codec refuses the packets' trim too",
+			track: container.Track{Codec: codec.FLAC, Samples: -1},
+			run:   copiedRun{samples: 48000, lastPadding: 648, trimmed: true},
+			want:  codec.Trailer{Samples: 48000, Delay: 0, Padding: 0},
+		},
+		{
+			// A cut's track carries trims its own arithmetic computed, while
+			// the packets it forwards are the source's: taking theirs would
+			// throw the cut's away. The packets only ever fill a trim the
+			// header left at zero.
+			name:  "a track that states its own trim keeps it",
+			track: container.Track{Codec: codec.Opus, Samples: 4000, Delay: 312, Padding: 88},
+			run:   copiedRun{samples: 4400, lastPadding: 648, trimmed: true},
+			want:  codec.Trailer{Samples: 4000, Delay: 312, Padding: 88},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := remuxTrailer(tc.track, tc.run); got != tc.want {
 				t.Errorf("remuxTrailer = %+v, want %+v", got, tc.want)
 			}
 		})

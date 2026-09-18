@@ -285,29 +285,31 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 		// naming them (the list is assigned after the loop, and a plain
 		// failure leaves the directory).
 		//
-		// Not measured exactly, which a merge and a timeline mint both are.
-		// The difference is that a split is not the last word on its own
-		// lengths: every piece is a Slice, and SpanTrack refuses a window past
-		// the length the piece's own freshly opened Media declares. So
-		// measuring exactly here would override a length the run then re-reads
-		// and holds the cuts to anyway, and a source whose open under-declares
+		// A declared count is not re-measured, which a merge and a timeline
+		// mint both are. The difference is that a split is not the last word
+		// on its own lengths: every piece is a Slice, and SpanTrack refuses a
+		// window past the length the piece's own Media declares. So measuring
+		// a source whose headers count would override a length the run then
+		// re-reads and holds the cuts to anyway, and one that under-declares
 		// would take a 201 and fail at run: the opposite of what validating
-		// early is for. Filling in an absent length adds a bound where there
-		// was none; replacing a present one puts a third number in a chain
-		// that needs one.
+		// early is for. Replacing a present count puts a third number in a
+		// chain that needs one.
 		track, err := s.trackFor(src, false)
 		if err != nil {
 			return nil, err
 		}
-		// The bound has to be the number the run will hold the pieces to, and
-		// a tolerant probe is no longer always that number: a Matroska Opus or
-		// Vorbis file estimates at probe and measures at open, and the estimate
-		// runs long, so a cut in the difference took a 201 here and died at the
-		// run's own SpanTrack with pieces already in the job directory. Asking
-		// what an open reports is not measuring: a source whose open estimates
-		// too keeps the estimate, which is what the paragraph above wants.
-		if track, err = s.settledAtOpen(src, track); err != nil {
-			return nil, err
+		// An advisory total is not a count, and it is the one shape where the
+		// bound and the run would otherwise be two numbers: a Matroska Info
+		// Duration is millisecond-rounded and can run past the audio, so a cut
+		// in the difference took a 201 here and died at the run's own SpanTrack
+		// with pieces already in the job directory. Measuring is the runner's
+		// own splitLength rule (it fills an advisory length the same way), and
+		// the run wraps each opened piece with what was measured, so one number
+		// from one memo is under the bound and the run both.
+		if track.SamplesAdvisory {
+			if track, err = s.trackFor(src, true); err != nil {
+				return nil, err
+			}
 		}
 		// A sheet becomes cut points here, once, so everything below (and
 		// the runner, and the restart) sees the same list a caller who sent

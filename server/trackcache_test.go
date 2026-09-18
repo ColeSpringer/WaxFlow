@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/testutil"
@@ -263,9 +265,9 @@ func TestMeasureLengthTakesTheCheapestRoute(t *testing.T) {
 		t.Errorf("measured %d, the walk settles at %d", got, want)
 	}
 
-	// A Matroska Opus track walks inside its own constructor, so its length is
-	// exact the moment the file is open and measuring it again would decode
-	// the whole file for a number already in hand.
+	// A Matroska Opus track takes the walk route: no open pays the cluster
+	// walk, so the estimate the headers state has to be replaced by reading,
+	// and the walk is the cheapest reading there is (no decode, no bisection).
 	webm, err := os.ReadFile(filepath.Join("..", "container", "mka", "testdata", "seed-opus.webm"))
 	if err != nil {
 		t.Fatal(err)
@@ -276,17 +278,87 @@ func TestMeasureLengthTakesTheCheapestRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer wm.Close()
-	opened := wm.Info().Default().Samples
+	opened := wm.Info().Default()
+	if !opened.SamplesAdvisory {
+		t.Fatalf("this cell needs an open that estimates; got %d (exact %v)", opened.Samples, opened.SamplesExact)
+	}
 	cs.Reset()
 	n, err := measureLength(wm)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != opened {
-		t.Errorf("measured %d, the open already reported %d", n, opened)
+	strict, err := format.Probe(container.BytesSource(webm), "webm", &format.Options{Strict: true})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if cs.Reads != 0 {
-		t.Errorf("the measure read the source %d times (%d bytes) for a length the open had", cs.Reads, cs.Bytes)
+	if want := strict.Default().Samples; n != want {
+		t.Errorf("measured %d, a strict probe walks to %d", n, want)
+	}
+	if cs.Reads == 0 {
+		t.Error("the measure read nothing; the walk it is supposed to take reads the clusters")
+	}
+}
+
+// TestMeasureAgreesWithTheDecodeOnARoundedContainer is the fourth route, and
+// the reason it exists. ASF names its positions in milliseconds, so a seek past
+// the end answers where the landing claims to be plus the frames decoded from
+// there, and the rounding up to that landing lands in the total: sine-s16.wma
+// comes back 33 samples under a read of the same file.
+//
+// Those 33 are the kind of wrong this measure exists to prevent. A timeline's
+// prefix sum carries them into every member after it, a bounded slice drops
+// them, and an HLS playlist promises a tail it will not serve. So a container
+// whose own positions are rounded is decoded instead.
+func TestMeasureAgreesWithTheDecodeOnARoundedContainer(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "testdata", "sine-s16.wma"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := func() format.Media {
+		med, err := format.Open(container.BytesSource(raw), "wma", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return med
+	}
+
+	med := open()
+	defer med.Close()
+	if tr := med.Info().Default(); !tr.SamplesAdvisory {
+		t.Fatalf("the fixture's length is not advisory (%+v); this cell needs a rounded container", tr)
+	}
+	got, err := measureLength(med)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The oracle is a read of the same file, which is what every consumer of
+	// this number will get.
+	lin := open()
+	defer lin.Close()
+	buf := audio.Get(lin.Info().Default().Fmt, audio.StandardChunk)
+	defer audio.Put(buf)
+	var want int64
+	for {
+		err := lin.ReadChunk(buf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		want += int64(buf.N)
+	}
+	if got != want {
+		t.Errorf("measured %d, a read of the same file delivers %d", got, want)
+	}
+
+	// And the shortcut it declines is still wrong, so the route is doing work
+	// rather than arriving at the same place by luck.
+	sk := open()
+	defer sk.Close()
+	if landed, err := sk.SeekSample(measureCeiling); err == nil && landed == want {
+		t.Errorf("a seek past the end answered %d too; this cell no longer pins anything", landed)
 	}
 }
 
@@ -353,11 +425,11 @@ func TestTrackForKeepsAnAdvisoryTotalForANonExactCaller(t *testing.T) {
 	}
 }
 
-// TestTimelineGateMemoizesWhatItPaidFor closes the double measure. The mint's
-// job gate opens each member to ask whether measuring it is slow; for a
-// Matroska Opus file that open walks every cluster, and throwing the result
-// away left the mint to open and walk the same file again.
-func TestTimelineGateMemoizesWhatItPaidFor(t *testing.T) {
+// TestTimelineGateReadsTheHeadOfAWebMMember is the gate's own cost and its own
+// verdict on a member whose length is a cluster walk away. The gate opens each
+// member to ask whether measuring it is slow; the open is a head read, the
+// answer is slow, and there is nothing to memoize because nothing was paid.
+func TestTimelineGateReadsTheHeadOfAWebMMember(t *testing.T) {
 	s, f := trackForFile(t, filepath.Join("..", "container", "mka", "testdata", "seed-opus.webm"), "seed.webm")
 	if s.trackIsExact(f) {
 		t.Fatal("the memo is warm before the gate ran")
@@ -366,19 +438,18 @@ func TestTimelineGateMemoizesWhatItPaidFor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if needs {
-		t.Error("an Opus member measured at open is not a job")
+	if !needs {
+		t.Error("a WebM Opus member whose exact total is a cluster walk away is a job")
 	}
-	if !s.trackIsExact(f) {
-		t.Fatal("the gate paid for the walk and kept nothing")
+	if s.trackIsExact(f) {
+		t.Error("the gate memoized an exact length it never measured")
 	}
-	// And the memo is the one an exact caller reads, so the mint's measure is
-	// a hit rather than a second open.
+	// And the measure, when the job runs it, is a walk that settles.
 	track, err := s.trackFor(f, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !track.SamplesExact || track.Samples <= 0 {
-		t.Errorf("memoized track = %d (exact %v), want the gate's measurement", track.Samples, track.SamplesExact)
+		t.Errorf("measured track = %d (exact %v), want the walk's count", track.Samples, track.SamplesExact)
 	}
 }

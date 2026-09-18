@@ -138,11 +138,17 @@ type Track struct {
 	// (LAME tag, iTunSMPB, Opus pre-skip, edit lists), in samples.
 	Delay   int64
 	Padding int64
-	// SamplesExact marks Samples as an authoritative hard length the decoder
-	// must be trimmed to, not an advisory total. Ogg-Vorbis and Ogg-Opus set
-	// it (the last page granule is exact and the decoder over-produces past
-	// it); formats whose declared total can lie (a bad FLAC STREAMINFO) leave
-	// it false so a mismatch stays a tolerated oddity rather than a truncation.
+	// SamplesExact marks Samples as an authoritative length rather than a
+	// declared or advisory one: something read the payload and this is what it
+	// found. Where the decoder over-produces past it (Ogg-Vorbis and Ogg-Opus,
+	// whose last page granule is the playable end) it is also a truncation
+	// instruction, and format.Media caps the decode there.
+	//
+	// It is set by a measurement, never by a header alone. A demuxer that
+	// verifies its declared total against the payload at open sets it (flacn
+	// and wv scan their tail for the closing frame), and one that defers that
+	// work sets it when Walk finishes. A total nothing checked leaves it false,
+	// so a mismatch stays a tolerated oddity rather than a truncation.
 	SamplesExact bool
 	// SamplesAdvisory marks Samples as a total the decode is not expected to
 	// match: fit for a duration to display, unfit for arithmetic that has to
@@ -150,9 +156,11 @@ type Track struct {
 	// trim the decode to this number and the other says not to trust it; a
 	// measurement that sets the first clears the second. It is a claim about
 	// precision, which is what SamplesExact is not (that one is a truncation
-	// instruction). A FLAC leaves both false, and so does a WAV whose payload
-	// is byte-linear: their totals are counted, not estimated, and a total
-	// that disagrees with the stream is damage rather than imprecision.
+	// instruction). An MP3's Xing count leaves both false: it is declared, not
+	// estimated, and one that disagrees with the frames is damage rather than
+	// imprecision. A WAV whose payload is byte-linear, and a FLAC or WavPack
+	// whose open verified its declared total against the payload, are exact
+	// outright.
 	//
 	// Four shapes reach it, for three different reasons. Two containers state a
 	// duration in a time unit and have no sample count at all: ASF, in
@@ -170,11 +178,12 @@ type Track struct {
 	// number is not rounded and it is not the track's length either, which is
 	// the same practical answer: display it, do not sum it.
 	//
-	// The fourth is the second shape met by a caller that declined to pay for
-	// the walk: a Matroska Opus or Vorbis track probed tolerantly, whose exact
-	// total is a cluster walk away (see mka's DeferWalk). A file with no Info
-	// Duration to fall back on reports -1 with neither flag rather than an
-	// estimate it does not have.
+	// The fourth is the second shape as any caller meets it: a Matroska Opus
+	// or Vorbis track at open, whose exact total is a cluster walk away. No
+	// open pays that walk, since the tail trim rides on the block that carries
+	// it (see Packet.Padding), so the read is gapless either way and only the
+	// number waits for Walk. A file with no Info Duration to fall back on
+	// reports -1 with neither flag rather than an estimate it does not have.
 	//
 	// Three things read it. A timeline refuses such a member, since a prefix
 	// sum cannot survive the drift; measure it first (see ConcatSource.Track).
@@ -226,6 +235,17 @@ func UnusableFormat(prefix string, f audio.Format, err error) error {
 // Packet is a codec packet routed to a track.
 type Packet struct {
 	Track int
+	// Padding is the number of samples at the end of this packet's decoded
+	// output that are not audio, stated by the container per packet
+	// (Matroska's DiscardPadding). A reader drops them from that packet's
+	// output, so delivery is gapless with no total in hand; a walk sums them
+	// into the track's Padding; a muxer ignores the field, since every output
+	// container carries the end trim in its trailer instead.
+	//
+	// The raw decoder timeline (PTS, Dur, a walk's raw total) keeps counting
+	// the trimmed frames, as ffmpeg's packet duration does, so the length a
+	// walk settles is that total less the sum of these.
+	Padding int64
 	codec.Packet
 }
 
@@ -322,14 +342,10 @@ type Warner interface {
 // strict probe calls Walk and the daemon's job gate reads Walked; they are
 // two views of one state on the same types, which is why one interface
 // carries both. A demuxer that confirms everything at open does not
-// implement it, and Open never calls Walk: a read finds damage where it
-// lies. Walk leaves the packet position where it was.
-//
-// "Open never calls Walk" is about this interface, not about reading nothing:
-// a Matroska Opus or Vorbis track confirms its gapless total by walking the
-// clusters inside its own constructor, because format.Media needs the total
-// before the first read. Its DeferWalk leaves that to Walk for a caller that
-// only wants headers.
+// implement it, and Open never calls Walk, and no open reads a payload: a
+// Matroska track's tail trim rides on the block that carries it
+// (Packet.Padding), so its exact total can wait for Walk. A read finds damage
+// where it lies. Walk leaves the packet position where it was.
 //
 // A Walk after a complete restore costs nothing and still settles: the
 // sidecar's index already reaches the end, so the walk has nothing to do and

@@ -157,14 +157,22 @@ probe takes a live slot for its walk, the way a stream does, so a daemon
 whose pool is full answers it `503 overloaded`; a tolerant probe takes none.
 A strict probe of a frame-indexed payload reports the walked length as
 exact: a count its headers stated is confirmed, or replaced by what a read
-delivers when the run comes up short, which is reported as damage. A
-Matroska Opus or Vorbis track joins those payloads: reading it exactly means
-walking its clusters, so a tolerant probe reports the Info Duration instead,
-or `samples: -1` where the file states none, and a strict one walks. `samplesExact` and `samplesAdvisory` say which kind
+delivers when the run comes up short, which is reported as damage. Every
+Matroska track joins those payloads: reading one exactly means walking its
+clusters, which no open pays, so a tolerant probe reports the Info Duration
+instead, or `samples: -1` where the file states none, and a strict one walks.
+A read of such a file is gapless either way, because Matroska states its tail
+trim per block rather than as a total. `samplesExact` and `samplesAdvisory` say which kind
 of number `samples` is: `samplesExact` a measured one, `samplesAdvisory` a
 rounded total fit for display and not for arithmetic that has to add up
 (ASF's ticks, a Matroska Info Duration, a WAV fact chunk over MP3 frames),
-and neither the headers' own count taken at its word. `notes` is the other
+and neither the headers' own count taken at its word. FLAC and WavPack report
+`samplesExact` from a tolerant probe: their opens verify the declared total
+against the payload in both directions, from one read of the tail, and report
+a shortfall as damage and an overrun as a note. A file whose measurement had
+to cross damage keeps the corrected length without the flag, since an
+authoritative length caps a decode and one walked past a hole should not.
+Ogg-FLAC does not verify at all yet (see `docs/deferred-work.md`). `notes` is the other
 half and is never damage: what this build did with a file that is perfectly well formed, such
 as ignoring a stream it cannot use, capping a chapter list at its own limit,
 rescaling a timeline whose timescale is not the sample rate, or reporting a
@@ -467,7 +475,12 @@ sample-exact through the decoder when it cannot.
 
 **Live transcode responses**: `200` chunked, `Accept-Ranges: none`,
 `Cache-Control: no-store`, `X-Accel-Buffering: no`, plus hints
-`X-Content-Duration` (seconds) and `X-Estimated-Content-Length`. Range
+`X-Content-Duration` (seconds) and `X-Estimated-Content-Length`. A source
+whose headers only estimate its length (ASF, Matroska) is measured once for
+that header, memoized per source; a source whose headers count is taken at its
+word. The measure is a hint, not a bound on the run: the body is whatever the
+file decodes to, so a source whose measure and whose decode disagree streams
+whole rather than being cut to the advertised number. Range
 policy per RFC 9110's permission to ignore: `Range: bytes=0-` gets the
 plain 200 full stream (Safari/AVPlayer attach it to everything); any
 nonzero offset gets `416` plus an envelope hinting at `t=`. Delivery
@@ -637,8 +650,10 @@ Things worth knowing before you build on it:
   its headers. That is a sub-millisecond walk for formats whose demuxer
   can find its end from a table (FLAC, WAV, Ogg, mp4), and a whole-file
   walk for a member whose demuxer defers one: MP3 (bare or in a WAV or
-  AIFF-C), ADTS, a Matroska file whose length is only its Info Duration,
-  and a Matroska Opus or Vorbis file, which a tolerant probe does not walk.
+  AIFF-C), ADTS, and any Matroska file, whose cluster walk no open pays.
+  ASF is slower still: it names its positions in milliseconds, so no walk or
+  seek can answer exactly and the measure is a decode. A cold mint over any of
+  these answers `202` rather than `201`.
   When a cold queue needs enough of the latter to be worth it,
   the response is `202` with a job instead of `201` with a digest; poll
   `GET /jobs/{id}` or follow its events, and the finished job's `timeline`

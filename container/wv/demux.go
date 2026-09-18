@@ -111,6 +111,17 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	return nil
 }
 
+// note records a Warning that Strict must not escalate: this build doing
+// something with a well-formed file that a caller should know about, rather
+// than damage in the file. See [container.Note]. It shares warn's cap and
+// de-duplication, since the list is one list.
+func (d *Demuxer) note(off int64, format string, args ...any) {
+	w := container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note}
+	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
+		d.warnings = append(d.warnings, w)
+	}
+}
+
 func (d *Demuxer) parse() error {
 	if !Match(d.w.Peek(0, 4)) {
 		if d.w.Err() != nil {
@@ -173,37 +184,52 @@ func (d *Demuxer) parse() error {
 	// else (a carved-out .wv, an interrupted encode with no total at all) has
 	// its length read off the last block instead.
 	//
-	// SamplesExact stays false either way. It exists for formats whose decoder
-	// over-produces past a length the container states exactly (an Ogg
-	// granule); WavPack's does not, since every block declares its own sample
-	// count and yields exactly that. Setting it would buy nothing and would
-	// turn a declared total that disagrees with the blocks into a silent
-	// truncation instead of the tolerated oddity flacn treats it as.
-	samples := int64(-1)
+	// Either way the length is measured from the blocks and is exact. The total
+	// is a claim the first block carries, back-patched once the input ran out;
+	// a file cut short afterwards still carries it, and one whose blocks outrun
+	// it is the mirror image. Left unchecked, the first hands every caller a
+	// duration no read can reach and strict mode a damaged file it has nothing
+	// to object to, and the second hands every caller that sums lengths a
+	// number the read then exceeds. A shortfall is damage and warns; an overrun
+	// is the file disagreeing with itself in a way this build believes the
+	// blocks about, which is a Note.
+	//
+	// SamplesExact says the number is authoritative, which is what a
+	// measurement is. It is not a truncation instruction here: WavPack's
+	// decoder does not over-produce, since every block declares its own sample
+	// count and yields exactly that, so capping a decode at this length can
+	// only ever land where the blocks already end.
+	samples, exact := int64(-1), false
 	if h.BlockIndex == 0 && h.TotalSamples >= 0 {
+		// A tail too damaged to locate leaves the declared total standing and
+		// unexact: the read path reports what it finds where it finds it.
 		samples = h.TotalSamples
-		// The total is a claim the first block carries, back-patched once the
-		// input ran out; a file cut short afterwards still carries it. Left
-		// unchecked it hands every caller a duration no read can reach, and
-		// strict mode a damaged file it has nothing to object to. Only a
-		// shortfall is this check's business: a stream running past its
-		// declared total is the tolerated disagreement it has always been.
-		if end, ok := d.deliverableEnd(); ok && end-d.initialIndex < samples {
-			if err := d.warn(off, "the header declares %d samples but the blocks end at %d",
-				samples, end-d.initialIndex); err != nil {
-				return err
+		if end, ok, clean := d.deliverableEnd(); ok {
+			got := end - d.initialIndex
+			switch {
+			case got < samples:
+				if err := d.warn(off, "the header declares %d samples but the blocks end at %d",
+					samples, got); err != nil {
+					return err
+				}
+			case got > samples:
+				d.note(off, "the header declares %d samples but the blocks run to %d", samples, got)
 			}
-			samples = end - d.initialIndex
+			// Exact only when nothing was resynced past: format.Media caps a
+			// decode at an authoritative length, and a block index read across
+			// a hole counts samples the file does not hold.
+			samples, exact = got, clean
 		}
 	} else if end, ok := d.scanTail(); ok {
-		samples = end - d.initialIndex
+		samples, exact = end-d.initialIndex, true
 	}
 	d.track = container.Track{
-		Codec:       codec.WavPack,
-		CodecConfig: cfgBlob,
-		Fmt:         f,
-		Samples:     samples,
-		Default:     true,
+		Codec:        codec.WavPack,
+		CodecConfig:  cfgBlob,
+		Fmt:          f,
+		Samples:      samples,
+		SamplesExact: exact,
+		Default:      true,
 	}
 	// The stream's own depth, when the container width it decodes at is wider
 	// (a 20-bit source in 24-bit words). Probe reports this rather than the
@@ -287,36 +313,44 @@ func (d *Demuxer) scanTail() (int64, bool) {
 // refuses there; escalating it here would refuse a merely-resynced file at
 // open. The length is the one thing this pass objects to, and parse warns
 // about that itself.
-func (d *Demuxer) deliverableEnd() (int64, bool) {
+//
+// clean reports that the pass met no damage, which is what decides whether the
+// answer is authoritative. The walk resyncs past unparsable bytes, and whole
+// blocks can go missing under one: the end it then reports is the last block's
+// own index, which counts the missing blocks' samples as if they were there.
+// That number is still the best answer for where the stream ends, and it is
+// not one to promise a caller who sums lengths.
+func (d *Demuxer) deliverableEnd() (end int64, ok, clean bool) {
 	if end, ok := d.scanTail(); ok {
-		return end, true
+		return end, true, true
 	}
 	strict, saved := d.opts.Strict, len(d.warnings)
 	off0, cur0, valid0 := d.off, d.cur, d.valid
 	d.opts.Strict = false
 	defer func() {
 		d.opts.Strict = strict
+		clean = clean && len(d.warnings) == saved
 		d.warnings = d.warnings[:saved]
 		// The walk ends past the audio; reads start where it began.
 		d.off, d.cur, d.valid = off0, cur0, valid0
 	}()
 
-	off, h, ok := d.bisect(math.MaxInt64) // no target: land on the last window
-	if !ok {
-		return 0, false
+	off, h, found := d.bisect(math.MaxInt64) // no target: land on the last window
+	if !found {
+		return 0, false, false
 	}
 	d.off, d.cur, d.valid = off, h, true
-	end, found := int64(0), false
+	end, found = 0, false
 	for d.valid {
 		if d.cur.Audio() {
 			end, found = d.cur.BlockIndex+int64(d.cur.BlockSamples), true
 		}
 		d.w.Trim(d.off)
 		if err := d.advance(); err != nil {
-			return 0, false
+			return 0, false, false
 		}
 	}
-	return end, found
+	return end, found, true
 }
 
 // tilesToEnd reports whether the blocks from off tile exactly to end. It is

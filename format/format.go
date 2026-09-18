@@ -24,18 +24,17 @@ type Options struct {
 	// `waxflow probe --strict`).
 	//
 	// It also decides how much of a file is read. A tolerant Probe reads
-	// headers, on every format: the payload walks a demuxer defers stay
+	// headers, and so does every Open: the payload walks a demuxer defers stay
 	// deferred (container.Walker: the MP3 frame index, bare or in a WAV or
-	// AIFF-C; the ADTS frame index; a Matroska cluster walk), and so does the
-	// one a Matroska Opus or Vorbis track would otherwise run inside its own
-	// constructor, which is the only open in the tree that reads a payload.
-	// A strict Probe finishes all of them, so its verdict covers the whole
-	// file at the cost of reading it.
+	// AIFF-C; the ADTS frame index; a Matroska cluster walk). A strict Probe
+	// finishes all of them, so its verdict covers the whole file at the cost
+	// of reading it.
 	//
-	// Open and OpenDemuxer keep that constructor walk whatever Strict says:
-	// the tail trim is folded into the exact total and format.Media needs it
-	// before the first read. Neither ever calls Walk, so damage past the head
-	// of a deferred payload is found by the read that reaches it.
+	// No open reads a payload. A Matroska track's tail trim rides on the block
+	// that carries it (container.Packet.Padding), so a read is gapless without
+	// the total and only the number waits for Walk. Open and OpenDemuxer never
+	// call Walk, so damage past the head of a deferred payload is found by the
+	// read that reaches it.
 	Strict bool
 }
 
@@ -96,6 +95,10 @@ func (i *Info) Default() container.Track {
 // demuxer positions on a sync point at or before the target and Media
 // pre-rolls the remainder internally, decoding and discarding.
 //
+// A read delivers the gapless stream on every format, whether or not the
+// length is known: a container that states its trims per packet is trimmed as
+// the packets arrive, and one that states a total is capped at it.
+//
 // Info's Warnings and Notes are live, and nothing else in it is: the two
 // lists are current as of the last ReadChunk or SeekSample, on the goroutine
 // that reads, because a demuxer whose walk is lazy finds damage where the
@@ -127,6 +130,28 @@ type Media interface {
 type Walker interface {
 	Walk() error
 	Walked() bool
+}
+
+// WalkMedia runs med's deferred walk, and nothing when it defers none.
+// MediaWalked reports whether that walk has run, true when there is none to
+// run. Together they are Walker asked of a Media that may or may not be one.
+//
+// They exist for the wrappers. Embedding the Media interface promotes no
+// method outside it, so a wrapper that does not write these two by hand
+// answers "nothing deferred" for a media that defers a whole-file walk, and
+// every consumer downstream of it quietly gets the wrong answer: a job gate
+// calls an expensive member cheap, a run commits a length nothing confirmed.
+// The forwarding cannot be inherited, so it is at least written once.
+func WalkMedia(med Media) error {
+	if w, ok := med.(Walker); ok {
+		return w.Walk()
+	}
+	return nil
+}
+
+func MediaWalked(med Media) bool {
+	w, ok := med.(Walker)
+	return !ok || w.Walked()
 }
 
 // Composite is implemented by a Media assembled from several sources rather
@@ -167,7 +192,7 @@ func Probe(src container.Source, hint string, opts *Options) (*Info, error) {
 		return nil, err
 	}
 	strict := opts != nil && opts.Strict
-	demux, err := d.open(src, openOptions{strict: strict, probe: true})
+	demux, err := d.open(src, openOptions{strict: strict})
 	if err != nil {
 		return nil, err
 	}

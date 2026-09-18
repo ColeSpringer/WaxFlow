@@ -28,6 +28,75 @@ const concatContainer = "timeline"
 // source.
 const ToEnd = -1
 
+// MeasuredMedia returns med reporting samples as its default track's length,
+// authoritative, for a caller that measured the source and needs the number it
+// measured to be the number the run enforces.
+//
+// Nothing else changes: Warnings and Notes stay live off the inner media, and
+// a media that already declares this length authoritatively is returned
+// untouched. A negative samples means unknown and leaves the declaration alone.
+//
+// The flags are part of "already": a media declaring the same number as an
+// estimate has not made the promise, and returning it unwrapped would leave
+// every caller that reads SamplesExact deciding the opposite of what the
+// measure says. The number matching is not the question, the claim is.
+//
+// It exists because a freshly opened media declares what its headers state,
+// which for an advisory container can sit on either side of the audio it holds
+// (a Matroska Info Duration is millisecond-rounded), while Slice and a
+// transcode's projection both re-derive from the media they are handed. A plan
+// validated against a measured total and a run bounded by a declared one are
+// two numbers where the caller needs one, and the gap between them refuses
+// windows the file can serve or commits headers the run then misses.
+//
+// It forwards format.Walker and nothing else. Embedding the interface promotes
+// no method outside it, so a container.Indexer on the inner media is hidden
+// here on purpose: the sidecar save lives in the wrapper the engine put around
+// it, whose own Close still runs.
+func MeasuredMedia(med format.Media, samples int64) format.Media {
+	info := med.Info()
+	if t := info.Default(); samples < 0 || (t.Samples == samples && t.SamplesExact) {
+		return med
+	}
+	patched := *info
+	patched.Tracks = slices.Clone(info.Tracks)
+	// The default track is the one a span bounds; mirror Default's pick.
+	idx := 0
+	for i, t := range patched.Tracks {
+		if t.Default {
+			idx = i
+			break
+		}
+	}
+	patched.Tracks[idx].Samples = samples
+	// Honest rather than optimistic: the caller measured, and a measurement
+	// is authoritative, so the rounded claim it replaced goes with it.
+	patched.Tracks[idx].SamplesExact = true
+	patched.Tracks[idx].SamplesAdvisory = false
+	return measuredMedia{Media: med, info: &patched}
+}
+
+// measuredMedia is a Media whose declared info is replaced; MeasuredMedia is
+// its only constructor and carries the rationale.
+type measuredMedia struct {
+	format.Media
+	info *format.Info
+}
+
+// Walk and Walked forward format.Walker, as the engine's own wrappers do.
+func (m measuredMedia) Walk() error { return format.WalkMedia(m.Media) }
+
+func (m measuredMedia) Walked() bool { return format.MediaWalked(m.Media) }
+
+// Info returns the patched description, its Warnings and Notes refreshed from
+// the inner media on every call: those two lists are live there (see
+// format.Media), and the copy holds the measured total, not a verdict.
+func (m measuredMedia) Info() *format.Info {
+	in := m.Media.Info()
+	m.info.Warnings, m.info.Notes = in.Warnings, in.Notes
+	return m.info
+}
+
 // Slice bounds med to the sample range [from, to) of its own timeline, as
 // a Media whose sample 0 is med's sample from and whose length is to-from.
 // to is exclusive; ToEnd means to the end. The returned Media owns med and
@@ -237,16 +306,16 @@ func SpanTrack(track container.Track, from, to int64) (container.Track, error) {
 	// That is precisely the desync a prefix sum cannot survive.
 	//
 	// The bound is the declared length whatever SamplesExact says, which
-	// looks like the wrong predicate and is not. SamplesExact is a
-	// truncation instruction (the decoder over-produces and must be cut back
-	// to this), not a claim about precision, so gating on it would drop the
-	// refusal for exactly the sources a split is usually pointed at: WAV and
-	// FLAC leave it false because their totals can lie, not because they are
-	// approximate. Gating here would trade a real refusal on the common case
-	// for a narrow one on Matroska, whose advisory total a third-party muxer
-	// can put on either side of the audio it has. Matroska this library wrote
-	// is not in that group: its Duration round-trips to the exact sample count,
-	// so a cut ending at the declared total is accepted, not refused by a hair.
+	// looks like the wrong predicate and is not. A length that is not exact is
+	// not thereby approximate: an MP3's Xing count and an mp4's sample table
+	// leave the flag false because nothing has checked them against the
+	// frames, not because they are estimates, and those are exactly the
+	// sources a split is usually pointed at. Gating here would trade a real
+	// refusal on the common case for a narrow one on Matroska, whose advisory
+	// total a third-party muxer can put on either side of the audio it has.
+	// Matroska this library wrote is not in that group: its Duration
+	// round-trips to the exact sample count, so a cut ending at the declared
+	// total is accepted, not refused by a hair.
 	if total >= 0 {
 		if from > total {
 			return container.Track{}, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(

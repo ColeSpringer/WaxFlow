@@ -128,19 +128,9 @@ func (m *indexSavingMedia) RestoreIndex(blob []byte) bool {
 // Walk and Walked forward format.Walker the way the index pair is forwarded:
 // embedding the interface promotes nothing outside it, and the daemon's job
 // gate asks the media it opened through this engine.
-func (m *indexSavingMedia) Walk() error {
-	if w, ok := m.Media.(format.Walker); ok {
-		return w.Walk()
-	}
-	return nil
-}
+func (m *indexSavingMedia) Walk() error { return format.WalkMedia(m.Media) }
 
-func (m *indexSavingMedia) Walked() bool {
-	if w, ok := m.Media.(format.Walker); ok {
-		return w.Walked()
-	}
-	return true
-}
+func (m *indexSavingMedia) Walked() bool { return format.MediaWalked(m.Media) }
 
 // TranscodeResult reports what Transcode produced.
 type TranscodeResult struct {
@@ -205,7 +195,9 @@ func (r *TranscodeResult) LevelNote() string {
 // WAV sizes) want a dst that can really seek, which is probed rather than
 // read off the method set: an *os.File on a pipe carries io.WriteSeeker and
 // cannot seek. WAV falls back to a compliant streaming form on one that
-// cannot; AIFF refuses.
+// cannot; AIFF refuses. A dst that cannot be patched also makes the output's
+// declared length a commitment, so a source length a header declared and
+// nothing checked is confirmed by walking the source before it is projected.
 func (e *Engine) Transcode(ctx context.Context, src container.Source, hint string, dst io.Writer, opts TranscodeOptions) (*TranscodeResult, error) {
 	med, err := e.OpenStream(src, hint)
 	if err != nil {
@@ -223,18 +215,8 @@ func (e *Engine) Transcode(ctx context.Context, src container.Source, hint strin
 // file. The caller owns med and closes it.
 func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Writer, opts TranscodeOptions) (*TranscodeResult, error) {
 	srcTrack := med.Info().Default()
-	srcSamples := srcTrack.Samples
 	if opts.FromSample < 0 {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: negative FromSample")
-	}
-	if opts.FromSample > 0 {
-		landed, err := med.SeekSample(opts.FromSample)
-		if err != nil {
-			return nil, err
-		}
-		if srcSamples >= 0 {
-			srcSamples = max(0, srcSamples-landed)
-		}
 	}
 	row, err := outputRow(opts.Format)
 	if err != nil {
@@ -244,9 +226,34 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 	// override the format cannot honor must fail here too, so a caller skipping
 	// the plan cannot have it silently ignored (a mux closure that just fell
 	// through on an unknown name would otherwise write the default form).
+	//
+	// Both checks come before the seek and the confirm below, so a request that
+	// was never going to work is refused before anything reads the source.
 	containerName, _, err := resolveContainer(row, opts.Container)
 	if err != nil {
 		return nil, err
+	}
+	var landed int64
+	if opts.FromSample > 0 {
+		if landed, err = med.SeekSample(opts.FromSample); err != nil {
+			return nil, err
+		}
+	}
+	// A header a muxer cannot go back and fix is a commitment, so the length it
+	// commits to is confirmed first. Walk leaves the packet position, so this
+	// sits after the seek and changes nothing about what is read out.
+	patchable := muxseek.CanSeek(dst)
+	if !patchable {
+		if w := confirmableLength(srcTrack, med); w != nil {
+			if err := w.Walk(); err != nil {
+				return nil, err
+			}
+			srcTrack = med.Info().Default()
+		}
+	}
+	srcSamples := srcTrack.Samples
+	if srcSamples >= 0 {
+		srcSamples = max(0, srcSamples-landed)
 	}
 	spec := specFor(opts)
 	if row.adjust != nil {
@@ -268,29 +275,39 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 		return nil, err
 	}
 
-	// An advisory source length projects nothing into the output's headers. It
-	// is a total the decode is not expected to match (ASF's ticks, a Matroska
-	// Info Duration, a WAV fact chunk over MP3 frames), so a muxer that sizes
-	// its headers from it writes a byte count the encoder then misses: the WAV
-	// muxer catches that at End on a writer it cannot seek and fails a whole
-	// transcode. Unknown is the honest projection, and every muxer already
-	// handles it, since an untagged MP3 opens with -1 today.
+	// What the output's headers are allowed to promise. On a destination the
+	// muxer can patch, the projection is provisional: a miss is corrected at
+	// End and the bytes are the same either way. On one it cannot, the headers
+	// are a commitment, so only a confirmed length is projected.
 	//
-	// The cost lands on an unseekable writer alone, and it is a hint rather
-	// than a header: Matroska reserves a Duration slot only for a projected
-	// length or a writer it can seek, so a live mka of an advisory source
-	// carries no Duration where it used to carry a rounded one. A seekable
-	// writer, which is every job and every cache entry, back-patches the exact
-	// number at End either way.
+	// An advisory total projects nothing. It is a number the decode is not
+	// expected to match (ASF's ticks, a Matroska Info Duration, a WAV fact
+	// chunk over MP3 frames), so a muxer that sizes its headers from it writes
+	// a byte count the encoder then misses: the WAV muxer catches that at End
+	// on a writer it cannot seek and fails a whole transcode. Walking would not
+	// help either, since the estimate is not a claim about content. Unknown is
+	// the honest projection, and every muxer already handles it, since an
+	// untagged MP3 opens with -1 today.
 	//
-	// It is keyed on SamplesAdvisory and not on "the headers have not been
-	// confirmed", which would take in FLAC and WAV: those leave SamplesExact
-	// false because their totals can lie, not because they are estimates, and
-	// dropping their projection would cost every streamed WAV its exact sizes
-	// for a mismatch that does not happen. A truncated Xing-tagged MP3 is the
-	// shape that still gets through; see docs/deferred-work.md.
+	// A declared count whose source could confirm it has been walked above; one
+	// whose walk did not finish stays unprojected, since the source itself says
+	// the payload is unaccounted for. Every other count projects as it always
+	// did, so a streamed WAV of an mp4 or a FLAC keeps its exact sizes.
+	//
+	// Which destinations those are is worth being exact about, because the
+	// walk is not free. A job's output file is seekable and pays nothing here.
+	// A live pipeline's cache entry is not: it is an append-only ring with no
+	// Seek, so every cold /stream and /transcode of a source with a declared
+	// count and a deferred walk (a Xing-tagged MP3, an ADTS stream) builds the
+	// frame index before the first encoded byte. That is a full pass of header
+	// hops, and the index sidecar makes repeats of the same source free.
+	//
+	// For the destinations that are only ever hints, the cost is a hint lost
+	// rather than a size: Matroska reserves a Duration slot only for a
+	// projected length or a writer it can seek, so a live mka of an advisory
+	// source carries no Duration where it used to carry a rounded one.
 	projected := srcSamples
-	if srcTrack.SamplesAdvisory {
+	if projectedLength(srcTrack, med, patchable) < 0 {
 		projected = -1
 	}
 	track := container.Track{
@@ -361,13 +378,91 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 		return nil, err
 	}
 	if err := mux.End(trailer); err != nil {
-		return nil, err
+		return nil, missedProjection(patchable, track.Samples, trailer.Samples, err)
 	}
 	clipped, truePeak := chain.Clipped(), chain.TruePeak()
 	e.log.Debug("transcode finished", "samples", trailer.Samples, "clipped", clipped, "truePeak", truePeak)
 	return &TranscodeResult{Samples: trailer.Samples, Format: f, Container: containerName,
 		ClippedSamples: clipped, TruePeak: truePeak, Quantized: chain.Quantized(),
 		InputWarnings: slices.Clone(med.Info().Warnings)}, nil
+}
+
+// lengthWalker is the deferred walk both domains expose under the same two
+// methods: format.Walker on a Media, container.Walker on a demuxer. The rungs
+// below ask the same question of each, so they ask it once.
+type lengthWalker interface {
+	Walk() error
+	Walked() bool
+}
+
+// confirmableLength returns src's deferred walk when t's length is a count
+// nothing has checked yet, and nil otherwise: declared by a header, not an
+// estimate, on a source whose own walk of the payload has not run.
+//
+// It answers both halves at once (is this the shape, and what confirms it) so
+// no caller asserts the walk separately from the test that decided there is
+// one. A nil answer therefore means two things a caller treats alike: the
+// length needs no confirming, or nothing here can confirm it.
+//
+// It is the one shape a header on an unpatchable destination must not commit
+// to. A Xing frame count is a claim the frames can contradict, and a run that
+// projects it writes a byte count the encoder then misses, failing at End with
+// the output's headers already on the wire. Walking first is the remedy, which
+// is why the deferred walk is part of the shape rather than a separate test: a
+// source with none has nothing better to offer than the number it declared, and
+// dropping that would cost every streamed WAV of an mp4 its exact sizes for a
+// mismatch nothing could have caught anyway.
+//
+// The other lengths are fine as they are: an exact one is authoritative, an
+// advisory one projects nothing at all, and an absent one commits to nothing.
+func confirmableLength(t container.Track, src any) lengthWalker {
+	if t.Samples < 0 || t.SamplesExact || t.SamplesAdvisory {
+		return nil
+	}
+	if w, ok := src.(lengthWalker); ok && !w.Walked() {
+		return w
+	}
+	return nil
+}
+
+// projectedLength is what a run may write into its output's headers for a
+// source track: the track's own count, or -1 for no claim at all.
+//
+// One function because the rule is one rule, and the two rungs that apply it
+// would otherwise state it twice and drift. patchable is whether the muxer can
+// go back and fix what it wrote; src is the source the length came from, asked
+// again in case its own walk could still confirm it.
+func projectedLength(t container.Track, src any, patchable bool) int64 {
+	if t.SamplesAdvisory || (!patchable && confirmableLength(t, src) != nil) {
+		return -1
+	}
+	return t.Samples
+}
+
+// missedProjection classifies a muxer's End failure when the output's length
+// came up short of what its headers promised.
+//
+// With a confirmed count, the only non-bug cause left is damage the read
+// tolerated: a page missing from an exact Ogg, a frame gap inside a verified
+// FLAC. That is the input's fault and a caller can act on it, where the
+// internal error the muxer raises says the library miscounted. On a patchable
+// destination no projection was a promise, so a failure there is the muxer's
+// own and passes through unchanged.
+//
+// It asks what the error was, not only what the counts were. A muxer's End
+// fails for reasons that have nothing to do with the length (a write that did
+// not land, a trim the container cannot signal), and those carry their own
+// codes; relabelling an unwritable output as malformed input would point an
+// operator at the file when the disk is what went wrong. Only the internal
+// error the muxer raises for a projection it could not keep is reclassified.
+func missedProjection(patchable bool, projected, produced int64, err error) error {
+	if err == nil || patchable || projected < 0 || produced == projected ||
+		waxerr.CodeOf(err) != waxerr.CodeInternal {
+		return err
+	}
+	return waxerr.Wrap(waxerr.CodeMalformedInput, fmt.Sprintf(
+		"waxflow: the encoder produced %d output frames against a projection of %d; "+
+			"the output's headers were already written from the projection", produced, projected), err)
 }
 
 // resolveContainer resolves a Container override against a row: the name the

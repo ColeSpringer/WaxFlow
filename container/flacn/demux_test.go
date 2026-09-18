@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow/codec"
@@ -551,19 +552,109 @@ func TestTruncatedStreamReportsWhatItCanDeliver(t *testing.T) {
 
 // TestIntactStreamKeepsItsDeclaredTotal is the other half: the length check
 // must be exact, not approximate. An undamaged file's frames end on the
-// declared sample, so the check has to stay silent and change nothing.
+// declared sample, so the check has to stay silent and change nothing, and it
+// reports the total exact because the open confirmed it against the frames.
 func TestIntactStreamKeepsItsDeclaredTotal(t *testing.T) {
 	d, err := flacn.NewDemuxer(container.BytesSource(fixture(t, "sine-s16.flac")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := d.Tracks()[0].Samples; got != 15435 {
-		t.Errorf("samples = %d, want the declared 15435", got)
+	tr := d.Tracks()[0]
+	if tr.Samples != 15435 {
+		t.Errorf("samples = %d, want the declared 15435", tr.Samples)
+	}
+	if !tr.SamplesExact {
+		t.Error("a total the open verified against the frames is not marked exact")
 	}
 	if w := d.Warnings(); len(w) != 0 {
 		t.Errorf("clean file warned: %v", w)
 	}
 	if _, walked := walk(t, d); walked != 15435 {
 		t.Errorf("walked %d samples", walked)
+	}
+}
+
+// TestOverDeclaredTotalAdoptsTheFrames is the direction the length check used
+// to let through. A STREAMINFO total short of the frames is not a truncation
+// instruction, so a read delivers more than the probe promised and every
+// caller that sums lengths is wrong by the difference: the same invariant a
+// shortfall breaks, from the other side.
+//
+// It is a Note rather than a Warning: the file is not damaged, it is
+// internally inconsistent in a way this build simply believes the frames
+// about, so strict mode has nothing to refuse.
+func TestOverDeclaredTotalAdoptsTheFrames(t *testing.T) {
+	const real, short = int64(15435), int64(100)
+	raw := patchFLACTotal(t, fixture(t, "sine-s16.flac"), real-short)
+
+	d, err := flacn.NewDemuxer(container.BytesSource(raw), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := d.Tracks()[0]
+	if tr.Samples != real || !tr.SamplesExact {
+		t.Errorf("samples = %d (exact %v), want the frames' %d exact", tr.Samples, tr.SamplesExact, real)
+	}
+	if _, walked := walk(t, d); walked != real {
+		t.Errorf("walked %d samples, the track declares %d", walked, real)
+	}
+	ws := d.Warnings()
+	if len(ws) != 1 || ws[0].Kind != container.Note {
+		t.Fatalf("warnings = %+v, want one Note", ws)
+	}
+	if !strings.Contains(ws[0].Msg, "run to") {
+		t.Errorf("note %q does not say the frames run past the declared total", ws[0].Msg)
+	}
+	// Strict never escalates a Note, so the file still opens.
+	if _, err := flacn.NewDemuxer(container.BytesSource(raw), &flacn.DemuxerOptions{Strict: true}); err != nil {
+		t.Errorf("strict refused a well-formed file over a Note: %v", err)
+	}
+}
+
+// patchFLACTotal rewrites STREAMINFO's 36-bit total_samples field in place,
+// leaving the frames alone: the file goes on holding every sample it held and
+// only its header now says otherwise. STREAMINFO is the first metadata block,
+// so the packed rate|channels|bits|total word sits at a fixed offset.
+func patchFLACTotal(t *testing.T, raw []byte, total int64) []byte {
+	t.Helper()
+	out := append([]byte(nil), raw...)
+	if len(out) < 26 || string(out[:4]) != "fLaC" {
+		t.Fatal("not a FLAC stream")
+	}
+	const off = 4 + 4 + 10
+	const mask = uint64(1)<<36 - 1
+	w := binary.BigEndian.Uint64(out[off:])
+	binary.BigEndian.PutUint64(out[off:], w&^mask|uint64(total)&mask)
+	return out
+}
+
+// TestDamagedTailIsMeasuredButNotPromised is the limit of the exactness the
+// open hands out. A length walked past damage is the best answer there is, and
+// it is not one to cap a decode with: format.Media stops at an authoritative
+// length, so promising one arrived at by crossing a hole would turn a
+// tolerated oddity into a hard end.
+//
+// The measurement still lands, and it still has to equal what a read delivers,
+// which is the invariant the whole check exists for.
+func TestDamagedTailIsMeasuredButNotPromised(t *testing.T) {
+	raw := fixture(t, "sine-s16.flac")
+	cut := raw[:len(raw)-1500]
+
+	d, err := flacn.NewDemuxer(container.BytesSource(cut), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := d.Tracks()[0]
+	if tr.Samples >= 15435 {
+		t.Fatalf("samples = %d; this cell needs a count short of the declared 15435", tr.Samples)
+	}
+	if tr.SamplesExact {
+		t.Error("a length walked past damage was promised as authoritative")
+	}
+	if _, walked := walk(t, d); walked != tr.Samples {
+		t.Errorf("probe reported %d samples, a read delivered %d", tr.Samples, walked)
+	}
+	if len(d.Warnings()) == 0 {
+		t.Error("a truncated file was corrected without a warning")
 	}
 }

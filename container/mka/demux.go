@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
 	"github.com/colespringer/waxflow/waxerr"
@@ -20,20 +19,6 @@ var (
 type DemuxerOptions struct {
 	// Strict turns tolerated damage (the Warnings list) into errors.
 	Strict bool
-	// DeferWalk leaves the cluster walk finalizeTrack would run at open for
-	// an Opus or Vorbis track to Walk or the first seek: the track reports
-	// the Info Duration as advisory, or -1 when there is none, until then.
-	// A tolerant probe sets it, because a probe reads headers; everything
-	// that reads samples wants the exact total before the first one, and
-	// format.Open and format.OpenDemuxer do not set it for that reason.
-	//
-	// A Media built over a deferred demuxer decodes the whole run: the tail
-	// trim rides in the DiscardPadding the walk sums, and format.Media will
-	// not cap a decode at an advisory total (see its rawEndFor), so the
-	// encoder's tail comes out as audio until Walk settles the track. Walk
-	// fixes it in place, since the Media re-reads its track from the demuxer
-	// there.
-	DeferWalk bool
 }
 
 // Demuxer reads one audio track from a Matroska/WebM segment. It selects the
@@ -67,15 +52,15 @@ type Demuxer struct {
 	// block timestamps cannot express a sample position. The full walk also
 	// yields the gapless raw total and DiscardPadding sum.
 	clusterIndex []clusterPos
-	walked       bool // the full walk has run; rawTotal and paddingNS are whole
+	walked       bool // the full walk has run; rawTotal and padding are whole
 	rawTotal     int64
-	paddingNS    int64
-	recording    bool // walk is building the index
+	padding      int64 // summed DiscardPadding, in samples
+	recording    bool  // walk is building the index
 
 	// In-flight walk state, carried across calls so a bounded walk extends the
 	// index rather than restarting. walkedTo is always a cluster boundary.
 	walkCumulative int64 // running sample count during the index walk
-	walkPaddingNS  int64 // running DiscardPadding sum, committed only by a full walk
+	walkPadding    int64 // running DiscardPadding sum, committed only by a full walk
 	walkFrames     int   // running frame count, against maxFrames
 	walkLimit      int64
 	walkedTo       int64
@@ -592,10 +577,11 @@ func (d *Demuxer) selectTrack() error {
 	return nil
 }
 
-// finalizeTrack builds the container.Track, resolving gapless trims. A track
-// with CodecDelay (the Opus-in-WebM gapless case) walks the whole stream once
-// for an exact sample total; others, and every track under DeferWalk, take an
-// advisory length from Duration.
+// finalizeTrack builds the container.Track, resolving gapless trims. No open
+// reads a payload, so the length is the Info Duration as an advisory total, or
+// -1 when there is none: Matroska states its tail trim per block
+// (container.Packet.Padding) rather than as a total, so a read is gapless
+// without one and only the number waits for Walk.
 func (d *Demuxer) finalizeTrack() error {
 	rate := d.setup.fmt.Rate
 	delay := nsToSamples(d.sel.codecDelay, rate)
@@ -611,24 +597,13 @@ func (d *Demuxer) finalizeTrack() error {
 	}
 
 	samples := int64(-1)
-	exact, advisory := false, false
-	if (d.sel.codecDelay > 0 || d.needsGaplessWalk()) && d.haveFirstCluster && !d.opts.DeferWalk {
-		// A gapless track needs the exact decoder-output total to place the end
-		// trim. Opus signals it with CodecDelay (front) plus DiscardPadding
-		// (tail); Vorbis carries no absolute sample count in its bitstream and
-		// signals its tail trim with DiscardPadding alone (CodecDelay 0, the
-		// priming is inside its first packet), so it always needs the walk to
-		// resolve rawTotal - padding. The walk that finds the total also builds
-		// the seek index.
-		if err := d.ensureWalk(); err != nil {
-			return err
-		}
-		samples = d.walkedSamples(delay, rate)
-		exact = true
-	} else if dur := d.durationSamples(rate); dur >= 0 {
+	advisory := false
+	if dur := d.durationSamples(rate); dur >= 0 {
 		samples, advisory = dur, true
 	}
 
+	// Padding stays 0: no header element states the tail trim, and the blocks
+	// that do are payload. Walk sums them and settles the length.
 	d.track = container.Track{
 		ID:              0,
 		Codec:           d.setup.id,
@@ -636,29 +611,11 @@ func (d *Demuxer) finalizeTrack() error {
 		Fmt:             d.setup.fmt,
 		Samples:         samples,
 		Delay:           delay,
-		SamplesExact:    exact,
 		SamplesAdvisory: advisory,
 		Default:         true,
 	}
 	d.resetReading(d.firstClusterOff)
 	return nil
-}
-
-// walkedSamples is what a finished walk says the track holds: the raw total
-// it counted, less the front trim the CodecDelay named and the tail trim the
-// DiscardPaddings summed to. One expression, because finalizeTrack and
-// adoptWalkedLength both need it and a second copy is a second answer.
-func (d *Demuxer) walkedSamples(delay int64, rate int) int64 {
-	return max(d.rawTotal-delay-nsToSamples(d.paddingNS, rate), 0)
-}
-
-// needsGaplessWalk reports whether the selected codec needs the frame-counting
-// walk to resolve an exact sample total independent of a CodecDelay signal.
-// Vorbis does: its packets carry no absolute position (unlike FLAC's numbered
-// frames) and it self-primes with no front delay, so the container's rawTotal
-// minus the DiscardPadding tail is the only exact length.
-func (d *Demuxer) needsGaplessWalk() bool {
-	return d.setup.id == codec.Vorbis
 }
 
 // durationSamples converts the Info Duration (in ticks) to a sample count, or

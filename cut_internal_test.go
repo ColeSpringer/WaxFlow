@@ -148,7 +148,7 @@ func TestCutTrackSamplesAreLanded(t *testing.T) {
 	// The trailer the muxer will actually be handed. decoded is what the walk
 	// delivers: the sum of the kept windows.
 	decoded := cut.Delay + cut.Samples + cut.Padding
-	tr := remuxTrailer(cut, decoded)
+	tr := remuxTrailer(cut, copiedRun{samples: decoded})
 	if tr.Padding != cut.Padding {
 		t.Errorf("remuxTrailer padding = %d, want %d: the slop did not cancel", tr.Padding, cut.Padding)
 	}
@@ -509,7 +509,7 @@ func TestCutTrackResolvesAnUnknownLength(t *testing.T) {
 	// Delay' = 21024-19456 = 1568. Say the walk delivers to decoded 100000:
 	// the kept window is [19456, 100000), 80544 samples.
 	const delivered = 80544
-	tr := remuxTrailer(cut, delivered)
+	tr := remuxTrailer(cut, copiedRun{samples: delivered})
 	if want := int64(delivered) - cut.Delay - cut.Padding; tr.Samples != want {
 		t.Errorf("remuxTrailer samples = %d, want %d", tr.Samples, want)
 	}
