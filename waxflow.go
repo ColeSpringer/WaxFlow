@@ -268,13 +268,43 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 		return nil, err
 	}
 
+	// An advisory source length projects nothing into the output's headers. It
+	// is a total the decode is not expected to match (ASF's ticks, a Matroska
+	// Info Duration, a WAV fact chunk over MP3 frames), so a muxer that sizes
+	// its headers from it writes a byte count the encoder then misses: the WAV
+	// muxer catches that at End on a writer it cannot seek and fails a whole
+	// transcode. Unknown is the honest projection, and every muxer already
+	// handles it, since an untagged MP3 opens with -1 today.
+	//
+	// The cost lands on an unseekable writer alone, and it is a hint rather
+	// than a header: Matroska reserves a Duration slot only for a projected
+	// length or a writer it can seek, so a live mka of an advisory source
+	// carries no Duration where it used to carry a rounded one. A seekable
+	// writer, which is every job and every cache entry, back-patches the exact
+	// number at End either way.
+	//
+	// It is keyed on SamplesAdvisory and not on "the headers have not been
+	// confirmed", which would take in FLAC and WAV: those leave SamplesExact
+	// false because their totals can lie, not because they are estimates, and
+	// dropping their projection would cost every streamed WAV its exact sizes
+	// for a mismatch that does not happen. A truncated Xing-tagged MP3 is the
+	// shape that still gets through; see docs/deferred-work.md.
+	projected := srcSamples
+	if srcTrack.SamplesAdvisory {
+		projected = -1
+	}
 	track := container.Track{
 		Codec:       row.codecID,
 		CodecConfig: enc.CodecConfig(),
 		Fmt:         f,
-		Samples:     chain.OutputSamples(srcSamples),
+		Samples:     chain.OutputSamples(projected),
 		Default:     true,
 	}
+	// Progress keeps the estimate the headers gave, because a progress total
+	// is the one place a rounded number is fit for purpose: it is a
+	// denominator, not a promise, and -1 there would leave every advisory
+	// source with no progress bar at all.
+	progressTotal := chain.OutputSamples(srcSamples)
 	// Encoders with priming declare it; muxers that can signal it (the
 	// fMP4 edit list) read it from the track, and the trailer restates
 	// it exactly at End.
@@ -323,7 +353,7 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 		}
 		if opts.Progress != nil {
 			done += int64(buf.N)
-			opts.Progress(done, track.Samples)
+			opts.Progress(done, progressTotal)
 		}
 	}
 	trailer, err := enc.Finish(emit)

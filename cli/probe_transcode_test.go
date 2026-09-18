@@ -184,9 +184,17 @@ func TestTranscodeFlagErrors(t *testing.T) {
 	if code != 2 {
 		t.Errorf("bad depth exit = %d, want 2 (invalid)", code)
 	}
-	code, _, _ = run(t, "transcode", in, filepath.Join(dir, "d.wav"), "--channels", "5")
+	// A count past audio.MaxChannels has no layout convention at all, so it
+	// is a valid-but-unreachable target rather than a malformed one: 5 used
+	// to be one and is a widening now.
+	code, out, _ := run(t, "transcode", in, filepath.Join(dir, "d.wav"), "--channels", "9")
 	if code != 5 {
-		t.Errorf("unsupported channels exit = %d, want 5 (unsupported)", code)
+		t.Errorf("unsupported channels exit = %d, want 5 (unsupported): %s", code, out)
+	}
+	// And the widening it replaced succeeds: a stereo source placed in the
+	// conventional 5.0 layout, with the positions it does not have silent.
+	if code, out, _ := run(t, "transcode", in, filepath.Join(dir, "d5.wav"), "--channels", "5"); code != 0 {
+		t.Errorf("widening to 5 channels exit = %d, want 0: %s", code, out)
 	}
 	// pflag parses NaN/Inf floats and absurd-but-valid ints; both must
 	// surface as clean errors, never a panic or corrupt output.

@@ -51,13 +51,37 @@ func TestRemuxTrailerDerivesPadding(t *testing.T) {
 		},
 		{
 			// No priming means no lookahead to flush, so there is no padding to
-			// derive. Deriving here would turn a lying FLAC STREAMINFO (an
-			// oddity format.Media tolerates) into a nonzero padding and a muxer
-			// error at End, after a whole file had been written.
+			// derive: a lying FLAC STREAMINFO (an oddity format.Media tolerates,
+			// and reads straight past) must not become a nonzero padding and a
+			// muxer error at End, after a whole file had been written. The
+			// length still follows the packets, which is the number the remux
+			// wrote and the number a read of the source delivers.
 			name:    "an unprimed codec keeps its own zero",
 			track:   container.Track{Codec: codec.FLAC, Samples: 47999, Delay: 0, Padding: 0},
 			decoded: 48000,
-			want:    codec.Trailer{Samples: 47999, Delay: 0, Padding: 0},
+			want:    codec.Trailer{Samples: 48000, Delay: 0, Padding: 0},
+		},
+		{
+			// Ogg Vorbis: the playable length is the final page granule, with
+			// no Delay to key the derivation off. Copying its Padding 0 across
+			// is the same mistake the Opus row above exists to prevent, and
+			// adopting the raw run instead would declare the encoder's tail as
+			// audio.
+			name:    "an exact length with no trims still caps the run",
+			track:   container.Track{Codec: codec.Vorbis, Samples: 48000, SamplesExact: true},
+			decoded: 48960,
+			want:    codec.Trailer{Samples: 48000, Delay: 0, Padding: 960},
+		},
+		{
+			// The shape this rung used to get wrong: a truncated LAME MP3 whose
+			// Xing count promises more audio than its frames hold. Copying the
+			// declared 48000 writes an edit list longer than the packets behind
+			// it; the length shrinks to what they deliver, and the raw tail the
+			// cap discards is the padding.
+			name:    "a truncated source shrinks to its packets",
+			track:   container.Track{Codec: codec.MP3, Samples: 48000, Delay: 1105, Padding: 1151},
+			decoded: 40000,
+			want:    codec.Trailer{Samples: 38895, Delay: 1105, Padding: 0},
 		},
 		{
 			// An unknown length inverts the arithmetic rather than defeating it:

@@ -241,10 +241,26 @@ func measureSamples(e *waxflow.Engine, src container.Source, hint string) (int64
 	return measureMedia(med)
 }
 
-// measureMedia is measureSamples on an open Media. The walk's own code is
-// kept: a damaged file fails it as malformed-input, and naming that
-// unreadable reported a bad disk.
+// measureMedia is measureSamples on an open Media, by the cheapest route the
+// media offers. It is the CLI's twin of the daemon's measureLength and takes
+// the same three: a demuxer that measured at open has already answered, one
+// with a deferred walk answers by finishing it (headers and hops), and only a
+// source whose length no walk settles is seeked past any possible end.
+//
+// The walk's own code is kept whichever route runs: a damaged file fails it
+// as malformed-input, and naming that unreadable reported a bad disk.
 func measureMedia(med format.Media) (int64, error) {
+	if t := med.Info().Default(); t.SamplesExact && t.Samples >= 0 {
+		return t.Samples, nil
+	}
+	if w, ok := med.(format.Walker); ok {
+		if err := w.Walk(); err != nil {
+			return 0, waxerr.Annotate("measuring the source", err)
+		}
+		if t := med.Info().Default(); t.SamplesExact && t.Samples >= 0 {
+			return t.Samples, nil
+		}
+	}
 	total, err := med.SeekSample(measureCeiling)
 	if err != nil {
 		return 0, waxerr.Annotate("measuring the source", err)

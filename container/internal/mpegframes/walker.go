@@ -63,6 +63,12 @@ type Options struct {
 	// prefix and applies its own Strict policy, so a non-nil return aborts
 	// the walk. A nil hook drops findings, which only a test does.
 	Warn func(off int64, msg string) error
+	// Note records a finding Strict must not escalate, at an offset, with
+	// the message already formatted for the same reason Warn's is. A count
+	// that overruns the run, or comes up one frame short of it on an
+	// otherwise clean end, is the file being loose rather than damaged, and
+	// the walk settles the length either way. A nil hook drops findings.
+	Note func(off int64, msg string)
 	// Trailer reports whether the region from off to the end of data is tag
 	// baggage rather than damage. It is nil wherever the container bounds
 	// the run, which is every wrapper: only a bare stream can have tags
@@ -88,6 +94,17 @@ type Walker struct {
 	idx  []int64
 	done bool
 	grew bool
+
+	// declared is the frame count a metadata frame stated, 0 when there was
+	// none or it was too large for the payload to hold. compared marks the
+	// one comparison of it against the finished index as run, and endFinding
+	// records that the run ended on damage rather than cleanly, which is
+	// what decides whether a one-frame shortfall is a Note or damage. A
+	// snapshot has no room for endFinding, so it never marks such a run
+	// complete: a restore would otherwise compare with the damage forgotten.
+	declared   int64
+	compared   bool
+	endFinding bool
 }
 
 // New returns a Walker reading up to end, which is the logical end of frame
@@ -139,6 +156,13 @@ func (w *Walker) warn(off int64, format string, args ...any) error {
 	return w.opts.Warn(off, fmt.Sprintf(format, args...))
 }
 
+func (w *Walker) note(off int64, format string, args ...any) {
+	if w.opts.Note == nil {
+		return
+	}
+	w.opts.Note(off, fmt.Sprintf(format, args...))
+}
+
 // Begin parses the head of the run at off and positions on the first audio
 // frame: a free-format stream is refused, leading junk is scanned past and
 // reported, and a Xing, Info, or VBRI metadata frame is consumed rather than
@@ -169,10 +193,10 @@ func (w *Walker) Begin(off int64) (VBRInfo, bool, error) {
 	}
 
 	// A Xing, Info, or VBRI frame is metadata, not audio: consume it.
-	tag, hasTag := none, false
+	tag, hasTag, tagOff := none, false, int64(0)
 	if frame := w.w.Peek(first, h.Size()); len(frame) == h.Size() {
 		if t, ok := ParseVBRTag(h, frame); ok {
-			tag, hasTag = t, true
+			tag, hasTag, tagOff = t, true, first
 			first += int64(h.Size())
 			fh, err := mp3.ParseHeader(w.w.Peek(first, mp3.HeaderLen))
 			if err != nil || !h.Kin(fh) || fh.Size() == 0 {
@@ -195,15 +219,86 @@ func (w *Walker) Begin(off int64) (VBRInfo, bool, error) {
 		return none, false, w.w.Err()
 	}
 
+	// Bound the declared count by what the payload can hold, the way riff
+	// bounds its fact chunk: the smallest compliant frame puts a ceiling on
+	// the run at O(1), and a count above it is one the bytes are not
+	// describing. Clearing it takes the trims with it, since Gapless adopts
+	// the length and the trims together or not at all.
+	if hasTag {
+		if room := w.w.DataEnd() - first; tag.Frames > MaxFrames(room) {
+			if err := w.warn(tagOff, "the metadata frame declares %d frames, more than %d bytes can hold; ignored",
+				tag.Frames, room); err != nil {
+				return none, false, err
+			}
+			tag.Frames = 0
+		}
+	}
+	w.declared = tag.Frames
+
 	w.hdr = h
 	w.spf = int64(h.SamplesPerFrame())
 	w.first = first
 	if first+int64(h.Size()) <= w.w.DataEnd() {
 		w.idx = append(w.idx, first)
-	} else if err := w.warn(first, "the only frame is truncated, dropped"); err != nil {
-		return none, false, err
+	} else {
+		w.endFinding = true
+		if err := w.warn(first, "the only frame is truncated, dropped"); err != nil {
+			return none, false, err
+		}
 	}
 	return tag, hasTag, nil
+}
+
+// latchDone marks the index complete and settles the declared count against
+// it. Every arm that ends the walk goes through it, on the read path as on
+// the walk path, so a strict read and a strict walk of the same run reach
+// the same answer.
+func (w *Walker) latchDone() error {
+	w.done = true
+	return w.compare()
+}
+
+// compare checks the count a metadata frame declared against the frames the
+// finished index holds, once. A shortfall shrinks the length the walk
+// settles, so it is damage: the file promised audio its bytes do not hold.
+// Two shapes are the file being loose rather than damaged, and are Notes: an
+// overrun, where the tag simply undercounts a run that is all there; and a
+// shortfall of exactly one frame on a run that ended cleanly, which is what
+// an encoder counting its own metadata frame produces on an intact file.
+func (w *Walker) compare() error {
+	if w.compared {
+		return nil
+	}
+	w.compared = true
+	if w.declared <= 0 {
+		return nil
+	}
+	n := w.Frames()
+	if n == w.declared {
+		return nil // runEnd reads a header; the agreeing case must not pay it
+	}
+	end := w.runEnd()
+	switch {
+	case n > w.declared:
+		w.note(end, "the run holds %d frames past the %d the metadata frame declares", n-w.declared, w.declared)
+		return nil
+	case w.declared-n == 1 && !w.endFinding:
+		w.note(end, "the metadata frame declares %d frames but the run holds %d", w.declared, n)
+		return nil
+	default:
+		return w.warn(end, "the metadata frame declares %d frames but the run holds %d", w.declared, n)
+	}
+}
+
+// runEnd is where the last indexed frame ends, which is where a count that
+// disagrees with the run is reported: the offset the frames it promised
+// would have continued from. An empty index reports at the head of the run.
+func (w *Walker) runEnd() int64 {
+	if len(w.idx) == 0 {
+		return w.first
+	}
+	n := int64(len(w.idx)) - 1
+	return w.idx[n] + w.frameSize(n)
 }
 
 // nextCandidate scans [from, limit) for a parsable, sized frame header; when
@@ -340,8 +435,7 @@ func (w *Walker) extend() (bool, error) {
 		return false, w.w.Err()
 	}
 	if len(w.idx) == 0 {
-		w.done = true
-		return false, nil
+		return false, w.latchDone() // Begin dropped a truncated lone frame
 	}
 	last := w.idx[len(w.idx)-1]
 	w.w.Trim(last)
@@ -349,13 +443,16 @@ func (w *Walker) extend() (bool, error) {
 	if !ok {
 		// The indexed frame itself went unreadable (shrinking source);
 		// treat as end.
-		w.done = true
-		return false, w.w.Err()
+		w.done, w.endFinding = true, true
+		if err := w.w.Err(); err != nil {
+			return false, err
+		}
+		return false, w.compare()
 	}
 	next := last + int64(h.Size())
 	if next >= w.w.DataEnd() {
-		w.done = true
-		return false, nil // the last frame ends exactly at (or is clamped by) dataEnd
+		// The last frame ends exactly at (or is clamped by) dataEnd.
+		return false, w.latchDone()
 	}
 	cand := next
 	nh, ok := w.headerAfter(last, h)
@@ -368,17 +465,23 @@ func (w *Walker) extend() (bool, error) {
 			}
 			w.done = true
 			if tail := w.w.DataEnd() - next; tail > 0 && !w.recognizedTrailer(next) {
-				return false, w.warn(next, "%d trailing bytes are not frames, dropped", tail)
+				w.endFinding = true
+				if err := w.warn(next, "%d trailing bytes are not frames, dropped", tail); err != nil {
+					return false, err
+				}
 			}
-			return false, nil
+			return false, w.compare()
 		}
 		if err := w.warn(next, "%d unparsable bytes skipped", cand-next); err != nil {
 			return false, err
 		}
 	}
 	if cand+int64(nh.Size()) > w.w.DataEnd() {
-		w.done = true
-		return false, w.warn(cand, "truncated final frame dropped")
+		w.done, w.endFinding = true, true
+		if err := w.warn(cand, "truncated final frame dropped"); err != nil {
+			return false, err
+		}
+		return false, w.compare()
 	}
 	w.idx = append(w.idx, cand)
 	w.grew = true

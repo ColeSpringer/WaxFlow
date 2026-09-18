@@ -1,10 +1,13 @@
 package mix
 
 import (
+	"errors"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 const eps = 1e-6
@@ -68,13 +71,23 @@ func TestMonoToStereoUnity(t *testing.T) {
 }
 
 // TestRowEnergyBound asserts the normalization invariant on every
-// supported conversion: no output row has power gain above 1.
+// supported conversion: no output row has power gain above 1. Every default
+// layout is a target now that widening exists, and a pair the positions rule
+// refuses is skipped rather than excluded by hand: the invariant is about
+// the matrices that get built.
 func TestRowEnergyBound(t *testing.T) {
-	targets := []audio.ChannelMask{audio.FrontCenter, audio.DefaultLayout(2)}
+	var targets []audio.ChannelMask
+	for ch := 1; ch <= audio.MaxChannels; ch++ {
+		targets = append(targets, audio.DefaultLayout(ch))
+	}
 	for ch := 1; ch <= audio.MaxChannels; ch++ {
 		src := audio.DefaultLayout(ch)
 		for _, dst := range targets {
-			if src == dst {
+			// Skipped by the positions rule alone, computed here rather than
+			// read off the error: matching on ErrUnsupportedFormat would also
+			// swallow "no downmix gain for position", so a hole in the
+			// stereoGain table would stop failing this.
+			if src == dst || (src&^dst != 0 && dst.Count() > 2) {
 				continue
 			}
 			m, err := For(src, dst)
@@ -131,11 +144,79 @@ func TestForErrors(t *testing.T) {
 		{"zero src", 0, stereo},
 		{"zero dst", stereo, 0},
 		{"equal", stereo, stereo},
-		{"multichannel target", stereo, audio.DefaultLayout(6)},
+		// The positions rule: 5.1's rear is a back pair and the 6.1 default's
+		// is BC plus a side pair, so the widening has nowhere to put BL/BR.
+		// This normalizes channel counts, not speaker assignments.
+		{"unplaceable position", audio.DefaultLayout(6), audio.DefaultLayout(7)},
 	}
 	for _, c := range cases {
 		if _, err := For(c.src, c.dst); err == nil {
 			t.Errorf("%s: want error", c.name)
+		}
+	}
+}
+
+// TestWidenPlacesAndZeroFills is the widening arm's whole contract: source
+// positions land on their own, everything else is silent, and nothing is
+// scaled. A member that joins a wider queue keeps its own levels, which is
+// what makes it measure the same loudness alone and inside the envelope.
+func TestWidenPlacesAndZeroFills(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		src, dst audio.ChannelMask
+		// want is the target's channels in order, each naming the source
+		// channel index it takes at unity, or -1 for a silent one.
+		want []int
+	}{
+		{"stereo into 5.1", audio.DefaultLayout(2), audio.DefaultLayout(6), []int{0, 1, -1, -1, -1, -1}},
+		{"5.1 into 7.1", audio.DefaultLayout(6), audio.DefaultLayout(8), []int{0, 1, 2, 3, 4, 5, -1, -1}},
+		{"mono into 5.1 lands on the center", audio.FrontCenter, audio.DefaultLayout(6), []int{-1, -1, 0, -1, -1, -1}},
+		{"an FL-masked mono lands there too", audio.FrontLeft, audio.DefaultLayout(6), []int{-1, -1, 0, -1, -1, -1}},
+		{"mono into quad duplicates the front pair", audio.FrontCenter, audio.DefaultLayout(4), []int{0, 0, -1, -1}},
+		{"3.0 into 5.1", audio.DefaultLayout(3), audio.DefaultLayout(6), []int{0, 1, 2, -1, -1, -1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := For(tc.src, tc.dst)
+			if err != nil {
+				t.Fatalf("For(%v, %v): %v", tc.src, tc.dst, err)
+			}
+			if m.Out() != len(tc.want) || m.In() != tc.src.Count() {
+				t.Fatalf("matrix is %dx%d, want %dx%d", m.Out(), m.In(), len(tc.want), tc.src.Count())
+			}
+			for o, from := range tc.want {
+				for i, g := range m.coef[o] {
+					want := float32(0)
+					if i == from {
+						want = 1
+					}
+					if g != want {
+						t.Errorf("coef[%d][%d] = %v, want %v", o, i, g, want)
+					}
+				}
+			}
+			if got := m.MaxGain(); got != 1 {
+				t.Errorf("MaxGain = %v, want 1: nothing is scaled, so no limiter engages", got)
+			}
+		})
+	}
+}
+
+// TestWidenRefusesAnUnplaceablePosition names what it cannot do rather than
+// substituting a nearby speaker, which is what swresample would do: a back
+// pair folded onto a side pair is a different mix, and silently making one is
+// worse than refusing.
+func TestWidenRefusesAnUnplaceablePosition(t *testing.T) {
+	for _, tc := range []struct{ src, dst audio.ChannelMask }{
+		{audio.DefaultLayout(6), audio.DefaultLayout(7)}, // BL/BR into a side pair
+		{audio.DefaultLayout(7), audio.DefaultLayout(8)}, // BC into 7.1
+	} {
+		_, err := For(tc.src, tc.dst)
+		if !errors.Is(err, waxerr.ErrUnsupportedFormat) {
+			t.Fatalf("For(%v, %v) = %v, want unsupported", tc.src, tc.dst, err)
+		}
+		missing := (tc.src &^ tc.dst).String()
+		if !strings.Contains(err.Error(), missing) {
+			t.Errorf("error %q does not name the positions with no place (%s)", err, missing)
 		}
 	}
 }

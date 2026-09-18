@@ -320,7 +320,7 @@ func timelineVersions(tracks []container.Track, env audio.Format, copts ConcatOp
 		add(crossfadeVersion(copts.Crossfade))
 	}
 	normalized := map[audio.Format]bool{}
-	for _, t := range tracks {
+	for i, t := range tracks {
 		add(decodeVersion(t.Codec))
 		if t.Fmt == env || normalized[t.Fmt] {
 			continue
@@ -331,7 +331,9 @@ func timelineVersions(tracks []container.Track, env audio.Format, copts ConcatOp
 		// cannot describe different processing.
 		chain, err := dsp.NewChain(dsp.NewSource(eofReader{}, t.Fmt), concatSpec(env, copts))
 		if err != nil {
-			return nil, err
+			// The first member of this format: the chain was handed a format,
+			// and which file it came from is what a caller can act on.
+			return nil, waxerr.Annotate(fmt.Sprintf("member %d", i), err)
 		}
 		for _, v := range chain.Versions() {
 			add(v)

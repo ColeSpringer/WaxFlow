@@ -336,15 +336,19 @@ func (d *Demuxer) Walk() error {
 }
 
 // adoptWalkedLength puts a finished walk's exact total on a track whose
-// length was the advisory Info Duration: the strict probe that walked the
-// clusters reports what it measured. finalizeTrack does the same arithmetic
-// for the tracks it walks at open.
+// length was the advisory Info Duration, or was not stated at all: the strict
+// probe that walked the clusters reports what it measured. finalizeTrack does
+// the same arithmetic for the tracks it walks at open.
+//
+// The unstated case is not hypothetical: a file with no Info Duration opens at
+// -1, and so does every Opus or Vorbis track whose walk a tolerant probe
+// deferred when its file has none either.
 func (d *Demuxer) adoptWalkedLength() {
-	if !d.track.SamplesAdvisory {
+	if !d.track.SamplesAdvisory && d.track.Samples >= 0 {
 		return
 	}
-	samples := d.rawTotal - d.track.Delay - nsToSamples(d.paddingNS, d.track.Fmt.Rate)
-	d.track.Samples, d.track.SamplesExact, d.track.SamplesAdvisory = max(samples, 0), true, false
+	d.track.Samples = d.walkedSamples(d.track.Delay, d.track.Fmt.Rate)
+	d.track.SamplesExact, d.track.SamplesAdvisory = true, false
 }
 
 // readerState is the packet reader's cursor, everything resetReading clears.

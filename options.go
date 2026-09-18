@@ -75,8 +75,11 @@ type TranscodeOptions struct {
 	Container string
 	// Rate resamples to this sample rate in Hz; 0 keeps the source rate.
 	Rate int
-	// Channels converts the channel count (downmix to 1 or 2, or mono
-	// duplication to stereo); 0 keeps the source layout.
+	// Channels converts the channel count: a downmix to 1 or 2, or a widening
+	// into the conventional layout for a larger count, which places the
+	// source's positions and leaves the rest silent. 0 keeps the source
+	// layout. A target whose layout has no place for one of the source's
+	// positions is refused rather than substituted.
 	Channels int
 	// BitDepth forces integer output at this depth, dithered when
 	// reducing; 0 keeps the source domain and depth.

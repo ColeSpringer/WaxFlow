@@ -13,6 +13,18 @@
 // downmix, the common default for music delivery: bass management is a
 // playback-system decision, and blindly summing LFE doubles bass on
 // systems that already fold it. Mono to stereo duplicates at unity.
+//
+// Widening is the other direction and follows no gain table at all: every
+// source position lands on the same position of the target at unity and the
+// rest are silent, so a narrower stream keeps its own levels inside a wider
+// envelope. Placement is measurement-neutral (channel powers sum under
+// BS.1770, and the positions that gained no signal contribute none), so a
+// widened member measures the same loudness alone as inside the envelope.
+// Duplication is not, and mono is the case that duplicates: a lone channel is
+// placed rather than matched, on the target's center where it has one, and
+// copied across the front pair where it has none, which is +10*log10(2).
+// A source position the target has no place for is refused: this normalizes
+// channel counts, not speaker assignments.
 package mix
 
 import (
@@ -25,6 +37,10 @@ import (
 
 // Version is this node's algorithm revision for cache keys: bump on any
 // change to the gain table or normalization (ADR-0004).
+//
+// The widening arm did not bump it: it changed no matrix that existed, since
+// every pair it answers was a refusal before, and a refusal has no cached
+// output to key against.
 const Version = "mix-1"
 
 // Matrix is an immutable channel conversion: out[o] = sum_i coef[o][i] * in[i].
@@ -63,11 +79,11 @@ var stereoGain = map[audio.ChannelMask][2]float64{
 	audio.TopBackRight:       {0, db6},
 }
 
-// For builds the conversion matrix from src to dst. Supported targets
-// are mono and stereo (lossy outputs downmix, lossless passes layout
-// through by design) plus unity mono-to-stereo duplication. Equal
-// layouts are refused: the caller decides identity, no-op nodes are never
-// built.
+// For builds the conversion matrix from src to dst. Mono and stereo targets
+// downmix through the gain table; a wider target takes the source's positions
+// as they are, at unity, with the rest zero-filled. Equal layouts are
+// refused: the caller decides identity, no-op nodes are never built, and so
+// is a target with no place for one of the source's positions.
 func For(src, dst audio.ChannelMask) (*Matrix, error) {
 	if src == 0 || dst == 0 {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, "mix: unknown layout")
@@ -107,9 +123,30 @@ func For(src, dst audio.ChannelMask) (*Matrix, error) {
 			m[i] = db3 * (g[0] + g[1])
 		}
 		rows = [][]float64{m}
+	case src.Count() == 1 && dst&audio.FrontCenter != 0:
+		// A single channel has no layout to preserve, so it is placed rather
+		// than matched, whatever its own mask calls it. The center is the
+		// ITU placement, it folds back through stereoGain as the standard
+		// BS.775 downmix, and it keeps the widening measurement-neutral:
+		// channel powers sum, so a mono member measures the same loudness
+		// alone and inside a 5.1 envelope.
+		rows = onlyRows(dst, audio.FrontCenter)
+	case src.Count() == 1 && dst&frontPair == frontPair:
+		// No center to land on (quad): duplicate across the front pair at
+		// unity, which is the mono-to-stereo convention one target wider.
+		rows = onlyRows(dst, frontPair)
+	case src&^dst == 0:
+		// Every source position exists in the target: place each on its own
+		// and leave the rest silent. Unity throughout, so no row's energy
+		// changes, MaxGain is 1, and no limiter engages.
+		rows = placeRows(positions, dst)
 	default:
+		// Reached whenever the target lacks one of the source's positions,
+		// which covers a narrowing to a multichannel target as well as a
+		// widening across an incompatible rear. Naming the positions is the
+		// only thing a caller can act on.
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("mix: unsupported target layout %v (only mono and stereo targets exist)", dst))
+			fmt.Sprintf("mix: %v has no place for %v, which %v holds", dst, src&^dst, src))
 	}
 
 	// Energy normalization: rows are scaled down to unit power gain,
@@ -172,6 +209,41 @@ func (m *Matrix) Apply(dst, src [][]float32, n int) {
 			}
 		}
 	}
+}
+
+// frontPair is the stereo front, the fallback placement for a lone channel in
+// a target with no center of its own.
+const frontPair = audio.FrontLeft | audio.FrontRight
+
+// onlyRows feeds a single source channel to the target positions in on, at
+// unity, and silences the rest.
+func onlyRows(dst, on audio.ChannelMask) [][]float64 {
+	rows := make([][]float64, 0, dst.Count())
+	for _, p := range maskPositions(dst) {
+		g := 0.0
+		if p&on != 0 {
+			g = 1
+		}
+		rows = append(rows, []float64{g})
+	}
+	return rows
+}
+
+// placeRows puts each source position on the same position of the target and
+// zero-fills the rest. src is the source's positions in channel order, which
+// is the order its coefficient columns are in.
+func placeRows(src []audio.ChannelMask, dst audio.ChannelMask) [][]float64 {
+	rows := make([][]float64, 0, dst.Count())
+	for _, p := range maskPositions(dst) {
+		row := make([]float64, len(src))
+		for i, s := range src {
+			if s == p {
+				row[i] = 1
+			}
+		}
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 // maskPositions expands a mask into positions in channel order

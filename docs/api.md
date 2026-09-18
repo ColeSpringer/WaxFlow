@@ -107,7 +107,8 @@ would otherwise return the opposite of what was asked.
       "tracks": [{
         "id": 0, "codec": "pcm", "rate": 44100, "channels": 2,
         "layout": "FL|FR", "sampleType": "int", "bitDepth": 16,
-        "samples": 2205, "durationSeconds": 0.05, "default": true
+        "samples": 2205, "durationSeconds": 0.05, "default": true,
+        "samplesExact": true
       }],
       "warnings": ["..."],
       "notes": ["..."]
@@ -154,9 +155,17 @@ an `input damage:` prefix once the write has read the file; a merge job
 prefixes each finding with the member it came from, `member 1:`). A strict
 probe takes a live slot for its walk, the way a stream does, so a daemon
 whose pool is full answers it `503 overloaded`; a tolerant probe takes none.
-A strict probe of a payload whose headers state no length, or only an
-advisory one, reports the walked length as exact. `notes` is the other half
-and is never damage: what this build did with a file that is perfectly well formed, such
+A strict probe of a frame-indexed payload reports the walked length as
+exact: a count its headers stated is confirmed, or replaced by what a read
+delivers when the run comes up short, which is reported as damage. A
+Matroska Opus or Vorbis track joins those payloads: reading it exactly means
+walking its clusters, so a tolerant probe reports the Info Duration instead,
+or `samples: -1` where the file states none, and a strict one walks. `samplesExact` and `samplesAdvisory` say which kind
+of number `samples` is: `samplesExact` a measured one, `samplesAdvisory` a
+rounded total fit for display and not for arithmetic that has to add up
+(ASF's ticks, a Matroska Info Duration, a WAV fact chunk over MP3 frames),
+and neither the headers' own count taken at its word. `notes` is the other
+half and is never damage: what this build did with a file that is perfectly well formed, such
 as ignoring a stream it cannot use, capping a chapter list at its own limit,
 rescaling a timeline whose timescale is not the sample rate, or reporting a
 band it does not synthesize. `strict` never refuses over a note, which is the
@@ -211,10 +220,11 @@ Parameters (unknown parameter names are rejected):
   and byte-rate pacing: a lossless encoder's output size is signal-dependent
   and unknown up front. CBR MP3 and Opus carry a size estimate. Completed
   cache entries serve with exact sizes like any other.
-- `rate`, `ch`, `bits`: output sample rate, channel count (1 or 2), bit
-  depth (16 or 24, dithered when reducing). **Absent** keeps the source's;
-  omitting the parameter is the only spelling of that. `rate=0`, `ch=0`,
-  `bits=0`, `maxBitRate=0`, and a bare `rate=` are 400, because zero is
+- `rate`, `ch`, `bits`: output sample rate, channel count (1, 2, or a
+  conventional wider layout the source is mixed into with the positions it
+  does not have left silent), bit depth (16 or 24, dithered when reducing).
+  **Absent** keeps the source's; omitting the parameter is the only
+  spelling of that. `rate=0`, `ch=0`, `bits=0`, `maxBitRate=0`, and a bare `rate=` are 400, because zero is
   not a rate, a channel count, a depth, or a cap. The same rule holds on
   the HLS master form.
 
@@ -230,7 +240,9 @@ Parameters (unknown parameter names are rejected):
   narrowed, since every other lossless output here carries 32-bit through.
   An explicit `bits=24` still converts it, because then the caller asked. `flac`, `vorbis`, `wav` and `aiff` carry
   multichannel natively and are untouched. An explicit `ch` is never
-  overridden in either direction.
+  overridden in either direction; one wider than the source places the
+  source's channels and leaves the rest silent, and one whose layout has no
+  place for a source position (a back pair meeting a side pair) is 415.
 
   The fold is the re-encoding rung's, which is the only rung that can
   fold: direct play ships the source's own bytes and a container rewrite
@@ -625,8 +637,9 @@ Things worth knowing before you build on it:
   its headers. That is a sub-millisecond walk for formats whose demuxer
   can find its end from a table (FLAC, WAV, Ogg, mp4), and a whole-file
   walk for a member whose demuxer defers one: MP3 (bare or in a WAV or
-  AIFF-C), ADTS, and a Matroska file whose length is only its Info
-  Duration. When a cold queue needs enough of the latter to be worth it,
+  AIFF-C), ADTS, a Matroska file whose length is only its Info Duration,
+  and a Matroska Opus or Vorbis file, which a tolerant probe does not walk.
+  When a cold queue needs enough of the latter to be worth it,
   the response is `202` with a job instead of `201` with a digest; poll
   `GET /jobs/{id}` or follow its events, and the finished job's `timeline`
   field carries the same values the `201` body would. The cost is once per

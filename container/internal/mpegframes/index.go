@@ -33,7 +33,14 @@ func (w *Walker) Snapshot() []byte {
 	}
 	buf := make([]byte, 0, len(idxMagic)+2+10+len(w.idx)*2)
 	buf = append(buf, idxMagic...)
-	if w.done {
+	// A run that ended on damage is never persisted as complete, and that is
+	// what keeps a sidecar from changing a verdict. The blob has no room for
+	// the finding itself, so a restore of one would compare the declared count
+	// against the run with the damage forgotten and call a one-frame shortfall
+	// a Note where the cold walk called it damage. Marking it incomplete costs
+	// the restore only the tail: the walk resumes from the last entry, finds
+	// the same damage, and reports it the same way.
+	if w.done && !w.endFinding {
 		buf = append(buf, 1)
 	} else {
 		buf = append(buf, 0)
@@ -125,8 +132,22 @@ func (w *Walker) Restore(blob []byte) bool {
 			}
 		}
 	}
-	w.idx = idx
-	w.done = done
-	w.grew = false
+	prevIdx, prevDone := w.idx, w.done
+	w.idx, w.done, w.grew = idx, done, false
+	if done {
+		// A complete blob makes the run's count known without walking it, so
+		// the declared count is settled against it here rather than at an end
+		// the walk will never reach. A strict owner that refuses the result
+		// declines the blob instead, and the rebuild reports it at its own
+		// end, where the walk can also say what the run actually holds.
+		//
+		// Declining costs a good sidecar nothing on the path that keeps one:
+		// the engine's index cache rides on OpenStream, which is always
+		// tolerant, so this arm is a direct caller's to reach.
+		if err := w.compare(); err != nil {
+			w.idx, w.done, w.compared = prevIdx, prevDone, false
+			return false
+		}
+	}
 	return true
 }

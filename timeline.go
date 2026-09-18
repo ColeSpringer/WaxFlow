@@ -13,6 +13,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/dsp"
 	"github.com/colespringer/waxflow/dsp/dither"
+	"github.com/colespringer/waxflow/dsp/mix"
 	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/waxerr"
@@ -739,21 +740,49 @@ func concatLayout(tracks []container.Track, opts ConcatOptions) (env audio.Forma
 	env.Layout = audio.DefaultLayout(env.Channels)
 
 	// The envelope's layout has to be the conventional one, because that is
-	// the only layout the mix node targets: a member with fewer channels is
-	// mixed up to audio.DefaultLayout(env.Channels), so any other envelope
-	// layout would be one no normalized member could reach. A member that
-	// already has the envelope's channel count runs no mix and keeps its own
-	// layout, so its layout has to match already. That is true of every
-	// layout the decoders produce; a WAVEFORMATEXTENSIBLE mask naming some
-	// other pair of speakers is the one case it is not, and it is refused by
-	// name rather than relabelled, since calling a back-left channel
+	// the only layout the mix node targets. Two rules, one per side of the
+	// envelope's channel count, and both are checked here rather than trusted:
+	// this is the plan-time funnel, and a layout that cannot be reached is a
+	// refusal minutes into a decode otherwise.
+	//
+	// A member that already has the envelope's channel count runs no mix and
+	// keeps its own layout, so its layout has to match already. That is true
+	// of every layout the decoders produce; a WAVEFORMATEXTENSIBLE mask naming
+	// some other pair of speakers is the one case it is not, and it is refused
+	// by name rather than relabelled, since calling a back-left channel
 	// front-right is a silent lie about what the file says it holds.
+	//
+	// A narrower member is widened into the envelope, which places its
+	// positions and zero-fills the rest, so what has to hold is that the
+	// envelope has a place for every one of them. It does for the common
+	// cases (a mono member in a stereo queue, a stereo member in a surround
+	// one) and it does not for a back pair meeting a side pair, which is the
+	// same "normalizes channel counts, not speaker assignments" line read the
+	// other way.
 	for i, t := range tracks {
-		if t.Fmt.Channels == env.Channels && t.Fmt.Layout != env.Layout {
-			return audio.Format{}, nil, nil, 0, waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
-				"waxflow: timeline member %d lays its %d channels out as %v, not the conventional %v; "+
-					"a timeline normalizes channel counts, not speaker assignments",
-				i, t.Fmt.Channels, t.Fmt.Layout, env.Layout))
+		// A layout is resolved before either rule reads it, with the zero-mask
+		// fallback dsp.NewChain applies, so the two agree about what a member
+		// that declares none means and so the two rules here agree with each
+		// other: without it a member with no mask passed the widening rule by
+		// the fallback and failed the equal-count one against a raw zero.
+		// audio.Format.Valid accepts Layout 0, so this is reachable.
+		layout := t.Fmt.Layout
+		if layout == 0 {
+			layout = audio.DefaultLayout(t.Fmt.Channels)
+		}
+		if t.Fmt.Channels == env.Channels {
+			if layout != env.Layout {
+				return audio.Format{}, nil, nil, 0, waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
+					"waxflow: timeline member %d lays its %d channels out as %v, not the conventional %v; "+
+						"a timeline normalizes channel counts, not speaker assignments",
+					i, t.Fmt.Channels, layout, env.Layout))
+			}
+			continue
+		}
+		if _, err := mix.For(layout, env.Layout); err != nil {
+			return audio.Format{}, nil, nil, 0, waxerr.Wrap(waxerr.CodeUnsupportedFormat,
+				fmt.Sprintf("waxflow: timeline member %d cannot be mixed into the %d-channel envelope",
+					i, env.Channels), err)
 		}
 	}
 
@@ -810,8 +839,13 @@ func concatLayout(tracks []container.Track, opts ConcatOptions) (env audio.Forma
 // is a maximum and is not capped at stereo: capping would silently destroy a
 // surround member, and it looks cheaper only because the output is usually
 // stereo, which is the same output-aware knowledge this function does not
-// have. The common mixed-channel case is a mono track in a stereo queue,
-// where the maximum is exact and free.
+// have. The common mixed-channel cases are a mono track in a stereo queue and
+// a stereo track in a surround one; a narrower member is widened into the
+// envelope by position, zero-filled and at unity, so it keeps its own levels.
+// A placed member measures the same loudness inside the queue as alone; a
+// mono member duplicated across a stereo or quad envelope measures
+// +10*log10(2), which is the long-standing mono-to-stereo convention rather
+// than anything the envelope added.
 //
 // Delay and Padding are zero, and that is load-bearing rather than
 // incidental: format.Media delivers already-trimmed PCM, so both trims
@@ -1513,7 +1547,9 @@ func (c *concat) buildChain() error {
 	}
 	chain, err := dsp.NewChain(dsp.NewSource(c.med, in), concatSpec(c.fmt, c.opts))
 	if err != nil {
-		return err
+		// Which member is the only thing a caller can act on, and the chain
+		// does not know: it was handed one format out of several.
+		return waxerr.Annotate(fmt.Sprintf("member %d", c.cur), err)
 	}
 	c.chain = chain
 	return nil

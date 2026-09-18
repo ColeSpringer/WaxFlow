@@ -624,6 +624,7 @@ func (d *Demuxer) startMPEG(wf waveFormat, dataOff, dataBytes, factSamples int64
 	walk := mpegframes.New(d.src, dataOff+dataBytes, mpegframes.Options{
 		Prefix: "wav: ",
 		Warn:   func(off int64, msg string) error { return d.warn(off, "%s", msg) },
+		Note:   func(off int64, msg string) { d.note(off, "%s", msg) },
 	})
 	tag, _, err := walk.Begin(dataOff)
 	if err != nil {

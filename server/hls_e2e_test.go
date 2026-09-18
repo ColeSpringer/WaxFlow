@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
@@ -633,4 +634,90 @@ func TestHLSMintRefusesNonUTF8Src(t *testing.T) {
 	if got := readBody(t, resp); resp.StatusCode != 200 {
 		t.Fatalf("/stream on the same file = %d: %s; the HLS refusal is the library's, not the descriptor's", resp.StatusCode, got)
 	}
+}
+
+// TestHLSMeasuresAnAdvisoryLength is the playlist's own rule. A VOD playlist
+// promises an exact segment count, and for a source whose headers only
+// estimate its total (ASF's ticks, a Matroska Info Duration, a WebM Opus file
+// a tolerant probe did not walk) taking that estimate at its word yields a
+// tail 404 or an early ENDLIST. trackFor hands a non-exact caller the headers'
+// number on purpose, so the playlist asks again for a measured one.
+//
+// The check is that every segment the playlist lists can actually be fetched,
+// which is what an over-estimate breaks, and that the last one is served
+// rather than 404ing, which is what an under-estimate breaks.
+func TestHLSMeasuresAnAdvisoryLength(t *testing.T) {
+	env := newTestEnv(t, nil)
+	masterURL := mintHLS(t, env, map[string]string{"src": "lib/seed.webm", "format": "aac"})
+	master := readBody(t, keyless(t, env, masterURL))
+	var mediaRef string
+	for _, l := range playlistLines(master) {
+		if !strings.HasPrefix(l, "#") {
+			mediaRef = l
+		}
+	}
+	if mediaRef == "" {
+		t.Fatalf("no media playlist in:\n%s", master)
+	}
+	resp := keyless(t, env, "/hls/"+mediaRef)
+	media := readBody(t, resp)
+	if resp.StatusCode != 200 {
+		t.Fatalf("media = %d: %s", resp.StatusCode, media)
+	}
+	initURI, segURIs, extinf := mediaURIs(t, media)
+	if initURI == "" || len(segURIs) == 0 {
+		t.Fatalf("init %q, %d segments:\n%s", initURI, len(segURIs), media)
+	}
+
+	// The two numbers this is about, taken from the surface that reports
+	// them: a tolerant probe states the headers' estimate, a strict one walks
+	// and measures. The fixture's Duration overstates by 8 ms, which is the
+	// tail the playlist must not promise.
+	declared := probeSeconds(t, env, "/probe?src=lib/seed.webm")
+	measured := probeSeconds(t, env, "/probe?src=lib/seed.webm&strict=1")
+	if declared == measured {
+		t.Fatalf("the fixture's estimate (%v) equals its measure; this cell needs a gap", declared)
+	}
+	var sum float64
+	for _, d := range extinf {
+		sum += d
+	}
+	tol := float64(len(extinf)) * 5e-6 // the playlist prints %.5f
+	if math.Abs(sum-measured) > tol {
+		t.Fatalf("EXTINF sum %.5f, want the measured %.5f (the headers estimate %.5f)", sum, measured, declared)
+	}
+
+	for i, u := range segURIs {
+		r := keyless(t, env, "/hls/"+u)
+		body := readBody(t, r)
+		if r.StatusCode != 200 {
+			t.Fatalf("segment %d of %d = %d: the playlist promised a segment the stream cannot fill: %s",
+				i, len(segURIs), r.StatusCode, body)
+		}
+		if len(body) == 0 {
+			t.Fatalf("segment %d of %d is empty", i, len(segURIs))
+		}
+	}
+}
+
+// probeSeconds reads the default track's durationSeconds off a probe.
+func probeSeconds(t *testing.T, env *testEnv, path string) float64 {
+	t.Helper()
+	resp := env.get(t, path, nil)
+	body := readBody(t, resp)
+	if resp.StatusCode != 200 {
+		t.Fatalf("%s = %d: %s", path, resp.StatusCode, body)
+	}
+	var doc struct {
+		Tracks []struct {
+			DurationSeconds float64 `json:"durationSeconds"`
+		} `json:"tracks"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Tracks) != 1 {
+		t.Fatalf("%s returned %d tracks", path, len(doc.Tracks))
+	}
+	return doc.Tracks[0].DurationSeconds
 }

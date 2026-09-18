@@ -702,7 +702,6 @@ func TestChainSpecErrors(t *testing.T) {
 		{Rate: -1},
 		{BitDepth: 1},
 		{BitDepth: 33},
-		{Channels: 6}, // stereo to 5.1 upmix is unsupported
 		{GainDB: math.NaN()},
 		{GainDB: math.Inf(1)},
 		{GainDB: math.Inf(-1)},
@@ -713,5 +712,19 @@ func TestChainSpecErrors(t *testing.T) {
 		if _, err := NewChain(stage, spec); err == nil {
 			t.Errorf("spec %+v: want error", spec)
 		}
+	}
+
+	// Widening is supported now, so the refusal moves to the pair the
+	// positions rule cannot place: 5.1's back pair has nowhere to go in the
+	// 6.1 default, whose rear is a center plus a side pair.
+	if _, err := NewChain(stage, ChainSpec{Channels: 6}); err != nil {
+		t.Errorf("stereo to 5.1: %v", err)
+	}
+	six := intFormat(44100, 6, 16)
+	sixSrc := audio.Get(six, 64)
+	defer audio.Put(sixSrc)
+	sixStage := NewSource(newMemSource(sixSrc, 64), six)
+	if _, err := NewChain(sixStage, ChainSpec{Channels: 7}); err == nil {
+		t.Error("5.1 to the 6.1 default: want the unplaceable-position refusal")
 	}
 }

@@ -327,23 +327,22 @@ func remuxable(opts TranscodeOptions, src audio.Format) bool {
 // a transcode reports its encoder's true count and a remux reporting -1 would
 // complete a cache entry with a length the run had in fact measured.
 //
-// The derivation is gated on a primed stream, not applied to everything, and
-// the guard is not a special case but the same definition read the other way.
+// Both shapes are one rule, container.SettleLength, which is also what a walk
+// settles a track's own length with: the length is what the packets hold. So a
+// declared count a truncated source cannot fill shrinks to them rather than
+// being copied across, and the edit list a remux writes is never longer than
+// the samples behind it.
+//
+// An unprimed stream keeps its zero trims and simply takes the measured count.
 // Padding is the flush of the encoder's lookahead, so a codec with no priming
 // has none to flush: FLAC and ALAC declare Delay 0 and every muxer that writes
-// them refuses a nonzero trim outright. Deriving against those would turn a
+// them refuses a nonzero trim outright. Deriving one there would turn a
 // container's own inconsistency (a FLAC whose STREAMINFO total disagrees with
 // its frames, which format.Media tolerates as an oddity) into a nonzero padding
 // and a muxer error at End, after a whole file had been written.
 func remuxTrailer(t container.Track, decoded int64) codec.Trailer {
-	tr := codec.Trailer{Samples: t.Samples, Delay: t.Delay, Padding: t.Padding}
-	switch {
-	case t.Samples < 0:
-		tr.Samples = max(0, decoded-t.Delay-t.Padding)
-	case t.Delay > 0:
-		tr.Padding = max(0, decoded-t.Delay-t.Samples)
-	}
-	return tr
+	s := container.SettleLength(t, decoded)
+	return codec.Trailer{Samples: s.Samples, Delay: s.Delay, Padding: s.Padding}
 }
 
 // gaplessSurvives reports whether a remux's trims would be *refused* by the

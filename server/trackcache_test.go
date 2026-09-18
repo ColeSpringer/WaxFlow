@@ -10,6 +10,8 @@ import (
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/source"
 )
 
@@ -217,5 +219,166 @@ func TestTrackForKeysBySource(t *testing.T) {
 	// one file's track for the other.
 	if n := idx.count(); n != 2 {
 		t.Errorf("measured %d times for 2 distinct sources, want 2", n)
+	}
+}
+
+// TestMeasureLengthTakesTheCheapestRoute pins the three routes to an exact
+// length, which differ only in what they cost: a decode is the last resort,
+// not the first.
+//
+// The MP3 cell is also the correctness half. Its Xing count promises audio the
+// truncated file does not hold, and the measure has to come back with the
+// audio rather than the promise.
+func TestMeasureLengthTakesTheCheapestRoute(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "testdata", "sine-cbr128.mp3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := raw[:len(raw)-100]
+	// The walk's own answer, which a tolerant consumer is the only one to get:
+	// the file is damaged, so a strict probe of it refuses outright.
+	tol, err := format.Open(container.BytesSource(cut), "mp3", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tol.Close()
+	if err := tol.(format.Walker).Walk(); err != nil {
+		t.Fatal(err)
+	}
+	want := tol.Info().Default().Samples
+	if want >= 22050 {
+		t.Fatalf("the walk settled at %d; this cell needs a count short of the declared 22050", want)
+	}
+
+	med, err := format.Open(container.BytesSource(cut), "mp3", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	got, err := measureLength(med)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Errorf("measured %d, the walk settles at %d", got, want)
+	}
+
+	// A Matroska Opus track walks inside its own constructor, so its length is
+	// exact the moment the file is open and measuring it again would decode
+	// the whole file for a number already in hand.
+	webm, err := os.ReadFile(filepath.Join("..", "container", "mka", "testdata", "seed-opus.webm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := &testutil.CountingSource{Src: container.BytesSource(webm)}
+	wm, err := format.Open(cs, "webm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wm.Close()
+	opened := wm.Info().Default().Samples
+	cs.Reset()
+	n, err := measureLength(wm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != opened {
+		t.Errorf("measured %d, the open already reported %d", n, opened)
+	}
+	if cs.Reads != 0 {
+		t.Errorf("the measure read the source %d times (%d bytes) for a length the open had", cs.Reads, cs.Bytes)
+	}
+}
+
+// trackForFile is trackForEnv for one fixture copied verbatim from anywhere in
+// the tree, for the cells whose point is a format other than a bare MP3.
+func trackForFile(t *testing.T, src, name string) (*Server, *source.File) {
+	t.Helper()
+	root := t.TempDir()
+	b, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, name), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	roots, err := source.OpenRoots([]source.Root{{Name: "lib", Path: root}}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { roots.Close() })
+	f, err := roots.Resolve(context.Background(), "lib/"+name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+	return &Server{eng: waxflow.New()}, f
+}
+
+// TestTrackForKeepsAnAdvisoryTotalForANonExactCaller pins the asymmetry
+// between an absent length and a rounded one. A caller that did not ask for
+// exact gets what the headers state, because two of them mean it: a split job
+// bounds its cuts with the declared total on purpose, since SpanTrack bounds
+// the run with the same number off a fresh open, and containerTagsFor wants no
+// length at all. An absent length is still measured, since there is nothing
+// there to hand back.
+//
+// The caller that cannot use a rounded total is the HLS playlist, and it asks
+// for a measured one by name; see the cell below.
+func TestTrackForKeepsAnAdvisoryTotalForANonExactCaller(t *testing.T) {
+	for _, tc := range []struct{ src, name string }{
+		{filepath.Join("..", "container", "mka", "testdata", "seed-opus.webm"), "seed.webm"},
+		{filepath.Join("..", "testdata", "sine-s16.wma"), "sine.wma"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, f := trackForFile(t, tc.src, tc.name)
+			track, err := s.trackFor(f, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !track.SamplesAdvisory {
+				t.Fatalf("this cell needs a source whose headers only estimate; got exact=%v", track.SamplesExact)
+			}
+			// And the same source measures when asked, which is the playlist's
+			// second call: the memo does not pin the estimate in place.
+			exact, err := s.trackFor(f, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !exact.SamplesExact || exact.SamplesAdvisory || exact.Samples <= 0 {
+				t.Errorf("exact trackFor returned %d (exact %v advisory %v)",
+					exact.Samples, exact.SamplesExact, exact.SamplesAdvisory)
+			}
+		})
+	}
+}
+
+// TestTimelineGateMemoizesWhatItPaidFor closes the double measure. The mint's
+// job gate opens each member to ask whether measuring it is slow; for a
+// Matroska Opus file that open walks every cluster, and throwing the result
+// away left the mint to open and walk the same file again.
+func TestTimelineGateMemoizesWhatItPaidFor(t *testing.T) {
+	s, f := trackForFile(t, filepath.Join("..", "container", "mka", "testdata", "seed-opus.webm"), "seed.webm")
+	if s.trackIsExact(f) {
+		t.Fatal("the memo is warm before the gate ran")
+	}
+	needs, err := s.timelineNeedsJob([]*source.File{f})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if needs {
+		t.Error("an Opus member measured at open is not a job")
+	}
+	if !s.trackIsExact(f) {
+		t.Fatal("the gate paid for the walk and kept nothing")
+	}
+	// And the memo is the one an exact caller reads, so the mint's measure is
+	// a hit rather than a second open.
+	track, err := s.trackFor(f, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !track.SamplesExact || track.Samples <= 0 {
+		t.Errorf("memoized track = %d (exact %v), want the gate's measurement", track.Samples, track.SamplesExact)
 	}
 }

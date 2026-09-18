@@ -428,13 +428,21 @@ func (s *Server) timelineNeedsJob(srcs []*source.File) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		exact := med.Info().Default().SamplesExact
+		info := med.Info()
+		track := info.Default()
 		walked := true
 		if w, ok := med.(format.Walker); ok {
 			walked = w.Walked()
 		}
+		if track.SamplesExact {
+			// This open paid for the measurement (a Matroska Opus or Vorbis
+			// track walks its clusters inside its own constructor), so keep it:
+			// without the memo the mint measures the same file again, opening
+			// it and walking it a second time for a number already in hand.
+			s.trackCache.put(identityString(f.Ref, f.ID), track, info.Tags)
+		}
 		med.Close()
-		if !exact && !walked {
+		if !track.SamplesExact && !walked {
 			return true, nil
 		}
 	}

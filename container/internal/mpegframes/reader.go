@@ -88,13 +88,24 @@ func (r *Reader) Walk() error { return r.w.Complete() }
 // end of the run.
 func (r *Reader) Walked() bool { return r.w.Done() }
 
-// Measured reports the run's length in samples once the index reaches its
-// end, and -1 before: a walked run is exactly its frames' worth.
-func (r *Reader) Measured() int64 {
+// SettleLength settles the owner's track against the walk: once the index
+// reaches the end of the run, the run's frames are its length, and what the
+// track reports is what a read of it delivers. Before that it is a no-op,
+// and after it is idempotent, which is what lets the media wrappers call
+// Walk as often as they like.
+//
+// The declared-count comparison runs here too, for the one path that
+// finishes an index without walking to its end: a restore whose blob was
+// adopted before this track was settled.
+func (r *Reader) SettleLength(t *container.Track) error {
 	if !r.w.Done() {
-		return -1
+		return nil
 	}
-	return r.w.Frames() * r.w.spf
+	if err := r.w.compare(); err != nil {
+		return err
+	}
+	*t = container.SettleLength(*t, r.w.Frames()*r.w.spf)
+	return nil
 }
 
 // Snapshot implements the serializing half of container.Indexer.

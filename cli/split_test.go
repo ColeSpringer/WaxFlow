@@ -1054,10 +1054,19 @@ func TestSplitAPEWritesItsOwnTags(t *testing.T) {
 // measureFailMedia is a Media whose measuring seek fails with the error it
 // was given. The other methods are explicit so a widened measureMedia fails
 // the test instead of panicking on a nil embedded interface.
+//
+// Its Info carries one track with no declared length, which is what a Media
+// always carries: all three of format's constructors refuse a trackless
+// demuxer, so Info().Default() has something to return. The length sends
+// measureMedia past its two cheap routes to the seek this is about, and the
+// type deliberately does not implement format.Walker, so there is no walk to
+// answer instead.
 type measureFailMedia struct{ err error }
 
-func (m *measureFailMedia) Info() *format.Info { return &format.Info{} }
-func (m *measureFailMedia) Close() error       { return nil }
+func (m *measureFailMedia) Info() *format.Info {
+	return &format.Info{Tracks: []container.Track{{Samples: -1, Default: true}}}
+}
+func (m *measureFailMedia) Close() error { return nil }
 func (m *measureFailMedia) ReadChunk(*audio.Buffer) error {
 	return errors.New("measureFailMedia: read")
 }

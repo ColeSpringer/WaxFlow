@@ -120,7 +120,14 @@ func (d *Demuxer) parse() error {
 	d.ref = h
 	d.haveRef = true
 	d.firstFrame = first
-	d.idx = append(d.idx, first)
+	// Only whole frames enter the index: ReadPacket trusts it, and a walk
+	// that published a frame the read then drops would let a strict probe
+	// pass a file a strict read fails.
+	if first+int64(h.frameLen) <= d.w.DataEnd() {
+		d.idx = append(d.idx, first)
+	} else if err := d.warn(first, "the only frame is truncated, dropped"); err != nil {
+		return err
+	}
 	if first+int64(h.frameLen) >= d.w.DataEnd() {
 		d.done = true // one frame: the index is already whole
 	}
@@ -279,6 +286,14 @@ func (d *Demuxer) extend() (bool, error) {
 	if d.w.Err() != nil {
 		return false, d.w.Err()
 	}
+	if len(d.idx) == 0 {
+		// parse already latches done when the only frame does not fit, so this
+		// is unreachable today. It stays because the alternative is an
+		// out-of-range read one drifting condition away, and because
+		// mpegframes.extend carries the same guard for the same reason.
+		d.done = true
+		return false, nil
+	}
 	last := d.idx[len(d.idx)-1]
 	d.w.Trim(last)
 	h, ok := parseHeader(d.w.BytesAt(last, 9))
@@ -298,6 +313,7 @@ func (d *Demuxer) extend() (bool, error) {
 	// that frame's own successor is the junk. The header is read with the
 	// last frame so the read extends the window rather than rebasing at a
 	// boundary.
+	cand := next
 	var nh header
 	ok = false
 	if b := d.w.BytesAt(last, h.frameLen+9); len(b) >= h.frameLen {
@@ -308,8 +324,9 @@ func (d *Demuxer) extend() (bool, error) {
 			return false, d.w.Err()
 		}
 		// Damage or trailing junk: resync within bounds, else end.
-		cand, _, ok := d.nextFrame(next, next+maxResync)
-		if !ok {
+		var found bool
+		cand, nh, found = d.nextFrame(next, next+maxResync)
+		if !found {
 			d.done = true
 			if tail := d.w.DataEnd() - next; tail > 0 {
 				return false, d.warn(next, "%d trailing bytes are not frames, dropped", tail)
@@ -319,9 +336,15 @@ func (d *Demuxer) extend() (bool, error) {
 		if err := d.warn(next, "%d unparsable bytes skipped", cand-next); err != nil {
 			return false, err
 		}
-		next = cand
 	}
-	d.idx = append(d.idx, next)
+	// frameAt accepts a candidate whose length runs to the end of data, since
+	// there is no header behind it to confirm against; the fit is decided
+	// here, so only whole frames enter the index.
+	if cand+int64(nh.frameLen) > d.w.DataEnd() {
+		d.done = true
+		return false, d.warn(cand, "truncated final frame dropped")
+	}
+	d.idx = append(d.idx, cand)
 	return true, nil
 }
 
@@ -339,7 +362,11 @@ func (d *Demuxer) Walk() error {
 		}
 		if !grew {
 			if d.done {
-				d.track.Samples, d.track.SamplesExact = int64(len(d.idx))*d.spf, true
+				// Through the shared rule rather than assigned: ADTS carries no
+				// trims, so it lands on the same number either way, and one
+				// settle keeps every frame-indexed container saying the same
+				// thing about what a finished walk means.
+				d.track = container.SettleLength(d.track, int64(len(d.idx))*d.spf)
 			}
 			return nil
 		}
@@ -386,14 +413,9 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 		if d.w.Err() != nil {
 			return d.w.Err()
 		}
-		// A final frame whose declared length runs past EOF is a truncated
-		// tail (it is always the last indexed frame): drop it with a warning
-		// rather than a hard error, matching the damage-tolerant contract.
-		d.cur++ // consume it so a re-read returns clean EOF
-		if werr := d.warn(off, "final frame truncated (%d of %d bytes), dropped", len(frame), h.frameLen); werr != nil {
-			return werr
-		}
-		return io.EOF
+		// The index only holds frames that fit, so a short read here is the
+		// source shrinking under us, which is the read-time rule.
+		return waxerr.New(waxerr.CodeSourceUnreadable, "adts: indexed frame shrank")
 	}
 	*pkt = container.Packet{
 		Track: 0,

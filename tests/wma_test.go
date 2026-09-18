@@ -609,3 +609,68 @@ func TestWMAVoiceSeekSampleExact(t *testing.T) {
 		})
 	}
 }
+
+// TestAdvisoryLengthProjectsNoHeaderLength is the write-side half of what an
+// advisory total means. ASF states its duration in 100-nanosecond ticks its
+// own muxer accumulates from millisecond-truncated packet times, so the number
+// is neither the source length nor the coded capacity; projecting it into a
+// muxer's headers promises a byte count the encoder then misses.
+//
+// A plain io.Writer is what makes it visible: the WAV muxer cannot back-patch
+// one, so it refuses at End rather than silently writing a header that
+// disagrees with the data behind it. The suite's other WMA cells write to a
+// seeker, which patches the projection away.
+func TestAdvisoryLengthProjectsNoHeaderLength(t *testing.T) {
+	raw, err := os.ReadFile(repoPath("testdata", "sine-s16.wma"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	track := probeTrack(t, raw, "wma")
+	if !track.SamplesAdvisory {
+		t.Fatalf("the fixture's length is not advisory (%d samples); this cell needs one that is", track.Samples)
+	}
+
+	var out bytes.Buffer
+	res, err := waxflow.New().Transcode(context.Background(), container.BytesSource(raw), "wma", &out,
+		waxflow.TranscodeOptions{Format: "wav"})
+	if err != nil {
+		t.Fatalf("transcode to an unseekable writer: %v", err)
+	}
+	if res.Samples <= 0 {
+		t.Fatalf("%d samples written", res.Samples)
+	}
+	// And the data chunk holds what the decode produced, so nothing was
+	// truncated to fit a projection either.
+	back := probeTrack(t, out.Bytes(), "wav")
+	if back.Samples != res.Samples {
+		t.Errorf("the output declares %d samples, the run wrote %d", back.Samples, res.Samples)
+	}
+}
+
+// TestAdvisoryLengthStillDrivesProgress is the other half of dropping the
+// projection: what the headers estimate is unfit for a muxer held to it and
+// perfectly fit for a denominator, so the progress total keeps it. Reporting
+// -1 there would leave every advisory source with no progress bar.
+func TestAdvisoryLengthStillDrivesProgress(t *testing.T) {
+	raw, err := os.ReadFile(repoPath("testdata", "sine-s16.wma"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !probeTrack(t, raw, "wma").SamplesAdvisory {
+		t.Fatal("the fixture's length is not advisory")
+	}
+	var totals []int64
+	if _, err := waxflow.New().Transcode(context.Background(), container.BytesSource(raw), "wma",
+		&bytes.Buffer{}, waxflow.TranscodeOptions{Format: "wav",
+			Progress: func(_, total int64) { totals = append(totals, total) }}); err != nil {
+		t.Fatal(err)
+	}
+	if len(totals) == 0 {
+		t.Fatal("no progress callbacks")
+	}
+	for _, got := range totals {
+		if got <= 0 {
+			t.Fatalf("progress total = %d, want the headers' estimate", got)
+		}
+	}
+}

@@ -58,6 +58,7 @@ func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 	d.walk = mpegframes.New(src, src.Size(), mpegframes.Options{
 		Prefix:  "mp3: ",
 		Warn:    func(off int64, msg string) error { return d.warn(off, "%s", msg) },
+		Note:    func(off int64, msg string) { d.note(off, "%s", msg) },
 		Trailer: d.recognizedTrailer,
 	})
 	if err := d.parse(); err != nil {
@@ -82,6 +83,12 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 		d.warnings = append(d.warnings, w)
 	}
 	return nil
+}
+
+// note records a finding Strict must not escalate: the file is loose rather
+// than damaged, and it still reads exactly as it stands.
+func (d *Demuxer) note(off int64, format string, args ...any) {
+	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
 }
 
 func (d *Demuxer) parse() error {

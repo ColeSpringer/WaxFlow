@@ -3,6 +3,7 @@ package waxflow_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -25,6 +26,7 @@ import (
 	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/hls"
+	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -1593,5 +1595,123 @@ func checkTimelineDelivers(t *testing.T, ms []waxflow.ConcatSource) {
 	}
 	if got := countMedia(t, med); got != planned.Samples {
 		t.Errorf("the timeline delivered %d samples, promised %d", got, planned.Samples)
+	}
+}
+
+// TestConcatWidensANarrowerMember is the surround half of "normalized, not
+// refused" (ADR-0009), end to end: a stereo member joining a 5.1 queue is
+// placed in the envelope rather than turned away, and placed means placed.
+// Its own two channels come out bit-identical to the source and the four it
+// does not have come out exactly zero, so nothing was scaled, folded, or
+// spread; the 5.1 member passes through untouched beside it.
+//
+// Float members, so bit-identity is assertable at all: an integer envelope
+// re-quantizes with dither, and a comparison through that says nothing about
+// the mix.
+func TestConcatWidensANarrowerMember(t *testing.T) {
+	const rate, frames = 48000, 4096
+	e := waxflow.New()
+
+	stereoChans := make([][]float32, 2)
+	for c := range stereoChans {
+		stereoChans[c] = make([]float32, frames)
+		for i := range stereoChans[c] {
+			stereoChans[c][i] = float32(math.Sin(2*math.Pi*float64(300+80*c)*float64(i)/rate)) * 0.4
+		}
+	}
+	surroundChans := make([][]float32, 6)
+	for c := range surroundChans {
+		surroundChans[c] = make([]float32, frames)
+		for i := range surroundChans[c] {
+			surroundChans[c][i] = float32(math.Sin(2*math.Pi*float64(200+50*c)*float64(i)/rate)) * 0.3
+		}
+	}
+	stereo := testutil.FloatWAVBytes(t, rate, stereoChans)
+	surround := testutil.FloatWAVBytes(t, rate, surroundChans)
+
+	ms := timelineMembers(t, e, stereo, surround)
+	tracks := []container.Track{ms[0].Track, ms[1].Track}
+	env, err := waxflow.ConcatTrack(tracks, waxflow.ConcatOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env.Fmt.Channels != 6 || env.Fmt.Type != audio.Float {
+		t.Fatalf("envelope = %v, want 6-channel float", env.Fmt)
+	}
+
+	med, err := waxflow.Concat(ms, waxflow.ConcatOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	got := drainMedia(t, med, 2*frames+16)
+	defer audio.Put(got)
+	if got.N != 2*frames {
+		t.Fatalf("timeline delivered %d frames, want %d", got.N, 2*frames)
+	}
+
+	// The stereo member: FL and FR are its own samples, the other four are
+	// silent. audio.DefaultLayout(6) is FL, FR, FC, LFE, BL, BR.
+	for c := range 6 {
+		ch := got.ChanF(c)[:frames]
+		want := make([]float32, frames)
+		if c < 2 {
+			want = stereoChans[c]
+		}
+		for i := range ch {
+			if ch[i] != want[i] {
+				t.Fatalf("widened member channel %d frame %d = %v, want %v", c, i, ch[i], want[i])
+			}
+		}
+	}
+	// And the member that already fills the envelope is untouched.
+	for c := range 6 {
+		ch := got.ChanF(c)[frames : 2*frames]
+		for i := range ch {
+			if ch[i] != surroundChans[c][i] {
+				t.Fatalf("5.1 member channel %d frame %d = %v, want %v", c, i, ch[i], surroundChans[c][i])
+			}
+		}
+	}
+
+	// And the same members key a segment plan, which is the other funnel:
+	// timelineVersions builds a chain per distinct member format.
+	if _, err := e.PlanSegmentsTimeline(tracks, waxflow.ConcatOptions{},
+		waxflow.TranscodeOptions{Format: "flac"}, 4); err != nil {
+		t.Fatalf("PlanSegmentsTimeline over a widened member: %v", err)
+	}
+}
+
+// TestConcatNamesTheMemberItCannotPlace is the message half. A caller with a
+// queue of files can act on "member 1" and cannot act on a bare layout pair,
+// and the annotation is on every path out: the plan-time funnel and the
+// chain built per member format.
+func TestConcatNamesTheMemberItCannotPlace(t *testing.T) {
+	const rate, frames = 48000, 1024
+	e := waxflow.New()
+	chans := func(n int) [][]float32 {
+		out := make([][]float32, n)
+		for c := range out {
+			out[c] = make([]float32, frames)
+			for i := range out[c] {
+				out[c][i] = float32(math.Sin(2*math.Pi*440*float64(i)/rate)) * 0.2
+			}
+		}
+		return out
+	}
+	five := testutil.FloatWAVBytes(t, rate, chans(6))
+	sixOne := testutil.FloatWAVBytes(t, rate, chans(7))
+
+	ms := timelineMembers(t, e, five, sixOne)
+	tracks := []container.Track{ms[0].Track, ms[1].Track}
+	_, err := waxflow.ConcatTrack(tracks, waxflow.ConcatOptions{})
+	if !errors.Is(err, waxerr.ErrUnsupportedFormat) {
+		t.Fatalf("ConcatTrack = %v, want unsupported", err)
+	}
+	if !strings.Contains(err.Error(), "member 0") {
+		t.Errorf("error %q does not name the member", err)
+	}
+	if _, err := waxflow.Concat(ms, waxflow.ConcatOptions{}); !errors.Is(err, waxerr.ErrUnsupportedFormat) {
+		t.Errorf("Concat = %v, want the same refusal", err)
 	}
 }

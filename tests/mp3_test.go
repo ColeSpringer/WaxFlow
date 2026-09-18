@@ -81,6 +81,43 @@ func TestMP3FixturesProbe(t *testing.T) {
 	}
 }
 
+// TestEveryMP3FixtureWalksWhole is the gate on the encoders that produced
+// them: a strict probe walks the run and compares it against the count the
+// metadata frame states, so a fixture whose tag is off by one surfaces here
+// as a Note rather than as a length nobody checked. Our own muxer counts
+// audio frames only, which is the convention the walk expects.
+func TestEveryMP3FixtureWalksWhole(t *testing.T) {
+	var files []string
+	for _, tt := range mp3Fixtures {
+		files = append(files, repoPath("testdata", tt.name))
+	}
+	more, err := filepath.Glob(repoPath("container", "mpa", "testdata", "*.mp3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files = append(files, more...)
+
+	for _, path := range files {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := waxflow.New().Probe(container.BytesSource(raw), "", &waxflow.ProbeOptions{Strict: true})
+			if err != nil {
+				t.Fatalf("strict probe: %v", err)
+			}
+			if d := info.Default(); !d.SamplesExact || d.Samples < 0 {
+				t.Errorf("strict probe reports %d samples (exact %v), want a measured length",
+					d.Samples, d.SamplesExact)
+			}
+			if len(info.Notes) != 0 {
+				t.Errorf("notes = %v; the encoder's frame count disagrees with the run", info.Notes)
+			}
+		})
+	}
+}
+
 // TestMP3DecodeDifferential holds the decoder to the quality gates
 // against ffmpeg's float decode, and to the exact output length: for the
 // LAME-tagged fixtures both sides apply the same gapless trims, so a

@@ -1,6 +1,7 @@
 package waxflow
 
 import (
+	"errors"
 	"io"
 	"math"
 	"strings"
@@ -62,6 +63,11 @@ var (
 	stereo48 = audio.Format{Rate: 48000, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
 	stereo44 = audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
 	mono48   = audio.Format{Rate: 48000, Channels: 1, Layout: audio.DefaultLayout(1), Type: audio.Int, BitDepth: 16}
+	// The surround pair the widening rule divides: 5.1's rear is a back pair,
+	// and the 6.1 default's is a back center plus a side pair, so a 5.1 member
+	// beside a 6.1-shaped one has nowhere to put BL and BR.
+	surround48 = audio.Format{Rate: 48000, Channels: 6, Layout: audio.DefaultLayout(6), Type: audio.Int, BitDepth: 16}
+	sixOne48   = audio.Format{Rate: 48000, Channels: 7, Layout: audio.DefaultLayout(7), Type: audio.Int, BitDepth: 16}
 )
 
 // openFirst forces the first member open so the wiring is observable.
@@ -140,6 +146,7 @@ func TestConcatTrackEnvelope(t *testing.T) {
 	}{
 		{"uniform keeps the format", []audio.Format{stereo48, stereo48}, stereo48},
 		{"mono in a stereo queue widens to stereo", []audio.Format{mono48, stereo48}, stereo48},
+		{"stereo in a surround queue widens to 5.1", []audio.Format{stereo48, surround48}, surround48},
 		{"the higher rate wins", []audio.Format{stereo44, stereo48}, stereo48},
 		{"the deeper word wins", []audio.Format{stereo48, deep96}, deep96},
 		{"any float member makes the envelope float", []audio.Format{stereo48, float48}, float48},
@@ -165,6 +172,55 @@ func TestConcatTrackEnvelope(t *testing.T) {
 				t.Fatal("the summed length is enforced, so it must not be advertised as advisory")
 			}
 		})
+	}
+}
+
+// TestConcatTrackTreatsAnUndeclaredLayoutTheSameWayTwice: audio.Format.Valid
+// accepts a zero mask, and both layout rules have to read it the same way.
+// The widening rule resolves it through DefaultLayout the way dsp.NewChain
+// does; the equal-count rule used to compare the raw zero, so the same member
+// was accepted below the envelope's width and refused at it.
+func TestConcatTrackTreatsAnUndeclaredLayoutTheSameWayTwice(t *testing.T) {
+	bare := stereo48
+	bare.Layout = 0
+	if err := bare.Valid(); err != nil {
+		t.Fatalf("a zero mask is meant to be a valid format: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		other audio.Format
+	}{
+		{"at the envelope's width", stereo48},
+		{"below it", surround48},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ConcatTrack([]container.Track{
+				{Codec: codec.PCM, Fmt: bare, Samples: 48000},
+				{Codec: codec.PCM, Fmt: tc.other, Samples: 48000},
+			}, ConcatOptions{}); err != nil {
+				t.Errorf("a member with no declared layout was refused: %v", err)
+			}
+		})
+	}
+}
+
+// TestConcatTrackRefusesAnUnplaceableMember is the other side of the widening
+// rule, and it is refused at plan time rather than minutes into a decode:
+// concatLayout is the single funnel, so what a plan accepts is what a run can
+// build. The message names the member, which is the only thing a caller with a
+// queue of files can act on.
+func TestConcatTrackRefusesAnUnplaceableMember(t *testing.T) {
+	_, err := ConcatTrack([]container.Track{
+		{Codec: codec.PCM, Fmt: surround48, Samples: 48000},
+		{Codec: codec.PCM, Fmt: sixOne48, Samples: 48000},
+	}, ConcatOptions{})
+	if !errors.Is(err, waxerr.ErrUnsupportedFormat) {
+		t.Fatalf("ConcatTrack = %v, want unsupported", err)
+	}
+	for _, want := range []string{"member 0", "BL|BR"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
 	}
 }
 

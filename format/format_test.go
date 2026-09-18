@@ -601,6 +601,9 @@ func TestStrictProbeMeasures(t *testing.T) {
 		{"mp3", filepath.Join("..", "testdata", "sine-untagged.mp3"), "mp3"},
 		{"adts", filepath.Join("..", "container", "adts", "testdata", "stereo.aac"), "aac"},
 		{"mka", filepath.Join("..", "container", "mka", "testdata", "seed-pcm.mka"), "mka"},
+		// An Opus track measures itself at open, so only the deferred probe
+		// leaves anything for the strict walk to measure.
+		{"webm-opus", filepath.Join("..", "container", "mka", "testdata", "seed-opus.webm"), "webm"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw, err := os.ReadFile(tc.path)
@@ -629,5 +632,116 @@ func TestStrictProbeMeasures(t *testing.T) {
 					d.Samples, d.SamplesExact, d.SamplesAdvisory, got)
 			}
 		})
+	}
+}
+
+// TestWalkRefreshesTheMediaTrack is the other half of "a finished walk has
+// measured the payload": the measurement has to be visible on the Media that
+// ran the walk. Without the refresh a caller has to reopen the file to see
+// its own walk, and the count Info reports stays the one the truncated
+// header claimed.
+func TestWalkRefreshesTheMediaTrack(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "testdata", "sine-cbr128.mp3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := raw[:len(raw)-100] // into the final frame
+
+	med, err := Open(container.BytesSource(cut), "mp3", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	before := med.Info().Default()
+	if before.Samples != 22050 || before.SamplesExact {
+		t.Fatalf("at open: samples = %d exact = %v, want the declared 22050 unconfirmed",
+			before.Samples, before.SamplesExact)
+	}
+	w, ok := med.(Walker)
+	if !ok {
+		t.Fatal("an MP3 Media must implement Walker")
+	}
+	if err := w.Walk(); err != nil {
+		t.Fatal(err)
+	}
+	after := med.Info().Default()
+	if !after.SamplesExact || after.Samples >= before.Samples {
+		t.Errorf("after Walk: samples = %d exact = %v, want a shorter measured length",
+			after.Samples, after.SamplesExact)
+	}
+	if got := count(t, med); got != after.Samples {
+		t.Errorf("the read delivered %d, Info says %d", got, after.Samples)
+	}
+
+	// An untagged run flips to exact on the same call, which is the case the
+	// refresh used to be invisible for: the demuxer knew, the Media did not.
+	bare, err := os.ReadFile(filepath.Join("..", "testdata", "sine-untagged.mp3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	med2, err := Open(container.BytesSource(bare), "mp3", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med2.Close()
+	if d := med2.Info().Default(); d.Samples != -1 {
+		t.Fatalf("at open: samples = %d, want -1", d.Samples)
+	}
+	if err := med2.(Walker).Walk(); err != nil {
+		t.Fatal(err)
+	}
+	d := med2.Info().Default()
+	if !d.SamplesExact || d.Samples != count(t, med2) {
+		t.Errorf("after Walk: samples = %d exact = %v, want the decode's count", d.Samples, d.SamplesExact)
+	}
+}
+
+// TestTolerantProbeReadsHeaders is the contract docs/api.md states and the
+// Matroska driver used to break: a tolerant probe reads headers. An Opus
+// track's exact gapless total needs every cluster walked, so opening one for
+// a probe read the whole file for a number the probe was not asked for.
+//
+// The advisory Info Duration is what it reports instead, which is the same
+// answer an ASF or Matroska PCM probe has always given, and a strict probe
+// still walks and still measures.
+func TestTolerantProbeReadsHeaders(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "container", "mka", "testdata", "seed-opus.webm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := &testutil.CountingSource{Src: container.BytesSource(raw)}
+	tolerant, err := Probe(cs, "webm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := tolerant.Default()
+	if !d.SamplesAdvisory || d.SamplesExact {
+		t.Errorf("tolerant probe: advisory = %v exact = %v, want the advisory Duration", d.SamplesAdvisory, d.SamplesExact)
+	}
+
+	// The fixture is a few kilobytes, so no absolute byte bound means anything
+	// on it; container/mka's opencost cells hold the head-read bound on
+	// streams of several windows. What this can say is that the tolerant probe
+	// reads strictly less than the strict one, on the same bytes.
+	scs := &testutil.CountingSource{Src: container.BytesSource(raw)}
+	strict, err := Probe(scs, "webm", &Options{Strict: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("%d bytes: tolerant read %d in %d reads, strict %d in %d", len(raw), cs.Bytes, cs.Reads, scs.Bytes, scs.Reads)
+	if cs.Bytes >= scs.Bytes {
+		t.Errorf("a tolerant probe read %d bytes and a strict one %d; the walk is not being deferred", cs.Bytes, scs.Bytes)
+	}
+	med, err := Open(container.BytesSource(raw), "webm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	want := med.Info().Default()
+	if !want.SamplesExact {
+		t.Fatal("Open must keep measuring an Opus track: Media needs the total before the first read")
+	}
+	if got := strict.Default(); !got.SamplesExact || got.Samples != want.Samples {
+		t.Errorf("strict probe: %d (exact %v), want Open's %d exact", got.Samples, got.SamplesExact, want.Samples)
 	}
 }

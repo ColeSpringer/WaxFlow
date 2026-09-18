@@ -446,6 +446,7 @@ func (d *Demuxer) startMPEG(cf commFormat, dataOff, dataBytes, commUnits int64) 
 	walk := mpegframes.New(d.src, dataOff+dataBytes, mpegframes.Options{
 		Prefix: "aiff: ",
 		Warn:   func(off int64, msg string) error { return d.warn(off, "%s", msg) },
+		Note:   func(off int64, msg string) { d.note(off, "%s", msg) },
 	})
 	tag, _, err := walk.Begin(dataOff)
 	if err != nil {

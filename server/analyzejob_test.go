@@ -744,3 +744,43 @@ func TestLoudnessMeasuresTheResolvedWidth(t *testing.T) {
 			implicit.Analysis.ReplayGainTrackPeak, explicit.Analysis.ReplayGainTrackPeak)
 	}
 }
+
+// TestSplitBoundIsWhatTheRunEnforces closes the gap a tolerant probe opened.
+// A Matroska Opus file estimates its total at probe (the exact one is a
+// cluster walk) and measures it at open, and the estimate runs long. Checking
+// cuts against the estimate accepted a cut past the real end: a 201 here, then
+// a failure part way through the run with pieces already in the job directory
+// and no Output naming them.
+//
+// The refusal must stay a refusal and the accepted cut must still run, or a
+// version that simply refused everything would satisfy the first half.
+func TestSplitBoundIsWhatTheRunEnforces(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cut  int64
+		want int
+	}{
+		// seed.webm: the Info Duration estimates 6144 samples, the walk
+		// measures 5760.
+		{"a cut between the estimate and the measure", 5900, http.StatusBadRequest},
+		{"a cut inside the audio", 3000, http.StatusCreated},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := jobsEnv(t) // cold: a warm memo would answer from an earlier run
+			body := fmt.Sprintf(`{"type":"split","src":"lib/seed.webm","format":"flac","cuts":[%d]}`, tc.cut)
+			resp := env.postJSON(t, "/jobs", body)
+			if tc.want == http.StatusBadRequest {
+				wantEnvelope(t, resp, http.StatusBadRequest, waxerr.CodeInvalidRequest)
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Fatalf("status = %d, want %d: %s", resp.StatusCode, tc.want, readBody(t, resp))
+			}
+			job := awaitJob(t, env, createJob(t, env, body))
+			if len(job.Outputs) != 2 {
+				t.Fatalf("split at one cut made %d pieces, want 2: %+v", len(job.Outputs), job.Outputs)
+			}
+		})
+	}
+}

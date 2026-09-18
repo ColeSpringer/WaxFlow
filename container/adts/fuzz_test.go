@@ -63,5 +63,48 @@ func FuzzDemux(f *testing.F) {
 				}
 			}
 		}
+
+		// The walk publishes exactly the frames a read delivers, and every
+		// one of them is whole: the index is what makes a strict probe's
+		// count trustworthy, so a frame it holds must fit in the source.
+		w, err := NewDemuxer(container.BytesSource(data), nil)
+		if err != nil {
+			return
+		}
+		if err := w.Walk(); err != nil || !w.Walked() {
+			t.Fatalf("a tolerant walk of accepted bytes failed: %v (walked %v)", err, w.Walked())
+		}
+		// Every entry's whole frame lies inside the data. Asserted on the
+		// index rather than on the packets a read delivers, because a read
+		// stops at the first entry it cannot fill: the bad entry is exactly
+		// the one no packet reaches.
+		for i, off := range w.idx {
+			h, ok := parseHeader(w.w.BytesAt(off, 9))
+			if !ok {
+				t.Fatalf("index entry %d at %d has no header", i, off)
+			}
+			if end := off + int64(h.frameLen); end > w.w.DataEnd() {
+				t.Fatalf("index entry %d runs to %d, past the %d bytes of data", i, end, w.w.DataEnd())
+			}
+		}
+		r, err := NewDemuxer(container.BytesSource(data), nil)
+		if err != nil {
+			t.Fatalf("the same bytes were refused on a second open: %v", err)
+		}
+		var pkt container.Packet
+		var delivered int64
+		for {
+			err := r.ReadPacket(&pkt)
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				t.Fatalf("ReadPacket: %v", err)
+			}
+			delivered++
+		}
+		if got := w.Tracks()[0].Samples / w.spf; got != delivered {
+			t.Fatalf("the walk counted %d frames, a read delivered %d", got, delivered)
+		}
 	})
 }

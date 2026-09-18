@@ -61,20 +61,7 @@ func newMedia(info *Info, demux container.Demuxer) (Media, error) {
 		return nil, err
 	}
 	m := &media{info: info, demux: demux, track: track, decoder: dec,
-		delay: track.Delay, skip: track.Delay, rawEnd: -1}
-	// The raw-end cap engages only when the container signaled trims, or when
-	// the length is authoritative (SamplesExact): a declared-total mismatch in
-	// an untrimmed advisory format (a lying FLAC STREAMINFO, say) stays a
-	// tolerated oddity, not a truncation.
-	//
-	// SamplesAdvisory vetoes it outright, and that is not redundant with the
-	// clause above: a Matroska track whose Opus CodecDelay sets Delay but
-	// whose length fell back to the millisecond Info Duration satisfies
-	// Delay > 0 while carrying a rounded total, and capping the decode there
-	// would clip the tail by whatever the rounding was worth.
-	if !track.SamplesAdvisory && (track.SamplesExact || track.Delay > 0 || track.Padding > 0) && track.Samples >= 0 {
-		m.rawEnd = track.Delay + track.Samples
-	}
+		delay: track.Delay, skip: track.Delay, rawEnd: rawEndFor(track)}
 	m.stashFn = m.stash
 	if s, ok := demux.(container.Seeker); ok {
 		m.seeker = s
@@ -104,6 +91,26 @@ func newMedia(info *Info, demux container.Demuxer) (Media, error) {
 	return m, nil
 }
 
+// rawEndFor is where the raw decoder timeline is capped for a track, -1 for
+// one that is not capped at all.
+//
+// The cap engages only when the container signaled trims, or when the length
+// is authoritative (SamplesExact): a declared-total mismatch in an untrimmed
+// advisory format (a lying FLAC STREAMINFO, say) stays a tolerated oddity,
+// not a truncation.
+//
+// SamplesAdvisory vetoes it outright, and that is not redundant with the
+// clause above: a Matroska track whose Opus CodecDelay sets Delay but whose
+// length fell back to the millisecond Info Duration satisfies Delay > 0 while
+// carrying a rounded total, and capping the decode there would clip the tail
+// by whatever the rounding was worth.
+func rawEndFor(track container.Track) int64 {
+	if !track.SamplesAdvisory && (track.SamplesExact || track.Delay > 0 || track.Padding > 0) && track.Samples >= 0 {
+		return track.Delay + track.Samples
+	}
+	return -1
+}
+
 // indexableMedia adds the demuxer's container.Indexer to the Media.
 type indexableMedia struct {
 	*media
@@ -113,12 +120,45 @@ type indexableMedia struct {
 func (m *indexableMedia) IndexSnapshot() []byte         { return m.ix.IndexSnapshot() }
 func (m *indexableMedia) RestoreIndex(blob []byte) bool { return m.ix.RestoreIndex(blob) }
 
-// Walk implements Walker: the demuxer's deferred walk, or nothing.
+// Walk implements Walker: the demuxer's deferred walk, or nothing, and then
+// the track this Media reports and decodes against is refreshed from it.
+//
+// A finished walk has measured the payload, and the measurement has to be
+// observable where format.Walker says it is: without the refresh the media
+// that walked keeps the open-time length and the caller has to reopen to see
+// its own walk. Only the length fields move (Fmt and Delay are fixed at
+// open), and the settled count is what delivery was already producing from
+// these bytes, so a Walk taken mid-read cannot shift the position or the
+// end: the cap only stops promising samples the packets never held.
 func (m *media) Walk() error {
 	if m.walker == nil {
 		return nil
 	}
-	return m.walker.Walk()
+	if err := m.walker.Walk(); err != nil {
+		return err
+	}
+	for _, t := range m.demux.Tracks() {
+		if t.ID != m.track.ID {
+			continue
+		}
+		// The length fields and nothing else, which is a structural
+		// restatement of what a walk can settle rather than a comment about
+		// it: Delay is already half spent (m.skip counts down against it) and
+		// Fmt is what the decoder was built for, so adopting either mid-read
+		// would move the delivered timeline under the caller.
+		m.track.Samples = t.Samples
+		m.track.Padding = t.Padding
+		m.track.SamplesExact = t.SamplesExact
+		m.track.SamplesAdvisory = t.SamplesAdvisory
+		m.rawEnd = rawEndFor(m.track)
+		for i := range m.info.Tracks {
+			if m.info.Tracks[i].ID == t.ID {
+				m.info.Tracks[i] = m.track
+			}
+		}
+		break
+	}
+	return nil
 }
 
 // Walked implements Walker: the demuxer's own answer, and true when it defers

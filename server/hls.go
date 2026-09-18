@@ -294,6 +294,19 @@ func (s *Server) resolveMember(ctx context.Context, req *hlsRequest, i int, ref 
 	if err != nil {
 		return err
 	}
+	// A rounded total cannot be divided into segments. trackFor hands a
+	// non-exact caller the headers' number, and for ASF, for a Matroska whose
+	// length is only its Info Duration, and now for a Matroska Opus or Vorbis
+	// file a tolerant probe did not walk, that number is an estimate: taking
+	// it at its word is the tail 404 or early ENDLIST trackFor's own comment
+	// names. So a playlist asks again for a measured one. The re-ask is a memo
+	// hit whenever the first call already measured, and Phase 2's cheap
+	// measure is what makes it a walk rather than a decode.
+	if track.SamplesAdvisory {
+		if track, err = s.trackFor(f, true); err != nil {
+			return err
+		}
+	}
 	// The pre-narrow total, recorded so the worker can re-anchor a freshly
 	// opened member's advisory declaration to the measure the window was
 	// validated against (sliceMeasured). Whenever a member is sliced, the
@@ -385,14 +398,41 @@ func hlsIdentity(desc hls.Descriptor, members []hlsSource) string {
 	return identityString(desc.Src, members[0].ID)
 }
 
-// measureSamples forces a source's exact length: seek past any possible
-// end and read where the stream really stops.
+// measureSamples forces a source's exact length, by the cheapest route the
+// opened media offers.
+//
+// Three of them, in order. A demuxer that measured at open (an Opus or Vorbis
+// Matroska walks inside its constructor) has already answered, and the answer
+// is taken without touching it again; that arm is a fast path rather than a
+// separate route, since Walk on a finished walk is a no-op, and it is what
+// lets a test pin zero reads after the open. A demuxer with a deferred walk
+// (MP3, ADTS, a lazily walked Matroska) measures by finishing that walk, which
+// reads headers and hops. Only a source whose length no walk settles (FLAC,
+// WavPack, Ogg, ASF, whose demuxers bisect for it) is seeked past any possible
+// end to find where the stream really stops.
 func (s *Server) measureSamples(src *source.File) (int64, error) {
 	med, err := s.eng.OpenStream(src, src.Ext)
 	if err != nil {
 		return 0, err
 	}
 	defer med.Close()
+	return measureLength(med)
+}
+
+// measureLength is measureSamples over an already-opened Media, which is
+// where the three routes are chosen between and so where they are tested.
+func measureLength(med format.Media) (int64, error) {
+	if t := med.Info().Default(); t.SamplesExact && t.Samples >= 0 {
+		return t.Samples, nil
+	}
+	if w, ok := med.(format.Walker); ok {
+		if err := w.Walk(); err != nil {
+			return 0, err
+		}
+		if t := med.Info().Default(); t.SamplesExact && t.Samples >= 0 {
+			return t.Samples, nil
+		}
+	}
 	return med.SeekSample(measureCeiling)
 }
 

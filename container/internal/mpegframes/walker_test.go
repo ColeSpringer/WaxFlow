@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow/codec/mp3"
@@ -65,6 +67,8 @@ func xingFrame(count uint32, lame bool, delay, padding uint16) []byte {
 type walkOpts struct {
 	msgs   []string
 	offs   []int64
+	notes  []string
+	noffs  []int64
 	fail   error // returned by Warn, the Strict policy an owner applies
 	tailOK bool  // the Trailer hook's answer, when one is wired
 	trail  bool  // wire a Trailer hook at all
@@ -75,6 +79,9 @@ func (o *walkOpts) options() Options {
 		o.msgs = append(o.msgs, msg)
 		o.offs = append(o.offs, off)
 		return o.fail
+	}, Note: func(off int64, msg string) {
+		o.notes = append(o.notes, msg)
+		o.noffs = append(o.noffs, off)
 	}}
 	if o.trail {
 		opts.Trailer = func(int64) bool { return o.tailOK }
@@ -250,6 +257,14 @@ func TestTruncatedFinalFrameIsDropped(t *testing.T) {
 	}
 	if len(o.msgs) != 1 || o.msgs[0] != "truncated final frame dropped" {
 		t.Fatalf("findings = %v", o.msgs)
+	}
+	// The premise Frame relies on, stated directly: every entry's whole
+	// frame lies inside the run.
+	for i, off := range w.idx {
+		h, ok := w.headerAt(off)
+		if !ok || off+int64(h.Size()) > w.DataEnd() {
+			t.Errorf("entry %d at %d does not hold a whole frame inside %d bytes", i, off, w.DataEnd())
+		}
 	}
 }
 
@@ -596,3 +611,215 @@ func TestCompleteFinishesTheWalk(t *testing.T) {
 		t.Error("a restored complete index is not Done")
 	}
 }
+
+// TestDeclaredCountIsCheckedAgainstTheRun covers the comparison the walk
+// makes when the index latches: a metadata frame's count is a claim, and the
+// run is the measurement.
+//
+// Which side it lands on is the whole of it. A run that comes up short
+// promised audio its bytes do not hold, so the length shrinks and that is
+// damage. A run that overruns holds everything the tag named and more, and a
+// run one frame short of a count on an otherwise clean end is an encoder
+// counting its own metadata frame; both are Notes, and both settle the same
+// way.
+func TestDeclaredCountIsCheckedAgainstTheRun(t *testing.T) {
+	const short = "the metadata frame declares 8 frames but the run holds 5"
+	for _, tc := range []struct {
+		name string
+		data []byte
+		warn string
+		note string
+	}{
+		{"the run is whole", append(xingFrame(5, false, 0, 0), frames(5)...), "", ""},
+		{"the run comes up short", append(xingFrame(8, false, 0, 0), frames(5)...), short, ""},
+		{
+			"one frame short on a clean end",
+			append(xingFrame(6, false, 0, 0), frames(5)...),
+			"", "the metadata frame declares 6 frames but the run holds 5",
+		},
+		{
+			"the run overruns the count",
+			append(xingFrame(5, false, 0, 0), frames(8)...),
+			"", "the run holds 3 frames past the 5 the metadata frame declares",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var o walkOpts
+			w, _, _ := begin(t, tc.data, &o)
+			if err := w.Complete(); err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			if got := joined(o.msgs); got != tc.warn {
+				t.Errorf("warnings = %q, want %q", got, tc.warn)
+			}
+			if got := joined(o.notes); got != tc.note {
+				t.Errorf("notes = %q, want %q", got, tc.note)
+			}
+			// The finding names where the frames the tag promised would have
+			// continued from, which is the end of the run.
+			if tc.warn != "" && o.offs[0] != int64(len(tc.data)) {
+				t.Errorf("reported at %d, want the end of the run (%d)", o.offs[0], len(tc.data))
+			}
+		})
+	}
+}
+
+// TestAShortfallIsFoundOnTheReadPathToo is why the comparison lives in the
+// walker rather than in each owner's Walk: a file cut exactly on a frame
+// boundary leaves nothing for a read to notice, so a read and a walk of it
+// would otherwise disagree about whether it is damaged.
+func TestAShortfallIsFoundOnTheReadPathToo(t *testing.T) {
+	data := append(xingFrame(8, false, 0, 0), frames(5)...)
+	var o walkOpts
+	w, _, _ := begin(t, data, &o)
+	if got := collect(t, w); len(got) != 5 {
+		t.Fatalf("read %d frames, want 5", len(got))
+	}
+	if got := joined(o.msgs); got == "" {
+		t.Error("a read to the end of a short run said nothing")
+	}
+
+	// And a strict owner refuses on the read, where it refuses on the walk.
+	strict := walkOpts{fail: errors.New("strict")}
+	w2, _, _ := begin(t, data, &strict)
+	var err error
+	for n := int64(0); err == nil; n++ {
+		_, err = w2.Frame(n)
+	}
+	if !errors.Is(err, strict.fail) {
+		t.Errorf("a strict read to the end = %v, want the refusal", err)
+	}
+}
+
+// TestImpossibleDeclaredCountIsIgnored bounds the tag the way riff bounds its
+// fact chunk: the smallest compliant frame puts a ceiling on the run at O(1),
+// and a count above it is one the payload cannot be describing. Clearing it
+// takes the trims with it, since a length and its trims are adopted together
+// or not at all.
+func TestImpossibleDeclaredCountIsIgnored(t *testing.T) {
+	var o walkOpts
+	data := append(xingFrame(1<<20, true, 576, 1000), frames(3)...)
+	w, tag, has := begin(t, data, &o)
+	if !has {
+		t.Fatal("the Xing frame was not recognized")
+	}
+	if tag.Frames != 0 {
+		t.Errorf("tag frames = %d, want it cleared", tag.Frames)
+	}
+	if samples, delay, padding := tag.Gapless(frameSPF); samples != -1 || delay != 0 || padding != 0 {
+		t.Errorf("gapless = %d/%d/%d, want the trims to go with the count", samples, delay, padding)
+	}
+	want := fmt.Sprintf("the metadata frame declares %d frames, more than %d bytes can hold; ignored",
+		1<<20, int64(len(data))-frameLen)
+	if got := joined(o.msgs); got != want {
+		t.Errorf("findings = %q, want %q", got, want)
+	}
+	// An ignored count is not compared against anything.
+	if err := w.Complete(); err != nil {
+		t.Fatal(err)
+	}
+	if len(o.msgs) != 1 || len(o.notes) != 0 {
+		t.Errorf("after the walk: warnings %v, notes %v", o.msgs, o.notes)
+	}
+}
+
+// TestRestoredIndexSettlesTheCount closes the one path that finishes an index
+// without walking to its end. The sidecar says where every frame is, so the
+// run's count is known the moment the blob is adopted and the comparison runs
+// there; a strict owner that refuses it declines the blob instead, and the
+// rebuilt walk reports at its own end, where it can also say what the run
+// holds.
+func TestRestoredIndexSettlesTheCount(t *testing.T) {
+	const n = IdxMinFrames + 50
+	data := append(xingFrame(n+9, false, 0, 0), frames(n)...)
+	build, _, _ := begin(t, data, &walkOpts{})
+	if err := build.Complete(); err != nil {
+		t.Fatal(err)
+	}
+	blob := build.Snapshot()
+	if blob == nil {
+		t.Fatal("no snapshot after a full walk")
+	}
+
+	var o walkOpts
+	w, _, _ := begin(t, data, &o)
+	if !w.Restore(blob) {
+		t.Fatal("a tolerant owner declined its own blob")
+	}
+	want := fmt.Sprintf("the metadata frame declares %d frames but the run holds %d", n+9, n)
+	if got := joined(o.msgs); got != want {
+		t.Errorf("findings after Restore = %q, want %q", got, want)
+	}
+
+	strict := walkOpts{fail: errors.New("strict")}
+	sw, _, _ := begin(t, data, &strict)
+	if sw.Restore(blob) {
+		t.Fatal("a strict owner adopted a blob whose count it refuses")
+	}
+	if sw.Done() || sw.Frames() > 1 {
+		t.Errorf("the declined blob left the walker at done=%v frames=%d", sw.Done(), sw.Frames())
+	}
+	strict.msgs = nil
+	if err := sw.Complete(); !errors.Is(err, strict.fail) {
+		t.Errorf("the rebuilt walk = %v, want the refusal at its own end", err)
+	}
+	if got := joined(strict.msgs); got != want {
+		t.Errorf("the rebuilt walk reported %q, want %q", got, want)
+	}
+}
+
+// TestADamagedRunIsNeverSnapshottedComplete is what keeps a sidecar from
+// changing a verdict. The blob carries the index and the completeness flag
+// and nothing about how the run ended, so a restore that adopted a complete
+// index over a damaged run would compare the declared count with the damage
+// forgotten: a one-frame shortfall would come back a Note where the cold walk
+// called it damage, and strict would pass on the warm open and fail on the
+// cold one.
+func TestADamagedRunIsNeverSnapshottedComplete(t *testing.T) {
+	const n = IdxMinFrames + 50
+	// n frames behind a tag that counts one more, with junk after them: a
+	// one-frame shortfall whose end is damaged, which is the pair the
+	// tolerance turns on. Trailing junk rather than a truncated final frame,
+	// because Restore's own trust-but-verify already catches that one (a half
+	// frame still parses a kin header, so the blob's completeness is refused
+	// on the spot); junk does not parse, so the flag would stand.
+	data := append(xingFrame(n+1, false, 0, 0), frames(n)...)
+	data = append(data, bytes.Repeat([]byte{0x11}, 64)...)
+
+	var cold walkOpts
+	w, _, _ := begin(t, data, &cold)
+	if err := w.Complete(); err != nil {
+		t.Fatal(err)
+	}
+	if !w.Done() {
+		t.Fatal("the walk did not reach the end")
+	}
+	if len(cold.notes) != 0 || len(cold.msgs) != 2 {
+		t.Fatalf("cold walk: warnings %v, notes %v; want the trailing bytes and the shortfall as damage",
+			cold.msgs, cold.notes)
+	}
+	blob := w.Snapshot()
+	if blob == nil {
+		t.Fatal("no snapshot after a full walk")
+	}
+
+	var warm walkOpts
+	w2, _, _ := begin(t, data, &warm)
+	if !w2.Restore(blob) {
+		t.Fatal("the blob was rejected by its own source")
+	}
+	if w2.Done() {
+		t.Error("a run that ended on damage was restored as complete")
+	}
+	if err := w2.Complete(); err != nil {
+		t.Fatal(err)
+	}
+	if len(warm.notes) != len(cold.notes) || len(warm.msgs) != len(cold.msgs) {
+		t.Errorf("warm walk: warnings %v, notes %v; want the cold walk's %v / %v",
+			warm.msgs, warm.notes, cold.msgs, cold.notes)
+	}
+}
+
+// joined renders a finding list for comparison; every case here expects at
+// most one, and an unexpected second must not read as a pass.
+func joined(msgs []string) string { return strings.Join(msgs, " | ") }

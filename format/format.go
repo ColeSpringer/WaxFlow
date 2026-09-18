@@ -21,12 +21,21 @@ import (
 // Options configures probing and opening.
 type Options struct {
 	// Strict turns tolerated input damage into errors (conformance tests,
-	// `waxflow probe --strict`). A strict Probe also finishes the payload
-	// walk a demuxer defers (container.Walker: the MP3 frame index, bare or
-	// in a WAV or AIFF-C; the ADTS frame index; a Matroska cluster walk
-	// behind an advisory length), so its verdict covers the whole file at
-	// the cost of reading it. Playback paths stay tolerant, and Open never
-	// walks: a read finds damage where it lies.
+	// `waxflow probe --strict`).
+	//
+	// It also decides how much of a file is read. A tolerant Probe reads
+	// headers, on every format: the payload walks a demuxer defers stay
+	// deferred (container.Walker: the MP3 frame index, bare or in a WAV or
+	// AIFF-C; the ADTS frame index; a Matroska cluster walk), and so does the
+	// one a Matroska Opus or Vorbis track would otherwise run inside its own
+	// constructor, which is the only open in the tree that reads a payload.
+	// A strict Probe finishes all of them, so its verdict covers the whole
+	// file at the cost of reading it.
+	//
+	// Open and OpenDemuxer keep that constructor walk whatever Strict says:
+	// the tail trim is folded into the exact total and format.Media needs it
+	// before the first read. Neither ever calls Walk, so damage past the head
+	// of a deferred payload is found by the read that reaches it.
 	Strict bool
 }
 
@@ -92,7 +101,8 @@ func (i *Info) Default() container.Track {
 // that reads, because a demuxer whose walk is lazy finds damage where the
 // read reaches it. A caller that wants the whole verdict reads or seeks to
 // the end first and asks again; Tracks, Chapters and Tags are what opening
-// found. Probe's Info is a detached snapshot, complete under Strict.
+// found, until Walk settles the default track's length to what the payload
+// actually holds. Probe's Info is a detached snapshot, complete under Strict.
 type Media interface {
 	Info() *Info
 	ReadChunk(dst *audio.Buffer) error
@@ -111,6 +121,9 @@ type Media interface {
 // and an MP3 whose sidecar index restored complete walks for nothing. A
 // concatenated timeline and a slice do not implement it: a consumer opens
 // the member files one at a time.
+// A finished walk has measured the payload, and the Media's own Info carries
+// that measurement from then on: the walk is observable on the Media that ran
+// it, without a reopen.
 type Walker interface {
 	Walk() error
 	Walked() bool
@@ -153,13 +166,15 @@ func Probe(src container.Source, hint string, opts *Options) (*Info, error) {
 	if err != nil {
 		return nil, err
 	}
-	demux, err := d.open(src, opts)
+	strict := opts != nil && opts.Strict
+	demux, err := d.open(src, openOptions{strict: strict, probe: true})
 	if err != nil {
 		return nil, err
 	}
 	// A strict verdict covers the whole file: the walk a demuxer defers is
-	// finished before the snapshot is taken, so what it found is in it.
-	if opts != nil && opts.Strict {
+	// finished before the snapshot is taken, so what it found is in it. That
+	// includes the one a probe asked the driver to defer.
+	if strict {
 		if w, ok := demux.(container.Walker); ok {
 			if err := w.Walk(); err != nil {
 				return nil, err
@@ -179,7 +194,7 @@ func Open(src container.Source, hint string, opts *Options) (Media, error) {
 	if err != nil {
 		return nil, err
 	}
-	demux, err := d.open(src, opts)
+	demux, err := d.open(src, openOptions{strict: opts != nil && opts.Strict})
 	if err != nil {
 		return nil, err
 	}
@@ -202,7 +217,7 @@ func OpenDemuxer(src container.Source, hint string, opts *Options) (container.De
 	if err != nil {
 		return nil, nil, err
 	}
-	demux, err := d.open(src, opts)
+	demux, err := d.open(src, openOptions{strict: opts != nil && opts.Strict})
 	if err != nil {
 		return nil, nil, err
 	}

@@ -28,13 +28,21 @@ const (
 // AnalyzeOptions configures Engine.Analyze.
 type AnalyzeOptions struct {
 	// Channels, when non-zero, measures the loudness after mixing the
-	// source down to this channel count (1 or 2, matching a later
+	// source to this channel count (matching a later
 	// TranscodeOptions.Channels), so a two-pass gain is computed on the
-	// audio the encode will meter. 0 keeps the source layout. The fold is
+	// audio the encode will meter. 0 keeps the source layout. The mix is
 	// the same one the encode applies (dsp/mix), but with no limiter, gain,
-	// or dither: a measurement observes the raw fold, so TruePeakDB stays
+	// or dither: a measurement observes the raw mix, so TruePeakDB stays
 	// honest where the encode's overshoot limiter would flatten it. This is
 	// the substantive difference from TranscodeOptions.Channels.
+	//
+	// A widening that places changes nothing measurable: the source's
+	// positions land on their own at unity, the rest are silent, and channel
+	// powers sum under BS.1770, so the measurement is the source's own. One
+	// that duplicates does change it, and mono is the case: a lone channel
+	// copied across a target's front pair (stereo, quad) measures
+	// +10*log10(2), where the same channel placed on a target's center (3.0,
+	// 5.1, 7.1) does not.
 	Channels int
 	// Progress, when non-nil, is called after each decoded chunk with the
 	// samples measured so far and the projected total (-1 unknown). It
@@ -255,10 +263,9 @@ func (e *Engine) AnalyzeMedia(ctx context.Context, med format.Media, opts Analyz
 			return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 				fmt.Sprintf("analyze: no layout convention for %d -> %d channels", f.Channels, opts.Channels))
 		}
-		// mix.For next, before any buffer: a target with a valid mask but no
-		// downmix (3 or 6 channels, since only mono and stereo targets exist)
-		// rejects here with a clean error, whereas audio.Get below panics on
-		// an invalid format.
+		// mix.For next, before any buffer: a pair it cannot serve (a source
+		// position the target layout has no place for) rejects here with a
+		// clean error, whereas audio.Get below panics on an invalid format.
 		matrix, err = mix.For(srcLayout, dstLayout)
 		if err != nil {
 			return nil, err

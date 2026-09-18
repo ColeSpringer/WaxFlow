@@ -5,11 +5,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // TestStrictOpenSurvivesUndecodableFirstFrame pins that the SBR probe
@@ -188,5 +190,81 @@ func TestTruncatedTailDropped(t *testing.T) {
 	}
 	if errors.Is(serr, io.EOF) {
 		t.Error("strict mode tolerated a truncated tail")
+	}
+
+	// The walk publishes what a read delivers. It used to index the
+	// truncated frame and report it exact, so a strict probe passed a file
+	// a strict read failed.
+	dw, err := NewDemuxer(container.BytesSource(trunc), nil)
+	if err != nil {
+		t.Fatalf("NewDemuxer(walk): %v", err)
+	}
+	if err := dw.Walk(); err != nil {
+		t.Fatalf("tolerant Walk on a truncated tail: %v", err)
+	}
+	tr := dw.Tracks()[0]
+	if want := int64(complete-1) * dw.spf; tr.Samples != want || !tr.SamplesExact {
+		t.Errorf("walked length = %d (exact %v), want %d exact", tr.Samples, tr.SamplesExact, want)
+	}
+	if tr.Samples != int64(got)*dw.spf {
+		t.Errorf("walk counted %d samples, a read delivered %d", tr.Samples, int64(got)*dw.spf)
+	}
+	if !slices.ContainsFunc(dw.Warnings(), func(w container.Warning) bool {
+		return w.Msg == "truncated final frame dropped"
+	}) {
+		t.Errorf("warnings after Walk = %v, want the dropped tail", dw.Warnings())
+	}
+
+	sw, err := NewDemuxer(container.BytesSource(trunc), &DemuxerOptions{Strict: true})
+	if err != nil {
+		t.Fatalf("NewDemuxer(strict walk): %v", err)
+	}
+	if err := sw.Walk(); !errors.Is(err, waxerr.ErrMalformedInput) {
+		t.Errorf("strict Walk = %v, want malformed", err)
+	}
+}
+
+// TestOnlyFrameTruncated is the same rule with nothing left over: a stream
+// cut off inside its one and only frame indexes nothing, so the walk
+// measures zero rather than publishing a frame no read can deliver.
+func TestOnlyFrameTruncated(t *testing.T) {
+	full := fixture(t, "stereo.aac")
+	probe, err := NewDemuxer(container.BytesSource(full), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := probe.firstFrame
+	h, ok := parseHeader(probe.w.BytesAt(first, 9))
+	if !ok || h.frameLen < 16 {
+		t.Skip("fixture's first frame is not usable here")
+	}
+	trunc := full[:first+int64(h.frameLen)-5]
+
+	d, err := NewDemuxer(container.BytesSource(trunc), nil)
+	if err != nil {
+		t.Fatalf("NewDemuxer(truncated): %v", err)
+	}
+	if len(d.idx) != 0 {
+		t.Errorf("index holds %d entries, want none: the only frame does not fit", len(d.idx))
+	}
+	want := container.Warning{Offset: first, Msg: "the only frame is truncated, dropped", Kind: container.Damage}
+	if !slices.Contains(d.Warnings(), want) {
+		t.Errorf("warnings = %v, want %v", d.Warnings(), want)
+	}
+	if err := d.Walk(); err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	if tr := d.Tracks()[0]; tr.Samples != 0 || !tr.SamplesExact {
+		t.Errorf("walked length = %d (exact %v), want 0 exact", tr.Samples, tr.SamplesExact)
+	}
+	var pkt container.Packet
+	if err := d.ReadPacket(&pkt); !errors.Is(err, io.EOF) {
+		t.Errorf("ReadPacket = %v, want EOF", err)
+	}
+	if landed, err := d.SeekSample(0, 1<<20); err != nil || landed != 0 {
+		t.Errorf("SeekSample = %d, %v; want 0, nil", landed, err)
+	}
+	if _, err := NewDemuxer(container.BytesSource(trunc), &DemuxerOptions{Strict: true}); !errors.Is(err, waxerr.ErrMalformedInput) {
+		t.Errorf("strict open = %v, want malformed", err)
 	}
 }

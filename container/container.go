@@ -154,7 +154,7 @@ type Track struct {
 	// is byte-linear: their totals are counted, not estimated, and a total
 	// that disagrees with the stream is damage rather than imprecision.
 	//
-	// Three shapes reach it, for two different reasons. Two containers state a
+	// Four shapes reach it, for three different reasons. Two containers state a
 	// duration in a time unit and have no sample count at all: ASF, in
 	// 100-nanosecond ticks its own muxer accumulates from
 	// millisecond-truncated packet times, and Matroska when it falls back to
@@ -170,10 +170,18 @@ type Track struct {
 	// number is not rounded and it is not the track's length either, which is
 	// the same practical answer: display it, do not sum it.
 	//
-	// Two things read it. A timeline refuses such a member, since a prefix sum
-	// cannot survive the drift; measure it first (see ConcatSource.Track). And
+	// The fourth is the second shape met by a caller that declined to pay for
+	// the walk: a Matroska Opus or Vorbis track probed tolerantly, whose exact
+	// total is a cluster walk away (see mka's DeferWalk). A file with no Info
+	// Duration to fall back on reports -1 with neither flag rather than an
+	// estimate it does not have.
+	//
+	// Three things read it. A timeline refuses such a member, since a prefix
+	// sum cannot survive the drift; measure it first (see ConcatSource.Track).
 	// format.Media will not cap a decode at a rounded total, which it would
-	// otherwise do for a track that also signals a gapless trim.
+	// otherwise do for a track that also signals a gapless trim. And a
+	// transcode projects no length into its muxer's headers from one, since a
+	// projection the encoder then misses is a write failure.
 	SamplesAdvisory bool
 	// SourceBitDepth is the depth the source stores samples at when that
 	// differs from Fmt.BitDepth, 0 when the two agree. Two cases reach it.
@@ -316,6 +324,16 @@ type Warner interface {
 // carries both. A demuxer that confirms everything at open does not
 // implement it, and Open never calls Walk: a read finds damage where it
 // lies. Walk leaves the packet position where it was.
+//
+// "Open never calls Walk" is about this interface, not about reading nothing:
+// a Matroska Opus or Vorbis track confirms its gapless total by walking the
+// clusters inside its own constructor, because format.Media needs the total
+// before the first read. Its DeferWalk leaves that to Walk for a caller that
+// only wants headers.
+//
+// A Walk after a complete restore costs nothing and still settles: the
+// sidecar's index already reaches the end, so the walk has nothing to do and
+// only the measurement it implies is applied.
 type Walker interface {
 	Walk() error
 	Walked() bool

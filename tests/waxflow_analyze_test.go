@@ -517,18 +517,66 @@ func TestAnalyzeChannelsNoopAndValidation(t *testing.T) {
 		t.Errorf("Channels == source count changed the measurement:\n same: %+v\n bare: %+v", *same, *bare)
 	}
 
+	// Placement is measurement-neutral, which is the whole reason it is unity
+	// and zero-filled: channel powers sum under BS.1770, so the source's own
+	// channels carry the same weight in a 5.1 envelope as they do alone and
+	// the silent ones add nothing.
+	wide, err := analyze(stereo, waxflow.AnalyzeOptions{Channels: 6})
+	if err != nil {
+		t.Fatal(err)
+	}
+	widened := *wide
+	widened.Format = bare.Format // the envelope is the one thing that did change
+	if widened != *bare {
+		t.Errorf("widening to 5.1 changed the measurement:\n wide: %+v\n bare: %+v", *wide, *bare)
+	}
+
+	// Duplication is not neutral, and the docs must not say otherwise: a lone
+	// channel lands on a 5.1 target's center and is copied across a quad
+	// target's front pair, which is the +10*log10(2) that
+	// TestAnalyzeChannelsMonoToStereoAnalytic already pins for stereo.
+	mono := floatWAVSource(t, analyzeChRate, multiSine(analyzeChRate, analyzeChFrames,
+		[]float64{0.25}, []float64{440}))
+	monoBare, err := analyze(mono, waxflow.AnalyzeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const dupShift = 3.0102999566398120 // 10*log10(2)
+	for _, tc := range []struct {
+		name  string
+		ch    int
+		shift float64
+	}{
+		{"placed on the center", 6, 0},
+		{"copied across the front pair", 4, dupShift},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := analyze(mono, waxflow.AnalyzeOptions{Channels: tc.ch})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := got.IntegratedLUFS - monoBare.IntegratedLUFS; math.Abs(d-tc.shift) > 1e-3 {
+				t.Errorf("mono into %d channels shifted integrated by %.6f LU, want %.6f",
+					tc.ch, d, tc.shift)
+			}
+		})
+	}
+
 	// The rejection code distinguishes a malformed count from a valid-but-
 	// unreachable target, and matches what the encode's chain returns for the
 	// same TranscodeOptions.Channels, so a two-pass job that hands the same
 	// bad value to both passes reports it the same way from either.
 	for _, tc := range []struct {
+		src  []byte
 		ch   int
 		code waxerr.Code
 	}{
-		{6, waxerr.CodeUnsupportedFormat}, // a valid 5.1 mask, but no downmix targets it
-		{-1, waxerr.CodeInvalidRequest},   // a negative count is malformed, not unsupported
+		// A valid 6.1 mask, but its rear is a center plus a side pair and
+		// 5.1's is a back pair, so there is nowhere to put BL/BR.
+		{fivePointOneFixture(t), 7, waxerr.CodeUnsupportedFormat},
+		{stereo, -1, waxerr.CodeInvalidRequest}, // malformed, not unsupported
 	} {
-		res, err := analyze(stereo, waxflow.AnalyzeOptions{Channels: tc.ch})
+		res, err := analyze(tc.src, waxflow.AnalyzeOptions{Channels: tc.ch})
 		if err == nil {
 			t.Errorf("Channels %d returned no error for an unreachable fold", tc.ch)
 			continue

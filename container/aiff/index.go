@@ -35,8 +35,8 @@ func (d *Demuxer) RestoreIndex(blob []byte) bool {
 
 // Walk implements container.Walker for a frame-walked payload: the lazy
 // index is finished, so damage past the head reaches Warnings, or under
-// Strict the error, and a track whose length was unknown or advisory
-// reports the walk's count exact. A byte-linear or block payload has
+// Strict the error, and the track reports the walk's count exact, which is
+// the length a read of it delivers. A byte-linear or block payload has
 // nothing to walk and answers nil.
 func (d *Demuxer) Walk() error {
 	r, ok := d.payload.(*mpegframes.Reader)
@@ -46,10 +46,7 @@ func (d *Demuxer) Walk() error {
 	if err := r.Walk(); err != nil {
 		return err
 	}
-	if n := r.Measured(); n >= 0 && (d.track.Samples < 0 || d.track.SamplesAdvisory) {
-		d.track.Samples, d.track.SamplesExact, d.track.SamplesAdvisory = n, true, false
-	}
-	return nil
+	return r.SettleLength(&d.track)
 }
 
 // Walked implements container.Walker: true for a payload with nothing to

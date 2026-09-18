@@ -82,6 +82,16 @@ func (s *Server) prepareSource(ctx context.Context, q url.Values, sigAuthed bool
 		return nil, err
 	}
 	track := info.Default()
+	// A tolerant probe estimates where a Matroska Opus or Vorbis file's exact
+	// total is a cluster walk away, and everything below plans from this
+	// track: plan.Samples is what X-Content-Duration advertises, and the body
+	// comes from an opened Media, which does walk. Advertising the estimate
+	// beside audio measured a different way is the drift this closes, and it
+	// pays the same one walk the probe used to.
+	if track, err = s.settledAtOpen(src, track); err != nil {
+		src.Close()
+		return nil, err
+	}
 	if p.track >= 0 && p.track != track.ID {
 		src.Close()
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,

@@ -232,6 +232,55 @@ func TestMP3XingLeadPayloadTakesItsTrims(t *testing.T) {
 	}
 }
 
+// TestMP3XingCountIsSettledByTheWalk: the same wrapped run cut inside its
+// final frame. The Xing count is a claim, so the walk that confirms it here
+// shrinks it where the payload cannot fill it, and the settled length is what
+// a read of the chunk delivers.
+func TestMP3XingCountIsSettledByTheWalk(t *testing.T) {
+	frames := mp3Payload(t)
+	payload := append(xingFrame(t, frames, wavMP3Frames, 576, 990), frames...)
+	raw := wavHeader(tagMP3, 1, 22050, wavMP3SPF, 0, mp3Extra(wavMP3CodecDelay), payload[:len(payload)-100], -1)
+
+	d, err := NewDemuxer(container.BytesSource(raw), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Walk(); err != nil {
+		t.Fatalf("tolerant Walk: %v", err)
+	}
+	tr := d.Tracks()[0]
+	if !tr.SamplesExact || tr.Samples >= 22050 {
+		t.Errorf("settled to %d (exact %v), want less than the declared 22050, exact", tr.Samples, tr.SamplesExact)
+	}
+	var damage int
+	for _, w := range d.Warnings() {
+		if w.Kind == container.Damage {
+			damage++
+		}
+	}
+	if damage != 2 {
+		t.Errorf("damage findings = %v, want the dropped frame and the shortfall", d.Warnings())
+	}
+	// The measurement is what a read hands out: the front trim comes off the
+	// raw run and the declared length no longer caps it.
+	d2, err := NewDemuxer(container.BytesSource(raw), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, pts := walkMP3(t, d2)
+	if want := int64(len(pts))*wavMP3SPF - tr.Delay; tr.Samples != want {
+		t.Errorf("settled to %d, the %d packets a read delivers hold %d", tr.Samples, len(pts), want)
+	}
+
+	strict, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := strict.Walk(); !errors.Is(err, waxerr.ErrMalformedInput) {
+		t.Errorf("strict Walk = %v, want malformed", err)
+	}
+}
+
 // TestMP3UntaggedLengthIsUnknown: with no metadata frame and no fact chunk
 // nothing in the file counted the samples, and -1 says so rather than the
 // walk's own guess.

@@ -12,11 +12,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -103,6 +105,10 @@ func newTestEnv(t *testing.T, mutate func(*server.Config)) *testEnv {
 		// An MP3 damaged past its head: what a tolerant probe reports and a
 		// strict one refuses. See TestProbeStrictWalksAFrameRun.
 		{"../testdata/sine-untagged.mp3", "damaged.mp3"},
+		// A WebM Opus track, whose exact length is a cluster walk: what a
+		// tolerant probe declines to pay for. See TestProbeReportsHowExactItIs.
+		{"../container/mka/testdata/seed-opus.webm", "seed.webm"},
+		{"../testdata/sine-s16.wma", "sine.wma"},
 	} {
 		b, err := os.ReadFile(fixture.src)
 		if err != nil {
@@ -1204,6 +1210,55 @@ func TestProbeStrictWalksAFrameRun(t *testing.T) {
 	wantEnvelope(t, env.get(t, "/probe?src=lib/damaged.mp3&strict=1", nil), 422, waxerr.CodeMalformedInput)
 }
 
+// TestProbeReportsHowExactItIs pins the two flags on the wire. Without them a
+// client cannot tell a measured count from a rounded one, which is exactly
+// the distinction a tolerant probe of a WebM Opus file now makes: it reports
+// the Info Duration rather than walking every cluster for the exact total.
+func TestProbeReportsHowExactItIs(t *testing.T) {
+	type probedTrack struct {
+		Samples  int64 `json:"samples"`
+		Exact    bool  `json:"samplesExact"`
+		Advisory bool  `json:"samplesAdvisory"`
+	}
+	env := newTestEnv(t, nil)
+	get := func(path string) probedTrack {
+		t.Helper()
+		resp := env.get(t, path, nil)
+		if resp.StatusCode != 200 {
+			t.Fatalf("%s = %d (body: %s)", path, resp.StatusCode, readBody(t, resp))
+		}
+		var doc struct {
+			Tracks []probedTrack `json:"tracks"`
+		}
+		if err := json.Unmarshal(readBody(t, resp), &doc); err != nil {
+			t.Fatal(err)
+		}
+		if len(doc.Tracks) != 1 {
+			t.Fatalf("%s returned %d tracks, want 1", path, len(doc.Tracks))
+		}
+		return doc.Tracks[0]
+	}
+
+	tol := get("/probe?src=lib/seed.webm")
+	if !tol.Advisory || tol.Exact {
+		t.Errorf("tolerant WebM Opus probe: exact=%v advisory=%v, want advisory", tol.Exact, tol.Advisory)
+	}
+	strict := get("/probe?src=lib/seed.webm&strict=1")
+	if !strict.Exact || strict.Advisory {
+		t.Errorf("strict WebM Opus probe: exact=%v advisory=%v, want exact", strict.Exact, strict.Advisory)
+	}
+	if strict.Samples == tol.Samples {
+		t.Logf("the fixture's Duration happens to round to its exact count (%d)", strict.Samples)
+	}
+
+	// A byte-linear WAV counts its own length rather than estimating it, so it
+	// says exact at open and neither flag ever has to change.
+	wav := get("/probe?src=lib/sine.wav")
+	if !wav.Exact || wav.Advisory {
+		t.Errorf("WAV probe: exact=%v advisory=%v, want exact", wav.Exact, wav.Advisory)
+	}
+}
+
 // TestStrictProbeTakesALiveSlot pins the admission side of the strict walk:
 // with the only live slot held, a strict probe answers 503 like a stream
 // would, while a tolerant probe of the same file, a header read, still
@@ -1854,5 +1909,37 @@ func TestProbeReportsNotesSeparately(t *testing.T) {
 		if strings.Contains(string(body), `"warnings"`) {
 			t.Errorf("probe%s body carries a warnings key: %s", q, body)
 		}
+	}
+}
+
+// TestStreamDurationIsWhatTheBodyHolds pins the other half of settling at
+// open. A non-span /stream plans from a tolerant probe, which for a Matroska
+// Opus source estimates the total, while the body is produced from an opened
+// Media, which walks and measures it. Advertising the estimate beside audio
+// measured a different way gives a player a seek bar longer than the stream.
+func TestStreamDurationIsWhatTheBodyHolds(t *testing.T) {
+	env := newTestEnv(t, nil)
+	resp := env.get(t, "/stream?src=lib/seed.webm&format=wav", nil)
+	body := readBody(t, resp)
+	if resp.StatusCode != 200 {
+		t.Fatalf("/stream = %d: %s", resp.StatusCode, body)
+	}
+	got := resp.Header.Get("X-Content-Duration")
+	if got == "" {
+		t.Fatal("no X-Content-Duration")
+	}
+	advertised, err := strconv.ParseFloat(got, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The body is the oracle: a WAV of the same stream states its own length.
+	info, err := format.Probe(container.BytesSource(body), "wav", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back := info.Default()
+	held := float64(back.Samples) / float64(back.Fmt.Rate)
+	if math.Abs(advertised-held) > 0.002 {
+		t.Errorf("advertised %.3fs, the body holds %.3fs", advertised, held)
 	}
 }

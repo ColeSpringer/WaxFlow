@@ -148,6 +148,12 @@ type ProbeTrack struct {
 	Samples         int64   `json:"samples"`
 	DurationSeconds float64 `json:"durationSeconds"`
 	Default         bool    `json:"default"`
+	// SamplesExact and SamplesAdvisory qualify Samples, and neither set
+	// means the headers' count taken at its word. SamplesExact is a measured
+	// length; SamplesAdvisory is a total fit for display and not for
+	// arithmetic that has to add up (see the server's ProbeTrack).
+	SamplesExact    bool `json:"samplesExact,omitempty"`
+	SamplesAdvisory bool `json:"samplesAdvisory,omitempty"`
 }
 
 // Caps is the GET /caps body: this daemon's tested capabilities.

@@ -87,6 +87,18 @@ type ProbeTrack struct {
 	Samples         int64   `json:"samples"`
 	DurationSeconds float64 `json:"durationSeconds"`
 	Default         bool    `json:"default"`
+	// SamplesExact and SamplesAdvisory qualify Samples, and neither set
+	// means the headers' count taken at its word: a number the file states
+	// and this build has not checked. SamplesExact is a measured length, fit
+	// for arithmetic that has to add up. SamplesAdvisory is a total stated in
+	// a time unit or counted from the wrong thing (ASF's 100-nanosecond
+	// ticks, a Matroska Info Duration, a WAV fact chunk over MP3 frames), fit
+	// for a duration to display and nothing else. A tolerant probe of a
+	// Matroska Opus or Vorbis file reports one where a strict probe walks the
+	// clusters and reports an exact count, and reports neither flag beside a
+	// samples of -1 when the file states no Info Duration to estimate from.
+	SamplesExact    bool `json:"samplesExact,omitempty"`
+	SamplesAdvisory bool `json:"samplesAdvisory,omitempty"`
 }
 
 // ProbeMetadata is the optional metadata summary a probe response
@@ -171,6 +183,8 @@ func ProbeJSON(info *format.Info, m *ProbeMetadata) ProbeInfo {
 			Samples:         t.Samples,
 			DurationSeconds: DurationSeconds(t.Samples, t.Fmt.Rate),
 			Default:         t.Default,
+			SamplesExact:    t.SamplesExact,
+			SamplesAdvisory: t.SamplesAdvisory,
 		})
 	}
 	return out
