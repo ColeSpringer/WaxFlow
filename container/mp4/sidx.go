@@ -20,7 +20,7 @@ const maxSidxBytes = 4 << 20
 // index and far short of the int64 ceiling, so coverageEnd's three-term sum
 // cannot overflow whatever a crafted box declares; a sum that reaches it is
 // damage, which the coverage rule then reports as such.
-const sidxSumCap = 1 << 60
+const sidxSumCap = int64(1) << 60
 
 // sidxInfo is one parsed segment index, reduced to what a length resolver
 // needs: which track it describes, the time base its durations are in, the
@@ -76,7 +76,7 @@ func parseSidx(payload []byte) (sidxInfo, error) {
 			return sidxInfo{}, malformed("sidx truncated")
 		}
 		off := be64(rest[8:])
-		if off > sidxSumCap {
+		if off > uint64(sidxSumCap) {
 			return sidxInfo{}, malformed("sidx first_offset %d", off)
 		}
 		s.firstOffset = int64(off)
@@ -106,7 +106,7 @@ func parseSidx(payload []byte) (sidxInfo, error) {
 // addSat adds two non-negative int64s, saturating rather than wrapping.
 func addSat(a, b int64) int64 {
 	sum, carry := bits.Add64(uint64(a), uint64(b), 0)
-	if carry != 0 || sum > sidxSumCap {
+	if carry != 0 || sum > uint64(sidxSumCap) {
 		return sidxSumCap
 	}
 	return int64(sum)
