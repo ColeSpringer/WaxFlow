@@ -270,6 +270,17 @@ func (e *Engine) PlanSegmentsTimeline(tracks []container.Track, copts ConcatOpti
 	if err != nil {
 		return nil, err
 	}
+	// The plan-time half of the width rule, on the count the row actually
+	// delivers rather than the one asked for. A run of this plan would refuse,
+	// so the plan does, and here it can name the remedy while the caller still
+	// has the tracks in hand.
+	if mixedWidthConversion(tracks, env.Fmt, plan.Format.Channels) {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+			"waxflow: this timeline's members were conformed to %d channels from other widths, so delivering it "+
+				"as %d channels is not any member's own conversion; build the timeline at the delivered width "+
+				"instead: ConcatOptions.Channels, see Engine.TimelineChannels",
+			env.Fmt.Channels, plan.Format.Channels))
+	}
 	extra, err := timelineVersions(tracks, env.Fmt, copts)
 	if err != nil {
 		return nil, err
@@ -319,6 +330,14 @@ func timelineVersions(tracks []container.Track, env audio.Format, copts ConcatOp
 	if copts.Crossfade != 0 {
 		add(crossfadeVersion(copts.Crossfade))
 	}
+	// Same rule, same reason: emitted only when nonzero, so every entry
+	// written for a queue that never set a width stays valid, and an entry
+	// appears exactly where the audio changed. Engine.TimelineChannels answers
+	// 0 for a queue with no per-member conversion to do, so adopting it does
+	// not retire a uniform album's cache.
+	if copts.Channels != 0 {
+		add(timelineWidthVersion(copts.Channels))
+	}
 	normalized := map[audio.Format]bool{}
 	for i, t := range tracks {
 		add(decodeVersion(t.Codec))
@@ -352,6 +371,14 @@ func timelineVersions(tracks []container.Track, env audio.Format, copts ConcatOp
 // revision would serve one caller's segments to the other. No comma, so
 // strings.Join(versions, ",") stays unambiguous.
 func crossfadeVersion(x int64) string { return fmt.Sprintf("xfade-%d-1", x) }
+
+// timelineWidthVersion is a width-pinned timeline's cache entry, in
+// crossfadeVersion's shape and for the same reason: two timelines over the
+// same members at different widths are different audio out of the same code,
+// because each member is folded or placed to that width before the seam. It
+// also retires every cached render that carried the fold-after-widening level
+// error. No comma, so strings.Join(versions, ",") stays unambiguous.
+func timelineWidthVersion(ch int) string { return fmt.Sprintf("tlwidth-%d-1", ch) }
 
 // primeStarts computes a run's two priming starts on the output timeline:
 // pChain is the first sample fed to the DSP chain, pEnc the first fed to the
@@ -595,6 +622,9 @@ func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, o
 	if row.adjust != nil {
 		row.adjust(&spec, srcTrack.Fmt, opts)
 	}
+	if err := refuseMixedWidthConversion(med, srcTrack.Fmt, spec.Channels); err != nil {
+		return nil, err
+	}
 	// A run meters its output, exactly as TranscodeMedia does.
 	spec.MeterTruePeak = true
 	frame := spec.FrameSize
@@ -626,6 +656,7 @@ func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, o
 	// nothing at all until this call, which made the claim that /stream and
 	// HLS behave alike true of the audio and false of the log.
 	e.logImplicitDownmix(opts, srcTrack.Fmt, f)
+	e.logTimelineDownmix(opts, med, srcTrack.Fmt)
 
 	// Output-timeline positions: p0 is the first kept sample, pChain the
 	// first fed to the chain, pEnc the first fed to the encoder.

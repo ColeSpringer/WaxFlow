@@ -132,6 +132,9 @@ func (m *indexSavingMedia) Walk() error { return format.WalkMedia(m.Media) }
 
 func (m *indexSavingMedia) Walked() bool { return format.MediaWalked(m.Media) }
 
+// MixedWidth forwards format.MixedWidth, for the same reason.
+func (m *indexSavingMedia) MixedWidth() bool { return format.MediaMixedWidth(m.Media) }
+
 // TranscodeResult reports what Transcode produced.
 type TranscodeResult struct {
 	// Samples is the number of frames written.
@@ -233,6 +236,18 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 	if err != nil {
 		return nil, err
 	}
+	// The chain spec is built here rather than below the seek so the width
+	// guard can read the count the row actually delivers and still refuse
+	// before anything reads the source, which is the rule the two checks above
+	// keep. A confirm walk moves only the length fields (format.media.Walk), so
+	// the spec this produces is the spec the refreshed track would.
+	spec := specFor(opts)
+	if row.adjust != nil {
+		row.adjust(&spec, srcTrack.Fmt, opts)
+	}
+	if err := refuseMixedWidthConversion(med, srcTrack.Fmt, spec.Channels); err != nil {
+		return nil, err
+	}
 	var landed int64
 	if opts.FromSample > 0 {
 		if landed, err = med.SeekSample(opts.FromSample); err != nil {
@@ -255,10 +270,6 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 	if srcSamples >= 0 {
 		srcSamples = max(0, srcSamples-landed)
 	}
-	spec := specFor(opts)
-	if row.adjust != nil {
-		row.adjust(&spec, srcTrack.Fmt, opts)
-	}
 	// A run meters its output; specFor leaves this off so the plan's
 	// throwaway chains and Analyze (which runs its own meter) do not.
 	spec.MeterTruePeak = true
@@ -270,6 +281,7 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 
 	f := chain.Format()
 	e.logImplicitDownmix(opts, srcTrack.Fmt, f)
+	e.logTimelineDownmix(opts, med, srcTrack.Fmt)
 	enc, err := row.encode(f, opts)
 	if err != nil {
 		return nil, err
@@ -298,7 +310,8 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 	// walk is not free. A job's output file is seekable and pays nothing here.
 	// A live pipeline's cache entry is not: it is an append-only ring with no
 	// Seek, so every cold /stream and /transcode of a source with a declared
-	// count and a deferred walk (a Xing-tagged MP3, an ADTS stream) builds the
+	// count and a deferred walk (a Xing-tagged MP3, an ADTS stream, a
+	// fragmented MP4 whose segment index states a length) builds the
 	// frame index before the first encoded byte. That is a full pass of header
 	// hops, and the index sidecar makes repeats of the same source free.
 	//
@@ -1664,6 +1677,35 @@ func (e *Engine) logImplicitDownmix(opts TranscodeOptions, src, out audio.Format
 	if opts.Channels == 0 && out.Channels < src.Channels {
 		e.log.Warn("downmixed to fit the output format",
 			"format", opts.Format, "source", src.Channels, "out", out.Channels)
+	}
+}
+
+// logTimelineDownmix is the same announcement for a fold that happened upstream
+// of the chain. A timeline built at the width it delivers (ConcatOptions.
+// Channels) folds each member before the seam, so by the time the run's chain
+// sees the envelope there is nothing left to fold and logImplicitDownmix has
+// nothing to say — but a 5.1 master was still quietly halved, and the operator
+// should not need a flag to find out.
+//
+// It reads the members rather than the option, so it fires exactly when audio
+// was discarded. It lives on the run side and not in Engine.TimelineChannels,
+// which answers the width: that is a planning call on the HLS request path, and
+// a Warn there is one line per master fetch rather than one per encode.
+func (e *Engine) logTimelineDownmix(opts TranscodeOptions, med format.Media, in audio.Format) {
+	if opts.Channels != 0 {
+		return
+	}
+	c, ok := med.(format.Composite)
+	if !ok {
+		return
+	}
+	widest := in.Channels
+	for _, t := range c.Members() {
+		widest = max(widest, t.Fmt.Channels)
+	}
+	if widest > in.Channels {
+		e.log.Warn("downmixed to fit the output format",
+			"format", opts.Format, "source", widest, "out", in.Channels)
 	}
 }
 

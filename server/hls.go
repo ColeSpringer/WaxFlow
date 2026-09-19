@@ -406,12 +406,13 @@ func hlsIdentity(desc hls.Descriptor, members []hlsSource) string {
 // WavPack whose open verified its declared total against the payload. That arm
 // is a fast path rather than a separate route, since Walk on a demuxer that
 // defers nothing is a no-op, and it is what lets a test pin zero reads after
-// the open. A demuxer with a deferred walk (MP3, ADTS, Matroska) measures by
-// finishing that walk, which reads headers and hops. A source that settles
-// neither way but names its positions exactly (mp4's sample table, Ogg-FLAC's
-// granules) is seeked past any possible end to find where the stream really
-// stops. Only a source whose positions are themselves rounded (ASF) is
-// decoded, since nothing cheaper is true; see countDecoded.
+// the open. A demuxer with a deferred walk (MP3, ADTS, Matroska, a fragmented
+// MP4) measures by finishing that walk, which reads headers and hops. A source
+// that settles neither way but names its positions exactly (a progressive
+// mp4's sample table, Ogg-FLAC's granules) is seeked past any possible end to
+// find where the stream really stops. Only a source whose positions are
+// themselves rounded (ASF) is decoded, since nothing cheaper is true; see
+// countDecoded.
 func (s *Server) measureSamples(src *source.File) (container.Track, error) {
 	med, err := s.eng.OpenStream(src, src.Ext)
 	if err != nil {
@@ -557,12 +558,13 @@ func (s *Server) planHLSVariant(desc hls.Descriptor, tracks []container.Track, m
 		// so the plan's length and the run's cannot disagree. A crossfade too long
 		// for the members is refused here at plan time (checkCrossfade inside
 		// ConcatTrack), so an oversized or tampered value 400s rather than serving
-		// a playlist the stream cannot fill.
-		var crossfade int64
-		if crossfade, err = waxflow.CrossfadeSamples(tracks, desc.CrossfadeSeconds); err != nil {
+		// a playlist the stream cannot fill. The delivered width rides the same
+		// helper, so the timeline is planned at the width it is encoded at.
+		var copts waxflow.ConcatOptions
+		if copts, err = s.timelineOptionsFor(tracks, desc.CrossfadeSeconds, opts); err != nil {
 			return fail(err)
 		}
-		plan, err = s.eng.PlanSegmentsTimeline(tracks, s.timelineOptions(crossfade), opts, desc.SegDur)
+		plan, err = s.eng.PlanSegmentsTimeline(tracks, copts, opts, desc.SegDur)
 	} else {
 		// The full source track, measured exact for a span (resolveMember). The
 		// rungs below plan from it directly; only the transcode fallback narrows it
@@ -1138,7 +1140,7 @@ func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool,
 		return s.logHLSWorker(ref, rungName(rungCut), len(members), start,
 			s.runHLSCutWorker(ctx, members[0], opts, sp, cut, variant, start, publish))
 	}
-	med, err := s.openHLSMedia(ctx, members, tl, sp, xfadeSeconds)
+	med, err := s.openHLSMedia(ctx, members, tl, sp, xfadeSeconds, opts)
 	if err != nil {
 		return err
 	}
@@ -1173,7 +1175,7 @@ func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool,
 // same way planHLSVariant did, so plan and run describe one blended length. It
 // is ignored for a single-track stream, which has no seam.
 func (s *Server) openHLSMedia(ctx context.Context, members []hlsSource, tl bool,
-	sp span, xfadeSeconds float64) (format.Media, error) {
+	sp span, xfadeSeconds float64, opts waxflow.TranscodeOptions) (format.Media, error) {
 	if !tl {
 		return s.openSlicedMember(ctx, members[0], sp)
 	}
@@ -1191,14 +1193,15 @@ func (s *Server) openHLSMedia(ctx context.Context, members []hlsSource, tl bool,
 		}
 		tracks[i] = m.Track
 	}
-	// The run converts the descriptor's crossfade the same way the plan did
-	// (planHLSVariant), on the same members, so the blended length the worker
-	// delivers is the one the playlist promised.
-	crossfade, err := waxflow.CrossfadeSamples(tracks, xfadeSeconds)
+	// The run derives the descriptor's crossfade and the delivered width the
+	// same way the plan did (planHLSVariant), on the same members and the same
+	// options, so the blended length the worker delivers is the one the
+	// playlist promised and each member is folded at its own width.
+	copts, err := s.timelineOptionsFor(tracks, xfadeSeconds, opts)
 	if err != nil {
 		return nil, err
 	}
-	return waxflow.Concat(srcs, s.timelineOptions(crossfade))
+	return waxflow.Concat(srcs, copts)
 }
 
 // sliceMeasured bounds med to sp for a run whose plan validated the window
@@ -1274,6 +1277,9 @@ type closingMedia struct {
 func (m closingMedia) Walk() error { return format.WalkMedia(m.Media) }
 
 func (m closingMedia) Walked() bool { return format.MediaWalked(m.Media) }
+
+// MixedWidth forwards format.MixedWidth, for the same reason.
+func (m closingMedia) MixedWidth() bool { return format.MediaMixedWidth(m.Media) }
 
 func (m closingMedia) Close() error {
 	err := m.Media.Close()

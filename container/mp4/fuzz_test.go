@@ -101,6 +101,18 @@ func FuzzDemux(f *testing.F) {
 		f.Add(seed)
 		f.Add(seed[:len(seed)/2])
 	}
+	// The same shape with a segment index ahead of the fragments, so the length
+	// resolver's scan and coverage rule are on the fuzzed path too.
+	if seed := sidxFileSeed(); seed != nil {
+		f.Add(seed)
+		f.Add(seed[:len(seed)/2])
+	}
+	// A hybrid movie: a populated sample table in the moov and fragments
+	// behind it, so the read path's transition between the two is fuzzed.
+	if seed := hybridSeed(); seed != nil {
+		f.Add(seed)
+		f.Add(seed[:len(seed)/2])
+	}
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		for _, strict := range []bool{false, true} {
@@ -116,6 +128,19 @@ func FuzzDemux(f *testing.F) {
 				t.Fatalf("accepted track with invalid format: %v", err)
 			}
 
+			// The walk reads the moof headers and settles the length, so it is
+			// on the fuzzed path with the read. Its error is a refusal, not a
+			// crash, and a settled track still has to describe itself.
+			if err := d.Walk(); err == nil {
+				tr := d.Tracks()[0]
+				if tr.SamplesExact && tr.SamplesAdvisory {
+					t.Fatal("a settled track is both exact and advisory")
+				}
+				if tr.Samples < -1 {
+					t.Fatalf("a settled track reports %d samples", tr.Samples)
+				}
+			}
+
 			// A generous safety cap so a bug that failed to terminate is caught,
 			// not a tight bound: a fragmented trun may declare zero-size samples
 			// (each capped per fragment at maxSamplesPerFragment), so the true
@@ -123,6 +148,7 @@ func FuzzDemux(f *testing.F) {
 			// still exercises the Dur>0 and no-crash invariants on every packet.
 			maxPackets := int(d.size) + maxSamplesPerFragment + 8
 			var pkt container.Packet
+			firstPTS := int64(-1)
 			for i := 0; i < maxPackets; i++ {
 				err := d.ReadPacket(&pkt)
 				if errors.Is(err, io.EOF) {
@@ -134,16 +160,21 @@ func FuzzDemux(f *testing.F) {
 				if pkt.Dur <= 0 {
 					t.Fatalf("packet with non-positive duration %d", pkt.Dur)
 				}
+				if firstPTS < 0 {
+					firstPTS = pkt.PTS
+				}
 			}
 
-			// Seeks must never land past the target.
+			// A landing past the target is legitimate only when the stream
+			// itself starts after it, which container.Seeker allows and a
+			// crafted tfdt produces: the fragments can begin anywhere.
 			for _, target := range []int64{0, 1, 1000, 1 << 20, 1 << 40} {
 				landed, err := d.SeekSample(0, target)
-				if err != nil {
+				if err != nil || firstPTS < 0 {
 					continue
 				}
-				if landed > target {
-					t.Fatalf("seek to %d overshot to %d", target, landed)
+				if landed > max(target, firstPTS) {
+					t.Fatalf("seek to %d landed at %d (the stream starts at %d)", target, landed, firstPTS)
 				}
 			}
 		}
@@ -174,6 +205,46 @@ func fragmentedSeed() []byte {
 		return nil
 	}
 	return buf.Bytes()
+}
+
+// sidxFileSeed is fragmentedSeed with a complete segment index between the init
+// header and the fragments, or nil if construction fails.
+func sidxFileSeed() []byte {
+	track, pkts := fuzzOpusTrack()
+	track.Samples = -1 // no edit-list length, so the index is what states one
+	init, err := InitSegment(track)
+	if err != nil {
+		return nil
+	}
+	seg, err := NewSegmenter(track, &SegmenterOptions{SegmentSamples: 2 * 960})
+	if err != nil {
+		return nil
+	}
+	var media bytes.Buffer
+	emit := func(s Segment) error { media.Write(s.Data); return nil }
+	for _, p := range pkts {
+		if seg.WritePacket(p, emit) != nil {
+			return nil
+		}
+	}
+	if seg.End(emit) != nil {
+		return nil
+	}
+	idx := sidxBox(1, 48000, 0, 0, []sidxRef{{size: uint32(media.Len()), dur: 4 * 960}})
+	out := append(append([]byte(nil), init...), idx...)
+	return append(out, media.Bytes()...)
+}
+
+// hybridSeed is a movie carrying both a sample table and fragments, or nil if
+// construction fails.
+func hybridSeed() []byte {
+	track, _ := fuzzOpusTrack()
+	entry, err := sampleEntryFor(track)
+	if err != nil {
+		return nil
+	}
+	return hybridMovie(movie{entry: entry, unitBytes: 40, frames: 6, chunkFrames: 3,
+		timescale: 48000, sttsDelta: 960}, 2, 3, true)
 }
 
 // fuzzOpusTrack is a minimal valid Opus track and packet run for seed building.
@@ -216,7 +287,8 @@ func FuzzFragment(f *testing.F) {
 
 	trex := trexDefaults{have: true, defaultDur: 1024, defaultSize: 100, defaultFlags: 0}
 	f.Fuzz(func(t *testing.T, data []byte) {
-		fi, err := parseFragment(data, trex, 1)
+		var fi fragInfo
+		err := parseFragment(&fi, data, trex, 1)
 		if err != nil {
 			return
 		}
@@ -224,4 +296,49 @@ func FuzzFragment(f *testing.F) {
 			t.Fatalf("parsed %d samples past the %d cap", len(fi.samples), maxSamplesPerFragment)
 		}
 	})
+}
+
+// FuzzSidx targets the segment-index parser directly: parseSidx must not panic
+// or run unbounded on any payload, and its sums must stay inside the cap that
+// keeps the coverage arithmetic from overflowing. The reference_count is a
+// uint16 and referenced_size a uint31, so a real index cannot approach either
+// bound; the point is that a crafted one cannot wrap past them into a small
+// plausible number.
+func FuzzSidx(f *testing.F) {
+	f.Add(sidxSeed())
+	f.Add([]byte{})
+	f.Add([]byte("\x00\x00\x00\x00"))
+	// A count the payload cannot hold: the length check must catch it before
+	// the loop reads anything.
+	f.Add(append([]byte("\x01\x00\x00\x00"), make([]byte, 28)...))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		s, err := parseSidx(data)
+		if err != nil {
+			return
+		}
+		if s.sumSize < 0 || s.sumSize > sidxSumCap {
+			t.Fatalf("sumSize %d outside [0, %d]", s.sumSize, sidxSumCap)
+		}
+		if s.sumDuration < 0 || s.sumDuration > sidxSumCap {
+			t.Fatalf("sumDuration %d outside [0, %d]", s.sumDuration, sidxSumCap)
+		}
+		if s.firstOffset < 0 || s.firstOffset > sidxSumCap {
+			t.Fatalf("firstOffset %d outside [0, %d]", s.firstOffset, sidxSumCap)
+		}
+		if 12*s.refs > len(data) {
+			t.Fatalf("accepted %d references from %d bytes", s.refs, len(data))
+		}
+		// coverageEnd is the sum the caps exist for: it must stay a number.
+		if e := s.coverageEnd(); e < 0 {
+			t.Fatalf("coverageEnd %d overflowed", e)
+		}
+	})
+}
+
+// sidxSeed is a well-formed sidx payload (past its 8-byte header) for the
+// corpus: two references over a 48 kHz time base.
+func sidxSeed() []byte {
+	box := sidxBox(1, 48000, 0, 0, []sidxRef{{size: 1000, dur: 1920}, {size: 1200, dur: 1920}})
+	return box[8:]
 }

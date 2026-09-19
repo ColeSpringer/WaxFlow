@@ -245,6 +245,13 @@ func (e *Engine) AnalyzeMedia(ctx context.Context, med format.Media, opts Analyz
 	var scratch *audio.Buffer
 	var dstV [][]float32
 	if opts.Channels != 0 && opts.Channels != f.Channels {
+		// Before mix.For, because the refusal is about which samples are
+		// being folded rather than which layouts: a timeline whose members
+		// were placed into a wider envelope has no fold that is any member's
+		// own. See refuseMixedWidthConversion.
+		if err := refuseMixedWidthConversion(med, f, opts.Channels); err != nil {
+			return nil, err
+		}
 		// srcLayout mirrors the encode's mixStage fallback (dsp.go): an
 		// unmasked source takes its count's default layout, so the fold's
 		// inputs are byte-identical to the encode's. A decoded source is

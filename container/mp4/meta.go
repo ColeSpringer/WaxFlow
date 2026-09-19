@@ -77,8 +77,9 @@ func (d *Demuxer) gapless(t *track) (delay, padding, samples int64, advisory boo
 // samples: the front delay from its media_time (media timescale) and the played
 // length from its segment_duration (movie timescale). haveSeg is false when the
 // edit declares no usable duration, leaving the length to the caller's fallback.
-// The progressive (gapless) and fragmented (fragmentedGapless) readers share
-// this rescale and differ only in that fallback (the stbl raw total vs unknown),
+// The progressive (gapless) and fragmented (fragmentedLength) readers share
+// this rescale and differ only in that fallback: the stbl raw total, against
+// the fragmented tiers (a segment index, then a header duration, then nothing),
 // which each applies around this call.
 func editListTrims(t *track, movieTimescale int64) (delay, segSamples int64, haveSeg bool) {
 	rate := int64(t.fmt.Rate)

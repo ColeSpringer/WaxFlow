@@ -152,9 +152,11 @@ func (s *sourceStage) ReadChunk(dst *audio.Buffer) error {
 type ChainSpec struct {
 	// Rate is the output sample rate in Hz, 0 to keep the source rate.
 	Rate int
-	// Channels is the output channel count, 0 to keep. Conversion
-	// targets are mono and stereo (plus mono-to-stereo duplication);
-	// other targets fail as unsupported.
+	// Channels is the output channel count, 0 to keep. Mono and stereo
+	// targets downmix through the gain table; a wider target places the
+	// source's positions at unity and zero-fills the rest. A target with
+	// no layout convention, or one with no place for a position the
+	// source holds, fails as unsupported. See mix.For.
 	Channels int
 	// BitDepth selects integer output at that depth (2..32), 0 to keep
 	// the source domain and depth. Reductions are dithered.

@@ -112,7 +112,7 @@ func (d *Demuxer) parseMoov(moov []byte) ([]*track, error) {
 	err := walkBoxes(moov, func(typ string, payload []byte) error {
 		switch typ {
 		case "mvhd":
-			d.movieTimescale = mvhdTimescale(payload)
+			d.movieTimescale, d.movieDuration = mvhdTime(payload)
 		case "trak":
 			if len(tracks) >= maxTracks {
 				return malformed("more than %d tracks", maxTracks)
@@ -130,22 +130,57 @@ func (d *Demuxer) parseMoov(moov []byte) ([]*track, error) {
 	return tracks, err
 }
 
-// mvhdTimescale extracts the movie timescale from an mvhd box.
-func mvhdTimescale(payload []byte) int64 {
+// mvhdTime extracts the movie timescale and duration from an mvhd box.
+//
+// The duration is the movie's own, on the movie timeline rather than the
+// track's. It is read for one case: a fragmented movie whose sample table is
+// empty and whose head states a length nowhere else. The all-ones value is the
+// spec's "unknown", which a fragmented writer often means literally, so it
+// reads as absent rather than as a huge number.
+// The two fields are read independently, so a box long enough for the
+// timescale and short of the duration still yields the timescale. Requiring
+// both would drop the movie timescale an edit list is rescaled against for the
+// sake of a duration this reads only as a last-resort fallback.
+func mvhdTime(payload []byte) (timescale, duration int64) {
 	version, _, rest, ok := fullBox(payload)
 	if !ok {
-		return 0
+		return 0, 0
 	}
-	// version 0: creation(4) modification(4) timescale(4) duration(4)
-	// version 1: creation(8) modification(8) timescale(4) duration(8)
-	off := 8
+	off := 8 // creation(4) modification(4)
 	if version == 1 {
-		off = 16
+		off = 16 // creation(8) modification(8)
 	}
 	if len(rest) < off+4 {
+		return 0, 0
+	}
+	timescale = int64(be32(rest[off:]))
+	if version == 1 {
+		if len(rest) >= off+12 {
+			duration = unknownAsZero64(be64(rest[off+4:]))
+		}
+		return timescale, duration
+	}
+	if len(rest) >= off+8 {
+		duration = unknownAsZero32(be32(rest[off+4:]))
+	}
+	return timescale, duration
+}
+
+// unknownAsZero32 and unknownAsZero64 map the all-ones "duration unknown" a
+// header writes when it does not know one onto the zero every other absent
+// duration uses, so one check covers both spellings.
+func unknownAsZero32(v uint32) int64 {
+	if v == 0xFFFFFFFF {
 		return 0
 	}
-	return int64(be32(rest[off:]))
+	return int64(v)
+}
+
+func unknownAsZero64(v uint64) int64 {
+	if v == 0xFFFFFFFFFFFFFFFF || v > 1<<62 {
+		return 0
+	}
+	return int64(v)
 }
 
 func (d *Demuxer) parseTrak(t *track, body []byte, depth int) error {
@@ -224,18 +259,28 @@ func mdhdTime(payload []byte) (timescale, duration int64) {
 	if !ok {
 		return 0, 0
 	}
+	// The same two-field read mvhdTime does, and the same all-ones mapping: the
+	// media header's duration is the first tier the fragmented length resolver
+	// falls back to, and the spec's "unknown" must not arrive there as
+	// 4294967295 samples.
+	off := 8 // creation(4) modification(4)
 	if version == 1 {
-		// creation(8) modification(8) timescale(4) duration(8)
-		if len(rest) < 28 {
-			return 0, 0
-		}
-		return int64(be32(rest[16:])), int64(be64(rest[20:]))
+		off = 16 // creation(8) modification(8)
 	}
-	// creation(4) modification(4) timescale(4) duration(4)
-	if len(rest) < 16 {
+	if len(rest) < off+4 {
 		return 0, 0
 	}
-	return int64(be32(rest[8:])), int64(be32(rest[12:]))
+	timescale = int64(be32(rest[off:]))
+	if version == 1 {
+		if len(rest) >= off+12 {
+			duration = unknownAsZero64(be64(rest[off+4:]))
+		}
+		return timescale, duration
+	}
+	if len(rest) >= off+8 {
+		duration = unknownAsZero32(be32(rest[off+4:]))
+	}
+	return timescale, duration
 }
 
 // hdlrType extracts the four-character handler type from an hdlr box.

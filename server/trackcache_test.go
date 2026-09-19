@@ -498,3 +498,67 @@ func TestTrackForCarriesTheWalksTrims(t *testing.T) {
 		t.Errorf("the memo carries Padding %d, want the final block's %d", track.Padding, MidTrimEndPad)
 	}
 }
+
+// TestMeasureLengthWalksAFragmentedMP4 pins the route a fragmented movie now
+// takes. It used to have no length and no walk, so the measure seeked past the
+// end, which read every moof payload in the file to find each tfdt; now the
+// walk reads one moof header per fragment and the seek route is gone.
+//
+// Zero decoder work is the sharp half: the walk reads moof headers and skips
+// every mdat by its own, so the sample data is never touched.
+func TestMeasureLengthWalksAFragmentedMP4(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "container", "mp4", "testdata", "ima4-frag.mov"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := &testutil.CountingSource{Src: container.BytesSource(raw)}
+	med, err := format.Open(cs, "mov", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	if format.MediaWalked(med) {
+		t.Fatal("this cell needs a source with a deferred walk")
+	}
+	cs.Reset()
+	got, err := measureLength(med)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.SamplesExact || got.Samples <= 0 {
+		t.Fatalf("measured %d (exact %v), want a positive exact count", got.Samples, got.SamplesExact)
+	}
+	if cs.Bytes >= int64(len(raw)) {
+		t.Errorf("the measure read %d bytes of a %d-byte file; a moof walk reads headers, not payloads",
+			cs.Bytes, len(raw))
+	}
+
+	// The oracle: a walked read of the same file delivers the same count. It
+	// has to be walked, because an un-walked read of a fragmented movie
+	// delivers whole decoded blocks past the trun sum; see
+	// TestFragmentedLengthWalkedAndNot, which pins both numbers.
+	lin, err := format.Open(container.BytesSource(raw), "mov", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lin.Close()
+	if err := format.WalkMedia(lin); err != nil {
+		t.Fatal(err)
+	}
+	buf := audio.Get(lin.Info().Default().Fmt, audio.StandardChunk)
+	defer audio.Put(buf)
+	var want int64
+	for {
+		err := lin.ReadChunk(buf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		want += int64(buf.N)
+	}
+	if got.Samples != want {
+		t.Errorf("the walk measured %d, a read delivers %d", got.Samples, want)
+	}
+}

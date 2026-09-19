@@ -14,3 +14,4 @@ Accepted ADR requires a superseding ADR, not an edit.
 | [0007](0007-tls-exposure-posture.md) | TLS and network exposure posture | Accepted |
 | [0008](0008-opus-encoder-quality-gate-units.md) | Opus encoder-quality gate restated in weighted-error ratios | Accepted |
 | [0009](0009-multi-source-timelines.md) | Multi-source timelines and their identity | Accepted |
+| [0010](0010-timeline-width.md) | A timeline is built at the width it is delivered at | Accepted |

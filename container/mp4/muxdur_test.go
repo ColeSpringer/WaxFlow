@@ -127,7 +127,7 @@ func TestLongHeaderRoundTrips(t *testing.T) {
 		if v, _, _, ok := fullBox(mvhd); !ok || v != 1 {
 			t.Fatalf("mvhd version = %d, want 1 for a duration past 32 bits", v)
 		}
-		if ts := mvhdTimescale(mvhd); ts != rate {
+		if ts, _ := mvhdTime(mvhd); ts != rate {
 			t.Errorf("mvhd timescale reads back as %d, want %d: the version-1 field offsets are wrong", ts, rate)
 		}
 

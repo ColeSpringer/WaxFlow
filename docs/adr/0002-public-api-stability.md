@@ -167,3 +167,16 @@ reason: `REM` is the format's only extension point, so the metadata CUE
 has no command for lives there, and a parser that drops it is not one a
 reader can use. The lines are kept as read; which keys mean anything is
 the reader's call.
+
+## Amendment (2026-09-19): one behavioural break, ADR-0010
+
+`Concat` over members of differing channel counts followed by a transcode,
+analysis or segmented run that converts the channel count is now refused
+(`CodeInvalidRequest`) where it used to succeed. It is a behavioural break on
+the public API with no signature change, and it is taken deliberately: the audio
+it used to produce was between 0.8 and 6 dB under what each member's own
+conversion gives, invisibly, because the error is a scalar every measurement
+moves with. ADR-0010 has the table and the remedy
+(`ConcatOptions.Channels`, `Engine.TimelineChannels`).
+
+A uniform-width `Concat` converts exactly as before.

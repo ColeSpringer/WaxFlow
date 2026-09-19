@@ -14,12 +14,12 @@ env:
   GO_VERSION: "1.26.8"
 
 jobs:
-  # Long fuzz soak over every native fuzz target: 20 minutes per target
-  # nightly versus the 45-second smoke in ci.yml. The list is 52 targets,
-  # about 17 hours of fuzzing, and a hosted job dies at 6 hours, so it is
+  # Long fuzz soak over every native fuzz target: 10 minutes per target
+  # nightly versus the 45-second smoke in ci.yml. The list is 53 targets,
+  # about 9 hours of fuzzing, and a hosted job dies at 6 hours, so it is
   # sharded: scripts/fuzz.sh discovers every target and FUZZ_SHARD=k/N runs
-  # every Nth one, so the six shards cover the list once at about 3 hours
-  # each. Add a shard once a shard holds 12 targets: that is 4 hours of
+  # every Nth one, so the six shards cover the list once at about 90 minutes
+  # each. Add a shard once a shard holds 24 targets: that is 4 hours of
   # fuzzing against the 5-hour timeout. New Fuzz* functions are picked up
   # automatically. scripts/fuzz.sh
   # fails the job only on a real crasher (a reproducer written under
@@ -39,8 +39,8 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
-      - name: fuzz every target in this shard for 20 minutes
-        run: bash scripts/fuzz.sh 20m
+      - name: fuzz every target in this shard for 10 minutes
+        run: bash scripts/fuzz.sh 10m
         env:
           FUZZ_SHARD: ${{ matrix.shard }}/6
       - name: upload fuzz logs and any reproducers

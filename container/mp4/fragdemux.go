@@ -2,10 +2,12 @@ package mp4
 
 import (
 	"io"
+	"slices"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // This file adds the read side of the fragmented (CMAF) MP4 the muxer and
@@ -51,44 +53,164 @@ type fragSample struct {
 	sync bool
 }
 
-// parseMvex records the trex per-sample defaults and marks the movie
-// fragmented. It is called from parseMoov when the moov carries an mvex box.
+// parseMvex records the per-track trex defaults and marks the movie fragmented.
+// It is called from parseMoov when the moov carries an mvex box.
+//
+// One trex per track, and every one is kept: the box states the per-sample
+// defaults a traf may omit, so applying another track's is applying the wrong
+// durations and sizes to this one's samples. A single-trex movie (everything
+// this tree writes) is unaffected either way; an interleaved video+audio
+// fragmented movie is the shape that needs the pick, and which track is
+// selected is not known until selectAudio runs, so the choice waits for it.
 func (d *Demuxer) parseMvex(payload []byte) {
 	d.fragmented = true
 	_ = walkBoxes(payload, func(typ string, body []byte) error {
-		if typ != "trex" {
-			return nil
-		}
-		if _, _, rest, ok := fullBox(body); ok && len(rest) >= 20 {
-			d.trex = trexDefaults{
-				trackID:      be32(rest[0:]),
-				defaultDur:   be32(rest[8:]),
-				defaultSize:  be32(rest[12:]),
-				defaultFlags: be32(rest[16:]),
-				have:         true,
+		switch typ {
+		case "mehd":
+			// The movie-extends header: how long the fragments run to, on the
+			// movie timeline. Optional and rare, and one of the three header
+			// durations the length resolver falls back to.
+			if version, _, rest, ok := fullBox(body); ok {
+				if version == 1 && len(rest) >= 8 {
+					d.fragmentDuration = unknownAsZero64(be64(rest))
+				} else if version == 0 && len(rest) >= 4 {
+					d.fragmentDuration = unknownAsZero32(be32(rest))
+				}
+			}
+		case "trex":
+			if _, _, rest, ok := fullBox(body); ok && len(rest) >= 20 && len(d.trexes) < maxTracks {
+				d.trexes = append(d.trexes, trexDefaults{
+					trackID:      be32(rest[0:]),
+					defaultDur:   be32(rest[8:]),
+					defaultSize:  be32(rest[12:]),
+					defaultFlags: be32(rest[16:]),
+					have:         true,
+				})
 			}
 		}
 		return nil
 	})
 }
 
-// fragmentedGapless resolves the gapless trims for a fragmented track from the
-// init segment's edit list (the fMP4 convention: the encoder delay and the
-// playable length ride in edts/elst, read by the same parseElst the progressive
-// path uses). It shares editListTrims with the progressive gapless resolver but
-// trusts the edit at any media_time, since a fragmented movie has no sample
-// table to fall back to: the edit's segment_duration is the authoritative
-// length (SamplesExact). Without a usable edit the length is left unknown and
-// the track decodes to end of stream.
-func (d *Demuxer) fragmentedGapless(t *track) (delay, samples int64, exact bool) {
-	if !t.hasEdit {
-		return 0, -1, false
+// trexFor picks the selected track's movie-extends defaults. A movie with one
+// trex hands it over whatever track_ID it names, since a single-track movie
+// that misnumbers its own trex is more likely than one that means it for some
+// other track; with several, only an exact match will do, and no match means
+// the traf has to state everything itself.
+func trexFor(trexes []trexDefaults, trackID int) trexDefaults {
+	if len(trexes) == 1 {
+		return trexes[0]
 	}
-	delay, seg, haveSeg := editListTrims(t, d.movieTimescale)
-	if haveSeg {
-		return delay, seg, true
+	for _, t := range trexes {
+		if int(t.trackID) == trackID {
+			return t
+		}
 	}
-	return delay, -1, false
+	return trexDefaults{}
+}
+
+// fragmentedLength resolves a fragmented track's gapless trims and length,
+// in tiers, from what the head of the file states.
+//
+// The edit list is the first and the only one that is authoritative. It is the
+// fMP4 convention: the encoder delay and the playable length ride in edts/elst,
+// read by the same parseElst the progressive path uses. This shares
+// editListTrims with the progressive gapless resolver but trusts the edit at
+// any media_time, since a fragmented movie has no sample table to fall back to,
+// and the edit's segment_duration is a measurement of the content
+// (SamplesExact).
+//
+// A segment index is the second, and it is a declared count rather than an
+// authoritative one (both flags false, the tier the progressive sample table
+// sits in): the writer stated it, nothing has checked it against the fragments,
+// and Walk is what turns it exact. It matters because it is the default
+// fragmented shape rather than an oddity: ffmpeg's plain fragmented output
+// writes no edit list and zeroes both header durations, and a movie with a
+// +global_sidx states its length there and nowhere else.
+//
+// A sidx is timed on the presentation timeline, edit list applied. Measured on
+// ffmpeg's +delay_moov+global_sidx: the truns sum to 265624 while the sidx sums
+// to 264600, exactly the 1024 the edit delays. So a delay stated beside a sidx
+// stays in Delay and is never subtracted from the count, and the raw timeline
+// the pair implies is Delay + Samples, which is what a walk of the truns finds.
+//
+// Without either, the length is left unknown and the track decodes to end of
+// stream.
+func (d *Demuxer) fragmentedLength(t *track) (delay, samples int64, exact, advisory bool, err error) {
+	if t.hasEdit {
+		delay0, seg, haveSeg := editListTrims(t, d.movieTimescale)
+		delay = delay0
+		if haveSeg {
+			return delay, seg, true, false, nil
+		}
+	}
+	s, ok, err := d.readSidxAhead(t)
+	if err != nil {
+		return 0, -1, false, false, err
+	}
+	if !ok {
+		n, box := d.headerDuration(t)
+		if n <= 0 {
+			return delay, -1, false, false, nil
+		}
+		d.note(0, "fragmented movie length taken from %s (advisory; the fragments have not been counted)", box)
+		return delay, n, false, true, nil
+	}
+	// A hybrid movie's index describes its fragments; the samples in the moov's
+	// own table sit ahead of them and are the reader's first packets, so the
+	// length is both. A table that had to be rescaled is a rounded total, which
+	// makes the sum one too.
+	head, headRounded := t.st.totalDur, t.st.rescaled
+	rate := int64(t.fmt.Rate)
+	if int64(s.timescale) == rate || s.timescale == 0 || rate <= 0 {
+		return delay, head + s.sumDuration, false, headRounded, nil
+	}
+	// A time base that is not the sample rate rescales, and a rescale that is
+	// not exact demotes the count to advisory, the same rule the sample table's
+	// own rescale follows: a rounded total is fit to display and unfit to sum.
+	n := mulDivSat(s.sumDuration, rate, int64(s.timescale))
+	exactRescale := s.sumDuration <= sidxSumCap && mulDivSat(n, int64(s.timescale), rate) == s.sumDuration
+	return delay, head + n, false, !exactRescale || headRounded, nil
+}
+
+// headerDuration is the last length tier: a duration out of the movie or media
+// header, advisory, and named in a Note so a reader knows which box it came
+// from.
+//
+// Advisory because it is not a count of anything this file can be held to.
+// mdhd and mvhd durations in a fragmented movie are zero in every shape ffmpeg
+// writes, and a writer that does fill them (YouTube's itag 140 states the same
+// number twice) is describing the presentation rather than the samples. Which
+// timeline the number sits on therefore does not matter much, and the tier is
+// ordered by how specific the box is: the track's own media header first, then
+// the movie-extends header, then the movie header.
+//
+// Two conditions gate it, and both are about not blessing a number that
+// describes something else. A populated sample table means the movie is a
+// hybrid, and the spec reading of its mdhd duration is the table's own part
+// (ffmpeg writes 45056 for the 44 AUs in the moov of a six-second file), so a
+// header duration beside a table is ignored outright. And a bare segment source
+// gets no length from its init at all: the init describes a presentation, the
+// source holds one piece of it, and the caller (the HLS client) owns the
+// length of what it assembled.
+func (d *Demuxer) headerDuration(t *track) (samples int64, box string) {
+	if d.bareSegments || t.st.total > 0 {
+		return 0, ""
+	}
+	rate := int64(t.fmt.Rate)
+	if rate <= 0 {
+		return 0, ""
+	}
+	if t.duration > 0 && t.timescale > 0 {
+		return mulDivSat(t.duration, rate, t.timescale), "the media header (mdhd)"
+	}
+	if d.fragmentDuration > 0 && d.movieTimescale > 0 {
+		return mulDivSat(d.fragmentDuration, rate, d.movieTimescale), "the movie-extends header (mehd)"
+	}
+	if d.movieDuration > 0 && d.movieTimescale > 0 {
+		return mulDivSat(d.movieDuration, rate, d.movieTimescale), "the movie header (mvhd)"
+	}
+	return 0, ""
 }
 
 // NewFragmentedDemuxer reads a bare CMAF/HLS media segment (moof+mdat with no
@@ -114,6 +236,7 @@ func NewFragmentedDemuxer(init []byte, media container.Source) (*Demuxer, error)
 	// The init declares a fragmented movie by construction; force the flag even
 	// if the moov omitted mvex, since the media source is fragments.
 	d.fragmented = true
+	d.bareSegments = true
 	if err := d.selectAudio(tracks); err != nil {
 		return nil, err
 	}
@@ -173,6 +296,21 @@ func (d *Demuxer) readFragmentedPacket(pkt *container.Packet) error {
 	return nil
 }
 
+// resetFragments rewinds the fragment iterator to the first fragment and drops
+// the queued samples, so the next read past the sample table starts from the
+// top. It is the hybrid movie's half of a seek into the moov's own table: the
+// table is rewound by d.cur and the fragments behind it by this.
+//
+// fragDecode is seeded from the table's own end rather than zeroed, which is
+// where the fragments' timeline begins when their trafs carry no tfdt to say
+// so; a tfdt overrides it in loadFragment, as it does everywhere.
+func (d *Demuxer) resetFragments() {
+	d.fragOff = d.fragStart
+	d.fragQueue = d.fragQueue[:0]
+	d.fragIdx = 0
+	d.fragDecode, d.fragTicks = d.sel.st.totalDur, d.sel.st.tickDur
+}
+
 // nextFragment advances to the next moof+mdat pair from d.fragOff and rebuilds
 // the sample queue. Non-fragment boxes (styp, sidx, free) are skipped. It
 // returns io.EOF when no more moof boxes remain.
@@ -203,8 +341,8 @@ func (d *Demuxer) loadFragment(moof box) error {
 	if err := container.ReadFull(d.src, buf, moof.payloadOff()); err != nil {
 		return err
 	}
-	fi, err := parseFragment(buf, d.trex, d.sel.id)
-	if err != nil {
+	var fi fragInfo
+	if err := parseFragment(&fi, buf, d.trex, d.sel.id); err != nil {
 		return err
 	}
 	// default-base-is-moof: the data reference base is the moof start unless a
@@ -241,9 +379,19 @@ func (d *Demuxer) loadFragment(moof box) error {
 		off += int64(s.size)
 	}
 	d.fragIdx = 0
-	d.fragDecode = fi.baseDecodeTime
+	// Where this fragment begins, in ticks: its own tfdt, or the running sum of
+	// every prior sample's raw duration. Converted here rather than
+	// accumulated in output samples, so a fragment with no tfdt lands exactly
+	// where one carrying it would (see Demuxer.fragTicks).
+	if fi.haveBaseTime {
+		d.fragTicks = fi.baseDecodeTime
+	}
+	d.fragDecode = d.fragTicks
 	if rescale {
-		d.fragDecode = mulDivSat(fi.baseDecodeTime, rate, d.sel.timescale)
+		d.fragDecode = mulDivSat(d.fragTicks, rate, d.sel.timescale)
+	}
+	for _, s := range fi.samples {
+		d.fragTicks += int64(s.dur)
 	}
 
 	// Advance past the moof and the mdat that follows it.
@@ -258,6 +406,12 @@ func (d *Demuxer) loadFragment(moof box) error {
 // an optional tfhd base_data_offset, and the per-sample metadata.
 type fragInfo struct {
 	baseDecodeTime int64
+	// haveBaseTime says the traf carried a tfdt. Without one the fragment does
+	// not state where it begins, so the reader continues from where the last
+	// one ended rather than restarting at zero: a movie whose fragments carry
+	// no tfdt otherwise replays its whole timeline from 0 at every fragment,
+	// and every PTS after the first goes backwards.
+	haveBaseTime   bool
 	dataOffset     int32
 	baseDataOffset int64
 	haveBaseOffset bool
@@ -277,8 +431,13 @@ type fragSampleInfo struct {
 // empty fragInfo, so the reader skips it rather than feeding the wrong track's
 // samples to the audio decoder. selID <= 0 (an unknown selected id) or a traf
 // with no readable id falls back to the first traf, the single-track case.
-func parseFragment(buf []byte, trex trexDefaults, selID int) (fragInfo, error) {
-	var fi fragInfo
+// It fills fi rather than returning one, and keeps its sample slice's capacity:
+// a trun may declare up to maxSamplesPerFragment entries, so a scan over a file
+// of many fragments would otherwise allocate that run once per moof. Every
+// other field is reset, since a reused fi must not carry the previous
+// fragment's base time or data offset into this one.
+func parseFragment(fi *fragInfo, buf []byte, trex trexDefaults, selID int) error {
+	*fi = fragInfo{samples: fi.samples[:0]}
 	matched := false
 	var perr error
 	_ = walkBoxes(buf, func(typ string, body []byte) error {
@@ -289,10 +448,10 @@ func parseFragment(buf []byte, trex trexDefaults, selID int) (fragInfo, error) {
 			return nil // a traf for a different track
 		}
 		matched = true
-		perr = parseTraf(&fi, body, trex)
+		perr = parseTraf(fi, body, trex)
 		return nil
 	})
-	return fi, perr
+	return perr
 }
 
 // trafTrackID reads the track_ID from a traf's tfhd (the first field after the
@@ -393,12 +552,12 @@ func parseTfdt(fi *fragInfo, payload []byte) {
 	}
 	if version == 1 {
 		if len(rest) >= 8 {
-			fi.baseDecodeTime = int64(be64(rest))
+			fi.baseDecodeTime, fi.haveBaseTime = int64(be64(rest)), true
 		}
 		return
 	}
 	if len(rest) >= 4 {
-		fi.baseDecodeTime = int64(be32(rest))
+		fi.baseDecodeTime, fi.haveBaseTime = int64(be32(rest)), true
 	}
 }
 
@@ -442,7 +601,7 @@ func parseTrun(fi *fragInfo, trun []byte, defaultDur, defaultSize, defaultFlags 
 	if int64(count)*int64(perSample) > int64(len(rest)) {
 		return malformed("trun declares %d samples for %d bytes", count, len(rest))
 	}
-	fi.samples = make([]fragSampleInfo, count)
+	fi.samples = slices.Grow(fi.samples[:0], int(count))[:count]
 	for i := uint32(0); i < count; i++ {
 		dur, size, sflags := defaultDur, defaultSize, defaultFlags
 		if flags&0x000100 != 0 {
@@ -471,74 +630,129 @@ func parseTrun(fi *fragInfo, trun []byte, defaultDur, defaultSize, defaultFlags 
 }
 
 // seekFragmented lands the fragment iterator on the fragment whose decode-time
-// span contains sample (or the earliest fragment when it precedes them all),
-// scanning moof headers from the top. It returns the landed decode time; the
-// remaining pre-roll is decode-and-discard in format.Media. Every audio sample
-// is a sync point, so landing on a fragment boundary is landing on a sync point.
-func (d *Demuxer) seekFragmented(sample int64) (int64, error) {
-	off := d.fragStart
-	landedOff, landed := off, int64(0)
-	// One scratch buffer, grown as needed and reused across the whole moof
-	// scan: a long file has thousands of fragments, and a fresh allocation per
-	// moof would be needless GC pressure. Only the tfdt is read, not the sample
-	// runs, so no per-sample slice is allocated either.
+// span contains sample (or the earliest fragment when it precedes them all).
+// It returns the landed decode time; the remaining pre-roll is
+// decode-and-discard in format.Media. Every audio sample is a sync point, so
+// landing on a fragment boundary is landing on a sync point.
+//
+// It lands through the fragment index, built here once if a walk has not
+// already built it. That trades a per-seek cost for a one-off one: the scan
+// this replaced read every moof payload up to the target on every seek, where
+// this reads every moof once and every seek after it is a binary search. The
+// open stays head-sized either way; the first seek is where a fragmented movie
+// pays for its lack of an index, and it pays once.
+//
+// It also fixes the landing on a file whose fragments carry no tfdt: that scan
+// read each fragment's base as 0, so no fragment ever "started after the
+// target" and every seek landed on the last one while reporting position 0.
+//
+// Building the index is deliberately not Walk: a seek must not settle the
+// length, because format.media refreshes its own copy of the track from Walk
+// and not from SeekSample (see Walked). A scan stopped by damage still leaves
+// the index it built, and seeking into the intact part is better than refusing.
+func (d *Demuxer) seekFragmented(sample int64) (int64, bool, error) {
+	if err := d.ensureFragmentIndex(); err != nil {
+		return 0, false, err
+	}
+	at := fragEntry{offset: d.fragStart, base: d.sel.st.totalDur, ticks: d.sel.st.tickDur}
+	if e, ok := d.fragmentAt(sample); ok {
+		at = e
+	}
+	// Past a capped index there are fragments the walk counted and did not
+	// record, so the tail is scanned the old way, from the last entry rather
+	// than from the top.
+	if n := len(d.fragIndex); n == maxFragments && sample > d.fragIndex[n-1].base {
+		e, err := d.scanForward(d.fragIndex[n-1], sample)
+		if err != nil {
+			return 0, false, err
+		}
+		at = e
+	}
+	// Every fragment begins after the target. With a sample table ahead of
+	// them the nearest sync point at or before it is in there, so the caller
+	// lands in the table instead; the fragments can begin anywhere, since a
+	// tfdt is a writer's claim. With no table the earliest fragment is the
+	// earliest sync point, which container.Seeker allows to exceed the target.
+	if at.base > sample && d.sel.st.total > 0 {
+		return 0, false, nil
+	}
+	landedOff, landed := at.offset, at.base
+	d.fragTicks = at.ticks
+	d.fragOff = landedOff
+	d.fragQueue = d.fragQueue[:0]
+	d.fragIdx = 0
+	d.fragDecode = landed
+	// The sample table is behind us. On an ordinary fragmented movie it is
+	// empty and this is a no-op; on a hybrid one it is what stops ReadPacket
+	// from serving the moov's samples again from the top, which is the branch
+	// it takes while cur is short of the table's end.
+	d.cur = d.sel.st.total
+	return landed, true, nil
+}
+
+// scanForward walks from a recorded fragment to the last one at or before
+// sample, for the tail of a file with more fragments than the index records
+// (maxFragments). It reads one moof per fragment, as the walk does, and returns
+// the entry it landed on.
+//
+// It re-reads the anchor fragment rather than skipping it, which is what makes
+// the running tick sum right: the next fragment's position, when it carries no
+// tfdt of its own, is the anchor's start plus the anchor's own sample
+// durations, and a scan that began after the anchor would seed the sum with
+// the anchor's start and place every fragment behind it one fragment early.
+// Re-reading recomputes the anchor's own entry unchanged and then adds its
+// durations, which is exactly the walk's arithmetic.
+func (d *Demuxer) scanForward(from fragEntry, sample int64) (fragEntry, error) {
 	rate := int64(d.sel.fmt.Rate)
 	rescale := d.sel.timescale > 0 && rate > 0 && d.sel.timescale != rate
+	landed := from
+	ticks := from.ticks
+	var fi fragInfo
 	var scratch []byte
+	off := from.offset
 	for off < d.size {
 		b, err := readBox(d.src, off, d.size)
 		if err != nil {
-			return 0, err
+			if waxerr.CodeOf(err) == waxerr.CodeMalformedInput {
+				return landed, nil // the chain is over; land on the last good one
+			}
+			return landed, err // the source failed, and a landing is not an answer
 		}
 		if b.typ == "moof" {
 			if b.payloadLen() > maxMoofBytes {
-				return 0, malformed("moof exceeds cap during seek")
+				return landed, nil
 			}
 			if int64(cap(scratch)) < b.payloadLen() {
 				scratch = make([]byte, b.payloadLen())
 			}
 			buf := scratch[:b.payloadLen()]
 			if err := container.ReadFull(d.src, buf, b.payloadOff()); err != nil {
-				return 0, err
+				return landed, err
 			}
-			base := moofBaseTime(buf) // media ticks
-			if rescale {
-				base = mulDivSat(base, rate, d.sel.timescale) // to output samples
+			if err := parseFragment(&fi, buf, d.trex, d.sel.id); err != nil {
+				return landed, nil
 			}
-			if base > sample {
-				break // this fragment starts after the target; keep the previous
+			if len(fi.samples) > 0 {
+				if fi.haveBaseTime {
+					ticks = fi.baseDecodeTime
+				}
+				base := ticks
+				if rescale {
+					base = mulDivSat(ticks, rate, d.sel.timescale)
+				}
+				if base > sample {
+					return landed, nil
+				}
+				landed = fragEntry{offset: b.off, base: base, ticks: ticks}
+				for _, s := range fi.samples {
+					ticks += int64(s.dur)
+				}
 			}
-			landedOff, landed = b.off, base
 		}
 		if b.toEnd {
 			break
 		}
 		off = b.off + b.size
 	}
-	d.fragOff = landedOff
-	d.fragQueue = d.fragQueue[:0]
-	d.fragIdx = 0
-	d.fragDecode = landed
 	return landed, nil
-}
-
-// moofBaseTime extracts a fragment's base media decode time (tfdt) without
-// parsing its sample runs, for the seek scan where only the fragment's start
-// time is needed. A moof with no tfdt reports 0 (the movie start); a run that
-// is itself malformed is caught later by loadFragment when the fragment is
-// actually read.
-func moofBaseTime(buf []byte) int64 {
-	var fi fragInfo
-	_ = walkBoxes(buf, func(typ string, body []byte) error {
-		if typ != "traf" {
-			return nil
-		}
-		return walkBoxes(body, func(inner string, p []byte) error {
-			if inner == "tfdt" {
-				parseTfdt(&fi, p)
-			}
-			return nil
-		})
-	})
-	return fi.baseDecodeTime
 }

@@ -175,6 +175,105 @@ func TestConcatTrackEnvelope(t *testing.T) {
 	}
 }
 
+// TestConcatTrackChannelsSetsTheEnvelope pins ConcatOptions.Channels: it
+// replaces the maximum rule on that one axis and leaves the others alone, in
+// both directions.
+func TestConcatTrackChannelsSetsTheEnvelope(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   []audio.Format
+		ch   int
+		want audio.Format
+	}{
+		{"a channel count folds the envelope", []audio.Format{surround48, stereo48}, 2, stereo48},
+		{"a channel count widens it", []audio.Format{stereo48, mono48}, 6, surround48},
+		{"a member already at the count is untouched", []audio.Format{stereo48, stereo48}, 2, stereo48},
+		{"the other axes keep their maxima", []audio.Format{surround48, stereo44}, 1, mono48},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tracks := make([]container.Track, len(tc.in))
+			for i, f := range tc.in {
+				tracks[i] = container.Track{Codec: codec.PCM, Fmt: f, Samples: 48000}
+			}
+			env, err := ConcatTrack(tracks, ConcatOptions{Channels: tc.ch})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if env.Fmt != tc.want {
+				t.Fatalf("envelope %v, want %v", env.Fmt, tc.want)
+			}
+		})
+	}
+}
+
+// TestConcatTrackRefusesAWidthItCannotReach: a width is refused at plan time,
+// which is the only place that can name the member, rather than one member
+// into the run.
+func TestConcatTrackRefusesAWidthItCannotReach(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   []audio.Format
+		ch   int
+		want error
+		says string
+	}{
+		{"a fold the gain table has no answer for", []audio.Format{surround48, stereo48}, 7,
+			waxerr.ErrUnsupportedFormat, "member 0"},
+		{"a count with no layout convention", []audio.Format{stereo48, stereo48}, 9,
+			waxerr.ErrUnsupportedFormat, "no layout convention for 9 channels"},
+		{"a negative count", []audio.Format{stereo48, stereo48}, -1,
+			waxerr.ErrInvalidRequest, "negative timeline channel count"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tracks := make([]container.Track, len(tc.in))
+			for i, f := range tc.in {
+				tracks[i] = container.Track{Codec: codec.PCM, Fmt: f, Samples: 48000}
+			}
+			_, err := ConcatTrack(tracks, ConcatOptions{Channels: tc.ch})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("error %v, want %v", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.says) {
+				t.Fatalf("error %q does not say %q", err, tc.says)
+			}
+		})
+	}
+}
+
+// TestConcatFoldsTheWiderMemberInItsOwnChain is the structural half of the
+// claim ConcatOptions.Channels makes: the fold is a node in the member's own
+// chain, so it happens before the member meets its siblings, and a member
+// already at the width still builds nothing.
+func TestConcatFoldsTheWiderMemberInItsOwnChain(t *testing.T) {
+	med, err := Concat([]ConcatSource{
+		fixedMember(surround48, 1000),
+		fixedMember(stereo48, 2000),
+	}, ConcatOptions{Channels: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	c := med.(*concat)
+	if c.fmt != stereo48 {
+		t.Fatalf("envelope %v, want %v", c.fmt, stereo48)
+	}
+	openFirst(t, c)
+	if c.chain == nil {
+		t.Fatal("a 5.1 member of a stereo timeline was read without a fold")
+	}
+	if got := c.chain.Format(); got != c.fmt {
+		t.Fatalf("the fold chain emits %v, the envelope is %v", got, c.fmt)
+	}
+	// Advance to the second member, which is already at the width.
+	if _, err := c.SeekSample(1000); err != nil {
+		t.Fatal(err)
+	}
+	openFirst(t, c)
+	if c.chain != nil {
+		t.Fatal("a member already at the timeline's width built a chain; it must be read straight through")
+	}
+}
+
 // TestConcatTrackTreatsAnUndeclaredLayoutTheSameWayTwice: audio.Format.Valid
 // accepts a zero mask, and both layout rules have to read it the same way.
 // The widening rule resolves it through DefaultLayout the way dsp.NewChain

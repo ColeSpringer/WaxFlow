@@ -190,6 +190,34 @@ func MediaWalked(med Media) bool {
 	return !ok || w.Walked()
 }
 
+// MixedWidth is answered by a Media whose channels were conformed to its own
+// width from different ones: a concatenated timeline whose members are not all
+// as wide as the envelope. It is one bit rather than a member list because the
+// question a consumer asks is a yes or no, and it is a property of the samples
+// this Media delivers rather than of how it was assembled.
+//
+// The consumer is a channel conversion. dsp/mix normalizes each output row over
+// every source column, so a fold applied to such a Media is not any member's
+// own fold: a member placed into a wider envelope has silent columns that still
+// count in the divisor, and the result is 1 to 6 dB under what that member
+// folded alone would give. waxflow refuses the conversion rather than deliver
+// it (see waxflow.ConcatOptions.Channels), and this is how it asks.
+//
+// Unlike Composite this is forwarded by a wrapper and by a slice: Composite's
+// "what are the members of a span of a timeline" has no right answer, and this
+// one does, since a slice of a mixed-width timeline is still mixed-width
+// samples. Every wrapper that forwards Walked forwards this too.
+type MixedWidth interface {
+	MixedWidth() bool
+}
+
+// MediaMixedWidth asks MixedWidth of a Media that may not implement it. False
+// is the answer for anything opened from one file, which has one width.
+func MediaMixedWidth(med Media) bool {
+	m, ok := med.(MixedWidth)
+	return ok && m.MixedWidth()
+}
+
 // Composite is implemented by a Media assembled from several sources rather
 // than opened from one: a concatenated timeline. Like container.Indexer and
 // container.Warner, it is an honest capability gate rather than a universal

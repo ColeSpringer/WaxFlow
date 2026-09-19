@@ -208,6 +208,11 @@ caller wants, refused at mint time where a client can act on it.
 - **Capping the envelope's channels at 2.** It silently destroys a surround
   member, and it looks cheaper only because the output is usually stereo, which
   is output-aware knowledge `ConcatTrack` does not have.
+
+  ADR-0010 keeps that judgement and supplies the knowledge from the party that
+  has it: the caller states the delivered width through `ConcatOptions.Channels`
+  and the engine tells them what it is. The envelope is still never capped by
+  inference, and the width is still not the timeline layer's to guess.
 - **Progressive concat** (repeated `src=` parameters). It would break
   `q.Get("src")` (which returns the first, so every existing read site would
   silently see only track 1), the canonical params, `directPlayable`, and

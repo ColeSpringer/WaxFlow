@@ -10,12 +10,15 @@ package waxflow_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/format"
 )
 
 func TestFragmentedMP4ReadBack(t *testing.T) {
@@ -80,7 +83,58 @@ func TestFragmentedMP4Probe(t *testing.T) {
 	if info.Container != "mp4" {
 		t.Errorf("Container = %q, want mp4", info.Container)
 	}
-	if d := info.Default(); d.Codec != "aac-lc" {
+	d := info.Default()
+	if d.Codec != "aac-lc" {
 		t.Errorf("codec = %q, want aac-lc", d.Codec)
+	}
+	// Our own fragmented output states its length in an edit list, which is the
+	// authoritative tier: a measurement of the content rather than a writer's
+	// claim about it. The sidx tier below it must not have displaced this.
+	if d.Samples != 4096 || !d.SamplesExact {
+		t.Errorf("Samples = %d exact=%v, want 4096 and exact (the init's edit list)", d.Samples, d.SamplesExact)
+	}
+}
+
+// TestFragmentedSeekLeavesTheLengthToBeConfirmed is the Media-level half of a
+// rule the demuxer enforces: a seek builds the fragment index and settles
+// nothing.
+//
+// format.Media caches its own copy of the track and refreshes it from Walk, not
+// from SeekSample. A seek that settled the demuxer's track would therefore flip
+// Walked() true while every length the Media reports stayed the open-time one,
+// and a run about to write a count into headers it cannot patch reads exactly
+// that flag (confirmableLength): it would commit the unverified number and
+// then miss it.
+func TestFragmentedSeekLeavesTheLengthToBeConfirmed(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "container", "mp4", "testdata", "ima4-frag.mov"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	med, err := format.Open(container.BytesSource(raw), "mov", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	before := med.Info().Default()
+	if format.MediaWalked(med) {
+		t.Fatal("this cell needs a source with a deferred walk")
+	}
+	if _, err := med.SeekSample(1024); err != nil {
+		t.Fatal(err)
+	}
+	if format.MediaWalked(med) {
+		t.Fatal("a seek reported the payload as measured; the Media's own length never moved")
+	}
+	after := med.Info().Default()
+	if after.Samples != before.Samples || after.SamplesExact != before.SamplesExact {
+		t.Fatalf("a seek moved the Media's length (%d/%v -> %d/%v)",
+			before.Samples, before.SamplesExact, after.Samples, after.SamplesExact)
+	}
+	// And the walk that follows still measures, on the same Media.
+	if err := format.WalkMedia(med); err != nil {
+		t.Fatal(err)
+	}
+	if !format.MediaWalked(med) || !med.Info().Default().SamplesExact {
+		t.Error("the walk after a seek did not settle the Media's length")
 	}
 }

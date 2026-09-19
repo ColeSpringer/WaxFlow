@@ -182,7 +182,13 @@ the muxer's own statement of the playable end on a CRC-verified page; a read
 finds any damage earlier in the file, where it is. A native FLAC or WavPack
 whose measurement had to cross damage keeps the corrected length without the
 flag, since an authoritative length caps a decode and one walked past a hole
-should not. `notes` is the other half and is never damage: what this build did
+should not. A fragmented MP4 states its length in an edit list where it has
+one; where it does not, a segment index (`sidx`) covering the whole file is
+read as the headers' own count, the same declared tier a progressive sample
+table sits in. An index covering only the first fragment is ignored rather
+than believed, and a movie header duration is advisory. A strict probe walks
+the fragments once, which reads their headers and reports either count as
+`samplesExact`. `notes` is the other half and is never damage: what this build did
 with a file that is perfectly well formed, such
 as ignoring a stream it cannot use, capping a chapter list at its own limit,
 rescaling a timeline whose timescale is not the sample rate, or reporting a
@@ -271,6 +277,10 @@ Parameters (unknown parameter names are rejected):
   what those rungs are; `ch=2` asks for stereo specifically and gets it
   from every rung, because a channel count the source does not already
   have declines the passthrough rungs by construction.
+
+  On a timeline (`tl=`) the count is applied per member, before the seam,
+  so a member's level is its own fold's rather than the assembled
+  envelope's. See the `tl` section below.
 - `gain`: `off`, `track` (default), `album`, or an explicit `+/-dB`
   number. `track` and `album` resolve against the source's ReplayGain
   2 tags (Opus `R128_*` tags convert from the -23 LUFS reference), fall
@@ -618,6 +628,18 @@ Things worth knowing before you build on it:
   and bit depths are converted to the envelope no member loses information
   reaching (the maximum of each). A uniform queue, which is what a gapless
   album is, is passed through untouched and costs nothing.
+- **A timeline is built at the width it is delivered at.** When the
+  delivered channel count differs from the envelope's and the members do
+  not all share the envelope's count, each member is conformed to the
+  delivered count by its own conversion before it reaches the seam: a
+  narrower member is placed, a wider one folded, each at its own width.
+  Folding the assembled envelope instead would be wrong by an exact
+  scalar, up to 6 dB, because the downmix matrix normalizes each output
+  row over every source column and a placed member's silent columns still
+  count in the divisor. The daemon resolves the width itself; a library
+  caller sets `waxflow.ConcatOptions.Channels` from
+  `Engine.TimelineChannels`, and a conversion applied to a mixed-width
+  timeline afterwards is a 400.
 - **Members take `from`/`to` sample windows.** A member may bound itself
   to a sample range of its own source: the virtual-track span (`/stream`'s
   `from`/`to`, with its exact semantics), joined to the queue as a member

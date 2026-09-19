@@ -215,6 +215,14 @@ type Track struct {
 	// number waits for Walk. A file with no Info Duration to fall back on
 	// reports -1 with neither flag rather than an estimate it does not have.
 	//
+	// The fifth is a fragmented MP4's header duration, which is the same
+	// reason in a third spelling: mvhd, mehd and mdhd state a duration about
+	// the presentation rather than about the fragments, and every ffmpeg
+	// fragmented shape writes zero there, so a writer that fills one (Smooth
+	// Streaming, YouTube's itag 140) is making a claim nothing in the file
+	// checks. A segment index is not advisory, because it counts subsegments
+	// of this file; it is declared, like a sample table. Walk settles either.
+	//
 	// Three things read it. A timeline refuses such a member, since a prefix
 	// sum cannot survive the drift; measure it first (see ConcatSource.Track).
 	// format.Media will not cap a decode at a rounded total, which it would
@@ -393,8 +401,9 @@ type Warner interface {
 }
 
 // Walker is implemented by demuxers whose open defers a walk of the payload:
-// a frame index built lazily (MP3, bare or inside a WAV or an AIFF-C; ADTS)
-// or a cluster walk behind an advisory length (Matroska). Walk finishes that
+// a frame index built lazily (MP3, bare or inside a WAV or an AIFF-C; ADTS),
+// a cluster walk behind an advisory length (Matroska), or a fragmented MP4's
+// run of moof headers behind whatever its head declared. Walk finishes that
 // walk through the owner's normal warn path, so under Strict damage past the
 // head becomes the malformed error and under tolerance it lands in Warnings.
 // Walked reports whether the walk has run to the end of the payload: a run

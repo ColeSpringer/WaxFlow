@@ -302,21 +302,29 @@ func TestFragmentedTrackMatch(t *testing.T) {
 	audioTraf := trafBox(1, 0, []uint32{960, 960}, []uint32{8, 8})      // 2 samples
 	body := append(append(append([]byte{}, mfhd...), other...), audioTraf...)
 
-	fi, err := parseFragment(body, trexDefaults{have: true}, 1)
-	if err != nil {
+	var fi fragInfo
+	if err := parseFragment(&fi, body, trexDefaults{have: true}, 1); err != nil {
 		t.Fatalf("parseFragment: %v", err)
 	}
 	if len(fi.samples) != 2 || fi.samples[0].dur != 960 {
 		t.Errorf("selected the wrong traf: got %d samples %+v, want the 2-sample audio traf", len(fi.samples), fi.samples)
 	}
-	// Selecting the other track picks the 3-sample traf.
-	if fi99, _ := parseFragment(body, trexDefaults{have: true}, 99); len(fi99.samples) != 3 {
-		t.Errorf("track 99 selected %d samples, want 3", len(fi99.samples))
+	// Selecting the other track picks the 3-sample traf. The same fragInfo is
+	// reused, which is what the scan does: every field but the sample slice's
+	// capacity must be reset, or the previous fragment's timing leaks in.
+	if err := parseFragment(&fi, body, trexDefaults{have: true}, 99); err != nil {
+		t.Fatal(err)
+	}
+	if len(fi.samples) != 3 {
+		t.Errorf("track 99 selected %d samples, want 3", len(fi.samples))
 	}
 	// A moof with only a non-matching traf yields no samples (skipped), not the
-	// wrong track's.
+	// wrong track's, and not the ones left in the reused slice.
 	onlyOther := append(append([]byte{}, mfhd...), other...)
-	if fiNone, _ := parseFragment(onlyOther, trexDefaults{have: true}, 1); len(fiNone.samples) != 0 {
-		t.Errorf("non-matching moof yielded %d samples, want 0", len(fiNone.samples))
+	if err := parseFragment(&fi, onlyOther, trexDefaults{have: true}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if len(fi.samples) != 0 {
+		t.Errorf("non-matching moof yielded %d samples, want 0", len(fi.samples))
 	}
 }

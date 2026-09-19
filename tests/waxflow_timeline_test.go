@@ -1715,3 +1715,335 @@ func TestConcatNamesTheMemberItCannotPlace(t *testing.T) {
 		t.Errorf("Concat = %v, want the same refusal", err)
 	}
 }
+
+// foldFixtureChans builds a multi-sine fixture: one distinct tone per
+// channel, at per-channel amplitudes, so a fold's weights are observable in
+// the result rather than cancelling.
+func foldFixtureChans(rate, frames int, amps, freqs []float64) [][]float32 {
+	out := make([][]float32, len(amps))
+	for c := range out {
+		out[c] = make([]float32, frames)
+		for i := range out[c] {
+			out[c][i] = float32(amps[c] * math.Sin(2*math.Pi*freqs[c]*float64(i)/float64(rate)))
+		}
+	}
+	return out
+}
+
+// TestConcatFoldsEachMemberAtItsOwnWidth is why ConcatOptions.Channels exists.
+//
+// dsp/mix normalizes each output row over every source column, silent ones
+// included, so a member widened into an envelope and folded afterwards comes
+// out sqrt(E_own/E_envelope) quieter than the same member folded alone: a
+// stereo member in a 5.1 envelope loses exactly 3.01 dB, and its own fold to
+// stereo is a no-op. The option moves the fold inside each member's chain,
+// where it is the member's own.
+//
+// The oracle is WaxTap's workaround: transcode each member to the delivered
+// width by itself and concatenate that set unfolded. The two must measure the
+// same, and the envelope fold must not.
+func TestConcatFoldsEachMemberAtItsOwnWidth(t *testing.T) {
+	const rate, frames = 48000, 48000
+	e := waxflow.New()
+
+	// The 5.1 fixture's recipe: the distinguishing energy is in FC and the
+	// surrounds, which the native meter and a stereo fold weigh differently.
+	five := testutil.FloatWAVBytes(t, rate, foldFixtureChans(rate, frames,
+		[]float64{0.05, 0.05, 0.15, 0.10, 0.15, 0.15},
+		[]float64{311, 349, 440, 55, 587, 622}))
+	// Decorrelated stereo, so its own fold to stereo is an identity and any
+	// level change is the envelope's doing.
+	stereoChans := foldFixtureChans(rate, frames, []float64{0.2, 0.2}, []float64{233, 392})
+	stereo := testutil.FloatWAVBytes(t, rate, stereoChans)
+
+	ms := timelineMembers(t, e, five, stereo)
+	tracks := []container.Track{ms[0].Track, ms[1].Track}
+
+	env, err := waxflow.ConcatTrack(tracks, waxflow.ConcatOptions{Channels: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env.Fmt.Channels != 2 {
+		t.Fatalf("envelope = %v, want stereo", env.Fmt)
+	}
+
+	// The member already at the width runs no chain, so its region is its
+	// source bit for bit. That is the structural claim the levels rest on.
+	med, err := waxflow.Concat(ms, waxflow.ConcatOptions{Channels: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := drainMedia(t, med, 2*frames+16)
+	med.Close()
+	defer audio.Put(got)
+	if got.N != 2*frames {
+		t.Fatalf("timeline delivered %d frames, want %d", got.N, 2*frames)
+	}
+	for c := range 2 {
+		ch := got.ChanF(c)[frames : 2*frames]
+		for i := range ch {
+			if ch[i] != stereoChans[c][i] {
+				t.Fatalf("the stereo member of a stereo timeline was altered: channel %d frame %d = %v, want %v",
+					c, i, ch[i], stereoChans[c][i])
+			}
+		}
+	}
+
+	measure := func(name string, med format.Media, opts waxflow.AnalyzeOptions) float64 {
+		t.Helper()
+		defer med.Close()
+		res, err := e.AnalyzeMedia(context.Background(), med, opts)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		return res.IntegratedLUFS
+	}
+
+	// The oracle: each member transcoded alone to the delivered width, then
+	// concatenated unfolded. Float WAV so the comparison is not through a
+	// quantizer.
+	var foldedFive, foldedStereo bytes.Buffer
+	for _, tc := range []struct {
+		src []byte
+		out *bytes.Buffer
+	}{{five, &foldedFive}, {stereo, &foldedStereo}} {
+		if _, err := e.Transcode(context.Background(), container.BytesSource(tc.src), "wav", tc.out,
+			waxflow.TranscodeOptions{Format: "wav", Channels: 2}); err != nil {
+			t.Fatalf("member transcode: %v", err)
+		}
+	}
+	oracleMembers := timelineMembers(t, e, foldedFive.Bytes(), foldedStereo.Bytes())
+	oracleMed, err := waxflow.Concat(oracleMembers, waxflow.ConcatOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oracle := measure("oracle", oracleMed, waxflow.AnalyzeOptions{})
+
+	ownWidth, err := waxflow.Concat(ms, waxflow.ConcatOptions{Channels: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got2 := measure("own width", ownWidth, waxflow.AnalyzeOptions{})
+	if d := math.Abs(got2 - oracle); d > 0.05 {
+		t.Errorf("a timeline built at the delivered width measures %.4f LUFS, each member folded alone measures %.4f (%.4f LU apart)",
+			got2, oracle, d)
+	}
+
+	// And the figure the option exists to avoid cannot be produced at all any
+	// more: folding the assembled 5.1 envelope to stereo is refused, naming
+	// the remedy. That refusal is the pin; the gap it stands for is 2.06 LU on
+	// this pair, and the level table on ConcatOptions.Channels has the rest.
+	envMed, err := waxflow.Concat(ms, waxflow.ConcatOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer envMed.Close()
+	_, err = e.AnalyzeMedia(context.Background(), envMed, waxflow.AnalyzeOptions{Channels: 2})
+	if !errors.Is(err, waxerr.ErrInvalidRequest) {
+		t.Fatalf("folding the assembled envelope = %v, want a refusal", err)
+	}
+	if !strings.Contains(err.Error(), "ConcatOptions.Channels") {
+		t.Errorf("the refusal %q does not name the remedy", err)
+	}
+
+	// The plan funnel takes the width too, and names it in the cache key.
+	plan, err := e.PlanSegmentsTimeline(tracks, waxflow.ConcatOptions{Channels: 2},
+		waxflow.TranscodeOptions{Format: "flac"}, 4)
+	if err != nil {
+		t.Fatalf("PlanSegmentsTimeline at a width: %v", err)
+	}
+	if !slices.Contains(plan.Versions, "tlwidth-2-1") {
+		t.Errorf("plan versions %v carry no width entry; two widths over the same members would share a cache key",
+			plan.Versions)
+	}
+}
+
+// widthTracks builds header-only members at the given channel counts, which is
+// all the plan funnel and TimelineChannels read.
+func widthTracks(chans ...int) []container.Track {
+	out := make([]container.Track, len(chans))
+	for i, n := range chans {
+		out[i] = container.Track{
+			Codec:        codec.PCM,
+			Fmt:          audio.Format{Rate: 48000, Channels: n, Layout: audio.DefaultLayout(n), Type: audio.Int, BitDepth: 16},
+			Samples:      48000,
+			SamplesExact: true,
+		}
+	}
+	return out
+}
+
+// TestTimelineChannelsAnswersOnlyWhereTheDefectIs pins D3's complement rule: a
+// count comes back exactly when a member would otherwise be placed into a wider
+// envelope and folded after the seam, and 0 otherwise. The 0 is what keeps a
+// queue that never had the defect building the identical chain and keying the
+// identical cache entry.
+func TestTimelineChannelsAnswersOnlyWhereTheDefectIs(t *testing.T) {
+	e := waxflow.New()
+	for _, tc := range []struct {
+		name string
+		in   []container.Track
+		opts waxflow.TranscodeOptions
+		want int
+	}{
+		{"a mixed queue to a lossy row", widthTracks(6, 2), waxflow.TranscodeOptions{Format: "opus"}, 2},
+		{"a uniform queue to a lossy row", widthTracks(6, 6), waxflow.TranscodeOptions{Format: "opus"}, 0},
+		{"a mixed queue to a lossless row", widthTracks(6, 2), waxflow.TranscodeOptions{Format: "flac"}, 0},
+		{"a mixed queue widened by an explicit count", widthTracks(1, 2),
+			waxflow.TranscodeOptions{Format: "flac", Channels: 6}, 6},
+		{"a uniform queue widened by an explicit count", widthTracks(2, 2),
+			waxflow.TranscodeOptions{Format: "flac", Channels: 6}, 0},
+		{"a mixed queue folded by an explicit count", widthTracks(6, 2),
+			waxflow.TranscodeOptions{Format: "flac", Channels: 1}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := e.TimelineChannels(tc.in, tc.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("TimelineChannels = %d, want %d", got, tc.want)
+			}
+		})
+	}
+
+	// A row that refuses the envelope refuses here, one call earlier than the
+	// real plan would: alac holds no more than two channels and will not fold.
+	if _, err := e.TimelineChannels(widthTracks(6, 2), waxflow.TranscodeOptions{Format: "alac"}); err == nil {
+		t.Error("TimelineChannels over an alac delivery of a 5.1 envelope succeeded; the row's refusal must propagate")
+	}
+}
+
+// TestTimelineRefusesAConversionAcrossAMixedSeam is D4 at every seam it has: the
+// plan funnel and the three run-side entry points, bare and through the wrappers
+// that have to forward the question.
+func TestTimelineRefusesAConversionAcrossAMixedSeam(t *testing.T) {
+	const rate, frames = 48000, 4096
+	e := waxflow.New()
+	src := func(n int) []byte {
+		return testutil.FloatWAVBytes(t, rate, foldFixtureChans(rate, frames,
+			slices.Repeat([]float64{0.2}, n), []float64{220, 290, 360, 55, 430, 500, 570}[:n]))
+	}
+	five, stereo, mono := src(6), src(2), src(1)
+
+	t.Run("the plan funnel", func(t *testing.T) {
+		ms := timelineMembers(t, e, five, stereo)
+		tracks := []container.Track{ms[0].Track, ms[1].Track}
+		_, err := e.PlanSegmentsTimeline(tracks, waxflow.ConcatOptions{},
+			waxflow.TranscodeOptions{Format: "opus"}, 4)
+		if !errors.Is(err, waxerr.ErrInvalidRequest) {
+			t.Fatalf("planning a fold of a mixed-width envelope = %v, want a refusal", err)
+		}
+		if !strings.Contains(err.Error(), "ConcatOptions.Channels") {
+			t.Errorf("the refusal %q does not name the remedy", err)
+		}
+		// Resolved through the engine it plans fine, and the width is keyed.
+		ch, err := e.TimelineChannels(tracks, waxflow.TranscodeOptions{Format: "opus"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err := e.PlanSegmentsTimeline(tracks, waxflow.ConcatOptions{Channels: ch},
+			waxflow.TranscodeOptions{Format: "opus"}, 4)
+		if err != nil {
+			t.Fatalf("planning at the resolved width: %v", err)
+		}
+		if !slices.Contains(plan.Versions, "tlwidth-2-1") {
+			t.Errorf("plan versions %v carry no width entry", plan.Versions)
+		}
+	})
+
+	// Every run-side entry point, over the same mixed timeline, wrapped three
+	// ways. The wrappers exist so that a sliced or measured timeline is guarded
+	// exactly as a bare one; a wrapper that answered for itself would be a hole.
+	for _, wrap := range []struct {
+		name string
+		fn   func(format.Media) format.Media
+	}{
+		{"bare", func(m format.Media) format.Media { return m }},
+		{"behind MeasuredMedia", func(m format.Media) format.Media {
+			return waxflow.MeasuredMedia(m, m.Info().Default().Samples-1)
+		}},
+		{"behind a Slice", func(m format.Media) format.Media {
+			s, err := waxflow.Slice(m, 0, 2*frames-16)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return s
+		}},
+	} {
+		t.Run(wrap.name, func(t *testing.T) {
+			open := func() format.Media {
+				t.Helper()
+				med, err := waxflow.Concat(timelineMembers(t, e, five, stereo), waxflow.ConcatOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return wrap.fn(med)
+			}
+			says := func(err error) {
+				t.Helper()
+				if !errors.Is(err, waxerr.ErrInvalidRequest) {
+					t.Fatalf("= %v, want a refusal", err)
+				}
+				if !strings.Contains(err.Error(), "Engine.TimelineChannels") {
+					t.Errorf("the refusal %q does not name the remedy", err)
+				}
+			}
+
+			med := open()
+			defer med.Close()
+			_, err := e.TranscodeMedia(context.Background(), med, io.Discard,
+				waxflow.TranscodeOptions{Format: "opus"})
+			says(err)
+
+			med2 := open()
+			defer med2.Close()
+			_, err = e.TranscodeSegmentsMedia(context.Background(), med2,
+				waxflow.TranscodeOptions{Format: "opus"},
+				waxflow.SegmentedOptions{SegmentSamples: 48000}, func(mp4.Segment) error { return nil })
+			says(err)
+
+			med3 := open()
+			defer med3.Close()
+			_, err = e.AnalyzeMedia(context.Background(), med3, waxflow.AnalyzeOptions{Channels: 2})
+			says(err)
+		})
+	}
+
+	t.Run("a uniform-width timeline still folds downstream", func(t *testing.T) {
+		ms := timelineMembers(t, e, five, five)
+		tracks := []container.Track{ms[0].Track, ms[1].Track}
+		plan, err := e.PlanSegmentsTimeline(tracks, waxflow.ConcatOptions{},
+			waxflow.TranscodeOptions{Format: "opus"}, 4)
+		if err != nil {
+			t.Fatalf("a uniform 5.1 queue to opus: %v", err)
+		}
+		if slices.Contains(plan.Versions, "tlwidth-2-1") {
+			t.Errorf("a uniform queue keyed a width entry (%v); its cache must be untouched", plan.Versions)
+		}
+		med, err := waxflow.Concat(ms, waxflow.ConcatOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer med.Close()
+		if _, err := e.AnalyzeMedia(context.Background(), med, waxflow.AnalyzeOptions{Channels: 2}); err != nil {
+			t.Errorf("folding a uniform-width timeline: %v; that fold is every member's own", err)
+		}
+	})
+
+	t.Run("a widening is refused too", func(t *testing.T) {
+		// Mono does not place, it duplicates: a mono member in a stereo
+		// envelope sits on both fronts, where its own conversion to 5.1 puts it
+		// on the center, 3 dB away.
+		ms := timelineMembers(t, e, mono, stereo)
+		med, err := waxflow.Concat(ms, waxflow.ConcatOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer med.Close()
+		_, err = e.AnalyzeMedia(context.Background(), med, waxflow.AnalyzeOptions{Channels: 6})
+		if !errors.Is(err, waxerr.ErrInvalidRequest) {
+			t.Fatalf("widening a mixed-width timeline = %v, want a refusal", err)
+		}
+	})
+}

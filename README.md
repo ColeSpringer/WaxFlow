@@ -81,7 +81,8 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   reason, the only encoder in existence being LGPL).
   Sample-exact
   seeking everywhere, gapless honored per format (LAME tag, iTunSMPB,
-  edit lists, Ogg pre-skip/end-trim, Matroska CodecDelay). One format
+  edit lists or a fragmented movie's segment index when it has none, Ogg
+  pre-skip/end-trim, Matroska CodecDelay). One format
   charges for that exactness: QuickTime `ima4` carries its predictor
   across blocks and a block header restates only nine bits of it, so a
   seek decodes from the file's start rather than from the block, at
@@ -93,8 +94,10 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   that codec's name too, the same name the sibling tag reader reports
   for the same bytes.
 - **DSP**: Kaiser windowed-sinc resampling (`hq`/`fast`), BS.775
-  downmix, gain with true-peak limiting, TPDF and shaped dither, EBU
-  R128 / BS.1770-4 loudness (differential-verified against ffmpeg).
+  downmix (on a timeline, applied per member before the seam so a
+  member's level is its own fold's), gain with true-peak limiting, TPDF
+  and shaped dither, EBU R128 / BS.1770-4 loudness
+  (differential-verified against ffmpeg).
 - **Service**: progressive streaming with a direct-play/transmux/
   transcode ladder, sample-exact `t=` seeks, HMAC-signed URLs pinned to
   source identity, a write-through cache with read-behind delivery and

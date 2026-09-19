@@ -89,6 +89,11 @@ func (m measuredMedia) Walk() error { return format.WalkMedia(m.Media) }
 
 func (m measuredMedia) Walked() bool { return format.MediaWalked(m.Media) }
 
+// MixedWidth forwards format.MixedWidth for the same reason: the guard that
+// reads it runs over whatever Media a caller hands the engine, and a wrapper
+// that answered for itself would answer false for a timeline it wraps.
+func (m measuredMedia) MixedWidth() bool { return format.MediaMixedWidth(m.Media) }
+
 // Info returns the patched description, its Warnings and Notes refreshed from
 // the inner media on every call: those two lists are live there (see
 // format.Media), and the copy holds the measured total, not a verdict.
@@ -403,6 +408,11 @@ type Headroomer interface {
 // keying a cache on it. Nothing slices a Concat today; the point is that if
 // something does, it gets no answer rather than a wrong one.
 //
+// format.MixedWidth is forwarded, for the same rule read the other way: it
+// asks whether these samples were conformed to one width from several, which
+// is true of any window onto a timeline where it is true of the whole. The
+// conversion it gates must be refused over a piece exactly as over the whole.
+//
 // A concatenated timeline's Warnings and Notes are the members' own, each
 // line prefixed with the member's index, gathered as the members are read:
 // they open lazily, one at a time, so the whole verdict exists only once the
@@ -514,6 +524,13 @@ func (s *slice) Headroom() int64 {
 	}
 	return s.from
 }
+
+// MixedWidth forwards the source's answer (format.MixedWidth). This one is
+// forwarded where Composite is not, and the difference is that it has a right
+// answer: a window onto a mixed-width timeline is still mixed-width samples,
+// whatever part of whichever members it covers, so the conversion that must be
+// refused over the whole is the same conversion over any piece of it.
+func (s *slice) MixedWidth() bool { return format.MediaMixedWidth(s.med) }
 
 func (s *slice) Close() error {
 	if s.closed {
@@ -767,6 +784,11 @@ type ConcatSource struct {
 // against a run delivering the full sum. That is the prefix-sum desync and the
 // tail 404 that ADR-0009's advisory-length section exists to prevent, arriving
 // by a different door.
+//
+// For Channels a mismatch is a level error rather than a length one, and it is
+// the one case the tree now catches: a timeline built at the envelope's width
+// and then converted downstream is refused (see Engine.TimelineChannels), so
+// the mismatch reports itself instead of delivering audio 1 to 6 dB off.
 type ConcatOptions struct {
 	// Profile selects the resampler quality profile for normalizing members
 	// whose rate is not the envelope's; empty means resample.HQ.
@@ -798,6 +820,47 @@ type ConcatOptions struct {
 	// (head plus tail, so the edge members need only one), and a zone must fit
 	// maxCrossfadeBytes.
 	Crossfade int64
+
+	// Channels is the timeline's channel count. Zero, the default, keeps the
+	// envelope's own rule (the widest member). Nonzero makes this the
+	// envelope's count, and every member whose count differs is conformed to
+	// it by its own chain, before it meets its siblings: a fold for a wider
+	// member, a placement for a narrower one, which is exactly the conversion
+	// TranscodeOptions.Channels applies to that member read alone.
+	//
+	// That "before" is the whole point. A fold applied to the assembled
+	// timeline is not the member's own, because dsp/mix normalizes each output
+	// row over every source column and a member widened by placement has
+	// silent columns that still count in the divisor. The error is an exact
+	// scalar, sqrt(E_own/E_envelope), so LUFS, true peak and sample peak all
+	// move by it together and nothing downstream can tell: a stereo member of a
+	// 5.1 envelope folded to stereo comes out 3.010 dB down, where its own fold
+	// is the identity. docs/adr/0010 has the figure for every pair.
+	//
+	// The fold this runs is the delivery fold, not a measurement one: it is
+	// inside the member's chain, so the true-peak limiter runs with it (a 5.1
+	// to stereo matrix has MaxGain 1.707) and an integer envelope requantizes
+	// at the envelope's depth with TPDF, the same cost a resampled member
+	// already pays.
+	//
+	// Engine.TimelineChannels(tracks, opts) is the recipe: it answers the
+	// count the transcode delivers when some member would otherwise be placed
+	// and then folded, and 0 when no member needs its own conversion, so a
+	// caller sets this field from that answer alone and a queue that never had
+	// the defect keeps its chain and its cache keys byte for byte.
+	//
+	// One crossfade note: with a fold inside a member chain the limiter runs
+	// before the equal-power blend, where a fold of the envelope ran after it,
+	// so a blend of correlated folded material can peak up to 3 dB past the
+	// limiter's ceiling. That is what unfolded material already gets
+	// (blendFrames leaves float for the output quantizer and clips the int
+	// path at the quantizer's rails), but it is a change for folded queues.
+	//
+	// Refused at ConcatTrack, naming the member: a count with no layout
+	// convention, a negative count, a member whose positions have no place in
+	// the target (7.1 into 5.1), and, by the existing rule, a member already
+	// at the count whose layout is not the conventional one.
+	Channels int
 }
 
 // maxCrossfadeBytes bounds one blend buffer, and the number is derived rather
@@ -873,6 +936,25 @@ func concatLayout(tracks []container.Track, opts ConcatOptions) (env audio.Forma
 	if env.Type == audio.Float {
 		env.BitDepth = 32
 	}
+	// The widest member, kept before the override: the crossfade bound is
+	// checked at it as well as at the timeline's own width, so a fold can
+	// never loosen a bound a caller already passed at the wider one.
+	widest := env.Channels
+	if opts.Channels != 0 {
+		if opts.Channels < 0 {
+			return audio.Format{}, nil, nil, 0, waxerr.New(waxerr.CodeInvalidRequest,
+				fmt.Sprintf("waxflow: negative timeline channel count %d", opts.Channels))
+		}
+		// Checked on the requested count alone. A queue whose own members are
+		// wider than any convention keeps whatever it did before: this is the
+		// caller naming a target, and a target the mix node cannot build is a
+		// refusal here rather than one member into the run.
+		if audio.DefaultLayout(opts.Channels) == 0 {
+			return audio.Format{}, nil, nil, 0, waxerr.New(waxerr.CodeUnsupportedFormat,
+				fmt.Sprintf("waxflow: no layout convention for %d channels", opts.Channels))
+		}
+		env.Channels = opts.Channels
+	}
 	env.Layout = audio.DefaultLayout(env.Channels)
 
 	// The envelope's layout has to be the conventional one, because that is
@@ -888,13 +970,18 @@ func concatLayout(tracks []container.Track, opts ConcatOptions) (env audio.Forma
 	// by name rather than relabelled, since calling a back-left channel
 	// front-right is a silent lie about what the file says it holds.
 	//
+	// Every other member is mixed, in whichever direction its own count lies.
 	// A narrower member is widened into the envelope, which places its
 	// positions and zero-fills the rest, so what has to hold is that the
 	// envelope has a place for every one of them. It does for the common
 	// cases (a mono member in a stereo queue, a stereo member in a surround
 	// one) and it does not for a back pair meeting a side pair, which is the
 	// same "normalizes channel counts, not speaker assignments" line read the
-	// other way.
+	// other way. A wider member is reachable only under ConcatOptions.Channels
+	// (the envelope is otherwise a maximum) and is folded through the same
+	// probe, which refuses a fold the gain table has no answer for exactly as
+	// that member's own transcode to the count would: 7.1 into a 5.1 timeline
+	// has nowhere to put the back pair.
 	for i, t := range tracks {
 		// A layout is resolved before either rule reads it, with the zero-mask
 		// fallback dsp.NewChain applies, so the two agree about what a member
@@ -938,7 +1025,7 @@ func concatLayout(tracks []container.Track, opts ConcatOptions) (env audio.Forma
 		}
 		starts[i+1] = starts[i] + lens[i] - tail
 	}
-	if err := checkCrossfade(lens, env, opts.Crossfade); err != nil {
+	if err := checkCrossfade(lens, env.Rate, max(widest, env.Channels), opts.Crossfade); err != nil {
 		return audio.Format{}, nil, nil, 0, err
 	}
 	// One zone per seam, and there are N-1 seams. Subtracted after every
@@ -972,10 +1059,18 @@ func concatLayout(tracks []container.Track, opts ConcatOptions) (env audio.Forma
 // unaddressed: collapsing it needs the output format, which is not known
 // here (an output row's adjust hook owns the real rate, which is how Opus
 // forces 48 kHz whatever the caller asked for). Likewise the channel count
-// is a maximum and is not capped at stereo: capping would silently destroy a
-// surround member, and it looks cheaper only because the output is usually
+// is a maximum and is not capped by inference: capping would silently destroy
+// a surround member, and it looks cheaper only because the output is usually
 // stereo, which is the same output-aware knowledge this function does not
-// have. The common mixed-channel cases are a mono track in a stereo queue and
+// have. A caller that does have it states the width it delivers through
+// ConcatOptions.Channels, and every member is then conformed to that width by
+// its own conversion rather than placed into an envelope and folded after the
+// seam.
+//
+// The track this returns carries no mark of having come from a timeline, so a
+// plan built from it alone (PlanTranscode) cannot see the seam and will not
+// refuse a conversion across it; the run does, off the Media. Ask
+// Engine.TimelineChannels for the width before building either. The common mixed-channel cases are a mono track in a stereo queue and
 // a stereo track in a surround one; a narrower member is widened into the
 // envelope by position, zero-filled and at unity, so it keeps its own levels.
 // A placed member measures the same loudness inside the queue as alone; a
@@ -1060,6 +1155,30 @@ func ConcatBoundaries(tracks []container.Track, opts ConcatOptions) ([]MemberBou
 	return bounds, env, nil
 }
 
+// mixedWidthConversion is the one predicate behind both halves of the width
+// rule: Engine.TimelineChannels answers a count exactly when it holds, and the
+// run-side guard refuses exactly when it holds. Writing it once is what keeps
+// the two an exact complement, so a queue the engine answers 0 for is a queue
+// nothing later refuses, and its chain and its cache keys are untouched.
+//
+// It holds when a conversion is asked for that the envelope does not already
+// deliver (channels != 0 and not the envelope's own count) over members that do
+// not all share the envelope's width. Both halves are needed: a conversion of a
+// uniform-width timeline is each member's own fold applied to all of them at
+// once, which is correct, and a "conversion" to the width the timeline already
+// has is not one.
+func mixedWidthConversion(members []container.Track, env audio.Format, channels int) bool {
+	if channels == 0 || channels == env.Channels {
+		return false
+	}
+	for _, t := range members {
+		if t.Fmt.Channels != env.Channels {
+			return true
+		}
+	}
+	return false
+}
+
 // CrossfadeSamples converts a crossfade expressed in seconds into the envelope
 // samples ConcatOptions.Crossfade carries. The wire spells a crossfade in
 // seconds because a caller cannot know the envelope rate (the maximum member
@@ -1097,6 +1216,83 @@ func CrossfadeSamples(tracks []container.Track, seconds float64) (int64, error) 
 	return int64(x), nil
 }
 
+// TimelineChannels is the width to build a timeline of these members at when
+// it will be transcoded with opts: the count ConcatOptions.Channels wants, and
+// 0 when that field should stay zero.
+//
+// It is the counterpart of CrossfadeSamples, and it exists for the same reason:
+// the caller cannot compute the number, because it is a fact about the output
+// row. Which width a lossy delivery folds to is an output row's adjust hook's
+// decision (foldWideToStereo), the same hook that decides Opus runs at 48 kHz
+// whatever was asked for, and the timeline layer deliberately does not know it
+// (ADR-0009 refused to cap the envelope by inference for exactly that reason).
+// This is where the two meet: the engine has the row, so the engine answers.
+//
+// It answers nonzero only when the defect would otherwise occur, which is the
+// exact complement of the refusal the run-side guard raises. A queue whose
+// members all share the envelope's width gets 0 and folds downstream as it
+// always has, with one fold at the envelope that is every member's own; so does
+// a delivery at the envelope's own width. Only a queue where some member would
+// be placed into a wider envelope and folded after the seam gets a count. That
+// is what keeps adopting this free: a uniform album to opus keeps its chain and
+// its cache keys byte for byte.
+//
+// It is a pure planning call and says nothing out loud. The fold it answers for
+// is announced by the run instead (Engine.logTimelineDownmix): this is called
+// per variant per HLS request, and a Warn on that path would be one line per
+// master fetch and per segment worker rather than one per encode.
+//
+// A plan error propagates as it is. It is the refusal the real plan would give
+// (alac over a 5.1 envelope, say), arriving one call earlier.
+func (e *Engine) TimelineChannels(tracks []container.Track, opts TranscodeOptions) (int, error) {
+	env, err := ConcatTrack(tracks, ConcatOptions{})
+	if err != nil {
+		return 0, err
+	}
+	plan, err := e.PlanTranscode(env, opts)
+	if err != nil {
+		return 0, err
+	}
+	if !mixedWidthConversion(tracks, env.Fmt, plan.Format.Channels) {
+		return 0, nil
+	}
+	return plan.Format.Channels, nil
+}
+
+// refuseMixedWidthConversion is the other half of the width rule: a channel
+// conversion never crosses a mixed-width seam.
+//
+// dsp/mix normalizes each output row over every source column, silent ones
+// included, so a fold applied to a timeline whose members were placed into a
+// wider envelope is not any member's own fold. It is that fold times
+// sqrt(E_own/E_envelope), between 0.8 and 6 dB down depending on the pair, and
+// because it is a scalar on the output every measurement moves with it and
+// nothing downstream can tell. The only way to get each member's own fold is to
+// build the timeline at the delivered width, so a request to convert one that
+// was not is refused rather than answered quietly wrong.
+//
+// Widenings are refused too, and the reason is mono. A placement commutes: a
+// stereo member placed into a 5.1 envelope sits on FL and FR either way. Mono
+// does not place, it duplicates: a mono member in a stereo envelope is on both
+// fronts, and widening that to 5.1 leaves it there, where the member's own
+// conversion to 5.1 puts it on the center, 3 dB away.
+//
+// The question is asked of the Media rather than of a member list, because it
+// is a property of the samples: format.MixedWidth, which a slice and every
+// wrapper forward, so a sliced or wrapped timeline is guarded the same as a
+// bare one.
+func refuseMixedWidthConversion(med format.Media, in audio.Format, channels int) error {
+	if channels == 0 || channels == in.Channels || !format.MediaMixedWidth(med) {
+		return nil
+	}
+	return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+		"waxflow: this timeline's members were conformed to %d channels from other widths, so converting it to "+
+			"%d is not any member's own conversion (dsp/mix normalizes each row over every source column, "+
+			"silent ones included); build the timeline at the delivered width instead: ConcatOptions.Channels, "+
+			"see Engine.TimelineChannels",
+		in.Channels, channels))
+}
+
 // checkCrossfade holds a crossfade to what the members and the envelope can
 // actually carry: a legal length, a blend that fits one pooled buffer, and a
 // zone that fits every member it lands on.
@@ -1104,7 +1300,16 @@ func CrossfadeSamples(tracks []container.Track, seconds float64) (int64, error) 
 // It runs inside ConcatTrack, which is what makes a plan and a run refuse
 // identically. lens are the members' normalized lengths, in the envelope's
 // samples, which is the timeline X is measured on too.
-func checkCrossfade(lens []int64, env audio.Format, x int64) error {
+//
+// channels is the width to bound the pooled buffer at, which is the wider of
+// the envelope's own count and the widest member's. A timeline folded by
+// ConcatOptions.Channels blends at the folded width, so bounding on that alone
+// would let a fold accept a crossfade the same members were refused at their
+// own width, and a mint that checked the unfolded queue would be the looser
+// check. Bounding on the widest member instead never loosens; a render that
+// widens past its queue by an explicit count still refuses at plan time, which
+// is where an explicit count is first known.
+func checkCrossfade(lens []int64, rate, channels int, x int64) error {
 	if x == 0 {
 		return nil
 	}
@@ -1116,7 +1321,7 @@ func checkCrossfade(lens []int64, env audio.Format, x int64) error {
 	// before it refuses, and the refusal is the point. The message obeys the
 	// same rule, which is why it quotes no byte count: x*perFrame would
 	// overflow here too, on exactly the inputs this exists to catch.
-	if perFrame := int64(env.Channels) * 4; x > maxCrossfadeBytes/perFrame {
+	if perFrame := int64(channels) * 4; x > maxCrossfadeBytes/perFrame {
 		limit := maxCrossfadeBytes / perFrame
 		// In the caller's own units. They set a frame count, not a byte count,
 		// so an answer in MiB would leave them to rediscover the channel
@@ -1125,7 +1330,7 @@ func checkCrossfade(lens []int64, env audio.Format, x int64) error {
 		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
 			"waxflow: a crossfade of %d samples is more than this timeline can blend; the most it can is "+
 				"%d samples (%.1f s at %d Hz, %d channels), which is the largest buffer the sample pool holds",
-			x, limit, float64(limit)/float64(env.Rate), env.Rate, env.Channels))
+			x, limit, float64(limit)/float64(rate), rate, channels))
 	}
 	// The fit rule is head+tail <= L, not 2X <= L: the first and last members
 	// carry one zone rather than two, and stating it this way makes N=1 pass
@@ -1317,6 +1522,31 @@ func appendMemberLines(dst []string, member int, lines []string) []string {
 // Members reports the members' tracks (format.Composite).
 func (c *concat) Members() []container.Track {
 	return append([]container.Track(nil), c.tracks...)
+}
+
+// MixedWidth reports whether any member reached this timeline's width from a
+// different one (format.MixedWidth). Read off the layout rather than the
+// chains: it has to be answerable before a member is open, since the question
+// gates a conversion that runs before the first read.
+//
+// It compares against the timeline's own width, which is the width after
+// ConcatOptions.Channels, and that is the comparison the question wants in both
+// directions. A uniform stereo queue built at six channels answers true, and
+// should: every member was placed, so a later fold to stereo is the 5.1 matrix
+// over placed stereo rather than each member's own identity.
+//
+// What it cannot see is a member that is itself a mixed-width timeline. The
+// members open lazily, one at a time, long after this is asked, so the only
+// thing available is the format each one declared, and a nested Concat declares
+// its inner envelope. Nothing in this tree nests them; a caller that does owns
+// the answer for the inner one.
+func (c *concat) MixedWidth() bool {
+	for _, t := range c.tracks {
+		if t.Fmt.Channels != c.fmt.Channels {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *concat) Close() error {

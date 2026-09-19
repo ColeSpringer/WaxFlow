@@ -48,6 +48,7 @@ type Demuxer struct {
 	warnings []container.Warning
 
 	movieTimescale int64     // mvhd timescale (ticks per second)
+	movieDuration  int64     // mvhd duration in movie ticks, 0 when unstated
 	chplChapters   []Chapter // Nero chpl markers, if present
 
 	// iTunes iTunSMPB gapless fields, in samples; valid only when smpbOK.
@@ -74,12 +75,41 @@ type Demuxer struct {
 	// mvex box; the samples then live in moof+mdat fragments rather than the
 	// (empty) moov sample table. See fragdemux.go.
 	fragmented bool
+	// bareSegments marks the NewFragmentedDemuxer path: an out-of-band init
+	// plus a media source of segments, where the caller owns the
+	// presentation's length and the head's durations describe a whole
+	// presentation this source holds one piece of.
+	bareSegments bool
+	// fragmentDuration is mehd's, in movie ticks: the fragmented movie's own
+	// statement of how long its fragments run to. 0 when unstated.
+	fragmentDuration int64
+	// trexes are the mvex per-track sample defaults, in box order; trex is the
+	// selected track's, resolved once selectAudio has picked one.
+	trexes     []trexDefaults
 	trex       trexDefaults
 	fragStart  int64        // offset of the first top-level box after moov
 	fragOff    int64        // next top-level box the fragment iterator reads
 	fragQueue  []fragSample // the current fragment's samples
 	fragIdx    int
 	fragDecode int64 // running decode time (samples) for the next sample's PTS
+	// fragTicks is where the fragment in flight begins on the media's own tick
+	// timeline, which is the unit a tfdt states. It exists for the fragments
+	// that carry none: their position is the sum of every prior sample's raw
+	// duration, and rescaling that sum once is not the number summing the
+	// per-sample rescales gives, since each of those floors. A traf without a
+	// tfdt has to land where one carrying it would, so the sum is kept in
+	// ticks and converted at each fragment boundary. Identical to fragDecode
+	// whenever the media timescale is the sample rate, which is the norm.
+	fragTicks int64
+	// fragIndex is the fragment map a finished walk leaves behind: where each
+	// fragment starts in the file and on the output timeline. Nil until Walk
+	// runs; see fragwalk.go.
+	fragIndex []fragEntry
+	// fragIndexed is set once the fragment map has been built; fragWalked once
+	// the length has actually been settled from it. Two flags, because a seek
+	// needs the first and Walked answers for the second (see Walked).
+	fragIndexed bool
+	fragWalked  bool
 
 	// w is the shared read-ahead window over mdat sample data.
 	w srcwin.Window
@@ -121,8 +151,24 @@ func (d *Demuxer) note(off int64, format string, args ...any) {
 	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
 }
 
-// parse scans the top-level boxes, reads moov into memory, builds the
-// track tree, and selects the audio track.
+// parse scans the top-level boxes up to and including moov, reads moov into
+// memory, builds the track tree, and selects the audio track.
+//
+// It stops at the moov because nothing after one is read here, for any movie.
+// The walk derives exactly four things (sawFtyp, the brands, the moov payload,
+// and fragStart), and a damaged chain past the moov already broke out of the
+// loop silently. Running on to EOF cost two header reads per fragment on a
+// fragmented movie, end to end, on the raw source with no srcwin coalescing:
+// a six-second file with 39 fragments paid 39 ranged round trips for boxes
+// nobody looked at. Whatever a fragmented open does need from past the moov
+// (a sidx, the fragment iterator) is read by the paths that want it, from
+// fragStart, and bounded by the first moof rather than by the file.
+//
+// Two odd inputs answer differently now, and both answers are at least as
+// defensible as the old one. An ftyp written after the moov earns the "no ftyp
+// box" note, since that is what the head holds. And of two moov boxes the
+// first wins where the last used to: reading a movie's description from the
+// box that follows its samples was never the intent.
 func (d *Demuxer) parse() error {
 	var moov []byte
 	sawFtyp := false
@@ -154,7 +200,7 @@ func (d *Demuxer) parse() error {
 			// where the fragment iterator starts scanning.
 			d.fragStart = b.off + b.size
 		}
-		if b.toEnd {
+		if moov != nil || b.toEnd {
 			break
 		}
 		off = b.off + b.size
@@ -319,14 +365,26 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		d.mp3Overhead = mp3FrameOverhead(sel.fmt)
 	}
 
+	// The selected track's movie-extends defaults, now that there is a selected
+	// track: a traf may omit a duration, size or flags and defer to them, and
+	// another track's are the wrong answer (see parseMvex).
+	d.trex = trexFor(d.trexes, sel.id)
+
 	var delay, padding, samples int64
 	var exact, advisory bool
 	if d.fragmented {
 		// The fragmented sample tables are empty; gapless comes from the init
-		// edit list, and the length is authoritative (SamplesExact) when the
-		// edit list carries a segment duration.
-		delay, samples, exact = d.fragmentedGapless(sel)
+		// edit list, and the length from that edit, a segment index, or
+		// nothing. See fragmentedLength for the tiers.
+		var err error
+		if delay, samples, exact, advisory, err = d.fragmentedLength(sel); err != nil {
+			return err
+		}
 		d.fragOff = d.fragStart
+		// A hybrid movie's fragments continue the table's timeline, so the
+		// decode time they start at is where the table ended. A tfdt overrides
+		// it; the ordinary fragmented movie has an empty table and starts at 0.
+		d.fragDecode, d.fragTicks = sel.st.totalDur, sel.st.tickDur
 	} else {
 		delay, padding, samples, advisory = d.gapless(sel)
 		if sel.unitDur > 1 && !advisory {
@@ -390,10 +448,15 @@ func (d *Demuxer) Brands() []string { return d.brands }
 // ReadPacket yields the next sample as a codec packet. Packet data aliases
 // the read window and is reused across calls.
 func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
-	if d.fragmented {
+	st := &d.sel.st
+	// A hybrid movie carries both: the samples written before the first
+	// fragment live in the moov's table and the rest in moofs, so the table is
+	// served first and the fragments take over where it ends. On the ordinary
+	// fragmented movie the table is empty and this is the first branch taken;
+	// on a progressive one there are no fragments to reach.
+	if d.fragmented && d.cur >= st.total {
 		return d.readFragmentedPacket(pkt)
 	}
-	st := &d.sel.st
 	if d.cur >= st.total {
 		if d.w.Err() != nil {
 			return d.w.Err()
@@ -495,18 +558,38 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	if d.seekPreroll > 0 {
 		sample = max(sample-d.seekPreroll, 0)
 	}
+	st := &d.sel.st
 	if d.fragmented && d.sel.carryState {
 		// Ahead of the ordinary fragmented branch because the reason is the
 		// codec's and not the sample table's: the landing below applies here
 		// too, and the fragmented walk reaches it through its own restart.
-		return d.seekFragmented(0)
+		// A hybrid movie restarts at its table instead, which is where such a
+		// track's first sample is.
+		if st.total > 0 {
+			d.cur, d.curChunk = 0, 0
+			d.resetFragments()
+			return 0, nil
+		}
+		landed, _, err := d.seekFragmented(0)
+		return landed, err
 	}
-	if d.fragmented {
-		return d.seekFragmented(sample)
+	if d.fragmented && sample >= st.totalDur {
+		// ok is false only when every fragment begins after the target and the
+		// moov's own table holds samples before it, which is a gap between the
+		// two halves. The landing then falls through to the table below.
+		if landed, ok, err := d.seekFragmented(sample); err != nil || ok {
+			return landed, err
+		}
 	}
-	st := &d.sel.st
 	if st.total == 0 {
 		return 0, nil
+	}
+	// A hybrid movie's target below the table's end lands in the table, and the
+	// fragment iterator is rewound with it: the read that follows walks the
+	// table to its end and then takes the fragments from the top, which is the
+	// order the samples are in.
+	if d.fragmented {
+		defer d.resetFragments()
 	}
 	if d.sel.carryState {
 		// Apple's ima4: the decoder's predictor crosses block boundaries and a

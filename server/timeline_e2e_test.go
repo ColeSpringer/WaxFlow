@@ -1001,3 +1001,30 @@ func TestTimelineWindowedMixedRate(t *testing.T) {
 		t.Fatal("the mixed-rate windowed timeline served no segments")
 	}
 }
+
+// TestTimelineMixedWidthRenders is the server's half of the width rule: a queue
+// whose members differ in channel count renders to a lossy format without a
+// refusal, because every site that builds the render's ConcatOptions resolves
+// the delivered width through one helper (timelineOptionsFor). Before that, the
+// plan built the 5.1 envelope and the encode chain folded it, which is the
+// silent 3 dB error waxflow.ConcatOptions.Channels exists to close.
+//
+// The TTL site is the one that keeps a width-0 timelineOptions, so the same
+// render is also minted with a crossfade: a bound the plan accepted must not be
+// refused by the lifetime calculation beside it.
+func TestTimelineMixedWidthRenders(t *testing.T) {
+	env, _ := timelineEnv(t)
+	for name, ch := range map[string]int{"tl-five.wav": 6, "tl-two.wav": 2} {
+		if err := os.WriteFile(filepath.Join(env.root, name), rampWAV(t, 48000, ch, 48000), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tl := mintTimeline(t, env, []string{"lib/tl-five.wav", "lib/tl-two.wav"})
+
+	params := map[string]string{"tl": tl.Tl, "format": "opus", "gain": "off", "segDur": "2",
+		"crossfadeSeconds": "0.1"}
+	total, seg0 := renderTimeline(t, env, mintHLS(t, env, params))
+	if total <= 0 || len(seg0) == 0 {
+		t.Fatalf("a mixed-width timeline rendered %d bytes over %.3f s", len(seg0), total)
+	}
+}

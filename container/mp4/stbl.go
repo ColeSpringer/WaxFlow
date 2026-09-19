@@ -44,6 +44,10 @@ type sampleTable struct {
 	runDelta []int64 // per-sample output duration within the run
 	runCount []int64 // samples in the run
 	totalDur int64   // total output samples across all runs (raw timeline)
+	// tickDur is the same span in the media's own ticks, which is where a
+	// fragmented movie's fragment times are stated. A hybrid movie's fragments
+	// continue from it, so the two have to be expressible in the same unit.
+	tickDur int64
 	// rescaled reports that totalDur was converted from a media timescale that
 	// is not the codec rate, so it is a rounded total rather than a counted
 	// one: the conversion floors each run and the sum carries every floor. A
@@ -214,10 +218,22 @@ func (d *Demuxer) parseStbl(t *track, body []byte, depth int) error {
 	if !isAudio && !isText {
 		return nil // video and other tracks need no sample map here
 	}
-	// A fragmented movie's sample tables are empty by design (samples live in
-	// moof fragments); the stsd alone gives the codec, config, and format. So
-	// require the full table only for a progressive movie.
-	if d.fragmented {
+	// A fragmented movie's sample tables are usually empty by design (samples
+	// live in moof fragments); the stsd alone gives the codec, config, and
+	// format, so an empty table is legal there and only there.
+	//
+	// A populated one is not a contradiction, and a movie that has both is what
+	// `ffmpeg -movflags frag_keyframe` writes without `empty_moov`: the moov's
+	// table holds the samples written before the first fragment (44 AUs on a
+	// six-second AAC file) and the moofs hold the rest. Skipping the table on
+	// any movie carrying mvex dropped those samples silently, so the table is
+	// built whenever the movie states one and the read path serves it first.
+	// An incomplete table is no table, which is the only reading that keeps a
+	// fragmented movie openable: the completeness check below is fatal for an
+	// audio track, and before this a movie carrying mvex never reached it at
+	// all. A fragmented moov with stts and chunks but no stsz used to open and
+	// read its fragments; it still does.
+	if d.fragmented && (!haveStsd || !haveStsz || len(stts) == 0 || len(chunks) == 0) {
 		return nil
 	}
 	if !haveStsd || !haveStsz || len(stts) == 0 || len(chunks) == 0 {
@@ -538,12 +554,13 @@ func (d *Demuxer) buildTimeBase(st *sampleTable, stts []sttsEntry, timescale, ra
 		d.note(0, "media timescale %d differs from sample rate %d; timing rescaled", timescale, rate)
 	}
 	st.rescaled = rescale
-	var sample, pts int64
+	var sample, pts, ticks int64
 	for _, e := range stts {
 		if sample >= st.total {
 			break
 		}
 		count := min(e.count, st.total-sample)
+		ticks += count * e.delta
 		delta := e.delta
 		if rescale {
 			delta = rescaleTicks(e.delta, rate, timescale)
@@ -562,7 +579,16 @@ func (d *Demuxer) buildTimeBase(st *sampleTable, stts []sttsEntry, timescale, ra
 		sample += count
 		pts += count * delta
 	}
-	st.totalDur = pts
+	st.totalDur, st.tickDur = pts, ticks
+	if !rescale {
+		// One timeline in two units, and with no rescale the units are the
+		// same. They can still diverge through the clamp: pts floors every
+		// delta at one output sample where ticks carries the stts value, so a
+		// zero delta leaves a tick span of nothing under a sample span of one
+		// each. A hybrid's fragments continue from both, so the two have to
+		// describe the same instant.
+		st.tickDur = st.totalDur
+	}
 	// stts may cover fewer samples than the table; extend the last run's
 	// cadence over the remainder so every sample has a time.
 	if sample < st.total && len(st.runDelta) > 0 {
@@ -572,6 +598,11 @@ func (d *Demuxer) buildTimeBase(st *sampleTable, stts []sttsEntry, timescale, ra
 		st.runDelta = append(st.runDelta, delta)
 		st.runCount = append(st.runCount, st.total-sample)
 		st.totalDur = pts + (st.total-sample)*delta
+		if !rescale {
+			st.tickDur = st.totalDur
+		} else if len(stts) > 0 {
+			st.tickDur = ticks + (st.total-sample)*stts[len(stts)-1].delta
+		}
 	}
 }
 

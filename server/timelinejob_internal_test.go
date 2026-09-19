@@ -46,6 +46,8 @@ func TestTimelineJobGateAsksTheFile(t *testing.T) {
 		{filepath.Join("..", "container", "mka", "testdata", "seed-pcm.mka"), "pcm.mka"},
 		{filepath.Join("..", "container", "mka", "testdata", "seed-cues.mka"), "cues.mka"},
 		{filepath.Join("..", "testdata", "sine-s16.wma"), "sine.wma"},
+		{filepath.Join("..", "container", "mp4", "testdata", "alac-stereo.m4a"), "prog.m4a"},
+		{filepath.Join("..", "container", "mp4", "testdata", "ima4-frag.mov"), "frag.mov"},
 	} {
 		b, err := os.ReadFile(f.src)
 		if err != nil {
@@ -102,6 +104,8 @@ func TestTimelineJobGateAsksTheFile(t *testing.T) {
 		{"lib/cues.mka", true},        // Opus: the cluster walk is the measure, and no open pays it
 		{"lib/long.mp3", true},        // a cold bare MP3
 		{"lib/sine.wma", true},        // rounded positions: measuring it is a decode
+		{"lib/prog.m4a", false},       // a progressive sample table: exact at open
+		{"lib/frag.mov", true},        // a fragmented movie: the moof walk is the measure
 	} {
 		if slow := ask(tc.ref); slow != tc.slow {
 			t.Errorf("%s: needs a job = %v, want %v", tc.ref, slow, tc.slow)

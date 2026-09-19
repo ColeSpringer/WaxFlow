@@ -446,11 +446,27 @@ func (s *Server) validateMergeRequest(ctx context.Context, body jobRequest, req 
 	// Planning the envelope now is what makes a 201 mean something: a queue
 	// whose members cannot be concatenated (one laid out for other speakers,
 	// say) fails here rather than after the caller has waited for the encode.
-	env, err := waxflow.ConcatTrack(tracks, s.timelineOptions(0))
+	//
+	// A merge never blends, so the crossfade is 0 and this does not go through
+	// timelineOptionsFor; the width still has to be resolved, because a mixed
+	// merge to a lossy row must be built at the width it delivers or every
+	// member's fold is the envelope's (see waxflow.ConcatOptions.Channels).
+	// runMerge resolves it the same way from the stored request.
+	// The output's own shape first, so a request that names an impossible
+	// output still gets the message about it: resolving the width plans a
+	// transcode, and its refusal would otherwise arrive first and speak in the
+	// encoder's terms about a request the shape check would have named plainly.
+	if err := s.checkOutputShape(req); err != nil {
+		return nil, err
+	}
+	copts := s.timelineOptions(0)
+	ch, err := s.eng.TimelineChannels(tracks, req.TranscodeOptions(0, s.profile))
 	if err != nil {
 		return nil, err
 	}
-	if err := s.checkOutputShape(req); err != nil {
+	copts.Channels = ch
+	env, err := waxflow.ConcatTrack(tracks, copts)
+	if err != nil {
 		return nil, err
 	}
 	plan, err := s.eng.PlanTranscode(env, req.TranscodeOptions(0, s.profile))

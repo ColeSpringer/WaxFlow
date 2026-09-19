@@ -37,6 +37,12 @@ import (
 // render's crossfade (from the descriptor) or, at mint, the request's; the merge
 // validation passes 0, because a merge butt-joins and never blends.
 //
+// This one leaves Channels at 0. A render knows its output and must build the
+// timeline at the width it delivers, which is timelineOptionsFor's job; the
+// three callers left here are the ones with no output to resolve against (the
+// mint) or no use for the width (the two TTL sites, which read the envelope's
+// length, and a length is rate-only).
+//
 // # One construction site is deliberately not here
 //
 // The merge job's run builds its own ConcatOptions (internal/jobs' runMerge),
@@ -47,6 +53,36 @@ import (
 // on the render path a wire crossfade reaches.
 func (s *Server) timelineOptions(crossfade int64) waxflow.ConcatOptions {
 	return waxflow.ConcatOptions{Profile: s.profile, Crossfade: crossfade}
+}
+
+// timelineOptionsFor is timelineOptions for a render, where the output is
+// known: it converts the wire's crossfade seconds and resolves the width the
+// transcode delivers, both on the members' fixed formats, so a plan and a run
+// handed the same tracks and the same opts build the same ConcatOptions.
+//
+// The width is the half timelineOptions cannot supply. A timeline must be built
+// at the width it is delivered at, or each member's fold is the envelope's
+// rather than its own (waxflow.ConcatOptions.Channels), and which width a lossy
+// row delivers is the engine's to say (waxflow.Engine.TimelineChannels). It
+// answers 0 for a queue that needs no per-member conversion, which is most of
+// them, so this is timelineOptions plus a crossfade for nearly every render.
+//
+// Three sites keep the width-0 timelineOptions and are not oversights: the mint
+// has no output to resolve against, and the two TTL sites read only the
+// envelope's length, which is rate-only and so cannot move with the width. The
+// crossfade bound is unaffected either way, because checkCrossfade bounds on the
+// widest member rather than on the timeline's own width.
+func (s *Server) timelineOptionsFor(tracks []container.Track, xfadeSeconds float64,
+	opts waxflow.TranscodeOptions) (waxflow.ConcatOptions, error) {
+	crossfade, err := waxflow.CrossfadeSamples(tracks, xfadeSeconds)
+	if err != nil {
+		return waxflow.ConcatOptions{}, err
+	}
+	copts := s.timelineOptions(crossfade)
+	if copts.Channels, err = s.eng.TimelineChannels(tracks, opts); err != nil {
+		return waxflow.ConcatOptions{}, err
+	}
+	return copts, nil
 }
 
 // checkCrossfadeSeconds is the cheap early guard on a wire crossfade: it must be
@@ -410,7 +446,13 @@ func (s *Server) mintTimelineFrom(ctx context.Context, srcs []*source.File, span
 // has not run it: a frame index to build (MP3, bare or in a WAV or AIFF-C;
 // ADTS), or a cluster walk behind an advisory length (a Matroska file, whose
 // Opus or Vorbis track no longer settles at open either; its Cues do not help,
-// since the measure's ceiling is past the last one). So is a member whose
+// since the measure's ceiling is past the last one). A fragmented MP4 joined
+// that list, and its verdict moved with it: its length comes from a segment
+// index or a header duration, neither of which is a measurement, so it now
+// mints through a job where it used to mint inline. That is the cheaper of
+// the two, not the more expensive one, and the job is a moof-header walk
+// rather than the per-seek payload sweep the inline mint used to pay in
+// trackFor. A progressive MP4 defers nothing and is still cheap. So is a member whose
 // container names its positions in a time unit rather than in samples (ASF):
 // no walk or seek can answer exactly there, so the measure is a decode, which
 // is the one cost this gate was written to keep out of a request. The mark is

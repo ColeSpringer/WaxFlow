@@ -429,6 +429,9 @@ func (m closingMedia) Walk() error { return format.WalkMedia(m.Media) }
 
 func (m closingMedia) Walked() bool { return format.MediaWalked(m.Media) }
 
+// MixedWidth forwards format.MixedWidth, for the same reason.
+func (m closingMedia) MixedWidth() bool { return format.MediaMixedWidth(m.Media) }
+
 func (m closingMedia) Close() error {
 	err := m.Media.Close()
 	m.f.Close()
@@ -1205,18 +1208,29 @@ func (r *Runner) runMerge(ctx context.Context, j *Job) error {
 	// the seams ConcatBoundaries reports are exactly the ones Concat plays. The
 	// second walk is header arithmetic with no I/O, once per job; the funnel is
 	// what makes it agree rather than merely happen to.
-	copts := waxflow.ConcatOptions{Profile: r.cfg.Profile}
-	med, err := waxflow.Concat(members, copts)
-	if err != nil {
-		return err
-	}
-	defer med.Close()
-
+	//
+	// The width is the third thing that has to agree, and it needs the output,
+	// so opts is built first. A merge whose members differ in width and whose
+	// output is narrower than the envelope must be concatenated at the
+	// delivered width or every member is folded by the envelope's matrix rather
+	// than its own (waxflow.ConcatOptions.Channels); TimelineChannels answers 0
+	// for every other merge, which is nearly all of them.
+	//
 	// Gain is zero and there are no source tags: a merge takes neither field,
 	// since both are per-track answers and this has N tracks in and one file
 	// out. The server refuses them at creation; this is only where that shows.
 	opts := req.TranscodeOptions(0, r.cfg.Profile)
 	opts.Progress = r.progressFunc(ctx, j.ID, "transcode")
+	ch, err := r.cfg.Engine.TimelineChannels(tracks, opts)
+	if err != nil {
+		return err
+	}
+	copts := waxflow.ConcatOptions{Profile: r.cfg.Profile, Channels: ch}
+	med, err := waxflow.Concat(members, copts)
+	if err != nil {
+		return err
+	}
+	defer med.Close()
 	if wantChapters {
 		// One chapter per member, at the member's start on the concatenated
 		// timeline. The offsets come from the same ConcatBoundaries the timeline
