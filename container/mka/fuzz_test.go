@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/colespringer/waxflow/container"
@@ -62,8 +63,10 @@ func FuzzDemux(f *testing.F) {
 			// rawDur is every frame's own length; kept is what the packets
 			// deliver, which is the timeline they are stamped on; lastPad and
 			// lastDur describe the final packet, whose trim is the only one
-			// that stays inside the run.
+			// that stays inside the run. inner is every earlier packet's trim
+			// with its place on the raw timeline, which is what a walk records.
 			var rawDur, kept, lastPad, lastDur int64
+			var inner []container.PacketTrim
 			clean := false
 			for i := 0; i < maxPackets; i++ {
 				err := d.ReadPacket(&pkt)
@@ -79,6 +82,9 @@ func FuzzDemux(f *testing.F) {
 				}
 				if pkt.Padding < 0 {
 					t.Fatalf("packet with negative padding %d", pkt.Padding)
+				}
+				if c := min(lastPad, lastDur); c > 0 {
+					inner = append(inner, container.PacketTrim{Pos: rawDur - c, Samples: c})
 				}
 				rawDur += pkt.Dur
 				kept += pkt.Dur - min(pkt.Padding, pkt.Dur)
@@ -113,9 +119,18 @@ func FuzzDemux(f *testing.F) {
 						t.Fatalf("settled length %d against a raw run of %d", tr.Samples, rawDur)
 					}
 					// The inner trims are real frames the packets held, so
-					// their sum cannot exceed what the frames decode to.
+					// their sum cannot exceed what the frames decode to, and
+					// the walk places each one where the read met it.
 					if tr.MidPadding < 0 || tr.MidPadding > rawDur {
 						t.Fatalf("settled mid padding %d against a raw run of %d", tr.MidPadding, rawDur)
+					}
+					if len(inner) <= maxMidTrims {
+						if !slices.Equal(tr.MidTrims, inner) {
+							t.Fatalf("walk recorded trims %v, the packets carried %v", tr.MidTrims, inner)
+						}
+						if !tr.MidTrimsComplete() {
+							t.Fatalf("walk recorded trims %v, which do not add up to MidPadding %d", tr.MidTrims, tr.MidPadding)
+						}
 					}
 				}
 			}

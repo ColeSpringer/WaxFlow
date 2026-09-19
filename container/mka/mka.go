@@ -14,10 +14,12 @@
 // (end), mapped onto Track.Delay/Padding so format.Media delivers the trimmed
 // timeline. These are the Opus-in-WebM gapless mechanism; other codecs rarely
 // signal them. DiscardPadding is stated per block rather than per file, so any
-// block may carry one (mkvmerge writes one at each append seam): each rides on
-// its own block's last frame, the packet timeline excludes it, and only the
-// last block's is the track's end trim. The rest are reported as
-// Track.MidPadding, which the copy rungs decline on.
+// block may carry one (mkvmerge writes one at each append seam): it trims the
+// block's end, so a laced block's is spread over its laces from the last one
+// backwards, each lace's packet states its own share, the packet timeline
+// excludes it, and only the last packet's is the track's end trim. The rest
+// are reported as Track.MidPadding, with their positions in Track.MidTrims,
+// which the copy rung declines on and a cut plans around.
 //
 // EBML is a nesting attack surface, so the parser holds to the hostile-input
 // invariants: a fixed, shallow descent that never recurses on attacker-chosen
@@ -63,6 +65,13 @@ const (
 	// raw-total pass), the backstop behind the segment-size bound. It clears a
 	// day of the finest Opus frames (2.5 ms) with headroom.
 	maxFrames = 1 << 26
+	// maxMidTrims bounds the walk's record of where the inner trims lie
+	// (container.Track.MidTrims): 64 KiB of positions, which a daemon memo
+	// keeps per track. An mkvmerge seam is one trim, so this clears a playlist
+	// of thousands of appended files; a hostile file trimming every block
+	// still walks, but the record stops here and the track says so
+	// (MidTrimsComplete), which only a cut reads.
+	maxMidTrims = 1 << 12
 	// maxCuePoints bounds the Cues index on both sides. One entry per cluster
 	// clears days of audio. Past it both sides halve the index and double their
 	// stride, giving a coarse index of the whole file rather than a fine index

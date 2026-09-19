@@ -151,11 +151,22 @@ type Track struct {
 	// so nothing about the decoded stream needs this. What needs it is a rung
 	// that moves packets instead of samples: an output container carries one
 	// end trim, so a copy into anything but Matroska would play the trimmed
-	// frames back as audio, and a cut of such a source is off-grid past the
-	// first inner trim because every later packet starts at a grid position
-	// minus the trims so far. Both rungs decline on it and the transcode rung,
-	// which trims in PCM, serves instead.
+	// frames back as audio. The copy rung declines on it for every other
+	// destination, and a cut carries the same answer for the trims its kept
+	// packets hold (see MidTrims); the transcode rung, which trims in PCM,
+	// serves what they decline.
 	MidPadding int64
+	// MidTrims lists the trims MidPadding sums, one per packet in stream
+	// order, each placed on the raw decode timeline (see PacketTrim). A cut
+	// needs the positions and a copy does not: past an inner trim every packet
+	// starts at a grid position minus the trims so far, so a window edge
+	// computed on the track's own timeline lands inside a packet unless the
+	// trims before it are added back, which is what the list is for.
+	//
+	// A walk records a bounded number of them and keeps summing MidPadding
+	// past that, so a list whose samples add up to less than MidPadding is
+	// incomplete; MidTrimsComplete says which. Nil until a walk has run.
+	MidTrims []PacketTrim
 	// SamplesExact marks Samples as an authoritative length rather than a
 	// declared or advisory one: something read the payload and this is what it
 	// found. Where the decoder over-produces past it (Ogg-Vorbis and Ogg-Opus,
@@ -224,6 +235,29 @@ type Track struct {
 	Default bool
 }
 
+// PacketTrim is one trim inside a run: a Packet.Padding on a packet something
+// followed, placed on the raw decode timeline, which is the sum of every
+// packet's Dur and the timeline a packet grid is laid on. The trimmed samples
+// occupy [Pos, Pos+Samples), the tail of the packet ending at Pos+Samples, so
+// a trim never crosses a packet boundary and Samples never exceeds the packet.
+type PacketTrim struct {
+	Pos     int64
+	Samples int64
+}
+
+// MidTrimsComplete reports whether MidTrims accounts for the whole of
+// MidPadding: every inner trim the walk summed is listed with its position.
+// A walk that hit its recording bound leaves the list short, and a track
+// nothing walked has no list at all; both say the same thing to a cut, which
+// cannot place windows around trims it cannot see.
+func (t Track) MidTrimsComplete() bool {
+	var n int64
+	for _, tr := range t.MidTrims {
+		n += tr.Samples
+	}
+	return n == t.MidPadding
+}
+
 // UnusableFormat wraps an [audio.Format] Valid failure on a format a demuxer
 // read out of a file, and picks the code Valid cannot.
 //
@@ -272,7 +306,7 @@ type Packet struct {
 	//
 	// A muxer writes it only if its container states trims per packet
 	// (Matroska's does); the rest never see one, because the copy rungs
-	// decline a source with an inner trim before a packet moves (see
+	// decline before a packet carrying an inner trim moves (see
 	// Track.MidPadding).
 	Padding int64
 	codec.Packet

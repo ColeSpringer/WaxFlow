@@ -163,10 +163,13 @@ clusters, which no open pays, so a tolerant probe reports the Info Duration
 instead, or `samples: -1` where the file states none, and a strict one walks.
 A read of such a file is gapless either way, because Matroska states its tail
 trim per block rather than as a total. Any block may carry one, not just the
-last (mkvmerge writes one at each append seam); the timeline excludes the
-frames it names, so a seek across one lands exactly, and a packet copy of such
-a file into anything but Matroska, and any cut of it, is declined for the
-transcode rung, which trims in PCM. `samplesExact` and `samplesAdvisory` say which kind
+last (mkvmerge writes one at each append seam), and a laced block's trim
+spreads over its laces from the last one backwards, as the spec places it at
+the block's end; the timeline excludes the frames it names, so a seek across
+one lands exactly. A packet copy of such a file into anything but Matroska is
+declined for the transcode rung, which trims in PCM; a cut is declined the
+same way when a kept packet carries a trim, and serves any destination when
+the trimmed packets are dropped. `samplesExact` and `samplesAdvisory` say which kind
 of number `samples` is: `samplesExact` a measured one, `samplesAdvisory` a
 rounded total fit for display and not for arithmetic that has to add up
 (ASF's ticks, a Matroska Info Duration, a WAV fact chunk over MP3 frames),
@@ -477,12 +480,15 @@ in its packets). Over HLS it also declines a source whose packet
 durations vary, since there is then no grid to lay segment boundaries on.
 `waxflow_remux_total` counts the pipelines it served. The cut declines in turn
 (a codec off the Opus/AAC-LC allowlist, `maxBitRate` set, a snapped window the
-destination cannot express, a source that trims samples inside its run, for
-every destination, since past such a trim its packets no longer sit on the grid
-the window snaps to, or over HLS a source whose packet durations vary and
-so give no grid to lay segment boundaries on) and falls to a transcode of the
-same span, so a span is always served: zero-generation when it can be,
-sample-exact through the decoder when it cannot.
+destination cannot express, a source that trims samples inside its run at
+places the measure did not record, a kept packet that carries such a trim and
+a destination other than Matroska, or over HLS a source whose packet
+durations vary and so give no grid to lay segment boundaries on) and falls to
+a transcode of the same span, so a span is always served: zero-generation
+when it can be, sample-exact through the decoder when it cannot. A cut plans
+its windows on the source's raw packet timeline, past every trim before them,
+so a span past a trim, or one whose gap holds it, moves the source's own
+packets like any other.
 
 **Live transcode responses**: `200` chunked, `Accept-Ranges: none`,
 `Cache-Control: no-store`, `X-Accel-Buffering: no`, plus hints

@@ -121,3 +121,47 @@ func TestStreamOfAnInnerTrimRemuxesToWebM(t *testing.T) {
 		}
 	}
 }
+
+// TestCutOfAnInnerTrimSource: a span of the same source takes the cut rung
+// when the destination can carry the trim its kept packets hold (WebM) and
+// the transcode rung when it cannot (Ogg-Opus), and both bodies hold the
+// span asked for.
+//
+// [1000, 4000) of the seven-packet fixture: the head snaps to packet 0 and
+// the tail past the trimmed packet 2 to the end of packet 5, so the trim is
+// among the kept packets.
+func TestCutOfAnInnerTrimSource(t *testing.T) {
+	env := newTestEnv(t, nil)
+	path := filepath.Join(env.root, "midtrim.webm")
+	server.MidTrimWebM(t, path, true)
+	const want = 3000
+	for _, tc := range []struct {
+		name, query, hint string
+		cut               bool
+	}{
+		{"webm takes the cut", "&container=webm", "webm", true},
+		{"ogg re-encodes", "", "opus", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cuts, remuxes := env.srv.Metrics().Cuts.Load(), env.srv.Metrics().Remuxes.Load()
+			resp := env.get(t, "/stream?src=lib/midtrim.webm&format=opus&from=1000&to=4000"+tc.query, nil)
+			body := readBody(t, resp)
+			if resp.StatusCode != 200 {
+				t.Fatalf("stream = %d: %s", resp.StatusCode, body)
+			}
+			if got := env.srv.Metrics().Remuxes.Load(); got != remuxes {
+				t.Errorf("remux_total moved to %d: a span cannot take rung 2", got)
+			}
+			wantCuts := cuts
+			if tc.cut {
+				wantCuts++
+			}
+			if got := env.srv.Metrics().Cuts.Load(); got != wantCuts {
+				t.Errorf("cut_total = %d, want %d", got, wantCuts)
+			}
+			if got := decodedBodyFrames(t, body, tc.hint); got != want {
+				t.Errorf("the body decodes to %d frames, want the %d asked for", got, want)
+			}
+		})
+	}
+}

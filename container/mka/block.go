@@ -5,10 +5,15 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-// frameLoc is one codec frame's byte range in the source.
+// frameLoc is one codec frame's byte range in the source and, once its block
+// is timed (timeBlock), its decoded length and its share of the block's
+// DiscardPadding. pad exceeds dur only on the last lace of a block whose trim
+// is larger than the block: the excess is reported, not honoured.
 type frameLoc struct {
 	off  int64
 	size int
+	dur  int64
+	pad  int64
 }
 
 // blockHeader is one parsed (Simple)Block: its track, cluster-relative
@@ -31,8 +36,9 @@ const (
 // through the window and resolves its laced frames into byte ranges. It reads
 // only the header and lacing table; frame payloads stay on disk until a packet
 // needs them. A read failure surfaces through the window's sticky error, which
-// the caller checks.
-func parseBlock(w *srcwin.Window, dataOff, size int64) (blockHeader, error) {
+// the caller checks. frames is scratch storage the result reuses, so a linear
+// read allocates nothing per block.
+func parseBlock(w *srcwin.Window, dataOff, size int64, frames []frameLoc) (blockHeader, error) {
 	var bh blockHeader
 	if size < 4 {
 		return bh, malformed("block of %d bytes too short", size)
@@ -67,7 +73,7 @@ func parseBlock(w *srcwin.Window, dataOff, size int64) (blockHeader, error) {
 
 	lacing := int(flags>>1) & 0x3
 	if lacing == laceNone {
-		bh.frames = []frameLoc{{off: pos, size: int(end - pos)}}
+		bh.frames = append(frames[:0], frameLoc{off: pos, size: int(end - pos)})
 		return bh, nil
 	}
 
@@ -119,10 +125,10 @@ func parseBlock(w *srcwin.Window, dataOff, size int64) (blockHeader, error) {
 	}
 	sizes[n-1] = int(end - pos - used)
 
-	bh.frames = make([]frameLoc, n)
+	bh.frames = frames[:0]
 	off := pos
-	for i, s := range sizes {
-		bh.frames[i] = frameLoc{off: off, size: s}
+	for _, s := range sizes {
+		bh.frames = append(bh.frames, frameLoc{off: off, size: s})
 		off += int64(s)
 	}
 	return bh, nil

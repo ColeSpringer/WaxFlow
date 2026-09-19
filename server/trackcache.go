@@ -8,13 +8,15 @@ import (
 	"github.com/colespringer/waxflow/source"
 )
 
-// trackCacheCap bounds the track memo. An entry is one container.Track: 112
-// bytes plus its CodecConfig payload, which is the codec's header blob and runs
-// to tens of bytes (an AAC ASC is ~5, a FLAC STREAMINFO 34, an OpusHead 19). So
-// a full cache is well under a megabyte, and the cap is about lifetime rather
-// than size: keyed by identity and invalidated only by replacement, the memo
-// would otherwise grow once per file for the process's life, and a library-wide
-// sweep would pin the whole catalog.
+// trackCacheCap bounds the track memo. An entry is one container.Track: its
+// fields plus its CodecConfig payload, which is the codec's header blob and
+// runs to tens of bytes (an AAC ASC is ~5, a FLAC STREAMINFO 34, an OpusHead
+// 19), plus for a Matroska with trims inside its run the walk's record of
+// them (MidTrims, at most 64 KiB, and one entry per mkvmerge seam in
+// practice). So a full cache is well under a megabyte for a real library, and
+// the cap is about lifetime rather than size: keyed by identity and
+// invalidated only by replacement, the memo would otherwise grow once per file
+// for the process's life, and a library-wide sweep would pin the whole catalog.
 //
 // The whole Track is stored, including the CodecConfig the HLS path does not
 // read. Trimming it would save a rounding error of memory and hand out a Track
@@ -233,7 +235,7 @@ func (s *Server) trackFor(src *source.File, exact bool) (container.Track, error)
 			// ASF or Matroska member the library otherwise refuses.
 			track.Samples, track.SamplesExact, track.SamplesAdvisory =
 				measured.Samples, measured.SamplesExact, measured.SamplesAdvisory
-			track.Padding, track.MidPadding = measured.Padding, measured.MidPadding
+			track.Padding, track.MidPadding, track.MidTrims = measured.Padding, measured.MidPadding, measured.MidTrims
 		}
 		s.trackCache.put(key, track, info.Tags)
 		return track, nil

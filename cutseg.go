@@ -57,6 +57,13 @@ func (e *Engine) PlanCutSegments(track container.Track, opts TranscodeOptions, s
 		}
 		return nil, err
 	}
+	// A restart seeks the source, and a trim that empties a packet makes the
+	// landing ambiguous (see cutSeekable); the progressive cut, which never
+	// seeks, is unaffected.
+	if wholePacketTrim(track.MidTrims, int64(grid)) {
+		e.log.Debug("segmented cut declined", "reason", "a trim empties a packet, so a restart's seek is ambiguous")
+		return nil, nil
+	}
 	rsp, err := e.PlanRemuxSegments(cutTrack, opts, segSeconds, grid)
 	if err != nil || rsp == nil {
 		return nil, err
@@ -137,7 +144,11 @@ func (e *Engine) CutSegments(ctx context.Context, src container.Source, hint str
 	if err != nil {
 		return nil, err
 	}
-	if rp == nil {
+	// PlanRemux answers for the options' container, and a segmented run always
+	// writes fMP4, which states no trim per packet: the decline PlanRemuxSegments
+	// makes, repeated here so a caller past the plan is refused before a segment
+	// goes out rather than by the copy's backstop mid-run.
+	if rp == nil || cutTrack.MidPadding > 0 {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("waxflow: a %s cut cannot be remuxed to %s with these options; transcode it",
 				track.Codec, opts.Format))
@@ -180,11 +191,35 @@ func cutSeekable(demux container.Demuxer, track container.Track, spans []Span, g
 	if err != nil {
 		return nil, err
 	}
+	// The output timeline this view seeks on is the raw one (segment
+	// boundaries are raw grid positions), which is the delivered one only
+	// while no kept packet carries a trim; and a landing is a packet start on
+	// the source's delivered timeline, which names two packets where a trim
+	// empties one. CutSegments and PlanCutSegments decline both shapes; this
+	// is the view's own guard.
+	if res.track.MidPadding > 0 {
+		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
+			"waxflow: a kept packet of this cut trims inside the run, which a segmented run cannot carry; transcode it")
+	}
+	if wholePacketTrim(res.trims, int64(grid)) {
+		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
+			"waxflow: this source trims a whole packet inside its run, so a seek into it is ambiguous; transcode it")
+	}
 	return &cutSeekDemuxer{
-		cutDemuxer: &cutDemuxer{Demuxer: demux, cut: res.track, track: track.ID, windows: res.windows},
+		cutDemuxer: &cutDemuxer{Demuxer: demux, cut: res.track, track: track.ID, windows: res.windows, trims: res.trims},
 		seek:       sk,
 	}, nil
 }
+
+// The source demuxer seeks on the timeline it delivers, which excludes every
+// trim before the landing (container.Packet.Padding), while the windows are
+// raw, so a target crosses over on the way in and a landing on the way back.
+// Both are packet starts, so the landing stays at or before the target on
+// both timelines. No delay: these are packet positions, not a span's.
+
+func (c *cutSeekDemuxer) deliveredPos(raw int64) int64 { return trackPos(c.trims, 0, raw) }
+
+func (c *cutSeekDemuxer) rawPos(delivered int64) int64 { return rawStart(c.trims, 0, delivered) }
 
 // SeekSample repositions the cut to outTarget on its own contiguous output
 // timeline, so a restarted segment worker resumes exactly where a continuous run
@@ -241,10 +276,11 @@ func (c *cutSeekDemuxer) SeekSample(track int, outTarget int64) (int64, error) {
 		return outTarget, nil
 	}
 	w := c.windows[i]
-	landed, err := c.seek.SeekSample(c.track, w.from+(outTarget-outStart))
+	landed, err := c.seek.SeekSample(c.track, c.deliveredPos(w.from+(outTarget-outStart)))
 	if err != nil {
 		return 0, err
 	}
+	landed = c.rawPos(landed)
 	// The inner demuxer's next packet begins at landed on the source decode
 	// timeline; cur names the window and pos the source position the walk resumes
 	// at. A seek is a coarse optimization, not an exact landing: a container that
@@ -258,9 +294,9 @@ func (c *cutSeekDemuxer) SeekSample(track int, outTarget int64) (int64, error) {
 	// walk's own pos < p0 skip carries it the rest of the way to the boundary.
 	c.cur, c.pos = i, landed
 	c.out = outStart + max(0, landed-w.from)
-	// prevPad describes the packet before the cursor, and after a seek there is
-	// none: carrying the pre-seek packet's trim across would refuse the first
-	// packet the seek lands on for following a trim it does not follow.
-	c.prevPad = 0
+	// The packet before the cursor is unknown after a seek: carrying the
+	// pre-seek packet's trim across would check the first packet the seek
+	// lands on against a trim it does not follow.
+	c.havePrev = false
 	return c.out, nil
 }

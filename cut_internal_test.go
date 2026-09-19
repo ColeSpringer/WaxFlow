@@ -1,6 +1,7 @@
 package waxflow
 
 import (
+	"context"
 	"io"
 	"math"
 	"slices"
@@ -205,28 +206,75 @@ func TestCutTrackRefusesUnexpressibleGaps(t *testing.T) {
 	}
 }
 
-// TestCutTrackDeclinesAnUnanswerableTail: PacketGrid does not measure the final
-// short packet, so a bounded last span landing inside it cannot be resolved from
-// the header.
-func TestCutTrackDeclinesAnUnanswerableTail(t *testing.T) {
+// TestCutTrackResolvesATailInsideTheFinalPacket: PacketGrid does not measure
+// the final short packet, so a bounded last span landing inside it cannot be
+// bounded from the header, and the window runs to EOF instead. The trailer is
+// what resolves it: the cut's length is exact, and container.SettleLength
+// re-derives the padding from the run the copy counted for an exact length
+// whether or not the track declares a delay. This used to decline when the
+// track had no delay, back when only a delay triggered that re-derivation.
+func TestCutTrackResolvesATailInsideTheFinalPacket(t *testing.T) {
 	// 47000 + 0 delay + 0 padding: the decode ends at 47000, which is not a
 	// multiple of 1024, so the final packet is short and runs [46080, 47000).
 	track := aacTrack(0, 47000)
-	_, _, err := CutTrack(track, []Span{{0, 46500}}, 1024)
-	if err == nil {
-		t.Fatal("a span ending inside the final short packet was accepted")
+	cut, landed, err := CutTrack(track, []Span{{0, 46500}}, 1024)
+	if err != nil {
+		t.Fatalf("a span ending inside the final short packet was declined: %v", err)
 	}
-	if got := waxerr.CodeOf(err); got != waxerr.CodeUnsupportedFormat {
-		t.Errorf("code = %v, want %v", got, waxerr.CodeUnsupportedFormat)
+	if cut.Delay != 0 || cut.Padding != 500 || cut.Samples != 46500 || !cut.SamplesExact {
+		t.Errorf("cut = {Delay %d Padding %d Samples %d exact %v}, want {0 500 46500 true}",
+			cut.Delay, cut.Padding, cut.Samples, cut.SamplesExact)
 	}
-	// A span ending on a boundary the header can name is fine.
+	if want := (Span{0, 46500}); landed[0] != want {
+		t.Errorf("Landed = %v, want %v", landed[0], want)
+	}
+	// The run half: the view keeps to EOF and the trailer the muxer is handed
+	// says exactly what the plan did, through the same copy and settle
+	// RemuxDemuxer runs.
+	view, err := Cut(&shortTailDemuxer{n: 46, dur: 1024, last: 920}, track, []Span{{0, 46500}}, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := copyPackets(context.Background(), view, 0, false, func(container.Packet) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.samples != 47000 {
+		t.Fatalf("the view delivered %d samples, want the whole 47000 to EOF", run.samples)
+	}
+	if tr := remuxTrailer(cut, run); tr.Samples != 46500 || tr.Padding != 500 || tr.Delay != 0 {
+		t.Errorf("remuxTrailer = %+v, want {Samples 46500 Delay 0 Padding 500}", tr)
+	}
+	// A span ending on a boundary the header can name, and ToEnd, which never
+	// asks the question, are as before.
 	if _, _, err := CutTrack(track, []Span{{0, 46080}}, 1024); err != nil {
 		t.Errorf("a span ending exactly on the grid was declined: %v", err)
 	}
-	// And ToEnd never asks the question: it runs to EOF.
 	if _, _, err := CutTrack(track, []Span{{0, ToEnd}}, 1024); err != nil {
 		t.Errorf("a ToEnd span was declined: %v", err)
 	}
+}
+
+// shortTailDemuxer yields n packets of dur, the last one last samples long:
+// an encoder's tail flush.
+type shortTailDemuxer struct {
+	n, i      int
+	dur, last int64
+}
+
+func (d *shortTailDemuxer) Tracks() []container.Track { return nil }
+
+func (d *shortTailDemuxer) ReadPacket(pkt *container.Packet) error {
+	if d.i == d.n {
+		return io.EOF
+	}
+	dur := d.dur
+	if d.i == d.n-1 {
+		dur = d.last
+	}
+	*pkt = container.Packet{Track: 0, Packet: codec.Packet{Data: []byte{byte(d.i)}, Dur: dur, Sync: true}}
+	d.i++
+	return nil
 }
 
 // TestCutTrackRefusesAZeroLengthSpan: SpanTrack permits To == From because a
@@ -355,7 +403,11 @@ func TestCutTrackErrorsVsDeclines(t *testing.T) {
 		{"codec off the allowlist", container.Track{Codec: codec.MP3, Samples: 96000}, []Span{{0, 20000}}, 1152, waxerr.CodeUnsupportedFormat},
 		{"no grid", aacTrack(0, 96000), []Span{{0, 20000}}, 0, waxerr.CodeUnsupportedFormat},
 		{"sub-grid gap", aacTrack(0, 96000), []Span{{0, 1000}, {1200, 20000}}, 1024, waxerr.CodeUnsupportedFormat},
-		{"unanswerable tail", aacTrack(0, 47000), []Span{{0, 46500}}, 1024, waxerr.CodeUnsupportedFormat},
+		{"trims the walk did not place", func() container.Track {
+			t := aacTrack(0, 96000)
+			t.MidPadding = 480
+			return t
+		}(), []Span{{0, 20000}}, 1024, waxerr.CodeUnsupportedFormat},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, err := CutTrack(tc.track, tc.spans, tc.grid)

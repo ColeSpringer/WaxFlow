@@ -28,89 +28,123 @@ func (d *Demuxer) resetReading(off int64) {
 	d.pendingIdx = 0
 	d.running = 0
 	d.vorbisPrevBlock = 0
-	d.curBlockDiscardNS = 0
 }
 
 // ReadPacket yields the next codec packet. Packet data aliases the read
 // window and is reused across calls.
 //
-// A block's DiscardPadding trims the end of the block, so it rides on the
-// block's last frame and nowhere else: after nextFrame took it, nothing is
-// left pending. The conversion is the walk's own, so the two agree by
-// construction rather than by a matching rounding rule.
-//
-// The position the packet is stamped with excludes the trims before it
-// (container.Packet.Padding): running advances by what the frame delivers, so
-// a read and a walk describe the same timeline and a seek across an inner trim
-// lands where it says.
+// The frame's duration and its share of its block's DiscardPadding were fixed
+// when the block loaded (timeBlock), by the code the walk reads too. The
+// position excludes the trims before it (container.Packet.Padding): running
+// advances by what the frame delivers, so a seek across an inner trim lands
+// where it says.
 func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
-	data, dur, sync, err := d.nextFrame()
-	if err != nil {
-		return err
-	}
-	var pad int64
-	if d.pendingIdx >= len(d.pending) {
-		pad = nsToSamples(d.curBlockDiscardNS, d.setup.fmt.Rate)
-	}
-	clamped, err := d.clampBlockTrim(pad, dur, d.pending[d.pendingIdx-1].off)
+	f, data, err := d.nextFrame()
 	if err != nil {
 		return err
 	}
 	*pkt = container.Packet{
 		Track:   0,
-		Padding: pad,
+		Padding: f.pad,
 		Packet: codec.Packet{
 			Data: data,
 			PTS:  d.running,
-			Dur:  dur,
-			Sync: sync,
+			Dur:  f.dur,
+			Sync: true, // every audio frame is a sync point
 		},
 	}
-	d.running += dur - clamped
+	d.running += f.dur - min(f.pad, f.dur)
 	return nil
 }
 
-// clampBlockTrim bounds a block's DiscardPadding to the frame it rides on (the
-// block's last) and surfaces an oversized one once per file.
-//
-// The spec attaches the trim to the block's end, so one larger than that frame
-// would have to reach back into the frames before it, and nothing here can: a
-// laced block's earlier frames have already been delivered by the time the
-// trim is known. ffmpeg ignores such a trim outright (decode.c applies a
-// trailing discard only while it fits the frame); trimming what the frame does
-// hold is the smaller departure, and the warning says which frames were kept.
-func (d *Demuxer) clampBlockTrim(pad, lastDur, off int64) (int64, error) {
-	if pad <= lastDur {
-		return pad, nil
-	}
-	if !d.warnedOversizedDiscard {
-		// Latched after the warn, not before: in strict mode warn returns the
-		// refusal instead of recording it, and latching first would let a
-		// retried walk or a second read past the same block succeed where the
-		// first refused.
-		if err := d.warn(off, "DiscardPadding of %d samples on a block whose last frame holds %d; only the frame is trimmed", pad, lastDur); err != nil {
-			return 0, err
-		}
-		d.warnedOversizedDiscard = true
-	}
-	return lastDur, nil
-}
-
-// nextFrame returns the next selected-track frame's data, duration, and sync
-// flag, or io.EOF at end of stream. Every audio frame is a sync point.
-func (d *Demuxer) nextFrame() ([]byte, int64, bool, error) {
+// nextFrame returns the next selected-track frame and its data, or io.EOF at
+// end of stream.
+func (d *Demuxer) nextFrame() (frameLoc, []byte, error) {
 	if d.pendingIdx >= len(d.pending) {
 		if err := d.advanceBlock(); err != nil {
-			return nil, 0, false, err
+			return frameLoc{}, nil, err
 		}
 	}
 	f := d.pending[d.pendingIdx]
 	d.pendingIdx++
 	data, err := d.frameBytes(f)
 	if err != nil {
-		return nil, 0, false, err
+		return frameLoc{}, nil, err
 	}
-	return data, d.frameSamples(data), true, nil
+	return f, data, nil
+}
+
+// timeBlock fixes the duration of every frame of a block before it is
+// installed and spreads the block's DiscardPadding over them from the last
+// lace backwards, since the spec attaches the trim to the block's end. Timing
+// at load, once per frame in stream order, is what keeps Vorbis right: its
+// frame durations depend on the frame before, and the read and the walk both
+// load blocks this way. The header prefixes it reads are in the window the
+// frames are delivered from.
+//
+// A trim larger than the whole block stays on the last lace's Padding,
+// unhonoured, and is surfaced once per file: a mid-stream one is lost (ffmpeg
+// ignores such a trim outright), a final one still comes off the settled
+// length through the raw-end cap.
+func (d *Demuxer) timeBlock(frames []frameLoc, discardNS int64) error {
+	if len(frames) == 0 {
+		return nil
+	}
+	d.w.Trim(frames[0].off)
+	for i := range frames {
+		dur, err := d.frameDur(frames[i])
+		if err != nil {
+			return err
+		}
+		frames[i].dur, frames[i].pad = dur, 0
+	}
+	pad := nsToSamples(discardNS, d.setup.fmt.Rate)
+	if pad <= 0 {
+		return nil
+	}
+	left := pad
+	for i := len(frames) - 1; i >= 0 && left > 0; i-- {
+		take := min(left, frames[i].dur)
+		frames[i].pad = take
+		left -= take
+	}
+	if left > 0 {
+		if !d.warnedOversizedDiscard {
+			// Latched after the warn, not before: in strict mode warn returns
+			// the refusal instead of recording it, and latching first would
+			// let a retried walk or a second read past the same block succeed
+			// where the first refused.
+			if err := d.warn(frames[0].off, "DiscardPadding of %d samples on a block holding %d; only the block is trimmed",
+				pad, pad-left); err != nil {
+				return err
+			}
+			d.warnedOversizedDiscard = true
+		}
+		frames[len(frames)-1].pad += left
+	}
+	return nil
+}
+
+// frameDur returns one frame's output length in samples. PCM derives it from
+// the frame size; the compressed codecs read a bounded header prefix, so
+// timing never reads a whole (possibly large) frame. For Vorbis it advances
+// the inter-frame state, so it is called once per frame, in order.
+func (d *Demuxer) frameDur(f frameLoc) (int64, error) {
+	if d.setup.id == codec.PCM {
+		if d.setup.pcmBytesPerFrame <= 0 {
+			return 0, nil
+		}
+		return int64(f.size / d.setup.pcmBytesPerFrame), nil
+	}
+	n := min(f.size, 128)
+	data := d.w.BytesAt(f.off, n)
+	if len(data) != n {
+		if e := d.w.Err(); e != nil {
+			return 0, e
+		}
+		return 0, malformed("frame prefix at %d truncated", f.off)
+	}
+	return d.frameSamples(data), nil
 }
 
 // frameBytes reads one frame's payload through the window, trimming consumed
@@ -268,10 +302,11 @@ func (d *Demuxer) stepCluster() (handled, done bool, err error) {
 }
 
 // loadBlock parses a (Simple)Block and, when it belongs to the selected track,
-// installs its frames as pending. A damaged block is skipped tolerantly; an I/O
-// failure propagates.
+// times it and installs its frames as pending. A damaged block is skipped
+// tolerantly; an I/O failure propagates. Nothing is installed on an error, so
+// a strict refusal is not followed by the block's frames.
 func (d *Demuxer) loadBlock(dataOff, size, discardNS int64) (bool, error) {
-	bh, err := parseBlock(&d.w, dataOff, size)
+	bh, err := parseBlock(&d.w, dataOff, size, d.pending[:0])
 	if err != nil {
 		if waxerr.CodeOf(err) == waxerr.CodeSourceUnreadable {
 			return false, err
@@ -284,9 +319,11 @@ func (d *Demuxer) loadBlock(dataOff, size, discardNS int64) (bool, error) {
 	if bh.track != d.sel.number {
 		return false, nil
 	}
+	if err := d.timeBlock(bh.frames, discardNS); err != nil {
+		return false, err
+	}
 	d.pending = bh.frames
 	d.pendingIdx = 0
-	d.curBlockDiscardNS = discardNS
 	return true, nil
 }
 
@@ -327,9 +364,9 @@ func (d *Demuxer) loadBlockGroup(g element) (bool, error) {
 				// to the start of the block) but not honored here; the
 				// gapless total treats it as zero, surfaced once per file.
 				if !d.warnedNegativeDiscard {
-					// Latched after the warn, for clampBlockTrim's reason: a
-					// strict warn is a refusal, and latching first would let a
-					// second pass over the same block through.
+					// Latched after the warn, for timeBlock's reason: a strict
+					// warn is a refusal, and latching first would let a second
+					// pass over the same block through.
 					if werr := d.warn(e.dataOff, "ignoring negative DiscardPadding"); werr != nil {
 						return false, werr
 					}
@@ -384,17 +421,21 @@ func (d *Demuxer) Walk() error {
 }
 
 // adoptWalkedLength puts a finished walk's measurement on the track: the last
-// block's DiscardPadding becomes the track's tail trim, the trims on the
-// blocks before it become MidPadding, and the raw total settles the length
-// through the one delivery rule. No open measures, so every mka track arrives
-// here with the advisory Info Duration or nothing at all. SettleLength is
-// idempotent on its own output, so running twice changes nothing.
+// packet's trim becomes the track's tail trim, the trims on the packets
+// before it become MidPadding with their positions in MidTrims, and the raw
+// total settles the length through the one delivery rule. No open measures,
+// so every mka track arrives here with the advisory Info Duration or nothing
+// at all. SettleLength is idempotent on its own output, so running twice
+// changes nothing.
 //
-// The tail trim is the final block's alone, not a sum, because that is the
+// The tail trim is the final packet's alone, not a sum, because that is the
 // only one an end trim can mean: the timeline already excludes the inner ones
 // (see container.Packet.Padding), so they are gone from the raw run and from
 // the settled length both, and folding them in here would shorten the end by
-// frames that play in the middle.
+// frames that play in the middle. A final laced block whose trim spreads
+// over its laces states the earlier laces' shares as inner trims for the
+// same reason: packets follow them, and a copy re-states each on the block
+// it writes.
 //
 // It is still clamped to the run it trims. A DiscardPadding is a signed 64-bit
 // element, so one block's is a hostile input's to choose: unclamped it can
@@ -405,14 +446,15 @@ func (d *Demuxer) Walk() error {
 func (d *Demuxer) adoptWalkedLength() {
 	d.track.Padding = min(max(d.padding, 0), d.rawTotal)
 	d.track.MidPadding = d.midPadding
+	d.track.MidTrims = d.midTrims
 	d.track = container.SettleLength(d.track, d.rawTotal)
 	if d.midPadding > 0 && !d.notedMidPadding {
 		// A Note rather than a warning: the file is not damaged and the audio
 		// is right. It exists so a probe, and the transcode a copy rung
 		// declines into, can say why a lossy source was re-encoded.
 		d.notedMidPadding = true
-		d.note(0, "%d samples are trimmed inside the run by a DiscardPadding on %d of the blocks before the last",
-			d.midPadding, d.midBlocks)
+		d.note(0, "%d samples are trimmed inside the run by a DiscardPadding on %d of the packets before the last",
+			d.midPadding, d.midCount)
 	}
 }
 
@@ -426,13 +468,12 @@ type readerState struct {
 	clusterCursor  int64
 	clusterUnknown bool
 
-	pending    []frameLoc
+	pending    []frameLoc // the loaded block's frames, timed (see timeBlock)
 	pendingIdx int
 	// running is the position the next packet is stamped with, on the timeline
-	// the reader delivers: each block's DiscardPadding comes off it as the
-	// block's last frame goes out (see container.Packet.Padding).
-	running           int64
-	curBlockDiscardNS int64 // DiscardPadding of the block in pending, in ns
+	// the reader delivers: each frame's share of its block's DiscardPadding
+	// comes off it as the frame goes out (see container.Packet.Padding).
+	running int64
 
 	vorbisPrevBlock int
 }
@@ -495,11 +536,11 @@ func (d *Demuxer) walk(limit int64) error {
 		// Every counter the loop below advances, or a retried walk counts the
 		// stretch a failed one already did twice. fail() drops walkedTo for
 		// exactly that reason, so this branch is the one a retry reaches.
-		d.walkCumulative = 0
-		d.walkMid = 0
-		d.walkMidBlocks = 0
+		d.walkCumulative, d.walkRaw = 0, 0
+		d.walkMid, d.walkMidCount = 0, 0
 		d.walkLastPad, d.walkLastClamped = 0, 0
 		d.walkFrames = 0
+		d.midTrims = nil
 		d.clusterIndex = d.clusterIndex[:0]
 		d.resetReading(d.firstClusterOff)
 	}
@@ -514,53 +555,26 @@ func (d *Demuxer) walk(limit int64) error {
 		if err != nil {
 			return fail(err)
 		}
-		var lastDur, lastOff int64
 		for d.pendingIdx < len(d.pending) {
 			f := d.pending[d.pendingIdx]
 			d.pendingIdx++
 			if d.walkFrames++; d.walkFrames > maxFrames {
 				return fail(malformed("more than %d frames", int64(maxFrames)))
 			}
-			dur, derr := d.frameDurAt(f)
-			if derr != nil {
-				return fail(derr)
-			}
-			d.walkCumulative += dur
-			lastDur, lastOff = dur, f.off
-		}
-		// The block's trim comes off the running position, so cluster anchors
-		// are the positions a read delivers. The newest block's trim is the
-		// end-trim candidate and stays out of walkMid until another block
-		// follows it, which is what makes walkMid the *inner* trims alone.
-		d.walkLastPad, d.walkLastClamped = 0, 0
-		if d.curBlockDiscardNS > 0 {
-			pad := nsToSamples(d.curBlockDiscardNS, d.setup.fmt.Rate)
-			clamped, werr := d.clampBlockTrim(pad, lastDur, lastOff)
-			if werr != nil {
-				return fail(werr)
-			}
-			d.walkCumulative -= clamped
-			d.walkLastPad, d.walkLastClamped = pad, clamped
-			if clamped > 0 {
-				d.walkMid += clamped
-				d.walkMidBlocks++
-			}
+			d.walkFrame(f)
 		}
 	}
 	if d.walkStopped {
 		d.walkedTo = d.curOff
 	} else {
 		// The stream ended, so the counts are whole even if a bound was set.
-		// The final block's trim goes back into the raw run, since that is
+		// The final packet's trim goes back into the raw run, since that is
 		// where SettleLength expects the end trim's frames to be; the inner
 		// ones stay out of both sides.
 		d.rawTotal = d.walkCumulative + d.walkLastClamped
 		d.padding = d.walkLastPad
-		d.midPadding = d.walkMid - d.walkLastClamped
-		d.midBlocks = d.walkMidBlocks
-		if d.walkLastClamped > 0 {
-			d.midBlocks--
-		}
+		d.midPadding = d.walkMid
+		d.midCount = d.walkMidCount
 		d.walkedTo = d.segmentEnd
 		d.walked = true
 	}
@@ -568,6 +582,28 @@ func (d *Demuxer) walk(limit int64) error {
 	d.walkLimit = -1
 	d.resetReading(d.firstClusterOff)
 	return nil
+}
+
+// walkFrame counts one frame into the walk. Its trim comes off the running
+// position, so cluster anchors are the positions a read delivers. The newest
+// frame's trim is the end-trim candidate until another frame follows it,
+// which is what makes walkMid and the recorded positions the inner trims
+// alone. A position is on the raw timeline (every frame whole), clamped to
+// its frame; past maxMidTrims the sum keeps counting and the list stops.
+func (d *Demuxer) walkFrame(f frameLoc) {
+	if d.walkLastClamped > 0 {
+		d.walkMid += d.walkLastClamped
+		d.walkMidCount++
+		if len(d.midTrims) < maxMidTrims {
+			d.midTrims = append(d.midTrims, container.PacketTrim{
+				Pos: d.walkRaw - d.walkLastClamped, Samples: d.walkLastClamped,
+			})
+		}
+	}
+	clamped := min(f.pad, f.dur)
+	d.walkCumulative += f.dur - clamped
+	d.walkRaw += f.dur
+	d.walkLastPad, d.walkLastClamped = f.pad, clamped
 }
 
 // boundedWalkSafe reports whether the walk may stop short and resume later.
@@ -644,32 +680,6 @@ func (d *Demuxer) seekWalk(sample int64) error {
 		return d.ensureWalk()
 	}
 	return d.walk(limit)
-}
-
-// frameDurAt returns a frame's output length in samples for the index walk. PCM
-// derives it from the frame size; the compressed codecs read a bounded header
-// prefix, so the walk never reads a whole (possibly large) frame just to time
-// it.
-func (d *Demuxer) frameDurAt(f frameLoc) (int64, error) {
-	if d.setup.id == codec.PCM {
-		if d.setup.pcmBytesPerFrame <= 0 {
-			return 0, nil
-		}
-		return int64(f.size / d.setup.pcmBytesPerFrame), nil
-	}
-	n := f.size
-	if n > 128 {
-		n = 128
-	}
-	d.w.Trim(f.off)
-	data := d.w.BytesAt(f.off, n)
-	if len(data) != n {
-		if e := d.w.Err(); e != nil {
-			return 0, e
-		}
-		return 0, malformed("frame prefix at %d truncated", f.off)
-	}
-	return d.frameSamples(data), nil
 }
 
 // SeekSample lands on the indexed cluster at or before the target in the raw

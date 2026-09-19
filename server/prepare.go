@@ -213,8 +213,9 @@ func (s *Server) planTranscode(req *streamRequest) error {
 	// declines rung 2 (it cuts mid-packet), so the cut rung sits below it: the
 	// same packet-move answer, filtered to the span, for a source whose codec
 	// survives being repositioned. Anything neither serves takes rung 3, and a
-	// source whose walk found a trim inside the run always does outside a plain
-	// Matroska remux (see container.Track.MidPadding).
+	// source whose walk found a trim inside the run does unless the output is
+	// Matroska or the cut drops the trimmed packets (see
+	// container.Track.MidPadding).
 	if req.remux = s.remuxPlanFor(req); req.remux != nil {
 		req.plan = &req.remux.TranscodePlan
 	} else if req.cut = s.cutPlanFor(req); req.cut != nil {
@@ -354,7 +355,7 @@ func (s *Server) cutPlanFor(req *streamRequest) *waxflow.CutPlan {
 		return decline("PlanCut refused the span", "err", err)
 	}
 	if plan == nil {
-		return decline("no cut serves these options (gap, tail, or destination)")
+		return decline("no cut serves these options (gap, trims, or destination)")
 	}
 	req.cutGrid = grid
 	// The measured length the plan cut from, so the run's init segment carries it

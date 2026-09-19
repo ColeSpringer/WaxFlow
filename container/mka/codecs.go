@@ -250,11 +250,13 @@ func flacStreamInfo(priv []byte) ([]byte, error) {
 }
 
 // frameSamples returns one codec frame's output length in samples, in the
-// codec's decode timeline. It drives per-packet PTS/Dur and, for gapless
-// tracks, the raw-total pass; Vorbis carries state across the call, so a seek
-// restart resets it (resetTiming). A frame it cannot measure returns 0 rather
-// than failing: only Opus (the gapless codec) needs an exact answer, and the
-// others' durations are informational.
+// codec's decode timeline, from the frame's header. It drives per-packet
+// PTS/Dur and the walk's raw total, once per frame in stream order as each
+// block is timed (timeBlock); Vorbis carries state across the call, which is
+// why that order matters, and a seek restart resets it (resetReading). A
+// frame it cannot measure returns 0 rather than failing: only Opus (the
+// gapless codec) needs an exact answer, and the others' durations are
+// informational.
 func (d *Demuxer) frameSamples(data []byte) int64 {
 	switch d.setup.id {
 	case codec.Opus:

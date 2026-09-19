@@ -9,6 +9,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // collectCutSegments runs a segmented cut and returns the segments it emitted.
@@ -204,4 +205,91 @@ func TestCutSegmentsAreTheSourcesOwnPackets(t *testing.T) {
 		si++
 	}
 	t.Logf("cut %d source packets to %d across segments, all byte-identical", len(want), len(got))
+}
+
+// TestCutSegmentsAcrossAMidStreamTrim: the segmented cut declines when a
+// kept packet carries a trim (fMP4 states none per packet) and serves a span
+// past the trim, where a restarted worker's seek crosses over the trim on
+// its way to the source and back: the source demuxer lands on a cluster
+// anchor stamped on the delivered timeline, and the cut's windows are on the
+// raw one, so a restart that took the landing at face value would resume a
+// trim's worth early and splice the wrong packets.
+//
+// Five seconds of source, so the muxer's second cluster (past four seconds)
+// begins after the trim on block 8, and a span inside it seeks there.
+func TestCutSegmentsAcrossAMidStreamTrim(t *testing.T) {
+	src := midTrimWebMOf(t, true, 240000)
+	track := walkedTrack(t, src, "webm")
+	if track.MidPadding != midTrimPad || !track.MidTrimsComplete() {
+		t.Fatalf("the walk found MidPadding %d at %v, want %d placed", track.MidPadding, track.MidTrims, midTrimPad)
+	}
+	e := waxflow.New()
+	grid, err := e.PacketGrid(container.BytesSource(src), "webm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := waxflow.TranscodeOptions{Format: "opus"}
+
+	// The trimmed packet is in the head slop of this span, and fMP4 cannot
+	// carry it.
+	plan, err := e.PlanCutSegments(track, opts, []waxflow.Span{{From: 9600, To: 28800}}, grid, 0.5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan != nil {
+		t.Error("PlanCutSegments planned a segmented cut whose kept packets carry a trim")
+	}
+
+	spans := []waxflow.Span{{From: 200000, To: 230000}}
+	plan, err = e.PlanCutSegments(track, opts, spans, grid, 0.5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan == nil {
+		t.Fatal("PlanCutSegments declined a span past the trim")
+	}
+	if plan.Samples != 30000 {
+		t.Errorf("plan.Samples = %d, want the 30000 asked for", plan.Samples)
+	}
+	full := collectCutSegments(t, e, src, "webm", opts, spans, grid, plan.Source, plan.SegmentSamples, 0)
+	if len(full) < 2 {
+		t.Fatalf("the cut yielded %d segments; need several to restart into", len(full))
+	}
+	for start := int64(1); start < int64(len(full)); start++ {
+		tail := collectCutSegments(t, e, src, "webm", opts, spans, grid, plan.Source, plan.SegmentSamples, start)
+		if int64(len(tail)) != int64(len(full))-start {
+			t.Fatalf("restart at %d yielded %d segments, want %d", start, len(tail), int64(len(full))-start)
+		}
+		for i, s := range tail {
+			if s.Index != full[int(start)+i].Index || !bytes.Equal(s.Data, full[int(start)+i].Data) {
+				t.Fatalf("restarted segment %d differs from the continuous run's: the seek crossed the trim wrong", s.Index)
+			}
+		}
+	}
+}
+
+// TestCutSegmentsRefusesAKeptTrimBeforeAnySegment: a run reached past the
+// plan with a Matroska container in its options passes PlanRemux, whose
+// answer is for that container, and the run always writes fMP4; it refuses
+// before a segment goes out rather than through the copy's backstop mid-run.
+func TestCutSegmentsRefusesAKeptTrimBeforeAnySegment(t *testing.T) {
+	src := midTrimWebM(t, true)
+	track, grid := midTrimTrack(t, src)
+	e := waxflow.New()
+	emitted := 0
+	_, err := e.CutSegments(context.Background(), container.BytesSource(src), "webm",
+		waxflow.TranscodeOptions{Format: "opus", Container: "mka"}, []waxflow.Span{{From: 9600, To: 28800}}, grid, track,
+		waxflow.SegmentedOptions{SegmentSamples: 4800}, func(mp4.Segment) error {
+			emitted++
+			return nil
+		})
+	if err == nil {
+		t.Fatal("CutSegments segmented a cut whose kept packets carry a trim")
+	}
+	if code := waxerr.CodeOf(err); code != waxerr.CodeInvalidRequest {
+		t.Errorf("code = %v, want %v: %v", code, waxerr.CodeInvalidRequest, err)
+	}
+	if emitted != 0 {
+		t.Errorf("%d segments went out before the refusal", emitted)
+	}
 }

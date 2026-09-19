@@ -150,7 +150,7 @@ func (m *media) Walk() error {
 		// would move the delivered timeline under the caller.
 		m.track.Samples = t.Samples
 		m.track.Padding = t.Padding
-		m.track.MidPadding = t.MidPadding
+		m.track.MidPadding, m.track.MidTrims = t.MidPadding, t.MidTrims
 		m.track.SamplesExact = t.SamplesExact
 		m.track.SamplesAdvisory = t.SamplesAdvisory
 		m.rawEnd = rawEndFor(m.track)

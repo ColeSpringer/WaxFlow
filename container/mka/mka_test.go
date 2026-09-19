@@ -41,7 +41,7 @@ func TestParseBlockLacing(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			w := srcwin.New(container.BytesSource(c.block), int64(len(c.block)), "test")
-			bh, err := parseBlock(&w, 0, int64(len(c.block)))
+			bh, err := parseBlock(&w, 0, int64(len(c.block)), nil)
 			if err != nil {
 				t.Fatalf("parseBlock: %v", err)
 			}

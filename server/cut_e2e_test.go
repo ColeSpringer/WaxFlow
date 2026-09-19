@@ -196,8 +196,7 @@ func TestCutSwallowsStricterRefusal(t *testing.T) {
 //
 // A ToEnd span is the discriminating case: only there does the header's -1 flow
 // into the run's synthesized track length (a bounded cut computes its own finite
-// length regardless). from>0 keeps the cut from declining on an unanswerable
-// tail.
+// length regardless).
 func TestCutThreadsMeasuredLengthForUndeclaredSource(t *testing.T) {
 	env := newTestEnv(t, nil)
 	ref := writeADTSFixture(t, env, "ramp.wav", "ramp.aac")

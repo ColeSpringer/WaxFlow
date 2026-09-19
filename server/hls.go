@@ -690,7 +690,7 @@ func (s *Server) cutSegmentPlanFor(src *source.File, track container.Track,
 		return decline("PlanCutSegments refused the span", "err", err)
 	}
 	if cp == nil {
-		return decline("no cut serves these options (gap, tail, or destination)")
+		return decline("no cut serves these options (gap, trims, or destination)")
 	}
 	return cp
 }

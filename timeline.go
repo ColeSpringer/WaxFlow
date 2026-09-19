@@ -344,9 +344,10 @@ func SpanTrack(track container.Track, from, to int64) (container.Track, error) {
 	// container's declaration through would make a downstream consumer trim
 	// a second time, against a stream that has no delay left to cut.
 	//
-	// MidPadding goes with them, for a reason one step further along: it
-	// describes the source's *packets*, and a span of a decoded view has none.
-	out.Delay, out.Padding, out.MidPadding = 0, 0, 0
+	// MidPadding and MidTrims go with them, for a reason one step further
+	// along: they describe the source's *packets*, and a span of a decoded
+	// view has none.
+	out.Delay, out.Padding, out.MidPadding, out.MidTrims = 0, 0, 0, nil
 	// The source's own codec is kept, unlike a Concat's synthetic PCM
 	// envelope, and that is not cosmetic: the codec is what names the
 	// decoder revision in a plan's Versions, so a span of a FLAC keys on the

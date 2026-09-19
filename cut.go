@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/aac"
@@ -165,8 +166,9 @@ var cutCodecs = map[codec.ID]cutCodec{
 // packet-grid walk for a codec no cut could ever serve.
 //
 // It answers only the codec question, which is the cheap one: a true here does
-// not promise the cut will be taken, since a sub-grid gap, an unanswerable tail,
-// or a destination that cannot signal the trims still declines inside PlanCut.
+// not promise the cut will be taken, since a sub-grid gap, a trim the walk
+// could not place, or a destination that cannot signal the trims still
+// declines inside PlanCut.
 // It is the fast negative, not a guarantee of the positive. See cutCodecs for
 // why the set is an allowlist rather than a lossless rule.
 func Cuttable(track container.Track) bool {
@@ -204,9 +206,9 @@ func CutFormats() []string {
 type cutWindow struct{ from, to int64 }
 
 // cutResult is the whole of the cut's arithmetic, read by CutTrack (which wants
-// the track and the landed spans) and Cut (which wants the windows), so the
-// track a muxer is opened with and the packets a walk delivers cannot come to
-// disagree.
+// the track and the landed spans) and Cut (which wants the windows and the
+// source's trims), so the track a muxer is opened with and the packets a walk
+// delivers cannot come to disagree.
 //
 // One function rather than one call: each public entry point recomputes this
 // from the caller's own inputs, so a cut runs it two or three times over. That
@@ -219,6 +221,9 @@ type cutResult struct {
 	track   container.Track
 	landed  []Span
 	windows []cutWindow
+	// trims is the source's inner trims the windows were placed around, the
+	// ones the view forwards; a packet carrying any other refuses.
+	trims []container.PacketTrim
 }
 
 // maxCutSample is the ceiling every input to the grid arithmetic must sit
@@ -232,14 +237,15 @@ type cutResult struct {
 // before it, a To of MaxInt64 was accepted and synthesized a Padding of
 // 9223372036854774785.
 //
-// All three inputs are bounded and not just the caller's, because the positions
-// the snap works in are span + Delay and the snap then adds grid - 1 on top. A
-// span bound alone leaves the sum free: a container declaring an absurd Delay
-// (nothing bounds one above, and mp4's progressive muxer is the only thing in
-// the tree that even rejects a negative) overflows the snap just as well, and
-// produced a Padding of 1525 where 501 was the answer. Three addends each under
-// 2^61 sum to under 2^63, so the arithmetic below provably cannot wrap. That is
-// the whole reason for the value.
+// All four inputs are bounded and not just the caller's, because the positions
+// the snap works in are span + Delay + the trims before it (MidPadding at
+// most) and the snap then adds grid - 1 on top. A span bound alone leaves the
+// sum free: a container declaring an absurd Delay (nothing bounds one above,
+// and mp4's progressive muxer is the only thing in the tree that even rejects
+// a negative) overflows the snap just as well, and produced a Padding of 1525
+// where 501 was the answer. Four addends each under 2^61 sum to under 2^63, so
+// the arithmetic below provably cannot wrap. That is the whole reason for the
+// value.
 //
 // It is not a claim about real audio: 2^61 samples is about a million and a half
 // years at 48 kHz, so nothing legitimate is refused. RemuxSegments guards its
@@ -274,6 +280,105 @@ func snapGridUp(x, g int64) int64 {
 		return 0
 	}
 	return (x + g - 1) / g * g
+}
+
+// The two timelines a cut works between: a span is on the track's own, where
+// the delay and the trims inside the run (container.Track.MidTrims) do not
+// exist, and the packet grid holds on the raw one, the sum of every packet's
+// Dur. A bound crosses over by stepping past the delay and then past every
+// trim before it, in order (a trim stepped over may carry it up to the next).
+// Trims end on packet boundaries (placeableTrims), so neither a grid position
+// nor a mapped bound is ever inside one.
+
+// rawStart maps the first kept sample of a span onto the raw timeline. A trim
+// beginning exactly there is before the sample, so it is stepped over.
+func rawStart(trims []container.PacketTrim, delay, t int64) int64 {
+	raw := t + delay
+	for _, tr := range trims {
+		if tr.Pos > raw {
+			break
+		}
+		raw += tr.Samples
+	}
+	return raw
+}
+
+// rawEnd maps the exclusive end of a span onto the raw timeline: one past the
+// last kept sample, so a trim beginning there stays and becomes tail slop.
+func rawEnd(trims []container.PacketTrim, delay, t int64) int64 {
+	return rawStart(trims, delay, t-1) + 1
+}
+
+// trackPos maps a grid position back onto the track's timeline: the delay
+// and every trim that ends at or before it come off.
+func trackPos(trims []container.PacketTrim, delay, raw int64) int64 {
+	t := raw - delay
+	for _, tr := range trims {
+		if tr.Pos+tr.Samples > raw {
+			break
+		}
+		t -= tr.Samples
+	}
+	return t
+}
+
+// trimsWithin returns the trims lying inside the raw range [from, to), a to of
+// -1 meaning to the end.
+func trimsWithin(trims []container.PacketTrim, from, to int64) []container.PacketTrim {
+	var out []container.PacketTrim
+	for _, tr := range trims {
+		if tr.Pos < from {
+			continue
+		}
+		if to >= 0 && tr.Pos+tr.Samples > to {
+			break
+		}
+		out = append(out, tr)
+	}
+	return out
+}
+
+// plannedTrim returns the size of the trim ending at the raw position end, or
+// 0 when none does.
+func plannedTrim(trims []container.PacketTrim, end int64) int64 {
+	i := sort.Search(len(trims), func(i int) bool { return trims[i].Pos >= end }) - 1
+	if i >= 0 && trims[i].Pos+trims[i].Samples == end {
+		return trims[i].Samples
+	}
+	return 0
+}
+
+// placeableTrims reports whether track's inner trims are ones a cut can plan
+// around on a g-sample grid: every trim MidPadding sums is listed, in order,
+// each inside one packet and ending on its boundary, and the sum is under
+// maxCutSample like the other addends. A walk that ran out of room leaves the
+// list short, a track nothing walked has a sum and no list, and a caller's
+// own track may say anything.
+func placeableTrims(track container.Track, g int64) bool {
+	if !track.MidTrimsComplete() || track.MidPadding >= maxCutSample {
+		return false
+	}
+	var prev int64
+	for _, tr := range track.MidTrims {
+		if tr.Samples <= 0 || tr.Samples > g || tr.Pos < prev || (tr.Pos+tr.Samples)%g != 0 {
+			return false
+		}
+		prev = tr.Pos + tr.Samples
+	}
+	return true
+}
+
+// wholePacketTrim reports whether any trim empties its packet. Two packets
+// then share one position on the delivered timeline, and a seek landing
+// there cannot tell which of them the demuxer will deliver first, so the
+// seekable cut view declines such a source.
+func wholePacketTrim(trims []container.PacketTrim, g int64) bool {
+	for _, tr := range trims {
+		if tr.Samples >= g {
+			return true
+		}
+	}
+	return false
 }
 
 // CutTrack synthesizes the track a cut of track to spans would produce: its
@@ -412,44 +517,43 @@ func computeCut(track container.Track, spans []Span, grid int) (*cutResult, erro
 			"waxflow: this source declares a %d-sample delay on a %d-sample grid, which is outside the timeline this rung can compute in",
 			track.Delay, grid))
 	}
-	// A trim inside the run declines for every destination, Matroska included,
-	// and for a reason the remux rung does not share: past the first inner trim
-	// every packet starts at a grid position minus the trims so far (a 960 grid
-	// and a 48-sample trim put packet 200 at 191952), so any window edge past it
-	// straddles a packet. PacketGrid cannot see it, because Dur is unchanged.
-	// Rung 3 decodes and cuts in PCM, where the grid does not exist.
-	//
-	// CodeUnsupportedFormat, so PlanCut reads it as a decline like the grid
-	// checks around it; the cut view refuses mid-walk for a source nothing
-	// measured first.
-	if track.MidPadding > 0 {
+	g := int64(grid)
+	// A trim inside the run is where the two timelines part: past it every
+	// packet starts at a grid position minus the trims so far, which
+	// PacketGrid cannot see because Dur is unchanged. So the arithmetic below
+	// runs on the raw timeline, carrying each bound past the trims before it,
+	// which needs every trim placed on the grid. A walk that ran out of room,
+	// a track nothing walked, or a caller's own list declines
+	// (CodeUnsupportedFormat, a decline like the grid checks above); the cut
+	// view refuses mid-walk for a source nothing measured first.
+	if (track.MidPadding > 0 || len(track.MidTrims) > 0) && !placeableTrims(track, g) {
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
-			"waxflow: this source trims %d samples inside the run, so its packets no longer sit on the %d-sample grid past that point; this cut cannot be made without re-encoding",
+			"waxflow: this source trims %d samples inside the run at places the walk did not record on its %d-sample grid; this cut cannot be made without re-encoding",
 			track.MidPadding, grid))
 	}
-	g := int64(grid)
 	n := len(spans)
 
-	// decodedEnd is where the source's audio ends on the decode timeline, or -1
+	// decodedEnd is where the source's decode ends on the raw timeline, or -1
 	// when the source declares no length. Everything below that needs it guards
 	// on it rather than branching the whole computation: an unknown length
 	// inverts the arithmetic rather than defeating it, which is remuxTrailer's
 	// own precedent, and the -1 propagates to Samples for it to resolve from the
-	// walk.
+	// walk. The inner trims are in the raw run like the tail trim is, and the
+	// audio ends a tail trim before it.
 	decodedEnd := int64(-1)
 	if track.Samples >= 0 {
-		decodedEnd = track.Delay + track.Samples + track.Padding
+		decodedEnd = track.Delay + track.Samples + track.Padding + track.MidPadding
 	}
 	lastToEnd := spans[n-1].To == ToEnd
 
-	// df/dt are the requested span on the decode timeline; sd/su are where the
+	// df/dt are the requested span on the raw timeline; sd/su are where the
 	// packet grid makes it land.
 	df := make([]int64, n)
 	dt := make([]int64, n)
 	sd := make([]int64, n)
 	su := make([]int64, n)
 	for i, s := range spans {
-		df[i] = s.From + track.Delay
+		df[i] = rawStart(track.MidTrims, track.Delay, s.From)
 		// The head backs off by the codec's pre-roll before it snaps, and that
 		// is not a refinement, it is the difference between a cut that works and
 		// one that silently destroys the source's priming. opusenc writes a
@@ -463,10 +567,10 @@ func computeCut(track container.Track, spans []Span, grid int) (*cutResult, erro
 		sd[i] = snapGridDown(df[i]-cc.preroll, g)
 		switch {
 		case s.To != ToEnd:
-			dt[i] = s.To + track.Delay
+			dt[i] = rawEnd(track.MidTrims, track.Delay, s.To)
 			su[i] = snapGridUp(dt[i], g)
 		case decodedEnd >= 0:
-			dt[i] = track.Delay + track.Samples
+			dt[i] = decodedEnd - track.Padding
 			su[i] = decodedEnd
 		default:
 			dt[i], su[i] = -1, -1
@@ -501,31 +605,38 @@ func computeCut(track container.Track, spans []Span, grid int) (*cutResult, erro
 	}
 
 	out := track
+	// The trims the kept packets carry stay on them (the view forwards each,
+	// Matroska writes it), so they are the cut track's own MidPadding, which is
+	// what PlanRemux declines every other destination on. The final kept
+	// packet's is left out: the trailer restates that one, and the tail slop
+	// below covers it. Each is re-placed on the output's raw timeline, where
+	// the kept windows run back to back.
+	out.MidPadding, out.MidTrims = 0, nil
+	var outRaw int64
+	for i := range spans {
+		for _, tr := range trimsWithin(track.MidTrims, sd[i], su[i]) {
+			if i == n-1 && !lastToEnd && !tailClamped && tr.Pos+tr.Samples == su[i] {
+				continue
+			}
+			out.MidPadding += tr.Samples
+			out.MidTrims = append(out.MidTrims, container.PacketTrim{Pos: outRaw + tr.Pos - sd[i], Samples: tr.Samples})
+		}
+		if su[i] >= 0 {
+			outRaw += su[i] - sd[i]
+		}
+	}
 	// The head's snap slop becomes the delay: it is delivered audio the decoder
-	// needs and the listener must not hear.
+	// needs and the listener must not hear, counted after the packets' own
+	// trims, which the reader drops first.
 	out.Delay = df[0] - sd[0]
-
-	// An unanswerable tail, and it is narrower than it looks.
-	//
-	// When the snap overshoots the end, the walk keeps to EOF and the true tail
-	// slop is what the walk delivered minus the requested end. The header cannot
-	// name that: a granule-truncated final packet (the Ogg-Opus shape) leaves the
-	// packets running past the header's decode total, by 648 samples in the
-	// ordinary case. remuxTrailer re-derives the padding from the walk for any
-	// track that declares a delay, which repairs exactly this, so the overshoot
-	// is harmless there and the arithmetic below is self-correcting.
-	//
-	// With no delay to trigger that branch, the header's number is the one that
-	// ships, and a muxer that writes the count explicitly (Matroska's
-	// DiscardPadding) would trim by it. So this declines only the combination
-	// that has no repair: an overshot tail on a track whose head is exact, which
-	// means a From of 0 on a source with no priming of its own.
-	if tailClamped && out.Delay == 0 {
-		return nil, waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
-			"waxflow: span [%d, %d) ends inside the source's final packet, whose length the header does not state, and this cut has no delay for the trailer to resolve it against; re-encode it",
-			spans[n-1].From, spans[n-1].To))
+	for _, tr := range trimsWithin(track.MidTrims, sd[0], df[0]) {
+		out.Delay -= tr.Samples
 	}
 
+	// A clamped tail runs to EOF, past the end the header names (an Ogg-Opus
+	// final packet is granule-truncated), and the trailer resolves it: the
+	// length below is exact, and container.SettleLength re-derives the padding
+	// from the run for an exact length, delay or no delay.
 	switch {
 	case lastToEnd && track.Samples < 0:
 		// Nothing to resolve the end against, so the source's own tail trim is
@@ -541,7 +652,9 @@ func computeCut(track container.Track, spans []Span, grid int) (*cutResult, erro
 		// becoming the delay. Where the last span runs to the source's own end
 		// (a ToEnd span, or a bounded one clamped to it above), su is the decode
 		// total and dt is the end of the audio, so this reduces to the source's
-		// own Padding by the same definition rather than by a special case.
+		// own Padding by the same definition rather than by a special case. It
+		// is in the final packet's own samples, which is what a trailer's trim
+		// means, so a trim the source stated on that packet is inside it.
 		out.Padding = su[n-1] - dt[n-1]
 		// The landed length, not the requested one. This is the keystone.
 		//
@@ -552,12 +665,13 @@ func computeCut(track container.Track, spans []Span, grid int) (*cutResult, erro
 		// delivered audio, because there is no per-splice trim to remove it
 		// with, so it is part of the length. Counting it in makes the slop terms
 		// cancel: remuxTrailer then yields exactly Padding, and the same number
-		// that makes the trailer correct is the number Landed reports.
+		// that makes the trailer correct is the number Landed reports. The
+		// trims the kept packets carry are not delivered, so they come off.
 		var delivered int64
 		for i := range spans {
 			delivered += su[i] - sd[i]
 		}
-		out.Samples = delivered - out.Delay - out.Padding
+		out.Samples = delivered - out.MidPadding - out.Delay - out.Padding
 	}
 	// Stated rather than left to fall out of the struct copy, which is how it
 	// drifts. A bounded last span makes the length computed rather than
@@ -577,7 +691,7 @@ func computeCut(track container.Track, spans []Span, grid int) (*cutResult, erro
 	landed := make([]Span, n)
 	windows := make([]cutWindow, n)
 	for i := range spans {
-		landed[i] = Span{From: sd[i] - track.Delay, To: su[i] - track.Delay}
+		landed[i] = Span{From: trackPos(track.MidTrims, track.Delay, sd[i]), To: trackPos(track.MidTrims, track.Delay, su[i])}
 		windows[i] = cutWindow{from: sd[i], to: su[i]}
 	}
 	// The head and the tail land exactly where they were asked for: their slop
@@ -600,7 +714,7 @@ func computeCut(track container.Track, spans []Span, grid int) (*cutResult, erro
 		// reaches the source's end, so it ends where the packets do.
 		windows[n-1].to = -1
 	}
-	return &cutResult{track: out, landed: landed, windows: windows}, nil
+	return &cutResult{track: out, landed: landed, windows: windows, trims: track.MidTrims}, nil
 }
 
 // adoptMeasured overlays onto a fresh header open the facts only a measurement
@@ -617,7 +731,7 @@ func adoptMeasured(track, measured container.Track) container.Track {
 		return track
 	}
 	track.Samples, track.SamplesExact, track.SamplesAdvisory = measured.Samples, true, false
-	track.Padding, track.MidPadding = measured.Padding, measured.MidPadding
+	track.Padding, track.MidPadding, track.MidTrims = measured.Padding, measured.MidPadding, measured.MidTrims
 	return track
 }
 
@@ -649,20 +763,24 @@ func Cut(demux container.Demuxer, track container.Track, spans []Span, grid int)
 	if err != nil {
 		return nil, err
 	}
-	return &cutDemuxer{Demuxer: demux, cut: res.track, track: track.ID, windows: res.windows}, nil
+	return &cutDemuxer{Demuxer: demux, cut: res.track, track: track.ID, windows: res.windows, trims: res.trims}, nil
 }
 
-// cutDemuxer is Cut's view: the windows in source decode coordinates, the walk's
+// cutDemuxer is Cut's view: the windows in source raw coordinates, the walk's
 // position in them, and the output position it retimes onto.
 type cutDemuxer struct {
 	container.Demuxer
 	cut     container.Track
 	track   int
 	windows []cutWindow
+	trims   []container.PacketTrim // the source's inner trims the plan placed
 	cur     int
-	pos     int64 // the next source packet's decode position
-	out     int64 // the next kept packet's output decode position
-	prevPad int64 // the previous source packet's own trim, if it stated one
+	pos     int64 // the next source packet's raw position
+	out     int64 // the next kept packet's output position, on the delivered timeline
+	prevPad int64 // the previous source packet's own trim, clamped to the packet
+	// havePrev says prevPad describes a packet this view read: false at the
+	// start and after a seek, when the packet before the cursor is unknown.
+	havePrev bool
 }
 
 // Tracks reports the cut's own track, which is the one the packets coming out of
@@ -705,18 +823,20 @@ func (c *cutDemuxer) ReadPacket(pkt *container.Packet) error {
 		if pkt.Track != c.track {
 			continue
 		}
-		// Something followed the previous packet, so its trim was an inner one.
-		// Past it the source's packets sit at a grid position minus the trims
-		// so far, so no window edge this cut computed lands on a packet
-		// boundary any more, and PacketGrid cannot see it because Dur is
-		// unchanged. PlanCut declines a source whose walk found one; this is
-		// the backstop for a source nothing measured first.
-		if c.prevPad > 0 {
-			return innerTrimRefusal(c.prevPad, cutTrimRemedy)
-		}
-		c.prevPad = pkt.Padding
 		start, end := c.pos, c.pos+pkt.Dur
 		c.pos = end
+		// Something followed the previous packet, so its trim was an inner one
+		// and must be the one the plan placed there, or the windows were
+		// computed for a different file: the plan declines trims it cannot
+		// place, and this is the backstop for a source nothing measured first
+		// or a stale measure. Checked before the windows advance, so the last
+		// kept packet is covered too; the packet that ends the walk never is.
+		if c.havePrev {
+			if planned := plannedTrim(c.trims, start); planned != c.prevPad {
+				return cutTrimMismatch(c.prevPad, planned, start)
+			}
+		}
+		c.prevPad, c.havePrev = min(max(pkt.Padding, 0), pkt.Dur), true
 		for c.cur < len(c.windows) && c.windows[c.cur].to >= 0 && start >= c.windows[c.cur].to {
 			c.cur++
 		}
@@ -741,11 +861,12 @@ func (c *cutDemuxer) ReadPacket(pkt *container.Packet) error {
 		if w.to >= 0 && end > w.to {
 			return cutStraddle(start, end, w.to)
 		}
-		// Retimed to be contiguous: the output's decode timeline runs from 0
-		// with no holes, and the cut track's Delay trims its head exactly as a
-		// plain remux's does.
+		// Retimed to be contiguous: the output's timeline runs from 0 with no
+		// holes, and the cut track's Delay trims its head exactly as a plain
+		// remux's does. A kept packet's own trim stays on it and the position
+		// advances past it as a demuxer's does (container.Packet.Padding).
 		pkt.PTS = c.out
-		c.out += pkt.Dur
+		c.out += pkt.Dur - c.prevPad
 		return nil
 	}
 }
@@ -754,6 +875,18 @@ func cutStraddle(start, end, at int64) error {
 	return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
 		"waxflow: source packet [%d, %d) straddles the cut boundary at %d; this stream cannot be cut without re-encoding",
 		start, end, at))
+}
+
+// cutTrimMismatch is the cut view's refusal when the packet ending at the raw
+// position at carries a trim (got) other than the one the plan placed there
+// (want): a source nothing measured first, or one that changed since.
+func cutTrimMismatch(got, want, at int64) error {
+	if want == 0 {
+		return innerTrimRefusal(got, cutTrimRemedy)
+	}
+	return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
+		"waxflow: the plan placed a %d-sample trim ending at %d and the packet there trims %d; the source is not the one that was measured, so this cut cannot be made without re-measuring it",
+		want, at, got))
 }
 
 // PlanCut reports whether opts can be served by cutting track's existing packets
@@ -778,15 +911,19 @@ func cutStraddle(start, end, at int64) error {
 // cut is re-encoding has no other signal, so each is logged at Debug on its way
 // out. The prose lives on the error path, where RemuxDemuxer names it.
 //
-// The seven: a codec off the allowlist, no grid, a sub-grid gap, an
-// unanswerable tail, a source whose Delay or grid is outside the timeline this
-// rung computes in, an HE-AAC span that does not keep the stream head, and a
-// codec config the reprime cannot rewrite. The last is worth naming
-// because it looks like it should be an error and is not: a priming this rung
-// computed and OpusHead's 16-bit field cannot hold is this rung's limit, not
-// the file's, so the honest answer is to hand the request to a rung that
-// re-encodes rather than to refuse it on everyone's behalf, and
-// CodeUnsupportedFormat is exactly what a decline is made of.
+// The seven: a codec off the allowlist, no grid, a sub-grid gap, a source
+// whose Delay or grid is outside the timeline this rung computes in, a source
+// that trims inside its run at places the walk did not record, an HE-AAC span
+// that does not keep the stream head, and a codec config the reprime cannot
+// rewrite. The last is worth naming because it looks like it should be an
+// error and is not: a priming this rung computed and OpusHead's 16-bit field
+// cannot hold is this rung's limit, not the file's, so the honest answer is to
+// hand the request to a rung that re-encodes rather than to refuse it on
+// everyone's behalf, and CodeUnsupportedFormat is exactly what a decline is
+// made of. Two more come from the destination: PlanRemux declines a cut whose
+// kept packets carry a trim for every destination but Matroska (the cut
+// track's MidPadding is exactly those), and cutTrimsExpressible declines one
+// whose head or tail trim the destination cannot signal.
 //
 // Only that code declines. A config that will not parse at all is different
 // and now errors: since the codes split it says CodeMalformedInput, and a

@@ -50,23 +50,26 @@ type Demuxer struct {
 	// sample position at its first frame, frame-counted by walk. Seeks land on
 	// an indexed cluster, sample-exact, because the container's millisecond
 	// block timestamps cannot express a sample position. Positions are on the
-	// timeline the reader delivers, so the walk subtracts each block's
-	// DiscardPadding as it passes it (see container.Packet.Padding). The full
-	// walk also yields the gapless raw total and the two trim totals.
+	// timeline the reader delivers, so the walk subtracts each frame's share
+	// of its block's DiscardPadding as it passes it (see
+	// container.Packet.Padding). The full walk also yields the gapless raw
+	// total, the two trim totals, and where the inner trims lie.
 	clusterIndex []clusterPos
-	walked       bool // the full walk has run; the three below are whole
+	walked       bool // the full walk has run; the four below are whole
 	rawTotal     int64
-	padding      int64 // the last block's DiscardPadding, in samples
-	midPadding   int64 // the trims on blocks before the last, summed
-	midBlocks    int   // how many blocks those came from, for the Note
-	recording    bool  // walk is building the index
+	padding      int64                  // the last packet's trim, in samples
+	midPadding   int64                  // the trims on packets before the last, summed
+	midCount     int                    // how many packets those came from, for the Note
+	midTrims     []container.PacketTrim // those trims, placed; at most maxMidTrims
+	recording    bool                   // walk is building the index
 
 	// In-flight walk state, carried across calls so a bounded walk extends the
 	// index rather than restarting. walkedTo is always a cluster boundary.
-	walkCumulative  int64 // running sample count during the index walk
-	walkMid         int64 // running sum of the clamped trims seen so far
-	walkMidBlocks   int   // blocks that contributed to walkMid
-	walkLastPad     int64 // the newest block's own DiscardPadding, the end-trim candidate
+	walkCumulative  int64 // running sample count on the delivered timeline
+	walkRaw         int64 // running sample count on the raw one, every frame whole
+	walkMid         int64 // running sum of the inner trims seen so far
+	walkMidCount    int   // packets that contributed to walkMid
+	walkLastPad     int64 // the newest frame's own trim, the end-trim candidate
 	walkLastClamped int64 // that trim clamped to the frame it rides on
 	walkFrames      int   // running frame count, against maxFrames
 	walkLimit       int64

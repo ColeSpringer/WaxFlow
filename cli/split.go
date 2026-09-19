@@ -136,7 +136,7 @@ or filtered at any seam.`,
 				// against the first and its pieces against the second.
 				track.Samples, track.SamplesExact = measured.Samples, measured.SamplesExact
 				track.SamplesAdvisory = measured.SamplesAdvisory
-				track.Padding, track.MidPadding = measured.Padding, measured.MidPadding
+				track.Padding, track.MidPadding, track.MidTrims = measured.Padding, measured.MidPadding, measured.MidTrims
 			}
 
 			var pieces []piece

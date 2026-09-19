@@ -640,7 +640,10 @@ func (e *Engine) RemuxSegments(ctx context.Context, src container.Source, hint s
 	if err != nil {
 		return nil, err
 	}
-	if rp == nil {
+	// PlanRemux answers for the options' container, and this run always writes
+	// fMP4, which states no trim per packet: PlanRemuxSegments's own decline,
+	// repeated so a caller past the plan is refused before a segment goes out.
+	if rp == nil || track.MidPadding > 0 {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("waxflow: a %s source cannot be remuxed to %s with these options; transcode it",
 				track.Codec, opts.Format))
@@ -765,10 +768,11 @@ func (e *Engine) segmentWalk(ctx context.Context, demux container.Demuxer, segTr
 		have = false
 		return seg.WritePacket(held, emitSeg)
 	}
-	// false: fMP4 states no trim per packet, so a source with an inner trim is
-	// refused here rather than segmented with the frames playing. The position
-	// arithmetic below stays raw, which is the packet timeline exactly because
-	// nothing gets past an inner trim.
+	// false: fMP4 states no trim per packet, so a packet carrying an inner trim
+	// is refused here rather than segmented with the frames playing; both
+	// callers refuse such a source before the run starts, and this is the
+	// backstop. The position arithmetic below stays raw, which is the
+	// delivered timeline exactly because no emitted packet carries one.
 	run, err := copyPackets(ctx, demux, walkTrackID, false, func(pkt container.Packet) error {
 		if pos < p0 {
 			pos += pkt.Dur
@@ -1025,13 +1029,14 @@ func copyPackets(ctx context.Context, demux container.Demuxer, track int, perPac
 // innerTrimRefusal is what a packet copy says when it meets a trim in the
 // middle of the stream that it cannot carry. remedy names the way past it,
 // which differs by rung: a plain remux into Matroska carries such a trim, and
-// no cut does, because past one the source's packets no longer sit on the grid
-// a window snaps to.
+// a cut carries the ones its plan placed, since past one the source's packets
+// no longer sit on the grid a window snaps to unless the plan knew.
 //
 // It is a mid-copy refusal, so the padded packet is already out, as with any
 // other (a straddling cut, a broken segment grid). The plan declines outright
-// for a source whose walk found one (see container.Track.MidPadding); this is
-// the backstop for a source nothing measured first.
+// for a source whose walk found one it cannot carry (see
+// container.Track.MidPadding); this is the backstop for a source nothing
+// measured first.
 func innerTrimRefusal(pad int64, remedy string) error {
 	return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
 		"waxflow: this source trims %d samples in the middle of the stream (a Matroska DiscardPadding), which this rung cannot carry; %s",
@@ -1042,7 +1047,7 @@ func innerTrimRefusal(pad int64, remedy string) error {
 // where the rung that meets one can name the right one.
 const (
 	copyTrimRemedy = "measure the source first and the plan declines this rung, write mka or webm, or transcode it"
-	cutTrimRemedy  = "measure the source first and the plan declines this rung, or transcode it (no destination can cut across such a trim)"
+	cutTrimRemedy  = "measure the source first so the plan can place the trim (and write mka or webm to keep it), or transcode it"
 )
 
 // copiedRun is what a packet walk observed: the decode duration it moved, and

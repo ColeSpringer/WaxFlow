@@ -488,7 +488,16 @@ const (
 // /stream used to plan from unwalked.
 func midTrimWebM(t *testing.T, declareLength bool) []byte {
 	t.Helper()
-	ogg := remuxFixture(t, waxflow.TranscodeOptions{Format: "opus"}, 48000)
+	return midTrimWebMOf(t, declareLength, 48000)
+}
+
+// midTrimWebMOf is midTrimWebM over a source of the given length. The
+// muxer starts a fresh cluster past four seconds, so a source longer than
+// that puts a cluster boundary after the trim, which is what a seek that
+// lands past the trim needs.
+func midTrimWebMOf(t *testing.T, declareLength bool, frames int) []byte {
+	t.Helper()
+	ogg := remuxFixture(t, waxflow.TranscodeOptions{Format: "opus"}, frames)
 	demux, info, err := format.OpenDemuxer(container.BytesSource(ogg), "opus", nil)
 	if err != nil {
 		t.Fatal(err)
