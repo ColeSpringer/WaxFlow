@@ -19,12 +19,13 @@ var _ container.Muxer = (*Muxer)(nil)
 // gets written around unchanged encoded packets, which is the one kind of
 // change no encoder or DSP version can notice.
 //
-// mpa-mux-2: the LAME extension's trims are written in the tag's own
-// convention on a remux too (MuxerOptions.DecodedTrims), where the head trim
-// used to gain DecoderDelay samples per generation and a tail trim shorter
-// than that was dropped. Encoded output is byte-identical; every remuxed MP3
-// carried wrong gapless metadata and regenerates.
-const MuxerVersion = "mpa-mux-2"
+// mpa-mux-3: the encoder string is LAME-prefixed (see encoderTag) and the
+// extension sits at its canonical offset with its counts and CRCs filled
+// in, where before it was branded WaxFlow01 and ffmpeg, Firefox and
+// GStreamer therefore ignored the gapless fields. Encoded output is
+// byte-identical; every MP3 written so far plays late and long in those
+// decoders and regenerates.
+const MuxerVersion = "mpa-mux-3"
 
 // Muxer writes one MP3 track as a bare Layer III elementary stream led by a
 // Xing/Info metadata frame with a LAME-format gapless extension. NeedsSeek
@@ -43,7 +44,8 @@ const MuxerVersion = "mpa-mux-2"
 // audio frame references no reservoir before itself, so prepending it never
 // disturbs the audio frames' back-references. Decoders (this package's
 // demuxer, ffmpeg, browsers) recognize the tag and skip the frame as audio,
-// so the gapless delay and padding apply to the audio frames alone.
+// so the gapless delay and padding apply to the audio frames alone, as long
+// as the extension passes their acceptance rules (see encoderTag).
 type Muxer struct {
 	w     io.Writer
 	patch muxseek.Patcher
@@ -65,6 +67,8 @@ type Muxer struct {
 	stride   int
 
 	audioFrames  int
+	minKbps      int    // CBR rate, or the VBR minimum, for the LAME block
+	musicCRC     uint16 // running CRC-16/ARC over the audio frames
 	began, ended bool
 	wroteInfo    bool
 }
@@ -167,6 +171,7 @@ func (m *Muxer) WritePacket(pkt container.Packet) error {
 		}
 		copy(m.hdr[:], pkt.Data[:mp3.HeaderLen])
 		m.h = h
+		m.minKbps = h.Bitrate / 1000
 		if m.opts.VBR {
 			// A VBR first frame's rate is whatever its content picked;
 			// the metadata frame instead uses the smallest legal rate
@@ -177,7 +182,7 @@ func (m *Muxer) WritePacket(pkt container.Packet) error {
 		delay, padding, frames := m.projectGapless()
 		// A nil frame (free format, or too small for even the Xing header)
 		// means no metadata frame; the audio frames stream on their own.
-		if info := m.buildInfoFrame(delay, padding, frames, nil, 0); info != nil {
+		if info := m.buildInfoFrame(infoFields{delay: delay, padding: padding, frames: frames}); info != nil {
 			if err := m.write(info); err != nil {
 				return err
 			}
@@ -186,6 +191,14 @@ func (m *Muxer) WritePacket(pkt container.Packet) error {
 		m.wroteInfo = true
 	}
 	if m.opts.VBR {
+		// Frame 0's rate was read above, where the metadata frame's own
+		// header came from; the init clause of an if runs whatever the
+		// condition says, so the skip has to be outside it.
+		if m.audioFrames > 0 {
+			if h, err := mp3.ParseHeader(pkt.Data); err == nil && h.Bitrate > 0 {
+				m.minKbps = min(m.minKbps, h.Bitrate/1000)
+			}
+		}
 		if m.audioFrames%m.stride == 0 {
 			if len(m.frameOff) == tocSampleCap {
 				for i := 0; i < tocSampleCap/2; i++ {
@@ -200,6 +213,7 @@ func (m *Muxer) WritePacket(pkt container.Packet) error {
 	if err := m.write(pkt.Data); err != nil {
 		return err
 	}
+	m.musicCRC = updateCRC16(m.musicCRC, pkt.Data)
 	m.audioFrames++
 	return nil
 }
@@ -222,7 +236,16 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 	if m.opts.VBR {
 		toc = m.measureTOC()
 	}
-	info := m.buildInfoFrame(int(trailer.Delay), int(trailer.Padding), m.audioFrames, toc, m.off-m.id3Len)
+	stream := m.off - m.id3Len
+	info := m.buildInfoFrame(infoFields{
+		delay:    int(trailer.Delay),
+		padding:  int(trailer.Padding),
+		frames:   m.audioFrames,
+		toc:      toc,
+		bytes:    stream,
+		musicLen: stream - int64(m.infoLen),
+		musicCRC: m.musicCRC,
+	})
 	if info == nil || len(info) != m.infoLen {
 		return nil // unbuildable now (should not happen); leave the projection
 	}
@@ -303,20 +326,116 @@ func legalRates(h mp3.Header) []int {
 	return []int{8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160}
 }
 
-// Xing layout offsets past the magic: the optional fields present in the
-// forms this muxer writes, then the 9-byte encoder string, 12 bytes of
-// LAME info fields, and the 3-byte delay/padding pack (parseVBRTag reads
-// the same shape back).
+// Xing layout: the magic, the flag word, the four optional fields in flag
+// order, then the LAME extension (mpegframes.ParseVBRTag reads the same
+// shape back). All four fields present puts the extension at magic+120,
+// where the readers that use a fixed offset rather than walking the flags
+// look for it.
 const (
-	xingFlagFrames = 1
-	xingFlagBytes  = 2
-	xingFlagTOC    = 4
-	xingLayoutLen  = 4 + 4 + 4 + 4 + 100 + 9 + 12 + 3 // magic..delay/padding, VBR form
+	xingFlagFrames  = 1
+	xingFlagBytes   = 2
+	xingFlagTOC     = 4
+	xingFlagQuality = 8
+	// lameBlockLen is the whole extension: the 9-byte encoder string, 12
+	// info bytes, the 3-byte delay/padding pack, the misc, gain and preset
+	// bytes, the music length and the two CRCs.
+	lameBlockLen = 36
+	// lamePrefixLen is the extension through the delay/padding pack, what
+	// a frame with no room for the rest still carries: the gapless fields
+	// are the part playback depends on.
+	lamePrefixLen = 24
+	xingLayoutLen = 4 + 4 + 4 + 4 + 4 + 100 + lameBlockLen // magic..tag CRC
 )
 
-// buildInfoFrame constructs the leading metadata frame: a valid silent
-// frame carrying the "Info" (CBR) or "Xing" (VBR) marker, the audio-frame
-// count, for VBR the stream byte count and TOC, and, when it fits, a
+// encoderTag is the extension's 9-byte encoder string. The LAME prefix is
+// load-bearing: ffmpeg applies the gapless fields only for a string
+// starting LAME, Lavc or Lavf, Firefox only for LAME or Lavc, GStreamer
+// only for LAME. Under the WaxFlow01 this muxer used to write, every one
+// of them played the file 22 ms late and 57 ms long. Inspectors that read
+// a version out of the digits after LAME show none, which is cosmetic.
+// The demuxer still takes the old prefix, so files written before this
+// still round-trip.
+const encoderTag = "LAME WaxF"
+
+// xingFields is the optional fields in flag order, with their lengths.
+var xingFields = [...]struct {
+	flag uint32
+	n    int
+}{
+	{xingFlagFrames, 4},
+	{xingFlagBytes, 4},
+	{xingFlagTOC, 100},
+	{xingFlagQuality, 4},
+}
+
+// pickFields chooses which of want fits in avail bytes with reserve held
+// back for the LAME extension, returning the flags and the bytes taken. A
+// field that does not fit is skipped and its flag cleared, so a reader
+// walking the flags still lands on the extension.
+func pickFields(avail, reserve int, want uint32) (flags uint32, used int) {
+	for _, f := range xingFields {
+		if want&f.flag == 0 || used+f.n+reserve > avail {
+			continue
+		}
+		flags |= f.flag
+		used += f.n
+	}
+	return flags, used
+}
+
+// miscByte is the extension's misc byte: the source sample frequency in
+// bits 7-6, the encoder's stereo mode in bits 4-2, and zero for the unwise
+// flag and the noise shaping this encoder has none of.
+//
+// The stereo mode is read off the stream's own header rather than left at
+// zero, because zero is a VALUE there and it means mono: a tag inspector
+// would otherwise report every stereo file this muxer writes as a mono
+// encode. ffmpeg's own muxer leaves the whole byte zero and says exactly
+// that about its files.
+func miscByte(h mp3.Header) byte {
+	var stereo byte
+	switch h.Mode {
+	case mp3.ModeStereo:
+		stereo = 1
+	case mp3.ModeDual:
+		stereo = 2
+	case mp3.ModeJoint:
+		stereo = 3
+	} // ModeMono is 0, the field's own encoding for it
+	return srcFreqBits(h.Rate)<<6 | stereo<<2
+}
+
+// srcFreqBits is the misc byte's source sample frequency code.
+func srcFreqBits(rate int) byte {
+	switch {
+	case rate <= 32000:
+		return 0
+	case rate == 44100:
+		return 1
+	case rate == 48000:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// infoFields is what the metadata frame states: the gapless trims and the
+// counts, plus the measurements only End has.
+//
+// A destination that cannot be patched leaves those measurements zero, and
+// the frame ships with the flags set over them. Zero is the format's own
+// "not computed" for all three, and the flags stay set either way: clearing
+// them would move the extension off the offset a fixed-offset reader looks
+// at, to say nothing more than the zeros already say.
+type infoFields struct {
+	delay, padding int
+	frames         int
+	toc            []byte // measured seek table, nil for the linear guess
+	bytes          int64  // Xing byte count: the whole MPEG stream, 0 unknown
+	musicLen       int64  // LAME music length: the audio frames alone, 0 unknown
+	musicCRC       uint16
+}
+
 // tagTrims converts the caller's trims into the LAME tag's own fields. See
 // MuxerOptions.DecodedTrims.
 //
@@ -344,85 +463,134 @@ func (m *Muxer) tagTrims(delay, padding int) (int, int) {
 
 // buildInfoFrame constructs the leading metadata frame: a valid silent
 // frame carrying the "Info" (CBR) or "Xing" (VBR) marker, the audio-frame
-// count, for VBR the stream byte count and TOC, and, when it fits, a
-// LAME-format extension with the gapless delay and padding at the offsets
-// the demuxer reads (parseVBRTag). The header bytes come from m.h (the
-// first audio frame's header; VBR swaps in xingHeader's rate). It returns
-// nil when no valid frame can hold even the Xing header (free format,
-// whose Size is 0, or a frame too small), so the caller skips the metadata
-// frame rather than emitting a bogus one.
+// count, the stream byte count and TOC, and the LAME extension with the
+// gapless delay and padding at the offsets the demuxer reads
+// (mpegframes.ParseVBRTag). The header bytes come from m.h (the first
+// audio frame's header; VBR swaps in xingHeader's rate). It returns nil
+// when no valid frame can hold even the Xing header (free format, whose
+// Size is 0, or a frame too small), so the caller skips the metadata frame
+// rather than emitting a bogus one.
 //
-// toc is the measured 100-byte seek table (nil before End: the streaming
-// form carries the linear neutral guess); bytes is the total stream size,
-// 0 when unknown.
-func (m *Muxer) buildInfoFrame(delay, padding, frames int, toc []byte, bytes int64) []byte {
+// Both callers must get the same frame length out or the End back-patch is
+// refused, so the layout is chosen from the header alone and never from
+// the values.
+func (m *Muxer) buildInfoFrame(f infoFields) []byte {
 	// Both callers hand over the caller's convention, so the conversion is
 	// here rather than at each: Begin's projection and End's exact trailer
 	// have to produce the same frame length or the back-patch is refused.
-	delay, padding = m.tagTrims(delay, padding)
+	delay, padding := m.tagTrims(f.delay, f.padding)
 	h := m.h
 	size := h.Size()
 	off := mp3.HeaderLen + h.SideInfoLen() // protection forced off: no CRC slot
 	if size == 0 || off+12 > size {
 		return nil
 	}
+	avail := size - off - 8 // room past the magic and the flag word
+
+	// Canonical placement first: all four fields ahead of the whole
+	// extension puts it at magic+120. A CBR frame cannot be resized (it
+	// carries the stream's own bit-rate index), so a small one drops
+	// fields in flag order, then the extension's tail, and only then the
+	// extension itself, at which point the frame keeps its form's own
+	// fields and the gapless trims are lost.
+	const canonical = xingFlagFrames | xingFlagBytes | xingFlagTOC | xingFlagQuality
+	lame := lameBlockLen
+	flags, used := pickFields(avail, lame, canonical)
+	if used+lame > avail {
+		lame = lamePrefixLen
+		flags, used = pickFields(avail, lame, canonical)
+	}
+	if used+lame > avail {
+		// No room for even the gapless fields. The frame keeps the marker and
+		// the frame count, which is what it carried before the extension was
+		// written at all. A VBR frame never reaches here: xingHeader sizes it
+		// to hold the whole canonical layout.
+		lame = 0
+		flags, used = pickFields(avail, 0, xingFlagFrames)
+	}
+
 	frame := make([]byte, size)
 	hdr := headerBytesFor(h, m.hdr)
 	copy(frame[:mp3.HeaderLen], hdr[:])
 	frame[1] |= 1 // protection bit set = no CRC-16
 
-	magic, flags := "Info", uint32(xingFlagFrames)
+	magic := "Info"
 	if m.opts.VBR {
-		magic, flags = "Xing", xingFlagFrames|xingFlagBytes|xingFlagTOC
+		magic = "Xing"
 	}
 	copy(frame[off:], magic)
 	binary.BigEndian.PutUint32(frame[off+4:], flags)
 	p := off + 8
-	binary.BigEndian.PutUint32(frame[p:], uint32(frames))
-	p += 4
+	if flags&xingFlagFrames != 0 {
+		binary.BigEndian.PutUint32(frame[p:], uint32(f.frames))
+		p += 4
+	}
 	if flags&xingFlagBytes != 0 {
-		if p+4 > size {
-			return frame
-		}
-		if bytes > 0 && bytes <= int64(^uint32(0)) {
-			binary.BigEndian.PutUint32(frame[p:], uint32(bytes))
+		if f.bytes > 0 && f.bytes <= int64(^uint32(0)) {
+			binary.BigEndian.PutUint32(frame[p:], uint32(f.bytes))
 		}
 		p += 4
 	}
 	if flags&xingFlagTOC != 0 {
-		if p+100 > size {
-			return frame
-		}
-		if toc == nil {
-			for i := 0; i < 100; i++ {
+		if f.toc == nil {
+			for i := range 100 {
 				frame[p+i] = byte(min(i*256/100, 255))
 			}
 		} else {
-			copy(frame[p:], toc)
+			copy(frame[p:], f.toc)
 		}
 		p += 100
 	}
-	if p+24 <= size {
-		copy(frame[p:], "WaxFlow01") // 9-byte encoder tag, prefix "WaxF"
-		// The 12 LAME info field bytes after the tag stay zero.
-		// The two trims share three bytes but not each other's fate. Each
-		// field is 12 bits, and a value past that cannot be written; losing
-		// the head trim because the tail did not fit would trade a leading
-		// 1105-sample gap for a trailing one that is usually smaller, and
-		// DecodedTrims made that cliff easier to reach by adding
-		// DecoderDelay to the padding before it is measured. So an
-		// unrepresentable padding writes as zero, which leaks the tail, and
-		// the delay it has nothing to do with still lands.
-		if delay < 0 || delay >= 1<<12 {
-			delay = 0
-		}
-		if padding < 0 || padding >= 1<<12 {
-			padding = 0
-		}
-		frame[p+21] = byte(delay >> 4)
-		frame[p+22] = byte((delay&0xF)<<4 | (padding>>8)&0xF)
-		frame[p+23] = byte(padding)
+	if flags&xingFlagQuality != 0 {
+		p += 4 // quality indicator: this encoder states none, so it stays 0
 	}
+	if lame == 0 {
+		return frame
+	}
+
+	b := frame[p : p+lame]
+	copy(b, encoderTag)
+	// Info tag revision 0 in the high nibble, VBR method in the low: 1 is
+	// CBR, and a VBR encode states 0 (unknown) rather than claim one of
+	// LAME's numbered methods, which name its own rate control.
+	if !m.opts.VBR {
+		b[9] = 1
+	}
+	// Bytes 10..19 stay zero: no lowpass, no ReplayGain, no encoding
+	// flags and no ATH type.
+	b[20] = byte(min(m.minKbps, 255)) // the CBR rate, or the VBR minimum
+	// The two trims share three bytes but not each other's fate. Each
+	// field is 12 bits, and a value past that cannot be written; losing
+	// the head trim because the tail did not fit would trade a leading
+	// 1105-sample gap for a trailing one that is usually smaller, and
+	// DecodedTrims made that cliff easier to reach by adding
+	// DecoderDelay to the padding before it is measured. So an
+	// unrepresentable padding writes as zero, which leaks the tail, and
+	// the delay it has nothing to do with still lands.
+	if delay < 0 || delay >= 1<<12 {
+		delay = 0
+	}
+	if padding < 0 || padding >= 1<<12 {
+		padding = 0
+	}
+	b[21] = byte(delay >> 4)
+	b[22] = byte((delay&0xF)<<4 | (padding>>8)&0xF)
+	b[23] = byte(padding)
+	if lame < lameBlockLen {
+		return frame
+	}
+	b[24] = miscByte(m.h)
+	// Bytes 25..27 stay zero: no MP3 gain, no preset, no surround info.
+	//
+	// The music length and CRC cover the audio frames alone. The spec's
+	// extent is the file past its tags and this frame, and it has to be:
+	// a CRC over this frame would have to include the field it is being
+	// written into.
+	if f.musicLen > 0 && f.musicLen <= int64(^uint32(0)) {
+		binary.BigEndian.PutUint32(b[28:], uint32(f.musicLen))
+	}
+	binary.BigEndian.PutUint16(b[32:], f.musicCRC)
+	binary.BigEndian.PutUint16(b[34:], updateCRC16(0, frame[:p+34]))
 	return frame
 }
 

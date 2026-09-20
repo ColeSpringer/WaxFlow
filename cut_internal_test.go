@@ -5,6 +5,7 @@ import (
 	"io"
 	"math"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
@@ -63,7 +64,7 @@ func aacTrack(delay, samples int64) container.Track {
 // is not a grid multiple, so it escapes the bug by luck.
 func TestCutTrackKeepsThePrimingItWasGiven(t *testing.T) {
 	track := opusTrack(3840, 48000)
-	cut, landed, err := CutTrack(track, []Span{{0, ToEnd}}, 960)
+	cut, landed, err := CutTrack(track, TranscodeOptions{}, []Span{{0, ToEnd}}, 960)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +99,7 @@ func TestCutTrackKeepsThePrimingItWasGiven(t *testing.T) {
 // exact head mean exact audio rather than an exact index.
 func TestCutTrackBacksTheHeadOffAtAPositiveFrom(t *testing.T) {
 	track := opusTrack(312, 96000)
-	cut, landed, err := CutTrack(track, []Span{{48000, 72000}}, 960)
+	cut, landed, err := CutTrack(track, TranscodeOptions{}, []Span{{48000, 72000}}, 960)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,13 +126,16 @@ func TestCutTrackBacksTheHeadOffAtAPositiveFrom(t *testing.T) {
 // length rather than the requested one, and the proof is that remuxTrailer then
 // yields exactly the padding the cut computed: the interior slop cancels.
 //
-// Under the requested-length version this fails by exactly the interior slop,
-// and the failure is silent in production: mka would write a DiscardPadding that
-// eats that much real audio off the end.
+// Under the requested-length version this fails by exactly however far the
+// interior edges moved, and the failure is silent in production: mka would
+// write a DiscardPadding that eats that much real audio off the end. The
+// edges now move the other way (inward, so the landed length is under the
+// request), which changes nothing here: the identity is between Samples and
+// the windows the walk delivers, whichever side of the request they fall on.
 func TestCutTrackSamplesAreLanded(t *testing.T) {
 	track := opusTrack(312, 96000)
 	spans := []Span{{0, 20000}, {40000, 60000}}
-	cut, landed, err := CutTrack(track, spans, 960)
+	cut, landed, err := CutTrack(track, TranscodeOptions{}, spans, 960)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,9 +146,15 @@ func TestCutTrackSamplesAreLanded(t *testing.T) {
 	if cut.Samples != sum {
 		t.Errorf("Samples = %d, want %d (the sum of the landed spans)", cut.Samples, sum)
 	}
-	if cut.Samples <= (20000-0)+(60000-40000) {
-		t.Errorf("Samples = %d is not longer than the %d requested; the interior slop is delivered audio and must count",
-			cut.Samples, 40000)
+	const requested = (20000 - 0) + (60000 - 40000)
+	if cut.Samples > requested {
+		t.Errorf("Samples = %d is past the %d requested; an interior edge must never deliver audio from outside the request",
+			cut.Samples, requested)
+	}
+	// Two interior edges, each losing under one packet.
+	if short := int64(requested) - cut.Samples; short >= 2*960 {
+		t.Errorf("Samples = %d is %d short of the %d requested, which is a packet or more per interior edge",
+			cut.Samples, short, requested)
 	}
 	// The trailer the muxer will actually be handed. decoded is what the walk
 	// delivers: the sum of the kept windows.
@@ -159,11 +169,13 @@ func TestCutTrackSamplesAreLanded(t *testing.T) {
 }
 
 // TestCutTrackReportsWhereItLanded pins the head/tail-exact, interior-snapped
-// split, which is the rung's whole promise about position.
+// split, which is the rung's whole promise about position: nothing outside the
+// request is ever delivered, and each interior edge lands within one packet
+// inside it. See ADR-0011.
 func TestCutTrackReportsWhereItLanded(t *testing.T) {
 	track := aacTrack(0, 96000)
 	spans := []Span{{100, 20000}, {40000, 60000}}
-	_, landed, err := CutTrack(track, spans, 1024)
+	_, landed, err := CutTrack(track, TranscodeOptions{}, spans, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,36 +185,78 @@ func TestCutTrackReportsWhereItLanded(t *testing.T) {
 	if landed[1].To != 60000 {
 		t.Errorf("Landed[1].To = %d, want the requested 60000 exactly", landed[1].To)
 	}
-	// The interior splices snapped outward, and say so.
-	if landed[0].To != 20480 { // snapUp(20000, 1024)
-		t.Errorf("Landed[0].To = %d, want 20480", landed[0].To)
+	// The interior splices snapped inward, and say so.
+	if landed[0].To != 19456 { // snapDown(20000, 1024) = 19*1024
+		t.Errorf("Landed[0].To = %d, want 19456", landed[0].To)
 	}
-	if landed[1].From != 38912 { // snapDown(40000-1024, 1024) = 38*1024
-		t.Errorf("Landed[1].From = %d, want 38912", landed[1].From)
+	if landed[1].From != 40960 { // snapUp(40000, 1024) = 40*1024
+		t.Errorf("Landed[1].From = %d, want 40960", landed[1].From)
 	}
 	for i, s := range landed {
-		if s.To-s.From < int64(spans[i].To-spans[i].From) {
-			t.Errorf("Landed[%d] = %v is shorter than the requested %v; snapping only ever widens", i, s, spans[i])
+		if s.From < spans[i].From || s.To > spans[i].To {
+			t.Errorf("Landed[%d] = %v reaches outside the requested %v", i, s, spans[i])
+		}
+		if (s.From-spans[i].From)+(spans[i].To-s.To) >= 1024 {
+			t.Errorf("Landed[%d] = %v gives up a whole packet of the requested %v", i, s, spans[i])
 		}
 	}
 }
 
-// TestCutTrackRefusesUnexpressibleGaps: a gap smaller than the grid can express
-// makes the keep windows overlap, which would emit a packet twice. Declining is
-// right; merging would break Landed's one-for-one correspondence.
-func TestCutTrackRefusesUnexpressibleGaps(t *testing.T) {
+// TestCutTrackRefusesASpanWithNoWholePacket is the cost of snapping inward:
+// a request narrower than the grid, or one falling between two boundaries,
+// keeps nothing. Snapping outward could not produce this, which is why it is
+// a new refusal rather than an old one. Rung 3 re-encodes such a span exactly.
+func TestCutTrackRefusesASpanWithNoWholePacket(t *testing.T) {
 	track := aacTrack(0, 96000)
-	_, _, err := CutTrack(track, []Span{{0, 1000}, {1200, 20000}}, 1024)
+	// [20000, 21000) spans no 1024 boundary: snapUp(20000) = 20480 and
+	// snapDown(21000) = 20480.
+	_, _, err := CutTrack(track, TranscodeOptions{}, []Span{{0, 10000}, {20000, 21000}, {40000, 50000}}, 1024)
 	if err == nil {
-		t.Fatal("a sub-grid gap was accepted; the windows overlap and packet 1 is emitted twice")
+		t.Fatal("a span that keeps no whole packet was accepted")
+	}
+	if got := waxerr.CodeOf(err); got != waxerr.CodeUnsupportedFormat {
+		t.Errorf("code = %v, want %v (a decline: rung 3 serves this exactly)", got, waxerr.CodeUnsupportedFormat)
+	}
+	// One packet is enough.
+	if _, _, err := CutTrack(track, TranscodeOptions{}, []Span{{0, 10000}, {20000, 22000}, {40000, 50000}}, 1024); err != nil {
+		t.Errorf("a span holding one whole packet was declined: %v", err)
+	}
+}
+
+// TestCutTrackRefusesUnexpressibleGaps: keep windows that overlap would emit
+// the packet between them twice. Declining is right; merging would break
+// Landed's one-for-one correspondence.
+//
+// Only SpliceTrims can reach it. Inward snapping never narrows a gap, so
+// under the default policy su[i] <= sd[i+1] holds by construction; with the
+// option on, every interior head backs off by the codec's pre-roll again and
+// every interior tail snaps out, which is what makes a small gap overlap.
+// The pair below is accepted under the default policy and declined with the
+// option, which is the difference stated as a test rather than as a comment.
+func TestCutTrackRefusesUnexpressibleGaps(t *testing.T) {
+	track := opusTrack(312, 96000)
+	// A 1000-sample gap against a 3840-sample pre-roll on a 960 grid: the
+	// second window's walk would start at 18240, inside the first window's
+	// 21120 end.
+	spans := []Span{{0, 20000}, {21000, 40000}}
+	if _, _, err := CutTrack(track, TranscodeOptions{}, spans, 960); err != nil {
+		t.Errorf("the default policy declined a gap it snaps clear of: %v", err)
+	}
+	_, _, err := CutTrack(track, TranscodeOptions{SpliceTrims: true}, spans, 960)
+	if err == nil {
+		t.Fatal("a spliced cut whose pre-roll reaches back into the span before it was accepted")
 	}
 	if got := waxerr.CodeOf(err); got != waxerr.CodeUnsupportedFormat {
 		t.Errorf("code = %v, want %v (a decline, not a bad request: rung 3 serves this exactly)",
 			got, waxerr.CodeUnsupportedFormat)
 	}
-	// A gap wide enough to express is fine.
-	if _, _, err := CutTrack(track, []Span{{0, 1000}, {20000, 40000}}, 1024); err != nil {
-		t.Errorf("a gap of 19000 samples was declined: %v", err)
+	if !strings.Contains(err.Error(), "closer together") {
+		t.Errorf("err = %q, want the overlap refusal rather than another decline", err)
+	}
+	// A gap wide enough for the pre-roll is fine with the option on.
+	if _, _, err := CutTrack(track, TranscodeOptions{SpliceTrims: true},
+		[]Span{{0, 20000}, {40000, 60000}}, 960); err != nil {
+		t.Errorf("a 20000-sample gap was declined with SpliceTrims: %v", err)
 	}
 }
 
@@ -217,7 +271,7 @@ func TestCutTrackResolvesATailInsideTheFinalPacket(t *testing.T) {
 	// 47000 + 0 delay + 0 padding: the decode ends at 47000, which is not a
 	// multiple of 1024, so the final packet is short and runs [46080, 47000).
 	track := aacTrack(0, 47000)
-	cut, landed, err := CutTrack(track, []Span{{0, 46500}}, 1024)
+	cut, landed, err := CutTrack(track, TranscodeOptions{}, []Span{{0, 46500}}, 1024)
 	if err != nil {
 		t.Fatalf("a span ending inside the final short packet was declined: %v", err)
 	}
@@ -231,7 +285,7 @@ func TestCutTrackResolvesATailInsideTheFinalPacket(t *testing.T) {
 	// The run half: the view keeps to EOF and the trailer the muxer is handed
 	// says exactly what the plan did, through the same copy and settle
 	// RemuxDemuxer runs.
-	view, err := Cut(&shortTailDemuxer{n: 46, dur: 1024, last: 920}, track, []Span{{0, 46500}}, 1024)
+	view, err := Cut(&shortTailDemuxer{n: 46, dur: 1024, last: 920}, track, TranscodeOptions{}, []Span{{0, 46500}}, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,10 +301,10 @@ func TestCutTrackResolvesATailInsideTheFinalPacket(t *testing.T) {
 	}
 	// A span ending on a boundary the header can name, and ToEnd, which never
 	// asks the question, are as before.
-	if _, _, err := CutTrack(track, []Span{{0, 46080}}, 1024); err != nil {
+	if _, _, err := CutTrack(track, TranscodeOptions{}, []Span{{0, 46080}}, 1024); err != nil {
 		t.Errorf("a span ending exactly on the grid was declined: %v", err)
 	}
-	if _, _, err := CutTrack(track, []Span{{0, ToEnd}}, 1024); err != nil {
+	if _, _, err := CutTrack(track, TranscodeOptions{}, []Span{{0, ToEnd}}, 1024); err != nil {
 		t.Errorf("a ToEnd span was declined: %v", err)
 	}
 }
@@ -283,7 +337,7 @@ func (d *shortTailDemuxer) ReadPacket(pkt *container.Packet) error {
 // keep nothing would get a whole packet of audio.
 func TestCutTrackRefusesAZeroLengthSpan(t *testing.T) {
 	track := aacTrack(0, 96000)
-	_, _, err := CutTrack(track, []Span{{100, 100}}, 1024)
+	_, _, err := CutTrack(track, TranscodeOptions{}, []Span{{100, 100}}, 1024)
 	if err == nil {
 		t.Fatal("a zero-length span was accepted; it would have landed as a whole packet of audio")
 	}
@@ -292,7 +346,7 @@ func TestCutTrackRefusesAZeroLengthSpan(t *testing.T) {
 	}
 	// The opposite worry, raised and dismissed: snapping cannot reduce a short
 	// span to nothing. A span entirely inside one packet lands as that packet.
-	_, landed, err := CutTrack(track, []Span{{100, 200}}, 1024)
+	_, landed, err := CutTrack(track, TranscodeOptions{}, []Span{{100, 200}}, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +366,7 @@ func TestCutTrackRefusesAZeroLengthSpan(t *testing.T) {
 func TestCutTrackRefusesAnEmptySpanInEitherSpelling(t *testing.T) {
 	track := opusTrack(312, 96000)
 	for _, s := range []Span{{96000, 96000}, {96000, ToEnd}} {
-		cut, landed, err := CutTrack(track, []Span{s}, 960)
+		cut, landed, err := CutTrack(track, TranscodeOptions{}, []Span{s}, 960)
 		if err == nil {
 			t.Errorf("CutTrack accepted the empty span %v: Samples=%d Delay=%d landed=%v",
 				s, cut.Samples, cut.Delay, landed)
@@ -325,11 +379,11 @@ func TestCutTrackRefusesAnEmptySpanInEitherSpelling(t *testing.T) {
 	// A From at the end of a source that declares no length cannot be known to
 	// be empty, so it is not refused: a bound that cannot be checked is not
 	// checked, which is SpanTrack's own call.
-	if _, _, err := CutTrack(aacTrack(1024, -1), []Span{{96000, ToEnd}}, 1024); err != nil {
+	if _, _, err := CutTrack(aacTrack(1024, -1), TranscodeOptions{}, []Span{{96000, ToEnd}}, 1024); err != nil {
 		t.Errorf("a ToEnd span on a lengthless source was refused: %v", err)
 	}
 	// And a real ToEnd span from inside the track still works.
-	if _, _, err := CutTrack(track, []Span{{48000, ToEnd}}, 960); err != nil {
+	if _, _, err := CutTrack(track, TranscodeOptions{}, []Span{{48000, ToEnd}}, 960); err != nil {
 		t.Errorf("an ordinary ToEnd span was refused: %v", err)
 	}
 }
@@ -344,11 +398,11 @@ func TestCutTrackRefusesAnEmptySpanInEitherSpelling(t *testing.T) {
 // over the cut's packets.
 func TestCutViewReportsTheCutTrack(t *testing.T) {
 	track := opusTrack(312, 96000)
-	want, _, err := CutTrack(track, []Span{{48000, 72000}}, 960)
+	want, _, err := CutTrack(track, TranscodeOptions{}, []Span{{48000, 72000}}, 960)
 	if err != nil {
 		t.Fatal(err)
 	}
-	view, err := Cut(&gridDemuxer{n: 200, dur: 960}, track, []Span{{48000, 72000}}, 960)
+	view, err := Cut(&gridDemuxer{n: 200, dur: 960}, track, TranscodeOptions{}, []Span{{48000, 72000}}, 960)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +456,7 @@ func TestCutTrackErrorsVsDeclines(t *testing.T) {
 		// Declines: this rung cannot, another can.
 		{"codec off the allowlist", container.Track{Codec: codec.MP3, Samples: 96000}, []Span{{0, 20000}}, 1152, waxerr.CodeUnsupportedFormat},
 		{"no grid", aacTrack(0, 96000), []Span{{0, 20000}}, 0, waxerr.CodeUnsupportedFormat},
-		{"sub-grid gap", aacTrack(0, 96000), []Span{{0, 1000}, {1200, 20000}}, 1024, waxerr.CodeUnsupportedFormat},
+		{"a span with no whole packet", aacTrack(0, 96000), []Span{{0, 1000}, {1200, 20000}}, 1024, waxerr.CodeUnsupportedFormat},
 		{"trims the walk did not place", func() container.Track {
 			t := aacTrack(0, 96000)
 			t.MidPadding = 480
@@ -410,7 +464,7 @@ func TestCutTrackErrorsVsDeclines(t *testing.T) {
 		}(), []Span{{0, 20000}}, 1024, waxerr.CodeUnsupportedFormat},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := CutTrack(tc.track, tc.spans, tc.grid)
+			_, _, err := CutTrack(tc.track, TranscodeOptions{}, tc.spans, tc.grid)
 			if err == nil {
 				t.Fatalf("CutTrack accepted %v", tc.spans)
 			}
@@ -436,7 +490,7 @@ func TestCutTrackErrorsVsDeclines(t *testing.T) {
 func TestCutTrackRefusesSpansThatOverflowTheTimeline(t *testing.T) {
 	track := aacTrack(1024, -1) // the ADTS shape: no length to bound against
 	for _, to := range []int64{math.MaxInt64, math.MaxInt64 - 1024, 1 << 62} {
-		cut, _, err := CutTrack(track, []Span{{0, to}}, 1024)
+		cut, _, err := CutTrack(track, TranscodeOptions{}, []Span{{0, to}}, 1024)
 		if err == nil {
 			t.Errorf("CutTrack accepted To=%d and synthesized Samples=%d Padding=%d",
 				to, cut.Samples, cut.Padding)
@@ -447,7 +501,7 @@ func TestCutTrackRefusesSpansThatOverflowTheTimeline(t *testing.T) {
 		}
 	}
 	// A From past the ceiling is refused on the same terms.
-	if _, _, err := CutTrack(track, []Span{{math.MaxInt64 - 1, ToEnd}}, 1024); err == nil {
+	if _, _, err := CutTrack(track, TranscodeOptions{}, []Span{{math.MaxInt64 - 1, ToEnd}}, 1024); err == nil {
 		t.Error("CutTrack accepted a From at the top of the timeline")
 	}
 
@@ -473,7 +527,7 @@ func TestCutTrackRefusesSpansThatOverflowTheTimeline(t *testing.T) {
 				// ceiling and the type is the guard.
 				t.Skip("no int on this build can hold a grid past maxCutSample")
 			}
-			cut, _, err := CutTrack(aacTrack(tc.delay, -1), []Span{{0, 500}}, int(tc.grid))
+			cut, _, err := CutTrack(aacTrack(tc.delay, -1), TranscodeOptions{}, []Span{{0, 500}}, int(tc.grid))
 			if err == nil {
 				t.Fatalf("CutTrack accepted delay=%d grid=%d and synthesized Samples=%d Padding=%d",
 					tc.delay, tc.grid, cut.Samples, cut.Padding)
@@ -486,10 +540,10 @@ func TestCutTrackRefusesSpansThatOverflowTheTimeline(t *testing.T) {
 	// The ceiling refuses nothing real: 2^62 samples is about three million
 	// years at 48 kHz, and an ordinary unbounded cut of a lengthless source is
 	// still served.
-	if _, _, err := CutTrack(track, []Span{{0, ToEnd}}, 1024); err != nil {
+	if _, _, err := CutTrack(track, TranscodeOptions{}, []Span{{0, ToEnd}}, 1024); err != nil {
 		t.Errorf("a ToEnd cut of a lengthless source was refused: %v", err)
 	}
-	if _, _, err := CutTrack(track, []Span{{0, 48000}}, 1024); err != nil {
+	if _, _, err := CutTrack(track, TranscodeOptions{}, []Span{{0, 48000}}, 1024); err != nil {
 		t.Errorf("an ordinary bounded cut of a lengthless source was refused: %v", err)
 	}
 }
@@ -504,7 +558,7 @@ func TestPlanCutMapsCodesOntoTheLadder(t *testing.T) {
 	// A decline is (nil, nil): the caller falls through to a transcode.
 	plan, err := e.PlanCut(aacTrack(0, 96000), opts, []Span{{0, 1000}, {1200, 20000}}, 1024)
 	if err != nil || plan != nil {
-		t.Errorf("PlanCut(sub-grid gap) = (%v, %v), want (nil, nil): a decline is not an error", plan, err)
+		t.Errorf("PlanCut(a span with no whole packet) = (%v, %v), want (nil, nil): a decline is not an error", plan, err)
 	}
 	// An error is an error: no rung serves it.
 	if _, err := e.PlanCut(aacTrack(0, 96000), opts, []Span{{100, 100}}, 1024); err == nil {
@@ -542,7 +596,7 @@ func TestPlanCutMapsCodesOntoTheLadder(t *testing.T) {
 // AAC-LC is on the allowlist.
 func TestCutTrackResolvesAnUnknownLength(t *testing.T) {
 	track := aacTrack(1024, -1) // the ADTS shape
-	cut, landed, err := CutTrack(track, []Span{{20000, ToEnd}}, 1024)
+	cut, landed, err := CutTrack(track, TranscodeOptions{}, []Span{{20000, ToEnd}}, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -589,7 +643,7 @@ func TestCutTrackSamplesExact(t *testing.T) {
 		}(), []Span{{0, ToEnd}}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cut, _, err := CutTrack(tc.track, tc.spans, 1024)
+			cut, _, err := CutTrack(tc.track, TranscodeOptions{}, tc.spans, 1024)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -643,7 +697,7 @@ func TestCutCodecsIsAnAllowlist(t *testing.T) {
 				t.Fatalf("cutCodecs[%v] present = %v, want %v (%s)", tc.id, ok, tc.in, tc.why)
 			}
 			track := container.Track{Codec: tc.id, Samples: 96000}
-			_, _, err := CutTrack(track, []Span{{0, 20000}}, tc.grid)
+			_, _, err := CutTrack(track, TranscodeOptions{}, []Span{{0, 20000}}, tc.grid)
 			if tc.in {
 				return // the allowlisted codecs are exercised for real elsewhere
 			}
@@ -792,7 +846,7 @@ func TestCutDeclinesTrimsTheDestinationCannotWrite(t *testing.T) {
 func TestCutRetimesPacketsContiguously(t *testing.T) {
 	track := aacTrack(0, 96000)
 	spans := []Span{{0, 20480}, {40960, 61440}} // all on the 1024 grid
-	demux, err := Cut(&gridDemuxer{n: 94, dur: 1024}, track, spans, 1024)
+	demux, err := Cut(&gridDemuxer{n: 94, dur: 1024}, track, TranscodeOptions{}, spans, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -810,18 +864,20 @@ func TestCutRetimesPacketsContiguously(t *testing.T) {
 		want += pkt.Dur
 		got = append(got, int64(pkt.Data[0])) // the source packet's ordinal
 	}
-	// Windows: [0, 20480) is source packets 0..19, and [39936, 61440) is 39..59
-	// (the head backs off by one frame of pre-roll).
-	if len(got) != 20+21 {
-		t.Fatalf("kept %d packets, want %d", len(got), 20+21)
+	// Windows: [0, 20480) is source packets 0..19, and [40960, 61440) is
+	// 40..59. Both spans are on the grid already, so the interior edges snap
+	// to themselves and no pre-roll is prepended: the second window starts at
+	// the packet the caller asked for, not one before it.
+	if len(got) != 20+20 {
+		t.Fatalf("kept %d packets, want %d", len(got), 20+20)
 	}
 	for i := range 20 {
 		if got[i] != int64(i) {
 			t.Errorf("kept[%d] = source packet %d, want %d", i, got[i], i)
 		}
 	}
-	for i := range 21 {
-		if want := int64(39 + i); got[20+i] != want {
+	for i := range 20 {
+		if want := int64(40 + i); got[20+i] != want {
 			t.Errorf("kept[%d] = source packet %d, want %d", 20+i, got[20+i], want)
 		}
 	}
@@ -835,7 +891,7 @@ func TestCutStraddleErrorsLoudly(t *testing.T) {
 	track := aacTrack(0, 96000)
 	// The spans are computed on a 1024 grid, but the source delivers 1000-sample
 	// packets: the stand-in for a stale plan or a file replaced under its URL.
-	demux, err := Cut(&gridDemuxer{n: 96, dur: 1000}, track, []Span{{2048, 20480}}, 1024)
+	demux, err := Cut(&gridDemuxer{n: 96, dur: 1000}, track, TranscodeOptions{}, []Span{{2048, 20480}}, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -897,5 +953,128 @@ func TestCutDemuxerForwardsWarnings(t *testing.T) {
 	}
 	if got := (&cutDemuxer{Demuxer: &warnerDemuxer{}}).Warnings(); len(got) != 0 {
 		t.Errorf("Warnings = %v on a source with none", got)
+	}
+}
+
+// TestSpliceTrimsWalksThePrerollAndDiscardsIt pins the opt-in's arithmetic:
+// every interior span gains the codec's pre-roll back, and every sample of it
+// is accounted for as a trim, so nothing the caller cut away is heard.
+func TestSpliceTrimsWalksThePrerollAndDiscardsIt(t *testing.T) {
+	track := opusTrack(312, 96000)
+	spans := []Span{{0, 20000}, {40000, 60000}}
+	opts := TranscodeOptions{SpliceTrims: true}
+	res, err := computeCut(track, opts, spans, 960)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := res.track
+	// Span 1's splice point is snapUp(40312) = 40320, and the walk starts a
+	// pre-roll (3840, four packets) before it.
+	if got, want := res.windows[1].from, int64(40320-3840); got != want {
+		t.Errorf("window 1 starts at %d, want %d (the splice less the pre-roll)", got, want)
+	}
+	// Four whole-packet discards at the head of window 1, then the exact tail
+	// slop on window 0's last kept packet.
+	if len(cut.MidTrims) != 5 {
+		t.Fatalf("MidTrims = %v, want four pre-roll discards and one tail slop", cut.MidTrims)
+	}
+	if !cut.MidTrimsComplete() {
+		t.Error("the cut's trims do not add up to its MidPadding")
+	}
+	// Window 0 runs [0, snapUp(20312)) = [0, 21120); the slop past the
+	// requested end is 21120-20312 = 808.
+	if got := cut.MidTrims[0]; got != (container.PacketTrim{Pos: 21120 - 808, Samples: 808}) {
+		t.Errorf("first trim = %v, want the 808-sample tail slop of window 0", got)
+	}
+	for i := 1; i < 5; i++ {
+		want := container.PacketTrim{Pos: 21120 + int64(i-1)*960, Samples: 960}
+		if cut.MidTrims[i] != want {
+			t.Errorf("trim %d = %v, want %v (a whole pre-roll packet)", i, cut.MidTrims[i], want)
+		}
+	}
+	// The interior tail is exact now, and the head still snaps inward.
+	if res.landed[0].To != 20000 {
+		t.Errorf("Landed[0].To = %d, want the requested 20000 exactly", res.landed[0].To)
+	}
+	if res.landed[1].From != 40320-312 {
+		t.Errorf("Landed[1].From = %d, want %d (the splice on the track timeline)", res.landed[1].From, 40320-312)
+	}
+	// The keystone survives: remuxTrailer still yields exactly the padding.
+	var delivered int64
+	for _, w := range res.windows {
+		delivered += w.to - w.from
+	}
+	tr := remuxTrailer(cut, copiedRun{samples: delivered - cut.MidPadding})
+	if tr.Padding != cut.Padding {
+		t.Errorf("remuxTrailer padding = %d, want %d", tr.Padding, cut.Padding)
+	}
+	if tr.Samples != cut.Samples {
+		t.Errorf("remuxTrailer samples = %d, want %d", tr.Samples, cut.Samples)
+	}
+}
+
+// TestSpliceTrimsIsIgnoredForOneSpan: a single-span cut has no interior edge,
+// so the option must not narrow it to Matroska for nothing.
+func TestSpliceTrimsIsIgnoredForOneSpan(t *testing.T) {
+	track := opusTrack(312, 96000)
+	plain, _, err := CutTrack(track, TranscodeOptions{}, []Span{{48000, 72000}}, 960)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spliced, _, err := CutTrack(track, TranscodeOptions{SpliceTrims: true}, []Span{{48000, 72000}}, 960)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spliced.MidPadding != 0 {
+		t.Errorf("MidPadding = %d on a single-span cut; the option has nothing to do there", spliced.MidPadding)
+	}
+	if spliced.Samples != plain.Samples || spliced.Delay != plain.Delay || spliced.Padding != plain.Padding {
+		t.Errorf("spliced = {%d %d %d}, plain = {%d %d %d}",
+			spliced.Delay, spliced.Padding, spliced.Samples, plain.Delay, plain.Padding, plain.Samples)
+	}
+}
+
+// TestCutTrackJoinsAdjacentSpansWithoutAHole: spans that touch name one
+// range in two pieces, so there is nothing between them to remove. An
+// off-grid boundary must not cost the packet it sits in, which is what two
+// independent inward snaps would do -- and which the rung used to avoid only
+// by declining the whole request.
+func TestCutTrackJoinsAdjacentSpansWithoutAHole(t *testing.T) {
+	track := aacTrack(0, 96000)
+	for _, tc := range []struct {
+		name  string
+		spans []Span
+		want  int64 // the union's length, which the cut must deliver whole
+	}{
+		{"off the grid", []Span{{0, 20000}, {20000, 40000}}, 40000},
+		{"on the grid", []Span{{0, 20480}, {20480, 40960}}, 40960},
+		{"a piece under one packet", []Span{{0, 1000}, {1000, 20000}}, 20000},
+		{"three pieces", []Span{{0, 20000}, {20000, 40000}, {40000, 60000}}, 60000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cut, landed, err := CutTrack(track, TranscodeOptions{}, tc.spans, 1024)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cut.Samples != tc.want {
+				t.Errorf("Samples = %d, want the whole %d: a touching pair has no gap to snap into",
+					cut.Samples, tc.want)
+			}
+			// The seams are contiguous and the ends exact, so the pieces
+			// still add up to the request one for one.
+			if landed[0].From != tc.spans[0].From {
+				t.Errorf("Landed[0].From = %d, want %d", landed[0].From, tc.spans[0].From)
+			}
+			last := len(landed) - 1
+			if landed[last].To != tc.spans[last].To {
+				t.Errorf("Landed[%d].To = %d, want %d", last, landed[last].To, tc.spans[last].To)
+			}
+			for i := 1; i <= last; i++ {
+				if landed[i].From != landed[i-1].To {
+					t.Errorf("Landed[%d].From = %d but Landed[%d].To = %d: the seam has a hole",
+						i, landed[i].From, i-1, landed[i-1].To)
+				}
+			}
+		})
 	}
 }

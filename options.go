@@ -73,6 +73,23 @@ type TranscodeOptions struct {
 	// with the raw ADTS elementary stream, a legacy opt-out that
 	// sacrifices gapless signaling (ADTS has none).
 	Container string
+	// SpliceTrims asks a multi-span cut for exact interior splices, which
+	// only Matroska can carry.
+	//
+	// The default cut snaps every interior edge inward onto the packet grid
+	// and gives up under one packet of wanted audio at each, because no
+	// per-splice trim is portable (ADR-0011). With this set, each interior
+	// span's head is preceded by the codec's pre-roll packets carrying a
+	// full-duration DiscardPadding -- decoded so the decoder converges,
+	// discarded so nothing is heard -- and each interior tail is exact.
+	//
+	// The cost is reach. The cut's track then trims inside its run, so
+	// PlanRemux declines every destination but mka and webm, and a request
+	// for any other container falls through to a re-encode. Firefox rejects
+	// a file with more than one DiscardPadding outright; Chromium and
+	// ffmpeg-based players take it. Ignored by a single-span cut, which has
+	// no interior edge.
+	SpliceTrims bool
 	// Rate resamples to this sample rate in Hz; 0 keeps the source rate.
 	Rate int
 	// Channels converts the channel count: a downmix to 1 or 2, or a widening

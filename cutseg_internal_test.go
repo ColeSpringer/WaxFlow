@@ -41,7 +41,7 @@ func TestCutSeekMapsOutputTargetToSource(t *testing.T) {
 	spans := []Span{{20480, 61440}}
 	const grid = 1024
 
-	view, err := cutSeekable(&seekableGridDemuxer{gridDemuxer{n: 94, dur: grid}}, track, spans, grid)
+	view, err := cutSeekable(&seekableGridDemuxer{gridDemuxer{n: 94, dur: grid}}, track, TranscodeOptions{}, spans, grid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,18 +99,18 @@ func TestCutSeekMapsOutputTargetToSource(t *testing.T) {
 // and the pre-window clamp interacting with a non-zero outStart.
 //
 // The spans mirror TestCutRetimesPacketsContiguously: window 0 is source packets
-// 0..19 (output [0, 20480)) and window 1 is source packets 39..59 (output [20480,
-// 41984)), window 1's head backed off by one frame of pre-roll to source 39.
+// 0..19 (output [0, 20480)) and window 1 is source packets 40..59 (output [20480,
+// 40960)), window 1's head snapping to the packet the caller asked for.
 func TestCutSeekMapsMultiWindow(t *testing.T) {
 	track := aacTrack(0, 96000)
 	spans := []Span{{0, 20480}, {40960, 61440}}
 	const grid = 1024
 
 	// An exact landing into window 1: output 25600 is five packets past the
-	// window-1 boundary at output 20480, so it maps to source packet 44 and the
+	// window-1 boundary at output 20480, so it maps to source packet 45 and the
 	// sync-point seek lands there exactly.
 	t.Run("exact landing into window 1", func(t *testing.T) {
-		view, err := cutSeekable(&seekableGridDemuxer{gridDemuxer{n: 94, dur: grid}}, track, spans, grid)
+		view, err := cutSeekable(&seekableGridDemuxer{gridDemuxer{n: 94, dur: grid}}, track, TranscodeOptions{}, spans, grid)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -125,8 +125,8 @@ func TestCutSeekMapsMultiWindow(t *testing.T) {
 		if err := view.ReadPacket(&pkt); err != nil {
 			t.Fatal(err)
 		}
-		if pkt.Data[0] != 44 || pkt.PTS != 25600 {
-			t.Errorf("first packet is source %d at PTS %d, want source 44 at PTS 25600", pkt.Data[0], pkt.PTS)
+		if pkt.Data[0] != 45 || pkt.PTS != 25600 {
+			t.Errorf("first packet is source %d at PTS %d, want source 45 at PTS 25600", pkt.Data[0], pkt.PTS)
 		}
 	})
 
@@ -135,7 +135,7 @@ func TestCutSeekMapsMultiWindow(t *testing.T) {
 	// (20480, a non-zero outStart) rather than go negative. The walk then skips
 	// forward to window 1's head.
 	t.Run("coarse landing clamps at window 1 start", func(t *testing.T) {
-		view, err := cutSeekable(&coarseSeekDemuxer{gridDemuxer{n: 94, dur: grid}}, track, spans, grid)
+		view, err := cutSeekable(&coarseSeekDemuxer{gridDemuxer{n: 94, dur: grid}}, track, TranscodeOptions{}, spans, grid)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -153,8 +153,8 @@ func TestCutSeekMapsMultiWindow(t *testing.T) {
 		if err := view.ReadPacket(&pkt); err != nil {
 			t.Fatal(err)
 		}
-		if pkt.Data[0] != 39 || pkt.PTS != 20480 {
-			t.Errorf("first packet is source %d at PTS %d, want window 1's head source 39 at PTS 20480", pkt.Data[0], pkt.PTS)
+		if pkt.Data[0] != 40 || pkt.PTS != 20480 {
+			t.Errorf("first packet is source %d at PTS %d, want window 1's head source 40 at PTS 20480", pkt.Data[0], pkt.PTS)
 		}
 	})
 }
@@ -180,7 +180,7 @@ func TestCutSeekClampsAPreWindowLanding(t *testing.T) {
 	spans := []Span{{20480, 61440}} // window 0 begins at source 19456 (the backed-off head)
 	const grid = 1024
 
-	view, err := cutSeekable(&coarseSeekDemuxer{gridDemuxer{n: 94, dur: grid}}, track, spans, grid)
+	view, err := cutSeekable(&coarseSeekDemuxer{gridDemuxer{n: 94, dur: grid}}, track, TranscodeOptions{}, spans, grid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +238,7 @@ func TestCutSeekResetsTheTrimCursor(t *testing.T) {
 		seekableGridDemuxer: seekableGridDemuxer{gridDemuxer{n: 94, dur: grid}},
 		padAt:               3, pad: 48,
 	}
-	view, err := cutSeekable(src, track, spans, grid)
+	view, err := cutSeekable(src, track, TranscodeOptions{}, spans, grid)
 	if err != nil {
 		t.Fatal(err)
 	}

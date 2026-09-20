@@ -97,7 +97,7 @@ func openSourceRef(cmd *cobra.Command, flavor Flavor, arg string, cfg *config.Co
 // openSource opens a local file as a container.Source. The caller must
 // invoke cleanup when done.
 func openSource(path string) (container.Source, func(), error) {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|container.OpenNonblock, 0)
 	if err != nil {
 		code := waxerr.CodeSourceUnreadable
 		if errors.Is(err, fs.ErrNotExist) {

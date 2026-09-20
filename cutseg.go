@@ -45,7 +45,7 @@ type CutSegmentPlan struct {
 // error/decline seam PlanCut documents.
 func (e *Engine) PlanCutSegments(track container.Track, opts TranscodeOptions, spans []Span,
 	grid int, segSeconds float64) (*CutSegmentPlan, error) {
-	cutTrack, landed, err := CutTrack(track, spans, grid)
+	cutTrack, landed, err := CutTrack(track, opts, spans, grid)
 	if err != nil {
 		// The seam, exactly as PlanCut maps it: CutTrack cannot express a decline
 		// through its signature, so a CodeUnsupportedFormat becomes the ladder's
@@ -133,7 +133,7 @@ func (e *Engine) CutSegments(ctx context.Context, src container.Source, hint str
 	// decodedEnd), and plan and run must read the same ones or their windows
 	// drift.
 	track := adoptMeasured(info.Default(), measured)
-	cutTrack, _, err := CutTrack(track, spans, grid)
+	cutTrack, _, err := CutTrack(track, opts, spans, grid)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +153,7 @@ func (e *Engine) CutSegments(ctx context.Context, src container.Source, hint str
 			fmt.Sprintf("waxflow: a %s cut cannot be remuxed to %s with these options; transcode it",
 				track.Codec, opts.Format))
 	}
-	cutDemux, err := cutSeekable(demux, track, spans, grid)
+	cutDemux, err := cutSeekable(demux, track, opts, spans, grid)
 	if err != nil {
 		return nil, err
 	}
@@ -181,13 +181,13 @@ type cutSeekDemuxer struct {
 
 // cutSeekable wraps a seekable demuxer in a Cut view that can reposition on its
 // output timeline. It is the seekable form of Cut, for CutSegments alone.
-func cutSeekable(demux container.Demuxer, track container.Track, spans []Span, grid int) (container.Demuxer, error) {
+func cutSeekable(demux container.Demuxer, track container.Track, opts TranscodeOptions, spans []Span, grid int) (container.Demuxer, error) {
 	sk, ok := demux.(container.Seeker)
 	if !ok {
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 			"waxflow: this container cannot seek, so a mid-stream segmented cut cannot start")
 	}
-	res, err := computeCut(track, spans, grid)
+	res, err := computeCut(track, opts, spans, grid)
 	if err != nil {
 		return nil, err
 	}
@@ -273,6 +273,7 @@ func (c *cutSeekDemuxer) SeekSample(track int, outTarget int64) (int64, error) {
 		// Past every window: nothing remains to read. Park the cursor at the end so
 		// the next ReadPacket returns io.EOF, and report the target back unchanged.
 		c.cur, c.pos, c.out, c.prevPad = len(c.windows), 0, outTarget, 0
+		c.outRaw = c.out
 		return outTarget, nil
 	}
 	w := c.windows[i]
@@ -294,6 +295,11 @@ func (c *cutSeekDemuxer) SeekSample(track int, outTarget int64) (int64, error) {
 	// walk's own pos < p0 skip carries it the rest of the way to the boundary.
 	c.cur, c.pos = i, landed
 	c.out = outStart + max(0, landed-w.from)
+	// The raw output position is the delivered one here, and only here: this
+	// view refused a cut whose kept packets trim at all, so the two timelines
+	// have not parted. Keeping it in step is what lets ReadPacket read the
+	// plan's trims by position without a second rule for the seeking path.
+	c.outRaw = c.out
 	// The packet before the cursor is unknown after a seek: carrying the
 	// pre-seek packet's trim across would check the first packet the seek
 	// lands on against a trim it does not follow.

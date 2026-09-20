@@ -22,7 +22,10 @@ var _ container.Muxer = (*Muxer)(nil)
 //
 // One constant covers the Matroska and WebM forms: they are one muxer
 // under a DocType flag.
-const MuxerVersion = "mka-mux-2"
+//
+// mka-mux-3: a BlockGroup carrying DiscardPadding now states its
+// BlockDuration too, so every file with an inner trim changes bytes.
+const MuxerVersion = "mka-mux-3"
 
 // Write-side element IDs, the header and track-entry elements the demuxer does
 // not itself parse (or parses only on read) but a valid file needs. The
@@ -353,6 +356,19 @@ func (m *Muxer) cuesElement() []byte {
 // cluster when the packet's timestamp would leave the current one (byte target
 // or the int16 millisecond span). discardNS > 0 wraps the block in a
 // BlockGroup so it can carry DiscardPadding; otherwise it is a SimpleBlock.
+//
+// A BlockGroup states its BlockDuration beside the padding. Without it a
+// reader takes the track's default duration, and Chromium's MSE frame
+// processor then treats a wholly discarded block as a zero-duration frame
+// and drops it as a duplicate of the block sharing its timestamp -- which
+// is exactly the shape a spliced cut writes, where the pre-roll blocks
+// before a splice are discarded whole and carry the splice's timestamp.
+//
+// It rounds UP. BlockDuration is in whole TimestampScale ticks (1 ms) while
+// DiscardPadding is exact nanoseconds, so rounding to nearest would state a
+// 1024-sample AAC packet at 44.1 kHz as 23 ms beside a whole-packet discard
+// of 23.22 ms: a block declaring less duration than it discards, which is
+// not a shape a reader should have to make sense of.
 func (m *Muxer) emitBlock(pkt codec.Packet, discardNS int64) error {
 	ptsMs := msAt(pkt.PTS, m.rate)
 	if !m.haveCluster || ptsMs-m.clusterMs > maxClusterMs || len(m.cluster) >= clusterTargetBytes {
@@ -368,6 +384,9 @@ func (m *Muxer) emitBlock(pkt codec.Packet, discardNS int64) error {
 		block := blockBody(rel, pkt.Data, 0x00) // Block: keyframe implied by BlockGroup
 		var group []byte
 		group = appendElement(group, idBlock, block)
+		if dur := msAt(pkt.Dur, m.rate); dur > 0 {
+			group = appendUint(group, idBlockDuration, uint64(dur))
+		}
 		group = appendElement(group, idDiscardPadding, beIntBytes(discardNS))
 		m.cluster = appendElement(m.cluster, idBlockGroup, group)
 		return nil
@@ -425,6 +444,15 @@ const muxTrackNumber = 1
 // TimestampScale is 1 ms). Block timestamps are informational for the reader
 // (it derives sample positions by frame-counting), so rounding here does not
 // affect gapless accuracy.
+// ceilMsAt is msAt rounded up, for a duration that must never come out
+// under the exact value it stands for.
+func ceilMsAt(sample int64, rate int) int64 {
+	if sample <= 0 || rate <= 0 {
+		return 0
+	}
+	return (sample*1000 + int64(rate) - 1) / int64(rate)
+}
+
 func msAt(sample int64, rate int) int64 {
 	if sample <= 0 || rate <= 0 {
 		return 0

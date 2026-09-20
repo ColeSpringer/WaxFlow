@@ -15,3 +15,4 @@ Accepted ADR requires a superseding ADR, not an edit.
 | [0008](0008-opus-encoder-quality-gate-units.md) | Opus encoder-quality gate restated in weighted-error ratios | Accepted |
 | [0009](0009-multi-source-timelines.md) | Multi-source timelines and their identity | Accepted |
 | [0010](0010-timeline-width.md) | A timeline is built at the width it is delivered at | Accepted |
+| [0011](0011-multi-span-packet-cuts.md) | Interior joins of a multi-span packet cut snap inward | Accepted |

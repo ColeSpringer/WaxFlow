@@ -231,10 +231,120 @@ func TestMP3VBRGaplessAndOracle(t *testing.T) {
 	}
 }
 
-// snrDB computes SNR at a fixed lag over interleaved channels.
+// TestMP3EncodeFFmpegAlignment is the gate the LAME extension exists for:
+// ffmpeg has to decode a WaxFlow MP3 to exactly the source's length, with
+// the first decoded sample being the source's first.
+//
+// It is strict on purpose. The differential above scores at the best of
+// 1600 lags, so it passed for years over a stream ffmpeg played 22 ms late
+// and 57 ms long: ffmpeg applies the gapless fields only when the
+// extension's encoder string starts LAME, Lavc or Lavf, and this muxer
+// branded it WaxFlow01. Nothing here would have caught that but a test
+// that asks where the audio landed.
+func TestMP3EncodeFFmpegAlignment(t *testing.T) {
+	if !testutil.HaveFFmpeg(t) {
+		t.Skip("ffmpeg not installed")
+	}
+	cases := []struct {
+		name            string
+		rate, ch        int
+		frames, bitrate int
+		vbr             bool
+	}{
+		{"44k-stereo-cbr", 44100, 2, 44100, 128000, false},
+		{"44k-stereo-vbr", 44100, 2, 44100, 128000, true},
+		{"48k-stereo-cbr", 48000, 2, 48000, 192000, false},
+		{"48k-stereo-vbr", 48000, 2, 48000, 192000, true},
+		// MPEG-2.5, where the tester measured 1216 samples of excess.
+		{"8k-mono-cbr", 8000, 1, 8000, 64000, false},
+		{"8k-mono-vbr", 8000, 1, 8000, 64000, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := audio.Format{Rate: tc.rate, Channels: tc.ch, Layout: audio.DefaultLayout(tc.ch), Type: audio.Int, BitDepth: 16}
+			ref := sweep(tc.rate, tc.frames, tc.ch)
+			wav := wavOf(t, f, ref)
+			mp3 := transcodeMP3(t, wav, waxflow.TranscodeOptions{MP3Bitrate: tc.bitrate, MP3VBR: tc.vbr})
+
+			dir := t.TempDir()
+			fp := filepath.Join(dir, "out.mp3")
+			if err := os.WriteFile(fp, mp3, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			dec := testutil.FFmpegDecodeF32(t, fp)
+			if got := len(dec) / tc.ch; got != tc.frames {
+				t.Errorf("ffmpeg decoded %d frames, want %d (%+d)", got, tc.frames, got-tc.frames)
+			}
+
+			// Both directions. A decode that skipped too much lands EARLY,
+			// and only a negative lag can see it: the sample count catches
+			// the usual form of that, but not one that also runs long.
+			at0 := snrDB(ref, dec, 0, tc.ch)
+			for lag := -1600; lag < 1600; lag++ {
+				if lag == 0 {
+					continue
+				}
+				if s := snrDB(ref, dec, lag, tc.ch); s > at0 {
+					t.Fatalf("ffmpeg's decode aligns best at lag %d (%.1f dB) not 0 (%.1f dB): the gapless fields did not apply",
+						lag, s, at0)
+				}
+			}
+			t.Logf("%s: %d frames, SNR at lag 0 = %.1f dB", tc.name, len(dec)/tc.ch, at0)
+		})
+	}
+}
+
+// sweep is the alignment test's source: a frequency ramp, which the
+// two-tone signal the rest of this file uses cannot be here. At 8 kHz its
+// 500 Hz and 3200 Hz components have periods of 16 and 2.5 samples, so the
+// whole signal repeats every 16 samples and EVERY multiple of 16 aligns as
+// well as lag 0 does -- an alignment gate over it proves nothing. A ramp
+// repeats at no lag.
+func sweep(rate, frames, ch int) []float32 {
+	out := make([]float32, frames*ch)
+	hi := float64(rate) / 3
+	for i := range frames {
+		t := float64(i) / float64(frames)
+		// Phase of a linear sweep from 300 Hz to hi, integrated.
+		phase := 2 * math.Pi * (300*float64(i)/float64(rate) + (hi-300)*t*float64(i)/(2*float64(rate)))
+		for c := range ch {
+			out[i*ch+c] = float32(0.35 * math.Sin(phase+float64(c)*0.7))
+		}
+	}
+	return out
+}
+
+// wavOf writes interleaved float samples as a WAV in f's format.
+func wavOf(t *testing.T, f audio.Format, interleaved []float32) []byte {
+	t.Helper()
+	frames := len(interleaved) / f.Channels
+	src := audio.Get(f, frames)
+	src.N = frames
+	scale := float64(int64(1)<<(f.BitDepth-1)) - 1
+	for ch := range f.Channels {
+		for i := range frames {
+			v := float64(interleaved[i*f.Channels+ch])
+			if f.Type == audio.Int {
+				src.ChanI(ch)[i] = int32(v * scale)
+			} else {
+				src.ChanF(ch)[i] = float32(v)
+			}
+		}
+	}
+	out := wavFromBuffer(t, f, src)
+	audio.Put(src)
+	return out
+}
+
+// snrDB computes SNR at a fixed lag over interleaved channels. A negative
+// lag scores got as landing EARLY, which is the direction a too-large
+// gapless skip moves a decode.
 func snrDB(ref, got []float32, lag, ch int) float64 {
 	var s, n float64
 	for i := ch * 2000; i+lag*ch < len(got) && i < len(ref); i++ {
+		if i+lag*ch < 0 {
+			continue
+		}
 		s += float64(ref[i]) * float64(ref[i])
 		d := float64(got[i+lag*ch]) - float64(ref[i])
 		n += d * d

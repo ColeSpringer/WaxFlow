@@ -246,3 +246,49 @@ func TestEncodeDecodeSNR(t *testing.T) {
 		})
 	}
 }
+
+// TestStereoModeFieldNeverChanges pins the header's mode field constant
+// across a two-channel stream while the mid/side decision flips inside
+// mode_extension.
+//
+// It is an interop rule, not a spec one: every frame's header stands on its
+// own, but ffmpeg reads the mode once and keeps it, so a stream that
+// alternates between stereo and joint stereo decodes there with the mid/side
+// butterfly applied to frames that never had it. The source below is
+// correlated for its first half and uncorrelated for its second, which is
+// what makes decideMS flip mid-stream.
+func TestStereoModeFieldNeverChanges(t *testing.T) {
+	const rate = 48000
+	const n = rate
+	f := audio.Format{Rate: rate, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Float, BitDepth: 32}
+	chans := [][]float32{make([]float32, n), make([]float32, n)}
+	for i := range n {
+		x := float64(i)
+		l := 0.4 * math.Sin(2*math.Pi*500*x/rate)
+		r := l
+		if i >= n/2 {
+			r = 0.4 * math.Sin(2*math.Pi*3100*x/rate)
+		}
+		chans[0][i], chans[1][i] = float32(l), float32(r)
+	}
+	e, err := NewEncoder(f, &EncoderOptions{Bitrate: 192000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkts := encodeSignal(t, e, chans, 1152)
+	exts := map[int]int{}
+	for i, p := range pkts {
+		h, err := ParseHeader(p)
+		if err != nil {
+			t.Fatalf("frame %d: %v", i, err)
+		}
+		if h.Mode != ModeJoint {
+			t.Fatalf("frame %d declares mode %v, want joint stereo in every frame", i, h.Mode)
+		}
+		exts[h.ModeExt]++
+	}
+	if len(exts) < 2 {
+		t.Fatalf("mode_extension stayed %v over %d frames; the source no longer flips the mid/side decision, so this proves nothing", exts, len(pkts))
+	}
+	t.Logf("%d frames, mode_extension counts %v", len(pkts), exts)
+}

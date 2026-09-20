@@ -114,8 +114,8 @@ func TestMuxXingVBR(t *testing.T) {
 				t.Fatalf("first frame tag %q, want Xing", got)
 			}
 			flags := binary.BigEndian.Uint32(out[off+4:])
-			if flags != xingFlagFrames|xingFlagBytes|xingFlagTOC {
-				t.Fatalf("flags %#x, want frames|bytes|toc", flags)
+			if flags != xingFlagFrames|xingFlagBytes|xingFlagTOC|xingFlagQuality {
+				t.Fatalf("flags %#x, want frames|bytes|toc|quality", flags)
 			}
 			frames := binary.BigEndian.Uint32(out[off+8:])
 			if int(frames) != len(pkts) {

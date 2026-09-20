@@ -1823,3 +1823,23 @@ two packets.
 population count is 1 whatever the stream carries. So the count comes from
 `nChannels`, and the mask supplies only the layout, and only when it is
 positional and covers exactly that count. Every real file is unaffected.
+
+## Addendum, 2026-09-20: the tail, measured against Windows
+
+`Drain` is a no-op and stays one. The question a WaxTap report raised for WMA
+Standard (does the reservoir carry hold a frame nobody decodes?) was put to
+this codec too, by decoding the carry at end of stream and comparing against
+Windows' own decoder over the Microsoft corpus. It fails on the first cell:
+`a subframe of 2048 samples at frontier 1024 of 2048`. What the carry holds is
+a fragment, and the length prefix in front of it belongs to a frame the file
+does not finish.
+
+The comparison is otherwise clean. Nine of the ten cells decode to exactly the
+sample count Windows delivers, ffmpeg included. The tenth is the odd-length
+tonal cell, where this decoder and ffmpeg both deliver 99,488 samples of a
+100,000-sample source and Windows delivers all 100,000; the 512 samples the
+two of us drop are real audio (RMS 0.265, the same as the body's). That is the
+`outFrames` number `corpus_test.go` pins rather than asserting the source
+length, and the measurement says what the pin costs: a hair under 12 ms off
+one file shape, agreed with ffmpeg and not with Windows. Left as it is,
+because nothing found says where those samples come back from.

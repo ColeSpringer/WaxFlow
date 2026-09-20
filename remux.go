@@ -313,6 +313,7 @@ func remuxable(opts TranscodeOptions, src audio.Format) bool {
 	base := TranscodeOptions{
 		Format:          opts.Format,
 		Container:       opts.Container,
+		SpliceTrims:     opts.SpliceTrims,
 		ResampleProfile: opts.ResampleProfile,
 		Shaping:         opts.Shaping,
 	}

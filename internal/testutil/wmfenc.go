@@ -36,8 +36,11 @@ import (
 // implementations that agree on a file neither of them wrote is a much
 // stronger statement than agreeing with the program that made it.
 //
-// Windows only, and Windows PowerShell 5.1 only (the WinRT projections the
-// script needs are absent from pwsh). Absence escalates under
+// Windows PowerShell 5.1 only (the WinRT projections the script needs are
+// absent from pwsh), and so Windows' own components either way -- but WSL
+// reaches them: powershell.exe is on PATH there and the scripts take
+// \\wsl.localhost paths, so a WSL box runs these cells against the same
+// Media Foundation the Windows box does. Absence escalates under
 // WAXFLOW_REQUIRE_WMFENC=1 and never under WAXFLOW_REQUIRE_FFMPEG, which no
 // Linux CI could satisfy.
 
@@ -59,8 +62,8 @@ func haveWMF(t testing.TB, script string) bool {
 	t.Helper()
 	why := ""
 	switch {
-	case runtime.GOOS != "windows":
-		why = "needs Windows"
+	case runtime.GOOS != "windows" && os.Getenv("WSL_DISTRO_NAME") == "":
+		why = "needs Windows, or WSL on one"
 	case wmfScript(script) == "":
 		why = "scripts/wmfenc/" + script + " is missing from the tree"
 	default:
@@ -100,31 +103,68 @@ func wmfScript(name string) string {
 	return p
 }
 
+// underWSL reports whether the scripts have to be driven as a Windows
+// process reaching into this filesystem.
+func underWSL() bool {
+	return runtime.GOOS != "windows" && os.Getenv("WSL_DISTRO_NAME") != ""
+}
+
+// wmfArg renders a local absolute path the way powershell.exe has to see
+// it. On Windows that is the path itself; under WSL it is whatever wslpath
+// says, which is the UNC form for this filesystem and a drive letter for a
+// mounted Windows one. Spelling the UNC form by hand instead would send a
+// staged file back through the share it was staged to get off. Every path
+// handed to a script goes through here and nothing else does: os.Stat and
+// the rest keep the local form.
+func wmfArg(t testing.TB, p string) string {
+	t.Helper()
+	if !underWSL() {
+		return p
+	}
+	out, err := exec.Command("wslpath", "-w", p).Output()
+	if err != nil {
+		t.Fatalf("wslpath -w %q: %v", p, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // runWMF drives one of the encoder scripts and holds them to the same output
 // contract. The exit status alone is not enough: PowerShell can report success
 // for a run whose encode never wrote anything, and a caller that only checked
 // the status would then decode an empty file as a corpus cell.
-func runWMF(t testing.TB, script, what, dst string, args ...string) {
+func runWMF(t testing.TB, script, what, in, dst string, args ...string) {
 	t.Helper()
 	path := wmfScript(script)
 	if path == "" {
 		t.Fatal("scripts/wmfenc/" + script + " is missing from the tree")
 	}
-	argv := append([]string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path}, args...)
-	b, err := exec.Command("powershell.exe", argv...).CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s %s: %v\n%s", script, what, err, b)
+	const tries = 4
+	var got, want float64
+	for try := 1; try <= tries; try++ {
+		argv := append([]string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", wmfArg(t, path)}, args...)
+		b, err := exec.Command("powershell.exe", argv...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s %s: %v\n%s", script, what, err, b)
+		}
+		if !strings.Contains(string(b), "ok "+wmfArg(t, dst)) {
+			t.Fatalf("%s %s did not report success:\n%s", script, what, b)
+		}
+		fi, err := os.Stat(dst)
+		if err != nil {
+			t.Fatalf("%s %s wrote no file: %v", script, what, err)
+		}
+		if fi.Size() == 0 {
+			t.Fatalf("%s %s wrote an empty file", script, what)
+		}
+		var ok bool
+		if ok, got, want = durationCheck(t, in, dst); ok {
+			if try > 1 {
+				t.Logf("%s %s landed on attempt %d (%.3fs of %.3fs)", script, what, try, got, want)
+			}
+			return
+		}
 	}
-	if !strings.Contains(string(b), "ok "+dst) {
-		t.Fatalf("%s %s did not report success:\n%s", script, what, b)
-	}
-	fi, err := os.Stat(dst)
-	if err != nil {
-		t.Fatalf("%s %s wrote no file: %v", script, what, err)
-	}
-	if fi.Size() == 0 {
-		t.Fatalf("%s %s wrote an empty file", script, what)
-	}
+	t.Fatal(wmfShortf(script+" "+what, got, want, tries))
 }
 
 // Media Foundation subtypes for the WMA family, as scripts/wmfenc/wmfenc.ps1
@@ -161,8 +201,8 @@ func WMFEncode(t testing.TB, wav, out string, rate, channels, bitRate int) {
 func WMFEncodeSubtype(t testing.TB, wav, out string, rate, channels, bitRate, bits int, subtype string) {
 	t.Helper()
 	in, dst := wmfPaths(t, wav, out)
-	runWMF(t, "wmfenc.ps1", fmt.Sprintf("%s %dHz %dch %d %dbit", subtype, rate, channels, bitRate, bits), dst,
-		"-In", in, "-Out", dst,
+	runWMF(t, "wmfenc.ps1", fmt.Sprintf("%s %dHz %dch %d %dbit", subtype, rate, channels, bitRate, bits), in, dst,
+		"-In", wmfArg(t, in), "-Out", wmfArg(t, dst),
 		"-Rate", strconv.Itoa(rate), "-Channels", strconv.Itoa(channels),
 		"-BitRate", strconv.Itoa(bitRate), "-Bits", strconv.Itoa(bits), "-Subtype", subtype)
 }
@@ -178,11 +218,11 @@ func WMFEncodeSubtype(t testing.TB, wav, out string, rate, channels, bitRate, bi
 func WMFDecode(t testing.TB, wma, out string, bits int) {
 	t.Helper()
 	in, dst := wmfPaths(t, wma, out)
-	args := []string{"-Decode", "-In", in, "-Out", dst}
+	args := []string{"-Decode", "-In", wmfArg(t, in), "-Out", wmfArg(t, dst)}
 	if bits != 0 {
 		args = append(args, "-Bits", strconv.Itoa(bits))
 	}
-	runWMF(t, "wmfenc.ps1", "decode "+filepath.Base(wma), dst, args...)
+	runWMF(t, "wmfenc.ps1", "decode "+filepath.Base(wma), in, dst, args...)
 }
 
 // WMFEncodeLossless encodes a WAV to WMA Lossless (wFormatTag 0x0163) with
@@ -196,7 +236,7 @@ func WMFDecode(t testing.TB, wma, out string, bits int) {
 func WMFEncodeLossless(t testing.TB, wav, out string) {
 	t.Helper()
 	in, dst := wmfPaths(t, wav, out)
-	runWMF(t, "wmfll.ps1", filepath.Base(wav), dst, "-In", in, "-Out", dst)
+	runWMF(t, "wmfll.ps1", filepath.Base(wav), in, dst, "-In", wmfArg(t, in), "-Out", wmfArg(t, dst))
 }
 
 func wmfPaths(t testing.TB, wav, out string) (string, string) {

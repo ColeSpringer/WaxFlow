@@ -14,7 +14,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"os"
 
 	"github.com/colespringer/waxflow/audio"
@@ -73,7 +75,44 @@ func FileSource(f *os.File) (Source, error) {
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeSourceUnreadable, "stat source", err)
 	}
+	if err := CheckRegular(f.Name(), fi.Mode()); err != nil {
+		return nil, err
+	}
 	return readerAtSource{f, fi.Size()}, nil
+}
+
+// CheckRegular refuses anything but a regular file, naming what it found.
+//
+// A Source is random access and states a size, and nothing else does both:
+// a directory stats to the size of its entry block, a FIFO to 0 however
+// much is queued behind it, a character device to 0 as well. Handed one,
+// a sniffer reads a head that is not the file's and a demuxer seeks in a
+// stream that cannot seek, so this is a classification refusal rather than
+// a malformed-input one a few bytes later. A path like /dev/stdin still
+// passes when it is redirected from a regular file, because the stat sees
+// that file.
+func CheckRegular(ref string, mode fs.FileMode) error {
+	if mode.IsRegular() {
+		return nil
+	}
+	return waxerr.New(waxerr.CodeUnsupportedSource,
+		fmt.Sprintf("source: %q is a %s, not a regular file", ref, modeWord(mode)))
+}
+
+// modeWord names a non-regular file for CheckRegular's message.
+func modeWord(m fs.FileMode) string {
+	switch {
+	case m.IsDir():
+		return "directory"
+	case m&fs.ModeNamedPipe != 0:
+		return "named pipe"
+	case m&fs.ModeDevice != 0:
+		return "device"
+	case m&fs.ModeSocket != 0:
+		return "socket"
+	default:
+		return "special file"
+	}
 }
 
 // BytesSource wraps an in-memory blob as a Source, mainly for tests and

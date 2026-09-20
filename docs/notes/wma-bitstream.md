@@ -707,6 +707,31 @@ would be unsound in exactly the Media Foundation case, since the declared
 duration is measured from source sample 0 while the decode begins one frame
 earlier, and that offset is the number just shown to be unknowable.
 
+### Addendum, 2026-09-20: the trailing carry holds no frame
+
+A WaxTap end-to-end report read the delivery policy as a defect (`chapters.wma`
+declares 2.000 s at 8 kHz, which is 16,000 samples, and decodes to the coded
+16,384) and suspected a second one behind it: that the frame left in the bit
+reservoir carry at end of stream is real audio nobody decodes, so up to one
+frame goes missing from every Windows-encoded file. It was measured, on the
+Microsoft corpus, against Windows' own decoder.
+
+There is no frame there. Decoding what the carry holds adds a frame whose RMS
+is under 0.006 where the frames around it run 0.1 to 0.35, and it puts the
+output a whole frame past both Windows' decode and ffmpeg's. Windows runs at
+most a few hundred samples past ffmpeg (128 at 16 kHz, 256 at 22.05, 512 at
+48), never a frame, and the last frame this decoder emits already carries the
+same energy Windows puts there: 0.1238 against 0.1058, 0.0482 against 0.0487,
+and an exact match on the four cells whose noise paths agree. The carry states
+no length and no completeness, so nothing separates a frame from stuffing by
+inspection; the measurement says there is nothing to separate.
+
+`codec/wma`'s `Drain` therefore emits the flush half-frame and drops the
+carry, as it always has, and `TestMicrosoftEncoderDifferential` now gates the
+last frame's energy against Windows' decode so a tail that goes missing later
+fails here. The delivery policy stands unchanged and is pinned end to end by
+`TestWMADeliversMoreThanTheDeclaredDuration`.
+
 ## 12. What v1 and v2 actually differ on
 
 | | v1 (0x0160) | v2 (0x0161) |

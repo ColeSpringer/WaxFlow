@@ -38,11 +38,11 @@ func runCut(t *testing.T, src []byte, hint string, opts waxflow.TranscodeOptions
 	if plan == nil {
 		return nil, nil
 	}
-	cut, _, err := waxflow.CutTrack(track, spans, grid)
+	cut, _, err := waxflow.CutTrack(track, opts, spans, grid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cutDemux, err := waxflow.Cut(demux, track, spans, grid)
+	cutDemux, err := waxflow.Cut(demux, track, opts, spans, grid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -530,8 +530,9 @@ func TestCutPastAMidStreamTrim(t *testing.T) {
 // with the packets around it, and the second span's landing is reported on
 // the track's own timeline, where the trim does not exist.
 //
-// [0, 5000) and [20000, 30000): the second window backs off to packet 17
-// (raw 16320), which is 16320-312-480 on the track's timeline.
+// [0, 5000) and [20000, 30000): both interior edges snap inward, so the
+// second window starts at packet 22 (raw 21120), which is 21120-312-480 on
+// the track's timeline, and the first ends at packet 5 (raw 4800).
 func TestCutAroundAMidStreamTrimInAGap(t *testing.T) {
 	src := midTrimWebM(t, true)
 	track, _ := midTrimTrack(t, src)
@@ -541,10 +542,10 @@ func TestCutAroundAMidStreamTrimInAGap(t *testing.T) {
 	if out == nil {
 		t.Fatal("PlanCut declined a cut whose gap holds the trim")
 	}
-	if want := []waxflow.Span{{From: 0, To: 5448}, {From: 15528, To: 30000}}; !slices.Equal(plan.Landed, want) {
+	if want := []waxflow.Span{{From: 0, To: 4488}, {From: 20328, To: 30000}}; !slices.Equal(plan.Landed, want) {
 		t.Errorf("Landed = %v, want %v", plan.Landed, want)
 	}
-	want := append(indexRange(0, 6), indexRange(17, 33)...)
+	want := append(indexRange(0, 5), indexRange(22, 33)...)
 	if kept := keptSourcePackets(t, payloads(t, out, "opus"), srcPackets); !slices.Equal(kept, want) {
 		t.Errorf("the cut kept source packets %v, want %v", kept, want)
 	}
@@ -592,7 +593,7 @@ func TestCutRefusesAMidStreamTrimMidWalk(t *testing.T) {
 	if track.MidPadding != 0 {
 		t.Fatalf("the source arrives measured (MidPadding %d); this cell needs the unwalked shape", track.MidPadding)
 	}
-	cutDemux, err := waxflow.Cut(demux, track, []waxflow.Span{{From: 0, To: 28800}}, grid)
+	cutDemux, err := waxflow.Cut(demux, track, waxflow.TranscodeOptions{}, []waxflow.Span{{From: 0, To: 28800}}, grid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -644,13 +645,13 @@ func TestCutRunReadsThePlansTrack(t *testing.T) {
 	to := measured.Samples - 1
 	spans := []waxflow.Span{{From: 0, To: to}}
 
-	planned, _, err := waxflow.CutTrack(measured, spans, grid)
+	planned, _, err := waxflow.CutTrack(measured, waxflow.TranscodeOptions{}, spans, grid)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// What the run would compute from a fresh open with the plan's track
 	// overlaid, which is what CutStream does.
-	ran, _, err := waxflow.CutTrack(adoptForTest(fresh, measured), spans, grid)
+	ran, _, err := waxflow.CutTrack(adoptForTest(fresh, measured), waxflow.TranscodeOptions{}, spans, grid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -660,7 +661,7 @@ func TestCutRunReadsThePlansTrack(t *testing.T) {
 	}
 	// And the same overlay on a header-only track, which is what the run used
 	// to do, differs: the cell would pass by luck without it.
-	blind, _, err := waxflow.CutTrack(withSamples(fresh, measured.Samples), spans, grid)
+	blind, _, err := waxflow.CutTrack(withSamples(fresh, measured.Samples), waxflow.TranscodeOptions{}, spans, grid)
 	if err == nil && blind.Padding == planned.Padding && blind.Samples == planned.Samples {
 		t.Error("the header-only track computes the same cut; this cell proves nothing")
 	}

@@ -206,12 +206,20 @@ func (e *Engine) Analyze(ctx context.Context, src container.Source, hint string,
 // format.Media, which flows through here exactly like a local file. The
 // caller owns med and closes it.
 func (e *Engine) AnalyzeMedia(ctx context.Context, med format.Media, opts AnalyzeOptions) (*AnalyzeResult, error) {
+	res, _, err := e.analyzeMedia(ctx, med, opts)
+	return res, err
+}
+
+// analyzeMedia is AnalyzeMedia, also handing back the flushed meter so a
+// group can fold the member's blocks in. Nothing else wants it: every
+// number a caller reads is already on the result.
+func (e *Engine) analyzeMedia(ctx context.Context, med format.Media, opts AnalyzeOptions) (*AnalyzeResult, *loudness.Meter, error) {
 	// A negative channel count is a malformed request, not an unsupported
 	// layout: reject it upfront with the same code the encode's NewChain
 	// gives TranscodeOptions.Channels < 0 (dsp.go), so a two-pass job that
 	// passes the same bad value to both passes reports it the same way.
 	if opts.Channels < 0 {
-		return nil, waxerr.New(waxerr.CodeInvalidRequest,
+		return nil, nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("analyze: negative channel count %d", opts.Channels))
 	}
 	track := med.Info().Default()
@@ -226,7 +234,7 @@ func (e *Engine) AnalyzeMedia(ctx context.Context, med format.Media, opts Analyz
 	// true-peak numbers the measurement exists to report.
 	chain, err := dsp.NewChain(dsp.NewSource(med, track.Fmt), dsp.ChainSpec{Float: true})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer chain.Release()
 
@@ -250,7 +258,7 @@ func (e *Engine) AnalyzeMedia(ctx context.Context, med format.Media, opts Analyz
 		// were placed into a wider envelope has no fold that is any member's
 		// own. See refuseMixedWidthConversion.
 		if err := refuseMixedWidthConversion(med, f, opts.Channels); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		// srcLayout mirrors the encode's mixStage fallback (dsp.go): an
 		// unmasked source takes its count's default layout, so the fold's
@@ -267,7 +275,7 @@ func (e *Engine) AnalyzeMedia(ctx context.Context, med format.Media, opts Analyz
 		// srcLayout == 0 disjunct only mirrors dsp.go:292 one for one; after
 		// the fallback above it cannot fire for a real 1..MaxChannels source.
 		if srcLayout == 0 || dstLayout == 0 {
-			return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
+			return nil, nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 				fmt.Sprintf("analyze: no layout convention for %d -> %d channels", f.Channels, opts.Channels))
 		}
 		// mix.For next, before any buffer: a pair it cannot serve (a source
@@ -275,7 +283,7 @@ func (e *Engine) AnalyzeMedia(ctx context.Context, med format.Media, opts Analyz
 		// clean error, whereas audio.Get below panics on an invalid format.
 		matrix, err = mix.For(srcLayout, dstLayout)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		meterFmt.Channels = opts.Channels
 		meterFmt.Layout = dstLayout
@@ -286,7 +294,7 @@ func (e *Engine) AnalyzeMedia(ctx context.Context, med format.Media, opts Analyz
 
 	meter, err := loudness.NewMeter(meterFmt.Rate, meterFmt.Channels, meterFmt.Layout)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// The silence detector and Tap keep consuming the source channels, never
 	// the downmix: Tap's contract is the source's own rate and layout, and
@@ -299,7 +307,7 @@ func (e *Engine) AnalyzeMedia(ctx context.Context, med format.Media, opts Analyz
 	if opts.Silence != nil {
 		silThreshold, silMinDur = opts.Silence.resolve()
 		if det, err = silence.New(f.Rate, f.Channels, silThreshold, silMinDur); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	buf := audio.Get(f, audio.StandardChunk)
@@ -308,14 +316,14 @@ func (e *Engine) AnalyzeMedia(ctx context.Context, med format.Media, opts Analyz
 	var done int64
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeCanceled, "analyze canceled", err)
+			return nil, nil, waxerr.Wrap(waxerr.CodeCanceled, "analyze canceled", err)
 		}
 		err := chain.ReadChunk(buf)
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for c := range chans {
 			chans[c] = buf.ChanF(c)
@@ -334,19 +342,19 @@ func (e *Engine) AnalyzeMedia(ctx context.Context, med format.Media, opts Analyz
 			}
 			matrix.Apply(dstV, chans, buf.N)
 			if err := meter.Process(dstV); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		} else if err := meter.Process(chans); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if det != nil {
 			if err := det.Process(chans); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 		if opts.Tap != nil {
 			if err := opts.Tap(chans); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 		done += int64(buf.N)
@@ -379,5 +387,111 @@ func (e *Engine) AnalyzeMedia(ctx context.Context, med format.Media, opts Analyz
 			TotalSamples:   det.TotalSamples(),
 		}
 	}
-	return res, nil
+	return res, meter, nil
+}
+
+// GroupMember is one stream of an album measurement.
+type GroupMember struct {
+	// Media is the opened source. The caller owns it and closes it.
+	Media format.Media
+	// Channels is the width this member will be DELIVERED at, which is
+	// what it must be measured at (ADR-0010). Read it off the member's own
+	// plan -- PlanTranscode(...).Format.Channels is the number the two-pass
+	// job already uses -- rather than passing the group's widest: a mono
+	// member measured inside a stereo envelope reads 3.01 dB hot, because
+	// the envelope duplicates it, and the album gain then pushes that
+	// member down by the same 3 dB.
+	//
+	// 0 measures the member at its own width, which is right when it is
+	// delivered unchanged.
+	Channels int
+}
+
+// AnalyzeGroupResult is AnalyzeGroup's answer: the group's own measurement
+// and each member's, from one decode per member.
+type AnalyzeGroupResult struct {
+	// Group is the measurement over every member at once, which is the one
+	// an album gain is computed from. Its Format is the zero value: a group
+	// has no single basis, since each member is measured at its own
+	// delivered width. Samples is the total measured across members.
+	Group AnalyzeResult
+	// Members holds each member's own measurement, in the order given.
+	Members []AnalyzeResult
+}
+
+// AnalyzeGroup measures a set of members as one programme, which is what an
+// album normalize needs: one gain, computed from the gates run over every
+// member at once rather than from an average of per-track numbers.
+//
+// Each member is decoded once and metered at its own delivered width (see
+// GroupMember.Channels), and the group's gates then run over the union of
+// their blocks. That is the difference from concatenating the members and
+// measuring the result: a timeline is built at one width (ADR-0010), so a
+// concatenation would have to widen every member into one envelope and
+// measure each through a fold that is not its own.
+//
+// AnalyzeOptions.Silence, AnalyzeOptions.Tap and AnalyzeOptions.Channels are
+// refused here: the first two are per-stream properties on a source's own
+// timeline and a group has no timeline, and the third is per member. Call
+// Analyze per member for those. Progress, when set, reports the samples
+// measured across the whole group against the sum of the members' projected
+// totals, -1 when any member's is unknown; as in Analyze the two are
+// different quantities, so a member whose declared length is advisory can
+// carry the count past the total.
+func (e *Engine) AnalyzeGroup(ctx context.Context, members []GroupMember, opts AnalyzeOptions) (*AnalyzeGroupResult, error) {
+	if len(members) == 0 {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, "analyze: a group needs at least one member")
+	}
+	if opts.Silence != nil || opts.Tap != nil {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest,
+			"analyze: a group measurement carries no silence map and no tap; both are per-source and Analyze reports them per member")
+	}
+	if opts.Channels != 0 {
+		// Refused rather than overwritten by each GroupMember.Channels: a
+		// group's whole point is that its members are delivered at
+		// different widths, so one count for all of them is a request that
+		// cannot be honoured rather than one to quietly reinterpret.
+		return nil, waxerr.New(waxerr.CodeInvalidRequest,
+			"analyze: a group takes each member's delivered width from GroupMember.Channels, not one count for all of them")
+	}
+	total := int64(0)
+	for _, m := range members {
+		if m.Media == nil {
+			return nil, waxerr.New(waxerr.CodeInvalidRequest, "analyze: a group member has no media")
+		}
+		if total >= 0 {
+			if n := m.Media.Info().Default().Samples; n < 0 {
+				total = -1
+			} else {
+				total += n
+			}
+		}
+	}
+	out := &AnalyzeGroupResult{Members: make([]AnalyzeResult, 0, len(members))}
+	var group loudness.Group
+	var base int64
+	for i, m := range members {
+		mo := opts
+		mo.Channels = m.Channels
+		if opts.Progress != nil {
+			mo.Progress = func(done, _ int64) { opts.Progress(base+done, total) }
+		}
+		res, meter, err := e.analyzeMedia(ctx, m.Media, mo)
+		if err != nil {
+			return nil, waxerr.Annotate(fmt.Sprintf("group member %d", i), err)
+		}
+		if err := group.Add(meter); err != nil {
+			return nil, err
+		}
+		out.Members = append(out.Members, *res)
+		base += res.Samples
+	}
+	out.Group = AnalyzeResult{
+		Samples:        base,
+		IntegratedLUFS: group.Integrated(),
+		LoudnessRange:  group.Range(),
+		TruePeakDB:     group.TruePeak(),
+		SamplePeakDB:   group.SamplePeak(),
+	}
+	return out, nil
 }

@@ -435,6 +435,47 @@ func TestWMAChaptersReachTheProbe(t *testing.T) {
 	}
 }
 
+// TestWMADeliversMoreThanTheDeclaredDuration pins the delivery policy at the
+// layer a caller sees it, because a reader who measures a WaxFlow output
+// against what ffprobe says will find them disagreeing and it is the policy
+// they are looking at, not a defect.
+//
+// chapters.wma declares 2.000 s at 8 kHz, which is 16,000 samples; the file
+// holds 32 packets of 512, which is 16,384. Delivered length is the coded
+// one, the declared total is advisory, and every part of that is deliberate:
+// ffmpeg's ASF muxer rounds the duration it writes to a millisecond, while
+// Media Foundation's declares the coded length, so a rule that trimmed to
+// the declaration would cut over a thousand real samples off a
+// Windows-encoded 44.1 kHz file. See docs/notes/wma-bitstream.md section 11.
+func TestWMADeliversMoreThanTheDeclaredDuration(t *testing.T) {
+	raw, err := os.ReadFile(repoPath("container", "asf", "testdata", "chapters.wma"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	track := probeTrack(t, raw, "wma")
+	if !track.SamplesAdvisory {
+		t.Error("the declared total is not marked advisory; nothing may add it up")
+	}
+	if track.Fmt.Rate != 8000 {
+		t.Fatalf("fixture rate %d, want 8000", track.Fmt.Rate)
+	}
+
+	var out bytes.Buffer
+	res, err := waxflow.New().Transcode(context.Background(), container.BytesSource(raw), "wma", &out,
+		waxflow.TranscodeOptions{Format: "wav"})
+	if err != nil {
+		t.Fatalf("transcode: %v", err)
+	}
+	const coded, declared = 16384, 16000
+	if res.Samples != coded {
+		t.Errorf("delivered %d samples, want the coded %d (the declaration of %d is advisory, not a cap)",
+			res.Samples, coded, declared)
+	}
+	if back := probeTrack(t, out.Bytes(), "wav"); back.Samples != coded {
+		t.Errorf("the output declares %d samples, want %d", back.Samples, coded)
+	}
+}
+
 // TestWMAProProbeAndDecode is the integration layer for the third codec in
 // the container: the sniff table resolves the header with no filename, the
 // track built by container/asf drives codec/wmapro without either side

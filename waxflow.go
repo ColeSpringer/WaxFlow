@@ -675,6 +675,7 @@ type planKey struct {
 type planOpts struct {
 	Format          string
 	Container       string
+	SpliceTrims     bool
 	Rate            int
 	Channels        int
 	BitDepth        int
@@ -702,6 +703,7 @@ func planOptsOf(opts TranscodeOptions) planOpts {
 	return planOpts{
 		Format:          opts.Format,
 		Container:       opts.Container,
+		SpliceTrims:     opts.SpliceTrims,
 		Rate:            opts.Rate,
 		Channels:        opts.Channels,
 		BitDepth:        opts.BitDepth,
@@ -1075,6 +1077,10 @@ var outputs = []output{
 			if err != nil {
 				return "", 0, 0, err
 			}
+			// The encoder clamps to what a 20 ms frame can carry; report
+			// the actual rate. Unconstrained VBR reports 0, leaving rate
+			// and size hints honestly unknown (the PlanTranscode VBR
+			// contract).
 			return opus.EncoderVersion, 0, enc.Bitrate(), nil
 		},
 		encode: func(f audio.Format, opts TranscodeOptions) (codec.Encoder, error) {

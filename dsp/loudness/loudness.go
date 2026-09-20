@@ -290,12 +290,17 @@ func (m *Meter) Flush() {
 // Integrated returns the gated integrated loudness in LUFS per
 // BS.1770-4. Returns math.Inf(-1) when no block passed the absolute
 // gate (silence).
-func (m *Meter) Integrated() float64 {
-	if len(m.blocks) == 0 {
+func (m *Meter) Integrated() float64 { return integratedOf(m.blocks) }
+
+// integratedOf is the gate and the mean over a set of momentary block
+// powers, shared with Group: a group measures over the union of its
+// members' blocks, which is the same computation over a longer slice.
+func integratedOf(blocks []float64) float64 {
+	if len(blocks) == 0 {
 		return math.Inf(-1)
 	}
 	var sum float64
-	for _, p := range m.blocks {
+	for _, p := range blocks {
 		sum += p
 	}
 	// The relative gate sits 10 LU below the power mean of the
@@ -312,10 +317,10 @@ func (m *Meter) Integrated() float64 {
 	// separate the two, and unifying them would still spend a Version
 	// bump (ADR-0004) invalidating every stored measurement to move
 	// nothing.
-	thresh := sum / float64(len(m.blocks)) / 10
+	thresh := sum / float64(len(blocks)) / 10
 	var gated float64
 	var n int
-	for _, p := range m.blocks {
+	for _, p := range blocks {
 		if p > thresh {
 			gated += p
 			n++
@@ -336,19 +341,23 @@ func (m *Meter) Integrated() float64 {
 // of input completes no short-term window at all, and a single surviving
 // window has nothing to take a spread across. Callers reporting LRA on
 // short material should read it as absent, not as zero dynamic range.
-func (m *Meter) Range() float64 {
-	if len(m.st) == 0 {
+func (m *Meter) Range() float64 { return rangeOf(m.st) }
+
+// rangeOf is the gate, sort and percentile spread over a set of
+// short-term powers, shared with Group for the reason integratedOf is.
+func rangeOf(st []float64) float64 {
+	if len(st) == 0 {
 		return 0
 	}
 	var sum float64
-	for _, p := range m.st {
+	for _, p := range st {
 		sum += p
 	}
 	// Tech 3342 gates 20 LU below the power mean, a factor 100. The
 	// comparison is >= where Integrated's is >; see the note there.
-	thresh := sum / float64(len(m.st)) / 100
-	gated := make([]float64, 0, len(m.st))
-	for _, p := range m.st {
+	thresh := sum / float64(len(st)) / 100
+	gated := make([]float64, 0, len(st))
+	for _, p := range st {
 		if p >= thresh {
 			gated = append(gated, p)
 		}

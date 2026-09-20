@@ -231,6 +231,44 @@ func TestMicrosoftEncoderDifferential(t *testing.T) {
 				t.Errorf("cell now measures %v, four times inside its recorded deficit (%s); delete the msDeficits entry",
 					d, why)
 			}
+
+			// The tail ffmpeg's decode does not reach. ffmpeg stops a frame
+			// before we do, so the comparison above scores a file's last
+			// frame against nothing; Windows' own decoder runs to within a
+			// few hundred samples of ours and is the only thing that can
+			// say whether what we put there is what is in the file.
+			win := filepath.Join(t.TempDir(), "win.wav")
+			testutil.WMFDecode(t, path, win, 16)
+			wpcm := testutil.FFmpegDecodeF32NoSIMD(t, win)
+			if len(wpcm) == 0 {
+				t.Fatal("Windows decoded nothing")
+			}
+			// Windows drops the file's first frame, which is the lead
+			// already taken off got. It delivers up to one more frame at
+			// the end than we do; short of that is a tail we are missing.
+			if short := len(wpcm) - len(got); short > cfg.FrameLen()*cfg.Channels {
+				t.Errorf("Windows delivers %d samples past our decode, over a frame of %d",
+					short, cfg.FrameLen()*cfg.Channels)
+			}
+			m := min(len(got), len(wpcm))
+			fl := cfg.FrameLen() * cfg.Channels
+			tailOurs, tailWin := rmsOf(got[max(0, m-fl):m]), rmsOf(wpcm[max(0, m-fl):m])
+			// The gate is energy, not samples. Windows' noise fill is its
+			// own -- the msDeficits note above says it cannot arbitrate a
+			// two percent question -- so the sample-level comparison
+			// belongs to ffmpeg. What only this decoder can answer is
+			// whether the last frame HAS the file's audio in it, and a
+			// tail we dropped would read as silence against a Windows
+			// decode that carries it. -60 dBFS is the floor below which
+			// both are silence and the ratio is noise.
+			if tailOurs > 1e-3 || tailWin > 1e-3 {
+				if r := tailOurs / max(tailWin, 1e-9); r < 0.5 || r > 2 {
+					t.Errorf("last frame is %.6f RMS against Windows' %.6f: the tails do not carry the same audio",
+						tailOurs, tailWin)
+				}
+			}
+			t.Logf("windows: ours %d win %d vs ffmpeg-region %v, last frame %.6f against %.6f",
+				len(got), len(wpcm), testutil.CompareF32(got[:m], wpcm[:m]), tailOurs, tailWin)
 		})
 	}
 }
@@ -240,4 +278,15 @@ func note(why string) string {
 		return ""
 	}
 	return " (" + why + ")"
+}
+
+func rmsOf(x []float32) float64 {
+	if len(x) == 0 {
+		return 0
+	}
+	var s float64
+	for _, v := range x {
+		s += float64(v) * float64(v)
+	}
+	return math.Sqrt(s / float64(len(x)))
 }

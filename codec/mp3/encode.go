@@ -41,7 +41,10 @@ var _ codec.Encoder = (*Encoder)(nil)
 // EncoderVersion is the encoder's cache-key version constant (ADR-0004):
 // bump on any change that alters the encoded bitstream. It composes the
 // psychoacoustic model's revision: retuning dsp/psy changes these streams.
-const EncoderVersion = "mp3-enc-2+" + psy.Version
+//
+// mp3-enc-3: a two-channel stream declares joint stereo in every frame
+// and carries the per-frame mid/side decision in mode_extension alone.
+const EncoderVersion = "mp3-enc-3+" + psy.Version
 
 // thrCalib maps psy thresholds (FFT energy of unit-full-scale input, 1024
 // point Hann analysis) onto the encoder's spectral energy scale (the
@@ -269,6 +272,16 @@ func NewEncoder(f audio.Format, opts *EncoderOptions) (*Encoder, error) {
 
 // header builds the frame header for this encoder with the given padding
 // and joint-stereo choice (mid/side sets mode_extension bit 2).
+//
+// A two-channel stream is always declared joint stereo, even on the frames
+// that code the channels independently: mode_extension 0 is exactly that,
+// so the bits are the same either way, and the mode field then never
+// changes across the stream. It has to not change. ffmpeg reads the mode
+// once and keeps it, so a stream that alternates between stereo and joint
+// stereo (which this encoder did, whenever decideMS flipped) decodes in
+// ffmpeg with the mid/side butterfly applied to the frames that never had
+// it: left comes out 3 dB hot and right near silent for half the file.
+// LAME pins the mode the same way and flips only mode_extension.
 func (e *Encoder) header(pad, ms bool) Header {
 	rate := rateHz[e.rateIdx]
 	if e.version != MPEG1 {
@@ -277,12 +290,10 @@ func (e *Encoder) header(pad, ms bool) Header {
 	if e.version == MPEG25 {
 		rate >>= 1
 	}
-	mode := ModeStereo
-	modeExt := 0
+	mode, modeExt := ModeJoint, 0
 	if e.channels == 1 {
 		mode = ModeMono
 	} else if ms {
-		mode = ModeJoint
 		modeExt = 2
 	}
 	return Header{

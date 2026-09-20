@@ -465,7 +465,25 @@ and the requested `format` matches it (`format=opus`, or `format=aac` for
 AAC-LC), the span is
 served by moving the source's own packets into a new stream: no decode, no
 re-encode, no generation loss. The head and tail land exactly where asked, since
-their snap-to-packet slop becomes the stream's gapless trims. It needs a
+their snap-to-packet slop becomes the stream's gapless trims.
+
+A cut of more than one span has interior joins, and those are not exact: no
+container but Matroska states a trim per packet, so every interior edge snaps
+INWARD onto the packet grid (ADR-0011). It used to snap outward with the
+codec's decode pre-roll in front of it, which delivered 21 ms of the removed
+span on AAC-LC, 80 ms on Opus and half a second on HE-AAC, at every join. A
+cut therefore never delivers audio from outside the request, and gives up
+under one packet of wanted audio at each interior edge; `CutPlan.Landed`
+reports where every span really fell. Spans that touch share one boundary, so
+a range named in two pieces still arrives whole. A span left holding no whole
+packet declines to the transcode rung. The decoder
+is not reset at a join either, so the first packet after one decodes against
+the previous span's state for as long as that codec's memory runs, which is
+the artefact every stream-copy tool has. `TranscodeOptions.SpliceTrims` buys
+exact interior tails and an inaudible decoded pre-roll where the destination
+can carry them, which is mka and webm alone; with it set every other
+destination falls through to a re-encode, and Firefox rejects a file carrying
+more than one `DiscardPadding`. It needs a
 source-matching format, because `format=auto` resolves to `wav` and would
 transcode, so a span that must not re-encode names its codec explicitly. A
 client can feature-detect the formats that engage this rung from `/caps`
@@ -490,10 +508,12 @@ in its packets). Over HLS it also declines a source whose packet
 durations vary, since there is then no grid to lay segment boundaries on.
 `waxflow_remux_total` counts the pipelines it served. The cut declines in turn
 (a codec off the Opus/AAC-LC allowlist, `maxBitRate` set, a snapped window the
-destination cannot express, a source that trims samples inside its run at
-places the measure did not record, a kept packet that carries such a trim and
-a destination other than Matroska, or over HLS a source whose packet
-durations vary and so give no grid to lay segment boundaries on) and falls to
+destination cannot express, a span that keeps no whole packet, two spans
+closer together than the windows can be kept apart, a source that trims
+samples inside its run at places the measure did not record, a kept packet
+that carries such a trim and a destination other than Matroska, or over HLS a
+source whose packet durations vary and so give no grid to lay segment
+boundaries on) and falls to
 a transcode of the same span, so a span is always served: zero-generation
 when it can be, sample-exact through the decoder when it cannot. A cut plans
 its windows on the source's raw packet timeline, past every trim before them,
@@ -884,6 +904,17 @@ Ogg-FLAC, WavPack, and Monkey's Audio. The job's `analysis` still carries
 the measurement in every case; only the file carries the estimate.
 Analyze jobs measure EBU R128 loudness (integrated LUFS, loudness
 range, true peak, sample peak) without producing audio.
+
+An album measurement is a library call rather than a job type:
+`Engine.AnalyzeGroup` takes the members and returns the group's numbers
+beside each member's own, from one decode per member. Each member is
+metered at the width it will be DELIVERED at (`GroupMember.Channels`, read
+off that member's own transcode plan), because a member measured inside a
+wider envelope is not measuring its own fold: a mono member inside a stereo
+one reads 3.01 dB hot, since the envelope duplicates it (ADR-0010). The
+group's gates then run over the union of the members' blocks, which is what
+makes one gain right for all of them. A silence map and a tap are refused
+for a group, since both are properties of one source's timeline.
 
 Each field belongs to a specific set of job types, and a field on a type
 that does not take it is a 400 rather than a field silently ignored at

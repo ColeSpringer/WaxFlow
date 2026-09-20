@@ -368,6 +368,22 @@ func TestProbeCommandErrors(t *testing.T) {
 	if code != 5 {
 		t.Errorf("junk file exit = %d, want 5 (unsupported)", code)
 	}
+
+	// An empty file says so rather than reading as an unknown format.
+	empty := filepath.Join(dir, "empty.wav")
+	if err := os.WriteFile(empty, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errOut := run(t, "probe", empty)
+	if code != 5 || !strings.Contains(errOut, "empty input") {
+		t.Errorf("empty file exit = %d, stderr %q; want 5 naming the empty input", code, errOut)
+	}
+
+	// A directory is refused as a source, not opened and sniffed.
+	code, _, errOut = run(t, "probe", dir)
+	if code == 0 || !strings.Contains(errOut, "not a regular file") {
+		t.Errorf("directory exit = %d, stderr %q; want a refusal naming what it is", code, errOut)
+	}
 }
 
 func TestTranscodeCommand(t *testing.T) {

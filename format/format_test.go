@@ -175,6 +175,23 @@ func TestProbeUnrecognized(t *testing.T) {
 	}
 }
 
+// TestProbeEmptyInputSaysSo separates a file with no bytes in it from a
+// format this build does not know. Both refuse, and "unrecognized input
+// (no magic bytes matched)" sent a user looking for a codec when the file
+// was zero length, which is what a truncated upload or an interrupted
+// write leaves behind.
+func TestProbeEmptyInputSaysSo(t *testing.T) {
+	for _, hint := range []string{"", "wav", "mp3"} {
+		_, err := Probe(container.BytesSource(nil), hint, nil)
+		if !errors.Is(err, waxerr.ErrUnsupportedFormat) {
+			t.Errorf("hint %q: err = %v, want unsupported-format", hint, err)
+		}
+		if got := err.Error(); !strings.Contains(got, "empty input") {
+			t.Errorf("hint %q: err = %q, want it to name the empty input", hint, got)
+		}
+	}
+}
+
 func TestProbeSkipsID3v2(t *testing.T) {
 	wav := buildFile(t, "wav", 20)
 	tag := make([]byte, 10+64) // 64-byte tag body

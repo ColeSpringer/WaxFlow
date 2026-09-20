@@ -269,16 +269,25 @@ func (e *Encoder) InputFormat() audio.Format { return e.fmt }
 // FrameSize is the encoder-native chunk: one 20 ms frame.
 func (e *Encoder) FrameSize() int { return opusFrameSize }
 
+// maxBitrate is the highest rate a 20 ms frame can carry, derived from the
+// frame cap rather than written out again: 510000 bit/s.
+const maxBitrate = maxFrameBytes * 8 * (SampleRate / opusFrameSize)
+
 // Bitrate reports the bit rate in bits per second the stream can be relied
 // on to hold: the exact rate in CBR, the reservoir-bounded long-term target
 // in constrained VBR, and 0 for unconstrained VBR, whose rate is
 // signal-dependent (size and rate hints are then honestly unknown).
+//
+// Both constrained modes report the rate the frame cap allows, not the one
+// that was asked for. The cap binds in constrained VBR exactly as it does
+// in CBR, so a caller asking for 2 Mbit/s used to be told it had it while
+// CBR told the truth about the same request.
 func (e *Encoder) Bitrate() int {
 	if e.vbr && !e.useCVBR {
 		return 0
 	}
 	if e.vbr {
-		return e.bitrate
+		return min(e.bitrate, maxBitrate)
 	}
 	return e.cbrBytes() * 8 * (SampleRate / opusFrameSize)
 }

@@ -415,11 +415,17 @@ func resolve(src container.Source, hint string) (container.Source, *driver, erro
 // genuine read failure propagates as source-unreadable rather than being
 // misclassified as an unsupported file.
 func readHead(src container.Source, n int64) ([]byte, error) {
-	if size := src.Size(); size < n {
-		n = size
+	size := src.Size()
+	if size <= 0 {
+		// Nothing to sniff, and "no magic bytes matched" reads as a
+		// format this build does not support rather than as a file with
+		// no bytes in it. A FIFO and a directory used to arrive here too,
+		// both stating a size they do not have; container.CheckRegular
+		// turns those away first, so an empty source really is empty.
+		return nil, waxerr.New(waxerr.CodeUnsupportedFormat, "format: empty input")
 	}
-	if n <= 0 {
-		return nil, nil
+	if size < n {
+		n = size
 	}
 	head := make([]byte, n)
 	got, err := src.ReadAt(head, 0)

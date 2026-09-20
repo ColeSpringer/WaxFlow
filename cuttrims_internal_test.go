@@ -27,6 +27,42 @@ func trimmedOpusTrack() container.Track {
 	return t
 }
 
+// TestSpliceTrimsSubsumesATrimInThePreroll: a source trim on a packet the
+// spliced pre-roll discards whole is not an additional trim. Counting it
+// again over-states MidPadding and, worse, leaves MidTrims out of ascending
+// order, which plannedTrim binary-searches: the walk would then read the
+// wrong trim for a packet, or none.
+func TestSpliceTrimsSubsumesATrimInThePreroll(t *testing.T) {
+	track := trimmedOpusTrack()
+	// Span 1's splice point is snapUp(50000+312+960) = 51840, and the
+	// pre-roll reaches back to 51840-3840 = 48000, which is where the
+	// whole-packet trim at raw 48000 sits.
+	spans := []Span{{0, 20000}, {50000, 60000}}
+	res, err := computeCut(track, TranscodeOptions{SpliceTrims: true}, spans, 960)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := res.track
+	if !cut.MidTrimsComplete() {
+		t.Errorf("MidPadding %d does not match MidTrims %v", cut.MidPadding, cut.MidTrims)
+	}
+	if !slices.IsSortedFunc(cut.MidTrims, func(a, b container.PacketTrim) int {
+		return int(a.Pos - b.Pos)
+	}) {
+		t.Errorf("MidTrims is not ascending: %v", cut.MidTrims)
+	}
+	var seen int64
+	for _, tr := range cut.MidTrims {
+		if tr.Pos < seen {
+			t.Errorf("trim %v overlaps the one before it", tr)
+		}
+		if tr.Samples > 960 {
+			t.Errorf("trim %v is longer than a packet", tr)
+		}
+		seen = tr.Pos + tr.Samples
+	}
+}
+
 // TestCutTrackMapsSpansThroughInnerTrims pins the arithmetic: a span bound is
 // carried past the delay and past every trim before it, the window snaps on
 // the raw grid there, and the trims the kept packets carry come off the
@@ -67,13 +103,16 @@ func TestCutTrackMapsSpansThroughInnerTrims(t *testing.T) {
 		{
 			// The first trim falls in the gap between the spans and the second
 			// past them, so the output carries none: every destination serves.
-			// Landed[1].From is packet 17's start on the track's timeline:
-			// 16320 - 312 - 480.
+			// Both interior edges snap inward: the first span's tail from
+			// 5312 down to 4800 and the second span's head from 20792 up to
+			// 21120, neither reaching into the gap the request removed.
+			// Landed[1].From is packet 22's start on the track's timeline:
+			// 21120 - 312 - 480.
 			name:  "the trim in a gap",
 			spans: []Span{{0, 5000}, {20000, 30000}},
-			delay: 312, pad: 31680 - 30792, length: 5760 + (31680 - 16320) - 312 - 888,
+			delay: 312, pad: 31680 - 30792, length: 4800 + (31680 - 21120) - 312 - 888,
 			mid: 0, trims: nil,
-			landed: []Span{{0, 5448}, {15528, 30000}}, win: []cutWindow{{0, 5760}, {16320, 31680}},
+			landed: []Span{{0, 4488}, {20328, 30000}}, win: []cutWindow{{0, 4800}, {21120, 31680}},
 		},
 		{
 			// A span ending where packet 8's audio ends: the end bound stays
@@ -106,7 +145,7 @@ func TestCutTrackMapsSpansThroughInnerTrims(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			res, err := computeCut(track, tc.spans, 960)
+			res, err := computeCut(track, TranscodeOptions{}, tc.spans, 960)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -180,7 +219,7 @@ func TestCutTrackDeclinesTrimsItCannotPlace(t *testing.T) {
 		{"a list out of order", unsorted},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := CutTrack(tc.track, []Span{{60000, 70000}}, 960)
+			_, _, err := CutTrack(tc.track, TranscodeOptions{}, []Span{{60000, 70000}}, 960)
 			if err == nil {
 				t.Fatal("CutTrack planned around trims it could not place")
 			}
@@ -243,7 +282,7 @@ func (d *trimDemuxer) SeekSample(track int, target int64) (int64, error) {
 func TestCutViewForwardsTheTrimsThePlanKnew(t *testing.T) {
 	track := trimmedOpusTrack()
 	pads := map[int]int64{8: 480, 50: 960}
-	view, err := Cut(&trimDemuxer{n: 100, dur: 960, pads: pads}, track, []Span{{9600, 28800}}, 960)
+	view, err := Cut(&trimDemuxer{n: 100, dur: 960, pads: pads}, track, TranscodeOptions{}, []Span{{9600, 28800}}, 960)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +315,7 @@ func TestCutViewForwardsTheTrimsThePlanKnew(t *testing.T) {
 	// track does not list: refused on the packet after it, as before.
 	blind := trimmedOpusTrack()
 	blind.MidPadding, blind.MidTrims = 0, nil
-	view, err = Cut(&trimDemuxer{n: 100, dur: 960, pads: pads}, blind, []Span{{9600, 28800}}, 960)
+	view, err = Cut(&trimDemuxer{n: 100, dur: 960, pads: pads}, blind, TranscodeOptions{}, []Span{{9600, 28800}}, 960)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +337,7 @@ func TestCutViewForwardsTheTrimsThePlanKnew(t *testing.T) {
 	// disagree with the track the windows were computed from.
 	moved := trimmedOpusTrack()
 	moved.MidTrims = []container.PacketTrim{{Pos: 7200, Samples: 480}, {Pos: 48000, Samples: 960}}
-	view, err = Cut(&trimDemuxer{n: 100, dur: 960, pads: pads}, moved, []Span{{9600, 28800}}, 960)
+	view, err = Cut(&trimDemuxer{n: 100, dur: 960, pads: pads}, moved, TranscodeOptions{}, []Span{{9600, 28800}}, 960)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +369,7 @@ func TestCutViewChecksOnlyThePacketsItNeeds(t *testing.T) {
 		{"a trim on the last kept packet", map[int]int64{30: 480}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			view, err := Cut(&trimDemuxer{n: 100, dur: 960, pads: tc.pads}, opusTrack(312, 93600), []Span{{9600, 28800}}, 960)
+			view, err := Cut(&trimDemuxer{n: 100, dur: 960, pads: tc.pads}, opusTrack(312, 93600), TranscodeOptions{}, []Span{{9600, 28800}}, 960)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -385,7 +424,7 @@ func TestCutSeekViewConvertsThroughTrims(t *testing.T) {
 	// trim on packet 8 lies before the window and shifts the delivered
 	// timeline under it. dt = 25192, su = 25920.
 	demux := &trimDemuxer{n: 100, dur: 960, pads: pads}
-	view, err := cutSeekable(demux, track, []Span{{12000, 24400}}, 960)
+	view, err := cutSeekable(demux, track, TranscodeOptions{}, []Span{{12000, 24400}}, 960)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +455,7 @@ func TestCutSeekViewConvertsThroughTrims(t *testing.T) {
 func TestSeekableCutDeclinesAWholePacketTrim(t *testing.T) {
 	track := trimmedOpusTrack() // packet 50 is trimmed whole
 	spans := []Span{{60000, 70000}}
-	if _, err := cutSeekable(&trimDemuxer{n: 100, dur: 960, pads: map[int]int64{8: 480, 50: 960}}, track, spans, 960); err == nil {
+	if _, err := cutSeekable(&trimDemuxer{n: 100, dur: 960, pads: map[int]int64{8: 480, 50: 960}}, track, TranscodeOptions{}, spans, 960); err == nil {
 		t.Error("cutSeekable accepted a source with a whole-packet trim")
 	} else if code := waxerr.CodeOf(err); code != waxerr.CodeUnsupportedFormat {
 		t.Errorf("cutSeekable code = %v, want %v", code, waxerr.CodeUnsupportedFormat)
@@ -428,7 +467,7 @@ func TestSeekableCutDeclinesAWholePacketTrim(t *testing.T) {
 	if plan != nil {
 		t.Error("PlanCutSegments planned a segmented cut of a source with a whole-packet trim")
 	}
-	if _, _, err := CutTrack(track, spans, 960); err != nil {
+	if _, _, err := CutTrack(track, TranscodeOptions{}, spans, 960); err != nil {
 		t.Errorf("the progressive cut declined the same source: %v", err)
 	}
 }
@@ -451,7 +490,7 @@ func TestCutTrackDeclinesTrimsOffTheGrid(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			track := opusTrack(312, 93600)
 			track.MidTrims, track.MidPadding = tc.trims, tc.sum
-			_, _, err := CutTrack(track, []Span{{20000, 30000}}, 960)
+			_, _, err := CutTrack(track, TranscodeOptions{}, []Span{{20000, 30000}}, 960)
 			if err == nil {
 				t.Fatal("CutTrack planned around trims it cannot place")
 			}

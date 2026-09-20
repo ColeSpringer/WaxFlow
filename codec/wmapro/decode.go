@@ -506,6 +506,16 @@ func (d *Decoder) roll() {
 // frame that never arrives: the reference emits it for the Xbox variant and
 // not for this codec, and emitting it here would add half a frame of alias to
 // the end of every file.
+//
+// Nor is the reservoir carry a frame to recover. Decoding what it holds at
+// end of stream was tried against Windows' own decoder over the Microsoft
+// corpus: it fails on the first cell ("a subframe of 2048 samples at
+// frontier 1024"), because the bits left over are a fragment and the length
+// prefix in front of them belongs to a frame the file does not finish. The
+// measurement is in docs/notes/wma-pro-bitstream.md: nine of the ten cells
+// decode to exactly what Windows delivers, and the tenth (the odd-length
+// tonal cell) is 512 samples short of it at both ends of the comparison,
+// ours and ffmpeg's alike.
 func (d *Decoder) Drain(func(*audio.Buffer) error) error { return nil }
 
 // Reset discards everything after a seek. The decoder then owes one frame of

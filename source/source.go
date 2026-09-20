@@ -150,7 +150,7 @@ func extHint(rel string) string {
 // is the caller's job, since the spool directory is daemon-owned, not a
 // user-named root.
 func OpenLocal(ref, path, name string) (*File, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|openNonblock, 0)
+	f, err := os.OpenFile(path, os.O_RDONLY|container.OpenNonblock, 0)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeNotFound, "source: no such file", err)
 	}
@@ -159,10 +159,9 @@ func OpenLocal(ref, path, name string) (*File, error) {
 		f.Close()
 		return nil, waxerr.Wrap(waxerr.CodeSourceUnreadable, "source: stat", err)
 	}
-	if !fi.Mode().IsRegular() {
+	if err := container.CheckRegular(ref, fi.Mode()); err != nil {
 		f.Close()
-		return nil, waxerr.New(waxerr.CodeUnsupportedSource,
-			fmt.Sprintf("source: %q is a %s, not a regular file", ref, modeWord(fi.Mode())))
+		return nil, err
 	}
 	return &File{
 		Ref: ref,

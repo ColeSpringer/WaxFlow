@@ -211,3 +211,36 @@ func TestOpusConstrainedVBREncode(t *testing.T) {
 		t.Fatal("decoder produced no samples")
 	}
 }
+
+// TestOpusBitrateReportsTheCeiling holds both constrained modes to the
+// rate a 20 ms frame can actually carry. A request past it is clamped by
+// the frame cap either way, and reporting the request back as if it were
+// met sends a size estimate and a Content-Length hint that the stream
+// cannot meet.
+func TestOpusBitrateReportsTheCeiling(t *testing.T) {
+	f := audio.Format{Rate: SampleRate, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Float, BitDepth: 32}
+	for _, tc := range []struct {
+		name string
+		opts EncoderOptions
+		want int
+	}{
+		{"cbr", EncoderOptions{Bitrate: 2_000_000}, maxBitrate},
+		{"constrained-vbr", EncoderOptions{Bitrate: 2_000_000, VBR: true, ConstrainedVBR: true}, maxBitrate},
+		{"cbr-in-range", EncoderOptions{Bitrate: 128_000}, 128_000},
+		{"constrained-vbr-in-range", EncoderOptions{Bitrate: 128_000, VBR: true, ConstrainedVBR: true}, 128_000},
+		{"unconstrained-vbr", EncoderOptions{Bitrate: 2_000_000, VBR: true}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, err := NewEncoder(f, &tc.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := e.Bitrate(); got != tc.want {
+				t.Errorf("Bitrate = %d, want %d", got, tc.want)
+			}
+		})
+	}
+	if maxBitrate != 510000 {
+		t.Errorf("maxBitrate = %d, want 510000 (1275 bytes in a 20 ms frame)", maxBitrate)
+	}
+}

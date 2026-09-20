@@ -140,8 +140,8 @@ func TestMuxFramesValid(t *testing.T) {
 	if got := string(out[off : off+4]); got != "Info" {
 		t.Errorf("first frame tag %q, want Info", got)
 	}
-	if got := string(out[off+12 : off+16]); got != "WaxF" {
-		t.Errorf("encoder tag %q, want WaxF prefix", got)
+	if got := string(out[off+120 : off+129]); got != encoderTag {
+		t.Errorf("encoder tag %q at the canonical magic+120, want %q", got, encoderTag)
 	}
 
 	// Walk the whole stream frame by frame: every frame must parse and its
@@ -170,7 +170,7 @@ func TestMuxFramesValid(t *testing.T) {
 // of silence, and never panics on the tiny frames.
 func TestMuxLowBitrateTag(t *testing.T) {
 	// MPEG-2.5 stereo at 8 kbit/s / 11.025 kHz: Size ~52, the Xing header fits
-	// but the 36-byte LAME extension does not.
+	// but not even the extension's 24-byte prefix does.
 	pkts, tr, samples := encodeTone(t, 11025, 2, 8000, 8000)
 	var b bytes.Buffer
 	muxPackets(t, &b, pkts, tr, samples, 11025, 2)
@@ -292,7 +292,7 @@ func TestGaplessFieldsFallIndependently(t *testing.T) {
 	// Both, as Begin sets them: the parsed header for the arithmetic and the
 	// raw bytes the emitted frame's own header is built from.
 	m.h, m.hdr = h, raw
-	frame := m.buildInfoFrame(delay, 1<<12, 40, nil, 0)
+	frame := m.buildInfoFrame(infoFields{delay: delay, padding: 1 << 12, frames: 40})
 	if frame == nil {
 		t.Fatal("buildInfoFrame returned nil for a frame that holds the layout")
 	}

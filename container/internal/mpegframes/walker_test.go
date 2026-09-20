@@ -301,6 +301,48 @@ func TestVBRTagWithoutLAMEHasNoTrims(t *testing.T) {
 	}
 }
 
+// canonicalXingFrame is a metadata frame in the layout LAME itself writes:
+// all four optional fields ahead of the extension, which puts the encoder
+// string at magic+120. The fixtures above put it at magic+12, so without
+// this one nothing here reads a tag laid out the way most files in the
+// world are.
+func canonicalXingFrame(count uint32, delay, padding uint16) []byte {
+	f := make([]byte, frameLen)
+	copy(f, frameHeader)
+	off := mp3.HeaderLen + sideInfo
+	copy(f[off:], "Xing")
+	binary.BigEndian.PutUint32(f[off+4:], 1|2|4|8) // frames, bytes, TOC, quality
+	binary.BigEndian.PutUint32(f[off+8:], count)
+	binary.BigEndian.PutUint32(f[off+12:], frameLen*uint32(count))
+	for i := range 100 {
+		f[off+16+i] = byte(min(i*256/100, 255))
+	}
+	p := off + 120
+	copy(f[p:], "LAME3.100")
+	b := f[p+9+12:]
+	b[0] = byte(delay >> 4)
+	b[1] = byte(delay<<4) | byte(padding>>8)
+	b[2] = byte(padding)
+	return f
+}
+
+// TestVBRTagAtItsCanonicalOffset reads the extension out of a frame that
+// carries every optional field ahead of it, which is where a reader that
+// walks the flags has to find it and where a fixed-offset reader looks.
+func TestVBRTagAtItsCanonicalOffset(t *testing.T) {
+	data := append(canonicalXingFrame(4, 576, 1000), frames(4)...)
+	w, tag, has := begin(t, data, &walkOpts{})
+	if !has {
+		t.Fatal("the canonical Xing frame was not recognized")
+	}
+	if tag.Frames != 4 || tag.Delay != 576 || tag.Padding != 1000 {
+		t.Errorf("tag = %+v, want frames 4 delay 576 padding 1000", tag)
+	}
+	if w.FirstFrame() != frameLen {
+		t.Errorf("first audio frame at %d, want %d", w.FirstFrame(), frameLen)
+	}
+}
+
 // TestRefusalsCarryTheOwnersPrefix is why Prefix exists: these messages
 // reach users, and they must name the format the request asked for rather
 // than this package.

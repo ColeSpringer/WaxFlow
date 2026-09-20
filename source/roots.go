@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -309,7 +310,7 @@ func (r *Roots) Resolve(_ context.Context, ref string) (*File, error) {
 	// O_NONBLOCK (unix) keeps the open itself from hanging on a FIFO; the
 	// fstat below then rejects anything that is not a regular file. On a
 	// regular file the flag is a no-op.
-	f, err := m.root.OpenFile(rel, os.O_RDONLY|openNonblock, 0)
+	f, err := m.root.OpenFile(rel, os.O_RDONLY|container.OpenNonblock, 0)
 	if err != nil {
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
@@ -333,10 +334,9 @@ func (r *Roots) Resolve(_ context.Context, ref string) (*File, error) {
 		f.Close()
 		return nil, waxerr.Wrap(waxerr.CodeSourceUnreadable, "source: stat", err)
 	}
-	if !fi.Mode().IsRegular() {
+	if err := container.CheckRegular(ref, fi.Mode()); err != nil {
 		f.Close()
-		return nil, waxerr.New(waxerr.CodeUnsupportedSource,
-			fmt.Sprintf("source: %q is a %s, not a regular file", ref, modeWord(fi.Mode())))
+		return nil, err
 	}
 	if fi.Size() > maxBytes {
 		f.Close()
@@ -349,19 +349,4 @@ func (r *Roots) Resolve(_ context.Context, ref string) (*File, error) {
 		ID:  Identity{Size: fi.Size(), MtimeNS: fi.ModTime().UnixNano()},
 		f:   f,
 	}, nil
-}
-
-func modeWord(m fs.FileMode) string {
-	switch {
-	case m.IsDir():
-		return "directory"
-	case m&fs.ModeNamedPipe != 0:
-		return "named pipe"
-	case m&fs.ModeDevice != 0:
-		return "device"
-	case m&fs.ModeSocket != 0:
-		return "socket"
-	default:
-		return "special file"
-	}
 }

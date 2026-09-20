@@ -130,6 +130,7 @@ const (
 	idSimpleBlock    = 0xA3
 	idBlockGroup     = 0xA0
 	idBlock          = 0xA1
+	idBlockDuration  = 0x9B
 	idDiscardPadding = 0x75A2
 )
 

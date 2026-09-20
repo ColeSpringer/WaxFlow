@@ -76,6 +76,20 @@ are the right ones is the engine suite's job
 (`TestSpanDeliversItsOwnSamples`, `TestSpanPrerollMatchesContinuous`); a
 browser cannot see that and should not be asked to.
 
+**Inner trims and Firefox.** A Matroska file carrying more than one
+`DiscardPadding` is rejected by Firefox's WebM demuxer, which honours exactly
+one per stream and marks any later padded block's duration invalid. Measured
+here on 2026-09-20 (playwright 1.62.0, Firefox 153.0): such a file stops after
+15,616 of 95,352 frames with a media error, and its MSE `SourceBuffer` raises
+on `appendBuffer`. The same cut without the inner trims plays to `ended`.
+Chromium plays both, MSE included. Two things
+in this tree can write one. An mka-to-mka copy forwards a source's own inner
+trims, which is inherited rather than chosen; and `TranscodeOptions.SpliceTrims`
+writes them deliberately, to make a multi-span cut's interior joins exact
+(ADR-0011). Chromium, ExoPlayer and everything ffmpeg-based take both. The
+default cut writes none, so nothing here changes for a caller who does not ask
+for it.
+
 The **manual, pending** cells are the "Safari progressive playback of a
 live transcode" question: our live transcodes are chunked with no
 Content-Length and `Accept-Ranges: none` (a `Range: bytes=0-` request

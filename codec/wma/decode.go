@@ -1045,6 +1045,16 @@ func (d *Decoder) transform(coded [2]bool, msStereo bool, blockLen int) error {
 // source without it, since the decode trails the source by exactly that much.
 // WMA has no padding count to trim it by, so a decoder emits it and downstream
 // gaplessness is not on offer.
+//
+// What it does NOT do is decode the reservoir carry. A packet leaves one at
+// the end of every reservoir stream, and it holds no whole frame: measured
+// against Windows' own decoder over the Microsoft corpus, decoding it adds a
+// frame whose RMS is under 0.006 where the frames around it run 0.1 to 0.35,
+// and it puts our output a whole frame past both Windows' decode and
+// ffmpeg's. Windows runs at most a few hundred samples past ffmpeg, never a
+// frame. The carry carries no length and no completeness bit, so there is no
+// test that separates a frame from stuffing; the measurement says there is no
+// frame there to find. See docs/notes/wma-bitstream.md section 11.
 func (d *Decoder) Drain(emit func(*audio.Buffer) error) error {
 	if d.err != nil {
 		return d.err

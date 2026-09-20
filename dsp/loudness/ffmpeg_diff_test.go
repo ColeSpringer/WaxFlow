@@ -228,3 +228,94 @@ func summaryValue(line, prefix string) (float64, bool) {
 	}
 	return v, true
 }
+
+// TestGroupAgainstFFmpegOnTheConcatenation checks the group accumulator
+// against the reference the same way one meter is checked: three members
+// measured separately, and ffmpeg's ebur128 over the concatenation of the
+// same audio.
+//
+// The two are not identical by construction, and the gap is the point of
+// the bound. Members do not share 100 ms sub-blocks, so each member's
+// partial final sub-block is dropped where a concatenation would carry it
+// into the next member's. That is under 100 ms of audio per member against
+// a 36-second programme, which has to land well inside the differential's
+// own 0.15 LU.
+func TestGroupAgainstFFmpegOnTheConcatenation(t *testing.T) {
+	ffmpeg := testutil.FFmpeg(t)
+	const rate = 48000
+	// None of these lengths is a whole number of 100 ms sub-blocks, which
+	// is the point: a member's partial final sub-block is dropped where a
+	// concatenation carries it into the next member, and a corpus of round
+	// 12-second members would never exercise the difference the bound is
+	// there to absorb.
+	members := [][][]float32{
+		{amNoise(rate, 12*rate+1234, 1), amNoise(rate, 12*rate+1234, 2)},
+		{toneOverNoise(rate, 12*rate+777, 9), amNoise(rate, 12*rate+777, 7)},
+		{sweepNoise(rate, 12*rate+4321, 13), sweepNoise(rate, 12*rate+4321, 21)},
+	}
+	var g Group
+	for i, chans := range members {
+		m, err := NewMeter(rate, len(chans), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := m.Process(chans); err != nil {
+			t.Fatal(err)
+		}
+		m.Flush()
+		if err := g.Add(m); err != nil {
+			t.Fatalf("member %d: %v", i, err)
+		}
+	}
+	if g.Members() != len(members) {
+		t.Fatalf("Members = %d, want %d", g.Members(), len(members))
+	}
+
+	cat := [][]float32{nil, nil}
+	for _, chans := range members {
+		for c := range cat {
+			cat[c] = append(cat[c], chans[c]...)
+		}
+	}
+	wav := filepath.Join(t.TempDir(), "cat.wav")
+	testutil.WriteFloatWAV(t, wav, rate, cat)
+	ref := ffmpegEbur128(t, ffmpeg, wav)
+
+	i, lra, tp := g.Integrated(), g.Range(), g.TruePeak()
+	t.Logf("group integrated %.2f LUFS (ffmpeg %.1f, delta %+.3f)", i, ref.i, i-ref.i)
+	t.Logf("group range      %.2f LU   (ffmpeg %.1f, delta %+.3f)", lra, ref.lra, lra-ref.lra)
+	t.Logf("group true peak  %.2f dBTP (ffmpeg %.1f, delta %+.3f)", tp, ref.peak, tp-ref.peak)
+	if math.Abs(i-ref.i) > 0.15 {
+		t.Errorf("integrated %.2f LUFS, ffmpeg %.1f, delta %+.3f exceeds 0.15", i, ref.i, i-ref.i)
+	}
+	if math.Abs(lra-ref.lra) > 0.5 {
+		t.Errorf("range %.2f LU, ffmpeg %.1f, delta %+.3f exceeds 0.5", lra, ref.lra, lra-ref.lra)
+	}
+	if math.Abs(tp-ref.peak) > 0.3 {
+		t.Errorf("true peak %.2f dBTP, ffmpeg %.1f, delta %+.3f exceeds 0.3", tp, ref.peak, tp-ref.peak)
+	}
+}
+
+// TestGroupRefusesAnUnflushedMeter: an unflushed meter still holds a
+// true-peak tail and a partial sub-block, so its numbers are not the
+// member's yet.
+func TestGroupRefusesAnUnflushedMeter(t *testing.T) {
+	m, err := NewMeter(48000, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Process([][]float32{amNoise(48000, 48000, 3)}); err != nil {
+		t.Fatal(err)
+	}
+	var g Group
+	if err := g.Add(m); err == nil {
+		t.Error("an unflushed meter was accepted")
+	}
+	if err := g.Add(nil); err == nil {
+		t.Error("a nil meter was accepted")
+	}
+	m.Flush()
+	if err := g.Add(m); err != nil {
+		t.Errorf("a flushed meter was refused: %v", err)
+	}
+}
