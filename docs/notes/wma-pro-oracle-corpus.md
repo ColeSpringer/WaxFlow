@@ -68,6 +68,7 @@ what can be produced:
 | depth | 16, 24 | everything else |
 | 32000 | 2ch/16-bit at 32 kbps only | every other 32 kHz shape |
 | 8 channels | 48000 and 96000 only | 8ch at 44100 or 88200 |
+| 8ch landings | 16-bit at 48 kHz: 128016 b/s (nBlockAlign 5462) for a 128k request, a 3414-byte packet for 192k and above; 24-bit: 384000 (16384) for every request to 512k, 768000 (32768) at 768k and at 96 kHz | |
 | 88200 | 24-bit only | 16-bit at 88.2 kHz |
 | decode flags | 0x00e0 (183 rows), 0x0060 (6 rows) | everything else |
 | extra word at offset 16 | 0x0000 (168), 0xc042 (19), 0x20c6 (2) | everything else |
@@ -112,6 +113,25 @@ The four segments, per sample index `i`:
 
 then clamp to `[-full, full]`.
 
+**The LFE channel** (channel 3 of a six- or eight-channel cell) takes periods
+`rate/50` and `rate/100` instead, 50 and 100 Hz at every rate, because the
+encoder band-limits that channel. *Measured* with a comb of twenty tones from
+12.5 Hz to 1 kHz in every channel, at 44.1, 48 and 96 kHz: the LFE comes back
+flat to 212.5 Hz, 1.5 to 5.7 dB down at 225 Hz, 10 to 31 dB down at 237.5 Hz
+and 30 dB or more down from 300 Hz, at every rate, while every other channel
+is flat throughout. That is the subwoofer cutoff of `wma-pro-bitstream.md`
+section 3.3, applied by the encoder. The two committed 5.1 cells predate the
+rule and keep the full-band LFE their fixtures were encoded from
+(`fullBandLFE` in `corpus_test.go`): at 44.1 and 48 kHz the encoder keeps the
+lower triangle's fundamental (130 and 142 Hz) and drops everything else, so
+the channel correlates 0.47 with its source, and at 96 kHz, where the same
+periods put the fundamentals at 284 and 706 Hz, it keeps nothing and the
+channel correlates 0.004. That is what failed the 96 kHz 5.1 cell the first
+time the Media Foundation cells ran under WSL, and it was the recipe and not
+the encoder build: this box's encoder gives 0.477 and 0.472 on the two
+committed cells' LFE, the figures the corpus was built with. Under the rule
+the 96 kHz cell's LFE correlates above 0.9 and the eight-channel cell's 0.90.
+
 The silence-to-noise edge at three quarters is a **hard transient landing on a
 frame boundary**, which is what drives the encoder to split a frame into short
 subframes. That edge is why the corpus reaches every subframe length rather
@@ -137,10 +157,26 @@ in both channels, with either sign on the second), it is the only one on which
 the encoder enables the channel transform band by band. With both tones in
 both channels it decides once for all bands, every time.
 
+**The multitone recipe**, added with the long cell (section 6): twenty
+cosines per channel at 44100/6/16, at 12.5, 25, 50, 75, 100, 125, 150, 175,
+200, 212.5, 225, 237.5, 250, 275, 300, 350, 400, 500, 700 and 1000 Hz, each
+at a twenty-fifth of full scale, by the same recurrence with `cos(w)` and
+`sin(w)` literals in thirty fractional bits. Every channel carries the same
+tones at the same amplitude; what tells the channels apart is each tone's
+phase, a quarter turn times a two-bit draw from the channel's splitmix64
+generator seeded `1 + c * 0x100`. The recurrence starts from `x[0] = A
+cos(phi)` and `x[-1] = A cos(phi - w)`, which for the four phases are `A, 0,
+-A, 0` and `A cos w, A sin w, -A cos w, -A sin w`, so no phase needs a
+literal. Nine of the tones sit under the LFE cutoff and that channel
+correlates 0.73 with its source. The seed is load-bearing and not by design:
+the size of the encoder's final frame on this material is chaotic in the
+phases, 10 to 56 kbits across sixteen seeds on the same tones, and seed 1 is
+one of the seven under which it outran the packet.
+
 ## 4. The corpus
 
-Six cells are committed at `codec/wmapro/testdata/corpus/`, 356 KiB together,
-and `MANIFEST.md` beside them repeats each command line. They are committed
+Eight cells are committed at `codec/wmapro/testdata/corpus/`, 414 KiB
+together, and `MANIFEST.md` beside them repeats each command line. They are committed
 because **FFmpeg cannot write this format**: a machine with no Windows has
 nothing to encode with, and these bytes are the only fixtures it gets.
 
@@ -152,14 +188,16 @@ nothing to encode with, and these bytes are the only fixtures it gets.
 | `pro-96000-2ch-24-384k.wma` | 96000 | 2 | 24 | 384000 | 16384 | 0x00e0 | 0x0000 | 131072 | 7 | 116590 |
 | `pro-32000-2ch-16-32k.wma` | 32000 | 2 | 16 | 32000 | 1536 | 0x0060 | 0x20c6 | 49152 | 7 | 12654 |
 | `pro-44100-2ch-16-128k-tonal.wma` | 44100 | 2 | 16 | 128016 | 5945 | 0x00e0 | 0x0000 | 100000 | 7 | 43517 |
+| `pro-44100-6ch-16-128k-long.wma` | 44100 | 6 | 16 | 128016 | 5945 | 0x00e0 | 0x0000 | 16384 | 3 | 19621 |
+| `pro-48000-8ch-16-128k.wma` | 48000 | 8 | 16 | 128016 | 5462 | 0x00e0 | 0x0000 | 65536 | 7 | 40136 |
 
-Five are gate cells and the sixth is a **refusal cell**: `pro-32000-2ch-16-32k`
+Seven are gate cells and the eighth is a **refusal cell**: `pro-32000-2ch-16-32k`
 is there so that a decoder's refusal of the low-bit-rate tool has something to
 refuse, not so that it can be decoded. It is also the only cell with decode
 flags 0x0060, so it is the one that proves the dynamic-range-gain byte is
 genuinely conditional.
 
-Why each of the other four earns its bytes:
+Why each of the other seven earns its bytes:
 
 - `pro-44100-2ch-16-128k` is the ordinary case: stereo, 16-bit, the rate and
   bit rate anyone actually ships.
@@ -178,17 +216,25 @@ Why each of the other four earns its bytes:
   times and carries an end trim of 864 on its last frame. Its 100000-frame
   length is not a multiple of the frame, and its decode is 99488 frames, the
   number section 6 predicted and pins.
+- `pro-44100-6ch-16-128k-long` is the multitone recipe, committed by the
+  long-frame round for its final frame: 50294 bits against a 47560-bit
+  packet, the one frame whose extent nothing but its walk can find (section
+  6). It is the smallest file on which this encoder wrote one.
+- `pro-48000-8ch-16-128k` is the only 7.1 cell, committed by the same round:
+  the only groups wider than six channels anywhere, at 16 kbit/s a channel,
+  and the first cell built under the LFE rule.
 
 `container/asf/testdata/pro-s16.wma` is the demuxer's cell: the same recipe at
 16384 frames, 44100/2/16 at 128 kbps, two packets, 13647 bytes. It exists so
 the ASF tests do not reach into another package's testdata.
 
-Six more shapes are generated on Windows and never committed, in
-`.../scratchpad/gen/`: 44100/2/16 at 64 kbps, 44100/2/24 at 440 kbps,
-44100/6/16 at 192 kbps, 48000/2/24 at 192 kbps, 88200/2/24 at 384 kbps and
-96000/6/24 at 768 kbps. They are in the coverage matrix below because they
-reach rows the committed five do not, and a reviewer with Windows can rebuild
-them.
+Eight more shapes are generated on Windows and never committed: 44100/2/16
+at 64 kbps, 44100/2/24 at 440 kbps, 44100/6/16 at 192 kbps, 48000/2/24 at 192
+kbps, 88200/2/24 at 384 kbps, 96000/6/24 at 768 kbps, and since the
+long-frame round 48000/8/24 at 384 kbps and 96000/8/24 at 768 kbps. They are
+in the coverage matrix below because they reach rows the committed cells do
+not, and a reviewer with Windows, or WSL on one, can rebuild them
+(`TestMicrosoftCorpus`).
 
 Two things a regeneration will show, both expected. The output is **not
 byte-identical** to the committed file, because the encoder writes a fresh File
@@ -244,6 +290,7 @@ exactly; the tonal cell it added is in a third table after the two.
 | extended payload (8.1) | - | - | - | - | **26** |
 | post-processing transform (7.1) | **-** | **-** | **-** | **-** | **-** |
 | LFE content above cutoff (13.2) | n/a | **-** | **-** | n/a | n/a |
+| frame longer than a packet (4.4) | - | - | - | - | - |
 | subframe with no channel coding | yes | yes | yes | yes | yes |
 | continuation count zero (4.1) | 1 | 1 | 1 | 1 | - |
 | continuation count saturates (4.1) | - | - | - | - | - |
@@ -302,6 +349,40 @@ decoder on the same rows:
 | **end trim (14.2)** | **864 on the last frame** |
 | continuation count zero (4.1) | 6 |
 
+The two cells the long-frame round committed, measured with this decoder's
+counters (the analysis decoder is gone, so the rows it alone counted, group
+sizes and channels per subframe among them, are not filled in):
+
+| path | 44k/6/16 128k long | 48k/8/16 128k |
+|---|---|---|
+| frames | 9 | 33 |
+| subframes | 25 | 67 |
+| scaled 2-channel matrix (9.2) | 8 | 3 |
+| explicit "no transform" (9.2) | - | 1 |
+| explicit rotation matrix (9.4) | 4 | 9 |
+| scale factors, DPCM form (10.1) | 54 | 208 |
+| scale factors, run-level form (10.2) | 24 | 103 |
+| scale factor 14-bit escape (10.2) | - | 46 |
+| resample with no transmission (10) | - | 15 |
+| 4-vector escape (11.1) | 1777 | 583 |
+| 2-vector escape (11.1) | 2686 | 286 |
+| large-value escape (11.2) | 724 | 25 |
+| run-level tail reached (11.3) | 78 | 323 |
+| run-level escape (11.3) | 26 | 236 |
+| end-of-block symbol (11.3) | 78 | 323 |
+| quantisation step escape (12.2) | 3 | 8 |
+| per-channel modifiers (12.3) | 54 | 237 |
+| start trim (14.2) | 1 | 1 |
+| continuation count zero (4.1) | 1 | 1 |
+| **continuation count saturates (4.1)** | **1** | **1** |
+| **frame longer than a packet (4.4)** | **1** | - |
+
+Both final packets carry a saturating continuation count, which section 6
+explains: it is the encoder's end-of-stream shape and not a rarity. The
+generated 96 kHz 7.1 cell adds the vector phase covering a block 5 times and
+a step escape 5 times; the 48 kHz 24-bit 7.1 cell adds nothing the 16-bit one
+lacks.
+
 **Rows nothing reaches**, which become the deficit list in
 `docs/quality-gates.md`:
 
@@ -353,6 +434,50 @@ odd-length cell is ever added, pin the number the encoder actually produced
 rather than the source length. The implementation pass added exactly such a
 cell (`pro-44100-2ch-16-128k-tonal`, 100000 frames) and it came back 99488
 again, with an end trim of 864; the corpus test pins 99488.
+
+### The final frame, and the frame longer than a packet
+
+*Measured* across the multitone encodes (section 3), where every ordinary
+frame costs 2.5 to 3 kbits at 44100/6/16 and 128 kbps: the encoder's **final
+frame is far larger than its others**, 41 to 64 kbits on files of 9 to 33
+frames, and its size is chaotic in the tones' phases (10 to 56 kbits across
+sixteen seeds of the same recipe). The four-segment cells' final frames are
+ordinary. The final frame **starts on a fresh packet**: the packet before it
+ends in padding that the next packet's zero continuation count abandons, the
+same abandonment section 4.1 of the bitstream note counts on ten of thirteen
+files.
+
+When the final frame is longer than the packet, and 50294 bits against a
+47560-bit packet is the committed instance (`pro-44100-6ch-16-128k-long`,
+pinned by `TestLongCellsFinalFrameOutrunsItsPacket`), **its length prefix
+reads exactly `nBlockAlign * 8`**, and the continuation count of the packet
+it ends in reads the same, whatever the frame's length. Both fields saturate
+at the packet size in bits, not at the field's own maximum (the prefix is 16
+bits wide there and 50294 would fit). The frame's walk, a padding bit (which
+reads 1) and a trailer bit (0) end it 2756 bits into that packet's payload,
+and the rest of the packet is zero. On a longer encode of the same recipe,
+33 frames with a 57396-bit final frame, the rest of the last packet was
+instead a **byte-for-byte copy of packet 0**, stale encoder buffer; either
+way no decoder reads it. The same shape recurs at 48000/8/16 (a 53336-bit frame against a 27312-bit packet,
+which is 97.7% of two payloads, so a frame across three packets is a matter
+of material rather than of format).
+
+What the decoders do with it. FFmpeg logs `frame[8] would have to skip
+-2733 bits` on the committed cell, marks the packet lost and **delivers the
+frame anyway** (its samples are written before the check), so its count is
+the source length;
+Windows' own decoder delivers it too, and the two agree on the frame to
+0.999999. This decoder refused it until the long-frame round, on the walk
+overrunning the prefix, and every such file lost its last 2048 samples. The
+rule now: a prefix equal to the packet size is a floor and not a length
+(bitstream note section 4.4).
+
+FFmpeg has a second, unrelated limit that the generated 96000/8/24 cell at
+768 kbps hits: `Too small input buffer is not implemented`, on a final frame
+larger than its frame buffer, which it drops entirely. It delivers 126976
+frames of 131072 where Windows' decoder and this one deliver 131072, and the
+31 frames it does deliver match this decoder at the floor. The cell carries
+`ffmpegShort: 4096` so the differential asserts exactly that.
 
 ### The declared duration overshoots
 
@@ -565,10 +690,12 @@ why.
 - **Mono, and 3, 4, 5 or 7 channels.** Windows' encoder offers 2, 6 and 8 only.
   A mono stream is describable by the container and the decoder should handle
   it, but nothing here can test that.
-- **Eight channels.** Offered by the encoder at 48 and 96 kHz, but no 8-channel
-  cell is committed or generated, so the 7- and 8-channel group paths, and in
-  particular the refusal of a built-in decorrelation matrix for a group above
-  six channels, have no fixture.
+- **A built-in decorrelation matrix for a group above six channels.** Eight
+  channels have fixtures since the long-frame round (`pro-48000-8ch-16-128k`
+  committed, two more generated), and they reach explicit rotation matrices
+  and scaled two-channel matrices over 7.1 groups; but the encoder never
+  selects a built-in matrix at any width, so the refusal of one above six
+  channels stays a hand-built test.
 - **Frame lengths other than 2048 and 4096.** The rate arms for 512, 1024 and
   8192 samples need rates at or below 22050 or above 96000, which the encoder
   does not offer, and the decode flags' frame-length adjustment is zero on

@@ -1,6 +1,6 @@
 # WMA Pro committed corpus
 
-Six cells, 356 KiB, committed because **FFmpeg cannot write this format**. It
+Eight cells, 414 KiB, committed because **FFmpeg cannot write this format**. It
 decodes WMA Pro and has no encoder for it, so a machine with no Windows has
 nothing to encode and these bytes are the only fixtures it gets. The wider
 generated corpus is Windows-only and never lands in the tree.
@@ -19,9 +19,11 @@ cell, so a reviewer can see exactly what produced it.
 | `pro-96000-2ch-24-384k.wma` | 96000 | 2 | 24 | 384000 | 16384 | 0x00e0 | 0x0000 | 131072 | 116590 |
 | `pro-32000-2ch-16-32k.wma` | 32000 | 2 | 16 | 32000 | 1536 | 0x0060 | 0x20c6 | 49152 | 12654 |
 | `pro-44100-2ch-16-128k-tonal.wma` | 44100 | 2 | 16 | 128016 | 5945 | 0x00e0 | 0x0000 | 100000 | 43517 |
+| `pro-44100-6ch-16-128k-long.wma` | 44100 | 6 | 16 | 128016 | 5945 | 0x00e0 | 0x0000 | 16384 | 19621 |
+| `pro-48000-8ch-16-128k.wma` | 48000 | 8 | 16 | 128016 | 5462 | 0x00e0 | 0x0000 | 65536 | 40136 |
 
-Five of the six are gate cells and the sixth is a refusal cell. Each is here
-to reach something nothing else does:
+Seven of the eight are gate cells and the eighth is a refusal cell. Each is
+here to reach something nothing else does:
 
 - `pro-44100-2ch-16-128k` is the ordinary case: 16-bit stereo at the lowest bit
   rate this shape reaches with a decodable stream.
@@ -43,6 +45,13 @@ to reach something nothing else does:
   tonal stereo provokes, and an **end trim** on the last frame. Its decode is
   99488 frames, 512 short of the source, and FFmpeg agrees; the corpus note's
   section 6 says why that number is pinned rather than the source length.
+- `pro-44100-6ch-16-128k-long` is the multitone recipe, and it exists for its
+  final frame: 50294 bits against a 47560-bit packet, so its length prefix and
+  the continuation count of the packet it ends in both saturate at the packet
+  size, and only its walk can find its end. The corpus note's section 6 has
+  the measurement; `TestAFrameLongerThanAPacketDecodes` has the rule.
+- `pro-48000-8ch-16-128k` is the only 7.1 cell, so the only groups wider than
+  six channels, at 16 kbit/s a channel.
 
 `container/asf/testdata/pro-s16.wma` is the same recipe at 16384 frames,
 encoded the same way, so the demuxer's differential has a 0x0162 file without
@@ -54,9 +63,14 @@ The source PCM is synthesized by the integer recipe `corpus_test.go` carries,
 with no floating point, so it regenerates identically on any platform and
 architecture. Four equal segments: two triangles per channel, triangles plus
 quarter-scale noise, digital silence, and full-scale noise, which puts a hard
-transient on a frame boundary. The tonal cell is one integer cosine per
-channel from a fixed-point rotation recurrence whose cosine is a literal.
-Section 3 of the corpus note has both recipes in prose.
+transient on a frame boundary; the LFE channel of a 5.1 or 7.1 cell puts its
+triangles at 50 and 100 Hz, under the cutoff the encoder applies to that
+channel, except on the two 5.1 cells encoded before that rule, which keep the
+full-band LFE their bytes were made from. The tonal cell is one integer
+cosine per channel from a fixed-point rotation recurrence whose cosine is a
+literal, and the long cell is twenty such cosines per channel, each started
+at one of four phases drawn from the channel's generator. Section 3 of the
+corpus note has all three recipes in prose.
 
 ```sh
 # 1. write the source WAV (the corpus test's own synthesis, at these lengths)
@@ -66,6 +80,8 @@ Section 3 of the corpus note has both recipes in prose.
 #      pro-96000-2ch-24-384k   96000 Hz  2ch  24-bit  131072 frames
 #      pro-32000-2ch-16-32k    32000 Hz  2ch  16-bit   49152 frames
 #      pro-44100-2ch-16-128k-tonal  44100 Hz  2ch  16-bit  100000 frames (the tonal recipe)
+#      pro-44100-6ch-16-128k-long   44100 Hz  6ch  16-bit   16384 frames (the multitone recipe)
+#      pro-48000-8ch-16-128k        48000 Hz  8ch  16-bit   65536 frames
 #
 # 2. encode with Windows' own encoder, from Windows or over WSL interop
 powershell.exe -NoProfile -ExecutionPolicy Bypass \

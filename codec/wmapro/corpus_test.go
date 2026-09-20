@@ -6,7 +6,7 @@ package wmapro_test
 //
 // FFmpeg cannot write this format, so unlike codec/wma the fixtures are not
 // generated on the machine that runs the tests: Windows' own encoder makes
-// them, five are committed, and the differential that runs on Linux CI decodes
+// them, eight are committed, and the differential that runs on Linux CI decodes
 // committed bytes with FFmpeg. That makes the oracle genuinely independent,
 // since it is scoring a file it did not produce.
 //
@@ -64,11 +64,28 @@ type cell struct {
 	// one pure tone per channel, which is what makes the encoder enable the
 	// channel transform per band rather than for every band at once.
 	tonal bool
+	// multitone selects the twenty-tone recipe: the material on which the
+	// encoder writes a final frame longer than a packet.
+	multitone bool
+	// fullBandLFE marks a 5.1 cell built before the LFE rule in synth: its
+	// LFE channel carries the same two triangles as any other channel, and
+	// the encoder, which band-limits that channel at about 220 Hz (measured
+	// in section 3 of the corpus note), keeps the lower one's fundamental at
+	// 44.1 and 48 kHz and nothing at all at 96 kHz. The two committed 5.1
+	// cells were encoded from that recipe and their fixtures pin them to it;
+	// every cell built since puts the LFE's triangles under the cutoff.
+	fullBandLFE bool
 	// outFrames is the sample count the encoder's output actually carries
 	// when it is not frames: the one odd-length cell comes back 512 samples
 	// short of its source, and FFmpeg agrees, so the number is pinned rather
 	// than the source length asserted.
 	outFrames int
+	// ffmpegShort is the number of frames FFmpeg's decode of the cell lacks
+	// at its end, for the one cell whose final frame is larger than FFmpeg's
+	// frame buffer: it reports "too small input buffer is not implemented"
+	// and drops the frame, where Windows' own decoder and this one deliver
+	// the source length. The frames before it match at the gate.
+	ffmpegShort int
 	// refused marks a cell this build declines by name. It is committed
 	// anyway, because a refusal with no real file behind it is a claim about a
 	// shape nobody has seen.
@@ -90,10 +107,10 @@ var cells = []cell{
 		bands: [5]int{26, 26, 23, 19, 14}, committed: true},
 	{name: "pro-44100-6ch-16-128k", rate: 44100, channels: 6, bits: 16, bitRate: 128016,
 		frames: 65536, align: 5945, flags: 0x00e0, frameLen: 2048,
-		bands: [5]int{26, 26, 23, 19, 14}, committed: true},
+		bands: [5]int{26, 26, 23, 19, 14}, fullBandLFE: true, committed: true},
 	{name: "pro-48000-6ch-24-384k", rate: 48000, channels: 6, bits: 24, bitRate: 384000,
 		frames: 65536, align: 16384, flags: 0x00e0, frameLen: 2048,
-		bands: [5]int{26, 26, 23, 18, 14}, committed: true},
+		bands: [5]int{26, 26, 23, 18, 14}, fullBandLFE: true, committed: true},
 	{name: "pro-96000-2ch-24-384k", rate: 96000, channels: 2, bits: 24, bitRate: 384000,
 		frames: 131072, align: 16384, flags: 0x00e0, frameLen: 4096,
 		bands: [5]int{28, 28, 25, 20, 16}, committed: true},
@@ -109,6 +126,19 @@ var cells = []cell{
 	{name: "pro-32000-2ch-16-32k", rate: 32000, channels: 2, bits: 16, bitRate: 32000,
 		frames: 49152, align: 1536, flags: 0x0060, word16: 0x20c6, frameLen: 2048,
 		bands: [5]int{25, 25, 24, 20, 15}, refused: true, committed: true},
+	// The long cell reaches the one frame whose extent is not known before
+	// it is decoded: on this material the encoder's final frame is 50294 bits
+	// against a 47560-bit packet, so its length prefix and the continuation
+	// count of the packet it ends in both saturate at the packet size.
+	{name: "pro-44100-6ch-16-128k-long", rate: 44100, channels: 6, bits: 16, bitRate: 128016,
+		frames: 16384, align: 5945, flags: 0x00e0, frameLen: 2048,
+		bands: [5]int{26, 26, 23, 19, 14}, multitone: true, committed: true},
+	// The eight-channel cell: the only layout with a group wider than six
+	// channels, and the heaviest quantisation in the corpus at 16 kbit/s a
+	// channel.
+	{name: "pro-48000-8ch-16-128k", rate: 48000, channels: 8, bits: 16, bitRate: 128016,
+		frames: 65536, align: 5462, flags: 0x00e0, frameLen: 2048,
+		bands: [5]int{26, 26, 23, 18, 14}, committed: true},
 
 	// Generated on Windows, never committed.
 	{name: "pro-44100-6ch-16-192k", rate: 44100, channels: 6, bits: 16, bitRate: 192016,
@@ -126,6 +156,12 @@ var cells = []cell{
 	{name: "pro-96000-6ch-24-768k", rate: 96000, channels: 6, bits: 24, bitRate: 768000,
 		frames: 131072, align: 32768, flags: 0x00e0, frameLen: 4096,
 		bands: [5]int{28, 28, 25, 20, 16}},
+	{name: "pro-48000-8ch-24-384k", rate: 48000, channels: 8, bits: 24, bitRate: 384000,
+		frames: 65536, align: 16384, flags: 0x00e0, frameLen: 2048,
+		bands: [5]int{26, 26, 23, 18, 14}},
+	{name: "pro-96000-8ch-24-768k", rate: 96000, channels: 8, bits: 24, bitRate: 768000,
+		frames: 131072, align: 32768, flags: 0x00e0, frameLen: 4096,
+		bands: [5]int{28, 28, 25, 20, 16}, ffmpegShort: 4096},
 	// A second refusal shape, at a rate whose neighbouring bit rates are fine,
 	// so the refusal cannot be passing because of the sample rate.
 	{name: "pro-44100-2ch-16-64k", rate: 44100, channels: 2, bits: 16, bitRate: 64024,
@@ -184,10 +220,8 @@ const (
 )
 
 func newTone(c int64, amp, bits int) *tone {
-	frac := uint(32 - bits)
-	x0 := int64(amp) << frac
 	// x[-1] = A cos(w), so the run starts at n = 0 with x[0] = A.
-	return &tone{c: c, frac: frac, prev: (x0*c + 1<<29) >> 30, cur: x0}
+	return newToneAt(c, 0, amp, bits, 0)
 }
 
 // next returns x[n] as a sample and advances to n+1.
@@ -198,14 +232,29 @@ func (t *tone) next() int {
 	return out
 }
 
+// lfeChannel is the LFE's position in the default 5.1 and 7.1 layouts, which
+// are the layouts the encoder assigns a six- or eight-channel source.
+const lfeChannel = 3
+
 // synth builds one cell's source PCM, planar. Four equal segments: two
 // triangles per channel, triangles plus quarter-scale noise, digital silence,
 // and full-scale noise. The silence-to-noise edge is a hard transient on a
 // frame boundary, and the triangles are rich enough in harmonics to fill the
 // band layout rather than lighting one band per channel.
+//
+// The LFE channel's triangles are at 50 and 100 Hz whatever the rate, because
+// the encoder band-limits that channel: measured with a comb of tones, it
+// passes 212 Hz flat and is 30 dB down by 240 Hz at every rate it offers.
+// The other channels' periods are in samples, so their fundamentals double
+// with the rate, and at 96 kHz the LFE's used to sit at 284 and 706 Hz, above
+// the cutoff, which left its decode uncorrelated with anything. The two
+// committed 5.1 cells keep that full-band LFE (fullBandLFE).
 func synth(c cell) [][]int32 {
-	if c.tonal {
+	switch {
+	case c.tonal:
 		return synthTonal(c)
+	case c.multitone:
+		return synthMultitone(c, multitoneSeed)
 	}
 	full := int(1)<<(c.bits-1) - 1
 	q := c.frames / 4
@@ -214,6 +263,12 @@ func synth(c cell) [][]int32 {
 		s := make([]int32, c.frames)
 		rng := prng(0x5741584C4F5700 + uint64(ch)*0x100)
 		p1, p2 := 97+13*ch, 251+29*ch
+		if ch == lfeChannel && c.channels >= 6 && !c.fullBandLFE {
+			if c.rate%100 != 0 {
+				panic("the LFE rule wants a rate that 50 and 100 Hz divide")
+			}
+			p1, p2 = c.rate/50, c.rate/100
+		}
 		for i := range s {
 			n := int(rng.next()%uint64(2*full+1)) - full
 			var v int
@@ -256,6 +311,118 @@ func synthTonal(c cell) [][]int32 {
 		tn := newTone(cos, full*3/8, c.bits)
 		for i := range s {
 			s[i] = int32(tn.next())
+		}
+		out[ch] = s
+	}
+	return out
+}
+
+// The multitone cell's tones, at 44100 Hz only: cos(w) and sin(w) for
+// w = 2 pi f / 44100 in thirty fractional bits, twenty frequencies from
+// 12.5 Hz to 1 kHz. The sines are what start a tone a quarter turn in.
+var multitoneCos = [20]int64{
+	1073740121, // 12.5 Hz
+	1073735013, // 25 Hz
+	1073714579, // 50 Hz
+	1073680523, // 75 Hz
+	1073632844, // 100 Hz
+	1073571545, // 125 Hz
+	1073496625, // 150 Hz
+	1073408086, // 175 Hz
+	1073305928, // 200 Hz
+	1073249742, // 212.5 Hz
+	1073190153, // 225 Hz
+	1073127159, // 237.5 Hz
+	1073060762, // 250 Hz
+	1072917757, // 275 Hz
+	1072761141, // 300 Hz
+	1072407078, // 350 Hz
+	1071998593, // 400 Hz
+	1071018441, // 500 Hz
+	1068406160, // 700 Hz
+	1062862106, // 1000 Hz
+}
+
+var multitoneSin = [20]int64{
+	1912278,   // 12.5 Hz
+	3824549,   // 25 Hz
+	7649050,   // 50 Hz
+	11473453,  // 75 Hz
+	15297711,  // 100 Hz
+	19121775,  // 125 Hz
+	22945596,  // 150 Hz
+	26769126,  // 175 Hz
+	30592317,  // 200 Hz
+	32503770,  // 212.5 Hz
+	34415119,  // 225 Hz
+	36326360,  // 237.5 Hz
+	38237485,  // 250 Hz
+	42059366,  // 275 Hz
+	45880713,  // 300 Hz
+	53521612,  // 350 Hz
+	61159795,  // 400 Hz
+	76426463,  // 500 Hz
+	106910161, // 700 Hz
+	152465238, // 1000 Hz
+}
+
+// multitoneSeed is the generator seed the long cell was built under. The
+// size of the encoder's final frame is chaotic in the tones' phases: across
+// sixteen seeds it ran from 10 to 56 kbits on the same twenty tones, and only
+// some of them outran the 47560-bit packet. This one did, on the build that
+// wrote the committed bytes; a regeneration on another build may not, which
+// costs the regenerated file nothing but the long frame.
+const multitoneSeed = 1
+
+// newToneAt starts a tone q quarter turns in: x[0] = A cos(phi) and
+// x[-1] = A cos(phi - w), which for the four phases are A, 0, -A, 0 and
+// A cos(w), A sin(w), -A cos(w), -A sin(w), so no phase needs a literal of
+// its own.
+func newToneAt(c, s int64, amp, bits, q int) *tone {
+	frac := uint(32 - bits)
+	a := int64(amp) << frac
+	ac := (a*c + 1<<29) >> 30
+	as := (a*s + 1<<29) >> 30
+	t := &tone{c: c, frac: frac}
+	switch q & 3 {
+	case 0:
+		t.prev, t.cur = ac, a
+	case 1:
+		t.prev, t.cur = as, 0
+	case 2:
+		t.prev, t.cur = -ac, -a
+	case 3:
+		t.prev, t.cur = -as, 0
+	}
+	return t
+}
+
+// synthMultitone is the twenty-tone recipe: every channel carries the same
+// twenty tones at the same amplitude, four fifths of full scale between them,
+// each at a phase of 0, 90, 180 or 270 degrees drawn from the channel's own
+// generator, which is what keeps the channels apart. Nine of the tones sit
+// under the LFE cutoff, so that channel keeps enough to correlate. Like the
+// tonal recipe it is 44.1 kHz only, since the literals are.
+func synthMultitone(c cell, seed uint64) [][]int32 {
+	if c.rate != 44100 {
+		panic("the multitone recipe's literals are for 44100 Hz")
+	}
+	full := int(1)<<(c.bits-1) - 1
+	amp := full * 4 / (5 * len(multitoneCos))
+	out := make([][]int32, c.channels)
+	for ch := 0; ch < c.channels; ch++ {
+		rng := prng(seed + uint64(ch)*0x100)
+		tones := make([]*tone, len(multitoneCos))
+		for k := range tones {
+			tones[k] = newToneAt(multitoneCos[k], multitoneSin[k], amp, c.bits, int(rng.next()&3))
+		}
+		s := make([]int32, c.frames)
+		for i := range s {
+			v := 0
+			for _, t := range tones {
+				v += t.next()
+			}
+			s[i] = int32(v)
 		}
 		out[ch] = s
 	}
@@ -567,10 +734,15 @@ func TestDecodeAlignsWithTheSource(t *testing.T) {
 // a window past the stream head, which is how an encoder-plus-decoder delay is
 // recovered. A window at the head would fit the first frames' warm-up instead
 // of the stream.
+//
+// The window leaves maxLag frames at the end of the source, so that every lag
+// is evaluated on a short cell: with the window merely fitted to the length,
+// the long cell's 16384 frames left room for lag zero alone and the search
+// could report nothing else.
 func bestLag(src, got []float32, channels, maxLag int) int {
 	skip, win := 8192, 16384
-	if (skip+win)*channels > len(src) {
-		win = len(src)/channels - skip
+	if (skip+win+maxLag)*channels > len(src) {
+		win = len(src)/channels - skip - maxLag
 	}
 	best, bestErr := 0, math.Inf(1)
 	for lag := 0; lag < maxLag; lag++ {
@@ -626,19 +798,51 @@ func TestDecodeIsNotGloballyNegated(t *testing.T) {
 			src := synthFloat(c)
 			for ch := 0; ch < c.channels; ch++ {
 				r := correlation(src, got, c.channels, ch)
-				if r < negationFloor {
-					t.Errorf("channel %d correlates %.3f with the source, want at least %.2f", ch, r, negationFloor)
+				if r < c.floor(ch) {
+					t.Errorf("channel %d correlates %.3f with the source, want at least %.2f", ch, r, c.floor(ch))
 				}
 			}
 		})
 	}
 }
 
-// negationFloor is well below what every channel of every cell measures and
-// far above what a negated decode gives, which is the same figure with the
-// sign flipped. Measured: 0.95 to 0.999 on every full-range channel, and 0.47
-// on the LFE channel of both 5.1 cells, which the encoder band-limits.
-const negationFloor = 0.3
+// The correlation floors, each about half of what its channels measure, so a
+// negated decode (the same figure with the sign flipped) or a misrouted
+// channel fails by a wide margin. Measured: full-range channels 0.946 to
+// 1.000 across the corpus; the LFE of a cell built under synth's LFE rule
+// 0.73 (the long cell, nine of whose twenty tones pass the cutoff) to 0.90;
+// the full-band LFE of the two legacy 5.1 cells 0.47, since the encoder
+// keeps one of its two fundamentals. Three floors rather than one, so that
+// the legacy cells' deficit is the gate's own entry and not a floor pulled
+// down for every cell.
+const (
+	negationFloor    = 0.8
+	lfeFloor         = 0.5
+	fullBandLFEFloor = 0.3
+)
+
+// floor is the correlation one channel of a cell has to reach.
+func (c cell) floor(ch int) float64 {
+	switch {
+	case ch != lfeChannel || c.channels < 6:
+		return negationFloor
+	case c.fullBandLFE:
+		return fullBandLFEFloor
+	}
+	return lfeFloor
+}
+
+// cellNamed is the corpus row for one cell.
+func cellNamed(t testing.TB, name string) cell {
+	t.Helper()
+	for _, c := range cells {
+		if c.name == name {
+			return c
+		}
+	}
+	t.Fatalf("no cell named %q", name)
+	return cell{}
+}
 
 // correlation is the normalised cross-correlation of one channel of the
 // source and the decode at lag zero, over the same window bestLag uses.
@@ -673,19 +877,25 @@ func correlation(src, got []float32, channels, ch int) float64 {
 // per-band enables and the end trim) cannot silently stop being reached.
 func TestCorpusReachesWhatTheNotesMeasured(t *testing.T) {
 	type counts struct {
-		frames, subframes                                            int
-		stereo, scaled, noTransform, explicit, perBand               int
-		dpcm, runLevel, scaleEscape, resampleOnly                    int
-		vec4, vec2, large, tail, tailEscape, endOfBlock              int
-		stepEscape, modifiers, startTrim, endTrim, contZero, contSat int
+		frames, subframes                                                       int
+		stereo, scaled, noTransform, explicit, perBand                          int
+		dpcm, runLevel, scaleEscape, resampleOnly                               int
+		vec4, vec2, large, tail, tailEscape, endOfBlock                         int
+		stepEscape, modifiers, startTrim, endTrim, contZero, contSat, longFrame int
 	}
 	want := map[string]counts{
-		"pro-44100-2ch-16-128k": {33, 55, 42, 0, 13, 0, 0, 52, 32, 43, 0, 10227, 450, 30, 84, 168, 84, 0, 18, 1, 0, 1, 0},
-		"pro-44100-6ch-16-128k": {33, 65, 0, 4, 2, 6, 0, 156, 70, 66, 15, 1370, 339, 15, 239, 219, 239, 0, 167, 1, 0, 1, 0},
-		"pro-48000-6ch-24-384k": {33, 64, 0, 4, 0, 7, 0, 156, 84, 152, 0, 30049, 20442, 429, 240, 605, 240, 1, 155, 1, 0, 1, 0},
-		"pro-96000-2ch-24-384k": {33, 55, 42, 0, 13, 0, 0, 52, 32, 53, 0, 29695, 19309, 99, 84, 399, 84, 0, 12, 1, 0, 1, 0},
+		"pro-44100-2ch-16-128k": {33, 55, 42, 0, 13, 0, 0, 52, 32, 43, 0, 10227, 450, 30, 84, 168, 84, 0, 18, 1, 0, 1, 0, 0},
+		"pro-44100-6ch-16-128k": {33, 65, 0, 4, 2, 6, 0, 156, 70, 66, 15, 1370, 339, 15, 239, 219, 239, 0, 167, 1, 0, 1, 0, 0},
+		"pro-48000-6ch-24-384k": {33, 64, 0, 4, 0, 7, 0, 156, 84, 152, 0, 30049, 20442, 429, 240, 605, 240, 1, 155, 1, 0, 1, 0, 0},
+		"pro-96000-2ch-24-384k": {33, 55, 42, 0, 13, 0, 0, 52, 32, 53, 0, 29695, 19309, 99, 84, 399, 84, 0, 12, 1, 0, 1, 0, 0},
 		// Measured here, not in the note.
-		"pro-44100-2ch-16-128k-tonal": {50, 58, 55, 0, 3, 0, 24, 100, 10, 16, 0, 2236, 2882, 483, 110, 32, 110, 2, 6, 1, 1, 6, 0},
+		"pro-44100-2ch-16-128k-tonal": {50, 58, 55, 0, 3, 0, 24, 100, 10, 16, 0, 2236, 2882, 483, 110, 32, 110, 2, 6, 1, 1, 6, 0, 0},
+		// The two cells the long-frame round added, measured here: the long
+		// cell's final frame is the one long frame, and the eight-channel
+		// cell is the first to resample scale factors without transmitting
+		// them since the 44.1 kHz 5.1 cell.
+		"pro-44100-6ch-16-128k-long": {9, 25, 0, 8, 0, 4, 0, 54, 24, 0, 0, 1777, 2686, 724, 78, 26, 78, 3, 54, 1, 0, 1, 1, 1},
+		"pro-48000-8ch-16-128k":      {33, 67, 0, 3, 1, 9, 0, 208, 103, 46, 15, 583, 286, 25, 323, 236, 323, 8, 237, 1, 0, 1, 1, 0},
 	}
 	for _, c := range committedCells() {
 		if c.refused {
@@ -712,7 +922,7 @@ func TestCorpusReachesWhatTheNotesMeasured(t *testing.T) {
 				p.StereoMatrix, p.ScaledMatrix, p.NoTransform, p.ExplicitMatrix, p.PerBandEnables,
 				p.DPCM, p.RunLevelDiffs, p.ScaleEscape, p.ResampleOnly,
 				p.Vec4Escape, p.Vec2Escape, p.LargeValue, p.TailReached, p.TailEscape, p.EndOfBlock,
-				p.StepEscape, p.Modifiers, p.StartTrim, p.EndTrim, p.ContZero, p.ContSaturates}
+				p.StepEscape, p.Modifiers, p.StartTrim, p.EndTrim, p.ContZero, p.ContSaturates, p.LongFrame}
 			if got != want[c.name] {
 				t.Errorf("path counts\n got  %+v\n want %+v", got, want[c.name])
 			}
@@ -729,7 +939,7 @@ func TestCorpusReachesWhatTheNotesMeasured(t *testing.T) {
 
 // TestMicrosoftCorpus is the wider corpus, generated rather than committed:
 // every cell in the table, re-encoded here with Windows' own encoder so a
-// Windows run covers the whole envelope, including the six shapes not worth
+// Windows run covers the whole envelope, including the eight shapes not worth
 // their bytes in the tree.
 //
 // Windows only, because Windows is the only place that can write this format
@@ -774,8 +984,8 @@ func TestMicrosoftCorpus(t *testing.T) {
 			}
 			src := synthFloat(c)
 			for ch := 0; ch < c.channels; ch++ {
-				if r := correlation(src, got, c.channels, ch); r < negationFloor {
-					t.Errorf("channel %d correlates %.3f with the source", ch, r)
+				if r := correlation(src, got, c.channels, ch); r < c.floor(ch) {
+					t.Errorf("channel %d correlates %.3f with the source, want at least %.2f", ch, r, c.floor(ch))
 				}
 			}
 			if !c.tonal {
@@ -785,14 +995,230 @@ func TestMicrosoftCorpus(t *testing.T) {
 			}
 			if testutil.HaveFFmpeg(t) {
 				want := testutil.FFmpegDecodeF32NoSIMD(t, wma)
-				if len(got) != len(want) {
-					t.Errorf("decoded %d samples, ffmpeg %d", len(got), len(want))
+				// An exact count, so a cell whose oracle stops short is
+				// named (ffmpegShort) rather than absorbed by an overlap.
+				if len(got) != len(want)+c.ffmpegShort*c.channels {
+					t.Errorf("decoded %d samples, ffmpeg %d, want ffmpeg short by %d frames", len(got), len(want), c.ffmpegShort)
 				}
 				n := min(len(got), len(want))
 				if d := testutil.CompareF32(got[:n], want[:n]); d.RMS > gateRMS || d.MaxAbs > gateMax {
 					t.Errorf("differential %v, want rms <= %g max <= %g", d, gateRMS, gateMax)
 				}
 			}
+			if c.ffmpegShort > 0 {
+				// The frames FFmpeg lacks are scored by the other oracle,
+				// Windows' own decoder, which delivers them.
+				win := windowsDecode(t, wma, filepath.Join(dir, c.name+".win.wav"))
+				if len(win) != len(got) {
+					t.Fatalf("decoded %d samples, Windows %d", len(got), len(win))
+				}
+				tail := c.ffmpegShort * c.channels
+				d := testutil.CompareF32(clipped(got[len(got)-tail:]), win[len(win)-tail:])
+				if d.RMS > windowsTailRMS || d.MaxAbs > windowsTailMax {
+					t.Errorf("the %d frames ffmpeg lacks differ from Windows' decode by %v, want rms <= %g max <= %g",
+						c.ffmpegShort, d, windowsTailRMS, windowsTailMax)
+				}
+			}
 		})
+	}
+}
+
+// The bound for the frames Windows' decoder alone can score. Windows' decoder
+// and this one differ by about 5e-5 RMS and up to 5e-3 max over a whole 5.1
+// or 7.1 file (the channel decorrelation's arithmetic, the corpus note's
+// section 7), and by 3.6e-7 RMS and 2.3e-6 max on the one frame this scores;
+// the bound is twice the whole-file figure, so a wrong frame, negated or of
+// the wrong material, fails by orders of magnitude.
+const (
+	windowsTailRMS = 2e-4
+	windowsTailMax = 1e-2
+)
+
+// windowsDecode is Windows' own decode of a cell, at 24 bits, as float32.
+func windowsDecode(t testing.TB, wma, out string) []float32 {
+	t.Helper()
+	testutil.WMFDecode(t, wma, out, 24)
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := testutil.WAVData(t, raw)
+	pcm := make([]float32, len(data)/3)
+	for i := range pcm {
+		v := int32(data[3*i]) | int32(data[3*i+1])<<8 | int32(data[3*i+2])<<16
+		pcm[i] = float32(v<<8>>8) / (1 << 23)
+	}
+	return pcm
+}
+
+// clipped is a float decode at the full scale an integer one is bound to,
+// which is what makes the two comparable (the corpus note's section 6).
+func clipped(x []float32) []float32 {
+	out := make([]float32, len(x))
+	for i, v := range x {
+		out[i] = max(-1, min(v, 1))
+	}
+	return out
+}
+
+// TestLongCellsFinalFrameOutrunsItsPacket pins what the long cell exists for:
+// its final frame is 50294 bits against a 47560-bit packet, and it is the
+// corpus's one long frame. A regeneration need not reproduce it, since the
+// flush's size is chaotic in the recipe's phases, but the committed bytes
+// must, or the cell has stopped reaching the path it was committed for.
+func TestLongCellsFinalFrameOutrunsItsPacket(t *testing.T) {
+	c := cellNamed(t, "pro-44100-6ch-16-128k-long")
+	track, pkts := demux(t, corpusPath(t, c.name))
+	cfg, err := wmapro.ParseConfig(track.CodecConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec, err := wmapro.NewDecoder(cfg, track.Fmt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dec.Release()
+	for _, p := range pkts {
+		if err := dec.Decode(p, func(*audio.Buffer) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := wmapro.FrameBitsForTest(dec); got != 50294 || got <= cfg.BlockAlign*8 {
+		t.Errorf("the final frame is %d bits against a %d-bit packet, want 50294", got, cfg.BlockAlign*8)
+	}
+	if p := wmapro.PathsForTest(dec); p.LongFrame != 1 {
+		t.Errorf("%d long frames, want 1", p.LongFrame)
+	}
+}
+
+// bitsAt reads an n-bit field at bit position at of a bit string.
+func bitsAt(w *bitWriter, at, n int) uint32 {
+	var v uint32
+	for i := at; i < at+n; i++ {
+		v = v<<1 | uint32(w.buf[i>>3]>>(7-uint(i&7))&1)
+	}
+	return v
+}
+
+// TestALongFrameAccumulatesAcrossManyPackets re-packetizes the long cell into
+// 1024-byte packets, which spreads its long frame over seven of them under
+// saturating counts, so every attempt but the last runs out of bits and is
+// undone against real audio. The decode has to be sample-identical to the
+// committed packetisation: a restore that dropped a field would leave the
+// last attempt overlap-adding onto the residue of the ones before it. The
+// hand-built long frame in state_test.go is silent, and cannot tell.
+func TestALongFrameAccumulatesAcrossManyPackets(t *testing.T) {
+	c := cellNamed(t, "pro-44100-6ch-16-128k-long")
+	track, pkts := demux(t, corpusPath(t, c.name))
+	want := decodeAll(t, track, pkts)
+	cfg, err := wmapro.ParseConfig(track.CodecConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec, err := wmapro.NewDecoder(cfg, track.Fmt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range pkts {
+		if err := dec.Decode(p, func(*audio.Buffer) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	longBits := wmapro.FrameBitsForTest(dec)
+	dec.Release()
+
+	// The frames as bit strings, prefix through trailer: the eight closed
+	// ones by their prefixes in packet 0, the long one from packet 1's
+	// payload and the head of packet 2's, to the extent its walk reported.
+	fsb := cfg.FrameSizeBits()
+	head := 6 + fsb
+	p0 := &bitWriter{buf: pkts[0], bits: len(pkts[0]) * 8}
+	var frames []*bitWriter
+	for at := head; at+fsb <= p0.bits; {
+		n := int(bitsAt(p0, at, fsb))
+		if n == 0 || at+n > p0.bits {
+			break
+		}
+		frames = append(frames, slice(p0, at, at+n))
+		at += n
+	}
+	if len(frames) != 8 {
+		t.Fatalf("%d frames in packet 0, want 8", len(frames))
+	}
+	p1 := &bitWriter{buf: pkts[1], bits: len(pkts[1]) * 8}
+	p2 := &bitWriter{buf: pkts[2], bits: len(pkts[2]) * 8}
+	long := slice(p1, head, p1.bits)
+	long.append(slice(p2, head, head+longBits-(p1.bits-head)))
+
+	// The same stream in 1024-byte packets. The prefix field is two bits
+	// narrower there, so every closed frame's declared length drops by two,
+	// and each frame's trailer bit is rewritten for the new packing.
+	small := append([]byte(nil), track.CodecConfig...)
+	binary.LittleEndian.PutUint16(small[12:], 1024)
+	scfg, err := wmapro.ParseConfig(small)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sfsb := scfg.FrameSizeBits()
+	spayload := scfg.BlockAlign*8 - 6 - sfsb
+	reprefix := func(f *bitWriter, prefix uint32, more bool) *bitWriter {
+		w := &bitWriter{}
+		w.put(prefix, sfsb)
+		w.append(slice(f, fsb, f.bits-1))
+		if more {
+			w.put(1, 1)
+		} else {
+			w.put(0, 1)
+		}
+		return w
+	}
+	var out [][]byte
+	seq := 0
+	for i := 0; i+1 < len(frames); i += 2 {
+		var w bitWriter
+		w.append(reprefix(frames[i], uint32(frames[i].bits-2), true))
+		w.append(reprefix(frames[i+1], uint32(frames[i+1].bits-2), false))
+		out = append(out, packet(t, scfg, seq, 0, &w, 0))
+		seq++
+	}
+	lf := reprefix(long, uint32(scfg.BlockAlign*8), false)
+	pieces := 0
+	for at := 0; at < lf.bits; at += spayload {
+		cont := scfg.BlockAlign * 8
+		if at == 0 {
+			cont = 0
+		}
+		out = append(out, packet(t, scfg, seq, cont, slice(lf, at, min(at+spayload, lf.bits)), 0))
+		seq++
+		pieces++
+	}
+	if pieces < 4 {
+		t.Fatalf("the long frame took %d packets, too few to undo an attempt more than once", pieces)
+	}
+
+	sdec, err := wmapro.NewDecoder(scfg, scfg.Format())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sdec.Release()
+	var got []float32
+	for i, p := range out {
+		if err := sdec.Decode(p, func(b *audio.Buffer) error {
+			got = append(got, testutil.InterleaveF(b)...)
+			return nil
+		}); err != nil {
+			t.Fatalf("packet %d of %d: %v", i, len(out), err)
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("decoded %d samples, the committed packetisation %d", len(got), len(want))
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("sample %d differs: %g, the committed packetisation %g", i, got[i], want[i])
+		}
+	}
+	if p := wmapro.PathsForTest(sdec); p.LongFrame != 1 || p.ContSaturates != pieces-1 {
+		t.Errorf("long frames %d, saturating counts %d, want 1 and %d", p.LongFrame, p.ContSaturates, pieces-1)
 	}
 }

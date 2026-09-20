@@ -29,6 +29,8 @@ func TestWaxlabelAgreesOnWMAPro(t *testing.T) {
 		{"pro-44100-2ch-16-128k", 44100, 2, 16},
 		{"pro-48000-6ch-24-384k", 48000, 6, 24},
 		{"pro-96000-2ch-24-384k", 96000, 2, 24},
+		{"pro-44100-6ch-16-128k-long", 44100, 6, 16},
+		{"pro-48000-8ch-16-128k", 48000, 8, 16},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw, err := os.ReadFile(filepath.Join("..", "codec", "wmapro", "testdata", "corpus", tc.name+".wma"))

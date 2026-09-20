@@ -14,7 +14,9 @@ import "github.com/colespringer/waxflow/audio"
 // Unlike codec/wmalossless there is no output latency: every frame here opens
 // with its own length, so a frame's extent is known before it is decoded and
 // the frames of packet k are emitted on the call that delivers packet k. Drain
-// therefore has nothing to flush.
+// therefore has nothing to flush. The one exception is a frame longer than a
+// packet, whose length prefix cannot say so (longFrame): it is emitted on the
+// call that delivers the packet its walk ends in.
 //
 // The one lead-in is a frame, not a packet: the first frame after any decode
 // start overlap-adds against a transform tail the decoder does not have, so it
@@ -73,7 +75,24 @@ type Decoder struct {
 	// index, so the hot path never touches the shared plan cache's lock.
 	plans []*imdctPlan
 
+	// undo is what an attempt at a long frame (longFrame) has to put back
+	// when it runs out of bits: everything a frame walk writes that a later
+	// frame reads, allocated on the first attempt.
+	undo *undoState
+
+	// frameBits is the extent of the last frame decoded, prefix to trailer,
+	// which for a long frame nothing but the walk can report.
+	frameBits int
+
 	paths pathCounts
+}
+
+// undoState is a copy of the state that crosses a frame boundary, plus the
+// path counts, which an attempt that came to nothing must not leave behind.
+type undoState struct {
+	bufs     [][]float32
+	prevLens []int
+	paths    pathCounts
 }
 
 // pathCounts counts the bitstream paths a decode takes. It is for the tests:
@@ -94,8 +113,10 @@ type pathCounts struct {
 	Vec4Escape, Vec2Escape, LargeValue, TailReached, VectorCovers, TailEscape, EndOfBlock int
 	// Quantisation (section 12).
 	StepEscape, Modifiers, ExplicitLimit int
-	// The frame and packet layers (sections 4 and 14).
-	StartTrim, EndTrim, ContZero, ContSaturates int
+	// The frame and packet layers (sections 4 and 14). LongFrame is a frame
+	// longer than a packet, whose length prefix saturates at the packet size
+	// and whose extent only its walk can find.
+	StartTrim, EndTrim, ContZero, ContSaturates, LongFrame int
 }
 
 // channel is one channel's state. The fields divide into three lifetimes and
@@ -274,6 +295,9 @@ func (d *Decoder) decode(pkt []byte, emit func(*audio.Buffer) error) error {
 	d.seq = seq
 	payload := d.r.left()
 
+	// continues marks a packet the carried frame swallows whole: nothing is
+	// left in it to read as frames, and the carry must survive it.
+	continues := false
 	switch {
 	case gap:
 		// Packets were lost or the stream was joined mid-file. The recovery is
@@ -287,6 +311,12 @@ func (d *Decoder) decode(pkt []byte, emit func(*audio.Buffer) error) error {
 		// concatenation of payloads desynchronises here: measured, a zero
 		// count arrives with a non-empty carry on ten of thirteen files and
 		// discards as much as 23583 bits of padded, abandoned packet tail.
+		//
+		// Measured on every such carry, the abandoned tail opens with a zero
+		// prefix: padding, not a frame, so the audio chain is intact and no
+		// lead-in is owed. A frame longer than a packet changes nothing
+		// here: the encoder starts one on a fresh packet, abandoning the
+		// padding before it the same way.
 		if d.carry.bits > 0 {
 			d.paths.ContZero++
 		}
@@ -314,13 +344,15 @@ func (d *Decoder) decode(pkt []byte, emit func(*audio.Buffer) error) error {
 		if err != nil {
 			return err
 		}
-		if !done {
-			if cont > payload {
-				// The frame continues into the next packet. This is the
-				// saturating case, where the count claims the whole payload;
-				// it is measured once, at end of stream.
-				return nil
-			}
+		switch {
+		case done:
+		case cont > payload:
+			// The frame continues into the next packet. This is the
+			// saturating case, where the count claims the whole payload:
+			// measured at end of stream, and on every packet a frame longer
+			// than a packet runs through.
+			continues = true
+		default:
 			// The count says the frame ends here and the frame's own length
 			// says it does not: an inconsistent stream, treated as the
 			// discontinuity it is rather than abandoning the frames that do
@@ -329,8 +361,10 @@ func (d *Decoder) decode(pkt []byte, emit func(*audio.Buffer) error) error {
 			d.dropNext = true
 		}
 	}
-	if err := d.framesIn(emit); err != nil {
-		return err
+	if !continues {
+		if err := d.framesIn(emit); err != nil {
+			return err
+		}
 	}
 	if len(pkt) < d.cfg.BlockAlign && d.carry.bits > 0 {
 		// A packet shorter than nBlockAlign is a container shape, not damage,
@@ -357,6 +391,9 @@ func (d *Decoder) carriedFrame(emit func(*audio.Buffer) error) (bool, error) {
 	if n <= d.frameSizeBits {
 		return false, malformed("a carried frame of %d bits cannot hold its own length prefix", n)
 	}
+	if n == d.cfg.BlockAlign*8 {
+		return d.longFrame(emit)
+	}
 	if n > d.carry.bits {
 		return false, nil
 	}
@@ -365,6 +402,75 @@ func (d *Decoder) carriedFrame(emit func(*audio.Buffer) error) (bool, error) {
 	}
 	d.carry.reset()
 	return true, nil
+}
+
+// maxLongFramePackets bounds a long frame's carry. Measured, the encoder's
+// longest frame fills 97.7% of two packets, and every packet that arrives
+// while the frame accumulates costs a walk of the whole carry, so a stream
+// that has spent sixteen packets on one frame is refused as damage rather
+// than walked again.
+const maxLongFramePackets = 16
+
+// longFrame decodes a carried frame whose length prefix is the packet size in
+// bits, which is the encoder's clamp and not a length. Measured on Windows'
+// encoder: a frame longer than a packet carries exactly nBlockAlign*8 as its
+// prefix, and each packet it continues into carries the same value as its
+// continuation count, whatever the frame's real length (50294 bits against a
+// 47560-bit packet on the committed long cell). The only way to find its end
+// is to walk it, so the walk is attempted on every packet that adds to the
+// carry and undone when it runs out of bits: the frame is then still
+// accumulating, and the next packet brings the rest. A walk that fails with
+// bits to spare is damage, as it is for any other frame. A frame of exactly
+// the packet size, honestly declared, decodes the same way, since the open
+// walk ends where its prefix would have said.
+//
+// What follows the frame in the carry is dropped with it. Measured, that is a
+// stale copy of an earlier packet the encoder never cleared, and by the
+// continuation count's own word no frame begins there.
+//
+// It reports whether the frame was complete, like carriedFrame.
+func (d *Decoder) longFrame(emit func(*audio.Buffer) error) (bool, error) {
+	if d.carry.bits > maxLongFramePackets*d.cfg.BlockAlign*8 {
+		return false, malformed("a frame spanning more than %d packets", maxLongFramePackets)
+	}
+	d.save()
+	if _, err := d.frame(&d.cr, 0, openFrame, emit); err != nil {
+		if d.cr.err != nil {
+			d.restore()
+			return false, nil
+		}
+		return false, err
+	}
+	d.paths.LongFrame++
+	d.carry.reset()
+	return true, nil
+}
+
+// save copies the state a frame walk changes and a later frame reads: the
+// rolling buffers, the previous subframe lengths, and the path counts. The
+// per-frame and per-subframe fields need no copy, since the next walk resets
+// them before reading them.
+func (d *Decoder) save() {
+	if d.undo == nil {
+		d.undo = &undoState{bufs: make([][]float32, len(d.ch)), prevLens: make([]int, len(d.ch))}
+		for c := range d.ch {
+			d.undo.bufs[c] = make([]float32, len(d.ch[c].buf))
+		}
+	}
+	for c := range d.ch {
+		copy(d.undo.bufs[c], d.ch[c].buf)
+		d.undo.prevLens[c] = d.ch[c].prevLen
+	}
+	d.undo.paths = d.paths
+}
+
+// restore puts back what save copied.
+func (d *Decoder) restore() {
+	for c := range d.ch {
+		copy(d.ch[c].buf, d.undo.bufs[c])
+		d.ch[c].prevLen = d.undo.prevLens[c]
+	}
+	d.paths = d.undo.paths
 }
 
 // framesIn decodes the whole frames this packet holds and carries the rest.
@@ -405,9 +511,15 @@ func (d *Decoder) framesIn(emit func(*audio.Buffer) error) error {
 	return nil
 }
 
+// openFrame stands in for the declared length of a frame whose prefix is the
+// packet-size clamp (longFrame): the frame extends as far as its walk, the
+// padding bit and the trailer bit reach. No real frame declares zero, since
+// the prefix counts itself.
+const openFrame = 0
+
 // frame decodes one frame spanning bits [at, at+n) of r, whose length prefix
-// the caller has already consumed, and reports whether another frame follows
-// in the same packet.
+// the caller has already consumed, or an open frame starting at bit at, and
+// reports whether another frame follows in the same packet.
 func (d *Decoder) frame(r *bitReader, at, n int, emit func(*audio.Buffer) error) (bool, error) {
 	d.paths.Frames++
 	if err := d.tiling(r); err != nil {
@@ -456,14 +568,23 @@ func (d *Decoder) frame(r *bitReader, at, n int, emit func(*audio.Buffer) error)
 	// any other gap as fatal and its own comment doubts that. A walk that
 	// went PAST it read bits belonging to the next frame, and seeking back
 	// would quietly accept a frame that contradicts its own length.
-	if r.pos > at+n-1 {
+	//
+	// An open frame has no such bit to seek to. Measured on the one shape
+	// that produces it, the padding is the one bit the notes describe and the
+	// trailer follows it, so that is where it is read.
+	switch {
+	case n == openFrame:
+		r.skip(1)
+	case r.pos > at+n-1:
 		return false, malformed("the frame reads %d bits past its declared length of %d", r.pos-(at+n-1), n)
+	default:
+		r.seek(at + n - 1)
 	}
-	r.seek(at + n - 1)
 	more := r.bit() != 0
 	if r.err != nil {
 		return false, r.err
 	}
+	d.frameBits = r.pos - at
 	return more, d.emitFrame(startTrim, endTrim, emit)
 }
 
@@ -540,4 +661,5 @@ func (d *Decoder) Release() {
 		audio.Put(d.out)
 		d.out, d.planes = nil, nil
 	}
+	d.undo = nil
 }

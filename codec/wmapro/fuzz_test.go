@@ -52,8 +52,26 @@ func FuzzDecode(f *testing.F) {
 	transmitFrame(f, c, &w, 0, nil)
 	f.Add(smallConfig(), uint16(0), packet(f, c, 0, 0, frame(c, &w, false, 0), 0))
 
+	// A frame longer than a packet, across three packets, which is the one
+	// walk that is attempted, undone and attempted again.
+	lc := parse(f, longConfig())
+	var body bitWriter
+	longSilentFrame(lc, &body)
+	long := clampedFrame(lc, &body, false)
+	payload := lc.BlockAlign*8 - 6 - lc.FrameSizeBits()
+	var run []byte
+	for at := 0; at < long.bits; at += payload {
+		cont := lc.BlockAlign * 8
+		if at == 0 {
+			cont = 0
+		}
+		run = append(run, packet(f, lc, at/payload, cont, slice(long, at, min(at+payload, long.bits)), 0)...)
+	}
+	f.Add(longConfig(), uint16(0), run)
+
 	// Real packets from the committed corpus, which is the only source of
-	// material that gets deep into a frame at all.
+	// material that gets deep into a frame at all. The long cell goes in
+	// whole, since its long frame is its last two packets.
 	for _, cell := range committedCells() {
 		if cell.refused {
 			continue
@@ -61,7 +79,7 @@ func FuzzDecode(f *testing.F) {
 		track, pkts := demux(f, corpusPath(f, cell.name))
 		var run []byte
 		for i, p := range pkts {
-			if i == 2 {
+			if i == 2 && !cell.multitone {
 				break
 			}
 			run = append(run, p...)

@@ -549,14 +549,19 @@ of the 13 files**, discarding as much as 23583 bits (2.9 KB) of packet tail
 that the encoder padded and abandoned. Honour it: drop the carry and start
 fresh at this packet's first frame.
 
-The saturating case is rare and appears at end of stream. *Measured*: once,
-in one file, where the final packet declares a continuation count of 65536 for
-a payload of 65513 bits. Clamp to the payload and carry on. The carried frame
-in that instance was complete within the clamped bits and decoded normally;
-*measured* over every other continuation in every file, the carried frame's
-own length prefix is **exactly** equal to the carry plus the continuation
-count, so the field is redundant with the length prefix on a clean stream and
-exists so a decoder can resynchronise without one.
+The saturating case appears at end of stream. *Measured*: first once, in one
+file, where the final packet declares a continuation count of 65536 for a
+payload of 65513 bits; then on the final packet of every file the long-frame
+round encoded (the committed long and 7.1 cells among them). The value is
+always exactly `nBlockAlign * 8`, the packet size in bits, and it says
+nothing about where the frame ends: in the first instance the carried frame
+was complete well within the clamped bits, and on the long cell it ends 2756
+bits into the payload with the rest of the packet zero. Clamp to the payload
+and let the frame's own length prefix, or its walk (section 4.4), say where
+it ends. *Measured* over every other continuation in every file, the carried
+frame's own length prefix is **exactly** equal to the carry plus the
+continuation count, so the field is redundant with the length prefix on a
+clean stream and exists so a decoder can resynchronise without one.
 
 Reference choice worth knowing: the reference attempts to decode the carried
 frame even in the saturating case, when the frame may still be incomplete, and
@@ -594,6 +599,38 @@ decode the partial frame.
 *Measured*: no discontinuity occurs in any corpus file, so the recovery path
 is exercised only by the resumed-decode measurement of section 5, which is
 the same code path.
+
+### 4.4 A frame longer than a packet
+
+The length prefix (7.1) **saturates at `nBlockAlign * 8`**, the packet size in
+bits, not at the field's own maximum. *Measured* on the corpus note's long
+cell: the encoder's final frame is 50294 bits against a 47560-bit packet, its
+prefix reads 47560 though the 16-bit field would hold 50294, and the
+continuation count of the packet it ends in reads 47560 as well. The same
+shape recurs at 48000/8/16, where a 53336-bit final frame fills 97.7% of two
+27312-bit payloads, so nothing says such a frame ends within two packets. The
+frame's walk, its padding bit and its trailer bit end it 2756 bits into the
+second packet's payload, and the rest of that packet is zero; on a longer
+encode of the same recipe the rest was a byte-for-byte copy of packet 0,
+stale encoder buffer. Nothing reads either.
+
+So a prefix equal to the packet size is a floor, and the frame's extent is
+whatever its walk consumes plus the padding bit and the trailer bit (7.3).
+Such a frame never fits the packet it starts in, so it is always the carried
+frame; the rule for it: attempt the walk whenever the carry holds at least
+the prefix, and if the walk runs out of bits **undo it** (the rolling
+buffers and the previous subframe lengths are all it changed that a later
+frame reads) and keep accumulating, since the next packet brings more of the
+frame; a walk that fails with bits to spare is damage, as for any frame. The
+reference logs "would have to skip -N bits" on such a frame, marks the packet
+lost and delivers the frame anyway, because its samples are written before
+the check; Windows' decoder delivers it. A decoder that refuses it loses the
+last frame of every such file, which is what this one did before the rule.
+
+*Measured* on the 96000/8/24 cell at 768 kbps: the reference has a frame
+buffer of its own, refuses a final frame larger than it ("Too small input
+buffer is not implemented") and delivers one frame fewer than Windows' decoder
+and this one. That is a limit of the reference and not of the format.
 
 ## 5. What a decode may start at, and what it costs
 
@@ -763,7 +800,7 @@ In order:
 
 | present when | width | field |
 |---|---|---|
-| decode-flags bit 6 | `frameSizeBits` | frame length in bits, including this field and the trailer bit |
+| decode-flags bit 6 | `frameSizeBits` | frame length in bits, including this field and the trailer bit; saturates at `nBlockAlign * 8` for a frame longer than a packet (4.4) |
 | always | variable | the tiling of section 6.2 |
 | channelCount > 1 | 1 | post-processing transform present |
 | the bit above is set | 1 | matrix present |
@@ -811,6 +848,10 @@ The reference treats any other gap as a fatal error and refuses the frame;
 that strictness is a **reference choice**, and its own comment says it is not
 sure the condition is always an error. A decoder should seek to `len - 1` and
 read the trailer bit there, and may warn rather than refuse on a wider gap.
+
+*Measured* on the long frame of section 4.4, the one frame whose end its
+prefix cannot place: the padding bit after the walk read 1, and the trailer
+bit after it 0, with the packet's zero padding right behind them. So the padding bit is a bit to skip and not a zero to check.
 
 With no length prefix (never seen in this envelope) the frame ends at the first
 1 bit found while scanning forward, which is the trailer bit; the format's
@@ -1564,7 +1605,10 @@ it only for the committed corpus, whose lengths are powers of two.
 
 There is no flush. The last frame's samples are complete when the frame is
 decoded, and the trailing half-buffer that a frame leaves behind is lead-out
-for a frame that never arrives. The reference does emit that half-buffer at end
+for a frame that never arrives. The encoder's own final frame may be longer
+than a packet (4.4), in which case it is delivered on the packet its walk ends
+in rather than the one it began in, and that packet's continuation count says
+only that the frame continues. The reference does emit that half-buffer at end
 of stream for the Xbox variant and not for this codec; do not emit it.
 
 ## 15. Everything the decoder must not try
@@ -1676,6 +1720,9 @@ that answers it is in brackets.
       field that is never set, the DRC byte, and the trim fields. (7.1)
 - [ ] Seek to `len - 1` for the trailer bit rather than assuming one padding
       bit, and do not refuse a wider gap. (7.3)
+- [ ] Walk a frame whose length prefix is the packet size in bits to its own
+      end, across as many packets as it takes, undoing an attempt that runs
+      out of bits. (4.4)
 - [ ] Form channel groups, decode all three transform selections, build the
       explicit rotation matrix from the 6-bit angles and the sign diagonal, and
       apply per-band enables. (9)

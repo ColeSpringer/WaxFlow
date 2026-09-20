@@ -312,3 +312,205 @@ func TestNewDecoderRefusesAnUnvalidatedConfig(t *testing.T) {
 		t.Fatal("accepted a track format that is not the config's")
 	}
 }
+
+// longConfig is eight channels in a 32-byte packet: 2048-sample frames at a
+// subframe depth of 16, so a frame of sixteen silent subframes with the
+// post-processing matrix present is 644 bits against a 241-bit payload, and
+// the length prefix cannot say so. That is the shape Windows' encoder writes
+// for its final frame on some material (the committed long cell), where the
+// prefix and the continuation count both saturate at the packet size.
+func longConfig() []byte { return config(testRate, 8, 16, 0x63f, 32, testFlags, 0) }
+
+// longSilentFrame writes the frame body: a uniform tiling of sixteen
+// 128-sample subframes, the post-processing matrix present and all zero, and
+// sixteen subframes in which no channel transmits.
+func longSilentFrame(cfg wmapro.Config, w *bitWriter) {
+	w.put(1, 1) // uniform tiling
+	// Fifteen steps read a shift of 4 (a set bit, then 3 in the two-bit
+	// field); the sixteenth sits at the last frontier and reads nothing.
+	for step := 0; step < 15; step++ {
+		w.put(1, 1)
+		w.put(3, 2)
+	}
+	w.put(1, 1) // post-processing transform present
+	w.put(1, 1) // its matrix present
+	w.put(0, 4*cfg.Channels*cfg.Channels)
+	if cfg.DecodeFlags&0x80 != 0 {
+		w.put(0, 8)
+	}
+	w.put(0, 1) // no trim fields
+	for i := 0; i < 16; i++ {
+		silentSubframe(cfg, w)
+	}
+}
+
+// clampedFrame is frame with the length prefix the encoder writes for a frame
+// longer than a packet: the packet size in bits, whatever the frame's length.
+func clampedFrame(cfg wmapro.Config, body *bitWriter, more bool) *bitWriter {
+	return prefixed(cfg, uint32(cfg.BlockAlign*8), body, more, 0)
+}
+
+// slice returns bits [from, to) of w.
+func slice(w *bitWriter, from, to int) *bitWriter {
+	out := &bitWriter{}
+	for i := from; i < to; i++ {
+		out.put(uint32(w.buf[i>>3]>>(7-uint(i&7))&1), 1)
+	}
+	return out
+}
+
+// TestAFrameLongerThanAPacketDecodes pins the one frame whose extent is NOT
+// known before it is decoded. Measured on Windows' encoder: a frame longer
+// than a packet carries a length prefix of exactly nBlockAlign*8, and the
+// packets it continues into carry a continuation count of the same value,
+// whatever the frame's real length. The decoder can only find its end by
+// walking it, and the walk is complete when the padding bit and the trailer
+// bit follow it; until then the frame is accumulated, however many packets
+// that takes, and an attempt that ran out of bits leaves no trace.
+func TestAFrameLongerThanAPacketDecodes(t *testing.T) {
+	cfg := parse(t, longConfig())
+	var body bitWriter
+	longSilentFrame(cfg, &body)
+	long := clampedFrame(cfg, &body, false)
+	var silent bitWriter
+	silentFrame(cfg, &silent)
+	lead := frame(cfg, &silent, true, 0)
+	payload := cfg.BlockAlign*8 - 6 - cfg.FrameSizeBits()
+	if long.bits <= 2*payload {
+		t.Fatalf("the long frame is %d bits; it has to outrun two payloads of %d to prove anything", long.bits, payload)
+	}
+	head := payload - lead.bits
+	var first bitWriter
+	first.append(lead)
+	first.append(slice(long, 0, head))
+	clamp := cfg.BlockAlign * 8
+
+	t.Run("saturated-counts-to-the-end", func(t *testing.T) {
+		// Every continuation packet claims the whole payload, as the
+		// encoder writes it; the frame ends partway through the third and
+		// the rest of that packet is a stale copy the decoder never reads.
+		dec, _ := newDec(t, longConfig())
+		var second, third bitWriter
+		second.append(slice(long, head, head+payload))
+		third.append(slice(long, head+payload, long.bits))
+		third.put(0xAAAAAAAA, min(32, payload-third.bits))
+		got, err := count(t, dec,
+			packet(t, cfg, 0, 0, &first, 0),
+			packet(t, cfg, 1, clamp, &second, 0),
+			packet(t, cfg, 2, clamp, &third, 0),
+			silentPacket(t, cfg, 3))
+		if err != nil {
+			t.Fatalf("a frame longer than a packet was reported as damage: %v", err)
+		}
+		// Frame 0 is lead-in; the long frame and the last frame deliver.
+		if want := 2 * cfg.SamplesPerFrame(); got != want {
+			t.Errorf("%d samples, want %d", got, want)
+		}
+		if p := wmapro.PathsForTest(dec); p.LongFrame != 1 || p.Frames != 3 {
+			t.Errorf("long frames %d of %d frames, want 1 of 3", p.LongFrame, p.Frames)
+		}
+	})
+
+	t.Run("exact-count-then-frames", func(t *testing.T) {
+		// The last continuation count is exact, and the frames that begin
+		// after it in the same packet decode as usual. The long frame opens
+		// the stream here so that the tail and a whole frame share a packet;
+		// it is the lead-in, so only the frame after it is delivered, and
+		// the counts say the long frame was decoded.
+		dec, _ := newDec(t, longConfig())
+		var one, two, three bitWriter
+		one.append(slice(long, 0, payload))
+		two.append(slice(long, payload, 2*payload))
+		rest := long.bits - 2*payload
+		three.append(slice(long, 2*payload, long.bits))
+		three.append(frame(cfg, &silent, false, 0))
+		got, err := count(t, dec,
+			packet(t, cfg, 0, 0, &one, 0),
+			packet(t, cfg, 1, clamp, &two, 0),
+			packet(t, cfg, 2, rest, &three, 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != cfg.SamplesPerFrame() {
+			t.Errorf("%d samples, want the frame after the long one (%d)", got, cfg.SamplesPerFrame())
+		}
+		if p := wmapro.PathsForTest(dec); p.LongFrame != 1 || p.Frames != 2 {
+			t.Errorf("long frames %d of %d frames, want 1 of 2", p.LongFrame, p.Frames)
+		}
+	})
+
+	t.Run("truncated-is-not-damage", func(t *testing.T) {
+		// The stream ends before the frame does: nothing is delivered for
+		// it and nothing is refused, which is what a truncated file costs.
+		dec, _ := newDec(t, longConfig())
+		var second bitWriter
+		second.append(slice(long, head, head+payload))
+		got, err := count(t, dec, packet(t, cfg, 0, 0, &first, 0), packet(t, cfg, 1, clamp, &second, 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != 0 {
+			t.Errorf("%d samples from a frame the stream never finished", got)
+		}
+		if p := wmapro.PathsForTest(dec); p.LongFrame != 0 || p.Frames != 1 {
+			t.Errorf("long frames %d of %d frames, want 0 of 1: an incomplete attempt must leave no count behind", p.LongFrame, p.Frames)
+		}
+	})
+
+	t.Run("short-continuation-packet-drops-the-frame", func(t *testing.T) {
+		// A packet shorter than nBlockAlign under a saturating count: the
+		// bits between its end and the boundary are missing, so the frame
+		// cannot be finished from what follows. It goes the way of every
+		// short packet's carry, dropped with a lead-in owed and no error.
+		dec, _ := newDec(t, longConfig())
+		var second, third bitWriter
+		second.append(slice(long, head, head+payload))
+		third.append(slice(long, head+payload, long.bits))
+		short := packet(t, cfg, 1, clamp, &second, 0)
+		short = short[:len(short)-4]
+		got, err := count(t, dec,
+			packet(t, cfg, 0, 0, &first, 0),
+			short,
+			packet(t, cfg, 2, clamp, &third, 0),
+			silentPacket(t, cfg, 3),
+			silentPacket(t, cfg, 4))
+		if err != nil {
+			t.Fatalf("a short packet under a long frame was reported as damage: %v", err)
+		}
+		// Frame 0 is lead-in, the long frame is lost with the short packet,
+		// packet 3's frame is the lead-in that costs, and packet 4's
+		// delivers.
+		if got != cfg.SamplesPerFrame() {
+			t.Errorf("%d samples, want one frame (%d)", got, cfg.SamplesPerFrame())
+		}
+		if p := wmapro.PathsForTest(dec); p.LongFrame != 0 {
+			t.Errorf("%d long frames, want none: the frame was never completed", p.LongFrame)
+		}
+	})
+
+	t.Run("damage-is-still-refused", func(t *testing.T) {
+		// The bit that must be clear in the tenth subframe's head is set,
+		// deep enough into the frame that the first attempt ran out of bits
+		// before reaching it. The walk that reaches it has bits to spare, so
+		// this is the frame and not the carry.
+		var bad bitWriter
+		longSilentFrame(cfg, &bad)
+		// The subframe heads follow the fixed prefix: the tiling, the
+		// post-processing matrix, the gain byte and the trim bit. The tenth
+		// head is nine heads in, and its second bit is the reserved one.
+		subHead := 2 + 1 + cfg.Channels + 1 + cfg.Channels
+		at := 1 + 45 + 2 + 4*cfg.Channels*cfg.Channels + 8 + 1 + 9*subHead
+		bad.buf[(at+1)>>3] |= 1 << (7 - uint((at+1)&7))
+		badLong := clampedFrame(cfg, &bad, false)
+		var one, two, three bitWriter
+		one.append(lead)
+		one.append(slice(badLong, 0, head))
+		two.append(slice(badLong, head, head+payload))
+		three.append(slice(badLong, head+payload, badLong.bits))
+		dec, _ := newDec(t, longConfig())
+		_, err := count(t, dec, packet(t, cfg, 0, 0, &one, 0), packet(t, cfg, 1, clamp, &two, 0), packet(t, cfg, 2, clamp, &three, 0))
+		if err == nil || !strings.Contains(err.Error(), "reserved") {
+			t.Fatalf("error = %v, want the subframe head's reserved bit named", err)
+		}
+	})
+}

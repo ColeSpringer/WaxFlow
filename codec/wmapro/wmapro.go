@@ -12,7 +12,7 @@ import (
 
 // Version is the decoder's cache-key version constant (ADR-0004): bump on any
 // change that alters decoded samples.
-const Version = "wmapro-dec-1"
+const Version = "wmapro-dec-2"
 
 // tagPro is the wFormatTag this package decodes. The tags it refuses belong to
 // container/asf's asfCodecID table, which names them before a track is wired.

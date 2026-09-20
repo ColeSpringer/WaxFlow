@@ -539,7 +539,11 @@ func TestWMAProProbeAndDecode(t *testing.T) {
 // frame grid a resumed decode actually lands on, and that the engine's pre-roll
 // covers the one frame of lead-in. The codec-level seek test cannot see either.
 func TestWMAProSeekSampleExact(t *testing.T) {
-	for _, name := range []string{"pro-44100-2ch-16-128k", "pro-48000-6ch-24-384k", "pro-96000-2ch-24-384k", "pro-44100-2ch-16-128k-tonal"} {
+	// The long cell's final frame spans its last two packets and is delivered
+	// on the second, so a target inside it needs a landing two packets back;
+	// the 7.1 cell is the widest layout the engine seeks in.
+	for _, name := range []string{"pro-44100-2ch-16-128k", "pro-48000-6ch-24-384k", "pro-96000-2ch-24-384k", "pro-44100-2ch-16-128k-tonal",
+		"pro-44100-6ch-16-128k-long", "pro-48000-8ch-16-128k"} {
 		t.Run(name, func(t *testing.T) {
 			raw, err := os.ReadFile(repoPath("codec", "wmapro", "testdata", "corpus", name+".wma"))
 			if err != nil {

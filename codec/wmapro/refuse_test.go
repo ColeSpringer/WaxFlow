@@ -287,8 +287,15 @@ func packet(t testing.TB, cfg wmapro.Config, seq, cont int, payload *bitWriter, 
 // trailer bit, which is what the length prefix accounts for. extraGap widens
 // the padding, which a decoder must tolerate.
 func frame(cfg wmapro.Config, body *bitWriter, more bool, extraGap int) *bitWriter {
+	return prefixed(cfg, uint32(cfg.FrameSizeBits()+body.bits+2+extraGap), body, more, extraGap)
+}
+
+// prefixed is frame with the prefix value chosen by the caller, which is how a
+// frame that lies about its length, or one whose prefix is the packet-size
+// clamp, is built.
+func prefixed(cfg wmapro.Config, prefix uint32, body *bitWriter, more bool, extraGap int) *bitWriter {
 	var w bitWriter
-	w.put(uint32(cfg.FrameSizeBits()+body.bits+2+extraGap), cfg.FrameSizeBits())
+	w.put(prefix, cfg.FrameSizeBits())
 	w.append(body)
 	w.put(0, 1+extraGap)
 	if more {
@@ -727,17 +734,10 @@ func splitFrame(cfg wmapro.Config, body *bitWriter, tailBits int) (first, tail *
 	room := cfg.BlockAlign*8 - 6 - cfg.FrameSizeBits() - lead.bits
 	whole := frame(cfg, body, false, 0)
 	whole = frame(cfg, body, false, room+tailBits-whole.bits)
-	first, tail = &bitWriter{}, &bitWriter{}
+	first = &bitWriter{}
 	first.append(lead)
-	for i := 0; i < whole.bits; i++ {
-		bit := uint32(whole.buf[i>>3] >> (7 - uint(i&7)) & 1)
-		if i < room {
-			first.put(bit, 1)
-		} else {
-			tail.put(bit, 1)
-		}
-	}
-	return first, tail
+	first.append(slice(whole, 0, room))
+	return first, slice(whole, room, whole.bits)
 }
 
 // TestTheseAreNotDamage is the other half of the contract, and the half a

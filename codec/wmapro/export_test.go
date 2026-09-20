@@ -42,6 +42,10 @@ func IMDCTForTest(spec []float32, scale float64) []float32 {
 	return out
 }
 
+// FrameBitsForTest is the extent of the last frame decoded, prefix to
+// trailer bit, which is the only report of a long frame's length.
+func FrameBitsForTest(d *Decoder) int { return d.frameBits }
+
 // PathsForTest is what a decoder has counted so far. Reset clears nothing
 // here: the counts are a property of the packets decoded, not of the state.
 func PathsForTest(d *Decoder) pathCounts { return d.paths }

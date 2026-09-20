@@ -31,6 +31,12 @@ var wantLandings = map[string]int{
 	"pro-48000-6ch-24-384k":       7, // of 7
 	"pro-96000-2ch-24-384k":       6, // of 7
 	"pro-44100-2ch-16-128k-tonal": 7, // of 7
+	// The long frame opens at the start of packet 1 and ends in packet 2, so
+	// a decode from packet 1 gets it as lead-in and nothing after, and one
+	// from packet 2 has only the tail of a frame it never saw the head of.
+	"pro-44100-6ch-16-128k-long": 1, // of 3
+	// The last packet holds a single frame, the lead-in, as on the 96 kHz cell.
+	"pro-48000-8ch-16-128k": 6, // of 7
 }
 
 // decodeFrom decodes packets[k:] through a decoder that has just been Reset,
