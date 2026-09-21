@@ -8,6 +8,9 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow"
@@ -150,7 +153,7 @@ func TestAnalyzeNilTapIsFree(t *testing.T) {
 	bare := analyze(waxflow.AnalyzeOptions{})
 	tapped := analyze(waxflow.AnalyzeOptions{Tap: func([][]float32) error { return nil }})
 
-	if *bare != *tapped {
+	if !reflect.DeepEqual(*bare, *tapped) {
 		t.Errorf("a no-op tap changed the measurement:\n bare:   %+v\n tapped: %+v", *bare, *tapped)
 	}
 }
@@ -175,7 +178,7 @@ func TestAnalyzeMediaEqualsAnalyze(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *got != *want {
+	if !reflect.DeepEqual(*got, *want) {
 		t.Errorf("AnalyzeMedia disagrees with Analyze:\n got:  %+v\n want: %+v", *got, *want)
 	}
 }
@@ -506,14 +509,14 @@ func TestAnalyzeChannelsNoopAndValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *zero != *bare {
+	if !reflect.DeepEqual(*zero, *bare) {
 		t.Errorf("Channels 0 changed the measurement:\n zero: %+v\n bare: %+v", *zero, *bare)
 	}
 	same, err := analyze(stereo, waxflow.AnalyzeOptions{Channels: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *same != *bare {
+	if !reflect.DeepEqual(*same, *bare) {
 		t.Errorf("Channels == source count changed the measurement:\n same: %+v\n bare: %+v", *same, *bare)
 	}
 
@@ -527,7 +530,7 @@ func TestAnalyzeChannelsNoopAndValidation(t *testing.T) {
 	}
 	widened := *wide
 	widened.Format = bare.Format // the envelope is the one thing that did change
-	if widened != *bare {
+	if !reflect.DeepEqual(widened, *bare) {
 		t.Errorf("widening to 5.1 changed the measurement:\n wide: %+v\n bare: %+v", *wide, *bare)
 	}
 
@@ -587,5 +590,54 @@ func TestAnalyzeChannelsNoopAndValidation(t *testing.T) {
 		if res != nil {
 			t.Errorf("Channels %d returned a result alongside the error: %+v", tc.ch, res)
 		}
+	}
+}
+
+// TestAnalyzeReportsInputWarnings: Analyze opens and closes the source
+// itself, so the damage its read found has to come back on the result. A
+// frame-walked payload finds its damage where the read reaches it, so the
+// list is the read's verdict rather than the probe's; a clean source
+// reports nil, and AnalyzeMedia reports what the media's own Info carries
+// once the read is done.
+func TestAnalyzeReportsInputWarnings(t *testing.T) {
+	wav, err := os.ReadFile(repoPath("testdata", "sine-s16.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mp3, err := os.ReadFile(repoPath("testdata", "sine-untagged.mp3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	damaged := testutil.ZeroMiddle(mp3, 2048)
+	e := waxflow.New()
+	ctx := context.Background()
+	clean, err := e.Analyze(ctx, container.BytesSource(wav), "wav", waxflow.AnalyzeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clean.InputWarnings != nil {
+		t.Errorf("a clean source reports %v, want nil", clean.InputWarnings)
+	}
+	res, err := e.Analyze(ctx, container.BytesSource(damaged), "mp3", waxflow.AnalyzeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(res.InputWarnings, func(s string) bool { return strings.Contains(s, "unparsable bytes skipped") }) {
+		t.Errorf("input warnings = %v, want the skipped bytes", res.InputWarnings)
+	}
+	med, err := e.OpenStream(container.BytesSource(damaged), "mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	viaMedia, err := e.AnalyzeMedia(ctx, med, waxflow.AnalyzeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(viaMedia.InputWarnings, med.Info().Warnings) {
+		t.Errorf("AnalyzeMedia reports %v, the media's Info %v", viaMedia.InputWarnings, med.Info().Warnings)
+	}
+	if !slices.Equal(viaMedia.InputWarnings, res.InputWarnings) {
+		t.Errorf("AnalyzeMedia reports %v, Analyze %v", viaMedia.InputWarnings, res.InputWarnings)
 	}
 }

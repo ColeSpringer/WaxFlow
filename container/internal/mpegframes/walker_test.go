@@ -865,3 +865,23 @@ func TestADamagedRunIsNeverSnapshottedComplete(t *testing.T) {
 // joined renders a finding list for comparison; every case here expects at
 // most one, and an unexpected second must not read as a pass.
 func joined(msgs []string) string { return strings.Join(msgs, " | ") }
+
+// TestMidRunDamageIsNotSnapshotted: a sidecar must not change a verdict. The
+// blob has no room for a finding, and unlike the head's findings and a run's
+// end, a skip between two indexed frames is nothing a restore re-walks; a
+// run with one keeps no snapshot and re-walks on every open instead.
+func TestMidRunDamageIsNotSnapshotted(t *testing.T) {
+	data := frames(IdxMinFrames + 50)
+	copy(data[(IdxMinFrames/2)*frameLen:], []byte{0, 0, 0, 0})
+	var o walkOpts
+	w, _, _ := begin(t, data, &o)
+	if got := collect(t, w); len(got) != IdxMinFrames+49 {
+		t.Errorf("walked %d frames, want the %d that still parse", len(got), IdxMinFrames+49)
+	}
+	if len(o.msgs) != 1 || o.msgs[0] != "417 unparsable bytes skipped" {
+		t.Fatalf("findings = %v", o.msgs)
+	}
+	if blob := w.Snapshot(); blob != nil {
+		t.Errorf("a run with damage in it snapshotted %d bytes; a restore would forget the finding", len(blob))
+	}
+}

@@ -496,28 +496,29 @@ func (r *Runner) warn(id, note string) {
 	}
 }
 
-// warnInput attaches the input damage the read worked around as job
-// warnings, one per finding, named for the output when the job writes
-// several and prefixed so a reader can tell it from the metadata warnings
-// folded at creation. It is the read's verdict, not the probe's: a
-// frame-walked payload finds its damage where the read reaches it, and the
-// engine result carries the list only once the whole source was read. A
+// warnInput attaches the input damage the read worked around (an engine
+// result's InputWarnings) as job warnings, one per finding, named for the
+// output when the job writes several and prefixed so a reader can tell it
+// from the metadata warnings folded at creation. It is the read's verdict,
+// not the probe's: a frame-walked payload finds its damage where the read
+// reaches it, and the engine result carries the list only once the whole
+// source was read, which an analyze job does as fully as a transcode. A
 // finding is attached once per job: a split's later pieces open the same
 // source and seek past the earlier ones, so their reads carry every finding
 // before their window too, and the first output to surface one keeps it.
-func (r *Runner) warnInput(id, output string, res *waxflow.TranscodeResult) {
-	if len(res.InputWarnings) == 0 {
+func (r *Runner) warnInput(id, output string, found []string) {
+	if len(found) == 0 {
 		return
 	}
 	added := false
 	j := r.store.update(id, false, func(job *Job) {
-		seen := make(map[string]bool, len(job.Warnings)+len(res.InputWarnings))
+		seen := make(map[string]bool, len(job.Warnings)+len(found))
 		for _, have := range job.Warnings {
 			if _, w, ok := strings.Cut(have, ": "); ok {
 				seen[w] = true
 			}
 		}
-		for _, w := range res.InputWarnings {
+		for _, w := range found {
 			if seen[w] {
 				continue
 			}
@@ -601,6 +602,7 @@ func (r *Runner) runAnalyze(ctx context.Context, j *Job) error {
 	if err != nil {
 		return err
 	}
+	r.warnInput(j.ID, "", res.InputWarnings)
 	a := analysisOf(res)
 	var out *Output
 	if res.Silence != nil {
@@ -866,6 +868,10 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 		if err != nil {
 			return err
 		}
+		// Attached now rather than left to the encode's own read of the same
+		// source: warnInput keeps one copy per finding, and an encode that
+		// fails after this pass would otherwise take the findings with it.
+		r.warnInput(j.ID, "", res.InputWarnings)
 		srcRes = res
 		analysis = analysisOf(res)
 		if !math.IsInf(res.IntegratedLUFS, -1) {
@@ -968,7 +974,7 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 	// for a number this job's own warning list can carry. No output name: a
 	// transcode job writes one file, so the note needs no address.
 	r.warnClipping(j.ID, "", res)
-	r.warnInput(j.ID, "", res)
+	r.warnInput(j.ID, "", res.InputWarnings)
 
 	var rg []container.Tag
 	if analyzeLoudness {
@@ -996,6 +1002,12 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 			})
 			if err != nil {
 				return err
+			}
+			// A file this job just wrote reads back damaged only through a
+			// WaxFlow bug, and the numbers below then describe a partial
+			// decode; say so rather than stamp them silently.
+			for _, w := range outRes.InputWarnings {
+				r.warn(j.ID, "output read back with damage: "+w)
 			}
 			outLUFS, outTP = outRes.IntegratedLUFS, outRes.TruePeakDB
 		}
@@ -1093,7 +1105,7 @@ func (r *Runner) writeMedia(ctx context.Context, j *Job, med format.Media, name 
 		return nil, err
 	}
 	r.warnClipping(j.ID, name, res)
-	r.warnInput(j.ID, name, res)
+	r.warnInput(j.ID, name, res.InputWarnings)
 	if err := f.Sync(); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: output sync", err)
 	}

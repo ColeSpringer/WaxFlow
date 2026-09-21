@@ -159,8 +159,9 @@ type TranscodeResult struct {
 	// InputWarnings is the input damage the read worked around, as the
 	// source's Info reports it once the whole stream has been read: a
 	// frame-walked payload finds its damage where the read reaches it, so
-	// the list is complete only now. Nil for a clean source and for a
-	// concatenated timeline, which carries no warnings of its own.
+	// the list is complete only now. Nil for a clean source. A concatenated
+	// timeline has no damage of its own and reports its members' under
+	// their index ("member 1: ..."), as its Info does.
 	InputWarnings []string
 }
 

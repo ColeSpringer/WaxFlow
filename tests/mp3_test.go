@@ -518,3 +518,41 @@ func TestMP3RejectsFreeFormat(t *testing.T) {
 		t.Errorf("error = %v, want unsupported-format", err)
 	}
 }
+
+// TestMP3IndexSidecarKeepsDamageFindings: a sidecar is an optimization and
+// must not change a verdict. A run with mid-run damage restored from a warm
+// index would deliver the frames around the damage with the finding
+// forgotten, so a damaged run is never snapshotted: every read re-walks it
+// and reports the same damage, which is what makes an analyze job's
+// InputWarnings the same on the second read as on the first.
+func TestMP3IndexSidecarKeepsDamageFindings(t *testing.T) {
+	raw, err := os.ReadFile(repoPath("testdata", "sine-untagged.mp3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := mp3.ParseHeader(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := testutil.ZeroMiddle(bytes.Repeat(raw[:h.Size()], 5000), 2048)
+	cache := &captureIndexCache{blobs: map[string][]byte{}}
+	eng := waxflow.New(waxflow.WithIndexCache(cache))
+	analyze := func() []string {
+		t.Helper()
+		res, err := eng.Analyze(context.Background(), container.BytesSource(stream), "mp3", waxflow.AnalyzeOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.InputWarnings
+	}
+	cold := analyze()
+	if !slices.ContainsFunc(cold, func(s string) bool { return strings.Contains(s, "unparsable bytes skipped") }) {
+		t.Fatalf("cold read reports %v, want the skipped bytes", cold)
+	}
+	if cache.saves != 0 {
+		t.Errorf("a damaged run was snapshotted (%d saves); a restore of it would forget the finding", cache.saves)
+	}
+	if warm := analyze(); !slices.Equal(warm, cold) {
+		t.Errorf("the second read reports %v, the first reported %v", warm, cold)
+	}
+}

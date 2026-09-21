@@ -511,6 +511,11 @@ func analyzeOutputRG(cmd *cobra.Command, e *waxflow.Engine, path, hint string, i
 		if err != nil {
 			return nil, err
 		}
+		// Only a WaxFlow bug makes a file this command just wrote read back
+		// damaged, and the tags below then describe a partial decode.
+		for _, w := range outRes.InputWarnings {
+			fmt.Fprintf(cmd.ErrOrStderr(), "output read back with damage: %s\n", w)
+		}
 		rg, outLUFS = meta.ReplayGainTags(outRes.IntegratedLUFS, outRes.TruePeakDB), outRes.IntegratedLUFS
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "loudness: output %.2f LUFS, %s / %s\n",

@@ -150,11 +150,12 @@ must not infer one from a depth.
 or in a WAV or AIFF-C; ADTS) `strict` also walks the payload to its end, so
 its verdict covers the whole file at the cost of reading it; without it a
 probe reads headers, and damage past the head of such a payload is reported
-by the read that reaches it (a transcode job lists it under `warnings` with
-an `input damage:` prefix once the write has read the file; a merge job
-prefixes each finding with the member it came from, `member 1:`). A strict
-probe takes a live slot for its walk, the way a stream does, so a daemon
-whose pool is full answers it `503 overloaded`; a tolerant probe takes none.
+by the read that reaches it (a transcode or analyze job lists it under
+`warnings` with an `input damage:` prefix once the read has covered the
+file; a merge job prefixes each finding with the member it came from,
+`member 1:`). A strict probe takes a live slot for its walk, the way a
+stream does, so a daemon whose pool is full answers it `503 overloaded`; a
+tolerant probe takes none.
 A strict probe of a frame-indexed payload reports the walked length as
 exact: a count its headers stated is confirmed, or replaced by what a read
 delivers when the run comes up short, which is reported as damage. Every
@@ -913,8 +914,16 @@ off that member's own transcode plan), because a member measured inside a
 wider envelope is not measuring its own fold: a mono member inside a stereo
 one reads 3.01 dB hot, since the envelope duplicates it (ADR-0010). The
 group's gates then run over the union of the members' blocks, which is what
-makes one gain right for all of them. A silence map and a tap are refused
-for a group, since both are properties of one source's timeline.
+makes one gain right for all of them. A member is handed open
+(`GroupMember.Media`, the caller's to close) or opened on demand
+(`GroupMember.Open`, the shape `ConcatSource.Open` has): the engine opens
+such a member when the run reaches it and closes it before opening the
+next, so a group of such members holds one descriptor at a time however
+long the album, and the damage each member's read found comes back on that
+member's
+`AnalyzeResult.InputWarnings`, as it does for every `Analyze`. A silence
+map and a tap are refused for a group, since both are properties of one
+source's timeline.
 
 Each field belongs to a specific set of job types, and a field on a type
 that does not take it is a 400 rather than a field silently ignored at

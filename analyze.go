@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"time"
 
 	"github.com/colespringer/waxflow/audio"
@@ -177,6 +178,14 @@ type AnalyzeResult struct {
 	// Silence is the silence map, non-nil exactly when AnalyzeOptions
 	// asked for one.
 	Silence *SilenceResult
+	// InputWarnings is the input damage the read worked around, as the
+	// source's Info reports it once the whole stream has been read: a
+	// frame-walked payload finds its damage where the read reaches it, so
+	// the list is complete only now, and Analyze closes the source before
+	// returning, so this is where its verdict survives. Nil for a clean
+	// source. A group's own result carries none; each member's list is on
+	// that member's result.
+	InputWarnings []string
 }
 
 // Analyze decodes src end to end and measures its loudness: integrated
@@ -371,6 +380,11 @@ func (e *Engine) analyzeMedia(ctx context.Context, med format.Media, opts Analyz
 		TruePeakDB:     meter.TruePeak(),
 		SamplePeakDB:   meter.SamplePeak(),
 	}
+	// Taken here rather than by the caller: Analyze and a group member
+	// opened on demand close the media before the caller sees the result.
+	if ws := med.Info().Warnings; len(ws) > 0 {
+		res.InputWarnings = slices.Clone(ws)
+	}
 	if det != nil {
 		det.Flush()
 		spans := make([]SilenceSpan, len(det.Spans()))
@@ -390,10 +404,22 @@ func (e *Engine) analyzeMedia(ctx context.Context, med format.Media, opts Analyz
 	return res, meter, nil
 }
 
-// GroupMember is one stream of an album measurement.
+// GroupMember is one stream of an album measurement: its source, handed
+// open or opened on demand, and the width it is measured at.
 type GroupMember struct {
-	// Media is the opened source. The caller owns it and closes it.
+	// Media is the opened source. The caller owns it and closes it. Set
+	// exactly one of Media and Open.
 	Media format.Media
+	// Open opens the source when the measurement reaches this member. The
+	// engine closes what it returns before opening the next member, so a
+	// group of such members holds one descriptor at a time however long the
+	// album, the way ConcatSource.Open does for a timeline. The damage the
+	// member's read finds comes back on its AnalyzeResult.InputWarnings,
+	// since the Media is closed by the time the call returns.
+	//
+	// Unlike ConcatSource.Open this fires inside the AnalyzeGroup call, so
+	// a closure may bind that call's context.
+	Open func() (format.Media, error)
 	// Channels is the width this member will be DELIVERED at, which is
 	// what it must be measured at (ADR-0010). Read it off the member's own
 	// plan -- PlanTranscode(...).Format.Channels is the number the two-pass
@@ -437,7 +463,10 @@ type AnalyzeGroupResult struct {
 // measured across the whole group against the sum of the members' projected
 // totals, -1 when any member's is unknown; as in Analyze the two are
 // different quantities, so a member whose declared length is advisory can
-// carry the count past the total.
+// carry the count past the total. A member opened on demand has no
+// projected total until the run reaches it, so a group with such members
+// reports -1 until its last member is open, and from then on the members'
+// sum when every one of them declares a length.
 func (e *Engine) AnalyzeGroup(ctx context.Context, members []GroupMember, opts AnalyzeOptions) (*AnalyzeGroupResult, error) {
 	if len(members) == 0 {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, "analyze: a group needs at least one member")
@@ -454,18 +483,35 @@ func (e *Engine) AnalyzeGroup(ctx context.Context, members []GroupMember, opts A
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			"analyze: a group takes each member's delivered width from GroupMember.Channels, not one count for all of them")
 	}
-	total := int64(0)
-	for _, m := range members {
-		if m.Media == nil {
-			return nil, waxerr.New(waxerr.CodeInvalidRequest, "analyze: a group member has no media")
+	// projected is the progress total: the members' declared lengths
+	// summed, -1 while any is unknown. A member handed open declares now;
+	// one opened on demand declares when the run reaches it, so unopened
+	// counts those still to come and the total stays -1 until it is zero.
+	projected, unopened := int64(0), 0
+	for i, m := range members {
+		switch {
+		case m.Media == nil && m.Open == nil:
+			return nil, waxerr.New(waxerr.CodeInvalidRequest,
+				fmt.Sprintf("analyze: group member %d has no media and no Open function", i))
+		case m.Media != nil && m.Open != nil:
+			return nil, waxerr.New(waxerr.CodeInvalidRequest,
+				fmt.Sprintf("analyze: group member %d has both a Media and an Open function; set one", i))
+		case m.Channels < 0:
+			// analyzeMedia refuses this too, but only when the run reaches
+			// the member, after every earlier one has been decoded.
+			return nil, waxerr.New(waxerr.CodeInvalidRequest,
+				fmt.Sprintf("analyze: group member %d has a negative channel count %d", i, m.Channels))
+		case m.Media == nil:
+			unopened++
+		default:
+			projected = sumProjected(projected, m.Media.Info().Default().Samples)
 		}
-		if total >= 0 {
-			if n := m.Media.Info().Default().Samples; n < 0 {
-				total = -1
-			} else {
-				total += n
-			}
+	}
+	total := func() int64 {
+		if unopened > 0 || projected < 0 {
+			return -1
 		}
+		return projected
 	}
 	out := &AnalyzeGroupResult{Members: make([]AnalyzeResult, 0, len(members))}
 	var group loudness.Group
@@ -474,9 +520,12 @@ func (e *Engine) AnalyzeGroup(ctx context.Context, members []GroupMember, opts A
 		mo := opts
 		mo.Channels = m.Channels
 		if opts.Progress != nil {
-			mo.Progress = func(done, _ int64) { opts.Progress(base+done, total) }
+			mo.Progress = func(done, _ int64) { opts.Progress(base+done, total()) }
 		}
-		res, meter, err := e.analyzeMedia(ctx, m.Media, mo)
+		res, meter, err := e.analyzeGroupMember(ctx, m, mo, func(med format.Media) {
+			unopened--
+			projected = sumProjected(projected, med.Info().Default().Samples)
+		})
 		if err != nil {
 			return nil, waxerr.Annotate(fmt.Sprintf("group member %d", i), err)
 		}
@@ -494,4 +543,36 @@ func (e *Engine) AnalyzeGroup(ctx context.Context, members []GroupMember, opts A
 		SamplePeakDB:   group.SamplePeak(),
 	}
 	return out, nil
+}
+
+// analyzeGroupMember measures one member. A member handed an Open function
+// is opened here and closed on the way out, so the next member opens only
+// once this one is closed; opened runs between the two, with the media the
+// Open returned. A member handed open is measured as it is and left open.
+func (e *Engine) analyzeGroupMember(ctx context.Context, m GroupMember, opts AnalyzeOptions, opened func(format.Media)) (*AnalyzeResult, *loudness.Meter, error) {
+	med := m.Media
+	if med == nil {
+		var err error
+		if med, err = m.Open(); err != nil {
+			return nil, nil, err
+		}
+		if med == nil {
+			return nil, nil, waxerr.New(waxerr.CodeInvalidRequest, "analyze: Open returned no media")
+		}
+		// The read's warnings are on the result by the time this runs, and
+		// its error is discarded as Analyze discards it: the measurement is
+		// already taken.
+		defer med.Close()
+		opened(med)
+	}
+	return e.analyzeMedia(ctx, med, opts)
+}
+
+// sumProjected adds a member's projected length to a running total, -1 once
+// either side is unknown.
+func sumProjected(sum, n int64) int64 {
+	if sum < 0 || n < 0 {
+		return -1
+	}
+	return sum + n
 }

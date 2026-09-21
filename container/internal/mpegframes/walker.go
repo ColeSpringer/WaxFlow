@@ -99,12 +99,14 @@ type Walker struct {
 	// none or it was too large for the payload to hold. compared marks the
 	// one comparison of it against the finished index as run, and endFinding
 	// records that the run ended on damage rather than cleanly, which is
-	// what decides whether a one-frame shortfall is a Note or damage. A
-	// snapshot has no room for endFinding, so it never marks such a run
-	// complete: a restore would otherwise compare with the damage forgotten.
+	// what decides whether a one-frame shortfall is a Note or damage. skipped
+	// records a mid-run finding, bytes the walk stepped over between two
+	// indexed frames, which is the one finding a restored index would omit
+	// (see Snapshot).
 	declared   int64
 	compared   bool
 	endFinding bool
+	skipped    bool
 }
 
 // New returns a Walker reading up to end, which is the logical end of frame
@@ -472,6 +474,7 @@ func (w *Walker) extend() (bool, error) {
 			}
 			return false, w.compare()
 		}
+		w.skipped = true
 		if err := w.warn(next, "%d unparsable bytes skipped", cand-next); err != nil {
 			return false, err
 		}

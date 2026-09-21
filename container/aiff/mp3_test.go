@@ -394,7 +394,7 @@ func TestByteLinearPayloadsHaveNoIndex(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if fresh.RestoreIndex([]byte("WXMPAIDX1\x00\x01\x01\x00")) {
+			if fresh.RestoreIndex([]byte("WXMPAIDX2\x00\x01\x01\x00")) {
 				t.Error("restored an index")
 			}
 		})

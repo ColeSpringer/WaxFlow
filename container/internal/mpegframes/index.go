@@ -10,11 +10,12 @@ import (
 // magic, a completeness flag, the entry count, then the frame offsets
 // as unsigned varint deltas (the first entry is absolute).
 //
-// The magic is the one container/mpa wrote before the walk moved here, and
-// it stays: the blob describes a run of frame offsets in a source, which is
-// the same thing it always was, so sidecars written by an older build still
-// restore.
-const idxMagic = "WXMPAIDX1\x00"
+// The layout is the one container/mpa wrote before the walk moved here. The
+// magic moved to 2 when a run with mid-run damage stopped being snapshotted
+// (see Snapshot): a 1 blob may describe such a run with the damage never
+// recorded, and nothing in it can say, so those are declined once and
+// rebuilt by a cold walk.
+const idxMagic = "WXMPAIDX2\x00"
 
 // IdxMinFrames is the snapshot threshold: below this, rebuilding the
 // index costs less than a disk round trip (a header-hop walk covers
@@ -26,9 +27,16 @@ const IdxMinFrames = 4096
 const idxProbes = 8
 
 // Snapshot serializes the index built so far, or returns nil when it is not
-// worth keeping (too small, or unchanged since Restore).
+// worth keeping (too small, or unchanged since Restore) or must not be kept:
+// a run the walk stepped over damage inside of. Every other finding survives
+// a restore (the head is re-parsed on every open, a declared count is
+// compared at restore, and a run that ended on damage is restored incomplete
+// so the tail re-walks), but the blob has no room for a skip between two
+// indexed frames, and a read through the restored index would report a clean
+// file where the cold walk reported damage. Such a run re-walks on every
+// open instead, and reports the same finding every time.
 func (w *Walker) Snapshot() []byte {
-	if len(w.idx) < IdxMinFrames || !w.grew {
+	if len(w.idx) < IdxMinFrames || !w.grew || w.skipped {
 		return nil
 	}
 	buf := make([]byte, 0, len(idxMagic)+2+10+len(w.idx)*2)
