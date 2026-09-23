@@ -8,11 +8,12 @@
 // index alongside the audio rather than a wrapper around it; it must
 // never enter format's magic-byte driver table.
 //
-// Parse is syntactic: it refuses a sheet whose structure or arithmetic it
-// cannot read, and accepts one whose tracks a splitter could not use.
-// File.Starts is where the splitting invariants live, so a caller that
-// only wants to read a sheet is not held to them. Cuts calls Starts, so
-// every splitting path refuses what it always did.
+// Parse refuses a sheet at the first line it cannot read, since a skipped
+// line is a silently wrong cut; ParseTolerant reads past it, for a reader.
+// Strict is the default here, unlike container, as a sheet's damage moves a cut.
+//
+// A sheet that parses may still not cut: File.Starts holds the splitting
+// invariants and Cuts calls it, so a reader is not held to them.
 //
 // Positions are CD frames throughout, never time.Duration. Samples says
 // why.
@@ -22,6 +23,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -53,7 +55,23 @@ type Sheet struct {
 	// key only per file is the case to know about.
 	Rems  []Rem
 	Files []File
+	// Warnings are the lines ParseTolerant could not read, in line order,
+	// capped at maxWarnings. Nil after Parse, and after ParseTolerant of a
+	// sheet Parse accepts.
+	Warnings []Warning
 }
+
+// Warning is one line ParseTolerant could not read.
+type Warning struct {
+	// Line is 1-based over the decoded text, which has the bytes' lines.
+	Line int
+	// Msg is the finding as Parse's error spells it after "cue: line N: ".
+	Msg string
+}
+
+// maxWarnings caps Sheet.Warnings, as the containers cap theirs: one
+// finding per unread line has no other bound.
+const maxWarnings = 64
 
 // Rem is one REM line: its first token and the rest of the line.
 //
@@ -67,9 +85,9 @@ type Rem struct {
 	// Key is the first token after REM, as the sheet spelled it. Rem
 	// compares it case-insensitively, since rippers disagree about case.
 	Key string
-	// Value is the remainder of the line: its tokens with quotes removed,
-	// rejoined with single spaces. A REM with nothing after its key has
-	// the empty string, which is why Rem reports presence separately.
+	// Value is the rest of the line after the key, trimmed, and a quoted
+	// value without its quotes. A REM with nothing after its key has the
+	// empty string, which is why Rem reports presence separately.
 	Value string
 }
 
@@ -78,7 +96,8 @@ type Rem struct {
 // sheet has each track at frame 0 of its own file.
 type File struct {
 	// Name is the referenced audio file, as the sheet spells it. It is a
-	// sheet-relative name and is not resolved or validated here.
+	// sheet-relative name and is not resolved or validated here. It is empty
+	// for the implied file a TRACK before any FILE opens.
 	Name string
 	// Type is the FILE type token (WAVE, MP3, AIFF, BINARY, MOTOROLA).
 	Type   string
@@ -89,6 +108,7 @@ type File struct {
 type Track struct {
 	// Number is the TRACK number as written. It is the disc's numbering,
 	// not an index into Tracks: a sheet is free to start at 2 or skip.
+	// ParseTolerant writes -1, which no sheet can, for one it cannot read.
 	Number int
 	// Type is the TRACK datatype token (AUDIO, MODE1/2352, and the other
 	// data modes). It is the only thing in a sheet that says a track is not
@@ -209,12 +229,15 @@ func (s *Sheet) SingleFile() (*File, error) {
 // caller reading titles or a REM key has no business being refused over a
 // track that would not cut, and WaxBin filters on Track.Start instead.
 //
+// A track numbered -1 is refused too: only ParseTolerant makes one, and a
+// split names and tags its pieces by number.
+//
 // The rate is the audio's, not the sheet's: a sheet has no rate. Its times
 // are CD frames, and it is the file that says how many samples a frame is.
 func (f *File) Starts(rate int) ([]int64, error) {
 	if len(f.Tracks) == 0 {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("cue: file %q names no tracks", f.Name))
+			fmt.Sprintf("cue: %s names no tracks", f.label()))
 	}
 	out := make([]int64, len(f.Tracks))
 	// The predecessor is carried rather than looked up by index, and a
@@ -225,15 +248,19 @@ func (f *File) Starts(rate int) ([]int64, error) {
 	var prevStart int
 	for i := range f.Tracks {
 		t := &f.Tracks[i]
+		if t.Number < 0 {
+			return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+				"cue: %s track %d has no readable number, so a split cannot number its piece", f.label(), t.Number))
+		}
 		start, ok := t.Start()
 		if !ok {
 			return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
-				"cue: file %q track %d has no INDEX 01, so it has no start", f.Name, t.Number))
+				"cue: %s track %d has no INDEX 01, so it has no start", f.label(), t.Number))
 		}
 		if prev != nil && start <= prevStart {
 			return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
-				"cue: file %q track %d starts at frame %d, at or before track %d at %d; a file's tracks have to ascend",
-				f.Name, t.Number, start, prev.Number, prevStart))
+				"cue: %s track %d starts at frame %d, at or before track %d at %d; a file's tracks have to ascend",
+				f.label(), t.Number, start, prev.Number, prevStart))
 		}
 		prev, prevStart = t, start
 		out[i] = Samples(start, rate)
@@ -279,12 +306,21 @@ func (f *File) Cuts(rate int) ([]int64, error) {
 	// with one message, at the same point.
 	if len(starts) < 2 {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
-			"cue: file %q names one track, so there is nothing to cut", f.Name))
+			"cue: %s names one track, so there is nothing to cut", f.label()))
 	}
 	if starts[0] == 0 {
 		return starts[1:], nil
 	}
 	return starts, nil
+}
+
+// label names the file in a message. A file with no name is the implied
+// one, and quoting its empty name would say nothing.
+func (f *File) label() string {
+	if f.Name == "" {
+		return "the implied file"
+	}
+	return fmt.Sprintf("file %q", clip(f.Name, nameBytes))
 }
 
 // Samples converts a CD frame count to a sample offset at rate.
@@ -335,55 +371,96 @@ const maxMinutes = 100 * 60
 // to 59, and FF is 0 to 74, which is what makes a frame 1/75 s rather than
 // a unit of the caller's choosing.
 func ParseTime(s string) (int, error) {
-	parts := strings.Split(s, ":")
-	if len(parts) != 3 {
-		return 0, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("cue: time %q is not MM:SS:FF", s))
+	frames, err := parseTime(s)
+	if err != nil {
+		return 0, waxerr.New(waxerr.CodeInvalidRequest, "cue: "+err.Error())
 	}
-	n := make([]int, 3)
+	return frames, nil
+}
+
+// parseTime is ParseTime with unprefixed findings, which the parser locates
+// by line.
+func parseTime(s string) (int, error) {
+	q := clip(s, operandBytes)
+	parts := strings.SplitN(s, ":", 4) // bounded whatever the token holds
+	if len(parts) != 3 {
+		return 0, fmt.Errorf("time %q is not MM:SS:FF", q)
+	}
+	var n [3]int
 	for i, p := range parts {
-		// Reject a signed or space-padded field rather than letting Atoi
-		// take it: "-0" and "+1" parse fine and mean nothing here.
-		if p == "" || strings.IndexFunc(p, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
-			return 0, waxerr.New(waxerr.CodeInvalidRequest,
-				fmt.Sprintf("cue: time %q is not MM:SS:FF", s))
-		}
-		v, err := strconv.Atoi(p)
-		if err != nil {
-			return 0, waxerr.New(waxerr.CodeInvalidRequest,
-				fmt.Sprintf("cue: time %q: %v", s, err))
+		v, ok := digits(p)
+		if !ok {
+			return 0, fmt.Errorf("time %q is not MM:SS:FF", q)
 		}
 		n[i] = v
 	}
 	switch {
 	case n[0] > maxMinutes:
-		return 0, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("cue: time %q has %d minutes; a sheet addresses at most %d", s, n[0], maxMinutes))
+		return 0, fmt.Errorf("time %q has %d minutes; a sheet addresses at most %d", q, n[0], maxMinutes)
 	case n[1] > 59:
-		return 0, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("cue: time %q has %d seconds; a minute holds 60", s, n[1]))
+		return 0, fmt.Errorf("time %q has %d seconds; a minute holds 60", q, n[1])
 	case n[2] > FramesPerSecond-1:
-		return 0, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("cue: time %q has %d frames; a second holds %d", s, n[2], FramesPerSecond))
+		return 0, fmt.Errorf("time %q has %d frames; a second holds %d", q, n[2], FramesPerSecond)
 	}
 	return (n[0]*60+n[1])*FramesPerSecond + n[2], nil
 }
 
-// Parse parses a CUE sheet.
-//
-// The text is decoded best effort: see decode. Unknown commands are
-// skipped rather than refused, since sheets in the wild carry vendor
-// extensions; what is refused is syntax, meaning a line this cannot read
-// at all (an operand missing, a TRACK indexed against no FILE, a
-// timestamp that is not one or is past what the arithmetic holds).
-//
-// Whether the tracks that come out could be cut is a separate question,
-// asked by File.Starts. Parse returning a sheet is not a promise that a
-// splitter can use it.
+// digits reads a field of ASCII digits and nothing else: no sign, and no
+// value past what an int holds.
+func digits(s string) (int, bool) {
+	n, err := strconv.ParseUint(s, 10, strconv.IntSize-1)
+	return int(n), err == nil
+}
+
+// Bounds on what a message quotes, so a 400 body or a diagnostic never
+// carries a megabyte: an operand, and a file's name at a filename's length.
+const (
+	operandBytes = 32
+	nameBytes    = 255
+)
+
+// clip cuts s to n bytes and "...", on a rune boundary when one is within a
+// rune's length of the cut.
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	i := n
+	for j := n; j > n-utf8.UTFMax; j-- {
+		if utf8.RuneStart(s[j]) {
+			i = j
+			break
+		}
+	}
+	return s[:i] + "..."
+}
+
+// Parse parses a CUE sheet and refuses it at the first line it cannot read,
+// as "cue: line N: " and the finding. Whether a splitter can use the sheet
+// is File.Starts' question.
 func Parse(b []byte) (*Sheet, error) {
+	s := parse(b, true)
+	if len(s.Warnings) > 0 {
+		w := s.Warnings[0]
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("cue: line %d: %s", w.Line, w.Msg))
+	}
+	return s, nil
+}
+
+// ParseTolerant never fails: each line Parse would refuse is a Warning and
+// is dropped, though a FILE or TRACK line still opens its file or track (-1
+// when unreadable). It is for a reader, since a dropped line can move a cut.
+func ParseTolerant(b []byte) *Sheet { return parse(b, false) }
+
+// parse reads the sheet, recording every finding; strict stops at the first.
+func parse(b []byte, strict bool) *Sheet {
 	var sheet Sheet
 	var file *File
 	var track *Track
+	// culprit is the first TRACK-shaped line skipped since the last FILE,
+	// TRACK or accepted INDEX line, which an ordering or outside-a-TRACK
+	// finding names.
+	var culprit skippedLine
 
 	// commit folds the track and file under construction into the sheet.
 	// Both are built in place and appended on close, so the pointers above
@@ -402,96 +479,132 @@ func Parse(b []byte) (*Sheet, error) {
 			file = nil
 		}
 	}
-
-	for i, line := range strings.Split(decode(b), "\n") {
-		lineNo := i + 1
-		toks, err := fields(strings.TrimRight(line, "\r"))
-		if err != nil {
-			return nil, lineErr(lineNo, err)
+	// warn records a line this could not read. The arm then drops the
+	// line, or keeps it best effort where dropping would orphan the
+	// lines under it (a FILE without a name, a TRACK without a number).
+	warn := func(line int, msg string) {
+		if len(sheet.Warnings) < maxWarnings {
+			sheet.Warnings = append(sheet.Warnings, Warning{Line: line, Msg: msg})
 		}
-		if len(toks) == 0 {
+	}
+
+	text := decode(b)
+	sep := "\n"
+	if !strings.Contains(text, "\n") {
+		sep = "\r" // classic Mac OS ends a line with CR alone
+	}
+	for i, line := range strings.Split(text, sep) {
+		if strict && sheet.Warnings != nil {
+			break
+		}
+		lineNo := i + 1
+		line = strings.TrimRight(line, "\r")
+		if strings.Trim(line, blanks) == "" {
 			continue
 		}
-		cmd, args := strings.ToUpper(toks[0]), toks[1:]
+		kw, rest, closed := cutToken(line)
+		if !closed {
+			warn(lineNo, fmt.Sprintf("%q is missing its closing quote", clip(kw, operandBytes)))
+			continue
+		}
+		cmd := strings.ToUpper(kw)
 
 		// A command that carries one string operand: which struct field it
 		// lands in depends only on whether a track is open, so the sheet
 		// and track levels share one arm rather than two parallel ones.
 		if dst := stringTarget(cmd, &sheet, track); dst != nil {
-			if len(args) < 1 {
-				return nil, lineErr(lineNo, waxerr.New(waxerr.CodeInvalidRequest,
-					fmt.Sprintf("cue: %s takes an operand", cmd)))
-			}
-			*dst = args[0]
+			*dst = stringOperand(rest)
 			continue
 		}
 
 		switch cmd {
 		case "FILE":
-			if len(args) < 1 {
-				return nil, lineErr(lineNo, waxerr.New(waxerr.CodeInvalidRequest,
-					"cue: FILE takes a name and a type"))
+			name, typ, msg := fileOperands(rest)
+			if msg != "" {
+				warn(lineNo, msg)
 			}
 			commitFile()
-			f := File{Name: args[0]}
-			if len(args) > 1 {
-				f.Type = strings.ToUpper(args[1])
-			}
-			file = &f
+			file = &File{Name: name, Type: typ}
+			culprit = skippedLine{}
 
 		case "TRACK":
 			if file == nil {
-				return nil, lineErr(lineNo, waxerr.New(waxerr.CodeInvalidRequest,
-					"cue: TRACK before any FILE; a track has to be indexed against something"))
-			}
-			if len(args) < 1 {
-				return nil, lineErr(lineNo, waxerr.New(waxerr.CodeInvalidRequest,
-					"cue: TRACK takes a number and a type"))
-			}
-			num, err := strconv.Atoi(args[0])
-			if err != nil || num < 0 {
-				return nil, lineErr(lineNo, waxerr.New(waxerr.CodeInvalidRequest,
-					fmt.Sprintf("cue: TRACK number %q is not a number", args[0])))
+				file = &File{} // the implied file
 			}
 			commitTrack()
-			t := Track{Number: num}
-			if len(args) > 1 {
-				t.Type = strings.ToUpper(args[1])
+			numTok, more, _ := cutToken(rest)
+			typ, _, _ := cutToken(more)
+			if typ == "" && isDatatype(numTok) {
+				numTok, typ = "", numTok // TRACK AUDIO: it is the number that is missing
+			}
+			t := Track{Number: -1, Type: strings.ToUpper(typ)}
+			num, ok := digits(numTok)
+			if ok {
+				t.Number = num
+			}
+			switch _, closed := tokens(rest); {
+			case numTok == "":
+				warn(lineNo, "TRACK takes a number")
+			case !ok:
+				warn(lineNo, fmt.Sprintf("TRACK number %q is not a number", clip(numTok, operandBytes)))
+			case !closed:
+				warn(lineNo, "TRACK is missing a closing quote")
 			}
 			track = &t
+			culprit = skippedLine{}
 
 		case "INDEX":
 			if track == nil {
-				return nil, lineErr(lineNo, waxerr.New(waxerr.CodeInvalidRequest,
-					"cue: INDEX outside a TRACK"))
+				warn(lineNo, outside(cmd, culprit))
+				continue
 			}
-			if len(args) < 2 {
-				return nil, lineErr(lineNo, waxerr.New(waxerr.CodeInvalidRequest,
-					"cue: INDEX takes a number and a time"))
+			numTok, more, _ := cutToken(rest)
+			timeTok, _, _ := cutToken(more)
+			if _, closed := tokens(rest); !closed {
+				warn(lineNo, trackf(track.Number, "INDEX is missing a closing quote"))
+				continue
 			}
-			num, err := strconv.Atoi(args[0])
-			if err != nil || num < 0 || num > 99 {
-				return nil, lineErr(lineNo, waxerr.New(waxerr.CodeInvalidRequest,
-					fmt.Sprintf("cue: INDEX number %q is not 00 to 99", args[0])))
+			if timeTok == "" {
+				warn(lineNo, trackf(track.Number, "INDEX takes a number and a time"))
+				continue
 			}
-			frame, err := ParseTime(args[1])
+			num, ok := digits(numTok)
+			if !ok || num > 99 {
+				warn(lineNo, trackf(track.Number, "INDEX number %q is not 00 to 99", clip(numTok, operandBytes)))
+				continue
+			}
+			frame, err := parseTime(timeTok)
 			if err != nil {
-				return nil, lineErr(lineNo, err)
+				warn(lineNo, trackf(track.Number, "%v", err))
+				continue
+			}
+			// Indexes ascend, so one that does not is most likely a TRACK line
+			// this never read, whose track would otherwise merge into this one.
+			if n := len(track.Indexes); n > 0 && num <= track.Indexes[n-1].Number {
+				warn(lineNo, disorder(track.Number, num, track.Indexes[n-1].Number, culprit))
+				continue
 			}
 			track.Indexes = append(track.Indexes, Index{Number: num, Frame: frame})
+			culprit = skippedLine{}
 
 		case "PREGAP", "POSTGAP":
 			if track == nil {
-				return nil, lineErr(lineNo, waxerr.New(waxerr.CodeInvalidRequest,
-					fmt.Sprintf("cue: %s outside a TRACK", cmd)))
+				warn(lineNo, outside(cmd, culprit))
+				continue
 			}
-			if len(args) < 1 {
-				return nil, lineErr(lineNo, waxerr.New(waxerr.CodeInvalidRequest,
-					fmt.Sprintf("cue: %s takes a time", cmd)))
+			tok, _, _ := cutToken(rest)
+			if _, closed := tokens(rest); !closed {
+				warn(lineNo, trackf(track.Number, "%s is missing a closing quote", cmd))
+				continue
 			}
-			gap, err := ParseTime(args[0])
+			if tok == "" {
+				warn(lineNo, trackf(track.Number, "%s takes a time", cmd))
+				continue
+			}
+			gap, err := parseTime(tok)
 			if err != nil {
-				return nil, lineErr(lineNo, err)
+				warn(lineNo, trackf(track.Number, "%v", err))
+				continue
 			}
 			if cmd == "PREGAP" {
 				track.Pregap = gap
@@ -500,8 +613,17 @@ func Parse(b []byte) (*Sheet, error) {
 			}
 
 		case "FLAGS":
-			if track != nil {
-				track.Flags = append(track.Flags, args...)
+			if track == nil {
+				continue
+			}
+			if _, closed := tokens(rest); !closed {
+				warn(lineNo, trackf(track.Number, "FLAGS is missing a closing quote"))
+				continue
+			}
+			for rest = strings.Trim(rest, blanks); rest != ""; {
+				var flag string
+				flag, rest, _ = cutToken(rest)
+				track.Flags = append(track.Flags, flag)
 			}
 
 		case "REM":
@@ -512,36 +634,101 @@ func Parse(b []byte) (*Sheet, error) {
 			//
 			// An empty REM is a blank comment line, which carries nothing
 			// and is not worth a keyless entry.
-			if len(args) == 0 {
+			key, value, _ := cutToken(rest)
+			if key == "" {
 				continue
 			}
-			r := Rem{Key: args[0], Value: strings.Join(args[1:], " ")}
+			r := Rem{Key: key, Value: stringOperand(value)}
 			if track != nil {
 				track.Rems = append(track.Rems, r)
 			} else {
 				sheet.Rems = append(sheet.Rems, r)
 			}
 
+		case "SONGWRITER", "CDTEXTFILE", "CATALOG", "ISRC":
+			// The format's own commands where nothing here reads them
+			// (CATALOG inside a track, ISRC outside one): skipped, and never
+			// named as a misspelled TRACK.
+
 		default:
 			// A vendor extension, or a command from a revision of the
 			// format this does not know. Skipping is deliberate: a sheet
 			// is metadata beside the audio, and refusing a whole rip over
 			// an unread line would trade a working split for a purity
-			// nobody asked for.
+			// nobody asked for. One shaped like a TRACK may be a misspelled one.
+			if culprit.line == 0 && trackish(kw, rest) {
+				culprit = skippedLine{line: lineNo, kw: clip(kw, operandBytes)}
+			}
 		}
 	}
 	commitFile()
-	return &sheet, nil
+	return &sheet
+}
+
+// skippedLine is a line whose command this does not read; the zero value is
+// none.
+type skippedLine struct {
+	line int
+	kw   string
+}
+
+// unread names the line in a finding. %+q escapes letters outside ASCII, so
+// a lookalike cannot read as TRACK.
+func (s skippedLine) unread() string {
+	if s.kw == "" {
+		return fmt.Sprintf("line %d is not a command this reads", s.line)
+	}
+	return fmt.Sprintf("line %d %+q is not a command this reads", s.line, s.kw)
+}
+
+// outside explains cmd arriving with no track open.
+func outside(cmd string, culprit skippedLine) string {
+	if culprit.line == 0 {
+		return cmd + " outside a TRACK"
+	}
+	return cmd + " outside a TRACK; " + culprit.unread()
+}
+
+// disorder explains INDEX num arriving after INDEX prev in track n.
+func disorder(n, num, prev int, culprit skippedLine) string {
+	what := fmt.Sprintf("INDEX %02d repeats", num)
+	if num < prev {
+		what = fmt.Sprintf("INDEX %02d follows INDEX %02d", num, prev)
+	}
+	if culprit.line == 0 {
+		return trackf(n, "%s; the TRACK line between the two is missing or misspelled", what)
+	}
+	return trackf(n, "%s; %s", what, culprit.unread())
+}
+
+// trackf prefixes a finding with the track its line belongs to.
+func trackf(n int, format string, args ...any) string {
+	return fmt.Sprintf("track %d: ", n) + fmt.Sprintf(format, args...)
+}
+
+// trackish reports whether a skipped line looks like a TRACK line: it says
+// TRACK, or its first operand is a track number.
+func trackish(kw, rest string) bool {
+	if strings.Contains(strings.ToUpper(kw+rest), "TRACK") {
+		return true
+	}
+	tok, _, _ := cutToken(rest)
+	n, ok := digits(tok)
+	return ok && n <= 99
+}
+
+// isDatatype reports whether tok is a TRACK datatype rather than a number.
+func isDatatype(tok string) bool {
+	t := strings.ToUpper(tok)
+	return t == "AUDIO" || t == "CDG" || strings.HasPrefix(t, "MODE") || strings.HasPrefix(t, "CDI")
 }
 
 // stringTarget returns the field a one-operand string command writes,
 // which is the open track's when there is one and the sheet's otherwise.
 // A nil return means cmd is not one of these, and the caller skips it.
 //
-// SONGWRITER is deliberately absent and so falls to the skip. A command
-// nothing reads is better skipped than stored: storing it would also mean
-// refusing a sheet whose SONGWRITER line is malformed, which is refusing a
-// working rip over a line that could not have changed the split.
+// SONGWRITER is deliberately absent and so falls to the skip: a command
+// nothing reads is better skipped than stored.
 func stringTarget(cmd string, sheet *Sheet, track *Track) *string {
 	if track != nil {
 		switch cmd {
@@ -565,39 +752,86 @@ func stringTarget(cmd string, sheet *Sheet, track *Track) *string {
 	return nil
 }
 
-func lineErr(line int, err error) error {
-	return waxerr.Annotate(fmt.Sprintf("cue: line %d", line), err)
+// blanks separate tokens; the format has no others.
+const blanks = " \t"
+
+// cutToken splits the first token off s: blanks skipped, then a quoted run
+// without its quotes, or a run to the next blank. closed is false when a
+// quote never closes; the token then runs to the end.
+func cutToken(s string) (tok, rest string, closed bool) {
+	s = strings.TrimLeft(s, blanks)
+	switch {
+	case s == "":
+		return "", "", true
+	case s[0] == '"':
+		end := strings.IndexByte(s[1:], '"')
+		if end < 0 {
+			return s[1:], "", false
+		}
+		return s[1 : 1+end], s[2+end:], true
+	}
+	if end := strings.IndexAny(s, blanks); end >= 0 {
+		return s[:end], s[end:], true
+	}
+	return s, "", true
 }
 
-// fields splits a CUE line into tokens: whitespace separated, except that
-// a double-quoted run is one token and may hold spaces.
-//
-// The format has no escape sequence, so a quote always opens or closes and
-// never stands for itself. That is a real limit of CUE rather than a
-// simplification here: a title containing a double quote cannot be written
-// in a sheet at all.
-func fields(line string) ([]string, error) {
-	var out []string
-	for i := 0; i < len(line); {
-		c := line[i]
-		switch {
-		case c == ' ' || c == '\t':
-			i++
-		case c == '"':
-			end := strings.IndexByte(line[i+1:], '"')
-			if end < 0 {
-				return nil, waxerr.New(waxerr.CodeInvalidRequest, "cue: unterminated quoted string")
+// tokens counts the tokens in s and reports whether every quote among them
+// closes.
+func tokens(s string) (n int, closed bool) {
+	closed = true
+	for s = strings.TrimLeft(s, blanks); s != ""; s = strings.TrimLeft(s, blanks) {
+		var ok bool
+		_, s, ok = cutToken(s)
+		n, closed = n+1, closed && ok
+	}
+	return n, closed
+}
+
+// stringOperand reads a one-string command's operand, the rest of the line.
+// The format has no escape, so quotes strip only as the pair around it: "The
+// "Best" Of" keeps its inner quotes, and 12" Remix reads itself.
+func stringOperand(s string) string {
+	s = strings.Trim(s, blanks)
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		return s[1 : len(s)-1]
+	}
+	if s != "" && s[0] == '"' {
+		tok, _, _ := cutToken(s) // to its closing quote, or the end
+		return tok
+	}
+	return s
+}
+
+// fileOperands reads a FILE line's name and type. A quoted name closes at its
+// first quote unless that splits a name with quotes of its own ("12"
+// Single.flac" WAVE); an unquoted one ends before a last word without a dot.
+func fileOperands(s string) (name, typ, msg string) {
+	s = strings.Trim(s, blanks)
+	if s == "" {
+		return "", "", "FILE takes a name"
+	}
+	if s[0] != '"' {
+		cut := strings.LastIndexAny(s, blanks)
+		if cut < 0 || strings.Contains(s[cut+1:], ".") {
+			return s, "", ""
+		}
+		return strings.TrimRight(s[:cut], blanks), strings.ToUpper(s[cut+1:]), ""
+	}
+	name, tail, closed := cutToken(s)
+	if !closed {
+		return name, "", "FILE name is missing its closing quote"
+	}
+	if n, _ := tokens(tail); n > 1 {
+		if last := strings.LastIndexByte(s, '"'); last > len(s)-len(tail)-1 {
+			if t, _, _ := cutToken(s[last+1:]); t != "" {
+				name, tail = s[1:last], s[last+1:]
 			}
-			out = append(out, line[i+1:i+1+end])
-			i += end + 2
-		default:
-			j := i
-			for j < len(line) && line[j] != ' ' && line[j] != '\t' {
-				j++
-			}
-			out = append(out, line[i:j])
-			i = j
 		}
 	}
-	return out, nil
+	typ, _, _ = cutToken(tail)
+	if _, closed := tokens(tail); !closed {
+		msg = "FILE is missing a closing quote"
+	}
+	return name, strings.ToUpper(typ), msg
 }

@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -327,7 +328,7 @@ func TestCuePieces(t *testing.T) {
 		want: []piece{
 			// The lead-in: the disc's track 0, which no sheet line names, so
 			// it takes no title and invents none.
-			{from: 0, to: 33 * 588, title: "", number: 0},
+			{from: 0, to: 33 * 588, title: "", number: 0, leadIn: true},
 			{from: 33 * 588, to: 412 * 588, title: "Track 1", number: 1},
 			{from: 412 * 588, to: waxflow.ToEnd, title: "Track 2", number: 2},
 		},
@@ -347,6 +348,145 @@ func TestCuePieces(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestCuePiecesTrackZeroIsATrack: a sheet may number its first track 00,
+// and that track is a track, not the lead-in its number resembles.
+func TestCuePiecesTrackZeroIsATrack(t *testing.T) {
+	sheet := filepath.Join(t.TempDir(), "album.cue")
+	if err := os.WriteFile(sheet, []byte("FILE \"album.wav\" WAVE\n"+
+		"  TRACK 00 AUDIO\n    TITLE \"Zero\"\n    INDEX 01 00:00:00\n"+
+		"  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:01:00\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := cuePieces(sheet, 44100, 400_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []piece{
+		{from: 0, to: 44100, title: "Zero", number: 0},
+		{from: 44100, to: waxflow.ToEnd, title: "One", number: 1},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("pieces = %+v, want %+v", got, want)
+	}
+}
+
+// TestTrackTotal: TRACKTOTAL counts the disc's tracks, which is every piece
+// but a lead-in, and a TRACK 00 is one of them.
+func TestTrackTotal(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		pieces []piece
+		want   int
+	}{
+		{"lead-in", []piece{{leadIn: true}, {number: 1}, {number: 2}}, 2},
+		{"track 00", []piece{{number: 0}, {number: 1}}, 2},
+		{"tracks", []piece{{number: 1}, {number: 2}, {number: 3}}, 3},
+		{"none", nil, 0},
+	} {
+		if got := trackTotal(tc.pieces); got != tc.want {
+			t.Errorf("%s: trackTotal = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestCuePiecesReadsWhatTheSheetMeans: a hand-written sheet names no FILE
+// and skips the quotes, and splits by the whole title all the same.
+func TestCuePiecesReadsWhatTheSheetMeans(t *testing.T) {
+	sheet := filepath.Join(t.TempDir(), "album.cue")
+	if err := os.WriteFile(sheet, []byte(
+		"TRACK 01 AUDIO\n  TITLE Track One\n  INDEX 01 00:00:00\n"+
+			"TRACK 02 AUDIO\n  TITLE \"Track Two\"\n  INDEX 01 00:01:00\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := cuePieces(sheet, 44100, 400_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []piece{
+		{from: 0, to: 44100, title: "Track One", number: 1},
+		{from: 44100, to: waxflow.ToEnd, title: "Track Two", number: 2},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("pieces = %+v, want %+v", got, want)
+	}
+}
+
+// TestSplitCueTrackTotal: TRACKTOTAL counts the disc's tracks, so a lead-in
+// piece is not one and a TRACK 00 is.
+func TestSplitCueTrackTotal(t *testing.T) {
+	dir := t.TempDir()
+	wav, leadIn, _ := cueRip(t, dir, []int{33, 412})
+	zero := filepath.Join(dir, "zero.cue")
+	if err := os.WriteFile(zero, []byte("FILE \"album.wav\" WAVE\n"+
+		"  TRACK 00 AUDIO\n    TITLE \"Zero\"\n    INDEX 01 00:00:00\n"+
+		"  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:05:37\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		sheet string
+		names []string
+	}{
+		{leadIn, []string{"00.flac", "01 - Track 1.flac", "02 - Track 2.flac"}},
+		{zero, []string{"00 - Zero.flac", "01 - One.flac"}},
+	} {
+		out := filepath.Join(dir, "out-"+filepath.Base(tc.sheet))
+		if code, _, errOut := run(t, "split", wav, out, "--cue", tc.sheet); code != 0 {
+			t.Fatalf("split exit = %d: %s", code, errOut)
+		}
+		for _, name := range tc.names {
+			raw, err := os.ReadFile(filepath.Join(out, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := label.New().Read(context.Background(), container.BytesSource(raw), "flac", meta.ReadOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := info.Tags["TRACKTOTAL"]; len(got) != 1 || got[0] != "2" {
+				t.Errorf("%s: %s carries TRACKTOTAL %v, want [2]", filepath.Base(tc.sheet), name, got)
+			}
+		}
+	}
+}
+
+// TestSplitCueRefusesSharedNames: pieces that would share a name are refused
+// before anything is written, since --force would let the later one replace
+// the earlier. A lead-in and an untitled TRACK 00 are both 00.
+func TestSplitCueRefusesSharedNames(t *testing.T) {
+	dir := t.TempDir()
+	wav, _, _ := cueRip(t, dir, []int{33, 412})
+	sheet := filepath.Join(dir, "zero.cue")
+	if err := os.WriteFile(sheet, []byte("FILE \"album.wav\" WAVE\n"+
+		"  TRACK 00 AUDIO\n    INDEX 01 00:00:33\n  TRACK 01 AUDIO\n    INDEX 01 00:05:37\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "tracks")
+	for _, flag := range []string{"--dry-run", "--force"} {
+		code, _, errOut := run(t, "split", wav, out, "--cue", sheet, flag)
+		if code == 0 || !strings.Contains(errOut, `pieces 1 and 2 would both be named "00.flac"`) {
+			t.Errorf("split %s exit = %d, stderr %q; want the shared name refused", flag, code, errOut)
+		}
+	}
+	if entries, _ := os.ReadDir(out); len(entries) != 0 {
+		t.Errorf("wrote %d files before refusing", len(entries))
+	}
+}
+
+// TestSanitizeFilenameMapsReservedCharacters: a title keeps its inner quotes
+// now, and a quote, like ?:*<>|, is a character Windows and FAT refuse in a
+// name, so a piece is named the same on every system.
+func TestSanitizeFilenameMapsReservedCharacters(t *testing.T) {
+	for _, tc := range []struct{ title, want string }{
+		{`The "Best" Of`, `The 'Best' Of`},
+		{`Symphony No. 5: Allegro`, `Symphony No. 5- Allegro`},
+		{`Why? <Live|Take*2>`, `Why- -Live-Take-2-`},
+	} {
+		if got := sanitizeFilename(tc.title); got != tc.want {
+			t.Errorf("sanitizeFilename(%q) = %q, want %q", tc.title, got, tc.want)
+		}
 	}
 }
 

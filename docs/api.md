@@ -959,9 +959,14 @@ boundary a CUE sheet's CD-frame arithmetic names exactly.
 reference like `src`, so the sheet can be uploaded (`upload:<id>`) or sit
 in a library root beside its rip, and it resolves through the same
 resolver. The sheet's track boundaries become this split's cut points at
-creation: the first track's start is dropped (it is the implied 0, and a
-cut there would ask for an empty piece), so a sheet of N tracks yields
-N-1 cuts and N pieces.
+creation: a first track starting at frame 0 is dropped (a cut there would
+ask for an empty piece), so the usual sheet of N tracks yields N-1 cuts
+and N pieces; a first track starting past frame 0 is kept, and the audio
+before it (a pregap, or hidden track one audio) becomes the first piece,
+so N tracks yield N cuts and N+1 pieces. The daemon reads the sheet
+strictly: a line it cannot read is a 400 naming the line, since a skipped
+line would be a silently wrong cut. A sheet that names no FILE indexes
+`src`.
 
 The daemon parses the sheet rather than making each client do it, and that
 is the point of the field. A CD frame is 1/75 s, which no nanosecond clock

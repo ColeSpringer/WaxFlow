@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -211,36 +212,48 @@ func TestSplitJobCueRejects(t *testing.T) {
 		"FILE \"rej.wav\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Not a sheet at all.
+	// A timestamp the sheet cannot mean: refused at its line, since a
+	// skipped line would be a silently wrong cut.
 	if err := os.WriteFile(filepath.Join(env.root, "junk.cue"), []byte(
-		"INDEX 01 99:99:99\n"), 0o644); err != nil {
+		"FILE \"rej.wav\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 99:99:99\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Not a sheet at all: nothing in it is a command, so it indexes nothing.
+	if err := os.WriteFile(filepath.Join(env.root, "nonsense.cue"), []byte(
+		"this is not a cue sheet\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
+	bad := http.StatusBadRequest
 	for _, tc := range []struct {
-		name string
-		body map[string]any
-		want string
+		name   string
+		body   map[string]any
+		status int
+		code   waxerr.Code
+		want   []string
 	}{
 		{"cue and cuts together", map[string]any{
 			"type": "split", "src": "lib/rej.wav", "format": "flac",
 			"cue": "lib/rej.cue", "cuts": []int64{1000},
-		}, "exclusive"},
+		}, bad, waxerr.CodeInvalidRequest, []string{"exclusive"}},
 		{"cue on a transcode", map[string]any{
 			"type": "transcode", "src": "lib/rej.wav", "format": "flac", "cue": "lib/rej.cue",
-		}, "cue applies to split"},
+		}, bad, waxerr.CodeInvalidRequest, []string{"cue applies to split"}},
 		{"multi-file sheet", map[string]any{
 			"type": "split", "src": "lib/rej.wav", "format": "flac", "cue": "lib/multi.cue",
-		}, "indexes 2 files"},
+		}, bad, waxerr.CodeInvalidRequest, []string{"indexes 2 files"}},
 		{"single-track sheet", map[string]any{
 			"type": "split", "src": "lib/rej.wav", "format": "flac", "cue": "lib/one.cue",
-		}, "nothing to cut"},
-		{"unparseable sheet", map[string]any{
+		}, bad, waxerr.CodeInvalidRequest, []string{"nothing to cut"}},
+		{"unreadable timestamp", map[string]any{
 			"type": "split", "src": "lib/rej.wav", "format": "flac", "cue": "lib/junk.cue",
-		}, "cue:"},
+		}, bad, waxerr.CodeInvalidRequest, []string{"line 3", "a minute holds 60"}},
+		{"not a sheet", map[string]any{
+			"type": "split", "src": "lib/rej.wav", "format": "flac", "cue": "lib/nonsense.cue",
+		}, bad, waxerr.CodeInvalidRequest, []string{"indexes no files"}},
 		{"missing sheet", map[string]any{
 			"type": "split", "src": "lib/rej.wav", "format": "flac", "cue": "lib/nope.cue",
-		}, ""},
+		}, http.StatusNotFound, waxerr.CodeNotFound, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body, err := json.Marshal(tc.body)
@@ -249,11 +262,14 @@ func TestSplitJobCueRejects(t *testing.T) {
 			}
 			resp := env.postJSON(t, "/jobs", string(body))
 			got := readBody(t, resp)
-			if resp.StatusCode == http.StatusCreated {
-				t.Fatalf("job accepted, want a refusal mentioning %q", tc.want)
+			var envelope server.ErrorBody
+			if resp.StatusCode != tc.status || json.Unmarshal(got, &envelope) != nil || envelope.Code != tc.code {
+				t.Fatalf("status %d, body %s; want %d and code %s", resp.StatusCode, got, tc.status, tc.code)
 			}
-			if tc.want != "" && !strings.Contains(string(got), tc.want) {
-				t.Errorf("body = %s, want it to mention %q", got, tc.want)
+			for _, want := range tc.want {
+				if !strings.Contains(string(got), want) {
+					t.Errorf("body = %s, want it to mention %q", got, want)
+				}
 			}
 		})
 	}
@@ -272,4 +288,29 @@ func TestSplitJobCueRejects(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantEnvelope(t, env.postJSON(t, "/jobs", string(body)), http.StatusBadRequest, waxerr.CodeInvalidRequest)
+}
+
+// TestSplitJobCueImpliedFile: a sheet with no FILE line indexes src, which
+// is what a sidecar beside its one rip means.
+func TestSplitJobCueImpliedFile(t *testing.T) {
+	env := jobsEnv(t)
+	cueFixture(t, env, "rej", []int{0, 5 * 75})
+	if err := os.WriteFile(filepath.Join(env.root, "nofile.cue"), []byte(
+		"  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    INDEX 01 00:05:00\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]any{
+		"type": "split", "src": "lib/rej.wav", "format": "flac", "cue": "lib/nofile.cue",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := awaitJob(t, env, createJob(t, env, string(body)))
+	// 00:05:00 is 375 frames, 588 samples each at 44100.
+	if want := []int64{220500}; fmt.Sprint(job.Request.Cuts) != fmt.Sprint(want) {
+		t.Errorf("the sheet became cuts %v, want %v", job.Request.Cuts, want)
+	}
+	if len(job.Outputs) != 2 {
+		t.Errorf("the split made %d pieces, want 2", len(job.Outputs))
+	}
 }

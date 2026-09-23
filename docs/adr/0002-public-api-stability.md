@@ -180,3 +180,56 @@ moves with. ADR-0010 has the table and the remedy
 (`ConcatOptions.Channels`, `Engine.TimelineChannels`).
 
 A uniform-width `Concat` converts exactly as before.
+
+## Amendment (2026-09-22): cue reads whole operands, and tolerantly on request
+
+WaxBin, the package's outside reader, filed three requests against the
+2026-09-10 surface: an unquoted title kept only its first word, one bad
+timestamp refused every track in the sheet, and a sheet with no `FILE`
+line was refused outright. Four points change.
+
+1. **The grammar.** A command with one string operand (`TITLE`,
+   `PERFORMER`, `ISRC`, `CATALOG`, a `REM` value) reads the rest of its
+   line, so `TITLE Jazz Album` reads `Jazz Album` where it read `Jazz`.
+   The format has no escape, so quotes strip only as the pair around the
+   whole operand, and there a quote that never closes runs to the end of
+   the line. A quoted `FILE` name closes at its first quote unless that
+   splits a name with quotes of its own (`"12" Single.flac" WAVE`). A
+   `TRACK` before any `FILE` opens an implied file with an empty
+   `File.Name`, and a `TRACK` line holding only a datatype keeps it as its
+   type. A sheet whose lines end in CR alone (classic Mac OS) reads line by
+   line. Sheets the 2026-09-10 surface refused now parse, and some it read
+   now read differently.
+2. **`ParseTolerant` and `Sheet.Warnings`.** Strict stays the default:
+   `Parse` refuses at the first line it cannot read. `ParseTolerant`
+   records that line as a `Warning` and keeps reading. The polarity is
+   the reverse of `container`'s `Strict` option on purpose: a demuxer's
+   tolerated damage is local to the bytes it skipped, while a skipped
+   sheet line moves a cut. So splitters refuse and readers opt in; WaxTap
+   and both splitters here stay on `Parse`. A reader that keeps state per
+   track should count a sheet with warnings as unread, as it would a
+   refusal, or a typo deletes the tracks behind the dropped lines.
+3. **The refusal list is replaced**, not amended at one point. Gone are
+   "a missing operand" (a bare string command is an empty value) and "a
+   `TRACK` indexed against no `FILE`" (the implied file). `Parse` refuses
+   a number or a time that is missing or is not one (a sign included,
+   which `Atoi` used to take), an `INDEX` number outside 00 to 99, a time
+   past what the arithmetic holds, an `INDEX`, `PREGAP` or `POSTGAP`
+   outside a track, a quote that never closes anywhere but a string
+   operand, a `REM` line or a command this skips, a `FILE` without a name,
+   and one structural refusal in both modes: `INDEX` numbers that do not
+   ascend within a track. That is the trace of a swallowed `TRACK` line.
+   Unknown commands are skipped by design, so `TRCK 02 AUDIO` vanished,
+   track 2's `INDEX 01` landed on track 1, `Start` took the first, and a
+   split lost a track without a word. The format requires ascending index
+   numbers, so a sheet accepted yesterday with a repeat or a descent is
+   refused today.
+4. **The error text** is `cue: line N: ` and the finding, one
+   `waxerr.Error` where there were two nested, each saying `cue:`.
+   Findings on a track's `INDEX`, `PREGAP` and `POSTGAP` lines begin
+   `track N: `, and a numeric field past what an int holds reads `is not
+   MM:SS:FF` rather than `strconv.Atoi`'s own words.
+
+`File.Starts` gains one refusal, reachable only from `ParseTolerant`
+output: a track numbered -1, since a split names and tags its pieces by
+number. Its messages say `the implied file` for a nameless one.

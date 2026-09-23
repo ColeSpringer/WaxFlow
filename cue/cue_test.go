@@ -1,8 +1,10 @@
 package cue
 
 import (
+	"bytes"
 	"fmt"
 	"math"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -113,11 +115,9 @@ func TestParseTimeMinutesBound(t *testing.T) {
 	if got := waxerr.CodeOf(err); got != waxerr.CodeInvalidRequest {
 		t.Errorf("ParseTime(%q) code = %v, want CodeInvalidRequest", overflows, got)
 	}
-	// Which refusal names it depends on the word size: an int holds
-	// 2049638230412173 on a 64-bit build, so the value reaches the bound
-	// check, while on a 32-bit one Atoi refuses the field first. Both are
-	// correct and both are invalid-request; only the wording differs, so the
-	// bound's own message is pinned on a value that reaches it either way.
+	// On a 32-bit build that field does not fit an int and is refused as not
+	// MM:SS:FF before the bound, so the bound's message is pinned on a value
+	// that reaches it at either word size.
 	const pastTheBound = "1000000:00:00"
 	if _, err := ParseTime(pastTheBound); err == nil {
 		t.Errorf("ParseTime(%q) was accepted; MM past maxMinutes cannot be a position", pastTheBound)
@@ -217,6 +217,32 @@ func TestStartsMustAscend(t *testing.T) {
 	}
 }
 
+// TestStartsRefusesAnUnnumberedTrack: ParseTolerant opens track -1 for a
+// TRACK line whose number it could not read. A split names and tags its
+// pieces by number, so the funnel refuses the sheet rather than cutting it.
+func TestStartsRefusesAnUnnumberedTrack(t *testing.T) {
+	sheet := ParseTolerant([]byte("TRACK x AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 01:00:00\n"))
+	tracks := tracksOf(t, sheet)
+	if len(tracks) != 2 || tracks[0].Number != -1 {
+		t.Fatalf("tracks = %+v, want track -1 then 2", tracks)
+	}
+	f := &sheet.Files[0]
+	if _, err := f.Starts(44100); err == nil || !strings.Contains(err.Error(), "track -1") {
+		t.Errorf("Starts error = %v, want it to name track -1", err)
+	} else if got := waxerr.CodeOf(err); got != waxerr.CodeInvalidRequest {
+		t.Errorf("Starts code = %v, want CodeInvalidRequest", got)
+	}
+	if cuts, err := f.Cuts(44100); err == nil {
+		t.Errorf("Cuts = %v, want the refusal Starts makes", cuts)
+	}
+	// Mid-file too, where the ascending rule has a predecessor to check.
+	mid := ParseTolerant([]byte("TRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK x AUDIO\nINDEX 01 01:00:00\n" +
+		"TRACK 03 AUDIO\nINDEX 01 02:00:00\n"))
+	if _, err := mid.Files[0].Starts(44100); err == nil || !strings.Contains(err.Error(), "track -1") {
+		t.Errorf("Starts error = %v, want it to name track -1", err)
+	}
+}
+
 // TestStartsNeverIndexesBeforeTheFirstTrack holds the ascent loop to
 // reporting a predecessor it actually has.
 //
@@ -301,27 +327,536 @@ func TestParseBasic(t *testing.T) {
 	}
 }
 
-// TestParseRejects covers what Parse itself refuses: syntax, which is a
-// line it cannot read at all. What a splitter cannot use is
-// TestStartsRejects.
+// wantRefusal holds both parses to one finding at one line: Parse refuses
+// with it, prefixed once, and it is ParseTolerant's first warning.
+func wantRefusal(t *testing.T, in string, line int, msg string) *Sheet {
+	t.Helper()
+	sheet, err := Parse([]byte(in))
+	if want := fmt.Sprintf("cue: line %d: %s", line, msg); err == nil || err.Error() != want {
+		t.Errorf("Parse(%q) error = %v, want %q", in, err, want)
+	}
+	if sheet != nil {
+		t.Errorf("Parse returned both a sheet and an error")
+	}
+	if err != nil && waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+		t.Errorf("code = %v, want CodeInvalidRequest", waxerr.CodeOf(err))
+	}
+	tol := ParseTolerant([]byte(in))
+	if len(tol.Warnings) == 0 || tol.Warnings[0] != (Warning{Line: line, Msg: msg}) {
+		t.Errorf("ParseTolerant warnings = %v, want line %d %q first", tol.Warnings, line, msg)
+	}
+	return tol
+}
+
+// tracksOf returns the tracks of the sheet's one file.
+func tracksOf(t *testing.T, s *Sheet) []Track {
+	t.Helper()
+	if len(s.Files) != 1 {
+		t.Fatalf("files = %+v, want 1", s.Files)
+	}
+	return s.Files[0].Tracks
+}
+
+// TestParseRejects covers what Parse itself refuses: a line it cannot read.
+// What a splitter cannot use is TestStartsRejects.
 func TestParseRejects(t *testing.T) {
-	for _, tc := range []struct{ name, in, want string }{
-		{"track before file", "TRACK 01 AUDIO\n", "before any FILE"},
-		{"index outside track", "FILE \"a.flac\" WAVE\nINDEX 01 00:00:00\n", "outside a TRACK"},
-		{"bad frame count", "FILE \"a.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:75\n", "a second holds 75"},
-		{"bad seconds", "FILE \"a.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:60:00\n", "a minute holds 60"},
-		{"not a timestamp", "FILE \"a.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 01 nope\n", "not MM:SS:FF"},
-		{"unterminated quote", "TITLE \"unclosed\nFILE \"a.flac\" WAVE\n", "unterminated"},
+	const file = "FILE \"a.flac\" WAVE\n"
+	const track = file + "TRACK 01 AUDIO\n"
+	for _, tc := range []struct {
+		name, in string
+		line     int
+		msg      string
+	}{
+		{"index outside track", file + "INDEX 01 00:00:00\n", 2, "INDEX outside a TRACK"},
+		{"bad frame count", track + "INDEX 01 00:00:75\n", 3, `track 1: time "00:00:75" has 75 frames; a second holds 75`},
+		{"bad seconds", track + "INDEX 01 00:60:00\n", 3, `track 1: time "00:60:00" has 60 seconds; a minute holds 60`},
+		{"minutes past the bound", track + "INDEX 01 6001:00:00\n", 3,
+			`track 1: time "6001:00:00" has 6001 minutes; a sheet addresses at most 6000`},
+		{"not a timestamp", track + "INDEX 01 nope\n", 3, `track 1: time "nope" is not MM:SS:FF`},
+		// Past what an int holds, in the format's words rather than strconv's.
+		{"20-digit minutes", track + "INDEX 01 99999999999999999999:00:00\n", 3,
+			`track 1: time "99999999999999999999:00:00" is not MM:SS:FF`},
+		{"index without a time", track + "INDEX 01\n", 3, "track 1: INDEX takes a number and a time"},
+		{"index number past 99", track + "INDEX 100 00:00:00\n", 3, `track 1: INDEX number "100" is not 00 to 99`},
+		{"pregap outside track", file + "PREGAP 00:00:32\n", 2, "PREGAP outside a TRACK"},
+		{"pregap without a time", track + "PREGAP\n", 3, "track 1: PREGAP takes a time"},
+		{"track without a number", file + "TRACK\n", 2, "TRACK takes a number"},
+		{"file without a name", "FILE\n", 1, "FILE takes a name"},
+		// A quote that never closes hides where a token ends, as it did before
+		// any operand could run to the end of its line.
+		{"quote before the command", track + "\"INDEX 01 00:00:00\n", 3, `"INDEX 01 00:00:00" is missing its closing quote`},
+		{"quote in a TRACK line", file + "TRACK 01 \"AUDIO\n", 2, "TRACK is missing a closing quote"},
+		{"quote in an INDEX line", track + "INDEX 01 00:00:00 \"\n", 3, "track 1: INDEX is missing a closing quote"},
+		{"quote in a PREGAP line", track + "PREGAP \"00:00:32\n", 3, "track 1: PREGAP is missing a closing quote"},
+		{"quote in a FLAGS line", track + "FLAGS \"DCP\n", 3, "track 1: FLAGS is missing a closing quote"},
+	} {
+		t.Run(tc.name, func(t *testing.T) { wantRefusal(t, tc.in, tc.line, tc.msg) })
+	}
+}
+
+// TestParseOperands pins the operand grammar: a one-operand command reads
+// the rest of its line, and a quote strips only as a pair around it.
+func TestParseOperands(t *testing.T) {
+	disc := func(line string) string {
+		return line + "\nFILE \"a.flac\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n"
+	}
+	inTrack := func(line string) string {
+		return "FILE \"a.flac\" WAVE\n  TRACK 01 AUDIO\n    " + line + "\n    INDEX 01 00:00:00\n"
+	}
+	title := func(s *Sheet) string { return s.Title }
+	// rem reads a key's value, or says it is absent.
+	rem := func(key string) func(*Sheet) string {
+		return func(s *Sheet) string {
+			if v, ok := s.Rem(key); ok {
+				return v
+			}
+			return "<absent>"
+		}
+	}
+	for _, tc := range []struct {
+		name, in string
+		get      func(*Sheet) string
+		want     string
+	}{
+		{"unquoted words", disc("TITLE Jazz Album"), title, "Jazz Album"},
+		{"inner spacing", disc("TITLE Jazz   Album"), title, "Jazz   Album"},
+		{"quoted", disc(`TITLE "Jazz Album"`), title, "Jazz Album"},
+		{"inner quotes", disc(`TITLE "The "Best" Of"`), title, `The "Best" Of`},
+		{"unterminated quote", disc(`TITLE "Unclosed`), title, "Unclosed"},
+		{"token after the quote", disc(`TITLE "Foo" bar`), title, "Foo"},
+		{"bare", disc("TITLE"), title, ""},
+		{"empty quotes", disc(`TITLE ""`), title, ""},
+		{"lone quote", disc(`TITLE "`), title, ""},
+		{"quoted, trailing blanks", disc("TITLE \"Foo\"  \t"), title, "Foo"},
+		{"unquoted, trailing blanks", disc("TITLE Foo  "), title, "Foo"},
+		{"inch mark", disc(`TITLE 12" Remix`), title, `12" Remix`},
+		{"tab separated", disc("TITLE\tTabbed Title"), title, "Tabbed Title"},
+		{"crlf", disc("TITLE \"Foo\"\r"), title, "Foo"},
+		{"track performer", inTrack("PERFORMER Guest Artist"),
+			func(s *Sheet) string { return s.Files[0].Tracks[0].Performer }, "Guest Artist"},
+		{"track isrc", inTrack("ISRC ABCDE1234567"),
+			func(s *Sheet) string { return s.Files[0].Tracks[0].ISRC }, "ABCDE1234567"},
+		{"catalog", disc("CATALOG 1234567890123"), func(s *Sheet) string { return s.Catalog }, "1234567890123"},
+		{"rem value", disc("REM COMMENT Ripped with EAC"), rem("COMMENT"), "Ripped with EAC"},
+		{"rem quoted", disc(`REM GENRE "Rock"`), rem("GENRE"), "Rock"},
+		{"rem unterminated", disc(`REM COMMENT "Ripped`), rem("COMMENT"), "Ripped"},
+		{"rem key alone", disc("REM DATE"), rem("DATE"), ""},
+		{"bare rem", disc("REM"), func(s *Sheet) string { return fmt.Sprint(len(s.Rems)) }, "0"},
+		// A command this skips is not read, so its quotes cannot refuse.
+		{"skipped command", disc(`SONGWRITER "Unclosed`), title, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := Parse([]byte(tc.in))
-			if err == nil {
-				t.Fatalf("Parse(%q) succeeded, want an error mentioning %q", tc.in, tc.want)
+			sheet, err := Parse([]byte(tc.in))
+			if err != nil {
+				t.Fatalf("Parse(%q): %v", tc.in, err)
 			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("Parse error = %v, want it to mention %q", err, tc.want)
+			if got := tc.get(sheet); got != tc.want {
+				t.Errorf("Parse(%q) read %q, want %q", tc.in, got, tc.want)
+			}
+			if sheet.Warnings != nil {
+				t.Errorf("Warnings = %v, want nil", sheet.Warnings)
+			}
+			if tol := ParseTolerant([]byte(tc.in)); !reflect.DeepEqual(tol, sheet) {
+				t.Errorf("ParseTolerant = %+v, Parse = %+v", tol, sheet)
 			}
 		})
+	}
+}
+
+// TestParseFile pins the FILE operands. A quoted name closes at its first
+// quote unless that splits a name with quotes of its own; an unquoted one may
+// hold spaces; the type is optional.
+func TestParseFile(t *testing.T) {
+	for _, tc := range []struct{ line, name, typ, msg string }{
+		{`FILE "a.flac" WAVE`, "a.flac", "WAVE", ""},
+		{`FILE "a.flac"`, "a.flac", "", ""},
+		{`FILE "a.flac" wave`, "a.flac", "WAVE", ""},
+		{`FILE "a.flac" WAVE extra`, "a.flac", "WAVE", ""},
+		{`FILE a.flac WAVE`, "a.flac", "WAVE", ""},
+		{`FILE my album.flac WAVE`, "my album.flac", "WAVE", ""},
+		{`FILE my album.flac`, "my album.flac", "", ""},
+		{`FILE a.flac`, "a.flac", "", ""},
+		// WaxBin's prepend: an empty quoted name is a name, not a missing one.
+		{`FILE "" WAVE`, "", "WAVE", ""},
+		{"FILE\t\"a.flac\"\tWAVE", "a.flac", "WAVE", ""},
+		{`FILE`, "", "", "FILE takes a name"},
+		{`FILE "unclosed.flac WAVE`, "unclosed.flac WAVE", "", "FILE name is missing its closing quote"},
+		// Quotes inside the name.
+		{`FILE "The "Best" Of.flac" WAVE`, `The "Best" Of.flac`, "WAVE", ""},
+		{`FILE "12" Single.flac" WAVE`, `12" Single.flac`, "WAVE", ""},
+		{`FILE "Album ""Live"".flac" WAVE`, `Album ""Live"".flac`, "WAVE", ""},
+		// Quotes after the name.
+		{`FILE "a.wav" "WAVE"`, "a.wav", "WAVE", ""},
+		{`FILE "a.wav" WAVE "comment"`, "a.wav", "WAVE", ""},
+		{`FILE "a.wav" "WAVE`, "a.wav", "WAVE", "FILE is missing a closing quote"},
+		{`FILE "a.wav" WAVE "`, "a.wav", "WAVE", "FILE is missing a closing quote"},
+		{`FILE "a" "`, "a", "", "FILE is missing a closing quote"},
+	} {
+		t.Run(tc.line, func(t *testing.T) {
+			in := tc.line + "\n"
+			var tol *Sheet
+			if tc.msg != "" {
+				tol = wantRefusal(t, in, 1, tc.msg)
+			} else {
+				if _, err := Parse([]byte(in)); err != nil {
+					t.Fatalf("Parse(%q): %v", in, err)
+				}
+				tol = ParseTolerant([]byte(in))
+				if tol.Warnings != nil {
+					t.Errorf("Warnings = %v, want nil", tol.Warnings)
+				}
+			}
+			// A FILE line read best effort still opens a file, so the tracks
+			// under it keep their own positions.
+			if len(tol.Files) != 1 {
+				t.Fatalf("ParseTolerant(%q) files = %d, want 1", in, len(tol.Files))
+			}
+			if f := tol.Files[0]; f.Name != tc.name || f.Type != tc.typ {
+				t.Errorf("file = %q %q, want %q %q", f.Name, f.Type, tc.name, tc.typ)
+			}
+		})
+	}
+}
+
+// sheetNoFile is a chapter sheet's shape: tracks and no FILE line, which a
+// sidecar named after its one rip routinely omits.
+const sheetNoFile = "TITLE \"No File Line\"\n" +
+	"  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n" +
+	"  TRACK 02 AUDIO\n    INDEX 01 01:00:00\n"
+
+// TestParseImpliedFile: a TRACK before any FILE opens a file with no name,
+// which a splitter cuts like any other.
+func TestParseImpliedFile(t *testing.T) {
+	// With a BOM too, which is where a prepended FILE line used to land.
+	for _, in := range []string{sheetNoFile, utf8BOM + sheetNoFile} {
+		sheet, err := Parse([]byte(in))
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", in, err)
+		}
+		if sheet.Title != "No File Line" {
+			t.Errorf("title = %q", sheet.Title)
+		}
+		tracks := tracksOf(t, sheet)
+		if f := sheet.Files[0]; f.Name != "" || f.Type != "" {
+			t.Errorf("file = %q %q, want the implied file's empty name and type", f.Name, f.Type)
+		}
+		if len(tracks) != 2 || tracks[0].Number != 1 || tracks[1].Number != 2 {
+			t.Fatalf("tracks = %+v, want 1 and 2", tracks)
+		}
+		single, err := sheet.SingleFile()
+		if err != nil {
+			t.Fatalf("SingleFile: %v", err)
+		}
+		// 01:00:00 is 4500 frames, 588 samples each at 44100.
+		if cuts, err := single.Cuts(44100); err != nil || !slices.Equal(cuts, []int64{2646000}) {
+			t.Errorf("Cuts(44100) = %v, %v; want [2646000]", cuts, err)
+		}
+	}
+
+	// A FILE line closes the implied file like any other.
+	late := "TRACK 01 AUDIO\n    INDEX 01 00:00:00\n" +
+		"FILE \"b.flac\" WAVE\n  TRACK 02 AUDIO\n    INDEX 01 00:00:00\n"
+	sheet, err := Parse([]byte(late))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(sheet.Files) != 2 || sheet.Files[0].Name != "" || sheet.Files[1].Name != "b.flac" {
+		t.Fatalf("files = %+v, want the implied file then b.flac", sheet.Files)
+	}
+	if _, err := sheet.SingleFile(); err == nil || !strings.Contains(err.Error(), "indexes 2 files") {
+		t.Errorf("SingleFile error = %v, want it to count 2 files", err)
+	}
+
+	// A refusal naming the file says which one.
+	for _, tc := range []struct{ in, want string }{
+		{"TRACK 01 AUDIO\n  INDEX 01 00:00:00\n", "the implied file names one track"},
+		{"FILE \"a.flac\" WAVE\nTRACK 01 AUDIO\n  INDEX 01 00:00:00\n", `file "a.flac" names one track`},
+	} {
+		sheet, err := Parse([]byte(tc.in))
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", tc.in, err)
+		}
+		if _, err := sheet.Files[0].Cuts(44100); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("Cuts error = %v, want it to mention %q", err, tc.want)
+		}
+	}
+}
+
+// TestParseClassicMacLineEnds: a sheet saved on classic Mac OS ends its lines
+// with CR alone, and still reads line by line.
+func TestParseClassicMacLineEnds(t *testing.T) {
+	sheet, err := Parse([]byte(strings.ReplaceAll(sheetNoFile, "\n", "\r")))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if sheet.Title != "No File Line" {
+		t.Errorf("title = %q", sheet.Title)
+	}
+	if tracks := tracksOf(t, sheet); len(tracks) != 2 {
+		t.Errorf("tracks = %+v, want 2", tracks)
+	}
+	wantRefusal(t, "FILE \"a.flac\" WAVE\rTRACK 01 AUDIO\rINDEX 01 nope\r", 3, `track 1: time "nope" is not MM:SS:FF`)
+}
+
+// TestParseTrackLine: a TRACK number is digits and nothing else. Read
+// tolerantly, a line with no readable number still opens a track, numbered
+// -1, so the lines under it are not read as the previous track's.
+func TestParseTrackLine(t *testing.T) {
+	tol := wantRefusal(t, "FILE \"a.flac\" WAVE\n  TRACK AUDIO\n    TITLE \"Orphan\"\n    INDEX 01 00:00:00\n"+
+		"  TRACK 02 AUDIO\n    INDEX 01 01:00:00\n", 2, "TRACK takes a number")
+	if len(tol.Warnings) != 1 {
+		t.Errorf("warnings = %v, want one", tol.Warnings)
+	}
+	tracks := tracksOf(t, tol)
+	if len(tracks) != 2 {
+		t.Fatalf("tracks = %+v, want 2", tracks)
+	}
+	// A lone datatype is the type, since it is what marks a data track.
+	if want := (Track{Number: -1, Type: "AUDIO", Title: "Orphan", Indexes: []Index{{Number: 1, Frame: 0}}}); !reflect.DeepEqual(tracks[0], want) {
+		t.Errorf("track 0 = %+v, want %+v", tracks[0], want)
+	}
+	if tracks[1].Number != 2 {
+		t.Errorf("track 1 number = %d, want 2", tracks[1].Number)
+	}
+	if tr := tracksOf(t, wantRefusal(t, "FILE \"a.bin\" BINARY\nTRACK MODE1/2352\n", 2, "TRACK takes a number")); len(tr) != 1 || tr[0].Type != "MODE1/2352" {
+		t.Errorf("tracks = %+v, want one typed MODE1/2352", tr)
+	}
+
+	// Atoi alone would take a sign.
+	for _, tc := range []struct{ line, msg string }{
+		{"TRACK 1A AUDIO", `TRACK number "1A" is not a number`},
+		{"TRACK -1 AUDIO", `TRACK number "-1" is not a number`},
+		{"TRACK +1 AUDIO", `TRACK number "+1" is not a number`},
+		{"TRACK 99999999999999999999 AUDIO", `TRACK number "99999999999999999999" is not a number`},
+		{"TRACK", "TRACK takes a number"},
+	} {
+		wantRefusal(t, "FILE \"a.flac\" WAVE\n"+tc.line+"\n", 2, tc.msg)
+	}
+
+	for _, tc := range []struct {
+		line string
+		num  int
+		typ  string
+	}{
+		// TRACK 00 is a number a sheet can write.
+		{"TRACK 00 AUDIO", 0, "AUDIO"},
+		{"TRACK 01", 1, ""},
+	} {
+		sheet, err := Parse([]byte("FILE \"a.flac\" WAVE\n" + tc.line + "\n"))
+		if err != nil {
+			t.Errorf("Parse(%q): %v", tc.line, err)
+			continue
+		}
+		if tr := sheet.Files[0].Tracks[0]; tr.Number != tc.num || tr.Type != tc.typ {
+			t.Errorf("Parse(%q) track = %d %q, want %d %q", tc.line, tr.Number, tr.Type, tc.num, tc.typ)
+		}
+	}
+}
+
+// sheetMisspelledTrack loses track 2 to a typo: TRCK is skipped as an
+// unknown command, so its TITLE and INDEX land on track 1.
+const sheetMisspelledTrack = "FILE \"a.flac\" WAVE\n" +
+	"  TRACK 01 AUDIO\n    TITLE \"A\"\n    INDEX 01 00:00:00\n" +
+	"  TRCK 02 AUDIO\n    TITLE \"B\"\n    INDEX 01 03:00:00\n" +
+	"  TRACK 03 AUDIO\n    TITLE \"C\"\n    INDEX 01 06:00:00\n"
+
+// TestParseIndexOrder: INDEX numbers ascend within a track, so one that does
+// not is the trace of a TRACK line this never read, which would otherwise
+// merge two tracks. The finding names a skipped line shaped like a TRACK.
+func TestParseIndexOrder(t *testing.T) {
+	const head = "FILE \"a.flac\" WAVE\nTRACK 01 AUDIO\n"
+	const missing = "the TRACK line between the two is missing or misspelled"
+	for _, tc := range []struct {
+		name, in string
+		line     int
+		msg      string
+	}{
+		{"misspelled TRACK", sheetMisspelledTrack, 7,
+			`track 1: INDEX 01 repeats; line 5 "TRCK" is not a command this reads`},
+		// The swallowed track's INDEX 00 is the first to break the order.
+		{"pregap of a swallowed track", head + "INDEX 01 00:00:00\ntrck 02 AUDIO\nTITLE \"B\"\n" +
+			"SONGWRITER \"S\"\nINDEX 00 02:58:00\nINDEX 01 03:00:00\n", 7,
+			`track 1: INDEX 00 follows INDEX 01; line 4 "trck" is not a command this reads`},
+		// SONGWRITER and CATALOG are the format's own commands, never a
+		// misspelled TRACK, wherever a sheet puts them.
+		{"songwriter after the INDEX lines", head + "INDEX 01 00:00:00\nSONGWRITER \"S\"\n" +
+			"TRCK 02 AUDIO\nINDEX 01 03:00:00\n", 6,
+			`track 1: INDEX 01 repeats; line 5 "TRCK" is not a command this reads`},
+		{"catalog in a track", head + "INDEX 01 00:00:00\nCATALOG 12\nINDEX 01 03:00:00\n", 5,
+			"track 1: INDEX 01 repeats; " + missing},
+		// A line that does not look like a TRACK is not named.
+		{"vendor line", head + "INDEX 01 00:00:00\nX-VENDOR foo\nINDEX 01 03:00:00\n", 5,
+			"track 1: INDEX 01 repeats; " + missing},
+		{"vendor line then TRCK", head + "INDEX 01 00:00:00\nX-VENDOR foo\nTRCK 02 AUDIO\nINDEX 01 03:00:00\n", 6,
+			`track 1: INDEX 01 repeats; line 5 "TRCK" is not a command this reads`},
+		{"empty keyword", head + "INDEX 01 00:00:00\n\"\" TRACK 02 AUDIO\nINDEX 01 03:00:00\n", 5,
+			"track 1: INDEX 01 repeats; line 4 is not a command this reads"},
+		// A lookalike letter is escaped, so the message cannot read TRACK.
+		{"lookalike keyword", head + "INDEX 01 00:00:00\nTR\u0410CK 02 AUDIO\nINDEX 01 03:00:00\n", 5,
+			`track 1: INDEX 01 repeats; line 4 "TR\u0410CK" is not a command this reads`},
+		{"nothing between", head + "INDEX 01 00:00:00\nINDEX 01 00:01:00\n", 4,
+			"track 1: INDEX 01 repeats; " + missing},
+		// An accepted INDEX starts the search again.
+		{"skipped line before both", head + "TRCK 02 AUDIO\nINDEX 01 00:00:00\nINDEX 01 00:01:00\n", 5,
+			"track 1: INDEX 01 repeats; " + missing},
+	} {
+		t.Run(tc.name, func(t *testing.T) { wantRefusal(t, tc.in, tc.line, tc.msg) })
+	}
+
+	if _, err := Parse([]byte(head + "INDEX 00 00:00:00\nINDEX 01 00:02:00\nINDEX 02 00:04:00\n")); err != nil {
+		t.Errorf("Parse(ascending indexes): %v", err)
+	}
+
+	// Read tolerantly, the first INDEX 01 stands and the overwrite the
+	// warning exists to expose is visible: track 1 carries track 2's title.
+	tracks := tracksOf(t, ParseTolerant([]byte(sheetMisspelledTrack)))
+	if len(tracks) != 2 || tracks[0].Number != 1 || tracks[1].Number != 3 {
+		t.Fatalf("tracks = %+v, want 1 and 3", tracks)
+	}
+	if tracks[0].Title != "B" {
+		t.Errorf("track 1 title = %q, want B", tracks[0].Title)
+	}
+	if want := []Index{{Number: 1, Frame: 0}}; !reflect.DeepEqual(tracks[0].Indexes, want) {
+		t.Errorf("track 1 indexes = %v, want %v", tracks[0].Indexes, want)
+	}
+}
+
+// TestParseOutsideATrack: a line that needs a track and has none names the
+// TRACK-shaped line skipped since the last FILE line.
+func TestParseOutsideATrack(t *testing.T) {
+	for _, tc := range []struct {
+		name, in string
+		line     int
+		msg      string
+	}{
+		{"misspelled first TRACK", "FILE \"a.wav\" WAVE\nTRCK 01 AUDIO\nINDEX 01 00:00:00\n", 3,
+			`INDEX outside a TRACK; line 2 "TRCK" is not a command this reads`},
+		// A FILE line closes the open track, so the search starts again.
+		{"after a later FILE line", "FILE \"a.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n" +
+			"FILE \"b.wav\" WAVE\nTRCK 02 AUDIO\nPREGAP 00:02:00\n", 6,
+			`PREGAP outside a TRACK; line 5 "TRCK" is not a command this reads`},
+		{"skipped before the FILE line", "TRCK 01 AUDIO\nFILE \"a.wav\" WAVE\nINDEX 01 00:00:00\n", 3,
+			"INDEX outside a TRACK"},
+		{"vendor line", "FILE \"a.wav\" WAVE\nX-VENDOR foo\nINDEX 01 00:00:00\n", 3, "INDEX outside a TRACK"},
+	} {
+		t.Run(tc.name, func(t *testing.T) { wantRefusal(t, tc.in, tc.line, tc.msg) })
+	}
+}
+
+// TestParseTolerantKeepsTheRest: one bad timestamp costs its line, not the
+// sheet.
+func TestParseTolerantKeepsTheRest(t *testing.T) {
+	tol := wantRefusal(t, "TITLE \"X\"\nFILE \"album.mp3\" WAVE\n"+
+		"  TRACK 01 AUDIO\n    TITLE \"A\"\n    INDEX 01 00:99:00\n"+
+		"  TRACK 02 AUDIO\n    TITLE \"B\"\n    INDEX 01 00:00:10\n",
+		5, `track 1: time "00:99:00" has 99 seconds; a minute holds 60`)
+	if len(tol.Warnings) != 1 {
+		t.Errorf("warnings = %v, want one", tol.Warnings)
+	}
+	if tol.Title != "X" {
+		t.Errorf("title = %q, want X", tol.Title)
+	}
+	tracks := tracksOf(t, tol)
+	if len(tracks) != 2 {
+		t.Fatalf("tracks = %+v, want 2", tracks)
+	}
+	if tracks[0].Title != "A" {
+		t.Errorf("track 1 title = %q, want A", tracks[0].Title)
+	}
+	if start, ok := tracks[0].Start(); ok {
+		t.Errorf("track 1 start = %d, want none: its INDEX 01 was the line dropped", start)
+	}
+	if start, ok := tracks[1].Start(); !ok || start != 10 {
+		t.Errorf("track 2 start = %d (%v), want frame 10", start, ok)
+	}
+}
+
+// TestParseStrictStopsAtTheFirstFinding: Parse names the first line it
+// cannot read and reads no further; ParseTolerant lists every one.
+func TestParseStrictStopsAtTheFirstFinding(t *testing.T) {
+	tol := wantRefusal(t, "FILE \"a.flac\" WAVE\n  PREGAP\n  TRACK 01 AUDIO\n    INDEX 01 nope\n"+
+		"    INDEX 01 00:00:00\n    INDEX 100 00:00:01\n", 2, "PREGAP outside a TRACK")
+	want := []Warning{
+		{Line: 2, Msg: "PREGAP outside a TRACK"},
+		{Line: 4, Msg: `track 1: time "nope" is not MM:SS:FF`},
+		{Line: 6, Msg: `track 1: INDEX number "100" is not 00 to 99`},
+	}
+	if !reflect.DeepEqual(tol.Warnings, want) {
+		t.Errorf("Warnings = %v, want %v", tol.Warnings, want)
+	}
+	if tracks := tracksOf(t, tol); len(tracks) != 1 || !reflect.DeepEqual(tracks[0].Indexes, []Index{{Number: 1, Frame: 0}}) {
+		t.Errorf("tracks = %+v, want one with INDEX 01 at 0", tracks)
+	}
+
+	// A thousand tracks after a first line it cannot read cost Parse nothing.
+	bad := []byte("INDEX 01 00:00:00\n" + strings.Repeat("TRACK 01 AUDIO\nINDEX 01 00:00:00\n", 1000))
+	if allocs := testing.AllocsPerRun(5, func() { _, _ = Parse(bad) }); allocs > 50 {
+		t.Errorf("Parse allocated %.0f times over a sheet refused at line 1, want it to stop there", allocs)
+	}
+
+	// A clean sheet reads the same both ways.
+	strict, err := Parse([]byte(sheetBasic))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	tolerant := ParseTolerant([]byte(sheetBasic))
+	if strict.Warnings != nil || tolerant.Warnings != nil {
+		t.Errorf("Warnings = %v and %v, want nil", strict.Warnings, tolerant.Warnings)
+	}
+	if !reflect.DeepEqual(strict, tolerant) {
+		t.Errorf("ParseTolerant = %+v, Parse = %+v", tolerant, strict)
+	}
+}
+
+// TestParseClipsOperands: an operand quoted into a message is clipped on a
+// rune boundary, so a hostile token cannot make a message a megabyte.
+func TestParseClipsOperands(t *testing.T) {
+	// A 3-byte rune straddles the 32-byte clip.
+	token := strings.Repeat("x", 31) + "€" + strings.Repeat("y", 1<<20)
+	tol := ParseTolerant([]byte("FILE \"a.flac\" WAVE\nTRACK " + token + " AUDIO\n"))
+	want := []Warning{{Line: 2, Msg: `TRACK number "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx..." is not a number`}}
+	if !reflect.DeepEqual(tol.Warnings, want) {
+		got := fmt.Sprint(tol.Warnings)
+		if len(got) > 200 {
+			got = got[:200] + "..."
+		}
+		t.Errorf("Warnings = %s, want %v", got, want)
+	}
+
+	// Public ParseTime takes any string. Bytes that are not UTF-8 have no
+	// rune boundary to back up to, so they are cut where the bound falls.
+	_, err := ParseTime(strings.Repeat("\x80", 40))
+	if want := `cue: time "` + strings.Repeat(`\x80`, 32) + `..." is not MM:SS:FF`; err == nil || err.Error() != want {
+		t.Errorf("ParseTime error = %v, want %q", err, want)
+	}
+
+	// A file's name is clipped at a filename's own length.
+	sheet, err := Parse([]byte("FILE \"" + strings.Repeat("n", 1<<20) + "\" WAVE\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	_, err = sheet.Files[0].Starts(44100)
+	if want := `cue: file "` + strings.Repeat("n", 255) + `..." names no tracks`; err == nil || err.Error() != want {
+		t.Errorf("Starts error is %d bytes, want the %d of %q", len(fmt.Sprint(err)), len(want), want[:40]+"...")
+	}
+}
+
+// TestParseWarningsCap: the list stops at maxWarnings, and the reading does
+// not.
+func TestParseWarningsCap(t *testing.T) {
+	in := []byte(strings.Repeat("INDEX 01 00:00:00\n", 100) + "FILE \"a.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:30\n")
+	tol := ParseTolerant(in)
+	if len(tol.Warnings) != 64 {
+		t.Fatalf("%d warnings, want 64", len(tol.Warnings))
+	}
+	if tol.Warnings[0].Line != 1 || tol.Warnings[63].Line != 64 {
+		t.Errorf("warnings run from line %d to %d, want 1 to 64", tol.Warnings[0].Line, tol.Warnings[63].Line)
+	}
+	if tracks := tracksOf(t, tol); len(tracks) != 1 || tracks[0].Indexes[0].Frame != 30 {
+		t.Errorf("tracks = %+v, want the track after the cap read", tracks)
+	}
+	if _, err := Parse(in); err == nil || !strings.HasPrefix(err.Error(), "cue: line 1: ") {
+		t.Errorf("Parse error = %v, want line 1's", err)
 	}
 }
 
@@ -367,7 +902,7 @@ func TestParseSkipsUnknown(t *testing.T) {
 		"VENDOR_EXTENSION whatever\n" +
 		"FILE \"a.flac\" WAVE\n" +
 		"  TRACK 01 AUDIO\n" +
-		"    FLAGS DCP\n" +
+		"    FLAGS DCP  4CH\n" +
 		"    PREGAP 00:00:32\n" +
 		"    INDEX 01 00:00:00\n"
 	sheet, err := Parse([]byte(in))
@@ -381,8 +916,8 @@ func TestParseSkipsUnknown(t *testing.T) {
 	if tr.Pregap != 32 {
 		t.Errorf("pregap = %d frames, want 32", tr.Pregap)
 	}
-	if len(tr.Flags) != 1 || tr.Flags[0] != "DCP" {
-		t.Errorf("flags = %v", tr.Flags)
+	if !slices.Equal(tr.Flags, []string{"DCP", "4CH"}) {
+		t.Errorf("flags = %v, want [DCP 4CH]", tr.Flags)
 	}
 }
 
@@ -675,19 +1210,79 @@ func FuzzParseCue(f *testing.F) {
 	f.Add([]byte("INDEX 01 99:59:74\n"))
 	f.Add([]byte{0x93, 0x94, 0xe9, 0xff})
 	f.Add([]byte(utf8BOM + "REM\n"))
+	f.Add([]byte(sheetNoFile))
+	f.Add([]byte(sheetMisspelledTrack))
+	f.Add([]byte(strings.Repeat("INDEX 01 00:00:00\n", 100)))
+	f.Add([]byte("FILE\n"))
+	f.Add([]byte("TRACK AUDIO\nTITLE x\n"))
+	f.Add([]byte("TITLE Jazz Album\n"))
+	f.Add([]byte("TRACK cue: AUDIO\n"))
+	f.Add([]byte(strings.ReplaceAll(sheetNoFile, "\n", "\r")))
+	f.Add([]byte("FILE \"a\" \"\nTRACK 01 \"AUDIO\n\"INDEX 01 00:00:00\n"))
 	f.Fuzz(func(t *testing.T, b []byte) {
-		sheet, err := Parse(b)
+		strict, err := Parse(b)
+		sheet := ParseTolerant(b)
+		if sheet == nil {
+			t.Fatal("ParseTolerant returned nil")
+		}
+		// One grammar, two policies: Parse refuses exactly when ParseTolerant
+		// warns, with its first warning. Compared whole, since an operand in
+		// the message may say cue: itself.
+		if (err != nil) != (len(sheet.Warnings) > 0) {
+			t.Fatalf("Parse error %v, ParseTolerant warnings %v", err, sheet.Warnings)
+		}
 		if err != nil {
-			if sheet != nil {
+			if strict != nil {
 				t.Fatal("Parse returned both a sheet and an error")
 			}
-			return
+			if got := waxerr.CodeOf(err); got != waxerr.CodeInvalidRequest {
+				t.Fatalf("code = %v, want CodeInvalidRequest", got)
+			}
+			w := sheet.Warnings[0]
+			if want := fmt.Sprintf("cue: line %d: %s", w.Line, w.Msg); err.Error() != want {
+				t.Fatalf("Parse error = %q, want %q", err, want)
+			}
+		} else {
+			if strict.Warnings != nil {
+				t.Fatalf("Parse returned warnings %v", strict.Warnings)
+			}
+			if !reflect.DeepEqual(strict, sheet) {
+				t.Fatalf("ParseTolerant = %+v, Parse = %+v", sheet, strict)
+			}
 		}
-		// Parse is syntactic, so a sheet coming out of it promises nothing
-		// about its tracks; the postcondition is Starts', and it is an
-		// either-or: for every file, either Starts refuses it or the offsets
-		// it returns are ones a splitter can act on. Checked against
-		// arbitrary input rather than the fixtures.
+		if len(sheet.Warnings) > maxWarnings {
+			t.Fatalf("%d warnings, past the cap of %d", len(sheet.Warnings), maxWarnings)
+		}
+		// Decoding never adds or removes a line end, so a warning's line is
+		// one the input has, and one line says at most one thing. A sheet with
+		// no LF ends its lines with CR.
+		ends := bytes.Count(b, []byte("\n"))
+		if ends == 0 {
+			ends = bytes.Count(b, []byte("\r"))
+		}
+		prev := 0
+		for _, w := range sheet.Warnings {
+			if w.Line <= prev || w.Line > ends+1 {
+				t.Fatalf("warning at line %d after line %d, in %d lines", w.Line, prev, ends+1)
+			}
+			// A finding never starts with an operand, so this sees a doubled
+			// prefix that the whole-message comparison above cannot.
+			if w.Msg == "" || strings.HasPrefix(w.Msg, "cue:") {
+				t.Fatalf("warning at line %d says %q", w.Line, w.Msg)
+			}
+			prev = w.Line
+		}
+		for _, file := range sheet.Files {
+			for _, tr := range file.Tracks {
+				if tr.Number < -1 || (tr.Number == -1 && len(sheet.Warnings) == 0) {
+					t.Fatalf("track numbered %d, with warnings %v", tr.Number, sheet.Warnings)
+				}
+			}
+		}
+
+		// Starts' postcondition is an either-or: it refuses a file or returns
+		// offsets a splitter can act on. Checked on the tolerant read, which
+		// reaches every shape Parse does and more.
 		//
 		// A start that converts to a negative sample offset is the shape the
 		// ParseTime bound exists to stop, and it stays asserted here on the

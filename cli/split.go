@@ -33,6 +33,9 @@ type piece struct {
 	from, to int64
 	title    string
 	number   int
+	// leadIn marks the audio before track 1, which no track names (see
+	// cuePieces).
+	leadIn bool
 }
 
 func newSplitCmd(flavor Flavor) *cobra.Command {
@@ -155,6 +158,9 @@ or filtered at any seam.`,
 			// no extension of its own still has a name its output is playable
 			// under.
 			ext := waxflow.OutputExt(outFormat, containerName)
+			if err := distinctNames(pieces, ext); err != nil {
+				return err
+			}
 
 			// Before the output directory is created: a dry run against a
 			// mistyped path prints and leaves nothing behind, which is what it
@@ -180,18 +186,11 @@ or filtered at any seam.`,
 				return waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating the output directory", err)
 			}
 
-			// TRACKTOTAL counts the disc's own tracks, and a lead-in piece is
-			// not one of them: it is the audio before track 1 and carries
-			// track 0 (see cuePieces).
-			ofN := len(pieces)
-			if len(pieces) > 0 && pieces[0].number == 0 {
-				ofN--
-			}
 			sp := splitter{
 				e: e, log: logger, src: src, hint: srcHint,
 				outFormat: outFormat, container: containerName,
 				flacLevel: optLevel, wavpackLevel: wavpackLevel, apeLevel: apeLevel,
-				force: force, ofN: ofN,
+				force: force, ofN: trackTotal(pieces),
 				mapper: label.NewLogged(logger), containerTags: info.Tags,
 			}
 			if !noTags {
@@ -286,18 +285,35 @@ func pieceName(p piece, ext string) string {
 	return fmt.Sprintf("%02d - %s.%s", p.number, sanitizeFilename(p.title), ext)
 }
 
+// distinctNames refuses pieces that would share a filename, which --force
+// would let the later one overwrite. Case is folded, as NTFS and APFS fold it.
+func distinctNames(pieces []piece, ext string) error {
+	seen := make(map[string]int, len(pieces))
+	for i, p := range pieces {
+		name := pieceName(p, ext)
+		if j, ok := seen[strings.ToLower(name)]; ok {
+			return waxerr.New(waxerr.CodeInvalidRequest,
+				fmt.Sprintf("pieces %d and %d would both be named %q", j+1, i+1, name))
+		}
+		seen[strings.ToLower(name)] = i
+	}
+	return nil
+}
+
 // maxTitleBytes bounds the title in a piece's filename. It is bytes because
 // the limit it stands off from is (255 on ext4 and APFS), with the number,
 // the separator and the extension riding alongside.
 const maxTitleBytes = 120
 
-// sanitizeFilename strips what a path cannot hold. It is deliberately
-// blunt: a title is arbitrary text from a sheet written by anyone, and a
-// separator or a NUL in it is a path traversal rather than a typo.
+// sanitizeFilename strips what a path cannot hold, bluntly: a separator or
+// a NUL in a title is a path traversal rather than a typo, and what Windows
+// and FAT refuse goes on every system, so a piece has one name.
 func sanitizeFilename(s string) string {
 	s = strings.Map(func(r rune) rune {
 		switch {
-		case r == '/' || r == '\\' || r == 0:
+		case r == '"':
+			return '\''
+		case r == 0 || strings.ContainsRune(`/\<>:|?*`, r):
 			return '-'
 		case r < 0x20:
 			return -1
@@ -373,7 +389,7 @@ func cuePieces(path string, rate int, total int64) ([]piece, error) {
 	out := make([]piece, 0, len(cuts)+1)
 	from := int64(0)
 	for i := 0; i <= len(cuts); i++ {
-		p := piece{from: from, to: waxflow.ToEnd}
+		p := piece{from: from, to: waxflow.ToEnd, leadIn: leadIn && i == 0}
 		if i < len(cuts) {
 			p.to = cuts[i]
 		}
@@ -393,6 +409,19 @@ func cuePieces(path string, rate int, total int64) ([]piece, error) {
 		from = p.to
 	}
 	return out, nil
+}
+
+// trackTotal is TRACKTOTAL: the disc's own tracks, which is every piece
+// but a lead-in. A lead-in carries track 0, and so can a sheet's own first
+// track, so the flag says which one it is and the number cannot.
+func trackTotal(pieces []piece) int {
+	n := 0
+	for _, p := range pieces {
+		if !p.leadIn {
+			n++
+		}
+	}
+	return n
 }
 
 // atPieces turns explicit sample offsets into pieces. The offsets are the
