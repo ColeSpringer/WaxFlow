@@ -413,8 +413,12 @@ type JobRequest struct {
 	// pieces. Split-only.
 	Cuts []int64 `json:"cuts,omitempty"`
 	// Cue names a CUE sheet whose track boundaries are this split's cut
-	// points, exclusive with Cuts. Split-only and create-only.
+	// points, exclusive with Cuts and Skip. Split-only and create-only.
 	Cue string `json:"cue,omitempty"`
+	// Skip lists the pieces Cuts opens that the split does not write, as
+	// 0-based piece indices, strictly ascending; the outputs are the rest,
+	// in order. A sheet's data track resolves to one. Split-only.
+	Skip []int `json:"skip,omitempty"`
 
 	// Output shaping, mirroring /stream; transcode, merge, and split
 	// take these, and Format is required by all three. Analyze takes
@@ -579,8 +583,8 @@ type Job struct {
 	Finished *time.Time `json:"finished,omitempty"`
 	Error    *JobError  `json:"error,omitempty"`
 	// Outputs are the job's product files, in order; the index is the
-	// one JobResult takes. A split has one per piece, the other types
-	// at most one.
+	// one JobResult takes. A split has one per piece it writes (Skip names
+	// the rest), the other types at most one.
 	Outputs  []JobOutput  `json:"outputs,omitempty"`
 	Analysis *JobAnalysis `json:"analysis,omitempty"`
 	Timeline *JobTimeline `json:"timeline,omitempty"`

@@ -1219,6 +1219,12 @@ func FuzzParseCue(f *testing.F) {
 	f.Add([]byte("TRACK cue: AUDIO\n"))
 	f.Add([]byte(strings.ReplaceAll(sheetNoFile, "\n", "\r")))
 	f.Add([]byte("FILE \"a\" \"\nTRACK 01 \"AUDIO\n\"INDEX 01 00:00:00\n"))
+	f.Add([]byte("FILE \"a.wav\" WAVE\nTRACK 01 MODE1/2352\nINDEX 01 00:00:00\n" +
+		"TRACK 02 AUDIO\nINDEX 01 00:00:00\nTRACK 03 AUDIO\nINDEX 01 00:05:00\n"))
+	f.Add([]byte("FILE \"a.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:33\n" +
+		"TRACK 02 MODE1/2048\nINDEX 00 00:05:00\nINDEX 01 00:07:00\nTRACK 03 CDI/2336\n"))
+	f.Add([]byte("FILE \"d.iso\" BINARY\nTRACK 01 MODE1/2352\nFILE \"a.wav\" WAVE\n" +
+		"TRACK 02 AUDIO\nINDEX 00 00:00:00\nINDEX 01 00:02:00\nTRACK 03 AUDIO\nINDEX 01 00:05:00\n"))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		strict, err := Parse(b)
 		sheet := ParseTolerant(b)
@@ -1292,16 +1298,35 @@ func FuzzParseCue(f *testing.F) {
 			file := &sheet.Files[fi]
 			starts, err := file.Starts(44100)
 			if err == nil {
-				first, prevStart := true, int64(0)
+				// An audio track's start strictly exceeds the one before it;
+				// a data track's may be shared, since it may occupy nothing.
 				for i, start := range starts {
-					if !first && start <= prevStart {
+					if i > 0 && (start < starts[i-1] || (start == starts[i-1] && file.Tracks[i-1].IsAudio())) {
 						t.Fatalf("track %d starts at sample %d, which does not advance past %d",
-							file.Tracks[i].Number, start, prevStart)
+							file.Tracks[i].Number, start, starts[i-1])
 					}
-					first, prevStart = false, start
 					if start < 0 {
 						t.Fatalf("track %d converts to sample offset %d", file.Tracks[i].Number, start)
 					}
+				}
+			}
+			// Pieces partition the file: each begins where the last ended,
+			// the first at 0, the last open, every audio piece non-empty,
+			// and a refusal or a list, never a panic, at any length.
+			for _, total := range []int64{-1, 0, 1, 44100, 1 << 40} {
+				pieces, err := file.Pieces(44100, total)
+				if err != nil {
+					continue
+				}
+				prev := int64(0)
+				for i, p := range pieces {
+					if p.From != prev || (p.To >= 0 && p.To <= p.From && p.Audio) || (p.To < 0) != (i == len(pieces)-1) {
+						t.Fatalf("pieces %+v do not partition the file at total %d", pieces, total)
+					}
+					if p.Audio && total >= 0 && p.From >= total {
+						t.Fatalf("audio piece %d starts at %d, past total %d", i, p.From, total)
+					}
+					prev = p.To
 				}
 			}
 			// Cuts is the list a caller divides the file by, so hold it to

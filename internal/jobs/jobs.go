@@ -180,6 +180,21 @@ type Request struct {
 	// at 44100 floors to one sample short of the boundary a CUE sheet's
 	// CD-frame arithmetic names exactly.
 	Cuts []int64 `json:"cuts,omitempty"`
+	// Skip lists the pieces Cuts opens that the split does not write, as
+	// 0-based piece indices, strictly ascending. Split-only.
+	//
+	// It is how a CUE sheet's data track reaches the job: the sheet's
+	// boundaries still partition the whole source, so the data track is a
+	// piece like any other, and this is the piece a cut list alone could not
+	// say to leave out. A client sending cuts by hand may name pieces of its
+	// own. The outputs are the pieces not named here, in order.
+	Skip []int `json:"skip,omitempty"`
+}
+
+// Skipped reports whether the split leaves piece i unwritten (Skip).
+func (req Request) Skipped(i int) bool {
+	_, found := slices.BinarySearch(req.Skip, i)
+	return found
 }
 
 // SplitSpans resolves Cuts into the [from, to) span of each piece, in order,
@@ -224,7 +239,25 @@ func (req Request) SplitSpans(total int64) ([][2]int64, error) {
 		spans = append(spans, [2]int64{prev, c})
 		prev = c
 	}
-	return append(spans, [2]int64{prev, waxflow.ToEnd}), nil
+	spans = append(spans, [2]int64{prev, waxflow.ToEnd})
+	// Skip names pieces, so it is held to the pieces the cuts open, and to
+	// ascending so that Skipped can search it and a piece cannot be named
+	// twice. A list naming every piece is a split that writes nothing.
+	for i, s := range req.Skip {
+		switch {
+		case s < 0 || s >= len(spans):
+			return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+				"jobs: skip names piece %d; the cuts open pieces 0 to %d", s, len(spans)-1))
+		case i > 0 && s <= req.Skip[i-1]:
+			return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+				"jobs: skip names piece %d after %d; pieces are named once, ascending", s, req.Skip[i-1]))
+		}
+	}
+	if len(req.Skip) == len(spans) {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest,
+			"jobs: skip names every piece, so the split would write nothing")
+	}
+	return spans, nil
 }
 
 // MemberSpan is one timeline member's sample window on its own source: To is
@@ -441,6 +474,7 @@ func (j *Job) clone() *Job {
 	c.Request.Srcs = slices.Clone(j.Request.Srcs)
 	c.Request.SourceIDs = slices.Clone(j.Request.SourceIDs)
 	c.Request.Cuts = slices.Clone(j.Request.Cuts)
+	c.Request.Skip = slices.Clone(j.Request.Skip)
 	c.Request.MemberTitles = slices.Clone(j.Request.MemberTitles)
 	c.Request.Spans = slices.Clone(j.Request.Spans)
 	// Output holds no reference field of its own, so cloning the slice is

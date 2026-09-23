@@ -13,7 +13,8 @@
 // Strict is the default here, unlike container, as a sheet's damage moves a cut.
 //
 // A sheet that parses may still not cut: File.Starts holds the splitting
-// invariants and Cuts calls it, so a reader is not held to them.
+// invariants and Pieces divides a file by it, so a reader is not held to
+// them. A data track is not a piece a split writes; Pieces says so.
 //
 // Positions are CD frames throughout, never time.Duration. Samples says
 // why.
@@ -21,6 +22,7 @@ package cue
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -102,6 +104,12 @@ type File struct {
 	// Type is the FILE type token (WAVE, MP3, AIFF, BINARY, MOTOROLA).
 	Type   string
 	Tracks []Track
+	// PrecededByData reports that the sheet's track before this file's
+	// first one is a data track in an earlier FILE, which is how EAC and
+	// XLD lay out a mixed-mode rip. Audio in this file ahead of its first
+	// INDEX 01 is then that track's pregap, and Pieces skips it rather
+	// than keeping it as a lead-in.
+	PrecededByData bool
 }
 
 // Track is one TRACK statement.
@@ -111,10 +119,9 @@ type Track struct {
 	// ParseTolerant writes -1, which no sheet can, for one it cannot read.
 	Number int
 	// Type is the TRACK datatype token (AUDIO, MODE1/2352, and the other
-	// data modes). It is the only thing in a sheet that says a track is not
-	// audio, which a mixed-mode disc's first track routinely is not, and
-	// cutting a data track as audio yields a piece of filesystem named after
-	// a song. Nothing refuses that yet.
+	// data modes), uppercased. It is the only thing in a sheet that says a
+	// track is not audio, which a mixed-mode disc's first track routinely
+	// is not; IsAudio reads it, and Pieces skips what it names.
 	Type      string
 	Title     string
 	Performer string
@@ -144,8 +151,9 @@ type Index struct {
 //
 // INDEX 00, when present, is the pregap start: it addresses audio that
 // belongs to the previous track's tail, so splitting there would move the
-// gap to the wrong side of the boundary. Every splitting tool cuts at
-// INDEX 01, and so does this.
+// gap to the wrong side of the boundary. Every splitting tool cuts an audio
+// track at INDEX 01, and so does this; the audio before a data track ends
+// at that track's INDEX 00 instead, which Starts says.
 func (t Track) Start() (int, bool) {
 	for _, ix := range t.Indexes {
 		if ix.Number == 1 {
@@ -186,51 +194,90 @@ func remValue(rems []Rem, key string) (string, bool) {
 	return "", false
 }
 
-// SingleFile returns the one file this sheet indexes.
+// SingleFile returns the one file this sheet's audio is indexed against.
 //
-// A sheet indexing several files describes a rip whose tracks are already
-// separate, so there is nothing to cut, and picking its first file would
-// be a plausible wrong answer rather than an error. Refusing by name is
-// the point.
+// A sheet indexing several files usually describes a rip whose tracks are
+// already separate, so there is nothing to cut, and picking its first file
+// would be a plausible wrong answer rather than an error. Refusing by name
+// is the point. The exception is a disc's data track given a FILE of its
+// own beside the one file holding every audio track, which is how EAC and
+// XLD write a mixed-mode or Enhanced CD rip: that is one audio file, and it
+// is the one returned.
 func (s *Sheet) SingleFile() (*File, error) {
 	switch len(s.Files) {
 	case 1:
 		return &s.Files[0], nil
 	case 0:
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, "cue: the sheet indexes no files")
-	default:
-		return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
-			"cue: the sheet indexes %d files, so its tracks are already separate; there is nothing to cut",
-			len(s.Files)))
 	}
+	var audio *File
+	n := 0
+	for i := range s.Files {
+		if s.Files[i].hasAudio() {
+			audio, n = &s.Files[i], n+1
+		}
+	}
+	switch n {
+	case 1:
+		return audio, nil
+	case 0:
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+			"cue: the sheet indexes %d files and none holds an audio track", len(s.Files)))
+	}
+	return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+		"cue: the sheet indexes %d files with audio tracks, so those tracks are already separate; there is nothing to cut", n))
 }
 
-// Starts returns every track's audio start in samples at rate, in order:
-// one offset per track, in the sheet's own order.
+// hasAudio reports whether any of the file's tracks is audio.
+func (f *File) hasAudio() bool {
+	return slices.ContainsFunc(f.Tracks, Track.IsAudio)
+}
+
+// isDataMode reports whether an uppercased TRACK datatype names a data
+// mode: MODE1/2352 and the other MODE and CDI forms.
+func isDataMode(typ string) bool {
+	return strings.HasPrefix(typ, "MODE") || strings.HasPrefix(typ, "CDI")
+}
+
+// IsAudio reports whether the track is audio, which is everything but the
+// MODE and CDI data modes. CDG is audio: the karaoke graphics ride the
+// subcode, which a decoded file no longer has. An absent or unfamiliar
+// datatype is taken as audio rather than dropping a song.
+func (t Track) IsAudio() bool { return !isDataMode(strings.ToUpper(t.Type)) }
+
+// raw reports whether a data track's sectors are raw: 2352 bytes, which is
+// 588 samples, the frame the sheet's times count in. A cooked sector
+// (MODE1/2048) is 512 samples, so each one lands every boundary after it
+// 76 samples early.
+func (t Track) raw() bool { return strings.HasSuffix(strings.ToUpper(t.Type), "/2352") }
+
+// typeLabel quotes the datatype for a message, at the operand bound.
+func (t Track) typeLabel() string { return fmt.Sprintf("%q", clip(t.Type, operandBytes)) }
+
+// Starts returns every track's start in samples at rate, in the sheet's own
+// order: an audio track's INDEX 01, and for a data track the sample the
+// audio before it ends at, which is its INDEX 00 when it has one and its
+// INDEX 01 otherwise. A first data track starts at 0 whatever its indexes
+// say: the audio before its INDEX 01 is its own pregap, in its own mode,
+// not a lead-in.
 //
-// This is the arithmetic, not the split. Cuts is what a caller dividing the
-// file wants, and is built on this. Reach for Starts directly only to pair
-// a track with its own start (naming a file by its title), and never to
-// re-derive cut points: that derivation is Cuts, once, because the two
-// callers each had a copy of it and the copies did not agree.
+// This is the walk, not the split: Pieces divides the file by it. Reach for
+// Starts directly only to pair a track with its own start, never to
+// re-derive cut points, because the two splitting callers each had a copy
+// of that derivation once and the copies did not agree.
 //
 // It is also where the invariants a splitter depends on are checked, rather
-// than in Parse, so that reading a sheet and dividing a file by one are
-// held to different standards. Both invariants prevent a silent failure: a
-// track with no INDEX 01 has no start, and starts that do not ascend
-// produce an empty or negative-length piece, which is arithmetic a split
-// job carries out rather than notices. Ascend means strictly, since two
-// tracks sharing an INDEX 01 name a zero-sample piece that jobs.SplitSpans
-// refuses in its own right; accepting it here would let one sheet be
-// answered two ways, cleanly for the CLI (which would write an empty file)
-// and not at the daemon.
-//
-// A sheet a splitter cannot use is still a sheet, and Parse returns it: a
-// caller reading titles or a REM key has no business being refused over a
-// track that would not cut, and WaxBin filters on Track.Start instead.
-//
-// A track numbered -1 is refused too: only ParseTolerant makes one, and a
-// split names and tags its pieces by number.
+// than in Parse, so that reading a sheet and dividing a file by one are held
+// to different standards. Each prevents a silent failure: an audio track with
+// no INDEX 01 has no start, a data track after audio with no INDEX 00 or 01
+// leaves the audio before it with no end, and starts that do not ascend
+// produce an empty or negative-length piece. An audio track's start must
+// strictly exceed the one before it, while a data track may share its start
+// with the track after it, since EAC's image of a mixed-mode disc holds the
+// audio session alone and lists the data track at frame 0 with the audio;
+// no track starts inside the one before it, and a data track's INDEX 01
+// still says where it runs to. A track numbered -1 is refused too: only
+// ParseTolerant makes one, and a split names its pieces by number.
 //
 // The rate is the audio's, not the sheet's: a sheet has no rate. Its times
 // are CD frames, and it is the file that says how many samples a frame is.
@@ -240,78 +287,213 @@ func (f *File) Starts(rate int) ([]int64, error) {
 			fmt.Sprintf("cue: %s names no tracks", f.label()))
 	}
 	out := make([]int64, len(f.Tracks))
-	// The predecessor is carried rather than looked up by index, and a
-	// first track is the nil case rather than a sentinel frame: there is no
-	// position that reads as "before every legal start" without also being
-	// a position, and a track legitimately at frame 0 has to keep going.
+	// floor is the frame the next start may not precede: the previous
+	// start, or a data track's INDEX 01 when that lies past it. A first
+	// track has no floor, and is not a sentinel frame: a track at frame 0
+	// has to keep going.
 	var prev *Track
-	var prevStart int
+	var floor int
 	for i := range f.Tracks {
 		t := &f.Tracks[i]
 		if t.Number < 0 {
 			return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
 				"cue: %s track %d has no readable number, so a split cannot number its piece", f.label(), t.Number))
 		}
-		start, ok := t.Start()
-		if !ok {
-			return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
-				"cue: %s track %d has no INDEX 01, so it has no start", f.label(), t.Number))
+		start, err := f.boundary(i)
+		if err != nil {
+			return nil, err
 		}
-		if prev != nil && start <= prevStart {
+		if prev != nil && (start < floor || (start == floor && prev.IsAudio())) {
 			return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
 				"cue: %s track %d starts at frame %d, at or before track %d at %d; a file's tracks have to ascend",
-				f.label(), t.Number, start, prev.Number, prevStart))
+				f.label(), t.Number, start, prev.Number, floor))
 		}
-		prev, prevStart = t, start
+		prev, floor = t, start
+		if s, ok := t.Start(); ok && !t.IsAudio() && s > floor {
+			floor = s
+		}
 		out[i] = Samples(start, rate)
 	}
 	return out, nil
 }
 
-// Cuts returns the interior cut points a split of this file uses, in
-// samples at rate.
+// boundary is the frame the piece of track i begins at. Starts says which
+// index that is for each kind of track.
+func (f *File) boundary(i int) (int, error) {
+	t := &f.Tracks[i]
+	if t.IsAudio() {
+		start, ok := t.Start()
+		if !ok {
+			return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+				"cue: %s track %d has no INDEX 01, so it has no start", f.label(), t.Number))
+		}
+		return start, nil
+	}
+	if i == 0 {
+		return 0, nil
+	}
+	for _, ix := range t.Indexes {
+		if ix.Number <= 1 {
+			return ix.Frame, nil
+		}
+	}
+	return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+		"cue: %s track %d is %s, a data track with no INDEX 00 or 01, so nothing says where the audio before it ends",
+		f.label(), t.Number, t.typeLabel()))
+}
+
+// Piece is one division of a file: the samples [From, To) at the rate
+// Pieces was asked for, To exclusive and negative for the file's end.
+type Piece struct {
+	From, To int64
+	// Track indexes File.Tracks, or is -1 for audio before the first track:
+	// the lead-in, which no track names, or the pregap after a data track
+	// in an earlier FILE (File.PrecededByData).
+	Track int
+	// Audio is true for a piece a split writes. It is false for a data
+	// track's span, and for the pregap after one, which are not audio and
+	// are skipped: cut and written they would be noise named after a song.
+	Audio bool
+}
+
+// Pieces divides the file into the pieces a split writes and the ones it
+// skips, in order, in samples at rate. total is the file's length in
+// samples, or negative when unknown.
 //
 // This is the funnel. The daemon and the CLI both divide a file by this
 // list, so a sheet POSTed to one and handed to the other cuts at the same
 // samples; they derived it separately before, and a sheet whose track 1 did
 // not start at frame 0 came out two different rips.
 //
-// The pieces a caller forms are [0,c0), [c0,c1), ..., [cn,end): the whole
-// file, nothing discarded. So the returned length is the piece count minus
-// one, which is not always the track count, and a caller sizing its output
-// counts pieces rather than tracks.
+// The pieces partition the whole file, and a data track's (Track.IsAudio
+// false) is skipped rather than written. Its span runs from its start
+// (Starts says where) to the next track's, whole, since the mode change
+// puts data-mode sectors inside the following audio track's pregap. It is
+// no piece at all when it occupies nothing: the next track shares its start
+// (EAC's image holds the audio session alone and lists the data track at
+// frame 0 beside it), or total puts it past the file (an Enhanced CD's sits
+// in a second session); the piece before it then runs on. An audio track at
+// or past total is a refusal instead, since that sheet describes some other
+// rip. A cooked data track (MODE1/2048) ahead of audio is refused too: its
+// sectors are 512 samples where a raw one's are the 588 of a frame, so the
+// sheet's frames past it land 76 samples early per sector.
 //
-// A first start of 0 is dropped, since a cut at 0 opens an empty piece and
-// track 1 already owns the file's first piece. That is the overwhelmingly
-// common sheet. A first start past 0 is kept, and this is the part worth
-// being deliberate about: the audio before track 1's INDEX 01 is real. It
-// is a pregap, or it is hidden track one audio, which on some discs is an
-// entire song. Keeping the cut makes it a piece of its own instead of
-// folding it into track 1 or dropping it on the floor, and both callers
-// then agree by construction rather than by comment.
+// The lead-in, audio before an audio track 1 that starts past frame 0, is
+// a piece of its own with Track -1: a pregap, or hidden track one audio,
+// which on some discs is a whole song. Keeping it a piece rather than
+// folding it into track 1 or dropping it is what lets both callers agree
+// by construction, and a Piece carries its track because pieces and tracks
+// then stop lining up. When the disc's track before this file's first one
+// is a data track in a FILE of its own (PrecededByData), that audio is the
+// data track's pregap instead, and is skipped as it would be were the data
+// track here.
 //
-// The cost of keeping it is that pieces and tracks stop lining up: with a
-// nonzero first start there is one more piece than there are tracks, and
-// the extra is the lead-in, which has no track and so no title. A caller
-// pairing pieces with titles has to account for that offset; the CLI is
-// that caller, and pairs by position.
-func (f *File) Cuts(rate int) ([]int64, error) {
+// A sheet naming one track is not describing a division of the file,
+// whatever its INDEX 01 says, and a file whose pieces reduce to one is
+// refused for the same reason: there is nothing to cut. This lives here so
+// that both callers refuse it with one message at the same point.
+func (f *File) Pieces(rate int, total int64) ([]Piece, error) {
+	if !f.hasAudio() {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+			"cue: %s names no audio track", f.label()))
+	}
 	starts, err := f.Starts(rate)
 	if err != nil {
 		return nil, err
 	}
-	// A sheet naming one track is not describing a division of the file,
-	// whatever its INDEX 01 says: there is one track, and the file already
-	// is it. This lives here rather than in a caller so that both refuse it,
-	// with one message, at the same point.
-	if len(starts) < 2 {
+	if len(f.Tracks) == 1 {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
 			"cue: %s names one track, so there is nothing to cut", f.label()))
 	}
-	if starts[0] == 0 {
-		return starts[1:], nil
+	all := make([]Piece, 0, len(starts)+1)
+	if starts[0] > 0 {
+		all = append(all, Piece{From: 0, To: starts[0], Track: -1, Audio: !f.PrecededByData})
 	}
-	return starts, nil
+	for i := range f.Tracks {
+		p := Piece{From: starts[i], To: -1, Track: i, Audio: f.Tracks[i].IsAudio()}
+		if i+1 < len(starts) {
+			p.To = starts[i+1]
+		}
+		all = append(all, p)
+	}
+	lastAudio := 0
+	for i, p := range all {
+		if p.Audio {
+			lastAudio = i
+		}
+	}
+	out := make([]Piece, 0, len(all))
+	for i, p := range all {
+		switch {
+		case p.Audio && total >= 0 && p.From >= total:
+			what := "a lead-in"
+			if p.Track >= 0 {
+				what = fmt.Sprintf("track %d", f.Tracks[p.Track].Number)
+			}
+			return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+				"cue: %s names %s starting at sample %d, past the file's %d: this sheet does not describe this file",
+				f.label(), what, p.From, total))
+		case !p.Audio && (p.To == p.From || (total >= 0 && p.From >= total)):
+			// The file holds none of it; the piece before it runs on.
+			if n := len(out); n > 0 {
+				out[n-1].To = p.To
+			}
+			continue
+		case !p.Audio && p.Track >= 0 && i < lastAudio && !f.Tracks[p.Track].raw():
+			t := f.Tracks[p.Track]
+			return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+				"cue: %s track %d is %s, a data track occupying the file ahead of audio; only 2352-byte sectors keep the sheet's frames on samples past it",
+				f.label(), t.Number, t.typeLabel()))
+		}
+		out = append(out, p)
+	}
+	if len(out) < 2 {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+			"cue: %s divides into one piece, so there is nothing to cut", f.label()))
+	}
+	return out, nil
+}
+
+// Cutpoints turns pieces into the list a split job carries: the interior cut
+// points, and the indices of the pieces it does not write.
+func Cutpoints(pieces []Piece) (cuts []int64, skip []int) {
+	for i, p := range pieces {
+		if i > 0 {
+			cuts = append(cuts, p.From)
+		}
+		if !p.Audio {
+			skip = append(skip, i)
+		}
+	}
+	return cuts, skip
+}
+
+// Cuts returns the interior cut points a split of this file uses, in
+// samples at rate, for a file whose every piece is written: [0,c0), [c0,c1),
+// ..., [cn,end) partition the whole file, nothing discarded, one piece per
+// track after a lead-in when the first start is past 0. It is Pieces for a
+// caller that can only cut and pairs pieces with tracks by position, which
+// is why a sheet with any data track is refused here by name: a cut list
+// cannot say "and skip this one", and a data track occupying nothing would
+// leave a track with no piece. Pieces is for those sheets.
+func (f *File) Cuts(rate int) ([]int64, error) {
+	pieces, err := f.Pieces(rate, -1)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range f.Tracks {
+		if !t.IsAudio() {
+			return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+				"cue: %s track %d is %s, a data track, which a cut list cannot skip",
+				f.label(), t.Number, t.typeLabel()))
+		}
+	}
+	if f.PrecededByData && !pieces[0].Audio {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+			"cue: %s follows a data track, whose pregap opens it; a cut list cannot skip that", f.label()))
+	}
+	cuts, _ := Cutpoints(pieces)
+	return cuts, nil
 }
 
 // label names the file in a message. A file with no name is the implied
@@ -523,8 +705,9 @@ func parse(b []byte, strict bool) *Sheet {
 			if msg != "" {
 				warn(lineNo, msg)
 			}
+			preceded := lastIsData(file, track)
 			commitFile()
-			file = &File{Name: name, Type: typ}
+			file = &File{Name: name, Type: typ, PrecededByData: preceded}
 			culprit = skippedLine{}
 
 		case "TRACK":
@@ -720,7 +903,19 @@ func trackish(kw, rest string) bool {
 // isDatatype reports whether tok is a TRACK datatype rather than a number.
 func isDatatype(tok string) bool {
 	t := strings.ToUpper(tok)
-	return t == "AUDIO" || t == "CDG" || strings.HasPrefix(t, "MODE") || strings.HasPrefix(t, "CDI")
+	return t == "AUDIO" || t == "CDG" || isDataMode(t)
+}
+
+// lastIsData reports whether the track a FILE line follows is a data track:
+// the open one, or else the last of the open file's.
+func lastIsData(file *File, track *Track) bool {
+	if track != nil {
+		return !track.IsAudio()
+	}
+	if file != nil && len(file.Tracks) > 0 {
+		return !file.Tracks[len(file.Tracks)-1].IsAudio()
+	}
+	return false
 }
 
 // stringTarget returns the field a one-operand string command writes,

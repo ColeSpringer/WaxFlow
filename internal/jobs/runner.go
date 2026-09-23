@@ -1380,7 +1380,8 @@ func (r *Runner) splitLength(src *source.File) (samples int64, measured bool, er
 	return m.Samples, true, nil
 }
 
-// runSplit cuts the source at the request's cut points, one output per piece.
+// runSplit cuts the source at the request's cut points, one output per piece
+// the request does not skip.
 //
 // Each piece is its own Slice of its own freshly opened Media, rather than one
 // Media seeked between pieces. That costs a header parse per piece and buys
@@ -1411,27 +1412,47 @@ func (r *Runner) runSplit(ctx context.Context, j *Job) error {
 	// piece's own track can be planned against.
 	ext := outputExt(opts)
 	// One progress bar over the whole split rather than one per piece, on the
-	// source's own timeline: the spans partition the source, so a piece's
-	// start plus how far into that piece the encoder has read is the split's
-	// position. Pieces are not the same length, so counting pieces would jump
-	// the bar in N uneven steps, and each piece's own samples would reset it N
-	// times. A source that declares no length leaves the total 0, which
-	// progressFunc renders as an unknown percent rather than a wrong one.
+	// timeline of the written pieces laid end to end: a piece's start there
+	// plus how far into it the encoder has read is the split's position.
+	// Pieces are not the same length, so counting pieces would jump the bar
+	// in N uneven steps, and each piece's own samples would reset it N times.
+	// A skipped piece (a CUE sheet's data track) is left out of the timeline
+	// rather than stepped over: counted, a data track the size of a game
+	// would open the bar at 80 percent and leave it to crawl. A source that
+	// declares no length leaves the total 0, which progressFunc renders as an
+	// unknown percent rather than a wrong one.
 	report := r.progressFunc(ctx, j.ID, "transcode")
-	total := max(srcSamples, 0)
-	for i, sp := range spans {
-		// The piece's end is its own except for the last, which is ToEnd:
-		// whatever the source turns out to hold, which is what total names.
-		end := sp[1]
-		if end == waxflow.ToEnd {
-			end = srcSamples
+	// The piece's end is its own except for the last, which is ToEnd:
+	// whatever the source turns out to hold, which is what srcSamples names.
+	pieceEnd := func(sp [2]int64) int64 {
+		if sp[1] == waxflow.ToEnd {
+			return srcSamples
 		}
-		base, span := sp[0], end-sp[0]
+		return sp[1]
+	}
+	var total int64
+	for i, sp := range spans {
+		if req.Skipped(i) {
+			continue
+		}
+		if end := pieceEnd(sp); end < 0 {
+			total = 0
+			break
+		} else {
+			total += end - sp[0]
+		}
+	}
+	var base int64 // written samples ahead of this piece
+	for i, sp := range spans {
+		if req.Skipped(i) {
+			continue
+		}
+		pieceBase, span := base, pieceEnd(sp)-sp[0]
 		// The hook still fires per chunk, and that is not a waste even when
 		// the bar barely moves: progressFunc is also where a job yields to a
 		// saturated live pool, and that has to be asked per chunk.
 		opts.Progress = func(done, pieceTotal int64) {
-			report(splitProgressAt(base, span, done, pieceTotal), total)
+			report(splitProgressAt(pieceBase, span, done, pieceTotal), total)
 		}
 		med, err := r.cfg.Engine.OpenStream(src, src.Ext)
 		if err != nil {
@@ -1459,14 +1480,18 @@ func (r *Runner) runSplit(ctx context.Context, j *Job) error {
 			sl.Close()
 			return err
 		}
-		out, err := r.writeMedia(ctx, j, sl, fmt.Sprintf("out.%d.%s", i, ext), opts, plan.MediaType)
+		// Named by output index, not piece index: it is the index /result
+		// takes and the name a warning about the piece carries, and with a
+		// piece skipped the two indices part company.
+		out, err := r.writeMedia(ctx, j, sl, fmt.Sprintf("out.%d.%s", len(outs), ext), opts, plan.MediaType)
 		sl.Close()
 		if err != nil {
 			return err
 		}
 		outs = append(outs, *out)
-		if end >= 0 {
-			report(end, total)
+		if span > 0 {
+			base += span
+			report(base, total)
 		}
 	}
 	r.store.update(j.ID, false, func(job *Job) { job.Outputs = outs })

@@ -133,18 +133,59 @@ func cueRip(t *testing.T, dir string, frameStarts []int) (wav, sheet string, sam
 		t.Fatal(err)
 	}
 
+	sheet = writeSheet(t, filepath.Join(dir, "album.cue"), false, frameStarts)
+	return wav, sheet, total
+}
+
+// writeSheet writes a sheet indexing album.wav at the given CD-frame starts,
+// with a data track at frame 0 ahead of them when dataFirst is set and the
+// audio then numbered from 2, as a mixed-mode disc numbers it.
+func writeSheet(t *testing.T, path string, dataFirst bool, frameStarts []int) string {
+	t.Helper()
 	var b strings.Builder
 	b.WriteString("PERFORMER \"The Band\"\nTITLE \"The Album\"\nFILE \"album.wav\" WAVE\n")
+	first := 1
+	if dataFirst {
+		b.WriteString("  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n")
+		first = 2
+	}
 	for i, f := range frameStarts {
 		mm, ss, ff := f/75/60, (f/75)%60, f%75
 		fmt.Fprintf(&b, "  TRACK %02d AUDIO\n    TITLE \"Track %d\"\n    INDEX 01 %02d:%02d:%02d\n",
-			i+1, i+1, mm, ss, ff)
+			i+first, i+first, mm, ss, ff)
 	}
-	sheet = filepath.Join(dir, "album.cue")
-	if err := os.WriteFile(sheet, []byte(b.String()), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return wav, sheet, total
+	return path
+}
+
+// outputNames lists a split's output directory in name order.
+func outputNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// pieceTags reads a written FLAC piece's tags.
+func pieceTags(t *testing.T, path string) map[string][]string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := label.New().Read(context.Background(), container.BytesSource(raw), "flac", meta.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Tags
 }
 
 // TestSplitCueRejoinsGaplessly is M24a's end-to-end proof, and the reason
@@ -313,6 +354,7 @@ func TestCuePieces(t *testing.T) {
 		name   string
 		starts []int
 		want   []piece
+		tracks int
 	}{{
 		name:   "track 1 at frame 0",
 		starts: []int{0, 100, 250},
@@ -321,6 +363,7 @@ func TestCuePieces(t *testing.T) {
 			{from: 100 * 588, to: 250 * 588, title: "Track 2", number: 2},
 			{from: 250 * 588, to: waxflow.ToEnd, title: "Track 3", number: 3},
 		},
+		tracks: 3,
 	}, {
 		// The shape the cue package's own sheetBasic fixture has.
 		name:   "track 1 past frame 0",
@@ -328,14 +371,16 @@ func TestCuePieces(t *testing.T) {
 		want: []piece{
 			// The lead-in: the disc's track 0, which no sheet line names, so
 			// it takes no title and invents none.
-			{from: 0, to: 33 * 588, title: "", number: 0, leadIn: true},
+			{from: 0, to: 33 * 588, title: "", number: 0},
 			{from: 33 * 588, to: 412 * 588, title: "Track 1", number: 1},
 			{from: 412 * 588, to: waxflow.ToEnd, title: "Track 2", number: 2},
 		},
+		// TRACKTOTAL counts the disc's tracks, which a lead-in is not.
+		tracks: 2,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, sheet, _ := cueRip(t, t.TempDir(), tc.starts)
-			got, err := cuePieces(sheet, 44100, total)
+			got, tracks, err := cuePieces(sheet, 44100, total)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -347,7 +392,91 @@ func TestCuePieces(t *testing.T) {
 					t.Errorf("piece %d = %+v, want %+v", i, got[i], tc.want[i])
 				}
 			}
+			if tracks != tc.tracks {
+				t.Errorf("tracks = %d, want %d", tracks, tc.tracks)
+			}
 		})
+	}
+}
+
+// mixedModeSheet is a single-file image of a mixed-mode disc: the data
+// track first at frame 0, then the audio tracks at the given frame starts,
+// numbered from 2 as the disc numbers them.
+func mixedModeSheet(t *testing.T, dir string, audioStarts []int) string {
+	t.Helper()
+	return writeSheet(t, filepath.Join(dir, "mixed.cue"), true, audioStarts)
+}
+
+// TestCuePiecesSkipsADataTrack: a mixed-mode disc's data track is a piece
+// the split names and does not write, and the disc's numbering survives:
+// the audio is tracks 2 and 3 of a 3-track disc, not 1 and 2 of 2.
+func TestCuePiecesSkipsADataTrack(t *testing.T) {
+	dir := t.TempDir()
+	sheet := mixedModeSheet(t, dir, []int{100, 250})
+	got, tracks, err := cuePieces(sheet, 44100, 400_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []piece{
+		{from: 0, to: 100 * 588, number: 1, skip: `TRACK 01 "MODE1/2352", a data track, not audio`},
+		{from: 100 * 588, to: 250 * 588, title: "Track 2", number: 2},
+		{from: 250 * 588, to: waxflow.ToEnd, title: "Track 3", number: 3},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("pieces = %+v, want %+v", got, want)
+	}
+	if tracks != 3 {
+		t.Errorf("tracks = %d, want 3: the data track is one of the disc's", tracks)
+	}
+
+	// A data track the sheet gives a FILE of its own is not in this file
+	// at all, and still counts as one of the disc's tracks; the audio
+	// before this file's first INDEX 01 is its pregap, not a lead-in.
+	beside := filepath.Join(dir, "beside.cue")
+	if err := os.WriteFile(beside, []byte(
+		"FILE \"album.iso\" BINARY\n  TRACK 01 MODE1/2352\n"+
+			"FILE \"album.wav\" WAVE\n  TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 00 00:00:00\n    INDEX 01 00:00:30\n"+
+			"  TRACK 03 AUDIO\n    TITLE \"Three\"\n    INDEX 01 00:01:00\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, tracks, err = cuePieces(beside, 44100, 400_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = []piece{
+		{from: 0, to: 30 * 588, skip: "the pregap after the disc's data track, not audio"},
+		{from: 30 * 588, to: 75 * 588, title: "Two", number: 2},
+		{from: 75 * 588, to: waxflow.ToEnd, title: "Three", number: 3},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("pieces = %+v, want %+v", got, want)
+	}
+	if tracks != 3 {
+		t.Errorf("tracks = %d, want 3: the data track is one of the disc's", tracks)
+	}
+
+	// An Enhanced CD's data track sits in a second session after the
+	// audio, which a CD player never counts: the audio is 1 and 2 of 2.
+	enhanced := filepath.Join(dir, "enhanced.cue")
+	if err := os.WriteFile(enhanced, []byte(
+		"FILE \"album.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n"+
+			"  TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:01:00\n"+
+			"  TRACK 03 MODE1/2352\n    INDEX 01 05:00:00\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, tracks, err = cuePieces(enhanced, 44100, 400_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = []piece{
+		{from: 0, to: 75 * 588, title: "One", number: 1},
+		{from: 75 * 588, to: waxflow.ToEnd, title: "Two", number: 2},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("pieces = %+v, want %+v", got, want)
+	}
+	if tracks != 2 {
+		t.Errorf("tracks = %d, want 2: a data track after the last audio track is not one of the disc's", tracks)
 	}
 }
 
@@ -360,7 +489,7 @@ func TestCuePiecesTrackZeroIsATrack(t *testing.T) {
 		"  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:01:00\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got, err := cuePieces(sheet, 44100, 400_000)
+	got, _, err := cuePieces(sheet, 44100, 400_000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,25 +502,6 @@ func TestCuePiecesTrackZeroIsATrack(t *testing.T) {
 	}
 }
 
-// TestTrackTotal: TRACKTOTAL counts the disc's tracks, which is every piece
-// but a lead-in, and a TRACK 00 is one of them.
-func TestTrackTotal(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		pieces []piece
-		want   int
-	}{
-		{"lead-in", []piece{{leadIn: true}, {number: 1}, {number: 2}}, 2},
-		{"track 00", []piece{{number: 0}, {number: 1}}, 2},
-		{"tracks", []piece{{number: 1}, {number: 2}, {number: 3}}, 3},
-		{"none", nil, 0},
-	} {
-		if got := trackTotal(tc.pieces); got != tc.want {
-			t.Errorf("%s: trackTotal = %d, want %d", tc.name, got, tc.want)
-		}
-	}
-}
-
 // TestCuePiecesReadsWhatTheSheetMeans: a hand-written sheet names no FILE
 // and skips the quotes, and splits by the whole title all the same.
 func TestCuePiecesReadsWhatTheSheetMeans(t *testing.T) {
@@ -401,7 +511,7 @@ func TestCuePiecesReadsWhatTheSheetMeans(t *testing.T) {
 			"TRACK 02 AUDIO\n  TITLE \"Track Two\"\n  INDEX 01 00:01:00\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got, err := cuePieces(sheet, 44100, 400_000)
+	got, _, err := cuePieces(sheet, 44100, 400_000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,15 +547,7 @@ func TestSplitCueTrackTotal(t *testing.T) {
 			t.Fatalf("split exit = %d: %s", code, errOut)
 		}
 		for _, name := range tc.names {
-			raw, err := os.ReadFile(filepath.Join(out, name))
-			if err != nil {
-				t.Fatal(err)
-			}
-			info, err := label.New().Read(context.Background(), container.BytesSource(raw), "flac", meta.ReadOptions{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := info.Tags["TRACKTOTAL"]; len(got) != 1 || got[0] != "2" {
+			if got := pieceTags(t, filepath.Join(out, name))["TRACKTOTAL"]; len(got) != 1 || got[0] != "2" {
 				t.Errorf("%s: %s carries TRACKTOTAL %v, want [2]", filepath.Base(tc.sheet), name, got)
 			}
 		}
@@ -501,14 +603,7 @@ func TestSplitCueLeadInBecomesAPiece(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("split exit = %d: %s", code, errOut)
 	}
-	entries, err := os.ReadDir(out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var names []string
-	for _, e := range entries {
-		names = append(names, e.Name())
-	}
+	names := outputNames(t, out)
 	// Track 0 sorts ahead of track 1, which is where it plays.
 	want := []string{"00.flac", "01 - Track 1.flac", "02 - Track 2.flac"}
 	if len(names) != len(want) {
@@ -1241,5 +1336,99 @@ func TestMeasureKeepsTheWalkCode(t *testing.T) {
 				t.Errorf("error = %v, want it to say what was being done", err)
 			}
 		})
+	}
+}
+
+// TestSplitCueSkipsADataTrack is the end of the mixed-mode story: the rip's
+// audio reaches the disk under the disc's own numbering, the data track's
+// bytes reach nothing, and the split says which track it left out.
+func TestSplitCueSkipsADataTrack(t *testing.T) {
+	dir := t.TempDir()
+	starts := []int{100, 250}
+	wav, _, total := cueRip(t, dir, starts)
+	sheet := mixedModeSheet(t, dir, starts)
+	out := filepath.Join(dir, "tracks")
+	code, _, errOut := run(t, "split", wav, out, "--cue", sheet)
+	if code != 0 {
+		t.Fatalf("split exit = %d: %s", code, errOut)
+	}
+	if !strings.Contains(errOut, "TRACK 01") || !strings.Contains(errOut, "data track") {
+		t.Errorf("stderr = %q, want it to say the data track was skipped", errOut)
+	}
+	names := outputNames(t, out)
+	if want := []string{"02 - Track 2.flac", "03 - Track 3.flac"}; !slices.Equal(names, want) {
+		t.Fatalf("wrote %v, want %v", names, want)
+	}
+	e := waxflow.New()
+	var sum int64
+	for i, name := range names {
+		raw, err := os.ReadFile(filepath.Join(out, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := e.Probe(container.BytesSource(raw), "flac", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum += info.Default().Samples
+		// The disc's numbering, and its count: the data track is track 1 of
+		// 3 on the disc, so the audio is 2 and 3 of 3.
+		tags := pieceTags(t, filepath.Join(out, name))
+		if got := tags["TRACKNUMBER"]; len(got) != 1 || got[0] != strconv.Itoa(i+2) {
+			t.Errorf("%s carries TRACKNUMBER %v, want [%d]", name, got, i+2)
+		}
+		if got := tags["TRACKTOTAL"]; len(got) != 1 || got[0] != "3" {
+			t.Errorf("%s carries TRACKTOTAL %v, want [3]", name, got)
+		}
+	}
+	// The pieces hold the audio and nothing else: the data track's span is
+	// exactly what is missing from the rip.
+	if want := total - int64(starts[0])*588; sum != want {
+		t.Errorf("the pieces hold %d samples, want %d: the rip less its data track", sum, want)
+	}
+}
+
+// TestSplitCueDryRunListsTheSkippedDataTrack: the dry run says what the split
+// would leave out, not only what it would write.
+func TestSplitCueDryRunListsTheSkippedDataTrack(t *testing.T) {
+	dir := t.TempDir()
+	starts := []int{100, 250}
+	wav, _, _ := cueRip(t, dir, starts)
+	sheet := mixedModeSheet(t, dir, starts)
+	out := filepath.Join(dir, "tracks")
+	code, stdout, errOut := run(t, "split", wav, out, "--cue", sheet, "--dry-run")
+	if code != 0 {
+		t.Fatalf("exit = %d: %s", code, errOut)
+	}
+	if !strings.Contains(stdout, "MODE1/2352") || !strings.Contains(stdout, "[0, 58800)") {
+		t.Errorf("dry run does not list the data track's span as skipped:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "02 - Track 2.flac") || !strings.Contains(stdout, "[58800, 147000)") {
+		t.Errorf("dry run does not list the audio pieces:\n%s", stdout)
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf("--dry-run created %s", out)
+	}
+}
+
+// TestSplitCueDataFileBesideTheRip: a sheet giving the data track a FILE of
+// its own beside the one WAVE with every audio track (EAC's and XLD's
+// mixed-mode layout) cuts that WAVE; it is not a rip already split.
+func TestSplitCueDataFileBesideTheRip(t *testing.T) {
+	dir := t.TempDir()
+	wav, _, _ := cueRip(t, dir, []int{0, 75})
+	sheet := filepath.Join(dir, "beside.cue")
+	if err := os.WriteFile(sheet, []byte(
+		"FILE \"album.iso\" BINARY\n  TRACK 01 MODE1/2352\n"+
+			"FILE \"album.wav\" WAVE\n  TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:00:00\n"+
+			"  TRACK 03 AUDIO\n    TITLE \"Three\"\n    INDEX 01 00:01:00\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "tracks")
+	if code, _, errOut := run(t, "split", wav, out, "--cue", sheet); code != 0 {
+		t.Fatalf("split exit = %d: %s", code, errOut)
+	}
+	if names, want := outputNames(t, out), []string{"02 - Two.flac", "03 - Three.flac"}; !slices.Equal(names, want) {
+		t.Errorf("wrote %v, want %v", names, want)
 	}
 }

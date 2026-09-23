@@ -104,8 +104,9 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
   full ranges on completed entries, HLS (CMAF/fMP4, stateless signed
   URLs, bitrate ladders, byte-identical segment regeneration), async
   jobs with restart safety (transcode, analyze, and the gapless
-  merge/split pair: a lossless split rejoins bit for bit, and a split
-  takes a CUE sheet or sample cut points), uploads,
+  merge/split pair: a lossless split rejoins bit for bit, less any data
+  track it skipped, and a split takes a CUE sheet or sample cut points),
+  uploads,
   loudness analysis with ReplayGain
   tagging, metadata passthrough (tags, chapters, cover art, lyrics),
   admission control, Prometheus metrics, named client delivery profiles
@@ -242,7 +243,9 @@ write keeps a reload from reading a half-written file and `400`ing.
   (44100/75 = 588), so a boundary converts with no rounding, where seconds
   would land a sample off and click at every join. The default FLAC output
   at the source's own rate makes the cut bit-exact, so the pieces rejoin
-  into the original. `--dry-run` prints the pieces and their ranges
+  into the original, less a mixed-mode disc's data track, which is skipped
+  rather than written as audio, under the disc's own numbering. `--dry-run`
+  prints the pieces and their ranges
 - `waxflow sign --src lib/a.flac`: mint a signed playback URL offline
   (ADR-0003; uses the same secret and roots the daemon holds)
 - `waxflow cache stats|gc`: inspect or evict a running daemon's cache

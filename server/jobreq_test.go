@@ -75,7 +75,7 @@ func TestJobRequestCoverage(t *testing.T) {
 	// silently dropped and occasionally, as here, a value resolved into a
 	// different one.
 	wireOnly := map[string]string{
-		"cue": "resolved into cuts at creation, so it is consumed rather than dropped. " +
+		"cue": "resolved into cuts and skip at creation, so it is consumed rather than dropped. " +
 			"The sheet deliberately does not reach the job: a job is its cut points, and " +
 			"carrying the reference would let an edit to the sheet between creation and " +
 			"execution change what the 201 accepted",
@@ -140,7 +140,7 @@ func populatedJobRequest() jobRequest {
 	// every field at once, which no job may. What it checks is the mapping,
 	// and a body missing a field checks the mapping of that field not at all.
 	return jobRequest{
-		Type: "transcode", Src: "x", Srcs: []string{"x"}, Titles: []string{"x"}, Cuts: []int64{1}, Cue: "x",
+		Type: "transcode", Src: "x", Srcs: []string{"x"}, Titles: []string{"x"}, Cuts: []int64{1}, Skip: []int{0}, Cue: "x",
 		Format: "x", Container: "x",
 		Rate: 1, Ch: 1, Bits: 1, Bitrate: 1, HEv2: true, Gain: "x", Loudness: "x",
 		FLACLevel: 1, WavPackLevel: 1, APELevel: 1000,

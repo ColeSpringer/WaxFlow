@@ -50,22 +50,31 @@ func TestSplitSpans(t *testing.T) {
 		for _, tc := range []struct {
 			name  string
 			cuts  []int64
+			skip  []int
 			total int64
 		}{
-			{"no cuts at all", nil, total},
+			{"no cuts at all", nil, nil, total},
 			// Every cut opens a piece, so a cut that does not advance is
 			// asking for an empty one, whichever way it fails to.
-			{"a leading 0 asks for an empty first piece", []int64{0, 100}, total},
-			{"a repeated cut asks for an empty piece", []int64{100, 100}, total},
-			{"descending cuts", []int64{250, 100}, total},
-			{"a negative cut", []int64{-1}, total},
+			{"a leading 0 asks for an empty first piece", []int64{0, 100}, nil, total},
+			{"a repeated cut asks for an empty piece", []int64{100, 100}, nil, total},
+			{"descending cuts", []int64{250, 100}, nil, total},
+			{"a negative cut", []int64{-1}, nil, total},
 			// Refused rather than clamped: a list that overshoots does not
 			// describe this source.
-			{"a cut at the end asks for an empty last piece", []int64{100, total}, total},
-			{"a cut past the end", []int64{100, total + 1}, total},
+			{"a cut at the end asks for an empty last piece", []int64{100, total}, nil, total},
+			{"a cut past the end", []int64{100, total + 1}, nil, total},
+			// Skip names pieces, so it is held to the pieces the cuts open:
+			// one cut opens pieces 0 and 1, and there is no piece 2.
+			{"skip names a piece the cuts do not open", []int64{100}, []int{2}, total},
+			{"skip names a negative piece", []int64{100}, []int{-1}, total},
+			{"skip names a piece twice", []int64{100, 250}, []int{0, 0}, total},
+			{"skip names pieces out of order", []int64{100, 250}, []int{2, 0}, total},
+			// A split that writes nothing is not a split.
+			{"skip names every piece", []int64{100}, []int{0, 1}, total},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				spans, err := (Request{Type: TypeSplit, Cuts: tc.cuts}).SplitSpans(tc.total)
+				spans, err := (Request{Type: TypeSplit, Cuts: tc.cuts, Skip: tc.skip}).SplitSpans(tc.total)
 				if waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
 					t.Errorf("SplitSpans(%v, total %d) error = %v, want %s",
 						tc.cuts, tc.total, err, waxerr.CodeInvalidRequest)
@@ -76,4 +85,23 @@ func TestSplitSpans(t *testing.T) {
 			})
 		}
 	})
+}
+
+// TestSplitSpansSkip: a skipped piece is still a piece, since the pieces
+// partition the source, and Skipped is what the runner asks per piece.
+func TestSplitSpansSkip(t *testing.T) {
+	req := Request{Type: TypeSplit, Cuts: []int64{100, 250}, Skip: []int{0, 2}}
+	got, err := req.SplitSpans(1000)
+	if err != nil {
+		t.Fatalf("SplitSpans: %v", err)
+	}
+	want := [][2]int64{{0, 100}, {100, 250}, {250, waxflow.ToEnd}}
+	if !slices.Equal(got, want) {
+		t.Errorf("SplitSpans = %v, want %v", got, want)
+	}
+	for i, skipped := range []bool{true, false, true} {
+		if got := req.Skipped(i); got != skipped {
+			t.Errorf("Skipped(%d) = %v, want %v", i, got, skipped)
+		}
+	}
 }

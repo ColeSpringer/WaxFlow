@@ -233,3 +233,58 @@ line was refused outright. Four points change.
 `File.Starts` gains one refusal, reachable only from `ParseTolerant`
 output: a track numbered -1, since a split names and tags its pieces by
 number. Its messages say `the implied file` for a nameless one.
+
+## Amendment (2026-09-22): a data track is a piece nothing writes
+
+A mixed-mode disc's sheet lists its data track (`TRACK 01 MODE1/2352`)
+beside the audio, and both splitters cut it as audio: a piece of noise
+named after a song. Four points change. Every sheet of audio tracks
+alone that the 2026-09-10 surface cut still cuts the same way; a sheet
+with a data track is refused by `Cuts` where it used to be cut wrong,
+and by `Pieces` where its data track is cooked and ahead of audio, or is
+every track it has, and `Starts` answers a data track's entry
+differently (its `INDEX 00`, or 0 when first). These are the behavioural
+breaks, taken because each replaces a silently wrong cut.
+
+1. **`File.Pieces(rate, total)` is the splitting funnel.** `Cuts` is
+   built on it for a caller that can only cut and pairs pieces with
+   tracks by position, and refuses by name any sheet with a data track,
+   since a cut list cannot skip a piece and a data track occupying
+   nothing would leave a track with no piece. The invariants move with
+   it: every audio track has an `INDEX 01`, and starts ascend, strictly
+   past an audio track and loosely past a data one (EAC's image holds
+   the audio session alone and lists the data track at frame 0 with the
+   audio), though never inside one. A sheet naming one track still has
+   nothing to cut, whatever its `INDEX 01` says, and so does a file
+   whose pieces reduce to one.
+2. **`Track.IsAudio`** reads the datatype: the MODE and CDI modes are
+   data, and AUDIO, CDG, an absent and an unfamiliar token are audio, the
+   rule WaxBin's own reader already applies. A data track's piece carries
+   `Audio` false and is skipped: the CLI names it on stderr, the daemon
+   resolves it into the job's `skip` list. The audio before a data track
+   ends at its `INDEX 00`, a first data track owns the file up to the
+   first audio `INDEX 01` (the mode change puts data-mode sectors inside
+   that pregap), one occupying nothing is no piece, and a cooked one
+   (`MODE1/2048`) ahead of audio is refused, since only 2352-byte sectors
+   keep the sheet's frames on samples past it. CUETools, the reference
+   consumer of these sheets, ends the audio at the same index.
+3. **`File.Starts`** returns each track's boundary under those rules: a
+   data track's entry is the sample the audio before it ends at, and a
+   first data track's is 0 whatever its indexes say.
+4. **`Sheet.SingleFile`** returns the one file holding audio when the
+   sheet's other files hold only data tracks, which is how EAC and XLD
+   write a mixed-mode or Enhanced CD rip. A sheet whose files each hold
+   audio is refused as before. `File.PrecededByData` says the file
+   follows such a data track, so the audio ahead of its first `INDEX 01`
+   is the mode change's pregap and is skipped, as it would be were the
+   data track in the file.
+
+The daemon places a trailing data track against the same length it
+holds the cuts to and the run enforces (the declared count, or the
+measure that replaced an advisory or absent one). A header that
+under-declares cannot turn that into noise: no demuxer delivers audio
+past the count it declares (an MP3 whose Xing count is short files the
+surplus frames as padding), so a data track addressed past that count is
+past the audio whatever the file holds behind it. A split job carries
+`skip`, the pieces it does not write; its outputs are named and indexed
+by what it wrote.

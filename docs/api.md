@@ -887,6 +887,7 @@ errors decoded to waxerr codes like every other method.
     {"type": "analyze", "src": "lib/a.flac", "silence": true}
     {"type": "merge", "srcs": ["lib/ch1.flac", "lib/ch2.flac"], "format": "alac"}
     {"type": "split", "src": "lib/album.flac", "format": "flac", "cuts": [10584000, 21344400]}
+    {"type": "split", "src": "lib/game.flac", "format": "flac", "cuts": [5292000, 21344400], "skip": [0]}
     {"type": "split", "src": "lib/album.flac", "format": "flac", "cue": "lib/album.cue"}
 
 Transcode jobs take the /stream shaping parameters (`format` required,
@@ -927,8 +928,9 @@ source's timeline.
 
 Each field belongs to a specific set of job types, and a field on a type
 that does not take it is a 400 rather than a field silently ignored at
-run time: `srcs` and `titles` are merge-only, `cuts` and `cue` split-only
-(and exclusive with each other), the silence fields analyze-only, `gain`
+run time: `srcs` and `titles` are merge-only, `cuts`, `skip` and `cue`
+split-only (`cue` exclusive with the other two), the silence fields
+analyze-only, `gain`
 and `loudness` transcode-only, and the shaping parameters belong to
 transcode, merge, and split. `src` is required by every type but merge,
 which refuses it.
@@ -944,8 +946,9 @@ advisory length that is two samples out desyncs every seam after it. That
 measuring is what a `POST /jobs` for a cold MP3 queue waits on; a queue
 already minted as a timeline (or any queue of FLACs) measures nothing.
 
-`split` cuts one `src` at `cuts` into N+1 outputs. Cut points are **source
-sample offsets, strictly ascending, and interior**: `0` is implied before
+`split` cuts one `src` at `cuts` into N+1 pieces and writes the ones it
+does not `skip`, one output each. Cut points are **source sample offsets,
+strictly ascending, and interior**: `0` is implied before
 the first and the source's end after the last, so N cuts make N+1 pieces
 and piece *i* runs `[cuts[i-1], cuts[i])`. A leading `0`, a cut at or past
 the end, a repeat, or a descending pair each ask for an empty piece or for
@@ -955,18 +958,37 @@ reason a span is: a cut declares which samples are this piece, so it is
 content identity, and 245.32 s at 44100 floors to one sample short of the
 boundary a CUE sheet's CD-frame arithmetic names exactly.
 
-**`cue` names a CUE sheet instead**, exclusive with `cuts`. It is a source
-reference like `src`, so the sheet can be uploaded (`upload:<id>`) or sit
-in a library root beside its rip, and it resolves through the same
-resolver. The sheet's track boundaries become this split's cut points at
-creation: a first track starting at frame 0 is dropped (a cut there would
-ask for an empty piece), so the usual sheet of N tracks yields N-1 cuts
-and N pieces; a first track starting past frame 0 is kept, and the audio
-before it (a pregap, or hidden track one audio) becomes the first piece,
-so N tracks yield N cuts and N+1 pieces. The daemon reads the sheet
-strictly: a line it cannot read is a 400 naming the line, since a skipped
-line would be a silently wrong cut. A sheet that names no FILE indexes
-`src`.
+**`skip` lists pieces the split does not write**, as 0-based indices into
+those N+1 pieces, strictly ascending. The outputs are the remaining pieces
+in order, and a list naming every piece is a 400. It is how a sheet's data
+track reaches the job (below); a client cutting by hand may name pieces of
+its own.
+
+**`cue` names a CUE sheet instead**, exclusive with `cuts` and `skip`. It
+is a source reference like `src`, so the sheet can be uploaded
+(`upload:<id>`) or sit in a library root beside its rip, and it resolves
+through the same resolver. The sheet's track boundaries become this
+split's cut points at creation: a first track starting at frame 0 is
+dropped (a cut there would ask for an empty piece), so the usual sheet of
+N audio tracks yields N-1 cuts and N pieces; a first track starting past
+frame 0 is kept, and the audio before it (a pregap, or hidden track one
+audio) becomes the first piece, so N tracks yield N cuts and N+1 pieces. A
+data track (`TRACK 01 MODE1/2352`, which a mixed-mode disc's sheet lists
+ahead of its audio and an Enhanced CD's after it) is a piece too, since
+the boundaries partition the whole file, and it resolves into `skip`
+rather than into a piece of noise named after a song: the audio before it
+ends at its `INDEX 00`, the audio after it begins at its own `INDEX 01`
+(the mode change puts data-mode sectors inside that pregap), and a data
+track occupying none of the file (EAC lists it at frame 0 beside the audio
+it ripped; an Enhanced CD's sits in a second session past the rip) is no
+piece at all and adds no cut. Whether it lies past the file is decided
+against the same length the cuts are held to, which no demuxer delivers
+audio past. A cooked data track (`MODE1/2048`) occupying the file ahead of
+audio is a 400, since only 2352-byte sectors keep the sheet's frames on
+samples past it. The daemon
+reads the sheet strictly: a line it cannot read is a 400 naming the line,
+since a skipped line would be a silently wrong cut. A sheet that names no
+FILE indexes `src`.
 
 The daemon parses the sheet rather than making each client do it, and that
 is the point of the field. A CD frame is 1/75 s, which no nanosecond clock
@@ -975,16 +997,20 @@ boundary; every CD-family rate divides by 75 exactly (44100/75 = 588), so
 frames convert to samples directly and exactly. Pushing that to each
 client is pushing each client to rediscover the same off-by-one. Sheets
 are decoded best-effort (BOM stripped, UTF-8 when valid, CP1252
-otherwise), and a sheet indexing several files is refused: its tracks are
-already separate, so there is nothing to cut.
+otherwise), and a sheet indexing several files is refused, since its tracks
+are already separate and there is nothing to cut, unless only one of them
+holds audio: a data track given a FILE of its own beside the rip is how EAC
+and XLD write a mixed-mode disc, and the audio file is the one cut.
 
-The sheet does not reach the job. It is resolved into `cuts`, which is
-what the job carries, so `GET /jobs/{id}` shows the boundaries the 201
-accepted and an edit to the sheet afterward cannot change what runs.
+The sheet does not reach the job. It is resolved into `cuts` and `skip`,
+which is what the job carries, so `GET /jobs/{id}` shows the boundaries
+the 201 accepted and an edit to the sheet afterward cannot change what
+runs.
 Sending `cue` and sending the samples it means produce the identical job.
 
 The pair is exact, and that is the property worth having: **a split to a
-lossless format at the source rate rejoins bit for bit through a merge.**
+lossless format at the source rate rejoins bit for bit through a merge**,
+less any piece it skipped.
 No resampler and no limiter means nothing to prime, so each piece's sample
 0 is the source's sample `from` exactly. Ask for a rate change and each
 piece carries the same ~1.5 ms head transient a seek already does.
@@ -1107,8 +1133,8 @@ The response (and `GET /jobs/{id}`) is the job document:
      "analysis": {"integratedLufs": -17.2, "loudnessRange": 4.1, "truePeakDb": -0.9, ...},
      "error": {"code": "...", "message": "..."}}
 
-`outputs` is a list because a split has one entry per piece, in cut order;
-every other type has at most one. Its index is what `GET
+`outputs` is a list because a split has one entry per piece it writes, in
+cut order; every other type has at most one. Its index is what `GET
 /jobs/{id}/result/{n}` takes.
 
 States: `queued`, `running`, then one of `done`, `failed`, `canceled`.

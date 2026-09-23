@@ -33,9 +33,9 @@ type piece struct {
 	from, to int64
 	title    string
 	number   int
-	// leadIn marks the audio before track 1, which no track names (see
-	// cuePieces).
-	leadIn bool
+	// skip, when set, is why the split does not write this piece (a data
+	// track's span, or the pregap after one), as the note it prints.
+	skip string
 }
 
 func newSplitCmd(flavor Flavor) *cobra.Command {
@@ -61,7 +61,11 @@ the sheet names, and that one sample is a click at every track join.
 
 The cut is sample-exact and, to a lossless output at the source's own rate,
 bit-exact: the pieces rejoin into the original with nothing lost, repeated,
-or filtered at any seam.`,
+or filtered at any seam, less any data track the split skipped.
+
+A mixed-mode disc's data track (TRACK 01 MODE1/2352) is not audio and is
+never written; the audio keeps the disc's own track numbers, and where the
+data track occupies part of the file the split says what it skipped.`,
 		Args: usageArgs(cobra.ExactArgs(2)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			switch {
@@ -142,11 +146,15 @@ or filtered at any seam.`,
 				track.Padding, track.MidPadding, track.MidTrims = measured.Padding, measured.MidPadding, measured.MidTrims
 			}
 
+			// ofN is TRACKTOTAL: the disc's own track count, which a sheet
+			// states and a cut list does not.
 			var pieces []piece
+			var ofN int
 			if cueFile != "" {
-				pieces, err = cuePieces(cueFile, track.Fmt.Rate, track.Samples)
+				pieces, ofN, err = cuePieces(cueFile, track.Fmt.Rate, track.Samples)
 			} else {
 				pieces, err = atPieces(atFlag, track.Samples)
+				ofN = len(pieces)
 			}
 			if err != nil {
 				return err
@@ -174,9 +182,12 @@ or filtered at any seam.`,
 					if to == waxflow.ToEnd {
 						to = track.Samples
 					}
+					name := pieceName(p, ext)
+					if p.skip != "" {
+						name = "(skipped: " + p.skip + ")"
+					}
 					fmt.Fprintf(cmd.OutOrStdout(), "%s\t[%d, %d)\t%.3fs\n",
-						pieceName(p, ext), p.from, to,
-						float64(to-p.from)/float64(track.Fmt.Rate))
+						name, p.from, to, float64(to-p.from)/float64(track.Fmt.Rate))
 				}
 				return nil
 			}
@@ -190,7 +201,7 @@ or filtered at any seam.`,
 				e: e, log: logger, src: src, hint: srcHint,
 				outFormat: outFormat, container: containerName,
 				flacLevel: optLevel, wavpackLevel: wavpackLevel, apeLevel: apeLevel,
-				force: force, ofN: trackTotal(pieces),
+				force: force, ofN: ofN,
 				mapper: label.NewLogged(logger), containerTags: info.Tags,
 			}
 			if !noTags {
@@ -198,6 +209,10 @@ or filtered at any seam.`,
 			}
 
 			for _, p := range pieces {
+				if p.skip != "" {
+					fmt.Fprintf(cmd.ErrOrStderr(), "skipping %s\n", p.skip)
+					continue
+				}
 				name := pieceName(p, ext)
 				res, err := sp.writePiece(cmd, filepath.Join(outDir, name), p)
 				if err != nil {
@@ -290,6 +305,9 @@ func pieceName(p piece, ext string) string {
 func distinctNames(pieces []piece, ext string) error {
 	seen := make(map[string]int, len(pieces))
 	for i, p := range pieces {
+		if p.skip != "" {
+			continue // never written, so never named
+		}
 		name := pieceName(p, ext)
 		if j, ok := seen[strings.ToLower(name)]; ok {
 			return waxerr.New(waxerr.CodeInvalidRequest,
@@ -346,82 +364,83 @@ func truncateTitle(s string, max int) string {
 	return s
 }
 
-// cuePieces turns a sheet into the pieces of one audio file.
+// cuePieces turns a sheet into the pieces of one audio file, and the count
+// of the disc's tracks for TRACKTOTAL.
 //
 // A sheet may index several files (a track-per-file rip), which has no
 // cutting to do and is refused by name rather than silently splitting the
-// wrong one. The file the sheet names is not resolved or checked against
-// the source: a sheet and its rip are routinely renamed together, and
-// refusing on a name mismatch would reject working input for a spelling.
-func cuePieces(path string, rate int, total int64) ([]piece, error) {
+// wrong one; a data track given a FILE of its own beside the one audio file
+// is the exception, and cue.SingleFile knows it. The file the sheet names is
+// not resolved or checked against the source: a sheet and its rip are
+// routinely renamed together, and refusing on a name mismatch would reject
+// working input for a spelling.
+//
+// The track count is the disc's: every TRACK the sheet has, in any of its
+// files, up to and including the last audio one. A mixed-mode disc's data
+// track is its track 1 whether the sheet placed it in this file or in one of
+// its own, and the audio after it is numbered 2 and up of that total; an
+// Enhanced CD's data track sits in a second session after the audio, which
+// a CD player never counts, so its audio is 1 and up of the audio alone. A
+// lead-in is not a track and is not counted.
+func cuePieces(path string, rate int, total int64) ([]piece, int, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeInvalidRequest, "reading the CUE sheet", err)
+		return nil, 0, waxerr.Wrap(waxerr.CodeInvalidRequest, "reading the CUE sheet", err)
 	}
 	sheet, err := cue.Parse(raw)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	file, err := sheet.SingleFile()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	// The same funnel the daemon's split job cuts by, so a sheet split here
 	// and the same sheet POSTed there cut at the same samples. Only the
-	// product differs: the daemon wants spans, this wants pieces with names.
-	// Every rule about what a sheet's cut list may say lives there, including
-	// the sheet that names one track and so has nothing to cut.
-	cuts, err := file.Cuts(rate)
+	// product differs: the daemon wants spans and a skip list, this wants
+	// pieces with names. Every rule about what a sheet's cut list may say
+	// lives there: the sheet that names one track and so has nothing to
+	// cut, the lead-in before track 1 that is a piece of its own, and the
+	// data track that is a piece nothing writes.
+	//
+	// The lead-in gets track 0, the disc's own address for the audio ahead
+	// of track 1, which is also where a listing sorts it. It gets no title:
+	// the sheet gave it none, and a piece with no title carries no TITLE
+	// tag rather than an invented one.
+	cuts, err := file.Pieces(rate, total)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-
-	// Cuts keeps a nonzero first start instead of folding the audio before
-	// track 1 into it, so with one there is a piece more than the sheet has
-	// tracks and it is the first: the lead-in, which no track names. It is a
-	// pregap, or it is hidden track one audio, which on some discs is a whole
-	// song. It gets track 0, the disc's own address for the audio ahead of
-	// track 1, which is also where a listing sorts it. It gets no title: the
-	// sheet gave it none, and a piece with no title carries no TITLE tag
-	// rather than an invented one.
-	leadIn := len(cuts) == len(file.Tracks)
-
-	out := make([]piece, 0, len(cuts)+1)
-	from := int64(0)
-	for i := 0; i <= len(cuts); i++ {
-		p := piece{from: from, to: waxflow.ToEnd, leadIn: leadIn && i == 0}
-		if i < len(cuts) {
-			p.to = cuts[i]
+	out := make([]piece, 0, len(cuts))
+	for _, c := range cuts {
+		p := piece{from: c.From, to: c.To}
+		if c.To < 0 {
+			p.to = waxflow.ToEnd
 		}
-		ti := i
-		if leadIn {
-			ti--
-		}
-		if ti >= 0 {
-			p.title, p.number = file.Tracks[ti].Title, file.Tracks[ti].Number
-		}
-		if from >= total {
-			return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
-				"track %d starts at sample %d, past the source's %d: this sheet does not describe this file",
-				p.number, from, total))
+		switch {
+		case c.Track >= 0:
+			t := file.Tracks[c.Track]
+			p.title, p.number = t.Title, t.Number
+			if !c.Audio {
+				// Quoted and bounded: the datatype is a token off the sheet,
+				// and this line reaches a terminal.
+				p.skip = fmt.Sprintf("TRACK %02d %q, a data track, not audio", t.Number, truncateTitle(t.Type, 32))
+			}
+		case !c.Audio:
+			p.skip = "the pregap after the disc's data track, not audio"
 		}
 		out = append(out, p)
-		from = p.to
 	}
-	return out, nil
-}
-
-// trackTotal is TRACKTOTAL: the disc's own tracks, which is every piece
-// but a lead-in. A lead-in carries track 0, and so can a sheet's own first
-// track, so the flag says which one it is and the number cannot.
-func trackTotal(pieces []piece) int {
-	n := 0
-	for _, p := range pieces {
-		if !p.leadIn {
+	tracks, n := 0, 0
+	for _, f := range sheet.Files {
+		for _, t := range f.Tracks {
 			n++
+			if t.IsAudio() {
+				tracks = n
+			}
 		}
 	}
-	return n
+	return out, tracks, nil
 }
 
 // atPieces turns explicit sample offsets into pieces. The offsets are the

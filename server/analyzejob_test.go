@@ -85,6 +85,9 @@ var jobFields = []jobField{
 	// which type owns a field, not which fields conflict), so
 	// TestSplitJobCueRejects carries that one.
 	{"cue", `"cue":"lib/rip.cue"`, []string{"split"}},
+	// skip names pieces of cuts, so it is split's for cuts' reason; that it
+	// cannot ride beside cue is the same conflict rule, pinned there.
+	{"skip", `"skip":[0]`, []string{"split"}},
 	{"format", `"format":"flac"`, []string{"transcode", "merge", "split"}},
 	{"container", `"container":"mka"`, []string{"transcode", "merge", "split"}},
 	{"rate", `"rate":44100`, []string{"transcode", "merge", "split"}},

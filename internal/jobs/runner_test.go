@@ -1399,3 +1399,76 @@ func TestLoudnessAnalyzeNonMP4OmitsPlaceholders(t *testing.T) {
 		t.Fatal("non-MP4 output embeds ReplayGain placeholders with no post-pass to patch them")
 	}
 }
+
+// TestSplitSkipWritesTheRest: a skipped piece is neither written nor counted.
+// The outputs are the written pieces in order and are named by that order,
+// which is the index /result takes, so a note about out.1 is about the
+// second file a client can fetch. The progress bar runs over the written
+// samples alone: counted, a skipped piece the size of a game's data track
+// would open the bar at 80 percent and then crawl.
+func TestSplitSkipWritesTheRest(t *testing.T) {
+	root := t.TempDir()
+	ref := writeLongWAV(t, root)
+	res := openRoots(t, root)
+	srcID := pinID(t, res, ref)
+	pools, release := saturatedPool(t)
+	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, Pools: pools})
+
+	// Four pieces of the 5 s fixture, the first and third skipped, so the
+	// split writes [1 s, 2 s) and [4 s, 5 s).
+	const written = 2 * 44100
+	j, err := r.Create(Request{
+		Type: TypeSplit, Src: ref, SourceID: srcID, Format: "flac", FLACLevel: -1,
+		Cuts: []int64{1 * 44100, 2 * 44100, 4 * 44100}, Skip: []int{0, 2},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	waitJob(t, r, j.ID, StateRunning)
+	ch, cancelSub, ok := r.Subscribe(j.ID)
+	if !ok {
+		t.Fatal("Subscribe: job not found")
+	}
+	defer cancelSub()
+	if snap, open := recv(t, ch); !open || snap.State != StateRunning {
+		t.Fatalf("initial snapshot = %+v, want a running job", snap)
+	}
+	release()
+	var seen []Progress
+	for {
+		s, open := recv(t, ch)
+		if !open {
+			break
+		}
+		if s.State == StateRunning && s.Progress != nil {
+			seen = append(seen, *s.Progress)
+		}
+	}
+	if len(seen) == 0 {
+		t.Fatal("no running snapshot carried progress")
+	}
+	for i, p := range seen {
+		if p.Total != written {
+			t.Errorf("progress %d total = %d, want the %d written samples", i, p.Total, written)
+		}
+		if p.Done < 0 || p.Done > written {
+			t.Errorf("progress %d done = %d, outside [0,%d]", i, p.Done, written)
+		}
+		if i > 0 && p.Done < seen[i-1].Done {
+			t.Errorf("progress %d went backwards: done %d after %d", i, p.Done, seen[i-1].Done)
+		}
+	}
+
+	done := waitJob(t, r, j.ID, StateDone)
+	if len(done.Outputs) != 2 {
+		t.Fatalf("split produced %d outputs, want the 2 written pieces: %+v", len(done.Outputs), done.Outputs)
+	}
+	for i, out := range done.Outputs {
+		if want := fmt.Sprintf("out.%d.flac", i); out.File != want {
+			t.Errorf("output %d file = %q, want %q: outputs are named by their own index", i, out.File, want)
+		}
+		if out.Samples != 44100 {
+			t.Errorf("output %d holds %d samples, want 44100", i, out.Samples)
+		}
+	}
+}

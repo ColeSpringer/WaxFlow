@@ -80,15 +80,19 @@ type jobRequest struct {
 	Titles []string `json:"titles,omitempty"`
 	Cuts   []int64  `json:"cuts,omitempty"`
 	// Cue is a source reference naming a CUE sheet whose track boundaries
-	// are this split's cut points, exclusive with Cuts. It resolves through
-	// the same resolver src does, so a sheet can be uploaded
+	// are this split's cut points, exclusive with Cuts and Skip. It resolves
+	// through the same resolver src does, so a sheet can be uploaded
 	// (upload:<id>) or sit in a library root beside its rip.
 	//
-	// It is resolved into Cuts at creation and does not reach the domain
-	// Request: the job is its cut points, so re-reading a sheet at run time
-	// would let an edit between creation and execution change what the job
-	// was accepted as.
-	Cue          string `json:"cue,omitempty"`
+	// It is resolved into Cuts and Skip at creation and does not reach the
+	// domain Request: the job is its cut points, so re-reading a sheet at
+	// run time would let an edit between creation and execution change what
+	// the job was accepted as.
+	Cue string `json:"cue,omitempty"`
+	// Skip lists the pieces Cuts opens that the split does not write, as
+	// 0-based piece indices. Split-only, and resolved from a sheet as Cuts is:
+	// a data track's piece lands here.
+	Skip         []int  `json:"skip,omitempty"`
 	Format       string `json:"format,omitempty"`
 	Container    string `json:"container,omitempty"`
 	Rate         int    `json:"rate,omitempty"`
@@ -120,6 +124,7 @@ func requestFrom(body jobRequest) *jobs.Request {
 		Srcs:               slices.Clone(body.Srcs),
 		MemberTitles:       slices.Clone(body.Titles),
 		Cuts:               slices.Clone(body.Cuts),
+		Skip:               slices.Clone(body.Skip),
 		Format:             body.Format,
 		Container:          body.Container,
 		Rate:               body.Rate,
@@ -221,8 +226,11 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 	if req.Type != jobs.TypeSplit && body.Cue != "" {
 		return bad("cue applies to split jobs")
 	}
-	if len(body.Cuts) > 0 && body.Cue != "" {
-		return bad("cuts and cue are exclusive: a split's boundaries come from one place")
+	if req.Type != jobs.TypeSplit && len(body.Skip) > 0 {
+		return bad("skip applies to split jobs")
+	}
+	if (len(body.Cuts) > 0 || len(body.Skip) > 0) && body.Cue != "" {
+		return bad("cuts and skip are exclusive with cue: a split's boundaries come from one place")
 	}
 	if req.Type != jobs.TypeAnalyze && (body.Silence || body.SilenceThresholdDB != 0 || body.SilenceMinSeconds != 0) {
 		return bad("the silence fields apply to analyze jobs")
@@ -276,6 +284,14 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 		return req, nil
 	}
 	if req.Type == jobs.TypeSplit {
+		// The sheet is read before the source is measured, so a sheet the
+		// daemon cannot use is a 400 that never waits on a decode.
+		var file *cue.File
+		if body.Cue != "" {
+			if file, err = s.cueFileFor(ctx, body.Cue); err != nil {
+				return nil, err
+			}
+		}
 		// A length no header declares is measured here, which is what makes
 		// the refusal a 400. SplitSpans only bounds a cut when it is given a
 		// total, so a source that declares none (total -1) has every cut
@@ -317,10 +333,22 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 		// job: a job is its cut points, and re-reading a sheet at run time
 		// would let an edit between creation and execution change what was
 		// accepted.
-		if body.Cue != "" {
-			if req.Cuts, err = s.cutsFromCue(ctx, body.Cue, track.Fmt.Rate); err != nil {
+		if file != nil {
+			// The length a data track is placed against is the one the cuts
+			// are held to below and the run enforces: the declared count, or
+			// the measure that replaced an advisory or absent one. A header's
+			// count is not re-measured for this, and that is not a hole a
+			// lying header could write noise through: no demuxer delivers
+			// audio past the count it declares (an MP3 whose Xing count is
+			// short files the surplus frames as trailing padding), so a data
+			// track addressed past that count is past the audio whatever the
+			// file holds behind it, and one addressed inside it is a cut like
+			// any other.
+			pieces, err := file.Pieces(track.Fmt.Rate, track.Samples)
+			if err != nil {
 				return nil, err
 			}
+			req.Cuts, req.Skip = cue.Cutpoints(pieces)
 		}
 		// The cut arithmetic itself is the runner's own function, so the two
 		// cannot disagree about which samples are piece 3. They are handed
@@ -680,9 +708,10 @@ func (s *Server) handleJobResult(w http.ResponseWriter, r *http.Request) {
 // The bare /result (no index) means the job's one output, and refuses to mean
 // anything when the job has several. That reads like a hedge and is the one
 // answer with no wrong case: for the three types that produce a single file it
-// is what it has always meant, and for a split it is genuinely ambiguous, so
-// handing back piece 1 of 12 would be a plausible-looking wrong answer to a
-// caller who never learned the pieces existed. This daemon refuses the
+// is what it has always meant (and for a split whose skips left one piece to
+// write), and for a split of several it is genuinely ambiguous, so handing
+// back piece 1 of 12 would be a plausible-looking wrong answer to a caller who
+// never learned the pieces existed. This daemon refuses the
 // ambiguous case everywhere else it meets one (a span past the end of a
 // source, a threshold with no silence:true) for the same reason: a 400 is read,
 // and a quiet first-of-N is not.
@@ -741,23 +770,18 @@ func (s *Server) writeJobProduct(w http.ResponseWriter, j *jobs.Job) {
 // reading it into memory to find out it is not a sheet.
 const maxCueBytes = 1 << 20
 
-// cutsFromCue resolves a CUE sheet reference and turns its track boundaries
-// into this split's interior cut points, at the source's own rate.
+// cueFileFor resolves a CUE sheet reference and returns the one file it
+// cuts: the sheet parsed strictly (a line the daemon cannot read is a 400
+// naming the line, since a skipped line would be a silently wrong cut) and
+// its audio file picked out (cue.SingleFile).
 //
-// The sheet's track starts and a split's cuts are not the same list, and
-// cue.Cuts owns every rule about the difference: a leading 0 is dropped
-// because a cut there would ask for an empty piece, and a nonzero first start
-// is kept, because a sheet whose TRACK 01 begins past frame 0 (a pregap, or
-// hidden-track-one audio, which can be a whole song) is describing a lead-in
-// that is part of the file and must become the first piece rather than
-// vanish. That funnel is shared with the CLI, which is what stops one sheet
-// being cut two ways.
-//
-// The rate is the source's, not the sheet's, because a sheet has no rate:
-// its MM:SS:FF times are CD frames of 1/75 s, and it is the audio that says
-// how many samples a frame is. Every CD-family rate divides by 75 exactly,
-// which is what makes the conversion exact rather than nearly so.
-func (s *Server) cutsFromCue(ctx context.Context, ref string, rate int) ([]int64, error) {
+// What the sheet says about that file is cue.Pieces' business, and the
+// caller's, since Pieces takes the source's rate and measured length: a sheet
+// has no rate, its MM:SS:FF times being CD frames of 1/75 s that every
+// CD-family rate divides exactly, and no length to hold a data track against.
+// That funnel is shared with the CLI, which is what stops one sheet being cut
+// two ways.
+func (s *Server) cueFileFor(ctx context.Context, ref string) (*cue.File, error) {
 	f, err := s.resolver.Resolve(ctx, ref)
 	if err != nil {
 		return nil, err
@@ -775,11 +799,7 @@ func (s *Server) cutsFromCue(ctx context.Context, ref string, rate int) ([]int64
 	if err != nil {
 		return nil, err
 	}
-	file, err := sheet.SingleFile()
-	if err != nil {
-		return nil, err
-	}
-	return file.Cuts(rate)
+	return sheet.SingleFile()
 }
 
 // jobResultFilename names the download. A split's pieces carry the index the
