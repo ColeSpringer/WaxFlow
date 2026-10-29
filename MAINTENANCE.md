@@ -130,8 +130,8 @@ The nightly encoder-quality harness (`make encoder-quality`, the
 `encoder-quality` job in `nightly.yml`) is the objective gate: it encodes
 the corpus with our encoder and the reference baseline (Shine for MP3,
 ffmpeg's native aac for AAC-LC, libfdk_aac for HE-AAC where the nightly's
-ffmpeg carries it, libopus via the reference tools for
-Opus), scores both with the ODG-proxy (`internal/testutil/odg.go`, a
+ffmpeg carries it, libvorbis for Vorbis, libopus via the reference tools
+for Opus), scores both with the ODG-proxy (`internal/testutil/odg.go`, a
 bark-band noise-to-mask ratio) or opus_compare, and fails when our corpus
 mean falls below the baseline or any track drops more than the per-codec
 allowance. The HTML reports are uploaded as CI artifacts.

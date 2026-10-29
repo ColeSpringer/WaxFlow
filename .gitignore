@@ -14,8 +14,7 @@
 /fuzz-logs/
 
 # generated encoder-quality reports (make encoder-quality); nightly artifacts
-/quality-report.html
-/opus-quality-report.html
+/*quality-report.html
 
 # fetched conformance vectors (make verify-vectors); pinned, never committed
 /testdata/vectors/

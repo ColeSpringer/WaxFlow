@@ -32,7 +32,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # the "stdlib-only codecs" promise.
 PUBLIC_PKGS := . ./waxerr ./audio ./dsp/... ./codec/... ./container/... ./cue ./format ./source ./server ./client
 
-.PHONY: build test test-race test-cli test-oracle test-example test-386 vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench encoder-quality fuzz opus-tools ape-tools mpc-tools client-e2e apple-smoke hls-e2e soak
+.PHONY: build test test-race test-cli test-oracle test-example test-386 vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench encoder-quality encoder-quality-mp3 encoder-quality-aac encoder-quality-heaac encoder-quality-heaacv2 encoder-quality-vorbis encoder-quality-opus encoder-quality-opus-speech fuzz opus-tools ape-tools mpc-tools client-e2e apple-smoke hls-e2e soak
 
 build:
 	cd cli && CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o ../bin/waxflow ./cmd/waxflow
@@ -272,33 +272,53 @@ mpc-tools:
 	echo "built $(MPC_TOOL_NAMES) in $(MPC_TOOLS_DIR) and $(MPPENC_DIR)/mppenc"
 
 # Encoder-quality gates: encode a corpus with our lossy encoders and the
-# reference baselines, score both (ODG-proxy vs Shine for MP3 and vs
-# ffmpeg's native aac for AAC; reference opus_compare vs libopus for Opus,
-# on the music corpus at 96/128/160k stereo and the TSP speech corpus at
-# 24/32/48k mono), enforce the docs/quality-gates.md gates, and publish
-# HTML reports. MP3 requires ffmpeg with libshine, AAC plain ffmpeg; Opus
-# requires `make opus-tools` and the fetched corpora (`make
-# verify-vectors`). Override the output paths with QUALITY_REPORT /
-# AAC_QUALITY_REPORT / HEAAC_QUALITY_REPORT / OPUS_QUALITY_REPORT /
-# OPUS_SPEECH_QUALITY_REPORT.
+# reference baselines, score both (ODG-proxy vs Shine for MP3, vs ffmpeg's
+# native aac for AAC and vs libvorbis for Vorbis; reference opus_compare vs
+# libopus for Opus, on the music corpus at 96/128/160k stereo and the TSP
+# speech corpus at 24/32/48k mono), enforce the docs/quality-gates.md gates,
+# and publish HTML reports. MP3 requires ffmpeg with libshine, AAC plain
+# ffmpeg, Vorbis ffmpeg with libvorbis; Opus requires `make opus-tools` and
+# the fetched corpora (`make verify-vectors`). Override the output paths
+# with QUALITY_REPORT / AAC_QUALITY_REPORT / HEAAC_QUALITY_REPORT /
+# HEAACV2_QUALITY_REPORT / VORBIS_QUALITY_REPORT / OPUS_QUALITY_REPORT /
+# OPUS_SPEECH_QUALITY_REPORT. go test runs the gates from tests/, so
+# QUALITY_ABSPATH pins each path to the directory make runs in, quoted and
+# with any spaces carried through abspath (which splits on them) as a
+# placeholder. Each gate is its own target: `make -k encoder-quality`, as
+# the nightly runs it, carries on past a failing gate so the later ones
+# still report.
 QUALITY_REPORT ?= quality-report.html
 AAC_QUALITY_REPORT ?= aac-quality-report.html
 HEAAC_QUALITY_REPORT ?= heaac-quality-report.html
 HEAACV2_QUALITY_REPORT ?= heaacv2-quality-report.html
+VORBIS_QUALITY_REPORT ?= vorbis-quality-report.html
 OPUS_QUALITY_REPORT ?= opus-quality-report.html
 OPUS_SPEECH_QUALITY_REPORT ?= opus-speech-quality-report.html
-encoder-quality:
-	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_REQUIRE_SHINE=1 WAXFLOW_QUALITY_REPORT=$(QUALITY_REPORT) \
+QUALITY_EMPTY :=
+QUALITY_SPACE := $(QUALITY_EMPTY) $(QUALITY_EMPTY)
+QUALITY_ABSPATH = "$(subst |,$(QUALITY_SPACE),$(abspath $(subst $(QUALITY_SPACE),|,$(1))))"
+encoder-quality: encoder-quality-mp3 encoder-quality-aac encoder-quality-heaac encoder-quality-heaacv2 \
+	encoder-quality-vorbis encoder-quality-opus encoder-quality-opus-speech
+encoder-quality-mp3:
+	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_REQUIRE_SHINE=1 WAXFLOW_QUALITY_REPORT=$(call QUALITY_ABSPATH,$(QUALITY_REPORT)) \
 		go test -run TestMP3EncoderQuality -count=1 -v ./tests
-	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_QUALITY_REPORT=$(AAC_QUALITY_REPORT) \
+encoder-quality-aac:
+	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_QUALITY_REPORT=$(call QUALITY_ABSPATH,$(AAC_QUALITY_REPORT)) \
 		go test -run TestAACEncoderQuality -count=1 -v ./tests
-	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_QUALITY_REPORT=$(HEAAC_QUALITY_REPORT) \
+encoder-quality-heaac:
+	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_QUALITY_REPORT=$(call QUALITY_ABSPATH,$(HEAAC_QUALITY_REPORT)) \
 		go test -run TestHEAACEncoderQuality -count=1 -v ./tests
-	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_QUALITY_REPORT=$(HEAACV2_QUALITY_REPORT) \
+encoder-quality-heaacv2:
+	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_QUALITY_REPORT=$(call QUALITY_ABSPATH,$(HEAACV2_QUALITY_REPORT)) \
 		go test -run TestHEAACv2EncoderQuality -count=1 -v ./tests
-	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_OPUS_TOOLS=1 WAXFLOW_REQUIRE_VECTORS=1 WAXFLOW_QUALITY_REPORT=$(OPUS_QUALITY_REPORT) \
+encoder-quality-vorbis:
+	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_QUALITY_REPORT=$(call QUALITY_ABSPATH,$(VORBIS_QUALITY_REPORT)) \
+		go test -run TestVorbisEncoderQuality -count=1 -v ./tests
+encoder-quality-opus:
+	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_OPUS_TOOLS=1 WAXFLOW_REQUIRE_VECTORS=1 WAXFLOW_QUALITY_REPORT=$(call QUALITY_ABSPATH,$(OPUS_QUALITY_REPORT)) \
 		go test -run 'TestOpusEncoderQuality$$' -count=1 -timeout 30m -v ./tests
-	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_OPUS_TOOLS=1 WAXFLOW_REQUIRE_VECTORS=1 WAXFLOW_QUALITY_REPORT=$(OPUS_SPEECH_QUALITY_REPORT) \
+encoder-quality-opus-speech:
+	WAXFLOW_ENCODER_QUALITY=1 WAXFLOW_REQUIRE_OPUS_TOOLS=1 WAXFLOW_REQUIRE_VECTORS=1 WAXFLOW_QUALITY_REPORT=$(call QUALITY_ABSPATH,$(OPUS_SPEECH_QUALITY_REPORT)) \
 		go test -run TestOpusSpeechEncoderQuality -count=1 -timeout 30m -v ./tests
 
 # Browser client-matrix e2e: a real daemon, the committed /demo page,

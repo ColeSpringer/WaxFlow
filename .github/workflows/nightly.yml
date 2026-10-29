@@ -160,13 +160,15 @@ jobs:
           WAXFLOW_LOAD_DURATION: 3m
 
   # Encoder-quality gates: score our lossy encoders against the reference
-  # baselines (Shine for MP3 and ffmpeg's native aac for AAC via the
-  # ODG-proxy; libopus for Opus via the reference opus_demo/opus_compare
-  # built from the pinned source), enforce the docs/quality-gates.md gates,
-  # and upload the HTML reports. libshine ships in Ubuntu's ffmpeg build;
-  # the libopus tools are built by `make opus-tools` and cached alongside
-  # the pinned corpus. ubuntu-24.04 is pinned because the baselines are
-  # ffmpeg build options and versions, and 24.04's are the measured ones.
+  # baselines (Shine for MP3, ffmpeg's native aac for AAC and libvorbis for
+  # Vorbis via the ODG-proxy; libopus for Opus via the reference
+  # opus_demo/opus_compare built from the pinned source), enforce the
+  # docs/quality-gates.md gates, and upload the HTML reports. libshine and
+  # libvorbis (encoder and decoder both) ship in Ubuntu's ffmpeg build; the
+  # libopus tools are built by `make opus-tools` and cached alongside the
+  # pinned corpus. make -k carries on past a failing gate, so every gate
+  # still reports. ubuntu-24.04 is pinned because the baselines are ffmpeg
+  # build options and versions, and 24.04's are the measured ones.
   encoder-quality:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -184,7 +186,7 @@ jobs:
           key: quality-${{ hashFiles('internal/testutil/vectors.go', 'Makefile') }}
       - run: go run ./internal/testutil/cmd/vectorfetch opus/corpus/ opus/speech/
       - run: make opus-tools
-      - run: make encoder-quality QUALITY_REPORT=quality-report.html AAC_QUALITY_REPORT=aac-quality-report.html HEAAC_QUALITY_REPORT=heaac-quality-report.html HEAACV2_QUALITY_REPORT=heaacv2-quality-report.html OPUS_QUALITY_REPORT=opus-quality-report.html OPUS_SPEECH_QUALITY_REPORT=opus-speech-quality-report.html
+      - run: make -k encoder-quality QUALITY_REPORT=quality-report.html AAC_QUALITY_REPORT=aac-quality-report.html HEAAC_QUALITY_REPORT=heaac-quality-report.html HEAACV2_QUALITY_REPORT=heaacv2-quality-report.html VORBIS_QUALITY_REPORT=vorbis-quality-report.html OPUS_QUALITY_REPORT=opus-quality-report.html OPUS_SPEECH_QUALITY_REPORT=opus-speech-quality-report.html
       - name: upload the encoder-quality reports
         if: always()
         uses: actions/upload-artifact@v7
@@ -195,6 +197,7 @@ jobs:
             aac-quality-report.html
             heaac-quality-report.html
             heaacv2-quality-report.html
+            vorbis-quality-report.html
             opus-quality-report.html
             opus-speech-quality-report.html
-          if-no-files-found: ignore
+          if-no-files-found: warn

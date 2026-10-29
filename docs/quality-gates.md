@@ -789,6 +789,7 @@ Floor notes recorded at the v1.0 bench pass:
 ## Reporting
 
 The nightly encoder-quality harness (stood up with the first lossy
-encoder) publishes an HTML report per run: per-track metrics vs references,
-deltas against the previous run, and ABX-ready clip pairs. The human
-listening protocol lives in `MAINTENANCE.md`.
+encoder) publishes one HTML report per gate on every run, uploaded as the
+`encoder-quality-report` artifact: per-track scores for our encoder beside
+its reference baseline, and the gate it is held to. The human listening
+protocol lives in `MAINTENANCE.md`.

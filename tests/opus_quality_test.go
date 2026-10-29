@@ -55,10 +55,10 @@ import (
 func TestOpusEncoderQuality(t *testing.T) {
 	testutil.EncoderQualityGate(t) // not part of the default loop; `make encoder-quality`
 	if raceEnabled {
-		// Single-goroutine numeric encode over the whole corpus: many times
-		// slower under the race detector for no concurrency coverage, like
-		// the opus conformance test. The nightly encoder-quality job runs it
-		// non-race and enforcing.
+		// Numeric encode over the whole corpus: many times slower under the
+		// race detector, like the opus conformance test. The sweep's cells
+		// run in parallel but share no encoder state. The nightly
+		// encoder-quality job runs it non-race and enforcing.
 		t.Skip("encoder-quality gate skipped under -race (runs non-race in the encoder-quality job)")
 	}
 	opusDemo, opusCompare := testutil.OpusTools(t)
@@ -66,13 +66,15 @@ func TestOpusEncoderQuality(t *testing.T) {
 	bitrates := []int{96, 128, 160}
 	complexity := 10
 	const meanGate, trackGate = 1.20, 1.5
-	const rate, channels = 48000, 2
+	const channels = 2
 
 	// Tuning aid, not part of the gate: WAXFLOW_OPUS_QUALITY_TRACKS and
 	// _BITRATES narrow the sweep (comma-separated track names / kbps values)
 	// so a single regressing cell reruns in seconds. The gate thresholds only
 	// mean anything over the full corpus, so a narrowed run reports and fails
-	// per-track but skips the mean gate.
+	// per-track but skips the mean gate. A -run pattern naming some of the
+	// sweep's cells (TestOpusEncoderQuality/sweep/128k/sample09r) narrows it
+	// the same way.
 	filtered := false
 	if v := os.Getenv("WAXFLOW_OPUS_QUALITY_TRACKS"); v != "" {
 		keep := map[string]bool{}
@@ -114,65 +116,63 @@ func TestOpusEncoderQuality(t *testing.T) {
 		kbps        int
 		qOurs, qLib float64
 		errRatio    float64
+		failed      bool // its subtest failed before scoring
 	}
 	var rows []row
+	var notes []string // why a bitrate's corpus mean went unjudged
 
-	for _, kbps := range bitrates {
+	cells := opusSweep(t, bitrates, corpus, func(t *testing.T, kbps int, track opusQualityTrack) opusScore {
+		s, _ := scoreOpusCell(t, opusDemo, opusCompare, track.pcm, channels, kbps, complexity)
+		return s
+	})
+	for bi, kbps := range bitrates {
 		logRatioSum, worst := 0.0, 0.0
 		worstName := ""
-		for _, track := range corpus {
-			frames := len(track.pcm) / channels
-
-			// Ours: encode, then decode with the reference decoder. The
-			// decode-only output leads the input by the declared pre-skip
-			// and covers at least the whole input (Finish pads the tail),
-			// so dropping the pre-skip aligns it sample-exactly.
-			packets, ranges := encodeOpusPackets(t, track.pcm, channels, kbps*1000, complexity)
-			// Per-iteration temp dir, removed immediately: t.TempDir()'s
-			// end-of-test cleanup would accumulate the whole sweep on /tmp.
-			bitDir, err := os.MkdirTemp("", "opusq-")
-			if err != nil {
-				t.Fatal(err)
+		ran, scored := 0, 0
+		for ti, track := range corpus {
+			c := cells[bi][ti]
+			if !c.ran {
+				continue
 			}
-			bitPath := filepath.Join(bitDir, "ours.bit")
-			if err := testutil.WriteOpusBitstream(bitPath, packets, ranges); err != nil {
-				t.Fatal(err)
+			ran++
+			if !c.scored {
+				rows = append(rows, row{name: track.name, kbps: kbps, failed: true})
+				t.Logf("%dk %-12s not scored (its subtest failed)", kbps, track.name)
+				continue
 			}
-			oursDec := testutil.OpusDemoDecode(t, opusDemo, bitPath, rate, channels)
-			os.RemoveAll(bitDir)
-			if len(oursDec) < opus.EncoderDelay*channels+len(track.pcm) {
-				t.Fatalf("%s: reference decode of our stream is short: %d samples, want >= %d",
-					track.name, len(oursDec)/channels, opus.EncoderDelay+frames)
-			}
-			ours := oursDec[opus.EncoderDelay*channels:]
-
-			// libopus: reference round trip, output lookahead-trimmed and
-			// aligned, shorter than the input by the encoder lookahead.
-			lib := testutil.OpusDemoRoundTrip(t, opusDemo, track.pcm, rate, channels, kbps*1000, complexity)
-
-			// Score both over the identical range against the identical
-			// original.
-			n := min(frames, min(len(ours)/channels, len(lib)/channels)) * channels
-			errOurs, qOurs := testutil.OpusCompareTool(t, opusCompare, track.pcm[:n], ours[:n], channels)
-			errLib, qLib := testutil.OpusCompareTool(t, opusCompare, track.pcm[:n], lib[:n], channels)
-
-			ratio := errOurs / max(errLib, 1e-12)
-			rows = append(rows, row{track.name, kbps, qOurs, qLib, ratio})
+			scored++
+			s := c.v
+			ratio := s.errOurs / max(s.errLib, 1e-12)
+			rows = append(rows, row{name: track.name, kbps: kbps, qOurs: s.qOurs, qLib: s.qLib, errRatio: ratio})
 			logRatioSum += math.Log(ratio)
 			if ratio > worst {
 				worst, worstName = ratio, track.name
 			}
 			t.Logf("%dk %-12s err_ours=%.4f err_lib=%.4f ratio=%.3f (Q %6.1f vs %6.1f)",
-				kbps, track.name, errOurs, errLib, ratio, qOurs, qLib)
+				kbps, track.name, s.errOurs, s.errLib, ratio, s.qOurs, s.qLib)
 			if ratio > trackGate {
 				t.Errorf("%dk %s: error ratio %.3f exceeds the per-track gate of %.1f", kbps, track.name, ratio, trackGate)
 			}
 		}
-		geoMean := math.Exp(logRatioSum / float64(len(corpus)))
-		t.Logf("bitrate=%dk: geometric-mean error ratio %.3f over %d tracks, worst %.3f (%s); gate mean<=%.2f track<=%.1f",
-			kbps, geoMean, len(corpus), worst, worstName, meanGate, trackGate)
-		if geoMean > meanGate && !filtered {
-			t.Errorf("%dk: geometric-mean error ratio %.3f exceeds the corpus gate of %.2f", kbps, geoMean, meanGate)
+		if ran == 0 {
+			continue // -run picked no cell at this bitrate
+		}
+		why := unjudged(ran, scored, len(corpus))
+		if filtered {
+			why = append(why, "WAXFLOW_OPUS_QUALITY_* is set")
+		}
+		if scored > 0 {
+			geoMean := math.Exp(logRatioSum / float64(scored))
+			t.Logf("bitrate=%dk: geometric-mean error ratio %.3f over %d tracks, worst %.3f (%s); gate mean<=%.2f track<=%.1f",
+				kbps, geoMean, scored, worst, worstName, meanGate, trackGate)
+			if len(why) == 0 && geoMean > meanGate {
+				t.Errorf("%dk: geometric-mean error ratio %.3f exceeds the corpus gate of %.2f", kbps, geoMean, meanGate)
+			}
+		}
+		if len(why) > 0 {
+			note := fmt.Sprintf("%dk: corpus mean not judged (%s)", kbps, strings.Join(why, ", "))
+			t.Log(note)
+			notes = append(notes, note)
 		}
 	}
 
@@ -180,8 +180,16 @@ func TestOpusEncoderQuality(t *testing.T) {
 		var b strings.Builder
 		fmt.Fprintf(&b, "<h1>Opus (CELT) encoder-quality report</h1>\n")
 		fmt.Fprintf(&b, "<p>opus_compare weighted-error ratio vs libopus at matched CBR, both decoded by the reference decoder, scored against the original (docs/quality-gates.md). Gate: geometric mean &le; %.2f, no track &gt; %.1f. Lower is better; 1.0 is parity.</p>\n", meanGate, trackGate)
+		for _, n := range notes {
+			fmt.Fprintf(&b, "<p><b>%s</b></p>\n", html.EscapeString(n))
+		}
 		fmt.Fprintf(&b, "<table border=1 cellpadding=4><tr><th>track</th><th>kbps</th><th>error ratio</th><th>Q ours</th><th>Q libopus</th></tr>\n")
 		for _, r := range rows {
+			if r.failed {
+				fmt.Fprintf(&b, "<tr><td>%s</td><td>%d</td><td colspan=3>not scored (its subtest failed)</td></tr>\n",
+					html.EscapeString(r.name), r.kbps)
+				continue
+			}
 			fmt.Fprintf(&b, "<tr><td>%s</td><td>%d</td><td>%.3f</td><td>%.1f</td><td>%.1f</td></tr>\n",
 				html.EscapeString(r.name), r.kbps, r.errRatio, r.qOurs, r.qLib)
 		}
@@ -203,8 +211,9 @@ func TestOpusEncoderQuality(t *testing.T) {
 // compared packet-by-packet against libopus's TOC bytes: agreement below 90%
 // blocks, below 95% warns.
 //
-// Everything else (determinism, sample-exactness, complexity 10, self-skip
-// and escalation env vars, report artifact) matches TestOpusEncoderQuality.
+// Everything else (the parallel sweep, determinism, sample-exactness,
+// complexity 10, self-skip and escalation env vars, report artifact) matches
+// TestOpusEncoderQuality.
 func TestOpusSpeechEncoderQuality(t *testing.T) {
 	testutil.EncoderQualityGate(t) // not part of the default loop; `make encoder-quality`
 	if raceEnabled {
@@ -224,74 +233,85 @@ func TestOpusSpeechEncoderQuality(t *testing.T) {
 		qOurs, qLib float64
 		errRatio    float64
 		agree       float64
+		failed      bool // its subtest failed before scoring
 	}
 	var rows []row
+	var notes []string // why a bitrate's corpus gates went unjudged
 
-	for _, kbps := range bitrates {
+	type speechScore struct {
+		opusScore
+		agree, pkts int // packets whose TOC mode matches libopus's, of those compared
+	}
+	cells := opusSweep(t, bitrates, corpus, func(t *testing.T, kbps int, track opusQualityTrack) speechScore {
+		s, packets := scoreOpusCell(t, opusDemo, opusCompare, track.pcm, channels, kbps, complexity)
+		// Packet-by-packet mode agreement from the TOC bytes.
+		libPkts := testutil.OpusDemoEncode(t, opusDemo, track.pcm, rate, channels, kbps*1000, complexity)
+		n := min(len(packets), len(libPkts))
+		agree := 0
+		for i := 0; i < n; i++ {
+			if tocModeOf(packets[i][0]) == tocModeOf(libPkts[i][0]) {
+				agree++
+			}
+		}
+		return speechScore{s, agree, n}
+	})
+	for bi, kbps := range bitrates {
 		logRatioSum, worst := 0.0, 0.0
 		worstName := ""
 		agreed, totalPkts := 0, 0
-		for _, track := range corpus {
-			frames := len(track.pcm) / channels
-
-			packets, ranges := encodeOpusPackets(t, track.pcm, channels, kbps*1000, complexity)
-			bitDir, err := os.MkdirTemp("", "opusq-")
-			if err != nil {
-				t.Fatal(err)
+		ran, scored := 0, 0
+		for ti, track := range corpus {
+			c := cells[bi][ti]
+			if !c.ran {
+				continue
 			}
-			bitPath := filepath.Join(bitDir, "ours.bit")
-			if err := testutil.WriteOpusBitstream(bitPath, packets, ranges); err != nil {
-				t.Fatal(err)
+			ran++
+			if !c.scored {
+				rows = append(rows, row{name: track.name, kbps: kbps, failed: true})
+				t.Logf("%dk %-8s not scored (its subtest failed)", kbps, track.name)
+				continue
 			}
-			oursDec := testutil.OpusDemoDecode(t, opusDemo, bitPath, rate, channels)
-			os.RemoveAll(bitDir)
-			if len(oursDec) < opus.EncoderDelay*channels+len(track.pcm) {
-				t.Fatalf("%s: reference decode of our stream is short: %d samples, want >= %d",
-					track.name, len(oursDec)/channels, opus.EncoderDelay+frames)
-			}
-			ours := oursDec[opus.EncoderDelay*channels:]
-
-			lib := testutil.OpusDemoRoundTrip(t, opusDemo, track.pcm, rate, channels, kbps*1000, complexity)
-
-			n := min(frames, min(len(ours)/channels, len(lib)/channels)) * channels
-			errOurs, qOurs := testutil.OpusCompareTool(t, opusCompare, track.pcm[:n], ours[:n], channels)
-			errLib, qLib := testutil.OpusCompareTool(t, opusCompare, track.pcm[:n], lib[:n], channels)
-
-			// Packet-by-packet mode agreement from the TOC bytes.
-			libPkts := testutil.OpusDemoEncode(t, opusDemo, track.pcm, rate, channels, kbps*1000, complexity)
-			nPkts := min(len(packets), len(libPkts))
-			trackAgree := 0
-			for i := 0; i < nPkts; i++ {
-				if tocModeOf(packets[i][0]) == tocModeOf(libPkts[i][0]) {
-					trackAgree++
-				}
-			}
-			agreed += trackAgree
-			totalPkts += nPkts
-
-			ratio := errOurs / max(errLib, 1e-12)
-			rows = append(rows, row{track.name, kbps, qOurs, qLib, ratio, float64(trackAgree) / float64(nPkts)})
+			scored++
+			s := c.v
+			agreed += s.agree
+			totalPkts += s.pkts
+			ratio := s.errOurs / max(s.errLib, 1e-12)
+			rows = append(rows, row{name: track.name, kbps: kbps, qOurs: s.qOurs, qLib: s.qLib, errRatio: ratio,
+				agree: float64(s.agree) / float64(s.pkts)})
 			logRatioSum += math.Log(ratio)
 			if ratio > worst {
 				worst, worstName = ratio, track.name
 			}
 			t.Logf("%dk %-8s err_ours=%.4f err_lib=%.4f ratio=%.3f (Q %6.1f vs %6.1f) mode-agree %d/%d",
-				kbps, track.name, errOurs, errLib, ratio, qOurs, qLib, trackAgree, nPkts)
+				kbps, track.name, s.errOurs, s.errLib, ratio, s.qOurs, s.qLib, s.agree, s.pkts)
 			if ratio > itemGate {
 				t.Errorf("%dk %s: error ratio %.3f exceeds the per-item gate of %.1f", kbps, track.name, ratio, itemGate)
 			}
 		}
-		geoMean := math.Exp(logRatioSum / float64(len(corpus)))
-		agreeFrac := float64(agreed) / float64(totalPkts)
-		t.Logf("bitrate=%dk: geometric-mean error ratio %.3f over %d items, worst %.3f (%s), mode agreement %.1f%%; gate mean<=%.2f item<=%.1f agree>=%.0f%%",
-			kbps, geoMean, len(corpus), worst, worstName, 100*agreeFrac, meanGate, itemGate, 100*agreeBlock)
-		if geoMean > meanGate {
-			t.Errorf("%dk: geometric-mean error ratio %.3f exceeds the corpus gate of %.2f", kbps, geoMean, meanGate)
+		if ran == 0 {
+			continue // -run picked no cell at this bitrate
 		}
-		if agreeFrac < agreeBlock {
-			t.Errorf("%dk: mode agreement %.1f%% below the blocking gate of %.0f%%", kbps, 100*agreeFrac, 100*agreeBlock)
-		} else if agreeFrac < agreeWarn {
-			t.Logf("%dk: NOTE mode agreement %.1f%% below the %.0f%% report threshold", kbps, 100*agreeFrac, 100*agreeWarn)
+		why := unjudged(ran, scored, len(corpus))
+		if scored > 0 {
+			geoMean := math.Exp(logRatioSum / float64(scored))
+			agreeFrac := float64(agreed) / float64(totalPkts)
+			t.Logf("bitrate=%dk: geometric-mean error ratio %.3f over %d items, worst %.3f (%s), mode agreement %.1f%%; gate mean<=%.2f item<=%.1f agree>=%.0f%%",
+				kbps, geoMean, scored, worst, worstName, 100*agreeFrac, meanGate, itemGate, 100*agreeBlock)
+			if len(why) == 0 {
+				if geoMean > meanGate {
+					t.Errorf("%dk: geometric-mean error ratio %.3f exceeds the corpus gate of %.2f", kbps, geoMean, meanGate)
+				}
+				if agreeFrac < agreeBlock {
+					t.Errorf("%dk: mode agreement %.1f%% below the blocking gate of %.0f%%", kbps, 100*agreeFrac, 100*agreeBlock)
+				} else if agreeFrac < agreeWarn {
+					t.Logf("%dk: NOTE mode agreement %.1f%% below the %.0f%% report threshold", kbps, 100*agreeFrac, 100*agreeWarn)
+				}
+			}
+		}
+		if len(why) > 0 {
+			note := fmt.Sprintf("%dk: corpus mean and mode agreement not judged (%s)", kbps, strings.Join(why, ", "))
+			t.Log(note)
+			notes = append(notes, note)
 		}
 	}
 
@@ -299,8 +319,16 @@ func TestOpusSpeechEncoderQuality(t *testing.T) {
 		var b strings.Builder
 		fmt.Fprintf(&b, "<h1>Opus (SILK/hybrid) speech encoder-quality report</h1>\n")
 		fmt.Fprintf(&b, "<p>opus_compare weighted-error ratio vs libopus at matched CBR on the TSP speech corpus (docs/quality-gates.md). Gate: geometric mean &le; %.2f, no item &gt; %.1f, mode agreement &ge; %.0f%%.</p>\n", meanGate, itemGate, 100*agreeBlock)
+		for _, n := range notes {
+			fmt.Fprintf(&b, "<p><b>%s</b></p>\n", html.EscapeString(n))
+		}
 		fmt.Fprintf(&b, "<table border=1 cellpadding=4><tr><th>item</th><th>kbps</th><th>error ratio</th><th>Q ours</th><th>Q libopus</th><th>mode agree</th></tr>\n")
 		for _, r := range rows {
+			if r.failed {
+				fmt.Fprintf(&b, "<tr><td>%s</td><td>%d</td><td colspan=4>not scored (its subtest failed)</td></tr>\n",
+					html.EscapeString(r.name), r.kbps)
+				continue
+			}
 			fmt.Fprintf(&b, "<tr><td>%s</td><td>%d</td><td>%.3f</td><td>%.1f</td><td>%.1f</td><td>%.1f%%</td></tr>\n",
 				html.EscapeString(r.name), r.kbps, r.errRatio, r.qOurs, r.qLib, 100*r.agree)
 		}
@@ -451,6 +479,96 @@ func loadOpusQualityCorpus(t *testing.T) []opusQualityTrack {
 		})
 	}
 	return corpus
+}
+
+// sweepCell is one (bitrate, corpus item) cell of an Opus quality sweep.
+type sweepCell[V any] struct {
+	ran    bool // -run picked it
+	scored bool // and it finished without failing
+	v      V
+}
+
+// opusSweep scores every (bitrate, item) cell as a parallel subtest named
+// sweep/<kbps>k/<item> and returns once all of them have finished. The cells
+// are independent and nearly all of a cell's time goes to the single-threaded
+// reference tools (opus_compare alone is ~90%), so they run as many at once as
+// -parallel allows (GOMAXPROCS by default). The gates then walk the cells in
+// corpus order, so the log and the report read as a serial run's would.
+func opusSweep[V any](t *testing.T, bitrates []int, corpus []opusQualityTrack,
+	score func(t *testing.T, kbps int, track opusQualityTrack) V) [][]sweepCell[V] {
+	cells := make([][]sweepCell[V], len(bitrates))
+	t.Run("sweep", func(t *testing.T) {
+		for bi, kbps := range bitrates {
+			cells[bi] = make([]sweepCell[V], len(corpus))
+			for ti, track := range corpus {
+				c := &cells[bi][ti]
+				t.Run(fmt.Sprintf("%dk/%s", kbps, track.name), func(t *testing.T) {
+					c.ran = true
+					t.Parallel()
+					c.v = score(t, kbps, track)
+					c.scored = true
+				})
+			}
+		}
+	})
+	return cells
+}
+
+// unjudged lists why one bitrate's corpus-level gates go unjudged: they mean
+// something only with every corpus item scored.
+func unjudged(ran, scored, total int) []string {
+	var why []string
+	if ran < total {
+		why = append(why, fmt.Sprintf("-run picked %d of %d", ran, total))
+	}
+	if ran > scored {
+		why = append(why, fmt.Sprintf("%d failed to score", ran-scored))
+	}
+	return why
+}
+
+// opusScore is one corpus item scored at one bitrate: the opus_compare
+// weighted error and quality for our encoder and for libopus.
+type opusScore struct {
+	errOurs, qOurs float64
+	errLib, qLib   float64
+}
+
+// scoreOpusCell encodes pcm (interleaved 16-bit 48 kHz) with our encoder and
+// with libopus at the same CBR target, decodes both with the reference
+// decoder, and scores both against pcm with the reference opus_compare. Our
+// packets come back too, for the speech gate's TOC comparison.
+func scoreOpusCell(t *testing.T, opusDemo, opusCompare string, pcm []int16, channels, kbps, complexity int) (opusScore, [][]byte) {
+	t.Helper()
+	const rate = 48000
+	frames := len(pcm) / channels
+
+	// Ours: encode, then decode with the reference decoder. The decode-only
+	// output leads the input by the declared pre-skip and covers at least the
+	// whole input (Finish pads the tail), so dropping the pre-skip aligns it
+	// sample-exactly.
+	packets, ranges := encodeOpusPackets(t, pcm, channels, kbps*1000, complexity)
+	bitPath := filepath.Join(t.TempDir(), "ours.bit")
+	if err := testutil.WriteOpusBitstream(bitPath, packets, ranges); err != nil {
+		t.Fatal(err)
+	}
+	oursDec := testutil.OpusDemoDecode(t, opusDemo, bitPath, rate, channels)
+	if len(oursDec) < opus.EncoderDelay*channels+len(pcm) {
+		t.Fatalf("reference decode of our stream is short: %d samples, want >= %d",
+			len(oursDec)/channels, opus.EncoderDelay+frames)
+	}
+	ours := oursDec[opus.EncoderDelay*channels:]
+
+	// libopus: reference round trip, output lookahead-trimmed and aligned,
+	// shorter than the input by the encoder lookahead.
+	lib := testutil.OpusDemoRoundTrip(t, opusDemo, pcm, rate, channels, kbps*1000, complexity)
+
+	// Score both over the identical range against the identical original.
+	n := min(frames, min(len(ours)/channels, len(lib)/channels)) * channels
+	var s opusScore
+	s.errOurs, s.qOurs = testutil.OpusCompareTool(t, opusCompare, pcm[:n], ours[:n], channels)
+	s.errLib, s.qLib = testutil.OpusCompareTool(t, opusCompare, pcm[:n], lib[:n], channels)
+	return s, packets
 }
 
 // encodeOpusPackets runs our encoder over interleaved 16-bit PCM and returns
