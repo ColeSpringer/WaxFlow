@@ -16,6 +16,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -213,6 +214,17 @@ type Server struct {
 
 	closeOnce sync.Once
 	closeErr  error
+
+	// hooks are test seams, set only through export_test.go.
+	hooks testHooks
+}
+
+// testHooks let a test hold a pipeline in place. pipelineDst wraps the cache
+// entry a progressive pipeline writes; hlsPublish runs before a variant worker
+// publishes segment n, with the worker's context.
+type testHooks struct {
+	pipelineDst func(io.Writer) io.Writer
+	hlsPublish  func(ctx context.Context, n int64)
 }
 
 // New validates cfg and builds a Server. The fail-closed rule is enforced

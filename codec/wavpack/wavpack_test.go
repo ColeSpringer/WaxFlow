@@ -101,6 +101,84 @@ func TestSyncOKRejects(t *testing.T) {
 	}
 }
 
+// legacyHead is the head of a pre-4.0 stream: the magic, the ckSize the
+// official suite's files carry for that version (2, 4 and 28 for 1 to 3), the
+// version, and zeros.
+func legacyHead(version uint16, ckSize uint32) []byte {
+	b := make([]byte, BlockHeaderLen+8)
+	copy(b, "wvpk")
+	binary.LittleEndian.PutUint32(b[4:], ckSize)
+	binary.LittleEndian.PutUint16(b[8:], version)
+	return b
+}
+
+// TestStreamHead: a WavPack head of any version is told apart from bytes that
+// only share the magic. A pre-4.0 head is shorter than a block header, so its
+// version is all there is to go on.
+func TestStreamHead(t *testing.T) {
+	odd := legacyHead(MinStreamVersion, 27)
+	tall := legacyHead(MinStreamVersion, 28)
+	tall[23] = 1
+	for _, tc := range []struct {
+		name    string
+		b       []byte
+		version int
+		ok      bool
+	}{
+		{"version 1", legacyHead(1, 2)[:10], 1, true},
+		{"version 2", legacyHead(2, 4), 2, true},
+		{"version 3", legacyHead(3, 28), 3, true},
+		{"a current block", firstBlock(t), 0x410, true},
+		{"a version before the decoder's", legacyHead(0x401, 28), 0x401, true},
+		{"a version after the decoder's", legacyHead(0x411, 28), 0x411, true},
+		{"an odd block size", odd, 0, false},
+		{"a sample count past the reference's bound", tall, 0, false},
+		{"a later version too short for its header", legacyHead(MinStreamVersion, 28)[:BlockHeaderLen-1], 0, false},
+		{"too short for the version", legacyHead(3, 28)[:9], 0, false},
+		{"no magic", append([]byte("wvpx"), legacyHead(3, 28)[4:]...), 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if v, ok := StreamHead(tc.b); v != tc.version || ok != tc.ok {
+				t.Errorf("StreamHead = %#x, %v; want %#x, %v", v, ok, tc.version, tc.ok)
+			}
+		})
+	}
+}
+
+func TestCheckStreamVersion(t *testing.T) {
+	for _, tc := range []struct {
+		version int
+		want    string // empty: decoded
+	}{
+		{1, "before 4.0 (version 1)"},
+		{3, "before 4.0 (version 3)"},
+		{0x401, "stream version 0x401 outside"},
+		{MinStreamVersion, ""},
+		{MaxStreamVersion, ""},
+		{0x411, "stream version 0x411 outside"},
+	} {
+		err := CheckStreamVersion(tc.version)
+		if tc.want == "" {
+			if err != nil {
+				t.Errorf("version %#x: %v, want it decoded", tc.version, err)
+			}
+			continue
+		}
+		if waxerr.CodeOf(err) != waxerr.CodeUnsupportedFormat || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("version %#x: %v, want unsupported-format naming %q", tc.version, err, tc.want)
+		}
+	}
+}
+
+// TestParseBlockHeaderNamesALegacyStream: a version 3 header is long enough to
+// reach the version check, which names it rather than quoting the range.
+func TestParseBlockHeaderNamesALegacyStream(t *testing.T) {
+	_, err := ParseBlockHeader(legacyHead(3, 28))
+	if waxerr.CodeOf(err) != waxerr.CodeUnsupportedFormat || !strings.Contains(err.Error(), "before 4.0") {
+		t.Fatalf("version 3 header: %v, want unsupported-format naming WavPack before 4.0", err)
+	}
+}
+
 // TestRefusalsNameTheSituation pins that every shape outside this decoder's
 // scope is refused by name. These are all legal WavPack, so the message has to
 // say what the file is, not that it is broken.

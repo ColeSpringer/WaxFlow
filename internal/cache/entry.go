@@ -308,7 +308,7 @@ func (e *Entry) maybeRelease() {
 		e.file = nil
 	}
 	if e.store != nil && !e.promoted {
-		e.store.dropAborted(e.dir)
+		e.store.dropAborted(e.dir, e.tmpPath)
 	}
 	e.mem = nil
 }

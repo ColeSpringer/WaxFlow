@@ -227,10 +227,10 @@ func (s *Server) trackFor(src *source.File, exact bool) (container.Track, error)
 			// Matroska source becomes the true decode end rather than the
 			// audio end it accidentally was, which is the shape an mp4 source
 			// already plans from.
-			// The measure's own flags come with it: it decoded to the true end
-			// of stream, so the length is authoritative and measureLength says
-			// so rather than leaving each caller to restamp. That is what lets
-			// a later exact caller reuse this entry, what stops a measured
+			// The measure's own flags come with it: it read to the true end of
+			// stream, so the length is authoritative and waxflow.MeasureLength
+			// says so rather than leaving each caller to restamp. That is what
+			// lets a later exact caller reuse this entry, what stops a measured
 			// track being measured again, and what lets a timeline accept an
 			// ASF or Matroska member the library otherwise refuses.
 			track.Samples, track.SamplesExact, track.SamplesAdvisory =

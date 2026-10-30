@@ -141,12 +141,39 @@ type BlockHeader struct {
 // format sniff-table entry.
 func Match(b []byte) bool { return len(b) >= 4 && string(b[:4]) == "wvpk" }
 
-// SyncOK reports whether b is a plausible block header, using the reference
-// decoder's own sync predicate: the magic, an even block size of at least 24
-// and under a megabyte, a stream version this decoder knows, and a sample
-// count under 3<<16. It is the cheap filter a boundary scan applies before
-// parsing.
-func SyncOK(b []byte) bool {
+// StreamHead reports whether b begins a WavPack stream, of any version, and
+// that version: a pre-4.0 head, which is shorter than a block header and has
+// only its version to go on, or a block header of the shape SyncOK requires
+// whatever its version. CheckStreamVersion says whether this build reads it.
+func StreamHead(b []byte) (version int, ok bool) {
+	if !Match(b) || len(b) < 10 {
+		return 0, false
+	}
+	if v := int(binary.LittleEndian.Uint16(b[8:])); legacyVersion(v) || blockShape(b) {
+		return v, true
+	}
+	return 0, false
+}
+
+// CheckStreamVersion returns nil for a stream version this build decodes, and
+// otherwise the unsupported-format refusal naming it.
+func CheckStreamVersion(version int) error {
+	switch {
+	case legacyVersion(version):
+		return unsupported("a stream from before 4.0 (version %d); this build reads WavPack 4.0 and later", version)
+	case version < MinStreamVersion || version > MaxStreamVersion:
+		return unsupported("stream version %#x outside the supported %#x..%#x",
+			version, MinStreamVersion, MaxStreamVersion)
+	}
+	return nil
+}
+
+// legacyVersion reports a version field from before 4.0: a different
+// bitstream behind the same magic.
+func legacyVersion(v int) bool { return v >= 1 && v <= 3 }
+
+// blockShape is SyncOK without its version window.
+func blockShape(b []byte) bool {
 	if !Match(b) || len(b) < BlockHeaderLen {
 		return false
 	}
@@ -156,10 +183,20 @@ func SyncOK(b []byte) bool {
 	if size&1 != 0 || size < BlockHeaderLen-8 || size >= 1<<20 {
 		return false
 	}
-	if ver := binary.LittleEndian.Uint16(b[8:]); ver < MinStreamVersion || ver > MaxStreamVersion {
+	return b[22] < 3 && b[23] == 0
+}
+
+// SyncOK reports whether b is a plausible block header, using the reference
+// decoder's own sync predicate: the magic, an even block size of at least 24
+// and under a megabyte, a stream version this decoder knows, and a sample
+// count under 3<<16. It is the cheap filter a boundary scan applies before
+// parsing.
+func SyncOK(b []byte) bool {
+	if !blockShape(b) {
 		return false
 	}
-	return b[22] < 3 && b[23] == 0
+	ver := binary.LittleEndian.Uint16(b[8:])
+	return ver >= MinStreamVersion && ver <= MaxStreamVersion
 }
 
 // ParseBlockHeader parses the 32-byte header at the head of b.
@@ -189,8 +226,7 @@ func ParseBlockHeader(b []byte) (BlockHeader, error) {
 	case h.Size < BlockHeaderLen:
 		return BlockHeader{}, malformed("block size %d below the %d-byte header", h.Size, BlockHeaderLen)
 	case h.StreamVersion < MinStreamVersion || h.StreamVersion > MaxStreamVersion:
-		return BlockHeader{}, unsupported("stream version %#x outside the supported %#x..%#x",
-			h.StreamVersion, MinStreamVersion, MaxStreamVersion)
+		return BlockHeader{}, CheckStreamVersion(h.StreamVersion)
 	case h.BlockSamples > maxBlockSamples:
 		return BlockHeader{}, malformed("block of %d samples exceeds %d", h.BlockSamples, maxBlockSamples)
 	case h.BlockSamples < 0 || h.TotalSamples < -1:

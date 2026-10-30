@@ -13,7 +13,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/colespringer/waxflow"
-	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/dsp/gain"
@@ -39,11 +38,6 @@ const playlistMediaType = "application/vnd.apple.mpegurl"
 // segment duration is degenerate for the source (a one-frame segDur on
 // an audiobook), and the playlist itself becomes the payload.
 const maxPlaylistSegments = 1 << 16
-
-// measureCeiling is the past-any-stream seek target that forces a
-// demuxer's exact-length walk (an IO-bound frame-index build, no
-// decode): Media.SeekSample lands at the true end of stream.
-const measureCeiling = int64(1) << 61
 
 // hlsParamNames is the closed parameter surface of the descriptor-form
 // HLS endpoints: the descriptor carries everything else.
@@ -79,7 +73,7 @@ type hlsSource struct {
 	// source). The worker re-anchors a freshly opened member's advisory
 	// declaration to it before slicing, so the run's bound check runs
 	// against the same total the mint and the plan validated the window on;
-	// see sliceMeasured.
+	// see waxflow.SliceMeasured.
 	SrcSamples int64
 	// Track is the probed, measured track the plan was computed from (for a
 	// windowed member, already narrowed through SpanTrack). A timeline hands
@@ -308,8 +302,8 @@ func (s *Server) resolveMember(ctx context.Context, req *hlsRequest, i int, ref 
 	}
 	// The pre-narrow total, recorded so the worker can re-anchor a freshly
 	// opened member's advisory declaration to the measure the window was
-	// validated against (sliceMeasured). Whenever a member is sliced, the
-	// exact branch above ran, so this is measured in every consulted case.
+	// validated against (waxflow.SliceMeasured). Whenever a member is sliced,
+	// the exact branch above ran, so this is measured in every consulted case.
 	srcSamples := track.Samples
 	// A timeline member's own stored window narrows its track through the
 	// same funnel the mint used (narrowMemberTrack), so the plan reads the
@@ -398,103 +392,16 @@ func hlsIdentity(desc hls.Descriptor, members []hlsSource) string {
 }
 
 // measureSamples forces a source's exact length, by the cheapest route the
-// opened media offers.
-//
-// Four of them, in order of what they cost. A demuxer that settles its length
-// at open has already answered, and the answer is taken without touching it
-// again: a WAV's byte-linear payload, an Ogg last-page granule, and a FLAC or
-// WavPack whose open verified its declared total against the payload. That arm
-// is a fast path rather than a separate route, since Walk on a demuxer that
-// defers nothing is a no-op, and it is what lets a test pin zero reads after
-// the open. A demuxer with a deferred walk (MP3, ADTS, Matroska, a fragmented
-// MP4) measures by finishing that walk, which reads headers and hops. A source
-// that settles neither way but names its positions exactly (a progressive
-// mp4's sample table, Ogg-FLAC's granules) is seeked past any possible end to
-// find where the stream really stops. Only a source whose positions are
-// themselves rounded (ASF) is decoded, since nothing cheaper is true; see
-// countDecoded.
+// opened media offers (see waxflow.MeasureLength). It returns the whole track,
+// because a walk settles the trims beside the length and the memo this fills
+// is what the copy rungs plan from (see container.Track.MidPadding).
 func (s *Server) measureSamples(src *source.File) (container.Track, error) {
 	med, err := s.eng.OpenStream(src, src.Ext)
 	if err != nil {
 		return container.Track{}, err
 	}
 	defer med.Close()
-	return measureLength(med)
-}
-
-// measureLength is measureSamples over an already-opened Media, which is
-// where the four routes are chosen between and so where they are tested.
-//
-// It returns the whole track and not just the count, because the walk route
-// settles more than a length: the trims a Matroska walk found are on the track
-// it refreshed and nowhere else, and the memo this fills is what the copy
-// rungs plan from (see container.Track.MidPadding). The other three routes
-// have nothing of their own to add, so they hand back the track they saw with
-// the count filled in.
-//
-// Every route returns a track that describes itself: the count is measured, so
-// it is exact and it is not advisory, whichever route found it. Handing back a
-// measured count still flagged advisory would be a track that contradicts
-// itself, and would leave every caller restamping the flags by hand.
-func measureLength(med format.Media) (container.Track, error) {
-	if t := med.Info().Default(); t.SamplesExact && t.Samples >= 0 {
-		return t, nil
-	}
-	if w, ok := med.(format.Walker); ok {
-		if err := w.Walk(); err != nil {
-			return container.Track{}, err
-		}
-		if t := med.Info().Default(); t.SamplesExact && t.Samples >= 0 {
-			return t, nil
-		}
-	}
-	t := med.Info().Default()
-	var n int64
-	var err error
-	if t.SamplesAdvisory {
-		n, err = countDecoded(med)
-	} else {
-		n, err = med.SeekSample(measureCeiling)
-	}
-	if err != nil {
-		return container.Track{}, err
-	}
-	t.Samples = n
-	t.SamplesExact, t.SamplesAdvisory = true, false
-	return t, nil
-}
-
-// countDecoded reads med to the end and counts what it delivered. It is the
-// only answer that is always right and the one that always costs the most, so
-// it is the last route and not the first.
-//
-// The seek past the end is a shortcut over this, and it is exact only while the
-// position a demuxer reports is exact: it answers where the landing claims to
-// be plus the frames decoded from there, so a container that names positions in
-// a time unit folds that rounding into the total. ASF does, and measured on
-// sine-s16.wma the shortcut comes back 33 samples under a read of the same
-// file. Those 33 are not cosmetic where this number is used: a timeline's
-// prefix sum carries the error into every member after it, a bounded slice
-// drops them, and an HLS playlist promises a tail it will not serve.
-//
-// SamplesAdvisory is the predicate because it is already the same fact. A
-// container earns the flag by stating a duration in a time unit instead of a
-// sample count (see container.Track), which is exactly the container whose
-// positions are rounded too.
-func countDecoded(med format.Media) (int64, error) {
-	buf := audio.Get(med.Info().Default().Fmt, audio.StandardChunk)
-	defer audio.Put(buf)
-	var n int64
-	for {
-		err := med.ReadChunk(buf)
-		if err == io.EOF {
-			return n, nil
-		}
-		if err != nil {
-			return 0, err
-		}
-		n += int64(buf.N)
-	}
+	return waxflow.MeasureLength(med)
 }
 
 // planHLSVariant maps one variant descriptor onto engine options and its
@@ -968,6 +875,9 @@ func (s *Server) handleHLSSegment(w http.ResponseWriter, r *http.Request) {
 			Spawn: s.hlsSpawner(req, variant),
 		})
 		if err != nil {
+			if r.Context().Err() != nil {
+				return // the client left while waiting; nobody reads an envelope
+			}
 			s.writeError(w, err)
 			return
 		}
@@ -1000,11 +910,17 @@ func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64,
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
+			// The session stops counting last, so idle means retired.
 			defer s.met.SessionsActive.Add(-1)
+			// Unpinned only after exit: the manager reads a running worker's
+			// progress as proof its segments are on disk.
 			defer s.store.Unpin(key)
-			defer release()
-			defer cancel()
-			exit(s.runHLSWorker(ctx, members, tl, sp, xfade, opts, plan, rmx, cut, variant, start, notify))
+			err := s.runHLSWorker(ctx, members, tl, sp, xfade, opts, plan, rmx, cut, variant, start, notify)
+			// The slot goes before exit wakes the waiters, one of which may
+			// spawn the next worker into it at once.
+			cancel()
+			release()
+			exit(err)
 		}()
 		return cancel, nil
 	}
@@ -1012,18 +928,20 @@ func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64,
 
 // logHLSWorker records a finished worker and passes its error through, so both
 // rungs report the same way and a session can be filtered by which one ran it.
-func (s *Server) logHLSWorker(ref, rung string, members int, start int64, err error) error {
-	return s.logHLSWorkerResult(ref, rung, members, start, nil, err)
+func (s *Server) logHLSWorker(ctx context.Context, ref, rung string, members int, start int64, err error) error {
+	return s.logHLSWorkerResult(ctx, ref, rung, members, start, nil, err)
 }
 
 // logHLSWorkerResult is logHLSWorker with the run's result, for the rung
 // that has one. A variant worker has no caller to warn, so the log line is
 // the whole surface; the clipped/truePeak keys appear only when the rung
 // measured (the count spans the priming feed, hence per worker, not summed).
-func (s *Server) logHLSWorkerResult(ref, rung string, members int, start int64,
+func (s *Server) logHLSWorkerResult(ctx context.Context, ref, rung string, members int, start int64,
 	res *waxflow.SegmentedResult, err error) error {
 	if err != nil {
-		s.log.Warn("hls worker failed", "src", ref, "rung", rung, "members", members, "start", start, "err", err)
+		// A seek restart cancels the worker it replaces; that is routine.
+		level, why := stopReason(ctx, err)
+		s.log.Log(ctx, level, "hls worker "+why, "src", ref, "rung", rung, "members", members, "start", start, "err", err)
 		return err
 	}
 	if res == nil {
@@ -1118,6 +1036,9 @@ func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool,
 	opts waxflow.TranscodeOptions, plan *waxflow.SegmentPlan, rmx *waxflow.RemuxSegmentPlan,
 	cut *waxflow.CutSegmentPlan, variant *cache.Variant, start int64, notify func(int64)) error {
 	publish := func(seg mp4.Segment) error {
+		if gate := s.hooks.hlsPublish; gate != nil {
+			gate(ctx, seg.Index)
+		}
 		if err := variant.WriteFile(segmentName(seg.Index), seg.Data); err != nil {
 			return err
 		}
@@ -1130,34 +1051,42 @@ func (s *Server) runHLSWorker(ctx context.Context, members []hlsSource, tl bool,
 	// writes are the ones the playlist's segment count and the cache key were
 	// computed for.
 	if rmx != nil {
-		return s.logHLSWorker(ref, rungName(rungRemux), len(members), start,
+		return s.logHLSWorker(ctx, ref, rungName(rungRemux), len(members), start,
 			s.runHLSRemuxWorker(ctx, members[0], opts, rmx, variant, start, publish))
 	}
 	// The cut rung, between rung 2 and rung 3, chosen at plan time for a span whose
 	// codec survives being moved. Passed rather than re-derived for the same reason
 	// remux is.
 	if cut != nil {
-		return s.logHLSWorker(ref, rungName(rungCut), len(members), start,
+		return s.logHLSWorker(ctx, ref, rungName(rungCut), len(members), start,
 			s.runHLSCutWorker(ctx, members[0], opts, sp, cut, variant, start, publish))
 	}
+	res, err := s.runHLSTranscodeWorker(ctx, members, tl, sp, xfadeSeconds, opts, plan, variant, start, publish)
+	return s.logHLSWorkerResult(ctx, ref, rungName(rungTranscode), len(members), start, res, err)
+}
+
+// runHLSTranscodeWorker is one variant worker on rung 3: the input decoded,
+// the init header if the variant lacks one, then the encoded segments.
+func (s *Server) runHLSTranscodeWorker(ctx context.Context, members []hlsSource, tl bool, sp span,
+	xfadeSeconds float64, opts waxflow.TranscodeOptions, plan *waxflow.SegmentPlan, variant *cache.Variant,
+	start int64, publish func(mp4.Segment) error) (*waxflow.SegmentedResult, error) {
 	med, err := s.openHLSMedia(ctx, members, tl, sp, xfadeSeconds, opts)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer med.Close()
 	if !variant.Has("init.mp4") {
 		init, err := s.eng.InitSegment(plan, opts)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if err := variant.WriteFile("init.mp4", init); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	res, err := s.eng.TranscodeSegmentsMedia(ctx, med, opts,
+	return s.eng.TranscodeSegmentsMedia(ctx, med, opts,
 		waxflow.SegmentedOptions{SegmentSamples: plan.SegmentSamples, StartSegment: start},
 		publish)
-	return s.logHLSWorkerResult(ref, rungName(rungTranscode), len(members), start, res, err)
 }
 
 // openHLSMedia opens a worker's input: the source itself for a single-track
@@ -1204,35 +1133,6 @@ func (s *Server) openHLSMedia(ctx context.Context, members []hlsSource, tl bool,
 	return waxflow.Concat(srcs, copts)
 }
 
-// sliceMeasured bounds med to sp for a run whose plan validated the window
-// against srcSamples, the source's measured total (negative means unknown,
-// and leaves the declaration alone).
-//
-// Slice re-derives its track from the media it is handed, and a freshly
-// opened media declares its header total, which for an advisory container
-// can sit under the audio it holds (Matroska's by up to a millisecond; see
-// SpanTrack's bound note). The mint and the plan validated the window
-// against the measured total, so without re-anchoring, a window edge inside
-// that gap would refuse here at every open: the playlist would mint and its
-// segments would fail, permanently, which is the exact "problems surface at
-// the mint" promise inverted. Replacing the declared count with the measure
-// puts one total under the mint, the plan, and the run.
-//
-// The refusal this bound gave a lying source is not lost, it moves to
-// delivery, where its real teeth always were: a bounded slice that runs dry
-// fails endOfSource by name, and a timeline member is held to its recorded
-// length on advance. Slice takes ownership of med; on error this closes
-// what it did not take.
-func sliceMeasured(med format.Media, sp span, srcSamples int64) (format.Media, error) {
-	med = waxflow.MeasuredMedia(med, srcSamples)
-	sl, err := waxflow.Slice(med, sp.from, sp.end())
-	if err != nil {
-		med.Close()
-		return nil, err
-	}
-	return sl, nil
-}
-
 // openSlicedMember opens m, bounded to sp when sp narrows it: a timeline
 // member's own stored window, or the descriptor span on a single source.
 // The zero span opens the member untouched.
@@ -1241,7 +1141,9 @@ func (s *Server) openSlicedMember(ctx context.Context, m hlsSource, sp span) (fo
 	if err != nil || !sp.narrowed() {
 		return med, err
 	}
-	return sliceMeasured(med, sp, m.SrcSamples)
+	// Against the measured total the mint and plan validated the window with,
+	// so a window edge in an advisory gap opens here too.
+	return waxflow.SliceMeasured(med, m.SrcSamples, sp.from, sp.end())
 }
 
 // openMember resolves one source, enforces the identity the plan was made

@@ -211,12 +211,3 @@ func variantSize(dir string) int64 {
 	}
 	return total
 }
-
-// pruneVariantTemps removes write-interrupted temp files a crash left in
-// a variant directory; the published files around them stay valid.
-func pruneVariantTemps(dir string) {
-	matches, _ := filepath.Glob(filepath.Join(dir, "*.tmp-*"))
-	for _, m := range matches {
-		os.Remove(m)
-	}
-}

@@ -43,7 +43,7 @@ type fragEntry struct {
 // Not "it has nothing to do", which would be the other defensible answer, but
 // two concrete consequences. Settling a progressive track through SettleLength
 // would flip SamplesExact on a sample table nobody verified, which caps every
-// progressive AAC decode at the table's total and hands measureLength a fast
+// progressive AAC decode at the table's total and hands MeasureLength a fast
 // path it has not earned. And projectedLength asks Walked before a pipe
 // transcode commits a length into headers it cannot patch: a progressive movie
 // answering false would run a no-op confirm walk, still answer false, and

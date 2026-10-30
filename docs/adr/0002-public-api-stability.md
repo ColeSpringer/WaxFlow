@@ -288,3 +288,14 @@ surplus frames as padding), so a data track addressed past that count is
 past the audio whatever the file holds behind it. A split job carries
 `skip`, the pieces it does not write; its outputs are named and indexed
 by what it wrote.
+
+## Amendment (2026-10-29): a WavPack stream in a WAV is refused by name
+
+A WAV whose data chunk holds a WavPack stream now fails to open with
+`unsupported-format`. Every WavPack file before 4.0 is written that way
+(the source's WAV header, then the compressed stream where the samples
+go), and such a file used to open as PCM and decode its compressed bytes
+as noise. A bare stream of a version this build does not decode, pre-4.0
+included, is refused for its version where it used to fail as unparsable.
+It is a behavioural break taken for the data-track amendment's reason: a
+refusal replaces a silently wrong decode.

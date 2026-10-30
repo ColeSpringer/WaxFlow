@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -10,10 +9,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxflow"
-	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/container"
-	"github.com/colespringer/waxflow/format"
-	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/source"
 )
 
@@ -224,144 +220,6 @@ func TestTrackForKeysBySource(t *testing.T) {
 	}
 }
 
-// TestMeasureLengthTakesTheCheapestRoute pins the three routes to an exact
-// length, which differ only in what they cost: a decode is the last resort,
-// not the first.
-//
-// The MP3 cell is also the correctness half. Its Xing count promises audio the
-// truncated file does not hold, and the measure has to come back with the
-// audio rather than the promise.
-func TestMeasureLengthTakesTheCheapestRoute(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "testdata", "sine-cbr128.mp3"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cut := raw[:len(raw)-100]
-	// The walk's own answer, which a tolerant consumer is the only one to get:
-	// the file is damaged, so a strict probe of it refuses outright.
-	tol, err := format.Open(container.BytesSource(cut), "mp3", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tol.Close()
-	if err := tol.(format.Walker).Walk(); err != nil {
-		t.Fatal(err)
-	}
-	want := tol.Info().Default().Samples
-	if want >= 22050 {
-		t.Fatalf("the walk settled at %d; this cell needs a count short of the declared 22050", want)
-	}
-
-	med, err := format.Open(container.BytesSource(cut), "mp3", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer med.Close()
-	got, err := measureLength(med)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Samples != want {
-		t.Errorf("measured %d, the walk settles at %d", got.Samples, want)
-	}
-
-	// A Matroska Opus track takes the walk route: no open pays the cluster
-	// walk, so the estimate the headers state has to be replaced by reading,
-	// and the walk is the cheapest reading there is (no decode, no bisection).
-	webm, err := os.ReadFile(filepath.Join("..", "container", "mka", "testdata", "seed-opus.webm"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cs := &testutil.CountingSource{Src: container.BytesSource(webm)}
-	wm, err := format.Open(cs, "webm", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer wm.Close()
-	opened := wm.Info().Default()
-	if !opened.SamplesAdvisory {
-		t.Fatalf("this cell needs an open that estimates; got %d (exact %v)", opened.Samples, opened.SamplesExact)
-	}
-	cs.Reset()
-	n, err := measureLength(wm)
-	if err != nil {
-		t.Fatal(err)
-	}
-	strict, err := format.Probe(container.BytesSource(webm), "webm", &format.Options{Strict: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := strict.Default().Samples; n.Samples != want {
-		t.Errorf("measured %d, a strict probe walks to %d", n.Samples, want)
-	}
-	if cs.Reads == 0 {
-		t.Error("the measure read nothing; the walk it is supposed to take reads the clusters")
-	}
-}
-
-// TestMeasureAgreesWithTheDecodeOnARoundedContainer is the fourth route, and
-// the reason it exists. ASF names its positions in milliseconds, so a seek past
-// the end answers where the landing claims to be plus the frames decoded from
-// there, and the rounding up to that landing lands in the total: sine-s16.wma
-// comes back 33 samples under a read of the same file.
-//
-// Those 33 are the kind of wrong this measure exists to prevent. A timeline's
-// prefix sum carries them into every member after it, a bounded slice drops
-// them, and an HLS playlist promises a tail it will not serve. So a container
-// whose own positions are rounded is decoded instead.
-func TestMeasureAgreesWithTheDecodeOnARoundedContainer(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "testdata", "sine-s16.wma"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	open := func() format.Media {
-		med, err := format.Open(container.BytesSource(raw), "wma", nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return med
-	}
-
-	med := open()
-	defer med.Close()
-	if tr := med.Info().Default(); !tr.SamplesAdvisory {
-		t.Fatalf("the fixture's length is not advisory (%+v); this cell needs a rounded container", tr)
-	}
-	got, err := measureLength(med)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// The oracle is a read of the same file, which is what every consumer of
-	// this number will get.
-	lin := open()
-	defer lin.Close()
-	buf := audio.Get(lin.Info().Default().Fmt, audio.StandardChunk)
-	defer audio.Put(buf)
-	var want int64
-	for {
-		err := lin.ReadChunk(buf)
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		want += int64(buf.N)
-	}
-	if got.Samples != want {
-		t.Errorf("measured %d, a read of the same file delivers %d", got.Samples, want)
-	}
-
-	// And the shortcut it declines is still wrong, so the route is doing work
-	// rather than arriving at the same place by luck.
-	sk := open()
-	defer sk.Close()
-	if landed, err := sk.SeekSample(measureCeiling); err == nil && landed == want {
-		t.Errorf("a seek past the end answered %d too; this cell no longer pins anything", landed)
-	}
-}
-
 // trackForFile is trackForEnv for one fixture copied verbatim from anywhere in
 // the tree, for the cells whose point is a format other than a bare MP3.
 func trackForFile(t *testing.T, src, name string) (*Server, *source.File) {
@@ -496,69 +354,5 @@ func TestTrackForCarriesTheWalksTrims(t *testing.T) {
 	}
 	if track.Padding != MidTrimEndPad {
 		t.Errorf("the memo carries Padding %d, want the final block's %d", track.Padding, MidTrimEndPad)
-	}
-}
-
-// TestMeasureLengthWalksAFragmentedMP4 pins the route a fragmented movie now
-// takes. It used to have no length and no walk, so the measure seeked past the
-// end, which read every moof payload in the file to find each tfdt; now the
-// walk reads one moof header per fragment and the seek route is gone.
-//
-// Zero decoder work is the sharp half: the walk reads moof headers and skips
-// every mdat by its own, so the sample data is never touched.
-func TestMeasureLengthWalksAFragmentedMP4(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "container", "mp4", "testdata", "ima4-frag.mov"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cs := &testutil.CountingSource{Src: container.BytesSource(raw)}
-	med, err := format.Open(cs, "mov", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer med.Close()
-	if format.MediaWalked(med) {
-		t.Fatal("this cell needs a source with a deferred walk")
-	}
-	cs.Reset()
-	got, err := measureLength(med)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !got.SamplesExact || got.Samples <= 0 {
-		t.Fatalf("measured %d (exact %v), want a positive exact count", got.Samples, got.SamplesExact)
-	}
-	if cs.Bytes >= int64(len(raw)) {
-		t.Errorf("the measure read %d bytes of a %d-byte file; a moof walk reads headers, not payloads",
-			cs.Bytes, len(raw))
-	}
-
-	// The oracle: a walked read of the same file delivers the same count. It
-	// has to be walked, because an un-walked read of a fragmented movie
-	// delivers whole decoded blocks past the trun sum; see
-	// TestFragmentedLengthWalkedAndNot, which pins both numbers.
-	lin, err := format.Open(container.BytesSource(raw), "mov", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lin.Close()
-	if err := format.WalkMedia(lin); err != nil {
-		t.Fatal(err)
-	}
-	buf := audio.Get(lin.Info().Default().Fmt, audio.StandardChunk)
-	defer audio.Put(buf)
-	var want int64
-	for {
-		err := lin.ReadChunk(buf)
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		want += int64(buf.N)
-	}
-	if got.Samples != want {
-		t.Errorf("the walk measured %d, a read delivers %d", got.Samples, want)
 	}
 }

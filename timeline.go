@@ -726,23 +726,10 @@ type ConcatSource struct {
 	// SamplesAdvisory), because that is the declaration the run enforces. A
 	// container that only rounds a duration into a sample count is refused
 	// when the timeline is planned, not when the seam breaks; measure such a
-	// member first and hand the measured length here.
-	//
-	// The measurement that always works is to read the member to io.EOF and
-	// count what it delivers:
-	//
-	//	track.Samples, track.SamplesAdvisory = counted, false
-	//
-	// Nothing is truncated, so nothing is lost, and it costs a full decode.
-	//
-	// A seek past any length is the cheap alternative, since a landing is
-	// clamped to the end of stream, but it does not produce the same number:
-	// a container that seeks by time lands under what its own decode goes on
-	// to deliver (ASF by up to a millisecond, since its index is in packet
-	// presentation times). A member measured that way has to be bound to the
-	// landing as well, by opening it through Slice over a Media whose Info
-	// reports the measured length. That is what the daemon does, and why its
-	// album mode accepts sources a library caller's does not.
+	// member first with MeasureLength and hand the track it returns here.
+	// That is what the daemon does. MeasureLength takes the cheapest route to
+	// the number the decode delivers, which for a container that seeks by
+	// time (ASF) is a full decode, since a seek past the end lands under it.
 	//
 	// It is also why a Concat implements no format.LengthConfirmer while a
 	// span does: confirming a member's length behind the caller's back would
@@ -924,7 +911,7 @@ func concatLayout(tracks []container.Track, opts ConcatOptions) (env audio.Forma
 			}
 			return audio.Format{}, nil, nil, 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
 				"waxflow: timeline member %d %s; measure it before planning a timeline "+
-					"(read it to the end and count what it delivers)", i, what))
+					"(waxflow.MeasureLength)", i, what))
 		}
 		env.Rate = max(env.Rate, t.Fmt.Rate)
 		env.Channels = max(env.Channels, t.Fmt.Channels)

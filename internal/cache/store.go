@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -136,10 +137,10 @@ func (s *Store) scan() error {
 				os.RemoveAll(dir)
 				continue
 			}
+			pruneTemps(dir)
 			if meta.Kind == KindHLS {
 				// A variant's size lives in its files, not its meta (born
-				// before its segments); interrupted temp writes are debris.
-				pruneVariantTemps(dir)
+				// before its segments).
 				meta.Bytes = variantSize(dir)
 			}
 			s.index[Key(ent.Name())] = &indexEntry{size: meta.Bytes, lastAccess: mtime, meta: meta}
@@ -147,6 +148,16 @@ func (s *Store) scan() error {
 		}
 	}
 	return nil
+}
+
+// pruneTemps removes the temp files in an entry directory. At boot nothing is
+// in flight, so each is debris: a write a crash interrupted, or a removal that
+// failed at runtime. The published files around them stay valid.
+func pruneTemps(dir string) {
+	matches, _ := filepath.Glob(filepath.Join(dir, "*.tmp-*"))
+	for _, m := range matches {
+		os.Remove(m)
+	}
 }
 
 func readMeta(dir string) (Meta, time.Time, error) {
@@ -244,6 +255,13 @@ func (s *Store) Begin(key Key, meta Meta) (*Entry, error) {
 	// file must never be truncated by a retry on the same key.
 	tmp := filepath.Join(dir, fmt.Sprintf("out.%s.tmp-%d", meta.Ext, s.tmpSeq.Add(1)))
 	f, err := s.createFile(tmp)
+	if errors.Is(err, fs.ErrNotExist) {
+		// A predecessor's release removes the key's directory once it is
+		// empty, which can land between the MkdirAll and the create.
+		if err = os.MkdirAll(dir, 0o755); err == nil {
+			f, err = s.createFile(tmp)
+		}
+	}
 	if err != nil {
 		os.Remove(dir) // best effort; fails harmlessly when non-empty
 		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "cache: creating entry file", err)
@@ -323,16 +341,15 @@ func (s *Store) noteDegraded(key Key, err error) {
 	s.unregister(key)
 }
 
-// dropAborted removes a never-promoted entry's debris.
-func (s *Store) dropAborted(dir string) {
+// dropAborted removes a never-promoted entry's temp file, and its directory
+// if nothing else is left there. Only its own: a successor on the same key may
+// already be writing a temp file beside it.
+func (s *Store) dropAborted(dir, tmpPath string) {
 	if dir == "" {
 		return
 	}
-	matches, _ := filepath.Glob(filepath.Join(dir, "out.*.tmp-*"))
-	for _, m := range matches {
-		os.Remove(m)
-	}
-	os.Remove(dir) // only if empty; a promoted sibling keeps it
+	os.Remove(tmpPath)
+	os.Remove(dir) // only if empty; a successor or a promoted sibling keeps it
 }
 
 // dropIndexed removes one completed entry (eviction or invalidation).

@@ -385,6 +385,60 @@ func TestDemuxRejectsUnsupported(t *testing.T) {
 	}
 }
 
+// TestDemuxRefusesWavPackPayload: WavPack before 4.0 kept the source's WAV
+// header and put its own stream where the samples go, so the file opened as
+// PCM and decoded to noise. A WavPack stream in the data chunk is refused by
+// name; a payload that only spells the magic still reads as PCM.
+func TestDemuxRefusesWavPackPayload(t *testing.T) {
+	head := func(version uint16, ckSize uint32) []byte {
+		b := make([]byte, 64)
+		copy(b, "wvpk")
+		le.PutUint32(b[4:], ckSize)
+		le.PutUint16(b[8:], version)
+		return b
+	}
+	wav := func(payload []byte) []byte { return wavHeader(1, 2, 44100, 4, 16, nil, payload, -1) }
+	// The suite's legacy files declare the data chunk at the original PCM
+	// size, far longer than the compressed stream behind it.
+	oversized := wav(head(3, 28))
+	le.PutUint32(oversized[bytes.Index(oversized, []byte("data"))+4:], 5020200)
+
+	for _, tc := range []struct {
+		name   string
+		raw    []byte
+		strict bool
+		want   string // empty: opens as PCM
+	}{
+		{"version 1", wav(head(1, 2)), false, "before 4.0 (version 1)"},
+		{"version 3", wav(head(3, 28)), false, "before 4.0 (version 3)"},
+		{"version 4.07", wav(head(0x407, 28)), false, "its own .wv file"},
+		{"a version before the decoder's", wav(head(0x401, 28)), false, "stream version 0x401 outside"},
+		{"a version after the decoder's", wav(head(0x411, 28)), false, "stream version 0x411 outside"},
+		// Under Strict the clamp is an error, so the refusal must come first or
+		// a strict open calls the file damaged.
+		{"version 3, oversized data chunk, strict", oversized, true, "before 4.0 (version 3)"},
+		// An odd block size is no WavPack header, so these are samples that
+		// happen to spell the magic.
+		{"magic without a header's shape", wav(head(0x407, 27)), false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, err := NewDemuxer(container.BytesSource(tc.raw), &DemuxerOptions{Strict: tc.strict})
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("a PCM payload spelling the magic was refused: %v", err)
+				}
+				if c := d.Tracks()[0].Codec; c != codec.PCM {
+					t.Errorf("codec = %s, want pcm", c)
+				}
+				return
+			}
+			if !errors.Is(err, waxerr.ErrUnsupportedFormat) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want unsupported-format naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestDemuxClampsTruncatedData(t *testing.T) {
 	cfg := pcm.Config{Encoding: pcm.SignedInt, Bits: 16}
 	f := cfg.PCMFormat(8000, 2, audio.DefaultLayout(2))

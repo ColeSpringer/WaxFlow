@@ -371,6 +371,46 @@ func TestRejectsNonWavPack(t *testing.T) {
 	}
 }
 
+// TestLegacyStreamRefusedByName: a pre-4.0 stream fails the current sync
+// predicate, and is refused as what it is rather than as unparsable. The
+// ckSize per version is the official suite's.
+func TestLegacyStreamRefusedByName(t *testing.T) {
+	for _, tc := range []struct {
+		version uint16
+		ckSize  uint32
+	}{{1, 2}, {2, 4}, {3, 28}} {
+		t.Run(fmt.Sprint("version ", tc.version), func(t *testing.T) {
+			raw := make([]byte, 4096)
+			copy(raw, "wvpk")
+			binary.LittleEndian.PutUint32(raw[4:], tc.ckSize)
+			binary.LittleEndian.PutUint16(raw[8:], tc.version)
+			_, err := wv.NewDemuxer(container.BytesSource(raw), nil)
+			if !errors.Is(err, waxerr.ErrUnsupportedFormat) || !strings.Contains(err.Error(), "before 4.0") {
+				t.Fatalf("error = %v, want unsupported-format naming WavPack before 4.0", err)
+			}
+		})
+	}
+}
+
+// TestOutOfRangeVersionRefusedByName: a block header whose version is past
+// either end of what this build decodes fails the sync predicate too, and is
+// refused for its version rather than as unparsable.
+func TestOutOfRangeVersionRefusedByName(t *testing.T) {
+	for _, version := range []uint16{0x401, 0x411} {
+		t.Run(fmt.Sprintf("%#x", version), func(t *testing.T) {
+			raw := make([]byte, 4096)
+			copy(raw, "wvpk")
+			binary.LittleEndian.PutUint32(raw[4:], 24)
+			binary.LittleEndian.PutUint16(raw[8:], version)
+			_, err := wv.NewDemuxer(container.BytesSource(raw), nil)
+			want := fmt.Sprintf("stream version %#x outside", version)
+			if !errors.Is(err, waxerr.ErrUnsupportedFormat) || !strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %v, want unsupported-format naming %q", err, want)
+			}
+		})
+	}
+}
+
 // TestLeadingMetadataBlock covers the sample-free block an encoder can write
 // before the audio: it is stepped over rather than delivered as a packet.
 func TestLeadingMetadataBlock(t *testing.T) {

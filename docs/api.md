@@ -946,6 +946,15 @@ advisory length that is two samples out desyncs every seam after it. That
 measuring is what a `POST /jobs` for a cold MP3 queue waits on; a queue
 already minted as a timeline (or any queue of FLACs) measures nothing.
 
+**A merge always decodes and re-encodes its members**, so any mix of codecs
+merges. There is no copy merge, by decision: joining a lossy codec's parts
+(MP3, AAC, Opus, Vorbis) without re-encoding would not be gapless, since each
+part's encoder priming and flush stay inside the joined stream, and no
+container every player honours can trim them mid-stream (ADR-0011). A
+caller merging lossy parts should pass a `bitrate` derived from its sources
+rather than take the encoder default, which can land above what the parts
+carried.
+
 `split` cuts one `src` at `cuts` into N+1 pieces and writes the ones it
 does not `skip`, one output each. Cut points are **source sample offsets,
 strictly ascending, and interior**: `0` is implied before

@@ -1458,21 +1458,20 @@ func (r *Runner) runSplit(ctx context.Context, j *Job) error {
 		if err != nil {
 			return err
 		}
+		// The bound the spans were cut against has to be the bound the run
+		// enforces: SpanTrack holds each piece to the track its own media
+		// declares, and an advisory container's declaration can sit under the
+		// audio it holds, so a piece inside that gap would refuse here with its
+		// predecessors already written. Only a length this actually measured
+		// is adopted; an embedder with no MeasureTrack got the declaration
+		// verbatim, and marking an estimate exact is the opposite of what that
+		// caller asked for.
+		bound := int64(-1)
 		if measured {
-			// The bound the spans were cut against has to be the bound the run
-			// enforces: SpanTrack holds each piece to the track its own media
-			// declares, and an advisory container's declaration can sit under
-			// the audio it holds, so a piece inside that gap would refuse here
-			// with its predecessors already written. Only a length this
-			// actually measured is adopted; an embedder with no MeasureTrack
-			// got the declaration verbatim, and marking an estimate exact is
-			// the opposite of what that caller asked for.
-			med = waxflow.MeasuredMedia(med, srcSamples)
+			bound = srcSamples
 		}
-		// Slice takes ownership, so a failure here closes what it did not take.
-		sl, err := waxflow.Slice(med, sp[0], sp[1])
+		sl, err := waxflow.SliceMeasured(med, bound, sp[0], sp[1])
 		if err != nil {
-			med.Close()
 			return err
 		}
 		plan, err := r.cfg.Engine.PlanTranscode(sl.Info().Default(), opts)
@@ -1487,6 +1486,12 @@ func (r *Runner) runSplit(ctx context.Context, j *Job) error {
 		sl.Close()
 		if err != nil {
 			return err
+		}
+		// A piece is never empty, so zero samples at any output rate is a seek
+		// that landed past the audio, refused rather than delivered.
+		if out.Samples == 0 {
+			return waxerr.New(waxerr.CodeInternal, fmt.Sprintf(
+				"jobs: %s: the source delivered no samples from sample %d", out.File, sp[0]))
 		}
 		outs = append(outs, *out)
 		if span > 0 {

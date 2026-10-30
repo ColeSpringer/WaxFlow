@@ -85,11 +85,10 @@ var wavpackRefused = map[string]string{
 	"num_channels/multichannel-6.wv": "hybrid",
 }
 
-// wavpackLegacyWAV are the suite's pre-4.0 members. They are a different
-// bitstream and out of scope, and they never reach this decoder to be refused:
-// WavPack before 4.0 prepended the source WAV header, so the sniff table
-// resolves them as RIFF, exactly as the suite readme warns every WAV-based
-// player does. Pinning that keeps the split honest about where they land.
+// wavpackLegacyWAV are the suite's pre-4.0 members, a different bitstream and
+// out of scope. WavPack before 4.0 prepended the source WAV header, so the
+// sniff table resolves them as RIFF, and the WAV driver refuses them by name
+// instead of reading the compressed stream as PCM.
 var wavpackLegacyWAV = []string{
 	"legacy/vers-10.wv",
 	"legacy/vers-20.wv",
@@ -282,23 +281,19 @@ func TestWavPackSuiteUnreadable(t *testing.T) {
 	}
 }
 
-// TestWavPackSuiteLegacyResolvesAsWAV pins where the pre-4.0 members land: the
-// wav driver, because they carry the original WAV header. They are out of
-// scope either way, but the reason matters, since it is why they never appear
-// in the refusal table.
-func TestWavPackSuiteLegacyResolvesAsWAV(t *testing.T) {
+// TestWavPackSuiteLegacyRefusedByName: a pre-4.0 member opens nowhere, under
+// either probe. It used to resolve as a WAV and decode to noise, with only the
+// oversized data chunk's clamp warning to fail a strict probe.
+func TestWavPackSuiteLegacyRefusedByName(t *testing.T) {
 	for _, name := range wavpackLegacyWAV {
 		t.Run(name, func(t *testing.T) {
 			raw := suiteFile(t, name)
-			info, err := waxflow.New().Probe(container.BytesSource(raw), "wv", nil)
-			if err != nil {
-				t.Skipf("pre-4.0 sample does not probe at all: %v", err)
-			}
-			if info.Container == "wavpack" {
-				t.Fatalf("a pre-4.0 stream resolved to the wavpack driver, which cannot decode it")
-			}
-			if info.Container != "wav" {
-				t.Errorf("container = %q, want wav (the prepended source header)", info.Container)
+			for _, opts := range []*waxflow.ProbeOptions{nil, {Strict: true}} {
+				_, err := waxflow.New().Probe(container.BytesSource(raw), "wv", opts)
+				if !errors.Is(err, waxerr.ErrUnsupportedFormat) || !strings.Contains(err.Error(), "before 4.0") {
+					t.Errorf("probe (strict %v) = %v, want unsupported-format naming WavPack before 4.0",
+						opts != nil, err)
+				}
 			}
 		})
 	}

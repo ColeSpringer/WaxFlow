@@ -492,8 +492,8 @@ func (s *Server) timelineNeedsJob(srcs []*source.File) (bool, error) {
 		// different reasons and the gate has to know about both. A deferred
 		// walk is a whole-file pass; a container whose positions are rounded
 		// (ASF) cannot be measured by any walk or seek at all and is decoded
-		// (see measureLength). Without this arm a cold timeline over a WMA
-		// minted inline and paid for that decode inside the request.
+		// (see waxflow.MeasureLength). Without this arm a cold timeline over a
+		// WMA minted inline and paid for that decode inside the request.
 		if !track.SamplesExact && (!walked || track.SamplesAdvisory) {
 			return true, nil
 		}

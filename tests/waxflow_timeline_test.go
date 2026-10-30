@@ -1024,7 +1024,7 @@ func TestConcatSeekMixedRatesLandsExact(t *testing.T) {
 }
 
 // TestConcatSeekPastEnd pins the end-of-stream landing a single Media gives,
-// which is what the exact-length walk (measureSamples) rides on.
+// which is what MeasureLength's seek route rides on.
 func TestConcatSeekPastEnd(t *testing.T) {
 	e := waxflow.New()
 	a, _ := ratedWAV(t, 48000, 2, 9000, 51)

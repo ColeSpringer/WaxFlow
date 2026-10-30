@@ -167,6 +167,77 @@ func TestFailPropagatesAfterDrain(t *testing.T) {
 	}
 }
 
+// TestDropAbortedSparesASuccessorsTemp: a failed entry whose last reader
+// leaves after a successor began on the same key removes its own temp file and
+// nothing else, so the successor still promotes.
+func TestDropAbortedSparesASuccessorsTemp(t *testing.T) {
+	s := openStore(t, Options{})
+	key := NewKey("id-successor", "p", nil)
+	a, err := s.Begin(key, testMeta("wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := a.NewReader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Fail(errors.New("pipeline exploded"))
+	b, err := s.Begin(key, testMeta("wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Close() // releases a
+
+	if _, err := os.Stat(a.tmpPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the failed entry's temp file survived its release: %v", err)
+	}
+	if _, err := os.Stat(b.tmpPath); err != nil {
+		t.Fatalf("the predecessor's release deleted the successor's temp file: %v", err)
+	}
+	b.Write(pattern(1000))
+	if err := b.Complete(10); err != nil {
+		t.Fatal(err)
+	}
+	if b.Degraded() {
+		t.Error("the successor degraded")
+	}
+	c := s.Lookup(key)
+	if c == nil {
+		t.Fatal("the successor did not promote")
+	}
+	c.File.Close()
+}
+
+// TestBeginSurvivesAPredecessorsDirRemoval: a predecessor's release can empty
+// and remove the key's directory after a successor's MkdirAll and before its
+// create. The successor still begins on the cache, not on a ring.
+func TestBeginSurvivesAPredecessorsDirRemoval(t *testing.T) {
+	s := openStore(t, Options{})
+	key := NewKey("id-dir-race", "p", nil)
+	a, err := s.Begin(key, testMeta("wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := a.NewReader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Fail(errors.New("pipeline exploded"))
+	create := s.createFile
+	s.createFile = func(path string) (entryFile, error) {
+		r.Close() // releases a, which removes the now empty directory
+		return create(path)
+	}
+	b, err := s.Begin(key, testMeta("wav"))
+	if err != nil {
+		t.Fatalf("a predecessor's release failed the successor's Begin: %v", err)
+	}
+	b.Write(pattern(1000))
+	if err := b.Complete(10); err != nil || b.Degraded() {
+		t.Fatalf("the successor did not promote cleanly (err %v, degraded %v)", err, b.Degraded())
+	}
+}
+
 // failAfter is the disk-full seam: writes succeed until n bytes, then
 // fail persistently.
 type failAfter struct {
@@ -417,6 +488,40 @@ func TestBootScanRebuildsIndexAndDropsPartials(t *testing.T) {
 	if st := s2.Stats(); st.Entries != 1 || st.Bytes != 5000 {
 		t.Fatalf("rebooted stats: %+v", st)
 	}
+}
+
+// TestBootScanPrunesTempsBesideACompletedEntry: a temp file left beside a
+// promoted entry (a runtime removal that failed) goes at the next boot, since
+// nothing is in flight then; the entry stays.
+func TestBootScanPrunesTempsBesideACompletedEntry(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := NewKey("boot-orphan", "p", nil)
+	e, _ := s.Begin(key, testMeta("wav"))
+	e.Write(pattern(5000))
+	e.Complete(9)
+	orphan := filepath.Join(s.entryDir(key), "out.wav.tmp-77")
+	if err := os.WriteFile(orphan, []byte("junk"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s2, err := Open(dir, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the boot scan kept a temp file beside a completed entry: %v", err)
+	}
+	c := s2.Lookup(key)
+	if c == nil {
+		t.Fatal("the boot scan lost the completed entry")
+	}
+	c.File.Close()
 }
 
 // TestConcurrentAttachEvictComplete is the randomized concurrent-operation

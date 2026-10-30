@@ -772,7 +772,7 @@ func TestSplitBoundIsWhatTheRunEnforces(t *testing.T) {
 		{"a cut past the measure", "lib/seed.webm", 5900, http.StatusBadRequest},
 		{"a cut inside the audio", "lib/seed.webm", 3000, http.StatusCreated},
 		// sine.wma: the declared duration estimates 22491 and the measure
-		// finds 22495, so the estimate runs short and this cut is one the
+		// decodes 22528, so the estimate runs short and this cut is one the
 		// file can serve. Bounding with the declaration refused it.
 		{"a cut past the estimate the file can serve", "lib/sine.wma", 22493, http.StatusCreated},
 	} {

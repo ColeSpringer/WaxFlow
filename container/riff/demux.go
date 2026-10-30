@@ -12,6 +12,7 @@ import (
 	"github.com/colespringer/waxflow/codec/g711"
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/codec/pcm"
+	"github.com/colespringer/waxflow/codec/wavpack"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/internal/codecname"
 	"github.com/colespringer/waxflow/container/internal/mpegframes"
@@ -276,6 +277,12 @@ func (d *Demuxer) parse() error {
 				break
 			}
 			dataOff = off + 8
+			// Ahead of the clamp: a legacy WavPack file declares the data
+			// chunk at its original PCM size, and under Strict the clamp
+			// would call the file damaged before this could name it.
+			if err := d.refuseWavPack(dataOff, size); err != nil {
+				return err
+			}
 			switch {
 			case chunkSize == size32Unknown && haveDS64:
 				// ds64 sizes are 64-bit and file-supplied: bound against
@@ -406,6 +413,29 @@ func (d *Demuxer) parse() error {
 		Default:        true,
 	}
 	return nil
+}
+
+// refuseWavPack refuses a data chunk holding a WavPack stream. WavPack before
+// 4.0 kept the source's WAV header and wrote its stream where the samples go,
+// which read as PCM is noise. Samples that only spell the magic, without a
+// WavPack head's shape, still read as PCM.
+func (d *Demuxer) refuseWavPack(dataOff, size int64) error {
+	n := min(int64(wavpack.BlockHeaderLen), size-dataOff)
+	if n < 10 {
+		return nil
+	}
+	b := make([]byte, n)
+	if err := container.ReadFull(d.src, b, dataOff); err != nil {
+		return container.ShortRead("wav: reading data", err)
+	}
+	v, ok := wavpack.StreamHead(b)
+	if !ok {
+		return nil
+	}
+	if err := wavpack.CheckStreamVersion(v); err != nil {
+		return waxerr.Annotate("wav: a WavPack stream behind a WAV header", err)
+	}
+	return unsupported("a WavPack stream behind a WAV header; this build reads WavPack from its own .wv file")
 }
 
 // unitName names a unit for a message, so a trailing-bytes warning says

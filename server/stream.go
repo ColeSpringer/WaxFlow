@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -209,8 +211,10 @@ func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, ref stri
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		defer release()
+		// The slot goes back before the session stops counting, so no active
+		// sessions means a free slot.
 		defer s.met.SessionsActive.Add(-1)
+		defer release()
 
 		// The pipeline owns its own source handle; the request's closes
 		// with the handler.
@@ -224,9 +228,14 @@ func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, ref stri
 			entry.Fail(waxerr.New(waxerr.CodeSourceChanged, "source changed while starting the pipeline"))
 			return
 		}
-		res, err := s.transcodeSpan(ctx, src, hint, entry, opts, sp, r, grid, cutTrack)
+		var dst io.Writer = entry
+		if wrap := s.hooks.pipelineDst; wrap != nil {
+			dst = wrap(entry)
+		}
+		res, err := s.transcodeSpan(ctx, src, hint, dst, opts, sp, r, grid, cutTrack)
 		if err != nil {
-			s.log.Warn("pipeline failed", "src", ref, "rung", rungName(r), "err", err)
+			level, why := stopReason(ctx, err)
+			s.log.Log(ctx, level, "pipeline "+why, "src", ref, "rung", rungName(r), "err", err)
 			entry.Fail(err)
 			return
 		}
@@ -242,6 +251,20 @@ func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, ref stri
 			"samples", res.Samples, "clipped", res.ClippedSamples, "truePeak", res.TruePeak,
 			"degraded", entry.Degraded())
 	}()
+}
+
+// stopReason grades why a pipeline or variant worker stopped, for its log
+// line: a run nobody was left to read, or one that was canceled, is routine.
+// ctx is the run's own.
+func stopReason(ctx context.Context, err error) (slog.Level, string) {
+	switch {
+	case errors.Is(err, cache.ErrAbandoned):
+		return slog.LevelInfo, "abandoned"
+	case ctx.Err() != nil || waxerr.CodeOf(err) == waxerr.CodeCanceled:
+		return slog.LevelDebug, "canceled"
+	default:
+		return slog.LevelWarn, "failed"
+	}
 }
 
 // rungName spells the decision ladder's rung for a log line, so a session can
@@ -302,11 +325,13 @@ func (s *Server) transcodeSpan(ctx context.Context, src *source.File, hint strin
 		// with the spanned branch below is the whole of why: there the measure
 		// feeds waxflow.Slice, which bounds delivery to it, and here nothing
 		// would. waxflow.MeasuredMedia only changes what a media *declares*, so
-		// on its own it turns the projection into a promise the read does not
-		// keep: an advisory source whose measure and whose decode disagree
-		// (sine-s16.wma measures 22495 and decodes 22528) then writes 22495
-		// into a header it cannot patch and dies at End, after the 200 and the
+		// on its own it turns the projection into a promise only the read can
+		// keep: a measure that missed the decode by a sample would be written
+		// into a header it cannot patch and die at End, after the 200 and the
 		// first bytes have gone out, with the cache entry permanently failed.
+		// The measure decodes an advisory source so the two agree
+		// (sine-s16.wma measures and decodes 22528), but nothing here rests
+		// on that.
 		//
 		// So an unspanned run reads what the file holds and projects from the
 		// media's own declaration, as it always did. The cost is that an
@@ -317,7 +342,7 @@ func (s *Server) transcodeSpan(ctx context.Context, src *source.File, hint strin
 	}
 	// The plan validated the window against the measured total (prepareSource
 	// measures on the span branch), so the run slices against the same number
-	// rather than the freshly opened header's advisory one; see sliceMeasured.
+	// rather than the freshly opened header's advisory one (waxflow.SliceMeasured).
 	// A memo hit rather than a second walk, exactly as the cut planner's
 	// trackFor is.
 	track, err := s.trackFor(src, true)
@@ -328,7 +353,7 @@ func (s *Server) transcodeSpan(ctx context.Context, src *source.File, hint strin
 	if err != nil {
 		return nil, err
 	}
-	sl, err := sliceMeasured(med, sp, track.Samples)
+	sl, err := waxflow.SliceMeasured(med, track.Samples, sp.from, sp.end())
 	if err != nil {
 		return nil, err
 	}
@@ -433,7 +458,13 @@ func (s *Server) serveLive(w http.ResponseWriter, r *http.Request, reader *cache
 		case err == io.EOF:
 			return
 		case err != nil:
-			// Headers are long gone; the truncated body is the signal.
+			// Headers are long gone; the truncated body is the signal. Only the
+			// request's AfterFunc closes the reader mid-loop, so a done context
+			// means the client left.
+			if r.Context().Err() != nil {
+				s.log.Debug("client left mid-stream", "err", err)
+				return
+			}
 			s.log.Warn("live stream truncated", "err", err)
 			return
 		}

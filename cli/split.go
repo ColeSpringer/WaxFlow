@@ -129,12 +129,14 @@ data track occupies part of the file the split says what it skipped.`,
 			// A cut list is meaningless against a length the headers only
 			// guess at: every piece is checked against the total. Measure
 			// rather than trust, the same call a timeline's mint makes for the
-			// same reason.
+			// same reason. srcSamples stays -1 when the headers already knew.
+			srcSamples := int64(-1)
 			if track.Samples < 0 || !track.SamplesExact {
 				measured, merr := measureSamples(e, src, srcHint)
 				if merr != nil {
 					return merr
 				}
+				srcSamples = measured.Samples
 				// The walk read to the true end of stream, so the length is
 				// authoritative now and the track says so rather than keeping
 				// the declaration it replaced. Everything below reads the
@@ -201,7 +203,7 @@ data track occupies part of the file the split says what it skipped.`,
 				e: e, log: logger, src: src, hint: srcHint,
 				outFormat: outFormat, container: containerName,
 				flacLevel: optLevel, wavpackLevel: wavpackLevel, apeLevel: apeLevel,
-				force: force, ofN: ofN,
+				force: force, ofN: ofN, srcSamples: srcSamples,
 				mapper: label.NewLogged(logger), containerTags: info.Tags,
 			}
 			if !noTags {
@@ -237,17 +239,9 @@ data track occupies part of the file the split says what it skipped.`,
 	return cmd
 }
 
-// measureCeiling is the past-any-stream seek target that forces a demuxer's
-// exact-length walk (an IO-bound frame-index build, no decode): SeekSample
-// lands at the true end of stream. It is the daemon's own ceiling, and it is
-// well short of the int64 maximum on purpose, so that a demuxer converting
-// the target to a timestamp or adding a seek margin to it cannot overflow on
-// the way.
-const measureCeiling = int64(1) << 61
-
-// measureSamples reads src to its end and returns the settled track: the
-// sample count it actually holds, and whatever else the measuring route
-// settled beside it (see measureMedia).
+// measureSamples returns src's settled track: the sample count it actually
+// holds, and whatever else the measuring route settled beside it (see
+// measureMedia).
 func measureSamples(e *waxflow.Engine, src container.Source, hint string) (container.Track, error) {
 	med, err := e.OpenStream(src, hint)
 	if err != nil {
@@ -257,36 +251,14 @@ func measureSamples(e *waxflow.Engine, src container.Source, hint string) (conta
 	return measureMedia(med)
 }
 
-// measureMedia is measureSamples on an open Media, by the cheapest route the
-// media offers. It is the CLI's twin of the daemon's measureLength and takes
-// the same three: a demuxer that measured at open has already answered, one
-// with a deferred walk answers by finishing it (headers and hops), and only a
-// source whose length no walk settles is seeked past any possible end.
-//
-// It returns the track and not just the count, for measureLength's reason: a
-// walk settles the trims beside the length, and the copy rungs plan from them.
-//
-// The walk's own code is kept whichever route runs: a damaged file fails it
+// measureMedia is waxflow.MeasureLength on an open Media, saying what was
+// being done. The measure's own code is kept: a damaged file fails its walk
 // as malformed-input, and naming that unreadable reported a bad disk.
 func measureMedia(med format.Media) (container.Track, error) {
-	if t := med.Info().Default(); t.SamplesExact && t.Samples >= 0 {
-		return t, nil
-	}
-	if w, ok := med.(format.Walker); ok {
-		if err := w.Walk(); err != nil {
-			return container.Track{}, waxerr.Annotate("measuring the source", err)
-		}
-		if t := med.Info().Default(); t.SamplesExact && t.Samples >= 0 {
-			return t, nil
-		}
-	}
-	total, err := med.SeekSample(measureCeiling)
+	t, err := waxflow.MeasureLength(med)
 	if err != nil {
 		return container.Track{}, waxerr.Annotate("measuring the source", err)
 	}
-	t := med.Info().Default()
-	t.Samples = total
-	t.SamplesExact, t.SamplesAdvisory = true, false
 	return t, nil
 }
 
@@ -490,6 +462,9 @@ type splitter struct {
 	apeLevel     int
 	force        bool
 	ofN          int
+	// srcSamples is the measured total the cuts were checked against, or -1
+	// when the headers' own length was exact.
+	srcSamples int64
 
 	// The metadata half: albumTags and art ride onto every piece at mux
 	// time, tagInfo carries what a tag list cannot (art again, for the
@@ -594,9 +569,10 @@ func (s *splitter) writePiece(cmd *cobra.Command, path string, p piece) (*waxflo
 	if err != nil {
 		return fail(err)
 	}
-	sl, err := waxflow.Slice(med, p.from, p.to)
+	// Held to the length the cuts were checked against, or a cut inside an
+	// advisory gap would pass atPieces and be refused here.
+	sl, err := waxflow.SliceMeasured(med, s.srcSamples, p.from, p.to)
 	if err != nil {
-		med.Close()
 		return fail(err)
 	}
 	defer sl.Close()
@@ -619,6 +595,11 @@ func (s *splitter) writePiece(cmd *cobra.Command, path string, p piece) (*waxflo
 	})
 	if err != nil {
 		return fail(err)
+	}
+	// A piece is never empty, so zero samples at any output rate is a seek
+	// that landed past the audio, refused rather than written.
+	if res.Samples == 0 {
+		return fail(waxerr.New(waxerr.CodeInternal, fmt.Sprintf("the source delivered no samples from sample %d", p.from)))
 	}
 	if err := out.Close(); err != nil {
 		os.Remove(writePath)

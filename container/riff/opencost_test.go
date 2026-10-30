@@ -23,7 +23,8 @@ func openCost(t *testing.T, raw []byte) (reads int, bytes int64) {
 // TestOpenReadsTheHeader pins what opening a WAV costs, and that the cost does
 // not depend on the payload. A PCM file is its chunk headers: the RIFF header,
 // the fmt chunk, the header of the LIST chunk ffmpeg writes and the data
-// chunk header, 52 bytes in 5 reads on the fixture. An MP3 payload adds the head of the frame run (the first header, one frame,
+// chunk header, plus a block header's length of the payload, where a WavPack
+// stream behind the header would begin: 84 bytes in 6 reads on the fixture. An MP3 payload adds the head of the frame run (the first header, one frame,
 // the header behind it) and nothing else: the index is lazy, and before the
 // walker's reads were exact this open cost a whole 128 KiB window for it. The
 // synthetic payloads are longer than two windows because every committed
@@ -33,8 +34,8 @@ func TestOpenReadsTheHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reads, bytes := openCost(t, raw); reads != 5 || bytes != 52 {
-		t.Errorf("opening the PCM fixture read %d bytes in %d reads, want its 52 bytes of chunk headers in 5", bytes, reads)
+	if reads, bytes := openCost(t, raw); reads != 6 || bytes != 84 {
+		t.Errorf("opening the PCM fixture read %d bytes in %d reads, want its 84 bytes of headers in 6", bytes, reads)
 	}
 
 	var costs [2][2]int64

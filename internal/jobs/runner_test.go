@@ -565,6 +565,48 @@ func TestSplitRefusesAnUnderDeclaredCutConsistently(t *testing.T) {
 	}
 }
 
+// TestSplitNeverReportsAnEmptyPiece: a split job either writes a piece that
+// holds its span or fails naming it. A WMA cut at 22510 needs a seek into the
+// file's tail, which lands late (docs/deferred-work.md), so today the second
+// piece comes up empty; once landings snap it holds its 18 samples.
+func TestSplitNeverReportsAnEmptyPiece(t *testing.T) {
+	root := t.TempDir()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "sine-s16.wma"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sine.wma"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := openRoots(t, root)
+	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, MeasureTrack: measureTrack()})
+	j, err := r.Create(Request{
+		Type: TypeSplit, Src: "lib/sine.wma", SourceID: pinID(t, res, "lib/sine.wma"),
+		Format: "flac", FLACLevel: -1, Cuts: []int64{22510},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	var done *Job
+	waitFor(t, "the split to finish", func() bool {
+		done, _ = r.Get(j.ID)
+		return done.State.Terminal()
+	})
+	switch done.State {
+	case StateFailed:
+		if done.Error == nil || done.Error.Code != string(waxerr.CodeInternal) ||
+			!strings.Contains(done.Error.Message, "no samples") {
+			t.Errorf("error = %+v, want an internal error naming the empty piece", done.Error)
+		}
+	case StateDone:
+		if len(done.Outputs) != 2 || done.Outputs[1].Samples != 18 {
+			t.Errorf("the split finished with outputs %+v, want a second piece of 18 samples", done.Outputs)
+		}
+	default:
+		t.Fatalf("job ended %s", done.State)
+	}
+}
+
 // TestSilenceJobEndToEnd drives the whole A12 path: an analyze job asks for
 // the map, the runner writes it into the job directory as an output file
 // rather than onto the job, and the job carries only the summary.

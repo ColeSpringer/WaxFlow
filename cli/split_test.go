@@ -967,6 +967,114 @@ func TestSplitMeasuresAnUnderDeclaredSource(t *testing.T) {
 	}
 }
 
+// TestSplitCutsInsideAnAdvisoryGap: a cut between a source's declared length
+// and the audio it holds is a cut the file can serve. The measure has to find
+// that audio, and each piece has to be held to the measure rather than to the
+// declaration.
+func TestSplitCutsInsideAnAdvisoryGap(t *testing.T) {
+	t.Run("matroska", func(t *testing.T) {
+		dir := t.TempDir()
+		const actual = 100_000
+		raw := underDeclaredMKA(t, 44100, 2, actual)
+		src := filepath.Join(dir, "rip.mka")
+		if err := os.WriteFile(src, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		info, err := waxflow.New().Probe(container.BytesSource(raw), "mka", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		declared := info.Default().Samples
+		const cut = actual - 18
+		if declared < 0 || declared >= cut {
+			t.Fatalf("the fixture declares %d of its %d samples; this cell needs a cut past it", declared, actual)
+		}
+		out := filepath.Join(dir, "pieces")
+		code, _, errOut := run(t, "split", src, out, "--at", strconv.Itoa(cut))
+		if code != 0 {
+			t.Fatalf("split at %d exit = %d (declared %d): %s", cut, code, declared, errOut)
+		}
+		e := waxflow.New()
+		for i, name := range []string{"01.flac", "02.flac"} {
+			raw, err := os.ReadFile(filepath.Join(out, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			pi, err := e.Probe(container.BytesSource(raw), "flac", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := pi.Default().Samples, []int64{cut, actual - cut}[i]; got != want {
+				t.Errorf("%s is %d samples, want %d", name, got, want)
+			}
+		}
+	})
+
+	// sine-s16.wma declares 22491, a seek past its end lands at 22495, and the
+	// decode delivers 22528, so a cut at 22510 needs the decode to measure. A
+	// dry run, because writing the second piece seeks into the file's tail,
+	// where a WMA landing is late (docs/deferred-work.md).
+	t.Run("wma", func(t *testing.T) {
+		dir := t.TempDir()
+		raw, err := os.ReadFile(filepath.Join("..", "testdata", "sine-s16.wma"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		src := filepath.Join(dir, "sine.wma")
+		if err := os.WriteFile(src, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		code, out, errOut := run(t, "split", src, filepath.Join(dir, "pieces"), "--at", "22510", "--dry-run")
+		if code != 0 {
+			t.Fatalf("split --dry-run at 22510 exit = %d: %s", code, errOut)
+		}
+		for _, want := range []string{"[0, 22510)", "[22510, 22528)"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("dry run does not list %s:\n%s", want, out)
+			}
+		}
+	})
+}
+
+// TestSplitNeverReportsAnEmptyPiece: a split either writes a piece that holds
+// its span or fails naming it. A WMA cut at 22510 needs a seek into the file's
+// tail, which lands late (docs/deferred-work.md), so today the second piece
+// comes up empty; once landings snap it holds its 18 samples.
+func TestSplitNeverReportsAnEmptyPiece(t *testing.T) {
+	dir := t.TempDir()
+	raw, err := os.ReadFile(filepath.Join("..", "testdata", "sine-s16.wma"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(dir, "sine.wma")
+	if err := os.WriteFile(src, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "pieces")
+	code, _, errOut := run(t, "split", src, out, "--at", "22510")
+	second := filepath.Join(out, "02.flac")
+	if code != 0 {
+		if !strings.Contains(errOut, "02.flac") || !strings.Contains(errOut, "no samples") {
+			t.Errorf("split failed without naming the empty piece: %s", errOut)
+		}
+		if _, err := os.Stat(second); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the empty piece was left on disk: %v", err)
+		}
+		return
+	}
+	b, err := os.ReadFile(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := waxflow.New().Probe(container.BytesSource(b), "flac", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Default().Samples; got != 18 {
+		t.Errorf("split exited 0 with a second piece of %d samples, want 18", got)
+	}
+}
+
 // TestSplitMeasuresASourceWithNoDeclaredLength: a container is free to declare
 // no length at all, which our Matroska muxer does when it has no projection and
 // cannot seek back to fill one in. Every cut point is checked against the

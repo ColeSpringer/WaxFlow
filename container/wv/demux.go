@@ -144,6 +144,14 @@ func (d *Demuxer) parse() error {
 			if d.w.Err() != nil {
 				return d.w.Err()
 			}
+			// A first block refused only for its version is named for it.
+			if i == 0 {
+				if v, ok := wavpack.StreamHead(d.w.Peek(off, wavpack.BlockHeaderLen)); ok {
+					if err := wavpack.CheckStreamVersion(v); err != nil {
+						return err
+					}
+				}
+			}
 			return malformed("no parsable block at offset %d", off)
 		}
 		if h.Audio() {

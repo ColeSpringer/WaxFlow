@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -41,6 +42,15 @@ func JobRequestJSONTags() []string {
 func (s *Server) HoldLiveSlot() (release func(), ok bool) {
 	return s.pools.AcquireLive()
 }
+
+// GatePipelineDst wraps the cache entry every progressive pipeline writes, so
+// a test can hold a running pipeline in place. Set it before the first request.
+func (s *Server) GatePipelineDst(wrap func(io.Writer) io.Writer) { s.hooks.pipelineDst = wrap }
+
+// GateHLSPublish runs gate before a variant worker publishes segment n. ctx is
+// the worker's, so a gate can release a canceled worker. Set it before the
+// first request.
+func (s *Server) GateHLSPublish(gate func(ctx context.Context, n int64)) { s.hooks.hlsPublish = gate }
 
 // Metrics exposes the internal counter set to the test package. It
 // lives here rather than on the public API because its type is
