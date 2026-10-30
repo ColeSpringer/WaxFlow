@@ -13,6 +13,7 @@
 //	                wavpack, ape, wma, wmalossless, wmapro, wmavoice, musepack
 //	container/... - riff, aiff, ogg, mp4, mka, adts, mpa, flacn, wv, apen, asf, mpc
 //	cue           - CUE sheet parsing (CD-frame track boundaries)
+//	m3u8          - HLS playlist writing and parsing
 //	format        - probe + registry + Open
 //	source        - source-ref model + Resolver interface
 //	server        - HTTP service

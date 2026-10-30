@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow/container"
@@ -15,15 +14,7 @@ import (
 func fetchHLSPresentation(t *testing.T, env *testEnv, masterURL string) []byte {
 	t.Helper()
 	master := readBody(t, keyless(t, env, masterURL))
-	var mediaRef string
-	for _, l := range playlistLines(master) {
-		if !strings.HasPrefix(l, "#") {
-			mediaRef = l
-		}
-	}
-	if mediaRef == "" {
-		t.Fatalf("no variant in master:\n%s", master)
-	}
+	mediaRef := variantURIs(t, master)[0]
 	resp := keyless(t, env, "/hls/"+mediaRef)
 	media := readBody(t, resp)
 	if resp.StatusCode != 200 {

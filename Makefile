@@ -30,7 +30,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # The public, stdlib-only tree (ADR-0002). Grows as public packages land; every
 # new public package MUST be added here. depcheck is the CI gate behind
 # the "stdlib-only codecs" promise.
-PUBLIC_PKGS := . ./waxerr ./audio ./dsp/... ./codec/... ./container/... ./cue ./format ./source ./server ./client
+PUBLIC_PKGS := . ./waxerr ./audio ./dsp/... ./codec/... ./container/... ./cue ./m3u8 ./format ./source ./server ./client
 
 .PHONY: build test test-race test-cli test-oracle test-example test-386 vet fmt fmt-check depcheck check docker clean verify-vectors goldens bench encoder-quality encoder-quality-mp3 encoder-quality-aac encoder-quality-heaac encoder-quality-heaacv2 encoder-quality-vorbis encoder-quality-opus encoder-quality-opus-speech fuzz opus-tools ape-tools mpc-tools client-e2e apple-smoke hls-e2e soak
 

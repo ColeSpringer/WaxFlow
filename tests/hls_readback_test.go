@@ -23,50 +23,54 @@ import (
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/hls"
+	"github.com/colespringer/waxflow/m3u8"
 )
 
-// hlsPresentation is one variant's worth of served resources.
-type hlsPresentation struct {
-	init string // init URI
+// hlsVariant is one rung of a served presentation: its plan and what the run
+// produced for it.
+type hlsVariant struct {
+	plan *waxflow.SegmentPlan
+	init []byte
 	segs []mp4.Segment
-	rate int
 }
 
-// serveHLS builds init + segments for each named format and serves them, plus a
-// media playlist per variant and a master playlist, from an httptest server. It
-// returns the master URL and the fetcher. Variants are served in the given
-// order, so a caller selects one by index.
-func serveHLS(t *testing.T, e *waxflow.Engine, raw []byte, src *audio.Buffer, variants []waxflow.TranscodeOptions, segSamples int) (string, hls.Fetcher) {
+// servePresentation serves variants from an httptest server as an HLS
+// presentation: per variant an init, its segments and a media playlist, and a
+// master over them, in the given order so a caller selects one by index. It
+// returns the master URL.
+func servePresentation(t *testing.T, variants []hlsVariant) string {
 	t.Helper()
 	files := map[string][]byte{}
-	var masterVariants []hls.MasterVariant
-
-	for vi, opts := range variants {
-		plan, err := e.PlanSegments(pcmTrack(src.Fmt, src.N), opts, float64(segSamples)/float64(src.Fmt.Rate))
-		if err != nil {
-			t.Fatalf("variant %d PlanSegments: %v", vi, err)
+	var rungs []m3u8.MasterVariant
+	for vi, v := range variants {
+		// The playlist lists the plan's segments, so the run has to have
+		// produced exactly those for the read-back to mean anything.
+		if int64(len(v.segs)) != v.plan.Segments {
+			t.Fatalf("variant %d: the run produced %d segments, the plan lists %d", vi, len(v.segs), v.plan.Segments)
 		}
-		init, err := e.InitSegment(plan, opts)
-		if err != nil {
-			t.Fatalf("variant %d InitSegment: %v", vi, err)
-		}
-		segs, _ := collectSegments(t, e, raw, opts, plan.SegmentSamples, 0)
-
 		initName := fmt.Sprintf("v%d-init.mp4", vi)
-		files["/"+initName] = init
-		var media []hls.MediaSegment
-		for _, s := range segs {
-			segName := fmt.Sprintf("v%d-seg%d.m4s", vi, s.Index)
-			files["/"+segName] = s.Data
-			media = append(media, hls.MediaSegment{URI: segName, Seconds: float64(s.Samples) / float64(src.Fmt.Rate)})
+		files["/"+initName] = v.init
+		segName := func(n int64) string { return fmt.Sprintf("v%d-seg%d.m4s", vi, n) }
+		for _, s := range v.segs {
+			files["/"+segName(s.Index)] = s.Data
+		}
+		listed, err := v.plan.MediaSegments(segName)
+		if err != nil {
+			t.Fatalf("variant %d segments: %v", vi, err)
+		}
+		text, err := m3u8.Media(initName, listed)
+		if err != nil {
+			t.Fatalf("variant %d media playlist: %v", vi, err)
 		}
 		mediaName := fmt.Sprintf("v%d.m3u8", vi)
-		files["/"+mediaName] = []byte(hls.Media(initName, media))
-		masterVariants = append(masterVariants, hls.MasterVariant{
-			URI: mediaName, Bandwidth: plan.Bandwidth, Codecs: plan.Codecs,
-		})
+		files["/"+mediaName] = []byte(text)
+		rungs = append(rungs, v.plan.MasterVariant(mediaName))
 	}
-	files["/master.m3u8"] = []byte(hls.Master(masterVariants))
+	master, err := m3u8.Master(rungs)
+	if err != nil {
+		t.Fatalf("master playlist: %v", err)
+	}
+	files["/master.m3u8"] = []byte(master)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		data, ok := files[r.URL.Path]
@@ -77,7 +81,27 @@ func serveHLS(t *testing.T, e *waxflow.Engine, raw []byte, src *audio.Buffer, va
 		w.Write(data)
 	}))
 	t.Cleanup(srv.Close)
-	return srv.URL + "/master.m3u8", hls.HTTPFetcher{}
+	return srv.URL + "/master.m3u8"
+}
+
+// serveHLS plans, inits and segments each variant of one source and serves
+// them through servePresentation, returning the master URL and the fetcher.
+func serveHLS(t *testing.T, e *waxflow.Engine, raw []byte, src *audio.Buffer, variants []waxflow.TranscodeOptions, segSamples int) (string, hls.Fetcher) {
+	t.Helper()
+	var vs []hlsVariant
+	for vi, opts := range variants {
+		plan, err := e.PlanSegments(pcmTrack(src.Fmt, src.N), opts, float64(segSamples)/float64(src.Fmt.Rate))
+		if err != nil {
+			t.Fatalf("variant %d PlanSegments: %v", vi, err)
+		}
+		init, err := e.InitSegment(plan, opts)
+		if err != nil {
+			t.Fatalf("variant %d InitSegment: %v", vi, err)
+		}
+		segs, _ := collectSegments(t, e, raw, opts, plan.SegmentSamples, 0)
+		vs = append(vs, hlsVariant{plan: plan, init: init, segs: segs})
+	}
+	return servePresentation(t, vs), hls.HTTPFetcher{}
 }
 
 // decodeMedia reads a whole Media into one buffer, refusing to exceed capMax

@@ -114,6 +114,8 @@ gates in [docs/quality-gates.md](docs/quality-gates.md).
 - **Structure**: the root module is the importable, dependency-free
   audio library; its `go.mod` has an **empty require block**, so
   importing `codec/flac` (or any public package) pulls in nothing.
+  Beside the codecs and containers it holds the two text formats a host
+  shares with the daemon, `cue` (CUE sheets) and `m3u8` (HLS playlists).
   The CLI/daemon binary lives in the nested `cli/` module (cobra +
   waxlabel), the tests that need third-party oracles in `oracletest/`,
   and a worked example of extending the CLI in `examples/catalogcli/`.

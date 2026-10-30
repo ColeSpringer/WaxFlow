@@ -7,13 +7,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/m3u8"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -27,12 +27,10 @@ import (
 // numbered fMP4 segments and M3U8 playlists, and this reads them back.
 
 // Bounds on a fetched presentation. Playlists are attacker-influenced once the
-// client fetches over the network, so the segment count and the concatenated
-// media size are capped rather than trusted.
+// client fetches over the network, so the concatenated media size is capped
+// rather than trusted. The segment count needs no cap of its own: m3u8's line
+// cap bounds it.
 const (
-	// maxSegments caps how many media segments one VOD playlist may list. At a
-	// few seconds each this clears many hours; past it the playlist is refused.
-	maxSegments = 1 << 20
 	// maxMediaBytes caps the total media a VOD read stores. VOD read-back loads
 	// the whole (finite) presentation to a temp file; a stream larger than this
 	// is refused rather than filling the disk.
@@ -172,46 +170,34 @@ func OpenVOD(ctx context.Context, f Fetcher, playlistURL string, opts *ClientOpt
 // resolveMediaPlaylist fetches playlistURL, follows a master to its selected
 // variant, and returns the media playlist plus its own URL (the base for the
 // init and segment URIs).
-func resolveMediaPlaylist(ctx context.Context, rf retryingFetcher, playlistURL string, variant int) (string, MediaPlaylist, error) {
+func resolveMediaPlaylist(ctx context.Context, rf retryingFetcher, playlistURL string, variant int) (string, m3u8.MediaPlaylist, error) {
 	raw, err := rf.get(ctx, playlistURL)
 	if err != nil {
-		return "", MediaPlaylist{}, err
+		return "", m3u8.MediaPlaylist{}, err
 	}
-	if isMasterPlaylist(raw) {
-		master, err := ParseMaster(string(raw))
+	text := string(raw)
+	if m3u8.IsMaster(text) {
+		master, err := m3u8.ParseMaster(text)
 		if err != nil {
-			return "", MediaPlaylist{}, err
+			return "", m3u8.MediaPlaylist{}, err
 		}
 		if variant >= len(master.Variants) {
-			return "", MediaPlaylist{}, waxerr.New(waxerr.CodeInvalidRequest,
+			return "", m3u8.MediaPlaylist{}, waxerr.New(waxerr.CodeInvalidRequest,
 				fmt.Sprintf("hls: variant index %d out of range (%d variants)", variant, len(master.Variants)))
 		}
 		mediaURL, err := resolveURL(playlistURL, master.Variants[variant].URI)
 		if err != nil {
-			return "", MediaPlaylist{}, err
+			return "", m3u8.MediaPlaylist{}, err
 		}
 		raw, err = rf.get(ctx, mediaURL)
 		if err != nil {
-			return "", MediaPlaylist{}, err
+			return "", m3u8.MediaPlaylist{}, err
 		}
-		media, err := ParseMedia(string(raw))
+		media, err := m3u8.ParseMedia(string(raw))
 		return mediaURL, media, err
 	}
-	media, err := ParseMedia(string(raw))
+	media, err := m3u8.ParseMedia(text)
 	return playlistURL, media, err
-}
-
-// isMasterPlaylist reports whether raw is a master (variant) playlist, detected
-// by an #EXT-X-STREAM-INF tag at the start of a line. The line anchor matters:
-// a bare substring check would misroute a media playlist that merely mentions
-// the tag text inside an #EXTINF title or comment.
-func isMasterPlaylist(raw []byte) bool {
-	for _, line := range strings.Split(string(raw), "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "#EXT-X-STREAM-INF") {
-			return true
-		}
-	}
-	return false
 }
 
 // assembleMedia fetches the init and media segments a media playlist lists,
@@ -220,14 +206,10 @@ func isMasterPlaylist(raw []byte) bool {
 // peak memory is one segment, not the whole (possibly large) presentation, and a
 // concurrent server cannot be driven to exhaust RAM; the temp file is removed
 // when the Media is closed.
-func assembleMedia(ctx context.Context, rf retryingFetcher, baseURL string, media MediaPlaylist) (format.Media, error) {
+func assembleMedia(ctx context.Context, rf retryingFetcher, baseURL string, media m3u8.MediaPlaylist) (format.Media, error) {
 	if media.InitURI == "" {
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 			"hls: playlist has no EXT-X-MAP init segment (only fragmented-MP4 presentations are read)")
-	}
-	if len(media.Segments) > maxSegments {
-		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("hls: playlist lists %d segments, over the %d cap", len(media.Segments), maxSegments))
 	}
 	initURL, err := resolveURL(baseURL, media.InitURI)
 	if err != nil {

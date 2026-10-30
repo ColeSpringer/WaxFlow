@@ -5,7 +5,7 @@ import (
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/format"
-	"github.com/colespringer/waxflow/internal/hls"
+	"github.com/colespringer/waxflow/m3u8"
 )
 
 // TestCodecContainerSymmetry is the read/write symmetry guard and the
@@ -350,16 +350,22 @@ func mp4DemuxCoversMux() bool {
 }
 
 // TestHLSWriterHasParser is the plan's separate HLS check: the M3U8 writer in
-// internal/hls has a matching parser, so what the segmenter advertises can be
-// read back. HLS is playlist-driven and multi-resource, not a container.Muxer
-// over one Source, so it is guarded here rather than in the table reconciliation.
+// m3u8 has a matching parser, so what the segmenter advertises can be read
+// back. HLS is playlist-driven and multi-resource, not a container.Muxer over
+// one Source, so it is guarded here rather than in the table reconciliation.
 func TestHLSWriterHasParser(t *testing.T) {
-	master := hls.Master([]hls.MasterVariant{{URI: "v0.m3u8", Bandwidth: 128000, Codecs: "Opus"}})
-	if _, err := hls.ParseMaster(master); err != nil {
+	master, err := m3u8.Master([]m3u8.MasterVariant{{URI: "v0.m3u8", Bandwidth: 128000, Codecs: "Opus"}})
+	if err != nil {
+		t.Fatalf("Master: %v", err)
+	}
+	if _, err := m3u8.ParseMaster(master); err != nil {
 		t.Errorf("ParseMaster of our own master playlist: %v", err)
 	}
-	media := hls.Media("init.mp4", []hls.MediaSegment{{URI: "0.m4s", Seconds: 4}})
-	if _, err := hls.ParseMedia(media); err != nil {
+	media, err := m3u8.Media("init.mp4", []m3u8.MediaSegment{{URI: "0.m4s", Seconds: 4}})
+	if err != nil {
+		t.Fatalf("Media: %v", err)
+	}
+	if _, err := m3u8.ParseMedia(media); err != nil {
 		t.Errorf("ParseMedia of our own media playlist: %v", err)
 	}
 }

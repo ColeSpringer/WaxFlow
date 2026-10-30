@@ -22,6 +22,7 @@ import (
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/sign"
 	"github.com/colespringer/waxflow/internal/timeline"
+	"github.com/colespringer/waxflow/m3u8"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -179,10 +180,6 @@ func (s *Server) prepareHLS(r *http.Request) (*hlsRequest, error) {
 	}
 	if req.opts, req.plan, req.remux, req.cut, err = s.planHLSVariant(desc, req.tracks(), m, rmx); err != nil {
 		return nil, err
-	}
-	if req.plan.Segments > maxPlaylistSegments {
-		return nil, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("segment duration yields %d segments (max %d); raise segDur", req.plan.Segments, maxPlaylistSegments))
 	}
 	canonical := canonicalHLSParams(req.plan, req.opts.GainDB, req.opts.Dynamics, descSpan(desc), req.opts.HEAACv2)
 	identity := hlsIdentity(desc, req.members)
@@ -414,7 +411,26 @@ func (s *Server) measureSamples(src *source.File) (container.Track, error) {
 // LC re-encode), so every path that prints a plan passes the source; only
 // mint-time validation, which prints nothing and needs any rung to answer,
 // skips the packet walk.
+//
+// The playlist cap is checked here, where the mint, the master and every
+// per-variant handler all plan, so a URL that mints is one whose media
+// playlist lists.
 func (s *Server) planHLSVariant(desc hls.Descriptor, tracks []container.Track, m *meta.Info,
+	rmx *source.File) (waxflow.TranscodeOptions, *waxflow.SegmentPlan, *waxflow.RemuxSegmentPlan, *waxflow.CutSegmentPlan, error) {
+	opts, plan, remux, cut, err := s.planHLSRung(desc, tracks, m, rmx)
+	if err == nil && plan.Segments > maxPlaylistSegments {
+		err = waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("segment duration yields %d segments (max %d); raise segDur", plan.Segments, maxPlaylistSegments))
+	}
+	if err != nil {
+		return waxflow.TranscodeOptions{}, nil, nil, nil, err
+	}
+	return opts, plan, remux, cut, nil
+}
+
+// planHLSRung is planHLSVariant short of the playlist cap: the first rung that
+// serves the variant, and its plan.
+func (s *Server) planHLSRung(desc hls.Descriptor, tracks []container.Track, m *meta.Info,
 	rmx *source.File) (waxflow.TranscodeOptions, *waxflow.SegmentPlan, *waxflow.RemuxSegmentPlan, *waxflow.CutSegmentPlan, error) {
 	fail := func(err error) (waxflow.TranscodeOptions, *waxflow.SegmentPlan, *waxflow.RemuxSegmentPlan, *waxflow.CutSegmentPlan, error) {
 		return waxflow.TranscodeOptions{}, nil, nil, nil, err
@@ -721,7 +737,7 @@ func (s *Server) handleHLSMaster(w http.ResponseWriter, r *http.Request) {
 		m = meta.WithContainerTags(s.readMeta(r.Context(), req.srcs[0], false), s.containerTagsFor(req.srcs[0]))
 		rmx = req.srcs[0]
 	}
-	var variants []hls.MasterVariant
+	var variants []m3u8.MasterVariant
 	for _, kbps := range desc.Ladder() {
 		vdesc := desc.Variant(kbps)
 		_, plan, _, _, err := s.planHLSVariant(vdesc, tracks, m, rmx)
@@ -729,13 +745,14 @@ func (s *Server) handleHLSMaster(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, err) // one bad rung fails the master honestly
 			return
 		}
-		variants = append(variants, hls.MasterVariant{
-			URI:       "media.m3u8?" + s.hlsChildQuery("/hls/media.m3u8", vdesc, exp),
-			Bandwidth: plan.Bandwidth,
-			Codecs:    plan.Codecs,
-		})
+		variants = append(variants, plan.MasterVariant("media.m3u8?"+s.hlsChildQuery("/hls/media.m3u8", vdesc, exp)))
 	}
-	s.servePlaylist(w, hls.Master(variants))
+	master, err := m3u8.Master(variants)
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	s.servePlaylist(w, master)
 }
 
 // handleHLSMedia serves a variant's VOD media playlist: every segment
@@ -749,23 +766,20 @@ func (s *Server) handleHLSMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer req.Close()
-	plan := req.plan
 	exp := req.childExp()
-	rate := float64(plan.Format.Rate)
-	segments := make([]hls.MediaSegment, plan.Segments)
-	for n := range segments {
-		path := fmt.Sprintf("/hls/seg/%d.m4s", n)
-		segments[n] = hls.MediaSegment{
-			URI: fmt.Sprintf("seg/%d.m4s?%s", n, s.hlsChildQuery(path, req.desc, exp)),
-			// The presentation timeline, not the decode one: EXTINF is what a
-			// player sums into a total duration, and the decode span overshoots
-			// it by the encoder delay plus the tail rounding (23 ms on AAC,
-			// almost all of it the head). The segments themselves are unchanged.
-			Seconds: float64(plan.PresentationDuration(int64(n))) / rate,
-		}
+	segs, err := req.plan.MediaSegments(func(n int64) string {
+		return fmt.Sprintf("seg/%d.m4s?%s", n, s.hlsChildQuery(fmt.Sprintf("/hls/seg/%d.m4s", n), req.desc, exp))
+	})
+	if err != nil {
+		s.writeError(w, err)
+		return
 	}
-	initURI := "init.mp4?" + s.hlsChildQuery("/hls/init.mp4", req.desc, exp)
-	s.servePlaylist(w, hls.Media(initURI, segments))
+	media, err := m3u8.Media("init.mp4?"+s.hlsChildQuery("/hls/init.mp4", req.desc, exp), segs)
+	if err != nil {
+		s.writeError(w, err)
+		return
+	}
+	s.servePlaylist(w, media)
 }
 
 func (s *Server) servePlaylist(w http.ResponseWriter, playlist string) {

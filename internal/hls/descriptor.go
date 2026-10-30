@@ -1,7 +1,8 @@
 // Package hls is the service plumbing behind the HLS surface: the v=
-// descriptor every HLS URL carries, the playlist writers, and the variant
-// worker manager. The server package stays transport-only on top of it;
-// nothing here is sample-shaped (the engine owns segments).
+// descriptor every HLS URL carries, the variant worker manager, and the
+// client that reads a presentation back. The playlist text is package
+// m3u8's. The server package stays transport-only on top of it; nothing
+// here is sample-shaped (the engine owns segments).
 package hls
 
 import (

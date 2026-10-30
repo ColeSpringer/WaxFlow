@@ -4,11 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"math"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"slices"
 	"strings"
@@ -1227,29 +1224,9 @@ func TestHLSReadBackTimeline(t *testing.T) {
 		t.Fatal(err)
 	}
 	segs := timelineSegments(t, e, raws, waxflow.ConcatOptions{}, opts, plan.SegmentSamples, 0)
+	masterURL := servePresentation(t, []hlsVariant{{plan: plan, init: init, segs: segs}})
 
-	files := map[string][]byte{"/init.mp4": init}
-	var media []hls.MediaSegment
-	for _, s := range segs {
-		name := fmt.Sprintf("seg%d.m4s", s.Index)
-		files["/"+name] = s.Data
-		media = append(media, hls.MediaSegment{URI: name, Seconds: float64(s.Samples) / 48000})
-	}
-	files["/v0.m3u8"] = []byte(hls.Media("init.mp4", media))
-	files["/master.m3u8"] = []byte(hls.Master([]hls.MasterVariant{
-		{URI: "v0.m3u8", Bandwidth: plan.Bandwidth, Codecs: plan.Codecs},
-	}))
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		data, ok := files[r.URL.Path]
-		if !ok {
-			http.NotFound(w, r)
-			return
-		}
-		w.Write(data)
-	}))
-	defer srv.Close()
-
-	med, err := hls.OpenVOD(context.Background(), hls.HTTPFetcher{}, srv.URL+"/master.m3u8", nil)
+	med, err := hls.OpenVOD(context.Background(), hls.HTTPFetcher{}, masterURL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

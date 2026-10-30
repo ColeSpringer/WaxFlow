@@ -299,3 +299,35 @@ as noise. A bare stream of a version this build does not decode, pre-4.0
 included, is refused for its version where it used to fail as unparsable.
 It is a behavioural break taken for the data-track amendment's reason: a
 refusal replaces a silently wrong decode.
+
+## Amendment (2026-10-30): `m3u8` joins the public tree
+
+`internal/hls`'s M3U8 writer and parser move to `m3u8`; the descriptor,
+the variant manager and the HLS client stay internal. A host rendering a
+presentation through the exported segmenter needs the daemon's playlist
+text, and without a shared writer each host writes its own: WaxDeck's
+fixtures already carried a copy that rounded the target duration its own
+way. `SegmentPlan.MediaSegments` and `SegmentPlan.MasterVariant` give a
+plan's rows, which `Media` and `Master` write. As with `cue`, the move is
+one direction only.
+
+Publishing changed both halves, because it changed who calls them:
+
+- **The writers refuse what M3U8 cannot carry.** `Master` and `Media`
+  return an error where they returned text. A URI must already be RFC
+  3986's characters (RFC 8216 asks for a URI, and a space or a non-ASCII
+  byte left unencoded is where other readers split a line this one does
+  not), a URI line may not start with `#`, CODECS may hold no control
+  character or double quote, and a duration must be finite and not
+  negative. What they write the parsers read back as given, durations to
+  the five decimals EXTINF is written with.
+- **The parsers refuse what their types cannot say.** `ParseMedia` refuses
+  a playlist with a byte range, encryption, a gap, a delta update, an
+  I-frame playlist or more than one init, where it read past the tag and
+  listed each segment as a whole, clear resource. An EXTINF duration must
+  be one of RFC 8216's unsigned spellings. The errors carry codes: damage
+  is `malformed-input`, and a playlist past the size caps or using a tag
+  the types cannot describe is `unsupported-format`.
+
+The package is named for the format, as `cue` is, which leaves `hls` free
+should the descriptor or the client ever go public.

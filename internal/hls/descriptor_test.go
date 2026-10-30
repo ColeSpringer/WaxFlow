@@ -138,39 +138,3 @@ func FuzzDecodeDescriptor(f *testing.F) {
 		}
 	})
 }
-
-func TestPlaylists(t *testing.T) {
-	master := Master([]MasterVariant{
-		{URI: "media.m3u8?v=abc", Bandwidth: 100000, Codecs: "Opus"},
-		{URI: "media.m3u8?v=def", Bandwidth: 1500000, Codecs: "fLaC"},
-	})
-	for _, want := range []string{
-		"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n",
-		"#EXT-X-STREAM-INF:BANDWIDTH=100000,CODECS=\"Opus\"\nmedia.m3u8?v=abc\n",
-		"#EXT-X-STREAM-INF:BANDWIDTH=1500000,CODECS=\"fLaC\"\nmedia.m3u8?v=def\n",
-	} {
-		if !strings.Contains(master, want) {
-			t.Errorf("master missing %q:\n%s", want, master)
-		}
-	}
-
-	media := Media("init.mp4?v=abc", []MediaSegment{
-		{URI: "seg/0.m4s?v=abc", Seconds: 4},
-		{URI: "seg/1.m4s?v=abc", Seconds: 2.02},
-	})
-	for _, want := range []string{
-		"#EXT-X-TARGETDURATION:4\n",
-		"#EXT-X-PLAYLIST-TYPE:VOD\n",
-		"#EXT-X-MAP:URI=\"init.mp4?v=abc\"\n",
-		"#EXTINF:4.00000,\nseg/0.m4s?v=abc\n",
-		"#EXTINF:2.02000,\nseg/1.m4s?v=abc\n",
-		"#EXT-X-ENDLIST\n",
-	} {
-		if !strings.Contains(media, want) {
-			t.Errorf("media playlist missing %q:\n%s", want, media)
-		}
-	}
-	if !strings.HasSuffix(media, "#EXT-X-ENDLIST\n") {
-		t.Error("ENDLIST is not last")
-	}
-}

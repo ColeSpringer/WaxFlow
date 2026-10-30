@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 
@@ -71,13 +70,7 @@ func writeLongRamp(t *testing.T, env *testEnv, name string, seconds int) {
 func hlsSegmentURIs(t *testing.T, env *testEnv, params map[string]string) []string {
 	t.Helper()
 	master := readBody(t, keyless(t, env, mintHLS(t, env, params)))
-	var mediaRef string
-	for _, l := range playlistLines(master) {
-		if !strings.HasPrefix(l, "#") {
-			mediaRef = l
-			break
-		}
-	}
+	mediaRef := variantURIs(t, master)[0]
 	resp := keyless(t, env, "/hls/"+mediaRef)
 	media := readBody(t, resp)
 	if resp.StatusCode != 200 {

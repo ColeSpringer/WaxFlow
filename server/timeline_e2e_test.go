@@ -102,15 +102,7 @@ func TestTimelineEndToEnd(t *testing.T) {
 
 	masterURL := mintHLS(t, env, map[string]string{"tl": tl.Tl, "format": "opus", "gain": "off"})
 	master := readBody(t, keyless(t, env, masterURL))
-	var mediaURL string
-	for _, l := range playlistLines(master) {
-		if l != "" && l[0] != '#' {
-			mediaURL = "/hls/" + l
-		}
-	}
-	if mediaURL == "" {
-		t.Fatalf("no variant in the master playlist: %s", master)
-	}
+	mediaURL := "/hls/" + variantURIs(t, master)[0]
 
 	media := readBody(t, keyless(t, env, mediaURL))
 	initURI, segURIs, extinf := mediaURIs(t, media)
@@ -322,15 +314,7 @@ func TestTimelineCrossfadeMintRefusals(t *testing.T) {
 func renderTimeline(t *testing.T, env *testEnv, masterURL string) (totalSeconds float64, seg0 []byte) {
 	t.Helper()
 	master := readBody(t, keyless(t, env, masterURL))
-	var mediaURL string
-	for _, l := range playlistLines(master) {
-		if l != "" && l[0] != '#' {
-			mediaURL = "/hls/" + l
-		}
-	}
-	if mediaURL == "" {
-		t.Fatalf("no variant in the master playlist: %s", master)
-	}
+	mediaURL := "/hls/" + variantURIs(t, master)[0]
 	_, segURIs, extinf := mediaURIs(t, readBody(t, keyless(t, env, mediaURL)))
 	for _, d := range extinf {
 		totalSeconds += d
@@ -697,15 +681,7 @@ func mintTimelineSrcs(t *testing.T, env *testEnv, srcs []client.TimelineSrc) cli
 func fetchVariant(t *testing.T, env *testEnv, masterURL string) (media, init []byte, segs [][]byte) {
 	t.Helper()
 	master := readBody(t, keyless(t, env, masterURL))
-	var mediaURL string
-	for _, l := range playlistLines(master) {
-		if l != "" && l[0] != '#' {
-			mediaURL = "/hls/" + l
-		}
-	}
-	if mediaURL == "" {
-		t.Fatalf("no variant in the master playlist: %s", master)
-	}
+	mediaURL := "/hls/" + variantURIs(t, master)[0]
 	media = readBody(t, keyless(t, env, mediaURL))
 	initURI, segURIs, _ := mediaURIs(t, media)
 	if initURI == "" || len(segURIs) == 0 {

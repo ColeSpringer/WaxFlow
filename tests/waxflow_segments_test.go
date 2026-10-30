@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/colespringer/waxflow/container/riff"
 	"github.com/colespringer/waxflow/dsp"
 	"github.com/colespringer/waxflow/dsp/gain"
+	"github.com/colespringer/waxflow/m3u8"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -907,6 +909,113 @@ func TestSegmentDurationBelowPrimingIsRefused(t *testing.T) {
 	// timeline is presentation, so a one-frame segment is merely small.
 	if _, err := e.PlanSegments(pcmTrack(f, 44100), waxflow.TranscodeOptions{Format: "flac"}, 0.001); err != nil {
 		t.Errorf("a tiny FLAC segment was refused, but FLAC carries no priming: %v", err)
+	}
+}
+
+// handPlan is a three-segment plan whose numbers are worked by hand: 400000
+// samples at 48 kHz behind a 312-sample delay, in 4 s segments over a decode
+// total of 400320. Segment 0 presents 192000-312, segment 1 a full 192000,
+// and segment 2 the remaining 16312 of its 16320 decode samples.
+func handPlan() *waxflow.SegmentPlan {
+	return &waxflow.SegmentPlan{
+		TranscodePlan:      waxflow.TranscodePlan{Format: audio.Format{Rate: 48000, Channels: 2}, Samples: 400000},
+		SegmentSamples:     192000,
+		Delay:              312,
+		Codecs:             "Opus",
+		Bandwidth:          70000,
+		TotalDecodeSamples: 400320,
+		Segments:           3,
+	}
+}
+
+// TestMediaSegmentsRenderThePlan pins the rows a host's media playlist gets
+// from the exported segmenter (segmentURI asked for every index, each segment
+// timed by its presentation duration: 191688, 192000 and 16312 samples) and
+// the text m3u8.Media makes of them, target duration included.
+func TestMediaSegmentsRenderThePlan(t *testing.T) {
+	segs, err := handPlan().MediaSegments(func(n int64) string { return fmt.Sprintf("seg-%d.m4s", n) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []m3u8.MediaSegment{
+		{URI: "seg-0.m4s", Seconds: 191688.0 / 48000},
+		{URI: "seg-1.m4s", Seconds: 4},
+		{URI: "seg-2.m4s", Seconds: 16312.0 / 48000},
+	}
+	if !slices.Equal(segs, want) {
+		t.Fatalf("segments %+v, want %+v", segs, want)
+	}
+	got, err := m3u8.Media("init.mp4", segs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const text = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n" +
+		"#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MAP:URI=\"init.mp4\"\n" +
+		"#EXTINF:3.99350,\nseg-0.m4s\n#EXTINF:4.00000,\nseg-1.m4s\n#EXTINF:0.33983,\nseg-2.m4s\n" +
+		"#EXT-X-ENDLIST\n"
+	if got != text {
+		t.Errorf("playlist:\n%s\nwant:\n%s", got, text)
+	}
+
+	master, err := m3u8.Master([]m3u8.MasterVariant{handPlan().MasterVariant("media.m3u8")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "#EXT-X-STREAM-INF:BANDWIDTH=70000,CODECS=\"Opus\"\nmedia.m3u8\n"; !strings.HasSuffix(master, want) {
+		t.Errorf("master:\n%s\nwant it to end:\n%s", master, want)
+	}
+}
+
+// TestMediaSegmentsRefuse pins the refusals: a plan whose length was never
+// measured, no URI function, a plan with no rate, one whose segment fields
+// disagree (as only a plan built by hand can), and one with more segments
+// than a playlist lists. None of them asks for a single URI.
+func TestMediaSegmentsRefuse(t *testing.T) {
+	long := func(n int64) func(*waxflow.SegmentPlan) {
+		return func(p *waxflow.SegmentPlan) {
+			p.SegmentSamples, p.Delay, p.Samples, p.TotalDecodeSamples, p.Segments = 1, 0, n, n, n
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		edit  func(*waxflow.SegmentPlan)
+		nilFn bool
+	}{
+		{"unmeasured", func(p *waxflow.SegmentPlan) { p.Segments, p.TotalDecodeSamples = -1, -1 }, false},
+		{"no URI function", func(*waxflow.SegmentPlan) {}, true},
+		{"no rate", func(p *waxflow.SegmentPlan) { p.Format.Rate = 0 }, false},
+		{"no segment size", func(p *waxflow.SegmentPlan) { p.SegmentSamples = 0 }, false},
+		{"no decode total", func(p *waxflow.SegmentPlan) { p.TotalDecodeSamples = -1 }, false},
+		{"count off the total", func(p *waxflow.SegmentPlan) { p.Segments = 4 }, false},
+		{"window past the decode span", func(p *waxflow.SegmentPlan) { p.Samples = 400100 }, false},
+		{"negative delay", func(p *waxflow.SegmentPlan) { p.Delay = -1 }, false},
+		{"one past MaxSegments", long(m3u8.MaxSegments + 1), false},
+		{"far past MaxSegments", long(1 << 50), false},
+	} {
+		p := handPlan()
+		tc.edit(p)
+		calls := 0
+		segFn := func(n int64) string { calls++; return fmt.Sprintf("%d.m4s", n) }
+		if tc.nilFn {
+			segFn = nil
+		}
+		segs, err := p.MediaSegments(segFn)
+		if err == nil {
+			t.Errorf("%s: listed %d segments", tc.name, len(segs))
+			continue
+		}
+		if code := waxerr.CodeOf(err); code != waxerr.CodeInvalidRequest {
+			t.Errorf("%s: code %s, want %s (%v)", tc.name, code, waxerr.CodeInvalidRequest, err)
+		}
+		if calls != 0 {
+			t.Errorf("%s: asked for %d URIs before refusing", tc.name, calls)
+		}
+	}
+	// The ceiling itself lists.
+	p := handPlan()
+	long(m3u8.MaxSegments)(p)
+	if _, err := p.MediaSegments(func(int64) string { return "s" }); err != nil {
+		t.Errorf("m3u8.MaxSegments segments: %v", err)
 	}
 }
 

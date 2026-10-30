@@ -14,6 +14,7 @@ import (
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/dsp"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/m3u8"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -128,6 +129,56 @@ func (p *SegmentPlan) PresentationDuration(n int64) int64 {
 	}
 	start := n * int64(p.SegmentSamples)
 	return max(0, min(start+d, p.Delay+p.Samples)-max(start, p.Delay))
+}
+
+// MediaSegments lists the plan's segments for a VOD media playlist: segment
+// n at segmentURI(n), timed by its presentation duration. m3u8.Media renders
+// them as the daemon's /hls/media.m3u8 renders the same plan. Which plan the
+// daemon serves is the daemon's choice of rung: PlanRemuxSegments or
+// PlanCutSegments over the source's PacketGrid where the source's own packets
+// serve, PlanSegments otherwise.
+//
+// A plan of unknown length is refused, since a VOD playlist lists every
+// segment: measure the source (MeasureLength) and plan from that track. So is
+// one whose segment fields disagree, which only a plan built by hand can.
+func (p *SegmentPlan) MediaSegments(segmentURI func(n int64) string) ([]m3u8.MediaSegment, error) {
+	switch {
+	case p.Segments < 0:
+		return nil, waxerr.New(waxerr.CodeInvalidRequest,
+			"waxflow: the plan's length is unknown, so no playlist can list its segments; plan from a measured track")
+	case segmentURI == nil:
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: MediaSegments needs a segment URI function")
+	case p.Format.Rate <= 0:
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: the plan has no output rate")
+	case p.SegmentSamples <= 0 || p.Delay < 0 || p.Samples < 0 || p.Delay+p.Samples > p.TotalDecodeSamples ||
+		p.Segments != (p.TotalDecodeSamples+int64(p.SegmentSamples)-1)/int64(p.SegmentSamples):
+		// What every planner's plan holds by construction.
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+			"waxflow: the plan's segment fields disagree: %d segments of %d over %d decode samples, %d presented after %d",
+			p.Segments, p.SegmentSamples, p.TotalDecodeSamples, p.Samples, p.Delay))
+	case p.Segments > m3u8.MaxSegments:
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+			"waxflow: %d segments are past the %d a playlist lists; raise the segment duration", p.Segments, m3u8.MaxSegments))
+	}
+	rate := float64(p.Format.Rate)
+	segs := make([]m3u8.MediaSegment, p.Segments)
+	for n := range segs {
+		segs[n] = m3u8.MediaSegment{
+			URI: segmentURI(int64(n)),
+			// The presentation timeline, not the decode one: EXTINF is what a
+			// player sums into a total duration, and the decode span overshoots
+			// it by the encoder delay plus the tail rounding (23 ms on AAC,
+			// almost all of it the head). The segments themselves are unchanged.
+			Seconds: float64(p.PresentationDuration(int64(n))) / rate,
+		}
+	}
+	return segs, nil
+}
+
+// MasterVariant is the plan's rung of a master playlist, at uri: the
+// bandwidth bound and CODECS the daemon's master advertises for it.
+func (p *SegmentPlan) MasterVariant(uri string) m3u8.MasterVariant {
+	return m3u8.MasterVariant{URI: uri, Bandwidth: p.Bandwidth, Codecs: p.Codecs}
 }
 
 // segmentBitDepth applies the segmented form's depth rule to opts: a FLAC

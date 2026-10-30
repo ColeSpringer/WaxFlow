@@ -10,6 +10,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/m3u8"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -89,7 +90,7 @@ func OpenLive(ctx context.Context, f Fetcher, playlistURL string, opts *LiveOpti
 	if err != nil {
 		return nil, err
 	}
-	first, err := ParseMedia(string(raw))
+	first, err := m3u8.ParseMedia(string(raw))
 	if err != nil {
 		return nil, err
 	}
@@ -131,10 +132,11 @@ func resolveLiveMedia(ctx context.Context, f Fetcher, playlistURL string, o Live
 	if err != nil {
 		return "", nil, err
 	}
-	if !isMasterPlaylist(raw) {
+	text := string(raw)
+	if !m3u8.IsMaster(text) {
 		return playlistURL, raw, nil
 	}
-	master, err := ParseMaster(string(raw))
+	master, err := m3u8.ParseMaster(text)
 	if err != nil {
 		return "", nil, err
 	}
@@ -158,7 +160,7 @@ func resolveLiveMedia(ctx context.Context, f Fetcher, playlistURL string, o Live
 // decode format the downstream pipeline was built from. Rate and channels are
 // not in the master, so they are locked from the selected variant's init on
 // open; codec is the piece the master can and must agree on.
-func formatLock(master MasterPlaylist) error {
+func formatLock(master m3u8.MasterPlaylist) error {
 	codecs := master.Variants[0].Codecs
 	for _, v := range master.Variants[1:] {
 		if v.Codecs != codecs {
@@ -261,7 +263,7 @@ func (s *segmentFeed) reload() (bool, error) {
 			return false, err
 		}
 	}
-	pl, err := ParseMedia(string(raw))
+	pl, err := m3u8.ParseMedia(string(raw))
 	if err != nil {
 		return false, err
 	}

@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/colespringer/waxflow/client"
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/m3u8"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -49,7 +51,8 @@ func keyless(t *testing.T, env *testEnv, pathAndQuery string) *http.Response {
 	return env.get(t, pathAndQuery, map[string]string{"X-API-Key": ""})
 }
 
-// playlistLines returns the non-blank lines of an m3u8 body.
+// playlistLines returns the non-blank lines of an m3u8 body, for a tag the
+// parsed playlists do not carry.
 func playlistLines(body []byte) []string {
 	var lines []string
 	for _, l := range strings.Split(string(body), "\n") {
@@ -60,25 +63,34 @@ func playlistLines(body []byte) []string {
 	return lines
 }
 
-// mediaURIs extracts the child URIs (non-tag lines) plus the EXT-X-MAP
-// init URI from a media playlist.
+// variantURIs reads a master playlist through m3u8.ParseMaster and returns its
+// variants' URIs in order.
+func variantURIs(t *testing.T, master []byte) []string {
+	t.Helper()
+	pl, err := m3u8.ParseMaster(string(master))
+	if err != nil {
+		t.Fatalf("master playlist: %v\n%s", err, master)
+	}
+	uris := make([]string, len(pl.Variants))
+	for i, v := range pl.Variants {
+		uris[i] = v.URI
+	}
+	return uris
+}
+
+// mediaURIs reads a media playlist through m3u8.ParseMedia: the EXT-X-MAP init
+// URI, the segment URIs, and their EXTINF durations.
 func mediaURIs(t *testing.T, body []byte) (initURI string, segURIs []string, extinf []float64) {
 	t.Helper()
-	for _, l := range playlistLines(body) {
-		switch {
-		case strings.HasPrefix(l, "#EXT-X-MAP:URI=\""):
-			initURI = strings.TrimSuffix(strings.TrimPrefix(l, "#EXT-X-MAP:URI=\""), "\"")
-		case strings.HasPrefix(l, "#EXTINF:"):
-			var d float64
-			if _, err := fmt.Sscanf(l, "#EXTINF:%f,", &d); err != nil {
-				t.Fatalf("bad EXTINF line %q", l)
-			}
-			extinf = append(extinf, d)
-		case !strings.HasPrefix(l, "#"):
-			segURIs = append(segURIs, l)
-		}
+	pl, err := m3u8.ParseMedia(string(body))
+	if err != nil {
+		t.Fatalf("media playlist: %v\n%s", err, body)
 	}
-	return initURI, segURIs, extinf
+	for _, s := range pl.Segments {
+		segURIs = append(segURIs, s.URI)
+		extinf = append(extinf, s.Seconds)
+	}
+	return pl.InitURI, segURIs, extinf
 }
 
 func TestHLSEndToEnd(t *testing.T) {
@@ -91,12 +103,7 @@ func TestHLSEndToEnd(t *testing.T) {
 	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "application/vnd.apple.mpegurl" {
 		t.Fatalf("master = %d %s: %s", resp.StatusCode, resp.Header.Get("Content-Type"), master)
 	}
-	var mediaRefs []string
-	for _, l := range playlistLines(master) {
-		if !strings.HasPrefix(l, "#") {
-			mediaRefs = append(mediaRefs, l)
-		}
-	}
+	mediaRefs := variantURIs(t, master)
 	if len(mediaRefs) != 2 {
 		t.Fatalf("master lists %d variants, want 2:\n%s", len(mediaRefs), master)
 	}
@@ -187,6 +194,153 @@ func TestHLSEndToEnd(t *testing.T) {
 	}
 }
 
+// TestHLSMediaPlaylistMatchesTheExportedPlan pins what SegmentPlan.MediaSegments
+// promises a host: plan as the daemon's rung does, through the exported
+// planners, and m3u8.Media renders the daemon's playlist byte for byte, given
+// its URIs. The daemon renders through the same two calls, so what this pins
+// is the plan (the rendering is pinned against a literal in tests/); a rung's
+// counter shows the daemon served the rung the host planned, since the
+// transcode fallback would serve a playlist too.
+func TestHLSMediaPlaylistMatchesTheExportedPlan(t *testing.T) {
+	env := newTestEnv(t, nil)
+	ref := writeOpusFixture(t, env, "ramp.wav", "ramp.opus")
+	e := waxflow.New()
+	track := func(name, ext string) (container.Source, container.Track) {
+		raw, err := os.ReadFile(filepath.Join(env.root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := e.Probe(container.BytesSource(raw), ext, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return container.BytesSource(raw), info.Default()
+	}
+	_, wav := track("ramp.wav", "wav")
+	opusSrc, opus := track("ramp.opus", "opus")
+	grid, err := e.PacketGrid(opusSrc, "opus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	asOpus := waxflow.TranscodeOptions{Format: "opus"}
+	met := env.srv.Metrics()
+	for _, tc := range []struct {
+		name    string
+		params  map[string]string
+		counter *atomic.Uint64
+		plan    func() (*waxflow.SegmentPlan, error)
+	}{
+		{"transcode/opus", map[string]string{"src": "lib/ramp.wav", "format": "opus", "segDur": "1"}, nil,
+			func() (*waxflow.SegmentPlan, error) { return e.PlanSegments(wav, asOpus, 1) }},
+		{"transcode/aac", map[string]string{"src": "lib/ramp.wav", "format": "aac", "segDur": "1"}, nil,
+			func() (*waxflow.SegmentPlan, error) {
+				return e.PlanSegments(wav, waxflow.TranscodeOptions{Format: "aac"}, 1)
+			}},
+		{"transcode/flac", map[string]string{"src": "lib/ramp.wav", "format": "flac", "segDur": "1"}, nil,
+			func() (*waxflow.SegmentPlan, error) {
+				return e.PlanSegments(wav, waxflow.TranscodeOptions{Format: "flac"}, 1)
+			}},
+		{"remux", map[string]string{"src": ref, "format": "opus", "segDur": "1"}, &met.Remuxes,
+			func() (*waxflow.SegmentPlan, error) {
+				rp, err := e.PlanRemuxSegments(opus, asOpus, 1, grid)
+				if rp == nil {
+					return nil, fmt.Errorf("the remux rung declined: %v", err)
+				}
+				return &rp.SegmentPlan, nil
+			}},
+		{"cut", map[string]string{"src": ref, "format": "opus", "segDur": "1", "from": "48000", "to": "144000"}, &met.Cuts,
+			func() (*waxflow.SegmentPlan, error) {
+				cp, err := e.PlanCutSegments(opus, asOpus, []waxflow.Span{{From: 48000, To: 144000}}, grid, 1)
+				if cp == nil {
+					return nil, fmt.Errorf("the cut rung declined: %v", err)
+				}
+				return &cp.SegmentPlan, nil
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			desc := hlsDescriptorFor(t, env, tc.params)
+			resp := env.get(t, "/hls/media.m3u8?v="+desc, nil)
+			served := readBody(t, resp)
+			if resp.StatusCode != 200 {
+				t.Fatalf("media = %d: %s", resp.StatusCode, served)
+			}
+			pl, err := m3u8.ParseMedia(string(served))
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := tc.plan()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if int64(len(pl.Segments)) != plan.Segments {
+				t.Fatalf("the daemon lists %d segments, the plan %d", len(pl.Segments), plan.Segments)
+			}
+			segs, err := plan.MediaSegments(func(n int64) string { return pl.Segments[n].URI })
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := m3u8.Media(pl.InitURI, segs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != string(served) {
+				t.Errorf("plan renders:\n%s\nthe daemon serves:\n%s", got, served)
+			}
+			if tc.counter == nil {
+				return
+			}
+			before := tc.counter.Load()
+			if r := env.get(t, "/hls/"+pl.Segments[0].URI, nil); readBody(t, r) == nil || r.StatusCode != 200 {
+				t.Fatalf("segment 0 = %d", r.StatusCode)
+			}
+			if tc.counter.Load() == before {
+				t.Error("the daemon served segment 0 on another rung than the one planned")
+			}
+		})
+	}
+}
+
+// writeSilentWAV writes an 8 kHz mono 8-bit WAV of frames samples whose data
+// the file system leaves sparse, for a source long enough to plan past a cap
+// without paying for it on disk.
+func writeSilentWAV(t *testing.T, path string, frames uint32) {
+	t.Helper()
+	h := []byte("RIFF\x00\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x40\x1f\x00\x00\x40\x1f\x00\x00\x01\x00\x08\x00data\x00\x00\x00\x00")
+	binary.LittleEndian.PutUint32(h[4:], 36+frames)
+	binary.LittleEndian.PutUint32(h[40:], frames)
+	if err := os.WriteFile(path, h, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, int64(len(h))+int64(frames)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestHLSRefusesTooManySegmentsAtEveryEntry pins the playlist cap where a
+// player is first handed a URL: a mint and a master refuse a variant whose
+// media playlist would be refused, rather than answer 200 and leave the
+// player to find out at media.m3u8. 1400 s at a one-frame Opus segDur is
+// 70000 segments, past the 65536 one playlist lists.
+func TestHLSRefusesTooManySegmentsAtEveryEntry(t *testing.T) {
+	env := newTestEnv(t, nil)
+	writeSilentWAV(t, filepath.Join(env.root, "long.wav"), 1400*8000)
+	params := map[string]string{"src": "lib/long.wav", "format": "opus", "segDur": "0.02"}
+
+	c, err := client.New(env.ts.URL, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Sign(t.Context(), client.SignRequest{Path: "/hls/master.m3u8", Params: params}); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+		t.Errorf("mint: %v, want %s", err, waxerr.CodeInvalidRequest)
+	}
+	wantEnvelope(t, env.get(t, "/hls/master.m3u8?src=lib/long.wav&format=opus&segDur=0.02", nil),
+		http.StatusBadRequest, waxerr.CodeInvalidRequest)
+
+	// The same source at 4 s segments mints, so the refusal is the count.
+	params["segDur"] = "4"
+	mintHLS(t, env, params)
+}
+
 // segmentDecodeSamples sums the trun durations of a segment.
 func segmentDecodeSamples(t *testing.T, seg []byte) int64 {
 	t.Helper()
@@ -252,12 +406,7 @@ func TestHLSSeekRestartLatency(t *testing.T) {
 	masterURL := mintHLS(t, env, map[string]string{"src": "lib/ramp.wav", "format": "opus", "segDur": "1"})
 	resp := keyless(t, env, masterURL)
 	master := readBody(t, resp)
-	var mediaRef string
-	for _, l := range playlistLines(master) {
-		if !strings.HasPrefix(l, "#") {
-			mediaRef = l
-		}
-	}
+	mediaRef := variantURIs(t, master)[0]
 	resp = keyless(t, env, "/hls/"+mediaRef)
 	_, segURIs, _ := mediaURIs(t, readBody(t, resp))
 	if len(segURIs) < 4 {
@@ -356,12 +505,7 @@ func TestHLSSourceChanged(t *testing.T) {
 	masterURL := mintHLS(t, env, map[string]string{"src": "lib/ramp.wav", "format": "opus"})
 	resp := keyless(t, env, masterURL)
 	master := readBody(t, resp)
-	var mediaRef string
-	for _, l := range playlistLines(master) {
-		if !strings.HasPrefix(l, "#") {
-			mediaRef = l
-		}
-	}
+	mediaRef := variantURIs(t, master)[0]
 
 	// Rewrite the source: identity (size+mtime) changes.
 	path := filepath.Join(env.root, "ramp.wav")
@@ -572,16 +716,7 @@ func TestHLSMasterAdvertisesHECopy(t *testing.T) {
 	}
 
 	// The media playlist behind it serves the same variant.
-	var mediaRef string
-	for _, l := range playlistLines(master) {
-		if !strings.HasPrefix(l, "#") {
-			mediaRef = l
-			break
-		}
-	}
-	if mediaRef == "" {
-		t.Fatalf("master lists no variant: %s", master)
-	}
+	mediaRef := variantURIs(t, master)[0]
 	resp = keyless(t, env, "/hls/"+mediaRef)
 	if media := readBody(t, resp); resp.StatusCode != 200 {
 		t.Fatalf("media playlist behind the HE master = %d: %s", resp.StatusCode, media)
@@ -650,15 +785,7 @@ func TestHLSMeasuresAnAdvisoryLength(t *testing.T) {
 	env := newTestEnv(t, nil)
 	masterURL := mintHLS(t, env, map[string]string{"src": "lib/seed.webm", "format": "aac"})
 	master := readBody(t, keyless(t, env, masterURL))
-	var mediaRef string
-	for _, l := range playlistLines(master) {
-		if !strings.HasPrefix(l, "#") {
-			mediaRef = l
-		}
-	}
-	if mediaRef == "" {
-		t.Fatalf("no media playlist in:\n%s", master)
-	}
+	mediaRef := variantURIs(t, master)[0]
 	resp := keyless(t, env, "/hls/"+mediaRef)
 	media := readBody(t, resp)
 	if resp.StatusCode != 200 {

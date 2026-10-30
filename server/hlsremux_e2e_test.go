@@ -5,7 +5,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow"
@@ -48,15 +47,7 @@ func TestHLSRemuxServesTheMiddleRung(t *testing.T) {
 
 	masterURL := mintHLS(t, env, map[string]string{"src": ref, "format": "opus"})
 	master := readBody(t, keyless(t, env, masterURL))
-	var mediaRef string
-	for _, l := range playlistLines(master) {
-		if !strings.HasPrefix(l, "#") {
-			mediaRef = l
-		}
-	}
-	if mediaRef == "" {
-		t.Fatalf("no variant in master:\n%s", master)
-	}
+	mediaRef := variantURIs(t, master)[0]
 
 	resp := keyless(t, env, "/hls/"+mediaRef)
 	media := readBody(t, resp)
@@ -134,12 +125,7 @@ func TestHLSRemuxDeclinedForSpanAndBitrate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			before := env.srv.Metrics().Remuxes.Load()
 			master := readBody(t, keyless(t, env, mintHLS(t, env, tc.params)))
-			var mediaRef string
-			for _, l := range playlistLines(master) {
-				if !strings.HasPrefix(l, "#") {
-					mediaRef = l
-				}
-			}
+			mediaRef := variantURIs(t, master)[0]
 			media := readBody(t, keyless(t, env, "/hls/"+mediaRef))
 			initURI, segURIs, _ := mediaURIs(t, media)
 			if initURI == "" || len(segURIs) == 0 {

@@ -111,10 +111,7 @@ func TestHLSAACBitrateLadder(t *testing.T) {
 		t.Fatalf("master = %d: %s", resp.StatusCode, master)
 	}
 	var sizes []int
-	for _, l := range playlistLines(master) {
-		if len(l) == 0 || l[0] == '#' {
-			continue
-		}
+	for _, l := range variantURIs(t, master) {
 		resp := keyless(t, env, "/hls/"+l)
 		media := readBody(t, resp)
 		if resp.StatusCode != 200 {
@@ -169,16 +166,7 @@ func TestHLSMasterAdvertisesHEv2(t *testing.T) {
 
 	// A v2 media playlist and its init segment serve (the descriptor
 	// carries the flag through the variant path).
-	var mediaRef string
-	for _, l := range playlistLines(master) {
-		if len(l) > 0 && l[0] != '#' {
-			mediaRef = l
-			break
-		}
-	}
-	if mediaRef == "" {
-		t.Fatalf("master lists no media playlist: %s", master)
-	}
+	mediaRef := variantURIs(t, master)[0]
 	resp = keyless(t, env, "/hls/"+mediaRef)
 	media := readBody(t, resp)
 	if resp.StatusCode != 200 {

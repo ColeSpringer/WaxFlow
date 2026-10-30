@@ -81,20 +81,6 @@ func TestHTTPFetcherLimit(t *testing.T) {
 	}
 }
 
-// TestIsMasterPlaylist pins the line-anchored master/media discrimination: a
-// media playlist that merely mentions the STREAM-INF tag text in a title is not
-// a master, while a real STREAM-INF tag line is.
-func TestIsMasterPlaylist(t *testing.T) {
-	master := "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nv0.m3u8\n"
-	media := "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,see #EXT-X-STREAM-INF notes\nseg0.m4s\n#EXT-X-ENDLIST\n"
-	if !isMasterPlaylist([]byte(master)) {
-		t.Error("real master with a STREAM-INF tag line not detected")
-	}
-	if isMasterPlaylist([]byte(media)) {
-		t.Error("media playlist mentioning the tag in a title misdetected as master")
-	}
-}
-
 // TestResolveURL pins relative-URI resolution against the playlist base, the
 // RFC 3986 behavior segment and init URIs rely on.
 func TestResolveURL(t *testing.T) {
