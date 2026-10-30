@@ -260,6 +260,9 @@ type CapsDelivery struct {
 	// non-omitempty to mirror the server: false is a real answer (server too
 	// new to omit it), absent means a server too old to advertise it.
 	RootsReload bool `json:"rootsReload"`
+	// RootsStatus: the daemon serves GET /roots (Roots). Sent non-omitempty
+	// like RootsReload: absent means a server too old to advertise it.
+	RootsStatus bool `json:"rootsStatus"`
 }
 
 // TimelineRequest is the POST /hls/timeline body: a play queue, in order.
@@ -356,9 +359,12 @@ type CacheGCResponse struct {
 // RootsReloadResponse is the POST /roots/reload body: the reconcile
 // delta. Added, Removed, and Changed report what moved (Changed is a
 // root whose name stayed but whose path was re-pointed); Roots is the
-// full set after the reload, in configuration order.
+// full set after the reload, in configuration order. Unmounted names the
+// roots among them that are not mounted (a path that did not open is
+// reported there, not refused), and Remounted the unchanged roots the
+// reload's retry mounted.
 //
-// The daemon renders all four as arrays, never null, so an empty delta
+// The daemon renders every list as an array, never null, so an empty delta
 // is still iterable. They are not normalized after decoding: encoding/json
 // already yields a non-nil empty slice for [], and ranging over a nil
 // slice is fine in Go, so normalizing would only paper over a daemon that
@@ -369,6 +375,26 @@ type RootsReloadResponse struct {
 	Removed       []string `json:"removed"`
 	Changed       []string `json:"changed"`
 	Roots         []string `json:"roots"`
+	Unmounted     []string `json:"unmounted"`
+	Remounted     []string `json:"remounted"`
+}
+
+// RootsResponse is the GET /roots body: every configured library root, in
+// configuration order.
+type RootsResponse struct {
+	SchemaVersion int          `json:"schemaVersion"`
+	Roots         []RootStatus `json:"roots"`
+}
+
+// RootStatus is one library root. An unmounted root answers
+// waxerr.CodeRootUnavailable until its folder opens; Error says why it did
+// not, and Since is when the root entered its current state.
+type RootStatus struct {
+	Name    string    `json:"name"`
+	Path    string    `json:"path"`
+	Mounted bool      `json:"mounted"`
+	Error   string    `json:"error,omitempty"`
+	Since   time.Time `json:"since"`
 }
 
 // JobRequest is the POST /jobs body and, equally, the request a job
@@ -592,6 +618,18 @@ type Job struct {
 	// Warnings are non-fatal notes (metadata that could not be read or
 	// written); the audio outcome is unaffected.
 	Warnings []string `json:"warnings,omitempty"`
+	// Waiting says why a queued job is waiting to run again: its source was
+	// unavailable for now (an unmounted root, an unreachable catalog) when it
+	// last ran. Nil once it runs.
+	Waiting *JobWait `json:"waiting,omitempty"`
+}
+
+// JobWait is why a job is back in the queue, with the code its last run met,
+// and when it runs again.
+type JobWait struct {
+	Code    string    `json:"code"`
+	Message string    `json:"message"`
+	Until   time.Time `json:"until"`
 }
 
 // JobsList is the GET /jobs body, mirroring the server's envelope type
@@ -707,6 +745,16 @@ func (c *Client) CacheGC(ctx context.Context) (*CacheGCResponse, error) {
 func (c *Client) ReloadRoots(ctx context.Context) (*RootsReloadResponse, error) {
 	var v RootsReloadResponse
 	if err := c.postJSON(ctx, "/roots/reload", nil, &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+// Roots fetches the daemon's library roots, mounted or not. Gate it on
+// Caps.Delivery.RootsStatus, as ReloadRoots is gated on RootsReload.
+func (c *Client) Roots(ctx context.Context) (*RootsResponse, error) {
+	var v RootsResponse
+	if err := c.getJSON(ctx, "/roots", nil, &v); err != nil {
 		return nil, err
 	}
 	return &v, nil

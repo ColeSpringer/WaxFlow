@@ -65,8 +65,8 @@ func TestDoctorFailsOnMissingRoot(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("exit = 0, want non-zero\n%s", out)
 	}
-	if !strings.Contains(out, "FAIL") || !strings.Contains(out, "roots") {
-		t.Errorf("output missing FAIL roots line:\n%s", out)
+	if !strings.Contains(out, "FAIL") || !strings.Contains(out, "root:lib") {
+		t.Errorf("output missing FAIL root:lib line:\n%s", out)
 	}
 }
 

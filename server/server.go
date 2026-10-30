@@ -97,6 +97,11 @@ type Config struct {
 	// re-read the filesystem and mutate the resolver's roots in place.
 	ReloadRoots func() (source.ReloadResult, error)
 
+	// RootsStatus reports the library roots, mounted or not. It enables GET
+	// /roots, delivery.rootsStatus in /caps and the waxflow_roots_unmounted
+	// gauge; nil disables all three.
+	RootsStatus func() []source.RootStatus
+
 	// SigningKeys enable signed playback URLs. Empty disables sig auth
 	// and POST /sign.
 	SigningKeys []SigningKey
@@ -452,6 +457,9 @@ func (s *Server) routes() {
 	}
 	if s.cfg.ReloadRoots != nil {
 		mux.HandleFunc("POST /roots/reload", s.requireKey(s.handleRootsReload))
+	}
+	if s.cfg.RootsStatus != nil {
+		mux.HandleFunc("GET /roots", s.requireKey(s.handleRoots))
 	}
 	mux.HandleFunc("GET /art", s.handleArt)
 	mux.HandleFunc("HEAD /art", s.handleArt)

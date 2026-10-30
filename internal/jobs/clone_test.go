@@ -125,6 +125,7 @@ func TestJobCloneIsDeep(t *testing.T) {
 		},
 		Progress: &Progress{Phase: "measure"},
 		Warnings: []string{"w"},
+		Waiting:  &Wait{Code: "root-unavailable", Message: "m"},
 	}
 	// The fixture must stay complete for any of the above to mean anything, and
 	// completeness is the one part of this a person cannot be trusted to keep:
@@ -158,6 +159,7 @@ func TestJobCloneIsDeep(t *testing.T) {
 	c.Timeline.Tl = "scribbled"
 	c.Timeline.Boundaries[0].OffsetSamples = 99
 	c.Progress.Phase = "scribbled"
+	c.Waiting.Message = "scribbled"
 
 	// Independent checks, not a switch: a switch reports only its first
 	// matching case, so one shared field would mask every other one and the
@@ -191,6 +193,9 @@ func TestJobCloneIsDeep(t *testing.T) {
 	}
 	if orig.Error.Message != "m" {
 		t.Error("clone shares the Error pointer")
+	}
+	if orig.Waiting.Message != "m" {
+		t.Error("clone shares the Waiting pointer")
 	}
 	if orig.Outputs[0].File != "out.0.flac" {
 		t.Error("clone shares Outputs' backing array with the stored job")

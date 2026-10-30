@@ -331,3 +331,27 @@ Publishing changed both halves, because it changed who calls them:
 
 The package is named for the format, as `cue` is, which leaves `hls` free
 should the descriptor or the client ever go public.
+
+## Amendment (2026-10-30): a library root that does not open is unmounted, not refused
+
+`source.OpenRoots` and `Roots.Reload` no longer fail on a path that does not
+open: the root is kept unmounted and reported (`Roots.Status`,
+`ReloadResult.Unmounted`, every change through `Roots.Watch`), and only an
+invalid set (a bad or duplicate name, an empty path) is refused. A folder
+that opens empty is unmounted too (`ErrRootEmpty`): that is a mount point
+before its drive arrives. `Resolve` answers an unmounted root with the new
+`root-unavailable` code (exit class io, HTTP 503 with `Retry-After`), mounts
+it the first time its folder opens, and remounts a root whose folder was
+removed or replaced; `Roots.Remount` checks the rest for a caller's sweep.
+No call waits on an unmounted root's folder for more than a few seconds, so
+a network mount that stops answering before it mounts holds up nothing but
+its own root.
+A root re-pointed by a reload to a path that fails stops serving the old
+one. Under a healthy root, an I/O error (on Windows also a file another
+program holds locked) is `source-unreadable` and running out of file handles
+is `overloaded`, where both were `invalid-request`.
+
+It is a behavioural break taken for availability: one unplugged drive kept
+the daemon from starting, and one bad path made a reload refuse every other
+change in it. A caller that relied on the refusal reads `Status` or
+`Unmounted` instead.

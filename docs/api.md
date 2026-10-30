@@ -18,7 +18,8 @@ Conventions:
 - Codes: `invalid-request unauthorized signature-invalid
   signature-expired source-changed not-found unsupported-format
   unsupported-source malformed-input payload-too-large source-unreadable
-  output-unwritable overloaded canceled catalog-unavailable internal`.
+  output-unwritable overloaded canceled catalog-unavailable
+  root-unavailable internal`.
 - `unsupported-format` and `malformed-input` are different answers and are
   worth telling apart: the first is a well-formed stream this build does not
   cover (a codec it has no decoder for, a spec its encoders cannot produce),
@@ -28,7 +29,17 @@ Conventions:
   signature-invalid/expired, 404 not-found, 410 source-changed, 413
   payload-too-large, 415 unsupported-format, 416 (range refusal, code
   invalid-request), 422 malformed-input, 501 unsupported-source, 503
-  overloaded (with `Retry-After: 2`) and catalog-unavailable, 500 the rest.
+  overloaded, catalog-unavailable and root-unavailable (each with
+  `Retry-After: 2`), 500 the rest.
+- `root-unavailable` is a configured library root whose folder does not open,
+  or opens empty (an unplugged drive, a mount point whose drive or share has
+  not arrived, a mount that failed). The daemon serves its other roots
+  meanwhile, and the first request after the folder opens with something in
+  it mounts it, so retrying is the right answer; `GET /roots` says which
+  roots are down and why. A folder that stops answering before it mounts (a
+  dead network mount) costs a request 5 s once, then answers at once; one
+  that hangs while mounted holds the requests reading it, as any blocked read
+  does.
 - A path that exists under other methods answers **405** with an `Allow`
   header listing them, and code `invalid-request` (no code maps to 405).
   A path no endpoint claims stays 404 `not-found`.
@@ -86,6 +97,7 @@ or `waxflow sign`.
 | `POST /hls/timeline` | key | mint a multi-source timeline (a play queue) into a `tl` digest |
 | `GET /cache/stats`, `POST /cache/gc` | key | cache operations |
 | `POST /roots/reload` | key | reconcile library roots from the re-read config (present only when wired; see `delivery.rootsReload`) |
+| `GET /roots` | key | every library root, mounted or not, with the reason one is not (see `delivery.rootsStatus`) |
 | `GET /metrics` | key or metricsKey | Prometheus text exposition |
 | `GET /demo` | none (dev mode only, `demo: true`) | browser test page |
 | `POST /uploads`, `DELETE /uploads/{id}` | key | spool one-shot sources; reference as `src=upload:<id>` |
@@ -781,7 +793,8 @@ is:
                    "cutFormats": ["opus", "aac"],
                    "jobs": false, "uploads": false, "pid": false,
                    "timelines": true, "maxTimelineMembers": 1000,
-                   "timelineMemberWindows": true, "rootsReload": true},
+                   "timelineMemberWindows": true, "rootsReload": true,
+                   "rootsStatus": true},
       "profiles": {
         "apple-native": {
           "delivery": "hls",
@@ -816,7 +829,9 @@ per-item URLs rather than trying).
 that endpoint): `true` only for a file-configured daemon whose roots are
 not pinned by `WAXFLOW_ROOTS`. It is always sent (`true` or `false`), so a
 client detects support before calling; absent means a server too old to
-advertise it.
+advertise it. `delivery.rootsStatus` reports whether `GET /roots` is served
+(the CLI daemon always does; an embedding with its own resolver may not),
+under the same always-sent rule.
 
 `dsp` is the signal-processing surface, so a format policy routes by
 capability instead of sniffing a version:
@@ -881,7 +896,13 @@ by `uploadMaxBytes` each and `scratchMaxBytes` together.
 
 Async full-file work that outlives any request, persisted under
 `dataDir/jobs`: completed results survive daemon restarts, and a job
-interrupted mid-run restarts cleanly from zero on the next start.
+interrupted mid-run restarts cleanly from zero on the next start. A job
+whose source is unavailable for now when it runs (`root-unavailable`,
+`catalog-unavailable`) goes back to `queued` rather than failing, with
+`waiting` saying why (`code`, `message`, and `until`, when it runs again),
+and reruns from zero at `until`, the wait doubling from 10 s to 5 minutes.
+So a daemon that starts before its library mounts finishes the jobs it was
+interrupted in.
 
 The `client` package wraps the whole surface (`client.CreateJob`,
 `Job`, `Jobs`, `DeleteJob`, `JobResult`, `JobEvents`), with envelope
@@ -1215,11 +1236,20 @@ Re-reads the daemon's configuration and reconciles its live library roots
 to match, so a root added at runtime streams without a restart
 (`client.ReloadRoots`). Empty body; returns
 
-    {"schemaVersion":1,"added":["B"],"removed":[],"changed":[],"roots":["A","B"]}
+    {"schemaVersion":1,"added":["B"],"removed":[],"changed":[],"roots":["A","B"],
+     "unmounted":[],"remounted":[]}
 
 `added`, `removed`, and `changed` report what moved (`changed` is a root
 whose name stayed but whose path was re-pointed); `roots` is the full set
-after the reload, in configuration order. All four are always arrays.
+after the reload, in configuration order, and `unmounted` the roots among
+them whose folder did not open. A reload also retries every unmounted root,
+and `remounted` names the unchanged ones that opened this time. Every list
+is always an array. A root the reload keeps mounted is not checked: a folder
+that went away since is caught by the next request on it or within 10 s by
+the sweep. Every open a reload makes runs in a check it waits on for 5 s at
+most, so a folder that stops answering leaves its root in `unmounted` (still
+opening) rather than holding the reload; a re-pointed root is briefly still
+opening, and a request on it meanwhile waits for that open.
 
 The reconcile scope is exactly the fields the resolver owns, the library
 `roots` and `sourceMaxBytes`, so a reload loads byte-for-byte what a
@@ -1227,11 +1257,14 @@ restart would. Everything else (`addr`, cache, slots, TLS, ...) belongs to
 subsystems built once at startup and still needs a restart. A new root is
 opened, a dropped one closed, and a re-pointed one swapped; in-flight
 streams already resolved from a removed or re-pointed root run to
-completion, later requests for a removed root `404`. A bad config edit
-(missing or unreadable file, unopenable path, invalid or duplicate root
-name) is refused synchronously as `400 invalid-request` with nothing
-changed, so the caller learns at once instead of after a `200` that did
-nothing; a wired endpoint never answers `404`, so that status
+completion, later requests for a removed root `404`. A path that does not
+open is no failure: the rest of the reload lands, the root is listed in
+`unmounted` and answers `503 root-unavailable` until its folder opens, and
+a re-pointed root whose new path fails stops serving the old one. A bad
+config edit (missing or unreadable file, invalid or duplicate root name, a
+root with no path) is refused synchronously as `400 invalid-request` with
+nothing changed, so the caller learns at once instead of after a `200` that
+did nothing; a wired endpoint never answers `404`, so that status
 unambiguously means the endpoint is not served here. To avoid a reload
 racing a half-written file, the writer updates the config **atomically**
 (write a temp file, then rename).
@@ -1247,12 +1280,34 @@ should be gated on `delivery.rootsReload` rather than on the status it
 gets back: an unwired daemon's `404` and a proxy that lost the route are
 not distinguishable from the client side.
 
+## GET /roots
+
+Every configured library root, in configuration order (`client.Roots`):
+
+    {"schemaVersion":1,"roots":[
+      {"name":"A","path":"/music","mounted":true,"since":"2026-10-30T09:00:00Z"},
+      {"name":"B","path":"/mnt/usb","mounted":false,
+       "error":"open /mnt/usb: no such file or directory","since":"2026-10-30T09:00:00Z"}]}
+
+`error` is why an unmounted root is not mounted (the open's error, "the
+folder is empty", "still opening the folder", or "the folder is not
+answering" once a check has run 5 s), and `since` is when the root entered
+its current state. A root whose folder is missing or empty at start,
+or goes away later, does not stop the daemon: requests on it answer `503
+root-unavailable`, and it is mounted again by the first request after its
+folder opens with something in it, or within 10 s by the daemon's own
+sweep. Paths are shown
+because the endpoint is key-gated, like the configuration they come from;
+the `503` a playback URL gets names the root alone. The route exists when
+`delivery.rootsStatus` is `true`.
+
 ## GET /metrics
 
 Prometheus text: `waxflow_build_info`, `waxflow_sessions_active`,
 `waxflow_sessions_total{kind}` (live, sync, hls),
-`waxflow_direct_play_total`, `waxflow_remux_total`,
+`waxflow_direct_play_total`, `waxflow_remux_total`, `waxflow_cut_total`,
 `waxflow_hls_segments_total`,
 `waxflow_cache_{hits,misses}_total`, `waxflow_cache_{bytes,entries}`,
 `waxflow_admission_rejects_total`, `waxflow_admission_in_use{pool}`,
+`waxflow_roots_unmounted` (when `delivery.rootsStatus` is `true`),
 `waxflow_session_degradations_total`, `waxflow_ttfb_seconds` histogram.

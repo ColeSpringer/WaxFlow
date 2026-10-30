@@ -87,6 +87,9 @@ type Gauges struct {
 	CacheMisses  uint64
 	LiveInUse    int
 	JobInUse     int
+	// RootsUnmounted counts configured library roots that are not mounted;
+	// nil omits the gauge (no roots status to read).
+	RootsUnmounted *int
 }
 
 // WritePrometheus renders the text exposition format.
@@ -145,6 +148,12 @@ func (m *Metrics) WritePrometheus(w io.Writer, version string, g Gauges) {
 	p("# TYPE waxflow_admission_in_use gauge\n")
 	p("waxflow_admission_in_use{pool=\"live\"} %d\n", g.LiveInUse)
 	p("waxflow_admission_in_use{pool=\"job\"} %d\n", g.JobInUse)
+
+	if g.RootsUnmounted != nil {
+		p("# HELP waxflow_roots_unmounted Configured library roots that are not mounted.\n")
+		p("# TYPE waxflow_roots_unmounted gauge\n")
+		p("waxflow_roots_unmounted %d\n", *g.RootsUnmounted)
+	}
 
 	p("# HELP waxflow_session_degradations_total Sessions downgraded to ring-fed streaming by cache write failures.\n")
 	p("# TYPE waxflow_session_degradations_total counter\n")

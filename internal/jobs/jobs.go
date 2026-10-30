@@ -458,6 +458,16 @@ type Job struct {
 	// Warnings are non-fatal notes (metadata that could not be read or
 	// written); the audio outcome is unaffected.
 	Warnings []string `json:"warnings,omitempty"`
+	// Waiting says why a queued job is waiting to run again: its source was
+	// unavailable for now when it last ran. Nil once it runs.
+	Waiting *Wait `json:"waiting,omitempty"`
+}
+
+// Wait is why a job is back in the queue, and when it runs again.
+type Wait struct {
+	Code    string    `json:"code"`
+	Message string    `json:"message"`
+	Until   time.Time `json:"until"`
 }
 
 // clone returns an independent copy safe to hand out.
@@ -491,6 +501,7 @@ func (j *Job) clone() *Job {
 	c.Finished = clonePtr(j.Finished)
 	c.Error = clonePtr(j.Error)
 	c.Progress = clonePtr(j.Progress)
+	c.Waiting = clonePtr(j.Waiting)
 	if j.Analysis != nil {
 		// Analysis is the one struct here that holds pointers of its own, so
 		// copying it is not the whole of it: the loudness and peak fields are

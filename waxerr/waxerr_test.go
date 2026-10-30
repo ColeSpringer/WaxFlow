@@ -120,6 +120,7 @@ func TestExitCodes(t *testing.T) {
 		{"source-unreadable", waxerr.New(waxerr.CodeSourceUnreadable, ""), 4},
 		{"source-changed", waxerr.New(waxerr.CodeSourceChanged, ""), 4},
 		{"catalog-unavailable", waxerr.New(waxerr.CodeCatalogUnavailable, ""), 4},
+		{"root-unavailable", waxerr.New(waxerr.CodeRootUnavailable, ""), 4},
 		{"unsupported-format", waxerr.New(waxerr.CodeUnsupportedFormat, ""), 5},
 		{"unsupported-source", waxerr.New(waxerr.CodeUnsupportedSource, ""), 5},
 		{"malformed-input", waxerr.New(waxerr.CodeMalformedInput, ""), 9},

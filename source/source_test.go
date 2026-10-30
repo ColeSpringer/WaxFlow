@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -59,12 +60,6 @@ func TestResolve(t *testing.T) {
 
 func TestResolveErrors(t *testing.T) {
 	r, dir := newRoots(t, 0)
-	if err := os.Symlink("/etc/passwd", filepath.Join(dir, "escape")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join("sub", "a.wav"), filepath.Join(dir, "inside")); err != nil {
-		t.Fatal(err)
-	}
 
 	cases := []struct {
 		ref  string
@@ -77,7 +72,6 @@ func TestResolveErrors(t *testing.T) {
 		{"lib/missing.wav", waxerr.CodeNotFound},
 		{"lib/sub", waxerr.CodeUnsupportedSource}, // directory
 		{"lib/../a.wav", waxerr.CodeInvalidRequest},
-		{"lib/escape", waxerr.CodeInvalidRequest}, // symlink out of the root
 		{"upload:abc", waxerr.CodeUnsupportedSource},
 		{"pid:01ARZ3NDEKTSV4RRFFQ69G5FAV", waxerr.CodeUnsupportedSource},
 		{"weird:thing", waxerr.CodeUnsupportedSource},
@@ -120,9 +114,27 @@ func TestResolveErrors(t *testing.T) {
 		}
 		f.Close()
 	}
+}
 
-	// Within-root symlinks stay allowed (in-place libraries use them).
-	f, err := r.Resolve(context.Background(), "lib/inside")
+// TestResolveSymlinks pins os.Root's confinement as Resolve answers it: a
+// symlink out of the root is refused like any escape, and one that stays
+// inside serves (in-place libraries use them).
+func TestResolveSymlinks(t *testing.T) {
+	ctx := context.Background()
+	r, dir := newRoots(t, 0)
+	if err := os.Symlink("/etc/passwd", filepath.Join(dir, "escape")); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("creating a symlink needs a privilege this Windows account lacks: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("sub", "a.wav"), filepath.Join(dir, "inside")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Resolve(ctx, "lib/escape"); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+		t.Errorf("symlink out of the root = %v, want invalid-request", err)
+	}
+	f, err := r.Resolve(ctx, "lib/inside")
 	if err != nil {
 		t.Fatalf("within-root symlink failed: %v", err)
 	}
@@ -140,15 +152,107 @@ func TestResolveSizeCap(t *testing.T) {
 func TestOpenRootsValidation(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"", "a/b", "a:b"} {
-		if _, err := OpenRoots([]Root{{Name: name, Path: dir}}, 0); err == nil {
-			t.Errorf("root name %q accepted", name)
+		if _, err := OpenRoots([]Root{{Name: name, Path: dir}}, 0); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+			t.Errorf("root name %q = %v, want invalid-request", name, err)
 		}
 	}
-	if _, err := OpenRoots([]Root{{Name: "a", Path: dir}, {Name: "a", Path: dir}}, 0); err == nil {
-		t.Error("duplicate root name accepted")
+	if _, err := OpenRoots([]Root{{Name: "a", Path: dir}, {Name: "a", Path: dir}}, 0); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+		t.Errorf("duplicate root name = %v, want invalid-request", err)
 	}
-	if _, err := OpenRoots([]Root{{Name: "a", Path: filepath.Join(dir, "missing")}}, 0); err == nil {
-		t.Error("missing root path accepted")
+	if _, err := OpenRoots([]Root{{Name: "a", Path: ""}}, 0); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+		t.Errorf("empty root path = %v, want invalid-request", err)
+	}
+}
+
+// TestOpenRootsMountsWhatItCan pins the tolerant open: a root whose path does
+// not open is kept unmounted with its error, and the others serve.
+func TestOpenRootsMountsWhatItCan(t *testing.T) {
+	lib := rootDir(t, map[string]string{"a.wav": "RIFFdata"})
+	missing := filepath.Join(t.TempDir(), "missing")
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := OpenRoots([]Root{{Name: "lib", Path: lib}, {Name: "gone", Path: missing}, {Name: "file", Path: file}}, 0)
+	if err != nil {
+		t.Fatalf("OpenRoots with unopenable paths = %v, want success", err)
+	}
+	defer r.Close()
+
+	st := r.Status()
+	if len(st) != 3 || st[0].Name != "lib" || st[1].Name != "gone" || st[2].Name != "file" {
+		t.Fatalf("Status() = %+v, want lib, gone, file in configuration order", st)
+	}
+	if !st[0].Mounted || st[0].Err != nil || st[0].Path != lib {
+		t.Errorf("lib = %+v, want mounted at %s", st[0], lib)
+	}
+	if st[1].Mounted || st[1].Path != missing || !errors.Is(st[1].Err, fs.ErrNotExist) {
+		t.Errorf("gone = %+v, want unmounted with a not-exist error", st[1])
+	}
+	if st[2].Mounted || st[2].Err == nil || errors.Is(st[2].Err, fs.ErrNotExist) {
+		t.Errorf("file = %+v, want unmounted with an error other than not-exist", st[2])
+	}
+	for _, s := range st {
+		if s.Since.IsZero() {
+			t.Errorf("%s has a zero Since", s.Name)
+		}
+	}
+	f, err := r.Resolve(context.Background(), "lib/a.wav")
+	if err != nil {
+		t.Fatalf("lib resolve beside unmounted roots = %v", err)
+	}
+	f.Close()
+}
+
+// TestResolveUnmountedIsRootUnavailable pins the answer for a configured root
+// that will not open: root-unavailable, naming the root but not its path (a
+// signed playback URL hands this message to a client), with the cause kept.
+func TestResolveUnmountedIsRootUnavailable(t *testing.T) {
+	base := t.TempDir()
+	file := filepath.Join(base, "file")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := OpenRoots([]Root{{Name: "gone", Path: filepath.Join(base, "missing")}, {Name: "file", Path: file}}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	for _, tc := range []struct {
+		name     string
+		notExist bool
+	}{{"gone", true}, {"file", false}} {
+		_, err := r.Resolve(context.Background(), tc.name+"/a.wav")
+		if got := waxerr.CodeOf(err); got != waxerr.CodeRootUnavailable {
+			t.Errorf("%s: code = %s (%v), want root-unavailable", tc.name, got, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), strconv.Quote(tc.name)) || strings.Contains(err.Error(), base) {
+			t.Errorf("%s: message %q should name the root and not its path", tc.name, err)
+		}
+		if errors.Is(err, fs.ErrNotExist) != tc.notExist {
+			t.Errorf("%s: errors.Is(err, fs.ErrNotExist) = %v, want %v", tc.name, !tc.notExist, tc.notExist)
+		}
+	}
+}
+
+// TestOpenFault pins how an open error on a healthy root is coded; each
+// platform's I/O faults have their own test beside its classifier.
+func TestOpenFault(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want waxerr.Code
+	}{
+		{"not exist", &fs.PathError{Op: "openat", Path: "a.wav", Err: fs.ErrNotExist}, waxerr.CodeNotFound},
+		{"permission", &fs.PathError{Op: "openat", Path: "a.wav", Err: fs.ErrPermission}, waxerr.CodeSourceUnreadable},
+		{"escape", &fs.PathError{Op: "openat", Path: "../a.wav", Err: errors.New("path escapes from parent")}, waxerr.CodeInvalidRequest},
+	}
+	for _, tc := range cases {
+		if got := waxerr.CodeOf(openFault(tc.err)); got != tc.want {
+			t.Errorf("%s: code = %s, want %s", tc.name, got, tc.want)
+		}
 	}
 }
 

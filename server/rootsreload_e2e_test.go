@@ -2,9 +2,11 @@ package server_test
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 
@@ -102,6 +104,33 @@ func TestRootsReloadEndpoint(t *testing.T) {
 		t.Fatalf("post-reload stream = %d, want 200 (body: %s)", resp.StatusCode, b)
 	}
 
+	// An unopenable path is no failure: the reload lands and names it, and a
+	// reload once its folder exists says it mounted.
+	dirC := filepath.Join(t.TempDir(), "C")
+	mu.Lock()
+	desired = []source.Root{{Name: "B", Path: dirB}, {Name: "C", Path: dirC}}
+	mu.Unlock()
+	for _, want := range []struct{ unmounted, remounted []string }{{[]string{"C"}, []string{}}, {[]string{}, []string{"C"}}} {
+		resp = env.req(t, http.MethodPost, "/roots/reload", nil)
+		body = readBody(t, resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("reload with C = %d, want 200 (body: %s)", resp.StatusCode, body)
+		}
+		var delta server.RootsReloadResponse
+		if err := json.Unmarshal(body, &delta); err != nil {
+			t.Fatalf("reload body %s: %v", body, err)
+		}
+		if !slices.Equal(delta.Unmounted, want.unmounted) || !slices.Equal(delta.Remounted, want.remounted) {
+			t.Fatalf("reload = %s, want unmounted %v and remounted %v", body, want.unmounted, want.remounted)
+		}
+		if err := os.MkdirAll(dirC, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dirC, "c.flac"), flac, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	// A reload of an invalid desired set surfaces synchronously as 400.
 	mu.Lock()
 	desired = []source.Root{{Name: "B", Path: dirB}, {Name: "B", Path: dirB}} // duplicate name
@@ -184,7 +213,7 @@ func TestRootsReloadClient(t *testing.T) {
 	}
 
 	// The no-op reload: every list decodes non-nil, so a caller can range
-	// over all four without a nil check. That is the contract the response
+	// over all of them without a nil check. That is the contract the response
 	// type documents and deliberately does not normalize for.
 	delta, err = cl.ReloadRoots(t.Context())
 	if err != nil {
@@ -195,6 +224,7 @@ func TestRootsReloadClient(t *testing.T) {
 		v    []string
 	}{
 		{"added", delta.Added}, {"removed", delta.Removed}, {"changed", delta.Changed},
+		{"unmounted", delta.Unmounted}, {"remounted", delta.Remounted},
 	} {
 		if l.v == nil {
 			t.Errorf("no-op reload %s = nil, want an empty array", l.name)
@@ -233,5 +263,38 @@ func TestRootsReloadClientUnwired(t *testing.T) {
 	}
 	if _, err := cl.ReloadRoots(t.Context()); waxerr.CodeOf(err) != waxerr.CodeNotFound {
 		t.Fatalf("unwired ReloadRoots = %v (code %q), want not-found", err, waxerr.CodeOf(err))
+	}
+}
+
+// TestRootsReloadLogsARemount pins the Info/Debug split on a reload whose only
+// effect is its retry mounting an unchanged root: that opened a handle, so it
+// is a change, where a reload that leaves the root down is not.
+func TestRootsReloadLogsARemount(t *testing.T) {
+	dirC := filepath.Join(t.TempDir(), "C")
+	roots, err := source.OpenRoots([]source.Root{{Name: "C", Path: dirC}}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { roots.Close() })
+	env, rec := recordingEnv(t, func(c *server.Config) {
+		c.Resolver = roots
+		c.ReloadRoots = func() (source.ReloadResult, error) {
+			return roots.Reload([]source.Root{{Name: "C", Path: dirC}}, 0)
+		}
+	})
+
+	readBody(t, env.req(t, http.MethodPost, "/roots/reload", nil))
+	if rec.Has(slog.LevelInfo, "roots reloaded") || !rec.Has(slog.LevelDebug, "roots reloaded with no change") {
+		t.Fatal("a reload that left C down logged as a change")
+	}
+	if err := os.MkdirAll(dirC, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirC, "c.wav"), []byte("RIFFdata"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	readBody(t, env.req(t, http.MethodPost, "/roots/reload", nil))
+	if !rec.Has(slog.LevelInfo, "roots reloaded") {
+		t.Fatal("a reload that mounted C did not log at Info")
 	}
 }

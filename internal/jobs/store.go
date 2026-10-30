@@ -25,13 +25,22 @@ type store struct {
 
 	mu   sync.Mutex
 	jobs map[string]*Job
+	// waits holds back the jobs whose source is away for now (see
+	// Runner.retry). It is memory only, so a restart runs them at once.
+	waits map[string]wait
+}
+
+// wait is when a waiting job may run again, and how often it has waited.
+type wait struct {
+	until time.Time
+	count int
 }
 
 func openStore(dir string, log *slog.Logger) (*store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: creating store dir", err)
 	}
-	s := &store{dir: dir, log: log, jobs: map[string]*Job{}}
+	s := &store{dir: dir, log: log, jobs: map[string]*Job{}, waits: map[string]wait{}}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeSourceUnreadable, "jobs: scanning store dir", err)
@@ -90,6 +99,7 @@ func (s *store) resetForRequeue(j *Job) {
 	j.Started, j.Finished, j.Error, j.Outputs, j.Analysis, j.Progress = nil, nil, nil, nil, nil, nil
 	j.Timeline = nil
 	j.Warnings = nil
+	j.Waiting = nil
 	dir := s.jobDir(j.ID)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -194,8 +204,9 @@ func (s *store) claimNext() *Job {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var next *Job
+	mono := time.Now()
 	for _, j := range s.jobs {
-		if j.State != StateQueued {
+		if j.State != StateQueued || s.waits[j.ID].until.After(mono) {
 			continue
 		}
 		if next == nil || j.ID < next.ID {
@@ -205,13 +216,39 @@ func (s *store) claimNext() *Job {
 	if next == nil {
 		return nil
 	}
-	now := time.Now().UTC()
+	now := mono.UTC()
 	next.State = StateRunning
 	next.Started = &now
+	next.Waiting = nil
 	if err := s.persistLocked(next); err != nil {
 		s.log.Warn("jobs: claim persist failed", "id", next.ID, "err", err)
 	}
 	return next.clone()
+}
+
+// requeue returns a job to the queue from zero, as a restart does, held back
+// from claims for retryDelay(every, its waits) with the reason on the job, and
+// reports how often it has waited and for how long; nil means the job no
+// longer exists. The hold is on the monotonic clock, so a step of the wall
+// clock cannot strand it behind its own wakeup.
+func (s *store) requeue(id string, every time.Duration, code, msg string) (*Job, int, time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, ok := s.jobs[id]
+	if !ok {
+		return nil, 0, 0
+	}
+	s.resetForRequeue(j)
+	w := s.waits[id]
+	w.count++
+	delay := retryDelay(every, w.count)
+	w.until = time.Now().Add(delay)
+	s.waits[id] = w
+	j.Waiting = &Wait{Code: code, Message: msg, Until: w.until.UTC()}
+	if err := s.persistLocked(j); err != nil {
+		s.log.Warn("jobs: requeue persist failed", "id", id, "err", err)
+	}
+	return j.clone(), w.count, delay
 }
 
 // update applies fn to the stored job under the lock and persists when
@@ -225,6 +262,9 @@ func (s *store) update(id string, persist bool, fn func(*Job)) *Job {
 		return nil
 	}
 	fn(j)
+	if j.State.Terminal() {
+		delete(s.waits, id)
+	}
 	if persist {
 		if err := s.persistLocked(j); err != nil {
 			s.log.Warn("jobs: persist failed", "id", id, "err", err)
@@ -241,6 +281,7 @@ func (s *store) remove(id string) bool {
 		return false
 	}
 	delete(s.jobs, id)
+	delete(s.waits, id)
 	if err := os.RemoveAll(s.jobDir(id)); err != nil {
 		s.log.Warn("jobs: removing job dir", "id", id, "err", err)
 	}

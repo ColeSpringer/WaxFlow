@@ -47,6 +47,23 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: make test
 
+  # source's Windows-only paths (the Win32 codes a failing drive or share
+  # reports, the directory semantics its tests skip around) and the daemon's
+  # root sweep and doctor rows, on real Windows.
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: go test ./source/
+      - name: cli root tests
+        working-directory: cli
+        shell: bash
+        run: go test -run '^Test(RemountSweep|RemountStopIsBounded|BuildServerConfig(ToleratesMissingRoot|LogsNoRootMounted|CleanupStopsTheSweep)|ReloadLogsUnmountedRoots|Doctor(ReportsEachRoot|FailsOnMissingRoot)|SignNamesAnUnmountedRootsPath)$' .
+
   depcheck:
     runs-on: ubuntu-latest
     timeout-minutes: 10

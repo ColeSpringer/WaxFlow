@@ -209,9 +209,36 @@ func usageArgs(v cobra.PositionalArgs) cobra.PositionalArgs {
 // when present. The returned close func tears the whole chain down. It is
 // the thin wrapper for the commands (sign, probe, doctor) that do not need
 // the inner roots handle; server calls openResolverWithRoots.
+//
+// Outside the daemon the chain also adds a root's configured path to its
+// root-unavailable error, which names the root alone for the daemon's
+// clients; at a terminal the path is what an operator needs.
 func (f Flavor) openResolver(ctx context.Context, cfg config.Config, logger *slog.Logger, daemon bool) (source.Resolver, func(), error) {
-	resolver, _, cleanup, err := f.openResolverWithRoots(ctx, cfg, logger, daemon)
-	return resolver, cleanup, err
+	resolver, roots, cleanup, err := f.openResolverWithRoots(ctx, cfg, logger, daemon)
+	if err != nil || daemon {
+		return resolver, cleanup, err
+	}
+	return pathHinting{Resolver: resolver, roots: roots}, cleanup, nil
+}
+
+// pathHinting adds a root's configured path to its root-unavailable error.
+type pathHinting struct {
+	source.Resolver
+	roots *source.Roots
+}
+
+func (p pathHinting) Resolve(ctx context.Context, ref string) (*source.File, error) {
+	f, err := p.Resolver.Resolve(ctx, ref)
+	if waxerr.CodeOf(err) != waxerr.CodeRootUnavailable {
+		return f, err
+	}
+	name, _, _ := strings.Cut(ref, "/")
+	for _, st := range p.roots.Status() {
+		if st.Name == name {
+			return nil, fmt.Errorf("%w (configured at %s)", err, st.Path)
+		}
+	}
+	return nil, err
 }
 
 // logClose closes c and reports a failure rather than dropping it. Every

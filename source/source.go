@@ -102,7 +102,8 @@ var _ container.Source = (*File)(nil)
 // Resolver opens the file behind a source reference. Implementations
 // validate what they open (regular file, size cap) and reject references
 // they do not serve with waxerr.CodeUnsupportedSource; unknown names and
-// paths carry waxerr.CodeNotFound.
+// paths carry waxerr.CodeNotFound, and a known place that is down a retryable
+// code (waxerr.CodeRootUnavailable, waxerr.CodeCatalogUnavailable).
 //
 // ctx governs the resolution only, not the returned File: local file
 // opens (roots, uploads) may ignore it, while implementations that

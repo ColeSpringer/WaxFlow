@@ -75,6 +75,10 @@ type Config struct {
 	Slots int
 	// Profile is the daemon's resampler profile.
 	Profile resample.Profile
+	// RetryEvery is how long a job whose source is unavailable for now (an
+	// unmounted root, an unreachable catalog) waits before it runs again; 0
+	// means 10 s.
+	RetryEvery time.Duration
 	// Logger receives job lifecycle notes; nil discards.
 	Logger *slog.Logger
 }
@@ -349,6 +353,10 @@ func (r *Runner) run(j *Job) {
 		// boot requeues the job from zero.
 		return
 	}
+	if waiting(err) {
+		r.retry(j, err)
+		return
+	}
 	now := time.Now().UTC()
 	final := r.store.update(j.ID, true, func(job *Job) {
 		job.Finished = &now
@@ -374,6 +382,53 @@ func (r *Runner) run(j *Job) {
 		r.log.Debug("job done", "id", j.ID, "type", j.Type)
 	}
 	r.notify(final, true)
+}
+
+// waiting reports a failure that is the source's for now rather than the
+// job's: an unmounted root, an unreachable catalog, a daemon out of handles.
+func waiting(err error) bool {
+	switch waxerr.CodeOf(err) {
+	case waxerr.CodeRootUnavailable, waxerr.CodeCatalogUnavailable, waxerr.CodeOverloaded:
+		return true
+	}
+	return false
+}
+
+// retry returns a job whose source is away for now to the queue, to run again
+// from zero after retryDelay, where it used to fail for good; the job says why
+// it waits. A daemon that starts before its library mounts restarts its
+// interrupted jobs this way.
+func (r *Runner) retry(j *Job, err error) {
+	every := r.cfg.RetryEvery
+	if every <= 0 {
+		every = 10 * time.Second
+	}
+	queued, waits, delay := r.store.requeue(j.ID, every, string(waxerr.CodeOf(err)), err.Error())
+	if queued == nil {
+		os.RemoveAll(r.store.jobDir(j.ID)) // deleted mid-run, as run's terminal path sweeps
+		return
+	}
+	level := slog.LevelDebug
+	if waits == 1 {
+		level = slog.LevelInfo
+	}
+	r.log.Log(context.Background(), level, "job waiting for its source", "id", j.ID, "type", j.Type, "err", err, "retry", delay)
+	r.notify(queued, false)
+	time.AfterFunc(delay, r.kick)
+}
+
+// maxRetryWait caps the backoff of a waiting job's reruns.
+const maxRetryWait = 5 * time.Minute
+
+// retryDelay is how long a job waits before its rerun after waits waits:
+// every, doubling with each wait up to maxRetryWait (or every, if longer).
+func retryDelay(every time.Duration, waits int) time.Duration {
+	limit := max(every, maxRetryWait)
+	d := every
+	for i := 1; i < waits && d < limit; i++ {
+		d *= 2
+	}
+	return min(d, limit)
 }
 
 // open resolves the job's source and enforces the pinned identity.

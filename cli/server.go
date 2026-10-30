@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -10,7 +11,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -194,6 +197,12 @@ func buildServerConfig(ctx context.Context, cfg config.Config, path string, vers
 		}
 	}
 
+	// Every root that did not open is reported now, and every change after
+	// this (the sweep's, a request's, a reload's) as it is committed.
+	watchRoots(roots, logger)
+	logUnmounted(logger, roots.Status())
+	stopRemount := startRemount(func() { roots.Remount() }, logger, remountEvery, remountStopWait)
+
 	return server.Config{
 		Addr:                 cfg.ResolvedAddr(),
 		APIKeys:              cfg.APIKeys,
@@ -203,6 +212,7 @@ func buildServerConfig(ctx context.Context, cfg config.Config, path string, vers
 		Resolver:             resolver,
 		PIDSources:           pidSources,
 		ReloadRoots:          reloadRoots,
+		RootsStatus:          roots.Status,
 		SigningKeys:          signingKeys,
 		CacheDir:             cacheDir,
 		CacheMaxBytes:        cfg.ResolvedCacheMaxBytes(),
@@ -223,7 +233,7 @@ func buildServerConfig(ctx context.Context, cfg config.Config, path string, vers
 		Demo:                 cfg.Demo,
 		Version:              version,
 		Logger:               logger,
-	}, closeResolver, nil
+	}, func() { stopRemount(); closeResolver() }, nil
 }
 
 func configRoots(cfg config.Config) []source.Root {
@@ -232,6 +242,92 @@ func configRoots(cfg config.Config) []source.Root {
 		roots[i] = source.Root{Name: r.Name, Path: r.Path}
 	}
 	return roots
+}
+
+// remountEvery paces the daemon's remount sweep. A pass is a stat or two per
+// root and an open per unmounted one; POST /roots/reload is the lever for
+// sooner, and a request on an unmounted root tries it at once anyway.
+// remountStopWait bounds how long shutdown waits for a pass in progress; a
+// pass waits on each root's check for 5 s at most, so only a stuck one hits it.
+const (
+	remountEvery    = 10 * time.Second
+	remountStopWait = 10 * time.Second
+)
+
+// startRemount runs remount every interval until stop; the roots' watcher
+// logs what each pass changes. stop waits out a pass in progress for up to
+// stopWait: a pass can wait on a slow network mount for seconds, and
+// shutdown need not.
+func startRemount(remount func(), logger *slog.Logger, every, stopWait time.Duration) (stop func()) {
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	if sweepStarted != nil {
+		sweepStarted(exited)
+	}
+	go func() {
+		defer close(exited)
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				remount()
+			case <-done:
+				return
+			}
+		}
+	}()
+	return sync.OnceFunc(func() {
+		close(done)
+		select {
+		case <-exited:
+		case <-time.After(stopWait):
+			logger.Warn("remount sweep did not stop; a library mount may be hung", "waited", stopWait)
+		}
+	})
+}
+
+// sweepStarted, set by a test, receives each sweep's exit channel.
+var sweepStarted func(exited <-chan struct{})
+
+// watchRoots logs every change to a root as it is committed, and an Error
+// when one leaves no root mounted.
+func watchRoots(roots *source.Roots, logger *slog.Logger) {
+	roots.Watch(func(st source.RootStatus) {
+		logRoot(logger, st)
+		if !st.Mounted && !slices.ContainsFunc(roots.Status(), func(s source.RootStatus) bool { return s.Mounted }) {
+			logger.Error("no library root is mounted", "roots", len(roots.Names()))
+		}
+	})
+}
+
+// logRoot reports one root's state: Info when mounted; Warn when its folder is
+// missing or empty, the unplugged drive the sweep waits for; Error for
+// anything else, a mistake that needs an operator.
+func logRoot(logger *slog.Logger, st source.RootStatus) {
+	switch {
+	case st.Mounted:
+		logger.Info("root mounted", "root", st.Name, "path", st.Path)
+	case errors.Is(st.Err, fs.ErrNotExist), errors.Is(st.Err, source.ErrRootEmpty):
+		logger.Warn("root not mounted", "root", st.Name, "path", st.Path, "err", st.Err)
+	default:
+		logger.Error("root not mounted", "root", st.Name, "path", st.Path, "err", st.Err)
+	}
+}
+
+// logUnmounted logs each root that is not mounted, and an Error when none is.
+func logUnmounted(logger *slog.Logger, all []source.RootStatus) {
+	mounted := 0
+	for _, st := range all {
+		if st.Mounted {
+			mounted++
+		} else {
+			logRoot(logger, st)
+		}
+	}
+	if mounted == 0 && len(all) > 0 {
+		logger.Error("no library root is mounted", "roots", len(all))
+	}
 }
 
 // startDebugListener serves pprof on the loopback-only debugAddr: live

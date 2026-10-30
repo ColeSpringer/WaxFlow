@@ -49,4 +49,13 @@ func TestWritePrometheus(t *testing.T) {
 	if !strings.Contains(out, "waxflow_ttfb_seconds_sum 99.207") {
 		t.Errorf("sum line missing or wrong:\n%s", out)
 	}
+	if strings.Contains(out, "waxflow_roots_unmounted") {
+		t.Errorf("roots gauge emitted with no roots status:\n%s", out)
+	}
+
+	sb.Reset()
+	m.WritePrometheus(&sb, "v1.2.3", Gauges{RootsUnmounted: new(2)})
+	if !strings.Contains(sb.String(), "waxflow_roots_unmounted 2\n") {
+		t.Errorf("missing waxflow_roots_unmounted 2 in output:\n%s", sb.String())
+	}
 }

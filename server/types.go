@@ -1,6 +1,8 @@
 package server
 
 import (
+	"time"
+
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/dsp/gain"
@@ -391,6 +393,9 @@ type CapsDelivery struct {
 	// 404s the endpoint. Always sent (true or false), so a client detects
 	// support at probe time; absent means a server too old to advertise it.
 	RootsReload bool `json:"rootsReload"`
+	// RootsStatus: GET /roots reports every library root, mounted or not.
+	// Always sent, like RootsReload.
+	RootsStatus bool `json:"rootsStatus"`
 }
 
 // UploadResponse is the POST /uploads body.
@@ -507,14 +512,35 @@ type CacheGCResponse struct {
 // The name lists map 1:1 from source.ReloadResult (kept off the wire, as
 // ProbeJSON keeps format.Info off it). Added, Removed, and Changed report
 // what moved; Roots is the full set after the reload, in configuration
-// order. All four are always arrays, never null, so an empty delta is still
-// iterable.
+// order, Unmounted the ones among them that are not mounted, and Remounted
+// the unchanged ones the reload's retry mounted. Every list is always an
+// array, never null, so an empty delta is still iterable.
 type RootsReloadResponse struct {
 	SchemaVersion int      `json:"schemaVersion"`
 	Added         []string `json:"added"`
 	Removed       []string `json:"removed"`
 	Changed       []string `json:"changed"`
 	Roots         []string `json:"roots"`
+	Unmounted     []string `json:"unmounted"`
+	Remounted     []string `json:"remounted"`
+}
+
+// RootsResponse is the GET /roots body: every configured library root, in
+// configuration order.
+type RootsResponse struct {
+	SchemaVersion int          `json:"schemaVersion"`
+	Roots         []RootStatus `json:"roots"`
+}
+
+// RootStatus is one library root, the wire form of source.RootStatus: Error
+// is why an unmounted root did not open, Since when the root entered its
+// current state.
+type RootStatus struct {
+	Name    string    `json:"name"`
+	Path    string    `json:"path"`
+	Mounted bool      `json:"mounted"`
+	Error   string    `json:"error,omitempty"`
+	Since   time.Time `json:"since"`
 }
 
 // capsFlags carries the optional-surface toggles buildCaps needs. Named
@@ -522,7 +548,7 @@ type RootsReloadResponse struct {
 // transposed into the wrong slot at the call site (the same "impossible to
 // write wrong" intent the caps comments state).
 type capsFlags struct {
-	jobs, uploads, pid, timelines, rootsReload bool
+	jobs, uploads, pid, timelines, rootsReload, rootsStatus bool
 }
 
 // buildCaps assembles Caps from the capability-gated tables plus the
@@ -542,6 +568,7 @@ func buildCaps(f capsFlags) Caps {
 			Timelines:   f.timelines,
 			HEv2:        true,
 			RootsReload: f.rootsReload,
+			RootsStatus: f.rootsStatus,
 		},
 		DSP: CapsDSP{
 			// Derived from the parsers rather than restated, so an

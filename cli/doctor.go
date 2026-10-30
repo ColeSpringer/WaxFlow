@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -127,10 +128,11 @@ func configCheck(cmd *cobra.Command) doctorCheck {
 	return doctorCheck{Name: "config", Status: "ok", Detail: detail}
 }
 
-// rootChecks opens every configured root the way the daemon does and
-// additionally reads each root directory, so an unreadable mount (a
-// permissions mistake, a container volume that failed to attach) fails
-// here rather than on the first stream request.
+// rootChecks opens every configured root the way the daemon does, one row
+// per root, and additionally reads each one that opened, so an unreadable
+// mount (a permissions mistake, a container volume that failed to attach)
+// fails here rather than on the first stream request. A root that does not
+// open fails under its own name: the daemon starts without it.
 func rootChecks(cfg config.Config) []doctorCheck {
 	if len(cfg.Roots) == 0 {
 		return []doctorCheck{{
@@ -141,14 +143,23 @@ func rootChecks(cfg config.Config) []doctorCheck {
 	}
 	roots, err := source.OpenRoots(configRoots(cfg), cfg.ResolvedSourceMaxBytes())
 	if err != nil {
-		// One bad root fails the whole set at daemon startup too; report
-		// the set-level error once.
+		// A name or path the daemon refuses fails the whole set there too.
 		return []doctorCheck{{Name: "roots", Status: "fail", Detail: err.Error(), err: err}}
 	}
-	roots.Close()
+	defer roots.Close()
 	checks := make([]doctorCheck, 0, len(cfg.Roots))
-	for _, r := range cfg.Roots {
-		checks = append(checks, readRootCheck(r))
+	for _, st := range roots.Status() {
+		switch {
+		case errors.Is(st.Err, source.ErrRootEmpty):
+			checks = append(checks, doctorCheck{Name: "root:" + st.Name, Status: "warn",
+				Detail: st.Path + " is readable but empty; the daemon serves it once it holds files"})
+			continue
+		case !st.Mounted:
+			checks = append(checks, doctorCheck{Name: "root:" + st.Name, Status: "fail", Detail: st.Err.Error(),
+				err: waxerr.Wrap(waxerr.CodeRootUnavailable, "root "+st.Name, st.Err)})
+			continue
+		}
+		checks = append(checks, readRootCheck(config.Root{Name: st.Name, Path: st.Path}))
 	}
 	return checks
 }

@@ -182,7 +182,7 @@ Precedence: **flag > `WAXFLOW_*` env > JSON config file > default**
 |---|---|---|---|
 | `addr` | `WAXFLOW_ADDR` | `127.0.0.1:4418` | listen address (compose widens to `0.0.0.0`) |
 | `logLevel` | `WAXFLOW_LOG_LEVEL` | `info` | `debug`\|`info`\|`warn`\|`error` |
-| `roots` | `WAXFLOW_ROOTS` | none | named library roots; JSON `[{"name","path"}]`, env `name=path,name2=path2`; each opened via `os.Root` (no escape, symlinks confined), files validated regular and size-capped |
+| `roots` | `WAXFLOW_ROOTS` | none | named library roots; JSON `[{"name","path"}]`, env `name=path,name2=path2`; each opened via `os.Root` (no escape, symlinks confined), files validated regular and size-capped; a root whose folder does not open, or is empty, starts unmounted (see below) |
 | `catalogDB` | `WAXFLOW_CATALOG_DB` | none | WaxBin catalog path for `pid:<ULID>` source references, read by a build that injects a catalog resolver (see [`pid:` sources](#pid-sources)). No build here serves it: this server refuses to start with it set (one-shots on plain paths never read config, so they neither honor nor refuse it) |
 | `apiKeys` | `WAXFLOW_API_KEYS` | none | control-API keys (comma-separated in env). **Fail closed**: required on a non-loopback `addr` unless `allowUnauthenticated` |
 | `allowUnauthenticated` | `WAXFLOW_ALLOW_UNAUTHENTICATED` | `false` | explicit opt-in to keyless on non-loopback |
@@ -215,6 +215,22 @@ by direct download. The integration contract for a caller that adds a root
 (WaxDeck): write the root into the sidecar's JSON config **atomically**
 (write a temp file, then rename), then `POST /roots/reload`; the atomic
 write keeps a reload from reading a half-written file and `400`ing.
+
+**Unmounted roots.** A root whose folder does not open, or is empty (an
+unplugged drive, a mount point whose drive has not arrived, a mount that
+failed), does not stop the daemon or fail a reload: the other roots serve,
+requests on that one answer `503 root-unavailable` with `Retry-After: 2`,
+and it mounts on the first request after its folder holds something, or
+within 10 s by the daemon's sweep, which also notices a root whose folder
+goes away later. A folder that stops answering before it mounts (a dead
+network mount) holds no request, reload or sweep for more than 5 s; one that
+hangs while mounted holds the requests reading it, as any blocked read does.
+The log names each change
+once, whoever finds it (Warn for a missing or empty folder, Error for
+anything else, a mistake that needs an operator), `GET /roots` lists every
+root with its state, a reload's `unmounted` field names the roots it leaves
+down, jobs on an unavailable root wait for it instead of failing, and
+`waxflow doctor` fails each one by name (an empty one is a warning).
 
 ## CLI
 

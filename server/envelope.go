@@ -40,7 +40,7 @@ func statusFor(code waxerr.Code) int {
 		// entity is what it cannot process. 415 told a client to send a
 		// different format when the file it sent was simply broken.
 		return http.StatusUnprocessableEntity
-	case waxerr.CodeOverloaded, waxerr.CodeCatalogUnavailable:
+	case waxerr.CodeOverloaded, waxerr.CodeCatalogUnavailable, waxerr.CodeRootUnavailable:
 		return http.StatusServiceUnavailable
 	default:
 		// source-unreadable, output-unwritable, canceled, internal
@@ -53,9 +53,9 @@ func statusFor(code waxerr.Code) int {
 // pre-body failures.
 func (s *Server) writeError(w http.ResponseWriter, err error) {
 	code := waxerr.CodeOf(err)
-	if code == waxerr.CodeOverloaded || code == waxerr.CodeCatalogUnavailable {
-		// Over admission limits or a briefly unreachable catalog, tell
-		// clients when to come back.
+	if statusFor(code) == http.StatusServiceUnavailable {
+		// Over admission limits, a briefly unreachable catalog or an unmounted
+		// library root: tell clients when to come back.
 		w.Header().Set("Retry-After", "2")
 	}
 	s.writeEnvelope(w, statusFor(code), code, err.Error())

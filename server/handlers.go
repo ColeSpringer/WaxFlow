@@ -24,6 +24,7 @@ func (s *Server) handleCaps(w http.ResponseWriter, _ *http.Request) {
 		pid:         s.cfg.PIDSources,
 		timelines:   s.timelines != nil,
 		rootsReload: s.cfg.ReloadRoots != nil,
+		rootsStatus: s.cfg.RootsStatus != nil,
 	}))
 }
 
@@ -304,14 +305,25 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st := s.store.Stats()
+	var unmounted *int
+	if s.cfg.RootsStatus != nil {
+		n := 0
+		for _, st := range s.cfg.RootsStatus() {
+			if !st.Mounted {
+				n++
+			}
+		}
+		unmounted = &n
+	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	s.met.WritePrometheus(w, s.cfg.Version, metrics.Gauges{
-		CacheBytes:   st.Bytes,
-		CacheEntries: st.Entries,
-		CacheHits:    st.Hits,
-		CacheMisses:  st.Misses,
-		LiveInUse:    s.pools.LiveInUse(),
-		JobInUse:     s.jobsRunning(),
+		CacheBytes:     st.Bytes,
+		CacheEntries:   st.Entries,
+		CacheHits:      st.Hits,
+		CacheMisses:    st.Misses,
+		LiveInUse:      s.pools.LiveInUse(),
+		JobInUse:       s.jobsRunning(),
+		RootsUnmounted: unmounted,
 	})
 }
 
