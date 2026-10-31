@@ -21,11 +21,6 @@ const DefaultLookahead = 3
 // wedged worker, and erroring beats holding the client forever.
 const defaultWaitTimeout = 60 * time.Second
 
-// maxSpawnsPerWait bounds how many workers one request may start before
-// giving up: the second spawn covers a worker that was canceled under us
-// (a competing seek); needing a third means the variant is thrashing.
-const maxSpawnsPerWait = 2
-
 // Ops are the per-variant callbacks the server supplies to Segment. The
 // same key must always arrive with equivalent Ops.
 type Ops struct {
@@ -121,7 +116,7 @@ func (m *Manager) Segment(ctx context.Context, key string, n int64, ops Ops) err
 	// the file exists), and by re-checking Has otherwise - so a stale stat
 	// can never 404 a written segment, kill a healthy worker, or spawn a
 	// redundant one.
-	spawns := 0
+	spawned := false
 	for {
 		if ops.Has(n) {
 			return nil
@@ -165,18 +160,7 @@ func (m *Manager) Segment(ctx context.Context, key string, n int64, ops Ops) err
 				return err
 			}
 
-		case spawns >= maxSpawnsPerWait:
-			err := v.lastErr
-			m.mu.Unlock()
-			if ops.Has(n) {
-				return nil
-			}
-			if err != nil {
-				return err
-			}
-			return waxerr.New(waxerr.CodeOverloaded, "hls: variant worker contention; retry")
-
-		case spawns > 0:
+		case spawned:
 			// Our worker came and went without producing n. Its failure is
 			// the honest answer; a clean end of stream means n is past the
 			// end (a lying playlist consumer, or a source that shrank).
@@ -217,7 +201,7 @@ func (m *Manager) Segment(ctx context.Context, key string, n int64, ops Ops) err
 			wk.cancel = cancelWorker
 			v.cur = wk
 			v.lastErr = nil
-			spawns++
+			spawned = true
 			m.mu.Unlock()
 		}
 	}

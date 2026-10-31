@@ -215,6 +215,46 @@ func TestManagerRestartsOutOfWindow(t *testing.T) {
 	w1.finish(nil)
 }
 
+// TestManagerSeekWaitsForTheFirstSegment: a worker that has not landed its
+// first segment is waited on by every request, a far seek included, so
+// competing seeks cannot cancel each other's workers before any segment
+// exists. Once it has produced, the seek restarts it as usual.
+func TestManagerSeekWaitsForTheFirstSegment(t *testing.T) {
+	h := newHarness()
+	m := &Manager{}
+	near := segmentAsync(m, "k", 0, h.ops())
+	w0 := h.worker(t, 0)
+	far := segmentAsync(m, "k", 50, h.ops())
+	mustBlock(t, far)
+	if w0.ctx.Err() != nil {
+		t.Fatal("a seek canceled a worker that had not produced its first segment")
+	}
+	h.mu.Lock()
+	spawned := len(h.spawns)
+	h.mu.Unlock()
+	if spawned != 1 {
+		t.Fatalf("%d workers while the first had produced nothing, want 1", spawned)
+	}
+	w0.produce(0)
+	if err := mustReturn(t, near); err != nil {
+		t.Fatal(err)
+	}
+	w1 := h.worker(t, 1)
+	if w1.start != 50 {
+		t.Fatalf("restarted worker at %d, want 50", w1.start)
+	}
+	select {
+	case <-w0.ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("the seek never canceled the worker once it had produced")
+	}
+	w1.produce(50)
+	if err := mustReturn(t, far); err != nil {
+		t.Fatal(err)
+	}
+	w1.finish(nil)
+}
+
 func TestManagerRestartsBehindWorker(t *testing.T) {
 	h := newHarness()
 	m := &Manager{}
@@ -715,13 +755,7 @@ func testManagerConcurrent(t *testing.T, idle time.Duration) {
 			for i := 0; i < 8; i++ {
 				n := int64((g*7 + i*5) % total)
 				if err := m.Segment(context.Background(), "k", n, h.ops()); err != nil {
-					switch waxerr.CodeOf(err) {
-					case waxerr.CodeCanceled, waxerr.CodeOverloaded:
-						// A racing restart can cancel the worker under a
-						// waiter; both are retryable answers.
-					default:
-						errs <- fmt.Errorf("segment %d: %w", n, err)
-					}
+					errs <- fmt.Errorf("segment %d: %w", n, err)
 				}
 			}
 		}(g)

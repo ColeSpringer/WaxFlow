@@ -571,7 +571,9 @@ func TestHLSIdleWorkerCanceled(t *testing.T) {
 
 // TestHLSStalledIdleWorkerGivesItsSlotBack: an idle worker stalled where its
 // cancel cannot reach (the gate ignores its context) gives its live slot back
-// at the idle cancel, and is counted once it unwinds.
+// at the idle cancel, and is counted once it unwinds. Its only fetch waits on
+// the gated segment and leaves once the worker is in the gate, so the grace
+// cannot run out while the worker is still somewhere its cancel would reach.
 func TestHLSStalledIdleWorkerGivesItsSlotBack(t *testing.T) {
 	env := newTestEnv(t, func(c *server.Config) {
 		c.LiveSlots = 1
@@ -580,12 +582,14 @@ func TestHLSStalledIdleWorkerGivesItsSlotBack(t *testing.T) {
 	stalled := make(chan struct{})
 	open := sync.OnceFunc(func() { close(stalled) })
 	t.Cleanup(open)
+	reached := make(chan struct{})
 	env.srv.GateHLSPublish(func(_ context.Context, n int64) {
 		if n == 1 {
+			close(reached)
 			<-stalled
 		}
 	})
-	fetchSegment(t, env, longRampSegments(t, env)[0])
+	leaveOnceGated(t, env, longRampSegments(t, env)[1], reached)
 	waitFor(t, "the slot to come back", func() bool {
 		release, ok := env.srv.HoldLiveSlot()
 		if ok {
@@ -661,6 +665,31 @@ func within(t *testing.T, ch <-chan struct{}, what string) {
 	}
 }
 
+// leaveOnceGated fetches segment uri with a client that stays until the worker
+// it drives closes reached from the gate, then leaves, and returns once the
+// handler has seen it go. A client waiting on a segment keeps the idle timeout
+// disarmed, so the grace starts only with the worker held where the gate holds
+// it, however slowly it got there.
+func leaveOnceGated(t *testing.T, env *testEnv, uri string, reached <-chan struct{}) {
+	t.Helper()
+	ctx, leave := context.WithCancel(context.Background())
+	defer leave()
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		env.srv.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(ctx, http.MethodGet, "/hls/"+uri, nil))
+	}()
+	select {
+	case <-reached:
+	case <-served:
+		t.Fatal("the segment request ended before its worker reached the gate")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the worker never reached the gate")
+	}
+	leave()
+	within(t, served, "the handler to see its client leave")
+}
+
 // TestHLSHitsKeepTheWorkerAlive: a fetch served from the cache counts as a
 // listener, so a worker whose every fetch is a hit runs on past the grace, and
 // stops a grace after the fetches end.
@@ -698,22 +727,7 @@ func TestHLSWorkerEndingAsItIdlesIsNotAbandoned(t *testing.T) {
 			<-ctx.Done()
 		}
 	})
-	ctx, leave := context.WithCancel(context.Background())
-	defer leave()
-	served := make(chan struct{})
-	go func() {
-		defer close(served)
-		env.srv.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(ctx, http.MethodGet, "/hls/"+segs[last], nil))
-	}()
-	select {
-	case <-reached:
-	case <-served:
-		t.Fatal("the segment request ended before its worker reached the last segment")
-	case <-time.After(10 * time.Second):
-		t.Fatal("the worker never reached the last segment")
-	}
-	leave()
-	<-served
+	leaveOnceGated(t, env, segs[last], reached)
 	waitForIdle(t, env)
 
 	if n := env.srv.Metrics().AbandonedHLS.Load(); n != 0 {
