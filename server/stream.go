@@ -17,6 +17,7 @@ import (
 	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/cache"
+	"github.com/colespringer/waxflow/internal/hls"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -161,12 +162,14 @@ func (s *Server) serveViaCache(w http.ResponseWriter, r *http.Request, key cache
 		if err != nil {
 			// The entry died between Do and attach. A pipeline failure
 			// carries the real error (a source deleted or changed under
-			// us): surface it instead of respawning doomed pipelines.
-			if ferr := entry.Err(); ferr != nil {
+			// us): surface it instead of respawning doomed pipelines. An
+			// abandoned one only lost its readers, so this request starts
+			// the encode afresh.
+			if ferr := entry.Err(); ferr != nil && !errors.Is(ferr, cache.ErrAbandoned) {
 				s.writeError(w, ferr)
 				return
 			}
-			continue // released or unjoinable after completion: retry
+			continue // released, abandoned, or unjoinable after completion: retry
 		}
 		s.serveLive(w, r, reader, plan, true, reqStart)
 		return
@@ -230,9 +233,10 @@ func (s *Server) sourcePipeline(req *streamRequest) pipeline {
 }
 
 // startPipeline runs p into entry on its own goroutine. Live pipelines pass
-// the server's base context, not the request's: the read-behind model
-// finishes the encode (and the cache entry) even when the first client
-// leaves. Sync one-shots pass their request context to die with it.
+// the server's base context, not the request's: a client leaving does not end
+// an encode another may join, and the entry abandons it once every reader has
+// been gone for LiveIdleGrace. Sync one-shots pass their request context to
+// die with it.
 func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, p pipeline, release func(), sync bool) {
 	if !s.startWork() {
 		// No writer runs, so failing the entry here keeps it single-writer.
@@ -246,44 +250,61 @@ func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, p pipeli
 		s.met.SessionsLive.Add(1)
 	}
 	s.met.SessionsActive.Add(1)
+	// An abandon gives the slot back and stops the run at once, even a run
+	// stalled where it cannot see the stop.
+	ctx, cancel := context.WithCancelCause(ctx)
+	entry.OnAbandon(func() {
+		release()
+		cancel(cache.ErrAbandoned)
+	})
 	go func() {
 		defer s.wg.Done()
 		// The slot goes back before the session stops counting, so no active
 		// sessions means a free slot.
 		defer s.met.SessionsActive.Add(-1)
 		defer release()
+		defer cancel(nil)
 
 		var dst io.Writer = entry
 		if wrap := s.hooks.pipelineDst; wrap != nil {
 			dst = wrap(entry)
 		}
 		res, err := p.run(ctx, dst)
-		if err != nil {
+		if err == nil {
+			err = entry.Complete(res.Samples)
+		}
+		switch {
+		case errors.Is(entry.Err(), cache.ErrAbandoned):
+			// The entry's word, whatever the run surfaced on its way out.
+			entry.Fail(cache.ErrAbandoned)
+			if !sync {
+				s.met.AbandonedLive.Add(1)
+			}
+			s.log.Info("pipeline abandoned", "src", p.ref, "rung", rungName(p.rung), "err", err)
+		case err != nil:
 			level, why := stopReason(ctx, err)
 			s.log.Log(ctx, level, "pipeline "+why, "src", p.ref, "rung", rungName(p.rung), "err", err)
 			entry.Fail(err)
-			return
+		default:
+			// After Complete: promotion failures (rename, meta write) also
+			// degrade, and they must count too.
+			if entry.FileBacked() && entry.Degraded() {
+				s.met.Degradations.Add(1)
+			}
+			s.log.Debug("pipeline finished", "src", p.ref, "rung", rungName(p.rung),
+				"samples", res.Samples, "clipped", res.ClippedSamples, "truePeak", res.TruePeak,
+				"degraded", entry.Degraded())
 		}
-		if err := entry.Complete(res.Samples); err != nil {
-			s.log.Warn("entry completion failed", "src", p.ref, "err", err)
-		}
-		// After Complete: promotion failures (rename, meta write) also
-		// degrade, and they must count too.
-		if entry.FileBacked() && entry.Degraded() {
-			s.met.Degradations.Add(1)
-		}
-		s.log.Debug("pipeline finished", "src", p.ref, "rung", rungName(p.rung),
-			"samples", res.Samples, "clipped", res.ClippedSamples, "truePeak", res.TruePeak,
-			"degraded", entry.Degraded())
 	}()
 }
 
 // stopReason grades why a pipeline or variant worker stopped, for its log
 // line: a run nobody was left to read, or one that was canceled, is routine.
-// ctx is the run's own.
+// ctx is the run's own. A progressive pipeline asks its entry whether it was
+// abandoned first.
 func stopReason(ctx context.Context, err error) (slog.Level, string) {
 	switch {
-	case errors.Is(err, cache.ErrAbandoned):
+	case errors.Is(context.Cause(ctx), hls.ErrIdle):
 		return slog.LevelInfo, "abandoned"
 	case ctx.Err() != nil || waxerr.CodeOf(err) == waxerr.CodeCanceled:
 		return slog.LevelDebug, "canceled"
@@ -432,7 +453,7 @@ func (s *Server) serveLive(w http.ResponseWriter, r *http.Request, reader *cache
 	defer reader.Close()
 
 	// A client that disconnects mid-read must unblock the reader; the
-	// pipeline itself keeps running into the cache.
+	// pipeline runs on unless the idle grace passes with nobody reading.
 	stop := context.AfterFunc(r.Context(), func() { reader.Close() })
 	defer stop()
 

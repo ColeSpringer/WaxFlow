@@ -175,6 +175,12 @@ func TestZeroValueUsable(t *testing.T) {
 	if got := cfg.ResolvedPaceFactor(); got != DefaultPaceFactor {
 		t.Errorf("ResolvedPaceFactor() = %v", got)
 	}
+	if got, err := cfg.ResolvedLiveIdleGrace(); err != nil || got != 5*time.Second {
+		t.Errorf("ResolvedLiveIdleGrace() = %v, %v, want 5s", got, err)
+	}
+	if got, err := cfg.ResolvedHLSIdleGrace(); err != nil || got != time.Minute {
+		t.Errorf("ResolvedHLSIdleGrace() = %v, %v, want 1m", got, err)
+	}
 }
 
 func TestServiceFieldsFromJSONAndEnv(t *testing.T) {
@@ -182,7 +188,8 @@ func TestServiceFieldsFromJSONAndEnv(t *testing.T) {
 		"roots": [{"name":"lib","path":"/music"}],
 		"apiKeys": ["k1"],
 		"cacheMaxAge": "720h",
-		"paceFactor": 0
+		"paceFactor": 0,
+		"liveIdleGrace": "0"
 	}`)
 	cfg, err := Load(path, envMap(map[string]string{
 		"WAXFLOW_ROOTS":           "a=/x, b=/y",
@@ -192,6 +199,7 @@ func TestServiceFieldsFromJSONAndEnv(t *testing.T) {
 		"WAXFLOW_DEMO":            "true",
 		"WAXFLOW_CACHE_MAX_BYTES": "1024",
 		"WAXFLOW_CATALOG_DB":      "/catalog/waxbin.db",
+		"WAXFLOW_HLS_IDLE_GRACE":  "90s",
 	}))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -217,6 +225,13 @@ func TestServiceFieldsFromJSONAndEnv(t *testing.T) {
 	// paceFactor: an explicit JSON 0 disables pacing, distinct from absent.
 	if got := cfg.ResolvedPaceFactor(); got != 0 {
 		t.Errorf("explicit paceFactor 0 resolved to %v", got)
+	}
+	// An explicit "0" grace never cancels, distinct from absent.
+	if got, err := cfg.ResolvedLiveIdleGrace(); err != nil || got != 0 {
+		t.Errorf("liveIdleGrace \"0\" resolved to %v, %v", got, err)
+	}
+	if got, err := cfg.ResolvedHLSIdleGrace(); err != nil || got != 90*time.Second {
+		t.Errorf("WAXFLOW_HLS_IDLE_GRACE resolved to %v, %v", got, err)
 	}
 }
 
@@ -252,6 +267,9 @@ func TestServiceFieldValidation(t *testing.T) {
 		{DebugAddr: "no-port"},
 		{PaceBurstSeconds: -3},
 		{ResampleProfile: "ultra"},
+		{LiveIdleGrace: "soon"},
+		{HLSIdleGrace: "-1s"},
+		{UploadTTL: "-1h"},
 	}
 	for i, cfg := range bad {
 		if err := cfg.Validate(); err == nil {

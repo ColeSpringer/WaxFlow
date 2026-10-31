@@ -519,8 +519,8 @@ func (r *Runner) openMemberMedia(ctx context.Context, req Request, i int) (forma
 
 // progressFunc builds the per-chunk hook: it updates the in-memory
 // progress (broadcasting at most ~4 times a second), and pauses the
-// pipeline while the live pool is saturated, which is the plan's
-// job-yields-to-interactive admission rule.
+// pipeline while the live pool is saturated: jobs yield to interactive
+// playback.
 func (r *Runner) progressFunc(ctx context.Context, id, phase string) func(done, total int64) {
 	var last time.Time
 	return func(done, total int64) {

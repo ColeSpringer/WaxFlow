@@ -1,8 +1,7 @@
-// Package metrics is WaxFlow's hand-rolled Prometheus surface (plan
-// section 9): a fixed set of counters, gauges, and one histogram, exposed
-// in text format by GET /metrics. No client library; the text exposition
-// format is a dozen lines and the family promise is a short dependency
-// list.
+// Package metrics is WaxFlow's hand-rolled Prometheus surface: a fixed set
+// of counters, gauges, and one histogram, exposed in text format by GET
+// /metrics. No client library; the text exposition format is a dozen lines
+// and the family promise is a short dependency list.
 package metrics
 
 import (
@@ -23,6 +22,10 @@ type Metrics struct {
 	SessionsLive atomic.Uint64
 	SessionsSync atomic.Uint64
 	SessionsHLS  atomic.Uint64
+	// AbandonedLive and AbandonedHLS count pipelines stopped because nobody
+	// was left to read them: /stream encodes and HLS variant workers.
+	AbandonedLive atomic.Uint64
+	AbandonedHLS  atomic.Uint64
 	// HLSSegments counts media segments served (cache hits included).
 	HLSSegments atomic.Uint64
 	// DirectPlays counts requests served as original bytes (ladder rung 1).
@@ -109,6 +112,11 @@ func (m *Metrics) WritePrometheus(w io.Writer, version string, g Gauges) {
 	p("waxflow_sessions_total{kind=\"live\"} %d\n", m.SessionsLive.Load())
 	p("waxflow_sessions_total{kind=\"sync\"} %d\n", m.SessionsSync.Load())
 	p("waxflow_sessions_total{kind=\"hls\"} %d\n", m.SessionsHLS.Load())
+
+	p("# HELP waxflow_sessions_abandoned_total Pipelines stopped because nobody was left to read them, by kind.\n")
+	p("# TYPE waxflow_sessions_abandoned_total counter\n")
+	p("waxflow_sessions_abandoned_total{kind=\"live\"} %d\n", m.AbandonedLive.Load())
+	p("waxflow_sessions_abandoned_total{kind=\"hls\"} %d\n", m.AbandonedHLS.Load())
 
 	p("# HELP waxflow_direct_play_total Requests served as original bytes.\n")
 	p("# TYPE waxflow_direct_play_total counter\n")

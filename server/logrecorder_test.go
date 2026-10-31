@@ -53,6 +53,13 @@ func (h *LogRecorder) Warnings() []LogRecord {
 	return out
 }
 
+// Records returns every record kept.
+func (h *LogRecorder) Records() []LogRecord {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]LogRecord(nil), h.recs...)
+}
+
 // Has reports whether a record with this level and message was logged.
 func (h *LogRecorder) Has(level slog.Level, msg string) bool {
 	h.mu.Lock()

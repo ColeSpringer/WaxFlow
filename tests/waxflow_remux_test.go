@@ -190,7 +190,7 @@ func TestMP3InWAVRemuxesToMP3(t *testing.T) {
 	}
 }
 
-// TestRemuxGaplessRoundTrip is the milestone's gate. Remux deliberately
+// TestRemuxGaplessRoundTrip is the remux rung's gapless gate. Remux deliberately
 // bypasses format.Media's trimming: the packets carry the full untrimmed audio
 // and the trim is re-signalled through the synthesized codec.Trailer instead. So
 // one file's trim is expressed in two places, and a muxer that ignored the

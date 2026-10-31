@@ -26,6 +26,9 @@ type Options struct {
 	MaxAge time.Duration
 	// RingBytes bounds degradation rings; 0 means DefaultRingBytes.
 	RingBytes int
+	// AbandonAfter stops an in-flight entry once its readers have all been
+	// gone this long; 0 lets it run to the end.
+	AbandonAfter time.Duration
 	// Logger receives eviction and degradation notes; nil discards.
 	Logger *slog.Logger
 }
@@ -39,16 +42,19 @@ type indexEntry struct {
 // Store is the on-disk transcode cache: an eviction index over completed
 // entries plus the registry of in-flight ones.
 type Store struct {
-	dir       string
-	maxBytes  int64
-	maxAge    time.Duration
-	ringBytes int
-	log       *slog.Logger
+	dir          string
+	maxBytes     int64
+	maxAge       time.Duration
+	ringBytes    int
+	abandonAfter time.Duration
+	log          *slog.Logger
 
-	// now and createFile are seams for eviction-clock and disk-failure
-	// tests.
+	// now, createFile and afterFunc are seams for eviction-clock,
+	// disk-failure and abandon-timer tests; afterFunc runs f after d and
+	// returns the timer's Stop.
 	now        func() time.Time
 	createFile func(path string) (entryFile, error)
+	afterFunc  func(d time.Duration, f func()) (stop func() bool)
 
 	mu         sync.Mutex
 	index      map[Key]*indexEntry
@@ -69,18 +75,20 @@ type Store struct {
 // are abandoned partials from a crash and are deleted.
 func Open(dir string, opts Options) (*Store, error) {
 	s := &Store{
-		dir:       dir,
-		maxBytes:  opts.MaxBytes,
-		maxAge:    opts.MaxAge,
-		ringBytes: opts.RingBytes,
-		log:       opts.Logger,
-		now:       time.Now,
+		dir:          dir,
+		maxBytes:     opts.MaxBytes,
+		maxAge:       opts.MaxAge,
+		ringBytes:    opts.RingBytes,
+		abandonAfter: opts.AbandonAfter,
+		log:          opts.Logger,
+		now:          time.Now,
 		createFile: func(path string) (entryFile, error) {
 			// posixfs.Create, not os.OpenFile: promote renames this file
 			// while the descriptor stays open, which Windows permits only
 			// with delete sharing.
 			return posixfs.Create(path)
 		},
+		afterFunc:   func(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop },
 		index:       make(map[Key]*indexEntry),
 		writing:     make(map[Key]*Entry),
 		janitorStop: make(chan struct{}),
@@ -328,17 +336,19 @@ func (s *Store) promote(e *Entry, meta *Meta) error {
 // unregister drops an in-flight entry from the registry so later requests
 // re-resolve through Lookup/Begin. Degraded entries unregister at the
 // moment of degradation: nobody new should attach to a ring that has
-// moved on.
-func (s *Store) unregister(key Key) {
+// moved on. Only e's own registration goes; a successor may hold the key.
+func (s *Store) unregister(e *Entry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.writing, key)
+	if s.writing[e.key] == e {
+		delete(s.writing, e.key)
+	}
 }
 
-// noteDegraded logs a degradation and unregisters the key.
-func (s *Store) noteDegraded(key Key, err error) {
-	s.log.Warn("cache: write failure, session degraded to ring-fed streaming", "key", key, "err", err)
-	s.unregister(key)
+// noteDegraded logs a degradation and unregisters the entry.
+func (s *Store) noteDegraded(e *Entry, err error) {
+	s.log.Warn("cache: write failure, session degraded to ring-fed streaming", "key", e.key, "err", err)
+	s.unregister(e)
 }
 
 // dropAborted removes a never-promoted entry's temp file, and its directory

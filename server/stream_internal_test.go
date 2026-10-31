@@ -10,10 +10,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/internal/cache"
+	"github.com/colespringer/waxflow/internal/hls"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -25,6 +27,8 @@ func TestStopReason(t *testing.T) {
 	live := context.Background()
 	gone, cancel := context.WithCancel(context.Background())
 	cancel()
+	idle, cancelIdle := context.WithCancelCause(context.Background())
+	cancelIdle(hls.ErrIdle)
 	for _, tc := range []struct {
 		name  string
 		ctx   context.Context
@@ -32,13 +36,11 @@ func TestStopReason(t *testing.T) {
 		level slog.Level
 		why   string
 	}{
-		{"abandoned", live, cache.ErrAbandoned, slog.LevelInfo, "abandoned"},
-		{"abandoned through a muxer", live, waxerr.Wrap(waxerr.CodeOutputUnwritable, "mp3: writing frame", cache.ErrAbandoned),
-			slog.LevelInfo, "abandoned"},
 		{"canceled", live, waxerr.Wrap(waxerr.CodeCanceled, "transcode canceled", context.Canceled), slog.LevelDebug, "canceled"},
 		{"bare context", live, context.Canceled, slog.LevelDebug, "canceled"},
 		{"canceled under another code", gone, waxerr.New(waxerr.CodeSourceUnreadable, "reading a member"),
 			slog.LevelDebug, "canceled"},
+		{"idle", idle, waxerr.Wrap(waxerr.CodeCanceled, "transcode canceled", context.Canceled), slog.LevelInfo, "abandoned"},
 		{"source", live, waxerr.New(waxerr.CodeSourceUnreadable, "reading"), slog.LevelWarn, "failed"},
 		{"unclassified", live, errors.New("boom"), slog.LevelWarn, "failed"},
 	} {
@@ -102,6 +104,94 @@ func TestPipelineFreesItsSlotBeforeGoingIdle(t *testing.T) {
 		func() { activeAtRelease <- s.met.SessionsActive.Load(); free() }, false)
 	if got := <-activeAtRelease; got != 1 {
 		t.Errorf("the slot was released with %d sessions active, want 1: the pipeline went idle first", got)
+	}
+}
+
+// TestOnlyLivePipelinesCountAsAbandoned: a /stream encode stopped for want of
+// readers counts as an abandoned live session; a sync one-shot, which dies with
+// its request anyway, does not. Each entry's only reader has left, so its ring
+// abandons once full.
+func TestOnlyLivePipelinesCountAsAbandoned(t *testing.T) {
+	s := internalServer(t, nil)
+	unread := pipeline{ref: "lib/a.wav", run: func(_ context.Context, dst io.Writer) (*waxflow.TranscodeResult, error) {
+		for {
+			if _, err := dst.Write(make([]byte, 512)); err != nil {
+				return nil, err
+			}
+		}
+	}}
+	for _, sync := range []bool{true, false} {
+		entry := cache.NewMemEntry(4096, cache.Meta{})
+		r, err := entry.NewReader()
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Close()
+		s.startPipeline(s.baseCtx, entry, unread, func() {}, sync)
+	}
+	s.wg.Wait()
+	if n := s.met.AbandonedLive.Load(); n != 1 {
+		t.Errorf("abandoned live sessions = %d, want 1: the sync one-shot is not one", n)
+	}
+}
+
+// TestAbandonCancelsAStalledRun: a run stalled waiting on its context, its
+// reader gone, is canceled a grace later with ErrAbandoned as the cause, counts
+// as abandoned, and its entry's temp file goes even though it never wrote
+// again.
+func TestAbandonCancelsAStalledRun(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "placeholder.txt"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	roots, err := source.OpenRoots([]source.Root{{Name: "lib", Path: root}}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheDir := t.TempDir()
+	s, err := New(Config{Addr: "127.0.0.1:4418", CacheDir: cacheDir, Resolver: roots, LiveSlots: 1,
+		LiveIdleGrace: 20 * time.Millisecond})
+	if err != nil {
+		roots.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		s.Close()
+		roots.Close()
+	})
+	entry, err := s.store.Begin(cache.NewKey("lib/a.wav|0", "stalled", nil), cache.Meta{Ext: "wav"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	free, ok := s.pools.AcquireLive()
+	if !ok {
+		t.Fatal("no live slot")
+	}
+	cause := make(chan error, 1)
+	s.startPipeline(s.baseCtx, entry, pipeline{ref: "lib/a.wav", run: func(ctx context.Context, _ io.Writer) (*waxflow.TranscodeResult, error) {
+		<-ctx.Done()
+		cause <- context.Cause(ctx)
+		return nil, ctx.Err()
+	}}, free, false)
+	r, err := entry.NewReader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Close()
+	select {
+	case got := <-cause:
+		if !errors.Is(got, cache.ErrAbandoned) {
+			t.Errorf("the stalled run was canceled by %v, want ErrAbandoned", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the abandon never canceled the stalled run")
+	}
+	s.wg.Wait()
+	if n := s.met.AbandonedLive.Load(); n != 1 {
+		t.Errorf("abandoned live sessions = %d, want 1", n)
+	}
+	if tmps, _ := filepath.Glob(filepath.Join(cacheDir, "v1", "*", "*", "*.tmp-*")); len(tmps) != 0 {
+		t.Errorf("the abandoned entry left %v", tmps)
 	}
 }
 
@@ -201,7 +291,7 @@ func TestNoVariantWorkerStartsOnceCloseBegins(t *testing.T) {
 	s.Close()
 	cancel, err := s.hlsSpawner(req, variant)(0, func(int64) {}, func(error) {})
 	if cancel != nil {
-		cancel()
+		cancel(nil)
 	}
 	s.wg.Wait()
 	if waxerr.CodeOf(err) != waxerr.CodeOverloaded || s.pools.LiveInUse() != 0 {
@@ -232,7 +322,7 @@ func spawnMissing(t *testing.T, s *Server, atExit func()) error {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cancel()
+	defer cancel(nil)
 	<-exited
 	return exitErr
 }

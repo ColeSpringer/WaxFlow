@@ -156,6 +156,13 @@ type Config struct {
 	PaceBurst  time.Duration
 	PaceFactor float64
 
+	// LiveIdleGrace stops a /stream encode once every client reading it has
+	// been gone this long; HLSIdleGrace stops a variant worker once nobody
+	// has fetched from its variant for this long. Zero (unlike the CLI's 5 s
+	// and 60 s) never stops either, so the encode finishes into the cache.
+	LiveIdleGrace time.Duration
+	HLSIdleGrace  time.Duration
+
 	// Demo serves the browser test page at GET /demo.
 	Demo bool
 
@@ -285,15 +292,16 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	store, err := cache.Open(cfg.CacheDir, cache.Options{
-		MaxBytes:  cfg.CacheMaxBytes,
-		MaxAge:    cfg.CacheMaxAge,
-		RingBytes: cfg.RingBytes,
-		Logger:    log,
+		MaxBytes:     cfg.CacheMaxBytes,
+		MaxAge:       cfg.CacheMaxAge,
+		RingBytes:    cfg.RingBytes,
+		AbandonAfter: cfg.LiveIdleGrace,
+		Logger:       log,
 	})
 	if err != nil {
 		return nil, err
 	}
-	// The index sidecar (plan section 10) shares the cache volume but
+	// The index sidecar shares the cache volume but
 	// not the entry lifecycle; losing it only costs index rebuilds, so
 	// an unusable idx directory downgrades to no sidecar, not a refusal
 	// to start.
@@ -358,6 +366,7 @@ func New(cfg Config) (*Server, error) {
 		uploads:     uploadStore,
 	}
 	s.baseCtx, s.cancel = context.WithCancel(context.Background())
+	s.hlsMgr.IdleTimeout = cfg.HLSIdleGrace
 
 	if cfg.TimelineDir != "" {
 		if s.timelines, err = timeline.Open(cfg.TimelineDir, timeline.Options{Logger: log}); err != nil {

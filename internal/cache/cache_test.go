@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -208,6 +209,40 @@ func TestDropAbortedSparesASuccessorsTemp(t *testing.T) {
 	c.File.Close()
 }
 
+// TestUnregisterSparesASuccessor: an entry that degraded (and so left the
+// registry) and a successor began on its key; the predecessor's end must not
+// drop the successor's registration, or the next request starts a duplicate.
+func TestUnregisterSparesASuccessor(t *testing.T) {
+	s := openStore(t, Options{})
+	create := s.createFile
+	s.createFile = func(path string) (entryFile, error) {
+		f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644)
+		if err != nil {
+			return nil, err
+		}
+		return &failAfter{f: f, limit: 100}, nil
+	}
+	key := NewKey("id-successor-registry", "p", nil)
+	p, err := s.Begin(key, testMeta("wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.createFile = create
+	mustWrite(t, p, pattern(1000))
+	if !p.Degraded() || s.InFlight(key) != nil {
+		t.Fatal("the predecessor did not degrade out of the registry")
+	}
+	succ, err := s.Begin(key, testMeta("wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Fail(errors.New("pipeline exploded"))
+	if got := s.InFlight(key); got != succ {
+		t.Fatalf("after the predecessor failed, InFlight = %p, want the successor %p", got, succ)
+	}
+	succ.Fail(errors.New("cleanup"))
+}
+
 // TestBeginSurvivesAPredecessorsDirRemoval: a predecessor's release can empty
 // and remove the key's directory after a successor's MkdirAll and before its
 // create. The successor still begins on the cache, not on a ring.
@@ -359,6 +394,8 @@ func TestMemEntrySyncOneShot(t *testing.T) {
 
 func TestAbandonedRingStopsWriter(t *testing.T) {
 	e := NewMemEntry(1024, testMeta("wav"))
+	abandons := 0
+	e.OnAbandon(func() { abandons++ })
 	r, _ := e.NewReader()
 	buf := pattern(600)
 	if _, err := e.Write(buf); err != nil {
@@ -376,7 +413,371 @@ func TestAbandonedRingStopsWriter(t *testing.T) {
 	if !errors.Is(err, ErrAbandoned) {
 		t.Fatalf("got %v, want ErrAbandoned", err)
 	}
+	// Failed by the time the writer hears it, so nothing can attach between
+	// the writer's return and its Fail.
+	if !errors.Is(e.Err(), ErrAbandoned) {
+		t.Errorf("Err() = %v once the writer was told, want ErrAbandoned", e.Err())
+	}
+	if _, err := e.NewReader(); err == nil {
+		t.Error("a reader attached to the abandoned ring")
+	}
+	if abandons != 1 {
+		t.Errorf("onAbandon ran %d times, want 1", abandons)
+	}
 	e.Fail(err)
+}
+
+// fakeTimers is the store's abandon timer seam: a timer fires only when the
+// test fires it.
+type fakeTimers struct {
+	mu     sync.Mutex
+	timers []*fakeTimer
+}
+
+type fakeTimer struct {
+	ft      *fakeTimers
+	d       time.Duration
+	f       func()
+	stopped bool
+	fired   bool
+}
+
+func (ft *fakeTimers) afterFunc(d time.Duration, f func()) func() bool {
+	tm := &fakeTimer{ft: ft, d: d, f: f}
+	ft.mu.Lock()
+	ft.timers = append(ft.timers, tm)
+	ft.mu.Unlock()
+	return func() bool {
+		ft.mu.Lock()
+		defer ft.mu.Unlock()
+		was := !tm.stopped && !tm.fired
+		tm.stopped = true
+		return was
+	}
+}
+
+// armed returns the timers neither stopped nor fired.
+func (ft *fakeTimers) armed() []*fakeTimer {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	var out []*fakeTimer
+	for _, tm := range ft.timers {
+		if !tm.stopped && !tm.fired {
+			out = append(out, tm)
+		}
+	}
+	return out
+}
+
+// only returns the one armed timer.
+func (ft *fakeTimers) only(t *testing.T) *fakeTimer {
+	t.Helper()
+	armed := ft.armed()
+	if len(armed) != 1 {
+		t.Fatalf("%d abandon timers armed, want 1", len(armed))
+	}
+	return armed[0]
+}
+
+// fire runs the timer's func as its expiry would, stopped or not: a real
+// timer can expire just as it is stopped.
+func (tm *fakeTimer) fire() {
+	tm.ft.mu.Lock()
+	tm.fired = true
+	tm.ft.mu.Unlock()
+	tm.f()
+}
+
+// graceStore is a store whose entries abandon after grace, on timers the test
+// fires by hand.
+func graceStore(t *testing.T, grace time.Duration) (*Store, *fakeTimers) {
+	t.Helper()
+	s := openStore(t, Options{AbandonAfter: grace})
+	ft := &fakeTimers{}
+	s.afterFunc = ft.afterFunc
+	return s, ft
+}
+
+func mustWrite(t *testing.T, e *Entry, p []byte) {
+	t.Helper()
+	if _, err := e.Write(p); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+}
+
+// TestFileEntryAbandonsAfterGrace: a grace after the last reader leaves, the
+// entry abandons: its onAbandon runs at that moment (whatever the writer is
+// doing), nothing new attaches, and the writer's next write fails and takes
+// the files with it. A ring that has not filled abandons the same way.
+func TestFileEntryAbandonsAfterGrace(t *testing.T) {
+	for _, degrade := range []bool{false, true} {
+		name := "on the cache"
+		if degrade {
+			name = "degraded to the ring"
+		}
+		t.Run(name, func(t *testing.T) {
+			const grace = 5 * time.Second
+			s, ft := graceStore(t, grace)
+			if degrade {
+				s.createFile = func(path string) (entryFile, error) {
+					f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644)
+					if err != nil {
+						return nil, err
+					}
+					return &failAfter{f: f, limit: 1000}, nil
+				}
+			}
+			key := NewKey("id-abandon", "p", nil)
+			e, err := s.Begin(key, testMeta("wav"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			abandons := 0
+			e.OnAbandon(func() { abandons++ })
+			r, err := e.NewReader()
+			if err != nil {
+				t.Fatal(err)
+			}
+			mustWrite(t, e, pattern(2000))
+			if e.Degraded() != degrade {
+				t.Fatalf("degraded = %v, want %v", e.Degraded(), degrade)
+			}
+			r.Close()
+
+			tm := ft.only(t)
+			if tm.d != grace {
+				t.Fatalf("abandon timer armed for %v, want the grace", tm.d)
+			}
+			mustWrite(t, e, pattern(100))
+			tm.fire()
+			if abandons != 1 {
+				t.Errorf("onAbandon ran %d times at the abandon, want 1", abandons)
+			}
+			if !errors.Is(e.Err(), ErrAbandoned) {
+				t.Errorf("Err() = %v, want ErrAbandoned", e.Err())
+			}
+			if s.InFlight(key) != nil {
+				t.Error("the abandoned entry is still registered for joiners")
+			}
+			if _, err := e.NewReader(); err == nil {
+				t.Error("a reader attached to the abandoned entry")
+			}
+			if _, err := e.Write(pattern(100)); !errors.Is(err, ErrAbandoned) {
+				t.Fatalf("the writer's next write = %v, want ErrAbandoned", err)
+			}
+			if _, err := os.Stat(e.tmpPath); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("the abandoned entry's temp file survived: %v", err)
+			}
+			if _, err := os.Stat(e.dir); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("the abandoned entry's directory survived: %v", err)
+			}
+			if abandons != 1 {
+				t.Errorf("onAbandon ran %d times in all, want 1", abandons)
+			}
+		})
+	}
+}
+
+// TestFileEntryReattachWithinGraceKeepsWriting: a reader attaching inside the
+// grace disarms the abandon, so the timeout firing late changes nothing; the
+// last reader leaving again starts a fresh grace; the entry promotes whole.
+func TestFileEntryReattachWithinGraceKeepsWriting(t *testing.T) {
+	const grace = 5 * time.Second
+	s, ft := graceStore(t, grace)
+	key := NewKey("id-reattach", "p", nil)
+	e, err := s.Begin(key, testMeta("wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := pattern(4000)
+	r1, err := e.NewReader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, e, want[:1000])
+	r1.Close()
+	first := ft.only(t)
+
+	r2, err := e.NewReader()
+	if err != nil {
+		t.Fatalf("a reader inside the grace could not attach: %v", err)
+	}
+	if n := len(ft.armed()); n != 0 {
+		t.Fatalf("%d abandon timers armed with a reader attached", n)
+	}
+	first.fire()
+	mustWrite(t, e, want[1000:2000])
+	r2.Close()
+	if again := ft.only(t); again == first {
+		t.Fatal("the second leave did not start a fresh grace")
+	}
+	mustWrite(t, e, want[2000:3000])
+
+	r3, err := e.NewReader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r3.Close()
+	mustWrite(t, e, want[3000:])
+	if err := e.Complete(1); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := io.ReadAll(r3); err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("the reattached reader read %d bytes (%v), want the %d written", len(got), err, len(want))
+	}
+	c := s.Lookup(key)
+	if c == nil {
+		t.Fatal("the entry did not promote")
+	}
+	c.File.Close()
+}
+
+// TestFileEntryNeverAbandonsWithoutGrace: a zero grace keeps today's rule, an
+// encode runs on into the cache however long its readers have been gone.
+func TestFileEntryNeverAbandonsWithoutGrace(t *testing.T) {
+	s, ft := graceStore(t, 0)
+	key := NewKey("id-no-grace", "p", nil)
+	e, err := s.Begin(key, testMeta("wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := e.NewReader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, e, pattern(1000))
+	r.Close()
+	if n := len(ft.armed()); n != 0 {
+		t.Fatalf("%d abandon timers armed with no grace", n)
+	}
+	mustWrite(t, e, pattern(1000))
+	if err := e.Complete(1); err != nil {
+		t.Fatal(err)
+	}
+	c := s.Lookup(key)
+	if c == nil {
+		t.Fatal("the entry did not promote")
+	}
+	c.File.Close()
+}
+
+// TestFileEntryNeverAbandonsBeforeFirstReader: the grace runs from a reader
+// leaving, so a pipeline writing before its first reader attaches keeps going.
+func TestFileEntryNeverAbandonsBeforeFirstReader(t *testing.T) {
+	s, ft := graceStore(t, 5*time.Second)
+	key := NewKey("id-unread", "p", nil)
+	e, err := s.Begin(key, testMeta("wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := pattern(2000)
+	mustWrite(t, e, want[:1000])
+	if n := len(ft.armed()); n != 0 {
+		t.Fatalf("%d abandon timers armed before any reader", n)
+	}
+	r, err := e.NewReader()
+	if err != nil {
+		t.Fatalf("the first reader could not attach: %v", err)
+	}
+	defer r.Close()
+	mustWrite(t, e, want[1000:])
+	if err := e.Complete(1); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := io.ReadAll(r); err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("the first reader read %d bytes (%v), want the %d written", len(got), err, len(want))
+	}
+}
+
+// heldFile is an entry file whose first write waits for the test, so an
+// abandon can land while the writer is inside it.
+type heldFile struct {
+	*os.File
+	entered, release chan struct{}
+	held             sync.Once
+	closed           atomic.Bool
+}
+
+func (f *heldFile) Write(p []byte) (int, error) {
+	f.held.Do(func() {
+		close(f.entered)
+		<-f.release
+	})
+	return f.File.Write(p)
+}
+
+func (f *heldFile) Close() error {
+	f.closed.Store(true)
+	return f.File.Close()
+}
+
+// TestAbandonLeavesTheFileToTheWriter: an abandon that lands while the writer
+// is inside its file write, the entry lock dropped, closes nothing under it;
+// the writer's next call fails the entry and closes the file.
+func TestAbandonLeavesTheFileToTheWriter(t *testing.T) {
+	s, ft := graceStore(t, 5*time.Second)
+	hf := &heldFile{entered: make(chan struct{}), release: make(chan struct{})}
+	s.createFile = func(path string) (entryFile, error) {
+		f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644)
+		hf.File = f
+		return hf, err
+	}
+	e, err := s.Begin(NewKey("id-mid-write", "p", nil), testMeta("wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := e.NewReader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Close()
+	wrote := make(chan error, 1)
+	go func() {
+		_, err := e.Write(pattern(100))
+		wrote <- err
+	}()
+	<-hf.entered
+	ft.only(t).fire()
+	if hf.closed.Load() {
+		t.Fatal("the abandon closed the file under the writer")
+	}
+	close(hf.release)
+	if err := <-wrote; err != nil {
+		t.Fatalf("the write the abandon landed in = %v, want it to finish", err)
+	}
+	if _, err := e.Write(pattern(100)); !errors.Is(err, ErrAbandoned) {
+		t.Fatalf("the writer's next write = %v, want ErrAbandoned", err)
+	}
+	if !hf.closed.Load() {
+		t.Error("the writer's failing call left the file open")
+	}
+}
+
+// TestAbandonedEntryCompletesNothing: an encode that ends after its entry
+// abandoned does not promote.
+func TestAbandonedEntryCompletesNothing(t *testing.T) {
+	s, ft := graceStore(t, 5*time.Second)
+	key := NewKey("id-late-complete", "p", nil)
+	e, err := s.Begin(key, testMeta("wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := e.NewReader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, e, pattern(1000))
+	r.Close()
+	ft.only(t).fire()
+	if err := e.Complete(1); !errors.Is(err, ErrAbandoned) {
+		t.Fatalf("Complete after the abandon = %v, want ErrAbandoned", err)
+	}
+	if s.Lookup(key) != nil {
+		t.Fatal("an abandoned entry promoted")
+	}
+	if _, err := os.Stat(e.tmpPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the abandoned entry's temp file survived: %v", err)
+	}
 }
 
 func TestReaderCloseUnblocksRead(t *testing.T) {
@@ -524,8 +925,8 @@ func TestBootScanPrunesTempsBesideACompletedEntry(t *testing.T) {
 	c.File.Close()
 }
 
-// TestConcurrentAttachEvictComplete is the randomized concurrent-operation
-// test the plan calls for on the flight/cache state machine: writers,
+// TestConcurrentAttachEvictComplete is a randomized concurrent-operation
+// test of the flight/cache state machine: writers,
 // attaching readers, lookups, and gc racing under -race, asserting stream
 // integrity throughout.
 func TestConcurrentAttachEvictComplete(t *testing.T) {

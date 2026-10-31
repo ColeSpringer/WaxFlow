@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/server"
 )
 
 func envDuration(name string, def time.Duration) time.Duration {
@@ -156,10 +157,35 @@ func TestLoadMixedTraffic(t *testing.T) {
 // configured duration while watching goroutine and heap trajectories,
 // then requires the daemon to return to its idle baseline: leaked
 // goroutines and monotonic heap growth are the two production failure
-// modes codec correctness tests cannot catch.
+// modes codec correctness tests cannot catch. The duration is split
+// between a daemon with no idle graces and one with both at 20 ms, where
+// abandoned encodes and idle timers churn as well.
 func TestStreamingSoak(t *testing.T) {
-	env := newTestEnv(t, nil)
-	duration := envDuration("WAXFLOW_SOAK_DURATION", 5*time.Second)
+	duration := envDuration("WAXFLOW_SOAK_DURATION", 5*time.Second) / 2
+	for _, grace := range []time.Duration{0, 20 * time.Millisecond} {
+		t.Run(fmt.Sprintf("grace %v", grace), func(t *testing.T) { streamingSoak(t, duration, grace) })
+	}
+}
+
+// soakWorkers is the soak's concurrency; each worker owns one HLS variant.
+const soakWorkers = 6
+
+func streamingSoak(t *testing.T, duration, grace time.Duration) {
+	env := newTestEnv(t, func(c *server.Config) {
+		c.LiveIdleGrace = grace
+		c.HLSIdleGrace = grace
+		// Small, so entries keep being evicted and requests keep missing:
+		// fresh encodes to abandon and segments for workers to make.
+		c.CacheMaxBytes = 1 << 20
+	})
+	writeLongRamp(t, env, "long.wav", 20)
+	// One variant per worker, so a worker's pause after a fetch is a pause
+	// on its variant.
+	segs := make([][]string, soakWorkers)
+	for w := range segs {
+		segs[w] = hlsSegmentURIs(t, env, map[string]string{"src": "lib/long.wav", "format": "opus",
+			"segDur": "1", "bitrate": fmt.Sprint(48 + 16*w)})
+	}
 
 	// Warm up one full request so lazily initialized machinery (plan
 	// cache, cache index) is in the baseline.
@@ -174,15 +200,27 @@ func TestStreamingSoak(t *testing.T) {
 	runtime.ReadMemStats(&mem)
 	baselineHeap := mem.HeapAlloc
 
+	// With a grace, the soak runs on (to 4x its duration at most) until it
+	// has stopped unread work of both kinds, so a slow runner still proves
+	// the paths it exists to leak-check.
 	stop := make(chan struct{})
-	time.AfterFunc(duration, func() { close(stop) })
+	met := env.srv.Metrics()
+	go func() {
+		defer close(stop)
+		time.Sleep(duration)
+		for deadline := time.Now().Add(3 * duration); grace > 0 && time.Now().Before(deadline) &&
+			(met.AbandonedLive.Load() == 0 || met.AbandonedHLS.Load() == 0); {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
 	var requests atomic.Int64
 	var wg sync.WaitGroup
-	for w := 0; w < 6; w++ {
+	for w := range soakWorkers {
 		wg.Add(1)
 		go func(seed int64) {
 			defer wg.Done()
 			rng := rand.New(rand.NewSource(seed))
+			mine := segs[w]
 			for {
 				select {
 				case <-stop:
@@ -190,7 +228,7 @@ func TestStreamingSoak(t *testing.T) {
 				default:
 				}
 				requests.Add(1)
-				switch rng.Intn(4) {
+				switch rng.Intn(6) {
 				case 0: // full read
 					drainStatus(t, env, "/stream?src=lib%2Framp.wav&format=opus")
 				case 1: // client abandons mid-body (the disconnect path)
@@ -202,8 +240,19 @@ func TestStreamingSoak(t *testing.T) {
 					}
 				case 2: // seek entry
 					drainStatus(t, env, fmt.Sprintf("/stream?src=lib%%2Framp.wav&format=opus&t=%.1f", 0.5*float64(rng.Intn(6))))
-				case 3: // HLS master + first media playlist
+				case 3: // HLS master playlist
 					drainStatus(t, env, "/hls/master.m3u8?src=lib%2Framp.wav&format=opus")
+				case 4: // HLS segment, then a pause the idle grace sees
+					drainStatus(t, env, "/hls/"+mine[rng.Intn(len(mine))])
+					time.Sleep(40 * time.Millisecond)
+				case 5: // a fresh encode (its own seek) abandoned mid-body
+					req, _ := http.NewRequest(http.MethodGet,
+						env.ts.URL+fmt.Sprintf("/stream?src=lib%%2Flong.wav&format=flac&t=%.3f", 10*rng.Float64()), nil)
+					req.Header.Set("X-API-Key", testKey)
+					if resp, err := env.ts.Client().Do(req); err == nil {
+						io.ReadFull(resp.Body, make([]byte, 512))
+						resp.Body.Close()
+					}
 				}
 			}
 		}(int64(w) + 100)
@@ -228,7 +277,13 @@ sampling:
 		}
 	}
 	wg.Wait()
-	waitForIdle(t, env)
+	// The encodes the soak left running (all of them, with no grace) drain
+	// slowly under -race, so this waits longer than waitForIdle.
+	for deadline := time.Now().Add(2 * time.Minute); env.srv.Metrics().SessionsActive.Load() != 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("sessions never went idle after the soak")
+		}
+	}
 	// Drop the client transport's idle connections before counting:
 	// each idle conn keeps two client goroutines and a server handler
 	// alive for the transport's idle timeout, and the leak watch is
@@ -259,9 +314,17 @@ sampling:
 	if finalHeap > bound {
 		t.Errorf("heap grew from %d to %d bytes over the soak (bound %d)", baselineHeap, finalHeap, bound)
 	}
-	t.Logf("soak: %s, %d requests; goroutines %d -> %d (baseline %d); heap %.1f -> %.1f MiB; %d samples",
+	// With no grace nothing abandons: the cache volume is healthy, so no
+	// ring ever fills.
+	live, hls := met.AbandonedLive.Load(), met.AbandonedHLS.Load()
+	if (grace > 0) != (live > 0) || (grace > 0) != (hls > 0) {
+		t.Errorf("abandoned %d live, %d hls at grace %v: the soak must stop unread work exactly when a grace is set",
+			live, hls, grace)
+	}
+	t.Logf("soak: %s, %d requests; goroutines %d -> %d (baseline %d); heap %.1f -> %.1f MiB; %d samples; "+
+		"abandoned %d live, %d hls",
 		duration, requests.Load(), baselineGoroutines, now, baselineGoroutines,
-		float64(baselineHeap)/(1<<20), float64(finalHeap)/(1<<20), len(samples))
+		float64(baselineHeap)/(1<<20), float64(finalHeap)/(1<<20), len(samples), live, hls)
 }
 
 // ttfb measures request start to first body byte.
@@ -308,7 +371,7 @@ func percentile(ds []time.Duration, p float64) time.Duration {
 }
 
 // TestTTFAPercentiles measures time-to-first-audio on the three paths
-// the §8 targets name: cold (a fresh transcode, which is also what a
+// the latency targets name: cold (a fresh transcode, which is also what a
 // t= seek costs, since every seek offset is its own cache entry) and
 // warm (a completed cache entry served with ranges). Results are
 // logged; the README records them per release. WAXFLOW_PERF=1 turns

@@ -10,6 +10,8 @@ func TestWritePrometheus(t *testing.T) {
 	m.SessionsActive.Add(2)
 	m.SessionsLive.Add(3)
 	m.SessionsSync.Add(1)
+	m.AbandonedLive.Add(2)
+	m.AbandonedHLS.Add(5)
 	m.DirectPlays.Add(4)
 	m.AdmissionRejects.Add(7)
 	m.Degradations.Add(1)
@@ -26,6 +28,8 @@ func TestWritePrometheus(t *testing.T) {
 		"waxflow_sessions_active 2",
 		`waxflow_sessions_total{kind="live"} 3`,
 		`waxflow_sessions_total{kind="sync"} 1`,
+		`waxflow_sessions_abandoned_total{kind="live"} 2`,
+		`waxflow_sessions_abandoned_total{kind="hls"} 5`,
 		"waxflow_direct_play_total 4",
 		"waxflow_cache_hits_total 5",
 		"waxflow_cache_misses_total 6",

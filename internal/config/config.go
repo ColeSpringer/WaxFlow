@@ -44,6 +44,8 @@ const (
 	DefaultUploadMaxBytes  = 2 << 30
 	DefaultUploadTTL       = time.Hour
 	DefaultScratchMaxBytes = 8 << 30
+	DefaultLiveIdleGrace   = 5 * time.Second
+	DefaultHLSIdleGrace    = time.Minute
 )
 
 // DefaultLiveSlots is the live admission pool default: one slot per CPU,
@@ -179,6 +181,16 @@ type Config struct {
 	// (the pointer distinguishes the two).
 	PaceFactor *float64 `json:"paceFactor"`
 
+	// LiveIdleGrace stops a /stream encode once every client reading it has
+	// been gone this long, as a Go duration string. Empty means 5s; "0"
+	// lets it run on into the cache.
+	LiveIdleGrace string `json:"liveIdleGrace"`
+
+	// HLSIdleGrace stops an HLS variant's encode once nobody has fetched a
+	// segment of it for this long, as a Go duration string. Empty means 60s;
+	// "0" lets it run to the end of the stream.
+	HLSIdleGrace string `json:"hlsIdleGrace"`
+
 	// Demo serves the browser test page at GET /demo (dev mode only).
 	Demo bool `json:"demo"`
 }
@@ -223,6 +235,8 @@ var envVars = []struct {
 		c.PaceFactor = &f
 		return nil
 	}},
+	{"WAXFLOW_LIVE_IDLE_GRACE", func(c *Config, v string) error { c.LiveIdleGrace = v; return nil }},
+	{"WAXFLOW_HLS_IDLE_GRACE", func(c *Config, v string) error { c.HLSIdleGrace = v; return nil }},
 	{"WAXFLOW_DEMO", func(c *Config, v string) error { return parseBool(v, &c.Demo) }},
 }
 
@@ -310,6 +324,12 @@ func (c Config) Validate() error {
 	if _, err := c.ResolvedUploadTTL(); err != nil {
 		return err
 	}
+	if _, err := c.ResolvedLiveIdleGrace(); err != nil {
+		return err
+	}
+	if _, err := c.ResolvedHLSIdleGrace(); err != nil {
+		return err
+	}
 	if (c.TLSCert == "") != (c.TLSKey == "") {
 		return waxerr.New(waxerr.CodeInvalidRequest, "tlsCert and tlsKey must be set together")
 	}
@@ -364,15 +384,7 @@ func (c Config) ResolvedCacheMaxBytes() int64 {
 
 // ResolvedCacheMaxAge parses CacheMaxAge; empty means 0 (no age limit).
 func (c Config) ResolvedCacheMaxAge() (time.Duration, error) {
-	if c.CacheMaxAge == "" {
-		return 0, nil
-	}
-	d, err := time.ParseDuration(c.CacheMaxAge)
-	if err != nil || d < 0 {
-		return 0, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("cacheMaxAge %q: want a non-negative Go duration like 720h", c.CacheMaxAge))
-	}
-	return d, nil
+	return parseDuration("cacheMaxAge", c.CacheMaxAge, 0, "720h")
 }
 
 // ResolvedLiveSlots returns the live admission pool size, defaulted.
@@ -445,13 +457,32 @@ func (c Config) ResolvedScratchMaxBytes() int64 {
 // ResolvedUploadTTL parses UploadTTL; empty means the 1 hour default,
 // an explicit "0" disables expiry.
 func (c Config) ResolvedUploadTTL() (time.Duration, error) {
-	if c.UploadTTL == "" {
-		return DefaultUploadTTL, nil
+	return parseDuration("uploadTTL", c.UploadTTL, DefaultUploadTTL, "1h (0 never expires)")
+}
+
+// ResolvedLiveIdleGrace parses LiveIdleGrace; empty means the 5 s default,
+// an explicit "0" never stops an unread encode.
+func (c Config) ResolvedLiveIdleGrace() (time.Duration, error) {
+	return parseDuration("liveIdleGrace", c.LiveIdleGrace, DefaultLiveIdleGrace, "5s (0 never stops)")
+}
+
+// ResolvedHLSIdleGrace parses HLSIdleGrace; empty means the 60 s default,
+// an explicit "0" never stops an unfetched variant.
+func (c Config) ResolvedHLSIdleGrace() (time.Duration, error) {
+	return parseDuration("hlsIdleGrace", c.HLSIdleGrace, DefaultHLSIdleGrace, "60s (0 never stops)")
+}
+
+// parseDuration reads a duration setting: empty means def, and anything
+// unparsable or negative is refused with a hint such as "1h (0 never
+// expires)".
+func parseDuration(key, v string, def time.Duration, hint string) (time.Duration, error) {
+	if v == "" {
+		return def, nil
 	}
-	d, err := time.ParseDuration(c.UploadTTL)
+	d, err := time.ParseDuration(v)
 	if err != nil || d < 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("uploadTTL %q: want a non-negative Go duration like 1h (0 never expires)", c.UploadTTL))
+			fmt.Sprintf("%s %q: want a non-negative Go duration like %s", key, v, hint))
 	}
 	return d, nil
 }

@@ -18,9 +18,10 @@ type entryFile interface {
 	Sync() error
 }
 
-// ErrAbandoned stops a ring-fed pipeline whose readers have all gone: with
-// no file behind it there is nobody left to produce for.
-var ErrAbandoned = errors.New("cache: all readers gone from ring-fed entry")
+// ErrAbandoned stops a pipeline whose readers have all gone: a ring-fed one
+// once its ring fills, a file-backed one once they have been gone for the
+// store's AbandonAfter. Err reports it for an entry that abandoned.
+var ErrAbandoned = errors.New("cache: all readers gone from entry")
 
 // errClosedReader is returned from Read after Close, including the
 // cross-goroutine Close that unblocks a reader whose client went away.
@@ -70,7 +71,15 @@ type Entry struct {
 	everAttached bool
 	released     bool
 	completedAt  time.Time
+
+	abandoned bool       // nobody read it for the grace; the writer's next call fails it
+	idle      *idleTimer // armed while the entry is writing with no reader
+	onAbandon func()
 }
+
+// idleTimer is one arming of an entry's abandon timeout; a callback that finds
+// its entry armed with another has been superseded.
+type idleTimer struct{ stop func() bool }
 
 // NewMemEntry returns a ring-only entry for uncacheable outputs. ringCap
 // of 0 means DefaultRingBytes.
@@ -103,6 +112,73 @@ func (e *Entry) Meta() Meta {
 	return e.meta
 }
 
+// OnAbandon sets f to run once, under the entry's lock, when the entry
+// abandons for want of readers. It runs whatever the writer is doing, so it
+// is where a caller gives back what the run holds; f must not call into the
+// entry.
+func (e *Entry) OnAbandon(f func()) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.onAbandon = f
+}
+
+// abandon stops the entry for want of readers: no reader attaches from here
+// on, the registry forgets it, and onAbandon runs. It can land beside a Write
+// that has the lock dropped, so the writer's next call fails the entry and
+// releases its file. Locked.
+func (e *Entry) abandon() {
+	if e.abandoned {
+		return
+	}
+	e.abandoned = true
+	e.disarmIdle()
+	if e.store != nil {
+		e.store.unregister(e)
+	}
+	e.cond.Broadcast()
+	if e.onAbandon != nil {
+		e.onAbandon()
+	}
+}
+
+// armIdle starts the abandon timeout now that the last reader has left.
+// Locked.
+func (e *Entry) armIdle() {
+	e.disarmIdle()
+	if e.store == nil || e.store.abandonAfter <= 0 || e.state != stateWriting || e.abandoned {
+		return
+	}
+	it := &idleTimer{}
+	it.stop = e.store.afterFunc(e.store.abandonAfter, func() { e.idleFire(it) })
+	e.idle = it
+}
+
+// disarmIdle stops the abandon timeout. Locked.
+func (e *Entry) disarmIdle() {
+	if e.idle != nil {
+		e.idle.stop()
+		e.idle = nil
+	}
+}
+
+// idleFire abandons the entry if the timeout that fired is still the one
+// armed: a reader attaching and the entry ending both disarm it.
+func (e *Entry) idleFire(it *idleTimer) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.idle == it {
+		e.abandon()
+	}
+}
+
+// now reads the store's clock, or the wall clock for a ring-only entry.
+func (e *Entry) now() time.Time {
+	if e.store != nil {
+		return e.store.now()
+	}
+	return time.Now()
+}
+
 // Degraded reports whether the entry is (or became) ring-fed.
 func (e *Entry) Degraded() bool {
 	e.mu.Lock()
@@ -125,6 +201,10 @@ func (e *Entry) Write(p []byte) (int, error) {
 	defer e.mu.Unlock()
 	if e.state != stateWriting {
 		return 0, waxerr.New(waxerr.CodeInternal, "cache: write after terminal state")
+	}
+	if e.abandoned {
+		e.fail(ErrAbandoned)
+		return 0, ErrAbandoned
 	}
 	total := len(p)
 
@@ -150,7 +230,7 @@ func (e *Entry) Write(p []byte) (int, error) {
 		e.degraded = true
 		e.memBase = e.size
 		if e.store != nil {
-			e.store.noteDegraded(e.key, err)
+			e.store.noteDegraded(e, err)
 		}
 		p = p[n:]
 	}
@@ -160,6 +240,8 @@ func (e *Entry) Write(p []byte) (int, error) {
 		space := e.ringCap - len(e.mem)
 		if space == 0 {
 			if e.everAttached && len(e.readers) == 0 {
+				e.abandon()
+				e.fail(ErrAbandoned)
 				return total - len(p), ErrAbandoned
 			}
 			e.cond.Wait()
@@ -206,6 +288,11 @@ func (e *Entry) Complete(samples int64) error {
 	if e.state != stateWriting {
 		return waxerr.New(waxerr.CodeInternal, "cache: Complete after terminal state")
 	}
+	if e.abandoned {
+		e.fail(ErrAbandoned)
+		return ErrAbandoned
+	}
+	e.disarmIdle()
 	e.meta.Bytes = e.size
 	e.meta.Samples = samples
 
@@ -224,7 +311,7 @@ func (e *Entry) Complete(samples int64) error {
 			// every byte through the open fd, so playback finishes; the
 			// entry is dropped like a degraded one afterward.
 			e.degraded = true
-			e.store.noteDegraded(e.key, err)
+			e.store.noteDegraded(e, err)
 		} else {
 			e.meta = meta
 			e.promoted = true
@@ -232,11 +319,9 @@ func (e *Entry) Complete(samples int64) error {
 	}
 	e.state = stateComplete
 	if e.store != nil {
-		e.store.unregister(e.key)
-		e.completedAt = e.store.now()
-	} else {
-		e.completedAt = time.Now()
+		e.store.unregister(e)
 	}
+	e.completedAt = e.now()
 	e.cond.Broadcast()
 	e.maybeRelease()
 	return nil
@@ -249,6 +334,9 @@ func (e *Entry) Complete(samples int64) error {
 func (e *Entry) Err() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.abandoned {
+		return ErrAbandoned
+	}
 	if e.state == stateFailed {
 		return e.err
 	}
@@ -260,13 +348,19 @@ func (e *Entry) Err() error {
 func (e *Entry) Fail(err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.fail(err)
+}
+
+// fail is Fail with the lock held.
+func (e *Entry) fail(err error) {
 	if e.state != stateWriting {
 		return
 	}
 	e.state = stateFailed
 	e.err = err
+	e.disarmIdle()
 	if e.store != nil {
-		e.store.unregister(e.key)
+		e.store.unregister(e)
 	}
 	e.cond.Broadcast()
 	e.maybeRelease()
@@ -282,6 +376,9 @@ func (e *Entry) NewReader() (*Reader, error) {
 	if e.released {
 		return nil, waxerr.New(waxerr.CodeInternal, "cache: entry already released")
 	}
+	if e.abandoned {
+		return nil, waxerr.New(waxerr.CodeInternal, "cache: entry abandoned")
+	}
 	// Once a degraded ring has dropped consumed bytes, offset zero is
 	// gone; a late attacher (raced against the degradation) must start
 	// its own session instead.
@@ -291,6 +388,7 @@ func (e *Entry) NewReader() (*Reader, error) {
 	r := &Reader{e: e}
 	e.readers[r] = struct{}{}
 	e.everAttached = true
+	e.disarmIdle()
 	return r, nil
 }
 
@@ -396,6 +494,9 @@ func (r *Reader) Close() error {
 	}
 	r.closed = true
 	delete(e.readers, r)
+	if len(e.readers) == 0 {
+		e.armIdle()
+	}
 	e.cond.Broadcast()
 	e.maybeRelease()
 	return nil

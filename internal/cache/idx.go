@@ -11,7 +11,7 @@ import (
 	"github.com/colespringer/waxflow/internal/posixfs"
 )
 
-// IdxStore is the source-index sidecar cache (plan section 10): probe
+// IdxStore is the source-index sidecar cache: probe
 // byproducts too expensive to rebuild per session, today the MP3 lazy
 // frame index, persist under cacheDir/idx keyed by source identity.
 // Everything is best effort: a lost or rejected blob only costs a

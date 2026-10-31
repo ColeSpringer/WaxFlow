@@ -2,6 +2,7 @@ package hls
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -34,10 +35,15 @@ type Ops struct {
 	// end of stream or cancellation. The worker calls notify(n) as each
 	// segment becomes servable and exit(err) exactly once when it stops
 	// (nil after a clean end of stream). Spawn returns the worker's
-	// cancel plus nil, or an error without starting (admission full).
-	// It must not call notify or exit synchronously.
-	Spawn func(start int64, notify func(int64), exit func(error)) (context.CancelFunc, error)
+	// cancel plus nil, or an error without starting (admission full);
+	// the manager cancels with the cause ErrIdle on an idle timeout and
+	// nil on a restart. It must not call notify or exit synchronously.
+	Spawn func(start int64, notify func(int64), exit func(error)) (context.CancelCauseFunc, error)
 }
+
+// ErrIdle is the cause a worker's context carries when the idle timeout
+// canceled it: nobody had fetched from its variant for Manager.IdleTimeout.
+var ErrIdle = errors.New("hls: nobody fetched from the variant")
 
 // Manager serializes variant workers: at most one per variant key, with
 // waiters parked on segment arrival. State is only bookkeeping; the
@@ -48,6 +54,14 @@ type Manager struct {
 	Lookahead int64
 	// WaitTimeout overrides defaultWaitTimeout when positive.
 	WaitTimeout time.Duration
+	// IdleTimeout cancels a worker once nobody has fetched from its variant
+	// for this long, cache hits included (see Touch); 0 lets every worker
+	// run to the end of its stream.
+	IdleTimeout time.Duration
+
+	// afterFunc is the idle timer seam: it runs f after d and returns the
+	// timer's Stop. Nil means time.AfterFunc.
+	afterFunc func(d time.Duration, f func()) (stop func() bool)
 
 	mu       sync.Mutex
 	variants map[string]*variant
@@ -58,13 +72,18 @@ type variant struct {
 	cur     *worker // nil when no worker is running
 	lastErr error   // the most recent worker's terminal error, nil after a clean end
 	notify  chan struct{}
+	idle    *idleTimer // armed while cur runs with nobody waiting on it
 }
+
+// idleTimer is one arming of a variant's idle timeout; a callback that finds
+// its variant armed with another has been superseded.
+type idleTimer struct{ stop func() bool }
 
 type worker struct {
 	start    int64 // the segment the worker began at
 	next     int64 // the segment the worker is producing now
 	produced bool  // it has landed at least one segment since starting
-	cancel   context.CancelFunc
+	cancel   context.CancelCauseFunc
 	exited   chan struct{}
 }
 
@@ -141,7 +160,7 @@ func (m *Manager) Segment(ctx context.Context, key string, n int64, ops Ops) err
 			if ops.Has(n) {
 				return nil
 			}
-			w.cancel()
+			w.cancel(nil)
 			if err := waitSignal(ctx, w.exited); err != nil {
 				return err
 			}
@@ -227,6 +246,7 @@ func (m *Manager) exitFunc(key string, v *variant, wk *worker) func(error) {
 		if v.cur == wk {
 			v.cur = nil
 			v.lastErr = err
+			m.disarmIdle(v)
 		}
 		close(wk.exited)
 		m.wake(v)
@@ -253,6 +273,7 @@ func (m *Manager) acquire(key string) *variant {
 		m.variants[key] = v
 	}
 	v.waiters++
+	m.disarmIdle(v)
 	return v
 }
 
@@ -260,7 +281,61 @@ func (m *Manager) release(key string, v *variant) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	v.waiters--
+	m.armIdle(v)
 	m.maybeDrop(key, v)
+}
+
+// Touch restarts the idle timeout of key's worker, if one is armed: a fetch
+// served straight from the cache never reaches Segment, and its listener is
+// still there.
+func (m *Manager) Touch(key string) {
+	if m.IdleTimeout <= 0 {
+		return // nothing is ever armed
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if v := m.variants[key]; v != nil && v.idle != nil {
+		m.armIdle(v)
+	}
+}
+
+// armIdle (re)starts v's idle timeout when its worker runs with nobody
+// waiting on it. Locked.
+func (m *Manager) armIdle(v *variant) {
+	m.disarmIdle(v)
+	if m.IdleTimeout <= 0 || v.waiters != 0 || v.cur == nil {
+		return
+	}
+	after := m.afterFunc
+	if after == nil {
+		after = func(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop }
+	}
+	wk, it := v.cur, &idleTimer{}
+	it.stop = after(m.IdleTimeout, func() { m.idleCancel(wk, v, it) })
+	v.idle = it
+}
+
+// disarmIdle stops v's idle timeout. Locked.
+func (m *Manager) disarmIdle(v *variant) {
+	if v.idle != nil {
+		v.idle.stop()
+		v.idle = nil
+	}
+}
+
+// idleCancel cancels wk when the timeout that fired is still the one armed:
+// a waiter's arrival and the worker's exit both disarm, so then nobody waits
+// and wk still runs. The cancel happens under the lock, so no waiter arrives
+// between the check and the cancel; Spawn's contract keeps the exit off this
+// goroutine.
+func (m *Manager) idleCancel(wk *worker, v *variant, it *idleTimer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if v.idle != it {
+		return
+	}
+	v.idle = nil
+	wk.cancel(ErrIdle)
 }
 
 // maybeDrop removes an idle variant's bookkeeping: no waiters, no worker.

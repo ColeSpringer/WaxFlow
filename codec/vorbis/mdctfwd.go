@@ -19,7 +19,7 @@ import (
 // two rotations by exp(-2*pi*i*(j + 1/8)/N).
 //
 // The decoder computes its inverse with a private float64 FFT; the encoder uses
-// dsp/fft here on purpose (the plan's "second FFT path"): its fixed float32
+// dsp/fft here on purpose: its fixed float32
 // op order with no FMA makes the forward transform a pure function of its
 // input, which the deterministic-mode/golden gate needs. The rotations and the
 // fold below are plain float32 multiplies and adds for the same reason.

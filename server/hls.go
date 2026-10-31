@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -873,7 +874,7 @@ func (s *Server) initSegmentFor(req *hlsRequest) ([]byte, error) {
 
 // handleHLSSegment serves one media segment: cache hit, wait on the
 // running worker when it is close, else restart a worker at the segment
-// (decoder pre-rolled sample-exact, encoder primed; §8 of the plan).
+// (decoder pre-rolled sample-exact, encoder primed).
 func (s *Server) handleHLSSegment(w http.ResponseWriter, r *http.Request) {
 	reqStart := time.Now()
 	s.applyCORS(w, r)
@@ -908,6 +909,9 @@ func (s *Server) handleHLSSegment(w http.ResponseWriter, r *http.Request) {
 	for attempt := 0; attempt < 2; attempt++ {
 		if c, ok := variant.Open(name); ok {
 			defer c.File.Close()
+			// A hit never reaches the manager, so it says the listener is
+			// still there.
+			s.hlsMgr.Touch(string(req.key))
 			s.met.HLSSegments.Add(1)
 			s.met.TTFB.Observe(time.Since(reqStart).Seconds())
 			http.ServeContent(w, r, "", c.ModTime, c.File)
@@ -934,12 +938,12 @@ func segmentName(n int64) string { return fmt.Sprintf("seg-%d.m4s", n) }
 // hold live slots), pinning (gc must not evict a variant mid-fill), and
 // the worker goroutine bounded by the server's base context (workers
 // outlive their requests, like read-behind pipelines).
-func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64, func(int64), func(error)) (context.CancelFunc, error) {
+func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64, func(int64), func(error)) (context.CancelCauseFunc, error) {
 	// The worker outlives the request; capture values, never req.srcs.
 	members, tl := req.members, req.desc.Tl != ""
 	opts, copts, plan, key, rmx, cut := req.opts, req.copts, req.plan, req.key, req.remux, req.cut
 	sp := descSpan(req.desc)
-	return func(start int64, notify func(int64), exit func(error)) (context.CancelFunc, error) {
+	return func(start int64, notify func(int64), exit func(error)) (context.CancelCauseFunc, error) {
 		release, ok := s.pools.AcquireLive()
 		if !ok {
 			s.met.AdmissionRejects.Add(1)
@@ -949,7 +953,15 @@ func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64,
 			release()
 			return nil, waxerr.New(waxerr.CodeOverloaded, "the daemon is shutting down")
 		}
-		ctx, cancel := context.WithCancel(s.baseCtx)
+		ctx, cancel := context.WithCancelCause(s.baseCtx)
+		// An idle cancel gives the slot back at once, stalled worker or not; a
+		// restart keeps it for the seek waiting on this worker's exit.
+		stop := func(cause error) {
+			if errors.Is(cause, hls.ErrIdle) {
+				release()
+			}
+			cancel(cause)
+		}
 		s.store.Pin(key)
 		s.met.SessionsHLS.Add(1)
 		s.met.SessionsActive.Add(1)
@@ -961,13 +973,16 @@ func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64,
 			// progress as proof its segments are on disk.
 			defer s.store.Unpin(key)
 			err := s.runHLSWorker(ctx, members, tl, sp, copts, opts, plan, rmx, cut, variant, start, notify)
+			if err != nil && errors.Is(context.Cause(ctx), hls.ErrIdle) {
+				s.met.AbandonedHLS.Add(1)
+			}
 			// The slot goes before exit wakes the waiters, one of which may
 			// spawn the next worker into it at once.
-			cancel()
+			cancel(nil)
 			release()
 			exit(err)
 		}()
-		return cancel, nil
+		return stop, nil
 	}
 }
 

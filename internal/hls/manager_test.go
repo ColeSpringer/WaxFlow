@@ -2,6 +2,7 @@ package hls
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -22,6 +23,8 @@ type harness struct {
 	// from its start through autoTotal-1 (yielding between segments),
 	// then a clean finish. Zero leaves workers hand-driven.
 	autoTotal int64
+	// manualExit leaves a canceled worker running until the test finishes it.
+	manualExit bool
 }
 
 type fakeWorker struct {
@@ -42,20 +45,23 @@ func (h *harness) ops() Ops {
 			defer h.mu.Unlock()
 			return h.have[n]
 		},
-		Spawn: func(start int64, notify func(int64), exit func(error)) (context.CancelFunc, error) {
+		Spawn: func(start int64, notify func(int64), exit func(error)) (context.CancelCauseFunc, error) {
 			if h.spawnErr != nil {
 				return nil, h.spawnErr
 			}
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancelCause(context.Background())
 			w := &fakeWorker{h: h, start: start, ctx: ctx, notify: notify, exit: exit}
 			h.mu.Lock()
 			h.spawns = append(h.spawns, w)
+			manual := h.manualExit
 			h.mu.Unlock()
 			// Cancellation behaves like the real pipeline: the worker
 			// notices and exits with a canceled error.
 			go func() {
 				<-ctx.Done()
-				w.finish(waxerr.Wrap(waxerr.CodeCanceled, "worker canceled", ctx.Err()))
+				if !manual {
+					w.finish(waxerr.Wrap(waxerr.CodeCanceled, "worker canceled", ctx.Err()))
+				}
 			}()
 			if h.autoTotal > 0 {
 				go func() {
@@ -87,7 +93,7 @@ func (w *fakeWorker) produce(n int64) {
 
 func (w *fakeWorker) finish(err error) { w.once.Do(func() { w.exit(err) }) }
 
-func (h *harness) worker(t *testing.T, i int) *fakeWorker {
+func (h *harness) worker(t testing.TB, i int) *fakeWorker {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -199,6 +205,9 @@ func TestManagerRestartsOutOfWindow(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("old worker never canceled")
 	}
+	if errors.Is(context.Cause(w0.ctx), ErrIdle) {
+		t.Error("a restart canceled the old worker as idle")
+	}
 	w1.produce(50)
 	if err := mustReturn(t, ch); err != nil {
 		t.Fatal(err)
@@ -269,7 +278,8 @@ func TestManagerSpawnErrorPropagates(t *testing.T) {
 
 func TestManagerClientCancel(t *testing.T) {
 	h := newHarness()
-	m := &Manager{}
+	ft := &fakeTimers{}
+	m := &Manager{afterFunc: ft.afterFunc}
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan error, 1)
 	go func() { ch <- m.Segment(ctx, "k", 0, h.ops()) }()
@@ -279,13 +289,301 @@ func TestManagerClientCancel(t *testing.T) {
 	if waxerr.CodeOf(err) != waxerr.CodeCanceled {
 		t.Fatalf("err %v, want canceled", err)
 	}
-	// The worker keeps encoding for the cache; only the waiter left.
+	// With no idle timeout the worker keeps encoding for the cache; only the
+	// waiter left, and nothing will stop the worker for it.
 	select {
 	case <-w.ctx.Done():
 		t.Fatal("client cancellation killed the worker")
 	default:
 	}
+	if n := len(ft.armed()); n != 0 {
+		t.Errorf("%d idle timers armed with no idle timeout", n)
+	}
 	w.finish(nil)
+}
+
+// fakeTimers is the manager's idle timer seam under the test's hand: a timer
+// fires only when the test runs its func.
+type fakeTimers struct {
+	mu     sync.Mutex
+	timers []*fakeTimer
+}
+
+type fakeTimer struct {
+	ft      *fakeTimers
+	d       time.Duration
+	f       func()
+	stopped bool
+	fired   bool
+}
+
+func (ft *fakeTimers) afterFunc(d time.Duration, f func()) func() bool {
+	tm := &fakeTimer{ft: ft, d: d, f: f}
+	ft.mu.Lock()
+	ft.timers = append(ft.timers, tm)
+	ft.mu.Unlock()
+	return func() bool {
+		ft.mu.Lock()
+		defer ft.mu.Unlock()
+		was := !tm.stopped && !tm.fired
+		tm.stopped = true
+		return was
+	}
+}
+
+// armed returns the timers neither stopped nor fired.
+func (ft *fakeTimers) armed() []*fakeTimer {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	var out []*fakeTimer
+	for _, tm := range ft.timers {
+		if !tm.stopped && !tm.fired {
+			out = append(out, tm)
+		}
+	}
+	return out
+}
+
+// only returns the one armed timer.
+func (ft *fakeTimers) only(t *testing.T) *fakeTimer {
+	t.Helper()
+	armed := ft.armed()
+	if len(armed) != 1 {
+		t.Fatalf("%d idle timers armed, want 1", len(armed))
+	}
+	return armed[0]
+}
+
+func (tm *fakeTimer) isStopped() bool {
+	tm.ft.mu.Lock()
+	defer tm.ft.mu.Unlock()
+	return tm.stopped
+}
+
+// fire runs the timer's func as its expiry would, whether or not it was
+// stopped: a real timer can expire just as it is stopped.
+func (tm *fakeTimer) fire() {
+	tm.ft.mu.Lock()
+	tm.fired = true
+	tm.ft.mu.Unlock()
+	tm.f()
+}
+
+// idleManager is a Manager with a one-minute idle timeout on fake timers.
+func idleManager() (*Manager, *fakeTimers) {
+	ft := &fakeTimers{}
+	return &Manager{IdleTimeout: time.Minute, afterFunc: ft.afterFunc}, ft
+}
+
+// served fetches segment n, which the harness worker w produces, and fails
+// unless it is served.
+func served(t *testing.T, m *Manager, h *harness, n int64, produce func()) {
+	t.Helper()
+	ch := segmentAsync(m, "k", n, h.ops())
+	produce()
+	if err := mustReturn(t, ch); err != nil {
+		t.Fatalf("segment %d: %v", n, err)
+	}
+}
+
+func waitVariants(t *testing.T, m *Manager, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for m.Variants() != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d variants tracked, want %d", m.Variants(), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func mustBeCanceled(t *testing.T, w *fakeWorker) {
+	t.Helper()
+	select {
+	case <-w.ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("the worker was not canceled")
+	}
+}
+
+func mustBeRunning(t *testing.T, w *fakeWorker) {
+	t.Helper()
+	select {
+	case <-w.ctx.Done():
+		t.Fatalf("the worker was canceled (%v)", context.Cause(w.ctx))
+	default:
+	}
+}
+
+// TestManagerIdleCancel: a worker nobody has fetched from for the idle timeout
+// is canceled, with ErrIdle as the cause, and the variant's bookkeeping goes
+// with its exit.
+func TestManagerIdleCancel(t *testing.T) {
+	h := newHarness()
+	m, ft := idleManager()
+	var w *fakeWorker
+	served(t, m, h, 0, func() { w = h.worker(t, 0); w.produce(0) })
+	tm := ft.only(t)
+	if tm.d != time.Minute {
+		t.Fatalf("idle timer armed for %v, want the idle timeout", tm.d)
+	}
+	tm.fire()
+	mustBeCanceled(t, w)
+	if cause := context.Cause(w.ctx); !errors.Is(cause, ErrIdle) {
+		t.Errorf("cause %v, want ErrIdle", cause)
+	}
+	waitVariants(t, m, 0)
+}
+
+// TestManagerIdleDisarmedByWaiter: a fetch waiting on the worker disarms the
+// timeout, which then cancels nothing even if it fires; the wait's end arms a
+// fresh one.
+func TestManagerIdleDisarmedByWaiter(t *testing.T) {
+	h := newHarness()
+	m, ft := idleManager()
+	var w *fakeWorker
+	served(t, m, h, 0, func() { w = h.worker(t, 0); w.produce(0) })
+	tm := ft.only(t)
+
+	ch := segmentAsync(m, "k", 1, h.ops())
+	deadline := time.Now().Add(2 * time.Second)
+	for !tm.isStopped() {
+		if time.Now().After(deadline) {
+			t.Fatal("a waiter did not disarm the idle timeout")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	tm.fire()
+	mustBeRunning(t, w)
+	w.produce(1)
+	if err := mustReturn(t, ch); err != nil {
+		t.Fatal(err)
+	}
+	if again := ft.only(t); again == tm {
+		t.Error("the wait's end did not arm a fresh timeout")
+	}
+	w.finish(nil)
+}
+
+// TestManagerTouchResetsIdle: a fetch served from the cache restarts the
+// timeout from the touch, so a listener whose every fetch is a hit keeps the
+// worker; the timer the touch replaced does nothing should it fire anyway. A
+// touch with nothing armed, before the worker or after its cancel, arms
+// nothing.
+func TestManagerTouchResetsIdle(t *testing.T) {
+	h := newHarness()
+	h.manualExit = true
+	m, ft := idleManager()
+	m.Touch("k")
+	if n := len(ft.armed()); n != 0 || m.Variants() != 0 {
+		t.Fatalf("a touch of an unknown variant armed %d timers, tracks %d variants", n, m.Variants())
+	}
+	var w *fakeWorker
+	served(t, m, h, 0, func() { w = h.worker(t, 0); w.produce(0) })
+	first := ft.only(t)
+
+	m.Touch("k")
+	if !first.isStopped() {
+		t.Error("the touch left the release's timer armed")
+	}
+	second := ft.only(t)
+	if second == first || second.d != time.Minute {
+		t.Fatalf("the touch armed %v for %v, want a fresh timer for the idle timeout", second, second.d)
+	}
+	first.fire()
+	mustBeRunning(t, w)
+	second.fire()
+	mustBeCanceled(t, w)
+	m.Touch("k")
+	if n := len(ft.armed()); n != 0 {
+		t.Errorf("a touch after the cancel armed %d timers for the dying worker", n)
+	}
+	w.finish(waxerr.Wrap(waxerr.CodeCanceled, "worker canceled", context.Cause(w.ctx)))
+}
+
+// TestManagerIdleWaitsForTheLastWaiter: the timeout arms only once nobody waits
+// on the worker, not when the first of several waiters is served.
+func TestManagerIdleWaitsForTheLastWaiter(t *testing.T) {
+	h := newHarness()
+	m, ft := idleManager()
+	var w *fakeWorker
+	served(t, m, h, 0, func() { w = h.worker(t, 0); w.produce(0) })
+	ch1 := segmentAsync(m, "k", 1, h.ops())
+	ch2 := segmentAsync(m, "k", 2, h.ops())
+	mustBlock(t, ch1)
+	mustBlock(t, ch2)
+	w.produce(1)
+	if err := mustReturn(t, ch1); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(ft.armed()); n != 0 {
+		t.Fatalf("%d idle timers armed with a fetch still waiting", n)
+	}
+	w.produce(2)
+	if err := mustReturn(t, ch2); err != nil {
+		t.Fatal(err)
+	}
+	ft.only(t)
+	w.finish(nil)
+}
+
+// TestManagerExitStopsIdle: a worker that ends on its own leaves no timeout
+// armed.
+func TestManagerExitStopsIdle(t *testing.T) {
+	h := newHarness()
+	m, ft := idleManager()
+	var w *fakeWorker
+	served(t, m, h, 0, func() { w = h.worker(t, 0); w.produce(0) })
+	tm := ft.only(t)
+	w.finish(nil)
+	waitVariants(t, m, 0)
+	if !tm.isStopped() {
+		t.Error("the worker's exit left its idle timeout armed")
+	}
+	if err := m.Segment(context.Background(), "k", 0, h.ops()); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(ft.armed()); n != 0 {
+		t.Errorf("a fetch served with no worker running armed %d timers", n)
+	}
+}
+
+// TestManagerIdleCancelLeavesNoError: the cancel an idle timeout causes is no
+// one's answer. The next fetch spawns afresh and is served, whether it comes
+// after the canceled worker exited or while it is still on its way out.
+func TestManagerIdleCancelLeavesNoError(t *testing.T) {
+	for _, exited := range []bool{true, false} {
+		name := "after the exit"
+		if !exited {
+			name = "before the exit"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newHarness()
+			h.manualExit = !exited
+			m, ft := idleManager()
+			var w0 *fakeWorker
+			served(t, m, h, 0, func() { w0 = h.worker(t, 0); w0.produce(0) })
+			ft.only(t).fire()
+			mustBeCanceled(t, w0)
+			if exited {
+				waitVariants(t, m, 0)
+			}
+			ch := segmentAsync(m, "k", 1, h.ops())
+			if !exited {
+				mustBlock(t, ch)
+				w0.finish(waxerr.Wrap(waxerr.CodeCanceled, "worker canceled", context.Cause(w0.ctx)))
+			}
+			w1 := h.worker(t, 1)
+			if w1.start != 1 {
+				t.Fatalf("the next worker started at %d, want 1", w1.start)
+			}
+			w1.produce(1)
+			if err := mustReturn(t, ch); err != nil {
+				t.Fatalf("the fetch after an idle cancel = %v, want served", err)
+			}
+			w1.finish(nil)
+		})
+	}
 }
 
 func TestManagerWaitTimeout(t *testing.T) {
@@ -394,12 +692,19 @@ func TestManagerRecheckBeforeSpawn(t *testing.T) {
 // TestManagerConcurrent hammers one variant from many goroutines under
 // the race detector: every waiter must end in a hit or a retryable
 // cancellation (a racing seek restarting the worker under it), and the
-// bookkeeping must drain once everyone leaves.
+// bookkeeping must drain once everyone leaves. A millisecond idle timeout on
+// real timers races its cancels against all of it.
 func TestManagerConcurrent(t *testing.T) {
+	for _, idle := range []time.Duration{0, time.Millisecond} {
+		t.Run(fmt.Sprintf("idle %v", idle), func(t *testing.T) { testManagerConcurrent(t, idle) })
+	}
+}
+
+func testManagerConcurrent(t *testing.T, idle time.Duration) {
 	const total = 40
 	h := newHarness()
 	h.autoTotal = total
-	m := &Manager{WaitTimeout: 5 * time.Second}
+	m := &Manager{WaitTimeout: 5 * time.Second, IdleTimeout: idle}
 
 	var wg sync.WaitGroup
 	errs := make(chan error, 64)
@@ -433,4 +738,23 @@ func TestManagerConcurrent(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+// BenchmarkTouchArmed is the hit path's cost with a worker running and its
+// idle timeout armed: one lock, a timer stopped and another armed.
+func BenchmarkTouchArmed(b *testing.B) {
+	h := newHarness()
+	m := &Manager{IdleTimeout: time.Minute}
+	ch := segmentAsync(m, "k", 0, h.ops())
+	w := h.worker(b, 0)
+	w.produce(0)
+	if err := <-ch; err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		m.Touch("k")
+	}
+	b.StopTimer()
+	w.finish(nil)
 }

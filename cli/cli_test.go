@@ -258,6 +258,45 @@ func TestBuildServerConfigPIDSources(t *testing.T) {
 	}
 }
 
+// TestBuildServerConfigIdleGraces: the daemon stops unread live work after the
+// configured graces, 5 s and 60 s by default, and "0" keeps it running.
+func TestBuildServerConfigIdleGraces(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		env               map[string]string
+		wantLive, wantHLS time.Duration
+	}{
+		{"defaults", nil, 5 * time.Second, time.Minute},
+		{"configured", map[string]string{"WAXFLOW_LIVE_IDLE_GRACE": "0", "WAXFLOW_HLS_IDLE_GRACE": "2m"}, 0, 2 * time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("WAXFLOW_DATA_DIR", filepath.Join(dir, "data"))
+			t.Setenv("WAXFLOW_CACHE_DIR", filepath.Join(dir, "cache"))
+			t.Setenv("WAXFLOW_SCRATCH_DIR", filepath.Join(dir, "scratch"))
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg, err := config.Load("", os.LookupEnv)
+			if err != nil {
+				t.Fatal(err)
+			}
+			logger, err := newLogger(&strings.Builder{}, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			srvCfg, cleanup, err := buildServerConfig(context.Background(), cfg, "", "test", logger, Flavor{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cleanup()
+			if srvCfg.LiveIdleGrace != tc.wantLive || srvCfg.HLSIdleGrace != tc.wantHLS {
+				t.Errorf("graces = %v live, %v hls; want %v, %v", srvCfg.LiveIdleGrace, srvCfg.HLSIdleGrace, tc.wantLive, tc.wantHLS)
+			}
+		})
+	}
+}
+
 func TestExitCodesCommand(t *testing.T) {
 	code, out, _ := run(t, "exit-codes")
 	if code != 0 {

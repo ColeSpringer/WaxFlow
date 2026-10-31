@@ -4,6 +4,8 @@
 // with append/complete notification: slow clients can never backpressure
 // the encoder, a second request for the same key attaches to the same
 // growing file, and completed entries serve with full HTTP range support.
+// An entry whose readers have all been gone for Options.AbandonAfter stops
+// its writer (ErrAbandoned) and caches nothing.
 //
 // A cache-volume write failure (disk full) downgrades the entry to a
 // bounded in-memory ring feeding only the attached readers; it never

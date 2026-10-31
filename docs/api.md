@@ -552,6 +552,14 @@ nonzero offset gets `416` plus an envelope hinting at `t=`. Delivery
 bursts `paceBurstSeconds` of audio then caps at `paceFactor` x realtime.
 A write stalled for 60 s kills the session.
 
+The encode behind a live response is shared: a second request for the same
+output reads it from its start, and a client leaving does not stop it. Once
+every client reading it has been gone for `liveIdleGrace` (5 s by default)
+it stops and caches nothing, freeing its live slot then even if it is stalled
+on its source, and a request after that starts the encode again. An encode that finishes inside the grace caches as
+before, and `0` lets every encode run on into the cache.
+`waxflow_sessions_abandoned_total{kind="live"}` counts the ones stopped.
+
 **Cached responses**: the pipeline writes through the transcode cache;
 once the entry completes the same URL serves it with real
 `Content-Length`, full ranges, and the cache key as strong `ETag`.
@@ -603,7 +611,7 @@ session.
 | `GET /hls/master.m3u8?v=...` | master playlist: one rung per ladder bitrate with `BANDWIDTH` and `CODECS` (`Opus`, `fLaC`, `alac`, `mp4a.40.2`; `format=he-aac` encodes and advertises `mp4a.40.5`, or `mp4a.40.29` under `hev2`, and an HE-AAC remux advertises its own signalling, `mp4a.40.5` or `mp4a.40.29`). With an API key, raw parameters (`src`, `format`, `bitrate` or `bitrates`, `hev2`, `bits`, `rate`, `ch`, `gain`, `dynamics`, `segDur`, and `crossfadeSeconds` for a `tl` timeline) also work; the daemon builds the descriptor. |
 | `GET /hls/media.m3u8?v=...` | variant VOD playlist: `EXT-X-VERSION:7`, `EXT-X-MAP`, `EXT-X-INDEPENDENT-SEGMENTS`, every segment listed with its exact duration, `EXT-X-ENDLIST`. Unknown source lengths are measured (frame-index walk), never estimated. |
 | `GET /hls/init.mp4?v=...` | the CMAF init header (codec config; the edit list carries encoder delay and the exact length) |
-| `GET /hls/seg/{n}.m4s?v=...` | media segment n (0-based). Cached segments serve with ranges and strong ETags; misses wait on the variant worker (within a 3-segment lookahead) or restart it at n. |
+| `GET /hls/seg/{n}.m4s?v=...` | media segment n (0-based). Cached segments serve with ranges and strong ETags; misses wait on the variant worker (within a 3-segment lookahead) or restart it at n. A worker nobody has fetched a segment from, cached or not, for `hlsIdleGrace` (60 s by default; `0` never) stops, and the next miss restarts it there. |
 
 Segments are `styp` + `moof`+`mdat` fragments, boundaries snapped to
 whole encoder frames (`segDur` is a target; the playlist carries exact
@@ -1305,6 +1313,8 @@ the `503` a playback URL gets names the root alone. The route exists when
 
 Prometheus text: `waxflow_build_info`, `waxflow_sessions_active`,
 `waxflow_sessions_total{kind}` (live, sync, hls),
+`waxflow_sessions_abandoned_total{kind}` (live, hls: stopped because nobody
+was left to read them),
 `waxflow_direct_play_total`, `waxflow_remux_total`, `waxflow_cut_total`,
 `waxflow_hls_segments_total`,
 `waxflow_cache_{hits,misses}_total`, `waxflow_cache_{bytes,entries}`,

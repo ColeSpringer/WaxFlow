@@ -201,6 +201,7 @@ Precedence: **flag > `WAXFLOW_*` env > JSON config file > default**
 | `tlsCert` / `tlsKey` | `WAXFLOW_TLS_*` | none | native TLS; else put a terminating proxy in front (ADR-0007) |
 | `debugAddr` | `WAXFLOW_DEBUG_ADDR` | off | loopback-only pprof listener |
 | `paceBurstSeconds` / `paceFactor` | `WAXFLOW_PACE_*` | 30 / 2.0 | read-behind delivery pacing (factor 0 disables) |
+| `liveIdleGrace` / `hlsIdleGrace` | `WAXFLOW_LIVE_IDLE_GRACE` / `WAXFLOW_HLS_IDLE_GRACE` | `5s` / `60s` | stop a `/stream` encode once every client reading it has been gone this long / an HLS variant worker once nobody has fetched from it this long (Go durations, `0` never); see ADR-0012 |
 | `demo` | `WAXFLOW_DEMO` | `false` | serve the browser test page at `/demo` (dev only) |
 
 **Runtime root reload.** A daemon configured through the JSON `roots` (not

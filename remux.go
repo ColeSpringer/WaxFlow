@@ -522,10 +522,9 @@ type RemuxSegmentPlan struct {
 // grid is the source's packet duration from PacketGrid. A zero grid declines,
 // as does anything PlanRemux declines, and both return (nil, nil).
 //
-// The alignment rule is to snap, not to refuse, and that is a correction to
-// this milestone's plan worth stating where the code is. The plan feared that a
-// 60 ms-frame Opus source has no whole-packet boundary in a 4 s segment
-// (192000/2880 = 66.67) and concluded such a request must fall to rung 3. But
+// The alignment rule is to snap, not to refuse. A 60 ms-frame Opus source
+// looks as if it has no whole-packet boundary in a 4 s segment
+// (192000/2880 = 66.67), which would send such a request to rung 3. But
 // segment length is not fixed at the request's ask: PlanSegments already snaps
 // it to a whole number of encoder frames, which is exactly why a transcode's
 // grid "is ours by construction". Handing it the packet duration as the frame

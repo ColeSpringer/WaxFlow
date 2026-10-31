@@ -42,12 +42,11 @@ func TestPacketGridReadsTheSourcesOwnGrid(t *testing.T) {
 	}
 }
 
-// TestRemuxSegmentsSnapToThePacketGrid is this milestone's alignment gate, and
-// it pins a correction to the plan rather than the rule the plan named.
+// TestRemuxSegmentsSnapToThePacketGrid is the segmented remux's alignment gate.
 //
-// The plan feared that a 60 ms-frame Opus source has no whole-packet boundary
-// in a 4 s segment (192000/2880 = 66.67) and concluded such a request must fall
-// to rung 3. But the segment length was never fixed at the request's ask:
+// A 60 ms-frame Opus source looks as if it has no whole-packet boundary in a
+// 4 s segment (192000/2880 = 66.67), which would send such a request to rung 3.
+// But the segment length was never fixed at the request's ask:
 // PlanSegments already snaps it to whole frames, which is precisely why a
 // transcode's grid "is ours by construction". Feeding it the source's packet
 // duration makes the same snap produce 67 packets of 2880, aligned, with no new

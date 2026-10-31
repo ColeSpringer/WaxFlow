@@ -2,11 +2,11 @@
 // and loudness analyses that outlive any request, with restart-safe
 // file-backed state under dataDir/jobs.
 //
-// Restart safety is deliberately simple (the plan's "no mid-encode state
-// resume"): a completed job's results survive restarts; an incomplete
-// job restarts cleanly from zero on boot, idempotent because its outputs
-// live inside its own directory and are recreated whole. HLS segments
-// remain the incremental path for resumable delivery.
+// Restart safety is deliberately simple (no mid-encode state resume): a
+// completed job's results survive restarts; an incomplete job restarts
+// cleanly from zero on boot, idempotent because its outputs live inside its
+// own directory and are recreated whole. HLS segments remain the
+// incremental path for resumable delivery.
 package jobs
 
 import (

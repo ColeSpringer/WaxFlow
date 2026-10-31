@@ -140,6 +140,16 @@ func buildServerConfig(ctx context.Context, cfg config.Config, path string, vers
 		closeResolver()
 		return server.Config{}, nop, err
 	}
+	liveGrace, err := cfg.ResolvedLiveIdleGrace()
+	if err != nil {
+		closeResolver()
+		return server.Config{}, nop, err
+	}
+	hlsGrace, err := cfg.ResolvedHLSIdleGrace()
+	if err != nil {
+		closeResolver()
+		return server.Config{}, nop, err
+	}
 	scratchDir := cfg.ResolvedScratchDir()
 	if err := os.MkdirAll(scratchDir, 0o700); err != nil {
 		closeResolver()
@@ -230,6 +240,8 @@ func buildServerConfig(ctx context.Context, cfg config.Config, path string, vers
 		ResampleProfile:      cfg.ResolvedResampleProfile(),
 		PaceBurst:            cfg.ResolvedPaceBurst(),
 		PaceFactor:           cfg.ResolvedPaceFactor(),
+		LiveIdleGrace:        liveGrace,
+		HLSIdleGrace:         hlsGrace,
 		Demo:                 cfg.Demo,
 		Version:              version,
 		Logger:               logger,
