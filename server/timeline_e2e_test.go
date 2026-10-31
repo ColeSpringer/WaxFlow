@@ -617,6 +617,9 @@ func TestTimelineDisabledByDefault(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("POST /hls/timeline = %d with timelines disabled, want 404", resp.StatusCode)
 	}
+	// A tl URL is refused by name, not read against a store that is not there.
+	resp = env.get(t, "/hls/master.m3u8?tl="+strings.Repeat("a", 43)+"&format=aac", nil)
+	wantEnvelope(t, resp, http.StatusUnsupportedMediaType, waxerr.CodeUnsupportedFormat)
 }
 
 // TestTimelineCapsAreHonest pins the other direction: an enabled daemon says
@@ -719,7 +722,9 @@ func TestTimelineWindowedMembersTileOneFile(t *testing.T) {
 
 	tlA := mintTimelineSrcs(t, env, []client.TimelineSrc{
 		{Src: "lib/tile.wav", From: 0, To: boundary},
-		{Src: "lib/tile.wav", From: boundary}, // open end: to the end of the source
+		// Closed and past 0, so it is sliced against the source's own total.
+		{Src: "lib/tile.wav", From: boundary, To: 2 * boundary},
+		{Src: "lib/tile.wav", From: 2 * boundary}, // open end: to the end of the source
 	})
 	tlB := mintTimelineSrcs(t, env, []client.TimelineSrc{{Src: "lib/tile.wav"}})
 

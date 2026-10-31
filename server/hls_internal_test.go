@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,6 +15,7 @@ import (
 	"github.com/colespringer/waxflow/internal/hls"
 	"github.com/colespringer/waxflow/internal/timeline"
 	"github.com/colespringer/waxflow/source"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // timelineSourcesEnv is a Server with a timeline store and a three-file queue.
@@ -30,6 +33,13 @@ func timelineSourcesEnv(t *testing.T) (*Server, []string) {
 		}
 		refs = append(refs, "lib/"+name)
 	}
+	return bareServer(t, root), refs
+}
+
+// bareServer is a Server with a timeline store over the library at root, and
+// a cold track memo.
+func bareServer(t *testing.T, root string) *Server {
+	t.Helper()
 	roots, err := source.OpenRoots([]source.Root{{Name: "lib", Path: root}}, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +49,105 @@ func timelineSourcesEnv(t *testing.T) (*Server, []string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Server{eng: waxflow.New(), resolver: roots, timelines: store}, refs
+	return &Server{eng: waxflow.New(), resolver: roots, timelines: store}
+}
+
+// shortXingMP3 writes sine-cbr128.mp3 cut 100 bytes short into root: its Xing
+// count still says 22050 samples, and its frames hold fewer. It returns the
+// file's reference and the count a decode delivers.
+func shortXingMP3(t *testing.T, root string) (string, int64) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "testdata", "sine-cbr128.mp3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := raw[:len(raw)-100]
+	if err := os.WriteFile(filepath.Join(root, "short.mp3"), cut, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := waxflow.New().Transcode(context.Background(), container.BytesSource(cut), "mp3", io.Discard,
+		waxflow.TranscodeOptions{Format: "wav"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Samples >= 22050 {
+		t.Fatalf("the cut decodes %d samples; this fixture needs fewer than its Xing count of 22050", res.Samples)
+	}
+	return "lib/short.mp3", res.Samples
+}
+
+// TestResolveTimelineMembersMeasuresEveryMember: a timeline member's total is
+// measured, never taken at its header's word: a member whose Xing count says
+// more than its frames hold would desync every position after it. The memo is
+// cold, as after an upgrade, so no mint measured it first.
+func TestResolveTimelineMembersMeasuresEveryMember(t *testing.T) {
+	root := t.TempDir()
+	ref, want := shortXingMP3(t, root)
+	s := bareServer(t, root)
+	members, err := s.resolveTimelineMembers(context.Background(), putTimeline(t, s, []string{ref}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := members[0].Track; got.Samples != want || !got.SamplesExact {
+		t.Errorf("the member resolved to %d samples (exact %t), want the %d its frames hold",
+			got.Samples, got.SamplesExact, want)
+	}
+}
+
+// TestResolveHLSSourcesMeasuresASpannedSource: a span is checked against its
+// source's total, so a spanned single source is measured too.
+func TestResolveHLSSourcesMeasuresASpannedSource(t *testing.T) {
+	root := t.TempDir()
+	ref, want := shortXingMP3(t, root)
+	s := bareServer(t, root)
+	f, err := s.resolver.Resolve(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := f.ID.String()
+	f.Close()
+	req := &hlsRequest{desc: hls.Descriptor{Ver: hls.DescriptorVersion, Src: ref, ID: id, Format: "aac", To: 1000}}
+	defer req.Close()
+	if err := s.resolveHLSSources(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.members[0].SrcSamples; got != want {
+		t.Errorf("the spanned source measured %d samples, want the %d its frames hold", got, want)
+	}
+}
+
+// putTimeline stores a timeline of refs, each at its current identity, without
+// minting it: nothing measures the members, so the track memo stays cold.
+func putTimeline(t *testing.T, s *Server, refs []string) string {
+	t.Helper()
+	members := make([]timeline.Member, len(refs))
+	for i, ref := range refs {
+		f, err := s.resolver.Resolve(context.Background(), ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		members[i] = timeline.Member{Src: ref, ID: f.ID.String()}
+		f.Close()
+	}
+	digest, err := s.timelines.Put(members, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return digest
+}
+
+// openedFiles records every handle its resolver hands out.
+type openedFiles struct {
+	source.Resolver
+	files []*source.File
+}
+
+func (r *openedFiles) Resolve(ctx context.Context, ref string) (*source.File, error) {
+	f, err := r.Resolver.Resolve(ctx, ref)
+	if err == nil {
+		r.files = append(r.files, f)
+	}
+	return f, err
 }
 
 // TestResolveHLSSourcesHoldsNoTimelineHandles pins what makes a timeline of
@@ -60,20 +168,10 @@ func timelineSourcesEnv(t *testing.T) (*Server, []string) {
 // sample rather than a fact to assert. This asserts the fact.
 func TestResolveHLSSourcesHoldsNoTimelineHandles(t *testing.T) {
 	s, refs := timelineSourcesEnv(t)
-	members := make([]timeline.Member, len(refs))
-	for i, ref := range refs {
-		f, err := s.resolver.Resolve(context.Background(), ref)
-		if err != nil {
-			t.Fatal(err)
-		}
-		members[i] = timeline.Member{Src: ref, ID: f.ID.String()}
-		f.Close()
-	}
-	digest, err := s.timelines.Put(members, time.Now().Add(time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
+	digest := putTimeline(t, s, refs)
 
+	opened := &openedFiles{Resolver: s.resolver}
+	s.resolver = opened
 	req := &hlsRequest{desc: hls.Descriptor{Ver: hls.DescriptorVersion, Tl: digest, Format: "opus"}}
 	defer req.Close()
 	if err := s.resolveHLSSources(context.Background(), req); err != nil {
@@ -86,6 +184,14 @@ func TestResolveHLSSourcesHoldsNoTimelineHandles(t *testing.T) {
 		t.Fatalf("a timeline request holds %d open source handles after resolving; it must hold none, "+
 			"because nothing reads a member again once it is checked and probed", len(req.srcs))
 	}
+	if len(opened.files) != len(refs) {
+		t.Fatalf("the resolver opened %d handles for %d members; the check below would see too few", len(opened.files), len(refs))
+	}
+	for i, f := range opened.files {
+		if _, err := f.ReadAt(make([]byte, 1), 0); !errors.Is(err, os.ErrClosed) {
+			t.Fatalf("handle %d (%s) is still open after resolving (read: %v)", i, f.Ref, err)
+		}
+	}
 	// The tracks are what the plan runs on, so dropping the handles must not
 	// have dropped the facts: a timeline that resolved to empty tracks would
 	// satisfy the assertion above for the wrong reason.
@@ -93,6 +199,23 @@ func TestResolveHLSSourcesHoldsNoTimelineHandles(t *testing.T) {
 		if m.Track.Samples <= 0 || m.Track.Fmt.Rate == 0 {
 			t.Fatalf("member %d kept no usable track (%d samples, %v)", i, m.Track.Samples, m.Track.Fmt)
 		}
+	}
+}
+
+// TestResolveTimelineMembersStopsWhenCanceled: a request that is gone stops
+// resolving, rather than measuring the rest of a queue nobody will read.
+func TestResolveTimelineMembersStopsWhenCanceled(t *testing.T) {
+	s, refs := timelineSourcesEnv(t)
+	digest := putTimeline(t, s, refs)
+	opened := &openedFiles{Resolver: s.resolver}
+	s.resolver = opened
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.resolveTimelineMembers(ctx, digest); waxerr.CodeOf(err) != waxerr.CodeCanceled {
+		t.Fatalf("resolving for a canceled request = %v, want %s", err, waxerr.CodeCanceled)
+	}
+	if len(opened.files) != 0 {
+		t.Errorf("a canceled request still opened %d of %d members", len(opened.files), len(refs))
 	}
 }
 

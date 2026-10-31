@@ -168,45 +168,16 @@ func (s *Server) prepareSource(ctx context.Context, q url.Values, sigAuthed bool
 // format=auto, plan the pipeline, and enforce the streaming-form and
 // bitrate-cap policies identically for /stream and /transcode.
 func (s *Server) planTranscode(req *streamRequest) error {
-	outFormat := req.p.format
-	if outFormat == "auto" {
-		outFormat = waxflow.DefaultLiveFormat()
-	}
-	// bitrate/q select a lossy output bit rate; a registered lossless format
-	// has none to set, so the request is refused rather than silently
-	// ignored. An unregistered format falls through to PlanTranscode's
-	// unsupported-format error instead of being mislabeled "lossless".
-	if req.p.bitrate != 0 {
-		if lossy, known := waxflow.LossyFormat(outFormat); known && !lossy {
-			return waxerr.New(waxerr.CodeUnsupportedFormat,
-				fmt.Sprintf("bitrate/q apply to lossy output; %s is lossless", outFormat))
-		}
-	}
-	// The refusal also keeps the cache key's hev2 term honest: true only
-	// where it shaped the stream.
-	if err := checkHEv2Format(req.p.hev2, outFormat); err != nil {
+	opts, err := s.streamOptions(req.p, req.gainDB, req.from)
+	if err != nil {
 		return err
 	}
-	req.opts = waxflow.TranscodeOptions{
-		Format:          outFormat,
-		Container:       req.p.container,
-		Rate:            req.p.rate,
-		Channels:        req.p.ch,
-		BitDepth:        req.p.bits,
-		GainDB:          req.gainDB,
-		Dynamics:        req.p.dynamics,
-		FromSample:      req.from,
-		ResampleProfile: s.profile,
-		MP3Bitrate:      req.p.bitrate * 1000,
-		OpusBitrate:     req.p.bitrate * 1000,
-		AACBitrate:      req.p.bitrate * 1000,
-		HEAACv2:         req.p.hev2,
-		// The live passthrough: the minimal descriptive set, embedded by
-		// muxers with a stream-form tag representation.
-		// Trimmed for the reason internal/jobs does it: a source's own tags
-		// carried onto a stream must not turn an oversized one into a refusal.
-		Tags: embeddableTags(req.meta),
-	}
+	// The live passthrough: the minimal descriptive set, embedded by
+	// muxers with a stream-form tag representation.
+	// Trimmed for the reason internal/jobs does it: a source's own tags
+	// carried onto a stream must not turn an oversized one into a refusal.
+	opts.Tags = embeddableTags(req.meta)
+	req.opts = opts
 	// Ladder rung 2: rewrite the container around the source's own packets.
 	// Rung 1 (directPlayable) already declined, or we would not be here, so
 	// this is the cheapest remaining answer whenever the codec survives. A span
@@ -228,11 +199,64 @@ func (s *Server) planTranscode(req *streamRequest) error {
 		req.plan = plan
 	}
 	plan := req.plan
+	if err := checkLivePlan(plan, req.p); err != nil {
+		return err
+	}
+	req.canonical = canonicalParams(plan, req.gainDB, req.p.dynamics, req.p.span, req.opts.HEAACv2, req.from)
+	if len(req.opts.Tags) > 0 {
+		req.canonical += "&tags=" + tagsFingerprint(req.opts.Tags)
+	}
+	return nil
+}
+
+// streamOptions maps a progressive request's parameters onto engine options,
+// resolving format=auto and refusing what the output format alone rules out.
+// Tags are left to the caller.
+func (s *Server) streamOptions(p *streamParams, gainDB float64, from int64) (waxflow.TranscodeOptions, error) {
+	outFormat := p.format
+	if outFormat == "auto" {
+		outFormat = waxflow.DefaultLiveFormat()
+	}
+	// bitrate/q select a lossy output bit rate; a registered lossless format
+	// has none to set, so the request is refused rather than silently
+	// ignored. An unregistered format falls through to PlanTranscode's
+	// unsupported-format error instead of being mislabeled "lossless".
+	if p.bitrate != 0 {
+		if lossy, known := waxflow.LossyFormat(outFormat); known && !lossy {
+			return waxflow.TranscodeOptions{}, waxerr.New(waxerr.CodeUnsupportedFormat,
+				fmt.Sprintf("bitrate/q apply to lossy output; %s is lossless", outFormat))
+		}
+	}
+	// The refusal also keeps the cache key's hev2 term honest: true only
+	// where it shaped the stream.
+	if err := checkHEv2Format(p.hev2, outFormat); err != nil {
+		return waxflow.TranscodeOptions{}, err
+	}
+	return waxflow.TranscodeOptions{
+		Format:          outFormat,
+		Container:       p.container,
+		Rate:            p.rate,
+		Channels:        p.ch,
+		BitDepth:        p.bits,
+		GainDB:          gainDB,
+		Dynamics:        p.dynamics,
+		FromSample:      from,
+		ResampleProfile: s.profile,
+		MP3Bitrate:      p.bitrate * 1000,
+		OpusBitrate:     p.bitrate * 1000,
+		AACBitrate:      p.bitrate * 1000,
+		HEAACv2:         p.hev2,
+	}, nil
+}
+
+// checkLivePlan enforces what a progressive plan must promise: a streaming
+// form, and the request's maxBitRate cap.
+func checkLivePlan(plan *waxflow.TranscodePlan, p *streamParams) error {
 	if !plan.Live {
 		return waxerr.New(waxerr.CodeUnsupportedFormat,
 			fmt.Sprintf("%s has no streaming form; request it as a job output (POST /jobs)", plan.Container))
 	}
-	if kbit := req.p.maxBitRate; kbit > 0 {
+	if kbit := p.maxBitRate; kbit > 0 {
 		// A plan without a bit rate (VBR lossless: the output size is
 		// signal-dependent) cannot promise any cap, so a cap on it is
 		// refused rather than silently unenforced.
@@ -245,10 +269,6 @@ func (s *Server) planTranscode(req *streamRequest) error {
 				fmt.Sprintf("no available encoding satisfies maxBitRate %d kbit/s (projected %d kbit/s; /caps lists the encoders)",
 					kbit, plan.BitRate/1000))
 		}
-	}
-	req.canonical = canonicalParams(plan, req.gainDB, req.p.dynamics, req.p.span, req.opts.HEAACv2, req.from)
-	if len(req.opts.Tags) > 0 {
-		req.canonical += "&tags=" + tagsFingerprint(req.opts.Tags)
 	}
 	return nil
 }

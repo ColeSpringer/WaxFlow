@@ -235,7 +235,7 @@ func (c *countingResolver) live() int {
 // TestValidateMergeHoldsOneMemberAtATime pins that accepting a merge costs one
 // descriptor at a time rather than one per member.
 //
-// This is the path resolveMember's own comment argues against at length: a
+// This is the path resolveTimelineMembers' own comment argues against: a
 // thousand-member queue is a thousand descriptors against a default limit of
 // 1024, and eagerly holding them is what Concat exists not to do. Creation is
 // where it would hurt most, because the measure pass is the slow part, so the

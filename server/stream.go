@@ -69,7 +69,14 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		Samples:     plan.Samples,
 		Rate:        plan.Format.Rate,
 	}
+	s.serveViaCache(w, r, key, meta, plan, s.sourcePipeline(req), reqStart)
+}
 
+// serveViaCache serves a planned transcode through the cache: the complete
+// entry under key when there is one, else a live read of the entry in flight,
+// starting p under a live slot to fill it when nothing is.
+func (s *Server) serveViaCache(w http.ResponseWriter, r *http.Request, key cache.Key, meta cache.Meta,
+	plan *waxflow.TranscodePlan, p pipeline, reqStart time.Time) {
 	// HEAD never spawns a pipeline: headers come from the plan, or from
 	// cache metadata when the entry is already complete.
 	if r.Method == http.MethodHead {
@@ -136,7 +143,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 				s.met.Degradations.Add(1)
 				entry = cache.NewMemEntry(s.cfg.RingBytes, meta)
 			}
-			s.startPipeline(s.baseCtx, entry, req.p.src, req.src.ID, req.src.Ext, req.opts, req.p.span, req.rung(), req.cutGrid, req.cutTrack, release, false)
+			s.startPipeline(s.baseCtx, entry, p, release, false)
 			armed = true
 			return entry, nil
 		})
@@ -146,6 +153,9 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 		if entry == nil {
 			continue // completed under us: re-run the Lookup
+		}
+		if gate := s.hooks.afterFlight; gate != nil {
+			gate()
 		}
 		reader, err := entry.NewReader()
 		if err != nil {
@@ -190,25 +200,52 @@ func (req *streamRequest) rung() rung {
 	}
 }
 
-// startPipeline runs the transcode into entry on its own goroutine. Live
-// pipelines pass the server's base context, not the request's: the
-// read-behind model finishes the encode (and the cache entry) even when
-// the first client leaves. Sync one-shots pass their request context to
-// die with it.
-//
-// grid and cutTrack are the source's packet grid and measured track, meaningful
-// only for rungCut and threaded in from the plan so the run cuts on the same
-// boundaries and writes the same length the plan keyed; the other rungs ignore
-// them.
-func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, ref string, id source.Identity, hint string,
-	opts waxflow.TranscodeOptions, sp span, r rung, grid int, cutTrack container.Track, release func(), sync bool) {
+// pipeline is one run to start into a cache entry: run writes the stream to
+// dst and returns a non-nil result whenever its error is nil, and ref and rung
+// name it in the log lines.
+type pipeline struct {
+	ref  string
+	rung rung
+	run  func(ctx context.Context, dst io.Writer) (*waxflow.TranscodeResult, error)
+}
+
+// sourcePipeline is the run that serves a planned single-source request. It
+// captures values, never req.src: the run outlives the request's handle.
+func (s *Server) sourcePipeline(req *streamRequest) pipeline {
+	ref, id, hint := req.p.src, req.src.ID, req.src.Ext
+	opts, sp, r, grid, cutTrack := req.opts, req.p.span, req.rung(), req.cutGrid, req.cutTrack
+	return pipeline{ref: ref, rung: r, run: func(ctx context.Context, dst io.Writer) (*waxflow.TranscodeResult, error) {
+		// The pipeline owns its own source handle; the request's closes
+		// with the handler.
+		src, err := s.resolver.Resolve(ctx, ref)
+		if err != nil {
+			return nil, err
+		}
+		defer src.Close()
+		if src.ID != id {
+			return nil, waxerr.New(waxerr.CodeSourceChanged, "source changed while starting the pipeline")
+		}
+		return s.transcodeSpan(ctx, src, hint, dst, opts, sp, r, grid, cutTrack)
+	}}
+}
+
+// startPipeline runs p into entry on its own goroutine. Live pipelines pass
+// the server's base context, not the request's: the read-behind model
+// finishes the encode (and the cache entry) even when the first client
+// leaves. Sync one-shots pass their request context to die with it.
+func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, p pipeline, release func(), sync bool) {
+	if !s.startWork() {
+		// No writer runs, so failing the entry here keeps it single-writer.
+		entry.Fail(waxerr.New(waxerr.CodeOverloaded, "the daemon is shutting down"))
+		release()
+		return
+	}
 	if sync {
 		s.met.SessionsSync.Add(1)
 	} else {
 		s.met.SessionsLive.Add(1)
 	}
 	s.met.SessionsActive.Add(1)
-	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		// The slot goes back before the session stops counting, so no active
@@ -216,38 +253,26 @@ func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, ref stri
 		defer s.met.SessionsActive.Add(-1)
 		defer release()
 
-		// The pipeline owns its own source handle; the request's closes
-		// with the handler.
-		src, err := s.resolver.Resolve(ctx, ref)
-		if err != nil {
-			entry.Fail(err)
-			return
-		}
-		defer src.Close()
-		if src.ID != id {
-			entry.Fail(waxerr.New(waxerr.CodeSourceChanged, "source changed while starting the pipeline"))
-			return
-		}
 		var dst io.Writer = entry
 		if wrap := s.hooks.pipelineDst; wrap != nil {
 			dst = wrap(entry)
 		}
-		res, err := s.transcodeSpan(ctx, src, hint, dst, opts, sp, r, grid, cutTrack)
+		res, err := p.run(ctx, dst)
 		if err != nil {
 			level, why := stopReason(ctx, err)
-			s.log.Log(ctx, level, "pipeline "+why, "src", ref, "rung", rungName(r), "err", err)
+			s.log.Log(ctx, level, "pipeline "+why, "src", p.ref, "rung", rungName(p.rung), "err", err)
 			entry.Fail(err)
 			return
 		}
 		if err := entry.Complete(res.Samples); err != nil {
-			s.log.Warn("entry completion failed", "src", ref, "err", err)
+			s.log.Warn("entry completion failed", "src", p.ref, "err", err)
 		}
 		// After Complete: promotion failures (rename, meta write) also
 		// degrade, and they must count too.
 		if entry.FileBacked() && entry.Degraded() {
 			s.met.Degradations.Add(1)
 		}
-		s.log.Debug("pipeline finished", "src", ref, "rung", rungName(r),
+		s.log.Debug("pipeline finished", "src", p.ref, "rung", rungName(p.rung),
 			"samples", res.Samples, "clipped", res.ClippedSamples, "truePeak", res.TruePeak,
 			"degraded", entry.Degraded())
 	}()

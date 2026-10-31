@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -813,6 +814,61 @@ func TestRangeMatrixLive(t *testing.T) {
 	}
 }
 
+// TestStreamIsPaced: past its burst a live transcode is delivered no faster
+// than PaceFactor times realtime. Only the lower bound is checked, which a slow
+// runner cannot break.
+func TestStreamIsPaced(t *testing.T) {
+	env := newTestEnv(t, func(c *server.Config) { c.PaceBurst, c.PaceFactor = time.Nanosecond, 8 })
+	start := time.Now()
+	readBody(t, env.get(t, "/stream?src=lib/ramp.wav&format=wav&rate=24000", nil))
+	// 4 s of audio at 8x realtime is half a second.
+	if elapsed := time.Since(start); elapsed < 400*time.Millisecond {
+		t.Fatalf("a 4 s stream paced at 8x arrived in %v, want about 500ms", elapsed)
+	}
+}
+
+// TestStreamHeadNeverStartsAnEncode: HEAD on a transcode nobody has cached
+// answers the plan's live headers without starting a pipeline, and once the
+// encode is cached it answers the entry's real length.
+func TestStreamHeadNeverStartsAnEncode(t *testing.T) {
+	env := newTestEnv(t, nil)
+	const stream = "/stream?src=lib/ramp.wav&format=mp3"
+
+	resp := env.req(t, http.MethodHead, stream, nil)
+	readBody(t, resp)
+	if resp.StatusCode != 200 || resp.Header.Get("Accept-Ranges") != "none" || resp.Header.Get("X-Content-Duration") == "" {
+		t.Fatalf("HEAD before any encode = %d, Accept-Ranges %q, X-Content-Duration %q, want the live headers",
+			resp.StatusCode, resp.Header.Get("Accept-Ranges"), resp.Header.Get("X-Content-Duration"))
+	}
+	if n := env.srv.Metrics().SessionsLive.Load(); n != 0 {
+		t.Fatalf("HEAD started %d pipeline(s)", n)
+	}
+
+	body := readBody(t, env.get(t, stream, nil))
+	waitForIdle(t, env)
+	resp = env.req(t, http.MethodHead, stream, nil)
+	readBody(t, resp)
+	if resp.Header.Get("Accept-Ranges") != "bytes" || resp.ContentLength != int64(len(body)) {
+		t.Fatalf("HEAD of the cached encode: Accept-Ranges %q, Content-Length %d, want bytes and %d",
+			resp.Header.Get("Accept-Ranges"), resp.ContentLength, len(body))
+	}
+}
+
+// TestStreamCacheEntryIsNamedForItsOutput: an encode's cache entry is a file
+// named for the form it holds, so an operator can copy it out and play it.
+func TestStreamCacheEntryIsNamedForItsOutput(t *testing.T) {
+	env := newTestEnv(t, nil)
+	readBody(t, env.get(t, "/stream?src=lib/ramp.wav&format=mp3", nil))
+	waitForIdle(t, env)
+	files, err := filepath.Glob(filepath.Join(env.cache, "v1", "*", "*", "out.*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || filepath.Base(files[0]) != "out.mp3" {
+		t.Fatalf("cache payloads %v, want one out.mp3", files)
+	}
+}
+
 func TestSeekSampleExact(t *testing.T) {
 	env := newTestEnv(t, nil)
 	srcBytes, err := os.ReadFile(filepath.Join(env.root, "ramp.wav"))
@@ -1496,6 +1552,34 @@ func TestPipelineFastFailPropagatesRealError(t *testing.T) {
 	// would direct-play without a pipeline).
 	resp := env.get(t, "/stream?src=lib/album/track.flac&format=wav", nil)
 	wantEnvelope(t, resp, http.StatusNotFound, waxerr.CodeNotFound)
+	if sessions := env.srv.Metrics().SessionsLive.Load(); sessions != 1 {
+		t.Fatalf("sessions = %d, want exactly 1 (no doomed respawns)", sessions)
+	}
+}
+
+// TestPipelineFailingBeforeTheAttachAnswersItsError is the same contract when
+// the pipeline has failed, and its entry gone, before the request attaches: the
+// gate holds the request after its flight until the pipeline has exited.
+func TestPipelineFailingBeforeTheAttachAnswersItsError(t *testing.T) {
+	var vr *vanishingResolver
+	env := newTestEnv(t, func(c *server.Config) {
+		vr = &vanishingResolver{inner: c.Resolver, allowed: 1}
+		c.Resolver = vr
+	})
+	var gated atomic.Bool
+	env.srv.GateAfterFlight(func() {
+		gated.Store(true)
+		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+			if env.srv.Metrics().SessionsActive.Load() == 0 {
+				return
+			}
+		}
+	})
+	resp := env.get(t, "/stream?src=lib/album/track.flac&format=wav", nil)
+	wantEnvelope(t, resp, http.StatusNotFound, waxerr.CodeNotFound)
+	if !gated.Load() {
+		t.Fatal("the request never reached the gate between its flight and its attach")
+	}
 	if sessions := env.srv.Metrics().SessionsLive.Load(); sessions != 1 {
 		t.Fatalf("sessions = %d, want exactly 1 (no doomed respawns)", sessions)
 	}

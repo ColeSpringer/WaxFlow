@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -10,7 +11,9 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/server"
 )
 
@@ -105,6 +108,72 @@ func TestClientLeavingMidStreamIsNotAWarning(t *testing.T) {
 	}
 	if !rec.Has(slog.LevelDebug, "client left mid-stream") {
 		t.Error("no Debug record says the client left")
+	}
+}
+
+// TestStreamFinishesAfterItsClientLeaves: a live encode runs on after its only
+// client leaves and caches what it wrote (read-behind), so the next request is
+// a cache hit. The gate holds the pipeline until the handler has seen its
+// client go.
+func TestStreamFinishesAfterItsClientLeaves(t *testing.T) {
+	env, rec := recordingEnv(t, nil)
+	open := gatePipelines(t, env)
+	const stream = "/stream?src=lib/ramp.wav&format=mp3"
+
+	resp := env.get(t, stream, nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("stream = %d: %s", resp.StatusCode, readBody(t, resp))
+	}
+	if _, err := io.ReadFull(resp.Body, make([]byte, 1)); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	deadline := time.Now().Add(10 * time.Second)
+	for !rec.Has(slog.LevelDebug, "client left mid-stream") {
+		if time.Now().After(deadline) {
+			t.Fatal("the handler never saw its client leave")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	open()
+	waitForIdle(t, env)
+
+	resp = env.get(t, stream, nil)
+	body := readBody(t, resp)
+	if resp.StatusCode != 200 || resp.Header.Get("Accept-Ranges") != "bytes" || resp.ContentLength != int64(len(body)) {
+		t.Fatalf("after its client left the stream = %d, Accept-Ranges %q, Content-Length %d of %d bytes: "+
+			"the encode did not finish into the cache", resp.StatusCode, resp.Header.Get("Accept-Ranges"),
+			resp.ContentLength, len(body))
+	}
+}
+
+// TestStreamJoinsTheEncodeInFlight: a request for an encode that is already
+// running reads that run from its start rather than starting another. The gate
+// holds the first pipeline, so the second request cannot arrive in its flight.
+func TestStreamJoinsTheEncodeInFlight(t *testing.T) {
+	env := newTestEnv(t, nil)
+	open := gatePipelines(t, env)
+	const stream = "/stream?src=lib/ramp.wav&format=wav&rate=24000"
+	want := engineReference(t, filepath.Join(env.root, "ramp.wav"), waxflow.TranscodeOptions{Format: "wav", Rate: 24000})
+
+	first := env.get(t, stream, nil)
+	head := make([]byte, 1)
+	if _, err := io.ReadFull(first.Body, head); err != nil {
+		t.Fatal(err)
+	}
+	second := env.get(t, stream, nil)
+	if second.StatusCode != 200 {
+		t.Fatalf("second request = %d: %s", second.StatusCode, readBody(t, second))
+	}
+	open()
+	bodies := [][]byte{append(head, readBody(t, first)...), readBody(t, second)}
+	for i, b := range bodies {
+		if !bytes.Equal(b, want) {
+			t.Errorf("request %d read %d bytes, want the %d of the encode", i, len(b), len(want))
+		}
+	}
+	if n := env.srv.Metrics().SessionsLive.Load(); n != 1 {
+		t.Errorf("%d pipelines ran, want 1: the second request has to join the first", n)
 	}
 }
 

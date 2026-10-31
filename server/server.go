@@ -216,6 +216,10 @@ type Server struct {
 	baseCtx context.Context
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
+	// closing is set once Close begins, under closeMu, which every wg.Add
+	// also holds: an Add that races Close's Wait can panic.
+	closeMu sync.Mutex
+	closing bool
 
 	closeOnce sync.Once
 	closeErr  error
@@ -230,6 +234,7 @@ type Server struct {
 type testHooks struct {
 	pipelineDst func(io.Writer) io.Writer
 	hlsPublish  func(ctx context.Context, n int64)
+	afterFlight func()
 }
 
 // New validates cfg and builds a Server. The fail-closed rule is enforced
@@ -565,12 +570,17 @@ func (rec *envelopeRecorder) Write(b []byte) (int, error) {
 }
 
 // Close stops pipeline goroutines, the job workers, the upload janitor,
-// and the cache janitor. Call after the http.Server has drained. Running
-// jobs stay in their persisted running state, which the next start
-// requeues from zero (the restart contract). Close is idempotent: a
-// restart-managing caller and a deferred cleanup may both call it.
+// and the cache janitor. Call after the http.Server has drained; a handler
+// still running then (a drain that timed out) has any pipeline or worker it
+// would start refused. Running jobs stay in their persisted running state,
+// which the next start requeues from zero (the restart contract). Close is
+// idempotent: a restart-managing caller and a deferred cleanup may both call
+// it.
 func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
+		s.closeMu.Lock()
+		s.closing = true
+		s.closeMu.Unlock()
 		s.cancel()
 		s.wg.Wait()
 		if s.jobs != nil {
@@ -589,6 +599,18 @@ func (s *Server) Close() error {
 		s.closeErr = errors.Join(uploadsErr, s.store.Close())
 	})
 	return s.closeErr
+}
+
+// startWork counts one more goroutine for Close to wait on, or reports false
+// once Close has begun.
+func (s *Server) startWork() bool {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	if s.closing {
+		return false
+	}
+	s.wg.Add(1)
+	return true
 }
 
 func (s *Server) handlePing(w http.ResponseWriter, _ *http.Request) {

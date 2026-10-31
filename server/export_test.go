@@ -47,6 +47,10 @@ func (s *Server) HoldLiveSlot() (release func(), ok bool) {
 // a test can hold a running pipeline in place. Set it before the first request.
 func (s *Server) GatePipelineDst(wrap func(io.Writer) io.Writer) { s.hooks.pipelineDst = wrap }
 
+// GateAfterFlight runs gate between a /stream request's flight and its attach
+// to the entry the flight returned. Set it before the first request.
+func (s *Server) GateAfterFlight(gate func()) { s.hooks.afterFlight = gate }
+
 // GateHLSPublish runs gate before a variant worker publishes segment n. ctx is
 // the worker's, so a gate can release a canceled worker. Set it before the
 // first request.

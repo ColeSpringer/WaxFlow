@@ -447,11 +447,11 @@ const mp4ProgressiveContainer = waxflow.ContainerProgressive
 // timeline mint fills, so a queue that was timelined before measures nothing
 // here and the merge job's own run measures nothing at all.
 //
-// One member is open at a time, for the reason resolveMember spells out: a
-// thousand-member queue held open at once is a thousand descriptors against a
-// default limit of 1024, and this is the path that would hold them longest,
-// since the measure pass is the slow part. runMerge already proves one at a
-// time suffices.
+// One member is open at a time, for the reason resolveTimelineMembers spells
+// out: a thousand-member queue held open at once is a thousand descriptors
+// against a default limit of 1024, and this is the path that would hold them
+// longest, since the measure pass is the slow part. runMerge already proves one
+// at a time suffices.
 func (s *Server) validateMergeRequest(ctx context.Context, body jobRequest, req *jobs.Request) (*jobs.Request, error) {
 	// Titles are index-aligned to the members, so the only shapes that mean
 	// anything are none and one-per-member. A short or long list would leave
