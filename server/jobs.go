@@ -479,7 +479,7 @@ func (s *Server) validateMergeRequest(ctx context.Context, body jobRequest, req 
 	// timelineOptionsFor; the width still has to be resolved, because a mixed
 	// merge to a lossy row must be built at the width it delivers or every
 	// member's fold is the envelope's (see waxflow.ConcatOptions.Channels).
-	// runMerge resolves it the same way from the stored request.
+	// runMerge resolves it through the same call from the stored request.
 	// The output's own shape first, so a request that names an impossible
 	// output still gets the message about it: resolving the width plans a
 	// transcode, and its refusal would otherwise arrive first and speak in the
@@ -487,17 +487,19 @@ func (s *Server) validateMergeRequest(ctx context.Context, body jobRequest, req 
 	if err := s.checkOutputShape(req); err != nil {
 		return nil, err
 	}
-	copts := s.timelineOptions(0)
-	ch, err := s.eng.TimelineChannels(tracks, req.TranscodeOptions(0, s.profile))
+	opts := req.TranscodeOptions(0, s.profile)
+	copts, err := s.eng.ConcatOptionsFor(tracks, 0, opts)
 	if err != nil {
 		return nil, err
 	}
-	copts.Channels = ch
 	env, err := waxflow.ConcatTrack(tracks, copts)
 	if err != nil {
 		return nil, err
 	}
-	plan, err := s.eng.PlanTranscode(env, req.TranscodeOptions(0, s.profile))
+	// The timeline's own plan, as runMerge makes it, so the width refusal and
+	// the member versions are the run's; the container is settled for a file
+	// below, which plans again.
+	plan, err := s.eng.PlanTranscodeTimeline(tracks, copts, opts)
 	if err != nil {
 		return nil, err
 	}

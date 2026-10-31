@@ -161,6 +161,11 @@ resampler revision, would leave a timeline's cached segments stale.
 than replacing the synthetic `pcm` entry, which would require knowing which
 entry is the decode version. Over-keying is safe; under-keying is the sin.
 
+*Amended (2026-10-31):* `PlanTranscodeTimeline` is the progressive sibling and
+ends in the same code (the width refusal, then the prepend), so a timeline's
+cached `/stream` keys on the same entries its HLS segments do, the crossfade's
+included. The merge job plans through it too, though nothing caches a merge.
+
 ### Lifetime is bounded by the signatures issued against it
 
 A stored timeline expires no sooner than the longest-lived URL minted against
@@ -218,6 +223,17 @@ caller wants, refused at mint time where a client can act on it.
   silently see only track 1), the canonical params, `directPlayable`, and
   `/stream` signing, for a consumer that does not exist: client-side gapless
   covers direct-play, and one long file is a merge job's output.
+
+  *Amended (2026-10-31), `tl` on `/stream`:* this stays rejected as written;
+  what changed is the consumer, which now exists. A Subsonic client plays an
+  audiobook in parts as one song and cannot play HLS, so a minted `tl` now
+  serves `/stream` too, as one live encode over every member. That form has
+  none of the problems above: it is one parameter, so `q.Get("src")` is
+  untouched and a `src` beside it is refused; it keys like any progressive
+  entry, under the digest; direct play never sees it, since a timeline is
+  always a transcode; and `/sign` signs it beside `src`, planning it first as
+  it plans an HLS master. `PlanTranscodeTimeline` closes the keying gap a
+  progressive timeline would otherwise have had.
 
 ## Consequences
 

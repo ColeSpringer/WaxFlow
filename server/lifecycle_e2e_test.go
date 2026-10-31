@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -175,29 +176,39 @@ func TestStreamFinishesAfterItsClientLeaves(t *testing.T) {
 // TestStreamAbandonFreesSlot: an encode whose only client has been gone for
 // the grace stops at its next write, on every rung that runs one: its live
 // slot comes back, nothing is cached, and it counts and logs as abandoned
-// rather than failed. The rung counters say which rung ran.
+// rather than failed. The rung counters say which rung ran, and the abandoned
+// record names the source the row asked for (a timeline's is its tl: ref).
 func TestStreamAbandonFreesSlot(t *testing.T) {
 	const grace = 50 * time.Millisecond
 	for _, tc := range []struct {
 		name   string
-		stream func(*testing.T, *testEnv) string
+		stream func(*testing.T, *testEnv) (url, ref string)
 		ran    func(*metrics.Metrics) bool
 	}{
-		{"transcode", func(*testing.T, *testEnv) string { return "/stream?src=lib/ramp.wav&format=mp3" },
-			func(m *metrics.Metrics) bool { return m.Remuxes.Load() == 0 && m.Cuts.Load() == 0 }},
-		{"remux", func(*testing.T, *testEnv) string { return "/stream?src=lib/album/track.flac&format=flac&container=mka" },
-			func(m *metrics.Metrics) bool { return m.Remuxes.Load() == 1 }},
-		{"cut", func(t *testing.T, env *testEnv) string {
-			return "/stream?src=" + writeOpusFixture(t, env, "ramp.wav", "ramp.opus") + "&from=48000&to=144000&format=opus"
+		{"transcode", func(*testing.T, *testEnv) (string, string) {
+			return "/stream?src=lib/ramp.wav&format=mp3", "lib/ramp.wav"
+		}, func(m *metrics.Metrics) bool { return m.Remuxes.Load() == 0 && m.Cuts.Load() == 0 }},
+		{"remux", func(*testing.T, *testEnv) (string, string) {
+			return "/stream?src=lib/album/track.flac&format=flac&container=mka", "lib/album/track.flac"
+		}, func(m *metrics.Metrics) bool { return m.Remuxes.Load() == 1 }},
+		{"cut", func(t *testing.T, env *testEnv) (string, string) {
+			ref := writeOpusFixture(t, env, "ramp.wav", "ramp.opus")
+			return "/stream?src=" + ref + "&from=48000&to=144000&format=opus", ref
 		}, func(m *metrics.Metrics) bool { return m.Cuts.Load() == 1 }},
+		{"timeline", func(t *testing.T, env *testEnv) (string, string) {
+			tl := mintTimeline(t, env, []string{"lib/ramp.wav", "lib/ramp.wav"}).Tl
+			return tlStream(tl, "mp3"), "tl:" + tl
+		}, func(m *metrics.Metrics) bool { return m.Remuxes.Load() == 0 && m.Cuts.Load() == 0 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env, rec := recordingEnv(t, func(c *server.Config) {
 				c.LiveSlots = 1
 				c.LiveIdleGrace = grace
+				c.TimelineDir = filepath.Join(t.TempDir(), "timelines")
 			})
 			open := gatePipelines(t, env)
-			leaveAfterOneByte(t, env, rec, tc.stream(t, env))
+			stream, ref := tc.stream(t, env)
+			leaveAfterOneByte(t, env, rec, stream)
 			time.Sleep(2 * grace)
 			open()
 			waitFor(t, "the slot to come back", func() bool {
@@ -220,6 +231,11 @@ func TestStreamAbandonFreesSlot(t *testing.T) {
 			}
 			if !rec.Has(slog.LevelInfo, "pipeline abandoned") {
 				t.Error("no Info record says the pipeline was abandoned")
+			}
+			for _, r := range rec.Records() {
+				if r.Msg == "pipeline abandoned" && !strings.Contains(r.Attrs, "src="+ref+" ") {
+					t.Errorf("the abandoned pipeline was %s, want src=%s", r.Attrs, ref)
+				}
 			}
 			if w := rec.Warnings(); len(w) != 0 {
 				t.Errorf("an abandoned encode logged %v", w)

@@ -213,6 +213,10 @@ byte-identical to `waxflow probe --json`.
 ## GET /stream
 
     /stream?src=<ref>&format=auto|wav|flac|alac|wavpack|mp3|aac|he-aac|opus|vorbis&rate=&ch=&bits=16|24&bitrate=|q=&hev2=&container=&gain=&dynamics=&t=&from=&to=&track=&maxBitRate=
+    /stream?tl=<digest>&format=...&rate=&ch=&bits=&bitrate=|q=&hev2=&container=&gain=&dynamics=&t=&crossfadeSeconds=&maxBitRate=
+
+The second form streams a minted multi-source timeline instead of one
+source (see Multi-source timelines below).
 
 Source references (`src`): `<root>/<relative/path>` under a configured
 library root; `upload:<id>` for a spooled one-shot upload (POST
@@ -349,11 +353,11 @@ Parameters (unknown parameter names are rejected):
   A `dynamics` request never direct-plays: unlike `gain=track` on an
   untagged file, which resolves to 0 dB and is a genuine no-op, a preset
   has no no-op state.
-- `t`: start position in **seconds** (decimal allowed). Seeks are
-  sample-exact: the decoder pre-rolls from the nearest sync point. A
-  `t>0` request is always a transcode (a new request per seek; live
-  streams are not byte-addressable). Seeking at or past the end of the
-  track is not an error: the response is a valid empty stream
+- `t`: start position in **seconds** (decimal allowed), converted to the
+  nearest sample. Seeks are sample-exact: the decoder pre-rolls from the
+  nearest sync point. A `t>0` request is always a transcode (a new request
+  per seek; live streams are not byte-addressable). Seeking at or past the
+  end of the track is not an error: the response is a valid empty stream
   (`X-Content-Duration: 0.000`).
 - `from`, `to`: bound the stream to a **sample range** of the source, `to`
   exclusive. This is the virtual-track surface: one offset range of one
@@ -452,6 +456,15 @@ Parameters (unknown parameter names are rejected):
   cost is what the cap protects. A VBR-lossless plan has no fixed rate to
   hold under the cap, so a cap on it is `415` rather than silently
   unenforced.
+- `tl`, `crossfadeSeconds`: stream a minted timeline (the digest
+  `POST /hls/timeline` returns) as one live encode over every member, in
+  place of `src`. `tl` refuses `src`, `from`, `to`, `id` and `track` by
+  name, since a member's window is minted into the timeline and the digest
+  pins every member's identity; everything else means what it means for one
+  source, `t` seeking on the timeline's clock. A timeline is always the
+  transcode rung, because no copy joins several sources. `crossfadeSeconds`
+  blends each seam as on HLS, and a positive one is `400` on a `src` URL,
+  which has no seam. See Multi-source timelines.
 
 **Decision ladder (v1)**, cheapest first:
 
@@ -569,7 +582,8 @@ metadata only.
 
 ## POST /transcode
 
-Same query parameters as `/stream`; the response body is the transcode
+Same query parameters as `/stream` except `tl`, which is `400`: one file of
+a timeline is what a merge job writes. The response body is the transcode
 (uncacheable, ring-fed, dies with the request). Sets
 `Content-Disposition: attachment`. Counts against live admission slots
 for its whole duration, so scripts do not starve playback.
@@ -658,6 +672,32 @@ from the `/stream` example, joined to a queue):
 Everything else (`format`, `bitrate`/`bitrates`, `hev2`, `bits`, `rate`,
 `ch`, `dynamics`, `segDur`) means what it means for a single source.
 
+**A minted `tl` serves both surfaces.** The same digest also plays as one
+progressive stream, for a player that cannot play HLS (a Subsonic client
+playing a book in parts as one song):
+
+    POST /sign
+    {"path": "/stream", "params": {"tl": "kJ3n...pQ", "format": "mp3", "gain": "off"}}
+
+It is one encode over every member, gapless at every seam, holding one live
+slot for the whole run, and it is a `/stream` in every other way: `t=` seeks
+on the timeline's clock (the envelope's rate), HEAD answers from the plan,
+the encode writes through the cache under the digest, a signed URL extends
+the stored timeline as a playlist read does, and an encode nobody reads stops
+after `liveIdleGrace`. Every live format serves it, each muxer handed the
+timeline's exact length before its first byte; `aiff` and `ape` stay
+job-only. `src`, `from`, `to`, `id` and `track` are refused beside `tl`, since
+a member's window is minted into the timeline and the digest pins every
+member's identity. A refusal the query alone decides (a tag-derived gain,
+`bitrate` on a lossless format, `hev2` off `he-aac`) answers before any
+member resolves, here and on HLS, so it costs no member read and no `410`
+hides it. To start at
+a member, send its `offsetSamples / envelopeRate` from the mint as `t`, in
+enough digits to round back (the shortest decimal that round-trips a float64
+does): `t` names the nearest sample. Send it only when `/caps`
+`delivery.timelineStream` is true: an older daemon `400`s `tl` on `/stream`
+as an unknown parameter, and one with timelines off `415`s it.
+
 Things worth knowing before you build on it:
 
 - **The digest is the identity.** It covers every member's reference and
@@ -724,16 +764,18 @@ Things worth knowing before you build on it:
   `boundaries`: an equal-power blend of `crossfadeSeconds` at each of the
   `members - 1` seams shortens the timeline by `(members - 1) *
   crossfadeSeconds`. Then pass the **same** value on the signed
-  `master.m3u8` you build, exactly as you pass `format`, because the mint's
-  boundaries reflect the crossfade minted with and a stream rendered with a
-  different one disagrees with them. It is a render option, not identity:
+  `master.m3u8` or `/stream` URL you build, exactly as you pass `format`,
+  because the mint's boundaries reflect the crossfade minted with and a
+  stream rendered with a different one disagrees with them. It is a render
+  option, not identity:
   the digest covers the members alone, so a queue minted with two different
   crossfades keeps one `tl` and the two renders are kept apart by the cache.
   Omit it (or send `0`) for a gapless butt-join, which is the default and
-  what a gapless album needs. It is refused on a single `src` URL (which has
-  no seam, being one file rather than a queue), when it is longer than the
-  shortest member can carry, or when it exceeds the largest blend buffer
-  (tens of seconds, the one bound that applies to a timeline of any length).
+  what a gapless album needs. A positive one is refused on a single `src`
+  URL (which has no seam, being one file rather than a queue), when it is
+  longer than the shortest member can carry, or when it exceeds the largest
+  blend buffer (tens of seconds, the one bound that applies to a timeline of
+  any length).
   A one-member timeline is not refused for want of a seam, though: it has zero
   seams, so an ordinary crossfade meets none of them (a butt-join), which lets
   a queue-driven client send one render config whatever the queue length. Only
@@ -776,7 +818,9 @@ and `/lyrics` (`params` take only `src`; identity is embedded), and
 the index is checked for shape only, since a URL worth signing is minted
 while the job is still queued and has no outputs yet). `params` are validated like a live
 request, the source identity is resolved and embedded, and the response
-is:
+is below. A `/stream` URL naming `tl` in place of `src` is planned at sign
+time, as an HLS master is, every member resolved and checked, and pins no
+`id`, since the digest pins every member's:
 
     {"schemaVersion": 1, "url": "/stream?exp=...&format=wav&id=...&kid=1&sig=...&src=...", "exp": 1767225600}
 
@@ -801,8 +845,8 @@ is:
                    "cutFormats": ["opus", "aac"],
                    "jobs": false, "uploads": false, "pid": false,
                    "timelines": true, "maxTimelineMembers": 1000,
-                   "timelineMemberWindows": true, "rootsReload": true,
-                   "rootsStatus": true},
+                   "timelineMemberWindows": true, "timelineStream": true,
+                   "rootsReload": true, "rootsStatus": true},
       "profiles": {
         "apple-native": {
           "delivery": "hls",
@@ -832,7 +876,11 @@ parameter are served, and `maxTimelineMembers` bounds one timeline.
 `delivery.timelineMemberWindows` reports that timeline members take
 `from`/`to` sample windows; route by its presence, because a daemon too
 old to have it `400`s a windowed member as an unknown field (fall back to
-per-item URLs rather than trying).
+per-item URLs rather than trying). `delivery.timelineStream` reports that
+`/stream` takes `tl`, under the same presence rule: absent is a daemon too
+old to have it, which `400`s it as an unknown parameter (play the timeline
+over HLS), or one with timelines off (`delivery.timelines` false), which
+`415`s it.
 `delivery.rootsReload` reports whether `POST /roots/reload` is served (see
 that endpoint): `true` only for a file-configured daemon whose roots are
 not pinned by `WAXFLOW_ROOTS`. It is always sent (`true` or `false`), so a
@@ -975,7 +1023,10 @@ which refuses it.
 ### Merge and split
 
 `merge` concatenates `srcs` into one output, gaplessly: it is the same
-timeline primitive `tl=` streams over HLS, pointed at a file. Members are
+timeline primitive `tl=` streams over HLS and `/stream`, pointed at a file.
+A `/stream?tl=` of the same members is the same encode delivered live: an MP3
+of it matches the merge frame for frame after the Info frame, which a live
+stream cannot back-patch with its byte counts. Members are
 normalized to a common envelope (the maximum rate and channel count, so
 no member loses information), and their lengths are **measured** rather
 than trusted, since a timeline's positions are a prefix sum and an

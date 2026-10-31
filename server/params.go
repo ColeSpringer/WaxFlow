@@ -12,6 +12,7 @@ import (
 	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/sign"
+	"github.com/colespringer/waxflow/internal/timeline"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -155,6 +156,14 @@ func checkHEv2Format(hev2 bool, format string) error {
 // so the bound must hold before the conversion, not be inferred after.
 const maxSeekSeconds = 1e9
 
+// seekSample is t= as a sample at rate: the nearest one, since t*rate in
+// float64 can fall just short of a whole sample (0.009 s at 48 kHz is
+// 431.99999999999994), and a client seeking to a timeline member's start sends
+// that start's offset over the envelope rate.
+func seekSample(t float64, rate int) int64 {
+	return int64(math.Round(t * float64(rate)))
+}
+
 type gainMode int
 
 const (
@@ -270,7 +279,19 @@ var streamParamNames = map[string]bool{
 	"src": true, "format": true, "rate": true, "ch": true, "bits": true,
 	"gain": true, "dynamics": true, "t": true, "track": true, "maxBitRate": true,
 	"bitrate": true, "q": true, "hev2": true, "container": true, "from": true, "to": true,
-	"id": true, sign.ParamExp: true, sign.ParamKID: true, sign.ParamSig: true,
+	"id": true, "tl": true, "crossfadeSeconds": true,
+	sign.ParamExp: true, sign.ParamKID: true, sign.ParamSig: true,
+}
+
+// singleSourceParams are the parameters only a single source can mean, each
+// with why a timeline refuses it. A fixed order, so a URL carrying several
+// always gets the same refusal.
+var singleSourceParams = []struct{ name, why string }{
+	{"src", "a URL names one stream or one timeline"},
+	{"from", "a member's window is minted into the timeline"},
+	{"to", "a member's window is minted into the timeline"},
+	{"id", "the digest pins every member's identity"},
+	{"track", "a timeline plays each member's default track"},
 }
 
 // probeParamNames is the closed parameter surface of GET /probe, the same
@@ -321,12 +342,18 @@ func (sp span) end() int64 {
 
 // streamParams is a parsed, policy-checked /stream request.
 type streamParams struct {
-	src        string
+	src string
+	// tl is a minted timeline's digest, "" for a single source; the two are
+	// exclusive.
+	tl string
+	// crossfade is the timeline's seam blend in seconds, 0 for a butt-join.
+	crossfade  float64
 	format     string // output name or "auto"
 	rate       int
 	ch         int
 	bits       int
 	gain       gainSpec
+	gainParam  string // gain= as sent, "" when absent, which a timeline's refusal names
 	dynamics   gain.Preset
 	t          float64 // seconds; samples are derived after probe
 	span       span    // source-sample window; the zero value is the whole source
@@ -353,9 +380,41 @@ func parseStreamParams(q url.Values, defaultGain gainSpec) (*streamParams, error
 			return bad("unknown parameter %q", k)
 		}
 	}
-	p := &streamParams{src: q.Get("src"), format: q.Get("format"), track: -1, identity: q.Get("id")}
-	if p.src == "" {
+	p := &streamParams{src: q.Get("src"), tl: q.Get("tl"), format: q.Get("format"), track: -1,
+		identity: q.Get("id"), gainParam: q.Get("gain")}
+	if q.Has("tl") {
+		switch {
+		case p.tl == "":
+			return bad("tl is present but empty; omit it to stream one src")
+		case !timeline.ValidDigest(p.tl):
+			return bad("tl %q is not a timeline digest", p.tl)
+		}
+		for _, sp := range singleSourceParams {
+			if q.Has(sp.name) {
+				return bad("tl and %s are exclusive: %s", sp.name, sp.why)
+			}
+		}
+	} else if p.src == "" {
 		return bad("src is required")
+	}
+	if q.Has("crossfadeSeconds") {
+		v := q.Get("crossfadeSeconds")
+		if v == "" {
+			return bad("crossfadeSeconds is present but empty; omit it for a butt-join")
+		}
+		x, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return bad("crossfadeSeconds %q: want seconds", v)
+		}
+		if err := checkCrossfadeSeconds(x); err != nil {
+			return nil, err
+		}
+		// Refused rather than ignored, as on the HLS descriptor: one source has
+		// no seam, so a crossfade on it would silently do nothing.
+		if x > 0 && p.tl == "" {
+			return bad("crossfadeSeconds %g on a src: a crossfade blends a timeline's seams, and one source has none", x)
+		}
+		p.crossfade = x
 	}
 	if p.format == "" {
 		p.format = "auto"

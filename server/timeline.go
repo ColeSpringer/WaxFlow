@@ -33,24 +33,18 @@ import (
 // obtained instead by signing the descriptor.
 //
 // The default is still a butt-join: an omitted crossfade is 0, exactly what a
-// gapless album needs and what every pre-crossfade caller got. Callers pass the
-// render's crossfade (from the descriptor) or, at mint, the request's; the merge
-// validation passes 0, because a merge butt-joins and never blends.
+// gapless album needs and what every pre-crossfade caller got.
 //
 // This one leaves Channels at 0. A render knows its output and must build the
 // timeline at the width it delivers, which is timelineOptionsFor's job; the
 // three callers left here are the ones with no output to resolve against (the
-// mint) or no use for the width (the two TTL sites, which read the envelope's
-// length, and a length is rate-only).
+// mint, which passes the request's crossfade) or no use for the width (the two
+// TTL sites, which read the envelope's length, and a length is rate-only).
 //
-// # One construction site is deliberately not here
-//
-// The merge job's run builds its own ConcatOptions (internal/jobs' runMerge),
-// and cannot call this: the dependency runs the other way. So a merge is the
-// one plan/run pair this method does not join up, since validateMergeRequest
-// plans its envelope through here with crossfade 0. They agree because both are
-// the daemon's profile and neither blends, and that holds because a merge is not
-// on the render path a wire crossfade reaches.
+// Every render, a merge job's included, builds through
+// waxflow.Engine.ConcatOptionsFor, the one place the profile, the crossfade and
+// the width meet; a merge passes crossfade 0, because nothing on the wire asks
+// it to blend.
 func (s *Server) timelineOptions(crossfade int64) waxflow.ConcatOptions {
 	return waxflow.ConcatOptions{Profile: s.profile, Crossfade: crossfade}
 }
@@ -66,6 +60,7 @@ func (s *Server) timelineOptions(crossfade int64) waxflow.ConcatOptions {
 // row delivers is the engine's to say (waxflow.Engine.TimelineChannels). It
 // answers 0 for a queue that needs no per-member conversion, which is most of
 // them, so this is timelineOptions plus a crossfade for nearly every render.
+// The profile is opts', which every render's opts carry as s.profile.
 //
 // Three sites keep the width-0 timelineOptions and are not oversights: the mint
 // has no output to resolve against, and the two TTL sites read only the
@@ -78,11 +73,28 @@ func (s *Server) timelineOptionsFor(tracks []container.Track, xfadeSeconds float
 	if err != nil {
 		return waxflow.ConcatOptions{}, err
 	}
-	copts := s.timelineOptions(crossfade)
-	if copts.Channels, err = s.eng.TimelineChannels(tracks, opts); err != nil {
-		return waxflow.ConcatOptions{}, err
+	return s.eng.ConcatOptionsFor(tracks, crossfade, opts)
+}
+
+// checkTimelines refuses a timeline on a daemon with no timeline store.
+func (s *Server) checkTimelines() error {
+	if s.timelines == nil {
+		return waxerr.New(waxerr.CodeUnsupportedFormat, "multi-source timelines are not enabled on this daemon")
 	}
-	return copts, nil
+	return nil
+}
+
+// readExpiry is the expiry a timeline read extends the store to, and the one an
+// HLS read signs its child URLs with: the signed URL's own exp (unix seconds,
+// 0 when key-authed), else what a default-TTL URL for seconds of audio would
+// carry, rounded up to the hour. The rounding is what lets a key-authed
+// session's reads extend the stored timeline once an hour rather than rewrite
+// it on every request.
+func readExpiry(exp int64, seconds float64) time.Time {
+	if exp > 0 {
+		return time.Unix(exp, 0)
+	}
+	return time.Now().Add(sign.DefaultTTLFor(seconds)).Truncate(time.Hour).Add(time.Hour)
 }
 
 // checkCrossfadeSeconds is the cheap early guard on a wire crossfade: it must be
@@ -187,8 +199,8 @@ func (s *Server) handleTimelineCreate(w http.ResponseWriter, r *http.Request) {
 // the request's, carried on the job so the 202 path shapes the same duration
 // and boundaries, and mints the same digest, the 201 fast path returns.
 func (s *Server) mintTimelineJob(ctx context.Context, refs []string, spans []jobs.MemberSpan, crossfadeSeconds float64, progress func(done, total int64)) (*jobs.Timeline, error) {
-	if s.timelines == nil {
-		return nil, waxerr.New(waxerr.CodeUnsupportedFormat, "multi-source timelines are not enabled on this daemon")
+	if err := s.checkTimelines(); err != nil {
+		return nil, err
 	}
 	sps, err := spansFromJob(len(refs), spans)
 	if err != nil {

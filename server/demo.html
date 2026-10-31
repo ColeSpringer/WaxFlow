@@ -72,8 +72,10 @@ are this track. Leave both empty for the whole file.</p>
 <p>Mints a play queue into a <code>tl</code> digest via
 <code>POST /hls/timeline</code>, then signs a master against it: several
 files delivered as one continuous stream, so seeking across a track
-boundary is just seeking. Gain must be <code>off</code> or a dB number
-here, because one stream has one gain and a queue has many tags.</p>
+boundary is just seeking. The same digest also plays as one progressive
+<code>/stream</code>, seeking with <code>t=</code> on the timeline's clock.
+Gain must be <code>off</code> or a dB number here, because one stream has
+one gain and a queue has many tags.</p>
 <label>Queue (one source reference per line, in order)
   <textarea id="tlSrcs" rows="3" placeholder="lib/album/01.flac&#10;lib/album/02.flac"></textarea></label>
 <div class="row">
@@ -86,8 +88,20 @@ here, because one stream has one gain and a queue has many tags.</p>
     </select></label></div>
   <div><label>Gain <input id="tlGain" value="off" placeholder="off or a dB number"></label></div>
 </div>
+<div class="row">
+  <div><label>Progressive format
+    <select id="tlStreamFormat">
+      <option value="mp3">mp3</option>
+      <option value="opus">opus</option>
+      <option value="aac">aac</option>
+      <option value="flac">flac (lossless)</option>
+    </select></label></div>
+  <div><label>Progressive start at t= seconds <input id="tlT" type="number" min="0" step="0.001" value="0"></label></div>
+</div>
 <button id="tlPlay">Mint &amp; play timeline</button>
+<button id="tlStream">Mint &amp; play as one /stream</button>
 <audio id="tlPlayer" controls></audio>
+<audio id="tlStreamPlayer" controls></audio>
 
 <pre id="out">ready</pre>
 
@@ -178,22 +192,29 @@ const playHLS = async (player, url) => {
   player.play();
 };
 
+// mintQueue mints the queue into a digest, or shows why not and answers
+// null. A 202 means a member's length had to be measured and the answer is a
+// job, not a digest.
+const mintQueue = async () => {
+  const srcs = document.getElementById('tlSrcs').value
+    .split('\n').map((s) => s.trim()).filter(Boolean).map((src) => ({ src }));
+  if (!srcs.length) { show('the queue is empty'); return null; }
+  const mint = await fetch('/hls/timeline', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...headers() },
+    body: JSON.stringify({ srcs }),
+  });
+  const tl = await mint.json();
+  show(tl);
+  if (!mint.ok) return null;
+  if (!tl.tl) { show({ note: 'the mint is a job; poll /jobs/' + tl.id, job: tl }); return null; }
+  return tl;
+};
+
 document.getElementById('tlPlay').onclick = async () => {
   try {
-    const srcs = document.getElementById('tlSrcs').value
-      .split('\n').map((s) => s.trim()).filter(Boolean).map((src) => ({ src }));
-    if (!srcs.length) return show('the queue is empty');
-    // Mint the queue into a digest. A 202 means a member's length had to
-    // be measured and the answer is a job, not a digest.
-    const mint = await fetch('/hls/timeline', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...headers() },
-      body: JSON.stringify({ srcs }),
-    });
-    const tl = await mint.json();
-    show(tl);
-    if (!mint.ok) return;
-    if (!tl.tl) return show({ note: 'the mint is a job; poll /jobs/' + tl.id, job: tl });
+    const tl = await mintQueue();
+    if (!tl) return;
 
     const resp = await fetch('/sign', {
       method: 'POST',
@@ -211,6 +232,31 @@ document.getElementById('tlPlay').onclick = async () => {
     show({ timeline: tl, signed: body });
     if (!resp.ok) return;
     await playHLS(document.getElementById('tlPlayer'), body.url);
+  } catch (err) { show(String(err)); }
+};
+
+document.getElementById('tlStream').onclick = async () => {
+  try {
+    const tl = await mintQueue();
+    if (!tl) return;
+    const params = {
+      tl: tl.tl,
+      format: document.getElementById('tlStreamFormat').value,
+      gain: document.getElementById('tlGain').value.trim(),
+    };
+    const t = parseFloat(document.getElementById('tlT').value);
+    if (t > 0) params.t = String(t);
+    const resp = await fetch('/sign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers() },
+      body: JSON.stringify({ path: '/stream', params }),
+    });
+    const body = await resp.json();
+    show({ timeline: tl, signed: body });
+    if (!resp.ok) return;
+    const player = document.getElementById('tlStreamPlayer');
+    player.src = body.url;
+    player.play();
   } catch (err) { show(String(err)); }
 };
 </script>

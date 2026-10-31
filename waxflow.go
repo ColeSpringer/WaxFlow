@@ -822,6 +822,30 @@ func (e *Engine) PlanTranscode(track container.Track, opts TranscodeOptions) (*T
 	}, nil
 }
 
+// PlanTranscodeTimeline plans a transcode of a concatenated timeline from its
+// members' tracks alone (no decode, no open), the progressive sibling of
+// PlanSegmentsTimeline: PlanTranscode over the synthetic track ConcatTrack
+// computes, with the versions that track cannot name prepended and a channel
+// conversion across a mixed-width seam refused.
+//
+// copts must be the options the Concat this plan describes is built with (see
+// ConcatOptions), and opts.FromSample seeks on the timeline's own clock.
+func (e *Engine) PlanTranscodeTimeline(tracks []container.Track, copts ConcatOptions,
+	opts TranscodeOptions) (*TranscodePlan, error) {
+	env, err := ConcatTrack(tracks, copts)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := e.PlanTranscode(env, opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := finishTimelinePlan(tracks, env.Fmt, copts, plan); err != nil {
+		return nil, err
+	}
+	return plan, nil
+}
+
 // buildPlanCore assembles and releases a throwaway chain to capture the
 // plan invariants.
 func buildPlanCore(in audio.Format, opts TranscodeOptions) (*planCore, error) {

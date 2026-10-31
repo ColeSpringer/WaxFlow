@@ -29,10 +29,9 @@ import (
 // arithmetic error rather than passing by symmetry.
 func timelineEnv(t *testing.T) (*testEnv, []string) {
 	t.Helper()
-	var env *testEnv
-	env = newTestEnv(t, func(cfg *server.Config) {
-		cfg.TimelineDir = filepath.Join(t.TempDir(), "timelines")
-	})
+	dir := filepath.Join(t.TempDir(), "timelines")
+	env := newTestEnv(t, func(cfg *server.Config) { cfg.TimelineDir = dir })
+	env.tlDir = dir
 	lens := []int{48000, 24000, 72000} // 1 s, 0.5 s, 1.5 s at 48 kHz
 	refs := make([]string, len(lens))
 	for i, n := range lens {
@@ -610,7 +609,7 @@ func TestTimelineDisabledByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if caps.Delivery.Timelines {
+	if caps.Delivery.Timelines || caps.Delivery.TimelineStream {
 		t.Error("/caps advertises timelines on a daemon with no timeline store")
 	}
 	resp := env.postJSON(t, "/hls/timeline", `{"srcs":[{"src":"lib/sine.wav"}]}`)
@@ -659,6 +658,10 @@ func TestTimelineCapsAreHonest(t *testing.T) {
 	// routes by capability (absent = older daemon, per-item fallback).
 	if !caps.Delivery.TimelineMemberWindows {
 		t.Error("/caps does not advertise timelineMemberWindows on a daemon that serves them")
+	}
+	// And /stream?tl=, which an older daemon 400s as an unknown parameter.
+	if !caps.Delivery.TimelineStream {
+		t.Error("/caps does not advertise timelineStream on a daemon that serves it")
 	}
 }
 

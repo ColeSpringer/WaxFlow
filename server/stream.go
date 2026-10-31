@@ -24,7 +24,7 @@ import (
 
 // handleStream serves GET/HEAD /stream: auth, parameter parsing, source
 // identity, then the decision ladder: direct play, transmux, transcode, all
-// via the cache.
+// via the cache. A tl URL serves a minted timeline instead.
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	reqStart := time.Now()
 	s.applyCORS(w, r)
@@ -33,6 +33,10 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	sigAuthed, err := s.playbackAuth(r, q)
 	if err != nil {
 		s.writeError(w, err)
+		return
+	}
+	if q.Has("tl") {
+		s.serveTimelineStream(w, r, q, sigAuthed, reqStart)
 		return
 	}
 	req, err := s.prepareSource(r.Context(), q, sigAuthed)

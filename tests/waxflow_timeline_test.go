@@ -1172,6 +1172,82 @@ func TestPlanSegmentsTimelineVersions(t *testing.T) {
 	}
 }
 
+// TestPlanTranscodeTimelineKeysWhatTheTrackCannot is the progressive sibling of
+// the two tests above: a cached /stream of a timeline keys on the same three
+// things the synthetic track cannot name, the members' decoders, the resampling
+// a member does to reach the envelope, and the crossfade.
+func TestPlanTranscodeTimelineKeysWhatTheTrackCannot(t *testing.T) {
+	e := waxflow.New()
+	f44 := audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
+	f48 := audio.Format{Rate: 48000, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
+	tracks := []container.Track{
+		{Codec: codec.FLAC, Fmt: f44, Samples: 44100, Default: true},
+		{Codec: codec.FLAC, Fmt: f44, Samples: 44100, Default: true},
+		{Codec: codec.Opus, Fmt: f48, Samples: 48000, Default: true},
+	}
+	opts := waxflow.TranscodeOptions{Format: "opus"}
+	copts := waxflow.ConcatOptions{Crossfade: 512}
+
+	plan, err := e.PlanTranscodeTimeline(tracks, copts, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{flac.Version, opus.Version, resample.HQ.Version(), "xfade-512-1"} {
+		if !slices.Contains(plan.Versions, want) {
+			t.Errorf("the timeline plan's Versions %v do not name %q, so a revision of it "+
+				"would serve a stale cached stream", plan.Versions, want)
+		}
+	}
+	if n := strings.Count(strings.Join(plan.Versions, ","), flac.Version); n != 1 {
+		t.Errorf("flac's version appears %d times in %v, want once", n, plan.Versions)
+	}
+
+	env, err := waxflow.ConcatTrack(tracks, copts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	naive, err := e.PlanTranscode(env, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, absent := range []string{flac.Version, resample.HQ.Version(), "xfade-512-1"} {
+		if slices.Contains(naive.Versions, absent) {
+			t.Fatalf("planning the synthetic track alone already names %q, so this test is "+
+				"no longer showing what PlanTranscodeTimeline is for", absent)
+		}
+	}
+}
+
+// TestPlanTranscodeTimelinePlansTheRenderedLength pins that the plan is over the
+// timeline its copts build, not a butt-join of the same members: a crossfade
+// shortens what X-Content-Duration and every live muxer's header promise, and a
+// seek counts from the timeline's start.
+func TestPlanTranscodeTimelinePlansTheRenderedLength(t *testing.T) {
+	e := waxflow.New()
+	tracks := widthTracks(2, 2) // 48000 samples each at 48 kHz
+	for _, tc := range []struct {
+		name  string
+		copts waxflow.ConcatOptions
+		from  int64
+		want  int64
+	}{
+		{"a butt-join is the sum", waxflow.ConcatOptions{}, 0, 96000},
+		{"a crossfade overlaps one seam", waxflow.ConcatOptions{Crossfade: 512}, 0, 96000 - 512},
+		{"a seek counts from the timeline's start", waxflow.ConcatOptions{Crossfade: 512}, 50000, 96000 - 512 - 50000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan, err := e.PlanTranscodeTimeline(tracks, tc.copts,
+				waxflow.TranscodeOptions{Format: "flac", FromSample: tc.from})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.Samples != tc.want {
+				t.Errorf("plan.Samples = %d, want %d", plan.Samples, tc.want)
+			}
+		})
+	}
+}
+
 // TestHLSReadBackTimeline is the full-stack gapless proof, and the one test
 // here that exercises every layer at once: one continuous signal is cut into
 // three files, handed back as a timeline, planned, encoded to FLAC, framed
@@ -1891,6 +1967,45 @@ func TestTimelineChannelsAnswersOnlyWhereTheDefectIs(t *testing.T) {
 	}
 }
 
+// TestConcatOptionsForFollowsTheTranscode pins the ConcatOptions convention as
+// one call: the profile is the transcode's own, the crossfade is passed
+// through, and the width is the one TimelineChannels answers, so a plan and a
+// run handed its answer build the same timeline.
+func TestConcatOptionsForFollowsTheTranscode(t *testing.T) {
+	e := waxflow.New()
+	for _, tc := range []struct {
+		name   string
+		tracks []container.Track
+		xfade  int64
+		opts   waxflow.TranscodeOptions
+		want   waxflow.ConcatOptions
+	}{
+		{"a uniform butt-join", widthTracks(2, 2), 0,
+			waxflow.TranscodeOptions{Format: "opus"}, waxflow.ConcatOptions{}},
+		{"the transcode's profile", widthTracks(2, 2), 0,
+			waxflow.TranscodeOptions{Format: "opus", ResampleProfile: resample.Fast},
+			waxflow.ConcatOptions{Profile: resample.Fast}},
+		{"a crossfade", widthTracks(2, 2), 512,
+			waxflow.TranscodeOptions{Format: "flac"}, waxflow.ConcatOptions{Crossfade: 512}},
+		{"a mixed queue to a lossy row", widthTracks(6, 2), 0,
+			waxflow.TranscodeOptions{Format: "opus", ResampleProfile: resample.HQ},
+			waxflow.ConcatOptions{Profile: resample.HQ, Channels: 2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := e.ConcatOptionsFor(tc.tracks, tc.xfade, tc.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("ConcatOptionsFor = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+	if _, err := e.ConcatOptionsFor(widthTracks(6, 2), 0, waxflow.TranscodeOptions{Format: "alac"}); err == nil {
+		t.Error("ConcatOptionsFor over an alac delivery of a 5.1 envelope succeeded; the row's refusal must propagate")
+	}
+}
+
 // TestTimelineRefusesAConversionAcrossAMixedSeam is D4 at every seam it has: the
 // plan funnel and the three run-side entry points, bare and through the wrappers
 // that have to forward the question.
@@ -1921,6 +2036,30 @@ func TestTimelineRefusesAConversionAcrossAMixedSeam(t *testing.T) {
 		}
 		plan, err := e.PlanSegmentsTimeline(tracks, waxflow.ConcatOptions{Channels: ch},
 			waxflow.TranscodeOptions{Format: "opus"}, 4)
+		if err != nil {
+			t.Fatalf("planning at the resolved width: %v", err)
+		}
+		if !slices.Contains(plan.Versions, "tlwidth-2-1") {
+			t.Errorf("plan versions %v carry no width entry", plan.Versions)
+		}
+	})
+
+	t.Run("the progressive plan funnel", func(t *testing.T) {
+		ms := timelineMembers(t, e, five, stereo)
+		tracks := []container.Track{ms[0].Track, ms[1].Track}
+		opts := waxflow.TranscodeOptions{Format: "opus"}
+		_, err := e.PlanTranscodeTimeline(tracks, waxflow.ConcatOptions{}, opts)
+		if !errors.Is(err, waxerr.ErrInvalidRequest) {
+			t.Fatalf("planning a fold of a mixed-width envelope = %v, want a refusal", err)
+		}
+		if !strings.Contains(err.Error(), "ConcatOptions.Channels") {
+			t.Errorf("the refusal %q does not name the remedy", err)
+		}
+		ch, err := e.TimelineChannels(tracks, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err := e.PlanTranscodeTimeline(tracks, waxflow.ConcatOptions{Channels: ch}, opts)
 		if err != nil {
 			t.Fatalf("planning at the resolved width: %v", err)
 		}

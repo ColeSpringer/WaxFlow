@@ -243,7 +243,8 @@ type CapsDelivery struct {
 	// WaxBin catalog (a build with a catalog resolver).
 	PID bool `json:"pid"`
 	// Timelines: the daemon mints multi-source timelines (CreateTimeline),
-	// which a tl= parameter then streams gaplessly.
+	// which a tl= parameter then streams gaplessly over HLS, and on /stream
+	// when TimelineStream says so.
 	Timelines bool `json:"timelines"`
 	// MaxTimelineMembers bounds one timeline's member count.
 	MaxTimelineMembers int `json:"maxTimelineMembers,omitempty"`
@@ -253,6 +254,12 @@ type CapsDelivery struct {
 	// which 400s a windowed member as an unknown field: route by presence
 	// and fall back (per-item URLs) rather than trying.
 	TimelineMemberWindows bool `json:"timelineMemberWindows,omitempty"`
+	// TimelineStream: /stream takes tl, serving a minted timeline as one
+	// progressive stream, so a player without HLS plays a queue gaplessly.
+	// Absent means the daemon does not: one too old to have it 400s tl on
+	// /stream as an unknown parameter, and one with timelines off (Timelines
+	// false) 415s it. Route by presence, as for TimelineMemberWindows.
+	TimelineStream bool `json:"timelineStream,omitempty"`
 	// RootsReload: the daemon serves POST /roots/reload, reconciling its
 	// live library roots from a re-read config so a runtime-added root
 	// streams without a restart. Wired only for a file-configured daemon

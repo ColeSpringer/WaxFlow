@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -232,6 +233,18 @@ func TestSourcePipelineRefusesAChangedSource(t *testing.T) {
 		src: &source.File{Ref: "lib/a.wav", Ext: "wav", ID: source.Identity{Size: 1, MtimeNS: 1}}})
 	if _, err := p.run(context.Background(), io.Discard); waxerr.CodeOf(err) != waxerr.CodeSourceChanged {
 		t.Errorf("a pipeline over a changed source = %v, want %s", err, waxerr.CodeSourceChanged)
+	}
+}
+
+// TestPrepareSourceRefusesATimeline: the single-source front half refuses a tl
+// request by name, so a caller that forgets to route a timeline gets that
+// refusal instead of resolving an empty source reference.
+func TestPrepareSourceRefusesATimeline(t *testing.T) {
+	s := internalServer(t, nil)
+	q := url.Values{"tl": {strings.Repeat("a", 43)}, "format": {"flac"}, "gain": {"off"}}
+	_, err := s.prepareSource(context.Background(), q, false)
+	if waxerr.CodeOf(err) != waxerr.CodeInvalidRequest || err == nil || !strings.Contains(err.Error(), "tl names a timeline") {
+		t.Fatalf("prepareSource of a tl request = %v, want the named refusal", err)
 	}
 }
 

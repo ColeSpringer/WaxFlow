@@ -316,7 +316,8 @@ func (s *Store) Touch(digest string, exp time.Time) {
 	}
 	// Extending rewrites the document, so it needs the members back. This is
 	// off the common path: every URL of one playback session carries the
-	// session's own expiry, so the first request extends and the rest do not.
+	// session's own expiry, and the daemon rounds a key-authed read's default
+	// up to the hour, so the first request extends and the rest do not.
 	//
 	// The load happens outside the lock, so a concurrent GC or eviction can
 	// take the timeline between the decision to extend and the Put that

@@ -153,6 +153,33 @@ func TestMergeJobLengthIsTheSum(t *testing.T) {
 	}
 }
 
+// TestMergeAcceptsMixedWidthsToALossyRow pins that the merge's creation plans
+// the timeline its run will: a 5.1 member and a stereo one merged to a stereo
+// lossy row are built at the delivered width, so the request is accepted and
+// the product is stereo and whole. A validation that planned the envelope's
+// width instead would refuse it as a fold across a mixed seam.
+func TestMergeAcceptsMixedWidthsToALossyRow(t *testing.T) {
+	env := jobsEnv(t)
+	for name, ch := range map[string]int{"wide.wav": 6, "two.wav": 2} {
+		if err := os.WriteFile(filepath.Join(env.root, name), rampWAV(t, 48000, ch, 24000), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	id := createJob(t, env, `{"type":"merge","srcs":["lib/wide.wav","lib/two.wav"],"format":"mp3"}`)
+	awaitJob(t, env, id)
+	resp := env.get(t, "/jobs/"+id+"/result", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("result: status = %d, want 200: %s", resp.StatusCode, readBody(t, resp))
+	}
+	got := decodePCM(t, readBody(t, resp))
+	if got.Fmt.Channels != 2 {
+		t.Errorf("the merge delivered %d channels, want the row's 2", got.Fmt.Channels)
+	}
+	if got.N != 48000 {
+		t.Errorf("the merged file decodes to %d frames, want both members' 48000", got.N)
+	}
+}
+
 // TestMergeSelectsProgressiveMP4 pins the M4B decision: an mp4-family merge
 // written to a file takes the flat form, which is what Apple Books reads and
 // the only shape that can carry a chapter text track, without the caller

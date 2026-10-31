@@ -754,11 +754,12 @@ type ConcatSource struct {
 //
 // # Hand the same options to the plan and to the run
 //
-// PlanSegmentsTimeline(tracks, copts, ...) and Concat(members, copts) are two
-// calls taking two separately constructed ConcatOptions, and nothing checks
-// that they match. Both fields below make a mismatch a silent wrong answer
-// rather than an error, so the convention is: build one ConcatOptions and pass
-// it to both.
+// PlanSegmentsTimeline(tracks, copts, ...) or PlanTranscodeTimeline and
+// Concat(members, copts) are two calls taking two separately constructed
+// ConcatOptions, and nothing checks that they match. Both fields below make a
+// mismatch a silent wrong answer rather than an error, so the convention is:
+// build one ConcatOptions and pass it to both. Engine.ConcatOptionsFor builds
+// the one a transcode with given TranscodeOptions needs.
 //
 // For Profile a mismatch is a wrong cache key: the plan names one profile in
 // its Versions and the run resamples through another, so the cached bytes
@@ -1244,6 +1245,19 @@ func (e *Engine) TimelineChannels(tracks []container.Track, opts TranscodeOption
 		return 0, nil
 	}
 	return plan.Format.Channels, nil
+}
+
+// ConcatOptionsFor is the ConcatOptions convention as one call: the options a
+// timeline of tracks transcoded with opts must be built and planned with. The
+// profile is opts.ResampleProfile, crossfade is in envelope samples (see
+// CrossfadeSamples) and passes through, and the width is TimelineChannels'
+// answer, whose errors propagate as they are.
+func (e *Engine) ConcatOptionsFor(tracks []container.Track, crossfade int64, opts TranscodeOptions) (ConcatOptions, error) {
+	ch, err := e.TimelineChannels(tracks, opts)
+	if err != nil {
+		return ConcatOptions{}, err
+	}
+	return ConcatOptions{Profile: opts.ResampleProfile, Crossfade: crossfade, Channels: ch}, nil
 }
 
 // refuseMixedWidthConversion is the other half of the width rule: a channel
@@ -1773,8 +1787,10 @@ func (c *concat) seekBody(local int64) (int64, error) {
 // cos(0) = 1.0, at exactly zone[0], the one frame the curve promises is the
 // outgoing member's own sample. A continuous read reaches that frame with a
 // warm chain, so the two differ. A uniform timeline has no chain to be cold
-// (see buildChain), which is both the gapless album and the two-slice declick,
-// so it is every caller there is today.
+// (see buildChain), which is both the gapless album and the two-slice declick.
+// A crossfaded mixed-rate timeline seeked on /stream reaches it, and there the
+// transient is one landing among others: a progressive seek starts cold
+// everywhere else too, and the length stays exact.
 //
 // Priming the outgoing member is possible and is not worth it: it would be a
 // new invariant for one case, and the consumer that would notice already

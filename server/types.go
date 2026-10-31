@@ -370,7 +370,8 @@ type CapsDelivery struct {
 	// catalog (a catalog resolver with catalogDB configured).
 	PID bool `json:"pid"`
 	// Timelines: POST /hls/timeline mints multi-source timelines, which the
-	// tl= parameter then streams gaplessly. MaxTimelineMembers bounds one.
+	// tl= parameter then streams gaplessly over HLS, and on /stream under
+	// TimelineStream. MaxTimelineMembers bounds one.
 	Timelines          bool `json:"timelines"`
 	MaxTimelineMembers int  `json:"maxTimelineMembers,omitempty"`
 	// TimelineMemberWindows: timeline members take from/to sample windows,
@@ -380,6 +381,12 @@ type CapsDelivery struct {
 	// as an unknown field, so absent means fall back (per-item URLs), not
 	// "windows without advertising them".
 	TimelineMemberWindows bool `json:"timelineMemberWindows,omitempty"`
+	// TimelineStream: /stream takes tl, serving a minted timeline as one
+	// progressive stream. Presence-routed like TimelineMemberWindows: absent
+	// is a daemon too old to have it, which 400s tl on /stream as an unknown
+	// parameter (play the timeline over HLS), or one with timelines off, which
+	// 415s it (play the members one URL at a time).
+	TimelineStream bool `json:"timelineStream,omitempty"`
 	// HEv2: the hev2 parameter selects HE-AAC v2 for he-aac output on
 	// /stream, the HLS mint, and jobs. A client routes by this field's
 	// presence, the TimelineMemberWindows convention: a daemon too old to
@@ -587,6 +594,7 @@ func buildCaps(f capsFlags) Caps {
 	if f.timelines {
 		caps.Delivery.MaxTimelineMembers = timeline.MaxMembers
 		caps.Delivery.TimelineMemberWindows = true
+		caps.Delivery.TimelineStream = true
 	}
 	for _, id := range format.Decoders() {
 		caps.Decoders = append(caps.Decoders, string(id))

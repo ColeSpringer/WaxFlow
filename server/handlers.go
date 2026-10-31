@@ -124,6 +124,19 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, err)
 			return
 		}
+		if p.tl != "" {
+			// Planned now, so a URL that signs is one that plays. Nothing is
+			// pinned beside the digest, which pins every member's identity, and
+			// the duration is the whole timeline's, as a source's is the whole
+			// source's whatever t= says.
+			ts, err := s.prepareTimelineStream(r.Context(), p)
+			if err != nil {
+				s.writeError(w, err)
+				return
+			}
+			duration = ts.seconds
+			break
+		}
 		f, err := s.resolver.Resolve(r.Context(), p.src)
 		if err != nil {
 			s.writeError(w, err)
@@ -204,6 +217,13 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 // /stream.
 func (s *Server) handleTranscode(w http.ResponseWriter, r *http.Request) {
 	reqStart := time.Now()
+	// The parameter surface is /stream's, which takes a timeline; this one-shot
+	// does not, since one file of a timeline is what a merge job writes.
+	if r.URL.Query().Has("tl") {
+		s.writeError(w, waxerr.New(waxerr.CodeInvalidRequest,
+			"tl: one file of a timeline is a merge job (POST /jobs, type merge); /transcode takes one src"))
+		return
+	}
 	req, err := s.prepareSource(r.Context(), r.URL.Query(), false)
 	if err != nil {
 		s.writeError(w, err)
@@ -248,8 +268,9 @@ func (s *Server) handleTranscode(w http.ResponseWriter, r *http.Request) {
 // outputFilename derives the attachment name from the source reference.
 //
 // A ref with no name of its own falls back rather than composing one out of
-// punctuation. Every caller requires a ref (parseStreamParams refuses an
-// empty src, validateJobRequest an empty src and empty srcs), so this is a
+// punctuation. Every caller requires a ref (prepareSource refuses a request
+// without one, since parseStreamParams admits an empty src only beside a tl,
+// and validateJobRequest refuses an empty src and empty srcs), so this is a
 // guard on the arithmetic and not a live path; it is here because the
 // arithmetic is a trap. path.Base("") is ".", whose only dot is at index 0,
 // which the extension strip below skips over on purpose (a leading dot is a

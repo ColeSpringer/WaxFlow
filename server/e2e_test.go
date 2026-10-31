@@ -84,6 +84,7 @@ type testEnv struct {
 	srv   *server.Server
 	root  string // library root with track.flac, sine.wav, sine-alaw.wav, mp3.wav, ramp.wav
 	cache string
+	tlDir string // the timeline store's directory when timelineEnv made it, else ""
 }
 
 func newTestEnv(t *testing.T, mutate func(*server.Config)) *testEnv {
@@ -898,6 +899,23 @@ func TestSeekSampleExact(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestSeekRoundsToTheNearestSample: t= names the nearest sample, not the one
+// below it. 0.009 s at 48 kHz is sample 432, but 0.009 * 48000 is
+// 431.99999999999994 in float64, which a truncating conversion turns into 431.
+func TestSeekRoundsToTheNearestSample(t *testing.T) {
+	env := newTestEnv(t, nil)
+	srcBytes, err := os.ReadFile(filepath.Join(env.root, "ramp.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := env.get(t, "/stream?src=lib/ramp.wav&format=wav&t=0.009", nil)
+	body := readBody(t, resp)
+	if resp.StatusCode != 200 {
+		t.Fatalf("seek stream = %d: %s", resp.StatusCode, body)
+	}
+	wantFramesFrom(t, decodePCM(t, body), decodePCM(t, srcBytes), 432)
 }
 
 func TestSignedURLLifecycle(t *testing.T) {

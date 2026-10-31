@@ -1260,27 +1260,26 @@ func (r *Runner) runMerge(ctx context.Context, j *Job) error {
 			Open:  func() (format.Media, error) { return r.openMemberMedia(ctx, req, i) },
 		}
 	}
-	// The daemon's profile and no crossfade, which is what the server plans a
-	// merge's envelope with (its timelineOptions). The two are separate
-	// literals because this package cannot see the server's, and they agree
-	// because a merge has no crossfade to disagree about: nothing on the wire
-	// asks for one. Thread a crossfade to a job and this is the second place it
-	// has to reach, or the 201 validates an envelope of sum-(N-1)X while this
-	// delivers the full sum.
+	// The daemon's profile and no crossfade, built by the same call the server
+	// validated the merge's envelope with (Engine.ConcatOptionsFor), so the two
+	// agree by construction. A merge has no crossfade because nothing on the
+	// wire asks for one. Thread a crossfade to a job and this 0 is the second
+	// place it has to reach, or the 201 validates an envelope of sum-(N-1)X
+	// while this delivers the full sum.
 	//
-	// One copts (not one layout) is handed to both Concat and the chapter
+	// One copts (not one layout) is handed to the plan, Concat and the chapter
 	// offsets: ConcatOptions' convention is that the plan and the run take the
 	// same options, and here Concat is the run and the offsets must match it.
-	// Both walk concatLayout independently over the same tracks and copts, so
-	// the seams ConcatBoundaries reports are exactly the ones Concat plays. The
-	// second walk is header arithmetic with no I/O, once per job; the funnel is
-	// what makes it agree rather than merely happen to.
+	// All three walk concatLayout independently over the same tracks and copts,
+	// so the seams ConcatBoundaries reports are exactly the ones Concat plays.
+	// The extra walks are header arithmetic with no I/O, once per job; the
+	// funnel is what makes them agree rather than merely happen to.
 	//
 	// The width is the third thing that has to agree, and it needs the output,
 	// so opts is built first. A merge whose members differ in width and whose
 	// output is narrower than the envelope must be concatenated at the
 	// delivered width or every member is folded by the envelope's matrix rather
-	// than its own (waxflow.ConcatOptions.Channels); TimelineChannels answers 0
+	// than its own (waxflow.ConcatOptions.Channels); the width comes back 0
 	// for every other merge, which is nearly all of them.
 	//
 	// Gain is zero and there are no source tags: a merge takes neither field,
@@ -1288,11 +1287,17 @@ func (r *Runner) runMerge(ctx context.Context, j *Job) error {
 	// out. The server refuses them at creation; this is only where that shows.
 	opts := req.TranscodeOptions(0, r.cfg.Profile)
 	opts.Progress = r.progressFunc(ctx, j.ID, "transcode")
-	ch, err := r.cfg.Engine.TimelineChannels(tracks, opts)
+	copts, err := r.cfg.Engine.ConcatOptionsFor(tracks, 0, opts)
 	if err != nil {
 		return err
 	}
-	copts := waxflow.ConcatOptions{Profile: r.cfg.Profile, Channels: ch}
+	// The timeline's own plan rather than one over the synthetic track, so the
+	// run plans what a /stream of the same timeline plans, width refusal and
+	// member versions included.
+	plan, err := r.cfg.Engine.PlanTranscodeTimeline(tracks, copts, opts)
+	if err != nil {
+		return err
+	}
 	med, err := waxflow.Concat(members, copts)
 	if err != nil {
 		return err
@@ -1307,10 +1312,6 @@ func (r *Runner) runMerge(ctx context.Context, j *Job) error {
 			return err
 		}
 		opts.Chapters = chapters
-	}
-	plan, err := r.cfg.Engine.PlanTranscode(med.Info().Default(), opts)
-	if err != nil {
-		return err
 	}
 	out, err := r.writeMedia(ctx, j, med, "out."+outputExt(opts), opts, plan.MediaType)
 	if err != nil {

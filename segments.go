@@ -321,25 +321,36 @@ func (e *Engine) PlanSegmentsTimeline(tracks []container.Track, copts ConcatOpti
 	if err != nil {
 		return nil, err
 	}
-	// The plan-time half of the width rule, on the count the row actually
-	// delivers rather than the one asked for. A run of this plan would refuse,
-	// so the plan does, and here it can name the remedy while the caller still
-	// has the tracks in hand.
-	if mixedWidthConversion(tracks, env.Fmt, plan.Format.Channels) {
-		return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+	if err := finishTimelinePlan(tracks, env.Fmt, copts, &plan.TranscodePlan); err != nil {
+		return nil, err
+	}
+	return plan, nil
+}
+
+// finishTimelinePlan is the tail both timeline plans share, so they refuse and
+// key alike: plan is the one PlanTranscode or PlanSegments made over the
+// synthetic track ConcatTrack built from tracks and copts, with env its format.
+//
+// It applies the plan-time half of the width rule, on the count the row
+// actually delivers rather than the one asked for. A run of this plan would
+// refuse, so the plan does, and here it can name the remedy while the caller
+// still has the tracks in hand. Then it prepends what the synthetic track
+// cannot name (timelineVersions). Both plans return a Versions slice of their
+// own, never the plan cache's shared one, so prepending is safe.
+func finishTimelinePlan(tracks []container.Track, env audio.Format, copts ConcatOptions, plan *TranscodePlan) error {
+	if mixedWidthConversion(tracks, env, plan.Format.Channels) {
+		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
 			"waxflow: this timeline's members were conformed to %d channels from other widths, so delivering it "+
 				"as %d channels is not any member's own conversion; build the timeline at the delivered width "+
 				"instead: ConcatOptions.Channels, see Engine.TimelineChannels",
-			env.Fmt.Channels, plan.Format.Channels))
+			env.Channels, plan.Format.Channels))
 	}
-	extra, err := timelineVersions(tracks, env.Fmt, copts)
+	extra, err := timelineVersions(tracks, env, copts)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	// PlanSegments already returned a Versions slice of its own, so
-	// prepending cannot reach the plan cache's shared one.
 	plan.Versions = append(extra, plan.Versions...)
-	return plan, nil
+	return nil
 }
 
 // timelineVersions lists what a timeline's synthetic track cannot: every

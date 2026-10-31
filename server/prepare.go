@@ -69,6 +69,11 @@ func (s *Server) prepareSource(ctx context.Context, q url.Values, sigAuthed bool
 	if err != nil {
 		return nil, err
 	}
+	// A timeline parses with no src; routing it is the caller's job, so one
+	// that reaches here is refused by name rather than resolved as "".
+	if p.tl != "" {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, "tl names a timeline, and this endpoint serves one src")
+	}
 	src, err := s.resolver.Resolve(ctx, p.src)
 	if err != nil {
 		return nil, err
@@ -155,7 +160,7 @@ func (s *Server) prepareSource(ctx context.Context, q url.Values, sigAuthed bool
 		track: track,
 		// The seek is inside the span: t= addresses the virtual track's own
 		// timeline, because that is the stream the caller is playing.
-		from:   int64(p.t * float64(track.Fmt.Rate)),
+		from:   seekSample(p.t, track.Fmt.Rate),
 		gainDB: p.gain.resolveDB(m, p.dynamics),
 		meta:   m,
 		// -1, not the zero value: cutTrack threads to CutStream as "the source's

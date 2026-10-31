@@ -164,6 +164,9 @@ func (s *Server) prepareHLS(r *http.Request) (*hlsRequest, error) {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			"this URL is per-variant; the bitrates ladder belongs to master.m3u8")
 	}
+	if err := s.refuseHLSQuery(desc); err != nil {
+		return nil, err
+	}
 	req := &hlsRequest{desc: desc}
 	ok := false
 	defer func() {
@@ -265,9 +268,8 @@ func (s *Server) resolveHLSSources(ctx context.Context, req *hlsRequest) error {
 // queue is a thousand descriptors against a default limit of 1024, and would
 // undo the point of Concat opening members lazily.
 func (s *Server) resolveTimelineMembers(ctx context.Context, digest string) ([]memberSource, error) {
-	if s.timelines == nil {
-		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
-			"multi-source timelines are not enabled on this daemon")
+	if err := s.checkTimelines(); err != nil {
+		return nil, err
 	}
 	refs, err := s.timelines.Members(digest)
 	if err != nil {
@@ -459,11 +461,12 @@ func (s *Server) planHLSVariant(desc hls.Descriptor, tracks []container.Track, m
 	return vp, nil
 }
 
-// planHLSRung is planHLSVariant short of the playlist cap: the first rung that
-// serves the variant, and its plan.
-func (s *Server) planHLSRung(desc hls.Descriptor, tracks []container.Track, m *meta.Info,
-	rmx *source.File) (variantPlan, error) {
-	fail := func(err error) (variantPlan, error) { return variantPlan{}, err }
+// hlsVariantOptions maps a variant descriptor onto engine options, refusing
+// what the descriptor alone rules out. It reads nothing but the descriptor and
+// m, which resolves tag-based gain (nil at mint and for a timeline), so a
+// caller can run it before resolving anything (refuseHLSQuery).
+func (s *Server) hlsVariantOptions(desc hls.Descriptor, m *meta.Info) (waxflow.TranscodeOptions, error) {
+	fail := func(err error) (waxflow.TranscodeOptions, error) { return waxflow.TranscodeOptions{}, err }
 	if desc.Bitrate != 0 {
 		if lossy, known := waxflow.LossyFormat(desc.Format); known && !lossy {
 			return fail(waxerr.New(waxerr.CodeUnsupportedFormat,
@@ -486,7 +489,7 @@ func (s *Server) planHLSRung(desc hls.Descriptor, tracks []container.Track, m *m
 	if err != nil {
 		return fail(err)
 	}
-	opts := waxflow.TranscodeOptions{
+	return waxflow.TranscodeOptions{
 		Format:          desc.Format,
 		Rate:            desc.Rate,
 		Channels:        desc.Ch,
@@ -498,6 +501,34 @@ func (s *Server) planHLSRung(desc hls.Descriptor, tracks []container.Track, m *m
 		OpusBitrate:     desc.Bitrate * 1000,
 		AACBitrate:      desc.Bitrate * 1000,
 		HEAACv2:         desc.HEv2,
+	}, nil
+}
+
+// refuseHLSQuery refuses what desc alone rules out, before anything resolves:
+// a timeline on a daemon without them, and each ladder rung's options. A
+// refusal then costs no source read, and no 404 or 410 hides it.
+func (s *Server) refuseHLSQuery(desc hls.Descriptor) error {
+	if desc.Tl != "" {
+		if err := s.checkTimelines(); err != nil {
+			return err
+		}
+	}
+	for _, kbps := range desc.Ladder() {
+		if _, err := s.hlsVariantOptions(desc.Variant(kbps), nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// planHLSRung is planHLSVariant short of the playlist cap: the first rung that
+// serves the variant, and its plan.
+func (s *Server) planHLSRung(desc hls.Descriptor, tracks []container.Track, m *meta.Info,
+	rmx *source.File) (variantPlan, error) {
+	fail := func(err error) (variantPlan, error) { return variantPlan{}, err }
+	opts, err := s.hlsVariantOptions(desc, m)
+	if err != nil {
+		return fail(err)
 	}
 	// The timeline plan is not the single-source plan over a synthetic
 	// track: it also carries the members' decoder revisions and the
@@ -662,14 +693,13 @@ func canonicalHLSParams(plan *waxflow.SegmentPlan, gainDB float64, dyn gain.Pres
 		canonicalCore(&plan.TranscodePlan, gainDB, dyn, sp, hev2), plan.SegmentSamples)
 }
 
-// hlsChildExp is the expiry child URLs (media playlists, init, segments)
-// are signed with: the requesting URL's own exp when it has one, so one
-// minting governs the session, else the default TTL policy.
+// childExp is the expiry child URLs (media playlists, init, segments) are
+// signed with, and the one a timeline read extends the store to: the
+// requesting URL's own exp when it has one, so one minting governs the
+// session, else the default TTL policy rounded up to the hour (readExpiry), so
+// a key-authed child URL can outlive max(6 h, 2x duration) by up to an hour.
 func (req *hlsRequest) childExp() time.Time {
-	if req.exp > 0 {
-		return time.Unix(req.exp, 0)
-	}
-	return time.Now().Add(sign.DefaultTTLFor(DurationSeconds(req.plan.Samples, req.plan.Format.Rate)))
+	return readExpiry(req.exp, DurationSeconds(req.plan.Samples, req.plan.Format.Rate))
 }
 
 // hlsChildQuery renders a child URL's query: the variant descriptor,
@@ -704,6 +734,10 @@ func (s *Server) handleHLSMaster(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if desc, err = hls.DecodeDescriptor(q.Get("v")); err != nil {
+			s.writeError(w, err)
+			return
+		}
+		if err := s.refuseHLSQuery(desc); err != nil {
 			s.writeError(w, err)
 			return
 		}
@@ -743,12 +777,11 @@ func (s *Server) handleHLSMaster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	exp := time.Now().Add(sign.DefaultTTLFor(duration))
+	var sigExp int64
 	if sigAuthed {
-		if e, _ := strconv.ParseInt(q.Get(sign.ParamExp), 10, 64); e > 0 {
-			exp = time.Unix(e, 0)
-		}
+		sigExp, _ = strconv.ParseInt(q.Get(sign.ParamExp), 10, 64)
 	}
+	exp := readExpiry(sigExp, duration)
 	if desc.Tl != "" {
 		// The master is a URL-minting path, like /sign: every child URL below
 		// is signed with exp, so the timeline has to outlive them. This is the
@@ -1377,6 +1410,9 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string
 	// playback.
 	out, err := hls.DecodeDescriptor(d.Encode())
 	if err != nil {
+		return hls.Descriptor{}, 0, err
+	}
+	if err := s.refuseHLSQuery(out); err != nil {
 		return hls.Descriptor{}, 0, err
 	}
 	// Every rung must plan (mirroring the master handler), so a URL that

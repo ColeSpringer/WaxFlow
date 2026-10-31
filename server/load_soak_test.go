@@ -177,8 +177,13 @@ func streamingSoak(t *testing.T, duration, grace time.Duration) {
 		// Small, so entries keep being evicted and requests keep missing:
 		// fresh encodes to abandon and segments for workers to make.
 		c.CacheMaxBytes = 1 << 20
+		c.TimelineDir = filepath.Join(t.TempDir(), "timelines")
 	})
 	writeLongRamp(t, env, "long.wav", 20)
+	// A timeline over both sources, so its encodes open members lazily and
+	// cross a seam under the same churn.
+	minted := mintTimeline(t, env, []string{"lib/long.wav", "lib/ramp.wav"})
+	tl := minted.Tl
 	// One variant per worker, so a worker's pause after a fetch is a pause
 	// on its variant.
 	segs := make([][]string, soakWorkers)
@@ -192,6 +197,11 @@ func streamingSoak(t *testing.T, duration, grace time.Duration) {
 	if status, head := drainStatus(t, env, "/stream?src=lib%2Framp.wav&format=opus"); status != http.StatusOK {
 		t.Fatalf("warmup = %d: %s", status, head)
 	}
+	// And one whole timeline: with no grace the unread encodes hold every
+	// slot, so under -race a fresh timeline encode may never get one later.
+	if status, head := drainStatus(t, env, "/stream?tl="+tl+"&format=flac&gain=off"); status != http.StatusOK {
+		t.Fatalf("timeline warmup = %d: %s", status, head)
+	}
 	waitForIdle(t, env)
 	env.ts.Client().CloseIdleConnections() // symmetric with the final count
 	runtime.GC()
@@ -201,19 +211,19 @@ func streamingSoak(t *testing.T, duration, grace time.Duration) {
 	baselineHeap := mem.HeapAlloc
 
 	// With a grace, the soak runs on (to 4x its duration at most) until it
-	// has stopped unread work of both kinds, so a slow runner still proves
-	// the paths it exists to leak-check.
+	// has stopped unread work of both kinds and streamed a timeline, so a
+	// slow runner still proves the paths it exists to leak-check.
 	stop := make(chan struct{})
 	met := env.srv.Metrics()
+	var requests, timelineStreams atomic.Int64
 	go func() {
 		defer close(stop)
 		time.Sleep(duration)
 		for deadline := time.Now().Add(3 * duration); grace > 0 && time.Now().Before(deadline) &&
-			(met.AbandonedLive.Load() == 0 || met.AbandonedHLS.Load() == 0); {
+			(met.AbandonedLive.Load() == 0 || met.AbandonedHLS.Load() == 0 || timelineStreams.Load() == 0); {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}()
-	var requests atomic.Int64
 	var wg sync.WaitGroup
 	for w := range soakWorkers {
 		wg.Add(1)
@@ -228,7 +238,7 @@ func streamingSoak(t *testing.T, duration, grace time.Duration) {
 				default:
 				}
 				requests.Add(1)
-				switch rng.Intn(6) {
+				switch rng.Intn(7) {
 				case 0: // full read
 					drainStatus(t, env, "/stream?src=lib%2Framp.wav&format=opus")
 				case 1: // client abandons mid-body (the disconnect path)
@@ -250,6 +260,19 @@ func streamingSoak(t *testing.T, duration, grace time.Duration) {
 						env.ts.URL+fmt.Sprintf("/stream?src=lib%%2Flong.wav&format=flac&t=%.3f", 10*rng.Float64()), nil)
 					req.Header.Set("X-API-Key", testKey)
 					if resp, err := env.ts.Client().Do(req); err == nil {
+						io.ReadFull(resp.Body, make([]byte, 512))
+						resp.Body.Close()
+					}
+				case 6: // a timeline encode at a fresh seek, some past the seam, abandoned mid-body
+					// Seeks stay 2 s short of the end, so every 200 counted is audio.
+					seek := (minted.DurationSeconds - 2) * rng.Float64()
+					req, _ := http.NewRequest(http.MethodGet,
+						env.ts.URL+fmt.Sprintf("/stream?tl=%s&format=flac&gain=off&t=%.3f", tl, seek), nil)
+					req.Header.Set("X-API-Key", testKey)
+					if resp, err := env.ts.Client().Do(req); err == nil {
+						if resp.StatusCode == http.StatusOK {
+							timelineStreams.Add(1)
+						}
 						io.ReadFull(resp.Body, make([]byte, 512))
 						resp.Body.Close()
 					}
@@ -321,9 +344,14 @@ sampling:
 		t.Errorf("abandoned %d live, %d hls at grace %v: the soak must stop unread work exactly when a grace is set",
 			live, hls, grace)
 	}
-	t.Logf("soak: %s, %d requests; goroutines %d -> %d (baseline %d); heap %.1f -> %.1f MiB; %d samples; "+
-		"abandoned %d live, %d hls",
-		duration, requests.Load(), baselineGoroutines, now, baselineGoroutines,
+	// With a grace the timeline kind must have run under the churn; without
+	// one the warmup is the timeline that ran (see there).
+	if grace > 0 && timelineStreams.Load() == 0 {
+		t.Error("the soak streamed no timeline under the churn")
+	}
+	t.Logf("soak: %s, %d requests (%d timeline streams); goroutines %d -> %d (baseline %d); "+
+		"heap %.1f -> %.1f MiB; %d samples; abandoned %d live, %d hls",
+		duration, requests.Load(), timelineStreams.Load(), baselineGoroutines, now, baselineGoroutines,
 		float64(baselineHeap)/(1<<20), float64(finalHeap)/(1<<20), len(samples), live, hls)
 }
 
