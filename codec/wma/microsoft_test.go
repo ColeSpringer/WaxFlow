@@ -136,6 +136,33 @@ var msCorpus = sync.OnceValues(func() (map[string]string, error) {
 	return out, nil
 })
 
+var (
+	msMu      sync.Mutex
+	msEncoded = map[string]bool{}
+)
+
+// msFile encodes one cell with Windows' encoder, once per run: several tests
+// read every cell, and each encode is a PowerShell round trip.
+func msFile(t *testing.T, c msCell) string {
+	t.Helper()
+	if !testutil.HaveWMFEnc(t) {
+		t.Skip("Windows' Media Foundation WMA encoder is unavailable")
+	}
+	ffmpegPath = testutil.FFmpeg(t)
+	paths, err := msCorpus()
+	if err != nil {
+		t.Fatalf("building the corpus: %v", err)
+	}
+	path := paths[c.name()]
+	msMu.Lock()
+	defer msMu.Unlock()
+	if !msEncoded[c.name()] {
+		testutil.WMFEncode(t, path[:len(path)-4]+".wav", path, c.rate, c.channels, c.bitRate)
+		msEncoded[c.name()] = true
+	}
+	return path
+}
+
 // TestMicrosoftStereoCellsAreStereo is TestCorpusStereoCellsAreStereo for the
 // second encoder's cells, which had the trap it exists to catch: `-ac 2` on a
 // mono source, so max|L-R| was exactly 0 on all four stereo cells and the one
@@ -184,17 +211,9 @@ func TestMicrosoftEncoderDifferential(t *testing.T) {
 		t.Skip("Windows' Media Foundation WMA encoder is unavailable; " +
 			"see the WMA row in docs/quality-gates.md for what this covers that ffmpeg cannot")
 	}
-	ffmpegPath = testutil.FFmpeg(t)
-	paths, err := msCorpus()
-	if err != nil {
-		t.Fatalf("building the corpus: %v", err)
-	}
 	for _, c := range msCells {
 		t.Run(c.name(), func(t *testing.T) {
-			path := paths[c.name()]
-			wav := path[:len(path)-4] + ".wav"
-			testutil.WMFEncode(t, wav, path, c.rate, c.channels, c.bitRate)
-
+			path := msFile(t, c)
 			track, pkts := demux(t, path)
 			cfg, err := wma.ParseConfig(track.CodecConfig)
 			if err != nil {

@@ -1578,25 +1578,6 @@ func TestConcatRefusesAnAdvisoryMember(t *testing.T) {
 		}
 		checkTimelineDelivers(t, ms)
 	})
-
-	t.Run("a seek landing is not the count", func(t *testing.T) {
-		// Why the doc on ConcatSource.Track names reading over seeking. ASF
-		// indexes by packet presentation time, so a landing past the end is
-		// the last packet's rounded time plus what the pre-roll then decoded,
-		// which is under what a straight read of the same member delivers.
-		// A member measured that way and handed over unbounded overruns its
-		// own declaration at the seam.
-		med := openWMA(t, e, raws[0])
-		landed, err := med.SeekSample(math.MaxInt64)
-		med.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		counted := countMedia(t, openWMA(t, e, raws[0]))
-		if landed >= counted {
-			t.Errorf("seek landed at %d and the read counted %d; the doc's warning no longer describes this container", landed, counted)
-		}
-	})
 }
 
 // openWMA opens one of the committed .wma fixtures.

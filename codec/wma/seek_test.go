@@ -3,12 +3,18 @@
 package wma_test
 
 import (
+	"errors"
 	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
+	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/wma"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/testutil"
 )
 
@@ -23,6 +29,16 @@ import (
 // one on a decoder that has state to discard, which is also the only kind
 // format.Media ever performs.
 func decodeFrom(t *testing.T, track container.Track, pkts [][]byte, p int) []float32 {
+	t.Helper()
+	got, err := resumeFrom(t, track, pkts, p)
+	if err != nil {
+		t.Fatalf("resumed at packet %d: %v", p, err)
+	}
+	return got
+}
+
+// resumeFrom is decodeFrom returning the decode's error rather than failing.
+func resumeFrom(t *testing.T, track container.Track, pkts [][]byte, p int) ([]float32, error) {
 	t.Helper()
 	cfg, err := wma.ParseConfig(track.CodecConfig)
 	if err != nil {
@@ -47,21 +63,20 @@ func decodeFrom(t *testing.T, track container.Track, pkts [][]byte, p int) []flo
 	}
 	for i := p; i < len(pkts); i++ {
 		if err := dec.Decode(pkts[i], emit); err != nil {
-			t.Fatalf("packet %d: %v", i, err)
+			return got, err
 		}
 	}
-	if err := dec.Drain(emit); err != nil {
-		t.Fatalf("drain: %v", err)
-	}
-	return got
+	return got, dec.Drain(emit)
 }
 
 // TestSeekLandsWhereThePacketSays is the seek invariant, and it is two
 // different gates because the format makes it two.
 //
-// Everything in this decoder resynchronises inside one packet, so a decode
-// resumed at packet p is BIT-IDENTICAL to a linear one from p*frameLen -- one
-// packet of run-up is enough, which is exactly what container/asf backs a
+// On these cells everything in this decoder resynchronises inside one packet
+// (ffmpeg never reuses exponents across frames; Windows' stereo encodes can,
+// see TestTheRunUpObjectCarriesTheExponents), so a decode resumed at packet p
+// is BIT-IDENTICAL to a linear one from p*frameLen -- one packet of run-up is
+// enough, which is exactly what container/asf backs a
 // landing up by. That holds only where noise coding is off. The noise index is
 // never reset by the format, so it is a function of the entire decode history;
 // a resumed decode draws different noise for the rest of the file and never
@@ -191,4 +206,181 @@ func gcd(a, b int) int {
 		a, b = b, a%b
 	}
 	return a
+}
+
+// TestStreamSamplesMatchesTheDecode pins the length a walk of the headers
+// settles without decoding: what a linear decode delivers, from the packet
+// count and the frame counts alone, on both writers' streams.
+func TestStreamSamplesMatchesTheDecode(t *testing.T) {
+	check := func(t *testing.T, path string) {
+		track, pkts := demux(t, path)
+		cfg, err := wma.ParseConfig(track.CodecConfig)
+		if err != nil {
+			t.Fatalf("parse config: %v", err)
+		}
+		var frames int64
+		for i, p := range pkts {
+			f, ok := cfg.PacketFrames(p)
+			if !ok {
+				t.Fatalf("packet %d states no frame count", i)
+			}
+			frames += int64(f)
+		}
+		want := int64(len(decodeAll(t, track, pkts)) / cfg.Channels)
+		if got := cfg.StreamSamples(int64(len(pkts)), frames); got != want {
+			t.Errorf("StreamSamples(%d, %d) = %d, a linear decode delivers %d", len(pkts), frames, got, want)
+		}
+	}
+	for _, c := range corpusCells {
+		t.Run(c.name(), func(t *testing.T) { check(t, corpusFile(t, c)) })
+	}
+	for _, c := range msCells {
+		t.Run(c.name(), func(t *testing.T) { check(t, msFile(t, c)) })
+	}
+}
+
+// TestSeekLandsWhereTheHeadersSay is where a resumed decode's first sample
+// sits, checked on every packet of Windows' streams: a decode resumed at
+// packet p emits from FrameLen times the frames the packets before it count.
+// Windows' timestamps sit two frames under that, which is why a landing cannot
+// be read off them. Noise-off cells match bit for bit; on noise-coded ones the
+// fill differs, so the gate is the remainder's length and the alignment that
+// correlates best. A resume can also meet a channel reusing exponents from
+// before the packet, which it reports as codec.ErrNeedsHistory
+// (TestAResumeMissingACurveAsksForHistory); none of these cells does, and
+// container/asf lands an object early so a real one has them.
+func TestSeekLandsWhereTheHeadersSay(t *testing.T) {
+	for _, c := range msCells {
+		t.Run(c.name(), func(t *testing.T) {
+			track, pkts := demux(t, msFile(t, c))
+			cfg, err := wma.ParseConfig(track.CodecConfig)
+			if err != nil {
+				t.Fatalf("parse config: %v", err)
+			}
+			_, noise := wma.HighFreqMultForTest(cfg)
+			linear := decodeAll(t, track, pkts)
+			frame := cfg.FrameLen() * cfg.Channels
+			before := 0
+			for p := range pkts {
+				at := before * frame
+				f, _ := cfg.PacketFrames(pkts[p])
+				before += f
+				seeked := decodeFrom(t, track, pkts, p)
+				if len(seeked) != len(linear)-at {
+					t.Errorf("packet %d: the landing delivered %d samples, the linear decode has %d past %d",
+						p, len(seeked), len(linear)-at, at/cfg.Channels)
+					continue
+				}
+				if len(seeked) == 0 {
+					continue
+				}
+				if !noise {
+					if d := testutil.CompareF32(seeked, linear[at:]); d.MaxAbs != 0 {
+						t.Errorf("packet %d: noise coding is off, so the landing must be bit-identical: %v", p, d)
+					}
+					continue
+				}
+				n := min(len(seeked), 4*frame)
+				best, bestAt := math.Inf(-1), 0
+				for off := -2 * frame; off <= 2*frame; off += frame {
+					if at+off < 0 || at+off+n > len(linear) {
+						continue
+					}
+					if r := correlation(seeked[:n], linear[at+off:at+off+n]); r > best {
+						best, bestAt = r, off
+					}
+				}
+				if bestAt != 0 {
+					t.Errorf("packet %d: the landing correlates best %d frames from where the headers say (%.3f)",
+						p, bestAt/frame, best)
+				}
+			}
+		})
+	}
+}
+
+func correlation(a, b []float32) float64 {
+	var ea, eb, dot float64
+	for i := range a {
+		x, y := float64(a[i]), float64(b[i])
+		ea, eb, dot = ea+x*x, eb+y*y, dot+x*y
+	}
+	if ea == 0 || eb == 0 {
+		return 0
+	}
+	return dot / math.Sqrt(ea*eb)
+}
+
+// TestTheRunUpObjectCarriesTheExponents: on a Windows stereo encode a decode
+// resumed at a packet can meet a channel reusing exponents last sent before
+// it, which it refuses with codec.ErrNeedsHistory. container/asf lands an
+// object earlier, so a seek through the format layer to every packet's
+// position reads back bit for bit. The cell has to contain such a packet, or
+// it proves nothing; on this source the first falls about 22 seconds in.
+func TestTheRunUpObjectCarriesTheExponents(t *testing.T) {
+	if !testutil.HaveWMFEnc(t) {
+		t.Skip("Windows' Media Foundation WMA encoder is unavailable")
+	}
+	dir := t.TempDir()
+	wav, path := filepath.Join(dir, "src.wav"), filepath.Join(dir, "src.wma")
+	args := []string{"-v", "error", "-y", "-f", "lavfi", "-i",
+		"aevalsrc='0.28*sin(2*PI*(200+1200*mod(t,8))*mod(t,8))+0.22*(2*random(1)-1)':s=44100:d=30",
+		"-filter_complex", stereoFilter, "-ac", "2", "-c:a", "pcm_s16le", wav}
+	if b, err := exec.Command(testutil.FFmpeg(t), args...).CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg: %v\n%s", err, b)
+	}
+	testutil.WMFEncode(t, wav, path, 44100, 2, 64000)
+	track, pkts := demux(t, path)
+	cfg, err := wma.ParseConfig(track.CodecConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, noise := wma.HighFreqMultForTest(cfg); noise {
+		t.Fatal("noise coding is on; the comparisons below need it off")
+	}
+	linear := decodeAll(t, track, pkts)
+	frame := cfg.FrameLen() * cfg.Channels
+	before := 0
+	needed := 0
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	med, err := format.Open(container.BytesSource(raw), "wma", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	buf := audio.Get(track.Fmt, 2*cfg.FrameLen())
+	defer audio.Put(buf)
+	for j := range pkts {
+		at := before * frame
+		f, _ := cfg.PacketFrames(pkts[j])
+		before += f
+		if j == 0 || j == len(pkts)-1 {
+			continue
+		}
+		got, err := resumeFrom(t, track, pkts, j)
+		if errors.Is(err, codec.ErrNeedsHistory) {
+			needed++
+		} else if err != nil {
+			t.Fatalf("resumed at packet %d: %v", j, err)
+		} else if n := min(len(got), len(linear)-at, 4*frame); testutil.CompareF32(got[:n], linear[at:at+n]).MaxAbs != 0 {
+			t.Errorf("resumed at packet %d, the decode is neither exact nor refused", j)
+		}
+		if _, err := med.SeekSample(int64(at / cfg.Channels)); err != nil {
+			t.Fatal(err)
+		}
+		if err := med.ReadChunk(buf); err != nil {
+			t.Fatal(err)
+		}
+		chunk := testutil.InterleaveF(buf)
+		if d := testutil.CompareF32(chunk, linear[at:at+len(chunk)]); d.MaxAbs != 0 {
+			t.Errorf("a seek to packet %d's position reads back %v off the linear decode", j, d)
+		}
+	}
+	if needed == 0 {
+		t.Fatal("every packet resumed exactly on its own; the cell no longer needs the run-up and proves nothing")
+	}
+	t.Logf("%d of %d packets needed the object before them", needed, len(pkts)-2)
 }

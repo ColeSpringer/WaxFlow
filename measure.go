@@ -20,10 +20,11 @@ const measureCeiling = int64(1) << 61
 // there. Errors keep their codes.
 //
 // It takes the cheapest route that works: a length the open settled costs no
-// read, a deferred walk (MP3, Matroska, fragmented MP4) reads headers, a source
-// with exact positions is seeked past its end, and one whose positions are
-// rounded (ASF) is decoded from the start and counted, since a seek there lands
-// short of what the decode delivers.
+// read, a deferred walk (MP3, Matroska, fragmented MP4, the frame counts of a
+// WMA v1/v2 track) reads headers, a source with exact positions is seeked past
+// its end, and one whose positions are rounded and whose codec counts no
+// frames (WMA Pro, Voice and Lossless in ASF) is decoded from the start and
+// counted, since a seek there lands on a stated time, not on the decode.
 func MeasureLength(med format.Media) (container.Track, error) {
 	if med == nil {
 		return container.Track{}, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: MeasureLength of a nil Media")

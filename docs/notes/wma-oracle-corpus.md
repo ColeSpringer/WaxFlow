@@ -260,11 +260,14 @@ source length floored to a millisecond; Media Foundation's declares the source
 plus up to a frame of encoder tail, measured from source sample 0 rather than
 from the start of the coded stream.
 
-**A seek past the end is not the length.** On `container/asf/testdata/
-sine-wmav2.wma`, `SeekSample` past any target lands at 90075 while a straight
-read delivers 90112: the index is in packet presentation times, so the landing
-carries that rounding. Measuring one of these tracks means reading it. The
-cell is `TestConcatRefusesAnAdvisoryMember` in tests/.
+**The length is the frame count, not a stamp.** On `container/asf/testdata/
+sine-wmav2.wma` a seek past the end used to land at 90075, the last packet's
+presentation time, while a read delivers 90112. `container/asf` now positions
+a WMA v1/v2 seek from the frame counts in the superframe headers, and a walk
+of those counts settles the length at what a read delivers without decoding:
+`TestWalkSettlesTheLength` in container/asf, and `TestMeasureWalksARoundedContainer`
+in tests/. On Media Foundation's files the stamps sit two frames under the
+landing; `wma-bitstream.md` section 4 has the frame-count rule.
 
 ## 6. Two things about the oracle itself
 
@@ -319,10 +322,13 @@ middle and last eleven thousand samples of the seeked region all read -42
 dBFS. It is steady state, not a transient.
 
 That is the noise index of `wma-bitstream.md` section 8, isolated. Everything
-else in the decoder resynchronises inside one packet, which is why the
-noise-off stream comes back exact; the noise index never resynchronises,
-because it is never reset, so a decode that starts anywhere but the beginning
-draws different noise for the rest of the file.
+else in the decoder resynchronises inside one packet on these streams, which is
+why the noise-off stream comes back exact; the noise index never
+resynchronises, because it is never reset, so a decode that starts anywhere but
+the beginning draws different noise for the rest of the file. (Windows' stereo
+encodes add one exception, exponents a channel reuses from before the packet;
+`wma-bitstream.md` section 5 has it, and `container/asf` lands an object early
+for it.)
 
 How a seek gate should be written, given that:
 

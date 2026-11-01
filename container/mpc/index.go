@@ -20,6 +20,10 @@ const idxProbes = 8
 // rescan costs less than a disk round trip. A variable so a test can lower it.
 var idxMinStates = 64
 
+// KeepsIndex implements container.Indexer: every open keeps the seek
+// scanner's states.
+func (d *Demuxer) KeepsIndex() bool { return true }
+
 // IndexSnapshot implements container.Indexer for the seek scanner's cache.
 func (d *Demuxer) IndexSnapshot() []byte {
 	var states []musepack.State

@@ -106,13 +106,20 @@ func asfCodecID(tag uint16) (codec.ID, string) {
 
 // codecSetup is what a recognized audio stream resolves to: the decoder to
 // build and the format it emits.
+//
+// A seek lands one of two ways. A codec whose packets count their own frames
+// (counter) is positioned from those counts; the rest land on an object's
+// stated presentation time, snapped to the codec's frame grid (frameLen), and
+// the three fields after counter describe that landing.
 type codecSetup struct {
 	id  codec.ID
 	fmt audio.Format
+	// counter, for WMA v1/v2, counts the frames each object adds. Its stamps
+	// sit off the grid a resumed decode lands on, by up to two frames on
+	// Windows' files, and its superframe headers say where the grid is.
+	counter frameCounter
 	// syncOK reports whether a decoder can begin at a media object. Nil when
-	// every object is one, which is the case for WMA v1/v2: a super-frame is
-	// where that decoder restarts and what the bit reservoir carries across
-	// one is what the seek run-up covers.
+	// every object is one.
 	syncOK func([]byte) bool
 	// frameLen is the sample grid a decode resumes on, or 0 when a landing is
 	// wherever the object says it is. ASF states presentation times in
@@ -149,7 +156,7 @@ func resolveCodec(id codec.ID, w waveFormat) (codecSetup, error) {
 		if err != nil {
 			return codecSetup{}, fromCodec(err)
 		}
-		return codecSetup{id: id, fmt: cfg.Format()}, nil
+		return codecSetup{id: id, fmt: cfg.Format(), counter: cfg}, nil
 	case codec.WMAPro:
 		cfg, err := wmapro.ParseConfig(w.raw)
 		if err != nil {

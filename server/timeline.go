@@ -451,8 +451,8 @@ func (s *Server) mintTimelineFrom(ctx context.Context, srcs []*source.File, span
 // asks what the measuring costs, and the answer is not "a decode": an
 // exact-length walk is a demuxer walk plus one frame, and where the demuxer
 // can find its end from a table (FLAC's seek table, WAV's data chunk size, an
-// Ogg last page, an mp4 stts) or by bisection (FLAC, WavPack, Ogg, ASF) it
-// is well under a millisecond for a three-minute track.
+// Ogg last page, an mp4 stts) or by bisection (FLAC, WavPack, Ogg) it is
+// well under a millisecond for a three-minute track.
 //
 // What is slow is a member whose demuxer deferred a walk of the payload and
 // has not run it: a frame index to build (MP3, bare or in a WAV or AIFF-C;
@@ -464,16 +464,16 @@ func (s *Server) mintTimelineFrom(ctx context.Context, srcs []*source.File, span
 // mints through a job where it used to mint inline. That is the cheaper of
 // the two, not the more expensive one, and the job is a moof-header walk
 // rather than the per-seek payload sweep the inline mint used to pay in
-// trackFor. A progressive MP4 defers nothing and is still cheap. So is a member whose
-// container names its positions in a time unit rather than in samples (ASF):
-// no walk or seek can answer exactly there, so the measure is a decode, which
-// is the one cost this gate was written to keep out of a request. The mark is
-// the file's own answer through
-// format.Walker, whose doc says why it is a method and not a method set:
-// slow is "not exact and not yet walked". container.Indexer is not
-// consulted; it means only what its doc says, an index worth persisting. A
-// demuxer that confirms its length at open implements neither, and its
-// absence reads as cheap.
+// trackFor. A progressive MP4 defers nothing and is still cheap. An ASF
+// member is slow either way: a WMA v1/v2 track walks its packets to count
+// frames, and a Pro, Voice or Lossless track names its positions in
+// milliseconds, so no walk or seek can answer exactly and the measure is a
+// decode, which is the one cost this gate was written to keep out of a
+// request. The mark is the file's own answer through format.Walker, whose
+// doc says why it is a method and not a method set: slow is "not exact and
+// not yet walked". container.Indexer is not consulted; it means only what its
+// doc says, an index worth persisting. A demuxer that confirms its length at
+// open implements neither, and its absence reads as cheap.
 func (s *Server) timelineNeedsJob(srcs []*source.File) (bool, error) {
 	for _, f := range srcs {
 		if s.trackIsExact(f) {
@@ -502,10 +502,10 @@ func (s *Server) timelineNeedsJob(srcs []*source.File) (bool, error) {
 		med.Close()
 		// Advisory beside not-walked, because measuring is expensive for two
 		// different reasons and the gate has to know about both. A deferred
-		// walk is a whole-file pass; a container whose positions are rounded
-		// (ASF) cannot be measured by any walk or seek at all and is decoded
-		// (see waxflow.MeasureLength). Without this arm a cold timeline over a
-		// WMA minted inline and paid for that decode inside the request.
+		// walk is a whole-file pass; a rounded length the walk cannot settle
+		// (an ASF track whose codec counts no frames) is decoded (see
+		// waxflow.MeasureLength). Without this arm a cold timeline over a WMA
+		// Pro file minted inline and paid for that decode inside the request.
 		if !track.SamplesExact && (!walked || track.SamplesAdvisory) {
 			return true, nil
 		}

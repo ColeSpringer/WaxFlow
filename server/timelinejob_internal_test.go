@@ -33,9 +33,9 @@ func (c *memIndexCache) Drop(src container.Source) { delete(c.blobs, c.key(src))
 // through format.Walker: not exact and not yet walked. Both directions are
 // asserted on one container, since a gate that answered the same way for
 // both would be no gate; the shapes that fell through the old Indexer mark
-// (ADTS, an advisory-length Matroska, and an ASF whose rounded positions make
-// its measure a decode) take the job path; and a sidecar restored complete
-// mints inline.
+// (ADTS, an advisory-length Matroska, an ASF whose frame count is a walk and
+// one whose rounded positions make its measure a decode) take the job path;
+// and a sidecar restored complete mints inline.
 func TestTimelineJobGateAsksTheFile(t *testing.T) {
 	root := t.TempDir()
 	for _, f := range []struct{ src, dst string }{
@@ -46,6 +46,8 @@ func TestTimelineJobGateAsksTheFile(t *testing.T) {
 		{filepath.Join("..", "container", "mka", "testdata", "seed-pcm.mka"), "pcm.mka"},
 		{filepath.Join("..", "container", "mka", "testdata", "seed-cues.mka"), "cues.mka"},
 		{filepath.Join("..", "testdata", "sine-s16.wma"), "sine.wma"},
+		{filepath.Join("..", "container", "asf", "testdata", "ms-v2-44100-2ch-128k.wma"), "ms.wma"},
+		{filepath.Join("..", "container", "asf", "testdata", "pro-s16.wma"), "pro.wma"},
 		{filepath.Join("..", "container", "mp4", "testdata", "alac-stereo.m4a"), "prog.m4a"},
 		{filepath.Join("..", "container", "mp4", "testdata", "ima4-frag.mov"), "frag.mov"},
 	} {
@@ -103,7 +105,9 @@ func TestTimelineJobGateAsksTheFile(t *testing.T) {
 		{"lib/pcm.mka", true},         // an advisory Info Duration, and no walk at open
 		{"lib/cues.mka", true},        // Opus: the cluster walk is the measure, and no open pays it
 		{"lib/long.mp3", true},        // a cold bare MP3
-		{"lib/sine.wma", true},        // rounded positions: measuring it is a decode
+		{"lib/sine.wma", true},        // a WMA v1/v2 frame count not yet walked
+		{"lib/ms.wma", true},          // the same, with enough packets for a sidecar
+		{"lib/pro.wma", true},         // rounded positions and no frame count: a decode
 		{"lib/prog.m4a", false},       // a progressive sample table: exact at open
 		{"lib/frag.mov", true},        // a fragmented movie: the moof walk is the measure
 	} {
@@ -129,5 +133,24 @@ func TestTimelineJobGateAsksTheFile(t *testing.T) {
 	}
 	if ask("lib/long.mp3") {
 		t.Error("an MP3 whose sidecar index is complete still needs a job")
+	}
+
+	// The same for a WMA v1/v2 count, whose length stays advisory until a
+	// walk settles it: restored complete, that walk is free.
+	f = resolve("lib/ms.wma")
+	med, err = s.eng.OpenStream(f, f.Ext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := waxflow.MeasureLength(med); err != nil {
+		t.Fatal(err)
+	}
+	med.Close()
+	f.Close()
+	if cache.saves != 2 {
+		t.Fatalf("saves = %d, want the WMA count saved too", cache.saves)
+	}
+	if ask("lib/ms.wma") {
+		t.Error("a WMA whose sidecar count is complete still needs a job")
 	}
 }

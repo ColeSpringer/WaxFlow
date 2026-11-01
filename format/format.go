@@ -26,9 +26,9 @@ type Options struct {
 	// It also decides how much of a file is read. A tolerant Probe reads
 	// headers, and so does every Open: the payload walks a demuxer defers stay
 	// deferred (container.Walker: the MP3 frame index, bare or in a WAV or
-	// AIFF-C; the ADTS frame index; a Matroska cluster walk). A strict Probe
-	// finishes all of them, so its verdict covers the whole file at the cost
-	// of reading it.
+	// AIFF-C; the ADTS frame index; a Matroska cluster walk; a WMA v1/v2
+	// frame count). A strict Probe finishes all of them, so its verdict
+	// covers the whole file at the cost of reading it.
 	//
 	// No open reads a payload. A Matroska track's tail trim rides on the block
 	// that carries it (container.Packet.Padding), so a read is gapless without
@@ -124,9 +124,11 @@ type Media interface {
 // and an MP3 whose sidecar index restored complete walks for nothing. A
 // concatenated timeline and a slice do not implement it: a consumer opens
 // the member files one at a time.
-// A finished walk has measured the payload, and the Media's own Info carries
-// that measurement from then on: the walk is observable on the Media that ran
-// it, without a reopen.
+// A finished walk has measured the payload, and once Walk has run the Media's
+// own Info carries that measurement: the walk is observable on the Media that
+// ran it, without a reopen. A walk finished some other way (a seek or a read
+// to the end, a restored sidecar) reads true from Walked, which changes
+// nothing, and Walk then takes the measurement at no cost.
 type Walker interface {
 	Walk() error
 	Walked() bool

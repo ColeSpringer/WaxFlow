@@ -387,6 +387,12 @@ type Seeker interface {
 // sessions: the cacheDir/idx sidecar. Both methods are cheap when there
 // is nothing to do.
 type Indexer interface {
+	// KeepsIndex reports whether this open has an index to persist at all,
+	// fixed at the open. Some formats keep one per file: a WAV or an AIFF-C
+	// carrying MP3 frames does and the same container carrying PCM does
+	// not, and an ASF keeps a frame count for WMA v1/v2 and none for Pro,
+	// Voice or Lossless.
+	KeepsIndex() bool
 	// IndexSnapshot serializes the index built so far, or nil when it is
 	// not worth keeping (too small, or unchanged since RestoreIndex).
 	IndexSnapshot() []byte
@@ -441,14 +447,16 @@ type Warner interface {
 
 // Walker is implemented by demuxers whose open defers a walk of the payload:
 // a frame index built lazily (MP3, bare or inside a WAV or an AIFF-C; ADTS),
-// a cluster walk behind an advisory length (Matroska), or a fragmented MP4's
-// run of moof headers behind whatever its head declared. Walk finishes that
+// a cluster walk behind an advisory length (Matroska), a fragmented MP4's
+// run of moof headers behind whatever its head declared, or a WMA v1/v2
+// track's frame count behind ASF's rounded duration. Walk finishes that
 // walk through the owner's normal warn path, so under Strict damage past the
 // head becomes the malformed error and under tolerance it lands in Warnings.
 // Walked reports whether the walk has run to the end of the payload: a run
-// read to its end, a restored complete index, a walk taken at open. A walk
-// that ended early, refused under Strict or stopped by a read failure, is
-// not finished, and Walk called again stops at the same place. A finished
+// read to its end where the read is the walk (an MP3 frame index, a WMA v1/v2
+// frame count), a restored complete index, a walk taken at open. A walk that
+// ended early, refused under Strict or stopped by a read failure, is not
+// finished, and Walk called again stops at the same place. A finished
 // walk has measured the payload, and the track reports that length. A
 // strict probe calls Walk and the daemon's job gate reads Walked; they are
 // two views of one state on the same types, which is why one interface

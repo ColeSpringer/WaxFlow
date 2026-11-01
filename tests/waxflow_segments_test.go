@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -136,13 +137,21 @@ func parseSegment(t *testing.T, data []byte) *parsedSegment {
 	return seg
 }
 
-// collectSegments runs a segmented transcode and returns the segments in
-// order, asserting the indices are sequential from start.
+// collectSegments runs a segmented transcode of a WAV and returns the
+// segments in order, asserting the indices are sequential from start.
 func collectSegments(t *testing.T, e *waxflow.Engine, raw []byte, opts waxflow.TranscodeOptions,
 	segSamples int, start int64) ([]mp4.Segment, *waxflow.SegmentedResult) {
 	t.Helper()
+	return collectSegmentsFrom(t, e, raw, "wav", opts, segSamples, start)
+}
+
+// collectSegmentsFrom is collectSegments for a source of any format, named by
+// its extension hint.
+func collectSegmentsFrom(t *testing.T, e *waxflow.Engine, raw []byte, hint string, opts waxflow.TranscodeOptions,
+	segSamples int, start int64) ([]mp4.Segment, *waxflow.SegmentedResult) {
+	t.Helper()
 	var segs []mp4.Segment
-	res, err := e.TranscodeSegments(context.Background(), container.BytesSource(raw), "wav", opts,
+	res, err := e.TranscodeSegments(context.Background(), container.BytesSource(raw), hint, opts,
 		waxflow.SegmentedOptions{SegmentSamples: segSamples, StartSegment: start},
 		func(s mp4.Segment) error {
 			if want := start + int64(len(segs)); s.Index != want {
@@ -322,6 +331,44 @@ func TestSegmentedRestartFLAC(t *testing.T) {
 		if !bytes.Equal(s.Data, full[i+1].Data) {
 			t.Fatalf("restarted segment %d differs from the continuous run", s.Index)
 		}
+	}
+}
+
+// TestSegmentedRestartWMA: an HLS worker restarted at segment n seeks its
+// source to that segment's start, and the segments it writes are the
+// continuous run's from n on, byte for byte. A WMA landing taken from the
+// stamps shifted the restarted audio under the same segment index (and the
+// same cache key) by up to 37 samples on ffmpeg's file and two frames on
+// Windows'.
+func TestSegmentedRestartWMA(t *testing.T) {
+	for _, parts := range [][]string{
+		{"container", "asf", "testdata", "sine-wmav2.wma"},
+		{"container", "asf", "testdata", "ms-v2-44100-2ch-128k.wma"},
+	} {
+		t.Run(parts[len(parts)-1], func(t *testing.T) {
+			raw, err := os.ReadFile(repoPath(parts...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			e := waxflow.New()
+			opts := waxflow.TranscodeOptions{Format: "flac"}
+			const segSamples = 32768 // 8 blocks of 4096
+			full, _ := collectSegmentsFrom(t, e, raw, "wma", opts, segSamples, 0)
+			if len(full) < 3 {
+				t.Fatalf("%d segments; the restarts below need at least three", len(full))
+			}
+			for n := int64(1); n < int64(len(full)); n++ {
+				tail, _ := collectSegmentsFrom(t, e, raw, "wma", opts, segSamples, n)
+				if int64(len(tail)) != int64(len(full))-n {
+					t.Fatalf("restart at %d yielded %d segments, want %d", n, len(tail), int64(len(full))-n)
+				}
+				for i, s := range tail {
+					if !bytes.Equal(s.Data, full[n+int64(i)].Data) {
+						t.Fatalf("restart at %d: segment %d differs from the continuous run", n, s.Index)
+					}
+				}
+			}
+		})
 	}
 }
 

@@ -13,9 +13,12 @@ package wma
 
 import (
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
+	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 func discard(*audio.Buffer) error { return nil }
@@ -370,4 +373,632 @@ func TestTheCarryStopsAtItsLastPayloadBit(t *testing.T) {
 	if r.bit(); r.err == nil {
 		t.Error("a bit of padding past the carry was read as payload")
 	}
+}
+
+// TestPacketFramesCountsWhatThePacketCompletes. A seek positions a landing by
+// counting frames from the packet headers: one per packet without the
+// reservoir, and with it the superframe's frame count, the low nibble of the
+// first byte. The high nibble is the superframe index, which readers ignore.
+func TestPacketFramesCountsWhatThePacketCompletes(t *testing.T) {
+	plain := synthConfig(t, flagExpVLC)
+	res := reservoirConfig(t)
+	for _, c := range []struct {
+		name   string
+		cfg    Config
+		pkt    []byte
+		frames int
+		ok     bool
+	}{
+		{"one per packet without the reservoir", plain, []byte{0x3f, 0x00}, 1, true},
+		{"an empty packet without the reservoir", plain, nil, 0, false},
+		{"count zero", res, []byte{0x30, 0xff}, 0, true},
+		{"count fifteen", res, []byte{0x3f}, 15, true},
+		{"count one", res, []byte{0x01}, 1, true},
+		{"an empty reservoir packet", res, []byte{}, 0, false},
+	} {
+		frames, ok := c.cfg.PacketFrames(c.pkt)
+		if frames != c.frames || ok != c.ok {
+			t.Errorf("%s: PacketFrames(% x) = %d, %v, want %d, %v", c.name, c.pkt, frames, ok, c.frames, c.ok)
+		}
+	}
+}
+
+// shortHeadStream lays synthetic frames into reservoir superframes the way
+// Windows' encoder counts them, each frame in the packet it begins in, so that
+// the second packet finishes the frame the first left open and begins the
+// next in its last six bits. quiet is how many one-bit uncoded frames follow
+// the first; they exist to make both packets whole bytes.
+func shortHeadStream(t *testing.T, cfg Config) (pkts [][]byte, quiet int) {
+	t.Helper()
+	offBits, err := cfg.offsetBits()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hb := 8 + offBits + 3
+	n := cfg.FrameLen()
+	frame := func(coded bool) synthBits {
+		s := &synth{cfg: cfg}
+		s.block(t, blockSpec{len: n, next: n, coded: [2]bool{coded, coded}, transmit: true})
+		return s.bw
+	}
+	full, q := frame(true), frame(false)
+	if q.n != 1 {
+		t.Fatalf("an uncoded frame is %d bits, want 1", q.n)
+	}
+	const head = 6
+	b := full.n
+	for (2*hb+2*b+quiet+head)%8 != 0 {
+		quiet++
+	}
+	h1 := 8*((hb+b+quiet+8)/8) - hb - b - quiet // the second frame's head in packet 0
+	// Every packet but the last must end on a byte: a reader carries
+	// whatever follows a packet's last frame, padding included.
+	pack := func(last bool, frames, bitOff int, parts ...func(w *synthBits)) []byte {
+		var w synthBits
+		resHeader(t, &w, cfg, frames, bitOff)
+		for _, p := range parts {
+			p(&w)
+		}
+		if w.n%8 != 0 && !last {
+			t.Fatalf("packet %d is %d bits, not whole bytes", len(pkts), w.n)
+		}
+		return append([]byte(nil), w.b...)
+	}
+	bits := func(src synthBits, at, n int) func(w *synthBits) {
+		return func(w *synthBits) { putBits(w, src.b, at, n) }
+	}
+	quietRun := func(w *synthBits) {
+		for range quiet {
+			putBits(w, q.b, 0, 1)
+		}
+	}
+	pkts = append(pkts, pack(false, quiet+2, 0, bits(full, 0, b), quietRun, bits(full, 0, h1)))
+	pkts = append(pkts, pack(false, 1, b-h1, bits(full, h1, b-h1), bits(full, 0, head)))
+	pkts = append(pkts, pack(true, 2, b-head, bits(full, head, b-head), bits(full, 0, b), bits(full, 0, b)))
+	return pkts, quiet
+}
+
+// TestResumedDecodeCarriesAShortHead. A frame that begins in its packet's last
+// byte is an ordinary carry out in a linear decode. A seek can land on that
+// packet: it finishes a frame the decoder never saw begin and begins the next
+// in a head of eight bits or fewer, which a linear decode refuses as an
+// all-continuation packet with no payload. After a seek that refusal turned a
+// legal landing into a seek that fails, and container/asf offers every packet
+// as one. The landing decodes the frame the head begins as its lead-in, so it
+// emits from the frame after it.
+func TestResumedDecodeCarriesAShortHead(t *testing.T) {
+	cfg := reservoirConfig(t)
+	pkts, quiet := shortHeadStream(t, cfg)
+	if f, _ := cfg.PacketFrames(pkts[1]); f != 1 {
+		t.Fatalf("the landing packet states %d frames, want 1", f)
+	}
+
+	collect := func(dst *[]float32) func(*audio.Buffer) error {
+		return func(b *audio.Buffer) error {
+			*dst = append(*dst, b.ChanF(0)[:b.N]...)
+			return nil
+		}
+	}
+	var linear []float32
+	d, err := NewDecoder(cfg, cfg.Format())
+	if err != nil {
+		t.Fatalf("new decoder: %v", err)
+	}
+	defer d.Release()
+	for i, p := range pkts {
+		if err := d.Decode(p, collect(&linear)); err != nil {
+			t.Fatalf("linear packet %d: %v", i, err)
+		}
+	}
+	if err := d.Drain(collect(&linear)); err != nil {
+		t.Fatalf("linear drain: %v", err)
+	}
+
+	// A used decoder, Reset where a seek would Reset it.
+	s, err := NewDecoder(cfg, cfg.Format())
+	if err != nil {
+		t.Fatalf("new decoder: %v", err)
+	}
+	defer s.Release()
+	if err := s.Decode(pkts[0], discard); err != nil {
+		t.Fatalf("run-up: %v", err)
+	}
+	s.Reset()
+	var got []float32
+	for i := 1; i < len(pkts); i++ {
+		if err := s.Decode(pkts[i], collect(&got)); err != nil {
+			t.Fatalf("landing at packet 1, packet %d: %v", i, err)
+		}
+	}
+	if err := s.Drain(collect(&got)); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	// Packet 0 began quiet+2 frames, so the landing emits from there.
+	at := (quiet + 2) * cfg.FrameLen()
+	if len(got) == 0 || len(got) != len(linear)-at {
+		t.Fatalf("the landing emitted %d samples, the linear decode has %d past sample %d", len(got), len(linear)-at, at)
+	}
+	for i := range got {
+		if got[i] != linear[at+i] {
+			t.Fatalf("sample %d past the landing is %v, the linear decode has %v", i, got[i], linear[at+i])
+		}
+	}
+
+	// At the start of a decode the same packet is still damage: nothing
+	// came before it to finish.
+	fresh, err := NewDecoder(cfg, cfg.Format())
+	if err != nil {
+		t.Fatalf("new decoder: %v", err)
+	}
+	defer fresh.Release()
+	if err := fresh.Decode(pkts[1], discard); err == nil {
+		t.Error("a frame head of six bits was accepted at the start of a decode")
+	}
+	// A decode Reset mid-stream is a resumed one whatever it is told of its
+	// position: after a hole a stamp can read 0 well into a file.
+	atZero, err := NewDecoder(cfg, cfg.Format())
+	if err != nil {
+		t.Fatalf("new decoder: %v", err)
+	}
+	defer atZero.Release()
+	if err := atZero.Decode(pkts[0], discard); err != nil {
+		t.Fatalf("run-up: %v", err)
+	}
+	atZero.Reset()
+	if p, ok := any(atZero).(codec.Positioner); ok {
+		p.SetPosition(0)
+	}
+	if err := atZero.Decode(pkts[1], discard); err != nil {
+		t.Errorf("a decode resumed and told it is at sample 0 refused the head: %v", err)
+	}
+	// Restart, which a caller uses for a landing on the stream's first
+	// packet, is a linear decode again.
+	atStart, err := NewDecoder(cfg, cfg.Format())
+	if err != nil {
+		t.Fatalf("new decoder: %v", err)
+	}
+	defer atStart.Release()
+	if err := atStart.Decode(pkts[0], discard); err != nil {
+		t.Fatalf("run-up: %v", err)
+	}
+	atStart.Restart()
+	if err := atStart.Decode(pkts[1], discard); err == nil {
+		t.Error("a frame head of six bits was accepted by a restarted decode")
+	}
+}
+
+// layStarts lays frames back to back into reservoir superframes of payload
+// bits each, stating every packet's frame count as Windows' encoder does: the
+// frames that begin in it. at[i] is the packet frame i begins in.
+func layStarts(t *testing.T, cfg Config, frames []synthBits, payload int) (pkts [][]byte, at []int) {
+	t.Helper()
+	offBits, err := cfg.offsetBits()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if (8+offBits+3+payload)%8 != 0 {
+		t.Fatalf("a %d-bit payload does not end a packet on a byte", payload)
+	}
+	var all synthBits
+	var starts, ends []int
+	for _, f := range frames {
+		starts = append(starts, all.n)
+		putBits(&all, f.b, 0, f.n)
+		ends = append(ends, all.n)
+	}
+	for cursor := 0; cursor < all.n; cursor += payload {
+		end := cursor + payload
+		count, bitOff := 0, 0
+		for i := range frames {
+			if starts[i] >= cursor && starts[i] < end {
+				count++
+				at = append(at, len(pkts))
+			}
+			// A packet the frame only passes through states no offset.
+			if starts[i] < cursor && ends[i] > cursor && ends[i] <= end {
+				bitOff = ends[i] - cursor
+			}
+		}
+		var w synthBits
+		resHeader(t, &w, cfg, count, bitOff)
+		putBits(&w, all.b, cursor, min(payload, all.n-cursor))
+		pkt := make([]byte, (8+offBits+3+payload)/8)
+		copy(pkt, w.b)
+		pkts = append(pkts, pkt)
+	}
+	return pkts, at
+}
+
+// TestAResumeMissingACurveAsksForHistory. A block may reuse a channel's
+// exponents from the last block that coded the channel, however far back
+// that was, and nothing restates them. A decode resumed between the two has
+// no curve to reuse. A linear decode that meets the same shape is reading
+// damage and refuses it; after a seek it is history the landing did not
+// carry, and the decoder says so with codec.ErrNeedsHistory, so the caller
+// can land earlier rather than play a wrong channel. container/asf lands an
+// object earlier for exactly this, and from there the block is exact.
+func TestAResumeMissingACurveAsksForHistory(t *testing.T) {
+	cfg := Config{V2: true, Rate: 44100, Channels: 2, BitRate: 128000,
+		Flags2: flagExpVLC | flagVarBlkLen | flagReservoir}
+	cfg.BlockAlign = cfg.BitRate * cfg.FrameLen() / (cfg.Rate * 8)
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, noise := cfg.highFreqMult(); noise {
+		t.Fatal("noise coding is on; the frames below do not write its fields")
+	}
+	n := cfg.FrameLen()
+	frame := func(blocks ...blockSpec) synthBits {
+		s := &synth{cfg: cfg}
+		for _, b := range blocks {
+			s.block(t, b)
+		}
+		return s.bw
+	}
+	both, mid := [2]bool{true, true}, [2]bool{true, false}
+	frames := []synthBits{
+		frame(blockSpec{len: n, next: n, coded: both, transmit: true}),
+		frame(blockSpec{len: n, next: n, coded: both, transmit: true}), // the run-up: sends channel 1 its curve
+		frame(blockSpec{len: n, next: n, coded: mid, transmit: true}),  // the landing: channel 1 uncoded
+		frame(blockSpec{len: n / 2, next: n / 2, coded: both}, blockSpec{len: n / 2, next: n, coded: both}),
+		frame(blockSpec{len: n, next: n, coded: both, transmit: true}),
+		frame(blockSpec{len: n, next: n, coded: both, transmit: true}),
+	}
+	payload := frames[0].n
+	for _, f := range frames {
+		payload = min(payload, f.n)
+	}
+	offBits, _ := cfg.offsetBits()
+	payload -= 8 + (8+offBits+3+payload)%8 // every frame spans two packets
+	pkts, at := layStarts(t, cfg, frames, payload)
+	if at[1] == at[0] || at[2] == at[1] {
+		t.Fatal("two frames begin in one packet; the landings below would carry the curve")
+	}
+
+	collect := func(dst *[2][]float32) func(*audio.Buffer) error {
+		return func(b *audio.Buffer) error {
+			for ch := range 2 {
+				dst[ch] = append(dst[ch], b.ChanF(ch)[:b.N]...)
+			}
+			return nil
+		}
+	}
+	var linear [2][]float32
+	d, err := NewDecoder(cfg, cfg.Format())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Release()
+	for i, p := range pkts {
+		if err := d.Decode(p, collect(&linear)); err != nil {
+			t.Fatalf("linear packet %d: %v", i, err)
+		}
+	}
+	// The linear decode's own lead-in is the first frame, so the reusing
+	// frame, the fourth, is its third emitted.
+	if len(linear[0]) < 3*n {
+		t.Fatalf("the linear decode emitted %d samples", len(linear[0]))
+	}
+	reuse := [2][]float32{linear[0][2*n : 3*n], linear[1][2*n : 3*n]}
+
+	// resume decodes from packet land with a decoder that has decoded the
+	// whole stream first, a seek resetting a decoder with any history at all,
+	// or restarting it for a landing on the stream's first packet. It returns
+	// what was emitted and the first error.
+	resume := func(land int, restart bool) ([2][]float32, error) {
+		r, err := NewDecoder(cfg, cfg.Format())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Release()
+		for i := range pkts {
+			if err := r.Decode(pkts[i], discard); err != nil {
+				t.Fatalf("run-up packet %d: %v", i, err)
+			}
+		}
+		if restart {
+			r.Restart()
+		} else {
+			r.Reset()
+		}
+		var got [2][]float32
+		for i := land; i < len(pkts); i++ {
+			if err := r.Decode(pkts[i], collect(&got)); err != nil {
+				return got, err
+			}
+		}
+		return got, nil
+	}
+
+	// At the landing the third frame is the lead-in, and the reusing frame
+	// has no curve for channel 1: the decode asks for history and plays
+	// nothing of that frame.
+	var side float64
+	for i := range n {
+		side = max(side, math.Abs(float64(reuse[1][i])))
+	}
+	if side == 0 {
+		t.Fatal("the linear decode's channel 1 is silent there; the test proves nothing")
+	}
+	got, err := resume(at[2], false)
+	if !errors.Is(err, codec.ErrNeedsHistory) {
+		t.Fatalf("resumed at the landing: %v, want codec.ErrNeedsHistory", err)
+	}
+	if waxerr.CodeOf(err) != waxerr.CodeMalformedInput {
+		t.Errorf("the refusal carries %q, want malformed-input for a caller that cannot land earlier", waxerr.CodeOf(err))
+	}
+	if len(got[0]) != 0 {
+		t.Errorf("the refused landing emitted %d samples", len(got[0]))
+	}
+	// Restarted, the same decode is a linear one, and there the shape is
+	// damage.
+	if _, err := resume(at[2], true); err == nil || errors.Is(err, codec.ErrNeedsHistory) {
+		t.Errorf("a restarted decode returned %v, want the plain refusal", err)
+	}
+
+	// An object earlier, where container/asf lands, the second frame is the
+	// lead-in, the curve arrives with it, and the reusing frame is exact.
+	got, err = resume(at[1], false)
+	if err != nil {
+		t.Fatalf("resumed an object earlier: %v", err)
+	}
+	if len(got[0]) < 2*n {
+		t.Fatalf("resumed an object earlier, %d samples", len(got[0]))
+	}
+	for ch := range 2 {
+		for i := range n {
+			if got[ch][n+i] != reuse[ch][i] {
+				t.Fatalf("resumed an object earlier, channel %d sample %d: %v, the linear decode has %v",
+					ch, i, got[ch][n+i], reuse[ch][i])
+			}
+		}
+	}
+
+	// A fresh decoder that begins at the landing without a seek still
+	// refuses the reuse.
+	fresh, err := NewDecoder(cfg, cfg.Format())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Release()
+	var ferr error
+	for i := at[2]; i < len(pkts) && ferr == nil; i++ {
+		ferr = fresh.Decode(pkts[i], discard)
+	}
+	if ferr == nil || !contains(ferr.Error(), "never transmitted") {
+		t.Errorf("a decode that begins at the landing without a seek returned %v, want the refusal", ferr)
+	}
+}
+
+// layEnds lays frames back to back into reservoir superframes of payload bits
+// each, stating every packet's frame count the other way a writer can: the
+// frames that end in it, plus one when no frame is carried in. A frame that
+// ends on its packet's last bit is then counted in that packet, and the next
+// packet starts with nothing carried.
+func layEnds(t *testing.T, cfg Config, frames []synthBits, payload int) [][]byte {
+	t.Helper()
+	offBits, err := cfg.offsetBits()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if (8+offBits+3+payload)%8 != 0 {
+		t.Fatalf("a %d-bit payload does not end a packet on a byte", payload)
+	}
+	var all synthBits
+	var starts, ends []int
+	for _, f := range frames {
+		starts = append(starts, all.n)
+		putBits(&all, f.b, 0, f.n)
+		ends = append(ends, all.n)
+	}
+	var pkts [][]byte
+	for cursor := 0; cursor < all.n; cursor += payload {
+		end := cursor + payload
+		done, carried, bitOff := 0, false, 0
+		for i := range frames {
+			if ends[i] > cursor && ends[i] <= end {
+				done++
+			}
+			if starts[i] < cursor && ends[i] > cursor {
+				carried = true
+				if ends[i] <= end {
+					bitOff = ends[i] - cursor
+				}
+			}
+		}
+		count := done
+		if !carried {
+			count++
+		}
+		var w synthBits
+		resHeader(t, &w, cfg, count, bitOff)
+		putBits(&w, all.b, cursor, min(payload, all.n-cursor))
+		pkt := make([]byte, (8+offBits+3+payload)/8)
+		copy(pkt, w.b)
+		pkts = append(pkts, pkt)
+	}
+	return pkts
+}
+
+// TestUncarriedResolvesAFrameEndingOnAPacket. The frame count field is
+// counted two ways by writers, and they differ only where a frame ends on its
+// packet's last bit: Windows counts it in the packet it began in, so the next
+// packet completes it from the carry, and the other way counts it where it
+// ends, so the next packet starts clean. The headers of the next packet read
+// the same either way, a zero bit offset and frames to count, so the sum of
+// PacketFrames over-counts a frame at every such packet laid the second way.
+// Uncarried tells them apart by parsing the packet before with the decoder's
+// own bit walk, and the corrected sum is where every resumed decode lands and
+// what a linear decode delivers.
+func TestUncarriedResolvesAFrameEndingOnAPacket(t *testing.T) {
+	cfg := reservoirConfig(t)
+	n := cfg.FrameLen()
+	full := func() synthBits {
+		s := &synth{cfg: cfg}
+		s.block(t, blockSpec{len: n, next: n, coded: [2]bool{true, true}, transmit: true})
+		return s.bw
+	}
+	quiet := func() synthBits {
+		s := &synth{cfg: cfg}
+		s.block(t, blockSpec{len: n, next: n})
+		return s.bw
+	}
+	offBits, _ := cfg.offsetBits()
+	b := full().n
+	q := 0
+	for (8+offBits+3+2*b+q)%8 != 0 {
+		q++
+	}
+	// Every packet holds two coded frames and q one-bit ones exactly, so every
+	// frame boundary at a packet's end is one.
+	var frames []synthBits
+	for range 6 {
+		frames = append(frames, full(), full())
+		for range q {
+			frames = append(frames, quiet())
+		}
+	}
+	// A frame that begins in one packet and ends on the last bit of the next
+	// leaves that packet completing only the frame carried into it.
+	qb := quiet().n
+	m := 0
+	for (m*qb+b)%2 != 0 || (8+offBits+3+(m*qb+b)/2)%8 != 0 {
+		if m++; m*qb >= b {
+			t.Fatal("no lead-in puts a coded frame across a whole packet")
+		}
+	}
+	span := (m*qb + b) / 2
+	var spanning []synthBits
+	for range m {
+		spanning = append(spanning, quiet())
+	}
+	for range 4 {
+		spanning = append(spanning, full())
+	}
+	for total := m*qb + 4*b; total%span != 0; total += qb {
+		spanning = append(spanning, quiet())
+	}
+	filled := layEnds(t, cfg, spanning, span)
+	if f, _ := cfg.PacketFrames(filled[1]); f != 1 {
+		t.Fatalf("the packet the frame fills states %d frames, want 1", f)
+	}
+	for _, laid := range []struct {
+		name string
+		pkts [][]byte
+	}{
+		{"counted where they end", layEnds(t, cfg, frames, 2*b+q)},
+		{"counted where they begin", func() [][]byte { p, _ := layStarts(t, cfg, frames, 2*b+q); return p }()},
+		{"counted where they end, one filling a packet", filled},
+	} {
+		t.Run(laid.name, func(t *testing.T) {
+			pkts := laid.pkts
+			before := make([]int, len(pkts)+1)
+			raw := 0
+			for i, p := range pkts {
+				f, _ := cfg.PacketFrames(p)
+				raw += f
+				if i > 0 {
+					un, err := cfg.Uncarried(pkts[i-1], p)
+					if err != nil {
+						t.Fatalf("packet %d: %v", i, err)
+					}
+					if un {
+						before[i]--
+					}
+				}
+				before[i+1] = before[i] + f
+			}
+			linear := decodeSynthAll(t, cfg, pkts, 0)
+			if got := cfg.StreamSamples(int64(len(pkts)), int64(before[len(pkts)])); got != int64(len(linear)) {
+				t.Errorf("the corrected count gives %d samples, a linear decode %d", got, len(linear))
+			}
+			if laid.name != "counted where they begin" && cfg.StreamSamples(int64(len(pkts)), int64(raw)) == int64(len(linear)) {
+				t.Fatal("the plain sum is right on this stream; it proves nothing")
+			}
+			for j := 1; j < len(pkts); j++ {
+				got := decodeSynthAll(t, cfg, pkts, j)
+				at := before[j] * n
+				if len(got) != len(linear)-at {
+					t.Fatalf("resumed at packet %d: %d samples, the linear decode has %d past %d", j, len(got), len(linear)-at, at)
+				}
+				for i := range got {
+					if got[i] != linear[at+i] {
+						t.Fatalf("resumed at packet %d: sample %d differs", j, i)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestACarryCheckKeepsItsDecoder: a caller that asks of every packet, as a
+// frame count does, gets one decoder for the bit walk rather than one per
+// question, and the same answers.
+func TestACarryCheckKeepsItsDecoder(t *testing.T) {
+	cfg := reservoirConfig(t)
+	n := cfg.FrameLen()
+	s := &synth{cfg: cfg}
+	s.block(t, blockSpec{len: n, next: n, coded: [2]bool{true, true}, transmit: true})
+	full := s.bw
+	offBits, _ := cfg.offsetBits()
+	q := 0
+	for (8+offBits+3+2*full.n+q)%8 != 0 {
+		q++
+	}
+	var frames []synthBits
+	for range 4 {
+		frames = append(frames, full, full)
+		for range q {
+			s := &synth{cfg: cfg}
+			s.block(t, blockSpec{len: n, next: n})
+			frames = append(frames, s.bw)
+		}
+	}
+	pkts := layEnds(t, cfg, frames, 2*full.n+q)
+	check := cfg.CarryCheck()
+	for i := 1; i < len(pkts); i++ {
+		want, err := cfg.Uncarried(pkts[i-1], pkts[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := check(pkts[i-1], pkts[i]); err != nil || got != want {
+			t.Fatalf("packet %d: the kept check says %v (%v), Uncarried %v", i, got, err, want)
+		}
+	}
+	if allocs := testing.AllocsPerRun(20, func() { check(pkts[0], pkts[1]) }); allocs > 1 {
+		t.Errorf("an ambiguous packet costs %v allocations a question; the decoder is built again", allocs)
+	}
+}
+
+// decodeSynthAll decodes pkts from packet from on, after a Reset when from is
+// past the start, and returns channel 0.
+func decodeSynthAll(t *testing.T, cfg Config, pkts [][]byte, from int) []float32 {
+	t.Helper()
+	d, err := NewDecoder(cfg, cfg.Format())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Release()
+	if from > 0 {
+		for i := range from {
+			if err := d.Decode(pkts[i], discard); err != nil {
+				t.Fatalf("run-up packet %d: %v", i, err)
+			}
+		}
+		d.Reset()
+	}
+	var out []float32
+	emit := func(b *audio.Buffer) error {
+		out = append(out, b.ChanF(0)[:b.N]...)
+		return nil
+	}
+	for i := from; i < len(pkts); i++ {
+		if err := d.Decode(pkts[i], emit); err != nil {
+			t.Fatalf("packet %d: %v", i, err)
+		}
+	}
+	if err := d.Drain(emit); err != nil {
+		t.Fatal(err)
+	}
+	return out
 }

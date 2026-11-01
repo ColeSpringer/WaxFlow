@@ -26,7 +26,7 @@ var measureRoutes = []struct {
 	{"exact", filepath.Join("..", "testdata", "sine-s16.flac"), "flac"},
 	{"walk", filepath.Join("..", "testdata", "sine-cbr128.mp3"), "mp3"},
 	{"seek", filepath.Join("..", "container", "mp4", "testdata", "alac-stereo.m4a"), "m4a"},
-	{"decode", filepath.Join("..", "testdata", "sine-s16.wma"), "wma"},
+	{"decode", filepath.Join("..", "container", "asf", "testdata", "pro-s16.wma"), "wma"},
 }
 
 // opener returns a function opening a fresh Media over the file at path.
@@ -207,20 +207,17 @@ func TestMeasureLengthTakesAnExactLengthWithoutReading(t *testing.T) {
 	}
 }
 
-// TestMeasureAgreesWithTheDecodeOnARoundedContainer is the decode route, and
-// the reason it exists. ASF names its positions in milliseconds, so a seek past
-// the end answers where the landing claims to be plus the frames decoded from
-// there, and the rounding up to that landing lands in the total: sine-s16.wma
-// comes back 33 samples under a read of the same file.
-//
-// Those 33 are the kind of wrong this measure exists to prevent. A timeline's
-// prefix sum carries them into every member after it, a bounded slice drops
-// them, and an HLS playlist promises a tail it will not serve. So a container
-// whose own positions are rounded is decoded instead.
-func TestMeasureAgreesWithTheDecodeOnARoundedContainer(t *testing.T) {
+// TestMeasureWalksARoundedContainer is the measure for a container whose own
+// positions are rounded. ASF states milliseconds, and sine-s16.wma declares
+// 22491 samples where a read delivers 22528: a timeline's prefix sum would
+// carry the gap into every member after it, a bounded slice would drop it,
+// and an HLS playlist would promise a tail it will not serve. Its WMA v2 track
+// counts its frames in its own superframe headers, so the measure is a walk
+// of those counts, exact, and reached without decoding a sample.
+func TestMeasureWalksARoundedContainer(t *testing.T) {
 	open := opener(t, filepath.Join("..", "testdata", "sine-s16.wma"), "wma")
 
-	med := open()
+	med := &countingMedia{Media: open()}
 	defer med.Close()
 	if tr := med.Info().Default(); !tr.SamplesAdvisory {
 		t.Fatalf("the fixture's length is not advisory (%+v); this cell needs a rounded container", tr)
@@ -238,15 +235,30 @@ func TestMeasureAgreesWithTheDecodeOnARoundedContainer(t *testing.T) {
 	if got.Samples != want {
 		t.Errorf("measured %d, a read of the same file delivers %d", got.Samples, want)
 	}
-
-	// And the shortcut it declines is still wrong, so the route is doing work
-	// rather than arriving at the same place by luck.
-	sk := open()
-	defer sk.Close()
-	if landed, err := sk.SeekSample(pastAnyEnd); err == nil && landed == want {
-		t.Errorf("a seek past the end answered %d too; this cell no longer pins anything", landed)
+	if !med.walked || med.reads != 0 {
+		t.Errorf("the measure walked %v and read %d chunks; it is a walk with no decode", med.walked, med.reads)
 	}
 }
+
+// countingMedia counts the chunks read through it and forwards the walk,
+// which format.WalkMedia finds only on a Media that declares one.
+type countingMedia struct {
+	format.Media
+	reads  int
+	walked bool
+}
+
+func (m *countingMedia) ReadChunk(b *audio.Buffer) error {
+	m.reads++
+	return m.Media.ReadChunk(b)
+}
+
+func (m *countingMedia) Walk() error {
+	m.walked = true
+	return format.WalkMedia(m.Media)
+}
+
+func (m *countingMedia) Walked() bool { return format.MediaWalked(m.Media) }
 
 // TestMeasureLengthWalksAFragmentedMP4 pins the route a fragmented movie
 // takes: the walk reads one moof header per fragment, not every payload.
@@ -324,10 +336,10 @@ func TestMeasureLengthLeavesTheMediaAtItsStart(t *testing.T) {
 // TestSliceMeasuredOpensAWindowInTheAdvisoryGap: sine-s16.wma declares 22491
 // samples and decodes 22528, so a window ending between the two is one the
 // file can serve. A bare Slice bounds it by the declaration and refuses it.
-// The window starts at 0 because a WMA seek into this file's tail lands late
-// (docs/deferred-work.md).
+// The window starts in the file's last frame, so it also needs a seek into the
+// tail to land where it says.
 func TestSliceMeasuredOpensAWindowInTheAdvisoryGap(t *testing.T) {
-	const declared, measured, from, to = 22491, 22528, 0, 22510
+	const declared, measured, from, to = 22491, 22528, 22400, 22510
 	open := opener(t, filepath.Join("..", "testdata", "sine-s16.wma"), "wma")
 	fresh := open()
 	got := fresh.Info().Default().Samples

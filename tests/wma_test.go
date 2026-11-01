@@ -15,7 +15,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -565,6 +567,50 @@ func TestWMAProSeekSampleExact(t *testing.T) {
 	}
 }
 
+// wmaV1V2Fixtures are the committed WMA v1/v2 files, by path from the repo
+// root: the six container/asf carries, the engine tests' own, and the one
+// Windows' encoder wrote, whose bit reservoir puts several frames in every
+// object and whose stamps sit two frames under where a decode resumes.
+var wmaV1V2Fixtures = [][]string{
+	{"container", "asf", "testdata", "sine-wmav1.wma"},
+	{"container", "asf", "testdata", "sine-wmav2.wma"},
+	{"container", "asf", "testdata", "frag.wma"},
+	{"container", "asf", "testdata", "tagged.wma"},
+	{"container", "asf", "testdata", "mono-8k.wma"},
+	{"container", "asf", "testdata", "chapters.wma"},
+	{"testdata", "sine-s16.wma"},
+	{"container", "asf", "testdata", "ms-v2-44100-2ch-128k.wma"},
+}
+
+// TestWMASeekSampleExact is the seek gate the other WMA codecs already had: a
+// seek lands exactly, and the audio behind it is the linear decode's, bit for
+// bit. Every fixture is above the noise-coding thresholds, so a resumed decode
+// owes the linear one nothing. A landing taken from the stamps shifted the
+// audio under an exact-looking position by up to 39 samples on ffmpeg's files
+// and by two frames on Windows'.
+func TestWMASeekSampleExact(t *testing.T) {
+	for _, parts := range wmaV1V2Fixtures {
+		t.Run(parts[len(parts)-1], func(t *testing.T) {
+			raw, err := os.ReadFile(repoPath(parts...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			src := container.BytesSource(raw)
+			ref, err := decodeAllDynamic(t, src, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer audio.Put(ref)
+			med, err := waxflow.New().OpenStream(src, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer med.Close()
+			seekMatchesReference(t, med, ref, 50, 7)
+		})
+	}
+}
+
 // TestWMAVoiceProbeAndDecode is the integration layer for the fourth codec in
 // the container: the sniff table resolves the header with no filename, the
 // track built by container/asf drives codec/wmavoice without either side
@@ -717,5 +763,196 @@ func TestAdvisoryLengthStillDrivesProgress(t *testing.T) {
 		if got <= 0 {
 			t.Fatalf("progress total = %d, want the headers' estimate", got)
 		}
+	}
+}
+
+// TestOpenStreamSettlesACompleteSidecar: a sidecar that restores a complete
+// WMA v1/v2 frame count is a measurement already taken, so the media an open
+// returns reports the exact length at once. Before, it reported the rounded
+// declaration and Walked true together, and a caller that trusted Walked
+// kept the declaration.
+func TestOpenStreamSettlesACompleteSidecar(t *testing.T) {
+	raw, err := os.ReadFile(repoPath("container", "asf", "testdata", "ms-v2-44100-2ch-128k.wma"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := &captureIndexCache{blobs: map[string][]byte{}}
+	e := waxflow.New(waxflow.WithIndexCache(cache))
+	first, err := e.OpenStream(container.BytesSource(raw), "wma")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := waxflow.MeasureLength(first)
+	first.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cache.saves != 1 {
+		t.Fatalf("saves = %d, want the measure's count saved", cache.saves)
+	}
+	med, err := e.OpenStream(container.BytesSource(raw), "wma")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	if tr := med.Info().Default(); !tr.SamplesExact || tr.SamplesAdvisory || tr.Samples != want.Samples {
+		t.Errorf("a warm open reports %d (exact %v advisory %v), the measure %d",
+			tr.Samples, tr.SamplesExact, tr.SamplesAdvisory, want.Samples)
+	}
+}
+
+// TestALinearPlayLeavesASidecar: a play from the start to the end passes
+// every object a walk would count, so the count is complete when the media
+// closes and is saved, and the next open knows the exact length without
+// walking.
+func TestALinearPlayLeavesASidecar(t *testing.T) {
+	raw, err := os.ReadFile(repoPath("container", "asf", "testdata", "ms-v2-44100-2ch-128k.wma"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := &captureIndexCache{blobs: map[string][]byte{}}
+	e := waxflow.New(waxflow.WithIndexCache(cache))
+	first, err := e.OpenStream(container.BytesSource(raw), "wma")
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := audio.Get(first.Info().Default().Fmt, audio.StandardChunk)
+	defer audio.Put(buf)
+	var played int64
+	for {
+		err := first.ReadChunk(buf)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		played += int64(buf.N)
+	}
+	first.Close()
+	if cache.saves != 1 {
+		t.Fatalf("saves = %d, want the play's count saved", cache.saves)
+	}
+	src := &testutil.CountingSource{Src: container.BytesSource(raw)}
+	med, err := e.OpenStream(src, "wma")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	if tr := med.Info().Default(); !tr.SamplesExact || tr.Samples != played {
+		t.Errorf("the next open reports %d (exact %v), the play delivered %d", tr.Samples, tr.SamplesExact, played)
+	}
+	src.Reset()
+	if _, err := waxflow.MeasureLength(med); err != nil {
+		t.Fatal(err)
+	}
+	if src.Reads != 0 {
+		t.Errorf("measuring the warm open read %d times", src.Reads)
+	}
+}
+
+// TestOpenStreamAsksTheSidecarOnlyForAnIndex: whether an open keeps an index
+// is the file's answer, not the format's. A WAV of PCM and a WMA Pro track
+// have none, so their opens never look one up; the same containers carrying
+// MP3 frames or a WMA v1/v2 frame count do.
+func TestOpenStreamAsksTheSidecarOnlyForAnIndex(t *testing.T) {
+	for _, tc := range []struct {
+		path  []string
+		hint  string
+		index bool
+	}{
+		{[]string{"testdata", "sine-s16.wav"}, "wav", false},
+		{[]string{"container", "riff", "testdata", "mp3.wav"}, "wav", true},
+		{[]string{"container", "asf", "testdata", "pro-s16.wma"}, "wma", false},
+		{[]string{"container", "asf", "testdata", "ms-v2-44100-2ch-128k.wma"}, "wma", true},
+	} {
+		t.Run(filepath.Base(filepath.Join(tc.path...)), func(t *testing.T) {
+			raw, err := os.ReadFile(repoPath(tc.path...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cache := &captureIndexCache{blobs: map[string][]byte{}}
+			med, err := waxflow.New(waxflow.WithIndexCache(cache)).OpenStream(container.BytesSource(raw), tc.hint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			med.Close()
+			if asked := cache.loads > 0; asked != tc.index {
+				t.Errorf("the open looked a sidecar up %d times; it keeps an index: %v", cache.loads, tc.index)
+			}
+			if _, ok := med.(container.Indexer); ok != tc.index {
+				t.Errorf("the media advertises an index: %v, want %v", ok, tc.index)
+			}
+		})
+	}
+}
+
+// TestAskingWalkedChangesNothing: Walked is a question. A seek past the end
+// finishes a WMA v1/v2 count, and the Media reports what it reported until
+// Walk takes the measurement onto it, which then reads nothing.
+func TestAskingWalkedChangesNothing(t *testing.T) {
+	raw, err := os.ReadFile(repoPath("container", "asf", "testdata", "ms-v2-44100-2ch-128k.wma"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := &testutil.CountingSource{Src: container.BytesSource(raw)}
+	med, err := format.Open(src, "wma", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	before := med.Info().Default()
+	if _, err := med.SeekSample(1 << 40); err != nil {
+		t.Fatal(err)
+	}
+	if !format.MediaWalked(med) {
+		t.Fatal("a seek past the end left the count unwalked")
+	}
+	if got := med.Info().Default(); got.Samples != before.Samples || got.SamplesExact != before.SamplesExact {
+		t.Errorf("asking Walked moved the track from %d (exact %v) to %d (exact %v)",
+			before.Samples, before.SamplesExact, got.Samples, got.SamplesExact)
+	}
+	src.Reset()
+	if err := format.WalkMedia(med); err != nil {
+		t.Fatal(err)
+	}
+	if got := med.Info().Default(); !got.SamplesExact || got.Samples != 268288 {
+		t.Errorf("Walk settled %d (exact %v), want the 268288 a decode delivers", got.Samples, got.SamplesExact)
+	}
+	if src.Reads != 0 {
+		t.Errorf("Walk after a finished count read %d times", src.Reads)
+	}
+}
+
+// TestASliceConfirmsAWalkThatAlreadyFinished: a span's confirmation takes the
+// source's measurement, and a walk a seek already finished has measured it
+// without putting it on the Media. The confirmation runs the walk anyway, at
+// no cost, rather than read the declaration beside a finished walk.
+func TestASliceConfirmsAWalkThatAlreadyFinished(t *testing.T) {
+	raw, err := os.ReadFile(repoPath("container", "asf", "testdata", "ms-v2-44100-2ch-128k.wma"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	med, err := format.Open(container.BytesSource(raw), "wma", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	if _, err := med.SeekSample(1 << 40); err != nil {
+		t.Fatal(err)
+	}
+	sl, err := waxflow.Slice(med, 1000, waxflow.ToEnd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lc, ok := sl.(format.LengthConfirmer)
+	if !ok {
+		t.Fatal("an open-ended span does not confirm its length")
+	}
+	if err := lc.ConfirmLength(); err != nil {
+		t.Fatal(err)
+	}
+	if got := sl.Info().Default(); !got.SamplesExact || got.Samples != 268288-1000 {
+		t.Errorf("the span confirmed %d (exact %v), want the %d the source holds past 1000", got.Samples, got.SamplesExact, 268288-1000)
 	}
 }

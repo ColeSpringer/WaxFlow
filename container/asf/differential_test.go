@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -29,6 +30,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/asf"
 	"github.com/colespringer/waxflow/internal/testutil"
+	"github.com/colespringer/waxflow/internal/testutil/wmacount"
 )
 
 // wmaSpec describes one fixture the differential generates with ffmpeg.
@@ -182,6 +184,10 @@ func TestCommittedDemuxMatchesFFprobe(t *testing.T) {
 			audio.Format{Rate: 44100, Channels: 2, Layout: audio.ChannelMask(0x03), Type: audio.Float, BitDepth: 32}},
 		{"voice-mono.wma", codec.WMAVoice,
 			audio.Format{Rate: 16000, Channels: 1, Layout: audio.DefaultLayout(1), Type: audio.Float, BitDepth: 32}},
+		// ffmpeg writes WMA v2 but never the bit reservoir Windows' encoder
+		// puts in every packet.
+		{windowsFixture, codec.WMA,
+			audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Float, BitDepth: 32}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			committedDemuxMatchesFFprobe(t, tc.name, tc.codec, tc.fmt)
@@ -282,9 +288,11 @@ func TestTrackLengthMatchesFFprobe(t *testing.T) {
 	}
 }
 
-// TestSeekAgainstFFprobePackets checks the landing against the packet list:
-// every seek must land on a packet ffmpeg also reports, at or before the
-// target, with at least one whole object of run-up.
+// TestSeekAgainstFFprobePackets checks the landing against the packet list.
+// Every seek lands at or before the target on an object ffmpeg also reports,
+// at the position the frame counts give that object, one object before the
+// object that holds the target. The packet read next still carries its stated
+// time, which is what ffprobe sees.
 func TestSeekAgainstFFprobePackets(t *testing.T) {
 	for _, s := range wmaSpecs {
 		t.Run(s.name, func(t *testing.T) {
@@ -294,15 +302,15 @@ func TestSeekAgainstFFprobePackets(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			objs, frameLen := wmacount.Objects(t, raw)
+			if len(objs) != len(want) {
+				t.Fatalf("%d objects, ffprobe reports %d packets", len(objs), len(want))
+			}
 			d, err := asf.NewDemuxer(container.BytesSource(raw), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			rate := d.Tracks()[0].Fmt.Rate
-			at := map[int64]bool{}
-			for _, p := range want {
-				at[p.PTS] = true
-			}
 			for i, p := range want {
 				// Target the middle of packet i, which is the hardest place
 				// to land at-or-before.
@@ -314,12 +322,22 @@ func TestSeekAgainstFFprobePackets(t *testing.T) {
 				if landed > target {
 					t.Fatalf("seek to %d landed at %d", target, landed)
 				}
-				ms := msOf(landed, rate)
-				if !at[ms] {
-					t.Fatalf("seek to packet %d landed at %d ms, which is no packet ffprobe reports", i, ms)
+				var pkt container.Packet
+				if err := d.ReadPacket(&pkt); err != nil {
+					t.Fatalf("read after the seek to packet %d: %v", i, err)
 				}
-				if i > 0 && ms >= p.PTS {
-					t.Fatalf("seek to packet %d landed on packet %d ms with no run-up", i, ms)
+				j := slices.IndexFunc(objs, func(o wmacount.Object) bool { return o.PTS == pkt.PTS })
+				if j < 0 || msOf(pkt.PTS, rate) != want[j].PTS {
+					t.Fatalf("seek to packet %d read an object at %d ms, which is no packet ffprobe reports",
+						i, msOf(pkt.PTS, rate))
+				}
+				if landed != objs[j].Before*frameLen {
+					t.Fatalf("seek to packet %d landed at %d; the frame counts put the object read next at %d",
+						i, landed, objs[j].Before*frameLen)
+				}
+				if j+2 < len(objs) && target >= objs[j+2].Before*frameLen {
+					t.Fatalf("seek to %d landed on object %d at %d, more than one object short of the target",
+						target, j, landed)
 				}
 			}
 		})

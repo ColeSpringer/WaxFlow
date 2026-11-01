@@ -379,7 +379,8 @@ func (s *Server) transcodeSpan(ctx context.Context, src *source.File, hint strin
 		// keep: a measure that missed the decode by a sample would be written
 		// into a header it cannot patch and die at End, after the 200 and the
 		// first bytes have gone out, with the cache entry permanently failed.
-		// The measure decodes an advisory source so the two agree
+		// The measure agrees with the decode, whether it decodes the source
+		// or, for WMA v1/v2, counts frames from the packet headers
 		// (sine-s16.wma measures and decodes 22528), but nothing here rests
 		// on that.
 		//

@@ -18,6 +18,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/asf"
+	"github.com/colespringer/waxflow/internal/testutil/wmacount"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -164,6 +165,7 @@ func TestDemuxPackets(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := open(t, fixture(t, tc.name))
+			declared := d.Tracks()[0]
 			objects, first, end, size := walk(t, d)
 			if objects != tc.objects {
 				t.Errorf("objects = %d, want %d", objects, tc.objects)
@@ -178,9 +180,10 @@ func TestDemuxPackets(t *testing.T) {
 			// land on the declared total within one object: every position
 			// here is a rounded millisecond, and the tail object has no
 			// successor to measure against and takes its predecessor's length.
-			tr := d.Tracks()[0]
-			if off := end - tr.Samples; off > int64(tc.objects) || off < -int64(tc.objects) {
-				t.Errorf("objects cover %d samples, track declares %d", end, tr.Samples)
+			// The read settles the track's length as it goes, so the
+			// declaration is the one taken at the open.
+			if off := end - declared.Samples; off > int64(tc.objects) || off < -int64(tc.objects) {
+				t.Errorf("objects cover %d samples, track declares %d", end, declared.Samples)
 			}
 			if len(d.Warnings()) != 0 {
 				t.Errorf("warnings on a clean file: %v", d.Warnings())
@@ -287,12 +290,14 @@ func TestUntaggedFileHasNoTags(t *testing.T) {
 }
 
 // TestSeekLandsAtOrBefore is the seek invariant: every landing is at or before
-// the target, reads resume exactly there, and the run-up is real -- a landing
-// equal to the target would mean the decoder got no bit-reservoir history.
+// the target, and reads resume exactly there. For WMA v1/v2 "there" is the
+// position the frame counts give the object read next, not its stamp.
 func TestSeekLandsAtOrBefore(t *testing.T) {
 	for _, name := range []string{"sine-wmav2.wma", "frag.wma", "mono-8k.wma"} {
 		t.Run(name, func(t *testing.T) {
-			d := open(t, fixture(t, name))
+			raw := fixture(t, name)
+			objs, frameLen := wmacount.Objects(t, raw)
+			d := open(t, raw)
 			total := d.Tracks()[0].Samples
 			for _, frac := range []float64{0, 0.1, 0.25, 0.5, 0.75, 0.99, 1.5} {
 				target := int64(float64(total) * frac)
@@ -310,34 +315,62 @@ func TestSeekLandsAtOrBefore(t *testing.T) {
 					}
 					t.Fatalf("reading after a seek to %d: %v", target, err)
 				}
-				if pkt.PTS != landed {
-					t.Errorf("seek to %d reported %d but the next packet is at %d", target, landed, pkt.PTS)
+				j := slices.IndexFunc(objs, func(o wmacount.Object) bool { return o.PTS == pkt.PTS && o.Size == len(pkt.Data) })
+				if j < 0 {
+					t.Fatalf("seek to %d read an object at %d that a linear read never delivers", target, pkt.PTS)
+				}
+				if want := objs[j].Before * frameLen; landed != want {
+					t.Errorf("seek to %d reported %d but the object read next sits at %d", target, landed, want)
 				}
 			}
 		})
 	}
 }
 
-// TestSeekGivesRunUp pins the pre-roll the landing owes the decoder: a target
-// inside the stream must land at least one media object earlier, since a WMA
-// super-frame carries reservoir state out of the one before it.
+// TestSeekGivesRunUp pins the run-up a landing owes the decoder: a target
+// inside the stream lands at least one media object earlier. A stated-time
+// landing backs up whole packets; a WMA v1/v2 landing backs up exactly one
+// object, to the position its frame counts give it.
 func TestSeekGivesRunUp(t *testing.T) {
+	t.Run("pro", func(t *testing.T) {
+		d := open(t, proStream(t, 40))
+		var pkt container.Packet
+		if err := d.ReadPacket(&pkt); err != nil {
+			t.Fatal(err)
+		}
+		objectDur := pkt.Dur
+		target := d.Tracks()[0].Samples / 2
+		landed, err := d.SeekSample(0, target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if target-landed < objectDur {
+			t.Errorf("seek to %d landed at %d, %d samples of run-up for a %d-sample object",
+				target, landed, target-landed, objectDur)
+		}
+	})
 	for _, name := range []string{"sine-wmav2.wma", "frag.wma"} {
 		t.Run(name, func(t *testing.T) {
-			d := open(t, fixture(t, name))
-			var pkt container.Packet
-			if err := d.ReadPacket(&pkt); err != nil {
-				t.Fatal(err)
-			}
-			objectDur := pkt.Dur
+			raw := fixture(t, name)
+			objs, frameLen := wmacount.Objects(t, raw)
+			d := open(t, raw)
 			target := d.Tracks()[0].Samples / 2
 			landed, err := d.SeekSample(0, target)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if target-landed < objectDur {
-				t.Errorf("seek to %d landed at %d, %d samples of run-up for a %d-sample object",
-					target, landed, target-landed, objectDur)
+			var pkt container.Packet
+			if err := d.ReadPacket(&pkt); err != nil {
+				t.Fatal(err)
+			}
+			j := slices.IndexFunc(objs, func(o wmacount.Object) bool { return o.PTS == pkt.PTS })
+			if j < 0 || j+2 >= len(objs) {
+				t.Fatalf("seek to %d read the object at %d, not one inside the stream", target, pkt.PTS)
+			}
+			// The object after the landing holds the target.
+			if lo, hi := objs[j+1].Before*frameLen, objs[j+2].Before*frameLen; landed != objs[j].Before*frameLen ||
+				target < lo || target >= hi {
+				t.Errorf("seek to %d landed at %d, not one object before the one spanning [%d, %d)", target, landed, lo, hi)
 			}
 		})
 	}
@@ -382,12 +415,11 @@ func TestSeekRestartsTheStream(t *testing.T) {
 }
 
 // TestSeekUsesTheSimpleIndex proves the index path runs rather than being
-// shadowed by the bisection fallback. ffmpeg writes no Simple Index Object for
-// an audio-only file, so the test appends one, and a deliberately blunt one:
-// every entry names packet 0, which bisection would never produce for a
-// mid-file target.
+// shadowed by the bisection fallback. The Pro stream carries no Simple Index
+// Object, so the test appends one, and a deliberately blunt one: every entry
+// names packet 0, which bisection would never produce for a mid-file target.
 func TestSeekUsesTheSimpleIndex(t *testing.T) {
-	raw := fixture(t, "sine-wmav2.wma")
+	raw := proStream(t, 40)
 	plain := open(t, raw)
 	mid := plain.Tracks()[0].Samples / 2
 	without, err := plain.SeekSample(0, mid)
@@ -417,12 +449,12 @@ func TestSeekUsesTheSimpleIndex(t *testing.T) {
 // the bisection it exists to save.
 //
 // The index here is zeros except for the one entry a correct lookup reaches:
-// at a 100 ms interval and the fixture's 3100 ms pre-roll, output time 900 ms
+// at a 100 ms interval and the stream's 3100 ms pre-roll, output time 900 ms
 // is absolute 4000 ms, which is entry 40. A lookup in the wrong domain reads
 // entry 9, finds the zero there, and lands at the start of the file.
 func TestSimpleIndexIsReadInAbsoluteTime(t *testing.T) {
 	const intervalMS, prerollMS, outMS = 100, 3100, 900
-	raw := fixture(t, "sine-wmav2.wma")
+	raw := proStream(t, 64)
 	rate := int64(open(t, raw).Tracks()[0].Fmt.Rate)
 
 	entries := make([]uint32, 64)
@@ -449,11 +481,11 @@ func TestSimpleIndexIsReadInAbsoluteTime(t *testing.T) {
 // is the rejection in packetFor: a file with a lying index must seek exactly
 // as well as the same file with no index at all.
 func TestSeekIgnoresAnIndexPointingPastTheTarget(t *testing.T) {
-	raw := fixture(t, "sine-wmav2.wma")
+	raw := proStream(t, 64)
 	plain := open(t, raw)
 	// Every entry names a packet well into the file, so any target near the
 	// front is one the index sends the seek past.
-	lying := open(t, appendSimpleIndexAt(raw, 32, 1_000_0000, 8))
+	lying := open(t, appendSimpleIndexAt(raw, 32, 1_000_0000, 60))
 	for _, target := range []int64{4000, 20000, 44100} {
 		want, err := plain.SeekSample(0, target)
 		if err != nil {
@@ -657,7 +689,7 @@ func TestSeekRejectsBadArguments(t *testing.T) {
 // probes an unknown length with. It reaches the demuxer verbatim, and the
 // conversions on the way to a packet number multiply it twice.
 func TestSeekTargetsPastEveryPlausibleLengthAreSafe(t *testing.T) {
-	for _, name := range []string{"sine-wmav2.wma", "frag.wma", "mono-8k.wma"} {
+	for _, name := range []string{"sine-wmav2.wma", "frag.wma", "mono-8k.wma", "pro-s16.wma"} {
 		for _, withIndex := range []bool{false, true} {
 			raw := fixture(t, name)
 			if withIndex {

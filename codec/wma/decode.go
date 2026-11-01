@@ -3,13 +3,18 @@
 package wma
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
-var _ codec.Releaser = (*Decoder)(nil)
+var (
+	_ codec.Releaser  = (*Decoder)(nil)
+	_ codec.Restarter = (*Decoder)(nil)
+)
 
 // expTableLo and expTableHi bound the VLC exponent index. The curve
 // 10^(index/16) is tabulated over exactly this range in every derived decoder,
@@ -109,6 +114,14 @@ type Decoder struct {
 	// resumed marks a decoder that was Reset mid-stream, which changes what a
 	// superframe header can legally say. See decodeSuperframe.
 	resumed bool
+	// dry walks the bitstream and nothing else: no curve is needed, nothing
+	// is reconstructed or emitted. Uncarried uses it to find where frames end.
+	dry bool
+	// seeked marks a decoder Reset to a landing mid-stream. Exponents it
+	// never saw sent are then history the landing did not carry, which it
+	// reports as codec.ErrNeedsHistory rather than as damage. Restart clears
+	// it: a decode from the start of the stream is a linear one.
+	seeked bool
 	// noResume is the one stream shape a Reset cannot be honest about. See
 	// Reset.
 	noResume bool
@@ -372,12 +385,20 @@ func (d *Decoder) decodeSuperframe(pkt []byte, emit func(*audio.Buffer) error) e
 	}
 	// Past here the packet either starts a frame or completes one, so the
 	// decoder is back on the stream's own frame boundaries.
+	resumed := d.resumed
 	d.resumed = false
 	if headerBits+bitOff > r.bitLen() {
 		return malformed("superframe bit offset %d runs past the packet", bitOff)
 	}
 	at := headerBits + bitOff
 
+	if n == 0 && !d.carried && resumed && at == r.bitLen() {
+		// The packet completes a frame begun before the landing and begins
+		// none: like a packet that only continues one, it is passed over.
+		d.carry.reset()
+		d.resumed = true
+		return nil
+	}
 	if n == 0 {
 		// The all-continuation packet: nothing finishes here. With a frame
 		// already open the whole payload continues it, so there is no head run
@@ -397,7 +418,11 @@ func (d *Decoder) decodeSuperframe(pkt []byte, emit func(*audio.Buffer) error) e
 			d.carry.reset()
 			d.resetLens = true
 		}
-		if r.bitLen()-from <= 8 {
+		// A head this short is damage in a linear decode. After a seek it is
+		// a landing that finishes a frame begun earlier and begins the next in
+		// its last byte, which a linear decode carries out like any other
+		// head, so it is carried here too.
+		if r.bitLen()-from <= 8 && !resumed {
 			return malformed("all-continuation superframe carries no payload")
 		}
 		if err := d.appendCarry(pkt, from, r.bitLen()-from); err != nil {
@@ -462,6 +487,9 @@ func (d *Decoder) decodeFrame(emit func(*audio.Buffer) error) error {
 		if err := d.decodeBlock(); err != nil {
 			return err
 		}
+	}
+	if d.dry {
+		return nil
 	}
 	return d.emitFrame(emit)
 }
@@ -575,6 +603,10 @@ func (d *Decoder) decodeBlock() error {
 		return r.err
 	}
 
+	if !any && d.dry {
+		d.blockPos += blockLen
+		return nil
+	}
 	if !any {
 		// The block stops the bitstream reading and nothing else, but the
 		// transform stage still runs with an all-zero spectrum. That is where
@@ -631,7 +663,15 @@ func (d *Decoder) decodeBlock() error {
 				return err
 			}
 			d.expLen[ch] = blockLen
-		} else if d.expLen[ch] == 0 {
+		} else if d.expLen[ch] == 0 && !d.dry {
+			// A channel can go uncoded for any number of blocks and then
+			// reuse the curve it had before, so after a seek that curve can
+			// predate the landing. No output for this block is right, and
+			// the caller can land earlier; from the start it is damage.
+			if d.seeked {
+				return waxerr.Wrap(waxerr.CodeMalformedInput, fmt.Sprintf(
+					"wma: channel %d reuses exponents sent before this decode's landing", ch), codec.ErrNeedsHistory)
+			}
 			return malformed("channel %d reuses exponents that were never transmitted", ch)
 		}
 	}
@@ -651,6 +691,10 @@ func (d *Decoder) decodeBlock() error {
 	}
 	if r.err != nil {
 		return r.err
+	}
+	if d.dry {
+		d.blockPos += blockLen
+		return nil
 	}
 
 	for ch := range d.cfg.Channels {
@@ -725,8 +769,9 @@ func (d *Decoder) decodeExponents(ch int, sz *blockSize, blockLen int) error {
 	// splice of this block's bands and the previous block's, with maxExp still
 	// describing the old one. Marking it untransmitted here is what keeps a
 	// later block from reusing the splice: the reuse path already refuses a
-	// curve that was never transmitted, and a half-written one is no more
-	// usable than none. decodeBlock sets the length back on success.
+	// curve that was never transmitted (or, after a seek, asks for history),
+	// and a half-written one is no more usable than none. decodeBlock sets
+	// the length back on success.
 	d.expLen[ch] = 0
 	if !d.cfg.expVLC() {
 		return d.decodeLSPExponents(ch, blockLen)
@@ -1093,6 +1138,7 @@ func (d *Decoder) Reset() {
 	d.carried = false
 	d.resetLens = true
 	d.resumed = true
+	d.seeked = true
 	d.noResume = d.selBits > 0 && !d.cfg.reservoir()
 	d.noiseAt = 0
 	d.blockPos = 0
@@ -1100,6 +1146,15 @@ func (d *Decoder) Reset() {
 	d.drained = false
 	d.err = nil
 	d.r.reset(nil)
+}
+
+// Restart implements codec.Restarter: a decoder as NewDecoder leaves it, at
+// the start of the stream, where a decode is a linear one and what a linear
+// decode refuses as damage is refused rather than taken for history a
+// landing missed.
+func (d *Decoder) Restart() {
+	d.Reset()
+	d.resumed, d.seeked, d.noResume = false, false, false
 }
 
 // Release returns the pooled output buffer (format.Media calls it on Close).

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -91,13 +92,13 @@ data track occupies part of the file the split says what it skipped.`,
 				outFormat = "flac"
 			}
 
-			src, srcHint, cleanup, err := openSourceRef(cmd, flavor, args[0], &cfg, logger)
+			src, srcHint, cleanup, err := openSplitSource(cmd, flavor, args[0], &cfg, logger)
 			if err != nil {
 				return err
 			}
 			defer cleanup()
 
-			e := waxflow.New(waxflow.WithLogger(logger))
+			e := splitEngine(logger)
 			info, err := e.Probe(src, srcHint, nil)
 			if err != nil {
 				return err
@@ -237,6 +238,46 @@ data track occupies part of the file the split says what it skipped.`,
 	cmd.Flags().BoolVar(&noTags, "no-tags", false, "do not carry the source's metadata onto the pieces")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the pieces and their sample ranges without writing anything")
 	return cmd
+}
+
+// splitEngine is the engine a split runs on. A split measures its source once
+// and opens it again for every piece, and a piece's seek to its start would
+// count a WMA v1/v2 source's frames, or index an MP3's, from the top each
+// time. The sidecar keeps the measure's count in memory for the pieces.
+func splitEngine(logger *slog.Logger) *waxflow.Engine {
+	return waxflow.New(waxflow.WithLogger(logger), waxflow.WithIndexCache(&oneSourceIndex{}))
+}
+
+// openSplitSource opens a split's source. A variable so a test can watch the
+// reads a whole split makes.
+var openSplitSource = openSourceRef
+
+// oneSourceIndex is an index sidecar held in memory for the one source it
+// was saved for; any other source gets nothing from it.
+type oneSourceIndex struct {
+	src  container.Source
+	blob []byte
+}
+
+func (c *oneSourceIndex) Load(src container.Source) []byte {
+	if !c.holds(src) {
+		return nil
+	}
+	return c.blob
+}
+
+func (c *oneSourceIndex) Save(src container.Source, b []byte) { c.src, c.blob = src, b }
+
+func (c *oneSourceIndex) Drop(src container.Source) {
+	if c.holds(src) {
+		c.src, c.blob = nil, nil
+	}
+}
+
+// holds reports whether src is the source the blob was saved for. A source
+// that cannot be compared is never the same one.
+func (c *oneSourceIndex) holds(src container.Source) bool {
+	return c.src != nil && src != nil && reflect.ValueOf(src).Comparable() && src == c.src
 }
 
 // measureSamples returns src's settled track: the sample count it actually

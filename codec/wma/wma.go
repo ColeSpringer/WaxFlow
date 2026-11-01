@@ -11,8 +11,9 @@ import (
 )
 
 // Version is the decoder's cache-key version constant (ADR-0004): bump on any
-// change that alters decoded samples.
-const Version = "wma-dec-2"
+// change that alters decoded samples. 3 also covers container/asf's landing
+// change, since the key has no demuxer term (as vorbis-enc-9 did for Ogg).
+const Version = "wma-dec-3"
 
 // The wFormatTag values this package decodes. The tags it refuses belong to
 // container/asf's asfCodecID table, which names them before a track is ever
@@ -244,6 +245,96 @@ func (c Config) frameLenBits() int {
 
 // FrameLen is the number of samples one coded frame produces per channel.
 func (c Config) FrameLen() int { return 1 << c.frameLenBits() }
+
+// PacketFrames is the frame count a packet adds to its stream's position: a
+// decode resumed at packet j emits its first sample at FrameLen times the sum
+// over packets 0 to j-1, less one for each packet up to j that Uncarried
+// reports. Without the reservoir every packet is one frame; with it, the
+// superframe header's frame count field. Measured on ffmpeg's and Windows'
+// streams, including a frame that ends on its packet's last bit, which
+// Windows counts in the packet it began in. ok is false for an empty packet.
+func (c Config) PacketFrames(pkt []byte) (frames int, ok bool) {
+	if len(pkt) == 0 {
+		return 0, false
+	}
+	if !c.reservoir() {
+		return 1, true
+	}
+	return int(pkt[0] & 0x0f), true
+}
+
+// Uncarried reports whether a decode enters pkt with nothing carried in from
+// prev although pkt states frames and no bit offset. That header means one of
+// two things, and the headers cannot say which: Windows counts a frame that
+// ends on its packet's last bit in the packet it began in, so the decode
+// carries it into pkt and completes it there, and a writer that counted it
+// where it ended leaves nothing to carry. In the second case the sum of
+// PacketFrames runs a frame high from pkt on. The decoder's own bit walk over
+// prev, which reads no curve and emits nothing, says which; an error is a
+// prev the decoder refuses. Each call builds that decoder; CarryCheck keeps
+// one for a caller that asks of every packet.
+func (c Config) Uncarried(prev, pkt []byte) (bool, error) {
+	return c.CarryCheck()(prev, pkt)
+}
+
+// CarryCheck returns Uncarried for c's stream with the decoder its bit walk
+// needs built once, on the first packet that asks for it. It is for one
+// goroutine.
+func (c Config) CarryCheck() func(prev, pkt []byte) (bool, error) {
+	var d *Decoder
+	return func(prev, pkt []byte) (bool, error) {
+		if ok, err := c.ambiguous(prev, pkt); !ok || err != nil {
+			return false, err
+		}
+		if d == nil {
+			nd, err := NewDecoder(c, c.Format())
+			if err != nil {
+				return false, err
+			}
+			d = nd
+			d.dry = true
+		}
+		d.Reset()
+		if err := d.Decode(prev, func(*audio.Buffer) error { return nil }); err != nil {
+			return false, err
+		}
+		return !d.carried, nil
+	}
+}
+
+// ambiguous reports whether pkt's header reads the same whether a frame is
+// carried into it or not: frames stated and no bit offset, after a packet
+// that states frames.
+func (c Config) ambiguous(prev, pkt []byte) (bool, error) {
+	if !c.reservoir() || len(pkt) == 0 || pkt[0]&0x0f == 0 || len(prev) == 0 || prev[0]&0x0f == 0 {
+		return false, nil
+	}
+	offBits, err := c.offsetBits()
+	if err != nil {
+		return false, err
+	}
+	var r bitReader
+	r.reset(pkt)
+	r.skip(8)
+	off := r.bits(offBits + 3)
+	return r.err == nil && off == 0, r.err
+}
+
+// StreamSamples is what a linear decode of a whole stream delivers per
+// channel, from its packet count and the frames counted over it: the sum of
+// PacketFrames, less one for each packet Uncarried reports. Every
+// decoded frame is delivered, the lead-in Drain makes up for. With the
+// reservoir the last packet's last frame never completes: Drain drops the
+// carry it sits in.
+func (c Config) StreamSamples(packets, frames int64) int64 {
+	if packets <= 0 {
+		return 0
+	}
+	if c.reservoir() {
+		frames--
+	}
+	return max(frames, 0) * int64(c.FrameLen())
+}
 
 // bps is bits per coded sample per channel, and bps1 the stereo-weighted form
 // the coefficient-book and noise ladders threshold on.

@@ -5,21 +5,27 @@
 // objects. One media object is one codec packet, which for WMA is one
 // super-frame.
 //
-// ASF names positions in milliseconds, not samples, so unlike the formats
-// whose frames can be counted this container cannot state an exact sample
-// position for anything: Track.Samples comes from the File Properties Object's
-// play duration, and a packet's PTS is its millisecond presentation time
-// converted at the track rate. The track says so with both length flags:
-// SamplesExact stays false, since the decode must not be trimmed to a rounded
-// total, and SamplesAdvisory is set, since no arithmetic may add the total up.
-// Measured across ffmpeg's and Media Foundation's encoders, the declared total
-// lands on either side of what the packets hold, by up to a millisecond and a
-// frame. That is also why seeking lands on a packet boundary at or before the
-// target and backs up far enough to cover a whole media object: WMA's bit
-// reservoir carries state across super-frames, so the landing owes the decoder
-// run-up, and format.Media's pre-roll takes it from there. A seek past the end
-// therefore lands under what a straight read delivers, which is why measuring
-// one of these tracks means reading it, not seeking it.
+// ASF names positions in milliseconds, not samples: Track.Samples comes from
+// the File Properties Object's play duration, and a packet's PTS is its
+// millisecond presentation time converted at the track rate. The track says
+// so with both length flags at open: SamplesExact stays false, since the
+// decode must not be trimmed to a rounded total, and SamplesAdvisory is set,
+// since no arithmetic may add the total up. Measured across ffmpeg's and
+// Media Foundation's encoders, the declared total lands on either side of what
+// the packets hold, by up to a millisecond and a frame.
+//
+// WMA v1/v2 states its frames in its own superframe headers, so its positions
+// are counted rather than read off the stamps: a seek lands on the media object
+// whose frame counts put it at or before the target, at exactly that position,
+// and a walk of the counts (container.Walker) settles the track's length to
+// what a decode delivers without decoding. The stamps would not do: Windows'
+// encoder stamps every object two frames under the sample a decode resumed
+// there first produces. The count is an index worth persisting
+// (container.Indexer), and a read from the start takes it as it goes. WMA
+// Pro, Voice and Lossless land on a packet boundary
+// at a stated time snapped to the codec's frame grid, backed up far enough for
+// the codec's run-up, and format.Media's pre-roll takes it from there; those
+// tracks are measured by reading them.
 //
 // The package is named asf rather than wma because ASF is the container and
 // WMA the codec inside it (the flacn and wv precedent). The public container

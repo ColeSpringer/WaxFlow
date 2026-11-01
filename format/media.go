@@ -1,6 +1,7 @@
 package format
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
@@ -38,8 +39,16 @@ type media struct {
 	carryOff int                       // frames of carry already consumed
 	pos      int64                     // source-timeline position of the next frame out
 	discont  bool                      // stamp the next chunk as a discontinuity
-	eof      bool
-	closed   bool
+	// landed is where the decode last landed, on the raw timeline, and step
+	// is the run-up a landing earlier adds when that decode needs state from
+	// before it: the seek's own run-up, doubled at each try.
+	landed, step int64
+	// hole records that the decode passed a hole in the stream since its last
+	// landing. State a decode needs from before a hole is lost to it, so no
+	// earlier landing carries it and none is tried.
+	hole   bool
+	eof    bool
+	closed bool
 
 	// Gapless trims (Track.Delay/Padding): the delivered timeline is the
 	// trimmed one, so sample 0 is the first real sample and Track.Samples
@@ -72,20 +81,17 @@ func newMedia(info *Info, demux container.Demuxer) (Media, error) {
 	if w, ok := demux.(container.Walker); ok {
 		m.walker = w
 	}
-	// Only demuxers that keep a persistable index yield a Media that
+	// Only an open that keeps a persistable index yields a Media that
 	// advertises container.Indexer, so a type assertion is an honest
-	// capability gate: consumers skip sidecar work for formats that
-	// would only ever answer nil.
-	//
-	// Two of them qualify per FILE rather than per format, and Go's method
-	// sets cannot say so: a WAV or an AIFF-C carrying MP3 frames has a frame
-	// index worth keeping and the same container carrying PCM has none, so
-	// container/riff and container/aiff advertise the capability always and
-	// answer nil and false for a byte-linear payload. A consumer that needs
-	// to know whether the walk is expensive reads Track.SamplesExact beside
-	// this (see the daemon's timelineNeedsJob), since a payload that states
-	// its own length from its byte count is exactly the one with no index.
-	if ix, ok := demux.(container.Indexer); ok {
+	// capability gate: consumers skip sidecar work for a file that would only
+	// ever answer nil. Some formats keep one per FILE rather than per format,
+	// which Go's method sets cannot say, so the demuxer answers KeepsIndex
+	// for the file it opened: a WAV or an AIFF-C of PCM, and a WMA Pro, Voice
+	// or Lossless track, advertise nothing. A consumer that needs to know
+	// whether the walk is expensive reads Track.SamplesExact beside this (see
+	// the daemon's timelineNeedsJob), since a payload that states its own
+	// length from its byte count is exactly the one with no index.
+	if ix, ok := demux.(container.Indexer); ok && ix.KeepsIndex() {
 		return &indexableMedia{media: m, ix: ix}, nil
 	}
 	return m, nil
@@ -113,12 +119,17 @@ func rawEndFor(track container.Track) int64 {
 	return -1
 }
 
-// indexableMedia adds the demuxer's container.Indexer to the Media.
+// indexableMedia adds the demuxer's container.Indexer to the Media. The
+// assertion keeps a method added to the interface from silently dropping the
+// capability here.
+var _ container.Indexer = (*indexableMedia)(nil)
+
 type indexableMedia struct {
 	*media
 	ix container.Indexer
 }
 
+func (m *indexableMedia) KeepsIndex() bool              { return m.ix.KeepsIndex() }
 func (m *indexableMedia) IndexSnapshot() []byte         { return m.ix.IndexSnapshot() }
 func (m *indexableMedia) RestoreIndex(blob []byte) bool { return m.ix.RestoreIndex(blob) }
 
@@ -139,6 +150,13 @@ func (m *media) Walk() error {
 	if err := m.walker.Walk(); err != nil {
 		return err
 	}
+	m.adoptLength()
+	return nil
+}
+
+// adoptLength copies the length the demuxer's walk settled onto this Media's
+// track and Info.
+func (m *media) adoptLength() {
 	for _, t := range m.demux.Tracks() {
 		if t.ID != m.track.ID {
 			continue
@@ -161,11 +179,13 @@ func (m *media) Walk() error {
 		}
 		break
 	}
-	return nil
 }
 
 // Walked implements Walker: the demuxer's own answer, and true when it defers
-// no walk, which is the honest answer for a length confirmed at open.
+// no walk, which is the honest answer for a length confirmed at open. It is a
+// question and moves nothing. A walk can finish without Walk (a seek or a
+// read that counted to the end, a sidecar restored complete); Walk is still
+// what puts the measurement on this Media, and costs nothing then.
 func (m *media) Walked() bool {
 	return m.walker == nil || m.walker.Walked()
 }
@@ -228,7 +248,15 @@ func (m *media) ReadChunk(dst *audio.Buffer) error {
 	dst.N = 0
 	m.copyOut(dst)
 	for dst.N < dst.Cap() && !m.eof {
-		if err := m.fill(dst); err != nil && err != io.EOF {
+		err := m.fill(dst)
+		if errors.Is(err, codec.ErrNeedsHistory) && !m.hole {
+			// Past the target the decode met state from before its landing,
+			// the way the pre-roll can. The samples delivered stand, and the
+			// decode lands again before the next sample owed.
+			err = m.reland(m.delay+m.pos+int64(dst.N), err)
+			m.copyOut(dst)
+		}
+		if err != nil && err != io.EOF {
 			return err
 		}
 	}
@@ -272,38 +300,100 @@ func (m *media) SeekSample(target int64) (int64, error) {
 	if m.rawEnd >= 0 {
 		rawTarget = min(rawTarget, m.rawEnd)
 	}
-	landed, err := m.seeker.SeekSample(m.track.ID, rawTarget)
+	m.step = 0
+	pos, err := m.preroll(rawTarget, rawTarget)
 	if err != nil {
 		return 0, err
 	}
-	m.decoder.Reset()
+	m.pos = max(pos-m.delay, 0)
+	m.discont = true
+	return m.pos, nil
+}
+
+// preroll lands the demuxer at or before at and decodes forward to rawTarget,
+// returning where the next chunk starts. A decode that reports
+// codec.ErrNeedsHistory met state from before its landing, which a landing
+// earlier still carries: the run-up doubles and the decode starts again,
+// until it succeeds, lands at the start, where the refusal is damage, or
+// passes a hole, behind which the state is lost. Each try lands strictly
+// earlier than the one before, so the search ends.
+func (m *media) preroll(at, rawTarget int64) (int64, error) {
+	for {
+		landed, err := m.land(at)
+		if err != nil {
+			return 0, err
+		}
+		if m.step == 0 {
+			m.step = max(rawTarget-landed, 1)
+		}
+		// Decode into the carry and discard up to the target, sample-exact.
+		// A short discard means the target was past the end: the landing is
+		// the stream's end.
+		if rawTarget <= landed {
+			return landed, nil
+		}
+		dropped, err := m.discard(rawTarget - landed)
+		if errors.Is(err, codec.ErrNeedsHistory) && landed > 0 && !m.hole {
+			m.step *= 2
+			at = max(landed-m.step, 0)
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		return landed + dropped, nil
+	}
+}
+
+// land puts the demuxer at or before at and the decoder at the start of a
+// decode there.
+func (m *media) land(at int64) (int64, error) {
+	landed, err := m.seeker.SeekSample(m.track.ID, at)
+	if err != nil {
+		return 0, err
+	}
+	// A landing at 0 is the stream's first packet, where a decode is a
+	// linear one, and a decoder that reads the two apart is restarted there.
+	if r, ok := m.decoder.(codec.Restarter); ok && landed == 0 {
+		r.Restart()
+	} else {
+		m.decoder.Reset()
+	}
 	// A decoder whose output depends on where the decode began is told its
-	// landing here. Only codec/wmavoice implements it, and there it is what
-	// makes a resumed decode converge to the linear one at all.
+	// landing here: codec/wmavoice draws its comfort noise by frame index.
 	if p, ok := m.decoder.(codec.Positioner); ok {
 		p.SetPosition(landed)
 	}
+	m.landed, m.hole = landed, false
 	m.carryOff = 0
 	if m.carry != nil {
 		m.carry.N = 0
 	}
 	m.eof = false
-	m.skip = 0 // the pre-roll below subsumes any front trim still owed
+	m.skip = 0 // the pre-roll subsumes any front trim still owed
+	return landed, nil
+}
 
-	// Pre-roll: decode into the carry and discard up to the target,
-	// sample-exact. A short discard means the target was past the end:
-	// the landing is the stream's end.
-	pos := landed
-	if rawTarget > landed {
-		dropped, err := m.discard(rawTarget - landed)
-		if err != nil {
-			return 0, err
-		}
-		pos += dropped
+// reland is the pre-roll's search for a read whose decode met state from
+// before its landing past the target: it lands earlier than the landing that
+// failed by a doubled run-up and decodes forward to raw, the next sample the
+// read owes. The samples already delivered stand, and the read goes on from
+// raw. A decode that began at the start has nothing earlier to try, and cause
+// is its answer.
+func (m *media) reland(raw int64, cause error) error {
+	if m.landed == 0 {
+		return cause
 	}
-	m.pos = max(pos-m.delay, 0)
-	m.discont = true
-	return m.pos, nil
+	m.step = max(2*m.step, 2)
+	pos, err := m.preroll(max(m.landed-m.step, 0), raw)
+	if err != nil {
+		return err
+	}
+	if pos != raw {
+		return waxerr.New(waxerr.CodeMalformedInput, fmt.Sprintf(
+			"format: decoding again for state from before the landing ends the stream at %d, short of %d", pos, raw))
+	}
+	return nil
 }
 
 // discard decodes and drops up to n frames, returning how many were
@@ -377,6 +467,7 @@ func (m *media) fill(dst *audio.Buffer) error {
 			// before it. Nothing a decoder carries across packets survives a
 			// hole, so it restarts here as it does after a seek, and one whose
 			// output depends on where it began is told the landing.
+			m.hole = true
 			m.decoder.Reset()
 			if p, ok := m.decoder.(codec.Positioner); ok {
 				p.SetPosition(pkt.PTS)

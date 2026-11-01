@@ -762,19 +762,20 @@ func TestLoudnessMeasuresTheResolvedWidth(t *testing.T) {
 // would satisfy the first half.
 func TestSplitBoundIsWhatTheRunEnforces(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		src  string
-		cut  int64
-		want int
+		name   string
+		src    string
+		cut    int64
+		want   int
+		second int64 // the second piece's samples
 	}{
 		// seed.webm: the Info Duration estimates 6144 samples, the walk
 		// measures 5760, so the estimate runs long.
-		{"a cut past the measure", "lib/seed.webm", 5900, http.StatusBadRequest},
-		{"a cut inside the audio", "lib/seed.webm", 3000, http.StatusCreated},
-		// sine.wma: the declared duration estimates 22491 and the measure
-		// decodes 22528, so the estimate runs short and this cut is one the
-		// file can serve. Bounding with the declaration refused it.
-		{"a cut past the estimate the file can serve", "lib/sine.wma", 22493, http.StatusCreated},
+		{"a cut past the measure", "lib/seed.webm", 5900, http.StatusBadRequest, 0},
+		{"a cut inside the audio", "lib/seed.webm", 3000, http.StatusCreated, 2760},
+		// sine.wma: the declared duration estimates 22491 and the frame
+		// counts measure 22528, so the estimate runs short and this cut is
+		// one the file can serve. Bounding with the declaration refused it.
+		{"a cut past the estimate the file can serve", "lib/sine.wma", 22493, http.StatusCreated, 35},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := jobsEnv(t) // cold: a warm memo would answer from an earlier run
@@ -791,6 +792,9 @@ func TestSplitBoundIsWhatTheRunEnforces(t *testing.T) {
 			job := awaitJob(t, env, createJob(t, env, body))
 			if len(job.Outputs) != 2 {
 				t.Fatalf("split at one cut made %d pieces, want 2: %+v", len(job.Outputs), job.Outputs)
+			}
+			if got := job.Outputs[1].Samples; got != tc.second {
+				t.Errorf("the second piece is %d samples, want %d", got, tc.second)
 			}
 		})
 	}

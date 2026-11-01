@@ -20,6 +20,8 @@ var (
 	_ container.Warner    = (*Demuxer)(nil)
 	_ container.Tagger    = (*Demuxer)(nil)
 	_ container.Chapterer = (*Demuxer)(nil)
+	_ container.Walker    = (*Demuxer)(nil)
+	_ container.Indexer   = (*Demuxer)(nil)
 )
 
 // DemuxerOptions configures parsing.
@@ -42,19 +44,92 @@ type stream struct {
 type object struct {
 	data []byte
 	pts  int64
+	// head is the data packet the object began in.
+	head int64
 	// gap says an object was dropped with a warning between this one and the
 	// one before it. It rides with the object rather than with the reader
 	// because the lookahead finds the drop while the previous object is still
 	// the one being handed out.
 	gap bool
+	// hole says any damage was reported there, which a frame count cannot
+	// see past even when no object of this stream was dropped by name.
+	hole bool
 }
 
 // set copies b into the object's own buffer. The copy is what lets the
 // demuxer hold an object across the read that finds its successor, since the
 // read window rebases underneath it.
-func (o *object) set(b []byte, pts int64) {
+func (o *object) set(b []byte, pts, head int64) {
 	o.data = append(o.data[:0], b...)
 	o.pts = pts
+	o.head = head
+}
+
+// reader walks the data packets and reassembles the selected stream's media
+// objects. The demuxer reads through one; the frame index walks with its own,
+// over its own window, so a walk never moves the demuxer's position.
+type reader struct {
+	d *Demuxer
+	w *srcwin.Window
+
+	// The packet cursor and the current packet's payload list.
+	cursor int64
+	pay    []payload
+	payIdx int
+
+	// Fragment reassembly, for a media object split across packets.
+	asm     []byte
+	asmNum  uint32
+	asmSize uint32
+	asmMS   int64
+	asmHead int64
+	asmHave int
+	asmOpen bool
+	// resumeUntil is the packet up to which a just-repositioned reader steps
+	// over fragments instead of reporting them. A seek lands on a packet
+	// boundary, which can sit inside a media object, so the tail of that one
+	// object is not damage. It expires: the object it excuses spans at most
+	// objectPackets packets, and a flag that never expired would swallow
+	// every later fragment error in the file, strict mode included, so
+	// damage a linear read refuses would be accepted after a seek.
+	resumeUntil int64
+
+	// gap is set when an object is dropped with a warning and moves onto the
+	// next object that completes, which carries it out as Discont: the decoder
+	// restarts there, since what it held across the hole continues nothing.
+	gap     bool
+	lastPTS int64
+	// sink takes the damage a reader that reads ahead of every read finds:
+	// the frame count's walk holds it for Walk to report, and a restore's
+	// probe refuses. Nil for the demuxer's own reader, which reports damage
+	// where its read finds it.
+	sink func(off int64, msg string) error
+	// hole is set by damage and moves onto the next object that completes,
+	// like gap.
+	hole bool
+}
+
+// warn reports damage that costs data.
+func (r *reader) warn(off int64, format string, args ...any) error {
+	r.hole = true
+	if r.sink != nil {
+		return r.sink(off, fmt.Sprintf(format, args...))
+	}
+	return r.d.warn(off, format, args...)
+}
+
+// warnTime reports damage to the stated times, which costs no object.
+func (r *reader) warnTime(off int64, format string, args ...any) error {
+	msg := fmt.Sprintf(format, args...)
+	if r.sink != nil {
+		return r.sink(off, msg)
+	}
+	if r.d.counter != nil {
+		// The count keeps it too, so a sidecar of a count a read took
+		// reports it on a restore as a walk's does.
+		r.d.idx.hold(off, msg)
+	}
+	return r.d.warn(off, "%s", msg)
 }
 
 // Demuxer reads one audio stream from an ASF source, emitting one packet per
@@ -113,34 +188,20 @@ type Demuxer struct {
 	// runUp is the codec's own run-up in samples, for one whose resumed decode
 	// converges rather than lands exact (WMA Voice); zero for the rest.
 	runUp int64
-	// gap is set when an object is dropped with a warning and moves onto the
-	// next object that completes, which carries it out as Discont: the decoder
-	// restarts there, since what it held across the hole continues nothing.
-	gap bool
+	// ord is the count ordinal of the object the next read delivers: 0 at
+	// the open, set by a counted landing, and -1 after any other rewind. A
+	// read feeds the count only where the two agree on which object it is.
+	ord int64
+	// counter is the codec's frame count, for a track whose seeks count their
+	// way to a landing (WMA v1/v2); nil for the rest. idx is that count.
+	counter frameCounter
+	idx     frameIndex
 
-	// Reading state: the packet cursor and the current packet's payload list.
-	cursor int64
-	pay    []payload
-	payIdx int
+	// rd is the reader ReadPacket delivers from.
+	rd reader
 	// probe is the scratch a seek reads packet prologues into, off the
 	// streaming window so bisection does not rebase it.
 	probe [packetOverhead]byte
-
-	// Fragment reassembly, for a media object split across packets.
-	asm     []byte
-	asmNum  uint32
-	asmSize uint32
-	asmMS   int64
-	asmHave int
-	asmOpen bool
-	// resumeUntil is the packet up to which a just-repositioned reader steps
-	// over fragments instead of reporting them. A seek lands on a packet
-	// boundary, which can sit inside a media object, so the tail of that one
-	// object is not damage. It expires: the object it excuses spans at most
-	// objectPackets packets, and a flag that never expired would swallow
-	// every later fragment error in the file, strict mode included, so
-	// damage a linear read refuses would be accepted after a seek.
-	resumeUntil int64
 
 	// cur is the object ReadPacket delivers and nxt the one-object lookahead
 	// its duration comes from: ASF states presentation times, not durations,
@@ -149,7 +210,6 @@ type Demuxer struct {
 	haveCur, haveNxt bool
 	filled, emitted  bool
 	lastDur          int64
-	lastPTS          int64
 	// err is sticky. Without it a strict-mode refusal mid-walk would be
 	// followed by the packet whose lookahead raised it, so a caller that
 	// logged the error and read on would get data after a failure.
@@ -165,6 +225,7 @@ func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 		d.opts = *opts
 	}
 	d.w = srcwin.New(src, d.size, "wma: reading packet data")
+	d.rd = reader{d: d, w: &d.w}
 	if err := d.parse(); err != nil {
 		return nil, err
 	}
@@ -218,7 +279,14 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 		return err
 	}
 	if !d.haveCur {
+		if d.counter != nil && d.ord >= 0 {
+			d.idx.readEnd(d, d.ord)
+		}
 		return io.EOF
+	}
+	if d.counter != nil && d.ord >= 0 {
+		d.idx.read(d, &d.cur, d.ord)
+		d.ord++
 	}
 	dur := d.tailDur(d.cur.pts)
 	if d.haveNxt {
@@ -229,11 +297,12 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 	*pkt = container.Packet{
 		Track: 0,
 		// ASF's own key-frame bit is not set by every writer for audio (ffmpeg
-		// leaves it clear), so the answer comes from the codec: for WMA v1/v2
-		// every super-frame is a restart and what the bit reservoir carries
-		// across one is what the seek run-up covers, while WMA Lossless
-		// produces nothing until a seekable tile and says which objects begin
-		// one in its own packet header.
+		// leaves it clear), so the answer comes from the codec: a WMA v1/v2
+		// decode resumed at any super-frame resynchronises inside it, while
+		// WMA Lossless produces nothing until a seekable tile and says which
+		// objects begin one in its own packet header. PTS stays the stated
+		// time either way; a seek's landing is the codec's fact, this the
+		// container's.
 		Packet: codec.Packet{Data: d.cur.data, PTS: d.cur.pts, Dur: dur, Sync: d.objectIsSync(), Discont: d.cur.gap},
 	}
 	return nil
@@ -251,21 +320,21 @@ func (d *Demuxer) ensure() error {
 		if !d.haveCur {
 			return nil
 		}
-		ok, err := d.fetch(&d.nxt)
+		ok, err := d.rd.fetch(&d.nxt)
 		if err != nil {
 			return err
 		}
 		d.haveNxt = ok
 	case !d.filled:
 		d.filled = true
-		ok, err := d.fetch(&d.cur)
+		ok, err := d.rd.fetch(&d.cur)
 		if err != nil {
 			return err
 		}
 		if d.haveCur = ok; !ok {
 			return nil
 		}
-		if ok, err = d.fetch(&d.nxt); err != nil {
+		if ok, err = d.rd.fetch(&d.nxt); err != nil {
 			return err
 		}
 		d.haveNxt = ok
@@ -290,45 +359,47 @@ func (d *Demuxer) tailDur(pts int64) int64 {
 
 // fetch advances the packet cursor until one whole media object is assembled
 // into dst, reporting false at the end of the data.
-func (d *Demuxer) fetch(dst *object) (bool, error) {
+func (r *reader) fetch(dst *object) (bool, error) {
+	d := r.d
 	for {
-		if d.payIdx < len(d.pay) {
-			p := d.pay[d.payIdx]
-			d.payIdx++
-			done, err := d.absorb(p, dst)
+		if r.payIdx < len(r.pay) {
+			p := r.pay[r.payIdx]
+			r.payIdx++
+			done, err := r.absorb(p, dst)
 			if err != nil {
 				return false, err
 			}
 			if !done {
 				continue
 			}
-			if dst.pts < d.lastPTS {
+			if dst.pts < r.lastPTS {
 				// No latch on this one: the warning list already drops
 				// duplicates and its own cap bounds a file that folds
 				// repeatedly, while a latch would have to be cleared on every
 				// reposition, and one that was not turned a second walk of a
 				// file strict had already refused into a clean read.
-				if err := d.warn(d.packetOff(d.cursor-1), "presentation times run backwards"); err != nil {
+				if err := r.warnTime(d.packetOff(r.cursor-1), "presentation times run backwards"); err != nil {
 					return false, err
 				}
-				dst.pts = d.lastPTS
+				dst.pts = r.lastPTS
 			}
-			d.lastPTS = dst.pts
-			dst.gap, d.gap = d.gap, false
+			r.lastPTS = dst.pts
+			dst.gap, r.gap = r.gap, false
+			dst.hole, r.hole = r.hole, false
 			return true, nil
 		}
-		if d.cursor >= d.packets {
+		if r.cursor >= d.packets {
 			// An object still under assembly here is a file that stops
 			// mid-object, which is the same damage a broken fragment run is
 			// mid-stream and has to read the same way.
-			if err := d.dropOpenAssembly(d.packetOff(d.cursor - 1)); err != nil {
+			if err := r.dropOpenAssembly(d.packetOff(r.cursor - 1)); err != nil {
 				return false, err
 			}
-			return false, d.w.Err()
+			return false, r.w.Err()
 		}
-		i := d.cursor
-		d.cursor++
-		if err := d.loadPacket(i); err != nil {
+		i := r.cursor
+		r.cursor++
+		if err := r.loadPacket(i); err != nil {
 			return false, err
 		}
 	}
@@ -336,77 +407,80 @@ func (d *Demuxer) fetch(dst *object) (bool, error) {
 
 // absorb feeds one payload into the object under assembly, reporting true when
 // that completes an object in dst.
-func (d *Demuxer) absorb(p payload, dst *object) (bool, error) {
+func (r *reader) absorb(p payload, dst *object) (bool, error) {
+	d := r.d
 	if p.stream != d.sel.number {
 		return false, nil
 	}
-	off := d.packetOff(d.cursor - 1)
+	pkt := r.cursor - 1
+	off := d.packetOff(pkt)
 	if p.objSize == 0 || p.objSize > maxObjectBytes {
-		d.dropAssembly()
-		d.gap = true
-		return false, d.warn(off, "media object of %d bytes", p.objSize)
+		r.dropAssembly()
+		r.gap = true
+		return false, r.warn(off, "media object of %d bytes", p.objSize)
 	}
 	if p.objOff == 0 {
-		d.resumeUntil = 0
+		r.resumeUntil = 0
 	}
 	switch {
 	case p.objOff == 0 && int(p.objSize) == len(p.data):
 		// The whole object rides in one payload, which is the common case.
-		if err := d.dropOpenAssembly(off); err != nil {
+		if err := r.dropOpenAssembly(off); err != nil {
 			return false, err
 		}
-		dst.set(p.data, d.samplePos(p.presMS))
+		dst.set(p.data, d.samplePos(p.presMS), pkt)
 		return true, nil
 	case p.objOff == 0:
-		if err := d.dropOpenAssembly(off); err != nil {
+		if err := r.dropOpenAssembly(off); err != nil {
 			return false, err
 		}
-		d.asm = append(d.asm[:0], p.data...)
-		d.asmNum, d.asmSize, d.asmMS = p.objNum, p.objSize, p.presMS
-		d.asmHave = len(p.data)
-		d.asmOpen = true
+		r.asm = append(r.asm[:0], p.data...)
+		r.asmNum, r.asmSize, r.asmMS, r.asmHead = p.objNum, p.objSize, p.presMS, pkt
+		r.asmHave = len(p.data)
+		r.asmOpen = true
 	default:
-		if !d.asmOpen || p.objNum != d.asmNum || p.objSize != d.asmSize || int64(p.objOff) != int64(d.asmHave) {
-			d.dropAssembly()
-			if d.cursor <= d.resumeUntil {
+		if !r.asmOpen || p.objNum != r.asmNum || p.objSize != r.asmSize || int64(p.objOff) != int64(r.asmHave) {
+			r.dropAssembly()
+			if r.cursor <= r.resumeUntil {
 				// The tail of an object this reader never saw the head of.
 				return false, nil
 			}
-			d.gap = true
-			return false, d.warn(off, "media object %d fragment at offset %d does not continue the one in hand", p.objNum, p.objOff)
+			r.gap = true
+			return false, r.warn(off, "media object %d fragment at offset %d does not continue the one in hand", p.objNum, p.objOff)
 		}
-		d.asm = append(d.asm, p.data...)
-		d.asmHave += len(p.data)
+		r.asm = append(r.asm, p.data...)
+		r.asmHave += len(p.data)
 	}
-	if d.asmHave > int(d.asmSize) {
-		d.dropAssembly()
-		d.gap = true
-		return false, d.warn(off, "media object %d overruns its declared %d bytes", p.objNum, p.objSize)
+	if r.asmHave > int(r.asmSize) {
+		r.dropAssembly()
+		r.gap = true
+		return false, r.warn(off, "media object %d overruns its declared %d bytes", p.objNum, p.objSize)
 	}
-	if d.asmHave < int(d.asmSize) {
+	if r.asmHave < int(r.asmSize) {
 		return false, nil
 	}
-	dst.set(d.asm, d.samplePos(d.asmMS))
-	d.dropAssembly()
+	dst.set(r.asm, d.samplePos(r.asmMS), r.asmHead)
+	r.dropAssembly()
 	return true, nil
 }
 
 // dropOpenAssembly abandons a half-built object, which is damage worth a
 // warning; dropAssembly is the silent reset the completion path uses.
-func (d *Demuxer) dropOpenAssembly(off int64) error {
-	if !d.asmOpen {
+func (r *reader) dropOpenAssembly(off int64) error {
+	if !r.asmOpen {
 		return nil
 	}
-	missing := int(d.asmSize) - d.asmHave
-	d.dropAssembly()
-	d.gap = true
-	return d.warn(off, "media object %d is missing %d bytes and was dropped", d.asmNum, missing)
+	missing := int(r.asmSize) - r.asmHave
+	num := r.asmNum
+	r.dropAssembly()
+	r.gap = true
+	return r.warn(off, "media object %d is missing %d bytes and was dropped", num, missing)
 }
 
-func (d *Demuxer) dropAssembly() {
-	d.asmOpen = false
-	d.asmHave = 0
-	d.asm = d.asm[:0]
+func (r *reader) dropAssembly() {
+	r.asmOpen = false
+	r.asmHave = 0
+	r.asm = r.asm[:0]
 }
 
 // samplePos converts an absolute presentation time to an output sample
@@ -424,8 +498,10 @@ func (d *Demuxer) packetOff(i int64) int64 {
 	return d.dataOff + i*d.packetLen
 }
 
-// SeekSample repositions to a packet boundary at or before the target and
-// returns the position reads resume at.
+// SeekSample repositions at or before the target and returns the position
+// reads resume at. A WMA v1/v2 track lands on the media object its frame
+// counts put there (seekCounted); the rest land on a packet boundary at a
+// stated presentation time and back up for the codec's run-up.
 func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	if track != 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("wma: no track %d", track))
@@ -435,6 +511,14 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	}
 	if d.packets == 0 {
 		return 0, nil
+	}
+	if d.counter != nil {
+		landed, err := d.seekCounted(sample)
+		if err != nil {
+			d.err = err
+			return 0, err
+		}
+		return landed, nil
 	}
 	// A target past the end lands on the last packet, where reads resume and
 	// immediately run out, which is what every other demuxer here does.
@@ -541,19 +625,11 @@ func (d *Demuxer) landingPTS(pts int64) int64 {
 // rewind puts the reader at the start of packet i, discarding the lookahead
 // and any half-built object.
 func (d *Demuxer) rewind(i int64) {
-	d.cursor = i
-	d.pay = d.pay[:0]
-	d.payIdx = 0
-	d.dropAssembly()
-	d.resumeUntil = 0
-	if i > 0 {
-		d.resumeUntil = i + d.objectPackets
-	}
+	d.rd.reset(i)
 	d.haveCur, d.haveNxt = false, false
 	d.filled, d.emitted = false, false
-	d.gap = false // a seek is its own discontinuity, and the format layer handles it
-	d.lastPTS = 0
 	d.err = nil
+	d.ord = -1
 	// lastDur deliberately survives: it is the nominal length of a media
 	// object, a property of the stream rather than of the reader's position,
 	// and it is the only answer the tail object has. Clearing it left a
@@ -877,6 +953,7 @@ func (d *Demuxer) wireTrack(s stream, id codec.ID, name string) error {
 	}
 	d.syncOK, d.syncFrameLen = setup.syncOK, setup.frameLen
 	d.runUp = int64(setup.runUp)
+	d.counter = setup.counter
 	f := setup.fmt
 	if err := f.Valid(); err != nil {
 		return container.UnusableFormat("wma", f, err)
@@ -912,10 +989,13 @@ func (d *Demuxer) wireTrack(s stream, id codec.ID, name string) error {
 	// measured in packets. When a packet holds whole media objects, backing
 	// up one already clears at least one of them; when an object spans k
 	// packets the landing falls inside the target's own object, so it takes k
-	// to clear that and k more for a whole object of history.
-	d.seekPreroll = 1
-	if d.objectPackets > 1 {
-		d.seekPreroll = min(2*d.objectPackets, maxSeekPrerollPackets)
+	// to clear that and k more for a whole object of history. A counted track
+	// lands on an object, a run-up object early, and needs none of this.
+	if d.counter == nil {
+		d.seekPreroll = 1
+		if d.objectPackets > 1 {
+			d.seekPreroll = min(2*d.objectPackets, maxSeekPrerollPackets)
+		}
 	}
 	if len(d.streams) > 1 {
 		d.note(0, "the file carries %d streams; %s stream %d was selected", len(d.streams), name, s.number)
@@ -983,7 +1063,9 @@ func (d *Demuxer) parseData(off int64) error {
 			return err
 		}
 	}
-	if end < d.size {
+	if end < d.size && d.counter == nil {
+		// A counted track lands by its frame counts and never asks the
+		// index, so its open does not read the file's tail for one.
 		return d.parseIndex(end)
 	}
 	return nil
@@ -1133,39 +1215,62 @@ func (d *Demuxer) parsePrologue(b []byte, total int) (packetInfo, bool) {
 	return info, true
 }
 
+// reset puts the reader at the start of packet i with nothing in hand.
+func (r *reader) reset(i int64) {
+	r.cursor = i
+	r.pay = r.pay[:0]
+	r.payIdx = 0
+	r.dropAssembly()
+	r.resumeUntil = 0
+	if i > 0 {
+		r.resumeUntil = i + r.d.objectPackets
+	}
+	r.gap = false // a seek is its own discontinuity, and the format layer handles it
+	r.hole = false
+	r.lastPTS = 0
+}
+
 // loadPacket parses data packet i into the payload list the fetch loop drains.
 // Damage costs the packet, not the stream: the walk moves to the next one.
-func (d *Demuxer) loadPacket(i int64) error {
-	d.pay = d.pay[:0]
-	d.payIdx = 0
+func (r *reader) loadPacket(i int64) error {
+	d := r.d
+	r.pay = r.pay[:0]
+	r.payIdx = 0
 	off := d.packetOff(i)
-	d.w.Trim(off)
-	b := d.w.BytesAt(off, int(d.packetLen))
+	r.w.Trim(off)
+	b := r.w.BytesAt(off, int(d.packetLen))
 	if int64(len(b)) < d.packetLen {
-		if err := d.w.Err(); err != nil {
+		if err := r.w.Err(); err != nil {
 			return err
 		}
-		return d.warn(off, "data packet %d is short", i)
+		return r.warn(off, "data packet %d is short", i)
 	}
+	return r.parsePacket(b, i)
+}
+
+// parsePacket parses the bytes of data packet i into the payload list.
+func (r *reader) parsePacket(b []byte, i int64) error {
+	d := r.d
+	off := d.packetOff(i)
 	info, ok := d.parsePrologue(b, len(b))
 	if !ok || info.payEnd > len(b) {
-		return d.warn(off, "data packet %d has an unreadable header", i)
+		return r.warn(off, "data packet %d has an unreadable header", i)
 	}
-	r := br{b: b[:info.payEnd], p: info.payStart, ok: true}
-	for k := 0; k < info.nPayloads && r.p < info.payEnd && len(d.pay) < maxPayloads; k++ {
-		sn := r.u8()
-		objNum := r.vlen(info.numType)
-		objOff := r.vlen(info.offType)
-		rep := r.take(int(r.vlen(info.repType)))
-		n := info.payEnd - r.p
+	pb := br{b: b[:info.payEnd], p: info.payStart, ok: true}
+	for k := 0; k < info.nPayloads && pb.p < info.payEnd && len(r.pay) < maxPayloads; k++ {
+		sn := pb.u8()
+		objNum := pb.vlen(info.numType)
+		objOff := pb.vlen(info.offType)
+		rep := pb.take(int(pb.vlen(info.repType)))
+		n := info.payEnd - pb.p
 		if info.multi {
-			n = int(r.vlen(info.payLenType))
+			n = int(pb.vlen(info.payLenType))
 		}
-		data := r.take(n)
-		if !r.ok {
-			return d.warn(off, "data packet %d payload %d runs past the packet", i, k)
+		data := pb.take(n)
+		if !pb.ok {
+			return r.warn(off, "data packet %d payload %d runs past the packet", i, k)
 		}
-		if err := d.addPayload(off, int(sn&0x7f), objNum, objOff, rep, data); err != nil {
+		if err := r.addPayload(off, int(sn&0x7f), objNum, objOff, rep, data); err != nil {
 			return err
 		}
 	}
@@ -1173,7 +1278,7 @@ func (d *Demuxer) loadPacket(i int64) error {
 }
 
 // addPayload normalizes one payload onto the payload list.
-func (d *Demuxer) addPayload(off int64, sn int, objNum, objOff uint32, rep, data []byte) error {
+func (r *reader) addPayload(off int64, sn int, objNum, objOff uint32, rep, data []byte) error {
 	switch {
 	case len(rep) == 1:
 		// A compressed payload holds a run of length-prefixed sub-payloads,
@@ -1182,29 +1287,29 @@ func (d *Demuxer) addPayload(off int64, sn int, objNum, objOff uint32, rep, data
 		// rather than an offset.
 		delta := int64(rep[0])
 		for j := 0; len(data) > 0; j++ {
-			if len(d.pay) >= maxPayloads {
+			if len(r.pay) >= maxPayloads {
 				// The one payload form whose entry count grows with the
 				// packet rather than with the six-bit count field.
-				return d.warn(off, "compressed payload holds more than %d sub-objects", maxPayloads)
+				return r.warn(off, "compressed payload holds more than %d sub-objects", maxPayloads)
 			}
 			n := int(data[0])
 			data = data[1:]
 			if n == 0 || n > len(data) {
-				return d.warn(off, "compressed payload sub-object of %d bytes with %d left", n, len(data))
+				return r.warn(off, "compressed payload sub-object of %d bytes with %d left", n, len(data))
 			}
-			d.pay = append(d.pay, payload{
+			r.pay = append(r.pay, payload{
 				stream: sn, objSize: uint32(n), data: data[:n],
 				presMS: int64(objOff) + int64(j)*delta,
 			})
 			data = data[n:]
 		}
 	case len(rep) >= 8:
-		d.pay = append(d.pay, payload{
+		r.pay = append(r.pay, payload{
 			stream: sn, objNum: objNum, objOff: objOff,
 			objSize: le.Uint32(rep), presMS: int64(le.Uint32(rep[4:])), data: data,
 		})
 	default:
-		return d.warn(off, "payload carries %d bytes of replicated data", len(rep))
+		return r.warn(off, "payload carries %d bytes of replicated data", len(rep))
 	}
 	return nil
 }

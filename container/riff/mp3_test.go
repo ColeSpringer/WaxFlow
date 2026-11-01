@@ -631,8 +631,9 @@ func TestMP3IndexRoundTrips(t *testing.T) {
 }
 
 // TestByteLinearPayloadsHaveNoIndex is the other half of the capability
-// gate: format.Media advertises container.Indexer by type assertion, so a
-// PCM WAV must answer nil and false rather than nothing at all.
+// gate: format.Media advertises container.Indexer only for an open that keeps
+// an index, so a PCM WAV says it keeps none, and answers nil and false if asked
+// anyway.
 func TestByteLinearPayloadsHaveNoIndex(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -651,6 +652,9 @@ func TestByteLinearPayloadsHaveNoIndex(t *testing.T) {
 			}
 			if blob := d.IndexSnapshot(); blob != nil {
 				t.Errorf("snapshotted %d bytes", len(blob))
+			}
+			if keeps, frames := d.KeepsIndex(), tc.name != "pcm"; keeps != frames {
+				t.Errorf("KeepsIndex = %v for a payload that walks frames: %v", keeps, frames)
 			}
 			// The same per-file answer on container.Walker: the byte-linear
 			// payload has nothing to walk, and the short frame run was just

@@ -7,7 +7,11 @@
 // routing and codec never learns about containers.
 package codec
 
-import "github.com/colespringer/waxflow/audio"
+import (
+	"errors"
+
+	"github.com/colespringer/waxflow/audio"
+)
 
 // ID names a codec. IDs appear in probe output, /caps, and cache keys, so
 // they are part of the public contract.
@@ -90,18 +94,37 @@ type Packet struct {
 // decode began, so a resumed decode can be told its landing and produce what a
 // decode from the start would have produced there.
 //
-// codec/wmavoice is the only one, and it is not bookkeeping there: its
-// comfort-noise frames draw from a codebook at an offset that is a function of
-// the frame index since the decoder started, so a resumed decode that starts
-// counting at zero draws different noise in every silent passage, for good.
-// Decoders that do not implement this are unaffected; the format layer calls
-// it only when a decoder offers it.
+// It is not bookkeeping in codec/wmavoice: its comfort-noise frames draw from
+// a codebook at an offset that is a function of the frame index since the
+// decoder started, so a resumed decode that starts counting at zero draws
+// different noise in every silent passage, for good. Decoders that do not
+// implement this are unaffected; the format layer calls it only when a
+// decoder offers it.
 type Positioner interface {
 	// SetPosition names the output sample the next packet's first decoded
 	// sample carries. It is called after Reset and before the first packet of
 	// a resumed run.
 	SetPosition(sample int64)
 }
+
+// Restarter is implemented by a decoder that reads a decode from the start of
+// the stream differently from one resumed mid-stream. Reset leaves it
+// resumed: it passes over the shapes only a landing produces and reports
+// ErrNeedsHistory for state from before its landing. Restart puts it where a
+// fresh decoder starts, where those shapes are damage. The format layer
+// restarts it for a landing on the stream's first packet and resets it
+// everywhere else, a hole included: a stamp says where a decode resumes, not
+// whether it does.
+type Restarter interface {
+	Restart()
+}
+
+// ErrNeedsHistory is what a decode resumed mid-stream reports when the
+// stream reuses state from before its landing that nothing restates, so a
+// landing that early cannot produce what a linear decode produces there. The
+// caller can land earlier and decode again. A decode from the start of the
+// stream meets the same shape as damage and reports that instead.
+var ErrNeedsHistory = errors.New("codec: the decode needs state from before its landing")
 
 // Trailer carries gapless finalization from an encoder to a muxer:
 // Samples is the true source length, Delay the encoder priming to trim

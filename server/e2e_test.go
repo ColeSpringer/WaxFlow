@@ -2015,16 +2015,17 @@ func TestProbeReportsNotesSeparately(t *testing.T) {
 	}
 }
 
-// TestStreamOfAMeasuredAdvisorySourceIsWhole is the regression the plan's D5
-// walked into: a source whose measure and whose decode disagree.
+// TestStreamOfAMeasuredAdvisorySourceIsWhole is the regression for a source
+// whose measure and whose decode disagreed.
 //
-// sine-s16.wma declares 22491, measures 22495 through a seek past the end, and
-// decodes to 22528. Handing the run the measure made the output's header
-// promise 22495 on a writer the muxer cannot patch; the encoder then produced
-// 22528 and the muxer refused at End, after the 200 and the first bytes had
-// already gone out. The status line is no help there, so this reads the body
-// back: a truncated stream is one whose bytes do not parse into the samples
-// its own header claims.
+// sine-s16.wma declares 22491 and decodes to 22528. Measured by a seek past
+// the end it came back 22495, and handing the run that number made the
+// output's header promise 22495 on a writer the muxer cannot patch; the
+// encoder then produced 22528 and the muxer refused at End, after the 200 and
+// the first bytes had already gone out. The measure is now a walk of the
+// track's frame counts. The status line is no help there, so this reads the
+// body back: a truncated stream is one whose bytes do not parse into the
+// samples its own header claims.
 func TestStreamOfAMeasuredAdvisorySourceIsWhole(t *testing.T) {
 	env := newTestEnv(t, nil)
 	for _, f := range []string{"wav", "flac"} {

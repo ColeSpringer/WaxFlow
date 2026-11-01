@@ -10,13 +10,16 @@ var (
 	_ container.Walker  = (*Demuxer)(nil)
 )
 
-// IndexSnapshot implements container.Indexer for a frame-walked payload.
-//
-// A byte-linear one answers nil, and the answer matters: format.Media
-// advertises the capability by type assertion, so this type carries it
-// whatever its payload holds and a PCM track has to say for itself that
-// there is nothing worth persisting. There is not: its unit geometry puts
-// every position in arithmetic reach, with no walk to skip.
+// KeepsIndex implements container.Indexer: a frame-walked payload keeps one.
+// A byte-linear one has nothing worth persisting, since its unit geometry
+// puts every position in arithmetic reach, with no walk to skip.
+func (d *Demuxer) KeepsIndex() bool {
+	_, ok := d.payload.(*mpegframes.Reader)
+	return ok
+}
+
+// IndexSnapshot implements container.Indexer for a frame-walked payload, and
+// answers nil for a byte-linear one.
 func (d *Demuxer) IndexSnapshot() []byte {
 	if r, ok := d.payload.(*mpegframes.Reader); ok {
 		return r.Snapshot()

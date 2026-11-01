@@ -7,6 +7,9 @@ var (
 	_ container.Walker  = (*Demuxer)(nil)
 )
 
+// KeepsIndex implements container.Indexer: every open keeps the frame index.
+func (d *Demuxer) KeepsIndex() bool { return true }
+
 // IndexSnapshot implements container.Indexer for the lazy frame index.
 func (d *Demuxer) IndexSnapshot() []byte { return d.pkts.Snapshot() }
 

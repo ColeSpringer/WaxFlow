@@ -480,10 +480,10 @@ func (s *slice) ConfirmLength() error {
 		if err := inner.ConfirmLength(); err != nil {
 			return err
 		}
-	} else if !format.MediaWalked(s.med) {
-		if err := format.WalkMedia(s.med); err != nil {
-			return err
-		}
+	} else if err := format.WalkMedia(s.med); err != nil {
+		// Unconditional: a walk that finished some other way has measured
+		// the payload, and only Walk, free by then, puts that on the Media.
+		return err
 	}
 	to := int64(ToEnd)
 	if s.limit >= 0 {
@@ -728,8 +728,9 @@ type ConcatSource struct {
 	// when the timeline is planned, not when the seam breaks; measure such a
 	// member first with MeasureLength and hand the track it returns here.
 	// That is what the daemon does. MeasureLength takes the cheapest route to
-	// the number the decode delivers, which for a container that seeks by
-	// time (ASF) is a full decode, since a seek past the end lands under it.
+	// the number the decode delivers: for an ASF member, a walk of a WMA v1/v2
+	// track's frame counts, or a full decode for the codecs whose positions
+	// are stated times.
 	//
 	// It is also why a Concat implements no format.LengthConfirmer while a
 	// span does: confirming a member's length behind the caller's back would

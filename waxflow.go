@@ -69,9 +69,9 @@ func (e *Engine) Probe(src container.Source, hint string, opts *ProbeOptions) (*
 }
 
 // OpenStream opens src for decoded, sample-exact PCM access. With an
-// IndexCache configured, a saved source index (the MP3 frame table) is
-// restored into the demuxer before the first read, and a grown one is
-// saved back when the media closes.
+// IndexCache configured, a saved source index (the MP3 frame table, a WMA
+// v1/v2 frame count) is restored into the demuxer before the first read,
+// and a grown one is saved back when the media closes.
 func (e *Engine) OpenStream(src container.Source, hint string) (format.Media, error) {
 	med, err := format.Open(src, hint, nil)
 	if err != nil || e.idx == nil {
@@ -87,10 +87,20 @@ func (e *Engine) OpenStream(src container.Source, hint string) (format.Media, er
 			// drop it so it is not served (and kept warm) again.
 			e.idx.Drop(src)
 			e.log.Debug("index sidecar rejected and dropped", "hint", hint)
+		} else if format.MediaWalked(med) {
+			// A complete index is a measurement already taken, and walking
+			// it costs nothing, so the media reports the length at once.
+			if err := format.WalkMedia(med); err != nil {
+				e.log.Debug("settling a restored index failed", "hint", hint, "err", err)
+			}
 		}
 	}
 	return &indexSavingMedia{Media: med, ix: ix, cache: e.idx, src: src}, nil
 }
+
+// The assertion keeps a method added to container.Indexer from silently
+// dropping the capability, and with it every sidecar, here.
+var _ container.Indexer = (*indexSavingMedia)(nil)
 
 // indexSavingMedia saves a grown source index when the media closes.
 // Close is idempotent like the media it wraps (ix nils after the first
@@ -113,6 +123,8 @@ func (m *indexSavingMedia) Close() error {
 	}
 	return m.Media.Close()
 }
+
+func (m *indexSavingMedia) KeepsIndex() bool { return m.ix != nil && m.ix.KeepsIndex() }
 
 func (m *indexSavingMedia) IndexSnapshot() []byte {
 	if m.ix == nil {
@@ -442,7 +454,9 @@ func confirmableLength(t container.Track, src any) func() error {
 	if t.Samples < 0 || t.SamplesExact || t.SamplesAdvisory {
 		return nil
 	}
-	if w, ok := src.(lengthWalker); ok && !w.Walked() {
+	// A finished walk is still the work: until Walk runs, the measurement is
+	// not on the track, and once the walk has finished Walk costs nothing.
+	if w, ok := src.(lengthWalker); ok {
 		return w.Walk
 	}
 	if c, ok := src.(format.LengthConfirmer); ok {

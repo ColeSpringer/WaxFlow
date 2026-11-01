@@ -46,6 +46,33 @@ func newBuilder() *builder {
 	return &builder{rate: 44100, channels: 2, blockAlign: 743, packetLen: 512, prerollMS: 3100, streamNum: 1}
 }
 
+// proArm points the stream at WMA Pro, borrowing testdata/pro-s16.wma's codec
+// private data with the builder's nBlockAlign. A Pro seek lands on stated
+// presentation times, so the Simple Index, the send-time bisection, the run-up
+// and the landing checks are tested there: a WMA v1/v2 seek counts frames and
+// consults none of them. Set blockAlign first.
+func (b *builder) proArm(t *testing.T) *builder {
+	t.Helper()
+	wfx := append([]byte(nil), open(t, fixture(t, "pro-s16.wma")).Tracks()[0].CodecConfig...)
+	le.PutUint16(wfx[12:], uint16(b.blockAlign))
+	b.wfx = wfx
+	return b
+}
+
+// proStream is n packets of one four-byte Pro object each, 20 ms apart.
+func proStream(t *testing.T, n int) []byte {
+	t.Helper()
+	b := newBuilder()
+	b.blockAlign = 4
+	b.proArm(t)
+	b.playHNS = b.prerollMS*10_000 + uint64(n)*20*10_000
+	pres := uint32(b.prerollMS)
+	for i := range n {
+		b.packet(uint32(i*20), byte(i+1), 0, 4, pres+uint32(i*20), []byte{byte(i), 0, 0, 0})
+	}
+	return b.build()
+}
+
 // object writes one ASF object: its GUID, its total size, and its body.
 func object(id []byte, body []byte) []byte {
 	out := make([]byte, 24, 24+len(body))
@@ -372,50 +399,63 @@ func TestBrokenFragmentRunIsDamage(t *testing.T) {
 // object that raised the error is not the object about to be handed out: a
 // caller that logged the error and read on would otherwise be given data after
 // a failure, from a file the demuxer had already refused. A seek clears it,
-// because repositioning re-derives every bit of that state.
+// because repositioning re-derives every bit of that state, on both arms: a
+// WMA v1/v2 seek counts frames through the damage, and that count reports
+// nothing until Walk does.
 func TestAReadFailureIsSticky(t *testing.T) {
-	b := newBuilder()
-	b.blockAlign = 4
-	b.playHNS = b.prerollMS*10_000 + 10_000_000
-	pres := uint32(b.prerollMS)
-	b.packet(0, 1, 0, 4, pres, []byte{1, 1, 1, 1})
-	b.packet(20, 2, 0, 4, pres+20, []byte{2, 2, 2, 2})
-	// A continuation of an object nothing started: damage, and in strict mode
-	// a refusal, raised while looking ahead past the second object.
-	b.packet(40, 3, 8, 12, pres+40, []byte{9, 9, 9, 9})
-	b.packet(60, 4, 0, 4, pres+60, []byte{4, 4, 4, 4})
-	b.packet(80, 5, 0, 4, pres+80, []byte{5, 5, 5, 5})
-
-	d, err := asf.NewDemuxer(container.BytesSource(b.build()), &asf.DemuxerOptions{Strict: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var pkt container.Packet
-	var first error
-	for i := 0; i < 8 && first == nil; i++ {
-		first = d.ReadPacket(&pkt)
-	}
-	if first == nil || errors.Is(first, io.EOF) {
-		t.Fatalf("strict mode walked past the damaged packet (%v)", first)
-	}
-	for i := 0; i < 3; i++ {
-		if err := d.ReadPacket(&pkt); err == nil {
-			t.Fatalf("read %d after a refusal handed out %v", i, pkt.Data)
-		} else if err.Error() != first.Error() {
-			t.Fatalf("read %d returned %v, want the original %v", i, err, first)
+	for _, pro := range []bool{true, false} {
+		b := newBuilder()
+		b.blockAlign = 4
+		if pro {
+			b.proArm(t)
 		}
-	}
-	// Landing past the damage clears it: the failure belonged to one packet,
-	// not to the file.
-	landed, err := d.SeekSample(0, 80*int64(b.rate)/1000)
-	if err != nil {
-		t.Fatalf("seek past the damaged packet: %v", err)
-	}
-	if err := d.ReadPacket(&pkt); err != nil {
-		t.Fatalf("read after seeking to %d: %v", landed, err)
-	}
-	if pkt.Data[0] != 4 && pkt.Data[0] != 5 {
-		t.Errorf("landed on object %v, want one of the two behind the damage", pkt.Data)
+		b.playHNS = b.prerollMS*10_000 + 10_000_000
+		pres := uint32(b.prerollMS)
+		b.packet(0, 1, 0, 4, pres, []byte{1, 1, 1, 1})
+		b.packet(20, 2, 0, 4, pres+20, []byte{2, 2, 2, 2})
+		// A continuation of an object nothing started: damage, and in strict
+		// mode a refusal, raised while looking ahead past the second object.
+		b.packet(40, 3, 8, 12, pres+40, []byte{9, 9, 9, 9})
+		b.packet(60, 4, 0, 4, pres+60, []byte{4, 4, 4, 4})
+		b.packet(80, 5, 0, 4, pres+80, []byte{5, 5, 5, 5})
+
+		d, err := asf.NewDemuxer(container.BytesSource(b.build()), &asf.DemuxerOptions{Strict: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var pkt container.Packet
+		var first error
+		for i := 0; i < 8 && first == nil; i++ {
+			first = d.ReadPacket(&pkt)
+		}
+		if first == nil || errors.Is(first, io.EOF) {
+			t.Fatalf("pro %v: strict mode walked past the damaged packet (%v)", pro, first)
+		}
+		for i := 0; i < 3; i++ {
+			if err := d.ReadPacket(&pkt); err == nil {
+				t.Fatalf("pro %v: read %d after a refusal handed out %v", pro, i, pkt.Data)
+			} else if err.Error() != first.Error() {
+				t.Fatalf("pro %v: read %d returned %v, want the original %v", pro, i, err, first)
+			}
+		}
+		// Landing past the damage clears it: the failure belonged to one
+		// packet, not to the file. On v1/v2 the target is the fourth
+		// object's frame, one frame each, and the landing is an object
+		// early, on the fourth packet.
+		target := 80 * int64(b.rate) / 1000
+		if !pro {
+			target = 3 * 2048
+		}
+		landed, err := d.SeekSample(0, target)
+		if err != nil {
+			t.Fatalf("seek past the damaged packet: %v", err)
+		}
+		if err := d.ReadPacket(&pkt); err != nil {
+			t.Fatalf("read after seeking to %d: %v", landed, err)
+		}
+		if pkt.Data[0] != 4 && pkt.Data[0] != 5 {
+			t.Errorf("landed on object %v, want one of the two behind the damage", pkt.Data)
+		}
 	}
 }
 
@@ -423,10 +463,11 @@ func TestAReadFailureIsSticky(t *testing.T) {
 // needs the send times to rise across the file and a damaged one owes nothing
 // of the sort; here they fold back on themselves, so bisection picks a packet
 // in the middle for a target at the start. SeekSample's landing check is what
-// has to catch it.
+// has to catch it. Pro, because a WMA v1/v2 seek does not bisect.
 func TestSeekSurvivesNonMonotonicSendTimes(t *testing.T) {
 	b := newBuilder()
 	b.blockAlign = 4
+	b.proArm(t)
 	b.playHNS = b.prerollMS*10_000 + 10_000_000
 	// Presentation times rise; send times do not, and the one at index 4
 	// invites the bisection to jump forward for a target of zero.
@@ -461,10 +502,11 @@ func TestSeekSurvivesNonMonotonicSendTimes(t *testing.T) {
 // TestSeekWithNothingReadableAtTheLanding covers the other half of the same
 // finding: when the packets behind the landing hold no whole media object, the
 // fetch has run to the end of the data and nothing will follow, so the landing
-// reported has to be one no caller can be misled by.
+// reported has to be one no caller can be misled by. Pro, for the same reason.
 func TestSeekWithNothingReadableAtTheLanding(t *testing.T) {
 	b := newBuilder()
 	b.blockAlign = 4
+	b.proArm(t)
 	b.playHNS = b.prerollMS*10_000 + 10_000_000
 	b.packet(0, 1, 0, 4, uint32(b.prerollMS), []byte{1, 2, 3, 4})
 	// Two packets of an object that never completes: the tail of the file
@@ -573,10 +615,12 @@ func TestTruncatedTailIsDamage(t *testing.T) {
 // allowed to step over. A seek lands on a packet boundary, so the tail of the
 // object it bisected is not damage, but a suppression that never expired
 // swallowed every later fragment error in the file: damage a linear read
-// refuses would be accepted on a post-seek read of the same bytes.
+// refuses would be accepted on a post-seek read of the same bytes. Pro: a
+// strict WMA v1/v2 seek into this tail is refused by its own count.
 func TestResumeSuppressionExpires(t *testing.T) {
 	b := newBuilder()
 	b.blockAlign = 4
+	b.proArm(t)
 	b.playHNS = b.prerollMS*10_000 + 20*10_000_000
 	pres := uint32(b.prerollMS)
 	for i := 0; i < 6; i++ {
@@ -597,7 +641,12 @@ func TestResumeSuppressionExpires(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.SeekSample(0, 200*int64(b.rate)/1000); err == nil {
+	if landed, err := d.SeekSample(0, 200*int64(b.rate)/1000); err == nil {
+		// A landing that found no object restarts at the start, and a walk
+		// from there reports the strays whatever the suppression does.
+		if landed == 0 {
+			t.Fatal("the seek into the stray tail fell back to the start, so the walk below pins nothing")
+		}
 		var pkt container.Packet
 		var post error
 		for i := 0; i < 20; i++ {
@@ -631,63 +680,70 @@ func walkErr(t *testing.T, raw []byte) error {
 // presentation times fold back. Emitting the fold verbatim would hand a
 // consumer a packet timeline that runs backwards, and strict has to refuse it
 // on every walk: latching the warning before taking it let a second walk of
-// the same file read to completion and report itself clean.
+// the same file read to completion and report itself clean. Both arms: the
+// Pro seek reads nothing, so there only the post-seek walk can report the
+// fold; a WMA v1/v2 seek counts through it and reports it on the way.
 func TestBackwardsPresentationTimesAreDamage(t *testing.T) {
-	b := newBuilder()
-	b.blockAlign = 4
-	b.playHNS = b.prerollMS*10_000 + 10_000_000
-	pres := uint32(b.prerollMS)
-	b.packet(0, 1, 0, 4, pres+100, []byte{1, 1, 1, 1})
-	b.packet(20, 2, 0, 4, pres+40, []byte{2, 2, 2, 2}) // folds back
-	b.packet(40, 3, 0, 4, pres+150, []byte{3, 3, 3, 3})
-	raw := b.build()
-
-	d, err := asf.NewDemuxer(container.BytesSource(raw), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var pkt container.Packet
-	last := int64(-1)
-	for {
-		if err := d.ReadPacket(&pkt); err != nil {
-			break
+	for _, pro := range []bool{true, false} {
+		b := newBuilder()
+		b.blockAlign = 4
+		if pro {
+			b.proArm(t)
 		}
-		if pkt.PTS < last {
-			t.Fatalf("emitted %d after %d: the timeline runs backwards", pkt.PTS, last)
-		}
-		last = pkt.PTS
-	}
-	if len(d.Warnings()) == 0 {
-		t.Error("a file whose presentation times fold back probed clean")
-	}
+		b.playHNS = b.prerollMS*10_000 + 10_000_000
+		pres := uint32(b.prerollMS)
+		b.packet(0, 1, 0, 4, pres+100, []byte{1, 1, 1, 1})
+		b.packet(20, 2, 0, 4, pres+40, []byte{2, 2, 2, 2}) // folds back
+		b.packet(40, 3, 0, 4, pres+150, []byte{3, 3, 3, 3})
+		raw := b.build()
 
-	// Strict refuses, and refuses again after a seek re-walks the same fold.
-	ds, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	first := readToErr(ds)
-	if first == nil || errors.Is(first, io.EOF) {
-		t.Fatalf("strict mode accepted the fold (%v)", first)
-	}
-	if _, err := ds.SeekSample(0, 0); err != nil {
-		t.Logf("seek after the refusal: %v", err)
-	}
-	if again := readToErr(ds); again == nil || errors.Is(again, io.EOF) {
-		t.Errorf("strict mode certified the same file clean on a second walk (%v)", again)
-	}
-	// The same in tolerant mode: the second walk has to report the fold too,
-	// or a caller that seeks before reading is told the file is clean.
-	dt, err := asf.NewDemuxer(container.BytesSource(raw), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := dt.SeekSample(0, 0); err != nil {
-		t.Fatal(err)
-	}
-	readToErr(dt)
-	if len(dt.Warnings()) == 0 {
-		t.Error("a walk that began with a seek reported no fold")
+		d, err := asf.NewDemuxer(container.BytesSource(raw), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var pkt container.Packet
+		last := int64(-1)
+		for {
+			if err := d.ReadPacket(&pkt); err != nil {
+				break
+			}
+			if pkt.PTS < last {
+				t.Fatalf("emitted %d after %d: the timeline runs backwards", pkt.PTS, last)
+			}
+			last = pkt.PTS
+		}
+		if len(d.Warnings()) == 0 {
+			t.Error("a file whose presentation times fold back probed clean")
+		}
+
+		// Strict refuses, and refuses again after a seek re-walks the same fold.
+		ds, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		first := readToErr(ds)
+		if first == nil || errors.Is(first, io.EOF) {
+			t.Fatalf("strict mode accepted the fold (%v)", first)
+		}
+		if _, err := ds.SeekSample(0, 0); err != nil {
+			t.Logf("seek after the refusal: %v", err)
+		}
+		if again := readToErr(ds); again == nil || errors.Is(again, io.EOF) {
+			t.Errorf("strict mode certified the same file clean on a second walk (%v)", again)
+		}
+		// The same in tolerant mode: the second walk has to report the fold too,
+		// or a caller that seeks before reading is told the file is clean.
+		dt, err := asf.NewDemuxer(container.BytesSource(raw), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := dt.SeekSample(0, 0); err != nil {
+			t.Fatal(err)
+		}
+		readToErr(dt)
+		if len(dt.Warnings()) == 0 {
+			t.Error("a walk that began with a seek reported no fold")
+		}
 	}
 }
 
@@ -706,43 +762,69 @@ func readToErr(d *asf.Demuxer) error {
 // object exactly as long as one already spans two, and sizing the run-up
 // against the packet length would give a seek no history at all for every
 // blockAlign in that band. ffmpeg's muxer picks neither end of it, so only a
-// hand-built file reaches this.
+// hand-built file reaches this. The packet run-up is a stated-time landing's,
+// so it is pinned on Pro; a WMA v1/v2 seek in the same geometry lands one
+// object before the one holding the target, at the position its frames count
+// to, whatever the packets.
 func TestRunUpWhenAnObjectBarelyOutgrowsAPacket(t *testing.T) {
 	const packetLen, object = 512, 512
-	b := newBuilder()
-	b.packetLen = packetLen
-	b.blockAlign = object
-	b.playHNS = b.prerollMS*10_000 + 20*10_000_000
-	// 485 bytes is what one packet has room for once its parsing information
-	// and payload header are paid for, so each object takes two packets.
-	for i := 0; i < 20; i++ {
-		whole := make([]byte, object)
-		whole[0] = byte(i)
-		pres := uint32(b.prerollMS) + uint32(i*20)
-		b.packet(uint32(i*20), byte(i+1), 0, object, pres, whole[:485])
-		b.packet(uint32(i*20), byte(i+1), 485, object, pres, whole[485:])
-	}
-	d, err := asf.NewDemuxer(container.BytesSource(b.build()), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var pkt container.Packet
-	if err := d.ReadPacket(&pkt); err != nil {
-		t.Fatal(err)
-	}
-	objectDur := pkt.Dur
-	for _, i := range []int64{5, 10, 15} {
-		target := i * 20 * int64(b.rate) / 1000
-		landed, err := d.SeekSample(0, target)
+	for _, pro := range []bool{true, false} {
+		b := newBuilder()
+		b.packetLen = packetLen
+		b.blockAlign = object
+		if pro {
+			b.proArm(t)
+		}
+		b.playHNS = b.prerollMS*10_000 + 20*10_000_000
+		// 485 bytes is what one packet has room for once its parsing
+		// information and payload header are paid for, so each object takes
+		// two packets.
+		for i := 0; i < 20; i++ {
+			whole := make([]byte, object)
+			whole[0] = byte(i)
+			pres := uint32(b.prerollMS) + uint32(i*20)
+			b.packet(uint32(i*20), byte(i+1), 0, object, pres, whole[:485])
+			b.packet(uint32(i*20), byte(i+1), 485, object, pres, whole[485:])
+		}
+		d, err := asf.NewDemuxer(container.BytesSource(b.build()), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if landed > target {
-			t.Fatalf("seek to %d landed at %d", target, landed)
+		var pkt container.Packet
+		if err := d.ReadPacket(&pkt); err != nil {
+			t.Fatal(err)
 		}
-		if target-landed < objectDur {
-			t.Errorf("seek to %d landed at %d: %d samples of run-up for a %d-sample object",
-				target, landed, target-landed, objectDur)
+		objectDur := pkt.Dur
+		for _, i := range []int64{5, 10, 15} {
+			target := i * 20 * int64(b.rate) / 1000
+			landed, err := d.SeekSample(0, target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if landed > target {
+				t.Fatalf("pro %v: seek to %d landed at %d", pro, target, landed)
+			}
+			if err := d.ReadPacket(&pkt); err != nil {
+				t.Fatal(err)
+			}
+			if pro {
+				// The history is what the reader hands the decoder. The
+				// reported landing is that object's time snapped to Pro's
+				// 2048-sample frame grid, which these 882-sample objects
+				// are nowhere near.
+				if target-pkt.PTS < objectDur {
+					t.Errorf("seek to %d resumed at the object at %d: %d samples of run-up for a %d-sample object",
+						target, pkt.PTS, target-pkt.PTS, objectDur)
+				}
+				continue
+			}
+			// No reservoir, so one 2048-sample frame per object: the landing
+			// is the object before the one holding the target.
+			j := target/2048 - 1
+			if landed != j*2048 || int64(pkt.Data[0]) != j {
+				t.Errorf("seek to %d landed at %d on object %d, want object %d at %d",
+					target, landed, pkt.Data[0], j, j*2048)
+			}
 		}
 	}
 }

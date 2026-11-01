@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -18,6 +19,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/spf13/cobra"
+
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/cli/label"
@@ -27,6 +30,7 @@ import (
 	"github.com/colespringer/waxflow/container/mka"
 	"github.com/colespringer/waxflow/container/riff"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/internal/config"
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/waxerr"
@@ -1010,10 +1014,9 @@ func TestSplitCutsInsideAnAdvisoryGap(t *testing.T) {
 		}
 	})
 
-	// sine-s16.wma declares 22491, a seek past its end lands at 22495, and the
-	// decode delivers 22528, so a cut at 22510 needs the decode to measure. A
-	// dry run, because writing the second piece seeks into the file's tail,
-	// where a WMA landing is late (docs/deferred-work.md).
+	// sine-s16.wma declares 22491 and decodes 22528, so a cut at 22510 needs
+	// the measure to find the audio past the declaration, and the second
+	// piece needs a seek into the file's last frame that lands where it says.
 	t.Run("wma", func(t *testing.T) {
 		dir := t.TempDir()
 		raw, err := os.ReadFile(filepath.Join("..", "testdata", "sine-s16.wma"))
@@ -1024,22 +1027,64 @@ func TestSplitCutsInsideAnAdvisoryGap(t *testing.T) {
 		if err := os.WriteFile(src, raw, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		code, out, errOut := run(t, "split", src, filepath.Join(dir, "pieces"), "--at", "22510", "--dry-run")
-		if code != 0 {
-			t.Fatalf("split --dry-run at 22510 exit = %d: %s", code, errOut)
+		out := filepath.Join(dir, "pieces")
+		if code, _, errOut := run(t, "split", src, out, "--at", "22510"); code != 0 {
+			t.Fatalf("split at 22510 exit = %d: %s", code, errOut)
 		}
-		for _, want := range []string{"[0, 22510)", "[22510, 22528)"} {
-			if !strings.Contains(out, want) {
-				t.Errorf("dry run does not list %s:\n%s", want, out)
+		whole := filepath.Join(dir, "whole.flac")
+		if code, _, errOut := run(t, "transcode", src, whole); code != 0 {
+			t.Fatalf("transcode exit = %d: %s", code, errOut)
+		}
+		decode := func(path string) *audio.Buffer {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
 			}
+			med, err := format.Open(container.BytesSource(raw), "flac", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer med.Close()
+			return drainAll(t, med, 1<<16)
+		}
+		ref := decode(whole)
+		defer audio.Put(ref)
+		// The source is float and the pieces 16-bit, so each piece dithers
+		// from its own start: the first matches the whole file exactly, and
+		// a later one to within the two steps two TPDF draws can differ by.
+		// A landing even a sample off misses by far more on this sine.
+		at := 0
+		for i, want := range []int{22510, 18} {
+			piece := decode(filepath.Join(out, fmt.Sprintf("%02d.flac", i+1)))
+			if piece.N != want {
+				t.Fatalf("piece %d is %d samples, want %d", i+1, piece.N, want)
+			}
+			tol := int32(0)
+			if at > 0 {
+				tol = 2
+			}
+			for ch := range piece.Fmt.Channels {
+				got, ref := piece.ChanI(ch), ref.ChanI(ch)[at:]
+				for j := range piece.N {
+					if d := got[j] - ref[j]; d > tol || d < -tol {
+						t.Fatalf("piece %d channel %d sample %d is %d, the whole file has %d", i+1, ch, j, got[j], ref[j])
+					}
+				}
+			}
+			at += piece.N
+			audio.Put(piece)
+		}
+		if at != ref.N {
+			t.Errorf("the pieces hold %d samples, the whole file %d", at, ref.N)
 		}
 	})
 }
 
-// TestSplitNeverReportsAnEmptyPiece: a split either writes a piece that holds
-// its span or fails naming it. A WMA cut at 22510 needs a seek into the file's
-// tail, which lands late (docs/deferred-work.md), so today the second piece
-// comes up empty; once landings snap it holds its 18 samples.
+// TestSplitNeverReportsAnEmptyPiece: a WMA cut at 22510 needs a seek into the
+// file's last frame, and the piece behind it holds its 18 samples. A landing
+// taken from the stamps used to land past them, and the piece came up empty;
+// the split's refusal of an empty piece stays as the guard for a seek that
+// lands past the audio.
 func TestSplitNeverReportsAnEmptyPiece(t *testing.T) {
 	dir := t.TempDir()
 	raw, err := os.ReadFile(filepath.Join("..", "testdata", "sine-s16.wma"))
@@ -1051,18 +1096,10 @@ func TestSplitNeverReportsAnEmptyPiece(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := filepath.Join(dir, "pieces")
-	code, _, errOut := run(t, "split", src, out, "--at", "22510")
-	second := filepath.Join(out, "02.flac")
-	if code != 0 {
-		if !strings.Contains(errOut, "02.flac") || !strings.Contains(errOut, "no samples") {
-			t.Errorf("split failed without naming the empty piece: %s", errOut)
-		}
-		if _, err := os.Stat(second); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("the empty piece was left on disk: %v", err)
-		}
-		return
+	if code, _, errOut := run(t, "split", src, out, "--at", "22510"); code != 0 {
+		t.Fatalf("split at 22510 exit = %d: %s", code, errOut)
 	}
-	b, err := os.ReadFile(second)
+	b, err := os.ReadFile(filepath.Join(out, "02.flac"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1071,7 +1108,7 @@ func TestSplitNeverReportsAnEmptyPiece(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := info.Default().Samples; got != 18 {
-		t.Errorf("split exited 0 with a second piece of %d samples, want 18", got)
+		t.Errorf("the second piece is %d samples, want 18", got)
 	}
 }
 
@@ -1538,5 +1575,83 @@ func TestSplitCueDataFileBesideTheRip(t *testing.T) {
 	}
 	if names, want := outputNames(t, out), []string{"02 - Two.flac", "03 - Three.flac"}; !slices.Equal(names, want) {
 		t.Errorf("wrote %v, want %v", names, want)
+	}
+}
+
+// TestSplitPiecesReuseTheMeasuresCount: a split measures its source once and
+// opens it again for every piece. On a WMA v1/v2 source the measure is a
+// count of frames, and each piece's open has to arrive holding it, or the
+// piece's seek counts from the top again and a split of n pieces reads the
+// file's head n more times. Two packets early in the file, which no restore
+// probes, are read by the measure and by the first piece and by nothing else.
+func TestSplitPiecesReuseTheMeasuresCount(t *testing.T) {
+	path := filepath.Join("..", "container", "asf", "testdata", "ms-v2-44100-2ch-128k.wma")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The data object follows the header object; its packets follow its own
+	// 50-byte header, all one length.
+	hdr := int64(binary.LittleEndian.Uint64(raw[16:]))
+	dataSize := int64(binary.LittleEndian.Uint64(raw[hdr+16:]))
+	packets := int64(binary.LittleEndian.Uint64(raw[hdr+40:]))
+	plen := (dataSize - 50) / packets
+	packetAt := func(i int64) int64 { return hdr + 50 + i*plen + plen/2 }
+
+	var cs *testutil.CountingSource
+	open := openSplitSource
+	t.Cleanup(func() { openSplitSource = open })
+	openSplitSource = func(cmd *cobra.Command, flavor Flavor, arg string, cfg *config.Config, logger *slog.Logger) (container.Source, string, func(), error) {
+		src, hint, cleanup, err := open(cmd, flavor, arg, cfg, logger)
+		if err != nil {
+			return src, hint, cleanup, err
+		}
+		cs = &testutil.CountingSource{Src: src, Log: true}
+		return cs, hint, cleanup, nil
+	}
+	out := filepath.Join(t.TempDir(), "pieces")
+	if code, _, errOut := run(t, "split", path, out, "--at", "100000,200000"); code != 0 {
+		t.Fatalf("split exit = %d: %s", code, errOut)
+	}
+	if names := outputNames(t, out); len(names) != 3 {
+		t.Fatalf("wrote %v, want three pieces", names)
+	}
+	if cs == nil {
+		t.Fatal("the split opened its source without openSplitSource")
+	}
+	// Every open reads the header, and that read runs into the first
+	// packets; what counts here is the reads of the packet data.
+	for _, i := range []int64{1, 3} {
+		n := 0
+		for _, sp := range cs.Spans {
+			if sp[0] >= hdr+50 && sp[0] <= packetAt(i) && packetAt(i) < sp[1] {
+				n++
+			}
+		}
+		if n != 2 {
+			t.Errorf("packet %d was read %d times, want twice: the measure and the first piece", i, n)
+		}
+	}
+}
+
+// TestSplitIndexServesOnlyItsSource: the split's sidecar holds the count of
+// the source it was saved for, and a second source gets nothing from it.
+func TestSplitIndexServesOnlyItsSource(t *testing.T) {
+	a, b := container.BytesSource([]byte("a")), container.BytesSource([]byte("b"))
+	var c oneSourceIndex
+	c.Save(a, []byte("count"))
+	if got := c.Load(a); string(got) != "count" {
+		t.Errorf("the source it was saved for loaded %q", got)
+	}
+	if got := c.Load(b); got != nil {
+		t.Errorf("another source loaded %q", got)
+	}
+	c.Drop(b)
+	if c.Load(a) == nil {
+		t.Error("dropping another source dropped this one's count")
+	}
+	c.Drop(a)
+	if c.Load(a) != nil {
+		t.Error("a dropped count is still served")
 	}
 }

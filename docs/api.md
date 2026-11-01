@@ -785,10 +785,15 @@ Things worth knowing before you build on it:
   its headers. That is a sub-millisecond walk for formats whose demuxer
   can find its end from a table (FLAC, WAV, Ogg, mp4), and a whole-file
   walk for a member whose demuxer defers one: MP3 (bare or in a WAV or
-  AIFF-C), ADTS, and any Matroska file, whose cluster walk no open pays.
-  ASF is slower still: it names its positions in milliseconds, so no walk or
-  seek can answer exactly and the measure is a decode. A cold mint over any of
-  these answers `202` rather than `201`.
+  AIFF-C), ADTS, any Matroska file, whose cluster walk no open pays, and a
+  WMA v1/v2 file, whose frame counts are walked out of every packet. WMA Pro,
+  Voice and Lossless are slower still: ASF names their positions in
+  milliseconds, so no walk or seek can answer exactly and the measure is a
+  decode. A cold mint over any of these answers `202` rather than `201`. A
+  WMA v1/v2 count long enough to cost anything is kept in the index sidecar,
+  and a `/stream` of the file from its start takes the count as it plays, so
+  only the first mint over a file nothing has read yet pays; later ones,
+  after a restart too, mint inline.
   When a cold queue needs enough of the latter to be worth it,
   the response is `202` with a job instead of `201` with a digest; poll
   `GET /jobs/{id}` or follow its events, and the finished job's `timeline`

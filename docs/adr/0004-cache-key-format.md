@@ -175,3 +175,35 @@ The one output too large to commit is `apen`'s unknown-length layout,
 whose seek-table reservation is 233 KB of zeros at this frame length. Its
 golden is the SHA-256 of the stream, kept in a file like any other so
 `make goldens` regenerates it.
+
+## Amendment (2026-10-31): a demuxer landing change borrows its decoder's term
+
+`container/asf` now lands a WMA v1/v2 seek by counting the frames each media
+object's superframe header says it completes, rather than on the millisecond
+presentation time ASF states for the object, which sat up to two frames under
+the sample a decode resumed there first produces. That changes the samples
+every such seek delivers (an HLS worker restart, `/stream?t=`, a split piece),
+and the same change lets `codec/wma` resume on a packet that begins a frame in
+its last byte, which it used to refuse. The Decision above leaves a demuxer
+change like this to a schema bump. It borrows the nearest term instead, as
+the Ogg granulepos fix borrowed `vorbis.EncoderVersion`: `wma.Version` moved
+from `wma-dec-2` to `wma-dec-3`, with a comment at the constant saying why.
+
+It errs the way that one did. It over-invalidates: every cached transcode of
+a WMA v1/v2 source misses once, seeked or not, though only a seeked one
+changed, at a cost of one re-encode per entry. WMA Pro, Voice and Lossless
+sources keep their keys, since their landings did not change. A demuxer term
+in the tuple would be precise and would cost one full invalidation plus a
+constant in every demuxing package; it remains the standing PR question.
+
+The frame count is also an index worth persisting, and it is saved through
+the same `cacheDir/idx/` sidecar as the MP3 frame table. Its blob carries its
+own magic and version (`WXASFIDX`, 3), so a change to that format needs no
+key term: a blob of another version is refused and the count is taken from
+the data again. It carries what the count found without losing an object
+(stamps that run backwards), so a restore reports what a walk does, and a
+count that lost one is not saved at all. A restore checks a blob against
+the file before using it: a CRC-32 for damage, the packet geometry, and a
+sample of its steps against the packets they name. A blob built to pass
+those checks is trusted where they do not look, as the transcodes beside it
+in the cache are.

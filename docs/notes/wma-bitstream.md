@@ -140,7 +140,32 @@ start here; with none pending, all n start here.
 `n == 0` is the legal all-continuation packet: append its bytes to the carry
 and emit nothing. It arises as F == 0 with a carry pending, or F == 1 with
 none. `n < 0` is damage, which is F == 0 with no carry pending. A packet that
-reaches `n == 0` with a byte or less of payload left is damage too.
+reaches `n == 0` with a byte or less of payload left is damage too, in a
+linear decode: after a seek, F == 1 with no carry and a byte or less left is
+a landing that finishes an earlier frame and begins the next in its last
+byte, and that head is carried like any other. With nothing left at all, the
+bit offset spanning the payload, the landing finishes an earlier frame and
+begins none, and is passed over like a packet that only continues one.
+
+Windows' encoder states F as the frames that BEGIN in the packet, so a decode
+resumed at packet j emits its first sample at frameLen times the sum of F over
+packets 0 to j-1, and a linear decode delivers frameLen times that sum over
+the whole stream, less the one frame left in the final carry. A frame that
+ends on its packet's last bit is still counted where it began: the next
+packet states a zero bit offset and completes it from the carry. Measured on
+four Windows encodes of four minutes each, 2,384 landings.
+
+A writer could instead count that frame in the packet it ends in. The next
+packet's header reads the same, frames and a zero bit offset, but nothing is
+carried into it, so it outputs one frame fewer than F says and the sum runs a
+frame high from there on. The header cannot tell the two apart; the packet
+before can. Its bitstream walked without reconstructing anything (block
+lengths, gains, noise flags, exponents and coefficients read, no curve
+needed) either leaves bits after its last frame or does not, and a count
+from the headers takes back a frame at each packet that walk leaves
+uncarried. ffmpeg writes no reservoir, and every zero-offset packet in
+seventeen Windows encodes (five) was carried, so no writer known here counts
+the second way.
 
 The `n < 0` rule holds for a LINEAR decode only. After a seek the decoder has
 no carry but the stream does, so a landing on a packet that only continues an
@@ -240,6 +265,20 @@ full-length block always transmits and reads no bit. Reused exponents keep the
 block size they were decoded at, so a reader must remember that size and index
 the exponent array with the ratio between it and the current block size. A
 coded channel whose exponents were never initialised is malformed input.
+
+That rule, too, holds for a LINEAR decode only. A channel can go uncoded for
+any number of blocks and then reuse the curve it had before, so after a seek
+the curve can predate the landing: measured on Windows' stereo encodes, about
+one landing in two hundred decodes such a block within its first frames, and
+never one needing a curve from more than one media object back (seven
+encodes of four minutes, near-mono material included). A reader resumed
+there has nothing correct to play for that block, so it reports that it
+needs history (`codec.ErrNeedsHistory`) rather than guessing; the format
+layer then lands earlier and decodes again, before the target or past it.
+`container/asf` lands one media object early to begin with, which carries
+the curve in every case measured. Only a decode that starts at the stream's
+first packet is a linear one: after a hole, or at a stamp that reads 0
+because it clamped, the decode is resumed.
 
 `blockPos` accumulates block lengths; a block that would push it past the
 frame length is malformed. The frame ends when `blockPos` reaches

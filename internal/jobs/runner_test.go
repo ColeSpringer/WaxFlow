@@ -565,10 +565,11 @@ func TestSplitRefusesAnUnderDeclaredCutConsistently(t *testing.T) {
 	}
 }
 
-// TestSplitNeverReportsAnEmptyPiece: a split job either writes a piece that
-// holds its span or fails naming it. A WMA cut at 22510 needs a seek into the
-// file's tail, which lands late (docs/deferred-work.md), so today the second
-// piece comes up empty; once landings snap it holds its 18 samples.
+// TestSplitNeverReportsAnEmptyPiece: a WMA cut at 22510 needs a seek into the
+// file's last frame, and the piece behind it holds its 18 samples. A landing
+// taken from the stamps used to land past them, and the piece came up empty;
+// the runner's refusal of an empty piece stays as the guard for a seek that
+// lands past the audio.
 func TestSplitNeverReportsAnEmptyPiece(t *testing.T) {
 	root := t.TempDir()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "sine-s16.wma"))
@@ -592,18 +593,11 @@ func TestSplitNeverReportsAnEmptyPiece(t *testing.T) {
 		done, _ = r.Get(j.ID)
 		return done.State.Terminal()
 	})
-	switch done.State {
-	case StateFailed:
-		if done.Error == nil || done.Error.Code != string(waxerr.CodeInternal) ||
-			!strings.Contains(done.Error.Message, "no samples") {
-			t.Errorf("error = %+v, want an internal error naming the empty piece", done.Error)
-		}
-	case StateDone:
-		if len(done.Outputs) != 2 || done.Outputs[1].Samples != 18 {
-			t.Errorf("the split finished with outputs %+v, want a second piece of 18 samples", done.Outputs)
-		}
-	default:
-		t.Fatalf("job ended %s", done.State)
+	if done.State != StateDone {
+		t.Fatalf("job ended %s: %+v", done.State, done.Error)
+	}
+	if len(done.Outputs) != 2 || done.Outputs[1].Samples != 18 {
+		t.Errorf("the split finished with outputs %+v, want a second piece of 18 samples", done.Outputs)
 	}
 }
 
