@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/internal/cache"
 	"github.com/colespringer/waxflow/internal/metrics"
 	"github.com/colespringer/waxflow/server"
 )
@@ -36,27 +37,42 @@ func recordingEnv(t *testing.T, mutate func(*server.Config)) (*testEnv, *server.
 }
 
 // gatePipelines holds every progressive pipeline after its first write until
-// the returned open runs. It also opens at cleanup, so a test that fails first
-// cannot leave a pipeline gated and the server's Close waiting on it.
-func gatePipelines(t *testing.T, env *testEnv) (open func()) {
+// the returned open runs; held closes once it holds one. It also opens at
+// cleanup, so a test that fails first cannot leave a pipeline gated and the
+// server's Close waiting on it.
+func gatePipelines(t *testing.T, env *testEnv) (open func(), held <-chan struct{}) {
 	t.Helper()
-	ch := make(chan struct{})
-	open = sync.OnceFunc(func() { close(ch) })
-	t.Cleanup(open)
-	env.srv.GatePipelineDst(func(w io.Writer) io.Writer { return &gatedWriter{w: w, open: ch} })
-	return open
+	return gateWrites(t, env, false)
 }
 
-// gatedWriter passes its first Write and holds every later one until open
-// closes. The pipeline is its only writer.
+// gateWrites is gatePipelines, holding the first write too when every is set.
+func gateWrites(t *testing.T, env *testEnv, every bool) (open func(), held <-chan struct{}) {
+	t.Helper()
+	ch, arrived := make(chan struct{}), make(chan struct{})
+	open = sync.OnceFunc(func() { close(ch) })
+	t.Cleanup(open)
+	hold := sync.OnceFunc(func() { close(arrived) })
+	env.srv.GatePipelineDst(func(w io.Writer) io.Writer {
+		return &gatedWriter{w: w, open: ch, passed: every, held: hold}
+	})
+	return open, arrived
+}
+
+// gatedWriter holds each Write until open closes, letting the first through
+// unless passed starts true, and calls held (when set) as one arrives at the
+// gate. The pipeline is its only writer.
 type gatedWriter struct {
 	w      io.Writer
 	open   <-chan struct{}
 	passed bool
+	held   func()
 }
 
 func (g *gatedWriter) Write(p []byte) (int, error) {
 	if g.passed {
+		if g.held != nil {
+			g.held()
+		}
 		<-g.open
 	}
 	g.passed = true
@@ -92,7 +108,7 @@ func hlsSegmentURIs(t *testing.T, env *testEnv, params map[string]string) []stri
 // arrives, since the gate stops the pipeline after its first write.
 func TestClientLeavingMidStreamIsNotAWarning(t *testing.T) {
 	env, rec := recordingEnv(t, nil)
-	open := gatePipelines(t, env)
+	open, _ := gatePipelines(t, env)
 
 	resp := env.get(t, "/stream?src=lib/album/track.flac&format=mp3", nil)
 	if resp.StatusCode != 200 {
@@ -115,18 +131,68 @@ func TestClientLeavingMidStreamIsNotAWarning(t *testing.T) {
 	}
 }
 
-// leaveAfterOneByte starts stream, reads one byte of it and leaves, returning
-// once the handler has seen its client go. Under gatePipelines the encode is
-// still running then.
-func leaveAfterOneByte(t *testing.T, env *testEnv, rec *server.LogRecorder, stream string) {
+// TestClientGoneMidWriteIsNotAWarning: a listener the handler finds gone by a
+// write, not a read, is logged as leaving the same routine way, and one stalled
+// past the write deadline says so. The encode outruns one copy buffer, so a
+// second write always comes.
+func TestClientGoneMidWriteIsNotAWarning(t *testing.T) {
+	for _, tc := range []struct {
+		name, msg string
+		err       error
+	}{
+		{"gone", "client left mid-stream", io.ErrClosedPipe},
+		{"stalled", "client stalled past the write deadline", os.ErrDeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, rec := recordingEnv(t, nil)
+			ctx, leave := context.WithCancel(context.Background())
+			defer leave()
+			req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/stream?src=lib/ramp.wav&format=wav&rate=24000", nil)
+			req.Header.Set("X-API-Key", testKey)
+			env.srv.ServeHTTP(&failingWriter{ResponseRecorder: httptest.NewRecorder(), leave: leave, err: tc.err}, req)
+			waitForIdle(t, env)
+			if !rec.Has(slog.LevelDebug, tc.msg) {
+				t.Errorf("no Debug record says %q", tc.msg)
+			}
+			if w := rec.Warnings(); len(w) != 0 {
+				t.Errorf("a client gone mid-write logged %v", w)
+			}
+		})
+	}
+}
+
+// failingWriter takes a handler's first write and fails each later one with
+// err, canceling the request first as net/http does when a write fails.
+type failingWriter struct {
+	*httptest.ResponseRecorder
+	leave  func()
+	err    error
+	writes int
+}
+
+func (f *failingWriter) Write(p []byte) (int, error) {
+	if f.writes++; f.writes > 1 {
+		f.leave()
+		return 0, f.err
+	}
+	return f.ResponseRecorder.Write(p)
+}
+
+// leaveAfterOneByte starts stream, reads one byte of it, stays until held
+// closes (the gate holding the encode), then leaves, returning once the handler
+// has seen its client go. A client still there keeps the grace from starting,
+// so it starts only with the encode held where its stop cannot reach.
+func leaveAfterOneByte(t *testing.T, env *testEnv, rec *server.LogRecorder, stream string, held <-chan struct{}) {
 	t.Helper()
 	resp := env.get(t, stream, nil)
+	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("stream = %d: %s", resp.StatusCode, readBody(t, resp))
 	}
 	if _, err := io.ReadFull(resp.Body, make([]byte, 1)); err != nil {
 		t.Fatal(err)
 	}
+	within(t, held, "the gate to hold the encode")
 	resp.Body.Close()
 	waitFor(t, "the handler to see its client leave", func() bool { return rec.Has(slog.LevelDebug, "client left mid-stream") })
 }
@@ -141,6 +207,15 @@ func waitFor(t *testing.T, what string, done func() bool) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// liveSlotFree reports whether a live slot is free, without keeping one.
+func liveSlotFree(env *testEnv) bool {
+	release, ok := env.srv.HoldLiveSlot()
+	if ok {
+		release()
+	}
+	return ok
 }
 
 // wantCached fails unless stream answers from a completed cache entry.
@@ -163,9 +238,9 @@ func TestStreamFinishesAfterItsClientLeaves(t *testing.T) {
 	for _, grace := range []time.Duration{0, time.Minute} {
 		t.Run(fmt.Sprintf("grace %v", grace), func(t *testing.T) {
 			env, rec := recordingEnv(t, func(c *server.Config) { c.LiveIdleGrace = grace })
-			open := gatePipelines(t, env)
+			open, held := gatePipelines(t, env)
 			const stream = "/stream?src=lib/ramp.wav&format=mp3"
-			leaveAfterOneByte(t, env, rec, stream)
+			leaveAfterOneByte(t, env, rec, stream, held)
 			open()
 			waitForIdle(t, env)
 			wantCached(t, env, stream)
@@ -177,7 +252,9 @@ func TestStreamFinishesAfterItsClientLeaves(t *testing.T) {
 // the grace stops at its next write, on every rung that runs one: its live
 // slot comes back, nothing is cached, and it counts and logs as abandoned
 // rather than failed. The rung counters say which rung ran, and the abandoned
-// record names the source the row asked for (a timeline's is its tl: ref).
+// record names the source the row asked for (a timeline's is its tl: ref). The
+// client leaves once the gate holds the encode, and the gate opens only after
+// the abandon, so the write it lets through is the one refused.
 func TestStreamAbandonFreesSlot(t *testing.T) {
 	const grace = 50 * time.Millisecond
 	for _, tc := range []struct {
@@ -188,8 +265,11 @@ func TestStreamAbandonFreesSlot(t *testing.T) {
 		{"transcode", func(*testing.T, *testEnv) (string, string) {
 			return "/stream?src=lib/ramp.wav&format=mp3", "lib/ramp.wav"
 		}, func(m *metrics.Metrics) bool { return m.Remuxes.Load() == 0 && m.Cuts.Load() == 0 }},
-		{"remux", func(*testing.T, *testEnv) (string, string) {
-			return "/stream?src=lib/album/track.flac&format=flac&container=mka", "lib/album/track.flac"
+		{"remux", func(t *testing.T, env *testEnv) (string, string) {
+			// Several clusters long, so the write the gate holds is not the last.
+			writeLongRamp(t, env, "long.wav", 12)
+			ref := writeFixture(t, env, "long.wav", "long.flac", "flac")
+			return "/stream?src=" + ref + "&format=flac&container=mka", ref
 		}, func(m *metrics.Metrics) bool { return m.Remuxes.Load() == 1 }},
 		{"cut", func(t *testing.T, env *testEnv) (string, string) {
 			ref := writeOpusFixture(t, env, "ramp.wav", "ramp.opus")
@@ -206,18 +286,12 @@ func TestStreamAbandonFreesSlot(t *testing.T) {
 				c.LiveIdleGrace = grace
 				c.TimelineDir = filepath.Join(t.TempDir(), "timelines")
 			})
-			open := gatePipelines(t, env)
+			open, held := gatePipelines(t, env)
 			stream, ref := tc.stream(t, env)
-			leaveAfterOneByte(t, env, rec, stream)
-			time.Sleep(2 * grace)
+			leaveAfterOneByte(t, env, rec, stream, held)
+			waitFor(t, "the abandon to give the slot back", func() bool { return liveSlotFree(env) })
 			open()
-			waitFor(t, "the slot to come back", func() bool {
-				release, ok := env.srv.HoldLiveSlot()
-				if ok {
-					release()
-				}
-				return ok && env.srv.Metrics().SessionsActive.Load() == 0
-			})
+			waitFor(t, "the encode to stop", func() bool { return env.srv.Metrics().SessionsActive.Load() == 0 })
 
 			met := env.srv.Metrics()
 			if !tc.ran(met) {
@@ -233,8 +307,14 @@ func TestStreamAbandonFreesSlot(t *testing.T) {
 				t.Error("no Info record says the pipeline was abandoned")
 			}
 			for _, r := range rec.Records() {
-				if r.Msg == "pipeline abandoned" && !strings.Contains(r.Attrs, "src="+ref+" ") {
+				if r.Msg != "pipeline abandoned" {
+					continue
+				}
+				if !strings.Contains(r.Attrs, "src="+ref+" ") {
 					t.Errorf("the abandoned pipeline was %s, want src=%s", r.Attrs, ref)
+				}
+				if !strings.Contains(r.Attrs, cache.ErrAbandoned.Error()) {
+					t.Errorf("the abandoned pipeline stopped with %s, want its next write refused", r.Attrs)
 				}
 			}
 			if w := rec.Warnings(); len(w) != 0 {
@@ -248,10 +328,10 @@ func TestStreamAbandonFreesSlot(t *testing.T) {
 // the encode still running, which then finishes into the cache.
 func TestStreamReattachWithinGrace(t *testing.T) {
 	env, rec := recordingEnv(t, func(c *server.Config) { c.LiveIdleGrace = time.Minute })
-	open := gatePipelines(t, env)
+	open, held := gatePipelines(t, env)
 	const stream = "/stream?src=lib/ramp.wav&format=wav&rate=24000"
 	want := engineReference(t, filepath.Join(env.root, "ramp.wav"), waxflow.TranscodeOptions{Format: "wav", Rate: 24000})
-	leaveAfterOneByte(t, env, rec, stream)
+	leaveAfterOneByte(t, env, rec, stream, held)
 
 	again := env.get(t, stream, nil)
 	if again.StatusCode != 200 {
@@ -292,19 +372,19 @@ func TestStreamRetriesAnAbandonedJoin(t *testing.T) {
 		}
 	})
 	// Only the first pipeline is held; the retry's runs free.
-	stalled := make(chan struct{})
+	stalled, reached := make(chan struct{}), make(chan struct{})
 	open := sync.OnceFunc(func() { close(stalled) })
 	t.Cleanup(open)
 	var pipelines atomic.Int32
 	env.srv.GatePipelineDst(func(w io.Writer) io.Writer {
 		if pipelines.Add(1) == 1 {
-			return &gatedWriter{w: w, open: stalled}
+			return &gatedWriter{w: w, open: stalled, held: sync.OnceFunc(func() { close(reached) })}
 		}
 		return w
 	})
 	const stream = "/stream?src=lib/ramp.wav&format=wav&rate=24000"
 	want := engineReference(t, filepath.Join(env.root, "ramp.wav"), waxflow.TranscodeOptions{Format: "wav", Rate: 24000})
-	leaveAfterOneByte(t, env, rec, stream)
+	leaveAfterOneByte(t, env, rec, stream, reached)
 	left := time.Now()
 
 	armed.Store(true)
@@ -334,7 +414,7 @@ func TestStreamRetriesAnAbandonedJoin(t *testing.T) {
 	if time.Since(left) > grace/2 {
 		t.Fatalf("the second request reached its gate %v after the first left, too late to find the encode before its grace ends", time.Since(left))
 	}
-	time.Sleep(time.Until(left.Add(2 * grace)))
+	waitFor(t, "the abandon to give the slot back", func() bool { return liveSlotFree(env) })
 	attach()
 
 	r := <-got
@@ -352,45 +432,31 @@ func TestStreamRetriesAnAbandonedJoin(t *testing.T) {
 	}
 }
 
-// gateEveryWrite holds every progressive pipeline before its first write until
-// the returned open runs, and opens at cleanup.
-func gateEveryWrite(t *testing.T, env *testEnv) (open func()) {
-	t.Helper()
-	ch := make(chan struct{})
-	open = sync.OnceFunc(func() { close(ch) })
-	t.Cleanup(open)
-	env.srv.GatePipelineDst(func(w io.Writer) io.Writer { return &gatedWriter{w: w, open: ch, passed: true} })
-	return open
-}
-
 // TestStreamStalledPipelineGivesItsSlotBack: a pipeline whose reader has gone
 // gives its live slot back a grace later even while it is stalled, before its
 // first write or between writes (a hung source, a long seek walk), and is
-// counted once it unwinds.
+// counted once it unwinds. Its client leaves only once the gate holds the
+// pipeline, so the grace cannot run out while the pipeline is still somewhere
+// its stop would reach.
 func TestStreamStalledPipelineGivesItsSlotBack(t *testing.T) {
 	const grace = 50 * time.Millisecond
+	const stream = "/stream?src=lib/ramp.wav&format=mp3"
 	for _, tc := range []struct {
 		name  string
 		leave func(*testing.T, *testEnv, *server.LogRecorder) (open func())
 	}{
 		{"before its first write", func(t *testing.T, env *testEnv, _ *server.LogRecorder) func() {
-			open := gateEveryWrite(t, env)
-			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-			defer cancel()
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, env.ts.URL+"/stream?src=lib/ramp.wav&format=mp3", nil)
-			if err != nil {
-				t.Fatal(err)
-			}
+			open, held := gateWrites(t, env, true)
+			req := httptest.NewRequest(http.MethodGet, stream, nil)
 			req.Header.Set("X-API-Key", testKey)
-			if resp, err := env.ts.Client().Do(req); err == nil {
-				resp.Body.Close()
-				t.Fatalf("a stream whose every write is held answered %d", resp.StatusCode)
+			if w := leaveOnceGated(t, env, req, held); w.Body.Len() != 0 || w.Flushed {
+				t.Fatalf("a client gone before the first write was answered %d: %.200s", w.Code, w.Body)
 			}
 			return open
 		}},
 		{"between writes", func(t *testing.T, env *testEnv, rec *server.LogRecorder) func() {
-			open := gatePipelines(t, env)
-			leaveAfterOneByte(t, env, rec, "/stream?src=lib/ramp.wav&format=mp3")
+			open, held := gatePipelines(t, env)
+			leaveAfterOneByte(t, env, rec, stream, held)
 			return open
 		}},
 	} {
@@ -400,13 +466,7 @@ func TestStreamStalledPipelineGivesItsSlotBack(t *testing.T) {
 				c.LiveIdleGrace = grace
 			})
 			open := tc.leave(t, env, rec)
-			waitFor(t, "the slot to come back", func() bool {
-				release, ok := env.srv.HoldLiveSlot()
-				if ok {
-					release()
-				}
-				return ok
-			})
+			waitFor(t, "the slot to come back", func() bool { return liveSlotFree(env) })
 			if n := env.srv.Metrics().SessionsActive.Load(); n != 1 {
 				t.Fatalf("%d sessions active, want the stalled pipeline still running", n)
 			}
@@ -427,7 +487,7 @@ func TestStreamStalledPipelineGivesItsSlotBack(t *testing.T) {
 // holds the first pipeline, so the second request cannot arrive in its flight.
 func TestStreamJoinsTheEncodeInFlight(t *testing.T) {
 	env := newTestEnv(t, nil)
-	open := gatePipelines(t, env)
+	open, _ := gatePipelines(t, env)
 	const stream = "/stream?src=lib/ramp.wav&format=wav&rate=24000"
 	want := engineReference(t, filepath.Join(env.root, "ramp.wav"), waxflow.TranscodeOptions{Format: "wav", Rate: 24000})
 
@@ -589,14 +649,8 @@ func TestHLSStalledIdleWorkerGivesItsSlotBack(t *testing.T) {
 			<-stalled
 		}
 	})
-	leaveOnceGated(t, env, longRampSegments(t, env)[1], reached)
-	waitFor(t, "the slot to come back", func() bool {
-		release, ok := env.srv.HoldLiveSlot()
-		if ok {
-			release()
-		}
-		return ok
-	})
+	leaveOnceGated(t, env, httptest.NewRequest(http.MethodGet, "/hls/"+longRampSegments(t, env)[1], nil), reached)
+	waitFor(t, "the slot to come back", func() bool { return liveSlotFree(env) })
 	if n := env.srv.Metrics().SessionsActive.Load(); n != 1 {
 		t.Fatalf("%d sessions active, want the stalled worker still running", n)
 	}
@@ -665,29 +719,31 @@ func within(t *testing.T, ch <-chan struct{}, what string) {
 	}
 }
 
-// leaveOnceGated fetches segment uri with a client that stays until the worker
-// it drives closes reached from the gate, then leaves, and returns once the
-// handler has seen it go. A client waiting on a segment keeps the idle timeout
-// disarmed, so the grace starts only with the worker held where the gate holds
-// it, however slowly it got there.
-func leaveOnceGated(t *testing.T, env *testEnv, uri string, reached <-chan struct{}) {
+// leaveOnceGated serves req with a client that stays until the work it drives
+// (an HLS worker, a progressive pipeline) closes reached from its gate, then
+// leaves, and returns what the handler wrote once it has seen the client go. A
+// client still waiting keeps the idle timeout disarmed, so the grace starts
+// only with the work held where the gate holds it, however slowly it got there.
+func leaveOnceGated(t *testing.T, env *testEnv, req *http.Request, reached <-chan struct{}) *httptest.ResponseRecorder {
 	t.Helper()
-	ctx, leave := context.WithCancel(context.Background())
+	ctx, leave := context.WithCancel(req.Context())
 	defer leave()
+	w := httptest.NewRecorder()
 	served := make(chan struct{})
 	go func() {
 		defer close(served)
-		env.srv.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(ctx, http.MethodGet, "/hls/"+uri, nil))
+		env.srv.ServeHTTP(w, req.WithContext(ctx))
 	}()
 	select {
 	case <-reached:
 	case <-served:
-		t.Fatal("the segment request ended before its worker reached the gate")
+		t.Fatalf("the request ended (%d: %.200s) before its work reached the gate", w.Code, w.Body)
 	case <-time.After(10 * time.Second):
-		t.Fatal("the worker never reached the gate")
+		t.Fatal("the work never reached the gate")
 	}
 	leave()
 	within(t, served, "the handler to see its client leave")
+	return w
 }
 
 // TestHLSHitsKeepTheWorkerAlive: a fetch served from the cache counts as a
@@ -727,7 +783,7 @@ func TestHLSWorkerEndingAsItIdlesIsNotAbandoned(t *testing.T) {
 			<-ctx.Done()
 		}
 	})
-	leaveOnceGated(t, env, segs[last], reached)
+	leaveOnceGated(t, env, httptest.NewRequest(http.MethodGet, "/hls/"+segs[last], nil), reached)
 	waitForIdle(t, env)
 
 	if n := env.srv.Metrics().AbandonedHLS.Load(); n != 0 {

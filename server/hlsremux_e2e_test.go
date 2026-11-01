@@ -17,6 +17,13 @@ import (
 // remux rung needs a source whose codec already is the output's.
 func writeOpusFixture(t *testing.T, env *testEnv, from, name string) string {
 	t.Helper()
+	return writeFixture(t, env, from, name, "opus")
+}
+
+// writeFixture transcodes the library WAV from to outFormat, writes it into the
+// library as name, and returns its ref.
+func writeFixture(t *testing.T, env *testEnv, from, name, outFormat string) string {
+	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(env.root, from))
 	if err != nil {
 		t.Fatal(err)
@@ -24,7 +31,7 @@ func writeOpusFixture(t *testing.T, env *testEnv, from, name string) string {
 	var out bytes.Buffer
 	e := waxflow.New()
 	if _, err := e.Transcode(context.Background(), container.BytesSource(raw), "wav", &out,
-		waxflow.TranscodeOptions{Format: "opus"}); err != nil {
+		waxflow.TranscodeOptions{Format: outFormat}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(env.root, name), out.Bytes(), 0o644); err != nil {

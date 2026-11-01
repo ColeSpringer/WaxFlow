@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -499,7 +500,14 @@ func (s *Server) serveLive(w http.ResponseWriter, r *http.Request, reader *cache
 			}
 			rc.SetWriteDeadline(time.Now().Add(writeStallTimeout))
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				return // client gone or stalled past the deadline
+				// Said as the read side says it: a client found gone by a write
+				// left just the same.
+				if errors.Is(werr, os.ErrDeadlineExceeded) {
+					s.log.Debug("client stalled past the write deadline", "err", werr)
+				} else {
+					s.log.Debug("client left mid-stream", "err", werr)
+				}
+				return
 			}
 			rc.Flush()
 			sent += int64(n)
