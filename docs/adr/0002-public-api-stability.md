@@ -401,3 +401,65 @@ to an exact length as a bounded one is, unless the source reported damage on
 the way; a FLAC copy carries its source's MD5 only into a header it patches at
 End and only while it fills no hole, so a streamed or segmented copy states
 none.
+
+## Amendment (2026-11-02): a master playlist can name its renditions
+
+`m3u8.ParseMaster` read past `EXT-X-MEDIA`, so a variant whose `AUDIO`
+attribute names a rendition group was listed like one carrying its own
+audio, and a client following its URI got video alone. The types now say
+it: `Rendition` is one `EXT-X-MEDIA` tag (TYPE, GROUP-ID, NAME, URI,
+LANGUAGE, DEFAULT, AUTOSELECT, CHANNELS, INSTREAM-ID; FORCED,
+ASSOC-LANGUAGE and CHARACTERISTICS are read past), `MasterPlaylist.Media`
+lists them, and `MasterVariant.Audio` is the variant's AUDIO group.
+`Master` takes the whole `MasterPlaylist`, so it stays `ParseMaster`'s
+inverse. It writes the renditions and refuses one its TYPE or its group
+forbids (a URI on CLOSED-CAPTIONS, none on SUBTITLES, an INSTREAM-ID
+missing, misplaced or outside CC1 to CC4 and SERVICE1 to SERVICE63, a
+second DEFAULT=YES or a repeated NAME in a group) and an AUDIO naming no
+audio group. The daemon's masters carry neither and are byte-identical.
+
+Both parsers refuse more, each for the RFC 8216 clause named:
+
+- **What a client must fail on** (`malformed-input`): a second
+  `EXT-X-VERSION` (4.3.1.2), `EXT-X-INDEPENDENT-SEGMENTS` or `EXT-X-START`
+  (4.3.5), and a master tag beside a media playlist or media segment tag
+  (4.3.4), which each parser reads as any tag of the other kind.
+- **What the types cannot represent** (`malformed-input`): an `EXT-X-MEDIA`
+  without TYPE, GROUP-ID or NAME, with an empty URI or INSTREAM-ID, a URI on
+  CLOSED-CAPTIONS, an INSTREAM-ID missing on CLOSED-CAPTIONS or present
+  elsewhere (4.3.4.1); no URI on SUBTITLES (4.3.4.2.1); a STREAM-INF without
+  BANDWIDTH or with one that is not a decimal-integer, an empty AUDIO or one
+  naming no TYPE=AUDIO group, a STREAM-INF without its URI line or a URI
+  line without its STREAM-INF (4.3.4.2); in `ParseMedia`, an `EXT-X-KEY`
+  without METHOD (4.3.2.4), an `EXT-X-MAP` without URI (4.3.2.5) and a
+  repeated media playlist tag (4.3.3); an attribute without a name or `=`,
+  with a quote that wraps no whole value, which moves the commas the list
+  splits on, or a decimal-integer or enumerated-string value in quotes
+  (4.2). A quoted-string written bare reads as written. A BANDWIDTH past an
+  int is `unsupported-format`.
+- **Two SHOULDs taken**: an attribute name given twice (4.2) is
+  `malformed-input`, and a leading byte order mark (4.1), refused before as
+  a missing `#EXTM3U`, is now refused by name.
+- **Two deviations**: `EXT-X-DEFINE` is rfc8216bis's (4.4.2.3), and RFC 8216
+  6.3.1 has a client ignore a tag it does not know, but a URI left
+  unsubstituted names nothing a client can fetch, so both parsers refuse it
+  as `unsupported-format`. And where 6.3.1 drops a tag whose enumerated
+  value it does not define, a DEFAULT or AUTOSELECT value other than YES
+  reads as NO: those only steer the choice within a group, and dropping the
+  rendition would lose the audio a variant names.
+
+An `EXT-X-MEDIA` whose TYPE RFC 8216 does not define is dropped, as 6.3.1
+asks, and an AUDIO naming its group is refused with that TYPE named. The
+group rules a server must keep (one DEFAULT=YES, distinct NAMEs, no
+AUTOSELECT=NO beside DEFAULT=YES) are read as written, since a host listing
+variants can still use such a master. `IsMaster` matches the tag's whole
+name, so `#EXT-X-STREAM-INFO` no longer counts, and `ParseMedia` matches
+every tag by name, so a bare `#EXT-X-KEY` or `#EXT-X-MAP` is refused rather
+than read past and `#EXT-X-ENDLIST:` ends the list.
+
+It is a behavioural break taken for the 2026-10-30 reason: a parser that
+reads past a tag its types cannot describe lists a stream a client cannot
+play. The internal HLS client follows a variant's audio rendition (the
+group's DEFAULT=YES member, then AUTOSELECT=YES, then the first; the
+variant's own URI when the rendition has none) and probes a VOD's init
+before it downloads the segments.

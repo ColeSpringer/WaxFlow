@@ -354,7 +354,7 @@ func mp4DemuxCoversMux() bool {
 // back. HLS is playlist-driven and multi-resource, not a container.Muxer over
 // one Source, so it is guarded here rather than in the table reconciliation.
 func TestHLSWriterHasParser(t *testing.T) {
-	master, err := m3u8.Master([]m3u8.MasterVariant{{URI: "v0.m3u8", Bandwidth: 128000, Codecs: "Opus"}})
+	master, err := m3u8.Master(m3u8.MasterPlaylist{Variants: []m3u8.MasterVariant{{URI: "v0.m3u8", Bandwidth: 128000, Codecs: "Opus"}}})
 	if err != nil {
 		t.Fatalf("Master: %v", err)
 	}

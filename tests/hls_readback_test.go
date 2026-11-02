@@ -66,7 +66,7 @@ func servePresentation(t *testing.T, variants []hlsVariant) string {
 		files["/"+mediaName] = []byte(text)
 		rungs = append(rungs, v.plan.MasterVariant(mediaName))
 	}
-	master, err := m3u8.Master(rungs)
+	master, err := m3u8.Master(m3u8.MasterPlaylist{Variants: rungs})
 	if err != nil {
 		t.Fatalf("master playlist: %v", err)
 	}

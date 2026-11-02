@@ -40,9 +40,9 @@ const (
 // LiveOptions configures the live client.
 type LiveOptions struct {
 	// VariantIndex selects a master-playlist variant (0-based, default 0). The
-	// client follows this one variant for the life of the read; the format-lock
-	// rule (variants must agree on codec) keeps a future switch within a stable
-	// output format.
+	// client follows this one variant, or its audio rendition when it names
+	// one, for the life of the read; the format-lock rule (variants must agree
+	// on codec) keeps a future switch within a stable output format.
 	VariantIndex int
 	// ReloadInterval overrides how often the media playlist is refetched. Zero
 	// derives it from the playlist's EXT-X-TARGETDURATION (floored at 200 ms).
@@ -79,11 +79,12 @@ func (o *LiveOptions) or() LiveOptions {
 
 // OpenLive follows a live HLS presentation and returns its audio as a
 // format.Media. It resolves a master to one variant (format-locked so the
-// variants agree on codec), fetches the init segment, and starts a refresh loop
-// near the live edge; ReadChunk then blocks for new segments and returns io.EOF
-// once the playlist carries EXT-X-ENDLIST or ctx is cancelled. A complete
-// (ENDLIST) playlist is read fine too, so OpenLive also serves VOD when the
-// caller wants streaming decode rather than OpenVOD's up-front load.
+// variants agree on codec) and that variant's audio rendition, if it names
+// one, fetches the init segment, and starts a refresh loop near the live edge;
+// ReadChunk then blocks for new segments and returns io.EOF once the playlist
+// carries EXT-X-ENDLIST or ctx is cancelled. A complete (ENDLIST) playlist is
+// read fine too, so OpenLive also serves VOD when the caller wants streaming
+// decode rather than OpenVOD's up-front load.
 func OpenLive(ctx context.Context, f Fetcher, playlistURL string, opts *LiveOptions) (format.Media, error) {
 	o := opts.or()
 	mediaURL, raw, err := resolveLiveMedia(ctx, f, playlistURL, o)
@@ -114,19 +115,15 @@ func OpenLive(ctx context.Context, f Fetcher, playlistURL string, opts *LiveOpti
 	if err != nil {
 		return nil, err
 	}
-	tracks := probe.Tracks()
-	if len(tracks) == 0 {
-		return nil, waxerr.New(waxerr.CodeUnsupportedFormat, "hls: init segment declares no audio track")
-	}
-	track := tracks[0]
+	track := probe.Tracks()[0]
 	track.Samples = -1
 	track.SamplesExact = false
 	return format.FromDemuxer("hls-live", &liveDemuxer{init: init, track: track, feed: feed})
 }
 
 // resolveLiveMedia fetches the playlist and, for a master, applies the
-// format-lock and follows the selected variant, returning the media playlist URL
-// and its bytes (reused as the feed's first load).
+// format-lock and follows the selected variant's audio (mediaURI), returning
+// the media playlist URL and its bytes (reused as the feed's first load).
 func resolveLiveMedia(ctx context.Context, f Fetcher, playlistURL string, o LiveOptions) (string, []byte, error) {
 	raw, err := fetchRetry(ctx, f, playlistURL, o.RequestTimeout, o.MaxRetries)
 	if err != nil {
@@ -147,7 +144,7 @@ func resolveLiveMedia(ctx context.Context, f Fetcher, playlistURL string, o Live
 		return "", nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("hls: variant index %d out of range (%d variants)", o.VariantIndex, len(master.Variants)))
 	}
-	mediaURL, err := resolveURL(playlistURL, master.Variants[o.VariantIndex].URI)
+	mediaURL, err := resolveURL(playlistURL, mediaURI(master, master.Variants[o.VariantIndex]))
 	if err != nil {
 		return "", nil, err
 	}
@@ -159,7 +156,9 @@ func resolveLiveMedia(ctx context.Context, f Fetcher, playlistURL string, o Live
 // codec, so following (or switching between) variants can never change the
 // decode format the downstream pipeline was built from. Rate and channels are
 // not in the master, so they are locked from the selected variant's init on
-// open; codec is the piece the master can and must agree on.
+// open; codec is the piece the master can and must agree on. It compares whole
+// CODECS strings, so variants sharing an AUDIO group but differing in video
+// codecs are refused here, before a rendition is chosen.
 func formatLock(master m3u8.MasterPlaylist) error {
 	codecs := master.Variants[0].Codecs
 	for _, v := range master.Variants[1:] {

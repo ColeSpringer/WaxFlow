@@ -11,10 +11,10 @@ import (
 )
 
 func TestPlaylists(t *testing.T) {
-	master, err := Master([]MasterVariant{
+	master, err := Master(MasterPlaylist{Variants: []MasterVariant{
 		{URI: "media.m3u8?v=abc", Bandwidth: 100000, Codecs: "Opus"},
 		{URI: "media.m3u8?v=def", Bandwidth: 1500000, Codecs: "fLaC"},
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,28 +54,64 @@ func TestPlaylists(t *testing.T) {
 
 // TestMasterRefusesWhatM3U8CannotCarry pins the writer's refusals: M3U8 has
 // no escape, so a value that would change the playlist's structure, or read
-// back as something else, is refused rather than written.
+// back as something else, is refused rather than written, and so is a
+// rendition RFC 8216 forbids a server to write.
 func TestMasterRefusesWhatM3U8CannotCarry(t *testing.T) {
+	ladder := func(vs ...MasterVariant) MasterPlaylist { return MasterPlaylist{Variants: vs} }
+	v := MasterVariant{URI: "v.m3u8", Bandwidth: 1}
+	with := func(rs ...Rendition) MasterPlaylist { return MasterPlaylist{Media: rs, Variants: []MasterVariant{v}} }
+	aud := Rendition{Type: "AUDIO", GroupID: "a", Name: "n"}
+	cc := Rendition{Type: "CLOSED-CAPTIONS", GroupID: "cc", Name: "n", InstreamID: "CC1"}
+	edit := func(r Rendition, f func(*Rendition)) Rendition { f(&r); return r }
 	for _, tc := range []struct {
-		name     string
-		variants []MasterVariant
+		name string
+		pl   MasterPlaylist
 	}{
-		{"no variants", nil},
-		{"empty URI", []MasterVariant{{URI: "", Bandwidth: 1, Codecs: "Opus"}}},
-		{"URI read as a tag", []MasterVariant{{URI: "#v.m3u8", Bandwidth: 1, Codecs: "Opus"}}},
-		{"LF in URI", []MasterVariant{{URI: "v.m3u8\n#EXT-X-ENDLIST", Bandwidth: 1, Codecs: "Opus"}}},
-		{"CR in URI", []MasterVariant{{URI: "v\r.m3u8", Bandwidth: 1, Codecs: "Opus"}}},
-		{"quote in URI", []MasterVariant{{URI: `v".m3u8`, Bandwidth: 1, Codecs: "Opus"}}},
-		{"padded URI", []MasterVariant{{URI: "v.m3u8 ", Bandwidth: 1, Codecs: "Opus"}}},
-		{"space in URI", []MasterVariant{{URI: "v 0.m3u8", Bandwidth: 1, Codecs: "Opus"}}},
-		{"quote in CODECS", []MasterVariant{{URI: "v.m3u8", Bandwidth: 1, Codecs: `Opus",X="`}}},
-		{"LF in CODECS", []MasterVariant{{URI: "v.m3u8", Bandwidth: 1, Codecs: "Opus\nv2.m3u8"}}},
-		{"control in CODECS", []MasterVariant{{URI: "v.m3u8", Bandwidth: 1, Codecs: "Op\x00us"}}},
-		{"negative BANDWIDTH", []MasterVariant{{URI: "v.m3u8", Bandwidth: -1, Codecs: "Opus"}}},
-		{"second variant bad", []MasterVariant{
-			{URI: "v0.m3u8", Bandwidth: 1, Codecs: "Opus"}, {URI: "", Bandwidth: 1, Codecs: "Opus"}}},
+		{"no variants", ladder()},
+		{"renditions but no variants", MasterPlaylist{Media: []Rendition{aud}}},
+		{"empty URI", ladder(MasterVariant{URI: "", Bandwidth: 1, Codecs: "Opus"})},
+		{"URI read as a tag", ladder(MasterVariant{URI: "#v.m3u8", Bandwidth: 1, Codecs: "Opus"})},
+		{"LF in URI", ladder(MasterVariant{URI: "v.m3u8\n#EXT-X-ENDLIST", Bandwidth: 1, Codecs: "Opus"})},
+		{"CR in URI", ladder(MasterVariant{URI: "v\r.m3u8", Bandwidth: 1, Codecs: "Opus"})},
+		{"quote in URI", ladder(MasterVariant{URI: `v".m3u8`, Bandwidth: 1, Codecs: "Opus"})},
+		{"padded URI", ladder(MasterVariant{URI: "v.m3u8 ", Bandwidth: 1, Codecs: "Opus"})},
+		{"space in URI", ladder(MasterVariant{URI: "v 0.m3u8", Bandwidth: 1, Codecs: "Opus"})},
+		{"quote in CODECS", ladder(MasterVariant{URI: "v.m3u8", Bandwidth: 1, Codecs: `Opus",X="`})},
+		{"LF in CODECS", ladder(MasterVariant{URI: "v.m3u8", Bandwidth: 1, Codecs: "Opus\nv2.m3u8"})},
+		{"control in CODECS", ladder(MasterVariant{URI: "v.m3u8", Bandwidth: 1, Codecs: "Op\x00us"})},
+		{"negative BANDWIDTH", ladder(MasterVariant{URI: "v.m3u8", Bandwidth: -1, Codecs: "Opus"})},
+		{"second variant bad", ladder(
+			MasterVariant{URI: "v0.m3u8", Bandwidth: 1, Codecs: "Opus"}, MasterVariant{URI: "", Bandwidth: 1, Codecs: "Opus"})},
+
+		{"no TYPE", with(edit(aud, func(r *Rendition) { r.Type = "" }))},
+		{"unknown TYPE", with(edit(aud, func(r *Rendition) { r.Type = "TEXT" }))},
+		{"lower-case TYPE", with(edit(aud, func(r *Rendition) { r.Type = "audio" }))},
+		{"no GROUP-ID", with(edit(aud, func(r *Rendition) { r.GroupID = "" }))},
+		{"no NAME", with(edit(aud, func(r *Rendition) { r.Name = "" }))},
+		{"quote in GROUP-ID", with(edit(aud, func(r *Rendition) { r.GroupID = `a",X="` }))},
+		{"LF in NAME", with(edit(aud, func(r *Rendition) { r.Name = "n\n#EXT-X-ENDLIST" }))},
+		{"control in LANGUAGE", with(edit(aud, func(r *Rendition) { r.Language = "e\x01n" }))},
+		{"quote in CHANNELS", with(edit(aud, func(r *Rendition) { r.Channels = `2"` }))},
+		{"space in rendition URI", with(edit(aud, func(r *Rendition) { r.URI = "a b.m3u8" }))},
+		{"empty-escape rendition URI", with(edit(aud, func(r *Rendition) { r.URI = "a%.m3u8" }))},
+		{"captions with a URI", with(edit(cc, func(r *Rendition) { r.URI = "cc.m3u8" }))},
+		{"captions with no INSTREAM-ID", with(edit(cc, func(r *Rendition) { r.InstreamID = "" }))},
+		{"INSTREAM-ID CC5", with(edit(cc, func(r *Rendition) { r.InstreamID = "CC5" }))},
+		{"INSTREAM-ID SERVICE64", with(edit(cc, func(r *Rendition) { r.InstreamID = "SERVICE64" }))},
+		{"INSTREAM-ID SERVICE07", with(edit(cc, func(r *Rendition) { r.InstreamID = "SERVICE07" }))},
+		{"quote in INSTREAM-ID", with(edit(cc, func(r *Rendition) { r.InstreamID = `CC1"` }))},
+		{"INSTREAM-ID on audio", with(edit(aud, func(r *Rendition) { r.InstreamID = "CC1" }))},
+		{"subtitles with no URI", with(Rendition{Type: "SUBTITLES", GroupID: "s", Name: "n"})},
+		{"two defaults in a group", with(edit(aud, func(r *Rendition) { r.Default = true }),
+			Rendition{Type: "AUDIO", GroupID: "a", Name: "m", Default: true})},
+		{"a NAME twice in a group", with(aud, aud)},
+		{"AUDIO naming no group", ladder(MasterVariant{URI: "v.m3u8", Bandwidth: 1, Audio: "a"})},
+		{"AUDIO naming a video group", MasterPlaylist{Media: []Rendition{{Type: "VIDEO", GroupID: "a", Name: "n"}},
+			Variants: []MasterVariant{{URI: "v.m3u8", Bandwidth: 1, Audio: "a"}}}},
+		{"quote in AUDIO", MasterPlaylist{Media: []Rendition{aud},
+			Variants: []MasterVariant{{URI: "v.m3u8", Bandwidth: 1, Audio: `a"`}}}},
 	} {
-		text, err := Master(tc.variants)
+		text, err := Master(tc.pl)
 		if err == nil {
 			t.Errorf("%s: written:\n%s", tc.name, text)
 			continue
@@ -86,6 +122,52 @@ func TestMasterRefusesWhatM3U8CannotCarry(t *testing.T) {
 		if text != "" {
 			t.Errorf("%s: refused, but returned text", tc.name)
 		}
+	}
+}
+
+// TestMasterWritesRenditions pins the rendition and variant lines exactly,
+// and what the group rules leave writable: a GROUP-ID under two TYPEs is two
+// groups, a NAME may repeat across groups, and DEFAULT=YES needs no
+// AUTOSELECT (RFC 8216 4.3.4.1).
+func TestMasterWritesRenditions(t *testing.T) {
+	text, err := Master(MasterPlaylist{
+		Media: []Rendition{
+			{Type: "AUDIO", GroupID: "aud", Name: "English", URI: "audio/en.m3u8", Language: "en",
+				Default: true, Autoselect: true, Channels: "2"},
+			{Type: "CLOSED-CAPTIONS", GroupID: "cc", Name: "English", InstreamID: "CC1"},
+		},
+		Variants: []MasterVariant{{URI: "video.m3u8", Bandwidth: 1000000, Codecs: "avc1.4d401f,mp4a.40.2", Audio: "aud"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n" +
+		"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"English\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES," +
+		"CHANNELS=\"2\",URI=\"audio/en.m3u8\"\n" +
+		"#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID=\"cc\",NAME=\"English\",INSTREAM-ID=\"CC1\"\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"avc1.4d401f,mp4a.40.2\",AUDIO=\"aud\"\nvideo.m3u8\n"
+	if text != want {
+		t.Errorf("master:\n%s\nwant:\n%s", text, want)
+	}
+
+	legal := MasterPlaylist{
+		Media: []Rendition{
+			{Type: "AUDIO", GroupID: "g", Name: "main", Default: true},
+			{Type: "VIDEO", GroupID: "g", Name: "main", Default: true, URI: "cam.m3u8"},
+			{Type: "AUDIO", GroupID: "h", Name: "main", Default: true},
+		},
+		Variants: []MasterVariant{{URI: "v.m3u8", Bandwidth: 1, Audio: "g"}, {URI: "w.m3u8", Bandwidth: 2, Audio: "h"}},
+	}
+	text, err = Master(legal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"g\",NAME=\"main\",DEFAULT=YES\n") {
+		t.Errorf("DEFAULT=YES written with an AUTOSELECT, or not at all:\n%s", text)
+	}
+	got, err := ParseMaster(text)
+	if err != nil || !reflect.DeepEqual(got.Media, legal.Media) || !reflect.DeepEqual(got.Variants, legal.Variants) {
+		t.Errorf("read back %+v (%v)", got, err)
 	}
 }
 
@@ -199,7 +281,7 @@ func TestMediaWritesEncodedURIs(t *testing.T) {
 // than CODECS="", an empty list a player can do nothing with; RFC 8216 makes
 // the attribute a SHOULD, and a missing one reads back as empty.
 func TestMasterOmitsEmptyCodecs(t *testing.T) {
-	text, err := Master([]MasterVariant{{URI: "v.m3u8", Bandwidth: 64000}})
+	text, err := Master(MasterPlaylist{Variants: []MasterVariant{{URI: "v.m3u8", Bandwidth: 64000}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,27 +401,39 @@ func FuzzMediaRoundTrip(f *testing.F) {
 	})
 }
 
-// FuzzMasterRoundTrip holds Master to ParseMaster the same way.
+// FuzzMasterRoundTrip holds Master to ParseMaster the same way, over one
+// variant and, when typ is set, one rendition the variant may name.
 func FuzzMasterRoundTrip(f *testing.F) {
-	f.Add("media.m3u8?v=abc", 128000, "Opus")
-	f.Add("v.m3u8", 0, "mp4a.40.2,avc1.4d401f")
-	f.Add("v.m3u8", 1, ` mp4a,BANDWIDTH=5 `)
-	f.Add(" v.m3u8", -1, `Op"us`)
-	f.Fuzz(func(t *testing.T, uri string, bandwidth int, codecs string) {
-		v := MasterVariant{URI: uri, Bandwidth: bandwidth, Codecs: codecs}
-		text, err := Master([]MasterVariant{v})
+	f.Add("media.m3u8?v=abc", 128000, "Opus", "", "", "", "", "", false, false, "", "", false)
+	f.Add("v.m3u8", 0, "mp4a.40.2,avc1.4d401f", "", "", "", "", "", false, false, "", "", false)
+	f.Add("v.m3u8", 1, ` mp4a,BANDWIDTH=5 `, "", "", "", "", "", false, false, "", "", false)
+	f.Add(" v.m3u8", -1, `Op"us`, "", "", "", "", "", false, false, "", "", false)
+	f.Add("v.m3u8", 1, "Opus", "AUDIO", "aud", "English, main", "a.m3u8?x=1,y=2", "en", true, false, "16/JOC", "", true)
+	f.Add("v.m3u8", 1, "Opus", "CLOSED-CAPTIONS", "cc", " pad ", "", "", false, true, "", "SERVICE9", false)
+	f.Add("v.m3u8", 1, "Opus", "SUBTITLES", "s", "n", "s.m3u8", "", false, false, "", "CC1", true)
+	f.Fuzz(func(t *testing.T, uri string, bandwidth int, codecs, typ, group, name, ruri, lang string,
+		def, auto bool, channels, instream string, named bool) {
+		pl := MasterPlaylist{Variants: []MasterVariant{{URI: uri, Bandwidth: bandwidth, Codecs: codecs}}}
+		if typ != "" {
+			pl.Media = []Rendition{{Type: typ, GroupID: group, Name: name, URI: ruri, Language: lang,
+				Default: def, Autoselect: auto, Channels: channels, InstreamID: instream}}
+			if named {
+				pl.Variants[0].Audio = group
+			}
+		}
+		text, err := Master(pl)
 		if err != nil {
 			if got := waxerr.CodeOf(err); got != waxerr.CodeInvalidRequest {
 				t.Fatalf("refusal code %s, want %s: %v", got, waxerr.CodeInvalidRequest, err)
 			}
 			return
 		}
-		pl, err := ParseMaster(text)
+		got, err := ParseMaster(text)
 		if err != nil {
 			t.Fatalf("ParseMaster refused what Master wrote: %v\n%s", err, text)
 		}
-		if len(pl.Variants) != 1 || pl.Variants[0] != v {
-			t.Fatalf("read back %+v, wrote %+v:\n%s", pl.Variants, v, text)
+		if !reflect.DeepEqual(got.Variants, pl.Variants) || !reflect.DeepEqual(got.Media, pl.Media) {
+			t.Fatalf("read back %+v, wrote %+v:\n%s", got, pl, text)
 		}
 	})
 }

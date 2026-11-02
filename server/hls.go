@@ -810,7 +810,7 @@ func (s *Server) handleHLSMaster(w http.ResponseWriter, r *http.Request) {
 		}
 		variants = append(variants, vp.plan.MasterVariant("media.m3u8?"+s.hlsChildQuery("/hls/media.m3u8", vdesc, exp)))
 	}
-	master, err := m3u8.Master(variants)
+	master, err := m3u8.Master(m3u8.MasterPlaylist{Variants: variants})
 	if err != nil {
 		s.writeError(w, err)
 		return

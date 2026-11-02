@@ -1004,7 +1004,7 @@ func TestMediaSegmentsRenderThePlan(t *testing.T) {
 		t.Errorf("playlist:\n%s\nwant:\n%s", got, text)
 	}
 
-	master, err := m3u8.Master([]m3u8.MasterVariant{handPlan().MasterVariant("media.m3u8")})
+	master, err := m3u8.Master(m3u8.MasterPlaylist{Variants: []m3u8.MasterVariant{handPlan().MasterVariant("media.m3u8")}})
 	if err != nil {
 		t.Fatal(err)
 	}

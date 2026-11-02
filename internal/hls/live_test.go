@@ -70,6 +70,19 @@ func (s *scriptFetcher) Fetch(_ context.Context, _ string) ([]byte, error) {
 	return []byte(b), nil
 }
 
+// TestLiveFollowsTheAudioRendition is TestVODFollowsTheAudioRendition for
+// the live reader.
+func TestLiveFollowsTheAudioRendition(t *testing.T) {
+	for _, tc := range renditionMasters {
+		f := mapFetcher{"http://h/master.m3u8": tc.master, tc.want: vodMedia}
+		got, raw, err := resolveLiveMedia(context.Background(), f, "http://h/master.m3u8",
+			LiveOptions{RequestTimeout: time.Second})
+		if err != nil || got != tc.want || string(raw) != vodMedia {
+			t.Errorf("%s: read %q (%v), want %q", tc.name, got, err, tc.want)
+		}
+	}
+}
+
 // TestFeedSequenceReset confirms the feed re-anchors when a live restart resets
 // EXT-X-MEDIA-SEQUENCE below the cursor, instead of stranding the cursor ahead
 // of every segment and hanging forever.

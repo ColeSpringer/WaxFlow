@@ -656,10 +656,12 @@ the file changed since minting: re-mint and reload.
 The playlist text is public: `m3u8.Media` over a plan's
 `SegmentPlan.MediaSegments` renders the media playlist the daemon serves for
 that plan, given its own URIs, and `SegmentPlan.MasterVariant` is the plan's
-rung for `m3u8.Master`. The daemon's plan is its rung's. Where the source's own
-packets serve the variant it is `PlanRemuxSegments` (or `PlanCutSegments` for a
-span) over the source's `PacketGrid`, whose delay, segment grid and CODECS come
-from the source; otherwise it is `PlanSegments`.
+rung for `m3u8.Master`, whose `MasterPlaylist` can also list `EXT-X-MEDIA`
+renditions a variant names by its `Audio` group (the daemon's masters list
+none). The daemon's plan is its rung's. Where the source's own packets serve
+the variant it is `PlanRemuxSegments` (or `PlanCutSegments` for a span) over
+the source's `PacketGrid`, whose delay, segment grid and CODECS come from the
+source; otherwise it is `PlanSegments`.
 
 ### Multi-source timelines (`tl`)
 

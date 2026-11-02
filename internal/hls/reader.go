@@ -148,8 +148,9 @@ func (rf retryingFetcher) get(ctx context.Context, url string) ([]byte, error) {
 
 // OpenVOD reads a complete (EXT-X-ENDLIST) HLS presentation and returns its
 // audio as a format.Media. playlistURL may name a master or a media playlist; a
-// master is resolved to one variant (ClientOptions.VariantIndex). It fetches the
-// init segment and every media segment up front (VOD is finite), streams the
+// master is resolved to one variant (ClientOptions.VariantIndex) and that
+// variant's audio rendition, if it names one. It probes the init segment, then
+// fetches every media segment up front (VOD is finite), streams the
 // media to a temp file, and decodes it through the fragmented-MP4 demuxer with
 // the init as the out-of-band codec config. Every fetch has a per-request
 // timeout and retry. A live (non-ENDLIST) playlist is refused here; OpenLive
@@ -168,8 +169,8 @@ func OpenVOD(ctx context.Context, f Fetcher, playlistURL string, opts *ClientOpt
 }
 
 // resolveMediaPlaylist fetches playlistURL, follows a master to its selected
-// variant, and returns the media playlist plus its own URL (the base for the
-// init and segment URIs).
+// variant's audio (mediaURI), and returns the media playlist plus its own URL
+// (the base for the init and segment URIs).
 func resolveMediaPlaylist(ctx context.Context, rf retryingFetcher, playlistURL string, variant int) (string, m3u8.MediaPlaylist, error) {
 	raw, err := rf.get(ctx, playlistURL)
 	if err != nil {
@@ -185,7 +186,7 @@ func resolveMediaPlaylist(ctx context.Context, rf retryingFetcher, playlistURL s
 			return "", m3u8.MediaPlaylist{}, waxerr.New(waxerr.CodeInvalidRequest,
 				fmt.Sprintf("hls: variant index %d out of range (%d variants)", variant, len(master.Variants)))
 		}
-		mediaURL, err := resolveURL(playlistURL, master.Variants[variant].URI)
+		mediaURL, err := resolveURL(playlistURL, mediaURI(master, master.Variants[variant]))
 		if err != nil {
 			return "", m3u8.MediaPlaylist{}, err
 		}
@@ -198,6 +199,39 @@ func resolveMediaPlaylist(ctx context.Context, rf retryingFetcher, playlistURL s
 	}
 	media, err := m3u8.ParseMedia(text)
 	return playlistURL, media, err
+}
+
+// audioRendition is the rendition a client plays for v's audio: the
+// TYPE=AUDIO member of v's AUDIO group marked DEFAULT=YES, else
+// AUTOSELECT=YES, else the first listed. ok is false when v names no group.
+func audioRendition(pl m3u8.MasterPlaylist, v m3u8.MasterVariant) (r m3u8.Rendition, ok bool) {
+	rank := -1
+	for _, c := range pl.Media {
+		if v.Audio == "" || c.Type != "AUDIO" || c.GroupID != v.Audio {
+			continue
+		}
+		cr := 0
+		switch {
+		case c.Default:
+			cr = 2
+		case c.Autoselect:
+			cr = 1
+		}
+		if cr > rank {
+			r, rank = c, cr
+		}
+	}
+	return r, rank >= 0
+}
+
+// mediaURI is the media playlist that carries v's audio: its audio
+// rendition's, or v's own when the rendition has no URI and so rides in the
+// variant (RFC 8216 4.3.4.2.1).
+func mediaURI(pl m3u8.MasterPlaylist, v m3u8.MasterVariant) string {
+	if r, ok := audioRendition(pl, v); ok && r.URI != "" {
+		return r.URI
+	}
+	return v.URI
 }
 
 // assembleMedia fetches the init and media segments a media playlist lists,
@@ -217,6 +251,11 @@ func assembleMedia(ctx context.Context, rf retryingFetcher, baseURL string, medi
 	}
 	init, err := rf.get(ctx, initURL)
 	if err != nil {
+		return nil, err
+	}
+	// The init alone says whether there is an audio track, so a variant with
+	// none fails before its segments download.
+	if _, err := mp4.NewFragmentedDemuxer(init, container.BytesSource(nil)); err != nil {
 		return nil, err
 	}
 
