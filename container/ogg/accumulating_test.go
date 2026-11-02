@@ -1,7 +1,6 @@
 package ogg
 
 import (
-	"encoding/binary"
 	"io"
 	"testing"
 
@@ -46,11 +45,7 @@ func TestResolvePositions(t *testing.T) {
 // the bisection window when a seek needs to actually narrow.
 func buildSyntheticOpus(preSkip, packetsPerPage, pages, padTo int) (stream []byte, samplesPerPacket int64, total int64) {
 	serial := uint32(4321)
-	head := append([]byte("OpusHead"), 1, 2) // version 1, 2 channels
-	head = binary.LittleEndian.AppendUint16(head, uint16(preSkip))
-	head = binary.LittleEndian.AppendUint32(head, 48000) // input rate
-	head = binary.LittleEndian.AppendUint16(head, 0)     // output gain
-	head = append(head, 0)                               // mapping family 0
+	head := muxOpusHead(preSkip)
 	tags := append([]byte("OpusTags"), 0, 0, 0, 0, 0, 0, 0, 0)
 
 	stream = append(stream, buildPage(flagBOS, 0, serial, 0, head)...)

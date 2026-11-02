@@ -46,7 +46,10 @@ type media struct {
 	// hole records that the decode passed a hole in the stream since its last
 	// landing. State a decode needs from before a hole is lost to it, so no
 	// earlier landing carries it and none is tried.
-	hole   bool
+	hole bool
+	// held is the packet after a hole, its Lost what silence the hole still
+	// owes before it (container.Packet.Lost).
+	held   *container.Packet
 	eof    bool
 	closed bool
 
@@ -201,6 +204,7 @@ func (m *media) Info() *Info {
 	if m.warner != nil {
 		foldWarnings(m.info, m.warner.Warnings())
 	}
+	m.info.Damage = container.DamageOf(m.demux)
 	return m.info
 }
 
@@ -365,6 +369,7 @@ func (m *media) land(at int64) (int64, error) {
 		p.SetPosition(landed)
 	}
 	m.landed, m.hole = landed, false
+	m.held = nil
 	m.carryOff = 0
 	if m.carry != nil {
 		m.carry.N = 0
@@ -447,6 +452,13 @@ func (m *media) fill(dst *audio.Buffer) error {
 	}
 	m.sink = dst
 	defer func() { m.sink = nil }()
+	if h := m.held; h != nil {
+		if h.Lost > 0 {
+			return m.silence(dst)
+		}
+		m.held = nil
+		return m.decode(dst, *h)
+	}
 	var pkt container.Packet
 	for {
 		err := m.demux.ReadPacket(&pkt)
@@ -459,25 +471,59 @@ func (m *media) fill(dst *audio.Buffer) error {
 		if err != nil {
 			return err
 		}
-		if pkt.Track != m.track.ID {
-			continue
+		if pkt.Track == m.track.ID {
+			break
 		}
-		if pkt.Discont {
-			// The container dropped something between this packet and the one
-			// before it. Nothing a decoder carries across packets survives a
-			// hole, so it restarts here as it does after a seek, and one whose
-			// output depends on where it began is told the landing.
-			m.hole = true
-			m.decoder.Reset()
-			if p, ok := m.decoder.(codec.Positioner); ok {
-				p.SetPosition(pkt.PTS)
-			}
-		}
-		if pkt.Padding <= 0 {
-			return m.decoder.Decode(pkt.Data, m.stashFn)
-		}
-		return m.decodeTrimmed(dst, pkt)
 	}
+	if pkt.Discont {
+		// The container dropped something between this packet and the one
+		// before it. Nothing a decoder carries across packets survives a
+		// hole, so it restarts here as it does after a seek, and one whose
+		// output depends on where it began is told the landing.
+		m.hole = true
+		m.decoder.Reset()
+		if p, ok := m.decoder.(codec.Positioner); ok {
+			p.SetPosition(pkt.PTS)
+		}
+	}
+	if pkt.Lost > 0 {
+		// The samples the hole took come first, as silence, so what follows
+		// sits where the stream puts it. The packet waits, copied, since a
+		// demuxer reuses its data.
+		held := pkt
+		held.Data = append([]byte(nil), pkt.Data...)
+		m.held = &held
+		return m.silence(dst)
+	}
+	return m.decode(dst, pkt)
+}
+
+// decode decodes pkt, dropping the frames it says are not audio.
+func (m *media) decode(dst *audio.Buffer, pkt container.Packet) error {
+	if pkt.Padding <= 0 {
+		return m.decoder.Decode(pkt.Data, m.stashFn)
+	}
+	return m.decodeTrimmed(dst, pkt)
+}
+
+// silence delivers part of the silence a hole owes (container.Packet.Lost):
+// what fits in dst, or a chunk when there is none, so a hole of any size
+// costs a chunk of memory.
+func (m *media) silence(dst *audio.Buffer) error {
+	k := int64(audio.StandardChunk)
+	if dst != nil {
+		k = int64(dst.Cap() - dst.N)
+	}
+	if k = min(k, m.held.Lost); k <= 0 {
+		return nil
+	}
+	z := audio.Get(m.track.Fmt, int(k))
+	defer audio.Put(z)
+	clear(z.I)
+	clear(z.F)
+	z.N = int(k)
+	m.held.Lost -= k
+	return m.stash(z)
 }
 
 // decodeTrimmed decodes a packet the container says ends in frames that are

@@ -66,6 +66,10 @@ type Info struct {
 	// Warnings describe input damage the tolerant parser worked around.
 	// Damage only: what this build did with a well-formed file is in Notes.
 	Warnings []string
+	// Damage counts the damage met so far (container.DamageOf), past the
+	// Warnings list's cap and de-duplication, so a reader can tell whether a
+	// read met more since it last looked.
+	Damage int
 	// Notes describe what this build did with a file that is not damaged: a
 	// stream it ignored, a list it capped, a timeline it rescaled, a band it
 	// does not synthesize. Strict mode never refuses over one of these, which
@@ -359,6 +363,7 @@ func RefreshWarnings(info *Info, demux container.Demuxer) {
 	if w, ok := demux.(container.Warner); ok {
 		foldWarnings(info, w.Warnings())
 	}
+	info.Damage = container.DamageOf(demux)
 }
 
 // foldWarnings sets info's Warnings and Notes from a demuxer's list, into

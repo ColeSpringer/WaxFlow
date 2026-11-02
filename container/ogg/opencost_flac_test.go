@@ -14,6 +14,13 @@ import (
 // than the tail scan's window, which no committed fixture is.
 func synthOggFLAC(t *testing.T, n int) []byte {
 	t.Helper()
+	return synthOggFLACFrom(t, n, 0)
+}
+
+// synthOggFLACFrom is synthOggFLAC with its frames numbered from first while
+// its pages still count from 0.
+func synthOggFLACFrom(t *testing.T, n int, first uint64) []byte {
+	t.Helper()
 	const bs = 4096
 	stream := buildPage(flagBOS, 0, 77, 0, flacBOSPacket())
 	stream = append(stream, buildPage(0, 0, 77, 1, commentPacket())...)
@@ -24,7 +31,7 @@ func synthOggFLAC(t *testing.T, n int) []byte {
 		}
 		// Equal STREAMINFO block bounds, so coded numbers are frame numbers.
 		stream = append(stream, buildPage(flags, int64(i+1)*bs, 77, uint32(i+2),
-			buildFrameBytes(t, uint64(i), bs))...)
+			buildFrameBytes(t, first+uint64(i), bs))...)
 	}
 	return patchOggFLACTotalB(t, stream, int64(n)*bs)
 }

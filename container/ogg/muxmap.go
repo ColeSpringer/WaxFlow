@@ -34,9 +34,11 @@ type muxMapping interface {
 	// or refuses, exactly as the native FLAC muxer does with STREAMINFO.
 	writeHeaders(t container.Track, tags []container.Tag, vendor string,
 		emit func(payload, seg []byte, granule int64, headerType byte) error) (wroteTotal int64, err error)
-	// writePacket returns the granule increment the muxer adds for pkt. Opus
-	// and FLAC return pkt.Dur unchanged.
-	writePacket(pkt container.Packet) (granuleIncrement int64, err error)
+	// writePacket returns the bytes the muxer writes for pkt, which the next
+	// call may overwrite, and the granule increment they add. Opus and Vorbis
+	// write pkt.Data and FLAC numbers its frames from 0; Opus and FLAC add
+	// pkt.Dur.
+	writePacket(pkt container.Packet) (data []byte, granuleIncrement int64, err error)
 	// endGranule is the final page's granule position: the gapless end point.
 	endGranule(trailer codec.Trailer) int64
 }
@@ -48,7 +50,7 @@ func muxMappingFor(id codec.ID) muxMapping {
 	case codec.Opus:
 		return opusMuxMapping{}
 	case codec.FLAC:
-		return flacMuxMapping{}
+		return &flacMuxMapping{}
 	case codec.Vorbis:
 		return &vorbisMuxMapping{}
 	}
@@ -86,7 +88,9 @@ func (opusMuxMapping) writeHeaders(t container.Track, tags []container.Tag, vend
 	return 0, emit(comment, lacing(len(comment)), 0, 0)
 }
 
-func (opusMuxMapping) writePacket(pkt container.Packet) (int64, error) { return pkt.Dur, nil }
+func (opusMuxMapping) writePacket(pkt container.Packet) ([]byte, int64, error) {
+	return pkt.Data, pkt.Dur, nil
+}
 
 // endGranule is the pre-skip plus the true length: the final page granule the
 // decoder clamps its output to (RFC 7845 section 4.4).
@@ -98,9 +102,11 @@ func (opusMuxMapping) endGranule(trailer codec.Trailer) int64 {
 // identification BOS page carrying STREAMINFO, then a VORBIS_COMMENT page, then
 // audio pages whose granule is the running sample count (FLAC self-times). It
 // reuses the existing FLAC encoder; no Vorbis encoder is involved.
-type flacMuxMapping struct{}
+type flacMuxMapping struct {
+	number *flac.Numberer // numbers the frames from 0
+}
 
-func (flacMuxMapping) codecID() codec.ID { return codec.FLAC }
+func (*flacMuxMapping) codecID() codec.ID { return codec.FLAC }
 
 // writeHeaders stamps the run's own projected length into STREAMINFO rather
 // than passing the source's total through.
@@ -116,11 +122,18 @@ func (flacMuxMapping) codecID() codec.ID { return codec.FLAC }
 // The MD5 is not written here, for the reason the native muxer does not either:
 // an encoder's signature exists only once it has seen every sample, so it is
 // End's to patch in.
-func (flacMuxMapping) writeHeaders(t container.Track, tags []container.Tag, vendor string,
+func (m *flacMuxMapping) writeHeaders(t container.Track, tags []container.Tag, vendor string,
 	emit func(payload, seg []byte, granule int64, headerType byte) error) (int64, error) {
 	if len(t.CodecConfig) != flac.StreamInfoLen {
 		return 0, waxerr.New(waxerr.CodeUnsupportedFormat, "ogg: FLAC CodecConfig is not a STREAMINFO block")
 	}
+	// Parsed for the frames' numbering, which its block bounds settle; it is
+	// the parse every reader of the stream makes.
+	si, err := flac.ParseStreamInfo(t.CodecConfig)
+	if err != nil {
+		return 0, err
+	}
+	m.number = flac.NewNumberer(si, 0, 0)
 	// The block's own bytes with one field rewritten, rather than a parse and a
 	// re-marshal. flac.StreamInfo.MarshalBinary validates more than
 	// ParseStreamInfo does (block bounds, the rate's upper end), so a
@@ -171,12 +184,23 @@ func setStreamInfoTotal(si []byte, total int64) {
 	binary.BigEndian.PutUint32(si[14:18], uint32(total))
 }
 
-func (flacMuxMapping) writePacket(pkt container.Packet) (int64, error) { return pkt.Dur, nil }
+// writePacket numbers the frame from 0 in the stream's own blocking strategy,
+// as RFC 9639 section 9.1.5 numbers a stream's. A copy of a stream that starts
+// past frame 0 would keep its source's numbers otherwise, which the granules,
+// counted from 0, would contradict. A frame already numbered so goes out as it
+// came.
+func (m *flacMuxMapping) writePacket(pkt container.Packet) ([]byte, int64, error) {
+	data, _, err := m.number.Number(pkt.Data)
+	if err != nil {
+		return nil, 0, err
+	}
+	return data, pkt.Dur, nil
+}
 
 // endGranule is the true length: FLAC self-times, so the final page granule is
 // just the sample total, which the demuxer reads back as the stream length when
 // STREAMINFO carries none.
-func (flacMuxMapping) endGranule(trailer codec.Trailer) int64 { return trailer.Samples }
+func (*flacMuxMapping) endGranule(trailer codec.Trailer) int64 { return trailer.Samples }
 
 // vorbisMuxMapping writes the Ogg-Vorbis mapping (Vorbis I spec section A.2):
 // an identification BOS page, then a page carrying the comment and setup headers
@@ -245,20 +269,20 @@ func (m *vorbisMuxMapping) writeHeaders(t container.Track, tags []container.Tag,
 // second packet on the increment is the (prevBlock+block)/4 the decoder actually
 // emits. Every page granule is therefore the cumulative decoded output through
 // that page's last completed packet, which is what libvorbis writes.
-func (m *vorbisMuxMapping) writePacket(pkt container.Packet) (int64, error) {
+func (m *vorbisMuxMapping) writePacket(pkt container.Packet) ([]byte, int64, error) {
 	if !m.haveCfg {
-		return 0, waxerr.New(waxerr.CodeInternal, "ogg: vorbis writePacket before writeHeaders")
+		return nil, 0, waxerr.New(waxerr.CodeInternal, "ogg: vorbis writePacket before writeHeaders")
 	}
 	block, ok := vorbis.PacketBlockSize(m.cfg, m.modeBits, pkt.Data)
 	if !ok {
-		return 0, waxerr.New(waxerr.CodeUnsupportedFormat, "ogg: not a valid Vorbis audio packet")
+		return nil, 0, waxerr.New(waxerr.CodeUnsupportedFormat, "ogg: not a valid Vorbis audio packet")
 	}
 	var inc int64
 	if m.prevBlock != 0 {
 		inc = int64(m.prevBlock+block) / 4
 	}
 	m.prevBlock = block
-	return inc, nil
+	return pkt.Data, inc, nil
 }
 
 // endGranule is the true length: the final page granule the decoder end-trims
@@ -268,12 +292,10 @@ func (m *vorbisMuxMapping) endGranule(trailer codec.Trailer) int64 {
 	return trailer.Samples
 }
 
-// emitHeaderPages frames whole header packets into Ogg pages via emit, packing as
-// many packets per page as the 255-entry segment table allows and continuing an
-// oversized packet onto a flagContinued page. Header pages carry granule 0 and no
-// BOS/EOS flag (the caller emits the BOS identification page itself). It mirrors
-// the generic reassembly the demuxer performs, so comment+setup ride one page in
-// the common case yet a huge setup still frames legally.
+// emitHeaderPages frames whole header packets into Ogg pages via emit, packing
+// as many per page as the segment table allows and continuing an oversized one
+// onto further pages, so comment and setup ride one page in the common case.
+// The caller emits the BOS identification page itself.
 func emitHeaderPages(pkts [][]byte,
 	emit func(payload, seg []byte, granule int64, headerType byte) error) error {
 	var body, laces []byte
@@ -281,25 +303,37 @@ func emitHeaderPages(pkts [][]byte,
 		body = append(body, pkt...)
 		laces = appendLacing(laces, len(pkt))
 	}
-	byteOff := 0
-	for i := 0; i < len(laces); {
-		end := min(i+maxPageSegEntries, len(laces))
-		seg := laces[i:end]
-		n := 0
-		for _, l := range seg {
-			n += int(l)
+	return paginate(body, laces, 0, 0, emit)
+}
+
+// paginate frames body, laced as seg, into pages of at most maxPageSegEntries
+// segments via emit. A page is continued when the one before it ended
+// mid-packet, and states granule when a packet completes on it, -1 when none
+// does (RFC 3533); the last page also carries flags.
+func paginate(body, seg []byte, granule int64, flags byte,
+	emit func(payload, seg []byte, granule int64, headerType byte) error) error {
+	var cont byte
+	for {
+		n := min(len(seg), maxPageSegEntries)
+		size, g, f := 0, int64(-1), cont
+		for _, l := range seg[:n] {
+			size += int(l)
+			if l < 255 {
+				g = granule
+			}
 		}
-		flags := byte(0)
-		if i > 0 && laces[i-1] == 255 {
-			flags = flagContinued // the previous page ended mid-packet
+		if n == len(seg) {
+			f |= flags
 		}
-		if err := emit(body[byteOff:byteOff+n], seg, 0, flags); err != nil {
+		if err := emit(body[:size], seg[:n], g, f); err != nil || n == len(seg) {
 			return err
 		}
-		byteOff += n
-		i = end
+		cont = 0
+		if seg[n-1] == 255 {
+			cont = flagContinued
+		}
+		body, seg = body[size:], seg[n:]
 	}
-	return nil
 }
 
 // buildComment builds a Vorbis-comment structure: an optional magic prefix

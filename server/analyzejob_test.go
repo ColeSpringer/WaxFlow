@@ -13,7 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/client"
+	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/internal/jobs"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/waxerr"
@@ -335,6 +337,34 @@ func TestSplitCutsAreMeasuredNotDeclared(t *testing.T) {
 	if len(job.Outputs) != 2 {
 		t.Fatalf("splitting %s at one cut made %d pieces, want 2: %+v", ref, len(job.Outputs), job.Outputs)
 	}
+}
+
+// TestSplitLastCutPastTheMeasureIsRefused: a source whose declared length is
+// not exact is measured for its open last piece at creation, as the run
+// measures it, so a last cut past what the source holds is a 400 here rather
+// than a job that fails with nothing written.
+func TestSplitLastCutPastTheMeasureIsRefused(t *testing.T) {
+	env := jobsEnv(t)
+	raw, err := os.ReadFile(filepath.Join("..", "testdata", "sine-cbr128.mp3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	short := raw[:len(raw)-100] // the Xing count still says 22050
+	if err := os.WriteFile(filepath.Join(env.root, "short.mp3"), short, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	med, err := waxflow.New().OpenStream(container.BytesSource(short), "mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, err := waxflow.MeasureLength(t.Context(), med)
+	med.Close()
+	if err != nil || tr.Samples >= 22050 {
+		t.Fatalf("the cut measures %d (%v); this case needs less than its Xing count", tr.Samples, err)
+	}
+	cut := (tr.Samples + 22050) / 2 // past the audio, inside the declaration
+	body := fmt.Sprintf(`{"type":"split","src":"lib/short.mp3","format":"flac","cuts":[%d]}`, cut)
+	wantEnvelope(t, env.postJSON(t, "/jobs", body), http.StatusBadRequest, waxerr.CodeInvalidRequest)
 }
 
 // TestSilenceFieldPolicing covers the silence surface's own shape rules: the

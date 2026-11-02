@@ -399,10 +399,12 @@ func New(cfg Config) (*Server, error) {
 			MintTimeline: s.mintTimelineJob,
 			// The exact length a merge's members need, through the memo the
 			// timeline mint fills: creation measured them, so the run does not.
-			MeasureTrack: func(src *source.File) (container.Track, error) { return s.trackFor(src, true) },
-			Slots:        jobSlots,
-			Profile:      profile,
-			Logger:       log,
+			MeasureTrack: func(ctx context.Context, src *source.File) (container.Track, error) {
+				return s.trackFor(ctx, src, true)
+			},
+			Slots:   jobSlots,
+			Profile: profile,
+			Logger:  log,
 		})
 		if err != nil {
 			if uploadStore != nil {

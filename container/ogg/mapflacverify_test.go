@@ -130,8 +130,9 @@ func countKinds(ws []container.Warning) (damage, notes int) {
 }
 
 // TestOggFLACDeclaredTotalIsVerified: an Ogg-FLAC's STREAMINFO total is
-// checked against the final page granule in both directions, exactly as the
-// native FLAC and WavPack opens check theirs against the payload.
+// checked against its frames, the last whole one in its tail, in both
+// directions, exactly as the native FLAC and WavPack opens check theirs
+// against the payload.
 //
 // Five outcomes, and the flag is the point of four of them: a length reported
 // exact is one format.Media caps a decode at, so promoting one nothing checked
@@ -263,8 +264,8 @@ func TestReferenceOggFLACFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := d.lastGranule(); got != declared {
-		t.Errorf("the final page granule is %d, STREAMINFO declares %d", got, declared)
+	if tl, err := d.readTail(); err != nil || tl.granule != declared {
+		t.Errorf("the final page granule is %d (%v), STREAMINFO declares %d", tl.granule, err, declared)
 	}
 	tr := d.Tracks()[0]
 	if tr.Samples != declared || !tr.SamplesExact {
@@ -302,7 +303,7 @@ func TestOggFLACUnknownLengthStaysUnknown(t *testing.T) {
 	if _, err := m.parseID(flacBOSPacket()); err != nil {
 		t.Fatal(err)
 	}
-	tr, err := m.finalizeTrack(func() int64 { return -1 }, nopReporter{})
+	tr, err := m.finalizeTrack(firstPage{granule: -1}, func() int64 { return -1 }, nopReporter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,8 +316,10 @@ func TestOggFLACUnknownLengthStaysUnknown(t *testing.T) {
 	if _, err := m2.parseID(flacBOSPacket()); err != nil {
 		t.Fatal(err)
 	}
+	m2.codecConfig = append([]byte(nil), m2.codecConfig...)
+	setStreamInfoTotal(m2.codecConfig, 4096)
 	m2.si.Samples = 4096
-	tr2, err := m2.finalizeTrack(func() int64 { return -1 }, nopReporter{})
+	tr2, err := m2.finalizeTrack(firstPage{granule: -1}, func() int64 { return -1 }, nopReporter{})
 	if err != nil {
 		t.Fatal(err)
 	}

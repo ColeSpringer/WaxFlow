@@ -207,3 +207,17 @@ the file before using it: a CRC-32 for damage, the packet geometry, and a
 sample of its steps against the packets they name. A blob built to pass
 those checks is trusted where they do not look, as the transcodes beside it
 in the cache are.
+
+## Amendment (2026-11-01): reader changes borrow their decoders' terms
+
+The FLAC and Ogg readers now deliver different samples for some inputs:
+`container/flacn` resyncs past a corrupt frame and fills it with silence
+where a read used to stop there; Ogg FLAC takes its length and seeks from its
+frame headers; both read a stream whose first frame is past 0 from that
+frame; and `container/ogg` honours an initial granule, so a shifted Opus or
+Vorbis stream changes length and a Vorbis start before zero trims its front.
+As the 2026-10-31 amendment did for WMA, each change borrows the decoder term
+of the codec it changes: `flac-dec-2`, `opus-dec-3`, `vorbis-dec-3`. It
+over-invalidates the same way, one re-encode per cached entry of those codecs,
+and the demuxer term remains the standing question.
+

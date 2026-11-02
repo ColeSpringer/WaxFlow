@@ -310,7 +310,7 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 		// would take a 201 and fail at run: the opposite of what validating
 		// early is for. Replacing a present count puts a third number in a
 		// chain that needs one.
-		track, err := s.trackFor(src, false)
+		track, err := s.trackFor(ctx, src, false)
 		if err != nil {
 			return nil, err
 		}
@@ -323,7 +323,7 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 		// the run wraps each opened piece with what was measured, so one number
 		// from one memo is under the bound and the run both.
 		if track.SamplesAdvisory {
-			if track, err = s.trackFor(src, true); err != nil {
+			if track, err = s.trackFor(ctx, src, true); err != nil {
 				return nil, err
 			}
 		}
@@ -354,8 +354,22 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 		// cannot disagree about which samples are piece 3. They are handed
 		// different totals, though: the runner re-probes raw, and closing that
 		// gap needs the runner to measure as this does.
-		if _, err := req.SplitSpans(track.Samples); err != nil {
+		spans, err := req.SplitSpans(track.Samples)
+		if err != nil {
 			return nil, err
+		}
+		// The run holds an open last piece to a measure when the header's
+		// length is not exact (an MP3's Xing count), and the same measure
+		// here, a memo hit there, refuses a last cut past what it holds.
+		if last := len(spans) - 1; !track.SamplesExact && track.Samples >= 0 && !req.Skipped(last) {
+			m, err := s.trackFor(ctx, src, true)
+			if err != nil {
+				return nil, err
+			}
+			if from := spans[last][0]; m.Samples >= 0 && m.Samples <= from {
+				return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+					"jobs: the last cut at sample %d is past the %d samples the source holds", from, m.Samples))
+			}
 		}
 	}
 	if err := s.checkOutputShape(req); err != nil {
@@ -552,7 +566,7 @@ func (s *Server) measureMember(ctx context.Context, ref string) (container.Track
 		return container.Track{}, "", err
 	}
 	defer f.Close()
-	track, err := s.trackFor(f, true)
+	track, err := s.trackFor(ctx, f, true)
 	if err != nil {
 		return container.Track{}, "", err
 	}

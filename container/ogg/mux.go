@@ -22,7 +22,12 @@ import (
 // every cached Ogg-Opus and Ogg-Vorbis output regenerates too although its
 // bytes do not change, which ADR-0004 accepts: over-keying costs a
 // regeneration, under-keying serves a wrong file.
-const MuxerVersion = "ogg-mux-2"
+//
+// ogg-mux-3: a packet too large for one page continues onto the next, where
+// it used to write a page no reader could parse, and the FLAC mapping numbers
+// its frames from 0, so a copy of a stream that starts past frame 0 changes
+// bytes.
+const MuxerVersion = "ogg-mux-3"
 
 // Muxer writes an Ogg stream: header pages (identification, comment), then
 // audio pages batching multiple packets each. The codec-specific part (which
@@ -32,12 +37,13 @@ const MuxerVersion = "ogg-mux-2"
 // flushes quickly (TTFA); later packets batch until a page nears the streaming
 // target size, one second of audio, or the segment-table limit, keeping the
 // per-page framing overhead a fraction of a percent instead of the ~11% a page
-// per 20 ms packet would cost. The page being batched is held until End can
-// stamp the final page's granule with the mapping's end position and the
-// end-of-stream flag. The muxer needs no seeking, so it streams live: a plain
-// io.Writer gets a compliant stream whose length is the final page's granule.
-// A destination it can seek gets one more thing, and only for FLAC, which is
-// the one mapping whose headers state a sample total: the BOS page's
+// per 20 ms packet would cost. A packet too large for one page (a hi-res FLAC
+// frame) continues across as many as it needs. The page being batched is held
+// until End can stamp the final page's granule with the mapping's end position
+// and the end-of-stream flag. The muxer needs no seeking, so it streams live: a
+// plain io.Writer gets a compliant stream whose length is the final page's
+// granule. A destination it can seek gets one more thing, and only for FLAC,
+// which is the one mapping whose headers state a sample total: the BOS page's
 // STREAMINFO is back-patched at End with the length the run produced and the
 // encoder's signature, so the output ends fully declared the way the reference
 // `flac --ogg` writes one.
@@ -98,8 +104,11 @@ type MuxerOptions struct {
 	// in (STREAMINFO's). The Opus and Vorbis output rows pass none on purpose,
 	// since their headers have nowhere for it to go.
 	//
-	// A remux leaves it nil and the source's own signature stands, which is
-	// right because the packets carry the same audio it was computed over.
+	// A remux leaves it nil and the track's own signature stands, which is
+	// right because the packets carry the same audio it was computed over. A
+	// copy of a stream that starts past frame 0 hands a track whose signature
+	// flac.ClearMD5 cleared, which says "not computed": the one it inherits
+	// covers the stream it was cut from.
 	MD5 func() [16]byte
 }
 
@@ -145,13 +154,19 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	// the destination sits now, so probing earlier would fix it before the
 	// caller had finished positioning (see muxseek).
 	m.patch = muxseek.New(m.w, "ogg")
-	m.begun = true
 	// The mapping emits its identification and comment pages; comments stay
 	// bounded (maxTagsPageBytes) so the comment header always fits one page's
 	// segment table (255*255 bytes) and the pre-audio headers stay small.
 	total, err := m.mapping.writeHeaders(tracks[0], m.tags, m.vendor, m.emitPage)
+	if err != nil {
+		// Pages may be out already, so a refused Begin is final: the muxer
+		// takes nothing more.
+		m.ended = true
+		return err
+	}
+	m.begun = true
 	m.wroteTotal = total
-	return err
+	return nil
 }
 
 // maxTagsPageBytes bounds a comment header so it stays a single page (the
@@ -166,15 +181,20 @@ const maxTagsPageBytes = 48 << 10
 // WritePacket adds a packet to the page being batched, first flushing that page
 // when the packet would not fit (segment table, byte target, or duration cap)
 // or when it is the stream's first audio page, which stays a single packet so
-// audio reaches the client right after the headers. The granule increment comes
-// from the mapping (pkt.Dur for Opus and FLAC), so accumulation stays codec
-// correct. The batch always keeps at least the newest packet, so End can stamp
-// the final page's granule with the end position.
+// audio reaches the client right after the headers. The bytes and the granule
+// increment come from the mapping (pkt.Dur for Opus and FLAC), so accumulation
+// stays codec correct and FLAC can number its frames from 0. The batch always
+// keeps at least the newest packet, so End can stamp the final page's granule
+// with the end position.
 func (m *Muxer) WritePacket(pkt container.Packet) error {
 	if !m.begun || m.ended {
 		return waxerr.New(waxerr.CodeInternal, "ogg: WritePacket outside Begin/End")
 	}
-	if n := len(pkt.Data); n > 0 && n < 1<<24 {
+	data, inc, err := m.mapping.writePacket(pkt)
+	if err != nil {
+		return err
+	}
+	if n := len(data); n > 0 && n < 1<<24 {
 		// The FLAC mapping's STREAMINFO states the frame-size bounds, which are
 		// the packet sizes here; End patches them in beside the total. The 24-bit
 		// cap is the field's, and a packet past it simply does not narrow them.
@@ -183,31 +203,32 @@ func (m *Muxer) WritePacket(pkt container.Packet) error {
 		}
 		m.maxFrame = max(m.maxFrame, n)
 	}
-	inc, err := m.mapping.writePacket(pkt)
-	if err != nil {
-		return err
-	}
-	segs := len(pkt.Data)/255 + 1
-	if len(m.pending) > 0 &&
+	segs := len(data)/255 + 1
+	// The segment table, not the bytes, says whether a batch is empty: an
+	// empty packet takes a segment too.
+	if len(m.pendingSeg) > 0 &&
 		(m.audioPages == 0 ||
 			len(m.pendingSeg)+segs > maxPageSegEntries ||
-			len(m.pending)+len(pkt.Data) > pageTargetBytes ||
+			len(m.pending)+len(data) > pageTargetBytes ||
 			m.pendingDur+inc > maxPageGranules) {
 		if err := m.flushPending(0); err != nil {
 			return err
 		}
 	}
 	m.granule += inc
-	m.pending = append(m.pending, pkt.Data...)
-	m.pendingSeg = appendLacing(m.pendingSeg, len(pkt.Data))
+	m.pending = append(m.pending, data...)
+	m.pendingSeg = appendLacing(m.pendingSeg, len(data))
 	m.pendingGranule = m.granule
 	m.pendingDur += inc
 	return nil
 }
 
-// flushPending writes the batched page and resets the batch.
+// flushPending writes the batched page and resets the batch. A batch too long
+// for one page's segment table is a lone packet, since WritePacket flushes
+// before a packet that would overflow one, so it continues onto as many pages
+// as it needs: each before the last completes no packet and states granule -1.
 func (m *Muxer) flushPending(headerType byte) error {
-	err := m.emitPage(m.pending, m.pendingSeg, m.pendingGranule, headerType)
+	err := paginate(m.pending, m.pendingSeg, m.pendingGranule, headerType, m.emitPage)
 	m.pending = m.pending[:0]
 	m.pendingSeg = m.pendingSeg[:0]
 	m.pendingDur = 0
@@ -233,7 +254,7 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 	}
 	m.ended = true
 	endGranule := m.mapping.endGranule(trailer)
-	if len(m.pending) == 0 {
+	if len(m.pendingSeg) == 0 {
 		// No audio: emit an empty EOS page so the stream is well-formed.
 		if err := m.emitPage(nil, lacing(0), endGranule, flagEOS); err != nil {
 			return err
@@ -246,6 +267,11 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 	}
 	return m.settleDeclaredTotal(endGranule)
 }
+
+// ClearMD5 has End state no MD5 in an Ogg FLAC's STREAMINFO ("not computed"),
+// for a run whose audio no longer matches the signature it was handed. It
+// reaches the file where End can rewrite the BOS page.
+func (m *Muxer) ClearMD5() { m.md5 = func() [16]byte { return [16]byte{} } }
 
 // settleDeclaredTotal reconciles what the headers claimed about the run with
 // the run that followed. total is what the stream ended up holding, which for
@@ -334,9 +360,12 @@ func patchOggFLACPage(page []byte, total int64, md5 func() [16]byte, minFrame, m
 const flacStreamInfoLen = 34
 
 // emitPage writes one Ogg page carrying the payload described by the segment
-// table (one or more whole packets; the batching bounds keep every packet
-// completed within its page).
+// table, which a page holds at most 255 values of.
 func (m *Muxer) emitPage(payload, seg []byte, granule int64, headerType byte) error {
+	if len(seg) > maxPageSegEntries {
+		// The count is one byte, and a wrapped one leaves a page no reader can.
+		return waxerr.New(waxerr.CodeInternal, fmt.Sprintf("ogg: a page of %d segments", len(seg)))
+	}
 	header := make([]byte, headerLen+len(seg))
 	copy(header, "OggS")
 	header[4] = 0 // stream structure version

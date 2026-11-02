@@ -111,7 +111,7 @@ func TestResolveHLSSourcesMeasuresASpannedSource(t *testing.T) {
 	if err := s.resolveHLSSources(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
-	if got := req.members[0].SrcSamples; got != want {
+	if got := req.members[0].SrcTrack.Samples; got != want {
 		t.Errorf("the spanned source measured %d samples, want the %d its frames hold", got, want)
 	}
 }

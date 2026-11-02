@@ -53,7 +53,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		s.serveDirect(w, r, req, reqStart)
 		return
 	}
-	if err := s.planTranscode(req); err != nil {
+	if err := s.planTranscode(r.Context(), req); err != nil {
 		s.writeError(w, err)
 		return
 	}
@@ -397,7 +397,7 @@ func (s *Server) transcodeSpan(ctx context.Context, src *source.File, hint strin
 	// rather than the freshly opened header's advisory one (waxflow.SliceMeasured).
 	// A memo hit rather than a second walk, exactly as the cut planner's
 	// trackFor is.
-	track, err := s.trackFor(src, true)
+	track, err := s.trackFor(ctx, src, true)
 	if err != nil {
 		return nil, err
 	}
@@ -405,7 +405,7 @@ func (s *Server) transcodeSpan(ctx context.Context, src *source.File, hint strin
 	if err != nil {
 		return nil, err
 	}
-	sl, err := waxflow.SliceMeasured(med, track.Samples, sp.from, sp.end())
+	sl, err := waxflow.SliceMeasured(med, track, sp.from, sp.end())
 	if err != nil {
 		return nil, err
 	}

@@ -11,11 +11,12 @@ import (
 // its header packets into a Track, and assigns each audio packet a timeline.
 //
 // Two timing models coexist. FLAC self-times: every frame header carries its
-// absolute sample position, so packetTiming ignores the running cursor and
-// SeekSample walks frames reading positions directly. Vorbis and Opus
-// accumulate: a packet's position is the running sum of durations, and
-// SeekSample anchors that sum to page granule positions (which are authoritative
-// at page boundaries). selfTiming selects which SeekSample walk applies.
+// sample position (counted here from the first frame's), so packetTiming
+// ignores the running cursor and SeekSample walks frames reading positions
+// directly. Vorbis and Opus accumulate: a packet's position is the running sum
+// of durations, and SeekSample anchors that sum to page granule positions
+// (which are authoritative at page boundaries). selfTiming selects which
+// SeekSample walk applies.
 type mapping interface {
 	// codecID is the codec this mapping decodes.
 	codecID() codec.ID
@@ -33,15 +34,17 @@ type mapping interface {
 	// the first audio packet; otherwise it validates the header/audio boundary.
 	isAudio(pkt []byte) bool
 
-	// finalizeTrack builds the Track once headers are done. lastGranule lazily
-	// yields the stream's final page granule (or -1 when unknown) via a tail
-	// scan, one window in the common case; the mapping maps it to Samples and,
-	// where the codec signals gapless trims, Delay and Padding. r reports what
-	// the mapping made of a declared total that the granule disagrees with: a
-	// shortfall is damage (and a strict open refuses it), an overrun is the
-	// stream being internally inconsistent in a way this build believes the
-	// pages about.
-	finalizeTrack(lastGranule func() int64, r reporter) (container.Track, error)
+	// finalizeTrack builds the Track once headers are done. first is the page
+	// the first audio packet completed on, which says where the stream starts.
+	// lastEnd lazily yields where the stream ends on the raw timeline (or -1
+	// when unknown) via a tail scan, one window in the common case: the last
+	// whole frame's end, off its header, for FLAC, and the final page granule
+	// for the rest. The mapping maps it to Samples and, where the codec
+	// signals gapless trims, Delay and Padding. r reports what the mapping made
+	// of a declared total that disagrees with it: a shortfall is damage (and a
+	// strict open refuses it), an overrun is the stream being internally
+	// inconsistent in a way this build believes the stream about.
+	finalizeTrack(first firstPage, lastEnd func() int64, r reporter) (container.Track, error)
 
 	// packetTiming returns a data packet's start sample and duration in the
 	// codec's output timeline, whether it is a seekable sync point, and whether
@@ -50,8 +53,8 @@ type mapping interface {
 	// pts == running.
 	packetTiming(pkt []byte, running int64) (pts, dur int64, sync, ok bool)
 
-	// selfTiming reports whether packetTiming reads absolute positions from the
-	// packet (FLAC) rather than accumulating them.
+	// selfTiming reports whether packetTiming reads positions from the packet
+	// itself (FLAC) rather than accumulating them.
 	selfTiming() bool
 
 	// preroll is how many samples before a seek target the demuxer should land
@@ -76,3 +79,18 @@ type reporter interface {
 // detectHeaders is parseID's sentinel for "consume header packets until the
 // first audio packet, using isAudio" (FLAC with a zero declared count).
 const detectHeaders = -1
+
+// firstPage is the page the first audio packet completed on. A stream may
+// start at a granule other than 0 (RFC 7845 section 4.5, Vorbis I section
+// A.2), and this page is where it says so.
+type firstPage struct {
+	off     int64
+	granule int64 // -1 when the page states none
+	samples int64 // in the packets that complete on the page
+	packets int   // the audio packets that complete on it
+	eos     bool
+	// start is the initial granule position the stream backs (see
+	// Demuxer.startGranule): a page granule less start is a position on the
+	// raw packet timeline, which starts at 0.
+	start int64
+}

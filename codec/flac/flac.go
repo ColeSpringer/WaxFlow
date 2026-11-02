@@ -6,9 +6,10 @@
 // up to 33 significant bits and are reconstructed in 64-bit arithmetic).
 //
 // The package also exports the pieces containers need to packetize the
-// codec: STREAMINFO parsing, frame-header parsing, and the frame CRC-16,
-// so container/flacn can confirm frame boundaries and container/ogg can
-// stamp packet positions without duplicating the wire format.
+// codec: STREAMINFO parsing, frame-header parsing, the frame CRC-16 and
+// frame renumbering, so container/flacn can confirm frame boundaries,
+// container/ogg can stamp packet positions, and both can number a copy's
+// frames from 0 without duplicating the wire format.
 package flac
 
 import (
@@ -17,8 +18,10 @@ import (
 )
 
 // Version is the decoder's cache-key version constant (ADR-0004): bump on
-// any change that alters decoded samples.
-const Version = "flac-dec-1"
+// any change that alters decoded samples. 2 covers the FLAC readers: a lost
+// frame is now silence, Ogg FLAC is timed by its frames, and a stream whose
+// first frame is past 0 reads from it (the key has no demuxer term).
+const Version = "flac-dec-2"
 
 // StreamInfoLen is the byte length of a STREAMINFO metadata block body,
 // which is also the codec configuration blob (codec.Encoder.CodecConfig

@@ -85,11 +85,20 @@ at all.
 Three things a regeneration will show, all expected:
 
 - The output is **not byte-identical** to the committed file. The encoder writes
-  a fresh File ID GUID each run, so a few dozen bytes differ while the decoded
-  samples do not.
-- The transcoder RENEGOTIATES rather than refusing what it cannot reach. A
-  stereo request comes back mono; a 32 kHz or 44.1 kHz request comes back at
-  22.05 kHz; a bit rate between two offered ones comes back at the nearer. The
-  corpus test reads back what it actually got for exactly this reason.
+  a fresh File ID GUID each run, so on five cells a few dozen bytes differ while
+  the decoded samples do not. `voice-11025-10k` and `voice-22050-20k` differ in
+  their audio too: measured 2026-11-01, 10 of 10 and 8 of 10 packets differ from
+  the committed bytes, through MediaTranscoder and the script's direct path
+  alike, and at every input chunking tried. The recipe is unchanged since the
+  cells were committed (12be0be), so Windows' encoder has changed. The committed
+  files stay as the older encoder's output: the corpus note's section 4 path
+  counts were measured on them, and a regeneration moves some of those counts
+  on these two cells (the stale-carry superframes stay where they are).
+- The script REFUSES what the encoder does not offer, naming the seven
+  formats, and refuses a WAV that is not already the format's rate, mono and
+  16-bit. MediaTranscoder would renegotiate instead (a stereo request comes
+  back mono, 32 or 44.1 kHz comes back at 22.05 kHz), but the script drives
+  the speech encoder itself because the transcoder can lose the encoder's
+  last 1.8 seconds; the script's header says how.
 - The bit rate the encoder lands on is exactly the request here, because every
   request above names a format the encoder offers.

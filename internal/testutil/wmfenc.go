@@ -11,8 +11,9 @@ import (
 	"testing"
 )
 
-// Windows' own WMA encoder, reached through Media Foundation's MediaTranscoder
-// by scripts/wmfenc/wmfenc.ps1.
+// Windows' own WMA encoder, reached through Media Foundation by
+// scripts/wmfenc/wmfenc.ps1: its MediaTranscoder for every subtype but WMA
+// Voice, whose encoder the script drives directly (wmfcheck.go says why).
 //
 // It is here because FFmpeg's WMA encoder is a poor oracle for this format and
 // the gap is measured rather than suspected: across every corpus cell and on
@@ -130,41 +131,34 @@ func wmfArg(t testing.TB, p string) string {
 
 // runWMF drives one of the encoder scripts and holds them to the same output
 // contract. The exit status alone is not enough: PowerShell can report success
-// for a run whose encode never wrote anything, and a caller that only checked
-// the status would then decode an empty file as a corpus cell.
+// for a run whose encode never wrote anything, or wrote a valid but short file
+// (wmfcheck.go), and a caller that only checked the status would then decode
+// it as a corpus cell. There is no retry: a short output is a defect to find,
+// not to absorb.
 func runWMF(t testing.TB, script, what, in, dst string, args ...string) {
 	t.Helper()
 	path := wmfScript(script)
 	if path == "" {
 		t.Fatal("scripts/wmfenc/" + script + " is missing from the tree")
 	}
-	const tries = 4
-	var got, want float64
-	for try := 1; try <= tries; try++ {
-		argv := append([]string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", wmfArg(t, path)}, args...)
-		b, err := exec.Command("powershell.exe", argv...).CombinedOutput()
-		if err != nil {
-			t.Fatalf("%s %s: %v\n%s", script, what, err, b)
-		}
-		if !strings.Contains(string(b), "ok "+wmfArg(t, dst)) {
-			t.Fatalf("%s %s did not report success:\n%s", script, what, b)
-		}
-		fi, err := os.Stat(dst)
-		if err != nil {
-			t.Fatalf("%s %s wrote no file: %v", script, what, err)
-		}
-		if fi.Size() == 0 {
-			t.Fatalf("%s %s wrote an empty file", script, what)
-		}
-		var ok bool
-		if ok, got, want = durationCheck(t, in, dst); ok {
-			if try > 1 {
-				t.Logf("%s %s landed on attempt %d (%.3fs of %.3fs)", script, what, try, got, want)
-			}
-			return
-		}
+	argv := append([]string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", wmfArg(t, path)}, args...)
+	b, err := exec.Command("powershell.exe", argv...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s %s: %v\n%s", script, what, err, b)
 	}
-	t.Fatal(wmfShortf(script+" "+what, got, want, tries))
+	if !strings.Contains(string(b), "ok "+wmfArg(t, dst)) {
+		t.Fatalf("%s %s did not report success:\n%s", script, what, b)
+	}
+	fi, err := os.Stat(dst)
+	if err != nil {
+		t.Fatalf("%s %s wrote no file: %v", script, what, err)
+	}
+	if fi.Size() == 0 {
+		t.Fatalf("%s %s wrote an empty file", script, what)
+	}
+	if ok, got, want := durationCheck(t, in, dst); !ok {
+		t.Fatal(wmfShortf(script+" "+what, got, want))
+	}
 }
 
 // Media Foundation subtypes for the WMA family, as scripts/wmfenc/wmfenc.ps1
@@ -197,7 +191,8 @@ func WMFEncode(t testing.TB, wav, out string, rate, channels, bitRate int) {
 // passed because MediaTranscoder RENEGOTIATES instead of refusing: every WMA
 // Pro format above 48 kHz is 24-bit, so a 96 kHz request at 16 bits comes back
 // as a 48 kHz file that looks like a successful encode. Callers read back what
-// they actually got.
+// they actually got. WMA Voice does not go through MediaTranscoder and refuses
+// a format its encoder does not offer instead.
 func WMFEncodeSubtype(t testing.TB, wav, out string, rate, channels, bitRate, bits int, subtype string) {
 	t.Helper()
 	in, dst := wmfPaths(t, wav, out)

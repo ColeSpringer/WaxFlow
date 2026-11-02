@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/flac"
@@ -37,6 +38,14 @@ const (
 	maxResync = 1 << 20
 	// seekWindow is the bisection cutoff: below this span, walk frames.
 	seekWindow = 128 << 10
+	// maxHeld bounds the frames a boundary scan holds as resync points at
+	// once: a damaged frame's successor, and the odd header its payload
+	// spells. The oldest goes first.
+	maxHeld = 8
+	// maxWarnings caps the tolerated-damage list. A read reports each hole
+	// it resyncs past, and seeking re-walks holes a read already crossed, so
+	// a damaged file would otherwise grow the list without bound.
+	maxWarnings = 64
 )
 
 // Metadata block types (RFC 9639 section 8).
@@ -65,7 +74,17 @@ type Demuxer struct {
 	si        flac.StreamInfo
 	track     container.Track
 	seekTable []seekPoint
-	warnings  []container.Warning
+	// seekBase is what the SEEKTABLE counts from (tableBase), once read.
+	seekBase     int64
+	seekBaseRead bool
+	warnings     []container.Warning
+	// damage counts the Damage warnings recorded, those the list's cap and
+	// de-duplication keep out included, so a measurement can tell whether it
+	// met any. Notes do not count: a tagger's trailer is not damage.
+	damage int
+	// tailDamage is the first damage the open's measurement met.
+	tailDamage *container.Warning
+	residual   []int64 // FrameLen's scratch
 
 	firstFrame int64 // byte offset of the first audio frame
 
@@ -74,11 +93,18 @@ type Demuxer struct {
 	// header bit, which must not change within a stream.
 	num    flac.Numbering
 	varBit bool
+	// origin is where positions run from 0: the first frame's sample
+	// position, whatever number it carries, or 0 when damage took the frames
+	// before it. first is that frame's header.
+	origin int64
+	first  flac.FrameInfo
 
-	off   int64          // offset of the current undelivered frame
-	cur   flac.FrameInfo // its parsed header
-	valid bool           // false once the stream is exhausted
-	empty bool           // stream has zero frames (legal: metadata only)
+	off     int64          // offset of the current undelivered frame
+	cur     flac.FrameInfo // its parsed header
+	valid   bool           // false once the stream is exhausted
+	empty   bool           // stream has zero frames (legal: metadata only)
+	discont bool           // the current frame follows a hole the read stepped over
+	lost    int64          // samples the holes before the current frame took
 
 	// w is the shared read-ahead window; its data end is the end of
 	// frame data (trailing tags stripped lazily) and its sticky error
@@ -113,7 +139,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
+	d.record(container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
 	return nil
 }
 
@@ -121,7 +147,19 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 // something with a well-formed file that a caller should know about, rather
 // than damage in the file. See [container.Note].
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
+	d.record(container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
+}
+
+// record lists w unless it is listed already or the list is full: warn and
+// note share one list, capped and de-duplicated as every tolerant demuxer in
+// this tree keeps its own.
+func (d *Demuxer) record(w container.Warning) {
+	if w.Kind == container.Damage {
+		d.damage++
+	}
+	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
+		d.warnings = append(d.warnings, w)
+	}
 }
 
 func (d *Demuxer) parse() error {
@@ -215,6 +253,7 @@ func (d *Demuxer) parse() error {
 	// fixed-strategy constant block size that converts frame numbers to
 	// sample positions everywhere else.
 	fi, err := flac.ParseFrameHeader(d.w.Peek(off, flac.MaxFrameHeaderLen))
+	skipped := int64(0)
 	if err != nil || !d.consistent(fi) {
 		if d.firstFrame >= d.w.DataEnd() {
 			// Zero frames and zero audio bytes: a legal stream (encoding
@@ -239,69 +278,75 @@ func (d *Demuxer) parse() error {
 			}
 			return malformed("no audio frame after the metadata blocks")
 		}
-		if werr := d.warn(off, "%d unparsable bytes before the first frame", fOff-off); werr != nil {
-			return werr
-		}
-		d.firstFrame, fi = fOff, ffi
+		d.firstFrame, fi, skipped = fOff, ffi, fOff-off
 	}
 	if d.w.Err() != nil {
 		return d.w.Err()
 	}
 	d.varBit = fi.Variable
 	d.num = d.si.Numbering(fi)
+	d.origin, d.first = d.num.Start(fi), fi
+	if skipped > 0 {
+		// Bytes that could hold the frames the first one's number skips are
+		// those frames, damaged: a hole from 0, not a stream starting late.
+		if lost := d.origin; lost > 0 && lost <= flac.MaxSamplesIn(skipped) {
+			if werr := d.warn(off, "%d bytes are not a valid frame, dropped: %d samples lost", skipped, lost); werr != nil {
+				return werr
+			}
+			d.origin, d.lost, d.discont = 0, lost, true
+		} else if werr := d.warn(off, "%d unparsable bytes before the first frame", skipped); werr != nil {
+			return werr
+		}
+	}
 	d.off, d.cur, d.valid = d.firstFrame, fi, true
 	return d.verifyLength()
 }
 
 // verifyLength settles the track's length against the frames the file actually
-// carries, in both directions, and marks the result authoritative.
-//
-// STREAMINFO's total is the encoder's back-patched claim, written once the
-// input ran out. A file cut short afterwards still carries it, so taking it on
-// trust hands every caller a duration no read can reach, and hands strict mode
-// a damaged file it has nothing to object to. A file whose frames run past it
-// is the mirror image: the number is not a truncation instruction, so a read
-// delivers more than the probe promised, and every caller that sums lengths is
-// wrong by the difference. Both are the same invariant, which the 2026-08-31
-// probe work was written to: a length the probe reports is a length a read
-// delivers.
-//
-// A shortfall is damage and warns; an overrun is the file being internally
-// inconsistent in a way this build simply believes the frames about, which is a
-// Note. A declared total of zero is not a claim at all (a streaming encoder
-// leaves it so) and settles silently.
-//
-// An intact file settles from its closing frame alone; see deliverableEnd for
-// what a damaged one costs. A tail too damaged to locate leaves the declared
-// count alone and unexact: the read path reports what it finds where it finds
-// it.
-//
-// Only a measurement that met no damage on the way is called exact, and the
-// flag is what makes that matter: format.Media caps a decode at an
-// authoritative length, so a number arrived at by walking past damage would
-// become a hard end rather than the tolerated oddity it has always been. The
-// length still moves either way, since it is the best answer there is; what a
-// damaged file does not get is the promise that nothing more is coming.
+// carries (flac.Settle), so a length the probe reports is a length a read
+// delivers. An intact file settles from its closing frame alone; see
+// deliverableEnd for what a damaged one costs. Only a measurement that met no
+// damage on the way is exact: format.Media caps a decode at an exact length, so
+// a number found by walking past damage would become a hard end.
 func (d *Demuxer) verifyLength() error {
 	if d.empty {
 		return nil
 	}
 	end, ok, clean := d.deliverableEnd()
-	if !ok {
-		return d.w.Err()
-	}
-	switch {
-	case d.si.Samples > 0 && end < d.si.Samples:
-		if err := d.warn(d.firstFrame,
-			"STREAMINFO declares %d samples but the frames end at %d", d.si.Samples, end); err != nil {
+	if w := d.tailDamage; !clean && w != nil {
+		// What the measurement met, reported where a read will meet it too:
+		// a strict open refuses it, and a tolerant one lists it once.
+		if err := d.warn(w.Offset, "%s", w.Msg); err != nil {
 			return err
 		}
-	case d.si.Samples > 0 && end > d.si.Samples:
-		d.note(d.firstFrame,
-			"STREAMINFO declares %d samples but the frames run to %d", d.si.Samples, end)
 	}
-	d.track.Samples = end
-	d.track.SamplesExact = clean
+	if err := d.w.Err(); err != nil {
+		return err
+	}
+	span := int64(-1)
+	if ok && end >= d.origin {
+		span = end - d.origin
+	}
+	if n := d.w.DataEnd() - d.firstFrame; span > flac.MaxSamplesIn(n) {
+		if err := d.warn(d.firstFrame, "the frames claim %d samples, more than %d bytes of frames can hold", span, n); err != nil {
+			return err
+		}
+		span = -1
+	}
+	st, err := flac.Settle(d.track.CodecConfig, d.origin, span)
+	if err != nil {
+		return err
+	}
+	for _, n := range st.Notes {
+		d.note(d.firstFrame, "%s", n)
+	}
+	if st.Damage != "" {
+		if err := d.warn(d.firstFrame, "%s", st.Damage); err != nil {
+			return err
+		}
+	}
+	d.track.CodecConfig, d.track.Samples = st.StreamInfo, st.Samples
+	d.track.SamplesExact = st.Measured && clean
 	return nil
 }
 
@@ -328,13 +373,22 @@ func (d *Demuxer) verifyLength() error {
 // the read path's to report, but whether there were any is the caller's to
 // know: a length walked past damage is a best answer rather than an
 // authoritative one.
+//
+// The walk steps over a hole as a read does, so the end it finds is where a
+// read's frames end.
 func (d *Demuxer) deliverableEnd() (end int64, ok, clean bool) {
-	strict, saved, dataEnd := d.opts.Strict, len(d.warnings), d.w.DataEnd()
+	strict, saved, seen, dataEnd := d.opts.Strict, len(d.warnings), d.damage, d.w.DataEnd()
 	off0, cur0, valid0 := d.off, d.cur, d.valid
 	d.opts.Strict = false
 	defer func() {
 		d.opts.Strict = strict
-		clean = clean && len(d.warnings) == saved
+		clean = clean && d.damage == seen
+		for _, w := range d.warnings[saved:] {
+			if w.Kind == container.Damage {
+				d.tailDamage = &w
+				break
+			}
+		}
 		d.warnings = d.warnings[:saved]
 		d.w.SetDataEnd(dataEnd)
 		// The walk ends past the audio; reads start where it began.
@@ -351,19 +405,19 @@ func (d *Demuxer) deliverableEnd() (end int64, ok, clean bool) {
 	d.off, d.cur, d.valid = off, fi, true
 	for {
 		d.w.Trim(d.off)
-		end, next, nextOK, err := d.findEnd()
+		fe, err := d.findEnd()
 		if err != nil || d.w.Err() != nil {
 			return 0, false, false
 		}
-		if end < 0 {
+		switch {
+		case !fe.nextOK && fe.end < 0:
 			// Stops inside this frame: the answer is where the audio ends and
 			// the file is damaged, which is exactly the pair the flag splits.
 			return d.num.Start(d.cur), true, false
-		}
-		if !nextOK {
+		case !fe.nextOK:
 			return d.num.Start(d.cur) + int64(d.cur.BlockSize), true, true // clean end
 		}
-		d.off, d.cur = end, next
+		d.off, d.cur = fe.resync, fe.next
 	}
 }
 
@@ -430,10 +484,13 @@ func (d *Demuxer) tailBacks() (int64, bool) {
 			}
 			d.off, d.cur, d.valid = cand, fi, true
 			// A complete frame with nothing after it: findEnd peels any
-			// trailing tag on the way, which the caller unpeels.
-			if end, _, nextOK, err := d.findEnd(); err == nil && end >= 0 && !nextOK {
+			// trailing tag on the way, which the caller unpeels. What a
+			// rejected candidate reported is not the file's.
+			damage, listed := d.damage, len(d.warnings)
+			if fe, err := d.findEnd(); err == nil && fe.end >= 0 && !fe.nextOK {
 				return d.num.Start(fi) + int64(fi.BlockSize), true
 			}
+			d.damage, d.warnings = damage, d.warnings[:listed]
 		}
 		if from == lo {
 			break // the whole window is scanned
@@ -485,6 +542,9 @@ func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track}
 // Warnings returns damage tolerated during parsing.
 func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
 
+// DamageCount implements container.Damaged.
+func (d *Demuxer) DamageCount() int { return d.damage }
+
 // consistent reports whether a frame header agrees with STREAMINFO; the
 // pipeline's track format is fixed, and consistency is also what makes
 // sync-candidate scanning trustworthy.
@@ -530,24 +590,59 @@ func (d *Demuxer) nextCandidate(from, limit int64) (int64, flac.FrameInfo, bool)
 	return 0, flac.FrameInfo{}, false
 }
 
+// frameEnd is where findEnd settled the frame at d.off.
+type frameEnd struct {
+	end    int64          // the frame's end; -1 when its bytes do not check
+	next   flac.FrameInfo // the header of the frame after it, when nextOK
+	nextOK bool
+	resync int64 // where that frame starts: end, or past damage
+	lost   int64 // the samples lost before it, the frame at d.off's too when end < 0
+}
+
+// boundary is the frame at d.off ending at end, where the frame next starts.
+func boundary(end int64, next flac.FrameInfo) frameEnd {
+	return frameEnd{end: end, next: next, nextOK: true, resync: end}
+}
+
+// last is the frame at d.off ending the stream at end, or a damaged tail at -1.
+func last(end int64) frameEnd { return frameEnd{end: end, resync: end} }
+
+// pending is a frame start whose end the scan has yet to find, with the
+// checksum of its bytes so far.
+type pending struct {
+	off    int64
+	fi     flac.FrameInfo
+	crc    uint16 // over [off, crcPos)
+	crcPos int64
+}
+
 // findEnd locates the end of the current frame at d.off: the next sync
 // candidate that parses consistently, carries the expected position, and
 // where the bytes so far checksum as a complete frame (CRC-16). At end
 // of data the final span must checksum likewise; recognized trailers
 // (ID3v1, APEv2, appended ID3v2, NUL padding) are peeled and retried
 // before the tail is declared damaged. end < 0 with a nil error reports
-// a tolerantly dropped tail.
-func (d *Demuxer) findEnd() (end int64, next flac.FrameInfo, nextOK bool, err error) {
+// a tolerantly dropped tail, or, with hole set, a damaged frame.
+//
+// A frame whose bytes do not check gives way to the first consistent frame
+// after it that does, making it a hole: one warning, and the read goes on from
+// there, for about two frames' scan. A later-numbered header where the frame
+// does check is a gap in the numbers, not damage, and is passed over (see
+// cut.go's FLAC row).
+func (d *Demuxer) findEnd() (frameEnd, error) {
 	start := d.off
-	crc := uint16(0)
-	crcPos := start // crc covers [start, crcPos)
+	cur := pending{off: start, fi: d.cur, crcPos: start}
+	succ := d.num.Next(d.cur)
+	var held [maxHeld]pending
+	nHeld := 0
+	own := int64(-1) // where the frame at start ends by its own parse, once found
 
 	// A boundary needs at least a header and CRC-16 before it; starting
 	// past the fixed header bytes keeps the scan out of our own header.
 	scan := start + 4
 	for {
 		if scan-start > maxFrameLen {
-			return 0, flac.FrameInfo{}, false, malformed("frame at offset %d exceeds %d bytes", start, int64(maxFrameLen))
+			return frameEnd{}, malformed("frame at offset %d exceeds %d bytes", start, int64(maxFrameLen))
 		}
 		buf := d.w.BytesAt(scan, srcwin.Chunk)
 		if len(buf) == 0 {
@@ -561,7 +656,7 @@ func (d *Demuxer) findEnd() (end int64, next flac.FrameInfo, nextOK bool, err er
 			}
 			cand := scan + int64(rel+i)
 			rel += i + 1
-			if cand-2 < crcPos || cand+2 > d.w.DataEnd() {
+			if cand+2 > d.w.DataEnd() {
 				continue
 			}
 			hdr := d.w.BytesAt(cand, flac.MaxFrameHeaderLen)
@@ -569,75 +664,239 @@ func (d *Demuxer) findEnd() (end int64, next flac.FrameInfo, nextOK bool, err er
 				continue
 			}
 			fi, perr := flac.ParseFrameHeader(hdr)
-			if perr != nil || fi.Variable != d.varBit || fi.Coded != d.num.Next(d.cur) {
+			if perr != nil || fi.Variable != d.varBit {
 				continue
 			}
-			crc = flac.UpdateCRC16(crc, d.w.BytesAt(crcPos, int(cand-2-crcPos)))
-			crcPos = cand - 2
-			tail := d.w.BytesAt(crcPos, 2)
-			if len(tail) == 2 && crc == uint16(tail[0])<<8|uint16(tail[1]) {
+			// A frame the read could go on from: the successor or, past
+			// damage, any consistent frame numbered after it.
+			fits := fi.Coded >= succ && d.consistent(fi)
+			checks := false
+			if fi.Coded == succ || fits {
+				checks = d.checksTo(&cur, cand)
+			}
+			if checks && fi.Coded == succ {
 				// Confirmed boundary. A frame here that disagrees with
 				// STREAMINFO is a mid-stream format change: not damage but
 				// a stream shape the fixed-format pipeline rejects (RFC
 				// 9639 permits this), so it is a hard error either mode.
 				if !d.consistent(fi) {
-					return 0, flac.FrameInfo{}, false,
-						malformed("mid-stream format change at offset %d", cand)
+					return frameEnd{}, malformed("mid-stream format change at offset %d", cand)
 				}
-				return cand, fi, true, nil
+				return boundary(cand, fi), nil
 			}
-			// Not a boundary: fold the two checked bytes in and go on.
-			crc = flac.UpdateCRC16(crc, tail)
-			crcPos += int64(len(tail))
+			if checks && fi.Coded > succ {
+				// The bytes check across a gap in the numbers. Where this
+				// frame ends here by its own parse, the frames are whole and
+				// only the numbers skip. Where it ends short with no frame
+				// there, what lies between is damage that checks, as zeroed
+				// bytes do (CRC-16 starts from zero).
+				if own < 0 {
+					if n, ok := d.ownEnd(cand); ok {
+						own = start + int64(n)
+					}
+				}
+				h := pending{off: cand, fi: fi, crcPos: cand}
+				switch {
+				case own == cand:
+					return d.jump(h)
+				case own >= 0 && own < cand && !d.headerAt(own):
+					return d.holeAfter(own, h)
+				}
+			}
+			for j := range nHeld {
+				if fi.Coded == d.num.Next(held[j].fi) && d.checksTo(&held[j], cand) {
+					return d.holeAt(held[j])
+				}
+			}
+			if fits && !checks {
+				if nHeld == maxHeld {
+					copy(held[:], held[1:])
+					nHeld--
+				}
+				held[nHeld] = pending{off: cand, fi: fi, crcPos: cand}
+				nHeld++
+			}
 		}
 		scan += int64(len(buf))
 	}
 	if d.w.Err() != nil {
-		return 0, flac.FrameInfo{}, false, d.w.Err()
+		return frameEnd{}, d.w.Err()
 	}
 
-	// End of data: the last frame must checksum to exactly here, after
-	// peeling any recognized trailing tags. Every peel is provisional,
-	// dataEnd shrinking only once the checksum confirms it, so a false
-	// recognition costs a retry rather than data.
-	end = d.w.DataEnd()
+	// End of data: the last frame must checksum to exactly here.
+	if end, ok := d.tailEnd(cur); ok {
+		return last(end), nil
+	}
+	for _, h := range held[:nHeld] {
+		if _, ok := d.tailEnd(h); ok {
+			return d.holeAt(h)
+		}
+	}
+	if d.w.Err() != nil {
+		return frameEnd{}, d.w.Err()
+	}
+	if n, ok := d.ownEnd(d.w.DataEnd()); ok {
+		end := start + int64(n)
+		if werr := d.warn(end, "%d trailing bytes are not a valid frame, dropped", d.w.DataEnd()-end); werr != nil {
+			return frameEnd{}, werr
+		}
+		return last(end), nil
+	}
+	if werr := d.warn(start, "%d trailing bytes are not a valid frame, dropped", d.w.DataEnd()-start); werr != nil {
+		return frameEnd{}, werr
+	}
+	return last(-1), nil
+}
+
+// checksTo reports whether p's bytes up to cand check as a whole frame, its
+// CRC-16 being the two bytes before cand, and moves p's checksum on to cand.
+func (d *Demuxer) checksTo(p *pending, cand int64) bool {
+	if cand-2 < p.crcPos {
+		return false
+	}
+	p.crc = flac.UpdateCRC16(p.crc, d.w.BytesAt(p.crcPos, int(cand-2-p.crcPos)))
+	tail := d.w.BytesAt(cand-2, 2)
+	ok := len(tail) == 2 && p.crc == uint16(tail[0])<<8|uint16(tail[1])
+	p.crc = flac.UpdateCRC16(p.crc, tail)
+	p.crcPos = cand - 2 + int64(len(tail))
+	return ok
+}
+
+// tailEnd reports where p's frame ends when it is the last: its bytes must
+// check to exactly the end of data, after peeling any recognized trailing
+// tags. Every peel is provisional, dataEnd shrinking only once the checksum
+// confirms it, so a false recognition costs a retry rather than data.
+func (d *Demuxer) tailEnd(p pending) (int64, bool) {
+	end := d.w.DataEnd()
 	// Check first, peel second, and check once more after the last peel: the
 	// peel that uncovers the real end is the one the bound would otherwise
 	// spend without ever validating it.
 	for i := 0; ; i++ {
-		if d.tailChecks(crc, crcPos, end) {
+		if d.tailChecks(p.crc, p.crcPos, end) {
 			if end != d.w.DataEnd() {
 				// Where taggers put an ID3v1 or APE trailer: bytes after the
 				// last frame that the file is entitled to carry.
 				d.note(end, "%d trailing tag or padding bytes ignored", d.w.DataEnd()-end)
 				d.w.SetDataEnd(end)
 			}
-			return end, flac.FrameInfo{}, false, nil
+			return end, true
 		}
 		if i == trailer.Max {
-			break
+			return 0, false
 		}
 		// The floor is the frame's own start plus its two checksum bytes.
 		// NUL padding is peeled here and nowhere else: it has no magic to
 		// recognize, and this is the only caller that confirms a peel.
 		stripped, _, ok := trailer.Peel(&d.w, trailer.APEv2|trailer.ID3v1|trailer.ID3v2|trailer.Padding,
-			start+2, end)
+			p.off+2, end)
 		if !ok {
-			break
+			return 0, false
 		}
 		end = stripped
 	}
-	if d.w.Err() != nil {
-		return 0, flac.FrameInfo{}, false, d.w.Err()
-	}
-	if werr := d.warn(start, "%d trailing bytes are not a valid frame, dropped", d.w.DataEnd()-start); werr != nil {
-		return 0, flac.FrameInfo{}, false, werr
-	}
-	return -1, flac.FrameInfo{}, false, nil
 }
 
-// tailChecks reports whether [d.off, end) checksums as a complete frame,
-// given crc already covering [d.off, crcPos).
+// believable reports whether a hole of lost samples over n bytes is one the
+// file could have lost, ending inside the track's length when that is known.
+func (d *Demuxer) believable(lost, n int64, next flac.FrameInfo) bool {
+	if lost > flac.MaxSamplesIn(n) {
+		return false
+	}
+	t := d.track
+	return !t.SamplesExact || t.Samples < 0 || d.num.Start(next)-d.origin <= t.Samples
+}
+
+// holeAt reports the damage before h, the next frame that checks. When the
+// frame at d.off is whole by its own CRC-16 and only the header after it is
+// damaged, that frame is delivered and the hole is what lies between them.
+func (d *Demuxer) holeAt(h pending) (frameEnd, error) {
+	if n, ok := d.ownEnd(h.off); ok {
+		return d.holeAfter(d.off+int64(n), h)
+	}
+	return d.hole(h)
+}
+
+// jump reports numbers that skip from the frame at d.off to h, which starts
+// where that frame ends: frames gone without their numbers. Where the stream
+// could have h, the samples skipped are lost, as a hole's are, so a read
+// places what follows where a seek and a measure do; numbers past that vouch
+// for nothing, so h is joined on.
+func (d *Demuxer) jump(h pending) (frameEnd, error) {
+	from := d.num.Start(d.cur) + int64(d.cur.BlockSize) - d.origin
+	to := d.num.Start(h.fi) - d.origin
+	if d.vouched(to) {
+		if err := d.warn(h.off, "the frames skip from sample %d to %d: %d samples lost", from, to, to-from); err != nil {
+			return frameEnd{}, err
+		}
+		fe := boundary(h.off, h.fi)
+		fe.lost = to - from
+		return fe, nil
+	}
+	if err := d.warn(h.off, "the frames skip from sample %d to %d, past what the stream holds; joined", from, to); err != nil {
+		return frameEnd{}, err
+	}
+	return boundary(h.off, h.fi), nil
+}
+
+// vouched reports whether a frame at sample to lies where this stream could
+// have one: inside its exact length, or short of one, inside what its frames'
+// bytes can hold.
+func (d *Demuxer) vouched(to int64) bool {
+	if t := d.track; t.SamplesExact && t.Samples >= 0 {
+		return to <= t.Samples
+	}
+	return to <= flac.MaxSamplesIn(d.w.DataEnd()-d.firstFrame)
+}
+
+// headerAt reports whether a frame header of this stream starts at off.
+func (d *Demuxer) headerAt(off int64) bool {
+	fi, err := flac.ParseFrameHeader(d.w.BytesAt(off, flac.MaxFrameHeaderLen))
+	return err == nil && fi.Variable == d.varBit
+}
+
+// ownEnd parses the frame at d.off to its end, short of limit, and reports its
+// length when its CRC-16 checks there.
+func (d *Demuxer) ownEnd(limit int64) (int, bool) {
+	limit = min(limit, d.off+maxFrameLen)
+	n, err := flac.FrameLen(d.w.BytesAt(d.off, int(limit-d.off)), d.si, &d.residual)
+	return n, err == nil
+}
+
+// holeAfter reports the bytes between end, where the whole frame at d.off
+// ends, and h: once, with the samples between.
+func (d *Demuxer) holeAfter(end int64, h pending) (frameEnd, error) {
+	lost := d.num.Start(h.fi) - d.num.Start(d.cur) - int64(d.cur.BlockSize)
+	if !d.believable(lost, h.off-end, h.fi) {
+		if err := d.warn(end, "%d trailing bytes are not a valid frame, dropped", d.w.DataEnd()-end); err != nil {
+			return frameEnd{}, err
+		}
+		return last(end), nil
+	}
+	if err := d.warn(end, "%d bytes are not a valid frame, dropped: %d samples lost", h.off-end, lost); err != nil {
+		return frameEnd{}, err
+	}
+	return frameEnd{end: end, next: h.fi, nextOK: true, resync: h.off, lost: lost}, nil
+}
+
+// hole reports the frame at d.off, whose bytes do not check, giving way to h,
+// which does: once, at the damaged frame, with the bytes and samples between.
+// Positions go on from h's own number, so what follows sits where it belongs.
+func (d *Demuxer) hole(h pending) (frameEnd, error) {
+	lost := d.num.Start(h.fi) - d.num.Start(d.cur)
+	if !d.believable(lost, h.off-d.off, h.fi) {
+		if err := d.warn(d.off, "%d trailing bytes are not a valid frame, dropped", d.w.DataEnd()-d.off); err != nil {
+			return frameEnd{}, err
+		}
+		return last(-1), nil
+	}
+	if err := d.warn(d.off, "%d bytes are not a valid frame, dropped: %d samples lost", h.off-d.off, lost); err != nil {
+		return frameEnd{}, err
+	}
+	return frameEnd{end: -1, next: h.fi, nextOK: true, resync: h.off, lost: lost}, nil
+}
+
+// tailChecks reports whether [start, end) checksums as a complete frame,
+// given crc already covering [start, crcPos).
 func (d *Demuxer) tailChecks(crc uint16, crcPos, end int64) bool {
 	if end-crcPos < 2 || end > d.w.DataEnd() {
 		return false
@@ -651,7 +910,9 @@ func (d *Demuxer) tailChecks(crc uint16, crcPos, end int64) bool {
 }
 
 // ReadPacket yields one whole frame, checksum included. Packet data is
-// reused across calls.
+// reused across calls. A frame whose bytes do not check is stepped over, and
+// the frame after it is the next packet, marked Discont, at its own position,
+// with Lost saying how many samples the hole took.
 func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 	if !d.valid {
 		if d.w.Err() != nil {
@@ -659,34 +920,47 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 		}
 		return io.EOF
 	}
-	d.w.Trim(d.off)
-	end, next, nextOK, err := d.findEnd()
-	if err != nil {
-		return err
-	}
-	if end < 0 {
-		// Damaged tail, tolerantly dropped.
-		d.valid = false
-		return io.EOF
-	}
-	data := d.w.BytesAt(d.off, int(end-d.off))
-	if int64(len(data)) != end-d.off {
-		if d.w.Err() != nil {
-			return d.w.Err()
+	for {
+		d.w.Trim(d.off)
+		fe, err := d.findEnd()
+		if err != nil {
+			return err
 		}
-		return waxerr.New(waxerr.CodeSourceUnreadable, "flac: reading frame data")
+		if fe.end < 0 {
+			if !fe.nextOK {
+				// Damaged tail, tolerantly dropped.
+				d.valid = false
+				return io.EOF
+			}
+			d.lost += fe.lost // a hole, the frame at d.off in it
+			d.off, d.cur, d.discont = fe.resync, fe.next, true
+			continue
+		}
+		data := d.w.BytesAt(d.off, int(fe.end-d.off))
+		if int64(len(data)) != fe.end-d.off {
+			if d.w.Err() != nil {
+				return d.w.Err()
+			}
+			return waxerr.New(waxerr.CodeSourceUnreadable, "flac: reading frame data")
+		}
+		*pkt = container.Packet{
+			Track: 0,
+			Lost:  d.lost,
+			Packet: codec.Packet{
+				Data:    data,
+				PTS:     d.num.Start(d.cur) - d.origin,
+				Dur:     int64(d.cur.BlockSize),
+				Sync:    true,
+				Discont: d.discont,
+			},
+		}
+		// What follows is discontinuous past damage, a hole or a jump.
+		d.discont = fe.nextOK && (fe.resync != fe.end ||
+			d.num.Start(fe.next) != d.num.Start(d.cur)+int64(d.cur.BlockSize))
+		d.lost = fe.lost
+		d.off, d.cur, d.valid = fe.resync, fe.next, fe.nextOK
+		return nil
 	}
-	*pkt = container.Packet{
-		Track: 0,
-		Packet: codec.Packet{
-			Data: data,
-			PTS:  d.num.Start(d.cur),
-			Dur:  int64(d.cur.BlockSize),
-			Sync: true,
-		},
-	}
-	d.off, d.cur, d.valid = end, next, nextOK
-	return nil
 }
 
 // SeekSample repositions to the frame containing the target sample and
@@ -694,6 +968,10 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 // remainder. The SEEKTABLE provides the starting point when present and
 // trustworthy; otherwise bisection on the frame headers' own position
 // numbers narrows the range.
+//
+// A target a hole took lands on the last frame before the hole, so the
+// pre-roll runs through the hole as a read does. A walk that begins in the
+// hole starts again twice as far back each time, down to the first frame.
 func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	if track != 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("flac: no track %d", track))
@@ -704,8 +982,40 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	if d.empty {
 		return 0, nil // nothing to land on; reads stay EOF
 	}
+	// Frames are numbered from origin and positions from 0.
+	at := int64(math.MaxInt64)
+	if sample <= math.MaxInt64-d.origin {
+		at = sample + d.origin
+	}
+	if start := d.num.Start(d.first); at < start {
+		// In the hole the stream starts with: land at 0, the read owing it.
+		d.off, d.cur, d.valid, d.discont, d.lost = d.firstFrame, d.first, true, true, start-d.origin
+		return 0, nil
+	}
+	// Each start is strictly earlier than the last, so the search ends: at
+	// the first frame at the latest.
+	from, back := at, int64(0)
+	for {
+		off, fi, fe, err := d.locate(from)
+		if err != nil {
+			return 0, err
+		}
+		landed, ok, err := d.walkTo(off, fi, fe, at, from == d.origin)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			return landed - d.origin, nil
+		}
+		back = max(2*back, int64(fi.BlockSize))
+		from = max(d.num.Start(fi)-back, d.origin)
+	}
+}
 
-	off, fi, ok := d.seekTableHint(sample)
+// locate finds the frame a seek to at walks from: the SEEKTABLE's, when it
+// checks, with its confirmed end, else bisection's.
+func (d *Demuxer) locate(at int64) (int64, flac.FrameInfo, *frameEnd, error) {
+	off, fi, ok := d.seekTableHint(at)
 	if ok {
 		// The table is data, not truth: like every other boundary here,
 		// the landing only counts once the pointed-at frame's end is
@@ -713,49 +1023,82 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 		// with it.
 		d.off, d.cur, d.valid = off, fi, true
 		saved := len(d.warnings)
-		end, _, _, err := d.findEnd()
-		if err != nil || end < 0 {
-			if d.w.Err() != nil {
-				return 0, d.w.Err()
-			}
-			d.warnings = d.warnings[:saved]
-			ok = false
+		fe, err := d.findEnd()
+		if err == nil && fe.end >= 0 {
+			return off, fi, &fe, nil
 		}
+		if d.w.Err() != nil {
+			return 0, flac.FrameInfo{}, nil, d.w.Err()
+		}
+		d.warnings = d.warnings[:saved]
 	}
-	if !ok {
-		off, fi, ok = d.bisect(sample)
-	}
+	off, fi, ok = d.bisect(at)
 	if !ok {
 		if d.w.Err() != nil {
-			return 0, d.w.Err()
+			return 0, flac.FrameInfo{}, nil, d.w.Err()
 		}
-		return 0, malformed("cannot relocate any frame for seeking")
+		return 0, flac.FrameInfo{}, nil, malformed("cannot relocate any frame for seeking")
 	}
+	return off, fi, nil, nil
+}
 
-	d.off, d.cur, d.valid = off, fi, true
-	// Walk forward to the frame containing the target; stop on the last
-	// frame for past-the-end targets.
-	for d.num.Start(d.cur)+int64(d.cur.BlockSize) <= sample {
-		d.w.Trim(d.off)
-		end, next, nextOK, err := d.findEnd()
-		if err != nil {
-			return 0, err
+// walkTo walks from the frame at off to the one containing at, stopping on the
+// last frame for past-the-end targets. It steps over holes as a read does and
+// confirms the frame it stops on, so the landing is where the next packet
+// starts. ok is false when the walk began in a hole that took the target, with
+// no frame of its own before it to land on; a first walk, which began where
+// the stream does, lands on the frame after the hole instead. confirmed, when
+// not nil, is the frame at off's end, already found.
+func (d *Demuxer) walkTo(off int64, fi flac.FrameInfo, confirmed *frameEnd, at int64, first bool) (landed int64, ok bool, err error) {
+	d.off, d.cur, d.valid, d.discont, d.lost = off, fi, true, false, 0
+	var prev pending // the last frame the walk confirmed
+	havePrev := false
+	for {
+		var fe frameEnd
+		if confirmed != nil {
+			fe, confirmed = *confirmed, nil
+		} else {
+			d.w.Trim(d.off)
+			if fe, err = d.findEnd(); err != nil {
+				return 0, false, err
+			}
 		}
-		if end < 0 || !nextOK {
-			break
+		if fe.end < 0 && fe.nextOK { // a hole, the frame at d.off in it
+			if d.num.Start(fe.next) <= at {
+				d.off, d.cur = fe.resync, fe.next
+				continue
+			}
+			switch {
+			case havePrev:
+				d.off, d.cur = prev.off, prev.fi
+			case !first:
+				return 0, false, nil
+			default:
+				// The stream begins in this hole: land at its start, the read
+				// owing it.
+				landed := d.num.Start(d.cur)
+				d.lost = fe.lost
+				d.off, d.cur, d.discont = fe.resync, fe.next, true
+				return landed, true, nil
+			}
+			return d.num.Start(d.cur), true, nil
 		}
-		d.off, d.cur = end, next
+		if fe.end < 0 || !fe.nextOK || d.num.Start(fe.next) > at {
+			return d.num.Start(d.cur), true, nil // in this frame, or the gap after it
+		}
+		prev, havePrev = pending{off: d.off, fi: d.cur}, true
+		d.off, d.cur = fe.resync, fe.next
 	}
-	return d.num.Start(d.cur), nil
 }
 
 // seekTableHint resolves the target through the SEEKTABLE, verifying the
 // pointed-at bytes really are a consistent frame header.
 func (d *Demuxer) seekTableHint(sample int64) (int64, flac.FrameInfo, bool) {
+	base := d.tableBase()
 	lo, hi := 0, len(d.seekTable)
 	for lo < hi {
 		mid := (lo + hi) / 2
-		if d.seekTable[mid].sample <= sample {
+		if base+d.seekTable[mid].sample <= sample {
 			lo = mid + 1
 		} else {
 			hi = mid
@@ -771,10 +1114,28 @@ func (d *Demuxer) seekTableHint(sample int64) (int64, flac.FrameInfo, bool) {
 	}
 	hdr := d.w.BytesAt(off, flac.MaxFrameHeaderLen)
 	fi, err := flac.ParseFrameHeader(hdr)
-	if err != nil || !d.consistent(fi) || d.num.Start(fi) > sample {
+	if err != nil || !d.consistent(fi) || d.num.Start(fi) > sample || d.num.Start(fi) < d.origin {
 		return 0, flac.FrameInfo{}, false
 	}
 	return off, fi, true
+}
+
+// tableBase is what the SEEKTABLE's sample numbers count from: the first
+// frame's own number for a table counted from the stream's first frame (a
+// stream-copy cut's, as ffmpeg writes one), which its first point's frame
+// says, else 0.
+func (d *Demuxer) tableBase() int64 {
+	if !d.seekBaseRead {
+		d.seekBaseRead = true
+		if d.origin > 0 && len(d.seekTable) > 0 {
+			pt := d.seekTable[0]
+			fi, err := flac.ParseFrameHeader(d.w.BytesAt(d.firstFrame+pt.off, flac.MaxFrameHeaderLen))
+			if err == nil && d.consistent(fi) && d.num.Start(fi) == d.origin+pt.sample {
+				d.seekBase = d.origin
+			}
+		}
+	}
+	return d.seekBase
 }
 
 // bisect narrows the byte range containing the target sample using frame
@@ -797,7 +1158,9 @@ func (d *Demuxer) bisect(sample int64) (int64, flac.FrameInfo, bool) {
 	for hi-lo > seekWindow {
 		mid := lo + (hi-lo)/2
 		off, fi, ok := d.nextCandidate(mid, hi)
-		if !ok || d.num.Start(fi) > sample {
+		// A frame numbered before the first one is not this stream's, so it
+		// places nothing.
+		if !ok || d.num.Start(fi) > sample || d.num.Start(fi) < d.origin {
 			hi = mid
 			continue
 		}

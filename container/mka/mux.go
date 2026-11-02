@@ -1,6 +1,7 @@
 package mka
 
 import (
+	"bytes"
 	"encoding/binary"
 	"io"
 
@@ -135,6 +136,13 @@ type Muxer struct {
 	// trailer's DiscardPadding rather than its own.
 	pending     container.Packet
 	havePending bool
+
+	// number numbers FLAC frames from 0, as RFC 9639 counts a stream's.
+	number *flac.Numberer
+	// md5Off is where a FLAC CodecPrivate's MD5 sits, -1 for none, and
+	// clearMD5 says End is to zero it (ClearMD5).
+	md5Off   int64
+	clearMD5 bool
 }
 
 // cuePoint is one cluster's timestamp and its position relative to the
@@ -153,6 +161,7 @@ func NewMuxer(w io.Writer, opts *MuxerOptions) *Muxer {
 		durOff:     -1,
 		cueSeekOff: -1,
 		cueStride:  1,
+		md5Off:     -1,
 	}
 	if opts != nil {
 		m.opts = *opts
@@ -191,6 +200,13 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	if err != nil {
 		return err
 	}
+	if t.Codec == codec.FLAC {
+		si, err := flac.ParseStreamInfo(t.CodecConfig)
+		if err != nil {
+			return err
+		}
+		m.number = flac.NewNumberer(si, 0, 0)
+	}
 	m.codecID = t.Codec
 	m.rate = t.Fmt.Rate
 	m.delay = t.Delay
@@ -205,8 +221,17 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 
 	header := m.ebmlHeader()
 	header = m.appendSegmentHeader(header, t, codecID, priv)
+	if t.Codec == codec.FLAC {
+		// "fLaC", the block header, then STREAMINFO, whose MD5 is 18 in.
+		m.md5Off = m.off + int64(bytes.Index(header, priv)) + 8 + 18
+	}
 	return m.write(header)
 }
+
+// ClearMD5 has End state no MD5 in a FLAC track's CodecPrivate ("not
+// computed"), for a run whose audio no longer matches the signature it was
+// handed. It reaches the file where End can patch the header.
+func (m *Muxer) ClearMD5() { m.clearMD5 = true }
 
 // WritePacket appends one packet as a block, with its own trim when it states
 // one. The newest packet is held back one step (havePending) so End can give
@@ -235,12 +260,19 @@ func (m *Muxer) WritePacket(pkt container.Packet) error {
 			m.rawSamples += m.pending.Dur - min(pad, m.pending.Dur)
 		}
 	}
+	data := pkt.Data
+	if m.number != nil {
+		var err error
+		if data, _, err = m.number.Number(pkt.Data); err != nil {
+			return err
+		}
+	}
 	// Copy the payload: the demuxer/engine may reuse pkt.Data after the call,
 	// and this packet is held until the next WritePacket or End.
 	m.pending = container.Packet{
 		Padding: pkt.Padding,
 		Packet: codec.Packet{
-			Data: append([]byte(nil), pkt.Data...),
+			Data: append([]byte(nil), data...),
 			PTS:  pkt.PTS,
 			Dur:  pkt.Dur,
 		},
@@ -300,6 +332,11 @@ func (m *Muxer) finish(trailer codec.Trailer) error {
 			if err := m.patch.At(m.durOff, appendFloat(nil, idDuration, durationTicks(n, m.rate))); err != nil {
 				return err
 			}
+		}
+	}
+	if m.clearMD5 && m.md5Off >= 0 {
+		if err := m.patch.At(m.md5Off, make([]byte, 16)); err != nil {
+			return err
 		}
 	}
 	if m.cueSeekOff >= 0 {

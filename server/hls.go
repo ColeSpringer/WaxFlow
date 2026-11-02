@@ -72,13 +72,13 @@ type memberSource struct {
 	// below.
 	From int64
 	To   int64
-	// SrcSamples is the source's own pre-narrow total, measured whenever
-	// this member can be sliced (a timeline member, or a spanned single
-	// source). The worker re-anchors a freshly opened member's advisory
-	// declaration to it before slicing, so the run's bound check runs
-	// against the same total the mint and the plan validated the window on;
-	// see waxflow.SliceMeasured.
-	SrcSamples int64
+	// SrcTrack is the source's own pre-narrow track, measured whenever this
+	// member can be sliced (a timeline member, or a spanned single source).
+	// The worker re-anchors a freshly opened member's advisory declaration to
+	// it before slicing, so the run's bound check runs against the same total
+	// the mint and the plan validated the window on; see
+	// waxflow.SliceMeasured.
+	SrcTrack container.Track
 	// Track is the probed, measured track the plan was computed from (for a
 	// windowed member, already narrowed through SpanTrack). A timeline hands
 	// it back to Concat, so the run's members are declared by exactly what
@@ -190,7 +190,7 @@ func (s *Server) prepareHLS(r *http.Request) (*hlsRequest, error) {
 		// without the container floor the same source answers one gain on
 		// /stream and another on /hls/master.m3u8 whenever the tag library
 		// cannot read the file (or none is wired at all).
-		m = meta.WithContainerTags(s.readMeta(r.Context(), req.srcs[0], false), s.containerTagsFor(req.srcs[0]))
+		m = meta.WithContainerTags(s.readMeta(r.Context(), req.srcs[0], false), s.containerTagsFor(r.Context(), req.srcs[0]))
 		rmx = req.srcs[0]
 	}
 	if req.variantPlan, err = s.planHLSVariant(desc, memberTracks(req.members), m, rmx); err != nil {
@@ -319,7 +319,7 @@ func (s *Server) resolveMember(ctx context.Context, i int, ref timeline.Member,
 		return memberSource{}, nil, waxerr.New(waxerr.CodeSourceChanged,
 			"the source changed since this URL was minted; request a fresh one")
 	}
-	track, err := s.trackFor(f, exact)
+	track, err := s.trackFor(ctx, f, exact)
 	if err != nil {
 		return memberSource{}, nil, err
 	}
@@ -331,7 +331,7 @@ func (s *Server) resolveMember(ctx context.Context, i int, ref timeline.Member,
 	// whenever the first call already measured, and the cheap measure below is
 	// what makes it a walk rather than a decode.
 	if track.SamplesAdvisory {
-		if track, err = s.trackFor(f, true); err != nil {
+		if track, err = s.trackFor(ctx, f, true); err != nil {
 			return memberSource{}, nil, err
 		}
 	}
@@ -339,7 +339,7 @@ func (s *Server) resolveMember(ctx context.Context, i int, ref timeline.Member,
 	// opened member's advisory declaration to the measure the window was
 	// validated against (waxflow.SliceMeasured). Whenever a member is sliced,
 	// the exact branch above ran, so this is measured in every consulted case.
-	srcSamples := track.Samples
+	srcTrack := track
 	// A timeline member's own stored window narrows its track through the
 	// same funnel the mint used (narrowMemberTrack), so the plan reads the
 	// window's length and the two refuse identically. The re-check against
@@ -356,7 +356,7 @@ func (s *Server) resolveMember(ctx context.Context, i int, ref timeline.Member,
 	}
 	ok = true
 	return memberSource{Ref: ref.Src, ID: f.ID, Ext: f.Ext,
-		From: ref.From, To: ref.To, SrcSamples: srcSamples, Track: track}, f, nil
+		From: ref.From, To: ref.To, SrcTrack: srcTrack, Track: track}, f, nil
 }
 
 // memberTracks are the members' tracks in order: what a variant or a timeline
@@ -425,13 +425,13 @@ func hlsIdentity(desc hls.Descriptor, members []memberSource) string {
 // opened media offers (see waxflow.MeasureLength). It returns the whole track,
 // because a walk settles the trims beside the length and the memo this fills
 // is what the copy rungs plan from (see container.Track.MidPadding).
-func (s *Server) measureSamples(src *source.File) (container.Track, error) {
+func (s *Server) measureSamples(ctx context.Context, src *source.File) (container.Track, error) {
 	med, err := s.eng.OpenStream(src, src.Ext)
 	if err != nil {
 		return container.Track{}, err
 	}
 	defer med.Close()
-	return waxflow.MeasureLength(med)
+	return waxflow.MeasureLength(ctx, med)
 }
 
 // planHLSVariant maps one variant descriptor onto engine options and its
@@ -797,7 +797,7 @@ func (s *Server) handleHLSMaster(w http.ResponseWriter, r *http.Request) {
 	var m *meta.Info
 	var rmx *source.File
 	if desc.Tl == "" {
-		m = meta.WithContainerTags(s.readMeta(r.Context(), req.srcs[0], false), s.containerTagsFor(req.srcs[0]))
+		m = meta.WithContainerTags(s.readMeta(r.Context(), req.srcs[0], false), s.containerTagsFor(r.Context(), req.srcs[0]))
 		rmx = req.srcs[0]
 	}
 	var variants []m3u8.MasterVariant
@@ -1230,7 +1230,7 @@ func (s *Server) openSlicedMember(ctx context.Context, m memberSource, sp span) 
 	}
 	// Against the measured total the mint and plan validated the window with,
 	// so a window edge in an advisory gap opens here too.
-	return waxflow.SliceMeasured(med, m.SrcSamples, sp.from, sp.end())
+	return waxflow.SliceMeasured(med, m.SrcTrack, sp.from, sp.end())
 }
 
 // openMember resolves one source, enforces the identity the plan was made

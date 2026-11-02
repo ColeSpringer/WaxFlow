@@ -230,7 +230,7 @@ func (s *Server) handleTranscode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer req.Close()
-	if err := s.planTranscode(req); err != nil {
+	if err := s.planTranscode(r.Context(), req); err != nil {
 		s.writeError(w, err)
 		return
 	}

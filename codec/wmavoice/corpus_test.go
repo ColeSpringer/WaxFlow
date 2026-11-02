@@ -779,9 +779,10 @@ func correlation(src, got []float32, lag int) float64 {
 // silent difference in a file nobody re-encoded. Windows only, because Windows
 // is the only place that can write this format at all.
 //
-// MediaTranscoder renegotiates a format it cannot honour rather than refusing
-// it, so the shape it landed on is checked against the cell before anything
-// else is: the rate, nBlockAlign and the flags word together name the format.
+// The script refuses a format the encoder does not offer, but the shape it
+// landed on is still checked against the cell before anything else is: the
+// rate, nBlockAlign and the flags word together name the format, and a drifted
+// encoder could put a different one behind the same rate and bit rate.
 func TestMicrosoftCorpus(t *testing.T) {
 	if !testutil.HaveWMFEnc(t) {
 		t.Skip("Windows' WMA encoder is not available here")
@@ -817,10 +818,10 @@ func TestMicrosoftCorpus(t *testing.T) {
 			if !testutil.HaveFFmpeg(t) {
 				return
 			}
-			// The stale runs are positions in the committed bytes. The encoder
-			// is deterministic, so a regenerated cell has the same ones; a
-			// re-encode that moved them fails here, and that is the signal to
-			// measure the new file rather than to widen anything.
+			// The stale runs are positions in the committed bytes, which a
+			// regenerated cell can move (MANIFEST.md names the two Windows now
+			// encodes differently). One that moved fails here, and that is the
+			// signal to measure the new file rather than to widen anything.
 			ref := testutil.FFmpegDecodeF32NoSIMD(t, wma)
 			maxAbs, rms, n := compare(got, ref, skipRuns(t, c.name))
 			wantMax, wantRMS := gateCleanMax, gateCleanRMS

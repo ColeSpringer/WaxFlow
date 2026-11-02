@@ -379,7 +379,7 @@ func (s *Server) mintTimelineFrom(ctx context.Context, srcs []*source.File, span
 		// The exact length is what a timeline needs and what makes this
 		// possibly slow: a member whose headers cannot declare one is
 		// decoded to its end here, once, and memoized by identity.
-		track, err := s.trackFor(f, true)
+		track, err := s.trackFor(ctx, f, true)
 		if err != nil {
 			return nil, err
 		}

@@ -103,7 +103,8 @@ func (e *Engine) CutInitSegment(plan *CutSegmentPlan) ([]byte, error) {
 // CutSegments emits numbered CMAF media segments from a span of src's own
 // packets: the run half of the segmented cut rung, and the segmented sibling of
 // CutStream. No decode, no DSP, no encode, so no generation loss; each segment
-// holds the kept access units byte for byte.
+// holds the kept access units byte for byte. A source that runs out early fails
+// the run, as Cut describes.
 //
 // opts, spans, grid, and samples must be the pair PlanCutSegments accepted, for
 // the reason CutStream gives: a caller reaching this directly has chosen the rung,
@@ -159,7 +160,7 @@ func (e *Engine) CutSegments(ctx context.Context, src container.Source, hint str
 	}
 	e.log.Debug("segmented cut started", "container", info.Container, "codec", track.Codec,
 		"out", opts.Format, "segment", segOpts.StartSegment, "segSamples", segOpts.SegmentSamples)
-	res, err := e.segmentWalk(ctx, cutDemux, rp.Track, cutTrack.ID, segOpts, emit)
+	res, err := e.segmentWalk(ctx, cutDemux, rp.Track, cutTrack.ID, segOpts, grid, emit)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +207,7 @@ func cutSeekable(demux container.Demuxer, track container.Track, opts TranscodeO
 			"waxflow: this source trims a whole packet inside its run, so a seek into it is ambiguous; transcode it")
 	}
 	return &cutSeekDemuxer{
-		cutDemuxer: &cutDemuxer{Demuxer: demux, cut: res.track, track: track.ID, windows: res.windows, trims: res.trims},
+		cutDemuxer: &cutDemuxer{Demuxer: demux, cut: res.track, track: track.ID, windows: res.windows, lastEnd: res.lastEnd, blind: res.blind, trims: res.trims, damage: container.DamageOf(demux)},
 		seek:       sk,
 	}, nil
 }

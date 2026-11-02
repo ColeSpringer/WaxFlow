@@ -4,7 +4,37 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/waxerr"
 )
+
+// TestCutSeekViewHoldsItsEnd: the seekable view CutSegments walks carries the
+// held end and the blind flag, so a source that runs out early fails there with
+// the same codes, after a seek as from the top.
+func TestCutSeekViewHoldsItsEnd(t *testing.T) {
+	exact := aacTrack(0, 96000)
+	exact.SamplesExact = true
+	for _, tc := range []struct {
+		name  string
+		track container.Track
+		code  waxerr.Code
+	}{
+		{"a declared total", exact, waxerr.CodeMalformedInput},
+		{"no length at all", aacTrack(0, -1), waxerr.CodeInvalidRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Ten packets: the audio stops at 10240, inside [0, 20480).
+			view, err := cutSeekable(&seekableGridDemuxer{gridDemuxer{n: 10, dur: 1024}}, tc.track,
+				TranscodeOptions{}, []Span{{0, 20480}}, 1024)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := view.(container.Seeker).SeekSample(tc.track.ID, 4096); err != nil {
+				t.Fatal(err)
+			}
+			drainCut(t, view, tc.code, 0, "end at 10240", "ending at 20480")
+		})
+	}
+}
 
 // seekableGridDemuxer is gridDemuxer plus SeekSample: it lands on the packet
 // boundary at or before the target, exactly as a real container's seek does for

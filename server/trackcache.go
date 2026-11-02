@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"math"
 	"sync"
 
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/source"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // trackCacheCap bounds the track memo. An entry is one container.Track: its
@@ -168,7 +170,24 @@ func (c *trackCache) evictOldestLocked() {
 //
 // The memo is in-memory only: a binary upgrade re-probes rather than trusting a
 // memo written by a different decoder revision.
-func (s *Server) trackFor(src *source.File, exact bool) (container.Track, error) {
+func (s *Server) trackFor(ctx context.Context, src *source.File, exact bool) (container.Track, error) {
+	return untilOwnCancel(ctx, func() (container.Track, error) { return s.trackOnce(ctx, src, exact) })
+}
+
+// untilOwnCancel runs try until it ends other than canceled while ctx is live.
+// One flight serves every caller of a source on the first one's context, so a
+// measure stopped because that caller left is the rest's to run again.
+func untilOwnCancel[T any](ctx context.Context, try func() (T, error)) (T, error) {
+	for {
+		v, err := try()
+		if waxerr.CodeOf(err) != waxerr.CodeCanceled || ctx.Err() != nil {
+			return v, err
+		}
+	}
+}
+
+// trackOnce is one try of trackFor.
+func (s *Server) trackOnce(ctx context.Context, src *source.File, exact bool) (container.Track, error) {
 	key := identityString(src.Ref, src.ID)
 	if t, ok := s.trackCache.get(key); ok && (!exact || t.SamplesExact) {
 		return t, nil
@@ -213,7 +232,7 @@ func (s *Server) trackFor(src *source.File, exact bool) (container.Track, error)
 			// and an exact caller that got there first leaves a measured one
 			// behind for everybody. What this avoids is making that the
 			// deterministic answer for every advisory source.
-			measured, merr := s.measureSamples(src)
+			measured, merr := s.measureSamples(ctx, src)
 			if merr != nil {
 				return container.Track{}, merr
 			}
@@ -233,8 +252,8 @@ func (s *Server) trackFor(src *source.File, exact bool) (container.Track, error)
 			// lets a later exact caller reuse this entry, what stops a measured
 			// track being measured again, and what lets a timeline accept an
 			// ASF or Matroska member the library otherwise refuses.
-			track.Samples, track.SamplesExact, track.SamplesAdvisory =
-				measured.Samples, measured.SamplesExact, measured.SamplesAdvisory
+			track.Samples, track.SamplesExact, track.SamplesAdvisory, track.SamplesCounted =
+				measured.Samples, measured.SamplesExact, measured.SamplesAdvisory, measured.SamplesCounted
 			track.Padding, track.MidPadding, track.MidTrims = measured.Padding, measured.MidPadding, measured.MidTrims
 		}
 		s.trackCache.put(key, track, info.Tags)
@@ -264,12 +283,12 @@ func (s *Server) trackIsExact(src *source.File) bool {
 // two facts keep coming from one probe. The advisory form is asked for because
 // this needs no length at all; an exact caller has already populated the entry
 // in every case that wanted one.
-func (s *Server) containerTagsFor(src *source.File) map[string][]string {
+func (s *Server) containerTagsFor(ctx context.Context, src *source.File) map[string][]string {
 	key := identityString(src.Ref, src.ID)
 	if _, tags, ok := s.trackCache.getWithTags(key); ok {
 		return tags
 	}
-	if _, err := s.trackFor(src, false); err != nil {
+	if _, err := s.trackFor(ctx, src, false); err != nil {
 		return nil
 	}
 	_, tags, _ := s.trackCache.getWithTags(key)

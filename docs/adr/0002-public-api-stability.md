@@ -355,3 +355,49 @@ It is a behavioural break taken for availability: one unplugged drive kept
 the daemon from starting, and one bad path made a reload refuse every other
 change in it. A caller that relied on the refusal reads `Status` or
 `Unmounted` instead.
+
+## Amendment (2026-11-02): measured lengths say how they were measured, and holes are counted and filled
+
+Three signatures changed. `waxflow.MeasureLength(ctx, med)` takes a context,
+which its decode count (WMA Pro, Voice and Lossless in ASF) checks between
+chunks. `waxflow.MeasuredMedia(med, measured)` and
+`waxflow.SliceMeasured(med, measured, from, to)` take the track
+`MeasureLength` returned in place of a bare sample count, a negative
+`Samples` still meaning "leave the declaration alone", so the measure's
+route travels with its length.
+
+New fields:
+- `container.Track.SamplesCounted` marks a length `MeasureLength` counted by
+  decoding. A span over such a source that delivers less fails `internal`;
+  one over a length the file stated fails `malformed-input`. The mark rides
+  in `Info`, which every wrapper forwards, so no walk or type check decides
+  it.
+- `container.Packet.Lost` is the samples damage took before a packet, which
+  `format.Media` delivers as silence first, so positions after a hole stay
+  where the stream puts them. flacn and the Ogg FLAC mapping set it, for a
+  hole after damage and for frame numbers that skip where the stream could
+  hold the frames.
+- `format.Info.Damage` counts the damage met so far, past the `Warnings`
+  list's cap and de-duplication.
+- `mp4.SegmenterOptions.Block` is the FLAC block size a run restarted past
+  segment 0 numbers its frames by.
+
+New interfaces and methods: `container.Damaged` (`DamageCount`), which the
+ten demuxers that cap their warning lists implement, with
+`container.DamageOf` answering for any demuxer. `ClearMD5` on the native
+FLAC, Ogg and Matroska muxers drops the STREAMINFO MD5 at End, for a run
+whose audio no longer matches the signature it was handed.
+
+New `codec/flac` exports: `Numberer` (`NewNumberer`, `Number`) and
+`RenumberFrame` number frames from where a run starts, the way every FLAC
+writer now numbers what it writes; `FrameLen` finds a frame's end by its own
+parse; `SilentFrame` builds the frames a copy carries a hole in; `Settle`
+(`Settled`), `RestateStreamInfo` and `ClearMD5` settle a reader's length and
+STREAMINFO against its frames; `MaxSamplesIn` bounds what a run of bytes can
+hold.
+
+Behaviour that changed with them: an open span (`Slice` with `ToEnd`) is held
+to an exact length as a bounded one is, unless the source reported damage on
+the way; a FLAC copy carries its source's MD5 only into a header it patches at
+End and only while it fills no hole, so a streamed or segmented copy states
+none.

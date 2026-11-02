@@ -18,7 +18,10 @@ var _ container.Muxer = (*Muxer)(nil)
 // output of it regenerates when this bumps. Bump it for a change to what
 // gets written around unchanged encoded packets, which is the one kind of
 // change no encoder or DSP version can notice.
-const MuxerVersion = "flacn-mux-1"
+//
+// flacn-mux-2: frames are numbered from 0 as they are written, so a copy of a
+// stream that starts past frame 0 changes bytes.
+const MuxerVersion = "flacn-mux-2"
 
 // seekInterval is the target spacing between SEEKTABLE points in
 // seconds, matching the reference encoder's default table.
@@ -47,8 +50,11 @@ type MuxerOptions struct {
 	// MD5 supplies the unencoded-PCM signature for the STREAMINFO
 	// back-patch at End, typically the encoder's MD5 method (valid once
 	// the engine has called Finish, which precedes End). When nil the
-	// initial STREAMINFO's signature stands; a packet-for-packet remux
-	// wants exactly that, since identical audio keeps its signature.
+	// track's STREAMINFO signature stands; a packet-for-packet remux
+	// wants exactly that, since identical audio keeps its signature. A
+	// copy of a stream that starts past frame 0 hands a track whose
+	// signature flac.ClearMD5 cleared, which says "not computed": the one
+	// it inherits covers the stream it was cut from.
 	MD5 func() [16]byte
 	// Tags are written as a VORBIS_COMMENT block between STREAMINFO and
 	// the audio. Vorbis comments are the canonical vocabulary already, so
@@ -79,9 +85,12 @@ type Muxer struct {
 	target   int64 // next seek point's sample threshold
 	filled   int
 
+	number *flac.Numberer // numbers the frames from 0
+
 	minFrame, maxFrame int
 	samples            int64
 	began, ended       bool
+	clearMD5           bool // ClearMD5 was called
 }
 
 // NewMuxer returns a FLAC muxer writing to w.
@@ -139,6 +148,7 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	}
 	m.si = si
 	m.wroteTotal = si.Samples
+	m.number = flac.NewNumberer(si, 0, 0)
 
 	// The seek table is sized from the best length in hand, which is not the
 	// same question as what the header may *declare*. A remux of a source whose
@@ -207,6 +217,12 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 
 // WritePacket appends one frame and accounts for the header patch and
 // the seek table.
+//
+// Frames are numbered from 0 as they are written, in the stream's own blocking
+// strategy, as RFC 9639 section 9.1.5 numbers a stream's. A copy of a stream
+// that starts past frame 0 (what `ffmpeg -ss X -c copy` writes) would keep its
+// source's numbers otherwise, which the seek table, counted from 0, would
+// contradict. A frame already numbered so is written as it came.
 func (m *Muxer) WritePacket(pkt container.Packet) error {
 	if !m.began || m.ended {
 		return waxerr.New(waxerr.CodeInternal, "flac: WritePacket outside Begin/End")
@@ -217,14 +233,18 @@ func (m *Muxer) WritePacket(pkt container.Packet) error {
 	if len(pkt.Data) == 0 || pkt.Dur <= 0 || pkt.Dur > flac.MaxBlockSize {
 		return waxerr.New(waxerr.CodeInternal, fmt.Sprintf("flac: packet of %d bytes, %d samples", len(pkt.Data), pkt.Dur))
 	}
-	if m.points != nil && pkt.PTS >= m.target && len(m.points) < cap(m.points) {
-		m.points = append(m.points, seekRec{sample: pkt.PTS, off: m.off - m.firstFrame, dur: pkt.Dur})
-		m.target = (pkt.PTS/m.interval + 1) * m.interval
-	}
-	if err := m.write(pkt.Data); err != nil {
+	data, pos, err := m.number.Number(pkt.Data)
+	if err != nil {
 		return err
 	}
-	if n := len(pkt.Data); n < 1<<24 {
+	if m.points != nil && pos >= m.target && len(m.points) < cap(m.points) {
+		m.points = append(m.points, seekRec{sample: pos, off: m.off - m.firstFrame, dur: pkt.Dur})
+		m.target = (pos/m.interval + 1) * m.interval
+	}
+	if err := m.write(data); err != nil {
+		return err
+	}
+	if n := len(data); n < 1<<24 {
 		if m.minFrame == 0 || n < m.minFrame {
 			m.minFrame = n
 		}
@@ -264,7 +284,10 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 	if m.samples < 1<<36 {
 		si.Samples = m.samples
 	}
-	if m.opts.MD5 != nil {
+	switch {
+	case m.clearMD5:
+		si.MD5 = [16]byte{}
+	case m.opts.MD5 != nil:
 		si.MD5 = m.opts.MD5()
 	}
 	body, err := si.MarshalBinary()
@@ -292,6 +315,11 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 	}
 	return m.patch.Resume(m.off)
 }
+
+// ClearMD5 has End state no MD5 ("not computed"), for a run whose audio no
+// longer matches the signature it was handed. It reaches the file where End
+// can patch STREAMINFO.
+func (m *Muxer) ClearMD5() { m.clearMD5 = true }
 
 func (m *Muxer) write(parts ...[]byte) error {
 	for _, p := range parts {

@@ -2,6 +2,7 @@ package waxflow
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"math"
 	"slices"
@@ -289,7 +290,7 @@ func TestCutTrackResolvesATailInsideTheFinalPacket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := copyPackets(context.Background(), view, 0, false, func(container.Packet) error { return nil })
+	run, err := copyPackets(context.Background(), view, 0, false, nil, func(container.Packet) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -673,11 +674,10 @@ func TestCutCodecsIsAnAllowlist(t *testing.T) {
 			"(TestCutOfHEAACMatchesFullDecode measures the served case)", 2048},
 		{codec.MP3, false, "the bit reservoir: a frame's main data may begin inside earlier frames, " +
 			"and an unsatisfied reference decodes to silence rather than erroring", 1152},
-		{codec.FLAC, false, "a multi-span cut leaves a gap in the frame ordinals, and the boundary " +
-			"scan then glues the post-gap frames into one packet that decodes to its first frame " +
-			"alone, ending in a clean EOF with the rest of the audio silently gone " +
-			"(TestCutFLACMultiSpanBreaks measures it); the STREAMINFO MD5 goes stale with no way to " +
-			"say unknown; and the PTS rides the ordinal rather than the container. A contiguous cut " +
+		{codec.FLAC, false, "a multi-span cut leaves a gap in the frame ordinals, which reads as a " +
+			"hole: the cut-out span comes back as silence, with a warning " +
+			"(TestCutFLACMultiSpanReadsAsAHole measures it); the STREAMINFO MD5 goes stale; " +
+			"and the PTS rides the ordinal rather than the container. A contiguous cut " +
 			"does re-read clean, so the reason is the gap and not the cut. Moot regardless: FLAC is " +
 			"lossless, so rung 3 costs no generation and EncoderOptions.FirstFrame already numbers a " +
 			"mid-stream slice correctly", 4096},
@@ -908,6 +908,141 @@ func TestCutStraddleErrorsLoudly(t *testing.T) {
 	}
 }
 
+// TestCutViewHoldsItsWindowsToTheSource: packets that run out short of the end
+// of the audio a held cut asked for mean the source holds less than its headers
+// declare, refused. A bounded cut is always held, and an open one only when its
+// length is exact. A cut held to nothing ends where the packets do, and an open
+// window keeps whatever the source delivers past its plan.
+func TestCutViewHoldsItsWindowsToTheSource(t *testing.T) {
+	exact := aacTrack(0, 96000)
+	exact.SamplesExact = true
+	unverified := aacTrack(0, 96000)
+	for _, tc := range []struct {
+		name    string
+		track   container.Track
+		spans   []Span
+		packets int         // 1024-sample packets the source holds
+		code    waxerr.Code // empty for a clean io.EOF
+		missed  int64       // the window end the error names
+	}{
+		{"a bounded cut", exact, []Span{{0, 20480}}, 10, waxerr.CodeMalformedInput, 20480},
+		// Packets that stop inside the first of two bounded windows miss the
+		// end the cut asked for, the last window's.
+		{"a two-span bounded cut ending inside its first window", exact, []Span{{0, 20480}, {40960, 61440}}, 10, waxerr.CodeMalformedInput, 61440},
+		// An open cut over an exact track is held to the end of its audio.
+		{"a two-span open cut over an exact track", exact, []Span{{0, 20480}, {40960, ToEnd}}, 10, waxerr.CodeMalformedInput, 96000},
+		{"a two-span open cut over an unverified track", unverified, []Span{{0, 20480}, {40960, ToEnd}}, 10, "", 0},
+		{"an open span over an exact track", exact, []Span{{0, ToEnd}}, 10, waxerr.CodeMalformedInput, 96000},
+		{"an open span over an unverified track", unverified, []Span{{0, ToEnd}}, 10, "", 0},
+		{"an open span whose source delivers past its plan", exact, []Span{{0, ToEnd}}, 100, "", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			view, err := Cut(&gridDemuxer{n: tc.packets, dur: 1024}, tc.track, TranscodeOptions{}, tc.spans, 1024)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Every packet sits in a kept window, so a clean end keeps them all.
+			drainCut(t, view, tc.code, tc.packets,
+				fmt.Sprintf("end at %d", int64(tc.packets)*1024), fmt.Sprintf("ending at %d", tc.missed))
+		})
+	}
+}
+
+// TestCutViewHoldsABoundedCutToItsRequest: a bounded cut is held to the end it
+// asked for, not to the source's declared total, and a source that runs out
+// before it refuses with the slice's codes: invalid request when no stated
+// total checked the cut, malformed input otherwise.
+func TestCutViewHoldsABoundedCutToItsRequest(t *testing.T) {
+	advisory := aacTrack(0, 95856)
+	advisory.SamplesAdvisory = true
+	for _, tc := range []struct {
+		name  string
+		track container.Track
+		to    int64
+		code  waxerr.Code // empty for a clean io.EOF
+		cause string
+	}{
+		{"a request inside an advisory total's audio", advisory, 95500, "", ""},
+		{"a request inside an unverified total's audio", aacTrack(0, 95856), 95500, "", ""},
+		{"an overrun of a source with no length", aacTrack(0, -1), 99000,
+			waxerr.CodeInvalidRequest, "never checked against a measured length"},
+		{"an overrun of an advisory total", advisory, 95856,
+			waxerr.CodeInvalidRequest, "never checked against a measured length"},
+		{"an overrun of a declared total", aacTrack(0, 100000), 99000,
+			waxerr.CodeMalformedInput, "holds less audio than its headers declare"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// 93 whole packets and a short one: the audio ends at 95832.
+			view, err := Cut(&shortTailDemuxer{n: 94, dur: 1024, last: 600}, tc.track, TranscodeOptions{},
+				[]Span{{0, tc.to}}, 1024)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A clean end keeps all 94: the request reaches into the last.
+			drainCut(t, view, tc.code, 94, "end at 95832", fmt.Sprintf("ending at %d", tc.to), tc.cause)
+		})
+	}
+}
+
+// TestCutViewHoldsAnOpenCutToTheEndOfItsAudio: an open cut over an exact track
+// is held to the end of its audio, not to the trailing padding a reader drops
+// anyway, so packets that carry every sample end cleanly.
+func TestCutViewHoldsAnOpenCutToTheEndOfItsAudio(t *testing.T) {
+	// The audio ends at raw 51105 (delay 1105, 50000 samples); the padding
+	// would take the planned end to 51200.
+	track := aacTrack(1105, 50000)
+	track.Padding, track.SamplesExact = 95, true
+	for _, tc := range []struct {
+		name string
+		last int64 // the final packet after 49 whole ones
+		code waxerr.Code
+	}{
+		{"packets lacking only their trailing padding", 929, ""},
+		{"packets one sample short of the audio", 928, waxerr.CodeMalformedInput},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			view, err := Cut(&shortTailDemuxer{n: 50, dur: 1024, last: tc.last}, track, TranscodeOptions{},
+				[]Span{{0, ToEnd}}, 1024)
+			if err != nil {
+				t.Fatal(err)
+			}
+			drainCut(t, view, tc.code, 50, "end at 51104", "ending at 51105")
+		})
+	}
+}
+
+// drainCut reads view to its end and checks how it ended: a clean io.EOF that
+// kept kept packets when code is empty, else an error of that code saying each
+// of says.
+func drainCut(t *testing.T, view container.Demuxer, code waxerr.Code, kept int, says ...string) {
+	t.Helper()
+	var pkt container.Packet
+	var err error
+	n := 0
+	for err == nil {
+		if err = view.ReadPacket(&pkt); err == nil {
+			n++
+		}
+	}
+	if code == "" {
+		if err != io.EOF {
+			t.Fatalf("error = %v, want a clean io.EOF", err)
+		}
+		if n != kept {
+			t.Errorf("kept %d packets, want %d", n, kept)
+		}
+		return
+	}
+	if got := waxerr.CodeOf(err); got != code {
+		t.Fatalf("error = %v (code %v), want %v", err, got, code)
+	}
+	for _, want := range says {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to say %q", err, want)
+		}
+	}
+}
+
 // gridDemuxer emits n packets of dur samples each, whose payload is the packet's
 // own ordinal so a test can say which ones survived a cut.
 type gridDemuxer struct {
@@ -1074,6 +1209,74 @@ func TestCutTrackJoinsAdjacentSpansWithoutAHole(t *testing.T) {
 					t.Errorf("Landed[%d].From = %d but Landed[%d].To = %d: the seam has a hole",
 						i, landed[i].From, i-1, landed[i-1].To)
 				}
+			}
+		})
+	}
+}
+
+// holeyDemuxer is gridDemuxer with lost samples before packet at, the way a
+// demuxer that measures a hole reports one (container.Packet.Lost).
+type holeyDemuxer struct {
+	gridDemuxer
+	at   int
+	lost int64
+}
+
+func (d *holeyDemuxer) ReadPacket(pkt *container.Packet) error {
+	if d.i == d.at {
+		d.pos += d.lost
+	}
+	if err := d.gridDemuxer.ReadPacket(pkt); err != nil {
+		return err
+	}
+	if pkt.Data[0] == byte(d.at) {
+		pkt.Lost = d.lost
+	}
+	return nil
+}
+
+// TestCutViewPlacesAHoleOnItsTimeline: a hole is source time, so the windows
+// after one in a gap stay where the source puts them and it goes with the gap.
+// One the windows keep any of is refused: silence there would move the trims
+// the plan placed.
+func TestCutViewPlacesAHoleOnItsTimeline(t *testing.T) {
+	// Packets of 1024; 2048 lost before packet 5, which so starts at 7168.
+	for _, tc := range []struct {
+		name  string
+		spans []Span
+		kept  []byte // the packets the cut keeps, by ordinal; nil for a refusal
+	}{
+		{"a hole in the gap", []Span{{0, 4096}, {8192, 12288}}, []byte{0, 1, 2, 3, 6, 7, 8, 9}},
+		{"a hole in a window", []Span{{4096, 10240}}, nil},
+		{"a hole across a window's start", []Span{{6144, 10240}}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := &holeyDemuxer{gridDemuxer{n: 14, dur: 1024}, 5, 2048}
+			view, err := Cut(src, aacTrack(0, 16384), TranscodeOptions{}, tc.spans, 1024)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var pkt container.Packet
+			var kept []byte
+			out := int64(0)
+			for {
+				if err = view.ReadPacket(&pkt); err != nil {
+					break
+				}
+				if pkt.PTS != out || pkt.Lost != 0 {
+					t.Errorf("packet %d at %d owing %d, want %d owing nothing", pkt.Data[0], pkt.PTS, pkt.Lost, out)
+				}
+				out = pkt.PTS + pkt.Dur
+				kept = append(kept, pkt.Data[0])
+			}
+			if tc.kept == nil {
+				if waxerr.CodeOf(err) != waxerr.CodeMalformedInput {
+					t.Errorf("kept %v and ended %v, want a refusal of the hole it keeps", kept, err)
+				}
+				return
+			}
+			if err != io.EOF || !slices.Equal(kept, tc.kept) {
+				t.Errorf("kept %v (%v), want %v", kept, err, tc.kept)
 			}
 		})
 	}

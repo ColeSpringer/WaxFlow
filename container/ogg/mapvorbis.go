@@ -54,7 +54,7 @@ func (m *vorbisMapping) isAudio(pkt []byte) bool {
 	return len(pkt) > 0 && pkt[0]&1 == 0
 }
 
-func (m *vorbisMapping) finalizeTrack(lastGranule func() int64, _ reporter) (container.Track, error) {
+func (m *vorbisMapping) finalizeTrack(first firstPage, lastGranule func() int64, _ reporter) (container.Track, error) {
 	if !m.haveCfg {
 		return container.Track{}, malformed("vorbis stream missing setup header")
 	}
@@ -64,10 +64,13 @@ func (m *vorbisMapping) finalizeTrack(lastGranule func() int64, _ reporter) (con
 	}
 	// A Vorbis page granule is the cumulative decoded output through that
 	// page's last completed packet (the priming packet emits nothing and
-	// advances it by 0), so the final granule is the playable length.
+	// advances it by 0), so the final granule is the decoded length. A stream
+	// starting before time zero discards the output before it (Vorbis I
+	// section A.2, as libvorbis does), which is a front trim.
+	delay := max(-first.start, 0)
 	samples := int64(-1)
 	if lg := lastGranule(); lg >= 0 {
-		samples = lg
+		samples = max(lg-delay, 0)
 	}
 	return container.Track{
 		Codec:        codec.Vorbis,
@@ -75,6 +78,7 @@ func (m *vorbisMapping) finalizeTrack(lastGranule func() int64, _ reporter) (con
 		Fmt:          f,
 		Samples:      samples,
 		SamplesExact: samples >= 0,
+		Delay:        delay,
 		Default:      true,
 	}, nil
 }

@@ -1,6 +1,7 @@
 package waxflow
 
 import (
+	"context"
 	"io"
 
 	"github.com/colespringer/waxflow/audio"
@@ -24,26 +25,24 @@ const measureCeiling = int64(1) << 61
 // WMA v1/v2 track) reads headers, a source with exact positions is seeked past
 // its end, and one whose positions are rounded and whose codec counts no
 // frames (WMA Pro, Voice and Lossless in ASF) is decoded from the start and
-// counted, since a seek there lands on a stated time, not on the decode.
-func MeasureLength(med format.Media) (container.Track, error) {
+// counted, since a seek there lands on a stated time, not on the decode. That
+// count stops when ctx ends; the other routes read headers.
+func MeasureLength(ctx context.Context, med format.Media) (container.Track, error) {
 	if med == nil {
 		return container.Track{}, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: MeasureLength of a nil Media")
 	}
-	if t := med.Info().Default(); t.SamplesExact && t.Samples >= 0 {
-		return t, nil
-	}
-	if err := format.WalkMedia(med); err != nil {
+	route, err := measureRoute(med)
+	if err != nil {
 		return container.Track{}, err
 	}
-	if t := med.Info().Default(); t.SamplesExact && t.Samples >= 0 {
+	t := med.Info().Default()
+	if route == routeSettled {
 		return t, nil
 	}
-	t := med.Info().Default()
 	var n int64
-	var err error
-	if t.SamplesAdvisory {
+	if route == routeDecode {
 		if _, err = med.SeekSample(0); err == nil {
-			n, err = countDecoded(med)
+			n, err = countDecoded(ctx, med)
 		}
 	} else {
 		n, err = med.SeekSample(measureCeiling)
@@ -56,17 +55,48 @@ func MeasureLength(med format.Media) (container.Track, error) {
 		return container.Track{}, err
 	}
 	t.Samples = n
-	t.SamplesExact, t.SamplesAdvisory = true, false
+	t.SamplesExact, t.SamplesAdvisory, t.SamplesCounted = true, false, route == routeDecode
 	return t, nil
+}
+
+// lengthRoute is what MeasureLength has left to do once the open and any
+// deferred walk have had their say.
+type lengthRoute int
+
+const (
+	routeSettled lengthRoute = iota // the open or the walk left an exact length
+	routeSeek                       // positions are exact: seek past the end
+	routeDecode                     // positions are stated times: decode and count
+)
+
+// measureRoute walks med unless its open already settled the length, and
+// names the route MeasureLength takes from there.
+func measureRoute(med format.Media) (lengthRoute, error) {
+	if t := med.Info().Default(); t.SamplesExact && t.Samples >= 0 {
+		return routeSettled, nil
+	}
+	if err := format.WalkMedia(med); err != nil {
+		return 0, err
+	}
+	switch t := med.Info().Default(); {
+	case t.SamplesExact && t.Samples >= 0:
+		return routeSettled, nil
+	case t.SamplesAdvisory:
+		return routeDecode, nil
+	}
+	return routeSeek, nil
 }
 
 // countDecoded reads med to the end and counts what it delivered: always
 // right, and always the most expensive, so it is the last route.
-func countDecoded(med format.Media) (int64, error) {
+func countDecoded(ctx context.Context, med format.Media) (int64, error) {
 	buf := audio.Get(med.Info().Default().Fmt, audio.StandardChunk)
 	defer audio.Put(buf)
 	var n int64
 	for {
+		if err := ctx.Err(); err != nil {
+			return 0, waxerr.Wrap(waxerr.CodeCanceled, "waxflow: measure canceled", err)
+		}
 		err := med.ReadChunk(buf)
 		if err == io.EOF {
 			return n, nil
@@ -79,17 +109,17 @@ func countDecoded(med format.Media) (int64, error) {
 }
 
 // SliceMeasured is Slice bounded by a measured length rather than med's
-// declared one: samples is the source's total as MeasureLength found it, or
-// negative to leave the declaration alone. A container that rounds its total
+// declared one: measured is the source's track as MeasureLength found it, or
+// one with a negative Samples to leave the declaration alone. A container that rounds its total
 // can declare less audio than it holds, and a window ending in that gap is one
 // the file can serve but a bare Slice refuses. Measure once and slice each
-// window of a source against the same total. It takes ownership of med and
-// closes it on error.
-func SliceMeasured(med format.Media, samples, from, to int64) (format.Media, error) {
+// window of a source against the same total, which a ToEnd window is held to
+// as well (see Slice). It takes ownership of med and closes it on error.
+func SliceMeasured(med format.Media, measured container.Track, from, to int64) (format.Media, error) {
 	if med == nil {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: SliceMeasured of a nil Media")
 	}
-	med = MeasuredMedia(med, samples)
+	med = MeasuredMedia(med, measured)
 	sl, err := Slice(med, from, to)
 	if err != nil {
 		med.Close()

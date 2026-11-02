@@ -75,24 +75,46 @@ func opusTrackFor(preSkip, samples int64, npkt int) (container.Track, []codec.Pa
 	return t, pkts
 }
 
-// flacTrackFor builds a synthetic FLAC track (a valid STREAMINFO) plus packets.
+// flacTrackFor encodes npkt 4096-sample FLAC frames of a stereo ramp.
 func flacTrackFor(t *testing.T, npkt int) (container.Track, []codec.Packet) {
 	t.Helper()
-	si := flac.StreamInfo{MinBlock: 4096, MaxBlock: 4096, Rate: 48000, Channels: 2, Bits: 16, Samples: int64(npkt) * 4096}
-	cfg, err := si.MarshalBinary()
+	return flacFramesFrom(t, npkt, 0)
+}
+
+// flacFramesFrom is flacTrackFor with the frames numbered from first.
+func flacFramesFrom(t *testing.T, npkt int, first int64) (container.Track, []codec.Packet) {
+	t.Helper()
+	f := audio.Format{Rate: 48000, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
+	enc, err := flac.NewEncoder(f, &flac.EncoderOptions{Level: 5, FirstFrame: first})
 	if err != nil {
 		t.Fatal(err)
 	}
-	track := container.Track{
-		Codec:       codec.FLAC,
-		CodecConfig: cfg,
-		Fmt:         si.PCMFormat(),
-		Samples:     int64(npkt) * 4096,
-	}
 	var pkts []codec.Packet
-	for i := 0; i < npkt; i++ {
-		pkts = append(pkts, codec.Packet{Data: bytes.Repeat([]byte{byte(i + 1)}, 200), Dur: 4096, Sync: true})
+	emit := func(p codec.Packet) error {
+		p.Data = append([]byte(nil), p.Data...)
+		pkts = append(pkts, p)
+		return nil
 	}
+	chunk := audio.Get(f, enc.FrameSize())
+	defer audio.Put(chunk)
+	for k := range npkt {
+		chunk.N = enc.FrameSize()
+		for c := range f.Channels {
+			for i, ch := 0, chunk.ChanI(c); i < len(ch); i++ {
+				ch[i] = int32((k*enc.FrameSize()+i)*(c+1)*37%2000 - 1000)
+			}
+		}
+		if err := enc.Encode(chunk, emit); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := enc.Finish(emit); err != nil {
+		t.Fatal(err)
+	}
+	if len(pkts) != npkt {
+		t.Fatalf("encoded %d frames, want %d", len(pkts), npkt)
+	}
+	track := container.Track{Codec: codec.FLAC, CodecConfig: enc.CodecConfig(), Fmt: f, Samples: int64(npkt) * 4096}
 	return track, pkts
 }
 
@@ -119,6 +141,47 @@ func segmentize(t *testing.T, track container.Track, pkts []codec.Packet, segSam
 		t.Fatalf("End: %v", err)
 	}
 	return init, buf.Bytes()
+}
+
+// segmentsFrom runs packets through a Segmenter starting at segment start and
+// returns each segment's bytes.
+func segmentsFrom(t *testing.T, track container.Track, pkts []codec.Packet, segSamples int, start int64, block int) [][]byte {
+	t.Helper()
+	seg, err := NewSegmenter(track, &SegmenterOptions{SegmentSamples: segSamples, StartSegment: start, Block: block})
+	if err != nil {
+		t.Fatalf("NewSegmenter: %v", err)
+	}
+	var out [][]byte
+	emit := func(s Segment) error { out = append(out, append([]byte(nil), s.Data...)); return nil }
+	for _, p := range pkts {
+		if err := seg.WritePacket(p, emit); err != nil {
+			t.Fatalf("WritePacket: %v", err)
+		}
+	}
+	if err := seg.End(emit); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	return out
+}
+
+// TestSegmenterNumbersFLACFrames: FLAC frames that arrive numbered from past 0
+// are written numbered from where the run starts, so a run from the top and one
+// restarted at a segment both write a continuous run's bytes.
+func TestSegmenterNumbersFLACFrames(t *testing.T) {
+	track, pkts := flacFramesFrom(t, 6, 0)
+	_, moved := flacFramesFrom(t, 6, 1000)
+	want := segmentsFrom(t, track, pkts, 2*4096, 0, 0)
+	for start := range int64(3) {
+		got := segmentsFrom(t, track, moved[2*start:], 2*4096, start, 4096)
+		if len(got) != len(want)-int(start) {
+			t.Fatalf("from segment %d: %d segments, want %d", start, len(got), len(want)-int(start))
+		}
+		for i, s := range got {
+			if !bytes.Equal(s, want[int(start)+i]) {
+				t.Errorf("from segment %d: segment %d is not the continuous run's", start, int(start)+i)
+			}
+		}
+	}
 }
 
 // readFrag drains a demuxer's packets into copied payloads and their PTS.

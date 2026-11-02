@@ -50,6 +50,10 @@ type SegmenterOptions struct {
 	// decode time follows as StartSegment * SegmentSamples. Zero is the
 	// stream's top.
 	StartSegment int64
+	// Block is a FLAC stream's block size, its first frame's, which a run
+	// from past segment 0 numbers its frames by. Zero takes STREAMINFO's,
+	// which this tree's own encodes state truly.
+	Block int
 }
 
 // Segmenter packs codec packets into numbered CMAF media segments for
@@ -79,6 +83,10 @@ type Segmenter struct {
 	data        []byte
 	durs, sizes []uint32
 	samples     int64
+
+	// number numbers FLAC frames from where the run starts, as RFC 9639
+	// counts them from the stream's first frame.
+	number *flac.Numberer
 }
 
 // NewSegmenter validates the track and options and returns a Segmenter.
@@ -94,10 +102,19 @@ func NewSegmenter(t container.Track, opts *SegmenterOptions) (*Segmenter, error)
 	if _, err := sampleEntryFor(t); err != nil {
 		return nil, err
 	}
-	return &Segmenter{
-		segTgt: opts.SegmentSamples,
-		index:  opts.StartSegment,
-	}, nil
+	s := &Segmenter{segTgt: opts.SegmentSamples, index: opts.StartSegment}
+	if t.Codec == codec.FLAC {
+		si, err := flac.ParseStreamInfo(t.CodecConfig)
+		if err != nil {
+			return nil, err
+		}
+		block := opts.Block
+		if block <= 0 {
+			block = si.MaxBlock
+		}
+		s.number = flac.NewNumberer(si, opts.StartSegment*int64(opts.SegmentSamples), block)
+	}
+	return s, nil
 }
 
 // WritePacket appends one packet to the current segment, emitting the
@@ -110,6 +127,12 @@ func (s *Segmenter) WritePacket(pkt codec.Packet, emit func(Segment) error) erro
 	}
 	if len(pkt.Data) == 0 || pkt.Dur <= 0 {
 		return waxerr.New(waxerr.CodeInternal, fmt.Sprintf("mp4: packet of %d bytes, %d samples", len(pkt.Data), pkt.Dur))
+	}
+	if s.number != nil {
+		var err error
+		if pkt.Data, _, err = s.number.Number(pkt.Data); err != nil {
+			return err
+		}
 	}
 	if len(pkt.Data) > maxSampleBytes || pkt.Dur > maxSampleDur {
 		return waxerr.New(waxerr.CodeInternal, fmt.Sprintf("mp4: packet too large (%d bytes, %d samples)", len(pkt.Data), pkt.Dur))

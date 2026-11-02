@@ -5,8 +5,11 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
+	"slices"
 
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -85,7 +88,25 @@ type Demuxer struct {
 	headerPackets int
 
 	firstData int64 // offset of the page where the first audio packet begins
+	// damage counts the Damage warnings recorded, those the list's cap and
+	// de-duplication keep out included.
+	damage int
+	// lostAt and lastPage are damage and the page offset when the last packet
+	// was read, so a gap after it is known to follow damage (see Lost).
+	lostAt   int
+	lastPage int64
+	// lookLimit, when set, ends a look ahead at that offset, and lookCut says
+	// it was reached rather than the end of the stream.
+	lookLimit int64
+	lookCut   bool
 	totalSize int64
+	// initialGranule is where the first audio packet starts on the page
+	// granule timeline (startGranule); a page granule less it is a raw
+	// position.
+	initialGranule int64
+	// disowned is the offset of a first page whose granule the stream does
+	// not back, so no seek or length reads it; -1 when there is none.
+	disowned int64
 
 	off      int64  // next page read position
 	scan     []byte // resync/bisection probe window, reused across calls
@@ -103,6 +124,7 @@ type Demuxer struct {
 	pendingPTS  int64
 	pendingDur  int64
 	pendingSync bool
+	pendingLost int64 // the hole before it, the one a stream starts with
 	havePending bool
 	empty       bool // stream carries zero audio packets
 }
@@ -152,7 +174,8 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
+	d.damage++
+	d.record(container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
 	return nil
 }
 
@@ -160,7 +183,21 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 // something with a well-formed file that a caller should know about, rather
 // than damage in the file. See [container.Note].
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
+	d.record(container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
+}
+
+// lookAheadBytes bounds how far a check of the first page's granule reads.
+const lookAheadBytes = 1 << 17
+
+// maxWarnings caps the list, as the other tolerant demuxers in this tree do.
+const maxWarnings = 64
+
+// record lists w unless it is listed already or the list is full, so a read
+// that crosses the same damage again after a seek records nothing new.
+func (d *Demuxer) record(w container.Warning) {
+	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
+		d.warnings = append(d.warnings, w)
+	}
 }
 
 // readPage reads and CRC-checks the page at off. It does not resync; callers
@@ -262,6 +299,10 @@ func (d *Demuxer) nextPageAt(off int64, p *page) (int64, bool, error) {
 // tolerantly on damage.
 func (d *Demuxer) advancePage() (bool, error) {
 	for {
+		if d.lookLimit > 0 && d.off >= d.lookLimit {
+			d.lookCut = true
+			return false, nil
+		}
 		var p page
 		p.lacing, p.body = d.page.lacing, d.page.body // reuse allocations
 		ok, err := d.readPage(d.off, &p)
@@ -447,6 +488,8 @@ func (d *Demuxer) parse() error {
 	d.off = off
 	d.seg, d.segOff = 0, 0
 	d.page = page{}
+	first := firstPage{granule: -1}
+	audioDamage, audioFrom := d.damage, d.off // what came before the audio
 	for skipped := 0; ; skipped++ {
 		if skipped > maxHeaderPackets {
 			return malformed("more than %d header packets", maxHeaderPackets)
@@ -466,6 +509,7 @@ func (d *Demuxer) parse() error {
 			if err := d.mapping.parseHeader(pkt); err != nil {
 				return err
 			}
+			audioDamage, audioFrom = d.damage, d.page.off+d.page.size
 			continue
 		}
 		if !d.mapping.isAudio(pkt) {
@@ -481,34 +525,248 @@ func (d *Demuxer) parse() error {
 			}
 			return malformed("first audio packet has no valid timing")
 		}
+		if fm, ok := d.mapping.(*flacMapping); ok && fm.origin > 0 && d.damage > audioDamage &&
+			fm.origin <= flac.MaxSamplesIn(d.pktPage-audioFrom) {
+			// Damage took the frames before this one, so it is a hole from
+			// 0, not a stream starting late.
+			if werr := d.warn(audioFrom, "damage before the first frame took %d samples", fm.origin); werr != nil {
+				return werr
+			}
+			pts += fm.origin
+			d.pendingLost, fm.origin = fm.origin, 0
+		}
 		d.pending = append(d.pending[:0], pkt...)
 		d.pendingPTS, d.pendingDur, d.pendingSync = pts, dur, sync
 		d.havePending = true
 		d.running = pts + dur
 		d.firstData = d.pktPage
+		first = d.firstPage()
 		break
 	}
+	d.disowned = -1
+	start, err := d.startGranule(first)
+	if err != nil {
+		return err
+	}
+	first.start = start
+	d.initialGranule = start
+	// Vorbis I A.2 trims a start before zero only in its layout: the first two
+	// packets alone on the page. Otherwise nothing is trimmed, and granules
+	// still count from where the stream starts.
+	if start < 0 && d.mapping.codecID() == codec.Vorbis && first.packets != 2 {
+		d.note(first.off, "the first audio page's granule %d starts before time zero without the layout Vorbis I A.2 requires; positions start at 0",
+			first.granule)
+		first.start = 0
+	}
 
-	// lastGranule is computed lazily, since a mapping may not need it at all.
-	// It reads one tail window in the common case and widens only when that
-	// window holds no page of this serial. Every mapping asks for it now: the
-	// FLAC one verifies its declared total against it (mapflac.go), where it
-	// used to skip the read whenever a total was declared.
-	lastGranule := func() int64 {
+	// lastEnd is computed lazily, since a mapping may not need it at all. It
+	// reads one tail window in the common case and widens only when that
+	// window holds nothing to read the end off. Every mapping asks for it now:
+	// the FLAC one verifies its declared total against it (mapflac.go), where
+	// it used to skip the read whenever a total was declared.
+	var (
+		unconfirmed bool
+		tailErr     error
+	)
+	lastEnd := func() int64 {
 		if d.empty {
 			return 0
 		}
-		return d.lastGranule()
+		t, err := d.readTail()
+		if err != nil {
+			tailErr = err
+			return -1
+		}
+		if d.mapping.selfTiming() {
+			// FLAC frames say where they are, within what the bytes can hold.
+			if n := d.totalSize - d.firstData; t.frameEnd > flac.MaxSamplesIn(n) {
+				tailErr = d.warn(d.firstData, "the frames claim %d samples, more than %d bytes of frames can hold", t.frameEnd, n)
+				return -1
+			}
+			return t.frameEnd
+		}
+		if t.unstated >= 0 {
+			// The granule read is not where the stream ends.
+			unconfirmed = true
+			tailErr = d.warn(t.unstated, "the page at offset %d completes a packet but states no granule, after the last page that does; the length is unconfirmed",
+				t.unstated)
+		}
+		if d.disowned >= 0 && t.off == d.disowned {
+			// A disowned first page that is also the last states no end
+			// either: the stream is the packets it holds.
+			return first.samples
+		}
+		return d.raw(t.granule)
 	}
-	track, err := d.mapping.finalizeTrack(lastGranule, d)
+	track, err := d.mapping.finalizeTrack(first, lastEnd, d)
+	if err == nil {
+		err = tailErr
+	}
 	if err != nil {
 		return err
+	}
+	if unconfirmed {
+		// Packets follow the last granule stated, so a decode runs past it.
+		track.SamplesExact, track.SamplesAdvisory = false, true
 	}
 	if d.empty {
 		track.Samples = 0
 	}
 	d.track = track
 	return nil
+}
+
+// firstPage reads where the stream starts off the page the first audio packet
+// just completed on, which is in hand: its granule, and the samples of every
+// packet completing on it. Timing the packets after the first moves the
+// mapping's timing state, so the first is timed again to put it back.
+func (d *Demuxer) firstPage() firstPage {
+	p := firstPage{off: d.page.off, granule: d.page.granule, samples: d.pendingDur,
+		packets: 1, eos: d.page.flags&flagEOS != 0}
+	from, to := d.segOff, d.segOff
+	for _, l := range d.page.lacing[d.seg:] {
+		to += int(l)
+		if l < 255 {
+			if _, dur, _, ok := d.mapping.packetTiming(d.page.body[from:to], 0); ok {
+				p.samples += dur
+				p.packets++
+			}
+			from = to
+		}
+	}
+	d.mapping.resetTiming()
+	d.mapping.packetTiming(d.pending, 0)
+	return p
+}
+
+// startGranule is the first page's granule less its samples, where the stream
+// backs it: the next page's granule less this one's must be the samples
+// completing on it, or less on a page ending the stream. A page with no later
+// granule stands alone only if it ends the stream or holds all its samples.
+// Otherwise, or when the look ahead met damage or its cap, the page is
+// disowned with a note and positions start at 0, as ffmpeg drops a 0 on a
+// first page holding audio. A source failing under the look ahead fails the
+// open. Ogg FLAC takes none of this: its frames say where they are.
+func (d *Demuxer) startGranule(first firstPage) (int64, error) {
+	if first.granule < 0 || d.mapping.selfTiming() {
+		return 0, nil
+	}
+	start := first.granule - first.samples
+	if start == 0 {
+		return 0, nil
+	}
+	if first.eos {
+		if start < 0 {
+			return 0, nil // the end trim
+		}
+		return start, nil
+	}
+	granule, samples, eos, damaged, found, err := d.nextGranulePage()
+	if err != nil {
+		return 0, err
+	}
+	switch {
+	case damaged:
+		d.note(first.off, "damage after the first audio page leaves its granule %d unconfirmed; positions start at 0",
+			first.granule)
+		d.disowned = first.off
+		return 0, nil
+	case found == streamEnds && start > 0:
+		return start, nil
+	case found == streamEnds:
+		d.note(first.off, "the first audio page's granule %d is short of its %d samples but does not end the stream; positions start at 0",
+			first.granule, first.samples)
+		d.disowned = first.off
+		return 0, nil
+	case found == unverified:
+		d.note(first.off, "no later page within reach states a granule to back the first audio page's %d; positions start at 0",
+			first.granule)
+		d.disowned = first.off
+		return 0, nil
+	}
+	if diff := granule - first.granule; diff != samples && !(eos && diff >= 0 && diff <= samples) {
+		d.note(first.off, "the first audio page's granule %d disagrees with the next page's %d; positions start at 0",
+			first.granule, granule)
+		d.disowned = first.off
+		return 0, nil
+	}
+	return start, nil
+}
+
+// lookahead is how nextGranulePage's search ended.
+type lookahead int
+
+const (
+	foundGranule lookahead = iota // a later page states a granule
+	streamEnds                    // the stream ends before one does
+	unverified                    // damage or the packet cap stopped the search
+)
+
+// nextGranulePage reads on to the next page of the serial that states a
+// granule and returns that granule, the samples of the packets completing
+// after the first page up to it, whether it ends the stream, and whether the
+// search met tolerated damage on the way. It is a look ahead and leaves
+// nothing behind: the cursor, the mapping's timing and the warnings are as
+// they were, and strict mode is off throughout, since a read reports what
+// this meets when it gets there. Only a source failure is an error, as at any
+// other open-time read.
+func (d *Demuxer) nextGranulePage() (granule, samples int64, eos, damaged bool, found lookahead, err error) {
+	pg := d.page
+	pg.lacing = append([]byte(nil), d.page.lacing...)
+	pg.body = append([]byte(nil), d.page.body...)
+	off, seg, segOff, pktPage, skipCont, ended := d.off, d.seg, d.segOff, d.pktPage, d.skipCont, d.eos
+	partial := append([]byte(nil), d.partial...)
+	strict, warned, damage := d.opts.Strict, len(d.warnings), d.damage
+	d.opts.Strict, d.lookLimit, d.lookCut = false, pg.off+lookAheadBytes, false
+	defer func() {
+		d.page, d.off, d.seg, d.segOff, d.pktPage, d.skipCont, d.eos = pg, off, seg, segOff, pktPage, skipCont, ended
+		d.partial = append(d.partial[:0], partial...)
+		d.opts.Strict, d.warnings, d.damage = strict, d.warnings[:warned], damage
+		d.lookLimit, d.lookCut = 0, false
+		d.mapping.resetTiming()
+		d.mapping.packetTiming(d.pending, 0)
+	}()
+	for range maxSeekPackets {
+		p, err := d.nextPacket()
+		switch {
+		case err != nil && waxerr.CodeOf(err) == waxerr.CodeSourceUnreadable:
+			return 0, 0, false, false, unverified, err
+		case err != nil:
+			return 0, 0, false, true, unverified, nil
+		case p == nil && d.lookCut:
+			return 0, 0, false, false, unverified, nil
+		case p == nil:
+			return 0, 0, false, d.damagedSince(damage), streamEnds, nil
+		}
+		_, dur, _, timed := d.mapping.packetTiming(p, 0)
+		if d.page.off == pg.off {
+			continue // completes on the first page, whose granule is the one in question
+		}
+		if timed {
+			samples += dur
+		} else {
+			damaged = true
+		}
+		if d.page.granule >= 0 && d.lastOfPage() {
+			return d.page.granule, samples, d.page.flags&flagEOS != 0, damaged || d.damagedSince(damage), foundGranule, nil
+		}
+	}
+	return 0, 0, false, false, unverified, nil
+}
+
+// damagedSince reports whether damage has been recorded past the first n
+// warnings.
+func (d *Demuxer) damagedSince(n int) bool { return d.damage > n }
+
+// lastOfPage reports whether the packet nextPacket just returned is the last
+// to complete on its page, so the page granule is where it ends.
+func (d *Demuxer) lastOfPage() bool {
+	for _, l := range d.page.lacing[d.seg:] {
+		if l < 255 {
+			return false
+		}
+	}
+	return true
 }
 
 func joinNames(names []string) string {
@@ -528,16 +786,21 @@ func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track}
 // Warnings returns damage tolerated during parsing.
 func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
 
+// DamageCount implements container.Damaged.
+func (d *Demuxer) DamageCount() int { return d.damage }
+
 // ReadPacket yields one codec packet. Packet data is reused across calls.
 func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 	var (
 		data     []byte
 		pts, dur int64
 		sync     bool
+		lost     int64
 	)
 	if d.havePending {
-		data, pts, dur, sync = d.pending, d.pendingPTS, d.pendingDur, d.pendingSync
-		d.havePending = false
+		data, pts, dur, sync, lost = d.pending, d.pendingPTS, d.pendingDur, d.pendingSync, d.pendingLost
+		d.havePending, d.pendingLost = false, 0
+		d.lostAt, d.lastPage = d.damage, d.page.off
 	} else {
 		for {
 			p, err := d.nextPacket()
@@ -556,26 +819,61 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 				continue
 			}
 			data = p
+			if d.mapping.selfTiming() && pts > d.running {
+				// FLAC frames say where they are, so a gap behind one is
+				// samples lost: to damage, or to frames gone without their
+				// numbers.
+				if lost, err = d.gap(pts); err != nil {
+					return err
+				}
+			}
 			d.running = pts + dur
+			d.lostAt, d.lastPage = d.damage, d.page.off
 			break
 		}
 	}
 	*pkt = container.Packet{
 		Track: 0,
+		Lost:  lost,
 		Packet: codec.Packet{
-			Data: data,
-			PTS:  pts,
-			Dur:  dur,
-			Sync: sync,
+			Data:    data,
+			PTS:     pts,
+			Dur:     dur,
+			Sync:    sync,
+			Discont: lost > 0,
 		},
 	}
 	return nil
 }
 
+// gap is what a self-timing packet at pts, past the running position, lost
+// before it. After damage it is what a lost page took, within what its bytes
+// could hold. With nothing damaged the numbers skip, and the samples are lost
+// where the stream could have the packet, inside its exact length or short of
+// one inside what its bytes can hold; numbers past that vouch for nothing, so
+// the packet is joined on. Either way it warns.
+func (d *Demuxer) gap(pts int64) (int64, error) {
+	if d.damage > d.lostAt {
+		if pts-d.running <= flac.MaxSamplesIn(d.page.off-d.lastPage) {
+			return pts - d.running, nil
+		}
+		return 0, nil
+	}
+	vouched := pts <= flac.MaxSamplesIn(d.totalSize-d.firstData)
+	if t := d.track; t.SamplesExact && t.Samples >= 0 {
+		vouched = pts <= t.Samples
+	}
+	if vouched {
+		return pts - d.running, d.warn(d.page.off, "the frames skip from sample %d to %d: %d samples lost",
+			d.running, pts, pts-d.running)
+	}
+	return 0, d.warn(d.page.off, "the frames skip from sample %d to %d, past what the stream holds; joined", d.running, pts)
+}
+
 // SeekSample lands on a sync point at or before target and returns the landed
-// position. Self-timing mappings (FLAC) walk frames reading absolute
-// positions; accumulating mappings (Vorbis, Opus) anchor to page granules and
-// land a mapping-defined pre-roll before the target.
+// position, both on the raw timeline. Self-timing mappings (FLAC) walk frames
+// reading their own positions; accumulating mappings (Vorbis, Opus) anchor to
+// page granules and land a mapping-defined pre-roll before the target.
 func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	if track != 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("ogg: no track %d", track))
@@ -586,8 +884,10 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	if d.empty {
 		return 0, nil
 	}
-	if d.track.Samples > 0 && sample >= d.track.Samples {
-		sample = d.track.Samples - 1
+	// sample is raw, so the end it is held to is the front trim plus the
+	// length.
+	if end := d.track.Delay + d.track.Samples; d.track.Samples > 0 && sample >= end {
+		sample = end - 1
 	}
 	if d.mapping.selfTiming() {
 		return d.seekSelfTiming(sample)
@@ -595,21 +895,25 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	return d.seekAccumulating(sample)
 }
 
-// seekSelfTiming seeks a mapping whose packets carry absolute positions (FLAC):
-// bisect on page granules, then walk packets to the frame containing target.
+// seekSelfTiming seeks a mapping whose packets carry their own positions
+// (FLAC): bisect on the frames that begin on each page, then walk packets to
+// the frame containing target. No granule plays a part, so none can cost a
+// seek.
 func (d *Demuxer) seekSelfTiming(sample int64) (int64, error) {
-	lo, err := d.bisect(sample)
+	lo, err := d.bisectFrames(sample)
 	if err != nil {
 		return 0, err
 	}
 	var (
 		lastData         []byte
 		lastPTS, lastDur int64
+		prevPTS          int64 // the frame before the last, -1 for none
 		lastSync         bool
 		haveLast         bool
 	)
 	for {
 		d.restartAt(lo)
+		prevPTS, haveLast = -1, false
 		for {
 			p, err := d.nextPacket()
 			if err != nil {
@@ -622,12 +926,26 @@ func (d *Demuxer) seekSelfTiming(sample int64) (int64, error) {
 			if !ok {
 				continue
 			}
+			if haveLast {
+				prevPTS = lastPTS
+			}
 			lastData = append(lastData[:0], p...)
 			lastPTS, lastDur, lastSync = pts, dur, sync
 			haveLast = true
 			if pts+dur > sample {
 				break
 			}
+		}
+		if haveLast && lastPTS > sample && lo > d.firstData && prevPTS < 0 {
+			haveLast = false // the target is in a hole: back off for a frame before it
+		}
+		if haveLast && lastPTS > sample && prevPTS >= 0 {
+			// The target is in a hole before this frame, so land on the one
+			// before it, at or before the target; the read fills the hole.
+			if lastData, lastDur, lastSync, err = d.walkToFrame(lo, prevPTS, lastData); err != nil {
+				return 0, err
+			}
+			lastPTS = prevPTS
 		}
 		if haveLast || lo <= d.firstData {
 			break
@@ -638,17 +956,41 @@ func (d *Demuxer) seekSelfTiming(sample int64) (int64, error) {
 		return 0, malformed("no frame found while seeking")
 	}
 	d.pending = append(d.pending[:0], lastData...)
-	d.pendingPTS, d.pendingDur, d.pendingSync = lastPTS, lastDur, lastSync
+	d.pendingPTS, d.pendingDur, d.pendingSync, d.pendingLost = lastPTS, lastDur, lastSync, 0
 	d.havePending = true
 	d.running = lastPTS + lastDur
+	if lastPTS > sample && prevPTS < 0 {
+		// In the hole the stream starts with: land at 0, the read owing it.
+		d.pendingLost = lastPTS
+		return 0, nil
+	}
 	return lastPTS, nil
 }
 
+// walkToFrame walks from lo to the frame that starts at pts and leaves the read
+// just past it, returning it in buf.
+func (d *Demuxer) walkToFrame(lo, pts int64, buf []byte) ([]byte, int64, bool, error) {
+	d.restartAt(lo)
+	for {
+		p, err := d.nextPacket()
+		if err != nil {
+			return nil, 0, false, err
+		}
+		if p == nil {
+			return nil, 0, false, malformed("the frame at %d was not found walking to it again", pts)
+		}
+		if at, dur, sync, ok := d.mapping.packetTiming(p, 0); ok && at == pts {
+			return append(buf[:0], p...), dur, sync, nil
+		}
+	}
+}
+
 // seekAccumulating seeks a mapping whose positions accumulate (Vorbis, Opus).
-// It works in the granule timeline, where page positions are authoritative and
-// which for both mappings is the decoder's output timeline. It lands a pre-roll
-// before the target so decode reconverges: the restart page's first packet is
-// consumed (priming), and output begins at its start.
+// It works on the raw timeline, the page granules less the initial granule,
+// where page positions are authoritative and which for both mappings is the
+// decoder's output timeline. It lands a pre-roll before the target so decode
+// reconverges: the restart page's first packet is consumed (priming), and
+// output begins at its start.
 func (d *Demuxer) seekAccumulating(sample int64) (int64, error) {
 	searchGranule := sample - d.mapping.preroll()
 	if searchGranule < 0 {
@@ -659,11 +1001,11 @@ func (d *Demuxer) seekAccumulating(sample int64) (int64, error) {
 		return 0, err
 	}
 
-	// Walk from lo, deriving each packet's absolute granule-end by anchoring
-	// accumulated durations to a page granule at or beyond the target. The walk
-	// is capped: a past-end target on an unknown-length stream (no clamp) would
-	// otherwise scan every packet to EOF, and a granule-less span would grow the
-	// arrays without bound (ADR-0005).
+	// Walk from lo, deriving each packet's raw end by anchoring accumulated
+	// durations to a page granule at or beyond the target. The walk is capped:
+	// a past-end target on an unknown-length stream (no clamp) would otherwise
+	// scan every packet to EOF, and a granule-less span would grow the arrays
+	// without bound (ADR-0005).
 	for {
 		d.mapping.resetTiming()
 		d.restartAt(lo)
@@ -683,20 +1025,19 @@ func (d *Demuxer) seekAccumulating(sample int64) (int64, error) {
 				continue
 			}
 			durs = append(durs, dur)
-			if d.endsPage() && d.page.granule >= 0 {
-				ends = append(ends, d.page.granule)
+			end := int64(-1)
+			if d.endsPage() && d.page.off != d.disowned {
+				end = d.raw(d.page.granule)
+			}
+			ends = append(ends, end)
+			if end >= 0 {
 				anchored = true
-				if d.page.granule > sample {
+				if end > sample {
 					break // enough to bracket the target
 				}
-			} else {
-				ends = append(ends, -1)
 			}
 		}
-		if !anchored {
-			if lo <= d.firstData {
-				return 0, malformed("no granule anchor found while seeking")
-			}
+		if !anchored && lo > d.firstData {
 			lo = max(d.firstData, lo-seekWindow)
 			continue
 		}
@@ -705,11 +1046,12 @@ func (d *Demuxer) seekAccumulating(sample int64) (int64, error) {
 		// The clamp is for a start that resolvePositions could not anchor:
 		// an unanchored end[0] falls back to 0, and Opus (unlike Vorbis, whose
 		// resetTiming zeroes durs[0]) carries a real duration there, so
-		// starts[0] can come out negative.
-		starts := resolvePositions(durs, ends)
-		landed := starts[0]
-		if landed < 0 {
-			landed = 0
+		// starts[0] can come out negative. A walk from the first audio page
+		// starts at the first audio packet, raw 0 by definition, whatever
+		// granules the stream gets wrong after it, and needs none to anchor.
+		landed := int64(0)
+		if lo > d.firstData {
+			landed = max(resolvePositions(durs, ends)[0], 0)
 		}
 		d.mapping.resetTiming()
 		d.restartAt(lo)
@@ -718,13 +1060,13 @@ func (d *Demuxer) seekAccumulating(sample int64) (int64, error) {
 	}
 }
 
-// resolvePositions computes each packet's absolute start position from its
-// duration and the page-granule anchors (ends[i] >= 0 marks packet i's end).
-// Each anchor propagates forward across the packets that follow it (durations
-// accumulate from the anchor, and a later anchor re-seeds the accumulation);
-// the backward pass then fills only the packets that precede the first anchor.
-// In a healthy stream the two directions agree, since durations telescope
-// between consecutive anchors.
+// resolvePositions computes each packet's start position from its duration and
+// the page-granule anchors (ends[i] >= 0 marks packet i's end). Each anchor
+// propagates forward across the packets that follow it (durations accumulate
+// from the anchor, and a later anchor re-seeds the accumulation); the backward
+// pass then fills only the packets that precede the first anchor. In a healthy
+// stream the two directions agree, since durations telescope between
+// consecutive anchors.
 func resolvePositions(durs, ends []int64) []int64 {
 	n := len(durs)
 	start := make([]int64, n)
@@ -759,19 +1101,29 @@ func resolvePositions(durs, ends []int64) []int64 {
 	return start
 }
 
-// bisect finds the byte offset of the last page of our serial whose granule is
-// below target; the target's frames begin on or after it. A source read
-// failure is surfaced, not swallowed, so a seek reports the error rather than
-// silently landing early.
-func (d *Demuxer) bisect(target int64) (int64, error) {
+// bisectFrames finds the byte offset of a page of our serial on which a frame
+// at or before target begins, a raw position, late enough that the target's
+// frame lies within a bisection window after it. A source read failure is
+// surfaced, as in bisect.
+func (d *Demuxer) bisectFrames(target int64) (int64, error) {
+	return d.narrow(func(mid, hi int64) (int64, bool, error) {
+		off, pts, ok, err := d.frameAt(mid, hi)
+		return off, err == nil && ok && pts <= target, err
+	})
+}
+
+// narrow bisects the stream's bytes to within a bisection window after the
+// last probe that lands before the target: probe reports the page it found at
+// or after mid, below hi, and whether what that page states is before it.
+func (d *Demuxer) narrow(probe func(mid, hi int64) (off int64, before bool, err error)) (int64, error) {
 	lo, hi := d.firstData, d.totalSize
 	for hi-lo > seekWindow {
 		mid := lo + (hi-lo)/2
-		off, granule, ok, err := d.granuleAt(mid, hi)
+		off, before, err := probe(mid, hi)
 		if err != nil {
 			return 0, err
 		}
-		if !ok || granule >= target {
+		if !before {
 			hi = mid
 			continue
 		}
@@ -780,7 +1132,89 @@ func (d *Demuxer) bisect(target int64) (int64, error) {
 	return lo, nil
 }
 
-// lastGranule scans the file tail for the final granule position of our serial.
+// frameAt finds the first page of our serial at or after off (bounded by
+// limit) on which a frame begins whose header reads, and returns the page's
+// offset and the frame's raw position. Pages are followed by their own
+// lengths, as in readTail, so a frame larger than a page costs its pages and
+// not a resync window each.
+func (d *Demuxer) frameAt(off, limit int64) (int64, int64, bool, error) {
+	var at, pts int64
+	found := false
+	err := d.walkPages(off, limit, func(o int64, p *page, _ bool) bool {
+		if p.serial == d.serial && p.flags&flagBOS == 0 {
+			if pts, found = d.firstFrameOn(p); found {
+				at = o
+			}
+		}
+		return !found
+	})
+	if err != nil {
+		return 0, 0, false, err
+	}
+	return at, pts, found, nil
+}
+
+// walkPages visits the pages from off to limit, following each one's own
+// length and resyncing past damage, which visit is told of. It stops at limit,
+// when visit returns false, or on an error: a source failure, or a resync
+// that found no page, returned as they are.
+func (d *Demuxer) walkPages(off, limit int64, visit func(at int64, p *page, resynced bool) bool) error {
+	var p page
+	synced := false
+	for off < limit {
+		at, resynced := off, false
+		if synced {
+			ok, err := d.readPage(off, &p)
+			if waxerr.CodeOf(err) == waxerr.CodeSourceUnreadable {
+				return err
+			}
+			synced = err == nil && ok
+		}
+		if !synced {
+			var ok bool
+			var err error
+			if at, ok, err = d.nextPageAt(off, &p); err != nil || !ok {
+				return err
+			}
+			synced, resynced = true, true
+		}
+		if at >= limit || !visit(at, &p, resynced) {
+			return nil
+		}
+		off = at + p.size
+	}
+	return nil
+}
+
+// bisect finds the byte offset of the last page of our serial whose granule is
+// below target, a raw position; the target's frames begin on or after it. A
+// source read failure is surfaced, not swallowed, so a seek reports the error
+// rather than silently landing early.
+func (d *Demuxer) bisect(target int64) (int64, error) {
+	return d.narrow(func(mid, hi int64) (int64, bool, error) {
+		off, granule, ok, err := d.granuleAt(mid, hi)
+		// A page before the stream's own start places nothing, so the search
+		// looks earlier, as it does for a span with no page at all.
+		raw := d.raw(granule)
+		return off, err == nil && ok && raw >= 0 && raw < target, err
+	})
+}
+
+// tail is what the open reads off the end of the file.
+type tail struct {
+	// off and granule are the last page of the serial stating a granule.
+	off, granule int64
+	// frameEnd is where the last whole packet read there ends on the raw
+	// timeline, from its own header, for a mapping whose packets say where
+	// they are (FLAC).
+	frameEnd int64
+	// unstated is the first page after that one that completes a packet
+	// without stating a granule.
+	unstated int64
+}
+
+// readTail scans the file tail for what says where the stream ends, -1 for
+// whatever it does not find.
 //
 // Pages are walked by following each one's own length, which is what keeps the
 // scan proportional to the window rather than to the pages in it: nextPageAt
@@ -789,43 +1223,123 @@ func (d *Demuxer) bisect(target int64) (int64, error) {
 // the window still costs a resync, since the window starts mid-page; from there
 // the next page begins exactly where the last one ended, and only a stream with
 // damage or padding between pages falls back to scanning again.
-func (d *Demuxer) lastGranule() int64 {
+func (d *Demuxer) readTail() (tail, error) {
+	frames := d.mapping.selfTiming()
 	for _, window := range []int64{maxPageSize + 64<<10, 1 << 20, 4 << 20} {
 		from := max(d.firstData, d.totalSize-window)
-		granule := int64(-1)
-		var p page
-		synced := false
-		for from < d.totalSize {
-			at := from
-			if synced {
-				ok, err := d.readPage(from, &p)
-				if err != nil || !ok {
-					synced = false
+		t := tail{off: -1, granule: -1, frameEnd: -1, unstated: -1}
+		var (
+			hdr  []byte // the head of the packet in progress
+			open bool   // a packet is in progress and its head was read
+		)
+		err := d.walkPages(from, d.totalSize, func(at int64, p *page, resynced bool) bool {
+			if resynced {
+				open = false // whatever was in progress is lost
+			}
+			if p.serial == d.serial {
+				switch {
+				case p.granule >= 0:
+					t.off, t.granule, t.unstated = at, p.granule, -1
+				case t.granule >= 0 && t.unstated < 0 && completes(p):
+					t.unstated = at
+				}
+				if frames {
+					open = d.framesOn(p, &hdr, open, &t.frameEnd)
 				}
 			}
-			if !synced {
-				var ok bool
-				var err error
-				at, ok, err = d.nextPageAt(from, &p)
-				if err != nil || !ok {
-					break
-				}
-				synced = true
-			}
-			if p.serial == d.serial && p.granule >= 0 {
-				granule = p.granule
-			}
-			from = at + p.size
+			return true
+		})
+		if waxerr.CodeOf(err) == waxerr.CodeSourceUnreadable {
+			return tail{}, err
 		}
-		if granule >= 0 || d.totalSize-window <= d.firstData {
-			return granule
+		done := t.granule >= 0
+		if frames {
+			done = t.frameEnd >= 0
+		}
+		if done || d.totalSize-window <= d.firstData {
+			return t, nil
 		}
 	}
-	return -1
+	return tail{off: -1, granule: -1, frameEnd: -1, unstated: -1}, nil
+}
+
+// completes reports whether a packet completes on p.
+func completes(p *page) bool {
+	for _, l := range p.lacing {
+		if l < 255 {
+			return true
+		}
+	}
+	return false
+}
+
+// framesOn carries the tail scan's packet reassembly across p, a page of the
+// serial, keeping only each packet's head, and sets end to where each whole
+// packet ends by its header. It returns whether a packet is left in progress.
+func (d *Demuxer) framesOn(p *page, hdr *[]byte, open bool, end *int64) bool {
+	fresh := p.flags&flagContinued == 0 // a packet begins at the first segment
+	if fresh {
+		open = false // one left unfinished is dropped, as a read drops it
+	}
+	at := 0
+	for _, l := range p.lacing {
+		if fresh {
+			*hdr, open, fresh = (*hdr)[:0], true, false
+		}
+		if open && len(*hdr) < flac.MaxFrameHeaderLen {
+			*hdr = append(*hdr, p.body[at:at+min(int(l), flac.MaxFrameHeaderLen-len(*hdr))]...)
+		}
+		at += int(l)
+		if l < 255 {
+			if open {
+				if pts, dur, _, ok := d.mapping.packetTiming(*hdr, 0); ok {
+					*end = pts + dur
+				}
+			}
+			open, fresh = false, true
+		}
+	}
+	return open
+}
+
+// firstFrameOn is the raw position of the first frame that begins on p, off
+// its own header, when one does and its header reads.
+func (d *Demuxer) firstFrameOn(p *page) (int64, bool) {
+	at, i := 0, 0
+	if p.flags&flagContinued != 0 {
+		for i < len(p.lacing) { // the tail of a frame begun on an earlier page
+			l := p.lacing[i]
+			at += int(l)
+			i++
+			if l < 255 {
+				break
+			}
+		}
+	}
+	if i == len(p.lacing) {
+		return 0, false
+	}
+	pts, _, _, ok := d.mapping.packetTiming(p.body[at:], 0)
+	return pts, ok
+}
+
+// raw maps a page granule onto the raw packet timeline: the granule less the
+// initial granule position, saturating at the top of the range. A page with no
+// granule, or one before the stream's own start, maps to -1.
+func (d *Demuxer) raw(granule int64) int64 {
+	switch {
+	case granule < 0 || granule < d.initialGranule:
+		return -1
+	case d.initialGranule < 0 && granule > math.MaxInt64+d.initialGranule:
+		return math.MaxInt64
+	}
+	return granule - d.initialGranule
 }
 
 // granuleAt finds the first page of our serial at or after off (bounded by
 // limit) that completes a packet, and returns its offset and granule position.
+// A disowned first page places nothing, so it is passed over, which matters
+// where the first packet begins pages before it.
 func (d *Demuxer) granuleAt(off, limit int64) (int64, int64, bool, error) {
 	var p page
 	for off < limit {
@@ -833,7 +1347,7 @@ func (d *Demuxer) granuleAt(off, limit int64) (int64, int64, bool, error) {
 		if err != nil || !ok || at >= limit {
 			return 0, 0, false, err
 		}
-		if p.serial == d.serial && p.granule >= 0 && p.flags&flagBOS == 0 {
+		if p.serial == d.serial && p.granule >= 0 && p.flags&flagBOS == 0 && at != d.disowned {
 			return at, p.granule, true, nil
 		}
 		off = at + p.size

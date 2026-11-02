@@ -222,6 +222,21 @@ func TestHybridFragmentedMP4DecodesWhole(t *testing.T) {
 	})
 }
 
+// fragmentedAAC has ffmpeg write 6 s of mono fragmented AAC at rate, whose last
+// access unit runs past its trun duration, and returns its path and bytes.
+func fragmentedAAC(t *testing.T, rate int) (string, []byte) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "frag.mp4")
+	testutil.FFmpegGenerateDuration(t, path, 6, rate, 1, "aac", "-b:a", "128k",
+		"-frag_duration", "1000000", "-movflags",
+		"+frag_keyframe+empty_moov+default_base_moof+global_sidx")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path, raw
+}
+
 // TestFragmentedLengthWalkedAndNot is a decision stated as a test, not a
 // surprise found in one. A fragmented AAC file whose head declares a length
 // gives two numbers, and both are right by the length contract:
@@ -243,14 +258,7 @@ func TestFragmentedLengthWalkedAndNot(t *testing.T) {
 	testutil.FFmpeg(t)
 	e := waxflow.New()
 	const rate = 44100
-	path := filepath.Join(t.TempDir(), "frag.mp4")
-	testutil.FFmpegGenerateDuration(t, path, 6, rate, 1, "aac", "-b:a", "128k",
-		"-frag_duration", "1000000", "-movflags",
-		"+frag_keyframe+empty_moov+default_base_moof+global_sidx")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	path, raw := fragmentedAAC(t, rate)
 
 	read := func(walk bool) int64 {
 		t.Helper()
@@ -302,14 +310,7 @@ func TestFragmentedTranscodeToAPipeCommitsTheWalkedCount(t *testing.T) {
 	testutil.FFmpeg(t)
 	e := waxflow.New()
 	const rate = 44100
-	path := filepath.Join(t.TempDir(), "frag.mp4")
-	testutil.FFmpegGenerateDuration(t, path, 6, rate, 1, "aac", "-b:a", "128k",
-		"-frag_duration", "1000000", "-movflags",
-		"+frag_keyframe+empty_moov+default_base_moof+global_sidx")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	path, raw := fragmentedAAC(t, rate)
 	med, err := e.OpenStream(container.BytesSource(raw), "")
 	if err != nil {
 		t.Fatal(err)

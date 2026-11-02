@@ -105,6 +105,23 @@ func SyncOK(b []byte) bool {
 	return len(b) >= 2 && b[0] == 0xFF && b[1]&0xFE == 0xF8
 }
 
+// subframeBits is the sample width channel c's subframe codes at: one more
+// than the stream's for the side channel of a decorrelated pair.
+func (fi FrameInfo) subframeBits(c, bits int) uint {
+	switch {
+	case (fi.assign == assignLeftSide || fi.assign == assignMidSide) && c == 1,
+		fi.assign == assignRightSide && c == 0:
+		return uint(bits) + 1
+	}
+	return uint(bits)
+}
+
+// crcCloses reports whether b ends in the CRC-16 of what precedes it.
+func crcCloses(b []byte) bool {
+	n := len(b) - 2
+	return n >= 0 && CRC16(b[:n]) == uint16(b[n])<<8|uint16(b[n+1])
+}
+
 // ParseFrameHeader parses and CRC-checks the frame header at the start of
 // b. It needs at most MaxFrameHeaderLen bytes; short input where the
 // header is truncated is an error. Rate and Bits stay 0 when the header

@@ -561,26 +561,9 @@ func (e *Encoder) writeFrameHeader(n, assign int) {
 // writeCodedNumber emits the UTF-8-like variable-length integer frame
 // headers carry, up to 36 bits.
 func (e *Encoder) writeCodedNumber(v uint64) {
-	w := &e.w
-	if v < 0x80 {
-		w.writeBits(8, v)
-		return
-	}
-	// An encoding of total bytes holds 6*(total-1) continuation bits plus
-	// 7-total lead bits: 11 bits at two bytes, five more per byte after.
-	total := 2
-	for lim := uint64(1) << 11; v >= lim && total < 7; total++ {
-		lim <<= 5
-	}
-	lead := uint64(0xFF<<(8-total)) & 0xFF
-	payload := uint(6 * (total - 1))
-	head := 8 - total - 1 // payload bits in the lead byte
-	if head < 0 {
-		head = 0
-	}
-	w.writeBits(8, lead|(v>>payload)&(1<<uint(head)-1))
-	for i := total - 2; i >= 0; i-- {
-		w.writeBits(8, 0x80|(v>>(6*uint(i)))&0x3F)
+	var b [7]byte
+	for _, x := range appendCoded(b[:0], v) {
+		e.w.writeBits(8, uint64(x))
 	}
 }
 

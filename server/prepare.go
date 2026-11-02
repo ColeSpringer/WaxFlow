@@ -115,7 +115,7 @@ func (s *Server) prepareSource(ctx context.Context, q url.Values, sigAuthed bool
 	// does; what a header on a pipe would otherwise commit is confirmed by the
 	// transcode itself.
 	if track.SamplesAdvisory || (track.Samples < 0 && waxflow.StatesTrimsPerPacket(info.Container)) {
-		if track, err = s.trackFor(src, true); err != nil {
+		if track, err = s.trackFor(ctx, src, true); err != nil {
 			src.Close()
 			return nil, err
 		}
@@ -138,7 +138,7 @@ func (s *Server) prepareSource(ctx context.Context, q url.Values, sigAuthed bool
 		// dies part way through delivery. A source that counts its own samples
 		// reaches the measure only here, since an ordinary stream of one
 		// depends on no number and must not pay for a walk to be told it.
-		if track, err = s.trackFor(src, true); err != nil {
+		if track, err = s.trackFor(ctx, src, true); err != nil {
 			src.Close()
 			return nil, err
 		}
@@ -172,7 +172,7 @@ func (s *Server) prepareSource(ctx context.Context, q url.Values, sigAuthed bool
 // planTranscode runs the shared transcode-shaped back half: resolve
 // format=auto, plan the pipeline, and enforce the streaming-form and
 // bitrate-cap policies identically for /stream and /transcode.
-func (s *Server) planTranscode(req *streamRequest) error {
+func (s *Server) planTranscode(ctx context.Context, req *streamRequest) error {
 	opts, err := s.streamOptions(req.p, req.gainDB, req.from)
 	if err != nil {
 		return err
@@ -194,7 +194,7 @@ func (s *Server) planTranscode(req *streamRequest) error {
 	// container.Track.MidPadding).
 	if req.remux = s.remuxPlanFor(req); req.remux != nil {
 		req.plan = &req.remux.TranscodePlan
-	} else if req.cut = s.cutPlanFor(req); req.cut != nil {
+	} else if req.cut = s.cutPlanFor(ctx, req); req.cut != nil {
 		req.plan = &req.cut.TranscodePlan
 	} else {
 		plan, err := s.eng.PlanTranscode(req.track, req.opts)
@@ -341,7 +341,7 @@ func (s *Server) remuxPlanFor(req *streamRequest) *waxflow.RemuxPlan {
 // early gates. See the reachability note in the API docs: the cut is reached
 // only with a source-matching format (format=opus, or format=aac for AAC-LC),
 // since format=auto may resolve to a codec the source is not.
-func (s *Server) cutPlanFor(req *streamRequest) *waxflow.CutPlan {
+func (s *Server) cutPlanFor(ctx context.Context, req *streamRequest) *waxflow.CutPlan {
 	if !req.p.span.narrowed() {
 		return nil // not a span: there is nothing for this rung to cut.
 	}
@@ -357,7 +357,7 @@ func (s *Server) cutPlanFor(req *streamRequest) *waxflow.CutPlan {
 		// source's real bit rate is in its packets, so it cannot promise a cap.
 		return decline("a bit rate cap cannot be promised by a packet-move rung")
 	}
-	track, err := s.trackFor(req.src, true)
+	track, err := s.trackFor(ctx, req.src, true)
 	if err != nil {
 		// prepareSource already measured this on the span branch, so an error
 		// here is not expected; decline rather than fail, and let the transcode

@@ -7,20 +7,16 @@ import (
 	"testing"
 )
 
-// Media Foundation truncates. Measured here over rounds of the WMA Voice
-// corpus, roughly one transcode in ten returns success having written a
-// valid but short file -- 6195 bytes of a 12897-byte cell, declaring 1.741
-// seconds of a 3.984-second source -- and the same input transcodes
-// correctly on the next attempt. It happens with the source and the
-// destination both on Windows-local storage, so it is the transcoder and
-// not the path, and the scripts cannot see it: their check is that the
-// output is not empty.
+// Windows' WMA Voice encoder can return success with a valid but short file:
+// drained too early, it drops the 1.8 seconds it holds. scripts/wmfenc/wmfenc.ps1
+// drives that encoder itself for that reason, and says how. The other encoders
+// and the decoder stay on MediaTranscoder, which delivered them whole.
 //
-// A short cell is worse than a failed one. It is a legal file, so it
-// decodes, and the corpus quietly becomes a corpus of truncated material
-// with the tail coverage it was built for missing. So every encode and
-// decode is measured against its source's duration and retried, and a run
-// that never lands fails by name.
+// A short file still decodes, so a corpus would quietly lose its tails. Every
+// encode and decode is held to its source's duration here, and one that runs a
+// tenth or more short fails by name. A smaller loss passes this check: the Pro,
+// Lossless and Voice cells also assert exact decoded counts, and the v2 cells
+// rest on this floor alone.
 
 // durationCheck compares a transcode's output duration against its input's
 // and reports whether the output is long enough to be the whole thing.
@@ -102,9 +98,8 @@ func asfDuration(b []byte) float64 {
 	return 0
 }
 
-// wmfShortf formats the message a run that never landed fails with.
-func wmfShortf(what string, got, want float64, tries int) string {
-	return fmt.Sprintf("%s came back %.3fs of a %.3fs source after %d attempts: "+
-		"Media Foundation truncates a transcode now and then, and this one never landed",
-		what, got, want, tries)
+// wmfShortf formats the message a short transcode fails with.
+func wmfShortf(what string, got, want float64) string {
+	return fmt.Sprintf("%s came back %.3fs of a %.3fs source: a valid file missing its tail (see wmfcheck.go)",
+		what, got, want)
 }

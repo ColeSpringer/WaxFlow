@@ -1,28 +1,5 @@
 # Deferred work
 
-## A split piece that runs short is written as if whole
-
-**Where:** `cli/split.go` `writePiece`; the daemon's split runner
-(`internal/jobs/runner.go`), whose last span is `ToEnd` too.
-
-**What:** a piece whose source delivers fewer samples than its span, but not
-none, is written short and the split reports success. `Slice` holds a
-bounded window to its length, but the last piece is open-ended. Both
-splitters refuse an empty piece. The one known cause was a WMA v1/v2 landing
-taken from ASF's stamps (a split of `sine-s16.wma` at 20000 wrote a second
-piece 33 samples short); that landing is now counted from the frames and
-exact, but nothing below the splitters would notice the next cause.
-
-**Why deferred:** `TranscodeResult.Samples` counts output frames, so a check
-against the span misfires on any resampled output (Opus at 48 kHz from a
-44.1 kHz source); zero is the one count that is wrong at every rate. A
-correct check counts the source frames the slice delivered, which means
-wrapping the slice (hiding its `LengthConfirmer` from the engine) or holding
-an open-ended `Slice` to an exact total; both reach past the splitters, and
-the landing fix removed the known cause.
-
-**Found by:** the review of the measure export, 2026-10-29.
-
 ## m3u8 cannot say that a variant's audio is a rendition
 
 **Where:** `m3u8/parse.go` `ParseMaster` and `MasterVariant`; felt by any
@@ -43,3 +20,20 @@ them, while nothing this repo writes has one.
 
 **Found by:** the third-party review's point that `ParseMedia` read past
 `EXT-X-BYTERANGE` and `EXT-X-KEY`, while fixing it, 2026-10-30.
+
+## A header walk runs to its end after a cancel
+
+**Where:** `format.Walker.Walk` and `container.Walker.Walk` (fourteen
+implementations) and the window readers under them (`srcwin`,
+`mpegframes`).
+
+**What:** `waxflow.MeasureLength` stops a decode count when its context
+ends, and a caller left waiting on another's canceled measure measures
+again, but a header walk (an MP3's frame index, a Matroska cluster walk, an
+ASF frame index) runs to its end first. Sources are local files, so that is
+one read of the file's headers at disk speed: 6 ms for a 15-minute Xing MP3.
+
+**Why deferred:** a judgment call, open to override. A context there reaches
+every Walk and the readers beneath it, for a wait the size of one header read.
+
+**Found by:** the third-party review of the open-span hold, 2026-11-01.

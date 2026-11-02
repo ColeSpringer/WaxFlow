@@ -8,6 +8,7 @@ import (
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/internal/testutil"
 )
@@ -307,5 +308,54 @@ func TestMuxForwardsPerPacketTrims(t *testing.T) {
 	if tr.Samples != p.Samples() || tr.Padding != p.EndPad || tr.MidPadding != p.MidPad {
 		t.Errorf("the copy settles %d samples, Padding %d, MidPadding %d; the source settles %d/%d/%d",
 			tr.Samples, tr.Padding, tr.MidPadding, p.Samples(), p.EndPad, p.MidPad)
+	}
+}
+
+// muxFLACFrom encodes a ramp, its frames numbered from first, into a Matroska
+// FLAC on a destination the muxer can seek.
+func muxFLACFrom(t *testing.T, first int64) []byte {
+	t.Helper()
+	f := audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
+	enc, err := flac.NewEncoder(f, &flac.EncoderOptions{Level: 5, FirstFrame: first})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := &memWS{}
+	m := NewMuxer(ws, nil)
+	const frames = 10
+	n := frames * enc.FrameSize()
+	if err := m.Begin([]container.Track{{Codec: codec.FLAC, CodecConfig: enc.CodecConfig(), Fmt: f, Samples: int64(n)}}); err != nil {
+		t.Fatal(err)
+	}
+	emit := func(p codec.Packet) error { return m.WritePacket(container.Packet{Packet: p}) }
+	chunk := audio.Get(f, enc.FrameSize())
+	defer audio.Put(chunk)
+	for k := range frames {
+		chunk.N = enc.FrameSize()
+		for c := range f.Channels {
+			for i, ch := 0, chunk.ChanI(c); i < len(ch); i++ {
+				ch[i] = int32((k*enc.FrameSize()+i)*(c+1)*37%2000 - 1000)
+			}
+		}
+		if err := enc.Encode(chunk, emit); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tr, err := enc.Finish(emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.End(tr); err != nil {
+		t.Fatal(err)
+	}
+	return ws.Buf
+}
+
+// TestMuxerNumbersFLACFramesFromZero: FLAC frames that arrive numbered from
+// past 0 are written numbered from 0, as RFC 9639 counts a stream's: an encode
+// whose frames start at 1000 muxes to the bytes of one whose frames start at 0.
+func TestMuxerNumbersFLACFramesFromZero(t *testing.T) {
+	if want, got := muxFLACFrom(t, 0), muxFLACFrom(t, 1000); !bytes.Equal(got, want) {
+		t.Fatalf("frames numbered from 1000 mux to %d bytes unlike those numbered from 0 (%d)", len(got), len(want))
 	}
 }

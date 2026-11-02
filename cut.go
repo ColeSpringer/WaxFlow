@@ -130,28 +130,16 @@ type cutCodec struct {
 //     hole is invisible today only because rung 1 direct-plays format=mp3; this
 //     rung is the first thing that could reach it.
 //   - FLAC fails on frame numbering, but only for a multi-span cut, which is the
-//     shape the sponsor-segment ask actually is. Numbering.Next is relative to
-//     the preceding frame rather than anchored to zero, so a contiguous cut (a
-//     head-only or tail-only one) re-reads clean; a gap in the ordinals does
-//     not, because flacn's demuxer treats ordinal succession as a hard per-frame
-//     invariant when it locates a packet's end. What that costs is measured in
-//     TestCutFLACMultiSpanBreaks rather than guessed at, and it is worse than a
-//     hard failure would be: the boundary scan wants the missing ordinal, never
-//     finds it, and runs on until a CRC confirms at a later frame's end (every
-//     FLAC frame's CRC-16 covers its own trailer, so the running CRC resets at
-//     every boundary and confirms at "boundary plus k whole frames" too). The
-//     read returns one glued packet declaring a single frame's duration, the
-//     decoder decodes its first frame and drops the rest, and the stream ends in
-//     a clean io.EOF having silently swallowed a quarter of the kept audio. No
-//     error is raised anywhere. Its STREAMINFO MD5 also goes stale with no way
-//     to say "unknown" through MuxerOptions.MD5's nil-means-inherit contract,
-//     and its PTS rides the frame's own coded number rather than the container,
-//     so retiming the wrapper's PTS cannot make a re-read agree with the cut
-//     length. And the clincher that makes all of it moot: FLAC is lossless, so
-//     rung 3 re-encodes it for CPU and zero generation loss, and
-//     EncoderOptions.FirstFrame already exists so that rung can number a
-//     mid-stream slice correctly. That is what this problem's solution looks
-//     like, on the encode side, where it belongs.
+//     shape the sponsor-segment ask actually is. A contiguous cut (head-only or
+//     tail-only) re-reads clean, since numbering is relative to the preceding
+//     frame; a gap in the ordinals reads as a hole, the cut-out span coming
+//     back as silence with a warning (TestCutFLACMultiSpanReadsAsAHole). The
+//     copy rung numbers its frames afresh (flac.Numberer), which would close
+//     the gap for a cut written through it, but the STREAMINFO MD5 would go
+//     stale: the rung clears an inherited signature only for a source whose
+//     first frame says it was cut. And FLAC is lossless, so rung 3 re-encodes
+//     it for CPU and zero generation loss, with EncoderOptions.FirstFrame
+//     numbering a mid-stream slice, which is where this belongs.
 //   - Vorbis overlap-adds with its predecessor, and the first packet to arrive
 //     is treated as priming and emits nothing. packetGrid's prev <= 0 clause
 //     already excludes it; it is named here anyway, because a rule that holds by
@@ -242,6 +230,12 @@ type cutResult struct {
 	track   container.Track
 	landed  []Span
 	windows []cutWindow
+	// lastEnd is the raw end of the audio the cut asked for, which the walk
+	// must reach before EOF when the cut's length is exact; -1 otherwise.
+	lastEnd int64
+	// blind marks a source whose total was absent or advisory, so its cut
+	// points were checked against nothing (see slice.blind).
+	blind bool
 	// trims is the source's inner trims the windows were placed around, the
 	// ones the view forwards; a packet carrying any other refuses.
 	trims []container.PacketTrim
@@ -855,7 +849,15 @@ func computeCut(track container.Track, opts TranscodeOptions, spans []Span, grid
 		// reaches the source's end, so it ends where the packets do.
 		windows[n-1].to = -1
 	}
-	return &cutResult{track: out, landed: landed, windows: windows, trims: track.MidTrims}, nil
+	// What the walk must reach before EOF (cutDemuxer.endOfPackets): the end of
+	// the audio the last span asked for, not its trailing padding, held when
+	// the cut's length is exact, which a bounded cut's always is.
+	lastEnd := int64(-1)
+	if out.SamplesExact && out.Samples >= 0 {
+		lastEnd = dt[n-1]
+	}
+	return &cutResult{track: out, landed: landed, windows: windows, lastEnd: lastEnd,
+		blind: track.Samples < 0 || track.SamplesAdvisory, trims: track.MidTrims}, nil
 }
 
 // adoptMeasured overlays onto a fresh header open the facts only a measurement
@@ -878,7 +880,8 @@ func adoptMeasured(track, measured container.Track) container.Track {
 
 // Cut returns a view of demux holding only track's packets that fall in spans,
 // retimed to be contiguous: the packet-domain sibling of Slice, and the input
-// side of a cut.
+// side of a cut. As with Slice, a source that runs out before the end the cut
+// is held to fails the read instead of ending early.
 //
 // It is a wrapper rather than a TranscodeOptions field for the reason Slice is,
 // and for one more that is this rung's own. The remux rung shares
@@ -908,7 +911,8 @@ func Cut(demux container.Demuxer, track container.Track, opts TranscodeOptions, 
 	if err != nil {
 		return nil, err
 	}
-	return &cutDemuxer{Demuxer: demux, cut: res.track, track: track.ID, windows: res.windows, trims: res.trims}, nil
+	return &cutDemuxer{Demuxer: demux, cut: res.track, track: track.ID, windows: res.windows, damage: container.DamageOf(demux),
+		lastEnd: res.lastEnd, blind: res.blind, trims: res.trims}, nil
 }
 
 // cutDemuxer is Cut's view: the windows in source raw coordinates, the walk's
@@ -918,6 +922,9 @@ type cutDemuxer struct {
 	cut     container.Track
 	track   int
 	windows []cutWindow
+	lastEnd int64                  // the raw end the walk is held to, -1 when not held
+	blind   bool                   // the source's total was absent or advisory
+	damage  int                    // the source's damage warnings when the view was made
 	trims   []container.PacketTrim // the source's inner trims the plan placed
 	cur     int
 	pos     int64 // the next source packet's raw position
@@ -964,11 +971,23 @@ func (c *cutDemuxer) ReadPacket(pkt *container.Packet) error {
 			return io.EOF
 		}
 		if err := c.Demuxer.ReadPacket(pkt); err != nil {
+			if err == io.EOF {
+				return c.endOfPackets()
+			}
 			return err
 		}
 		if pkt.Track != c.track {
 			continue
 		}
+		// A hole is source time: the packet starts past it. One in a gap goes
+		// with the gap; silence inside a window would move the trims the plan
+		// placed there, so a hole the windows keep any of is refused.
+		if kept := c.keptIn(c.pos, c.pos+pkt.Lost); kept > 0 {
+			return waxerr.New(waxerr.CodeMalformedInput, fmt.Sprintf(
+				"waxflow: damage took %d samples inside the cut, before sample %d, which a copy cannot place; transcode it",
+				kept, c.pos+pkt.Lost))
+		}
+		c.pos, pkt.Lost = c.pos+pkt.Lost, 0
 		start, end := c.pos, c.pos+pkt.Dur
 		c.pos = end
 		// Something followed the previous packet, so its trim was an inner one
@@ -1025,6 +1044,34 @@ func (c *cutDemuxer) ReadPacket(pkt *container.Packet) error {
 		c.out += pkt.Dur - pad
 		return nil
 	}
+}
+
+// keptIn is how much of the source span [from, to) the windows from the
+// current one on keep.
+func (c *cutDemuxer) keptIn(from, to int64) int64 {
+	var n int64
+	for _, w := range c.windows[c.cur:] {
+		end := to
+		if w.to >= 0 {
+			end = min(end, w.to)
+		}
+		if lo := max(from, w.from); end > lo {
+			n += end - lo
+		}
+	}
+	return n
+}
+
+// endOfPackets answers the source running out of packets as a slice answers
+// its source running out: short of the held end (lastEnd), it fails with the
+// slice's codes, an invalid request when no stated total checked the cut and
+// malformed input otherwise. Otherwise the walk ends where the packets do.
+func (c *cutDemuxer) endOfPackets() error {
+	if c.pos >= c.lastEnd || container.DamageOf(c.Demuxer) > c.damage {
+		return io.EOF // reached, or short with the damage reported on the way
+	}
+	return shortSource(fmt.Sprintf("waxflow: the source's packets end at %d, short of the cut window ending at %d",
+		c.pos, c.lastEnd), c.blind)
 }
 
 func cutStraddle(start, end, at int64) error {
@@ -1218,7 +1265,7 @@ func cutTrimsExpressible(containerName string, delay, padding int64) bool {
 // around them, opening the source itself: the run half of the cut rung, and the
 // packet-move sibling of Remux. No decode, no DSP, no encode, so no generation
 // loss; the output holds the kept access units byte for byte, retimed to be
-// contiguous.
+// contiguous. A source that runs out early fails the run, as Cut describes.
 //
 // opts and spans must be a pair PlanCut accepted; a request it declines is an
 // error here rather than a silent re-encode, for the reason Remux gives about

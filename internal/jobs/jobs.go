@@ -199,8 +199,10 @@ func (req Request) Skipped(i int) bool {
 
 // SplitSpans resolves Cuts into the [from, to) span of each piece, in order,
 // against a source of total samples (negative when the headers do not declare
-// one). to is waxflow.ToEnd for the last piece, which inherits whatever the
-// source turns out to hold rather than being held to a declaration.
+// one). to is waxflow.ToEnd for the last piece, which ends where the source
+// does rather than at a cut; the run holds it to the header's length when that
+// is exact, and to a measure when it is not and one is to be had (see
+// runSplit).
 //
 // It is the single funnel for the cut arithmetic, in the SpanTrack spirit and
 // for the same reason: the server validates cuts at creation and the runner

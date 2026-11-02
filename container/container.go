@@ -214,8 +214,9 @@ type Track struct {
 	//
 	// It is set by a measurement, never by a header alone. A demuxer that
 	// verifies its declared total against the payload at open sets it (flacn
-	// and wv scan their tail for the closing frame, Ogg-FLAC reads the final
-	// page granule), and one that defers that work sets it when Walk finishes.
+	// and wv scan their tail for the closing frame, Ogg-FLAC reads the last
+	// whole frame in its tail), and one that defers that work sets it when
+	// Walk finishes.
 	// A total nothing checked leaves it false, so a mismatch stays a tolerated
 	// oddity rather than a truncation.
 	SamplesExact bool
@@ -231,7 +232,7 @@ type Track struct {
 	// whose open verified its declared total against the payload, are exact
 	// outright.
 	//
-	// Four shapes reach it, for three different reasons. Two containers state a
+	// Six shapes reach it, for four different reasons. Two containers state a
 	// duration in a time unit and have no sample count at all: ASF, in
 	// 100-nanosecond ticks its own muxer accumulates from
 	// millisecond-truncated packet times, and Matroska when it falls back to
@@ -262,6 +263,10 @@ type Track struct {
 	// checks. A segment index is not advisory, because it counts subsegments
 	// of this file; it is declared, like a sample table. Walk settles either.
 	//
+	// The sixth is damage: an Ogg stream whose last page completing a packet
+	// states no granule. The last granule stated is short of the packets
+	// after it, and nothing says where they end.
+	//
 	// Three things read it. A timeline refuses such a member, since a prefix
 	// sum cannot survive the drift; measure it first (see ConcatSource.Track).
 	// format.Media will not cap a decode at a rounded total, which it would
@@ -269,6 +274,11 @@ type Track struct {
 	// transcode projects no length into its muxer's headers from one, since a
 	// projection the encoder then misses is a write failure.
 	SamplesAdvisory bool
+	// SamplesCounted marks an exact Samples counted by decoding the whole
+	// stream, waxflow.MeasureLength's last route. A decode of the same source
+	// that then delivers less is the build disagreeing with itself, not the
+	// file holding less, and a span says so.
+	SamplesCounted bool
 	// SourceBitDepth is the depth the source stores samples at when that
 	// differs from Fmt.BitDepth, 0 when the two agree. Two cases reach it.
 	// audio.Format carries floats as float32, so a 64-bit float source
@@ -356,6 +366,13 @@ type Packet struct {
 	// decline before a packet carrying an inner trim moves (see
 	// Track.MidPadding).
 	Padding int64
+	// Lost is the number of samples a hole just before this packet took, as
+	// the container's own positions measure it (FLAC frames carry theirs). A
+	// reader delivers that many samples of silence before this packet's
+	// output, so everything after a hole sits where the stream places it and
+	// a declared exact length is still what a read delivers. Zero except on
+	// the first packet after a hole, which also has Discont set.
+	Lost int64
 	codec.Packet
 }
 
@@ -443,6 +460,30 @@ type Warning struct {
 // a decoder limitation against a well-formed file.
 type Warner interface {
 	Warnings() []Warning
+}
+
+// Damaged is implemented by a demuxer that counts the damage it meets, every
+// warn its Warnings list's cap and de-duplication keep out included, so a
+// caller can tell whether a read met any since it last looked.
+type Damaged interface {
+	DamageCount() int
+}
+
+// DamageOf is the damage d has met: its own count where it keeps one, else the
+// Damage entries among its warnings.
+func DamageOf(d Demuxer) int {
+	if c, ok := d.(Damaged); ok {
+		return c.DamageCount()
+	}
+	n := 0
+	if w, ok := d.(Warner); ok {
+		for _, x := range w.Warnings() {
+			if x.Kind == Damage {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // Walker is implemented by demuxers whose open defers a walk of the payload:

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -400,24 +401,289 @@ func TestSliceBlindSpanOutrunningItsSourceIsABadRequest(t *testing.T) {
 	}
 }
 
-// declaringMedia reports a total of its own in place of the source's.
+// TestSliceOpenSpanOfAnExactSourceThatEndsEarlyFails: an open span over a
+// length its source stands behind fails a short delivery, with a code naming
+// whose length was wrong: a decode count is internal, a file's claim malformed.
+func TestSliceOpenSpanOfAnExactSourceThatEndsEarlyFails(t *testing.T) {
+	const frames, from, at = 10000, 1000, 4000
+	const want = "ended 4000 samples into a span that declared 9000"
+	raw, _ := ratedWAV(t, 48000, 1, frames, 9)
+	e := waxflow.New()
+	for _, tc := range []struct {
+		name string
+		// source dresses the truncated WAV as the origin of its length.
+		source func(short format.Media) format.Media
+		code   waxerr.Code
+	}{
+		{"a declared exact length", func(m format.Media) format.Media { return m }, waxerr.CodeMalformedInput},
+		{"a measure counted by decoding", func(m format.Media) format.Media {
+			return waxflow.MeasuredMedia(&declaringMedia{Media: m, samples: frames, advisory: true}, countedLen(frames))
+		}, waxerr.CodeInternal},
+		{"a decode count behind a wrapper", func(m format.Media) format.Media {
+			return struct{ format.Media }{waxflow.MeasuredMedia(m, countedLen(frames))}
+		}, waxerr.CodeInternal},
+		{"a measure found by seeking past the end", func(m format.Media) format.Media {
+			return waxflow.MeasuredMedia(&declaringMedia{Media: m, samples: frames}, measuredLen(frames))
+		}, waxerr.CodeMalformedInput},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := tc.source(shortWAV(t, e, raw, at))
+			sl, err := waxflow.Slice(src, from, waxflow.ToEnd)
+			if err != nil {
+				src.Close()
+				t.Fatal(err)
+			}
+			defer sl.Close()
+			_, err = readToFailure(t, sl)
+			wantShort(t, err, tc.code, want)
+		})
+	}
+
+	// The golden's sample table counts 960 samples a packet and its Opus
+	// packets hold 480, so the seek route measures past what a read delivers.
+	t.Run("a measure read off a sample table", func(t *testing.T) {
+		open := opener(t, filepath.Join("..", "container", "mp4", "testdata", "golden", "golden-progressive-opus.mp4"), "mp4")
+		first := open()
+		track, err := waxflow.MeasureLength(t.Context(), first)
+		first.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if track.Samples != 6888 {
+			t.Fatalf("the golden measures %d samples, want the 6888 its sample table states", track.Samples)
+		}
+		if held := readLength(t, open()); held >= track.Samples {
+			t.Fatalf("a read of the golden delivers %d of its measured %d; this cell needs one that runs short",
+				held, track.Samples)
+		}
+		sl, err := waxflow.SliceMeasured(open(), track, from, waxflow.ToEnd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer sl.Close()
+		n, err := readToFailure(t, sl)
+		wantShort(t, err, waxerr.CodeMalformedInput,
+			fmt.Sprintf("ended %d samples into a span that declared %d", n, track.Samples-from))
+	})
+}
+
+// TestSliceShortOfADecodedCountIsInternal: a bounded span declares its own
+// arithmetic, but a source ending inside it is judged by where the source's
+// total came from, as an open span's is. Counted by decoding the very source
+// that then delivered less, the shortfall is the engine's own.
+func TestSliceShortOfADecodedCountIsInternal(t *testing.T) {
+	const frames, at = 10000, 4000
+	raw, _ := ratedWAV(t, 48000, 1, frames, 9)
+	src := waxflow.MeasuredMedia(&declaringMedia{Media: shortWAV(t, waxflow.New(), raw, at),
+		samples: frames, advisory: true}, countedLen(frames))
+	sl, err := waxflow.Slice(src, 1000, 9000)
+	if err != nil {
+		src.Close()
+		t.Fatal(err)
+	}
+	defer sl.Close()
+	_, err = readToFailure(t, sl)
+	wantShort(t, err, waxerr.CodeInternal, "ended 4000 samples into a span that declared 8000")
+}
+
+// TestSliceOpenSpanOfAnUnverifiedSourceEndsQuietly: a source that does not
+// stand behind its total gives an open span no length to hold it to, so the
+// span ends where the audio does, as the unsliced source would.
+func TestSliceOpenSpanOfAnUnverifiedSourceEndsQuietly(t *testing.T) {
+	const frames, from, at = 10000, 1000, 4000
+
+	// An MP3's Xing count is declared, never verified at open.
+	t.Run("a Xing count", func(t *testing.T) {
+		raw := truncatedMP3(t, 100)
+		whole, err := format.Open(container.BytesSource(raw), "mp3", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		held, err := waxflow.MeasureLength(t.Context(), whole)
+		whole.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		sl, _ := openCountedSlice(t, raw, from, waxflow.ToEnd)
+		declared := sl.Info().Default().Samples
+		if held.Samples-from >= declared {
+			sl.Close()
+			t.Fatalf("the span declares %d and the file holds %d past its start; this cell needs a short source",
+				declared, held.Samples-from)
+		}
+		if got, want := readLength(t, sl), held.Samples-from; got != want {
+			t.Errorf("the span delivered %d samples, want the %d the file holds", got, want)
+		}
+	})
+
+	raw, _ := ratedWAV(t, 48000, 1, frames, 9)
+	e := waxflow.New()
+	for _, tc := range []struct {
+		name     string
+		samples  int64
+		advisory bool
+	}{
+		{"an advisory total", frames, true},
+		{"an unknown total", -1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := &declaringMedia{Media: shortWAV(t, e, raw, at), samples: tc.samples, advisory: tc.advisory}
+			sl, err := waxflow.Slice(src, from, waxflow.ToEnd)
+			if err != nil {
+				src.Close()
+				t.Fatal(err)
+			}
+			if got := readLength(t, sl); got != at {
+				t.Errorf("the span delivered %d samples, want the %d the source holds past its start", got, at)
+			}
+		})
+	}
+}
+
+// TestSliceOpenSpanAllowsAnOverDeliveringSource: an open span is held against
+// a shortfall only, so an un-walked fragmented movie that delivers past its
+// walked measure (see TestFragmentedLengthWalkedAndNot) ends cleanly.
+func TestSliceOpenSpanAllowsAnOverDeliveringSource(t *testing.T) {
+	testutil.FFmpeg(t)
+	const from = 1000
+	_, raw := fragmentedAAC(t, 44100)
+	e := waxflow.New()
+	open := func() format.Media {
+		t.Helper()
+		med, err := e.OpenStream(container.BytesSource(raw), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return med
+	}
+	first := open()
+	walked, err := waxflow.MeasureLength(t.Context(), first)
+	first.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := waxflow.MeasuredMedia(open(), walked)
+	sl, err := waxflow.Slice(src, from, waxflow.ToEnd)
+	if err != nil {
+		src.Close()
+		t.Fatal(err)
+	}
+	span := sl.Info().Default()
+	if !span.SamplesExact {
+		sl.Close()
+		t.Fatalf("the span's length is not exact (%+v); this cell needs one the source stands behind", span)
+	}
+	if got := readLength(t, sl); got <= span.Samples {
+		t.Errorf("the span delivered %d of the %d it declared; this cell needs a source that delivers past its measure",
+			got, span.Samples)
+	}
+}
+
+// shortWAV opens raw, a WAV, as a Media whose stream stops after at delivered
+// samples while riff still declares the whole length, exactly.
+func shortWAV(t *testing.T, e *waxflow.Engine, raw []byte, at int64) format.Media {
+	t.Helper()
+	med, err := e.OpenStream(container.BytesSource(raw), "wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &truncatedMedia{Media: med, at: at}
+}
+
+// readToFailure reads med until it fails and returns the samples it delivered
+// first and the error. A clean end fails the test: it is the short stream a
+// length the source stood behind rules out.
+func readToFailure(t *testing.T, med format.Media) (int64, error) {
+	t.Helper()
+	n, err := readCount(med)
+	if err == nil {
+		t.Fatalf("the stream ended cleanly after %d samples; a short delivery must fail", n)
+	}
+	return n, err
+}
+
+// wantShort checks that err refuses a short delivery with code and names the
+// counts in want.
+func wantShort(t *testing.T, err error, code waxerr.Code, want string) {
+	t.Helper()
+	if got := waxerr.CodeOf(err); got != code {
+		t.Errorf("code = %s, want %s: %v", got, code, err)
+	}
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %v, want it to say %q", err, want)
+	}
+}
+
+// measuredLen is a measure of n samples; countedLen one MeasureLength counted
+// by decoding.
+func measuredLen(n int64) container.Track { return container.Track{Samples: n} }
+func countedLen(n int64) container.Track  { return container.Track{Samples: n, SamplesCounted: true} }
+
+// TestMeasureLengthMarksADecodeCount: only a length MeasureLength counted by
+// decoding is marked so, the mark a short span reads its code from. One a
+// walk settles is not, though it was advisory until walked.
+func TestMeasureLengthMarksADecodeCount(t *testing.T) {
+	const frames = 10000
+	raw, _ := ratedWAV(t, 48000, 1, frames, 9)
+	for _, tc := range []struct {
+		name    string
+		dress   func(format.Media) format.Media
+		counted bool
+	}{
+		{"an advisory length", func(m format.Media) format.Media {
+			return &declaringMedia{Media: m, samples: frames, advisory: true}
+		}, true},
+		{"one a walk settles", func(m format.Media) format.Media {
+			return &settlingMedia{declaringMedia{Media: m, samples: frames, advisory: true}}
+		}, false},
+		{"one the open settled", func(m format.Media) format.Media { return m }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			med := tc.dress(openBytes(t, raw, "wav"))
+			defer med.Close()
+			tr, err := waxflow.MeasureLength(t.Context(), med)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tr.Samples != frames || tr.SamplesCounted != tc.counted {
+				t.Errorf("%d samples, counted %v; want %d, counted %v", tr.Samples, tr.SamplesCounted, frames, tc.counted)
+			}
+		})
+	}
+}
+
+// declaringMedia reports a total of its own in place of the source's, exact
+// or advisory as its fields say.
 type declaringMedia struct {
 	format.Media
-	samples  int64
-	advisory bool
+	samples         int64
+	exact, advisory bool
 }
 
 func (m *declaringMedia) Info() *format.Info {
 	in := *m.Media.Info()
 	in.Tracks = slices.Clone(in.Tracks)
 	for i := range in.Tracks {
-		in.Tracks[i].Samples, in.Tracks[i].SamplesAdvisory = m.samples, m.advisory
+		tr := &in.Tracks[i]
+		tr.Samples, tr.SamplesExact, tr.SamplesAdvisory = m.samples, m.exact, m.advisory
 	}
 	return &in
 }
 
+// settlingMedia is a declaringMedia whose walk makes its total exact, as a
+// WMA v1/v2 frame walk settles ASF's rounded duration.
+type settlingMedia struct{ declaringMedia }
+
+func (m *settlingMedia) Walk() error {
+	m.exact, m.advisory = true, false
+	return nil
+}
+
+func (m *settlingMedia) Walked() bool { return m.exact }
+
 // truncatedMedia ends the stream early while its Info still promises the
-// full length.
+// full length. It stops once it has delivered at samples, wherever a seek put
+// it first.
 type truncatedMedia struct {
 	format.Media
 	at   int64

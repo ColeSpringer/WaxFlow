@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -327,6 +328,11 @@ func TestTrailingTags(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// The tail read steps over the tag to the closing frame, so the
+			// length is as exact as the untagged file's.
+			if tr := d.Tracks()[0]; tr.Samples != 15435 || !tr.SamplesExact {
+				t.Errorf("%d samples (exact %v), want 15435 exact", tr.Samples, tr.SamplesExact)
+			}
 			if _, samples := walk(t, d); samples != 15435 {
 				t.Fatalf("walked %d samples (last frame lost to the trailer)", samples)
 			}
@@ -373,13 +379,15 @@ func TestTrailingTags(t *testing.T) {
 // TestStackedTrailersReachTheBound pins what the shared bound buys here. The
 // loop is check-then-peel, so the peel that uncovers the real end is only
 // worth anything if the check runs once more after it: at trailer.Max stacked
-// tags the last frame must still confirm, and one past the bound it must not.
+// tags the trailer is recognized and is a note, and one past the bound it is
+// not, so it is damage. The last frame is delivered either way, since it is
+// whole by its own CRC-16.
 func TestStackedTrailersReachTheBound(t *testing.T) {
 	raw := fixture(t, "sine-s16.flac")
 	for _, c := range []struct {
-		tags int
-		want int64
-	}{{trailer.Max, 15435}, {trailer.Max + 1, 0}} {
+		tags   int
+		damage bool
+	}{{trailer.Max, false}, {trailer.Max + 1, true}} {
 		out := append([]byte(nil), raw...)
 		for range c.tags {
 			out = append(out, apeTag(false)...)
@@ -388,12 +396,12 @@ func TestStackedTrailersReachTheBound(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, samples := walk(t, d)
-		if c.want != 0 && samples != c.want {
-			t.Errorf("%d stacked tags: walked %d samples, want %d", c.tags, samples, c.want)
+		if _, samples := walk(t, d); samples != 15435 {
+			t.Errorf("%d stacked tags: walked %d samples, want 15435", c.tags, samples)
 		}
-		if c.want == 0 && samples == 15435 {
-			t.Errorf("%d stacked tags: walked the whole stream past the bound", c.tags)
+		damaged := slices.ContainsFunc(d.Warnings(), func(w container.Warning) bool { return w.Kind == container.Damage })
+		if damaged != c.damage {
+			t.Errorf("%d stacked tags: damage reported %v, want %v (%v)", c.tags, damaged, c.damage, d.Warnings())
 		}
 	}
 }

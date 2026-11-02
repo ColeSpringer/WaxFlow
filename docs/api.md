@@ -190,9 +190,14 @@ and neither the headers' own count taken at its word. FLAC, WavPack and
 Ogg-FLAC report `samplesExact` from a tolerant probe: their opens verify the
 declared total against the payload in both directions, from one read of the
 tail, and report a shortfall as damage and an overrun as a note. Ogg-FLAC
-checks STREAMINFO's total against the stream's final page granule, which is
-the muxer's own statement of the playable end on a CRC-verified page; a read
-finds any damage earlier in the file, where it is. A native FLAC or WavPack
+checks STREAMINFO's total against its frames, from the first to the end of the
+last whole frame in its tail, since each FLAC frame states its own position; a
+read finds any damage earlier in the file, where it is, and fills a lost
+frame with silence so what follows keeps its place. Native and Ogg FLAC read
+frame numbers that skip with every frame intact (frames deleted without
+renumbering) the same way, as a hole, where the stream could hold the
+frames; a first frame lost to damage is a hole from sample 0, not a stream
+that starts late. A native FLAC or WavPack
 whose measurement had to cross damage keeps the corrected length without the
 flag, since an authoritative length caps a decode and one walked past a hole
 should not. A fragmented MP4 states its length in an edit list where it has
@@ -367,6 +372,14 @@ Parameters (unknown parameter names are rejected):
   than clamped, since a cut point past the end means the caller's cut
   points describe a different file.
 
+  A span is held to the source's measured length, `to` omitted or not: a
+  source that delivers less fails the run rather than ending it early.
+  The code says whose fault it is: `malformed-input` when the length is
+  the file's own claim, and `internal` when it was counted by decoding the
+  same source (WMA Pro, Voice and Lossless in ASF), since two decodes of
+  one file then disagree. A source that reports damage on the way ends an
+  open span where its read ends, as a whole-file run does.
+
   A span is streamed, not seeked: `plan.Samples`, `X-Content-Duration`,
   and the HLS segment count all describe the span, so
   `/hls/master.m3u8?v={...,"from":10804500,"to":18744300}` is a
@@ -481,7 +494,11 @@ Parameters (unknown parameter names are rejected):
    source. Gapless trims are carried across and re-signalled in whatever
    the target container uses (iTunSMPB, an edit list, an Ogg pre-skip).
    `format=flac&container=mka` on a FLAC file is this rung, as is
-   `format=opus` on an Opus file over HLS.
+   `format=opus` on an Opus file over HLS. A FLAC copy numbers its frames
+   from 0, carries a hole damage left in the source as silent frames, and
+   keeps the source's MD5 signature only in a header it can patch once the
+   copy is done and only if it filled no hole: a streamed or segmented copy
+   states none ("not computed"), which `flac -t` accepts.
 3. **Transcode.** Anything else: decode, DSP, encode.
 
 **The cut** sits between transmux and transcode for a `from`/`to` span. When
@@ -555,9 +572,10 @@ since only a walk finds a trim inside its run and the copy rungs plan from one.
 A source whose headers count is taken at its word, and one that states no length
 in a container that cannot hide a trim (an untagged MP3, a bare ADTS stream)
 sends no duration hint rather than reading the whole file to compute one before
-the first byte goes out. The measure is a hint, not a bound on the run: the
-body is whatever the file decodes to, so a source whose measure and whose
-decode disagree streams whole rather than being cut to the advertised number.
+the first byte goes out. For a whole-file run the measure is a hint, not a
+bound: the body is whatever the file decodes to, so a source whose measure and
+whose decode disagree streams whole rather than being cut to the advertised
+number. A span is held to it instead (see `from`, `to`).
 Range
 policy per RFC 9110's permission to ignore: `Range: bytes=0-` gets the
 plain 200 full stream (Safari/AVPlayer attach it to everything); any
@@ -1055,7 +1073,11 @@ the first and the source's end after the last, so N cuts make N+1 pieces
 and piece *i* runs `[cuts[i-1], cuts[i])`. A leading `0`, a cut at or past
 the end, a repeat, or a descending pair each ask for an empty piece or for
 samples the source does not have, and are all a 400 at creation rather
-than a job that dies on piece 7. Samples rather than seconds for the same
+than a job that dies on piece 7. The end is the source's measured length
+where its headers only estimate one (ASF, a Matroska Info Duration) or state
+none, and for the last piece also where they declare one nothing has checked
+(an MP3's Xing count), so a last cut past the audio a short file holds is a
+400 too. Samples rather than seconds for the same
 reason a span is: a cut declares which samples are this piece, so it is
 content identity, and 245.32 s at 44100 floors to one sample short of the
 boundary a CUE sheet's CD-frame arithmetic names exactly.

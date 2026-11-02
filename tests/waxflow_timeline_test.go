@@ -1573,7 +1573,7 @@ func TestConcatRefusesAnAdvisoryMember(t *testing.T) {
 		// so the timeline carries every sample the members decode.
 		ms := slices.Clone(srcs)
 		for i := range ms {
-			n := countMedia(t, openWMA(t, e, raws[i]))
+			n := readLength(t, openWMA(t, e, raws[i]))
 			ms[i].Track.Samples, ms[i].Track.SamplesAdvisory = n, false
 		}
 		checkTimelineDelivers(t, ms)
@@ -1588,26 +1588,6 @@ func openWMA(t *testing.T, e *waxflow.Engine, raw []byte) format.Media {
 		t.Fatal(err)
 	}
 	return med
-}
-
-// countMedia reads a Media to end of stream and returns the frames it
-// delivered, closing it.
-func countMedia(t *testing.T, med format.Media) int64 {
-	t.Helper()
-	defer med.Close()
-	buf := audio.Get(med.Info().Default().Fmt, audio.StandardChunk)
-	defer audio.Put(buf)
-	var total int64
-	for {
-		err := med.ReadChunk(buf)
-		total += int64(buf.N)
-		if err == io.EOF {
-			return total
-		}
-		if err != nil {
-			t.Fatalf("read: %v", err)
-		}
-	}
 }
 
 // checkTimelineDelivers builds a timeline from measured members and holds it
@@ -1627,8 +1607,52 @@ func checkTimelineDelivers(t *testing.T, ms []waxflow.ConcatSource) {
 	if err != nil {
 		t.Fatalf("Concat after measuring: %v", err)
 	}
-	if got := countMedia(t, med); got != planned.Samples {
+	if got := readLength(t, med); got != planned.Samples {
 		t.Errorf("the timeline delivered %d samples, promised %d", got, planned.Samples)
+	}
+}
+
+// TestTimelineRefusesASlicedMemberThatEndsEarly: a member opened as a span,
+// as an HLS member window is, fails with the span's own error when its source
+// ends short, ahead of the timeline's count of what the member delivered. The
+// span's code is the one that knows whose length was wrong.
+func TestTimelineRefusesASlicedMemberThatEndsEarly(t *testing.T) {
+	const frames, from, at = 10000, 1000, 4000
+	raw, _ := ratedWAV(t, 48000, 1, frames, 9)
+	e := waxflow.New()
+	info, err := e.Probe(container.BytesSource(raw), "wav", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	track, err := waxflow.SpanTrack(info.Default(), from, waxflow.ToEnd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		slice func(short format.Media) (format.Media, error)
+		code  waxerr.Code
+	}{
+		{"a member whose measure counted its decode", func(m format.Media) (format.Media, error) {
+			return waxflow.SliceMeasured(&declaringMedia{Media: m, samples: frames, advisory: true},
+				countedLen(frames), from, waxflow.ToEnd)
+		}, waxerr.CodeInternal},
+		{"a member sliced on its headers", func(m format.Media) (format.Media, error) {
+			return waxflow.Slice(m, from, waxflow.ToEnd)
+		}, waxerr.CodeMalformedInput},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			med, err := waxflow.Concat([]waxflow.ConcatSource{{
+				Track: track,
+				Open:  func() (format.Media, error) { return tc.slice(shortWAV(t, e, raw, at)) },
+			}}, waxflow.ConcatOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer med.Close()
+			_, err = readToFailure(t, med)
+			wantShort(t, err, tc.code, "ended 4000 samples into a span that declared 9000")
+		})
 	}
 }
 
@@ -2058,7 +2082,7 @@ func TestTimelineRefusesAConversionAcrossAMixedSeam(t *testing.T) {
 	}{
 		{"bare", func(m format.Media) format.Media { return m }},
 		{"behind MeasuredMedia", func(m format.Media) format.Media {
-			return waxflow.MeasuredMedia(m, m.Info().Default().Samples-1)
+			return waxflow.MeasuredMedia(m, measuredLen(m.Info().Default().Samples-1))
 		}},
 		{"behind a Slice", func(m format.Media) format.Media {
 			s, err := waxflow.Slice(m, 0, 2*frames-16)

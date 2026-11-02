@@ -18,8 +18,9 @@ import (
 // Version is the decoder's cache-key version constant (ADR-0004): bump on
 // any change that alters decoded samples. Revision 2: the CELT inverse
 // MDCT's DFT moved from a float64 direct form to the float32 dsp/fft
-// kernel.
-const Version = "opus-dec-2"
+// kernel. Revision 3: container/ogg honours an initial granule, which
+// changes the length and samples of such a stream (no demuxer term).
+const Version = "opus-dec-3"
 
 const maxFrameSamples = 2880
 

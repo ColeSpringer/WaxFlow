@@ -794,8 +794,8 @@ func TestTolerantProbeReadsHeaders(t *testing.T) {
 	}
 }
 
-// TestOggFLACProbeIsExact: an Ogg-FLAC's length is settled at open against the
-// stream's final page granule, in both directions, so a tolerant probe reports
+// TestOggFLACProbeIsExact: an Ogg-FLAC's length is settled at open against its
+// frames, the last whole one in its tail, so a tolerant probe reports
 // it exact and the strict walk has nothing left to measure. It joins FLAC and
 // WavPack, whose opens verify their declared totals against the payload.
 //

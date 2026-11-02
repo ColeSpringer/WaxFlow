@@ -66,7 +66,7 @@ func (d *Decoder) Decode(pkt []byte, emit func(*audio.Buffer) error) error {
 	if len(pkt) < fi.hdrLen+2 {
 		return malformed("frame truncated")
 	}
-	if got, want := CRC16(pkt[:len(pkt)-2]), uint16(pkt[len(pkt)-2])<<8|uint16(pkt[len(pkt)-1]); got != want {
+	if !crcCloses(pkt) {
 		return malformed("frame CRC-16 mismatch")
 	}
 
@@ -78,18 +78,7 @@ func (d *Decoder) Decode(pkt []byte, emit func(*audio.Buffer) error) error {
 
 	r := &bitReader{data: pkt[:len(pkt)-2], pos: fi.hdrLen}
 	for c := 0; c < fi.Channels; c++ {
-		bps := uint(bits)
-		switch fi.assign {
-		case assignLeftSide, assignMidSide:
-			if c == 1 {
-				bps++
-			}
-		case assignRightSide:
-			if c == 0 {
-				bps++
-			}
-		}
-		if err := decodeSubframe(r, d.res[c*n:(c+1)*n], bps); err != nil {
+		if err := decodeSubframe(r, d.res[c*n:(c+1)*n], fi.subframeBits(c, bits)); err != nil {
 			return err
 		}
 	}

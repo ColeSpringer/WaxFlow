@@ -198,101 +198,76 @@ func TestCutJoinsSpansContiguously(t *testing.T) {
 	}
 }
 
-// TestCutFLACMultiSpanBreaks pins what a multi-span FLAC cut actually does,
-// which is the claim the allowlist's FLAC row rests on. The design left the
-// failure mode open between two candidates: a scan that runs past maxFrameLen
-// and errors, or a CRC-confirmed glue that silently swallows audio. It is the
-// second, and it is worse than either the design or WaxTap supposed.
-//
-// FLAC is not on the allowlist, so this cannot go through CutTrack: it byte-cuts
-// a fixture directly, which is exactly the operation a cut would perform. Frame
-// numbering is relative to the preceding frame rather than anchored to zero, so
-// a contiguous cut re-reads clean and only a gap in the ordinals breaks it. That
-// is why the row's reason is the gap and not the cut, and why this test keeps
-// the reason honest: WaxTap will test the claim.
-func TestCutFLACMultiSpanBreaks(t *testing.T) {
+// TestCutFLACMultiSpanReadsAsAHole pins what a multi-span FLAC byte cut reads
+// as, the claim the allowlist's FLAC row rests on. FLAC is not on the
+// allowlist, so this byte-cuts a fixture directly, the operation a copy cut
+// would perform. The kept frames keep their numbers, so the gap in them is a
+// hole: every kept frame is delivered, the cut-out span comes back as silence
+// with a warning, and the decode is the source's length.
+func TestCutFLACMultiSpanReadsAsAHole(t *testing.T) {
 	src := remuxFixture(t, waxflow.TranscodeOptions{Format: "flac"}, 96000)
 	frames := payloads(t, src, "flac")
 	if len(frames) < 24 {
 		t.Fatalf("the FLAC fixture has %d frames; too few to leave a gap", len(frames))
 	}
-	// The frames run contiguously from the end of the metadata blocks, so the
-	// file can be rebuilt by concatenation.
-	off := bytes.Index(src, frames[0])
+	off := bytes.Index(src, frames[0]) // the frames run on from the metadata
 	if off < 0 {
 		t.Fatal("could not locate the first frame in the fixture")
 	}
-
-	// Keep frames 0..9 and 20..end: the ordinal gap a multi-span cut leaves.
-	const keepHead, resumeAt = 10, 20
+	const keepHead, resumeAt = 10, 20 // the ordinal gap a multi-span cut leaves
 	var cut bytes.Buffer
 	cut.Write(src[:off])
-	for i := range keepHead {
-		cut.Write(frames[i])
-	}
-	var keptFrames int64 = keepHead
-	for i := resumeAt; i < len(frames); i++ {
-		cut.Write(frames[i])
-		keptFrames++
-	}
-
-	// It opens, and it reads, and it reports no error at all. That is the whole
-	// problem: nothing about this stream announces itself as broken.
-	demux, _, err := format.OpenDemuxer(container.BytesSource(cut.Bytes()), "flac", nil)
-	if err != nil {
-		t.Fatalf("the byte-cut FLAC failed to open (%v), which is not the mode this pins; "+
-			"if the demuxer has changed, the allowlist's FLAC row must change with it", err)
-	}
-	var pkt container.Packet
-	var packets int
-	var glued int
-	for {
-		if err := demux.ReadPacket(&pkt); err != nil {
-			if err != io.EOF {
-				t.Fatalf("read failed with %v; this test pins the silent mode, not an error", err)
-			}
-			break
+	var kept [][]byte
+	for i, f := range frames {
+		if i < keepHead || i >= resumeAt {
+			cut.Write(f)
+			kept = append(kept, f)
 		}
-		// A packet holding more bytes than its own frame is the glue: the
-		// boundary scan wanted the next ordinal, the cut took it away, and the
-		// scan ran on until a CRC happened to confirm at a later frame's end.
-		if len(pkt.Data) > len(frames[min(packets, len(frames)-1)])+1024 {
-			glued++
-		}
-		packets++
 	}
-	if glued == 0 {
-		t.Fatalf("no glued packet: read %d packets cleanly, which contradicts the FLAC row's reason", packets)
-	}
-	t.Logf("mode: %d packets read, %d of them glued, ending in a clean EOF", packets, glued)
-
-	// The decode is where the audio goes missing, silently. FLAC leaves
-	// SamplesExact false because its declared total can lie, so the shortfall is
-	// a tolerated oddity rather than a truncation: no error is raised anywhere.
-	med, err := waxflow.New().OpenStream(container.BytesSource(cut.Bytes()), "flac")
+	demux, info, err := format.OpenDemuxer(container.BytesSource(cut.Bytes()), "flac", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer med.Close()
-	buf := audio.Get(med.Info().Default().Fmt, audio.StandardChunk)
-	defer audio.Put(buf)
-	var decoded int64
+	var pkt container.Packet
+	var got int
 	for {
-		if err := med.ReadChunk(buf); err != nil {
-			if err != io.EOF {
-				t.Fatalf("decode failed with %v; this test pins the silent mode", err)
-			}
+		if err := demux.ReadPacket(&pkt); err == io.EOF {
 			break
+		} else if err != nil {
+			t.Fatal(err)
 		}
-		decoded += int64(buf.N)
+		if got >= len(kept) || !bytes.Equal(pkt.Data, kept[got]) {
+			t.Fatalf("packet %d is not the kept frame it should be", got)
+		}
+		if want := int64(0); got == keepHead {
+			want = (resumeAt - keepHead) * 4096
+			if pkt.Lost != want {
+				t.Fatalf("the frame after the gap says %d samples were lost, want %d", pkt.Lost, want)
+			}
+		}
+		got++
 	}
-	kept := keptFrames * 4096
-	if decoded >= kept {
-		t.Fatalf("decoded %d samples of the %d the kept frames hold; nothing was lost, "+
-			"which contradicts the FLAC row's reason", decoded, kept)
+	if got != len(kept) {
+		t.Fatalf("read %d packets, want the %d kept frames", got, len(kept))
 	}
-	t.Logf("decoded %d samples of the %d kept: %d samples of the caller's own audio silently gone",
-		decoded, kept, kept-decoded)
+	if w, ok := demux.(container.Warner); !ok || len(w.Warnings()) == 0 {
+		t.Error("the gap raised no warning")
+	}
+	dec, err := decodeAllDynamic(t, container.BytesSource(cut.Bytes()), "flac")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer audio.Put(dec)
+	if want := info.Default().Samples; int64(dec.N) != want || want != 96000 {
+		t.Fatalf("decoded %d samples, want the source's %d (declared %d)", dec.N, 96000, want)
+	}
+	for c := range dec.Fmt.Channels {
+		for _, v := range dec.ChanI(c)[keepHead*4096 : resumeAt*4096] {
+			if v != 0 {
+				t.Fatal("the cut-out span is not silence")
+			}
+		}
+	}
 }
 
 // TestCutOfAACToFMP4 drives the other allowlist member, through the edit list.

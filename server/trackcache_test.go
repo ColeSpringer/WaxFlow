@@ -11,6 +11,7 @@ import (
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/source"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 func trackWithSamples(n int64) container.Track {
@@ -156,7 +157,7 @@ func TestTrackForCollapsesConcurrentMisses(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start // release together, so the miss is genuinely concurrent
-			got[i], errs[i] = s.trackFor(src, false)
+			got[i], errs[i] = s.trackFor(t.Context(), src, false)
 		}()
 	}
 	close(start)
@@ -179,7 +180,7 @@ func TestTrackForCollapsesConcurrentMisses(t *testing.T) {
 	}
 
 	// Warm: the memo now serves without measuring again.
-	if _, err := s.trackFor(src, false); err != nil {
+	if _, err := s.trackFor(t.Context(), src, false); err != nil {
 		t.Fatal(err)
 	}
 	if n := idx.count(); n != 1 {
@@ -205,7 +206,7 @@ func TestTrackForKeysBySource(t *testing.T) {
 			}
 			defer src.Close()
 			<-start
-			if _, err := s.trackFor(src, false); err != nil {
+			if _, err := s.trackFor(t.Context(), src, false); err != nil {
 				t.Errorf("%s: %v", ref, err)
 			}
 		}()
@@ -262,7 +263,7 @@ func TestTrackForKeepsAnAdvisoryTotalForANonExactCaller(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, f := trackForFile(t, tc.src, tc.name)
-			track, err := s.trackFor(f, false)
+			track, err := s.trackFor(t.Context(), f, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -271,7 +272,7 @@ func TestTrackForKeepsAnAdvisoryTotalForANonExactCaller(t *testing.T) {
 			}
 			// And the same source measures when asked, which is the playlist's
 			// second call: the memo does not pin the estimate in place.
-			exact, err := s.trackFor(f, true)
+			exact, err := s.trackFor(t.Context(), f, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -303,7 +304,7 @@ func TestTimelineGateReadsTheHeadOfAWebMMember(t *testing.T) {
 		t.Error("the gate memoized an exact length it never measured")
 	}
 	// And the measure, when the job runs it, is a walk that settles.
-	track, err := s.trackFor(f, true)
+	track, err := s.trackFor(t.Context(), f, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +334,7 @@ func TestTrackForCarriesTheWalksTrims(t *testing.T) {
 	t.Cleanup(func() { f.Close() })
 	s := &Server{eng: waxflow.New()}
 
-	probe, err := s.trackFor(f, false)
+	probe, err := s.trackFor(t.Context(), f, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +343,7 @@ func TestTrackForCarriesTheWalksTrims(t *testing.T) {
 			probe.Padding, probe.MidPadding)
 	}
 
-	track, err := s.trackFor(f, true)
+	track, err := s.trackFor(t.Context(), f, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,5 +355,32 @@ func TestTrackForCarriesTheWalksTrims(t *testing.T) {
 	}
 	if track.Padding != MidTrimEndPad {
 		t.Errorf("the memo carries Padding %d, want the final block's %d", track.Padding, MidTrimEndPad)
+	}
+}
+
+// TestUntilOwnCancel: a measure canceled by another caller's leaving is run
+// again for a caller still waiting, and one's own cancel ends the wait.
+func TestUntilOwnCancel(t *testing.T) {
+	canceled := waxerr.New(waxerr.CodeCanceled, "the flight's owner left")
+	tries := 0
+	try := func() (int, error) {
+		if tries++; tries == 1 {
+			return 0, canceled
+		}
+		return 7, nil
+	}
+	if v, err := untilOwnCancel(t.Context(), try); err != nil || v != 7 || tries != 2 {
+		t.Errorf("got %d (%v) after %d tries, want 7 after the canceled one", v, err, tries)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	tries = 0
+	if _, err := untilOwnCancel(ctx, try); waxerr.CodeOf(err) != waxerr.CodeCanceled || tries != 1 {
+		t.Errorf("%v after %d tries, want the caller's own cancel after one", err, tries)
+	}
+	failed := waxerr.New(waxerr.CodeSourceUnreadable, "read failed")
+	tries = 0
+	if _, err := untilOwnCancel(t.Context(), func() (int, error) { tries++; return 0, failed }); err != failed || tries != 1 {
+		t.Errorf("%v after %d tries, want the failure itself after one", err, tries)
 	}
 }

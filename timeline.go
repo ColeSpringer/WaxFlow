@@ -29,13 +29,14 @@ const concatContainer = "timeline"
 // source.
 const ToEnd = -1
 
-// MeasuredMedia returns med reporting samples as its default track's length,
-// authoritative, for a caller that measured the source and needs the number it
-// measured to be the number the run enforces.
+// MeasuredMedia returns med reporting measured's length as its default
+// track's, authoritative, for a caller that measured the source and needs the
+// number it measured to be the number the run enforces. measured is the track
+// MeasureLength returned; its SamplesCounted comes with the length.
 //
 // Nothing else changes: Warnings and Notes stay live off the inner media, and
 // a media that already declares this length authoritatively is returned
-// untouched. A negative samples means unknown and leaves the declaration alone.
+// untouched. A negative Samples means unknown and leaves the declaration alone.
 //
 // The flags are part of "already": a media declaring the same number as an
 // estimate has not made the promise, and returning it unwrapped would leave
@@ -54,9 +55,11 @@ const ToEnd = -1
 // no method outside it, so a container.Indexer on the inner media is hidden
 // here on purpose: the sidecar save lives in the wrapper the engine put around
 // it, whose own Close still runs.
-func MeasuredMedia(med format.Media, samples int64) format.Media {
+func MeasuredMedia(med format.Media, measured container.Track) format.Media {
 	info := med.Info()
-	if t := info.Default(); samples < 0 || (t.Samples == samples && t.SamplesExact) {
+	samples := measured.Samples
+	if t := info.Default(); samples < 0 ||
+		(t.Samples == samples && t.SamplesExact && t.SamplesCounted == measured.SamplesCounted) {
 		return med
 	}
 	patched := *info
@@ -74,6 +77,7 @@ func MeasuredMedia(med format.Media, samples int64) format.Media {
 	// is authoritative, so the rounded claim it replaced goes with it.
 	patched.Tracks[idx].SamplesExact = true
 	patched.Tracks[idx].SamplesAdvisory = false
+	patched.Tracks[idx].SamplesCounted = measured.SamplesCounted
 	return measuredMedia{Media: med, info: &patched}
 }
 
@@ -99,14 +103,19 @@ func (m measuredMedia) MixedWidth() bool { return format.MediaMixedWidth(m.Media
 // format.Media), and the copy holds the measured total, not a verdict.
 func (m measuredMedia) Info() *format.Info {
 	in := m.Media.Info()
-	m.info.Warnings, m.info.Notes = in.Warnings, in.Notes
+	m.info.Warnings, m.info.Notes, m.info.Damage = in.Warnings, in.Notes, in.Damage
 	return m.info
 }
 
 // Slice bounds med to the sample range [from, to) of its own timeline, as
 // a Media whose sample 0 is med's sample from and whose length is to-from.
 // to is exclusive; ToEnd means to the end. The returned Media owns med and
-// closes it.
+// closes it. A span whose source ends short of a length the source stands
+// behind fails the read instead of ending early; a ToEnd span is held to it
+// too, unless the source reported damage on the way, and then it ends where
+// the read does. The failure is CodeMalformedInput for a length the file
+// stated and CodeInternal for one MeasureLength counted by decoding the same
+// source (container.Track.SamplesCounted).
 //
 // It is the primitive behind three things that looked like three features:
 // a split job's cut points, an end trim (a span with a from of 0), and a
@@ -163,14 +172,13 @@ func Slice(med format.Media, from, to int64) (format.Media, error) {
 		return nil, err
 	}
 	s := &slice{med: med, from: from, limit: ToEnd, fmt: track.Fmt,
-		blind: track.Samples < 0 || track.SamplesAdvisory}
+		blind: track.Samples < 0 || track.SamplesAdvisory, damage: damageIn(med)}
 	// limit is the clamp; the track's Samples is what it advertises. They
 	// differ on purpose for the open-ended form: an explicit end is a
 	// declaration this holds the source to, while a slice that just trims
-	// the front inherits the source's own length and the source's own
-	// honesty about it. Clamping the open form at an advisory length would
-	// truncate a source that is merely mis-declared, which the unsliced
-	// Media tolerates and which is not this wrapper's business to change.
+	// the front inherits the source's own length and honesty about it. That
+	// length is held against a shortfall (see endOfSource) but never
+	// clamped, which would truncate a source that is merely mis-declared.
 	if to >= 0 {
 		s.limit = to - from
 	}
@@ -442,6 +450,10 @@ type slice struct {
 	// source stood behind: its total was unknown or advisory. See endOfSource.
 	blind bool
 
+	// damage is how many Damage warnings med had when the span was made, so
+	// a shortfall that comes with more is known to be reported.
+	damage int
+
 	pos     int64 // delivered-timeline position of the next frame out
 	started bool  // med has been positioned at from
 	discont bool
@@ -453,7 +465,7 @@ type slice struct {
 // Tracks and Chapters were rebased onto the window once and stay.
 func (s *slice) Info() *format.Info {
 	in := s.med.Info()
-	s.info.Warnings, s.info.Notes = in.Warnings, in.Notes
+	s.info.Warnings, s.info.Notes, s.info.Damage = in.Warnings, in.Notes, in.Damage
 	return s.info
 }
 
@@ -644,34 +656,45 @@ func (s *slice) ReadChunk(dst *audio.Buffer) error {
 	return nil
 }
 
-// endOfSource reports the source running out, which is only legal when the
-// window did not declare where it ends.
-//
-// A bounded span whose source ends early is an error rather than a short
-// stream, and for the same reason a Concat holds its members to their
-// declared lengths: the track this Media advertises says to-from samples,
-// a plan has already promised a segment count built from that number, and
-// delivering fewer produces the tail 404 that number exists to prevent.
-// Failing here names the real cause instead.
-//
-// Which cause depends on what the source declared. SpanTrack refuses a cut
-// past a declared total, so a source that declared one and still ended early
-// holds less audio than its headers say: malformed input, by
-// container.ShortRead's rule, not an I/O failure. One that declared nothing,
-// or only an advisory total, was checked against nothing, and the cut list is
-// what overran the audio: an invalid request, as the plan-time refusal of an
-// unmeasured timeline member is.
+// endOfSource answers the source running out. A span is held to an exact
+// length it declared: a bounded span's to-from, or an open span's inherited
+// total when the source stood behind it (exact or measured), and only against
+// a shortfall, so a plan's segment count is never left a tail it cannot fill.
+// It sees a short delivery, not a late landing: ensureStart positions an
+// honest late landing, and one late but reported exact is caught only because
+// the delivery then runs short. An open span whose source reported damage on
+// the way ends there, as a plain read does: that shortfall is not silent. The
+// code names whose length was wrong: cut points no stated total checked are an
+// invalid request, a length MeasureLength counted by decoding this source is
+// internal (container.Track.SamplesCounted), and any other claim is the
+// file's, malformed input.
 func (s *slice) endOfSource() error {
-	if s.limit < 0 || s.pos >= s.limit {
+	declared := s.limit
+	if t := s.info.Tracks[0]; declared < 0 && t.SamplesExact && t.Samples >= 0 {
+		declared = t.Samples
+	}
+	if declared < 0 || s.pos >= declared || s.limit < 0 && damageIn(s.med) > s.damage {
 		return io.EOF
 	}
-	msg := fmt.Sprintf("waxflow: the source ended %d samples into a span that declared %d; ", s.pos, s.limit)
-	if s.blind {
-		return waxerr.New(waxerr.CodeInvalidRequest,
-			msg+"its cut points were never checked against a measured length")
+	where := fmt.Sprintf("waxflow: the source ended %d samples into a span that declared %d", s.pos, declared)
+	if !s.blind && s.info.Tracks[0].SamplesCounted {
+		return waxerr.New(waxerr.CodeInternal, where+"; its length was counted by decoding this same source")
 	}
-	return waxerr.New(waxerr.CodeMalformedInput, msg+"the file holds less audio than its headers declare")
+	return shortSource(where, s.blind)
 }
+
+// shortSource is the error for a source that ran short of a length it stood
+// behind, where says where. A blind run's cut points were never checked, so
+// the request is at fault; otherwise the file is.
+func shortSource(where string, blind bool) error {
+	if blind {
+		return waxerr.New(waxerr.CodeInvalidRequest, where+"; its cut points were never checked against a measured length")
+	}
+	return waxerr.New(waxerr.CodeMalformedInput, where+"; the file holds less audio than its headers declare")
+}
+
+// damageIn counts the damage med has reported (format.Info.Damage).
+func damageIn(med format.Media) int { return med.Info().Damage }
 
 // SeekSample repositions to target on the window's own timeline.
 //
@@ -1468,6 +1491,9 @@ type concat struct {
 	med   format.Media // nil when no member is open
 	chain *dsp.Chain   // nil when the open member needs no normalization
 
+	// damaged is the finished members' Damage, summed: a count, so a member
+	// closed and reopened by a seek adds its own again.
+	damaged int
 	// found and noted are the finished members' Warnings and Notes, each
 	// line prefixed with its member's index, folded in as a member closes;
 	// Info adds the open member's live lists behind them.
@@ -1502,10 +1528,12 @@ type concat struct {
 func (c *concat) Info() *format.Info {
 	c.info.Warnings = append([]string(nil), c.found...)
 	c.info.Notes = append([]string(nil), c.noted...)
+	c.info.Damage = c.damaged
 	if c.med != nil {
 		in := c.med.Info()
 		c.info.Warnings = appendMemberLines(c.info.Warnings, c.cur, in.Warnings)
 		c.info.Notes = appendMemberLines(c.info.Notes, c.cur, in.Notes)
+		c.info.Damage += in.Damage
 	}
 	return c.info
 }
@@ -2281,5 +2309,6 @@ func (c *concat) closeMember() error {
 	in := med.Info()
 	c.found = appendMemberLines(c.found, c.cur, in.Warnings)
 	c.noted = appendMemberLines(c.noted, c.cur, in.Notes)
+	c.damaged += in.Damage
 	return med.Close()
 }

@@ -30,7 +30,13 @@ func muxFmt(rate, channels, bits int) audio.Format {
 // -1 means unknown). It returns the finished encoder for MD5 checks.
 func encodeStream(t *testing.T, src *audio.Buffer, level int, w io.Writer, samplesHint int64) *flac.Encoder {
 	t.Helper()
-	enc, err := flac.NewEncoder(src.Fmt, &flac.EncoderOptions{Level: level})
+	return encodeStreamWith(t, src, &flac.EncoderOptions{Level: level}, w, samplesHint)
+}
+
+// encodeStreamWith is encodeStream with the encoder's every option.
+func encodeStreamWith(t *testing.T, src *audio.Buffer, opts *flac.EncoderOptions, w io.Writer, samplesHint int64) *flac.Encoder {
+	t.Helper()
+	enc, err := flac.NewEncoder(src.Fmt, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -480,5 +486,26 @@ func TestMuxSeekTableSurvivesAnUnknownProjection(t *testing.T) {
 		t.Fatal(err)
 	} else if declared.Samples != 0 {
 		t.Errorf("STREAMINFO declares %d samples for a run that projected none", declared.Samples)
+	}
+}
+
+// TestMuxNumbersFramesFromZero: frames that arrive numbered from past 0 are
+// written numbered from 0, so an encode whose frames start at 1000 muxes to the
+// bytes of one whose frames start at 0, seek table and all.
+func TestMuxNumbersFramesFromZero(t *testing.T) {
+	f := muxFmt(44100, 2, 16)
+	src := testutil.Sine(f, 4410*100+1000, 500, 0.5)
+	defer audio.Put(src)
+	mux := func(first int64) []byte {
+		ws := &memWS{}
+		encodeStreamWith(t, src, &flac.EncoderOptions{Level: 5, FirstFrame: first}, ws, int64(src.N))
+		return ws.Buf
+	}
+	want, got := mux(0), mux(1000)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("frames numbered from 1000 mux to %d bytes unlike those numbered from 0 (%d)", len(got), len(want))
+	}
+	if !hasSeekTable(t, want) {
+		t.Fatal("the stream has no seek table to compare")
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/aac"
+	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/format"
@@ -71,7 +72,11 @@ import (
 // declines such a source for every destination but Matroska rather than
 // copying the frames out as audio. A cached output of one was wrong on both
 // counts. Over-keying the sources that have no inner trim is safe (ADR-0004).
-const RemuxVersion = "remux-5"
+//
+// remux-6: a FLAC copy numbers its frames from 0 in every container, a
+// segmented one by each frame's true position, and carries its source's MD5
+// only into a header it patches at End and only while it fills no hole.
+const RemuxVersion = "remux-6"
 
 // RemuxPlan describes what a remux would produce, computed from the source
 // track's headers alone.
@@ -163,6 +168,12 @@ func (e *Engine) PlanRemux(track container.Track, opts TranscodeOptions) (*Remux
 		return nil, err
 	}
 	if !codecSurvives(track.Codec, row.codecID) || !remuxable(opts, track.Fmt) || !gaplessSurvives(track) {
+		return nil, nil
+	}
+	if track.Codec == codec.Vorbis && track.Delay > 0 && !isMatroska(containerName) {
+		// Ogg states a Vorbis front trim only as a negative start, which the
+		// Ogg muxer does not write: its granules run from 0, so a copy would
+		// play the trimmed samples. The transcode rung trims them in PCM.
 		return nil, nil
 	}
 	if track.MidPadding > 0 && !StatesTrimsPerPacket(containerName) {
@@ -389,8 +400,8 @@ func remuxTrailer(t container.Track, run copiedRun) codec.Trailer {
 		// The unprimed rule again, now against what the settle produced rather
 		// than what the packets said. SettleLength's capped arm derives a
 		// padding from the arithmetic whenever the run outlives the track's
-		// authoritative length, which an Ogg-FLAC whose final page granule
-		// under-reports its own frames does; handing that to a FLAC or ALAC
+		// authoritative length, which a source whose length under-reports its
+		// own packets does; handing that to a FLAC or ALAC
 		// muxer is a refusal at End with the whole file already written. The
 		// count the packets hold is the tolerant answer, and it is the one this
 		// rung gave before those lengths were verified at all.
@@ -609,6 +620,13 @@ func (e *Engine) PlanRemuxSegments(track container.Track, opts TranscodeOptions,
 func (e *Engine) RemuxInitSegment(plan *RemuxSegmentPlan) ([]byte, error) {
 	t := plan.Track
 	t.Samples, t.Delay = plan.Samples, plan.Delay
+	if t.Codec == codec.FLAC {
+		// No segment can vouch for the whole stream's MD5 or patch it here.
+		var err error
+		if t.CodecConfig, err = flac.ClearMD5(t.CodecConfig); err != nil {
+			return nil, err
+		}
+	}
 	return mp4.InitSegment(t)
 }
 
@@ -648,9 +666,17 @@ func (e *Engine) RemuxSegments(ctx context.Context, src container.Source, hint s
 			fmt.Sprintf("waxflow: a %s source cannot be remuxed to %s with these options; transcode it",
 				track.Codec, opts.Format))
 	}
+	// A restart numbers FLAC frames by the stream's block size, its first
+	// packet's; CutSegments has it as the grid.
+	block := 0
+	if track.Codec == codec.FLAC && segOpts.StartSegment > 0 {
+		if block, err = firstDur(demux, track.ID); err != nil {
+			return nil, err
+		}
+	}
 	e.log.Debug("segmented remux started", "container", info.Container, "codec", track.Codec,
 		"out", opts.Format, "segment", segOpts.StartSegment, "segSamples", segOpts.SegmentSamples)
-	res, err := e.segmentWalk(ctx, demux, rp.Track, track.ID, segOpts, emit)
+	res, err := e.segmentWalk(ctx, demux, rp.Track, track.ID, segOpts, block, emit)
 	if err != nil {
 		return nil, err
 	}
@@ -688,8 +714,11 @@ func validateSegOpts(segOpts SegmentedOptions) error {
 // a cut segment laid on the grid is identical in structure to a remux segment, so
 // the player-side Opus pre-roll handling the segmenter inherits is inherited by
 // the cut too rather than reinvented.
+//
+// block is a FLAC stream's block size, which the segmenter numbers a run from
+// past 0 by.
 func (e *Engine) segmentWalk(ctx context.Context, demux container.Demuxer, segTrack container.Track,
-	walkTrackID int, segOpts SegmentedOptions, emit func(mp4.Segment) error) (*SegmentedResult, error) {
+	walkTrackID int, segOpts SegmentedOptions, block int, emit func(mp4.Segment) error) (*SegmentedResult, error) {
 	// No confirm step here, and the reason is where the commitment actually
 	// lives: the length an init segment declares rides in its edit list, which
 	// mp4.InitSegment builds from the *plan's* track (see RemuxInitSegment),
@@ -702,7 +731,7 @@ func (e *Engine) segmentWalk(ctx context.Context, demux container.Demuxer, segTr
 	// so a bad request fails on its own inputs first; NewSegmenter re-guards the
 	// length and start it can express.
 	seg, err := mp4.NewSegmenter(segTrack, &mp4.SegmenterOptions{
-		SegmentSamples: segOpts.SegmentSamples, StartSegment: segOpts.StartSegment,
+		SegmentSamples: segOpts.SegmentSamples, StartSegment: segOpts.StartSegment, Block: block,
 	})
 	if err != nil {
 		return nil, err
@@ -749,6 +778,7 @@ func (e *Engine) segmentWalk(ctx context.Context, demux container.Demuxer, segTr
 	var held codec.Packet
 	var have bool
 	var scratch []byte
+
 	// release emits the held packet. checked is false only for the stream's last,
 	// which has no successor to prove it is not short by right.
 	release := func(checked bool) error {
@@ -773,7 +803,11 @@ func (e *Engine) segmentWalk(ctx context.Context, demux container.Demuxer, segTr
 	// callers refuse such a source before the run starts, and this is the
 	// backstop. The position arithmetic below stays raw, which is the
 	// delivered timeline exactly because no emitted packet carries one.
-	run, err := copyPackets(ctx, demux, walkTrackID, false, func(pkt container.Packet) error {
+	silence, err := silenceFor(segTrack)
+	if err != nil {
+		return nil, err
+	}
+	run, err := copyPackets(ctx, demux, walkTrackID, false, silence, func(pkt container.Packet) error {
 		if pos < p0 {
 			pos += pkt.Dur
 			return nil // still walking up to the restart point
@@ -801,6 +835,24 @@ func (e *Engine) segmentWalk(ctx context.Context, demux container.Demuxer, segTr
 	}
 	res.Samples = run.samples
 	return res, nil
+}
+
+// firstDur is the duration of track's first packet, from a demuxer that has
+// delivered none: a stream's block size, when a later frame exists.
+func firstDur(demux container.Demuxer, track int) (int, error) {
+	var pkt container.Packet
+	for {
+		err := demux.ReadPacket(&pkt)
+		if err == io.EOF {
+			return 0, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+		if pkt.Track == track {
+			return int(pkt.Dur), nil
+		}
+	}
 }
 
 // seekPackets positions demux at or before target and reports the decode
@@ -917,14 +969,37 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 	if err := checkSeekable(mux, dst, opts.Format); err != nil {
 		return nil, err
 	}
+	// The source's MD5 holds for the copy only while it fills no hole, so it
+	// goes out only where the muxer can clear it at End, which the first hole
+	// does; a header that is final once written states none.
+	var clearMD5 func()
+	if track.Codec == codec.FLAC {
+		if c, ok := mux.(interface{ ClearMD5() }); ok && patchable {
+			clearMD5 = c.ClearMD5
+		} else if muxTrack.CodecConfig, err = flac.ClearMD5(muxTrack.CodecConfig); err != nil {
+			return nil, err
+		}
+	}
 	if err := mux.Begin([]container.Track{muxTrack}); err != nil {
 		return nil, err
 	}
 	e.log.Debug("remux started", "codec", track.Codec,
 		"out", opts.Format, "outContainer", plan.Container, "samples", muxTrack.Samples)
 
+	// A FLAC muxer numbers the frames it writes, the silent ones a hole leaves
+	// included; the copy only makes those.
 	var done int64
-	run, err := copyPackets(ctx, demux, track.ID, StatesTrimsPerPacket(plan.Container), func(pkt container.Packet) error {
+	silence, err := silenceFor(muxTrack)
+	if err != nil {
+		return nil, err
+	}
+	if fill := silence; clearMD5 != nil {
+		silence = func(template []byte, n int64) ([]byte, error) {
+			clearMD5()
+			return fill(template, n)
+		}
+	}
+	run, err := copyPackets(ctx, demux, track.ID, StatesTrimsPerPacket(plan.Container), silence, func(pkt container.Packet) error {
 		// Padding forwarded, not dropped: Matroska is the one destination that
 		// states trims per packet, and it is the only one this call lets an
 		// inner trim reach.
@@ -967,6 +1042,45 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 		InputWarnings: found.Warnings}, nil
 }
 
+// fillHole writes the pkt.Lost samples damage took before pkt as silent frames
+// of the stream's block size, bs, or refuses when the codec has no silence.
+func fillHole(pkt container.Packet, bs int64, silence func([]byte, int64) ([]byte, error),
+	write func(container.Packet) error) error {
+	if silence == nil {
+		return waxerr.New(waxerr.CodeMalformedInput, fmt.Sprintf(
+			"waxflow: damage took %d samples before sample %d, which a copy of this stream cannot carry", pkt.Lost, pkt.PTS))
+	}
+	if bs <= 0 {
+		bs = pkt.Dur
+	}
+	at := pkt.PTS - pkt.Lost
+	for left := pkt.Lost; left > 0; {
+		n := min(left, bs, flac.MaxBlockSize)
+		data, err := silence(pkt.Data, n)
+		if err != nil {
+			return err
+		}
+		if err := write(container.Packet{Track: pkt.Track, Packet: codec.Packet{Data: data, PTS: at, Dur: n, Sync: true}}); err != nil {
+			return err
+		}
+		at, left = at+n, left-n
+	}
+	return nil
+}
+
+// silenceFor builds the silent frames a copy of t carries a hole in, nil for a
+// codec whose copy cannot carry one.
+func silenceFor(t container.Track) (func(template []byte, n int64) ([]byte, error), error) {
+	if t.Codec != codec.FLAC {
+		return nil, nil
+	}
+	si, err := flac.ParseStreamInfo(t.CodecConfig)
+	if err != nil {
+		return nil, err
+	}
+	return func(template []byte, n int64) ([]byte, error) { return flac.SilentFrame(template, si, int(n)) }, nil
+}
+
 // copyPackets walks demux and hands every packet of the given track to write,
 // returning the decode duration it moved. It is the whole of what remux does
 // with a packet, in one place so the progressive and segmented forms cannot
@@ -977,10 +1091,11 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 // container.Muxer), which is why the rule is stated there rather than defended
 // with a copy here: a copy per packet would cost the rung its reason to exist.
 func copyPackets(ctx context.Context, demux container.Demuxer, track int, perPacketTrims bool,
-	write func(container.Packet) error) (copiedRun, error) {
+	silence func(template []byte, n int64) ([]byte, error), write func(container.Packet) error) (copiedRun, error) {
 	var pkt container.Packet
 	var run copiedRun
 	var prevPad int64 // the previous packet's trim, clamped to what it can mean
+	var lastDur int64 // the previous packet's duration, the stream's block size
 	for {
 		if err := ctx.Err(); err != nil {
 			return copiedRun{}, waxerr.Wrap(waxerr.CodeCanceled, "remux canceled", err)
@@ -1001,6 +1116,16 @@ func copyPackets(ctx context.Context, demux container.Demuxer, track int, perPac
 		if pkt.Track != track {
 			continue
 		}
+		if pkt.Lost > 0 {
+			// Damage took these samples, and a decode delivers them as
+			// silence; the copy carries them as silent frames so it keeps
+			// the same timeline, and a header's length still holds.
+			if err := fillHole(pkt, lastDur, silence, write); err != nil {
+				return copiedRun{}, err
+			}
+			run.samples += pkt.Lost
+		}
+		lastDur = pkt.Dur
 		// Something followed the previous packet, so its trim was an inner one
 		// after all. A destination that cannot state trims per packet would
 		// play those frames back as audio, so the copy stops here rather than

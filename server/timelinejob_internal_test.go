@@ -142,7 +142,7 @@ func TestTimelineJobGateAsksTheFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := waxflow.MeasureLength(med); err != nil {
+	if _, err := waxflow.MeasureLength(t.Context(), med); err != nil {
 		t.Fatal(err)
 	}
 	med.Close()

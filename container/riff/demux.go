@@ -48,8 +48,9 @@ type DemuxerOptions struct {
 
 // Demuxer reads one audio track from a WAV source.
 type Demuxer struct {
-	src  container.Source
-	opts DemuxerOptions
+	damage int // Damage warnings met, the list's cap aside (DamageCount)
+	src    container.Source
+	opts   DemuxerOptions
 
 	track    container.Track
 	payload  payload
@@ -130,6 +131,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 		return malformed("%s (at offset %d)", msg, off)
 	}
 	w := container.Warning{Offset: off, Msg: msg, Kind: container.Damage}
+	d.damage++
 	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
 		d.warnings = append(d.warnings, w)
 	}
@@ -780,6 +782,9 @@ func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track}
 
 // Warnings returns damage tolerated during parsing.
 func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
+
+// DamageCount implements container.Damaged.
+func (d *Demuxer) DamageCount() int { return d.damage }
 
 // ReadPacket yields the next run of payload. Packet data is reused across
 // calls.

@@ -1470,7 +1470,7 @@ func TestMeasureKeepsTheWalkCode(t *testing.T) {
 		{"unclassified", errors.New("a walk that forgot its code"), waxerr.CodeInternal},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := measureMedia(&measureFailMedia{err: tc.err})
+			_, err := measureMedia(t.Context(), &measureFailMedia{err: tc.err})
 			if err == nil {
 				t.Fatal("a failed measure returned a length")
 			}

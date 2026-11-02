@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -362,26 +363,17 @@ func writeDoubledMP3(t *testing.T, dir, name string) (ref string, declared, real
 	return "lib/" + name, declared, walked.Samples + walked.Padding
 }
 
-// measureTrack is the daemon's MeasureTrack hook in miniature: the declared
-// length when the header marks it exact, a decode to the true end when it does
-// not. The daemon's own (server.trackFor) memoizes the answer per source
-// identity; the walk is the half that matters here.
-func measureTrack() func(*source.File) (container.Track, error) {
+// measureTrack is the daemon's MeasureTrack hook without its memo:
+// waxflow.MeasureLength over a fresh open, as server.measureSamples does.
+func measureTrack() func(context.Context, *source.File) (container.Track, error) {
 	eng := waxflow.New()
-	return func(src *source.File) (container.Track, error) {
-		info, err := eng.Probe(src, src.Ext, nil)
+	return func(ctx context.Context, src *source.File) (container.Track, error) {
+		med, err := eng.OpenStream(src, src.Ext)
 		if err != nil {
 			return container.Track{}, err
 		}
-		track := info.Default()
-		if track.Samples < 0 || !track.SamplesExact {
-			res, err := eng.Analyze(context.Background(), src, src.Ext, waxflow.AnalyzeOptions{})
-			if err != nil {
-				return container.Track{}, err
-			}
-			track.Samples, track.SamplesExact = res.Samples, true
-		}
-		return track, nil
+		defer med.Close()
+		return waxflow.MeasureLength(ctx, med)
 	}
 }
 
@@ -598,6 +590,246 @@ func TestSplitNeverReportsAnEmptyPiece(t *testing.T) {
 	}
 	if len(done.Outputs) != 2 || done.Outputs[1].Samples != 18 {
 		t.Errorf("the split finished with outputs %+v, want a second piece of 18 samples", done.Outputs)
+	}
+}
+
+// countedMeasure is measureTrack with its calls counted and over added to every
+// length it reports. An over-measure stands in for a source that delivers short
+// of what was measured.
+func countedMeasure(over int64) (func(context.Context, *source.File) (container.Track, error), *atomic.Int64) {
+	measure := measureTrack()
+	calls := new(atomic.Int64)
+	return func(ctx context.Context, src *source.File) (container.Track, error) {
+		calls.Add(1)
+		track, err := measure(ctx, src)
+		track.Samples += over
+		return track, err
+	}, calls
+}
+
+// measuredSamples is the length the honest hook reports for ref.
+func measuredSamples(t *testing.T, res source.Resolver, ref string) int64 {
+	t.Helper()
+	src, err := res.Resolve(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	track, err := measureTrack()(t.Context(), src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return track.Samples
+}
+
+// TestSplitHoldsAnUnverifiedLastPieceToAMeasure: an MP3's Xing count is
+// declared and never verified, so the open last piece is held to a measure of
+// its own, and a source that ends short of it fails the job instead of writing
+// the piece short. The cuts are still checked against the declaration.
+func TestSplitHoldsAnUnverifiedLastPieceToAMeasure(t *testing.T) {
+	const cut, over = int64(10_000), int64(1000)
+	root := t.TempDir()
+	copyFixture(t, root, "sine-cbr128.mp3")
+	ref := "lib/sine-cbr128.mp3"
+	res := openRoots(t, root)
+	measured := measuredSamples(t, res, ref)
+	hook, calls := countedMeasure(over)
+	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, MeasureTrack: hook})
+
+	j, err := r.Create(Request{
+		Type: TypeSplit, Src: ref, SourceID: pinID(t, res, ref),
+		Format: "flac", FLACLevel: -1, Cuts: []int64{cut},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	failed := waitJob(t, r, j.ID, StateFailed)
+	if n := calls.Load(); n != 1 {
+		t.Errorf("the hook ran %d times, want once for the last piece", n)
+	}
+	// The source walks to its own count, so the length came from its headers.
+	if failed.Error == nil || failed.Error.Code != string(waxerr.CodeMalformedInput) {
+		t.Fatalf("error = %+v, want %s", failed.Error, waxerr.CodeMalformedInput)
+	}
+	want := fmt.Sprintf("ended %d samples into a span that declared %d", measured-cut, measured+over-cut)
+	if !strings.Contains(failed.Error.Message, want) {
+		t.Errorf("error %q does not say %q", failed.Error.Message, want)
+	}
+}
+
+// TestSplitOfAnUnderDeclaredMP3MeetsItsMeasure is the honest twin: the doubled
+// MP3's reader files its second copy as trailing padding, so the measure
+// agrees with what the last piece delivers and the split succeeds.
+func TestSplitOfAnUnderDeclaredMP3MeetsItsMeasure(t *testing.T) {
+	const cut = int64(10_000)
+	root := t.TempDir()
+	ref, declared, _ := writeDoubledMP3(t, root, "doubled.mp3")
+	if cut >= declared {
+		t.Fatalf("cut %d must fall inside the declared %d", cut, declared)
+	}
+	res := openRoots(t, root)
+	measured := measuredSamples(t, res, ref)
+	hook, _ := countedMeasure(0)
+	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, MeasureTrack: hook})
+
+	j, err := r.Create(Request{
+		Type: TypeSplit, Src: ref, SourceID: pinID(t, res, ref),
+		Format: "flac", FLACLevel: -1, Cuts: []int64{cut},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	done := waitJob(t, r, j.ID, StateDone)
+	if len(done.Outputs) != 2 {
+		t.Fatalf("split produced %d outputs, want 2", len(done.Outputs))
+	}
+	if got, want := done.Outputs[1].Samples, measured-cut; got != want {
+		t.Errorf("last piece = %d samples, want %d: the measured %d less the cut", got, want, measured)
+	}
+}
+
+// TestSplitOfAnExactSourceMeasuresNothing: a length the header stands behind
+// is the measure already, so no piece asks the hook for one.
+func TestSplitOfAnExactSourceMeasuresNothing(t *testing.T) {
+	root := t.TempDir()
+	copyFixture(t, root, fixtureWAV)
+	ref := "lib/" + fixtureWAV
+	res := openRoots(t, root)
+	hook, calls := countedMeasure(0)
+	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, MeasureTrack: hook})
+
+	j, err := r.Create(Request{
+		Type: TypeSplit, Src: ref, SourceID: pinID(t, res, ref),
+		Format: "flac", FLACLevel: -1, Cuts: []int64{1000},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if done := waitJob(t, r, j.ID, StateDone); len(done.Outputs) != 2 {
+		t.Fatalf("split produced %d outputs, want 2", len(done.Outputs))
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("the hook ran %d times over an exact source, want none", n)
+	}
+}
+
+// writeShortMP3 writes sine-cbr128.mp3 less its last 100 bytes into dir under
+// name, and reports the ref and the count its Xing frame still declares.
+func writeShortMP3(t *testing.T, dir, name string) (ref string, declared int64) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "sine-cbr128.mp3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	short := raw[:len(raw)-100]
+	if err := os.WriteFile(filepath.Join(dir, name), short, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := waxflow.New().Probe(container.BytesSource(short), "mp3", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "lib/" + name, info.Default().Samples
+}
+
+// TestSplitOfAnOverDeclaredMP3MeetsItsMeasure: the truncated MP3 declares more
+// than it holds, so a last piece held to the declaration would fail. Held to
+// the measure, the split succeeds.
+func TestSplitOfAnOverDeclaredMP3MeetsItsMeasure(t *testing.T) {
+	const cut = int64(10_000)
+	root := t.TempDir()
+	ref, declared := writeShortMP3(t, root, "short.mp3")
+	res := openRoots(t, root)
+	measured := measuredSamples(t, res, ref)
+	if measured >= declared {
+		t.Fatalf("the fixture measures %d of its declared %d; this cell needs one that holds less", measured, declared)
+	}
+	hook, _ := countedMeasure(0)
+	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, MeasureTrack: hook})
+
+	j, err := r.Create(Request{
+		Type: TypeSplit, Src: ref, SourceID: pinID(t, res, ref),
+		Format: "flac", FLACLevel: -1, Cuts: []int64{cut},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	done := waitJob(t, r, j.ID, StateDone)
+	if len(done.Outputs) != 2 {
+		t.Fatalf("split produced %d outputs, want 2", len(done.Outputs))
+	}
+	if got, want := done.Outputs[1].Samples, measured-cut; got != want {
+		t.Errorf("last piece = %d samples, want %d: the measured %d less the cut", got, want, measured)
+	}
+}
+
+// TestSplitSkippingItsLastPieceMeasuresNothing: the last piece's own measure is
+// taken only for a piece the split writes.
+func TestSplitSkippingItsLastPieceMeasuresNothing(t *testing.T) {
+	root := t.TempDir()
+	copyFixture(t, root, "sine-cbr128.mp3")
+	ref := "lib/sine-cbr128.mp3"
+	res := openRoots(t, root)
+	hook, calls := countedMeasure(0)
+	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, MeasureTrack: hook})
+
+	j, err := r.Create(Request{
+		Type: TypeSplit, Src: ref, SourceID: pinID(t, res, ref),
+		Format: "flac", FLACLevel: -1, Cuts: []int64{10_000}, Skip: []int{1},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if done := waitJob(t, r, j.ID, StateDone); len(done.Outputs) != 1 {
+		t.Fatalf("split produced %d outputs, want the 1 it does not skip", len(done.Outputs))
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("the hook ran %d times for a skipped last piece, want none", n)
+	}
+}
+
+// TestSplitRefusesALastPieceItsMeasureLeavesEmpty: a measure at or before the
+// last cut leaves that piece nothing, so the source holds less than its
+// headers declare and the split refuses before it writes any piece.
+func TestSplitRefusesALastPieceItsMeasureLeavesEmpty(t *testing.T) {
+	root := t.TempDir()
+	ref, declared := writeShortMP3(t, root, "short.mp3")
+	res := openRoots(t, root)
+	measured := measuredSamples(t, res, ref)
+	if measured >= declared {
+		t.Fatalf("the fixture measures %d of its declared %d; this cell needs one that holds less", measured, declared)
+	}
+	for _, tc := range []struct {
+		name string
+		cut  int64
+	}{
+		{"a cut at the measured end", measured},
+		{"a cut past it", (measured + declared) / 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			r := openRunner(t, Config{Dir: dir, Resolver: res, MeasureTrack: measureTrack()})
+			j, err := r.Create(Request{
+				Type: TypeSplit, Src: ref, SourceID: pinID(t, res, ref),
+				Format: "flac", FLACLevel: -1, Cuts: []int64{tc.cut},
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			failed := waitJob(t, r, j.ID, StateFailed)
+			if failed.Error == nil || failed.Error.Code != string(waxerr.CodeMalformedInput) {
+				t.Errorf("error = %+v, want %s", failed.Error, waxerr.CodeMalformedInput)
+			}
+			entries, err := os.ReadDir(filepath.Join(dir, j.ID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range entries {
+				if e.Name() != jobFile {
+					t.Errorf("the refused split left %q in the job directory", e.Name())
+				}
+			}
+		})
 	}
 }
 

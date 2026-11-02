@@ -258,21 +258,34 @@ func checkVorbisPageGranules(t *testing.T, stream, cfg []byte, packets [][]byte,
 // TestEmitHeaderPagesSpill exercises the header-page packer's spill path: a
 // packet larger than one page's 255x255-byte segment table must continue onto a
 // flagContinued page, and the emitted pages must reassemble the original packets
-// exactly (the demuxer's generic reassembly relies on this). Real Vorbis setups
-// fit one page, so this covers the otherwise-unreached large-setup branch.
+// exactly (the demuxer's generic reassembly relies on this). A header page
+// states granule 0 when a packet completes on it and -1 when none does (RFC
+// 3533). Real Vorbis setups fit one page, so this covers the otherwise-unreached
+// large-setup branch.
 func TestEmitHeaderPagesSpill(t *testing.T) {
-	small := bytes.Repeat([]byte{0xAB}, 300)  // 2 segments
-	huge := bytes.Repeat([]byte{0xCD}, 70000) // 275 segments: spans >1 page
-	pkts := [][]byte{small, huge}
+	small := bytes.Repeat([]byte{0xAB}, 300)       // 2 segments
+	huge := bytes.Repeat([]byte{0xCD}, 70000)      // 275 segments: spans >1 page
+	giant := bytes.Repeat([]byte{0xEF}, 3*255*255) // spans pages it completes nothing on
+	pkts := [][]byte{small, huge, giant}
 
 	type emitted struct {
 		payload, seg []byte
 		flags        byte
 	}
 	var pages []emitted
+	var unstated int
 	err := emitHeaderPages(pkts, func(payload, seg []byte, granule int64, headerType byte) error {
-		if granule != 0 {
-			t.Errorf("header page granule = %d, want 0", granule)
+		want := int64(-1)
+		for _, l := range seg {
+			if l < 255 {
+				want = 0
+			}
+		}
+		if granule != want {
+			t.Errorf("header page granule = %d, want %d", granule, want)
+		}
+		if want < 0 {
+			unstated++
 		}
 		if len(seg) > maxPageSegEntries {
 			t.Errorf("page has %d segments, over the %d cap", len(seg), maxPageSegEntries)
@@ -322,6 +335,9 @@ func TestEmitHeaderPagesSpill(t *testing.T) {
 		if !bytes.Equal(got[i], pkts[i]) {
 			t.Errorf("packet %d did not reassemble to the original", i)
 		}
+	}
+	if unstated == 0 {
+		t.Error("no page completed nothing; the giant packet did not span one")
 	}
 }
 

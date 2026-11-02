@@ -47,8 +47,12 @@ disagreement nobody in reach can arbitrate.
 ## 2. Reaching Windows' encoder
 
 `scripts/wmfenc/wmfenc.ps1 -Subtype "{0000000A-0000-0010-8000-00AA00389B71}"`
-writes this format through Media Foundation's transcoder. The command line for
-each cell is in `codec/wmavoice/testdata/corpus/MANIFEST.md`.
+writes this format. The corpus was made through Media Foundation's transcoder;
+the script now drives the speech encoder MFT itself and writes the file with
+the Sink Writer, because the transcoder can drain that encoder in a way that
+drops its last 1.8 seconds (the script's header gives the mechanism). The two
+paths encode the same packets. The command line for each cell is in
+`codec/wmavoice/testdata/corpus/MANIFEST.md`.
 
 ### The envelope
 
@@ -69,8 +73,9 @@ each cell is in `codec/wmavoice/testdata/corpus/MANIFEST.md`.
 The full 46-byte extradata of each is in the manifest, and
 `wma-voice-bitstream.md` section 1.3 decodes all seven field by field.
 
-Two behaviours to know before trusting an encode, both the same trap stage 6
-added `-Bits` for:
+Two behaviours of the transcoder to know before trusting an encode through it,
+both the same trap stage 6 added `-Bits` for (the script now refuses both
+cases instead, naming the seven formats):
 
 1. **Media Foundation renegotiates rather than refusing.** Ask for 32 kHz or
    44.1 kHz and you get a **22050 Hz** file. Ask for stereo and you get mono.
@@ -138,7 +143,12 @@ drops to a hundred bits per superframe, and that is what overruns the
 reference's carry buffer (section 6).
 
 A regeneration will not be byte-identical: the encoder writes a fresh File ID
-GUID every run.
+GUID every run. Measured 2026-11-01, it is not sample-identical on two cells
+either: Windows' encoder now writes different packets for `voice-11025-10k` (10
+of 10) and `voice-22050-20k` (8 of 10) from the unchanged recipe. The committed
+bytes stay as the older encoder's output, since section 4 was measured on them
+and a regeneration moves some of its path counts on those two cells; the
+stale-carry superframes of section 6 do not move.
 
 ## 4. What the corpus reaches
 

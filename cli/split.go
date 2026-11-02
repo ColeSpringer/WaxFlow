@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -26,10 +27,10 @@ import (
 // timeline, and what to call it.
 //
 // to is waxflow.ToEnd for the last piece, the shape jobs.SplitSpans hands
-// the daemon's runner and for the same reason: the end is whatever the
-// source turns out to hold. Holding the last piece to a number instead
-// makes the split refuse a source whose headers merely under-declare, since
-// the number is checked against the declaration the CLI chose not to trust.
+// the daemon's runner. Every length here is exact (measured when the headers
+// only guessed), and the slice holds an open piece to it against a
+// shortfall: a source that ends short fails the piece rather than writing it
+// short.
 type piece struct {
 	from, to int64
 	title    string
@@ -130,14 +131,14 @@ data track occupies part of the file the split says what it skipped.`,
 			// A cut list is meaningless against a length the headers only
 			// guess at: every piece is checked against the total. Measure
 			// rather than trust, the same call a timeline's mint makes for the
-			// same reason. srcSamples stays -1 when the headers already knew.
-			srcSamples := int64(-1)
+			// same reason. srcTrack stays unknown when the headers already knew.
+			srcTrack := container.Track{Samples: -1}
 			if track.Samples < 0 || !track.SamplesExact {
-				measured, merr := measureSamples(e, src, srcHint)
+				measured, merr := measureSamples(cmd.Context(), e, src, srcHint)
 				if merr != nil {
 					return merr
 				}
-				srcSamples = measured.Samples
+				srcTrack = measured
 				// The walk read to the true end of stream, so the length is
 				// authoritative now and the track says so rather than keeping
 				// the declaration it replaced. Everything below reads the
@@ -204,7 +205,7 @@ data track occupies part of the file the split says what it skipped.`,
 				e: e, log: logger, src: src, hint: srcHint,
 				outFormat: outFormat, container: containerName,
 				flacLevel: optLevel, wavpackLevel: wavpackLevel, apeLevel: apeLevel,
-				force: force, ofN: ofN, srcSamples: srcSamples,
+				force: force, ofN: ofN, srcTrack: srcTrack,
 				mapper: label.NewLogged(logger), containerTags: info.Tags,
 			}
 			if !noTags {
@@ -283,20 +284,20 @@ func (c *oneSourceIndex) holds(src container.Source) bool {
 // measureSamples returns src's settled track: the sample count it actually
 // holds, and whatever else the measuring route settled beside it (see
 // measureMedia).
-func measureSamples(e *waxflow.Engine, src container.Source, hint string) (container.Track, error) {
+func measureSamples(ctx context.Context, e *waxflow.Engine, src container.Source, hint string) (container.Track, error) {
 	med, err := e.OpenStream(src, hint)
 	if err != nil {
 		return container.Track{}, err
 	}
 	defer med.Close()
-	return measureMedia(med)
+	return measureMedia(ctx, med)
 }
 
 // measureMedia is waxflow.MeasureLength on an open Media, saying what was
 // being done. The measure's own code is kept: a damaged file fails its walk
 // as malformed-input, and naming that unreadable reported a bad disk.
-func measureMedia(med format.Media) (container.Track, error) {
-	t, err := waxflow.MeasureLength(med)
+func measureMedia(ctx context.Context, med format.Media) (container.Track, error) {
+	t, err := waxflow.MeasureLength(ctx, med)
 	if err != nil {
 		return container.Track{}, waxerr.Annotate("measuring the source", err)
 	}
@@ -503,9 +504,9 @@ type splitter struct {
 	apeLevel     int
 	force        bool
 	ofN          int
-	// srcSamples is the measured total the cuts were checked against, or -1
+	// srcTrack is the measure the cuts were checked against, its Samples -1
 	// when the headers' own length was exact.
-	srcSamples int64
+	srcTrack container.Track
 
 	// The metadata half: albumTags and art ride onto every piece at mux
 	// time, tagInfo carries what a tag list cannot (art again, for the
@@ -612,7 +613,7 @@ func (s *splitter) writePiece(cmd *cobra.Command, path string, p piece) (*waxflo
 	}
 	// Held to the length the cuts were checked against, or a cut inside an
 	// advisory gap would pass atPieces and be refused here.
-	sl, err := waxflow.SliceMeasured(med, s.srcSamples, p.from, p.to)
+	sl, err := waxflow.SliceMeasured(med, s.srcTrack, p.from, p.to)
 	if err != nil {
 		return fail(err)
 	}
@@ -637,8 +638,10 @@ func (s *splitter) writePiece(cmd *cobra.Command, path string, p piece) (*waxflo
 	if err != nil {
 		return fail(err)
 	}
-	// A piece is never empty, so zero samples at any output rate is a seek
-	// that landed past the audio, refused rather than written.
+	// The slice already fails a piece that ends short of its length, and every
+	// length here is exact, so this is a belt: a piece is never empty, and zero
+	// samples at any output rate is a seek that landed past the audio, refused
+	// rather than written.
 	if res.Samples == 0 {
 		return fail(waxerr.New(waxerr.CodeInternal, fmt.Sprintf("the source delivered no samples from sample %d", p.from)))
 	}

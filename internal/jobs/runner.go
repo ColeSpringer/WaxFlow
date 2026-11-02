@@ -70,7 +70,7 @@ type Config struct {
 	// can. Concat holds every member to its track, so an advisory total that
 	// is two samples out fails the run outright; and even if it did not, a
 	// prefix sum desyncs every position after it.
-	MeasureTrack func(src *source.File) (container.Track, error)
+	MeasureTrack func(ctx context.Context, src *source.File) (container.Track, error)
 	// Slots is the number of concurrently running jobs (jobSlots).
 	Slots int
 	// Profile is the daemon's resampler profile.
@@ -1225,7 +1225,7 @@ func (r *Runner) runMerge(ctx context.Context, j *Job) error {
 		if err != nil {
 			return err
 		}
-		track, err := r.cfg.MeasureTrack(f)
+		track, err := r.cfg.MeasureTrack(ctx, f)
 		if err != nil {
 			f.Close()
 			return err
@@ -1381,17 +1381,20 @@ func splitProgressAt(base, span, done, pieceTotal int64) int64 {
 	return base + int64(float64(span)*min(1, float64(done)/float64(pieceTotal)))
 }
 
-// splitLength is the source length a split's cuts are resolved against: the
-// header's own, measured only when the header declares none, and whether it
-// measured. runSplit adopts a measurement onto each piece's media, so the
-// bound that accepted the cuts is the bound the run enforces.
+// splitLength is the source track whose length a split's cuts are resolved
+// against: the header's own, measured only when the header declares none, and
+// whether it measured. runSplit adopts a measurement onto each piece's media, so the
+// bound that accepted the cuts is the bound the run enforces. exact reports
+// whether the header's own length is one it stands behind.
 //
-// Filling an absent length is the whole of the measuring, and overriding a
+// Filling an absent length is all the measuring the cuts see, and overriding a
 // declared one is deliberately not. A length measured in defiance of a header
 // could only widen what this accepts, moving a clear refusal at the funnel
 // three layers down for no gain: a source that under-declares keeps its extra
 // audio unaddressable either way, which is what a lying header buys and the
-// position SpanTrack already takes.
+// position SpanTrack already takes. A declared length the header does not
+// stand behind is still measured for the open last piece alone (see runSplit),
+// which holds that piece to it without widening what is accepted.
 //
 // An absent length carries no such conflict, since SpanTrack bounds nothing
 // against a track that declares nothing. There the measurement adds the
@@ -1420,20 +1423,21 @@ func splitProgressAt(base, span, done, pieceTotal int64) int64 {
 // and nothing can disagree with it: the server always wires the hook, so a nil
 // one means the server is not the caller and no validation of these cuts ran
 // anywhere.
-func (r *Runner) splitLength(src *source.File) (samples int64, measured bool, err error) {
+func (r *Runner) splitLength(ctx context.Context, src *source.File) (track container.Track, measured, exact bool, err error) {
 	info, err := r.cfg.Engine.Probe(src, src.Ext, nil)
 	if err != nil {
-		return 0, false, err
+		return container.Track{}, false, false, err
 	}
-	track := info.Default()
+	track = info.Default()
+	exact = track.SamplesExact && track.Samples >= 0
 	if (track.Samples >= 0 && !track.SamplesAdvisory) || r.cfg.MeasureTrack == nil {
-		return track.Samples, false, nil
+		return track, false, exact, nil
 	}
-	m, err := r.cfg.MeasureTrack(src)
+	m, err := r.cfg.MeasureTrack(ctx, src)
 	if err != nil {
-		return 0, false, err
+		return container.Track{}, false, false, err
 	}
-	return m.Samples, true, nil
+	return m, true, exact, nil
 }
 
 // runSplit cuts the source at the request's cut points, one output per piece
@@ -1452,13 +1456,35 @@ func (r *Runner) runSplit(ctx context.Context, j *Job) error {
 		return err
 	}
 	defer src.Close()
-	srcSamples, measured, err := r.splitLength(src)
+	srcTrack, measured, exact, err := r.splitLength(ctx, src)
 	if err != nil {
 		return err
 	}
+	srcSamples := srcTrack.Samples
 	spans, err := req.SplitSpans(srcSamples)
 	if err != nil {
 		return err
+	}
+	// last holds the open last piece: the measure that filled an absent or
+	// advisory length, or one taken here when the header's own is not exact
+	// (an MP3's Xing count). It bounds that piece alone; the cuts stay checked
+	// against the declaration. Samples -1 leaves the declaration.
+	last := container.Track{Samples: -1}
+	switch {
+	case measured:
+		last = srcTrack
+	case !exact && r.cfg.MeasureTrack != nil && !req.Skipped(len(spans)-1):
+		if last, err = r.cfg.MeasureTrack(ctx, src); err != nil {
+			return err
+		}
+	}
+	lastBound := last.Samples
+	// A measure at or before the last cut leaves that piece nothing: refused
+	// here, before any piece is written.
+	if from := spans[len(spans)-1][0]; lastBound >= 0 && lastBound <= from {
+		return waxerr.New(waxerr.CodeMalformedInput, fmt.Sprintf(
+			"jobs: the source holds %d samples, less than its headers declare, and nothing past the last cut at sample %d",
+			lastBound, from))
 	}
 
 	opts := req.TranscodeOptions(0, r.cfg.Profile)
@@ -1478,13 +1504,16 @@ func (r *Runner) runSplit(ctx context.Context, j *Job) error {
 	// declares no length leaves the total 0, which progressFunc renders as an
 	// unknown percent rather than a wrong one.
 	report := r.progressFunc(ctx, j.ID, "transcode")
-	// The piece's end is its own except for the last, which is ToEnd:
-	// whatever the source turns out to hold, which is what srcSamples names.
+	// The piece's end is its own except for the last, which is ToEnd: the
+	// length that piece is held to, or the declaration when it has none.
 	pieceEnd := func(sp [2]int64) int64 {
-		if sp[1] == waxflow.ToEnd {
-			return srcSamples
+		switch {
+		case sp[1] != waxflow.ToEnd:
+			return sp[1]
+		case lastBound >= 0:
+			return lastBound
 		}
-		return sp[1]
+		return srcSamples
 	}
 	var total int64
 	for i, sp := range spans {
@@ -1519,12 +1548,16 @@ func (r *Runner) runSplit(ctx context.Context, j *Job) error {
 		// declares, and an advisory container's declaration can sit under the
 		// audio it holds, so a piece inside that gap would refuse here with its
 		// predecessors already written. Only a length this actually measured
-		// is adopted; an embedder with no MeasureTrack got the declaration
-		// verbatim, and marking an estimate exact is the opposite of what that
-		// caller asked for.
-		bound := int64(-1)
-		if measured {
-			bound = srcSamples
+		// is adopted, and the last piece's own measure bounds that piece alone;
+		// an embedder with no MeasureTrack got the declaration verbatim, and
+		// marking an estimate exact is the opposite of what that caller asked
+		// for.
+		bound := container.Track{Samples: -1}
+		switch {
+		case sp[1] == waxflow.ToEnd:
+			bound = last
+		case measured:
+			bound = srcTrack
 		}
 		sl, err := waxflow.SliceMeasured(med, bound, sp[0], sp[1])
 		if err != nil {
@@ -1544,7 +1577,9 @@ func (r *Runner) runSplit(ctx context.Context, j *Job) error {
 			return err
 		}
 		// A piece is never empty, so zero samples at any output rate is a seek
-		// that landed past the audio, refused rather than delivered.
+		// that landed past the audio, refused rather than delivered. With a
+		// MeasureTrack the slice holds every piece first, so this belt is
+		// reachable only without one.
 		if out.Samples == 0 {
 			return waxerr.New(waxerr.CodeInternal, fmt.Sprintf(
 				"jobs: %s: the source delivered no samples from sample %d", out.File, sp[0]))

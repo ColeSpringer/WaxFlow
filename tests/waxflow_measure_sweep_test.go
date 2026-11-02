@@ -1,16 +1,14 @@
 package waxflow_test
 
 import (
-	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/colespringer/waxflow"
-	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
 // measureSweep is one committed fixture per container and codec the tree
@@ -95,57 +93,65 @@ func TestMeasureLengthEqualsTheDecode(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			hint := filepath.Ext(c.path[len(c.path)-1])[1:]
-			open := func() format.Media {
-				med, err := format.Open(container.BytesSource(raw), hint, nil)
-				if err != nil {
-					t.Fatal(err)
-				}
-				return med
-			}
-			med := open()
-			route := measureRouteOf(t, med)
-			med.Close()
-			if route != c.route {
-				t.Errorf("MeasureLength takes the %s route, the table says %s", route, c.route)
-			}
-			med = open()
-			got, err := waxflow.MeasureLength(med)
-			if err != nil {
-				med.Close()
-				t.Fatal(err)
-			}
-			if !got.SamplesExact || got.SamplesAdvisory {
-				t.Errorf("measured %d with exact %v advisory %v", got.Samples, got.SamplesExact, got.SamplesAdvisory)
-			}
-			// The measure leaves med at its start, so this is the read the
-			// measure promises; a fresh open's read is the one nothing walked.
-			if read := readLength(t, med); got.Samples != read {
-				t.Errorf("measured %d, a read of the measured media delivers %d", got.Samples, read)
-			}
-			if fresh := readLength(t, open()); fresh != got.Samples+c.over {
-				t.Errorf("measured %d, a read of a fresh open delivers %d, want %d past the measure",
-					got.Samples, fresh, c.over)
-			}
+			measureEqualsDecode(t, raw, filepath.Ext(c.path[len(c.path)-1])[1:], c.route, c.over)
 		})
+	}
+	// Ogg streams starting past granule 0, and a native FLAC whose first frame
+	// is not numbered 0, built at test time.
+	for _, c := range oggStartCases(t, 2) {
+		t.Run("ogg "+c.name+" start", func(t *testing.T) {
+			measureEqualsDecode(t, c.shifted, c.hint, "exact", 0)
+		})
+	}
+	t.Run("flac first frame past 0", func(t *testing.T) {
+		twin := transcodeBytes(t, loopedWAV(t, 2), waxflow.TranscodeOptions{Format: "flac"})
+		measureEqualsDecode(t, testutil.RenumberFLACFrames(t, twin, 1000), "flac", "exact", 0)
+	})
+}
+
+// measureEqualsDecode is one row of the sweep: raw takes route, and measures
+// exactly what a read delivers, over past the measure for a fresh open.
+func measureEqualsDecode(t *testing.T, raw []byte, hint, wantRoute string, over int64) {
+	t.Helper()
+	open := func() format.Media {
+		med, err := format.Open(container.BytesSource(raw), hint, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return med
+	}
+	med := open()
+	route := measureRouteOf(t, med)
+	med.Close()
+	if route != wantRoute {
+		t.Errorf("MeasureLength takes the %s route, the table says %s", route, wantRoute)
+	}
+	med = open()
+	got, err := waxflow.MeasureLength(t.Context(), med)
+	if err != nil {
+		med.Close()
+		t.Fatal(err)
+	}
+	if !got.SamplesExact || got.SamplesAdvisory {
+		t.Errorf("measured %d with exact %v advisory %v", got.Samples, got.SamplesExact, got.SamplesAdvisory)
+	}
+	// The measure leaves med at its start, so this is the read the measure
+	// promises; a fresh open's read is the one nothing walked.
+	if read := readLength(t, med); got.Samples != read {
+		t.Errorf("measured %d, a read of the measured media delivers %d", got.Samples, read)
+	}
+	if fresh := readLength(t, open()); fresh != got.Samples+over {
+		t.Errorf("measured %d, a read of a fresh open delivers %d, want %d past the measure",
+			got.Samples, fresh, over)
 	}
 }
 
 // readLength reads med to the end, closes it, and returns what it delivered.
 func readLength(t *testing.T, med format.Media) int64 {
 	t.Helper()
-	defer med.Close()
-	buf := audio.Get(med.Info().Default().Fmt, audio.StandardChunk)
-	defer audio.Put(buf)
-	var n int64
-	for {
-		err := med.ReadChunk(buf)
-		if errors.Is(err, io.EOF) {
-			return n
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		n += int64(buf.N)
+	n, err := readUntilEnd(med)
+	if err != nil {
+		t.Fatal(err)
 	}
+	return n
 }

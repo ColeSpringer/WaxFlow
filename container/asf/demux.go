@@ -135,7 +135,8 @@ func (r *reader) warnTime(off int64, format string, args ...any) error {
 // Demuxer reads one audio stream from an ASF source, emitting one packet per
 // media object.
 type Demuxer struct {
-	opts DemuxerOptions
+	damage int // Damage warnings met, the list's cap aside (DamageCount)
+	opts   DemuxerOptions
 	// syncOK reports whether a decoder can begin at a media object, from the
 	// codec that will decode it. Nil when every object is a start point.
 	syncOK func([]byte) bool
@@ -238,6 +239,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
+	d.damage++
 	d.record(container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
 	return nil
 }
@@ -259,6 +261,9 @@ func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track}
 
 // Warnings returns the tolerated oddities seen so far.
 func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
+
+// DamageCount implements container.Damaged.
+func (d *Demuxer) DamageCount() int { return d.damage }
 
 // Tags returns the canonical tags parsed from the header's two tag objects.
 func (d *Demuxer) Tags() map[string][]string { return d.tags }

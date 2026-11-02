@@ -31,8 +31,9 @@ type DemuxerOptions struct {
 // state: one frame of IMDCT overlap for AAC-LC, and the HE-AAC preroll
 // when the first frame's SBR probe upgraded the track.
 type Demuxer struct {
-	src  container.Source
-	opts DemuxerOptions
+	damage int // Damage warnings met, the list's cap aside (DamageCount)
+	src    container.Source
+	opts   DemuxerOptions
 
 	ref      header
 	haveRef  bool // ref is set (distinct from firstFrame, which can be 0)
@@ -76,6 +77,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	// Capped and deduplicated like the MP3 readers' list: a stream with junk
 	// between every frame would otherwise grow it with the walk.
 	w := container.Warning{Offset: off, Msg: msg, Kind: container.Damage}
+	d.damage++
 	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
 		d.warnings = append(d.warnings, w)
 	}
@@ -274,6 +276,9 @@ func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track}
 
 // Warnings returns damage tolerated during parsing.
 func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
+
+// DamageCount implements container.Damaged.
+func (d *Demuxer) DamageCount() int { return d.damage }
 
 // extend grows the frame index by one and reports whether it did. The
 // window is trimmed to the last indexed frame first, and the next header is

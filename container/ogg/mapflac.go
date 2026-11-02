@@ -14,6 +14,9 @@ type flacMapping struct {
 	codecConfig []byte
 	num         flac.Numbering
 	haveNum     bool
+	// origin is the first frame's sample position. Positions run from 0 at
+	// that frame, whatever number it carries, as a native FLAC's do.
+	origin int64
 }
 
 func (m *flacMapping) codecID() codec.ID { return codec.FLAC }
@@ -54,67 +57,39 @@ func (m *flacMapping) parseHeader([]byte) error { return nil }
 
 func (m *flacMapping) isAudio(pkt []byte) bool { return flac.SyncOK(pkt) }
 
-// finalizeTrack builds the track and settles its length against the stream's
-// final page granule, in both directions, exactly as the native FLAC and
-// WavPack opens settle theirs against the payload.
+// finalizeTrack builds the track and settles its length against its frames
+// (flac.Settle): the span from the first frame's own position to the end of
+// the last whole frame in the file's tail, read off its header. Page granules
+// play no part, so neither a lost frame nor a broken granule moves it.
 //
-// The granule is always read. STREAMINFO's total is the encoder's back-patched
-// claim, written once the input ran out, and a file cut short afterwards still
-// carries it; taking it on trust hands every caller a duration no read can
-// reach, and hands strict mode a damaged file it has nothing to object to. A
-// stream whose pages run past it is the mirror image. Five outcomes: a
-// shortfall warns (damage) and adopts the granule, an overrun notes and adopts
-// it, equality confirms, a declared total of zero is not a claim at all and
-// simply takes the granule, and a tail with no page of this serial keeps the
-// declared count unflagged, since nothing was found to check it against. A
-// stream that declares nothing *and* has no granule to find is unknown (-1),
-// not empty.
-//
-// A length found this way is exact, and that is sound on a tail read alone
-// where flacn's is not. The granule is the muxer's own statement of the
-// playable end, on a page whose CRC checked out, which is the very basis the
-// Opus and Vorbis mappings already promote on; and a cap only ever stops a
-// decode early, never extends one. Like flacn's open, a tail read cannot see a
-// hole before the last page: a read finds anything earlier, where it is.
-func (m *flacMapping) finalizeTrack(lastGranule func() int64, r reporter) (container.Track, error) {
+// That length is exact on a tail read alone: the last frame's header is on a
+// page whose CRC checked, and a cap only stops a decode early. A hole before
+// the last page is a read's to find. No FLAC decoder trims on a granule, so a
+// stream starting at another granule moves the timeline its pages state, not
+// the audio.
+func (m *flacMapping) finalizeTrack(first firstPage, lastEnd func() int64, r reporter) (container.Track, error) {
 	f := m.si.PCMFormat()
 	if err := f.Valid(); err != nil {
 		return container.Track{}, container.UnusableFormat("ogg", f, err)
 	}
-	samples, exact := m.si.Samples, false
-	switch granule := lastGranule(); {
-	case granule < 0 && samples == 0:
-		// Nothing declared and nothing found: unknown, which is what the Opus
-		// and Vorbis mappings report in the same position. Reporting the zero
-		// through would call the track empty, which is a different claim and a
-		// worse one.
-		samples = -1
-	case granule < 0:
-		// No page of this serial in the tail: nothing to check against, so the
-		// declared count stands as the claim it always was.
-	case samples == 0:
-		// Streaming muxers leave STREAMINFO's total at zero, which is not a
-		// claim; ffmpeg's Ogg-FLAC output is this shape.
-		samples, exact = granule, true
-	case granule < samples:
-		if err := r.warn(0, "STREAMINFO declares %d samples but the final page granule is %d",
-			samples, granule); err != nil {
+	st, err := flac.Settle(m.codecConfig, m.origin, lastEnd())
+	if err != nil {
+		return container.Track{}, err
+	}
+	for _, n := range st.Notes {
+		r.note(first.off, "%s", n)
+	}
+	if st.Damage != "" {
+		if err := r.warn(first.off, "%s", st.Damage); err != nil {
 			return container.Track{}, err
 		}
-		samples, exact = granule, true
-	case granule > samples:
-		r.note(0, "STREAMINFO declares %d samples but the final page granule is %d",
-			samples, granule)
-		samples, exact = granule, true
-	default:
-		exact = true
 	}
 	return container.Track{
 		Codec:        codec.FLAC,
-		CodecConfig:  m.codecConfig,
+		CodecConfig:  st.StreamInfo,
 		Fmt:          f,
-		Samples:      samples,
-		SamplesExact: exact,
+		Samples:      st.Samples,
+		SamplesExact: st.Measured,
 		Default:      true,
 	}, nil
 }
@@ -126,9 +101,13 @@ func (m *flacMapping) packetTiming(pkt []byte, _ int64) (pts, dur int64, sync, o
 	}
 	if !m.haveNum {
 		m.num = m.si.Numbering(fi)
+		m.origin = m.num.Start(fi)
 		m.haveNum = true
 	}
-	return m.num.Start(fi), int64(fi.BlockSize), true, true
+	if m.num.Start(fi) < m.origin {
+		return 0, 0, false, false // numbered before the first frame: not this stream's
+	}
+	return m.num.Start(fi) - m.origin, int64(fi.BlockSize), true, true
 }
 
 func (m *flacMapping) selfTiming() bool { return true }

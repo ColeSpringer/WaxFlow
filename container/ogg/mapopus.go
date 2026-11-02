@@ -99,7 +99,7 @@ func (m *opusMapping) isAudio(pkt []byte) bool {
 	return len(pkt) > 0
 }
 
-func (m *opusMapping) finalizeTrack(lastGranule func() int64, _ reporter) (container.Track, error) {
+func (m *opusMapping) finalizeTrack(first firstPage, lastGranule func() int64, r reporter) (container.Track, error) {
 	f := audio.Format{
 		Rate:     48000,
 		Channels: m.channels,
@@ -110,12 +110,26 @@ func (m *opusMapping) finalizeTrack(lastGranule func() int64, _ reporter) (conta
 	if err := f.Valid(); err != nil {
 		return container.Track{}, container.UnusableFormat("ogg", f, err)
 	}
+	// RFC 7845 section 4.5 makes a stream invalid when its first page's granule
+	// falls short of the packets completing on it, or, on a page that also ends
+	// the stream, of the pre-skip. Read tolerantly, the first keeps the
+	// timeline its pages state, and the second has nothing to play.
+	switch {
+	case first.granule < 0: // nothing stated to check
+	case first.eos && first.granule < m.preSkip:
+		if err := r.warn(first.off, "the first audio page ends the stream at granule %d, short of the %d-sample pre-skip",
+			first.granule, m.preSkip); err != nil {
+			return container.Track{}, err
+		}
+	case !first.eos && first.granule < first.samples:
+		if err := r.warn(first.off, "the first audio page's granule %d is smaller than the %d samples completing on it",
+			first.granule, first.samples); err != nil {
+			return container.Track{}, err
+		}
+	}
 	samples := int64(-1)
 	if lg := lastGranule(); lg >= 0 {
-		samples = lg - m.preSkip
-		if samples < 0 {
-			samples = 0
-		}
+		samples = max(lg-m.preSkip, 0)
 	}
 	return container.Track{
 		Codec:        codec.Opus,

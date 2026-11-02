@@ -782,7 +782,7 @@ func TestOpenStreamSettlesACompleteSidecar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := waxflow.MeasureLength(first)
+	want, err := waxflow.MeasureLength(t.Context(), first)
 	first.Close()
 	if err != nil {
 		t.Fatal(err)
@@ -843,7 +843,7 @@ func TestALinearPlayLeavesASidecar(t *testing.T) {
 		t.Errorf("the next open reports %d (exact %v), the play delivered %d", tr.Samples, tr.SamplesExact, played)
 	}
 	src.Reset()
-	if _, err := waxflow.MeasureLength(med); err != nil {
+	if _, err := waxflow.MeasureLength(t.Context(), med); err != nil {
 		t.Fatal(err)
 	}
 	if src.Reads != 0 {
