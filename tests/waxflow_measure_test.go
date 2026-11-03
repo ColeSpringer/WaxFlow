@@ -62,7 +62,7 @@ func TestMeasureRouteFixturesTakeTheirRoute(t *testing.T) {
 			if r.route == "exact" {
 				return
 			}
-			if err := format.WalkMedia(med); err != nil {
+			if err := format.WalkMedia(context.Background(), med); err != nil {
 				t.Fatal(err)
 			}
 			if got := exact(); got != (r.route == "walk") {
@@ -127,7 +127,7 @@ func TestMeasureLengthTakesTheCheapestRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tol.Close()
-	if err := tol.(format.Walker).Walk(); err != nil {
+	if err := tol.(format.Walker).Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	want := tol.Info().Default().Samples
@@ -170,7 +170,7 @@ func TestMeasureLengthTakesTheCheapestRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	strict, err := format.Probe(container.BytesSource(webm), "webm", &format.Options{Strict: true})
+	strict, err := format.Probe(context.Background(), container.BytesSource(webm), "webm", &format.Options{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,9 +254,9 @@ func (m *countingMedia) ReadChunk(b *audio.Buffer) error {
 	return m.Media.ReadChunk(b)
 }
 
-func (m *countingMedia) Walk() error {
+func (m *countingMedia) Walk(ctx context.Context) error {
 	m.walked = true
-	return format.WalkMedia(m.Media)
+	return format.WalkMedia(ctx, m.Media)
 }
 
 func (m *countingMedia) Walked() bool { return format.MediaWalked(m.Media) }
@@ -302,7 +302,7 @@ func TestMeasureLengthWalksAFragmentedMP4(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lin.Close()
-	if err := format.WalkMedia(lin); err != nil {
+	if err := format.WalkMedia(context.Background(), lin); err != nil {
 		t.Fatal(err)
 	}
 	if n := int64(drainMedia(t, lin, 1<<20).N); n != got.Samples {
@@ -367,7 +367,7 @@ func TestSliceMeasuredOpensAWindowInTheAdvisoryGap(t *testing.T) {
 		med.Close()
 		t.Fatal(err)
 	}
-	sl, err := waxflow.SliceMeasured(med, track, from, to)
+	sl, err := waxflow.SliceMeasured(context.Background(), med, track, from, to)
 	if err != nil {
 		t.Fatalf("SliceMeasured refused a window the file can serve: %v", err)
 	}
@@ -406,7 +406,7 @@ func TestSliceAfterMeasureMatchesAFreshSlice(t *testing.T) {
 				if _, err := waxflow.MeasureLength(t.Context(), med); err != nil {
 					t.Fatal(err)
 				}
-				sl, err := waxflow.SliceMeasured(med, track, w[0], w[1])
+				sl, err := waxflow.SliceMeasured(context.Background(), med, track, w[0], w[1])
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -428,10 +428,10 @@ type stubMedia struct {
 	closed bool
 }
 
-func (m *stubMedia) Info() *format.Info                { return m.info }
-func (m *stubMedia) ReadChunk(*audio.Buffer) error     { return io.EOF }
-func (m *stubMedia) SeekSample(t int64) (int64, error) { return t, nil }
-func (m *stubMedia) Close() error                      { m.closed = true; return nil }
+func (m *stubMedia) Info() *format.Info                                     { return m.info }
+func (m *stubMedia) ReadChunk(*audio.Buffer) error                          { return io.EOF }
+func (m *stubMedia) SeekSample(ctx context.Context, t int64) (int64, error) { return t, nil }
+func (m *stubMedia) Close() error                                           { m.closed = true; return nil }
 
 func advisoryMedia(declared int64) *stubMedia {
 	return &stubMedia{info: &format.Info{
@@ -474,7 +474,7 @@ func TestSliceMeasuredReanchorsAdvisoryDeclarations(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			med := advisoryMedia(tc.declared)
-			sl, err := waxflow.SliceMeasured(med, measuredLen(tc.n), tc.from, tc.to)
+			sl, err := waxflow.SliceMeasured(context.Background(), med, measuredLen(tc.n), tc.from, tc.to)
 			if tc.want < 0 {
 				if err == nil || !strings.Contains(err.Error(), "past the source's") {
 					t.Fatalf("a window past the measure was not refused: %v", err)
@@ -517,7 +517,7 @@ func TestSliceMeasuredForwardsLiveWarnings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sl, err := waxflow.SliceMeasured(med, measuredLen(measured), 0, waxflow.ToEnd)
+	sl, err := waxflow.SliceMeasured(context.Background(), med, measuredLen(measured), 0, waxflow.ToEnd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -542,7 +542,7 @@ func TestSliceMeasuredClosesWhatItRefuses(t *testing.T) {
 		Media:   opener(t, filepath.Join("..", "testdata", "sine-s16.flac"), "flac")(),
 		onClose: func() { closed = true },
 	}
-	if _, err := waxflow.SliceMeasured(spy, measuredLen(-1), 0, 15436); err == nil {
+	if _, err := waxflow.SliceMeasured(context.Background(), spy, measuredLen(-1), 0, 15436); err == nil {
 		t.Error("a window one sample past the length opened")
 	}
 	if !closed {
@@ -559,7 +559,9 @@ func (f *failingWalk) Info() *format.Info {
 	info.Tracks[0].Samples, info.Tracks[0].SamplesExact = -1, false
 	return &info
 }
-func (f *failingWalk) Walk() error  { return waxerr.New(waxerr.CodeMalformedInput, "no frame sync") }
+func (f *failingWalk) Walk(context.Context) error {
+	return waxerr.New(waxerr.CodeMalformedInput, "no frame sync")
+}
 func (f *failingWalk) Walked() bool { return false }
 
 // TestMeasureLengthKeepsTheRouteErrorCode: a failed walk is malformed input,
@@ -578,8 +580,8 @@ func TestMeasureRefusesANilMedia(t *testing.T) {
 	if _, err := waxflow.MeasureLength(t.Context(), nil); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
 		t.Errorf("MeasureLength(nil) = %v, want invalid-request", err)
 	}
-	if _, err := waxflow.SliceMeasured(nil, measuredLen(-1), 0, waxflow.ToEnd); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
-		t.Errorf("SliceMeasured(nil) = %v, want invalid-request", err)
+	if _, err := waxflow.SliceMeasured(context.Background(), nil, measuredLen(-1), 0, waxflow.ToEnd); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+		t.Errorf("SliceMeasured of a nil Media = %v, want invalid-request", err)
 	}
 }
 
@@ -597,5 +599,69 @@ func TestMeasureLengthStopsWhenCanceled(t *testing.T) {
 	}
 	if tr, err := waxflow.MeasureLength(t.Context(), med); err != nil || tr.Samples != frames {
 		t.Fatalf("%d samples (%v) after the canceled count, want %d", tr.Samples, err, frames)
+	}
+}
+
+// TestMeasureLengthStopsAWalkWhenCanceled: on every sweep row the measure
+// walks for, a canceled measure settles and moves nothing, an ended context
+// costs no read, and the next measure finishes the walk from where it stopped.
+func TestMeasureLengthStopsAWalkWhenCanceled(t *testing.T) {
+	for _, c := range measureSweep {
+		if c.route != "walk" {
+			continue
+		}
+		t.Run(c.what, func(t *testing.T) {
+			raw, err := os.ReadFile(repoPath(c.path...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			hint := filepath.Ext(c.path[len(c.path)-1])[1:]
+			fresh, err := format.Open(container.BytesSource(raw), hint, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer fresh.Close()
+			if format.MediaWalked(fresh) {
+				t.Fatal("this cell needs a source with a deferred walk")
+			}
+			want, err := waxflow.MeasureLength(t.Context(), fresh)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantPCM := drainMedia(t, fresh, 1<<20)
+			defer audio.Put(wantPCM)
+
+			src := &testutil.CountingSource{Src: container.BytesSource(raw)}
+			med, err := format.Open(src, hint, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer med.Close()
+			opened := src.Reads
+			ended, stop := context.WithCancel(t.Context())
+			stop()
+			if _, err := waxflow.MeasureLength(ended, med); waxerr.CodeOf(err) != waxerr.CodeCanceled {
+				t.Fatalf("a measure whose context had ended returned %v, want canceled", err)
+			}
+			if src.Reads != opened {
+				t.Errorf("a measure whose context had ended read %d times", src.Reads-opened)
+			}
+			if _, err := waxflow.MeasureLength(testutil.CancelAfterChecks(t, 2), med); waxerr.CodeOf(err) != waxerr.CodeCanceled {
+				t.Fatalf("a measure canceled mid-walk returned %v, want canceled", err)
+			}
+			if tr := med.Info().Default(); tr.SamplesExact || format.MediaWalked(med) {
+				t.Errorf("a canceled measure settled %d (exact %v, walked %v)", tr.Samples, tr.SamplesExact, format.MediaWalked(med))
+			}
+			got, err := waxflow.MeasureLength(t.Context(), med)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Samples != want.Samples || !got.SamplesExact || got.SamplesCounted != want.SamplesCounted {
+				t.Errorf("measured %+v after the cancel, a fresh measure %+v", got, want)
+			}
+			gotPCM := drainMedia(t, med, 1<<20)
+			defer audio.Put(gotPCM)
+			equalPCM(t, wantPCM, gotPCM)
+		})
 	}
 }

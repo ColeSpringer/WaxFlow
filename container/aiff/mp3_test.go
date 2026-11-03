@@ -2,6 +2,7 @@ package aiff
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"slices"
@@ -204,7 +205,7 @@ func TestMP3SeekBacksOffForTheReservoir(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := int64(400 * mp3SPF)
-	landed, err := d.SeekSample(0, target)
+	landed, err := d.SeekSample(context.Background(), 0, target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +280,7 @@ func TestMP3ToleratedDamage(t *testing.T) {
 			if walked.Walked() && !tc.atOpen {
 				t.Error("Walked before any walk")
 			}
-			if err := walked.Walk(); err != nil {
+			if err := walked.Walk(context.Background()); err != nil {
 				t.Fatalf("a tolerant Walk failed: %v", err)
 			}
 			if !walked.Walked() {
@@ -315,7 +316,7 @@ func TestMP3ToleratedDamage(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := strict.Walk(); !errors.Is(err, waxerr.ErrMalformedInput) {
+			if err := strict.Walk(context.Background()); !errors.Is(err, waxerr.ErrMalformedInput) {
 				t.Errorf("strict Walk returned %v, want malformed", err)
 			}
 		})
@@ -332,7 +333,7 @@ func TestMP3IndexRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.SeekSample(0, int64(mp3FrameCount)*600*mp3SPF); err != nil {
+	if _, err := d.SeekSample(context.Background(), 0, int64(mp3FrameCount)*600*mp3SPF); err != nil {
 		t.Fatal(err)
 	}
 	blob := d.IndexSnapshot()
@@ -346,11 +347,11 @@ func TestMP3IndexRoundTrips(t *testing.T) {
 	if !d2.RestoreIndex(blob) {
 		t.Fatal("snapshot rejected by an identical source")
 	}
-	l1, err := d.SeekSample(0, 2_000_000)
+	l1, err := d.SeekSample(context.Background(), 0, 2_000_000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	l2, err := d2.SeekSample(0, 2_000_000)
+	l2, err := d2.SeekSample(context.Background(), 0, 2_000_000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +377,7 @@ func TestByteLinearPayloadsHaveNoIndex(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := d.SeekSample(0, 1<<20); err != nil {
+			if _, err := d.SeekSample(context.Background(), 0, 1<<20); err != nil {
 				t.Fatal(err)
 			}
 			if blob := d.IndexSnapshot(); blob != nil {
@@ -388,7 +389,7 @@ func TestByteLinearPayloadsHaveNoIndex(t *testing.T) {
 			// The same per-file answer on container.Walker: the byte-linear
 			// payload has nothing to walk, and the short frame run was just
 			// walked to its end by the seek.
-			if err := d.Walk(); err != nil || !d.Walked() {
+			if err := d.Walk(context.Background()); err != nil || !d.Walked() {
 				t.Errorf("Walk = %v, Walked = %v; want nil and true for a payload with nothing left to walk", err, d.Walked())
 			}
 			// On a demuxer that has not moved, so the refusal is the one

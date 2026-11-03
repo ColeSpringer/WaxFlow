@@ -201,7 +201,7 @@ func TestFLACSubsetProbeClean(t *testing.T) {
 	for _, name := range subsetFiles {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			info, err := waxflow.New().Probe(vectorSource(t, "flac/subset/"+name+".flac"), "flac", nil)
+			info, err := waxflow.New().Probe(context.Background(), vectorSource(t, "flac/subset/"+name+".flac"), "flac", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -297,14 +297,14 @@ func TestFLACFaulty(t *testing.T) {
 			t.Fatalf("tolerant decode: %v", err)
 		}
 		audio.Put(got)
-		info, err := waxflow.New().Probe(vectorSource(t, name), "flac", nil)
+		info, err := waxflow.New().Probe(context.Background(), vectorSource(t, name), "flac", nil)
 		if err != nil {
 			t.Fatalf("tolerant probe: %v", err)
 		}
 		if len(info.Warnings) == 0 {
 			t.Error("no warning about the misplaced STREAMINFO")
 		}
-		if _, err := waxflow.New().Probe(vectorSource(t, name), "flac", &waxflow.ProbeOptions{Strict: true}); err == nil {
+		if _, err := waxflow.New().Probe(context.Background(), vectorSource(t, name), "flac", &waxflow.ProbeOptions{Strict: true}); err == nil {
 			t.Error("strict probe accepted a misplaced STREAMINFO")
 		}
 	})
@@ -393,7 +393,7 @@ func seekMatchesReference(t *testing.T, med format.Media, ref *audio.Buffer, n i
 		if target < 0 {
 			target += total
 		}
-		landed, err := med.SeekSample(target)
+		landed, err := med.SeekSample(context.Background(), target)
 		if err != nil {
 			t.Fatalf("seek %d to %d: %v", i, target, err)
 		}
@@ -425,7 +425,7 @@ func seekMatchesReference(t *testing.T, med format.Media, ref *audio.Buffer, n i
 		}
 	}
 	// Past-the-end target: lands at or before the end, then hits EOF.
-	landed, err := med.SeekSample(total + 100)
+	landed, err := med.SeekSample(context.Background(), total+100)
 	if err != nil {
 		t.Fatalf("past-end seek: %v", err)
 	}
@@ -451,7 +451,7 @@ func TestFLACProbeAgreesWithFFprobeOnSuite(t *testing.T) {
 			t.Parallel()
 			path := testutil.VectorPath(t, name)
 			ref := testutil.FFprobeFile(t, path)
-			info, err := waxflow.New().Probe(vectorSource(t, name), "flac", nil)
+			info, err := waxflow.New().Probe(context.Background(), vectorSource(t, name), "flac", nil)
 			if err != nil {
 				t.Fatal(err)
 			}

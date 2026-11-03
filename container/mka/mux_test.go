@@ -2,6 +2,7 @@ package mka
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"io"
 	"testing"
@@ -153,7 +154,7 @@ func TestMuxOpusGapless(t *testing.T) {
 	// The exact total is a cluster walk away and no open pays it; the stream
 	// this builds is too short for the muxer to write a Duration, so the fresh
 	// open has nothing to state at all.
-	if err := d.Walk(); err != nil {
+	if err := d.Walk(context.Background()); err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
 	tr = d.Tracks()[0]
@@ -301,7 +302,7 @@ func TestMuxForwardsPerPacketTrims(t *testing.T) {
 			t.Fatalf("copy packet %d: Padding = %d, want %d", i, pkt.Padding, want)
 		}
 	}
-	if err := back.Walk(); err != nil {
+	if err := back.Walk(context.Background()); err != nil {
 		t.Fatalf("Walk of the copy: %v", err)
 	}
 	tr := back.Tracks()[0]

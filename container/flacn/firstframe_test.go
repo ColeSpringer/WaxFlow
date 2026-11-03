@@ -7,6 +7,7 @@ package flacn_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"io"
 	"strings"
@@ -100,11 +101,11 @@ func TestFirstFrameNotZero(t *testing.T) {
 		targets = append(targets, end*i/40+i)
 	}
 	for _, target := range targets {
-		la, err := ref.SeekSample(0, target)
+		la, err := ref.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatalf("twin seek to %d: %v", target, err)
 		}
-		lb, err := got.SeekSample(0, target)
+		lb, err := got.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatalf("renumbered seek to %d: %v", target, err)
 		}
@@ -173,7 +174,7 @@ func TestFramesBeforeTheFirstPlaceNothing(t *testing.T) {
 				t.Errorf("%d samples settled exact from a tail numbered before the first frame", tr.Samples)
 			}
 			for _, target := range []int64{0, 4096*50 + 5, 4096*(head-2) + 1, 4096 * (head + 50), 1 << 40} {
-				landed, err := d.SeekSample(0, target)
+				landed, err := d.SeekSample(context.Background(), 0, target)
 				if err != nil {
 					t.Fatalf("seek to %d: %v", target, err)
 				}

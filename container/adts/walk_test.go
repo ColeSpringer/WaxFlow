@@ -2,6 +2,7 @@ package adts
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -42,7 +43,7 @@ func TestWalkFindsJunkBetweenFrames(t *testing.T) {
 	if d.Walked() || len(d.Warnings()) != 0 {
 		t.Fatalf("at open: walked = %v, warnings = %v; the head is clean and the index lazy", d.Walked(), d.Warnings())
 	}
-	if err := d.Walk(); err != nil {
+	if err := d.Walk(context.Background()); err != nil {
 		t.Fatalf("a tolerant Walk failed: %v", err)
 	}
 	if !d.Walked() {
@@ -56,7 +57,7 @@ func TestWalkFindsJunkBetweenFrames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("strict refused at open, before the walk reached the junk: %v", err)
 	}
-	if err := strict.Walk(); !errors.Is(err, waxerr.ErrMalformedInput) {
+	if err := strict.Walk(context.Background()); !errors.Is(err, waxerr.ErrMalformedInput) {
 		t.Errorf("strict Walk returned %v, want malformed", err)
 	}
 
@@ -65,7 +66,7 @@ func TestWalkFindsJunkBetweenFrames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := clean.Walk(); err != nil || !clean.Walked() || len(clean.Warnings()) != 0 {
+	if err := clean.Walk(context.Background()); err != nil || !clean.Walked() || len(clean.Warnings()) != 0 {
 		t.Errorf("clean stream: Walk = %v, Walked = %v, warnings = %v", err, clean.Walked(), clean.Warnings())
 	}
 }

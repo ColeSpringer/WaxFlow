@@ -63,9 +63,10 @@ func New(opts ...Option) *Engine {
 }
 
 // Probe identifies src and returns its parsed headers. The hint is an
-// optional file extension used only when no magic bytes match.
-func (e *Engine) Probe(src container.Source, hint string, opts *ProbeOptions) (*format.Info, error) {
-	return format.Probe(src, hint, &format.Options{Strict: opts != nil && opts.Strict})
+// optional file extension used only when no magic bytes match. ctx bounds the
+// walk a strict probe runs for its verdict (see format.Probe).
+func (e *Engine) Probe(ctx context.Context, src container.Source, hint string, opts *ProbeOptions) (*format.Info, error) {
+	return format.Probe(ctx, src, hint, &format.Options{Strict: opts != nil && opts.Strict})
 }
 
 // OpenStream opens src for decoded, sample-exact PCM access. With an
@@ -89,8 +90,9 @@ func (e *Engine) OpenStream(src container.Source, hint string) (format.Media, er
 			e.log.Debug("index sidecar rejected and dropped", "hint", hint)
 		} else if format.MediaWalked(med) {
 			// A complete index is a measurement already taken, and walking
-			// it costs nothing, so the media reports the length at once.
-			if err := format.WalkMedia(med); err != nil {
+			// it costs nothing, so the media reports the length at once; with
+			// nothing left to stop, the context is the background one.
+			if err := format.WalkMedia(context.Background(), med); err != nil {
 				e.log.Debug("settling a restored index failed", "hint", hint, "err", err)
 			}
 		}
@@ -140,7 +142,7 @@ func (m *indexSavingMedia) RestoreIndex(blob []byte) bool {
 // Walk and Walked forward format.Walker the way the index pair is forwarded:
 // embedding the interface promotes nothing outside it, and the daemon's job
 // gate asks the media it opened through this engine.
-func (m *indexSavingMedia) Walk() error { return format.WalkMedia(m.Media) }
+func (m *indexSavingMedia) Walk(ctx context.Context) error { return format.WalkMedia(ctx, m.Media) }
 
 func (m *indexSavingMedia) Walked() bool { return format.MediaWalked(m.Media) }
 
@@ -263,7 +265,7 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 	}
 	var landed int64
 	if opts.FromSample > 0 {
-		if landed, err = med.SeekSample(opts.FromSample); err != nil {
+		if landed, err = med.SeekSample(ctx, opts.FromSample); err != nil {
 			return nil, err
 		}
 	}
@@ -273,7 +275,7 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 	patchable := muxseek.CanSeek(dst)
 	if !patchable {
 		if confirm := confirmableLength(srcTrack, med); confirm != nil {
-			if err := confirm(); err != nil {
+			if err := confirm(ctx); err != nil {
 				return nil, err
 			}
 			srcTrack = med.Info().Default()
@@ -417,7 +419,7 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 // methods: format.Walker on a Media, container.Walker on a demuxer. The rungs
 // below ask the same question of each, so they ask it once.
 type lengthWalker interface {
-	Walk() error
+	Walk(ctx context.Context) error
 	Walked() bool
 }
 
@@ -450,7 +452,7 @@ type lengthWalker interface {
 //
 // The other lengths are fine as they are: an exact one is authoritative, an
 // advisory one projects nothing at all, and an absent one commits to nothing.
-func confirmableLength(t container.Track, src any) func() error {
+func confirmableLength(t container.Track, src any) func(context.Context) error {
 	if t.Samples < 0 || t.SamplesExact || t.SamplesAdvisory {
 		return nil
 	}

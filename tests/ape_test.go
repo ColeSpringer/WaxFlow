@@ -107,7 +107,7 @@ func apeCheck(t *testing.T, path string, f audio.Format, want []int32) {
 	// Strict mode as well as tolerant: a file the reference wrote must give
 	// the demuxer nothing to warn about, which is what keeps the tail checks
 	// from being noise on healthy files.
-	if _, err := waxflow.New().Probe(container.BytesSource(raw), "ape", &waxflow.ProbeOptions{Strict: true}); err != nil {
+	if _, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "ape", &waxflow.ProbeOptions{Strict: true}); err != nil {
 		t.Fatalf("strict probe of a reference-encoded file: %v", err)
 	}
 	got, err := decodeAllDynamic(t, container.BytesSource(raw), "ape")
@@ -215,7 +215,7 @@ func TestAPEProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	// No extension hint: the driver has to be found by magic.
-	info, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", nil)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestAPEMidFrameSeek(t *testing.T) {
 	// Inside the first frame, inside the second, either side of a boundary,
 	// and inside the short final one.
 	for _, target := range []int64{0, 1, 12345, 73727, 73728, 73729, 100000, 147455, 147456, 150000, track.Samples - 1} {
-		landed, err := med.SeekSample(target)
+		landed, err := med.SeekSample(context.Background(), target)
 		if err != nil {
 			t.Fatalf("seek %d: %v", target, err)
 		}

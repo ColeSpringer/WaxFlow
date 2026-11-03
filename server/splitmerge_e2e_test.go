@@ -5,6 +5,7 @@ package server_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -283,7 +284,7 @@ func TestMergeJobStampsChapters(t *testing.T) {
 		t.Fatalf("merge made %d outputs, want 1", len(job.Outputs))
 	}
 	raw := readBody(t, env.get(t, "/jobs/"+id+"/result", nil))
-	info, err := format.Probe(bytes.NewReader(raw), job.Outputs[0].Container, nil)
+	info, err := format.Probe(context.Background(), bytes.NewReader(raw), job.Outputs[0].Container, nil)
 	if err != nil {
 		t.Fatalf("probing the merged output: %v", err)
 	}

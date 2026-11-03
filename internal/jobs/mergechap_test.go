@@ -131,7 +131,7 @@ func mergeOutputChapters(t *testing.T, r *Runner, req Request) []container.Chapt
 	if err != nil {
 		t.Fatalf("reading the output: %v", err)
 	}
-	info, err := format.Probe(bytes.NewReader(raw), out.Container, nil)
+	info, err := format.Probe(context.Background(), bytes.NewReader(raw), out.Container, nil)
 	if err != nil {
 		t.Fatalf("probing the output: %v", err)
 	}

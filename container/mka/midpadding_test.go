@@ -7,6 +7,7 @@ package mka
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"io"
 	"testing"
@@ -208,7 +209,7 @@ func TestMidStreamDiscardPadding(t *testing.T) {
 				}
 			}
 
-			if err := d.Walk(); err != nil {
+			if err := d.Walk(context.Background()); err != nil {
 				t.Fatalf("Walk: %v", err)
 			}
 			tr := d.Tracks()[0]
@@ -247,7 +248,7 @@ func TestMidPaddingWalkRetryAfterFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDemuxer: %v", err)
 	}
-	if err := clean.Walk(); err != nil {
+	if err := clean.Walk(context.Background()); err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
 	want := clean.Tracks()[0]
@@ -257,23 +258,23 @@ func TestMidPaddingWalkRetryAfterFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDemuxer: %v", err)
 	}
-	// Resolve while reads work, so the seek below takes the bounded path: the
-	// full walk is marked spent on its first attempt and would never retry.
+	// Resolve while reads work, so the seek below takes the bounded path: a
+	// full walk keeps its failure and would never retry.
 	d.resolveCues()
 	if len(d.cues) == 0 {
 		t.Fatal("no Cues; the seek below would not be a bounded walk")
 	}
 	// Fail across the padded block, so the dead walk has counted a trim.
 	f.from, f.to, f.armed = int64(len(p.File))/8, int64(len(p.File))/2, true
-	if _, err := d.SeekSample(0, p.Raw/2); err == nil {
+	if _, err := d.SeekSample(context.Background(), 0, p.Raw/2); err == nil {
 		t.Fatal("the seek succeeded through a failing source")
 	}
-	if d.walked {
+	if d.walkErr != nil {
 		t.Fatal("the failed walk was the full one; this test needs the bounded path")
 	}
 
 	f.armed = false
-	if err := d.Walk(); err != nil {
+	if err := d.Walk(context.Background()); err != nil {
 		t.Fatalf("retry after the source recovered: %v", err)
 	}
 	got := d.Tracks()[0]

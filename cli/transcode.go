@@ -193,7 +193,7 @@ with true-peak limiting, dither).`,
 			// (or skip) its own: the container's own tags for the metadata
 			// fallback, the track the output form is planned from, and the
 			// source layout the loudness pass measures against.
-			srcInfo, err := e.Probe(src, srcHint, nil)
+			srcInfo, err := e.Probe(cmd.Context(), src, srcHint, nil)
 			if err != nil {
 				return err
 			}

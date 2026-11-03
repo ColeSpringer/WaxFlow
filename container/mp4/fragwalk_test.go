@@ -1,6 +1,7 @@
 package mp4
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"strings"
@@ -28,7 +29,7 @@ func TestFragmentedWalkSettlesTheDeclaredCount(t *testing.T) {
 		if d.Walked() {
 			t.Fatal("a fragmented movie defers a walk; Walked must be false before it runs")
 		}
-		if err := d.Walk(); err != nil {
+		if err := d.Walk(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 		tr := d.Tracks()[0]
@@ -54,7 +55,7 @@ func TestFragmentedWalkSettlesTheDeclaredCount(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := d.Walk(); err != nil {
+		if err := d.Walk(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 		tr := d.Tracks()[0]
@@ -77,7 +78,7 @@ func TestFragmentedWalkSettlesTheDeclaredCount(t *testing.T) {
 		if tr := d.Tracks()[0]; !tr.SamplesAdvisory || tr.Samples != dur+7 {
 			t.Fatalf("Samples = %d advisory=%v, want %d and advisory", tr.Samples, tr.SamplesAdvisory, dur+7)
 		}
-		if err := d.Walk(); err != nil {
+		if err := d.Walk(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 		tr := d.Tracks()[0]
@@ -95,7 +96,7 @@ func TestFragmentedWalkSettlesTheDeclaredCount(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := d.Walk(); err != nil {
+		if err := d.Walk(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 		want := int64((tableFrames + nfrag*perFrag) * delta)
@@ -115,7 +116,7 @@ func TestFragmentedWalkSettlesTheDeclaredCount(t *testing.T) {
 			t.Fatal("a progressive movie defers nothing; Walked must be true at open")
 		}
 		before := d.Tracks()[0]
-		if err := d.Walk(); err != nil {
+		if err := d.Walk(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 		after := d.Tracks()[0]
@@ -141,7 +142,7 @@ func TestFragmentedWalkShrinksATruncatedFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Walk(); err != nil {
+	if err := d.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	tr := d.Tracks()[0]
@@ -166,7 +167,7 @@ func TestFragmentedWalkShrinksATruncatedFile(t *testing.T) {
 
 	strict, err := openFrag(t, cut, true)
 	if err == nil {
-		err = strict.Walk()
+		err = strict.Walk(context.Background())
 	}
 	if !errors.Is(err, waxerr.ErrMalformedInput) {
 		t.Fatalf("a strict walk of a truncated file = %v, want malformed", err)
@@ -187,7 +188,7 @@ func TestFragmentedSeekLandsThroughTheIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, target := range []int64{0, 5 * 960, 21 * 960, 39 * 960} {
-		landed, err := d.SeekSample(0, target)
+		landed, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatalf("seek to %d: %v", target, err)
 		}
@@ -206,7 +207,7 @@ func TestFragmentedSeekLandsThroughTheIndex(t *testing.T) {
 	// The walk ran once, inside the first seek. Every seek after it reads only
 	// the fragment it lands on.
 	src.Reset()
-	if _, err := d.SeekSample(0, 13*960); err != nil {
+	if _, err := d.SeekSample(context.Background(), 0, 13*960); err != nil {
 		t.Fatal(err)
 	}
 	if src.Reads != 0 {
@@ -276,7 +277,7 @@ func TestFragmentedSeekWithoutTfdt(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		landed, err := d.SeekSample(0, tc.target)
+		landed, err := d.SeekSample(context.Background(), 0, tc.target)
 		if err != nil {
 			t.Fatalf("seek to %d: %v", tc.target, err)
 		}

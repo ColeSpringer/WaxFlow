@@ -2,6 +2,7 @@ package format
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -121,7 +122,7 @@ func TestProbeIdentifies(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			info, err := Probe(container.BytesSource(tt.raw), "", &Options{Strict: true})
+			info, err := Probe(context.Background(), container.BytesSource(tt.raw), "", &Options{Strict: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -141,7 +142,7 @@ func TestProbeIdentifies(t *testing.T) {
 
 func TestProbeMagicBeatsHint(t *testing.T) {
 	raw := buildFile(t, "wav", 10)
-	info, err := Probe(container.BytesSource(raw), "aiff", nil)
+	info, err := Probe(context.Background(), container.BytesSource(raw), "aiff", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,18 +159,18 @@ func TestProbeHintTiebreak(t *testing.T) {
 	// The hinted driver read the bytes and they are not its format, which is
 	// damage; the unhinted path below never gets that far and reports the
 	// generic "unrecognized input" instead.
-	if _, err := Probe(container.BytesSource(raw), ".wav", nil); !errors.Is(err, waxerr.ErrMalformedInput) {
+	if _, err := Probe(context.Background(), container.BytesSource(raw), ".wav", nil); !errors.Is(err, waxerr.ErrMalformedInput) {
 		t.Errorf("err = %v, want malformed-input from the hinted driver", err)
 	}
 	// Without a hint the generic unrecognized error surfaces.
-	_, err := Probe(container.BytesSource(raw), "", nil)
+	_, err := Probe(context.Background(), container.BytesSource(raw), "", nil)
 	if !errors.Is(err, waxerr.ErrUnsupportedFormat) {
 		t.Errorf("err = %v, want unsupported-format", err)
 	}
 }
 
 func TestProbeUnrecognized(t *testing.T) {
-	_, err := Probe(container.BytesSource([]byte("definitely not audio data, longer than any magic")), "", nil)
+	_, err := Probe(context.Background(), container.BytesSource([]byte("definitely not audio data, longer than any magic")), "", nil)
 	if !errors.Is(err, waxerr.ErrUnsupportedFormat) {
 		t.Errorf("err = %v, want unsupported-format", err)
 	}
@@ -182,7 +183,7 @@ func TestProbeUnrecognized(t *testing.T) {
 // write leaves behind.
 func TestProbeEmptyInputSaysSo(t *testing.T) {
 	for _, hint := range []string{"", "wav", "mp3"} {
-		_, err := Probe(container.BytesSource(nil), hint, nil)
+		_, err := Probe(context.Background(), container.BytesSource(nil), hint, nil)
 		if !errors.Is(err, waxerr.ErrUnsupportedFormat) {
 			t.Errorf("hint %q: err = %v, want unsupported-format", hint, err)
 		}
@@ -199,7 +200,7 @@ func TestProbeSkipsID3v2(t *testing.T) {
 	tag[3], tag[4] = 4, 0
 	tag[9] = 64
 	raw := append(tag, wav...)
-	info, err := Probe(container.BytesSource(raw), "", nil)
+	info, err := Probe(context.Background(), container.BytesSource(raw), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +267,7 @@ func TestMediaSeekSampleExact(t *testing.T) {
 	defer audio.Put(dst)
 
 	for _, target := range []int64{1, 4095, 4096, 4097, 7777, 0, 9999} {
-		landed, err := med.SeekSample(target)
+		landed, err := med.SeekSample(context.Background(), target)
 		if err != nil {
 			t.Fatalf("SeekSample(%d): %v", target, err)
 		}
@@ -291,7 +292,7 @@ func TestMediaSeekSampleExact(t *testing.T) {
 	}
 
 	// Past-the-end seeks land at the end and read EOF.
-	landed, err := med.SeekSample(frames + 100)
+	landed, err := med.SeekSample(context.Background(), frames+100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +302,7 @@ func TestMediaSeekSampleExact(t *testing.T) {
 	if err := med.ReadChunk(dst); !errors.Is(err, io.EOF) {
 		t.Errorf("read after past-end seek = %v, want EOF", err)
 	}
-	if _, err := med.SeekSample(-1); err == nil {
+	if _, err := med.SeekSample(context.Background(), -1); err == nil {
 		t.Error("negative seek must fail")
 	}
 }
@@ -362,7 +363,7 @@ func TestBoundaryEOFSourceDecodesFully(t *testing.T) {
 
 	// Seek into the very last packet: pre-roll crosses the boundary read.
 	target := int64(frames - 3)
-	landed, err := med.SeekSample(target)
+	landed, err := med.SeekSample(context.Background(), target)
 	if err != nil || landed != target {
 		t.Fatalf("SeekSample(%d) = %d, %v", target, landed, err)
 	}
@@ -422,7 +423,7 @@ func TestReadFailureIsNotEOF(t *testing.T) {
 // as an I/O problem, not misclassified as an unsupported format.
 func TestProbeSurfacesHeadReadFailure(t *testing.T) {
 	src := failingSource{container.BytesSource(make([]byte, 1024)), 0}
-	_, err := Probe(src, "", nil)
+	_, err := Probe(context.Background(), src, "", nil)
 	if !errors.Is(err, waxerr.ErrSourceUnreadable) {
 		t.Errorf("err = %v, want source-unreadable", err)
 	}
@@ -520,10 +521,10 @@ func TestStrictProbeWalks(t *testing.T) {
 		{"adts", "aac", damagedADTS(t)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := Probe(container.BytesSource(tc.raw), tc.hint, nil); err != nil {
+			if _, err := Probe(context.Background(), container.BytesSource(tc.raw), tc.hint, nil); err != nil {
 				t.Fatalf("a tolerant probe refused: %v", err)
 			}
-			_, err := Probe(container.BytesSource(tc.raw), tc.hint, &Options{Strict: true})
+			_, err := Probe(context.Background(), container.BytesSource(tc.raw), tc.hint, &Options{Strict: true})
 			if !errors.Is(err, waxerr.ErrMalformedInput) {
 				t.Fatalf("strict probe error = %v, want malformed: the walk did not reach the damage", err)
 			}
@@ -573,7 +574,7 @@ func TestWarningsFollowTheRead(t *testing.T) {
 				}
 				if how == "read" {
 					drain(t, med)
-				} else if _, err := med.SeekSample(1 << 40); err != nil {
+				} else if _, err := med.SeekSample(context.Background(), 1<<40); err != nil {
 					t.Fatal(err)
 				}
 				if again := med.Info(); again != info {
@@ -627,14 +628,14 @@ func TestStrictProbeMeasures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			tolerant, err := Probe(container.BytesSource(raw), tc.hint, nil)
+			tolerant, err := Probe(context.Background(), container.BytesSource(raw), tc.hint, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if d := tolerant.Default(); d.SamplesExact {
 				t.Fatalf("the tolerant probe already reports an exact %d; this cell needs a header that does not", d.Samples)
 			}
-			strict, err := Probe(container.BytesSource(raw), tc.hint, &Options{Strict: true})
+			strict, err := Probe(context.Background(), container.BytesSource(raw), tc.hint, &Options{Strict: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -678,7 +679,7 @@ func TestWalkRefreshesTheMediaTrack(t *testing.T) {
 	if !ok {
 		t.Fatal("an MP3 Media must implement Walker")
 	}
-	if err := w.Walk(); err != nil {
+	if err := w.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	after := med.Info().Default()
@@ -704,7 +705,7 @@ func TestWalkRefreshesTheMediaTrack(t *testing.T) {
 	if d := med2.Info().Default(); d.Samples != -1 {
 		t.Fatalf("at open: samples = %d, want -1", d.Samples)
 	}
-	if err := med2.(Walker).Walk(); err != nil {
+	if err := med2.(Walker).Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	d := med2.Info().Default()
@@ -730,7 +731,7 @@ func TestTolerantProbeReadsHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	cs := &testutil.CountingSource{Src: container.BytesSource(raw)}
-	tolerant, err := Probe(cs, "webm", nil)
+	tolerant, err := Probe(context.Background(), cs, "webm", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -744,7 +745,7 @@ func TestTolerantProbeReadsHeaders(t *testing.T) {
 	// streams of several windows. What this can say is that the tolerant probe
 	// reads strictly less than the strict one, on the same bytes.
 	scs := &testutil.CountingSource{Src: container.BytesSource(raw)}
-	strict, err := Probe(scs, "webm", &Options{Strict: true})
+	strict, err := Probe(context.Background(), scs, "webm", &Options{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -820,7 +821,7 @@ func TestOggFLACProbeIsExact(t *testing.T) {
 				t.Fatal(err)
 			}
 			cs := &testutil.CountingSource{Src: container.BytesSource(raw)}
-			info, err := Probe(cs, "oga", nil)
+			info, err := Probe(context.Background(), cs, "oga", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -843,5 +844,23 @@ func TestOggFLACProbeIsExact(t *testing.T) {
 					len(raw), cs.Bytes)
 			}
 		})
+	}
+}
+
+// TestProbeStrictStopsWithItsContext: the walk a strict probe runs for its
+// verdict ends with the probe's context, as the measure's does. A tolerant
+// probe reads headers and walks nothing, so it has nothing to stop.
+func TestProbeStrictStopsWithItsContext(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "testdata", "sine-cbr128.mp3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := Probe(ctx, container.BytesSource(raw), "mp3", &Options{Strict: true}); waxerr.CodeOf(err) != waxerr.CodeCanceled {
+		t.Errorf("a strict probe whose context had ended returned %v, want canceled", err)
+	}
+	if _, err := Probe(ctx, container.BytesSource(raw), "mp3", nil); err != nil {
+		t.Errorf("a tolerant probe whose context had ended returned %v, want its headers", err)
 	}
 }

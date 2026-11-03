@@ -12,6 +12,7 @@ package oracletest
 // exactly why the cell is worth having.
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -44,7 +45,7 @@ func TestWaxlabelAgreesMP3InWAVAndAIFC(t *testing.T) {
 		{"mp3-ms.aifc", testutil.AIFCFrames("ms\x00\x55", 22050, 1, 0, 41, frames), "aiff", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			info, err := waxflow.New().Probe(container.BytesSource(tc.raw), tc.hint, nil)
+			info, err := waxflow.New().Probe(context.Background(), container.BytesSource(tc.raw), tc.hint, nil)
 			if err != nil {
 				t.Fatalf("waxflow.Probe: %v", err)
 			}

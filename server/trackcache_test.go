@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
@@ -84,12 +85,23 @@ func TestTrackCacheBoundHolds(t *testing.T) {
 type countingIdx struct {
 	mu    sync.Mutex
 	loads int
+	// loaded, when set, is closed on the first Load: the first measure began.
+	// hold, when set, blocks every Load until it is closed, which holds the
+	// measure inside its OpenStream.
+	loaded, hold chan struct{}
 }
 
 func (c *countingIdx) Load(container.Source) []byte {
 	c.mu.Lock()
 	c.loads++
+	first := c.loads == 1
 	c.mu.Unlock()
+	if first && c.loaded != nil {
+		close(c.loaded)
+	}
+	if c.hold != nil {
+		<-c.hold
+	}
 	return nil
 }
 func (c *countingIdx) Save(container.Source, []byte) {}
@@ -124,8 +136,74 @@ func trackForEnv(t *testing.T, names ...string) (*Server, *countingIdx, *source.
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { roots.Close() })
-	idx := &countingIdx{}
+	idx := &countingIdx{loaded: make(chan struct{})}
 	return &Server{eng: waxflow.New(waxflow.WithIndexCache(idx))}, idx, roots
+}
+
+// TestTrackForLetsALeavingCallerGo: the shared measure runs on a context and
+// a source handle of its own. The caller that started it leaves mid-measure,
+// gets its own cancel at once and closes its file; the caller still waiting
+// gets the measured track from the one measure, which is neither stopped nor
+// run again.
+func TestTrackForLetsALeavingCallerGo(t *testing.T) {
+	s, idx, roots := trackForEnv(t, "a.mp3")
+	idx.hold = make(chan struct{})
+	release := sync.OnceFunc(func() { close(idx.hold) })
+	defer release()
+	srcA, err := roots.Resolve(context.Background(), "lib/a.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srcB, err := roots.Resolve(context.Background(), "lib/a.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srcB.Close()
+
+	ctxA, cancelA := context.WithCancel(t.Context())
+	errA := make(chan error, 1)
+	go func() {
+		_, err := s.trackFor(ctxA, srcA, false)
+		srcA.Close() // as a handler's deferred close does
+		errA <- err
+	}()
+	<-idx.loaded // A's measure is held inside its OpenStream; A owns the flight
+
+	var got container.Track
+	var errB error
+	doneB := make(chan struct{})
+	go func() {
+		got, errB = s.trackFor(t.Context(), srcB, false)
+		close(doneB)
+	}()
+	key := identityString(srcB.Ref, srcB.ID)
+	for deadline := time.Now().Add(5 * time.Second); s.trackFlight.Waiting(key) < 2; {
+		if time.Now().After(deadline) {
+			t.Fatal("B never joined A's flight")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancelA()
+	select {
+	case err := <-errA:
+		if waxerr.CodeOf(err) != waxerr.CodeCanceled {
+			t.Errorf("the caller that left got %v, want its own cancel", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a caller that left is held until the shared measure ends")
+	}
+
+	release()
+	<-doneB
+	if errB != nil {
+		t.Fatalf("the waiting caller got %v, want the measured track", errB)
+	}
+	if got.Samples <= 0 {
+		t.Errorf("the waiting caller got Samples = %d, want the measured length", got.Samples)
+	}
+	if n := idx.count(); n != 1 {
+		t.Errorf("the measure ran %d times; a caller that left must not stop it for the one still waiting", n)
+	}
 }
 
 // TestTrackForCollapsesConcurrentMisses drives the real trackFor: many

@@ -1806,7 +1806,7 @@ func TestStreamEmbedsContainerTagsWithoutAMapper(t *testing.T) {
 		t.Fatalf("GET /stream = %d", resp.StatusCode)
 	}
 	body := readBody(t, resp)
-	info, err := format.Probe(container.BytesSource(body), "m4a", nil)
+	info, err := format.Probe(context.Background(), container.BytesSource(body), "m4a", nil)
 	if err != nil {
 		t.Fatalf("probing the streamed output: %v", err)
 	}
@@ -2035,7 +2035,7 @@ func TestStreamOfAMeasuredAdvisorySourceIsWhole(t *testing.T) {
 			if resp.StatusCode != 200 {
 				t.Fatalf("/stream = %d: %s", resp.StatusCode, body)
 			}
-			info, err := format.Probe(container.BytesSource(body), f, nil)
+			info, err := format.Probe(context.Background(), container.BytesSource(body), f, nil)
 			if err != nil {
 				t.Fatalf("the streamed %s does not parse: %v", f, err)
 			}
@@ -2126,7 +2126,7 @@ func TestStreamDurationIsWhatTheBodyHolds(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The body is the oracle: a WAV of the same stream states its own length.
-	info, err := format.Probe(container.BytesSource(body), "wav", nil)
+	info, err := format.Probe(context.Background(), container.BytesSource(body), "wav", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

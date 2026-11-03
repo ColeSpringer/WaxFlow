@@ -2,6 +2,7 @@ package mp4
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"testing"
 
@@ -157,7 +158,7 @@ func TestHybridMovieSeeksIntoBothHalves(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		landed, err := d.SeekSample(0, target)
+		landed, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatalf("seek to %d: %v", target, err)
 		}

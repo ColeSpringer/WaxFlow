@@ -2,6 +2,7 @@ package mp4
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
@@ -86,7 +87,7 @@ func TestCodecFixtureTracks(t *testing.T) {
 func TestIMA4SeeksToTheStart(t *testing.T) {
 	d := open(t, fixture(t, "ima4.mov"))
 	for _, target := range []int64{0, 64, 1000, 40000, 1 << 20} {
-		got, err := d.SeekSample(0, target)
+		got, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatalf("SeekSample(%d): %v", target, err)
 		}
@@ -95,7 +96,7 @@ func TestIMA4SeeksToTheStart(t *testing.T) {
 		}
 	}
 	g := open(t, fixture(t, "g711-ulaw.mov"))
-	if got, err := g.SeekSample(0, 500); err != nil || got != 500 {
+	if got, err := g.SeekSample(context.Background(), 0, 500); err != nil || got != 500 {
 		t.Errorf("G.711 SeekSample(500) = %d, %v; want an exact landing", got, err)
 	}
 }

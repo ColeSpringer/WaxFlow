@@ -1,6 +1,7 @@
 package mpc_test
 
 import (
+	"context"
 	"errors"
 	"io"
 	"testing"
@@ -71,7 +72,7 @@ func FuzzDemux(f *testing.F) {
 				}
 			}
 			for _, target := range []int64{0, 1000, 1 << 40} {
-				landed, err := d.SeekSample(0, target)
+				landed, err := d.SeekSample(context.Background(), 0, target)
 				if err != nil || firstPTS < 0 {
 					continue
 				}

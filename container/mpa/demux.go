@@ -1,8 +1,8 @@
 package mpa
 
 import (
+	"context"
 	"fmt"
-	"slices"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
@@ -24,8 +24,6 @@ const (
 	maxID3Tags = 8
 	// trailerScan is how far back trailing tag recognition looks.
 	trailerScan = 64 << 10
-	// maxWarnings caps the tolerated-damage list.
-	maxWarnings = 64
 )
 
 // DemuxerOptions configures parsing.
@@ -36,8 +34,7 @@ type DemuxerOptions struct {
 
 // Demuxer reads one MP3 track from an elementary stream source.
 type Demuxer struct {
-	damage int // Damage warnings met, the list's cap aside (DamageCount)
-	opts   DemuxerOptions
+	opts DemuxerOptions
 
 	// walk is the frame index and the window it walks, pkts the packet
 	// stream over it; this package owns the tags around them and the track
@@ -45,7 +42,7 @@ type Demuxer struct {
 	walk     *mpegframes.Walker
 	pkts     *mpegframes.Reader
 	track    container.Track
-	warnings []container.Warning
+	warnings container.Warnings
 }
 
 // NewDemuxer parses the stream head (tags, the VBR metadata frame) and
@@ -69,28 +66,19 @@ func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 }
 
 // warn records tolerated damage, or fails in strict mode.
-//
-// The list is capped and deduplicated, as every tolerant demuxer in this tree
-// caps its own: the frame walk reports one finding per damaged gap, and a
-// payload of nothing but alternating frames and junk would otherwise grow a
-// finding per frame for as long as the file runs.
 func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	msg := fmt.Sprintf(format, args...)
 	if d.opts.Strict {
 		return waxerr.Malformed("mp3: ", "%s (at offset %d)", msg, off)
 	}
-	w := container.Warning{Offset: off, Msg: msg, Kind: container.Damage}
-	d.damage++
-	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
-		d.warnings = append(d.warnings, w)
-	}
+	d.warnings.Damage(off, msg)
 	return nil
 }
 
 // note records a finding Strict must not escalate: the file is loose rather
 // than damaged, and it still reads exactly as it stands.
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
+	d.warnings.Note(off, fmt.Sprintf(format, args...))
 }
 
 func (d *Demuxer) parse() error {
@@ -132,10 +120,10 @@ func (d *Demuxer) parse() error {
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns damage tolerated during parsing.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
+func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
 
 // DamageCount implements container.Damaged.
-func (d *Demuxer) DamageCount() int { return d.damage }
+func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
 
 // recognizedTrailer reports whether the region from off to the end of
 // data is plain tag baggage: ID3v1, APEv2, an appended ID3v2, Lyrics3,
@@ -181,12 +169,12 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error { return d.pkts.ReadPa
 // that decoder state converges; see mpegframes.Walker.Landing. format.Media
 // decodes and discards from the landing, so the seek is sample-exact
 // regardless of the backoff depth.
-func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
+func (d *Demuxer) SeekSample(ctx context.Context, track int, sample int64) (int64, error) {
 	if track != 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("mp3: no track %d", track))
 	}
 	if sample < 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, "mp3: negative seek target")
 	}
-	return d.pkts.SeekSample(sample)
+	return d.pkts.SeekSample(ctx, sample)
 }

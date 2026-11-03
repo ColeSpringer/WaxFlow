@@ -2,6 +2,7 @@ package waxflow_test
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"testing"
 
@@ -116,7 +117,7 @@ func TestSegmentedCopyAcrossAHoleRestartsIdentically(t *testing.T) {
 	e := waxflow.New()
 	opts := waxflow.TranscodeOptions{Format: "flac"}
 	track := probeTrack(t, bad, "flac")
-	grid, err := e.PacketGrid(container.BytesSource(bad), "flac")
+	grid, err := e.PacketGrid(context.Background(), container.BytesSource(bad), "flac")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +160,7 @@ func TestOpenSpanOverAFullWarningListEndsWithItsDamage(t *testing.T) {
 		med.Close()
 		t.Fatalf("read %d (%v) with %d warnings; this cell needs a full list", n, err, len(med.Info().Warnings))
 	}
-	if _, err := med.SeekSample(0); err != nil {
+	if _, err := med.SeekSample(context.Background(), 0); err != nil {
 		med.Close()
 		t.Fatal(err)
 	}

@@ -1,6 +1,7 @@
 package aiff
 
 import (
+	"context"
 	"errors"
 	"io"
 	"testing"
@@ -122,7 +123,7 @@ func FuzzDemux(f *testing.F) {
 			// reservoir backoff reaches for a frame run.
 			if track.Samples > 0 {
 				target := track.Samples / 2
-				landed, err := d.SeekSample(0, target)
+				landed, err := d.SeekSample(context.Background(), 0, target)
 				if err != nil {
 					// A frame walk builds its index on demand, so a seek is
 					// the call that reaches damage further down the payload,

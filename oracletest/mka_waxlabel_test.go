@@ -149,7 +149,7 @@ func seekCost(t *testing.T, raw []byte, target int64) int64 {
 	if err != nil {
 		t.Fatalf("NewDemuxer: %v", err)
 	}
-	landed, err := d.SeekSample(0, target)
+	landed, err := d.SeekSample(context.Background(), 0, target)
 	if err != nil {
 		t.Fatalf("SeekSample to %d: %v", target, err)
 	}

@@ -7,6 +7,7 @@ package waxflow_test
 // adaptive predictor, the middle-side matrix, and the escape path all run.
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -80,7 +81,7 @@ func TestALACProbe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := waxflow.New().Probe(container.BytesSource(raw), "m4a", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "m4a", nil)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}

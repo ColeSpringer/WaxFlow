@@ -5,6 +5,7 @@ package server_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -375,7 +376,7 @@ func TestStreamTimelineIsTheEngineRun(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				info, err := e.Probe(container.BytesSource(raw), "wav", nil)
+				info, err := e.Probe(context.Background(), container.BytesSource(raw), "wav", nil)
 				if err != nil {
 					t.Fatal(err)
 				}

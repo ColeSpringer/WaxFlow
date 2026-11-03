@@ -1,6 +1,7 @@
 package mka
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -100,7 +101,7 @@ func FuzzDemux(f *testing.F) {
 			// absorb and only the settled length can remove.
 			if clean && !strict {
 				w, err := NewDemuxer(container.BytesSource(data), nil)
-				if err == nil && w.Walk() == nil && w.Walked() {
+				if err == nil && w.Walk(context.Background()) == nil && w.Walked() {
 					tr := w.Tracks()[0]
 					rawTotal := kept + min(lastPad, lastDur)
 					excess := lastPad - min(lastPad, lastDur)
@@ -137,7 +138,7 @@ func FuzzDemux(f *testing.F) {
 
 			// Seeks land at or before the target (or at the earliest sync point).
 			for _, target := range []int64{0, 1, 1000, 1 << 20, 1 << 40} {
-				landed, err := d.SeekSample(0, target)
+				landed, err := d.SeekSample(context.Background(), 0, target)
 				if err != nil {
 					continue
 				}

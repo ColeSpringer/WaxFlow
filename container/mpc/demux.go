@@ -2,9 +2,9 @@ package mpc
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
-	"slices"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/musepack"
@@ -26,8 +26,7 @@ var (
 
 // Demuxer reads one Musepack track from a native .mpc source.
 type Demuxer struct {
-	damage int // Damage warnings met, the list's cap aside (DamageCount)
-	opts   DemuxerOptions
+	opts DemuxerOptions
 
 	src container.Source
 	w   srcwin.Window
@@ -40,7 +39,7 @@ type Demuxer struct {
 	track    container.Track
 	tags     map[string][]string
 	chapters []container.Chapter
-	warnings []container.Warning
+	warnings container.Warnings
 	rg       replayGain
 
 	// total is how many packets the stream delivers (SV7 frames, SV8
@@ -91,11 +90,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	w := container.Warning{Offset: off, Msg: msg, Kind: container.Damage}
-	d.damage++
-	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
-		d.warnings = append(d.warnings, w)
-	}
+	d.warnings.Damage(off, msg)
 	return nil
 }
 
@@ -103,10 +98,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 // something with a well-formed file that a caller should know about, rather
 // than damage in the file. See [container.Note].
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	w := container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note}
-	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
-		d.warnings = append(d.warnings, w)
-	}
+	d.warnings.Note(off, fmt.Sprintf(format, args...))
 }
 
 func (d *Demuxer) parse() error {
@@ -198,10 +190,10 @@ func (d *Demuxer) stripTrailers(floor int64) {
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns damage tolerated during parsing.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
+func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
 
 // DamageCount implements container.Damaged.
-func (d *Demuxer) DamageCount() int { return d.damage }
+func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
 
 // ReadPacket yields one frame (SV7) or one block (SV8) behind the header the
 // decoder reads, with the decoder state a seek landing owes in front of the
@@ -255,7 +247,7 @@ func (d *Demuxer) packetHeader(frames, bitLen int) int {
 // sample; format.Media pre-rolls the remainder. The decoder state at the
 // landing is scanned from the stream (cached across seeks) and handed over in
 // the first packet.
-func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
+func (d *Demuxer) SeekSample(ctx context.Context, track int, sample int64) (int64, error) {
 	if track != 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("musepack: no track %d", track))
 	}
@@ -269,7 +261,7 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	frame := max(sample-synthWarmup, 0) / musepack.FrameLength
 	if d.cfg.StreamVersion == 7 {
 		frame = min(frame, d.total-1)
-		st, err := d.sv7StateAt(frame)
+		st, err := d.sv7StateAt(ctx, frame)
 		if err != nil {
 			return 0, err
 		}
@@ -278,7 +270,7 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	}
 	fpb := int64(d.cfg.FramesPerBlock())
 	block := min(frame/fpb, d.total-1)
-	st, err := d.sv8StateAt(block)
+	st, err := d.sv8StateAt(ctx, block)
 	if err != nil {
 		return 0, err
 	}

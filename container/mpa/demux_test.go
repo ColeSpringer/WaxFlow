@@ -2,6 +2,7 @@ package mpa
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -97,7 +98,7 @@ func TestIndexSnapshotRestore(t *testing.T) {
 	if blob := d.IndexSnapshot(); blob != nil {
 		t.Fatal("snapshot before any walk should be nil")
 	}
-	if _, err := d.SeekSample(0, int64(4999)*1152); err != nil {
+	if _, err := d.SeekSample(context.Background(), 0, int64(4999)*1152); err != nil {
 		t.Fatal(err)
 	}
 	blob := d.IndexSnapshot()
@@ -116,11 +117,11 @@ func TestIndexSnapshotRestore(t *testing.T) {
 	if d2.IndexSnapshot() != nil {
 		t.Error("restored index re-snapshots without growth")
 	}
-	l1, err := d.SeekSample(0, 3_000_000)
+	l1, err := d.SeekSample(context.Background(), 0, 3_000_000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	l2, err := d2.SeekSample(0, 3_000_000)
+	l2, err := d2.SeekSample(context.Background(), 0, 3_000_000)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,10 +1,10 @@
 package aiff
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"math"
-	"slices"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
@@ -28,11 +28,6 @@ var (
 const (
 	maxChunks      = 1024
 	maxCommPayload = 512
-	// maxWarnings caps the tolerated-damage list. A chunk walk is bounded by
-	// maxChunks on its own; a frame-walked payload is not, since it reports
-	// one finding per damaged gap and a run of alternating frames and junk
-	// has one gap per frame.
-	maxWarnings = 64
 )
 
 // DemuxerOptions configures parsing.
@@ -43,9 +38,8 @@ type DemuxerOptions struct {
 
 // Demuxer reads one audio track from an AIFF or AIFF-C source.
 type Demuxer struct {
-	damage int // Damage warnings met, the list's cap aside (DamageCount)
-	src    container.Source
-	opts   DemuxerOptions
+	src  container.Source
+	opts DemuxerOptions
 
 	track   container.Track
 	payload payload
@@ -53,7 +47,7 @@ type Demuxer struct {
 	// unit boundary, so a decode begun at one never converges to the linear
 	// decode. ima4 is the only one; see SeekSample.
 	carryState bool
-	warnings   []container.Warning
+	warnings   container.Warnings
 }
 
 // payload is the walk over the SSND chunk. Two shapes reach it, and the
@@ -66,7 +60,7 @@ type payload interface {
 	ReadPacket(pkt *container.Packet) error
 	// SeekSample repositions to the unit or frame holding a sample and
 	// reports the sample that unit starts on.
-	SeekSample(sample int64) (landed int64, err error)
+	SeekSample(ctx context.Context, sample int64) (landed int64, err error)
 }
 
 // blockReader walks the SSND payload as a run of equal units.
@@ -142,11 +136,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	w := container.Warning{Offset: off, Msg: msg, Kind: container.Damage}
-	d.damage++
-	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
-		d.warnings = append(d.warnings, w)
-	}
+	d.warnings.Damage(off, msg)
 	return nil
 }
 
@@ -154,7 +144,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 // something with a well-formed file that a caller should know about, rather
 // than damage in the file. See [container.Note].
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
+	d.warnings.Note(off, fmt.Sprintf(format, args...))
 }
 
 func (d *Demuxer) parse() error {
@@ -538,10 +528,10 @@ func (d *Demuxer) pcmConfig(comp, raw string, bits int) (pcm.Config, error) {
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns damage tolerated during parsing.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
+func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
 
 // DamageCount implements container.Damaged.
-func (d *Demuxer) DamageCount() int { return d.damage }
+func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
 
 // ReadPacket yields the next run of payload. Packet data is reused across
 // calls.
@@ -596,7 +586,7 @@ func (r *blockReader) ReadPacket(pkt *container.Packet) error {
 // target, which costs about a second per hour of stereo 44.1 kHz audio and is
 // exact. Fixing that cost means checkpointing decoder state, never starting
 // fresh at a packet.
-func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
+func (d *Demuxer) SeekSample(ctx context.Context, track int, sample int64) (int64, error) {
 	if track != 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("aiff: no track %d", track))
 	}
@@ -608,11 +598,11 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 		// only landing a decode converges from is the head of the stream.
 		sample = 0
 	}
-	return d.payload.SeekSample(sample)
+	return d.payload.SeekSample(ctx, sample)
 }
 
 // SeekSample lands on the unit boundary at or before the target.
-func (r *blockReader) SeekSample(sample int64) (int64, error) {
+func (r *blockReader) SeekSample(_ context.Context, sample int64) (int64, error) {
 	// Clamped to the track's length rather than the payload's; see the riff
 	// sibling, where the two can differ.
 	r.pos = min(min(sample, r.samples)/r.unitFrames, r.units)

@@ -1,6 +1,7 @@
 package mp4
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
+	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -28,17 +30,28 @@ func fragmentFile(baseTimes []uint64, durs, sizes []uint32, mdat int) []byte {
 // craftFragmentsFrom wires a Demuxer to a crafted fragment run, bypassing the
 // movie header the shapes below have no use for.
 func craftFragmentsFrom(strict bool, file []byte) *Demuxer {
-	src := container.BytesSource(file)
+	return craftFragmentsOn(strict, container.BytesSource(file))
+}
+
+// craftFragmentsOn is craftFragmentsFrom over any source, for the cells that
+// count or cancel the reads.
+func craftFragmentsOn(strict bool, src container.Source) *Demuxer {
+	return craftFragmentsAt(strict, src, 48000)
+}
+
+// craftFragmentsAt is craftFragmentsOn with the track's media timescale
+// chosen, so a cell can rescale the fragments' ticks to the sample rate.
+func craftFragmentsAt(strict bool, src container.Source, timescale int64) *Demuxer {
 	d := &Demuxer{
 		src:        src,
-		size:       int64(len(file)),
+		size:       src.Size(),
 		opts:       DemuxerOptions{Strict: strict},
-		w:          srcwin.New(src, int64(len(file)), "mp4: test"),
+		w:          srcwin.New(src, src.Size(), "mp4: test"),
 		fragmented: true,
 		trex:       trexDefaults{have: true},
 		sel: &track{
 			id:        1,
-			timescale: 48000,
+			timescale: timescale,
 			fmt:       audio.Format{Rate: 48000, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Float, BitDepth: 32},
 		},
 	}
@@ -67,7 +80,7 @@ func TestFragmentedWalkLatchesOnlyWhenItSettles(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := d.Walk(); err != nil {
+		if err := d.Walk(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 		if !d.Walked() {
@@ -79,19 +92,24 @@ func TestFragmentedWalkLatchesOnlyWhenItSettles(t *testing.T) {
 	})
 
 	t.Run("strict", func(t *testing.T) {
-		d, err := openFrag(t, raw, true)
+		cs := &testutil.CountingSource{Src: container.BytesSource(raw)}
+		d, err := NewDemuxer(cs, &DemuxerOptions{Strict: true})
 		if err != nil {
 			t.Fatal(err)
 		}
-		first := d.Walk()
+		first := d.Walk(context.Background())
 		if !errors.Is(first, waxerr.ErrMalformedInput) {
 			t.Fatalf("first Walk = %v, want malformed", first)
 		}
 		if d.Walked() {
 			t.Fatal("Walked is true after a walk that refused to settle")
 		}
-		if second := d.Walk(); !errors.Is(second, waxerr.ErrMalformedInput) {
+		reads := cs.Reads
+		if second := d.Walk(context.Background()); !errors.Is(second, waxerr.ErrMalformedInput) {
 			t.Fatalf("second Walk = %v, want the same refusal; the latch made it a silent success", second)
+		}
+		if cs.Reads != reads {
+			t.Errorf("the second Walk read %d times; the scan had reached the end and a refused compare leaves nothing to read", cs.Reads-reads)
 		}
 		if d.Tracks()[0].SamplesExact {
 			t.Error("a refused walk left the track marked exact")
@@ -127,7 +145,7 @@ func TestFragmentedWalkNamesTheDamageItStopsAt(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := craftFragmentsFrom(false, tc.file)
-			if err := d.Walk(); err != nil {
+			if err := d.Walk(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			var found bool
@@ -143,7 +161,7 @@ func TestFragmentedWalkNamesTheDamageItStopsAt(t *testing.T) {
 				t.Errorf("Samples = %d, want %d: only what lies ahead of the damage", got, tc.want)
 			}
 
-			if err := craftFragmentsFrom(true, tc.file).Walk(); !errors.Is(err, waxerr.ErrMalformedInput) {
+			if err := craftFragmentsFrom(true, tc.file).Walk(context.Background()); !errors.Is(err, waxerr.ErrMalformedInput) {
 				t.Fatalf("strict walk = %v, want malformed", err)
 			}
 		})
@@ -168,7 +186,7 @@ func corruptSecondMoofSize(file []byte) []byte {
 // search must not be handed an unsorted slice.
 func TestFragmentedIndexStaysSorted(t *testing.T) {
 	d := craftFragments(false, []uint64{0, 4800, 960, 9600}, []uint32{960}, []uint32{8}, 32)
-	if err := d.Walk(); err != nil {
+	if err := d.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(d.fragIndex) == 0 {
@@ -187,7 +205,7 @@ func TestFragmentedIndexStaysSorted(t *testing.T) {
 	}
 	// And every landing is still at or before its target.
 	for _, target := range []int64{0, 1000, 5000, 20000} {
-		landed, _, err := d.seekFragmented(target)
+		landed, _, err := d.seekFragmented(context.Background(), target)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -211,7 +229,7 @@ func TestFragmentedSeekDoesNotSettle(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := d.Tracks()[0]
-	if _, err := d.SeekSample(0, 3*960); err != nil {
+	if _, err := d.SeekSample(context.Background(), 0, 3*960); err != nil {
 		t.Fatal(err)
 	}
 	if d.Walked() {
@@ -226,7 +244,7 @@ func TestFragmentedSeekDoesNotSettle(t *testing.T) {
 	if !d.fragIndexed {
 		t.Error("the seek did not leave an index behind")
 	}
-	if err := d.Walk(); err != nil {
+	if err := d.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !d.Walked() || !d.Tracks()[0].SamplesExact {

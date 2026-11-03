@@ -1,6 +1,7 @@
 package mpc_test
 
 import (
+	"context"
 	"os"
 	"testing"
 
@@ -26,7 +27,7 @@ func TestIndexRoundTrip(t *testing.T) {
 			d := open(t, raw, true)
 			track := d.Tracks()[0]
 			end := track.Delay + track.Samples
-			if _, err := d.SeekSample(0, end-1); err != nil {
+			if _, err := d.SeekSample(context.Background(), 0, end-1); err != nil {
 				t.Fatal(err)
 			}
 			scanned := d.ScannedForTest()
@@ -79,7 +80,7 @@ func TestIndexRoundTrip(t *testing.T) {
 			}
 			// Restoring over a scan already begun is refused.
 			progressed := open(t, raw, true)
-			if _, err := progressed.SeekSample(0, end/2); err != nil {
+			if _, err := progressed.SeekSample(context.Background(), 0, end/2); err != nil {
 				t.Fatal(err)
 			}
 			if progressed.ScannedForTest() > 0 && progressed.RestoreIndex(blob) {
@@ -95,7 +96,7 @@ func TestNoIndexWithoutNoiseSubstitution(t *testing.T) {
 	defer mpc.SetIdxMinStatesForTest(1)()
 	d := open(t, fixture(t, "seek.mpc"), true)
 	track := d.Tracks()[0]
-	if _, err := d.SeekSample(0, track.Delay+track.Samples-1); err != nil {
+	if _, err := d.SeekSample(context.Background(), 0, track.Delay+track.Samples-1); err != nil {
 		t.Fatal(err)
 	}
 	if d.ScannedForTest() != 0 {
@@ -108,7 +109,7 @@ func TestNoIndexWithoutNoiseSubstitution(t *testing.T) {
 
 func seekAndDecode(t testing.TB, d *mpc.Demuxer, target int64) []float32 {
 	t.Helper()
-	if _, err := d.SeekSample(0, target); err != nil {
+	if _, err := d.SeekSample(context.Background(), 0, target); err != nil {
 		t.Fatal(err)
 	}
 	return decodeAll(t, d)

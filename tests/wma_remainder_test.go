@@ -1,6 +1,7 @@
 package waxflow_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -136,7 +137,7 @@ func assertSeeksDeliverTheRemainder(t *testing.T, path string, pastFirst bool) {
 	defer audio.Put(buf)
 	for _, x := range targets {
 		x = min(x, total)
-		landed, err := med.SeekSample(x)
+		landed, err := med.SeekSample(context.Background(), x)
 		if err != nil {
 			t.Fatalf("seek to %d: %v", x, err)
 		}
@@ -171,7 +172,7 @@ func assertSeeksDeliverTheRemainder(t *testing.T, path string, pastFirst bool) {
 	}
 	past := 0
 	for _, x := range targets {
-		if landed, err := d.SeekSample(0, x); err == nil && landed > 0 {
+		if landed, err := d.SeekSample(context.Background(), 0, x); err == nil && landed > 0 {
 			past++
 		}
 	}

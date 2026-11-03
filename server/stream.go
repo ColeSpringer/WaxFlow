@@ -405,7 +405,7 @@ func (s *Server) transcodeSpan(ctx context.Context, src *source.File, hint strin
 	if err != nil {
 		return nil, err
 	}
-	sl, err := waxflow.SliceMeasured(med, track, sp.from, sp.end())
+	sl, err := waxflow.SliceMeasured(ctx, med, track, sp.from, sp.end())
 	if err != nil {
 		return nil, err
 	}

@@ -161,7 +161,7 @@ func decodeAll(t *testing.T, src container.Source, hint string) *audio.Buffer {
 func TestFixturesProbe(t *testing.T) {
 	for _, tt := range fixtures {
 		t.Run(tt.name, func(t *testing.T) {
-			info, err := waxflow.New().Probe(fixtureSource(t, tt.name), "", nil)
+			info, err := waxflow.New().Probe(context.Background(), fixtureSource(t, tt.name), "", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -199,7 +199,7 @@ func TestADPCMWAVWithoutFactIsExact(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw = testutil.WAVWithoutChunk(t, raw, "fact")
-	info, err := waxflow.New().Probe(container.BytesSource(raw), "wav", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "wav", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestADPCMWAVWithoutFactIsExact(t *testing.T) {
 // regenerated at a different block size needs no edit.
 func trimBlockPadding(t *testing.T, name string, ours, want []int32) []int32 {
 	t.Helper()
-	info, err := waxflow.New().Probe(fixtureSource(t, name), "", nil)
+	info, err := waxflow.New().Probe(context.Background(), fixtureSource(t, name), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +285,7 @@ func TestFixturesProbeAgreesWithFFprobe(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			path := repoPath("testdata", tt.name)
 			ref := testutil.FFprobeFile(t, path)
-			info, err := waxflow.New().Probe(fixtureSource(t, tt.name), "", nil)
+			info, err := waxflow.New().Probe(context.Background(), fixtureSource(t, tt.name), "", nil)
 			if err != nil {
 				t.Fatal(err)
 			}

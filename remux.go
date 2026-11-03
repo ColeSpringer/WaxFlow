@@ -458,15 +458,17 @@ func gaplessSurvives(t container.Track) bool {
 // short packet in the middle desynchronizes the real decode time from that
 // arithmetic and every later segment carries a tfdt that is a lie. A packet
 // that straddles a boundary errors loudly; a short one in the middle would not.
-func (e *Engine) PacketGrid(src container.Source, hint string) (int, error) {
+// ctx is read before every packet; one that has ended stops the walk with
+// canceled.
+func (e *Engine) PacketGrid(ctx context.Context, src container.Source, hint string) (int, error) {
 	demux, info, err := format.OpenDemuxer(src, hint, nil)
 	if err != nil {
 		return 0, err
 	}
-	return packetGrid(demux, info.Default().ID)
+	return packetGrid(ctx, demux, info.Default().ID)
 }
 
-func packetGrid(demux container.Demuxer, track int) (int, error) {
+func packetGrid(ctx context.Context, demux container.Demuxer, track int) (int, error) {
 	grid, prev := int64(0), int64(0)
 	// The predecessor is tracked with an explicit flag rather than by testing
 	// prev > 0, and the distinction is not cosmetic: prev > 0 conflates
@@ -480,6 +482,9 @@ func packetGrid(demux container.Demuxer, track int) (int, error) {
 	have, uniform := false, true
 	var pkt container.Packet
 	for {
+		if err := container.WalkCanceled(ctx, "waxflow: "); err != nil {
+			return 0, err
+		}
 		err := demux.ReadPacket(&pkt)
 		if err == io.EOF {
 			break
@@ -737,7 +742,7 @@ func (e *Engine) segmentWalk(ctx context.Context, demux container.Demuxer, segTr
 		return nil, err
 	}
 	p0 := segOpts.StartSegment * int64(segOpts.SegmentSamples)
-	pos, err := seekPackets(demux, walkTrackID, p0)
+	pos, err := seekPackets(ctx, demux, walkTrackID, p0)
 	if err != nil {
 		return nil, err
 	}
@@ -858,7 +863,7 @@ func firstDur(demux container.Demuxer, track int) (int, error) {
 // seekPackets positions demux at or before target and reports the decode
 // position it landed on. A run from the top does not seek at all, which is what
 // keeps a whole-stream remux working on a demuxer that cannot seek.
-func seekPackets(demux container.Demuxer, track int, target int64) (int64, error) {
+func seekPackets(ctx context.Context, demux container.Demuxer, track int, target int64) (int64, error) {
 	if target == 0 {
 		return 0, nil
 	}
@@ -867,7 +872,7 @@ func seekPackets(demux container.Demuxer, track int, target int64) (int64, error
 		return 0, waxerr.New(waxerr.CodeUnsupportedFormat,
 			"waxflow: this container cannot seek, so a mid-stream segmented remux cannot start")
 	}
-	landed, err := sk.SeekSample(track, target)
+	landed, err := sk.SeekSample(ctx, track, target)
 	if err != nil {
 		return 0, err
 	}
@@ -935,7 +940,7 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 	// only the length, which no check above it reads.
 	if !patchable {
 		if confirm := confirmableLength(track, demux); confirm != nil {
-			if err := confirm(); err != nil {
+			if err := confirm(ctx); err != nil {
 				return nil, err
 			}
 			for _, t := range demux.Tracks() {

@@ -2,6 +2,7 @@ package format
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
@@ -19,7 +20,7 @@ func TestParseErrorsUsePublicContainerNames(t *testing.T) {
 	junk := bytes.Repeat([]byte{'z'}, 4096)
 	for _, d := range drivers {
 		t.Run(d.name, func(t *testing.T) {
-			_, err := Probe(container.BytesSource(junk), d.exts[0], nil)
+			_, err := Probe(context.Background(), container.BytesSource(junk), d.exts[0], nil)
 			if err == nil {
 				t.Fatalf("Probe accepted %d junk bytes as %s", len(junk), d.name)
 			}

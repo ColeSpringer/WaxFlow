@@ -2,6 +2,7 @@ package waxflow_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"os"
 	"path/filepath"
@@ -225,7 +226,7 @@ func TestPCMInMP4Transcodes(t *testing.T) {
 	}
 	// The hint is empty above on purpose: a .mov has to sniff as MP4 for a
 	// caller who only has the bytes.
-	info, err := e.Probe(pcmInMP4(t, "pcm-in24.mov"), "", nil)
+	info, err := e.Probe(context.Background(), pcmInMP4(t, "pcm-in24.mov"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +341,7 @@ func spliceEnda(t *testing.T, raw []byte, little uint16) []byte {
 func TestPCMInMP4ChannelIdentity(t *testing.T) {
 	for _, f := range pcmLayoutFixtures {
 		t.Run(f.name, func(t *testing.T) {
-			info, err := waxflow.New().Probe(pcmInMP4(t, f.name), "", nil)
+			info, err := waxflow.New().Probe(context.Background(), pcmInMP4(t, f.name), "", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -428,7 +429,7 @@ func TestPCMInMP4LayoutAgreesWithFFprobe(t *testing.T) {
 			if f.probe != [2]int{} && !testutil.FFmpegAtLeast(t, f.probe[0], f.probe[1]) {
 				t.Skipf("ffprobe before %d.%d does not place this file's chnl positions", f.probe[0], f.probe[1])
 			}
-			info, err := waxflow.New().Probe(pcmInMP4(t, f.name), "", nil)
+			info, err := waxflow.New().Probe(context.Background(), pcmInMP4(t, f.name), "", nil)
 			if err != nil {
 				t.Fatal(err)
 			}

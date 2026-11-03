@@ -76,7 +76,7 @@ func TestFragmentedMP4Probe(t *testing.T) {
 		waxflow.TranscodeOptions{Format: "aac"}); err != nil {
 		t.Fatalf("transcode: %v", err)
 	}
-	info, err := e.Probe(container.BytesSource(out.Buf), "", nil)
+	info, err := e.Probe(context.Background(), container.BytesSource(out.Buf), "", nil)
 	if err != nil {
 		t.Fatalf("probe fragmented mp4: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestFragmentedSeekLeavesTheLengthToBeConfirmed(t *testing.T) {
 	if format.MediaWalked(med) {
 		t.Fatal("this cell needs a source with a deferred walk")
 	}
-	if _, err := med.SeekSample(1024); err != nil {
+	if _, err := med.SeekSample(context.Background(), 1024); err != nil {
 		t.Fatal(err)
 	}
 	if format.MediaWalked(med) {
@@ -131,7 +131,7 @@ func TestFragmentedSeekLeavesTheLengthToBeConfirmed(t *testing.T) {
 			before.Samples, before.SamplesExact, after.Samples, after.SamplesExact)
 	}
 	// And the walk that follows still measures, on the same Media.
-	if err := format.WalkMedia(med); err != nil {
+	if err := format.WalkMedia(context.Background(), med); err != nil {
 		t.Fatal(err)
 	}
 	if !format.MediaWalked(med) || !med.Info().Default().SamplesExact {

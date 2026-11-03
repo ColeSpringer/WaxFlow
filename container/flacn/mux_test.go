@@ -2,6 +2,7 @@ package flacn_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"io"
 	"testing"
@@ -240,7 +241,7 @@ func TestMuxSeekTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	landed, err := d.SeekSample(0, 44100*20)
+	landed, err := d.SeekSample(context.Background(), 0, 44100*20)
 	if err != nil {
 		t.Fatal(err)
 	}

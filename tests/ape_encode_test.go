@@ -409,7 +409,7 @@ func TestAPEPlanMatchesRun(t *testing.T) {
 	const frames = 12000
 	wav, src := makeWAV(t, pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, 2, frames, 21)
 	defer audio.Put(src)
-	info, err := e.Probe(container.BytesSource(wav), "wav", nil)
+	info, err := e.Probe(context.Background(), container.BytesSource(wav), "wav", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -535,7 +535,7 @@ func TestAPEEncodeTags(t *testing.T) {
 	tags := []container.Tag{{Key: "TITLE", Value: "Stage Seven"}, {Key: "ALBUM", Value: "WaxFlow"}}
 	raw := encodeAPE(t, e, wav, waxflow.TranscodeOptions{Tags: tags})
 
-	info, err := e.Probe(container.BytesSource(raw), "ape", &waxflow.ProbeOptions{Strict: true})
+	info, err := e.Probe(context.Background(), container.BytesSource(raw), "ape", &waxflow.ProbeOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -574,7 +574,7 @@ func TestAPEEncodeDepthPolicy(t *testing.T) {
 			wav, src := makeWAV(t, tc.cfg, 2, 5000, 51)
 			defer audio.Put(src)
 			raw := encodeAPE(t, e, wav, waxflow.TranscodeOptions{})
-			info, err := e.Probe(container.BytesSource(raw), "ape", nil)
+			info, err := e.Probe(context.Background(), container.BytesSource(raw), "ape", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -598,7 +598,7 @@ func TestAPEEncodeDepthPolicy(t *testing.T) {
 		// The same source at an explicit 24 bits goes through: the narrow is
 		// the caller's to ask for.
 		raw := encodeAPE(t, e, wav, waxflow.TranscodeOptions{BitDepth: 24})
-		info, err := e.Probe(container.BytesSource(raw), "ape", nil)
+		info, err := e.Probe(context.Background(), container.BytesSource(raw), "ape", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -633,7 +633,7 @@ func TestAPEEncodeSeeksExactly(t *testing.T) {
 	defer audio.Put(buf)
 	for _, target := range []int64{0, 1, ape.BlocksPerFrame - 1, ape.BlocksPerFrame,
 		ape.BlocksPerFrame + 1, 2 * ape.BlocksPerFrame, frames - 1} {
-		landed, err := med.SeekSample(target)
+		landed, err := med.SeekSample(context.Background(), target)
 		if err != nil {
 			t.Fatalf("seek %d: %v", target, err)
 		}
@@ -686,7 +686,7 @@ func TestAPERemuxMovesFrames(t *testing.T) {
 
 	for name, raw := range sources {
 		t.Run(name, func(t *testing.T) {
-			info, err := e.Probe(container.BytesSource(raw), "ape", nil)
+			info, err := e.Probe(context.Background(), container.BytesSource(raw), "ape", nil)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -1,6 +1,7 @@
 package flacn_test
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -90,7 +91,7 @@ func TestStrictCleanFixture(t *testing.T) {
 // frame containing the target (or the last frame for past-end targets).
 func seekAndCheck(t *testing.T, d *flacn.Demuxer, target int64) {
 	t.Helper()
-	landed, err := d.SeekSample(0, target)
+	landed, err := d.SeekSample(context.Background(), 0, target)
 	if err != nil {
 		t.Fatalf("seek to %d: %v", target, err)
 	}
@@ -119,7 +120,7 @@ func TestSeekBisection(t *testing.T) {
 		seekAndCheck(t, d, target)
 	}
 	// Interleave a seek with linear reading: stream stays contiguous.
-	landed, err := d.SeekSample(0, 6000)
+	landed, err := d.SeekSample(context.Background(), 0, 6000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +439,7 @@ func TestZeroFrameStream(t *testing.T) {
 		if err := d.ReadPacket(&pkt); err != io.EOF {
 			t.Fatalf("ReadPacket = %v, want EOF", err)
 		}
-		landed, err := d.SeekSample(0, 500)
+		landed, err := d.SeekSample(context.Background(), 0, 500)
 		if err != nil || landed != 0 {
 			t.Fatalf("seek = %d, %v; want 0, nil", landed, err)
 		}

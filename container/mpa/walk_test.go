@@ -1,6 +1,7 @@
 package mpa_test
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -75,7 +76,7 @@ func walked(t *testing.T, raw []byte, strict bool) (container.Track, []container
 	if err != nil {
 		return container.Track{}, nil, err
 	}
-	err = d.Walk()
+	err = d.Walk(context.Background())
 	return d.Tracks()[0], d.Warnings(), err
 }
 

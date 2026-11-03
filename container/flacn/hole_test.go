@@ -2,6 +2,7 @@ package flacn_test
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"slices"
 	"strings"
@@ -203,7 +204,7 @@ func TestDamagedFLACKeepsItsTimeline(t *testing.T) {
 	}
 	defer med.Close()
 	target := int64(hi + 3*int(clean[k].dur) + 17)
-	if _, err := med.SeekSample(target); err != nil {
+	if _, err := med.SeekSample(context.Background(), target); err != nil {
 		t.Fatal(err)
 	}
 	buf := audio.Get(med.Info().Default().Fmt, 256)
@@ -396,7 +397,7 @@ func TestCleanJumpIsAHole(t *testing.T) {
 	if dm := damageOf(d); len(dm) != 1 || !strings.Contains(dm[0], "skip") {
 		t.Errorf("damage %v, want one warning that the frames skip", dm)
 	}
-	if landed, err := d.SeekSample(0, clean[k+1].pts); err != nil || landed != clean[k-1].pts {
+	if landed, err := d.SeekSample(context.Background(), 0, clean[k+1].pts); err != nil || landed != clean[k-1].pts {
 		t.Errorf("a seek into the gap landed at %d (%v), want the frame before it at %d", landed, err, clean[k-1].pts)
 	}
 }
@@ -455,7 +456,7 @@ func TestCleanJumpUnderAnInexactLengthIsAHole(t *testing.T) {
 	if f := frames[k]; f.lost != 3*f.dur {
 		t.Fatalf("the frame after the jump at %d says %d samples were lost, want %d", f.pts, f.lost, 3*f.dur)
 	}
-	landed, err := d.SeekSample(0, frames[k+1].pts)
+	landed, err := d.SeekSample(context.Background(), 0, frames[k+1].pts)
 	if err != nil || landed != frames[k+1].pts {
 		t.Errorf("a seek to %d landed at %d (%v), where the read has a frame", frames[k+1].pts, landed, err)
 	}
@@ -502,7 +503,7 @@ func TestDamagedFirstFrameIsAHoleFromZero(t *testing.T) {
 					t.Errorf("note %q: the damage reads as a stream-copy cut", w.Msg)
 				}
 			}
-			landed, err := d.SeekSample(0, clean[0].dur/2)
+			landed, err := d.SeekSample(context.Background(), 0, clean[0].dur/2)
 			if err != nil || landed != 0 {
 				t.Fatalf("a seek into the hole landed at %d (%v), want 0", landed, err)
 			}

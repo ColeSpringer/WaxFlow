@@ -1,6 +1,7 @@
 package waxflow
 
 import (
+	"context"
 	"errors"
 	"io"
 	"math"
@@ -47,7 +48,7 @@ func (m *fixedMedia) ReadChunk(dst *audio.Buffer) error {
 	return nil
 }
 
-func (m *fixedMedia) SeekSample(target int64) (int64, error) {
+func (m *fixedMedia) SeekSample(ctx context.Context, target int64) (int64, error) {
 	m.pos = min(target, m.track.Samples)
 	return m.pos, nil
 }
@@ -265,7 +266,7 @@ func TestConcatFoldsTheWiderMemberInItsOwnChain(t *testing.T) {
 		t.Fatalf("the fold chain emits %v, the envelope is %v", got, c.fmt)
 	}
 	// Advance to the second member, which is already at the width.
-	if _, err := c.SeekSample(1000); err != nil {
+	if _, err := c.SeekSample(context.Background(), 1000); err != nil {
 		t.Fatal(err)
 	}
 	openFirst(t, c)
@@ -348,12 +349,12 @@ type seekFailMedia struct {
 	failed *bool
 }
 
-func (m *seekFailMedia) SeekSample(target int64) (int64, error) {
+func (m *seekFailMedia) SeekSample(ctx context.Context, target int64) (int64, error) {
 	if !*m.failed {
 		*m.failed = true
 		return 0, waxerr.New(waxerr.CodeSourceUnreadable, "seek failed")
 	}
-	return m.fixedMedia.SeekSample(target)
+	return m.fixedMedia.SeekSample(ctx, target)
 }
 
 // TestConcatFailedSeekDoesNotDesync pins what a half-done seek must not do.
@@ -385,7 +386,7 @@ func TestConcatFailedSeekDoesNotDesync(t *testing.T) {
 	if err := med.ReadChunk(buf); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := med.SeekSample(1500); err == nil {
+	if _, err := med.SeekSample(context.Background(), 1500); err == nil {
 		t.Fatal("a seek onto a member that cannot seek reported success")
 	}
 	// The read must fail rather than deliver samples stamped with the
@@ -396,7 +397,7 @@ func TestConcatFailedSeekDoesNotDesync(t *testing.T) {
 	}
 	// A seek that succeeds puts it back in a known state, so the latch is not
 	// a one-way door: the timeline is recoverable, not poisoned.
-	if _, err := med.SeekSample(0); err != nil {
+	if _, err := med.SeekSample(context.Background(), 0); err != nil {
 		t.Fatalf("seeking back to the top after a failed seek: %v", err)
 	}
 	if err := med.ReadChunk(buf); err != nil {
@@ -413,8 +414,8 @@ func TestConcatFailedSeekDoesNotDesync(t *testing.T) {
 // case, reached here through a caller's Open the way stallMedia below is.
 type shortSeekMedia struct{ *fixedMedia }
 
-func (m *shortSeekMedia) SeekSample(target int64) (int64, error) {
-	return m.fixedMedia.SeekSample(max(target-100, 0))
+func (m *shortSeekMedia) SeekSample(ctx context.Context, target int64) (int64, error) {
+	return m.fixedMedia.SeekSample(ctx, max(target-100, 0))
 }
 
 // TestConcatCrossfadeRefusesAShortSeekLanding pins the one precondition the
@@ -445,7 +446,7 @@ func TestConcatCrossfadeRefusesAShortSeekLanding(t *testing.T) {
 	// Ten frames into member 1's head zone, which is member 0's tail: reaching
 	// it opens member 0 and seeks it to its body's end, and this member lands
 	// 100 frames short of that.
-	_, err = med.SeekSample(n - x + 10)
+	_, err = med.SeekSample(context.Background(), n-x+10)
 	if err == nil {
 		t.Fatal("a member that landed short of its own crossfade zone captured a tail anyway; " +
 			"the blend buffer is sized at exactly the zone, so the extra frames run past it")
@@ -470,8 +471,8 @@ func TestConcatCrossfadeRefusesAShortSeekLanding(t *testing.T) {
 // stream whose first sync point lies beyond the target starts there.
 type longSeekMedia struct{ *fixedMedia }
 
-func (m *longSeekMedia) SeekSample(target int64) (int64, error) {
-	return m.fixedMedia.SeekSample(target + 100)
+func (m *longSeekMedia) SeekSample(ctx context.Context, target int64) (int64, error) {
+	return m.fixedMedia.SeekSample(ctx, target+100)
 }
 
 // TestConcatCrossfadeRefusesALandingPastTheBody pins seekBody's refusal and
@@ -490,7 +491,7 @@ func TestConcatCrossfadeRefusesALandingPastTheBody(t *testing.T) {
 
 	// Fifty frames before member 0's body ends: the landing is fifty past
 	// it, inside the tail zone.
-	_, err = med.SeekSample(n - x - 50)
+	_, err = med.SeekSample(context.Background(), n-x-50)
 	if err == nil {
 		t.Fatal("a member that landed inside its own crossfade zone was positioned there anyway")
 	}
@@ -541,7 +542,7 @@ func TestConcatSeekPreRollRefusesAStalledMember(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := med.SeekSample(5000)
+		_, err := med.SeekSample(context.Background(), 5000)
 		done <- err
 	}()
 	select {

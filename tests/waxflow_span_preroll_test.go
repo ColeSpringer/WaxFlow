@@ -219,7 +219,7 @@ func TestSpanPrerollSeeksBeforeItsWindow(t *testing.T) {
 	defer sl.Close()
 
 	// Seek 500 samples ahead of the window's start.
-	landed, err := sl.SeekSample(-500)
+	landed, err := sl.SeekSample(context.Background(), -500)
 	if err != nil {
 		t.Fatalf("a span refused a seek into its own headroom: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestSpanPrerollSeeksBeforeItsWindow(t *testing.T) {
 	}
 
 	// Reading on must cross 0 and carry into the window continuously.
-	if _, err := sl.SeekSample(-10); err != nil {
+	if _, err := sl.SeekSample(context.Background(), -10); err != nil {
 		t.Fatal(err)
 	}
 	big := audio.Get(f, 100)
@@ -289,11 +289,11 @@ func TestSpanRefusesSeekBeforeTheSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sl.Close()
-	if _, err := sl.SeekSample(-1001); err == nil {
+	if _, err := sl.SeekSample(context.Background(), -1001); err == nil {
 		t.Fatal("a span allowed a seek before its source's own start")
 	}
 	// The edge is reachable.
-	if _, err := sl.SeekSample(-1000); err != nil {
+	if _, err := sl.SeekSample(context.Background(), -1000); err != nil {
 		t.Fatalf("a span refused a seek to its source's start: %v", err)
 	}
 }
@@ -329,7 +329,7 @@ func TestSliceZeroFromHasNoHeadroom(t *testing.T) {
 	if h.Headroom() != 0 {
 		t.Errorf("Headroom() = %d, want 0 for a span at the source's start", h.Headroom())
 	}
-	if _, err := sl.SeekSample(-1); err == nil {
+	if _, err := sl.SeekSample(context.Background(), -1); err == nil {
 		t.Error("a span at the source's start allowed a negative seek")
 	}
 }

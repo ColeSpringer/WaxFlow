@@ -2,9 +2,9 @@ package adts
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
-	"slices"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/aac"
@@ -31,14 +31,16 @@ type DemuxerOptions struct {
 // state: one frame of IMDCT overlap for AAC-LC, and the HE-AAC preroll
 // when the first frame's SBR probe upgraded the track.
 type Demuxer struct {
-	damage int // Damage warnings met, the list's cap aside (DamageCount)
-	src    container.Source
-	opts   DemuxerOptions
+	src  container.Source
+	opts DemuxerOptions
 
 	ref      header
 	haveRef  bool // ref is set (distinct from firstFrame, which can be 0)
 	track    container.Track
-	warnings []container.Warning
+	warnings container.Warnings
+	// refused is a strict refusal, kept: the walk is not finished while it
+	// stands, and Walk and the reads return it again.
+	refused error
 
 	// spf is the output samples each frame decodes to (1024, or 2048 for
 	// a detected HE-AAC stream), fixed at open: the format is immutable,
@@ -72,15 +74,10 @@ func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	msg := fmt.Sprintf(format, args...)
 	if d.opts.Strict {
-		return malformed("%s (at offset %d)", msg, off)
+		d.refused = malformed("%s (at offset %d)", msg, off)
+		return d.refused
 	}
-	// Capped and deduplicated like the MP3 readers' list: a stream with junk
-	// between every frame would otherwise grow it with the walk.
-	w := container.Warning{Offset: off, Msg: msg, Kind: container.Damage}
-	d.damage++
-	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
-		d.warnings = append(d.warnings, w)
-	}
+	d.warnings.Damage(off, msg)
 	return nil
 }
 
@@ -88,7 +85,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 // convention): warn is for framing mess; a probe that cannot decode a
 // payload says nothing about framing, and the file still remuxes.
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
+	d.warnings.Note(off, fmt.Sprintf(format, args...))
 }
 
 func (d *Demuxer) parse() error {
@@ -275,16 +272,19 @@ func (d *Demuxer) frameAt(off int64) (header, bool) {
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns damage tolerated during parsing.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
+func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
 
 // DamageCount implements container.Damaged.
-func (d *Demuxer) DamageCount() int { return d.damage }
+func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
 
 // extend grows the frame index by one and reports whether it did. The
 // window is trimmed to the last indexed frame first, and the next header is
 // pulled in with that frame: a seek to the end walks the index without
 // reading a packet, and this is what keeps that walk at one window, sliding.
 func (d *Demuxer) extend() (bool, error) {
+	if d.refused != nil {
+		return false, d.refused
+	}
 	if d.done {
 		return false, nil
 	}
@@ -358,32 +358,51 @@ func (d *Demuxer) extend() (bool, error) {
 // under Strict the error, without a packet being read. A finished walk has
 // counted every frame, which is the length the stream itself never states,
 // so the track reports it exact from then on: a strict probe, which walks
-// before its snapshot, measures the file it refused to guess about.
-func (d *Demuxer) Walk() error {
-	for {
+// before its snapshot, measures the file it refused to guess about. ctx is
+// read before every frame; one that has ended pauses the walk there
+// (container.Walker). A strict refusal is kept and returned again.
+func (d *Demuxer) Walk(ctx context.Context) error {
+	if d.refused != nil {
+		return d.refused
+	}
+	for !d.done {
+		if err := container.WalkCanceled(ctx, "adts: "); err != nil {
+			return err
+		}
 		grew, err := d.extend()
 		if err != nil {
 			return err
 		}
 		if !grew {
-			if d.done {
-				// Through the shared rule rather than assigned: ADTS carries no
-				// trims, so it lands on the same number either way, and one
-				// settle keeps every frame-indexed container saying the same
-				// thing about what a finished walk means.
-				d.track = container.SettleLength(d.track, int64(len(d.idx))*d.spf)
-			}
-			return nil
+			break
 		}
 	}
+	if d.Walked() {
+		// Through the shared rule rather than assigned: ADTS carries no
+		// trims, so it lands on the same number either way, and one
+		// settle keeps every frame-indexed container saying the same
+		// thing about what a finished walk means.
+		d.track = container.SettleLength(d.track, int64(len(d.idx))*d.spf)
+	}
+	return nil
 }
 
-// Walked implements container.Walker: whether the index reaches the end.
-func (d *Demuxer) Walked() bool { return d.done }
+// Walked implements container.Walker: whether the index reaches the end, and
+// nothing was refused on the way.
+func (d *Demuxer) Walked() bool { return d.done && d.refused == nil }
 
 // frameNo extends the index up to frame n, returning the highest available.
-func (d *Demuxer) frameNo(n int64) (int64, error) {
+func (d *Demuxer) frameNo(ctx context.Context, n int64) (int64, error) {
 	for int64(len(d.idx)) <= n {
+		if d.refused != nil {
+			return 0, d.refused
+		}
+		if d.done {
+			break // nothing left to index, whatever ctx says
+		}
+		if err := container.WalkCanceled(ctx, "adts: "); err != nil {
+			return 0, err
+		}
 		grew, err := d.extend()
 		if err != nil {
 			return 0, err
@@ -397,7 +416,7 @@ func (d *Demuxer) frameNo(n int64) (int64, error) {
 
 // ReadPacket yields one raw_data_block. Packet data is reused across calls.
 func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
-	lastNo, err := d.frameNo(d.cur)
+	lastNo, err := d.frameNo(context.Background(), d.cur) // a read carries no context
 	if err != nil {
 		return err
 	}
@@ -438,7 +457,7 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 // SeekSample lands preFrames before the target (the decoder's restart
 // state: IMDCT overlap for LC, the SBR/PS preroll for HE-AAC) and returns
 // that frame's first sample; format.Media pre-rolls the rest.
-func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
+func (d *Demuxer) SeekSample(ctx context.Context, track int, sample int64) (int64, error) {
 	if track != 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("adts: no track %d", track))
 	}
@@ -446,7 +465,7 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, "adts: negative seek target")
 	}
 	target := sample / d.spf
-	lastNo, err := d.frameNo(target)
+	lastNo, err := d.frameNo(ctx, target)
 	if err != nil {
 		return 0, err
 	}

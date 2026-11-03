@@ -6,6 +6,7 @@ package waxflow_test
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -82,10 +83,10 @@ func requireFLACTwin(t *testing.T, raw []byte, hint string, twin []byte, skip in
 		if i == 0 {
 			target = 0
 		}
-		if landed, err := med.SeekSample(target); err != nil || landed != target {
+		if landed, err := med.SeekSample(context.Background(), target); err != nil || landed != target {
 			t.Fatalf("seek to %d landed at %d (%v)", target, landed, err)
 		}
-		if landed, err := twinMed.SeekSample(target + skip); err != nil || landed != target+skip {
+		if landed, err := twinMed.SeekSample(context.Background(), target+skip); err != nil || landed != target+skip {
 			t.Fatalf("twin seek to %d landed at %d (%v)", target+skip, landed, err)
 		}
 		if err := med.ReadChunk(a); err != nil {
@@ -101,7 +102,7 @@ func requireFLACTwin(t *testing.T, raw []byte, hint string, twin []byte, skip in
 			t.Fatalf("seek to %d: differs from its twin's at frame %d", target, j)
 		}
 	}
-	if landed, err := med.SeekSample(total + 100); err != nil || landed != total {
+	if landed, err := med.SeekSample(context.Background(), total+100); err != nil || landed != total {
 		t.Fatalf("past-end seek landed at %d (%v), want %d", landed, err, total)
 	}
 	audio.Put(a)

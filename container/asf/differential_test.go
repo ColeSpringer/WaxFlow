@@ -14,6 +14,7 @@ package asf_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -315,7 +316,7 @@ func TestSeekAgainstFFprobePackets(t *testing.T) {
 				// Target the middle of packet i, which is the hardest place
 				// to land at-or-before.
 				target := msToSamples(p.PTS, rate) + int64(p.Dur)*int64(rate)/2000
-				landed, err := d.SeekSample(0, target)
+				landed, err := d.SeekSample(context.Background(), 0, target)
 				if err != nil {
 					t.Fatalf("seek to packet %d: %v", i, err)
 				}

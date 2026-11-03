@@ -90,7 +90,7 @@ func TestSliceSplitRoundTrip(t *testing.T) {
 	// exactly what a caller with a split album does.
 	members := make([]waxflow.ConcatSource, len(pieces))
 	for i, p := range pieces {
-		info, err := e.Probe(container.BytesSource(p), "flac", nil)
+		info, err := e.Probe(context.Background(), container.BytesSource(p), "flac", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -193,7 +193,7 @@ func TestSliceEndTrimNeedsNoSeek(t *testing.T) {
 // path never reaches for it.
 type unseekableMedia struct{ format.Media }
 
-func (unseekableMedia) SeekSample(int64) (int64, error) {
+func (unseekableMedia) SeekSample(context.Context, int64) (int64, error) {
 	return 0, io.ErrUnexpectedEOF
 }
 
@@ -214,7 +214,7 @@ func TestSliceSeek(t *testing.T) {
 
 	// A seek inside the window is relative to the window, and lands there
 	// exactly: the sample read after it is the source's from+target.
-	landed, err := sl.SeekSample(4000)
+	landed, err := sl.SeekSample(context.Background(), 4000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestSliceSeek(t *testing.T) {
 
 	// Past the window's end lands at its end, as a Media does at the end of
 	// a file, and reads nothing more.
-	landed, err = sl.SeekSample(999999)
+	landed, err = sl.SeekSample(context.Background(), 999999)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,7 +456,7 @@ func TestSliceOpenSpanOfAnExactSourceThatEndsEarlyFails(t *testing.T) {
 			t.Fatalf("a read of the golden delivers %d of its measured %d; this cell needs one that runs short",
 				held, track.Samples)
 		}
-		sl, err := waxflow.SliceMeasured(open(), track, from, waxflow.ToEnd)
+		sl, err := waxflow.SliceMeasured(context.Background(), open(), track, from, waxflow.ToEnd)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -674,7 +674,7 @@ func (m *declaringMedia) Info() *format.Info {
 // WMA v1/v2 frame walk settles ASF's rounded duration.
 type settlingMedia struct{ declaringMedia }
 
-func (m *settlingMedia) Walk() error {
+func (m *settlingMedia) Walk(context.Context) error {
 	m.exact, m.advisory = true, false
 	return nil
 }
@@ -713,12 +713,12 @@ type flakyMedia struct {
 	fails int // seeks left to refuse; a negative refuses every one
 }
 
-func (m *flakyMedia) SeekSample(target int64) (int64, error) {
+func (m *flakyMedia) SeekSample(ctx context.Context, target int64) (int64, error) {
 	if m.fails != 0 {
 		m.fails--
 		return 0, errors.New("waxflow_test: the source refused a seek")
 	}
-	return m.Media.SeekSample(target)
+	return m.Media.SeekSample(ctx, target)
 }
 
 // TestSliceFailedStartDeliversNothing pins that a span whose positioning
@@ -1036,9 +1036,9 @@ type walkCounter struct {
 	walks int
 }
 
-func (w *walkCounter) Walk() error {
+func (w *walkCounter) Walk(ctx context.Context) error {
 	w.walks++
-	return format.WalkMedia(w.Media)
+	return format.WalkMedia(ctx, w.Media)
 }
 
 func (w *walkCounter) Walked() bool { return format.MediaWalked(w.Media) }
@@ -1091,7 +1091,7 @@ func TestSliceConfirmsItsOwnLength(t *testing.T) {
 	// The numbers this rests on, read off the file rather than assumed.
 	whole, _ := openCountedSlice(t, raw, 0, waxflow.ToEnd)
 	declared := whole.Info().Default().Samples
-	if err := whole.(format.LengthConfirmer).ConfirmLength(); err != nil {
+	if err := whole.(format.LengthConfirmer).ConfirmLength(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	held := whole.Info().Default().Samples
@@ -1154,7 +1154,7 @@ func TestSliceRefusesAWindowTheConfirmedSourceCannotCover(t *testing.T) {
 	raw := truncatedMP3(t, 100)
 	whole, _ := openCountedSlice(t, raw, 0, waxflow.ToEnd)
 	declared := whole.Info().Default().Samples
-	if err := whole.(format.LengthConfirmer).ConfirmLength(); err != nil {
+	if err := whole.(format.LengthConfirmer).ConfirmLength(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	held := whole.Info().Default().Samples

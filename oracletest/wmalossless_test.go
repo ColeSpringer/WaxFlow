@@ -15,6 +15,7 @@ package oracletest
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,7 +40,7 @@ func TestWaxlabelAgreesOnWMALossless(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			info, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+			info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", nil)
 			if err != nil {
 				t.Fatalf("probe: %v", err)
 			}
@@ -81,7 +82,7 @@ func TestBothReadersTakeTheDepthFromTheExtraBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +99,7 @@ func TestBothReadersTakeTheDepthFromTheExtraBytes(t *testing.T) {
 	patched := bytes.Clone(raw)
 	patched[at+14], patched[at+15] = 16, 0
 
-	info, err = waxflow.New().Probe(container.BytesSource(patched), "", nil)
+	info, err = waxflow.New().Probe(context.Background(), container.BytesSource(patched), "", nil)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}

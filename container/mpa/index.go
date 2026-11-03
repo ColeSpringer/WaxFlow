@@ -1,6 +1,10 @@
 package mpa
 
-import "github.com/colespringer/waxflow/container"
+import (
+	"context"
+
+	"github.com/colespringer/waxflow/container"
+)
 
 var (
 	_ container.Indexer = (*Demuxer)(nil)
@@ -23,8 +27,8 @@ func (d *Demuxer) RestoreIndex(blob []byte) bool { return d.pkts.Restore(blob) }
 // and the track reports that count exact from then on, whatever a metadata
 // frame claimed: the walk is the measurement, and a count it disagrees with
 // has already been reported as damage (a shortfall) or a note (an overrun).
-func (d *Demuxer) Walk() error {
-	if err := d.pkts.Walk(); err != nil {
+func (d *Demuxer) Walk(ctx context.Context) error {
+	if err := d.pkts.Walk(ctx); err != nil {
 		return err
 	}
 	return d.pkts.SettleLength(&d.track)

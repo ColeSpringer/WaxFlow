@@ -3,6 +3,7 @@
 package mpegframes
 
 import (
+	"context"
 	"runtime"
 	"testing"
 
@@ -26,7 +27,7 @@ func TestMeasurePassAllocatesOneWindow(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	if _, err := w.Landing(n - 10); err != nil {
+	if _, err := w.Landing(context.Background(), n-10); err != nil {
 		t.Fatal(err)
 	}
 	runtime.ReadMemStats(&after)

@@ -1,6 +1,7 @@
 package format
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -242,7 +243,7 @@ func seekAndCompare(t *testing.T, raw []byte, ref []float32, ch int, target int6
 		t.Fatal(err)
 	}
 	defer med.Close()
-	landed, err := med.SeekSample(target)
+	landed, err := med.SeekSample(context.Background(), target)
 	if err != nil {
 		t.Fatalf("seek %d: %v", target, err)
 	}

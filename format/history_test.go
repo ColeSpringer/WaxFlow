@@ -1,6 +1,7 @@
 package format
 
 import (
+	"context"
 	"errors"
 	"io"
 	"testing"
@@ -40,7 +41,7 @@ func (d *historyDemux) ReadPacket(p *container.Packet) error {
 	return nil
 }
 
-func (d *historyDemux) SeekSample(_ int, sample int64) (int64, error) {
+func (d *historyDemux) SeekSample(ctx context.Context, _ int, sample int64) (int64, error) {
 	p := max(int(min(sample/historyFrame, int64(d.n-1)))-1, 0)
 	d.lands = append(d.lands, p)
 	d.cursor = p
@@ -143,7 +144,7 @@ func TestASeekLandsEarlierWhenTheDecodeNeedsHistory(t *testing.T) {
 
 	m, dm := historyMedia(map[int]int{10: 5}, nil, nil)
 	target := int64(10*historyFrame + historyFrame/2)
-	landed, err := m.SeekSample(target)
+	landed, err := m.SeekSample(context.Background(), target)
 	if err != nil {
 		t.Fatalf("seek to %d: %v", target, err)
 	}
@@ -165,7 +166,7 @@ func TestASeekLandsEarlierWhenTheDecodeNeedsHistory(t *testing.T) {
 	// one that meets it is already part filled.
 	m, dm = historyMedia(map[int]int{15: 5}, nil, nil)
 	target = 12*historyFrame + 10
-	if _, err := m.SeekSample(target); err != nil {
+	if _, err := m.SeekSample(context.Background(), target); err != nil {
 		t.Fatal(err)
 	}
 	got, err := readAll(t, m, 150)
@@ -185,14 +186,14 @@ func TestASeekLandsEarlierWhenTheDecodeNeedsHistory(t *testing.T) {
 	}
 
 	m, _ = historyMedia(map[int]int{3: 20}, nil, nil)
-	if _, err := m.SeekSample(3*historyFrame + 1); err == nil || errors.Is(err, codec.ErrNeedsHistory) {
+	if _, err := m.SeekSample(context.Background(), 3*historyFrame+1); err == nil || errors.Is(err, codec.ErrNeedsHistory) {
 		t.Errorf("state the stream never sent gave %v, want the damage the start of the stream reports", err)
 	}
 
 	// Behind a hole: every landing early enough passes the hole, which
 	// restarts the decode, so no landing carries the state.
 	m, dm = historyMedia(map[int]int{15: 5}, map[int]bool{10: true}, nil)
-	if _, err := m.SeekSample(12 * historyFrame); err != nil {
+	if _, err := m.SeekSample(context.Background(), 12*historyFrame); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := readAll(t, m, historyFrame); !errors.Is(err, codec.ErrNeedsHistory) {
@@ -203,7 +204,7 @@ func TestASeekLandsEarlierWhenTheDecodeNeedsHistory(t *testing.T) {
 	}
 	// The same behind a hole the pre-roll itself passes.
 	m, dm = historyMedia(map[int]int{15: 5}, map[int]bool{13: true}, nil)
-	if _, err := m.SeekSample(15*historyFrame + 10); !errors.Is(err, codec.ErrNeedsHistory) {
+	if _, err := m.SeekSample(context.Background(), 15*historyFrame+10); !errors.Is(err, codec.ErrNeedsHistory) {
 		t.Errorf("a seek whose state lies behind a hole gave %v, want the decoder's refusal", err)
 	}
 	if low := minOf(dm.lands); low < 5 {
@@ -214,7 +215,7 @@ func TestASeekLandsEarlierWhenTheDecodeNeedsHistory(t *testing.T) {
 	// too, and a read that meets a reuse there has nothing earlier to try.
 	m, _ = historyMedia(map[int]int{3: 20}, nil, nil)
 	m.decoder = resetOnly{m.decoder.(*historyDecoder)}
-	if _, err := m.SeekSample(historyFrame + 1); err != nil {
+	if _, err := m.SeekSample(context.Background(), historyFrame+1); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := readAll(t, m, historyFrame); !errors.Is(err, codec.ErrNeedsHistory) {

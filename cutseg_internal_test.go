@@ -1,6 +1,7 @@
 package waxflow
 
 import (
+	"context"
 	"testing"
 
 	"github.com/colespringer/waxflow/container"
@@ -28,7 +29,7 @@ func TestCutSeekViewHoldsItsEnd(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := view.(container.Seeker).SeekSample(tc.track.ID, 4096); err != nil {
+			if _, err := view.(container.Seeker).SeekSample(context.Background(), tc.track.ID, 4096); err != nil {
 				t.Fatal(err)
 			}
 			drainCut(t, view, tc.code, 0, "end at 10240", "ending at 20480")
@@ -41,7 +42,7 @@ func TestCutSeekViewHoldsItsEnd(t *testing.T) {
 // an all-sync-point codec (Opus, AAC-LC), which is what the cut allowlist is.
 type seekableGridDemuxer struct{ gridDemuxer }
 
-func (d *seekableGridDemuxer) SeekSample(track int, sample int64) (int64, error) {
+func (d *seekableGridDemuxer) SeekSample(ctx context.Context, track int, sample int64) (int64, error) {
 	if sample < 0 {
 		sample = 0
 	}
@@ -96,7 +97,7 @@ func TestCutSeekMapsOutputTargetToSource(t *testing.T) {
 		{"mid-stream boundary lands exactly", 10240, 10240, 29},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			landed, err := sk.SeekSample(track.ID, tc.outTarget)
+			landed, err := sk.SeekSample(context.Background(), track.ID, tc.outTarget)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -144,7 +145,7 @@ func TestCutSeekMapsMultiWindow(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		landed, err := view.(container.Seeker).SeekSample(track.ID, 25600)
+		landed, err := view.(container.Seeker).SeekSample(context.Background(), track.ID, 25600)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -169,7 +170,7 @@ func TestCutSeekMapsMultiWindow(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		landed, err := view.(container.Seeker).SeekSample(track.ID, 25600)
+		landed, err := view.(container.Seeker).SeekSample(context.Background(), track.ID, 25600)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -194,7 +195,7 @@ func TestCutSeekMapsMultiWindow(t *testing.T) {
 // landing is well before the target, even before the cut window's own start.
 type coarseSeekDemuxer struct{ gridDemuxer }
 
-func (d *coarseSeekDemuxer) SeekSample(track int, sample int64) (int64, error) {
+func (d *coarseSeekDemuxer) SeekSample(ctx context.Context, track int, sample int64) (int64, error) {
 	d.i, d.pos = 0, 0
 	return 0, nil
 }
@@ -215,7 +216,7 @@ func TestCutSeekClampsAPreWindowLanding(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Seek to a mid-stream output boundary the coarse demuxer cannot reach.
-	landed, err := view.(container.Seeker).SeekSample(track.ID, 10240)
+	landed, err := view.(container.Seeker).SeekSample(context.Background(), track.ID, 10240)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +282,7 @@ func TestCutSeekResetsTheTrimCursor(t *testing.T) {
 		}
 	}
 	sk := view.(container.Seeker)
-	if _, err := sk.SeekSample(0, 40*grid); err != nil {
+	if _, err := sk.SeekSample(context.Background(), 0, 40*grid); err != nil {
 		t.Fatalf("SeekSample: %v", err)
 	}
 	if err := view.ReadPacket(&pkt); err != nil {

@@ -1,6 +1,7 @@
 package adts_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -40,7 +41,7 @@ func TestWalkSurfacesAReadFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Walk(); !errors.Is(err, waxerr.ErrSourceUnreadable) {
+	if err := d.Walk(context.Background()); !errors.Is(err, waxerr.ErrSourceUnreadable) {
 		t.Fatalf("Walk = %v, want the read failure as source-unreadable", err)
 	}
 	if d.Walked() {

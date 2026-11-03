@@ -1,6 +1,7 @@
 package mp4
 
 import (
+	"context"
 	"sort"
 
 	"github.com/colespringer/waxflow/container"
@@ -14,7 +15,7 @@ var _ container.Walker = (*Demuxer)(nil)
 // one-second fragments on a real one. Past it the walk keeps counting (the
 // length is still measured) and stops recording, and a seek past the last
 // recorded entry scans forward from it.
-const maxFragments = 1 << 20
+var maxFragments = 1 << 20 // a variable so a test can reach it
 
 // fragEntry is one fragment's place: the offset of its moof, the output sample
 // its first sample carries, and the same instant in the media's own ticks.
@@ -28,6 +29,14 @@ type fragEntry struct {
 	offset int64
 	base   int64
 	ticks  int64
+}
+
+// fragCursor is where the fragment scan stands between runs: the next box to
+// read and the running sums in both units, so a stopped scan resumes rather
+// than reading every moof again.
+type fragCursor struct {
+	off, ticks, raw int64
+	begun           bool
 }
 
 // Walk measures a fragmented movie by reading its moof headers, and is a no-op
@@ -60,7 +69,7 @@ type fragEntry struct {
 // and neither is called damage. A count short of the run is an overrun the
 // reader tolerated and gets a Note; a run short of the count is Damage, which
 // Strict turns into the error the interface asks for.
-func (d *Demuxer) Walk() error {
+func (d *Demuxer) Walk(ctx context.Context) error {
 	if !d.fragmented {
 		return nil
 	}
@@ -70,15 +79,15 @@ func (d *Demuxer) Walk() error {
 		// length change under it.
 		return nil
 	}
-	raw, err := d.indexFragments()
+	raw, err := d.indexFragments(ctx)
 	if err == nil {
 		d.fragIndexed = true
 	}
 	if err != nil {
-		// The source could not be read to its end. Nothing is settled and
-		// Walked stays false, so a later Walk tries again; the partial index
-		// stands, since a seek into the part that was readable is better than
-		// refusing one.
+		// The source could not be read to its end, or the context ended.
+		// Nothing is settled and Walked stays false, so a later Walk resumes
+		// at the box this one stopped on; the partial index stands, since a
+		// seek into the part that was scanned is better than refusing one.
 		return err
 	}
 	// The latch goes last, after the track is actually settled. Setting it
@@ -109,18 +118,18 @@ func (d *Demuxer) Walked() bool { return !d.fragmented || d.fragWalked }
 // ensureFragmentIndex builds the fragment map once, for a seek that needs a
 // landing rather than a length. It is Walk without the settlement, which is
 // what keeps a seek from answering Walked's question on Walk's behalf.
-func (d *Demuxer) ensureFragmentIndex() error {
+func (d *Demuxer) ensureFragmentIndex(ctx context.Context) error {
 	if d.fragIndexed {
 		return nil
 	}
-	_, err := d.indexFragments()
+	_, err := d.indexFragments(ctx)
 	if err == nil {
 		d.fragIndexed = true
 	}
 	return err
 }
 
-// walkFragments reads every moof from fragStart, building the index and
+// indexFragments reads every moof from fragStart, building the index and
 // returning the raw sample run the fragments hold plus whatever the moov's own
 // table holds ahead of them.
 //
@@ -135,8 +144,10 @@ func (d *Demuxer) ensureFragmentIndex() error {
 // open records how far the fragments got; silently settling a short count as
 // exact would let a truncated file claim to have been measured. An error is
 // the source failing to deliver bytes it should have, which is not an end and
-// is not a measurement.
-func (d *Demuxer) indexFragments() (raw int64, err error) {
+// is not a measurement. A context that ends is neither: the scan pauses at
+// the box it would read next (container.Walker). The cursor carries every
+// stop, so a failed scan resumes too, and a finished one reads nothing more.
+func (d *Demuxer) indexFragments(ctx context.Context) (raw int64, err error) {
 	rate := int64(d.sel.fmt.Rate)
 	rescale := d.sel.timescale > 0 && rate > 0 && d.sel.timescale != rate
 	toSamples := func(ticks int64) int64 {
@@ -146,10 +157,19 @@ func (d *Demuxer) indexFragments() (raw int64, err error) {
 		return mulDivSat(ticks, rate, d.sel.timescale)
 	}
 
-	// The fragments continue the sample table's timeline, in both units.
-	ticks := d.sel.st.tickDur
-	raw = d.sel.st.totalDur
-	index := d.fragIndex[:0]
+	// The fragments continue the sample table's timeline, in both units; a
+	// scan that stopped short continues from where it stood.
+	c := &d.fragScan
+	if !c.begun {
+		*c = fragCursor{off: d.fragStart, ticks: d.sel.st.tickDur, raw: d.sel.st.totalDur, begun: true}
+		d.fragIndex = d.fragIndex[:0]
+	}
+	off, ticks, index := c.off, c.ticks, d.fragIndex
+	raw = c.raw
+	defer func() {
+		c.off, c.ticks, c.raw = off, ticks, raw
+		d.fragIndex = index
+	}()
 	// One fragInfo across the scan. parseFragment reuses its sample slice, so
 	// a file of many fragments allocates one run rather than one per moof;
 	// a trun may declare up to maxSamplesPerFragment entries, and the read
@@ -157,19 +177,24 @@ func (d *Demuxer) indexFragments() (raw int64, err error) {
 	var fi fragInfo
 	var scratch []byte
 	// stop ends the scan where the box chain does: the index stands, and the
-	// damage is named so Strict refuses and tolerance records it.
-	stop := func(off int64, format string, args ...any) (int64, error) {
-		d.fragIndex = index
-		return raw, d.warn(off, format, args...)
+	// damage is named so Strict refuses and tolerance records it. Tolerated,
+	// the scan is over; refused, the cursor stays on the box for the retry.
+	stop := func(at int64, format string, args ...any) (int64, error) {
+		err := d.warn(at, format, args...)
+		if err == nil {
+			off = d.size
+		}
+		return raw, err
 	}
-	off := d.fragStart
 	for off < d.size {
+		if err := container.WalkCanceled(ctx, "mp4: "); err != nil {
+			return raw, err
+		}
 		b, err := readBox(d.src, off, d.size)
 		if err != nil {
 			if waxerr.CodeOf(err) == waxerr.CodeMalformedInput {
 				return stop(off, "fragment chain ends at %d: %s", off, err)
 			}
-			d.fragIndex = index
 			return raw, err
 		}
 		if b.typ == "moof" {
@@ -181,7 +206,6 @@ func (d *Demuxer) indexFragments() (raw int64, err error) {
 			}
 			buf := scratch[:b.payloadLen()]
 			if err := container.ReadFull(d.src, buf, b.payloadOff()); err != nil {
-				d.fragIndex = index
 				return raw, err // unreadable, not ended
 			}
 			if err := parseFragment(&fi, buf, d.trex, d.sel.id); err != nil {
@@ -232,11 +256,11 @@ func (d *Demuxer) indexFragments() (raw int64, err error) {
 			}
 		}
 		if b.toEnd {
+			off = d.size // the box runs to the end: the scan is over
 			break
 		}
 		off = b.off + b.size
 	}
-	d.fragIndex = index
 	return raw, nil
 }
 

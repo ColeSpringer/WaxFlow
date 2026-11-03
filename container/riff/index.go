@@ -1,6 +1,8 @@
 package riff
 
 import (
+	"context"
+
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/internal/mpegframes"
 )
@@ -41,12 +43,12 @@ func (d *Demuxer) RestoreIndex(blob []byte) bool {
 // Strict the error, and the track reports the walk's count exact, which is
 // the length a read of it delivers. A byte-linear or block payload has
 // nothing to walk and answers nil.
-func (d *Demuxer) Walk() error {
+func (d *Demuxer) Walk(ctx context.Context) error {
 	r, ok := d.payload.(*mpegframes.Reader)
 	if !ok {
 		return nil
 	}
-	if err := r.Walk(); err != nil {
+	if err := r.Walk(ctx); err != nil {
 		return err
 	}
 	return r.SettleLength(&d.track)

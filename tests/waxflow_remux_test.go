@@ -284,7 +284,7 @@ func TestRemuxFallsBackWhenGaplessCannotSurvive(t *testing.T) {
 func probeTrack(t *testing.T, raw []byte, hint string) container.Track {
 	t.Helper()
 	e := waxflow.New()
-	info, err := e.Probe(container.BytesSource(raw), hint, nil)
+	info, err := e.Probe(context.Background(), container.BytesSource(raw), hint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -589,7 +589,7 @@ func walkedTrack(t *testing.T, raw []byte, hint string) container.Track {
 	if !ok {
 		t.Fatalf("a %s Media defers no walk", hint)
 	}
-	if err := w.Walk(); err != nil {
+	if err := w.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	return med.Info().Default()

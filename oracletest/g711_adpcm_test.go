@@ -18,6 +18,7 @@ package oracletest
 // whose provenance comments hold the command lines.
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -54,7 +55,7 @@ func TestWaxlabelAgreesG711AndADPCM(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			info, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+			info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", nil)
 			if err != nil {
 				t.Fatalf("waxflow.Probe: %v", err)
 			}

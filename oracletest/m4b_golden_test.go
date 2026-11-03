@@ -100,7 +100,7 @@ func TestGoldenM4BChapters(t *testing.T) {
 	if len(back.Chapters) != 3 {
 		t.Errorf("the tag library read back %d chapters, want 3", len(back.Chapters))
 	}
-	probed, err := waxflow.New().Probe(container.BytesSource(got), "m4b", nil)
+	probed, err := waxflow.New().Probe(context.Background(), container.BytesSource(got), "m4b", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

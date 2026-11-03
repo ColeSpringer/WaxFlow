@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"math"
 	"sync"
 
@@ -97,23 +98,27 @@ func (c *gridCache) evictOldestLocked() {
 // the memo is in-memory, so a daemon restart with live sessions is cold, and
 // the resuming clients arrive as a burst of concurrent segment requests for one
 // source, each of which would otherwise run its own walk.
-func (s *Server) gridFor(src *source.File) (int, error) {
+func (s *Server) gridFor(ctx context.Context, src *source.File) (int, error) {
 	key := identityString(src.Ref, src.ID)
 	if g, ok := s.gridCache.get(key); ok {
 		return g, nil
 	}
-	return s.gridFlight.Do(key, func() (int, error) {
-		// Re-check under the flight: flight is duplicate suppression, not
-		// caching, so a caller that missed just as the previous flight filled
-		// the memo would otherwise walk again.
-		if g, ok := s.gridCache.get(key); ok {
-			return g, nil
-		}
-		grid, err := s.eng.PacketGrid(src, src.Ext)
-		if err != nil {
-			return 0, err
-		}
-		s.gridCache.put(key, grid)
-		return grid, nil
+	// A joined flight, as trackFor's is: the walk runs for every caller
+	// waiting on it, on a handle of its own.
+	return untilOwnCancel(ctx, func() (int, error) {
+		return s.gridFlight.JoinHolding(ctx, key, holdFile(src), func(ctx context.Context) (int, error) {
+			// Re-check under the flight: flight is duplicate suppression, not
+			// caching, so a caller that missed just as the previous flight
+			// filled the memo would otherwise walk again.
+			if g, ok := s.gridCache.get(key); ok {
+				return g, nil
+			}
+			grid, err := s.eng.PacketGrid(ctx, src, src.Ext)
+			if err != nil {
+				return 0, err
+			}
+			s.gridCache.put(key, grid)
+			return grid, nil
+		})
 	})
 }

@@ -2,6 +2,7 @@ package wv_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -174,7 +175,7 @@ func TestTrailingMetadataBlock(t *testing.T) {
 	// A seek at or past the end lands on the last block that carried samples,
 	// not on the trailing one, whose index is zero here.
 	for _, target := range []int64{40000, 1 << 40} {
-		landed, err := d.SeekSample(0, target)
+		landed, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatalf("seek to %d: %v", target, err)
 		}
@@ -218,7 +219,7 @@ func TestSeekLandsOnBlockStart(t *testing.T) {
 	}
 	const blockLen = 2000
 	for _, target := range []int64{0, 1, 1999, 2000, 12345, 39999, 40000, 1 << 40} {
-		landed, err := d.SeekSample(0, target)
+		landed, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatalf("seek to %d: %v", target, err)
 		}
@@ -239,10 +240,10 @@ func TestSeekLandsOnBlockStart(t *testing.T) {
 			t.Errorf("post-seek packet at %d, want %d", pkt.PTS, landed)
 		}
 	}
-	if _, err := d.SeekSample(1, 0); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+	if _, err := d.SeekSample(context.Background(), 1, 0); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
 		t.Errorf("seek on a nonexistent track: %v", err)
 	}
-	if _, err := d.SeekSample(0, -1); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+	if _, err := d.SeekSample(context.Background(), 0, -1); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
 		t.Errorf("negative seek target: %v", err)
 	}
 }
@@ -347,7 +348,7 @@ func TestWarningsAreBoundedAndDeduped(t *testing.T) {
 		t.Fatal("trailing garbage produced no warning")
 	}
 	for range 20 {
-		if _, err := d.SeekSample(0, 1<<40); err != nil {
+		if _, err := d.SeekSample(context.Background(), 0, 1<<40); err != nil {
 			t.Fatal(err)
 		}
 		drain()
@@ -500,7 +501,7 @@ func TestSeekOverAHoleLandsAtOrBeforeTheTarget(t *testing.T) {
 		{hole, hole},       // the first sample the second block does hold
 		{hole + 500, hole}, // inside the second block
 	} {
-		landed, err := d.SeekSample(0, tt.target)
+		landed, err := d.SeekSample(context.Background(), 0, tt.target)
 		if err != nil {
 			t.Fatalf("seek to %d: %v", tt.target, err)
 		}

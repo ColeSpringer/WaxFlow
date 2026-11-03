@@ -6,6 +6,7 @@ package flacn_test
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -292,11 +293,11 @@ func TestSeekPastAHole(t *testing.T) {
 			targets = append(targets, refFrames[n-10].pts+77, last.pts+5, last.pts+last.dur+1000)
 			var pa, pb container.Packet
 			for _, target := range targets {
-				la, err := ref.SeekSample(0, target)
+				la, err := ref.SeekSample(context.Background(), 0, target)
 				if err != nil {
 					t.Fatal(err)
 				}
-				lb, err := d.SeekSample(0, target)
+				lb, err := d.SeekSample(context.Background(), 0, target)
 				if err != nil {
 					t.Fatalf("seek to %d: %v", target, err)
 				}
@@ -369,7 +370,7 @@ func TestSeekIntoAHole(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				landed, err := d.SeekSample(0, target)
+				landed, err := d.SeekSample(context.Background(), 0, target)
 				if err != nil {
 					t.Fatalf("seek to %d: %v", target, err)
 				}
@@ -408,7 +409,7 @@ func TestHoleWarnsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if _, err := d.SeekSample(0, 0); err != nil {
+		if _, err := d.SeekSample(context.Background(), 0, 0); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := readFrames(t, d); err != nil {
@@ -417,7 +418,7 @@ func TestHoleWarnsOnce(t *testing.T) {
 	}
 	var pkt container.Packet
 	for k := h - 4; k < h+4; k++ {
-		if _, err := d.SeekSample(0, int64(k)*4096+100); err != nil {
+		if _, err := d.SeekSample(context.Background(), 0, int64(k)*4096+100); err != nil {
 			t.Fatal(err)
 		}
 		if err := d.ReadPacket(&pkt); err != nil && err != io.EOF {

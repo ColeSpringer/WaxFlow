@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -462,7 +463,7 @@ func TestSplitJobCueDataTrackBehindALyingHeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	if w, ok := med.(format.Walker); ok {
-		if err := w.Walk(); err != nil {
+		if err := w.Walk(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 	}

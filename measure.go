@@ -25,13 +25,15 @@ const measureCeiling = int64(1) << 61
 // WMA v1/v2 track) reads headers, a source with exact positions is seeked past
 // its end, and one whose positions are rounded and whose codec counts no
 // frames (WMA Pro, Voice and Lossless in ASF) is decoded from the start and
-// counted, since a seek there lands on a stated time, not on the decode. That
-// count stops when ctx ends; the other routes read headers.
+// counted, since a seek there lands on a stated time, not on the decode. The
+// walk and the count both stop when ctx ends, with CodeCanceled, the walk
+// pausing where the next measure of the same media resumes it; a seek past
+// the end is a few reads and runs whole.
 func MeasureLength(ctx context.Context, med format.Media) (container.Track, error) {
 	if med == nil {
 		return container.Track{}, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: MeasureLength of a nil Media")
 	}
-	route, err := measureRoute(med)
+	route, err := measureRoute(ctx, med)
 	if err != nil {
 		return container.Track{}, err
 	}
@@ -41,15 +43,15 @@ func MeasureLength(ctx context.Context, med format.Media) (container.Track, erro
 	}
 	var n int64
 	if route == routeDecode {
-		if _, err = med.SeekSample(0); err == nil {
+		if _, err = med.SeekSample(ctx, 0); err == nil {
 			n, err = countDecoded(ctx, med)
 		}
 	} else {
-		n, err = med.SeekSample(measureCeiling)
+		n, err = med.SeekSample(ctx, measureCeiling)
 	}
 	if err == nil {
 		// Both routes left med at its end.
-		_, err = med.SeekSample(0)
+		_, err = med.SeekSample(ctx, 0)
 	}
 	if err != nil {
 		return container.Track{}, err
@@ -71,11 +73,11 @@ const (
 
 // measureRoute walks med unless its open already settled the length, and
 // names the route MeasureLength takes from there.
-func measureRoute(med format.Media) (lengthRoute, error) {
+func measureRoute(ctx context.Context, med format.Media) (lengthRoute, error) {
 	if t := med.Info().Default(); t.SamplesExact && t.Samples >= 0 {
 		return routeSettled, nil
 	}
-	if err := format.WalkMedia(med); err != nil {
+	if err := format.WalkMedia(ctx, med); err != nil {
 		return 0, err
 	}
 	switch t := med.Info().Default(); {
@@ -114,13 +116,16 @@ func countDecoded(ctx context.Context, med format.Media) (int64, error) {
 // can declare less audio than it holds, and a window ending in that gap is one
 // the file can serve but a bare Slice refuses. Measure once and slice each
 // window of a source against the same total, which a ToEnd window is held to
-// as well (see Slice). It takes ownership of med and closes it on error.
-func SliceMeasured(med format.Media, measured container.Track, from, to int64) (format.Media, error) {
+// as well (see Slice). ctx bounds the seek the window's first read runs to
+// its start, which can be a walk (container.Seeker) that a read carries no
+// context to stop; a caller that seeks the window itself seeks once. It takes
+// ownership of med and closes it on error.
+func SliceMeasured(ctx context.Context, med format.Media, measured container.Track, from, to int64) (format.Media, error) {
 	if med == nil {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: SliceMeasured of a nil Media")
 	}
 	med = MeasuredMedia(med, measured)
-	sl, err := Slice(med, from, to)
+	sl, err := newSlice(ctx, med, from, to)
 	if err != nil {
 		med.Close()
 		return nil, err

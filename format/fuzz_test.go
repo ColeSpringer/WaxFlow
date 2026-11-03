@@ -1,6 +1,7 @@
 package format
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -32,7 +33,7 @@ func FuzzProbe(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, data []byte, hint string) {
 		src := container.BytesSource(data)
-		info, err := Probe(src, hint, nil)
+		info, err := Probe(context.Background(), src, hint, nil)
 		if err != nil {
 			return
 		}
@@ -87,9 +88,9 @@ func FuzzProbe(f *testing.F) {
 			// before the target (ADR-0006, container.Seeker), and Media
 			// reports it verbatim. This bounds the real seek by it, matching
 			// the container-level fuzz tests.
-			start, startErr := med.SeekSample(0)
+			start, startErr := med.SeekSample(context.Background(), 0)
 			target := samples / 2
-			landed, err := med.SeekSample(target)
+			landed, err := med.SeekSample(context.Background(), target)
 			if err == nil {
 				// Media pre-rolls to the exact sample; landing past the target
 				// is legal only up to the stream start, landing short only

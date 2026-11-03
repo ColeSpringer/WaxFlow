@@ -1,6 +1,7 @@
 package mp4
 
 import (
+	"context"
 	"io"
 	"slices"
 
@@ -650,8 +651,8 @@ func parseTrun(fi *fragInfo, trun []byte, defaultDur, defaultSize, defaultFlags 
 // length, because format.media refreshes its own copy of the track from Walk
 // and not from SeekSample (see Walked). A scan stopped by damage still leaves
 // the index it built, and seeking into the intact part is better than refusing.
-func (d *Demuxer) seekFragmented(sample int64) (int64, bool, error) {
-	if err := d.ensureFragmentIndex(); err != nil {
+func (d *Demuxer) seekFragmented(ctx context.Context, sample int64) (int64, bool, error) {
+	if err := d.ensureFragmentIndex(ctx); err != nil {
 		return 0, false, err
 	}
 	at := fragEntry{offset: d.fragStart, base: d.sel.st.totalDur, ticks: d.sel.st.tickDur}
@@ -662,7 +663,7 @@ func (d *Demuxer) seekFragmented(sample int64) (int64, bool, error) {
 	// record, so the tail is scanned the old way, from the last entry rather
 	// than from the top.
 	if n := len(d.fragIndex); n == maxFragments && sample > d.fragIndex[n-1].base {
-		e, err := d.scanForward(d.fragIndex[n-1], sample)
+		e, err := d.scanForward(ctx, d.fragIndex[n-1], sample)
 		if err != nil {
 			return 0, false, err
 		}
@@ -702,7 +703,7 @@ func (d *Demuxer) seekFragmented(sample int64) (int64, bool, error) {
 // the anchor's start and place every fragment behind it one fragment early.
 // Re-reading recomputes the anchor's own entry unchanged and then adds its
 // durations, which is exactly the walk's arithmetic.
-func (d *Demuxer) scanForward(from fragEntry, sample int64) (fragEntry, error) {
+func (d *Demuxer) scanForward(ctx context.Context, from fragEntry, sample int64) (fragEntry, error) {
 	rate := int64(d.sel.fmt.Rate)
 	rescale := d.sel.timescale > 0 && rate > 0 && d.sel.timescale != rate
 	landed := from
@@ -711,6 +712,9 @@ func (d *Demuxer) scanForward(from fragEntry, sample int64) (fragEntry, error) {
 	var scratch []byte
 	off := from.offset
 	for off < d.size {
+		if err := container.WalkCanceled(ctx, "mp4: "); err != nil {
+			return landed, err
+		}
 		b, err := readBox(d.src, off, d.size)
 		if err != nil {
 			if waxerr.CodeOf(err) == waxerr.CodeMalformedInput {

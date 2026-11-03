@@ -2,6 +2,7 @@ package mp4
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"strings"
@@ -242,7 +243,7 @@ func TestMP3SeekBacksOffForTheReservoir(t *testing.T) {
 	d := open(t, fixture(t, "mp3.mp4"))
 	const spf = 576
 	target := int64(30 * spf)
-	landed, err := d.SeekSample(0, target)
+	landed, err := d.SeekSample(context.Background(), 0, target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +268,7 @@ func TestMP3SeekBacksOffForTheReservoir(t *testing.T) {
 
 	// A target inside the backoff distance clamps at the stream's top rather
 	// than going negative.
-	if landed, err := d.SeekSample(0, spf); err != nil || landed != 0 {
+	if landed, err := d.SeekSample(context.Background(), 0, spf); err != nil || landed != 0 {
 		t.Errorf("seek to %d = %d, %v; want 0", spf, landed, err)
 	}
 }

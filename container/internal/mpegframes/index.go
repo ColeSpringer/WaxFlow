@@ -48,7 +48,7 @@ func (w *Walker) Snapshot() []byte {
 	// a Note where the cold walk called it damage. Marking it incomplete costs
 	// the restore only the tail: the walk resumes from the last entry, finds
 	// the same damage, and reports it the same way.
-	if w.done && !w.endFinding {
+	if w.Done() && !w.endFinding {
 		buf = append(buf, 1)
 	} else {
 		buf = append(buf, 0)
@@ -140,7 +140,7 @@ func (w *Walker) Restore(blob []byte) bool {
 			}
 		}
 	}
-	prevIdx, prevDone := w.idx, w.done
+	prevIdx, prevDone, prevRefused := w.idx, w.done, w.refused
 	w.idx, w.done, w.grew = idx, done, false
 	if done {
 		// A complete blob makes the run's count known without walking it, so
@@ -153,7 +153,7 @@ func (w *Walker) Restore(blob []byte) bool {
 		// the engine's index cache rides on OpenStream, which is always
 		// tolerant, so this arm is a direct caller's to reach.
 		if err := w.compare(); err != nil {
-			w.idx, w.done, w.compared = prevIdx, prevDone, false
+			w.idx, w.done, w.compared, w.refused = prevIdx, prevDone, false, prevRefused
 			return false
 		}
 	}

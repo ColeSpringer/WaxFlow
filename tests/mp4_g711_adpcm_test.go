@@ -1,6 +1,7 @@
 package waxflow_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/colespringer/waxflow"
@@ -123,7 +124,7 @@ func TestCompressedInMP4Probe(t *testing.T) {
 		{"ima4.mov", codec.IMAADPCM, 44100, 2, 44100, 4},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			info, err := waxflow.New().Probe(pcmInMP4(t, tt.name), "mp4", nil)
+			info, err := waxflow.New().Probe(context.Background(), pcmInMP4(t, tt.name), "mp4", nil)
 			if err != nil {
 				t.Fatal(err)
 			}

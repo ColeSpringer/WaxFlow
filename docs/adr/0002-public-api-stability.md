@@ -463,3 +463,60 @@ play. The internal HLS client follows a variant's audio rendition (the
 group's DEFAULT=YES member, then AUTOSELECT=YES, then the first; the
 variant's own URI when the rendition has none) and probes a VOD's init
 before it downloads the segments.
+
+## Amendment (2026-11-02): a header walk stops with its context
+
+Nine signatures changed. `container.Walker.Walk(ctx)` and
+`format.Walker.Walk(ctx)` take a context, which every walk reads before each
+of its steps (a frame, a moof, a Matroska element, an ASF packet): a context
+that ends stops the walk there with `canceled`, as a pause rather than a
+failure. Nothing is settled or latched, `Walked` reads false, and the next
+`Walk` resumes where the paused one stopped, so damage is met and reported
+once: the frame index as it stands (MP3 in any container, ADTS), the count and
+its reader (WMA v1/v2), a fragment cursor (fragmented MP4), the walk's own
+reader cursor (Matroska, exact for Vorbis too). `format.WalkMedia(ctx, med)`,
+`format.LengthConfirmer.ConfirmLength(ctx)`, `format.Probe(ctx, ...)` and
+`waxflow.Engine.Probe(ctx, ...)` carry it, as do the `Walk` methods of the
+adts, aiff, asf, mka, mp4, mpa and riff demuxers: a strict probe's walk stops
+with the probe's context, and a tolerant probe walks nothing. With it
+`waxflow.MeasureLength` stops on every route.
+
+`container.Seeker.SeekSample(ctx, track, sample)` and
+`format.Media.SeekSample(ctx, target)` take a context too, with every
+demuxer's `SeekSample` and `waxflow.Slice`'s and `Concat`'s: the walk a seek
+runs to place its landing (an MP3 or ADTS index walk to the target, a
+Matroska cluster walk without a usable cue, a fragmented MP4's moof scan, a
+WMA v1/v2 count to the target) reads it the same way and pauses the same way.
+A read carries no context, so a `Slice` positioning itself on its first read
+does so under the context it was built with: the background one for `Slice`,
+the caller's for `waxflow.SliceMeasured(ctx, ...)`, which every daemon and CLI
+window goes through. `waxflow.Engine.PacketGrid(ctx, src, hint)` reads its
+context per packet, since the grid is a walk of every packet in the file.
+
+New in `container`: `Warnings`, the list every demuxer now records its
+findings in, with `MaxWarnings` (64) and `WarningsMark` for a speculative
+scan's rollback. Damage is listed up to the cap and deduplicated, counted past
+both (`DamageCount`); notes are listed on a cap of their own and take no
+damage slot, where they used to share the one list's 64 entries. mp4 joins
+`container.Damaged` with it. New in `source`: `File.Retain`, a second holder
+on an open file, which closes with its last holder; the daemon's shared
+measure and packet-grid walks hold the file they were started on this way,
+so a caller that leaves and closes its handle leaves the walk its file.
+
+Behaviour that changed with them. A strict refusal is kept: a walk the owner
+refused (MP3 in any container, ADTS) is not `Walked` and `Walk` refuses again,
+where the second call used to settle the length. A Matroska full walk that
+fails keeps its error, which `Walk` reports again at no cost (it used to
+latch itself as run before running, so the second `Walk` returned nil over a
+track nothing had measured), and every seek after it lands on what the walk
+indexed. A Matroska walk runs on a cursor of its own, so a Vorbis seek takes
+the Cues bound like any other codec's, and a read failure on an element
+header is `source-unreadable` rather than damage that ends the stream. A
+fragmented MP4 scan that failed resumes at the box it stopped on rather than
+reading every moof again, one that ended on tolerated damage is over, and a
+second `Walk` after a refused compare reads nothing. A WMA v1/v2 walk reports
+each finding once, however often `Walk` is called. `mka.Demuxer` implements
+`container.Damaged`, with its warning list capped at 64 and deduplicated like
+the ten that already were: a block damaged on every cluster no longer grows
+the list without bound, and a block read twice across a seek back is listed
+once.

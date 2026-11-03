@@ -1,6 +1,7 @@
 package mpc
 
 import (
+	"context"
 	"hash/crc32"
 
 	"github.com/colespringer/waxflow/codec"
@@ -449,12 +450,15 @@ func (d *Demuxer) sv8Advance(st *musepack.State, b int64) error {
 // an iTunSMPB atom is: both encoders' declarations agree with their streams
 // on every cell (TestNoiseDeclarationMatchesUse), and a stream that lied would
 // resume after a seek with a different noise realisation, not wrong audio.
-func (d *Demuxer) sv8StateAt(b int64) (musepack.State, error) {
+func (d *Demuxer) sv8StateAt(ctx context.Context, b int64) (musepack.State, error) {
 	s := &d.sv8
 	if d.cfg.PNS == 0 {
 		return musepack.InitialState(), nil
 	}
 	for int64(len(s.rng)) <= b {
+		if err := container.WalkCanceled(ctx, "musepack: "); err != nil {
+			return musepack.State{}, err
+		}
 		i := int64(len(s.rng)) - 1
 		st := musepack.State{RNG: s.rng[i]}
 		if err := d.sv8Advance(&st, i); err != nil {

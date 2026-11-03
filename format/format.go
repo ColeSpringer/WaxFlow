@@ -9,6 +9,7 @@
 package format
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -113,7 +114,7 @@ func (i *Info) Default() container.Track {
 type Media interface {
 	Info() *Info
 	ReadChunk(dst *audio.Buffer) error
-	SeekSample(target int64) (landed int64, err error)
+	SeekSample(ctx context.Context, target int64) (landed int64, err error)
 	Close() error
 }
 
@@ -123,25 +124,28 @@ type Media interface {
 // nothing, so a consumer that needs to know whether measuring the file costs
 // a full scan asks the file rather than a method set. A type assertion would
 // answer per format where the question is per file and per moment: the same
-// WAV demuxer walks for an MP3 payload and not for PCM, the same Matroska
-// demuxer walks for an advisory length and not for one it measured at open,
-// and an MP3 whose sidecar index restored complete walks for nothing. A
+// WAV demuxer walks for an MP3 payload and not for PCM, the same MP4 demuxer
+// walks for a fragmented movie and not for a progressive one, and an MP3
+// whose sidecar index restored complete walks for nothing. A
 // concatenated timeline and a slice do not implement it: a consumer opens
 // the member files one at a time.
 // A finished walk has measured the payload, and once Walk has run the Media's
 // own Info carries that measurement: the walk is observable on the Media that
 // ran it, without a reopen. A walk finished some other way (a seek or a read
 // to the end, a restored sidecar) reads true from Walked, which changes
-// nothing, and Walk then takes the measurement at no cost.
+// nothing, and Walk then takes the measurement at no cost. Walk's context
+// is container.Walker's: a context that ends pauses the walk, with
+// CodeCanceled, where the next Walk resumes it.
 type Walker interface {
-	Walk() error
+	Walk(ctx context.Context) error
 	Walked() bool
 }
 
 // LengthConfirmer is how a Media that is not a file confirms the length it
 // reports: run whatever the source underneath it defers, re-derive this
 // Media's own length from the result, and refuse when the confirmed source no
-// longer covers what this Media promised.
+// longer covers what this Media promised. The context bounds that walk as it
+// bounds Walk's.
 //
 // It exists because Walker answers a different question. Walker is the per-file
 // view (see above), and a consumer reads it as "one file I can measure"; a
@@ -159,7 +163,7 @@ type Walker interface {
 // behind the caller's back would contradict what the timeline promises (see
 // ADR-0009). Measure the members first.
 type LengthConfirmer interface {
-	ConfirmLength() error
+	ConfirmLength(ctx context.Context) error
 }
 
 // A wrapper around a Media forwards this only when what it wraps implements
@@ -174,9 +178,10 @@ type LengthConfirmer interface {
 // forwards it; a wrapper that comes to needs a type assertion on what it wraps
 // rather than a method that always answers.
 
-// WalkMedia runs med's deferred walk, and nothing when it defers none.
-// MediaWalked reports whether that walk has run, true when there is none to
-// run. Together they are Walker asked of a Media that may or may not be one.
+// WalkMedia runs med's deferred walk under ctx, and nothing when it defers
+// none. MediaWalked reports whether that walk has run, true when there is
+// none to run. Together they are Walker asked of a Media that may or may not
+// be one.
 //
 // They exist for the wrappers. Embedding the Media interface promotes no
 // method outside it, so a wrapper that does not write these two by hand
@@ -184,9 +189,9 @@ type LengthConfirmer interface {
 // every consumer downstream of it quietly gets the wrong answer: a job gate
 // calls an expensive member cheap, a run commits a length nothing confirmed.
 // The forwarding cannot be inherited, so it is at least written once.
-func WalkMedia(med Media) error {
+func WalkMedia(ctx context.Context, med Media) error {
 	if w, ok := med.(Walker); ok {
-		return w.Walk()
+		return w.Walk(ctx)
 	}
 	return nil
 }
@@ -255,8 +260,10 @@ var maxSniffNeed = func() int64 {
 
 // Probe identifies src and returns its parsed headers. The hint is an
 // optional file extension (with or without the dot) used only to pick a
-// driver when no magic matches.
-func Probe(src container.Source, hint string, opts *Options) (*Info, error) {
+// driver when no magic matches. ctx bounds the walk a strict probe runs for
+// its verdict, which a context that ends stops with CodeCanceled; a tolerant
+// probe reads headers and walks nothing, so it has nothing to stop.
+func Probe(ctx context.Context, src container.Source, hint string, opts *Options) (*Info, error) {
 	src, d, err := resolve(src, hint)
 	if err != nil {
 		return nil, err
@@ -271,7 +278,7 @@ func Probe(src container.Source, hint string, opts *Options) (*Info, error) {
 	// includes the one a probe asked the driver to defer.
 	if strict {
 		if w, ok := demux.(container.Walker); ok {
-			if err := w.Walk(); err != nil {
+			if err := w.Walk(ctx); err != nil {
 				return nil, err
 			}
 		}

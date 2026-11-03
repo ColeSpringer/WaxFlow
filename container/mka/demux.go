@@ -63,8 +63,8 @@ type Demuxer struct {
 	midTrims     []container.PacketTrim // those trims, placed; at most maxMidTrims
 	recording    bool                   // walk is building the index
 
-	// In-flight walk state, carried across calls so a bounded walk extends the
-	// index rather than restarting. walkedTo is always a cluster boundary.
+	// In-flight walk state, carried across calls so a walk that stopped, at a
+	// bound or a cancel, extends the index rather than restarting.
 	walkCumulative  int64 // running sample count on the delivered timeline
 	walkRaw         int64 // running sample count on the raw one, every frame whole
 	walkMid         int64 // running sum of the inner trims seen so far
@@ -73,8 +73,15 @@ type Demuxer struct {
 	walkLastClamped int64 // that trim clamped to the frame it rides on
 	walkFrames      int   // running frame count, against maxFrames
 	walkLimit       int64
-	walkedTo        int64
 	walkStopped     bool // the walk in progress hit walkLimit rather than the end
+	// walkCursor is the walk's own reader cursor, where the last walk stood;
+	// walkBegun says it holds one, and the counters above describe what lies
+	// before it.
+	walkCursor readerState
+	walkBegun  bool
+	// walkErr is a full walk's failure, kept: Walk reports it again and a
+	// seek lands on what the walk indexed, with no second walk.
+	walkErr error
 
 	// Cues, parsed lazily on the first seek. Byte offsets only; see seekWalk.
 	cues         []cueEntry
@@ -85,7 +92,7 @@ type Demuxer struct {
 	w srcwin.Window
 	readerState
 
-	warnings               []container.Warning
+	warnings               container.Warnings
 	warnedNegativeDiscard  bool // negative DiscardPadding is surfaced once per file
 	warnedOversizedDiscard bool // one larger than the frame it rides on, likewise
 	notedMidPadding        bool // the inner-trim Note is recorded once per file
@@ -111,22 +118,28 @@ func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 	return d, nil
 }
 
-// warn records tolerated damage, or fails in strict mode.
+// warn records tolerated damage, or fails in strict mode. The list is capped
+// and deduplicated; the count says how much damage was met.
 func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	msg := fmt.Sprintf(format, args...)
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
+	d.warnings.Damage(off, msg)
 	return nil
 }
+
+// DamageCount implements container.Damaged.
+func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
+
+var _ container.Damaged = (*Demuxer)(nil)
 
 // note records a Warning that Strict must not escalate: a limitation of this
 // decoder against a file that is well formed, rather than damage in the file.
 // See mp4's note, which exists for the same reason: Strict rejects mess, and an
 // HE-AAC config is not mess.
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
+	d.warnings.Note(off, fmt.Sprintf(format, args...))
 }
 
 // readBytes reads n bytes at off into a fresh buffer, bounded by a cap so a

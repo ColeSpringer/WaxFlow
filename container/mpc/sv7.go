@@ -1,6 +1,7 @@
 package mpc
 
 import (
+	"context"
 	"encoding/binary"
 	"math"
 
@@ -367,7 +368,7 @@ func (d *Demuxer) sv7Advance(st *musepack.State, from, to int64) error {
 // the nearest cached checkpoint. The scan is incremental and remembered, and
 // each interval is committed whole: a scan that fails partway leaves the cache
 // where it was, so the retry does not start from a half-advanced state.
-func (d *Demuxer) sv7StateAt(i int64) (musepack.State, error) {
+func (d *Demuxer) sv7StateAt(ctx context.Context, i int64) (musepack.State, error) {
 	s := &d.sv7
 	if i < s.scanned {
 		k := i / checkpointFrames
@@ -375,6 +376,9 @@ func (d *Demuxer) sv7StateAt(i int64) (musepack.State, error) {
 		s.scanned = k * checkpointFrames
 	}
 	for s.scanned < i {
+		if err := container.WalkCanceled(ctx, "musepack: "); err != nil {
+			return musepack.State{}, err
+		}
 		next := min(i, (s.scanned/checkpointFrames+1)*checkpointFrames)
 		st := s.scanState
 		if err := d.sv7Advance(&st, s.scanned, next); err != nil {

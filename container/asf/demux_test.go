@@ -2,6 +2,7 @@ package asf_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -301,7 +302,7 @@ func TestSeekLandsAtOrBefore(t *testing.T) {
 			total := d.Tracks()[0].Samples
 			for _, frac := range []float64{0, 0.1, 0.25, 0.5, 0.75, 0.99, 1.5} {
 				target := int64(float64(total) * frac)
-				landed, err := d.SeekSample(0, target)
+				landed, err := d.SeekSample(context.Background(), 0, target)
 				if err != nil {
 					t.Fatalf("seek to %d: %v", target, err)
 				}
@@ -340,7 +341,7 @@ func TestSeekGivesRunUp(t *testing.T) {
 		}
 		objectDur := pkt.Dur
 		target := d.Tracks()[0].Samples / 2
-		landed, err := d.SeekSample(0, target)
+		landed, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -355,7 +356,7 @@ func TestSeekGivesRunUp(t *testing.T) {
 			objs, frameLen := wmacount.Objects(t, raw)
 			d := open(t, raw)
 			target := d.Tracks()[0].Samples / 2
-			landed, err := d.SeekSample(0, target)
+			landed, err := d.SeekSample(context.Background(), 0, target)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -391,7 +392,7 @@ func TestSeekRestartsTheStream(t *testing.T) {
 		linear[pkt.PTS] = len(pkt.Data)
 	}
 	d = open(t, raw)
-	landed, err := d.SeekSample(0, d.Tracks()[0].Samples/2)
+	landed, err := d.SeekSample(context.Background(), 0, d.Tracks()[0].Samples/2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +423,7 @@ func TestSeekUsesTheSimpleIndex(t *testing.T) {
 	raw := proStream(t, 40)
 	plain := open(t, raw)
 	mid := plain.Tracks()[0].Samples / 2
-	without, err := plain.SeekSample(0, mid)
+	without, err := plain.SeekSample(context.Background(), 0, mid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,7 +432,7 @@ func TestSeekUsesTheSimpleIndex(t *testing.T) {
 	}
 
 	indexed := open(t, appendSimpleIndex(raw, 32, 1_000_0000))
-	with, err := indexed.SeekSample(0, mid)
+	with, err := indexed.SeekSample(context.Background(), 0, mid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +463,7 @@ func TestSimpleIndexIsReadInAbsoluteTime(t *testing.T) {
 	d := open(t, appendSimpleIndexEntries(raw, entries, intervalMS*1_0000))
 
 	target := outMS * rate / 1000
-	landed, err := d.SeekSample(0, target)
+	landed, err := d.SeekSample(context.Background(), 0, target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,11 +488,11 @@ func TestSeekIgnoresAnIndexPointingPastTheTarget(t *testing.T) {
 	// front is one the index sends the seek past.
 	lying := open(t, appendSimpleIndexAt(raw, 32, 1_000_0000, 60))
 	for _, target := range []int64{4000, 20000, 44100} {
-		want, err := plain.SeekSample(0, target)
+		want, err := plain.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, err := lying.SeekSample(0, target)
+		got, err := lying.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -679,7 +680,7 @@ func TestSeekRejectsBadArguments(t *testing.T) {
 		{"no such track", 1, 0},
 		{"negative target", 0, -1},
 	} {
-		if _, err := d.SeekSample(tc.track, tc.sample); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+		if _, err := d.SeekSample(context.Background(), tc.track, tc.sample); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
 			t.Errorf("%s: err = %v, want an invalid-request code", tc.name, err)
 		}
 	}
@@ -697,7 +698,7 @@ func TestSeekTargetsPastEveryPlausibleLengthAreSafe(t *testing.T) {
 			}
 			d := open(t, raw)
 			for _, target := range []int64{1 << 40, 1 << 58, 1<<61 - 1, math.MaxInt64} {
-				landed, err := d.SeekSample(0, target)
+				landed, err := d.SeekSample(context.Background(), 0, target)
 				if err != nil {
 					t.Fatalf("%s (index %v): seek to %d: %v", name, withIndex, target, err)
 				}
@@ -970,7 +971,7 @@ func TestSeekIntoAFragmentedObjectIsNotDamage(t *testing.T) {
 	total := d.Tracks()[0].Samples
 	for _, frac := range []float64{0.15, 0.35, 0.55, 0.8} {
 		target := int64(float64(total) * frac)
-		if _, err := d.SeekSample(0, target); err != nil {
+		if _, err := d.SeekSample(context.Background(), 0, target); err != nil {
 			t.Fatalf("strict seek to %d: %v", target, err)
 		}
 		var pkt container.Packet

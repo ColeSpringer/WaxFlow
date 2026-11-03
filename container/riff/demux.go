@@ -1,10 +1,10 @@
 package riff
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"math"
-	"slices"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
@@ -31,11 +31,6 @@ var (
 const (
 	maxChunks     = 1024
 	maxFmtPayload = 4096
-	// maxWarnings caps the tolerated-damage list. A chunk walk is bounded by
-	// maxChunks on its own; a frame-walked payload is not, since it reports
-	// one finding per damaged gap and a run of alternating frames and junk
-	// has one gap per frame.
-	maxWarnings = 64
 )
 
 // DemuxerOptions configures parsing.
@@ -48,13 +43,12 @@ type DemuxerOptions struct {
 
 // Demuxer reads one audio track from a WAV source.
 type Demuxer struct {
-	damage int // Damage warnings met, the list's cap aside (DamageCount)
-	src    container.Source
-	opts   DemuxerOptions
+	src  container.Source
+	opts DemuxerOptions
 
 	track    container.Track
 	payload  payload
-	warnings []container.Warning
+	warnings container.Warnings
 }
 
 // payload is the walk over the data chunk. Two shapes reach it, and the
@@ -67,7 +61,7 @@ type payload interface {
 	ReadPacket(pkt *container.Packet) error
 	// SeekSample repositions to the unit or frame holding a sample and
 	// reports the sample that unit starts on.
-	SeekSample(sample int64) (landed int64, err error)
+	SeekSample(ctx context.Context, sample int64) (landed int64, err error)
 }
 
 // blockReader walks the data chunk as a run of equal units.
@@ -130,11 +124,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	w := container.Warning{Offset: off, Msg: msg, Kind: container.Damage}
-	d.damage++
-	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
-		d.warnings = append(d.warnings, w)
-	}
+	d.warnings.Damage(off, msg)
 	return nil
 }
 
@@ -142,7 +132,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 // something with a well-formed file that a caller should know about, rather
 // than damage in the file. See [container.Note].
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
+	d.warnings.Note(off, fmt.Sprintf(format, args...))
 }
 
 // waveFormat is what a fmt chunk resolves to: the codec, the configuration
@@ -781,10 +771,10 @@ func (d *Demuxer) adpcmConfig(b []byte, off int64) (adpcm.Config, error) {
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns damage tolerated during parsing.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
+func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
 
 // DamageCount implements container.Damaged.
-func (d *Demuxer) DamageCount() int { return d.damage }
+func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
 
 // ReadPacket yields the next run of payload. Packet data is reused across
 // calls.
@@ -831,18 +821,18 @@ func (r *blockReader) ReadPacket(pkt *container.Packet) error {
 // converge. format.Media decodes and discards the remainder in every case, so
 // the delivered position is sample-exact. Targets past the end land at the end
 // and the next ReadPacket returns io.EOF.
-func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
+func (d *Demuxer) SeekSample(ctx context.Context, track int, sample int64) (int64, error) {
 	if track != 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("wav: no track %d", track))
 	}
 	if sample < 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, "wav: negative seek target")
 	}
-	return d.payload.SeekSample(sample)
+	return d.payload.SeekSample(ctx, sample)
 }
 
 // SeekSample lands on the unit boundary at or before the target.
-func (r *blockReader) SeekSample(sample int64) (int64, error) {
+func (r *blockReader) SeekSample(_ context.Context, sample int64) (int64, error) {
 	// Clamped to the track's length and not to the payload's, which for a
 	// fact-trimmed block track is strictly larger: container.Seeker's landing
 	// is authoritative for its callers, and one past the end of the track is a

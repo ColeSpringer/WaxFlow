@@ -2,10 +2,10 @@ package wv
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"math"
-	"slices"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/wavpack"
@@ -40,10 +40,6 @@ const (
 	// start finds the next inside this; without the bound a probe over a
 	// damaged tail would pull the rest of the file into the read window.
 	maxProbe = 2 << 20
-	// maxWarnings caps the tolerated-damage list. Seeking re-walks spans a
-	// linear read already crossed, so a damaged file would otherwise
-	// accumulate the same warning without bound.
-	maxWarnings = 64
 )
 
 // DemuxerOptions configures parsing.
@@ -54,13 +50,12 @@ type DemuxerOptions struct {
 
 // Demuxer reads one WavPack track from a native .wv source.
 type Demuxer struct {
-	damage int // Damage warnings met, the list's cap aside (DamageCount)
-	opts   DemuxerOptions
+	opts DemuxerOptions
 
 	cfg      wavpack.Config
 	track    container.Track
 	tags     map[string][]string
-	warnings []container.Warning
+	warnings container.Warnings
 
 	firstBlock int64 // byte offset of the first audio block
 	// initialIndex is the first audio block's own sample index. A .wv file
@@ -105,11 +100,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	w := container.Warning{Offset: off, Msg: msg, Kind: container.Damage}
-	d.damage++
-	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
-		d.warnings = append(d.warnings, w)
-	}
+	d.warnings.Damage(off, msg)
 	return nil
 }
 
@@ -118,10 +109,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 // than damage in the file. See [container.Note]. It shares warn's cap and
 // de-duplication, since the list is one list.
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	w := container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note}
-	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
-		d.warnings = append(d.warnings, w)
-	}
+	d.warnings.Note(off, fmt.Sprintf(format, args...))
 }
 
 func (d *Demuxer) parse() error {
@@ -334,13 +322,13 @@ func (d *Demuxer) deliverableEnd() (end int64, ok, clean bool) {
 	if end, ok := d.scanTail(); ok {
 		return end, true, true
 	}
-	strict, saved := d.opts.Strict, len(d.warnings)
+	strict, mark, seen := d.opts.Strict, d.warnings.Mark(), d.warnings.DamageCount()
 	off0, cur0, valid0 := d.off, d.cur, d.valid
 	d.opts.Strict = false
 	defer func() {
 		d.opts.Strict = strict
-		clean = clean && len(d.warnings) == saved
-		d.warnings = d.warnings[:saved]
+		clean = clean && d.warnings.DamageCount() == seen
+		d.warnings.Rollback(mark)
 		// The walk ends past the audio; reads start where it began.
 		d.off, d.cur, d.valid = off0, cur0, valid0
 	}()
@@ -503,10 +491,10 @@ func (d *Demuxer) advance() error {
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns damage tolerated during parsing.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
+func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
 
 // DamageCount implements container.Damaged.
-func (d *Demuxer) DamageCount() int { return d.damage }
+func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
 
 // Tags returns the APEv2 tag's fields under canonical uppercase keys.
 func (d *Demuxer) Tags() map[string][]string { return d.tags }
@@ -569,7 +557,7 @@ func (d *Demuxer) checkShape(h wavpack.BlockHeader) error {
 // returns that block's first sample; format.Media pre-rolls the remainder.
 // Bisection on the blocks' own sample indexes narrows the range, then the
 // remaining span is walked.
-func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
+func (d *Demuxer) SeekSample(_ context.Context, track int, sample int64) (int64, error) {
 	if track != 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("wavpack: no track %d", track))
 	}

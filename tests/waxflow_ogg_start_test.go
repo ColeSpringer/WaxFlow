@@ -7,6 +7,7 @@ package waxflow_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"math"
@@ -386,11 +387,11 @@ func requireOggTwin(t *testing.T, c oggStart) {
 			if i == 0 {
 				target = 0
 			}
-			landed, err := med.SeekSample(target)
+			landed, err := med.SeekSample(context.Background(), target)
 			if err != nil || landed != target {
 				t.Fatalf("seek to %d landed at %d (%v)", target, landed, err)
 			}
-			if landed, err := ref.SeekSample(target + c.trim); err != nil || landed != target+c.trim {
+			if landed, err := ref.SeekSample(context.Background(), target+c.trim); err != nil || landed != target+c.trim {
 				t.Fatalf("twin seek to %d landed at %d (%v)", target+c.trim, landed, err)
 			}
 			if err := med.ReadChunk(a); err != nil {
@@ -406,7 +407,7 @@ func requireOggTwin(t *testing.T, c oggStart) {
 				t.Fatalf("seek to %d: differs from its twin's at frame %d", target, j)
 			}
 		}
-		if landed, err := med.SeekSample(total + 100); err != nil || landed != total {
+		if landed, err := med.SeekSample(context.Background(), total+100); err != nil || landed != total {
 			t.Fatalf("past-end seek landed at %d (%v), want %d", landed, err, total)
 		}
 		if err := med.ReadChunk(a); !errors.Is(err, io.EOF) {
@@ -471,7 +472,7 @@ func requireCutDeclines(t *testing.T, raw []byte, hint string) {
 // openCut is an open cut of all of raw: one span from 0 to the end.
 func openCut(t *testing.T, raw []byte, hint string) container.Demuxer {
 	t.Helper()
-	grid, err := waxflow.New().PacketGrid(container.BytesSource(raw), hint)
+	grid, err := waxflow.New().PacketGrid(context.Background(), container.BytesSource(raw), hint)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -600,7 +601,7 @@ func TestOggSeekWithNoGranules(t *testing.T) {
 	buf := audio.Get(full.Fmt, 4096)
 	defer audio.Put(buf)
 	for _, target := range []int64{0, 1, 48000, 123457, int64(full.N) - 5000} {
-		landed, err := med.SeekSample(target)
+		landed, err := med.SeekSample(context.Background(), target)
 		if err != nil || landed != target {
 			t.Fatalf("seek to %d landed at %d (%v)", target, landed, err)
 		}

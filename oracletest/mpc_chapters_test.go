@@ -9,6 +9,7 @@ package oracletest
 // both readers sort and title it the same way.
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
@@ -25,7 +26,7 @@ func TestMusepackChaptersAgreeAcrossReaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	probe, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+	probe, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,6 +2,7 @@ package aiff
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"math"
@@ -230,7 +231,7 @@ func TestSeekSample(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	landed, err := d.SeekSample(0, 4321)
+	landed, err := d.SeekSample(context.Background(), 0, 4321)
 	if err != nil || landed != 4321 {
 		t.Fatalf("SeekSample = %d, %v; want 4321, nil", landed, err)
 	}
@@ -241,7 +242,7 @@ func TestSeekSample(t *testing.T) {
 	if pkt.PTS != 4321 || !bytes.Equal(pkt.Data, wire[4321*4:4321*4+len(pkt.Data)]) {
 		t.Error("post-seek packet mismatch")
 	}
-	if landed, _ = d.SeekSample(0, frames+1); landed != frames {
+	if landed, _ = d.SeekSample(context.Background(), 0, frames+1); landed != frames {
 		t.Errorf("past-end seek landed %d, want %d", landed, frames)
 	}
 	if err := d.ReadPacket(&pkt); !errors.Is(err, io.EOF) {

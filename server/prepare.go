@@ -82,7 +82,7 @@ func (s *Server) prepareSource(ctx context.Context, q url.Values, sigAuthed bool
 		src.Close()
 		return nil, err
 	}
-	info, err := s.eng.Probe(src, src.Ext, nil)
+	info, err := s.eng.Probe(ctx, src, src.Ext, nil)
 	if err != nil {
 		src.Close()
 		return nil, err
@@ -367,7 +367,7 @@ func (s *Server) cutPlanFor(ctx context.Context, req *streamRequest) *waxflow.Cu
 	if !waxflow.Cuttable(track) {
 		return decline("the codec is not on the cut allowlist", "codec", track.Codec)
 	}
-	grid, err := s.gridFor(req.src)
+	grid, err := s.gridFor(ctx, req.src)
 	if err != nil {
 		return decline("the packet grid could not be measured", "err", err)
 	}

@@ -114,7 +114,7 @@ func fragProbe(t *testing.T, e *waxflow.Engine, path string) (container.Track, *
 		t.Fatal(err)
 	}
 	src := &testutil.CountingSource{Src: container.BytesSource(raw)}
-	info, err := e.Probe(src, "", nil)
+	info, err := e.Probe(context.Background(), src, "", nil)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestFragmentedLengthWalkedAndNot(t *testing.T) {
 		}
 		defer med.Close()
 		if walk {
-			if err := format.WalkMedia(med); err != nil {
+			if err := format.WalkMedia(context.Background(), med); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -327,7 +327,7 @@ func TestFragmentedTranscodeToAPipeCommitsTheWalkedCount(t *testing.T) {
 	if res.Samples != presentation {
 		t.Errorf("wrote %d samples, the walk settles at %d", res.Samples, presentation)
 	}
-	info, err := e.Probe(container.BytesSource(out.Bytes()), "wav", nil)
+	info, err := e.Probe(context.Background(), container.BytesSource(out.Bytes()), "wav", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

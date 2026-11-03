@@ -1,6 +1,7 @@
 package mpc_test
 
 import (
+	"context"
 	"io"
 	"math"
 	"slices"
@@ -350,7 +351,7 @@ func TestSeekLandsEarlyEnough(t *testing.T) {
 			track := d.Tracks()[0]
 			raw := track.Delay + track.Samples
 			for _, target := range []int64{0, 1, 511, 512, 513, 1152, 1663, 1664, 5000, 9999, raw / 2, raw - 1} {
-				landed, err := d.SeekSample(0, target)
+				landed, err := d.SeekSample(context.Background(), 0, target)
 				if err != nil {
 					t.Fatalf("seek to %d: %v", target, err)
 				}
@@ -369,7 +370,7 @@ func TestSeekLandsEarlyEnough(t *testing.T) {
 					t.Errorf("seek to %d: first packet PTS %d Sync %v, landed %d", target, pkt.PTS, pkt.Sync, landed)
 				}
 			}
-			landed, err := d.SeekSample(0, raw+100000)
+			landed, err := d.SeekSample(context.Background(), 0, raw+100000)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -403,7 +404,7 @@ func TestSeekDecodesTheRightSamples(t *testing.T) {
 			linear := decodeAll(t, d)
 			end := track.Delay + track.Samples
 			for _, target := range []int64{0, 600, 1700, 4000, end / 3, end / 2, end - 2000, end - 1} {
-				landed, err := d.SeekSample(0, target)
+				landed, err := d.SeekSample(context.Background(), 0, target)
 				if err != nil {
 					t.Fatalf("seek to %d: %v", target, err)
 				}

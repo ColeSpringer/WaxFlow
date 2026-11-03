@@ -207,7 +207,7 @@ func clipFixtureAAC(t *testing.T, e *waxflow.Engine) []byte {
 func TestCutReportsNoClipping(t *testing.T) {
 	e := waxflow.New()
 	m4a := clipFixtureAAC(t, e)
-	grid, err := e.PacketGrid(container.BytesSource(m4a), "m4a")
+	grid, err := e.PacketGrid(context.Background(), container.BytesSource(m4a), "m4a")
 	if err != nil {
 		t.Fatal(err)
 	}

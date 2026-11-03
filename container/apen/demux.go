@@ -2,10 +2,10 @@ package apen
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
-	"slices"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/ape"
@@ -43,8 +43,6 @@ const (
 	// reference hands it the same slack; past the end of the audio the bytes
 	// are zero and the decoder never reaches them.
 	frameSlack = 4
-	// maxWarnings caps the tolerated-damage list.
-	maxWarnings = 64
 )
 
 // DemuxerOptions configures parsing.
@@ -55,13 +53,12 @@ type DemuxerOptions struct {
 
 // Demuxer reads one Monkey's Audio track from a native .ape source.
 type Demuxer struct {
-	damage int // Damage warnings met, the list's cap aside (DamageCount)
-	opts   DemuxerOptions
+	opts DemuxerOptions
 
 	hdr      ape.Header
 	track    container.Track
 	tags     map[string][]string
-	warnings []container.Warning
+	warnings container.Warnings
 
 	// base is the byte offset of the file header: nonzero when a tag or
 	// padding sits in front of it. Every offset the header states is measured
@@ -106,11 +103,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	w := container.Warning{Offset: off, Msg: msg, Kind: container.Damage}
-	d.damage++
-	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
-		d.warnings = append(d.warnings, w)
-	}
+	d.warnings.Damage(off, msg)
 	return nil
 }
 
@@ -334,10 +327,10 @@ func (d *Demuxer) maxFrameBytes() int64 {
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns damage tolerated during parsing.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
+func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
 
 // DamageCount implements container.Damaged.
-func (d *Demuxer) DamageCount() int { return d.damage }
+func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
 
 // Tags returns the APEv2 tag's fields under canonical uppercase keys.
 func (d *Demuxer) Tags() map[string][]string { return d.tags }
@@ -390,7 +383,7 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 // that frame's first sample; format.Media pre-rolls the remainder. The seek
 // table makes this exact arithmetic rather than a search, at the cost of a
 // frame's worth of pre-roll, which the deep levels make long.
-func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
+func (d *Demuxer) SeekSample(_ context.Context, track int, sample int64) (int64, error) {
 	if track != 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("ape: no track %d", track))
 	}

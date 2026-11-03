@@ -8,6 +8,7 @@ package oracletest
 // chapters and the probe report another.
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
@@ -24,7 +25,7 @@ func TestWMAChaptersAgreeAcrossReaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	probe, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+	probe, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

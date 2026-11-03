@@ -174,9 +174,18 @@ func (s *Server) trackFor(ctx context.Context, src *source.File, exact bool) (co
 	return untilOwnCancel(ctx, func() (container.Track, error) { return s.trackOnce(ctx, src, exact) })
 }
 
+// holdFile is a flight's hold on a caller's source (flight.JoinHolding): the
+// file stays open until the call ends, whatever its callers close.
+func holdFile(src *source.File) func() func() {
+	return func() func() {
+		held := src.Retain()
+		return func() { held.Close() }
+	}
+}
+
 // untilOwnCancel runs try until it ends other than canceled while ctx is live.
-// One flight serves every caller of a source on the first one's context, so a
-// measure stopped because that caller left is the rest's to run again.
+// One flight serves every caller of a source, on a context that ends when the
+// last of them leaves; a caller that joined it in that moment runs again.
 func untilOwnCancel[T any](ctx context.Context, try func() (T, error)) (T, error) {
 	for {
 		v, err := try()
@@ -196,14 +205,16 @@ func (s *Server) trackOnce(ctx context.Context, src *source.File, exact bool) (c
 	if exact {
 		flightKey += "|exact"
 	}
-	return s.trackFlight.Do(flightKey, func() (container.Track, error) {
+	// The flight holds the source for its own life (holdFile): the caller
+	// that started it may leave and close its handle while the rest wait.
+	return s.trackFlight.JoinHolding(ctx, flightKey, holdFile(src), func(ctx context.Context) (container.Track, error) {
 		// Re-check under the flight: flight is duplicate suppression, not
 		// caching, so a caller that missed the memo just as the previous
 		// flight filled it would otherwise probe again.
 		if t, ok := s.trackCache.get(key); ok && (!exact || t.SamplesExact) {
 			return t, nil
 		}
-		info, err := s.eng.Probe(src, src.Ext, nil)
+		info, err := s.eng.Probe(ctx, src, src.Ext, nil)
 		if err != nil {
 			return container.Track{}, err
 		}

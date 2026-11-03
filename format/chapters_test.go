@@ -2,6 +2,7 @@ package format
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,7 +22,7 @@ func TestProbeReportsChapters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := Probe(bytes.NewReader(raw), "m4b", nil)
+	info, err := Probe(context.Background(), bytes.NewReader(raw), "m4b", nil)
 	if err != nil {
 		t.Fatalf("Probe: %v", err)
 	}
@@ -52,7 +53,7 @@ func TestProbeReportsChapters(t *testing.T) {
 // capability gate: a container with no chapter form reports none rather
 // than an empty non-nil slice or a fabricated marker.
 func TestProbeChaptersAbsentForPlainContainer(t *testing.T) {
-	info, err := Probe(bytes.NewReader(buildFile(t, "wav", 1000)), "wav", nil)
+	info, err := Probe(context.Background(), bytes.NewReader(buildFile(t, "wav", 1000)), "wav", nil)
 	if err != nil {
 		t.Fatalf("Probe: %v", err)
 	}

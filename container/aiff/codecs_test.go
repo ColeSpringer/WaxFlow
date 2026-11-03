@@ -2,6 +2,7 @@ package aiff
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
@@ -140,7 +141,7 @@ func TestIMA4SeeksToTheStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, target := range []int64{0, 64, 300, 1 << 20} {
-		got, err := d.SeekSample(0, target)
+		got, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatalf("SeekSample(%d): %v", target, err)
 		}
@@ -154,7 +155,7 @@ func TestIMA4SeeksToTheStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := g.SeekSample(0, 321); err != nil || got != 321 {
+	if got, err := g.SeekSample(context.Background(), 0, 321); err != nil || got != 321 {
 		t.Errorf("mu-law SeekSample(321) = %d, %v; want an exact landing", got, err)
 	}
 }

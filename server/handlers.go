@@ -79,7 +79,7 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 		}
 		defer release()
 	}
-	info, err := s.eng.Probe(f, f.Ext, &waxflow.ProbeOptions{Strict: req.Strict})
+	info, err := s.eng.Probe(r.Context(), f, f.Ext, &waxflow.ProbeOptions{Strict: req.Strict})
 	if err != nil {
 		s.writeError(w, err)
 		return
@@ -145,7 +145,7 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 		q.Set("id", f.ID.String())
 		// Duration comes from the probe; unknown lengths get the floor.
 		duration = -1
-		if info, err := s.eng.Probe(f, f.Ext, nil); err == nil {
+		if info, err := s.eng.Probe(r.Context(), f, f.Ext, nil); err == nil {
 			track := info.Default()
 			duration = DurationSeconds(track.Samples, track.Fmt.Rate)
 		}

@@ -6,6 +6,7 @@ package waxflow
 // track's own timeline onto it.
 
 import (
+	"context"
 	"io"
 	"slices"
 	"testing"
@@ -266,7 +267,7 @@ func (d *trimDemuxer) ReadPacket(pkt *container.Packet) error {
 	return nil
 }
 
-func (d *trimDemuxer) SeekSample(track int, target int64) (int64, error) {
+func (d *trimDemuxer) SeekSample(ctx context.Context, track int, target int64) (int64, error) {
 	i := 0
 	for i+1 < d.n && d.start(i+1) <= target {
 		i++
@@ -431,7 +432,7 @@ func TestCutSeekViewConvertsThroughTrims(t *testing.T) {
 	sk := view.(container.Seeker)
 	// Output sample 9600 is ten packets into the window: source packet 19,
 	// raw 18240, which the demuxer knows as 18240 - 480.
-	landed, err := sk.SeekSample(0, 9600)
+	landed, err := sk.SeekSample(context.Background(), 0, 9600)
 	if err != nil {
 		t.Fatal(err)
 	}

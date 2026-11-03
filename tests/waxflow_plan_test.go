@@ -63,7 +63,7 @@ func TestPlanTranscode(t *testing.T) {
 	defer audio.Put(src)
 
 	e := waxflow.New()
-	info, err := e.Probe(container.BytesSource(wav), "", nil)
+	info, err := e.Probe(context.Background(), container.BytesSource(wav), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestChannelRefusalNamesTheRemedy(t *testing.T) {
 	defer audio.Put(src)
 
 	e := waxflow.New()
-	info, err := e.Probe(container.BytesSource(wav), "", nil)
+	info, err := e.Probe(context.Background(), container.BytesSource(wav), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func TestWideSourceChannelPolicy(t *testing.T) {
 	defer audio.Put(src)
 
 	e := waxflow.New()
-	info, err := e.Probe(container.BytesSource(wav), "", nil)
+	info, err := e.Probe(context.Background(), container.BytesSource(wav), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

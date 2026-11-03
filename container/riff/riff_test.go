@@ -2,6 +2,7 @@ package riff
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"math"
@@ -267,7 +268,7 @@ func TestSeekSample(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	landed, err := d.SeekSample(0, 4321)
+	landed, err := d.SeekSample(context.Background(), 0, 4321)
 	if err != nil || landed != 4321 {
 		t.Fatalf("SeekSample = %d, %v; want 4321, nil", landed, err)
 	}
@@ -283,16 +284,16 @@ func TestSeekSample(t *testing.T) {
 		t.Error("post-seek payload mismatch")
 	}
 
-	if landed, err = d.SeekSample(0, frames+50); err != nil || landed != frames {
+	if landed, err = d.SeekSample(context.Background(), 0, frames+50); err != nil || landed != frames {
 		t.Errorf("past-end seek = %d, %v; want clamp to %d", landed, err, frames)
 	}
 	if err := d.ReadPacket(&pkt); !errors.Is(err, io.EOF) {
 		t.Errorf("read after past-end seek = %v, want EOF", err)
 	}
-	if _, err := d.SeekSample(0, -1); err == nil {
+	if _, err := d.SeekSample(context.Background(), 0, -1); err == nil {
 		t.Error("negative seek must fail")
 	}
-	if _, err := d.SeekSample(1, 0); err == nil {
+	if _, err := d.SeekSample(context.Background(), 1, 0); err == nil {
 		t.Error("seek on unknown track must fail")
 	}
 }

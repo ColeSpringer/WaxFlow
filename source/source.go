@@ -25,6 +25,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/colespringer/waxflow/container"
@@ -78,6 +79,8 @@ type File struct {
 	ID Identity
 
 	f *os.File
+	// extra counts the holders Retain added; the file closes with the last.
+	extra atomic.Int32
 }
 
 // ReadAt implements container.Source.
@@ -95,7 +98,20 @@ func (f *File) ReadSeeker() io.ReadSeeker { return f.f }
 func (f *File) ModTime() time.Time { return time.Unix(0, f.ID.MtimeNS) }
 
 // Close releases the underlying file.
-func (f *File) Close() error { return f.f.Close() }
+// Retain adds a holder: the file stays open until every holder has closed it,
+// so work that outlives the caller it was started by keeps its handle.
+func (f *File) Retain() *File {
+	f.extra.Add(1)
+	return f
+}
+
+// Close releases one holder, and the file with the last.
+func (f *File) Close() error {
+	if f.extra.Add(-1) >= 0 {
+		return nil
+	}
+	return f.f.Close()
+}
 
 var _ container.Source = (*File)(nil)
 

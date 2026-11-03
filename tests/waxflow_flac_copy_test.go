@@ -7,6 +7,7 @@ package waxflow_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -395,7 +396,7 @@ func requireSegmentedFLACCopy(t *testing.T, c flacCopy, want *audio.Buffer) {
 	t.Helper()
 	e := waxflow.New()
 	opts := waxflow.TranscodeOptions{Format: "flac"}
-	grid, err := e.PacketGrid(container.BytesSource(c.src), "flac")
+	grid, err := e.PacketGrid(context.Background(), container.BytesSource(c.src), "flac")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -529,7 +530,7 @@ func TestFLACCopyFromZeroIsUnchanged(t *testing.T) {
 			}
 		}
 		e := waxflow.New()
-		grid, err := e.PacketGrid(container.BytesSource(src), "flac")
+		grid, err := e.PacketGrid(context.Background(), container.BytesSource(src), "flac")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -573,7 +574,7 @@ func TestSegmentedFLACRestartNumbersByItsFrames(t *testing.T) {
 	e := waxflow.New()
 	opts := waxflow.TranscodeOptions{Format: "flac"}
 	track := probeTrack(t, raw, "flac")
-	grid, err := e.PacketGrid(container.BytesSource(raw), "flac")
+	grid, err := e.PacketGrid(context.Background(), container.BytesSource(raw), "flac")
 	if err != nil || grid != 1152 {
 		t.Fatalf("grid %d (%v), want the frames' 1152", grid, err)
 	}

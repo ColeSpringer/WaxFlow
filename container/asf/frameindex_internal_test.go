@@ -2,6 +2,7 @@ package asf
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -37,7 +38,7 @@ func TestARestoreRefusesAForeignCount(t *testing.T) {
 	const name = "ms-v2-44100-2ch-128k.wma"
 	walked := func() *Demuxer {
 		d := openFixture(t, name)
-		if err := d.Walk(); err != nil {
+		if err := d.Walk(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 		return d
@@ -48,7 +49,7 @@ func TestARestoreRefusesAForeignCount(t *testing.T) {
 		t.Fatal("no snapshot to vary")
 	}
 	target := good.track.Samples - 3000
-	want, err := good.SeekSample(0, target)
+	want, err := good.SeekSample(context.Background(), 0, target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +97,7 @@ func TestARestoreRefusesAForeignCount(t *testing.T) {
 		if d.Walked() || len(d.idx.entries) != 0 {
 			t.Errorf("%s: a refused restore left %d entries (walked %v)", what, len(d.idx.entries), d.Walked())
 		}
-		if got, err := d.SeekSample(0, target); err != nil || got != want {
+		if got, err := d.SeekSample(context.Background(), 0, target); err != nil || got != want {
 			t.Errorf("%s: seek to %d landed at %d (%v), %d from a count of the data", what, target, got, err, want)
 		}
 	}
@@ -112,7 +113,7 @@ func TestARestoreRefusesAForeignCount(t *testing.T) {
 // right; the count is dropped, and the next seek takes it from the data.
 func TestALandingThatDisagreesWithItsCountStartsOver(t *testing.T) {
 	d := openFixture(t, "frag.wma")
-	if err := d.Walk(); err != nil {
+	if err := d.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	fl := int64(d.counter.FrameLen())
@@ -130,12 +131,12 @@ func TestALandingThatDisagreesWithItsCountStartsOver(t *testing.T) {
 	}
 	e := d.idx.entries[k]
 	target := e.frames * fl
-	want, err := d.SeekSample(0, target)
+	want, err := d.SeekSample(context.Background(), 0, target)
 	if err != nil || want == 0 {
 		t.Fatalf("a seek to entry %d's object landed at %d (%v); the fallback below would be invisible", k, want, err)
 	}
 	d.idx.entries[k].packet++
-	landed, err := d.SeekSample(0, target)
+	landed, err := d.SeekSample(context.Background(), 0, target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +147,7 @@ func TestALandingThatDisagreesWithItsCountStartsOver(t *testing.T) {
 	if landed != 0 || pkt.PTS != 0 {
 		t.Errorf("a landing on a packet no object begins in returned %d and read the object at %d, want the start", landed, pkt.PTS)
 	}
-	if got, err := d.SeekSample(0, target); err != nil || got != want {
+	if got, err := d.SeekSample(context.Background(), 0, target); err != nil || got != want {
 		t.Errorf("the next seek landed at %d (%v), want %d from a fresh count", got, err, want)
 	}
 }
@@ -160,7 +161,7 @@ func TestALandingThatDisagreesWithItsCountStartsOver(t *testing.T) {
 func TestARestoreRefusesACorruptedSnapshot(t *testing.T) {
 	const name = "ms-v2-44100-2ch-128k.wma"
 	d := openFixture(t, name)
-	if err := d.Walk(); err != nil {
+	if err := d.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	blob := d.IndexSnapshot()
@@ -187,13 +188,13 @@ func TestARestoreRefusesACorruptedSnapshot(t *testing.T) {
 func TestACountPastItsCapStillLandsAndSettles(t *testing.T) {
 	const name = "ms-v2-44100-2ch-128k.wma"
 	full := openFixture(t, name)
-	if err := full.Walk(); err != nil {
+	if err := full.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	defer func(n int) { maxCountEntries = n }(maxCountEntries)
 	maxCountEntries = 4
 	d := openFixture(t, name)
-	if err := d.Walk(); err != nil {
+	if err := d.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(d.idx.entries) > 4 {
@@ -203,11 +204,11 @@ func TestACountPastItsCapStillLandsAndSettles(t *testing.T) {
 		t.Errorf("the capped walk settled %d (exact %v), the full one %d", got, d.track.SamplesExact, want)
 	}
 	for _, target := range []int64{0, 10000, 100000, 200000, full.track.Samples - 1} {
-		want, err := full.SeekSample(0, target)
+		want, err := full.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got, err := d.SeekSample(0, target); err != nil || got != want {
+		if got, err := d.SeekSample(context.Background(), 0, target); err != nil || got != want {
 			t.Errorf("seek to %d landed at %d (%v) capped, %d uncapped", target, got, err, want)
 		}
 	}
@@ -232,13 +233,13 @@ func TestAWalkDoesNotCopyEveryObject(t *testing.T) {
 		return d
 	}
 	walk := testing.AllocsPerRun(5, func() {
-		if err := open().Walk(); err != nil {
+		if err := open().Walk(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 	})
 	bare := testing.AllocsPerRun(5, func() { open() })
 	d := open()
-	if err := d.Walk(); err != nil {
+	if err := d.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if objects := float64(d.idx.objects); walk-bare >= objects/2 {
@@ -253,7 +254,7 @@ func TestAWalkDoesNotCopyEveryObject(t *testing.T) {
 func TestARestoreProbeLeavesNoWarning(t *testing.T) {
 	const name = "ms-v2-44100-2ch-128k.wma"
 	d := openFixture(t, name)
-	if err := d.Walk(); err != nil {
+	if err := d.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	blob := d.IndexSnapshot()

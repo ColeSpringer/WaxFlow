@@ -123,7 +123,7 @@ func TestTimelineJobGateAsksTheFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := med.SeekSample(1 << 40); err != nil {
+	if _, err := med.SeekSample(context.Background(), 1<<40); err != nil {
 		t.Fatal(err)
 	}
 	med.Close()

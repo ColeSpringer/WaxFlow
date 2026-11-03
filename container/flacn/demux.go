@@ -2,11 +2,11 @@ package flacn
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"math"
-	"slices"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/flac"
@@ -42,10 +42,6 @@ const (
 	// once: a damaged frame's successor, and the odd header its payload
 	// spells. The oldest goes first.
 	maxHeld = 8
-	// maxWarnings caps the tolerated-damage list. A read reports each hole
-	// it resyncs past, and seeking re-walks holes a read already crossed, so
-	// a damaged file would otherwise grow the list without bound.
-	maxWarnings = 64
 )
 
 // Metadata block types (RFC 9639 section 8).
@@ -77,11 +73,7 @@ type Demuxer struct {
 	// seekBase is what the SEEKTABLE counts from (tableBase), once read.
 	seekBase     int64
 	seekBaseRead bool
-	warnings     []container.Warning
-	// damage counts the Damage warnings recorded, those the list's cap and
-	// de-duplication keep out included, so a measurement can tell whether it
-	// met any. Notes do not count: a tagger's trailer is not damage.
-	damage int
+	warnings     container.Warnings
 	// tailDamage is the first damage the open's measurement met.
 	tailDamage *container.Warning
 	residual   []int64 // FrameLen's scratch
@@ -139,7 +131,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	d.record(container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
+	d.warnings.Damage(off, msg)
 	return nil
 }
 
@@ -147,19 +139,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 // something with a well-formed file that a caller should know about, rather
 // than damage in the file. See [container.Note].
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.record(container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
-}
-
-// record lists w unless it is listed already or the list is full: warn and
-// note share one list, capped and de-duplicated as every tolerant demuxer in
-// this tree keeps its own.
-func (d *Demuxer) record(w container.Warning) {
-	if w.Kind == container.Damage {
-		d.damage++
-	}
-	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
-		d.warnings = append(d.warnings, w)
-	}
+	d.warnings.Note(off, fmt.Sprintf(format, args...))
 }
 
 func (d *Demuxer) parse() error {
@@ -377,19 +357,19 @@ func (d *Demuxer) verifyLength() error {
 // The walk steps over a hole as a read does, so the end it finds is where a
 // read's frames end.
 func (d *Demuxer) deliverableEnd() (end int64, ok, clean bool) {
-	strict, saved, seen, dataEnd := d.opts.Strict, len(d.warnings), d.damage, d.w.DataEnd()
+	strict, mark, seen, dataEnd := d.opts.Strict, d.warnings.Mark(), d.warnings.DamageCount(), d.w.DataEnd()
 	off0, cur0, valid0 := d.off, d.cur, d.valid
 	d.opts.Strict = false
 	defer func() {
 		d.opts.Strict = strict
-		clean = clean && d.damage == seen
-		for _, w := range d.warnings[saved:] {
+		clean = clean && d.warnings.DamageCount() == seen
+		for _, w := range d.warnings.Since(mark) {
 			if w.Kind == container.Damage {
 				d.tailDamage = &w
 				break
 			}
 		}
-		d.warnings = d.warnings[:saved]
+		d.warnings.Rollback(mark)
 		d.w.SetDataEnd(dataEnd)
 		// The walk ends past the audio; reads start where it began.
 		d.off, d.cur, d.valid = off0, cur0, valid0
@@ -486,11 +466,11 @@ func (d *Demuxer) tailBacks() (int64, bool) {
 			// A complete frame with nothing after it: findEnd peels any
 			// trailing tag on the way, which the caller unpeels. What a
 			// rejected candidate reported is not the file's.
-			damage, listed := d.damage, len(d.warnings)
+			mark := d.warnings.Mark()
 			if fe, err := d.findEnd(); err == nil && fe.end >= 0 && !fe.nextOK {
 				return d.num.Start(fi) + int64(fi.BlockSize), true
 			}
-			d.damage, d.warnings = damage, d.warnings[:listed]
+			d.warnings.Rollback(mark)
 		}
 		if from == lo {
 			break // the whole window is scanned
@@ -540,10 +520,10 @@ func (d *Demuxer) parseSeekTable(off, length int64) error {
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns damage tolerated during parsing.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
+func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
 
 // DamageCount implements container.Damaged.
-func (d *Demuxer) DamageCount() int { return d.damage }
+func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
 
 // consistent reports whether a frame header agrees with STREAMINFO; the
 // pipeline's track format is fixed, and consistency is also what makes
@@ -972,7 +952,7 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 // A target a hole took lands on the last frame before the hole, so the
 // pre-roll runs through the hole as a read does. A walk that begins in the
 // hole starts again twice as far back each time, down to the first frame.
-func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
+func (d *Demuxer) SeekSample(_ context.Context, track int, sample int64) (int64, error) {
 	if track != 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("flac: no track %d", track))
 	}
@@ -1022,7 +1002,7 @@ func (d *Demuxer) locate(at int64) (int64, flac.FrameInfo, *frameEnd, error) {
 		// checksum-confirmed. Warnings from a failed probe are dropped
 		// with it.
 		d.off, d.cur, d.valid = off, fi, true
-		saved := len(d.warnings)
+		mark := d.warnings.Mark()
 		fe, err := d.findEnd()
 		if err == nil && fe.end >= 0 {
 			return off, fi, &fe, nil
@@ -1030,7 +1010,7 @@ func (d *Demuxer) locate(at int64) (int64, flac.FrameInfo, *frameEnd, error) {
 		if d.w.Err() != nil {
 			return 0, flac.FrameInfo{}, nil, d.w.Err()
 		}
-		d.warnings = d.warnings[:saved]
+		d.warnings.Rollback(mark)
 	}
 	off, fi, ok = d.bisect(at)
 	if !ok {

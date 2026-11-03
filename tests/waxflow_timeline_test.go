@@ -74,7 +74,7 @@ func timelineMembers(t *testing.T, e *waxflow.Engine, raws ...[]byte) []waxflow.
 	t.Helper()
 	out := make([]waxflow.ConcatSource, len(raws))
 	for i, raw := range raws {
-		info, err := e.Probe(container.BytesSource(raw), "wav", nil)
+		info, err := e.Probe(context.Background(), container.BytesSource(raw), "wav", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -716,7 +716,7 @@ func TestConcatCrossfadeSeekLandsExact(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer med.Close()
-			landed, err := med.SeekSample(tc.target)
+			landed, err := med.SeekSample(context.Background(), tc.target)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -762,7 +762,7 @@ func TestConcatCrossfadeDeclicksASlice(t *testing.T) {
 	defer audio.Put(whole)
 
 	spans := [][2]int64{{1000, 6000}, {12000, 18000}}
-	info, err := e.Probe(container.BytesSource(raw), "wav", nil)
+	info, err := e.Probe(context.Background(), container.BytesSource(raw), "wav", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -928,7 +928,7 @@ func TestConcatSeekLandsExact(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer med.Close()
-			landed, err := med.SeekSample(target)
+			landed, err := med.SeekSample(context.Background(), target)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -962,7 +962,7 @@ func TestConcatSeekMarksDiscont(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer med.Close()
-	if _, err := med.SeekSample(9000); err != nil { // the seam sample itself
+	if _, err := med.SeekSample(context.Background(), 9000); err != nil { // the seam sample itself
 		t.Fatal(err)
 	}
 	buf := audio.Get(med.Info().Default().Fmt, 1024)
@@ -1001,7 +1001,7 @@ func TestConcatSeekMixedRatesLandsExact(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer med.Close()
-			landed, err := med.SeekSample(target)
+			landed, err := med.SeekSample(context.Background(), target)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1031,7 +1031,7 @@ func TestConcatSeekPastEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer med.Close()
-	landed, err := med.SeekSample(1 << 40)
+	landed, err := med.SeekSample(context.Background(), 1<<40)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1535,7 +1535,7 @@ func TestConcatRefusesAnAdvisoryMember(t *testing.T) {
 			t.Fatal(err)
 		}
 		raws[i] = raw
-		info, err := e.Probe(container.BytesSource(raw), "wma", nil)
+		info, err := e.Probe(context.Background(), container.BytesSource(raw), "wma", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1620,7 +1620,7 @@ func TestTimelineRefusesASlicedMemberThatEndsEarly(t *testing.T) {
 	const frames, from, at = 10000, 1000, 4000
 	raw, _ := ratedWAV(t, 48000, 1, frames, 9)
 	e := waxflow.New()
-	info, err := e.Probe(container.BytesSource(raw), "wav", nil)
+	info, err := e.Probe(context.Background(), container.BytesSource(raw), "wav", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1634,7 +1634,7 @@ func TestTimelineRefusesASlicedMemberThatEndsEarly(t *testing.T) {
 		code  waxerr.Code
 	}{
 		{"a member whose measure counted its decode", func(m format.Media) (format.Media, error) {
-			return waxflow.SliceMeasured(&declaringMedia{Media: m, samples: frames, advisory: true},
+			return waxflow.SliceMeasured(context.Background(), &declaringMedia{Media: m, samples: frames, advisory: true},
 				countedLen(frames), from, waxflow.ToEnd)
 		}, waxerr.CodeInternal},
 		{"a member sliced on its headers", func(m format.Media) (format.Media, error) {

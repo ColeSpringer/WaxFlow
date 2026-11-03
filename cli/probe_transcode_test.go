@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -235,7 +236,7 @@ func probeOutput(t *testing.T, path string) probedOutput {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := waxflow.New().Probe(src, "", nil)
+	info, err := waxflow.New().Probe(context.Background(), src, "", nil)
 	if err != nil {
 		t.Fatalf("probe %s: %v", path, err)
 	}
@@ -853,7 +854,7 @@ func TestTranscodeHEAACv2(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := waxflow.New().Probe(src, "", nil)
+	info, err := waxflow.New().Probe(context.Background(), src, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -911,7 +912,7 @@ func TestTranscodeWavPackLoudnessEmbedsRG(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := waxflow.New().Probe(container.BytesSource(raw), "wv", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "wv", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1090,7 +1091,7 @@ func TestTranscodeAPELoudnessEmbedsRG(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := waxflow.New().Probe(container.BytesSource(raw), "ape", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "ape", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

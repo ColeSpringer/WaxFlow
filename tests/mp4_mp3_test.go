@@ -1,6 +1,7 @@
 package waxflow_test
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -109,7 +110,7 @@ func TestMP3InMP4Seeks(t *testing.T) {
 	buf := audio.Get(track.Fmt, compare)
 	defer audio.Put(buf)
 	for _, target := range []int64{0, 1, 575, 576, 577, 5000, 11520, track.Samples - 1} {
-		landed, err := med.SeekSample(target)
+		landed, err := med.SeekSample(context.Background(), target)
 		if err != nil {
 			t.Fatalf("seek %d: %v", target, err)
 		}
@@ -173,7 +174,7 @@ func TestMP3InMP4Transcodes(t *testing.T) {
 	}
 	// The hint is empty above on purpose: a .mov has to sniff as MP4 for a
 	// caller who only has the bytes.
-	info, err := e.Probe(mp3InMP4(t, "mp3.mov"), "", nil)
+	info, err := e.Probe(context.Background(), mp3InMP4(t, "mp3.mov"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +207,7 @@ func TestMP3RemuxKeepsItsTrims(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			src := mp3InMP4(t, tc.name)
-			in, err := e.Probe(src, tc.hint, nil)
+			in, err := e.Probe(context.Background(), src, tc.hint, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -222,7 +223,7 @@ func TestMP3RemuxKeepsItsTrims(t *testing.T) {
 			if _, err := e.Remux(t.Context(), src, tc.hint, ws, waxflow.TranscodeOptions{Format: "mp3"}); err != nil {
 				t.Fatal(err)
 			}
-			out, err := e.Probe(container.BytesSource(ws.Buf), "mp3", nil)
+			out, err := e.Probe(context.Background(), container.BytesSource(ws.Buf), "mp3", nil)
 			if err != nil {
 				t.Fatal(err)
 			}

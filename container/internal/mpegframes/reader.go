@@ -1,6 +1,8 @@
 package mpegframes
 
 import (
+	"context"
+
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
 )
@@ -71,8 +73,8 @@ func (r *Reader) ReadPacket(pkt *container.Packet) error {
 // at, and reports the sample that frame starts on. The landing precedes the
 // target by the backoff Landing computes; the caller's pre-roll decodes and
 // discards the rest, so the delivered position is sample-exact.
-func (r *Reader) SeekSample(sample int64) (int64, error) {
-	land, err := r.w.Landing(sample / r.w.spf)
+func (r *Reader) SeekSample(ctx context.Context, sample int64) (int64, error) {
+	land, err := r.w.Landing(ctx, sample/r.w.spf)
 	if err != nil {
 		return 0, err
 	}
@@ -82,7 +84,7 @@ func (r *Reader) SeekSample(sample int64) (int64, error) {
 
 // Walk implements the walking half of container.Walker for the owner: the
 // index is finished, and every finding on the way is reported as reached.
-func (r *Reader) Walk() error { return r.w.Complete() }
+func (r *Reader) Walk(ctx context.Context) error { return r.w.Complete(ctx) }
 
 // Walked implements the other half: whether the index already reaches the
 // end of the run.

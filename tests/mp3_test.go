@@ -56,7 +56,7 @@ var mp3Fixtures = []struct {
 func TestMP3FixturesProbe(t *testing.T) {
 	for _, tt := range mp3Fixtures {
 		t.Run(tt.name, func(t *testing.T) {
-			info, err := waxflow.New().Probe(fixtureSource(t, tt.name), "", nil)
+			info, err := waxflow.New().Probe(context.Background(), fixtureSource(t, tt.name), "", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -103,7 +103,7 @@ func TestEveryMP3FixtureWalksWhole(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			info, err := waxflow.New().Probe(container.BytesSource(raw), "", &waxflow.ProbeOptions{Strict: true})
+			info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", &waxflow.ProbeOptions{Strict: true})
 			if err != nil {
 				t.Fatalf("strict probe: %v", err)
 			}
@@ -255,14 +255,14 @@ func TestMP3ToleratedDamage(t *testing.T) {
 
 	t.Run("leading junk", func(t *testing.T) {
 		mangled := append([]byte("this is not audio at all, sorry!"), clean...)
-		info, err := waxflow.New().Probe(container.BytesSource(mangled), "mp3", nil)
+		info, err := waxflow.New().Probe(context.Background(), container.BytesSource(mangled), "mp3", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(info.Warnings) == 0 || !strings.Contains(info.Warnings[0], "before the first frame") {
 			t.Errorf("warnings = %v, want a leading-junk note", info.Warnings)
 		}
-		if _, err := waxflow.New().Probe(container.BytesSource(mangled), "mp3", &waxflow.ProbeOptions{Strict: true}); err == nil {
+		if _, err := waxflow.New().Probe(context.Background(), container.BytesSource(mangled), "mp3", &waxflow.ProbeOptions{Strict: true}); err == nil {
 			t.Error("strict mode accepted leading junk")
 		}
 	})
@@ -311,14 +311,14 @@ func TestMP3ToleratedDamage(t *testing.T) {
 		// reports the finding only once a read has reached it.
 		mangled := testutil.ZeroMiddle(clean, 2048)
 		e := waxflow.New()
-		info, err := e.Probe(container.BytesSource(mangled), "mp3", nil)
+		info, err := e.Probe(context.Background(), container.BytesSource(mangled), "mp3", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(info.Warnings) != 0 {
 			t.Errorf("a tolerant probe reports %v; it reads the head, which is clean", info.Warnings)
 		}
-		if _, err := e.Probe(container.BytesSource(mangled), "mp3", &waxflow.ProbeOptions{Strict: true}); !errors.Is(err, waxerr.ErrMalformedInput) {
+		if _, err := e.Probe(context.Background(), container.BytesSource(mangled), "mp3", &waxflow.ProbeOptions{Strict: true}); !errors.Is(err, waxerr.ErrMalformedInput) {
 			t.Errorf("strict probe error = %v, want malformed", err)
 		}
 		med, err := e.OpenStream(container.BytesSource(mangled), "mp3")
@@ -440,7 +440,7 @@ func TestMP3IndexSidecar(t *testing.T) {
 
 	readAt := func(med format.Media, target int64) *audio.Buffer {
 		t.Helper()
-		if landed, err := med.SeekSample(target); err != nil || landed != target {
+		if landed, err := med.SeekSample(context.Background(), target); err != nil || landed != target {
 			t.Fatalf("seek to %d: landed %d, err %v", target, landed, err)
 		}
 		dst := audio.Get(med.Info().Default().Fmt, 512)
@@ -510,7 +510,7 @@ func TestMP3RejectsFreeFormat(t *testing.T) {
 		mangled[off+2] &= 0x0F
 		off += h.Size()
 	}
-	_, err = waxflow.New().Probe(container.BytesSource(mangled), "mp3", nil)
+	_, err = waxflow.New().Probe(context.Background(), container.BytesSource(mangled), "mp3", nil)
 	if err == nil {
 		t.Fatal("free-format stream was accepted")
 	}

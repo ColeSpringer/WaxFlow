@@ -9,6 +9,7 @@ package ogg
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -109,11 +110,11 @@ func holdToTwin(t *testing.T, twin, shifted []byte, w twinWant) {
 		if target < 0 {
 			continue
 		}
-		la, err := ref.SeekSample(0, target)
+		la, err := ref.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatalf("twin seek to %d: %v", target, err)
 		}
-		lb, err := got.SeekSample(0, target)
+		lb, err := got.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatalf("shifted seek to %d: %v", target, err)
 		}
@@ -191,11 +192,11 @@ func TestOpusInvalidInitialGranule(t *testing.T) {
 			t.Errorf("read tolerantly: %d samples, delay %d; its twin %d, delay %d", b.Samples, b.Delay, a.Samples, a.Delay)
 		}
 		for _, target := range []int64{0, 5000, 400000, 1000000} {
-			la, err := ref.SeekSample(0, target)
+			la, err := ref.SeekSample(context.Background(), 0, target)
 			if err != nil {
 				t.Fatal(err)
 			}
-			lb, err := got.SeekSample(0, target)
+			lb, err := got.SeekSample(context.Background(), 0, target)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -367,7 +368,7 @@ func TestOggFLACSeekPastAWrongFirstGranule(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, target := range []int64{0, 4096*100 + 5, 4096*4000 + 7, 4096*7999 + 1} {
-		landed, err := d.SeekSample(0, target)
+		landed, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatalf("seek to %d: %v", target, err)
 		}
@@ -516,7 +517,7 @@ func TestVorbisNegativeStartNeedsItsLayout(t *testing.T) {
 		at[p.PTS] = p.Data
 	}
 	for _, target := range []int64{got.Samples / 3, 2 * got.Samples / 3} {
-		landed, err := d.SeekSample(0, target)
+		landed, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -581,7 +582,7 @@ func TestOggLoneFirstPageStands(t *testing.T) {
 	if tr := d.Tracks()[0]; tr.Samples != 3*960-312 || !tr.SamplesExact {
 		t.Errorf("%d samples (exact %v), want the packets' %d", tr.Samples, tr.SamplesExact, 3*960-312)
 	}
-	if landed, err := d.SeekSample(0, 0); err != nil || landed != 0 {
+	if landed, err := d.SeekSample(context.Background(), 0, 0); err != nil || landed != 0 {
 		t.Errorf("seek to 0 landed at %d (%v)", landed, err)
 	}
 }
@@ -604,7 +605,7 @@ func TestOggSeekFromTheFirstPageLandsAtZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, target := range []int64{0, 1000} {
-		if landed, err := d.SeekSample(0, target); err != nil || landed != 0 {
+		if landed, err := d.SeekSample(context.Background(), 0, target); err != nil || landed != 0 {
 			t.Errorf("seek to %d landed at %d (%v), want the first packet at 0", target, landed, err)
 		}
 	}
@@ -750,7 +751,7 @@ func TestOggLoneFirstPageShortOfItsSamples(t *testing.T) {
 				if pkts := walkPackets(t, d); len(pkts) != c.packets || pkts[len(pkts)-1].PTS+pkts[len(pkts)-1].Dur != c.end {
 					t.Errorf("%d packets, want the page's %d ending at %d", len(pkts), c.packets, c.end)
 				}
-				if landed, err := d.SeekSample(0, 0); err != nil || landed != 0 {
+				if landed, err := d.SeekSample(context.Background(), 0, 0); err != nil || landed != 0 {
 					t.Errorf("seek to 0 landed at %d (%v)", landed, err)
 				}
 			})
@@ -894,11 +895,11 @@ func TestOggBisectionSkipsADisownedFirstPage(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, target := range c.targets {
-				la, err := ref.SeekSample(0, target)
+				la, err := ref.SeekSample(context.Background(), 0, target)
 				if err != nil {
 					t.Fatalf("twin seek to %d: %v", target, err)
 				}
-				lb, err := got.SeekSample(0, target)
+				lb, err := got.SeekSample(context.Background(), 0, target)
 				if err != nil {
 					t.Fatalf("seek to %d: %v", target, err)
 				}
@@ -1055,7 +1056,7 @@ func TestOggFLACSeeksPastDamage(t *testing.T) {
 				if lost(target) {
 					continue
 				}
-				landed, err := d.SeekSample(0, target)
+				landed, err := d.SeekSample(context.Background(), 0, target)
 				if err != nil {
 					t.Fatalf("seek to %d: %v", target, err)
 				}
@@ -1109,7 +1110,7 @@ func TestOggFLACLengthIsTheFramesSpan(t *testing.T) {
 				t.Errorf("the frames end at %d, want %d", end, span)
 			}
 			for _, target := range []int64{0, 3*bs + 7, span / 2, span - 1} {
-				landed, err := d.SeekSample(0, target)
+				landed, err := d.SeekSample(context.Background(), 0, target)
 				if err != nil || landed != target/bs*bs {
 					t.Errorf("seek to %d landed at %d (%v), want %d", target, landed, err, target/bs*bs)
 				}
@@ -1265,7 +1266,7 @@ func TestOggFLACSeeksOnFramesLargerThanAPage(t *testing.T) {
 	bound := int64(steps+4) * 3 * maxPageSize
 	for _, target := range []int64{0, 7, frames*bs/4 + 5, frames * bs / 2, frames*bs*9/10 + 1, frames*bs - 1} {
 		cs.Reset()
-		landed, err := d.SeekSample(0, target)
+		landed, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatalf("seek to %d: %v", target, err)
 		}

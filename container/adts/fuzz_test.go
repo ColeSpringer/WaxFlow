@@ -1,6 +1,7 @@
 package adts
 
 import (
+	"context"
 	"errors"
 	"io"
 	"testing"
@@ -54,7 +55,7 @@ func FuzzDemux(f *testing.F) {
 				}
 			}
 			for _, target := range []int64{0, 1024, 1 << 20, 1 << 40} {
-				landed, err := d.SeekSample(0, target)
+				landed, err := d.SeekSample(context.Background(), 0, target)
 				if err != nil {
 					continue
 				}
@@ -71,7 +72,7 @@ func FuzzDemux(f *testing.F) {
 		if err != nil {
 			return
 		}
-		if err := w.Walk(); err != nil || !w.Walked() {
+		if err := w.Walk(context.Background()); err != nil || !w.Walked() {
 			t.Fatalf("a tolerant walk of accepted bytes failed: %v (walked %v)", err, w.Walked())
 		}
 		// Every entry's whole frame lies inside the data. Asserted on the

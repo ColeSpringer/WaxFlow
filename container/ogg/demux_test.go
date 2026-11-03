@@ -1,6 +1,7 @@
 package ogg
 
 import (
+	"context"
 	"encoding/binary"
 	"io"
 	"os"
@@ -164,7 +165,7 @@ func TestContinuedPackets(t *testing.T) {
 		}
 	}
 	// Seeking still lands exactly on reassembled frames.
-	landed, err := d.SeekSample(0, want[2].PTS+10)
+	landed, err := d.SeekSample(context.Background(), 0, want[2].PTS+10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +216,7 @@ func TestSeek(t *testing.T) {
 	}
 	total := d.Tracks()[0].Samples
 	for _, target := range []int64{0, 1, 4096, 9000, total - 1} {
-		landed, err := d.SeekSample(0, target)
+		landed, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatalf("seek to %d: %v", target, err)
 		}
@@ -234,7 +235,7 @@ func TestSeek(t *testing.T) {
 		}
 	}
 	// Past-the-end: land on the last frame.
-	landed, err := d.SeekSample(0, total+5000)
+	landed, err := d.SeekSample(context.Background(), 0, total+5000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +395,7 @@ func TestOldFormatNumbering(t *testing.T) {
 				pkt.PTS, pkt.Dur, f.coded, f.bs)
 		}
 	}
-	landed, err := d.SeekSample(0, 5000)
+	landed, err := d.SeekSample(context.Background(), 0, 5000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +430,7 @@ func TestEmptyStream(t *testing.T) {
 	if err := d.ReadPacket(&pkt); err != io.EOF {
 		t.Fatalf("ReadPacket = %v, want EOF", err)
 	}
-	landed, err := d.SeekSample(0, 500)
+	landed, err := d.SeekSample(context.Background(), 0, 500)
 	if err != nil || landed != 0 {
 		t.Fatalf("seek = %d, %v; want 0, nil", landed, err)
 	}
@@ -540,7 +541,7 @@ func TestPastEndSeekOnContinuedTail(t *testing.T) {
 			}
 		}
 		for _, target := range []int64{total + 999, total - 1} {
-			landed, err := d.SeekSample(0, target)
+			landed, err := d.SeekSample(context.Background(), 0, target)
 			if err != nil {
 				t.Fatalf("trailing=%v seek to %d: %v", trailing, target, err)
 			}

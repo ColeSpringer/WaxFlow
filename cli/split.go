@@ -100,7 +100,7 @@ data track occupies part of the file the split says what it skipped.`,
 			defer cleanup()
 
 			e := splitEngine(logger)
-			info, err := e.Probe(src, srcHint, nil)
+			info, err := e.Probe(cmd.Context(), src, srcHint, nil)
 			if err != nil {
 				return err
 			}
@@ -613,7 +613,7 @@ func (s *splitter) writePiece(cmd *cobra.Command, path string, p piece) (*waxflo
 	}
 	// Held to the length the cuts were checked against, or a cut inside an
 	// advisory gap would pass atPieces and be refused here.
-	sl, err := waxflow.SliceMeasured(med, s.srcTrack, p.from, p.to)
+	sl, err := waxflow.SliceMeasured(cmd.Context(), med, s.srcTrack, p.from, p.to)
 	if err != nil {
 		return fail(err)
 	}

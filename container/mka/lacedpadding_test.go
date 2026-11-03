@@ -8,6 +8,7 @@ package mka
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"math"
 	"slices"
@@ -348,7 +349,7 @@ func TestLacedBlockSpreadsItsTrim(t *testing.T) {
 				}
 			}
 
-			if err := d.Walk(); err != nil {
+			if err := d.Walk(context.Background()); err != nil {
 				t.Fatalf("Walk: %v", err)
 			}
 			tr := d.Tracks()[0]
@@ -452,10 +453,10 @@ func comparePackets(t *testing.T, got, want []byte) {
 				i, pg.Dur, pg.PTS, pg.Padding, len(pg.Data), pw.Dur, pw.PTS, pw.Padding, len(pw.Data))
 		}
 	}
-	if err := dg.Walk(); err != nil {
+	if err := dg.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := dw.Walk(); err != nil {
+	if err := dw.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	tg, tw := dg.Tracks()[0], dw.Tracks()[0]

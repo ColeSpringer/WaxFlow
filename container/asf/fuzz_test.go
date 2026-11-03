@@ -2,6 +2,7 @@ package asf_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
@@ -92,7 +93,7 @@ func FuzzDemux(f *testing.F) {
 				if err != nil {
 					t.Fatalf("a second open of the same bytes failed: %v", err)
 				}
-				if w.Walk() == nil {
+				if w.Walk(context.Background()) == nil {
 					a, b := d.Tracks()[0], w.Tracks()[0]
 					if a.Samples != b.Samples || a.SamplesExact != b.SamplesExact {
 						t.Fatalf("a read to the end settled %d (exact %v), a walk %d (exact %v)",
@@ -105,7 +106,7 @@ func FuzzDemux(f *testing.F) {
 			}
 			targets := []int64{0, 1000, 1 << 40}
 			for _, target := range targets {
-				landed, err := d.SeekSample(0, target)
+				landed, err := d.SeekSample(context.Background(), 0, target)
 				if err != nil || firstPTS < 0 {
 					// Errors are fine; so is any landing when no packet was
 					// ever readable (reads after the seek just hit EOF).
@@ -117,7 +118,7 @@ func FuzzDemux(f *testing.F) {
 					t.Fatalf("seek to %d landed at %d (stream starts at %d)", target, landed, firstPTS)
 				}
 			}
-			if err := d.Walk(); err != nil {
+			if err := d.Walk(context.Background()); err != nil {
 				continue
 			}
 			if !d.Walked() {
@@ -138,8 +139,8 @@ func FuzzDemux(f *testing.F) {
 			}
 			e.RestoreIndex(blob)
 			for _, target := range targets {
-				want, errD := d.SeekSample(0, target)
-				got, errE := e.SeekSample(0, target)
+				want, errD := d.SeekSample(context.Background(), 0, target)
+				got, errE := e.SeekSample(context.Background(), 0, target)
 				if (errD == nil) != (errE == nil) || got != want {
 					t.Fatalf("seek to %d: the restored count landed at %d (%v), the walked one at %d (%v)",
 						target, got, errE, want, errD)
@@ -161,7 +162,7 @@ func FuzzRestoreIndex(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
-	if err := d.Walk(); err != nil {
+	if err := d.Walk(context.Background()); err != nil {
 		f.Fatal(err)
 	}
 	blob := d.IndexSnapshot()
@@ -176,7 +177,7 @@ func FuzzRestoreIndex(f *testing.F) {
 	targets := []int64{0, total / 3, total / 2, total - 1, 1 << 40}
 	want := make([]int64, len(targets))
 	for i, target := range targets {
-		if want[i], err = d.SeekSample(0, target); err != nil {
+		if want[i], err = d.SeekSample(context.Background(), 0, target); err != nil {
 			f.Fatal(err)
 		}
 	}
@@ -188,7 +189,7 @@ func FuzzRestoreIndex(f *testing.F) {
 		}
 		restored := d.RestoreIndex(b)
 		for i, target := range targets {
-			landed, err := d.SeekSample(0, target)
+			landed, err := d.SeekSample(context.Background(), 0, target)
 			if err != nil {
 				t.Fatalf("seek to %d: %v", target, err)
 			}
@@ -201,7 +202,7 @@ func FuzzRestoreIndex(f *testing.F) {
 				t.Fatalf("read after a seek to %d: %v", target, err)
 			}
 		}
-		if err := d.Walk(); err != nil {
+		if err := d.Walk(context.Background()); err != nil {
 			t.Fatalf("walk: %v", err)
 		}
 		if got := d.Tracks()[0]; got.Samples != total || !got.SamplesExact {
@@ -219,7 +220,7 @@ func FuzzRestoreIndex(f *testing.F) {
 		}
 		restored = d.RestoreIndex(forged)
 		for _, target := range targets {
-			landed, err := d.SeekSample(0, target)
+			landed, err := d.SeekSample(context.Background(), 0, target)
 			if err != nil || landed > target {
 				t.Fatalf("re-signed (restored %v): seek to %d landed at %d (%v)", restored, target, landed, err)
 			}
@@ -228,7 +229,7 @@ func FuzzRestoreIndex(f *testing.F) {
 				t.Fatalf("re-signed (restored %v): read after a seek to %d: %v", restored, target, err)
 			}
 		}
-		if err := d.Walk(); err != nil {
+		if err := d.Walk(context.Background()); err != nil {
 			t.Fatalf("re-signed (restored %v): walk: %v", restored, err)
 		}
 	})

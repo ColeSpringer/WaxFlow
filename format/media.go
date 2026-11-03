@@ -1,6 +1,7 @@
 package format
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -146,11 +147,11 @@ func (m *indexableMedia) RestoreIndex(blob []byte) bool { return m.ix.RestoreInd
 // open), and the settled count is what delivery was already producing from
 // these bytes, so a Walk taken mid-read cannot shift the position or the
 // end: the cap only stops promising samples the packets never held.
-func (m *media) Walk() error {
+func (m *media) Walk(ctx context.Context) error {
 	if m.walker == nil {
 		return nil
 	}
-	if err := m.walker.Walk(); err != nil {
+	if err := m.walker.Walk(ctx); err != nil {
 		return err
 	}
 	m.adoptLength()
@@ -287,8 +288,9 @@ func (m *media) ReadChunk(dst *audio.Buffer) error {
 // starts exactly at target (or at end of stream for past-the-end
 // targets). When the stream's first sync point lies beyond the target
 // (container.Seeker allows that landing), the returned position exceeds
-// the target and is where the next chunk really starts.
-func (m *media) SeekSample(target int64) (int64, error) {
+// the target and is where the next chunk really starts. ctx bounds the walk
+// a landing may run (container.Seeker).
+func (m *media) SeekSample(ctx context.Context, target int64) (int64, error) {
 	if m.closed {
 		return 0, waxerr.New(waxerr.CodeInternal, "format: SeekSample on closed media")
 	}
@@ -305,7 +307,7 @@ func (m *media) SeekSample(target int64) (int64, error) {
 		rawTarget = min(rawTarget, m.rawEnd)
 	}
 	m.step = 0
-	pos, err := m.preroll(rawTarget, rawTarget)
+	pos, err := m.preroll(ctx, rawTarget, rawTarget)
 	if err != nil {
 		return 0, err
 	}
@@ -321,9 +323,9 @@ func (m *media) SeekSample(target int64) (int64, error) {
 // until it succeeds, lands at the start, where the refusal is damage, or
 // passes a hole, behind which the state is lost. Each try lands strictly
 // earlier than the one before, so the search ends.
-func (m *media) preroll(at, rawTarget int64) (int64, error) {
+func (m *media) preroll(ctx context.Context, at, rawTarget int64) (int64, error) {
 	for {
-		landed, err := m.land(at)
+		landed, err := m.land(ctx, at)
 		if err != nil {
 			return 0, err
 		}
@@ -351,8 +353,8 @@ func (m *media) preroll(at, rawTarget int64) (int64, error) {
 
 // land puts the demuxer at or before at and the decoder at the start of a
 // decode there.
-func (m *media) land(at int64) (int64, error) {
-	landed, err := m.seeker.SeekSample(m.track.ID, at)
+func (m *media) land(ctx context.Context, at int64) (int64, error) {
+	landed, err := m.seeker.SeekSample(ctx, m.track.ID, at)
 	if err != nil {
 		return 0, err
 	}
@@ -390,7 +392,7 @@ func (m *media) reland(raw int64, cause error) error {
 		return cause
 	}
 	m.step = max(2*m.step, 2)
-	pos, err := m.preroll(max(m.landed-m.step, 0), raw)
+	pos, err := m.preroll(context.Background(), max(m.landed-m.step, 0), raw) // a read carries no context
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,7 @@
 package waxflow_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -67,7 +68,7 @@ func measureRouteOf(t *testing.T, med format.Media) string {
 	if exact() {
 		return "exact"
 	}
-	if err := format.WalkMedia(med); err != nil {
+	if err := format.WalkMedia(context.Background(), med); err != nil {
 		t.Fatal(err)
 	}
 	switch {

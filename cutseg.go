@@ -238,7 +238,7 @@ func (c *cutSeekDemuxer) rawPos(delivered int64) int64 { return rawStart(c.trims
 // not from packets in the media segment. The head pre-roll (segment 0) is a
 // different thing and is already in window 0, which CutTrack widened, so it never
 // reaches this seek.
-func (c *cutSeekDemuxer) SeekSample(track int, outTarget int64) (int64, error) {
+func (c *cutSeekDemuxer) SeekSample(ctx context.Context, track int, outTarget int64) (int64, error) {
 	// The cut view exposes one track (the source's own, which CutTrack preserves),
 	// so a seek names it exactly as every other demuxer's SeekSample names track 0;
 	// c.track then forwards to the inner demuxer, whose ID it is. The walk only ever
@@ -278,7 +278,7 @@ func (c *cutSeekDemuxer) SeekSample(track int, outTarget int64) (int64, error) {
 		return outTarget, nil
 	}
 	w := c.windows[i]
-	landed, err := c.seek.SeekSample(c.track, c.deliveredPos(w.from+(outTarget-outStart)))
+	landed, err := c.seek.SeekSample(ctx, c.track, c.deliveredPos(w.from+(outTarget-outStart)))
 	if err != nil {
 		return 0, err
 	}

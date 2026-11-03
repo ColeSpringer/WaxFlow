@@ -3,6 +3,7 @@
 package wma_test
 
 import (
+	"context"
 	"errors"
 	"math"
 	"os"
@@ -368,7 +369,7 @@ func TestTheRunUpObjectCarriesTheExponents(t *testing.T) {
 		} else if n := min(len(got), len(linear)-at, 4*frame); testutil.CompareF32(got[:n], linear[at:at+n]).MaxAbs != 0 {
 			t.Errorf("resumed at packet %d, the decode is neither exact nor refused", j)
 		}
-		if _, err := med.SeekSample(int64(at / cfg.Channels)); err != nil {
+		if _, err := med.SeekSample(context.Background(), int64(at/cfg.Channels)); err != nil {
 			t.Fatal(err)
 		}
 		if err := med.ReadChunk(buf); err != nil {

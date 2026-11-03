@@ -1121,7 +1121,7 @@ func TestSegmentsWidenUnplayableFLACDepths(t *testing.T) {
 					tc.src, plan.Format.BitDepth, tc.want)
 			}
 
-			grid, err := e.PacketGrid(container.BytesSource(raw), "flac")
+			grid, err := e.PacketGrid(context.Background(), container.BytesSource(raw), "flac")
 			if err != nil {
 				t.Fatal(err)
 			}

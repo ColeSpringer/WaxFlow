@@ -1,6 +1,7 @@
 package ogg
 
 import (
+	"context"
 	"io"
 	"testing"
 
@@ -127,7 +128,7 @@ func TestSyntheticOpusSeek(t *testing.T) {
 	}
 	lateTarget := total - 5000
 	for _, target := range []int64{960, total / 2, lateTarget} {
-		landed, err := d.SeekSample(0, target)
+		landed, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatalf("seek %d: %v", target, err)
 		}

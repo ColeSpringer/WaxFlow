@@ -195,7 +195,7 @@ func TestWavPackPlanMatchesRun(t *testing.T) {
 	const frames = 12000
 	wav, src := makeWAV(t, pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, 2, frames, 21)
 	defer audio.Put(src)
-	info, err := e.Probe(container.BytesSource(wav), "wav", nil)
+	info, err := e.Probe(context.Background(), container.BytesSource(wav), "wav", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestWavPackEncodeTags(t *testing.T) {
 	tags := []container.Tag{{Key: "TITLE", Value: "Stage Five"}, {Key: "ALBUM", Value: "WaxFlow"}}
 	raw := encodeWavPack(t, e, wav, waxflow.TranscodeOptions{Tags: tags})
 
-	info, err := e.Probe(container.BytesSource(raw), "wv", nil)
+	info, err := e.Probe(context.Background(), container.BytesSource(raw), "wv", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +324,7 @@ func TestWavPackEncodeDepthPolicy(t *testing.T) {
 			wav, src := makeWAV(t, tc.cfg, 2, 5000, 51)
 			defer audio.Put(src)
 			raw := encodeWavPack(t, e, wav, waxflow.TranscodeOptions{})
-			info, err := e.Probe(container.BytesSource(raw), "wv", nil)
+			info, err := e.Probe(context.Background(), container.BytesSource(raw), "wv", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -348,7 +348,7 @@ func TestWavPackRemuxMovesBlocks(t *testing.T) {
 	defer audio.Put(src)
 	raw := encodeWavPack(t, e, wav, waxflow.TranscodeOptions{})
 
-	info, err := e.Probe(container.BytesSource(raw), "wv", nil)
+	info, err := e.Probe(context.Background(), container.BytesSource(raw), "wv", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

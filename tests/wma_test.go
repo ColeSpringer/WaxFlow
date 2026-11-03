@@ -75,7 +75,7 @@ func TestWMAProbeAndDecode(t *testing.T) {
 				t.Fatal(err)
 			}
 			// No hint: the 16-byte Header Object GUID is what resolves it.
-			info, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+			info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", nil)
 			if err != nil {
 				t.Fatalf("probe: %v", err)
 			}
@@ -176,7 +176,7 @@ func TestWMALosslessIsLosslessEndToEnd(t *testing.T) {
 	}
 	// No hint: the Header Object GUID is what resolves it, and the codec has
 	// to come out of the WAVEFORMATEX rather than out of a filename.
-	info, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", nil)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestWMARefusalsNameTheCodec(t *testing.T) {
 	} {
 		t.Run(fmt.Sprintf("%#04x", tc.tag), func(t *testing.T) {
 			patched := retagWMA(t, raw, tc.tag)
-			_, err := waxflow.New().Probe(container.BytesSource(patched), "", nil)
+			_, err := waxflow.New().Probe(context.Background(), container.BytesSource(patched), "", nil)
 			if err == nil {
 				t.Fatal("accepted")
 			}
@@ -315,7 +315,7 @@ func TestDecodedTagOnAWMAv2FileIsDamage(t *testing.T) {
 		{"voice", 0x000a},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := waxflow.New().Probe(container.BytesSource(retagWMA(t, raw, tc.tag)), "", nil)
+			_, err := waxflow.New().Probe(context.Background(), container.BytesSource(retagWMA(t, raw, tc.tag)), "", nil)
 			if err == nil {
 				t.Fatalf("accepted a WMA v2 header retyped as %s", tc.name)
 			}
@@ -377,7 +377,7 @@ func TestWMAExtensionHints(t *testing.T) {
 	// passed because the magic resolved them before the hint was read.
 	for _, hint := range []string{"", "wma", ".wma", "asf", ".asf"} {
 		t.Run("magic/hint="+hint, func(t *testing.T) {
-			info, err := waxflow.New().Probe(container.BytesSource(raw), hint, nil)
+			info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), hint, nil)
 			if err != nil {
 				t.Fatalf("probe with hint %q: %v", hint, err)
 			}
@@ -393,7 +393,7 @@ func TestWMAExtensionHints(t *testing.T) {
 	junk := bytes.Repeat([]byte{'z'}, 4096)
 	for _, hint := range []string{"wma", ".wma", "asf", ".asf"} {
 		t.Run("hint-only/"+hint, func(t *testing.T) {
-			_, err := waxflow.New().Probe(container.BytesSource(junk), hint, nil)
+			_, err := waxflow.New().Probe(context.Background(), container.BytesSource(junk), hint, nil)
 			if err == nil {
 				t.Fatalf("probe accepted 4096 junk bytes as %q", hint)
 			}
@@ -404,7 +404,7 @@ func TestWMAExtensionHints(t *testing.T) {
 	}
 	// And an extension the driver does not claim must not route here, or the
 	// check above would pass for any hint at all.
-	if _, err := waxflow.New().Probe(container.BytesSource(junk), "wmv", nil); err == nil ||
+	if _, err := waxflow.New().Probe(context.Background(), container.BytesSource(junk), "wmv", nil); err == nil ||
 		strings.HasPrefix(err.Error(), "wma: ") {
 		t.Errorf("an unclaimed extension routed to the wma driver: %v", err)
 	}
@@ -423,7 +423,7 @@ func TestWMAChaptersReachTheProbe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", nil)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -490,7 +490,7 @@ func TestWMAProProbeAndDecode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", nil)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -623,7 +623,7 @@ func TestWMAVoiceProbeAndDecode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", nil)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -902,7 +902,7 @@ func TestAskingWalkedChangesNothing(t *testing.T) {
 	}
 	defer med.Close()
 	before := med.Info().Default()
-	if _, err := med.SeekSample(1 << 40); err != nil {
+	if _, err := med.SeekSample(context.Background(), 1<<40); err != nil {
 		t.Fatal(err)
 	}
 	if !format.MediaWalked(med) {
@@ -913,7 +913,7 @@ func TestAskingWalkedChangesNothing(t *testing.T) {
 			before.Samples, before.SamplesExact, got.Samples, got.SamplesExact)
 	}
 	src.Reset()
-	if err := format.WalkMedia(med); err != nil {
+	if err := format.WalkMedia(context.Background(), med); err != nil {
 		t.Fatal(err)
 	}
 	if got := med.Info().Default(); !got.SamplesExact || got.Samples != 268288 {
@@ -938,7 +938,7 @@ func TestASliceConfirmsAWalkThatAlreadyFinished(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer med.Close()
-	if _, err := med.SeekSample(1 << 40); err != nil {
+	if _, err := med.SeekSample(context.Background(), 1<<40); err != nil {
 		t.Fatal(err)
 	}
 	sl, err := waxflow.Slice(med, 1000, waxflow.ToEnd)
@@ -949,7 +949,7 @@ func TestASliceConfirmsAWalkThatAlreadyFinished(t *testing.T) {
 	if !ok {
 		t.Fatal("an open-ended span does not confirm its length")
 	}
-	if err := lc.ConfirmLength(); err != nil {
+	if err := lc.ConfirmLength(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if got := sl.Info().Default(); !got.SamplesExact || got.Samples != 268288-1000 {

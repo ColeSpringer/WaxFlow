@@ -9,6 +9,7 @@ package mka_test
 // contract: CodecDelay and DiscardPadding trims yield ffmpeg's exact count.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -124,7 +125,7 @@ func decodeAll(t *testing.T, path string, strict bool) decoded {
 	}
 	out.walked = out.track
 	if w, ok := med.(format.Walker); ok {
-		if err := w.Walk(); err != nil {
+		if err := w.Walk(context.Background()); err != nil {
 			t.Fatalf("Walk: %v", err)
 		}
 		out.walked = med.Info().Default()
@@ -143,7 +144,7 @@ func TestDemuxProbe(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			info, err := format.Probe(container.BytesSource(raw), "", nil)
+			info, err := format.Probe(context.Background(), container.BytesSource(raw), "", nil)
 			if err != nil {
 				t.Fatalf("probe: %v", err)
 			}
@@ -318,7 +319,7 @@ func TestSeekLossless(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				landed, err := med.SeekSample(target)
+				landed, err := med.SeekSample(context.Background(), target)
 				if err != nil {
 					med.Close()
 					t.Fatalf("seek to %d: %v", target, err)
@@ -405,7 +406,7 @@ func TestSeekLossy(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			landed, err := med.SeekSample(target)
+			landed, err := med.SeekSample(context.Background(), target)
 			if err != nil {
 				med.Close()
 				t.Fatalf("seek to %d: %v", target, err)

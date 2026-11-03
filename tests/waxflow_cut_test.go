@@ -22,7 +22,7 @@ func runCut(t *testing.T, src []byte, hint string, opts waxflow.TranscodeOptions
 	spans []waxflow.Span) ([]byte, *waxflow.CutPlan) {
 	t.Helper()
 	e := waxflow.New()
-	grid, err := e.PacketGrid(container.BytesSource(src), hint)
+	grid, err := e.PacketGrid(context.Background(), container.BytesSource(src), hint)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +322,7 @@ func TestCutOfADamagedSourceIsMalformedNotADecline(t *testing.T) {
 	// Truncated inside the first page's lacing table, which is what a partial
 	// download leaves behind. The grid probe is the first thing a cut-eligible
 	// request runs, so that is where the damage surfaces and the request stops.
-	if _, err := e.PacketGrid(container.BytesSource(src[:30]), "opus"); err == nil {
+	if _, err := e.PacketGrid(context.Background(), container.BytesSource(src[:30]), "opus"); err == nil {
 		t.Fatal("the grid probe read a truncated Ogg clean; this cell covers nothing")
 	} else if got := waxerr.CodeOf(err); got != waxerr.CodeMalformedInput {
 		t.Errorf("grid probe code = %q, want %q (%v)", got, waxerr.CodeMalformedInput, err)
@@ -365,7 +365,7 @@ func midTrimTrack(t *testing.T, src []byte) (container.Track, int) {
 	if track.Delay != 312 {
 		t.Fatalf("the fixture's pre-skip is %d, the cells below assume 312", track.Delay)
 	}
-	grid, err := waxflow.New().PacketGrid(container.BytesSource(src), "webm")
+	grid, err := waxflow.New().PacketGrid(context.Background(), container.BytesSource(src), "webm")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -532,7 +532,7 @@ func runMeasuredCut(t *testing.T, src []byte, measured container.Track, opts wax
 	spans []waxflow.Span) ([]byte, *waxflow.CutPlan) {
 	t.Helper()
 	e := waxflow.New()
-	grid, err := e.PacketGrid(container.BytesSource(src), "webm")
+	grid, err := e.PacketGrid(context.Background(), container.BytesSource(src), "webm")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -556,7 +556,7 @@ func runMeasuredCut(t *testing.T, src []byte, measured container.Track, opts wax
 func TestCutRefusesAMidStreamTrimMidWalk(t *testing.T) {
 	src := midTrimWebM(t, true)
 	e := waxflow.New()
-	grid, err := e.PacketGrid(container.BytesSource(src), "webm")
+	grid, err := e.PacketGrid(context.Background(), container.BytesSource(src), "webm")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -610,7 +610,7 @@ func TestCutRunReadsThePlansTrack(t *testing.T) {
 		t.Fatalf("a header open already reports Padding %d; the divergence this pins is gone", fresh.Padding)
 	}
 	e := waxflow.New()
-	grid, err := e.PacketGrid(container.BytesSource(src), "webm")
+	grid, err := e.PacketGrid(context.Background(), container.BytesSource(src), "webm")
 	if err != nil {
 		t.Fatal(err)
 	}

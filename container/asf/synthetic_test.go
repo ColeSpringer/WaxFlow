@@ -9,6 +9,7 @@ package asf_test
 // unverified rather than merely untested.
 
 import (
+	"context"
 	"errors"
 	"io"
 	"strings"
@@ -446,7 +447,7 @@ func TestAReadFailureIsSticky(t *testing.T) {
 		if !pro {
 			target = 3 * 2048
 		}
-		landed, err := d.SeekSample(0, target)
+		landed, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatalf("seek past the damaged packet: %v", err)
 		}
@@ -482,7 +483,7 @@ func TestSeekSurvivesNonMonotonicSendTimes(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, target := range []int64{0, 1, 100} {
-		landed, err := d.SeekSample(0, target)
+		landed, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatalf("seek to %d: %v", target, err)
 		}
@@ -519,7 +520,7 @@ func TestSeekWithNothingReadableAtTheLanding(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, target := range []int64{0, 1000, 1 << 40} {
-		landed, err := d.SeekSample(0, target)
+		landed, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatalf("seek to %d: %v", target, err)
 		}
@@ -641,7 +642,7 @@ func TestResumeSuppressionExpires(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if landed, err := d.SeekSample(0, 200*int64(b.rate)/1000); err == nil {
+	if landed, err := d.SeekSample(context.Background(), 0, 200*int64(b.rate)/1000); err == nil {
 		// A landing that found no object restarts at the start, and a walk
 		// from there reports the strays whatever the suppression does.
 		if landed == 0 {
@@ -725,7 +726,7 @@ func TestBackwardsPresentationTimesAreDamage(t *testing.T) {
 		if first == nil || errors.Is(first, io.EOF) {
 			t.Fatalf("strict mode accepted the fold (%v)", first)
 		}
-		if _, err := ds.SeekSample(0, 0); err != nil {
+		if _, err := ds.SeekSample(context.Background(), 0, 0); err != nil {
 			t.Logf("seek after the refusal: %v", err)
 		}
 		if again := readToErr(ds); again == nil || errors.Is(again, io.EOF) {
@@ -737,7 +738,7 @@ func TestBackwardsPresentationTimesAreDamage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := dt.SeekSample(0, 0); err != nil {
+		if _, err := dt.SeekSample(context.Background(), 0, 0); err != nil {
 			t.Fatal(err)
 		}
 		readToErr(dt)
@@ -797,7 +798,7 @@ func TestRunUpWhenAnObjectBarelyOutgrowsAPacket(t *testing.T) {
 		objectDur := pkt.Dur
 		for _, i := range []int64{5, 10, 15} {
 			target := i * 20 * int64(b.rate) / 1000
-			landed, err := d.SeekSample(0, target)
+			landed, err := d.SeekSample(context.Background(), 0, target)
 			if err != nil {
 				t.Fatal(err)
 			}

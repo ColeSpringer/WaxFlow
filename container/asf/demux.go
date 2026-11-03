@@ -1,6 +1,7 @@
 package asf
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"math"
@@ -135,8 +136,7 @@ func (r *reader) warnTime(off int64, format string, args ...any) error {
 // Demuxer reads one audio stream from an ASF source, emitting one packet per
 // media object.
 type Demuxer struct {
-	damage int // Damage warnings met, the list's cap aside (DamageCount)
-	opts   DemuxerOptions
+	opts DemuxerOptions
 	// syncOK reports whether a decoder can begin at a media object, from the
 	// codec that will decode it. Nil when every object is a start point.
 	syncOK func([]byte) bool
@@ -153,7 +153,7 @@ type Demuxer struct {
 
 	track    container.Track
 	tags     map[string][]string
-	warnings []container.Warning
+	warnings container.Warnings
 	// chapters is the Marker Object's list, read as stored and moved onto
 	// the playback timeline once the pre-roll is known; markerObject and
 	// markersOff record that one was read and where, for the reports the
@@ -239,31 +239,24 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	d.damage++
-	d.record(container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
+	d.warnings.Damage(off, msg)
 	return nil
 }
 
 // note records a Warning that Strict must not escalate: a limitation of this
 // build against a file that is well formed, rather than damage in the file.
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.record(container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
-}
-
-func (d *Demuxer) record(w container.Warning) {
-	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
-		d.warnings = append(d.warnings, w)
-	}
+	d.warnings.Note(off, fmt.Sprintf(format, args...))
 }
 
 // Tracks returns the selected audio track.
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns the tolerated oddities seen so far.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
+func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
 
 // DamageCount implements container.Damaged.
-func (d *Demuxer) DamageCount() int { return d.damage }
+func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
 
 // Tags returns the canonical tags parsed from the header's two tag objects.
 func (d *Demuxer) Tags() map[string][]string { return d.tags }
@@ -325,21 +318,21 @@ func (d *Demuxer) ensure() error {
 		if !d.haveCur {
 			return nil
 		}
-		ok, err := d.rd.fetch(&d.nxt)
+		ok, err := d.rd.fetch(context.Background(), &d.nxt)
 		if err != nil {
 			return err
 		}
 		d.haveNxt = ok
 	case !d.filled:
 		d.filled = true
-		ok, err := d.rd.fetch(&d.cur)
+		ok, err := d.rd.fetch(context.Background(), &d.cur)
 		if err != nil {
 			return err
 		}
 		if d.haveCur = ok; !ok {
 			return nil
 		}
-		if ok, err = d.rd.fetch(&d.nxt); err != nil {
+		if ok, err = d.rd.fetch(context.Background(), &d.nxt); err != nil {
 			return err
 		}
 		d.haveNxt = ok
@@ -363,8 +356,9 @@ func (d *Demuxer) tailDur(pts int64) int64 {
 }
 
 // fetch advances the packet cursor until one whole media object is assembled
-// into dst, reporting false at the end of the data.
-func (r *reader) fetch(dst *object) (bool, error) {
+// into dst, reporting false at the end of the data. ctx is read before every
+// packet loaded; one that has ended stops the fetch there as canceled.
+func (r *reader) fetch(ctx context.Context, dst *object) (bool, error) {
 	d := r.d
 	for {
 		if r.payIdx < len(r.pay) {
@@ -401,6 +395,9 @@ func (r *reader) fetch(dst *object) (bool, error) {
 				return false, err
 			}
 			return false, r.w.Err()
+		}
+		if err := container.WalkCanceled(ctx, "wma: "); err != nil {
+			return false, err
 		}
 		i := r.cursor
 		r.cursor++
@@ -507,7 +504,7 @@ func (d *Demuxer) packetOff(i int64) int64 {
 // reads resume at. A WMA v1/v2 track lands on the media object its frame
 // counts put there (seekCounted); the rest land on a packet boundary at a
 // stated presentation time and back up for the codec's run-up.
-func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
+func (d *Demuxer) SeekSample(ctx context.Context, track int, sample int64) (int64, error) {
 	if track != 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("wma: no track %d", track))
 	}
@@ -518,7 +515,7 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 		return 0, nil
 	}
 	if d.counter != nil {
-		landed, err := d.seekCounted(sample)
+		landed, err := d.seekCounted(ctx, sample)
 		if err != nil {
 			d.err = err
 			return 0, err
@@ -541,7 +538,7 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	}
 	if d.syncOK != nil {
 		var err error
-		if landing, err = d.syncLanding(target, sample); err != nil {
+		if landing, err = d.syncLanding(ctx, target, sample); err != nil {
 			d.err = err
 			return 0, err
 		}
@@ -603,8 +600,11 @@ func (d *Demuxer) objectIsSync() bool {
 // object in one to seven on stereo material and one in twenty-three to
 // twenty-nine on 5.1, and in the worst case by the start of the data. Only a
 // seek pays for it.
-func (d *Demuxer) syncLanding(target, sample int64) (int64, error) {
+func (d *Demuxer) syncLanding(ctx context.Context, target, sample int64) (int64, error) {
 	for i := target; i > 0; i-- {
+		if err := container.WalkCanceled(ctx, "wma: "); err != nil {
+			return 0, err
+		}
 		d.rewind(i)
 		if err := d.ensure(); err != nil {
 			return 0, err

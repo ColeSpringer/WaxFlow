@@ -1,6 +1,7 @@
 package waxflow
 
 import (
+	"context"
 	"testing"
 
 	"github.com/colespringer/waxflow/container"
@@ -10,8 +11,8 @@ import (
 // counted to the end or a sidecar restored complete leaves one.
 type walkedSource struct{ walks int }
 
-func (w *walkedSource) Walk() error  { w.walks++; return nil }
-func (w *walkedSource) Walked() bool { return true }
+func (w *walkedSource) Walk(context.Context) error { w.walks++; return nil }
+func (w *walkedSource) Walked() bool               { return true }
 
 // TestAWalkedSourceStillConfirms: a walk that finished some other way has not
 // put its measurement on the track yet; Walk is what does, at no cost then.
@@ -23,7 +24,7 @@ func TestAWalkedSourceStillConfirms(t *testing.T) {
 	if confirm == nil {
 		t.Fatal("a stated count on a walked source asked for no confirming")
 	}
-	if err := confirm(); err != nil || src.walks != 1 {
+	if err := confirm(context.Background()); err != nil || src.walks != 1 {
 		t.Errorf("the confirming ran %d walks (%v), want the source's own Walk", src.walks, err)
 	}
 	if confirmableLength(container.Track{Samples: 1000, SamplesExact: true}, src) != nil {

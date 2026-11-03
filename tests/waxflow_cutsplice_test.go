@@ -188,11 +188,11 @@ func TestCutSpliceTrimsAreExactOnMatroska(t *testing.T) {
 			if tc.format == "aac" {
 				raw, sp = aac, aacSpans
 			}
-			info, err := e.Probe(container.BytesSource(raw), tc.format, nil)
+			info, err := e.Probe(context.Background(), container.BytesSource(raw), tc.format, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			grid, err := e.PacketGrid(container.BytesSource(raw), tc.format)
+			grid, err := e.PacketGrid(context.Background(), container.BytesSource(raw), tc.format)
 			if err != nil {
 				t.Fatal(err)
 			}

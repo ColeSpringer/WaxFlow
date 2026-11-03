@@ -303,7 +303,7 @@ func TestAACMultichannelProbeUsesASC(t *testing.T) {
 	was := binary.BigEndian.Uint16(raw[off:])
 	binary.BigEndian.PutUint16(raw[off:], 2)
 
-	info, err := waxflow.New().Probe(container.BytesSource(raw), "m4a", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "m4a", nil)
 	if err != nil {
 		t.Fatalf("Probe: %v", err)
 	}
@@ -471,7 +471,7 @@ func TestAACConfig7Refused(t *testing.T) {
 	}
 
 	for _, tc := range []struct{ path, hint string }{{adts, "aac"}, {m4a, "m4a"}} {
-		_, err := waxflow.New().Probe(fileSource(t, tc.path), tc.hint, nil)
+		_, err := waxflow.New().Probe(context.Background(), fileSource(t, tc.path), tc.hint, nil)
 		if err == nil {
 			t.Errorf("%s: a channel configuration 7 stream was accepted", tc.hint)
 			continue

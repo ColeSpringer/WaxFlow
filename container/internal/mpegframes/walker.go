@@ -23,6 +23,7 @@ package mpegframes
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 
@@ -107,6 +108,9 @@ type Walker struct {
 	compared   bool
 	endFinding bool
 	skipped    bool
+	// refused is the error the owner's hook returned, kept: the walk is not
+	// done while it stands, and every extension returns it again.
+	refused error
 }
 
 // New returns a Walker reading up to end, which is the logical end of frame
@@ -155,7 +159,11 @@ func (w *Walker) warn(off int64, format string, args ...any) error {
 	if w.opts.Warn == nil {
 		return nil
 	}
-	return w.opts.Warn(off, fmt.Sprintf(format, args...))
+	if err := w.opts.Warn(off, fmt.Sprintf(format, args...)); err != nil {
+		w.refused = err
+		return err
+	}
+	return nil
 }
 
 func (w *Walker) note(off int64, format string, args ...any) {
@@ -430,6 +438,9 @@ func (w *Walker) kin(b []byte) (mp3.Header, bool) {
 // it a walk that never reads a packet, which is what a seek to the end or a
 // measure pass is, has nothing else keeping the window from growing.
 func (w *Walker) extend() (bool, error) {
+	if w.refused != nil {
+		return false, w.refused
+	}
 	if w.done {
 		return false, nil
 	}
@@ -500,35 +511,53 @@ func (w *Walker) recognizedTrailer(off int64) bool {
 
 // Complete finishes the walk: the index is extended until it stops growing,
 // each finding reported through the owner's hook as it is reached, and the
-// first error the hook returns ends it. A run already walked to its end
-// returns at once. Nothing is delivered, so the window slides behind the
+// first error the hook returns ends it, for this call and every later one.
+// ctx is read before every frame; one that has ended pauses the walk there
+// (container.Walker). Nothing is delivered, so the window slides behind the
 // walk at one window of residency whatever the run's length.
-func (w *Walker) Complete() error {
-	for {
+func (w *Walker) Complete(ctx context.Context) error {
+	if w.refused != nil {
+		return w.refused
+	}
+	for !w.done {
+		if err := container.WalkCanceled(ctx, w.opts.Prefix); err != nil {
+			return err
+		}
 		grew, err := w.extend()
 		if err != nil {
 			return err
 		}
 		if !grew {
-			return nil
+			break
 		}
 	}
+	return nil
 }
 
 // Done reports whether the index reaches the end of the run, by a walk or by
-// a verified restore of a complete snapshot. A walk the hook refused on its
-// last arm (trailing bytes, a truncated final frame) is done too: there is
-// nothing past it to index. One refused in the middle of the run is not.
-func (w *Walker) Done() bool { return w.done }
+// a verified restore of a complete snapshot. A walk the hook refused is not
+// done, wherever the refusal fell: Complete refuses again, and nothing settles
+// a length the owner refused.
+func (w *Walker) Done() bool { return w.done && w.refused == nil }
 
 // Frames is the number of frames the index holds, the run's whole count
 // once Done.
 func (w *Walker) Frames() int64 { return int64(len(w.idx)) }
 
 // frameNo extends the index up to frame n and reports the highest frame
-// number available (which is n when the run is long enough).
-func (w *Walker) frameNo(n int64) (int64, error) {
+// number available (which is n when the run is long enough). ctx is read
+// before every frame extended, as Complete reads it.
+func (w *Walker) frameNo(ctx context.Context, n int64) (int64, error) {
 	for int64(len(w.idx)) <= n {
+		if w.refused != nil {
+			return 0, w.refused
+		}
+		if w.done {
+			break // nothing left to index, whatever ctx says
+		}
+		if err := container.WalkCanceled(ctx, w.opts.Prefix); err != nil {
+			return 0, err
+		}
 		grew, err := w.extend()
 		if err != nil {
 			return 0, err
@@ -553,7 +582,7 @@ type Frame struct {
 // container.Packet.Data already carries. Past the last frame the walk can
 // reach it returns io.EOF.
 func (w *Walker) Frame(n int64) (Frame, error) {
-	lastNo, err := w.frameNo(n)
+	lastNo, err := w.frameNo(context.Background(), n) // a read carries no context
 	if err != nil {
 		return Frame{}, err
 	}
@@ -605,9 +634,10 @@ func syncFrame(h mp3.Header, frame []byte) bool {
 // regardless of the backoff depth.
 //
 // A target past the end of the run lands on the last frame's backoff; a run
-// with no frames at all lands at 0, where reads stay EOF.
-func (w *Walker) Landing(target int64) (int64, error) {
-	lastNo, err := w.frameNo(target)
+// with no frames at all lands at 0, where reads stay EOF. The index walk to
+// the target reads ctx per frame (container.Seeker).
+func (w *Walker) Landing(ctx context.Context, target int64) (int64, error) {
+	lastNo, err := w.frameNo(ctx, target)
 	if err != nil {
 		return 0, err
 	}

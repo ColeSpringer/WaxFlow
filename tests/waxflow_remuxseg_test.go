@@ -33,7 +33,7 @@ func collectRemuxSegments(t *testing.T, e *waxflow.Engine, raw []byte, hint stri
 func TestPacketGridReadsTheSourcesOwnGrid(t *testing.T) {
 	src := remuxFixture(t, waxflow.TranscodeOptions{Format: "opus"}, 48000)
 	e := waxflow.New()
-	grid, err := e.PacketGrid(container.BytesSource(src), "opus")
+	grid, err := e.PacketGrid(context.Background(), container.BytesSource(src), "opus")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestRemuxSegmentsShortFinalPacket(t *testing.T) {
 	e := waxflow.New()
 	opts := waxflow.TranscodeOptions{Format: "flac"}
 	track := probeTrack(t, src, "flac")
-	grid, err := e.PacketGrid(container.BytesSource(src), "flac")
+	grid, err := e.PacketGrid(context.Background(), container.BytesSource(src), "flac")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestRemuxSegmentsRestartIsByteIdentical(t *testing.T) {
 	e := waxflow.New()
 	opts := waxflow.TranscodeOptions{Format: "opus"}
 	track := probeTrack(t, src, "opus")
-	grid, err := e.PacketGrid(container.BytesSource(src), "opus")
+	grid, err := e.PacketGrid(context.Background(), container.BytesSource(src), "opus")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestRemuxSegmentsCountMatchesThePlan(t *testing.T) {
 	e := waxflow.New()
 	opts := waxflow.TranscodeOptions{Format: "opus"}
 	track := probeTrack(t, src, "opus")
-	grid, err := e.PacketGrid(container.BytesSource(src), "opus")
+	grid, err := e.PacketGrid(context.Background(), container.BytesSource(src), "opus")
 	if err != nil {
 		t.Fatal(err)
 	}

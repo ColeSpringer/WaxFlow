@@ -1,6 +1,7 @@
 package waxflow
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"math"
@@ -89,7 +90,7 @@ type measuredMedia struct {
 }
 
 // Walk and Walked forward format.Walker, as the engine's own wrappers do.
-func (m measuredMedia) Walk() error { return format.WalkMedia(m.Media) }
+func (m measuredMedia) Walk(ctx context.Context) error { return format.WalkMedia(ctx, m.Media) }
 
 func (m measuredMedia) Walked() bool { return format.MediaWalked(m.Media) }
 
@@ -163,6 +164,16 @@ func (m measuredMedia) Info() *format.Info {
 // downstream of decode, so it cuts at any sample, which is the whole reason
 // it is sample-exact where a packet-level cut would not be.
 func Slice(med format.Media, from, to int64) (format.Media, error) {
+	s, err := newSlice(context.Background(), med, from, to)
+	if err != nil {
+		return nil, err // nil, not a Media holding a nil span
+	}
+	return s, nil
+}
+
+// newSlice is Slice returning the concrete span, built under ctx, which bounds
+// the seek its first read runs (see ensureStart).
+func newSlice(ctx context.Context, med format.Media, from, to int64) (*slice, error) {
 	if med == nil {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: Slice of a nil Media")
 	}
@@ -171,7 +182,7 @@ func Slice(med format.Media, from, to int64) (format.Media, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &slice{med: med, from: from, limit: ToEnd, fmt: track.Fmt,
+	s := &slice{med: med, ctx: ctx, from: from, limit: ToEnd, fmt: track.Fmt,
 		blind: track.Samples < 0 || track.SamplesAdvisory, damage: damageIn(med)}
 	// limit is the clamp; the track's Samples is what it advertises. They
 	// differ on purpose for the open-ended form: an explicit end is a
@@ -442,6 +453,9 @@ type slice struct {
 	med  format.Media
 	info *format.Info
 	fmt  audio.Format
+	// ctx is the context the span was built under, which bounds the seek its
+	// first read runs: a read carries none, and the window is a request's.
+	ctx context.Context
 	// from is the window's first sample on med's timeline.
 	from int64
 	// limit is the window's length, ToEnd for an unbounded one. See Slice.
@@ -483,16 +497,16 @@ func (s *slice) Info() *format.Info {
 // It clears blind, because after this the span's cut points have been checked
 // against a length the payload stands behind, which is exactly what blind
 // means the absence of (see endOfSource).
-func (s *slice) ConfirmLength() error {
+func (s *slice) ConfirmLength(ctx context.Context) error {
 	declared := s.med.Info().Default().Samples
 	// An inner span confirms itself the same way, for Headroom's reason:
 	// nothing nests spans today, and the right answer for one is the same
 	// answer one level down rather than a guess.
 	if inner, ok := s.med.(format.LengthConfirmer); ok {
-		if err := inner.ConfirmLength(); err != nil {
+		if err := inner.ConfirmLength(ctx); err != nil {
 			return err
 		}
-	} else if err := format.WalkMedia(s.med); err != nil {
+	} else if err := format.WalkMedia(ctx, s.med); err != nil {
 		// Unconditional: a walk that finished some other way has measured
 		// the payload, and only Walk, free by then, puts that on the Media.
 		return err
@@ -552,11 +566,12 @@ func (s *slice) Close() error {
 	return s.med.Close()
 }
 
-// ensureStart positions med at the window's start, lazily.
+// ensureStart positions med at the window's start, lazily, under ctx.
 //
 // Lazily, and only when from is nonzero, so that a pure end trim (a span
 // starting at 0) neither seeks nor requires a seekable source. The
-// unbounded, unshifted slice is then free.
+// unbounded, unshifted slice is then free. A read carries no context, so a
+// first read positions under the one the span was built with (s.ctx).
 //
 // A failed seek leaves the span unstarted, so the next read attempts it
 // again, and that is the opposite of the call concat makes about its own
@@ -575,7 +590,7 @@ func (s *slice) Close() error {
 // What both answers share is the only part that is not a choice: a position
 // that never succeeded never becomes one a read can deliver samples against.
 // started latches after the seek here, exactly as it does in SeekSample.
-func (s *slice) ensureStart() error {
+func (s *slice) ensureStart(ctx context.Context) error {
 	if s.started {
 		return nil
 	}
@@ -583,7 +598,7 @@ func (s *slice) ensureStart() error {
 		s.started = true
 		return nil
 	}
-	landed, err := s.med.SeekSample(s.from)
+	landed, err := s.med.SeekSample(ctx, s.from)
 	if err != nil {
 		return err
 	}
@@ -626,7 +641,7 @@ func (s *slice) ReadChunk(dst *audio.Buffer) error {
 	case dst.Cap() == 0:
 		return waxerr.New(waxerr.CodeInvalidRequest, "waxflow: zero-capacity chunk buffer")
 	}
-	if err := s.ensureStart(); err != nil {
+	if err := s.ensureStart(s.ctx); err != nil {
 		return err
 	}
 	if s.limit >= 0 && s.pos >= s.limit {
@@ -703,7 +718,7 @@ func damageIn(med format.Media) int { return med.Info().Damage }
 // priming a chain for the span's sample 0 asks for. Everything below the
 // window is still the source's own audio, so the seek is an ordinary one
 // once rebased. See Headroomer.
-func (s *slice) SeekSample(target int64) (int64, error) {
+func (s *slice) SeekSample(ctx context.Context, target int64) (int64, error) {
 	// The bound is what Headroom advertises, not from alone: the two have to
 	// agree, or a caller that primes by exactly the headroom it was told
 	// about gets refused for asking.
@@ -721,7 +736,7 @@ func (s *slice) SeekSample(target int64) (int64, error) {
 	if s.limit >= 0 {
 		target = min(target, s.limit)
 	}
-	landed, err := s.med.SeekSample(s.from + target)
+	landed, err := s.med.SeekSample(ctx, s.from+target)
 	if err != nil {
 		return 0, err
 	}
@@ -1702,14 +1717,14 @@ func (c *concat) fill(dst *audio.Buffer) error {
 // error again instead of samples labelled with a position they do not have.
 // Another seek clears it, because a seek is what puts the timeline back
 // somewhere known.
-func (c *concat) SeekSample(target int64) (int64, error) {
+func (c *concat) SeekSample(ctx context.Context, target int64) (int64, error) {
 	switch {
 	case c.closed:
 		return 0, waxerr.New(waxerr.CodeInternal, "waxflow: SeekSample on a closed timeline")
 	case target < 0:
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: negative seek target")
 	}
-	pos, err := c.seekTo(target)
+	pos, err := c.seekTo(ctx, target)
 	if err != nil {
 		c.closeMember()
 		c.releaseBlend()
@@ -1722,7 +1737,7 @@ func (c *concat) SeekSample(target int64) (int64, error) {
 
 // seekTo is SeekSample's body, split out so every failure inside it lands on
 // the one latch above rather than each error path having to remember.
-func (c *concat) seekTo(target int64) (int64, error) {
+func (c *concat) seekTo(ctx context.Context, target int64) (int64, error) {
 	// A blend describes where the stream was, and a seek is what makes that
 	// wrong. Dropped before anything else, so no path below has to remember.
 	c.releaseBlend()
@@ -1742,7 +1757,7 @@ func (c *concat) seekTo(target int64) (int64, error) {
 	// are a blend of two members, so they cannot be had by positioning one.
 	// Unreachable at Crossfade 0, where no member has a head zone.
 	if i > 0 && off < c.opts.Crossfade {
-		return c.seekIntoBlend(i, off)
+		return c.seekIntoBlend(ctx, i, off)
 	}
 	if c.med == nil || c.cur != i {
 		if err := c.closeMember(); err != nil {
@@ -1754,7 +1769,7 @@ func (c *concat) seekTo(target int64) (int64, error) {
 	} else if err := c.buildChain(); err != nil {
 		return 0, err
 	}
-	landed, err := c.seekBody(off)
+	landed, err := c.seekBody(ctx, off)
 	if err != nil {
 		return 0, err
 	}
@@ -1777,8 +1792,8 @@ func (c *concat) seekTo(target int64) (int64, error) {
 // Landing exactly at the body is legal and needs no case of its own: bound()
 // returns 0 there and the ordinary capture, advance and blend produce the zone.
 // Unreachable at Crossfade 0, where the body is the whole member.
-func (c *concat) seekBody(local int64) (int64, error) {
-	landed, err := c.seekMember(local)
+func (c *concat) seekBody(ctx context.Context, local int64) (int64, error) {
+	landed, err := c.seekMember(ctx, local)
 	if err != nil {
 		return 0, err
 	}
@@ -1828,7 +1843,7 @@ func (c *concat) seekBody(local int64) (int64, error) {
 // chain's own prime before the first kept sample, which dwarfs any FIR window,
 // so the cold-chain transient at zone[0] is discarded before p0 rather than
 // served.
-func (c *concat) seekIntoBlend(i int, off int64) (int64, error) {
+func (c *concat) seekIntoBlend(ctx context.Context, i int, off int64) (int64, error) {
 	if err := c.closeMember(); err != nil {
 		return 0, err
 	}
@@ -1839,7 +1854,7 @@ func (c *concat) seekIntoBlend(i int, off int64) (int64, error) {
 	// means the stream ended first (a seek past a Media's real end lands at
 	// that end), which captureTail refuses. So this lands exactly at the
 	// body's end, and the tail captured below is the full X the zone declares.
-	landed, err := c.seekBody(c.lens[i-1] - c.opts.Crossfade)
+	landed, err := c.seekBody(ctx, c.lens[i-1]-c.opts.Crossfade)
 	if err != nil {
 		return 0, err
 	}
@@ -2200,9 +2215,9 @@ func blendFrames(dst, out *audio.Buffer, off, x int) {
 
 // seekMember positions the open member at local, its own position on the
 // envelope timeline, and returns where it landed.
-func (c *concat) seekMember(local int64) (int64, error) {
+func (c *concat) seekMember(ctx context.Context, local int64) (int64, error) {
 	if c.chain == nil {
-		return c.med.SeekSample(local)
+		return c.med.SeekSample(ctx, local)
 	}
 	// The member's own timeline runs at its source rate. Map back to it,
 	// flooring and then backing off one more sample so the landing is at or
@@ -2215,7 +2230,7 @@ func (c *concat) seekMember(local int64) (int64, error) {
 			src--
 		}
 	}
-	landed, err := c.med.SeekSample(src)
+	landed, err := c.med.SeekSample(ctx, src)
 	if err != nil {
 		return 0, err
 	}

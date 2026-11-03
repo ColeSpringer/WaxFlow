@@ -1,6 +1,7 @@
 package mka
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -33,7 +34,7 @@ func TestWalkKeepsThePacketPosition(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := pkt.PTS + pkt.Dur
-	if err := d.Walk(); err != nil {
+	if err := d.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !d.Walked() {

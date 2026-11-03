@@ -2,6 +2,7 @@ package mpegframes
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -383,7 +384,7 @@ func TestRefusalsCarryTheOwnersPrefix(t *testing.T) {
 func TestLandingBacksOffForTheReservoir(t *testing.T) {
 	w, _, _ := begin(t, frames(200), &walkOpts{})
 	const target = 150
-	land, err := w.Landing(target)
+	land, err := w.Landing(context.Background(), target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +403,7 @@ func TestLandingBacksOffForTheReservoir(t *testing.T) {
 	// Targets at or before the head clamp rather than going negative, and a
 	// target past the end lands on the last frame's backoff.
 	for _, target := range []int64{0, 1, 1 << 40} {
-		land, err := w.Landing(target)
+		land, err := w.Landing(context.Background(), target)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -566,7 +567,7 @@ func TestLandingLeavesTheWindowBounded(t *testing.T) {
 	const n = 2000
 	w, src := countedWalk(t, frames(n))
 	src.Reset()
-	if _, err := w.Landing(n - 10); err != nil {
+	if _, err := w.Landing(context.Background(), n-10); err != nil {
 		t.Fatal(err)
 	}
 	if resident, capacity := w.w.Resident(); resident > 2*srcwin.Chunk+frameLen || capacity > 3*srcwin.Chunk {
@@ -613,7 +614,7 @@ func TestCompleteFinishesTheWalk(t *testing.T) {
 	if w.Done() {
 		t.Fatal("Done before any walk")
 	}
-	if err := w.Complete(); err != nil {
+	if err := w.Complete(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !w.Done() {
@@ -622,7 +623,7 @@ func TestCompleteFinishesTheWalk(t *testing.T) {
 	if len(o.msgs) != 1 || o.msgs[0] != "417 unparsable bytes skipped" {
 		t.Fatalf("findings = %v, want the skipped frame once", o.msgs)
 	}
-	if err := w.Complete(); err != nil || len(o.msgs) != 1 {
+	if err := w.Complete(context.Background()); err != nil || len(o.msgs) != 1 {
 		t.Errorf("a second Complete returned %v and left %d findings; a finished walk reports nothing again", err, len(o.msgs))
 	}
 	if got := collect(t, w); len(got) != 5 {
@@ -632,7 +633,7 @@ func TestCompleteFinishesTheWalk(t *testing.T) {
 	boom := errors.New("strict")
 	strict := walkOpts{fail: boom}
 	ws, _, _ := begin(t, data, &strict)
-	if err := ws.Complete(); !errors.Is(err, boom) {
+	if err := ws.Complete(context.Background()); !errors.Is(err, boom) {
 		t.Errorf("Complete under a refusing hook returned %v, want the hook's error", err)
 	}
 	if ws.Done() {
@@ -642,7 +643,7 @@ func TestCompleteFinishesTheWalk(t *testing.T) {
 	// A restored complete snapshot is a finished walk.
 	long := frames(IdxMinFrames + 50)
 	full, _, _ := begin(t, long, &walkOpts{})
-	if err := full.Complete(); err != nil {
+	if err := full.Complete(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	restored, _, _ := begin(t, long, &walkOpts{})
@@ -688,7 +689,7 @@ func TestDeclaredCountIsCheckedAgainstTheRun(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var o walkOpts
 			w, _, _ := begin(t, tc.data, &o)
-			if err := w.Complete(); err != nil {
+			if err := w.Complete(context.Background()); err != nil {
 				t.Fatalf("Complete: %v", err)
 			}
 			if got := joined(o.msgs); got != tc.warn {
@@ -757,7 +758,7 @@ func TestImpossibleDeclaredCountIsIgnored(t *testing.T) {
 		t.Errorf("findings = %q, want %q", got, want)
 	}
 	// An ignored count is not compared against anything.
-	if err := w.Complete(); err != nil {
+	if err := w.Complete(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(o.msgs) != 1 || len(o.notes) != 0 {
@@ -775,7 +776,7 @@ func TestRestoredIndexSettlesTheCount(t *testing.T) {
 	const n = IdxMinFrames + 50
 	data := append(xingFrame(n+9, false, 0, 0), frames(n)...)
 	build, _, _ := begin(t, data, &walkOpts{})
-	if err := build.Complete(); err != nil {
+	if err := build.Complete(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	blob := build.Snapshot()
@@ -802,7 +803,7 @@ func TestRestoredIndexSettlesTheCount(t *testing.T) {
 		t.Errorf("the declined blob left the walker at done=%v frames=%d", sw.Done(), sw.Frames())
 	}
 	strict.msgs = nil
-	if err := sw.Complete(); !errors.Is(err, strict.fail) {
+	if err := sw.Complete(context.Background()); !errors.Is(err, strict.fail) {
 		t.Errorf("the rebuilt walk = %v, want the refusal at its own end", err)
 	}
 	if got := joined(strict.msgs); got != want {
@@ -830,7 +831,7 @@ func TestADamagedRunIsNeverSnapshottedComplete(t *testing.T) {
 
 	var cold walkOpts
 	w, _, _ := begin(t, data, &cold)
-	if err := w.Complete(); err != nil {
+	if err := w.Complete(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !w.Done() {
@@ -853,7 +854,7 @@ func TestADamagedRunIsNeverSnapshottedComplete(t *testing.T) {
 	if w2.Done() {
 		t.Error("a run that ended on damage was restored as complete")
 	}
-	if err := w2.Complete(); err != nil {
+	if err := w2.Complete(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(warm.notes) != len(cold.notes) || len(warm.msgs) != len(cold.msgs) {

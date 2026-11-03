@@ -740,7 +740,7 @@ func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, o
 		if l, m := chain.Ratio(); l != m {
 			srcPos = floorDiv(pChain*int64(m), int64(l)) - 1
 		}
-		if _, err := med.SeekSample(srcPos); err != nil {
+		if _, err := med.SeekSample(ctx, srcPos); err != nil {
 			return nil, err
 		}
 	}

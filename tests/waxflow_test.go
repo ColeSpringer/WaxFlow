@@ -317,7 +317,7 @@ func TestTranscodeRF64RoundTrip(t *testing.T) {
 	}
 
 	e := waxflow.New()
-	info, err := e.Probe(container.BytesSource(ws.Buf), "", &waxflow.ProbeOptions{Strict: true})
+	info, err := e.Probe(context.Background(), container.BytesSource(ws.Buf), "", &waxflow.ProbeOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}

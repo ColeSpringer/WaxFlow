@@ -163,7 +163,7 @@ func TestWavPackProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	// No extension hint: the driver has to be found by magic.
-	info, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", nil)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}

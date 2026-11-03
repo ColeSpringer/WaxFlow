@@ -2,6 +2,7 @@ package mka_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"io"
 	"os"
@@ -122,7 +123,7 @@ func TestOpenReadsTheHead(t *testing.T) {
 		// Anti-vacuous: the walk this open skipped is a whole-file read, so
 		// the same source reads past one window once Walk runs. Without this
 		// the cell above would pass on a demuxer that read nothing at all.
-		if err := d.Walk(); err != nil {
+		if err := d.Walk(context.Background()); err != nil {
 			t.Fatalf("Walk: %v", err)
 		}
 		if cs.Bytes <= srcwin.Chunk {
@@ -154,7 +155,7 @@ func TestOpenWithNoDuration(t *testing.T) {
 		t.Fatalf("opened track = %d (exact %v advisory %v), want -1 with neither flag",
 			tr.Samples, tr.SamplesExact, tr.SamplesAdvisory)
 	}
-	if err := d.Walk(); err != nil {
+	if err := d.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	got := d.Tracks()[0]
@@ -186,7 +187,7 @@ func TestOpenOnVorbis(t *testing.T) {
 			if tr := d.Tracks()[0]; tr.SamplesExact {
 				t.Errorf("opened track reports %d exact; the walk has not run", tr.Samples)
 			}
-			if err := d.Walk(); err != nil {
+			if err := d.Walk(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			got := d.Tracks()[0]
@@ -210,7 +211,7 @@ func TestReadDeliversTheGaplessRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	strict, err := format.Probe(container.BytesSource(raw), "", &format.Options{Strict: true})
+	strict, err := format.Probe(context.Background(), container.BytesSource(raw), "", &format.Options{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +255,7 @@ func TestReadDeliversTheGaplessRun(t *testing.T) {
 		t.Errorf("read delivered %d frames with no walk, want the gapless %d", count, want.Samples)
 	}
 
-	if err := w.Walk(); err != nil {
+	if err := w.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	got := med.Info().Default()

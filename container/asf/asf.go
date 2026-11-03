@@ -82,10 +82,6 @@ const (
 	// clears days of audio; past it the index is dropped and seeking falls
 	// back to bisection, which needs no table at all.
 	maxIndexEntries = 1 << 20
-	// maxWarnings caps the tolerated-damage list. Seeking re-walks spans a
-	// linear read already crossed, so a damaged file would otherwise
-	// accumulate the same warning without bound.
-	maxWarnings = 64
 	// maxPrerollMS bounds the File Properties pre-roll, which shifts every
 	// presentation time in the file. Writers use a few seconds; a crafted one
 	// past this is ignored rather than allowed to push the whole timeline.

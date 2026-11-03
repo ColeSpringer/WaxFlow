@@ -8,6 +8,7 @@ package oracletest
 // rather than about a decoder that might arrive.
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,7 +32,7 @@ func TestRefusalUsesWaxlabelsCodecName(t *testing.T) {
 	if name == "" {
 		t.Fatal("waxlabel names no codec for an MP2 WAV")
 	}
-	_, err = waxflow.New().Probe(container.BytesSource(raw), "", nil)
+	_, err = waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", nil)
 	if err == nil {
 		t.Fatal("waxflow decoded an MP2 WAV; this build has no Layer II decoder")
 	}

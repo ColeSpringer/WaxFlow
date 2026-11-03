@@ -129,7 +129,7 @@ func TestHEAACv2SeekDifferential(t *testing.T) {
 	}
 	defer med.Close()
 	const target = 70000
-	landed, err := med.SeekSample(target)
+	landed, err := med.SeekSample(context.Background(), target)
 	if err != nil {
 		t.Fatalf("seek: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestHEAACv2FragmentedSeek(t *testing.T) {
 	}
 	defer med.Close()
 	const target = 70000
-	landed, err := med.SeekSample(target)
+	landed, err := med.SeekSample(context.Background(), target)
 	if err != nil {
 		t.Fatalf("seek: %v", err)
 	}

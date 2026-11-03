@@ -298,7 +298,7 @@ func writeUndeclaredADTS(t *testing.T, dir, name string, repeats int) (ref strin
 		t.Fatal(err)
 	}
 	e := waxflow.New()
-	info, err := e.Probe(container.BytesSource(raw), "aac", nil)
+	info, err := e.Probe(context.Background(), container.BytesSource(raw), "aac", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +311,7 @@ func writeUndeclaredADTS(t *testing.T, dir, name string, repeats int) (ref strin
 		t.Fatal(err)
 	}
 	defer med.Close()
-	if err := med.(format.Walker).Walk(); err != nil {
+	if err := med.(format.Walker).Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	return "lib/" + name, med.Info().Default().Samples
@@ -336,7 +336,7 @@ func writeDoubledMP3(t *testing.T, dir, name string) (ref string, declared, real
 		t.Fatal(err)
 	}
 	e := waxflow.New()
-	info, err := e.Probe(container.BytesSource(doubled), "mp3", nil)
+	info, err := e.Probe(context.Background(), container.BytesSource(doubled), "mp3", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +355,7 @@ func writeDoubledMP3(t *testing.T, dir, name string) (ref string, declared, real
 	}
 	defer med.Close()
 	if w, ok := med.(format.Walker); ok {
-		if err := w.Walk(); err != nil {
+		if err := w.Walk(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -725,7 +725,7 @@ func writeShortMP3(t *testing.T, dir, name string) (ref string, declared int64) 
 	if err := os.WriteFile(filepath.Join(dir, name), short, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	info, err := waxflow.New().Probe(container.BytesSource(short), "mp3", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(short), "mp3", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1017,7 +1017,7 @@ func transcodedChapterTitles(t *testing.T, m meta.Mapper) []string {
 	if err != nil {
 		t.Fatalf("reading the output: %v", err)
 	}
-	info, err := format.Probe(bytes.NewReader(raw), out.Container, nil)
+	info, err := format.Probe(context.Background(), bytes.NewReader(raw), out.Container, nil)
 	if err != nil {
 		t.Fatalf("probing the output: %v", err)
 	}

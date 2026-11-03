@@ -1,6 +1,7 @@
 package riff
 
 import (
+	"context"
 	"errors"
 	"io"
 	"testing"
@@ -143,7 +144,7 @@ func FuzzDemux(f *testing.F) {
 			// backoff reaches where it holds frames.
 			if track.Samples > 0 {
 				target := track.Samples / 2
-				landed, err := d.SeekSample(0, target)
+				landed, err := d.SeekSample(context.Background(), 0, target)
 				if err != nil {
 					// A frame walk builds its index on demand, so a seek is
 					// the call that reaches damage further down the payload,

@@ -11,6 +11,7 @@ package oracletest
 // depth is checked against the cell's known value instead.
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -37,7 +38,7 @@ func TestWaxlabelAgreesOnWMAPro(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			info, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+			info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", nil)
 			if err != nil {
 				t.Fatalf("probe: %v", err)
 			}

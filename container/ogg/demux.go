@@ -2,11 +2,11 @@ package ogg
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"math"
-	"slices"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/flac"
@@ -81,17 +81,14 @@ type Demuxer struct {
 	mapping  mapping
 	serial   uint32
 	track    container.Track
-	warnings []container.Warning
+	warnings container.Warnings
 
 	// headerPackets is the count of header packets after the identification
 	// packet, or 0 in detect mode (find audio by the mapping's isAudio).
 	headerPackets int
 
 	firstData int64 // offset of the page where the first audio packet begins
-	// damage counts the Damage warnings recorded, those the list's cap and
-	// de-duplication keep out included.
-	damage int
-	// lostAt and lastPage are damage and the page offset when the last packet
+	// lostAt and lastPage are the damage count and the page offset when the last packet
 	// was read, so a gap after it is known to follow damage (see Lost).
 	lostAt   int
 	lastPage int64
@@ -174,8 +171,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	d.damage++
-	d.record(container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
+	d.warnings.Damage(off, msg)
 	return nil
 }
 
@@ -183,22 +179,11 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 // something with a well-formed file that a caller should know about, rather
 // than damage in the file. See [container.Note].
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.record(container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
+	d.warnings.Note(off, fmt.Sprintf(format, args...))
 }
 
 // lookAheadBytes bounds how far a check of the first page's granule reads.
 const lookAheadBytes = 1 << 17
-
-// maxWarnings caps the list, as the other tolerant demuxers in this tree do.
-const maxWarnings = 64
-
-// record lists w unless it is listed already or the list is full, so a read
-// that crosses the same damage again after a seek records nothing new.
-func (d *Demuxer) record(w container.Warning) {
-	if len(d.warnings) < maxWarnings && !slices.Contains(d.warnings, w) {
-		d.warnings = append(d.warnings, w)
-	}
-}
 
 // readPage reads and CRC-checks the page at off. It does not resync; callers
 // own that policy. A nil page with nil error means end of file.
@@ -489,7 +474,7 @@ func (d *Demuxer) parse() error {
 	d.seg, d.segOff = 0, 0
 	d.page = page{}
 	first := firstPage{granule: -1}
-	audioDamage, audioFrom := d.damage, d.off // what came before the audio
+	audioDamage, audioFrom := d.warnings.DamageCount(), d.off // what came before the audio
 	for skipped := 0; ; skipped++ {
 		if skipped > maxHeaderPackets {
 			return malformed("more than %d header packets", maxHeaderPackets)
@@ -509,7 +494,7 @@ func (d *Demuxer) parse() error {
 			if err := d.mapping.parseHeader(pkt); err != nil {
 				return err
 			}
-			audioDamage, audioFrom = d.damage, d.page.off+d.page.size
+			audioDamage, audioFrom = d.warnings.DamageCount(), d.page.off+d.page.size
 			continue
 		}
 		if !d.mapping.isAudio(pkt) {
@@ -525,7 +510,7 @@ func (d *Demuxer) parse() error {
 			}
 			return malformed("first audio packet has no valid timing")
 		}
-		if fm, ok := d.mapping.(*flacMapping); ok && fm.origin > 0 && d.damage > audioDamage &&
+		if fm, ok := d.mapping.(*flacMapping); ok && fm.origin > 0 && d.warnings.DamageCount() > audioDamage &&
 			fm.origin <= flac.MaxSamplesIn(d.pktPage-audioFrom) {
 			// Damage took the frames before this one, so it is a hole from
 			// 0, not a stream starting late.
@@ -716,12 +701,13 @@ func (d *Demuxer) nextGranulePage() (granule, samples int64, eos, damaged bool, 
 	pg.body = append([]byte(nil), d.page.body...)
 	off, seg, segOff, pktPage, skipCont, ended := d.off, d.seg, d.segOff, d.pktPage, d.skipCont, d.eos
 	partial := append([]byte(nil), d.partial...)
-	strict, warned, damage := d.opts.Strict, len(d.warnings), d.damage
+	strict, mark, damage := d.opts.Strict, d.warnings.Mark(), d.warnings.DamageCount()
 	d.opts.Strict, d.lookLimit, d.lookCut = false, pg.off+lookAheadBytes, false
 	defer func() {
 		d.page, d.off, d.seg, d.segOff, d.pktPage, d.skipCont, d.eos = pg, off, seg, segOff, pktPage, skipCont, ended
 		d.partial = append(d.partial[:0], partial...)
-		d.opts.Strict, d.warnings, d.damage = strict, d.warnings[:warned], damage
+		d.opts.Strict = strict
+		d.warnings.Rollback(mark)
 		d.lookLimit, d.lookCut = 0, false
 		d.mapping.resetTiming()
 		d.mapping.packetTiming(d.pending, 0)
@@ -756,7 +742,7 @@ func (d *Demuxer) nextGranulePage() (granule, samples int64, eos, damaged bool, 
 
 // damagedSince reports whether damage has been recorded past the first n
 // warnings.
-func (d *Demuxer) damagedSince(n int) bool { return d.damage > n }
+func (d *Demuxer) damagedSince(n int) bool { return d.warnings.DamageCount() > n }
 
 // lastOfPage reports whether the packet nextPacket just returned is the last
 // to complete on its page, so the page granule is where it ends.
@@ -784,10 +770,10 @@ func joinNames(names []string) string {
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns damage tolerated during parsing.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
+func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
 
 // DamageCount implements container.Damaged.
-func (d *Demuxer) DamageCount() int { return d.damage }
+func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
 
 // ReadPacket yields one codec packet. Packet data is reused across calls.
 func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
@@ -800,7 +786,7 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 	if d.havePending {
 		data, pts, dur, sync, lost = d.pending, d.pendingPTS, d.pendingDur, d.pendingSync, d.pendingLost
 		d.havePending, d.pendingLost = false, 0
-		d.lostAt, d.lastPage = d.damage, d.page.off
+		d.lostAt, d.lastPage = d.warnings.DamageCount(), d.page.off
 	} else {
 		for {
 			p, err := d.nextPacket()
@@ -828,7 +814,7 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 				}
 			}
 			d.running = pts + dur
-			d.lostAt, d.lastPage = d.damage, d.page.off
+			d.lostAt, d.lastPage = d.warnings.DamageCount(), d.page.off
 			break
 		}
 	}
@@ -853,7 +839,7 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 // one inside what its bytes can hold; numbers past that vouch for nothing, so
 // the packet is joined on. Either way it warns.
 func (d *Demuxer) gap(pts int64) (int64, error) {
-	if d.damage > d.lostAt {
+	if d.warnings.DamageCount() > d.lostAt {
 		if pts-d.running <= flac.MaxSamplesIn(d.page.off-d.lastPage) {
 			return pts - d.running, nil
 		}
@@ -874,7 +860,7 @@ func (d *Demuxer) gap(pts int64) (int64, error) {
 // position, both on the raw timeline. Self-timing mappings (FLAC) walk frames
 // reading their own positions; accumulating mappings (Vorbis, Opus) anchor to
 // page granules and land a mapping-defined pre-roll before the target.
-func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
+func (d *Demuxer) SeekSample(_ context.Context, track int, sample int64) (int64, error) {
 	if track != 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("ogg: no track %d", track))
 	}

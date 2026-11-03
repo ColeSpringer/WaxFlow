@@ -2,6 +2,7 @@ package riff
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"strings"
@@ -554,13 +555,13 @@ func TestBlockSeekLandsOnABlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := td.SeekSample(0, 1<<20); got > td.Tracks()[0].Samples {
+	if got, _ := td.SeekSample(context.Background(), 0, 1<<20); got > td.Tracks()[0].Samples {
 		t.Errorf("a past-the-end seek landed at %d, past the track's %d", got, td.Tracks()[0].Samples)
 	}
 	for _, tc := range []struct{ target, want int64 }{
 		{0, 0}, {1, 0}, {32, 0}, {33, 33}, {70, 66}, {1 << 20, 4 * spb},
 	} {
-		got, err := d.SeekSample(0, tc.target)
+		got, err := d.SeekSample(context.Background(), 0, tc.target)
 		if err != nil {
 			t.Fatalf("SeekSample(%d): %v", tc.target, err)
 		}

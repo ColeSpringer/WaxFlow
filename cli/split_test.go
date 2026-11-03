@@ -237,7 +237,7 @@ func TestSplitCueRejoinsGaplessly(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		info, err := e.Probe(container.BytesSource(raw), "flac", nil)
+		info, err := e.Probe(context.Background(), container.BytesSource(raw), "flac", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -628,7 +628,7 @@ func TestSplitCueLeadInBecomesAPiece(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		info, err := e.Probe(container.BytesSource(raw), "flac", nil)
+		info, err := e.Probe(context.Background(), container.BytesSource(raw), "flac", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -802,7 +802,7 @@ func TestSplitPieceExtension(t *testing.T) {
 			}
 			// The extension has to be the one the bytes are, not just a
 			// plausible string: probing by it is what a player does.
-			if _, err := waxflow.New().Probe(container.BytesSource(piece), strings.TrimPrefix(filepath.Ext(path), "."), nil); err != nil {
+			if _, err := waxflow.New().Probe(context.Background(), container.BytesSource(piece), strings.TrimPrefix(filepath.Ext(path), "."), nil); err != nil {
 				t.Errorf("%s does not hold what its name says: %v", tc.want, err)
 			}
 		})
@@ -834,7 +834,7 @@ func TestSplitWavPackWritesItsOwnTags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := waxflow.New().Probe(container.BytesSource(piece), "wv", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(piece), "wv", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -930,7 +930,7 @@ func TestSplitMeasuresAnUnderDeclaredSource(t *testing.T) {
 	}
 	// The fixture only tests anything if the headers really do under-declare,
 	// and the probe is what says whether they do.
-	info, err := waxflow.New().Probe(container.BytesSource(raw), "mka", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "mka", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -953,7 +953,7 @@ func TestSplitMeasuresAnUnderDeclaredSource(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		info, err := e.Probe(container.BytesSource(raw), "flac", nil)
+		info, err := e.Probe(context.Background(), container.BytesSource(raw), "flac", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -984,7 +984,7 @@ func TestSplitCutsInsideAnAdvisoryGap(t *testing.T) {
 		if err := os.WriteFile(src, raw, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		info, err := waxflow.New().Probe(container.BytesSource(raw), "mka", nil)
+		info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "mka", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1004,7 +1004,7 @@ func TestSplitCutsInsideAnAdvisoryGap(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			pi, err := e.Probe(container.BytesSource(raw), "flac", nil)
+			pi, err := e.Probe(context.Background(), container.BytesSource(raw), "flac", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1103,7 +1103,7 @@ func TestSplitNeverReportsAnEmptyPiece(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := waxflow.New().Probe(container.BytesSource(b), "flac", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(b), "flac", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1128,7 +1128,7 @@ func TestSplitMeasuresASourceWithNoDeclaredLength(t *testing.T) {
 	if err := os.WriteFile(src, b.Bytes(), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	info, err := waxflow.New().Probe(container.BytesSource(b.Bytes()), "mka", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(b.Bytes()), "mka", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1148,7 +1148,7 @@ func TestSplitMeasuresASourceWithNoDeclaredLength(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		pieceInfo, err := e.Probe(container.BytesSource(raw), "flac", nil)
+		pieceInfo, err := e.Probe(context.Background(), container.BytesSource(raw), "flac", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1422,7 +1422,7 @@ func TestSplitAPEWritesItsOwnTags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := waxflow.New().Probe(container.BytesSource(piece), "ape", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(piece), "ape", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1450,7 +1450,7 @@ func (m *measureFailMedia) Close() error { return nil }
 func (m *measureFailMedia) ReadChunk(*audio.Buffer) error {
 	return errors.New("measureFailMedia: read")
 }
-func (m *measureFailMedia) SeekSample(int64) (int64, error) { return 0, m.err }
+func (m *measureFailMedia) SeekSample(context.Context, int64) (int64, error) { return 0, m.err }
 
 // TestMeasureKeepsTheWalkCode pins that measuring reports the walk's own
 // classification. A damaged file fails its exact-length walk as
@@ -1511,7 +1511,7 @@ func TestSplitCueSkipsADataTrack(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		info, err := e.Probe(container.BytesSource(raw), "flac", nil)
+		info, err := e.Probe(context.Background(), container.BytesSource(raw), "flac", nil)
 		if err != nil {
 			t.Fatal(err)
 		}

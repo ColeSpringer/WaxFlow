@@ -8,6 +8,7 @@ package waxflow_test
 // writes.
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,7 +32,7 @@ func TestReferenceOggFLACFixtureDecodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := format.Probe(container.BytesSource(raw), "oga", nil)
+	info, err := format.Probe(context.Background(), container.BytesSource(raw), "oga", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +70,7 @@ func TestReferenceOggFLACDeclaresItsTotal(t *testing.T) {
 	if total := oggFLACStreamInfo(t, raw).Samples; total == 0 {
 		t.Fatal("the reference wrote STREAMINFO total 0; this cell needs a declared total")
 	}
-	info, err := format.Probe(container.BytesSource(raw), "oga", nil)
+	info, err := format.Probe(context.Background(), container.BytesSource(raw), "oga", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

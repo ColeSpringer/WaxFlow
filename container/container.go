@@ -18,6 +18,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"slices"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
@@ -394,9 +395,11 @@ type Demuxer interface {
 // point at or before the target (its first frame starts later, say after
 // tolerated damage at the head), the landing is the earliest sync point
 // and may exceed the target; consumers treat the returned position as
-// authoritative either way.
+// authoritative either way. A seek that runs a walk to place its landing
+// (Walker) reads ctx as the walk does, and a context that has ended stops it
+// with CodeCanceled, the walk paused where the next seek or Walk resumes it.
 type Seeker interface {
-	SeekSample(track int, sample int64) (landed int64, err error)
+	SeekSample(ctx context.Context, track int, sample int64) (landed int64, err error)
 }
 
 // Indexer is implemented by demuxers whose seeking builds an expensive
@@ -507,12 +510,83 @@ func DamageOf(d Demuxer) int {
 // (Packet.Padding), so its exact total can wait for Walk. A read finds damage
 // where it lies. Walk leaves the packet position where it was.
 //
+// Walk reads ctx before every step (a frame, a moof, an element, a packet);
+// a context that has ended pauses the walk there with CodeCanceled: nothing
+// is settled or latched, Walked reads false, and the next Walk resumes where
+// it stopped. A finished walk returns nil whatever ctx says. A seek that runs
+// the same walk reads its own context the same way (Seeker).
+//
 // A Walk after a complete restore costs nothing and still settles: the
 // sidecar's index already reaches the end, so the walk has nothing to do and
 // only the measurement it implies is applied.
 type Walker interface {
-	Walk() error
+	Walk(ctx context.Context) error
 	Walked() bool
+}
+
+// WalkCanceled is the error a walk returns when ctx has ended, nil while it
+// has not; prefix is the owner's public container name with its separator.
+func WalkCanceled(ctx context.Context, prefix string) error {
+	if err := ctx.Err(); err != nil {
+		return waxerr.Annotate(prefix+"walk canceled", err)
+	}
+	return nil
+}
+
+// MaxWarnings caps what a Warnings list keeps of each kind.
+const MaxWarnings = 64
+
+// Warnings is the list a demuxer records its findings in. Damage is listed up
+// to MaxWarnings entries and deduplicated, and counted past both, so a file
+// damaged on every block cannot grow the list without bound and a block met
+// twice is listed once; notes are listed on their own cap and take no damage
+// slot. The zero value is ready to use.
+type Warnings struct {
+	list   []Warning
+	damage int // every Damage recorded, listed or not
+	kept   int // Damage entries in list
+	notes  int // Note entries in list
+}
+
+// Damage records tolerated damage at off.
+func (w *Warnings) Damage(off int64, msg string) {
+	w.damage++
+	x := Warning{Offset: off, Msg: msg, Kind: Damage}
+	if w.kept < MaxWarnings && !slices.Contains(w.list, x) {
+		w.list = append(w.list, x)
+		w.kept++
+	}
+}
+
+// Note records a finding Strict must not escalate, at off.
+func (w *Warnings) Note(off int64, msg string) {
+	if w.notes < MaxWarnings {
+		w.list = append(w.list, Warning{Offset: off, Msg: msg, Kind: Note})
+		w.notes++
+	}
+}
+
+// List is what was listed, in order. The slice is the list's own.
+func (w *Warnings) List() []Warning { return w.list }
+
+// DamageCount is every damage recorded, the cap and the dedup aside.
+func (w *Warnings) DamageCount() int { return w.damage }
+
+// WarningsMark is a point in a Warnings list a speculative scan can be rolled
+// back to.
+type WarningsMark struct{ list, kept, notes, damage int }
+
+// Mark is where the list stands now.
+func (w *Warnings) Mark() WarningsMark {
+	return WarningsMark{list: len(w.list), kept: w.kept, notes: w.notes, damage: w.damage}
+}
+
+// Since is what was listed after m.
+func (w *Warnings) Since(m WarningsMark) []Warning { return w.list[m.list:] }
+
+// Rollback drops what was recorded after m, the count included.
+func (w *Warnings) Rollback(m WarningsMark) {
+	w.list, w.kept, w.notes, w.damage = w.list[:m.list], m.kept, m.notes, m.damage
 }
 
 // Muxer writes one audio track to a container. Muxers are single-track by

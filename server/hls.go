@@ -193,7 +193,7 @@ func (s *Server) prepareHLS(r *http.Request) (*hlsRequest, error) {
 		m = meta.WithContainerTags(s.readMeta(r.Context(), req.srcs[0], false), s.containerTagsFor(r.Context(), req.srcs[0]))
 		rmx = req.srcs[0]
 	}
-	if req.variantPlan, err = s.planHLSVariant(desc, memberTracks(req.members), m, rmx); err != nil {
+	if req.variantPlan, err = s.planHLSVariant(r.Context(), desc, memberTracks(req.members), m, rmx); err != nil {
 		return nil, err
 	}
 	canonical := canonicalHLSParams(req.plan, req.opts.GainDB, req.opts.Dynamics, descSpan(desc), req.opts.HEAACv2)
@@ -277,7 +277,8 @@ func (s *Server) resolveTimelineMembers(ctx context.Context, digest string) ([]m
 	}
 	members := make([]memberSource, 0, len(refs))
 	for i, ref := range refs {
-		// Resolve and the measure only read ctx while waiting on a mount.
+		// Resolve reads ctx only while waiting on a mount, so check between
+		// members.
 		if err := ctx.Err(); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeCanceled, "resolving a timeline canceled", err)
 		}
@@ -448,9 +449,9 @@ func (s *Server) measureSamples(ctx context.Context, src *source.File) (containe
 // The playlist cap is checked here, where the mint, the master and every
 // per-variant handler all plan, so a URL that mints is one whose media
 // playlist lists.
-func (s *Server) planHLSVariant(desc hls.Descriptor, tracks []container.Track, m *meta.Info,
+func (s *Server) planHLSVariant(ctx context.Context, desc hls.Descriptor, tracks []container.Track, m *meta.Info,
 	rmx *source.File) (variantPlan, error) {
-	vp, err := s.planHLSRung(desc, tracks, m, rmx)
+	vp, err := s.planHLSRung(ctx, desc, tracks, m, rmx)
 	if err == nil && vp.plan.Segments > maxPlaylistSegments {
 		err = waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("segment duration yields %d segments (max %d); raise segDur", vp.plan.Segments, maxPlaylistSegments))
@@ -523,7 +524,7 @@ func (s *Server) refuseHLSQuery(desc hls.Descriptor) error {
 
 // planHLSRung is planHLSVariant short of the playlist cap: the first rung that
 // serves the variant, and its plan.
-func (s *Server) planHLSRung(desc hls.Descriptor, tracks []container.Track, m *meta.Info,
+func (s *Server) planHLSRung(ctx context.Context, desc hls.Descriptor, tracks []container.Track, m *meta.Info,
 	rmx *source.File) (variantPlan, error) {
 	fail := func(err error) (variantPlan, error) { return variantPlan{}, err }
 	opts, err := s.hlsVariantOptions(desc, m)
@@ -564,7 +565,7 @@ func (s *Server) planHLSRung(desc hls.Descriptor, tracks []container.Track, m *m
 		// remux (cutting at an arbitrary sample means cutting mid-packet); both are
 		// structural declines the engine, handed a track and options, cannot see.
 		if rmx != nil && !spanned {
-			rp, err := s.remuxSegmentPlanFor(rmx, src, opts, desc.SegDur)
+			rp, err := s.remuxSegmentPlanFor(ctx, rmx, src, opts, desc.SegDur)
 			if err != nil {
 				return fail(err)
 			}
@@ -579,7 +580,7 @@ func (s *Server) planHLSRung(desc hls.Descriptor, tracks []container.Track, m *m
 		// to a codec the source is not. Its declines all fall through to the
 		// transcode below; see cutSegmentPlanFor.
 		if rmx != nil && spanned {
-			if cp := s.cutSegmentPlanFor(rmx, src, opts, sp, desc.SegDur); cp != nil {
+			if cp := s.cutSegmentPlanFor(ctx, rmx, src, opts, sp, desc.SegDur); cp != nil {
 				return variantPlan{opts: opts, plan: &cp.SegmentPlan, cut: cp}, nil
 			}
 		}
@@ -611,7 +612,7 @@ func (s *Server) planHLSRung(desc hls.Descriptor, tracks []container.Track, m *m
 // bitrate ladder rung, a codec mismatch) must not pay for a walk to be told what
 // its options already say, and a ladder is exactly where that bites: every rung
 // of it declines, and every rung of it would have walked.
-func (s *Server) remuxSegmentPlanFor(src *source.File, track container.Track,
+func (s *Server) remuxSegmentPlanFor(ctx context.Context, src *source.File, track container.Track,
 	opts waxflow.TranscodeOptions, segDur float64) (*waxflow.RemuxSegmentPlan, error) {
 	// An error is not this rung's to report; PlanSegments is about to hit the
 	// same one with the same words.
@@ -627,7 +628,7 @@ func (s *Server) remuxSegmentPlanFor(src *source.File, track container.Track,
 	if rp, err := s.eng.PlanRemux(track, opts); err != nil || rp == nil {
 		return nil, nil
 	}
-	grid, err := s.gridFor(src)
+	grid, err := s.gridFor(ctx, src)
 	if err != nil {
 		return nil, err
 	}
@@ -652,7 +653,7 @@ func (s *Server) remuxSegmentPlanFor(src *source.File, track container.Track,
 // is the same per-identity memo remuxSegmentPlanFor uses. Every decline is logged
 // at Debug naming its reason, because a caller asking why an Opus span re-encoded
 // on the HLS path has no other signal.
-func (s *Server) cutSegmentPlanFor(src *source.File, track container.Track,
+func (s *Server) cutSegmentPlanFor(ctx context.Context, src *source.File, track container.Track,
 	opts waxflow.TranscodeOptions, sp span, segDur float64) *waxflow.CutSegmentPlan {
 	decline := func(reason string, args ...any) *waxflow.CutSegmentPlan {
 		kv := make([]any, 0, 4+len(args))
@@ -664,7 +665,7 @@ func (s *Server) cutSegmentPlanFor(src *source.File, track container.Track,
 	if !waxflow.Cuttable(track) {
 		return decline("the codec is not on the cut allowlist", "codec", track.Codec)
 	}
-	grid, err := s.gridFor(src)
+	grid, err := s.gridFor(ctx, src)
 	if err != nil {
 		return decline("the packet grid could not be measured", "err", err)
 	}
@@ -803,7 +804,7 @@ func (s *Server) handleHLSMaster(w http.ResponseWriter, r *http.Request) {
 	var variants []m3u8.MasterVariant
 	for _, kbps := range desc.Ladder() {
 		vdesc := desc.Variant(kbps)
-		vp, err := s.planHLSVariant(vdesc, tracks, m, rmx)
+		vp, err := s.planHLSVariant(r.Context(), vdesc, tracks, m, rmx)
 		if err != nil {
 			s.writeError(w, err) // one bad rung fails the master honestly
 			return
@@ -1230,7 +1231,7 @@ func (s *Server) openSlicedMember(ctx context.Context, m memberSource, sp span) 
 	}
 	// Against the measured total the mint and plan validated the window with,
 	// so a window edge in an advisory gap opens here too.
-	return waxflow.SliceMeasured(med, m.SrcTrack, sp.from, sp.end())
+	return waxflow.SliceMeasured(ctx, med, m.SrcTrack, sp.from, sp.end())
 }
 
 // openMember resolves one source, enforces the identity the plan was made
@@ -1263,7 +1264,7 @@ type closingMedia struct {
 
 // Walk and Walked forward format.Walker: embedding the interface promotes
 // nothing outside it, and this wraps one file.
-func (m closingMedia) Walk() error { return format.WalkMedia(m.Media) }
+func (m closingMedia) Walk(ctx context.Context) error { return format.WalkMedia(ctx, m.Media) }
 
 func (m closingMedia) Walked() bool { return format.MediaWalked(m.Media) }
 
@@ -1431,7 +1432,7 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string
 		// remux rung no source for the same reason: a mint validates that some
 		// rung can serve the variant, and rung 3 always can wherever rung 2
 		// could, so paying for a packet walk here would buy nothing.
-		if _, err := s.planHLSVariant(out.Variant(kbps), tracks, nil, nil); err != nil {
+		if _, err := s.planHLSVariant(ctx, out.Variant(kbps), tracks, nil, nil); err != nil {
 			return hls.Descriptor{}, 0, err
 		}
 	}

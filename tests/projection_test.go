@@ -80,7 +80,7 @@ func (d *overDeclaringDemuxer) ReadPacket(pkt *container.Packet) error {
 
 // Walk settles the declaration against the payload, the way every deferred
 // walk in the tree does, and leaves the packet position alone.
-func (d *overDeclaringDemuxer) Walk() error {
+func (d *overDeclaringDemuxer) Walk(context.Context) error {
 	d.walks++
 	d.walked = true
 	d.track = container.SettleLength(d.track, d.raw)
@@ -474,7 +474,7 @@ func TestFLACHeadersClaimTheProjection(t *testing.T) {
 		}
 		// And the file reads back as sound rather than as damaged, which is
 		// what the demuxer's own verification now decides.
-		info, err := format.Probe(container.BytesSource(out.Bytes()), "oga", nil)
+		info, err := format.Probe(context.Background(), container.BytesSource(out.Bytes()), "oga", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -558,9 +558,9 @@ type overDeclaringFLAC struct {
 	track container.Track
 }
 
-func (d *overDeclaringFLAC) Tracks() []container.Track { return []container.Track{d.track} }
-func (d *overDeclaringFLAC) Walk() error               { return nil }
-func (d *overDeclaringFLAC) Walked() bool              { return true }
+func (d *overDeclaringFLAC) Tracks() []container.Track  { return []container.Track{d.track} }
+func (d *overDeclaringFLAC) Walk(context.Context) error { return nil }
+func (d *overDeclaringFLAC) Walked() bool               { return true }
 
 // TestOggFLACProjectionMissIsPatchedOrRefused is D4 for the Ogg mapping, both
 // destinations. A header the muxer cannot go back and fix is a commitment, so

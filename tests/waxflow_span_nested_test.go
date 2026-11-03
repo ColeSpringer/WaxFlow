@@ -1,6 +1,7 @@
 package waxflow_test
 
 import (
+	"context"
 	"io"
 	"strings"
 	"testing"
@@ -62,7 +63,7 @@ func TestSliceNestedHeadroom(t *testing.T) {
 
 	// And what it advertises, it can deliver: the advertised edge is
 	// reachable, and the sample there is the file's sample 0.
-	landed, err := outer.SeekSample(-15_000)
+	landed, err := outer.SeekSample(context.Background(), -15_000)
 	if err != nil {
 		t.Fatalf("a span refused a seek to the headroom it advertises: %v", err)
 	}
@@ -82,7 +83,7 @@ func TestSliceNestedHeadroom(t *testing.T) {
 		}
 	}
 	// One past the advertised edge is before the file's start, and refused.
-	if _, err := outer.SeekSample(-15_001); err == nil {
+	if _, err := outer.SeekSample(context.Background(), -15_001); err == nil {
 		t.Error("a span allowed a seek before the file's own start")
 	}
 }
@@ -151,8 +152,8 @@ type shortMedia struct {
 	pos int64
 }
 
-func (m *shortMedia) SeekSample(target int64) (int64, error) {
-	landed, err := m.Media.SeekSample(min(target, m.at))
+func (m *shortMedia) SeekSample(ctx context.Context, target int64) (int64, error) {
+	landed, err := m.Media.SeekSample(ctx, min(target, m.at))
 	if err != nil {
 		return 0, err
 	}

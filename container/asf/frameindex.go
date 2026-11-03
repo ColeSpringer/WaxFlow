@@ -1,6 +1,7 @@
 package asf
 
 import (
+	"context"
 	"encoding/binary"
 	"hash/crc32"
 	"math"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // frameCounter is a codec whose packets say how many frames they add to the
@@ -71,8 +73,9 @@ type frameIndex struct {
 	// pending is what Walk reports: the damage a walk found, since a seek
 	// that walks reads ahead of every read the caller asked for, the folds a
 	// read found, and a restored sidecar's findings, so a restore reports
-	// what a walk would.
-	pending []container.Warning
+	// what a walk would. reported is how many of them Walk has reported.
+	pending  []container.Warning
+	reported int
 }
 
 // indexEntry is the first object to begin in a packet and what precedes it.
@@ -85,19 +88,25 @@ type indexEntry struct {
 // extendTo counts forward until an entry lies past frame n or the data ends.
 // The walk reads through its own reader and window, so the demuxer's
 // position does not move. A refusal is sticky but fails only a count that
-// has to pass it: a landing the count already reaches still lands.
-func (x *frameIndex) extendTo(d *Demuxer, n int64) error {
+// has to pass it: a landing the count already reaches still lands. ctx is
+// read before every packet; one that has ended pauses the count there
+// (container.Walker), its reader standing where it is.
+func (x *frameIndex) extendTo(ctx context.Context, d *Demuxer, n int64) error {
 	for !x.done && (len(x.entries) == 0 || x.entries[len(x.entries)-1].frames <= n) {
 		if x.err != nil {
 			return x.err
 		}
-		x.err = x.step(d)
+		err := x.step(ctx, d)
+		if waxerr.CodeOf(err) == waxerr.CodeCanceled {
+			return err
+		}
+		x.err = err
 	}
 	return nil
 }
 
 // step counts one more object.
-func (x *frameIndex) step(d *Demuxer) error {
+func (x *frameIndex) step(ctx context.Context, d *Demuxer) error {
 	if x.walk == nil {
 		// A count with entries, however it took them, resumes by counting
 		// again from its last entry's packet; a fresh one starts at the top.
@@ -111,7 +120,7 @@ func (x *frameIndex) step(d *Demuxer) error {
 		x.havePrev = false
 	}
 	o := &x.obj
-	ok, err := x.walk.fetch(o)
+	ok, err := x.walk.fetch(ctx, o)
 	if err != nil {
 		return err
 	}
@@ -216,7 +225,7 @@ func (x *frameIndex) readEnd(d *Demuxer, ord int64) {
 // hold keeps a finding of the walk for Walk to report.
 func (x *frameIndex) hold(off int64, msg string) error {
 	w := container.Warning{Offset: off, Msg: msg, Kind: container.Damage}
-	if len(x.pending) < maxWarnings && !slices.Contains(x.pending, w) {
+	if len(x.pending) < container.MaxWarnings && !slices.Contains(x.pending, w) {
 		x.pending = append(x.pending, w)
 	}
 	return nil
@@ -245,19 +254,19 @@ func (d *Demuxer) walker(at int64, sink func(int64, string) error) *reader {
 // one landing in two hundred, every one of which a landing an object earlier
 // decodes exactly. The caller's pre-roll discards the run up to the target,
 // and lands earlier still if the decode reports it needs more.
-func (d *Demuxer) seekCounted(sample int64) (int64, error) {
+func (d *Demuxer) seekCounted(ctx context.Context, sample int64) (int64, error) {
 	fl := int64(d.counter.FrameLen())
-	at, err := d.landCounted(sample / fl)
+	at, err := d.landCounted(ctx, sample/fl)
 	if err == nil && at > 0 {
-		at, err = d.landCounted(at - 1)
+		at, err = d.landCounted(ctx, at-1)
 	}
 	return at * fl, err
 }
 
 // landCounted puts the reader on the last media object whose frames before it
 // are at most n, and returns that count.
-func (d *Demuxer) landCounted(n int64) (int64, error) {
-	if err := d.idx.extendTo(d, n); err != nil {
+func (d *Demuxer) landCounted(ctx context.Context, n int64) (int64, error) {
+	if err := d.idx.extendTo(ctx, d, n); err != nil {
 		return 0, err
 	}
 	i := d.idx.entryAtOrBefore(n)
@@ -321,17 +330,20 @@ func (d *Demuxer) advance(a, b *object) int64 {
 // walk or a seek's met it, is reported here through the warn path, so under
 // Strict the walk refuses; a count that lost an object settles nothing,
 // since the decoder restarts at the hole. Other codecs defer nothing.
-func (d *Demuxer) Walk() error {
+func (d *Demuxer) Walk(ctx context.Context) error {
 	if d.counter == nil {
 		return nil
 	}
-	if err := d.idx.extendTo(d, math.MaxInt64); err != nil {
+	if err := d.idx.extendTo(ctx, d, math.MaxInt64); err != nil {
 		return err
 	}
-	for _, w := range d.idx.pending {
+	// Each finding once, however often Walk is asked; a strict refusal stops
+	// at the finding it refused, and the next Walk refuses it again.
+	for _, w := range d.idx.pending[d.idx.reported:] {
 		if err := d.warn(w.Offset, "%s", w.Msg); err != nil {
 			return err
 		}
+		d.idx.reported++
 	}
 	return nil
 }
@@ -574,7 +586,7 @@ func (d *Demuxer) decodeIndex(blob []byte) (snapshot, bool) {
 // package could have written about a byte of this file.
 func (d *Demuxer) decodeFindings(next func() (uint64, bool), rest *[]byte) ([]container.Warning, bool) {
 	n, ok := next()
-	if !ok || n > maxWarnings {
+	if !ok || n > container.MaxWarnings {
 		return nil, false
 	}
 	var found []container.Warning

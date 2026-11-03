@@ -83,7 +83,7 @@ minted here dies with 410 source-changed if the file changes.`,
 				// The default TTL policy needs the duration: probe
 				// locally through the same engine the daemon uses.
 				d := float64(-1)
-				if info, err := waxflow.New().Probe(f, f.Ext, nil); err == nil {
+				if info, err := waxflow.New().Probe(cmd.Context(), f, f.Ext, nil); err == nil {
 					track := info.Default()
 					d = durationSeconds(track.Samples, track.Fmt.Rate)
 				}

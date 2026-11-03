@@ -2,6 +2,7 @@ package mp4
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"testing"
@@ -131,7 +132,7 @@ func FuzzDemux(f *testing.F) {
 			// The walk reads the moof headers and settles the length, so it is
 			// on the fuzzed path with the read. Its error is a refusal, not a
 			// crash, and a settled track still has to describe itself.
-			if err := d.Walk(); err == nil {
+			if err := d.Walk(context.Background()); err == nil {
 				tr := d.Tracks()[0]
 				if tr.SamplesExact && tr.SamplesAdvisory {
 					t.Fatal("a settled track is both exact and advisory")
@@ -169,7 +170,7 @@ func FuzzDemux(f *testing.F) {
 			// itself starts after it, which container.Seeker allows and a
 			// crafted tfdt produces: the fragments can begin anywhere.
 			for _, target := range []int64{0, 1, 1000, 1 << 20, 1 << 40} {
-				landed, err := d.SeekSample(0, target)
+				landed, err := d.SeekSample(context.Background(), 0, target)
 				if err != nil || firstPTS < 0 {
 					continue
 				}

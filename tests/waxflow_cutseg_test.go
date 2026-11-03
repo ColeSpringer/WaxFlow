@@ -35,7 +35,7 @@ func planCutSegments(t *testing.T, e *waxflow.Engine, src []byte, opts waxflow.T
 	spans []waxflow.Span, segSeconds float64) (*waxflow.CutSegmentPlan, int) {
 	t.Helper()
 	track := probeTrack(t, src, "opus")
-	grid, err := e.PacketGrid(container.BytesSource(src), "opus")
+	grid, err := e.PacketGrid(context.Background(), container.BytesSource(src), "opus")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestPlanCutSegmentsMapsDeclinesAndErrors(t *testing.T) {
 	src := remuxFixture(t, waxflow.TranscodeOptions{Format: "opus"}, 96000)
 	e := waxflow.New()
 	track := probeTrack(t, src, "opus")
-	grid, err := e.PacketGrid(container.BytesSource(src), "opus")
+	grid, err := e.PacketGrid(context.Background(), container.BytesSource(src), "opus")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestCutSegmentsAcrossAMidStreamTrim(t *testing.T) {
 		t.Fatalf("the walk found MidPadding %d at %v, want %d placed", track.MidPadding, track.MidTrims, midTrimPad)
 	}
 	e := waxflow.New()
-	grid, err := e.PacketGrid(container.BytesSource(src), "webm")
+	grid, err := e.PacketGrid(context.Background(), container.BytesSource(src), "webm")
 	if err != nil {
 		t.Fatal(err)
 	}

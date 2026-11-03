@@ -2,6 +2,7 @@ package mp4
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -258,7 +259,7 @@ func TestPCMSeeksAreExact(t *testing.T) {
 				if target >= f.frames {
 					continue
 				}
-				landed, err := d.SeekSample(0, target)
+				landed, err := d.SeekSample(context.Background(), 0, target)
 				if err != nil {
 					t.Fatalf("seek %d: %v", target, err)
 				}
@@ -274,7 +275,7 @@ func TestPCMSeeksAreExact(t *testing.T) {
 				}
 			}
 			// Past the end lands on the last frame rather than past it.
-			landed, err := d.SeekSample(0, f.frames+1000)
+			landed, err := d.SeekSample(context.Background(), 0, f.frames+1000)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1052,7 +1053,7 @@ func TestPCMChunkIndexCrossesManyChunks(t *testing.T) {
 	// its start: the offset within the chunk is the part a chunk index can
 	// get wrong.
 	for _, target := range []int64{0, 6, 7, 8, 20, 63} {
-		landed, err := d.SeekSample(0, target)
+		landed, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil || landed != target {
 			t.Fatalf("seek %d = %d, %v", target, landed, err)
 		}

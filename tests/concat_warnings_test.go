@@ -1,6 +1,7 @@
 package waxflow_test
 
 import (
+	"context"
 	"os"
 	"slices"
 	"strings"
@@ -29,7 +30,7 @@ func TestConcatCarriesMemberWarnings(t *testing.T) {
 	damaged := testutil.ZeroMiddle(mp3, 2048)
 	e := waxflow.New()
 	member := func(raw []byte, hint string) waxflow.ConcatSource {
-		info, err := e.Probe(container.BytesSource(raw), hint, nil)
+		info, err := e.Probe(context.Background(), container.BytesSource(raw), hint, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

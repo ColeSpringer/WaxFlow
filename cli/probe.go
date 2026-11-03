@@ -34,7 +34,7 @@ func newProbeCmd(flavor Flavor) *cobra.Command {
 				return err
 			}
 			defer cleanup()
-			info, err := waxflow.New().Probe(src, hint, &waxflow.ProbeOptions{Strict: strict})
+			info, err := waxflow.New().Probe(cmd.Context(), src, hint, &waxflow.ProbeOptions{Strict: strict})
 			if err != nil {
 				return err
 			}

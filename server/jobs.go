@@ -258,7 +258,7 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 	defer src.Close()
 	req.SourceID = src.ID.String()
 
-	info, err := s.eng.Probe(src, src.Ext, nil)
+	info, err := s.eng.Probe(ctx, src, src.Ext, nil)
 	if err != nil {
 		return nil, err
 	}

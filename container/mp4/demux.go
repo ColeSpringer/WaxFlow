@@ -1,6 +1,7 @@
 package mp4
 
 import (
+	"context"
 	"fmt"
 	"io"
 
@@ -45,7 +46,7 @@ type Demuxer struct {
 	brands   []string
 	chapters []Chapter
 	tags     map[string][]string // ilst tags, canonical keys
-	warnings []container.Warning
+	warnings container.Warnings
 
 	movieTimescale int64     // mvhd timescale (ticks per second)
 	movieDuration  int64     // mvhd duration in movie ticks, 0 when unstated
@@ -101,15 +102,18 @@ type Demuxer struct {
 	// ticks and converted at each fragment boundary. Identical to fragDecode
 	// whenever the media timescale is the sample rate, which is the norm.
 	fragTicks int64
-	// fragIndex is the fragment map a finished walk leaves behind: where each
-	// fragment starts in the file and on the output timeline. Nil until Walk
-	// runs; see fragwalk.go.
+	// fragIndex is the fragment map the scan builds, a seek's or a Walk's:
+	// where each fragment starts in the file and on the output timeline, as
+	// far as the scan got; see fragwalk.go.
 	fragIndex []fragEntry
 	// fragIndexed is set once the fragment map has been built; fragWalked once
 	// the length has actually been settled from it. Two flags, because a seek
 	// needs the first and Walked answers for the second (see Walked).
 	fragIndexed bool
 	fragWalked  bool
+	// fragScan is where the fragment scan stands between runs (see
+	// indexFragments).
+	fragScan fragCursor
 
 	// w is the shared read-ahead window over mdat sample data.
 	w srcwin.Window
@@ -135,7 +139,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 	if d.opts.Strict {
 		return malformed("%s (at offset %d)", msg, off)
 	}
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: msg, Kind: container.Damage})
+	d.warnings.Damage(off, msg)
 	return nil
 }
 
@@ -148,7 +152,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 // `probe --strict` reject valid HE-AAC files as malformed, which is why this
 // path exists and why it cannot fail.
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.warnings = append(d.warnings, container.Warning{Offset: off, Msg: fmt.Sprintf(format, args...), Kind: container.Note})
+	d.warnings.Note(off, fmt.Sprintf(format, args...))
 }
 
 // parse scans the top-level boxes up to and including moov, reads moov into
@@ -431,7 +435,7 @@ func decodableAudio(id codec.ID) bool {
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns damage tolerated during parsing.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
+func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
 
 // Chapters returns parsed chapter markers in start order, nil when the file
 // carries none. The slice is the demuxer's own and must not be mutated.
@@ -545,7 +549,7 @@ func (d *Demuxer) readUniformPacket(pkt *container.Packet, st *sampleTable) erro
 // decoder timeline, backed off by seekPreroll samples so the decoder's
 // inter-frame state converges. format.Media pre-rolls the remainder for a
 // sample-exact landing.
-func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
+func (d *Demuxer) SeekSample(ctx context.Context, track int, sample int64) (int64, error) {
 	if track != 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("mp4: no track %d", track))
 	}
@@ -570,14 +574,14 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 			d.resetFragments()
 			return 0, nil
 		}
-		landed, _, err := d.seekFragmented(0)
+		landed, _, err := d.seekFragmented(ctx, 0)
 		return landed, err
 	}
 	if d.fragmented && sample >= st.totalDur {
 		// ok is false only when every fragment begins after the target and the
 		// moov's own table holds samples before it, which is a gap between the
 		// two halves. The landing then falls through to the table below.
-		if landed, ok, err := d.seekFragmented(sample); err != nil || ok {
+		if landed, ok, err := d.seekFragmented(ctx, sample); err != nil || ok {
 			return landed, err
 		}
 	}

@@ -1,6 +1,7 @@
 package mpegframes
 
 import (
+	"context"
 	"errors"
 	"io"
 	"testing"
@@ -29,14 +30,14 @@ func FuzzWalk(f *testing.F) {
 		if _, _, err := w.Begin(0); err != nil {
 			return
 		}
-		if err := w.Complete(); err != nil {
+		if err := w.Complete(context.Background()); err != nil {
 			t.Fatalf("a tolerant Complete failed: %v", err)
 		}
 		if !w.Done() {
 			t.Fatal("not Done after Complete")
 		}
 		found := len(o.msgs)
-		if err := w.Complete(); err != nil || len(o.msgs) != found {
+		if err := w.Complete(context.Background()); err != nil || len(o.msgs) != found {
 			t.Fatalf("a second Complete returned %v and reported %d more findings", err, len(o.msgs)-found)
 		}
 		ref := w.Header()
@@ -59,7 +60,7 @@ func FuzzWalk(f *testing.F) {
 		if _, _, err := ws.Begin(0); err != nil {
 			return
 		}
-		if err := ws.Complete(); (err != nil) != (found > 0) {
+		if err := ws.Complete(context.Background()); (err != nil) != (found > 0) {
 			t.Fatalf("strict Complete returned %v where the tolerant walk found %d things", err, found)
 		}
 	})

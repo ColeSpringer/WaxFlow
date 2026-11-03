@@ -2,6 +2,7 @@ package asf_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -119,13 +120,13 @@ func TestASeekReportsNoDamageItsWindowNeverReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.SeekSample(0, 5*2048); err != nil {
+	if _, err := d.SeekSample(context.Background(), 0, 5*2048); err != nil {
 		t.Fatal(err)
 	}
 	if w := d.Warnings(); len(w) != 0 {
 		t.Errorf("a seek past the damage reported %v", w)
 	}
-	if err := d.Walk(); err != nil {
+	if err := d.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(d.Warnings()) == 0 {
@@ -136,21 +137,21 @@ func TestASeekReportsNoDamageItsWindowNeverReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.SeekSample(0, 5*2048); err != nil {
+	if _, err := s.SeekSample(context.Background(), 0, 5*2048); err != nil {
 		t.Errorf("a strict seek past the damage: %v", err)
 	}
 	var pkt container.Packet
 	if err := s.ReadPacket(&pkt); err != nil || pkt.Data[1] < 3 {
 		t.Errorf("read after the seek: %v, object %v, want one behind the damage", err, pkt.Data)
 	}
-	first := s.Walk()
+	first := s.Walk(context.Background())
 	if first == nil {
 		t.Fatal("a strict walk accepted the damage")
 	}
 	if s.Walked() {
 		t.Error("a strict walk that refused reports the count walked")
 	}
-	if again := s.Walk(); again == nil || again.Error() != first.Error() {
+	if again := s.Walk(context.Background()); again == nil || again.Error() != first.Error() {
 		t.Errorf("a second strict walk returned %v, want the first refusal %v", again, first)
 	}
 }
@@ -183,7 +184,7 @@ func TestALandingStepsOverAnObjectThatCompletesNoFrame(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, c := range tc.seeks {
-				landed, err := d.SeekSample(0, c[0]*2048)
+				landed, err := d.SeekSample(context.Background(), 0, c[0]*2048)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -242,7 +243,7 @@ func TestACountTakesBackAFrameNothingCarries(t *testing.T) {
 		for _, o := range objs {
 			for _, target := range []int64{o.Before * fl, o.Before*fl + fl/2} {
 				want := landingFor(objs, fl, target)
-				landed, err := d.SeekSample(0, target)
+				landed, err := d.SeekSample(context.Background(), 0, target)
 				if err != nil {
 					t.Fatalf("%s: seek to %d: %v", what, target, err)
 				}
@@ -260,7 +261,7 @@ func TestACountTakesBackAFrameNothingCarries(t *testing.T) {
 
 	d := openHooked()
 	seeks("counted", d)
-	if err := d.Walk(); err != nil {
+	if err := d.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if tr := d.Tracks()[0]; !tr.SamplesExact || tr.Samples != (total-1)*fl {
@@ -309,7 +310,7 @@ func TestALinearReadTakesTheCount(t *testing.T) {
 	objs, fl := wmacount.Objects(t, raw)
 	start, plen, _ := packetGeometry(t, raw)
 	walked := open(t, raw)
-	if err := walked.Walk(); err != nil {
+	if err := walked.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	src := &testutil.CountingSource{Src: container.BytesSource(raw)}
@@ -330,14 +331,14 @@ func TestALinearReadTakesTheCount(t *testing.T) {
 		t.Error("the read's count is not the one a walk takes")
 	}
 	src.Reset()
-	if err := d.Walk(); err != nil {
+	if err := d.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if src.Reads != 0 {
 		t.Errorf("Walk read %d times after a read to the end", src.Reads)
 	}
 	j := len(objs) - 3
-	landed, err := d.SeekSample(0, objs[j].Before*fl+fl/2)
+	landed, err := d.SeekSample(context.Background(), 0, objs[j].Before*fl+fl/2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,11 +358,11 @@ func TestAReadTakesOverFromAWalk(t *testing.T) {
 	raw := readFixture(t, windowsFixture)
 	objs, fl := wmacount.Objects(t, raw)
 	walked := open(t, raw)
-	if err := walked.Walk(); err != nil {
+	if err := walked.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	d := open(t, raw)
-	if _, err := d.SeekSample(0, objs[len(objs)/2].Before*fl); err != nil {
+	if _, err := d.SeekSample(context.Background(), 0, objs[len(objs)/2].Before*fl); err != nil {
 		t.Fatal(err)
 	}
 	// The walk stands an object or two past the target, which six objects
@@ -373,7 +374,7 @@ func TestAReadTakesOverFromAWalk(t *testing.T) {
 		}
 	}
 	j := len(objs) - 2
-	landed, err := d.SeekSample(0, objs[j].Before*fl)
+	landed, err := d.SeekSample(context.Background(), 0, objs[j].Before*fl)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +393,7 @@ func TestAReadTakesOverFromAWalk(t *testing.T) {
 	for j, o := range objs {
 		target := o.Before*fl + fl/2
 		want := landingFor(objs, fl, target)
-		landed, err := d.SeekSample(0, target)
+		landed, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -412,13 +413,13 @@ func TestAReadJoinsTheCountInsideAPacket(t *testing.T) {
 	}
 	raw := reservoirStream(t, counts)
 	walked := open(t, raw)
-	if err := walked.Walk(); err != nil {
+	if err := walked.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	want := walked.Tracks()[0].Samples
 	for _, target := range []int64{9 * 2048, 21 * 2048, 40 * 2048, 58 * 2048} {
 		d := open(t, raw)
-		if _, err := d.SeekSample(0, target); err != nil {
+		if _, err := d.SeekSample(context.Background(), 0, target); err != nil {
 			t.Fatal(err)
 		}
 		if err := readAll(t, d); !errors.Is(err, io.EOF) {
@@ -458,7 +459,7 @@ func TestASeekAfterAReadCountsOnFromIt(t *testing.T) {
 	}
 	src.Reset()
 	j := len(objs) - 3
-	landed, err := d.SeekSample(0, objs[j].Before*fl+fl/2)
+	landed, err := d.SeekSample(context.Background(), 0, objs[j].Before*fl+fl/2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -528,7 +529,7 @@ func TestACountWithAFoldedStampKeepsItsSidecar(t *testing.T) {
 		return slices.ContainsFunc(ws, func(w container.Warning) bool { return w.Msg == fold })
 	}
 	walked := open(t, raw)
-	if err := walked.Walk(); err != nil {
+	if err := walked.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !has(walked.Warnings()) {
@@ -550,7 +551,7 @@ func TestACountWithAFoldedStampKeepsItsSidecar(t *testing.T) {
 	if !r.RestoreIndex(blob) {
 		t.Fatal("the sidecar was refused")
 	}
-	if err := r.Walk(); err != nil {
+	if err := r.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !has(r.Warnings()) {
@@ -563,7 +564,7 @@ func TestACountWithAFoldedStampKeepsItsSidecar(t *testing.T) {
 	if !strict.RestoreIndex(blob) {
 		t.Fatal("the sidecar was refused under Strict")
 	}
-	if strict.Walk() == nil || strict.Walked() {
+	if strict.Walk(context.Background()) == nil || strict.Walked() {
 		t.Error("under Strict the restored count took the fold a walk refuses")
 	}
 }
@@ -590,7 +591,7 @@ func TestAHoleBreaksTheCarryPair(t *testing.T) {
 			return false, nil
 		})
 		if how == "walk" {
-			if err := d.Walk(); err != nil {
+			if err := d.Walk(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 		} else if err := readAll(t, d); !errors.Is(err, io.EOF) {
@@ -626,7 +627,7 @@ func TestSeekLandsOnTheFrameIndex(t *testing.T) {
 			for j, o := range objs {
 				for _, target := range []int64{o.Before * frameLen, o.Before*frameLen + frameLen/2} {
 					want := landingFor(objs, frameLen, target)
-					landed, err := d.SeekSample(0, target)
+					landed, err := d.SeekSample(context.Background(), 0, target)
 					if err != nil {
 						t.Fatalf("seek to %d: %v", target, err)
 					}
@@ -670,7 +671,7 @@ func TestWalkSettlesTheLength(t *testing.T) {
 				t.Fatalf("before the walk: exact %v advisory %v walked %v, want an advisory length not yet walked",
 					tr.SamplesExact, tr.SamplesAdvisory, d.Walked())
 			}
-			if err := d.Walk(); err != nil {
+			if err := d.Walk(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			tr := d.Tracks()[0]
@@ -728,7 +729,7 @@ func TestIndexSnapshotRoundTrip(t *testing.T) {
 	if walked.IndexSnapshot() != nil {
 		t.Error("a count not yet taken gave a snapshot")
 	}
-	if err := walked.Walk(); err != nil {
+	if err := walked.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	blob := walked.IndexSnapshot()
@@ -753,7 +754,7 @@ func TestIndexSnapshotRoundTrip(t *testing.T) {
 	j := len(objs) - 3
 	target := objs[j].Before*fl + fl/2
 	src.Reset()
-	landed, err := d.SeekSample(0, target)
+	landed, err := d.SeekSample(context.Background(), 0, target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -764,7 +765,7 @@ func TestIndexSnapshotRoundTrip(t *testing.T) {
 		t.Errorf("the seek read from %d, before the landing packet at %d", src.Low, at)
 	}
 	reads := src.Reads
-	if err := d.Walk(); err != nil {
+	if err := d.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if src.Reads != reads {
@@ -808,13 +809,13 @@ func TestACountFinishedAnyWaySettlesTheTrack(t *testing.T) {
 		}
 	}
 	d := open(t, raw)
-	if _, err := d.SeekSample(0, 1<<40); err != nil {
+	if _, err := d.SeekSample(context.Background(), 0, 1<<40); err != nil {
 		t.Fatal(err)
 	}
 	check("a seek past the end", d)
 
 	walked := open(t, raw)
-	if err := walked.Walk(); err != nil {
+	if err := walked.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	r := open(t, raw)
@@ -830,13 +831,13 @@ func TestACountFinishedAnyWaySettlesTheTrack(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer med.Close()
-	if _, err := med.SeekSample(1 << 40); err != nil {
+	if _, err := med.SeekSample(context.Background(), 1<<40); err != nil {
 		t.Fatal(err)
 	}
 	if !format.MediaWalked(med) {
 		t.Fatal("the media does not report the walk a seek finished")
 	}
-	if err := format.WalkMedia(med); err != nil {
+	if err := format.WalkMedia(context.Background(), med); err != nil {
 		t.Fatal(err)
 	}
 	if tr := med.Info().Default(); !tr.SamplesExact || tr.Samples != want {

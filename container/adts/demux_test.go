@@ -1,6 +1,7 @@
 package adts
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -106,7 +107,7 @@ func TestSeekBacksOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, target := range []int64{0, 1024, 2048, 4096, 1 << 30} {
-		landed, err := d.SeekSample(0, target)
+		landed, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatalf("seek to %d: %v", target, err)
 		}
@@ -199,7 +200,7 @@ func TestTruncatedTailDropped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDemuxer(walk): %v", err)
 	}
-	if err := dw.Walk(); err != nil {
+	if err := dw.Walk(context.Background()); err != nil {
 		t.Fatalf("tolerant Walk on a truncated tail: %v", err)
 	}
 	tr := dw.Tracks()[0]
@@ -219,7 +220,7 @@ func TestTruncatedTailDropped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDemuxer(strict walk): %v", err)
 	}
-	if err := sw.Walk(); !errors.Is(err, waxerr.ErrMalformedInput) {
+	if err := sw.Walk(context.Background()); !errors.Is(err, waxerr.ErrMalformedInput) {
 		t.Errorf("strict Walk = %v, want malformed", err)
 	}
 }
@@ -251,7 +252,7 @@ func TestOnlyFrameTruncated(t *testing.T) {
 	if !slices.Contains(d.Warnings(), want) {
 		t.Errorf("warnings = %v, want %v", d.Warnings(), want)
 	}
-	if err := d.Walk(); err != nil {
+	if err := d.Walk(context.Background()); err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
 	if tr := d.Tracks()[0]; tr.Samples != 0 || !tr.SamplesExact {
@@ -261,7 +262,7 @@ func TestOnlyFrameTruncated(t *testing.T) {
 	if err := d.ReadPacket(&pkt); !errors.Is(err, io.EOF) {
 		t.Errorf("ReadPacket = %v, want EOF", err)
 	}
-	if landed, err := d.SeekSample(0, 1<<20); err != nil || landed != 0 {
+	if landed, err := d.SeekSample(context.Background(), 0, 1<<20); err != nil || landed != 0 {
 		t.Errorf("SeekSample = %d, %v; want 0, nil", landed, err)
 	}
 	if _, err := NewDemuxer(container.BytesSource(trunc), &DemuxerOptions{Strict: true}); !errors.Is(err, waxerr.ErrMalformedInput) {

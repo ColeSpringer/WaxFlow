@@ -1,6 +1,7 @@
 package mka
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"sort"
@@ -14,7 +15,7 @@ import (
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns damage tolerated during parsing.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings }
+func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
 
 // resetReading positions the frame iterator at a cluster boundary and clears
 // per-run state (accumulated position, Vorbis timing, end-of-stream).
@@ -61,7 +62,7 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 // end of stream.
 func (d *Demuxer) nextFrame() (frameLoc, []byte, error) {
 	if d.pendingIdx >= len(d.pending) {
-		if err := d.advanceBlock(); err != nil {
+		if err := d.advanceBlock(context.Background()); err != nil {
 			return frameLoc{}, nil, err
 		}
 	}
@@ -163,11 +164,11 @@ func (d *Demuxer) frameBytes(f frameLoc) ([]byte, error) {
 
 // advanceBlock loads the next selected-track block's frames into pending,
 // walking clusters and skipping other tracks' blocks. It returns io.EOF at end
-// of stream.
-func (d *Demuxer) advanceBlock() error {
+// of stream, and ctx's end, read before every element read, as canceled.
+func (d *Demuxer) advanceBlock(ctx context.Context) error {
 	for {
 		if !d.inCluster {
-			done, err := d.stepSegment()
+			done, err := d.stepSegment(ctx)
 			if err != nil {
 				return err
 			}
@@ -176,7 +177,7 @@ func (d *Demuxer) advanceBlock() error {
 			}
 			continue
 		}
-		handled, done, err := d.stepCluster()
+		handled, done, err := d.stepCluster(ctx)
 		if err != nil {
 			return err
 		}
@@ -191,7 +192,7 @@ func (d *Demuxer) advanceBlock() error {
 
 // stepSegment reads one segment-level element, entering a cluster or skipping
 // anything else. done reports end of stream.
-func (d *Demuxer) stepSegment() (done bool, err error) {
+func (d *Demuxer) stepSegment(ctx context.Context) (done bool, err error) {
 	if d.recording && d.walkLimit >= 0 && d.curOff >= d.walkLimit {
 		// Stopping before the element is read is what makes the walk
 		// resumable: curOff is exactly the limit cluster's first byte and
@@ -202,8 +203,14 @@ func (d *Demuxer) stepSegment() (done bool, err error) {
 	if d.curOff >= d.segmentEnd {
 		return true, nil
 	}
+	if err := container.WalkCanceled(ctx, "mka: "); err != nil {
+		return false, err
+	}
 	e, err := d.readElement(d.curOff, d.segmentEnd)
 	if err != nil {
+		if waxerr.CodeOf(err) == waxerr.CodeSourceUnreadable {
+			return false, err // the source failed, not the file
+		}
 		// No resync at this level; tolerate trailing damage as end of stream.
 		if werr := d.warn(d.curOff, "damaged segment element, ending stream"); werr != nil {
 			return false, werr
@@ -241,7 +248,7 @@ func (d *Demuxer) enterCluster(e element, startOff int64) {
 
 // stepCluster reads one cluster-level element. handled reports that a
 // selected-track block was loaded into pending; done reports end of stream.
-func (d *Demuxer) stepCluster() (handled, done bool, err error) {
+func (d *Demuxer) stepCluster(ctx context.Context) (handled, done bool, err error) {
 	if d.clusterCursor >= d.clusterEnd {
 		d.inCluster = false
 		if !d.clusterUnknown {
@@ -251,8 +258,14 @@ func (d *Demuxer) stepCluster() (handled, done bool, err error) {
 		}
 		return false, false, nil
 	}
+	if err := container.WalkCanceled(ctx, "mka: "); err != nil {
+		return false, false, err
+	}
 	e, err := d.readElement(d.clusterCursor, d.clusterEnd)
 	if err != nil {
+		if waxerr.CodeOf(err) == waxerr.CodeSourceUnreadable {
+			return false, false, err
+		}
 		if werr := d.warn(d.clusterCursor, "damaged cluster element, ending stream"); werr != nil {
 			return false, false, werr
 		}
@@ -337,6 +350,9 @@ func (d *Demuxer) loadBlockGroup(g element) (bool, error) {
 	for off < end {
 		e, err := d.readElement(off, end)
 		if err != nil {
+			if waxerr.CodeOf(err) == waxerr.CodeSourceUnreadable {
+				return false, err
+			}
 			if werr := d.warn(off, "damaged block group element"); werr != nil {
 				return false, werr
 			}
@@ -394,30 +410,24 @@ type clusterPos struct {
 }
 
 // ensureWalk frame-counts every block once, building the whole seek index and
-// recording the gapless raw total and DiscardPadding sum. It runs at most once,
-// on the first seek or the first Walk; no open runs it.
-func (d *Demuxer) ensureWalk() error { return d.walk(-1) }
+// recording the gapless raw total and DiscardPadding sum. It runs to the end
+// at most once, on the first seek or the first Walk; no open runs it.
+func (d *Demuxer) ensureWalk(ctx context.Context) error { return d.walk(ctx, -1) }
 
 var _ container.Walker = (*Demuxer)(nil)
 
 // Walk implements container.Walker: the full cluster walk, which a measure of
 // an advisory-length file runs anyway (its ceiling is past the last cue and
 // past the seconds cap, so cueLimit answers -1 and the walk runs whole). A
-// strict probe of such a file walks its clusters, by name.
-//
-// The walk drives the packet reader's own cursor and leaves it on the first
-// cluster, which is what a seek wants and a Walk mid-read must not: the
-// reader's state is saved around it and put back, so the next packet is the
-// one that would have come without the walk, as the frame walkers' Walk
-// already promises.
-func (d *Demuxer) Walk() error {
-	saved := d.saveReader()
-	err := d.ensureWalk()
-	d.restoreReader(saved)
-	if err == nil && d.Walked() {
-		d.adoptWalkedLength()
+// strict probe of such a file walks its clusters, by name. The walk runs on
+// its own cursor (see walk), so a Walk mid-read leaves the next packet where
+// it was, and one whose context ends resumes on the next Walk.
+func (d *Demuxer) Walk(ctx context.Context) error {
+	if err := d.ensureWalk(ctx); err != nil {
+		return err
 	}
-	return err
+	d.adoptWalkedLength()
+	return nil
 }
 
 // adoptWalkedLength puts a finished walk's measurement on the track: the last
@@ -492,50 +502,36 @@ func (d *Demuxer) restoreReader(s readerState) {
 }
 
 // Walked implements container.Walker: whether the full walk has reached the
-// end of the segment, which the open walk of a CodecDelay track counts as.
-// A walk that failed set walked (it runs once, even so) but not walkedTo,
-// and is not finished. Cues do not enter it, for the reason above.
-func (d *Demuxer) Walked() bool { return d.walked && d.walkedTo >= d.segmentEnd }
+// end of the segment. A walk that failed or was canceled is not finished.
+// Cues do not enter it, for the reason above.
+func (d *Demuxer) Walked() bool { return d.walked }
 
 // walk frame-counts blocks into the seek index up to limit, a segment-level
-// byte offset, or -1 for the whole stream. Reading is restored to the first
-// cluster afterward.
+// byte offset, or -1 for the whole stream.
 //
 // Only a walk that reached the end commits rawTotal, the two trim totals, and
 // the walked flag: which block is the *last* is the whole of what separates an
 // end trim from an inner one, and a walk that stopped short does not know.
 //
-// A bounded walk extends rather than restarts, since clusterIndex is a correct
-// prefix and walkedTo is a cluster boundary. Restarting would make a scrub cost
-// 0.1n + 0.2n + 0.3n where one full walk pays n and later seeks are free.
-func (d *Demuxer) walk(limit int64) error {
+// The walk runs on a cursor of its own, swapped in for the packet reader's
+// and out again: a Walk mid-read moves nothing, and a walk stopped at a bound
+// or a cancel resumes where it stood (a scrub would otherwise cost 0.1n +
+// 0.2n + 0.3n where one full walk pays n). The cursor carries the Vorbis
+// block state, so every codec takes the cue bound. A failed walk starts over.
+func (d *Demuxer) walk(ctx context.Context, limit int64) error {
 	if d.walked {
 		return nil
 	}
-	if limit >= 0 && !d.boundedWalkSafe() {
-		limit = -1
+	if d.walkErr != nil {
+		return d.walkErr
 	}
-	if limit >= 0 && d.walkedTo >= limit {
+	if limit >= 0 && d.walkBegun && d.walkCursor.curOff >= limit {
 		return nil // already counted past this bound
 	}
-	if limit < 0 {
-		d.walked = true // a full walk runs at most once, even if it fails
-	}
-	fail := func(e error) error {
-		d.recording = false
-		d.walkLimit = -1
-		// The counters advanced past walkedTo, so it no longer names what they
-		// describe. Drop it, or the next walk counts that stretch twice.
-		d.walkedTo = 0
-		d.resetReading(d.firstClusterOff)
-		return e
-	}
-	if d.walkedTo > 0 {
-		d.resetReading(d.walkedTo) // resume: the counters carry the prefix
+	saved := d.saveReader()
+	if d.walkBegun {
+		d.restoreReader(d.walkCursor)
 	} else {
-		// Every counter the loop below advances, or a retried walk counts the
-		// stretch a failed one already did twice. fail() drops walkedTo for
-		// exactly that reason, so this branch is the one a retry reaches.
 		d.walkCumulative, d.walkRaw = 0, 0
 		d.walkMid, d.walkMidCount = 0, 0
 		d.walkLastPad, d.walkLastClamped = 0, 0
@@ -543,14 +539,30 @@ func (d *Demuxer) walk(limit int64) error {
 		d.midTrims = nil
 		d.clusterIndex = d.clusterIndex[:0]
 		d.resetReading(d.firstClusterOff)
+		d.walkBegun = true
 	}
-	d.recording = true
-	d.walkLimit = limit
-	d.walkStopped = false
+	d.recording, d.walkLimit, d.walkStopped = true, limit, false
+	defer func() {
+		d.walkCursor = d.saveReader()
+		d.restoreReader(saved)
+		d.recording, d.walkLimit = false, -1
+	}()
+	fail := func(e error) error {
+		d.walkBegun = false // the counters ran past the cursor: start over
+		// The file's own faults are kept; a source that failed to read is
+		// tried again by the next walk.
+		if limit < 0 && waxerr.CodeOf(e) != waxerr.CodeSourceUnreadable {
+			d.walkErr = e
+		}
+		return e
+	}
 	for {
-		err := d.advanceBlock()
+		err := d.advanceBlock(ctx)
 		if err == io.EOF {
 			break
+		}
+		if waxerr.CodeOf(err) == waxerr.CodeCanceled {
+			return err // paused between elements; the cursor stands
 		}
 		if err != nil {
 			return fail(err)
@@ -564,9 +576,7 @@ func (d *Demuxer) walk(limit int64) error {
 			d.walkFrame(f)
 		}
 	}
-	if d.walkStopped {
-		d.walkedTo = d.curOff
-	} else {
+	if !d.walkStopped {
 		// The stream ended, so the counts are whole even if a bound was set.
 		// The final packet's trim goes back into the raw run, since that is
 		// where SettleLength expects the end trim's frames to be; the inner
@@ -575,12 +585,8 @@ func (d *Demuxer) walk(limit int64) error {
 		d.padding = d.walkLastPad
 		d.midPadding = d.walkMid
 		d.midCount = d.walkMidCount
-		d.walkedTo = d.segmentEnd
 		d.walked = true
 	}
-	d.recording = false
-	d.walkLimit = -1
-	d.resetReading(d.firstClusterOff)
 	return nil
 }
 
@@ -606,15 +612,6 @@ func (d *Demuxer) walkFrame(f frameLoc) {
 	d.walkLastPad, d.walkLastClamped = f.pad, clamped
 }
 
-// boundedWalkSafe reports whether the walk may stop short and resume later.
-// resetReading clears vorbisPrevBlock and a Vorbis frame's duration depends on
-// the previous block's size, so a mid-file resume would mis-time it. Vorbis
-// therefore pays its whole walk on the first seek that needs one, where every
-// other codec pays only as far as the cue bound.
-func (d *Demuxer) boundedWalkSafe() bool {
-	return d.setup.id != codec.Vorbis // the one codec carrying inter-frame duration state
-}
-
 // maxSeekSeconds and maxSeekRate bound the operands of cueLimit's conversion to
 // timestamp units. samplesToNs multiplies both whole seconds and the remainder
 // by a billion, and a declared SamplingFrequency is only required to be
@@ -635,17 +632,18 @@ const (
 // it was and still never early. Block timestamps continue from the trimmed end
 // after an mkvmerge seam, which is the case that puts a trim mid-file at all.
 func (d *Demuxer) cueLimit(sample int64) int64 {
-	d.resolveCues()
-	rate := int64(d.setup.fmt.Rate)
-	if len(d.cues) == 0 || rate <= 0 {
-		return -1
-	}
 	if sample <= 0 {
 		// Zero lands on the first cluster whatever the index says, and
 		// SeekSample reads that off firstClusterOff with nothing indexed.
 		// Otherwise the search picks the cue after the zero-timestamped first
-		// one and walks that whole cluster for an answer it already had.
+		// one and walks that whole cluster for an answer it already had, and a
+		// file without Cues walks whole.
 		return d.firstClusterOff
+	}
+	d.resolveCues()
+	rate := int64(d.setup.fmt.Rate)
+	if len(d.cues) == 0 || rate <= 0 {
+		return -1
 	}
 	if rate > maxSeekRate || sample/rate > maxSeekSeconds {
 		return -1
@@ -671,15 +669,25 @@ func (d *Demuxer) cueLimit(sample int64) int64 {
 // A wrong index can only make a landing earlier or slower, never wrong: the
 // bound decides where the walk stops, and landing early is already
 // SeekSample's contract, with format.Media pre-rolling the remainder.
-func (d *Demuxer) seekWalk(sample int64) error {
+func (d *Demuxer) seekWalk(ctx context.Context, sample int64) error {
 	if d.walked {
 		return nil
 	}
 	limit := d.cueLimit(sample)
+	var err error
 	if limit < 0 {
-		return d.ensureWalk()
+		err = d.ensureWalk(ctx)
+	} else {
+		err = d.walk(ctx, limit)
 	}
-	return d.walk(limit)
+	// A cancel is the seek's own, and so is a bounded walk's failure, which
+	// the next seek tries again. A full walk the file's damage stopped is
+	// Walk's to report: a strict seek refuses with it, a tolerant one lands
+	// on what the walk indexed.
+	if err == nil || limit >= 0 || d.opts.Strict || waxerr.CodeOf(err) == waxerr.CodeCanceled {
+		return err
+	}
+	return nil
 }
 
 // SeekSample lands on the indexed cluster at or before the target in the raw
@@ -688,7 +696,7 @@ func (d *Demuxer) seekWalk(sample int64) error {
 // timestamps could not. format.Media pre-rolls the remainder (decode and
 // discard) for a sample-exact landing, so for Opus the SeekPreRoll margin is
 // decoded through and the decoder reconverges.
-func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
+func (d *Demuxer) SeekSample(ctx context.Context, track int, sample int64) (int64, error) {
 	if track != 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("mka: no track %d", track))
 	}
@@ -698,7 +706,7 @@ func (d *Demuxer) SeekSample(track int, sample int64) (int64, error) {
 	if !d.haveFirstCluster {
 		return 0, nil
 	}
-	if err := d.seekWalk(sample); err != nil {
+	if err := d.seekWalk(ctx, sample); err != nil {
 		return 0, err
 	}
 	searchRaw := sample - d.seekPreRollSamples

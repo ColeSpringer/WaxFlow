@@ -4,6 +4,7 @@ package mka_test
 // the demuxer's half are in midpadding_test.go, which cannot import format.
 
 import (
+	"context"
 	"testing"
 
 	"github.com/colespringer/waxflow/container"
@@ -66,7 +67,7 @@ func TestMidStreamDiscardPaddingRead(t *testing.T) {
 	}
 	for _, target := range []int64{10000, 100000, secondCluster} {
 		seeked := open()
-		landed, err := seeked.SeekSample(target)
+		landed, err := seeked.SeekSample(context.Background(), target)
 		if err != nil {
 			seeked.Close()
 			t.Fatalf("SeekSample(%d): %v", target, err)
@@ -100,14 +101,14 @@ func TestMidStreamDiscardPaddingRead(t *testing.T) {
 
 	seekedAgain := open()
 	defer seekedAgain.Close()
-	if _, err := seekedAgain.SeekSample(secondCluster); err != nil {
+	if _, err := seekedAgain.SeekSample(context.Background(), secondCluster); err != nil {
 		t.Fatalf("SeekSample: %v", err)
 	}
 	w, ok := seekedAgain.(format.Walker)
 	if !ok {
 		t.Fatal("a Matroska Media must implement format.Walker")
 	}
-	if err := w.Walk(); err != nil {
+	if err := w.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	afterWalk := mustReadInts(t, seekedAgain)
@@ -146,7 +147,7 @@ func TestOversizedFinalDiscardPaddingRead(t *testing.T) {
 	if !ok {
 		t.Fatal("a Matroska Media must implement format.Walker")
 	}
-	if err := w.Walk(); err != nil {
+	if err := w.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if got := int64(len(mustReadInts(t, walked))); got != p.Samples() {

@@ -6,6 +6,7 @@ package waxflow_test
 // long stream that exercises real Ogg granule bisection.
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -72,7 +73,7 @@ func TestZeroFrameFLACEndToEnd(t *testing.T) {
 	}
 	src := container.BytesSource(raw)
 
-	info, err := waxflow.New().Probe(src, "flac", nil)
+	info, err := waxflow.New().Probe(context.Background(), src, "flac", nil)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}

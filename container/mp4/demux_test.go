@@ -1,6 +1,7 @@
 package mp4
 
 import (
+	"context"
 	"errors"
 	"io"
 	"math"
@@ -91,7 +92,7 @@ func TestSeekLandsAtOrBefore(t *testing.T) {
 	d := open(t, fixture(t, "alac-stereo.m4a"))
 	raw := d.sel.st.totalDur
 	for _, target := range []int64{0, 1, 1000, 4096, raw / 2, raw - 1, raw, raw + 100000} {
-		landed, err := d.SeekSample(0, target)
+		landed, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatalf("seek to %d: %v", target, err)
 		}

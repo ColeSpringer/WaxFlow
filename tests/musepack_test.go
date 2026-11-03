@@ -60,7 +60,7 @@ func TestMusepackProbeAndDecode(t *testing.T) {
 	for _, tc := range mpcCases {
 		t.Run(tc.path[len(tc.path)-1], func(t *testing.T) {
 			raw := mpcFixture(t, tc.path...)
-			info, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+			info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", nil)
 			if err != nil {
 				t.Fatalf("probe: %v", err)
 			}
@@ -170,7 +170,7 @@ func TestMusepackFATEPair(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			info, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+			info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", nil)
 			if err != nil {
 				t.Fatalf("probe: %v", err)
 			}
@@ -193,7 +193,7 @@ func TestMusepackFATEPair(t *testing.T) {
 // the engine's Info, under the canonical spellings.
 func TestMusepackTagsReachTheProbe(t *testing.T) {
 	raw := mpcFixture(t, "container", "mpc", "testdata", "tagged.mpc")
-	info, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestMusepackTagsReachTheProbe(t *testing.T) {
 // chapters with their titles and start times, the untitled one included.
 func TestMusepackChaptersReachTheProbe(t *testing.T) {
 	raw := mpcFixture(t, "container", "mpc", "testdata", "chapters.mpc")
-	info, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", nil)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestMusepackChaptersReachTheProbe(t *testing.T) {
 func TestMusepackRefusalsNameTheVersion(t *testing.T) {
 	for _, v := range []byte{4, 5, 6} {
 		raw := append([]byte{'M', 'P', '+', v}, make([]byte, 64)...)
-		_, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+		_, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", nil)
 		if err == nil {
 			t.Fatalf("SV%d accepted", v)
 		}
@@ -251,7 +251,7 @@ func TestMusepackRefusalsNameTheVersion(t *testing.T) {
 func TestMusepackExtensionHints(t *testing.T) {
 	raw := mpcFixture(t, "testdata", "sine-s16.mpc")
 	for _, hint := range []string{"", "mpc", ".mpc", "mp+", "mpp"} {
-		info, err := waxflow.New().Probe(container.BytesSource(raw), hint, nil)
+		info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), hint, nil)
 		if err != nil {
 			t.Fatalf("probe with hint %q: %v", hint, err)
 		}
@@ -261,7 +261,7 @@ func TestMusepackExtensionHints(t *testing.T) {
 	}
 	junk := bytes.Repeat([]byte{'z'}, 4096)
 	for _, hint := range []string{"mpc", ".mpc", "mp+", "mpp"} {
-		_, err := waxflow.New().Probe(container.BytesSource(junk), hint, nil)
+		_, err := waxflow.New().Probe(context.Background(), container.BytesSource(junk), hint, nil)
 		if err == nil {
 			t.Fatalf("probe accepted junk as %q", hint)
 		}

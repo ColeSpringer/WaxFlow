@@ -2,6 +2,7 @@ package apen_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -134,7 +135,7 @@ func TestSeekLandsOnAFrame(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, target := range []int64{0, 1, 73727, 73728, 73729, 100000, tr.Samples - 1, tr.Samples, tr.Samples + 1000} {
-		got, err := d.SeekSample(0, target)
+		got, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatalf("seek %d: %v", target, err)
 		}
@@ -153,10 +154,10 @@ func TestSeekLandsOnAFrame(t *testing.T) {
 			t.Errorf("seek %d: next packet at %d, seek reported %d", target, pkt.PTS, got)
 		}
 	}
-	if _, err := d.SeekSample(1, 0); err == nil {
+	if _, err := d.SeekSample(context.Background(), 1, 0); err == nil {
 		t.Error("seek on a track that does not exist was accepted")
 	}
-	if _, err := d.SeekSample(0, -1); err == nil {
+	if _, err := d.SeekSample(context.Background(), 0, -1); err == nil {
 		t.Error("negative seek target was accepted")
 	}
 }
@@ -178,7 +179,7 @@ func TestSeekDecodesTheRightSamples(t *testing.T) {
 	}
 	defer dec.Release()
 	for _, target := range []int64{0, 73728, 147456} {
-		at, err := d.SeekSample(0, target)
+		at, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatal(err)
 		}

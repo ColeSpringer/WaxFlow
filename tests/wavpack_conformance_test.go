@@ -16,6 +16,7 @@ package waxflow_test
 
 import (
 	"archive/zip"
+	"context"
 	"errors"
 	"io"
 	pathpkg "path"
@@ -181,7 +182,7 @@ func TestWavPackSuiteSourceBitDepth(t *testing.T) {
 		{"bit_depths/24bit.wv", 24, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			info, err := waxflow.New().Probe(container.BytesSource(suiteFile(t, tc.name)), "wv", nil)
+			info, err := waxflow.New().Probe(context.Background(), container.BytesSource(suiteFile(t, tc.name)), "wv", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -273,7 +274,7 @@ func TestWavPackSuiteUnreadable(t *testing.T) {
 	for _, name := range wavpackUnreadable {
 		t.Run(name, func(t *testing.T) {
 			raw := suiteFile(t, name)
-			if info, err := waxflow.New().Probe(container.BytesSource(raw), "wv", nil); err == nil {
+			if info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "wv", nil); err == nil {
 				t.Fatalf("resolved as %q; a stream behind an executable header is not a .wv",
 					info.Container)
 			}
@@ -289,7 +290,7 @@ func TestWavPackSuiteLegacyRefusedByName(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			raw := suiteFile(t, name)
 			for _, opts := range []*waxflow.ProbeOptions{nil, {Strict: true}} {
-				_, err := waxflow.New().Probe(container.BytesSource(raw), "wv", opts)
+				_, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "wv", opts)
 				if !errors.Is(err, waxerr.ErrUnsupportedFormat) || !strings.Contains(err.Error(), "before 4.0") {
 					t.Errorf("probe (strict %v) = %v, want unsupported-format naming WavPack before 4.0",
 						opts != nil, err)

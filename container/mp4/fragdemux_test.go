@@ -2,6 +2,7 @@ package mp4
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"io"
 	"testing"
@@ -298,7 +299,7 @@ func TestFragmentedSeek(t *testing.T) {
 	}
 	// Target inside the second fragment (decode time 4*960..8*960); landing
 	// should be the second fragment's base decode time.
-	landed, err := d.SeekSample(0, 5*960)
+	landed, err := d.SeekSample(context.Background(), 0, 5*960)
 	if err != nil {
 		t.Fatalf("SeekSample: %v", err)
 	}

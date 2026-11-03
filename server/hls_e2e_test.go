@@ -7,6 +7,7 @@ package server_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -210,7 +211,7 @@ func TestHLSMediaPlaylistMatchesTheExportedPlan(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		info, err := e.Probe(container.BytesSource(raw), ext, nil)
+		info, err := e.Probe(context.Background(), container.BytesSource(raw), ext, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -218,7 +219,7 @@ func TestHLSMediaPlaylistMatchesTheExportedPlan(t *testing.T) {
 	}
 	_, wav := track("ramp.wav", "wav")
 	opusSrc, opus := track("ramp.opus", "opus")
-	grid, err := e.PacketGrid(opusSrc, "opus")
+	grid, err := e.PacketGrid(context.Background(), opusSrc, "opus")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -582,7 +583,7 @@ func TestHLSUnknownLengthMeasures(t *testing.T) {
 	}
 
 	// Sanity: the engine really cannot know the length from headers.
-	info, err := waxflow.New().Probe(container.BytesSource(tagless), "mp3", nil)
+	info, err := waxflow.New().Probe(context.Background(), container.BytesSource(tagless), "mp3", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

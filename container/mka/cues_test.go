@@ -5,6 +5,7 @@ package mka
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -107,7 +108,7 @@ func landAll(t *testing.T, file []byte, targets []int64) ([]int64, int64, *Demux
 	}
 	var landed []int64
 	for _, want := range targets {
-		got, err := d.SeekSample(0, want)
+		got, err := d.SeekSample(context.Background(), 0, want)
 		if err != nil {
 			t.Fatalf("seek to %d: %v", want, err)
 		}
@@ -271,7 +272,7 @@ func seekAndRead(t *testing.T, file []byte, target int64) (int64, [][]byte) {
 	if err != nil {
 		t.Fatalf("NewDemuxer: %v", err)
 	}
-	landed, err := d.SeekSample(0, target)
+	landed, err := d.SeekSample(context.Background(), 0, target)
 	if err != nil {
 		t.Fatalf("seek to %d: %v", target, err)
 	}
@@ -310,7 +311,7 @@ func TestCuesFromFFmpegBoundTheWalk(t *testing.T) {
 	if total <= 0 {
 		t.Fatalf("ffmpeg's fixture declares %d samples", total)
 	}
-	got, err := d.SeekSample(0, total/10)
+	got, err := d.SeekSample(context.Background(), 0, total/10)
 	if err != nil {
 		t.Fatalf("seek: %v", err)
 	}
@@ -327,10 +328,10 @@ func TestCuesFromFFmpegBoundTheWalk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := rd.ensureWalk(); err != nil {
+	if err := rd.ensureWalk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	want, err := rd.SeekSample(0, total/10)
+	want, err := rd.SeekSample(context.Background(), 0, total/10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,20 +344,56 @@ func TestCuesFromFFmpegBoundTheWalk(t *testing.T) {
 	t.Logf("%d cues, bounded read %d bytes, unbounded %d (%d-byte file)", len(d.cues), c.Bytes, ref.Bytes, len(file))
 }
 
-// TestCuesVorbisRefusesTheBound pins the guard against a codec whose frame
-// duration depends on the previous block, which a resume would mis-time: a
-// Vorbis seek pays the whole walk rather than stopping at the cue bound.
-func TestCuesVorbisRefusesTheBound(t *testing.T) {
-	d := &Demuxer{}
-	d.setup.id = codec.Vorbis
-	if d.boundedWalkSafe() {
-		t.Error("Vorbis accepted a bounded walk; a resume would mis-time its frames")
+// TestCuesBoundAVorbisWalk: a Vorbis frame's duration depends on the block
+// before it, and the walk's cursor carries that, so a Vorbis seek stops at
+// the cue bound like any other codec's and the resumed walk settles the
+// length a whole walk does.
+func TestCuesBoundAVorbisWalk(t *testing.T) {
+	testutil.FFmpegEncoder(t, "libvorbis")
+	path := filepath.Join(t.TempDir(), "vorbis.mka")
+	testutil.FFmpegGenerateDuration(t, path, 8.0, 44100, 2, "libvorbis", "-q:a", "4", "-cluster_time_limit", "500")
+	file, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, id := range []codec.ID{codec.PCM, codec.FLAC, codec.Opus, codec.AACLC} {
-		d.setup.id = id
-		if !d.boundedWalkSafe() {
-			t.Errorf("%s refused a bounded walk; it carries no inter-frame duration state", id)
-		}
+	full, err := NewDemuxer(container.BytesSource(file), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := full.Walk(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := full.Tracks()[0]
+	total := want.Samples
+
+	c := &testutil.CountingSource{Src: container.BytesSource(file)}
+	d, err := NewDemuxer(c, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantLand, err := full.SeekSample(context.Background(), 0, total/4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.SeekSample(context.Background(), 0, total/4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.cues) == 0 {
+		t.Fatal("ffmpeg's Cues did not parse")
+	}
+	if d.walked {
+		t.Error("a Vorbis seek ran the full walk; the Cues bound was not taken")
+	}
+	if got != wantLand {
+		t.Errorf("bounded Vorbis seek landed at %d, the unbounded walk at %d", got, wantLand)
+	}
+	if err := d.Walk(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if settled := d.Tracks()[0]; settled.Samples != total || settled.Padding != want.Padding {
+		t.Errorf("the walk resumed past the bound settled %d samples (padding %d), a whole walk %d (%d)",
+			settled.Samples, settled.Padding, total, want.Padding)
 	}
 }
 
@@ -392,8 +429,8 @@ func TestCuesWalkRetryAfterFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDemuxer: %v", err)
 	}
-	// Resolve while reads work, so the seeks below take the bounded path. The
-	// full walk is marked spent on its first attempt and would never retry.
+	// Resolve while reads work, so the seeks below take the bounded path: a
+	// full walk keeps its failure and would never retry.
 	d.resolveCues()
 	if len(d.cues) == 0 {
 		t.Fatal("no Cues; the seeks below would not be bounded walks")
@@ -401,26 +438,26 @@ func TestCuesWalkRetryAfterFailure(t *testing.T) {
 
 	// A shallow seek first, so there is a resume point to be wrong about: a
 	// first walk starts from zero and leaves nothing stale behind.
-	if got, err := d.SeekSample(0, shallow); err != nil {
+	if got, err := d.SeekSample(context.Background(), 0, shallow); err != nil {
 		t.Fatalf("shallow seek: %v", err)
 	} else if got != want[0] {
 		t.Fatalf("shallow seek landed at %d, want %d", got, want[0])
 	}
-	if d.walkedTo <= 0 {
+	if !d.walkBegun {
 		t.Fatal("the shallow seek left no resume point; there is nothing for the retry to trip over")
 	}
 
 	// Fail inside the stretch the deeper seek walks, not at its bound cluster.
 	f.from, f.to, f.armed = int64(len(file))*3/10, int64(len(file))*45/100, true
-	if _, err := d.SeekSample(0, deep); err == nil {
+	if _, err := d.SeekSample(context.Background(), 0, deep); err == nil {
 		t.Fatal("the deep seek succeeded through a failing source")
 	}
-	if d.walked {
+	if d.walkErr != nil {
 		t.Fatal("the failed walk was the full one; this test needs the bounded path")
 	}
 
 	f.armed = false
-	got, err := d.SeekSample(0, deep)
+	got, err := d.SeekSample(context.Background(), 0, deep)
 	if err != nil {
 		t.Fatalf("retry after the source recovered: %v", err)
 	}
@@ -443,7 +480,7 @@ func TestCuesSeekToStartCostsNothing(t *testing.T) {
 	d.resolveCues()
 	opened := c.Bytes
 
-	landed, err := d.SeekSample(0, 0)
+	landed, err := d.SeekSample(context.Background(), 0, 0)
 	if err != nil {
 		t.Fatalf("SeekSample(0): %v", err)
 	}
@@ -457,7 +494,7 @@ func TestCuesSeekToStartCostsNothing(t *testing.T) {
 
 	// The cheap path must leave the walk resumable, not wedged.
 	deep := total / 2
-	got, err := d.SeekSample(0, deep)
+	got, err := d.SeekSample(context.Background(), 0, deep)
 	if err != nil {
 		t.Fatalf("deep seek after seeking to 0: %v", err)
 	}
@@ -474,7 +511,7 @@ func boundTaken(t *testing.T, file []byte, target int64) bool {
 	if err != nil {
 		t.Fatalf("NewDemuxer: %v", err)
 	}
-	if _, err := d.SeekSample(0, target); err != nil {
+	if _, err := d.SeekSample(context.Background(), 0, target); err != nil {
 		t.Fatalf("seek to %d: %v", target, err)
 	}
 	return !d.walked
@@ -503,19 +540,20 @@ func TestCuesReadErrorDoesNotFailTheSeek(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDemuxer: %v", err)
 	}
-	got, err := d.SeekSample(0, total/3)
+	got, err := d.SeekSample(context.Background(), 0, total/3)
 	if err != nil {
 		t.Fatalf("an unreadable Cues element failed the seek: %v", err)
 	}
 	if got != want[0] {
 		t.Errorf("landed at %d, a readable index lands at %d", got, want[0])
 	}
-	if !d.walked {
+	// No bound was taken: nothing of the index parsed, so the seek walked.
+	if len(d.cues) != 0 {
 		t.Error("the seek claimed a bound from an index it could not read")
 	}
 	// The second seek must agree: the outcome cannot depend on which call
 	// triggered the read.
-	if again, err := d.SeekSample(0, total/3); err != nil || again != got {
+	if again, err := d.SeekSample(context.Background(), 0, total/3); err != nil || again != got {
 		t.Errorf("the second seek gave (%d, %v), the first gave (%d, nil)", again, err, got)
 	}
 }

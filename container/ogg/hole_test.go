@@ -1,6 +1,7 @@
 package ogg
 
 import (
+	"context"
 	"io"
 	"strings"
 	"testing"
@@ -54,7 +55,7 @@ func TestOggDamageWarnsOnce(t *testing.T) {
 	}
 	var pkt container.Packet
 	crossDamage := func() {
-		if _, err := d.SeekSample(0, 15*5*bs); err != nil {
+		if _, err := d.SeekSample(context.Background(), 0, 15*5*bs); err != nil {
 			t.Fatal(err)
 		}
 		for range 10 * 5 {
@@ -200,7 +201,7 @@ func TestOggFLACDamagedFirstPageIsAHoleFromZero(t *testing.T) {
 	if pkts := walkPackets(t, d); len(pkts) != 3 || pkts[0].PTS != bs || pkts[0].Lost != bs {
 		t.Fatalf("%d packets, the first at %d owing %d; want 3 from %d owing %d", len(pkts), pkts[0].PTS, pkts[0].Lost, bs, bs)
 	}
-	if landed, err := d.SeekSample(0, bs/2); err != nil || landed != 0 {
+	if landed, err := d.SeekSample(context.Background(), 0, bs/2); err != nil || landed != 0 {
 		t.Fatalf("a seek into the hole landed at %d (%v), want 0", landed, err)
 	}
 	var pkt container.Packet
@@ -213,13 +214,13 @@ func TestOggFLACDamagedFirstPageIsAHoleFromZero(t *testing.T) {
 // count, which the warning list's cap and de-duplication cannot hide.
 func TestOggDamageCountIgnoresTheListCap(t *testing.T) {
 	d := &Demuxer{}
-	for i := range maxWarnings + 5 {
+	for i := range container.MaxWarnings + 5 {
 		if err := d.warn(int64(i), "damaged page, resyncing"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	n := d.damage
-	if err := d.warn(int64(maxWarnings+5), "damaged page, resyncing"); err != nil {
+	n := d.warnings.DamageCount()
+	if err := d.warn(int64(container.MaxWarnings+5), "damaged page, resyncing"); err != nil {
 		t.Fatal(err)
 	}
 	if !d.damagedSince(n) {
@@ -240,7 +241,7 @@ func TestOggFLACSeekIntoAHoleLandsBefore(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		landed, err := d.SeekSample(0, target)
+		landed, err := d.SeekSample(context.Background(), 0, target)
 		if err != nil {
 			t.Fatal(err)
 		}

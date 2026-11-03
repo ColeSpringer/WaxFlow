@@ -11,6 +11,7 @@ package oracletest
 // code in both readers: esds at either timescale, and the fourcc.
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -37,7 +38,7 @@ func TestWaxlabelAgreesMP3InMP4(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			info, err := waxflow.New().Probe(container.BytesSource(raw), "", nil)
+			info, err := waxflow.New().Probe(context.Background(), container.BytesSource(raw), "", nil)
 			if err != nil {
 				t.Fatalf("waxflow.Probe: %v", err)
 			}

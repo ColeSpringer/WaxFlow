@@ -480,7 +480,7 @@ type closingMedia struct {
 
 // Walk and Walked forward format.Walker: embedding the interface promotes
 // nothing outside it, and this wraps one file.
-func (m closingMedia) Walk() error { return format.WalkMedia(m.Media) }
+func (m closingMedia) Walk(ctx context.Context) error { return format.WalkMedia(ctx, m.Media) }
 
 func (m closingMedia) Walked() bool { return format.MediaWalked(m.Media) }
 
@@ -841,7 +841,7 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 	// options further down need, and it fixes the output's identity fields
 	// (media type, container) for the plan. Creation validated this same plan,
 	// so failures here mean the source itself changed shape.
-	probe, err := r.cfg.Engine.Probe(src, src.Ext, nil)
+	probe, err := r.cfg.Engine.Probe(ctx, src, src.Ext, nil)
 	if err != nil {
 		return err
 	}
@@ -1424,7 +1424,7 @@ func splitProgressAt(base, span, done, pieceTotal int64) int64 {
 // one means the server is not the caller and no validation of these cuts ran
 // anywhere.
 func (r *Runner) splitLength(ctx context.Context, src *source.File) (track container.Track, measured, exact bool, err error) {
-	info, err := r.cfg.Engine.Probe(src, src.Ext, nil)
+	info, err := r.cfg.Engine.Probe(ctx, src, src.Ext, nil)
 	if err != nil {
 		return container.Track{}, false, false, err
 	}
@@ -1559,7 +1559,7 @@ func (r *Runner) runSplit(ctx context.Context, j *Job) error {
 		case measured:
 			bound = srcTrack
 		}
-		sl, err := waxflow.SliceMeasured(med, bound, sp[0], sp[1])
+		sl, err := waxflow.SliceMeasured(ctx, med, bound, sp[0], sp[1])
 		if err != nil {
 			return err
 		}
