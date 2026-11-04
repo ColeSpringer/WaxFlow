@@ -27,7 +27,7 @@ func (d *Decoder) finishChannel(cd *channelData, outCh int) {
 	// AAC dequantization yields integer-PCM-scale samples; normalize to the
 	// pipeline's [-1, 1] float convention.
 	const norm = 1.0 / 32768.0
-	for i := 0; i < 1024; i++ {
+	for i := range 1024 {
 		out[i] = float32((cur[i] + ov[i]) * norm)
 		ov[i] = cur[1024+i]
 	}
@@ -41,10 +41,10 @@ func longWindowApply(z, cur *[2048]float64, seq, prevShape, curShape int) {
 	// Left half [0,1024).
 	if seq == longStop {
 		wl := &shortWindow[prevShape]
-		for n := 0; n < 448; n++ {
+		for n := range 448 {
 			cur[n] = 0
 		}
-		for n := 0; n < 128; n++ {
+		for n := range 128 {
 			cur[448+n] = z[448+n] * wl[n]
 		}
 		for n := 576; n < 1024; n++ {
@@ -52,7 +52,7 @@ func longWindowApply(z, cur *[2048]float64, seq, prevShape, curShape int) {
 		}
 	} else {
 		wl := &longWindow[prevShape]
-		for n := 0; n < 1024; n++ {
+		for n := range 1024 {
 			cur[n] = z[n] * wl[n]
 		}
 	}
@@ -62,7 +62,7 @@ func longWindowApply(z, cur *[2048]float64, seq, prevShape, curShape int) {
 			cur[n] = z[n]
 		}
 		wr := &shortWindow[curShape]
-		for n := 0; n < 128; n++ {
+		for n := range 128 {
 			cur[1472+n] = z[1472+n] * wr[128+n]
 		}
 		for n := 1600; n < 2048; n++ {
@@ -81,7 +81,7 @@ func longWindowApply(z, cur *[2048]float64, seq, prevShape, curShape int) {
 // hops starting at offset 448.
 func shortFilterbank(cd *channelData, prevShape, curShape int, cur *[2048]float64) {
 	*cur = [2048]float64{}
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		var z [256]float64
 		planShort.imdct(cd.spec[i*128:i*128+128], z[:])
 		lShape := curShape
@@ -91,7 +91,7 @@ func shortFilterbank(cd *channelData, prevShape, curShape int, cur *[2048]float6
 		wl := &shortWindow[lShape]
 		wr := &shortWindow[curShape]
 		off := 448 + i*128
-		for n := 0; n < 128; n++ {
+		for n := range 128 {
 			cur[off+n] += z[n] * wl[n]
 			cur[off+128+n] += z[128+n] * wr[128+n]
 		}

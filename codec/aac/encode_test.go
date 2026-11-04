@@ -175,7 +175,7 @@ func TestAACEncodeTransient(t *testing.T) {
 	}
 	// Sharp attacks every ~0.19 s, decaying bursts.
 	for hit := 5000; hit < n-2000; hit += 9000 {
-		for j := 0; j < 800; j++ {
+		for j := range 800 {
 			src[0][hit+j] += float32(0.8 * math.Exp(-float64(j)/150) *
 				math.Sin(2*math.Pi*2500*float64(j)/rate))
 		}
@@ -210,7 +210,7 @@ func TestAACEncodeStereoMS(t *testing.T) {
 	pkts, tr := encodeAll(t, f, src, nil)
 	enc, _ := NewEncoder(f, nil)
 	out := decodeAll(t, enc.CodecConfig(), pkts)
-	for c := 0; c < 2; c++ {
+	for c := range 2 {
 		snr := snrDB(src[c][:tr.Samples], out[c][EncoderDelay:EncoderDelay+int(tr.Samples)])
 		t.Logf("ch %d SNR %.1f dB", c, snr)
 		if snr < 40 {
@@ -322,9 +322,9 @@ func TestAACEncodeAUCeiling(t *testing.T) {
 				}
 				buf := audio.Get(fm, frameLen)
 				defer audio.Put(buf)
-				for blk := 0; blk < blocks; blk++ {
+				for blk := range blocks {
 					buf.N = frameLen
-					for c := 0; c < ch; c++ {
+					for c := range ch {
 						dst := buf.ChanF(c)
 						for i := range dst {
 							b := pattern[(blk*frameLen+i*ch+c)%len(pattern)]
@@ -376,7 +376,7 @@ func TestEncodeSilentChannelDPCM(t *testing.T) {
 			return d.Decode(p.Data, func(*audio.Buffer) error { return nil })
 		}
 		buf := audio.Get(fm, 1024)
-		for blk := 0; blk < 8; blk++ {
+		for blk := range 8 {
 			buf.N = 1024
 			clear(buf.ChanF(0)[:1024])
 			for i := range buf.ChanF(1)[:1024] {

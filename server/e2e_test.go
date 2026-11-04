@@ -890,7 +890,7 @@ func TestSeekSampleExact(t *testing.T) {
 	if got.N != src.N-from {
 		t.Fatalf("seeked stream has %d frames, want %d", got.N, src.N-from)
 	}
-	for c := 0; c < 2; c++ {
+	for c := range 2 {
 		wantCh := src.ChanI(c)[from:]
 		gotCh := got.ChanI(c)
 		for i := range wantCh {
@@ -1106,9 +1106,7 @@ func TestFlightDedupUnderConcurrency(t *testing.T) {
 	var wg sync.WaitGroup
 	bodies := make([][]byte, clients)
 	for i := range clients {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			req, _ := http.NewRequest(http.MethodGet, env.ts.URL+"/stream?src=lib/ramp.wav&format=wav&rate=24000", nil)
 			req.Header.Set("X-API-Key", testKey)
 			resp, err := env.ts.Client().Do(req)
@@ -1118,7 +1116,7 @@ func TestFlightDedupUnderConcurrency(t *testing.T) {
 			}
 			defer resp.Body.Close()
 			bodies[i], _ = io.ReadAll(resp.Body)
-		}()
+		})
 	}
 	wg.Wait()
 

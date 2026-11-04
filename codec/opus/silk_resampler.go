@@ -29,11 +29,7 @@ var delayMatrixEnc = [6][3]int8{
 
 // rateID maps a sample rate to its delay-matrix column (silk/resampler.c).
 func rateID(r int) int {
-	id := (((r >> 12) - b2iRate(r > 16000)) >> b2iRate(r > 24000)) - 1
-	if id > 5 {
-		id = 5
-	}
-	return id
+	return min((((r>>12)-b2iRate(r > 16000))>>b2iRate(r > 24000))-1, 5)
 }
 
 func b2iRate(b bool) int {
@@ -173,10 +169,7 @@ func (S *silkResampler) iirFIR(out, in []int16, inLen int) {
 	outPos, inPos := 0, 0
 	nSamplesIn := 0
 	for {
-		nSamplesIn = inLen
-		if nSamplesIn > S.batchSize {
-			nSamplesIn = S.batchSize
-		}
+		nSamplesIn = min(inLen, S.batchSize)
 		silkResamplerUp2HQ(S.sIIR[:], buf[resamplerOrderFIR12:], in[inPos:], nSamplesIn)
 		maxIndex := int32(nSamplesIn) << (16 + 1)
 		outPos += iirFIRInterpol(out[outPos:], buf, maxIndex, indexInc)
@@ -222,10 +215,7 @@ func (S *silkResampler) downFIR(out, in []int16, inLen int) {
 	outPos, inPos := 0, 0
 	nSamplesIn := 0
 	for {
-		nSamplesIn = inLen
-		if nSamplesIn > S.batchSize {
-			nSamplesIn = S.batchSize
-		}
+		nSamplesIn = min(inLen, S.batchSize)
 		silkResamplerAR2(S.sIIR[:2], buf[S.firOrder:], in[inPos:], S.coefs, nSamplesIn)
 		maxIndex := int32(nSamplesIn) << 16
 		outPos += downFIRInterpol(out[outPos:], buf, firCoefs, S.firOrder, S.firFracs, maxIndex, indexInc)
@@ -243,7 +233,7 @@ func (S *silkResampler) downFIR(out, in []int16, inLen int) {
 // silkResamplerAR2 is the second-order AR filter with single delay elements
 // (silk_resampler_private_AR2). Output is Q8.
 func silkResamplerAR2(S []int32, outQ8 []int32, in []int16, aQ14 []int16, length int) {
-	for k := 0; k < length; k++ {
+	for k := range length {
 		out32 := S[0] + silkLSHIFT(int32(in[k]), 8)
 		outQ8[k] = out32
 		out32 = silkLSHIFT(out32, 2)
@@ -267,7 +257,7 @@ func downFIRInterpol(out []int16, buf []int32, firCoefs []int16, firOrder, firFr
 				resQ6 = silkSMLAWB(resQ6, b[j], int32(p[j]))
 			}
 			p = firCoefs[resamplerDownOrderFIR0/2*(int32(firFracs)-1-interpolInd):]
-			for j := 0; j < 9; j++ {
+			for j := range 9 {
 				resQ6 = silkSMLAWB(resQ6, b[17-j], int32(p[j]))
 			}
 			out[n] = int16(silkSAT16(silkRSHIFTROUND(resQ6, 6)))
@@ -300,7 +290,7 @@ func downFIRInterpol(out []int16, buf []int32, firCoefs []int16, firOrder, firFr
 // silkResamplerUp2HQ is the 2x high-quality IIR upsampler
 // (silk_resampler_private_up2_HQ). S is the 6-element IIR state.
 func silkResamplerUp2HQ(S []int32, out, in []int16, length int) {
-	for k := 0; k < length; k++ {
+	for k := range length {
 		in32 := silkLSHIFT(int32(in[k]), 10)
 		Y := in32 - S[0]
 		X := silkSMULWB(Y, int32(silk_resampler_up2_hq_0[0]))

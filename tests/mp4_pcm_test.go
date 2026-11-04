@@ -66,23 +66,16 @@ var pcmInMP4Fixtures = []struct {
 	{name: "pcm-51-perm.mp4", permuted: true},
 }
 
-// The tone each speaker position carries in the layout fixtures, the
-// spacing tests/aac_multichannel_test.go uses with 60 Hz on the LFE. The tone
-// is keyed to the POSITION, not to the channel index, so a permuted file
-// carries the same tone in the same speaker as its canonical twin and the
-// identity assertion is one assertion for both.
-var positionTones = map[audio.ChannelMask]float64{
-	audio.FrontLeft: 300, audio.FrontRight: 550, audio.FrontCenter: 800, audio.LowFrequency: 60,
-	audio.BackLeft: 1050, audio.BackRight: 1300, audio.SideLeft: 1550, audio.SideRight: 1800,
-	audio.BackCenter: 2050,
-}
-
 // pcmLayoutFixtures is the layout each fixture must report and the tone each
-// of OUR output channels must carry, in mask-bit order. Where a row's tones
-// are not the positions' own, the file's Ls Rs pair was generated as
-// ffmpeg's side pair and lands on WAVE's back pair here: that is decision 7,
-// a lone 110 degree pair (a named tag's, or chnl positions 4 and 5) is the
-// back pair in this tree and 5.1(side) to ffmpeg.
+// of OUR output channels must carry, in mask-bit order. The fixtures key each
+// tone to its speaker POSITION, not its channel index (FL 300, FR 550, FC 800,
+// LFE 60, BL 1050, BR 1300, SL 1550, SR 1800, BC 2050 Hz, the spacing
+// tests/aac_multichannel_test.go uses), so a permuted file carries the same
+// tone in the same speaker as its canonical twin and one assertion covers
+// both. Where a row's tones are not the positions' own, the file's Ls Rs pair
+// was generated as ffmpeg's side pair and lands on WAVE's back pair here: that
+// is decision 7, a lone 110 degree pair (a named tag's, or chnl positions 4
+// and 5) is the back pair in this tree and 5.1(side) to ffmpeg.
 var pcmLayoutFixtures = []struct {
 	name   string
 	layout audio.ChannelMask
@@ -466,9 +459,9 @@ func ffprobeLayout(t *testing.T, s string) audio.ChannelMask {
 		list = s[i+1 : len(s)-1]
 	}
 	var mask audio.ChannelMask
-	for _, name := range strings.Split(list, "+") {
+	for name := range strings.SplitSeq(list, "+") {
 		bit := audio.ChannelMask(0)
-		for i := 0; i < 32; i++ {
+		for i := range 32 {
 			if audio.ChannelMask(1<<i).String() == name {
 				bit = 1 << i
 			}

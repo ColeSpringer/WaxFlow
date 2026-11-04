@@ -12,7 +12,7 @@ import (
 // at the shorter length).
 func DiffI32(a, b []int32) int {
 	n := min(len(a), len(b))
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if a[i] != b[i] {
 			return i
 		}
@@ -62,7 +62,7 @@ func Interleave(b *audio.Buffer) []int32 {
 	ch := b.Fmt.Channels
 	out := make([]int32, b.N*ch)
 	shift := 32 - b.Fmt.BitDepth
-	for c := 0; c < ch; c++ {
+	for c := range ch {
 		s := b.ChanI(c)
 		for i, v := range s {
 			out[i*ch+c] = v << shift
@@ -75,7 +75,7 @@ func Interleave(b *audio.Buffer) []int32 {
 func InterleaveF(b *audio.Buffer) []float32 {
 	ch := b.Fmt.Channels
 	out := make([]float32, b.N*ch)
-	for c := 0; c < ch; c++ {
+	for c := range ch {
 		s := b.ChanF(c)
 		for i, v := range s {
 			out[i*ch+c] = v

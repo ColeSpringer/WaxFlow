@@ -211,7 +211,7 @@ func dcWAV(t *testing.T, rate, channels, frames int, dc int32) []byte {
 	buf := audio.Get(f, frames)
 	defer audio.Put(buf)
 	buf.N = frames
-	for c := 0; c < channels; c++ {
+	for c := range channels {
 		s := buf.ChanI(c)
 		for i := range s {
 			s[i] = dc
@@ -284,14 +284,14 @@ func TestConcatCrossfadeCurve(t *testing.T) {
 				t.Fatalf("the timeline delivered %d samples, want %d", got.N, total)
 			}
 
-			for c := 0; c < 2; c++ {
+			for c := range 2 {
 				s := got.ChanI(c)
-				for i := 0; i < zoneAt; i++ {
+				for i := range zoneAt {
 					if s[i] != dcA {
 						t.Fatalf("ch%d[%d] = %d before the zone, want A's %d untouched", c, i, s[i], dcA)
 					}
 				}
-				for k := 0; k < x; k++ {
+				for k := range x {
 					th := float64(k) / float64(x) * (math.Pi / 2)
 					want := int32(math.Floor(dcA*math.Cos(th) + dcB*math.Sin(th) + 0.5))
 					if s[zoneAt+k] != want {
@@ -353,7 +353,7 @@ func noiseWAV(t *testing.T, rate, channels, frames int, seed uint64) ([]byte, *a
 	buf := audio.Get(f, frames)
 	buf.N = frames
 	synth(buf, seed)
-	for c := 0; c < channels; c++ {
+	for c := range channels {
 		s := buf.ChanI(c)
 		for i := range s {
 			s[i] /= 2
@@ -453,7 +453,7 @@ func TestConcatCrossfadeSaturates(t *testing.T) {
 			got := drainMedia(t, med, total)
 			defer audio.Put(got)
 			hit := false
-			for c := 0; c < 2; c++ {
+			for c := range 2 {
 				s := got.ChanI(c)
 				for i, v := range s {
 					if v > 32767 || v < -32768 {
@@ -728,7 +728,7 @@ func TestConcatCrossfadeSeekLandsExact(t *testing.T) {
 			if int64(got.N) != total-tc.target {
 				t.Fatalf("a seek to %d left %d samples, want %d", tc.target, got.N, total-tc.target)
 			}
-			for c := 0; c < 2; c++ {
+			for c := range 2 {
 				w, g := whole.ChanI(c), got.ChanI(c)
 				for i := 0; i < got.N; i++ {
 					if g[i] != w[int(tc.target)+i] {
@@ -794,9 +794,9 @@ func TestConcatCrossfadeDeclicksASlice(t *testing.T) {
 	// The zone blends span A's last x samples with span B's first x, and both
 	// are known: they are windows onto one buffer this test still holds.
 	zoneAt := lenA - x
-	for c := 0; c < 2; c++ {
+	for c := range 2 {
 		w, g := whole.ChanI(c), got.ChanI(c)
-		for k := 0; k < x; k++ {
+		for k := range x {
 			th := float64(k) / float64(x) * (math.Pi / 2)
 			out := float64(w[int(spans[0][0])+zoneAt+k])
 			in := float64(w[int(spans[1][0])+k])

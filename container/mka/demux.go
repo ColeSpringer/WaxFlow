@@ -3,6 +3,7 @@ package mka
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
@@ -377,7 +378,7 @@ func (d *Demuxer) parseCues(body []byte) error {
 		}
 		if seen%stride == 0 {
 			if len(out) == maxCuePoints {
-				for i := 0; i < maxCuePoints/2; i++ {
+				for i := range maxCuePoints / 2 {
 					out[i] = out[2*i]
 				}
 				out = out[:maxCuePoints/2]
@@ -583,7 +584,7 @@ func (d *Demuxer) selectTrack() error {
 	}
 	if chosen == nil {
 		if len(found) > 0 {
-			return unsupported("no decodable audio track (found: %s)", joinNames(found))
+			return unsupported("no decodable audio track (found: %s)", strings.Join(found, ", "))
 		}
 		return unsupported("no audio track")
 	}

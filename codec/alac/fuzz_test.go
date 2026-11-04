@@ -82,7 +82,7 @@ func FuzzEncode(f *testing.F) {
 		st := seed | 1
 		lo := int32(-1) << (depth - 1)
 		span := uint64(-(lo + 1)) - uint64(lo) + 1
-		for c := 0; c < ch; c++ {
+		for c := range ch {
 			s := src.ChanI(c)
 			for i := range s {
 				st ^= st << 13
@@ -117,7 +117,7 @@ func FuzzEncode(f *testing.F) {
 				if pos+b.N > n {
 					t.Fatalf("decoded %d+%d samples exceeds source length %d", pos, b.N, n)
 				}
-				for c := 0; c < ch; c++ {
+				for c := range ch {
 					copy(got.I[c*got.Stride+pos:c*got.Stride+pos+b.N], b.ChanI(c))
 				}
 				pos += b.N
@@ -129,7 +129,7 @@ func FuzzEncode(f *testing.F) {
 		for off := 0; off < n; off += FrameSize {
 			m := min(FrameSize, n-off)
 			frame.N = m
-			for c := 0; c < ch; c++ {
+			for c := range ch {
 				copy(frame.ChanI(c), src.I[c*src.Stride+off:c*src.Stride+off+m])
 			}
 			if err := enc.Encode(frame, emit); err != nil {
@@ -139,7 +139,7 @@ func FuzzEncode(f *testing.F) {
 		if pos != n {
 			t.Fatalf("decoded %d samples, want %d", pos, n)
 		}
-		for c := 0; c < ch; c++ {
+		for c := range ch {
 			w := src.I[c*src.Stride : c*src.Stride+n]
 			g := got.I[c*got.Stride : c*got.Stride+n]
 			for i := range w {

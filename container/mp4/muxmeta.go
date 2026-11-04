@@ -222,10 +222,7 @@ func chplBox(chapters []container.Chapter) []byte {
 	}
 	body := []byte{byte(len(chapters))}
 	for _, ch := range chapters {
-		start := ch.Start.Nanoseconds() / 100
-		if start < 0 {
-			start = 0
-		}
+		start := max(ch.Start.Nanoseconds()/100, 0)
 		title := truncateRunes(ch.Title, 255)
 		body = append(body, u64(uint64(start))...)
 		body = append(body, byte(len(title)))

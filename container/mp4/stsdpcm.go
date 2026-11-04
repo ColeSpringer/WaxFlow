@@ -227,10 +227,10 @@ func pcmFourcc(format string) string {
 func (d *Demuxer) pcmConfig(e pcmEntry) (pcm.Config, int, error) {
 	var cfg pcm.Config
 	var err error
-	switch {
-	case e.canon == "lpcm":
+	switch e.canon {
+	case "lpcm":
 		cfg, err = d.lpcmConfig(e)
-	case e.canon == "ipcm", e.canon == "fpcm":
+	case "ipcm", "fpcm":
 		cfg, err = d.isoPCMConfig(e)
 	default:
 		if tag, ok := codecname.QuickTimeWaveTag(e.format); ok {

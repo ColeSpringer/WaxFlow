@@ -30,8 +30,7 @@ func jsonTag(f reflect.StructField) string {
 
 func fieldsByJSONTag(t reflect.Type) map[string]reflect.StructField {
 	out := map[string]reflect.StructField{}
-	for i := range t.NumField() {
-		f := t.Field(i)
+	for f := range t.Fields() {
 		if tag := jsonTag(f); tag != "" {
 			out[tag] = f
 		}

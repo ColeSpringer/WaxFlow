@@ -27,7 +27,7 @@ func TestCoreTransientAllocationDiag(t *testing.T) {
 	frames := 3 * rate
 	period := rate / 8
 	ref := make([]float32, frames)
-	for i := 0; i < frames; i++ {
+	for i := range frames {
 		phase := i % period
 		env := math.Exp(-float64(phase) / float64(rate) * 60)
 		ref[i] = float32(env * math.Sin(2*math.Pi*2000*float64(phase)/float64(rate)) * 0.6)

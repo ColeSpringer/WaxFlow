@@ -42,7 +42,7 @@ func (r *bitReader) window() uint64 {
 			uint64(r.data[i+4])<<24 | uint64(r.data[i+5])<<16 | uint64(r.data[i+6])<<8 | uint64(r.data[i+7])
 	}
 	var acc uint64
-	for j := 0; j < 8; j++ {
+	for j := range 8 {
 		acc <<= 8
 		if i+j < len(r.data) {
 			acc |= uint64(r.data[i+j])
@@ -92,7 +92,7 @@ const maxVarintBytes = MaxVarintBytes
 // per byte, most significant first, the high bit continuing.
 func (r *bitReader) varint() (uint64, bool) {
 	var v uint64
-	for i := 0; i < maxVarintBytes; i++ {
+	for range maxVarintBytes {
 		b := r.bits(8)
 		v = v<<7 | uint64(b&0x7F)
 		if b&0x80 == 0 {

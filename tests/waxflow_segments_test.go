@@ -109,7 +109,7 @@ func parseSegment(t *testing.T, data []byte) *parsedSegment {
 						}
 						n := int(binary.BigEndian.Uint32(b[4:]))
 						at := 12 // past sample_count and data_offset
-						for i := 0; i < n; i++ {
+						for range n {
 							durs = append(durs, binary.BigEndian.Uint32(b[at:]))
 							sizes = append(sizes, binary.BigEndian.Uint32(b[at+4:]))
 							at += 8
@@ -534,11 +534,10 @@ func opusHeadConfig(t *testing.T, e *waxflow.Engine, plan *waxflow.SegmentPlan, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	i := bytes.Index(init, []byte("dOps"))
-	if i < 0 {
+	_, b, ok := bytes.Cut(init, []byte("dOps"))
+	if !ok {
 		t.Fatal("init has no dOps")
 	}
-	b := init[i+4:]
 	return opus.Config{
 		Channels: int(b[1]),
 		PreSkip:  int(binary.BigEndian.Uint16(b[2:])),

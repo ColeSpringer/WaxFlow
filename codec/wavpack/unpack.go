@@ -50,10 +50,7 @@ func updateWeight(weight *int32, delta, source, result int32) {
 func updateWeightClip(weight *int32, delta, source, result int32) {
 	if source != 0 && result != 0 {
 		s := (source ^ result) >> 31
-		w := (*weight ^ s) + (delta - s)
-		if w > 1024 {
-			w = 1024
-		}
+		w := min((*weight^s)+(delta-s), 1024)
 		*weight = (w ^ s) - s
 	}
 }
@@ -422,7 +419,7 @@ func (s *blockState) readEntropyVars(data []byte, mono bool) error {
 		chans = 2
 	}
 	for ch := 0; ch < chans; ch++ {
-		for m := 0; m < 3; m++ {
+		for m := range 3 {
 			raw := binary.LittleEndian.Uint16(data[(ch*3+m)*2:])
 			s.w.c[ch].median[m] = uint32(exp2s(int(raw)))
 		}

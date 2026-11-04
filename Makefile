@@ -75,11 +75,16 @@ test-oracle:
 test-example:
 	cd examples/catalogcli && go vet ./... && go test -timeout 10m ./...
 
-# The second pass type-checks the build-tagged table extractor, which nothing
-# else in the tree compiles. Without it a drifted pin or a broken parser
-# surfaces only when someone attempts the audit THIRD-PARTY-NOTICES promises.
+# The GOOS=windows pass compiles every test file as Windows would. The
+# cross-compile job's go build skips test files and the Windows job tests only
+# ./source/, so without it a call into a unix-only test helper breaks Windows
+# unseen. The -tags passes type-check the build-tagged table extractor, which
+# nothing else in the tree compiles. Without them a drifted pin or a broken
+# parser surfaces only when someone attempts the audit THIRD-PARTY-NOTICES
+# promises.
 vet:
 	go vet ./...
+	GOOS=windows go vet ./...
 	go vet -tags wmatablesgen ./codec/wma/
 	go vet -tags wmaprotablesgen ./codec/wmapro/
 	go vet -tags wmavoicetablesgen ./codec/wmavoice/

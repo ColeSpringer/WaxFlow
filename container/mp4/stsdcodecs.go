@@ -106,9 +106,9 @@ func (d *Demuxer) setCodec(t *track, e pcmEntry) error {
 
 	switch {
 	case e.canon == "alaw" || (isMS && tag == waveTagALaw):
-		return d.setG711(t, g711.ALaw, codec.ALaw, rate, channels, layout)
+		return d.setG711(t, codec.ALaw, rate, channels, layout)
 	case e.canon == "ulaw" || (isMS && tag == waveTagMuLaw):
-		return d.setG711(t, g711.MuLaw, codec.MuLaw, rate, channels, layout)
+		return d.setG711(t, codec.MuLaw, rate, channels, layout)
 	case e.canon == "ima4":
 		return d.setIMA4(t, e, rate, channels, layout)
 	}
@@ -120,7 +120,7 @@ func (d *Demuxer) setCodec(t *track, e pcmEntry) error {
 // setG711 wires an A-law or mu-law track. There is nothing to configure: the
 // law is the codec ID, and one byte is one sample whatever the entry's
 // samplesize field says (it is conventionally 16, the DECODED width).
-func (d *Demuxer) setG711(t *track, law g711.Law, id codec.ID, rate, channels int, layout audio.ChannelMask) error {
+func (d *Demuxer) setG711(t *track, id codec.ID, rate, channels int, layout audio.ChannelMask) error {
 	t.codec = id
 	t.fmt = g711.Format(rate, channels, layout)
 	t.sourceBits = g711.SourceBitDepth

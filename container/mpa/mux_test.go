@@ -37,8 +37,8 @@ func encodeTone(t *testing.T, rate, channels, bitrate, n int) ([][]byte, codec.T
 		m := min(1152, n-off)
 		buf := audio.Get(f, m)
 		buf.N = m
-		for ch := 0; ch < channels; ch++ {
-			for i := 0; i < m; i++ {
+		for ch := range channels {
+			for i := range m {
 				x := float64(off + i)
 				buf.ChanF(ch)[i] = float32(0.3 * math.Sin(2*math.Pi*440*x/float64(rate)))
 			}

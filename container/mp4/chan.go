@@ -1,6 +1,9 @@
 package mp4
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // QuickTime's 'chan' box is Core Audio's AudioChannelLayout struct in a
 // FullBox: a layout tag, a bitmap, a description count, and that many
@@ -201,10 +204,8 @@ func readChan(payload []byte, channels int) boxLayout {
 
 // speakerLayout places a speaker list, reporting a speaker WAVE cannot name.
 func speakerLayout(spk []speaker, what string) boxLayout {
-	for _, s := range spk {
-		if s == spkNone {
-			return boxLayout{note: what + " has a channel with no WAVE position"}
-		}
+	if slices.Contains(spk, spkNone) {
+		return boxLayout{note: what + " has a channel with no WAVE position"}
 	}
 	return boxLayout{positions: wavePositions(spk)}
 }

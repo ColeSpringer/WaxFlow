@@ -174,7 +174,7 @@ func (d *celtDecoder) celtDecodeInner(dec *rangeDecoder, data []byte, LM, C, sta
 	}
 
 	if C == 1 {
-		for i := 0; i < nb; i++ {
+		for i := range nb {
 			d.oldBandE[i] = max(d.oldBandE[i], d.oldBandE[nb+i])
 		}
 	}
@@ -286,7 +286,7 @@ func (d *celtDecoder) celtDecodeInner(dec *rangeDecoder, data []byte, LM, C, sta
 	// Slide the decode history left by N so the new frame's synthesis region
 	// keeps the previous frame's overlap tail.
 	keep := celtDecodeBufferSize - N + overlap
-	for c := 0; c < CC; c++ {
+	for c := range CC {
 		copy(d.decodeMem[c][:keep], d.decodeMem[c][N:N+keep])
 	}
 
@@ -325,7 +325,7 @@ func (d *celtDecoder) celtDecodeInner(dec *rangeDecoder, data []byte, LM, C, sta
 	d.synthesis(X, LM, C, CC, isTransient, start, effEnd, N, silence != 0)
 
 	// Post-filter each output channel across the frame.
-	for c := 0; c < CC; c++ {
+	for c := range CC {
 		base := celtDecodeBufferSize - N
 		d.postPeriod = max(d.postPeriod, combMinPeriod)
 		d.postPeriodOld = max(d.postPeriodOld, combMinPeriod)
@@ -360,11 +360,11 @@ func (d *celtDecoder) celtDecodeInner(dec *rangeDecoder, data []byte, LM, C, sta
 // deemphasis, the 48 kHz float case).
 func (d *celtDecoder) deemphasis(out [][]float32, CC, N int) {
 	base := celtDecodeBufferSize - N
-	for c := 0; c < CC; c++ {
+	for c := range CC {
 		m := d.preemphMemD[c]
 		src := d.decodeMem[c]
 		dst := out[c]
-		for j := 0; j < N; j++ {
+		for j := range N {
 			tmp := src[base+j] + m
 			m = celtPreemph * tmp
 			dst[j] = tmp * (1.0 / celtSigScale)
@@ -408,14 +408,14 @@ func (d *celtDecoder) synthesis(X []float32, LM, C, CC, isTransient, start, effE
 		base := celtDecodeBufferSize - N
 		denormaliseBands(X, d.freq, d.oldBandE, start, effEnd, M, 1, silence)
 		denormaliseBands(X[N:], d.freq2, d.oldBandE[celtNBands:], start, effEnd, M, 1, silence)
-		for i := 0; i < N; i++ {
+		for i := range N {
 			d.freq[i] = 0.5*d.freq[i] + 0.5*d.freq2[i]
 		}
 		for b := 0; b < B; b++ {
 			plan.backward(d.freq[b:], B, d.decodeMem[0][base+NB*b:], d.window, overlap, d.mdctScr)
 		}
 	} else {
-		for c := 0; c < CC; c++ {
+		for c := range CC {
 			do(c, c)
 		}
 	}
@@ -440,8 +440,8 @@ func (d *celtDecoder) updateEnergyState(C, isTransient, M, start, end int) {
 	for i := 0; i < 2*nb; i++ {
 		d.backgroundLogE[i] = min(d.backgroundLogE[i]+maxInc, d.oldBandE[i])
 	}
-	for c := 0; c < 2; c++ {
-		for i := 0; i < start; i++ {
+	for c := range 2 {
+		for i := range start {
 			d.oldBandE[c*nb+i] = 0
 			d.oldLogE[c*nb+i] = -28
 			d.oldLogE2[c*nb+i] = -28
@@ -461,7 +461,7 @@ func (d *celtDecoder) updateEnergyState(C, isTransient, M, start, end int) {
 // either way, so there is no reference state to track through this path.
 func (d *celtDecoder) combShiftSilence(N, CC int, out [][]float32) {
 	keep := celtDecodeBufferSize - N + d.overlap
-	for c := 0; c < CC; c++ {
+	for c := range CC {
 		copy(d.decodeMem[c][:keep], d.decodeMem[c][N:N+keep])
 		clear(d.decodeMem[c][celtDecodeBufferSize-N : celtDecodeBufferSize])
 	}

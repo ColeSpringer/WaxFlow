@@ -51,7 +51,7 @@ func newPsyModel(rate, n2 int, offsetDB float64) (*psy.Model, error) {
 // thresholds land on the same scale as the caller's MDCT coefficient energy.
 func lineThresholds(res psy.Result, spec []float32, dst []float64, n2 int) {
 	var sumMDCT, sumPsy float64
-	for l := 0; l < n2; l++ {
+	for l := range n2 {
 		v := float64(spec[l])
 		sumMDCT += v * v
 		if l < len(res.Energy) {
@@ -62,7 +62,7 @@ func lineThresholds(res psy.Result, spec []float32, dst []float64, n2 int) {
 	if sumPsy > 0 {
 		ratio = sumMDCT / sumPsy
 	}
-	for l := 0; l < n2; l++ {
+	for l := range n2 {
 		if l < len(res.Thr) {
 			dst[l] = res.Thr[l] * ratio
 		} else {
@@ -100,7 +100,7 @@ func lineThresholds(res psy.Result, spec []float32, dst []float64, n2 int) {
 // coarsens while a transient's residue stays fine regardless of block size.
 func classifyPartitions(spec, curve []float32, thrLine []float64, classes []int, partSize, n2 int, capNoise bool) {
 	nParts := n2 / partSize
-	for p := 0; p < nParts; p++ {
+	for p := range nParts {
 		lo, hi := p*partSize, (p+1)*partSize
 		var peak, demand, sumE float64
 		for l := lo; l < hi; l++ {
@@ -180,13 +180,13 @@ func partitionFlatness(spec []float32, lo, hi int, sumE float64) float64 {
 // book generator, which has no psy model) falls back to the floor test alone.
 func maskResidue(spec, resid []float32, thrLine []float64, n2 int) {
 	var peak2 float64
-	for l := 0; l < n2; l++ {
+	for l := range n2 {
 		if s := float64(spec[l]); s*s > peak2 {
 			peak2 = s * s
 		}
 	}
 	globalFloor := peak2 * globalMaskRatio
-	for l := 0; l < n2; l++ {
+	for l := range n2 {
 		s := float64(spec[l])
 		e := s * s
 		if e > globalFloor {

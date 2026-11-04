@@ -231,15 +231,13 @@ func BenchmarkLimiter(b *testing.B) {
 		sineAt(rate, 1499, 0.4, chunk, 1.2),
 	}
 	dst := [][]float32{make([]float32, chunk), make([]float32, chunk)}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		src := [][]float32{in[0], in[1]}
 		for len(src[0]) > 0 {
 			_, consumed := l.Process(dst, src)
 			src[0], src[1] = src[0][consumed:], src[1][consumed:]
 		}
 	}
-	b.StopTimer()
 	seconds := float64(b.N) * chunk / float64(rate)
 	b.ReportMetric(seconds/b.Elapsed().Seconds(), "x-realtime")
 }

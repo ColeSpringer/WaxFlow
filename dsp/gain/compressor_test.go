@@ -449,11 +449,9 @@ func BenchmarkCompressor(b *testing.B) {
 		sineAt(rate, 1499, 0.4, chunk, 0.9),
 	}
 	dst := [][]float32{make([]float32, chunk), make([]float32, chunk)}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		c.Process(dst, in)
 	}
-	b.StopTimer()
 	seconds := float64(b.N) * chunk / float64(rate)
 	b.ReportMetric(seconds/b.Elapsed().Seconds(), "x-realtime")
 }

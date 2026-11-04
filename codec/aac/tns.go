@@ -57,7 +57,7 @@ func parseTNS(r *bitReader, cd *channelData) {
 			// first maxTNSOrder for the synthesis filter.
 			filt.order = min(rawOrder, maxTNSOrder)
 			var refl [maxTNSOrder]float64
-			for i := 0; i < rawOrder; i++ {
+			for i := range rawOrder {
 				c := int(r.read(uint(coefBits)))
 				if i >= maxTNSOrder {
 					continue
@@ -92,7 +92,7 @@ func reflToLPC(refl, a []float64) {
 		}
 		lpc[m] = refl[m-1]
 	}
-	for i := 0; i < order; i++ {
+	for i := range order {
 		a[i] = lpc[i+1]
 	}
 }
@@ -145,7 +145,7 @@ func arFilter(spec []float64, size int, filt *tnsFilter) {
 	}
 	var state [maxTNSOrder]float64
 	pos := off
-	for i := 0; i < size; i++ {
+	for i := range size {
 		y := spec[pos]
 		for j := 0; j < filt.order; j++ {
 			if i-1-j >= 0 {

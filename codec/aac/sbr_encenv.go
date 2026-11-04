@@ -106,7 +106,7 @@ func newSBREnc(extRate, chans, bitrate int) (*sbrEnc, error) {
 // newSBREncFrom builds the extractor over already-derived parameters.
 func newSBREncFrom(chans int, hdr sbrHeader, tbl sbrFreqTables) *sbrEnc {
 	s := &sbrEnc{chans: chans, hdr: hdr, tbl: tbl}
-	for c := 0; c < chans; c++ {
+	for c := range chans {
 		s.ringRe[c] = new([sbrEncRing][64]float32)
 		s.ringIm[c] = new([sbrEncRing][64]float32)
 	}
@@ -145,7 +145,7 @@ func chooseSBRHeader(extRate, bitrate, chans int) (sbrHeader, sbrFreqTables, err
 		limiterBands: 2, limiterGains: 2, interpolFreq: 1, smoothingMode: 1,
 	}
 	bestStart, bestDiff := -1, math.Inf(1)
-	for sf := 0; sf < 16; sf++ {
+	for sf := range 16 {
 		k0, ok := sbrStartK0(extRate, sf)
 		if !ok || k0 < 1 || k0 > 32 {
 			continue
@@ -161,7 +161,7 @@ func chooseSBRHeader(extRate, bitrate, chans int) (sbrHeader, sbrFreqTables, err
 	k0, _ := sbrStartK0(extRate, bestStart)
 
 	bestStop, bestDiff := -1, math.Inf(1)
-	for sf := 0; sf < 14; sf++ { // 14/15 are the k0-relative escapes; the direct rows suffice
+	for sf := range 14 { // 14/15 are the k0-relative escapes; the direct rows suffice
 		k2 := sbrStopK2(extRate, sf, k0)
 		if k2 <= k0 {
 			continue
@@ -307,7 +307,7 @@ func (s *sbrEnc) buildGrid(g *sbrGrid, s0 int64) {
 	for i := -16; i < 0; i++ {
 		trail += s.slotEnergy(s0 + int64(i))
 	}
-	for u := 0; u < 32; u++ {
+	for u := range 32 {
 		e := s.slotEnergy(s0 + int64(u))
 		avg := trail / 16
 		if e > ratio*avg+floor {
@@ -399,7 +399,7 @@ func (s *sbrEnc) buildGrid(g *sbrGrid, s0 int64) {
 // slotEnergy16 sums slotEnergy over 16 consecutive slots.
 func (s *sbrEnc) slotEnergy16(s0 int64) float64 {
 	var e float64
-	for i := int64(0); i < 16; i++ {
+	for i := range int64(16) {
 		e += s.slotEnergy(s0 + i)
 	}
 	return e
@@ -671,7 +671,7 @@ func (s *sbrEnc) buildFrame(au int64) bool {
 		}
 		n := envBands(t, g.freqRes[l])
 		e0, e1 := s0+2*int64(g.tE[l]), s0+2*int64(g.tE[l+1])
-		for b := 0; b < n; b++ {
+		for b := range n {
 			lo, hi := bands[b], bands[b+1]
 			eL := s.bandEnergy(0, e0, e1, lo, hi)
 			if s.chans == 1 {
@@ -734,7 +734,7 @@ func (s *sbrEnc) buildFrame(au int64) bool {
 					refRes = g.freqRes[l-1]
 				}
 				refMapped = make([]int32, n)
-				for b := 0; b < n; b++ {
+				for b := range n {
 					refMapped[b] = ref[mapPrevBand(t, g.freqRes[l], refRes, b)]
 				}
 			}

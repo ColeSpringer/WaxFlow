@@ -300,10 +300,10 @@ func spreadDB(dz float64) float64 {
 func (m *Model) buildSpreading() {
 	np := len(m.parts)
 	m.spread = make([]float64, np*np)
-	for i := 0; i < np; i++ {
+	for i := range np {
 		row := m.spread[i*np : (i+1)*np]
 		sum := 0.0
-		for j := 0; j < np; j++ {
+		for j := range np {
 			s := math.Pow(10, spreadDB(m.parts[i].bval-m.parts[j].bval)/10)
 			row[j] = s
 			sum += s
@@ -326,7 +326,7 @@ func (m *Model) buildBandMap() {
 	// scale converts transform offsets onto the FFT grid.
 	scale := float64(m.cfg.FFTSize) / (2 * float64(m.cfg.Lines))
 	half := float64(m.cfg.FFTSize / 2)
-	for b := 0; b < nb; b++ {
+	for b := range nb {
 		loF := math.Min(float64(m.cfg.BandOffsets[b])*scale, half)
 		hiF := math.Min(float64(m.cfg.BandOffsets[b+1])*scale, half)
 		li := int(loF)
@@ -353,7 +353,7 @@ func (m *Model) Analyze(x []float32) (Result, error) {
 		return Result{}, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("psy: block is %d samples, geometry wants %d", len(x), n))
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		m.xw[i] = float64(x[i]) * m.win[i]
 		m.im[i] = 0
 	}
@@ -362,7 +362,7 @@ func (m *Model) Analyze(x []float32) (Result, error) {
 
 	half := n / 2
 	cur, old := m.frames%2, (m.frames+1)%2
-	for w := 0; w < half; w++ {
+	for w := range half {
 		re, im := m.re[w], m.im[w]
 		e := re*re + im*im
 		r := math.Sqrt(e)
@@ -420,10 +420,10 @@ func (m *Model) Analyze(x []float32) (Result, error) {
 	// absolute floor.
 	np := len(m.parts)
 	pe := 0.0
-	for i := 0; i < np; i++ {
+	for i := range np {
 		row := m.spread[i*np : (i+1)*np]
 		ecb, ctb := 0.0, 0.0
-		for j := 0; j < np; j++ {
+		for j := range np {
 			ecb += row[j] * m.pe[j]
 			ctb += row[j] * m.pc[j]
 		}

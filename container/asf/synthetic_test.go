@@ -432,7 +432,7 @@ func TestAReadFailureIsSticky(t *testing.T) {
 		if first == nil || errors.Is(first, io.EOF) {
 			t.Fatalf("pro %v: strict mode walked past the damaged packet (%v)", pro, first)
 		}
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			if err := d.ReadPacket(&pkt); err == nil {
 				t.Fatalf("pro %v: read %d after a refusal handed out %v", pro, i, pkt.Data)
 			} else if err.Error() != first.Error() {
@@ -512,7 +512,7 @@ func TestSeekWithNothingReadableAtTheLanding(t *testing.T) {
 	b.packet(0, 1, 0, 4, uint32(b.prerollMS), []byte{1, 2, 3, 4})
 	// Two packets of an object that never completes: the tail of the file
 	// yields nothing, whatever its send times say.
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		b.packet(uint32(20+i*20), 2, 0, 999, uint32(b.prerollMS)+uint32(20+i*20), []byte{9, 9, 9, 9})
 	}
 	d, err := asf.NewDemuxer(container.BytesSource(b.build()), nil)
@@ -602,7 +602,7 @@ func TestTruncatedTailIsDamage(t *testing.T) {
 		t.Fatal(err)
 	}
 	var last error
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		if last = ds.ReadPacket(&pkt); last != nil {
 			break
 		}
@@ -624,7 +624,7 @@ func TestResumeSuppressionExpires(t *testing.T) {
 	b.proArm(t)
 	b.playHNS = b.prerollMS*10_000 + 20*10_000_000
 	pres := uint32(b.prerollMS)
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		b.packet(uint32(i*20), byte(i+1), 0, 4, pres+uint32(i*20), []byte{byte(i), 0, 0, 0})
 	}
 	// A tail of nothing but stray continuations, so no payload after a
@@ -650,7 +650,7 @@ func TestResumeSuppressionExpires(t *testing.T) {
 		}
 		var pkt container.Packet
 		var post error
-		for i := 0; i < 20; i++ {
+		for range 20 {
 			if post = d.ReadPacket(&pkt); post != nil {
 				break
 			}
@@ -669,7 +669,7 @@ func walkErr(t *testing.T, raw []byte) error {
 		return err
 	}
 	var pkt container.Packet
-	for i := 0; i < 40; i++ {
+	for range 40 {
 		if err := d.ReadPacket(&pkt); err != nil {
 			return err
 		}
@@ -750,7 +750,7 @@ func TestBackwardsPresentationTimesAreDamage(t *testing.T) {
 
 func readToErr(d *asf.Demuxer) error {
 	var pkt container.Packet
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		if err := d.ReadPacket(&pkt); err != nil {
 			return err
 		}
@@ -780,7 +780,7 @@ func TestRunUpWhenAnObjectBarelyOutgrowsAPacket(t *testing.T) {
 		// 485 bytes is what one packet has room for once its parsing
 		// information and payload header are paid for, so each object takes
 		// two packets.
-		for i := 0; i < 20; i++ {
+		for i := range 20 {
 			whole := make([]byte, object)
 			whole[0] = byte(i)
 			pres := uint32(b.prerollMS) + uint32(i*20)
@@ -876,7 +876,7 @@ func TestPayloadWithNoReplicatedData(t *testing.T) {
 	b := newBuilder()
 	b.blockAlign = 4
 	b.playHNS = b.prerollMS*10_000 + 3*10_000_000
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		b.packetRep0(uint32(i*20), byte(i+1), []byte{byte(i), 2, 3, 4})
 	}
 	raw := b.build()

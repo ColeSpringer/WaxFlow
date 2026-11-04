@@ -166,7 +166,7 @@ func (d *Decoder) decodeMono(r *bitReader, ci int) (int, error) {
 		modeU, denShiftU := hb>>4, uint(hb&0xf)
 		hb = r.read(8)
 		pbFactorU, numU := hb>>5, int(hb&0x1f)
-		for i := 0; i < numU; i++ {
+		for i := range numU {
 			d.coefsU[i] = int16(r.read(16))
 		}
 		shiftStart := 0
@@ -186,7 +186,7 @@ func (d *Decoder) decodeMono(r *bitReader, ci int) (int, error) {
 		bytesShifted = 0
 	}
 	dst := d.buf.I[ci*d.buf.Stride : ci*d.buf.Stride+numSamples]
-	for i := 0; i < numSamples; i++ {
+	for i := range numSamples {
 		v := d.mixU[i]
 		if bytesShifted != 0 {
 			v = v<<shift | int32(d.shiftBuf[i])
@@ -216,14 +216,14 @@ func (d *Decoder) decodeStereo(r *bitReader, ci int) (int, error) {
 		modeU, denShiftU := hb>>4, uint(hb&0xf)
 		hb = r.read(8)
 		pbFactorU, numU := hb>>5, int(hb&0x1f)
-		for i := 0; i < numU; i++ {
+		for i := range numU {
 			d.coefsU[i] = int16(r.read(16))
 		}
 		hb = r.read(8)
 		modeV, denShiftV := hb>>4, uint(hb&0xf)
 		hb = r.read(8)
 		pbFactorV, numV := hb>>5, int(hb&0x1f)
-		for i := 0; i < numV; i++ {
+		for i := range numV {
 			d.coefsV[i] = int16(r.read(16))
 		}
 		shiftStart := 0
@@ -251,7 +251,7 @@ func (d *Decoder) decodeStereo(r *bitReader, ci int) (int, error) {
 	stride := d.buf.Stride
 	dl := d.buf.I[ci*stride : ci*stride+numSamples]
 	dr := d.buf.I[(ci+1)*stride : (ci+1)*stride+numSamples]
-	for i := 0; i < numSamples; i++ {
+	for i := range numSamples {
 		var l, r0 int32
 		if mixRes != 0 {
 			l = d.mixU[i] + d.mixV[i] - ((mixRes * d.mixV[i]) >> uint(mixBits))
@@ -283,7 +283,7 @@ func (d *Decoder) predict(mode uint32, num int, coefs []int16, numactive int, ch
 // to chanBits, into one or two mix buffers.
 func (d *Decoder) readUncompressed(r *bitReader, chanBits uint, num int, u, v []int32) {
 	sh := 32 - chanBits
-	for i := 0; i < num; i++ {
+	for i := range num {
 		u[i] = int32(r.read(chanBits)) << sh >> sh
 		if v != nil {
 			v[i] = int32(r.read(chanBits)) << sh >> sh
@@ -316,10 +316,7 @@ func (d *Decoder) dynDecomp(r *bitReader, pc []int32, chanBits uint, pb uint32) 
 			return malformed("adaptive-Golomb data overruns packet")
 		}
 		m := mb >> qbShift
-		k := lg3a(m)
-		if k > kb {
-			k = kb
-		}
+		k := min(lg3a(m), kb)
 		m = 1<<k - 1
 		n := r.dynGet32(&p, m, k, maxSize)
 
@@ -410,10 +407,7 @@ func unpcBlock(pc1, out []int32, num int, coefs []int16, numactive int, chanBits
 	// warm-up: the first numactive residuals are exact differences. A
 	// malformed frame can declare more predictor taps than it has samples
 	// (a tiny FrameLength cookie), so clamp the run to the buffer.
-	warm := numactive
-	if warm > num-1 {
-		warm = num - 1
-	}
+	warm := min(numactive, num-1)
 	for j := 1; j <= warm; j++ {
 		out[j] = (pc1[j] + out[j-1]) << chanShift >> chanShift
 	}
@@ -421,7 +415,7 @@ func unpcBlock(pc1, out []int32, num int, coefs []int16, numactive int, chanBits
 	for j := lim; j < num; j++ {
 		top := out[j-lim]
 		var sum1 int32
-		for k := 0; k < numactive; k++ {
+		for k := range numactive {
 			sum1 += int32(coefs[k]) * (out[j-1-k] - top)
 		}
 		del := pc1[j]

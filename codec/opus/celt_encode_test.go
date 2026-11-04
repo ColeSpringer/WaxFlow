@@ -50,7 +50,7 @@ func TestCELTEncodeDecodeRoundTrip(t *testing.T) {
 
 			pcm := make([][]float32, tc.C)
 			out := make([][]float32, tc.C)
-			for f := 0; f < frames; f++ {
+			for f := range frames {
 				for c := 0; c < tc.C; c++ {
 					pcm[c] = src[c][f*N : (f+1)*N]
 					if out[c] == nil {
@@ -103,7 +103,7 @@ func TestCELTEncodeComplexityLevels(t *testing.T) {
 	total := frames * N
 	// Tone bed plus a sharp amplitude burst every 5 ms to trigger transients.
 	src := make([][]float32, C)
-	for c := 0; c < C; c++ {
+	for c := range C {
 		src[c] = make([]float32, total)
 		f1 := 500.0 + 130*float64(c)
 		for i := range src[c] {
@@ -130,11 +130,11 @@ func TestCELTEncodeComplexityLevels(t *testing.T) {
 		got := make([][]float32, C)
 		pcm := make([][]float32, C)
 		out := make([][]float32, C)
-		for c := 0; c < C; c++ {
+		for c := range C {
 			out[c] = make([]float32, N)
 		}
-		for f := 0; f < frames; f++ {
-			for c := 0; c < C; c++ {
+		for f := range frames {
+			for c := range C {
 				pcm[c] = src[c][f*N : (f+1)*N]
 			}
 			payload := enc.celtEncode(pcm, N, LM, C, 0, end, nbytes)
@@ -144,7 +144,7 @@ func TestCELTEncodeComplexityLevels(t *testing.T) {
 			if err := dec.celtDecode(payload, LM, C, 0, end, out); err != nil {
 				t.Fatalf("cx=%d frame %d decode: %v", cx, f, err)
 			}
-			for c := 0; c < C; c++ {
+			for c := range C {
 				got[c] = append(got[c], out[c]...)
 			}
 		}
@@ -168,16 +168,13 @@ func TestCELTEncodeComplexityLevels(t *testing.T) {
 
 func roundTripSNR(src, got [][]float32, delay int) float64 {
 	C := len(src)
-	n := len(got[0]) - delay
-	if n > len(src[0]) {
-		n = len(src[0])
-	}
+	n := min(len(got[0])-delay, len(src[0]))
 	if n < 4000 {
 		return math.Inf(-1)
 	}
 	// Skip the first 2000 samples (encoder warm-up) and the tail.
 	var sig, errE float64
-	for c := 0; c < C; c++ {
+	for c := range C {
 		for i := 2000; i < n-1000; i++ {
 			s := float64(src[c][i])
 			g := float64(got[c][i+delay])

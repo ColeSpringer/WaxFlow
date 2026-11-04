@@ -41,7 +41,7 @@ func TestPSTreesComplete(t *testing.T) {
 func psHuffPath(tree [][2]int16, value int) []byte {
 	var walk func(idx int, path []byte) []byte
 	walk = func(idx int, path []byte) []byte {
-		for bit := 0; bit < 2; bit++ {
+		for bit := range 2 {
 			v := tree[idx][bit]
 			p := append(append([]byte(nil), path...), byte(bit))
 			if v < 0 {
@@ -100,8 +100,8 @@ func TestPSMixLUT(t *testing.T) {
 			t.Errorf("identity h[%d] = %g, want %g", j, id[j], want)
 		}
 	}
-	for i := 0; i < 46; i++ {
-		for icc := 0; icc < 8; icc++ {
+	for i := range 46 {
+		for icc := range 8 {
 			h := psMixLUT[0][i][icc]
 			sum := float64(h[0]*h[0] + h[2]*h[2] + h[1]*h[1] + h[3]*h[3])
 			if math.Abs(sum-2) > 1e-5 {
@@ -109,7 +109,7 @@ func TestPSMixLUT(t *testing.T) {
 			}
 		}
 	}
-	for i := 0; i < 15; i++ {
+	for i := range 15 {
 		// c -> 1/c swaps the channel scales, so the columns swap; the sine
 		// components also negate (beta flips with the scale difference).
 		a, b := psMixLUT[0][i][3], psMixLUT[0][14-i][3]
@@ -148,9 +148,9 @@ func TestPSHybridIdentity(t *testing.T) {
 		ps.hybridAnalysis(is34)
 		ps.rHyb = ps.lHyb // synthesis reads both; mirror so rBuf checks too
 		ps.hybridSynthesis(is34)
-		for l := 0; l < sbrSlots; l++ {
-			for k := 0; k < 64; k++ {
-				for c := 0; c < 2; c++ {
+		for l := range sbrSlots {
+			for k := range 64 {
+				for c := range 2 {
 					got := ps.xBuf[l][k][c]
 					if diff := math.Abs(float64(got - want[l][k][c])); diff > 2e-5 {
 						t.Fatalf("is34=%d slot %d band %d: got %g want %g (diff %g)",

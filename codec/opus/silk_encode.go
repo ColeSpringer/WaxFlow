@@ -44,13 +44,6 @@ type silkNSQState struct {
 	rewhiteFlag   int
 }
 
-// reset restores the initial quantizer state (part of silk_init_encoder).
-func (s *silkNSQState) reset() {
-	*s = silkNSQState{}
-	s.lagPrev = 100
-	s.prevGainQ16 = 65536
-}
-
 // silkShapeState is the noise shaping analysis state (silk_shape_state_FLP).
 type silkShapeState struct {
 	lastGainIndex     int8

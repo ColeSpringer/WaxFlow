@@ -59,6 +59,14 @@ func within(t *testing.T, d time.Duration, what string, fn func()) {
 	}
 }
 
+// setAttemptWait shortens the bound callers wait on a root's folder.
+func setAttemptWait(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := attemptWait
+	attemptWait = d
+	t.Cleanup(func() { attemptWait = prev })
+}
+
 // TestOpenRootsIsNotHeldByAHungFolder pins start-up against a folder whose
 // open never returns: the daemon starts with that root unmounted, and a
 // request on it joins the stuck check, which has run out its bound, so it

@@ -152,7 +152,7 @@ func pcmCase(t *testing.T, packets int, samples int64) (container.Track, []codec
 	f := audio.Format{Rate: 48000, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
 	track := container.Track{Codec: codec.PCM, Fmt: f, Samples: samples, Default: true}
 	var pkts []codec.Packet
-	for i := 0; i < packets; i++ {
+	for i := range packets {
 		data := make([]byte, 480*4)
 		for j := range data {
 			data[j] = byte(i*13 + j*5)
@@ -515,7 +515,7 @@ func TestDurationTicksRoundTrip(t *testing.T) {
 func TestMuxCueCapHalves(t *testing.T) {
 	m := &Muxer{patch: muxseek.New(&memWS{}, "mka"), cueStride: 1}
 	const clusters = maxCuePoints*3 + 17
-	for i := 0; i < clusters; i++ {
+	for i := range clusters {
 		m.off = int64(i) * 1000
 		m.clusterMs = int64(i) * 4000
 		m.recordCue()

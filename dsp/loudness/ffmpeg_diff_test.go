@@ -187,7 +187,7 @@ func ffmpegEbur128(t *testing.T, ffmpeg, path string) ebur128Summary {
 	var s ebur128Summary
 	var haveI, haveLRA, havePeak bool
 	inSummary := false
-	for _, line := range strings.Split(out.String(), "\n") {
+	for line := range strings.SplitSeq(out.String(), "\n") {
 		line = strings.TrimSpace(line)
 		if strings.Contains(line, "Summary:") {
 			inSummary = true

@@ -46,7 +46,7 @@ func brightWAV(t *testing.T, rate, frames, ch int) []byte {
 	f := audio.Format{Rate: rate, Channels: ch, Layout: audio.DefaultLayout(ch), Type: audio.Float, BitDepth: 32}
 	samples := make([]float32, frames*ch)
 	seed := uint64(99)
-	for i := 0; i < frames; i++ {
+	for i := range frames {
 		seed = seed*6364136223846793005 + 1442695040888963407
 		noise := 0.02 * (2*float64(seed>>11)/float64(1<<53) - 1)
 		x := float64(i)
@@ -54,7 +54,7 @@ func brightWAV(t *testing.T, rate, frames, ch int) []byte {
 			0.18*math.Sin(2*math.Pi*3200*x/float64(rate)) +
 			0.12*math.Sin(2*math.Pi*9500*x/float64(rate)) +
 			0.08*math.Sin(2*math.Pi*13800*x/float64(rate)) + noise
-		for c := 0; c < ch; c++ {
+		for c := range ch {
 			samples[i*ch+c] = float32(v * (1 - 0.15*float64(c)))
 		}
 	}
@@ -227,7 +227,7 @@ func TestHEAACDelayPinFFmpeg(t *testing.T) {
 	got := testutil.FFmpegDecodeF32(t, path)
 
 	bestLag, bestCorr := -1, 0.0
-	for lag := 0; lag < 6000; lag++ {
+	for lag := range 6000 {
 		var corr float64
 		for _, p := range starts {
 			for i, w := range burst {

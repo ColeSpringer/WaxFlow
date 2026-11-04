@@ -378,7 +378,7 @@ func TestPCMInAFragmentedMovieIsRefused(t *testing.T) {
 		var tr track
 		tr.handler = "soun"
 		entry := soundEntry("sowt", 2, 16, 48000)
-		if err := (&Demuxer{}).parseAudioSampleEntry(&tr, "sowt", entry[8:], 1); err != nil {
+		if err := (&Demuxer{}).parseAudioSampleEntry(&tr, "sowt", entry[8:]); err != nil {
 			t.Fatal(err)
 		}
 		return &tr
@@ -1187,7 +1187,7 @@ func TestUniformTableNeedsNoPerSampleMemory(t *testing.T) {
 	}
 	// The data is not there, and that is what the read reports.
 	var pkt container.Packet
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		if err = d.ReadPacket(&pkt); err != nil {
 			break
 		}

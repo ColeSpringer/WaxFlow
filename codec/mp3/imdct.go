@@ -17,11 +17,11 @@ func imdctSubband(in []float32, bt int, out *[36]float32) {
 	if bt == blockShort {
 		*out = [36]float32{}
 		win := &imdctWinF[blockShort]
-		for w := 0; w < 3; w++ {
+		for w := range 3 {
 			var x [12]float32
-			for p := 0; p < 3; p++ {
+			for p := range 3 {
 				var sum float32
-				for m := 0; m < 6; m++ {
+				for m := range 6 {
 					sum += in[w+3*m] * cosN12f[m][p]
 				}
 				x[p] = sum
@@ -29,13 +29,13 @@ func imdctSubband(in []float32, bt int, out *[36]float32) {
 			}
 			for p := 6; p < 9; p++ {
 				var sum float32
-				for m := 0; m < 6; m++ {
+				for m := range 6 {
 					sum += in[w+3*m] * cosN12f[m][p]
 				}
 				x[p] = sum
 				x[17-p] = sum
 			}
-			for p := 0; p < 12; p++ {
+			for p := range 12 {
 				out[6*w+p+6] += x[p] * win[p]
 			}
 		}
@@ -43,9 +43,9 @@ func imdctSubband(in []float32, bt int, out *[36]float32) {
 	}
 	win := &imdctWinF[bt]
 	var x [36]float32
-	for p := 0; p < 9; p++ {
+	for p := range 9 {
 		var sum float32
-		for m := 0; m < 18; m++ {
+		for m := range 18 {
 			sum += in[m] * cosN36f[m][p]
 		}
 		x[p] = sum
@@ -53,13 +53,13 @@ func imdctSubband(in []float32, bt int, out *[36]float32) {
 	}
 	for p := 18; p < 27; p++ {
 		var sum float32
-		for m := 0; m < 18; m++ {
+		for m := range 18 {
 			sum += in[m] * cosN36f[m][p]
 		}
 		x[p] = sum
 		x[53-p] = sum
 	}
-	for p := 0; p < 36; p++ {
+	for p := range 36 {
 		out[p] = x[p] * win[p]
 	}
 }
@@ -72,13 +72,13 @@ func (d *Decoder) hybrid(gi *grInfo, g *granule, ch int, nLongBands int) {
 	spec := &g.spec[ch]
 	store := &d.store[ch]
 	var out [36]float32
-	for sb := 0; sb < 32; sb++ {
+	for sb := range 32 {
 		bt := gi.blockType
 		if sb < nLongBands {
 			bt = blockNormal
 		}
 		imdctSubband(spec[sb*18:sb*18+18], bt, &out)
-		for i := 0; i < 18; i++ {
+		for i := range 18 {
 			spec[sb*18+i] = out[i] + store[sb][i]
 			store[sb][i] = out[i+18]
 		}

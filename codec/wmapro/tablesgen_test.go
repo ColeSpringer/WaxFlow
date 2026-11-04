@@ -236,7 +236,7 @@ func uints(t *testing.T, vals []string) []uint64 {
 // maximum code lengths are only read to check the parse, never emitted.
 func define(t *testing.T, src, name string) int {
 	t.Helper()
-	for _, ln := range strings.Split(src, "\n") {
+	for ln := range strings.SplitSeq(src, "\n") {
 		f := strings.Fields(ln)
 		if len(f) == 3 && f[0] == "#define" && f[1] == name {
 			n, err := strconv.Atoi(f[2])

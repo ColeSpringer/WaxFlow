@@ -99,7 +99,7 @@ func (ch *silkEncoderChannel) encodeIndices(enc *rangeEncoder, frameIndex int, e
 // combineAndCheck pairwise-combines pulses and reports whether any sum
 // exceeds maxPulses (combine_and_check).
 func combineAndCheck(pulsesComb, pulsesIn []int, maxPulses, length int) bool {
-	for k := 0; k < length; k++ {
+	for k := range length {
 		sum := pulsesIn[2*k] + pulsesIn[2*k+1]
 		if sum > maxPulses {
 			return true
@@ -147,7 +147,7 @@ func silkEncodePulses(enc *rangeEncoder, signalType, quantOffsetType int8, pulse
 				break
 			}
 			nRshifts[i]++
-			for k := 0; k < shellFrameLen; k++ {
+			for k := range shellFrameLen {
 				blk[k] >>= 1
 			}
 		}
@@ -156,7 +156,7 @@ func silkEncodePulses(enc *rangeEncoder, signalType, quantOffsetType int8, pulse
 	// Rate level: fewest bits for the pulses-per-block info.
 	rateLevelIndex := 0
 	minSumBitsQ5 := int32(silkInt32Max)
-	for k := 0; k < nRateLevels-1; k++ {
+	for k := range nRateLevels - 1 {
 		nBits := silk_pulses_per_block_BITS_Q5[k]
 		sumBitsQ5 := int32(silk_rate_levels_BITS_Q5[signalType>>1][k])
 		for i := 0; i < iter; i++ {
@@ -199,7 +199,7 @@ func silkEncodePulses(enc *rangeEncoder, signalType, quantOffsetType int8, pulse
 		if nRshifts[i] > 0 {
 			blk := pulses[i*shellFrameLen:]
 			nLS := nRshifts[i] - 1
-			for k := 0; k < shellFrameLen; k++ {
+			for k := range shellFrameLen {
 				absQ := int32(blk[k])
 				if absQ < 0 {
 					absQ = -absQ
@@ -231,13 +231,13 @@ func shellEncoder(enc *rangeEncoder, pulses0 []int) {
 	var pulses3 [2]int
 	var pulses4 [1]int
 
-	for k := 0; k < 8; k++ {
+	for k := range 8 {
 		pulses1[k] = pulses0[2*k] + pulses0[2*k+1]
 	}
-	for k := 0; k < 4; k++ {
+	for k := range 4 {
 		pulses2[k] = pulses1[2*k] + pulses1[2*k+1]
 	}
-	for k := 0; k < 2; k++ {
+	for k := range 2 {
 		pulses3[k] = pulses2[2*k] + pulses2[2*k+1]
 	}
 	pulses4[0] = pulses3[0] + pulses3[1]
@@ -271,16 +271,13 @@ func encodeSigns(enc *rangeEncoder, pulses []int8, length int, signalType, quant
 	i := int(7 * (int32(quantOffsetType) + int32(signalType)<<1))
 	icdfPtr := silk_sign_iCDF[i:]
 	nBlocks := (length + shellFrameLen/2) >> log2ShellFrame
-	for i := 0; i < nBlocks; i++ {
+	for i := range nBlocks {
 		p := sumPulses[i]
 		if p > 0 {
-			m := p & 0x1F
-			if m > 6 {
-				m = 6
-			}
+			m := min(p&0x1F, 6)
 			icdf[0] = icdfPtr[m]
 			blk := pulses[i*shellFrameLen:]
-			for j := 0; j < shellFrameLen; j++ {
+			for j := range shellFrameLen {
 				if blk[j] != 0 {
 					// silk_enc_map: sign bit to 0/1.
 					enc.encodeICDF(int(blk[j]>>7)+1, icdf[:], 8)

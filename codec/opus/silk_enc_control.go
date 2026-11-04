@@ -88,10 +88,7 @@ func (ch *silkEncoderChannel) setupResamplers(fsKHz int) {
 			bufLengthMS := silkLSHIFTint(ch.nbSubfr*5, 1) + laShapeMS
 			oldBufSamples := bufLengthMS * ch.fsKHz
 			newBufSamples := bufLengthMS * fsKHz
-			maxS := oldBufSamples
-			if newBufSamples > maxS {
-				maxS = newBufSamples
-			}
+			maxS := max(newBufSamples, oldBufSamples)
 			xBufFIX := make([]int16, maxS)
 			silkFloat2ShortArray(xBufFIX, ch.xBuf[:], oldBufSamples)
 
@@ -290,10 +287,7 @@ func (ch *silkEncoderChannel) setupLBRR(encControl *silkEncControl) {
 		if !lbrrInPreviousPacket {
 			ch.LBRRGainIncreases = 7
 		} else {
-			v := 7 - silkSMULWB(int32(ch.packetLossPerc), silkFixConst(0.2, 16))
-			if v < 3 {
-				v = 3
-			}
+			v := max(7-silkSMULWB(int32(ch.packetLossPerc), silkFixConst(0.2, 16)), 3)
 			ch.LBRRGainIncreases = int8(v)
 		}
 	}

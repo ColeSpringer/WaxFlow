@@ -167,16 +167,13 @@ func celtEndBand(bw int) int {
 // interleavedSNR compares planar `got` (per channel) against interleaved `ref`,
 // skipping the first `off` frames of got, and returns 10log10(signal/error) dB.
 func interleavedSNR(got [][]float32, ref []float32, off, ch int) float64 {
-	n := len(got[0]) - off
-	if n > len(ref)/ch {
-		n = len(ref) / ch
-	}
+	n := min(len(got[0])-off, len(ref)/ch)
 	if n <= 0 {
 		return math.Inf(-1)
 	}
 	var sig, errE float64
-	for i := 0; i < n; i++ {
-		for c := 0; c < ch; c++ {
+	for i := range n {
+		for c := range ch {
 			r := float64(ref[i*ch+c])
 			g := float64(got[c][off+i])
 			sig += r * r

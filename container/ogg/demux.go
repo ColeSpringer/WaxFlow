@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strings"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/flac"
@@ -462,10 +463,10 @@ func (d *Demuxer) parse() error {
 		if len(found) == 0 {
 			return malformed("no streams")
 		}
-		return unsupported("no supported stream (found: %s)", joinNames(found))
+		return unsupported("no supported stream (found: %s)", strings.Join(found, ", "))
 	}
 	if len(found) > 0 {
-		d.note(0, "ignoring %d additional stream(s): %s", len(found), joinNames(found))
+		d.note(0, "ignoring %d additional stream(s): %s", len(found), strings.Join(found, ", "))
 	}
 
 	// Consume header packets, then find the first audio packet.
@@ -755,17 +756,6 @@ func (d *Demuxer) lastOfPage() bool {
 	return true
 }
 
-func joinNames(names []string) string {
-	var b bytes.Buffer
-	for i, n := range names {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		b.WriteString(n)
-	}
-	return b.String()
-}
-
 // Tracks returns the single decoded track.
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
@@ -978,10 +968,7 @@ func (d *Demuxer) walkToFrame(lo, pts int64, buf []byte) ([]byte, int64, bool, e
 // reconverges: the restart page's first packet is consumed (priming), and
 // output begins at its start.
 func (d *Demuxer) seekAccumulating(sample int64) (int64, error) {
-	searchGranule := sample - d.mapping.preroll()
-	if searchGranule < 0 {
-		searchGranule = 0
-	}
+	searchGranule := max(sample-d.mapping.preroll(), 0)
 	lo, err := d.bisect(searchGranule)
 	if err != nil {
 		return 0, err
@@ -1061,7 +1048,7 @@ func resolvePositions(durs, ends []int64) []int64 {
 		end[i] = -1
 	}
 	// Seed ends from anchors.
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if ends[i] >= 0 {
 			end[i] = ends[i]
 		}
@@ -1078,7 +1065,7 @@ func resolvePositions(durs, ends []int64) []int64 {
 			end[i] = end[i+1] - durs[i+1]
 		}
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if end[i] < 0 {
 			end[i] = 0
 		}

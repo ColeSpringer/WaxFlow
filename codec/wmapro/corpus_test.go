@@ -453,7 +453,7 @@ func writeWAV(t testing.TB, path string, c cell) {
 	for i := 0; i < c.frames; i++ {
 		for ch := 0; ch < c.channels; ch++ {
 			v := uint32(pcm[ch][i])
-			for b := 0; b < bytesPer; b++ {
+			for b := range bytesPer {
 				data[p] = byte(v >> (8 * b))
 				p++
 			}
@@ -745,7 +745,7 @@ func bestLag(src, got []float32, channels, maxLag int) int {
 		win = len(src)/channels - skip - maxLag
 	}
 	best, bestErr := 0, math.Inf(1)
-	for lag := 0; lag < maxLag; lag++ {
+	for lag := range maxLag {
 		if (lag+skip+win)*channels > len(got) {
 			break
 		}

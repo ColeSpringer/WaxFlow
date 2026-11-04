@@ -57,7 +57,7 @@ func buildSyntheticOpus(preSkip, packetsPerPage, pages, padTo int) (stream []byt
 	samplesPerPacket = 960
 	seq := uint32(2)
 	var granule int64
-	for p := 0; p < pages; p++ {
+	for p := range pages {
 		pkts := make([][]byte, packetsPerPage)
 		for i := range pkts {
 			pkts[i] = audioPkt

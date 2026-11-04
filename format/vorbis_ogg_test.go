@@ -280,7 +280,7 @@ func chunkMaxAbs(dst *audio.Buffer, ref []float32, ch int, landed, off int64) fl
 		if ri < 0 || ri+ch > len(ref) {
 			continue
 		}
-		for c := 0; c < ch; c++ {
+		for c := range ch {
 			if d := math.Abs(float64(dst.ChanF(c)[i]) - float64(ref[ri+c])); d > maxAbs {
 				maxAbs = d
 			}

@@ -18,19 +18,19 @@ func (d *Decoder) synth(g *granule, ch int, dst []float32) {
 	var s [32]float32
 	var u [512]float32
 	dst = dst[:576]
-	for ss := 0; ss < 18; ss++ {
+	for ss := range 18 {
 		copy(v[64:], v[:1024-64])
-		for j := 0; j < 32; j++ {
+		for j := range 32 {
 			s[j] = spec[j*18+ss]
 		}
 		var total float32
 		for _, x := range s {
 			total += x
 		}
-		for i := 0; i < 16; i++ {
+		for i := range 16 {
 			nw := &synthNWin[i]
 			var sum float32
-			for j := 0; j < 32; j++ {
+			for j := range 32 {
 				sum += nw[j] * s[j]
 			}
 			v[i] = sum
@@ -43,7 +43,7 @@ func (d *Decoder) synth(g *granule, ch int, dst []float32) {
 		for i := 32; i < 48; i++ {
 			nw := &synthNWin[i]
 			var sum float32
-			for j := 0; j < 32; j++ {
+			for j := range 32 {
 				sum += nw[j] * s[j]
 			}
 			v[i] = sum

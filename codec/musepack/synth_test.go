@@ -25,7 +25,7 @@ func directV(s *[32]float32) [64]float64 {
 // terms rather than only through the decode differential.
 func TestMatrixingIsTheISOSum(t *testing.T) {
 	rng := rand.New(rand.NewPCG(3, 9))
-	for trial := 0; trial < 200; trial++ {
+	for trial := range 200 {
 		var s [32]float32
 		for k := range s {
 			s[k] = float32(rng.Float64()*2 - 1)

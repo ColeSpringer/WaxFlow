@@ -22,7 +22,7 @@ func newFFTPlan(n int) *fftPlan {
 	for 1<<bits < n {
 		bits++
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		r := 0
 		for b := 0; b < bits; b++ {
 			r = r<<1 | (i>>b)&1

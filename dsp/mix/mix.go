@@ -250,7 +250,7 @@ func placeRows(src []audio.ChannelMask, dst audio.ChannelMask) [][]float64 {
 // (ascending bit position, the audio package convention).
 func maskPositions(m audio.ChannelMask) []audio.ChannelMask {
 	out := make([]audio.ChannelMask, 0, m.Count())
-	for bit := 0; bit < 32; bit++ {
+	for bit := range 32 {
 		if m&(1<<bit) != 0 {
 			out = append(out, 1<<bit)
 		}

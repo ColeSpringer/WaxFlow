@@ -2175,10 +2175,10 @@ func blendFrames(dst, out *audio.Buffer, off, x int) {
 		// nominal, and convertStage's own doc says the output quantizer
 		// absorbs the overshoot. The asymmetry with the int path below is the
 		// tree's, not this function's.
-		for k := 0; k < n; k++ {
+		for k := range n {
 			sin, cos := math.Sincos(float64(off+k) / float64(x) * (math.Pi / 2))
 			gi, go_ := float32(sin), float32(cos)
-			for ch := 0; ch < chans; ch++ {
+			for ch := range chans {
 				d, o := &dst.F[ch*dst.Stride+k], out.F[ch*out.Stride+off+k]
 				*d = o*go_ + *d*gi
 			}
@@ -2198,9 +2198,9 @@ func blendFrames(dst, out *audio.Buffer, off, x int) {
 	// FLAC, NewChain inserts nothing between here and the encoder.
 	scale := math.Ldexp(1, dst.Fmt.BitDepth-1)
 	lo, hi := -scale, scale-1
-	for k := 0; k < n; k++ {
+	for k := range n {
 		sin, cos := math.Sincos(float64(off+k) / float64(x) * (math.Pi / 2))
-		for ch := 0; ch < chans; ch++ {
+		for ch := range chans {
 			d := &dst.I[ch*dst.Stride+k]
 			v := math.Floor(float64(out.I[ch*out.Stride+off+k])*cos + float64(*d)*sin + 0.5)
 			if v < lo {

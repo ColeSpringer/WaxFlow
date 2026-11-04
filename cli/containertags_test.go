@@ -362,7 +362,7 @@ func TestLoudnessMeasuresTheResolvedWidth(t *testing.T) {
 
 	source := func(log string) string {
 		t.Helper()
-		for _, line := range strings.Split(log, "\n") {
+		for line := range strings.SplitSeq(log, "\n") {
 			if strings.HasPrefix(line, "loudness: source ") {
 				return line
 			}

@@ -48,7 +48,7 @@ func (m ChannelMask) String() string {
 		return "unknown"
 	}
 	var b strings.Builder
-	for i := 0; i < 32; i++ {
+	for i := range 32 {
 		if m&(1<<i) == 0 {
 			continue
 		}

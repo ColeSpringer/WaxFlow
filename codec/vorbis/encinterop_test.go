@@ -78,8 +78,8 @@ func interleave(planar [][]float32) []float32 {
 	ch := len(planar)
 	n := len(planar[0])
 	out := make([]float32, n*ch)
-	for i := 0; i < n; i++ {
-		for c := 0; c < ch; c++ {
+	for i := range n {
+		for c := range ch {
 			out[i*ch+c] = planar[c][i]
 		}
 	}

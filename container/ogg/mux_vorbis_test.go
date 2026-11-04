@@ -132,7 +132,7 @@ func TestMuxVorbisRoundTrip(t *testing.T) {
 func muxVorbisRoundTrip(t *testing.T, n, ch int) {
 	f := audio.Format{Rate: 48000, Channels: ch, Layout: audio.DefaultLayout(ch), Type: audio.Float, BitDepth: 32}
 	src := make([][]float32, ch)
-	for c := 0; c < ch; c++ {
+	for c := range ch {
 		src[c] = make([]float32, n)
 		freq := 440.0 * float64(c+1)
 		for i := range src[c] {
@@ -349,7 +349,7 @@ func TestMuxVorbisComment(t *testing.T) {
 	f := audio.Format{Rate: 48000, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Float, BitDepth: 32}
 	n := 8000
 	src := [][]float32{make([]float32, n), make([]float32, n)}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		v := 0.2 * float32(math.Sin(2*math.Pi*330*float64(i)/48000))
 		src[0][i], src[1][i] = v, v
 	}

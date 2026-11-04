@@ -41,12 +41,9 @@ func buildFloor1(n2, partitions int) (*floor1, int) {
 	xs := make([]int, 0, posts+2)
 	xs = append(xs, 0, 1<<rangebits)
 	seen := map[int]bool{0: true, 1 << rangebits: true}
-	for i := 0; i < posts; i++ {
+	for i := range posts {
 		frac := float64(i+1) / float64(posts)
-		p := int(math.Round(float64(n2-1) * math.Pow(frac, floorWarp)))
-		if p < 1 {
-			p = 1
-		}
+		p := max(int(math.Round(float64(n2-1)*math.Pow(frac, floorWarp))), 1)
 		for seen[p] {
 			p++
 		}
@@ -100,7 +97,7 @@ func ampToY(amp float64) int {
 // touch above the raw peak so interpolation dips never push the residue past 1.
 func floor1Fit(f *floor1, spec []float32, dst []int, n2 int) {
 	count := len(f.xs)
-	for si := 0; si < count; si++ {
+	for si := range count {
 		i := f.sortOrder[si]
 		lo := 0
 		if si > 0 {

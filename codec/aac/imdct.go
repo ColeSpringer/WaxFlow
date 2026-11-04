@@ -81,14 +81,14 @@ func newIMDCTPlan(n int) *imdctPlan {
 // length M/2.
 func (p *imdctPlan) dctIV(in, out, cr, ci []float64) {
 	m, n2 := p.m, p.n2
-	for j := 0; j < m; j++ {
+	for j := range m {
 		x1, x2 := in[2*j], in[n2-1-2*j]
 		c, s := p.rotRe[j], p.rotIm[j]
 		cr[j] = x1*c - x2*s
 		ci[j] = x2*c + x1*s
 	}
 	p.fft(cr, ci)
-	for k := 0; k < m; k++ {
+	for k := range m {
 		re, im := cr[k], ci[k]
 		c, s := p.rotRe[k], p.rotIm[k]
 		out[2*k] = re*c - im*s
@@ -116,13 +116,13 @@ func (p *imdctPlan) runInverse(spec, out, c, cr, ci []float64) {
 	p.dctIV(spec, c, cr, ci)
 	// The middle half, reversed and scaled; then the outer quarters from the
 	// transform's own symmetries, which read only from the middle.
-	for h := 0; h < n2; h++ {
+	for h := range n2 {
 		out[half+h] = -p.invScale * c[n2-1-h]
 	}
-	for q := 0; q < half; q++ {
+	for q := range half {
 		out[half-1-q] = -out[half+q]
 	}
-	for r := 0; r < half; r++ {
+	for r := range half {
 		out[3*half+r] = out[3*half-1-r]
 	}
 }
@@ -134,7 +134,7 @@ func (p *imdctPlan) runInverse(spec, out, c, cr, ci []float64) {
 // position outside [0, M) lands back inside it with a sign.
 func (p *imdctPlan) fold(x, u []float64) {
 	n2, half := p.n2, p.n/4
-	for j := 0; j < half; j++ {
+	for j := range half {
 		u[j] = -x[3*half-1-j] - x[j+3*half]
 	}
 	for j := half; j < n2; j++ {
@@ -162,7 +162,7 @@ func (p *imdctPlan) fft(re, im []float64) {
 		half := length / 2
 		base := tw
 		for i := 0; i < n; i += length {
-			for k := 0; k < half; k++ {
+			for k := range half {
 				wr, wi := p.twRe[base+k], p.twIm[base+k]
 				a, b := i+k, i+k+half
 				vr := re[b]*wr - im[b]*wi

@@ -166,7 +166,7 @@ func parseMoof(t *testing.T, file []byte, moofOff, moofSize int64, moof []byte, 
 			dataOffset = be32(rest)
 			rest = rest[4:]
 		}
-		for i := uint32(0); i < count; i++ {
+		for range count {
 			var dur, sz uint32
 			if flags&0x000100 != 0 {
 				dur = be32(rest)
@@ -251,7 +251,7 @@ func TestMuxRoundTrip(t *testing.T) {
 					src.N = n
 					fillTone(src)
 					got := decodeFMP4(t, src, frag)
-					for c := 0; c < ch; c++ {
+					for c := range ch {
 						w := src.I[c*src.Stride : c*src.Stride+n]
 						g := got.I[c*got.Stride : c*got.Stride+n]
 						for i := range w {
@@ -317,7 +317,7 @@ func TestMuxLayoutTolerated(t *testing.T) {
 		pos := 0
 		for _, s := range samples {
 			if err := dec.Decode(s.data, func(b *audio.Buffer) error {
-				for c := 0; c < 2; c++ {
+				for c := range 2 {
 					copy(got.I[c*got.Stride+pos:c*got.Stride+pos+b.N], b.ChanI(c))
 				}
 				pos += b.N
@@ -326,7 +326,7 @@ func TestMuxLayoutTolerated(t *testing.T) {
 				t.Fatalf("decode: %v", err)
 			}
 		}
-		for c := 0; c < 2; c++ { // channel order is layout-agnostic
+		for c := range 2 { // channel order is layout-agnostic
 			w := src.I[c*src.Stride : c*src.Stride+src.N]
 			g := got.I[c*got.Stride : c*got.Stride+src.N]
 			for i := range w {
@@ -353,7 +353,7 @@ func TestMuxHighRateClampsSampleEntry(t *testing.T) {
 	fillTone(src)
 	got := decodeFMP4(t, src, 0) // cookie carries 96000, decode is exact
 	defer audio.Put(got)
-	for c := 0; c < 2; c++ {
+	for c := range 2 {
 		w := src.I[c*src.Stride : c*src.Stride+src.N]
 		g := got.I[c*got.Stride : c*got.Stride+src.N]
 		for i := range w {

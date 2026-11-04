@@ -311,7 +311,7 @@ func (el *sbrElement) processPS(kxCur, mCur, lTemp int, out [][]float32) {
 // boundary: the last 8 slots become the new history, and the Y slots past
 // the frame (envelopes may extend into it) slide down likewise.
 func (st *sbrChanState) shiftBuffers() {
-	for i := 0; i < sbrBufSlots-sbrSlots; i++ {
+	for i := range sbrBufSlots - sbrSlots {
 		st.xlowRe[i] = st.xlowRe[i+sbrSlots]
 		st.xlowIm[i] = st.xlowIm[i+sbrSlots]
 		st.yRe[i] = st.yRe[i+sbrSlots]

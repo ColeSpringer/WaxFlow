@@ -273,9 +273,9 @@ func TestWidenedDepthCostsOnlyTheRawBytes(t *testing.T) {
 				srcW := audio.Get(fw, n)
 				defer audio.Put(srcW)
 				srcW.N = n
-				for c := 0; c < ch; c++ {
+				for c := range ch {
 					w, s := srcW.ChanI(c), src16.ChanI(c)
-					for i := 0; i < n; i++ {
+					for i := range n {
 						w[i] = s[i] << tc.shift
 					}
 				}

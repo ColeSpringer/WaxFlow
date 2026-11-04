@@ -84,7 +84,7 @@ func init() {
 // mirror.
 func buildWindow(w []float64, half []float64) {
 	n := len(half)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		w[i] = half[i]
 		w[2*n-1-i] = half[i]
 	}
@@ -116,7 +116,7 @@ func kbdHalf(n int, alpha float64) []float64 {
 	}
 	half := make([]float64, n)
 	var running float64
-	for i := 0; i < n; i++ {
+	for i := range n {
 		running += w[i]
 		half[i] = math.Sqrt(running / total)
 	}

@@ -131,7 +131,7 @@ func ffmpegSilence(t *testing.T, ffmpeg, path string, rate int, thresholdDB floa
 
 	var spans []Span
 	open := false
-	for _, line := range strings.Split(out.String(), "\n") {
+	for line := range strings.SplitSeq(out.String(), "\n") {
 		if v, ok := silenceValue(line, "silence_start:"); ok {
 			if open {
 				t.Fatalf("ffmpeg reported two starts with no end between them:\n%s", out.String())
@@ -156,11 +156,11 @@ func ffmpegSilence(t *testing.T, ffmpeg, path string, rate int, thresholdDB floa
 // silenceValue parses the number following a silencedetect key on a log
 // line ("[silencedetect @ 0x..] silence_end: 2.005333 | silence_duration: ..").
 func silenceValue(line, key string) (float64, bool) {
-	i := strings.Index(line, key)
-	if i < 0 {
+	_, after, ok := strings.Cut(line, key)
+	if !ok {
 		return 0, false
 	}
-	fields := strings.Fields(line[i+len(key):])
+	fields := strings.Fields(after)
 	if len(fields) == 0 {
 		return 0, false
 	}

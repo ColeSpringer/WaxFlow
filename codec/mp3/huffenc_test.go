@@ -57,13 +57,13 @@ func escapeValues(lim int) []int {
 
 // TestHuffCount1RoundTrip checks the count1 quad tables the same way.
 func TestHuffCount1RoundTrip(t *testing.T) {
-	for sel := 0; sel < 2; sel++ {
-		for i := 0; i < 16; i++ {
+	for sel := range 2 {
+		for i := range 16 {
 			// Expand the 4-bit magnitude pattern with every sign combo.
 			mags := [4]int{i >> 3 & 1, i >> 2 & 1, i >> 1 & 1, i & 1}
-			for signs := 0; signs < 16; signs++ {
+			for signs := range 16 {
 				var vals [4]int
-				for k := 0; k < 4; k++ {
+				for k := range 4 {
 					vals[k] = mags[k]
 					if mags[k] != 0 && signs>>k&1 != 0 {
 						vals[k] = -vals[k]

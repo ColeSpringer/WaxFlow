@@ -11,8 +11,6 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-func noEnv(string) (string, bool) { return "", false }
-
 func envMap(m map[string]string) func(string) (string, bool) {
 	return func(k string) (string, bool) {
 		v, ok := m[k]

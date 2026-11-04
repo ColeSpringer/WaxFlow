@@ -554,7 +554,7 @@ func (d *Demuxer) decodeIndex(blob []byte) (snapshot, bool) {
 	}
 	entries := make([]indexEntry, 0, min(count, 4096))
 	var e indexEntry
-	for i := uint64(0); i < count; i++ {
+	for i := range count {
 		dp, okp := next()
 		if !okp || dp >= packets-uint64(e.packet) || (i > 0 && dp == 0) {
 			return none, false

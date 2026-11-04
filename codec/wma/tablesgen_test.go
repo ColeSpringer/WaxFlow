@@ -258,17 +258,17 @@ func emitCoef(t *testing.T, wmadata string) string {
 // counted from index 2 upward.
 
 var coefCodes = [6][]uint32{`)
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		v := uints(t, initializer(t, wmadata, fmt.Sprintf("coef%d_huffcodes", i)).flat())
 		fmt.Fprintf(&b, "\n\t{%s},", list(v, 12, true))
 	}
 	b.WriteString("\n}\n\nvar coefBits = [6][]uint8{")
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		v := uints(t, initializer(t, wmadata, fmt.Sprintf("coef%d_huffbits", i)).flat())
 		fmt.Fprintf(&b, "\n\t{%s},", list(v, 24, false))
 	}
 	b.WriteString("\n}\n\nvar coefLevels = [6][]uint16{")
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		v := uints(t, initializer(t, wmadata, fmt.Sprintf("levels%d", i)).flat())
 		fmt.Fprintf(&b, "\n\t{%s},", list(v, 16, false))
 	}
@@ -290,14 +290,16 @@ var expScaleCodes = [121]uint32{`)
 	if len(code) != 121 {
 		t.Fatalf("scalefactor code: %d entries", len(code))
 	}
-	b.WriteString(list(code, 8, true) + "}\n")
+	b.WriteString(list(code, 8, true))
+	b.WriteString("}\n")
 
 	b.WriteString("\nvar expScaleBits = [121]uint8{")
 	bits := uints(t, initializer(t, aactab, "ff_aac_scalefactor_bits").flat())
 	if len(bits) != 121 {
 		t.Fatalf("scalefactor bits: %d entries", len(bits))
 	}
-	b.WriteString(list(bits, 20, false) + "}\n")
+	b.WriteString(list(bits, 20, false))
+	b.WriteString("}\n")
 
 	b.WriteString(`
 // hgainHuff is the noise-gain book as {symbol, length} pairs in canonical code
@@ -347,7 +349,8 @@ func emitBands(t *testing.T, wmadata, freqs string) string {
 // scale), not WMA-specific.
 
 var criticalFreqs = [25]uint16{`)
-	b.WriteString(list(uints(t, initializer(t, freqs, "ff_wma_critical_freqs").flat()), 8, false) + "}\n")
+	b.WriteString(list(uints(t, initializer(t, freqs, "ff_wma_critical_freqs").flat()), 8, false))
+	b.WriteString("}\n")
 
 	b.WriteString(`
 // The v2 exponent-band widths that are tabulated rather than computed, for the

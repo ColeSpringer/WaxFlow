@@ -508,7 +508,7 @@ func (r *ascReader) left() int { return len(r.data)*8 - r.pos }
 
 func (r *ascReader) read(n uint) uint32 {
 	var v uint32
-	for i := uint(0); i < n; i++ {
+	for range n {
 		bit := uint32(0)
 		if idx := r.pos >> 3; idx < len(r.data) {
 			bit = uint32(r.data[idx]>>(7-uint(r.pos&7))) & 1

@@ -409,7 +409,7 @@ func TestStrictRefusalDeliversNothing(t *testing.T) {
 	if n != l.First {
 		t.Errorf("the refusal came after %d packets, want the %d before the block", n, l.First)
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := d.ReadPacket(&pkt); err == nil || err == io.EOF {
 			t.Fatalf("read %d after the refusal returned %v; the refused block's frames must not come out", i, err)
 		}

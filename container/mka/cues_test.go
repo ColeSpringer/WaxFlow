@@ -26,7 +26,7 @@ func cuesFixture(t *testing.T) ([]byte, int64) {
 	f := audio.Format{Rate: 48000, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
 	track := container.Track{Codec: codec.PCM, Fmt: f, Samples: packets * 480, Default: true}
 	var pkts []codec.Packet
-	for i := 0; i < packets; i++ {
+	for i := range packets {
 		data := make([]byte, 480*4)
 		for j := range data {
 			data[j] = byte(i*17 + j*3)

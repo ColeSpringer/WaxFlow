@@ -33,8 +33,8 @@ func encodeVBR(t *testing.T, rate, channels, anchor, n int) ([][]byte, codec.Tra
 		m := min(1152, n-off)
 		buf := audio.Get(f, m)
 		buf.N = m
-		for ch := 0; ch < channels; ch++ {
-			for i := 0; i < m; i++ {
+		for ch := range channels {
+			for i := range m {
 				v := 0.0
 				if off+i >= n/2 {
 					x := float64(off + i)
@@ -198,7 +198,7 @@ func TestMuxXingVBRLongStream(t *testing.T) {
 	if err := mux.Begin([]container.Track{track}); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < frames; i++ {
+	for range frames {
 		if err := mux.WritePacket(container.Packet{Packet: codec.Packet{Data: one, Dur: 1152, Sync: true}}); err != nil {
 			t.Fatal(err)
 		}

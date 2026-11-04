@@ -56,7 +56,7 @@ func newTruePeak(rate, channels int) *truePeak {
 		frac := float64(p+1) / float64(factor)
 		ph := &tp.phases[p]
 		var sum float64
-		for t := 0; t < tpTaps; t++ {
+		for t := range tpTaps {
 			// Tap t weighs sample j-half+1+t for the value at j+frac.
 			x := frac - float64(t-half+1)
 			u := x / half
@@ -89,7 +89,7 @@ func (tp *truePeak) push(c int, x float64) float64 {
 	for p := range tp.phases {
 		ph := &tp.phases[p]
 		var acc float64
-		for t := 0; t < tpTaps; t++ {
+		for t := range tpTaps {
 			acc += ph[t] * win[t]
 		}
 		if a := math.Abs(acc); a > peak {
@@ -105,7 +105,7 @@ func (tp *truePeak) push(c int, x float64) float64 {
 func (tp *truePeak) drain() float64 {
 	var peak float64
 	for c := range tp.hist {
-		for i := 0; i < tpTaps; i++ {
+		for range tpTaps {
 			if p := tp.push(c, 0); p > peak {
 				peak = p
 			}

@@ -383,8 +383,7 @@ func fetchOne(w io.Writer, path string, v Vector) error {
 			return err
 		}
 		delay := fetchRetryDelay << (attempt - 1)
-		var wait retryAfterError
-		if errors.As(err, &wait) {
+		if wait, ok := errors.AsType[retryAfterError](err); ok {
 			if d := min(wait.after, fetchRetryCap); d > delay {
 				delay = d
 			}

@@ -133,10 +133,7 @@ type Resolver interface {
 // appears before any slash; root-relative paths may contain colons inside
 // path segments.
 func scheme(ref string) (string, bool) {
-	head := ref
-	if i := strings.IndexByte(ref, '/'); i >= 0 {
-		head = ref[:i]
-	}
+	head, _, _ := strings.Cut(ref, "/")
 	s, _, ok := strings.Cut(head, ":")
 	return s, ok
 }

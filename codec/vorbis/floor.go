@@ -59,7 +59,7 @@ func parseFloor1(r *bitReader, numBooks int) (floor, error) {
 	f.classSubclasses = make([]int, nClass)
 	f.classMasterbook = make([]int, nClass)
 	f.classSubbooks = make([][]int, nClass)
-	for c := 0; c < nClass; c++ {
+	for c := range nClass {
 		f.classDims[c] = int(r.read(3)) + 1
 		f.classSubclasses[c] = int(r.read(2))
 		if f.classSubclasses[c] > 0 {
@@ -70,7 +70,7 @@ func parseFloor1(r *bitReader, numBooks int) (floor, error) {
 		}
 		nsub := 1 << f.classSubclasses[c]
 		f.classSubbooks[c] = make([]int, nsub)
-		for j := 0; j < nsub; j++ {
+		for j := range nsub {
 			b := int(r.read(8)) - 1
 			if b >= numBooks {
 				return nil, malformed("floor1 subbook %d of %d", b, numBooks)
@@ -82,7 +82,7 @@ func parseFloor1(r *bitReader, numBooks int) (floor, error) {
 	f.rangeVal = floor1Ranges[f.multiplier-1]
 	rangebits := int(r.read(4))
 	f.xs = []int{0, 1 << rangebits}
-	for i := 0; i < partitions; i++ {
+	for i := range partitions {
 		cls := f.partitionClass[i]
 		for j := 0; j < f.classDims[cls]; j++ {
 			f.xs = append(f.xs, int(r.read(rangebits)))
@@ -134,7 +134,7 @@ func (f *floor1) computeNeighbors() error {
 
 func lowNeighbor(v []int, x int) int {
 	n, found := 0, false
-	for i := 0; i < x; i++ {
+	for i := range x {
 		if v[i] < v[x] && (!found || v[i] > v[n]) {
 			n, found = i, true
 		}
@@ -144,7 +144,7 @@ func lowNeighbor(v []int, x int) int {
 
 func highNeighbor(v []int, x int) int {
 	n, found := 0, false
-	for i := 0; i < x; i++ {
+	for i := range x {
 		if v[i] > v[x] && (!found || v[i] < v[n]) {
 			n, found = i, true
 		}
@@ -175,7 +175,7 @@ func (f *floor1) decode(r *bitReader, books []codebook, st *floorState) (bool, e
 			}
 			cval = v
 		}
-		for j := 0; j < cdim; j++ {
+		for range cdim {
 			book := f.classSubbooks[cls][cval&csub]
 			cval >>= cbits
 			if book >= 0 {
@@ -209,7 +209,7 @@ func (f *floor1) apply(st *floorState, spec []float32, n2 int) {
 	}
 	curve := st.curve[:n2]
 	f.curve(st.y, curve, st.final[:count], st.step2[:count], n2)
-	for i := 0; i < n2; i++ {
+	for i := range n2 {
 		spec[i] *= curve[i]
 	}
 }
@@ -314,10 +314,7 @@ func renderLine(x0, y0, x1, y1 int, out []float32) {
 	ady -= absBase * adx
 	y := y0
 	err := 0
-	end := x1
-	if end > len(out) {
-		end = len(out)
-	}
+	end := min(x1, len(out))
 	for x := x0; x < end; x++ {
 		out[x] = floor1InverseDB[clampDB(y)]
 		err += ady

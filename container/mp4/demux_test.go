@@ -134,7 +134,7 @@ func TestTruncationTolerated(t *testing.T) {
 				return // clean failure is fine
 			}
 			var pkt container.Packet
-			for i := 0; i < 10000; i++ {
+			for range 10000 {
 				if d.ReadPacket(&pkt) != nil {
 					break
 				}

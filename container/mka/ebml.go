@@ -10,7 +10,7 @@ import (
 // byte would need a width past eight (EBML's ceiling), so it returns 0 to mark
 // the encoding invalid.
 func vintWidth(first byte) int {
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		if first&(0x80>>i) != 0 {
 			return i + 1
 		}

@@ -81,9 +81,7 @@ func TestIdxStoreConcurrentSaves(t *testing.T) {
 	blob := bytes.Repeat([]byte("idx"), 4096)
 	var wg sync.WaitGroup
 	for w := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range 25 {
 				s.Save("shared", blob)
 				s.Save(fmt.Sprint("own-", w, "-", i), blob)
@@ -92,7 +90,7 @@ func TestIdxStoreConcurrentSaves(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if got := s.Load("shared"); !bytes.Equal(got, blob) {

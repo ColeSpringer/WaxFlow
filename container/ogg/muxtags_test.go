@@ -33,7 +33,7 @@ func muxCannedOpus(t *testing.T, opts *MuxerOptions, packets int) (stream []byte
 	if err := m.Begin([]container.Track{track}); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < packets; i++ {
+	for i := range packets {
 		data := make([]byte, tagTestPktLen)
 		data[0] = byte(31<<3 | 0x4) // TOC: CELT FB 20 ms, stereo, code 0
 		for j := 1; j < tagTestPktLen; j++ {
@@ -104,7 +104,7 @@ func opusTagsComments(t *testing.T, stream []byte) (vendor string, comments []st
 	rest := pay[12+vl:]
 	count := int(binary.LittleEndian.Uint32(rest))
 	rest = rest[4:]
-	for i := 0; i < count; i++ {
+	for i := range count {
 		if len(rest) < 4 {
 			t.Fatalf("comment %d length truncated", i)
 		}

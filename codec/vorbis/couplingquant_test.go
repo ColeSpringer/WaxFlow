@@ -69,7 +69,7 @@ func TestCoupledResidueRoundTripInvariant(t *testing.T) {
 			rng := rand.New(rand.NewSource(int64(cls) * 7919))
 			mag := make([]float32, n2)
 			ang := make([]float32, n2)
-			for i := 0; i < n2; i++ {
+			for i := range n2 {
 				a, b := g.gen(rng, i)
 				mag[i], ang[i] = coupleForward(a, b)
 			}
@@ -92,7 +92,7 @@ func TestCoupledResidueRoundTripInvariant(t *testing.T) {
 			if err := dec.decode(newBitReader(w.bytes()), parsed.codebooks, out, []bool{false, false}, n2, vec); err != nil {
 				t.Fatalf("%s cls=%d: decode: %v", g.name, cls, err)
 			}
-			for i := 0; i < n2; i++ {
+			for i := range n2 {
 				if out[0][i] == 0 && out[1][i] != 0 {
 					t.Fatalf("%s cls=%d line %d: reconstructed magnitude 0 with angle %g "+
 						"(from M=%g A=%g): ffmpeg's vectorized inverse coupling negates the angle here",

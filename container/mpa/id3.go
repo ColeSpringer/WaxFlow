@@ -2,6 +2,7 @@ package mpa
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/colespringer/waxflow/container"
 )
@@ -72,7 +73,7 @@ func id3v2Tag(tags []container.Tag) ([]byte, error) {
 	}
 	for _, m := range id3Text {
 		if vs := vals[m.key]; len(vs) > 0 {
-			if err := add(m.frame, m.key, joinValues(vs)); err != nil {
+			if err := add(m.frame, m.key, strings.Join(vs, "; ")); err != nil {
 				return nil, err
 			}
 		}
@@ -100,14 +101,6 @@ func id3v2Tag(tags []container.Tag) ([]byte, error) {
 
 func appendSyncsafe(b []byte, v uint32) []byte {
 	return append(b, byte(v>>21&0x7F), byte(v>>14&0x7F), byte(v>>7&0x7F), byte(v&0x7F))
-}
-
-func joinValues(vs []string) string {
-	out := vs[0]
-	for _, v := range vs[1:] {
-		out += "; " + v
-	}
-	return out
 }
 
 // numberPair renders "n" or "n/total" from the first value of each list.

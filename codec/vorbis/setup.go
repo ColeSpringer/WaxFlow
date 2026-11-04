@@ -43,7 +43,7 @@ func (c *Config) parseSetup(pkt []byte) error {
 
 	// Time-domain transforms: placeholder, every value must be zero.
 	numTimes := int(r.read(6)) + 1
-	for i := 0; i < numTimes; i++ {
+	for range numTimes {
 		if v := r.read(16); v != 0 {
 			return malformed("nonzero time-domain transform %d", v)
 		}
@@ -148,7 +148,7 @@ func (c *Config) parseMapping(r *bitReader, numFloors, numResidues int) (mapping
 	if r.bit() == 1 {
 		steps := int(r.read(8)) + 1
 		magBits := ilog(c.Channels - 1)
-		for i := 0; i < steps; i++ {
+		for range steps {
 			mag := int(r.read(magBits))
 			ang := int(r.read(magBits))
 			if mag == ang || mag >= c.Channels || ang >= c.Channels {

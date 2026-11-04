@@ -11,7 +11,6 @@ const (
 	peSubfrLengthMS    = 5
 	peLTPMemLengthMS   = 4 * peSubfrLengthMS
 	peMaxFrameLengthMS = peLTPMemLengthMS + peMaxNBSubfr*peSubfrLengthMS
-	peMaxFrameLength   = peMaxFrameLengthMS * peMaxFsKHz
 	peMaxLag           = peMaxLagMS * peMaxFsKHz
 	peDSrchLength      = 24
 	peNBStage3Lags     = 5
@@ -37,7 +36,7 @@ const (
 // (silk_resampler_down2). S is the 2-element Q10 state.
 func silkResamplerDown2(S []int32, out, in []int16, inLen int) {
 	len2 := inLen >> 1
-	for k := 0; k < len2; k++ {
+	for k := range len2 {
 		in32 := silkLSHIFT(int32(in[2*k]), 10)
 		Y := in32 - S[0]
 		X := silkSMLAWB(Y, Y, silk_resampler_down2_1)
@@ -70,10 +69,7 @@ func silkResamplerDown23(S []int32, out, in []int16, inLen int) {
 	outPos, inPos := 0, 0
 	nSamplesIn := 0
 	for {
-		nSamplesIn = inLen
-		if nSamplesIn > resamplerMaxBatchSizeIn {
-			nSamplesIn = resamplerMaxBatchSizeIn
-		}
+		nSamplesIn = min(inLen, resamplerMaxBatchSizeIn)
 		silkResamplerAR2(S[orderFIR:], buf[orderFIR:], in[inPos:], silk_Resampler_2_3_COEFS_LQ, nSamplesIn)
 		bufPtr := 0
 		counter := nSamplesIn
@@ -203,7 +199,7 @@ func silkPitchAnalysisCore(frame []float32, pitchOut []int, lagIndex *int, conto
 
 	Cmax := C[0][minLag4kHz]
 	if Cmax < 0.2 {
-		for i := 0; i < nbSubfr; i++ {
+		for i := range nbSubfr {
 			pitchOut[i] = 0
 		}
 		*ltpCorr = 0
@@ -264,7 +260,7 @@ func silkPitchAnalysisCore(frame []float32, pitchOut []int, lagIndex *int, conto
 		target = frame8kHz[:]
 		targetBase = peLTPMemLengthMS * 8
 	}
-	for k := 0; k < nbSubfr; k++ {
+	for k := range nbSubfr {
 		energyTmp := silkEnergyFLP(target[targetBase:], sfLength8kHz) + 1.0
 		for j := 0; j < lengthDComp; j++ {
 			d := int(dComp[j])
@@ -286,9 +282,10 @@ func silkPitchAnalysisCore(frame []float32, pitchOut []int, lagIndex *int, conto
 	lag := -1
 	var prevLagLog2 float32
 	if prevLag > 0 {
-		if fsKHz == 12 {
+		switch fsKHz {
+		case 12:
 			prevLag = int(silkLSHIFT(int32(prevLag), 1)) / 3
-		} else if fsKHz == 16 {
+		case 16:
 			prevLag >>= 1
 		}
 		prevLagLog2 = silkLog2F(float64(prevLag))
@@ -317,7 +314,7 @@ func silkPitchAnalysisCore(frame []float32, pitchOut []int, lagIndex *int, conto
 		d := dSrch[k]
 		for j := 0; j < nbCbkSearch; j++ {
 			CC[j] = 0.0
-			for i := 0; i < nbSubfr; i++ {
+			for i := range nbSubfr {
 				CC[j] += C[i][d+int(lagCB[i][j])]
 			}
 		}
@@ -345,7 +342,7 @@ func silkPitchAnalysisCore(frame []float32, pitchOut []int, lagIndex *int, conto
 	}
 
 	if lag == -1 {
-		for i := 0; i < nbSubfr; i++ {
+		for i := range nbSubfr {
 			pitchOut[i] = 0
 		}
 		*ltpCorr = 0
@@ -391,7 +388,7 @@ func silkPitchAnalysisCore(frame []float32, pitchOut []int, lagIndex *int, conto
 			for j := 0; j < nbCbkSearch; j++ {
 				crossCorr := 0.0
 				energy := energyTmp
-				for k := 0; k < nbSubfr; k++ {
+				for k := range nbSubfr {
 					crossCorr += float64(crossCorrSt3[k][j][lagCounter])
 					energy += float64(energiesSt3[k][j][lagCounter])
 				}
@@ -409,14 +406,14 @@ func silkPitchAnalysisCore(frame []float32, pitchOut []int, lagIndex *int, conto
 			lagCounter++
 		}
 
-		for k := 0; k < nbSubfr; k++ {
+		for k := range nbSubfr {
 			pitchOut[k] = lagNew + int(lagCB3[k][CBimax])
 			pitchOut[k] = int(silkLIMIT(int32(pitchOut[k]), int32(minLag), int32(peMaxLagMS*fsKHz)))
 		}
 		*lagIndex = lagNew - minLag
 		*contourIndex = int8(CBimax)
 	} else {
-		for k := 0; k < nbSubfr; k++ {
+		for k := range nbSubfr {
 			pitchOut[k] = lag + int(lagCB[k][CBimax])
 			pitchOut[k] = int(silkLIMIT(int32(pitchOut[k]), int32(minLag8kHz), int32(peMaxLagMS*8)))
 		}
@@ -461,7 +458,7 @@ func silkPAnaCalcCorrSt3(crossCorrSt3 *[peMaxNBSubfr][peNBCbksStage3Max][peNBSta
 	var scratchMem [pitchScratchSize]float32
 	var xcorr [pitchScratchSize]float32
 	targetOff := silkLSHIFT32(int32(sfLength), 2)
-	for k := 0; k < nbSubfr; k++ {
+	for k := range nbSubfr {
 		lagCounter := 0
 		lagLow := int(lagRange[k][0])
 		lagHigh := int(lagRange[k][1])
@@ -474,7 +471,7 @@ func silkPAnaCalcCorrSt3(crossCorrSt3 *[peMaxNBSubfr][peNBCbksStage3Max][peNBSta
 		delta := int(lagRange[k][0])
 		for i := 0; i < nbCbkSearch; i++ {
 			idx := int(lagCB[k][i]) - delta
-			for j := 0; j < peNBStage3Lags; j++ {
+			for j := range peNBStage3Lags {
 				crossCorrSt3[k][i][j] = scratchMem[idx+j]
 			}
 		}
@@ -502,7 +499,7 @@ func silkPAnaCalcEnergySt3(energiesSt3 *[peMaxNBSubfr][peNBCbksStage3Max][peNBSt
 
 	var scratchMem [pitchScratchSize]float32
 	targetOff := silkLSHIFT32(int32(sfLength), 2)
-	for k := 0; k < nbSubfr; k++ {
+	for k := range nbSubfr {
 		lagCounter := 0
 		basisOff := int(targetOff) - (startLag + int(lagRange[k][0]))
 		energy := silkEnergyFLP(frame[basisOff:], sfLength) + 1e-3
@@ -519,7 +516,7 @@ func silkPAnaCalcEnergySt3(energiesSt3 *[peMaxNBSubfr][peNBCbksStage3Max][peNBSt
 		delta := int(lagRange[k][0])
 		for i := 0; i < nbCbkSearch; i++ {
 			idx := int(lagCB[k][i]) - delta
-			for j := 0; j < peNBStage3Lags; j++ {
+			for j := range peNBStage3Lags {
 				energiesSt3[k][i][j] = scratchMem[idx+j]
 			}
 		}

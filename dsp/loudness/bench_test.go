@@ -25,8 +25,7 @@ func BenchmarkMeterProcess(b *testing.B) {
 		b.Fatal(err)
 	}
 	b.SetBytes(int64(rate * channels * 4))
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		if err := m.Process(chans); err != nil {
 			b.Fatal(err)
 		}
@@ -51,8 +50,7 @@ func BenchmarkPeakMeterProcess(b *testing.B) {
 		b.Fatal(err)
 	}
 	b.SetBytes(int64(rate * channels * 4))
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		m.Process(chans)
 	}
 }
@@ -73,8 +71,7 @@ func BenchmarkPeakMeterProcessInt(b *testing.B) {
 		b.Fatal(err)
 	}
 	b.SetBytes(int64(rate * channels * 4))
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		m.ProcessInt(chans, 16)
 	}
 }

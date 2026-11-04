@@ -48,10 +48,7 @@ func (d *rangeDecoder) laplaceDecode(fs uint32, decay int) int {
 			fl += fs
 		}
 	}
-	hi := fl + fs
-	if hi > 32768 {
-		hi = 32768
-	}
+	hi := min(fl+fs, 32768)
 	d.update(fl, hi, 32768)
 	return val
 }

@@ -236,10 +236,7 @@ func (d *Demuxer) parse() error {
 				if err := d.warn(off, "SSND data of %d bytes exceeds file, clamped", dataBytes); err != nil {
 					return err
 				}
-				dataBytes = size - dataOff
-				if dataBytes < 0 {
-					dataBytes = 0
-				}
+				dataBytes = max(size-dataOff, 0)
 			}
 		}
 

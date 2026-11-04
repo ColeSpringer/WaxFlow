@@ -66,7 +66,7 @@ func TestBlockSwitchTDAC(t *testing.T) {
 			}
 			return x[idx]
 		}
-		for i := 0; i < leftBegin; i++ {
+		for i := range leftBegin {
 			dst[i] = 0
 		}
 		for i := leftBegin; i < leftEnd; i++ {
@@ -111,7 +111,7 @@ func TestBlockSwitchTDAC(t *testing.T) {
 		}
 		l := (prevN + n) / 4
 		shift := (prevN - n) / 4
-		for j := 0; j < l; j++ {
+		for j := range l {
 			var v float64
 			if pi := j + prevN/2; pi < prevN {
 				v += prev[pi]
@@ -158,7 +158,7 @@ func TestBlockSwitchRoundTrip(t *testing.T) {
 	f := audio.Format{Rate: rate, Channels: 1, Layout: audio.DefaultLayout(1), Type: audio.Float, BitDepth: 32}
 	src := make([]float32, n)
 	period := rate / 8
-	for i := 0; i < n; i++ {
+	for i := range n {
 		phase := i % period
 		env := math.Exp(-float64(phase) / float64(rate) * 60)
 		src[i] = float32(env * math.Sin(2*math.Pi*2000*float64(phase)/float64(rate)) * 0.6)

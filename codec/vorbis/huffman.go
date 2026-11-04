@@ -37,7 +37,7 @@ func huffmanLengths(freq []float64) []uint8 {
 		active      bool
 	}
 	nodes := make([]node, 0, 2*n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		w := freq[i]
 		if w <= 0 {
 			w = 1e-12 // floor so every symbol is codeable
@@ -71,13 +71,7 @@ func huffmanLengths(freq []float64) []uint8 {
 	walk = func(idx, depth int) {
 		if nodes[idx].left < 0 {
 			if idx < n {
-				d := depth
-				if d < 1 {
-					d = 1
-				}
-				if d > maxCodewordLen {
-					d = maxCodewordLen
-				}
+				d := min(max(depth, 1), maxCodewordLen)
 				lengths[idx] = uint8(d)
 			}
 			return

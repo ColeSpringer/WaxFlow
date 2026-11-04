@@ -93,7 +93,7 @@ func (p *imdctPlan) imdct(spec []float32, out, cr, ci []float64) {
 
 	// Pre-rotation: fold the coefficients from both ends into n/4 complex
 	// samples, X[2j] against X[n2-1-2j], and rotate.
-	for j := 0; j < m; j++ {
+	for j := range m {
 		x1, x2 := float64(spec[2*j]), float64(spec[n2-1-2*j])
 		c, s := p.rotRe[j], p.rotIm[j]
 		cr[j] = x1*c - x2*s
@@ -106,7 +106,7 @@ func (p *imdctPlan) imdct(spec []float32, out, cr, ci []float64) {
 	// C[2k] in its real part and C[n2-1-2k] in its imaginary part; reversed
 	// and negated, they are y[n/4 + h].
 	mid := out[half : half+n2]
-	for k := 0; k < m; k++ {
+	for k := range m {
 		re, im := cr[k], ci[k]
 		c, s := p.rotRe[k], p.rotIm[k]
 		mid[n2-1-2*k] = -vorbisScale * (re*c - im*s)
@@ -115,10 +115,10 @@ func (p *imdctPlan) imdct(spec []float32, out, cr, ci []float64) {
 
 	// The outer quarters, by the transform's own symmetries. Both read only
 	// from the middle half, which is now complete.
-	for q := 0; q < half; q++ {
+	for q := range half {
 		out[half-1-q] = -out[half+q]
 	}
-	for r := 0; r < half; r++ {
+	for r := range half {
 		out[3*half+r] = out[3*half-1-r]
 	}
 }
@@ -143,7 +143,7 @@ func (p *imdctPlan) fft(re, im []float64) {
 		half := length / 2
 		base := tw
 		for i := 0; i < n; i += length {
-			for k := 0; k < half; k++ {
+			for k := range half {
 				wr, wi := p.twRe[base+k], p.twIm[base+k]
 				a, b := i+k, i+k+half
 				vr := re[b]*wr - im[b]*wi
@@ -165,7 +165,7 @@ func applyWindow(buf []float64, n, ln, rn int, leftWin, rightWin []float32) {
 	leftEnd := leftBegin + ln/2
 	rightBegin := 3*n/4 - rn/4
 	rightEnd := rightBegin + rn/2
-	for i := 0; i < leftBegin; i++ {
+	for i := range leftBegin {
 		buf[i] = 0
 	}
 	for i := leftBegin; i < leftEnd; i++ {

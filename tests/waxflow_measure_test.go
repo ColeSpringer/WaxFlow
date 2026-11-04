@@ -17,9 +17,6 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-// pastAnyEnd is a seek target past the end of any stream.
-const pastAnyEnd = int64(1) << 61
-
 // measureRoutes is one fixture per route MeasureLength takes.
 var measureRoutes = []struct {
 	route, path, hint string

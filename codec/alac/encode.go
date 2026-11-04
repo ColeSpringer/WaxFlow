@@ -309,7 +309,7 @@ func (e *Encoder) writeMonoCompressed(n int) {
 	in := e.chL
 	if e.bytesShifted > 0 {
 		sh := uint(e.bytesShifted * 8)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			e.hiL[i] = e.chL[i] >> sh
 		}
 		in = e.hiL
@@ -331,7 +331,7 @@ func (e *Encoder) writeStereoCompressed(n int) {
 	l, r := e.chL, e.chR
 	if e.bytesShifted > 0 {
 		sh := uint(e.bytesShifted * 8)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			e.hiL[i] = e.chL[i] >> sh
 			e.hiR[i] = e.chR[i] >> sh
 		}
@@ -378,13 +378,13 @@ func (e *Encoder) writeShift(n int) {
 	}
 	sh := uint(e.bytesShifted * 8)
 	if e.fmt.Channels == 2 {
-		for i := 0; i < n; i++ {
+		for i := range n {
 			e.w.writeBits(sh, uint64(uint32(e.chL[i])))
 			e.w.writeBits(sh, uint64(uint32(e.chR[i])))
 		}
 		return
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		e.w.writeBits(sh, uint64(uint32(e.chL[i])))
 	}
 }
@@ -416,7 +416,7 @@ func (e *Encoder) predict(in, res []int32, n int) {
 func (e *Encoder) writeMonoVerbatim(n int) {
 	e.writeElementHeader(n, true)
 	cb := uint(e.fmt.BitDepth)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		e.w.writeBits(cb, uint64(uint32(e.chL[i])))
 	}
 }
@@ -426,7 +426,7 @@ func (e *Encoder) writeMonoVerbatim(n int) {
 func (e *Encoder) writeStereoVerbatim(n int) {
 	e.writeElementHeader(n, true)
 	cb := uint(e.fmt.BitDepth)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		e.w.writeBits(cb, uint64(uint32(e.chL[i])))
 		e.w.writeBits(cb, uint64(uint32(e.chR[i])))
 	}
@@ -443,7 +443,7 @@ func mix(l, r, u, v []int32, n, mixBits, mixRes int) {
 	}
 	mod := int32(1) << uint(mixBits)
 	m2 := mod - int32(mixRes)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		u[i] = (int32(mixRes)*l[i] + m2*r[i]) >> uint(mixBits)
 		v[i] = l[i] - r[i]
 	}
@@ -475,10 +475,7 @@ func pcBlock(in, pc1 []int32, num int, coefs []int16, numactive int, chanBits, d
 	}
 	// warm-up: the first numactive residuals are exact differences. A short
 	// final frame may hold fewer samples than the order, so clamp the run.
-	warm := numactive
-	if warm > num-1 {
-		warm = num - 1
-	}
+	warm := min(numactive, num-1)
 	for j := 1; j <= warm; j++ {
 		pc1[j] = (in[j] - in[j-1]) << chanShift >> chanShift
 	}
@@ -486,7 +483,7 @@ func pcBlock(in, pc1 []int32, num int, coefs []int16, numactive int, chanBits, d
 	for j := lim; j < num; j++ {
 		top := in[j-lim]
 		var sum1 int32
-		for k := 0; k < numactive; k++ {
+		for k := range numactive {
 			sum1 += int32(coefs[k]) * (in[j-1-k] - top)
 		}
 		del := (in[j] - top - ((sum1 + denHalf) >> denShift)) << chanShift >> chanShift
@@ -547,10 +544,7 @@ func (e *Encoder) dynComp(pc []int32, chanBits uint, pb uint32) {
 	c := 0
 	for c < numSamples {
 		m := mb >> qbShift
-		k := lg3a(m)
-		if k > kb {
-			k = kb
-		}
+		k := min(lg3a(m), kb)
 		m = 1<<k - 1
 
 		nfull := zigzag(pc[c])

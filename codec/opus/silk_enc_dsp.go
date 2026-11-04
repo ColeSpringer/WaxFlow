@@ -27,9 +27,8 @@ const (
 	speechActivityDTXThres  = 0.05
 	lbrrSpeechActivityThres = 0.3
 
-	bgSNRDecrDB     = 2.0
-	harmSNRIncrDB   = 2.0
-	sparseSNRIncrDB = 2.0
+	bgSNRDecrDB   = 2.0
+	harmSNRIncrDB = 2.0
 
 	energyVariationThresholdQntOffset = 0.6
 
@@ -40,8 +39,6 @@ const (
 	highRateOrLowQualityHarmonicShaping = 0.2
 	hpNoiseCoef                         = 0.25
 	harmHPNoiseCoef                     = 0.35
-	inputTilt                           = 0.05
-	highRateInputTilt                   = 0.1
 	lowFreqShaping                      = 4.0
 	lowQualityLowFreqShapingDecr        = 0.5
 	subfrSmthCoef                       = 0.4
@@ -53,7 +50,6 @@ const (
 	lambdaCodingQuality    = -0.2
 	lambdaQuantOffset      = 0.8
 
-	reduceBitrate10MSBPS      = 2200
 	maxBandwidthSwitchDelayMS = 5000
 )
 
@@ -112,7 +108,7 @@ const (
 // allpass sections (silk_ana_filt_bank_1). State and internals are Q10.
 func silkAnaFiltBank1(in []int16, S []int32, outL, outH []int16, N int) {
 	N2 := N >> 1
-	for k := 0; k < N2; k++ {
+	for k := range N2 {
 		in32 := silkLSHIFT(int32(in[2*k]), 10)
 		Y := in32 - S[0]
 		X := silkSMLAWB(Y, Y, aFB121)
@@ -147,11 +143,8 @@ type silkVADState struct {
 // init resets the VAD state (silk_VAD_Init).
 func (v *silkVADState) init() {
 	*v = silkVADState{}
-	for b := 0; b < vadNBands; b++ {
-		bias := silkDIV32_16(vadNoiseLevelsBias, int32(b+1))
-		if bias < 1 {
-			bias = 1
-		}
+	for b := range vadNBands {
+		bias := max(silkDIV32_16(vadNoiseLevelsBias, int32(b+1)), 1)
 		v.NoiseLevelBias[b] = bias
 		v.NL[b] = 100 * v.NoiseLevelBias[b]
 		v.invNL[b] = silkDIV32(silkInt32Max, v.NL[b])
@@ -202,19 +195,16 @@ func (v *silkVADState) getSAQ8(pIn []int16, frameLength, fsKHz int) vadResult {
 
 	// Energy in each band.
 	var Xnrg [vadNBands]int32
-	for b := 0; b < vadNBands; b++ {
-		m := vadNBands - b
-		if m > vadNBands-1 {
-			m = vadNBands - 1
-		}
+	for b := range vadNBands {
+		m := min(vadNBands-b, vadNBands-1)
 		decLen := frameLength >> uint(m)
 		decSubframeLength := decLen >> vadInternalSubfrsLog2
 		decSubframeOffset := 0
 		Xnrg[b] = v.XnrgSubfr[b]
 		var sumSquared int32
-		for s := 0; s < vadInternalSubfrs; s++ {
+		for s := range vadInternalSubfrs {
 			sumSquared = 0
-			for i := 0; i < decSubframeLength; i++ {
+			for i := range decSubframeLength {
 				xTmp := int32(X[xOffset[b]+i+decSubframeOffset]) >> 3
 				sumSquared = silkSMLABB(sumSquared, xTmp, xTmp)
 			}
@@ -234,7 +224,7 @@ func (v *silkVADState) getSAQ8(pIn []int16, frameLength, fsKHz int) vadResult {
 	// Signal-plus-noise to noise ratio estimation.
 	var sumSquared, inputTilt int32
 	var nrgToNoiseRatioQ8 [vadNBands]int32
-	for b := 0; b < vadNBands; b++ {
+	for b := range vadNBands {
 		speechNrg := Xnrg[b] - v.NL[b]
 		if speechNrg > 0 {
 			if Xnrg[b]&int32(-8388608) == 0 { // 0xFF800000
@@ -261,7 +251,7 @@ func (v *silkVADState) getSAQ8(pIn []int16, frameLength, fsKHz int) vadResult {
 
 	// Scale the sigmoid output based on power levels.
 	var speechNrg int32
-	for b := 0; b < vadNBands; b++ {
+	for b := range vadNBands {
 		speechNrg += int32(b+1) * ((Xnrg[b] - v.NL[b]) >> 4)
 	}
 	if frameLength == 20*fsKHz {
@@ -282,7 +272,7 @@ func (v *silkVADState) getSAQ8(pIn []int16, frameLength, fsKHz int) vadResult {
 	if frameLength == 10*fsKHz {
 		smoothCoefQ16 >>= 1
 	}
-	for b := 0; b < vadNBands; b++ {
+	for b := range vadNBands {
 		v.NrgRatioSmthQ8[b] = silkSMLAWB(v.NrgRatioSmthQ8[b],
 			nrgToNoiseRatioQ8[b]-v.NrgRatioSmthQ8[b], smoothCoefQ16)
 		SNRQ7 := 3 * (silkLin2Log(v.NrgRatioSmthQ8[b]) - 8*128)
@@ -299,7 +289,7 @@ func (v *silkVADState) getNoiseLevels(pX []int32) {
 		minCoef = silkDIV32_16(silkInt16Max, (v.counter>>4)+1)
 		v.counter++
 	}
-	for k := 0; k < vadNBands; k++ {
+	for k := range vadNBands {
 		nl := v.NL[k]
 		nrg := silkADDPOSSAT32(pX[k], v.NoiseLevelBias[k])
 		invNrg := silkDIV32(silkInt32Max, nrg)
@@ -326,7 +316,7 @@ func silkBiquadAltStride1(in []int16, bQ28 []int32, aQ28 []int32, S []int32, out
 	a0UQ28 := silkRSHIFT(-aQ28[0], 14)
 	a1LQ28 := (-aQ28[1]) & 0x00003FFF
 	a1UQ28 := silkRSHIFT(-aQ28[1], 14)
-	for k := 0; k < length; k++ {
+	for k := range length {
 		inval := int32(in[k])
 		out32Q14 := silkLSHIFT(silkSMLAWB(S[0], bQ28[0], inval), 2)
 
@@ -365,20 +355,20 @@ func silkLPInterpolateFilterTaps(bQ28 []int32, aQ28 []int32, ind int, facQ16 int
 	if ind < transitionIntNum-1 {
 		if facQ16 > 0 {
 			if facQ16 < 32768 {
-				for nb := 0; nb < transitionNB; nb++ {
+				for nb := range transitionNB {
 					bQ28[nb] = silkSMLAWB(silk_Transition_LP_B_Q28[ind][nb],
 						silk_Transition_LP_B_Q28[ind+1][nb]-silk_Transition_LP_B_Q28[ind][nb], facQ16)
 				}
-				for na := 0; na < transitionNA; na++ {
+				for na := range transitionNA {
 					aQ28[na] = silkSMLAWB(silk_Transition_LP_A_Q28[ind][na],
 						silk_Transition_LP_A_Q28[ind+1][na]-silk_Transition_LP_A_Q28[ind][na], facQ16)
 				}
 			} else {
-				for nb := 0; nb < transitionNB; nb++ {
+				for nb := range transitionNB {
 					bQ28[nb] = silkSMLAWB(silk_Transition_LP_B_Q28[ind+1][nb],
 						silk_Transition_LP_B_Q28[ind+1][nb]-silk_Transition_LP_B_Q28[ind][nb], facQ16-(1<<16))
 				}
-				for na := 0; na < transitionNA; na++ {
+				for na := range transitionNA {
 					aQ28[na] = silkSMLAWB(silk_Transition_LP_A_Q28[ind+1][na],
 						silk_Transition_LP_A_Q28[ind+1][na]-silk_Transition_LP_A_Q28[ind][na], facQ16-(1<<16))
 				}

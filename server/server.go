@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -543,9 +544,7 @@ func (s *Server) serveNoRoute(w http.ResponseWriter, r *http.Request, h http.Han
 	default:
 		// A cleaned-path redirect lands here; replayed so a 307 does not
 		// become a 404.
-		for k, v := range rec.header {
-			w.Header()[k] = v
-		}
+		maps.Copy(w.Header(), rec.header)
 		w.WriteHeader(rec.status)
 		_, _ = w.Write(rec.body.Bytes())
 	}

@@ -19,14 +19,14 @@ func silkFloat2Int(x float32) int32 {
 
 // silkFloat2ShortArray converts and saturates to int16 (silk_float2short_array).
 func silkFloat2ShortArray(out []int16, in []float32, length int) {
-	for k := 0; k < length; k++ {
+	for k := range length {
 		out[k] = int16(silkSAT16(silkFloat2Int(in[k])))
 	}
 }
 
 // silkShort2FloatArray widens int16 samples to float32 (silk_short2float_array).
 func silkShort2FloatArray(out []float32, in []int16, length int) {
-	for k := 0; k < length; k++ {
+	for k := range length {
 		out[k] = float32(in[k])
 	}
 }
@@ -46,7 +46,7 @@ func silkLog2F(x float64) float32 {
 // (silk_energy_FLP).
 func silkEnergyFLP(data []float32, dataSize int) float64 {
 	var result float64
-	for i := 0; i < dataSize; i++ {
+	for i := range dataSize {
 		result += float64(data[i]) * float64(data[i])
 	}
 	return result
@@ -56,7 +56,7 @@ func silkEnergyFLP(data []float32, dataSize int) float64 {
 // (silk_inner_product_FLP_c).
 func silkInnerProductFLP(data1, data2 []float32, dataSize int) float64 {
 	var result float64
-	for i := 0; i < dataSize; i++ {
+	for i := range dataSize {
 		result += float64(data1[i]) * float64(data2[i])
 	}
 	return result
@@ -64,14 +64,14 @@ func silkInnerProductFLP(data1, data2 []float32, dataSize int) float64 {
 
 // silkScaleVectorFLP multiplies a vector by a constant (silk_scale_vector_FLP).
 func silkScaleVectorFLP(data []float32, gain float32, dataSize int) {
-	for i := 0; i < dataSize; i++ {
+	for i := range dataSize {
 		data[i] *= gain
 	}
 }
 
 // silkScaleCopyVectorFLP copies with a gain (silk_scale_copy_vector_FLP).
 func silkScaleCopyVectorFLP(dataOut, dataIn []float32, gain float32, dataSize int) {
-	for i := 0; i < dataSize; i++ {
+	for i := range dataSize {
 		dataOut[i] = gain * dataIn[i]
 	}
 }
@@ -79,7 +79,7 @@ func silkScaleCopyVectorFLP(dataOut, dataIn []float32, gain float32, dataSize in
 // silkInsertionSortDecreasingFLP sorts a decreasing, tracking indices, with
 // only the first K positions guaranteed (silk_insertion_sort_decreasing_FLP).
 func silkInsertionSortDecreasingFLP(a []float32, idx []int, L, K int) {
-	for i := 0; i < K; i++ {
+	for i := range K {
 		idx[i] = i
 	}
 	for i := 1; i < K; i++ {
@@ -157,7 +157,7 @@ func silkSchurFLP(reflCoef []float32, autoCorr []float32, order int) float32 {
 		C[k][0] = float64(autoCorr[k])
 		C[k][1] = float64(autoCorr[k])
 	}
-	for k := 0; k < order; k++ {
+	for k := range order {
 		den := C[0][1]
 		if den < 1e-9 {
 			den = 1e-9
@@ -177,7 +177,7 @@ func silkSchurFLP(reflCoef []float32, autoCorr []float32, order int) float32 {
 // silkK2AFLP converts reflection coefficients to prediction coefficients
 // (silk_k2a_FLP).
 func silkK2AFLP(A []float32, rc []float32, order int) {
-	for k := 0; k < order; k++ {
+	for k := range order {
 		rck := rc[k]
 		for n := 0; n < (k+1)>>1; n++ {
 			tmp1 := A[n]
@@ -189,47 +189,17 @@ func silkK2AFLP(A []float32, rc []float32, order int) {
 	}
 }
 
-// silkLPCInversePredGainFLP computes the inverse prediction gain and returns
-// 0 for unstable filters (silk_LPC_inverse_pred_gain_FLP).
-func silkLPCInversePredGainFLP(A []float32, order int) float32 {
-	var atmp [silkMaxOrderLPC]float32
-	copy(atmp[:order], A[:order])
-	invGain := 1.0
-	for k := order - 1; k > 0; k-- {
-		rc := -float64(atmp[k])
-		rcMult1 := 1.0 - rc*rc
-		invGain *= rcMult1
-		if invGain*maxPredictionPowerGain < 1.0 {
-			return 0.0
-		}
-		rcMult2 := 1.0 / rcMult1
-		for n := 0; n < (k+1)>>1; n++ {
-			tmp1 := float64(atmp[n])
-			tmp2 := float64(atmp[k-n-1])
-			atmp[n] = float32((tmp1 - tmp2*rc) * rcMult2)
-			atmp[k-n-1] = float32((tmp2 - tmp1*rc) * rcMult2)
-		}
-	}
-	rc := -float64(atmp[0])
-	rcMult1 := 1.0 - rc*rc
-	invGain *= rcMult1
-	if invGain*maxPredictionPowerGain < 1.0 {
-		return 0.0
-	}
-	return float32(invGain)
-}
-
 // silkLPCAnalysisFilterFLP runs the zero-state whitening filter; the first
 // order output samples are zeroed (silk_LPC_analysis_filter_FLP).
 func silkLPCAnalysisFilterFLP(rLPC []float32, predCoef []float32, s []float32, length, order int) {
 	for ix := order; ix < length; ix++ {
 		var lpcPred float32
-		for j := 0; j < order; j++ {
+		for j := range order {
 			lpcPred += s[ix-1-j] * predCoef[j]
 		}
 		rLPC[ix] = s[ix] - lpcPred
 	}
-	for i := 0; i < order; i++ {
+	for i := range order {
 		rLPC[i] = 0
 	}
 }
@@ -240,7 +210,7 @@ func silkWarpedAutocorrelationFLP(corr []float32, input []float32, warping float
 	var state [maxShapeLPCOrder + 1]float64
 	var C [maxShapeLPCOrder + 1]float64
 	w := float64(warping)
-	for n := 0; n < length; n++ {
+	for n := range length {
 		tmp1 := float64(input[n])
 		for i := 0; i < order; i += 2 {
 			tmp2 := state[i] + w*state[i+1] - w*tmp1
@@ -267,7 +237,7 @@ func silkBurgModifiedFLP(A []float32, x []float32, minInvGain float32, subfrLeng
 	var af [silkMaxOrderLPC]float64
 
 	c0 := silkEnergyFLP(x, nbSubfr*subfrLength)
-	for s := 0; s < nbSubfr; s++ {
+	for s := range nbSubfr {
 		xPtr := x[s*subfrLength:]
 		for n := 1; n < D+1; n++ {
 			cFirstRow[n-1] += silkInnerProductFLP(xPtr, xPtr[n:], subfrLength-n)
@@ -279,12 +249,12 @@ func silkBurgModifiedFLP(A []float32, x []float32, minInvGain float32, subfrLeng
 	cAf[0] = cAb[0]
 	invGain := 1.0
 	reachedMaxGain := false
-	for n := 0; n < D; n++ {
-		for s := 0; s < nbSubfr; s++ {
+	for n := range D {
+		for s := range nbSubfr {
 			xPtr := x[s*subfrLength:]
 			tmp1 := float64(xPtr[n])
 			tmp2 := float64(xPtr[subfrLength-n-1])
-			for k := 0; k < n; k++ {
+			for k := range n {
 				cFirstRow[k] -= float64(xPtr[n]) * float64(xPtr[n-k-1])
 				cLastRow[k] -= float64(xPtr[subfrLength-n-1]) * float64(xPtr[subfrLength-n+k])
 				atmp := af[k]
@@ -298,7 +268,7 @@ func silkBurgModifiedFLP(A []float32, x []float32, minInvGain float32, subfrLeng
 		}
 		tmp1 := cFirstRow[n]
 		tmp2 := cLastRow[n]
-		for k := 0; k < n; k++ {
+		for k := range n {
 			atmp := af[k]
 			tmp1 += cLastRow[n-k-1] * atmp
 			tmp2 += cFirstRow[n-k-1] * atmp
@@ -309,7 +279,7 @@ func silkBurgModifiedFLP(A []float32, x []float32, minInvGain float32, subfrLeng
 		num := cAb[n+1]
 		nrgB := cAb[0]
 		nrgF := cAf[0]
-		for k := 0; k < n; k++ {
+		for k := range n {
 			atmp := af[k]
 			num += cAb[n-k] * atmp
 			nrgB += cAb[k+1] * atmp
@@ -356,17 +326,17 @@ func silkBurgModifiedFLP(A []float32, x []float32, minInvGain float32, subfrLeng
 
 	var nrgF float64
 	if reachedMaxGain {
-		for k := 0; k < D; k++ {
+		for k := range D {
 			A[k] = float32(-af[k])
 		}
-		for s := 0; s < nbSubfr; s++ {
+		for s := range nbSubfr {
 			c0 -= silkEnergyFLP(x[s*subfrLength:], D)
 		}
 		nrgF = c0 * invGain
 	} else {
 		nrgF = cAf[0]
 		tmp1 := 1.0
-		for k := 0; k < D; k++ {
+		for k := range D {
 			atmp := af[k]
 			nrgF += cAf[k+1] * atmp
 			tmp1 += atmp * atmp

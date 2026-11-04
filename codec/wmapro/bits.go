@@ -63,7 +63,7 @@ func (r *bitReader) window() uint64 {
 			uint64(b[4])<<24 | uint64(b[5])<<16 | uint64(b[6])<<8 | uint64(b[7])
 	}
 	var acc uint64
-	for j := 0; j < 8; j++ {
+	for j := range 8 {
 		acc <<= 8
 		if i+j < len(r.buf) {
 			acc |= uint64(r.buf[i+j])
@@ -90,11 +90,6 @@ func (r *bitReader) bits(n int) uint64 {
 	r.pos += n
 	return v
 }
-
-// u32 is bits for a field a caller wants as a 32-bit value. It exists so the
-// conversion is written once rather than at every call site, where a narrowing
-// of the wrong field would be invisible.
-func (r *bitReader) u32(n int) uint32 { return uint32(r.bits(n)) }
 
 // bit reads one bit.
 func (r *bitReader) bit() uint32 {

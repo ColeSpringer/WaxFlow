@@ -25,7 +25,7 @@ func (t *sbrHuffEncTable) write(w *bitWriter, d int32) {
 func buildHuffEnc(tab [][2]int8) (enc sbrHuffEncTable) {
 	var walk func(row int, code uint32, bits uint8)
 	walk = func(row int, code uint32, bits uint8) {
-		for b := 0; b < 2; b++ {
+		for b := range 2 {
 			v := tab[row][b]
 			c, n := code<<1|uint32(b), bits+1
 			if v < 0 {
@@ -172,7 +172,7 @@ func writeSBREnvelope(w *bitWriter, t *sbrFreqTables, fd *sbrFrameData,
 				ref = &fd.env[l-1]
 				refRes = fd.grid.freqRes[l-1]
 			}
-			for b := 0; b < n; b++ {
+			for b := range n {
 				pb := mapPrevBand(t, fd.grid.freqRes[l], refRes, b)
 				tTab.write(w, fd.env[l][b]-ref[pb])
 			}

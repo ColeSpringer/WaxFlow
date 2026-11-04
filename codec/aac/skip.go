@@ -58,7 +58,7 @@ func skipPCE(r *bitReader) {
 	for i := 0; i < numLFE+numAssoc; i++ {
 		r.read(4) // element_tag_select
 	}
-	for i := 0; i < numCC; i++ {
+	for range numCC {
 		r.read(5) // cc_element_is_ind_sw(1) + element_tag_select(4)
 	}
 	r.byteAlign()

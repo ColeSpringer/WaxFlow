@@ -27,8 +27,8 @@ func TestOpusVBREncode(t *testing.T) {
 
 	// 0.2 s loud harmonic stacks alternating with 0.2 s near-silence.
 	src := make([]float32, C*n)
-	for c := 0; c < C; c++ {
-		for i := 0; i < n; i++ {
+	for c := range C {
+		for i := range n {
 			ts := float64(i) / sr
 			loud := (i/(sr/5))%2 == 0
 			var v float64
@@ -137,8 +137,8 @@ func TestOpusConstrainedVBREncode(t *testing.T) {
 	// A dense harmonic stack with slow vibrato: hard enough that VBR wants to
 	// exceed the target continuously.
 	src := make([]float32, C*n)
-	for c := 0; c < C; c++ {
-		for i := 0; i < n; i++ {
+	for c := range C {
+		for i := range n {
 			ts := float64(i) / sr
 			var v float64
 			for k := 1; k <= 12; k++ {

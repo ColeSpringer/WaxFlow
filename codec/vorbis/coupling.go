@@ -57,7 +57,7 @@ func abs32(x float32) float32 {
 // channels) produces an exactly-zero angle residue.
 func coupleResidues(resid [][]float32, n2 int) {
 	m, a := resid[0], resid[1]
-	for i := 0; i < n2; i++ {
+	for i := range n2 {
 		m[i], a[i] = coupleForward(m[i], a[i])
 	}
 }
@@ -75,10 +75,7 @@ func coupleResidues(resid [][]float32, n2 int) {
 // the coupled-stereo size win a shared (type-2) class stream could not express.
 func deriveCoupledClasses(magCls, angCls []int, ang []float32, n2 int) {
 	for p := range magCls {
-		band := magCls[p]
-		if angCls[p] > band {
-			band = angCls[p]
-		}
+		band := max(angCls[p], magCls[p])
 		magCls[p] = band
 		angCls[p] = classSkip
 		if band == classSkip {

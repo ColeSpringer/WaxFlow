@@ -29,6 +29,7 @@ package mp3
 import (
 	"fmt"
 	"math"
+	"slices"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
@@ -252,10 +253,7 @@ func NewEncoder(f audio.Format, opts *EncoderOptions) (*Encoder, error) {
 	if vbr {
 		offsetDB = math.Min(math.Max(10*math.Log2(float64(bitrate)/128000), -18), 12)
 	}
-	offs := make([]int, len(sfbEdgesLong[e.row]))
-	for i, v := range sfbEdgesLong[e.row] {
-		offs[i] = v
-	}
+	offs := slices.Clone(sfbEdgesLong[e.row][:])
 	for c := 0; c < f.Channels; c++ {
 		m, err := psy.New(psy.Config{
 			Rate: h.Rate, Lines: 576, FFTSize: 1024,
@@ -398,7 +396,7 @@ func (e *Encoder) Finish(emit func(codec.Packet) error) (codec.Trailer, error) {
 	// Flush the encoder's own latency: silent frames push the last real
 	// samples out of the MDCT overlap and polyphase history. The count is
 	// flushFrames, the same constant FramesFor projects against.
-	for i := 0; i < flushFrames; i++ {
+	for range flushFrames {
 		for ch := 0; ch < e.channels; ch++ {
 			e.buf[ch] = append(e.buf[ch][:0], make([]float32, fs)...)
 		}
@@ -419,10 +417,7 @@ func (e *Encoder) Finish(emit func(codec.Packet) error) (codec.Trailer, error) {
 	// trailing samples. encDelay is the fixed encoder priming; padding makes
 	// the kept length equal the real input length.
 	delay := int64(EncoderDelay)
-	padding := e.outSamples - e.inSamples - delay
-	if padding < 0 {
-		padding = 0
-	}
+	padding := max(e.outSamples-e.inSamples-delay, 0)
 	return codec.Trailer{Samples: e.inSamples, Delay: delay, Padding: padding}, nil
 }
 
@@ -483,7 +478,7 @@ func (e *Encoder) encodeFrame(fs int, emit func(codec.Packet) error) error {
 			if err != nil {
 				return err
 			}
-			for b := 0; b < nSfBands; b++ {
+			for b := range nSfBands {
 				e.thr[gr][ch][b] = res.Thr[b] * thrCalib
 			}
 			chPE += res.PE
@@ -496,7 +491,7 @@ func (e *Encoder) encodeFrame(fs int, emit func(codec.Packet) error) error {
 	edges := &sfbEdgesLong[e.row]
 	for gr := 0; gr < e.granules; gr++ {
 		for ch := 0; ch < e.channels; ch++ {
-			for b := 0; b < nSfBands; b++ {
+			for b := range nSfBands {
 				s := 0.0
 				for i := edges[b]; i < edges[b+1]; i++ {
 					v := float64(e.xr[gr][ch][i])
@@ -679,7 +674,7 @@ func (e *Encoder) splitAndQuantize(q *[2][2]gcQuant, target int) {
 func (e *Encoder) gcDemand(gr, ch int) float64 {
 	edges := &sfbEdgesLong[e.row]
 	d := 0.0
-	for b := 0; b < nSfBands; b++ {
+	for b := range nSfBands {
 		en, thr := e.bandE[gr][ch][b], e.thr[gr][ch][b]
 		if thr > 0 && en > thr {
 			d += float64(edges[b+1]-edges[b]) * math.Log2(en/thr)
@@ -722,7 +717,7 @@ func (e *Encoder) decideMS() bool {
 	demLR, demMS := 0.0, 0.0
 	for gr := 0; gr < e.granules; gr++ {
 		l, r := &e.xr[gr][0], &e.xr[gr][1]
-		for b := 0; b < nSfBands; b++ {
+		for b := range nSfBands {
 			var em, es float64
 			for i := edges[b]; i < edges[b+1]; i++ {
 				lv, rv := float64(l[i]), float64(r[i])
@@ -746,12 +741,12 @@ func (e *Encoder) decideMS() bool {
 		l, r := &e.xr[gr][0], &e.xr[gr][1]
 		// The whole spectrum transforms: the decoder's mid/side butterfly
 		// covers all 576 lines when intensity stereo is off.
-		for i := 0; i < 576; i++ {
+		for i := range 576 {
 			lv, rv := float64(l[i]), float64(r[i])
 			l[i] = float32((lv + rv) * invSqrt2)
 			r[i] = float32((lv - rv) * invSqrt2)
 		}
-		for b := 0; b < nSfBands; b++ {
+		for b := range nSfBands {
 			thrMS := math.Min(e.thr[gr][0][b], e.thr[gr][1][b])
 			e.thr[gr][0][b] = thrMS
 			e.thr[gr][1][b] = thrMS
@@ -779,7 +774,7 @@ func (e *Encoder) writeGranuleData(q *gcQuant) {
 	band := 0
 	for p, cnt := range sfPartCount {
 		bits := uint(q.slen[p])
-		for i := 0; i < cnt; i++ {
+		for range cnt {
 			if bits > 0 {
 				e.mw.writeBits(bits, uint32(q.sfTx[band]))
 			}

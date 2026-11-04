@@ -699,9 +699,7 @@ func TestResolveSurvivesARetiredHandle(t *testing.T) {
 	done := make(chan struct{})
 	var readers sync.WaitGroup
 	for range 4 {
-		readers.Add(1)
-		go func() {
-			defer readers.Done()
+		readers.Go(func() {
 			for {
 				select {
 				case <-done:
@@ -717,7 +715,7 @@ func TestResolveSurvivesARetiredHandle(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 	for i := range 400 {
 		if _, err := r.Reload(states[i%2], 0); err != nil {
@@ -743,9 +741,7 @@ func TestRemountConcurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	// loop runs body until done closes or body returns false.
 	loop := func(body func() bool) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				select {
 				case <-done:
@@ -756,7 +752,7 @@ func TestRemountConcurrent(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 	for range 4 {
 		loop(func() bool {
@@ -891,9 +887,7 @@ func TestReloadConcurrent(t *testing.T) {
 
 	// Readers on the stable root: it must resolve throughout.
 	for range 6 {
-		readers.Add(1)
-		go func() {
-			defer readers.Done()
+		readers.Go(func() {
 			for {
 				select {
 				case <-done:
@@ -907,14 +901,12 @@ func TestReloadConcurrent(t *testing.T) {
 				}
 				f.Close()
 			}
-		}()
+		})
 	}
 	// Readers on the churning root: open racing the reloader's close of that
 	// same handle. Any error is fine; a race or use-after-close is not.
 	for range 4 {
-		readers.Add(1)
-		go func() {
-			defer readers.Done()
+		readers.Go(func() {
 			for {
 				select {
 				case <-done:
@@ -926,7 +918,7 @@ func TestReloadConcurrent(t *testing.T) {
 					f.Close()
 				}
 			}
-		}()
+		})
 	}
 
 	states := [][]Root{
@@ -981,14 +973,6 @@ func TestResolveDoesNotWaitOnAReload(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Resolve waited on the reload in progress")
 	}
-}
-
-// setAttemptWait shortens the bound callers wait on a root's folder.
-func setAttemptWait(t *testing.T, d time.Duration) {
-	t.Helper()
-	prev := attemptWait
-	attemptWait = d
-	t.Cleanup(func() { attemptWait = prev })
 }
 
 // TestResolveHerdOnAFolderThatAppears pins a burst of requests on a root whose

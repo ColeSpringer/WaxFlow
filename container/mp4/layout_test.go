@@ -308,7 +308,7 @@ func TestLayoutBoxReordersThePayload(t *testing.T) {
 	pkt := readAllPacketData(t, d)
 	frames := 0
 	if err := dec.Decode(pkt, func(b *audio.Buffer) error {
-		for c := 0; c < 6; c++ {
+		for c := range 6 {
 			for i, v := range b.ChanI(c) {
 				if want := int32(int(byte((frames+i)*6+int(order[c]))) - 128); v != want {
 					t.Fatalf("output channel %d frame %d = %d, want wire channel %d's %d", c, frames+i, v, order[c], want)

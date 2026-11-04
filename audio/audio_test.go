@@ -77,7 +77,7 @@ func TestBufferChannelViews(t *testing.T) {
 		t.Fatalf("fresh buffer: cap=%d n=%d pos=%d discont=%v", b.Cap(), b.N, b.Pos, b.Discont)
 	}
 	b.N = 10
-	for c := 0; c < 3; c++ {
+	for c := range 3 {
 		view := b.ChanI(c)
 		if len(view) != 10 || cap(view) != 100 {
 			t.Fatalf("ChanI(%d): len=%d cap=%d, want 10, 100", c, len(view), cap(view))
@@ -87,8 +87,8 @@ func TestBufferChannelViews(t *testing.T) {
 		}
 	}
 	// Views alias the flat backing at c*Stride.
-	for c := 0; c < 3; c++ {
-		for i := 0; i < 10; i++ {
+	for c := range 3 {
+		for i := range 10 {
 			if got := b.I[c*b.Stride+i]; got != int32(c*1000+i) {
 				t.Fatalf("backing[%d*stride+%d] = %d, want %d", c, i, got, c*1000+i)
 			}
@@ -165,15 +165,15 @@ func TestCopyFrames(t *testing.T) {
 	defer Put(dst)
 	src.N = 16
 	dst.N = 16
-	for c := 0; c < 2; c++ {
+	for c := range 2 {
 		s := src.ChanI(c)
 		for i := range s {
 			s[i] = int32(c*100 + i)
 		}
 	}
 	CopyFrames(dst, 4, src, 2, 5)
-	for c := 0; c < 2; c++ {
-		for i := 0; i < 5; i++ {
+	for c := range 2 {
+		for i := range 5 {
 			if got := dst.I[c*dst.Stride+4+i]; got != int32(c*100+2+i) {
 				t.Fatalf("dst ch%d[%d] = %d, want %d", c, 4+i, got, c*100+2+i)
 			}

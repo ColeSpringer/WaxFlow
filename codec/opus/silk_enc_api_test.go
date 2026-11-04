@@ -14,7 +14,7 @@ import (
 func synthSpeech(n int) []int16 {
 	out := make([]int16, n)
 	rng := uint32(12345)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		t := float64(i) / 48000.0
 		f0 := 110.0 + 20.0*math.Sin(2*math.Pi*0.8*t)
 		var v float64
@@ -125,12 +125,9 @@ func decodePackets(t *testing.T, pkts [][]byte) []float32 {
 // SNR of the aligned overlap, both signals normalized to float in [-1,1).
 func alignedSNR(ref []int16, got []float32, maxLag int) (float64, int) {
 	bestLag, bestCorr := 0, math.Inf(-1)
-	n := len(got) - maxLag
-	if n > 48000 {
-		n = 48000
-	}
+	n := min(len(got)-maxLag, 48000)
 	start := 24000 // skip startup transients
-	for lag := 0; lag < maxLag; lag++ {
+	for lag := range maxLag {
 		var corr float64
 		for i := start; i < start+n/2; i += 2 {
 			corr += float64(ref[i]) / 32768.0 * float64(got[i+lag])

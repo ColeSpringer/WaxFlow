@@ -286,7 +286,7 @@ func (e *Encoder) updateMD5(src *audio.Buffer) {
 	}
 	buf := e.md5buf[:need]
 	ch := e.fmt.Channels
-	for c := 0; c < ch; c++ {
+	for c := range ch {
 		s := src.ChanI(c)
 		off := c * bs
 		step := ch * bs
@@ -350,7 +350,7 @@ func (e *Encoder) encodeFrame(src *audio.Buffer) {
 		}
 	}
 
-	for c := 0; c < ch; c++ {
+	for c := range ch {
 		x := e.slots[c].x[:n]
 		for i, v := range src.ChanI(c) {
 			x[i] = int64(v)
@@ -359,7 +359,7 @@ func (e *Encoder) encodeFrame(src *audio.Buffer) {
 	if stereo {
 		l, r := e.slots[sigLeft].x[:n], e.slots[sigRight].x[:n]
 		m, s := e.slots[sigMid].x[:n], e.slots[sigSide].x[:n]
-		for i := 0; i < n; i++ {
+		for i := range n {
 			m[i] = (l[i] + r[i]) >> 1
 			s[i] = l[i] - r[i]
 		}
@@ -391,7 +391,7 @@ func (e *Encoder) encodeFrame(src *audio.Buffer) {
 			assign, order = assignMidSide, append(order, sigMid, sigSide)
 		}
 	} else {
-		for c := 0; c < ch; c++ {
+		for c := range ch {
 			order = append(order, c)
 		}
 	}

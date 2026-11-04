@@ -115,7 +115,7 @@ func init() {
 		csTab[i] = 1 / math.Sqrt(1+c*c)
 		caTab[i] = c / math.Sqrt(1+c*c)
 	}
-	for i := 0; i < 7; i++ {
+	for i := range 7 {
 		if i == 6 {
 			panPos[i] = [2]float32{1, 0} // tan(pi/2): all left
 			continue
@@ -125,10 +125,10 @@ func init() {
 	}
 
 	var imdctWin [4][36]float64
-	for i := 0; i < 36; i++ {
+	for i := range 36 {
 		imdctWin[0][i] = math.Sin(math.Pi / 36 * (float64(i) + 0.5))
 	}
-	for i := 0; i < 18; i++ {
+	for i := range 18 {
 		imdctWin[1][i] = math.Sin(math.Pi / 36 * (float64(i) + 0.5))
 	}
 	for i := 18; i < 24; i++ {
@@ -137,7 +137,7 @@ func init() {
 	for i := 24; i < 30; i++ {
 		imdctWin[1][i] = math.Sin(math.Pi / 12 * (float64(i) + 0.5 - 18))
 	}
-	for i := 0; i < 12; i++ {
+	for i := range 12 {
 		imdctWin[2][i] = math.Sin(math.Pi / 12 * (float64(i) + 0.5))
 	}
 	for i := 6; i < 12; i++ {
@@ -154,18 +154,18 @@ func init() {
 			imdctWinF[w][i] = float32(imdctWin[w][i])
 		}
 	}
-	for i := 0; i < 6; i++ {
-		for j := 0; j < 12; j++ {
+	for i := range 6 {
+		for j := range 12 {
 			cosN12f[i][j] = float32(math.Cos(math.Pi / 24 * (2*float64(j) + 1 + 6) * (2*float64(i) + 1)))
 		}
 	}
-	for i := 0; i < 18; i++ {
-		for j := 0; j < 36; j++ {
+	for i := range 18 {
+		for j := range 36 {
 			cosN36f[i][j] = float32(math.Cos(math.Pi / 72 * (2*float64(j) + 1 + 18) * (2*float64(i) + 1)))
 		}
 	}
-	for i := 0; i < 64; i++ {
-		for j := 0; j < 32; j++ {
+	for i := range 64 {
+		for j := range 32 {
 			synthNWin[i][j] = float32(math.Cos(float64((16+i)*(2*j+1)) * (math.Pi / 64)))
 		}
 	}

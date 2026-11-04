@@ -16,7 +16,7 @@ func TestSilkA2NLSFInversion(t *testing.T) {
 		order := cb.order
 		for v := 0; v < cb.nVectors; v++ {
 			nlsf := make([]int16, order)
-			for i := 0; i < order; i++ {
+			for i := range order {
 				nlsf[i] = int16(silkLSHIFT(int32(cb.cb1NLSFQ8[v*order+i]), 7))
 			}
 
@@ -24,13 +24,13 @@ func TestSilkA2NLSFInversion(t *testing.T) {
 			silkNLSF2A(aQ12[:], nlsf, order)
 
 			aQ16 := make([]int32, order)
-			for i := 0; i < order; i++ {
+			for i := range order {
 				aQ16[i] = silkLSHIFT(int32(aQ12[i]), 4)
 			}
 			got := make([]int16, order)
 			silkA2NLSF(got, aQ16, order)
 
-			for i := 0; i < order; i++ {
+			for i := range order {
 				diff := int32(got[i]) - int32(nlsf[i])
 				if diff < -250 || diff > 250 {
 					t.Fatalf("order %d vector %d: NLSF[%d] = %d, want ~%d (diff %d)",
@@ -48,11 +48,11 @@ func TestSilkA2NLSFInversion(t *testing.T) {
 func TestSilkNLSFEncodeDecodeAgree(t *testing.T) {
 	rng := rand.New(rand.NewSource(4))
 	for _, cb := range []*nlsfCB{silkNLSFCBNBMB, silkNLSFCBWB} {
-		for trial := 0; trial < 200; trial++ {
+		for trial := range 200 {
 			order := cb.order
 			nlsf := make([]int16, order)
 			acc := int32(0)
-			for i := 0; i < order; i++ {
+			for i := range order {
 				acc += int32(500 + rng.Intn(2*32768/(order+1)))
 				if acc > 32000 {
 					acc = 32000
@@ -77,7 +77,7 @@ func TestSilkNLSFEncodeDecodeAgree(t *testing.T) {
 
 			dec := make([]int16, order)
 			silkNLSFDecode(dec, indices, cb)
-			for i := 0; i < order; i++ {
+			for i := range order {
 				if dec[i] != nlsf[i] {
 					t.Fatalf("decode disagrees at %d: %d != %d", i, dec[i], nlsf[i])
 				}

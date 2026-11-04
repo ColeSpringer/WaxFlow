@@ -26,8 +26,7 @@ func TestPlanOptsCoverage(t *testing.T) {
 	opts := reflect.TypeFor[TranscodeOptions]()
 	key := reflect.TypeFor[planOpts]()
 	covered := map[string]bool{}
-	for i := range opts.NumField() {
-		f := opts.Field(i)
+	for f := range opts.Fields() {
 		if nonShaping[f.Name] {
 			continue
 		}
@@ -41,8 +40,8 @@ func TestPlanOptsCoverage(t *testing.T) {
 		}
 		covered[f.Name] = true
 	}
-	for i := range key.NumField() {
-		if name := key.Field(i).Name; !covered[name] {
+	for field := range key.Fields() {
+		if name := field.Name; !covered[name] {
 			t.Errorf("planOpts.%s has no matching TranscodeOptions field", name)
 		}
 	}

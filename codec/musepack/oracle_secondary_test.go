@@ -120,7 +120,7 @@ func assertMatchesFFmpeg(t *testing.T, path string) {
 	// content is what is left, and it must correlate as the noise-free cells
 	// do. In full-scale units per sample.
 	var ea, eb, dot, ed float64
-	for i := 0; i < n; i++ {
+	for i := range n {
 		a, b := float64(ours[i]), float64(ref[i])
 		ea, eb, dot = ea+a*a, eb+b*b, dot+a*b
 		ed += (a - b) * (a - b)

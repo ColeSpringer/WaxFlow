@@ -140,8 +140,8 @@ func TestMuxFFmpegDifferential(t *testing.T) {
 	}
 	var sig, errE float64
 	off := int(tr.Delay)
-	for i := 0; i < n; i++ {
-		for c := 0; c < 2; c++ {
+	for i := range n {
+		for c := range 2 {
 			s := float64(src[c][i])
 			e := s - float64(got[(off+i)*2+c])
 			sig += s * s
@@ -175,7 +175,7 @@ func TestMuxFFmpegTNSDifferential(t *testing.T) {
 	got := testutil.FFmpegDecodeF32(t, path)
 	var sig, errE float64
 	off := int(tr.Delay)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		s := float64(src[0][i])
 		e := s - float64(got[off+i])
 		sig += s * s

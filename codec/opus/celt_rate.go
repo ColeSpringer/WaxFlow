@@ -45,7 +45,7 @@ func bits2pulses(band, LM, bits int) int {
 	lo := 0
 	hi := int(cache[0])
 	bits--
-	for i := 0; i < logMaxPseu; i++ {
+	for range logMaxPseu {
 		mid := (lo + hi + 1) >> 1
 		if int(cache[mid]) >= bits {
 			hi = mid
@@ -76,7 +76,7 @@ func pulses2bits(band, LM, pulses int) int {
 // initCaps fills cap[] with the per-band maximum useful allocation (libopus
 // celt.c init_caps).
 func initCaps(cap []int, LM, C int) {
-	for i := 0; i < celtNBands; i++ {
+	for i := range celtNBands {
 		N := (int(celtEBands[i+1]) - int(celtEBands[i])) << LM
 		cap[i] = (int(celtCacheCaps[celtNBands*(2*LM+C-1)+i]) + 64) * C * N >> 2
 	}
@@ -95,7 +95,7 @@ func interpBits2Pulses(start, end, skipStart int, bits1, bits2, thresh, cap []in
 	logM := LM << bitRes
 
 	lo, hi := 0, 1<<allocSteps
-	for i := 0; i < allocSteps; i++ {
+	for range allocSteps {
 		mid := (lo + hi) >> 1
 		psum := 0
 		done := false

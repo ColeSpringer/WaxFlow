@@ -60,7 +60,7 @@ func FuzzRangeDecoder(f *testing.F) {
 			return
 		}
 		d := newRangeDecoder(data)
-		for i := 0; i < 64; i++ {
+		for i := range 64 {
 			switch i % 5 {
 			case 0:
 				d.decodeICDF(icdf, 8)

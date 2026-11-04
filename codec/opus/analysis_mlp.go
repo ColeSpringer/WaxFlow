@@ -80,8 +80,8 @@ func sigmoidApprox(x float32) float32 {
 // gemmAccum accumulates weights*x into out; weights are column-major with the
 // given stride (mlp.c gemm_accum).
 func gemmAccum(out []float32, weights []int8, rows, cols, colStride int, x []float32) {
-	for i := 0; i < rows; i++ {
-		for j := 0; j < cols; j++ {
+	for i := range rows {
+		for j := range cols {
 			out[i] += float32(weights[j*colStride+i]) * x[j]
 		}
 	}
@@ -90,19 +90,19 @@ func gemmAccum(out []float32, weights []int8, rows, cols, colStride int, x []flo
 // computeDense evaluates a dense layer (analysis_compute_dense).
 func (l *analysisDenseLayer) compute(output, input []float32) {
 	N := l.nbNeurons
-	for i := 0; i < N; i++ {
+	for i := range N {
 		output[i] = float32(l.bias[i])
 	}
 	gemmAccum(output, l.inputWeights, N, l.nbInputs, N, input)
-	for i := 0; i < N; i++ {
+	for i := range N {
 		output[i] *= mlpWeightsScale
 	}
 	if l.sigmoid {
-		for i := 0; i < N; i++ {
+		for i := range N {
 			output[i] = sigmoidApprox(output[i])
 		}
 	} else {
-		for i := 0; i < N; i++ {
+		for i := range N {
 			output[i] = tansigApprox(output[i])
 		}
 	}
@@ -116,35 +116,35 @@ func (g *analysisGRULayer) compute(state, input []float32) {
 	var tmp, z, r, h [mlpMaxNeurons]float32
 
 	// Update gate.
-	for i := 0; i < N; i++ {
+	for i := range N {
 		z[i] = float32(g.bias[i])
 	}
 	gemmAccum(z[:], g.inputWeights, N, M, stride, input)
 	gemmAccum(z[:], g.recurrentWeights, N, N, stride, state)
-	for i := 0; i < N; i++ {
+	for i := range N {
 		z[i] = sigmoidApprox(mlpWeightsScale * z[i])
 	}
 
 	// Reset gate.
-	for i := 0; i < N; i++ {
+	for i := range N {
 		r[i] = float32(g.bias[N+i])
 	}
 	gemmAccum(r[:], g.inputWeights[N:], N, M, stride, input)
 	gemmAccum(r[:], g.recurrentWeights[N:], N, N, stride, state)
-	for i := 0; i < N; i++ {
+	for i := range N {
 		r[i] = sigmoidApprox(mlpWeightsScale * r[i])
 	}
 
 	// Output.
-	for i := 0; i < N; i++ {
+	for i := range N {
 		h[i] = float32(g.bias[2*N+i])
 	}
-	for i := 0; i < N; i++ {
+	for i := range N {
 		tmp[i] = state[i] * r[i]
 	}
 	gemmAccum(h[:], g.inputWeights[2*N:], N, M, stride, input)
 	gemmAccum(h[:], g.recurrentWeights[2*N:], N, N, stride, tmp[:])
-	for i := 0; i < N; i++ {
+	for i := range N {
 		state[i] = z[i]*state[i] + (1-z[i])*tansigApprox(mlpWeightsScale*h[i])
 	}
 }

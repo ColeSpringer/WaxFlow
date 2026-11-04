@@ -232,12 +232,12 @@ var ilstFreeformKeys = map[string]bool{
 // item is skipped, never an error, since none of it gates playback.
 func (d *Demuxer) parseILST(body []byte) {
 	_ = walkBoxes(body, func(typ string, payload []byte) error {
-		switch {
-		case typ == "----":
+		switch typ {
+		case "----":
 			d.parseFreeform(payload)
-		case typ == "trkn":
+		case "trkn":
 			d.addNumberPair(payload, "TRACKNUMBER", "TRACKTOTAL")
-		case typ == "disk":
+		case "disk":
 			d.addNumberPair(payload, "DISCNUMBER", "DISCTOTAL")
 		default:
 			if key, ok := ilstTextKeys[typ]; ok {
@@ -458,10 +458,7 @@ func (d *Demuxer) chapterTrack(tracks []*track, audio *track) *track {
 // sample's presentation time.
 func (d *Demuxer) readTextChapters(ct *track) []Chapter {
 	st := &ct.st
-	n := st.total
-	if n > maxChapters {
-		n = maxChapters
-	}
+	n := min(st.total, maxChapters)
 	// The track's leading empty edit, on the track's own timeline. stts times
 	// the samples as deltas accumulated from zero, so the first chapter's start
 	// is in none of them: it is the edit list's blank presentation time, and a
@@ -474,7 +471,7 @@ func (d *Demuxer) readTextChapters(ct *track) []Chapter {
 	// truncating would move the anchor a millisecond rather than a tick.
 	shift := mulDivRound(ct.emptyEdit, ct.timescale, d.movieTimescale)
 	var out []Chapter
-	for i := int64(0); i < n; i++ {
+	for i := range n {
 		size := int(st.sizes[i])
 		if size < 2 || size > 1<<16 {
 			continue

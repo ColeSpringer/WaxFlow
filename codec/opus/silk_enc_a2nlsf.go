@@ -38,7 +38,7 @@ func a2nlsfEvalPoly(p []int32, x int32, dd int) int32 {
 func a2nlsfInit(aQ16 []int32, P, Q []int32, dd int) {
 	P[dd] = 1 << 16
 	Q[dd] = 1 << 16
-	for k := 0; k < dd; k++ {
+	for k := range dd {
 		P[k] = -aQ16[dd-k-1] - aQ16[dd+k]
 		Q[k] = -aQ16[dd-k-1] + aQ16[dd+k]
 	}
@@ -84,7 +84,7 @@ func silkA2NLSF(nlsf []int16, aQ16 []int32, d int) {
 				thr = 0
 			}
 			ffrac := int32(-256)
-			for m := 0; m < binDivStepsA2NLSF; m++ {
+			for m := range binDivStepsA2NLSF {
 				xmid := silkRSHIFTROUND(xlo+xhi, 1)
 				ymid := a2nlsfEvalPoly(p, xmid, dd)
 				if (ylo <= 0 && ymid >= 0) || (ylo >= 0 && ymid <= 0) {

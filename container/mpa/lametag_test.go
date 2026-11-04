@@ -23,28 +23,6 @@ func TestCRC16ARC(t *testing.T) {
 	}
 }
 
-// tagAt returns the metadata frame's payload offset and its LAME extension,
-// located by walking the flags the way a reader does.
-func tagAt(t *testing.T, out []byte) (off int, lame []byte) {
-	t.Helper()
-	h, err := mp3.ParseHeader(out)
-	if err != nil {
-		t.Fatalf("first frame header: %v", err)
-	}
-	off = mp3.HeaderLen + h.SideInfoLen()
-	flags := binary.BigEndian.Uint32(out[off+4:])
-	p := off + 8
-	for _, f := range xingFields {
-		if flags&f.flag != 0 {
-			p += f.n
-		}
-	}
-	if p+lamePrefixLen > h.Size() {
-		return off, nil
-	}
-	return off, out[p:h.Size()]
-}
-
 // TestLAMETagCanonicalLayout pins what every MP3 this muxer writes at a
 // normal bit rate must carry: the LAME-prefixed encoder string at the
 // canonical magic+120, all four Xing fields ahead of it, and the block's

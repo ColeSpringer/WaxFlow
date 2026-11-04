@@ -75,7 +75,7 @@ func (r *bitReader) bits(n int) uint32 {
 	if i+4 <= len(r.buf) {
 		acc = uint32(r.buf[i])<<24 | uint32(r.buf[i+1])<<16 | uint32(r.buf[i+2])<<8 | uint32(r.buf[i+3])
 	} else {
-		for j := 0; j < 4; j++ {
+		for j := range 4 {
 			acc <<= 8
 			if i+j < len(r.buf) {
 				acc |= uint32(r.buf[i+j])
@@ -105,7 +105,7 @@ func (r *bitReader) peek(n int) uint32 {
 	i := r.pos >> 3
 	off := r.pos & 7
 	var acc uint32
-	for j := 0; j < 4; j++ {
+	for j := range 4 {
 		acc <<= 8
 		if i+j < len(r.buf) {
 			acc |= uint32(r.buf[i+j])

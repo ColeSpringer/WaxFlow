@@ -221,7 +221,7 @@ func TestMuxSeekTable(t *testing.T) {
 	body := raw[off+4 : off+4+size]
 	last := int64(-1)
 	placeholders := false
-	for p := 0; p < points; p++ {
+	for p := range points {
 		sample := binary.BigEndian.Uint64(body[p*18:])
 		if sample == ^uint64(0) {
 			placeholders = true

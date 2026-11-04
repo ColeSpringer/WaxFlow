@@ -52,7 +52,7 @@ func parseSideInfo(h Header, b []byte, si *sideInfo) bool {
 			r.bits(3)
 		}
 		for ch := 0; ch < h.Channels; ch++ {
-			for g := 0; g < 4; g++ {
+			for g := range 4 {
 				si.scfsi[ch][g] = r.bit() == 1
 			}
 		}

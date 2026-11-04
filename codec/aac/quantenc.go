@@ -88,10 +88,10 @@ func (cq *chanQuant) buildBands(spec *[1024]float64, groupLen []int, swb []uint1
 	n := 0
 	winBase := 0
 	for g, L := range groupLen {
-		for sfb := 0; sfb < maxSfb; sfb++ {
+		for sfb := range maxSfb {
 			b := encBand{off: n}
 			lo, hi := int(swb[sfb]), int(swb[sfb+1])
-			for w := 0; w < L; w++ {
+			for w := range L {
 				base := (winBase + w) * 128
 				for k := lo; k < hi; k++ {
 					v := spec[base+k]
@@ -151,14 +151,7 @@ const sfClampMax = 255
 
 // sfFor is a band's scalefactor at uniform offset delta.
 func (b *encBand) sfFor(delta int) int {
-	sf := delta - b.amp
-	if sf < b.minSf {
-		sf = b.minSf
-	}
-	if sf > sfClampMax {
-		sf = sfClampMax
-	}
-	return sf
+	return min(max(delta-b.amp, b.minSf), sfClampMax)
 }
 
 // quantAt fills q[:b.n] with the band's signed quantized values at sf
@@ -167,10 +160,7 @@ func (cq *chanQuant) quantAt(b *encBand, sf int, q []int) int {
 	f := math.Exp2(-0.1875 * float64(sf-100))
 	maxQ := 0
 	for i := 0; i < b.n; i++ {
-		m := int(cq.xrpow[b.off+i]*f + 0.4054)
-		if m > escMaxValue {
-			m = escMaxValue
-		}
+		m := min(int(cq.xrpow[b.off+i]*f+0.4054), escMaxValue)
 		if m > maxQ {
 			maxQ = m
 		}
@@ -254,7 +244,7 @@ func (cq *chanQuant) totalBits(delta int) int {
 				total += 4 + cq.lenBits*(runLen/lenEsc+1)
 			}
 		}
-		for k := 0; k < perGroup; k++ {
+		for k := range perGroup {
 			bi := g*perGroup + k
 			b := &cq.bands[bi]
 			m := cq.bandAt(bi, b.sfFor(delta))

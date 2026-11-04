@@ -54,17 +54,17 @@ func windowedLong(t *[2048]float64, seq int, out *[2048]float64) {
 	wl := &longWindow[shapeSine]
 	ws := &shortWindow[shapeSine]
 	if seq == longStop {
-		for n := 0; n < 448; n++ {
+		for n := range 448 {
 			out[n] = 0
 		}
-		for n := 0; n < 128; n++ {
+		for n := range 128 {
 			out[448+n] = t[448+n] * ws[n]
 		}
 		for n := 576; n < 1024; n++ {
 			out[n] = t[n]
 		}
 	} else {
-		for n := 0; n < 1024; n++ {
+		for n := range 1024 {
 			out[n] = t[n] * wl[n]
 		}
 	}
@@ -72,7 +72,7 @@ func windowedLong(t *[2048]float64, seq int, out *[2048]float64) {
 		for n := 1024; n < 1472; n++ {
 			out[n] = t[n]
 		}
-		for n := 0; n < 128; n++ {
+		for n := range 128 {
 			out[1472+n] = t[1472+n] * ws[128+n]
 		}
 		for n := 1600; n < 2048; n++ {
@@ -98,9 +98,9 @@ func mdctFrame(t *[2048]float64, seq int, spec *[1024]float64) {
 	}
 	ws := &shortWindow[shapeSine]
 	var w [256]float64
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		off := 448 + i*128
-		for n := 0; n < 256; n++ {
+		for n := range 256 {
 			w[n] = t[off+n] * ws[n]
 		}
 		mdctShort.mdct(w[:], spec[i*128:i*128+128])

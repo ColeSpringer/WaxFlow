@@ -27,7 +27,7 @@ func TestAnalysisRoundTrip(t *testing.T) {
 	var dec Decoder
 	gi := grInfo{blockType: blockNormal}
 	out := make([]float32, 0, n)
-	for gr := 0; gr < grans; gr++ {
+	for gr := range grans {
 		var xr [576]float32
 		a.granuleMDCT(in[gr*576:gr*576+576], &xr)
 
@@ -45,7 +45,7 @@ func TestAnalysisRoundTrip(t *testing.T) {
 	// is the 481-sample polyphase group delay plus the MDCT's one-granule
 	// (576-sample) overlap delay, so search past 1057.
 	bestLag, bestRMS := -1, math.Inf(1)
-	for lag := 0; lag < 1200; lag++ {
+	for lag := range 1200 {
 		var sum float64
 		cnt := 0
 		for i := 3 * 576; i+lag < n; i++ { // skip startup transient

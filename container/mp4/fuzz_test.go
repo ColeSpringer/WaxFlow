@@ -92,7 +92,7 @@ func FuzzDemux(f *testing.F) {
 	f.Add([]byte("\x00\x00\x00\x08ftyp\x00\x00\x00\x01moov\xff\xff\xff\xff\xff\xff\xff\xff"))
 	// Deeply nested container boxes to probe the depth cap.
 	nested := []byte("\x00\x00\x00\x08ftyp")
-	for i := 0; i < 40; i++ {
+	for range 40 {
 		nested = append([]byte("\x00\x00\x00\x00moov"), nested...)
 	}
 	f.Add(nested)
@@ -150,7 +150,7 @@ func FuzzDemux(f *testing.F) {
 			maxPackets := int(d.size) + maxSamplesPerFragment + 8
 			var pkt container.Packet
 			firstPTS := int64(-1)
-			for i := 0; i < maxPackets; i++ {
+			for range maxPackets {
 				err := d.ReadPacket(&pkt)
 				if errors.Is(err, io.EOF) {
 					break
@@ -264,7 +264,7 @@ func fuzzOpusTrack() (container.Track, []codec.Packet) {
 		Samples:     4*960 - 312,
 	}
 	var pkts []codec.Packet
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		pkts = append(pkts, codec.Packet{Data: []byte{0x00, byte(i), 0x5A}, Dur: 960, Sync: true})
 	}
 	return track, pkts

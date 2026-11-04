@@ -141,8 +141,8 @@ func design(l, m int, p Profile) (*bank, error) {
 	// Phase-major, taps reversed: coef[p][j] = h[p + (tpp-1-j)*L] makes
 	// the inner loop a forward dot product over contiguous history.
 	coef := make([]float32, total)
-	for p := 0; p < l; p++ {
-		for j := 0; j < tpp; j++ {
+	for p := range l {
+		for j := range tpp {
 			coef[p*tpp+j] = float32(h[p+(tpp-1-j)*l] * scale)
 		}
 	}

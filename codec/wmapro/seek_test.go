@@ -62,7 +62,7 @@ func decodeFrom(t *testing.T, track container.Track, pkts [][]byte, k int) []flo
 	// numbers either side of the Reset are consecutive and the decoder's own
 	// recovery from a jump cannot stand in for the Reset.
 	drop := func(*audio.Buffer) error { return nil }
-	for i := 0; i < k; i++ {
+	for i := range k {
 		if err := dec.Decode(pkts[i], drop); err != nil {
 			t.Fatalf("run-up packet %d: %v", i, err)
 		}

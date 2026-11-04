@@ -33,7 +33,7 @@ func (r *bitReader) read(n uint) uint32 {
 	if byteOff+8 <= len(r.data) {
 		acc = binary.BigEndian.Uint64(r.data[byteOff:])
 	} else {
-		for i := 0; i < 8; i++ {
+		for i := range 8 {
 			acc = acc<<8 | uint64(r.byteAt(byteOff+i))
 		}
 	}

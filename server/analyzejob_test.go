@@ -650,7 +650,7 @@ func TestClientJobsLifecycle(t *testing.T) {
 		t.Fatalf("event stream carries no event: job frame: %q", stream)
 	}
 	var last client.Job
-	for _, line := range strings.Split(string(stream), "\n") {
+	for line := range strings.SplitSeq(string(stream), "\n") {
 		if data, ok := strings.CutPrefix(line, "data: "); ok {
 			if err := json.Unmarshal([]byte(data), &last); err != nil {
 				t.Fatalf("event data does not decode as a job document: %v\n%s", err, data)

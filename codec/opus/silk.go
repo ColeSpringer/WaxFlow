@@ -154,7 +154,7 @@ func (cs *silkChannelState) setFS(fsKHz int, fsAPIHz int) {
 func silkGainsDequant(gainQ16 []int32, ind []int8, prevInd *int8, conditional bool, nbSubfr int) {
 	const offset = (minQGainDB*128)/6 + 16*128
 	const invScaleQ16 = (65536 * (((maxQGainDB - minQGainDB) * 128) / 6)) / (nLevelsQGain - 1)
-	for k := 0; k < nbSubfr; k++ {
+	for k := range nbSubfr {
 		if k == 0 && !conditional {
 			*prevInd = int8(silkMaxInt(int32(ind[k]), int32(*prevInd)-16))
 		} else {
@@ -190,7 +190,7 @@ func silkDecodePitch(lagIndex int, contourIndex int8, pitchLags []int, fsKHz, nb
 	minLag := peMinLagMS * fsKHz
 	maxLag := peMaxLagMS * fsKHz
 	lag := minLag + lagIndex
-	for k := 0; k < nbSubfr; k++ {
+	for k := range nbSubfr {
 		pitchLags[k] = lag + int(lagCB[k][contourIndex])
 		pitchLags[k] = int(silkLIMIT(int32(pitchLags[k]), int32(minLag), int32(maxLag)))
 	}
@@ -207,7 +207,7 @@ func silkLPCAnalysisFilter(out, in []int16, B []int16, length, order int) {
 		out32 := silkRSHIFTROUND(out32Q12, 12)
 		out[ix] = int16(silkSAT16(out32))
 	}
-	for j := 0; j < order; j++ {
+	for j := range order {
 		out[j] = 0
 	}
 }

@@ -27,9 +27,7 @@ func TestSharesConcurrentCalls(t *testing.T) {
 		var wg sync.WaitGroup
 		results := make([]int, waiters)
 		for i := range waiters {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				v, err := g.Do("k", func() (int, error) {
 					calls.Add(1)
 					return -1, nil
@@ -38,7 +36,7 @@ func TestSharesConcurrentCalls(t *testing.T) {
 					t.Errorf("waiter error: %v", err)
 				}
 				results[i] = v
-			}()
+			})
 		}
 		// synctest: all waiters are durably blocked on the shared call
 		// before the release, so sharing is deterministic, not scheduled.

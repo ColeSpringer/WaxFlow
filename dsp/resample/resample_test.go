@@ -83,7 +83,7 @@ func dB(x float64) float64 { return 20 * math.Log10(x) }
 
 // steady trims the filter transient from both ends of an output stream,
 // leaving the steady-state middle for measurements.
-func steady(t *testing.T, r *Resampler, out []float32, outRate int) []float32 {
+func steady(t *testing.T, r *Resampler, out []float32) []float32 {
 	t.Helper()
 	num, den := r.GroupDelay()
 	l, m := r.Ratio()
@@ -148,7 +148,7 @@ func TestPassbandRipple(t *testing.T) {
 				}
 				in := [][]float32{sineAt(rc.in, freq, rc.in/2, 0.5)}
 				out := resampleAll(t, r, in, 4096)
-				got := toneAmp(steady(t, r, out[0], rc.out), rc.out, freq)
+				got := toneAmp(steady(t, r, out[0]), rc.out, freq)
 				if ripple := math.Abs(dB(got / 0.5)); ripple > g.rippleDB {
 					t.Errorf("%s %d->%d: tone %.0f Hz level error %.4f dB, want <= %.2f",
 						g.profile, rc.in, rc.out, freq, ripple, g.rippleDB)
@@ -193,7 +193,7 @@ func TestAliasRejection(t *testing.T) {
 				}
 				in := [][]float32{sineAt(rc.in, freq, rc.in/2, 1.0)}
 				out := resampleAll(t, r, in, 4096)
-				alias := toneAmp(steady(t, r, out[0], rc.out), rc.out, target)
+				alias := toneAmp(steady(t, r, out[0]), rc.out, target)
 				if rej := -dB(alias); rej < g.rejectDB {
 					t.Errorf("%s %d->%d: tone %.0f Hz folds to %.0f Hz at %.1f dB rejection, want >= %.0f",
 						g.profile, rc.in, rc.out, freq, target, rej, g.rejectDB)
@@ -227,7 +227,7 @@ func TestImageRejection(t *testing.T) {
 				}
 				in := [][]float32{sineAt(rc.in, freq, rc.in/2, 1.0)}
 				out := resampleAll(t, r, in, 4096)
-				img := toneAmp(steady(t, r, out[0], rc.out), rc.out, image)
+				img := toneAmp(steady(t, r, out[0]), rc.out, image)
 				if rej := -dB(img); rej < g.rejectDB {
 					t.Errorf("%s %d->%d: tone %.0f Hz images at %.0f Hz with %.1f dB rejection, want >= %.0f",
 						g.profile, rc.in, rc.out, freq, image, rej, g.rejectDB)
@@ -439,7 +439,7 @@ func TestBankConcurrent(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	for i, rq := range reqs {
-		for w := 0; w < workers; w++ {
+		for w := range workers {
 			wg.Add(1)
 			go func(i, w int, rq req) {
 				defer wg.Done()
@@ -485,15 +485,13 @@ func benchResample(b *testing.B, inRate, outRate int, p Profile) {
 	in := [][]float32{sineAt(inRate, 997, chunk, 0.5), sineAt(inRate, 1499, chunk, 0.5)}
 	dst := [][]float32{make([]float32, 2*chunk), make([]float32, 2*chunk)}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		src := [][]float32{in[0], in[1]}
 		for len(src[0]) > 0 {
 			_, consumed := r.Process(dst, src)
 			src[0], src[1] = src[0][consumed:], src[1][consumed:]
 		}
 	}
-	b.StopTimer()
 	seconds := float64(b.N) * chunk / float64(inRate)
 	b.ReportMetric(seconds/b.Elapsed().Seconds(), "x-realtime")
 }

@@ -2210,10 +2210,8 @@ func OutputFormatForExt(ext string) string {
 			// that true if one ever grows them.
 			continue
 		}
-		for _, e := range o.exts {
-			if e == ext {
-				return o.name
-			}
+		if slices.Contains(o.exts, ext) {
+			return o.name
 		}
 	}
 	return ""

@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/colespringer/waxflow/audio"
@@ -414,10 +415,8 @@ func resolve(src container.Source, hint string) (container.Source, *driver, erro
 	}
 	if ext := strings.ToLower(strings.TrimPrefix(hint, ".")); ext != "" {
 		for i := range drivers {
-			for _, e := range drivers[i].exts {
-				if e == ext {
-					return src, &drivers[i], nil
-				}
+			if slices.Contains(drivers[i].exts, ext) {
+				return src, &drivers[i], nil
 			}
 		}
 	}

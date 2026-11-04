@@ -12,7 +12,7 @@ func mdctDirect(x, spec []float64) {
 	n0 := (float64(n)/2 + 1) / 2
 	for k := 0; k < n/2; k++ {
 		var sum float64
-		for i := 0; i < n; i++ {
+		for i := range n {
 			sum += x[i] * math.Cos(2*math.Pi/float64(n)*(float64(i)+n0)*(float64(k)+0.5))
 		}
 		spec[k] = 2 * sum
@@ -73,7 +73,7 @@ func TestMDCTRoundTripTDAC(t *testing.T) {
 
 	// Encode: frame m windows src[m*1024 : m*1024+2048).
 	specs := make([][1024]float64, frames)
-	for m := 0; m < frames; m++ {
+	for m := range frames {
 		var tblk [2048]float64
 		copy(tblk[:], src[m*1024:m*1024+2048])
 		mdctFrame(&tblk, seqs[m], &specs[m])
@@ -82,7 +82,7 @@ func TestMDCTRoundTripTDAC(t *testing.T) {
 	// Decode: the decoder's filterbank path, overlap-add by hand.
 	overlap := make([]float64, 1024)
 	out := make([]float64, 0, frames*1024)
-	for m := 0; m < frames; m++ {
+	for m := range frames {
 		var cur [2048]float64
 		if seqs[m] == eightShort {
 			cd := &channelData{}
@@ -94,7 +94,7 @@ func TestMDCTRoundTripTDAC(t *testing.T) {
 			planLong.imdct(specs[m][:], z[:])
 			longWindowApply(&z, &cur, seqs[m], shapeSine, shapeSine)
 		}
-		for i := 0; i < 1024; i++ {
+		for i := range 1024 {
 			out = append(out, cur[i]+overlap[i])
 			overlap[i] = cur[1024+i]
 		}

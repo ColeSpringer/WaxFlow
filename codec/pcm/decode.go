@@ -54,10 +54,7 @@ func (d *Decoder) Decode(pkt []byte, emit func(*audio.Buffer) error) error {
 		return waxerr.Malformed("pcm: ", "packet of %d bytes is not a whole number of %d-byte frames", len(pkt), fb)
 	}
 	for len(pkt) > 0 {
-		frames := len(pkt) / fb
-		if frames > audio.StandardChunk {
-			frames = audio.StandardChunk
-		}
+		frames := min(len(pkt)/fb, audio.StandardChunk)
 		if d.buf == nil || d.buf.Cap() < frames || d.buf.Fmt != d.fmt {
 			audio.Put(d.buf)
 			d.buf = audio.Get(d.fmt, audio.StandardChunk)
@@ -92,7 +89,7 @@ func (d *Decoder) unpack(data []byte) {
 	ch := d.fmt.Channels
 	step := d.cfg.Bits / 8 * ch
 	shift := d.cfg.shift()
-	for c := 0; c < ch; c++ {
+	for c := range ch {
 		src := c
 		if d.cfg.Order != nil {
 			src = int(d.cfg.Order[c])

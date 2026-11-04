@@ -98,7 +98,7 @@ func planRice(res []int64, order, blockSize, maxPart int, s *riceScratch) ricePl
 	parts := 1 << top
 	size := blockSize >> top
 	sums := s.sums[:parts]
-	for p := 0; p < parts; p++ {
+	for p := range parts {
 		start := p * size
 		if p == 0 {
 			start = order
@@ -117,7 +117,7 @@ func planRice(res []int64, order, blockSize, maxPart int, s *riceScratch) ricePl
 		total := int64(0)
 		maxK := uint(0)
 		params := s.params[:parts]
-		for p := 0; p < parts; p++ {
+		for p := range parts {
 			count := size
 			if p == 0 {
 				count -= order

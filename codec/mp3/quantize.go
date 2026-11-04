@@ -63,9 +63,9 @@ var sfPartOf [nSfBands]int
 var sfbEdgesLong [8][23]int
 
 func init() {
-	for row := 0; row < 8; row++ {
+	for row := range 8 {
 		sum := 0
-		for i := 0; i < 22; i++ {
+		for i := range 22 {
 			sfbEdgesLong[row][i] = sum
 			sum += int(sfbLong[row][i])
 		}
@@ -143,10 +143,7 @@ func quantizeAt(xrpow *[576]float64, gg int, ix *[576]int) int {
 	istep := math.Exp2(-float64(gg-210) * quantExp)
 	maxIx := 0
 	for i, p := range xrpow {
-		v := int(p*istep + 0.4054)
-		if v > maxQuant {
-			v = maxQuant
-		}
+		v := min(int(p*istep+0.4054), maxQuant)
 		ix[i] = v
 		if v > maxIx {
 			maxIx = v
@@ -228,10 +225,7 @@ func planHuffman(ix *[576]int, bigValues, count1, row int, q *gcQuant, exact boo
 func regionBounds(r0, r1, bigEnd, row int) (b0, b1 int) {
 	edges := &sfbEdgesLong[row]
 	b0 = min(edges[min(r0+1, 22)], bigEnd)
-	b1 = min(edges[min(r0+r1+2, 22)], bigEnd)
-	if b1 < b0 {
-		b1 = b0
-	}
+	b1 = max(min(edges[min(r0+r1+2, 22)], bigEnd), b0)
 	return b0, b1
 }
 
@@ -559,7 +553,7 @@ func quantizeGranule(in quantIn, budget int) gcQuant {
 		violated := false
 		var wants [nSfBands]bool
 		if in.thr != nil {
-			for b := 0; b < nSfBands; b++ {
+			for b := range nSfBands {
 				sb := sf[b] << uint(scfScale+1)
 				qexp := max(probe.globalGain-210-sb, -pow2qBias)
 				mult := pow2q[qexp+pow2qBias]
@@ -602,7 +596,7 @@ func quantizeGranule(in quantIn, budget int) gcQuant {
 		// (rounding up, so no band's effective amplification regresses) and
 		// doubles the step for the rounds that remain.
 		escalate := false
-		for b := 0; b < nSfBands; b++ {
+		for b := range nSfBands {
 			if wants[b] && sf[b] >= sfPartMax[sfPartOf[b]] {
 				escalate = true
 			}
@@ -615,7 +609,7 @@ func quantizeGranule(in quantIn, budget int) gcQuant {
 			// Rebuild xrpow at the new scale from the unamplified base.
 			step := amplifyStep()
 			maxp = 0
-			for b := 0; b < nSfBands; b++ {
+			for b := range nSfBands {
 				amp := math.Pow(step, float64(sf[b]))
 				for i := edges[b]; i < edges[b+1]; i++ {
 					p := math.Sqrt(absXr[i])
@@ -634,7 +628,7 @@ func quantizeGranule(in quantIn, budget int) gcQuant {
 			}
 		}
 		step := amplifyStep()
-		for b := 0; b < nSfBands; b++ {
+		for b := range nSfBands {
 			if !wants[b] || sf[b] >= sfPartMax[sfPartOf[b]] {
 				continue
 			}

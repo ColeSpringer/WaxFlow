@@ -46,10 +46,7 @@ func parseWaveFormat(b []byte) (waveFormat, bool) {
 		blockAlign: int(le.Uint16(b[12:])),
 		bits:       int(le.Uint16(b[14:])),
 	}
-	cb := int(le.Uint16(b[16:]))
-	if cb > len(b)-waveFormatLen {
-		cb = len(b) - waveFormatLen
-	}
+	cb := min(int(le.Uint16(b[16:])), len(b)-waveFormatLen)
 	// Copied, not sliced. b points into the whole header buffer, which holds
 	// whatever cover art the Extended Content Description carried and runs to
 	// megabytes; the demuxer keeps this structure for its lifetime, and a

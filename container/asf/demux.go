@@ -1346,10 +1346,7 @@ func (d *Demuxer) walkHeaderExtension(body []byte) {
 	if len(body) < prologue {
 		return
 	}
-	size := int64(le.Uint32(body[18:]))
-	if size > int64(len(body)-prologue) {
-		size = int64(len(body) - prologue)
-	}
+	size := min(int64(le.Uint32(body[18:])), int64(len(body)-prologue))
 	children := body[prologue : prologue+size]
 	for len(children) >= objectHeaderLen {
 		n := le.Uint64(children[16:])

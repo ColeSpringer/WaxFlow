@@ -100,7 +100,7 @@ func ScanSV7Frame(data []byte, bitLen int, cfg Config, st *State) error {
 	if err != nil {
 		return err
 	}
-	for n := 0; n < maxUsed; n++ {
+	for n := range maxUsed {
 		for ch := range 2 {
 			if f.res[ch][n] == -1 {
 				f.rng.advance(36)
@@ -126,7 +126,7 @@ func ScanSV8Block(data []byte, frames int, cfg Config, st *State) error {
 	f.load(st, 8)
 	var r bitReader
 	r.reset(data, len(data)*8)
-	for i := 0; i < frames; i++ {
+	for i := range frames {
 		if err := f.readSV8(&r, &cfg, i == 0); err != nil {
 			return err
 		}

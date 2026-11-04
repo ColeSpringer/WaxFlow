@@ -232,7 +232,7 @@ func (ps *psData) readPar(r *bitReader, par *[5][34]int8, e, num int,
 		if e > 0 {
 			ePrev = e - 1
 		}
-		for b := 0; b < num; b++ {
+		for b := range num {
 			v := int(par[ePrev][b]) + psHuffDecode(r, dtTree)
 			if mask != 0 {
 				v &= int(mask)
@@ -245,7 +245,7 @@ func (ps *psData) readPar(r *bitReader, par *[5][34]int8, e, num int,
 		return true
 	}
 	v := 0
-	for b := 0; b < num; b++ {
+	for b := range num {
 		v += psHuffDecode(r, dfTree)
 		if mask != 0 {
 			v &= int(mask)

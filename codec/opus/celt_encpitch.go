@@ -20,17 +20,17 @@ func toneLPC(x []float32, length, delay int, lpc *[2]float32) bool {
 		r02 += x[i] * x[i+2*delay]
 	}
 	edges = 0
-	for i := 0; i < delay; i++ {
+	for i := range delay {
 		edges += x[length+i-2*delay]*x[length+i-2*delay] - x[i]*x[i]
 	}
 	r11 = r00 + edges
 	edges = 0
-	for i := 0; i < delay; i++ {
+	for i := range delay {
 		edges += x[length+i-delay]*x[length+i-delay] - x[i+delay]*x[i+delay]
 	}
 	r22 = r11 + edges
 	edges = 0
-	for i := 0; i < delay; i++ {
+	for i := range delay {
 		edges += x[length+i-2*delay]*x[length+i-delay] - x[i]*x[i+delay]
 	}
 	r12 = r01 + edges
@@ -76,7 +76,7 @@ func toneDetect(in [][]float32, C, n int, toneishness *float32) float32 {
 	delay := 1
 	x := make([]float32, n)
 	if C == 2 {
-		for i := 0; i < n; i++ {
+		for i := range n {
 			x[i] = in[0][i] + in[1][i]
 		}
 	} else {
@@ -116,9 +116,9 @@ func celtLPC(lpc []float32, ac []float32, p int) {
 	clear(lpc[:p])
 	errE := ac[0]
 	if ac[0] > 1e-10 {
-		for i := 0; i < p; i++ {
+		for i := range p {
 			var rr float32
-			for j := 0; j < i; j++ {
+			for j := range i {
 				rr += lpc[j] * ac[i-j]
 			}
 			rr += ac[i+1]
@@ -141,7 +141,7 @@ func celtLPC(lpc []float32, ac []float32, p int) {
 // celtFIR5 applies a 5-tap FIR in place (libopus celt_fir5, float build).
 func celtFIR5(x []float32, num *[5]float32, n int) {
 	var mem0, mem1, mem2, mem3, mem4 float32
-	for i := 0; i < n; i++ {
+	for i := range n {
 		sum := x[i] +
 			num[0]*mem0 + num[1]*mem1 + num[2]*mem2 + num[3]*mem3 + num[4]*mem4
 		mem4, mem3, mem2, mem1, mem0 = mem3, mem2, mem1, mem0, x[i]
@@ -176,7 +176,7 @@ func pitchDownsample(x [][]float32, xLP []float32, length, C int) {
 	var lpc [4]float32
 	celtLPC(lpc[:], ac[:], 4)
 	tmp := float32(1.0)
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		tmp *= 0.9
 		lpc[i] *= tmp
 	}
@@ -195,7 +195,7 @@ func pitchDownsample(x [][]float32, xLP []float32, length, C int) {
 // pitchXcorr computes the raw cross-correlations for every candidate lag
 // (libopus celt_pitch_xcorr, plain C path).
 func pitchXcorr(x, y []float32, xcorr []float32, length, maxPitch int) {
-	for i := 0; i < maxPitch; i++ {
+	for i := range maxPitch {
 		xcorr[i] = innerProd(x, y[i:], length)
 	}
 }
@@ -207,10 +207,10 @@ func findBestPitch(xcorr, y []float32, length, maxPitch int, bestPitch *[2]int) 
 	bestNum := [2]float32{-1, -1}
 	bestDen := [2]float32{}
 	bestPitch[0], bestPitch[1] = 0, 1
-	for j := 0; j < length; j++ {
+	for j := range length {
 		syy += y[j] * y[j]
 	}
-	for i := 0; i < maxPitch; i++ {
+	for i := range maxPitch {
 		if xcorr[i] > 0 {
 			// The scaling avoids both underflow and overflow when squaring.
 			xcorr16 := xcorr[i] * 1e-12
@@ -369,7 +369,7 @@ func removeDoubling(x []float32, maxPeriod, minPeriod, N int, T0ptr *int, prevPe
 		pg = bestXY / (bestYY + 1)
 	}
 	var xcorr [3]float32
-	for k := 0; k < 3; k++ {
+	for k := range 3 {
 		xcorr[k] = innerProd(x[xo:], x[xo-(T+k-1):], N)
 	}
 	offset := 0
@@ -381,10 +381,7 @@ func removeDoubling(x []float32, maxPeriod, minPeriod, N int, T0ptr *int, prevPe
 	if pg > g {
 		pg = g
 	}
-	*T0ptr = 2*T + offset
-	if *T0ptr < minPeriod0 {
-		*T0ptr = minPeriod0
-	}
+	*T0ptr = max(2*T+offset, minPeriod0)
 	return pg
 }
 
@@ -462,7 +459,7 @@ func (e *celtEncoder) runPrefilter(in [][]float32, C, N int, prefilterTapset int
 	const minPeriod = combMinPeriod
 	overlap := e.overlap
 	pre := make([][]float32, C)
-	for c := 0; c < C; c++ {
+	for c := range C {
 		pre[c] = make([]float32, N+maxPeriod)
 		copy(pre[c][:maxPeriod], e.prefilterMem[c])
 		copy(pre[c][maxPeriod:], in[c][overlap:overlap+N])
@@ -551,9 +548,9 @@ func (e *celtEncoder) runPrefilter(in [][]float32, C, N int, prefilterTapset int
 	var before, after [2]float32
 	offset := celtShortMDCTSize - overlap
 	e.prefilterPeriod = max(e.prefilterPeriod, minPeriod)
-	for c := 0; c < C; c++ {
+	for c := range C {
 		copy(in[c][:overlap], e.preHistory[c])
-		for i := 0; i < N; i++ {
+		for i := range N {
 			before[c] += absf(in[c][overlap+i])
 		}
 		if offset != 0 {
@@ -564,7 +561,7 @@ func (e *celtEncoder) runPrefilter(in [][]float32, C, N int, prefilterTapset int
 		combFilter(in[c], overlap+offset, pre[c], maxPeriod+offset,
 			e.prefilterPeriod, pitchIndex, N-offset, -e.prefilterGain, -gain1,
 			e.prefilterTapset, prefilterTapset, e.window, overlap)
-		for i := 0; i < N; i++ {
+		for i := range N {
 			after[c] += absf(in[c][overlap+i])
 		}
 	}
@@ -587,7 +584,7 @@ func (e *celtEncoder) runPrefilter(in [][]float32, C, N int, prefilterTapset int
 	}
 	if cancelPitch {
 		// Revert to a gain of zero, fading the previous frame's filter out.
-		for c := 0; c < C; c++ {
+		for c := range C {
 			copy(in[c][overlap:overlap+N], pre[c][maxPeriod:maxPeriod+N])
 			combFilter(in[c], overlap+offset, pre[c], maxPeriod+offset,
 				e.prefilterPeriod, pitchIndex, overlap, -e.prefilterGain, 0,
@@ -598,7 +595,7 @@ func (e *celtEncoder) runPrefilter(in [][]float32, C, N int, prefilterTapset int
 		qg = 0
 	}
 
-	for c := 0; c < C; c++ {
+	for c := range C {
 		// The filtered tail becomes the next frame's MDCT history; the
 		// caller copies it from in[c] after the frame is fully assembled.
 		// The unfiltered signal slides into the pitch-search history.

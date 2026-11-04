@@ -91,7 +91,7 @@ func repaginate(t *testing.T, name string, split bool) ([]byte, []container.Pack
 	// Copy the BOS and header pages verbatim.
 	var out []byte
 	off := 0
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		n := int(raw[off+26])
 		size := headerLen + n
 		for _, l := range raw[off+headerLen : off+headerLen+n] {
@@ -351,7 +351,7 @@ func buildFrameBytes(t *testing.T, coded uint64, blockSize int) []byte {
 		b = append(b, 0xE0|byte(coded>>12), 0x80|byte(coded>>6)&0x3F, 0x80|byte(coded)&0x3F)
 	}
 	b = append(b, byte((blockSize-1)>>8), byte(blockSize-1))
-	for crc := 0; crc < 256; crc++ {
+	for crc := range 256 {
 		if fi, err := flac.ParseFrameHeader(append(b, byte(crc))); err == nil && fi.BlockSize == blockSize {
 			return append(b, byte(crc), 0xAA, 0xBB) // header + dummy body
 		}
@@ -476,7 +476,7 @@ func buildTailOnlyStream(t *testing.T, trailingForeign bool) ([]byte, []containe
 
 	var out []byte
 	off := 0
-	for i := 0; i < 2; i++ { // BOS and header pages verbatim
+	for range 2 { // BOS and header pages verbatim
 		n := int(raw[off+26])
 		size := headerLen + n
 		for _, l := range raw[off+headerLen : off+headerLen+n] {
@@ -487,7 +487,7 @@ func buildTailOnlyStream(t *testing.T, trailingForeign bool) ([]byte, []containe
 	}
 	seq := uint32(2)
 	foreign := func(count int) {
-		for i := 0; i < count; i++ {
+		for i := range count {
 			out = append(out, buildPage(0, int64(i), 999, seq, make([]byte, 3500))...)
 			seq++
 		}
@@ -567,7 +567,7 @@ func TestDamagedPageResync(t *testing.T) {
 	// Corrupt one byte inside the body of the second data page (pages 0
 	// and 1 are the headers, page 2 the first frame).
 	off := 0
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		n := int(raw[off+26])
 		size := headerLen + n
 		for _, l := range raw[off+headerLen : off+headerLen+n] {

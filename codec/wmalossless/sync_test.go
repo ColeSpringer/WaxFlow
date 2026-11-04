@@ -13,7 +13,7 @@ func TestPacketIsSyncReadsTheHeaderFlag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for seq := 0; seq < 16; seq++ {
+	for seq := range 16 {
 		for _, want := range []bool{false, true} {
 			var w bitWriter
 			w.put(uint32(seq), 4)

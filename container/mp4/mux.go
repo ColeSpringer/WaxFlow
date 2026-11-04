@@ -482,7 +482,7 @@ func fragmentBoxes(seq uint32, baseTime int64, durs, sizes []uint32, data []byte
 	body = binary.BigEndian.AppendUint32(body, uint32(n)) // sample_count
 	dataOffPos := len(body)
 	body = binary.BigEndian.AppendUint32(body, 0) // data_offset placeholder
-	for i := 0; i < n; i++ {
+	for i := range n {
 		// Append directly into the preallocated body rather than through u32,
 		// whose throwaway 4-byte slices would allocate twice per sample.
 		body = binary.BigEndian.AppendUint32(body, durs[i])

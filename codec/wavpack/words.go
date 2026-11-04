@@ -255,16 +255,16 @@ func (w *wordCoder) getWordsLossless(bs *bitReader, buf []int32, n int, mono boo
 		ones = ones>>1 + carry
 
 		var low, high uint32
-		switch {
-		case ones == 0:
+		switch ones {
+		case 0:
 			high = c.med(0) - 1
 			c.decMed0()
-		case ones == 1:
+		case 1:
 			low = c.med(0)
 			c.incMed0()
 			high = low + c.med(1) - 1
 			c.decMed1()
-		case ones == 2:
+		case 2:
 			low = c.med(0)
 			c.incMed0()
 			low += c.med(1)

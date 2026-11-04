@@ -35,7 +35,7 @@ func encodeOggOpus(t *testing.T, src [][]float32, bitrate int) []byte {
 		t.Fatal(err)
 	}
 	flat := make([]float32, C*total)
-	for c := 0; c < C; c++ {
+	for c := range C {
 		copy(flat[c*total:], src[c])
 	}
 	buf := &audio.Buffer{Fmt: f, F: flat, Stride: total, N: total}
@@ -71,9 +71,9 @@ func ffDecodeF32(t *testing.T, ff, path string, C int) [][]float32 {
 	}
 	out := make([][]float32, C)
 	n := len(inter) / C
-	for c := 0; c < C; c++ {
+	for c := range C {
 		out[c] = make([]float32, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			out[c][i] = inter[i*C+c]
 		}
 	}
@@ -110,7 +110,7 @@ func TestOpusEncodeLibopusDecode(t *testing.T) {
 func synthMusic(C, sr int) [][]float32 {
 	total := int(1.2 * float64(sr))
 	src := make([][]float32, C)
-	for c := 0; c < C; c++ {
+	for c := range C {
 		src[c] = make([]float32, total)
 		f1 := 220.0 + 110*float64(c)
 		var seed uint32 = 0x51ed7700 + uint32(c)*2654435761
@@ -142,8 +142,8 @@ func interleaveScaled(x [][]float32) []float32 {
 	C := len(x)
 	n := len(x[0])
 	out := make([]float32, C*n)
-	for i := 0; i < n; i++ {
-		for c := 0; c < C; c++ {
+	for i := range n {
+		for c := range C {
 			out[i*C+c] = x[c][i] * 32768
 		}
 	}
@@ -177,7 +177,7 @@ func alignedQ(src, got [][]float32, C int) (float64, int) {
 	}
 	sa := make([][]float32, C)
 	ga := make([][]float32, C)
-	for c := 0; c < C; c++ {
+	for c := range C {
 		sa[c] = src[c][skip : skip+n]
 		ga[c] = got[c][skip+d : skip+d+n]
 	}

@@ -11,9 +11,9 @@ func naiveDFT(re, im []float32) (outRe, outIm []float64) {
 	n := len(re)
 	outRe = make([]float64, n)
 	outIm = make([]float64, n)
-	for k := 0; k < n; k++ {
+	for k := range n {
 		var sr, si float64
-		for j := 0; j < n; j++ {
+		for j := range n {
 			a := -2 * math.Pi * float64(j) * float64(k) / float64(n)
 			c, s := math.Cos(a), math.Sin(a)
 			sr += float64(re[j])*c - float64(im[j])*s
@@ -50,12 +50,12 @@ func TestTransformMatchesNaiveDFT(t *testing.T) {
 		// ulp of the transform's norm. The bound is generous against the
 		// observed error yet far below any codec tolerance.
 		norm := 0.0
-		for k := 0; k < n; k++ {
+		for k := range n {
 			norm += wantRe[k]*wantRe[k] + wantIm[k]*wantIm[k]
 		}
 		tol := 3e-6 * math.Sqrt(norm/float64(n))
 		tol = math.Max(tol, 1e-7)
-		for k := 0; k < n; k++ {
+		for k := range n {
 			if d := math.Abs(float64(dstRe[k]) - wantRe[k]); d > tol {
 				t.Fatalf("n=%d re[%d]: got %g want %g (|d|=%g tol=%g)", n, k, dstRe[k], wantRe[k], d, tol)
 			}
@@ -78,7 +78,7 @@ func TestTransformImpulseExact(t *testing.T) {
 		dstRe := make([]float32, n)
 		dstIm := make([]float32, n)
 		p.Transform(dstRe, dstIm, srcRe, srcIm)
-		for k := 0; k < n; k++ {
+		for k := range n {
 			if dstRe[k] != 1 || dstIm[k] != 0 {
 				t.Fatalf("n=%d k=%d: impulse response (%g, %g), want (1, 0)", n, k, dstRe[k], dstIm[k])
 			}
@@ -100,7 +100,7 @@ func TestTransformDeterministic(t *testing.T) {
 	bRe, bIm := make([]float32, n), make([]float32, n)
 	p.Transform(aRe, aIm, srcRe, srcIm)
 	NewPlan(n).Transform(bRe, bIm, srcRe, srcIm)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if aRe[i] != bRe[i] || aIm[i] != bIm[i] {
 			t.Fatalf("output differs at %d across identical runs", i)
 		}
@@ -119,7 +119,7 @@ func TestTransformLeavesSrcUntouched(t *testing.T) {
 	wantRe := append([]float32(nil), srcRe...)
 	wantIm := append([]float32(nil), srcIm...)
 	p.Transform(make([]float32, n), make([]float32, n), srcRe, srcIm)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if srcRe[i] != wantRe[i] || srcIm[i] != wantIm[i] {
 			t.Fatalf("src modified at %d", i)
 		}
@@ -183,8 +183,7 @@ func benchTransform(b *testing.B, n int) {
 	dstRe := make([]float32, n)
 	dstIm := make([]float32, n)
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		p.Transform(dstRe, dstIm, srcRe, srcIm)
 	}
 }

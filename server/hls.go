@@ -940,7 +940,7 @@ func (s *Server) handleHLSSegment(w http.ResponseWriter, r *http.Request) {
 
 	// Two passes: eviction can race the manager's ground-truth check, so
 	// one honest re-drive; a second miss is a real failure.
-	for attempt := 0; attempt < 2; attempt++ {
+	for range 2 {
 		if c, ok := variant.Open(name); ok {
 			defer c.File.Close()
 			// A hit never reaches the manager, so it says the listener is
@@ -1380,7 +1380,7 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string
 		}
 	}
 	if v := params["bitrates"]; v != "" {
-		for _, part := range strings.Split(v, ",") {
+		for part := range strings.SplitSeq(v, ",") {
 			kbps, err := strconv.Atoi(strings.TrimSpace(part))
 			if err != nil {
 				return bad("bitrates %q: want comma-separated kbit/s values", v)

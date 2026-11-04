@@ -155,7 +155,7 @@ func randomFrame(seed, n int) sv7Frame {
 	f := sv7Frame{n: n}
 	var w bitWriter
 	x := uint64(seed)*6364136223846793005 + 1442695040888963407
-	for i := 0; i < n; i++ {
+	for range n {
 		x = x*6364136223846793005 + 1442695040888963407
 		w.write(x>>63, 1)
 	}

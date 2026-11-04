@@ -18,8 +18,6 @@ const (
 	silkInt32Min = -0x80000000
 	silkInt16Max = 0x7FFF
 	silkInt16Min = -0x8000
-	silkInt8Max  = 0x7F
-	silkInt8Min  = -0x80
 
 	randMultiplier = 196314165
 	randIncrement  = 907633515
@@ -31,9 +29,6 @@ func silkSMULWB(a, b int32) int32 { return int32((int64(a) * int64(int16(b))) >>
 // a32 + ((b32 * (int16)c32) >> 16)
 func silkSMLAWB(a, b, c int32) int32 { return int32(int64(a) + ((int64(b) * int64(int16(c))) >> 16)) }
 
-// (a32 * (b32 >> 16)) >> 16
-func silkSMULWT(a, b int32) int32 { return int32((int64(a) * int64(b>>16)) >> 16) }
-
 // a32 + ((b32 * (c32 >> 16)) >> 16)
 func silkSMLAWT(a, b, c int32) int32 { return int32(int64(a) + ((int64(b) * int64(c>>16)) >> 16)) }
 
@@ -43,23 +38,11 @@ func silkSMULBB(a, b int32) int32 { return int32(int16(a)) * int32(int16(b)) }
 // a32 + (int16)b32 * (int16)c32
 func silkSMLABB(a, b, c int32) int32 { return a + int32(int16(b))*int32(int16(c)) }
 
-// (int16)a32 * (b32 >> 16)
-func silkSMULBT(a, b int32) int32 { return int32(int16(a)) * (b >> 16) }
-
-// a32 + (int16)b32 * (c32 >> 16)
-func silkSMLABT(a, b, c int32) int32 { return a + int32(int16(b))*(c>>16) }
-
 // (a32 * b32) >> 16
 func silkSMULWW(a, b int32) int32 { return int32((int64(a) * int64(b)) >> 16) }
 
 // a32 + ((b32 * c32) >> 16)
 func silkSMLAWW(a, b, c int32) int32 { return int32(int64(a) + ((int64(b) * int64(c)) >> 16)) }
-
-// (a32 >> 16) * (b32 >> 16)
-func silkSMULTT(a, b int32) int32 { return (a >> 16) * (b >> 16) }
-
-// a32 + (b32 >> 16) * (c32 >> 16)
-func silkSMLATT(a, b, c int32) int32 { return a + (b>>16)*(c>>16) }
 
 // (int64)a32 * b32
 func silkSMULL(a, b int32) int64 { return int64(a) * int64(b) }
@@ -87,16 +70,6 @@ func silkRAND(seed int32) int32 { return silkMLAovflw(randIncrement, seed, randM
 
 func silkDIV32_16(a, b int32) int32 { return a / b }
 func silkDIV32(a, b int32) int32    { return a / b }
-
-func silkSAT8(a int32) int32 {
-	if a > silkInt8Max {
-		return silkInt8Max
-	}
-	if a < silkInt8Min {
-		return silkInt8Min
-	}
-	return a
-}
 
 func silkSAT16(a int32) int32 {
 	if a > silkInt16Max {
@@ -188,16 +161,6 @@ func silkAbs32(a int32) int32 {
 		return a
 	}
 	return -a
-}
-
-func silkSign(a int32) int32 {
-	if a > 0 {
-		return 1
-	}
-	if a < 0 {
-		return -1
-	}
-	return 0
 }
 
 // silk_CLZ32: count leading zeros of a 32-bit value (32 for zero).

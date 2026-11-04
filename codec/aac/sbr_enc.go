@@ -290,7 +290,7 @@ func (e *HEEncoder) Encode(src *audio.Buffer, emit func(codec.Packet) error) err
 	ch := e.fmt.Channels
 	for off := 0; off < src.N; {
 		n := min(2*frameLen, src.N-off)
-		for c := 0; c < ch; c++ {
+		for c := range ch {
 			e.clean[c] = appendSanitized(e.clean[c][:0], src.ChanF(c)[off:off+n])
 		}
 		if e.sbr.ps != nil {
@@ -317,17 +317,17 @@ func (e *HEEncoder) consume(chans [][]float32, emit func(codec.Packet) error) er
 	// QMF analysis first: by the time the resampled core completes
 	// block m (which needs input past sample 2048(m+1)), every slot
 	// the AU's SBR payload reads (below abs slot 32m) has been pushed.
-	for c := 0; c < ch; c++ {
+	for c := range ch {
 		e.slotStage[c] = append(e.slotStage[c], chans[c]...)
 	}
 	pos := 0
 	for pos+64 <= len(e.slotStage[0]) {
-		for c := 0; c < ch; c++ {
+		for c := range ch {
 			e.sbr.pushSlot(c, e.slotStage[c][pos:pos+64])
 		}
 		pos += 64
 	}
-	for c := 0; c < ch; c++ {
+	for c := range ch {
 		e.slotStage[c] = append(e.slotStage[c][:0], e.slotStage[c][pos:]...)
 	}
 	return e.feedCore(chans, emit)
@@ -420,7 +420,7 @@ func (e *HEEncoder) feedCore(src [][]float32, emit func(codec.Packet) error) err
 	var dst [2][]float32
 	consumed := 0
 	for {
-		for c := 0; c < ch; c++ {
+		for c := range ch {
 			dst[c] = e.coreBuf.ChanF(c)[:e.coreBuf.Cap()]
 		}
 		var produced, took int
@@ -428,7 +428,7 @@ func (e *HEEncoder) feedCore(src [][]float32, emit func(codec.Packet) error) err
 			produced = e.res.Drain(dst[:ch])
 		} else {
 			var in [2][]float32
-			for c := 0; c < ch; c++ {
+			for c := range ch {
 				in[c] = src[c][consumed:]
 			}
 			produced, took = e.res.Process(dst[:ch], in[:ch])
@@ -470,7 +470,7 @@ func (e *HEEncoder) Finish(emit func(codec.Packet) error) (codec.Trailer, error)
 	}
 	ch := e.sbr.chans
 	if n := len(e.slotStage[0]); n > 0 {
-		for c := 0; c < ch; c++ {
+		for c := range ch {
 			e.slotStage[c] = append(e.slotStage[c], make([]float32, 64-n)...)
 			e.sbr.pushSlot(c, e.slotStage[c][:64])
 			e.slotStage[c] = e.slotStage[c][:0]
@@ -491,7 +491,7 @@ func (e *HEEncoder) Finish(emit func(codec.Packet) error) (codec.Trailer, error)
 	if aus*2*frameLen-e.inSamples-HEEncoderDelay < 0 {
 		zero := audio.Get(e.core.fmt, frameLen)
 		zero.N = frameLen
-		for c := 0; c < ch; c++ {
+		for c := range ch {
 			clear(zero.ChanF(c)[:frameLen])
 		}
 		err := e.core.Encode(zero, e.emitWrap(emit))
@@ -503,10 +503,7 @@ func (e *HEEncoder) Finish(emit func(codec.Packet) error) (codec.Trailer, error)
 	if _, err := e.core.Finish(e.emitWrap(emit)); err != nil {
 		return codec.Trailer{}, err
 	}
-	padding := e.outFrames*2*frameLen - e.inSamples - HEEncoderDelay
-	if padding < 0 {
-		padding = 0
-	}
+	padding := max(e.outFrames*2*frameLen-e.inSamples-HEEncoderDelay, 0)
 	// The engine has no encoder-release hook on the happy path, so the
 	// pooled scratch goes back here, at the end of every completed encode;
 	// Release covers callers that stop early.

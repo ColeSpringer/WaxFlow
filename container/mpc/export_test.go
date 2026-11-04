@@ -27,7 +27,7 @@ func (d *Demuxer) SeekTableForTest() ([]int64, int) {
 	exp := int(r.Bits(4))
 	var table []int64
 	var last [2]int64
-	for i := uint64(0); i < n; i++ {
+	for i := range n {
 		var v int64
 		if i < 2 {
 			pos, ok := r.Varint()

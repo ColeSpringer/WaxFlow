@@ -36,15 +36,15 @@ func TestMDCTForwardInverseTDAC(t *testing.T) {
 			tbuf := make([]float64, n)
 			cr := make([]float64, n)
 			ci := make([]float64, n)
-			for b := 0; b < blocks; b++ {
+			for b := range blocks {
 				off := b * hop
-				for i := 0; i < n; i++ {
+				for i := range n {
 					wbuf[i] = x[off+i] * win[i]
 				}
 				fwd.forward(wbuf, spec)
 				plan.imdct(spec, tbuf, cr, ci)
 				// Synthesis window (all-long: both neighbours size n).
-				for i := 0; i < n; i++ {
+				for i := range n {
 					recon[off+i] += tbuf[i] * float64(win[i])
 				}
 			}

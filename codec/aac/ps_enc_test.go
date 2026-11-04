@@ -98,7 +98,7 @@ func TestHEEncoderV2MonoRefused(t *testing.T) {
 func stereoSig(n int, right func(v float64, i int) float64) [][]float32 {
 	out := [][]float32{make([]float32, n), make([]float32, n)}
 	seed := uint64(17)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		seed = seed*6364136223846793005 + 1442695040888963407
 		noise := 0.02 * (2*float64(seed>>11)/float64(1<<53) - 1)
 		v := 0.25*math.Sin(2*math.Pi*440*float64(i)/48000) +
@@ -176,7 +176,7 @@ func TestHEEncoderV2PayloadRoundTrip(t *testing.T) {
 		if pd.numEnv != 1 || pd.border[1] != sbrSlots-1 {
 			t.Fatalf("au %d: numEnv %d border %v", aus, pd.numEnv, pd.border)
 		}
-		for b := 0; b < psEncBands; b++ {
+		for b := range psEncBands {
 			if int32(pd.iid[0][b]) != wantIID[b] {
 				t.Fatalf("au %d band %d: iid parsed %d, wrote %d", aus, b, pd.iid[0][b], wantIID[b])
 			}
@@ -192,7 +192,7 @@ func TestHEEncoderV2PayloadRoundTrip(t *testing.T) {
 	defer audio.Put(buf)
 	for off := 0; off < frames*2048; off += 2048 {
 		buf.N = 2048
-		for c := 0; c < 2; c++ {
+		for c := range 2 {
 			copy(buf.ChanF(c)[:2048], in[c][off:off+2048])
 		}
 		if err := e.Encode(buf, check); err != nil {
@@ -224,7 +224,7 @@ func TestSBRPayloadRollback(t *testing.T) {
 	emit := func(codec.Packet) error { return nil }
 	for off := 0; off < 6*2048; off += 2048 {
 		buf.N = 2048
-		for c := 0; c < 2; c++ {
+		for c := range 2 {
 			copy(buf.ChanF(c)[:2048], in[c][off:off+2048])
 		}
 		if err := e.Encode(buf, emit); err != nil {
@@ -261,7 +261,7 @@ func wideImageSig(n int) [][]float32 {
 	out := [][]float32{make([]float32, n), make([]float32, n)}
 	tones := []float64{180, 440, 950, 1700, 2600, 3800, 5200, 7000, 9200, 12000}
 	s0, s1 := uint64(3), uint64(7919)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		drift := 0.5 + 0.45*math.Sin(2*math.Pi*float64(i)/48000)
 		var l, r float64
 		for j, fq := range tones {
@@ -300,7 +300,7 @@ func TestHEEncoderV2DelayPin(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := heDecodeAll(t, cfg, aus)
-	for c := 0; c < 2; c++ {
+	for c := range 2 {
 		got := heDelayPeak(out[c], starts, burst)
 		t.Logf("ch%d matched-filter delay %d (declared %d)", c, got, HEEncoderDelay)
 		if got != HEEncoderDelay {
@@ -401,7 +401,7 @@ func TestHEEncoderV2StereoImage(t *testing.T) {
 		}
 		out := heDecodeAll(t, cfg, aus)
 
-		for c := 0; c < 2; c++ {
+		for c := range 2 {
 			want := energyOf(tc.in[c][lo:hi])
 			got := energyOf(out[c][lo+HEEncoderDelay : hi+HEEncoderDelay])
 			if want == 0 {
@@ -464,7 +464,7 @@ func TestHEEncoderV2ChunkInvariance(t *testing.T) {
 		for off := 0; off < n; off += chunk {
 			m := min(chunk, n-off)
 			buf.N = m
-			for c := 0; c < 2; c++ {
+			for c := range 2 {
 				copy(buf.ChanF(c)[:m], in[c][off:off+m])
 			}
 			if err := e.Encode(buf, emit); err != nil {

@@ -65,7 +65,7 @@ func (d *AttackDetector) Scan(x []float32, sub int) (attack bool, pos int) {
 	}
 	w := len(x) / sub
 	prev := d.prev
-	for i := 0; i < sub; i++ {
+	for i := range sub {
 		e := 0.0
 		for _, v := range x[i*w : (i+1)*w] {
 			e += float64(v) * float64(v)

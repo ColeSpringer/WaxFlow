@@ -86,7 +86,7 @@ func synthWAV(t *testing.T, f audio.Format, frames int) ([]byte, []float32) {
 	ref := make([]float32, frames*f.Channels)
 	scale := float64(int64(1)<<(f.BitDepth-1)) - 1
 	for ch := 0; ch < f.Channels; ch++ {
-		for i := 0; i < frames; i++ {
+		for i := range frames {
 			x := float64(i)
 			v := 0.35*math.Sin(2*math.Pi*(500+float64(ch)*70)*x/float64(f.Rate)) +
 				0.2*math.Sin(2*math.Pi*3200*x/float64(f.Rate))
@@ -142,7 +142,7 @@ func snrDB(ref, got []float32, lag, ch int) float64 {
 // bestSNR searches per-frame lags for the alignment maximizing SNR.
 func bestSNR(ref, got []float32, maxLag, ch int) float64 {
 	best := math.Inf(-1)
-	for lag := 0; lag < maxLag; lag++ {
+	for lag := range maxLag {
 		if s := snrDB(ref, got, lag, ch); s > best {
 			best = s
 		}

@@ -49,7 +49,7 @@ func muxAAC(t *testing.T, w io.Writer, n int, declaredLen int64) (src [][]float3
 	for off := 0; off < n; off += 1024 {
 		end := min(off+1024, n)
 		buf.N = end - off
-		for c := 0; c < 2; c++ {
+		for c := range 2 {
 			copy(buf.ChanF(c), src[c][off:end])
 		}
 		if err := enc.Encode(buf, emit); err != nil {
@@ -108,8 +108,8 @@ func TestMuxAACGaplessKnownLength(t *testing.T) {
 		t.Fatalf("ffmpeg decoded %d interleaved samples, want %d (front trim honored)", len(got), want)
 	}
 	var sig, errE float64
-	for i := 0; i < n; i++ {
-		for c := 0; c < 2; c++ {
+	for i := range n {
+		for c := range 2 {
 			s := float64(src[c][i])
 			e := s - float64(got[i*2+c])
 			sig += s * s

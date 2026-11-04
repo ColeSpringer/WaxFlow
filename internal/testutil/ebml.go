@@ -22,7 +22,7 @@ func ebmlVint(b []byte, keepMarker bool) (val uint64, n int, unknown, ok bool) {
 		return 0, 0, false, false
 	}
 	w := 0
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		if b[0]&(0x80>>i) != 0 {
 			w = i + 1
 			break

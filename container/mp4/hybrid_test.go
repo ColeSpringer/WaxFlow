@@ -80,9 +80,9 @@ func stripTfdt(frag []byte) []byte {
 	// moof, traf and the trun's data_offset all shrink by the box removed.
 	moofSize := int(binary.BigEndian.Uint32(out[0:4]))
 	binary.BigEndian.PutUint32(out[0:], uint32(moofSize-size))
-	j := bytes.Index(out, []byte("traf"))
-	trafSize := int(binary.BigEndian.Uint32(out[j-4:]))
-	binary.BigEndian.PutUint32(out[j-4:], uint32(trafSize-size))
+	traf := bytes.Index(out, []byte("traf")) - 4 // the box starts at its size field
+	trafSize := int(binary.BigEndian.Uint32(out[traf:]))
+	binary.BigEndian.PutUint32(out[traf:], uint32(trafSize-size))
 	k := bytes.Index(out, []byte("trun"))
 	binary.BigEndian.PutUint32(out[k+4+4+4:], uint32(moofSize-size+8))
 	return out

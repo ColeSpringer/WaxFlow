@@ -68,7 +68,7 @@ func bestLagSNR(in, out []float32, maxLag int) (lag int, snrDB float64) {
 	for _, v := range in {
 		sig += float64(v) * float64(v)
 	}
-	for l := 0; l < maxLag; l++ {
+	for l := range maxLag {
 		var e float64
 		cnt := 0
 		for i := 2000; i+l < len(out) && i < len(in); i++ {

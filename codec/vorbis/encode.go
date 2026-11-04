@@ -167,7 +167,7 @@ func NewEncoder(f audio.Format, opts *EncoderOptions) (*Encoder, error) {
 	e.resid = make([][]float32, f.Channels)
 	e.vals = make([][]int, f.Channels)
 	e.classes = make([][]int, f.Channels)
-	for s := 0; s < 2; s++ {
+	for s := range 2 {
 		e.psy[s] = make([]*psy.Model, f.Channels)
 	}
 	// Prime: a half-long block of silence lead-in so the first (priming) packet's
@@ -181,7 +181,7 @@ func NewEncoder(f audio.Format, opts *EncoderOptions) (*Encoder, error) {
 		e.resid[c] = make([]float32, maxN2)
 		e.vals[c] = make([]int, maxPosts)
 		e.classes[c] = make([]int, maxN2/resPartSize)
-		for s := 0; s < 2; s++ {
+		for s := range 2 {
 			n2 := cfg.blockSizes[s] / 2
 			m, err := newPsyModel(f.Rate, n2, e.offsetDB)
 			if err != nil {
@@ -445,7 +445,7 @@ func (e *Encoder) windowBlock(c int, start int64, n, ln, rn int) {
 	rightEnd := rightBegin + rn/2
 	off := int(start - e.bufBase)
 	src := e.buf[c]
-	for i := 0; i < leftBegin; i++ {
+	for i := range leftBegin {
 		e.wbuf[i] = 0
 	}
 	for i := leftBegin; i < leftEnd; i++ {
@@ -473,7 +473,7 @@ func (e *Encoder) blockSamples(c int, start int64, n int) []float32 {
 		e.psyIn = make([]float32, n)
 	}
 	e.psyIn = e.psyIn[:n]
-	for i := 0; i < n; i++ {
+	for i := range n {
 		e.psyIn[i] = e.at(src, off+i)
 	}
 	return e.psyIn
@@ -491,10 +491,10 @@ func (e *Encoder) blockTemporallySteady(start int64, n int) bool {
 		return true
 	}
 	var maxE, sumE float64
-	for s := 0; s < subs; s++ {
+	for s := range subs {
 		off := int(start-e.bufBase) + s*sw
 		var eSub float64
-		for i := 0; i < sw; i++ {
+		for i := range sw {
 			var v float32
 			for c := 0; c < e.channels; c++ {
 				v += e.at(e.buf[c], off+i)
@@ -586,10 +586,7 @@ func (e *Encoder) Finish(emit func(codec.Packet) error) (codec.Trailer, error) {
 			return codec.Trailer{}, err
 		}
 	}
-	padding := e.decoded - e.inSamples
-	if padding < 0 {
-		padding = 0
-	}
+	padding := max(e.decoded-e.inSamples, 0)
 	return codec.Trailer{Samples: e.inSamples, Delay: 0, Padding: padding}, nil
 }
 

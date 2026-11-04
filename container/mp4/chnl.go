@@ -204,7 +204,7 @@ func readChnl(payload []byte, channels int) boxLayout {
 		return speakerLayout(spk, fmt.Sprintf("chnl configuration %d", defined))
 	}
 	spk := make([]speaker, 0, channels)
-	for i := 0; i < channels; i++ {
+	for i := range channels {
 		if len(rest) < 1 {
 			return boxLayout{damage: fmt.Sprintf("chnl box holds %d positions for %d channels", i, channels)}
 		}

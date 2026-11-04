@@ -231,12 +231,10 @@ func TestTrackForCollapsesConcurrentMisses(t *testing.T) {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	for i := range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start // release together, so the miss is genuinely concurrent
 			got[i], errs[i] = s.trackFor(t.Context(), src, false)
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -274,9 +272,7 @@ func TestTrackForKeysBySource(t *testing.T) {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	for _, ref := range []string{"lib/a.mp3", "lib/b.mp3"} {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			src, err := roots.Resolve(context.Background(), ref)
 			if err != nil {
 				t.Error(err)
@@ -287,7 +283,7 @@ func TestTrackForKeysBySource(t *testing.T) {
 			if _, err := s.trackFor(t.Context(), src, false); err != nil {
 				t.Errorf("%s: %v", ref, err)
 			}
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

@@ -220,9 +220,9 @@ func TestEncodeMD5(t *testing.T) {
 		bs := (bits + 7) / 8
 		raw := make([]byte, 0, src.N*2*bs)
 		for i := 0; i < src.N; i++ {
-			for c := 0; c < 2; c++ {
+			for c := range 2 {
 				v := src.ChanI(c)[i]
-				for b := 0; b < bs; b++ {
+				for b := range bs {
 					raw = append(raw, byte(v>>(8*b)))
 				}
 			}
@@ -391,17 +391,11 @@ func FuzzEncodeRoundTrip(f *testing.F) {
 		defer audio.Put(src)
 		src.N = n
 		lim := int64(1)<<(depth-1) - 1
-		for c := 0; c < ch; c++ {
+		for c := range ch {
 			s := src.ChanI(c)
 			for i := range s {
 				b := int64(seed[(i*ch+c)%len(seed)])
-				v := (b - 128) * lim / 127
-				if v > lim {
-					v = lim
-				}
-				if v < -lim-1 {
-					v = -lim - 1
-				}
+				v := max(min((b-128)*lim/127, lim), -lim-1)
 				s[i] = int32(v)
 			}
 		}

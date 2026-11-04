@@ -25,7 +25,7 @@ func crestWAV(t *testing.T, seconds float64) ([]byte, float64) {
 	f := audio.Format{Rate: rate, Channels: ch, Layout: audio.DefaultLayout(ch), Type: audio.Float, BitDepth: 32}
 	frames := int(seconds * rate)
 	inter := make([]float32, frames*ch)
-	for i := 0; i < frames; i++ {
+	for i := range frames {
 		bed := 0.062 * math.Sin(2*math.Pi*220*float64(i)/rate)
 		inter[i*ch] = float32(bed)
 		inter[i*ch+1] = float32(bed * 0.9)

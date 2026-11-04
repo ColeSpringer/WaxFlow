@@ -93,7 +93,7 @@ func (w *Walker) Restore(blob []byte) bool {
 	idx := make([]int64, 0, min(count, 4096))
 	prev := int64(-1)
 	pos := int64(0)
-	for i := uint64(0); i < count; i++ {
+	for range count {
 		delta, n := binary.Uvarint(rest)
 		if n <= 0 || delta > uint64(w.w.DataEnd()) {
 			return false

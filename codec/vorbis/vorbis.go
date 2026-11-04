@@ -104,10 +104,7 @@ func (r *bitReader) read(n int) uint32 {
 			return result
 		}
 		avail := 8 - int(r.bitx)
-		take := n - got
-		if take > avail {
-			take = avail
-		}
+		take := min(n-got, avail)
 		chunk := (uint32(r.data[r.bytex]) >> r.bitx) & ((1 << take) - 1)
 		result |= chunk << got
 		got += take

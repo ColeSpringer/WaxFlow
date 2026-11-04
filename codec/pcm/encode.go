@@ -92,7 +92,7 @@ func (e *Encoder) pack(src *audio.Buffer) {
 	ch := e.fmt.Channels
 	step := e.cfg.Bits / 8 * ch
 	shift := e.cfg.shift()
-	for c := 0; c < ch; c++ {
+	for c := range ch {
 		off := c * e.cfg.Bits / 8
 		switch {
 		case e.cfg.Encoding == Float && e.cfg.Bits == 32:

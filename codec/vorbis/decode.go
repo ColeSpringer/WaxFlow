@@ -1,6 +1,8 @@
 package vorbis
 
 import (
+	"slices"
+
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 )
@@ -157,10 +159,10 @@ func (d *Decoder) Decode(pkt []byte, emit func(*audio.Buffer) error) error {
 	}
 
 	// 4. Inverse channel coupling, in reverse order (spec 4.3.2).
-	for i := len(mp.couplingMag) - 1; i >= 0; i-- {
-		mag := d.spec[mp.couplingMag[i]]
+	for i, magCh := range slices.Backward(mp.couplingMag) {
+		mag := d.spec[magCh]
 		ang := d.spec[mp.couplingAng[i]]
-		for j := 0; j < n2; j++ {
+		for j := range n2 {
 			mv, av := mag[j], ang[j]
 			var newM, newA float32
 			if mv > 0 {
@@ -234,7 +236,7 @@ func (d *Decoder) Decode(pkt []byte, emit func(*audio.Buffer) error) error {
 		applyWindow(d.timeBuf, n, ln, rn, leftWin, rightWin)
 		dst := d.out.ChanF(wc)
 		prev := d.prev[vc]
-		for j := 0; j < l; j++ {
+		for j := range l {
 			var v float64
 			if pi := j + d.prevN/2; pi < d.prevN {
 				v += prev[pi]

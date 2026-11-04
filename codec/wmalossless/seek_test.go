@@ -61,7 +61,7 @@ func decodeFrom(t *testing.T, track container.Track, pkts [][]byte, k int) []int
 	// jump drops the carry and the filter state too, so a run-up that leaves a
 	// gap makes an empty Reset indistinguishable from a real one.
 	drop := func(*audio.Buffer) error { return nil }
-	for i := 0; i < k; i++ {
+	for i := range k {
 		if err := dec.Decode(pkts[i], drop); err != nil {
 			t.Fatalf("run-up packet %d: %v", i, err)
 		}

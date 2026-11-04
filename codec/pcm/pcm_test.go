@@ -184,7 +184,7 @@ func TestDecodeAppliesTheOrder(t *testing.T) {
 				if b.N != 64 {
 					t.Fatalf("decoded %d frames, want 64", b.N)
 				}
-				for c := 0; c < 3; c++ {
+				for c := range 3 {
 					want := int(order[c])
 					if f.Type == audio.Int {
 						if got, exp := b.ChanI(c), src.ChanI(want); !slices.Equal(got, exp) {

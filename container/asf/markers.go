@@ -62,7 +62,7 @@ func (d *Demuxer) parseMarkers(b []byte, off int64) error {
 	d.chapters = make([]container.Chapter, 0, min(uint64(count), room, maxMarkers))
 	var fault error
 	var past, long, firstPast uint32 // times past any duration; descriptions past the tag cap
-	for i := uint32(0); i < count; i++ {
+	for i := range count {
 		if i >= maxMarkers {
 			if uint64(count) > room {
 				fault = d.warn(off+mkCount, "the Marker Object declares %d markers and has room for at most %d", count, room)

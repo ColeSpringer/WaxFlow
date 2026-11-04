@@ -45,7 +45,7 @@ func FuzzDemux(f *testing.F) {
 			}
 			maxPackets := len(data)/7 + 4
 			var pkt container.Packet
-			for i := 0; i < maxPackets; i++ {
+			for range maxPackets {
 				err := d.ReadPacket(&pkt)
 				if errors.Is(err, io.EOF) || err != nil {
 					break

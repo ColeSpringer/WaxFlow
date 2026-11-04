@@ -43,7 +43,7 @@ func silkSumSqrShift(x []int16, length int) (energy int32, shift int) {
 // (silk_inner_prod_aligned_scale).
 func silkInnerProdAlignedScale(v1, v2 []int16, scale, length int) int32 {
 	var sum int32
-	for i := 0; i < length; i++ {
+	for i := range length {
 		sum += silkRSHIFT(silkSMULBB(int32(v1[i]), int32(v2[i])), scale)
 	}
 	return sum
@@ -54,10 +54,7 @@ func silkInnerProdAlignedScale(v1, v2 []int16, scale, length int) int32 {
 func silkStereoFindPredictor(ratioQ14 *int32, x, y []int16, midResAmpQ0 []int32, length int, smoothCoefQ16 int32) int32 {
 	nrgx, scale1 := silkSumSqrShift(x, length)
 	nrgy, scale2 := silkSumSqrShift(y, length)
-	scale := scale1
-	if scale2 > scale {
-		scale = scale2
-	}
+	scale := max(scale2, scale1)
 	scale += scale & 1
 	nrgy = silkRSHIFT(nrgy, scale-scale2)
 	nrgx = silkRSHIFT(nrgx, scale-scale1)
@@ -82,15 +79,15 @@ func silkStereoFindPredictor(ratioQ14 *int32, x, y []int16, midResAmpQ0 []int32,
 
 // silkStereoQuantPred quantizes the mid/side predictors (silk_stereo_quant_pred).
 func silkStereoQuantPred(predQ13 []int32, ix *[2][3]int8) {
-	for n := 0; n < 2; n++ {
+	for n := range 2 {
 		errMinQ13 := int32(silkInt32Max)
 		quantPredQ13 := int32(0)
 	search:
-		for i := 0; i < stereoQuantTabSize-1; i++ {
+		for i := range stereoQuantTabSize - 1 {
 			lowQ13 := int32(silk_stereo_pred_quant_Q13[i])
 			stepQ13 := silkSMULWB(int32(silk_stereo_pred_quant_Q13[i+1])-lowQ13,
 				silkFixConst(0.5/stereoQuantSubSteps, 16))
-			for j := 0; j < stereoQuantSubSteps; j++ {
+			for j := range stereoQuantSubSteps {
 				lvlQ13 := silkSMLABB(lowQ13, stepQ13, int32(2*j+1))
 				errQ13 := silkAbs32(predQ13[n] - lvlQ13)
 				if errQ13 < errMinQ13 {
@@ -116,7 +113,7 @@ func silkStereoQuantPred(predQ13 []int32, ix *[2][3]int8) {
 func silkStereoEncodePred(enc *rangeEncoder, ix *[2][3]int8) {
 	n := 5*int(ix[0][2]) + int(ix[1][2])
 	enc.encodeICDF(n, silk_stereo_pred_joint_iCDF, 8)
-	for n := 0; n < 2; n++ {
+	for n := range 2 {
 		enc.encodeICDF(int(ix[n][0]), silk_uniform3_iCDF, 8)
 		enc.encodeICDF(int(ix[n][1]), silk_uniform5_iCDF, 8)
 	}
@@ -154,14 +151,14 @@ func (state *stereoEncState) lrToMS(x1, x2 []int16, ix *[2][3]int8, midOnlyFlag 
 	// LP and HP filter mid and side signals.
 	lpMid := make([]int16, frameLength)
 	hpMid := make([]int16, frameLength)
-	for n := 0; n < frameLength; n++ {
+	for n := range frameLength {
 		sum := silkRSHIFTROUND(int32(mid[n])+int32(mid[n+2])+silkLSHIFT(int32(mid[n+1]), 1), 2)
 		lpMid[n] = int16(sum)
 		hpMid[n] = int16(int32(mid[n+1]) - sum)
 	}
 	lpSide := make([]int16, frameLength)
 	hpSide := make([]int16, frameLength)
-	for n := 0; n < frameLength; n++ {
+	for n := range frameLength {
 		sum := silkRSHIFTROUND(int32(side[n])+int32(side[n+2])+silkLSHIFT(int32(side[n+1]), 1), 2)
 		lpSide[n] = int16(sum)
 		hpSide[n] = int16(int32(side[n+1]) - sum)

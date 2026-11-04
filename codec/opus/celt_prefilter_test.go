@@ -59,8 +59,8 @@ func TestPrefilterMatchesLibopus(t *testing.T) {
 
 	// A clearly pitched signal: a 220 Hz harmonic stack with slow vibrato.
 	src := make([]float32, C*n)
-	for c := 0; c < C; c++ {
-		for i := 0; i < n; i++ {
+	for c := range C {
+		for i := range n {
 			ts := float64(i) / sr
 			var v float64
 			for k := 1; k <= 6; k++ {
@@ -85,8 +85,8 @@ func TestPrefilterMatchesLibopus(t *testing.T) {
 	in := filepath.Join(dir, "in.sw")
 	bit := filepath.Join(dir, "out.bit")
 	raw := make([]byte, 2*C*n)
-	for i := 0; i < n; i++ {
-		for c := 0; c < C; c++ {
+	for i := range n {
+		for c := range C {
 			s := int16(max(-32768, min(32767, int(src[c*n+i]*32768))))
 			binary.LittleEndian.PutUint16(raw[2*(i*C+c):], uint16(s))
 		}
@@ -113,7 +113,7 @@ func TestPrefilterMatchesLibopus(t *testing.T) {
 		t.Fatalf("too few comparable frames: %d", m)
 	}
 	agree, pfFrames := 0, 0
-	for i := 0; i < m; i++ {
+	for i := range m {
 		oOn, oP, oQ, oT := parsePF(ours[i])
 		lOn, lP, lQ, lT := parsePF(lib[i])
 		if lOn == 1 {

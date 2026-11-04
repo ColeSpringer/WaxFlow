@@ -41,25 +41,25 @@ func OpusCompare(ref, test []float32, nchannels int) float64 {
 		s := make([]float32, winSize)
 		xbuf := make([]float32, nchannels*winSize)
 		psSz := winSize / 2
-		for j := 0; j < winSize; j++ {
+		for j := range winSize {
 			window[j] = 0.5 - 0.5*float32(math.Cos((2*pi/(winSize-1))*float64(j)))
 			c[j] = float32(math.Cos((2 * pi / winSize) * float64(j)))
 			s[j] = float32(math.Sin((2 * pi / winSize) * float64(j)))
 		}
-		for xi := 0; xi < nframes; xi++ {
-			for ci := 0; ci < nchannels; ci++ {
-				for xk := 0; xk < winSize; xk++ {
+		for xi := range nframes {
+			for ci := range nchannels {
+				for xk := range winSize {
 					xbuf[ci*winSize+xk] = window[xk] * in[(xi*winStep+xk)*nchannels+ci]
 				}
 			}
 			xj := 0
-			for bi := 0; bi < nbands; bi++ {
+			for bi := range nbands {
 				var p [2]float64
 				for ; xj < bands[bi+1]; xj++ {
-					for ci := 0; ci < nchannels; ci++ {
+					for ci := range nchannels {
 						var re, im float64
 						ti := 0
-						for xk := 0; xk < winSize; xk++ {
+						for xk := range winSize {
 							re += float64(c[ti]) * float64(xbuf[ci*winSize+xk])
 							im -= float64(s[ti]) * float64(xbuf[ci*winSize+xk])
 							ti += xj
@@ -88,36 +88,36 @@ func OpusCompare(ref, test []float32, nchannels int) float64 {
 	bandEnergy(x, xb, X)
 	bandEnergy(y, nil, Y)
 
-	for xi := 0; xi < nframes; xi++ {
+	for xi := range nframes {
 		for bi := 1; bi < nbands; bi++ {
-			for ci := 0; ci < nchannels; ci++ {
+			for ci := range nchannels {
 				xb[(xi*nbands+bi)*nchannels+ci] += 0.1 * xb[(xi*nbands+bi-1)*nchannels+ci]
 			}
 		}
 		for bi := nbands - 1; bi > 0; {
 			bi--
-			for ci := 0; ci < nchannels; ci++ {
+			for ci := range nchannels {
 				xb[(xi*nbands+bi)*nchannels+ci] += 0.03 * xb[(xi*nbands+bi+1)*nchannels+ci]
 			}
 		}
 		if xi > 0 {
-			for bi := 0; bi < nbands; bi++ {
-				for ci := 0; ci < nchannels; ci++ {
+			for bi := range nbands {
+				for ci := range nchannels {
 					xb[(xi*nbands+bi)*nchannels+ci] += 0.5 * xb[((xi-1)*nbands+bi)*nchannels+ci]
 				}
 			}
 		}
 		if nchannels == 2 {
-			for bi := 0; bi < nbands; bi++ {
+			for bi := range nbands {
 				l := xb[(xi*nbands+bi)*nchannels+0]
 				r := xb[(xi*nbands+bi)*nchannels+1]
 				xb[(xi*nbands+bi)*nchannels+0] += 0.01 * r
 				xb[(xi*nbands+bi)*nchannels+1] += 0.01 * l
 			}
 		}
-		for bi := 0; bi < nbands; bi++ {
+		for bi := range nbands {
 			for xj := bands[bi]; xj < bands[bi+1]; xj++ {
-				for ci := 0; ci < nchannels; ci++ {
+				for ci := range nchannels {
 					X[(xi*nfreqs+xj)*nchannels+ci] += 0.1 * xb[(xi*nbands+bi)*nchannels+ci]
 					Y[(xi*nfreqs+xj)*nchannels+ci] += 0.1 * xb[(xi*nbands+bi)*nchannels+ci]
 				}
@@ -126,9 +126,9 @@ func OpusCompare(ref, test []float32, nchannels int) float64 {
 	}
 
 	// Average of consecutive frames.
-	for bi := 0; bi < nbands; bi++ {
+	for bi := range nbands {
 		for xj := bands[bi]; xj < bands[bi+1]; xj++ {
-			for ci := 0; ci < nchannels; ci++ {
+			for ci := range nchannels {
 				xtmp := X[xj*nchannels+ci]
 				ytmp := Y[xj*nchannels+ci]
 				for xi := 1; xi < nframes; xi++ {
@@ -144,12 +144,12 @@ func OpusCompare(ref, test []float32, nchannels int) float64 {
 
 	maxCompare := bands[nbands]
 	var err float64
-	for xi := 0; xi < nframes; xi++ {
+	for xi := range nframes {
 		var Ef float64
-		for bi := 0; bi < nbands; bi++ {
+		for bi := range nbands {
 			var Eb float64
 			for xj := bands[bi]; xj < bands[bi+1] && xj < maxCompare; xj++ {
-				for ci := 0; ci < nchannels; ci++ {
+				for ci := range nchannels {
 					re := float64(Y[(xi*nfreqs+xj)*nchannels+ci] / X[(xi*nfreqs+xj)*nchannels+ci])
 					im := re - math.Log(re) - 1
 					if xj >= 79 && xj <= 81 {

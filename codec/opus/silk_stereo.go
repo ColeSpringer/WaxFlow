@@ -19,11 +19,11 @@ func stereoDecodePred(dec *rangeDecoder, predQ13 []int32) {
 	n := dec.decodeICDF(silk_stereo_pred_joint_iCDF, 8)
 	ix[0][2] = n / 5
 	ix[1][2] = n - 5*ix[0][2]
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		ix[i][0] = dec.decodeICDF(silk_uniform3_iCDF, 8)
 		ix[i][1] = dec.decodeICDF(silk_uniform5_iCDF, 8)
 	}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		ix[i][0] += 3 * ix[i][2]
 		lowQ13 := int32(silk_stereo_pred_quant_Q13[ix[i][0]])
 		stepQ13 := silkSMULWB(int32(silk_stereo_pred_quant_Q13[ix[i][0]+1])-lowQ13,
@@ -52,7 +52,7 @@ func stereoMSToLR(st *stereoState, x1, x2 []int16, predQ13 []int32, fsKHz, frame
 	delta0 := silkRSHIFTROUND(silkSMULBB(predQ13[0]-st.predPrevQ13[0], denomQ16), 16)
 	delta1 := silkRSHIFTROUND(silkSMULBB(predQ13[1]-st.predPrevQ13[1], denomQ16), 16)
 	interp := stereoInterpLenMS * fsKHz
-	for n := 0; n < interp; n++ {
+	for n := range interp {
 		pred0 += delta0
 		pred1 += delta1
 		sum := silkLSHIFT(int32(x1[n])+int32(x1[n+2])+silkLSHIFT(int32(x1[n+1]), 1), 9)
@@ -70,7 +70,7 @@ func stereoMSToLR(st *stereoState, x1, x2 []int16, predQ13 []int32, fsKHz, frame
 	}
 	st.predPrevQ13[0] = predQ13[0]
 	st.predPrevQ13[1] = predQ13[1]
-	for n := 0; n < frameLength; n++ {
+	for n := range frameLength {
 		sum := int32(x1[n+1]) + int32(x2[n+1])
 		diff := int32(x1[n+1]) - int32(x2[n+1])
 		x1[n+1] = int16(silkSAT16(sum))
@@ -87,7 +87,7 @@ func (d *silkDecoder) decode(dec *rangeDecoder, ctrl silkControl, out [][]int16)
 	nAPI := ctrl.nChannelsAPI
 
 	if cs0.nFramesDecoded == 0 {
-		for n := 0; n < nInt; n++ {
+		for n := range nInt {
 			cs := &d.channel[n]
 			switch ctrl.payloadSizeMs {
 			case 10:
@@ -109,14 +109,14 @@ func (d *silkDecoder) decode(dec *rangeDecoder, ctrl silkControl, out [][]int16)
 		d.nChannelsAPI = nAPI
 		d.nChannelsInternal = nInt
 
-		for n := 0; n < nInt; n++ {
+		for n := range nInt {
 			cs := &d.channel[n]
 			for i := 0; i < cs.nFramesPerPacket; i++ {
 				cs.VADFlags[i] = dec.decodeBitLogp(1)
 			}
 			cs.LBRRFlag = dec.decodeBitLogp(1)
 		}
-		for n := 0; n < nInt; n++ {
+		for n := range nInt {
 			cs := &d.channel[n]
 			cs.LBRRFlags = [3]int{}
 			if cs.LBRRFlag != 0 {
@@ -132,7 +132,7 @@ func (d *silkDecoder) decode(dec *rangeDecoder, ctrl silkControl, out [][]int16)
 		}
 		// Consume (and discard) LBRR redundancy frames to stay bit-aligned.
 		for i := 0; i < cs0.nFramesPerPacket; i++ {
-			for n := 0; n < nInt; n++ {
+			for n := range nInt {
 				cs := &d.channel[n]
 				if cs.LBRRFlags[i] == 0 {
 					continue
@@ -179,10 +179,10 @@ func (d *silkDecoder) decode(dec *rangeDecoder, ctrl silkControl, out [][]int16)
 	hasSide := decodeOnlyMiddle == 0
 	frameLen := cs0.frameLength
 	var buf [2][]int16
-	for n := 0; n < nInt; n++ {
+	for n := range nInt {
 		buf[n] = make([]int16, frameLen+2)
 	}
-	for n := 0; n < nInt; n++ {
+	for n := range nInt {
 		cs := &d.channel[n]
 		if n == 0 || hasSide {
 			frameIndex := cs0.nFramesDecoded - n

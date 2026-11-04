@@ -26,7 +26,7 @@ func TestMDCTLinearity(t *testing.T) {
 			seed = seed*1664525 + 1013904223
 			return float32(int32(seed))/float32(1<<31) - 0
 		}
-		for i := 0; i < n2; i++ {
+		for i := range n2 {
 			x1[i] = rnd()
 			x2[i] = rnd()
 		}
@@ -46,7 +46,7 @@ func TestMDCTLinearity(t *testing.T) {
 		os := run(sum)
 
 		var maxErr float64
-		for i := 0; i < outLen; i++ {
+		for i := range outLen {
 			want := a*float64(o1[i]) + b*float64(o2[i])
 			got := float64(os[i])
 			if math.IsNaN(got) || math.IsInf(got, 0) {

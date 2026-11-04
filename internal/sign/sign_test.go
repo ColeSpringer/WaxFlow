@@ -204,11 +204,9 @@ func TestLoadOrCreateConcurrent(t *testing.T) {
 	errs := make([]error, racers)
 	var wg sync.WaitGroup
 	for i := range racers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			keys[i], errs[i] = LoadOrCreate(path)
-		}()
+		})
 	}
 	wg.Wait()
 	for i := range racers {

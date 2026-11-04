@@ -13,7 +13,7 @@ const (
 // silkGainsQuant quantizes the subframe gains uniformly on a log scale with
 // hysteresis (silk_gains_quant).
 func silkGainsQuant(ind []int8, gainQ16 []int32, prevInd *int8, conditional bool, nbSubfr int) {
-	for k := 0; k < nbSubfr; k++ {
+	for k := range nbSubfr {
 		v := silkSMULWB(gainQuantScaleQ16, silkLin2Log(gainQ16[k])-gainQuantOffset)
 		if v < int32(*prevInd) {
 			v++
@@ -46,7 +46,7 @@ func silkGainsQuant(ind []int8, gainQ16 []int32, prevInd *int8, conditional bool
 // (silk_gains_ID).
 func silkGainsID(ind []int8, nbSubfr int) int32 {
 	var gainsID int32
-	for k := 0; k < nbSubfr; k++ {
+	for k := range nbSubfr {
 		gainsID = int32(ind[k]) + silkLSHIFT32(gainsID, 8)
 	}
 	return gainsID
@@ -64,14 +64,14 @@ func silkVQWMatEC(ind *int8, resNrgQ15, rateDistQ8 *int32, gainQ7 *int32,
 	subfrLen int, maxGainQ7 int32, L int) {
 
 	var negxXQ24 [5]int32
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		negxXQ24[i] = -silkLSHIFT32(xXQ17[i], 7)
 	}
 
 	*rateDistQ8 = silkInt32Max
 	*resNrgQ15 = silkInt32Max
 	*ind = 0
-	for k := 0; k < L; k++ {
+	for k := range L {
 		cbRow := cbQ7[k]
 		gainTmpQ7 := int32(cbGainQ7[k])
 		sum1Q15 := silkFixConst(1.001, 15)
@@ -134,7 +134,7 @@ func silkQuantLTPGains(bQ14 []int16, cbkIndex []int8, periodicityIndex *int8,
 	// predGainDBQ7 below is the LAST codebook's accumulation, not the
 	// winner's (quant_LTP_gains.c leaves res_nrg_Q15 at its k==2 value).
 	resNrgQ15 := int32(0)
-	for k := 0; k < 3; k++ {
+	for k := range 3 {
 		gainSafety := silkFixConst(0.4, 7)
 		clPtrQ5 := silkLTPGainBITSQ5Ptrs[k]
 		cbkPtrQ7 := silkLTPVQPtrsQ7[k]
@@ -144,7 +144,7 @@ func silkQuantLTPGains(bQ14 []int16, cbkIndex []int8, periodicityIndex *int8,
 		resNrgQ15 = 0
 		rateDistQ7 := int32(0)
 		sumLogGainTmpQ7 := *sumLogGainQ7
-		for j := 0; j < nbSubfr; j++ {
+		for j := range nbSubfr {
 			maxGainQ7 := silkLog2Lin(silkFixConst(maxSumLogGainDB/6.0, 7)-sumLogGainTmpQ7+silkFixConst(7, 7)) - gainSafety
 			var resNrgQ15Subfr, rateDistQ7Subfr, gainQ7 int32
 			silkVQWMatEC(&tempIdx[j], &resNrgQ15Subfr, &rateDistQ7Subfr, &gainQ7,
@@ -163,8 +163,8 @@ func silkQuantLTPGains(bQ14 []int16, cbkIndex []int8, periodicityIndex *int8,
 	}
 
 	cbkPtrQ7 := silkLTPVQPtrsQ7[*periodicityIndex]
-	for j := 0; j < nbSubfr; j++ {
-		for k := 0; k < silkLTPOrder; k++ {
+	for j := range nbSubfr {
+		for k := range silkLTPOrder {
 			bQ14[j*silkLTPOrder+k] = int16(silkLSHIFT(int32(cbkPtrQ7[cbkIndex[j]][k]), 7))
 		}
 	}

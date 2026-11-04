@@ -17,7 +17,7 @@ var (
 )
 
 func init() {
-	for cb := 0; cb < 11; cb++ {
+	for cb := range 11 {
 		codes := make([]uint32, len(spectralCodes[cb]))
 		for i, c := range spectralCodes[cb] {
 			codes[i] = uint32(c)
@@ -85,7 +85,7 @@ func decodeSpectral(r *bitReader, cb int, out []int) bool {
 	}
 	if !hcbUnsigned[cb-1] {
 		off := hcbOff[cb-1]
-		for d := 0; d < dim; d++ {
+		for d := range dim {
 			out[d] -= off // signed value, no sign bit
 		}
 		return true
@@ -94,19 +94,19 @@ func decodeSpectral(r *bitReader, cb int, out []int) bool {
 	// (in order), then the escape words for magnitude 16. Reading them in
 	// that order keeps the variable-length escape prefix bit-aligned.
 	var neg [4]bool
-	for d := 0; d < dim; d++ {
+	for d := range dim {
 		if out[d] != 0 {
 			neg[d] = r.bit() != 0
 		}
 	}
 	if cb == escHCB {
-		for d := 0; d < dim; d++ {
+		for d := range dim {
 			if out[d] == 16 {
 				out[d] = decodeEscape(r)
 			}
 		}
 	}
-	for d := 0; d < dim; d++ {
+	for d := range dim {
 		if neg[d] {
 			out[d] = -out[d]
 		}

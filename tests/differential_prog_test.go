@@ -73,7 +73,7 @@ func hasTopLevelBox(data []byte, typ string) bool {
 				return false
 			}
 			var s int64
-			for i := 0; i < 8; i++ {
+			for i := range 8 {
 				s = s<<8 | int64(data[off+8+i])
 			}
 			size = int(s)

@@ -235,7 +235,7 @@ func (d *Demuxer) sv7Bits(pos int64, n int) (uint32, bool) {
 		return 0, false
 	}
 	var acc uint64
-	for j := int64(0); j < 5; j++ {
+	for j := range int64(5) {
 		acc <<= 8
 		if i := int((m0 + j - w0) ^ 3); i < len(buf) {
 			acc |= uint64(buf[i])
@@ -268,7 +268,7 @@ func (d *Demuxer) sv7Realign(dst []byte, pos int64, bitLen int) ([]byte, bool) {
 		}
 		return 0
 	}
-	for j := 0; j < count; j++ {
+	for j := range count {
 		m := m0 + int64(j)
 		b := lb(m) << shift
 		if shift != 0 {

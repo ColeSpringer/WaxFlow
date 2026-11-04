@@ -107,7 +107,7 @@ func TestVorbisCoupledStereo(t *testing.T) {
 			const frames = couplingRate * couplingSeconds
 			f := audio.Format{Rate: couplingRate, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Float, BitDepth: 32}
 			src := make([]float32, frames*2)
-			for i := 0; i < frames; i++ {
+			for i := range frames {
 				tt := float64(i) / couplingRate
 				src[i*2] = float32(c.l(tt))
 				src[i*2+1] = float32(c.r(tt))
@@ -188,7 +188,7 @@ func checkCoupledChannels(t *testing.T, decoder string, dec, src []float32) {
 		t.Errorf("%s: decoded no samples", decoder)
 		return
 	}
-	for ch := 0; ch < 2; ch++ {
+	for ch := range 2 {
 		d := deinterleave(dec, 2, ch)
 		s := deinterleave(src, 2, ch)
 		corr := bestLagCorrelation(d, s)
@@ -223,7 +223,7 @@ func checkDecodersAgree(t *testing.T, a, b struct {
 	if len(a.pcm) == 0 || len(b.pcm) == 0 {
 		return // already reported by checkCoupledChannels
 	}
-	for ch := 0; ch < 2; ch++ {
+	for ch := range 2 {
 		if corr := bestLagCorrelation(deinterleave(b.pcm, 2, ch), deinterleave(a.pcm, 2, ch)); corr < 0.999 {
 			t.Errorf("%s and %s ch%d disagree on the same file: correlation %.5f, want >= 0.999",
 				a.name, b.name, ch, corr)
@@ -283,7 +283,7 @@ func bestLagCorrelation(got, want []float32) float64 {
 			continue
 		}
 		var xy, xx, yy float64
-		for i := 0; i < n; i++ {
+		for i := range n {
 			a, b := float64(got[gi+i]), float64(want[wi+i])
 			xy += a * b
 			xx += a * a

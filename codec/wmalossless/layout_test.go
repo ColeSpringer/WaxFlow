@@ -225,12 +225,12 @@ func TestMultipleSubframesInAFrame(t *testing.T) {
 	}
 	w.put(0, 8) // gain
 	w.put(0, 1) // no skips
-	for s := 0; s < n; s++ {
+	for s := range n {
 		w.put(0, 1) // not seekable
 		w.put(1, 1) // raw PCM, so no filter state is needed
 		w.put(0, 1) // no padding
 		for c := 0; c < cfg.Channels; c++ {
-			for i := 0; i < sub; i++ {
+			for i := range sub {
 				v := int32(s*1000 + i - 500 + c*7)
 				want[c][s*sub+i] = v
 				w.put(uint32(v)&0xFFFF, 16)

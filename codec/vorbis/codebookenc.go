@@ -1,6 +1,9 @@
 package vorbis
 
-import "math"
+import (
+	"math"
+	"slices"
+)
 
 // The encode side of a codebook. It mirrors the decoder's codebook (codebook.go)
 // but adds what emission needs: per-entry codewords ready for the LSB-first
@@ -70,7 +73,7 @@ func buildEncBook(s bookSpec) *encBook {
 	if !ok {
 		panic("vorbis: over-subscribed encoder codebook")
 	}
-	for e := 0; e < entries; e++ {
+	for e := range entries {
 		l := s.lengths[e]
 		b.codeLen[e] = l
 		b.codeword[e] = reverseCodeword(codes[e], l)
@@ -99,14 +102,7 @@ func (b *encBook) emit(w *bitWriter, e int) {
 // so the nearest point is a rounded index; the clamp keeps out-of-range residue on
 // the lattice. This is the per-dimension half of the separable nearest-entry search.
 func (b *encBook) latIndex(v float64) int {
-	idx := int(math.Round((v - b.minimum) / b.delta))
-	if idx < 0 {
-		idx = 0
-	}
-	if idx >= b.lookupValues {
-		idx = b.lookupValues - 1
-	}
-	return idx
+	return min(max(int(math.Round((v-b.minimum)/b.delta)), 0), b.lookupValues-1)
 }
 
 // latValue reconstructs the lattice point at an index (the decoder's per-dimension
@@ -170,13 +166,7 @@ func writeCodebook(w *bitWriter, s bookSpec) {
 	w.writeBits(16, uint32(s.dimensions))
 	w.writeBits(24, uint32(entries))
 
-	sparse := false
-	for _, l := range s.lengths {
-		if l == 0 {
-			sparse = true
-			break
-		}
-	}
+	sparse := slices.Contains(s.lengths, 0)
 	w.writeBit(0) // not ordered
 	if sparse {
 		w.writeBit(1)

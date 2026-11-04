@@ -93,7 +93,7 @@ func (m *mdctForward) forward(windowed []float32, spec []float32) {
 	// The TDAC fold: every input position outside [0, n/2) lands back inside
 	// it with a sign, which is the aliasing the window pairs cancel.
 	u := m.u
-	for j := 0; j < q; j++ {
+	for j := range q {
 		u[j] = -windowed[3*q-1-j] - windowed[j+3*q]
 	}
 	for j := q; j < n2; j++ {
@@ -101,14 +101,14 @@ func (m *mdctForward) forward(windowed []float32, spec []float32) {
 	}
 	// Pre-rotation, the n/4-point DFT, then post-rotation: one complex output
 	// carries C[2k] in its real part and C[n2-1-2k] in its imaginary part.
-	for j := 0; j < q; j++ {
+	for j := range q {
 		x1, x2 := u[2*j], u[n2-1-2*j]
 		c, s := m.rotRe[j], m.rotIm[j]
 		m.inRe[j] = x1*c - x2*s
 		m.inIm[j] = x2*c + x1*s
 	}
 	m.plan.Transform(m.outRe, m.outIm, m.inRe, m.inIm)
-	for k := 0; k < q; k++ {
+	for k := range q {
 		re, im := m.outRe[k], m.outIm[k]
 		c, s := m.rotRe[k], m.rotIm[k]
 		spec[2*k] = m.scale * (re*c - im*s)

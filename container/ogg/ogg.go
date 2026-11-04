@@ -55,11 +55,3 @@ func crc32(crc uint32, b []byte) uint32 {
 	}
 	return crc
 }
-
-func le32(b []byte) uint32 {
-	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
-}
-
-func le64(b []byte) uint64 {
-	return uint64(le32(b)) | uint64(le32(b[4:]))<<32
-}

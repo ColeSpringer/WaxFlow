@@ -135,7 +135,7 @@ func TestMuxOpusGapless(t *testing.T) {
 
 	// Five 480-sample packets (TOC 0x00 = SILK NB 10 ms, one frame).
 	var pkts []codec.Packet
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		pkts = append(pkts, codec.Packet{Data: []byte{0x00, byte(i), 0x55}, Dur: 480, PTS: int64(i * 480)})
 	}
 	const padding = 88

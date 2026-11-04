@@ -191,7 +191,7 @@ func (m *mclms) run(x [][]int32, coded []bool, n int, clipLo, clipHi int32) {
 	span := m.order * m.channels
 	bias := int32(1<<uint(m.scaling)) >> 1
 	sh := uint(m.scaling)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		for c := 0; c < m.channels; c++ {
 			if !coded[c] {
 				m.pred[c] = 0

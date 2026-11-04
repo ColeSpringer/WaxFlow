@@ -488,16 +488,13 @@ func (d *Demuxer) parseSeekTable(off, length int64) error {
 			return err
 		}
 	}
-	points := length / 18
-	if points > maxSeekPoints {
-		points = maxSeekPoints
-	}
+	points := min(length/18, maxSeekPoints)
 	raw := make([]byte, points*18)
 	if err := container.ReadFull(d.src, raw, off); err != nil {
 		return container.ShortRead("flac: reading SEEKTABLE", err)
 	}
 	d.seekTable = make([]seekPoint, 0, points)
-	for i := int64(0); i < points; i++ {
+	for i := range points {
 		b := raw[i*18:]
 		sample := binary.BigEndian.Uint64(b)
 		if sample == 1<<64-1 {

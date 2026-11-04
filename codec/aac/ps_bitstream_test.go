@@ -71,7 +71,7 @@ func TestPSDataDeltaTime(t *testing.T) {
 	w.put(0, 1)
 	w.put(1, 2)
 	w.put(0, 1)
-	for b := 0; b < 10; b++ {
+	for b := range 10 {
 		d := 1
 		if b >= 4 {
 			d = -1
@@ -88,7 +88,7 @@ func TestPSDataDeltaTime(t *testing.T) {
 	w2.put(0, 1)
 	w2.put(1, 2)
 	w2.put(1, 1) // dt = 1: anchored on frame A's last envelope
-	for b := 0; b < 10; b++ {
+	for range 10 {
 		psPutHuff(&w2, psTreeIIDDT, 0)
 	}
 	if _, ok := ps.parse(w2.reader(), 1<<20); !ok {
@@ -112,7 +112,7 @@ func TestPSDataEnvelopeFixup(t *testing.T) {
 	w.put(0, 2)  // one envelope
 	w.put(15, 5) // border at 15: short of 31
 	w.put(0, 1)
-	for b := 0; b < 10; b++ {
+	for b := range 10 {
 		d := 1
 		if b >= 4 {
 			d = -1
@@ -141,7 +141,7 @@ func TestPSDataBorderViolation(t *testing.T) {
 	w.put(0, 1)
 	w.put(1, 2)
 	w.put(0, 1)
-	for b := 0; b < 10; b++ {
+	for b := range 10 {
 		d := 2
 		if b >= 3 {
 			d = 0
@@ -180,7 +180,7 @@ func TestPSDataICCNegative(t *testing.T) {
 	w.put(0, 1)
 	w.put(1, 2)
 	w.put(0, 1) // iid df
-	for b := 0; b < 10; b++ {
+	for range 10 {
 		psPutHuff(&w, psTreeIIDDF, 0)
 	}
 	w.put(0, 1) // icc df
@@ -232,7 +232,7 @@ func TestPSData34Bands(t *testing.T) {
 	w.put(0, 1)
 	w.put(1, 2)
 	w.put(0, 1)
-	for b := 0; b < 34; b++ {
+	for range 34 {
 		psPutHuff(&w, psTreeIIDDF, 0)
 	}
 	if _, ok := ps.parse(w.reader(), 1<<20); !ok {
@@ -254,7 +254,7 @@ func TestPSDataIPDOPD(t *testing.T) {
 	w.put(0, 1)
 	w.put(1, 2)
 	w.put(0, 1)
-	for b := 0; b < 10; b++ {
+	for range 10 {
 		psPutHuff(&w, psTreeIIDDF, 0)
 	}
 	// Extension: 6 bytes; id 0, enable, per-envelope dt+5 ipd and dt+5 opd
@@ -263,11 +263,11 @@ func TestPSDataIPDOPD(t *testing.T) {
 	w.put(0, 2) // ps_extension_id 0
 	w.put(1, 1) // enable_ipdopd
 	w.put(0, 1)
-	for b := 0; b < 5; b++ {
+	for range 5 {
 		psPutHuff(&w, psTreeIPDDF, 3)
 	}
 	w.put(0, 1)
-	for b := 0; b < 5; b++ {
+	for range 5 {
 		psPutHuff(&w, psTreeOPDDF, 3)
 	}
 	w.put(0, 1) // reserved

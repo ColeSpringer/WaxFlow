@@ -70,7 +70,7 @@ func opusTrackFor(preSkip, samples int64, npkt int) (container.Track, []codec.Pa
 		Samples:     samples,
 	}
 	var pkts []codec.Packet
-	for i := 0; i < npkt; i++ {
+	for i := range npkt {
 		pkts = append(pkts, codec.Packet{Data: []byte{0x00, byte(i), byte(i >> 8), 0x5A}, Dur: 960, Sync: true})
 	}
 	return t, pkts
@@ -320,7 +320,7 @@ func TestFragmentedSeek(t *testing.T) {
 // the reader clamps each to at least one sample, like the stbl reader.
 func TestFragmentedDurClamp(t *testing.T) {
 	d := craftDemuxer(1, 48000, 48000, []uint32{0, 0, 0}, []uint32{4, 4, 4})
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		var pkt container.Packet
 		if err := d.ReadPacket(&pkt); err != nil {
 			t.Fatalf("ReadPacket %d: %v", i, err)
@@ -341,7 +341,7 @@ func TestFragmentedTimescaleRescale(t *testing.T) {
 	// timescale 96000 = 2x rate 48000; a 1920-tick sample is 960 output samples.
 	d := craftDemuxer(1, 96000, 48000, []uint32{1920, 1920}, []uint32{8, 8})
 	var pts int64
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		var pkt container.Packet
 		if err := d.ReadPacket(&pkt); err != nil {
 			t.Fatalf("ReadPacket %d: %v", i, err)

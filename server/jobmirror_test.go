@@ -31,14 +31,14 @@ func fillNonZero(t *testing.T, v reflect.Value, n *int) {
 		v.Set(reflect.New(v.Type().Elem()))
 		fillNonZero(t, v.Elem(), n)
 	case reflect.Struct:
-		if v.Type() == reflect.TypeOf(time.Time{}) {
+		if v.Type() == reflect.TypeFor[time.Time]() {
 			*n++
 			v.Set(reflect.ValueOf(time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC).
 				Add(time.Duration(*n) * time.Second)))
 			return
 		}
-		for i := range v.NumField() {
-			fillNonZero(t, v.Field(i), n)
+		for _, field := range v.Fields() {
+			fillNonZero(t, field, n)
 		}
 	case reflect.Slice:
 		s := reflect.MakeSlice(v.Type(), 1, 1)

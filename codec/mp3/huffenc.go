@@ -116,15 +116,14 @@ var bigCandidates = [...]int{
 	16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
 }
 
-// noLinbitsTables code values up to 15 with no escape; treeA (16-23) and
-// treeB (24-31) each share a tree and differ only in linbits, ascending. For
-// a region whose peak exceeds 15 the cheapest choice in each escape tree is
-// the smallest linbits that still reaches the peak (more linbits only adds
-// escape bits), so selection tries just those two.
+// treeA (16-23) and treeB (24-31) each share a tree and differ only in
+// linbits, ascending. For a region whose peak exceeds 15 the cheapest choice
+// in each escape tree is the smallest linbits that still reaches the peak
+// (more linbits only adds escape bits), so selection tries just those two.
+// The tables with no escape, which code values up to 15, are nlTiers.
 var (
-	noLinbitsTables = []int{1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15}
-	treeA           = []int{16, 17, 18, 19, 20, 21, 22, 23}
-	treeB           = []int{24, 25, 26, 27, 28, 29, 30, 31}
+	treeA = []int{16, 17, 18, 19, 20, 21, 22, 23}
+	treeB = []int{24, 25, 26, 27, 28, 29, 30, 31}
 )
 
 // pairBits returns the bit cost of coding the pair (ax, ay) of absolute

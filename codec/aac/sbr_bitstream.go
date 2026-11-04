@@ -130,7 +130,7 @@ func parseGrid(r *bitReader, g *sbrGrid) bool {
 		g.numEnv = numRel + 1
 		g.tE[0] = 0
 		g.tE[g.numEnv] = absBord
-		for i := 0; i < numRel; i++ {
+		for i := range numRel {
 			w := 2*int(r.read(2)) + 2
 			g.tE[g.numEnv-1-i] = g.tE[g.numEnv-i] - w
 		}
@@ -146,7 +146,7 @@ func parseGrid(r *bitReader, g *sbrGrid) bool {
 		g.tE[0] = int(r.read(2))
 		numRel := int(r.read(2))
 		g.numEnv = numRel + 1
-		for i := 0; i < numRel; i++ {
+		for i := range numRel {
 			w := 2*int(r.read(2)) + 2
 			g.tE[i+1] = g.tE[i] + w
 		}
@@ -169,11 +169,11 @@ func parseGrid(r *bitReader, g *sbrGrid) bool {
 			return false
 		}
 		g.tE[g.numEnv] = absBord1
-		for i := 0; i < numRel0; i++ {
+		for i := range numRel0 {
 			w := 2*int(r.read(2)) + 2
 			g.tE[i+1] = g.tE[i] + w
 		}
-		for i := 0; i < numRel1; i++ {
+		for i := range numRel1 {
 			w := 2*int(r.read(2)) + 2
 			g.tE[g.numEnv-1-i] = g.tE[g.numEnv-i] - w
 		}
@@ -337,7 +337,7 @@ func parseEnvelope(r *bitReader, t *sbrFreqTables, fd *sbrFrameData,
 				ref = &fd.env[l-1]
 				refRes = fd.grid.freqRes[l-1]
 			}
-			for b := 0; b < n; b++ {
+			for b := range n {
 				d := int32(sbrHuffDecode(r, tTab))
 				pb := mapPrevBand(t, fd.grid.freqRes[l], refRes, b)
 				fd.env[l][b] = ref[pb] + d

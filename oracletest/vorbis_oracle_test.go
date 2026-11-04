@@ -51,13 +51,10 @@ func TestVorbisEncodeJfreymuthDecode(t *testing.T) {
 			return nil
 		}
 		for off := 0; off < n; off += 1024 {
-			end := off + 1024
-			if end > n {
-				end = n
-			}
+			end := min(off+1024, n)
 			buf := audio.Get(f, end-off)
 			buf.N = end - off
-			for c := 0; c < ch; c++ {
+			for c := range ch {
 				copy(buf.ChanF(c), src[c][off:end])
 			}
 			if err := e.Encode(buf, emit); err != nil {
@@ -91,8 +88,8 @@ func TestVorbisEncodeJfreymuthDecode(t *testing.T) {
 		// reconstruction tracks the source (a foreign decoder producing the
 		// right waveform is the real cross-check).
 		ref := make([]float32, n*ch)
-		for i := 0; i < n; i++ {
-			for c := 0; c < ch; c++ {
+		for i := range n {
+			for c := range ch {
 				ref[i*ch+c] = src[c][i]
 			}
 		}

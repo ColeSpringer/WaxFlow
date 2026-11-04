@@ -60,8 +60,8 @@ func silkNLSFDecode(pNLSFQ15 []int16, nlsfIndices []int8, cb *nlsfCB) {
 // silkNLSFStabilize enforces the minimum NLSF spacing (silk_NLSF_stabilize).
 func silkNLSFStabilize(nlsfQ15 []int16, ndeltaMinQ15 []int16, L int) {
 	const maxLoops = 20
-	var I, loops int
-	for loops = 0; loops < maxLoops; loops++ {
+	var I int
+	for range maxLoops {
 		minDiff := int32(nlsfQ15[0]) - int32(ndeltaMinQ15[0])
 		I = 0
 		for i := 1; i <= L-1; i++ {
@@ -79,11 +79,12 @@ func silkNLSFStabilize(nlsfQ15 []int16, ndeltaMinQ15 []int16, L int) {
 		if minDiff >= 0 {
 			return
 		}
-		if I == 0 {
+		switch I {
+		case 0:
 			nlsfQ15[0] = ndeltaMinQ15[0]
-		} else if I == L {
+		case L:
 			nlsfQ15[L-1] = int16(int32(1<<15) - int32(ndeltaMinQ15[L]))
-		} else {
+		default:
 			minCenter := int32(0)
 			for k := 0; k < I; k++ {
 				minCenter += int32(ndeltaMinQ15[k])
@@ -140,7 +141,7 @@ func silkNLSF2A(aQ12 []int16, nlsf []int16, d int) {
 		ordering = nlsf2AOrdering10[:]
 	}
 	var cosLSFQA [silkMaxLPCOrder]int32
-	for k := 0; k < d; k++ {
+	for k := range d {
 		fInt := silkRSHIFT(int32(nlsf[k]), 15-7)
 		fFrac := int32(nlsf[k]) - silkLSHIFT(fInt, 15-7)
 		cosVal := int32(silk_LSFCosTab_FIX_Q12[fInt])
@@ -152,7 +153,7 @@ func silkNLSF2A(aQ12 []int16, nlsf []int16, d int) {
 	silkNLSF2AFindPoly(P[:], cosLSFQA[0:], dd)
 	silkNLSF2AFindPoly(Q[:], cosLSFQA[1:], dd)
 	var a32QA1 [silkMaxLPCOrder]int32
-	for k := 0; k < dd; k++ {
+	for k := range dd {
 		Ptmp := P[k+1] + P[k]
 		Qtmp := Q[k+1] - Q[k]
 		a32QA1[k] = -Qtmp - Ptmp
@@ -161,7 +162,7 @@ func silkNLSF2A(aQ12 []int16, nlsf []int16, d int) {
 	silkLPCFit(aQ12, a32QA1[:], 12, nlsf2AQA+1, d)
 	for i := 0; silkLPCInversePredGain(aQ12, d) == 0 && i < maxLPCStabilizeIters; i++ {
 		silkBWExpander32(a32QA1[:], d, int32(65536-silkLSHIFT(2, i)))
-		for k := 0; k < d; k++ {
+		for k := range d {
 			aQ12[k] = int16(silkRSHIFTROUND(a32QA1[k], nlsf2AQA+1-12))
 		}
 	}
@@ -173,7 +174,7 @@ func silkLPCFit(aQOut []int16, aQIn []int32, qOut, qIn, d int) {
 	var i, idx int
 	for i = 0; i < 10; i++ {
 		maxabs := int32(0)
-		for k := 0; k < d; k++ {
+		for k := range d {
 			absval := silkAbs32(aQIn[k])
 			if absval > maxabs {
 				maxabs = absval
@@ -191,12 +192,12 @@ func silkLPCFit(aQOut []int16, aQIn []int32, qOut, qIn, d int) {
 		}
 	}
 	if i == 10 {
-		for k := 0; k < d; k++ {
+		for k := range d {
 			aQOut[k] = int16(silkSAT16(silkRSHIFTROUND(aQIn[k], qIn-qOut)))
 			aQIn[k] = silkLSHIFT(int32(aQOut[k]), qIn-qOut)
 		}
 	} else {
-		for k := 0; k < d; k++ {
+		for k := range d {
 			aQOut[k] = int16(silkRSHIFTROUND(aQIn[k], qIn-qOut))
 		}
 	}
@@ -213,16 +214,6 @@ func silkBWExpander32(ar []int32, d int, chirpQ16 int32) {
 	ar[d-1] = silkSMULWW(chirpQ16, ar[d-1])
 }
 
-// silkBWExpander applies chirp to Q12 int16 LPC coefficients (silk_bwexpander).
-func silkBWExpander(ar []int16, d int, chirpQ16 int32) {
-	chirpMinusOne := chirpQ16 - 65536
-	for i := 0; i < d-1; i++ {
-		ar[i] = int16(silkRSHIFTROUND(chirpQ16*int32(ar[i]), 16))
-		chirpQ16 += silkRSHIFTROUND(chirpQ16*chirpMinusOne, 16)
-	}
-	ar[d-1] = int16(silkRSHIFTROUND(chirpQ16*int32(ar[d-1]), 16))
-}
-
 const invPredGainQA = 24
 
 // silkLPCInversePredGain returns the inverse prediction gain (Q30), or 0 if the
@@ -230,7 +221,7 @@ const invPredGainQA = 24
 func silkLPCInversePredGain(aQ12 []int16, order int) int32 {
 	var atmpQA [silkMaxLPCOrder]int32
 	dcResp := int32(0)
-	for k := 0; k < order; k++ {
+	for k := range order {
 		dcResp += int32(aQ12[k])
 		atmpQA[k] = silkLSHIFT32(int32(aQ12[k]), invPredGainQA-12)
 	}

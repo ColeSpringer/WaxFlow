@@ -18,7 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -56,7 +56,7 @@ func keyless(t *testing.T, env *testEnv, pathAndQuery string) *http.Response {
 // parsed playlists do not carry.
 func playlistLines(body []byte) []string {
 	var lines []string
-	for _, l := range strings.Split(string(body), "\n") {
+	for l := range strings.SplitSeq(string(body), "\n") {
 		if l != "" {
 			lines = append(lines, l)
 		}
@@ -354,14 +354,13 @@ func segmentDecodeSamples(t *testing.T, seg []byte) int64 {
 		}
 		if typ == "moof" {
 			body := seg[off+8 : off+size]
-			i := bytes.Index(body, []byte("trun"))
-			if i < 0 {
+			_, b, ok := bytes.Cut(body, []byte("trun"))
+			if !ok {
 				t.Fatal("moof without trun")
 			}
-			b := body[i+4:]
 			n := int(binary.BigEndian.Uint32(b[4:]))
 			at := 12
-			for j := 0; j < n; j++ {
+			for range n {
 				total += int64(binary.BigEndian.Uint32(b[at:]))
 				at += 8
 			}
@@ -430,7 +429,7 @@ func TestHLSSeekRestartLatency(t *testing.T) {
 		}
 		times = append(times, took)
 	}
-	sort.Slice(times, func(i, j int) bool { return times[i] < times[j] })
+	slices.Sort(times)
 	t.Logf("seek-to-segment times (sorted): %v", times)
 	if worst := times[len(times)-1]; worst > 3*time.Second {
 		t.Fatalf("worst seek-to-segment %v; the p95 target is <1s", worst)

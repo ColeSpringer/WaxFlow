@@ -67,7 +67,7 @@ func ODGProxy(ref, test []float32, rate, channels int) float64 {
 	rc := make([]complex128, odgWindow)
 	tc := make([]complex128, odgWindow)
 	for off := 0; off+odgWindow <= n; off += odgHop {
-		for i := 0; i < odgWindow; i++ {
+		for i := range odgWindow {
 			rc[i] = complex(float64(r[off+i])*win[i], 0)
 			tc[i] = complex(float64(t[off+i])*win[i], 0)
 		}
@@ -120,7 +120,7 @@ func ODGBandNMR(ref, test []float32, rate, channels int) []BandStat {
 	tc := make([]complex128, odgWindow)
 	half := odgWindow / 2
 	for off := 0; off+odgWindow <= n; off += odgHop {
-		for i := 0; i < odgWindow; i++ {
+		for i := range odgWindow {
 			rc[i] = complex(float64(r[off+i])*win[i], 0)
 			tc[i] = complex(float64(t[off+i])*win[i], 0)
 		}
@@ -310,9 +310,9 @@ func downmixMono(x []float32, channels int) []float32 {
 	}
 	n := len(x) / channels
 	out := make([]float32, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		var s float32
-		for c := 0; c < channels; c++ {
+		for c := range channels {
 			s += x[i*channels+c]
 		}
 		out[i] = s / float32(channels)

@@ -15,6 +15,7 @@ package wmalossless_test
 
 import (
 	"encoding/binary"
+	"slices"
 	"strings"
 	"testing"
 
@@ -252,19 +253,14 @@ func frameHead(cfg wmalossless.Config, w *bitWriter, takes []int) {
 }
 
 func allTake(takes []int) bool {
-	for _, v := range takes {
-		if v == 0 {
-			return false
-		}
-	}
-	return true
+	return !slices.Contains(takes, 0)
 }
 
 // cdlmsDef writes a minimal filter definition: one filter per channel, order
 // 16, scaling 12, nothing transmitted.
 func cdlmsDef(w *bitWriter, channels int) {
 	w.put(0, 1) // no transmitted coefficients
-	for c := 0; c < channels; c++ {
+	for range channels {
 		w.put(0, 3) // one filter
 		w.put(1, 7) // order (1+1)*8 = 16
 		w.put(12, 4)

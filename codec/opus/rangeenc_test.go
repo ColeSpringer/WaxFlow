@@ -36,7 +36,7 @@ func buildScript(n int) []op {
 		{25, 23, 2, 0}, {2, 0},
 	}
 	ops := make([]op, 0, n)
-	for i := 0; i < n; i++ {
+	for range n {
 		switch rnd() % 7 {
 		case 0:
 			ft := 2 + rnd()%4000

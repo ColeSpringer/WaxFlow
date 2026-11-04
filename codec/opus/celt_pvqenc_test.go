@@ -54,7 +54,7 @@ func TestPVQEncodeRoundTrip(t *testing.T) {
 			if B > N {
 				B = 1
 			}
-			for trial := 0; trial < 8; trial++ {
+			for trial := range 8 {
 				X := make([]float32, N)
 				for i := range X {
 					X[i] = rnd()
@@ -77,7 +77,7 @@ func TestPVQEncodeRoundTrip(t *testing.T) {
 				if cmEnc != cmDec {
 					t.Fatalf("N=%d K=%d trial=%d: collapse mask enc=%#x dec=%#x", N, K, trial, cmEnc, cmDec)
 				}
-				for i := 0; i < N; i++ {
+				for i := range N {
 					if d := math.Abs(float64(xEnc[i] - xDec[i])); d > 1e-6 {
 						t.Fatalf("N=%d K=%d trial=%d idx=%d: enc=%g dec=%g diff=%g",
 							N, K, trial, i, xEnc[i], xDec[i], d)

@@ -101,7 +101,7 @@ func (p *mdctPlan) backward(in []float32, stride int, out []float32, window []fl
 	// Pre-rotation: fold the coefficients from both ends into n4 complex
 	// samples. Real and imaginary parts are swapped throughout because the DFT
 	// runs forward where the transform wants an inverse (libopus does the same).
-	for i := 0; i < n4; i++ {
+	for i := range n4 {
 		x1 := float64(in[(2*i)*stride])
 		x2 := float64(in[(n2-1-2*i)*stride])
 		yr := x2*tr[i] + x1*tr[n4+i]
@@ -116,7 +116,7 @@ func (p *mdctPlan) backward(in []float32, stride int, out []float32, window []fl
 	// Post-rotation and de-shuffle into out[overlap/2 : overlap/2 + n2].
 	mid := overlap / 2
 	half := (n4 + 1) >> 1
-	for i := 0; i < half; i++ {
+	for i := range half {
 		// low end
 		re := float64(gi[i])
 		im := float64(gr[i])
@@ -168,7 +168,7 @@ func (p *mdctPlan) forward(in []float32, out []float32, stride int, window []flo
 	// Window, shuffle, fold the n2+overlap input into n4 complex samples, fused
 	// with the pre-rotation (libopus folds then pre-rotates in two passes; the
 	// arithmetic is identical done together).
-	for i := 0; i < n4; i++ {
+	for i := range n4 {
 		xp1 := o2 + 2*i
 		xp2 := n2 - 1 + o2 - 2*i
 		var re, im float64
@@ -198,7 +198,7 @@ func (p *mdctPlan) forward(in []float32, out []float32, stride int, window []flo
 	p.fp.Transform(gr, gi, fr, fi)
 
 	// Post-rotation, de-shuffled into out at the block stride.
-	for i := 0; i < n4; i++ {
+	for i := range n4 {
 		t0 := tr[i]
 		t1 := tr[n4+i]
 		yr := float64(gi[i])*t1 - float64(gr[i])*t0

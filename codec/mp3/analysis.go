@@ -37,8 +37,8 @@ func init() {
 	for i := range enwindow {
 		enwindow[i] = float64(synthD[i]) / 32
 	}
-	for sb := 0; sb < 32; sb++ {
-		for k := 0; k < 64; k++ {
+	for sb := range 32 {
+		for k := range 64 {
 			anaCos[sb][k] = math.Cos(float64((2*sb+1)*(k-16)) * math.Pi / 64)
 		}
 	}
@@ -51,32 +51,26 @@ type analyzer struct {
 	overlap [32][18]float64
 }
 
-// reset clears the filterbank and MDCT history (a fresh stream or a splice).
-func (a *analyzer) reset() {
-	a.fifo = [512]float64{}
-	a.overlap = [32][18]float64{}
-}
-
 // subband pushes 32 new PCM samples (time order) through the polyphase
 // filterbank and writes 32 subband samples to out.
 func (a *analyzer) subband(in []float32, out *[32]float64) {
 	f := &a.fifo
 	copy(f[32:], f[:512-32])
-	for i := 0; i < 32; i++ {
+	for i := range 32 {
 		f[i] = float64(in[31-i])
 	}
 	var z [64]float64
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		s := 0.0
-		for j := 0; j < 8; j++ {
+		for j := range 8 {
 			s += f[i+64*j] * enwindow[i+64*j]
 		}
 		z[i] = s
 	}
-	for sb := 0; sb < 32; sb++ {
+	for sb := range 32 {
 		m := &anaCos[sb]
 		s := 0.0
-		for k := 0; k < 64; k++ {
+		for k := range 64 {
 			s += z[k] * m[k]
 		}
 		out[sb] = s
@@ -92,9 +86,9 @@ func (a *analyzer) subband(in []float32, out *[32]float64) {
 func (a *analyzer) granuleMDCT(pcm []float32, xr *[576]float32) {
 	var sb [32][18]float64
 	var s [32]float64
-	for ss := 0; ss < 18; ss++ {
+	for ss := range 18 {
 		a.subband(pcm[32*ss:32*ss+32], &s)
-		for j := 0; j < 32; j++ {
+		for j := range 32 {
 			sb[j][ss] = s[j]
 		}
 	}
@@ -110,17 +104,17 @@ func (a *analyzer) granuleMDCT(pcm []float32, xr *[576]float32) {
 	}
 
 	win := &imdctWinF[blockNormal]
-	for j := 0; j < 32; j++ {
+	for j := range 32 {
 		var z [36]float64
-		for p := 0; p < 18; p++ {
+		for p := range 18 {
 			z[p] = a.overlap[j][p] * float64(win[p])
 			z[p+18] = sb[j][p] * float64(win[p+18])
 		}
 		a.overlap[j] = sb[j]
 
-		for m := 0; m < 18; m++ {
+		for m := range 18 {
 			acc := 0.0
-			for p := 0; p < 36; p++ {
+			for p := range 36 {
 				acc += z[p] * float64(cosN36f[m][p])
 			}
 			xr[j*18+m] = float32(acc * mdctScale)
@@ -136,7 +130,7 @@ func (a *analyzer) granuleMDCT(pcm []float32, xr *[576]float32) {
 func forwardAlias(xr *[576]float32) {
 	for sb := 1; sb <= 31; sb++ {
 		edge := 18 * sb
-		for i := 0; i < 8; i++ {
+		for i := range 8 {
 			lo, hi := edge-1-i, edge+i
 			a, b := float64(xr[lo]), float64(xr[hi])
 			xr[lo] = float32(a*csTab[i] + b*caTab[i])

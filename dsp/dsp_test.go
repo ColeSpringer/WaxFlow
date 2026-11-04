@@ -273,7 +273,7 @@ func TestChainClipped(t *testing.T) {
 	defer audio.Put(src)
 	for ch := 0; ch < in.Channels; ch++ {
 		s := src.ChanF(ch)
-		for i := 0; i < overs; i++ {
+		for i := range overs {
 			s[i*7] = 1.5
 		}
 	}
@@ -376,7 +376,7 @@ func TestChainTruePeak(t *testing.T) {
 		b := audio.Get(f, frames)
 		b.N = frames
 		for ch := 0; ch < f.Channels; ch++ {
-			for i := 0; i < frames; i++ {
+			for i := range frames {
 				v := 1.2 * math.Sin(math.Pi/2*float64(i)+math.Pi/4)
 				if f.Type == audio.Int {
 					b.ChanI(ch)[i] = int32(math.RoundToEven(v * float64(int64(1)<<(f.BitDepth-1))))

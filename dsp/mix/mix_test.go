@@ -45,7 +45,7 @@ func TestStereoToMono(t *testing.T) {
 		t.Fatal(err)
 	}
 	// db3*(L+R): row energy is exactly 1, no rescale.
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if got := float64(m.coef[0][i]); math.Abs(got-db3) > eps {
 			t.Errorf("coef[0][%d] = %.6f, want %.6f", i, got, db3)
 		}
@@ -60,7 +60,7 @@ func TestMonoToStereoUnity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for o := 0; o < 2; o++ {
+	for o := range 2 {
 		if got := float64(m.coef[o][0]); got != 1 {
 			t.Errorf("coef[%d][0] = %.6f, want exactly 1", o, got)
 		}

@@ -47,7 +47,7 @@ func parseResidue(r *bitReader, numBooks int) (residue, error) {
 	res.books = make([][]int, res.classes)
 	for i := 0; i < res.classes; i++ {
 		res.books[i] = make([]int, 8)
-		for j := 0; j < 8; j++ {
+		for j := range 8 {
 			res.books[i][j] = -1
 			if cascade[i]&(1<<uint(j)) != 0 {
 				b := int(r.read(8))
@@ -106,7 +106,7 @@ func (res *residue) decode(r *bitReader, cbs []codebook, out [][]float32, doNotD
 		pcount := 0
 		for pcount < partRead {
 			if pass == 0 {
-				for j := 0; j < ch; j++ {
+				for j := range ch {
 					if doNotDecode[j] {
 						continue
 					}
@@ -123,7 +123,7 @@ func (res *residue) decode(r *bitReader, cbs []codebook, out [][]float32, doNotD
 				}
 			}
 			for i := 0; i < classwords && pcount < partRead; i, pcount = i+1, pcount+1 {
-				for j := 0; j < ch; j++ {
+				for j := range ch {
 					if doNotDecode[j] {
 						continue
 					}
@@ -204,13 +204,13 @@ func (res *residue) partition(r *bitReader, book *codebook, target []float32, of
 	dim := book.dimensions
 	if res.kind == 0 {
 		step := res.partSize / dim
-		for i := 0; i < step; i++ {
+		for i := range step {
 			entry, err := book.decodeScalar(r)
 			if err != nil {
 				return err
 			}
 			book.valueVector(entry, vec[:dim])
-			for k := 0; k < dim; k++ {
+			for k := range dim {
 				pos := off + i + k*step
 				if pos >= 0 && pos < len(target) {
 					target[pos] += vec[k]

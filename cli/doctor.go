@@ -348,7 +348,7 @@ func benchWAV(seconds int) []byte {
 		return (float64(rng)/float64(math.MaxUint32) - 0.5) * 0.05
 	}
 	var phaseL, phaseR float64
-	for i := 0; i < frames; i++ {
+	for i := range frames {
 		t := float64(i) / rate
 		f := 220 + 3000*t/float64(seconds)
 		phaseL += 2 * math.Pi * f / rate

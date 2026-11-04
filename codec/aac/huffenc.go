@@ -22,7 +22,7 @@ func specTupleBits(cb int, v []int) int {
 	idx := 0
 	extra := 0
 	if hcbUnsigned[cb-1] {
-		for d := 0; d < dim; d++ {
+		for d := range dim {
 			m := v[d]
 			if m < 0 {
 				m = -m
@@ -44,7 +44,7 @@ func specTupleBits(cb int, v []int) int {
 			idx = idx*mod + m
 		}
 	} else {
-		for d := 0; d < dim; d++ {
+		for d := range dim {
 			s := v[d] + off
 			if s < 0 || s >= mod {
 				return -1
@@ -73,7 +73,7 @@ func (w *bitWriter) writeSpecTuple(cb int, v []int) {
 	idx := 0
 	var mag [4]int
 	if hcbUnsigned[cb-1] {
-		for d := 0; d < dim; d++ {
+		for d := range dim {
 			m := v[d]
 			if m < 0 {
 				m = -m
@@ -86,7 +86,7 @@ func (w *bitWriter) writeSpecTuple(cb int, v []int) {
 			idx = idx*mod + c
 		}
 	} else {
-		for d := 0; d < dim; d++ {
+		for d := range dim {
 			idx = idx*mod + v[d] + off
 		}
 	}
@@ -94,7 +94,7 @@ func (w *bitWriter) writeSpecTuple(cb int, v []int) {
 	if !hcbUnsigned[cb-1] {
 		return
 	}
-	for d := 0; d < dim; d++ {
+	for d := range dim {
 		if mag[d] != 0 {
 			s := uint64(0)
 			if v[d] < 0 {
@@ -104,7 +104,7 @@ func (w *bitWriter) writeSpecTuple(cb int, v []int) {
 		}
 	}
 	if cb == escHCB {
-		for d := 0; d < dim; d++ {
+		for d := range dim {
 			if mag[d] >= 16 {
 				n := 0
 				for mag[d] >= 1<<uint(n+5) {

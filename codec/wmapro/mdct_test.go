@@ -16,7 +16,7 @@ func dct4(x []float64) []float64 {
 	out := make([]float64, n)
 	for m := range out {
 		var s float64
-		for k := 0; k < n; k++ {
+		for k := range n {
 			s += x[k] * math.Cos(math.Pi*float64(2*k+1)*float64(2*m+1)/float64(4*n))
 		}
 		out[m] = s
@@ -31,7 +31,7 @@ func textbookIMDCT(x []float64) []float64 {
 	out := make([]float64, 2*n)
 	for i := range out {
 		var s float64
-		for k := 0; k < n; k++ {
+		for k := range n {
 			s += x[k] * math.Cos(math.Pi/float64(n)*(float64(i)+0.5+float64(n)/2)*(float64(k)+0.5))
 		}
 		out[i] = s

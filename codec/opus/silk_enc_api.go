@@ -9,7 +9,7 @@ package opus
 // newSILKEncoder returns an initialized SILK encoder (silk_InitEncoder).
 func newSILKEncoder(channels int) *silkEncoder {
 	e := &silkEncoder{}
-	for n := 0; n < channels; n++ {
+	for n := range channels {
 		e.channel[n].initEncoderChannel()
 	}
 	e.nChannelsAPI = 1
@@ -76,7 +76,7 @@ func (ch *silkEncoderChannel) encodeFrame(enc *rangeEncoder, condCoding, maxBits
 	silkShort2FloatArray(ch.xBuf[xFrameOff+laShapeMS*ch.fsKHz:], ch.inputBuf[1:], ch.frameLength)
 
 	// Avoid denormals.
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		v := float32(1 - (i & 2))
 		ch.xBuf[xFrameOff+laShapeMS*ch.fsKHz+i*(ch.frameLength>>3)] += v * 1e-6
 	}
@@ -408,15 +408,13 @@ func (e *silkEncoder) encode(encControl *silkEncControl, samplesIn []int16, nSam
 	samplesPos := 0
 	for {
 		nSamplesToBuffer := e.channel[0].frameLength - e.channel[0].inputBufIx
-		if nSamplesToBuffer > nSamplesToBufferMax {
-			nSamplesToBuffer = nSamplesToBufferMax
-		}
+		nSamplesToBuffer = min(nSamplesToBuffer, nSamplesToBufferMax)
 		nSamplesFromInput := nSamplesToBuffer * e.channel[0].apiFsHz / (e.channel[0].fsKHz * 1000)
 
 		switch {
 		case encControl.nChannelsAPI == 2 && encControl.nChannelsInternal == 2:
 			id := e.channel[0].nFramesEncoded
-			for n := 0; n < nSamplesFromInput; n++ {
+			for n := range nSamplesFromInput {
 				buf[n] = samplesIn[samplesPos+2*n]
 			}
 			if e.nPrevChannelsInternal == 1 && id == 0 {
@@ -429,14 +427,14 @@ func (e *silkEncoder) encode(encControl *silkEncControl, samplesIn []int16, nSam
 			if v := 10 * nBlocksOf10ms * e.channel[1].fsKHz; nSamplesToBuffer > v {
 				nSamplesToBuffer = v
 			}
-			for n := 0; n < nSamplesFromInput; n++ {
+			for n := range nSamplesFromInput {
 				buf[n] = samplesIn[samplesPos+2*n+1]
 			}
 			e.channel[1].resampler.resample(e.channel[1].inputBuf[e.channel[1].inputBufIx+2:], buf, nSamplesFromInput)
 			e.channel[1].inputBufIx += nSamplesToBuffer
 
 		case encControl.nChannelsAPI == 2 && encControl.nChannelsInternal == 1:
-			for n := 0; n < nSamplesFromInput; n++ {
+			for n := range nSamplesFromInput {
 				sum := int32(samplesIn[samplesPos+2*n]) + int32(samplesIn[samplesPos+2*n+1])
 				buf[n] = int16(silkRSHIFTROUND(sum, 1))
 			}

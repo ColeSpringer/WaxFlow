@@ -13,7 +13,7 @@ const quantLevelAdjustQ10 = 80 // QUANT_LEVEL_ADJUST_Q10
 // backward from pos.
 func nsqShortPrediction(buf []int32, pos int, coef []int16, order int) int32 {
 	out := int32(order >> 1)
-	for j := 0; j < order; j++ {
+	for j := range order {
 		out = silkSMLAWB(out, buf[pos-j], int32(coef[j]))
 	}
 	return out
@@ -110,7 +110,7 @@ func noiseShapeQuantizer(NSQ *silkNSQState, signalType int, xScQ10 []int32, puls
 
 	psLPC := nsqLPCBufLength - 1
 
-	for i := 0; i < length; i++ {
+	for i := range length {
 		NSQ.randSeed = silkRAND(NSQ.randSeed)
 
 		lpcPredQ10 := nsqShortPrediction(NSQ.sLPCQ14[:], psLPC, aQ12, predictLPCOrder)
@@ -269,10 +269,10 @@ func (ch *silkEncoderChannel) nsqScaleStates(NSQ *silkNSQState, x16 []int16, xSc
 		}
 		NSQ.sLFARShpQ14 = silkSMULWW(gainAdjQ16, NSQ.sLFARShpQ14)
 		NSQ.sDiffShpQ14 = silkSMULWW(gainAdjQ16, NSQ.sDiffShpQ14)
-		for i := 0; i < nsqLPCBufLength; i++ {
+		for i := range nsqLPCBufLength {
 			NSQ.sLPCQ14[i] = silkSMULWW(gainAdjQ16, NSQ.sLPCQ14[i])
 		}
-		for i := 0; i < maxShapeLPCOrder; i++ {
+		for i := range maxShapeLPCOrder {
 			NSQ.sAR2Q14[i] = silkSMULWW(gainAdjQ16, NSQ.sAR2Q14[i])
 		}
 		NSQ.prevGainQ16 = gainsQ16[subfr]
@@ -329,10 +329,7 @@ func (ch *silkEncoderChannel) nsqDelDec(NSQ *silkNSQState, psIndices *silkIndice
 
 	offsetQ10 := int32(silk_Quantization_Offsets_Q10[psIndices.signalType>>1][psIndices.quantOffsetType])
 	smplBufIdx := 0
-	dd := decisionDelay
-	if dd > ch.subfrLength {
-		dd = ch.subfrLength
-	}
+	dd := min(decisionDelay, ch.subfrLength)
 	if psIndices.signalType == typeVoiced {
 		for k := 0; k < ch.nbSubfr; k++ {
 			if v := pitchL[k] - silkLTPOrder/2 - 1; v < dd {
@@ -471,7 +468,7 @@ func (ch *silkEncoderChannel) noiseShapeQuantizerDelDec(NSQ *silkNSQState, psDel
 	predLagPtr := NSQ.sLTPBufIdx - lag + silkLTPOrder/2
 	gainQ10 := silkRSHIFT(gainQ16, 6)
 
-	for i := 0; i < length; i++ {
+	for i := range length {
 		// Long-term prediction, shared across states.
 		var ltpPredQ14 int32
 		if signalType == typeVoiced {
@@ -493,7 +490,7 @@ func (ch *silkEncoderChannel) noiseShapeQuantizerDelDec(NSQ *silkNSQState, psDel
 			shpLagPtr++
 		}
 
-		for k := 0; k < nStatesDelayedDecision; k++ {
+		for k := range nStatesDelayedDecision {
 			psDD := &psDelDec[k]
 			psSS := &psSampleState[k]
 
@@ -556,7 +553,7 @@ func (ch *silkEncoderChannel) noiseShapeQuantizerDelDec(NSQ *silkNSQState, psDel
 				psSS[1].QQ10 = q1Q10
 			}
 
-			for c := 0; c < 2; c++ {
+			for c := range 2 {
 				excQ14 := silkLSHIFT32(psSS[c].QQ10, 4)
 				if psDD.Seed < 0 {
 					excQ14 = -excQ14
@@ -591,7 +588,7 @@ func (ch *silkEncoderChannel) noiseShapeQuantizerDelDec(NSQ *silkNSQState, psDel
 
 		// Expire states that disagree with the winner's committed dither.
 		winnerRandState := psDelDec[winnerInd].RandState[lastSmpleIdx]
-		for k := 0; k < nStatesDelayedDecision; k++ {
+		for k := range nStatesDelayedDecision {
 			if psDelDec[k].RandState[lastSmpleIdx] != winnerRandState {
 				psSampleState[k][0].RDQ10 += silkInt32Max >> 4
 				psSampleState[k][1].RDQ10 += silkInt32Max >> 4
@@ -645,7 +642,7 @@ func (ch *silkEncoderChannel) noiseShapeQuantizerDelDec(NSQ *silkNSQState, psDel
 		NSQ.sLTPShpBufIdx++
 		NSQ.sLTPBufIdx++
 
-		for k := 0; k < nStatesDelayedDecision; k++ {
+		for k := range nStatesDelayedDecision {
 			psDD := &psDelDec[k]
 			psSS := &psSampleState[k][0]
 			psDD.LFARQ14 = psSS.LFARQ14
@@ -701,17 +698,17 @@ func (ch *silkEncoderChannel) nsqDelDecScaleStates(NSQ *silkNSQState, psDelDec [
 				sLTPQ15[i] = silkSMULWW(gainAdjQ16, sLTPQ15[i])
 			}
 		}
-		for k := 0; k < nStatesDelayedDecision; k++ {
+		for k := range nStatesDelayedDecision {
 			psDD := &psDelDec[k]
 			psDD.LFARQ14 = silkSMULWW(gainAdjQ16, psDD.LFARQ14)
 			psDD.DiffQ14 = silkSMULWW(gainAdjQ16, psDD.DiffQ14)
-			for i := 0; i < nsqLPCBufLength; i++ {
+			for i := range nsqLPCBufLength {
 				psDD.sLPCQ14[i] = silkSMULWW(gainAdjQ16, psDD.sLPCQ14[i])
 			}
-			for i := 0; i < maxShapeLPCOrder; i++ {
+			for i := range maxShapeLPCOrder {
 				psDD.sAR2Q14[i] = silkSMULWW(gainAdjQ16, psDD.sAR2Q14[i])
 			}
-			for i := 0; i < decisionDelay; i++ {
+			for i := range decisionDelay {
 				psDD.PredQ15[i] = silkSMULWW(gainAdjQ16, psDD.PredQ15[i])
 				psDD.ShapeQ14[i] = silkSMULWW(gainAdjQ16, psDD.ShapeQ14[i])
 			}

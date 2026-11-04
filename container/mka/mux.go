@@ -455,7 +455,7 @@ func (m *Muxer) recordCue() {
 	}
 	if m.clusters%m.cueStride == 0 {
 		if len(m.cues) == maxCuePoints {
-			for i := 0; i < maxCuePoints/2; i++ {
+			for i := range maxCuePoints / 2 {
 				m.cues[i] = m.cues[2*i]
 			}
 			m.cues = m.cues[:maxCuePoints/2]

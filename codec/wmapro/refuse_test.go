@@ -395,7 +395,7 @@ func quantHead(cfg wmapro.Config, w *bitWriter, delta int) {
 // delta on every band.
 func dpcm(w *bitWriter, nb int) {
 	w.put(0, 2)
-	for i := 0; i < nb; i++ {
+	for range nb {
 		w.code("scaleDelta", 60)
 	}
 }
@@ -542,7 +542,7 @@ func TestBitstreamRefusals(t *testing.T) {
 			w.put(2, 2)
 			w.put(0, 1)
 			w.signed(31, 6)
-			for i := 0; i < 9; i++ {
+			for range 9 {
 				w.put(31, 5)
 			}
 			w.put(5, 5)
@@ -582,7 +582,7 @@ func TestBitstreamRefusals(t *testing.T) {
 			w.put(0, 8) // gain
 			w.put(0, 1) // no trims
 			nb := wmapro.BandCountForTest(cfg, 1)
-			for i := 0; i < 2; i++ {
+			for i := range 2 {
 				subframeHead(cfg, w)
 				w.put(2, 2)
 				quantHead(cfg, w, 0)
@@ -825,7 +825,7 @@ func TestTheseAreNotDamage(t *testing.T) {
 		w.put(2, 2)
 		w.put(0, 1)
 		w.signed(-32, 6)
-		for i := 0; i < 4; i++ {
+		for range 4 {
 			w.put(31, 5)
 		}
 		w.put(0, 5)

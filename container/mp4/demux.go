@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
@@ -321,9 +322,9 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 			// unsupported, a truncated one is damage, and the wrap must not
 			// flatten the two into one answer.
 			return waxerr.Wrap(waxerr.CodeOf(stsdErr),
-				fmt.Sprintf("mp4: no decodable audio track (found: %s)", joinNames(foundCodecs)), stsdErr)
+				fmt.Sprintf("mp4: no decodable audio track (found: %s)", strings.Join(foundCodecs, ", ")), stsdErr)
 		case len(foundCodecs) > 0:
-			return unsupported("no decodable audio track (found: %s)", joinNames(foundCodecs))
+			return unsupported("no decodable audio track (found: %s)", strings.Join(foundCodecs, ", "))
 		}
 		return unsupported("no audio track")
 	}
@@ -676,17 +677,6 @@ func (d *Demuxer) mp3AdoptFrameFormat(t *track) error {
 	}
 	t.fmt = got
 	return nil
-}
-
-func joinNames(names []string) string {
-	out := ""
-	for i, n := range names {
-		if i > 0 {
-			out += ", "
-		}
-		out += n
-	}
-	return out
 }
 
 // trimBrand renders a 4-byte brand, trimming trailing spaces and NULs, or

@@ -427,7 +427,7 @@ func TestGolombCode(t *testing.T) {
 func TestPRNGMatchesTheReferenceSetup(t *testing.T) {
 	parity := func(x uint32) uint32 { return uint32(bits.OnesCount32(x) & 1) }
 	r1, r2 := uint32(1), uint32(1)
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		want1 := r1>>1 | parity(r1&0xF5)<<31
 		want2 := r2<<1 | parity(r2>>25&0x63)
 		v, n1, n2 := musepack.PRNGNext(r1, r2)

@@ -141,14 +141,14 @@ func genBroadband(rate, frames, ch int, seed uint64) []float32 {
 	out := make([]float32, frames*ch)
 	freqs := []float64{110, 220, 440, 880, 1500, 3000, 6000, 9000}
 	s := seed
-	for i := 0; i < frames; i++ {
+	for i := range frames {
 		var v float64
 		for j, fq := range freqs {
 			v += 0.12 * math.Sin(2*math.Pi*fq*float64(i)/float64(rate)+float64(j))
 		}
 		s = s*6364136223846793005 + 1442695040888963407
 		v += 0.05 * (2*float64(int64(s>>11))/float64(1<<53) - 1)
-		for c := 0; c < ch; c++ {
+		for c := range ch {
 			out[i*ch+c] = float32(v)
 		}
 	}
@@ -157,11 +157,11 @@ func genBroadband(rate, frames, ch int, seed uint64) []float32 {
 
 func genTonal(rate, frames, ch int) []float32 {
 	out := make([]float32, frames*ch)
-	for i := 0; i < frames; i++ {
+	for i := range frames {
 		v := 0.4*math.Sin(2*math.Pi*523.25*float64(i)/float64(rate)) +
 			0.25*math.Sin(2*math.Pi*1046.5*float64(i)/float64(rate)) +
 			0.15*math.Sin(2*math.Pi*1568*float64(i)/float64(rate))
-		for c := 0; c < ch; c++ {
+		for c := range ch {
 			out[i*ch+c] = float32(v)
 		}
 	}
@@ -171,11 +171,11 @@ func genTonal(rate, frames, ch int) []float32 {
 func genTransient(rate, frames, ch int) []float32 {
 	out := make([]float32, frames*ch)
 	period := rate / 8
-	for i := 0; i < frames; i++ {
+	for i := range frames {
 		phase := i % period
 		env := math.Exp(-float64(phase) / float64(rate) * 60)
 		v := env * math.Sin(2*math.Pi*2000*float64(phase)/float64(rate)) * 0.6
-		for c := 0; c < ch; c++ {
+		for c := range ch {
 			out[i*ch+c] = float32(v)
 		}
 	}
@@ -186,11 +186,11 @@ func genNoise(frames, ch int, seed uint64) []float32 {
 	out := make([]float32, frames*ch)
 	s := seed
 	var lp float64
-	for i := 0; i < frames; i++ {
+	for i := range frames {
 		s = s*6364136223846793005 + 1442695040888963407
 		w := 2*float64(int64(s>>11))/float64(1<<53) - 1
 		lp = 0.97*lp + 0.03*w // pink-ish
-		for c := 0; c < ch; c++ {
+		for c := range ch {
 			out[i*ch+c] = float32(0.5 * lp)
 		}
 	}
@@ -206,7 +206,7 @@ func synthWAVFromSamples(t *testing.T, f audio.Format, interleaved []float32) []
 	buf.N = frames
 	for ch := 0; ch < f.Channels; ch++ {
 		dst := buf.ChanF(ch)
-		for i := 0; i < frames; i++ {
+		for i := range frames {
 			dst[i] = interleaved[i*f.Channels+ch]
 		}
 	}

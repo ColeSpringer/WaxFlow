@@ -43,11 +43,11 @@ func encodeResidueType1(w *bitWriter, r *residue, books []*encBook, residues [][
 		end = n2
 	}
 	partRead := (end - begin) / r.partSize
-	for p := 0; p < partRead; p++ {
-		for j := 0; j < ch; j++ {
+	for p := range partRead {
+		for j := range ch {
 			classbook.emit(w, classes[j][p])
 		}
-		for j := 0; j < ch; j++ {
+		for j := range ch {
 			chain := r.books[classes[j][p]]
 			if chain[0] >= 0 {
 				emitResidueVectors(w, books[chain[0]], nil, residues[j], begin+p*r.partSize, r.partSize, n2, magAngle(j == magChannel, ang), isLastBook(chain, 0))
@@ -56,8 +56,8 @@ func encodeResidueType1(w *bitWriter, r *residue, books []*encBook, residues [][
 	}
 	var prevs [maxResPass]*encBook
 	for pass := 1; pass < r.maxPass; pass++ {
-		for p := 0; p < partRead; p++ {
-			for j := 0; j < ch; j++ {
+		for p := range partRead {
+			for j := range ch {
 				chain := r.books[classes[j][p]]
 				book := chain[pass]
 				if book < 0 {
@@ -130,7 +130,7 @@ func emitResidueVectors(w *bitWriter, book *encBook, prevs []*encBook, resid []f
 	var vec [maxBookVecDim]float64
 	var sp [maxBookVecDim]bool
 	for i := 0; i < partSize; i += dim {
-		for k := 0; k < dim; k++ {
+		for k := range dim {
 			bin := off + i + k
 			v := 0.0
 			inRange := bin >= 0 && bin < n2
@@ -172,7 +172,7 @@ func cascadeValue(book *encBook, prevs []*encBook, x float64) float64 {
 // residue the value book clamps. A skipped partition is zeroed on decode
 // regardless, so its residue values here are irrelevant.
 func normalizeResidue(spec, curve, dst []float32, n2 int) {
-	for i := 0; i < n2; i++ {
+	for i := range n2 {
 		dst[i] = spec[i] / curve[i]
 	}
 }

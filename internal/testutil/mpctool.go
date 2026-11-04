@@ -182,7 +182,7 @@ func MPCInfo(t testing.TB, path string) MPCStreamInfo {
 	t.Helper()
 	out := runMPC(t, MPCDecRawTool(t), "-i", path)
 	fields := map[string]string{}
-	for _, line := range strings.Split(string(out), "\n") {
+	for line := range strings.SplitSeq(string(out), "\n") {
 		if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
 			fields[k] = v
 		}

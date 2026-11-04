@@ -64,7 +64,7 @@ func TestQMFUpsampling(t *testing.T) {
 	out := make([]float32, 64*frames)
 	var re32, im32 [32]float32
 	var re, im [64]float32
-	for s := 0; s < frames; s++ {
+	for s := range frames {
 		ana.analyze(in[32*s:32*s+32], re32[:], im32[:])
 		clear(re[:])
 		clear(im[:])

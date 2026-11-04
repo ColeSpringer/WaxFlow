@@ -351,7 +351,7 @@ func (ps *psDec) stereoProcess(is34 int) {
 		mix = 1 // ICC modes 3-5 select mixing procedure B
 	}
 	for e := 0; e < d.numEnv; e++ {
-		for b := 0; b < nrPar; b++ {
+		for b := range nrPar {
 			row := int(iidM[e][b]) + 7 + 23*d.iidQuant
 			h := &psMixLUT[mix][row][iccM[e][b]]
 			h11, h12, h21, h22 := h[0], h[1], h[2], h[3]
@@ -513,11 +513,11 @@ func psRemapPar(dst *[5][34]int8, src *[5][34]int8, numPar, numEnv, is34 int, fu
 	if is34 == 1 {
 		switch numPar {
 		case 20, 11:
-			for e := 0; e < numEnv; e++ {
+			for e := range numEnv {
 				psMapIdx20To34(&dst[e], &src[e], full)
 			}
 		case 10, 5:
-			for e := 0; e < numEnv; e++ {
+			for e := range numEnv {
 				psMapIdx10To34(&dst[e], &src[e], full)
 			}
 		default:
@@ -527,11 +527,11 @@ func psRemapPar(dst *[5][34]int8, src *[5][34]int8, numPar, numEnv, is34 int, fu
 	}
 	switch numPar {
 	case 34, 17:
-		for e := 0; e < numEnv; e++ {
+		for e := range numEnv {
 			psMapIdx34To20(&dst[e], &src[e], full)
 		}
 	case 10, 5:
-		for e := 0; e < numEnv; e++ {
+		for e := range numEnv {
 			psMapIdx10To20(&dst[e], &src[e], full)
 		}
 	default:

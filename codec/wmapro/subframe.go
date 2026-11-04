@@ -98,7 +98,7 @@ func (d *Decoder) tiling(r *bitReader) error {
 		// The last possible frontier admits one length only, so no channel at
 		// it needs a presence bit and no length field is read either.
 		last := frontier == d.frameLen-d.minSubframeLen
-		for c := 0; c < nc; c++ {
+		for c := range nc {
 			switch {
 			case d.ch[c].placed != frontier:
 				d.takes[c] = false
@@ -115,7 +115,7 @@ func (d *Decoder) tiling(r *bitReader) error {
 			return err
 		}
 		frontier += length
-		for c := 0; c < nc; c++ {
+		for c := range nc {
 			ch := &d.ch[c]
 			if d.takes[c] {
 				if len(ch.subLens) >= maxSubframesPerChannel {
@@ -301,7 +301,7 @@ func (d *Decoder) subframe(r *bitReader, part []int, off, length int) error {
 			}
 		}
 	}
-	d.applyTransforms(k, length, edges, nb)
+	d.applyTransforms(length, edges, nb)
 	for _, c := range part {
 		if err := d.reconstruct(c, off, length, edges, nb); err != nil {
 			return err
@@ -482,7 +482,7 @@ func (d *Decoder) groupBands(r *bitReader, g *group, k int) error {
 
 // applyTransforms runs every group's transform over the coded coefficients,
 // which happens after all channels are decoded and BEFORE dequantisation.
-func (d *Decoder) applyTransforms(k, length int, edges []int, nb int) {
+func (d *Decoder) applyTransforms(length int, edges []int, nb int) {
 	for gi := range d.nGroups {
 		g := &d.groups[gi]
 		n := len(g.chans)

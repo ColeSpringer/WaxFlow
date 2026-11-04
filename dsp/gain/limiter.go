@@ -295,7 +295,7 @@ func (l *Limiter) detect(draining bool) {
 				for p := range l.interp {
 					phase := &l.interp[p]
 					var acc float32
-					for t := 0; t < interpTaps; t++ {
+					for t := range interpTaps {
 						acc += phase[t] * win[t]
 					}
 					if a := abs32(acc); a > peak {
@@ -319,7 +319,7 @@ func (l *Limiter) detectEdge(buf []float32, j int, peak float32) float32 {
 	for p := range l.interp {
 		phase := &l.interp[p]
 		var acc float32
-		for t := 0; t < interpTaps; t++ {
+		for t := range interpTaps {
 			if i := j - half + 1 + t; i >= 0 && i < l.have {
 				acc += phase[t] * buf[i]
 			}
@@ -415,7 +415,7 @@ func (l *Limiter) designInterp() {
 		c := &l.interp[p-1]
 		frac := float64(p) / 4
 		var sum float64
-		for t := 0; t < interpTaps; t++ {
+		for t := range interpTaps {
 			// Tap t weighs sample j-half+1+t for the value at j+frac.
 			x := frac - float64(t-half+1)
 			w := firwin.BesselI0(beta*math.Sqrt(1-(x/float64(half))*(x/float64(half)))) / i0

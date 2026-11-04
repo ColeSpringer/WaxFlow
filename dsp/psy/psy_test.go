@@ -46,7 +46,7 @@ func warm(t *testing.T, m *Model, block func(i int) []float32, n int) Result {
 	t.Helper()
 	var res Result
 	var err error
-	for i := 0; i < n; i++ {
+	for i := range n {
 		res, err = m.Analyze(block(i))
 		if err != nil {
 			t.Fatal(err)
@@ -215,7 +215,7 @@ func TestAttackDetectorReattack(t *testing.T) {
 	d := NewAttackDetector(0, 0)
 	x := make([]float32, 1024)
 	// Burst decaying through subs 0-3, second burst at sub 4.
-	for i := 0; i < 512; i++ {
+	for i := range 512 {
 		x[i] = 0.5 * float32(math.Exp(-float64(i)/150))
 	}
 	for i := 512; i < 512+96; i++ {
@@ -300,7 +300,7 @@ func TestFFTImpulseAndSine(t *testing.T) {
 		im[i] = 0
 	}
 	p.transform(re, im)
-	for k := 0; k < 32; k++ {
+	for k := range 32 {
 		want := 0.0
 		if k == 4 {
 			want = 32

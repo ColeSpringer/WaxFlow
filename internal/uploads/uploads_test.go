@@ -366,15 +366,13 @@ func TestConcurrentPuts(t *testing.T) {
 	const workers, each = 8, 10
 	var wg sync.WaitGroup
 	for w := range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range each {
 				if _, err := s.Put(strings.NewReader("payload"), fmt.Sprintf("w%d-%d", w, i)); err != nil {
 					t.Errorf("Put: %v", err)
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if n := len(s.Items()); n != workers*each {

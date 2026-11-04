@@ -22,8 +22,8 @@ func TestTranscodeOpusChannels(t *testing.T) {
 		const rate, n = 48000, 48000
 		f := audio.Format{Rate: rate, Channels: channels, Layout: audio.DefaultLayout(channels), Type: audio.Float, BitDepth: 32}
 		samples := make([]float32, channels*n)
-		for i := 0; i < n; i++ {
-			for c := 0; c < channels; c++ {
+		for i := range n {
+			for c := range channels {
 				samples[i*channels+c] = float32(0.2 * math.Sin(2*math.Pi*(220+110*float64(c))*float64(i)/rate))
 			}
 		}

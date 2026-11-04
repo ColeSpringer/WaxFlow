@@ -159,7 +159,7 @@ func (s *frameState) dscf7(r *bitReader, b *sv7BookSet, dst *int32, prev int32) 
 // readSV7Samples reads the quantised samples of the bands in use.
 func (s *frameState) readSV7Samples(r *bitReader, maxUsed int) error {
 	b := sv7Books()
-	for n := 0; n < maxUsed; n++ {
+	for n := range maxUsed {
 		for ch := range 2 {
 			q := &s.q[n][ch]
 			switch res := s.res[ch][n]; {
@@ -338,7 +338,7 @@ func (s *frameState) readSV8(r *bitReader, cfg *Config, key bool) error {
 				}
 				scf[0] = ((scf[2] - 25 + d) & 127) - 6
 			}
-			for m := 0; m < 2; m++ {
+			for m := range 2 {
 				if (s.scfi[ch][n]<<m)&2 == 0 {
 					v, ok := b.dscf[0].decode(r)
 					if !ok {

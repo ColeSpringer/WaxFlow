@@ -102,7 +102,7 @@ func (d *Decoder) Decode(pkt []byte, emit func(*audio.Buffer) error) error {
 		if d.gainMult != 1 {
 			for c := 0; c < d.cfg.Channels; c++ {
 				ch := d.outCh[c]
-				for j := 0; j < n; j++ {
+				for j := range n {
 					ch[j] *= d.gainMult
 				}
 			}
@@ -146,7 +146,7 @@ func (d *Decoder) decodeFrame(fr frame, out [][]float32) error {
 	}
 	CC := d.cfg.Channels
 
-	for c := 0; c < CC; c++ {
+	for c := range CC {
 		clear(out[c][:audiosize])
 	}
 
@@ -174,7 +174,7 @@ func (d *Decoder) decodeFrame(fr frame, out [][]float32) error {
 		decoded := 0
 		for decoded < audiosize {
 			subOut := make([][]int16, CC)
-			for c := 0; c < CC; c++ {
+			for c := range CC {
 				subOut[c] = d.silkBuf[c][decoded:]
 			}
 			n := d.silk.decode(dec, ctrl, subOut)
@@ -258,10 +258,10 @@ func (d *Decoder) decodeFrame(fr frame, out [][]float32) error {
 
 	// Sum the SILK low band onto the CELT output (opus_decode_frame).
 	if mode != modeCELT {
-		for c := 0; c < CC; c++ {
+		for c := range CC {
 			oc := out[c]
 			sc := d.silkBuf[c]
-			for i := 0; i < audiosize; i++ {
+			for i := range audiosize {
 				oc[i] += float32(sc[i]) * (1.0 / 32768.0)
 			}
 		}
@@ -275,7 +275,7 @@ func (d *Decoder) decodeFrame(fr frame, out [][]float32) error {
 		if err := d.celt.celtDecode(redData, 1, C, 0, end, d.redCh); err != nil {
 			return err
 		}
-		for c := 0; c < CC; c++ {
+		for c := range CC {
 			smoothFade(out[c][audiosize-celtF2_5:], d.redCh[c][celtF2_5:], out[c][audiosize-celtF2_5:], d.celt.window)
 		}
 	}
@@ -284,7 +284,7 @@ func (d *Decoder) decodeFrame(fr frame, out [][]float32) error {
 	// is skipped (but was still decoded, for state) when the previous frame gave
 	// the CELT decoder no valid history to continue from.
 	if redundancy && celtToSilk && (d.prevMode != modeSILK || d.prevRedundancy) {
-		for c := 0; c < CC; c++ {
+		for c := range CC {
 			copy(out[c][:celtF2_5], d.redCh[c][:celtF2_5])
 			smoothFade(d.redCh[c][celtF2_5:], out[c][celtF2_5:], out[c][celtF2_5:], d.celt.window)
 		}
@@ -310,7 +310,7 @@ func (d *Decoder) redViews() {
 // (libopus smooth_fade; single channel, 48 kHz so the window is read directly).
 // out may alias in2. w rises 0->1 so the result fades in1 out and in2 in.
 func smoothFade(in1, in2, out []float32, window []float64) {
-	for i := 0; i < celtF2_5; i++ {
+	for i := range celtF2_5 {
 		w := float32(window[i] * window[i])
 		out[i] = w*in2[i] + (1-w)*in1[i]
 	}

@@ -16,7 +16,7 @@ const (
 // silkInsertionSortIncreasing sorts a increasing, tracking source indices;
 // only the first K positions are guaranteed sorted (silk_insertion_sort_increasing).
 func silkInsertionSortIncreasing(a []int32, idx []int, L, K int) {
-	for i := 0; i < K; i++ {
+	for i := range K {
 		idx[i] = i
 	}
 	for i := 1; i < K; i++ {
@@ -46,7 +46,7 @@ func silkInsertionSortIncreasing(a []int32, idx []int, L, K int) {
 // silkNLSFVQ computes the weighted quantization error of the input against
 // every first-stage codebook vector (silk_NLSF_VQ).
 func silkNLSFVQ(errQ24 []int32, inQ15 []int16, cbQ8 []uint8, wghtQ9 []int16, K, order int) {
-	for i := 0; i < K; i++ {
+	for i := range K {
 		cb := cbQ8[i*order:]
 		w := wghtQ9[i*order:]
 		var sumErrorQ24, predQ24 int32
@@ -89,7 +89,7 @@ func silkNLSFVQWeightsLaroia(w []int16, nlsfQ15 []int16, D int) {
 // silkInterpolate interpolates two vectors with weight ifactQ2/4 on the
 // second (silk_interpolate).
 func silkInterpolate(xi, x0, x1 []int16, ifactQ2 int, d int) {
-	for i := 0; i < d; i++ {
+	for i := range d {
 		xi[i] = int16(int32(x0[i]) + silkSMULBB(int32(x1[i])-int32(x0[i]), int32(ifactQ2))>>2)
 	}
 }
@@ -181,7 +181,7 @@ func silkNLSFDelDecQuant(indices []int8, xQ10, wQ5 []int16, predCoefQ8 []uint8, 
 				ind[j][i] = ind[j-nStates][i]
 			}
 		} else {
-			for j := 0; j < nlsfQuantDelDecStates; j++ {
+			for j := range nlsfQuantDelDecStates {
 				if rdQ25[j] > rdQ25[j+nlsfQuantDelDecStates] {
 					rdMaxQ25[j] = rdQ25[j]
 					rdMinQ25[j] = rdQ25[j+nlsfQuantDelDecStates]
@@ -200,7 +200,7 @@ func silkNLSFDelDecQuant(indices []int8, xQ10, wQ5 []int16, predCoefQ8 []uint8, 
 				maxMinQ25 := int32(0)
 				indMinMax := 0
 				indMaxMin := 0
-				for j := 0; j < nlsfQuantDelDecStates; j++ {
+				for j := range nlsfQuantDelDecStates {
 					if minMaxQ25 > rdMaxQ25[j] {
 						minMaxQ25 = rdMaxQ25[j]
 						indMinMax = j
@@ -220,7 +220,7 @@ func silkNLSFDelDecQuant(indices []int8, xQ10, wQ5 []int16, predCoefQ8 []uint8, 
 				rdMaxQ25[indMinMax] = silkInt32Max
 				ind[indMaxMin] = ind[indMinMax]
 			}
-			for j := 0; j < nlsfQuantDelDecStates; j++ {
+			for j := range nlsfQuantDelDecStates {
 				ind[j][i] += int8(silkRSHIFT(int32(indSort[j]), nlsfQuantDelDecStatesLog2))
 			}
 		}
@@ -228,13 +228,13 @@ func silkNLSFDelDecQuant(indices []int8, xQ10, wQ5 []int16, predCoefQ8 []uint8, 
 
 	indTmp := 0
 	minQ25 := int32(silkInt32Max)
-	for j := 0; j < 2*nlsfQuantDelDecStates; j++ {
+	for j := range 2 * nlsfQuantDelDecStates {
 		if minQ25 > rdQ25[j] {
 			minQ25 = rdQ25[j]
 			indTmp = j
 		}
 	}
-	for j := 0; j < order; j++ {
+	for j := range order {
 		indices[j] = ind[indTmp&(nlsfQuantDelDecStates-1)][j]
 	}
 	indices[0] += int8(silkRSHIFT(int32(indTmp), nlsfQuantDelDecStatesLog2))
@@ -261,7 +261,7 @@ func silkNLSFEncode(nlsfIndices []int8, pNLSFQ15 []int16, cb *nlsfCB, pWQ2 []int
 	var resQ10, nlsfTmpQ15, wAdjQ5 [silkMaxLPCOrder]int16
 	var predQ8 [silkMaxLPCOrder]uint8
 	var ecIx [silkMaxLPCOrder]int16
-	for s := 0; s < nSurvivors; s++ {
+	for s := range nSurvivors {
 		ind1 := tempIndices1[s]
 		cbElem := cb.cb1NLSFQ8[ind1*cb.order:]
 		cbWght := cb.cb1WghtQ9[ind1*cb.order:]

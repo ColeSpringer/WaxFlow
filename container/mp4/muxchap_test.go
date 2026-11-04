@@ -77,7 +77,7 @@ func flacTrackAt(t *testing.T, rate, npkt int) (container.Track, []codec.Packet)
 	track := container.Track{Codec: codec.FLAC, CodecConfig: cfg, Fmt: si.PCMFormat(),
 		Samples: int64(npkt) * 4096}
 	var pkts []codec.Packet
-	for i := 0; i < npkt; i++ {
+	for i := range npkt {
 		pkts = append(pkts, codec.Packet{Data: bytes.Repeat([]byte{byte(i + 1)}, 64), Dur: 4096, Sync: true})
 	}
 	return track, pkts

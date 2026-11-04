@@ -73,10 +73,10 @@ func sbrStartK0(fs, bsStartFreq int) (int, bool) {
 // sbrStopK2 resolves the stop band k2 from the SBR rate, bs_stop_freq, and
 // the already-resolved k0.
 func sbrStopK2(fs, bsStopFreq, k0 int) int {
-	switch {
-	case bsStopFreq == 14:
+	switch bsStopFreq {
+	case 14:
 		return min(64, 2*k0)
-	case bsStopFreq == 15:
+	case 15:
 		return min(64, 3*k0)
 	}
 	stopMin := (2*sbrStopBase(fs)*128 + fs/2) / fs
@@ -182,10 +182,7 @@ func deriveFreqTables(h sbrHeader, fs int) (sbrFreqTables, error) {
 	// Noise bands: bs_noise_bands per octave of the SBR range, at least one,
 	// at most five, spread evenly over the low-resolution table.
 	nQ := int(math.Round(float64(h.noiseBands) * math.Log2(float64(k2)/float64(t.kx))))
-	t.nQ = min(5, max(1, nQ))
-	if t.nQ > t.nLow {
-		t.nQ = t.nLow
-	}
+	t.nQ = min(5, max(1, nQ), t.nLow)
 	if t.nQ < 1 {
 		return t, errSBRFreq
 	}
@@ -237,7 +234,7 @@ func masterLinear(t *sbrFreqTables, alterScale bool) error {
 	t.nMaster = numBands
 	t.fMaster = make([]int, numBands+1)
 	t.fMaster[0] = t.k0
-	for i := 0; i < numBands; i++ {
+	for i := range numBands {
 		if vDk[i] < 1 {
 			return errSBRFreq
 		}

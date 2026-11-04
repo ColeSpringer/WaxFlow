@@ -84,7 +84,7 @@ var orderyTable = []int{
 func haar1(X []float32, N0, stride int) {
 	N0 >>= 1
 	const s = float32(0.70710678)
-	for i := 0; i < stride; i++ {
+	for i := range stride {
 		for j := 0; j < N0; j++ {
 			t1 := s * X[stride*2*j+i]
 			t2 := s * X[stride*(2*j+1)+i]
@@ -99,14 +99,14 @@ func deinterleaveHadamard(X []float32, N0, stride, hadamard int) {
 	tmp := make([]float32, N)
 	if hadamard != 0 {
 		ordery := orderyTable[stride-2:]
-		for i := 0; i < stride; i++ {
-			for j := 0; j < N0; j++ {
+		for i := range stride {
+			for j := range N0 {
 				tmp[ordery[i]*N0+j] = X[j*stride+i]
 			}
 		}
 	} else {
-		for i := 0; i < stride; i++ {
-			for j := 0; j < N0; j++ {
+		for i := range stride {
+			for j := range N0 {
 				tmp[i*N0+j] = X[j*stride+i]
 			}
 		}
@@ -119,14 +119,14 @@ func interleaveHadamard(X []float32, N0, stride, hadamard int) {
 	tmp := make([]float32, N)
 	if hadamard != 0 {
 		ordery := orderyTable[stride-2:]
-		for i := 0; i < stride; i++ {
-			for j := 0; j < N0; j++ {
+		for i := range stride {
+			for j := range N0 {
 				tmp[j*stride+i] = X[ordery[i]*N0+j]
 			}
 		}
 	} else {
-		for i := 0; i < stride; i++ {
-			for j := 0; j < N0; j++ {
+		for i := range stride {
+			for j := range N0 {
 				tmp[j*stride+i] = X[i*N0+j]
 			}
 		}
@@ -149,7 +149,7 @@ func denormaliseBands(X, freq, bandLogE []float32, start, end, M, downsample int
 		start, end = 0, 0
 	}
 	fstart := M * int(celtEBands[start])
-	for i := 0; i < fstart; i++ {
+	for i := range fstart {
 		freq[i] = 0
 	}
 	for i := start; i < end; i++ {
@@ -176,7 +176,7 @@ func antiCollapse(X []float32, collapseMasks []byte, LM, C, size, start, end int
 		depth := (1 + pulses[i]) / (int(celtEBands[i+1]) - int(celtEBands[i])) >> LM
 		thresh := 0.5 * float32(math.Exp2(-0.125*float64(depth)))
 		sqrt1 := float32(1.0 / math.Sqrt(float64(N0<<LM)))
-		for c := 0; c < C; c++ {
+		for c := range C {
 			prev1 := prev1logE[c*celtNBands+i]
 			prev2 := prev2logE[c*celtNBands+i]
 			if C == 1 {
@@ -195,7 +195,7 @@ func antiCollapse(X []float32, collapseMasks []byte, LM, C, size, start, end int
 			renorm := false
 			for k := 0; k < 1<<LM; k++ {
 				if collapseMasks[i*C+c]&(1<<uint(k)) == 0 {
-					for j := 0; j < N0; j++ {
+					for j := range N0 {
 						seed = celtLCGRand(seed)
 						if seed&0x8000 != 0 {
 							Xp[(j<<LM)+k] = r
@@ -222,7 +222,7 @@ func antiCollapse(X []float32, collapseMasks []byte, LM, C, size, start, end int
 // shapes (libopus bands.c stereo_merge; float build).
 func stereoMerge(X, Y []float32, mid float32, N int) {
 	var xp, side float32
-	for j := 0; j < N; j++ {
+	for j := range N {
 		xp += X[j] * Y[j]
 		side += Y[j] * Y[j]
 	}
@@ -235,7 +235,7 @@ func stereoMerge(X, Y []float32, mid float32, N int) {
 	}
 	lgain := 1.0 / float32(math.Sqrt(float64(El)))
 	rgain := 1.0 / float32(math.Sqrt(float64(Er)))
-	for j := 0; j < N; j++ {
+	for j := range N {
 		l := mid * X[j]
 		r := Y[j]
 		X[j] = lgain * (l - r)
@@ -273,13 +273,6 @@ func (ctx *bandCtx) tellFrac() int {
 	return ctx.dec.tellFrac()
 }
 
-func (ctx *bandCtx) tell() int {
-	if ctx.encode {
-		return ctx.enc.tell()
-	}
-	return ctx.dec.tell()
-}
-
 type splitCtx struct {
 	inv, imid, iside, delta, itheta, qalloc int
 }
@@ -308,7 +301,7 @@ func intensityStereo(X, Y, bandE []float32, bandID, N int) {
 	norm := 1e-15 + float32(math.Sqrt(float64(1e-15+left*left+right*right)))
 	a1 := left / norm
 	a2 := right / norm
-	for j := 0; j < N; j++ {
+	for j := range N {
 		X[j] = a1*X[j] + a2*Y[j]
 	}
 }
@@ -327,7 +320,7 @@ func computeChannelWeights(ex, ey float32) (w0, w1 float32) {
 // stereo_split, float build).
 func stereoSplit(X, Y []float32, N int) {
 	const s = float32(0.70710678)
-	for j := 0; j < N; j++ {
+	for j := range N {
 		l := s * X[j]
 		r := s * Y[j]
 		X[j] = l + r
@@ -460,7 +453,7 @@ func (ctx *bandCtx) computeTheta(sctx *splitCtx, X, Y []float32, N int, b *int, 
 				inv = 1
 			}
 			if inv != 0 {
-				for j := 0; j < N; j++ {
+				for j := range N {
 					Y[j] = -Y[j]
 				}
 			}
@@ -483,12 +476,12 @@ func (ctx *bandCtx) computeTheta(sctx *splitCtx, X, Y []float32, N int, b *int, 
 	qalloc := ctx.tellFrac() - tell
 	*b -= qalloc
 	var imid, iside, delta int
-	switch {
-	case itheta == 0:
+	switch itheta {
+	case 0:
 		imid, iside = 32767, 0
 		*fill &= (1 << B) - 1
 		delta = -16384
-	case itheta == 16384:
+	case 16384:
 		imid, iside = 0, 32767
 		*fill &= ((1 << B) - 1) << B
 		delta = 16384
@@ -741,7 +734,7 @@ func (ctx *bandCtx) quantBand(X []float32, N, b, B int, lowband []float32, LM in
 		B <<= recombine
 		if lowbandOut != nil {
 			n := float32(math.Sqrt(float64(N0)))
-			for j := 0; j < N0; j++ {
+			for j := range N0 {
 				lowbandOut[j] = n * X[j]
 			}
 		}
@@ -846,7 +839,7 @@ func (ctx *bandCtx) quantBandStereo(X, Y []float32, N, b, B int, lowband []float
 			stereoMerge(X, Y, mid, N)
 		}
 		if inv != 0 {
-			for j := 0; j < N; j++ {
+			for j := range N {
 				Y[j] = -Y[j]
 			}
 		}

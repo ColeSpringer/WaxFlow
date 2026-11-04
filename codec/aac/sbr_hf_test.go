@@ -59,7 +59,7 @@ func TestSBRPatchFrequencyShift(t *testing.T) {
 	out := make([]float32, 2048)
 	var got []float32
 	n0 := 0
-	for f := 0; f < frames; f++ {
+	for range frames {
 		for i := range in {
 			in[i] = float32(0.5 * math.Sin(2*math.Pi*tone/coreRate*float64(n0+i)))
 		}

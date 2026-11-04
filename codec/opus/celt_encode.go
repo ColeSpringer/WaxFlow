@@ -157,7 +157,7 @@ func (e *celtEncoder) Reset() {
 func (e *celtEncoder) celtPreemphasis(pcm, inp []float32, N int, mem *float32) {
 	coef0 := float32(celtPreemph)
 	m := *mem
-	for i := 0; i < N; i++ {
+	for i := range N {
 		x := pcm[i] * celtSigScale
 		inp[i] = x - m
 		m = coef0 * x
@@ -178,7 +178,7 @@ func (e *celtEncoder) computeMDCTs(shortBlocks int, in [][]float32, freq []float
 	}
 	plan := e.planFor(2 * N)
 	frameN := celtShortMDCTSize << LM
-	for c := 0; c < C; c++ {
+	for c := range C {
 		for b := 0; b < B; b++ {
 			plan.forward(in[c][b*N:], freq[c*frameN+b:], B, e.window, e.overlap, e.mdctScr)
 		}
@@ -301,11 +301,11 @@ func (e *celtEncoder) celtEncodeWithEC(pcm [][]float32, N, LM, C, start, end int
 	// swaps in the filtered tail the MDCT windows need.
 	in := make([][]float32, C)
 	var sampleMax float32
-	for c := 0; c < C; c++ {
+	for c := range C {
 		in[c] = make([]float32, N+overlap)
 		copy(in[c][:overlap], e.prefilterMem[c][combMaxPeriod-overlap:])
 		e.celtPreemphasis(pcm[c], in[c][overlap:], N, &e.preemphMem[c])
-		for i := 0; i < N; i++ {
+		for i := range N {
 			if a := absf(pcm[c][i]); a > sampleMax {
 				sampleMax = a
 			}
@@ -402,8 +402,8 @@ func (e *celtEncoder) celtEncodeWithEC(pcm [][]float32, N, LM, C, start, end int
 		e.computeMDCTs(0, in, freq, C, LM)
 		computeBandEnergies(freq, bandE, effEnd, C, LM)
 		amp2Log2(effEnd, end, bandE, bandLogE2, C)
-		for c := 0; c < C; c++ {
-			for i := 0; i < end; i++ {
+		for c := range C {
+			for i := range end {
 				bandLogE2[nb*c+i] += 0.5 * float32(LM)
 			}
 		}
@@ -446,8 +446,8 @@ func (e *celtEncoder) celtEncodeWithEC(pcm [][]float32, N, LM, C, start, end int
 			e.computeMDCTs(shortBlocks, in, freq, C, LM)
 			computeBandEnergies(freq, bandE, effEnd, C, LM)
 			amp2Log2(effEnd, end, bandE, bandLogE, C)
-			for c := 0; c < C; c++ {
-				for i := 0; i < end; i++ {
+			for c := range C {
+				for i := range end {
 					bandLogE2[nb*c+i] += 0.5 * float32(LM)
 				}
 			}
@@ -488,23 +488,23 @@ func (e *celtEncoder) celtEncodeWithEC(pcm [][]float32, N, LM, C, start, end int
 	case hybrid && weakTransient != 0:
 		// Weak transients rely on TF-on-long-window's imperfection instead of
 		// short blocks, avoiding energy collapse at low bitrate.
-		for i := 0; i < end; i++ {
+		for i := range end {
 			tfRes[i] = 1
 		}
 	case hybrid && effectiveBytes < 15 && e.silkInfoSignalType != 2:
 		// Low-bitrate hybrid: force 5 ms temporal resolution.
-		for i := 0; i < end; i++ {
+		for i := range end {
 			tfRes[i] = 0
 		}
 		tfSelect = isTransient
 	default:
-		for i := 0; i < end; i++ {
+		for i := range end {
 			tfRes[i] = isTransient
 		}
 	}
 
 	// Stabilize energy by biasing toward the previous frame's error.
-	for c := 0; c < C; c++ {
+	for c := range C {
 		for i := start; i < end; i++ {
 			if absf(bandLogE[i+c*nb]-e.oldBandE[i+c*nb]) < 2 {
 				bandLogE[i+c*nb] -= 0.25 * e.energyError[i+c*nb]
@@ -749,7 +749,7 @@ func (e *celtEncoder) celtEncodeWithEC(pcm [][]float32, N, LM, C, start, end int
 	quantEnergyFinalise(start, end, e.oldBandE, errorArr, fineQuant, finePriority,
 		nbCompressedBytes*8-enc.tell(), enc, C)
 
-	for c := 0; c < C; c++ {
+	for c := range C {
 		for i := start; i < end; i++ {
 			e.energyError[i+c*nb] = max(-0.5, min(0.5, errorArr[i+c*nb]))
 		}
@@ -765,7 +765,7 @@ func (e *celtEncoder) celtEncodeWithEC(pcm [][]float32, N, LM, C, start, end int
 
 	// Carry the tail of this frame's prefiltered signal as the next frame's
 	// MDCT overlap history (libopus st->in_mem).
-	for c := 0; c < C; c++ {
+	for c := range C {
 		copy(e.preHistory[c], in[c][N:N+overlap])
 	}
 
@@ -786,8 +786,8 @@ func (e *celtEncoder) updateEnergyState(C, isTransient, start, end int) {
 			e.oldLogE[i] = min(e.oldLogE[i], e.oldBandE[i])
 		}
 	}
-	for c := 0; c < C; c++ {
-		for i := 0; i < start; i++ {
+	for c := range C {
+		for i := range start {
 			e.oldBandE[c*nb+i] = 0
 			e.oldLogE[c*nb+i] = -28
 			e.oldLogE2[c*nb+i] = -28

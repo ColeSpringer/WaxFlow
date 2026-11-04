@@ -14,8 +14,8 @@ import (
 // out-of-room high encoding.
 func TestFloorPostRoundTrip(t *testing.T) {
 	for _, rng := range []int{64, 86, 128, 256} {
-		for pred := 0; pred < rng; pred++ {
-			for target := 0; target < rng; target++ {
+		for pred := range rng {
+			for target := range rng {
 				val := floor1EncodeVal(pred, target, rng)
 				if val < 0 {
 					t.Fatalf("rng=%d pred=%d target=%d: negative val %d", rng, pred, target, val)
@@ -191,7 +191,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 
 			// Reconstruction error against the source, per channel.
 			var sqErr, sqSig float64
-			for i := 0; i < gotFrames; i++ {
+			for i := range gotFrames {
 				for c := 0; c < tc.ch; c++ {
 					d := float64(trimmed[i*tc.ch+c]) - float64(src[c][i])
 					sqErr += d * d

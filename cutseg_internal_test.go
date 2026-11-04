@@ -46,10 +46,7 @@ func (d *seekableGridDemuxer) SeekSample(ctx context.Context, track int, sample 
 	if sample < 0 {
 		sample = 0
 	}
-	k := sample / d.dur // the packet boundary at or before the target
-	if k > int64(d.n) {
-		k = int64(d.n)
-	}
+	k := min(sample/d.dur, int64(d.n)) // the packet boundary at or before the target
 	d.i = int(k)
 	d.pos = k * d.dur
 	return d.pos, nil

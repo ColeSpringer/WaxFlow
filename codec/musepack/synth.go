@@ -371,12 +371,12 @@ func (s *synthesis) frame(y *[36][32]float32, out []float32) {
 	// will fill, so the taps read a continuous history.
 	copy(s.v[vMem:], s.v[:960])
 	at := vMem
-	for n := 0; n < 36; n++ {
+	for n := range 36 {
 		at -= 64
 		pV := s.v[at : at+64 : at+64]
 		computeNewV(&y[n], pV)
 		o := out[n*32 : n*32+32]
-		for k := 0; k < 32; k++ {
+		for k := range 32 {
 			v := s.v[at+k : at+k+vSpan]
 			d := &diOpt[k]
 			o[k] = mul(v[0], d[0]) + mul(v[96], d[1]) + mul(v[128], d[2]) + mul(v[224], d[3]) +

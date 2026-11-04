@@ -42,7 +42,7 @@ func (r *bitReader) bits(k uint) uint32 {
 	// Load 32 bits starting at the current byte; off + k <= 31 always
 	// holds for k <= 24, so four bytes suffice.
 	var v uint32
-	for j := 0; j < 4; j++ {
+	for j := range 4 {
 		v <<= 8
 		if i+j < len(r.data) {
 			v |= uint32(r.data[i+j])

@@ -34,13 +34,7 @@ func writeWAV(t *testing.T, path string, interleaved []float32, rate, ch int) {
 	b.WriteString("data")
 	binary.Write(&b, binary.LittleEndian, uint32(dataLen))
 	for _, v := range interleaved {
-		s := int32(math.Round(float64(v) * 32767))
-		if s > 32767 {
-			s = 32767
-		}
-		if s < -32768 {
-			s = -32768
-		}
+		s := max(min(int32(math.Round(float64(v)*32767)), 32767), -32768)
 		binary.Write(&b, binary.LittleEndian, int16(s))
 	}
 	if err := os.WriteFile(path, b.Bytes(), 0o644); err != nil {
@@ -57,7 +51,7 @@ func musicish(rate, n, ch int, seed int64) [][]float32 {
 	fundamentals := []float64{220, 330, 440}
 	for c := range src {
 		src[c] = make([]float32, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			t := float64(i) / float64(rate)
 			env := 0.5 + 0.5*math.Sin(2*math.Pi*2*t) // slow tremolo for dynamics
 			var s float64

@@ -290,7 +290,7 @@ func emitFlat(b *strings.Builder, goName, goType string, vals []string, perLine 
 // of width cols.
 func emitRows(b *strings.Builder, goName, goType string, vals []string, rows, cols, perLine int) {
 	fmt.Fprintf(b, "\nvar %s = [%d][%d]%s{", goName, rows, cols, goType)
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		fmt.Fprintf(b, "\n\t{%s},", listRaw(vals[r*cols:(r+1)*cols], perLine))
 	}
 	b.WriteString("\n}\n")
@@ -354,9 +354,9 @@ func emitLSP(t *testing.T, data string) string {
 	} {
 		v := scalars(t, data, tab.c, 32*2*tab.n)
 		fmt.Fprintf(&b, "\nvar %s = [32][2][%d]float32{", tab.g, tab.n)
-		for i := 0; i < 32; i++ {
+		for i := range 32 {
 			b.WriteString("\n\t{")
-			for j := 0; j < 2; j++ {
+			for j := range 2 {
 				off := (i*2 + j) * tab.n
 				fmt.Fprintf(&b, "\n\t\t{%s},", listRaw(v[off:off+tab.n], tab.n))
 			}

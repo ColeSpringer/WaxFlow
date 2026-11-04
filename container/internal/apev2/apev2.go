@@ -169,7 +169,7 @@ func parseItems(items []byte, count int) map[string][]string {
 			continue
 		}
 		// A multi-valued item stores its values NUL-separated.
-		for _, v := range strings.Split(string(value), "\x00") {
+		for v := range strings.SplitSeq(string(value), "\x00") {
 			if v != "" {
 				out[name] = append(out[name], v)
 			}

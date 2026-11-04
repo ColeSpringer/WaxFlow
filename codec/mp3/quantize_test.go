@@ -2,6 +2,7 @@ package mp3
 
 import (
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
@@ -17,10 +18,7 @@ import (
 func TestPsyCalibration(t *testing.T) {
 	const rate = 44100
 	row := 6 // 44.1 kHz
-	offs := make([]int, len(sfbEdgesLong[row]))
-	for i, v := range sfbEdgesLong[row] {
-		offs[i] = v
-	}
+	offs := slices.Clone(sfbEdgesLong[row][:])
 	lo, hi := math.Inf(1), math.Inf(-1)
 	for _, freq := range []float64{220, 440, 1000, 2000, 4000, 7000, 12000, 16000} {
 		var a analyzer
@@ -30,7 +28,7 @@ func TestPsyCalibration(t *testing.T) {
 		for i := range pcm {
 			pcm[i] = float32(math.Sin(2 * math.Pi * freq * float64(i) / rate))
 		}
-		for g := 0; g < gs; g++ {
+		for g := range gs {
 			a.granuleMDCT(pcm[g*576:(g+1)*576], &xr)
 		}
 		xrE := 0.0
@@ -185,7 +183,7 @@ func TestMSStereoDecision(t *testing.T) {
 	const rate, n = 44100, 30000
 	gen := func(correlated bool) [][]float32 {
 		chans := [][]float32{make([]float32, n), make([]float32, n)}
-		for i := 0; i < n; i++ {
+		for i := range n {
 			v := 0.4*math.Sin(2*math.Pi*440*float64(i)/rate) +
 				0.2*math.Sin(2*math.Pi*3000*float64(i)/rate)
 			chans[0][i] = float32(v)
@@ -225,7 +223,7 @@ func TestMSStereoDecision(t *testing.T) {
 		t.Errorf("correlated stereo chose mid/side on 0/%d frames", total)
 	}
 	out := decodeFrames(t, f, pkts)
-	for ch := 0; ch < 2; ch++ {
+	for ch := range 2 {
 		if _, snr := bestLagSNR(corr[ch], out[ch], 1600); snr < 30 {
 			t.Errorf("correlated ch %d round-trip SNR %.1f dB below 30", ch, snr)
 		}
@@ -242,7 +240,7 @@ func TestMSStereoDecision(t *testing.T) {
 		t.Errorf("uncorrelated stereo chose mid/side on %d/%d frames", ms, total)
 	}
 	out = decodeFrames(t, f, pkts)
-	for ch := 0; ch < 2; ch++ {
+	for ch := range 2 {
 		if _, snr := bestLagSNR(uncorr[ch], out[ch], 1600); snr < 30 {
 			t.Errorf("uncorrelated ch %d round-trip SNR %.1f dB below 30", ch, snr)
 		}
@@ -258,7 +256,7 @@ func TestScalefactorsOnWire(t *testing.T) {
 	// A strong low tone plus a quiet high tone: shaping the quiet band's
 	// noise floor needs per-band amplification, not just global gain.
 	chans := [][]float32{make([]float32, n)}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		chans[0][i] = float32(0.5*math.Sin(2*math.Pi*200*float64(i)/rate) +
 			0.01*math.Sin(2*math.Pi*6000*float64(i)/rate))
 	}
@@ -279,7 +277,7 @@ func TestScalefactorsOnWire(t *testing.T) {
 		if !parseSideInfo(h, p[HeaderLen:HeaderLen+h.SideInfoLen()], &si) {
 			t.Fatal("side info does not parse")
 		}
-		for gr := 0; gr < 2; gr++ {
+		for gr := range 2 {
 			if si.gr[gr][0].scfCompress != 0 {
 				sawCompress = true
 			}
@@ -301,7 +299,7 @@ func TestScalefactorsOnWire(t *testing.T) {
 func TestVBREncode(t *testing.T) {
 	const rate, n = 44100, 60000
 	chans := [][]float32{make([]float32, n), make([]float32, n)}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		v := 0.0
 		if i >= n/2 { // half silence, half dense broadband
 			for j, fq := range []float64{220, 700, 1900, 4300, 8100, 11000} {

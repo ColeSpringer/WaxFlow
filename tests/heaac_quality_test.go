@@ -25,7 +25,7 @@ func heQualityCorpus(rate, frames int) []qualityItem {
 	bright := func(seed uint64, tones []float64, burst bool) []float32 {
 		out := make([]float32, frames*2)
 		s := seed
-		for i := 0; i < frames; i++ {
+		for i := range frames {
 			var v float64
 			for j, fq := range tones {
 				v += 0.4 / float64(j+1) * math.Sin(2*math.Pi*fq*float64(i)/float64(rate)+float64(j)*1.3)

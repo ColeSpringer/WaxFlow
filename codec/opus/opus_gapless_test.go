@@ -82,8 +82,8 @@ func encodeN(t *testing.T, C, n, bitrate int) []byte {
 		t.Fatal(err)
 	}
 	flat := make([]float32, C*n)
-	for c := 0; c < C; c++ {
-		for i := 0; i < n; i++ {
+	for c := range C {
+		for i := range n {
 			flat[c*n+i] = float32(0.2 * float64((i%400)-200) / 200)
 		}
 	}

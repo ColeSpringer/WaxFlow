@@ -71,7 +71,7 @@ func NewPlan(n int) *Plan {
 		for q := 1; q < f; q++ {
 			re := make([]float32, m)
 			im := make([]float32, m)
-			for k2 := 0; k2 < m; k2++ {
+			for k2 := range m {
 				s, c := math.Sincos(-2 * math.Pi * float64((k2*q*stride)%n) / float64(n))
 				re[k2] = float32(c)
 				im[k2] = float32(s)
@@ -148,12 +148,12 @@ func buildPerm(n int, factors []int) []int32 {
 		f := factors[depth]
 		m := lengths[depth]
 		if m == 1 {
-			for q := 0; q < f; q++ {
+			for q := range f {
 				perm[outBase+q] = int32(inBase + q*stride)
 			}
 			return
 		}
-		for q := 0; q < f; q++ {
+		for q := range f {
 			rec(outBase+q*m, inBase+q*stride, stride*f, depth+1)
 		}
 	}
@@ -199,7 +199,7 @@ func combine2(lv *level, re, im []float32) {
 	m := lv.m
 	w0r, w0i := lv.twRe[0], lv.twIm[0]
 	for base := 0; base < len(re); base += lv.bl {
-		for k2 := 0; k2 < m; k2++ {
+		for k2 := range m {
 			i0, i1 := base+k2, base+m+k2
 			t1r := re[i1]*w0r[k2] - im[i1]*w0i[k2]
 			t1i := re[i1]*w0i[k2] + im[i1]*w0r[k2]
@@ -216,7 +216,7 @@ func combine3(lv *level, re, im []float32) {
 	w0r, w0i := lv.twRe[0], lv.twIm[0]
 	w1r, w1i := lv.twRe[1], lv.twIm[1]
 	for base := 0; base < len(re); base += lv.bl {
-		for k2 := 0; k2 < m; k2++ {
+		for k2 := range m {
 			i0, i1, i2 := base+k2, base+m+k2, base+2*m+k2
 			t1r := re[i1]*w0r[k2] - im[i1]*w0i[k2]
 			t1i := re[i1]*w0i[k2] + im[i1]*w0r[k2]
@@ -242,7 +242,7 @@ func combine4(lv *level, re, im []float32) {
 	w1r, w1i := lv.twRe[1], lv.twIm[1]
 	w2r, w2i := lv.twRe[2], lv.twIm[2]
 	for base := 0; base < len(re); base += lv.bl {
-		for k2 := 0; k2 < m; k2++ {
+		for k2 := range m {
 			i0, i1, i2, i3 := base+k2, base+m+k2, base+2*m+k2, base+3*m+k2
 			t1r := re[i1]*w0r[k2] - im[i1]*w0i[k2]
 			t1i := re[i1]*w0i[k2] + im[i1]*w0r[k2]
@@ -273,7 +273,7 @@ func combine5(lv *level, re, im []float32) {
 	w2r, w2i := lv.twRe[2], lv.twIm[2]
 	w3r, w3i := lv.twRe[3], lv.twIm[3]
 	for base := 0; base < len(re); base += lv.bl {
-		for k2 := 0; k2 < m; k2++ {
+		for k2 := range m {
 			i0 := base + k2
 			i1, i2 := i0+m, i0+2*m
 			i3, i4 := i0+3*m, i0+4*m

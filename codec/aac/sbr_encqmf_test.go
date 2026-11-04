@@ -21,7 +21,7 @@ func TestQMFEncoderAnalysisReconstruction(t *testing.T) {
 	var syn qmfSynthesizer64
 	out := make([]float32, 64*frames)
 	var re, im [64]float32
-	for s := 0; s < frames; s++ {
+	for s := range frames {
 		ana.analyze(in[64*s:64*s+64], re[:], im[:])
 		syn.synthesize(re[:], im[:], out[64*s:64*s+64])
 	}

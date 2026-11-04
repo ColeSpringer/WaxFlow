@@ -39,7 +39,7 @@ func warmup(pass func()) {
 // the runner's other tenants as much as the code under test.
 func bestOf(reps int, pass func()) time.Duration {
 	var best time.Duration
-	for r := 0; r < reps; r++ {
+	for range reps {
 		start := time.Now()
 		pass()
 		if d := time.Since(start); best == 0 || d < best {
@@ -74,8 +74,8 @@ func TestEncodeRealtimeFactor(t *testing.T) {
 		pass := func() {
 			enc := newCELTEncoder(C)
 			enc.complexity = complexity
-			for fi := 0; fi < frames; fi++ {
-				for c := 0; c < C; c++ {
+			for fi := range frames {
+				for c := range C {
 					pcm[c] = src[c][fi*opusFrameSize : (fi+1)*opusFrameSize]
 				}
 				enc.celtEncode(pcm, opusFrameSize, opusFrameLM, C, 0, opusCELTBands, 319)
@@ -130,8 +130,8 @@ func TestOpusEncodeRealtimeFactor(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for fi := 0; fi < frames; fi++ {
-				for c := 0; c < C; c++ {
+			for fi := range frames {
+				for c := range C {
 					copy(b.ChanF(c), tc.pcm[c][fi*opusFrameSize:(fi+1)*opusFrameSize])
 				}
 				b.N = opusFrameSize

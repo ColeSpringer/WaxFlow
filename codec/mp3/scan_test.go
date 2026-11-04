@@ -65,7 +65,7 @@ func scanFeatures(t *testing.T, raw []byte) (preflag, scfsi, both, short, mixed 
 			}
 			anyScfsi := false
 			for ch := 0; ch < h.Channels; ch++ {
-				for g := 0; g < 4; g++ {
+				for g := range 4 {
 					anyScfsi = anyScfsi || si.scfsi[ch][g]
 				}
 			}

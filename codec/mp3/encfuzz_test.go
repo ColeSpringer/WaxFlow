@@ -51,7 +51,7 @@ func FuzzEncode(f *testing.F) {
 		const blocks = 3
 		buf := audio.Get(fm, 1152)
 		defer audio.Put(buf)
-		for blk := 0; blk < blocks; blk++ {
+		for blk := range blocks {
 			buf.N = 1152
 			for c := 0; c < ch; c++ {
 				dst := buf.ChanF(c)

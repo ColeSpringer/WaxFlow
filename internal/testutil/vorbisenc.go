@@ -109,7 +109,7 @@ func readCodecListing(listing string) map[string]bool {
 		return nil
 	}
 	set := make(map[string]bool)
-	for _, line := range strings.Split(string(out), "\n") {
+	for line := range strings.SplitSeq(string(out), "\n") {
 		// Each entry is " FLAGS name description"; take the name field
 		// exactly so "libvorbis" cannot be found inside a description.
 		if f := strings.Fields(line); len(f) >= 2 {

@@ -19,7 +19,7 @@ func (b *sbrTestBits) reader() *bitReader {
 func huffPath(tab [][2]int8, value int) []byte {
 	var walk func(idx int, path []byte) []byte
 	walk = func(idx int, path []byte) []byte {
-		for bit := 0; bit < 2; bit++ {
+		for bit := range 2 {
 			v := tab[idx][bit]
 			p := append(append([]byte(nil), path...), byte(bit))
 			if v < 0 {

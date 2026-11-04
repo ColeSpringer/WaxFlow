@@ -62,7 +62,7 @@ func TestStateBlockRestoresADecode(t *testing.T) {
 			p := len(pkts) / 2
 			st := musepack.InitialState()
 			var at int
-			for i := 0; i < p; i++ {
+			for i := range p {
 				h, _, payload, err := musepack.ParsePacketHeader(pkts[i], cfg)
 				if err != nil {
 					t.Fatal(err)

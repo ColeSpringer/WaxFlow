@@ -19,7 +19,7 @@ func TestAnalysisFFT(t *testing.T) {
 
 	for _, k := range []int{0, 1, 7, 59, 239, 240, 401, 479} {
 		var accR, accI float64
-		for j := 0; j < n; j++ {
+		for j := range n {
 			ang := -2 * math.Pi * float64(k) * float64(j) / n
 			c, s := math.Cos(ang), math.Sin(ang)
 			xr, xi := float64(real(in[j])), float64(imag(in[j]))

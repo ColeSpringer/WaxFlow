@@ -17,6 +17,7 @@ package meta
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
 	"strconv"
 	"strings"
@@ -258,13 +259,9 @@ func WithContainerTags(info *Info, tags map[string][]string) *Info {
 		out = *info
 	}
 	out.Tags = make(map[string][]string, len(out.Tags)+len(tags))
-	for k, v := range tags {
-		out.Tags[k] = v
-	}
+	maps.Copy(out.Tags, tags)
 	if info != nil {
-		for k, v := range info.Tags {
-			out.Tags[k] = v
-		}
+		maps.Copy(out.Tags, info.Tags)
 	}
 	return &out
 }

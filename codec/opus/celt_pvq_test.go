@@ -20,7 +20,7 @@ func TestCWRSBijection(t *testing.T) {
 			v := ncwrsURow(tc.n, tc.k, u)
 			seen := make(map[string]bool, v)
 			y := make([]int, tc.n)
-			for i := uint32(0); i < v; i++ {
+			for i := range v {
 				// ncwrsURow refills u destructively each call (cwrsi mutates it).
 				ncwrsURow(tc.n, tc.k, u)
 				cwrsi(tc.n, tc.k, i, y, u)

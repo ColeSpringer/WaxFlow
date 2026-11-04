@@ -748,11 +748,11 @@ func testManagerConcurrent(t *testing.T, idle time.Duration) {
 
 	var wg sync.WaitGroup
 	errs := make(chan error, 64)
-	for g := 0; g < 8; g++ {
+	for g := range 8 {
 		wg.Add(1)
 		go func(g int) {
 			defer wg.Done()
-			for i := 0; i < 8; i++ {
+			for i := range 8 {
 				n := int64((g*7 + i*5) % total)
 				if err := m.Segment(context.Background(), "k", n, h.ops()); err != nil {
 					errs <- fmt.Errorf("segment %d: %w", n, err)

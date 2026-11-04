@@ -298,7 +298,7 @@ func writeResidue(w *bitWriter, r *residue) {
 	// Cascade bitmap per class, from which passes carry a book.
 	cascade := make([]int, r.classes)
 	for i := 0; i < r.classes; i++ {
-		for j := 0; j < 8; j++ {
+		for j := range 8 {
 			if r.books[i][j] >= 0 {
 				cascade[i] |= 1 << uint(j)
 			}
@@ -314,7 +314,7 @@ func writeResidue(w *bitWriter, r *residue) {
 		}
 	}
 	for i := 0; i < r.classes; i++ {
-		for j := 0; j < 8; j++ {
+		for j := range 8 {
 			if cascade[i]&(1<<uint(j)) != 0 {
 				w.writeBits(8, uint32(r.books[i][j]))
 			}
@@ -345,7 +345,7 @@ func writeMapping(w *bitWriter, m *mapping, channels int) {
 	}
 	w.writeBits(2, 0) // reserved
 	if submaps > 1 {
-		for ch := 0; ch < channels; ch++ {
+		for ch := range channels {
 			w.writeBits(4, uint32(m.mux[ch]))
 		}
 	}

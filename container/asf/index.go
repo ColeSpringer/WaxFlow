@@ -85,7 +85,7 @@ func (d *Demuxer) readSimpleIndex(off, size int64) {
 			d.note(base, "Simple Index Object is truncated at entry %d; seeking bisects instead", i)
 			return
 		}
-		for j := int64(0); j < n; j++ {
+		for j := range n {
 			index = append(index, le.Uint32(b[j*siEntryLen:]))
 		}
 		i += n

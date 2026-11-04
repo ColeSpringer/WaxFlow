@@ -100,7 +100,7 @@ func (r fmp4Reader) samples(t *testing.T) [][]byte {
 			}
 			data := mdat[8:int(be32t(mdat))]
 			off := 0
-			for i := 0; i < count; i++ {
+			for range count {
 				if flags&0x100 != 0 {
 					p = p[4:] // duration
 				}

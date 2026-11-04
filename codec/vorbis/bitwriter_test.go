@@ -107,7 +107,7 @@ func TestBitWriterMask(t *testing.T) {
 
 func TestBitWriterRoundTripRandom(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
-	for iter := 0; iter < 2000; iter++ {
+	for range 2000 {
 		n := rng.Intn(40)
 		fields := make([]field, n)
 		for i := range fields {

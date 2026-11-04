@@ -340,11 +340,9 @@ func benchQuantize(b *testing.B, shaping Shaping) {
 	const chunk = 4096
 	src := sine(48000, 997, chunk, 0.5)
 	dst := make([]int32, chunk)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		q.Quantize(dst, src, 0, 0)
 	}
-	b.StopTimer()
 	seconds := float64(b.N) * chunk / 48000
 	b.ReportMetric(seconds/b.Elapsed().Seconds(), "x-realtime")
 }

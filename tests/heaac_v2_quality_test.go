@@ -37,7 +37,7 @@ func heV2QualityCorpus(rate, frames int) []qualityItem {
 	widePan := make([]float32, frames*2)
 	s0, s1 := uint64(41), uint64(1223)
 	tones := []float64{196, 440, 880, 1760, 3100, 5200, 8200, 11800}
-	for i := 0; i < frames; i++ {
+	for i := range frames {
 		drift := 0.5 + 0.45*math.Sin(2*math.Pi*0.7*float64(i)/float64(rate))
 		var l, r float64
 		for j, fq := range tones {
@@ -61,7 +61,7 @@ func heV2QualityCorpus(rate, frames int) []qualityItem {
 	// decoder's decorrelator carry real signal.
 	wideNoise := make([]float32, frames*2)
 	s0, s1 = uint64(907), uint64(2027)
-	for i := 0; i < frames; i++ {
+	for i := range frames {
 		bed := 0.22*math.Sin(2*math.Pi*330*float64(i)/float64(rate)) +
 			0.14*math.Sin(2*math.Pi*2400*float64(i)/float64(rate)) +
 			0.08*math.Sin(2*math.Pi*7900*float64(i)/float64(rate))

@@ -10,7 +10,7 @@ import (
 func imdctDirect(spec, out []float64) {
 	n := len(out)
 	n0 := (float64(n)/2 + 1) / 2
-	for i := 0; i < n; i++ {
+	for i := range n {
 		var sum float64
 		for k := 0; k < n/2; k++ {
 			sum += spec[k] * math.Cos(2*math.Pi/float64(n)*(float64(i)+n0)*(float64(k)+0.5))

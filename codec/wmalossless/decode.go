@@ -790,10 +790,10 @@ func (d *Decoder) cdlmsDef(r *bitReader) error {
 	for c := range d.ch {
 		count := int(r.bits(3)) + 1
 		var orders, scalings [maxCDLMSFilters]int
-		for f := 0; f < count; f++ {
+		for f := range count {
 			orders[f] = (int(r.bits(7)) + 1) * 8
 		}
-		for f := 0; f < count; f++ {
+		for f := range count {
 			scalings[f] = int(r.bits(4))
 		}
 		if r.failed() {
@@ -803,7 +803,7 @@ func (d *Decoder) cdlmsDef(r *bitReader) error {
 			d.ch[c].filters = make([]cdlms, count)
 		}
 		d.ch[c].filters = d.ch[c].filters[:count]
-		for f := 0; f < count; f++ {
+		for f := range count {
 			if orders[f] > maxCDLMSOrder {
 				return malformed("CDLMS order %d, want at most %d", orders[f], maxCDLMSOrder)
 			}

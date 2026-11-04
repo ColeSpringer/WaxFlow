@@ -294,14 +294,7 @@ func (e *Encoder) Bitrate() int {
 
 // cbrBytes is the fixed packet size (TOC included) in CBR mode.
 func (e *Encoder) cbrBytes() int {
-	n := (e.bitrate*opusFrameSize + 4*SampleRate) / (8 * SampleRate)
-	if n < 3 {
-		n = 3
-	}
-	if n > maxFrameBytes {
-		n = maxFrameBytes
-	}
-	return n
+	return min(max((e.bitrate*opusFrameSize+4*SampleRate)/(8*SampleRate), 3), maxFrameBytes)
 }
 
 // FinalRange reports the range coder's final state after the most recently
@@ -388,10 +381,7 @@ func (e *Encoder) Finish(emit func(codec.Packet) error) (codec.Trailer, error) {
 		}
 	}
 	delay := int64(EncoderDelay)
-	padding := e.outFrames*opusFrameSize - e.inSamples - delay
-	if padding < 0 {
-		padding = 0
-	}
+	padding := max(e.outFrames*opusFrameSize-e.inSamples-delay, 0)
 	return codec.Trailer{Samples: e.inSamples, Delay: delay, Padding: padding}, nil
 }
 
@@ -420,13 +410,13 @@ func computeEquivRate(bitrate int32, channels, frameRate int, vbr bool, mode, co
 		equiv -= equiv / 12
 	}
 	equiv = equiv * int32(90+complexity) / 100
-	switch {
-	case mode == modeSILK || mode == modeHybrid:
+	switch mode {
+	case modeSILK, modeHybrid:
 		if complexity < 2 {
 			equiv = equiv * 4 / 5
 		}
 		equiv -= equiv * int32(loss) / int32(6*loss+10)
-	case mode == modeCELT:
+	case modeCELT:
 		if complexity < 5 {
 			equiv = equiv * 9 / 10
 		}
@@ -517,10 +507,7 @@ func genTOC(mode, frameRate, bandwidth, channels int) byte {
 		toc = byte(bandwidth-bandwidthNarrow) << 5
 		toc |= byte(period-2) << 3
 	case modeCELT:
-		tmp := bandwidth - bandwidthMedium
-		if tmp < 0 {
-			tmp = 0
-		}
+		tmp := max(bandwidth-bandwidthMedium, 0)
 		toc = 0x80
 		toc |= byte(tmp) << 5
 		toc |= byte(period) << 3
@@ -540,9 +527,9 @@ func genTOC(mode, frameRate, bandwidth, channels int) byte {
 func dcReject(in [][]float32, cutoffHz int, out [][]float32, hpMem []float32, length, channels int) {
 	coef := 6.3 * float32(cutoffHz) / SampleRate
 	coef2 := 1 - coef
-	for c := 0; c < channels; c++ {
+	for c := range channels {
 		m0 := hpMem[2*c]
-		for i := 0; i < length; i++ {
+		for i := range length {
 			x := in[c][i]
 			y := x - m0
 			m0 = coef*x + 1e-30 + coef2*m0
@@ -556,7 +543,7 @@ func dcReject(in [][]float32, cutoffHz int, out [][]float32, hpMem []float32, le
 // planar in place.
 func (e *Encoder) gainFade(buf [][]float32, g1, g2 float32, frameSize int) {
 	overlap := e.celt.overlap
-	for i := 0; i < overlap; i++ {
+	for i := range overlap {
 		w := float32(opusFadeWindow[i])
 		w = w * w
 		g := w*g2 + (1-w)*g1
@@ -576,7 +563,7 @@ func (e *Encoder) stereoFade(buf [][]float32, g1, g2 float32, frameSize int) {
 	overlap := e.celt.overlap
 	g1 = 1 - g1
 	g2 = 1 - g2
-	for i := 0; i < frameSize; i++ {
+	for i := range frameSize {
 		var g float32
 		if i < overlap {
 			w := float32(opusFadeWindow[i])
@@ -607,7 +594,7 @@ func (m *stereoWidthState) compute(pcm [][]float32, frameSize int) float32 {
 	var xx, xy, yy float32
 	for i := 0; i+3 < frameSize; i += 4 {
 		var pxx, pxy, pyy float32
-		for j := 0; j < 4; j++ {
+		for j := range 4 {
 			x := pcm[0][i+j]
 			y := pcm[1][i+j]
 			pxx += x * x
@@ -681,10 +668,10 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 	e.detectedBandwidth = 0
 	if info.valid {
 		var prob float32
-		switch {
-		case e.prevMode == modeNone:
+		switch e.prevMode {
+		case modeNone:
 			prob = info.musicProb
-		case e.prevMode == modeCELT:
+		case modeCELT:
 			prob = info.musicProbMax
 		default:
 			prob = info.musicProbMin
@@ -720,10 +707,7 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 	case e.signal == signalMusic:
 		voiceEst = 0
 	case e.voiceRatio >= 0:
-		voiceEst = e.voiceRatio * 327 >> 8
-		if voiceEst > 115 {
-			voiceEst = 115 // AUDIO application cap
-		}
+		voiceEst = min(e.voiceRatio*327>>8, 115) // AUDIO application cap
 	}
 
 	// Mode not decided yet: the reference passes 0 here, which is not one of
@@ -796,7 +780,7 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 			voiceTh, musicTh = &monoVoiceBandwidthThresholds, &monoMusicBandwidthThresholds
 		}
 		var thresholds [8]int32
-		for i := 0; i < 8; i++ {
+		for i := range 8 {
 			thresholds[i] = musicTh[i] + int32(voiceEst*voiceEst)*(voiceTh[i]-musicTh[i])>>14
 		}
 		bandwidth := bandwidthFull
@@ -905,7 +889,7 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 	// Delayed input: [delayCompensation history | filtered new frame].
 	totalBuffer := delayCompensation
 	pcmBuf := make([][]float32, C)
-	for c := 0; c < C; c++ {
+	for c := range C {
 		pcmBuf[c] = make([]float32, totalBuffer+frameSize)
 		copy(pcmBuf[c][:totalBuffer], e.delayBuffer[c][encoderBuffer-totalBuffer:])
 	}
@@ -923,7 +907,7 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 
 	{
 		out := make([][]float32, C)
-		for c := 0; c < C; c++ {
+		for c := range C {
 			out[c] = pcmBuf[c][totalBuffer:]
 		}
 		dcReject(pcm, 3, out, e.hpMem[:], frameSize, C)
@@ -932,11 +916,11 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 	// NaN guard (float API).
 	{
 		var sum float64
-		for c := 0; c < C; c++ {
+		for c := range C {
 			sum += silkEnergyFLP(pcmBuf[c][totalBuffer:], frameSize)
 		}
 		if !(sum < 1e9) || math.IsNaN(sum) {
-			for c := 0; c < C; c++ {
+			for c := range C {
 				for i := range pcmBuf[c][totalBuffer:] {
 					pcmBuf[c][totalBuffer+i] = 0
 				}
@@ -1018,13 +1002,13 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 			// discontinuity; the ramp lands right where the redundant CELT
 			// frame will cover.
 			prefillOffset := encoderBuffer - delayCompensation - SampleRate/400
-			for c := 0; c < C; c++ {
+			for c := range C {
 				ramp := e.delayBuffer[c][prefillOffset:]
 				for i := 0; i < e.celt.overlap && i < SampleRate/400; i++ {
 					w := float32(opusFadeWindow[i])
 					ramp[i] *= w * w
 				}
-				for i := 0; i < prefillOffset; i++ {
+				for i := range prefillOffset {
 					e.delayBuffer[c][i] = 0
 				}
 			}
@@ -1076,14 +1060,14 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 	var tmpPrefill [][]float32
 	if e.mode != modeSILK && e.mode != e.prevMode && e.prevMode != modeNone {
 		tmpPrefill = make([][]float32, C)
-		for c := 0; c < C; c++ {
+		for c := range C {
 			tmpPrefill[c] = make([]float32, SampleRate/400)
 			copy(tmpPrefill[c], e.delayBuffer[c][encoderBuffer-totalBuffer-SampleRate/400:])
 		}
 	}
 
 	// Update the delay buffer.
-	for c := 0; c < C; c++ {
+	for c := range C {
 		if encoderBuffer-(frameSize+totalBuffer) > 0 {
 			copy(e.delayBuffer[c], e.delayBuffer[c][frameSize:])
 			copy(e.delayBuffer[c][encoderBuffer-frameSize-totalBuffer:], pcmBuf[c])
@@ -1345,8 +1329,8 @@ func subFrames(buf [][]float32, off, n int) [][]float32 {
 // interleaveToInt16 converts planar float [-1,1) to interleaved int16.
 func interleaveToInt16(buf [][]float32, C, n int) []int16 {
 	out := make([]int16, C*n)
-	for c := 0; c < C; c++ {
-		for i := 0; i < n; i++ {
+	for c := range C {
+		for i := range n {
 			out[i*C+c] = int16(silkSAT16(silkFloat2Int(buf[c][i] * 32768)))
 		}
 	}
@@ -1356,8 +1340,8 @@ func interleaveToInt16(buf [][]float32, C, n int) []int16 {
 // interleaveToInt16planarView converts the frame part of pcmBuf.
 func interleaveToInt16planarView(buf [][]float32, C, off, n int) []int16 {
 	out := make([]int16, C*n)
-	for c := 0; c < C; c++ {
-		for i := 0; i < n; i++ {
+	for c := range C {
+		for i := range n {
 			out[i*C+c] = int16(silkSAT16(silkFloat2Int(buf[c][off+i] * 32768)))
 		}
 	}

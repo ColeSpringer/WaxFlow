@@ -24,8 +24,8 @@ import (
 func JobRequestJSONTags() []string {
 	t := reflect.TypeFor[jobRequest]()
 	tags := make([]string, 0, t.NumField())
-	for i := range t.NumField() {
-		if tag := jsonTag(t.Field(i)); tag != "" {
+	for field := range t.Fields() {
+		if tag := jsonTag(field); tag != "" {
 			tags = append(tags, tag)
 		}
 	}

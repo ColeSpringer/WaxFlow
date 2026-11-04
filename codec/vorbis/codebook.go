@@ -47,7 +47,7 @@ func lookup1Values(entries, dimensions int) int {
 	for {
 		next := v + 1
 		p := 1.0
-		for i := 0; i < dimensions; i++ {
+		for range dimensions {
 			p *= float64(next)
 			if p > float64(entries) {
 				break
@@ -94,7 +94,7 @@ func parseCodebook(r *bitReader) (codebook, error) {
 			if entry+num > c.entries {
 				return c, malformed("ordered codebook overruns entry count")
 			}
-			for i := 0; i < num; i++ {
+			for i := range num {
 				lengths[entry+i] = uint8(length)
 			}
 			entry += num
@@ -155,18 +155,6 @@ func parseCodebook(r *bitReader) (codebook, error) {
 // decodeScalar reads one Huffman codeword and returns its entry number.
 func (c *codebook) decodeScalar(r *bitReader) (int, error) {
 	return c.tree.decode(r)
-}
-
-// decodeVector reads one codeword and writes its VQ value vector into out
-// (length c.dimensions), applying the type-1 or type-2 lookup. Used by
-// residue value decode; sequence_p accumulation runs per vector.
-func (c *codebook) decodeVector(r *bitReader, out []float32) error {
-	entry, err := c.tree.decode(r)
-	if err != nil {
-		return err
-	}
-	c.valueVector(entry, out)
-	return nil
 }
 
 // valueVector fills out with the VQ vector for an entry (spec 3.2.1 value

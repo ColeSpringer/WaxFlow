@@ -37,9 +37,9 @@ func FuzzCELTEncode(f *testing.F) {
 
 		// Turn the fuzz bytes into a few frames of PCM in [-1, 1].
 		frames := 3
-		for fi := 0; fi < frames; fi++ {
+		for fi := range frames {
 			for c := 0; c < C; c++ {
-				for i := 0; i < opusFrameSize; i++ {
+				for i := range opusFrameSize {
 					idx := (fi*opusFrameSize + i) % max(1, len(data))
 					var b byte
 					if len(data) > 0 {
@@ -56,7 +56,7 @@ func FuzzCELTEncode(f *testing.F) {
 				t.Fatalf("decode of self-produced payload failed: %v", err)
 			}
 			for c := 0; c < C; c++ {
-				for i := 0; i < opusFrameSize; i++ {
+				for i := range opusFrameSize {
 					if v := out[c][i]; math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
 						t.Fatalf("decoded non-finite sample %v", v)
 					}
@@ -119,7 +119,7 @@ func FuzzOpusEncode(f *testing.F) {
 			})
 		}
 		packets := 0
-		for fi := 0; fi < frames; fi++ {
+		for fi := range frames {
 			b := audio.Get(f32, opusFrameSize)
 			for c := 0; c < C; c++ {
 				ch := b.ChanF(c)

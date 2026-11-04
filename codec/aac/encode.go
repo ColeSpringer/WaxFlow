@@ -508,7 +508,7 @@ func (e *Encoder) encodeFrame(emit func(codec.Packet) error) error {
 		}
 		// Short thresholds accumulate over each group's windows.
 		var wThr [8][maxSFBCount]float64
-		for i := 0; i < 8; i++ {
+		for i := range 8 {
 			off := frameLen + 448 + i*128
 			rs, err := e.psyShort[c].Analyze(e.hist[c][off : off+256])
 			if err != nil {
@@ -522,7 +522,7 @@ func (e *Encoder) encodeFrame(emit func(codec.Packet) error) error {
 		for g, L := range groupLen {
 			for sfb := 0; sfb < e.numSwbShort; sfb++ {
 				t := 0.0
-				for w := 0; w < L; w++ {
+				for w := range L {
 					t += wThr[win+w][sfb]
 				}
 				e.thr[c][g][sfb] = t
@@ -582,10 +582,7 @@ func (e *Encoder) encodeFrame(emit func(codec.Packet) error) error {
 	target = math.Min(target, float64(6144*e.channels)*0.93)
 
 	overhead := e.overheadBits(seq, maxSfb, msMask, len(groupLen)) + sbrOverhead
-	spectral := int(target) - overhead
-	if spectral < 0 {
-		spectral = 0
-	}
+	spectral := max(int(target)-overhead, 0)
 	// The spectral ceiling the rate loop may never cross, as against the target
 	// above, which it may. The target is already well under it, so neither this
 	// clamp nor quantizeChannel's fires today. They are not dead: the fallback
@@ -678,10 +675,10 @@ func (e *Encoder) decideMS(groupLen []int, swb []uint16, maxSfb int) int {
 	all, none := true, true
 	winBase := 0
 	for g, L := range groupLen {
-		for sfb := 0; sfb < maxSfb; sfb++ {
+		for sfb := range maxSfb {
 			lo, hi := int(swb[sfb]), int(swb[sfb+1])
 			var eL, eR, eM, eS float64
-			for w := 0; w < L; w++ {
+			for w := range L {
 				base := (winBase + w) * 128
 				for k := lo; k < hi; k++ {
 					l, r := e.spec[0][base+k], e.spec[1][base+k]
@@ -713,7 +710,7 @@ func (e *Encoder) decideMS(groupLen []int, swb []uint16, maxSfb int) int {
 	// Transform the chosen bands and install the shared thresholds.
 	winBase = 0
 	for g, L := range groupLen {
-		for sfb := 0; sfb < maxSfb; sfb++ {
+		for sfb := range maxSfb {
 			if !e.msUse[g][sfb] {
 				continue
 			}
@@ -721,7 +718,7 @@ func (e *Encoder) decideMS(groupLen []int, swb []uint16, maxSfb int) int {
 			e.thr[0][g][sfb] = thrMS
 			e.thr[1][g][sfb] = thrMS
 			lo, hi := int(swb[sfb]), int(swb[sfb+1])
-			for w := 0; w < L; w++ {
+			for w := range L {
 				base := (winBase + w) * 128
 				for k := lo; k < hi; k++ {
 					l, r := e.spec[0][base+k], e.spec[1][base+k]
@@ -890,7 +887,7 @@ func (e *Encoder) writeCPE(seq int, groupLen []int, maxSfb, msMask int) {
 	e.w.writeBits(2, uint64(msMask))
 	if msMask == 1 {
 		for g := range groupLen {
-			for sfb := 0; sfb < maxSfb; sfb++ {
+			for sfb := range maxSfb {
 				v := uint64(0)
 				if e.msUse[g][sfb] {
 					v = 1
@@ -917,7 +914,7 @@ func (e *Encoder) Finish(emit func(codec.Packet) error) (codec.Trailer, error) {
 			return codec.Trailer{}, err
 		}
 	}
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		for c := 0; c < e.channels; c++ {
 			if cap(e.pending[c]) < frameLen {
 				e.pending[c] = make([]float32, frameLen)
@@ -934,9 +931,6 @@ func (e *Encoder) Finish(emit func(codec.Packet) error) (codec.Trailer, error) {
 		e.pending[c] = e.pending[c][:0]
 	}
 	delay := int64(EncoderDelay)
-	padding := e.outFrames*frameLen - e.inSamples - delay
-	if padding < 0 {
-		padding = 0
-	}
+	padding := max(e.outFrames*frameLen-e.inSamples-delay, 0)
 	return codec.Trailer{Samples: e.inSamples, Delay: delay, Padding: padding}, nil
 }

@@ -57,7 +57,7 @@ func ncwrsURow(n, k int, u []uint32) uint32 {
 // row n of U() in u (destructively modified). Returns Σ y² (libopus cwrs.c).
 func cwrsi(n, k int, i uint32, y []int, u []uint32) float32 {
 	var yy float32
-	for j := 0; j < n; j++ {
+	for j := range n {
 		p := u[k+1]
 		s := 0
 		if i >= p {
@@ -130,7 +130,7 @@ func expRotation(X []float32, n, dir, B, K, spread int) {
 		}
 	}
 	length /= B
-	for i := 0; i < B; i++ {
+	for i := range B {
 		seg := X[i*length:]
 		if dir < 0 {
 			if stride2 != 0 {
@@ -150,7 +150,7 @@ func expRotation(X []float32, n, dir, B, K, spread int) {
 // (libopus vq.c normalise_residual; float build).
 func normaliseResidual(iy []int, X []float32, n int, ryy, gain float32) {
 	g := gain / float32(math.Sqrt(float64(ryy)))
-	for i := 0; i < n; i++ {
+	for i := range n {
 		X[i] = float32(iy[i]) * g
 	}
 }
@@ -163,9 +163,9 @@ func extractCollapseMask(iy []int, N, B int) uint32 {
 	}
 	N0 := N / B
 	var mask uint32
-	for i := 0; i < B; i++ {
+	for i := range B {
 		var tmp int
-		for j := 0; j < N0; j++ {
+		for j := range N0 {
 			tmp |= iy[i*N0+j]
 		}
 		if tmp != 0 {
@@ -201,7 +201,7 @@ func opPVQSearch(X []float32, iy []int, K, N int) float32 {
 	y := make([]float32, N)
 	signx := make([]int, N)
 	var sum, xy, yy float32
-	for j := 0; j < N; j++ {
+	for j := range N {
 		if X[j] < 0 {
 			signx[j] = 1
 		} else {
@@ -213,7 +213,7 @@ func opPVQSearch(X []float32, iy []int, K, N int) float32 {
 	}
 	pulsesLeft := K
 	if K > N>>1 {
-		for j := 0; j < N; j++ {
+		for j := range N {
 			sum += X[j]
 		}
 		// If X is too small, replace it with a single pulse to avoid NaNs and
@@ -227,7 +227,7 @@ func opPVQSearch(X []float32, iy []int, K, N int) float32 {
 		}
 		// K+0.8 guarantees at most K pulses after the floor.
 		rcp := (float32(K) + 0.8) / sum
-		for j := 0; j < N; j++ {
+		for j := range N {
 			iy[j] = int(math.Floor(float64(rcp * X[j])))
 			y[j] = float32(iy[j])
 			yy += y[j] * y[j]
@@ -269,7 +269,7 @@ func opPVQSearch(X []float32, iy []int, K, N int) float32 {
 		y[bestID] += 2
 		iy[bestID]++
 	}
-	for j := 0; j < N; j++ {
+	for j := range N {
 		iy[j] = (iy[j] ^ -signx[j]) + signx[j]
 	}
 	return yy
@@ -335,14 +335,14 @@ func algQuant(X []float32, n, K, spread, B int, e *rangeEncoder, gain float32, i
 func stereoItheta(X, Y []float32, stereo, N int) int {
 	var Emid, Eside float32
 	if stereo != 0 {
-		for i := 0; i < N; i++ {
+		for i := range N {
 			m := X[i] + Y[i]
 			s := X[i] - Y[i]
 			Emid += m * m
 			Eside += s * s
 		}
 	} else {
-		for i := 0; i < N; i++ {
+		for i := range N {
 			Emid += X[i] * X[i]
 			Eside += Y[i] * Y[i]
 		}
@@ -360,11 +360,11 @@ func stereoItheta(X, Y []float32, stereo, N int) int {
 // float build). Used by band folding and the theta split.
 func renormaliseVector(X []float32, N int, gain float32) {
 	E := float32(1e-15)
-	for i := 0; i < N; i++ {
+	for i := range N {
 		E += X[i] * X[i]
 	}
 	g := gain / float32(math.Sqrt(float64(E)))
-	for i := 0; i < N; i++ {
+	for i := range N {
 		X[i] *= g
 	}
 }

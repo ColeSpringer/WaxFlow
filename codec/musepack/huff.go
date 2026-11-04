@@ -67,7 +67,7 @@ func (v *vlc) decode(r *bitReader) (int, bool) {
 	window := v.maxLen
 	acc := r.peek(window)
 	at := int32(0)
-	for i := 0; i < window; i++ {
+	for i := range window {
 		d := int(acc>>(window-1-i)) & 1
 		next := v.kid[2*int(at)+d]
 		if next < 0 {

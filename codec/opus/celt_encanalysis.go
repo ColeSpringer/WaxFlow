@@ -41,10 +41,10 @@ func transientAnalysis(in [][]float32, n, C int, tfEstimate *float32, tfChan *in
 	tmp := make([]float32, n)
 	maskMetric := 0
 	*tfChan = 0
-	for c := 0; c < C; c++ {
+	for c := range C {
 		var mem0, mem1 float32
 		// High-pass filter: (1 - 2z^-1 + z^-2) / (1 - z^-1 + .5z^-2).
-		for i := 0; i < n; i++ {
+		for i := range n {
 			x := in[c][i]
 			y := mem0 + x
 			mem00 := mem0
@@ -59,7 +59,7 @@ func transientAnalysis(in [][]float32, n, C int, tfEstimate *float32, tfChan *in
 		var mean float32
 		mem0 = 0
 		// Forward pass: post-echo threshold, grouped by two.
-		for i := 0; i < len2; i++ {
+		for i := range len2 {
 			x2 := tmp[2*i]*tmp[2*i] + tmp[2*i+1]*tmp[2*i+1]
 			mean += x2
 			mem0 = x2 + (1-forwardDecay)*mem0
@@ -155,7 +155,7 @@ func patchTransientDecision(newE, oldE []float32, start, end, C int) bool {
 	}
 	i0 := max(2, start)
 	var meanDiff float32
-	for c := 0; c < C; c++ {
+	for c := range C {
 		for i := i0; i < end-1; i++ {
 			x1 := max(0, newE[i+c*nb])
 			x2 := max(0, spreadOld[i])
@@ -171,7 +171,7 @@ func patchTransientDecision(newE, oldE []float32, start, end, C int) bool {
 // tfAnalysis prefers coarser time resolution when in doubt.
 func l1Metric(tmp []float32, N, LM int, bias float32) float32 {
 	var L1 float32
-	for i := 0; i < N; i++ {
+	for i := range N {
 		L1 += absf(tmp[i])
 	}
 	return L1 + (float32(LM)*bias)*L1
@@ -192,7 +192,7 @@ func tfAnalysis(effEnd, isTransient int, tfRes []int, lambda int, X []float32, N
 	tmp := make([]float32, maxWidth)
 	tmp1 := make([]float32, maxWidth)
 
-	for i := 0; i < length; i++ {
+	for i := range length {
 		N := (int(celtEBands[i+1]) - int(celtEBands[i])) << LM
 		narrow := (int(celtEBands[i+1]) - int(celtEBands[i])) == 1
 		copy(tmp[:N], X[tfChan*N0+(int(celtEBands[i])<<LM):tfChan*N0+(int(celtEBands[i])<<LM)+N])
@@ -251,7 +251,7 @@ func tfAnalysis(effEnd, isTransient int, tfRes []int, lambda int, X []float32, N
 		}
 		return lambda
 	}
-	for sel := 0; sel < 2; sel++ {
+	for sel := range 2 {
 		cost0 := importance[0] * iabs(metric[0]-sc(sel, 0))
 		cost1 := importance[0]*iabs(metric[0]-sc(sel, 1)) + transientLambda()
 		for i := 1; i < length; i++ {
@@ -325,7 +325,7 @@ func allocTrimAnalysis(X, bandLogE []float32, end, LM, C, N0 int, tfEstimate flo
 	}
 	if C == 2 {
 		var sum float32
-		for i := 0; i < 8; i++ {
+		for i := range 8 {
 			lo := int(celtEBands[i]) << LM
 			w := (int(celtEBands[i+1]) - int(celtEBands[i])) << LM
 			sum += innerProd(X[lo:], X[N0+lo:], w)
@@ -347,7 +347,7 @@ func allocTrimAnalysis(X, bandLogE []float32, end, LM, C, N0 int, tfEstimate flo
 	}
 	// Spectral tilt.
 	var diff float32
-	for c := 0; c < C; c++ {
+	for c := range C {
 		for i := 0; i < end-1; i++ {
 			diff += bandLogE[i+c*celtNBands] * float32(2+2*i-end)
 		}
@@ -371,7 +371,7 @@ func allocTrimAnalysis(X, bandLogE []float32, end, LM, C, N0 int, tfEstimate flo
 
 func innerProd(a, b []float32, n int) float32 {
 	var s float32
-	for i := 0; i < n; i++ {
+	for i := range n {
 		s += a[i] * b[i]
 	}
 	return s
@@ -454,15 +454,15 @@ func spreadingDecision(X []float32, average *int, lastDecision int, hfAverage, t
 		return spreadNone
 	}
 	sum, nbBands, hfSum := 0, 0, 0
-	for c := 0; c < C; c++ {
-		for i := 0; i < end; i++ {
+	for c := range C {
+		for i := range end {
 			N := M * (int(celtEBands[i+1]) - int(celtEBands[i]))
 			if N <= 8 {
 				continue
 			}
 			x := X[M*int(celtEBands[i])+c*N0:]
 			var tcount [3]int
-			for j := 0; j < N; j++ {
+			for j := range N {
 				x2N := x[j] * x[j] * float32(N)
 				if x2N < 0.25 {
 					tcount[0]++
@@ -489,9 +489,10 @@ func spreadingDecision(X []float32, average *int, lastDecision int, hfAverage, t
 		}
 		*hfAverage = (*hfAverage + hfSum) >> 1
 		hfSum = *hfAverage
-		if *tapsetDecision == 2 {
+		switch *tapsetDecision {
+		case 2:
 			hfSum += 4
-		} else if *tapsetDecision == 0 {
+		case 0:
 			hfSum -= 4
 		}
 		if hfSum > 22 {
@@ -526,7 +527,7 @@ func spreadingDecision(X []float32, average *int, lastDecision int, hfAverage, t
 func stereoAnalysis(X []float32, LM, N0 int) int {
 	sumLR := float32(1e-15)
 	sumMS := float32(1e-15)
-	for i := 0; i < 13; i++ {
+	for i := range 13 {
 		for j := int(celtEBands[i]) << LM; j < int(celtEBands[i+1])<<LM; j++ {
 			L := X[j]
 			R := X[N0+j]
@@ -562,18 +563,18 @@ func stereoAnalysis(X []float32, LM, N0 int) int {
 // quality, never a decodable stream.
 func dynallocOffsets(bandLogE, bandLogE2, oldBandE []float32, start, end, C, LM, effectiveBytes, isTransient int, vbr, constrainedVBR bool, offsets, importance, spreadWeight []int, totBoost *int, toneFreq, toneishness float32, analysis *analysisInfo) float32 {
 	nb := celtNBands
-	for i := 0; i < end; i++ {
+	for i := range end {
 		offsets[i] = 0
 	}
 	const lsbDepth = 24
 	noiseFloor := make([]float32, end)
-	for i := 0; i < end; i++ {
+	for i := range end {
 		noiseFloor[i] = 0.0625*float32(celtLogN[i]) + 0.5 + float32(9-lsbDepth) -
 			celtEMeans[i] + 0.0062*float32((i+5)*(i+5))
 	}
 	maxDepth := float32(-31.9)
-	for c := 0; c < C; c++ {
-		for i := 0; i < end; i++ {
+	for c := range C {
+		for i := range end {
 			maxDepth = max(maxDepth, bandLogE[c*nb+i]-noiseFloor[i])
 		}
 	}
@@ -581,11 +582,11 @@ func dynallocOffsets(bandLogE, bandLogE2, oldBandE []float32, start, end, C, LM,
 	// fully masked. spreadWeight is computed even below the dynalloc threshold.
 	mask := make([]float32, end)
 	sig := make([]float32, end)
-	for i := 0; i < end; i++ {
+	for i := range end {
 		mask[i] = bandLogE[i] - noiseFloor[i]
 	}
 	if C == 2 {
-		for i := 0; i < end; i++ {
+		for i := range end {
 			mask[i] = max(mask[i], bandLogE[nb+i]-noiseFloor[i])
 		}
 	}
@@ -596,7 +597,7 @@ func dynallocOffsets(bandLogE, bandLogE2, oldBandE []float32, start, end, C, LM,
 	for i := end - 2; i >= 0; i-- {
 		mask[i] = max(mask[i], mask[i+1]-3.0)
 	}
-	for i := 0; i < end; i++ {
+	for i := range end {
 		// SMR: never more than 72 dB below the peak, never below the noise floor.
 		smr := sig[i] - max(max(0, maxDepth-12.0), mask[i])
 		shift := int(-math.Floor(float64(0.5 + smr)))
@@ -619,7 +620,7 @@ func dynallocOffsets(bandLogE, bandLogE2, oldBandE []float32, start, end, C, LM,
 	follower := make([]float32, C*nb)
 	bandLogE3 := make([]float32, end)
 	last := 0
-	for c := 0; c < C; c++ {
+	for c := range C {
 		copy(bandLogE3, bandLogE2[c*nb:c*nb+end])
 		if LM == 0 {
 			for i := 0; i < min(8, end); i++ {
@@ -647,7 +648,7 @@ func dynallocOffsets(bandLogE, bandLogE2, oldBandE []float32, start, end, C, LM,
 		tmp = median3(bandLogE3[end-3:]) - offset
 		f[end-2] = max(f[end-2], tmp)
 		f[end-1] = max(f[end-1], tmp)
-		for i := 0; i < end; i++ {
+		for i := range end {
 			f[i] = max(f[i], noiseFloor[i])
 		}
 	}

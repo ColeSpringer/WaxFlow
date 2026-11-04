@@ -78,7 +78,7 @@ func TestOpusEncoderQuality(t *testing.T) {
 	filtered := false
 	if v := os.Getenv("WAXFLOW_OPUS_QUALITY_TRACKS"); v != "" {
 		keep := map[string]bool{}
-		for _, name := range strings.Split(v, ",") {
+		for name := range strings.SplitSeq(v, ",") {
 			keep[strings.TrimSpace(name)] = true
 		}
 		var sub []opusQualityTrack
@@ -94,7 +94,7 @@ func TestOpusEncoderQuality(t *testing.T) {
 	}
 	if v := os.Getenv("WAXFLOW_OPUS_QUALITY_BITRATES"); v != "" {
 		var kb []int
-		for _, s := range strings.Split(v, ",") {
+		for s := range strings.SplitSeq(v, ",") {
 			n, err := strconv.Atoi(strings.TrimSpace(s))
 			if err != nil {
 				t.Fatalf("WAXFLOW_OPUS_QUALITY_BITRATES=%q: %v", v, err)
@@ -248,7 +248,7 @@ func TestOpusSpeechEncoderQuality(t *testing.T) {
 		libPkts := testutil.OpusDemoEncode(t, opusDemo, track.pcm, rate, channels, kbps*1000, complexity)
 		n := min(len(packets), len(libPkts))
 		agree := 0
-		for i := 0; i < n; i++ {
+		for i := range n {
 			if tocModeOf(packets[i][0]) == tocModeOf(libPkts[i][0]) {
 				agree++
 			}
@@ -586,8 +586,8 @@ func encodeOpusPackets(t *testing.T, pcm []int16, channels, bitrate, complexity 
 	// The same nominal [-1, 1) mapping the engine's convert stage applies.
 	n := len(pcm) / channels
 	flat := make([]float32, channels*n)
-	for i := 0; i < n; i++ {
-		for c := 0; c < channels; c++ {
+	for i := range n {
+		for c := range channels {
 			flat[c*n+i] = float32(pcm[i*channels+c]) / 32768
 		}
 	}

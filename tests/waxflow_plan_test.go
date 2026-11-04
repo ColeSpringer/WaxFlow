@@ -38,7 +38,7 @@ func TestTranscodeFromSample(t *testing.T) {
 	}
 	got := readAll(t, e, out.Buf, frames-from)
 	defer audio.Put(got)
-	for c := 0; c < 2; c++ {
+	for c := range 2 {
 		want := src.ChanI(c)[from:]
 		have := got.ChanI(c)
 		for i := range want {

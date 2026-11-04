@@ -541,7 +541,7 @@ func TestWalkCostsOneReadPerWindow(t *testing.T) {
 	const n = 2000 // 834 KB, over six windows
 	w, src := countedWalk(t, frames(n))
 	src.Reset()
-	for i := int64(0); i < 8; i++ {
+	for i := range int64(8) {
 		if _, err := w.Frame(i); err != nil {
 			t.Fatal(err)
 		}

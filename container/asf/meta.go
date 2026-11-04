@@ -1,6 +1,7 @@
 package asf
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf16"
@@ -89,7 +90,7 @@ func (d *Demuxer) parseExtendedContentDescription(body []byte) {
 	}
 	count := int(le.Uint16(body))
 	p := 2
-	for i := 0; i < count; i++ {
+	for range count {
 		if p+2 > len(body) {
 			return
 		}
@@ -165,10 +166,8 @@ func (d *Demuxer) addTag(key, value string) {
 	if !container.ValidTagKey(key) {
 		return
 	}
-	for _, v := range d.tags[key] {
-		if v == value {
-			return
-		}
+	if slices.Contains(d.tags[key], value) {
+		return
 	}
 	if d.tags == nil {
 		d.tags = make(map[string][]string)

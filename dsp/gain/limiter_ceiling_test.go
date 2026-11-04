@@ -77,7 +77,7 @@ func kernelTruePeak(t *testing.T, rate int, out [][]float32) float64 {
 			for p := range l.interp {
 				phase := &l.interp[p]
 				var acc float64
-				for tap := 0; tap < interpTaps; tap++ {
+				for tap := range interpTaps {
 					if i := j - half + 1 + tap; i >= 0 && i < len(ch) {
 						acc += float64(phase[tap]) * float64(ch[i])
 					}
@@ -319,7 +319,7 @@ func TestLimiterSettlerRejoin(t *testing.T) {
 	}
 	diffs, first := 0, -1
 	var maxDiff float64
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if cont[i] != rest[i] {
 			diffs++
 			if first < 0 {
@@ -350,7 +350,7 @@ func limitRange(t *testing.T, rate int, gen func(int) float32, from, end, keepFr
 	var out []float32
 	pos := from // absolute index of the next frame the limiter will emit
 	keep := func(n int) {
-		for i := 0; i < n; i++ {
+		for i := range n {
 			if pos+i >= keepFrom {
 				out = append(out, dst[0][i])
 			}
@@ -359,7 +359,7 @@ func limitRange(t *testing.T, rate int, gen func(int) float32, from, end, keepFr
 	}
 	for at := from; at < end; at += chunk {
 		nn := min(chunk, end-at)
-		for i := 0; i < nn; i++ {
+		for i := range nn {
 			in[i] = gen(at + i)
 		}
 		src := [][]float32{in[:nn]}

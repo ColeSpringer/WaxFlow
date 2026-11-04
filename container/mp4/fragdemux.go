@@ -603,7 +603,7 @@ func parseTrun(fi *fragInfo, trun []byte, defaultDur, defaultSize, defaultFlags 
 		return malformed("trun declares %d samples for %d bytes", count, len(rest))
 	}
 	fi.samples = slices.Grow(fi.samples[:0], int(count))[:count]
-	for i := uint32(0); i < count; i++ {
+	for i := range count {
 		dur, size, sflags := defaultDur, defaultSize, defaultFlags
 		if flags&0x000100 != 0 {
 			dur = be32(rest)

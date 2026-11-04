@@ -709,19 +709,14 @@ func (d *Demuxer) SeekSample(ctx context.Context, track int, sample int64) (int6
 	if err := d.seekWalk(ctx, sample); err != nil {
 		return 0, err
 	}
-	searchRaw := sample - d.seekPreRollSamples
-	if searchRaw < 0 {
-		searchRaw = 0
-	}
+	searchRaw := max(sample-d.seekPreRollSamples, 0)
 	clusterOff, landed := d.firstClusterOff, int64(0)
 	if len(d.clusterIndex) > 0 {
 		// The last cluster whose first frame is at or before the search point.
 		idx := sort.Search(len(d.clusterIndex), func(i int) bool {
 			return d.clusterIndex[i].sample > searchRaw
 		}) - 1
-		if idx < 0 {
-			idx = 0
-		}
+		idx = max(idx, 0)
 		clusterOff = d.clusterIndex[idx].off
 		landed = d.clusterIndex[idx].sample
 	}
@@ -752,16 +747,4 @@ func codecName(codecID string) string {
 		return codecID[2:]
 	}
 	return codecID
-}
-
-// joinNames renders a codec-name list for diagnostics.
-func joinNames(names []string) string {
-	out := ""
-	for i, n := range names {
-		if i > 0 {
-			out += ", "
-		}
-		out += n
-	}
-	return out
 }

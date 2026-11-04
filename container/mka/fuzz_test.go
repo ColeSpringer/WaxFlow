@@ -69,7 +69,7 @@ func FuzzDemux(f *testing.F) {
 			var rawDur, kept, lastPad, lastDur int64
 			var inner []container.PacketTrim
 			clean := false
-			for i := 0; i < maxPackets; i++ {
+			for range maxPackets {
 				err := d.ReadPacket(&pkt)
 				if errors.Is(err, io.EOF) {
 					clean = true

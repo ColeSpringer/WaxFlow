@@ -32,7 +32,7 @@ func TestEncoderGoldenBytes(t *testing.T) {
 			out[c] = make([]float32, n)
 		}
 		seed := uint64(42)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			seed = seed*6364136223846793005 + 1442695040888963407
 			noise := 0.02 * (2*float64(seed>>11)/float64(1<<53) - 1)
 			v := 0.25*math.Sin(2*math.Pi*440*float64(i)/48000) +
@@ -41,7 +41,7 @@ func TestEncoderGoldenBytes(t *testing.T) {
 			if i >= 30000 && i < 30400 {
 				v += 0.6 * math.Sin(2*math.Pi*12000*float64(i)/48000)
 			}
-			for c := 0; c < ch; c++ {
+			for c := range ch {
 				out[c][i] = float32(v * (1 - 0.2*float64(c)))
 			}
 		}

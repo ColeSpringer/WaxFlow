@@ -216,7 +216,7 @@ func (c *Compressor) Process(dst, src [][]float32) (produced, consumed int) {
 		panic("gain: compressor channel count mismatch")
 	}
 	n := min(checkFrames("compressor destination", dst), checkFrames("compressor source", src))
-	for i := 0; i < n; i++ {
+	for i := range n {
 		var peak float32
 		for ch := range src {
 			v := src[ch][i]

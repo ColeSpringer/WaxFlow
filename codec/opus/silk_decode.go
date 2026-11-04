@@ -35,9 +35,10 @@ func (cs *silkChannelState) decodeIndices(dec *rangeDecoder, frameIndex int, dec
 	silkNLSFUnpack(ecIx[:], predQ8[:], cb, int(ix.NLSFIndices[0]))
 	for i := 0; i < cb.order; i++ {
 		v := dec.decodeICDF(cb.ecICDF[ecIx[i]:], 8)
-		if v == 0 {
+		switch v {
+		case 0:
 			v -= dec.decodeICDF(silk_NLSF_EXT_iCDF, 8)
-		} else if v == 2*nlsfQuantMaxAmp {
+		case 2 * nlsfQuantMaxAmp:
 			v += dec.decodeICDF(silk_NLSF_EXT_iCDF, 8)
 		}
 		ix.NLSFIndices[i+1] = int8(v - nlsfQuantMaxAmp)
@@ -107,7 +108,7 @@ func (cs *silkChannelState) decodeParameters(ctrl *silkDecoderControl, condCodin
 		cbk := silkLTPVQPtrsQ7[ix.PERIndex]
 		for k := 0; k < cs.nbSubfr; k++ {
 			idx := ix.LTPIndex[k]
-			for i := 0; i < silkLTPOrder; i++ {
+			for i := range silkLTPOrder {
 				ctrl.LTPCoefQ14[k*silkLTPOrder+i] = int16(silkLSHIFT(int32(cbk[idx][i]), 7))
 			}
 		}
@@ -149,7 +150,7 @@ func silkDecodePulses(dec *rangeDecoder, pulses []int16, signalType, quantOffset
 		if sumPulses[i] > 0 {
 			shellDecoder(pulses[i*shellFrameLen:], dec, sumPulses[i])
 		} else {
-			for k := 0; k < shellFrameLen; k++ {
+			for k := range shellFrameLen {
 				pulses[i*shellFrameLen+k] = 0
 			}
 		}
@@ -158,9 +159,9 @@ func silkDecodePulses(dec *rangeDecoder, pulses []int16, signalType, quantOffset
 		if nLshifts[i] > 0 {
 			nLS := nLshifts[i]
 			p := pulses[i*shellFrameLen:]
-			for k := 0; k < shellFrameLen; k++ {
+			for k := range shellFrameLen {
 				absQ := int(p[k])
-				for j := 0; j < nLS; j++ {
+				for range nLS {
 					absQ <<= 1
 					absQ += dec.decodeICDF(silk_lsb_iCDF, 8)
 				}
@@ -210,12 +211,12 @@ func decodeSigns(dec *rangeDecoder, pulses []int16, length int, signalType, quan
 	i := 7 * (int(quantOffsetType) + int(signalType)<<1)
 	icdfPtr := silk_sign_iCDF[i:]
 	nBlocks := (length + shellFrameLen/2) >> log2ShellFrame
-	for i := 0; i < nBlocks; i++ {
+	for i := range nBlocks {
 		p := sumPulses[i]
 		q := pulses[i*shellFrameLen:]
 		if p > 0 {
 			icdf[0] = icdfPtr[min(p&0x1F, 6)]
-			for j := 0; j < shellFrameLen; j++ {
+			for j := range shellFrameLen {
 				if q[j] > 0 {
 					q[j] *= int16(int(dec.decodeICDF(icdf[:], 8))<<1 - 1)
 				}
@@ -266,7 +267,7 @@ func (cs *silkChannelState) decodeCore(ctrl *silkDecoderControl, xq []int16, pul
 		var gainAdjQ16 int32
 		if ctrl.GainsQ16[k] != cs.prevGainQ16 {
 			gainAdjQ16 = silkDIV32varQ(cs.prevGainQ16, ctrl.GainsQ16[k], 16)
-			for i := 0; i < silkMaxLPCOrder; i++ {
+			for i := range silkMaxLPCOrder {
 				sLPCQ14[i] = silkSMULWW(gainAdjQ16, sLPCQ14[i])
 			}
 		} else {

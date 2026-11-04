@@ -201,7 +201,7 @@ func (m *Muxer) WritePacket(pkt container.Packet) error {
 		}
 		if m.audioFrames%m.stride == 0 {
 			if len(m.frameOff) == tocSampleCap {
-				for i := 0; i < tocSampleCap/2; i++ {
+				for i := range tocSampleCap / 2 {
 					m.frameOff[i] = m.frameOff[2*i]
 				}
 				m.frameOff = m.frameOff[:tocSampleCap/2]

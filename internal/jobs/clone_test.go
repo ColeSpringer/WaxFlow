@@ -8,10 +8,6 @@ import (
 	"github.com/colespringer/waxflow"
 )
 
-// ptrTo returns a pointer to v, a fresh one per call. The fixture's pointers
-// must alias nothing else, per the aliasing trap named below.
-func ptrTo[T any](v T) *T { return &v }
-
 // assertRefFieldsSet fails for each reference field of v left nil, naming it.
 //
 // This and assertNoSharedPointers are the only reflection here, and neither is
@@ -110,10 +106,10 @@ func TestJobCloneIsDeep(t *testing.T) {
 			// carry the negative infinity of digital silence, and a fixture
 			// that leaves them nil cannot catch clone sharing them, which is
 			// exactly what it did not catch.
-			IntegratedLUFS: ptrTo(-14.5),
-			TruePeakDB:     ptrTo(-1.5),
-			SamplePeakDB:   ptrTo(-2.25),
-			AppliedGainDB:  ptrTo(3.75),
+			IntegratedLUFS: new(-14.5),
+			TruePeakDB:     new(-1.5),
+			SamplePeakDB:   new(-2.25),
+			AppliedGainDB:  new(3.75),
 			Silence:        &SilenceSummary{Spans: 3},
 		},
 		Timeline: &Timeline{

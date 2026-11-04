@@ -32,7 +32,7 @@ func TestMDCTForwardBackwardRoundTrip(t *testing.T) {
 		// [previous overlap history | N new] input buffer (zeros before 0).
 		coeffs := make([][]float32, frames)
 		inMem := make([]float32, N+overlap)
-		for k := 0; k < frames; k++ {
+		for k := range frames {
 			for j := 0; j < N+overlap; j++ {
 				si := k*N - overlap + j
 				if si >= 0 && si < len(sig) {
@@ -50,7 +50,7 @@ func TestMDCTForwardBackwardRoundTrip(t *testing.T) {
 		const bufSize = 2048
 		decodeMem := make([]float32, bufSize+overlap)
 		recon := make([]float32, 0, total)
-		for k := 0; k < frames; k++ {
+		for k := range frames {
 			keep := bufSize - N + overlap
 			copy(decodeMem[:keep], decodeMem[N:N+keep])
 			base := bufSize - N

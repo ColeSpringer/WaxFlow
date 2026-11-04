@@ -103,21 +103,21 @@ func (d *Decoder) decorrelate(fi FrameInfo, n int) {
 	case assignLeftSide:
 		left, side := d.res[:n], d.res[n:2*n]
 		l, r := d.buf.ChanI(0), d.buf.ChanI(1)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			l[i] = int32(left[i])
 			r[i] = int32(left[i] - side[i])
 		}
 	case assignRightSide:
 		side, right := d.res[:n], d.res[n:2*n]
 		l, r := d.buf.ChanI(0), d.buf.ChanI(1)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			l[i] = int32(right[i] + side[i])
 			r[i] = int32(right[i])
 		}
 	case assignMidSide:
 		mid, side := d.res[:n], d.res[n:2*n]
 		l, r := d.buf.ChanI(0), d.buf.ChanI(1)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			m := mid[i]<<1 | side[i]&1
 			l[i] = int32((m + side[i]) >> 1)
 			r[i] = int32((m - side[i]) >> 1)
@@ -126,7 +126,7 @@ func (d *Decoder) decorrelate(fi FrameInfo, n int) {
 		for c := 0; c < fi.Channels; c++ {
 			src := d.res[c*n : (c+1)*n]
 			dst := d.buf.ChanI(c)
-			for i := 0; i < n; i++ {
+			for i := range n {
 				dst[i] = int32(src[i])
 			}
 		}
@@ -205,7 +205,7 @@ func decodeFixed(r *bitReader, out []int64, order int, bps uint) error {
 	if order > len(out) {
 		return malformed("fixed order %d exceeds block size %d", order, len(out))
 	}
-	for i := 0; i < order; i++ {
+	for i := range order {
 		out[i] = r.s(bps)
 	}
 	if err := decodeResidual(r, out, order); err != nil {
@@ -237,7 +237,7 @@ func decodeLPC(r *bitReader, out []int64, order int, bps uint) error {
 	if order > len(out) {
 		return malformed("LPC order %d exceeds block size %d", order, len(out))
 	}
-	for i := 0; i < order; i++ {
+	for i := range order {
 		out[i] = r.s(bps)
 	}
 	precision := uint(r.u(4)) + 1
@@ -249,7 +249,7 @@ func decodeLPC(r *bitReader, out []int64, order int, bps uint) error {
 		return malformed("negative LPC shift")
 	}
 	var coef [32]int64
-	for i := 0; i < order; i++ {
+	for i := range order {
 		coef[i] = r.s(precision)
 	}
 	if r.err {
@@ -291,7 +291,7 @@ func decodeResidual(r *bitReader, out []int64, order int) error {
 	}
 
 	pos := order
-	for p := 0; p < parts; p++ {
+	for p := range parts {
 		want := count
 		if p == 0 {
 			want -= order

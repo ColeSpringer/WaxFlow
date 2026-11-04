@@ -45,7 +45,7 @@ func TestVorbisRealAudioQuality(t *testing.T) {
 	qs := []float64{4, 6, 8}
 	if s := os.Getenv("WAXFLOW_REAL_AUDIO_Q"); s != "" {
 		qs = nil
-		for _, p := range strings.Split(s, ",") {
+		for p := range strings.SplitSeq(s, ",") {
 			v, err := strconv.ParseFloat(strings.TrimSpace(p), 64)
 			if err != nil {
 				t.Fatalf("bad WAXFLOW_REAL_AUDIO_Q %q: %v", s, err)

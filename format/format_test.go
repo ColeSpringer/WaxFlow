@@ -449,8 +449,8 @@ func TestMediaCloseIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if med.Close() != nil || med.Close() != nil {
-		t.Error("Close must be idempotent and nil")
+	if first, second := med.Close(), med.Close(); first != nil || second != nil {
+		t.Errorf("Close = %v, then %v; it must be idempotent and nil", first, second)
 	}
 	f := med.Info().Default().Fmt
 	dst := audio.Get(f, 64)

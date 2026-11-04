@@ -23,7 +23,7 @@ func (d *Decoder) parseICSInfo(r *bitReader, info *icsInfo) bool {
 		info.numWindows = 8
 		info.numWindowGroups = 1
 		info.windowGroupLen[0] = 1
-		for i := 0; i < 7; i++ {
+		for i := range 7 {
 			if grouping&(1<<uint(6-i)) != 0 {
 				info.windowGroupLen[info.numWindowGroups-1]++
 			} else {
@@ -144,17 +144,17 @@ func (d *Decoder) scaleFactorData(r *bitReader, cd *channelData) bool {
 	firstNoise := true
 	for g := 0; g < info.numWindowGroups; g++ {
 		for sfb := 0; sfb < info.maxSfb; sfb++ {
-			switch cb := cd.sfbCb[g][sfb]; {
-			case cb == zeroHCB:
+			switch cd.sfbCb[g][sfb] {
+			case zeroHCB:
 				cd.sf[g][sfb] = 0
-			case cb == intensityHCB || cb == intensityHCB2:
+			case intensityHCB, intensityHCB2:
 				delta, ok := decodeScalefactor(r)
 				if !ok {
 					return false
 				}
 				isPos += delta
 				cd.sf[g][sfb] = isPos
-			case cb == noiseHCB:
+			case noiseHCB:
 				if firstNoise {
 					firstNoise = false
 					noiseEnergy += int(r.read(9)) - 256
@@ -218,9 +218,9 @@ func (d *Decoder) spectralData(r *bitReader, cd *channelData) bool {
 			n := 0
 			for s := sfb; s < end; s++ {
 				width := int(info.swb[s+1]) - int(info.swb[s])
-				for w := 0; w < L; w++ {
+				for w := range L {
 					base := (gs[g]+w)*128 + int(info.swb[s])
-					for k := 0; k < width; k++ {
+					for k := range width {
 						pos[n] = base + k
 						n++
 					}

@@ -75,7 +75,7 @@ func readScalefactors(r *bitReader, h Header, gi *grInfo, b bands, g *granule, c
 	for p := 0; p < 4 && counts[p] != 0; p++ {
 		cnt := int(counts[p])
 		if scfsi != nil && scfsi[p] {
-			for i := 0; i < cnt; i++ {
+			for i := range cnt {
 				g.iscf[ch][band+i] = int32(gr0Ist[ch][band+i])
 			}
 			copy(g.istPos[ch][band:band+cnt], gr0Ist[ch][band:band+cnt])
@@ -84,7 +84,7 @@ func readScalefactors(r *bitReader, h Header, gi *grInfo, b bands, g *granule, c
 		}
 		bits := uint(sizes[p])
 		if bits == 0 {
-			for i := 0; i < cnt; i++ {
+			for range cnt {
 				g.iscf[ch][band] = 0
 				g.istPos[ch][band] = 0
 				band++
@@ -92,7 +92,7 @@ func readScalefactors(r *bitReader, h Header, gi *grInfo, b bands, g *granule, c
 			continue
 		}
 		maxVal := uint32(1)<<bits - 1
-		for i := 0; i < cnt; i++ {
+		for range cnt {
 			v := r.bits(bits)
 			g.iscf[ch][band] = int32(v)
 			if istOn && v == maxVal {
@@ -258,7 +258,7 @@ func reorder(b bands, g *granule, ch int, base int, scratch *[576]float32) {
 		if w == 0 || pos+3*w > 576 {
 			break
 		}
-		for i := 0; i < w; i++ {
+		for i := range w {
 			scratch[out+3*i+0] = spec[pos+0*w+i]
 			scratch[out+3*i+1] = spec[pos+1*w+i]
 			scratch[out+3*i+2] = spec[pos+2*w+i]
@@ -394,7 +394,7 @@ func antialias(g *granule, ch int, boundaries int) {
 	spec := &g.spec[ch]
 	for sb := 1; sb <= boundaries; sb++ {
 		edge := 18 * sb
-		for i := 0; i < 8; i++ {
+		for i := range 8 {
 			lo, hi := edge-1-i, edge+i
 			a, b := float64(spec[lo]), float64(spec[hi])
 			spec[lo] = float32(a*csTab[i] - b*caTab[i])

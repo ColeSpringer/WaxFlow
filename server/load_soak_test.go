@@ -107,7 +107,7 @@ func TestLoadMixedTraffic(t *testing.T) {
 
 	deadline := time.Now().Add(duration)
 	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
+	for w := range workers {
 		wg.Add(1)
 		go func(seed int64) {
 			defer wg.Done()
@@ -121,9 +121,9 @@ func TestLoadMixedTraffic(t *testing.T) {
 				}
 				status, head := drainStatus(t, env, path)
 				total.Add(1)
-				switch {
-				case status == http.StatusOK:
-				case status == http.StatusServiceUnavailable:
+				switch status {
+				case http.StatusOK:
+				case http.StatusServiceUnavailable:
 					overloaded.Add(1)
 					if !strings.Contains(head, "overloaded") {
 						mu.Lock()
@@ -388,13 +388,7 @@ func percentile(ds []time.Duration, p float64) time.Duration {
 	}
 	sorted := slices.Clone(ds)
 	slices.Sort(sorted)
-	idx := int(p*float64(len(sorted))+0.5) - 1
-	if idx < 0 {
-		idx = 0
-	}
-	if idx >= len(sorted) {
-		idx = len(sorted) - 1
-	}
+	idx := min(max(int(p*float64(len(sorted))+0.5)-1, 0), len(sorted)-1)
 	return sorted[idx]
 }
 
@@ -412,7 +406,7 @@ func TestTTFAPercentiles(t *testing.T) {
 	// Cold and seek: each distinct t= is a distinct cache entry, so
 	// unique offsets keep every request a fresh pipeline.
 	cold := make([]time.Duration, 0, iters)
-	for i := 0; i < iters; i++ {
+	for i := range iters {
 		cold = append(cold, ttfb(t, env, fmt.Sprintf("/stream?src=lib%%2Framp.wav&format=opus&t=%.3f", 0.001*float64(i+1))))
 	}
 
@@ -423,7 +417,7 @@ func TestTTFAPercentiles(t *testing.T) {
 	}
 	waitForIdle(t, env)
 	warm := make([]time.Duration, 0, iters)
-	for i := 0; i < iters; i++ {
+	for range iters {
 		warm = append(warm, ttfb(t, env, warmPath))
 	}
 
@@ -446,7 +440,7 @@ func TestTTFAPercentiles(t *testing.T) {
 	}
 	rng := rand.New(rand.NewSource(7))
 	seek := make([]time.Duration, 0, iters)
-	for i := 0; i < iters; i++ {
+	for range iters {
 		// Unique fractional offsets: every request is a cold pipeline.
 		tt := 5 + 50*rng.Float64()
 		seek = append(seek, ttfb(t, env, fmt.Sprintf("/stream?src=lib%%2Flong.flac&format=opus&t=%.3f", tt)))

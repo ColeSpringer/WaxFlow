@@ -157,7 +157,7 @@ func (d *Detector) Process(chans [][]float32) error {
 			return waxerr.New(waxerr.CodeInvalidRequest, "silence: channel slices differ in length")
 		}
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		var peak float32
 		for c := range chans {
 			v := chans[c][i]

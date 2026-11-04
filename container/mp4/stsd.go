@@ -37,13 +37,13 @@ func (d *Demuxer) parseStsd(t *track, payload []byte, depth int) error {
 			return nil // one audio sample description is enough
 		}
 		done = true
-		return d.parseAudioSampleEntry(t, format, body, depth+1)
+		return d.parseAudioSampleEntry(t, format, body)
 	})
 }
 
 // parseAudioSampleEntry reads the AudioSampleEntry header and dispatches on
 // the sample format to extract the codec configuration.
-func (d *Demuxer) parseAudioSampleEntry(t *track, format string, body []byte, depth int) error {
+func (d *Demuxer) parseAudioSampleEntry(t *track, format string, body []byte) error {
 	// SampleEntry: reserved(6) + data_reference_index(2). AudioSampleEntry
 	// (QTFF/ISO v0): version(2) revision(2) vendor(4) channelcount(2)
 	// samplesize(2) compressionID(2) packetsize(2) samplerate(4, 16.16).
@@ -129,7 +129,7 @@ func (d *Demuxer) parseAudioSampleEntry(t *track, format string, body []byte, de
 
 	switch format {
 	case "alac":
-		return d.setALAC(t, format, children, sampleRate, channels, bitsPerSample)
+		return d.setALAC(t, children)
 	case "mp4a":
 		return d.setMP4A(t, children, sampleRate, channels)
 	case "Opus":
@@ -253,7 +253,7 @@ func (d *Demuxer) setFLAC(t *track, children []byte) error {
 
 // setALAC extracts the ALAC magic cookie (the 'alac' extension box) and
 // builds the track format from it.
-func (d *Demuxer) setALAC(t *track, format string, children []byte, rate, channels, bits int) error {
+func (d *Demuxer) setALAC(t *track, children []byte) error {
 	ext := findChild(children, "alac")
 	if ext == nil {
 		return malformed("ALAC sample entry has no magic cookie")
@@ -436,7 +436,7 @@ func readDescriptor(b []byte) (tag byte, body, rest []byte, ok bool) {
 	tag = b[0]
 	i := 1
 	length := 0
-	for n := 0; n < 4; n++ {
+	for range 4 {
 		if i >= len(b) {
 			return 0, nil, nil, false
 		}

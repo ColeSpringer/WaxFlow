@@ -28,7 +28,7 @@ func vorbisTestWAV(t *testing.T, frames int) (wav []byte, f audio.Format, interl
 	const rate, ch = 48000, 2
 	f = audio.Format{Rate: rate, Channels: ch, Layout: audio.DefaultLayout(ch), Type: audio.Float, BitDepth: 32}
 	interleaved = make([]float32, frames*ch)
-	for i := 0; i < frames; i++ {
+	for i := range frames {
 		l := 0.30*math.Sin(2*math.Pi*440*float64(i)/rate) + 0.15*math.Sin(2*math.Pi*880*float64(i)/rate)
 		r := 0.25 * math.Sin(2*math.Pi*660*float64(i)/rate)
 		interleaved[i*ch] = float32(l)
@@ -45,7 +45,7 @@ func nrmse(dec *audio.Buffer, src []float32, channels int) float64 {
 		frames = sf
 	}
 	var errSq, sigSq float64
-	for c := 0; c < channels; c++ {
+	for c := range channels {
 		d := dec.ChanF(c)
 		for i := 0; i < frames; i++ {
 			s := float64(src[i*channels+c])
@@ -165,7 +165,7 @@ func TestOggVorbisDifferential(t *testing.T) {
 	lv.N = common
 	for c := 0; c < f.Channels; c++ {
 		ch := lv.ChanF(c)
-		for i := 0; i < common; i++ {
+		for i := range common {
 			ch[i] = dec[i*f.Channels+c]
 		}
 	}

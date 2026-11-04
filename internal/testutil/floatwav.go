@@ -50,7 +50,7 @@ func HotFloatChans(t *testing.T, rate, frames, overs int) [][]float32 {
 	chans := ToneChans(rate, frames)
 	for c := range chans {
 		chans[c][0], chans[c][1] = 1, -1
-		for k := 0; k < overs; k++ {
+		for k := range overs {
 			v := float32(1.5)
 			if k%2 == 1 {
 				v = -1.5
@@ -108,8 +108,8 @@ func PCM16WAVBytes(t *testing.T, rate int, chans [][]float32) []byte {
 	copy(buf[36:], "data")
 	le.PutUint32(buf[40:], uint32(data))
 	off := 44
-	for i := 0; i < n; i++ {
-		for c := 0; c < ch; c++ {
+	for i := range n {
+		for c := range ch {
 			v := math.RoundToEven(float64(chans[c][i]) * 32768)
 			if v > 32767 {
 				v = 32767
@@ -153,8 +153,8 @@ func FloatWAVBytes(t *testing.T, rate int, chans [][]float32) []byte {
 	copy(buf[36:], "data")
 	le.PutUint32(buf[40:], uint32(data))
 	off := 44
-	for i := 0; i < n; i++ {
-		for c := 0; c < ch; c++ {
+	for i := range n {
+		for c := range ch {
 			le.PutUint32(buf[off:], math.Float32bits(chans[c][i]))
 			off += 4
 		}

@@ -121,7 +121,7 @@ func buildPSTree(entries [][2]int8) [][2]int16 {
 	for i, e := range entries {
 		val, bits := int(e[0]), uint(e[1])
 		node := 0
-		for b := uint(0); b < bits; b++ {
+		for b := range bits {
 			bit := (code >> (31 - b)) & 1
 			next := tree[node][bit]
 			if b == bits-1 {
@@ -245,7 +245,7 @@ var (
 func psMakeFilters(out [][13][2]float32, proto *[7]float64) {
 	bands := len(out)
 	for q := range out {
-		for n := 0; n < 13; n++ {
+		for n := range 13 {
 			p := proto[min(n, 12-n)]
 			theta := 2 * math.Pi * (float64(q) + 0.5) * float64(n-6) / float64(bands)
 			s, c := math.Sincos(theta)

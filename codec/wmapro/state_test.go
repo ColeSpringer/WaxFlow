@@ -211,7 +211,7 @@ func TestAnInconsistentCarryRecovers(t *testing.T) {
 	silentFrame(cfg, &silent)
 	first, tail := splitFrame(cfg, &silent, 300)
 	var next bitWriter
-	for i := 0; i < 100; i++ { // a hundred of the three hundred bits owed
+	for i := range 100 { // a hundred of the three hundred bits owed
 		next.put(uint32(tail.buf[i>>3]>>(7-uint(i&7))&1), 1)
 	}
 	next.append(frame(cfg, &silent, true, 0))
@@ -328,7 +328,7 @@ func longSilentFrame(cfg wmapro.Config, w *bitWriter) {
 	w.put(1, 1) // uniform tiling
 	// Fifteen steps read a shift of 4 (a set bit, then 3 in the two-bit
 	// field); the sixteenth sits at the last frontier and reads nothing.
-	for step := 0; step < 15; step++ {
+	for range 15 {
 		w.put(1, 1)
 		w.put(3, 2)
 	}
@@ -339,7 +339,7 @@ func longSilentFrame(cfg wmapro.Config, w *bitWriter) {
 		w.put(0, 8)
 	}
 	w.put(0, 1) // no trim fields
-	for i := 0; i < 16; i++ {
+	for range 16 {
 		silentSubframe(cfg, w)
 	}
 }

@@ -847,7 +847,7 @@ func TestHeaderSizeLies(t *testing.T) {
 				t.Fatalf("accepted a track declaring %d samples", s)
 			}
 			var pkt container.Packet
-			for i := 0; i < len(raw); i++ {
+			for range raw {
 				if err := d.ReadPacket(&pkt); err != nil {
 					return
 				}

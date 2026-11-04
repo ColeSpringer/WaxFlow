@@ -2,6 +2,7 @@ package mpc
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"time"
 
@@ -16,9 +17,7 @@ import (
 // fold in the engine sees one value per key.
 func (d *Demuxer) Tags() map[string][]string {
 	out := make(map[string][]string, len(d.tags)+4)
-	for k, v := range d.tags {
-		out[k] = v
-	}
+	maps.Copy(out, d.tags)
 	add := func(key string, gain, peak uint16) {
 		if gain == 0 {
 			return

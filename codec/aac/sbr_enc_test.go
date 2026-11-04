@@ -158,7 +158,7 @@ func heDelayBurst(n int) ([]float32, []int, []float32) {
 // the burst-pattern correlation summed over every burst.
 func heDelayPeak(out []float32, starts []int, burst []float32) int {
 	bestLag, bestCorr := -1, 0.0
-	for lag := 0; lag < 6000; lag++ {
+	for lag := range 6000 {
 		var corr float64
 		for _, p := range starts {
 			for i, w := range burst {
@@ -218,7 +218,7 @@ func TestHEEncoderRoundTrip(t *testing.T) {
 	for c := range in {
 		in[c] = make([]float32, n)
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		seed = seed*6364136223846793005 + 1442695040888963407
 		noise := 0.02 * (2*float64(seed>>11)/float64(1<<53) - 1)
 		v := 0.25*math.Sin(2*math.Pi*440*float64(i)/48000) +
@@ -310,7 +310,7 @@ func TestHEEncoderStereoBalance(t *testing.T) {
 			in[c] = make([]float32, n)
 		}
 		seed := uint64(21)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			seed = seed*6364136223846793005 + 1442695040888963407
 			noise := 0.03 * (2*float64(seed>>11)/float64(1<<53) - 1)
 			v := 0.2*math.Sin(2*math.Pi*500*float64(i)/48000) +
@@ -339,7 +339,7 @@ func TestHEEncoderStereoBalance(t *testing.T) {
 			return sum
 		}
 		lo, hi := 12000, 44000
-		for c := 0; c < 2; c++ {
+		for c := range 2 {
 			got := hiEnergy(out[c][lo+HEEncoderDelay : hi+HEEncoderDelay])
 			want := hiEnergy(in[c][lo:hi])
 			db := 10 * math.Log10(got/want)
@@ -364,7 +364,7 @@ func TestHEEncoderChunkInvariance(t *testing.T) {
 	for c := range in {
 		in[c] = make([]float32, n)
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		v := 0.25*math.Sin(2*math.Pi*440*float64(i)/48000) +
 			0.15*math.Sin(2*math.Pi*9500*float64(i)/48000)
 		in[0][i] = float32(v)
@@ -385,7 +385,7 @@ func TestHEEncoderChunkInvariance(t *testing.T) {
 		for off := 0; off < n; off += chunk {
 			m := min(chunk, n-off)
 			buf.N = m
-			for c := 0; c < 2; c++ {
+			for c := range 2 {
 				copy(buf.ChanF(c)[:m], in[c][off:off+m])
 			}
 			if err := e.Encode(buf, emit); err != nil {

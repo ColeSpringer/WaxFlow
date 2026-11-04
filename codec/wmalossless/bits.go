@@ -78,7 +78,7 @@ func (r *bitReader) bits(n int) uint32 {
 	} else {
 		// The tail is short of eight bytes at the very end, so it assembles
 		// byte by byte there.
-		for j := 0; j < 8; j++ {
+		for j := range 8 {
 			acc <<= 8
 			if i+j < len(r.buf) {
 				acc |= uint64(r.buf[i+j])

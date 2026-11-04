@@ -353,10 +353,7 @@ func (c Config) bps1() float64 {
 // the fixed three. A bit rate absurd for the frame length overflows the bit
 // reader's word here rather than deep inside a packet walk.
 func (c Config) offsetBits() (int, error) {
-	v := int(c.bps()*float64(c.FrameLen())/8 + 0.5)
-	if v < 1 {
-		v = 1
-	}
+	v := max(int(c.bps()*float64(c.FrameLen())/8+0.5), 1)
 	n := bitsOf(v) + 2
 	if n+3 > maxOffsetBits {
 		return 0, malformed("bit rate %d needs a %d-bit superframe offset field", c.BitRate, n+3)

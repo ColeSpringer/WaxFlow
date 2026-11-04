@@ -387,7 +387,7 @@ func seekMatchesReference(t *testing.T, med format.Media, ref *audio.Buffer, n i
 	defer audio.Put(dst)
 	total := int64(ref.N)
 	state := seed
-	for i := 0; i < n; i++ {
+	for i := range n {
 		state = state*6364136223846793005 + 1442695040888963407 // LCG, deterministic
 		target := (state >> 16) % total
 		if target < 0 {

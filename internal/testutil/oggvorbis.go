@@ -71,7 +71,7 @@ func oggPage(out *bytes.Buffer, serial, seq uint32, headerType byte, granule int
 var oggCRCTable = func() (t [256]uint32) {
 	for i := range t {
 		crc := uint32(i) << 24
-		for j := 0; j < 8; j++ {
+		for range 8 {
 			if crc&0x80000000 != 0 {
 				crc = crc<<1 ^ 0x04c11db7
 			} else {

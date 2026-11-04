@@ -60,7 +60,7 @@ func mdctDirect(windowed []float32, spec []float64) {
 	s := fwdScale(n)
 	for k := range spec {
 		var sum float64
-		for i := 0; i < n; i++ {
+		for i := range n {
 			sum += float64(windowed[i]) *
 				math.Cos(2*math.Pi/float64(n)*(float64(i)+n0)*(float64(k)+0.5))
 		}

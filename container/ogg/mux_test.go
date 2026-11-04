@@ -44,7 +44,7 @@ func TestMuxerPageBatching(t *testing.T) {
 	}
 	var want [][]byte
 	payloadBytes := 0
-	for i := 0; i < packets; i++ {
+	for i := range packets {
 		data := make([]byte, pktLen)
 		data[0] = byte(31<<3 | 0x4) // TOC: CELT FB 20 ms, stereo, code 0
 		for j := 1; j < pktLen; j++ {

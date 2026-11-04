@@ -81,11 +81,6 @@ type tonalityAnalysisState struct {
 	info             [detectSize]analysisInfo
 }
 
-// reset clears the analyser history (tonality_analysis_reset).
-func (t *tonalityAnalysisState) reset() {
-	*t = tonalityAnalysisState{}
-}
-
 // --- 480-point FFT --------------------------------------------------------
 
 // fft480 is a mixed-radix DIT plan for N=480 (factors 2^5*3*5), with the
@@ -111,7 +106,7 @@ func newFFTPlan(n int) *fftPlan {
 		panic("opus: fft size must factor into 2,3,5")
 	}
 	p.twiddle = make([]complex64, n)
-	for k := 0; k < n; k++ {
+	for k := range n {
 		s, c := math.Sincos(-2 * math.Pi * float64(k) / float64(n))
 		p.twiddle[k] = complex(float32(c), float32(s))
 	}
@@ -140,20 +135,20 @@ func (p *fftPlan) work(out, in []complex64, stride int, factors []int) {
 	}
 	m := length / f
 	if m == 1 {
-		for q := 0; q < f; q++ {
+		for q := range f {
 			out[q] = in[q*stride]
 		}
 	} else {
-		for q := 0; q < f; q++ {
+		for q := range f {
 			p.work(out[q*m:], in[q*stride:], stride*f, factors[1:])
 		}
 	}
 	scratch := make([]complex64, f)
-	for k2 := 0; k2 < m; k2++ {
-		for q := 0; q < f; q++ {
+	for k2 := range m {
+		for q := range f {
 			scratch[q] = out[q*m+k2]
 		}
-		for r := 0; r < f; r++ {
+		for r := range f {
 			k := k2 + r*m
 			acc := scratch[0]
 			for q := 1; q < f; q++ {
@@ -204,7 +199,7 @@ func fastAtan2(y, x float32) float32 {
 func analysisDown2HP(S []float32, out, in []float32, inLen int) float32 {
 	len2 := inLen / 2
 	var hpEner float64
-	for k := 0; k < len2; k++ {
+	for k := range len2 {
 		in32 := in[2*k]
 		Y := in32 - S[0]
 		X := 0.6074371 * Y
@@ -238,16 +233,16 @@ func analysisDown2HP(S []float32, out, in []float32, inLen int) float32 {
 // analysisDownmix mixes the requested channels of planar float input into
 // the signal domain (downmix_float): output is scaled to +-32768.
 func analysisDownmix(x [][]float32, y []float32, subframe, offset, c1, c2, C int) {
-	for j := 0; j < subframe; j++ {
+	for j := range subframe {
 		y[j] = 32768 * x[c1][offset+j]
 	}
 	if c2 > -1 {
-		for j := 0; j < subframe; j++ {
+		for j := range subframe {
 			y[j] += 32768 * x[c2][offset+j]
 		}
 	} else if c2 == -2 {
 		for c := 1; c < C; c++ {
-			for j := 0; j < subframe; j++ {
+			for j := range subframe {
 				y[j] += 32768 * x[c][offset+j]
 			}
 		}
@@ -328,7 +323,7 @@ func (t *tonalityAnalysisState) tonalityAnalysis(x [][]float32, len48, offset48,
 
 	var in, out [N]complex64
 	var tonality, noisiness, tonality2 [240]float32
-	for i := 0; i < N2; i++ {
+	for i := range N2 {
 		w := analysis_window_240[i]
 		in[i] = complex(w*t.inmem[i], w*t.inmem[N2+i])
 		in[N-i-1] = complex(analysis_window_240[i]*t.inmem[N-i-1], analysis_window_240[i]*t.inmem[N+N2-i-1])
@@ -402,7 +397,7 @@ func (t *tonalityAnalysisState) tonalityAnalysis(x [][]float32, len48, offset48,
 	frameNoisiness := float32(0)
 	frameStationarity := float32(0)
 	if t.count == 0 {
-		for b := 0; b < nbTbands; b++ {
+		for b := range nbTbands {
 			t.lowE[b] = 1e10
 			t.highE[b] = -1e10
 		}
@@ -427,7 +422,7 @@ func (t *tonalityAnalysisState) tonalityAnalysis(x [][]float32, len48, offset48,
 		bandLog2[0] = 0.5 * 1.442695 * float32(math.Log(float64(E)+1e-10))
 	}
 	var slope float32
-	for b := 0; b < nbTbands; b++ {
+	for b := range nbTbands {
 		var E, tE, nE float32
 		for i := analysisTbands[b]; i < analysisTbands[b+1]; i++ {
 			binE := real(out[i])*real(out[i]) + real(out[N-i])*real(out[N-i]) +
@@ -469,7 +464,7 @@ func (t *tonalityAnalysisState) tonalityAnalysis(x [][]float32, len48, offset48,
 		relativeE += (logE[b] - t.lowE[b]) / (1e-5 + t.highE[b] - t.lowE[b])
 
 		var L1, L2 float32
-		for i := 0; i < nbFrames; i++ {
+		for i := range nbFrames {
 			L1 += float32(math.Sqrt(float64(t.E[i][b])))
 			L2 += t.E[i][b]
 		}
@@ -501,22 +496,19 @@ func (t *tonalityAnalysisState) tonalityAnalysis(x [][]float32, len48, offset48,
 		leakageFrom[b] = minA(leakageFrom[b+1]+leakSlope, leakageFrom[b])
 		leakageTo[b] = maxA(leakageTo[b+1]-leakSlope, leakageTo[b])
 	}
-	for b := 0; b < nbTbands+1; b++ {
+	for b := range nbTbands + 1 {
 		boost := maxA(0, leakageTo[b]-bandLog2[b]) +
 			maxA(0, bandLog2[b]-(leakageFrom[b]+leakageOffset))
-		v := int(math.Floor(0.5 + 64*float64(boost)))
-		if v > 255 {
-			v = 255
-		}
+		v := min(int(math.Floor(0.5+64*float64(boost))), 255)
 		info.leakBoost[b] = uint8(v)
 	}
 
 	specVariability := float32(0)
-	for i := 0; i < nbFrames; i++ {
+	for i := range nbFrames {
 		mindist := float32(1e15)
-		for j := 0; j < nbFrames; j++ {
+		for j := range nbFrames {
 			var dist float32
-			for k := 0; k < nbTbands; k++ {
+			for k := range nbTbands {
 				tmp := t.logE[i][k] - t.logE[j][k]
 				dist += tmp * tmp
 			}
@@ -535,7 +527,7 @@ func (t *tonalityAnalysisState) tonalityAnalysis(x [][]float32, len48, offset48,
 	noiseFloor *= noiseFloor
 	var belowMaxPitch, aboveMaxPitch float32
 	var isMasked [nbTbands + 1]bool
-	for b := 0; b < nbTbands; b++ {
+	for b := range nbTbands {
 		var E float32
 		bandStart := analysisTbands[b]
 		bandEnd := analysisTbands[b+1]
@@ -605,16 +597,16 @@ func (t *tonalityAnalysisState) tonalityAnalysis(x [][]float32, len48, offset48,
 	}
 
 	var BFCC, midE [8]float32
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		var sum float32
-		for b := 0; b < 16; b++ {
+		for b := range 16 {
 			sum += analysis_dct_table[i*16+b] * logE[b]
 		}
 		BFCC[i] = sum
 	}
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		var sum float32
-		for b := 0; b < 16; b++ {
+		for b := range 16 {
 			sum += analysis_dct_table[i*16+b] * 0.5 * (t.highE[b] + t.lowE[b])
 		}
 		midE[i] = sum
@@ -640,34 +632,34 @@ func (t *tonalityAnalysisState) tonalityAnalysis(x [][]float32, len48, offset48,
 	info.tonality = frameTonality
 
 	var features [25]float32
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		features[i] = -0.12299*(BFCC[i]+t.mem[i+24]) + 0.49195*(t.mem[i]+t.mem[i+16]) +
 			0.69693*t.mem[i+8] - 1.4349*t.cmean[i]
 	}
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		t.cmean[i] = (1-alpha)*t.cmean[i] + alpha*BFCC[i]
 	}
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		features[4+i] = 0.63246*(BFCC[i]-t.mem[i+24]) + 0.31623*(t.mem[i]-t.mem[i+16])
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		features[8+i] = 0.53452*(BFCC[i]+t.mem[i+24]) - 0.26726*(t.mem[i]+t.mem[i+16]) - 0.53452*t.mem[i+8]
 	}
 	if t.count > 5 {
-		for i := 0; i < 9; i++ {
+		for i := range 9 {
 			t.std[i] = (1-alpha)*t.std[i] + alpha*features[i]*features[i]
 		}
 	}
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		features[i] = BFCC[i] - midE[i]
 	}
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		t.mem[i+24] = t.mem[i+16]
 		t.mem[i+16] = t.mem[i+8]
 		t.mem[i+8] = t.mem[i]
 		t.mem[i] = BFCC[i]
 	}
-	for i := 0; i < 9; i++ {
+	for i := range 9 {
 		features[11+i] = float32(math.Sqrt(float64(t.std[i]))) - analysisStdFeatureBias[i]
 	}
 	features[18] = specVariability - 0.78
@@ -735,7 +727,7 @@ func (t *tonalityAnalysisState) tonalityGetInfo(infoOut *analysisInfo, length in
 	tonalityCount := 1
 
 	bandwidthSpan := 6
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		pos++
 		if pos == detectSize {
 			pos = 0

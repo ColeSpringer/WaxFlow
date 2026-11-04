@@ -10,13 +10,13 @@ import (
 // asserts the existing bit-exact decoder reproduces every pulse.
 func TestSilkPulsesRoundTrip(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
-	for trial := 0; trial < 400; trial++ {
+	for trial := range 400 {
 		frameLength := []int{160, 240, 320}[trial%3]
 		signalType := int8(trial % 3)
 		quantOffsetType := int8((trial / 3) % 2)
 		var pulses [silkMaxFrameLen]int8
 		mag := []int{1, 2, 5, 30, 127}[trial%5]
-		for i := 0; i < frameLength; i++ {
+		for i := range frameLength {
 			if rng.Intn(3) == 0 {
 				pulses[i] = int8(rng.Intn(2*mag+1) - mag)
 			}
@@ -31,7 +31,7 @@ func TestSilkPulsesRoundTrip(t *testing.T) {
 		dec := newRangeDecoder(enc.payload())
 		got := make([]int16, frameLength+shellFrameLen)
 		silkDecodePulses(dec, got, signalType, quantOffsetType, frameLength)
-		for i := 0; i < frameLength; i++ {
+		for i := range frameLength {
 			if int16(want[i]) != got[i] {
 				t.Fatalf("trial %d (len %d type %d/%d): pulse %d = %d, want %d",
 					trial, frameLength, signalType, quantOffsetType, i, got[i], want[i])
@@ -45,7 +45,7 @@ func TestSilkPulsesRoundTrip(t *testing.T) {
 // independent coding.
 func TestSilkIndicesRoundTrip(t *testing.T) {
 	rng := rand.New(rand.NewSource(2))
-	for trial := 0; trial < 400; trial++ {
+	for trial := range 400 {
 		fsKHz := []int{8, 12, 16}[trial%3]
 		condCoding := codeIndependently
 		if trial%2 == 1 {

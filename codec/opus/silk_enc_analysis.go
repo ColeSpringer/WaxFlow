@@ -17,7 +17,7 @@ const (
 // silkA2NLSFFLP converts float AR coefficients to NLSFs (silk_A2NLSF_FLP).
 func silkA2NLSFFLP(nlsfQ15 []int16, pAR []float32, lpcOrder int) {
 	var aFixQ16 [silkMaxLPCOrder]int32
-	for i := 0; i < lpcOrder; i++ {
+	for i := range lpcOrder {
 		aFixQ16[i] = silkFloat2Int(pAR[i] * 65536.0)
 	}
 	silkA2NLSF(nlsfQ15, aFixQ16[:lpcOrder], lpcOrder)
@@ -27,7 +27,7 @@ func silkA2NLSFFLP(nlsfQ15 []int16, pAR []float32, lpcOrder int) {
 func silkNLSF2AFLP(pAR []float32, nlsfQ15 []int16, lpcOrder int) {
 	var aFixQ12 [silkMaxLPCOrder]int16
 	silkNLSF2A(aFixQ12[:], nlsfQ15, lpcOrder)
-	for i := 0; i < lpcOrder; i++ {
+	for i := range lpcOrder {
 		pAR[i] = float32(aFixQ12[i]) * (1.0 / 4096.0)
 	}
 }
@@ -37,7 +37,7 @@ func silkNLSF2AFLP(pAR []float32, nlsfQ15 []int16, lpcOrder int) {
 func (ch *silkEncoderChannel) processNLSFsFLP(predCoef *[2][silkMaxLPCOrder]float32, nlsfQ15 []int16, prevNLSFQ15 []int16) {
 	var predCoefQ12 [2][silkMaxLPCOrder]int16
 	ch.processNLSFs(&predCoefQ12, nlsfQ15, prevNLSFQ15)
-	for j := 0; j < 2; j++ {
+	for j := range 2 {
 		for i := 0; i < ch.predictLPCOrder; i++ {
 			predCoef[j][i] = float32(predCoefQ12[j][i]) * (1.0 / 4096.0)
 		}
@@ -96,7 +96,7 @@ func (ch *silkEncoderChannel) nsqWrapper(ctrl *silkEncoderControl, psIndices *si
 	for i := 0; i < ch.nbSubfr*silkLTPOrder; i++ {
 		ltpCoefQ14[i] = int16(silkFloat2Int(ctrl.ltpCoef[i] * 16384.0))
 	}
-	for j := 0; j < 2; j++ {
+	for j := range 2 {
 		for i := 0; i < ch.predictLPCOrder; i++ {
 			predCoefQ12[j][i] = int16(silkFloat2Int(ctrl.predCoef[j][i] * 4096.0))
 		}
@@ -228,7 +228,7 @@ func (ch *silkEncoderChannel) findLPC(nlsfQ15 []int16, x []float32, minInvGain f
 // silkCorrVectorFLP calculates X'*t (silk_corrVector_FLP). x has L+order-1
 // samples ending order-1 before the target.
 func silkCorrVectorFLP(x, t []float32, L, order int, Xt []float32) {
-	for lag := 0; lag < order; lag++ {
+	for lag := range order {
 		Xt[lag] = float32(silkInnerProductFLP(x[order-1-lag:], t, L))
 	}
 }
@@ -259,7 +259,7 @@ func silkCorrMatrixFLP(x []float32, L, order int, XX []float32) {
 // findLTP computes the LTP correlation weights (silk_find_LTP_FLP). r is the
 // pitch residual positioned at the frame start.
 func silkFindLTPFLP(XX, xX []float32, r []float32, rOff int, lag []int, subfrLength, nbSubfr int) {
-	for k := 0; k < nbSubfr; k++ {
+	for k := range nbSubfr {
 		lagOff := rOff - (lag[k] + silkLTPOrder/2)
 		silkCorrMatrixFLP(r[lagOff:], subfrLength, silkLTPOrder, XX[k*silkLTPOrder*silkLTPOrder:])
 		silkCorrVectorFLP(r[lagOff:], r[rOff:], subfrLength, silkLTPOrder, xX[k*silkLTPOrder:])
@@ -281,14 +281,14 @@ func silkLTPAnalysisFilterFLP(ltpRes []float32, x []float32, xOff int, B []float
 	pitchL []int, invGains []float32, subfrLength, nbSubfr, preLength int) {
 
 	resOff := 0
-	for k := 0; k < nbSubfr; k++ {
+	for k := range nbSubfr {
 		lagOff := xOff - pitchL[k]
 		invGain := invGains[k]
 		var btmp [silkLTPOrder]float32
 		copy(btmp[:], B[k*silkLTPOrder:])
 		for i := 0; i < subfrLength+preLength; i++ {
 			v := x[xOff+i]
-			for j := 0; j < silkLTPOrder; j++ {
+			for j := range silkLTPOrder {
 				v -= btmp[j] * x[lagOff+i+silkLTPOrder/2-j]
 			}
 			ltpRes[resOff+i] = v * invGain
@@ -466,13 +466,13 @@ func warpedTrue2MonicCoefs(coefs []float32, lambda, limit float32, order int) {
 		coefs[i-1] -= lambda * coefs[i]
 	}
 	gain := (1.0 - lambda*lambda) / (1.0 + lambda*coefs[0])
-	for i := 0; i < order; i++ {
+	for i := range order {
 		coefs[i] *= gain
 	}
-	for iter := 0; iter < 10; iter++ {
+	for iter := range 10 {
 		maxabs := float32(-1.0)
 		ind := 0
-		for i := 0; i < order; i++ {
+		for i := range order {
 			tmp := coefs[i]
 			if tmp < 0 {
 				tmp = -tmp
@@ -489,7 +489,7 @@ func warpedTrue2MonicCoefs(coefs []float32, lambda, limit float32, order int) {
 			coefs[i-1] += lambda * coefs[i]
 		}
 		gain = 1.0 / gain
-		for i := 0; i < order; i++ {
+		for i := range order {
 			coefs[i] *= gain
 		}
 		chirp := 0.99 - (0.8+0.1*float32(iter))*(maxabs-limit)/(maxabs*float32(ind+1))
@@ -498,7 +498,7 @@ func warpedTrue2MonicCoefs(coefs []float32, lambda, limit float32, order int) {
 			coefs[i-1] -= lambda * coefs[i]
 		}
 		gain = (1.0 - lambda*lambda) / (1.0 + lambda*coefs[0])
-		for i := 0; i < order; i++ {
+		for i := range order {
 			coefs[i] *= gain
 		}
 	}
@@ -506,10 +506,10 @@ func warpedTrue2MonicCoefs(coefs []float32, lambda, limit float32, order int) {
 
 // limitCoefs bounds coefficient amplitudes by bandwidth expansion (limit_coefs).
 func limitCoefs(coefs []float32, limit float32, order int) {
-	for iter := 0; iter < 10; iter++ {
+	for iter := range 10 {
 		maxabs := float32(-1.0)
 		ind := 0
-		for i := 0; i < order; i++ {
+		for i := range order {
 			tmp := coefs[i]
 			if tmp < 0 {
 				tmp = -tmp
@@ -566,7 +566,7 @@ func (ch *silkEncoderChannel) noiseShapeAnalysis(ctrl *silkEncoderControl,
 		logEnergyPrev := float32(0.0)
 		off := pitchResOff
 		nSegs := silkSubFrameMS * ch.nbSubfr / 2
-		for k := 0; k < nSegs; k++ {
+		for k := range nSegs {
 			nrg := float32(nSamples) + float32(silkEnergyFLP(pitchRes[off:], nSamples))
 			logEnergy := silkLog2F(float64(nrg))
 			if k > 0 {

@@ -71,10 +71,10 @@ func newLiveServer(t *testing.T, e *waxflow.Engine, raw []byte, src *audio.Buffe
 	ls := &liveServer{init: init, segs: segs, rate: src.Fmt.Rate, seg0Got: make(chan struct{})}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/live.m3u8":
+		switch r.URL.Path {
+		case "/live.m3u8":
 			w.Write([]byte(ls.mediaPlaylist()))
-		case r.URL.Path == "/init.mp4":
+		case "/init.mp4":
 			w.Write(ls.init)
 		default:
 			var idx int
@@ -127,7 +127,7 @@ func TestHLSLiveFollow(t *testing.T) {
 	}
 	for c := 0; c < src.Fmt.Channels; c++ {
 		w, g := src.ChanI(c), got.ChanI(c)
-		for i := 0; i < frames; i++ {
+		for i := range frames {
 			if w[i] != g[i] {
 				t.Fatalf("ch%d[%d] = %d, want %d (live decode not bit-exact across segments)", c, i, g[i], w[i])
 			}

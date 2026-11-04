@@ -34,8 +34,8 @@ func TestParseStreamInfo(t *testing.T) {
 	// rate 44100 (20 bits), channels 2 (code 1), bits 16 (code 15)
 	b[10] = 0x0A
 	b[11] = 0xC4
-	b[12] = 0x40 | 1<<1 | 0
-	b[13] = 0xF0 | 0x0                                  // bits low nibble | samples high nibble
+	b[12] = 0x40 | 1<<1                                 // rate low nibble, channels code, bits MSB 0
+	b[13] = 0xF0                                        // bits low nibble, samples high nibble 0
 	b[14], b[15], b[16], b[17] = 0x00, 0x00, 0x30, 0x39 // 12345 samples
 	si, err := ParseStreamInfo(b)
 	if err != nil {
@@ -115,7 +115,7 @@ func TestParseFrameHeader(t *testing.T) {
 	}
 	// Every truncation errors rather than panics.
 	full := buildFrameHeader(3, 7, 14, 1, 4, 0x10, 0x00, 0x11, 0x22)
-	for i := 0; i < len(full); i++ {
+	for i := range full {
 		if _, err := ParseFrameHeader(full[:i]); err == nil {
 			t.Errorf("truncation to %d bytes accepted", i)
 		}

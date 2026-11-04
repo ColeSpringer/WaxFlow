@@ -93,10 +93,7 @@ func TestOpusEncoderStereoSILKHybrid(t *testing.T) {
 	right := make([]float32, n)
 	rng := uint32(99)
 	for i := range right {
-		d := i - 17
-		if d < 0 {
-			d = 0
-		}
+		d := max(i-17, 0)
 		rng = rng*1664525 + 1013904223
 		right[i] = 0.8*left[d] + 0.01*(float32(int32(rng))/float32(1<<31))
 	}

@@ -508,7 +508,7 @@ func TestChapters(t *testing.T) {
 	ct := func(sample uint64, title string) []byte { return sv8Packet("CT", ctPayload(sample, title)) }
 	blocks := func(n int) [][]byte {
 		var out [][]byte
-		for i := 0; i < n; i++ {
+		for i := range n {
 			out = append(out, sv8Packet("AP", apBlock(8+i)))
 		}
 		return out
@@ -609,7 +609,7 @@ func TestChapterStartBounds(t *testing.T) {
 	sh := sv8Header{count: 10 * 1152, freq: 0, maxBand: 20, channels: 2, blockPwr: 0}
 	stream := func(run ...[]byte) []byte {
 		packets := [][]byte{sv8Packet("SH", shPayload(sh))}
-		for i := 0; i < 11; i++ {
+		for i := range 11 {
 			packets = append(packets, sv8Packet("AP", apBlock(8+i)))
 		}
 		return buildSV8(append(append(packets, run...), sv8Packet("SE", nil))...)
@@ -666,7 +666,7 @@ func TestChapterStartBounds(t *testing.T) {
 func TestChaptersStartOrder(t *testing.T) {
 	sh := sv8Header{count: 10 * 1152, freq: 0, maxBand: 20, channels: 2, blockPwr: 0}
 	packets := [][]byte{sv8Packet("SH", shPayload(sh))}
-	for i := 0; i < 11; i++ {
+	for i := range 11 {
 		packets = append(packets, sv8Packet("AP", apBlock(8+i)))
 	}
 	packets = append(packets,

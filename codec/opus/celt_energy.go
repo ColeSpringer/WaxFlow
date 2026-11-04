@@ -28,7 +28,7 @@ func unquantCoarseEnergy(oldE []float32, nbEBands, start, end int, intra bool, d
 	budget := d.storage * 8
 	var prev [2]float32
 	for i := start; i < end; i++ {
-		for c := 0; c < C; c++ {
+		for c := range C {
 			var qi int
 			tell := d.tell()
 			switch {
@@ -67,7 +67,7 @@ func unquantFineEnergy(oldE []float32, nbEBands, start, end int, fineQuant []int
 		if d.tell()+C*extra > d.storage*8 {
 			continue
 		}
-		for c := 0; c < C; c++ {
+		for c := range C {
 			q2 := int(d.decodeRawBits(uint(extra)))
 			offset := (float32(q2)+0.5)*float32(int(1)<<(14-extra))*(1.0/16384) - 0.5
 			oldE[i+c*nbEBands] += offset
@@ -78,12 +78,12 @@ func unquantFineEnergy(oldE []float32, nbEBands, start, end int, fineQuant []int
 // unquantEnergyFinalise spends the leftover bits on a final ±half-step of energy
 // resolution, in two priority passes.
 func unquantEnergyFinalise(oldE []float32, nbEBands, start, end int, fineQuant, finePriority []int, bitsLeft int, d *rangeDecoder, C int) {
-	for prio := 0; prio < 2; prio++ {
+	for prio := range 2 {
 		for i := start; i < end && bitsLeft >= C; i++ {
 			if fineQuant[i] >= maxFineBits || finePriority[i] != prio {
 				continue
 			}
-			for c := 0; c < C; c++ {
+			for c := range C {
 				q2 := int(d.decodeRawBits(1))
 				offset := (float32(q2) - 0.5) * float32(int(1)<<(14-fineQuant[i]-1)) * (1.0 / 16384)
 				oldE[i+c*nbEBands] += offset
@@ -100,8 +100,8 @@ func unquantEnergyFinalise(oldE []float32, nbEBands, start, end int, fineQuant, 
 // (per channel, stride N), matching libopus's float celt_inner_prod accumulation.
 func computeBandEnergies(X, bandE []float32, end, C, LM int) {
 	N := celtShortMDCTSize << LM
-	for c := 0; c < C; c++ {
-		for i := 0; i < end; i++ {
+	for c := range C {
+		for i := range end {
 			lo := int(celtEBands[i]) << LM
 			hi := int(celtEBands[i+1]) << LM
 			var sum float32 = 1e-27
@@ -118,8 +118,8 @@ func computeBandEnergies(X, bandE []float32, end, C, LM int) {
 // inverse of denormaliseBands (libopus normalise_bands, float build).
 func normaliseBands(freq, X, bandE []float32, end, C, M int) {
 	N := M * celtShortMDCTSize
-	for c := 0; c < C; c++ {
-		for i := 0; i < end; i++ {
+	for c := range C {
+		for i := range end {
 			g := 1.0 / (1e-27 + bandE[i+c*celtNBands])
 			for j := M * int(celtEBands[i]); j < M*int(celtEBands[i+1]); j++ {
 				X[j+c*N] = freq[j+c*N] * g
@@ -131,8 +131,8 @@ func normaliseBands(freq, X, bandE []float32, end, C, M int) {
 // amp2Log2 converts band energies to the log2-minus-mean domain the coarse-energy
 // quantizer codes (libopus amp2Log2, float build with exact celt_log2).
 func amp2Log2(effEnd, end int, bandE, bandLogE []float32, C int) {
-	for c := 0; c < C; c++ {
-		for i := 0; i < effEnd; i++ {
+	for c := range C {
+		for i := range effEnd {
 			bandLogE[i+c*celtNBands] = float32(math.Log2(float64(bandE[i+c*celtNBands]))) - celtEMeans[i]
 		}
 		for i := effEnd; i < end; i++ {
@@ -145,7 +145,7 @@ func amp2Log2(effEnd, end int, bandE, bandLogE []float32, C int) {
 // previous frame's, used to bias the intra/inter coarse-energy choice.
 func lossDistortion(eBands, oldEBands []float32, start, end, C int) float32 {
 	var dist float32
-	for c := 0; c < C; c++ {
+	for c := range C {
 		for i := start; i < end; i++ {
 			d := eBands[i+c*celtNBands] - oldEBands[i+c*celtNBands]
 			dist += d * d
@@ -173,7 +173,7 @@ func quantCoarseEnergyImpl(start, end int, eBands, oldEBands []float32, budget, 
 		coef, beta = celtPredCoef[LM], celtBetaCoef[LM]
 	}
 	for i := start; i < end; i++ {
-		for c := 0; c < C; c++ {
+		for c := range C {
 			x := eBands[i+c*celtNBands]
 			oldE := max(-9.0, oldEBands[i+c*celtNBands])
 			f := x - coef*oldE - prev[c]
@@ -297,14 +297,9 @@ func quantFineEnergy(start, end int, oldEBands, errorArr []float32, extraQuant [
 		if e.tell()+C*extraQuant[i] > e.storage*8 {
 			continue
 		}
-		for c := 0; c < C; c++ {
+		for c := range C {
 			q2 := int(math.Floor(float64((errorArr[i+c*celtNBands] + 0.5) * float32(extra))))
-			if q2 > extra-1 {
-				q2 = extra - 1
-			}
-			if q2 < 0 {
-				q2 = 0
-			}
+			q2 = max(min(q2, extra-1), 0)
 			e.encodeRawBits(uint32(q2), uint(extraQuant[i]))
 			offset := (float32(q2)+0.5)*float32(int(1)<<(14-extraQuant[i]))*(1.0/16384) - 0.5
 			oldEBands[i+c*celtNBands] += offset
@@ -316,12 +311,12 @@ func quantFineEnergy(start, end int, oldEBands, errorArr []float32, extraQuant [
 // quantEnergyFinalise spends the leftover bits on a final ±half-step, in two
 // priority passes (libopus quant_energy_finalise, float).
 func quantEnergyFinalise(start, end int, oldEBands, errorArr []float32, fineQuant, finePriority []int, bitsLeft int, e *rangeEncoder, C int) {
-	for prio := 0; prio < 2; prio++ {
+	for prio := range 2 {
 		for i := start; i < end && bitsLeft >= C; i++ {
 			if fineQuant[i] >= maxFineBits || finePriority[i] != prio {
 				continue
 			}
-			for c := 0; c < C; c++ {
+			for c := range C {
 				q2 := 0
 				if errorArr[i+c*celtNBands] >= 0 {
 					q2 = 1

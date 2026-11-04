@@ -97,7 +97,7 @@ func muxAACMeta(t *testing.T, w io.Writer, n int, declaredLen int64, opts *Muxer
 	for off := 0; off < n; off += 1024 {
 		end := min(off+1024, n)
 		buf.N = end - off
-		for c := 0; c < 2; c++ {
+		for c := range 2 {
 			s := buf.ChanF(c)
 			for i := 0; i < buf.N; i++ {
 				ti := float64(off+i) / 44100
@@ -300,11 +300,11 @@ func TestMuxITunSMPB(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		i := bytes.Index(data, []byte("iTunSMPB"))
-		if i < 0 {
+		// The data atom follows the freeform name.
+		_, da, ok := bytes.Cut(data, []byte("iTunSMPB"))
+		if !ok {
 			t.Fatal("no iTunSMPB atom in the file")
 		}
-		da := data[i+len("iTunSMPB"):] // the data atom follows the freeform name
 		if string(da[4:8]) != "data" {
 			t.Fatalf("box after the freeform name is %q, want data", da[4:8])
 		}

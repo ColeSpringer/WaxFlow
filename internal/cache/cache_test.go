@@ -933,9 +933,7 @@ func TestConcurrentAttachEvictComplete(t *testing.T) {
 	s := openStore(t, Options{MaxBytes: 60_000})
 	var wg sync.WaitGroup
 	for i := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			key := NewKey(fmt.Sprintf("conc-%d", i%4), fmt.Sprintf("run-%d", i), nil)
 			want := pattern(20_000 + i*1000)
 
@@ -972,7 +970,7 @@ func TestConcurrentAttachEvictComplete(t *testing.T) {
 			if err == nil && !bytes.Equal(b, want) {
 				t.Errorf("streamed bytes mismatch for %s", key[:8])
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	s.GC()

@@ -443,7 +443,7 @@ func TestVersion2SoundEntryFeedsTheChannelFallback(t *testing.T) {
 	entry := v2SoundEntry("mp4a", 44100, 1, 0, esdsBox(implicitASC))
 
 	var tr track
-	if err := (&Demuxer{}).parseAudioSampleEntry(&tr, "mp4a", entry[8:], 1); err != nil {
+	if err := (&Demuxer{}).parseAudioSampleEntry(&tr, "mp4a", entry[8:]); err != nil {
 		t.Fatalf("parseAudioSampleEntry: %v", err)
 	}
 	if tr.codec != codec.AACLC {
@@ -461,7 +461,7 @@ func TestVersion2SoundEntryFeedsTheChannelFallback(t *testing.T) {
 	// lands inside the padding and reports "no esds".
 	padded := v2SoundEntryPadded("mp4a", 44100, 1, 0, 24, esdsBox(implicitASC))
 	var pt track
-	if err := (&Demuxer{}).parseAudioSampleEntry(&pt, "mp4a", padded[8:], 1); err != nil {
+	if err := (&Demuxer{}).parseAudioSampleEntry(&pt, "mp4a", padded[8:]); err != nil {
 		t.Fatalf("parseAudioSampleEntry on a padded version 2 entry: %v", err)
 	}
 	if pt.codec != codec.AACLC || pt.fmt.Channels != 1 {

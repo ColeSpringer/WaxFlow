@@ -12,6 +12,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	waxflow "github.com/colespringer/waxflow"
@@ -165,7 +166,7 @@ func TestHEAACv2DelayPinFFmpeg(t *testing.T) {
 	got := testutil.FFmpegDecodeF32(t, path)
 
 	bestLag, bestCorr := -1, 0.0
-	for lag := 0; lag < 6000; lag++ {
+	for lag := range 6000 {
 		var corr float64
 		for _, p := range starts {
 			for i, w := range burst {
@@ -200,15 +201,7 @@ func TestHEAACv2PlanDefaults(t *testing.T) {
 	if plan.BitRate != aac.HEV2DefaultBitrate {
 		t.Errorf("v2 default bitrate = %d, want %d", plan.BitRate, aac.HEV2DefaultBitrate)
 	}
-	hasVersion := func(p *waxflow.TranscodePlan, v string) bool {
-		for _, s := range p.Versions {
-			if s == v {
-				return true
-			}
-		}
-		return false
-	}
-	if !hasVersion(plan, aac.HEV2EncoderVersion) {
+	if !slices.Contains(plan.Versions, aac.HEV2EncoderVersion) {
 		t.Errorf("v2 plan versions %v carry no %s", plan.Versions, aac.HEV2EncoderVersion)
 	}
 
@@ -216,7 +209,7 @@ func TestHEAACv2PlanDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v1.BitRate != aac.HEDefaultBitrate || hasVersion(v1, aac.HEV2EncoderVersion) {
+	if v1.BitRate != aac.HEDefaultBitrate || slices.Contains(v1.Versions, aac.HEV2EncoderVersion) {
 		t.Errorf("v1 plan = bitrate %d versions %v; the flag must not leak", v1.BitRate, v1.Versions)
 	}
 

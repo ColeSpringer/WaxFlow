@@ -131,7 +131,7 @@ func encodeVorbisOgg(t *testing.T, f audio.Format, interleaved []float32, qualit
 		end := min(off+1024, n)
 		buf := audio.Get(f, end-off)
 		buf.N = end - off
-		for c := 0; c < ch; c++ {
+		for c := range ch {
 			dst := buf.ChanF(c)
 			for i := off; i < end; i++ {
 				dst[i-off] = interleaved[i*ch+c]

@@ -23,7 +23,7 @@ func TestGoldenMuxOutputs(t *testing.T) {
 	pcmFmt := audio.Format{Rate: 48000, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
 	pcmTrack := container.Track{Codec: codec.PCM, Fmt: pcmFmt, Samples: 5 * 480, Default: true}
 	var pcmPkts []codec.Packet
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		data := make([]byte, 480*4)
 		for j := range data {
 			data[j] = byte(i*31 + j*3)
@@ -42,7 +42,7 @@ func TestGoldenMuxOutputs(t *testing.T) {
 		Samples: 5*480 - 312 - 100, Delay: 312, Default: true,
 	}
 	var opusPkts []codec.Packet
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		opusPkts = append(opusPkts, codec.Packet{Data: []byte{0x00, byte(i), 0xA5, 0x5A}, Dur: 480, PTS: int64(i * 480)})
 	}
 

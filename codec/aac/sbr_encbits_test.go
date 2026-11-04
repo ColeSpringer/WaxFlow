@@ -85,7 +85,7 @@ func TestSBRPayloadRoundTrip(t *testing.T) {
 				if n >= 26*2048 && n < 26*2048+400 {
 					v += 0.7 * float64(noise())
 				}
-				for c := 0; c < chans; c++ {
+				for c := range chans {
 					slot[c][n%64] = float32(v)
 					if n%64 == 63 {
 						s.pushSlot(c, slot[c][:])
@@ -94,11 +94,11 @@ func TestSBRPayloadRoundTrip(t *testing.T) {
 			}
 		}
 
-		for au := int64(0); au < frames; au++ {
+		for au := range int64(frames) {
 			pushTo(32 * (au + 2))
 			payload := s.payloadFor(au)
 			want := make([]sbrFrameData, chans)
-			for c := 0; c < chans; c++ {
+			for c := range chans {
 				want[c] = s.fd[c]
 			}
 
@@ -117,7 +117,7 @@ func TestSBRPayloadRoundTrip(t *testing.T) {
 			if au == 0 && el.hdr != s.hdr {
 				t.Fatalf("parsed header %+v, want %+v", el.hdr, s.hdr)
 			}
-			for c := 0; c < chans; c++ {
+			for c := range chans {
 				compareSBRFrame(t, chans, au, c, &el.tbl, &want[c], &el.ch[c].frame)
 			}
 			if chans == 2 && !el.coupled {
@@ -158,7 +158,7 @@ func compareSBRFrame(t *testing.T, chans int, au int64, c int, tbl *sbrFreqTable
 			fail("dfEnv", want.dfEnv, got.dfEnv)
 		}
 		n := envBands(tbl, want.grid.freqRes[l])
-		for b := 0; b < n; b++ {
+		for b := range n {
 			if got.env[l][b] != want.env[l][b] {
 				fail("env", want.env[l][:n], got.env[l][:n])
 				break

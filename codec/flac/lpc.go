@@ -126,13 +126,7 @@ func quantizeLPC(c []float64, q []int64) (shift uint) {
 		return 0
 	}
 	_, exp := math.Frexp(cmax) // cmax in [2^(exp-1), 2^exp)
-	s := lpcPrecision - 1 - exp
-	if s > maxLPCShift {
-		s = maxLPCShift
-	}
-	if s < 0 {
-		s = 0
-	}
+	s := max(min(lpcPrecision-1-exp, maxLPCShift), 0)
 	const lim = int64(1)<<(lpcPrecision-1) - 1
 	e := 0.0
 	scale := float64(int64(1) << uint(s))

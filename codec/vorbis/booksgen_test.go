@@ -60,7 +60,7 @@ func TestGenerateBooks(t *testing.T) {
 	// codeword lengths only (size), not on any decoded value; tightening it by
 	// feeding the generator a representative threshold is a known size lever.
 	residues := func(sig []float32, start int) {
-		for i := 0; i < n; i++ {
+		for i := range n {
 			j := start + i
 			var x float32
 			if j >= 0 && j < len(sig) {
@@ -150,7 +150,7 @@ func TestGenerateBooks(t *testing.T) {
 			copy(mag, resid)
 			residues(r, start)
 			copy(ang, resid)
-			for i := 0; i < n2; i++ {
+			for i := range n2 {
 				mag[i], ang[i] = coupleForward(mag[i], ang[i])
 			}
 			accumChannel(mag)

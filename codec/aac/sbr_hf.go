@@ -51,7 +51,7 @@ func dequantElement(el *sbrElement, out *sbrDequant) {
 	}
 	for l := 0; l < fd0.grid.numEnv; l++ {
 		n := envBands(t, fd0.grid.freqRes[l])
-		for b := 0; b < n; b++ {
+		for b := range n {
 			e0 := float64(fd0.env[l][b])
 			e1 := float64(fd1.env[l][b])
 			base := math.Exp2(e0/a+1) * math.Exp2(6-30)
@@ -81,7 +81,7 @@ func dequantPlain(fd *sbrFrameData, t *sbrFreqTables, out *sbrChanDequant) {
 	}
 	for l := 0; l < fd.grid.numEnv; l++ {
 		n := envBands(t, fd.grid.freqRes[l])
-		for b := 0; b < n; b++ {
+		for b := range n {
 			out.eOrig[l][b] = math.Exp2(float64(fd.env[l][b])/a + (6 - 30))
 		}
 	}
@@ -280,7 +280,7 @@ func hfAdjust(st *sbrChanState, t *sbrFreqTables, hdr sbrHeader, dq *sbrChanDequ
 			bands = t.fHigh
 		}
 		band := 0
-		for mi := 0; mi < m; mi++ {
+		for mi := range m {
 			k := t.kx + mi
 			for band+1 < len(bands)-1 && bands[band+1] <= k {
 				band++
@@ -295,7 +295,7 @@ func hfAdjust(st *sbrChanState, t *sbrFreqTables, hdr sbrHeader, dq *sbrChanDequ
 		}
 		// sMapped covers the whole band containing an active sine at this
 		// envelope's resolution.
-		for mi := 0; mi < m; mi++ {
+		for mi := range m {
 			if !sIndex[mi] {
 				continue
 			}
@@ -317,7 +317,7 @@ func hfAdjust(st *sbrChanState, t *sbrFreqTables, hdr sbrHeader, dq *sbrChanDequ
 		slot1 = min(slot1, sbrBufSlots)
 		width := float64(max(slot1-slot0, 1))
 		if hdr.interpolFreq == 1 {
-			for mi := 0; mi < m; mi++ {
+			for mi := range m {
 				k := t.kx + mi
 				var sum float64
 				for i := slot0; i < slot1; i++ {
@@ -407,7 +407,7 @@ func hfAdjust(st *sbrChanState, t *sbrFreqTables, hdr sbrHeader, dq *sbrChanDequ
 			st.qTemp[i+base] = qME[0]
 		}
 	} else if hSL > 0 {
-		for i := 0; i < 4; i++ {
+		for i := range 4 {
 			if i+st.prevEnvEnd < len(st.gTemp) && i+base < len(st.gTemp) {
 				st.gTemp[i+base] = st.gTemp[i+st.prevEnvEnd]
 				st.qTemp[i+base] = st.qTemp[i+st.prevEnvEnd]
@@ -433,7 +433,7 @@ func hfAdjust(st *sbrChanState, t *sbrFreqTables, hdr sbrHeader, dq *sbrChanDequ
 			}
 			var gFilt, qFilt [64]float64
 			if smoothed {
-				for mi := 0; mi < m; mi++ {
+				for mi := range m {
 					for j := 0; j <= 4; j++ {
 						gFilt[mi] += sbrSmoothWindow[j] * st.gTemp[hSL+i-j][mi]
 						qFilt[mi] += sbrSmoothWindow[j] * st.qTemp[hSL+i-j][mi]
@@ -442,7 +442,7 @@ func hfAdjust(st *sbrChanState, t *sbrFreqTables, hdr sbrHeader, dq *sbrChanDequ
 			} else {
 				gFilt, qFilt = *gain, *qM
 			}
-			for mi := 0; mi < m; mi++ {
+			for mi := range m {
 				k := t.kx + mi
 				yr := float64(st.xhighRe[slot][k]) * gFilt[mi]
 				yi := float64(st.xhighIm[slot][k]) * gFilt[mi]
