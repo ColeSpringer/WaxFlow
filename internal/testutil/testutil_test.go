@@ -3,11 +3,17 @@ package testutil
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -288,10 +294,161 @@ func TestFetchRetriesTransientFailures(t *testing.T) {
 	}
 }
 
+// TestFetchDoesNotRetryALocalFailure pins that a failure on this machine is
+// settled on the first attempt: only the link is worth asking again, and
+// eight attempts at a file that cannot be written would sit through three
+// minutes of backoff to report the same error.
+func TestFetchDoesNotRetryALocalFailure(t *testing.T) {
+	defer func(d time.Duration) { fetchRetryDelay = d }(fetchRetryDelay)
+	fetchRetryDelay = time.Millisecond
+
+	payload := []byte("vector payload bytes")
+	sum := sha256.Sum256(payload)
+	var mu sync.Mutex
+	asked := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked++
+		mu.Unlock()
+		w.Write(payload)
+	}))
+	defer srv.Close()
+	v := Vector{Name: "suite/v.bin", URL: srv.URL + "/v", SHA256: hex.EncodeToString(sum[:])}
+	fetchOnce := func(t *testing.T, dir string) {
+		t.Helper()
+		mu.Lock()
+		asked = 0
+		mu.Unlock()
+		if err := Fetch(io.Discard, dir, []Vector{v}); err == nil {
+			t.Fatal("the fetch must fail")
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if asked != 1 {
+			t.Errorf("a local failure took %d attempts, want 1", asked)
+		}
+	}
+
+	t.Run("cannot place the file", func(t *testing.T) {
+		// A directory where the pinned file goes: the download arrives
+		// intact and the rename onto the directory fails.
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, "suite", "v.bin", "old"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		fetchOnce(t, dir)
+	})
+	t.Run("cannot write the directory", func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("a read-only directory stops neither Windows nor root")
+		}
+		dir := t.TempDir()
+		suite := filepath.Join(dir, "suite")
+		if err := os.Mkdir(suite, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chmod(suite, 0o755)
+		fetchOnce(t, dir)
+	})
+}
+
+// TestFetchBoundsTheConnect pins that a host which never answers the connect
+// costs an attempt the dial timeout, not the operating system's own (about
+// two minutes on Linux, which eight attempts would stretch to twenty).
+func TestFetchBoundsTheConnect(t *testing.T) {
+	defer func(a int, d time.Duration) { fetchAttempts, fetchDialTimeout = a, d }(fetchAttempts, fetchDialTimeout)
+	fetchAttempts, fetchDialTimeout = 1, time.Nanosecond
+
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer srv.Close()
+	v := Vector{Name: "suite/v.bin", URL: srv.URL + "/v", SHA256: strings.Repeat("0", 64)}
+	err := Fetch(io.Discard, t.TempDir(), []Vector{v})
+	if ne, ok := errors.AsType[net.Error](err); !ok || !ne.Timeout() {
+		t.Fatalf("a connect slower than the dial timeout must time out, got %v", err)
+	}
+}
+
+// TestFetchOutlastsAHostDownForMinutes pins how long a host that drops
+// every connection keeps being asked. On 2026-11-04 fate-suite.ffmpeg.org
+// reset every connection for over a minute, past the 14 s that four attempts
+// waited in all. Run at a thousandth of the real schedule, a host down for
+// 150 s must still be fetched from once it is back.
+func TestFetchOutlastsAHostDownForMinutes(t *testing.T) {
+	const scale = 1000
+	defer func(d, c time.Duration) { fetchRetryDelay, fetchRetryCap = d, c }(fetchRetryDelay, fetchRetryCap)
+	fetchRetryDelay, fetchRetryCap = fetchRetryDelay/scale, fetchRetryCap/scale
+	outage := 150 * time.Second / scale
+
+	payload := []byte("vector payload bytes")
+	sum := sha256.Sum256(payload)
+	var mu sync.Mutex
+	var first time.Time
+	asked := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		if first.IsZero() {
+			first = time.Now()
+		}
+		asked++
+		down := time.Since(first) < outage
+		mu.Unlock()
+		if !down {
+			w.Write(payload)
+			return
+		}
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		conn.Close()
+	}))
+	defer srv.Close()
+
+	down := Vector{Name: "suite/down.bin", URL: srv.URL + "/down", SHA256: hex.EncodeToString(sum[:])}
+	var log strings.Builder
+	if err := Fetch(&log, t.TempDir(), []Vector{down}); err != nil {
+		mu.Lock()
+		defer mu.Unlock()
+		t.Fatalf("a host back after %s (%s at full scale), asked %d times: %v", outage, outage*scale, asked, err)
+	}
+}
+
+// TestRetryDelay pins the wait after each failed attempt: doubling, never
+// past the cap however many attempts came before, and a host's own
+// Retry-After heard up to the same cap but never shortening the backoff.
+func TestRetryDelay(t *testing.T) {
+	defer func(d, c time.Duration) { fetchRetryDelay, fetchRetryCap = d, c }(fetchRetryDelay, fetchRetryCap)
+	fetchRetryDelay, fetchRetryCap = 2*time.Second, time.Minute
+
+	reset := errors.New("connection reset by peer")
+	limited := func(after time.Duration) error { return retryAfterError{err: reset, after: after} }
+	cases := []struct {
+		attempt int
+		err     error
+		want    time.Duration
+	}{
+		{1, reset, 2 * time.Second},
+		{2, reset, 4 * time.Second},
+		{5, reset, 32 * time.Second},
+		{6, reset, time.Minute},  // 64 s, capped
+		{7, reset, time.Minute},  // 128 s, capped
+		{70, reset, time.Minute}, // 2 s doubled 69 times overflows
+		{1, limited(30 * time.Second), 30 * time.Second},
+		{1, limited(10 * time.Minute), time.Minute},
+		{5, limited(time.Second), 32 * time.Second},
+	}
+	for _, c := range cases {
+		if got := retryDelay(c.attempt, c.err); got != c.want {
+			t.Errorf("retryDelay(%d, %v) = %s, want %s", c.attempt, c.err, got, c.want)
+		}
+	}
+}
+
 // TestFetchBudgetCoversEveryAttempt pins that the deadline belongs to the
 // vector and not to the request: a host slow enough to spend it is not asked
-// again, since four fresh tries would outlast the CI job the retry exists to
-// keep alive.
+// again, since fresh tries would outlast the CI job the retry exists to keep
+// alive.
 func TestFetchBudgetCoversEveryAttempt(t *testing.T) {
 	defer func(b time.Duration) { fetchBudget = b }(fetchBudget)
 	fetchBudget = 500 * time.Millisecond
@@ -394,5 +551,112 @@ func TestRetryAfterHeader(t *testing.T) {
 	h.Set("Retry-After", time.Now().Add(time.Hour).UTC().Format(http.TimeFormat))
 	if got := retryAfter(h); got < 59*time.Minute || got > time.Hour {
 		t.Errorf("retryAfter(an hour out) = %s, want about an hour", got)
+	}
+}
+
+// TestPruneKeepsExactlyThePins pins what CI's vector cache relies on: a set
+// restored from an older pin list leaves with exactly the pinned files, so a
+// superseded archive is not carried into every cache saved after it.
+func TestPruneKeepsExactlyThePins(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string) {
+		t.Helper()
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pinned := []Vector{{Name: "ape/MAC_1345_SDK.zip"}, {Name: "flac/subset/01 - blocksize 4096.flac"}}
+	for _, v := range pinned {
+		write(v.Name)
+	}
+	// The pin this one replaced, a directory nothing pins any more, and the
+	// temp file of a fetch killed mid-download.
+	stale := []string{"ape/MAC_1326_SDK.zip", "wma/old/a.wma", "flac/subset/.fetch-123"}
+	for _, name := range stale {
+		write(name)
+	}
+
+	var log strings.Builder
+	if err := Prune(&log, dir, pinned); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	var left []string
+	err := filepath.WalkDir(dir, func(path string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		left = append(left, filepath.ToSlash(rel))
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{".", "ape", "ape/MAC_1345_SDK.zip", "flac", "flac/subset", "flac/subset/01 - blocksize 4096.flac"}
+	if !slices.Equal(left, want) {
+		t.Errorf("after Prune the tree is\n%q\nwant\n%q", left, want)
+	}
+	for _, name := range stale {
+		if !strings.Contains(log.String(), "removed  "+name) {
+			t.Errorf("the removal of %s must be reported:\n%s", name, log.String())
+		}
+	}
+
+	// Pruned of everything, the directory itself stays.
+	if err := Prune(io.Discard, dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Errorf("pruned of every pin, the directory holds %v, %v; want it empty and still there", entries, err)
+	}
+}
+
+// TestPruneLeavesLinksAlone pins that Prune removes only the regular files a
+// fetch writes. A link is someone's own arrangement: a linked directory is
+// neither removed nor walked into, and a linked root (a vector directory
+// kept on another disk) is pruned through, never removed itself.
+func TestPruneLeavesLinksAlone(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "a.wav"), []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(dir, "linked")); err != nil {
+		t.Skipf("this filesystem makes no links: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "a.wav"), filepath.Join(dir, "a.wav")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "stale.bin"), []byte("s"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "vectors")
+	if err := os.Symlink(dir, root); err != nil {
+		t.Fatal(err)
+	}
+
+	var log strings.Builder
+	if err := Prune(&log, root, nil); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	for _, kept := range []string{root, filepath.Join(dir, "linked"), filepath.Join(dir, "a.wav"), filepath.Join(outside, "a.wav")} {
+		if _, err := os.Lstat(kept); err != nil {
+			t.Errorf("Prune removed %s: %v", kept, err)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "stale.bin")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a file no pin names, under a linked root, survived: %v", err)
+	}
+}
+
+// TestPruneOfNothingIsNothing pins that a vector directory that does not
+// exist yet, as on a cache that restored nothing, has nothing to prune.
+func TestPruneOfNothingIsNothing(t *testing.T) {
+	if err := Prune(io.Discard, filepath.Join(t.TempDir(), "vectors"), nil); err != nil {
+		t.Errorf("Prune of a directory not made yet: %v", err)
 	}
 }

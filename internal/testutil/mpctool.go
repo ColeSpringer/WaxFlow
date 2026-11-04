@@ -29,7 +29,7 @@ import (
 // absence to a failure so the suite cannot silently thin out.
 
 // mpcToolsVersion and mppencVersion are the pinned source releases the tools
-// are built from, matching the Makefile and the tarballs in Vectors.
+// are built from, matching tools.mk and the tarballs in Vectors.
 const (
 	mpcToolsVersion = "musepack-r475"
 	mppencVersion   = "mppenc-1.16"

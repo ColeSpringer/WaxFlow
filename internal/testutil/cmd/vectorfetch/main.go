@@ -1,13 +1,16 @@
 // Command vectorfetch downloads the SHA-256-pinned conformance vectors
-// into testdata/vectors. It backs `make verify-vectors`; CI caches the
-// directory keyed on the pinned digests. With arguments it fetches only
-// the vectors whose names match an argument exactly or by prefix, which
-// lets targets like `make opus-tools` pull one pinned file without the
-// full corpus.
+// into testdata/vectors. It backs `make verify-vectors`. With arguments it
+// fetches only the vectors whose names match an argument exactly or by
+// prefix, which lets targets like `make opus-tools` pull one pinned file
+// without the full corpus.
 //
 // With -extract DIR the matched vectors are also unpacked into DIR after the
 // digest check: tar.gz and tar.bz2 archives, with Go's own decompressors, so
 // a build recipe does not depend on a bzip2 binary being installed.
+//
+// With -prune it first removes every file in testdata/vectors that no pinned
+// vector names. CI restores its vector cache from an older pin list when the
+// list changes, and this is what saves it back as exactly the pinned set.
 package main
 
 import (
@@ -26,6 +29,7 @@ import (
 
 func main() {
 	extract := flag.String("extract", "", "unpack the fetched archives into this directory")
+	prune := flag.Bool("prune", false, "first remove every file in the vectors directory that no pinned vector names")
 	flag.Parse()
 	vectors := testutil.Vectors
 	if args := flag.Args(); len(args) > 0 {
@@ -43,7 +47,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	if err := testutil.Fetch(os.Stdout, testutil.VectorsDir(), vectors); err != nil {
+	if err := fetch(os.Stdout, testutil.VectorsDir(), testutil.Vectors, vectors, *prune); err != nil {
 		fmt.Fprintf(os.Stderr, "vectorfetch: %v\n", err)
 		os.Exit(1)
 	}
@@ -126,4 +130,18 @@ func extractArchive(path, dir string) error {
 			// tree builds from; skipping them keeps the unpack confined.
 		}
 	}
+}
+
+// fetch fetches want into dir. With prune it first removes every file no pin
+// names, against the whole pin list whatever want holds, so a pinned file is
+// never removed. First, because a set restored from an older pin list can
+// hold a file where a pin now needs a directory, or the reverse, and the
+// fetch cannot write through either.
+func fetch(w io.Writer, dir string, pinned, want []testutil.Vector, prune bool) error {
+	if prune {
+		if err := testutil.Prune(w, dir, pinned); err != nil {
+			return err
+		}
+	}
+	return testutil.Fetch(w, dir, want)
 }

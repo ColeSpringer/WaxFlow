@@ -69,25 +69,11 @@ jobs:
         with:
           go-version-file: .go-version
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg flac wavpack
-      # The cached tools are binaries for one image's glibc; ci.yml's
-      # differential job says why the key reads the image from os-release.
-      - id: image
-        run: echo "id=$(. /etc/os-release && echo "$ID-$VERSION_ID")-$(uname -m)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v6
+      # Every pinned vector and every reference tool, as in ci.yml's
+      # differential job; this image's tool builds are saved from here.
+      - uses: ./.github/actions/vectors-and-tools
         with:
-          path: |
-            testdata/vectors
-            testdata/tools
-          key: vectors-${{ steps.image.outputs.id }}-${{ hashFiles('internal/testutil/vectors.go', 'Makefile') }}
-      - run: make verify-vectors
-      - run: make ape-tools
-      # The Musepack reference tools: both encoders the format has ever had,
-      # the reference decoder's float output and the repacker and cutter, built
-      # from the pinned tarballs the same way.
-      - run: make mpc-tools
-      # libopus's opus_demo, the reference decoder behind the codec/opus
-      # interop tests.
-      - run: make opus-tools
+          save: "true"
       - run: WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_REQUIRE_FLAC=1 WAXFLOW_REQUIRE_WAVPACK=1 WAXFLOW_REQUIRE_MAC=1 WAXFLOW_REQUIRE_MPC=1 WAXFLOW_REQUIRE_OPUS_TOOLS=1 WAXFLOW_REQUIRE_VECTORS=1 go test -count=1 -timeout 30m ./...
       # -count=1 so the scheduled soak actually re-executes: without it the
       # cached GOCACHE (restored by setup-go) short-circuits an unchanged tree.
@@ -171,10 +157,11 @@ jobs:
   # opus_demo/opus_compare built from the pinned source), enforce the
   # docs/quality-gates.md gates, and upload the HTML reports. libshine and
   # libvorbis (encoder and decoder both) ship in Ubuntu's ffmpeg build; the
-  # libopus tools are built by `make opus-tools` and cached alongside the
-  # pinned corpus. make -k carries on past a failing gate, so every gate
-  # still reports. ubuntu-26.04 is pinned because the baselines are ffmpeg
-  # build options and versions, and 26.04's are the measured ones.
+  # libopus tools come from the tool cache ci.yml's differential job saves on
+  # this image, rebuilt here only when their stamp is stale (tools.mk).
+  # make -k carries on past a failing gate, so every gate still reports.
+  # ubuntu-26.04 is pinned because the baselines are ffmpeg build options and
+  # versions, and 26.04's are the measured ones.
   encoder-quality:
     runs-on: ubuntu-26.04
     timeout-minutes: 90
@@ -184,17 +171,14 @@ jobs:
         with:
           go-version-file: .go-version
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      # Keyed on the image for the reason the differential job gives.
-      - id: image
-        run: echo "id=$(. /etc/os-release && echo "$ID-$VERSION_ID")-$(uname -m)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v6
+      # The differential jobs' caches, restored and not saved: this job
+      # fetches and builds only their Opus part. The whole vector set comes
+      # down, about 5 s more than the Opus part would; an Opus-only cache
+      # would have to be filled from the corpora's hosts on its own.
+      - uses: ./.github/actions/vectors-and-tools
         with:
-          path: |
-            testdata/vectors
-            testdata/tools
-          key: quality-${{ steps.image.outputs.id }}-${{ hashFiles('internal/testutil/vectors.go', 'Makefile') }}
-      - run: go run ./internal/testutil/cmd/vectorfetch opus/corpus/ opus/speech/
-      - run: make opus-tools
+          vectors: opus/corpus/ opus/speech/
+          tools: opus-tools
       - run: make -k encoder-quality QUALITY_REPORT=quality-report.html AAC_QUALITY_REPORT=aac-quality-report.html HEAAC_QUALITY_REPORT=heaac-quality-report.html HEAACV2_QUALITY_REPORT=heaacv2-quality-report.html VORBIS_QUALITY_REPORT=vorbis-quality-report.html OPUS_QUALITY_REPORT=opus-quality-report.html OPUS_SPEECH_QUALITY_REPORT=opus-speech-quality-report.html
       - name: upload the encoder-quality reports
         if: always()

@@ -1,0 +1,79 @@
+name: Pinned vectors and reference tools
+description: >-
+  Restores testdata/vectors and testdata/tools from their caches, fetches and
+  builds whatever is missing or stale, and saves each cache as soon as it is
+  complete. ci.yml and nightly.yml share both caches, so their keys live here
+  and nowhere else.
+inputs:
+  vectors:
+    description: >-
+      vectorfetch's arguments. The default fetches every pin and first removes
+      what no pin names.
+    default: -prune
+  tools:
+    description: The tools.mk recipes to build.
+    default: ape-tools mpc-tools opus-tools
+  save:
+    description: >-
+      Whether to save the caches. Only a job that fetches every pin and builds
+      every tool may: a subset saved under a shared key is an exact hit that
+      never saves again, so every later run would fetch or build the rest.
+    default: "false"
+runs:
+  using: composite
+  steps:
+    # The pinned vectors are the same bytes on every image, so every job shares
+    # one cache keyed on the pin list alone (vectors.go holds nothing else). A
+    # changed list restores the newest older set and fetches only the
+    # difference.
+    - id: vectors-key
+      shell: bash
+      run: echo "key=vectors-$(sha256sum internal/testutil/vectors.go | cut -c1-64)" >> "$GITHUB_OUTPUT"
+    - id: vectors
+      uses: actions/cache/restore@v6
+      with:
+        path: testdata/vectors
+        key: ${{ steps.vectors-key.outputs.key }}
+        restore-keys: vectors-
+    - shell: bash
+      env:
+        VECTORS: ${{ inputs.vectors }}
+      run: go run ./internal/testutil/cmd/vectorfetch $VECTORS
+    # Each cache is saved as soon as it is complete: the plain cache action
+    # saves only from a job that passes, so one failing test would throw away
+    # a fetch or a build the next run then repeats.
+    - if: inputs.save == 'true' && steps.vectors.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: testdata/vectors
+        key: ${{ steps.vectors.outputs.cache-primary-key }}
+    # The tools are binaries for one image's glibc, so the key names the
+    # image, read from os-release because an expression cannot see the
+    # runner's own ImageOS. The rest of the key is the recipes' stamps
+    # (tools.mk), and a recipe rebuilds whatever its stamp says is stale, so
+    # the newest older set for the image is safe to restore. A stamp that
+    # cannot be read yet, its archive not fetched, only misses the exact key.
+    - id: tools-key
+      shell: bash
+      env:
+        TOOLS: ${{ inputs.tools }}
+      run: |
+        image="$(. /etc/os-release && echo "$ID-$VERSION_ID")-$(uname -m)"
+        stamps="$(make -s $(printf '%s-stamp ' $TOOLS) 2>/dev/null)" || true
+        echo "prefix=tools-$image-" >> "$GITHUB_OUTPUT"
+        echo "key=tools-$image-$(printf '%s' "$stamps" | sha256sum | cut -c1-64)" >> "$GITHUB_OUTPUT"
+    - id: tools
+      uses: actions/cache/restore@v6
+      with:
+        path: testdata/tools
+        key: ${{ steps.tools-key.outputs.key }}
+        restore-keys: ${{ steps.tools-key.outputs.prefix }}
+    - shell: bash
+      env:
+        TOOLS: ${{ inputs.tools }}
+      run: make $TOOLS
+    - if: inputs.save == 'true' && steps.tools.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: testdata/tools
+        key: ${{ steps.tools.outputs.cache-primary-key }}

@@ -171,32 +171,15 @@ jobs:
         with:
           go-version-file: .go-version
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg flac wavpack
-      # testdata/tools is cached beside the vectors so the reference tools
-      # below are compiled once per pin rather than on every push; each
-      # recipe is a no-op when its binaries are already there. Those binaries
-      # need the glibc of the image that built them, so the key names the
-      # image. It is read from os-release because an expression cannot see the
-      # runner's own ImageOS variable.
-      - id: image
-        run: echo "id=$(. /etc/os-release && echo "$ID-$VERSION_ID")-$(uname -m)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v6
+      # Every pinned vector, and the reference tools built from pinned
+      # source: the Monkey's Audio console tool (the only APE encoder there
+      # is), the Musepack encoders and reference decoder, and libopus's
+      # opus_demo behind the SILK and mode interop tests. tools.mk says why
+      # each is built as it is; the action holds the cache keys the nightly
+      # jobs share, and saves what this job fetched or built.
+      - uses: ./.github/actions/vectors-and-tools
         with:
-          path: |
-            testdata/vectors
-            testdata/tools
-          key: vectors-${{ steps.image.outputs.id }}-${{ hashFiles('internal/testutil/vectors.go', 'Makefile') }}
-      - run: make verify-vectors
-      # No distribution packages the Monkey's Audio console tool and ffmpeg
-      # has no APE encoder, so the only APE encoder there is gets built from
-      # the pinned SDK source here.
-      - run: make ape-tools
-      # The Musepack reference tools: both encoders the format has ever had,
-      # the reference decoder's float output and the repacker and cutter, built
-      # from the pinned tarballs the same way.
-      - run: make mpc-tools
-      # libopus's opus_demo: the reference decoder behind the SILK and mode
-      # interop tests in codec/opus, which self-skip without it.
-      - run: make opus-tools
+          save: "true"
       - run: WAXFLOW_REQUIRE_FFMPEG=1 WAXFLOW_REQUIRE_FLAC=1 WAXFLOW_REQUIRE_WAVPACK=1 WAXFLOW_REQUIRE_MAC=1 WAXFLOW_REQUIRE_MPC=1 WAXFLOW_REQUIRE_OPUS_TOOLS=1 WAXFLOW_REQUIRE_VECTORS=1 go test -timeout 30m ./...
 
   # 45s per fuzz target; nightly.yml runs the long soak. scripts/fuzz.sh
