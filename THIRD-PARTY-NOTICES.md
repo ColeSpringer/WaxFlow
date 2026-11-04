@@ -292,7 +292,7 @@ Entries follow this format:
 > decisions, and the container writer.
 
 > **codec/ape decoder**: a clean-room port of the *Monkey's Audio* reference
-> decoder (BSD-3-Clause), https://monkeysaudio.com, SDK 13.26. A lossless
+> decoder (BSD-3-Clause), https://monkeysaudio.com, SDK 13.45. A lossless
 > decoder has to reproduce the reference bit for bit, so the parts that define
 > the bitstream are ported faithfully: the range decoder and its two symbol
 > models (`UnBitArray.cpp` and `Old/UnBitArrayOld.cpp`, with the model tables
@@ -300,7 +300,7 @@ Entries follow this format:
 > product, sign-sign weight update, and step quantizers (`NNFilterGeneric.cpp`,
 > `NNFilterCommon.h`), the adaptive predictor and its first-order lift
 > (`NewPredictor.cpp`, `ScaledFirstOrderFilter.h`), the interim 24-bit variant
-> (`Interim.h`), the file header layouts (`APEHeader.cpp`, `MACLib.h`), the
+> (`Interim.cpp`), the file header layouts (`APEHeader.cpp`, `MACLib.h`), the
 > frame driver's special-code handling and CRC finalization
 > (`APEDecompressCore.cpp`), and the mid/side inverse and sample packing
 > (`Prepare.cpp`). The bit reader, the packet model, the container demuxer, and

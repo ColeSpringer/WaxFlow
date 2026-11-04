@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.26-bookworm AS build
+# CI, release.yml and `make docker` pass the exact pin from .go-version, so
+# the image and the release binaries build with one Go release. The default
+# is go.mod's minor line, for a bare `docker build`.
+ARG GO_VERSION=1.26
+FROM golang:${GO_VERSION}-trixie AS build
 WORKDIR /src
 COPY go.mod ./
 COPY cli/go.mod cli/go.sum cli/
@@ -20,7 +24,7 @@ RUN mkdir -p /out/state/data /out/state/cache && chown -R 10001:10001 /out/state
 
 # Fully static binary -> distroless static: the first Wax image with no OS
 # layer. No tini: waxflow spawns no subprocesses (no ffmpeg at runtime, ever).
-FROM gcr.io/distroless/static-debian12
+FROM gcr.io/distroless/static-debian13
 ARG VERSION=dev
 LABEL org.opencontainers.image.title="waxflow" \
       org.opencontainers.image.description="Golang audio transcoding service." \

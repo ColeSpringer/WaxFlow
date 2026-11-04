@@ -16,9 +16,6 @@ concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: true
 
-env:
-  GO_VERSION: "1.26.8"
-
 jobs:
   # One pass per OS, no double-run: the whole-tree race pass on ubuntu (races
   # are caught here), and the non-race functional suite on macOS for
@@ -36,7 +33,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
       - run: make fmt-check
       - run: make vet
       - run: go build ./...
@@ -57,7 +54,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
       - run: go test ./source/
       - name: cli root tests
         working-directory: cli
@@ -71,7 +68,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
       - run: make depcheck
 
   # The nested modules: ./... at the root stops at their go.mod
@@ -88,7 +85,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
       - run: make test-cli
       - run: make test-oracle
       - run: make test-example
@@ -106,7 +103,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
       - run: make test-386
 
   cross-compile:
@@ -116,7 +113,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
       - name: build all release targets
         run: |
           set -eu
@@ -134,6 +131,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
+      # .go-version is the toolchain pin setup-go reads in every job, and the
+      # image builds FROM the same release.
+      - id: go
+        run: echo "version=$(cat .go-version)" >> "$GITHUB_OUTPUT"
       - name: build image (no push)
         uses: docker/build-push-action@v7
         with:
@@ -141,6 +142,7 @@ jobs:
           push: false
           build-args: |
             VERSION=ci
+            GO_VERSION=${{ steps.go.outputs.version }}
 
   # ffmpeg is a TEST ORACLE only, never a runtime dependency.
   # WAXFLOW_REQUIRE_FFMPEG=1, WAXFLOW_REQUIRE_FLAC=1,
@@ -154,29 +156,35 @@ jobs:
   # test job. The Opus conformance suite runs here too (it self-skips only
   # under -race, so a non-race run exercises it in-line).
   #
-  # Pinned to ubuntu-24.04 rather than ubuntu-latest: apt's ffmpeg is the
-  # oracle and its version is part of every measured bound (24.04 ships
-  # 6.1.1, 26.04 ships 8.0.1), and the version-keyed skips in the codec tests
-  # are written against what this label installs. Moving the label is an
-  # oracle change, not a runner upgrade.
+  # Pinned to ubuntu-26.04 rather than ubuntu-latest: apt's ffmpeg is the
+  # oracle and its version is part of every measured bound. 26.04 ships
+  # 8.0.1, the build the figures in docs/notes were measured on. The nightly
+  # differential job runs 24.04's 6.1.1, the older oracle the version-keyed
+  # skips in the codec tests (testutil.FFmpegAtLeast) exist for, so those stay
+  # checked too. Moving a label is an oracle change, not a runner upgrade.
   differential:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg flac wavpack
       # testdata/tools is cached beside the vectors so the reference tools
       # below are compiled once per pin rather than on every push; each
-      # recipe is a no-op when its binaries are already there.
+      # recipe is a no-op when its binaries are already there. Those binaries
+      # need the glibc of the image that built them, so the key names the
+      # image. It is read from os-release because an expression cannot see the
+      # runner's own ImageOS variable.
+      - id: image
+        run: echo "id=$(. /etc/os-release && echo "$ID-$VERSION_ID")-$(uname -m)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v6
         with:
           path: |
             testdata/vectors
             testdata/tools
-          key: vectors-${{ hashFiles('internal/testutil/vectors.go', 'Makefile') }}
+          key: vectors-${{ steps.image.outputs.id }}-${{ hashFiles('internal/testutil/vectors.go', 'Makefile') }}
       - run: make verify-vectors
       # No distribution packages the Monkey's Audio console tool and ffmpeg
       # has no APE encoder, so the only APE encoder there is gets built from
@@ -209,7 +217,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
       - name: fuzz every target in this shard for 45 seconds
         run: bash scripts/fuzz.sh 45s
         env:

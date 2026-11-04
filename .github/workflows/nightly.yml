@@ -10,9 +10,6 @@ on:
 permissions:
   contents: read
 
-env:
-  GO_VERSION: "1.26.8"
-
 jobs:
   # Long fuzz soak over every native fuzz target: 10 minutes per target
   # nightly versus the 45-second smoke in ci.yml. The list is 53 targets,
@@ -38,7 +35,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
       - name: fuzz every target in this shard for 10 minutes
         run: bash scripts/fuzz.sh 10m
         env:
@@ -58,8 +55,11 @@ jobs:
   # required, so a broken comparison cannot hide behind a skip. The non-race
   # run enforces the oracles (all single-goroutine numeric); the race pass
   # (whole tree, heavy numeric suites self-skip) covers the concurrent code.
-  # ubuntu-24.04 is pinned for the reason ci.yml's differential job gives:
-  # apt's ffmpeg version is an oracle input, not a runner detail.
+  # ubuntu-24.04 on purpose. ci.yml's differential job and the dev box run
+  # 26.04's ffmpeg 8.0.1; this one runs 24.04's 6.1.1, the older oracle the
+  # version-keyed skips in the codec tests exist for (codec/wmavoice's
+  # narrowedRuns is one). Nothing else exercises those skips, so a wrong one
+  # would pass everywhere else.
   differential:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -67,14 +67,18 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg flac wavpack
+      # The cached tools are binaries for one image's glibc; ci.yml's
+      # differential job says why the key reads the image from os-release.
+      - id: image
+        run: echo "id=$(. /etc/os-release && echo "$ID-$VERSION_ID")-$(uname -m)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v6
         with:
           path: |
             testdata/vectors
             testdata/tools
-          key: vectors-${{ hashFiles('internal/testutil/vectors.go', 'Makefile') }}
+          key: vectors-${{ steps.image.outputs.id }}-${{ hashFiles('internal/testutil/vectors.go', 'Makefile') }}
       - run: make verify-vectors
       - run: make ape-tools
       # The Musepack reference tools: both encoders the format has ever had,
@@ -100,10 +104,12 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
+      # The dev box's Node major, so a failure here reproduces with a plain
+      # `make client-e2e` there.
       - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
       - run: npm install playwright && npx playwright install --with-deps chromium
       - run: make client-e2e
 
@@ -119,7 +125,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
       - uses: actions/cache@v6
         with:
           path: bench-baseline.txt
@@ -153,7 +159,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
       - run: make soak
         env:
           WAXFLOW_SOAK_DURATION: 20m
@@ -167,23 +173,26 @@ jobs:
   # libvorbis (encoder and decoder both) ship in Ubuntu's ffmpeg build; the
   # libopus tools are built by `make opus-tools` and cached alongside the
   # pinned corpus. make -k carries on past a failing gate, so every gate
-  # still reports. ubuntu-24.04 is pinned because the baselines are ffmpeg
-  # build options and versions, and 24.04's are the measured ones.
+  # still reports. ubuntu-26.04 is pinned because the baselines are ffmpeg
+  # build options and versions, and 26.04's are the measured ones.
   encoder-quality:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # Keyed on the image for the reason the differential job gives.
+      - id: image
+        run: echo "id=$(. /etc/os-release && echo "$ID-$VERSION_ID")-$(uname -m)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v6
         with:
           path: |
             testdata/vectors
             testdata/tools
-          key: quality-${{ hashFiles('internal/testutil/vectors.go', 'Makefile') }}
+          key: quality-${{ steps.image.outputs.id }}-${{ hashFiles('internal/testutil/vectors.go', 'Makefile') }}
       - run: go run ./internal/testutil/cmd/vectorfetch opus/corpus/ opus/speech/
       - run: make opus-tools
       - run: make -k encoder-quality QUALITY_REPORT=quality-report.html AAC_QUALITY_REPORT=aac-quality-report.html HEAAC_QUALITY_REPORT=heaac-quality-report.html HEAACV2_QUALITY_REPORT=heaacv2-quality-report.html VORBIS_QUALITY_REPORT=vorbis-quality-report.html OPUS_QUALITY_REPORT=opus-quality-report.html OPUS_SPEECH_QUALITY_REPORT=opus-speech-quality-report.html

@@ -15,7 +15,7 @@ which one runs). Windows-side numbers come from the Windows Media Format SDK
 and Media Foundation on Windows 11 reached over `powershell.exe` interop. The
 identities (packet size, superframe count, exact sample count) are exact and
 portable; the floating-point figures are from these builds. A third build,
-`ffmpeg 6.1.1` (Ubuntu 24.04, which is what the CI differential job runs), is
+`ffmpeg 6.1.1` (Ubuntu 24.04's, which the nightly differential job runs), is
 bit-identical to 8.0.1 on seven of the eight fixtures whole and differs on
 three superframes of the eighth, for the reason section 5's last subsection
 gives.
@@ -328,7 +328,7 @@ then narrow it to float before truncating it to an int (`av_clipf` on a double
 argument). Upstream removed the narrowing in `9876158e` ("avcodec/wmavoice: use
 av_clipd for double values") to quiet a compiler warning, and 7.1 is the first
 release carrying it. That is not a footnote: Ubuntu 24.04 ships 6.1.1, which is
-what the CI differential job runs.
+what the nightly differential job runs.
 
 *Measured*, with the reference instrumented to report every index the two
 spellings disagree on, the narrowing moves the index **exactly once** across

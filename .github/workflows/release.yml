@@ -8,7 +8,6 @@ on:
     tags: ["v*"]
 
 env:
-  GO_VERSION: "1.26.8"
   IMAGE: ghcr.io/colespringer/waxflow
 
 # Each job holds only the write it makes: the release upload, or the image
@@ -26,7 +25,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: .go-version
       - run: make check
       - name: build release binaries
         run: |
@@ -70,6 +69,10 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
+      # The image builds FROM the release the binaries job's setup-go read
+      # from .go-version, so one pin drives both.
+      - id: go
+        run: echo "version=$(cat .go-version)" >> "$GITHUB_OUTPUT"
       # Multi-arch (amd64 + arm64): self-hosters run Pi/ARM NAS boxes.
       - uses: docker/build-push-action@v7
         with:
@@ -78,6 +81,7 @@ jobs:
           push: true
           build-args: |
             VERSION=${{ github.ref_name }}
+            GO_VERSION=${{ steps.go.outputs.version }}
           tags: |
             ${{ env.IMAGE }}:${{ github.ref_name }}
             ${{ env.IMAGE }}:latest

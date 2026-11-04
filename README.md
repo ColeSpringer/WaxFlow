@@ -164,7 +164,7 @@ Put music under `./library`, or point the compose bind mount elsewhere
 with `WAXFLOW_LIBRARY=/path/to/music`, and stream: mint a URL with `POST
 /sign`, or try the dev demo page (`--demo`). `WAXFLOW_LIBRARY` is
 compose's variable for that mount, not a daemon setting; the daemon reads
-`roots` / `WAXFLOW_ROOTS`. Or from source (Go 1.26.3):
+`roots` / `WAXFLOW_ROOTS`. Or from source (Go 1.26):
 
 ```sh
 make build

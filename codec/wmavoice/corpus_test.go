@@ -424,7 +424,7 @@ var staleRuns = map[string][][2]int{
 // before truncating it to an int (av_clipf on a double argument). Upstream
 // removed the narrowing in 9876158e to quiet a compiler warning, without
 // noting that it moves the index, and 7.1 is the first release carrying it;
-// Ubuntu 24.04, which is what the CI differential job runs, ships 6.1.1.
+// Ubuntu 24.04 ships 6.1.1, and the nightly differential job runs it.
 //
 // Measured over all eight fixtures, the narrowing changes the index exactly
 // ONCE: on voice-16000-16k, at superframe 31, where the index is

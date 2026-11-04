@@ -189,8 +189,11 @@ endif
 # differentials come from here. A test-time oracle only, never a runtime
 # dependency. Tests that need it self-skip until this has run;
 # WAXFLOW_REQUIRE_MAC=1 escalates.
-APE_TOOLS_VERSION := mac-13.26
+APE_TOOLS_VERSION := mac-13.45
 APE_TOOLS_DIR := testdata/tools/$(APE_TOOLS_VERSION)
+# The SDK ships as MAC_<version without its dot>_SDK.zip, so the archive name
+# follows from APE_TOOLS_VERSION rather than being a second copy of it.
+APE_SDK_ZIP := MAC_$(subst .,,$(APE_TOOLS_VERSION:mac-%=%))_SDK.zip
 # The SDK picks its file-I/O backend and its wide-character entry point from a
 # platform define, so the build needs one of three spellings. These are
 # recursively expanded on purpose: only the ape-tools recipe reads them, and an
@@ -205,10 +208,10 @@ ape-tools:
 		echo "$(APE_TOOLS_DIR)/mac$(APE_TOOLS_EXE) is already built"; exit 0; \
 	fi; \
 	set -e; \
-	go run ./internal/testutil/cmd/vectorfetch ape/MAC_1326_SDK.zip; \
+	go run ./internal/testutil/cmd/vectorfetch ape/$(APE_SDK_ZIP); \
 	rm -rf testdata/tools/ape-build; \
 	mkdir -p testdata/tools/ape-build $(APE_TOOLS_DIR); \
-	( cd testdata/tools/ape-build && unzip -q ../../vectors/ape/MAC_1326_SDK.zip ); \
+	( cd testdata/tools/ape-build && unzip -q ../../vectors/ape/$(APE_SDK_ZIP) ); \
 	( cd testdata/tools/ape-build && $(CXX) -O2 -std=c++11 -w $(APE_TOOLS_CXXFLAGS) \
 		-ISource/MACLib -ISource/MACLib/Old -ISource/Shared -IShared -ISource/Console \
 		Source/MACLib/*.cpp Source/MACLib/Old/*.cpp \
@@ -241,6 +244,8 @@ ape-tools:
 # missing tool skip.
 MPC_TOOLS_VERSION := musepack-r475
 MPPENC_VERSION := mppenc-1.16
+# The r475 tarball unpacks to musepack_src_r475, and mppenc-1.16 to itself.
+MPC_SRC := musepack_src_$(MPC_TOOLS_VERSION:musepack-%=%)
 MPC_TOOLS_DIR := testdata/tools/$(MPC_TOOLS_VERSION)
 MPC_TOOL_NAMES := mpcdec mpcdecraw mpcenc mpc2sv8 mpccut mpcchap
 MPPENC_DIR := testdata/tools/$(MPPENC_VERSION)
@@ -257,17 +262,17 @@ mpc-tools:
 	set -e; \
 	rm -rf $(MPC_BUILD); \
 	mkdir -p $(MPC_BUILD)/out $(MPC_TOOLS_DIR) $(MPPENC_DIR); \
-	go run ./internal/testutil/cmd/vectorfetch -extract $(MPC_BUILD) musepack/musepack_src_r475.tar.gz musepack/mppenc-1.16.tar.bz2; \
-	cp scripts/mpcdecraw/mpcdecraw.c $(MPC_BUILD)/musepack_src_r475/; \
-	cp -r scripts/mpcchap $(MPC_BUILD)/musepack_src_r475/cuestub; \
-	( cd $(MPC_BUILD)/musepack_src_r475 && \
+	go run ./internal/testutil/cmd/vectorfetch -extract $(MPC_BUILD) musepack/$(MPC_SRC).tar.gz musepack/$(MPPENC_VERSION).tar.bz2; \
+	cp scripts/mpcdecraw/mpcdecraw.c $(MPC_BUILD)/$(MPC_SRC)/; \
+	cp -r scripts/mpcchap $(MPC_BUILD)/$(MPC_SRC)/cuestub; \
+	( cd $(MPC_BUILD)/$(MPC_SRC) && \
 		$(CC) $(MPC_CFLAGS) -Iinclude -Ilibwavformat libmpcdec/*.c common/crc32.c libwavformat/output.c mpcdec/mpcdec.c -o ../out/mpcdec$(APE_TOOLS_EXE) -lm && \
 		$(CC) $(MPC_CFLAGS) -Iinclude -Ilibmpcdec libmpcdec/*.c common/crc32.c mpcdecraw.c -o ../out/mpcdecraw$(APE_TOOLS_EXE) -lm && \
 		( $(CC) $(MPC_CFLAGS) -DFAST_MATH -DCVD_FASTLOG -Iinclude -Ilibmpcpsy -Ilibmpcenc libmpcpsy/*.c libmpcenc/*.c common/crc32.c common/fastmath.c common/tags.c mpcenc/*.c -o ../out/mpcenc$(APE_TOOLS_EXE) -lm $(MPC_TOLERATE) ) && \
 		( $(CC) $(MPC_CFLAGS) -DFAST_MATH -DCVD_FASTLOG -Iinclude -Ilibmpcdec -Ilibmpcenc libmpcdec/*.c libmpcenc/*.c common/crc32.c mpc2sv8/mpc2sv8.c -o ../out/mpc2sv8$(APE_TOOLS_EXE) -lm $(MPC_TOLERATE) ) && \
 		( $(CC) $(MPC_CFLAGS) -DFAST_MATH -DCVD_FASTLOG -Iinclude -Ilibmpcdec -Ilibmpcenc libmpcdec/*.c libmpcenc/*.c common/crc32.c mpccut/mpccut.c -o ../out/mpccut$(APE_TOOLS_EXE) -lm $(MPC_TOLERATE) ) && \
 		( $(CC) $(MPC_CFLAGS) -DFAST_MATH -DCVD_FASTLOG -Iinclude -Ilibmpcdec -Ilibmpcenc -Icuestub libmpcdec/*.c libmpcenc/*.c common/crc32.c common/tags.c mpcchap/mpcchap.c mpcchap/iniparser.c mpcchap/dictionary.c cuestub/cuestub.c -o ../out/mpcchap$(APE_TOOLS_EXE) -lm $(MPC_TOLERATE) ) ); \
-	( cd $(MPC_BUILD)/mppenc-1.16 && \
+	( cd $(MPC_BUILD)/$(MPPENC_VERSION) && \
 		( $(CC) $(MPC_CFLAGS) -DMPP_ENCODER -DFAST_MATH -DCVD_FASTLOG src/*.c -o ../out/mppenc$(APE_TOOLS_EXE) -lm $(MPC_TOLERATE) ) ); \
 	for t in $(MPC_TOOL_NAMES); do \
 		if [ -x "$(MPC_BUILD)/out/$$t$(APE_TOOLS_EXE)" ]; then cp "$(MPC_BUILD)/out/$$t$(APE_TOOLS_EXE)" $(MPC_TOOLS_DIR)/; fi; \
@@ -349,7 +354,7 @@ apple-smoke: build
 hls-e2e: client-e2e
 
 docker:
-	docker build --build-arg VERSION=$(VERSION) -t waxflow:$(VERSION) .
+	docker build --build-arg VERSION=$(VERSION) --build-arg GO_VERSION=$$(cat .go-version) -t waxflow:$(VERSION) .
 
 clean:
 	rm -rf bin dist
