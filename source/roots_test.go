@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1173,5 +1174,33 @@ func TestEmptyFolderIgnoresPlaceholders(t *testing.T) {
 	}
 	if got := r.Remount(); len(got) != 1 || !got[0].Mounted {
 		t.Fatalf("Remount with one real entry = %+v, want B mounted", got)
+	}
+}
+
+// TestRootUnavailableNamesItsRoot pins the typed cause inside a
+// root-unavailable error: whoever wraps the error (the pid lookup, a CLI
+// hint) can still tell which root is down, and the text and the underlying
+// cause read as before.
+func TestRootUnavailableNamesItsRoot(t *testing.T) {
+	gone := filepath.Join(t.TempDir(), "gone")
+	r, err := OpenRoots([]Root{{Name: "lib", Path: gone}}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	_, err = r.Resolve(context.Background(), "lib/a.wav")
+	if waxerr.CodeOf(err) != waxerr.CodeRootUnavailable {
+		t.Fatalf("resolve on an unmounted root = %v, want root-unavailable", err)
+	}
+	wrapped := fmt.Errorf("pid lookup: %w", err)
+	down, ok := errors.AsType[*RootDownError](wrapped)
+	if !ok || down.Root != "lib" {
+		t.Fatalf("no RootDownError naming lib inside %v", wrapped)
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("err = %v, want the missing folder still visible to errors.Is", err)
+	}
+	if !strings.Contains(err.Error(), `root "lib" is unavailable: `) || strings.Contains(err.Error(), gone) {
+		t.Errorf("err text = %q, want the root named and its path withheld", err)
 	}
 }

@@ -4,12 +4,13 @@
 //
 //	<root>/<relative/path>   a file under a configured library root
 //	upload:<id>              a spooled one-shot upload (with the job store)
-//	pid:<ULID>               a WaxBin catalog identifier (catalog resolver)
+//	pid:<id>                 an item the host's pid lookup maps to a root-relative path
 //
-// The Resolver interface is public so a build that injects a catalog
-// resolver can implement the pid form against a WaxBin catalog; this
-// module ships Roots, which serves the first form and rejects the
-// schemes it does not know with waxerr.CodeUnsupportedSource (HTTP 501).
+// Roots serves the first form and rejects the schemes it does not know
+// with waxerr.CodeUnsupportedSource (HTTP 501); PIDLookup serves the third
+// by asking a host over HTTP and wraps Roots; the daemon adds the second
+// over its upload spool. The Resolver interface is public so a build can
+// add schemes of its own.
 //
 // Every resolved file carries an Identity (size plus mtime in
 // nanoseconds), the same identity that signed URLs embed (ADR-0003) and
@@ -123,7 +124,7 @@ var _ container.Source = (*File)(nil)
 //
 // ctx governs the resolution only, not the returned File: local file
 // opens (roots, uploads) may ignore it, while implementations that
-// reach further (the WaxBin catalog resolver) derive their lookup
+// reach further (PIDLookup, a catalog resolver) derive their lookup
 // deadlines from it so a canceled request stops waiting.
 type Resolver interface {
 	Resolve(ctx context.Context, ref string) (*File, error)
@@ -146,7 +147,7 @@ func unsupportedScheme(s string) error {
 	case "upload":
 		return waxerr.New(waxerr.CodeUnsupportedSource, "source: upload references need the daemon's upload spool (uploads are disabled here)")
 	case "pid":
-		return waxerr.New(waxerr.CodeUnsupportedSource, "source: pid references require a build with a catalog resolver")
+		return waxerr.New(waxerr.CodeUnsupportedSource, "source: pid references need a pid lookup configured (pidLookupURL)")
 	default:
 		return waxerr.New(waxerr.CodeUnsupportedSource, fmt.Sprintf("source: unknown source scheme %q", s))
 	}

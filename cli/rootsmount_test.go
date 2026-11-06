@@ -365,3 +365,19 @@ func TestSignNamesAnUnmountedRootsPath(t *testing.T) {
 		t.Errorf("stderr %q does not name the configured path", stderr)
 	}
 }
+
+// TestSignNamesAnUnmountedRootsPathForAPID: the hint survives a pid
+// reference, whose root name is the lookup host's answer, not the ref.
+func TestSignNamesAnUnmountedRootsPathForAPID(t *testing.T) {
+	gone := filepath.Join(t.TempDir(), "gone")
+	t.Setenv("WAXFLOW_ROOTS", "lib="+gone)
+	t.Setenv("WAXFLOW_DATA_DIR", t.TempDir())
+	pidHostEnv(t, map[string]string{lookupPID: "lib/a.flac"})
+	code, _, stderr := run(t, "sign", "--src", "pid:"+lookupPID)
+	if want := waxerr.CodeRootUnavailable.ExitCode(); code != want {
+		t.Fatalf("exit = %d, want %d; stderr: %s", code, want, stderr)
+	}
+	if !strings.Contains(stderr, gone) {
+		t.Errorf("stderr %q does not name the configured path", stderr)
+	}
+}

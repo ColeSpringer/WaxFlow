@@ -68,6 +68,7 @@ func TestResolveErrors(t *testing.T) {
 		{"", waxerr.CodeInvalidRequest},
 		{"lib", waxerr.CodeInvalidRequest},
 		{"lib/", waxerr.CodeInvalidRequest},
+		{"/lib/a.wav", waxerr.CodeInvalidRequest},
 		{"nope/a.wav", waxerr.CodeNotFound},
 		{"lib/missing.wav", waxerr.CodeNotFound},
 		{"lib/sub", waxerr.CodeUnsupportedSource}, // directory

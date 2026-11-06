@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -267,6 +268,11 @@ func (s *Server) resolveHLSSources(ctx context.Context, req *hlsRequest) error {
 // open file per member on every segment request, which for a thousand-member
 // queue is a thousand descriptors against a default limit of 1024, and would
 // undo the point of Concat opening members lazily.
+//
+// Members resolve together, memberResolvers at a time: a pid member is a
+// round trip to the lookup host, and a thousand of them one after another
+// would make every segment request wait on the sum. The bound keeps the
+// handles open at once to that many. The first failure ends the rest.
 func (s *Server) resolveTimelineMembers(ctx context.Context, digest string) ([]memberSource, error) {
 	if err := s.checkTimelines(); err != nil {
 		return nil, err
@@ -275,22 +281,48 @@ func (s *Server) resolveTimelineMembers(ctx context.Context, digest string) ([]m
 	if err != nil {
 		return nil, err
 	}
-	members := make([]memberSource, 0, len(refs))
+	rctx, stop := context.WithCancel(ctx)
+	defer stop()
+	members := make([]memberSource, len(refs))
+	var (
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		first error
+		slots = make(chan struct{}, memberResolvers)
+	)
 	for i, ref := range refs {
-		// Resolve reads ctx only while waiting on a mount, so check between
-		// members.
-		if err := ctx.Err(); err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeCanceled, "resolving a timeline canceled", err)
+		if rctx.Err() != nil {
+			break
 		}
-		m, f, err := s.resolveMember(ctx, i, ref, true)
-		if err != nil {
-			return nil, err
-		}
-		f.Close()
-		members = append(members, m)
+		slots <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-slots }()
+			m, f, err := s.resolveMember(rctx, i, ref, true)
+			if err != nil {
+				mu.Lock()
+				if first == nil {
+					first = err
+					stop()
+				}
+				mu.Unlock()
+				return
+			}
+			f.Close()
+			members[i] = m
+		})
+	}
+	wg.Wait()
+	if first != nil {
+		return nil, first
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeCanceled, "resolving a timeline canceled", err)
 	}
 	return members, nil
 }
+
+// memberResolvers bounds how many timeline members resolve at once.
+const memberResolvers = 8
 
 // resolveMember resolves member i, enforces the identity the URL pins, probes
 // it, and returns what the plan and the worker need beside its open handle,

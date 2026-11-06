@@ -5,16 +5,17 @@
 # Mount your audio files under /library and name it as a root; signed URLs and
 # the transcode cache persist in the named volumes.
 #
-# A build that injects a catalog resolver (pid:<ULID> sources) adds its image,
-# WAXFLOW_CATALOG_DB, and a catalog mount in an override file you write, then
-# layers it on top of this one:
+# pid:<id> sources need the host that answers them: set WAXFLOW_PID_LOOKUP_URL
+# (and WAXFLOW_PID_LOOKUP_KEY) in an override file or the environment; the
+# README's `pid:` sources section is the contract. A build that injects a
+# catalog resolver instead (cli.Flavor) adds its image and WAXFLOW_CATALOG_DB
+# in that override:
 #
-#   docker compose -f compose.yaml -f your-catalog.yaml up -d
+#   docker compose -f compose.yaml -f your-override.yaml up -d
 #
-# Mount that catalog read-write even though a resolver opens it read-only: a
+# Mount such a catalog read-write even though a resolver opens it read-only: a
 # SQLite catalog's WAL readers write read-marks into the -shm sidecar, so the
-# daemon's UID (10001) needs write access to the -wal/-shm files beside the
-# database, and a read-only mount fails at open.
+# daemon's UID (10001) needs write access to the -wal/-shm files beside it.
 #
 # Exposure note (ADR-0007): this widens the listen address to 0.0.0.0 inside
 # the container. Put TLS in front (native tlsCert/tlsKey or a terminating

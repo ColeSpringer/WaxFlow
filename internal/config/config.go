@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxflow/dsp/resample"
+	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -77,13 +78,12 @@ type Config struct {
 	Roots []Root `json:"roots"`
 
 	// CatalogDB is the path of a WaxBin catalog database, opened
-	// read-only to resolve pid:<ULID> source references. No build here
-	// resolves them: this field is the hand-off point to the code that
-	// does. It exists so a build injecting a catalog resolver through
-	// cli.Flavor reads its catalog path from the family's normal
-	// precedence chain (flag > env > JSON file) instead of reinventing
-	// configuration; cli.ResolverOptions.CatalogDB is what carries it
-	// across the seam.
+	// read-only to resolve pid:<id> source references in a build that
+	// injects a catalog resolver through cli.Flavor (the stock build
+	// resolves them through PIDLookupURL instead). It exists so such a
+	// build reads its catalog path from the family's normal precedence
+	// chain (flag > env > JSON file) instead of reinventing configuration;
+	// cli.ResolverOptions.CatalogDB is what carries it across the seam.
 	//
 	// A build without such a resolver refuses a configured CatalogDB
 	// loudly, rather than silently ignoring a capability the operator
@@ -91,8 +91,17 @@ type Config struct {
 	// and any one-shot given a pid: or upload: ref. One-shots on plain
 	// paths never read configuration at all (a broken config file must
 	// not fail probing a local file), so they neither honor nor refuse
-	// it.
+	// it. Exclusive with PIDLookupURL.
 	CatalogDB string `json:"catalogDB"`
+
+	// PIDLookupURL is the host endpoint that maps pid:<id> source references
+	// to root-relative ones: GET <url>/<id> answers {"ref": "<root>/<path>"}
+	// (source.PIDLookup). Read at start; exclusive with CatalogDB.
+	PIDLookupURL string `json:"pidLookupURL"`
+
+	// PIDLookupKey is sent as a bearer token with every pid lookup, so it
+	// holds only what that header carries (source.CheckPIDLookupKey).
+	PIDLookupKey string `json:"pidLookupKey"`
 
 	// APIKeys are the control-API keys. With none configured, a
 	// non-loopback Addr refuses to start unless AllowUnauthenticated is
@@ -205,6 +214,8 @@ var envVars = []struct {
 	{"WAXFLOW_LOG_LEVEL", func(c *Config, v string) error { c.LogLevel = v; return nil }},
 	{"WAXFLOW_ROOTS", func(c *Config, v string) error { return parseRoots(v, &c.Roots) }},
 	{"WAXFLOW_CATALOG_DB", func(c *Config, v string) error { c.CatalogDB = v; return nil }},
+	{"WAXFLOW_PID_LOOKUP_URL", func(c *Config, v string) error { c.PIDLookupURL = v; return nil }},
+	{"WAXFLOW_PID_LOOKUP_KEY", func(c *Config, v string) error { c.PIDLookupKey = v; return nil }},
 	{"WAXFLOW_API_KEYS", func(c *Config, v string) error { c.APIKeys = splitList(v); return nil }},
 	{"WAXFLOW_ALLOW_UNAUTHENTICATED", func(c *Config, v string) error { return parseBool(v, &c.AllowUnauthenticated) }},
 	{"WAXFLOW_SOURCE_MAX_BYTES", func(c *Config, v string) error { return parseInt64(v, &c.SourceMaxBytes) }},
@@ -238,6 +249,16 @@ var envVars = []struct {
 	{"WAXFLOW_LIVE_IDLE_GRACE", func(c *Config, v string) error { c.LiveIdleGrace = v; return nil }},
 	{"WAXFLOW_HLS_IDLE_GRACE", func(c *Config, v string) error { c.HLSIdleGrace = v; return nil }},
 	{"WAXFLOW_DEMO", func(c *Config, v string) error { return parseBool(v, &c.Demo) }},
+}
+
+// EnvVars lists every environment variable Load reads, in table order, so a
+// test suite can clear the ambient environment before setting its own.
+func EnvVars() []string {
+	names := make([]string, len(envVars))
+	for i, ev := range envVars {
+		names[i] = ev.name
+	}
+	return names
 }
 
 // Load resolves configuration from the JSON file at path overlaid with
@@ -332,6 +353,19 @@ func (c Config) Validate() error {
 	}
 	if (c.TLSCert == "") != (c.TLSKey == "") {
 		return waxerr.New(waxerr.CodeInvalidRequest, "tlsCert and tlsKey must be set together")
+	}
+	if c.PIDLookupURL != "" {
+		if _, err := source.ParsePIDLookupURL(c.PIDLookupURL); err != nil {
+			return waxerr.Wrap(waxerr.CodeInvalidRequest, "pidLookupURL", err)
+		}
+		if c.CatalogDB != "" {
+			return waxerr.New(waxerr.CodeInvalidRequest, "pid: sources come from one place: set pidLookupURL or catalogDB, not both")
+		}
+		if err := source.CheckPIDLookupKey(c.PIDLookupKey); err != nil {
+			return waxerr.Wrap(waxerr.CodeInvalidRequest, "pidLookupKey", err)
+		}
+	} else if c.PIDLookupKey != "" {
+		return waxerr.New(waxerr.CodeInvalidRequest, "pidLookupKey needs pidLookupURL")
 	}
 	if c.PaceBurstSeconds < 0 || !finite(c.PaceBurstSeconds) {
 		return waxerr.New(waxerr.CodeInvalidRequest, "paceBurstSeconds must be a finite non-negative number")

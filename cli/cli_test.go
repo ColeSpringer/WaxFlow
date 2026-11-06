@@ -4,20 +4,171 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/colespringer/waxflow/internal/config"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/source"
+	"github.com/colespringer/waxflow/waxerr"
 )
+
+const lookupPID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+
+// TestMain clears every setting the environment can carry, so a shell that
+// exports WAXFLOW_* for a running stack cannot steer these tests; a test
+// that wants one sets it.
+func TestMain(m *testing.M) {
+	for _, name := range config.EnvVars() {
+		os.Unsetenv(name)
+	}
+	os.Exit(m.Run())
+}
+
+// pidHost is a fake lookup host for the CLI tests: it serves GET /pid/{id}
+// from refs (404 otherwise) and counts requests, the connections opened to
+// it and the connections closed.
+type pidHost struct {
+	*httptest.Server
+	requests, opened, closed atomic.Int64
+	mu                       sync.Mutex
+	auth                     string
+}
+
+func (h *pidHost) lastAuth() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.auth
+}
+
+// pidHostEnv starts a pidHost and points WAXFLOW_PID_LOOKUP_URL at it.
+func pidHostEnv(t *testing.T, refs map[string]string) *pidHost {
+	t.Helper()
+	h := &pidHost{}
+	h.Server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.requests.Add(1)
+		h.mu.Lock()
+		h.auth = r.Header.Get("Authorization")
+		h.mu.Unlock()
+		ref, ok := refs[path.Base(r.URL.Path)]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"ref":%q}`, ref)
+	}))
+	h.Config.ConnState = func(_ net.Conn, st http.ConnState) {
+		switch st {
+		case http.StateNew:
+			h.opened.Add(1)
+		case http.StateClosed:
+			h.closed.Add(1)
+		}
+	}
+	h.Start()
+	t.Cleanup(h.Close)
+	t.Setenv("WAXFLOW_PID_LOOKUP_URL", h.URL+"/pid")
+	return h
+}
+
+// trackRoot writes a one-file library and configures it as root lib.
+func trackRoot(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "track.wav"), []byte("not audio; sign only stats it"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WAXFLOW_ROOTS", "lib="+dir)
+	t.Setenv("WAXFLOW_DATA_DIR", t.TempDir())
+	return dir
+}
+
+func TestSignResolvesPIDThroughLookup(t *testing.T) {
+	trackRoot(t)
+	t.Setenv("WAXFLOW_PID_LOOKUP_KEY", "k1")
+	host := pidHostEnv(t, map[string]string{lookupPID: "lib/track.wav"})
+	code, out, stderr := run(t, "sign", "--src", "pid:"+lookupPID)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr: %s", code, stderr)
+	}
+	for _, want := range []string{"src=pid%3A" + lookupPID, "id=", "sig=", "exp="} {
+		if !strings.Contains(out, want) {
+			t.Errorf("minted URL missing %q: %s", want, out)
+		}
+	}
+	if n := host.requests.Load(); n != 1 {
+		t.Errorf("host saw %d requests, want 1", n)
+	}
+	if got := host.lastAuth(); got != "Bearer k1" {
+		t.Errorf("Authorization = %q, want Bearer k1", got)
+	}
+	// The command's teardown closes the lookup's connections rather than
+	// leaving them idle on the host.
+	deadline := time.Now().Add(2 * time.Second)
+	for host.closed.Load() < host.opened.Load() {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d of %d connections to the host still open after the command returned", host.opened.Load()-host.closed.Load(), host.opened.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestStockBuildRefusesPIDWithoutLookup(t *testing.T) {
+	t.Setenv("WAXFLOW_DATA_DIR", t.TempDir())
+	code, _, stderr := run(t, "sign", "--src", "pid:"+lookupPID)
+	if want := waxerr.CodeUnsupportedSource.ExitCode(); code != want {
+		t.Fatalf("exit = %d, want %d; stderr: %s", code, want, stderr)
+	}
+	if !strings.Contains(stderr, "pidLookupURL") {
+		t.Errorf("stderr = %q, want the key that enables pid lookups", stderr)
+	}
+}
+
+func TestConfigRefusesLookupBesideCatalogDB(t *testing.T) {
+	t.Setenv("WAXFLOW_DATA_DIR", t.TempDir())
+	t.Setenv("WAXFLOW_PID_LOOKUP_URL", "http://127.0.0.1:1/pid")
+	t.Setenv("WAXFLOW_CATALOG_DB", "/nonexistent/waxbin.db")
+	code, _, stderr := run(t, "sign", "--src", "pid:"+lookupPID)
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (invalid-request); stderr: %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "one place") {
+		t.Errorf("stderr = %q, want the one-place rule", stderr)
+	}
+}
+
+// TestFlavorNextCarriesThePIDLookup pins the Flavor contract: Next is the
+// stock chain, lookup included, so a Flavor that hands it back serves pids.
+func TestFlavorNextCarriesThePIDLookup(t *testing.T) {
+	trackRoot(t)
+	host := pidHostEnv(t, map[string]string{lookupPID: "lib/track.wav"})
+	flavor := Flavor{
+		Name: "catalog",
+		OpenResolver: func(_ context.Context, o ResolverOptions) (source.Resolver, io.Closer, error) {
+			return o.Next, nil, nil
+		},
+	}
+	var out, errOut strings.Builder
+	code := ExecuteFlavor("test", []string{"sign", "--src", "pid:" + lookupPID}, &out, &errOut, flavor)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr: %s", code, errOut.String())
+	}
+	if n := host.requests.Load(); n != 1 {
+		t.Errorf("host saw %d requests, want 1", n)
+	}
+}
 
 func run(t *testing.T, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
@@ -190,40 +341,34 @@ type pidReporter struct {
 
 func (p pidReporter) PIDSources() bool { return p.pid }
 
-// TestBuildServerConfigPIDSources pins what /caps advertises: the
-// catalogDB inference by default, and the resolver's own answer when it
-// has one.
+// TestBuildServerConfigPIDSources pins what /caps advertises: inferred from
+// catalogDB or pidLookupURL by default, and the resolver's own answer when
+// it has one.
 func TestBuildServerConfigPIDSources(t *testing.T) {
+	pass := func(next source.Resolver) source.Resolver { return next }
+	report := func(pid bool) func(source.Resolver) source.Resolver {
+		return func(next source.Resolver) source.Resolver { return pidReporter{next, pid} }
+	}
 	tests := []struct {
 		name      string
 		catalogDB string
+		pidURL    string
+		stock     bool
 		resolver  func(next source.Resolver) source.Resolver
 		want      bool
 	}{
-		{
-			name:     "no catalogDB, no reporter: inferred off",
-			resolver: func(next source.Resolver) source.Resolver { return next },
-			want:     false,
-		},
-		{
-			name:      "catalogDB set, no reporter: inferred on",
-			catalogDB: "/tmp/waxbin.db",
-			resolver:  func(next source.Resolver) source.Resolver { return next },
-			want:      true,
-		},
+		{name: "stock, nothing configured: off", stock: true, want: false},
+		{name: "stock, pidLookupURL: advertised", stock: true, pidURL: "http://127.0.0.1:1/pid", want: true},
+		{name: "no catalogDB, no reporter: inferred off", resolver: pass, want: false},
+		{name: "catalogDB set, no reporter: inferred on", catalogDB: "/tmp/waxbin.db", resolver: pass, want: true},
+		{name: "pidLookupURL set, flavor passes next: inferred on", pidURL: "http://127.0.0.1:1/pid", resolver: pass, want: true},
 		{
 			// The case the inference cannot reach: pid served from
-			// somewhere that is not catalogDB.
-			name:     "no catalogDB, reporter says yes: advertised",
-			resolver: func(next source.Resolver) source.Resolver { return pidReporter{next, true} },
-			want:     true,
+			// somewhere that is neither catalogDB nor the lookup.
+			name: "nothing configured, reporter says yes: advertised", resolver: report(true), want: true,
 		},
-		{
-			name:      "catalogDB set, reporter says no: not advertised",
-			catalogDB: "/tmp/waxbin.db",
-			resolver:  func(next source.Resolver) source.Resolver { return pidReporter{next, false} },
-			want:      false,
-		},
+		{name: "catalogDB set, reporter says no: not advertised", catalogDB: "/tmp/waxbin.db", resolver: report(false), want: false},
+		{name: "pidLookupURL set, reporter says no: not advertised", pidURL: "http://127.0.0.1:1/pid", resolver: report(false), want: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -236,15 +381,19 @@ func TestBuildServerConfigPIDSources(t *testing.T) {
 				t.Fatal(err)
 			}
 			cfg.CatalogDB = tc.catalogDB
+			cfg.PIDLookupURL = tc.pidURL
 			logger, err := newLogger(&strings.Builder{}, cfg)
 			if err != nil {
 				t.Fatal(err)
 			}
-			flavor := Flavor{
-				Name: "catalog",
-				OpenResolver: func(_ context.Context, o ResolverOptions) (source.Resolver, io.Closer, error) {
-					return tc.resolver(o.Next), nil, nil
-				},
+			var flavor Flavor
+			if !tc.stock {
+				flavor = Flavor{
+					Name: "catalog",
+					OpenResolver: func(_ context.Context, o ResolverOptions) (source.Resolver, io.Closer, error) {
+						return tc.resolver(o.Next), nil, nil
+					},
+				}
 			}
 			srvCfg, cleanup, err := buildServerConfig(context.Background(), cfg, "", "test", logger, flavor)
 			if err != nil {

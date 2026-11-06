@@ -5,6 +5,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,9 +22,10 @@ import (
 
 // Flavor customizes the command tree for a build that adds source
 // schemes the stock binary cannot serve. The zero value is the stock
-// build. A build that resolves pid:<ULID> against a catalog
-// injects one; no build in this repo does, so the seam is aimed at
-// modules outside it, and examples/catalogcli is a worked example.
+// build, which resolves pid:<id> through the pid lookup when pidLookupURL
+// is configured. A build that resolves pids some other way (against a
+// catalog, say) injects one; no build in this repo does, so the seam is
+// aimed at modules outside it, and examples/catalogcli is a worked example.
 type Flavor struct {
 	// Name tags the version output: "catalog" prints waxflow-catalog.
 	// Empty means stock.
@@ -39,10 +41,10 @@ type Flavor struct {
 	// rather than leaked, so handing back one already closed is a double
 	// close. A typed-nil pointer in a non-nil interface is not a nil
 	// Closer and will be called. An implementation that is present but
-	// unconfigured owns the refusal for its own schemes: it returns a
-	// resolver that answers them with a message naming what is missing,
-	// rather than passing them down to opts.Next and the stock
-	// unsupported-source error.
+	// unconfigured delegates to opts.Next: the stock chain serves pid:
+	// when pidLookupURL is configured and otherwise refuses it naming
+	// that key. It may add its own key to that refusal (examples/catalogcli
+	// does) but claims nothing.
 	//
 	// An implementation must not start background goroutines when
 	// opts.Daemon is false: the command resolves one reference and
@@ -57,14 +59,15 @@ type Flavor struct {
 }
 
 // PIDSourceReporter, when implemented by the resolver an OpenResolver
-// returns, declares whether this build resolves pid:<ULID> references.
+// returns, declares whether this build resolves pid:<id> references.
 // `waxflow server` publishes the answer as delivery.pid in /caps.
 //
 // Implementing it is optional. Without it the CLI infers support from
-// catalogDB being configured, which is right for a resolver keyed on
-// catalogDB -- the documented channel, and what ResolverOptions.CatalogDB
-// carries -- and wrong for one that is not. A build that resolves pid:
-// from somewhere else says so here rather than leaving /caps to deny a
+// catalogDB or pidLookupURL being configured, which is right for a
+// resolver keyed on catalogDB (the documented channel, and what
+// ResolverOptions.CatalogDB carries) and for the stock lookup, and wrong
+// for one keyed on something else. A build that resolves pid: from
+// somewhere else says so here rather than leaving /caps to deny a
 // capability it has.
 //
 // This only keeps the capability surface honest; whether a given pid
@@ -113,9 +116,10 @@ type ResolverOptions struct {
 	// copied value is a restart-only snapshot.
 	MaxBytes int64
 
-	// Next serves every reference the implementation does not claim:
-	// the configured library roots. Implementations delegate rather
-	// than answer not-found.
+	// Next serves every reference the implementation does not claim: the
+	// stock chain, the configured library roots plus the pid lookup when
+	// pidLookupURL is configured. Implementations delegate rather than
+	// answer not-found.
 	//
 	// Next is live-mutable: a root reload (POST /roots/reload) mutates
 	// the roots it points at in place, so an implementation must delegate
@@ -222,6 +226,8 @@ func (f Flavor) openResolver(ctx context.Context, cfg config.Config, logger *slo
 }
 
 // pathHinting adds a root's configured path to its root-unavailable error.
+// The root is read off the error, not the reference: a pid reference names
+// no root, its lookup answer does.
 type pathHinting struct {
 	source.Resolver
 	roots *source.Roots
@@ -229,12 +235,12 @@ type pathHinting struct {
 
 func (p pathHinting) Resolve(ctx context.Context, ref string) (*source.File, error) {
 	f, err := p.Resolver.Resolve(ctx, ref)
-	if waxerr.CodeOf(err) != waxerr.CodeRootUnavailable {
+	down, ok := errors.AsType[*source.RootDownError](err)
+	if !ok {
 		return f, err
 	}
-	name, _, _ := strings.Cut(ref, "/")
 	for _, st := range p.roots.Status() {
-		if st.Name == name {
+		if st.Name == down.Root {
 			return nil, fmt.Errorf("%w (configured at %s)", err, st.Path)
 		}
 	}
@@ -259,26 +265,45 @@ func logClose(logger *slog.Logger, what string, c io.Closer) {
 
 // openResolverWithRoots is openResolver plus the inner *source.Roots it
 // opens regardless of flavor, so the server can hand that same live handle
-// to a root-reload closure (the whole chain delegates to it by pointer). A
-// configured catalogDB with no resolver to serve it is refused loudly: the
-// operator asked for pid: sources and this build cannot deliver them.
+// to a root-reload closure (the whole chain delegates to it by pointer). The
+// stock chain is the roots, under the pid lookup when pidLookupURL is set; a
+// Flavor wraps that chain. A configured catalogDB with no resolver to serve
+// it is refused loudly: the operator asked for pid: sources and this build
+// cannot deliver them.
 func (f Flavor) openResolverWithRoots(ctx context.Context, cfg config.Config, logger *slog.Logger, daemon bool) (source.Resolver, *source.Roots, func(), error) {
 	roots, err := source.OpenRoots(configRoots(cfg), cfg.ResolvedSourceMaxBytes())
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	var stock source.Resolver = roots
+	closeStock := func() { logClose(logger, "roots", roots) }
+	if cfg.PIDLookupURL != "" {
+		lookup, err := source.NewPIDLookup(cfg.PIDLookupURL, roots, source.PIDLookupOptions{Key: cfg.PIDLookupKey, Logger: logger})
+		if err != nil {
+			closeStock()
+			return nil, nil, nil, err
+		}
+		stock = lookup
+		closeStock = func() {
+			logClose(logger, "pid lookup", lookup)
+			logClose(logger, "roots", roots)
+		}
+		if daemon {
+			logger.Info("pid lookups enabled", "url", lookup.URL())
+		}
+	}
 	if f.OpenResolver == nil {
 		if cfg.CatalogDB != "" {
-			logClose(logger, "roots", roots)
+			closeStock()
 			return nil, nil, nil, waxerr.New(waxerr.CodeInvalidRequest,
 				"catalogDB is set but this build has no catalog resolver; pid: sources need a build that injects one")
 		}
-		return roots, roots, func() { logClose(logger, "roots", roots) }, nil
+		return stock, roots, closeStock, nil
 	}
 	resolver, closer, err := f.OpenResolver(ctx, ResolverOptions{
 		CatalogDB: cfg.CatalogDB,
 		MaxBytes:  cfg.ResolvedSourceMaxBytes(),
-		Next:      roots,
+		Next:      stock,
 		Logger:    logger,
 		Daemon:    daemon,
 	})
@@ -288,7 +313,7 @@ func (f Flavor) openResolverWithRoots(ctx context.Context, cfg config.Config, lo
 		// it for the rest of the command. doctor is the case that shows,
 		// since it keeps running its remaining checks after this one fails.
 		logClose(logger, "resolver", closer)
-		logClose(logger, "roots", roots)
+		closeStock()
 		return nil, nil, nil, err
 	}
 	if resolver == nil {
@@ -298,13 +323,13 @@ func (f Flavor) openResolverWithRoots(ctx context.Context, cfg config.Config, lo
 		// one close in this chain that fails in practice, so this rollback
 		// reports it the same way the teardown closure does.
 		logClose(logger, "resolver", closer)
-		logClose(logger, "roots", roots)
+		closeStock()
 		return nil, nil, nil, waxerr.New(waxerr.CodeInternal,
 			"cli: Flavor.OpenResolver returned a nil resolver and no error")
 	}
 	return resolver, roots, func() {
 		logClose(logger, "resolver", closer)
-		logClose(logger, "roots", roots)
+		closeStock()
 	}, nil
 }
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -137,15 +138,20 @@ func putTimeline(t *testing.T, s *Server, refs []string) string {
 }
 
 // openedFiles records every handle its resolver hands out.
+// openedFiles records every handle a resolver opened. Members resolve
+// together, so it is safe to call concurrently, as every resolver must be.
 type openedFiles struct {
 	source.Resolver
+	mu    sync.Mutex
 	files []*source.File
 }
 
 func (r *openedFiles) Resolve(ctx context.Context, ref string) (*source.File, error) {
 	f, err := r.Resolver.Resolve(ctx, ref)
 	if err == nil {
+		r.mu.Lock()
 		r.files = append(r.files, f)
+		r.mu.Unlock()
 	}
 	return f, err
 }

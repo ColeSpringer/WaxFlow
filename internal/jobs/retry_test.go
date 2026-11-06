@@ -2,6 +2,9 @@ package jobs
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -80,5 +83,46 @@ func TestRetryDelay(t *testing.T) {
 	}
 	if got := retryDelay(10*time.Minute, 1); got != 10*time.Minute {
 		t.Errorf("retryDelay(10m, 1) = %v, want the configured 10m", got)
+	}
+}
+
+// TestJobWaitsForThePIDHost: a job whose pid lookup host is down waits for
+// it, as it waits for an unmounted root, and runs once the host answers.
+func TestJobWaitsForThePIDHost(t *testing.T) {
+	dir := t.TempDir()
+	copyFixture(t, dir, fixtureWAV)
+	var up atomic.Bool
+	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if !up.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"ref":%q}`, "lib/"+fixtureWAV)
+	}))
+	t.Cleanup(host.Close)
+	lookup, err := source.NewPIDLookup(host.URL+"/pid", openRoots(t, dir), source.PIDLookupOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := &countingResolver{Resolver: lookup}
+	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, RetryEvery: 10 * time.Millisecond})
+	j, err := r.Create(transcodeReq("pid:01ARZ3NDEKTSV4RRFFQ69G5FAV", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	waitFor(t, "two tries at the host", func() bool { return res.calls.Load() >= 2 })
+	waitFor(t, "the job to say why it waits", func() bool {
+		got, _ := r.Get(j.ID)
+		return got.State == StateQueued && got.Waiting != nil
+	})
+	got, _ := r.Get(j.ID)
+	if got.Waiting.Code != "catalog-unavailable" || got.Waiting.Message == "" || got.Error != nil {
+		t.Fatalf("waiting job = state %s, waiting %+v, error %+v; want queued on catalog-unavailable", got.State, got.Waiting, got.Error)
+	}
+	up.Store(true)
+	if done := waitJob(t, r, j.ID, StateDone); done.Error != nil || done.Waiting != nil {
+		t.Fatalf("job done with error %+v, waiting %+v", done.Error, done.Waiting)
 	}
 }

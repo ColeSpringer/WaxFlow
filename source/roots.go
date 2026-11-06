@@ -563,7 +563,7 @@ func (r *Roots) Resolve(ctx context.Context, ref string) (*File, error) {
 		return nil, unsupportedScheme(s)
 	}
 	name, rel, ok := strings.Cut(ref, "/")
-	if !ok || rel == "" {
+	if !ok || name == "" || rel == "" {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("source: reference %q is not <root>/<path>", ref))
 	}
@@ -662,6 +662,17 @@ func (r *Roots) current(name string, st rootState) bool {
 	return ok && live.seq == st.seq
 }
 
+// RootDownError is the cause inside a root-unavailable error. It names the
+// root, so a caller holding the error wrapped (the pid lookup, a CLI hint)
+// can still tell which one is down.
+type RootDownError struct {
+	Root string
+	Err  error
+}
+
+func (e *RootDownError) Error() string { return e.Err.Error() }
+func (e *RootDownError) Unwrap() error { return e.Err }
+
 // unavailable answers for a configured root that is not open. It names the
 // root but not its path, since a signed playback URL hands this message to a
 // client.
@@ -669,7 +680,8 @@ func unavailable(name string, cause error) error {
 	if pe, ok := errors.AsType[*fs.PathError](cause); ok {
 		cause = pe.Err
 	}
-	return waxerr.Wrap(waxerr.CodeRootUnavailable, fmt.Sprintf("source: root %q is unavailable", name), cause)
+	return waxerr.Wrap(waxerr.CodeRootUnavailable, fmt.Sprintf("source: root %q is unavailable", name),
+		&RootDownError{Root: name, Err: cause})
 }
 
 // openFault codes an open error on a healthy root. A missing file is

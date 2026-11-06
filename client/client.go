@@ -239,8 +239,8 @@ type CapsDelivery struct {
 	CutFormats []string `json:"cutFormats,omitempty"`
 	Jobs       bool     `json:"jobs"`
 	Uploads    bool     `json:"uploads"`
-	// PID: the daemon resolves pid:<ULID> source references against a
-	// WaxBin catalog (a build with a catalog resolver).
+	// PID: the daemon resolves pid:<id> source references, through its
+	// pid lookup host or a catalog resolver.
 	PID bool `json:"pid"`
 	// Timelines: the daemon mints multi-source timelines (CreateTimeline),
 	// which a tl= parameter then streams gaplessly over HLS, and on /stream

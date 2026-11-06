@@ -1,10 +1,11 @@
 // Command catalogcli is a worked example: a waxflow CLI that resolves
 // pid:<ULID> source references against a catalog.
 //
-// No build in the WaxFlow repo resolves pid: references. A build that
-// wants them supplies cli.Flavor.OpenResolver, as this command does
-// against a stub catalog: catalogDB names a directory, and the file
-// called <ULID> inside it holds the path of the track that PID names.
+// The stock WaxFlow build resolves pid: references by asking a host over
+// HTTP (pidLookupURL). A build that wants them from a catalog directly
+// supplies cli.Flavor.OpenResolver, as this command does against a stub
+// catalog: catalogDB names a directory, and the file called <ULID> inside
+// it holds the path of the track that PID names.
 // That is the whole lookup a real catalog does, minus the database.
 // Replace openCatalog and catalog.Resolve with real queries and the
 // surrounding shape stands.
@@ -47,12 +48,10 @@ func main() {
 // of the library roots when catalogDB is configured.
 func openResolver(ctx context.Context, opts cli.ResolverOptions) (source.Resolver, io.Closer, error) {
 	if opts.CatalogDB == "" {
-		// Present but unconfigured. This build owns the refusal for its
-		// own scheme, so a pid: reference reports the missing catalog
-		// instead of falling through to the stock unsupported-source
-		// error, which would tell the operator to go find a build that
-		// serves pid: -- this one.
-		return noCatalog{next: opts.Next}, nil, nil
+		// Present but unconfigured: the stock chain serves pid: through its
+		// own lookup when pidLookupURL is set, and otherwise refuses it
+		// naming that key; this build only adds the key it would read.
+		return unconfigured{next: opts.Next}, nil, nil
 	}
 	cat, err := openCatalog(ctx, opts)
 	if err != nil {
@@ -161,18 +160,14 @@ func (c *catalog) Close() error { return nil }
 // resolve pid: from something other than catalogDB.
 func (c *catalog) PIDSources() bool { return true }
 
-// noCatalog answers pid references precisely when no catalog is
-// configured, and delegates everything else.
-type noCatalog struct{ next source.Resolver }
+// unconfigured delegates everything and names catalogDB beside the stock
+// refusal of a pid, so an operator of this build sees both ways to serve it.
+type unconfigured struct{ next source.Resolver }
 
-func (n noCatalog) Resolve(ctx context.Context, ref string) (*source.File, error) {
-	if strings.HasPrefix(ref, "pid:") {
-		return nil, waxerr.New(waxerr.CodeUnsupportedSource,
-			"catalogcli: pid references need catalogDB configured")
+func (u unconfigured) Resolve(ctx context.Context, ref string) (*source.File, error) {
+	f, err := u.next.Resolve(ctx, ref)
+	if err != nil && strings.HasPrefix(ref, "pid:") && waxerr.CodeOf(err) == waxerr.CodeUnsupportedSource {
+		return nil, waxerr.New(waxerr.CodeUnsupportedSource, err.Error()+", or catalogDB for this build")
 	}
-	return n.next.Resolve(ctx, ref)
+	return f, err
 }
-
-// PIDSources implements cli.PIDSourceReporter: this build could serve
-// pid: references but has no catalog, so /caps must not advertise them.
-func (noCatalog) PIDSources() bool { return false }

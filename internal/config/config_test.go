@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -268,6 +269,12 @@ func TestServiceFieldValidation(t *testing.T) {
 		{LiveIdleGrace: "soon"},
 		{HLSIdleGrace: "-1s"},
 		{UploadTTL: "-1h"},
+		{PIDLookupURL: "deck/pid"},
+		{PIDLookupURL: "http://deck/pid?x=1"},
+		{PIDLookupKey: "k"},
+		{PIDLookupURL: "http://deck/pid", CatalogDB: "/x/waxbin.db"},
+		{PIDLookupURL: "http://deck/pid", PIDLookupKey: "bad key"},
+		{PIDLookupURL: "http://deck/pid", PIDLookupKey: "k\n"},
 	}
 	for i, cfg := range bad {
 		if err := cfg.Validate(); err == nil {
@@ -279,5 +286,57 @@ func TestServiceFieldValidation(t *testing.T) {
 	neg := -1.0
 	if err := (Config{PaceFactor: &neg}).Validate(); err == nil {
 		t.Error("negative paceFactor validated")
+	}
+}
+
+// TestPIDLookupFromJSONAndEnv loads the two pid lookup fields from the file
+// and lets the environment override them, like every other setting.
+func TestPIDLookupFromJSONAndEnv(t *testing.T) {
+	path := writeConfig(t, `{"pidLookupURL": "http://file:4420/pid", "pidLookupKey": "fk"}`)
+	cfg, err := Load(path, envMap(nil))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.PIDLookupURL != "http://file:4420/pid" || cfg.PIDLookupKey != "fk" {
+		t.Errorf("file values = %q, %q", cfg.PIDLookupURL, cfg.PIDLookupKey)
+	}
+	cfg, err = Load(path, envMap(map[string]string{
+		"WAXFLOW_PID_LOOKUP_URL": "http://deck:4420/engine/pid",
+		"WAXFLOW_PID_LOOKUP_KEY": "k",
+	}))
+	if err != nil {
+		t.Fatalf("Load with env: %v", err)
+	}
+	if cfg.PIDLookupURL != "http://deck:4420/engine/pid" || cfg.PIDLookupKey != "k" {
+		t.Errorf("env overrides = %q, %q", cfg.PIDLookupURL, cfg.PIDLookupKey)
+	}
+}
+
+// TestPIDLookupValidates pins what a pid source configuration may look like:
+// a lookup URL alone or with a key, or a catalogDB alone, never both sources.
+func TestPIDLookupValidates(t *testing.T) {
+	for i, cfg := range []Config{
+		{PIDLookupURL: "http://deck/pid"},
+		{PIDLookupURL: "https://u:p@deck/", PIDLookupKey: "k"},
+		{PIDLookupURL: "http://deck/pid", PIDLookupKey: "Abc-._~+/="},
+		{CatalogDB: "/x/waxbin.db"},
+	} {
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("case %d refused: %v", i, err)
+		}
+	}
+}
+
+// TestEnvVarsNamesEveryKnob: the exported list is the table, so a test suite
+// clearing the ambient environment clears every setting Load reads.
+func TestEnvVarsNamesEveryKnob(t *testing.T) {
+	names := EnvVars()
+	if len(names) != len(envVars) {
+		t.Fatalf("EnvVars() lists %d names, the table has %d", len(names), len(envVars))
+	}
+	for _, want := range []string{"WAXFLOW_ADDR", "WAXFLOW_PID_LOOKUP_URL", "WAXFLOW_PID_LOOKUP_KEY"} {
+		if !slices.Contains(names, want) {
+			t.Errorf("EnvVars() lacks %s", want)
+		}
 	}
 }

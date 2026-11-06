@@ -17,7 +17,7 @@ import (
 
 // newSignCmd mints signed playback URLs offline: the daemon does not need
 // to be running, only the signing secret and the source configuration
-// (roots, and catalogDB where a catalog resolver serves it) must match its.
+// (roots, and pidLookupURL or catalogDB for pid: sources) must match its.
 func newSignCmd(flavor Flavor) *cobra.Command {
 	var src, format, gain string
 	var dynamics dynamicsFlag

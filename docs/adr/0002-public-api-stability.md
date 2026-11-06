@@ -520,3 +520,30 @@ each finding once, however often `Walk` is called. `mka.Demuxer` implements
 the ten that already were: a block damaged on every cluster no longer grows
 the list without bound, and a block read twice across a seek back is listed
 once.
+
+## Amendment (2026-11-06): `pid:` served in-tree, over HTTP
+
+The stock build now resolves `pid:<id>` itself: `source.PIDLookup` asks a
+host configured by URL (`pidLookupURL`) for the root-relative reference
+behind an id, `GET <url>/<id>` answering `{"ref": "<root>/<path>"}`, and
+opens it through the roots. The one consumer of the 2026-07-17 seam,
+WaxDeck, stopped shipping an engine image with a catalog reader linked in
+and asked for exactly this, so the published image serves pids for any
+host. The README's `pid:` sources section is the host contract.
+
+The `cli.Flavor` seam and `catalogDB` stay as the extension surface for a
+build that resolves pids another way (against a catalog directly), with
+one change to the contract stated above: an implementation that is
+present but unconfigured delegates to `opts.Next`, the stock chain,
+rather than refusing its own schemes, since that chain now answers or
+refuses `pid:` precisely (naming `pidLookupURL`); it may add its own key
+to that refusal, as the example does. `ResolverOptions.Next` is that
+chain, the roots plus the lookup when one is configured, and `catalogDB`
+and `pidLookupURL` are mutually exclusive. `delivery.pid` is inferred from
+either; a `PIDSourceReporter` still overrides.
+
+The id grammar is wider than the ULID ADR-0003/0004 name: 1 to 128
+characters of `A-Z a-z 0-9 _ -`, so a host's prefixed ids fit. The
+identity rule those ADRs state is unchanged: the opened file keeps
+`pid:<id>` as its reference, size and mtime pin the bytes, and a rename
+the host tracks keeps URLs and cache entries.

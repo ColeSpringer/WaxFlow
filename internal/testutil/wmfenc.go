@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Windows' own WMA encoder, reached through Media Foundation by
@@ -129,12 +131,44 @@ func wmfArg(t testing.TB, p string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// wmfExec launches powershell.exe with argv and returns its combined output.
+// A test swaps it (swapWMFExec).
+var wmfExec = func(argv []string) ([]byte, error) {
+	return exec.Command("powershell.exe", argv...).CombinedOutput()
+}
+
+// wmfRetryDelay paces the relaunches runWMF makes when WSL's interop relay
+// failed to start powershell.exe at all; tests zero it.
+var wmfRetryDelay = time.Second
+
+// swapWMFExec installs fn as the launcher and returns the undo.
+func swapWMFExec(fn func([]string) ([]byte, error)) func() {
+	prev := wmfExec
+	wmfExec = fn
+	return func() { wmfExec = prev }
+}
+
+// swapWMFRetryDelay sets the relaunch pace and returns the undo.
+func swapWMFRetryDelay(d time.Duration) func() {
+	prev := wmfRetryDelay
+	wmfRetryDelay = d
+	return func() { wmfRetryDelay = prev }
+}
+
+// interopLaunchFailed reports WSL's interop relay failing to start the
+// Windows process at all, in its own words and before any script ran. It
+// happens when several test binaries start powershell.exe at once.
+func interopLaunchFailed(err error, out []byte) bool {
+	return err != nil && bytes.Contains(out, []byte("UtilAcceptVsock"))
+}
+
 // runWMF drives one of the encoder scripts and holds them to the same output
 // contract. The exit status alone is not enough: PowerShell can report success
 // for a run whose encode never wrote anything, or wrote a valid but short file
 // (wmfcheck.go), and a caller that only checked the status would then decode
-// it as a corpus cell. There is no retry: a short output is a defect to find,
-// not to absorb.
+// it as a corpus cell. There is no retry on what a script produced: a short
+// output is a defect to find, not to absorb. The one thing tried again is a
+// launch the interop relay failed before any script ran.
 func runWMF(t testing.TB, script, what, in, dst string, args ...string) {
 	t.Helper()
 	path := wmfScript(script)
@@ -142,7 +176,16 @@ func runWMF(t testing.TB, script, what, in, dst string, args ...string) {
 		t.Fatal("scripts/wmfenc/" + script + " is missing from the tree")
 	}
 	argv := append([]string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", wmfArg(t, path)}, args...)
-	b, err := exec.Command("powershell.exe", argv...).CombinedOutput()
+	const launches = 3
+	var b []byte
+	var err error
+	for attempt := 1; ; attempt++ {
+		b, err = wmfExec(argv)
+		if !interopLaunchFailed(err, b) || attempt == launches {
+			break
+		}
+		time.Sleep(wmfRetryDelay * time.Duration(attempt))
+	}
 	if err != nil {
 		t.Fatalf("%s %s: %v\n%s", script, what, err, b)
 	}

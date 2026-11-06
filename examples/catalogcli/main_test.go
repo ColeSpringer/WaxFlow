@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -104,18 +107,49 @@ func TestCatalogReloadSourceMaxBytes(t *testing.T) {
 	f.Close()
 }
 
-// TestUnconfiguredCatalogOwnsRefusal pins the rule cli.Flavor documents:
-// an implementation that is present but unconfigured answers its own
-// schemes itself, rather than leaving pid: to the stock
-// unsupported-source error.
-func TestUnconfiguredCatalogOwnsRefusal(t *testing.T) {
+// TestUnconfiguredCatalogDelegatesPID pins the rule cli.Flavor documents:
+// an implementation that is present but unconfigured hands back the stock
+// chain, whose refusal names the key that enables pid lookups.
+func TestUnconfiguredCatalogDelegatesPID(t *testing.T) {
 	t.Setenv("WAXFLOW_DATA_DIR", t.TempDir())
+	t.Setenv("WAXFLOW_CATALOG_DB", "")
+	t.Setenv("WAXFLOW_PID_LOOKUP_URL", "")
 	code, _, stderr := runCLI(t, "sign", "--src", "pid:"+testPID)
-	if code == 0 {
-		t.Fatal("exit = 0 with no catalog configured")
+	if want := waxerr.CodeUnsupportedSource.ExitCode(); code != want {
+		t.Fatalf("exit = %d, want %d; stderr: %s", code, want, stderr)
 	}
-	if !strings.Contains(stderr, "catalogDB configured") {
-		t.Errorf("stderr = %q, want this build's own refusal", stderr)
+	if !strings.Contains(stderr, "pidLookupURL") || !strings.Contains(stderr, "catalogDB") {
+		t.Errorf("stderr = %q, want the stock refusal with this build's own key beside it", stderr)
+	}
+}
+
+// TestUnconfiguredCatalogServesLookupPID is the other half of that rule: with
+// pidLookupURL configured and no catalog, this build's pids resolve through
+// the stock lookup, because Next carries it.
+func TestUnconfiguredCatalogServesLookupPID(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "track.wav"), []byte("not audio; sign only stats it"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/"+testPID) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ref":"lib/track.wav"}`)
+	}))
+	defer host.Close()
+	t.Setenv("WAXFLOW_ROOTS", "lib="+dir)
+	t.Setenv("WAXFLOW_DATA_DIR", t.TempDir())
+	t.Setenv("WAXFLOW_CATALOG_DB", "")
+	t.Setenv("WAXFLOW_PID_LOOKUP_URL", host.URL+"/pid")
+	code, out, stderr := runCLI(t, "sign", "--src", "pid:"+testPID)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	if !strings.Contains(out, "src=pid%3A"+testPID) {
+		t.Errorf("minted URL does not carry the pid: %s", out)
 	}
 }
 
@@ -149,14 +183,14 @@ func TestDoctorOpensCatalog(t *testing.T) {
 		t.Fatalf("doctor --json: %v\nstdout: %s\nstderr: %s", err, out, stderr)
 	}
 	for _, c := range report.Checks {
-		if c.Name == "catalog" {
+		if c.Name == "pid" {
 			if c.Status != "ok" {
-				t.Errorf("catalog check = %q (%s), want ok", c.Status, c.Detail)
+				t.Errorf("pid check = %q (%s), want ok", c.Status, c.Detail)
 			}
 			return
 		}
 	}
-	t.Errorf("no catalog check in doctor report:\n%s", out)
+	t.Errorf("no pid check in doctor report:\n%s", out)
 }
 
 // TestServerConfigConstructs pins the other half of the extension

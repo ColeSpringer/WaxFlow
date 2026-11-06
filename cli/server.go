@@ -156,11 +156,11 @@ func buildServerConfig(ctx context.Context, cfg config.Config, path string, vers
 		return server.Config{}, nop, waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating scratchDir", err)
 	}
 
-	// A configured catalogDB is the inference for pid support, and it is
-	// exact for a resolver keyed on catalogDB. A resolver that knows
-	// better overrides it rather than let /caps guess at an out-of-tree
-	// build's schemes.
-	pidSources := cfg.CatalogDB != ""
+	// A configured catalogDB or pidLookupURL is the inference for pid
+	// support, exact for the stock lookup and for a resolver keyed on
+	// catalogDB. A resolver that knows better overrides it rather than let
+	// /caps guess at an out-of-tree build's schemes.
+	pidSources := cfg.CatalogDB != "" || cfg.PIDLookupURL != ""
 	if r, ok := resolver.(PIDSourceReporter); ok {
 		pidSources = r.PIDSources()
 	}
