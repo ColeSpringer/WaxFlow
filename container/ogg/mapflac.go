@@ -84,6 +84,7 @@ func (m *flacMapping) finalizeTrack(first firstPage, lastEnd func() int64, r rep
 			return container.Track{}, err
 		}
 	}
+	r.truncatedBy(st.Truncated)
 	return container.Track{
 		Codec:        codec.FLAC,
 		CodecConfig:  st.StreamInfo,

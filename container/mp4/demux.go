@@ -94,6 +94,14 @@ type Demuxer struct {
 	fragQueue  []fragSample // the current fragment's samples
 	fragIdx    int
 	fragDecode int64 // running decode time (samples) for the next sample's PTS
+	// fragTruncated is how far the head's declared length runs past what the
+	// fragments hold (container.Truncated), and fragCompared marks the one
+	// comparison that finds it as made: by Walk, or by a read reaching the end
+	// of the fragments. fragRun is the raw run the reader's own fragments
+	// have reached, which is that read's measure when no scan has made one.
+	fragTruncated int64
+	fragCompared  bool
+	fragRun       int64
 	// fragTicks is where the fragment in flight begins on the media's own tick
 	// timeline, which is the unit a tfdt states. It exists for the fragments
 	// that carry none: their position is the sum of every prior sample's raw
@@ -390,6 +398,9 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		// decode time they start at is where the table ended. A tfdt overrides
 		// it; the ordinary fragmented movie has an empty table and starts at 0.
 		d.fragDecode, d.fragTicks = sel.st.totalDur, sel.st.tickDur
+		// No trims are fitted to a hybrid movie's table, so what it times
+		// past the file's data is counted as it stands.
+		sel.st.truncated = sel.st.shortDur
 	} else {
 		delay, padding, samples, advisory = d.gapless(sel)
 		if sel.unitDur > 1 && !advisory {
@@ -437,6 +448,16 @@ func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track}
 
 // Warnings returns damage tolerated during parsing.
 func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
+
+// TruncatedSamples implements container.Truncated: what the sample table
+// times past the end of the file's data, or what a fragmented movie's head
+// declares past everything it holds, the second known once a walk, or a read
+// to the end of the fragments, has held the two against each other.
+//
+// The larger of the two, not their sum. Only a hybrid movie has both, and
+// its head is measured against a run that already ends where the table's
+// data did, so the second count contains the first.
+func (d *Demuxer) TruncatedSamples(int) int64 { return max(d.sel.st.truncated, d.fragTruncated) }
 
 // Chapters returns parsed chapter markers in start order, nil when the file
 // carries none. The slice is the demuxer's own and must not be mutated.

@@ -282,6 +282,7 @@ func (d *Demuxer) sv8Walk(first int64) error {
 			return err
 		}
 		d.total = s.present
+		d.truncated = samples - deliverable
 		samples = deliverable
 	default:
 		d.total = blocks

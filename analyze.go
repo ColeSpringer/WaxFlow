@@ -14,6 +14,7 @@ import (
 	"github.com/colespringer/waxflow/dsp/mix"
 	"github.com/colespringer/waxflow/dsp/silence"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/internal/satmath"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -186,6 +187,32 @@ type AnalyzeResult struct {
 	// source. A group's own result carries none; each member's list is on
 	// that member's result.
 	InputWarnings []string
+	// LostSamples counts the measured frames that are silence standing in
+	// for audio damage took (format.Info.Lost), of Samples and at the same
+	// rate. A hole keeps the stream's length, so Samples cannot say how much
+	// of the measurement is the file's own. It is this measurement's own
+	// read. A group's result carries its members' total, as its Samples
+	// does. Zero for a source with no hole, and for one whose holes shorten
+	// the read instead, which is every format but FLAC, native or in Ogg.
+	LostSamples int64
+	// TruncatedSamples counts the samples the source's header declares past
+	// the end of what the file holds (format.Info.Truncated), as this
+	// measurement's read left it, at the rate of Samples. None of them was
+	// measured: Samples is what was there and this is how much more the
+	// file claimed. A group's result carries its members' total. Zero for a
+	// whole source, for a header that states no length to fall short of,
+	// and for a window that stops short of the source's end (Slice).
+	TruncatedSamples int64
+}
+
+// LossNote returns the one warning line LostSamples and TruncatedSamples
+// warrant, or "" for a source that lost nothing, worded as
+// TranscodeResult.LossNote words it.
+func (r *AnalyzeResult) LossNote() string {
+	if r == nil {
+		return ""
+	}
+	return lossNote(r.LostSamples, r.TruncatedSamples, r.Format.Rate)
 }
 
 // Analyze decodes src end to end and measures its loudness: integrated
@@ -231,7 +258,9 @@ func (e *Engine) analyzeMedia(ctx context.Context, med format.Media, opts Analyz
 		return nil, nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("analyze: negative channel count %d", opts.Channels))
 	}
-	track := med.Info().Default()
+	opened := med.Info()
+	track := opened.Default()
+	lostBefore := opened.Lost // a caller's Media may have been read already
 	// The chain only converts to float here (no resample, no mix): the
 	// meter is rate-aware, and absent a downmix it weighs the source
 	// channels itself, so measurement runs on the source's own timeline. An
@@ -382,9 +411,12 @@ func (e *Engine) analyzeMedia(ctx context.Context, med format.Media, opts Analyz
 	}
 	// Taken here rather than by the caller: Analyze and a group member
 	// opened on demand close the media before the caller sees the result.
-	if ws := med.Info().Warnings; len(ws) > 0 {
+	found := med.Info()
+	if ws := found.Warnings; len(ws) > 0 {
 		res.InputWarnings = slices.Clone(ws)
 	}
+	res.LostSamples = found.Lost - lostBefore
+	res.TruncatedSamples = found.Truncated
 	if det != nil {
 		det.Flush()
 		spans := make([]SilenceSpan, len(det.Spans()))
@@ -515,7 +547,7 @@ func (e *Engine) AnalyzeGroup(ctx context.Context, members []GroupMember, opts A
 	}
 	out := &AnalyzeGroupResult{Members: make([]AnalyzeResult, 0, len(members))}
 	var group loudness.Group
-	var base int64
+	var base, lost, truncated int64
 	for i, m := range members {
 		mo := opts
 		mo.Channels = m.Channels
@@ -534,13 +566,17 @@ func (e *Engine) AnalyzeGroup(ctx context.Context, members []GroupMember, opts A
 		}
 		out.Members = append(out.Members, *res)
 		base += res.Samples
+		lost += res.LostSamples
+		truncated = satmath.Add(truncated, res.TruncatedSamples)
 	}
 	out.Group = AnalyzeResult{
-		Samples:        base,
-		IntegratedLUFS: group.Integrated(),
-		LoudnessRange:  group.Range(),
-		TruePeakDB:     group.TruePeak(),
-		SamplePeakDB:   group.SamplePeak(),
+		Samples:          base,
+		LostSamples:      lost,
+		TruncatedSamples: truncated,
+		IntegratedLUFS:   group.Integrated(),
+		LoudnessRange:    group.Range(),
+		TruePeakDB:       group.TruePeak(),
+		SamplePeakDB:     group.SamplePeak(),
 	}
 	return out, nil
 }

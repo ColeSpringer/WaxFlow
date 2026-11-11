@@ -224,6 +224,7 @@ data track occupies part of the file the split says what it skipped.`,
 				}
 				fmt.Fprintf(cmd.ErrOrStderr(), "%s\n", name)
 				clippingNote(cmd.ErrOrStderr(), res)
+				lossNote(cmd.ErrOrStderr(), res) // this piece's own, not the source's
 			}
 			return nil
 		},

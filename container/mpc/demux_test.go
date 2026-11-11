@@ -222,6 +222,9 @@ func TestSV8Packets(t *testing.T) {
 	if !hasWarning(d.Warnings(), "only 2 blocks are present") {
 		t.Errorf("warnings %v", d.Warnings())
 	}
+	if got, want := container.TruncatedOf(d, 0), 20000-d.Tracks()[0].Samples; got != want {
+		t.Errorf("%d samples truncated, want the %d the header declares past the blocks", got, want)
+	}
 	if _, err := mpc.NewDemuxer(container.BytesSource(short), &mpc.DemuxerOptions{Strict: true}); err == nil {
 		t.Error("strict mode accepted a stream short of its declared blocks")
 	}
@@ -849,6 +852,11 @@ func TestSubMinimumFrameEndsTheStream(t *testing.T) {
 	d := open(t, raw, false)
 	if d.TotalForTest() != 1 || !hasWarning(d.Warnings(), "no frame can hold") {
 		t.Errorf("delivers %d packets with warnings %v", d.TotalForTest(), d.Warnings())
+	}
+	// Three frames declared, the last holding 480 samples; one delivered.
+	const declared = 2*musepack.FrameLength + 480
+	if got, want := container.TruncatedOf(d, 0), declared-d.Tracks()[0].Samples; got != want || want <= 0 {
+		t.Errorf("%d samples truncated, want the %d the header declares past the frames", got, want)
 	}
 	cfg, _ := musepack.ParseConfig(d.Tracks()[0].CodecConfig)
 	for _, p := range readAll(t, d) {

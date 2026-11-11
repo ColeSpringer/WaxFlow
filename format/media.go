@@ -29,7 +29,6 @@ type media struct {
 	info    *Info
 	demux   container.Demuxer
 	seeker  container.Seeker // nil when the demuxer cannot seek
-	warner  container.Warner // nil when the demuxer records no warnings
 	walker  container.Walker // nil when the demuxer defers no walk
 	track   container.Track
 	decoder codec.Decoder
@@ -50,7 +49,15 @@ type media struct {
 	hole bool
 	// held is the packet after a hole, its Lost what silence the hole still
 	// owes before it (container.Packet.Lost).
-	held   *container.Packet
+	held *container.Packet
+	// head is the raw position of the next frame the decode emits, and fills
+	// are the runs of that timeline emitted as a hole's silence which no read
+	// has delivered yet, in order. lost is what reads did deliver of them
+	// (Info.Lost): a run is counted where a chunk carries it out, so silence
+	// a pre-roll discards or the raw-end cap cuts is never in it.
+	head   int64
+	fills  []fillRun
+	lost   int64
 	eof    bool
 	closed bool
 
@@ -78,9 +85,6 @@ func newMedia(info *Info, demux container.Demuxer) (Media, error) {
 	m.stashFn = m.stash
 	if s, ok := demux.(container.Seeker); ok {
 		m.seeker = s
-	}
-	if w, ok := demux.(container.Warner); ok {
-		m.warner = w
 	}
 	if w, ok := demux.(container.Walker); ok {
 		m.walker = w
@@ -194,18 +198,17 @@ func (m *media) Walked() bool {
 	return m.walker == nil || m.walker.Walked()
 }
 
-// Info returns the same *Info every time, with Warnings and Notes refolded
-// from the demuxer on each call: a lazy walk finds damage where the read
-// reaches it, so the lists are current as of the last read or seek (see
-// Media). No change counter guards the refold. Info is asked a handful of
-// times per open and never per chunk, and a length check would have a
-// blind spot: flacn truncates and refills its list during its length walk
-// and can land on the same length with different content.
+// Info returns the same *Info every time, with its live fields refreshed on
+// each call: Warnings and Notes refolded from the demuxer, its counts of
+// damage and truncation, and the fill this Media's reads delivered. A lazy
+// walk finds damage where the read reaches it, so they are current as of the
+// last read or seek (see Media). No change counter guards the refold. Info
+// is asked a handful of times per open and never per chunk, and a length
+// check would have a blind spot: flacn truncates and refills its list during
+// its length walk and can land on the same length with different content.
 func (m *media) Info() *Info {
-	if m.warner != nil {
-		foldWarnings(m.info, m.warner.Warnings())
-	}
-	m.info.Damage = container.DamageOf(m.demux)
+	RefreshWarnings(m.info, m.demux)
+	m.info.Lost = m.lost
 	return m.info
 }
 
@@ -245,10 +248,10 @@ func (m *media) ReadChunk(dst *audio.Buffer) error {
 	// decoded and discarded exactly like seek pre-roll.
 	if m.skip > 0 && !m.eof {
 		dropped, err := m.discard(m.skip)
+		m.skip -= dropped // what a failed discard dropped is off the front trim too
 		if err != nil {
 			return err
 		}
-		m.skip -= dropped
 	}
 	dst.N = 0
 	m.copyOut(dst)
@@ -262,6 +265,7 @@ func (m *media) ReadChunk(dst *audio.Buffer) error {
 			m.copyOut(dst)
 		}
 		if err != nil && err != io.EOF {
+			m.unread(int64(dst.N))
 			return err
 		}
 	}
@@ -276,11 +280,58 @@ func (m *media) ReadChunk(dst *audio.Buffer) error {
 	if dst.N == 0 {
 		return io.EOF
 	}
+	m.tally(m.delay+m.pos, m.delay+m.pos+int64(dst.N))
 	dst.Pos = m.pos
 	dst.Discont = m.discont
 	m.discont = false
 	m.pos += int64(dst.N)
 	return nil
+}
+
+// unread keeps the fill count on the timeline a failed read leaves behind.
+// The n frames the read had put in its chunk are gone with it, and the next
+// chunk is stamped where this one would have been, so the raw positions after
+// them close up: head and every fill still pending move down by n, and a fill
+// that lay in the dropped frames goes with them. Without this a hole after
+// the failure would be counted n frames late, or not at all at the end.
+func (m *media) unread(n int64) {
+	lo := m.delay + m.pos
+	if m.head-int64(m.carryLen()) != lo+n {
+		// A landing that failed part way left the decode somewhere the
+		// stamps do not describe, so nothing pending can be placed.
+		m.head, m.fills = lo+int64(m.carryLen()), m.fills[:0]
+		return
+	}
+	closeUp := func(p int64) int64 { return min(p, max(p-n, lo)) }
+	kept := m.fills[:0]
+	for _, f := range m.fills {
+		if from, to := closeUp(f.from), closeUp(f.to); to > from {
+			kept = append(kept, fillRun{from, to})
+		}
+	}
+	m.head, m.fills = m.head-n, kept
+}
+
+// fillRun is a run of the raw timeline, [from, to), emitted as silence.
+type fillRun struct{ from, to int64 }
+
+// tally counts the silence in the raw run [from, to), which a read just
+// delivered, and forgets every fill the read has passed.
+func (m *media) tally(from, to int64) {
+	done := 0
+	for i := range m.fills {
+		f := &m.fills[i]
+		if f.from >= to {
+			break
+		}
+		m.lost += max(min(f.to, to)-max(f.from, from), 0)
+		if f.to > to {
+			f.from = to // the rest of it is still to come
+			break
+		}
+		done++
+	}
+	m.fills = m.fills[done:]
 }
 
 // SeekSample repositions to target. The demuxer lands on a sync point at
@@ -371,6 +422,10 @@ func (m *media) land(ctx context.Context, at int64) (int64, error) {
 		p.SetPosition(landed)
 	}
 	m.landed, m.hole = landed, false
+	// The fills pending go with the frames that held them. None of those is
+	// in a chunk half delivered: a read lands again only with no hole passed
+	// since its last landing (see hole), so there was no fill to hold.
+	m.head, m.fills = landed, m.fills[:0]
 	m.held = nil
 	m.carryOff = 0
 	if m.carry != nil {
@@ -525,6 +580,11 @@ func (m *media) silence(dst *audio.Buffer) error {
 	clear(z.F)
 	z.N = int(k)
 	m.held.Lost -= k
+	if n := len(m.fills); n > 0 && m.fills[n-1].to == m.head {
+		m.fills[n-1].to += k // one hole, a chunk at a time
+	} else {
+		m.fills = append(m.fills, fillRun{m.head, m.head + k})
+	}
 	return m.stash(z)
 }
 
@@ -558,11 +618,13 @@ func (m *media) decodeTrimmed(dst *audio.Buffer, pkt container.Packet) error {
 	n := pkt.Padding
 	if drop := int(min(int64(m.carryLen()-carryBefore), n)); drop > 0 {
 		m.carry.N -= drop
+		m.head -= int64(drop)
 		n -= int64(drop)
 	}
 	if dst != nil {
 		if drop := int(min(int64(dst.N-sinkBefore), n)); drop > 0 {
 			dst.N -= drop
+			m.head -= int64(drop)
 		}
 	}
 	return nil
@@ -579,6 +641,7 @@ func (m *media) stash(b *audio.Buffer) error {
 		return waxerr.New(waxerr.CodeInternal,
 			fmt.Sprintf("format: decoder emitted %v for a %v track", b.Fmt, m.track.Fmt))
 	}
+	m.head += int64(b.N)
 	off := 0
 	if m.sink != nil {
 		take := min(m.sink.Cap()-m.sink.N, b.N)

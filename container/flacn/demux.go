@@ -76,7 +76,10 @@ type Demuxer struct {
 	warnings     container.Warnings
 	// tailDamage is the first damage the open's measurement met.
 	tailDamage *container.Warning
-	residual   []int64 // FrameLen's scratch
+	// truncated is how far STREAMINFO's total runs past the frames
+	// (container.Truncated).
+	truncated int64
+	residual  []int64 // FrameLen's scratch
 
 	firstFrame int64 // byte offset of the first audio frame
 
@@ -244,6 +247,7 @@ func (d *Demuxer) parse() error {
 				if werr := d.warn(off, "STREAMINFO declares %d samples but the stream has no frames", d.si.Samples); werr != nil {
 					return werr
 				}
+				d.truncated = d.si.Samples
 			}
 			d.track.Samples = 0
 			d.empty = true
@@ -327,6 +331,7 @@ func (d *Demuxer) verifyLength() error {
 	}
 	d.track.CodecConfig, d.track.Samples = st.StreamInfo, st.Samples
 	d.track.SamplesExact = st.Measured && clean
+	d.truncated = st.Truncated
 	return nil
 }
 
@@ -521,6 +526,9 @@ func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
 
 // DamageCount implements container.Damaged.
 func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
+
+// TruncatedSamples implements container.Truncated.
+func (d *Demuxer) TruncatedSamples(int) int64 { return d.truncated }
 
 // consistent reports whether a frame header agrees with STREAMINFO; the
 // pipeline's track format is fixed, and consistency is also what makes

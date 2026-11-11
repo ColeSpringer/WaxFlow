@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -1074,15 +1075,31 @@ func TestPCMChunkIndexCrossesManyChunks(t *testing.T) {
 // says so as damage, and refuses under --strict. A truncated download is the
 // common case, and playing what arrived beats refusing the file.
 func TestPCMTruncatedMdatKeepsWhatItHolds(t *testing.T) {
-	const unitBytes, frames = 4, 64
-	full := buildMovie(soundEntry("sowt", 2, 16, movieTimescale), unitBytes, frames, 0)
+	// The second size is one a real file has: its table declares more samples
+	// than the cut file could hold at this unit size, which is the bound the
+	// sample-size box is read under, so the count has to come from the box.
+	for _, frames := range []int64{64, 100000} {
+		t.Run(fmt.Sprint(frames, " frames"), func(t *testing.T) { pcmTruncatedMdat(t, frames) })
+	}
+}
+
+func pcmTruncatedMdat(t *testing.T, frames int64) {
+	const unitBytes = 4
+	full := buildMovie(soundEntry("sowt", 2, 16, movieTimescale), unitBytes, int(frames), 0)
 	// Half the payload, and not on a frame boundary: the odd two bytes must
 	// not become a thirty-second frame.
-	cut := full[:len(full)-(frames/2*unitBytes)-2]
+	cut := full[:int64(len(full))-(frames/2*unitBytes)-2]
 	d := open(t, cut)
 	tr := d.Tracks()[0]
-	if want := int64(frames/2 - 1); tr.Samples != want {
+	if want := frames/2 - 1; tr.Samples != want {
 		t.Errorf("samples = %d, want the %d whole frames the file holds", tr.Samples, want)
+	}
+	// The frames the table still declares are counted, not only warned about.
+	if got, want := container.TruncatedOf(d, tr.ID), frames-tr.Samples; got != want {
+		t.Errorf("%d samples truncated, want the %d the table declares past the file", got, want)
+	}
+	if got := container.TruncatedOf(open(t, full), tr.ID); got != 0 {
+		t.Errorf("%d samples truncated from the whole file", got)
 	}
 	var said bool
 	for _, w := range d.Warnings() {

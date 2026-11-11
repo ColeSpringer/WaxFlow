@@ -1153,3 +1153,79 @@ func TestTranscodeReportsInputDamage(t *testing.T) {
 		t.Errorf("stderr = %q, want an input damage line naming the skipped bytes", errOut)
 	}
 }
+
+// writeFixture writes raw into dir under name and returns its path.
+func writeFixture(t *testing.T, dir, name string, raw []byte) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestTranscodeReportsLostAudio pins the summary's count: a FLAC that lost a
+// frame keeps its length, with silence where the frame was, so the write says
+// how much of what it wrote is that silence rather than leaving the number in
+// a warning's wording.
+func TestTranscodeReportsLostAudio(t *testing.T) {
+	dir := t.TempDir()
+	raw, frames := testutil.FLACFixture(t)
+	in := writeFixture(t, dir, "holed.flac", testutil.DamageFLACFrames(t, raw, frames, 1))
+	code, _, errOut := run(t, "transcode", in, filepath.Join(dir, "out.wav"))
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, errOut)
+	}
+	want := fmt.Sprintf("input damage: %d samples (0.10 s) are silence where damage took the audio\n", frames[1].Dur)
+	if !strings.Contains(errOut, want) {
+		t.Errorf("stderr = %q, want the line %q counting the silence the hole left", errOut, want)
+	}
+	// A whole file says nothing of the kind.
+	whole := writeFixture(t, dir, "whole.flac", raw)
+	if code, _, errOut := run(t, "transcode", whole, filepath.Join(dir, "whole.wav")); code != 0 || strings.Contains(errOut, "silence") {
+		t.Errorf("a whole file: exit = %d, stderr = %q", code, errOut)
+	}
+}
+
+// TestProbeReportsTruncation pins the count a probe prints, and states on the
+// wire, for a file cut short: how many samples its header declares past the
+// audio it holds, beside the length that is there.
+func TestProbeReportsTruncation(t *testing.T) {
+	dir := t.TempDir()
+	raw, frames := testutil.FLACFixture(t)
+	in := writeFixture(t, dir, "cut.flac", raw[:frames[2].End])
+	code, out, errOut := run(t, "probe", in)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, errOut)
+	}
+	if !strings.Contains(out, "\ntruncated: ") {
+		t.Errorf("stdout = %q, want a truncated line", out)
+	}
+	code, out, errOut = run(t, "probe", "--json", in)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, errOut)
+	}
+	var doc struct {
+		Tracks           []struct{ Samples int64 }
+		TruncatedSamples int64
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatal(err)
+	}
+	whole := writeFixture(t, dir, "whole.flac", raw)
+	_, wholeText, _ := run(t, "probe", whole)
+	_, wholeOut, _ := run(t, "probe", "--json", whole)
+	var wholeDoc struct {
+		Tracks []struct{ Samples int64 }
+	}
+	if err := json.Unmarshal([]byte(wholeOut), &wholeDoc); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(wholeOut, "truncatedSamples") || strings.Contains(wholeText, "truncated:") {
+		t.Errorf("a whole file's probe states a truncation: %s%s", wholeText, wholeOut)
+	}
+	if want := wholeDoc.Tracks[0].Samples - doc.Tracks[0].Samples; doc.TruncatedSamples != want || want <= 0 {
+		t.Errorf("truncatedSamples = %d, want %d: the whole file's %d samples less the %d this one holds",
+			doc.TruncatedSamples, want, wholeDoc.Tracks[0].Samples, doc.Tracks[0].Samples)
+	}
+}

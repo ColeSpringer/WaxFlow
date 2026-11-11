@@ -118,6 +118,11 @@ type ProbeInfo struct {
 	// list it capped, a band it does not synthesize).
 	Warnings []string `json:"warnings,omitempty"`
 	Notes    []string `json:"notes,omitempty"`
+	// TruncatedSamples is how many samples the default track's header
+	// declares past the end of what the file holds, at that track's rate:
+	// what a file cut short lost off its end. The track's Samples is the
+	// length that is there. Zero for a whole file.
+	TruncatedSamples int64 `json:"truncatedSamples,omitempty"`
 
 	// Metadata summary, present when the daemon maps metadata and the
 	// source carries it.
@@ -508,6 +513,12 @@ type JobOutput struct {
 	// document carries the analyzed length instead.
 	Samples int64 `json:"samples"`
 	Rate    int   `json:"rate"`
+	// LostSamples counts the samples that are silence standing in for
+	// audio damage took from the source, and TruncatedSamples the samples
+	// the source's header declares past the end of what it holds; both at
+	// Rate, zero for a source that lost nothing. Neither shows in Samples.
+	LostSamples      int64 `json:"lostSamples,omitempty"`
+	TruncatedSamples int64 `json:"truncatedSamples,omitempty"`
 }
 
 // SilenceSummary is the silence map's headline, carried inline on the
@@ -549,6 +560,13 @@ type JobAnalysis struct {
 	Rate            int     `json:"rate"`
 	Channels        int     `json:"channels"`
 	DurationSeconds float64 `json:"durationSeconds"`
+	// LostSamples counts the measured samples that are silence standing
+	// in for audio damage took, and TruncatedSamples the samples the
+	// source's header declares past the end of what it holds; both at
+	// Rate, zero for a source that lost nothing. Neither shows in Samples,
+	// so these are what say a measurement covered part of a track.
+	LostSamples      int64 `json:"lostSamples,omitempty"`
+	TruncatedSamples int64 `json:"truncatedSamples,omitempty"`
 	// AppliedGainDB is the exact gain a loudness-analyze transcode
 	// applied (the ReplayGain reference minus the measured loudness).
 	AppliedGainDB *float64 `json:"appliedGainDb,omitempty"`

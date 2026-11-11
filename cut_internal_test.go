@@ -1281,3 +1281,43 @@ func TestCutViewPlacesAHoleOnItsTimeline(t *testing.T) {
 		})
 	}
 }
+
+// truncatedDemuxer is a Demuxer that counts a truncation, for the forwarding
+// pin.
+type truncatedDemuxer struct {
+	container.Demuxer
+	n int64
+}
+
+func (d *truncatedDemuxer) TruncatedSamples(int) int64 { return d.n }
+
+// TestCutReachingTheEndForwardsTruncation pins that the cut view states its
+// source's container.Truncated when its last span runs to the end of the
+// source, however that end was spelled, and nothing when the span stops short
+// of it: a file cut short lost its audio past every such span. A Slice
+// answers the same way.
+func TestCutReachingTheEndForwardsTruncation(t *testing.T) {
+	const grid, samples = 960, 96000
+	// With priming the end falls off the packet grid, so a span bounded there
+	// snaps past it and is clamped; without, it lands on the grid exactly.
+	for _, preSkip := range []int{312, 0} {
+		track := opusTrack(preSkip, samples)
+		for _, c := range []struct {
+			name string
+			last Span
+			want int64
+		}{
+			{"to the end", Span{48000, ToEnd}, 4800},
+			{"bounded at the end", Span{48000, samples}, 4800},
+			{"bounded short of it", Span{48000, samples - 2*grid}, 0},
+		} {
+			view, err := Cut(&truncatedDemuxer{n: 4800}, track, TranscodeOptions{}, []Span{{0, 9600}, c.last}, grid)
+			if err != nil {
+				t.Fatalf("pre-skip %d, %s: %v", preSkip, c.name, err)
+			}
+			if got := container.TruncatedOf(view, 0); got != c.want {
+				t.Errorf("pre-skip %d, %s: %d samples truncated, want %d", preSkip, c.name, got, c.want)
+			}
+		}
+	}
+}

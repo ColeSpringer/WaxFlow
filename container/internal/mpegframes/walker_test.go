@@ -672,25 +672,34 @@ func TestDeclaredCountIsCheckedAgainstTheRun(t *testing.T) {
 		data []byte
 		warn string
 		note string
+		// short is how many frames the count declares past the run where
+		// that is damage: what Truncated counts, in samples.
+		short int64
 	}{
-		{"the run is whole", append(xingFrame(5, false, 0, 0), frames(5)...), "", ""},
-		{"the run comes up short", append(xingFrame(8, false, 0, 0), frames(5)...), short, ""},
+		{"the run is whole", append(xingFrame(5, false, 0, 0), frames(5)...), "", "", 0},
+		{"the run comes up short", append(xingFrame(8, false, 0, 0), frames(5)...), short, "", 3},
 		{
 			"one frame short on a clean end",
 			append(xingFrame(6, false, 0, 0), frames(5)...),
-			"", "the metadata frame declares 6 frames but the run holds 5",
+			"", "the metadata frame declares 6 frames but the run holds 5", 0,
 		},
 		{
 			"the run overruns the count",
 			append(xingFrame(5, false, 0, 0), frames(8)...),
-			"", "the run holds 3 frames past the 5 the metadata frame declares",
+			"", "the run holds 3 frames past the 5 the metadata frame declares", 0,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var o walkOpts
 			w, _, _ := begin(t, tc.data, &o)
+			if got := w.Truncated(); got != 0 {
+				t.Errorf("%d samples truncated before the run was walked", got)
+			}
 			if err := w.Complete(context.Background()); err != nil {
 				t.Fatalf("Complete: %v", err)
+			}
+			if got, want := w.Truncated(), tc.short*w.SamplesPerFrame(); got != want {
+				t.Errorf("%d samples truncated, want %d", got, want)
 			}
 			if got := joined(o.msgs); got != tc.warn {
 				t.Errorf("warnings = %q, want %q", got, tc.warn)
@@ -884,5 +893,55 @@ func TestMidRunDamageIsNotSnapshotted(t *testing.T) {
 	}
 	if blob := w.Snapshot(); blob != nil {
 		t.Errorf("a run with damage in it snapshotted %d bytes; a restore would forget the finding", len(blob))
+	}
+}
+
+// TestTruncatedIsWhatTheSettleTakesOffTheLength: the count is on the played
+// timeline, where the length is, so it is exactly what settling the declared
+// track against the run takes off it. Frames that were only the encoder's
+// padding took no audio with them, and frames short of a LAME tag's count
+// cost less than their raw length where the padding absorbs part of it.
+func TestTruncatedIsWhatTheSettleTakesOffTheLength(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		declared, held int
+		lame           bool
+		delay, padding uint16
+	}{
+		{"no trims", 10, 6, false, 0, 0},
+		{"padding absorbs part of it", 10, 8, true, 576, 2000},
+		{"padding absorbs all of it", 10, 8, true, 576, 4000},
+		{"deep into the audio", 10, 3, true, 576, 2000},
+		{"nothing but the priming left", 10, 1, true, 576, 2000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var o walkOpts
+			data := append(xingFrame(uint32(tc.declared), tc.lame, tc.delay, tc.padding), frames(tc.held)...)
+			w, tag, _ := begin(t, data, &o)
+			if err := w.Complete(context.Background()); err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			spf := w.SamplesPerFrame()
+			samples, delay, padding := tag.Gapless(spf)
+			declared := container.Track{Samples: samples, Delay: delay, Padding: padding}
+			settled := container.SettleLength(declared, w.Frames()*spf)
+			if got, want := w.Truncated(), declared.Samples-settled.Samples; got != want {
+				t.Fatalf("%d samples truncated, want the %d the settle takes off the declared %d (%d of %d frames held)",
+					got, want, declared.Samples, tc.held, tc.declared)
+			}
+		})
+	}
+}
+
+// TestRefusedCompareCountsNothing: a strict owner that refuses the shortfall
+// has not adopted a shorter length, so no count is left behind for it.
+func TestRefusedCompareCountsNothing(t *testing.T) {
+	o := walkOpts{fail: errors.New("strict")}
+	w, _, _ := begin(t, append(xingFrame(8, false, 0, 0), frames(5)...), &o)
+	if err := w.Complete(context.Background()); err == nil {
+		t.Fatal("a strict walk accepted a run short of its declared count")
+	}
+	if got := w.Truncated(); got != 0 {
+		t.Fatalf("%d samples truncated after a refusal", got)
 	}
 }

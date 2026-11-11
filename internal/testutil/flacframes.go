@@ -2,6 +2,8 @@ package testutil
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -247,4 +249,78 @@ func flacCRC16(crc uint16, b []byte) uint16 {
 		}
 	}
 	return crc
+}
+
+// FLACFrame is where one frame of a native FLAC stream sits and what it
+// holds: its bytes, [Off, End), and its samples, Dur of them from Pos.
+type FLACFrame struct {
+	Off, End int
+	Pos, Dur int64
+}
+
+// FLACFrames walks raw, a native FLAC stream of fixed block size as this
+// tree's encoder and the reference one write it, and returns its frames in
+// order. It is how a test finds a frame to damage or a frame boundary to cut
+// at without opening the demuxer it is testing.
+func FLACFrames(t testing.TB, raw []byte) []FLACFrame {
+	t.Helper()
+	if !bytes.HasPrefix(raw, []byte("fLaC")) {
+		t.Fatal("not a native FLAC stream")
+	}
+	off := 4
+	for last := false; !last; {
+		if off+4 > len(raw) {
+			t.Fatal("the metadata runs past the stream")
+		}
+		last = raw[off]&0x80 != 0
+		off += 4 + (int(raw[off+1])<<16 | int(raw[off+2])<<8 | int(raw[off+3]))
+	}
+	var frames []FLACFrame
+	var sample int64
+	for pos := off; pos < len(raw); {
+		hdr := flacHeaderSize(raw, pos)
+		if hdr == 0 || raw[pos+1] != 0xF8 {
+			t.Fatalf("no fixed-block-size frame header that checks at %d", pos)
+		}
+		end := flacFrameEnd(t, raw, pos, hdr)
+		dur := int64(flacBlockSize(t, raw[pos:pos+hdr]))
+		frames = append(frames, FLACFrame{Off: pos, End: end, Pos: sample, Dur: dur})
+		sample, pos = sample+dur, end
+	}
+	return frames
+}
+
+// DamageFLACFrames returns raw with 16 bytes inverted in the middle of each
+// frame named by its index in frames, so that frame's checksum fails and
+// every other frame is untouched: a hole a read steps over.
+func DamageFLACFrames(t testing.TB, raw []byte, frames []FLACFrame, which ...int) []byte {
+	t.Helper()
+	out := append([]byte(nil), raw...)
+	for _, k := range which {
+		f := frames[k]
+		if f.End-f.Off < 64 {
+			t.Fatalf("frame %d is %d bytes, too short to damage inside", k, f.End-f.Off)
+		}
+		mid := (f.Off + f.End) / 2
+		for i := mid - 8; i < mid+8; i++ {
+			out[i] ^= 0xFF
+		}
+	}
+	return out
+}
+
+// FLACFixture is the reference encoder's FLAC fixture, testdata/sine-s16.flac,
+// and its frames: a few whole blocks and a short last one, behind a padded
+// metadata block. The bytes are a copy the caller may edit.
+func FLACFixture(t testing.TB) ([]byte, []FLACFrame) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(VectorsDir(), "..", "sine-s16.flac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames := FLACFrames(t, raw)
+	if len(frames) < 4 {
+		t.Fatalf("the fixture holds %d frames; its callers need a few", len(frames))
+	}
+	return raw, frames
 }

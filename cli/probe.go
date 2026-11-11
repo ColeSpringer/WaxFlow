@@ -165,6 +165,11 @@ func printProbe(cmd *cobra.Command, info *format.Info, m *meta.Info) {
 			fmt.Fprintln(w, "samples:   unknown")
 		}
 	}
+	if info.Truncated > 0 {
+		// The default track's, and the same number --json states.
+		fmt.Fprintf(w, "truncated: %d samples (%.3fs) declared past the end of the audio\n",
+			info.Truncated, durationSeconds(info.Truncated, info.Default().Fmt.Rate))
+	}
 	// Tags resolve exactly as --json resolves them (server.ProbeJSON): the
 	// mapper wins where it read any, the container's own are the fallback.
 	// Reading only the mapper here is what let `probe frag.m4a` print no

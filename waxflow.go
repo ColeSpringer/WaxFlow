@@ -177,6 +177,64 @@ type TranscodeResult struct {
 	// timeline has no damage of its own and reports its members' under
 	// their index ("member 1: ..."), as its Info does.
 	InputWarnings []string
+	// LostSamples counts the output's samples that are silence standing in
+	// for audio damage took from the source (format.Info.Lost). A hole keeps
+	// the stream's length, so Samples cannot say how much of the output is
+	// the file's own. It is this run's own read, on the output's timeline as
+	// Samples is: a run that resamples scales the source's count to
+	// Format.Rate. A copy rung reports the silent frames it wrote. Zero for a
+	// source with no hole, and for one whose holes shorten the read instead,
+	// which is every format but FLAC, native or in Ogg.
+	LostSamples int64
+	// TruncatedSamples counts the samples the source's header declares past
+	// the end of what the file holds (format.Info.Truncated), as this run's
+	// read left it, scaled to Format.Rate as LostSamples is. None of them is
+	// in the output, which ends where the source's audio does: Samples is
+	// what was there and this is how much more the file claimed. Zero for a
+	// whole source, for a header that states no length to fall short of,
+	// and for a window that stops short of the source's end (Slice).
+	TruncatedSamples int64
+}
+
+// LossNote returns the one warning line LostSamples and TruncatedSamples
+// warrant, or "" for a source that lost nothing: how much of the output is
+// silence standing in for a hole, and how far it ends short of the length its
+// source declared. Both are counted in this result's own samples, at
+// Format.Rate, so the line speaks of the audio and never of a number of the
+// source's samples, which a run that resamples does not report. Every
+// surface that reports a result words it through here.
+func (r *TranscodeResult) LossNote() string {
+	if r == nil {
+		return ""
+	}
+	return lossNote(r.LostSamples, r.TruncatedSamples, r.Format.Rate)
+}
+
+// lossNote is LossNote's wording for a result at rate, which says how long
+// the counts are; a result with no single rate (a group's) states them bare.
+func lossNote(lost, truncated int64, rate int) string {
+	count := func(n int64) string {
+		s := fmt.Sprintf("%d samples", n)
+		if n == 1 {
+			s = "1 sample"
+		}
+		if rate > 0 {
+			s += fmt.Sprintf(" (%.2f s)", float64(n)/float64(rate))
+		}
+		return s
+	}
+	var parts []string
+	if lost > 0 {
+		verb := "are"
+		if lost == 1 {
+			verb = "is"
+		}
+		parts = append(parts, count(lost)+" "+verb+" silence where damage took the audio")
+	}
+	if truncated > 0 {
+		parts = append(parts, "the audio ends "+count(truncated)+" short of the length its source declares")
+	}
+	return strings.Join(parts, "; ")
 }
 
 // LevelNote returns the one warning line the level fields warrant, or "":
@@ -285,6 +343,9 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 	if srcSamples >= 0 {
 		srcSamples = max(0, srcSamples-landed)
 	}
+	// Where the run's own read begins: a caller's Media may have been read
+	// already, and neither the seek nor the walk above delivered anything.
+	lostBefore := med.Info().Lost
 	// A run meters its output; specFor leaves this off so the plan's
 	// throwaway chains and Analyze (which runs its own meter) do not.
 	spec.MeterTruePeak = true
@@ -410,9 +471,13 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 	}
 	clipped, truePeak := chain.Clipped(), chain.TruePeak()
 	e.log.Debug("transcode finished", "samples", trailer.Samples, "clipped", clipped, "truePeak", truePeak)
+	found := med.Info()
+	l, m := chain.Ratio()
 	return &TranscodeResult{Samples: trailer.Samples, Format: f, Container: containerName,
 		ClippedSamples: clipped, TruePeak: truePeak, Quantized: chain.Quantized(),
-		InputWarnings: slices.Clone(med.Info().Warnings)}, nil
+		InputWarnings:    slices.Clone(found.Warnings),
+		LostSamples:      rescale(found.Lost-lostBefore, l, m),
+		TruncatedSamples: rescale(found.Truncated, l, m)}, nil
 }
 
 // lengthWalker is the deferred walk both domains expose under the same two

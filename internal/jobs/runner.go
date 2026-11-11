@@ -591,6 +591,23 @@ func (r *Runner) warnInput(id, output string, found []string) {
 	}
 }
 
+// warnLoss attaches an engine result's loss note (LossNote) as a job warning,
+// named for the output when the job writes several: how much of the result
+// is silence standing in for a hole, and how much more the source declared
+// than it holds. The counts are on the job's Outputs and Analysis; this is
+// the line a person reads. It is not folded into warnInput's findings, which
+// are kept once per job: two pieces of a split can each hold a hole of the
+// same size, and each count is its own piece's.
+func (r *Runner) warnLoss(id, output, note string) {
+	if note == "" {
+		return
+	}
+	if output != "" {
+		note += " in " + output
+	}
+	r.warn(id, "input damage: "+note)
+}
+
 // warnClipping attaches the engine's level note as a job warning, named for
 // the output when the job writes several (a split's pieces would otherwise
 // be indistinguishable). Warning, not failure: the level is a property of
@@ -625,6 +642,9 @@ func analysisOf(res *waxflow.AnalyzeResult) *Analysis {
 		Samples:        res.Samples,
 		Rate:           res.Format.Rate,
 		Channels:       res.Format.Channels,
+
+		LostSamples:      res.LostSamples,
+		TruncatedSamples: res.TruncatedSamples,
 	}
 	if res.Format.Rate > 0 {
 		a.DurationSeconds = float64(res.Samples) / float64(res.Format.Rate)
@@ -658,6 +678,7 @@ func (r *Runner) runAnalyze(ctx context.Context, j *Job) error {
 		return err
 	}
 	r.warnInput(j.ID, "", res.InputWarnings)
+	r.warnLoss(j.ID, "", res.LossNote())
 	a := analysisOf(res)
 	var out *Output
 	if res.Silence != nil {
@@ -1030,6 +1051,9 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 	// transcode job writes one file, so the note needs no address.
 	r.warnClipping(j.ID, "", res)
 	r.warnInput(j.ID, "", res.InputWarnings)
+	// The output's own count, at its own rate. A loudness:analyze pass left
+	// the source's on the Analysis and said nothing, so the line is here once.
+	r.warnLoss(j.ID, "", res.LossNote())
 
 	var rg []container.Tag
 	if analyzeLoudness {
@@ -1113,6 +1137,9 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 			Bytes:     fi.Size(),
 			Samples:   res.Samples,
 			Rate:      plan.Format.Rate,
+
+			LostSamples:      res.LostSamples,
+			TruncatedSamples: res.TruncatedSamples,
 		}}
 		job.Analysis = analysis
 	})
@@ -1161,6 +1188,7 @@ func (r *Runner) writeMedia(ctx context.Context, j *Job, med format.Media, name 
 	}
 	r.warnClipping(j.ID, name, res)
 	r.warnInput(j.ID, name, res.InputWarnings)
+	r.warnLoss(j.ID, name, res.LossNote())
 	if err := f.Sync(); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: output sync", err)
 	}
@@ -1178,6 +1206,9 @@ func (r *Runner) writeMedia(ctx context.Context, j *Job, med format.Media, name 
 		Bytes:     fi.Size(),
 		Samples:   res.Samples,
 		Rate:      res.Format.Rate,
+
+		LostSamples:      res.LostSamples,
+		TruncatedSamples: res.TruncatedSamples,
 	}, nil
 }
 

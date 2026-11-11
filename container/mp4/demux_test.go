@@ -278,28 +278,6 @@ func TestGaplessEditListNoOverflow(t *testing.T) {
 	}
 }
 
-// TestMulDivSat checks the saturating rescale: exact for values that fit,
-// saturated at math.MaxInt64 when the product or quotient would overflow, and
-// zero for a non-positive operand.
-func TestMulDivSat(t *testing.T) {
-	cases := []struct {
-		a, b, c, want int64
-	}{
-		{10, 20, 4, 50},                                  // exact
-		{1000, int64(1e9), 600, 1666666666},              // chapter ns, no overflow
-		{math.MaxInt64, math.MaxInt64, 1, math.MaxInt64}, // product overflows -> saturate
-		{math.MaxInt64, 2, 1, math.MaxInt64},             // quotient overflows int64 -> saturate
-		{1 << 40, 1 << 40, 1 << 40, 1 << 40},             // 128-bit intermediate, exact
-		{-5, 10, 2, 0},                                   // non-positive operand
-		{5, 10, 0, 0},                                    // non-positive divisor
-	}
-	for _, tc := range cases {
-		if got := mulDivSat(tc.a, tc.b, tc.c); got != tc.want {
-			t.Errorf("mulDivSat(%d, %d, %d) = %d, want %d", tc.a, tc.b, tc.c, got, tc.want)
-		}
-	}
-}
-
 // TestBuildSyncDeduplicates checks that a stss repeating sample numbers yields
 // a sync set with no duplicates, so isSync and syncAtOrBefore search a minimal
 // list.

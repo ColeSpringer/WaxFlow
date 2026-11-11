@@ -125,6 +125,10 @@ func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
 // DamageCount implements container.Damaged.
 func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
 
+// TruncatedSamples implements container.Truncated: what the metadata frame's
+// count declares past the run, known once the walk has reached its end.
+func (d *Demuxer) TruncatedSamples(int) int64 { return d.walk.Truncated() }
+
 // recognizedTrailer reports whether the region from off to the end of
 // data is plain tag baggage: ID3v1, APEv2, an appended ID3v2, Lyrics3,
 // or NUL padding, possibly stacked. It is what makes a bare stream's end

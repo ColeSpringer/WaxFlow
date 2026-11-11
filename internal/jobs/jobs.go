@@ -290,6 +290,14 @@ type Output struct {
 	// document carries the analyzed length instead.
 	Samples int64 `json:"samples"`
 	Rate    int   `json:"rate"`
+	// LostSamples counts the samples that are silence standing in for audio
+	// damage took from the source, and TruncatedSamples the samples the
+	// source's header declares past the end of what it holds; both at Rate,
+	// and absent when zero. A hole keeps a stream's length and a file cut
+	// short has its length restated, so neither shows in Samples. See
+	// waxflow.TranscodeResult.
+	LostSamples      int64 `json:"lostSamples,omitempty"`
+	TruncatedSamples int64 `json:"truncatedSamples,omitempty"`
 }
 
 // SilenceSummary is the silence map's headline, small enough to live
@@ -376,6 +384,15 @@ type Analysis struct {
 	Rate            int     `json:"rate"`
 	Channels        int     `json:"channels"`
 	DurationSeconds float64 `json:"durationSeconds"`
+	// LostSamples counts the measured samples that are silence standing in
+	// for audio damage took, and TruncatedSamples the samples the source's
+	// header declares past the end of what it holds; both at Rate, and
+	// absent when zero. Neither shows in Samples: a hole keeps a stream's
+	// length, and a file cut short has its length restated. A measurement
+	// of part of a track describes that part, which is what these are for.
+	// See waxflow.AnalyzeResult.
+	LostSamples      int64 `json:"lostSamples,omitempty"`
+	TruncatedSamples int64 `json:"truncatedSamples,omitempty"`
 	// AppliedGainDB is the exact gain a loudness:analyze transcode
 	// applied (the RG2 reference minus the measured source loudness).
 	AppliedGainDB *float64 `json:"appliedGainDb,omitempty"`

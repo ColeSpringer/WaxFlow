@@ -74,6 +74,9 @@ type mapping interface {
 type reporter interface {
 	warn(off int64, format string, args ...any) error
 	note(off int64, format string, args ...any)
+	// truncatedBy records how many samples the declared length runs past
+	// the pages (container.Truncated).
+	truncatedBy(samples int64)
 }
 
 // detectHeaders is parseID's sentinel for "consume header packets until the

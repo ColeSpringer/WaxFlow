@@ -18,6 +18,7 @@ import (
 	"github.com/colespringer/waxflow/dsp/mix"
 	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/internal/satmath"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -99,12 +100,11 @@ func (m measuredMedia) Walked() bool { return format.MediaWalked(m.Media) }
 // that answered for itself would answer false for a timeline it wraps.
 func (m measuredMedia) MixedWidth() bool { return format.MediaMixedWidth(m.Media) }
 
-// Info returns the patched description, its Warnings and Notes refreshed from
-// the inner media on every call: those two lists are live there (see
-// format.Media), and the copy holds the measured total, not a verdict.
+// Info returns the patched description, its live fields refreshed from the
+// inner media on every call (see format.Media): the copy holds the measured
+// total, not a verdict.
 func (m measuredMedia) Info() *format.Info {
-	in := m.Media.Info()
-	m.info.Warnings, m.info.Notes, m.info.Damage = in.Warnings, in.Notes, in.Damage
+	m.info.AdoptLive(m.Media.Info())
 	return m.info
 }
 
@@ -468,6 +468,14 @@ type slice struct {
 	// a shortfall that comes with more is known to be reported.
 	damage int
 
+	// lost is the fill the window's reads delivered (format.Info.Lost) over
+	// the runs of them already ended, and base is med's own count where the
+	// run in flight entered the window. counting is false until a read is
+	// positioned in the window: one in the headroom is not the window's.
+	lost     int64
+	base     int64
+	counting bool
+
 	pos     int64 // delivered-timeline position of the next frame out
 	started bool  // med has been positioned at from
 	discont bool
@@ -476,11 +484,44 @@ type slice struct {
 
 // Info returns the span's description. Warnings and Notes are live on the
 // inner media (see format.Media) and are refreshed from it on every call;
-// Tracks and Chapters were rebased onto the window once and stay.
+// Tracks and Chapters were rebased onto the window once and stay. Lost is
+// the window's own: the fill its reads delivered, not the source's. Truncated
+// is the source's for a window that reaches its end, which is where a file
+// cut short lost its audio, and 0 for one that stops short of it.
 func (s *slice) Info() *format.Info {
 	in := s.med.Info()
-	s.info.Warnings, s.info.Notes, s.info.Damage = in.Warnings, in.Notes, in.Damage
+	s.info.AdoptLive(in)
+	s.info.Lost = s.lost
+	if s.counting {
+		s.info.Lost += in.Lost - s.base
+	}
+	if !s.reachesEnd(in) {
+		s.info.Truncated = 0 // a window that stops short of the end holds all it asked for
+	}
 	return s.info
+}
+
+// reachesEnd reports whether the window runs to the end of its source, whose
+// Info is in: an open one does, and so does one bounded at or past the length
+// the source reports, which is the same window spelled with a number. A cut
+// draws the same line (cutResult.toEnd).
+func (s *slice) reachesEnd(in *format.Info) bool {
+	if s.limit < 0 {
+		return true
+	}
+	total := in.Default().Samples
+	return total >= 0 && s.from+s.limit >= total
+}
+
+// enter starts counting med's fill as the window's, from where med stands.
+func (s *slice) enter() { s.base, s.counting = s.med.Info().Lost, true }
+
+// leave ends the run of reads in flight and keeps what it counted.
+func (s *slice) leave() {
+	if s.counting {
+		s.lost += s.med.Info().Lost - s.base
+		s.counting = false
+	}
 }
 
 // ConfirmLength implements format.LengthConfirmer: run whatever the inner
@@ -596,6 +637,7 @@ func (s *slice) ensureStart(ctx context.Context) error {
 	}
 	if s.from == 0 {
 		s.started = true
+		s.enter()
 		return nil
 	}
 	landed, err := s.med.SeekSample(ctx, s.from)
@@ -621,6 +663,7 @@ func (s *slice) ensureStart(ctx context.Context) error {
 	// than report a negative count.
 	s.pos = max(landed-s.from, 0)
 	s.started = true
+	s.enter()
 	return nil
 }
 
@@ -629,8 +672,12 @@ func (s *slice) ensureStart(ctx context.Context) error {
 // The front of the window is handled by the seek in ensureStart rather than
 // by shifting a buffer, which is what lets the inner Media fill dst
 // directly: an audio.Buffer is planar with a stride and has no sub-buffer
-// view, so a shifted fill would need a copy. The back is a clamp on dst.N,
-// the same shape the gapless padding trim already uses one layer down.
+// view, so a shifted fill would need a copy. The read that reaches an edge
+// of the window, its end or its sample 0 from the headroom, is the one that
+// pays that copy (see read): the inner read stops at the edge, so the inner
+// media never delivers past the end, and what it counts as Lost can be told
+// apart on either side of sample 0. A chunk that crosses sample 0 is still
+// one full chunk, read in two parts.
 func (s *slice) ReadChunk(dst *audio.Buffer) error {
 	switch {
 	case s.closed:
@@ -648,7 +695,14 @@ func (s *slice) ReadChunk(dst *audio.Buffer) error {
 		return io.EOF
 	}
 	dst.N = 0
-	err := s.med.ReadChunk(dst)
+	room := int64(dst.Cap())
+	switch {
+	case s.pos < 0:
+		room = min(room, -s.pos)
+	case s.limit >= 0:
+		room = min(room, s.limit-s.pos)
+	}
+	err := s.read(dst, int(room))
 	if err == io.EOF {
 		return s.endOfSource()
 	}
@@ -659,15 +713,47 @@ func (s *slice) ReadChunk(dst *audio.Buffer) error {
 		return waxerr.New(waxerr.CodeInternal,
 			"waxflow: a span's source returned no frames and no error; io.EOF is the only empty answer")
 	}
-	if s.limit >= 0 {
-		if allowed := s.limit - s.pos; int64(dst.N) >= allowed {
-			dst.N = int(max(allowed, 0))
+	if s.pos < 0 && s.pos+int64(dst.N) == 0 {
+		// The headroom ends here and the window's own count begins. The
+		// chunk goes on into the window, as full as one that never stopped.
+		s.enter()
+		rest := int64(dst.Cap() - dst.N)
+		if s.limit >= 0 {
+			rest = min(rest, s.limit)
+		}
+		if rest > 0 {
+			// The source ending here is the next read's to find: the
+			// headroom frames are delivered. Any other failure fails this
+			// read, as it would have failed the one read this chunk used to
+			// be, and the span stands where the inner media does, at its
+			// sample 0.
+			if err := s.read(dst, int(rest)); err != nil && err != io.EOF {
+				s.pos = 0
+				return err
+			}
 		}
 	}
 	dst.Pos = s.pos
 	dst.Discont = s.discont
 	s.discont = false
 	s.pos += int64(dst.N)
+	return nil
+}
+
+// read appends at most room frames of med to dst: straight in when dst is
+// empty and holds no more than that, and through a buffer of exactly that
+// capacity otherwise, since a Media fills what it is handed.
+func (s *slice) read(dst *audio.Buffer, room int) error {
+	if dst.N == 0 && room >= dst.Cap() {
+		return s.med.ReadChunk(dst)
+	}
+	b := audio.Get(s.fmt, room)
+	defer audio.Put(b)
+	if err := s.med.ReadChunk(b); err != nil {
+		return err
+	}
+	audio.CopyFrames(dst, dst.N, b, 0, b.N)
+	dst.N += b.N
 	return nil
 }
 
@@ -736,8 +822,16 @@ func (s *slice) SeekSample(ctx context.Context, target int64) (int64, error) {
 	if s.limit >= 0 {
 		target = min(target, s.limit)
 	}
+	// The run of reads before the seek ends here, and the next begins at
+	// the landing: a seek delivers nothing, so whatever the inner media
+	// counted while it positioned itself is no part of either.
+	counting := s.counting
+	s.leave()
 	landed, err := s.med.SeekSample(ctx, s.from+target)
 	if err != nil {
+		if counting {
+			s.enter() // nothing moved, so the run goes on
+		}
 		return 0, err
 	}
 	s.started = true
@@ -746,6 +840,9 @@ func (s *slice) SeekSample(ctx context.Context, target int64) (int64, error) {
 	s.pos = landed - s.from
 	if s.limit >= 0 {
 		s.pos = min(s.pos, s.limit)
+	}
+	if s.pos >= 0 {
+		s.enter()
 	}
 	s.discont = true
 	return s.pos, nil
@@ -1473,6 +1570,8 @@ func Concat(members []ConcatSource, opts ConcatOptions) (format.Media, error) {
 		starts:  starts,
 		lens:    lens,
 		info:    &format.Info{Container: concatContainer, Tracks: []container.Track{concatSynthetic(env, total)}},
+
+		truncated: make([]int64, len(members)),
 	}, nil
 }
 
@@ -1509,6 +1608,15 @@ type concat struct {
 	// damaged is the finished members' Damage, summed: a count, so a member
 	// closed and reopened by a seek adds its own again.
 	damaged int
+	// lost is the finished members' Lost, summed the same way, each on the
+	// envelope's timeline (see memberLost). lostBase is the open member's
+	// own count as it was opened.
+	lost, lostBase int64
+	// truncated is each member's Truncated as its read last left it, on the
+	// envelope's timeline. It is a fact about the member's file rather than
+	// a count of deliveries, so it is kept per member: one closed and
+	// reopened by a seek states it again, not twice.
+	truncated []int64
 	// found and noted are the finished members' Warnings and Notes, each
 	// line prefixed with its member's index, folded in as a member closes;
 	// Info adds the open member's live lists behind them.
@@ -1540,17 +1648,63 @@ type concat struct {
 // open member's live (see format.Media). A member not yet opened contributes
 // nothing, so the whole verdict exists once the timeline has been read to
 // its end, which is what a merge does. Tracks stay the synthetic envelope.
+//
+// Lost sums the members' own counts as Damage does, so it is exact for a
+// timeline read through, and a crossfade zone holds two members, each counted
+// for its own fill. A seek counts nothing, as on any Media, which leaves two
+// things out that a read after it does deliver: the little a member's chain
+// had read ahead of the landing (about a resampling filter's length), and,
+// for a landing inside a crossfade zone, the outgoing member's fill in the
+// rest of that zone.
 func (c *concat) Info() *format.Info {
 	c.info.Warnings = append([]string(nil), c.found...)
 	c.info.Notes = append([]string(nil), c.noted...)
 	c.info.Damage = c.damaged
+	c.info.Lost = c.lost
 	if c.med != nil {
 		in := c.med.Info()
 		c.info.Warnings = appendMemberLines(c.info.Warnings, c.cur, in.Warnings)
 		c.info.Notes = appendMemberLines(c.info.Notes, c.cur, in.Notes)
 		c.info.Damage += in.Damage
+		c.info.Lost += c.memberLost(in)
+		c.memberTruncated(in)
+	}
+	c.info.Truncated = 0
+	for _, n := range c.truncated {
+		c.info.Truncated = satmath.Add(c.info.Truncated, n)
 	}
 	return c.info
+}
+
+// memberLost is the open member's Lost since it was opened, in, on the
+// envelope's timeline: a member the timeline resamples lost its samples at
+// its own rate.
+func (c *concat) memberLost(in *format.Info) int64 {
+	n := in.Lost - c.lostBase
+	if c.chain != nil {
+		l, m := c.chain.Ratio()
+		n = rescale(n, l, m)
+	}
+	return n
+}
+
+// memberTruncated records the open member's Truncated, in, on the envelope's
+// timeline. A member whose walk is deferred states it only once its read has
+// reached the end, so a later look never lowers it.
+func (c *concat) memberTruncated(in *format.Info) {
+	n := in.Truncated
+	if c.chain != nil {
+		l, m := c.chain.Ratio()
+		n = rescale(n, l, m)
+	}
+	c.truncated[c.cur] = max(c.truncated[c.cur], n)
+}
+
+// rescale maps a count of samples across a chain's rate change of l/m, output
+// over input, to the nearest sample (dsp.Chain.Ratio). A count too large to
+// scale saturates, since a header can declare any length.
+func rescale(n int64, l, m int) int64 {
+	return satmath.MulDivRound(n, int64(l), int64(m))
 }
 
 // appendMemberLines appends a member's lines to dst under its index, once
@@ -1724,11 +1878,25 @@ func (c *concat) SeekSample(ctx context.Context, target int64) (int64, error) {
 	case target < 0:
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: negative seek target")
 	}
+	counted := c.lost
+	if c.med != nil {
+		counted += c.memberLost(c.med.Info())
+	}
 	pos, err := c.seekTo(ctx, target)
 	if err != nil {
 		c.closeMember()
 		c.releaseBlend()
 		c.unpositioned = true
+	}
+	// A seek delivers nothing, so it counts nothing: what the members it
+	// positioned counted on the way (a pre-roll it discarded, a little a
+	// chain read ahead of the landing) is set aside, and Lost stands where
+	// it stood. See Info for what that leaves out.
+	c.lost = counted
+	if c.med != nil {
+		c.lostBase = c.med.Info().Lost
+	}
+	if err != nil {
 		return 0, err
 	}
 	c.unpositioned = false
@@ -1934,6 +2102,7 @@ func (c *concat) open(i int) error {
 			"waxflow: timeline member %d opened as %v, its headers declared %v", i, got, c.tracks[i].Fmt))
 	}
 	c.med, c.cur, c.local = med, i, 0
+	c.lostBase = med.Info().Lost
 	if err := c.buildChain(); err != nil {
 		c.closeMember()
 		return err
@@ -2312,16 +2481,23 @@ func (c *concat) advance() error {
 
 // closeMember releases the open member's chain and media.
 func (c *concat) closeMember() error {
-	if c.chain != nil {
-		c.chain.Release()
-		c.chain = nil
-	}
 	if c.med == nil {
+		if c.chain != nil {
+			c.chain.Release()
+			c.chain = nil
+		}
 		return nil
 	}
 	med := c.med
 	c.med = nil
 	in := med.Info()
+	// While the chain still states its ratio.
+	c.lost += c.memberLost(in)
+	c.memberTruncated(in)
+	if c.chain != nil {
+		c.chain.Release()
+		c.chain = nil
+	}
 	c.found = appendMemberLines(c.found, c.cur, in.Warnings)
 	c.noted = appendMemberLines(c.noted, c.cur, in.Notes)
 	c.damaged += in.Damage

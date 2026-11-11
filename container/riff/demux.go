@@ -49,6 +49,9 @@ type Demuxer struct {
 	track    container.Track
 	payload  payload
 	warnings container.Warnings
+	// truncated is how far the headers' claims run past the data the file
+	// holds (container.Truncated).
+	truncated int64
 }
 
 // payload is the walk over the data chunk. Two shapes reach it, and the
@@ -173,6 +176,7 @@ func (d *Demuxer) parse() error {
 		fmtSeen         bool
 		dataOff         int64 = -1
 		dataBytes       int64 = -1
+		declaredBytes   int64 // the data chunk's own size, where it ran past the file
 		factSamples     int64 = -1
 		factSeen        bool
 		wf              waveFormat
@@ -284,6 +288,7 @@ func (d *Demuxer) parse() error {
 					if err := d.warn(off, "ds64 data size %d exceeds file, clamped", ds64DataSize); err != nil {
 						return err
 					}
+					declaredBytes = int64(min(ds64DataSize, math.MaxInt64))
 					dataBytes = size - dataOff
 				} else {
 					dataBytes = int64(ds64DataSize)
@@ -299,6 +304,7 @@ func (d *Demuxer) parse() error {
 				if err := d.warn(off, "data chunk size %d exceeds file, clamped", chunkSize); err != nil {
 					return err
 				}
+				declaredBytes = chunkSize
 				dataBytes = size - dataOff
 			default:
 				dataBytes = chunkSize
@@ -344,6 +350,19 @@ func (d *Demuxer) parse() error {
 	units := dataBytes / unitBytes
 	capacity := units * int64(wf.unitFrames)
 	samples := capacity
+	// What the headers declare past the data the file holds
+	// (container.Truncated). A fact chunk is the sample count where the
+	// format has one and it is believed, so it decides in those arms below;
+	// everywhere else the count is the data chunk's own size, in the whole
+	// units the file no longer holds.
+	var byBytes int64
+	if missing := declaredBytes/unitBytes - units; missing > 0 {
+		byBytes = missing * int64(wf.unitFrames)
+		if byBytes/int64(wf.unitFrames) != missing {
+			byBytes = math.MaxInt64 // a ds64 size no file holds
+		}
+	}
+	d.truncated = byBytes
 	// Exact in every arm: the count is what a read delivers, a byte-linear
 	// payload by its frames and a block codec by unitFrames per unit. A fact
 	// inside the last block is a trim the flag makes format/media apply;
@@ -371,13 +390,15 @@ func (d *Demuxer) parse() error {
 			if err := d.warn(0, "fact declares %d samples, the data holds %d; clamped", factSamples, capacity); err != nil {
 				return err
 			}
+			d.truncated = factSamples - capacity
 		case capacity-factSamples >= int64(wf.unitFrames):
+			// Not believed, so the data chunk's size is still the count.
 			if err := d.warn(0, "fact declares %d samples, %d short of the %d the data holds; ignored",
 				factSamples, capacity-factSamples, capacity); err != nil {
 				return err
 			}
 		default:
-			samples = factSamples
+			samples, d.truncated = factSamples, 0 // the length, and all of it is here
 		}
 	case factSamples != capacity:
 		// A byte-linear payload states its own length exactly, and for a
@@ -386,6 +407,9 @@ func (d *Demuxer) parse() error {
 		if err := d.warn(0, "fact declares %d samples, the data holds %d", factSamples, capacity); err != nil {
 			return err
 		}
+		d.truncated = max(factSamples-capacity, 0)
+	default:
+		d.truncated = 0 // the fact chunk's count is the data's
 	}
 	if haveDS64 && ds64SampleCount != 0 && ds64SampleCount != uint64(capacity) {
 		if err := d.warn(0, "ds64 sample count %d disagrees with data size (%d frames)", ds64SampleCount, capacity); err != nil {
@@ -775,6 +799,15 @@ func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
 
 // DamageCount implements container.Damaged.
 func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
+
+// TruncatedSamples implements container.Truncated. An MP3 payload's count is
+// its frame walk's, known once that walk has reached the end.
+func (d *Demuxer) TruncatedSamples(int) int64 {
+	if r, ok := d.payload.(*mpegframes.Reader); ok {
+		return r.Truncated()
+	}
+	return d.truncated
+}
 
 // ReadPacket yields the next run of payload. Packet data is reused across
 // calls.

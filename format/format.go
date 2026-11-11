@@ -72,12 +72,41 @@ type Info struct {
 	// Warnings list's cap and de-duplication, so a reader can tell whether a
 	// read met more since it last looked.
 	Damage int
+	// Lost counts the samples reads have delivered as silence where damage
+	// took the audio (container.Packet.Lost): a hole keeps the stream's
+	// length, so the length cannot say how much of it is the file's own.
+	// It counts deliveries, not positions. Silence a seek decodes and
+	// discards on the way to its target is not in it, and a hole read twice
+	// is. The difference across a run of reads is the fill in what they
+	// delivered; a probe, which reads nothing, reports 0. No Media's count
+	// moves in a seek. A Media that joins several sources sums theirs, which
+	// is exact for a read from its start to its end.
+	Lost int64
+	// Truncated counts the samples the default track's header declares past
+	// the end of what the file holds (container.Truncated): what a file cut
+	// short lost off its end. It is on the played timeline, as a length is,
+	// so the length that is there and this make the length the file
+	// claimed, and frames that were only an encoder's end padding count
+	// nothing. Nothing stands in for these in a read, which ends where the
+	// audio does. A format that settles its length at open knows it from a
+	// probe, and Tracks states the settled length beside it; one whose walk
+	// is deferred (Walker) knows it once the walk, or a read to the end,
+	// has held the declared count against the payload.
+	Truncated int64
 	// Notes describe what this build did with a file that is not damaged: a
 	// stream it ignored, a list it capped, a timeline it rescaled, a band it
 	// does not synthesize. Strict mode never refuses over one of these, which
 	// is the whole reason they are not Warnings; a caller showing "input
 	// damage" wants Warnings alone.
 	Notes []string
+}
+
+// AdoptLive sets i's live fields to src's: the lists and counts a read keeps
+// current (see Media). A Media that wraps another reports the inner one's
+// verdict through this, so a field that joins the set reaches every wrapper.
+func (i *Info) AdoptLive(src *Info) {
+	i.Warnings, i.Notes, i.Damage = src.Warnings, src.Notes, src.Damage
+	i.Lost, i.Truncated = src.Lost, src.Truncated
 }
 
 // Default returns the container's designated default track, or the first
@@ -105,13 +134,14 @@ func (i *Info) Default() container.Track {
 // length is known: a container that states its trims per packet is trimmed as
 // the packets arrive, and one that states a total is capped at it.
 //
-// Info's Warnings and Notes are live, and nothing else in it is: the two
-// lists are current as of the last ReadChunk or SeekSample, on the goroutine
-// that reads, because a demuxer whose walk is lazy finds damage where the
-// read reaches it. A caller that wants the whole verdict reads or seeks to
-// the end first and asks again; Tracks, Chapters and Tags are what opening
-// found, until Walk settles the default track's length to what the payload
-// actually holds. Probe's Info is a detached snapshot, complete under Strict.
+// Info's Warnings, Notes, Damage, Lost and Truncated are live, and nothing
+// else in it is: they are current as of the last ReadChunk or SeekSample, on
+// the goroutine that reads, because a demuxer whose walk is lazy finds damage
+// where the read reaches it and a hole is only delivered by the read that
+// crosses it. A caller that wants the whole verdict reads or seeks to the end
+// first and asks again; Tracks, Chapters and Tags are what opening found,
+// until Walk settles the default track's length to what the payload actually
+// holds. Probe's Info is a detached snapshot, complete under Strict.
 type Media interface {
 	Info() *Info
 	ReadChunk(dst *audio.Buffer) error
@@ -356,22 +386,25 @@ func buildInfo(name string, demux container.Demuxer) *Info {
 	if t, ok := demux.(container.Tagger); ok {
 		info.Tags = t.Tags()
 	}
-	if w, ok := demux.(container.Warner); ok {
-		foldWarnings(info, w.Warnings())
-	}
+	RefreshWarnings(info, demux)
 	return info
 }
 
-// RefreshWarnings refolds info's Warnings and Notes from demux, for a caller
-// that drives a demuxer it opened through OpenDemuxer: the two lists are
-// live on a Media (see Media), and this is the same refresh for the packet
-// path, where damage past the head is found by the read that reaches it. A
-// demuxer that records no warnings leaves info as it was.
+// RefreshWarnings sets what info reports of demux's findings to what demux
+// holds now: Warnings and Notes refolded, Damage, and the default track's
+// Truncated. It is for a caller that drives a demuxer it opened through
+// OpenDemuxer: these are live on a Media (see Media), and this is the same
+// refresh for the packet path, where damage past the head is found by the
+// read that reaches it. A demuxer that records no warnings leaves the two
+// lists as they were, and an info with no tracks keeps its Truncated.
 func RefreshWarnings(info *Info, demux container.Demuxer) {
 	if w, ok := demux.(container.Warner); ok {
 		foldWarnings(info, w.Warnings())
 	}
 	info.Damage = container.DamageOf(demux)
+	if len(info.Tracks) > 0 {
+		info.Truncated = container.TruncatedOf(demux, info.Default().ID)
+	}
 }
 
 // foldWarnings sets info's Warnings and Notes from a demuxer's list, into

@@ -110,6 +110,9 @@ func (r *Reader) SettleLength(t *container.Track) error {
 	return nil
 }
 
+// Truncated is the walk's count for the owner's container.Truncated.
+func (r *Reader) Truncated() int64 { return r.w.Truncated() }
+
 // Snapshot implements the serializing half of container.Indexer.
 func (r *Reader) Snapshot() []byte { return r.w.Snapshot() }
 

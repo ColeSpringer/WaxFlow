@@ -1,10 +1,12 @@
 package waxflow
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -940,5 +942,314 @@ func TestSliceIsNotAWalker(t *testing.T) {
 	}
 	if _, ok := med.(format.LengthConfirmer); !ok {
 		t.Error("a slice does not implement format.LengthConfirmer")
+	}
+}
+
+// TestRescaleIsOutputOverInput: the chain's ratio is l over m, output over
+// input, and a count crosses it that way round (satmath.MulDivRound has the
+// rounding and the saturation).
+func TestRescaleIsOutputOverInput(t *testing.T) {
+	if got := rescale(4096, 160, 147); got != 4458 { // 44.1 kHz to 48 kHz
+		t.Errorf("rescale(4096, 160, 147) = %d, want 4458", got)
+	}
+	if got := rescale(4096, 1, 1); got != 4096 {
+		t.Errorf("rescale(4096, 1, 1) = %d, want 4096", got)
+	}
+}
+
+// failOnceMedia fails one read and reads on after it, as a packet that does
+// not decode fails a read without ending the stream.
+type failOnceMedia struct {
+	*fixedMedia
+	reads, failAt int
+}
+
+func (m *failOnceMedia) ReadChunk(dst *audio.Buffer) error {
+	if m.reads++; m.reads == m.failAt {
+		return waxerr.New(waxerr.CodeMalformedInput, "a packet that does not decode")
+	}
+	return m.fixedMedia.ReadChunk(dst)
+}
+
+// TestSliceReportsAFailureOnTheReadThatCrossesItsStart: a chunk that crosses
+// the window's sample 0 from the headroom is read in two parts, and a failure
+// in the second is the read's own failure. Swallowing it would lose an error
+// the inner media reports once, and leave every sample after it stamped as if
+// nothing had been dropped. The span stands at its sample 0 afterwards, where
+// the inner media does, and still ends at its own end.
+func TestSliceReportsAFailureOnTheReadThatCrossesItsStart(t *testing.T) {
+	const from, to = 10_000, 60_000
+	inner := &failOnceMedia{fixedMedia: newFixedMedia(stereo48, 100_000), failAt: 2}
+	sl, err := newSlice(context.Background(), inner, from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sl.SeekSample(context.Background(), -1000); err != nil {
+		t.Fatal(err)
+	}
+	buf := audio.Get(stereo48, audio.StandardChunk)
+	defer audio.Put(buf)
+	if err := sl.ReadChunk(buf); waxerr.CodeOf(err) != waxerr.CodeMalformedInput {
+		t.Fatalf("the read across sample 0 returned %v with %d frames, want the inner read's failure", err, buf.N)
+	}
+	var n int64
+	for first := true; ; first = false {
+		err := sl.ReadChunk(buf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first && buf.Pos != 0 {
+			t.Fatalf("the read after the failure is stamped %d, want the window's sample 0", buf.Pos)
+		}
+		n += int64(buf.N)
+	}
+	if n != to-from {
+		t.Fatalf("the span delivered %d samples after the failure, want its own %d", n, to-from)
+	}
+	if inner.pos != to {
+		t.Fatalf("the inner media stands at %d, want the window's end %d: the span read past itself", inner.pos, to)
+	}
+}
+
+// TestSliceCrossesItsStartInOneChunk: the two parts are one chunk to the
+// caller, as full as any other, and a source that ends exactly at the
+// window's sample 0 delivers its headroom and then ends.
+func TestSliceCrossesItsStartInOneChunk(t *testing.T) {
+	sl, err := newSlice(context.Background(), newFixedMedia(stereo48, 100_000), 10_000, 60_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sl.SeekSample(context.Background(), -1000); err != nil {
+		t.Fatal(err)
+	}
+	buf := audio.Get(stereo48, audio.StandardChunk)
+	defer audio.Put(buf)
+	if err := sl.ReadChunk(buf); err != nil || buf.N != buf.Cap() || buf.Pos != -1000 {
+		t.Fatalf("the chunk across sample 0: %d of %d frames at %d (%v), want a full one at -1000", buf.N, buf.Cap(), buf.Pos, err)
+	}
+
+	// The window is empty: its source ends where it begins.
+	end, err := newSlice(context.Background(), newFixedMedia(stereo48, 10_000), 10_000, ToEnd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := end.SeekSample(context.Background(), -1000); err != nil {
+		t.Fatal(err)
+	}
+	if err := end.ReadChunk(buf); err != nil || buf.N != 1000 {
+		t.Fatalf("the headroom of an empty window read %d frames (%v), want its 1000", buf.N, err)
+	}
+	if err := end.ReadChunk(buf); err != io.EOF {
+		t.Fatalf("the read after it returned %v, want the end", err)
+	}
+}
+
+// TestConcatTruncationSaturates: a header can declare any length, so each
+// member's count may already be the largest there is, and their sum stays it
+// rather than wrapping into a negative one.
+func TestConcatTruncationSaturates(t *testing.T) {
+	member := func() ConcatSource {
+		m := fixedMember(stereo48, 1000)
+		m.Open = func() (format.Media, error) {
+			med := newFixedMedia(stereo48, 1000)
+			med.info.Truncated = math.MaxInt64
+			return med, nil
+		}
+		return m
+	}
+	med, err := Concat([]ConcatSource{member(), member()}, ConcatOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	buf := audio.Get(stereo48, audio.StandardChunk)
+	defer audio.Put(buf)
+	for {
+		if err := med.ReadChunk(buf); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := med.Info().Truncated; got != math.MaxInt64 {
+		t.Fatalf("Truncated is %d over two members that each declare the most there is", got)
+	}
+}
+
+// TestAnalyzeGroupTruncationSaturates: the group's total is its members',
+// each of which may be the most a header can declare.
+func TestAnalyzeGroupTruncationSaturates(t *testing.T) {
+	member := func() GroupMember {
+		med := newFixedMedia(stereo48, 4800)
+		med.info.Truncated = math.MaxInt64
+		return GroupMember{Media: med}
+	}
+	res, err := New().AnalyzeGroup(context.Background(), []GroupMember{member(), member()}, AnalyzeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.Group.TruncatedSamples; got != math.MaxInt64 {
+		t.Fatalf("the group's TruncatedSamples is %d over two members that each declare the most there is", got)
+	}
+}
+
+// fillInfo sets every field reachable from v to a non-zero value, so nothing
+// a copy leaves out can hide behind a zero.
+func fillInfo(v reflect.Value) {
+	switch v.Kind() {
+	case reflect.String:
+		v.SetString("x")
+	case reflect.Bool:
+		v.SetBool(true)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		v.SetInt(1)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		v.SetUint(1)
+	case reflect.Float32, reflect.Float64:
+		v.SetFloat(1)
+	case reflect.Slice:
+		s := reflect.MakeSlice(v.Type(), 1, 1)
+		fillInfo(s.Index(0))
+		v.Set(s)
+	case reflect.Map:
+		m := reflect.MakeMap(v.Type())
+		k, e := reflect.New(v.Type().Key()).Elem(), reflect.New(v.Type().Elem()).Elem()
+		fillInfo(k)
+		fillInfo(e)
+		m.SetMapIndex(k, e)
+		v.Set(m)
+	case reflect.Pointer:
+		v.Set(reflect.New(v.Type().Elem()))
+		fillInfo(v.Elem())
+	case reflect.Struct:
+		for _, f := range v.Fields() {
+			if f.CanSet() {
+				fillInfo(f)
+			}
+		}
+	}
+}
+
+// liveMedia is a fixedMedia whose Info carries every live field set, with a
+// Lost that grows by one with each chunk read, since a wrapper that counts
+// its own deliveries reports the growth and not the number.
+type liveMedia struct{ *fixedMedia }
+
+func (m *liveMedia) ReadChunk(dst *audio.Buffer) error {
+	err := m.fixedMedia.ReadChunk(dst)
+	if err == nil {
+		m.info.Lost++
+	}
+	return err
+}
+
+// TestEveryWrapperCarriesEveryLiveField: format.Info.AdoptLive defines which
+// of a Media's fields a read keeps current. A span and a measured Media adopt
+// them and then restate one or two, and a timeline builds each from its
+// members by hand, so a field that joins the set could read as zero on any of
+// them with nothing failing. The set is read off AdoptLive itself, so this
+// holds for a field that does not exist yet.
+func TestEveryWrapperCarriesEveryLiveField(t *testing.T) {
+	var full, adopted format.Info
+	fillInfo(reflect.ValueOf(&full).Elem())
+	adopted.AdoptLive(&full)
+	var live []string
+	for field, v := range reflect.ValueOf(adopted).Fields() {
+		if !v.IsZero() {
+			live = append(live, field.Name)
+		}
+	}
+	if len(live) < 5 {
+		t.Fatalf("AdoptLive copies %v, fewer fields than the five this was written against", live)
+	}
+	source := func() *liveMedia {
+		m := &liveMedia{newFixedMedia(stereo48, 20_000)}
+		m.info.AdoptLive(&full)
+		return m
+	}
+	measured := source().track
+	measured.SamplesCounted = true // a different claim, so the wrapper is built
+	wrappers := map[string]func() (format.Media, error){
+		"a measured Media": func() (format.Media, error) { return MeasuredMedia(source(), measured), nil },
+		"a span":           func() (format.Media, error) { return Slice(source(), 0, ToEnd) },
+		"a timeline": func() (format.Media, error) {
+			m := fixedMember(stereo48, 20_000)
+			m.Open = func() (format.Media, error) { return source(), nil }
+			return Concat([]ConcatSource{m}, ConcatOptions{})
+		},
+	}
+	for name, open := range wrappers {
+		t.Run(name, func(t *testing.T) {
+			med, err := open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer med.Close()
+			if _, ok := med.(*liveMedia); ok {
+				t.Fatal("the wrapper was not built; this cell reads the source directly")
+			}
+			buf := audio.Get(stereo48, audio.StandardChunk)
+			defer audio.Put(buf)
+			// Read into the stream, and stop with the source still open: a
+			// timeline reports its open member and its closed ones by two
+			// different routes, and the open one is the live one.
+			for range 2 {
+				if err := med.ReadChunk(buf); err != nil {
+					t.Fatal(err)
+				}
+			}
+			info := reflect.ValueOf(*med.Info())
+			for _, name := range live {
+				if info.FieldByName(name).IsZero() {
+					t.Errorf("Info.%s is zero through the wrapper, and its source's is not", name)
+				}
+			}
+		})
+	}
+}
+
+// seekCountingMedia is a Media whose seek moves its own Lost, as one that
+// counted a pre-roll it discarded would.
+type seekCountingMedia struct{ *fixedMedia }
+
+func (m *seekCountingMedia) SeekSample(ctx context.Context, target int64) (int64, error) {
+	m.info.Lost += 500
+	return m.fixedMedia.SeekSample(ctx, target)
+}
+
+// TestASeekCountsNothingForItsCaller: a seek delivers nothing, so what a
+// source counted while it positioned itself is no part of what a span over it
+// delivered, nor of what a run that began at that seek wrote. Every Media in
+// the tree keeps its own count still in a seek (tests/TestSeekCountsNothing);
+// this holds the two callers to the same rule over one that does not.
+func TestASeekCountsNothingForItsCaller(t *testing.T) {
+	sl, err := newSlice(context.Background(), &seekCountingMedia{newFixedMedia(stereo48, 100_000)}, 1000, 50_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := audio.Get(stereo48, audio.StandardChunk)
+	defer audio.Put(buf)
+	for _, target := range []int64{0, 20_000, 5, -500} {
+		if err := sl.ReadChunk(buf); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sl.SeekSample(context.Background(), target); err != nil {
+			t.Fatal(err)
+		}
+		if got := sl.Info().Lost; got != 0 {
+			t.Fatalf("a span's Lost is %d after a seek to %d over a source that counted 500 in each", got, target)
+		}
+	}
+
+	res, err := New().TranscodeMedia(context.Background(), &seekCountingMedia{newFixedMedia(stereo48, 100_000)},
+		&bytes.Buffer{}, TranscodeOptions{Format: "wav", FromSample: 40_000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.LostSamples != 0 {
+		t.Fatalf("a run from sample 40000 reports %d lost samples its source counted in the seek there", res.LostSamples)
 	}
 }

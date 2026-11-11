@@ -550,10 +550,19 @@ func TestTruncatedTailCorrectsTheDeclaredTotal(t *testing.T) {
 				if declared != 40000 {
 					t.Errorf("samples = %d, want the declared 40000 kept", declared)
 				}
+				if got := container.TruncatedOf(d, 0); got != 0 {
+					t.Errorf("%d samples truncated from a file that kept its audio", got)
+				}
 				return
 			}
 			if declared >= 40000 {
 				t.Errorf("samples = %d, still the declared total of a file cut short", declared)
+			}
+			// What the header still claims past the blocks is counted, so a
+			// caller need not read it out of the warning.
+			if got := container.TruncatedOf(d, 0); got != 40000-declared {
+				t.Errorf("%d samples truncated, want the %d between the blocks' %d and the declared 40000",
+					got, 40000-declared, declared)
 			}
 			// Measured, not promised: format.Media caps a decode at an
 			// authoritative length, so a count arrived at by walking past
@@ -626,6 +635,9 @@ func TestOverDeclaredTotalAdoptsTheBlocks(t *testing.T) {
 	ws := d.Warnings()
 	if len(ws) != 1 || ws[0].Kind != container.Note {
 		t.Fatalf("warnings = %+v, want one Note", ws)
+	}
+	if got := container.TruncatedOf(d, 0); got != 0 {
+		t.Errorf("%d samples truncated from a file whose blocks outrun its total", got)
 	}
 	if !strings.Contains(ws[0].Msg, "run to") {
 		t.Errorf("note %q does not say the blocks run past the declared total", ws[0].Msg)

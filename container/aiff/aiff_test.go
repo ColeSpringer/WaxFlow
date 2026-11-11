@@ -309,6 +309,14 @@ func TestCOMMFramesDisagreeWithSSND(t *testing.T) {
 	if len(warns) == 0 {
 		t.Error("expected a clamp warning")
 	}
+	// The 50 frames COMM still claims are counted, not only warned about.
+	d, err := NewDemuxer(container.BytesSource(ws.Buf), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := container.TruncatedOf(d, 0); got != 50 {
+		t.Errorf("%d samples truncated, want the 50 COMM declares past SSND", got)
+	}
 	if _, err := NewDemuxer(container.BytesSource(ws.Buf), &DemuxerOptions{Strict: true}); err == nil {
 		t.Error("strict demux of disagreeing counts must fail")
 	}

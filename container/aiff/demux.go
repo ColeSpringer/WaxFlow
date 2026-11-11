@@ -48,6 +48,9 @@ type Demuxer struct {
 	// decode. ima4 is the only one; see SeekSample.
 	carryState bool
 	warnings   container.Warnings
+	// truncated is how far COMM's count runs past what SSND holds
+	// (container.Truncated).
+	truncated int64
 }
 
 // payload is the walk over the SSND chunk. Two shapes reach it, and the
@@ -281,6 +284,7 @@ func (d *Demuxer) parse() error {
 		if err := d.warn(dataOff, "COMM declares %d %ss, SSND holds %d; clamped", commUnits, unitName(cf), available); err != nil {
 			return err
 		}
+		d.truncated = (commUnits - available) * int64(cf.unitFrames)
 		units = available
 	case available > commUnits:
 		if err := d.warn(dataOff, "SSND holds %d %ss beyond the %d COMM declares; extra ignored", available-commUnits, unitName(cf), commUnits); err != nil {
@@ -529,6 +533,15 @@ func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
 
 // DamageCount implements container.Damaged.
 func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
+
+// TruncatedSamples implements container.Truncated. An MP3 payload's count is
+// its frame walk's, known once that walk has reached the end.
+func (d *Demuxer) TruncatedSamples(int) int64 {
+	if r, ok := d.payload.(*mpegframes.Reader); ok {
+		return r.Truncated()
+	}
+	return d.truncated
+}
 
 // ReadPacket yields the next run of payload. Packet data is reused across
 // calls.

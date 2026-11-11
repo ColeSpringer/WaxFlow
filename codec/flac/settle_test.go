@@ -32,17 +32,26 @@ func TestSettle(t *testing.T) {
 		notes               []string
 		damage              string
 		md5                 bool
+		truncated           int64
 	}{
-		{"nothing found or declared", 0, 0, -1, -1, false, false, nil, "", true},
-		{"nothing found", 5000, 0, -1, 5000, false, false, nil, "", true},
-		{"confirmed", 5000, 0, 5000, 5000, true, false, nil, "", true},
-		{"no claim", 0, 0, 5000, 5000, true, false, nil, "", true},
-		{"a shortfall", 5000, 0, 4000, 4000, true, true, nil, "frames end at 4000", false},
-		{"an overrun", 5000, 0, 6000, 6000, true, true, []string{"frames run to 6000"}, "", false},
+		{"nothing found or declared", 0, 0, -1, -1, false, false, nil, "", true, 0},
+		{"nothing found", 5000, 0, -1, 5000, false, false, nil, "", true, 0},
+		{"confirmed", 5000, 0, 5000, 5000, true, false, nil, "", true, 0},
+		{"no claim", 0, 0, 5000, 5000, true, false, nil, "", true, 0},
+		{"a shortfall", 5000, 0, 4000, 4000, true, true, nil, "frames end at 4000", false, 1000},
+		{"an overrun", 5000, 0, 6000, 6000, true, true, []string{"frames run to 6000"}, "", false, 0},
 		{"a cut's source length", 5000, 1000, 4000, 4000, true, true,
-			[]string{"starts at sample 1000", "its source's length"}, "", false},
+			[]string{"starts at sample 1000", "its source's length"}, "", false, 0},
 		{"a cut with its own length", 4000, 1000, 4000, 4000, true, false,
-			[]string{"starts at sample 1000"}, "", false},
+			[]string{"starts at sample 1000"}, "", false, 0},
+		// A cut that is short as well: the least its total can mean is its
+		// source's length, which the frames end 500 short of.
+		{"a cut short of its source's length", 5000, 1000, 3500, 3500, true, true,
+			[]string{"starts at sample 1000"}, "frames end at 3500", false, 500},
+		// Frames past where a source of that length ends: the total is the
+		// cut's own, and they end 200 short of it.
+		{"a cut short of its own length", 4000, 1000, 3800, 3800, true, true,
+			[]string{"starts at sample 1000"}, "frames end at 3800", false, 200},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := header(tc.total)
@@ -67,6 +76,9 @@ func TestSettle(t *testing.T) {
 			}
 			if (st.Damage == "") != (tc.damage == "") || !strings.Contains(st.Damage, tc.damage) {
 				t.Errorf("damage %q, want %q", st.Damage, tc.damage)
+			}
+			if st.Truncated != tc.truncated {
+				t.Errorf("truncated by %d samples, want %d", st.Truncated, tc.truncated)
 			}
 			si, err := flac.ParseStreamInfo(st.StreamInfo)
 			if err != nil {

@@ -49,6 +49,9 @@ type Demuxer struct {
 	pkt   []byte
 	// pending is the decoder state a seek landing owes the next packet.
 	pending *musepack.State
+	// truncated is how far the header's length runs past what the packets
+	// present deliver (container.Truncated).
+	truncated int64
 
 	sv7 sv7Stream
 	sv8 sv8Stream
@@ -194,6 +197,9 @@ func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
 
 // DamageCount implements container.Damaged.
 func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
+
+// TruncatedSamples implements container.Truncated.
+func (d *Demuxer) TruncatedSamples(int) int64 { return d.truncated }
 
 // ReadPacket yields one frame (SV7) or one block (SV8) behind the header the
 // decoder reads, with the decoder state a seek landing owes in front of the

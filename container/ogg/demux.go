@@ -83,6 +83,9 @@ type Demuxer struct {
 	serial   uint32
 	track    container.Track
 	warnings container.Warnings
+	// truncated is how far the headers' total runs past the pages
+	// (container.Truncated).
+	truncated int64
 
 	// headerPackets is the count of header packets after the identification
 	// packet, or 0 in detect mode (find audio by the mapping's isAudio).
@@ -764,6 +767,12 @@ func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
 
 // DamageCount implements container.Damaged.
 func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
+
+// TruncatedSamples implements container.Truncated. Only a mapping whose
+// headers declare a total has one to fall short of: FLAC's STREAMINFO.
+func (d *Demuxer) TruncatedSamples(int) int64 { return d.truncated }
+
+func (d *Demuxer) truncatedBy(samples int64) { d.truncated = samples }
 
 // ReadPacket yields one codec packet. Packet data is reused across calls.
 func (d *Demuxer) ReadPacket(pkt *container.Packet) error {

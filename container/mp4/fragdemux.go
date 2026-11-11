@@ -8,6 +8,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
+	"github.com/colespringer/waxflow/internal/satmath"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -169,8 +170,8 @@ func (d *Demuxer) fragmentedLength(t *track) (delay, samples int64, exact, advis
 	// A time base that is not the sample rate rescales, and a rescale that is
 	// not exact demotes the count to advisory, the same rule the sample table's
 	// own rescale follows: a rounded total is fit to display and unfit to sum.
-	n := mulDivSat(s.sumDuration, rate, int64(s.timescale))
-	exactRescale := s.sumDuration <= sidxSumCap && mulDivSat(n, int64(s.timescale), rate) == s.sumDuration
+	n := satmath.MulDiv(s.sumDuration, rate, int64(s.timescale))
+	exactRescale := s.sumDuration <= sidxSumCap && satmath.MulDiv(n, int64(s.timescale), rate) == s.sumDuration
 	return delay, head + n, false, !exactRescale || headRounded, nil
 }
 
@@ -203,13 +204,13 @@ func (d *Demuxer) headerDuration(t *track) (samples int64, box string) {
 		return 0, ""
 	}
 	if t.duration > 0 && t.timescale > 0 {
-		return mulDivSat(t.duration, rate, t.timescale), "the media header (mdhd)"
+		return satmath.MulDiv(t.duration, rate, t.timescale), "the media header (mdhd)"
 	}
 	if d.fragmentDuration > 0 && d.movieTimescale > 0 {
-		return mulDivSat(d.fragmentDuration, rate, d.movieTimescale), "the movie-extends header (mehd)"
+		return satmath.MulDiv(d.fragmentDuration, rate, d.movieTimescale), "the movie-extends header (mehd)"
 	}
 	if d.movieDuration > 0 && d.movieTimescale > 0 {
-		return mulDivSat(d.movieDuration, rate, d.movieTimescale), "the movie header (mvhd)"
+		return satmath.MulDiv(d.movieDuration, rate, d.movieTimescale), "the movie header (mvhd)"
 	}
 	return 0, ""
 }
@@ -329,6 +330,26 @@ func (d *Demuxer) nextFragment() error {
 		}
 		d.fragOff = b.off + b.size
 	}
+	return d.fragmentsEnded()
+}
+
+// fragmentsEnded is the read reaching the end of the fragments. The run is
+// held against what the head declared, as Walk holds it, so a movie cut short
+// at a fragment boundary is damage the read that reaches it finds, and a
+// strict read refuses. The length is left alone: settling it is Walk's (see
+// Walked).
+//
+// The run is the scan's where a seek or a walk has made one, and otherwise
+// the reader's own, which began at the first fragment and has loaded every
+// one since. Both end each fragment by the same arithmetic.
+func (d *Demuxer) fragmentsEnded() error {
+	raw := max(d.fragRun, d.sel.st.totalDur)
+	if d.fragIndexed {
+		raw = d.fragScan.raw
+	}
+	if err := d.compareDeclared(raw); err != nil {
+		return err
+	}
 	return io.EOF
 }
 
@@ -389,11 +410,16 @@ func (d *Demuxer) loadFragment(moof box) error {
 	}
 	d.fragDecode = d.fragTicks
 	if rescale {
-		d.fragDecode = mulDivSat(d.fragTicks, rate, d.sel.timescale)
+		d.fragDecode = satmath.MulDiv(d.fragTicks, rate, d.sel.timescale)
 	}
 	for _, s := range fi.samples {
 		d.fragTicks += int64(s.dur)
 	}
+	end := d.fragDecode
+	for _, s := range d.fragQueue {
+		end += int64(s.dur)
+	}
+	d.fragRun = max(d.fragRun, end)
 
 	// Advance past the moof and the mdat that follows it.
 	d.fragOff = moof.off + moof.size
@@ -742,7 +768,7 @@ func (d *Demuxer) scanForward(ctx context.Context, from fragEntry, sample int64)
 				}
 				base := ticks
 				if rescale {
-					base = mulDivSat(ticks, rate, d.sel.timescale)
+					base = satmath.MulDiv(ticks, rate, d.sel.timescale)
 				}
 				if base > sample {
 					return landed, nil

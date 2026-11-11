@@ -1044,7 +1044,8 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 	var found format.Info
 	format.RefreshWarnings(&found, demux)
 	return &TranscodeResult{Samples: trailer.Samples, Format: track.Fmt, Container: plan.Container,
-		InputWarnings: found.Warnings}, nil
+		InputWarnings: found.Warnings, LostSamples: run.lost,
+		TruncatedSamples: container.TruncatedOf(demux, track.ID)}, nil
 }
 
 // fillHole writes the pkt.Lost samples damage took before pkt as silent frames
@@ -1129,6 +1130,7 @@ func copyPackets(ctx context.Context, demux container.Demuxer, track int, perPac
 				return copiedRun{}, err
 			}
 			run.samples += pkt.Lost
+			run.lost += pkt.Lost
 		}
 		lastDur = pkt.Dur
 		// Something followed the previous packet, so its trim was an inner one
@@ -1194,4 +1196,7 @@ type copiedRun struct {
 	// is the only trim any output container carries.
 	lastPadding int64
 	trimmed     bool
+	// lost is how many of samples are the silent frames written for holes
+	// (container.Packet.Lost): the copy's fill, as a decode's silence is.
+	lost int64
 }

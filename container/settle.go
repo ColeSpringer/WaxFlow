@@ -55,3 +55,16 @@ func SettleLength(t Track, raw int64) Track {
 	t.SamplesExact, t.SamplesAdvisory = true, false
 	return t
 }
+
+// SettleShortfall is how much of t's declared length a completed run of raw
+// samples cannot supply: what SettleLength takes off it. A demuxer that
+// reports a short run as damage counts it with this (Truncated), so the count
+// and the settled length come from one rule and cannot disagree. It is on the
+// timeline the length is on, so frames that were only priming or padding are
+// not in it, and it is 0 for a track that declared no length to fall short of.
+func SettleShortfall(t Track, raw int64) int64 {
+	if t.Samples < 0 || t.SamplesAdvisory {
+		return 0
+	}
+	return max(t.Samples-SettleLength(t, raw).Samples, 0)
+}

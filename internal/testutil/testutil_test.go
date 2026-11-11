@@ -660,3 +660,43 @@ func TestPruneOfNothingIsNothing(t *testing.T) {
 		t.Errorf("Prune of a directory not made yet: %v", err)
 	}
 }
+
+// TestFLACFramesTileTheStream: the frames FLACFrames finds in the reference
+// encoder's fixture run end to end from the first to the end of the file, and
+// their samples from 0 with no gap, a short last frame included.
+func TestFLACFramesTileTheStream(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "sine-s16.flac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames := FLACFrames(t, raw)
+	if len(frames) < 2 {
+		t.Fatalf("%d frames", len(frames))
+	}
+	var pos int64
+	for i, f := range frames {
+		if i > 0 && f.Off != frames[i-1].End {
+			t.Fatalf("frame %d starts at %d, the one before it ends at %d", i, f.Off, frames[i-1].End)
+		}
+		if f.Pos != pos || f.Dur <= 0 {
+			t.Fatalf("frame %d holds %d samples from %d, want from %d", i, f.Dur, f.Pos, pos)
+		}
+		pos += f.Dur
+	}
+	if last := frames[len(frames)-1]; last.End != len(raw) {
+		t.Fatalf("the last frame ends at %d of %d bytes", last.End, len(raw))
+	}
+	// STREAMINFO's total, 36 bits from the low nibble of its fourteenth byte.
+	si := raw[8:]
+	total := int64(si[13]&0x0F)<<32 | int64(si[14])<<24 | int64(si[15])<<16 | int64(si[16])<<8 | int64(si[17])
+	if pos != total {
+		t.Fatalf("the frames hold %d samples, STREAMINFO declares %d", pos, total)
+	}
+	bad := DamageFLACFrames(t, raw, frames, 1)
+	if len(bad) != len(raw) || slices.Equal(bad[frames[1].Off:frames[1].End], raw[frames[1].Off:frames[1].End]) {
+		t.Fatal("the named frame was not damaged")
+	}
+	if !slices.Equal(bad[:frames[1].Off], raw[:frames[1].Off]) || !slices.Equal(bad[frames[1].End:], raw[frames[1].End:]) {
+		t.Fatal("damage reached outside the named frame")
+	}
+}

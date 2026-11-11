@@ -142,12 +142,18 @@ func TestFragmentedWalkShrinksATruncatedFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if got := container.TruncatedOf(d, d.Tracks()[0].ID); got != 0 {
+		t.Errorf("%d samples truncated before the walk measured anything", got)
+	}
 	if err := d.Walk(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	tr := d.Tracks()[0]
 	if tr.Samples >= dur {
 		t.Fatalf("after Walk: Samples = %d, want less than the declared %d", tr.Samples, dur)
+	}
+	if got, want := container.TruncatedOf(d, tr.ID), dur-tr.Samples; got != want {
+		t.Errorf("%d samples truncated, want the %d the head declares past the fragments", got, want)
 	}
 	if !tr.SamplesExact {
 		t.Error("a finished walk measures the payload, so its count is exact")

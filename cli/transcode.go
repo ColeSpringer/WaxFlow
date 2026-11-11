@@ -46,6 +46,16 @@ func inputNotes(w io.Writer, res *waxflow.TranscodeResult) {
 	for _, note := range res.InputWarnings {
 		fmt.Fprintf(w, "input damage: %s\n", note)
 	}
+	lossNote(w, res)
+}
+
+// lossNote prints the engine's loss note on stderr: how much of what was
+// written is silence standing in for a hole, and how much more the source
+// declared than it holds. waxflow.TranscodeResult.LossNote owns the wording.
+func lossNote(w io.Writer, res *waxflow.TranscodeResult) {
+	if note := res.LossNote(); note != "" {
+		fmt.Fprintf(w, "input damage: %s\n", note)
+	}
 }
 
 // isMP4Container reports whether an output written by format with this

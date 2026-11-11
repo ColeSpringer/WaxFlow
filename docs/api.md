@@ -206,7 +206,9 @@ read as the headers' own count, the same declared tier a progressive sample
 table sits in. An index covering only the first fragment is ignored rather
 than believed, and a movie header duration is advisory. A strict probe walks
 the fragments once, which reads their headers and reports either count as
-`samplesExact`. `notes` is the other half and is never damage: what this build did
+`samplesExact`. A fragmented MP4 cut short at a fragment boundary reads to a
+clean end, and the read that reaches it reports the fragments short of the
+declared count as damage, as the walk does. `notes` is the other half and is never damage: what this build did
 with a file that is perfectly well formed, such
 as ignoring a stream it cannot use, capping a chapter list at its own limit,
 rescaling a timeline whose timescale is not the sample rate, or reporting a
@@ -214,6 +216,24 @@ band it does not synthesize. `strict` never refuses over a note, which is the
 whole reason the two are separate fields; a client leading with "input
 damage" wants `warnings` alone. `samples: -1` means unknown length. This is
 byte-identical to `waxflow probe --json`.
+
+`truncatedSamples` is how many samples the default track's header declares
+past the end of what the file holds, at that track's rate: what a file cut
+short lost off its end. `samples` is the length that is there, so the two
+together are what the file claimed, and a caller that must not take part of
+a track for the whole reads this field instead of a warning's wording. It is
+counted on the played timeline, as `samples` is, so a cut that took only an
+encoder's end padding counts nothing. It is counted wherever a short payload
+is reported as damage and the shorter length adopted. A probe knows it for
+FLAC (native and Ogg), WavPack, Musepack, WAV, AIFF and a progressive MP4's
+sample table. An MP3 (bare or in a WAV or AIFF-C) and a fragmented MP4 are
+held against their declared count only where a read reaches the end of the
+payload, which a tolerant probe leaves to the read, so theirs is on the
+result of a job that read the file (below) and not here. The field is absent for a
+whole file, for a header that states no length to fall short of, for a
+length that is not stated in samples (ASF, Matroska), and for Monkey's
+Audio, where a file cut short keeps its declared length and its last frame
+fails to decode instead.
 
 ## GET /stream
 
@@ -1033,9 +1053,13 @@ such a member when the run reaches it and closes it before opening the
 next, so a group of such members holds one descriptor at a time however
 long the album, and the damage each member's read found comes back on that
 member's
-`AnalyzeResult.InputWarnings`, as it does for every `Analyze`. A silence
-map and a tap are refused for a group, since both are properties of one
-source's timeline.
+`AnalyzeResult.InputWarnings`, as it does for every `Analyze`. Its
+`LostSamples` and `TruncatedSamples` say how much of that member's
+measurement was silence standing in for a hole and how much more its file
+declared than it held, which is what tells a caller a shared gain would be
+computed from part of a track; the group's own result carries the totals. A
+silence map and a tap are refused for a group, since both are properties of
+one source's timeline.
 
 Each field belongs to a specific set of job types, and a field on a type
 that does not take it is a 400 rather than a field silently ignored at
@@ -1263,6 +1287,21 @@ The response (and `GET /jobs/{id}`) is the job document:
 `outputs` is a list because a split has one entry per piece it writes, in
 cut order; every other type has at most one. Its index is what `GET
 /jobs/{id}/result/{n}` takes.
+
+An output and `analysis` each carry two counts of what the source lost, at
+that entry's own `rate` and absent when zero. `lostSamples` is the samples
+that are silence standing in for audio damage took: a FLAC, native or in
+Ogg, that lost frames keeps its length and reads silence where they were,
+so `samples` does not shrink and this is the only number that says how much
+of the result is the file's own. `truncatedSamples` is what the source's
+header declares past the end of what it holds, as /probe reports it, and
+here it covers an MP3 and a fragmented MP4 too, since the job's read reaches
+the end where theirs is found. A transcode that resamples states both at the
+output's rate. A split's pieces count their own windows: a hole is counted
+in the piece it falls in, and a truncation only by a piece that runs to the
+end of the source. A job that found either says so once per output in
+`warnings`, under the `input damage:` prefix, which is the line for a
+person; the fields are the ones to compute with.
 
 States: `queued`, `running`, then one of `done`, `failed`, `canceled`.
 `analysis` peak and loudness fields are `null` for digital silence

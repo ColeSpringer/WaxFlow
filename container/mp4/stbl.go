@@ -57,6 +57,15 @@ type sampleTable struct {
 	// sync holds the 0-based sync sample indices in ascending order; nil
 	// means every sample is a sync point (the audio norm).
 	sync []int64
+
+	// short is how many samples the table declares past total, which is
+	// where the file's data ran out, and shortDur what they time to in output
+	// samples on the raw timeline. truncated is that on the played timeline,
+	// which is the one a length is on (container.Truncated): gapless nets
+	// out whatever of it was end padding.
+	short     int64
+	shortDur  int64
+	truncated int64
 }
 
 // The Layer III seek backoff, container/mpa's rule restated for a sample
@@ -144,6 +153,7 @@ func (d *Demuxer) parseStbl(t *track, body []byte, depth int) error {
 		sizes     []uint32
 		constSize uint32
 		sampleN   int64
+		declaredN int64 // the sample-size box's own count, before any bound
 		chunks    []int64
 		stss      []int64
 		haveStsd  bool
@@ -174,11 +184,11 @@ func (d *Demuxer) parseStbl(t *track, body []byte, depth int) error {
 		case "stsc":
 			stsc, parseErr = parseStsc(payload)
 		case "stsz":
-			sizes, constSize, sampleN, parseErr = parseStsz(payload, d.size)
+			sizes, constSize, sampleN, declaredN, parseErr = parseStsz(payload, d.size)
 			haveStsz = true
 		case "stz2":
 			sizes, sampleN, parseErr = parseStz2(payload)
-			haveStsz = true
+			declaredN, haveStsz = sampleN, true
 		case "stco":
 			chunks, parseErr = parseStco(payload, false)
 		case "co64":
@@ -284,7 +294,7 @@ func (d *Demuxer) parseStbl(t *track, body []byte, depth int) error {
 		// per-frame index instead, and past maxSamples would be refused
 		// outright, which is why the clock is converted rather than required
 		// to be the rate.
-		if err := d.buildChunkIndex(st, t, sampleN, stsc, chunks); err != nil {
+		if err := d.buildChunkIndex(st, t, sampleN, declaredN, stsc, chunks); err != nil {
 			return err
 		}
 		// The time base comes from the same builder the flat path uses, and
@@ -302,7 +312,7 @@ func (d *Demuxer) parseStbl(t *track, body []byte, depth int) error {
 		}
 		return nil
 	}
-	if err := d.flatten(st, sampleN, sizes, constSize, stsc, chunks); err != nil {
+	if err := d.flatten(st, sampleN, declaredN, sizes, constSize, stsc, chunks); err != nil {
 		if isAudio {
 			return err
 		}
@@ -371,7 +381,7 @@ func uniformStts(stts []sttsEntry, ticks int64) bool {
 // the table with the same warning flatten gives, so a truncated source plays
 // what it holds. Memory is bounded by the chunk-offset box's own payload,
 // never by the sample count, which is the whole reason this path exists.
-func (d *Demuxer) buildChunkIndex(st *sampleTable, t *track, sampleN int64, stsc []stscEntry, chunks []int64) error {
+func (d *Demuxer) buildChunkIndex(st *sampleTable, t *track, sampleN, declaredN int64, stsc []stscEntry, chunks []int64) error {
 	if t.unitBytes < 1 || t.unitDur < 1 {
 		// The caller's gate establishes both, and the packet path divides by
 		// unitDur. Stated here too because the distance between the two is
@@ -439,6 +449,7 @@ done:
 	if err := d.warnShortTable(truncated, truncAt, idx, sampleN); err != nil {
 		return err
 	}
+	st.short = shortOf(idx, sampleN, declaredN)
 	st.uniform = true
 	st.unitBytes = unitBytes
 	st.unitDur = t.unitDur
@@ -464,7 +475,7 @@ func (st *sampleTable) chunkOf(idx int64) int {
 // sample-to-chunk map, bounded at every step. A sample that would read
 // past the end of the file truncates the table with a warning rather than
 // letting playback over-read a damaged or truncated source.
-func (d *Demuxer) flatten(st *sampleTable, sampleN int64, sizes []uint32, constSize uint32, stsc []stscEntry, chunks []int64) error {
+func (d *Demuxer) flatten(st *sampleTable, sampleN, declaredN int64, sizes []uint32, constSize uint32, stsc []stscEntry, chunks []int64) error {
 	if sampleN > maxSamples {
 		return malformed("%d samples exceed the %d cap", sampleN, int64(maxSamples))
 	}
@@ -516,10 +527,22 @@ done:
 	if err := d.warnShortTable(truncated, truncAt, idx, sampleN); err != nil {
 		return err
 	}
+	st.short = shortOf(idx, sampleN, declaredN)
 	st.offsets = offsets
 	st.sizes = outSizes
 	st.total = idx
 	return nil
+}
+
+// shortOf is how many samples a table declares past the got it yielded, where
+// warnShortTable called that damage: counted from the sample-size box's own
+// count, since the one the builders run to is bounded by what the file could
+// hold (parseStsz), which a file cut short has already shrunk.
+func shortOf(got, want, declared int64) int64 {
+	if got >= want {
+		return 0
+	}
+	return max(declared, want) - got
 }
 
 // warnShortTable reports a sample map that yielded fewer samples than the
@@ -604,6 +627,42 @@ func (d *Demuxer) buildTimeBase(st *sampleTable, stts []sttsEntry, timescale, ra
 			st.tickDur = ticks + (st.total-sample)*stts[len(stts)-1].delta
 		}
 	}
+	if st.short > 0 {
+		st.shortDur = st.timeShort(stts, rescale, rate, timescale)
+	}
+}
+
+// timeShort is how long the samples the table declares past total run, in
+// output samples, timed as buildTimeBase times the ones kept: each stts run
+// at its own delta, and the last cadence over any the stts does not reach.
+func (st *sampleTable) timeShort(stts []sttsEntry, rescale bool, rate, timescale int64) int64 {
+	var sample, dur, delta int64
+	end := st.total + st.short
+	// add times n samples at the cadence in hand. A run that lies outside
+	// [total, end) has none to add, which is what n <= 0 says.
+	add := func(n int64) {
+		switch {
+		case n <= 0:
+		case delta > (math.MaxInt64-dur)/n:
+			dur = math.MaxInt64 // a crafted table's count times a crafted delta
+		default:
+			dur += n * delta
+		}
+	}
+	for _, e := range stts {
+		if sample >= end {
+			break
+		}
+		delta = e.delta
+		if rescale {
+			delta = rescaleTicks(e.delta, rate, timescale)
+		}
+		delta = max(delta, 1)
+		add(min(sample+e.count, end) - max(sample, st.total))
+		sample += e.count
+	}
+	add(end - max(sample, st.total))
+	return dur
 }
 
 // rescaleTicks converts a media-tick sample delta to output samples as
@@ -743,13 +802,14 @@ func parseStsc(payload []byte) ([]stscEntry, error) {
 // parseStsz reads a sample-size box: a constant size, or a per-sample
 // table. sampleCount is capped against the file size so a crafted constant
 // size cannot force a huge allocation.
-func parseStsz(payload []byte, fileSize int64) (sizes []uint32, constSize uint32, count int64, err error) {
+func parseStsz(payload []byte, fileSize int64) (sizes []uint32, constSize uint32, count, declared int64, err error) {
 	_, _, rest, ok := fullBox(payload)
 	if !ok || len(rest) < 8 {
-		return nil, 0, 0, malformed("stsz truncated")
+		return nil, 0, 0, 0, malformed("stsz truncated")
 	}
 	constSize = be32(rest)
 	count = int64(be32(rest[4:]))
+	declared = count // what the box says, which a truncated file still says
 	rest = rest[8:]
 	if constSize != 0 {
 		// Every sample is constSize bytes; the count cannot exceed what the
@@ -763,16 +823,16 @@ func parseStsz(payload []byte, fileSize int64) (sizes []uint32, constSize uint32
 		// 48 kHz audio legitimately declares 173 million of them. The clamp
 		// above is what bounds this against a crafted count, and flatten
 		// keeps its own cap for the tracks that still need a flat table.
-		return nil, constSize, count, nil
+		return nil, constSize, count, declared, nil
 	}
 	if count > int64(len(rest))/4 {
-		return nil, 0, 0, malformed("stsz declares %d samples for %d bytes", count, len(rest))
+		return nil, 0, 0, 0, malformed("stsz declares %d samples for %d bytes", count, len(rest))
 	}
 	sizes = make([]uint32, count)
 	for i := range sizes {
 		sizes[i] = be32(rest[i*4:])
 	}
-	return sizes, 0, count, nil
+	return sizes, 0, count, declared, nil
 }
 
 // parseStz2 reads a compact sample-size box (4-, 8-, or 16-bit fields).

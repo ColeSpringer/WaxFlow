@@ -54,6 +54,14 @@ type ProbeInfo struct {
 	// it ignored, a list it capped, a timeline it rescaled, a band it does not
 	// synthesize. `probe --strict` never refuses over one of these.
 	Notes []string `json:"notes,omitempty"`
+	// TruncatedSamples is how many samples the default track's header
+	// declares past the end of what the file holds, at that track's rate:
+	// what a file cut short lost off its end. The track's samples is the
+	// length that is there, restated, so this is the only place the
+	// shortfall is a number. Absent for a whole file, for a header that
+	// states no length to fall short of, and for a format whose frame walk a
+	// tolerant probe leaves to the read (MP3, fragmented MP4).
+	TruncatedSamples int64 `json:"truncatedSamples,omitempty"`
 
 	// Tags is the canonical tag summary (TITLE, ARTIST, REPLAYGAIN_*, ...).
 	Tags map[string][]string `json:"tags,omitempty"`
@@ -122,7 +130,8 @@ type ProbeMetadata struct {
 // ProbeJSON maps a format.Info (and, when metadata was read, its
 // summary) onto the wire shape.
 func ProbeJSON(info *format.Info, m *ProbeMetadata) ProbeInfo {
-	out := ProbeInfo{SchemaVersion: 1, Container: info.Container, Warnings: info.Warnings, Notes: info.Notes}
+	out := ProbeInfo{SchemaVersion: 1, Container: info.Container, Warnings: info.Warnings, Notes: info.Notes,
+		TruncatedSamples: info.Truncated}
 	if m != nil {
 		out.HasArt = m.HasArt
 		out.HasLyrics = m.HasLyrics

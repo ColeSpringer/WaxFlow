@@ -16,6 +16,9 @@ type Settled struct {
 	// Notes are for the reader to note, and Damage, when set, to warn.
 	Notes  []string
 	Damage string
+	// Truncated is how many samples the declared total claims past the end
+	// of the frames, set with a Damage that says they end short of it.
+	Truncated int64
 }
 
 // Settle settles a FLAC stream's length from raw, its STREAMINFO block body,
@@ -58,6 +61,12 @@ func Settle(raw []byte, origin, span int64) (Settled, error) {
 			declared, origin, span))
 	case span < declared:
 		s.Damage = fmt.Sprintf("STREAMINFO declares %d samples but the frames end at %d", declared, span)
+		// The least the total can mean: its source's length where the frames
+		// end inside one, else the stream's own.
+		s.Truncated = declared - span
+		if origin+span < declared {
+			s.Truncated -= origin
+		}
 	default:
 		s.Notes = append(s.Notes, fmt.Sprintf("STREAMINFO declares %d samples but the frames run to %d", declared, span))
 	}

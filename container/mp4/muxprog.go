@@ -10,6 +10,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/internal/muxseek"
+	"github.com/colespringer/waxflow/internal/satmath"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -414,16 +415,16 @@ func buildChapterTrack(chapters []container.Chapter, movieSamples int64, rate in
 	if len(chapters) == 0 {
 		return nil
 	}
-	movieEnd := mulDivSat(movieSamples, chapterTimescale, int64(rate))
+	movieEnd := satmath.MulDiv(movieSamples, chapterTimescale, int64(rate))
 	starts := make([]int64, len(chapters))
 	for i, ch := range chapters {
-		starts[i] = min(mulDivSat(int64(ch.Start), chapterTimescale, int64(time.Second)), movieEnd)
+		starts[i] = min(satmath.MulDiv(int64(ch.Start), chapterTimescale, int64(time.Second)), movieEnd)
 	}
 	// Chapter.End is the caller's, and a caller has no reason to know the
 	// length the encoder settled on, so it is a request rather than a bound.
 	end := movieEnd
 	if last := chapters[len(chapters)-1]; last.End > 0 {
-		end = min(mulDivSat(int64(last.End), chapterTimescale, int64(time.Second)), movieEnd)
+		end = min(satmath.MulDiv(int64(last.End), chapterTimescale, int64(time.Second)), movieEnd)
 	}
 
 	c := &chapterTrack{chunkOff: chunkOff, startTicks: starts[0]}
@@ -488,8 +489,8 @@ func (c *chapterTrack) trakBox(movieRate int, movieDur int64) []byte {
 // itself, and neither a rescale that rounded up nor a chapter list reaching past
 // the end of the audio gets to cause that.
 func (c *chapterTrack) editDurs(movieRate int, movieDur int64) (empty, played int64) {
-	empty = min(mulDivSat(c.startTicks, int64(movieRate), chapterTimescale), movieDur)
-	played = min(mulDivSat(c.mediaDur, int64(movieRate), chapterTimescale), movieDur-empty)
+	empty = min(satmath.MulDiv(c.startTicks, int64(movieRate), chapterTimescale), movieDur)
+	played = min(satmath.MulDiv(c.mediaDur, int64(movieRate), chapterTimescale), movieDur-empty)
 	return empty, played
 }
 

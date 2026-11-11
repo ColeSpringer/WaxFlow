@@ -207,7 +207,7 @@ func cutSeekable(demux container.Demuxer, track container.Track, opts TranscodeO
 			"waxflow: this source trims a whole packet inside its run, so a seek into it is ambiguous; transcode it")
 	}
 	return &cutSeekDemuxer{
-		cutDemuxer: &cutDemuxer{Demuxer: demux, cut: res.track, track: track.ID, windows: res.windows, lastEnd: res.lastEnd, blind: res.blind, trims: res.trims, damage: container.DamageOf(demux)},
+		cutDemuxer: &cutDemuxer{Demuxer: demux, cut: res.track, track: track.ID, windows: res.windows, lastEnd: res.lastEnd, blind: res.blind, trims: res.trims, toEnd: res.toEnd, damage: container.DamageOf(demux)},
 		seek:       sk,
 	}, nil
 }

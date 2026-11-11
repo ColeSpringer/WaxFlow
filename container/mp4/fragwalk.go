@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/satmath"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -154,7 +155,7 @@ func (d *Demuxer) indexFragments(ctx context.Context) (raw int64, err error) {
 		if !rescale {
 			return ticks
 		}
-		return mulDivSat(ticks, rate, d.sel.timescale)
+		return satmath.MulDiv(ticks, rate, d.sel.timescale)
 	}
 
 	// The fragments continue the sample table's timeline, in both units; a
@@ -282,14 +283,26 @@ func (d *Demuxer) fragmentFits(moof box, fi *fragInfo) bool {
 	return true
 }
 
-// compareDeclared reports what the walk found against what the head declared,
-// in mpegframes.Walker.compare's vocabulary: a shortfall is damage and an
-// overrun is a note, and an intact file on either timeline is neither.
-func (d *Demuxer) compareDeclared(raw int64) error {
+// compareDeclared reports the raw run the fragments hold against what the head
+// declared, in mpegframes.Walker.compare's vocabulary: a shortfall is damage
+// and an overrun is a note, and an intact file on either timeline is neither.
+// Walk calls it with the run its scan measured, and a read that reaches the
+// end of the fragments with the run it read (fragmentsEnded).
+func (d *Demuxer) compareDeclared(raw int64) (err error) {
+	if d.fragCompared {
+		return nil // once: a read to the end and the walk after it say one thing
+	}
 	t := d.track
 	if t.Samples < 0 || t.SamplesAdvisory {
 		return nil // nothing was claimed, so nothing can disagree
 	}
+	// Latched only past the refusal below: a strict compare that fails leaves
+	// the next one to fail the same way.
+	defer func() {
+		if err == nil {
+			d.fragCompared = true
+		}
+	}()
 	// Two intact forms. A sidx is timed on the presentation timeline with the
 	// edit applied (ffmpeg's +delay_moov+global_sidx sums to exactly the truns
 	// less the priming), so the raw run it implies is Delay + Samples. A
@@ -298,8 +311,12 @@ func (d *Demuxer) compareDeclared(raw int64) error {
 		return nil
 	}
 	if t.Delay+t.Samples > raw {
-		return d.warn(d.fragStart, "the head declares %d samples, the fragments hold %d",
-			t.Delay+t.Samples, raw)
+		if err := d.warn(d.fragStart, "the head declares %d samples, the fragments hold %d",
+			t.Delay+t.Samples, raw); err != nil {
+			return err
+		}
+		d.fragTruncated = container.SettleShortfall(t, raw) // what Walk's settle takes off
+		return nil
 	}
 	d.note(d.fragStart, "the fragments hold %d samples, %d more than the head declares",
 		raw, raw-t.Delay-t.Samples)

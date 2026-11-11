@@ -58,6 +58,9 @@ type Demuxer struct {
 	warnings container.Warnings
 
 	firstBlock int64 // byte offset of the first audio block
+	// truncated is how far the header's total runs past the blocks
+	// (container.Truncated).
+	truncated int64
 	// initialIndex is the first audio block's own sample index. A .wv file
 	// carved out of a longer encode starts partway up the numbering, so
 	// packet positions are measured from here rather than from zero.
@@ -210,6 +213,7 @@ func (d *Demuxer) parse() error {
 					samples, got); err != nil {
 					return err
 				}
+				d.truncated = samples - got
 			case got > samples:
 				d.note(off, "the header declares %d samples but the blocks run to %d", samples, got)
 			}
@@ -495,6 +499,9 @@ func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
 
 // DamageCount implements container.Damaged.
 func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
+
+// TruncatedSamples implements container.Truncated.
+func (d *Demuxer) TruncatedSamples(int) int64 { return d.truncated }
 
 // Tags returns the APEv2 tag's fields under canonical uppercase keys.
 func (d *Demuxer) Tags() map[string][]string { return d.tags }

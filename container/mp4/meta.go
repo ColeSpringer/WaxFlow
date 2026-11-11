@@ -1,8 +1,6 @@
 package mp4
 
 import (
-	"math"
-	"math/bits"
 	"strconv"
 	"strings"
 	"time"
@@ -11,22 +9,39 @@ import (
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/satmath"
 )
 
 // gapless resolves the audio track's trims in output samples: the iTunes
 // iTunSMPB tag first (exact priming, padding, and length), then an edit
 // list (media_time as priming), else no trim. format.Media consumes
 // Delay/Padding/Samples to deliver the trimmed timeline and to map seeks.
+//
+// It also puts what the table times past the file's data (shortDur) on the
+// played timeline, which is the one the length is on: the length the whole
+// table would have played, less the one this run does. A cut that took only
+// end padding lost no audio.
 func (d *Demuxer) gapless(t *track) (delay, padding, samples int64, advisory bool) {
 	totalRaw := t.st.totalDur
+	front, stated := d.statedTrims(t)
 	// A length taken from totalRaw inherits its rounding; one stated by
-	// iTunSMPB or an edit list segment does not, which is why this is set
-	// per assignment rather than once from t.st.rescaled.
-	fromRaw := false
+	// iTunSMPB or an edit list segment does not, which is why this follows
+	// where the length came from rather than t.st.rescaled alone.
+	delay, samples, fromRaw := playedIn(totalRaw, front, stated)
+	padding = totalRaw - delay - samples
+	if t.st.shortDur > 0 {
+		_, whole, _ := playedIn(satmath.Add(totalRaw, t.st.shortDur), front, stated)
+		t.st.truncated = max(whole-samples, 0)
+	}
+	return delay, padding, samples, fromRaw && t.st.rescaled
+}
 
+// statedTrims is what the track's tags state of its gapless shape, before
+// any run bounds them: the front trim, and the played length, negative when
+// they state none.
+func (d *Demuxer) statedTrims(t *track) (delay, length int64) {
 	if d.smpbOK {
-		delay = d.smpbDelay
-		samples = d.smpbTotal
+		delay, length = d.smpbDelay, d.smpbTotal
 		// Some encoders write HE-AAC gapless fields in core (1024) units,
 		// half the output timeline. When the three fields add up to exactly
 		// half the raw track duration, they are half-units: rescale. Keyed
@@ -35,18 +50,13 @@ func (d *Demuxer) gapless(t *track) (delay, padding, samples int64, advisory boo
 		// units the tag uses, and a half-sum there is a coincidence this
 		// heuristic must not double.
 		if t.codec == codec.HEAAC && t.perAU == 2048 {
-			if sum := delay + d.smpbPad + samples; sum > 0 && sum*2 == totalRaw {
+			if sum := delay + d.smpbPad + length; sum > 0 && sum*2 == t.st.totalDur {
 				delay *= 2
-				samples *= 2
+				length *= 2
 				d.note(0, "mp4: iTunSMPB in core half-units; rescaled to the output rate")
 			}
 		}
-		delay = clamp(delay, 0, totalRaw)
-		if samples < 0 || samples > totalRaw-delay {
-			samples, fromRaw = totalRaw-delay, true
-		}
-		padding = totalRaw - delay - samples
-		return delay, padding, samples, fromRaw && t.st.rescaled
+		return delay, length
 	}
 
 	// A nonzero edit-list media_time is the encoder-delay priming. The
@@ -57,20 +67,24 @@ func (d *Demuxer) gapless(t *track) (delay, padding, samples int64, advisory boo
 	// duration even at zero delay; both share editListTrims for the rescale.)
 	if t.hasEdit && t.editMedia > 0 {
 		delay, seg, haveSeg := editListTrims(t, d.movieTimescale)
-		delay = clamp(delay, 0, totalRaw)
-		if haveSeg {
-			samples = seg
-		} else {
-			samples, fromRaw = totalRaw-delay, true
+		if !haveSeg {
+			seg = -1
 		}
-		if samples < 0 || samples > totalRaw-delay {
-			samples, fromRaw = totalRaw-delay, true
-		}
-		padding = totalRaw - delay - samples
-		return delay, padding, samples, fromRaw && t.st.rescaled
+		return delay, seg
 	}
+	return 0, -1
+}
 
-	return 0, 0, totalRaw, t.st.rescaled
+// playedIn fits stated trims to a run of raw samples: the front trim held
+// inside the run, and the played length the tags state where the run can hold
+// it behind that trim. Where they state none, or more than the run holds, the
+// run's own remainder is the length, and fromRaw says so.
+func playedIn(raw, front, stated int64) (delay, samples int64, fromRaw bool) {
+	delay = clamp(front, 0, raw)
+	if stated < 0 || stated > raw-delay {
+		return delay, raw - delay, true
+	}
+	return delay, stated, false
 }
 
 // editListTrims rescales a track's first real edit into gapless trims in output
@@ -85,13 +99,13 @@ func editListTrims(t *track, movieTimescale int64) (delay, segSamples int64, hav
 	rate := int64(t.fmt.Rate)
 	delay = t.editMedia
 	if t.timescale > 0 && rate > 0 && t.timescale != rate {
-		delay = mulDivSat(t.editMedia, rate, t.timescale)
+		delay = satmath.MulDiv(t.editMedia, rate, t.timescale)
 	}
 	if delay < 0 {
 		delay = 0
 	}
 	if t.editSegDur > 0 && movieTimescale > 0 && rate > 0 {
-		return delay, mulDivSat(t.editSegDur, rate, movieTimescale), true
+		return delay, satmath.MulDiv(t.editSegDur, rate, movieTimescale), true
 	}
 	return delay, 0, false
 }
@@ -104,57 +118,6 @@ func clamp(v, lo, hi int64) int64 {
 		return hi
 	}
 	return v
-}
-
-// mulDivSat computes a*b/c in 128 bits, saturating at math.MaxInt64 so a
-// hostile edit-list time or chapter timescale cannot overflow the product.
-// A non-positive operand yields 0. It backs the movie-timeline rescales,
-// whose results are int64 sample counts or nanosecond durations; the
-// per-sample delta path in stbl.go uses rescaleTicks instead, which caps
-// tighter to keep count*delta from overflowing during PTS accumulation.
-func mulDivSat(a, b, c int64) int64 {
-	if a <= 0 || b <= 0 || c <= 0 {
-		return 0
-	}
-	hi, lo := bits.Mul64(uint64(a), uint64(b))
-	if hi >= uint64(c) {
-		return math.MaxInt64 // quotient would exceed 64 bits
-	}
-	q, _ := bits.Div64(hi, lo, uint64(c))
-	if q > math.MaxInt64 {
-		return math.MaxInt64
-	}
-	return int64(q)
-}
-
-// mulDivRound computes a*b/c like mulDivSat, rounding to nearest rather than
-// truncating, in 128 bits and saturating at math.MaxInt64. A non-positive
-// operand yields 0.
-//
-// It exists for rescales between two grids that do not divide each other, where
-// truncation is a bias and not just a rounding: a chapter track's empty edit is
-// spelled in movie ticks, and at 44.1 kHz a millisecond is 44.1 of them, so
-// converting the edit back to the millisecond grid the chapter was authored on
-// truncates a whole millisecond off the track's anchor. Rounding recovers the
-// authored value exactly, since the movie-tick error is a fraction of a tick and
-// every audio rate makes a tick far shorter than the millisecond it lands in.
-func mulDivRound(a, b, c int64) int64 {
-	if a <= 0 || b <= 0 || c <= 0 {
-		return 0
-	}
-	hi, lo := bits.Mul64(uint64(a), uint64(b))
-	// a and b are int64, so the product is below 2^126 and hi below 2^62: the
-	// half-divisor carry cannot overflow hi.
-	lo, carry := bits.Add64(lo, uint64(c)/2, 0)
-	hi += carry
-	if hi >= uint64(c) {
-		return math.MaxInt64 // quotient would exceed 64 bits
-	}
-	q, _ := bits.Div64(hi, lo, uint64(c))
-	if q > math.MaxInt64 {
-		return math.MaxInt64
-	}
-	return int64(q)
 }
 
 // parseUdta walks the user-data box for Nero chapters (chpl) and the
@@ -469,7 +432,7 @@ func (d *Demuxer) readTextChapters(ct *track) []Chapter {
 	// The rescale rounds because the two grids do not divide each other: the
 	// edit is in movie ticks, 44.1 of which make a millisecond at 44.1 kHz, and
 	// truncating would move the anchor a millisecond rather than a tick.
-	shift := mulDivRound(ct.emptyEdit, ct.timescale, d.movieTimescale)
+	shift := satmath.MulDivRound(ct.emptyEdit, ct.timescale, d.movieTimescale)
 	var out []Chapter
 	for i := range n {
 		size := int(st.sizes[i])
@@ -488,14 +451,14 @@ func (d *Demuxer) readTextChapters(ct *track) []Chapter {
 		// pts*time.Second can overflow int64 for a hostile pts or a tiny
 		// timescale; the saturating rescale keeps chapter times from wrapping
 		// negative. mulDivSat returns 0 when ct.timescale is not positive.
-		start := time.Duration(mulDivSat(pts+shift, int64(time.Second), ct.timescale))
+		start := time.Duration(satmath.MulDiv(pts+shift, int64(time.Second), ct.timescale))
 		// A text track times every chapter to its end, which is why this
 		// source outranks chpl: chpl has nowhere to put an end. A
 		// zero-duration sample leaves End zero, which reads as "until the
 		// next chapter" exactly as a chpl entry does.
 		end := time.Duration(0)
 		if dur > 0 {
-			end = time.Duration(mulDivSat(pts+shift+dur, int64(time.Second), ct.timescale))
+			end = time.Duration(satmath.MulDiv(pts+shift+dur, int64(time.Second), ct.timescale))
 		}
 		out = append(out, Chapter{Start: start, End: end, Title: sanitizeTitle(buf[2 : 2+textLen])})
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/colespringer/waxflow/codec/alac"
 	"github.com/colespringer/waxflow/codec/flac"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/satmath"
 )
 
 // chapterSpacing is the gap between synthetic chapters. It is a whole number
@@ -395,8 +396,8 @@ func TestChapterAnchorRescaleRounds(t *testing.T) {
 	for _, rate := range []int64{44100, 48000, 22050, 96000} {
 		t.Run(fmt.Sprint(rate), func(t *testing.T) {
 			for ms := int64(0); ms < 20000; ms += 7 {
-				empty := mulDivSat(ms, rate, chapterTimescale) // what editDurs writes
-				if got := mulDivRound(empty, chapterTimescale, rate); got != ms {
+				empty := satmath.MulDiv(ms, rate, chapterTimescale) // what editDurs writes
+				if got := satmath.MulDivRound(empty, chapterTimescale, rate); got != ms {
 					t.Fatalf("a chapter at %d ms writes an empty edit of %d movie ticks and reads back at %d ms",
 						ms, empty, got)
 				}
@@ -405,7 +406,7 @@ func TestChapterAnchorRescaleRounds(t *testing.T) {
 	}
 	// And the truncating rescale beside it does not round trip, which is what
 	// makes the one above a choice rather than a spelling.
-	if empty := mulDivSat(1, 44100, chapterTimescale); mulDivSat(empty, chapterTimescale, 44100) == 1 {
+	if empty := satmath.MulDiv(1, 44100, chapterTimescale); satmath.MulDiv(empty, chapterTimescale, 44100) == 1 {
 		t.Fatal("the premise moved: truncating now round trips a millisecond at 44.1 kHz")
 	}
 }
@@ -519,7 +520,7 @@ func TestProgressiveChapterZeroStartNoEdit(t *testing.T) {
 	// The duration a muxer with no notion of an empty edit writes: the whole
 	// media rescaled onto the movie timeline, with nothing added ahead of it and
 	// no clamp biting. An untrimmed movie must not move off it.
-	want4 := mulDivSat(chapterTrackMediaDur(t, file), 48000, chapterTimescale)
+	want4 := satmath.MulDiv(chapterTrackMediaDur(t, file), 48000, chapterTimescale)
 	if got := tkhdDuration(t, tkhd); got != want4 {
 		t.Errorf("chapter tkhd duration = %d movie ticks, want %d", got, want4)
 	}

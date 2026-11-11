@@ -210,6 +210,7 @@ func (d *Demuxer) sv7Walk() error {
 		if err := d.warn(d.w.DataEnd(), "the header declares %d samples but the frames present deliver %d", declared, deliverable); err != nil {
 			return err
 		}
+		d.truncated = declared - deliverable
 		samples = deliverable
 	}
 	d.track.Samples = samples

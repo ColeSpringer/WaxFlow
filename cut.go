@@ -239,6 +239,10 @@ type cutResult struct {
 	// trims is the source's inner trims the windows were placed around, the
 	// ones the view forwards; a packet carrying any other refuses.
 	trims []container.PacketTrim
+	// toEnd says the last span reaches the end of the source, however it was
+	// spelled: ToEnd, an end clamped to the source's, or one that lands on it.
+	// What a source cut short lost off its end is past every other cut.
+	toEnd bool
 }
 
 // maxCutSample is the ceiling every input to the grid arithmetic must sit
@@ -857,7 +861,8 @@ func computeCut(track container.Track, opts TranscodeOptions, spans []Span, grid
 		lastEnd = dt[n-1]
 	}
 	return &cutResult{track: out, landed: landed, windows: windows, lastEnd: lastEnd,
-		blind: track.Samples < 0 || track.SamplesAdvisory, trims: track.MidTrims}, nil
+		blind: track.Samples < 0 || track.SamplesAdvisory, trims: track.MidTrims,
+		toEnd: lastToEnd || tailClamped || track.Samples >= 0 && spans[n-1].To >= track.Samples}, nil
 }
 
 // adoptMeasured overlays onto a fresh header open the facts only a measurement
@@ -912,7 +917,7 @@ func Cut(demux container.Demuxer, track container.Track, opts TranscodeOptions, 
 		return nil, err
 	}
 	return &cutDemuxer{Demuxer: demux, cut: res.track, track: track.ID, windows: res.windows, damage: container.DamageOf(demux),
-		lastEnd: res.lastEnd, blind: res.blind, trims: res.trims}, nil
+		lastEnd: res.lastEnd, blind: res.blind, trims: res.trims, toEnd: res.toEnd}, nil
 }
 
 // cutDemuxer is Cut's view: the windows in source raw coordinates, the walk's
@@ -926,6 +931,7 @@ type cutDemuxer struct {
 	blind   bool                   // the source's total was absent or advisory
 	damage  int                    // the source's damage warnings when the view was made
 	trims   []container.PacketTrim // the source's inner trims the plan placed
+	toEnd   bool                   // the last span reaches the source's end (cutResult.toEnd)
 	cur     int
 	pos     int64 // the next source packet's raw position
 	out     int64 // the next kept packet's output position, on the delivered timeline
@@ -960,6 +966,17 @@ func (c *cutDemuxer) Warnings() []container.Warning {
 		return w.Warnings()
 	}
 	return nil
+}
+
+// TruncatedSamples forwards the source's count (container.Truncated) for a
+// cut whose last span reaches the end of the source, which is where a file
+// cut short lost its audio. One that stops short of it holds all it asked
+// for. A Slice draws the same line, so the count does not turn on the rung.
+func (c *cutDemuxer) TruncatedSamples(track int) int64 {
+	if !c.toEnd {
+		return 0
+	}
+	return container.TruncatedOf(c.Demuxer, track)
 }
 
 func (c *cutDemuxer) ReadPacket(pkt *container.Packet) error {

@@ -117,6 +117,17 @@ func probeTotal(t *testing.T, raw []byte) (container.Track, []container.Warning)
 	return d.Tracks()[0], d.Warnings()
 }
 
+// truncatedBy is how many samples the stream's header declares past its
+// frames (container.Truncated).
+func truncatedBy(t *testing.T, raw []byte) int64 {
+	t.Helper()
+	d, err := NewDemuxer(container.BytesSource(raw), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return container.TruncatedOf(d, 0)
+}
+
 // countKinds splits a warning list.
 func countKinds(ws []container.Warning) (damage, notes int) {
 	for _, w := range ws {
@@ -160,6 +171,9 @@ func TestOggFLACDeclaredTotalIsVerified(t *testing.T) {
 				if tr.Samples != granule || !tr.SamplesExact {
 					t.Errorf("%d samples (exact %v), want %d exact", tr.Samples, tr.SamplesExact, granule)
 				}
+				if got := truncatedBy(t, patchOggFLACTotal(t, raw, granule)); got != 0 {
+					t.Errorf("%d samples truncated from a stream that holds its total", got)
+				}
 				if len(ws) != 0 {
 					t.Errorf("a total the granule confirms must report nothing: %v", ws)
 				}
@@ -175,6 +189,9 @@ func TestOggFLACDeclaredTotalIsVerified(t *testing.T) {
 				if damage != 0 || notes != 1 {
 					t.Errorf("%d damage, %d notes, want one note: a stream running past its own "+
 						"total is inconsistent, not damaged: %v", damage, notes, ws)
+				}
+				if got := truncatedBy(t, patchOggFLACTotal(t, raw, granule-100)); got != 0 {
+					t.Errorf("%d samples truncated from a stream that outruns its total", got)
 				}
 				// And a strict open still succeeds, which is what separates a
 				// Note from a warning.
@@ -204,6 +221,9 @@ func TestOggFLACDeclaredTotalIsVerified(t *testing.T) {
 				}
 				if got := readDelivers(t, cut); got != tr.Samples {
 					t.Errorf("the open reports %d samples, a read delivers %d", tr.Samples, got)
+				}
+				if got, want := truncatedBy(t, cut), granule-tr.Samples; got != want {
+					t.Errorf("%d samples truncated, want the %d the total declares past the frames", got, want)
 				}
 				damage, notes := countKinds(ws)
 				if damage != 1 || notes != 0 {
@@ -334,6 +354,7 @@ type nopReporter struct{}
 
 func (nopReporter) warn(int64, string, ...any) error { return nil }
 func (nopReporter) note(int64, string, ...any)       {}
+func (nopReporter) truncatedBy(int64)                {}
 
 // TestOggFLACMuxAcceptsWhatItCanDemux: the muxer must not refuse a STREAMINFO
 // this tree opens and decodes. Parsing is looser than marshalling (block bounds

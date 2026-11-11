@@ -372,7 +372,9 @@ type Packet struct {
 	// reader delivers that many samples of silence before this packet's
 	// output, so everything after a hole sits where the stream places it and
 	// a declared exact length is still what a read delivers. Zero except on
-	// the first packet after a hole, which also has Discont set.
+	// the first packet after a hole, which also has Discont set. A reader
+	// that delivers the silence counts it (format.Info.Lost), since the
+	// length then no longer says how much of the stream is the file's own.
 	Lost int64
 	codec.Packet
 }
@@ -470,6 +472,33 @@ type Warner interface {
 // caller can tell whether a read met any since it last looked.
 type Damaged interface {
 	DamageCount() int
+}
+
+// Truncated is implemented by a demuxer that can say how many samples a
+// track's header declares past the end of what its payload holds: the audio a
+// file cut short lost off its end. A demuxer counts it where it reports that
+// shortfall as Damage and adopts the shorter length, on the timeline that
+// length is on: the settled Track.Samples is what is there and this is how
+// much more the file claimed, so frames that were only end padding count
+// nothing. Unlike a hole (Packet.Lost) nothing stands in for it in a read,
+// which simply ends.
+//
+// It is 0 for a whole file, for a header that states no length to fall short
+// of, and for a claim the demuxer cannot count in samples (ASF's packets, a
+// Matroska Duration). A demuxer whose walk is deferred (Walker) knows it once
+// that walk, or a read to the end of the payload, has held the declared count
+// against what is there.
+type Truncated interface {
+	TruncatedSamples(track int) int64
+}
+
+// TruncatedOf is how many samples d's track is truncated by, 0 for a demuxer
+// that keeps no count.
+func TruncatedOf(d Demuxer, track int) int64 {
+	if t, ok := d.(Truncated); ok {
+		return t.TruncatedSamples(track)
+	}
+	return 0
 }
 
 // DamageOf is the damage d has met: its own count where it keeps one, else the

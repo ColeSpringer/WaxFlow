@@ -238,3 +238,38 @@ func TestPerPacketPaddingCannotOutrunItsPacket(t *testing.T) {
 		t.Errorf("a trim of five packets on the last one delivered %d, want %d", got, want)
 	}
 }
+
+// TestSettleShortfall: what a run of raw samples cannot supply of a declared
+// length is what SettleLength takes off it, on the timeline the length is on:
+// frames that were only priming or padding are not audio the run failed to
+// hold, and a track that declared no length has none to fall short of.
+func TestSettleShortfall(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		track container.Track
+		raw   int64
+		want  int64
+	}{
+		{"a bare count, short", container.Track{Samples: 10000}, 7000, 3000},
+		{"a bare count, whole", container.Track{Samples: 10000}, 10000, 0},
+		{"a bare count, overrun", container.Track{Samples: 10000}, 12000, 0},
+		{"trims, cut inside the padding", container.Track{Samples: 8000, Delay: 1000, Padding: 1000}, 9500, 0},
+		{"trims, cut inside the audio", container.Track{Samples: 8000, Delay: 1000, Padding: 1000}, 7000, 2000},
+		{"trims, cut inside the priming", container.Track{Samples: 8000, Delay: 1000, Padding: 1000}, 600, 8000},
+		{"an exact length, short", container.Track{Samples: 10000, SamplesExact: true}, 7000, 3000},
+		{"no length", container.Track{Samples: -1}, 7000, 0},
+		{"an advisory length", container.Track{Samples: 10000, SamplesAdvisory: true}, 7000, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := container.SettleShortfall(tc.track, tc.raw)
+			if got != tc.want {
+				t.Fatalf("a shortfall of %d, want %d", got, tc.want)
+			}
+			if tc.track.Samples >= 0 && !tc.track.SamplesAdvisory {
+				if settled := container.SettleLength(tc.track, tc.raw).Samples; tc.raw < tc.track.Delay+tc.track.Samples && settled+got != tc.track.Samples {
+					t.Fatalf("settled %d and short %d do not make the declared %d", settled, got, tc.track.Samples)
+				}
+			}
+		})
+	}
+}

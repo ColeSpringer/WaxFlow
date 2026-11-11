@@ -108,6 +108,11 @@ type Walker struct {
 	compared   bool
 	endFinding bool
 	skipped    bool
+	// tag is the metadata frame behind declared, whose trims put a shortfall
+	// on the played timeline, and truncated is that shortfall where compare
+	// found it to be damage and the owner took the warning.
+	tag       VBRInfo
+	truncated int64
 	// refused is the error the owner's hook returned, kept: the walk is not
 	// done while it stands, and every extension returns it again.
 	refused error
@@ -243,7 +248,7 @@ func (w *Walker) Begin(off int64) (VBRInfo, bool, error) {
 			tag.Frames = 0
 		}
 	}
-	w.declared = tag.Frames
+	w.declared, w.tag = tag.Frames, tag
 
 	w.hdr = h
 	w.spf = int64(h.SamplesPerFrame())
@@ -296,9 +301,25 @@ func (w *Walker) compare() error {
 		w.note(end, "the metadata frame declares %d frames but the run holds %d", w.declared, n)
 		return nil
 	default:
-		return w.warn(end, "the metadata frame declares %d frames but the run holds %d", w.declared, n)
+		if err := w.warn(end, "the metadata frame declares %d frames but the run holds %d", w.declared, n); err != nil {
+			return err
+		}
+		// What settling the declared track against the run takes off its
+		// length, by the rule that settles it: the frames short of the
+		// count, less whatever of them was the encoder's padding.
+		samples, delay, padding := w.tag.Gapless(w.spf)
+		declared := container.Track{Samples: samples, Delay: delay, Padding: padding}
+		w.truncated = container.SettleShortfall(declared, n*w.spf)
+		return nil
 	}
 }
+
+// Truncated is how many samples of audio the metadata frame's count declares
+// past the end of the run (container.Truncated), on the played timeline: what
+// settling the declared length against the run takes off it. It is 0 until
+// the walk has reached that end and compared the two, 0 when the count holds
+// or is merely loose, and 0 when the frames missing were only padding.
+func (w *Walker) Truncated() int64 { return w.truncated }
 
 // runEnd is where the last indexed frame ends, which is where a count that
 // disagrees with the run is reported: the offset the frames it promised
