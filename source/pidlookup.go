@@ -17,8 +17,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/colespringer/waxflow/internal/flight"
+	"github.com/colespringer/waxflow/internal/reftext"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -63,9 +65,10 @@ type PIDLookupOptions struct {
 
 // PIDLookup resolves pid:<id> references by asking a host over HTTP for the
 // root-relative reference behind each one, then opening that through the
-// resolver it wraps: GET <base>/<id> answers {"ref": "<root>/<path>"}. The
-// opened file keeps the pid as its Ref, so cache keys and signed URLs
-// survive a rename the host tracks. An answer is remembered only as long
+// resolver it wraps: GET <base>/<id> answers {"ref": "<root>/<path>"}, the
+// reference in text form (see Ref), so a name that is not UTF-8 is written
+// pct:. The opened file keeps the pid as its Ref, so cache keys and signed
+// URLs survive a rename the host tracks. An answer is remembered only as long
 // as its Cache-Control max-age allows (an hour at most) and only once its
 // file opened; a remembered path that turns out gone is asked again once.
 // Errors name the pid and a status, never the host or a path: a pid exists
@@ -286,17 +289,17 @@ func (l *PIDLookup) open(ctx context.Context, id, ref, target string) (*File, er
 	case waxerr.CodeRootUnavailable, waxerr.CodePayloadTooLarge, waxerr.CodeCanceled:
 		return nil, err
 	case waxerr.CodeInvalidRequest, waxerr.CodeUnsupportedSource:
-		l.log.Warn("pid lookup answered an unusable reference", "pid", id, "ref", clip(target), "err", clip(err.Error()))
+		l.log.Warn("pid lookup answered an unusable reference", "pid", id, "ref", clip(Ref(target).Text()), "err", clip(err.Error()))
 		return nil, pidBroken(id, "answered an unusable reference")
 	case waxerr.CodeNotFound:
 		level := slog.LevelDebug // a rename the host has not indexed yet
 		if !errors.Is(err, fs.ErrNotExist) {
 			level = slog.LevelWarn // a root this daemon does not have
 		}
-		l.log.Log(ctx, level, "pid lookup answered a reference with nothing behind it", "pid", id, "ref", clip(target), "err", clip(err.Error()))
+		l.log.Log(ctx, level, "pid lookup answered a reference with nothing behind it", "pid", id, "ref", clip(Ref(target).Text()), "err", clip(err.Error()))
 		return nil, waxerr.New(code, fmt.Sprintf("source: nothing is behind pid %q", id))
 	}
-	l.log.Warn("the file behind a pid did not open", "pid", id, "ref", clip(target), "err", clip(err.Error()))
+	l.log.Warn("the file behind a pid did not open", "pid", id, "ref", clip(Ref(target).Text()), "err", clip(err.Error()))
 	return nil, waxerr.New(code, fmt.Sprintf("source: the file behind pid %q did not open: %s", id, code))
 }
 
@@ -375,14 +378,20 @@ func (l *PIDLookup) ask(parent context.Context, id string) (string, time.Duratio
 	if len(body) > maxPIDAnswerBytes {
 		return "", 0, l.broken(id, body, fmt.Sprintf("more than %d bytes", maxPIDAnswerBytes))
 	}
+	// Ref decodes strictly, and only ref is held to it: the fields beside
+	// it are ignored, whatever they hold.
 	var answer struct {
-		Ref string `json:"ref"`
+		Ref Ref `json:"ref"`
 	}
 	if err := json.Unmarshal(body, &answer); err != nil {
-		return "", 0, l.broken(id, body, "not JSON")
+		why := "not JSON"
+		if waxerr.CodeOf(err) == waxerr.CodeInvalidRequest {
+			why = strings.TrimPrefix(err.Error(), "source: ") // the reference's own refusal
+		}
+		return "", 0, l.broken(id, body, why)
 	}
 	// The reference's shape is the roots' to judge (open recodes a refusal).
-	return answer.Ref, maxAge(resp.Header), nil
+	return string(answer.Ref), maxAge(resp.Header), nil
 }
 
 // unreachable codes a failed request: the caller leaving is canceled,
@@ -428,13 +437,26 @@ func pidBroken(id, what string) error {
 	return waxerr.New(waxerr.CodeInternal, fmt.Sprintf("source: pid lookup for %q %s", id, what))
 }
 
-// clip bounds a logged answer.
+// clip makes a logged answer or error legible and bounds it, cutting between
+// characters and never inside a %XX or \xNN escape, so what is shown is the
+// start of what was sent.
 func clip(s string) string {
 	const keep = 160
+	s = reftext.EscapeStray(s)
 	if len(s) <= keep {
 		return s
 	}
-	return s[:keep] + " (clipped)"
+	cut := keep
+	for back := 0; back < utf8.UTFMax-1 && !utf8.RuneStart(s[cut]); back++ {
+		cut--
+	}
+	if i := strings.LastIndexByte(s[cut-2:cut], '%'); i >= 0 {
+		cut += i - 2
+	}
+	if i := strings.LastIndex(s[cut-3:cut], `\x`); i >= 0 {
+		cut += i - 3
+	}
+	return s[:cut] + " (clipped)"
 }
 
 // validPID accepts 1 to maxPIDLen bytes of A-Z, a-z, 0-9, '_' and '-': one

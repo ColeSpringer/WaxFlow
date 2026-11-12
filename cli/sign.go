@@ -11,6 +11,7 @@ import (
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/internal/config"
 	"github.com/colespringer/waxflow/internal/sign"
+	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 	urlpkg "net/url"
 )
@@ -42,6 +43,13 @@ minted here dies with 410 source-changed if the file changes.`,
 			if src == "" {
 				return waxerr.New(waxerr.CodeInvalidRequest, "--src is required")
 			}
+			// Read as the daemon reads one, so a reference copied from a job
+			// document or a log line works; the URL names its own bytes.
+			ref, err := source.ParseRef(src)
+			if err != nil {
+				return err
+			}
+			src = string(ref)
 
 			// CLI convention: diagnostics from the resolver chain go to
 			// stderr; the minted URL alone lands on stdout.
@@ -60,7 +68,7 @@ minted here dies with 410 source-changed if the file changes.`,
 			}
 			defer f.Close()
 
-			params := urlpkg.Values{"src": {src}, "id": {f.ID.String()}}
+			params := urlpkg.Values{"src": {ref.QueryValue()}, "id": {f.ID.String()}}
 			if format != "" {
 				params.Set("format", format)
 			}

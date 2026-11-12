@@ -3,10 +3,12 @@ package timeline
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -22,7 +24,7 @@ func testStore(t *testing.T) *Store {
 func members(refs ...string) []Member {
 	out := make([]Member, len(refs))
 	for i, r := range refs {
-		out[i] = Member{Src: r, ID: "100-200"}
+		out[i] = Member{Src: source.Ref(r), ID: "100-200"}
 	}
 	return out
 }
@@ -419,5 +421,27 @@ func TestPutBoundsMembers(t *testing.T) {
 	}
 	if _, err := s.Put(members(refs...), later()); err == nil {
 		t.Errorf("a timeline of %d members was stored past the %d bound", len(refs), MaxMembers)
+	}
+}
+
+// TestMembersCarryAnyReference: the store and the digest are JSON, which
+// would turn a name that is not UTF-8 into another file's, and two such
+// names into one digest.
+func TestMembersCarryAnyReference(t *testing.T) {
+	s := testStore(t)
+	want := []Member{{Src: "lib/caf\xe9.flac", ID: "1-2"}, {Src: "lib/100% \xff.flac", ID: "3-4"}}
+	digest, err := s.Put(want, later())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Members(digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("members came back %#v, want %#v", got, want)
+	}
+	if other := Digest([]Member{{Src: "lib/caf\xe8.flac", ID: "1-2"}, want[1]}); other == digest {
+		t.Fatal("two queues that differ in one stray byte share a digest")
 	}
 }

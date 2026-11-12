@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxflow/internal/config"
+	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
@@ -125,6 +127,156 @@ func TestSignResolvesPIDThroughLookup(t *testing.T) {
 	}
 }
 
+// TestSignTakesAReferenceInTextForm: a reference copied out of a job
+// document or a log line is in text form, and --src reads it as the daemon
+// does. The URL names the reference's own bytes either way.
+func TestSignTakesAReferenceInTextForm(t *testing.T) {
+	dir := trackRoot(t)
+	code, out, stderr := run(t, "sign", "--src", "pct:lib%2Ftrack.wav")
+	if code != 0 || !strings.HasSuffix(strings.TrimSpace(out), "&src=lib%2Ftrack.wav") {
+		t.Fatalf("exit = %d, URL %s; stderr: %s", code, out, stderr)
+	}
+	code, _, stderr = run(t, "sign", "--src", "pct:lib/100%")
+	if want := waxerr.CodeInvalidRequest.ExitCode(); code != want {
+		t.Fatalf("a malformed escape: exit = %d, want %d; stderr: %s", code, want, stderr)
+	}
+	name, escaped, ok := testutil.NonUTF8Name()
+	if !ok {
+		return // this platform's file names are all valid UTF-8
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, src := range []string{"pct:lib/" + escaped, "lib/" + name} {
+		code, out, stderr = run(t, "sign", "--src", src)
+		if code != 0 || !strings.HasSuffix(strings.TrimSpace(out), "&src=lib%2F"+escaped) {
+			t.Errorf("--src %q: exit = %d, URL %s; stderr: %s", src, code, out, stderr)
+		}
+	}
+}
+
+// TestRootAtANonUTF8Path: a compose file holds only UTF-8, so a root whose
+// folder path is not is configured in text form, and doctor says the path
+// the same way.
+func TestRootAtANonUTF8Path(t *testing.T) {
+	name, _, ok := testutil.NonUTF8Name()
+	if !ok {
+		t.Skip("this platform's file names are all valid UTF-8")
+	}
+	dir := filepath.Join(t.TempDir(), name)
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "track.wav"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	text := source.Ref(dir).Text()
+	t.Setenv("WAXFLOW_ROOTS", "lib="+text)
+	t.Setenv("WAXFLOW_DATA_DIR", t.TempDir())
+	if code, _, stderr := run(t, "sign", "--src", "lib/track.wav"); code != 0 {
+		t.Fatalf("sign under the root: exit = %d; stderr: %s", code, stderr)
+	}
+	_, out, _ := run(t, "doctor", "--json")
+	var report struct {
+		Checks []struct{ Name, Status, Detail string }
+	}
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("decoding doctor JSON: %v\n%s", err, out)
+	}
+	for _, c := range report.Checks {
+		if c.Name == "root:lib" {
+			if c.Status != "ok" || !strings.Contains(c.Detail, text) {
+				t.Errorf("root:lib = %s %q, want ok naming %s", c.Status, c.Detail, text)
+			}
+			return
+		}
+	}
+	t.Fatalf("doctor reported no root:lib check:\n%s", out)
+}
+
+// TestDoctorNamesEveryPathInTextForm: the directory rows sit under the root
+// rows and are JSON like them, so a path that is not UTF-8 is written the
+// way the configuration spells it there too.
+func TestDoctorNamesEveryPathInTextForm(t *testing.T) {
+	name, _, ok := testutil.NonUTF8Name()
+	if !ok {
+		t.Skip("this platform's file names are all valid UTF-8")
+	}
+	trackRoot(t)
+	want := map[string]string{}
+	for check, env := range map[string]string{"data": "WAXFLOW_DATA_DIR", "cache": "WAXFLOW_CACHE_DIR", "scratch": "WAXFLOW_SCRATCH_DIR"} {
+		want[check] = source.Ref(filepath.Join(t.TempDir(), name)).Text()
+		t.Setenv(env, want[check])
+	}
+	_, out, _ := run(t, "doctor", "--json")
+	var report struct {
+		Checks []struct{ Name, Status, Detail string }
+	}
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("decoding doctor JSON: %v\n%s", err, out)
+	}
+	for _, c := range report.Checks {
+		text, listed := want[c.Name]
+		if !listed {
+			continue
+		}
+		delete(want, c.Name)
+		if c.Status != "ok" || !strings.Contains(c.Detail, text) || strings.Contains(c.Detail, "\ufffd") {
+			t.Errorf("%s = %s %q, want ok naming %s", c.Name, c.Status, c.Detail, text)
+		}
+	}
+	if len(want) != 0 {
+		t.Errorf("doctor reported no check for %v:\n%s", want, out)
+	}
+}
+
+// TestSignHintsAnUnmountedRootInTextForm: the hint is there to be pasted
+// back into the configuration, which spells the path in text form.
+func TestSignHintsAnUnmountedRootInTextForm(t *testing.T) {
+	name, _, ok := testutil.NonUTF8Name()
+	if !ok {
+		t.Skip("this platform's file names are all valid UTF-8")
+	}
+	text := source.Ref(filepath.Join(t.TempDir(), name)).Text()
+	t.Setenv("WAXFLOW_ROOTS", "lib="+text)
+	t.Setenv("WAXFLOW_DATA_DIR", t.TempDir())
+	code, _, stderr := run(t, "sign", "--src", "lib/a.flac")
+	if want := waxerr.CodeRootUnavailable.ExitCode(); code != want {
+		t.Fatalf("exit = %d, want %d; stderr: %s", code, want, stderr)
+	}
+	if !strings.Contains(stderr, "configured at "+text) {
+		t.Errorf("stderr %q does not name the configured path as %s", stderr, text)
+	}
+}
+
+// TestDoctorNamesAMissingRootAtANonUTF8Path: the failure quotes the path,
+// and doctor --json is JSON.
+func TestDoctorNamesAMissingRootAtANonUTF8Path(t *testing.T) {
+	name, _, ok := testutil.NonUTF8Name()
+	if !ok {
+		t.Skip("this platform's file names are all valid UTF-8")
+	}
+	text := source.Ref(filepath.Join(t.TempDir(), name)).Text()
+	t.Setenv("WAXFLOW_ROOTS", "lib="+text)
+	t.Setenv("WAXFLOW_DATA_DIR", t.TempDir())
+	_, out, _ := run(t, "doctor", "--json")
+	var report struct {
+		Checks []struct{ Name, Status, Detail string }
+	}
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("decoding doctor JSON: %v\n%s", err, out)
+	}
+	for _, c := range report.Checks {
+		if c.Name == "root:lib" {
+			if c.Status != "fail" || !strings.Contains(c.Detail, text) || strings.Contains(c.Detail, "\ufffd") {
+				t.Errorf("root:lib = %s %q, want a failure naming %s", c.Status, c.Detail, text)
+			}
+			return
+		}
+	}
+	t.Fatalf("doctor reported no root:lib check:\n%s", out)
+}
+
 func TestStockBuildRefusesPIDWithoutLookup(t *testing.T) {
 	t.Setenv("WAXFLOW_DATA_DIR", t.TempDir())
 	code, _, stderr := run(t, "sign", "--src", "pid:"+lookupPID)
@@ -167,6 +319,45 @@ func TestFlavorNextCarriesThePIDLookup(t *testing.T) {
 	}
 	if n := host.requests.Load(); n != 1 {
 		t.Errorf("host saw %d requests, want 1", n)
+	}
+}
+
+// pctScheme serves the reference "pct:abc" itself, as a build that adds a
+// scheme of that name would.
+type pctScheme struct{ next source.Resolver }
+
+func (p pctScheme) Resolve(ctx context.Context, ref string) (*source.File, error) {
+	if ref != "pct:abc" {
+		return p.next.Resolve(ctx, ref)
+	}
+	f, err := p.next.Resolve(ctx, "lib/track.wav")
+	if err == nil {
+		f.Ref = ref
+	}
+	return f, err
+}
+
+// TestSignKeepsAReferenceThatStartsWithTheMarker: the daemon decodes pct:
+// in a query, so a URL that carried such a reference bare would play
+// another one.
+func TestSignKeepsAReferenceThatStartsWithTheMarker(t *testing.T) {
+	trackRoot(t)
+	flavor := Flavor{
+		Name: "pct",
+		OpenResolver: func(_ context.Context, o ResolverOptions) (source.Resolver, io.Closer, error) {
+			return pctScheme{o.Next}, nil, nil
+		},
+	}
+	var out, errOut strings.Builder
+	if code := ExecuteFlavor("test", []string{"sign", "--src", "pct:pct%3Aabc"}, &out, &errOut, flavor); code != 0 {
+		t.Fatalf("exit = %d; stderr: %s", code, errOut.String())
+	}
+	u, err := url.Parse(strings.TrimSpace(out.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := source.ParseRef(u.Query().Get("src")); err != nil || got != "pct:abc" {
+		t.Errorf("the URL's src reads back as %q (%v), want pct:abc: %s", got, err, out.String())
 	}
 }
 

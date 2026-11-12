@@ -11,9 +11,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-	"unicode/utf8"
 
 	"github.com/colespringer/waxflow/internal/timeline"
+	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -44,8 +44,9 @@ type Descriptor struct {
 	// Ver is the schema version, always DescriptorVersion.
 	Ver int `json:"ver"`
 	// Src is the source reference (rootName/rel/path or upload:<id>) of a
-	// single-track stream. Exactly one of Src and Tl is set.
-	Src string `json:"src,omitempty"`
+	// single-track stream, carried in its text form. Exactly one of Src and
+	// Tl is set.
+	Src source.Ref `json:"src,omitempty"`
 	// ID is Src's ADR-0003 source identity (size-mtimeNS). Embedded so a
 	// stale URL can never serve surprise bytes: mismatch means 410. A
 	// timeline needs no counterpart, because its members' identities are
@@ -163,16 +164,20 @@ func DecodeDescriptor(s string) (Descriptor, error) {
 	if err != nil {
 		return bad("is not base64url: %v", err)
 	}
-	// Refused rather than decoded, because encoding/json substitutes U+FFFD for
-	// every invalid byte: a src would silently name a file other than the one
-	// spelled, which is the same class of quiet reinterpretation the
-	// unknown-field rule refuses.
-	if !utf8.Valid(raw) {
-		return bad("is not valid UTF-8")
+	// Refused rather than decoded: a decoder reads a stray byte, or half a
+	// surrogate pair, as U+FFFD. A src would name another file, and any other
+	// field would fail later as something it is not (a changed source, an
+	// unknown format).
+	if err := source.CheckJSON(raw); err != nil {
+		return bad("%v", err)
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&d); err != nil {
+		// A src with a malformed pct: escape speaks for itself.
+		if waxerr.CodeOf(err) == waxerr.CodeInvalidRequest {
+			return bad("src: %v", err)
+		}
 		return bad("is not valid JSON: %v", err)
 	}
 	if dec.More() {

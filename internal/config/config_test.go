@@ -5,7 +5,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -337,6 +339,114 @@ func TestEnvVarsNamesEveryKnob(t *testing.T) {
 	for _, want := range []string{"WAXFLOW_ADDR", "WAXFLOW_PID_LOOKUP_URL", "WAXFLOW_PID_LOOKUP_KEY"} {
 		if !slices.Contains(names, want) {
 			t.Errorf("EnvVars() lacks %s", want)
+		}
+	}
+}
+
+// TestLoadRefusesAFileThatIsNotUTF8: a JSON decoder reads a stray byte as
+// U+FFFD, so a root's path would name another folder. The environment
+// carries the bytes as they are.
+func TestLoadRefusesAFileThatIsNotUTF8(t *testing.T) {
+	path := writeConfig(t, "{\"roots\":[{\"name\":\"lib\",\"path\":\"/music/caf\xe9\"}]}")
+	cfg, err := Load(path, func(string) (string, bool) { return "", false })
+	if waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+		t.Fatalf("Load = %+v, %v; want invalid-request", cfg.Roots, err)
+	}
+	if !strings.Contains(err.Error(), "UTF-8") || !strings.Contains(err.Error(), "pct:") {
+		t.Errorf("the refusal does not state the rule and the form that satisfies it: %v", err)
+	}
+
+	cfg, err = Load("", func(name string) (string, bool) {
+		if name == "WAXFLOW_ROOTS" {
+			return "lib=/music/caf\xe9", true
+		}
+		return "", false
+	})
+	if err != nil || len(cfg.Roots) != 1 || cfg.Roots[0].Path != "/music/caf\xe9" {
+		t.Fatalf("WAXFLOW_ROOTS gave %+v, %v; want the path's own bytes", cfg.Roots, err)
+	}
+}
+
+// TestRootPathTakesTextForm: a folder's path is bytes like a file's name,
+// and neither JSON nor a compose file can hold one that is not UTF-8.
+func TestRootPathTakesTextForm(t *testing.T) {
+	const want = "/music/caf\xe9"
+	path := writeConfig(t, `{"roots":[{"name":"lib","path":"pct:/music/caf%E9"},{"name":"hits","path":"/music/100% hits"}]}`)
+	cfg, err := Load(path, envMap(nil))
+	if err != nil || len(cfg.Roots) != 2 || cfg.Roots[0].Path != want || cfg.Roots[1].Path != "/music/100% hits" {
+		t.Fatalf("the file gave %+q, %v", cfg.Roots, err)
+	}
+	cfg, err = Load("", envMap(map[string]string{"WAXFLOW_ROOTS": "lib=pct:/music/caf%E9"}))
+	if err != nil || len(cfg.Roots) != 1 || cfg.Roots[0].Path != want {
+		t.Fatalf("WAXFLOW_ROOTS gave %+q, %v", cfg.Roots, err)
+	}
+	_, err = Load("", envMap(map[string]string{"WAXFLOW_ROOTS": "lib=pct:/music/100%"}))
+	if waxerr.CodeOf(err) != waxerr.CodeInvalidRequest || !strings.Contains(err.Error(), "lib") {
+		t.Fatalf("a malformed escape gave %v, want invalid-request naming the root", err)
+	}
+}
+
+// TestEveryPathTakesTextForm: the refusal of a file that is not UTF-8 tells
+// the operator to write pct:, so every path the file can hold has to read
+// it, or the daemon would make a folder named "pct:/srv/caf%E9".
+func TestEveryPathTakesTextForm(t *testing.T) {
+	const want = "/srv/caf\xe9"
+	path := writeConfig(t, `{"dataDir":"pct:/srv/caf%E9","cacheDir":"pct:/srv/caf%E9","scratchDir":"pct:/srv/caf%E9",
+		"tlsCert":"pct:/srv/caf%E9","tlsKey":"pct:/srv/caf%E9","catalogDB":"pct:/srv/caf%E9"}`)
+	cfg, err := Load(path, envMap(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, got := range map[string]string{"dataDir": cfg.DataDir, "cacheDir": cfg.CacheDir, "scratchDir": cfg.ScratchDir,
+		"tlsCert": cfg.TLSCert, "tlsKey": cfg.TLSKey, "catalogDB": cfg.CatalogDB} {
+		if got != want {
+			t.Errorf("%s = %q, want the path's own bytes %q", name, got, want)
+		}
+	}
+	cfg, err = Load("", envMap(map[string]string{"WAXFLOW_CACHE_DIR": "pct:/srv/caf%E9"}))
+	if err != nil || cfg.CacheDir != want {
+		t.Fatalf("WAXFLOW_CACHE_DIR gave %q, %v", cfg.CacheDir, err)
+	}
+	_, err = Load("", envMap(map[string]string{"WAXFLOW_CACHE_DIR": "pct:/srv/100%"}))
+	if waxerr.CodeOf(err) != waxerr.CodeInvalidRequest || !strings.Contains(err.Error(), "cacheDir") {
+		t.Fatalf("a malformed escape gave %v, want invalid-request naming the field", err)
+	}
+}
+
+// TestLoadRefusesAnEscapedLoneSurrogate: \udce9 is ASCII, so the file is
+// valid UTF-8, and a decoder still reads it as U+FFFD.
+func TestLoadRefusesAnEscapedLoneSurrogate(t *testing.T) {
+	path := writeConfig(t, `{"roots":[{"name":"lib","path":"/music/caf\udce9"}]}`)
+	cfg, err := Load(path, envMap(nil))
+	if waxerr.CodeOf(err) != waxerr.CodeInvalidRequest || !strings.Contains(err.Error(), "pct:") {
+		t.Fatalf("Load = %+q, %v; want invalid-request naming the pct: form", cfg.Roots, err)
+	}
+}
+
+// TestEveryStringFieldIsAPathOrNot guards the two above: a string field
+// added to Config is either read from text form or listed here as holding
+// no path, so a new directory setting cannot miss the decode.
+func TestEveryStringFieldIsAPathOrNot(t *testing.T) {
+	notPaths := map[string]bool{
+		"addr": true, "logLevel": true, "pidLookupURL": true, "pidLookupKey": true, "metricsKey": true,
+		"signingSecret": true, "cacheMaxAge": true, "uploadTTL": true, "defaultGain": true,
+		"resampleProfile": true, "debugAddr": true, "liveIdleGrace": true, "hlsIdleGrace": true,
+	}
+	var cfg Config
+	paths := map[*string]bool{}
+	for _, f := range pathFields(&cfg) {
+		paths[f.value] = true
+	}
+	v := reflect.ValueOf(&cfg).Elem()
+	for i := range v.NumField() {
+		field := v.Type().Field(i)
+		if field.Type.Kind() != reflect.String {
+			continue
+		}
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		isPath := paths[v.Field(i).Addr().Interface().(*string)]
+		if isPath == notPaths[name] {
+			t.Errorf("%s (%s): path = %v, listed as not a path = %v; it is one or the other", field.Name, name, isPath, notPaths[name])
 		}
 	}
 }

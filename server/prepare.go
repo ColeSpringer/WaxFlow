@@ -347,7 +347,7 @@ func (s *Server) cutPlanFor(ctx context.Context, req *streamRequest) *waxflow.Cu
 	}
 	decline := func(reason string, args ...any) *waxflow.CutPlan {
 		kv := make([]any, 0, 4+len(args))
-		kv = append(kv, "reason", reason, "src", req.p.src)
+		kv = append(kv, "reason", reason, "src", source.Ref(req.p.src))
 		kv = append(kv, args...)
 		s.log.Debug("cut declined", kv...)
 		return nil

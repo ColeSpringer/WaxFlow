@@ -1,6 +1,10 @@
 package server
 
 import (
+	"encoding/json"
+	"maps"
+	"net/url"
+	"slices"
 	"time"
 
 	"github.com/colespringer/waxflow"
@@ -9,7 +13,9 @@ import (
 	"github.com/colespringer/waxflow/dsp/silence"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/meta"
+	"github.com/colespringer/waxflow/internal/reftext"
 	"github.com/colespringer/waxflow/internal/timeline"
+	"github.com/colespringer/waxflow/source"
 )
 
 // probeMetadata summarizes an internal metadata read for ProbeJSON.
@@ -130,7 +136,7 @@ type ProbeMetadata struct {
 // ProbeJSON maps a format.Info (and, when metadata was read, its
 // summary) onto the wire shape.
 func ProbeJSON(info *format.Info, m *ProbeMetadata) ProbeInfo {
-	out := ProbeInfo{SchemaVersion: 1, Container: info.Container, Warnings: info.Warnings, Notes: info.Notes,
+	out := ProbeInfo{SchemaVersion: 1, Container: info.Container, Warnings: legible(info.Warnings), Notes: legible(info.Notes),
 		TruncatedSamples: info.Truncated}
 	if m != nil {
 		out.HasArt = m.HasArt
@@ -448,7 +454,7 @@ type TimelineRequest struct {
 
 // TimelineSrc is one member of a timeline request.
 type TimelineSrc struct {
-	Src string `json:"src"`
+	Src source.Ref `json:"src"`
 	// From and To bound the member to the sample window [From, To) of its
 	// own source, with /stream's span semantics exactly: source samples, To
 	// exclusive, 0 (or absent) running to the end, the zero pair the whole
@@ -490,9 +496,101 @@ type SignRequest struct {
 	Path string `json:"path,omitempty"`
 	// Params are the playback query parameters (src required). The
 	// source identity (id), exp, kid, and sig are added by the server.
-	Params map[string]string `json:"params"`
+	Params SignParams `json:"params"`
 	// TTLSeconds overrides the default TTL max(6h, 2 x duration).
 	TTLSeconds int64 `json:"ttlSeconds,omitempty"`
+}
+
+// legible returns notes with each one's stray bytes written \xNN, as a job
+// document shows the same notes. The list is the engine's and may be shared,
+// so it is copied only when one changes.
+func legible(notes []string) []string {
+	for i, note := range notes {
+		if esc := reftext.EscapeStray(note); esc != note {
+			out := slices.Clone(notes)
+			for j := i; j < len(out); j++ {
+				out[j] = reftext.EscapeStray(out[j])
+			}
+			return out
+		}
+	}
+	return notes
+}
+
+// SignParams are a sign request's playback parameters, as a query string
+// would carry them, except that src is the reference's own bytes: JSON
+// carries it in text form, read as strictly as any Ref, and query writes it
+// as a query reader takes it.
+type SignParams map[string]string
+
+// signParamsOf reads the parameters a query string carries.
+func signParamsOf(q url.Values) (SignParams, error) {
+	p := make(SignParams, len(q))
+	for k := range q {
+		p[k] = q.Get(k)
+	}
+	if q.Has("src") {
+		src, err := srcParam(q)
+		if err != nil {
+			return nil, err
+		}
+		p["src"] = src
+	}
+	return p, nil
+}
+
+// src returns the reference, and whether the parameter is there at all.
+func (p SignParams) src() (string, bool) {
+	ref, ok := p["src"]
+	return ref, ok
+}
+
+// MarshalJSON implements json.Marshaler.
+func (p SignParams) MarshalJSON() ([]byte, error) {
+	out := map[string]string(p)
+	if ref, ok := p.src(); ok {
+		out = maps.Clone(out)
+		out["src"] = source.Ref(ref).Text()
+	}
+	return json.Marshal(out)
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (p *SignParams) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	out := make(SignParams, len(raw))
+	for k, v := range raw {
+		if k == "src" {
+			var ref source.Ref
+			if err := json.Unmarshal(v, &ref); err != nil {
+				return err
+			}
+			out[k] = string(ref)
+			continue
+		}
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			return err
+		}
+		out[k] = s
+	}
+	*p = out
+	return nil
+}
+
+// query is the parameters as the query string they stand for.
+func (p SignParams) query() url.Values {
+	q := make(url.Values, len(p))
+	for k, v := range p {
+		q.Set(k, v)
+	}
+	if ref, ok := p.src(); ok {
+		q.Set("src", source.Ref(ref).QueryValue())
+	}
+	return q
 }
 
 // SignResponse is the POST /sign body: a ready-to-fetch relative URL.
@@ -550,7 +648,8 @@ type RootsResponse struct {
 
 // RootStatus is one library root, the wire form of source.RootStatus: Error
 // is why an unmounted root did not open, Since when the root entered its
-// current state.
+// current state. Path is in text form (source.Ref), since a folder's path
+// need not be UTF-8 either, and Error quotes it the same way.
 type RootStatus struct {
 	Name    string    `json:"name"`
 	Path    string    `json:"path"`

@@ -547,3 +547,55 @@ characters of `A-Z a-z 0-9 _ -`, so a host's prefixed ids fit. The
 identity rule those ADRs state is unchanged: the opened file keeps
 `pid:<id>` as its reference, size and mtime pin the bytes, and a rename
 the host tracks keeps URLs and cache entries.
+
+## Amendment (2026-11-12): a reference has a text form
+
+A source reference is a byte string, since a file name is, and JSON holds
+only UTF-8: an encoder writes U+FFFD for a stray byte and the name that
+arrives is another file's. WaxBin, which catalogs such files by their raw
+path, asked for a pid lookup answer that could name one. The gap was wider
+than the answer: `POST /sign`, `/probe`, `/jobs` and `/hls/timeline`
+rewrote the name the same way and answered for the wrong file or none, and
+the HLS descriptor refused it.
+
+New in `source`: `Ref`, a string type whose text form is the reference
+itself when that is valid UTF-8 and otherwise `pct:` followed by the
+reference with each stray byte, and each `%`, written `%XX`; `ParseRef`
+reads the form back. `Ref` marshals as its text form, so a struct that
+carries a reference through JSON types the field `Ref`. A plain reference
+marshals exactly as a string did, so stored jobs, timeline digests and HLS
+URLs are unchanged. `Resolver.Resolve` is untouched: the form is read at
+the edge and a resolver still receives the reference's own bytes.
+docs/api.md's Source references section is the wire contract.
+
+Behaviour that changed with it. A reference in JSON is read strictly
+(`Ref.UnmarshalJSON`, `source.CheckJSON`): a stray byte in it, or a
+`\uDXXX` escape of half a surrogate pair, is `400 invalid-request`, where
+a decoder used to read both as U+FFFD and the request was answered for
+whatever file that named. Only the reference is held to that, so a stray
+byte in a field beside it reads as before. A pid lookup answer whose `ref`
+is such text is `500 internal`, where it used to open the U+FFFD name.
+`/hls/master.m3u8` mints for a name that is not UTF-8, where it refused,
+and refuses `src` beside `tl` by presence, where an empty `src` was
+dropped. On Windows a reference or a root path whose bytes UTF-16 cannot
+hold is refused (`404`, and a configuration error), where the conversion
+opened the name with U+FFFD in it. A URL the daemon, the CLI or the
+client mints escapes a reference that itself starts with `pct:`
+(`Ref.QueryValue`), since every reader decodes one. A message that quotes
+a name goes out with each stray byte written `\xNN`: the envelope, a job
+document's text (escaped once, where the job is stored), and a probe's
+warnings and notes. `server`'s `TimelineSrc.Src` is a `Ref` and
+`SignRequest.Params` a `SignParams`, whose `src` is the reference's own
+bytes in Go and its text form in JSON. The
+`client` package's request types keep `string` fields that hold a
+reference's own bytes, and marshal them in text form themselves.
+
+A path in the configuration is bytes as well, and takes the same form:
+`roots[].path`, `dataDir`, `cacheDir`, `scratchDir`, `tlsCert`, `tlsKey`
+and `catalogDB` are read from it, in the file and in their `WAXFLOW_*`
+variables, so a file or a compose block that holds only UTF-8 can name a
+folder that is not. A config file that is not UTF-8, or that escapes half
+a surrogate pair, is refused at load. `GET /roots` writes `path` in the
+form and quotes it that way in `error` (`RootStatus.PathText`, `ErrText`;
+`client.Roots` hands back the bytes). A path that starts with `pct:` is
+therefore read as marked.

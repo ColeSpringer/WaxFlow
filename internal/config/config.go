@@ -9,6 +9,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,7 +55,8 @@ const (
 func DefaultLiveSlots() int { return max(1, runtime.NumCPU()-1) }
 
 // Root names one library directory; references address it as
-// "<name>/<relative/path>".
+// "<name>/<relative/path>". Load reads Path, like every path in Config, from
+// text form (source.Ref), so what it holds is the folder's own bytes.
 type Root struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
@@ -270,7 +272,7 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 	var cfg Config
 
 	if path != "" {
-		f, err := os.Open(path)
+		raw, err := os.ReadFile(path)
 		if err != nil {
 			code := waxerr.CodeInvalidRequest
 			if errors.Is(err, fs.ErrNotExist) {
@@ -278,8 +280,13 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 			}
 			return cfg, waxerr.Wrap(code, "config file", err)
 		}
-		defer f.Close()
-		dec := json.NewDecoder(f)
+		// Refused rather than decoded: the decoder reads a stray byte, or
+		// half a surrogate pair, as U+FFFD, and a path would name another
+		// folder, a secret another key.
+		if err := source.CheckJSON(raw); err != nil {
+			return cfg, waxerr.Wrap(waxerr.CodeInvalidRequest, fmt.Sprintf("config file %s", path), err)
+		}
+		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&cfg); err != nil {
 			return cfg, waxerr.Wrap(waxerr.CodeInvalidRequest, fmt.Sprintf("config file %s", path), err)
@@ -305,10 +312,40 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 		}
 	}
 
+	// Every path is read from text form, as a reference is, so a file or a
+	// compose block that holds only UTF-8 can name a folder that is not.
+	for _, f := range pathFields(&cfg) {
+		path, err := source.ParseRef(*f.value)
+		if err != nil {
+			return cfg, waxerr.Wrap(waxerr.CodeInvalidRequest, f.name, err)
+		}
+		*f.value = string(path)
+	}
+
 	if err := cfg.Validate(); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+// pathField is one setting that names a place on disk.
+type pathField struct {
+	name  string
+	value *string
+}
+
+// pathFields lists every path in c: the settings Load reads from text form.
+// TestEveryStringFieldIsAPathOrNot holds a new string field to being listed
+// here or named there as no path.
+func pathFields(c *Config) []pathField {
+	fields := []pathField{
+		{"catalogDB", &c.CatalogDB}, {"dataDir", &c.DataDir}, {"cacheDir", &c.CacheDir},
+		{"scratchDir", &c.ScratchDir}, {"tlsCert", &c.TLSCert}, {"tlsKey", &c.TLSKey},
+	}
+	for i := range c.Roots {
+		fields = append(fields, pathField{fmt.Sprintf("root %q", c.Roots[i].Name), &c.Roots[i].Path})
+	}
+	return fields
 }
 
 // Validate checks field syntax without touching the network or filesystem.

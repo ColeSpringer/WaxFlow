@@ -17,6 +17,7 @@ import (
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/testutil"
+	"github.com/colespringer/waxflow/source"
 )
 
 // TestMergeTitle pins the A18 chapter-title precedence purely: the request field
@@ -105,12 +106,12 @@ func (m *countingTitleMapper) Apply(context.Context, string, *meta.Info, []conta
 
 // mergeMembers writes members of the given lengths into a fresh root and opens
 // a runner over them, with the given metadata mapper (nil for none).
-func mergeMembers(t *testing.T, lens []int, m meta.Mapper) (*Runner, []string) {
+func mergeMembers(t *testing.T, lens []int, m meta.Mapper) (*Runner, []source.Ref) {
 	t.Helper()
 	root := t.TempDir()
-	refs := make([]string, len(lens))
+	refs := make([]source.Ref, len(lens))
 	for i, n := range lens {
-		refs[i] = writeMergeWAV(t, root, fmt.Sprintf("m%d.wav", i), n)
+		refs[i] = source.Ref(writeMergeWAV(t, root, fmt.Sprintf("m%d.wav", i), n))
 	}
 	res := openRoots(t, root)
 	return openRunner(t, Config{Dir: t.TempDir(), Resolver: res, MeasureTrack: measureTrack(), Meta: m}), refs

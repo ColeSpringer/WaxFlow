@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxflow/internal/posixfs"
+	"github.com/colespringer/waxflow/internal/reftext"
 	"github.com/colespringer/waxflow/internal/ulid"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -245,6 +246,7 @@ func (s *store) requeue(id string, every time.Duration, code, msg string) (*Job,
 	w.until = time.Now().Add(delay)
 	s.waits[id] = w
 	j.Waiting = &Wait{Code: code, Message: msg, Until: w.until.UTC()}
+	reftext.EscapeStrays(j)
 	if err := s.persistLocked(j); err != nil {
 		s.log.Warn("jobs: requeue persist failed", "id", id, "err", err)
 	}
@@ -262,6 +264,9 @@ func (s *store) update(id string, persist bool, fn func(*Job)) *Job {
 		return nil
 	}
 	fn(j)
+	// Every message on a job is written as JSON, here and to its readers. A
+	// name it quotes that is not UTF-8 is made legible once, for all of them.
+	reftext.EscapeStrays(j)
 	if j.State.Terminal() {
 		delete(s.waits, id)
 	}

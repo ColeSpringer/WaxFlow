@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -69,7 +70,7 @@ type Request struct {
 	Type Type `json:"type"`
 	// Src is the single source a transcode, an analyze, or a split reads.
 	// Empty for a merge, which names its members in Srcs instead.
-	Src string `json:"src"`
+	Src source.Ref `json:"src"`
 	// SourceID pins the source identity (size-mtimeNS) at creation; a
 	// source that changed before the job ran fails with source-changed
 	// rather than silently transcoding different bytes.
@@ -130,7 +131,7 @@ type Request struct {
 	// Where the two pin those members differs: a timeline pins them inside
 	// the digest it mints, while a merge pins them in SourceIDs, because it
 	// mints nothing and its product is a file.
-	Srcs []string `json:"srcs,omitempty"`
+	Srcs []source.Ref `json:"srcs,omitempty"`
 
 	// CrossfadeSeconds is a timeline job's per-seam blend in seconds, carried so
 	// the 202 async mint shapes the same durationSeconds and boundaries the 201

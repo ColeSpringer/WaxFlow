@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxflow/internal/jobs"
+	"github.com/colespringer/waxflow/source"
 )
 
 // TestOutputFilenameHasAName pins that the attachment name is always a name.
@@ -58,13 +59,13 @@ func TestJobResultFilenameNamesAFileForm(t *testing.T) {
 		{
 			// The default an mp4-family merge picks for itself.
 			name: "an mp4 merge's progressive default",
-			req:  jobs.Request{Type: jobs.TypeMerge, Srcs: []string{"lib/ch1.mp3"}, Format: "aac", Container: "progressive"},
+			req:  jobs.Request{Type: jobs.TypeMerge, Srcs: []source.Ref{"lib/ch1.mp3"}, Format: "aac", Container: "progressive"},
 			outs: []jobs.Output{{Container: "progressive"}},
 			want: "ch1.m4a",
 		},
 		{
 			name: "alac in a flat mp4",
-			req:  jobs.Request{Type: jobs.TypeMerge, Srcs: []string{"lib/book.flac"}, Format: "alac", Container: "progressive"},
+			req:  jobs.Request{Type: jobs.TypeMerge, Srcs: []source.Ref{"lib/book.flac"}, Format: "alac", Container: "progressive"},
 			outs: []jobs.Output{{Container: "progressive"}},
 			want: "book.m4a",
 		},

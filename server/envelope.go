@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/colespringer/waxflow/internal/reftext"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -64,7 +65,8 @@ func (s *Server) writeError(w http.ResponseWriter, err error) {
 // writeEnvelope writes an envelope with an explicit status (the 416 range
 // refusal reuses invalid-request at a range-specific status).
 func (s *Server) writeEnvelope(w http.ResponseWriter, status int, code waxerr.Code, msg string) {
-	s.writeJSON(w, status, ErrorBody{Error: msg, Code: code, SchemaVersion: 1})
+	// A message that quotes a name which is not UTF-8 keeps its bytes legible.
+	s.writeJSON(w, status, ErrorBody{Error: reftext.EscapeStray(msg), Code: code, SchemaVersion: 1})
 }
 
 func (s *Server) writeJSON(w http.ResponseWriter, status int, v any) {

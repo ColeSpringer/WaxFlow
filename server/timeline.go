@@ -198,7 +198,7 @@ func (s *Server) handleTimelineCreate(w http.ResponseWriter, r *http.Request) {
 // pipeline binds the server's base context. crossfadeSeconds and spans are
 // the request's, carried on the job so the 202 path shapes the same duration
 // and boundaries, and mints the same digest, the 201 fast path returns.
-func (s *Server) mintTimelineJob(ctx context.Context, refs []string, spans []jobs.MemberSpan, crossfadeSeconds float64, progress func(done, total int64)) (*jobs.Timeline, error) {
+func (s *Server) mintTimelineJob(ctx context.Context, refs []source.Ref, spans []jobs.MemberSpan, crossfadeSeconds float64, progress func(done, total int64)) (*jobs.Timeline, error) {
 	if err := s.checkTimelines(); err != nil {
 		return nil, err
 	}
@@ -264,8 +264,8 @@ func narrowMemberTrack(i int, track container.Track, sp span) (container.Track, 
 
 // timelineRefs validates the body and flattens it to source references plus
 // per-member windows, index-aligned (the zero span is the whole file).
-func timelineRefs(body TimelineRequest) ([]string, []span, error) {
-	bad := func(format string, args ...any) ([]string, []span, error) {
+func timelineRefs(body TimelineRequest) ([]source.Ref, []span, error) {
+	bad := func(format string, args ...any) ([]source.Ref, []span, error) {
 		return nil, nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(format, args...))
 	}
 	switch {
@@ -275,7 +275,7 @@ func timelineRefs(body TimelineRequest) ([]string, []span, error) {
 		return bad("%d members is past the %d-member bound; a timeline is a play queue, not a library",
 			len(body.Srcs), timeline.MaxMembers)
 	}
-	refs := make([]string, len(body.Srcs))
+	refs := make([]source.Ref, len(body.Srcs))
 	spans := make([]span, len(body.Srcs))
 	for i, m := range body.Srcs {
 		if m.Src == "" {
@@ -340,7 +340,7 @@ func spansFromJob(members int, spans []jobs.MemberSpan) ([]span, error) {
 // mintTimeline resolves the references and mints. It is the job's entry
 // point, which has only the references the request was created from; the
 // handler has open handles already and calls mintTimelineFrom directly.
-func (s *Server) mintTimeline(ctx context.Context, refs []string, spans []span, crossfadeSeconds float64, progress func(done, total int64)) (*jobs.Timeline, error) {
+func (s *Server) mintTimeline(ctx context.Context, refs []source.Ref, spans []span, crossfadeSeconds float64, progress func(done, total int64)) (*jobs.Timeline, error) {
 	srcs, err := s.resolveAll(ctx, refs)
 	if err != nil {
 		return nil, err
@@ -391,7 +391,7 @@ func (s *Server) mintTimelineFrom(ctx context.Context, srcs []*source.File, span
 			return nil, err
 		}
 		tracks[i] = track
-		members[i] = timeline.Member{Src: f.Ref, ID: f.ID.String(), From: sp.from, To: sp.to}
+		members[i] = timeline.Member{Src: source.Ref(f.Ref), ID: f.ID.String(), From: sp.from, To: sp.to}
 		if progress != nil {
 			progress(int64(i+1), int64(len(srcs)))
 		}
@@ -514,10 +514,10 @@ func (s *Server) timelineNeedsJob(srcs []*source.File) (bool, error) {
 }
 
 // resolveAll resolves every reference, closing what it opened if any fails.
-func (s *Server) resolveAll(ctx context.Context, refs []string) ([]*source.File, error) {
+func (s *Server) resolveAll(ctx context.Context, refs []source.Ref) ([]*source.File, error) {
 	srcs := make([]*source.File, 0, len(refs))
 	for _, ref := range refs {
-		f, err := s.resolver.Resolve(ctx, ref)
+		f, err := s.resolver.Resolve(ctx, string(ref))
 		if err != nil {
 			closeAll(srcs)
 			return nil, err

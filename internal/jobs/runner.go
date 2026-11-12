@@ -54,7 +54,7 @@ type Config struct {
 	// the request's crossfade and member spans so the async mint shapes the
 	// same duration and boundaries, and mints the same digest, the sync path
 	// would.
-	MintTimeline func(ctx context.Context, srcs []string, spans []MemberSpan, crossfadeSeconds float64, progress func(done, total int64)) (*Timeline, error)
+	MintTimeline func(ctx context.Context, srcs []source.Ref, spans []MemberSpan, crossfadeSeconds float64, progress func(done, total int64)) (*Timeline, error)
 	// MeasureTrack reports a source's default track with an authoritative
 	// length, walking the source when its headers cannot declare one. Nil
 	// disables merge jobs.
@@ -433,7 +433,7 @@ func retryDelay(every time.Duration, waits int) time.Duration {
 
 // open resolves the job's source and enforces the pinned identity.
 func (r *Runner) open(ctx context.Context, req Request) (*source.File, error) {
-	return r.resolvePinned(ctx, req.Src, req.SourceID, -1)
+	return r.resolvePinned(ctx, string(req.Src), req.SourceID, -1)
 }
 
 // openMember resolves a merge's ith member and enforces its own pinned
@@ -443,7 +443,7 @@ func (r *Runner) openMember(ctx context.Context, req Request, i int) (*source.Fi
 	if i < len(req.SourceIDs) {
 		id = req.SourceIDs[i]
 	}
-	return r.resolvePinned(ctx, req.Srcs[i], id, i)
+	return r.resolvePinned(ctx, string(req.Srcs[i]), id, i)
 }
 
 // resolvePinned resolves ref and holds it to the identity the job was created
@@ -464,7 +464,7 @@ func (r *Runner) resolvePinned(ctx context.Context, ref, id string, member int) 
 		src.Close()
 		msg := "jobs: the source changed since the job was created"
 		if member >= 0 {
-			msg = fmt.Sprintf("jobs: member %d (%s): the source changed since the job was created", member, ref)
+			msg = fmt.Sprintf("jobs: member %d (%s): the source changed since the job was created", member, source.Ref(ref).Text())
 		}
 		return nil, waxerr.New(waxerr.CodeSourceChanged, msg)
 	}

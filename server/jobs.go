@@ -20,6 +20,7 @@ import (
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/sign"
 	"github.com/colespringer/waxflow/internal/timeline"
+	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -71,9 +72,9 @@ func (s *Server) handleUploadDelete(w http.ResponseWriter, r *http.Request) {
 
 // jobRequest is the POST /jobs body.
 type jobRequest struct {
-	Type string   `json:"type"`
-	Src  string   `json:"src"`
-	Srcs []string `json:"srcs,omitempty"`
+	Type string       `json:"type"`
+	Src  source.Ref   `json:"src"`
+	Srcs []source.Ref `json:"srcs,omitempty"`
 	// Titles are optional per-member chapter titles for a merge, index-aligned
 	// to Srcs. They stamp the QuickTime chapter track of an mp4-family merge,
 	// overriding each member's own TITLE tag; see validateMergeRequest.
@@ -88,7 +89,7 @@ type jobRequest struct {
 	// domain Request: the job is its cut points, so re-reading a sheet at
 	// run time would let an edit between creation and execution change what
 	// the job was accepted as.
-	Cue string `json:"cue,omitempty"`
+	Cue source.Ref `json:"cue,omitempty"`
 	// Skip lists the pieces Cuts opens that the split does not write, as
 	// 0-based piece indices. Split-only, and resolved from a sheet as Cuts is:
 	// a data track's piece lands here.
@@ -251,7 +252,7 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 		return s.validateMergeRequest(ctx, body, req)
 	}
 
-	src, err := s.resolver.Resolve(ctx, body.Src)
+	src, err := s.resolver.Resolve(ctx, string(body.Src))
 	if err != nil {
 		return nil, err
 	}
@@ -288,7 +289,7 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 		// daemon cannot use is a 400 that never waits on a decode.
 		var file *cue.File
 		if body.Cue != "" {
-			if file, err = s.cueFileFor(ctx, body.Cue); err != nil {
+			if file, err = s.cueFileFor(ctx, string(body.Cue)); err != nil {
 				return nil, err
 			}
 		}
@@ -478,7 +479,7 @@ func (s *Server) validateMergeRequest(ctx context.Context, body jobRequest, req 
 	tracks := make([]container.Track, len(body.Srcs))
 	req.SourceIDs = make([]string, len(body.Srcs))
 	for i, ref := range body.Srcs {
-		track, id, err := s.measureMember(ctx, ref)
+		track, id, err := s.measureMember(ctx, string(ref))
 		if err != nil {
 			return nil, err
 		}
@@ -844,7 +845,7 @@ func jobResultFilename(j *jobs.Job, n int) string {
 	if j.Request.Format != "" {
 		ext = waxflow.OutputExt(j.Request.Format, j.Request.Container)
 	}
-	name := outputFilename(ref, ext)
+	name := outputFilename(string(ref), ext)
 	if len(j.Outputs) == 1 {
 		return name
 	}
@@ -882,7 +883,12 @@ func (s *Server) prepareMetaRequest(w http.ResponseWriter, r *http.Request, pict
 		s.writeError(w, waxerr.New(waxerr.CodeUnsupportedFormat, "metadata mapping is not configured on this daemon"))
 		return nil, nil, false
 	}
-	p := &streamParams{src: q.Get("src"), identity: q.Get("id")}
+	ref, err := srcParam(q)
+	if err != nil {
+		s.writeError(w, err)
+		return nil, nil, false
+	}
+	p := &streamParams{src: ref, identity: q.Get("id")}
 	if p.src == "" {
 		s.writeError(w, waxerr.New(waxerr.CodeInvalidRequest, "src is required"))
 		return nil, nil, false
@@ -987,8 +993,8 @@ func signableJobTail(tail string) bool {
 
 // signMetaPath prepares the query for signing /art and /lyrics: src plus
 // the pinned identity, exactly like /stream.
-func (s *Server) signMetaPath(ctx context.Context, params map[string]string) (url.Values, error) {
-	src := params["src"]
+func (s *Server) signMetaPath(ctx context.Context, params SignParams) (url.Values, error) {
+	src, _ := params.src()
 	if src == "" {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, "src is required")
 	}
@@ -1002,5 +1008,5 @@ func (s *Server) signMetaPath(ctx context.Context, params map[string]string) (ur
 		return nil, err
 	}
 	defer f.Close()
-	return url.Values{"src": []string{src}, "id": []string{f.ID.String()}}, nil
+	return url.Values{"src": []string{source.Ref(src).QueryValue()}, "id": []string{f.ID.String()}}, nil
 }

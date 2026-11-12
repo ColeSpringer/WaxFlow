@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxflow/internal/testutil"
+	"github.com/colespringer/waxflow/source"
 )
 
 // libWAV builds a library root holding one WAV and returns its ref.
@@ -120,7 +121,7 @@ func TestSplitJobWarnsOnClipping(t *testing.T) {
 	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res})
 
 	j, err := r.Create(Request{
-		Type: TypeSplit, Src: ref, SourceID: pinID(t, res, ref),
+		Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
 		Format: "flac", FLACLevel: -1, Cuts: []int64{22050},
 	})
 	if err != nil {

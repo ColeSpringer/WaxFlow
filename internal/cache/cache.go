@@ -58,6 +58,7 @@ func NewKey(identity, params string, versions []string) Key {
 // the payload; the key itself never needs reversing. Ref, Identity, and
 // Params are written for humans inspecting a cache directory (nothing
 // reads them back; an opaque hash dir would otherwise be undebuggable).
+// Ref is the reference's text form (source.Ref.Text), which JSON can hold.
 type Meta struct {
 	SchemaVersion int    `json:"schemaVersion"`
 	Ref           string `json:"ref"`

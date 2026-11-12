@@ -241,7 +241,7 @@ func (p pathHinting) Resolve(ctx context.Context, ref string) (*source.File, err
 	}
 	for _, st := range p.roots.Status() {
 		if st.Name == down.Root {
-			return nil, fmt.Errorf("%w (configured at %s)", err, st.Path)
+			return nil, fmt.Errorf("%w (configured at %s)", err, st.PathText())
 		}
 	}
 	return nil, err

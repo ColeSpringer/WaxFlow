@@ -16,7 +16,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -456,7 +458,7 @@ func TestPIDLookupMalformedAnswers(t *testing.T) {
 
 func TestPIDLookupTimeoutAndCancel(t *testing.T) {
 	// The host holds every request until the client gives up on it.
-	hold := func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }
+	hold := func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }
 	host := newPIDHost(t, nil)
 	host.setAnswer(func(_ string, w http.ResponseWriter, r *http.Request) { hold(w, r) })
 	l, _ := newLookup(t, host, PIDLookupOptions{Timeout: 50 * time.Millisecond})
@@ -902,4 +904,178 @@ func TestPIDLookupCacheEvictsExpiredThenLeastRecentlyUsed(t *testing.T) {
 			t.Fatal("the least recently used entry survived")
 		}
 	})
+}
+
+// TestPIDLookupAnswerInTextForm: the host may write any reference pct:
+// escaped, which is how it names a file whose name is not UTF-8.
+func TestPIDLookupAnswerInTextForm(t *testing.T) {
+	host := newPIDHost(t, answerRef("pct:lib%2Fsub/a%2Ewav", "Cache-Control", "max-age=60"))
+	l, _ := newLookup(t, host, PIDLookupOptions{})
+	for range 2 {
+		f, err := l.Resolve(context.Background(), "pid:"+testPID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f.Ref != "pid:"+testPID || f.Ext != "wav" {
+			t.Errorf("Ref = %q, Ext = %q, want the pid reference and wav", f.Ref, f.Ext)
+		}
+		if got := readAll(t, f); !strings.HasPrefix(got, "RIFF") {
+			t.Errorf("ReadAt = %q, want the file's bytes", got)
+		}
+		f.Close()
+	}
+	if n := host.requests.Load(); n != 1 {
+		t.Errorf("%d requests, want the remembered answer to serve the second", n)
+	}
+}
+
+// TestPIDLookupNamesANonUTF8File needs a library that holds such a name.
+func TestPIDLookupNamesANonUTF8File(t *testing.T) {
+	name, escaped, ok := testutil.NonUTF8Name()
+	if !ok {
+		t.Skip("this platform's file names are all valid UTF-8")
+	}
+	host := newPIDHost(t, answerRef("pct:lib/sub/"+escaped))
+	l, dir := newLookup(t, host, PIDLookupOptions{})
+	if err := os.WriteFile(filepath.Join(dir, "sub", name), []byte("RIFFstray"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := l.Resolve(context.Background(), "pid:"+testPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if got := readAll(t, f); got != "RIFFstray" {
+		t.Errorf("ReadAt = %q, want the non-UTF-8 file's bytes", got)
+	}
+}
+
+// TestPIDLookupRefusesAnAnswerThatIsNotUTF8: a JSON decoder reads a stray
+// byte as U+FFFD, so the answer would name another file. Here that file
+// exists, and it must not be the one served.
+func TestPIDLookupRefusesAnAnswerThatIsNotUTF8(t *testing.T) {
+	var buf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	host := newPIDHost(t, answerBody("{\"ref\":\"lib/sub/caf\xe9.wav\"}"))
+	l, dir := newLookup(t, host, PIDLookupOptions{Logger: logger})
+	if err := os.WriteFile(filepath.Join(dir, "sub", "caf�.wav"), []byte("RIFFother"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := l.Resolve(context.Background(), "pid:"+testPID)
+	if err == nil {
+		defer f.Close()
+		t.Fatalf("resolved %q for an answer that is not UTF-8", readAll(t, f))
+	}
+	wantCode(t, err, waxerr.CodeInternal)
+	if !strings.Contains(buf.String(), "not UTF-8") || !strings.Contains(buf.String(), "pct:") {
+		t.Errorf("the log does not say the answer is not UTF-8 or name the pct: form:\n%s", buf.String())
+	}
+}
+
+func TestPIDLookupRefusesAMalformedEscape(t *testing.T) {
+	var buf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	host := newPIDHost(t, answerRef("pct:lib/sub/100%.wav"))
+	l, _ := newLookup(t, host, PIDLookupOptions{Logger: logger})
+	_, err := l.Resolve(context.Background(), "pid:"+testPID)
+	wantCode(t, err, waxerr.CodeInternal)
+	if strings.Contains(err.Error(), "lib/sub") {
+		t.Errorf("the client message carries the host's path: %v", err)
+	}
+	if !strings.Contains(buf.String(), "pct:lib/sub/100%.wav") || !strings.Contains(buf.String(), "two hex digits") {
+		t.Errorf("the log does not carry the host's answer and what is wrong with it:\n%s", buf.String())
+	}
+}
+
+// TestPIDLookupLogsAReferenceInTextForm: a JSON log line would otherwise
+// carry U+FFFD where the stray byte was.
+func TestPIDLookupLogsAReferenceInTextForm(t *testing.T) {
+	var buf strings.Builder
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	host := newPIDHost(t, answerRef("pct:lib/sub/gone%E9.wav"))
+	l, _ := newLookup(t, host, PIDLookupOptions{Logger: logger})
+	_, err := l.Resolve(context.Background(), "pid:"+testPID)
+	wantCode(t, err, waxerr.CodeNotFound)
+	if !strings.Contains(buf.String(), "pct:lib/sub/gone%E9.wav") {
+		t.Errorf("the log does not name the reference in text form:\n%s", buf.String())
+	}
+}
+
+// TestPIDLookupRefusesAnEscapedLoneSurrogate: \udce9 is ASCII, so the answer
+// is valid UTF-8, and a decoder still reads it as U+FFFD. Python's json.dumps
+// writes a name that is not UTF-8 this way.
+func TestPIDLookupRefusesAnEscapedLoneSurrogate(t *testing.T) {
+	var buf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	host := newPIDHost(t, answerBody(`{"ref":"lib/sub/caf\udce9.wav"}`))
+	l, dir := newLookup(t, host, PIDLookupOptions{Logger: logger})
+	if err := os.WriteFile(filepath.Join(dir, "sub", "caf\ufffd.wav"), []byte("RIFFother"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := l.Resolve(context.Background(), "pid:"+testPID)
+	if err == nil {
+		defer f.Close()
+		t.Fatalf("resolved %q for an answer that escapes half a surrogate pair", readAll(t, f))
+	}
+	wantCode(t, err, waxerr.CodeInternal)
+	if !strings.Contains(buf.String(), "surrogate") || !strings.Contains(buf.String(), "pct:") {
+		t.Errorf("the log does not say what is wrong or name the pct: form:\n%s", buf.String())
+	}
+}
+
+// TestPIDLookupIgnoresOtherFields: only ref names a file, so a stray byte in
+// a field beside it does not cost the answer.
+func TestPIDLookupIgnoresOtherFields(t *testing.T) {
+	host := newPIDHost(t, answerBody("{\"ref\":\"lib/sub/a.wav\",\"title\":\"caf\xe9 \\udce9\"}"))
+	l, _ := newLookup(t, host, PIDLookupOptions{})
+	f, err := l.Resolve(context.Background(), "pid:"+testPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+}
+
+// TestPIDLookupLogsABrokenAnswersBytes: a JSON log line writes U+FFFD for a
+// stray byte, and the operator could not see which byte the host sent.
+func TestPIDLookupLogsABrokenAnswersBytes(t *testing.T) {
+	var buf strings.Builder
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	host := newPIDHost(t, answerBody("{\"ref\":\"lib/sub/caf\xe9.wav\"}"))
+	l, _ := newLookup(t, host, PIDLookupOptions{Logger: logger})
+	_, err := l.Resolve(context.Background(), "pid:"+testPID)
+	wantCode(t, err, waxerr.CodeInternal)
+	if got := buf.String(); !strings.Contains(got, `caf\\xe9.wav`) || strings.Contains(got, `\ufffd`) {
+		t.Errorf("the log does not show the byte the host sent:\n%s", got)
+	}
+}
+
+// TestClipKeepsWhatItShowsWhole: a cut inside a character or a %XX escape
+// leaves text that is not the reference's.
+func TestClipKeepsWhatItShowsWhole(t *testing.T) {
+	for _, s := range []string{
+		strings.Repeat("a", 159) + "\u00e9" + strings.Repeat("b", 40),
+		strings.Repeat("a", 158) + "%E9" + strings.Repeat("b", 40),
+		strings.Repeat("a", 159) + "%E9" + strings.Repeat("b", 40),
+	} {
+		got := strings.TrimSuffix(clip(s), " (clipped)")
+		if got == s || !strings.HasPrefix(s, got) || !utf8.ValidString(got) || len(got) > 160 {
+			t.Errorf("clip gave %q", got)
+		}
+		if i := strings.LastIndexByte(got, '%'); i >= 0 && i > len(got)-3 {
+			t.Errorf("clip cut an escape: %q", got[len(got)-8:])
+		}
+	}
+	if got := clip("short"); got != "short" {
+		t.Errorf("clip changed a short string: %q", got)
+	}
+	// An error quotes a name's own bytes. A run of them that looks like the
+	// middle of a character must not walk the cut back to nothing, and what
+	// is shown keeps them legible.
+	got := clip(strings.Repeat("a", 100) + strings.Repeat("\x80", 200))
+	if !strings.HasPrefix(got, strings.Repeat("a", 100)+`\x80`) || !utf8.ValidString(got) || len(got) > 180 {
+		t.Errorf("clip of a run of stray bytes gave %q", got)
+	}
+	if got := clip(strings.Repeat("\x80", 400)); len(got) < 150 || !utf8.ValidString(got) {
+		t.Errorf("clip of nothing but stray bytes gave %q", got)
+	}
 }

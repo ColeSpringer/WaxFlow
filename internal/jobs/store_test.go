@@ -2,14 +2,20 @@ package jobs
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/colespringer/waxflow/internal/ulid"
+	"github.com/colespringer/waxflow/source"
 )
 
 func mustULID(t *testing.T) string {
@@ -335,5 +341,112 @@ func TestListOrder(t *testing.T) {
 		if i > 0 && list[i-1].ID >= j.ID {
 			t.Errorf("List ids out of order: %s before %s", list[i-1].ID, j.ID)
 		}
+	}
+}
+
+// TestRestartKeepsAnyReference: job.json is JSON, which would turn a name
+// that is not UTF-8 into another file's, and the requeued job would run
+// against that one.
+func TestRestartKeepsAnyReference(t *testing.T) {
+	dir := t.TempDir()
+	s1, err := openStore(dir, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := Request{Type: TypeMerge, Src: "lib/caf\xe9.flac", Srcs: []source.Ref{"lib/100% \xff.flac", "lib/a.flac"}}
+	j, err := s1.create(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := openStore(dir, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := s2.get(j.ID)
+	if !ok {
+		t.Fatal("the job did not survive the reopen")
+	}
+	if got.Request.Src != req.Src || !slices.Equal(got.Request.Srcs, req.Srcs) {
+		t.Fatalf("after the reopen the job names %q and %q, want %q and %q",
+			got.Request.Src, got.Request.Srcs, req.Src, req.Srcs)
+	}
+}
+
+// aliasResolver serves one file under any reference, so a test can name a
+// source with bytes no fixture's name holds on every platform.
+type aliasResolver struct {
+	next source.Resolver
+	to   string
+}
+
+func (a aliasResolver) Resolve(ctx context.Context, ref string) (*source.File, error) {
+	f, err := a.next.Resolve(ctx, a.to)
+	if err == nil {
+		f.Ref = ref
+	}
+	return f, err
+}
+
+// TestJobErrorNamesAnyReference: a job's error is stored and served as JSON,
+// where a stray byte becomes U+FFFD and the member named is another file.
+func TestJobErrorNamesAnyReference(t *testing.T) {
+	res, ref, _ := openLib(t)
+	dir := t.TempDir()
+	r := openRunner(t, Config{Dir: dir, Resolver: aliasResolver{res, ref}, MeasureTrack: measureTrack()})
+	j, err := r.Create(Request{Type: TypeMerge, Srcs: []source.Ref{"lib/caf\xe9.wav"}, SourceIDs: []string{"1-1"},
+		Format: "flac", FLACLevel: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := waitJob(t, r, j.ID, StateFailed)
+	if failed.Error == nil || !strings.Contains(failed.Error.Message, "pct:lib/caf%E9.wav") {
+		t.Fatalf("the error does not name the member in text form: %+v", failed.Error)
+	}
+
+	// An error the file system wrote quotes the name's own bytes.
+	r2 := openRunner(t, Config{Dir: t.TempDir(), Resolver: res})
+	j, err = r2.Create(Request{Type: TypeTranscode, Src: "lib/gone\xe9.wav", Format: "flac", FLACLevel: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed = waitJob(t, r2, j.ID, StateFailed)
+	if failed.Error == nil || !utf8.ValidString(failed.Error.Message) || !strings.Contains(failed.Error.Message, `gone\xe9.wav`) {
+		t.Fatalf("the error does not show the name's bytes: %+v", failed.Error)
+	}
+}
+
+// TestStoreKeepsEveryMessageLegible: whatever text a caller puts on a job,
+// the store makes it something JSON holds, so no caller has to remember to.
+// The reference is not text: its bytes are its value, and it marshals itself.
+func TestStoreKeepsEveryMessageLegible(t *testing.T) {
+	dir := t.TempDir()
+	s, err := openStore(dir, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := s.create(Request{Type: TypeTranscode, Src: "lib/caf\xe9.flac"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := s.update(j.ID, true, func(job *Job) {
+		job.Warnings = append(job.Warnings, "input damage: chunk \"\xff\xfe\" skipped")
+		job.Error = &ErrInfo{Code: "internal", Message: "open /m/caf\xe9: gone"}
+	})
+	if got.Warnings[0] != `input damage: chunk "\xff\xfe" skipped` || got.Error.Message != `open /m/caf\xe9: gone` {
+		t.Errorf("update left %q and %q", got.Warnings, got.Error.Message)
+	}
+	if got.Request.Src != "lib/caf\xe9.flac" {
+		t.Errorf("the reference was rewritten: %q", got.Request.Src)
+	}
+	queued, _, _ := s.requeue(j.ID, time.Second, "root-unavailable", "root at /m/caf\xe9 is down")
+	if queued.Waiting == nil || queued.Waiting.Message != `root at /m/caf\xe9 is down` {
+		t.Errorf("requeue left %+v", queued.Waiting)
+	}
+	doc, err := os.ReadFile(filepath.Join(dir, j.ID, jobFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !utf8.Valid(doc) || bytes.Contains(doc, []byte(`�`)) || !bytes.Contains(doc, []byte(`caf\\xe9`)) {
+		t.Errorf("job.json lost a message's bytes:\n%s", doc)
 	}
 }

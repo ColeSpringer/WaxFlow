@@ -53,7 +53,7 @@ func (s *Server) readMeta(ctx context.Context, src *source.File, pictures bool) 
 		// cache so it stays a few KB per entry.
 		info, err := s.cfg.Meta.Read(ctx, src, src.Ext, meta.ReadOptions{Pictures: true})
 		if err != nil {
-			s.log.Debug("metadata read failed", "src", src.Ref, "err", err)
+			s.log.Debug("metadata read failed", "src", source.Ref(src.Ref), "err", err)
 			return nil
 		}
 		return info
@@ -64,7 +64,7 @@ func (s *Server) readMeta(ctx context.Context, src *source.File, pictures bool) 
 	}
 	info, err := s.cfg.Meta.Read(ctx, src, src.Ext, meta.ReadOptions{})
 	if err != nil {
-		s.log.Debug("metadata read failed", "src", src.Ref, "err", err)
+		s.log.Debug("metadata read failed", "src", source.Ref(src.Ref), "err", err)
 		return nil
 	}
 	s.metaCache.put(key, info)

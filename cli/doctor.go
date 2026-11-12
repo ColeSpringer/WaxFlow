@@ -20,6 +20,7 @@ import (
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/internal/config"
+	"github.com/colespringer/waxflow/internal/reftext"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -82,6 +83,9 @@ func newDoctorCmd(flavor Flavor) *cobra.Command {
 				}
 			}
 
+			// Whatever a check quoted, both forms of the report show its
+			// bytes: JSON would write U+FFFD for a stray one.
+			reftext.EscapeStrays(&checks)
 			if jsonOut {
 				report := doctorReport{SchemaVersion: 1, Healthy: nfail == 0, Checks: checks}
 				if err := json.NewEncoder(cmd.OutOrStdout()).Encode(report); err != nil {
@@ -152,10 +156,10 @@ func rootChecks(cfg config.Config) []doctorCheck {
 		switch {
 		case errors.Is(st.Err, source.ErrRootEmpty):
 			checks = append(checks, doctorCheck{Name: "root:" + st.Name, Status: "warn",
-				Detail: st.Path + " is readable but empty; the daemon serves it once it holds files"})
+				Detail: st.PathText() + " is readable but empty; the daemon serves it once it holds files"})
 			continue
 		case !st.Mounted:
-			checks = append(checks, doctorCheck{Name: "root:" + st.Name, Status: "fail", Detail: st.Err.Error(),
+			checks = append(checks, doctorCheck{Name: "root:" + st.Name, Status: "fail", Detail: st.ErrText(),
 				err: waxerr.Wrap(waxerr.CodeRootUnavailable, "root "+st.Name, st.Err)})
 			continue
 		}
@@ -166,24 +170,28 @@ func rootChecks(cfg config.Config) []doctorCheck {
 
 // readRootCheck lists one entry of the root directory: os.OpenRoot
 // succeeds on a directory the daemon cannot actually read (execute
-// permission without read), so opening is not enough.
+// permission without read), so opening is not enough. The path is shown in
+// text form, as the configuration spells it.
 func readRootCheck(r config.Root) doctorCheck {
 	name := "root:" + r.Name
+	shown := source.Ref(r.Path).Text()
+	// errText is an error that quotes the path, shown the same way.
+	errText := func(err error) string { return source.RootStatus{Path: r.Path, Err: err}.ErrText() }
 	dir, err := os.Open(r.Path)
 	if err != nil {
-		return doctorCheck{Name: name, Status: "fail", Detail: err.Error(),
+		return doctorCheck{Name: name, Status: "fail", Detail: errText(err),
 			err: waxerr.Wrap(waxerr.CodeSourceUnreadable, "root "+r.Name, err)}
 	}
 	defer dir.Close()
 	names, err := dir.Readdirnames(1)
 	if err != nil && err != io.EOF {
-		return doctorCheck{Name: name, Status: "fail", Detail: "directory not readable: " + err.Error(),
+		return doctorCheck{Name: name, Status: "fail", Detail: "directory not readable: " + errText(err),
 			err: waxerr.Wrap(waxerr.CodeSourceUnreadable, "root "+r.Name, err)}
 	}
 	if len(names) == 0 {
-		return doctorCheck{Name: name, Status: "warn", Detail: r.Path + " is readable but empty"}
+		return doctorCheck{Name: name, Status: "warn", Detail: shown + " is readable but empty"}
 	}
-	return doctorCheck{Name: name, Status: "ok", Detail: r.Path + " readable"}
+	return doctorCheck{Name: name, Status: "ok", Detail: shown + " readable"}
 }
 
 // dirChecks verifies the three directories the daemon writes: the
@@ -209,11 +217,14 @@ func dirChecks(cfg config.Config) []doctorCheck {
 }
 
 // writableDirCheck creates the directory if needed and round-trips a
-// probe file through it.
+// probe file through it. The path is shown in text form, as the
+// configuration spells it and the root rows show theirs.
 func writableDirCheck(name, dir string) doctorCheck {
+	shown := source.Ref(dir).Text()
 	fail := func(err error) doctorCheck {
-		return doctorCheck{Name: name, Status: "fail", Detail: dir + ": " + err.Error(),
-			err: waxerr.Wrap(waxerr.CodeOutputUnwritable, name+" dir", err)}
+		return doctorCheck{Name: name, Status: "fail",
+			Detail: shown + ": " + source.RootStatus{Path: dir, Err: err}.ErrText(),
+			err:    waxerr.Wrap(waxerr.CodeOutputUnwritable, name+" dir", err)}
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fail(err)
@@ -231,7 +242,7 @@ func writableDirCheck(name, dir string) doctorCheck {
 	if cerr != nil {
 		return fail(cerr)
 	}
-	return doctorCheck{Name: name, Status: "ok", Detail: dir + " writable"}
+	return doctorCheck{Name: name, Status: "ok", Detail: shown + " writable"}
 }
 
 // pidCheck reports where pid: sources come from. A configured lookup host is
@@ -272,7 +283,7 @@ func pidCheck(ctx context.Context, cfg config.Config, flavor Flavor, logger *slo
 			return fail(err)
 		}
 		closeFn()
-		return doctorCheck{Name: "pid", Status: "ok", Detail: cfg.CatalogDB + " opens"}
+		return doctorCheck{Name: "pid", Status: "ok", Detail: source.Ref(cfg.CatalogDB).Text() + " opens"}
 	default:
 		return doctorCheck{Name: "pid", Status: "skip", Detail: "no pidLookupURL or catalogDB configured; pid: sources answer 501"}
 	}

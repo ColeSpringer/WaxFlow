@@ -340,8 +340,17 @@ func (sp span) end() int64 {
 	return sp.to
 }
 
+// srcParam reads a request's src: the reference's own bytes, out of the
+// text form the parameter carries. Every reader of src goes through it
+// (TestSrcIsReadInOnePlace), since one that did not would resolve pct: text.
+func srcParam(q url.Values) (string, error) {
+	ref, err := source.ParseRef(q.Get("src"))
+	return string(ref), err
+}
+
 // streamParams is a parsed, policy-checked /stream request.
 type streamParams struct {
+	// src is the reference's own bytes, read from its text form.
 	src string
 	// tl is a minted timeline's digest, "" for a single source; the two are
 	// exclusive.
@@ -380,7 +389,11 @@ func parseStreamParams(q url.Values, defaultGain gainSpec) (*streamParams, error
 			return bad("unknown parameter %q", k)
 		}
 	}
-	p := &streamParams{src: q.Get("src"), tl: q.Get("tl"), format: q.Get("format"), track: -1,
+	src, err := srcParam(q)
+	if err != nil {
+		return nil, err
+	}
+	p := &streamParams{src: src, tl: q.Get("tl"), format: q.Get("format"), track: -1,
 		identity: q.Get("id"), gainParam: q.Get("gain")}
 	if q.Has("tl") {
 		switch {
@@ -428,7 +441,6 @@ func parseStreamParams(q url.Values, defaultGain gainSpec) (*streamParams, error
 		return bad("container requires an explicit format")
 	}
 
-	var err error
 	if p.rate, err = intParam(q, "rate", 0); err != nil {
 		return nil, err
 	}

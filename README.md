@@ -177,6 +177,12 @@ open http://127.0.0.1:4418/demo
 
 Precedence: **flag > `WAXFLOW_*` env > JSON config file > default**
 (config file via `--config` or `WAXFLOW_CONFIG`; unknown keys are rejected).
+The file is UTF-8, and one that is not, or that escapes half a surrogate
+pair, is refused rather than read with those replaced. A path that is not
+UTF-8 (a root's, `dataDir`, `cacheDir`, `scratchDir`, `tlsCert`, `tlsKey`,
+`catalogDB`) is written in the text form a reference takes
+([docs/api.md](docs/api.md#source-references)), in the file or in its
+`WAXFLOW_*` variable: `pct:/mnt/caf%E9`.
 
 | Key | Env | Default | Purpose |
 |---|---|---|---|
@@ -303,17 +309,27 @@ The host's side of the contract:
 - **Answer.** `200` with a JSON object whose `ref` is a root-relative
   reference under one of the daemon's roots,
   `{"ref": "music/Artist/Album/01.flac"}`; other fields are ignored and the
-  body is capped at 64 KiB. `404` or `410` means no such item (`not-found`
-  to the client); `400` or `422` means the host rejected the id
-  (`invalid-request`). `401`, `403`, `408`, `429`, any `5xx`, a connection
+  body is capped at 64 KiB. `ref` is the reference's text form
+  ([docs/api.md](docs/api.md#source-references)), which is how a host names
+  a file whose name is not UTF-8, as JSON holds no such bytes:
+  `{"ref": "pct:music/Artist/caf%E9.flac"}`, each stray byte and each `%`
+  written `%XX` behind the `pct:` marker. A host may write every answer
+  that way (`"pct:" + url.PathEscape(ref)` in Go, or `source.Ref(ref).Text()`
+  with this module, which escapes only what needs it). `404` or `410` means no
+  such item (`not-found` to the client); `400` or `422` means the host
+  rejected the id (`invalid-request`). `401`, `403`, `408`, `429`, any `5xx`, a connection
   failure or an answer slower than 5 s read as the host being down: clients
   get `503 catalog-unavailable` with `Retry-After: 2`, and jobs wait for it
   (`waiting`) as they wait for an unmounted root; a refused key is logged
   once and is the operator's to fix. Any other status, redirects included,
   a `200` whose body is not that shape, or a `ref` the roots refuse (no
   root, a scheme, a path that escapes its root, a directory) is
-  `500 internal`: the host is broken, not down. Envelope text names the pid
-  and a status, never the host or a path (a signed URL's holder reads it);
+  `500 internal`: the host is broken, not down. So is a `ref` a JSON
+  decoder would read as another name (a stray byte, or a `\udXXX` escape of
+  half a surrogate pair, which is how Python's `json.dumps` writes such a
+  name), and a `pct:` reference with a malformed escape. Envelope text
+  names the pid and a status, never the host or a path (a signed URL's
+  holder reads it);
   what the host answered, and why it could not be reached, go to the daemon
   log, once per outage. Callers asking for one pid at the same time share
   one request.

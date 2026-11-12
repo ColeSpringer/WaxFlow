@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxflow/client"
+	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
@@ -177,4 +178,42 @@ func TestClientRootsMirrorsCoverTheWire(t *testing.T) {
 	n = 0
 	fillNonZero(t, reflect.ValueOf(&reload).Elem(), &n)
 	roundTripEqual(t, "populated reload", reload, &client.RootsReloadResponse{})
+}
+
+// TestRootsStatusNamesAnyPath: a folder's path is bytes, as a file's name
+// is, and the response is JSON, so the path travels in text form.
+func TestRootsStatusNamesAnyPath(t *testing.T) {
+	name, _, ok := testutil.NonUTF8Name()
+	if !ok {
+		t.Skip("this platform's file names are all valid UTF-8")
+	}
+	stray := filepath.Join(t.TempDir(), name)
+	env := newTestEnv(t, func(c *server.Config) {
+		roots := c.Resolver.(*source.Roots)
+		lib := roots.Status()[0]
+		if _, err := roots.Reload([]source.Root{{Name: lib.Name, Path: lib.Path}, {Name: "stray", Path: stray}}, 0); err != nil {
+			t.Fatal(err)
+		}
+		c.RootsStatus = roots.Status
+	})
+	body := readBody(t, env.get(t, "/roots", nil))
+	want, err := json.Marshal(source.Ref(stray).Text())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"path":`+string(want)) {
+		t.Errorf("GET /roots does not carry the path as %s:\n%s", want, body)
+	}
+	// The error quotes the path, and is JSON too.
+	if strings.Count(string(body), strings.Trim(string(want), `"`)) != 2 || strings.Contains(string(body), `\ufffd`) {
+		t.Errorf("GET /roots does not name the path in its error as %s:\n%s", want, body)
+	}
+	cl, err := client.New(env.ts.URL, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := cl.Roots(t.Context())
+	if err != nil || len(got.Roots) != 2 || got.Roots[1].Path != stray {
+		t.Fatalf("the client read %#v (%v), want the stray root at %q", got, err, stray)
+	}
 }

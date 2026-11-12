@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/reftext"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -49,6 +50,25 @@ type RootStatus struct {
 	Since time.Time
 }
 
+// PathText is Path in text form (see Ref), which is how the configuration
+// spells it and how JSON can hold it.
+func (s RootStatus) PathText() string { return Ref(s.Path).Text() }
+
+// ErrText is Err's message as JSON can hold it; "" for a mounted root. The
+// path a file-system error quotes is written whole in text form, so it reads
+// back as that path, and any other stray byte as \xNN.
+func (s RootStatus) ErrText() string {
+	if s.Err == nil {
+		return ""
+	}
+	msg := s.Err.Error()
+	if pe, ok := errors.AsType[*fs.PathError](s.Err); ok {
+		shown := pe.Op + " " + Ref(pe.Path).Text() + ": " + pe.Err.Error()
+		msg = strings.Replace(msg, pe.Error(), shown, 1)
+	}
+	return reftext.EscapeStray(msg)
+}
+
 // ErrRootEmpty is why a root whose folder opens but holds nothing is not
 // mounted: that is what a mount point is before its drive or share arrives,
 // and serving it would answer every request not-found.
@@ -61,6 +81,8 @@ var (
 	errNotAnswering = errors.New("the folder is not answering")
 	// errChanging is why an open gave up on a root reloads kept replacing.
 	errChanging = errors.New("the root kept changing during the open")
+	// errNoSuchName is why a name the system cannot hold names no file.
+	errNoSuchName = fmt.Errorf("%w: no file name on this system holds these bytes", fs.ErrNotExist)
 )
 
 // rootState is one configured root: the path it was configured with (so a
@@ -166,6 +188,10 @@ func validateRoots(roots []Root) error {
 		if root.Path == "" {
 			return waxerr.New(waxerr.CodeInvalidRequest,
 				fmt.Sprintf("source: root %q has no path", root.Name))
+		}
+		if !nameable(root.Path) {
+			return waxerr.New(waxerr.CodeInvalidRequest,
+				fmt.Sprintf("source: root %q has a path no folder on this system can have", root.Name))
 		}
 		seen[root.Name] = true
 	}
@@ -566,6 +592,11 @@ func (r *Roots) Resolve(ctx context.Context, ref string) (*File, error) {
 	if !ok || name == "" || rel == "" {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("source: reference %q is not <root>/<path>", ref))
+	}
+	// No file has a name the system cannot hold, whatever state its root is
+	// in, so this is not-found before the root is asked.
+	if !nameable(rel) {
+		return nil, openFault(&fs.PathError{Op: "open", Path: rel, Err: errNoSuchName})
 	}
 	f, maxBytes, err := r.open(ctx, name, rel)
 	if err != nil {

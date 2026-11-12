@@ -119,7 +119,9 @@ rather than reading it off the headers.
                     -> {"tl":"kJ3n...pQ","durationSeconds":2998.5}
 
 The digest is `base64url(sha256(canonical JSON of the {src, id} pairs))`. The
-store holds `dataDir/timelines/<digest>.json`, written atomically.
+store holds `dataDir/timelines/<digest>.json`, written atomically. `src` is
+the reference's text form (docs/api.md, Source references), so a member whose
+name is not UTF-8 digests and stores as the file it is.
 
 **The digest is the identity, and that is the whole point of addressing it by
 content.** Because it covers every member's reference *and* its ADR-0003

@@ -106,6 +106,72 @@ or `waxflow sign`.
 | `GET /jobs/{id}/result[/{n}]` | key or sig | finished output file (full ranges), or the job's product as JSON when it wrote no file |
 | `GET /art`, `GET /lyrics` | key or sig | embedded cover art / lyrics passthrough (raw bytes, ETag'd, no resizing) |
 
+## Source references
+
+A source reference names one input, wherever one is taken: `src`, a job's
+`srcs` and `cue`, a timeline member's `src`.
+
+- `<root>/<relative/path>`: a file under a configured library root.
+- `upload:<id>`: a spooled one-shot upload (POST /uploads).
+- `pid:<id>`: an item the daemon's pid lookup maps to a root-relative
+  reference (`pidLookupURL`, the README's `pid:` sources section) or a
+  catalog resolver serves (`delivery.pid` in `/caps`), and `501
+  unsupported-source` where neither is configured. A pid reference
+  re-resolves to the item's current path on every request, or as often as
+  the host's `Cache-Control: max-age` allows, so renames and moves are
+  transparent: the source identity pins bytes, not locations.
+
+A reference is a byte string, because a file name is: on Linux a name is
+any bytes, and on Windows it can hold a lone surrogate. A query string
+carries those bytes as it carries any (`src=music/caf%E9.flac`). JSON
+cannot. A JSON string is UTF-8, and an encoder writes U+FFFD for a stray
+byte, which names another file. So a reference has a **text form**, and
+that is what every JSON document here carries:
+
+- A reference that is valid UTF-8 is its own text form.
+- Any other is `pct:` followed by the reference with each stray byte, and
+  each `%`, written `%XX`: `pct:music/Artist/caf%E9.flac`.
+
+Text that does not start with `pct:` is read as the reference. After
+`pct:`, `%XX` (two hex digits, either case) is one byte and every other
+byte is itself: `+` is a plus sign, and a literal `%` is `%25`. A `%`
+without two hex digits after it is `400 invalid-request`, and so is `pct:`
+with nothing after it. Any reference may be written this way, whether or
+not it needs it (`"pct:" + url.PathEscape(ref)` in Go), and the two
+spellings of one reference are one reference: they share cache entries,
+and a timeline of either has one digest.
+
+The form is read wherever a reference is: the bodies of `POST /probe`,
+`/sign`, `/jobs` and `/hls/timeline`, query strings (which never need
+it), `waxflow sign --src`, and a pid lookup host's answer. The daemon
+writes it wherever it puts a reference into JSON: a job document's
+`request.src` and `request.srcs`, and its own stored jobs, timelines and
+HLS descriptors. A URL it mints carries the reference's bytes
+percent-encoded in the query, with no marker unless the reference itself
+starts with `pct:`. The Go `client` package takes a reference's own bytes
+and writes the form itself.
+
+A reference in JSON has to be one a decoder reads as written. A stray byte
+in it, or a `\uDXXX` escape of half a surrogate pair (how Python's
+`json.dumps` writes a `surrogateescape` name, `caf\udce9`), would be read
+as U+FFFD, so either is `400 invalid-request` with the form to use
+instead. Only the reference is held to that: a stray byte in a field
+beside it reads as it always did.
+
+A name the platform cannot hold names no file. On Windows a name is
+UTF-16, so a reference whose bytes are neither UTF-8 nor a lone surrogate
+is `404 not-found`, where the conversion would otherwise open the name
+with U+FFFD in its place.
+
+A message that quotes a name, or bytes of the file, goes out with each
+stray byte written `\xNN`: the error envelope, a job document's error,
+wait and warnings, and a probe's warnings and notes.
+
+A path in the configuration is bytes too, and takes the same form:
+`roots[].path`, `dataDir`, `cacheDir`, `scratchDir`, `tlsCert`, `tlsKey`
+and `catalogDB`, in the file or in their `WAXFLOW_*` variables, are read
+from it, and `GET /roots` writes it.
+
 ## GET /probe, POST /probe
 
 `GET /probe?src=<ref>[&strict=1]` or `POST /probe` with
@@ -243,15 +309,7 @@ fails to decode instead.
 The second form streams a minted multi-source timeline instead of one
 source (see Multi-source timelines below).
 
-Source references (`src`): `<root>/<relative/path>` under a configured
-library root; `upload:<id>` for a spooled one-shot upload (POST
-/uploads); `pid:<id>` for an item the daemon's pid lookup maps to a
-root-relative reference (`pidLookupURL`, the README's `pid:` sources
-section) or a catalog resolver serves (`delivery.pid` in `/caps`), and
-`501 unsupported-source` where neither is configured. A pid reference
-re-resolves to the item's current path on every request, or as often as
-the host's `Cache-Control: max-age` allows, so renames and moves are
-transparent: the source identity pins bytes, not locations.
+`src` is a source reference (see Source references above).
 
 Parameters (unknown parameter names are rejected):
 
@@ -867,7 +925,11 @@ while the job is still queued and has no outputs yet). `params` are validated li
 request, the source identity is resolved and embedded, and the response
 is below. A `/stream` URL naming `tl` in place of `src` is planned at sign
 time, as an HLS master is, every member resolved and checked, and pins no
-`id`, since the digest pins every member's:
+`id`, since the digest pins every member's. The URL's `src` is the
+reference's own bytes, percent-encoded as a query string encodes any,
+whichever spelling `params` used (see Source references). An HLS master
+refuses `src` beside `tl` by presence, as `/stream` does, so an empty
+`src` is not dropped:
 
     {"schemaVersion": 1, "url": "/stream?exp=...&format=wav&id=...&kid=1&sig=...&src=...", "exp": 1767225600}
 
@@ -1426,7 +1488,11 @@ root-unavailable`, and it is mounted again by the first request after its
 folder opens with something in it, or within 10 s by the daemon's own
 sweep. Paths are shown
 because the endpoint is key-gated, like the configuration they come from;
-the `503` a playback URL gets names the root alone. The route exists when
+the `503` a playback URL gets names the root alone. `path` is in the text
+form a reference takes (see Source references), as the configuration
+spells it, since a folder's path need not be UTF-8 either, and `error`
+quotes it the same way; `client.Roots` hands back the path's own bytes.
+The route exists when
 `delivery.rootsStatus` is `true`.
 
 ## GET /metrics

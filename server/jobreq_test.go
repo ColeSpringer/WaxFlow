@@ -139,7 +139,7 @@ func populatedJobRequest() jobRequest {
 	// every field at once, which no job may. What it checks is the mapping,
 	// and a body missing a field checks the mapping of that field not at all.
 	return jobRequest{
-		Type: "transcode", Src: "x", Srcs: []string{"x"}, Titles: []string{"x"}, Cuts: []int64{1}, Skip: []int{0}, Cue: "x",
+		Type: "transcode", Src: "x", Srcs: []source.Ref{"x"}, Titles: []string{"x"}, Cuts: []int64{1}, Skip: []int{0}, Cue: "x",
 		Format: "x", Container: "x",
 		Rate: 1, Ch: 1, Bits: 1, Bitrate: 1, HEv2: true, Gain: "x", Loudness: "x",
 		FLACLevel: 1, WavPackLevel: 1, APELevel: 1000,
@@ -255,13 +255,13 @@ func TestValidateMergeHoldsOneMemberAtATime(t *testing.T) {
 	// one go collide, and the memo behind trackFor would then answer three of
 	// the four for free. The padding rides past the RIFF chunk size, so the
 	// audio is unchanged and only the identity moves.
-	var refs []string
+	var refs []source.Ref
 	for i := range 4 {
 		name := fmt.Sprintf("m%d.wav", i)
 		if err := os.WriteFile(filepath.Join(root, name), append(slices.Clone(wav), make([]byte, i)...), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		refs = append(refs, "lib/"+name)
+		refs = append(refs, source.Ref("lib/"+name))
 	}
 	roots, err := source.OpenRoots([]source.Root{{Name: "lib", Path: root}}, 0)
 	if err != nil {

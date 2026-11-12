@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/source"
 )
 
 // assertRefFieldsSet fails for each reference field of v left nil, naming it.
@@ -89,7 +90,7 @@ func TestJobCloneIsDeep(t *testing.T) {
 		State:         StateDone,
 		Request: Request{
 			Type:         TypeTimeline,
-			Srcs:         []string{"a.flac", "b.flac"},
+			Srcs:         []source.Ref{"a.flac", "b.flac"},
 			SourceIDs:    []string{"1-1", "2-2"},
 			Cuts:         []int64{100, 200},
 			Skip:         []int{0},

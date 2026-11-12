@@ -51,11 +51,8 @@ func (s *Server) handleRoots(w http.ResponseWriter, _ *http.Request) {
 	all := s.cfg.RootsStatus()
 	resp := RootsResponse{SchemaVersion: 1, Roots: make([]RootStatus, 0, len(all))}
 	for _, r := range all {
-		st := RootStatus{Name: r.Name, Path: r.Path, Mounted: r.Mounted, Since: r.Since}
-		if r.Err != nil {
-			st.Error = r.Err.Error()
-		}
-		resp.Roots = append(resp.Roots, st)
+		resp.Roots = append(resp.Roots, RootStatus{Name: r.Name, Path: r.PathText(), Mounted: r.Mounted,
+			Error: r.ErrText(), Since: r.Since})
 	}
 	s.writeJSON(w, http.StatusOK, resp)
 }

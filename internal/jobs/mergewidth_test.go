@@ -14,6 +14,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/riff"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/source"
 )
 
 // writeWidthWAV renders frames of 48 kHz sine at a channel count into dir/name
@@ -140,7 +141,7 @@ func TestMergeFoldsEachMemberAtItsOwnWidth(t *testing.T) {
 		return openRunner(t, Config{Dir: t.TempDir(), Resolver: res, MeasureTrack: measureTrack()})
 	}
 
-	mixed := runMergeOutput(t, mk(), Request{Type: TypeMerge, Srcs: []string{five, stereo}, Format: "opus"})
+	mixed := runMergeOutput(t, mk(), Request{Type: TypeMerge, Srcs: []source.Ref{source.Ref(five), source.Ref(stereo)}, Format: "opus"})
 	defer audio.Put(mixed)
 	if mixed.Fmt.Channels != 2 {
 		t.Fatalf("an opus merge delivered %d channels, want the row's stereo fold", mixed.Fmt.Channels)
@@ -149,7 +150,7 @@ func TestMergeFoldsEachMemberAtItsOwnWidth(t *testing.T) {
 		t.Fatalf("the merge delivered %d frames, want at least %d", mixed.N, 2*frames)
 	}
 
-	alone := runMergeOutput(t, mk(), Request{Type: TypeMerge, Srcs: []string{stereo, stereo}, Format: "opus"})
+	alone := runMergeOutput(t, mk(), Request{Type: TypeMerge, Srcs: []source.Ref{source.Ref(stereo), source.Ref(stereo)}, Format: "opus"})
 	defer audio.Put(alone)
 
 	// Inner windows, 100 ms in from each edge: opus is lossy and a seam is
@@ -169,9 +170,9 @@ func TestMergeFoldsEachMemberAtItsOwnWidth(t *testing.T) {
 func TestMergeRefusesNothingItUsedToAccept(t *testing.T) {
 	const frames = 24000
 	root := t.TempDir()
-	var refs []string
+	var refs []source.Ref
 	for i := range 2 {
-		refs = append(refs, writeWidthWAV(t, root, fmt.Sprintf("s%d.wav", i), 6, frames))
+		refs = append(refs, source.Ref(writeWidthWAV(t, root, fmt.Sprintf("s%d.wav", i), 6, frames)))
 	}
 	res := openRoots(t, root)
 	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, MeasureTrack: measureTrack()})

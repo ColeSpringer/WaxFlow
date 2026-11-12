@@ -61,7 +61,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	key := cache.NewKey(identityString(req.p.src, req.src.ID), req.canonical, plan.Versions)
 	meta := cache.Meta{
-		Ref:      req.p.src,
+		Ref:      source.Ref(req.p.src).Text(),
 		Identity: req.src.ID.String(),
 		Params:   req.canonical,
 		// The entry's payload is named out.<Ext>, and the output table answers
@@ -285,10 +285,10 @@ func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, p pipeli
 			if !sync {
 				s.met.AbandonedLive.Add(1)
 			}
-			s.log.Info("pipeline abandoned", "src", p.ref, "rung", rungName(p.rung), "err", err)
+			s.log.Info("pipeline abandoned", "src", source.Ref(p.ref), "rung", rungName(p.rung), "err", err)
 		case err != nil:
 			level, why := stopReason(ctx, err)
-			s.log.Log(ctx, level, "pipeline "+why, "src", p.ref, "rung", rungName(p.rung), "err", err)
+			s.log.Log(ctx, level, "pipeline "+why, "src", source.Ref(p.ref), "rung", rungName(p.rung), "err", err)
 			entry.Fail(err)
 		default:
 			// After Complete: promotion failures (rename, meta write) also
@@ -296,7 +296,7 @@ func (s *Server) startPipeline(ctx context.Context, entry *cache.Entry, p pipeli
 			if entry.FileBacked() && entry.Degraded() {
 				s.met.Degradations.Add(1)
 			}
-			s.log.Debug("pipeline finished", "src", p.ref, "rung", rungName(p.rung),
+			s.log.Debug("pipeline finished", "src", source.Ref(p.ref), "rung", rungName(p.rung),
 				"samples", res.Samples, "clipped", res.ClippedSamples, "truePeak", res.TruePeak,
 				"degraded", entry.Degraded())
 		}

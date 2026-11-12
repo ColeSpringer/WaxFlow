@@ -97,11 +97,11 @@ func openRunner(t *testing.T, cfg Config) *Runner {
 }
 
 func transcodeReq(ref, srcID string) Request {
-	return Request{Type: TypeTranscode, Src: ref, SourceID: srcID, Format: "flac", FLACLevel: -1}
+	return Request{Type: TypeTranscode, Src: source.Ref(ref), SourceID: srcID, Format: "flac", FLACLevel: -1}
 }
 
 func analyzeReq(ref, srcID string) Request {
-	return Request{Type: TypeAnalyze, Src: ref, SourceID: srcID}
+	return Request{Type: TypeAnalyze, Src: source.Ref(ref), SourceID: srcID}
 }
 
 // soleOutput returns the single product of a job that has exactly one. Most
@@ -401,7 +401,7 @@ func TestSplitFillsAnAbsentLength(t *testing.T) {
 		})
 
 		j, err := r.Create(Request{
-			Type: TypeSplit, Src: ref, SourceID: pinID(t, res, ref),
+			Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
 			Format: "flac", FLACLevel: -1, Cuts: []int64{cut},
 		})
 		if err != nil {
@@ -461,7 +461,7 @@ func TestSplitFillsAnAbsentLength(t *testing.T) {
 		r := openRunner(t, Config{Dir: dir, Resolver: res, MeasureTrack: measureTrack()})
 
 		j, err := r.Create(Request{
-			Type: TypeSplit, Src: ref, SourceID: pinID(t, res, ref),
+			Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
 			Format: "flac", FLACLevel: -1, Cuts: []int64{cut, past},
 		})
 		if err != nil {
@@ -526,7 +526,7 @@ func TestSplitRefusesAnUnderDeclaredCutConsistently(t *testing.T) {
 	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, MeasureTrack: measureTrack()})
 
 	j, err := r.Create(Request{
-		Type: TypeSplit, Src: ref, SourceID: pinID(t, res, ref),
+		Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
 		Format: "flac", FLACLevel: -1, Cuts: []int64{cut},
 	})
 	if err != nil {
@@ -637,7 +637,7 @@ func TestSplitHoldsAnUnverifiedLastPieceToAMeasure(t *testing.T) {
 	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, MeasureTrack: hook})
 
 	j, err := r.Create(Request{
-		Type: TypeSplit, Src: ref, SourceID: pinID(t, res, ref),
+		Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
 		Format: "flac", FLACLevel: -1, Cuts: []int64{cut},
 	})
 	if err != nil {
@@ -673,7 +673,7 @@ func TestSplitOfAnUnderDeclaredMP3MeetsItsMeasure(t *testing.T) {
 	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, MeasureTrack: hook})
 
 	j, err := r.Create(Request{
-		Type: TypeSplit, Src: ref, SourceID: pinID(t, res, ref),
+		Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
 		Format: "flac", FLACLevel: -1, Cuts: []int64{cut},
 	})
 	if err != nil {
@@ -699,7 +699,7 @@ func TestSplitOfAnExactSourceMeasuresNothing(t *testing.T) {
 	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, MeasureTrack: hook})
 
 	j, err := r.Create(Request{
-		Type: TypeSplit, Src: ref, SourceID: pinID(t, res, ref),
+		Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
 		Format: "flac", FLACLevel: -1, Cuts: []int64{1000},
 	})
 	if err != nil {
@@ -748,7 +748,7 @@ func TestSplitOfAnOverDeclaredMP3MeetsItsMeasure(t *testing.T) {
 	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, MeasureTrack: hook})
 
 	j, err := r.Create(Request{
-		Type: TypeSplit, Src: ref, SourceID: pinID(t, res, ref),
+		Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
 		Format: "flac", FLACLevel: -1, Cuts: []int64{cut},
 	})
 	if err != nil {
@@ -774,7 +774,7 @@ func TestSplitSkippingItsLastPieceMeasuresNothing(t *testing.T) {
 	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, MeasureTrack: hook})
 
 	j, err := r.Create(Request{
-		Type: TypeSplit, Src: ref, SourceID: pinID(t, res, ref),
+		Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
 		Format: "flac", FLACLevel: -1, Cuts: []int64{10_000}, Skip: []int{1},
 	})
 	if err != nil {
@@ -810,7 +810,7 @@ func TestSplitRefusesALastPieceItsMeasureLeavesEmpty(t *testing.T) {
 			dir := t.TempDir()
 			r := openRunner(t, Config{Dir: dir, Resolver: res, MeasureTrack: measureTrack()})
 			j, err := r.Create(Request{
-				Type: TypeSplit, Src: ref, SourceID: pinID(t, res, ref),
+				Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
 				Format: "flac", FLACLevel: -1, Cuts: []int64{tc.cut},
 			})
 			if err != nil {
@@ -1006,7 +1006,7 @@ func transcodedChapterTitles(t *testing.T, m meta.Mapper) []string {
 	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, Meta: m})
 
 	j, err := r.Create(Request{
-		Type: TypeTranscode, Src: ref, SourceID: pinID(t, res, ref), Format: "alac",
+		Type: TypeTranscode, Src: source.Ref(ref), SourceID: pinID(t, res, ref), Format: "alac",
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -1129,7 +1129,7 @@ func TestSplitJobProgressIsOnTheSourceTimeline(t *testing.T) {
 	const srcSamples = 5 * 44100
 	cuts := []int64{1 * 44100, 2 * 44100, 4 * 44100}
 	j, err := r.Create(Request{
-		Type: TypeSplit, Src: ref, SourceID: srcID, Format: "flac", FLACLevel: -1, Cuts: cuts,
+		Type: TypeSplit, Src: source.Ref(ref), SourceID: srcID, Format: "flac", FLACLevel: -1, Cuts: cuts,
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -1203,7 +1203,7 @@ func TestMP4OutputsAreNamedByTheirExtension(t *testing.T) {
 			r := openRunner(t, Config{Dir: dir, Resolver: res})
 
 			j, err := r.Create(Request{
-				Type: TypeTranscode, Src: ref, SourceID: srcID,
+				Type: TypeTranscode, Src: source.Ref(ref), SourceID: srcID,
 				Format: "alac", Container: tc.container,
 			})
 			if err != nil {
@@ -1235,7 +1235,7 @@ func TestMP4OutputsAreNamedByTheirExtension(t *testing.T) {
 		r := openRunner(t, Config{Dir: dir, Resolver: res})
 
 		j, err := r.Create(Request{
-			Type: TypeSplit, Src: ref, SourceID: pinID(t, res, ref),
+			Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
 			Format: "alac", Cuts: []int64{2 * 44100},
 		})
 		if err != nil {
@@ -1609,7 +1609,7 @@ func TestWavPackJobSkipsPostPass(t *testing.T) {
 	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, Meta: m})
 
 	j, err := r.Create(Request{
-		Type: TypeTranscode, Src: ref, SourceID: srcID,
+		Type: TypeTranscode, Src: source.Ref(ref), SourceID: srcID,
 		Format: "wavpack", Loudness: "analyze",
 	})
 	if err != nil {
@@ -1649,7 +1649,7 @@ func TestLoudnessAnalyzeNonMP4OmitsPlaceholders(t *testing.T) {
 	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res})
 
 	j, err := r.Create(Request{
-		Type: TypeTranscode, Src: ref, SourceID: srcID,
+		Type: TypeTranscode, Src: source.Ref(ref), SourceID: srcID,
 		Format: "flac", Loudness: "analyze",
 	})
 	if err != nil {
@@ -1686,7 +1686,7 @@ func TestSplitSkipWritesTheRest(t *testing.T) {
 	// split writes [1 s, 2 s) and [4 s, 5 s).
 	const written = 2 * 44100
 	j, err := r.Create(Request{
-		Type: TypeSplit, Src: ref, SourceID: srcID, Format: "flac", FLACLevel: -1,
+		Type: TypeSplit, Src: source.Ref(ref), SourceID: srcID, Format: "flac", FLACLevel: -1,
 		Cuts: []int64{1 * 44100, 2 * 44100, 4 * 44100}, Skip: []int{0, 2},
 	})
 	if err != nil {

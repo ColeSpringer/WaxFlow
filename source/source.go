@@ -12,6 +12,12 @@
 // over its upload spool. The Resolver interface is public so a build can
 // add schemes of its own.
 //
+// A reference is a byte string, because a file name is: a resolver takes
+// those bytes as they are. Where a reference is written as text that must
+// be UTF-8 (JSON, above all) it takes the form Ref describes, which spells
+// a name that is not UTF-8 behind a "pct:" marker. That form is read at
+// the edge, by whoever parses the text, and never reaches a Resolver.
+//
 // Every resolved file carries an Identity (size plus mtime in
 // nanoseconds), the same identity that signed URLs embed (ADR-0003) and
 // cache keys hash (ADR-0004): if the bytes behind a reference change, the
@@ -120,7 +126,8 @@ var _ container.Source = (*File)(nil)
 // validate what they open (regular file, size cap) and reject references
 // they do not serve with waxerr.CodeUnsupportedSource; unknown names and
 // paths carry waxerr.CodeNotFound, and a known place that is down a retryable
-// code (waxerr.CodeRootUnavailable, waxerr.CodeCatalogUnavailable).
+// code (waxerr.CodeRootUnavailable, waxerr.CodeCatalogUnavailable). ref is
+// the reference's own bytes, never its text form (see Ref).
 //
 // ctx governs the resolution only, not the returned File: local file
 // opens (roots, uploads) may ignore it, while implementations that

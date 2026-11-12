@@ -319,11 +319,11 @@ func watchRoots(roots *source.Roots, logger *slog.Logger) {
 func logRoot(logger *slog.Logger, st source.RootStatus) {
 	switch {
 	case st.Mounted:
-		logger.Info("root mounted", "root", st.Name, "path", st.Path)
+		logger.Info("root mounted", "root", st.Name, "path", st.PathText())
 	case errors.Is(st.Err, fs.ErrNotExist), errors.Is(st.Err, source.ErrRootEmpty):
-		logger.Warn("root not mounted", "root", st.Name, "path", st.Path, "err", st.Err)
+		logger.Warn("root not mounted", "root", st.Name, "path", st.PathText(), "err", st.ErrText())
 	default:
-		logger.Error("root not mounted", "root", st.Name, "path", st.Path, "err", st.Err)
+		logger.Error("root not mounted", "root", st.Name, "path", st.PathText(), "err", st.ErrText())
 	}
 }
 

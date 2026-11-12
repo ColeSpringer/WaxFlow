@@ -14,6 +14,7 @@ import (
 	"github.com/colespringer/waxflow/internal/cache"
 	"github.com/colespringer/waxflow/internal/metrics"
 	"github.com/colespringer/waxflow/internal/sign"
+	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -31,8 +32,8 @@ func (s *Server) handleCaps(w http.ResponseWriter, _ *http.Request) {
 // probeRequest is the POST /probe body; GET uses src and strict query
 // parameters with the same meaning.
 type probeRequest struct {
-	Src    string `json:"src"`
-	Strict bool   `json:"strict"`
+	Src    source.Ref `json:"src"`
+	Strict bool       `json:"strict"`
 }
 
 func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
@@ -53,14 +54,19 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		req.Src = q.Get("src")
+		src, err := srcParam(q)
+		if err != nil {
+			s.writeError(w, err)
+			return
+		}
+		req.Src = source.Ref(src)
 		req.Strict = boolish(q.Get("strict"))
 	}
 	if req.Src == "" {
 		s.writeError(w, waxerr.New(waxerr.CodeInvalidRequest, "src is required"))
 		return
 	}
-	f, err := s.resolver.Resolve(r.Context(), req.Src)
+	f, err := s.resolver.Resolve(r.Context(), string(req.Src))
 	if err != nil {
 		s.writeError(w, err)
 		return
@@ -114,15 +120,17 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 	var duration float64
 	switch req.Path {
 	case "/stream":
-		q = make(url.Values, len(req.Params)+4)
-		for k, v := range req.Params {
-			q.Set(k, v)
-		}
+		q = req.Params.query()
 		// Reject junk at mint time, not at playback time.
 		p, err := parseStreamParams(q, s.defaultGain)
 		if err != nil {
 			s.writeError(w, err)
 			return
+		}
+		if p.src != "" {
+			// A query string carries a reference's bytes itself, so the URL
+			// names them however the request spelled the reference.
+			q.Set("src", source.Ref(p.src).QueryValue())
 		}
 		if p.tl != "" {
 			// Planned now, so a URL that signs is one that plays. Nothing is

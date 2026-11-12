@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxflow/internal/posixfs"
+	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -64,8 +65,9 @@ const defaultMaxEntries = 4096
 
 // Member is one source in a timeline, pinned at mint time.
 type Member struct {
-	// Src is the source reference, as the caller gave it.
-	Src string `json:"src"`
+	// Src is the source reference. It is stored, and digested, in its
+	// text form.
+	Src source.Ref `json:"src"`
 	// ID is the member's ADR-0003 source identity (size-mtimeNS). It is
 	// inside the digest, which is what makes the digest an identity rather
 	// than a name: a member that changes on disk cannot keep its timeline.

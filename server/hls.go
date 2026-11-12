@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
@@ -198,11 +197,11 @@ func (s *Server) prepareHLS(r *http.Request) (*hlsRequest, error) {
 		return nil, err
 	}
 	canonical := canonicalHLSParams(req.plan, req.opts.GainDB, req.opts.Dynamics, descSpan(desc), req.opts.HEAACv2)
-	identity := hlsIdentity(desc, req.members)
+	identity, shown := hlsIdentity(desc, req.members)
 	req.key = cache.NewKey(identity, canonical, req.plan.Versions)
 	req.meta = cache.Meta{
 		Ref:         hlsRef(desc),
-		Identity:    identity,
+		Identity:    shown,
 		Params:      canonical,
 		Ext:         "m4s",
 		ContentType: hlsMediaType,
@@ -338,7 +337,7 @@ func (s *Server) resolveMember(ctx context.Context, i int, ref timeline.Member,
 	if err != nil {
 		return memberSource{}, nil, err
 	}
-	f, err := s.resolver.Resolve(ctx, ref.Src)
+	f, err := s.resolver.Resolve(ctx, string(ref.Src))
 	if err != nil {
 		return memberSource{}, nil, err
 	}
@@ -388,7 +387,7 @@ func (s *Server) resolveMember(ctx context.Context, i int, ref timeline.Member,
 		return memberSource{}, nil, err
 	}
 	ok = true
-	return memberSource{Ref: ref.Src, ID: f.ID, Ext: f.Ext,
+	return memberSource{Ref: string(ref.Src), ID: f.ID, Ext: f.Ext,
 		From: ref.From, To: ref.To, SrcTrack: srcTrack, Track: track}, f, nil
 }
 
@@ -437,7 +436,7 @@ func hlsRef(desc hls.Descriptor) string {
 	if desc.Tl != "" {
 		return "tl:" + desc.Tl
 	}
-	return desc.Src
+	return desc.Src.Text()
 }
 
 // hlsIdentity is the ADR-0004 identity a variant's entries key on: the
@@ -447,11 +446,15 @@ func hlsRef(desc hls.Descriptor) string {
 // addressing it. It covers every member's reference and identity, so any
 // change to any member is a different digest and therefore a different key,
 // and there is no second list identity that could disagree with it.
-func hlsIdentity(desc hls.Descriptor, members []memberSource) string {
+//
+// shown is the same identity as the sidecar records it: JSON, so the
+// reference is in text form where key hashes its own bytes.
+func hlsIdentity(desc hls.Descriptor, members []memberSource) (key, shown string) {
 	if desc.Tl != "" {
-		return "tl:" + desc.Tl
+		return "tl:" + desc.Tl, "tl:" + desc.Tl
 	}
-	return identityString(desc.Src, members[0].ID)
+	id := members[0].ID
+	return identityString(string(desc.Src), id), identityString(desc.Src.Text(), id)
 }
 
 // measureSamples forces a source's exact length, by the cheapest route the
@@ -689,7 +692,7 @@ func (s *Server) cutSegmentPlanFor(ctx context.Context, src *source.File, track 
 	opts waxflow.TranscodeOptions, sp span, segDur float64) *waxflow.CutSegmentPlan {
 	decline := func(reason string, args ...any) *waxflow.CutSegmentPlan {
 		kv := make([]any, 0, 4+len(args))
-		kv = append(kv, "reason", reason, "src", src.Ref)
+		kv = append(kv, "reason", reason, "src", source.Ref(src.Ref))
 		kv = append(kv, args...)
 		s.log.Debug("hls cut declined", kv...)
 		return nil
@@ -779,9 +782,10 @@ func (s *Server) handleHLSMaster(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, waxerr.New(waxerr.CodeUnauthorized, "master.m3u8 without v= needs an API key"))
 			return
 		}
-		params := make(map[string]string, len(q))
-		for k := range q {
-			params[k] = q.Get(k)
+		params, err := signParamsOf(q)
+		if err != nil {
+			s.writeError(w, err)
+			return
 		}
 		if desc, _, err = s.mintHLSDescriptor(r.Context(), params); err != nil {
 			s.writeError(w, err)
@@ -1067,14 +1071,14 @@ func (s *Server) logHLSWorkerResult(ctx context.Context, ref, rung string, membe
 	if err != nil {
 		// A seek restart cancels the worker it replaces; that is routine.
 		level, why := stopReason(ctx, err)
-		s.log.Log(ctx, level, "hls worker "+why, "src", ref, "rung", rung, "members", members, "start", start, "err", err)
+		s.log.Log(ctx, level, "hls worker "+why, "src", source.Ref(ref), "rung", rung, "members", members, "start", start, "err", err)
 		return err
 	}
 	if res == nil {
-		s.log.Debug("hls worker finished", "src", ref, "rung", rung, "members", members, "start", start)
+		s.log.Debug("hls worker finished", "src", source.Ref(ref), "rung", rung, "members", members, "start", start)
 		return nil
 	}
-	s.log.Debug("hls worker finished", "src", ref, "rung", rung, "members", members,
+	s.log.Debug("hls worker finished", "src", source.Ref(ref), "rung", rung, "members", members,
 		"start", start, "clipped", res.ClippedSamples, "truePeak", res.TruePeak)
 	return nil
 }
@@ -1317,7 +1321,7 @@ func (m closingMedia) Close() error {
 // own validation, so mint-time junk is rejected exactly like
 // playback-time junk. It also returns the source duration in seconds
 // (-1 unknown) for the TTL policy.
-func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string) (hls.Descriptor, float64, error) {
+func (s *Server) mintHLSDescriptor(ctx context.Context, params SignParams) (hls.Descriptor, float64, error) {
 	bad := func(format string, args ...any) (hls.Descriptor, float64, error) {
 		return hls.Descriptor{}, 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(format, args...))
 	}
@@ -1326,26 +1330,21 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string
 			return bad("unknown parameter %q", k)
 		}
 	}
-	d := hls.Descriptor{Ver: hls.DescriptorVersion, Src: params["src"], Tl: params["tl"],
+	// By presence, as /stream judges the pair: an empty src beside a tl is
+	// refused, not dropped.
+	src, hasSrc := params.src()
+	d := hls.Descriptor{Ver: hls.DescriptorVersion, Src: source.Ref(src), Tl: params["tl"],
 		Format: params["format"], Gain: params["gain"], Dynamics: params["dynamics"]}
+	var err error
 	switch {
 	case d.Src == "" && d.Tl == "":
 		return bad("src or tl is required")
-	case d.Src != "" && d.Tl != "":
+	case hasSrc && d.Tl != "":
 		return bad("src and tl are exclusive: a URL names one stream or one timeline")
-	case !utf8.ValidString(d.Src):
-		// Guarded before Encode for the same reason as crossfadeSeconds below:
-		// the descriptor travels as JSON, and json.Marshal substitutes U+FFFD
-		// for every invalid byte, so the round trip would hand back a src
-		// naming a file other than the one just resolved. Stated here rather
-		// than left to surface as a 404 for a file that plainly exists. A
-		// non-UTF-8 name still streams over /stream, which carries no JSON.
-		return bad("src %q is not valid UTF-8, and an HLS source reference travels as JSON", d.Src)
 	}
 	if d.Format == "" {
 		d.Format = waxflow.SegmentedFormats()[0]
 	}
-	var err error
 	// Absent is how "keep the source's value" is spelled, as on /stream. The
 	// master form copies the query key by key, so a bare rate= arrives
 	// present and empty.
@@ -1431,7 +1430,7 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params map[string]string
 	// A timeline's members already carry their identities inside the digest,
 	// so only a single source needs one pinned here.
 	if d.Src != "" {
-		f, err := s.resolver.Resolve(ctx, d.Src)
+		f, err := s.resolver.Resolve(ctx, string(d.Src))
 		if err != nil {
 			return hls.Descriptor{}, 0, err
 		}

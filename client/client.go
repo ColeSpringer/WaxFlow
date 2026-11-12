@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/colespringer/waxflow/internal/reftext"
 	"github.com/colespringer/waxflow/internal/sign"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -690,7 +691,7 @@ func (c *Client) Caps(ctx context.Context) (*Caps, error) {
 // Probe identifies a source reference.
 func (c *Client) Probe(ctx context.Context, src string) (*ProbeInfo, error) {
 	var v ProbeInfo
-	if err := c.getJSON(ctx, "/probe", url.Values{"src": {src}}, &v); err != nil {
+	if err := c.getJSON(ctx, "/probe", url.Values{"src": {reftext.EncodeQuery(src)}}, &v); err != nil {
 		return nil, err
 	}
 	return &v, nil
@@ -812,9 +813,10 @@ func (c *Client) openStream(ctx context.Context, pathAndQuery, op string, ok ...
 
 // Stream opens a progressive stream. The caller owns the response body.
 // The body read runs under the caller's ctx alone, with no client-side
-// time bound: playback takes as long as it plays (see New).
+// time bound: playback takes as long as it plays (see New). params' src is
+// the reference's own bytes.
 func (c *Client) Stream(ctx context.Context, params url.Values) (*http.Response, error) {
-	return c.openStream(ctx, "/stream?"+params.Encode(), "stream",
+	return c.openStream(ctx, "/stream?"+queryParams(params).Encode(), "stream",
 		http.StatusOK, http.StatusPartialContent)
 }
 
@@ -928,7 +930,8 @@ func checkJobID(id string) error {
 // MintURL mints a signed playback URL offline: the same canonical scheme
 // the daemon verifies (ADR-0003), for holders of the signing secret who
 // do not want a round trip. secretSpec uses the signingSecret config
-// syntax; params must already include the id identity parameter.
+// syntax; params must already include the id identity parameter, and
+// their src is the reference's own bytes.
 func MintURL(secretSpec, path string, params url.Values, exp time.Time) (string, error) {
 	keys, err := sign.ParseKeys(secretSpec)
 	if err != nil {
@@ -938,7 +941,7 @@ func MintURL(secretSpec, path string, params url.Values, exp time.Time) (string,
 	if err != nil {
 		return "", err
 	}
-	signed := signer.Sign(http.MethodGet, path, params, exp)
+	signed := signer.Sign(http.MethodGet, path, queryParams(params), exp)
 	return path + "?" + signed.Encode(), nil
 }
 

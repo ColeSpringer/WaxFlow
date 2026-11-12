@@ -107,7 +107,7 @@ func TestResolveHLSSourcesMeasuresASpannedSource(t *testing.T) {
 	}
 	id := f.ID.String()
 	f.Close()
-	req := &hlsRequest{desc: hls.Descriptor{Ver: hls.DescriptorVersion, Src: ref, ID: id, Format: "aac", To: 1000}}
+	req := &hlsRequest{desc: hls.Descriptor{Ver: hls.DescriptorVersion, Src: source.Ref(ref), ID: id, Format: "aac", To: 1000}}
 	defer req.Close()
 	if err := s.resolveHLSSources(context.Background(), req); err != nil {
 		t.Fatal(err)
@@ -127,7 +127,7 @@ func putTimeline(t *testing.T, s *Server, refs []string) string {
 		if err != nil {
 			t.Fatal(err)
 		}
-		members[i] = timeline.Member{Src: ref, ID: f.ID.String()}
+		members[i] = timeline.Member{Src: source.Ref(ref), ID: f.ID.String()}
 		f.Close()
 	}
 	digest, err := s.timelines.Put(members, time.Now().Add(time.Hour))
@@ -280,7 +280,7 @@ func TestResolveHLSSourcesKeepsTheSingleSourceHandle(t *testing.T) {
 	id := f.ID.String()
 	f.Close()
 
-	req := &hlsRequest{desc: hls.Descriptor{Ver: hls.DescriptorVersion, Src: refs[0], ID: id, Format: "opus"}}
+	req := &hlsRequest{desc: hls.Descriptor{Ver: hls.DescriptorVersion, Src: source.Ref(refs[0]), ID: id, Format: "opus"}}
 	defer req.Close()
 	if err := s.resolveHLSSources(context.Background(), req); err != nil {
 		t.Fatal(err)
