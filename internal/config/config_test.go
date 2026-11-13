@@ -277,6 +277,18 @@ func TestServiceFieldValidation(t *testing.T) {
 		{PIDLookupURL: "http://deck/pid", CatalogDB: "/x/waxbin.db"},
 		{PIDLookupURL: "http://deck/pid", PIDLookupKey: "bad key"},
 		{PIDLookupURL: "http://deck/pid", PIDLookupKey: "k\n"},
+		{DefaultGain: "loud"},
+		{DefaultGain: "NaN"},
+		{SigningSecret: "a:zz"},      // not hex
+		{SigningSecret: "one,two"},   // a list of literals
+		{SigningSecret: "a:00,a:01"}, // one id twice
+		{SigningSecret: ":00"},       // no id
+		{APIKeys: []string{"k", ""}},
+		{APIKeys: []string{" k"}}, // a header's value is trimmed
+		{APIKeys: []string{"k\t"}},
+		{APIKeys: []string{" "}},
+		{MetricsKey: "m "}, // presented through the same header
+		{MetricsKey: "\tm"},
 	}
 	for i, cfg := range bad {
 		if err := cfg.Validate(); err == nil {
@@ -447,6 +459,105 @@ func TestEveryStringFieldIsAPathOrNot(t *testing.T) {
 		isPath := paths[v.Field(i).Addr().Interface().(*string)]
 		if isPath == notPaths[name] {
 			t.Errorf("%s (%s): path = %v, listed as not a path = %v; it is one or the other", field.Name, name, isPath, notPaths[name])
+		}
+	}
+}
+
+// TestValidateAcceptsWhatTheDaemonStartsWith: the three settings Validate
+// reads the syntax of still take every spelling the daemon does.
+func TestValidateAcceptsWhatTheDaemonStartsWith(t *testing.T) {
+	for i, cfg := range []Config{
+		{DefaultGain: "album"},
+		{DefaultGain: "-3dB"},
+		{DefaultGain: "OFF"},
+		{SigningSecret: "a literal secret"},
+		{SigningSecret: "a:00,b:01"},
+		{APIKeys: []string{"k", "another", "with a space inside"}},
+		{MetricsKey: "a metrics key"},
+	} {
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("case %d (%+v) refused: %v", i, cfg, err)
+		}
+	}
+}
+
+// TestValidateNamesTheField: a refusal says which key to fix, and never
+// quotes a secret.
+func TestValidateNamesTheField(t *testing.T) {
+	for field, cfg := range map[string]Config{
+		"defaultGain":   {DefaultGain: "loud"},
+		"signingSecret": {SigningSecret: "kid:5ec2e7,kid:5ec2e8"},
+		"apiKeys":       {APIKeys: []string{""}},
+	} {
+		err := cfg.Validate()
+		if err == nil {
+			t.Errorf("%s: validated", field)
+			continue
+		}
+		if !strings.Contains(err.Error(), field) {
+			t.Errorf("%s: the refusal does not name the key: %v", field, err)
+		}
+		if strings.Contains(err.Error(), "5ec2e") {
+			t.Errorf("%s: the refusal quotes the secret: %v", field, err)
+		}
+	}
+	// A literal secret with a colon in it reads as a malformed kid:hex
+	// entry, whose "key id" is the head of the secret.
+	err := Config{SigningSecret: "hunter2:pa55word"}.Validate()
+	if err == nil || strings.Contains(err.Error(), "hunter2") || strings.Contains(err.Error(), "pa55word") {
+		t.Errorf("a literal secret with a colon: %v; want a refusal that quotes none of it", err)
+	}
+}
+
+// TestCheckDaemon: the two rules only a daemon start has. Validate accepts
+// every one of these configurations, so a local command runs under them.
+func TestCheckDaemon(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		ok   bool
+	}{
+		{"the default address, keyless", Config{}, true},
+		{"loopback, keyless", Config{Addr: "127.0.0.1:4418"}, true},
+		{"wildcard, keyless", Config{Addr: "0.0.0.0:4418"}, false},
+		{"empty host, keyless", Config{Addr: ":4418"}, false},
+		{"a LAN address, keyless", Config{Addr: "192.168.1.5:4418"}, false},
+		{"wildcard with a key", Config{Addr: "0.0.0.0:4418", APIKeys: []string{"k"}}, true},
+		{"wildcard, keyless by choice", Config{Addr: "0.0.0.0:4418", AllowUnauthenticated: true}, true},
+		{"a loopback debug listener", Config{DebugAddr: "localhost:6060"}, true},
+		{"a wildcard debug listener", Config{DebugAddr: "0.0.0.0:6060"}, false},
+		{"a wildcard debug listener behind a key", Config{DebugAddr: ":6060", APIKeys: []string{"k"}}, false},
+	} {
+		err := tc.cfg.CheckDaemon()
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: CheckDaemon = %v, want ok %v", tc.name, err, tc.ok)
+		}
+		if err != nil && waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+			t.Errorf("%s: code = %s, want invalid-request", tc.name, waxerr.CodeOf(err))
+		}
+		if err := tc.cfg.Validate(); err != nil {
+			t.Errorf("%s: Validate = %v; a daemon-only rule must not refuse a local command", tc.name, err)
+		}
+	}
+}
+
+func TestLoopbackAddr(t *testing.T) {
+	for addr, want := range map[string]bool{
+		"":                 true, // the default address
+		"127.0.0.1:4418":   true,
+		"127.0.0.2:1":      true,
+		"localhost:4418":   true,
+		"LocalHost:4418":   true,
+		"[::1]:4418":       true,
+		"0.0.0.0:4418":     false,
+		":4418":            false, // an empty host is every interface
+		"[::]:4418":        false,
+		"192.168.1.5:4418": false,
+		"example.com:4418": false,
+		"no-port":          false,
+	} {
+		if got := LoopbackAddr(addr); got != want {
+			t.Errorf("LoopbackAddr(%q) = %v, want %v", addr, got, want)
 		}
 	}
 }

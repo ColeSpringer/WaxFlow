@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -43,7 +44,8 @@ type doctorReport struct {
 }
 
 // newDoctorCmd diagnoses the local environment a daemon would run in:
-// configuration resolves, every configured root opens and reads, the
+// configuration resolves and is one a daemon starts under, a configured TLS
+// pair loads, every configured root opens and reads, the
 // cache/data/scratch directories accept writes, the pid lookup host answers
 // (or the catalog opens, in a build with a catalog resolver), a quick
 // self-bench confirms the box transcodes faster than realtime, and the
@@ -65,7 +67,7 @@ func newDoctorCmd(flavor Flavor) *cobra.Command {
 				return err
 			}
 
-			checks := []doctorCheck{configCheck(cmd)}
+			checks := []doctorCheck{configCheck(cmd, cfg), tlsCheck(cfg), exposureCheck(cfg)}
 			checks = append(checks, rootChecks(cfg)...)
 			checks = append(checks, dirChecks(cfg)...)
 			checks = append(checks, pidCheck(cmd.Context(), cfg, flavor, logger))
@@ -119,8 +121,14 @@ func newDoctorCmd(flavor Flavor) *cobra.Command {
 	return cmd
 }
 
-// configCheck reports where the effective configuration came from.
-func configCheck(cmd *cobra.Command) doctorCheck {
+// configCheck reports where the effective configuration came from, and
+// fails one a daemon refuses to start under. The syntax of each key was
+// checked when the configuration loaded; what is left is the rules only a
+// daemon start has.
+func configCheck(cmd *cobra.Command, cfg config.Config) doctorCheck {
+	if err := cfg.CheckDaemon(); err != nil {
+		return doctorCheck{Name: "config", Status: "fail", Detail: err.Error(), err: err}
+	}
 	path, _ := cmd.Flags().GetString("config")
 	if path == "" {
 		path = os.Getenv("WAXFLOW_CONFIG")
@@ -130,6 +138,37 @@ func configCheck(cmd *cobra.Command) doctorCheck {
 		detail = "loaded " + path
 	}
 	return doctorCheck{Name: "config", Status: "ok", Detail: detail}
+}
+
+// tlsCheck loads the configured certificate and key as the daemon's
+// listener would. A pair that does not load stops the daemon only after it
+// has opened its stores and its port.
+func tlsCheck(cfg config.Config) doctorCheck {
+	if cfg.TLSCert == "" {
+		return doctorCheck{Name: "tls", Status: "skip", Detail: "no tlsCert and tlsKey configured; the daemon serves plain HTTP"}
+	}
+	if _, err := tls.LoadX509KeyPair(cfg.TLSCert, cfg.TLSKey); err != nil {
+		// The error quotes the paths, shown as the configuration spells them.
+		detail := source.RootStatus{Path: cfg.TLSCert, Err: err}.ErrText()
+		return doctorCheck{Name: "tls", Status: "fail", Detail: detail,
+			err: waxerr.Wrap(waxerr.CodeInvalidRequest, "tlsCert and tlsKey", err)}
+	}
+	return doctorCheck{Name: "tls", Status: "ok", Detail: source.Ref(cfg.TLSCert).Text() + " and its key load"}
+}
+
+// exposureCheck warns when other machines reach the daemon over plain HTTP
+// (ADR-0007). A warning and not a failure: a proxy in front may terminate
+// TLS, which nothing here can see.
+func exposureCheck(cfg config.Config) doctorCheck {
+	addr := cfg.ResolvedAddr()
+	switch {
+	case config.LoopbackAddr(addr):
+		return doctorCheck{Name: "exposure", Status: "ok", Detail: addr + " is loopback-only"}
+	case cfg.TLSCert != "":
+		return doctorCheck{Name: "exposure", Status: "ok", Detail: addr + " is served over TLS"}
+	}
+	return doctorCheck{Name: "exposure", Status: "warn",
+		Detail: addr + " is not loopback and no tlsCert and tlsKey are set; keys and signed URLs travel in the clear unless a proxy in front terminates TLS"}
 }
 
 // rootChecks opens every configured root the way the daemon does, one row

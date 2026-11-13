@@ -534,7 +534,7 @@ func (s *Server) hlsVariantOptions(desc hls.Descriptor, m *meta.Info) (waxflow.T
 		Rate:            desc.Rate,
 		Channels:        desc.Ch,
 		BitDepth:        desc.Bits,
-		GainDB:          g.resolveDB(m, dyn),
+		GainDB:          resolveGainDB(g, m, dyn),
 		Dynamics:        dyn,
 		ResampleProfile: s.profile,
 		MP3Bitrate:      desc.Bitrate * 1000,
@@ -1385,20 +1385,17 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params SignParams) (hls.
 	if d.Ch, err = atoi("ch"); err != nil {
 		return hls.Descriptor{}, 0, err
 	}
+	// Each duration is refused here when it is not finite, before anything
+	// resolves; Canonical below refuses one for any float the descriptor
+	// holds, since it could not be encoded.
 	if v := params["crossfadeSeconds"]; v != "" {
-		if d.CrossfadeSeconds, err = strconv.ParseFloat(v, 64); err != nil {
-			return bad("crossfadeSeconds %q: want seconds", v)
-		}
-		// Guard before Encode: json.Marshal rejects a NaN or Inf float, so an
-		// unvalidated one would panic rather than 400. This is the same rule the
-		// descriptor decode applies, applied a step earlier on the raw value.
-		if err := checkCrossfadeSeconds(d.CrossfadeSeconds); err != nil {
+		if d.CrossfadeSeconds, err = parseSeconds("crossfadeSeconds", v); err != nil {
 			return hls.Descriptor{}, 0, err
 		}
 	}
 	if v := params["segDur"]; v != "" {
-		if d.SegDur, err = strconv.ParseFloat(v, 64); err != nil {
-			return bad("segDur %q: want seconds", v)
+		if d.SegDur, err = parseSeconds("segDur", v); err != nil {
+			return hls.Descriptor{}, 0, err
 		}
 	}
 	// Present-but-empty refuses, the same rule /stream applies (and atoi
@@ -1443,7 +1440,7 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params SignParams) (hls.
 
 	// Round trip through the wire form: one validator for minting and
 	// playback.
-	out, err := hls.DecodeDescriptor(d.Encode())
+	out, err := d.Canonical()
 	if err != nil {
 		return hls.Descriptor{}, 0, err
 	}

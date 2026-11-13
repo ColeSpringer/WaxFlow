@@ -714,6 +714,18 @@ type TranscodePlan struct {
 	EstimatedBytes int64
 }
 
+// withDemuxer puts the track's demuxer revision, when it names one, ahead of
+// a plan's versions. Every plan built from one source track assembles its
+// Versions through here, so a rung that copies packets keys on the demuxer
+// as a rung that decodes does. A timeline lists its members' revisions
+// itself (timelineVersions).
+func withDemuxer(track container.Track, versions ...string) []string {
+	if track.DemuxerVersion == "" {
+		return versions
+	}
+	return append([]string{track.DemuxerVersion}, versions...)
+}
+
 // decodeVersion is the read-side member of the plan's version tuple: the
 // source codec's decoder revision (each codec package's Version constant).
 // It rides in TranscodePlan.Versions so a decoder change invalidates
@@ -894,7 +906,7 @@ func (e *Engine) PlanTranscode(track container.Track, opts TranscodeOptions) (*T
 		Container:      core.container,
 		MediaType:      core.mediaType,
 		Live:           core.live,
-		Versions:       append([]string{decodeVersion(track.Codec)}, core.versions...),
+		Versions:       withDemuxer(track, append([]string{decodeVersion(track.Codec)}, core.versions...)...),
 		Samples:        samples,
 		BytesPerFrame:  core.bytesPerFrame,
 		FrameSize:      core.frameSize,
@@ -969,12 +981,19 @@ func buildPlanCore(in audio.Format, opts TranscodeOptions) (*planCore, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A chain computes in floats, so its plan names how this build rounds
+	// them, where that can differ (FloatBuildVersion). The copy rungs run no
+	// chain and name no build.
+	versions := append(chain.Versions(), version, muxV)
+	if FloatBuildVersion != "" {
+		versions = append([]string{FloatBuildVersion}, versions...)
+	}
 	return &planCore{
 		format:        f,
 		container:     containerName,
 		mediaType:     mediaType,
 		live:          containerLive(row.live, opts.Container),
-		versions:      append(chain.Versions(), version, muxV),
+		versions:      versions,
 		l:             l,
 		m:             m,
 		bytesPerFrame: bytesPerFrame,

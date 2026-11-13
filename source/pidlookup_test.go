@@ -1079,3 +1079,30 @@ func TestClipKeepsWhatItShowsWhole(t *testing.T) {
 		t.Errorf("clip of nothing but stray bytes gave %q", got)
 	}
 }
+
+// TestPIDLookupURLRefusalsQuoteNoQuery: a refused lookup URL is quoted
+// without its query, its fragment or its password. A query is where a token
+// rides, and the refusal travels: to the daemon's log, and to the body of a
+// reload the configuration fails.
+func TestPIDLookupURLRefusalsQuoteNoQuery(t *testing.T) {
+	for _, raw := range []string{
+		"http://deck/pid?token=s3cret",
+		"http://deck/pid#s3cret",
+		"http://deck/pid?",
+		"ftp://deck/pid?token=s3cret",
+		"http:///pid?token=s3cret",
+		"http://user:s3cret@deck/pid?k=s3cret#s3cret",
+	} {
+		_, err := ParsePIDLookupURL(raw)
+		if waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+			t.Errorf("%s: %v, want an invalid-request refusal", raw, err)
+			continue
+		}
+		if strings.Contains(err.Error(), "s3cret") || strings.Contains(err.Error(), "token") {
+			t.Errorf("%s: the refusal quotes what it should not: %v", raw, err)
+		}
+		if !strings.Contains(err.Error(), "pid") {
+			t.Errorf("%s: the refusal no longer says which URL: %v", raw, err)
+		}
+	}
+}

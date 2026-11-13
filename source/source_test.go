@@ -284,3 +284,51 @@ func TestNamesOrder(t *testing.T) {
 		t.Fatalf("Names() = %s, want configuration order b,a", got)
 	}
 }
+
+// TestLocalFaultClassifies: a file that is missing is not-found, and one
+// that is there and cannot be opened is not. OpenLocal called every open
+// failure not-found, so an upload the daemon could not read answered 404 as
+// if it had been deleted.
+func TestLocalFaultClassifies(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		code waxerr.Code
+		msg  string
+	}{
+		{"missing", fs.ErrNotExist, waxerr.CodeNotFound, "source: no such file"},
+		{"permission", fs.ErrPermission, waxerr.CodeSourceUnreadable, "source: permission denied"},
+		{"anything else", errors.New("an error nothing names"), waxerr.CodeSourceUnreadable, "source: opening the file"},
+	} {
+		in := &fs.PathError{Op: "open", Path: "spool/01J", Err: tc.err}
+		got := localFault(in)
+		if waxerr.CodeOf(got) != tc.code {
+			t.Errorf("%s: code = %s, want %s", tc.name, waxerr.CodeOf(got), tc.code)
+		}
+		if !strings.HasPrefix(got.Error(), tc.msg+": ") {
+			t.Errorf("%s: message = %q, want it to start %q", tc.name, got, tc.msg)
+		}
+		if !errors.Is(got, tc.err) {
+			t.Errorf("%s: the cause is not kept: %v", tc.name, got)
+		}
+	}
+}
+
+// TestOpenLocalMissing: a path that names nothing is not-found, whether its
+// last element is missing or an earlier one is a file.
+func TestOpenLocalMissing(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.flac"), []byte("fLaC"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.Join(dir, "absent"),
+		filepath.Join(dir, "absent", "x.flac"),
+		filepath.Join(dir, "a.flac", "x.flac"),
+	} {
+		_, err := OpenLocal("pid:1", path, path)
+		if waxerr.CodeOf(err) != waxerr.CodeNotFound {
+			t.Errorf("OpenLocal(%s) = %v, want not-found", path, err)
+		}
+	}
+}

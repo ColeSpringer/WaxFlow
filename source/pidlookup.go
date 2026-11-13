@@ -106,7 +106,8 @@ type pidEntry struct {
 
 // ParsePIDLookupURL validates a lookup base: an absolute http or https URL
 // with a host and no query or fragment. Errors carry
-// waxerr.CodeInvalidRequest and never the URL's password.
+// waxerr.CodeInvalidRequest and never the URL's password, query or
+// fragment: a query is where a token rides.
 func ParsePIDLookupURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -117,7 +118,9 @@ func ParsePIDLookupURL(raw string) (*url.URL, error) {
 		}
 		return nil, waxerr.Wrap(waxerr.CodeInvalidRequest, "source: pid lookup URL does not parse", err)
 	}
-	shown := u.Redacted()
+	bare := *u
+	bare.RawQuery, bare.ForceQuery, bare.Fragment, bare.RawFragment = "", false, "", ""
+	shown := bare.Redacted()
 	switch {
 	case u.Scheme != "http" && u.Scheme != "https":
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,

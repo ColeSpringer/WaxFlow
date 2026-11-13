@@ -1194,8 +1194,10 @@ func concatLayout(tracks []container.Track, opts ConcatOptions) (env audio.Forma
 // The track this returns carries no mark of having come from a timeline, so a
 // plan built from it alone (PlanTranscode) cannot see the seam and will not
 // refuse a conversion across it; the run does, off the Media. Ask
-// Engine.TimelineChannels for the width before building either. The common mixed-channel cases are a mono track in a stereo queue and
-// a stereo track in a surround one; a narrower member is widened into the
+// Engine.TimelineChannels for the width before building either.
+//
+// The common mixed-channel cases are a mono track in a stereo queue and a
+// stereo track in a surround one; a narrower member is widened into the
 // envelope by position, zero-filled and at unity, so it keeps its own levels.
 // A placed member measures the same loudness inside the queue as alone; a
 // mono member duplicated across a stereo or quad envelope measures

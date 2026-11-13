@@ -1,10 +1,9 @@
 package aac
 
 // bitWriter assembles MSB-first bit fields into a growing byte slice, the
-// mirror of bitReader (the same shape codec/alac uses; the nested-module
-// extraction rules out sharing it across codec packages). Whole bytes
-// spill from the cache as they fill; align pads the tail with zeros,
-// which is how a raw_data_block ends after the END element.
+// mirror of bitReader. Whole bytes spill from the cache as they fill; align
+// pads the tail with zeros, which is how a raw_data_block ends after the
+// END element.
 type bitWriter struct {
 	buf   []byte
 	cache uint64 // low n bits are pending, next bit out is their MSB

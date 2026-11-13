@@ -184,6 +184,13 @@ UTF-8 (a root's, `dataDir`, `cacheDir`, `scratchDir`, `tlsCert`, `tlsKey`,
 ([docs/api.md](docs/api.md#source-references)), in the file or in its
 `WAXFLOW_*` variable: `pct:/mnt/caf%E9`.
 
+A key whose value is malformed is refused by every command that loads the
+configuration (`server`, `doctor`, `sign`, `transcode`, `split`, `ping`,
+`cache`, and a probe of a `pid:` or `upload:` reference; a probe of a plain
+path loads none). Two rules belong to a daemon's start alone, so `server`
+and `doctor` apply them and a local `transcode` does not: no keys on a
+non-loopback `addr`, and a `debugAddr` that is not loopback.
+
 | Key | Env | Default | Purpose |
 |---|---|---|---|
 | `addr` | `WAXFLOW_ADDR` | `127.0.0.1:4418` | listen address (compose widens to `0.0.0.0`) |
@@ -191,8 +198,8 @@ UTF-8 (a root's, `dataDir`, `cacheDir`, `scratchDir`, `tlsCert`, `tlsKey`,
 | `roots` | `WAXFLOW_ROOTS` | none | named library roots; JSON `[{"name","path"}]`, env `name=path,name2=path2`; each opened via `os.Root` (no escape, symlinks confined), files validated regular and size-capped; a root whose folder does not open, or is empty, starts unmounted (see below) |
 | `pidLookupURL` | `WAXFLOW_PID_LOOKUP_URL` | none | the host endpoint that maps `pid:<id>` source references to root-relative ones, `GET <url>/<id>` (see [`pid:` sources](#pid-sources)); read at start |
 | `pidLookupKey` | `WAXFLOW_PID_LOOKUP_KEY` | none | bearer token sent with every pid lookup |
-| `catalogDB` | `WAXFLOW_CATALOG_DB` | none | WaxBin catalog path for a build that injects a catalog resolver through `cli.Flavor` (see [`pid:` sources](#pid-sources)); exclusive with `pidLookupURL`. No build here serves it: this server refuses to start with it set (one-shots on plain paths never read config, so they neither honor nor refuse it) |
-| `apiKeys` | `WAXFLOW_API_KEYS` | none | control-API keys (comma-separated in env). **Fail closed**: required on a non-loopback `addr` unless `allowUnauthenticated` |
+| `catalogDB` | `WAXFLOW_CATALOG_DB` | none | WaxBin catalog path for a build that injects a catalog resolver through `cli.Flavor` (see [`pid:` sources](#pid-sources)); exclusive with `pidLookupURL`. No build here serves it: this server refuses to start with it set (a one-shot on a plain path opens no resolver, so it neither honors nor refuses it) |
+| `apiKeys` | `WAXFLOW_API_KEYS` | none | control-API keys (comma-separated in env); a key no request can present, an empty one or one with white space at an end, is refused. **Fail closed**: required on a non-loopback `addr` unless `allowUnauthenticated` |
 | `allowUnauthenticated` | `WAXFLOW_ALLOW_UNAUTHENTICATED` | `false` | explicit opt-in to keyless on non-loopback |
 | `sourceMaxBytes` | `WAXFLOW_SOURCE_MAX_BYTES` | 4 GiB | per-source open cap |
 | `metricsKey` | `WAXFLOW_METRICS_KEY` | none | additionally unlocks `GET /metrics` |
@@ -204,7 +211,7 @@ UTF-8 (a root's, `dataDir`, `cacheDir`, `scratchDir`, `tlsCert`, `tlsKey`,
 | `scratchMaxBytes` | `WAXFLOW_SCRATCH_MAX_BYTES` | 8 GiB | aggregate spool cap (`uploadMaxBytes` only caps one upload) |
 | `cacheMaxBytes` / `cacheMaxAge` | `WAXFLOW_CACHE_MAX_*` | 10 GiB / off | LRU eviction policy (`cacheMaxAge` is a Go duration) |
 | `liveSlots` / `jobSlots` | `WAXFLOW_*_SLOTS` | NumCPU-1 / 2 | live admission pool (over limit means 503 + `Retry-After: 2`) / concurrent job workers (jobs queue and also pause while the live pool is saturated) |
-| `defaultGain` | `WAXFLOW_DEFAULT_GAIN` | `track` | gain mode when `gain=` absent |
+| `defaultGain` | `WAXFLOW_DEFAULT_GAIN` | `track` | gain mode when `gain=` absent: `off`, `track`, `album`, or a dB number |
 | `resampleProfile` | `WAXFLOW_RESAMPLE_PROFILE` | `hq` | `hq` or `fast` (constrained hosts) |
 | `tlsCert` / `tlsKey` | `WAXFLOW_TLS_*` | none | native TLS; else put a terminating proxy in front (ADR-0007) |
 | `debugAddr` | `WAXFLOW_DEBUG_ADDR` | off | loopback-only pprof listener |
@@ -277,7 +284,9 @@ down, jobs on an unavailable root wait for it instead of failing, and
   (ADR-0003; uses the same secret and roots the daemon holds)
 - `waxflow cache stats|gc`: inspect or evict a running daemon's cache
 - `waxflow doctor`: check the local environment a daemon needs: config
-  resolves, every root opens and reads, the cache/data/scratch dirs
+  resolves and is one a daemon starts under, a configured TLS pair loads
+  (and a non-loopback `addr` served without one is a warning), every root
+  opens and reads, the cache/data/scratch dirs
   accept writes, the pid lookup host answers (or the catalog opens, in a
   build with a catalog resolver), a quick self-bench transcodes faster
   than realtime, and the

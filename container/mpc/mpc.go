@@ -64,8 +64,6 @@ const (
 	// reference reads the magic at the tag's end and nowhere else; the scan is
 	// tolerance for a tagger that left padding.
 	maxJunk = 1 << 20
-	// maxWarnings caps the tolerated-damage list.
-	maxWarnings = 64
 	// checkpointFrames is the SV7 index granularity: the hop walk records
 	// every this-many-th frame's position, and the seek scanner keeps the
 	// decoder state at the same points.

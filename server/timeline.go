@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/colespringer/waxflow"
@@ -97,18 +98,32 @@ func readExpiry(exp int64, seconds float64) time.Time {
 	return time.Now().Add(sign.DefaultTTLFor(seconds)).Truncate(time.Hour).Add(time.Hour)
 }
 
-// checkCrossfadeSeconds is the cheap early guard on a wire crossfade: it must be
-// non-negative and finite. Whether it actually fits the timeline (the shortest
-// member, the pool buffer) is checkCrossfade's call inside ConcatTrack, which
-// needs the members measured; this is what a handler can refuse before resolving
-// or measuring anything. The HLS descriptor applies the same rule at decode, so
-// a signed URL and a fresh request are held to one contract.
-func checkCrossfadeSeconds(x float64) error {
+// checkSeconds is the cheap early guard on a wire duration, name's: it must
+// be non-negative and finite. Whether a crossfade fits its timeline (the
+// shortest member, the pool buffer) is checkCrossfade's call inside
+// ConcatTrack, which needs the members measured, and whether a segment is
+// short enough is the engine's when it plans; this is what a handler can
+// refuse before resolving or measuring anything.
+func checkSeconds(name string, x float64) error {
 	if x < 0 || math.IsNaN(x) || math.IsInf(x, 0) {
 		return waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("crossfadeSeconds %g must be non-negative and finite", x))
+			fmt.Sprintf("%s %g must be non-negative and finite", name, x))
 	}
 	return nil
+}
+
+// parseSeconds reads the wire duration name from v, by checkSeconds' rule.
+// strconv.ParseFloat reads "NaN" and "Inf", which is why the value is
+// checked and not only the spelling.
+func parseSeconds(name, v string) (float64, error) {
+	x, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("%s %q: want seconds", name, v))
+	}
+	if err := checkSeconds(name, x); err != nil {
+		return 0, err
+	}
+	return x, nil
 }
 
 // handleTimelineCreate serves POST /hls/timeline: it resolves and probes the
@@ -146,7 +161,7 @@ func (s *Server) handleTimelineCreate(w http.ResponseWriter, r *http.Request) {
 	// deferring the measure, not new to the crossfade: a member window's fit
 	// against the measured source (SpanTrack's refusal) splits the same way,
 	// while its internal sense (timelineRefs above) is refused on both paths.
-	if err := checkCrossfadeSeconds(body.CrossfadeSeconds); err != nil {
+	if err := checkSeconds("crossfadeSeconds", body.CrossfadeSeconds); err != nil {
 		s.writeError(w, err)
 		return
 	}

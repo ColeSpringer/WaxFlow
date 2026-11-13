@@ -82,17 +82,32 @@ func New(keys []Key) (*Signer, error) {
 	if len(keys) == 0 {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, "sign: no signing keys")
 	}
+	if err := CheckKeys(keys); err != nil {
+		return nil, err
+	}
 	s := &Signer{active: keys[0], keys: make(map[string]Key, len(keys)), now: time.Now}
 	for _, k := range keys {
-		if k.ID == "" || len(k.Secret) == 0 {
-			return nil, waxerr.New(waxerr.CodeInvalidRequest, "sign: key with empty id or secret")
-		}
-		if _, dup := s.keys[k.ID]; dup {
-			return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("sign: duplicate key id %q", k.ID))
-		}
 		s.keys[k.ID] = k
 	}
 	return s, nil
+}
+
+// CheckKeys refuses a rotation list New would: a key with no id or no
+// secret, or two keys under one id. An empty list passes; New refuses that
+// one itself, since a configuration with no key means "generate one". A
+// refusal names keys by position and quotes no id (see ParseKeys).
+func CheckKeys(keys []Key) error {
+	first := make(map[string]int, len(keys))
+	for i, k := range keys {
+		if k.ID == "" || len(k.Secret) == 0 {
+			return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("sign: key %d has an empty id or secret", i+1))
+		}
+		if j, dup := first[k.ID]; dup {
+			return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("sign: keys %d and %d share an id", j+1, i+1))
+		}
+		first[k.ID] = i
+	}
+	return nil
 }
 
 // Sign returns a copy of q with exp, kid, and sig added, valid until exp.

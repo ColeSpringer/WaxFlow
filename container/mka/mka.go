@@ -65,9 +65,6 @@ const (
 	// raw-total pass), the backstop behind the segment-size bound. It clears a
 	// day of the finest Opus frames (2.5 ms) with headroom.
 	maxFrames = 1 << 26
-	// maxWarnings caps the tolerated-damage list; damage past it is counted
-	// (DamageCount), not listed.
-	maxWarnings = 64
 	// maxMidTrims bounds the walk's record of where the inner trims lie
 	// (container.Track.MidTrims): 64 KiB of positions, which a daemon memo
 	// keeps per track. An mkvmerge seam is one trim, so this clears a playlist
@@ -107,6 +104,7 @@ const (
 	idTrackNumber  = 0xD7
 	idTrackType    = 0x83
 	idFlagDefault  = 0x88
+	idFlagEnabled  = 0xB9
 	idCodecID      = 0x86
 	idCodecPrivate = 0x63A2
 	idCodecDelay   = 0x56AA

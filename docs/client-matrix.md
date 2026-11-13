@@ -128,15 +128,15 @@ Automating this list on a hosted macOS runner is the plan, and it is
 blocked on two facts about such a runner rather than on the harness:
 whether AVPlayer advances with no audio output device, and whether App
 Transport Security lets a command-line Swift binary load plain http from
-loopback. `scripts/apple-e2e/smoke.swift` and the `apple-smoke` workflow
-(manual dispatch, `macos-latest`) answer both in one run, building the
+loopback. `scripts/apple-e2e/smoke.swift` answers both in one run of
+`make apple-smoke` on a Mac (no workflow runs it), building the
 probe with and without an embedded `NSAllowsLocalNetworking` plist. The
 harness shape follows from the answers; until they are in, the list above
 stands as manual.
 
 Outcome log (append per run):
 
-- (none yet; first run pending Apple hardware or the `apple-smoke` job)
+- (none yet; first run pending Apple hardware: `make apple-smoke`)
 
 ## Manual checklist: Android Media3/ExoPlayer
 

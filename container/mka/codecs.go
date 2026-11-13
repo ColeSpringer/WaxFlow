@@ -25,6 +25,7 @@ type trackEntry struct {
 	codecDelay  int64 // nanoseconds
 	seekPreRoll int64 // nanoseconds
 	def         bool
+	enabled     bool
 }
 
 // codecSetup is the result of resolving a TrackEntry to a wired codec: the
@@ -300,4 +301,18 @@ func (d *Demuxer) frameSamples(data []byte) int64 {
 	default:
 		return 0
 	}
+}
+
+// rank orders tracks for selection: one the file marks usable (FlagEnabled)
+// ahead of one it does not, then a default track (FlagDefault) ahead of one
+// that is not. The first of equals wins.
+func (t *trackEntry) rank() int {
+	r := 0
+	if t.enabled {
+		r += 2
+	}
+	if t.def {
+		r++
+	}
+	return r
 }

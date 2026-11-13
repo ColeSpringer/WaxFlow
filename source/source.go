@@ -170,11 +170,13 @@ func extHint(rel string) string {
 // the reference the file answers for ("upload:<id>") and name supplies
 // the extension hint (the client's original filename); path confinement
 // is the caller's job, since the spool directory is daemon-owned, not a
-// user-named root.
+// user-named root. Only a path that names nothing is not-found: a file that
+// is there and does not open answers source-unreadable, or overloaded when
+// the daemon is out of file handles.
 func OpenLocal(ref, path, name string) (*File, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|container.OpenNonblock, 0)
 	if err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeNotFound, "source: no such file", err)
+		return nil, localFault(err)
 	}
 	fi, err := f.Stat()
 	if err != nil {

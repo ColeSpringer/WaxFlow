@@ -21,10 +21,12 @@ import (
 // A hash change here is not a failure to paper over: either revert the
 // byte change, or bump the matching version constant (EncoderVersion /
 // HEEncoderVersion / HEV2EncoderVersion) and update the hash in the
-// same commit. The encoders are pure functions of their input on every
-// platform by design (float tables rounded once, no FMA in the
-// kernels); a platform-dependent hash means that promise broke, which
-// this test exists to surface too.
+// same commit. The encoders are pure functions of their input for one
+// GOARCH and GOAMD64 level (float tables rounded once, a fixed operation
+// order). The compiler fuses multiply-adds on arm64 and under GOAMD64=v3,
+// and these hashes have held on the darwin/arm64 CI leg all the same. If
+// one ever differs by platform, a fused site has begun to move an encoded
+// byte, and this test is where that shows.
 func TestEncoderGoldenBytes(t *testing.T) {
 	sig := func(n, ch int) [][]float32 {
 		out := make([][]float32, ch)

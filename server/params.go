@@ -10,6 +10,7 @@ import (
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/dsp/gain"
+	"github.com/colespringer/waxflow/internal/gainspec"
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/sign"
 	"github.com/colespringer/waxflow/internal/timeline"
@@ -89,14 +90,6 @@ func checkSilenceOptions(o *waxflow.SilenceOptions) error {
 // need it nameable.
 const dynamicsOff = "off"
 
-// gainSpellings lists the named gain modes parseGain accepts, which is
-// exactly what /caps advertises. The scalar escape hatch is deliberately
-// absent: every advertised value must parse, and a "<db>" placeholder does
-// not. The ceilings carry that information instead.
-func gainSpellings() []string {
-	return []string{"off", "track", "album"}
-}
-
 // dynamicsSpellings lists what parseDynamics accepts, which is exactly what
 // /caps advertises. Deriving the advertised list from the parser rather than
 // restating it is what makes TestCapsDSPIsHonest structural instead of a
@@ -164,22 +157,7 @@ func seekSample(t float64, rate int) int64 {
 	return int64(math.Round(t * float64(rate)))
 }
 
-type gainMode int
-
-const (
-	gainOff gainMode = iota
-	gainTrack
-	gainAlbum
-	gainFixed
-)
-
-// gainSpec is a parsed gain= parameter.
-type gainSpec struct {
-	mode gainMode
-	db   float64
-}
-
-// resolveDB is the dB the DSP chain applies: fixed values verbatim, tag
+// resolveGainDB is the dB the DSP chain applies: fixed values verbatim, tag
 // modes from the source's ReplayGain (album falls back to track, the usual
 // player behavior), 0 when the tags or the mapper are absent. Positive gain
 // clamps at gainCeilingFor(dyn), whichever mode it came from.
@@ -187,16 +165,16 @@ type gainSpec struct {
 // The clamp lives here rather than in parseGain because the ceiling is a
 // function of the dynamics preset, which is a different parameter: nothing
 // at parse time knows yet which ceiling applies.
-func (g gainSpec) resolveDB(info *meta.Info, dyn gain.Preset) float64 {
+func resolveGainDB(g gainspec.Spec, info *meta.Info, dyn gain.Preset) float64 {
 	ceiling := gainCeilingFor(dyn)
-	switch g.mode {
-	case gainFixed:
-		return min(g.db, ceiling)
-	case gainTrack:
+	switch g.Mode {
+	case gainspec.Fixed:
+		return min(g.DB, ceiling)
+	case gainspec.Track:
 		if db, ok := meta.TrackGainDB(info); ok {
 			return min(db, ceiling)
 		}
-	case gainAlbum:
+	case gainspec.Album:
 		if db, ok := meta.AlbumGainDB(info); ok {
 			return min(db, ceiling)
 		}
@@ -220,8 +198,8 @@ func (g gainSpec) resolveDB(info *meta.Info, dyn gain.Preset) float64 {
 // So a timeline takes gain=off or the dB the caller wants, which is what a
 // caller with its own loudness measurements sends anyway. The refusal is at
 // mint time, where the client can act on it, rather than at playback.
-func checkTimelineGain(spelling string, g gainSpec) error {
-	if g.mode != gainTrack && g.mode != gainAlbum {
+func checkTimelineGain(spelling string, g gainspec.Spec) error {
+	if g.Mode != gainspec.Track && g.Mode != gainspec.Album {
 		return nil
 	}
 	how := "gain=" + spelling
@@ -229,46 +207,32 @@ func checkTimelineGain(spelling string, g gainSpec) error {
 		// The request named no gain at all, so this is the daemon's default
 		// biting. Say that, or the error names a parameter the caller can
 		// look at its own request and not find.
-		how = "this daemon's default gain (" + gainModeName(g.mode) + ")"
+		how = "this daemon's default gain (" + gainModeName(g.Mode) + ")"
 	}
 	return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
 		"%s resolves from one source's tags and a timeline has many; pass gain=off or a dB number", how))
 }
 
-func gainModeName(m gainMode) string {
+func gainModeName(m gainspec.Mode) string {
 	switch m {
-	case gainTrack:
+	case gainspec.Track:
 		return "track"
-	case gainAlbum:
+	case gainspec.Album:
 		return "album"
-	case gainFixed:
+	case gainspec.Fixed:
 		return "a dB number"
 	default:
 		return "off"
 	}
 }
 
-func parseGain(v string, dflt gainSpec) (gainSpec, error) {
-	switch strings.ToLower(v) {
-	case "":
+// parseGain reads a gain= value by the grammar gainspec.Parse holds; the
+// empty value is dflt.
+func parseGain(v string, dflt gainspec.Spec) (gainspec.Spec, error) {
+	if v == "" {
 		return dflt, nil
-	case "off":
-		return gainSpec{mode: gainOff}, nil
-	case "track":
-		return gainSpec{mode: gainTrack}, nil
-	case "album":
-		return gainSpec{mode: gainAlbum}, nil
 	}
-	num := strings.TrimSuffix(strings.ToLower(v), "db")
-	db, err := strconv.ParseFloat(num, 64)
-	if err != nil || math.IsNaN(db) || math.IsInf(db, 0) {
-		return gainSpec{}, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("gain %q: want off, track, album, or a dB number", v))
-	}
-	// Positive gain is clamped rather than refused, but not here: the
-	// ceiling depends on the dynamics preset, so resolveDB applies it once
-	// both parameters are known.
-	return gainSpec{mode: gainFixed, db: db}, nil
+	return gainspec.Parse(v)
 }
 
 // streamParamNames is the closed parameter surface of /stream and
@@ -361,7 +325,7 @@ type streamParams struct {
 	rate       int
 	ch         int
 	bits       int
-	gain       gainSpec
+	gain       gainspec.Spec
 	gainParam  string // gain= as sent, "" when absent, which a timeline's refusal names
 	dynamics   gain.Preset
 	t          float64 // seconds; samples are derived after probe
@@ -380,7 +344,7 @@ type streamParams struct {
 // out-of-range preset to a layer-legal rate, so a preset never fails).
 var qPreset = map[string]int{"low": 96, "med": 128, "high": 192}
 
-func parseStreamParams(q url.Values, defaultGain gainSpec) (*streamParams, error) {
+func parseStreamParams(q url.Values, defaultGain gainspec.Spec) (*streamParams, error) {
 	bad := func(format string, args ...any) (*streamParams, error) {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(format, args...))
 	}
@@ -415,11 +379,8 @@ func parseStreamParams(q url.Values, defaultGain gainSpec) (*streamParams, error
 		if v == "" {
 			return bad("crossfadeSeconds is present but empty; omit it for a butt-join")
 		}
-		x, err := strconv.ParseFloat(v, 64)
+		x, err := parseSeconds("crossfadeSeconds", v)
 		if err != nil {
-			return bad("crossfadeSeconds %q: want seconds", v)
-		}
-		if err := checkCrossfadeSeconds(x); err != nil {
 			return nil, err
 		}
 		// Refused rather than ignored, as on the HLS descriptor: one source has

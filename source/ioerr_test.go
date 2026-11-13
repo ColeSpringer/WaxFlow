@@ -39,3 +39,28 @@ func TestOpenFaultIO(t *testing.T) {
 		}
 	}
 }
+
+// TestLocalFaultIO: a trusted local path fails as a root's file does. A
+// device fault is the file's, running out of descriptors is the daemon's
+// and worth a retry, and an errno nothing here names is still not a
+// missing file.
+func TestLocalFaultIO(t *testing.T) {
+	for _, tc := range []struct {
+		errno syscall.Errno
+		want  waxerr.Code
+	}{
+		{syscall.EIO, waxerr.CodeSourceUnreadable},
+		{syscall.ESTALE, waxerr.CodeSourceUnreadable},
+		{syscall.EMFILE, waxerr.CodeOverloaded},
+		{syscall.ENFILE, waxerr.CodeOverloaded},
+		// A path that runs through a file names nothing, as a missing one does.
+		{syscall.ENOTDIR, waxerr.CodeNotFound},
+		{syscall.ENAMETOOLONG, waxerr.CodeSourceUnreadable},
+		{syscall.ELOOP, waxerr.CodeSourceUnreadable},
+	} {
+		err := &fs.PathError{Op: "open", Path: "spool/01J", Err: tc.errno}
+		if got := waxerr.CodeOf(localFault(err)); got != tc.want {
+			t.Errorf("%v: code = %s, want %s", tc.errno, got, tc.want)
+		}
+	}
+}

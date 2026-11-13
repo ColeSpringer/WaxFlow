@@ -730,7 +730,8 @@ session.
 | `GET /hls/seg/{n}.m4s?v=...` | media segment n (0-based). Cached segments serve with ranges and strong ETags; misses wait on the variant worker (within a 3-segment lookahead) or restart it at n. A worker nobody has fetched a segment from, cached or not, for `hlsIdleGrace` (60 s by default; `0` never) stops, and the next miss restarts it there. |
 
 Segments are `styp` + `moof`+`mdat` fragments, boundaries snapped to
-whole encoder frames (`segDur` is a target; the playlist carries exact
+whole encoder frames (`segDur` is a target, in seconds, non-negative and
+finite, else a 400; the playlist carries exact
 durations), all sync samples, decode timeline in sample units. Formats
 with a segmented form: `opus`, `flac`, `aac`, `alac` (see `/caps`
 `delivery.hlsFormats`); of these, `opus` and `aac` also cut over HLS without
@@ -971,8 +972,7 @@ refuses `src` beside `tl` by presence, as `/stream` does, so an empty
         "hls-js": {"delivery": "hls", "progressive": ["opus", "flac", "mp3", "aac", "wav"],
                    "hls": ["opus", "flac", "aac"],
                    "basis": "automated: hls.js + <audio> in Chromium (make client-e2e, nightly)",
-                   "notes": ["12- and 20-bit FLAC sources are widened to 16/24 bits losslessly for HLS, which re-encodes them instead of remuxing (Chromium's MP4 parser accepts only 8/16/24/32)",
-                             "an explicit bits=12 or bits=20 is honored and mints a stream Chromium cannot play; omit bits, or ask for 16 or 24"]},
+                   "notes": ["12- and 20-bit FLAC sources are widened to 16/24 bits losslessly for HLS, which re-encodes them instead of remuxing (Chromium's MP4 parser accepts only 8/16/24/32)"]},
         "android-exoplayer": {"...": "..."},
         "desktop-mpv": {"...": "..."}
       }
@@ -1059,6 +1059,8 @@ is accepted, `upload:<id>`. Uploads expire `uploadTTL` after creation
 (default 1 h; `expiresAt` is absent when expiry is off) and are capped
 by `uploadMaxBytes` each and `scratchMaxBytes` together.
 `DELETE /uploads/{id}` removes one immediately (204).
+
+The `client` package wraps both (`client.Upload`, `client.DeleteUpload`).
 
 ## Jobs
 
@@ -1323,7 +1325,7 @@ The job carries only the summary:
 The spans themselves are the job's **output file**, served by `GET
 /jobs/{id}/result`, because a 40-hour audiobook pausing every 30 s is
 ~4800 spans and the job document is broadcast whole on every progress
-event. It is `silence.json`:
+event. It is `silence.json` (`client.SilenceMap`):
 
     {"schemaVersion": 1, "version": "silence-1", "thresholdDb": -50, "minSeconds": 0.5,
      "rate": 44100, "samples": 220500, "durationSeconds": 5,
@@ -1456,7 +1458,9 @@ open is no failure: the rest of the reload lands, the root is listed in
 `unmounted` and answers `503 root-unavailable` until its folder opens, and
 a re-pointed root whose new path fails stops serving the old one. A bad
 config edit (missing or unreadable file, invalid or duplicate root name, a
-root with no path) is refused synchronously as `400 invalid-request` with
+root with no path, or any other key whose value the configuration refuses,
+though the reload applies only the roots) is refused synchronously as
+`400 invalid-request` with
 nothing changed, so the caller learns at once instead of after a `200` that
 did nothing; a wired endpoint never answers `404`, so that status
 unambiguously means the endpoint is not served here. To avoid a reload

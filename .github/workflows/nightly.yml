@@ -12,13 +12,14 @@ permissions:
 
 jobs:
   # Long fuzz soak over every native fuzz target: 10 minutes per target
-  # nightly versus the 45-second smoke in ci.yml. The list is 53 targets,
-  # about 9 hours of fuzzing, and a hosted job dies at 6 hours, so it is
+  # nightly versus the 45-second smoke in ci.yml. The list is 61 targets,
+  # about 10 hours of fuzzing, and a hosted job dies at 6 hours, so it is
   # sharded: scripts/fuzz.sh discovers every target and FUZZ_SHARD=k/N runs
-  # every Nth one, so the six shards cover the list once at about 90 minutes
-  # each. Add a shard once a shard holds 24 targets: that is 4 hours of
-  # fuzzing against the 5-hour timeout. New Fuzz* functions are picked up
-  # automatically. scripts/fuzz.sh
+  # every Nth one, so the six shards cover the list once at 100 to 110
+  # minutes each. Add a shard once a shard holds 24 targets: that is 4 hours
+  # of fuzzing against the 5-hour timeout. New Fuzz* functions are picked up
+  # automatically, and TestFuzzCountInDocs holds these figures and each
+  # workflow's shard list to the targets there are. scripts/fuzz.sh
   # fails the job only on a real crasher (a reproducer written under
   # testdata/fuzz), not on Go's benign end-of-run "context deadline
   # exceeded"; a real finding is echoed into this log and uploaded below so

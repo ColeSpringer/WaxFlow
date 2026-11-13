@@ -25,10 +25,10 @@ const gridCacheCap = 4096
 
 // gridCache is a bounded identity-keyed memo of packet grids.
 //
-// Eviction is least-recently-used, following trackCache and resolver.Catalog
-// for the same reason both do: rebuilding an entry is expensive (a full walk of
-// the source), so evicting a hot one is costly and a library-wide sweep must
-// not push a live session's grid out of the memo.
+// Eviction is least-recently-used, following trackCache for the same reason:
+// rebuilding an entry is expensive (a full walk of the source), so evicting a
+// hot one is costly and a library-wide sweep must not push a live session's
+// grid out of the memo.
 type gridCache struct {
 	mu      sync.Mutex
 	entries map[string]*gridEntry

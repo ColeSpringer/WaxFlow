@@ -349,7 +349,9 @@ func TestSampleEntriesSatisfyMSE(t *testing.T) {
 // what the track is. The remedy is a rung up, where PlanSegments widens such
 // a source to the next depth the parser takes
 // (TestSegmentsWidenUnplayableFLACDepths), so these entries are the ones an
-// HLS mint no longer produces. A caller naming `bits=12` still gets one.
+// HLS mint no longer produces. No HTTP surface takes a depth of 12 or 20
+// (bits is 16 or 24), so only an engine caller naming BitDepth 12 still
+// gets one.
 func TestMSERuleNamesTheUnplayableFLACDepths(t *testing.T) {
 	for _, depth := range []int{12, 20} {
 		init, err := InitSegment(flacTrackDepth(t, 44100, depth))

@@ -34,8 +34,7 @@ const trackCacheCap = 4096
 // metadata entry is one cheap tag read, while rebuilding a track entry can cost
 // a full decode (measureSamples on a source with no declared length). So
 // evicting a hot entry is nearly free there and expensive here, and a
-// library-wide sweep must not push a live session's track out of the memo. This
-// follows resolver.Catalog's PID cache, which is LRU for the same reason.
+// library-wide sweep must not push a live session's track out of the memo.
 type trackCache struct {
 	mu      sync.Mutex
 	entries map[string]*trackEntry
@@ -104,9 +103,8 @@ func (c *trackCache) put(key string, t container.Track, tags map[string][]string
 }
 
 // evictOldestLocked drops the least recently used entry: a linear scan, run
-// only on insert at capacity, exactly as resolver.Catalog does it. The scan is
-// microseconds against a miss that costs a probe at best and a full decode at
-// worst, so it is not worth a heap.
+// only on insert at capacity. The scan is microseconds against a miss that
+// costs a probe at best and a full decode at worst, so it is not worth a heap.
 func (c *trackCache) evictOldestLocked() {
 	var oldest string
 	var found bool

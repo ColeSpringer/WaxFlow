@@ -17,10 +17,12 @@ import (
 // The restart, not a continuous modulation, is load-bearing: it places
 // each band's alias images where the matched synthesis cancels them when
 // bands are hard-replaced at the crossover. Twiddles are designed in
-// float64 and rounded once, and the kernels avoid FMA, so output is a pure
-// function of input on every platform. The encoder-side 64-band analysis
-// (sbr_encqmf.go) shares the prototype and its post-twiddle covers this
-// bank's: e^(-j*pi*(2k+1)/256) at 32 bands is that table's lower half.
+// float64 and rounded once and the kernels fix their operation order, so
+// output is a pure function of input for one GOARCH and GOAMD64 level (the
+// compiler fuses multiply-adds on arm64 and under GOAMD64=v3; see dsp/fft).
+// The encoder-side 64-band analysis (sbr_encqmf.go) shares the prototype
+// and its post-twiddle covers this bank's: e^(-j*pi*(2k+1)/256) at 32 bands
+// is that table's lower half.
 
 var (
 	qmfPlan64  = fft.NewPlan(64)

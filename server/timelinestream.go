@@ -89,7 +89,7 @@ func (s *Server) prepareTimelineStream(ctx context.Context, p *streamParams) (*t
 	}
 	// No metadata and no tags: only off and a dB number pass the gain check,
 	// and a timeline carries no one source's tags, as a merge job does not.
-	gainDB := p.gain.resolveDB(nil, p.dynamics)
+	gainDB := resolveGainDB(p.gain, nil, p.dynamics)
 	opts, err := s.streamOptions(p, gainDB, 0)
 	if err != nil {
 		return nil, err

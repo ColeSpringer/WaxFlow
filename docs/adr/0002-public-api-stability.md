@@ -599,3 +599,64 @@ a surrogate pair, is refused at load. `GET /roots` writes `path` in the
 form and quotes it that way in `error` (`RootStatus.PathText`, `ErrText`;
 `client.Roots` hands back the bytes). A path that starts with `pct:` is
 therefore read as marked.
+
+## Amendment (2026-11-13): the client mirrors every wire type, and refusals move to where a value is read
+
+What a caller of the public packages or of the wire sees:
+
+- `client` gains `CapsDelivery.HEv2`, which `/caps` has sent and the mirror
+  dropped, `UploadResponse` with `(*Client).Upload` and `DeleteUpload`, and
+  `SilenceMap` with `SilenceMapSpan` for the `silence.json` an analyze job
+  writes. A test in the server suite now holds every struct the daemon
+  writes or reads to having a mirror or a stated reason for none.
+- `source.OpenLocal` codes its open failures as a root's file is coded:
+  only a path that names nothing is `not-found` (a missing file, or a path
+  that runs through a file). One that is there and does not open
+  is `source-unreadable`, and running out of file handles is `overloaded`,
+  so an upload the daemon cannot read is a 500 or a retryable 503 where it
+  was a 404.
+- `server.New` refuses an API key no request can present, an empty one or
+  one with white space at an end, and a metrics key with white space at an
+  end (`invalid-request`). Such an API key counted for the fail-closed rule
+  and admitted nobody. `server.LoopbackAddr` is gone: nothing called it
+  once the rule and its sentence had one home.
+- `PlanSegments`, `PlanRemuxSegments` and `PlanCutSegments` refuse a segment
+  duration that is NaN (`invalid-request`), which passed the range check and
+  became a frame count by a conversion the language leaves to the platform.
+  On the wire, a `segDur` that is NaN or infinite at the HLS mint or at
+  `POST /sign` is a 400; it used to panic the handler.
+- A Matroska track that leaves `FlagDefault` out, or writes it with no
+  octets, is a default track, as the format says, and a track whose
+  `FlagEnabled` is 0 is passed over while a usable one exists (the flag was
+  not read before). In a file of several audio tracks the one selected can
+  change: a track that writes `FlagDefault` 0 no longer wins over a later
+  one that writes nothing.
+- `container.Track` gains `DemuxerVersion`, a cache-key term a demuxer sets
+  when a change makes it deliver other samples for an unchanged file, and
+  `container/mka` exports its own as `DemuxerVersion` (`mka-demux-2`, for
+  the track selection above). Every plan built from a track that names one
+  carries it first in `Versions`, and a timeline's plan lists each
+  member's, so cached entries of Matroska and WebM sources, and of
+  timelines with such a member, miss once and no other key moves (ADR-0004,
+  amended the same day).
+- `waxflow.FloatBuildVersion` is new: a cache-key term naming how the
+  build rounds floats, `fp-<GOARCH>` (`fp-amd64v3` and `fp-amd64v4` on
+  amd64) and empty for amd64 below `GOAMD64=v3`. Every plan that runs a
+  chain carries it behind the decoder's term, so on every build but that
+  baseline cached transcodes miss once (ADR-0004).
+- The `hls-js` profile in `/caps` loses its second note, which said
+  `bits=12` and `bits=20` are honored. `/stream` has always taken 16 or 24.
+
+The configuration is not a public package, and its behaviour is the CLI's.
+A `defaultGain` that is no mode and no number, a `signingSecret` that is no
+key list (or names one key id twice) and an `apiKeys` entry or a
+`metricsKey` no request can present are refused when the configuration
+loads, by every command that loads it, and by `POST /roots/reload`, which
+re-reads it; the daemon used to refuse the first two after it had opened
+its stores, and `doctor` passed them all. A refused `signingSecret` or key
+is named by its position and never quoted, and a refused `pidLookupURL` is
+quoted without its query or fragment. The two rules that belong to a daemon's start
+alone, no keys on a non-loopback `addr` and a `debugAddr` that is not
+loopback, are refused by `server` before it creates anything and failed by
+`doctor`, which also loads a configured TLS pair and warns when a
+non-loopback `addr` is served without one (ADR-0007).

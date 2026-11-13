@@ -171,6 +171,13 @@ type Track struct {
 	Codec       codec.ID
 	CodecConfig []byte
 	Fmt         audio.Format
+	// DemuxerVersion names the revision of the demuxer's reading of the
+	// file, spelled <name>-demux-<n>. It is a cache-key term (ADR-0004): a
+	// demuxer bumps it when a change makes it deliver other samples for a
+	// file that has not changed (another track, another trim, another
+	// landing). Empty for a demuxer that has not revised since the term
+	// existed, so its sources keep their keys.
+	DemuxerVersion string
 	// Samples is the track length in samples after gapless trimming, or
 	// -1 when unknown.
 	Samples int64

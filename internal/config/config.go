@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/colespringer/waxflow/dsp/resample"
+	"github.com/colespringer/waxflow/internal/gainspec"
+	"github.com/colespringer/waxflow/internal/sign"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -89,11 +91,11 @@ type Config struct {
 	//
 	// A build without such a resolver refuses a configured CatalogDB
 	// loudly, rather than silently ignoring a capability the operator
-	// asked for, everywhere configuration is resolved: the server, sign,
-	// and any one-shot given a pid: or upload: ref. One-shots on plain
-	// paths never read configuration at all (a broken config file must
-	// not fail probing a local file), so they neither honor nor refuse
-	// it. Exclusive with PIDLookupURL.
+	// asked for, everywhere a resolver is opened: the server, sign, and
+	// any one-shot given a pid: or upload: ref. A one-shot on a plain path
+	// opens none, so it neither honors nor refuses it, and a probe of one
+	// reads no configuration at all (a broken config file must not fail
+	// probing a local file). Exclusive with PIDLookupURL.
 	CatalogDB string `json:"catalogDB"`
 
 	// PIDLookupURL is the host endpoint that maps pid:<id> source references
@@ -349,6 +351,8 @@ func pathFields(c *Config) []pathField {
 }
 
 // Validate checks field syntax without touching the network or filesystem.
+// Load runs it, so every command that loads a configuration refuses what it
+// refuses; CheckDaemon holds the rules only a daemon start has.
 func (c Config) Validate() error {
 	if c.Addr != "" {
 		if _, _, err := net.SplitHostPort(c.Addr); err != nil {
@@ -413,7 +417,104 @@ func (c Config) Validate() error {
 	if _, err := resample.ParseProfile(c.ResampleProfile); err != nil {
 		return err
 	}
+	if c.DefaultGain != "" {
+		if _, err := gainspec.Parse(c.DefaultGain); err != nil {
+			return waxerr.Wrap(waxerr.CodeInvalidRequest, "defaultGain", err)
+		}
+	}
+	if c.SigningSecret != "" {
+		keys, err := sign.ParseKeys(c.SigningSecret)
+		if err == nil {
+			err = sign.CheckKeys(keys)
+		}
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeInvalidRequest, "signingSecret", err)
+		}
+	}
+	if err := CheckAPIKeys(c.APIKeys); err != nil {
+		return err
+	}
+	return CheckMetricsKey(c.MetricsKey)
+}
+
+// CheckDaemon holds the rules only a daemon start has: the fail-closed rule
+// and the loopback-only debug listener. They stay out of Validate so a
+// local command is not refused over a listener it never opens. It is asked
+// of a configuration Validate has passed.
+func (c Config) CheckDaemon() error {
+	if err := CheckKeyless(c.ResolvedAddr(), c.APIKeys, c.AllowUnauthenticated); err != nil {
+		return err
+	}
+	return CheckDebugAddr(c.DebugAddr)
+}
+
+// CheckKeyless is the fail-closed rule: with no API key, an address that is
+// not loopback needs allowUnauthenticated.
+func CheckKeyless(addr string, apiKeys []string, allowUnauthenticated bool) error {
+	if len(apiKeys) == 0 && !allowUnauthenticated && !LoopbackAddr(addr) {
+		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+			"refusing to run keyless on non-loopback %q; configure apiKeys or set allowUnauthenticated", addr))
+	}
 	return nil
+}
+
+// CheckAPIKeys refuses a key no request can present: an empty one, or one
+// with white space at either end, which a header's value never keeps. Such
+// a key would count for the fail-closed rule and admit nobody. The key is
+// not quoted.
+func CheckAPIKeys(keys []string) error {
+	for i, k := range keys {
+		switch {
+		case k == "":
+			return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("apiKeys entry %d is empty", i+1))
+		case strings.TrimSpace(k) != k:
+			return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+				"apiKeys entry %d has white space at an end, which no request header carries", i+1))
+		}
+	}
+	return nil
+}
+
+// CheckMetricsKey refuses a metrics key with white space at either end. It
+// is presented through the header an API key is, which keeps none, so such
+// a key would unlock /metrics for nobody. Empty is no key. The key is not
+// quoted.
+func CheckMetricsKey(key string) error {
+	if strings.TrimSpace(key) != key {
+		return waxerr.New(waxerr.CodeInvalidRequest,
+			"metricsKey has white space at an end, which no request header carries")
+	}
+	return nil
+}
+
+// CheckDebugAddr refuses a debug listener that is not loopback-only. The
+// empty address is no listener.
+func CheckDebugAddr(addr string) error {
+	if !LoopbackAddr(addr) {
+		return waxerr.New(waxerr.CodeInvalidRequest, "debugAddr must be loopback-only")
+	}
+	return nil
+}
+
+// LoopbackAddr reports whether addr binds only loopback: the predicate of
+// the fail-closed rule and of the debug listener. The empty address is the
+// default, which is loopback; an empty host is every interface.
+func LoopbackAddr(addr string) bool {
+	if addr == "" {
+		return true
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // ResolvedAddr returns Addr or DefaultAddr when unset.

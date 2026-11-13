@@ -161,7 +161,7 @@ func (s *Server) prepareSource(ctx context.Context, q url.Values, sigAuthed bool
 		// The seek is inside the span: t= addresses the virtual track's own
 		// timeline, because that is the stream the caller is playing.
 		from:   seekSample(p.t, track.Fmt.Rate),
-		gainDB: p.gain.resolveDB(m, p.dynamics),
+		gainDB: resolveGainDB(p.gain, m, p.dynamics),
 		meta:   m,
 		// -1, not the zero value: cutTrack threads to CutStream as "the source's
 		// own header length" when no cut set it, and 0 would zero the run's track.

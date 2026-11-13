@@ -19,10 +19,8 @@ import (
 	"io"
 	"log/slog"
 	"maps"
-	"net"
 	"net/http"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +32,7 @@ import (
 	"github.com/colespringer/waxflow/internal/cache"
 	"github.com/colespringer/waxflow/internal/config"
 	"github.com/colespringer/waxflow/internal/flight"
+	"github.com/colespringer/waxflow/internal/gainspec"
 	"github.com/colespringer/waxflow/internal/hls"
 	"github.com/colespringer/waxflow/internal/jobs"
 	"github.com/colespringer/waxflow/internal/meta"
@@ -197,7 +196,7 @@ type Server struct {
 	origins        map[string]bool
 	anyOrigin      bool
 
-	defaultGain gainSpec
+	defaultGain gainspec.Spec
 	profile     resample.Profile
 
 	uploads   *uploads.Store  // nil: uploads disabled
@@ -269,9 +268,14 @@ func New(cfg Config) (*Server, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	if len(cfg.APIKeys) == 0 && !cfg.AllowUnauthenticated && !LoopbackAddr(cfg.Addr) {
-		return nil, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("server: refusing to run keyless on non-loopback %q; configure apiKeys or set allowUnauthenticated", cfg.Addr))
+	if err := config.CheckKeyless(cfg.Addr, cfg.APIKeys, cfg.AllowUnauthenticated); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeInvalidRequest, "server", err)
+	}
+	if err := config.CheckAPIKeys(cfg.APIKeys); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeInvalidRequest, "server", err)
+	}
+	if err := config.CheckMetricsKey(cfg.MetricsKey); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeInvalidRequest, "server", err)
 	}
 	if cfg.CacheDir == "" {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, "server: cacheDir is required")
@@ -289,7 +293,7 @@ func New(cfg Config) (*Server, error) {
 	if cfg.RingBytes == 0 {
 		cfg.RingBytes = cache.DefaultRingBytes
 	}
-	defaultGain, err := parseGain(cfg.DefaultGain, gainSpec{mode: gainTrack})
+	defaultGain, err := gainspec.Parse(cfg.DefaultGain)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeInvalidRequest, "server: defaultGain", err)
 	}
@@ -412,7 +416,7 @@ func New(cfg Config) (*Server, error) {
 				if err != nil {
 					return 0, err
 				}
-				return g.resolveDB(info, gain.PresetOff), nil
+				return resolveGainDB(g, info, gain.PresetOff), nil
 			},
 			MintTimeline: s.mintTimelineJob,
 			// The exact length a merge's members need, through the memo the
@@ -646,27 +650,4 @@ func (s *Server) handlePing(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 	s.writeJSON(w, http.StatusOK, VersionInfo{SchemaVersion: 1, Version: s.cfg.Version})
-}
-
-// LoopbackAddr reports whether addr binds only loopback: the fail-closed
-// predicate, exported so the CLI's loopback-only debug listener enforces
-// the identical notion of loopback.
-// The empty address means the config default (loopback); an empty host
-// means wildcard.
-func LoopbackAddr(addr string) bool {
-	if addr == "" {
-		return true
-	}
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return false
-	}
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		return false
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }

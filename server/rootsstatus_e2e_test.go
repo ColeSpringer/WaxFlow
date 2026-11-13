@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -163,21 +162,6 @@ func TestRootsClient(t *testing.T) {
 	if _, err := unwired.Roots(t.Context()); waxerr.CodeOf(err) != waxerr.CodeNotFound {
 		t.Fatalf("unwired Roots = %v (code %q), want not-found", err, waxerr.CodeOf(err))
 	}
-}
-
-// TestClientRootsMirrorsCoverTheWire pins the client's roots types against
-// the server's, populated and zero, as the job mirrors are pinned.
-func TestClientRootsMirrorsCoverTheWire(t *testing.T) {
-	var roots server.RootsResponse
-	n := 0
-	fillNonZero(t, reflect.ValueOf(&roots).Elem(), &n)
-	roundTripEqual(t, "populated roots", roots, &client.RootsResponse{})
-	roundTripEqual(t, "zero root", server.RootStatus{}, &client.RootStatus{})
-
-	var reload server.RootsReloadResponse
-	n = 0
-	fillNonZero(t, reflect.ValueOf(&reload).Elem(), &n)
-	roundTripEqual(t, "populated reload", reload, &client.RootsReloadResponse{})
 }
 
 // TestRootsStatusNamesAnyPath: a folder's path is bytes, as a file's name

@@ -207,9 +207,9 @@ is OSS-Fuzz-compatible (native Go fuzzing, no external fixtures needed
 to build the targets), so onboarding to OSS-Fuzz needs only the
 standard `compile_native_go_fuzzer` build script listing the targets.
 Budgets: CI smoke 45 s/target and nightly 10 m/target, each split across
-parallel jobs with `FUZZ_SHARD=k/N` (the 53 targets are about 9 hours of
+parallel jobs with `FUZZ_SHARD=k/N` (the 61 targets are about 10 hours of
 nightly fuzzing, past the six hours one hosted job may run), and a release
-soak via `make fuzz FUZZTIME=160m` (about 140 hours of aggregate fuzzing
+soak via `make fuzz FUZZTIME=160m` (about 160 hours of aggregate fuzzing
 across those targets; run it on a spare box, not CI).
 
 ## Release checklist (grows over time)

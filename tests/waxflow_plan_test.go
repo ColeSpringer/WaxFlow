@@ -94,12 +94,17 @@ func TestPlanTranscode(t *testing.T) {
 	}
 
 	// The same options with no conversion carry exactly the source decoder,
-	// the encoder version (both pcm here), and the muxer's.
+	// the encoder version (both pcm here), and the muxer's, and this build's
+	// float term where it has one.
 	base, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "wav"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(base.Versions) != 3 || base.Samples != frames {
+	terms := 3
+	if waxflow.FloatBuildVersion != "" {
+		terms++
+	}
+	if len(base.Versions) != terms || base.Samples != frames {
 		t.Fatalf("baseline plan = %+v", base)
 	}
 	if base.Versions[0] != pcm.Version {

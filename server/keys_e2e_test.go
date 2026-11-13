@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,6 +43,11 @@ type keyLog struct {
 }
 
 func (l *keyLog) add(surface, rung, identity, canonical string, versions []string) {
+	// The build's float term is left out: it is this build's, and the file
+	// is every build's. The engine's own test holds which plans carry it.
+	if waxflow.FloatBuildVersion != "" {
+		versions = slices.DeleteFunc(slices.Clone(versions), func(v string) bool { return v == waxflow.FloatBuildVersion })
+	}
 	v := "-"
 	if len(versions) > 0 {
 		v = strings.Join(versions, ",")
@@ -152,8 +158,9 @@ const (
 
 // keyMatrix lists the requests, by the surface each asks and the rung each
 // takes. tl is a timeline of two 16-bit members, mixed one of a 16-bit and a
-// 24-bit member.
-func keyMatrix(tl, mixed string) (cases []keyCase) {
+// 24-bit member, and withWebM one of a WAV and a Matroska member, whose
+// demuxer's revision the timeline's key lists.
+func keyMatrix(tl, mixed, withWebM string) (cases []keyCase) {
 	type ask struct{ name, query string }
 	add := func(surface, rung string, asks []ask) {
 		for _, a := range asks {
@@ -236,6 +243,9 @@ func keyMatrix(tl, mixed string) (cases []keyCase) {
 		{"aac-in-adts", srcWAV + "&format=aac&container=adts"},
 		{"aac-fragmented", srcWAV + "&format=aac&container=fragmented"},
 		{"aac-in-mka", srcWAV + "&format=aac&container=mka"},
+		// A Matroska source: its demuxer's revision heads the versions on
+		// this rung as on the copy rungs above.
+		{"webm-flac", srcWebM + "&format=flac"},
 		{"he-aac-in-adts", srcWAV + "&format=he-aac&container=adts"},
 		{"he-aac-fragmented", srcWAV + "&format=he-aac&container=fragmented"},
 		{"he-aac-in-mka", srcWAV + "&format=he-aac&container=mka"},
@@ -252,6 +262,7 @@ func keyMatrix(tl, mixed string) (cases []keyCase) {
 		{"tl-opus-seek", "tl=" + tl + "&format=opus" + gainOff + seek},
 		{"tl-opus-gain", "tl=" + tl + "&format=opus&gain=-3"},
 		{"tl-flac-mixed-width", "tl=" + mixed + "&format=flac" + gainOff},
+		{"tl-flac-webm-member", "tl=" + withWebM + "&format=flac" + gainOff},
 	})
 
 	add("hls", "remux", []ask{
@@ -284,7 +295,9 @@ func keyMatrix(tl, mixed string) (cases []keyCase) {
 		{"hls-tl-opus", "tl=" + tl + "&format=opus" + gainOff},
 		{"hls-tl-opus-crossfade", "tl=" + tl + "&format=opus" + gainOff + xfade},
 		{"hls-tl-flac-mixed-width", "tl=" + mixed + "&format=flac" + gainOff},
+		{"hls-tl-flac-webm-member", "tl=" + withWebM + "&format=flac" + gainOff},
 		{"hls-ref-not-utf8", straySrc + "&format=flac"},
+		{"hls-webm-flac", srcWebM + "&format=flac"},
 	})
 	return cases
 }
@@ -427,7 +440,8 @@ func TestGoldenCacheKeys(t *testing.T) {
 	env, log := keyEnv(t)
 	tl := mintTimeline(t, env, []string{"lib/tl-a.wav", "lib/tl-b.wav"}).Tl
 	mixed := mintTimeline(t, env, []string{"lib/tl-a.wav", "lib/sine-s24.flac"}).Tl
-	run(env, log, keyMatrix(tl, mixed))
+	withWebM := mintTimeline(t, env, []string{"lib/tl-a.wav", "lib/seed.webm"}).Tl
+	run(env, log, keyMatrix(tl, mixed, withWebM))
 
 	// The cover and the lyric sheet answer to the direct key of their source.
 	// Only a daemon with a tag mapper serves them, so they have one of their

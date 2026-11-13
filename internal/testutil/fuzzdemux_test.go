@@ -125,6 +125,12 @@ func TestDemuxFuzzHoldsEveryOpenToTheStrictForm(t *testing.T) {
 		{name: "two tracks", mk: func() *scriptDemux {
 			return &scriptDemux{tracks: append(oneTrack(), oneTrack()...)}
 		}, want: "2 tracks"},
+		{name: "a demuxer revision in the spelling", mk: func() *scriptDemux {
+			return &scriptDemux{tracks: []container.Track{{Fmt: goodFmt, DemuxerVersion: "mka-demux-12"}}, packets: packetsAt(0, 2, 10)}
+		}},
+		{name: "a demuxer revision in another spelling", mk: func() *scriptDemux {
+			return &scriptDemux{tracks: []container.Track{{Fmt: goodFmt, DemuxerVersion: "mka demuxer v2"}}, packets: packetsAt(0, 2, 10)}
+		}, want: "<name>-demux-<n>"},
 		{name: "an invalid format", mk: func() *scriptDemux {
 			return &scriptDemux{tracks: []container.Track{{}}}
 		}, want: "invalid format"},

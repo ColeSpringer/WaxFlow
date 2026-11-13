@@ -222,8 +222,7 @@ client-e2e: build
 # audio output, and does App Transport Security block plain-http loopback from
 # a command-line Swift binary? Two answers, one run. It is a spike ahead of the
 # Apple cells of docs/client-matrix.md, not a test, so it is not in `check` and
-# runs on demand: `make apple-smoke` locally, or the apple-smoke workflow on a
-# macos-latest runner.
+# runs on demand, on a Mac: `make apple-smoke`. No workflow runs it.
 apple-smoke: build
 	WAXFLOW_BIN=./bin/waxflow node scripts/apple-e2e/smoke.mjs
 

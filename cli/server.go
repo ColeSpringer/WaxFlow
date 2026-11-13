@@ -45,6 +45,10 @@ func newServerCmd(version string, flavor Flavor) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Refused before anything is opened or created.
+			if err := cfg.CheckDaemon(); err != nil {
+				return err
+			}
 			// The config file path drives the reload closure: a reload
 			// re-reads this exact file so it produces what a restart would.
 			path, err := resolveConfigPath(cmd)
@@ -177,7 +181,12 @@ func buildServerConfig(ctx context.Context, cfg config.Config, path string, vers
 	if path != "" {
 		if v, ok := os.LookupEnv("WAXFLOW_ROOTS"); !ok || strings.TrimSpace(v) == "" {
 			reloadRoots = func() (source.ReloadResult, error) {
-				fresh, err := config.Load(path, os.LookupEnv) // same precedence + Validate as startup
+				// The precedence and the syntax checks of a start. The
+				// start-only rules (config.CheckDaemon) are not asked again:
+				// a reload applies the roots and opens no listener, and the
+				// listen address may have come from --addr, which a re-read
+				// cannot see.
+				fresh, err := config.Load(path, os.LookupEnv)
 				if err != nil {
 					// config.Load maps a missing file to not-found (404). For a
 					// reload that is a bad request, not a resource lookup, and a
@@ -348,9 +357,8 @@ func startDebugListener(cfg config.Config, logger *slog.Logger) (func(), error) 
 	if cfg.DebugAddr == "" {
 		return func() {}, nil
 	}
-	// The same loopback notion as the fail-closed rule, one predicate.
-	if !server.LoopbackAddr(cfg.DebugAddr) {
-		return nil, waxerr.New(waxerr.CodeInvalidRequest, "debugAddr must be loopback-only")
+	if err := config.CheckDebugAddr(cfg.DebugAddr); err != nil {
+		return nil, err
 	}
 	dmux := http.NewServeMux()
 	dmux.HandleFunc("/debug/pprof/", pprof.Index)

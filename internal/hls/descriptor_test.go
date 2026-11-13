@@ -2,6 +2,8 @@ package hls
 
 import (
 	"encoding/base64"
+	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -162,4 +164,51 @@ func FuzzDecodeDescriptor(f *testing.F) {
 			t.Fatalf("re-encode renamed the source: %q, then %q", d.Src, again.Src)
 		}
 	})
+}
+
+// TestCanonicalRefusesANonFiniteFloat: a descriptor built by hand goes
+// through Canonical, which refuses a float that is not finite where Encode
+// would panic on it. Every float field is asked, found by reflection, so a
+// field added without its line in Canonical fails here.
+func TestCanonicalRefusesANonFiniteFloat(t *testing.T) {
+	full := Descriptor{Src: "lib/a.flac", ID: "1-2", Format: "opus", Bitrates: []int{64, 96},
+		Rate: 48000, Ch: 2, Bits: 16, Gain: "off", Dynamics: "voice", SegDur: 4, From: 1, To: 2, HEv2: true}
+	canonical := func(d Descriptor) (out Descriptor, err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("panicked: %v", r)
+			}
+		}()
+		return d.Canonical()
+	}
+	got, err := canonical(full)
+	if err != nil {
+		t.Fatalf("a descriptor of finite values: %v", err)
+	}
+	if want, _ := DecodeDescriptor(full.Encode()); !reflect.DeepEqual(got, want) {
+		t.Errorf("Canonical = %+v, want what its encoding decodes to, %+v", got, want)
+	}
+
+	floats := 0
+	v := reflect.ValueOf(&full).Elem()
+	for i := range v.NumField() {
+		field := v.Field(i)
+		if field.Kind() != reflect.Float64 && field.Kind() != reflect.Float32 {
+			continue
+		}
+		floats++
+		name, _, _ := strings.Cut(v.Type().Field(i).Tag.Get("json"), ",")
+		keep := field.Float()
+		for _, bad := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+			field.SetFloat(bad)
+			_, err := canonical(full)
+			if waxerr.CodeOf(err) != waxerr.CodeInvalidRequest || !strings.Contains(err.Error(), name) {
+				t.Errorf("%s = %g: %v; want an invalid-request refusal naming it", name, bad, err)
+			}
+		}
+		field.SetFloat(keep)
+	}
+	if floats < 2 {
+		t.Errorf("found %d float fields, want segDur and crossfadeSeconds at least", floats)
+	}
 }

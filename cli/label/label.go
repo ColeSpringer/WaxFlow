@@ -247,8 +247,7 @@ func (m Mapper) Apply(ctx context.Context, path string, info *meta.Info, extra [
 		// the rename failed (the directory fsync; waxlabel v1.4.1 documents the
 		// quadrant and spends the plan). The tags are on the file, so failing
 		// here would report a write that happened as one that did not; the
-		// durability caveat is worth a log line but not an error, since
-		// WaxFlow's own output writes never fsync at all.
+		// durability caveat is worth a log line but not an error.
 		//
 		// Checked before canceled for the same reason canceled tests the error
 		// and not ctx.Err(): the real outcome wins over the racing signal, and

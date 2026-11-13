@@ -12,6 +12,7 @@ import (
 	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/dsp/silence"
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/internal/gainspec"
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/reftext"
 	"github.com/colespringer/waxflow/internal/timeline"
@@ -319,7 +320,6 @@ var deliveryProfiles = map[string]CapsProfile{
 		Basis:       "automated: hls.js + <audio> in Chromium (make client-e2e, nightly)",
 		Notes: []string{
 			"12- and 20-bit FLAC sources are widened to 16/24 bits losslessly for HLS, which re-encodes them instead of remuxing (Chromium's MP4 parser accepts only 8/16/24/32)",
-			"an explicit bits=12 or bits=20 is honored and mints a stream Chromium cannot play; omit bits, or ask for 16 or 24",
 		},
 	},
 	// AVPlayer and Safari. HLS is Apple's own guaranteed-supported
@@ -689,7 +689,7 @@ func buildCaps(f capsFlags) Caps {
 			// Derived from the parsers rather than restated, so an
 			// advertised value that does not parse is impossible to write
 			// rather than merely caught by a test.
-			GainModes:         gainSpellings(),
+			GainModes:         gainspec.Spellings(),
 			GainMaxDB:         gainCeilingFor(gain.PresetOff),
 			GainMaxVoiceDB:    gainCeilingFor(gain.PresetVoice),
 			Dynamics:          dynamicsSpellings(),

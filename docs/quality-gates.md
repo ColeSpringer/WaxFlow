@@ -176,14 +176,18 @@ Every encoder, always: validity (above) plus golden-stream byte-exactness in
 deterministic mode.
 
 Byte-exactness holds *within* a build, not across architectures. Go lets a
-compiler contract `a*b+c` to a single rounding (arm64 does, amd64 does not),
+compiler contract `a*b+c` to a single rounding (arm64 does, and amd64 built
+at `GOAMD64=v3`; amd64 at its default level does not),
 and the math package's per-arch implementations need not agree in the last
 ulp; either moves a float encoder's spectral values by an ulp, which is enough
 to flip a quantizer decision and pick different codewords. The stream stays
 valid and the quality gates still hold, so golden hashes are pinned to one
 architecture and skip elsewhere (`codec/vorbis.goldenEncodeArch`). What the
 ADR-0004 cache key rests on is a build reproducing its own bytes, which the
-deterministic-mode tests cover on every platform.
+deterministic-mode tests cover on every platform; a transcode's key names
+the build where its float results can differ from amd64's at the default
+level (`waxflow.FloatBuildVersion`), so a cache directory carried to
+another architecture does not mix two builds' encodes.
 
 The container muxer goldens sit beside that rather than against it. They are
 committed files compared byte for byte on every architecture CI runs, and the

@@ -222,3 +222,72 @@ func TestLoadOrCreateConcurrent(t *testing.T) {
 		t.Fatalf("temp debris: %v", leftovers)
 	}
 }
+
+// TestCheckKeys: a rotation list is refused for a key with no id or no
+// secret and for two keys under one id, and New refuses the same lists.
+func TestCheckKeys(t *testing.T) {
+	good := []Key{{ID: "a", Secret: []byte{1}}, {ID: "b", Secret: []byte{1}}}
+	if err := CheckKeys(good); err != nil {
+		t.Errorf("CheckKeys(two keys) = %v", err)
+	}
+	// An empty list holds nothing to refuse. Having no key at all is New's
+	// refusal, since a configuration with none means "generate one".
+	if err := CheckKeys(nil); err != nil {
+		t.Errorf("CheckKeys(nil) = %v", err)
+	}
+	if _, err := New(nil); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+		t.Errorf("New(nil) = %v, want invalid-request", err)
+	}
+	for name, keys := range map[string][]Key{
+		"empty id":     {{ID: "", Secret: []byte{1}}},
+		"empty secret": {{ID: "a"}},
+		"duplicate id": {{ID: "a", Secret: []byte{1}}, {ID: "a", Secret: []byte{2}}},
+	} {
+		err := CheckKeys(keys)
+		if waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+			t.Errorf("%s: CheckKeys = %v, want invalid-request", name, err)
+			continue
+		}
+		if _, nerr := New(keys); nerr == nil || nerr.Error() != err.Error() {
+			t.Errorf("%s: New = %v, want CheckKeys' refusal %q", name, nerr, err)
+		}
+	}
+}
+
+// TestKeyRefusalsQuoteNothing: a refused key list is named by position.
+// A literal secret that holds a colon reads as a malformed kid:hex entry,
+// so quoting the "key id" would quote the head of the secret, and the
+// refusal travels: to a log, and to the body of a failed roots reload.
+func TestKeyRefusalsQuoteNothing(t *testing.T) {
+	secrets := []string{"hunter2", "pa55word", "5ec2e7"}
+	check := func(what string, err error) {
+		t.Helper()
+		if waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+			t.Errorf("%s: %v, want an invalid-request refusal", what, err)
+			return
+		}
+		for _, s := range secrets {
+			if strings.Contains(err.Error(), s) {
+				t.Errorf("%s: the refusal quotes %q: %v", what, s, err)
+			}
+		}
+	}
+	for _, spec := range []string{
+		"hunter2:pa55word",      // a literal with a colon, read as kid:hex
+		"hunter2:",              // an id and no secret
+		"a:00,hunter2:pa55word", // the second entry
+		"hunter2,pa55word",      // a list of literals
+	} {
+		_, err := ParseKeys(spec)
+		check("ParseKeys("+spec+")", err)
+	}
+	if _, err := ParseKeys("a:00,b:zz"); err == nil || !strings.Contains(err.Error(), "entry 2") {
+		t.Errorf("a malformed second entry = %v, want it named by its position", err)
+	}
+	dup := []Key{{ID: "hunter2", Secret: []byte{1}}, {ID: "x", Secret: []byte{1}}, {ID: "hunter2", Secret: []byte{2}}}
+	err := CheckKeys(dup)
+	check("CheckKeys(a repeated id)", err)
+	if err == nil || !strings.Contains(err.Error(), "1 and 3") {
+		t.Errorf("a repeated id = %v, want the two keys named by position", err)
+	}
+}

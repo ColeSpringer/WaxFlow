@@ -133,13 +133,13 @@ func TestEncodeDeterministic(t *testing.T) {
 //
 // The pin is per-architecture, and asserts only on goldenEncodeArch. Go leaves
 // a compiler free to contract a*b+c into a single rounding, which arm64 does
-// and amd64 does not, and the math package's arch-specific implementations
-// need not agree in the last ulp either. Either one moves a spectral value by
-// an ulp, which is all it takes to land a residue line on the other side of a
-// quantizer decision (latIndexSigned's sign test, for one) and pick a
-// different codeword from there on. The result is a valid, equivalent stream
-// that hashes differently, so other architectures report the hash and skip
-// rather than fail a legitimate encode.
+// and amd64 does only under GOAMD64=v3, and the math package's arch-specific
+// implementations need not agree in the last ulp either. Either one moves a
+// spectral value by an ulp, which is all it takes to land a residue line on
+// the other side of a quantizer decision (latIndexSigned's sign test, for
+// one) and pick a different codeword from there on. The result is a valid,
+// equivalent stream that hashes differently, so other architectures report
+// the hash and skip rather than fail a legitimate encode.
 //
 // Byte-exactness across architectures is not a property this encoder has, nor
 // one anything depends on: the ADR-0004 cache key needs a build to reproduce

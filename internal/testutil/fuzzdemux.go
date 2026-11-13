@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"context"
+	"regexp"
 	"testing"
 
 	"github.com/colespringer/waxflow/container"
@@ -44,6 +45,10 @@ type DemuxFuzz struct {
 	After  func(t testing.TB, raw []byte, d container.Demuxer, strict bool)
 }
 
+// demuxerVersionSpelling is how a track names its demuxer's revision, the
+// cache-key term of ADR-0004.
+var demuxerVersionSpelling = regexp.MustCompile(`^[a-z0-9]+-demux-[1-9][0-9]*$`)
+
 // Run holds the demuxer f opens over raw to f.
 func (f DemuxFuzz) Run(t testing.TB, raw []byte) {
 	t.Helper()
@@ -64,6 +69,9 @@ func (f DemuxFuzz) hold(t testing.TB, raw []byte, d container.Demuxer, strict bo
 	}
 	if err := tracks[0].Fmt.Valid(); err != nil {
 		t.Fatalf("accepted track with invalid format: %v", err)
+	}
+	if v := tracks[0].DemuxerVersion; v != "" && !demuxerVersionSpelling.MatchString(v) {
+		t.Fatalf("track names demuxer revision %q, want <name>-demux-<n>", v)
 	}
 	if f.Opened != nil {
 		f.Opened(t, d, strict)

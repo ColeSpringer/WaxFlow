@@ -79,7 +79,7 @@ func (e *Engine) PlanCutSegments(track container.Track, opts TranscodeOptions, s
 	// RemuxVersion and the segmenter revision the remux plan already named, plus
 	// CutVersion for the trims and rewritten config the cut synthesized: the same
 	// three the progressive cut keys on, plus the segmenter's own.
-	rsp.Versions = []string{RemuxVersion, mp4.SegmenterVersion, CutVersion}
+	rsp.Versions = withDemuxer(track, RemuxVersion, mp4.SegmenterVersion, CutVersion)
 	return &CutSegmentPlan{
 		RemuxSegmentPlan: *rsp,
 		Landed:           landed,

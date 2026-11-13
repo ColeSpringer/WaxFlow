@@ -143,16 +143,70 @@ type bitAppender struct {
 
 func (w *bitAppender) reset() { w.buf, w.bits = w.buf[:0], 0 }
 
-// appendFrom copies n bits out of src starting at bit position at.
+// appendFrom copies n bits out of src starting at bit position at; a bit past
+// the end of src reads as zero.
+//
+// What a packet leaves unread is most of a packet, so this is filled by
+// bytes: the head to a byte boundary, the middle a byte at a time with one
+// shift, and only the tail by the general read.
 func (w *bitAppender) appendFrom(src []byte, at, n int) {
-	for ; n > 0; n-- {
+	if n <= 0 {
+		return
+	}
+	if off := w.bits & 7; off != 0 {
+		take := min(8-off, n)
+		w.buf[w.bits>>3] |= byte(peekByteBits(src, at, take) << uint(8-off-take))
+		w.bits += take
+		at += take
+		n -= take
+	}
+	if n == 0 {
+		return
+	}
+	// A run that starts past the source has no whole byte to copy; the padded
+	// read below takes it.
+	if at&7 == 0 && at>>3 < len(src) {
+		whole := min(n>>3, len(src)-at>>3)
+		i := at >> 3
+		w.buf = append(w.buf, src[i:i+whole]...)
+		w.bits += whole << 3
+		at += whole << 3
+		n -= whole << 3
+	}
+	if sh := uint(at & 7); sh != 0 {
+		i := at >> 3
+		for n >= 8 && i+1 < len(src) {
+			w.buf = append(w.buf, src[i]<<sh|src[i+1]>>(8-sh))
+			w.bits += 8
+			i++
+			at += 8
+			n -= 8
+		}
+	}
+	for n > 0 {
 		if w.bits&7 == 0 {
 			w.buf = append(w.buf, 0)
 		}
-		if at>>3 < len(src) && src[at>>3]>>(7-at&7)&1 != 0 {
-			w.buf[w.bits>>3] |= 1 << (7 - w.bits&7)
-		}
-		at++
-		w.bits++
+		free := 8 - w.bits&7
+		take := min(free, n)
+		w.buf[w.bits>>3] |= byte(peekByteBits(src, at, take) << uint(free-take))
+		w.bits += take
+		at += take
+		n -= take
 	}
+}
+
+// peekByteBits reads up to 8 bits from src at bit position at, right aligned,
+// padding with zeroes past the end.
+func peekByteBits(src []byte, at, n int) uint32 {
+	i := at >> 3
+	off := uint(at & 7)
+	var acc uint32
+	if i < len(src) {
+		acc = uint32(src[i]) << 8
+	}
+	if i+1 < len(src) {
+		acc |= uint32(src[i+1])
+	}
+	return (acc >> (16 - off - uint(n))) & (1<<uint(n) - 1)
 }

@@ -210,7 +210,7 @@ func (e *Engine) PlanRemux(track container.Track, opts TranscodeOptions) (*Remux
 			Container: containerName,
 			MediaType: mediaType,
 			Live:      containerLive(row.live, opts.Container),
-			Versions:  []string{RemuxVersion, muxV},
+			Versions:  withDemuxer(track, RemuxVersion, muxV),
 			Samples:   track.Samples,
 			// BytesPerFrame, FrameSize, BitRate, and EstimatedBytes stay at
 			// their unknown values. The source's packets have a bit rate, but
@@ -602,7 +602,7 @@ func (e *Engine) PlanRemuxSegments(track container.Track, opts TranscodeOptions,
 		TotalDecodeSamples: -1,
 		Segments:           -1,
 	}
-	sp.Versions = []string{RemuxVersion, mp4.SegmenterVersion}
+	sp.Versions = withDemuxer(track, RemuxVersion, mp4.SegmenterVersion)
 	sp.FrameSize = grid
 	if track.Samples >= 0 {
 		sp.TotalDecodeSamples = totalDecodeSamples(track.Samples, track.Delay, int64(grid))

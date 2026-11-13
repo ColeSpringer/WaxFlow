@@ -38,10 +38,14 @@ func ResolveKeys(secretSpec, dataDir string) ([]Key, error) {
 // hex-encoded secret under that key id; an entry without one is a literal
 // secret under key id "1" (single-key convenience) and must then be the
 // only entry. The first entry mints.
+//
+// A refusal names an entry by its position and quotes none of it: a literal
+// secret with a colon in it reads as a malformed kid:hex entry, and the "key
+// id" of that one is the head of the secret.
 func ParseKeys(spec string) ([]Key, error) {
 	entries := strings.Split(spec, ",")
 	keys := make([]Key, 0, len(entries))
-	for _, e := range entries {
+	for i, e := range entries {
 		e = strings.TrimSpace(e)
 		if e == "" {
 			return nil, waxerr.New(waxerr.CodeInvalidRequest, "sign: empty signingSecret entry")
@@ -57,7 +61,7 @@ func ParseKeys(spec string) ([]Key, error) {
 		secret, err := hex.DecodeString(hexSecret)
 		if err != nil || len(secret) == 0 {
 			return nil, waxerr.New(waxerr.CodeInvalidRequest,
-				fmt.Sprintf("sign: signingSecret key %q is not kid:hex", kid))
+				fmt.Sprintf("sign: signingSecret entry %d is not kid:hex", i+1))
 		}
 		keys = append(keys, Key{ID: kid, Secret: secret})
 	}

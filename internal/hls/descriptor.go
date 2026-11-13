@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"slices"
 
 	"github.com/colespringer/waxflow/internal/timeline"
@@ -116,13 +117,31 @@ type Descriptor struct {
 	CrossfadeSeconds float64 `json:"crossfadeSeconds,omitempty"`
 }
 
+// Canonical returns d as a request carrying it would decode, which is the
+// one validator minting and playback share. A descriptor built by hand goes
+// through here before it is encoded: it refuses a float that is not finite,
+// which Encode cannot write and no decode can produce.
+func (d Descriptor) Canonical() (Descriptor, error) {
+	for _, f := range []struct {
+		name string
+		x    float64
+	}{{"segDur", d.SegDur}, {"crossfadeSeconds", d.CrossfadeSeconds}} {
+		if math.IsNaN(f.x) || math.IsInf(f.x, 0) {
+			return Descriptor{}, waxerr.New(waxerr.CodeInvalidRequest,
+				fmt.Sprintf("hls: descriptor %s must be finite", f.name))
+		}
+	}
+	return DecodeDescriptor(d.Encode())
+}
+
 // Encode serializes the descriptor as base64url JSON for the v=
-// parameter.
+// parameter. It panics on a float that is not finite, the one value of
+// these fields JSON cannot hold. A decoded descriptor holds none, and
+// Canonical refuses one built by hand.
 func (d Descriptor) Encode() string {
 	d.Ver = DescriptorVersion
 	b, err := json.Marshal(d)
 	if err != nil {
-		// The struct is plain data; Marshal cannot fail on it.
 		panic(err)
 	}
 	return base64.RawURLEncoding.EncodeToString(b)

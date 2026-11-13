@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/colespringer/waxflow/internal/reftext"
@@ -41,6 +42,8 @@ type Client struct {
 	// deadline, so that side cannot carry a header bound at all. See New.
 	http   *http.Client
 	stream *http.Client
+	// bound is jsonTimeout, the limit on one JSON round trip.
+	bound time.Duration
 }
 
 // Option configures a Client.
@@ -92,7 +95,7 @@ func New(baseURL, apiKey string, opts ...Option) (*Client, error) {
 	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.ResponseHeaderTimeout = streamHeaderTimeout
-	c := &Client{base: u, apiKey: apiKey, http: &http.Client{}, stream: &http.Client{Transport: tr}}
+	c := &Client{base: u, apiKey: apiKey, http: &http.Client{}, stream: &http.Client{Transport: tr}, bound: jsonTimeout}
 	for _, opt := range opts {
 		opt(c)
 	}
@@ -100,8 +103,7 @@ func New(baseURL, apiKey string, opts ...Option) (*Client, error) {
 }
 
 // Wire types mirror the server's (docs/api.md); the golden fixtures and
-// the server suite's job-mirror round trips pin both sides against
-// drift.
+// the server suite's mirror round trips pin both sides against drift.
 
 // VersionInfo is the GET /version body.
 type VersionInfo struct {
@@ -266,6 +268,10 @@ type CapsDelivery struct {
 	// /stream as an unknown parameter, and one with timelines off (Timelines
 	// false) 415s it. Route by presence, as for TimelineMemberWindows.
 	TimelineStream bool `json:"timelineStream,omitempty"`
+	// HEv2: the hev2 parameter selects HE-AAC v2 for he-aac output on
+	// /stream, the HLS mint, and jobs. Absent means a daemon too old to have
+	// it, which 400s hev2 as an unknown parameter: route by presence.
+	HEv2 bool `json:"hev2,omitempty"`
 	// RootsReload: the daemon serves POST /roots/reload, reconciling its
 	// live library roots from a re-read config so a runtime-added root
 	// streams without a restart. Wired only for a file-configured daemon
@@ -276,6 +282,19 @@ type CapsDelivery struct {
 	// RootsStatus: the daemon serves GET /roots (Roots). Sent non-omitempty
 	// like RootsReload: absent means a server too old to advertise it.
 	RootsStatus bool `json:"rootsStatus"`
+}
+
+// UploadResponse is the POST /uploads body.
+type UploadResponse struct {
+	SchemaVersion int    `json:"schemaVersion"`
+	ID            string `json:"id"`
+	// Ref is the ready-to-use source reference (upload:<id>).
+	Ref   string `json:"ref"`
+	Name  string `json:"name,omitempty"`
+	Bytes int64  `json:"bytes"`
+	// ExpiresAt is the unix time the daemon removes the upload, 0 when
+	// uploads never expire.
+	ExpiresAt int64 `json:"expiresAt,omitempty"`
 }
 
 // TimelineRequest is the POST /hls/timeline body: a play queue, in order.
@@ -546,6 +565,35 @@ type SilenceSummary struct {
 	TotalSeconds float64 `json:"totalSeconds"`
 }
 
+// SilenceMap is the silence.json document, an analyze job's output file:
+// decode a JobResult body into it. Version is the detector revision, as on
+// SilenceSummary.
+type SilenceMap struct {
+	SchemaVersion int     `json:"schemaVersion"`
+	Version       string  `json:"version"`
+	ThresholdDB   float64 `json:"thresholdDb"`
+	MinSeconds    float64 `json:"minSeconds"`
+	// Rate and Samples describe the analyzed audio, the basis of every
+	// span's sample fields.
+	Rate            int              `json:"rate"`
+	Samples         int64            `json:"samples"`
+	DurationSeconds float64          `json:"durationSeconds"`
+	Spans           []SilenceMapSpan `json:"spans"`
+	Dropped         int              `json:"dropped"`
+	DroppedSeconds  float64          `json:"droppedSeconds"`
+	TotalSeconds    float64          `json:"totalSeconds"`
+}
+
+// SilenceMapSpan is one silence, in samples and in seconds. The samples are
+// exact and source-addressed, which is what a cut-point list takes. To is
+// exclusive.
+type SilenceMapSpan struct {
+	FromSample  int64   `json:"fromSample"`
+	ToSample    int64   `json:"toSample"`
+	FromSeconds float64 `json:"fromSeconds"`
+	ToSeconds   float64 `json:"toSeconds"`
+}
+
 // JobAnalysis is a loudness measurement. The peak and loudness fields
 // are pointers because digital silence measures negative infinity,
 // which JSON cannot carry: nil means silence.
@@ -786,6 +834,66 @@ func (c *Client) Roots(ctx context.Context) (*RootsResponse, error) {
 	return &v, nil
 }
 
+// Upload spools body on the daemon as a one-shot source (POST /uploads) and
+// returns its reference, which any src takes. name is the original file
+// name, whose extension seeds the probe hint; it may be empty. Gate it on
+// Caps.Delivery.Uploads.
+//
+// The send runs under the caller's ctx alone, like a stream's body: an
+// upload takes as long as its bytes take. The daemon's answer is bounded as
+// any JSON round trip is, from the moment the body is sent: 30 s for its
+// headers and 30 s for its body, unless ctx carries a deadline of its own.
+func (c *Client) Upload(ctx context.Context, name string, body io.Reader) (*UploadResponse, error) {
+	p := "/uploads"
+	if name != "" {
+		p += "?" + url.Values{"name": {name}}.Encode()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	req, err := c.newRequest(ctx, http.MethodPost, p, body)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.send(c.stream, req)
+	if err != nil {
+		return nil, err
+	}
+	// The stream client bounds the wait for headers and nothing after them,
+	// so the body's read gets the JSON bound here.
+	var late atomic.Bool
+	if _, ok := ctx.Deadline(); !ok {
+		timer := time.AfterFunc(c.bound, func() {
+			late.Store(true)
+			cancel()
+		})
+		defer timer.Stop()
+	}
+	var v UploadResponse
+	if err := answer(resp, &v); err != nil {
+		if late.Load() {
+			return nil, ctxErr(context.DeadlineExceeded)
+		}
+		return nil, err
+	}
+	return &v, nil
+}
+
+// DeleteUpload removes an upload now, ahead of its expiry. id is
+// UploadResponse.ID.
+func (c *Client) DeleteUpload(ctx context.Context, id string) error {
+	if id == "" {
+		// "/uploads/" is not an upload's URL.
+		return waxerr.New(waxerr.CodeInvalidRequest, "client: an upload id is required")
+	}
+	ctx, cancel := c.jsonDeadline(ctx)
+	defer cancel()
+	req, err := c.newRequest(ctx, http.MethodDelete, "/uploads/"+url.PathEscape(id), nil)
+	if err != nil {
+		return err
+	}
+	return c.do(req, nil)
+}
+
 // openStream runs a GET whose successful body the caller owns: the
 // shared back half of the streaming methods. It uses the stream client
 // (response headers bounded, body not; see New) and applies no default
@@ -866,7 +974,7 @@ func (c *Client) DeleteJob(ctx context.Context, id string) error {
 	if err := checkJobID(id); err != nil {
 		return err
 	}
-	ctx, cancel := jsonDeadline(ctx)
+	ctx, cancel := c.jsonDeadline(ctx)
 	defer cancel()
 	req, err := c.newRequest(ctx, http.MethodDelete, "/jobs/"+url.PathEscape(id), nil)
 	if err != nil {
@@ -966,15 +1074,15 @@ const jsonTimeout = 30 * time.Second
 
 // jsonDeadline applies the default JSON round-trip bound, deferring to
 // any deadline the caller already set.
-func jsonDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+func (c *Client) jsonDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
 	if _, ok := ctx.Deadline(); ok {
 		return ctx, func() {}
 	}
-	return context.WithTimeout(ctx, jsonTimeout)
+	return context.WithTimeout(ctx, c.bound)
 }
 
 func (c *Client) getJSON(ctx context.Context, path string, q url.Values, v any) error {
-	ctx, cancel := jsonDeadline(ctx)
+	ctx, cancel := c.jsonDeadline(ctx)
 	defer cancel()
 	p := path
 	if len(q) > 0 {
@@ -988,7 +1096,7 @@ func (c *Client) getJSON(ctx context.Context, path string, q url.Values, v any) 
 }
 
 func (c *Client) postJSON(ctx context.Context, path string, body, v any) error {
-	ctx, cancel := jsonDeadline(ctx)
+	ctx, cancel := c.jsonDeadline(ctx)
 	defer cancel()
 	var rdr io.Reader
 	if body != nil {
@@ -1026,13 +1134,29 @@ func ctxErr(err error) error {
 // do runs the request and decodes the 2xx body into v; a nil v skips
 // the decode, for endpoints whose success is a bare status (204).
 func (c *Client) do(req *http.Request, v any) error {
-	resp, err := c.http.Do(req)
+	resp, err := c.send(c.http, req)
+	if err != nil {
+		return err
+	}
+	return answer(resp, v)
+}
+
+// send runs the request on the client named, the JSON one or the stream
+// one, and returns once the response's headers are in.
+func (c *Client) send(h *http.Client, req *http.Request) (*http.Response, error) {
+	resp, err := h.Do(req)
 	if err != nil {
 		if ce := ctxErr(err); ce != nil {
-			return ce
+			return nil, ce
 		}
-		return waxerr.Wrap(waxerr.CodeInternal, "client: daemon unreachable", err)
+		return nil, waxerr.Wrap(waxerr.CodeInternal, "client: daemon unreachable", err)
 	}
+	return resp, nil
+}
+
+// answer reads a response into v and closes it: the envelope's error for a
+// status outside 2xx, the decoded body otherwise.
+func answer(resp *http.Response, v any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return decodeEnvelope(resp)

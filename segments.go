@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 	"time"
 
@@ -56,7 +57,8 @@ func snapSegmentSamples(segSeconds float64, rate, grid int) (int, error) {
 	switch {
 	case segSeconds == 0:
 		segSeconds = DefaultSegmentSeconds
-	case segSeconds < 0 || segSeconds > maxSegmentSeconds:
+	// A NaN compares false against both bounds, so it is named.
+	case math.IsNaN(segSeconds) || segSeconds < 0 || segSeconds > maxSegmentSeconds:
 		return 0, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("waxflow: segment duration %g outside 0..%g seconds", segSeconds, maxSegmentSeconds))
 	}
@@ -354,8 +356,8 @@ func finishTimelinePlan(tracks []container.Track, env audio.Format, copts Concat
 }
 
 // timelineVersions lists what a timeline's synthetic track cannot: every
-// member's decoder revision, and the revisions of the nodes each member's
-// own normalization to the envelope runs through.
+// member's demuxer and decoder revision, and the revisions of the nodes
+// each member's own normalization to the envelope runs through.
 //
 // Both are silent under-keying if left out, which ADR-0004 exists to
 // prevent. The synthetic track's codec is PCM, so the plan folds in pcm's
@@ -402,6 +404,9 @@ func timelineVersions(tracks []container.Track, env audio.Format, copts ConcatOp
 	}
 	normalized := map[audio.Format]bool{}
 	for i, t := range tracks {
+		if t.DemuxerVersion != "" {
+			add(t.DemuxerVersion)
+		}
 		add(decodeVersion(t.Codec))
 		if t.Fmt == env || normalized[t.Fmt] {
 			continue

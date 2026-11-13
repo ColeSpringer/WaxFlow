@@ -12,10 +12,15 @@
 // with no scaling; callers fold any 1/n factor into their own pre- or
 // post-passes.
 //
-// The per-element floating-point operation sequence is fixed by the radix
-// kernels in this file and contains no fused multiply-add, so a Transform's
-// output is a pure function of its input on every platform: golden streams,
-// cache keys, and deterministic-mode encoders can depend on it.
+// The radix kernels in this file fix the order of the floating-point
+// operations, and nothing here asks for a fused multiply-add. The compiler
+// fuses a multiply into the add after it where the target has the
+// instruction: on arm64, and on amd64 built at GOAMD64=v3, though not at
+// amd64's default level. So a Transform's output is a pure function of its
+// input within one build, which is what golden streams, deterministic-mode
+// encoders and the cache rest on: a build reproduces its own bytes. A build
+// for another GOARCH or GOAMD64 level may differ in the last ulp, which is
+// why a transcode's cache key names such a build (waxflow.FloatBuildVersion).
 package fft
 
 import (

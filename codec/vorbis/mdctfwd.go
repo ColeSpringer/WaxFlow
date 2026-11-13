@@ -19,10 +19,12 @@ import (
 // two rotations by exp(-2*pi*i*(j + 1/8)/N).
 //
 // The decoder computes its inverse with a private float64 FFT; the encoder uses
-// dsp/fft here on purpose: its fixed float32
-// op order with no FMA makes the forward transform a pure function of its
-// input, which the deterministic-mode/golden gate needs. The rotations and the
-// fold below are plain float32 multiplies and adds for the same reason.
+// dsp/fft here on purpose: its fixed float32 op order makes the forward
+// transform a pure function of its input for one GOARCH and GOAMD64 level,
+// which the deterministic-mode/golden gate needs. The rotations and the fold
+// below are plain float32 multiplies and adds for the same reason. The
+// compiler fuses some of them on arm64 and under GOAMD64=v3, as in dsp/fft,
+// which is why TestEncodeGolden's hash is pinned to one architecture.
 
 // fwdScale is the analysis normalization. The decoder's inverse carries no 1/N
 // (vorbisScale == 1), so the forward holds it all. The single-block operator

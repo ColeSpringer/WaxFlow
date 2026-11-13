@@ -511,7 +511,9 @@ func (d *Demuxer) parseTracks(body []byte) error {
 
 // parseTrackEntry parses one TrackEntry's fields.
 func (d *Demuxer) parseTrackEntry(body []byte) (*trackEntry, error) {
-	t := &trackEntry{}
+	// FlagDefault and FlagEnabled default to 1: a track that leaves one out
+	// is a default track, and a usable one.
+	t := &trackEntry{def: true, enabled: true}
 	err := walkElements(body, func(id uint32, data []byte) error {
 		switch id {
 		case idTrackNumber:
@@ -529,8 +531,11 @@ func (d *Demuxer) parseTrackEntry(body []byte) (*trackEntry, error) {
 			t.codecDelay = int64(beUint(data))
 		case idSeekPreRoll:
 			t.seekPreRoll = int64(beUint(data))
+		// An element with no octets is its default, 1 (RFC 8794, 6.1).
 		case idFlagDefault:
-			t.def = beUint(data) != 0
+			t.def = len(data) == 0 || beUint(data) != 0
+		case idFlagEnabled:
+			t.enabled = len(data) == 0 || beUint(data) != 0
 		case idAudio:
 			parseAudioSettings(t, data)
 		}
@@ -559,10 +564,22 @@ func parseAudioSettings(t *trackEntry, body []byte) {
 	})
 }
 
+// DemuxerVersion is this demuxer's term in the ADR-0004 cache key, carried
+// by its track: a cached output of a Matroska or WebM source regenerates
+// when this bumps. Bump it for a change that makes the demuxer deliver other
+// samples for a file that has not changed.
+//
+// mka-demux-2: a track with no FlagDefault, or an empty one, is a default
+// track, and a track whose FlagEnabled is 0 is passed over while a usable
+// one exists, so a file of several audio tracks can select another one.
+// Revision 1 is every key built before the term existed.
+const DemuxerVersion = "mka-demux-2"
+
 // selectTrack picks the first audio track carrying a codec this build decodes,
-// preferring the container's default track, and resolves its codec setup.
+// preferring a track the file marks usable and then one it marks default
+// (trackEntry.rank), and resolves its codec setup.
 func (d *Demuxer) selectTrack() error {
-	var chosen, fallback *trackEntry
+	var chosen *trackEntry
 	var found []string
 	for _, t := range d.entries {
 		if t.trackType != trackTypeAudio {
@@ -572,15 +589,9 @@ func (d *Demuxer) selectTrack() error {
 			found = append(found, codecName(t.codecID))
 			continue
 		}
-		if chosen == nil || (t.def && !chosen.def) {
+		if chosen == nil || t.rank() > chosen.rank() {
 			chosen = t
 		}
-		if fallback == nil {
-			fallback = t
-		}
-	}
-	if chosen == nil {
-		chosen = fallback
 	}
 	if chosen == nil {
 		if len(found) > 0 {
@@ -633,6 +644,7 @@ func (d *Demuxer) finalizeTrack() error {
 	// before it and settles the length.
 	d.track = container.Track{
 		ID:              0,
+		DemuxerVersion:  DemuxerVersion,
 		Codec:           d.setup.id,
 		CodecConfig:     d.setup.config,
 		Fmt:             d.setup.fmt,

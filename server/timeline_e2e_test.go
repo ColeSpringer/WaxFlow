@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -19,6 +21,7 @@ import (
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/client"
 	"github.com/colespringer/waxflow/dsp/silence"
+	"github.com/colespringer/waxflow/internal/hls"
 	"github.com/colespringer/waxflow/internal/timeline"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/waxerr"
@@ -1010,5 +1013,98 @@ func TestTimelineMixedWidthRenders(t *testing.T) {
 	total, seg0 := renderTimeline(t, env, mintHLS(t, env, params))
 	if total <= 0 || len(seg0) == 0 {
 		t.Fatalf("a mixed-width timeline rendered %d bytes over %.3f s", len(seg0), total)
+	}
+}
+
+// nonFiniteSpellings are what strconv.ParseFloat reads as a NaN or an
+// infinity.
+var nonFiniteSpellings = []string{"NaN", "nan", "Inf", "+Inf", "-Inf", "Infinity", "-infinity"}
+
+// mintAnswer asks the HLS mint for params in both its forms, the keyed
+// master and POST /sign, and returns each one's status and body. A handler
+// that panics answers nothing, which is reported as status 0.
+func mintAnswer(t *testing.T, env *testEnv, params map[string]string) (status [2]int, body [2]string) {
+	t.Helper()
+	q := url.Values{}
+	for k, v := range params {
+		q.Set(k, v)
+	}
+	req, err := http.NewRequest(http.MethodGet, env.ts.URL+"/hls/master.m3u8?"+q.Encode(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-API-Key", testKey)
+	sign, err := json.Marshal(map[string]any{"path": "/hls/master.m3u8", "params": params})
+	if err != nil {
+		t.Fatal(err)
+	}
+	post, err := http.NewRequest(http.MethodPost, env.ts.URL+"/sign", bytes.NewReader(sign))
+	if err != nil {
+		t.Fatal(err)
+	}
+	post.Header.Set("X-API-Key", testKey)
+	post.Header.Set("Content-Type", "application/json")
+	for i, r := range []*http.Request{req, post} {
+		resp, err := env.ts.Client().Do(r)
+		if err != nil {
+			body[i] = err.Error()
+			continue
+		}
+		status[i], body[i] = resp.StatusCode, string(readBody(t, resp))
+	}
+	return status, body
+}
+
+// TestHLSMintRefusesANonFiniteSegDur: a segDur that is no number is a 400
+// naming the parameter, on the keyed master and on POST /sign. It used to
+// panic the handler: ParseFloat reads the spellings, nothing checked the
+// value, and the descriptor cannot be written as JSON.
+func TestHLSMintRefusesANonFiniteSegDur(t *testing.T) {
+	env := newTestEnv(t, nil)
+	for _, v := range append(nonFiniteSpellings, "-1") {
+		status, body := mintAnswer(t, env, map[string]string{"src": "lib/sine.wav", "format": "opus", "segDur": v})
+		for i, surface := range []string{"the keyed master", "POST /sign"} {
+			if status[i] != http.StatusBadRequest || !strings.Contains(body[i], "segDur") {
+				t.Errorf("segDur=%s on %s = %d %s; want a 400 naming segDur", v, surface, status[i], body[i])
+			}
+		}
+	}
+	// The guard reads the value, not the spelling: a finite one still mints.
+	if status, body := mintAnswer(t, env, map[string]string{"src": "lib/sine.wav", "format": "opus", "segDur": "2.5"}); status != [2]int{200, 200} {
+		t.Errorf("segDur=2.5 = %v %v, want 200 from both", status, body)
+	}
+}
+
+// TestDescriptorFloatsAreGuardedAtTheMint: every float the descriptor holds
+// is refused at the mint when it is not finite, under the parameter its JSON
+// tag names. A float field added without a guard fails here, where it would
+// otherwise panic the handler the first time a client sent NaN.
+func TestDescriptorFloatsAreGuardedAtTheMint(t *testing.T) {
+	env := newTestEnv(t, nil)
+	floats := 0
+	for field := range reflect.TypeFor[hls.Descriptor]().Fields() {
+		switch field.Type.Kind() {
+		case reflect.Float32, reflect.Float64:
+		case reflect.Slice, reflect.Array, reflect.Map, reflect.Struct, reflect.Pointer:
+			if field.Type.Kind() != reflect.Slice || field.Type.Elem().Kind() != reflect.Int {
+				t.Errorf("%s is a %s; teach this test to look for floats inside it", field.Name, field.Type)
+			}
+			continue
+		default:
+			continue
+		}
+		floats++
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		for _, v := range nonFiniteSpellings {
+			status, body := mintAnswer(t, env, map[string]string{"src": "lib/sine.wav", "format": "opus", name: v})
+			for i, surface := range []string{"the keyed master", "POST /sign"} {
+				if status[i] != http.StatusBadRequest || !strings.Contains(body[i], name) || !strings.Contains(body[i], "finite") {
+					t.Errorf("%s=%s on %s = %d %s; want a 400 saying %s must be finite", name, v, surface, status[i], body[i], name)
+				}
+			}
+		}
+	}
+	if floats < 2 {
+		t.Errorf("found %d float fields in hls.Descriptor, want segDur and crossfadeSeconds at least", floats)
 	}
 }

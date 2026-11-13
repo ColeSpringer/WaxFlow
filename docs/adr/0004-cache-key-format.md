@@ -221,3 +221,72 @@ of the codec it changes: `flac-dec-2`, `opus-dec-3`, `vorbis-dec-3`. It
 over-invalidates the same way, one re-encode per cached entry of those codecs,
 and the demuxer term remains the standing question.
 
+
+## Amendment (2026-11-13): a demuxer names its own revision
+
+`container/mka` now reads a track that leaves `FlagDefault` out, or writes
+it with no octets, as a default track, which is what Matroska defines, and
+passes over a track whose `FlagEnabled` is 0 while a usable one exists. A
+file of several audio tracks can select another one, and every plan built
+from that file then holds other samples. The Decision leaves a demuxer
+change to a schema bump, and the two amendments above borrowed a decoder's
+term instead. Matroska carries every codec, so it has no decoder term to
+borrow: the case the muxer side met on 2026-07-29 and closed on 2026-09-10.
+
+The demuxer side is closed the same way, without the full invalidation.
+`container.Track` carries `DemuxerVersion`, spelled `<name>-demux-<n>`, and
+the engine puts it ahead of the versions of every plan built from the
+track, on the copy rungs as on the transcode one (`withDemuxer`); a
+timeline lists each member's once (`timelineVersions`). The tuple is
+`[demuxer, decoder, dsp..., encoder, muxer]`, its first element present
+only where a demuxer names one. `mka.DemuxerVersion` is `mka-demux-2`;
+revision 1 is every key built before the term existed.
+
+A demuxer that has not revised since names nothing, so its sources keep
+their keys: only cached entries of Matroska and WebM sources, and of
+timelines with such a member, miss once, at one re-encode or one copy per
+entry. That is what the standing question was
+waiting on. It priced the term at a constant in every demuxing package and
+one full invalidation, and an empty term standing for revision 1 costs
+neither. From here a change to what a demuxer delivers for a file that has
+not changed bumps that package's own constant in the same change, adding it
+at `-2` where there is none yet. The terms already borrowed (`wma-dec-3`,
+`flac-dec-2`, `opus-dec-3`, `vorbis-dec-3`) stay: moving them back would
+retire those entries a second time for nothing.
+
+The engine reads the term from the track, so a caller that builds a
+`container.Track` by hand names no demuxer and keys as before. The shared
+fuzz driver holds every demuxer's track to the spelling, and the server's
+cache-key golden shows the term on each rung of a Matroska source.
+
+## Amendment (2026-11-13): a transcode names the build that rounds its floats
+
+Byte-exactness holds within a build and not across them
+(docs/quality-gates.md): the compiler fuses a multiply into an add on arm64
+and on amd64 built at `GOAMD64=v3`, and the math package's
+per-architecture routines need not agree in the last ulp, either of which
+can move a lossy encoder to other codewords. The key carried no `GOARCH`
+and no `GOAMD64` level, so a cache directory that outlived a change of
+either held entries the new build would encode to other bytes, under the
+same key and the same strong ETag. A cached output stayed whole. What could
+mix was a partly cached HLS variant, whose remaining segments came from the
+new build, and a ranged resume of a progressive entry evicted and encoded
+again in between, where the byte offsets of two encodes do not line up.
+
+Every plan that runs a chain now carries `waxflow.FloatBuildVersion`
+behind its decoder's term: `fp-<GOARCH>`, or `fp-amd64v3` and `fp-amd64v4`
+on amd64. It is empty for amd64 below v3, the one target where nothing
+fuses, so no key moves there. Every other build's transcode entries miss
+once, arm64's among them. The term is opt-in for the reason the demuxer's
+is: an empty one standing for the baseline costs no invalidation where
+nothing changed. The copy rungs compute nothing and name no build. It
+over-keys a lossless transcode of an integer source, whose bytes are the
+same everywhere, at one re-encode per entry.
+
+What it does not cover is a toolchain that changes where it fuses under an
+unchanged architecture: the term names no Go version, since that would
+retire a fusing build's cache on every toolchain bump for an event that
+has not been seen. Explicit conversions in the kernels would forbid fusing
+and make the bytes one thing everywhere, at a cost in speed and a revision
+of every float codec; that stays open. The byte goldens are where a move
+would show.

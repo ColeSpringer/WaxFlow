@@ -1,12 +1,15 @@
 package server
 
 import (
+	"net/url"
+	"regexp"
 	"slices"
 	"testing"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/dsp/silence"
+	"github.com/colespringer/waxflow/internal/gainspec"
 )
 
 // TestDeliveryProfilesAreHonest pins the /caps profile contract: the
@@ -115,7 +118,7 @@ func TestCapsDSPIsHonest(t *testing.T) {
 		t.Fatalf("DSP slot advertises nothing: %+v", dsp)
 	}
 	for _, mode := range dsp.GainModes {
-		if _, err := parseGain(mode, gainSpec{}); err != nil {
+		if _, err := parseGain(mode, gainspec.Spec{}); err != nil {
 			t.Errorf("advertised gain mode %q does not parse: %v", mode, err)
 		}
 	}
@@ -184,22 +187,69 @@ func TestCapsDSPIsHonest(t *testing.T) {
 // left to be discovered: the same gain= request resolves to a different dB
 // depending on a neighbouring parameter.
 func TestGainCeilingIsCoupledToDynamics(t *testing.T) {
-	req := gainSpec{mode: gainFixed, db: 16}
-	if got := req.resolveDB(nil, gain.PresetOff); got != maxGainDB {
+	req := gainspec.Spec{Mode: gainspec.Fixed, DB: 16}
+	if got := resolveGainDB(req, nil, gain.PresetOff); got != maxGainDB {
 		t.Errorf("gain=16 with no dynamics resolved to %v, want the music ceiling %v", got, float64(maxGainDB))
 	}
-	if got := req.resolveDB(nil, gain.PresetVoice); got != 16 {
+	if got := resolveGainDB(req, nil, gain.PresetVoice); got != 16 {
 		t.Errorf("gain=16 with dynamics=voice resolved to %v, want 16 (under the %v voice ceiling)",
 			got, float64(maxVoiceGainDB))
 	}
 	// The voice ceiling still clamps: it is a higher bound, not no bound.
-	over := gainSpec{mode: gainFixed, db: 40}
-	if got := over.resolveDB(nil, gain.PresetVoice); got != maxVoiceGainDB {
+	over := gainspec.Spec{Mode: gainspec.Fixed, DB: 40}
+	if got := resolveGainDB(over, nil, gain.PresetVoice); got != maxVoiceGainDB {
 		t.Errorf("gain=40 with dynamics=voice resolved to %v, want the voice ceiling %v", got, float64(maxVoiceGainDB))
 	}
 	// Negative gain is never clamped by either ceiling.
-	down := gainSpec{mode: gainFixed, db: -30}
-	if got := down.resolveDB(nil, gain.PresetVoice); got != -30 {
+	down := gainspec.Spec{Mode: gainspec.Fixed, DB: -30}
+	if got := resolveGainDB(down, nil, gain.PresetVoice); got != -30 {
 		t.Errorf("gain=-30 resolved to %v, want -30: the ceiling bounds positive gain only", got)
+	}
+}
+
+// capsNoteParam finds a request parameter spelled out in a profile note.
+var capsNoteParam = regexp.MustCompile(`\b(bits|rate|ch|format|bitrate|q|container|hev2)=([A-Za-z0-9.]+)`)
+
+// refusedInNote lists the parameters note spells out that /stream refuses.
+// Each is parsed beside a src, with the note's other parameters at the
+// first value the note gives them.
+func refusedInNote(note string) []string {
+	var refused []string
+	tokens := capsNoteParam.FindAllStringSubmatch(note, -1)
+	for _, tok := range tokens {
+		q := url.Values{"src": {"lib/a.flac"}}
+		for _, other := range tokens {
+			if !q.Has(other[1]) {
+				q.Set(other[1], other[2])
+			}
+		}
+		q.Set(tok[1], tok[2])
+		if _, err := parseStreamParams(q, gainspec.Spec{}); err != nil {
+			refused = append(refused, tok[0])
+		}
+	}
+	return refused
+}
+
+// TestCapsNotesNameOnlyAcceptedValues: a note that spells a parameter out
+// is advice a client acts on, so the value it names has to be one /stream
+// takes. The hls-js profile once told clients that bits=12 and bits=20 are
+// honored, which /stream has never accepted; that note is gone.
+func TestCapsNotesNameOnlyAcceptedValues(t *testing.T) {
+	for name, p := range buildCaps(capsFlags{jobs: true, uploads: true, pid: true, timelines: true}).Profiles {
+		for _, note := range p.Notes {
+			if refused := refusedInNote(note); len(refused) > 0 {
+				t.Errorf("profile %q tells a client about %v, which /stream refuses\nnote: %s", name, refused, note)
+			}
+		}
+	}
+	// No note spells a parameter out today, so the check is shown to bite
+	// on the sentence it was written for and to pass one that is true.
+	retired := "an explicit bits=12 or bits=20 is honored and mints a stream Chromium cannot play"
+	if got := refusedInNote(retired); !slices.Equal(got, []string{"bits=12", "bits=20"}) {
+		t.Errorf("the retired note's refused parameters = %v, want bits=12 and bits=20", got)
+	}
+	if got := refusedInNote("ask for format=flac with bits=16 or bits=24, or rate=48000"); len(got) > 0 {
+		t.Errorf("a note of accepted values is flagged: %v", got)
 	}
 }

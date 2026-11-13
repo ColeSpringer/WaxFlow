@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/colespringer/waxflow/container"
@@ -731,5 +732,25 @@ func openFault(err error) error {
 		return waxerr.Wrap(waxerr.CodeOverloaded, "source: out of file handles", err)
 	default:
 		return waxerr.Wrap(waxerr.CodeInvalidRequest, "source: unresolvable path", err)
+	}
+}
+
+// localFault codes an open error on a trusted local path (OpenLocal). It is
+// openFault without the last case: no request spelled this path, so an error
+// nothing here names is the file's fault too, and only a path that names
+// nothing is not-found: a missing file, or one whose path runs through a
+// file.
+func localFault(err error) error {
+	switch {
+	case errors.Is(err, fs.ErrNotExist), errors.Is(err, syscall.ENOTDIR):
+		return waxerr.Wrap(waxerr.CodeNotFound, "source: no such file", err)
+	case errors.Is(err, fs.ErrPermission):
+		return waxerr.Wrap(waxerr.CodeSourceUnreadable, "source: permission denied", err)
+	case isIOFault(err):
+		return waxerr.Wrap(waxerr.CodeSourceUnreadable, "source: reading the file", err)
+	case isOutOfHandles(err):
+		return waxerr.Wrap(waxerr.CodeOverloaded, "source: out of file handles", err)
+	default:
+		return waxerr.Wrap(waxerr.CodeSourceUnreadable, "source: opening the file", err)
 	}
 }

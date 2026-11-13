@@ -53,3 +53,26 @@ func TestOpenFaultWin32(t *testing.T) {
 		}
 	}
 }
+
+// TestLocalFaultWin32: a trusted local path fails as a root's file does,
+// except that a name Windows refuses is the file's fault and not a request's.
+func TestLocalFaultWin32(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		errno syscall.Errno
+		want  waxerr.Code
+	}{
+		{"ERROR_FILE_NOT_FOUND", 2, waxerr.CodeNotFound},
+		{"ERROR_PATH_NOT_FOUND", 3, waxerr.CodeNotFound},
+		{"ERROR_ACCESS_DENIED", 5, waxerr.CodeSourceUnreadable},
+		{"ERROR_SHARING_VIOLATION", 32, waxerr.CodeSourceUnreadable},
+		{"ERROR_READ_FAULT", 30, waxerr.CodeSourceUnreadable},
+		{"ERROR_TOO_MANY_OPEN_FILES", 4, waxerr.CodeOverloaded},
+		{"ERROR_INVALID_NAME", 123, waxerr.CodeSourceUnreadable},
+	} {
+		err := &fs.PathError{Op: "open", Path: `spool\01J`, Err: tc.errno}
+		if got := waxerr.CodeOf(localFault(err)); got != tc.want {
+			t.Errorf("%s: code = %s, want %s", tc.name, got, tc.want)
+		}
+	}
+}
