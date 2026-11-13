@@ -191,6 +191,19 @@ func (e *testEnv) req(t *testing.T, method, path string, hdr map[string]string) 
 	return resp
 }
 
+// liveGet asks for a stream nothing has encoded yet and returns once the
+// response's headers are in. Its pipeline is held after its first write until
+// then: a source this short is otherwise encoded and cached before the request
+// attaches to it, and the answer is then the cached form. Call it before any
+// other request (GatePipelineDst).
+func liveGet(t *testing.T, env *testEnv, path string) *http.Response {
+	t.Helper()
+	open, _ := gatePipelines(t, env)
+	resp := env.get(t, path, nil)
+	open()
+	return resp
+}
+
 func readBody(t *testing.T, resp *http.Response) []byte {
 	t.Helper()
 	defer resp.Body.Close()
@@ -446,7 +459,7 @@ func TestStreamTranscodeWriteThrough(t *testing.T) {
 	env := newTestEnv(t, nil)
 	want := engineReference(t, filepath.Join(env.root, "album", "track.flac"), waxflow.TranscodeOptions{Format: "wav"})
 
-	resp := env.get(t, "/stream?src=lib/album/track.flac&format=wav", nil)
+	resp := liveGet(t, env, "/stream?src=lib/album/track.flac&format=wav")
 	first := readBody(t, resp)
 	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "audio/wav" {
 		t.Fatalf("live transcode = %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
@@ -508,7 +521,7 @@ func TestStreamTranscodeFLACWriteThrough(t *testing.T) {
 	env := newTestEnv(t, nil)
 	want := engineReference(t, filepath.Join(env.root, "sine.wav"), waxflow.TranscodeOptions{Format: "flac"})
 
-	resp := env.get(t, "/stream?src=lib/sine.wav&format=flac", nil)
+	resp := liveGet(t, env, "/stream?src=lib/sine.wav&format=flac")
 	first := readBody(t, resp)
 	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "audio/flac" {
 		t.Fatalf("live transcode = %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
@@ -569,7 +582,7 @@ func TestStreamTranscodeALAC(t *testing.T) {
 	env := newTestEnv(t, nil)
 	want := engineReference(t, filepath.Join(env.root, "sine.wav"), waxflow.TranscodeOptions{Format: "alac"})
 
-	resp := env.get(t, "/stream?src=lib/sine.wav&format=alac", nil)
+	resp := liveGet(t, env, "/stream?src=lib/sine.wav&format=alac")
 	first := readBody(t, resp)
 	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "audio/mp4" {
 		t.Fatalf("live transcode = %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
@@ -629,7 +642,7 @@ func TestStreamTranscodeMP3(t *testing.T) {
 	want := engineReference(t, filepath.Join(env.root, "sine.wav"),
 		waxflow.TranscodeOptions{Format: "mp3", MP3Bitrate: 128000})
 
-	resp := env.get(t, "/stream?src=lib/sine.wav&format=mp3&bitrate=128", nil)
+	resp := liveGet(t, env, "/stream?src=lib/sine.wav&format=mp3&bitrate=128")
 	first := readBody(t, resp)
 	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "audio/mpeg" {
 		t.Fatalf("live mp3 transcode = %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
@@ -686,7 +699,7 @@ func TestStreamTranscodeOpus(t *testing.T) {
 	want := engineReference(t, filepath.Join(env.root, "sine.wav"),
 		waxflow.TranscodeOptions{Format: "opus", OpusBitrate: 96000})
 
-	resp := env.get(t, "/stream?src=lib/sine.wav&format=opus", nil)
+	resp := liveGet(t, env, "/stream?src=lib/sine.wav&format=opus")
 	first := readBody(t, resp)
 	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "audio/ogg" {
 		t.Fatalf("live opus transcode = %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
@@ -773,6 +786,9 @@ func TestStreamMP3BitrateEdges(t *testing.T) {
 // original bytes, and t>0 forces a live re-encode.
 func TestStreamFLACFormatLadder(t *testing.T) {
 	env := newTestEnv(t, nil)
+	// The live answer below is asserted, so its encode is held until the
+	// response's headers are in (liveGet has the reason).
+	open, _ := gatePipelines(t, env)
 	orig, err := os.ReadFile(filepath.Join(env.root, "album", "track.flac"))
 	if err != nil {
 		t.Fatal(err)
@@ -788,6 +804,7 @@ func TestStreamFLACFormatLadder(t *testing.T) {
 	}
 
 	resp = env.get(t, "/stream?src=lib/album/track.flac&format=flac&t=0.1", nil)
+	open()
 	body = readBody(t, resp)
 	if resp.StatusCode != 200 || resp.Header.Get("Accept-Ranges") != "none" {
 		t.Fatalf("t>0 must transcode live: %d, Accept-Ranges %q", resp.StatusCode, resp.Header.Get("Accept-Ranges"))

@@ -1,13 +1,11 @@
 package wv_test
 
 import (
-	"context"
-	"errors"
-	"io"
 	"testing"
 
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/wv"
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
 // FuzzDemux asserts the hostile-input invariants on arbitrary bytes: no
@@ -23,51 +21,17 @@ func FuzzDemux(f *testing.F) {
 	f.Add([]byte("wvpk\x18\x00\x00\x00\x10\x04\x00\x00"))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		for _, strict := range []bool{false, true} {
-			d, err := wv.NewDemuxer(container.BytesSource(data), &wv.DemuxerOptions{Strict: strict})
-			if err != nil {
-				continue
-			}
-			track := d.Tracks()[0]
-			if err := track.Fmt.Valid(); err != nil {
-				t.Fatalf("accepted track with invalid format: %v", err)
-			}
+		testutil.DemuxFuzz{
+			Open: func(src container.Source, strict bool) (container.Demuxer, error) {
+				return wv.NewDemuxer(src, &wv.DemuxerOptions{Strict: strict})
+			},
 			// A block is at least its 32-byte header, so packet production is
 			// bounded by the input.
-			maxPackets := int64(len(data))/32 + 4
-			var pkt container.Packet
-			firstPTS := int64(-1)
-			for i := int64(0); ; i++ {
-				if i > maxPackets {
-					t.Fatalf("more than %d packets from %d bytes", maxPackets, len(data))
-				}
-				err := d.ReadPacket(&pkt)
-				if errors.Is(err, io.EOF) {
-					break
-				}
-				if err != nil {
-					break
-				}
-				if pkt.Dur <= 0 || len(pkt.Data) == 0 {
-					t.Fatal("empty packet must be EOF or error")
-				}
-				if firstPTS < 0 {
-					firstPTS = pkt.PTS
-				}
-			}
-			for _, target := range []int64{0, 1000, 1 << 40} {
-				landed, err := d.SeekSample(context.Background(), 0, target)
-				if err != nil || firstPTS < 0 {
-					// Errors are fine; so is any landing when no packet was
-					// ever readable (reads after the seek just hit EOF).
-					continue
-				}
-				// Landing past the target is only legitimate when the stream
-				// itself starts after it.
-				if landed > max(target, firstPTS) {
-					t.Fatalf("seek to %d landed at %d (stream starts at %d)", target, landed, firstPTS)
-				}
-			}
-		}
+			MaxPackets: func(raw []byte) int64 { return int64(len(raw))/32 + 4 },
+			Targets:    []int64{0, 1000, 1 << 40},
+			// Landing past the target is only legitimate when the stream
+			// itself starts after it.
+			LateLanding: true,
+		}.Run(t, data)
 	})
 }

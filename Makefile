@@ -138,12 +138,15 @@ FUZZTIME ?= 30s
 fuzz:
 	./scripts/fuzz.sh $(FUZZTIME)
 
-# Regenerate muxer golden files. Review the diff before committing.
+# Regenerate the golden files: the muxers' bytes, and the server's two tables
+# (the cache keys it builds, what it answers to an encoder knob). Review the
+# diff before committing.
 goldens:
 	go test -run TestGolden ./container/riff ./container/aiff ./container/flacn ./container/mpa \
 		./container/mka ./container/mp4 ./container/ogg ./container/wv ./container/apen ./container/adts -update
 	go test -run TestGoldenSegments ./tests -update
 	cd oracletest && go test -run TestGoldenM4BChapters . -update
+	go test -run 'TestGolden(CacheKeys|KnobAnswers)$$' ./server -update
 
 # Decode/encode throughput; the x-realtime metric is judged against the
 # per-codec floors in docs/quality-gates.md.

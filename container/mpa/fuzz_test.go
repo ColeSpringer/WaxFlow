@@ -1,15 +1,13 @@
 package mpa_test
 
 import (
-	"context"
-	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/mpa"
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
 func fixture(f *testing.F, name string) []byte {
@@ -33,47 +31,14 @@ func FuzzDemux(f *testing.F) {
 	f.Add([]byte("ID3\x04\x00\x00\x00\x00\x00\x0a0123456789\xff\xfb\x90\x64"))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		for _, strict := range []bool{false, true} {
-			d, err := mpa.NewDemuxer(container.BytesSource(data), &mpa.DemuxerOptions{Strict: strict})
-			if err != nil {
-				continue
-			}
-			track := d.Tracks()[0]
-			if err := track.Fmt.Valid(); err != nil {
-				t.Fatalf("accepted track with invalid format: %v", err)
-			}
+		testutil.DemuxFuzz{
+			Open: func(src container.Source, strict bool) (container.Demuxer, error) {
+				return mpa.NewDemuxer(src, &mpa.DemuxerOptions{Strict: strict})
+			},
 			// The smallest Layer III frame is 24 bytes (8 kbit/s at
 			// 24 kHz), so packet production is bounded by the input.
-			maxPackets := int64(len(data))/24 + 4
-			var pkt container.Packet
-			firstPTS := int64(-1)
-			for i := int64(0); ; i++ {
-				if i > maxPackets {
-					t.Fatalf("more than %d packets from %d bytes", maxPackets, len(data))
-				}
-				err := d.ReadPacket(&pkt)
-				if errors.Is(err, io.EOF) {
-					break
-				}
-				if err != nil {
-					break
-				}
-				if pkt.Dur <= 0 || len(pkt.Data) == 0 {
-					t.Fatal("empty packet must be EOF or error")
-				}
-				if firstPTS < 0 {
-					firstPTS = pkt.PTS
-				}
-			}
-			for _, target := range []int64{0, 1000, 1 << 40} {
-				landed, err := d.SeekSample(context.Background(), 0, target)
-				if err != nil {
-					continue
-				}
-				if landed > target {
-					t.Fatalf("seek to %d landed at %d", target, landed)
-				}
-			}
-		}
+			MaxPackets: func(raw []byte) int64 { return int64(len(raw))/24 + 4 },
+			Targets:    []int64{0, 1000, 1 << 40},
+		}.Run(t, data)
 	})
 }

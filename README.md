@@ -375,7 +375,7 @@ make soak            # 30m streaming soak + load + TTFA percentiles (nightly-sca
 make client-e2e      # browser client-matrix cells via Playwright (gated tooling)
 make docker          # local image build
 make verify-vectors  # fetch SHA-256-pinned conformance vectors (CI-cached)
-make goldens         # regenerate muxer golden files (review the diff)
+make goldens         # regenerate golden files (review the diff)
 ```
 
 - Architecture invariants live in [docs/adr/](docs/adr/README.md). Read

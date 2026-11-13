@@ -11,6 +11,7 @@ import (
 
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/asf"
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
 // FuzzDemux asserts the hostile-input invariants on arbitrary bytes: no
@@ -43,110 +44,90 @@ func FuzzDemux(f *testing.F) {
 	f.Add(guidHeader)
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		for _, strict := range []bool{false, true} {
-			d, err := asf.NewDemuxer(container.BytesSource(data), &asf.DemuxerOptions{Strict: strict})
-			if err != nil {
-				continue
-			}
-			track := d.Tracks()[0]
-			if err := track.Fmt.Valid(); err != nil {
-				t.Fatalf("accepted track with invalid format: %v", err)
-			}
-			if track.SamplesExact {
-				t.Fatal("ASF states milliseconds; no track from it is sample-exact before a walk")
-			}
-			// The Chapterer contract: start order, the start-only form, no
-			// negative time, and a list the cap bounds.
-			chs := d.Chapters()
-			if len(chs) > 1<<16 {
-				t.Fatalf("%d chapters from %d bytes", len(chs), len(data))
-			}
-			for i, ch := range chs {
-				if ch.Start < 0 || ch.End != 0 || (i > 0 && ch.Start < chs[i-1].Start) {
-					t.Fatalf("chapter %d = %+v breaks the Chapterer contract", i, ch)
-				}
-			}
+		targets := []int64{0, 1000, 1 << 40}
+		testutil.DemuxFuzz{
+			Open: func(src container.Source, strict bool) (container.Demuxer, error) {
+				return asf.NewDemuxer(src, &asf.DemuxerOptions{Strict: strict})
+			},
 			// A media object needs at least a length byte and a byte of its
 			// own, so production is bounded by the input either way.
-			maxPackets := int64(len(data))/2 + 8
-			var pkt container.Packet
-			firstPTS := int64(-1)
-			var readErr error
-			for i := int64(0); ; i++ {
-				if i > maxPackets {
-					t.Fatalf("more than %d packets from %d bytes", maxPackets, len(data))
+			MaxPackets: func(raw []byte) int64 { return int64(len(raw))/2 + 8 },
+			Targets:    targets,
+			// Landing past the target is only legitimate when the stream
+			// itself starts after it.
+			LateLanding: true,
+			Opened: func(t testing.TB, dm container.Demuxer, _ bool) {
+				d := dm.(*asf.Demuxer)
+				if d.Tracks()[0].SamplesExact {
+					t.Fatal("ASF states milliseconds; no track from it is sample-exact before a walk")
 				}
-				if readErr = d.ReadPacket(&pkt); readErr != nil {
-					break
+				// The Chapterer contract: start order, the start-only form, no
+				// negative time, and a list the cap bounds.
+				chs := d.Chapters()
+				if len(chs) > 1<<16 {
+					t.Fatalf("%d chapters from %d bytes", len(chs), len(data))
 				}
-				if pkt.Dur <= 0 || len(pkt.Data) == 0 {
-					t.Fatal("empty packet must be EOF or error")
+				for i, ch := range chs {
+					if ch.Start < 0 || ch.End != 0 || (i > 0 && ch.Start < chs[i-1].Start) {
+						t.Fatalf("chapter %d = %+v breaks the Chapterer contract", i, ch)
+					}
 				}
-				if firstPTS < 0 {
-					firstPTS = pkt.PTS
-				}
-			}
+			},
 			// A read to the end counts what a walk counts: a second open that
 			// walks settles the same length, and the two counts snapshot alike.
-			if errors.Is(readErr, io.EOF) {
+			Read: func(t testing.TB, dm container.Demuxer, strict bool, end error) {
+				if !errors.Is(end, io.EOF) {
+					return
+				}
+				d := dm.(*asf.Demuxer)
 				w, err := asf.NewDemuxer(container.BytesSource(data), &asf.DemuxerOptions{Strict: strict})
 				if err != nil {
 					t.Fatalf("a second open of the same bytes failed: %v", err)
 				}
-				if w.Walk(context.Background()) == nil {
-					a, b := d.Tracks()[0], w.Tracks()[0]
-					if a.Samples != b.Samples || a.SamplesExact != b.SamplesExact {
-						t.Fatalf("a read to the end settled %d (exact %v), a walk %d (exact %v)",
-							a.Samples, a.SamplesExact, b.Samples, b.SamplesExact)
+				if w.Walk(context.Background()) != nil {
+					return
+				}
+				a, b := d.Tracks()[0], w.Tracks()[0]
+				if a.Samples != b.Samples || a.SamplesExact != b.SamplesExact {
+					t.Fatalf("a read to the end settled %d (exact %v), a walk %d (exact %v)",
+						a.Samples, a.SamplesExact, b.Samples, b.SamplesExact)
+				}
+				if sa, sb := d.IndexSnapshot(), w.IndexSnapshot(); sa != nil && sb != nil && !bytes.Equal(sa, sb) {
+					t.Fatal("a read to the end and a walk took different counts")
+				}
+			},
+			After: func(t testing.TB, _ []byte, dm container.Demuxer, strict bool) {
+				d := dm.(*asf.Demuxer)
+				if err := d.Walk(context.Background()); err != nil {
+					return
+				}
+				if !d.Walked() {
+					t.Fatal("a walk that returned nil is not walked")
+				}
+				if tr := d.Tracks()[0]; tr.SamplesExact && (tr.Samples < 0 || tr.SamplesAdvisory) {
+					t.Fatalf("the walk settled %d samples, exact %v advisory %v", tr.Samples, tr.SamplesExact, tr.SamplesAdvisory)
+				}
+				blob := d.IndexSnapshot()
+				if blob == nil {
+					return
+				}
+				// A restore of its own snapshot, accepted or refused, lands
+				// where the count it was taken from does.
+				e, err := asf.NewDemuxer(container.BytesSource(data), &asf.DemuxerOptions{Strict: strict})
+				if err != nil {
+					t.Fatalf("a second open of the same bytes failed: %v", err)
+				}
+				e.RestoreIndex(blob)
+				for _, target := range targets {
+					want, errD := d.SeekSample(context.Background(), 0, target)
+					got, errE := e.SeekSample(context.Background(), 0, target)
+					if (errD == nil) != (errE == nil) || got != want {
+						t.Fatalf("seek to %d: the restored count landed at %d (%v), the walked one at %d (%v)",
+							target, got, errE, want, errD)
 					}
-					if sa, sb := d.IndexSnapshot(), w.IndexSnapshot(); sa != nil && sb != nil && !bytes.Equal(sa, sb) {
-						t.Fatal("a read to the end and a walk took different counts")
-					}
 				}
-			}
-			targets := []int64{0, 1000, 1 << 40}
-			for _, target := range targets {
-				landed, err := d.SeekSample(context.Background(), 0, target)
-				if err != nil || firstPTS < 0 {
-					// Errors are fine; so is any landing when no packet was
-					// ever readable (reads after the seek just hit EOF).
-					continue
-				}
-				// Landing past the target is only legitimate when the stream
-				// itself starts after it.
-				if landed > max(target, firstPTS) {
-					t.Fatalf("seek to %d landed at %d (stream starts at %d)", target, landed, firstPTS)
-				}
-			}
-			if err := d.Walk(context.Background()); err != nil {
-				continue
-			}
-			if !d.Walked() {
-				t.Fatal("a walk that returned nil is not walked")
-			}
-			if tr := d.Tracks()[0]; tr.SamplesExact && (tr.Samples < 0 || tr.SamplesAdvisory) {
-				t.Fatalf("the walk settled %d samples, exact %v advisory %v", tr.Samples, tr.SamplesExact, tr.SamplesAdvisory)
-			}
-			blob := d.IndexSnapshot()
-			if blob == nil {
-				continue
-			}
-			// A restore of its own snapshot, accepted or refused, lands
-			// where the count it was taken from does.
-			e, err := asf.NewDemuxer(container.BytesSource(data), &asf.DemuxerOptions{Strict: strict})
-			if err != nil {
-				t.Fatalf("a second open of the same bytes failed: %v", err)
-			}
-			e.RestoreIndex(blob)
-			for _, target := range targets {
-				want, errD := d.SeekSample(context.Background(), 0, target)
-				got, errE := e.SeekSample(context.Background(), 0, target)
-				if (errD == nil) != (errE == nil) || got != want {
-					t.Fatalf("seek to %d: the restored count landed at %d (%v), the walked one at %d (%v)",
-						target, got, errE, want, errD)
-				}
-			}
-		}
+			},
+		}.Run(t, data)
 	})
 }
 

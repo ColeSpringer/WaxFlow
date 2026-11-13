@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
 func fixture(t testing.TB, name string) []byte {
@@ -45,42 +46,30 @@ func FuzzDemux(f *testing.F) {
 	f.Add([]byte{0x1A, 0x45, 0xDF, 0xA3, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF})
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		for _, strict := range []bool{false, true} {
-			d, err := NewDemuxer(container.BytesSource(data), &DemuxerOptions{Strict: strict})
-			if err != nil {
-				continue
-			}
-			tracks := d.Tracks()
-			if len(tracks) != 1 {
-				t.Fatalf("accepted input with %d tracks", len(tracks))
-			}
-			if err := tracks[0].Fmt.Valid(); err != nil {
-				t.Fatalf("accepted track with invalid format: %v", err)
-			}
-
-			// Every packet consumes input, so the count is bounded by the size.
-			maxPackets := len(data) + 16
-			var pkt container.Packet
-			// rawDur is every frame's own length; kept is what the packets
-			// deliver, which is the timeline they are stamped on; lastPad and
-			// lastDur describe the final packet, whose trim is the only one
-			// that stays inside the run. inner is every earlier packet's trim
-			// with its place on the raw timeline, which is what a walk records.
-			var rawDur, kept, lastPad, lastDur int64
-			var inner []container.PacketTrim
-			clean := false
-			for range maxPackets {
-				err := d.ReadPacket(&pkt)
-				if errors.Is(err, io.EOF) {
-					clean = true
-					break
-				}
-				if err != nil {
-					break
-				}
-				if pkt.Dur < 0 {
-					t.Fatalf("packet with negative duration %d", pkt.Dur)
-				}
+		// rawDur is every frame's own length; kept is what the packets
+		// deliver, which is the timeline they are stamped on; lastPad and
+		// lastDur describe the final packet, whose trim is the only one
+		// that stays inside the run. inner is every earlier packet's trim
+		// with its place on the raw timeline, which is what a walk records.
+		var rawDur, kept, lastPad, lastDur int64
+		var inner []container.PacketTrim
+		testutil.DemuxFuzz{
+			Open: func(src container.Source, strict bool) (container.Demuxer, error) {
+				return NewDemuxer(src, &DemuxerOptions{Strict: strict})
+			},
+			// Every packet consumes input, so the size bounds the count. This
+			// target stops reading at the cap and does not fail there.
+			MaxPackets:  func(raw []byte) int64 { return int64(len(raw)) + 16 },
+			CapNotFatal: true,
+			// A block may hold a frame of no bytes, and a frame of no samples.
+			EmptyData: true,
+			ZeroDur:   true,
+			// Seeks land at or before the target (or at the earliest sync point).
+			Targets: []int64{0, 1, 1000, 1 << 20, 1 << 40},
+			Opened: func(testing.TB, container.Demuxer, bool) {
+				rawDur, kept, lastPad, lastDur, inner = 0, 0, 0, 0, nil
+			},
+			Packet: func(t testing.TB, pkt *container.Packet) {
 				if pkt.Padding < 0 {
 					t.Fatalf("packet with negative padding %d", pkt.Padding)
 				}
@@ -90,8 +79,7 @@ func FuzzDemux(f *testing.F) {
 				rawDur += pkt.Dur
 				kept += pkt.Dur - min(pkt.Padding, pkt.Dur)
 				lastPad, lastDur = pkt.Padding, pkt.Dur
-			}
-
+			},
 			// A read that reached the end inside the bound saw the whole
 			// payload, so a fresh demuxer's finished walk must settle on
 			// exactly what those packets add up to: the walk and the read
@@ -99,53 +87,46 @@ func FuzzDemux(f *testing.F) {
 			//
 			// excess is a final trim past its own frame, which no frame can
 			// absorb and only the settled length can remove.
-			if clean && !strict {
+			Read: func(t testing.TB, _ container.Demuxer, strict bool, end error) {
+				if !errors.Is(end, io.EOF) || strict {
+					return
+				}
 				w, err := NewDemuxer(container.BytesSource(data), nil)
-				if err == nil && w.Walk(context.Background()) == nil && w.Walked() {
-					tr := w.Tracks()[0]
-					rawTotal := kept + min(lastPad, lastDur)
-					excess := lastPad - min(lastPad, lastDur)
-					if want := max(kept-tr.Delay-excess, 0); tr.Samples != want {
-						t.Fatalf("walk settled %d, the packets hold %d (kept %d, delay %d, final trim %d of %d)",
-							tr.Samples, want, kept, tr.Delay, lastPad, lastDur)
+				if err != nil || w.Walk(context.Background()) != nil || !w.Walked() {
+					return
+				}
+				tr := w.Tracks()[0]
+				rawTotal := kept + min(lastPad, lastDur)
+				excess := lastPad - min(lastPad, lastDur)
+				if want := max(kept-tr.Delay-excess, 0); tr.Samples != want {
+					t.Fatalf("walk settled %d, the packets hold %d (kept %d, delay %d, final trim %d of %d)",
+						tr.Samples, want, kept, tr.Delay, lastPad, lastDur)
+				}
+				// A trim can never exceed the run it trims, however much
+				// the file's DiscardPaddings add up to, and a settled
+				// length can never exceed the samples the walk counted.
+				if want := min(lastPad, rawTotal); tr.Padding != want {
+					t.Fatalf("settled padding %d, want the final packet's trim bounded by the run (%d)",
+						tr.Padding, want)
+				}
+				if tr.Samples < 0 || tr.Samples > rawDur {
+					t.Fatalf("settled length %d against a raw run of %d", tr.Samples, rawDur)
+				}
+				// The inner trims are real frames the packets held, so
+				// their sum cannot exceed what the frames decode to, and
+				// the walk places each one where the read met it.
+				if tr.MidPadding < 0 || tr.MidPadding > rawDur {
+					t.Fatalf("settled mid padding %d against a raw run of %d", tr.MidPadding, rawDur)
+				}
+				if len(inner) <= maxMidTrims {
+					if !slices.Equal(tr.MidTrims, inner) {
+						t.Fatalf("walk recorded trims %v, the packets carried %v", tr.MidTrims, inner)
 					}
-					// A trim can never exceed the run it trims, however much
-					// the file's DiscardPaddings add up to, and a settled
-					// length can never exceed the samples the walk counted.
-					if want := min(lastPad, rawTotal); tr.Padding != want {
-						t.Fatalf("settled padding %d, want the final packet's trim bounded by the run (%d)",
-							tr.Padding, want)
-					}
-					if tr.Samples < 0 || tr.Samples > rawDur {
-						t.Fatalf("settled length %d against a raw run of %d", tr.Samples, rawDur)
-					}
-					// The inner trims are real frames the packets held, so
-					// their sum cannot exceed what the frames decode to, and
-					// the walk places each one where the read met it.
-					if tr.MidPadding < 0 || tr.MidPadding > rawDur {
-						t.Fatalf("settled mid padding %d against a raw run of %d", tr.MidPadding, rawDur)
-					}
-					if len(inner) <= maxMidTrims {
-						if !slices.Equal(tr.MidTrims, inner) {
-							t.Fatalf("walk recorded trims %v, the packets carried %v", tr.MidTrims, inner)
-						}
-						if !tr.MidTrimsComplete() {
-							t.Fatalf("walk recorded trims %v, which do not add up to MidPadding %d", tr.MidTrims, tr.MidPadding)
-						}
+					if !tr.MidTrimsComplete() {
+						t.Fatalf("walk recorded trims %v, which do not add up to MidPadding %d", tr.MidTrims, tr.MidPadding)
 					}
 				}
-			}
-
-			// Seeks land at or before the target (or at the earliest sync point).
-			for _, target := range []int64{0, 1, 1000, 1 << 20, 1 << 40} {
-				landed, err := d.SeekSample(context.Background(), 0, target)
-				if err != nil {
-					continue
-				}
-				if landed > target {
-					t.Fatalf("seek to %d overshot to %d", target, landed)
-				}
-			}
-		}
+			},
+		}.Run(t, data)
 	})
 }

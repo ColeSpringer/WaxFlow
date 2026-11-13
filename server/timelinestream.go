@@ -55,7 +55,7 @@ func (s *Server) serveTimelineStream(w http.ResponseWriter, r *http.Request, q u
 	// The digest is the identity, as for a timeline's HLS variants, whose
 	// canonical params carry an hls prefix this key space lacks.
 	identity := "tl:" + p.tl
-	key := cache.NewKey(identity, ts.canonical, ts.plan.Versions)
+	key := s.newKey("timeline", rungName(rungTranscode), identity, ts.canonical, ts.plan.Versions)
 	meta := cache.Meta{
 		Ref:         identity,
 		Identity:    identity,

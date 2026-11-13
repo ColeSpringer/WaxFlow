@@ -56,6 +56,13 @@ func (s *Server) GateAfterFlight(gate func()) { s.hooks.afterFlight = gate }
 // first request.
 func (s *Server) GateHLSPublish(gate func(ctx context.Context, n int64)) { s.hooks.hlsPublish = gate }
 
+// OnKey reports every cache key as it is built: the surface, the ladder rung
+// taken, and the identity, canonical parameter string and version terms it
+// hashes. Set it before the first request.
+func (s *Server) OnKey(fn func(surface, rung, identity, canonical string, versions []string)) {
+	s.hooks.keyed = fn
+}
+
 // Metrics exposes the internal counter set to the test package. It
 // lives here rather than on the public API because its type is
 // internal/metrics, which external callers cannot name (the v1.0

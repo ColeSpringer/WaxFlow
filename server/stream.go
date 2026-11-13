@@ -59,7 +59,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	plan := req.plan
 
-	key := cache.NewKey(identityString(req.p.src, req.src.ID), req.canonical, plan.Versions)
+	key := s.newKey("stream", rungName(req.rung()), identityString(req.p.src, req.src.ID), req.canonical, plan.Versions)
 	meta := cache.Meta{
 		Ref:      source.Ref(req.p.src).Text(),
 		Identity: req.src.ID.String(),
@@ -197,11 +197,15 @@ const (
 // rung reports which ladder rung planTranscode chose for this request. It reads
 // the two plan pointers the shared back half set, so the pipeline cannot drift
 // from the plan the cache key and response headers were built from.
-func (req *streamRequest) rung() rung {
+func (req *streamRequest) rung() rung { return rungOf(req.remux != nil, req.cut != nil) }
+
+// rungOf is the rung a plan took, from which of its two copy plans is set. A
+// plan holds at most one.
+func rungOf(remux, cut bool) rung {
 	switch {
-	case req.remux != nil:
+	case remux:
 		return rungRemux
-	case req.cut != nil:
+	case cut:
 		return rungCut
 	default:
 		return rungTranscode
@@ -419,7 +423,7 @@ func (s *Server) transcodeSpan(ctx context.Context, src *source.File, hint strin
 func (s *Server) serveDirect(w http.ResponseWriter, r *http.Request, req *streamRequest, reqStart time.Time) {
 	s.met.DirectPlays.Add(1)
 	w.Header().Set("Content-Type", format.MediaTypeFor(req.info.Container))
-	w.Header().Set("ETag", `"`+directETag(req.src)+`"`)
+	w.Header().Set("ETag", `"`+s.directETag("stream", req.src)+`"`)
 	setDurationHeader(w, req.track.Samples, req.track.Fmt.Rate)
 	s.met.TTFB.Observe(time.Since(reqStart).Seconds())
 	http.ServeContent(w, r, "", req.src.ModTime(), req.src.ReadSeeker())
@@ -720,9 +724,12 @@ func checkIdentity(p *streamParams, sigAuthed bool, f *source.File) error {
 }
 
 // directETag derives the strong ETag for original bytes from the source
-// identity (ADR-0003: identity is what pins bytes).
-func directETag(f *source.File) string {
-	sum := cache.NewKey(identityString(f.Ref, f.ID), "direct", nil)
+// identity (ADR-0003: identity is what pins bytes). surface names the caller
+// to a test watching keys.
+func (s *Server) directETag(surface string, f *source.File) string {
+	// "direct" twice: the rung, which has no member in rung because no
+	// pipeline runs it, and the parameters, of which original bytes have none.
+	sum := s.newKey(surface, "direct", identityString(f.Ref, f.ID), "direct", nil)
 	return string(sum[:32])
 }
 

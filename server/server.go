@@ -136,8 +136,10 @@ type Config struct {
 	// the live minimal-tag passthrough, tag-based gain resolution, and
 	// the job post-pass. The implementation is internal (waxlabel stays
 	// out of the depcheck-enforced public tree), so only the waxflow CLI
-	// can construct one; embedders leave it nil, which disables metadata
-	// passthrough and resolves tag-based gain to 0 dB.
+	// can construct one. Embedders leave it nil, and the tags are then the
+	// ones the source's demuxer parses (container.Tagger: MP4, WavPack,
+	// Monkey's Audio, ASF, Musepack). A FLAC, Ogg, MP3 or Matroska source
+	// then passes no tags through and resolves tag-based gain to 0 dB.
 	Meta meta.Mapper
 
 	// LiveSlots and JobSlots size the admission pools; 0 means
@@ -240,10 +242,24 @@ type Server struct {
 // testHooks let a test hold a pipeline in place. pipelineDst wraps the cache
 // entry a progressive pipeline writes; hlsPublish runs before a variant worker
 // publishes segment n, with the worker's context.
+//
+// keyed sees each cache key as it is built: the surface, the ladder rung
+// taken, and the three terms hashed (identity, parameters, versions).
 type testHooks struct {
 	pipelineDst func(io.Writer) io.Writer
 	hlsPublish  func(ctx context.Context, n int64)
 	afterFlight func()
+	keyed       func(surface, rung, identity, canonical string, versions []string)
+}
+
+// newKey is cache.NewKey, shown to a test watching keys (testHooks.keyed).
+// Every key the server builds comes through it, so what a test sees is what
+// was hashed.
+func (s *Server) newKey(surface, rung, identity, canonical string, versions []string) cache.Key {
+	if fn := s.hooks.keyed; fn != nil {
+		fn(surface, rung, identity, canonical, versions)
+	}
+	return cache.NewKey(identity, canonical, versions)
 }
 
 // New validates cfg and builds a Server. The fail-closed rule is enforced

@@ -926,7 +926,7 @@ func (s *Server) handleArt(w http.ResponseWriter, r *http.Request) {
 		mime = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", mime)
-	w.Header().Set("ETag", `"`+directETag(req.src)+`-art"`)
+	w.Header().Set("ETag", `"`+s.directETag("art", req.src)+`-art"`)
 	http.ServeContent(w, r, "", req.src.ModTime(), bytes.NewReader(pic.Data))
 }
 
@@ -947,7 +947,7 @@ func (s *Server) handleLyrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("ETag", `"`+directETag(req.src)+`-lyrics"`)
+	w.Header().Set("ETag", `"`+s.directETag("lyrics", req.src)+`-lyrics"`)
 	http.ServeContent(w, r, "", req.src.ModTime(), strings.NewReader(text))
 }
 

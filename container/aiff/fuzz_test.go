@@ -2,8 +2,6 @@ package aiff
 
 import (
 	"context"
-	"errors"
-	"io"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
@@ -11,6 +9,7 @@ import (
 	"github.com/colespringer/waxflow/codec/adpcm"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
 // minMPEGFrame is the smallest compliant Layer III frame (8 kbit/s at
@@ -64,64 +63,58 @@ func FuzzDemux(f *testing.F) {
 	f.Add(buildAIFCrate("ms\x00\x55", mp3Channels, 16, mp3Rate, mp3Payload(), mp3FrameCount))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		for _, strict := range []bool{false, true} {
-			d, err := NewDemuxer(container.BytesSource(data), &DemuxerOptions{Strict: strict})
-			if err != nil {
-				continue
-			}
-			track := d.Tracks()[0]
-			if err := track.Fmt.Valid(); err != nil {
-				t.Fatalf("accepted track with invalid format: %v", err)
-			}
-			// Unknown is the one negative length a track may state, and only
-			// where nothing in the file counted the samples: a frame run with
-			// no metadata frame at the head of it.
-			units, byUnits := d.payload.(*blockReader)
-			if track.Samples < 0 && (byUnits || track.Samples != -1) {
-				t.Fatalf("accepted track with sample count %d", track.Samples)
-			}
-			maxPackets := int64(len(data))/int64(audio.StandardChunk) + 2
-			if !byUnits {
-				maxPackets = int64(len(data))/minMPEGFrame + 2 // one frame per packet
-			}
-			var pkt container.Packet
-			var got int64
-			for i := int64(0); ; i++ {
-				if i > maxPackets {
-					t.Fatalf("demuxer produced more than %d packets from %d bytes", maxPackets, len(data))
+		// What the open stated, and what the read added up to.
+		var (
+			track   container.Track
+			units   *blockReader
+			byUnits bool
+			got     int64
+		)
+		testutil.DemuxFuzz{
+			Open: func(src container.Source, strict bool) (container.Demuxer, error) {
+				return NewDemuxer(src, &DemuxerOptions{Strict: strict})
+			},
+			Opened: func(t testing.TB, d container.Demuxer, _ bool) {
+				track, got = d.Tracks()[0], 0
+				// Unknown is the one negative length a track may state, and only
+				// where nothing in the file counted the samples: a frame run with
+				// no metadata frame at the head of it.
+				units, byUnits = d.(*Demuxer).payload.(*blockReader)
+				if track.Samples < 0 && (byUnits || track.Samples != -1) {
+					t.Fatalf("accepted track with sample count %d", track.Samples)
 				}
-				err := d.ReadPacket(&pkt)
-				if errors.Is(err, io.EOF) {
-					break
+			},
+			MaxPackets: func(raw []byte) int64 {
+				if !byUnits {
+					return int64(len(raw))/minMPEGFrame + 2 // one frame per packet
 				}
-				if err != nil {
-					break
+				return int64(len(raw))/int64(audio.StandardChunk) + 2
+			},
+			Packet: func(_ testing.TB, pkt *container.Packet) { got += pkt.Dur },
+			Read: func(t testing.TB, dm container.Demuxer, strict bool, _ error) {
+				d := dm.(*Demuxer)
+				if byUnits {
+					// The walk delivers whole UNITS, and for ima4 a unit is 64
+					// samples, so what is bounded is the payload rather than the
+					// declared length; COMM counts units, so the two agree here,
+					// and the check is written against the payload anyway because
+					// that is the property (no unbounded production from bounded
+					// input).
+					capacity := units.units * units.unitFrames
+					if got > capacity {
+						t.Fatalf("read %d samples from a payload holding %d", got, capacity)
+					}
+					if track.Samples > capacity {
+						t.Fatalf("track declares %d samples from a payload holding %d", track.Samples, capacity)
+					}
 				}
-				if pkt.Dur <= 0 || len(pkt.Data) == 0 {
-					t.Fatal("empty packet must be EOF or error")
+				// Seeking anywhere legal must land at or before the target: on a
+				// unit boundary where units are what the payload holds, at zero
+				// for a decoder whose state crosses units, and on the frame the
+				// reservoir backoff reaches for a frame run.
+				if track.Samples <= 0 {
+					return
 				}
-				got += pkt.Dur
-			}
-			if byUnits {
-				// The walk delivers whole UNITS, and for ima4 a unit is 64
-				// samples, so what is bounded is the payload rather than the
-				// declared length; COMM counts units, so the two agree here,
-				// and the check is written against the payload anyway because
-				// that is the property (no unbounded production from bounded
-				// input).
-				capacity := units.units * units.unitFrames
-				if got > capacity {
-					t.Fatalf("read %d samples from a payload holding %d", got, capacity)
-				}
-				if track.Samples > capacity {
-					t.Fatalf("track declares %d samples from a payload holding %d", track.Samples, capacity)
-				}
-			}
-			// Seeking anywhere legal must land at or before the target: on a
-			// unit boundary where units are what the payload holds, at zero
-			// for a decoder whose state crosses units, and on the frame the
-			// reservoir backoff reaches for a frame run.
-			if track.Samples > 0 {
 				target := track.Samples / 2
 				landed, err := d.SeekSample(context.Background(), 0, target)
 				if err != nil {
@@ -134,7 +127,7 @@ func FuzzDemux(f *testing.F) {
 					if byUnits || !strict {
 						t.Fatalf("SeekSample(%d): %v", target, err)
 					}
-					continue
+					return
 				}
 				if landed > target {
 					t.Fatalf("SeekSample(%d) landed at %d", target, landed)
@@ -145,7 +138,7 @@ func FuzzDemux(f *testing.F) {
 				case byUnits && !d.carryState && landed != target/units.unitFrames*units.unitFrames:
 					t.Fatalf("SeekSample(%d) = %d, want the unit boundary at or before it", target, landed)
 				}
-			}
-		}
+			},
+		}.Run(t, data)
 	})
 }

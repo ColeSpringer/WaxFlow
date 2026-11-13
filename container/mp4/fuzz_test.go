@@ -3,14 +3,13 @@ package mp4
 import (
 	"bytes"
 	"context"
-	"errors"
-	"io"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/adpcm"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
 // FuzzDemux is the mp4 box parser's fuzz target. The box tree is the
@@ -116,69 +115,39 @@ func FuzzDemux(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		for _, strict := range []bool{false, true} {
-			d, err := NewDemuxer(container.BytesSource(data), &DemuxerOptions{Strict: strict})
-			if err != nil {
-				continue
-			}
-			tracks := d.Tracks()
-			if len(tracks) != 1 {
-				t.Fatalf("accepted input with %d tracks", len(tracks))
-			}
-			if err := tracks[0].Fmt.Valid(); err != nil {
-				t.Fatalf("accepted track with invalid format: %v", err)
-			}
-
-			// The walk reads the moof headers and settles the length, so it is
-			// on the fuzzed path with the read. Its error is a refusal, not a
-			// crash, and a settled track still has to describe itself.
-			if err := d.Walk(context.Background()); err == nil {
-				tr := d.Tracks()[0]
-				if tr.SamplesExact && tr.SamplesAdvisory {
-					t.Fatal("a settled track is both exact and advisory")
-				}
-				if tr.Samples < -1 {
-					t.Fatalf("a settled track reports %d samples", tr.Samples)
-				}
-			}
-
+		testutil.DemuxFuzz{
+			Open: func(src container.Source, strict bool) (container.Demuxer, error) {
+				return NewDemuxer(src, &DemuxerOptions{Strict: strict})
+			},
 			// A generous safety cap so a bug that failed to terminate is caught,
 			// not a tight bound: a fragmented trun may declare zero-size samples
 			// (each capped per fragment at maxSamplesPerFragment), so the true
 			// packet count is not bounded by the byte size. Reading a prefix
 			// still exercises the Dur>0 and no-crash invariants on every packet.
-			maxPackets := int(d.size) + maxSamplesPerFragment + 8
-			var pkt container.Packet
-			firstPTS := int64(-1)
-			for range maxPackets {
-				err := d.ReadPacket(&pkt)
-				if errors.Is(err, io.EOF) {
-					break
-				}
-				if err != nil {
-					break
-				}
-				if pkt.Dur <= 0 {
-					t.Fatalf("packet with non-positive duration %d", pkt.Dur)
-				}
-				if firstPTS < 0 {
-					firstPTS = pkt.PTS
-				}
-			}
-
+			MaxPackets:  func(raw []byte) int64 { return int64(len(raw)) + maxSamplesPerFragment + 8 },
+			CapNotFatal: true,
+			EmptyData:   true,
+			Targets:     []int64{0, 1, 1000, 1 << 20, 1 << 40},
 			// A landing past the target is legitimate only when the stream
 			// itself starts after it, which container.Seeker allows and a
 			// crafted tfdt produces: the fragments can begin anywhere.
-			for _, target := range []int64{0, 1, 1000, 1 << 20, 1 << 40} {
-				landed, err := d.SeekSample(context.Background(), 0, target)
-				if err != nil || firstPTS < 0 {
-					continue
+			LateLanding: true,
+			// The walk reads the moof headers and settles the length, so it is
+			// on the fuzzed path with the read. Its error is a refusal, not a
+			// crash, and a settled track still has to describe itself.
+			Opened: func(t testing.TB, dm container.Demuxer, _ bool) {
+				d := dm.(*Demuxer)
+				if err := d.Walk(context.Background()); err == nil {
+					tr := d.Tracks()[0]
+					if tr.SamplesExact && tr.SamplesAdvisory {
+						t.Fatal("a settled track is both exact and advisory")
+					}
+					if tr.Samples < -1 {
+						t.Fatalf("a settled track reports %d samples", tr.Samples)
+					}
 				}
-				if landed > max(target, firstPTS) {
-					t.Fatalf("seek to %d landed at %d (the stream starts at %d)", target, landed, firstPTS)
-				}
-			}
-		}
+			},
+		}.Run(t, data)
 	})
 }
 

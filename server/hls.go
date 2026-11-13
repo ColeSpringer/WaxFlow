@@ -130,6 +130,10 @@ type variantPlan struct {
 	cut *waxflow.CutSegmentPlan
 }
 
+// rung reports which ladder rung planned this variant. The key, the init
+// segment and the worker all read it.
+func (vp variantPlan) rung() rung { return rungOf(vp.remux != nil, vp.cut != nil) }
+
 func (req *hlsRequest) Close() error {
 	closeAll(req.srcs)
 	req.srcs = nil
@@ -198,7 +202,7 @@ func (s *Server) prepareHLS(r *http.Request) (*hlsRequest, error) {
 	}
 	canonical := canonicalHLSParams(req.plan, req.opts.GainDB, req.opts.Dynamics, descSpan(desc), req.opts.HEAACv2)
 	identity, shown := hlsIdentity(desc, req.members)
-	req.key = cache.NewKey(identity, canonical, req.plan.Versions)
+	req.key = s.newKey("hls", rungName(req.rung()), identity, canonical, req.plan.Versions)
 	req.meta = cache.Meta{
 		Ref:         hlsRef(desc),
 		Identity:    shown,
@@ -933,13 +937,14 @@ func (s *Server) handleHLSInit(w http.ResponseWriter, r *http.Request) {
 // about what describes the segments. A remuxed variant's header carries the
 // source's own sample entry; a transcoded one's carries the encoder's.
 func (s *Server) initSegmentFor(req *hlsRequest) ([]byte, error) {
-	if req.cut != nil {
-		return s.eng.CutInitSegment(req.cut)
-	}
-	if req.remux != nil {
+	switch req.rung() {
+	case rungRemux:
 		return s.eng.RemuxInitSegment(req.remux)
+	case rungCut:
+		return s.eng.CutInitSegment(req.cut)
+	default:
+		return s.eng.InitSegment(req.plan, req.opts)
 	}
-	return s.eng.InitSegment(req.plan, req.opts)
 }
 
 // handleHLSSegment serves one media segment: cache hit, wait on the
@@ -1011,7 +1016,7 @@ func segmentName(n int64) string { return fmt.Sprintf("seg-%d.m4s", n) }
 func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64, func(int64), func(error)) (context.CancelCauseFunc, error) {
 	// The worker outlives the request; capture values, never req.srcs.
 	members, tl := req.members, req.desc.Tl != ""
-	opts, copts, plan, key, rmx, cut := req.opts, req.copts, req.plan, req.key, req.remux, req.cut
+	vp, key := req.variantPlan, req.key
 	sp := descSpan(req.desc)
 	return func(start int64, notify func(int64), exit func(error)) (context.CancelCauseFunc, error) {
 		release, ok := s.pools.AcquireLive()
@@ -1042,7 +1047,7 @@ func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64,
 			// Unpinned only after exit: the manager reads a running worker's
 			// progress as proof its segments are on disk.
 			defer s.store.Unpin(key)
-			err := s.runHLSWorker(ctx, members, tl, sp, copts, opts, plan, rmx, cut, variant, start, notify)
+			err := s.runHLSWorker(ctx, members, tl, sp, vp, variant, start, notify)
 			if err != nil && errors.Is(context.Cause(ctx), hls.ErrIdle) {
 				s.met.AbandonedHLS.Add(1)
 			}
@@ -1162,9 +1167,8 @@ func (s *Server) runHLSCutWorker(ctx context.Context, m memberSource, opts waxfl
 // runHLSWorker is one variant worker: its own input, opened afresh, the init
 // header if the variant lacks one, then segments from start to end of
 // stream, each published atomically and announced.
-func (s *Server) runHLSWorker(ctx context.Context, members []memberSource, tl bool, sp span, copts waxflow.ConcatOptions,
-	opts waxflow.TranscodeOptions, plan *waxflow.SegmentPlan, rmx *waxflow.RemuxSegmentPlan,
-	cut *waxflow.CutSegmentPlan, variant *cache.Variant, start int64, notify func(int64)) error {
+func (s *Server) runHLSWorker(ctx context.Context, members []memberSource, tl bool, sp span, vp variantPlan,
+	variant *cache.Variant, start int64, notify func(int64)) error {
 	publish := func(seg mp4.Segment) error {
 		if gate := s.hooks.hlsPublish; gate != nil {
 			gate(ctx, seg.Index)
@@ -1176,23 +1180,22 @@ func (s *Server) runHLSWorker(ctx context.Context, members []memberSource, tl bo
 		return nil
 	}
 	ref := members[0].Ref
-	// Ladder rung 2, which the plan already chose: the source's own packets,
-	// resegmented. It is passed rather than re-derived so the bytes a worker
-	// writes are the ones the playlist's segment count and the cache key were
-	// computed for.
-	if rmx != nil {
-		return s.logHLSWorker(ctx, ref, rungName(rungRemux), len(members), start,
-			s.runHLSRemuxWorker(ctx, members[0], opts, rmx, variant, start, publish))
+	// The rung is the plan's, passed rather than re-derived, so the bytes a
+	// worker writes are the ones the playlist's segment count and the cache key
+	// were computed for.
+	switch r := vp.rung(); r {
+	case rungRemux:
+		// Ladder rung 2: the source's own packets, resegmented.
+		return s.logHLSWorker(ctx, ref, rungName(r), len(members), start,
+			s.runHLSRemuxWorker(ctx, members[0], vp.opts, vp.remux, variant, start, publish))
+	case rungCut:
+		// Between rung 2 and rung 3: a span whose codec survives being moved.
+		return s.logHLSWorker(ctx, ref, rungName(r), len(members), start,
+			s.runHLSCutWorker(ctx, members[0], vp.opts, sp, vp.cut, variant, start, publish))
+	default:
+		res, err := s.runHLSTranscodeWorker(ctx, members, tl, sp, vp.copts, vp.opts, vp.plan, variant, start, publish)
+		return s.logHLSWorkerResult(ctx, ref, rungName(r), len(members), start, res, err)
 	}
-	// The cut rung, between rung 2 and rung 3, chosen at plan time for a span whose
-	// codec survives being moved. Passed rather than re-derived for the same reason
-	// remux is.
-	if cut != nil {
-		return s.logHLSWorker(ctx, ref, rungName(rungCut), len(members), start,
-			s.runHLSCutWorker(ctx, members[0], opts, sp, cut, variant, start, publish))
-	}
-	res, err := s.runHLSTranscodeWorker(ctx, members, tl, sp, copts, opts, plan, variant, start, publish)
-	return s.logHLSWorkerResult(ctx, ref, rungName(rungTranscode), len(members), start, res, err)
 }
 
 // runHLSTranscodeWorker is one variant worker on rung 3: the input decoded,

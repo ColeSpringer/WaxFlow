@@ -1,0 +1,158 @@
+stream | wav | bare | 200
+stream | wav | bitrate=128 | 415 unsupported-format
+stream | wav | q=high | 415 unsupported-format
+stream | wav | hev2=1 | 415 unsupported-format
+stream | opus | bare | 200
+stream | opus | bitrate=128 | 200
+stream | opus | q=high | 200
+stream | opus | hev2=1 | 415 unsupported-format
+stream | vorbis | bare | 200
+stream | vorbis | bitrate=128 | 200
+stream | vorbis | q=high | 200
+stream | vorbis | hev2=1 | 415 unsupported-format
+stream | aiff | bare | 415 unsupported-format
+stream | aiff | bitrate=128 | 415 unsupported-format
+stream | aiff | q=high | 415 unsupported-format
+stream | aiff | hev2=1 | 415 unsupported-format
+stream | flac | bare | 200
+stream | flac | bitrate=128 | 415 unsupported-format
+stream | flac | q=high | 415 unsupported-format
+stream | flac | hev2=1 | 415 unsupported-format
+stream | mp3 | bare | 200
+stream | mp3 | bitrate=128 | 200
+stream | mp3 | q=high | 200
+stream | mp3 | hev2=1 | 415 unsupported-format
+stream | aac | bare | 200
+stream | aac | bitrate=128 | 200
+stream | aac | q=high | 200
+stream | aac | hev2=1 | 415 unsupported-format
+stream | he-aac | bare | 200
+stream | he-aac | bitrate=128 | 200
+stream | he-aac | q=high | 200
+stream | he-aac | hev2=1 | 200
+stream | alac | bare | 200
+stream | alac | bitrate=128 | 415 unsupported-format
+stream | alac | q=high | 415 unsupported-format
+stream | alac | hev2=1 | 415 unsupported-format
+stream | wavpack | bare | 200
+stream | wavpack | bitrate=128 | 415 unsupported-format
+stream | wavpack | q=high | 415 unsupported-format
+stream | wavpack | hev2=1 | 415 unsupported-format
+stream | ape | bare | 415 unsupported-format
+stream | ape | bitrate=128 | 415 unsupported-format
+stream | ape | q=high | 415 unsupported-format
+stream | ape | hev2=1 | 415 unsupported-format
+stream | auto | bare | 200
+stream | auto | bitrate=128 | 415 unsupported-format
+stream | auto | q=high | 415 unsupported-format
+stream | auto | hev2=1 | 415 unsupported-format
+hls | wav | bare | 415 unsupported-format
+hls | wav | bitrate=128 | 415 unsupported-format
+hls | wav | bitrates=64,96 | 415 unsupported-format
+hls | wav | hev2=1 | 415 unsupported-format
+hls | opus | bare | 200
+hls | opus | bitrate=128 | 200
+hls | opus | bitrates=64,96 | 200
+hls | opus | hev2=1 | 415 unsupported-format
+hls | vorbis | bare | 415 unsupported-format
+hls | vorbis | bitrate=128 | 415 unsupported-format
+hls | vorbis | bitrates=64,96 | 415 unsupported-format
+hls | vorbis | hev2=1 | 415 unsupported-format
+hls | aiff | bare | 415 unsupported-format
+hls | aiff | bitrate=128 | 415 unsupported-format
+hls | aiff | bitrates=64,96 | 415 unsupported-format
+hls | aiff | hev2=1 | 415 unsupported-format
+hls | flac | bare | 200
+hls | flac | bitrate=128 | 415 unsupported-format
+hls | flac | bitrates=64,96 | 415 unsupported-format
+hls | flac | hev2=1 | 415 unsupported-format
+hls | mp3 | bare | 415 unsupported-format
+hls | mp3 | bitrate=128 | 415 unsupported-format
+hls | mp3 | bitrates=64,96 | 415 unsupported-format
+hls | mp3 | hev2=1 | 415 unsupported-format
+hls | aac | bare | 200
+hls | aac | bitrate=128 | 200
+hls | aac | bitrates=64,96 | 200
+hls | aac | hev2=1 | 415 unsupported-format
+hls | he-aac | bare | 200
+hls | he-aac | bitrate=128 | 200
+hls | he-aac | bitrates=64,96 | 200
+hls | he-aac | hev2=1 | 200
+hls | alac | bare | 200
+hls | alac | bitrate=128 | 415 unsupported-format
+hls | alac | bitrates=64,96 | 415 unsupported-format
+hls | alac | hev2=1 | 415 unsupported-format
+hls | wavpack | bare | 415 unsupported-format
+hls | wavpack | bitrate=128 | 415 unsupported-format
+hls | wavpack | bitrates=64,96 | 415 unsupported-format
+hls | wavpack | hev2=1 | 415 unsupported-format
+hls | ape | bare | 415 unsupported-format
+hls | ape | bitrate=128 | 415 unsupported-format
+hls | ape | bitrates=64,96 | 415 unsupported-format
+hls | ape | hev2=1 | 415 unsupported-format
+jobs | wav | bare | 201
+jobs | wav | bitrate=128 | 415 unsupported-format
+jobs | wav | hev2=true | 415 unsupported-format
+jobs | wav | flacLevel=5 | 201
+jobs | wav | wavpackLevel=3 | 201
+jobs | wav | apeLevel=3000 | 201
+jobs | opus | bare | 201
+jobs | opus | bitrate=128 | 201
+jobs | opus | hev2=true | 415 unsupported-format
+jobs | opus | flacLevel=5 | 201
+jobs | opus | wavpackLevel=3 | 201
+jobs | opus | apeLevel=3000 | 201
+jobs | vorbis | bare | 201
+jobs | vorbis | bitrate=128 | 201
+jobs | vorbis | hev2=true | 415 unsupported-format
+jobs | vorbis | flacLevel=5 | 201
+jobs | vorbis | wavpackLevel=3 | 201
+jobs | vorbis | apeLevel=3000 | 201
+jobs | aiff | bare | 201
+jobs | aiff | bitrate=128 | 415 unsupported-format
+jobs | aiff | hev2=true | 415 unsupported-format
+jobs | aiff | flacLevel=5 | 201
+jobs | aiff | wavpackLevel=3 | 201
+jobs | aiff | apeLevel=3000 | 201
+jobs | flac | bare | 201
+jobs | flac | bitrate=128 | 415 unsupported-format
+jobs | flac | hev2=true | 415 unsupported-format
+jobs | flac | flacLevel=5 | 201
+jobs | flac | wavpackLevel=3 | 201
+jobs | flac | apeLevel=3000 | 201
+jobs | mp3 | bare | 201
+jobs | mp3 | bitrate=128 | 201
+jobs | mp3 | hev2=true | 415 unsupported-format
+jobs | mp3 | flacLevel=5 | 201
+jobs | mp3 | wavpackLevel=3 | 201
+jobs | mp3 | apeLevel=3000 | 201
+jobs | aac | bare | 201
+jobs | aac | bitrate=128 | 201
+jobs | aac | hev2=true | 415 unsupported-format
+jobs | aac | flacLevel=5 | 201
+jobs | aac | wavpackLevel=3 | 201
+jobs | aac | apeLevel=3000 | 201
+jobs | he-aac | bare | 201
+jobs | he-aac | bitrate=128 | 201
+jobs | he-aac | hev2=true | 201
+jobs | he-aac | flacLevel=5 | 201
+jobs | he-aac | wavpackLevel=3 | 201
+jobs | he-aac | apeLevel=3000 | 201
+jobs | alac | bare | 201
+jobs | alac | bitrate=128 | 415 unsupported-format
+jobs | alac | hev2=true | 415 unsupported-format
+jobs | alac | flacLevel=5 | 201
+jobs | alac | wavpackLevel=3 | 201
+jobs | alac | apeLevel=3000 | 201
+jobs | wavpack | bare | 201
+jobs | wavpack | bitrate=128 | 415 unsupported-format
+jobs | wavpack | hev2=true | 415 unsupported-format
+jobs | wavpack | flacLevel=5 | 201
+jobs | wavpack | wavpackLevel=3 | 201
+jobs | wavpack | apeLevel=3000 | 201
+jobs | ape | bare | 201
+jobs | ape | bitrate=128 | 415 unsupported-format
+jobs | ape | hev2=true | 415 unsupported-format
+jobs | ape | flacLevel=5 | 201
+jobs | ape | wavpackLevel=3 | 201
+jobs | ape | apeLevel=3000 | 201

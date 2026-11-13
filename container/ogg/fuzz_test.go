@@ -2,7 +2,6 @@ package ogg
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"io"
 	"testing"
@@ -31,57 +30,31 @@ func FuzzDemux(f *testing.F) {
 	f.Add(testutil.SetOggGranule(f, testutil.TruncateOggAfter(f, opus, 2), 2, 0))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		for _, strict := range []bool{false, true} {
-			d, err := NewDemuxer(container.BytesSource(data), &DemuxerOptions{Strict: strict})
-			if err != nil {
-				continue
-			}
-			track := d.Tracks()[0]
-			if err := track.Fmt.Valid(); err != nil {
-				t.Fatalf("accepted track with invalid format: %v", err)
-			}
+		var packets int64
+		testutil.DemuxFuzz{
+			Open: func(src container.Source, strict bool) (container.Demuxer, error) {
+				return NewDemuxer(src, &DemuxerOptions{Strict: strict})
+			},
 			// Every packet consumes at least one lacing byte, so packet
 			// production is bounded by the input length.
-			maxPackets := int64(len(data)) + 8
-			var pkt container.Packet
-			firstPTS := int64(-1)
-			for i := int64(0); ; i++ {
-				if i > maxPackets {
-					t.Fatalf("more than %d packets from %d bytes", maxPackets, len(data))
-				}
-				err := d.ReadPacket(&pkt)
-				if errors.Is(err, io.EOF) {
-					break
-				}
-				if err != nil {
-					break
-				}
-				if pkt.Dur <= 0 || len(pkt.Data) == 0 {
-					t.Fatal("empty packet must be EOF or error")
-				}
+			MaxPackets: func(raw []byte) int64 { return int64(len(raw)) + 8 },
+			Targets:    []int64{0, 1000, 1 << 40},
+			// Landing past the target is only legitimate when the stream
+			// itself starts after it.
+			LateLanding: true,
+			Opened:      func(testing.TB, container.Demuxer, bool) { packets = 0 },
+			Packet: func(t testing.TB, pkt *container.Packet) {
 				if pkt.PTS < 0 {
-					t.Fatalf("packet %d at %d: positions start at 0", i, pkt.PTS)
+					t.Fatalf("packet %d at %d: positions start at 0", packets, pkt.PTS)
 				}
-				if firstPTS < 0 {
-					firstPTS = pkt.PTS
-				}
-			}
-			for _, target := range []int64{0, 1000, 1 << 40} {
-				landed, err := d.SeekSample(context.Background(), 0, target)
-				if err != nil {
-					continue
-				}
+				packets++
+			},
+			Landed: func(t testing.TB, _ container.Demuxer, target, landed int64) {
 				if landed < 0 {
 					t.Fatalf("seek to %d landed at %d", target, landed)
 				}
-				if firstPTS < 0 {
-					continue
-				}
-				if landed > max(target, firstPTS) {
-					t.Fatalf("seek to %d landed at %d (stream starts at %d)", target, landed, firstPTS)
-				}
-			}
-		}
+			},
+		}.Run(t, data)
 	})
 }
 

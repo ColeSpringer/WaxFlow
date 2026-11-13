@@ -208,6 +208,9 @@ func (s *Server) planTranscode(ctx context.Context, req *streamRequest) error {
 		return err
 	}
 	req.canonical = canonicalParams(plan, req.gainDB, req.p.dynamics, req.p.span, req.opts.HEAACv2, req.from)
+	// Keyed for every output, the few that embed no tags included (ADTS, WAV,
+	// Matroska): a term too many costs a re-encode, a term too few serves
+	// another mapping's tags.
 	if len(req.opts.Tags) > 0 {
 		req.canonical += "&tags=" + tagsFingerprint(req.opts.Tags)
 	}

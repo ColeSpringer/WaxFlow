@@ -1,9 +1,6 @@
 package flacn_test
 
 import (
-	"context"
-	"errors"
-	"io"
 	"testing"
 
 	"github.com/colespringer/waxflow/container"
@@ -30,68 +27,35 @@ func FuzzDemux(f *testing.F) {
 	f.Add(damageFrames(f, noise, frameSpans(f, noise), 0, 2))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		for _, strict := range []bool{false, true} {
-			d, err := flacn.NewDemuxer(container.BytesSource(data), &flacn.DemuxerOptions{Strict: strict})
-			if err != nil {
-				continue
-			}
-			track := d.Tracks()[0]
-			if err := track.Fmt.Valid(); err != nil {
-				t.Fatalf("accepted track with invalid format: %v", err)
-			}
+		var packets, lastPTS int64
+		testutil.DemuxFuzz{
+			Open: func(src container.Source, strict bool) (container.Demuxer, error) {
+				return flacn.NewDemuxer(src, &flacn.DemuxerOptions{Strict: strict})
+			},
 			// A frame is at least 9 bytes (header, one subframe byte, and
 			// the CRC-16), so packet production is bounded by the input.
-			maxPackets := int64(len(data))/6 + 4
-			var pkt container.Packet
-			firstPTS, lastPTS := int64(-1), int64(-1)
-			for i := int64(0); ; i++ {
-				if i > maxPackets {
-					t.Fatalf("more than %d packets from %d bytes", maxPackets, len(data))
-				}
-				err := d.ReadPacket(&pkt)
-				if errors.Is(err, io.EOF) {
-					break
-				}
-				if err != nil {
-					break
-				}
-				if pkt.Dur <= 0 || len(pkt.Data) == 0 {
-					t.Fatal("empty packet must be EOF or error")
-				}
+			MaxPackets: func(raw []byte) int64 { return int64(len(raw))/6 + 4 },
+			Targets:    []int64{0, 1000, 5000, 1 << 40},
+			// Landing past the target is only legitimate when the stream
+			// itself starts after it.
+			LateLanding: true,
+			SeekPTS:     true,
+			Opened:      func(testing.TB, container.Demuxer, bool) { packets, lastPTS = 0, -1 },
+			Packet: func(t testing.TB, pkt *container.Packet) {
 				if pkt.PTS < 0 {
-					t.Fatalf("packet %d at %d: positions start at 0", i, pkt.PTS)
+					t.Fatalf("packet %d at %d: positions start at 0", packets, pkt.PTS)
 				}
 				if pkt.PTS <= lastPTS {
-					t.Fatalf("packet %d at %d after one at %d: positions went backwards", i, pkt.PTS, lastPTS)
+					t.Fatalf("packet %d at %d after one at %d: positions went backwards", packets, pkt.PTS, lastPTS)
 				}
 				lastPTS = pkt.PTS
-				if firstPTS < 0 {
-					firstPTS = pkt.PTS
-				}
-			}
-			for _, target := range []int64{0, 1000, 5000, 1 << 40} {
-				landed, err := d.SeekSample(context.Background(), 0, target)
-				if err != nil {
-					continue // errors are fine
-				}
+				packets++
+			},
+			Landed: func(t testing.TB, _ container.Demuxer, target, landed int64) {
 				if landed < 0 {
 					t.Fatalf("seek to %d landed at %d", target, landed)
 				}
-				// A landing in a hole is owed what the hole took.
-				if err := d.ReadPacket(&pkt); err == nil && pkt.PTS-pkt.Lost != landed {
-					t.Fatalf("seek to %d landed at %d, then read a packet at %d owing %d", target, landed, pkt.PTS, pkt.Lost)
-				}
-				if firstPTS < 0 {
-					// Any landing is fine when no packet was ever readable
-					// (reads after the seek just hit EOF).
-					continue
-				}
-				// Landing past the target is only legitimate when the
-				// stream itself starts after it.
-				if landed > max(target, firstPTS) {
-					t.Fatalf("seek to %d landed at %d (stream starts at %d)", target, landed, firstPTS)
-				}
-			}
-		}
+			},
+		}.Run(t, data)
 	})
 }

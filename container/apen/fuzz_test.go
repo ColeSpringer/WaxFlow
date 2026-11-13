@@ -1,9 +1,6 @@
 package apen_test
 
 import (
-	"context"
-	"errors"
-	"io"
 	"testing"
 
 	"github.com/colespringer/waxflow/codec"
@@ -26,58 +23,31 @@ func FuzzDemux(f *testing.F) {
 	f.Add([]byte("MAC \x8e\x0f\x62\x33\x34\x00\x00\x00"))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		for _, strict := range []bool{false, true} {
-			d, err := apen.NewDemuxer(container.BytesSource(data), &apen.DemuxerOptions{Strict: strict})
-			if err != nil {
-				continue
-			}
-			track := d.Tracks()[0]
-			if err := track.Fmt.Valid(); err != nil {
-				t.Fatalf("accepted track with invalid format: %v", err)
-			}
-			if track.Samples < 0 {
-				t.Fatalf("accepted a track declaring %d samples", track.Samples)
-			}
+		testutil.DemuxFuzz{
+			Open: func(src container.Source, strict bool) (container.Demuxer, error) {
+				return apen.NewDemuxer(src, &apen.DemuxerOptions{Strict: strict})
+			},
 			// A frame's extent comes from the seek table, whose entries are
 			// four bytes each, so packet production is bounded by the input.
-			maxPackets := int64(len(data))/4 + 4
-			var pkt container.Packet
-			firstPTS := int64(-1)
-			for i := int64(0); ; i++ {
-				if i > maxPackets {
-					t.Fatalf("more than %d packets from %d bytes", maxPackets, len(data))
+			MaxPackets: func(raw []byte) int64 { return int64(len(raw))/4 + 4 },
+			Targets:    []int64{0, 1000, 1 << 40},
+			// Landing past the target is only legitimate when the stream
+			// itself starts after it.
+			LateLanding: true,
+			Opened: func(t testing.TB, d container.Demuxer, _ bool) {
+				if n := d.Tracks()[0].Samples; n < 0 {
+					t.Fatalf("accepted a track declaring %d samples", n)
 				}
-				err := d.ReadPacket(&pkt)
-				if errors.Is(err, io.EOF) {
-					break
-				}
-				if err != nil {
-					break
-				}
-				if pkt.Dur <= 0 || len(pkt.Data) < ape.FrameHeaderLen {
+			},
+			Packet: func(t testing.TB, pkt *container.Packet) {
+				if len(pkt.Data) < ape.FrameHeaderLen {
 					t.Fatal("empty packet must be EOF or error")
 				}
 				if _, _, _, _, err := ape.ParseFrameHeader(pkt.Data); err != nil {
 					t.Fatalf("emitted a packet the decoder cannot parse: %v", err)
 				}
-				if firstPTS < 0 {
-					firstPTS = pkt.PTS
-				}
-			}
-			for _, target := range []int64{0, 1000, 1 << 40} {
-				landed, err := d.SeekSample(context.Background(), 0, target)
-				if err != nil || firstPTS < 0 {
-					// Errors are fine; so is any landing when no packet was
-					// ever readable (reads after the seek just hit EOF).
-					continue
-				}
-				// Landing past the target is only legitimate when the stream
-				// itself starts after it.
-				if landed > max(target, firstPTS) {
-					t.Fatalf("seek to %d landed at %d (stream starts at %d)", target, landed, firstPTS)
-				}
-			}
-		}
+			},
+		}.Run(t, data)
 	})
 }
 

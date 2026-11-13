@@ -322,8 +322,9 @@ Parameters (unknown parameter names are rejected):
   progressive fragmented MP4 (`audio/mp4`, 128 kbit/s default,
   `bitrate`/`q` select it; the init header's edit list carries the
   gapless trims); `he-aac` an HE-AAC v1 stream in the same wrappers
-  (64 kbit/s default, output rates 32/44.1/48 kHz; a copyable HE-AAC
-  source under `format=aac` remuxes rather than re-encoding, so
+  (64 kbit/s default, `bitrate`/`q` select it, output rates
+  32/44.1/48 kHz; a copyable HE-AAC source under `format=aac` remuxes
+  rather than re-encoding, so
   `he-aac` is for encoding *to* SBR), or HE-AAC v2 under `hev2=1`
   (parametric stereo over a mono SBR core, 32 kbit/s default, stereo
   sources only); `opus` an Ogg-Opus stream (`audio/ogg`, 96 kbit/s
@@ -502,9 +503,12 @@ Parameters (unknown parameter names are rejected):
 - `bitrate`, `q`: lossy quality selection, mutually exclusive. `bitrate`
   is an explicit CBR rate in kbit/s; `q` is a preset (`low` 96, `med`
   128, `high` 192). Both require an explicit lossy `format` (`mp3`,
-  `aac`, `opus`); on a lossless output they are `415`. A `bitrate`/`q` request
-  forces a re-encode (never direct-play), and the resolved bit rate is
-  part of the cache key, so two rates never share an entry.
+  `aac`, `he-aac`, `opus`); on a lossless output they are `415`, and so
+  under `format=auto`, which resolves to `wav`. `vorbis` accepts both and
+  ignores them: it encodes at its default quality whatever they say. A
+  `bitrate`/`q` request forces a re-encode (never direct-play), and the
+  resolved bit rate is part of the cache key, so two rates that encode
+  differently never share an entry.
 - `hev2`: boolean, selects HE-AAC v2 (parametric stereo, `mp4a.40.29`)
   for `format=he-aac`; any other format is `415`. Selection is explicit
   rather than bitrate-automatic, and the flag is part of the cache key:
