@@ -156,7 +156,7 @@ func TestSpanPrerollMatchesContinuous(t *testing.T) {
 		medSpan.Close()
 		t.Fatal(err)
 	}
-	if h, ok := sl.(waxflow.Headroomer); !ok || h.Headroom() != from {
+	if h, ok := sl.(format.Headroomer); !ok || h.Headroom() != from {
 		sl.Close()
 		t.Fatal("the span reports no usable headroom, so priming cannot engage and this test is vacuous")
 	}
@@ -322,7 +322,7 @@ func TestSliceZeroFromHasNoHeadroom(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sl.Close()
-	h, ok := sl.(waxflow.Headroomer)
+	h, ok := sl.(format.Headroomer)
 	if !ok {
 		t.Fatal("a slice does not implement Headroomer")
 	}

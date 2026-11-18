@@ -52,11 +52,18 @@ type driver struct {
 }
 
 // openOptions is what the driver table's open takes: the caller's Strict
-// policy, and nothing else. A probe and an open are the same call on every
-// row, because no demuxer reads a payload at open: what a walk would confirm
-// is deferred to Walk on every one of them.
+// policy, and where the source begins in the file (container.DemuxerOptions).
+// A probe and an open are the same call on every row, because no demuxer
+// reads a payload at open: what a walk would confirm is deferred to Walk on
+// every one of them.
 type openOptions struct {
 	strict bool
+	base   int64
+}
+
+// demuxerOptions is o as a demuxer takes it.
+func (o openOptions) demuxerOptions() *container.DemuxerOptions {
+	return &container.DemuxerOptions{Strict: o.strict, Base: o.base}
 }
 
 // drivers is the explicit ordered magic table (no blank-import
@@ -71,7 +78,7 @@ var drivers = []driver{
 		exts:      []string{"flac"},
 		mediaType: "audio/flac",
 		open: func(src container.Source, o openOptions) (container.Demuxer, error) {
-			return flacn.NewDemuxer(src, &flacn.DemuxerOptions{Strict: o.strict})
+			return flacn.NewDemuxer(src, o.demuxerOptions())
 		},
 	},
 	{
@@ -81,7 +88,7 @@ var drivers = []driver{
 		exts:      []string{"wav", "wave", "rf64", "bw64"},
 		mediaType: "audio/wav",
 		open: func(src container.Source, o openOptions) (container.Demuxer, error) {
-			return riff.NewDemuxer(src, &riff.DemuxerOptions{Strict: o.strict})
+			return riff.NewDemuxer(src, o.demuxerOptions())
 		},
 	},
 	{
@@ -91,7 +98,7 @@ var drivers = []driver{
 		exts:      []string{"aif", "aiff", "aifc", "afc"},
 		mediaType: "audio/aiff",
 		open: func(src container.Source, o openOptions) (container.Demuxer, error) {
-			return aiff.NewDemuxer(src, &aiff.DemuxerOptions{Strict: o.strict})
+			return aiff.NewDemuxer(src, o.demuxerOptions())
 		},
 	},
 	{
@@ -101,7 +108,7 @@ var drivers = []driver{
 		exts:      []string{"ogg", "oga", "opus"},
 		mediaType: "audio/ogg",
 		open: func(src container.Source, o openOptions) (container.Demuxer, error) {
-			return ogg.NewDemuxer(src, &ogg.DemuxerOptions{Strict: o.strict})
+			return ogg.NewDemuxer(src, o.demuxerOptions())
 		},
 	},
 	{
@@ -111,7 +118,7 @@ var drivers = []driver{
 		exts:      []string{"m4a", "m4b", "mp4", "m4r", "mov"},
 		mediaType: "audio/mp4",
 		open: func(src container.Source, o openOptions) (container.Demuxer, error) {
-			return mp4.NewDemuxer(src, &mp4.DemuxerOptions{Strict: o.strict})
+			return mp4.NewDemuxer(src, o.demuxerOptions())
 		},
 	},
 	{
@@ -121,7 +128,7 @@ var drivers = []driver{
 		exts:      []string{"mka", "mkv", "webm"},
 		mediaType: "audio/x-matroska",
 		open: func(src container.Source, o openOptions) (container.Demuxer, error) {
-			return mka.NewDemuxer(src, &mka.DemuxerOptions{Strict: o.strict})
+			return mka.NewDemuxer(src, o.demuxerOptions())
 		},
 	},
 	{
@@ -131,7 +138,7 @@ var drivers = []driver{
 		exts:      []string{"aac", "adts"},
 		mediaType: "audio/aac",
 		open: func(src container.Source, o openOptions) (container.Demuxer, error) {
-			return adts.NewDemuxer(src, &adts.DemuxerOptions{Strict: o.strict})
+			return adts.NewDemuxer(src, o.demuxerOptions())
 		},
 	},
 	{
@@ -141,7 +148,7 @@ var drivers = []driver{
 		exts:      []string{"ape"},
 		mediaType: "audio/x-ape",
 		open: func(src container.Source, o openOptions) (container.Demuxer, error) {
-			return apen.NewDemuxer(src, &apen.DemuxerOptions{Strict: o.strict})
+			return apen.NewDemuxer(src, o.demuxerOptions())
 		},
 	},
 	{
@@ -151,7 +158,7 @@ var drivers = []driver{
 		exts:      []string{"wv"},
 		mediaType: "audio/x-wavpack",
 		open: func(src container.Source, o openOptions) (container.Demuxer, error) {
-			return wv.NewDemuxer(src, &wv.DemuxerOptions{Strict: o.strict})
+			return wv.NewDemuxer(src, o.demuxerOptions())
 		},
 	},
 	{
@@ -164,7 +171,7 @@ var drivers = []driver{
 		exts:      []string{"wma", "asf"},
 		mediaType: "audio/x-ms-wma",
 		open: func(src container.Source, o openOptions) (container.Demuxer, error) {
-			return asf.NewDemuxer(src, &asf.DemuxerOptions{Strict: o.strict})
+			return asf.NewDemuxer(src, o.demuxerOptions())
 		},
 	},
 	{
@@ -176,7 +183,7 @@ var drivers = []driver{
 		exts:      []string{"mpc", "mp+", "mpp"},
 		mediaType: "audio/x-musepack",
 		open: func(src container.Source, o openOptions) (container.Demuxer, error) {
-			return mpc.NewDemuxer(src, &mpc.DemuxerOptions{Strict: o.strict})
+			return mpc.NewDemuxer(src, o.demuxerOptions())
 		},
 	},
 	// The MPEG sync word stays last: it is twelve set bits anywhere in a
@@ -188,7 +195,7 @@ var drivers = []driver{
 		exts:      []string{"mp3", "mpga"},
 		mediaType: "audio/mpeg",
 		open: func(src container.Source, o openOptions) (container.Demuxer, error) {
-			return mpa.NewDemuxer(src, &mpa.DemuxerOptions{Strict: o.strict})
+			return mpa.NewDemuxer(src, o.demuxerOptions())
 		},
 	},
 }

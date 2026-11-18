@@ -389,7 +389,7 @@ func TestLacedBlockSpreadsItsTrim(t *testing.T) {
 // on gets its frames after an error and then the same refusal again, forever.
 func TestStrictRefusalDeliversNothing(t *testing.T) {
 	l := BuildLacedPadding(t, 100, 3, 1500)
-	d, err := NewDemuxer(container.BytesSource(l.File), &DemuxerOptions{Strict: true})
+	d, err := NewDemuxer(container.BytesSource(l.File), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatalf("NewDemuxer: %v", err)
 	}

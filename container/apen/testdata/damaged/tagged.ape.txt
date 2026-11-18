@@ -1,0 +1,79 @@
+# <case> p<n> <pts> <dur> <crc-32 of the data>, with lost=<samples> and discont where the packet says so
+# <case> seek <target> landed <position>, then the packet read next in the same fields
+clean file 5793 bytes
+clean open samples=8000 exact=true
+clean packets 1
+clean p0 0 8000 1ab6c8cf
+clean warnings 0
+clean seek 2000 landed 0, then 0 8000 1ab6c8cf
+clean seek 4000 landed 0, then 0 8000 1ab6c8cf
+clean seek 6000 landed 0, then 0 8000 1ab6c8cf
+clean seek warnings 0
+junk-head file 13985 bytes: 8192 bytes of junk at 0, every second one 0x4d
+junk-head open samples=8000 exact=true
+junk-head packets 1
+junk-head p0 0 8000 1ab6c8cf
+junk-head warnings 0
+junk-head seek 2000 landed 0, then 0 8000 1ab6c8cf
+junk-head seek 4000 landed 0, then 0 8000 1ab6c8cf
+junk-head seek 6000 landed 0, then 0 8000 1ab6c8cf
+junk-head seek warnings 0
+junk-span file 6814 bytes: 1021 bytes of junk at 0, every second one 0x4d
+junk-span open samples=8000 exact=true
+junk-span packets 1
+junk-span p0 0 8000 1ab6c8cf
+junk-span warnings 0
+junk-span seek 2000 landed 0, then 0 8000 1ab6c8cf
+junk-span seek 4000 landed 0, then 0 8000 1ab6c8cf
+junk-span seek 6000 landed 0, then 0 8000 1ab6c8cf
+junk-span seek warnings 0
+junk-window file 136863 bytes: 131070 bytes of junk at 0, every second one 0x4d
+junk-window open samples=8000 exact=true
+junk-window packets 1
+junk-window p0 0 8000 1ab6c8cf
+junk-window warnings 0
+junk-window seek 2000 landed 0, then 0 8000 1ab6c8cf
+junk-window seek 4000 landed 0, then 0 8000 1ab6c8cf
+junk-window seek 6000 landed 0, then 0 8000 1ab6c8cf
+junk-window seek warnings 0
+decoy-head file 13985 bytes: 8192 bytes of junk at 0, every second one 0x4d, the 32 bytes that follow it also at 2048
+decoy-head open samples=8000 exact=true
+decoy-head packets 1
+decoy-head p0 0 8000 1ab6c8cf
+decoy-head warnings 0
+decoy-head seek 2000 landed 0, then 0 8000 1ab6c8cf
+decoy-head seek 4000 landed 0, then 0 8000 1ab6c8cf
+decoy-head seek 6000 landed 0, then 0 8000 1ab6c8cf
+decoy-head seek warnings 0
+junk-island file 22177 bytes: 8192 bytes of junk at 0 and at 8268, every second one 0x4d, the 76 bytes between them whole
+junk-island open refused malformed-input: ape: seek table starts at 1305636149 but the header puts the frames at 8316
+junk-under-bound file 1054368 bytes: 1048575 bytes of junk at 0, every second one 0x4d
+junk-under-bound open samples=8000 exact=true
+junk-under-bound packets 1
+junk-under-bound p0 0 8000 1ab6c8cf
+junk-under-bound warnings 0
+junk-under-bound seek 2000 landed 0, then 0 8000 1ab6c8cf
+junk-under-bound seek 4000 landed 0, then 0 8000 1ab6c8cf
+junk-under-bound seek 6000 landed 0, then 0 8000 1ab6c8cf
+junk-under-bound seek warnings 0
+junk-past-bound file 1054369 bytes: 1048576 bytes of junk at 0, every second one 0x4d
+junk-past-bound open refused malformed-input: ape: no Monkey's Audio header in the first 1048576 bytes
+zero-middle file 5793 bytes: 64 bytes zeroed at 2896
+zero-middle open samples=8000 exact=true
+zero-middle packets 1
+zero-middle p0 0 8000 2ec85a3c
+zero-middle warnings 0
+zero-middle seek 2000 landed 0, then 0 8000 2ec85a3c
+zero-middle seek 4000 landed 0, then 0 8000 2ec85a3c
+zero-middle seek 6000 landed 0, then 0 8000 2ec85a3c
+zero-middle seek warnings 0
+cut-tail file 5693 bytes: the last 100 bytes cut
+cut-tail open samples=8000 exact=true
+cut-tail packets 1
+cut-tail p0 0 8000 7161038b
+cut-tail warnings 1
+cut-tail w0 damage at 5693: the descriptor counts 5540 bytes of frame data but 5569 are present
+cut-tail seek 2000 landed 0, then 0 8000 7161038b
+cut-tail seek 4000 landed 0, then 0 8000 7161038b
+cut-tail seek 6000 landed 0, then 0 8000 7161038b
+cut-tail seek warnings 0

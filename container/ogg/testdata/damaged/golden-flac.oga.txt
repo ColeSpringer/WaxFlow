@@ -1,0 +1,45 @@
+# <case> p<n> <pts> <dur> <crc-32 of the data>, with lost=<samples> and discont where the packet says so
+# <case> seek <target> landed <position>, then the packet read next in the same fields
+clean file 3321 bytes
+clean open samples=4410 exact=true
+clean packets 2
+clean p0 0 4096 84079918
+clean p1 4096 314 547c981e
+clean warnings 0
+clean seek 1102 landed 0, then 0 4096 84079918
+clean seek 2205 landed 0, then 0 4096 84079918
+clean seek 3306 landed 0, then 0 4096 84079918
+clean seek warnings 0
+junk-last file 11513 bytes: 8192 bytes of junk at 3015, every second one 0x4f
+junk-last open samples=4410 exact=true
+junk-last packets 2
+junk-last p0 0 4096 84079918
+junk-last p1 4096 314 547c981e
+junk-last warnings 1
+junk-last w0 damage at 3015: damaged page, resyncing
+junk-last seek 1102 landed 0, then 0 4096 84079918
+junk-last seek 2205 landed 0, then 0 4096 84079918
+junk-last seek 3306 landed 0, then 0 4096 84079918
+junk-last seek warnings 0
+zero-middle file 3321 bytes: 64 bytes zeroed at 1660
+zero-middle open samples=4410 exact=true
+zero-middle packets 1
+zero-middle p0 4096 314 547c981e lost=4096 discont
+zero-middle warnings 2
+zero-middle w0 damage at 142: damaged page, resyncing
+zero-middle w1 damage at 142: damage before the first frame took 4096 samples
+zero-middle seek 1102 landed 0, then 4096 314 547c981e lost=4096 discont
+zero-middle seek 2205 landed 0, then 4096 314 547c981e lost=4096 discont
+zero-middle seek 3306 landed 0, then 4096 314 547c981e lost=4096 discont
+zero-middle seek warnings 0
+cut-tail file 3221 bytes: the last 100 bytes cut
+cut-tail open samples=4096 exact=true
+cut-tail packets 1
+cut-tail p0 0 4096 84079918
+cut-tail warnings 2
+cut-tail w0 damage at 142: STREAMINFO declares 4410 samples but the frames end at 4096
+cut-tail w1 damage at 3015: damaged page, resyncing
+cut-tail seek 1102 landed 0, then 0 4096 84079918
+cut-tail seek 2205 landed 0, then 0 4096 84079918
+cut-tail seek 3306 landed 0, then 0 4096 84079918
+cut-tail seek warnings 0

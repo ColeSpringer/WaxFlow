@@ -447,7 +447,7 @@ func TestMuxEmptyStreamVoidsTheCuesEntry(t *testing.T) {
 				}
 			}
 			// Strict: a Void must read as reserved space, not as damage.
-			d, err := NewDemuxer(container.BytesSource(file), &DemuxerOptions{Strict: true})
+			d, err := NewDemuxer(container.BytesSource(file), &container.DemuxerOptions{Strict: true})
 			if err != nil {
 				t.Fatalf("strict open of an empty stream: %v", err)
 			}
@@ -473,7 +473,7 @@ func TestMuxSeekableRoundTrip(t *testing.T) {
 	const junk = 64
 	src := append(append([]byte(nil), file...), make([]byte, junk)...)
 
-	d, err := NewDemuxer(container.BytesSource(src), &DemuxerOptions{Strict: true})
+	d, err := NewDemuxer(container.BytesSource(src), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatalf("NewDemuxer: %v", err)
 	}
@@ -604,7 +604,7 @@ func TestMuxSeekableAtNonZeroStart(t *testing.T) {
 			t.Errorf("SeekHead points %#x at segment offset %d, which holds %#x", p.target, p.pos, id)
 		}
 	}
-	d, err := NewDemuxer(container.BytesSource(file), &DemuxerOptions{Strict: true})
+	d, err := NewDemuxer(container.BytesSource(file), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatalf("NewDemuxer: %v", err)
 	}

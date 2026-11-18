@@ -1292,23 +1292,14 @@ func (s *Server) openMember(ctx context.Context, m memberSource) (format.Media, 
 		f.Close()
 		return nil, err
 	}
-	return closingMedia{Media: med, f: f}, nil
+	return closingMedia{Forwarder: format.Forwarder{Media: med}, f: f}, nil
 }
 
 // closingMedia releases the source handle with the media.
 type closingMedia struct {
-	format.Media
+	format.Forwarder
 	f *source.File
 }
-
-// Walk and Walked forward format.Walker: embedding the interface promotes
-// nothing outside it, and this wraps one file.
-func (m closingMedia) Walk(ctx context.Context) error { return format.WalkMedia(ctx, m.Media) }
-
-func (m closingMedia) Walked() bool { return format.MediaWalked(m.Media) }
-
-// MixedWidth forwards format.MixedWidth, for the same reason.
-func (m closingMedia) MixedWidth() bool { return format.MediaMixedWidth(m.Media) }
 
 func (m closingMedia) Close() error {
 	err := m.Media.Close()

@@ -1,11 +1,11 @@
 package mka
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/diag"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -16,18 +16,11 @@ var (
 	_ container.Warner  = (*Demuxer)(nil)
 )
 
-// DemuxerOptions configures parsing.
-type DemuxerOptions struct {
-	// Strict turns tolerated damage (the Warnings list) into errors.
-	Strict bool
-}
-
 // Demuxer reads one audio track from a Matroska/WebM segment. It selects the
 // sound track, exposes it as a single track (ID 0), and streams block frames
 // from the clusters as codec packets.
 type Demuxer struct {
 	src  container.Source
-	opts DemuxerOptions
 	size int64
 
 	segmentDataOff int64
@@ -93,7 +86,7 @@ type Demuxer struct {
 	w srcwin.Window
 	readerState
 
-	warnings               container.Warnings
+	log                    diag.Log
 	warnedNegativeDiscard  bool // negative DiscardPadding is surfaced once per file
 	warnedOversizedDiscard bool // one larger than the frame it rides on, likewise
 	notedMidPadding        bool // the inner-trim Note is recorded once per file
@@ -101,7 +94,7 @@ type Demuxer struct {
 
 // NewDemuxer parses the segment header and positions on the first cluster.
 // The returned Demuxer implements container.Seeker and container.Warner.
-func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
+func NewDemuxer(src container.Source, opts *container.DemuxerOptions) (*Demuxer, error) {
 	d := &Demuxer{
 		src:            src,
 		size:           src.Size(),
@@ -110,9 +103,7 @@ func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 		w:              srcwin.New(src, src.Size(), "mka: reading block data"),
 		walkLimit:      -1,
 	}
-	if opts != nil {
-		d.opts = *opts
-	}
+	d.log = diag.New("mka: ", opts)
 	if err := d.parse(); err != nil {
 		return nil, err
 	}
@@ -122,16 +113,11 @@ func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 // warn records tolerated damage, or fails in strict mode. The list is capped
 // and deduplicated; the count says how much damage was met.
 func (d *Demuxer) warn(off int64, format string, args ...any) error {
-	msg := fmt.Sprintf(format, args...)
-	if d.opts.Strict {
-		return malformed("%s (at offset %d)", msg, off)
-	}
-	d.warnings.Damage(off, msg)
-	return nil
+	return d.log.Warn(off, format, args...)
 }
 
 // DamageCount implements container.Damaged.
-func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
+func (d *Demuxer) DamageCount() int { return d.log.DamageCount() }
 
 var _ container.Damaged = (*Demuxer)(nil)
 
@@ -140,7 +126,7 @@ var _ container.Damaged = (*Demuxer)(nil)
 // See mp4's note, which exists for the same reason: Strict rejects mess, and an
 // HE-AAC config is not mess.
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.warnings.Note(off, fmt.Sprintf(format, args...))
+	d.log.Note(off, format, args...)
 }
 
 // readBytes reads n bytes at off into a fresh buffer, bounded by a cap so a

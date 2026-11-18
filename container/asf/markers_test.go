@@ -112,7 +112,7 @@ func marked(marks ...synthMarker) []byte {
 
 func chapters(t *testing.T, raw []byte, strict bool) ([]container.Chapter, []container.Warning) {
 	t.Helper()
-	d, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: strict})
+	d, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: strict})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func oneWarning(t *testing.T, warnings []container.Warning, want string) {
 func refused(t *testing.T, files map[string][]byte) {
 	t.Helper()
 	for name, raw := range files {
-		if _, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true}); err == nil {
+		if _, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err == nil {
 			t.Errorf("strict mode accepted %s", name)
 		}
 	}

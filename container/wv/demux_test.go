@@ -93,7 +93,7 @@ func TestDemuxPackets(t *testing.T) {
 func TestStrictCleanFixture(t *testing.T) {
 	for _, name := range []string{"sine-s16.wv", "seek-mono.wv", "tagged.wv"} {
 		t.Run(name, func(t *testing.T) {
-			d, err := wv.NewDemuxer(container.BytesSource(fixture(t, name)), &wv.DemuxerOptions{Strict: true})
+			d, err := wv.NewDemuxer(container.BytesSource(fixture(t, name)), &container.DemuxerOptions{Strict: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -262,7 +262,7 @@ func TestTrailingGarbage(t *testing.T) {
 	if len(d.Warnings()) == 0 {
 		t.Error("trailing garbage was dropped with no warning")
 	}
-	ds, err := wv.NewDemuxer(container.BytesSource(raw), &wv.DemuxerOptions{Strict: true})
+	ds, err := wv.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +302,7 @@ func TestAppendedID3v2IsNotAudio(t *testing.T) {
 	}
 
 	// And strict mode must not refuse a file for carrying one.
-	ds, err := wv.NewDemuxer(container.BytesSource(raw), &wv.DemuxerOptions{Strict: true})
+	ds, err := wv.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -574,7 +574,7 @@ func TestTruncatedTailCorrectsTheDeclaredTotal(t *testing.T) {
 				t.Error("a length the file cannot deliver was reported without a warning")
 			}
 			if _, err := wv.NewDemuxer(container.BytesSource(short),
-				&wv.DemuxerOptions{Strict: true}); err == nil {
+				&container.DemuxerOptions{Strict: true}); err == nil {
 				t.Error("strict mode accepted a file that cannot deliver its declared length")
 			}
 		})
@@ -643,7 +643,7 @@ func TestOverDeclaredTotalAdoptsTheBlocks(t *testing.T) {
 		t.Errorf("note %q does not say the blocks run past the declared total", ws[0].Msg)
 	}
 	// Strict never escalates a Note, so the file still opens.
-	if _, err := wv.NewDemuxer(container.BytesSource(raw), &wv.DemuxerOptions{Strict: true}); err != nil {
+	if _, err := wv.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err != nil {
 		t.Errorf("strict refused a well-formed file over a Note: %v", err)
 	}
 }

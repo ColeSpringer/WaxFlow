@@ -14,7 +14,7 @@ import (
 // refuses it again on the next Walk, never settling the length.
 func TestAStrictRefusalIsKept(t *testing.T) {
 	raw := append(fixture(t, "stereo.aac"), bytes.Repeat([]byte{0x11}, 16)...)
-	d, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true})
+	d, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -113,7 +113,7 @@ func TestSeeksAgreeAfterAFailedFullWalk(t *testing.T) {
 	file := damageBlocks(t, p.File, 250)
 	target := p.PTS(400)
 
-	strict, err := NewDemuxer(container.BytesSource(file), &DemuxerOptions{Strict: true})
+	strict, err := NewDemuxer(container.BytesSource(file), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}

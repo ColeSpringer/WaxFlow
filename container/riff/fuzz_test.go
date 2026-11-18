@@ -9,6 +9,8 @@ import (
 	"github.com/colespringer/waxflow/codec/adpcm"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/blocks"
+	"github.com/colespringer/waxflow/container/internal/mpegframes"
 	"github.com/colespringer/waxflow/internal/testutil"
 )
 
@@ -64,6 +66,8 @@ func FuzzDemux(f *testing.F) {
 	// geometry field and the walk has to resync from it.
 	f.Add(fixtureBytes(f, "mp3.wav"))
 	f.Add(wavHeader(tagMP3, 1, 22050, 576, 0, mp3Extra(1393), nil, 23616))
+	// A frame run long enough for the walker to give an index snapshot.
+	f.Add(wavHeader(tagMP3, 1, 24000, 1, 0, mp3Extra(0), testutil.ShortMP3Frames(mpegframes.IdxMinFrames+16), -1))
 	f.Add([]byte("RIFF\xff\xff\xff\xffWAVE"))
 	f.Add([]byte("RF64\xff\xff\xff\xffWAVEds64"))
 
@@ -72,20 +76,24 @@ func FuzzDemux(f *testing.F) {
 		// packet's length.
 		var (
 			track        container.Track
-			units        *blockReader
+			units        *blocks.Reader
 			byUnits      bool
 			got, lastDur int64
 		)
 		testutil.DemuxFuzz{
 			Open: func(src container.Source, strict bool) (container.Demuxer, error) {
-				return NewDemuxer(src, &DemuxerOptions{Strict: strict})
+				return NewDemuxer(src, &container.DemuxerOptions{Strict: strict})
 			},
+			Targets: []int64{0, 1000, 1 << 20, 1 << 40},
+			SeekPTS: true,
+			Walk:    true,
+			Restore: true,
 			Opened: func(t testing.TB, d container.Demuxer, _ bool) {
 				track, got, lastDur = d.Tracks()[0], 0, 0
 				// Unknown is the one negative length a track may state, and
 				// only where nothing in the file counted the samples: a frame
 				// run with no metadata frame and no fact chunk.
-				units, byUnits = d.(*Demuxer).payload.(*blockReader)
+				units, byUnits = d.(*Demuxer).payload.(*blocks.Reader)
 				if track.Samples < 0 && (byUnits || track.Samples != -1) {
 					t.Fatalf("accepted track with sample count %d", track.Samples)
 				}
@@ -97,7 +105,10 @@ func FuzzDemux(f *testing.F) {
 				if !byUnits {
 					return int64(len(raw))/minMPEGFrame + 2 // one frame per packet
 				}
-				return int64(len(raw))/int64(audio.StandardChunk) + 2
+				// Whole units up to StandardChunk frames, so every packet but
+				// the last holds over half that, and 4-bit ADPCM, the densest
+				// unit here, spends a byte on two frames.
+				return int64(len(raw))/int64(audio.StandardChunk/4) + 2
 			},
 			Packet: func(_ testing.TB, pkt *container.Packet) {
 				got += pkt.Dur
@@ -111,7 +122,7 @@ func FuzzDemux(f *testing.F) {
 					// stop inside the last block, and format.Media trims there.
 					// What is bounded is the payload, which the declared length
 					// also cannot exceed.
-					capacity := units.units * units.unitFrames
+					capacity := units.Units() * units.UnitFrames()
 					if got > capacity {
 						t.Fatalf("read %d samples from a payload holding %d", got, capacity)
 					}
@@ -132,10 +143,9 @@ func FuzzDemux(f *testing.F) {
 					}
 				}
 
-				// Seeking anywhere legal then reading must also terminate, and
-				// land at or before the target: on a unit boundary where units
-				// are what the payload holds, and on the frame the reservoir
-				// backoff reaches where it holds frames.
+				// A seek mid-file lands at or before the target, on a unit
+				// boundary or the frame the reservoir backoff reaches, and the
+				// packet read after it starts there, as SeekPTS holds elsewhere.
 				if track.Samples <= 0 {
 					return
 				}
@@ -156,7 +166,7 @@ func FuzzDemux(f *testing.F) {
 				if landed > target {
 					t.Fatalf("SeekSample(%d) landed at %d", target, landed)
 				}
-				if byUnits && landed != target/units.unitFrames*units.unitFrames {
+				if byUnits && landed != target/units.UnitFrames()*units.UnitFrames() {
 					t.Fatalf("SeekSample(%d) = %d, want the unit boundary at or before it", target, landed)
 				}
 				var pkt container.Packet

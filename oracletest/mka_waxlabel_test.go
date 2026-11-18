@@ -117,7 +117,7 @@ func (c *countingSource) Size() int64 { return c.src.Size() }
 // readMKA opens raw with the production demuxer, drains it, and seeks.
 func readMKA(t *testing.T, raw []byte) mkaShape {
 	t.Helper()
-	d, err := mka.NewDemuxer(container.BytesSource(raw), &mka.DemuxerOptions{Strict: true})
+	d, err := mka.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatalf("NewDemuxer: %v", err)
 	}

@@ -1,0 +1,131 @@
+# <case> p<n> <pts> <dur> <crc-32 of the data>, with lost=<samples> and discont where the packet says so
+# <case> seek <target> landed <position>, then the packet read next in the same fields
+clean file 27059 bytes
+clean open samples=16800 exact=true
+clean packets 4
+clean p0 0 4608 905d75cb
+clean p1 4608 4608 557901a2
+clean p2 9216 4608 99f27c2e
+clean p3 13824 2976 66f9b83c
+clean warnings 0
+clean seek 4200 landed 0, then 0 4608 905d75cb
+clean seek 8400 landed 4608, then 4608 4608 557901a2
+clean seek 12600 landed 9216, then 9216 4608 99f27c2e
+clean seek warnings 0
+junk-head file 35251 bytes: 8192 bytes of junk at 8286, every second one 0xff
+junk-head open samples=16800 exact=true
+junk-head packets 4
+junk-head p0 0 4608 905d75cb
+junk-head p1 4608 4608 557901a2
+junk-head p2 9216 4608 99f27c2e
+junk-head p3 13824 2976 66f9b83c
+junk-head warnings 1
+junk-head w0 damage at 8286: 8192 unparsable bytes before the first frame
+junk-head seek 4200 landed 0, then 0 4608 905d75cb
+junk-head seek 8400 landed 4608, then 4608 4608 557901a2
+junk-head seek 12600 landed 9216, then 9216 4608 99f27c2e
+junk-head seek warnings 0
+junk-span file 28080 bytes: 1021 bytes of junk at 8286, every second one 0xff
+junk-span open samples=16800 exact=true
+junk-span packets 4
+junk-span p0 0 4608 905d75cb
+junk-span p1 4608 4608 557901a2
+junk-span p2 9216 4608 99f27c2e
+junk-span p3 13824 2976 66f9b83c
+junk-span warnings 1
+junk-span w0 damage at 8286: 1021 unparsable bytes before the first frame
+junk-span seek 4200 landed 0, then 0 4608 905d75cb
+junk-span seek 8400 landed 4608, then 4608 4608 557901a2
+junk-span seek 12600 landed 9216, then 9216 4608 99f27c2e
+junk-span seek warnings 0
+decoy-head file 35251 bytes: 8192 bytes of junk at 8286, every second one 0xff, the 32 bytes that follow it also at 10334
+decoy-head open samples=16800 exact=true
+decoy-head packets 3
+decoy-head p0 4608 4608 557901a2 lost=4608 discont
+decoy-head p1 9216 4608 99f27c2e
+decoy-head p2 13824 2976 66f9b83c
+decoy-head warnings 2
+decoy-head w0 damage at 8286: 2048 unparsable bytes before the first frame
+decoy-head w1 damage at 10334: 11262 bytes are not a valid frame, dropped: 4608 samples lost
+decoy-head seek 4200 landed 0, then 4608 4608 557901a2 lost=4608 discont
+decoy-head seek 8400 landed 4608, then 4608 4608 557901a2
+decoy-head seek 12600 landed 9216, then 9216 4608 99f27c2e
+decoy-head seek warnings 0
+junk-mid file 35251 bytes: 8192 bytes of junk at 18573, every second one 0xff
+junk-mid open samples=16800 exact=true
+junk-mid packets 4
+junk-mid p0 0 4608 905d75cb
+junk-mid p1 4608 4608 557901a2
+junk-mid p2 9216 4608 99f27c2e discont
+junk-mid p3 13824 2976 66f9b83c
+junk-mid warnings 1
+junk-mid w0 damage at 18573: 8192 bytes are not a valid frame, dropped: 0 samples lost
+junk-mid seek 4200 landed 0, then 0 4608 905d75cb
+junk-mid seek 8400 landed 4608, then 4608 4608 557901a2
+junk-mid seek 12600 landed 9216, then 9216 4608 99f27c2e
+junk-mid seek warnings 0
+junk-tail file 35251 bytes: 8192 bytes of junk at 27059, every second one 0xff
+junk-tail open samples=16800 exact=false
+junk-tail packets 4
+junk-tail p0 0 4608 905d75cb
+junk-tail p1 4608 4608 557901a2
+junk-tail p2 9216 4608 99f27c2e
+junk-tail p3 13824 2976 66f9b83c
+junk-tail warnings 1
+junk-tail w0 damage at 27059: 8192 trailing bytes are not a valid frame, dropped
+junk-tail seek 4200 landed 0, then 0 4608 905d75cb
+junk-tail seek 8400 landed 4608, then 4608 4608 557901a2
+junk-tail seek 12600 landed 9216, then 9216 4608 99f27c2e
+junk-tail seek warnings 0
+junk-probe file 334159 bytes: 307200 bytes of junk at 18573, every second one 0xff, and the last 100 bytes cut
+junk-probe open samples=13824 exact=false
+junk-probe packets 3
+junk-probe p0 0 4608 905d75cb
+junk-probe p1 4608 4608 557901a2
+junk-probe p2 9216 4608 99f27c2e discont
+junk-probe warnings 3
+junk-probe w0 damage at 330888: 3271 trailing bytes are not a valid frame, dropped
+junk-probe w1 damage at 8286: STREAMINFO declares 16800 samples but the frames end at 13824
+junk-probe w2 damage at 18573: 307200 bytes are not a valid frame, dropped: 0 samples lost
+junk-probe seek 4200 landed 0, then 0 4608 905d75cb
+junk-probe seek 8400 landed 4608, then 4608 4608 557901a2
+junk-probe seek 12600 landed 9216, then 9216 4608 99f27c2e
+junk-probe seek warnings 0
+decoy-probe file 334259 bytes: 307200 bytes of junk at 18573, every second one 0xff, the 32 bytes that follow it also at 323725
+decoy-probe open samples=16800 exact=true
+decoy-probe packets 4
+decoy-probe p0 0 4608 905d75cb
+decoy-probe p1 4608 4608 557901a2
+decoy-probe p2 9216 4608 99f27c2e discont
+decoy-probe p3 13824 2976 66f9b83c
+decoy-probe warnings 1
+decoy-probe w0 damage at 18573: 307200 bytes are not a valid frame, dropped: 0 samples lost
+decoy-probe seek 4200 landed 0, then 0 4608 905d75cb
+decoy-probe seek 8400 landed 4608, then 4608 4608 557901a2
+decoy-probe seek 12600 landed 9216, then 9216 4608 99f27c2e
+decoy-probe seek warnings 0
+zero-middle file 27059 bytes: 64 bytes zeroed at 13529
+zero-middle open samples=16800 exact=true
+zero-middle packets 3
+zero-middle p0 0 4608 905d75cb
+zero-middle p1 9216 4608 99f27c2e lost=4608 discont
+zero-middle p2 13824 2976 66f9b83c
+zero-middle warnings 1
+zero-middle w0 damage at 13404: 5169 bytes are not a valid frame, dropped: 4608 samples lost
+zero-middle seek 4200 landed 0, then 0 4608 905d75cb
+zero-middle seek 8400 landed 0, then 0 4608 905d75cb
+zero-middle seek 12600 landed 9216, then 9216 4608 99f27c2e
+zero-middle seek warnings 0
+cut-tail file 26959 bytes: the last 100 bytes cut
+cut-tail open samples=13824 exact=false
+cut-tail packets 3
+cut-tail p0 0 4608 905d75cb
+cut-tail p1 4608 4608 557901a2
+cut-tail p2 9216 4608 99f27c2e
+cut-tail warnings 2
+cut-tail w0 damage at 23688: 3271 trailing bytes are not a valid frame, dropped
+cut-tail w1 damage at 8286: STREAMINFO declares 16800 samples but the frames end at 13824
+cut-tail seek 4200 landed 0, then 0 4608 905d75cb
+cut-tail seek 8400 landed 4608, then 4608 4608 557901a2
+cut-tail seek 12600 landed 9216, then 9216 4608 99f27c2e
+cut-tail seek warnings 0

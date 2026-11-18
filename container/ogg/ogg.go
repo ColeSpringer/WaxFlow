@@ -55,3 +55,41 @@ func crc32(crc uint32, b []byte) uint32 {
 	}
 	return crc
 }
+
+// crcPow[k] is x^(8*2^k) modulo the polynomial: a register of 1 advanced
+// over 2^k zero bytes.
+var crcPow = func() (t [64]uint32) {
+	t[0] = crc32(1, []byte{0})
+	for k := 1; k < len(t); k++ {
+		t[k] = crcMul(t[k-1], t[k-1])
+	}
+	return
+}()
+
+// crcMul is a times b modulo the checksum polynomial, each a register's
+// polynomial with bit 31 its x^31 term.
+func crcMul(a, b uint32) uint32 {
+	var r uint32
+	for ; a != 0; a >>= 1 {
+		if a&1 != 0 {
+			r ^= b
+		}
+		if b&0x80000000 != 0 {
+			b = b<<1 ^ 0x04C11DB7
+		} else {
+			b <<= 1
+		}
+	}
+	return r
+}
+
+// crcShift is crc advanced over n zero bytes, which is what a checksum's
+// leading part contributes once n more bytes follow it.
+func crcShift(crc uint32, n int64) uint32 {
+	for k := 0; n > 0; k, n = k+1, n>>1 {
+		if n&1 != 0 {
+			crc = crcMul(crc, crcPow[k])
+		}
+	}
+	return crc
+}

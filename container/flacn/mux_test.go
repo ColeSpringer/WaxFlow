@@ -79,7 +79,7 @@ func encodeStreamWith(t *testing.T, src *audio.Buffer, opts *flac.EncoderOptions
 // asserting it equals src.
 func decodeStream(t *testing.T, raw []byte, src *audio.Buffer) flac.StreamInfo {
 	t.Helper()
-	d, err := flacn.NewDemuxer(container.BytesSource(raw), &flacn.DemuxerOptions{Strict: true})
+	d, err := flacn.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}

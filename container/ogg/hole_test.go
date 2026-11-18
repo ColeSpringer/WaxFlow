@@ -127,7 +127,7 @@ func TestOggFLACCleanJumpIsAHole(t *testing.T) {
 	if len(damage) != 1 || !strings.Contains(damage[0], "skip") {
 		t.Errorf("damage %v, want one warning that the frames skip", damage)
 	}
-	sd, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true})
+	sd, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestOggDamageCountIgnoresTheListCap(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	n := d.warnings.DamageCount()
+	n := d.log.DamageCount()
 	if err := d.warn(int64(container.MaxWarnings+5), "damaged page, resyncing"); err != nil {
 		t.Fatal(err)
 	}

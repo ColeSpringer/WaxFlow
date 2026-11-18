@@ -52,7 +52,7 @@ func fragFileWithSidx(t *testing.T, npkt int, preSkip int64, mk func(mediaLen, d
 // openFrag opens a crafted fragmented file and returns its demuxer.
 func openFrag(t *testing.T, raw []byte, strict bool) (*Demuxer, error) {
 	t.Helper()
-	return NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: strict})
+	return NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: strict})
 }
 
 // TestFragmentedSidxStatesTheLength is the sidx tier, one cell per structural

@@ -82,7 +82,7 @@ func (d *Demuxer) parseSV8() error {
 			if d.w.Err() != nil {
 				return d.w.Err()
 			}
-			return malformed("no whole packet at offset %d before the first audio packet", pos)
+			return malformed("no whole packet at offset %d before the first audio packet", d.log.At(pos))
 		}
 		if blk.key == "AP" {
 			firstAP = pos
@@ -122,7 +122,9 @@ func (d *Demuxer) parseSV8() error {
 		return malformed("no stream header before the first audio packet")
 	}
 
-	d.stripTrailers(shEnd)
+	if err := d.stripTrailers(shEnd); err != nil {
+		return err
+	}
 	if err := d.sv8Walk(firstAP); err != nil {
 		return err
 	}

@@ -65,6 +65,11 @@ type mapping interface {
 	// resetTiming clears any stateful per-packet timing (Vorbis block-size
 	// tracking) after a seek restart.
 	resetTiming()
+
+	// heldTiming is that timing as it stands now, and putTiming puts it
+	// back, for a seek that is canceled on the way.
+	heldTiming() int
+	putTiming(int)
 }
 
 // reporter is the demuxer's warning pair, handed to a mapping that verifies a

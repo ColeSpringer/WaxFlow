@@ -25,7 +25,7 @@ func TestStrictOpenSurvivesUndecodableFirstFrame(t *testing.T) {
 	// fails the decode.
 	frame := []byte{0xFF, 0xF1, 0x58, 0x40, 0x01, 0x3F, 0xFC, 0x40, 0x00}
 	raw := append(append([]byte(nil), frame...), frame...)
-	d, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true})
+	d, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatalf("strict open must survive a payload the probe cannot decode: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestTruncatedTailDropped(t *testing.T) {
 		t.Error("truncated tail produced no warning")
 	}
 
-	ds, err := NewDemuxer(container.BytesSource(trunc), &DemuxerOptions{Strict: true})
+	ds, err := NewDemuxer(container.BytesSource(trunc), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatalf("NewDemuxer(strict): %v", err)
 	}
@@ -216,7 +216,7 @@ func TestTruncatedTailDropped(t *testing.T) {
 		t.Errorf("warnings after Walk = %v, want the dropped tail", dw.Warnings())
 	}
 
-	sw, err := NewDemuxer(container.BytesSource(trunc), &DemuxerOptions{Strict: true})
+	sw, err := NewDemuxer(container.BytesSource(trunc), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatalf("NewDemuxer(strict walk): %v", err)
 	}
@@ -265,7 +265,7 @@ func TestOnlyFrameTruncated(t *testing.T) {
 	if landed, err := d.SeekSample(context.Background(), 0, 1<<20); err != nil || landed != 0 {
 		t.Errorf("SeekSample = %d, %v; want 0, nil", landed, err)
 	}
-	if _, err := NewDemuxer(container.BytesSource(trunc), &DemuxerOptions{Strict: true}); !errors.Is(err, waxerr.ErrMalformedInput) {
+	if _, err := NewDemuxer(container.BytesSource(trunc), &container.DemuxerOptions{Strict: true}); !errors.Is(err, waxerr.ErrMalformedInput) {
 		t.Errorf("strict open = %v, want malformed", err)
 	}
 }

@@ -22,3 +22,15 @@ func SyntheticMP3Frames(n int) []byte {
 	}
 	return bytes.Repeat(f, n)
 }
+
+// ShortMP3FrameLen is the size of one frame ShortMP3Frames builds.
+const ShortMP3FrameLen = 24
+
+// ShortMP3Frames returns n whole MPEG-2 Layer III frames: 8 kbit/s, 24 kHz,
+// mono, no CRC, 576 samples in 24 bytes each, the smallest frame a walk
+// accepts, so a run long enough for a frame index snapshot is under 100 KB.
+func ShortMP3Frames(n int) []byte {
+	f := make([]byte, ShortMP3FrameLen)
+	copy(f, []byte{0xFF, 0xF3, 0x14, 0xC4})
+	return bytes.Repeat(f, n)
+}

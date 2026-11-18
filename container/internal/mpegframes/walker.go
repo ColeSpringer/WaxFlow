@@ -22,7 +22,6 @@
 package mpegframes
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -179,9 +178,10 @@ func (w *Walker) note(off int64, format string, args ...any) {
 }
 
 // Begin parses the head of the run at off and positions on the first audio
-// frame: a free-format stream is refused, leading junk is scanned past and
-// reported, and a Xing, Info, or VBRI metadata frame is consumed rather than
-// delivered. It reports what that frame declared, and whether there was one.
+// frame: a free-format stream is refused, junk at the head and behind a
+// metadata frame is scanned past and reported, and a Xing, Info, or VBRI
+// metadata frame is consumed rather than delivered. It reports what that
+// frame declared, and whether there was one.
 func (w *Walker) Begin(off int64) (VBRInfo, bool, error) {
 	none := VBRInfo{Delay: -1, Padding: -1}
 
@@ -218,13 +218,19 @@ func (w *Walker) Begin(off int64) (VBRInfo, bool, error) {
 				// Tag frame with no audio behind it (or damage): scan. An
 				// unsized header is damage too: taken as the reference it
 				// would index a frame of no length that Frame cannot read.
+				tagEnd := first
 				var ok bool
-				first, fh, ok = w.nextCandidate(first, first+maxResync)
+				first, fh, ok = w.nextCandidate(tagEnd, tagEnd+maxResync)
 				if !ok {
 					if w.w.Err() != nil {
 						return none, false, w.w.Err()
 					}
 					return none, false, w.malformed("no audio frames after the VBR tag")
+				}
+				if first != tagEnd {
+					if err := w.warn(tagEnd, "%d unparsable bytes after the metadata frame", first-tagEnd); err != nil {
+						return none, false, err
+					}
 				}
 			}
 			h = fh
@@ -336,65 +342,33 @@ func (w *Walker) runEnd() int64 {
 // a reference header exists it must also be kin, and a candidate is confirmed
 // by the header its size points at (the end of data counts).
 //
-// The reads are exact, and a clean run costs the header and one frame: the
-// header at from is confirmed by one contiguous read of the frame with the
-// header behind it. Only junk pays a scan, in spans that start at 1 KiB and
-// double up to a window, so the bytes read stay within about twice the junk
-// and the reads grow with its length rather than its content: every sync
-// byte in a span is tried from the same view before more is asked for, and a
-// header straddling a span's end is tried from the start of the next. The
-// old loop asked for a whole window from every false candidate, and forward
-// extension turned that into a read per sync byte in the junk.
+// The header at from is tried first, through exact reads, so a clean run
+// costs the header and one frame. Only junk pays the scan.
 func (w *Walker) nextCandidate(from, limit int64) (int64, mp3.Header, bool) {
 	limit = min(limit, w.w.DataEnd())
 	if from >= limit {
 		return 0, mp3.Header{}, false
 	}
-	if h, ok := w.confirmed(from, w.w.Peek(from, mp3.HeaderLen)); ok {
+	if h, ok := w.confirmed(from, w.w.Peek(from, mp3.HeaderLen), w.w.Peek); ok {
 		return from, h, true
 	}
-	span := int64(1 << 10)
-	for off := from; off < limit; {
-		// A candidate below limit may carry its header past it.
-		n := min(span, limit-off+mp3.HeaderLen-1)
-		buf := w.w.Peek(off, int(n))
-		if len(buf) < mp3.HeaderLen {
-			return 0, mp3.Header{}, false
+	var h mp3.Header
+	off, ok := w.w.Scan(from, limit, []byte{0xFF}, mp3.HeaderLen, func(off int64, hdr []byte) srcwin.Verdict {
+		got, ok := w.confirmed(off, hdr, w.w.Ahead)
+		if !ok {
+			return srcwin.Skip
 		}
-		next := off + int64(len(buf))
-		for i := 0; i < len(buf); {
-			j := bytes.IndexByte(buf[i:], 0xFF)
-			if j < 0 {
-				break
-			}
-			i += j
-			cand := off + int64(i)
-			if cand >= limit {
-				return 0, mp3.Header{}, false
-			}
-			if i+mp3.HeaderLen > len(buf) {
-				next = cand // straddles the span: the next span starts on it
-				break
-			}
-			if h, ok := w.confirmed(cand, buf[i:i+mp3.HeaderLen]); ok {
-				return cand, h, true
-			}
-			i++
-		}
-		if int64(len(buf)) < n {
-			return 0, mp3.Header{}, false // the data ended inside the span
-		}
-		off = next
-		span = min(span*2, srcwin.Chunk)
-	}
-	return 0, mp3.Header{}, false
+		h = got
+		return srcwin.Take
+	})
+	return off, h, ok
 }
 
 // confirmed parses the candidate header hdr found at off and confirms it by
-// the header its size points at, read in one exact read with the frame: the
-// read starts inside the window, so it extends it rather than rebasing, and
-// a candidate that is a frame costs the frame and nothing more.
-func (w *Walker) confirmed(off int64, hdr []byte) (mp3.Header, bool) {
+// the header its size points at, read with the frame in one read that starts
+// inside the window and so extends it. read is Peek for the one offset a
+// caller knows and Ahead inside a scan.
+func (w *Walker) confirmed(off int64, hdr []byte, read func(off int64, n int) []byte) (mp3.Header, bool) {
 	h, err := mp3.ParseHeader(hdr)
 	if err != nil || h.Size() == 0 || (w.spf != 0 && !w.hdr.Kin(h)) {
 		return mp3.Header{}, false
@@ -403,7 +377,7 @@ func (w *Walker) confirmed(off int64, hdr []byte) (mp3.Header, bool) {
 	if next >= w.w.DataEnd() {
 		return h, true // runs to the end: nothing to confirm against
 	}
-	frame := w.w.Peek(off, h.Size()+mp3.HeaderLen)
+	frame := read(off, h.Size()+mp3.HeaderLen)
 	if len(frame) < h.Size()+mp3.HeaderLen {
 		return mp3.Header{}, false
 	}
@@ -475,12 +449,13 @@ func (w *Walker) extend() (bool, error) {
 	w.w.Trim(last)
 	h, ok := w.headerAt(last)
 	if !ok {
-		// The indexed frame itself went unreadable (shrinking source);
-		// treat as end.
-		w.done, w.endFinding = true, true
+		// A read that failed is no end: the walk is not done.
 		if err := w.w.Err(); err != nil {
 			return false, err
 		}
+		// The indexed frame itself went unreadable (shrinking source);
+		// treat as end.
+		w.done, w.endFinding = true, true
 		return false, w.compare()
 	}
 	next := last + int64(h.Size())

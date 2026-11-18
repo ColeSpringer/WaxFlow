@@ -53,7 +53,7 @@ func TestWalkFindsJunkBetweenFrames(t *testing.T) {
 		t.Errorf("warnings after Walk = %v, want %v", d.Warnings(), want)
 	}
 
-	strict, err := NewDemuxer(container.BytesSource(damaged), &DemuxerOptions{Strict: true})
+	strict, err := NewDemuxer(container.BytesSource(damaged), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatalf("strict refused at open, before the walk reached the junk: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestWalkFindsJunkBetweenFrames(t *testing.T) {
 	}
 
 	// A clean stream walks to its end with nothing to say.
-	clean, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true})
+	clean, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/mka"
 	"github.com/colespringer/waxflow/container/mpa"
+	"github.com/colespringer/waxflow/container/ogg"
 	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/testutil"
@@ -408,6 +410,8 @@ func TestPlanRemuxDeclinesCodecMismatch(t *testing.T) {
 // decoder and no encoder, so naming their revisions would invalidate entries for
 // fixes that cannot reach them; the trailer synthesis is the one thing here that
 // can go wrong in a way that is wrong playback rather than merely older bytes.
+// The packets copied are the ones the source's demuxer delivers, so its
+// revision leads the plan as it leads a transcode's (ADR-0004).
 func TestRemuxPlanNamesNoCodecVersion(t *testing.T) {
 	src := remuxFixture(t, waxflow.TranscodeOptions{Format: "opus"}, 4800)
 	track := probeTrack(t, src, "opus")
@@ -419,12 +423,11 @@ func TestRemuxPlanNamesNoCodecVersion(t *testing.T) {
 	if plan == nil {
 		t.Fatal("PlanRemux declined a plain container rewrite")
 	}
-	// The trailer synthesis and the muxer, and nothing else: no decoder and
-	// no encoder ran, so no revision of either can reach these bytes.
-	if len(plan.Versions) != 2 || plan.Versions[0] != waxflow.RemuxVersion ||
-		plan.Versions[1] != mka.MuxerVersion {
-		t.Errorf("remux Versions = %v, want exactly [%s %s]", plan.Versions,
-			waxflow.RemuxVersion, mka.MuxerVersion)
+	// The Ogg demuxer, the trailer synthesis and the muxer, and nothing
+	// else: no decoder and no encoder ran, so no revision of either can
+	// reach these bytes.
+	if want := []string{ogg.DemuxerVersion, waxflow.RemuxVersion, mka.MuxerVersion}; !slices.Equal(plan.Versions, want) {
+		t.Errorf("remux Versions = %v, want exactly %v", plan.Versions, want)
 	}
 	// The plan must promise the source's own format, not a chain's output.
 	if plan.Format != track.Fmt {

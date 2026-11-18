@@ -142,7 +142,8 @@ func (m *indexableMedia) IndexSnapshot() []byte         { return m.ix.IndexSnaps
 func (m *indexableMedia) RestoreIndex(blob []byte) bool { return m.ix.RestoreIndex(blob) }
 
 // Walk implements Walker: the demuxer's deferred walk, or nothing, and then
-// the track this Media reports and decodes against is refreshed from it.
+// the track this Media reports and decodes against is refreshed from it,
+// which takes a length a demuxer with no walk settled at a read's end.
 //
 // A finished walk has measured the payload, and the measurement has to be
 // observable where format.Walker says it is: without the refresh the media
@@ -150,13 +151,13 @@ func (m *indexableMedia) RestoreIndex(blob []byte) bool { return m.ix.RestoreInd
 // its own walk. Only the length fields move (Fmt and Delay are fixed at
 // open), and the settled count is what delivery was already producing from
 // these bytes, so a Walk taken mid-read cannot shift the position or the
-// end: the cap only stops promising samples the packets never held.
+// end: the cap only stops promising samples the packets never held, or is
+// lifted where a read's end found the length not to hold.
 func (m *media) Walk(ctx context.Context) error {
-	if m.walker == nil {
-		return nil
-	}
-	if err := m.walker.Walk(ctx); err != nil {
-		return err
+	if m.walker != nil {
+		if err := m.walker.Walk(ctx); err != nil {
+			return err
+		}
 	}
 	m.adoptLength()
 	return nil
@@ -196,6 +197,16 @@ func (m *media) adoptLength() {
 // what puts the measurement on this Media, and costs nothing then.
 func (m *media) Walked() bool {
 	return m.walker == nil || m.walker.Walked()
+}
+
+// MeasureSamples implements Measurer from the demuxer's container.Measurer.
+func (m *media) MeasureSamples(ctx context.Context) (int64, bool, error) {
+	ms, ok := m.demux.(container.Measurer)
+	if !ok {
+		return 0, false, nil
+	}
+	n, err := ms.MeasureSamples(ctx, m.track.ID)
+	return n, err == nil && n >= 0, err
 }
 
 // Info returns the same *Info every time, with its live fields refreshed on

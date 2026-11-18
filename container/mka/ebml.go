@@ -70,7 +70,7 @@ func (e element) dataEnd() int64 { return e.dataOff + e.size }
 // caller advancing to dataEnd makes progress.
 func (d *Demuxer) readElement(off, end int64) (element, error) {
 	if off+2 > end {
-		return element{}, malformed("element header at %d runs past %d", off, end)
+		return element{}, malformed("element header at %d runs past %d", d.log.At(off), d.log.At(end))
 	}
 	var hdr [12]byte
 	n := int64(len(hdr))
@@ -83,11 +83,11 @@ func (d *Demuxer) readElement(off, end int64) (element, error) {
 	buf := hdr[:n]
 	id64, idLen, _, ok := parseVint(buf, true)
 	if !ok || id64 > 0xFFFFFFFF {
-		return element{}, malformed("invalid element ID at %d", off)
+		return element{}, malformed("invalid element ID at %d", d.log.At(off))
 	}
 	size, sizeLen, unknown, ok := parseVint(buf[idLen:], false)
 	if !ok {
-		return element{}, malformed("invalid element size at %d", off)
+		return element{}, malformed("invalid element size at %d", d.log.At(off))
 	}
 	e := element{id: uint32(id64), dataOff: off + int64(idLen+sizeLen)}
 	if unknown {
@@ -98,7 +98,7 @@ func (d *Demuxer) readElement(off, end int64) (element, error) {
 	// size > end-dataOff rather than dataOff+size > end: a near-2^63 size
 	// would overflow the sum and slip past the guard. dataOff <= end here.
 	if e.dataOff > end || int64(size) > end-e.dataOff {
-		return element{}, malformed("element %#x at %d (size %d) runs past %d", e.id, off, size, end)
+		return element{}, malformed("element %#x at %d (size %d) runs past %d", e.id, d.log.At(off), size, d.log.At(end))
 	}
 	e.size = int64(size)
 	return e, nil

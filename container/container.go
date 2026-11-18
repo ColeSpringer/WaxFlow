@@ -224,7 +224,8 @@ type Track struct {
 	// verifies its declared total against the payload at open sets it (flacn
 	// and wv scan their tail for the closing frame, Ogg-FLAC reads the last
 	// whole frame in its tail), and one that defers that work sets it when
-	// Walk finishes.
+	// Walk finishes. A whole read from the first packet that ends off it
+	// withdraws it (SettleRead).
 	// A total nothing checked leaves it false, so a mismatch stays a tolerated
 	// oddity rather than a truncation.
 	SamplesExact bool
@@ -382,8 +383,21 @@ type Packet struct {
 	// the first packet after a hole, which also has Discont set. A reader
 	// that delivers the silence counts it (format.Info.Lost), since the
 	// length then no longer says how much of the stream is the file's own.
+	// A copy hands it to a muxer only where the packets state their own
+	// positions (WavPack), whose length then counts it; elsewhere it writes
+	// silent frames into the hole first.
 	Lost int64
 	codec.Packet
+}
+
+// DemuxerOptions configures a demuxer.
+type DemuxerOptions struct {
+	// Strict turns tolerated damage (the Warnings list) into errors.
+	Strict bool
+	// Base is where the source's byte 0 sits in the file it was cut from
+	// (the bytes behind a leading ID3v2 tag). A demuxer adds it to every
+	// offset it reports.
+	Base int64
 }
 
 // Demuxer yields a container's tracks and packets. ReadPacket returns
@@ -462,7 +476,8 @@ const (
 // caller should know about, surfaced through probe results. Kind says which of
 // the two it is; see [WarningKind].
 type Warning struct {
-	// Offset is the byte position of the oddity, -1 when not localized.
+	// Offset is the oddity's byte position in the file, -1 when not
+	// localized.
 	Offset int64
 	Msg    string
 	Kind   WarningKind
@@ -490,11 +505,15 @@ type Damaged interface {
 // nothing. Unlike a hole (Packet.Lost) nothing stands in for it in a read,
 // which simply ends.
 //
-// It is 0 for a whole file, for a header that states no length to fall short
-// of, and for a claim the demuxer cannot count in samples (ASF's packets, a
-// Matroska Duration). A demuxer whose walk is deferred (Walker) knows it once
+// It is 0 for a whole file, for a track that states no length to fall short
+// of (the length a header declares, or one the open measured), and for a
+// claim the demuxer cannot count in samples (ASF's packets, a Matroska
+// Duration). A demuxer whose walk is deferred (Walker) knows it once
 // that walk, or a read to the end of the payload, has held the declared count
-// against what is there.
+// against what is there. One that checks its length at open (WavPack, and
+// FLAC native or in Ogg) adds what an exact length states past the end of a
+// read from the first packet: samples that read does not deliver, some of
+// which a seek may still reach.
 type Truncated interface {
 	TruncatedSamples(track int) int64
 }
@@ -567,6 +586,14 @@ func WalkCanceled(ctx context.Context, prefix string) error {
 		return waxerr.Annotate(prefix+"walk canceled", err)
 	}
 	return nil
+}
+
+// Measurer measures a track whose open did not call its length exact,
+// decoding nothing and leaving the track as it was. One reads headers alone;
+// another reads the packets as a read does, at a read's cost. A negative
+// answer says it has none; ctx stops it between steps.
+type Measurer interface {
+	MeasureSamples(ctx context.Context, track int) (int64, error)
 }
 
 // MaxWarnings caps what a Warnings list keeps of each kind.

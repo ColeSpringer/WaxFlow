@@ -66,7 +66,7 @@ func TestFirstFrameNotZero(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := flacn.NewDemuxer(container.BytesSource(shifted), &flacn.DemuxerOptions{Strict: true})
+	got, err := flacn.NewDemuxer(container.BytesSource(shifted), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatalf("a strict open refused the renumbered stream: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestSourceLengthTotalIsANote(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			raw := patchFLACTotal(t, renumbered, c.total)
-			if _, err := flacn.NewDemuxer(container.BytesSource(raw), &flacn.DemuxerOptions{Strict: true}); (err != nil) != c.damage {
+			if _, err := flacn.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); (err != nil) != c.damage {
 				t.Errorf("a strict open returned %v; damage expected: %v", err, c.damage)
 			}
 			d, err := flacn.NewDemuxer(container.BytesSource(raw), nil)

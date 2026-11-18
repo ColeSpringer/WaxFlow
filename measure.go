@@ -22,13 +22,15 @@ const measureCeiling = int64(1) << 61
 //
 // It takes the cheapest route that works: a length the open settled costs no
 // read, a deferred walk (MP3, Matroska, fragmented MP4, the frame counts of a
-// WMA v1/v2 track) reads headers, a source with exact positions is seeked past
-// its end, and one whose positions are rounded and whose codec counts no
-// frames (WMA Pro, Voice and Lossless in ASF) is decoded from the start and
-// counted, since a seek there lands on a stated time, not on the decode. The
-// walk and the count both stop when ctx ends, with CodeCanceled, the walk
-// pausing where the next measure of the same media resumes it; a seek past
-// the end is a few reads and runs whole.
+// WMA v1/v2 track) reads headers, as does a demuxer that measures a length
+// its open would not promise (WavPack, and FLAC in Ogg, which reads its
+// packets as a read does), a source with exact positions is seeked past its
+// end, and one whose positions are rounded and whose codec counts no frames
+// (WMA Pro, Voice and Lossless in ASF) is decoded from the start and
+// counted, since a seek there lands on a stated time, not on the decode.
+// The walk and the count both stop when ctx ends, with CodeCanceled, the
+// walk pausing where the next measure of the same media resumes it; a seek
+// past the end is a few reads and runs whole.
 func MeasureLength(ctx context.Context, med format.Media) (container.Track, error) {
 	if med == nil {
 		return container.Track{}, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: MeasureLength of a nil Media")
@@ -42,6 +44,20 @@ func MeasureLength(ctx context.Context, med format.Media) (container.Track, erro
 		return t, nil
 	}
 	var n int64
+	if route == routeSeek {
+		// A demuxer that measures without decoding answers first: its positions
+		// are its blocks' own, which a seek would take on trust, and the
+		// seek's run-up decodes what a damaged tail may not let it.
+		m, ok, err := format.MeasureMedia(ctx, med)
+		if err != nil {
+			return container.Track{}, err
+		}
+		if ok {
+			t.Samples = m
+			t.SamplesExact, t.SamplesAdvisory, t.SamplesCounted = true, false, false
+			return t, nil
+		}
+	}
 	if route == routeDecode {
 		if _, err = med.SeekSample(ctx, 0); err == nil {
 			n, err = countDecoded(ctx, med)

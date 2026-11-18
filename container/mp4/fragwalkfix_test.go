@@ -9,6 +9,7 @@ import (
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/diag"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
 	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/waxerr"
@@ -45,7 +46,7 @@ func craftFragmentsAt(strict bool, src container.Source, timescale int64) *Demux
 	d := &Demuxer{
 		src:        src,
 		size:       src.Size(),
-		opts:       DemuxerOptions{Strict: strict},
+		log:        diag.New("mp4: ", &container.DemuxerOptions{Strict: strict}),
 		w:          srcwin.New(src, src.Size(), "mp4: test"),
 		fragmented: true,
 		trex:       trexDefaults{have: true},
@@ -93,7 +94,7 @@ func TestFragmentedWalkLatchesOnlyWhenItSettles(t *testing.T) {
 
 	t.Run("strict", func(t *testing.T) {
 		cs := &testutil.CountingSource{Src: container.BytesSource(raw)}
-		d, err := NewDemuxer(cs, &DemuxerOptions{Strict: true})
+		d, err := NewDemuxer(cs, &container.DemuxerOptions{Strict: true})
 		if err != nil {
 			t.Fatal(err)
 		}

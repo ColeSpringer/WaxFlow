@@ -1,6 +1,9 @@
 package flacn_test
 
 import (
+	"os"
+	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/colespringer/waxflow/container"
@@ -25,12 +28,32 @@ func FuzzDemux(f *testing.F) {
 	// Frames whose bytes do not check, mid-stream: the resync.
 	f.Add(damageFrames(f, full, frameSpans(f, full), 1))
 	f.Add(damageFrames(f, noise, frameSpans(f, noise), 0, 2))
+	// Frames behind a hole numbered past what its bytes held: a read ends
+	// short of the length the closing frame confirms.
+	f.Add(farBehindAHole(f, full, 1, 5000))
+	// Block size bounds no stream may state, over frames that count by one.
+	f.Add(withBounds(full, 4608, 256))
+	// The short last frame in front of the one before it: read in order, it
+	// lies wholly past the closing frame's end.
+	fr := testutil.FLACFrames(f, full)
+	part := func(k int) []byte { return full[fr[k].Off:fr[k].End] }
+	f.Add(slices.Concat(full[:fr[0].Off], part(0), part(1), part(3), part(2)))
+	// A frame longer than the step its number gives: the read delivers more
+	// than the closing frame's end, which the open called exact.
+	f.Add(longFrameAt(f, packageFixture(f, "golden-noise-s16-l0.flac"), 1, packageFixture(f, "golden-sine-s16-l5.flac")))
+	// Both: frames overlapping in front of the length, and the short last
+	// frame, swapped behind the closing one, wholly past it.
+	long := longFrameAt(f, packageFixture(f, "golden-noise-s16-l0.flac"), 1, packageFixture(f, "golden-sine-s16-l5.flac"))
+	lf := testutil.FLACFrames(f, long)
+	f.Add(slices.Concat(long[:lf[0].Off], long[lf[0].Off:lf[2].Off], long[lf[3].Off:lf[3].End], long[lf[2].Off:lf[2].End]))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		var packets, lastPTS int64
+		// The length the open stated, and where the last packet starting
+		// inside it ends; positions only rise, so the rest start past it.
+		var packets, lastPTS, opened, inEnd int64
 		testutil.DemuxFuzz{
 			Open: func(src container.Source, strict bool) (container.Demuxer, error) {
-				return flacn.NewDemuxer(src, &flacn.DemuxerOptions{Strict: strict})
+				return flacn.NewDemuxer(src, &container.DemuxerOptions{Strict: strict})
 			},
 			// A frame is at least 9 bytes (header, one subframe byte, and
 			// the CRC-16), so packet production is bounded by the input.
@@ -40,13 +63,25 @@ func FuzzDemux(f *testing.F) {
 			// itself starts after it.
 			LateLanding: true,
 			SeekPTS:     true,
-			Opened:      func(testing.TB, container.Demuxer, bool) { packets, lastPTS = 0, -1 },
+			ExactLength: true,
+			// A read may hold more than the open called exact only where
+			// the packets starting inside it end inside it, the excess being
+			// frames longer than their numbers' step, overlapping, and the
+			// rest start past it, numbered past the closing frame the open saw.
+			OpenLength: true,
+			LongerWhen: func(container.Demuxer) bool { return inEnd <= opened },
+			Opened: func(_ testing.TB, d container.Demuxer, _ bool) {
+				packets, lastPTS, inEnd, opened = 0, -1, 0, d.Tracks()[0].Samples
+			},
 			Packet: func(t testing.TB, pkt *container.Packet) {
 				if pkt.PTS < 0 {
 					t.Fatalf("packet %d at %d: positions start at 0", packets, pkt.PTS)
 				}
 				if pkt.PTS <= lastPTS {
 					t.Fatalf("packet %d at %d after one at %d: positions went backwards", packets, pkt.PTS, lastPTS)
+				}
+				if pkt.PTS < opened {
+					inEnd = pkt.PTS + pkt.Dur
 				}
 				lastPTS = pkt.PTS
 				packets++
@@ -58,4 +93,28 @@ func FuzzDemux(f *testing.F) {
 			},
 		}.Run(t, data)
 	})
+}
+
+// longFrameAt returns raw with the first frame of other, a stream of the same
+// shape and a larger block size, put in front of frame at and numbered for
+// that place, and every frame behind it numbered one on.
+func longFrameAt(t testing.TB, raw []byte, at int, other []byte) []byte {
+	t.Helper()
+	frames, long := testutil.FLACFrames(t, raw), testutil.FLACFrames(t, other)[0]
+	out := append([]byte(nil), raw[:frames[at].Off]...)
+	out = append(out, testutil.SetFLACFrameNumber(t, other[long.Off:long.End], false, uint64(at))...)
+	for k := at; k < len(frames); k++ {
+		out = append(out, testutil.SetFLACFrameNumber(t, raw[frames[k].Off:frames[k].End], false, uint64(k+1))...)
+	}
+	return out
+}
+
+// packageFixture loads a file from this package's testdata.
+func packageFixture(t testing.TB, name string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }

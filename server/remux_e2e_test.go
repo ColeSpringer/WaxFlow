@@ -3,10 +3,14 @@ package server_test
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/colespringer/waxflow/codec/wavpack"
 	"github.com/colespringer/waxflow/internal/testutil"
 )
 
@@ -43,6 +47,41 @@ func TestRemuxServesTheMiddleRung(t *testing.T) {
 	}
 	if got := env.srv.Metrics().Remuxes.Load(); got != before+1 {
 		t.Fatalf("remux_total = %d, want %d: the request took a rung other than 2", got, before+1)
+	}
+}
+
+// TestRemuxOfAWavPackHoleStreamsWhole: a WavPack that lost a block streams
+// as a copy to its end, with the length its header promised before the body.
+// /stream direct-plays the file, so the one-shot is the request that copies.
+func TestRemuxOfAWavPackHoleStreamsWhole(t *testing.T) {
+	env, rec := recordingEnv(t, nil)
+	src, err := os.ReadFile(filepath.Join("..", "container", "wv", "testdata", "seek-mono.wv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.root, "hole.wv"), testutil.WavPackWithout(t, src, 10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resp := env.req(t, http.MethodPost, "/transcode?src=lib/hole.wv&format=wavpack", nil)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || err != nil {
+		t.Fatalf("request = %d, read %d bytes (%v)", resp.StatusCode, len(body), err)
+	}
+	if h, err := wavpack.ParseBlockHeader(body); err != nil || h.TotalSamples != 40000 {
+		t.Errorf("the stream's header declares %d samples (%v), want 40000", h.TotalSamples, err)
+	}
+	ended := func() (msg string, attrs string) {
+		for _, r := range rec.Records() {
+			if strings.HasPrefix(r.Msg, "pipeline ") {
+				return r.Msg, r.Attrs
+			}
+		}
+		return "", ""
+	}
+	waitFor(t, "the pipeline to end", func() bool { msg, _ := ended(); return msg != "" })
+	if msg, attrs := ended(); msg != "pipeline finished" || !strings.Contains(attrs, "rung=remux") {
+		t.Errorf("the pipeline ended %q %s, want a remux that finished", msg, attrs)
 	}
 }
 

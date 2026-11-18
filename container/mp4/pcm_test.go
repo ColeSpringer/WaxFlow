@@ -236,7 +236,7 @@ func TestDemuxPCMFixtures(t *testing.T) {
 			// Strict must accept every one: these are well-formed files, and
 			// the one limitation any of them reaches (a rate taken from the
 			// media timescale) is a Note rather than damage.
-			if _, err := NewDemuxer(container.BytesSource(fixture(t, f.name)), &DemuxerOptions{Strict: true}); err != nil {
+			if _, err := NewDemuxer(container.BytesSource(fixture(t, f.name)), &container.DemuxerOptions{Strict: true}); err != nil {
 				t.Errorf("strict mode refused a well-formed file: %v", err)
 			}
 			for _, w := range d.Warnings() {
@@ -939,7 +939,7 @@ func TestPCMEntryDamageIsToleratedAndNamed(t *testing.T) {
 			if !said {
 				t.Errorf("warnings = %v, want damage naming %q", d.Warnings(), tc.want)
 			}
-			if _, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true}); err == nil {
+			if _, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err == nil {
 				t.Error("strict accepted an entry that contradicts itself")
 			}
 		})
@@ -1005,7 +1005,7 @@ func TestByteLinearLengthDisagreementIsNamed(t *testing.T) {
 	if !said {
 		t.Errorf("warnings = %v, want damage naming the two lengths", d.Warnings())
 	}
-	if _, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true}); err == nil {
+	if _, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err == nil {
 		t.Error("strict accepted a track whose two lengths disagree")
 	}
 }
@@ -1114,7 +1114,7 @@ func pcmTruncatedMdat(t *testing.T, frames int64) {
 	if got := int64(len(readAllPacketData(t, d))); got != tr.Samples*unitBytes {
 		t.Errorf("the walk delivered %d bytes for %d frames", got, tr.Samples)
 	}
-	if _, err := NewDemuxer(container.BytesSource(cut), &DemuxerOptions{Strict: true}); err == nil {
+	if _, err := NewDemuxer(container.BytesSource(cut), &container.DemuxerOptions{Strict: true}); err == nil {
 		t.Error("strict accepted a truncated mdat")
 	}
 }
@@ -1395,7 +1395,7 @@ func TestByteLinearTrackOnARescaledTimeline(t *testing.T) {
 			t.Errorf("damage %q on a well-formed file", w.Msg)
 		}
 	}
-	if _, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true}); err != nil {
+	if _, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err != nil {
 		t.Errorf("strict refused a well-formed file: %v", err)
 	}
 	// The packets still tile the track exactly.

@@ -75,6 +75,24 @@ func TestUnknownTotalSentinel(t *testing.T) {
 	}
 }
 
+// TestMaxSamplesInCountsHeadersOfTheLargestBlock: n bytes hold n/32 headers
+// and one more, each stating maxBlockSamples, which no block that passes the
+// sync check exceeds.
+func TestMaxSamplesInCountsHeadersOfTheLargestBlock(t *testing.T) {
+	for _, tc := range []struct{ n, want int64 }{
+		{-1, maxBlockSamples}, {0, maxBlockSamples}, {31, maxBlockSamples}, {64, 3 * maxBlockSamples},
+	} {
+		if got := MaxSamplesIn(tc.n); got != tc.want {
+			t.Errorf("MaxSamplesIn(%d) = %d, want %d", tc.n, got, tc.want)
+		}
+	}
+	hdr := append([]byte(nil), firstBlock(t)[:BlockHeaderLen]...)
+	binary.LittleEndian.PutUint32(hdr[20:], maxBlockSamples-1)
+	if !SyncOK(hdr) {
+		t.Error("a block of one sample under the bound fails the sync check")
+	}
+}
+
 func TestSyncOKRejects(t *testing.T) {
 	block := firstBlock(t)
 	cases := map[string]func([]byte){

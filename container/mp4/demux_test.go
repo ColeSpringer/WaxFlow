@@ -158,7 +158,7 @@ func TestMissingFtypIsANoteNotDamage(t *testing.T) {
 	mangled := append([]byte(nil), full...)
 	copy(mangled[4:8], "xxxx")
 	for _, strict := range []bool{false, true} {
-		d, err := NewDemuxer(container.BytesSource(mangled), &DemuxerOptions{Strict: strict})
+		d, err := NewDemuxer(container.BytesSource(mangled), &container.DemuxerOptions{Strict: strict})
 		if err != nil {
 			t.Fatalf("strict=%v rejected a file with no ftyp: %v", strict, err)
 		}

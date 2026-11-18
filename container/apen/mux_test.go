@@ -219,7 +219,7 @@ func TestMuxUnknownLengthReservesTheMaximum(t *testing.T) {
 		t.Errorf("header says %d frames / %d samples, want 1 / %d", h.TotalFrames, h.Samples(), n)
 	}
 	// The unused entries are zeros and the file still reads back.
-	d, err := apen.NewDemuxer(container.BytesSource(raw), &apen.DemuxerOptions{Strict: true})
+	d, err := apen.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatalf("strict demux of an unknown-length file: %v", err)
 	}
@@ -341,7 +341,7 @@ func TestMuxTagsRideBehindTheAudio(t *testing.T) {
 	// Strict mode is the check that matters: the demuxer cross-checks the
 	// descriptor's count against the bytes it finds, and a tag it failed to
 	// peel would show up there.
-	d, err := apen.NewDemuxer(container.BytesSource(tagged), &apen.DemuxerOptions{Strict: true})
+	d, err := apen.NewDemuxer(container.BytesSource(tagged), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatalf("strict demux of a tagged file: %v", err)
 	}
@@ -380,7 +380,7 @@ func TestMuxPacksAFrameWhoseLastWordIsShort(t *testing.T) {
 	if len(raw) != len(whole) {
 		t.Fatalf("the trimmed packet wrote %d bytes against the whole one's %d", len(raw), len(whole))
 	}
-	d, err := apen.NewDemuxer(container.BytesSource(raw), &apen.DemuxerOptions{Strict: true})
+	d, err := apen.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatalf("strict demux: %v", err)
 	}

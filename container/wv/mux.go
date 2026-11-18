@@ -140,7 +140,7 @@ func (m *Muxer) WritePacket(pkt container.Packet) error {
 		return err
 	}
 	m.blocks++
-	m.samples += pkt.Dur
+	m.samples += pkt.Lost + pkt.Dur // a block states its own index, past a hole too
 	return nil
 }
 

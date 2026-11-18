@@ -2,24 +2,28 @@ package wv
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"fmt"
 	"io"
 	"math"
+	"slices"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/wavpack"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/diag"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
 	"github.com/colespringer/waxflow/container/internal/trailer"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
 var (
-	_ container.Demuxer = (*Demuxer)(nil)
-	_ container.Seeker  = (*Demuxer)(nil)
-	_ container.Warner  = (*Demuxer)(nil)
-	_ container.Tagger  = (*Demuxer)(nil)
+	_ container.Demuxer  = (*Demuxer)(nil)
+	_ container.Seeker   = (*Demuxer)(nil)
+	_ container.Measurer = (*Demuxer)(nil)
+	_ container.Warner   = (*Demuxer)(nil)
+	_ container.Tagger   = (*Demuxer)(nil)
 )
 
 // Hostile-input caps (ADR-0005 invariants).
@@ -40,27 +44,37 @@ const (
 	// start finds the next inside this; without the bound a probe over a
 	// damaged tail would pull the rest of the file into the read window.
 	maxProbe = 2 << 20
+	// maxHops and maxLookahead bound the walk of the stream's headers: the
+	// blocks it steps to (6 hours of this encoder's, 4 MiB read as headers)
+	// and the bytes its resyncs scan.
+	maxHops      = 1 << 17
+	maxLookahead = 1 << 22
+	// maxGaps bounds the gaps in the indexes kept as holes.
+	maxGaps = 1 << 10
 )
 
-// DemuxerOptions configures parsing.
-type DemuxerOptions struct {
-	// Strict turns tolerated damage (the Warnings list) into errors.
-	Strict bool
-}
+// DemuxerVersion is this demuxer's term in the ADR-0004 cache key, carried
+// by its track. Bump it for a change that makes the demuxer deliver other
+// samples for a file that has not changed; the ADR says what revision 2 is.
+const DemuxerVersion = "wv-demux-2"
 
 // Demuxer reads one WavPack track from a native .wv source.
 type Demuxer struct {
-	opts DemuxerOptions
-
-	cfg      wavpack.Config
-	track    container.Track
-	tags     map[string][]string
-	warnings container.Warnings
+	cfg   wavpack.Config
+	track container.Track
+	tags  map[string][]string
+	log   diag.Log
 
 	firstBlock int64 // byte offset of the first audio block
-	// truncated is how far the header's total runs past the blocks
+	// truncated is how far the stated length runs past the blocks
 	// (container.Truncated).
 	truncated int64
+	// declared is the header's total and promised the length the open called
+	// exact, which a decode is cut at: -1 for none.
+	declared, promised int64
+	// reach is where the open found the stream's last block to end, and far
+	// where the last audio block of any shape does: -1 with none found.
+	reach, far int64
 	// initialIndex is the first audio block's own sample index. A .wv file
 	// carved out of a longer encode starts partway up the numbering, so
 	// packet positions are measured from here rather than from zero.
@@ -69,6 +83,28 @@ type Demuxer struct {
 	off   int64 // offset of the current undelivered block
 	cur   wavpack.BlockHeader
 	valid bool
+	// pts and lost are where the current audio block goes on the timeline and
+	// what a hole in front of it took. next is where the read reaches once it
+	// is delivered, and own where its own numbering says the next one starts.
+	pts, lost, next, own int64
+	// outrun is what lets a read deliver more than the open called exact. It
+	// is kept for the fuzz target's length relaxation, since only the read
+	// sees it; nothing in the demuxer reads it.
+	outrun struct {
+		backs    int  // blocks placed behind a step back in the indexes
+		placed   bool // an audio block has been placed
+		headBack bool // the first one placed stepped back
+		// tail is the block whose end agreeing with the total alone made the
+		// length exact (-1 for none), and tailRead says a read delivered it.
+		tail     int64
+		tailRead bool
+	}
+	// whole says next counts from the first block: the read began there, or
+	// at a seek whose walk from there found every block at its own index.
+	whole bool
+
+	first wavpack.BlockHeader // the first audio block's header
+	path  path
 
 	// w is the shared read-ahead window; its data end is the end of block
 	// data (trailing tags stripped during the header parse) and its sticky
@@ -79,11 +115,8 @@ type Demuxer struct {
 // NewDemuxer parses the header of a native WavPack source and positions on
 // the first audio block. The returned Demuxer implements container.Seeker,
 // container.Warner, and container.Tagger.
-func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
-	d := &Demuxer{w: srcwin.New(src, src.Size(), "wavpack: reading block data")}
-	if opts != nil {
-		d.opts = *opts
-	}
+func NewDemuxer(src container.Source, opts *container.DemuxerOptions) (*Demuxer, error) {
+	d := &Demuxer{w: srcwin.New(src, src.Size(), "wavpack: reading block data"), log: diag.New("wavpack: ", opts)}
 	if err := d.parse(); err != nil {
 		return nil, err
 	}
@@ -99,12 +132,7 @@ func malformed(format string, args ...any) error {
 
 // warn records tolerated damage, or fails in strict mode.
 func (d *Demuxer) warn(off int64, format string, args ...any) error {
-	msg := fmt.Sprintf(format, args...)
-	if d.opts.Strict {
-		return malformed("%s (at offset %d)", msg, off)
-	}
-	d.warnings.Damage(off, msg)
-	return nil
+	return d.log.Warn(off, format, args...)
 }
 
 // note records a Warning that Strict must not escalate: this build doing
@@ -112,7 +140,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 // than damage in the file. See [container.Note]. It shares warn's cap and
 // de-duplication, since the list is one list.
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.warnings.Note(off, fmt.Sprintf(format, args...))
+	d.log.Note(off, format, args...)
 }
 
 func (d *Demuxer) parse() error {
@@ -145,7 +173,7 @@ func (d *Demuxer) parse() error {
 					}
 				}
 			}
-			return malformed("no parsable block at offset %d", off)
+			return malformed("no parsable block at offset %d", d.log.At(off))
 		}
 		if h.Audio() {
 			break
@@ -177,8 +205,9 @@ func (d *Demuxer) parse() error {
 	if err != nil {
 		return err
 	}
-	d.firstBlock, d.initialIndex = off, h.BlockIndex
-	d.off, d.cur, d.valid = off, h, true
+	d.firstBlock, d.initialIndex, d.first = off, h.BlockIndex, h
+	d.off, d.cur, d.valid, d.whole = off, h, true, true
+	d.settle()
 
 	// The declared total is the encoder's back-patched length and counts from
 	// sample zero, so it only applies to a stream that starts there; anything
@@ -195,43 +224,87 @@ func (d *Demuxer) parse() error {
 	// is the file disagreeing with itself in a way this build believes the
 	// blocks about, which is a Note.
 	//
-	// SamplesExact says the number is authoritative, which is what a
-	// measurement is. It is not a truncation instruction here: WavPack's
-	// decoder does not over-produce, since every block declares its own sample
-	// count and yields exactly that, so capping a decode at this length can
-	// only ever land where the blocks already end.
+	// SamplesExact says the number is a measurement, and format.Media caps a
+	// decode at it: the two ends agree, or the block beside each bears its
+	// index out. What lies between is the read's to find (settleEnd).
 	samples, exact := int64(-1), false
+	d.declared, d.reach, d.far, d.outrun.tail = -1, -1, -1, -1
 	if h.BlockIndex == 0 && h.TotalSamples >= 0 {
-		// A tail too damaged to locate leaves the declared total standing and
-		// unexact: the read path reports what it finds where it finds it.
+		d.declared = h.TotalSamples
+		// A tail too damaged to locate, past what the bytes can hold, or at
+		// odds with the total and the block in front of it leaves the total
+		// standing and unexact: the read reports what it finds where it lies.
 		samples = h.TotalSamples
-		if end, ok, clean := d.deliverableEnd(); ok {
-			got := end - d.initialIndex
-			switch {
-			case got < samples:
-				if err := d.warn(off, "the header declares %d samples but the blocks end at %d",
-					samples, got); err != nil {
-					return err
-				}
-				d.truncated = samples - got
-			case got > samples:
-				d.note(off, "the header declares %d samples but the blocks run to %d", samples, got)
+		t, ok := d.deliverableEnd()
+		d.setFar(t)
+		if ok = ok && d.vouched(t.end-d.initialIndex, d.w.DataEnd()); ok {
+			d.reach = t.end - d.initialIndex
+		}
+		// Only a tail that could be called exact has its index checked: one
+		// already unsure is the cut file it was, and warns as it did.
+		front := int64(-1) // where the block in front of the tail ends
+		bears := func() (ok bool) {
+			if ok, front = d.frontBears(t); d.w.Err() != nil {
+				front = -1
 			}
+			return ok
+		}
+		if ok && (d.reach == samples || !t.sure || d.borne(bears)) {
 			// Exact only when nothing was resynced past: format.Media caps a
 			// decode at an authoritative length, and a block index read across
 			// a hole counts samples the file does not hold.
-			samples, exact = got, clean
+			if d.reach == samples && t.sure {
+				d.outrun.tail = t.off
+			}
+			samples, exact = d.reach, t.sure
+		} else if ok && d.reach < samples && front >= 0 && front <= t.index {
+			// A tail short of the total and past the block in front of it is
+			// a cut file either way, and not exact. Its tail is its last audio
+			// block, so the rule below finds nothing past it.
+			samples = d.reach
 		}
-	} else if end, ok := d.scanTail(); ok {
-		samples, exact = end-d.initialIndex, true
+	} else {
+		t, ok := d.scanTail()
+		d.setFar(t)
+		// No total to hold the tail to: the length is the two ends' indexes,
+		// each borne out by the block beside it, or there is none.
+		if ok && d.vouched(t.end-d.initialIndex, d.w.DataEnd()) {
+			d.reach = t.end - d.initialIndex
+			if d.borne(func() bool { front, _ := d.frontBears(t); return front && d.headBears(h, t) }) {
+				samples, exact = d.reach, t.sure
+			}
+		}
+	}
+	// A length stated and not exact is no less than the last audio block's
+	// own end, where every open once took it, wherever the bytes could hold
+	// it: a read, a seek or a measure may reach that far.
+	stated := samples
+	if !exact && samples >= 0 && d.far > samples && d.vouched(d.far, d.w.DataEnd()) {
+		samples = d.far
+	}
+	switch {
+	case d.declared >= 0 && samples < d.declared:
+		if err := d.warn(off, "the header declares %d samples but the blocks end at %d", d.declared, samples); err != nil {
+			return err
+		}
+		d.truncated = d.declared - samples
+	case d.declared >= 0 && samples > d.declared:
+		d.note(off, "the header declares %d samples but the blocks run to %d", d.declared, samples)
+	case samples > stated:
+		d.note(off, "the tail ends at %d samples but the blocks run to %d", stated, samples)
+	}
+	d.promised = -1
+	if exact {
+		d.promised = samples
 	}
 	d.track = container.Track{
-		Codec:        codec.WavPack,
-		CodecConfig:  cfgBlob,
-		Fmt:          f,
-		Samples:      samples,
-		SamplesExact: exact,
-		Default:      true,
+		Codec:          codec.WavPack,
+		CodecConfig:    cfgBlob,
+		Fmt:            f,
+		DemuxerVersion: DemuxerVersion,
+		Samples:        samples,
+		SamplesExact:   exact,
+		Default:        true,
 	}
 	// The stream's own depth, when the container width it decodes at is wider
 	// (a 20-bit source in 24-bit words). Probe reports this rather than the
@@ -259,22 +332,69 @@ func (d *Demuxer) stripTrailers() error {
 	return d.w.Err()
 }
 
-// scanTail looks back from the end of the audio for the last block, and
-// returns the sample index one past its last frame. It is how a stream whose
-// header carries no total gets a length.
-//
-// The scan is backward only in where it starts looking; a candidate counts
-// only once its declared length lands exactly on the end of the audio, which
-// is what tells the real last block from a "wvpk" the payload happened to
-// spell.
-func (d *Demuxer) scanTail() (int64, bool) {
+// tail is the last audio block a read can deliver, as the open measured it.
+type tail struct {
+	off        int64 // where the block starts
+	held       int64 // the window holds the bytes from here to it
+	index, end int64 // its first sample's index, and the index one past its last
+	// any is the index the last audio block of any shape ends at, which is
+	// where every open once took its length from; 0 for none.
+	any int64
+	// sure says nothing on the way puts the measurement in doubt: no bytes
+	// stepped over, no index that does not carry on, no block of another
+	// shape behind the stream's last.
+	sure bool
+}
+
+// scanTail looks back from the end of the audio for the last block of the
+// stream's shape whose length lands on that end, which tells it from a
+// "wvpk" a payload spells. One of another shape leaves the answer unsure.
+func (d *Demuxer) scanTail() (tail, bool) {
+	t := tail{sure: true}
 	audioEnd := d.w.DataEnd()
 	lo := max(d.firstBlock, audioEnd-maxTailScan)
-	for hi := audioEnd; hi > lo; {
-		from := max(lo, hi-srcwin.Chunk)
-		buf := d.w.BytesAt(from, int(hi-from))
+	passed, step := int64(-1), int64(0) // the block passed over, and its step's from
+	try := func(cand, from int64) bool {
+		if passed >= 0 && cand >= passed {
+			return false // offered before the pass
+		}
+		h, ok := d.blockAt(cand)
+		if !ok || !h.Audio() || !d.tilesToEnd(cand+h.Size, audioEnd) {
+			return false
+		}
+		if t.any == 0 {
+			t.any = h.BlockIndex + int64(h.BlockSamples)
+		}
+		if !d.fits(h) {
+			if t.sure {
+				t.sure, passed, step = false, cand, from
+				return true
+			}
+			return false
+		}
+		t.off, t.held, t.index, t.end = cand, from, h.BlockIndex, h.BlockIndex+int64(h.BlockSamples)
+		return true
+	}
+	found := d.scanBack(lo, audioEnd, try)
+	if t.sure {
+		return t, found
+	}
+	// The scan once ended at the block passed over, so behind it the scan
+	// only strengthens the answer. Resumed at the step's own from, it offers
+	// what that step had left, from bytes the window holds.
+	hi := min(audioEnd, step+srcwin.Chunk)
+	found, _ = d.w.Try(true, func() bool { return d.scanBack(lo, hi, try) })
+	return t, found
+}
+
+// scanBack offers try each "wvpk" in [lo, hi), the last first, with the
+// offset its step read from, until try takes one. A step reads a Chunk in
+// front of the window, so a hop forward from a candidate reads nothing.
+func (d *Demuxer) scanBack(lo, hi int64, try func(cand, from int64) bool) bool {
+	for from := max(lo, hi-srcwin.Chunk); hi > lo; from = max(lo, from-srcwin.Chunk) {
+		buf := d.w.Back(from, int(hi-from))
 		if len(buf) == 0 {
-			return 0, false
+			return false
 		}
 		for rel := len(buf); ; {
 			i := bytes.LastIndex(buf[:rel], magic)
@@ -282,77 +402,143 @@ func (d *Demuxer) scanTail() (int64, bool) {
 				break
 			}
 			rel = i + len(magic) - 1
-			cand := from + int64(i)
-			h, ok := d.blockAt(cand)
-			if !ok || !h.Audio() || !d.tilesToEnd(cand+h.Size, audioEnd) {
-				continue
+			if try(from+int64(i), from) {
+				return true
 			}
-			return h.BlockIndex + int64(h.BlockSamples), true
 		}
 		if from == lo {
-			break // the whole window is scanned
+			break // the whole range is scanned
 		}
 		// Overlap by the magic length so a candidate straddling the chunk
 		// boundary is not lost between passes.
 		hi = from + int64(len(magic)) - 1
 	}
-	return 0, false
+	return false
 }
 
-// deliverableEnd returns the sample index one past the last block a read can
-// deliver, which is what verifies the header's declared total.
-//
-// The tail scan answers it outright for an intact stream, whose blocks tile
-// exactly onto the end of the audio, and that is the whole cost in the common
-// case. A stream cut mid-block has no such tiling and the scan declines, so the
-// fallback walks: bisection to the closing window, then block by block to the
-// last one whose bytes are all there (blockAt refuses a block running past the
-// data end, so a partial one is never counted).
-//
-// The walk is a measurement and leaves nothing behind: its warnings are
-// dropped and strict mode is off for the duration. The damage it crosses is
-// read-time damage, which a read reports when it reaches it and strict mode
-// refuses there; escalating it here would refuse a merely-resynced file at
-// open. The length is the one thing this pass objects to, and parse warns
-// about that itself.
-//
-// clean reports that the pass met no damage, which is what decides whether the
-// answer is authoritative. The walk resyncs past unparsable bytes, and whole
-// blocks can go missing under one: the end it then reports is the last block's
-// own index, which counts the missing blocks' samples as if they were there.
-// That number is still the best answer for where the stream ends, and it is
-// not one to promise a caller who sums lengths.
-func (d *Demuxer) deliverableEnd() (end int64, ok, clean bool) {
-	if end, ok := d.scanTail(); ok {
-		return end, true, true
+// deliverableEnd is the last block a read can deliver, which verifies the
+// header's total. The tail scan answers for a stream whose blocks tile onto
+// the end of the audio, in one window; one cut mid-block is walked.
+func (d *Demuxer) deliverableEnd() (tail, bool) {
+	t, ok := d.scanTail()
+	if ok {
+		return t, true
 	}
-	strict, mark, seen := d.opts.Strict, d.warnings.Mark(), d.warnings.DamageCount()
-	off0, cur0, valid0 := d.off, d.cur, d.valid
-	d.opts.Strict = false
-	defer func() {
-		d.opts.Strict = strict
-		clean = clean && d.warnings.DamageCount() == seen
-		d.warnings.Rollback(mark)
-		// The walk ends past the audio; reads start where it began.
-		d.off, d.cur, d.valid = off0, cur0, valid0
-	}()
+	if t.sure {
+		return d.walkTail()
+	}
+	// The scan passed over a block of another shape, where it once ended:
+	// the walk is this open's own extra, and meets that block again. A read
+	// that fails in it is no answer.
+	any := t.any
+	ok, _ = d.w.Try(false, func() (found bool) { t, found = d.walkTail(); return found })
+	if any != 0 {
+		t.any = any
+	}
+	return t, ok
+}
 
+// walkTail bisects to the closing window and walks it by the read's steps to
+// the last audio block whose bytes are all there. It reports nothing: what
+// it crosses is the read's to report, and leaves the answer unsure.
+func (d *Demuxer) walkTail() (t tail, ok bool) {
 	off, h, found := d.bisect(math.MaxInt64) // no target: land on the last window
 	if !found {
-		return 0, false, false
+		return tail{}, false
 	}
-	d.off, d.cur, d.valid = off, h, true
-	end, found = 0, false
-	for d.valid {
-		if d.cur.Audio() {
-			end, found = d.cur.BlockIndex+int64(d.cur.BlockSamples), true
+	t.sure = true
+	changed := false // behind a change of shape only any is still counted
+	for {
+		if h.Audio() {
+			t.any = h.BlockIndex + int64(h.BlockSamples)
 		}
-		d.w.Trim(d.off)
-		if err := d.advance(); err != nil {
-			return 0, false, false
+		switch {
+		case changed || !h.Audio():
+		case !d.fits(h):
+			// A stray block is stepped over; a change of shape ends the read.
+			t.sure = false
+			changed = !ok || !d.stray(h, t.end-d.initialIndex)
+		default:
+			if ok && h.BlockIndex != t.end {
+				t.sure = false
+			}
+			t.off, t.held, t.index, t.end, ok = off, off, h.BlockIndex, h.BlockIndex+int64(h.BlockSamples), true
 		}
+		d.w.Trim(off)
+		end := off + h.Size
+		if off, h, found = d.after(end); !found {
+			if d.w.Err() != nil {
+				return tail{}, false
+			}
+			t.sure = t.sure && end >= d.w.DataEnd()
+			break
+		}
+		t.sure = t.sure && off == end
 	}
-	return end, found, true
+	return t, ok
+}
+
+// borne runs a check of an index that an exact length would rest on. A read
+// that fails in it is no answer and not the open's error.
+func (d *Demuxer) borne(check func() bool) bool {
+	ok, _ := d.w.Try(true, check)
+	return ok
+}
+
+// frontBears reports whether the block in front of the tail carries on to
+// it, and the index that block ends at, -1 with none found. It is the nearest,
+// a probe's reach back, that a read steps to, or a nearer one that carries on.
+func (d *Demuxer) frontBears(t tail) (bears bool, end int64) {
+	if t.off == d.firstBlock {
+		return true, t.index
+	}
+	end = -1
+	try := func(cand, _ int64) bool {
+		hdr := d.w.BytesAt(cand, wavpack.BlockHeaderLen)
+		h, ok := d.block(cand, hdr)
+		if !ok || !h.Audio() || !d.fits(h) || cand+h.Size > t.off {
+			return false
+		}
+		at := h.BlockIndex + int64(h.BlockSamples)
+		if bears = at == t.index; !bears && cand != d.firstBlock {
+			if _, stepped := d.confirm(cand, hdr); !stepped {
+				return false
+			}
+		}
+		end = at
+		return true
+	}
+	// What the window holds first: an intact stream's is there, unread.
+	lo := max(d.firstBlock, t.off-maxProbe)
+	if held := max(lo, t.held); d.scanBack(held, t.off, try) || held == lo {
+		return bears, end
+	}
+	d.scanBack(lo, min(t.off, t.held+int64(len(magic))-1), try)
+	return bears, end
+}
+
+// headBears reports whether the audio block a read steps to behind the first
+// bears the first one's index out by carrying on from it. A first block that
+// is the tail has none behind.
+func (d *Demuxer) headBears(first wavpack.BlockHeader, t tail) bool {
+	if t.off == d.firstBlock {
+		return true
+	}
+	end := d.firstBlock + first.Size
+	for range maxMetaBlocks + 1 {
+		// An exact read first: an intact stream holds the header here.
+		off, h, ok := end, wavpack.BlockHeader{}, false
+		if h, ok = d.blockPeek(end); !ok {
+			if off, h, ok = d.nextCandidate(end, end+maxResync); !ok {
+				return false
+			}
+		}
+		if h.Audio() {
+			return d.fits(h) && h.BlockIndex == first.BlockIndex+int64(first.BlockSamples)
+		}
+		end = off + h.Size
+	}
+	return false
 }
 
 // tilesToEnd reports whether the blocks from off tile exactly to end. It is
@@ -403,29 +589,33 @@ func (d *Demuxer) block(off int64, buf []byte) (wavpack.BlockHeader, bool) {
 	return h, true
 }
 
-// confirm is blockAt plus the checks a scan needs: what follows the block must
+// confirm is block plus the checks a scan needs: what follows the block must
 // be either the end of the audio or another block header, and the block must
 // agree with the track. Compressed payload can spell "wvpk" and pass the
 // header sniff; chaining to a second header is what tells a real boundary from
 // that coincidence. Only the paths that guess an offset (resync, bisection
-// probes) pay for it.
-func (d *Demuxer) confirm(off int64) (wavpack.BlockHeader, bool) {
-	h, ok := d.blockAt(off)
+// probes) pay for it. hdr is the scan's view at off; the block and the header
+// behind it are one read from off, which extends the window.
+func (d *Demuxer) confirm(off int64, hdr []byte) (wavpack.BlockHeader, bool) {
+	h, ok := d.block(off, hdr)
 	if !ok {
 		return wavpack.BlockHeader{}, false
 	}
 	// A candidate that disagrees with the track is not this stream's block, so
 	// the scan keeps looking. Only the sequential walk treats a shape change
 	// as the hard error it is; a guess that lands on one is just a bad guess.
-	if d.cfg.Channels != 0 && h.Audio() &&
-		(h.Channels() != d.cfg.Channels || h.BytesPerSample()*8 != d.cfg.BitDepth) {
+	if h.Audio() && !d.fits(h) {
 		return wavpack.BlockHeader{}, false
 	}
 	end := off + h.Size
 	if end == d.w.DataEnd() {
 		return h, true
 	}
-	if _, ok := d.blockAt(end); !ok {
+	b := d.w.Ahead(off, int(h.Size)+wavpack.BlockHeaderLen)
+	if int64(len(b)) < h.Size+wavpack.BlockHeaderLen {
+		return wavpack.BlockHeader{}, false
+	}
+	if _, ok := d.block(end, b[h.Size:]); !ok {
 		return wavpack.BlockHeader{}, false
 	}
 	return h, true
@@ -437,57 +627,306 @@ var magic = []byte("wvpk")
 // nextCandidate scans [from, limit) for a confirmable block header. It is the
 // resync path after damage and the bisection probe.
 func (d *Demuxer) nextCandidate(from, limit int64) (int64, wavpack.BlockHeader, bool) {
-	limit = min(limit, d.w.DataEnd())
-	for off := from; off < limit; {
-		buf := d.w.BytesAt(off, srcwin.Chunk)
-		if len(buf) < wavpack.BlockHeaderLen {
-			return 0, wavpack.BlockHeader{}, false
+	var h wavpack.BlockHeader
+	off, ok := d.w.Scan(from, limit, magic, wavpack.BlockHeaderLen, func(off int64, hdr []byte) srcwin.Verdict {
+		got, ok := d.confirm(off, hdr)
+		if !ok {
+			return srcwin.Skip
 		}
-		i := bytes.Index(buf, magic)
-		if i < 0 {
-			// Step back by the magic length so one straddling the chunk
-			// boundary is not lost between passes.
-			off += int64(len(buf) - len(magic) + 1)
-			continue
-		}
-		cand := off + int64(i)
-		if cand >= limit {
-			return 0, wavpack.BlockHeader{}, false
-		}
-		if h, ok := d.confirm(cand); ok {
-			return cand, h, true
-		}
-		off = cand + 1
-	}
-	return 0, wavpack.BlockHeader{}, false
+		h = got
+		return srcwin.Take
+	})
+	return off, h, ok
 }
 
-// advance moves to the block after the current one, resyncing over damage.
-func (d *Demuxer) advance() error {
-	end := d.off + d.cur.Size
+// after is the block a read steps to from end, where the one before it
+// ended: the block that starts there, or the first one a resync confirms.
+func (d *Demuxer) after(end int64) (int64, wavpack.BlockHeader, bool) {
 	if end >= d.w.DataEnd() {
-		d.valid = false
+		return 0, wavpack.BlockHeader{}, false
+	}
+	if h, ok := d.blockAt(end); ok {
+		return end, h, true
+	}
+	return d.nextCandidate(end, end+maxResync)
+}
+
+// stray reports whether h is an audio block of another shape whose index does
+// not carry on from the stream's own numbering: not this stream's, and
+// stepped over. One that carries on is a change of shape, where a read fails.
+func (d *Demuxer) stray(h wavpack.BlockHeader, own int64) bool {
+	return h.Audio() && !d.fits(h) && d.pos(h) != own
+}
+
+// advance moves to the block after the current one, resyncing over damage
+// and stepping over stray blocks, and places it when it carries samples. The
+// step is taken once its findings are reported, so Strict leaves the read be.
+// ctx stops a walk that places it, with the step not taken.
+func (d *Demuxer) advance(ctx context.Context) error {
+	end := d.off + d.cur.Size
+	type finding struct {
+		off int64
+		msg string
+	}
+	var found []finding
+	// One finding for a run of stray blocks, at the first of them.
+	strays := func(at, n int64) {
+		if n > 0 {
+			found = append(found, finding{at, fmt.Sprintf("%d bytes of blocks of another shape are not this stream's, stepped over", n)})
+		}
+	}
+	report := func() error {
+		for _, f := range found {
+			if err := d.warn(f.off, "%s", f.msg); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
-	h, ok := d.blockAt(end)
-	if !ok {
-		off, resynced, found := d.nextCandidate(end, end+maxResync)
-		if !found {
-			if d.w.Err() != nil {
-				return d.w.Err()
-			}
-			if err := d.warn(end, "%d trailing bytes are not a block, dropped", d.w.DataEnd()-end); err != nil {
+	var strayAt, strayLen int64
+	for {
+		if end >= d.w.DataEnd() {
+			strays(strayAt, strayLen)
+			if err := report(); err != nil {
 				return err
 			}
 			d.valid = false
 			return nil
 		}
-		if err := d.warn(end, "%d unparsable bytes between blocks", off-end); err != nil {
+		off, h, ok := d.after(end)
+		if !ok {
+			if d.w.Err() != nil {
+				return d.w.Err()
+			}
+			strays(strayAt, strayLen)
+			found = append(found, finding{end, fmt.Sprintf("%d trailing bytes are not a block, dropped", d.w.DataEnd()-end)})
+			if err := report(); err != nil {
+				return err
+			}
+			d.valid = false
+			return nil
+		}
+		if d.stray(h, d.own) {
+			if off > end {
+				strays(strayAt, strayLen)
+				strayLen = 0
+				found = append(found, finding{end, fmt.Sprintf("%d unparsable bytes between blocks", off-end)})
+			}
+			if strayLen == 0 {
+				strayAt = off
+			}
+			strayLen += h.Size
+			end = off + h.Size
+			continue
+		}
+		strays(strayAt, strayLen)
+		// A sample-free block's index is no position, and a change of shape
+		// is refused where it is read.
+		var at placement
+		alone, behind := "", ""
+		if h.Audio() && d.fits(h) {
+			var err error
+			if at, alone, behind, err = d.place(ctx, off, h); err != nil {
+				return err
+			}
+		}
+		switch {
+		case off > end && behind != "":
+			found = append(found, finding{end, fmt.Sprintf("%d unparsable bytes between blocks: %s", off-end, behind)})
+		case off > end:
+			found = append(found, finding{end, fmt.Sprintf("%d unparsable bytes between blocks", off-end)})
+		case alone != "":
+			found = append(found, finding{off, alone})
+		}
+		if err := report(); err != nil {
 			return err
 		}
-		end, h = off, resynced
+		d.off, d.cur = off, h
+		if h.Audio() && d.fits(h) {
+			d.pts, d.lost, d.next, d.own = at.pts, at.lost, at.next, at.own
+			if at.back {
+				d.outrun.backs++
+				d.outrun.headBack = d.outrun.headBack || !d.outrun.placed
+			}
+			d.outrun.placed = true
+		}
+		return nil
 	}
-	d.off, d.cur = end, h
+}
+
+// fits reports whether an audio block is the track's shape, its channels and
+// depth. The read delivers no other, so a scan that guesses an offset takes no
+// other either. Before the track is known, every shape fits.
+func (d *Demuxer) fits(h wavpack.BlockHeader) bool {
+	return d.cfg.Channels == 0 || h.Channels() == d.cfg.Channels && h.BytesPerSample()*8 == d.cfg.BitDepth
+}
+
+// vouched reports whether a block ending at sample end, and at byte endOff,
+// could be where it says: the bytes in front of its end hold that many samples.
+func (d *Demuxer) vouched(end, endOff int64) bool {
+	return end >= 0 && end <= wavpack.MaxSamplesIn(endOff-d.firstBlock)
+}
+
+// settle places the current block at its own index, where a read starts: at
+// the open and on a seek's landing.
+func (d *Demuxer) settle() {
+	p, n := d.pos(d.cur), int64(d.cur.BlockSamples)
+	d.pts, d.lost, d.next, d.own = p, 0, p+n, p+n
+}
+
+// placement is where an audio block goes and where the read then stands.
+// back says its index stepped back from the read.
+type placement struct {
+	pts, lost, next, own int64
+	back                 bool
+}
+
+// place puts the audio block h at off where the read has reached, or past a
+// hole at its own index when the stream bears the skip out. Any other skip,
+// and a step back, are findings: it returns one alone and as said behind a resync.
+func (d *Demuxer) place(ctx context.Context, off int64, h wavpack.BlockHeader) (at placement, alone, behind string, err error) {
+	p, n := d.pos(h), int64(h.BlockSamples)
+	from := d.next
+	at.pts = from
+	switch {
+	case p == from || p == d.own:
+	case p > from:
+		hole, checked, err := d.hole(ctx, off)
+		if err != nil {
+			return at, "", "", err
+		}
+		if hole {
+			at.pts, at.lost = p, p-from
+			alone = fmt.Sprintf("the blocks skip from sample %d to %d: %d samples lost", from, p, p-from)
+			behind = fmt.Sprintf("%d samples lost", p-from)
+			break
+		}
+		why := "which nothing bears out"
+		if !checked {
+			why = "which could not be checked"
+		}
+		alone = fmt.Sprintf("the blocks skip from sample %d to %d, %s; read on in order", from, p, why)
+		behind = alone
+	default:
+		at.back = true
+		alone = fmt.Sprintf("the blocks step back from sample %d to %d; read on in order", from, p)
+		behind = alone
+	}
+	at.next, at.own = at.pts+n, p+n
+	return at, alone, behind, nil
+}
+
+// hole reports whether the skip that lands on the block at off is a hole, and
+// whether the headers could be walked to say. It is one only in a stream
+// that bears every skip out (path.back) and ends inside the promised length.
+// A read that fails in the walk is no answer; ctx ending pauses it.
+func (d *Demuxer) hole(ctx context.Context, off int64) (hole, checked bool, err error) {
+	p := &d.path
+	if !p.done && !p.spent {
+		var walked error
+		d.w.Try(false, func() bool { walked = d.walkPath(ctx); return walked == nil })
+		if walked != nil && ctx.Err() != nil {
+			return false, false, walked
+		}
+	}
+	if !p.done {
+		return false, false, nil
+	}
+	if p.back || d.promised >= 0 && p.own-d.initialIndex > d.promised {
+		return false, true, nil
+	}
+	_, hole = slices.BinarySearch(p.gaps, off)
+	return hole, true, nil
+}
+
+// path is what one walk of the stream's headers found, from the first block
+// by the read's own steps: a function of the file's bytes, which every skip
+// and the measured length are answered from.
+type path struct {
+	end int64 // where the next step starts
+	own int64 // the index the last block of the stream ends at
+	// agree is where a read from the first block, read on in order, ends
+	// the run of blocks each at its own index: a seek reaches as far.
+	agree int64
+	split bool    // a block since sat off its own index
+	gaps  []int64 // the offsets of the blocks behind a gap in the indexes
+	// back says the stream does not bear its skips out: an index steps back,
+	// a gap is past what the bytes could hold, there are more gaps than are
+	// kept, or the stream changes shape.
+	back bool
+	// change is where a block of another shape carries on from the stream,
+	// which is where a read fails, 0 for none; told once a measure warned it.
+	change      int64
+	told        bool
+	hops        int
+	resynced    int64 // bytes scanned across resyncs
+	done, spent bool  // at the stream's end; out of hops or bytes, for good
+}
+
+// walkPath takes the walk on to the stream's end through a window of its
+// own: one exact read of a header a block, a scan only where a read would
+// resync. A failed read, or ctx ending, leaves it where it stood.
+func (d *Demuxer) walkPath(ctx context.Context) error {
+	p := &d.path
+	if p.end == 0 {
+		n := int64(d.first.BlockSamples)
+		p.end, p.own, p.agree = d.firstBlock+d.first.Size, d.first.BlockIndex+n, n
+	}
+	for !p.done && !p.spent {
+		if err := container.WalkCanceled(ctx, "wavpack: "); err != nil {
+			return err
+		}
+		if p.end >= d.w.DataEnd() {
+			p.done = true
+			break
+		}
+		if p.hops >= maxHops || p.resynced > maxLookahead {
+			p.spent = true
+			break
+		}
+		d.w.Trim(p.end)
+		off := p.end
+		h, ok := d.blockPeek(off)
+		if d.w.Err() != nil {
+			return d.w.Err()
+		}
+		if !ok {
+			off, h, ok = d.nextCandidate(p.end, p.end+maxResync)
+			if d.w.Err() != nil {
+				return d.w.Err()
+			}
+			if !ok {
+				p.done = true // trailing bytes: a read ends here
+				break
+			}
+			p.resynced += off - p.end
+		}
+		p.hops++
+		switch own := p.own - d.initialIndex; {
+		case !h.Audio() || d.stray(h, own):
+		case !d.fits(h):
+			p.change, p.back, p.done = off, true, true
+		default:
+			at, n := d.pos(h), int64(h.BlockSamples)
+			switch {
+			case at < own:
+				p.back = true
+			case at > own:
+				if len(p.gaps) < maxGaps && d.vouched(at+n, off+h.Size) {
+					p.gaps = append(p.gaps, off)
+				} else {
+					p.back = true
+				}
+			}
+			if p.split = p.split || at != p.agree; !p.split {
+				p.agree += n
+			}
+			p.own = h.BlockIndex + n
+		}
+		if !p.done {
+			p.end = off + h.Size
+		}
+	}
 	return nil
 }
 
@@ -495,10 +934,10 @@ func (d *Demuxer) advance() error {
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns damage tolerated during parsing.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
+func (d *Demuxer) Warnings() []container.Warning { return d.log.List() }
 
 // DamageCount implements container.Damaged.
-func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
+func (d *Demuxer) DamageCount() int { return d.log.DamageCount() }
 
 // TruncatedSamples implements container.Truncated.
 func (d *Demuxer) TruncatedSamples(int) int64 { return d.truncated }
@@ -506,16 +945,16 @@ func (d *Demuxer) TruncatedSamples(int) int64 { return d.truncated }
 // Tags returns the APEv2 tag's fields under canonical uppercase keys.
 func (d *Demuxer) Tags() map[string][]string { return d.tags }
 
-// ReadPacket yields one whole block, header included. Blocks that carry no
-// samples are stream metadata, not packets, and are stepped over. Packet data
-// is reused across calls.
+// ReadPacket yields one whole block, header included, its data reused across
+// calls; blocks with no samples are metadata and stepped over. A block past
+// a hole is marked Discont, with Lost saying how many samples the hole took.
 func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 	for d.valid {
 		d.w.Trim(d.off)
 		h := d.cur
 		if !h.Audio() {
 			// Stream metadata (a RIFF trailer, an MD5 signature), not a packet.
-			if err := d.advance(); err != nil {
+			if err := d.advance(context.Background()); err != nil {
 				return err
 			}
 			continue
@@ -530,16 +969,20 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 			}
 			return waxerr.New(waxerr.CodeSourceUnreadable, "wavpack: reading block data")
 		}
-		if err := d.advance(); err != nil {
+		pts, lost := d.pts, d.lost
+		d.outrun.tailRead = d.outrun.tailRead || d.off == d.outrun.tail
+		if err := d.advance(context.Background()); err != nil {
 			return err
 		}
 		*pkt = container.Packet{
 			Track: 0,
+			Lost:  lost,
 			Packet: codec.Packet{
-				Data: data,
-				PTS:  h.BlockIndex - d.initialIndex,
-				Dur:  int64(h.BlockSamples),
-				Sync: true,
+				Data:    data,
+				PTS:     pts,
+				Dur:     int64(h.BlockSamples),
+				Sync:    true,
+				Discont: lost > 0,
 			},
 		}
 		return nil
@@ -547,15 +990,93 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 	if d.w.Err() != nil {
 		return d.w.Err()
 	}
+	if err := d.settleEnd(); err != nil {
+		return err
+	}
 	return io.EOF
+}
+
+// settleEnd holds the length the open called exact against where a whole
+// read ended. Short of it the track takes what is there and counts the rest
+// truncated; past it the overrun is noted; either way it is no longer exact.
+func (d *Demuxer) settleEnd() error {
+	t := d.track
+	if !d.whole || !t.SamplesExact || d.next == t.Samples {
+		return nil
+	}
+	of := "the header declares"
+	if t.Samples != d.declared {
+		of = "the tail ends at"
+	}
+	if d.next > t.Samples {
+		d.note(d.firstBlock, "%s %d samples but the blocks run to %d", of, t.Samples, d.next)
+	} else if err := d.warn(d.firstBlock, "%s %d samples but the blocks end at %d", of, t.Samples, d.next); err != nil {
+		return err
+	}
+	// The config states no length, so it is restated as it is.
+	tr, n, err := container.SettleRead(t, d.next, func(config []byte, _ int64) ([]byte, error) { return config, nil })
+	d.track, d.truncated = tr, d.truncated+n
+	return err
+}
+
+// MeasureSamples implements container.Measurer by a walk of the headers
+// where the open did not call the length exact; -1 says the walk has no
+// answer. The track stays as it was, so nothing is cut at the measure.
+func (d *Demuxer) MeasureSamples(ctx context.Context, track int) (int64, error) {
+	if track != 0 {
+		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("wavpack: no track %d", track))
+	}
+	if d.promised >= 0 {
+		return d.promised, nil
+	}
+	// The walk decides the answer, so a read that fails in it is the
+	// measure's error.
+	var err error
+	_, read := d.w.Try(false, func() bool {
+		if err = d.walkPath(ctx); err == nil && d.far < 0 && d.path.done {
+			// The open found no tail: where a seek past the end lands.
+			t, _ := d.walkTail()
+			d.setFar(t)
+		}
+		return err == nil
+	})
+	err = cmp.Or(read, err)
+	p := &d.path
+	if err != nil || !p.done {
+		return -1, err
+	}
+	// A change of shape ends the walk as it ends a read, and is its finding.
+	if p.change > 0 && !p.told {
+		if err := d.warn(p.change, "a block of another shape carries on from the stream, which changes shape there"); err != nil {
+			return -1, err
+		}
+		p.told = true
+	}
+	if !p.back {
+		// Every gap is a hole, so a read ends where the indexes do, and a
+		// seek reaches the tail the open found.
+		return max(p.own-d.initialIndex, d.reach), nil
+	}
+	// No skip is a hole, so every read is the one it was before the indexes
+	// were read: the further of the length it was held to and where a read
+	// leaves the run of blocks at their own indexes, which a seek reaches.
+	return max(d.far, p.agree), nil
+}
+
+// setFar keeps where the last audio block of any shape ends, which is no
+// length when it lies in front of the first block's index.
+func (d *Demuxer) setFar(t tail) {
+	if t.any != 0 && t.any >= d.initialIndex {
+		d.far = t.any - d.initialIndex
+	}
 }
 
 // checkShape rejects a block whose channel count or width disagrees with the
 // track. WavPack permits the change; the fixed-format pipeline does not, so
 // it is a hard error rather than tolerated damage.
 func (d *Demuxer) checkShape(h wavpack.BlockHeader) error {
-	if h.Channels() != d.cfg.Channels || h.BytesPerSample()*8 != d.cfg.BitDepth {
-		return malformed("mid-stream format change at offset %d", d.off)
+	if !d.fits(h) {
+		return malformed("mid-stream format change at offset %d", d.log.At(d.off))
 	}
 	return nil
 }
@@ -563,8 +1084,8 @@ func (d *Demuxer) checkShape(h wavpack.BlockHeader) error {
 // SeekSample repositions to the block containing the target sample and
 // returns that block's first sample; format.Media pre-rolls the remainder.
 // Bisection on the blocks' own sample indexes narrows the range, then the
-// remaining span is walked.
-func (d *Demuxer) SeekSample(_ context.Context, track int, sample int64) (int64, error) {
+// remaining span is walked. A skip it crosses walks the headers under ctx.
+func (d *Demuxer) SeekSample(ctx context.Context, track int, sample int64) (int64, error) {
 	if track != 0 {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("wavpack: no track %d", track))
 	}
@@ -579,15 +1100,25 @@ func (d *Demuxer) SeekSample(_ context.Context, track int, sample int64) (int64,
 		return 0, malformed("cannot relocate any block for seeking")
 	}
 	d.off, d.cur, d.valid = off, h, true
+	d.settle()
 	// Walk forward to the block holding the target, stepping over the
 	// sample-free blocks a stream ends with (an MD5 signature, a RIFF
 	// trailer): their block index is not a position, so landing on one would
 	// report whatever the encoder happened to write there. A past-the-end
 	// target runs out of blocks and the walk stands on the last one that
 	// carried samples, which is where the seek lands and where reads resume.
+	// The walk places the blocks it steps to as a read does, in the read's
+	// words, and lands on a block's own index. A block of another shape is
+	// stepped over and never landed on: a read delivers none.
 	lastOff, lastH := d.off, d.cur
+	// whole holds while the landing still counts from the first block.
+	whole := off == d.firstBlock
+	d.whole = false
 	for d.valid {
-		if d.cur.Audio() {
+		if d.cur.Audio() && !d.fits(d.cur) {
+			whole = false
+		} else if d.cur.Audio() {
+			whole = whole && d.pts == d.pos(d.cur)
 			// A block answers the seek by containing the target, not merely
 			// by ending after it. Nothing checksums a block header, so a
 			// damaged stream can leave a hole in the timeline, and the block
@@ -600,17 +1131,21 @@ func (d *Demuxer) SeekSample(_ context.Context, track int, sample int64) (int64,
 				break
 			}
 			if d.pos(d.cur)+int64(d.cur.BlockSamples) > sample {
-				return d.pos(d.cur), nil
+				d.settle()
+				d.whole = whole
+				return d.pts, nil
 			}
 			lastOff, lastH = d.off, d.cur
 		}
 		d.w.Trim(d.off)
-		if err := d.advance(); err != nil {
+		if err := d.advance(ctx); err != nil {
 			return 0, err
 		}
 	}
 	d.off, d.cur, d.valid = lastOff, lastH, true
-	return d.pos(d.cur), nil
+	d.settle()
+	d.whole = whole
+	return d.pts, nil
 }
 
 // pos is a block's position in the track timeline.
@@ -633,10 +1168,11 @@ func (d *Demuxer) bisect(sample int64) (int64, wavpack.BlockHeader, bool) {
 	hi := d.w.DataEnd()
 	for hi-lo > seekWindow {
 		mid := lo + (hi-lo)/2
-		d.w.Trim(mid)
-		// One block's worth of scan is all a probe can need; past that the
-		// span is damaged and halving is the right answer anyway.
-		off, h, found := d.nextAudio(mid, min(hi, mid+maxProbe))
+		off, h, found := d.probe(mid, hi)
+		// A probe a read failed in places nothing, and no later one will.
+		if d.w.Err() != nil {
+			return 0, wavpack.BlockHeader{}, false
+		}
 		if !found || d.pos(h) > sample {
 			hi = mid
 			continue
@@ -644,6 +1180,15 @@ func (d *Demuxer) bisect(sample int64) (int64, wavpack.BlockHeader, bool) {
 		lo, loH = off, h
 	}
 	return lo, loH, true
+}
+
+// probe is one bisection probe: the first audio block from mid, short of hi.
+// It reads a window at mid first, not cut at hi, since that block may end past
+// it; past a block's worth of scan the span is damaged and halving answers it.
+func (d *Demuxer) probe(mid, hi int64) (int64, wavpack.BlockHeader, bool) {
+	d.w.Trim(mid)
+	d.w.Peek(mid, srcwin.Chunk)
+	return d.nextAudio(mid, min(hi, mid+maxProbe))
 }
 
 // nextAudio is nextCandidate restricted to blocks that carry samples, which

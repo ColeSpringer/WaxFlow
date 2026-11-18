@@ -319,7 +319,7 @@ func TestMP3EntryDisagreeingWithTheFrames(t *testing.T) {
 	if !said {
 		t.Errorf("warnings = %v, want one naming the disagreement", d.Warnings())
 	}
-	if _, err := NewDemuxer(container.BytesSource(lying), &DemuxerOptions{Strict: true}); err == nil {
+	if _, err := NewDemuxer(container.BytesSource(lying), &container.DemuxerOptions{Strict: true}); err == nil {
 		t.Error("strict accepted an entry that disagrees with its frames")
 	}
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/diag"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
 	"github.com/colespringer/waxflow/internal/satmath"
 	"github.com/colespringer/waxflow/waxerr"
@@ -226,6 +227,7 @@ func NewFragmentedDemuxer(init []byte, media container.Source) (*Demuxer, error)
 		src:  media,
 		size: media.Size(),
 		w:    srcwin.New(media, media.Size(), "mp4: reading sample data"),
+		log:  diag.New("mp4: ", nil),
 	}
 	moov, err := findInitMoov(init)
 	if err != nil {
@@ -282,7 +284,7 @@ func (d *Demuxer) readFragmentedPacket(pkt *container.Packet) error {
 		if err := d.w.Err(); err != nil {
 			return err
 		}
-		return malformed("fragment sample at %d truncated (want %d bytes)", s.off, s.size)
+		return malformed("fragment sample at %d truncated (want %d bytes)", d.log.At(s.off), s.size)
 	}
 	pts := d.fragDecode
 	d.fragDecode += int64(s.dur)
@@ -318,7 +320,7 @@ func (d *Demuxer) resetFragments() {
 // returns io.EOF when no more moof boxes remain.
 func (d *Demuxer) nextFragment() error {
 	for d.fragOff < d.size {
-		b, err := readBox(d.src, d.fragOff, d.size)
+		b, err := d.readBox(d.fragOff, d.size)
 		if err != nil {
 			return err
 		}
@@ -423,7 +425,7 @@ func (d *Demuxer) loadFragment(moof box) error {
 
 	// Advance past the moof and the mdat that follows it.
 	d.fragOff = moof.off + moof.size
-	if mdat, err := readBox(d.src, d.fragOff, d.size); err == nil && mdat.typ == "mdat" {
+	if mdat, err := d.readBox(d.fragOff, d.size); err == nil && mdat.typ == "mdat" {
 		d.fragOff = mdat.off + mdat.size
 	}
 	return nil
@@ -741,7 +743,7 @@ func (d *Demuxer) scanForward(ctx context.Context, from fragEntry, sample int64)
 		if err := container.WalkCanceled(ctx, "mp4: "); err != nil {
 			return landed, err
 		}
-		b, err := readBox(d.src, off, d.size)
+		b, err := d.readBox(off, d.size)
 		if err != nil {
 			if waxerr.CodeOf(err) == waxerr.CodeMalformedInput {
 				return landed, nil // the chain is over; land on the last good one

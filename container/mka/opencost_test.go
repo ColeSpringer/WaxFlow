@@ -77,7 +77,7 @@ func buildOpusFile(t *testing.T, n int, duration bool) []byte {
 	return buf.Bytes()
 }
 
-func openCounted(t *testing.T, raw []byte, o *mka.DemuxerOptions) (*mka.Demuxer, *testutil.CountingSource) {
+func openCounted(t *testing.T, raw []byte, o *container.DemuxerOptions) (*mka.Demuxer, *testutil.CountingSource) {
 	t.Helper()
 	cs := &testutil.CountingSource{Src: container.BytesSource(raw)}
 	d, err := mka.NewDemuxer(cs, o)

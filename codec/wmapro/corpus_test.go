@@ -505,7 +505,7 @@ func demux(t testing.TB, path string) (container.Track, [][]byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+	d, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatalf("demux %s: %v", path, err)
 	}

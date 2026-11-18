@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 
@@ -289,6 +290,49 @@ func TestVBRTagIsConsumed(t *testing.T) {
 	}
 }
 
+// TestJunkBehindTheMetadataFrameIsReported: bytes the scan steps over between
+// a metadata frame and the first audio frame are a finding at the frame's
+// end, in the sibling scans' words, and an owner that refuses it stops the
+// open. A frame with audio straight behind it reports nothing.
+func TestJunkBehindTheMetadataFrameIsReported(t *testing.T) {
+	// A kin header of no stated size confirms the metadata frame and cannot
+	// be the first audio frame, so the scan starts behind the frame.
+	junk := make([]byte, 100)
+	copy(junk, frameHeader)
+	junk[2] &= 0x0F
+	data := slices.Concat(xingFrame(3, false, 0, 0), junk, frames(3))
+
+	var o walkOpts
+	w, tag, has := begin(t, data, &o)
+	if !has || tag.Frames != 3 {
+		t.Fatalf("tag = %+v, present = %v", tag, has)
+	}
+	if w.FirstFrame() != frameLen+100 {
+		t.Errorf("first audio frame at %d, want %d", w.FirstFrame(), frameLen+100)
+	}
+	if len(o.msgs) != 1 || o.msgs[0] != "100 unparsable bytes after the metadata frame" {
+		t.Fatalf("findings = %v", o.msgs)
+	}
+	if o.offs[0] != frameLen {
+		t.Errorf("finding reported at offset %d, want the metadata frame's end at %d", o.offs[0], frameLen)
+	}
+	if got := collect(t, w); len(got) != 3 {
+		t.Errorf("walked %d frames, want the 3 behind the junk", len(got))
+	}
+
+	boom := errors.New("strict")
+	strict := walkOpts{fail: boom}
+	if _, _, err := New(container.BytesSource(data), int64(len(data)), strict.options()).Begin(0); !errors.Is(err, boom) {
+		t.Errorf("Begin error = %v, want the hook's", err)
+	}
+
+	var clean walkOpts
+	begin(t, append(xingFrame(3, false, 0, 0), frames(3)...), &clean)
+	if len(clean.msgs) != 0 || len(clean.notes) != 0 {
+		t.Errorf("findings with audio straight behind the metadata frame: %v %v", clean.msgs, clean.notes)
+	}
+}
+
 // TestVBRTagWithoutLAMEHasNoTrims: a bare Xing states a count and nothing
 // about gapless, which the -1 sentinels are how a caller tells apart from a
 // tag that states zero trims.
@@ -534,6 +578,51 @@ func TestJunkScanIsBoundedBySpans(t *testing.T) {
 	}
 }
 
+// TestJunkOfParseableHeadersIsBoundedBySpans is the same pin for junk whose
+// candidates parse and never confirm. Each one asks for the frame behind it,
+// and near a span's end that must not be a read per candidate.
+func TestJunkOfParseableHeadersIsBoundedBySpans(t *testing.T) {
+	const big = 512 << 10
+	cost := func(junk []byte) int {
+		w, src := countedWalk(t, append(junk, frames(3)...))
+		if w.FirstFrame() != big {
+			t.Fatalf("first frame at %d, want %d", w.FirstFrame(), big)
+		}
+		return src.Reads
+	}
+	plain := cost(bytes.Repeat([]byte{0x11}, big))
+	// A 417-byte frame from a candidate every four bytes never lands on one.
+	headers := cost(bytes.Repeat(frameHeader, big/len(frameHeader)))
+	if headers > 2*plain {
+		t.Errorf("junk of headers that parse cost %d reads and plain junk %d, want at most twice", headers, plain)
+	}
+}
+
+// TestConfirmBehindShortJunkReadsNoWindow: the frame behind the junk is
+// confirmed by a read in proportion to what the scan holds, so short junk
+// before a long run costs about twice the junk and never a window.
+func TestConfirmBehindShortJunkReadsNoWindow(t *testing.T) {
+	// Each junk ends within a frame of a span's end, so the confirm reads.
+	for _, n := range []int{1000, 3000, 7000} {
+		w, src := countedWalk(t, append(bytes.Repeat([]byte{0x11}, n), frames(2000)...))
+		if w.FirstFrame() != int64(n) {
+			t.Fatalf("first frame at %d, want %d", w.FirstFrame(), n)
+		}
+		if src.Bytes > int64(2*n+1024) {
+			t.Errorf("%d bytes of junk before a long run read %d bytes, want about twice the junk", n, src.Bytes)
+		}
+	}
+}
+
+// TestBeginReadsTheFirstFrameExactly: a clean run is confirmed by exact reads
+// at its head and never enters the scan, whose first span is a kilobyte.
+func TestBeginReadsTheFirstFrameExactly(t *testing.T) {
+	_, src := countedWalk(t, frames(2000))
+	if want := int64(frameLen + mp3.HeaderLen); src.Bytes != want || src.Reads != 2 {
+		t.Errorf("Begin read %d bytes in %d reads, want the %d of one frame and the header behind it in 2", src.Bytes, src.Reads, want)
+	}
+}
+
 // TestWalkCostsOneReadPerWindow pins the packet path's cost after the exact
 // open: the first frames cost about one window, a walk of several windows
 // stays at one read per window, and the window behind it stays bounded.
@@ -652,6 +741,92 @@ func TestCompleteFinishesTheWalk(t *testing.T) {
 	}
 	if !restored.Done() {
 		t.Error("a restored complete index is not Done")
+	}
+}
+
+// TestAReadThatFailsInAScanIsNeverAFinishedWalk: a confirm whose read fails
+// ends the scan with the read's error, for a tolerant owner and a strict one.
+// The walk does not go on to a sync byte it already holds and settle the run
+// short of a frame it could not read.
+func TestAReadThatFailsInAScanIsNeverAFinishedWalk(t *testing.T) {
+	// 312 frames, then junk holding a whole frame at 974 with the header
+	// that confirms it at 1391, and inside that frame a header at 1004 whose
+	// own frame runs past the end of data, which nothing has to confirm.
+	const k = 312
+	tail := bytes.Repeat([]byte{0x11}, 1400)
+	copy(tail[974:], oneFrame())
+	copy(tail[1391:], frameHeader)
+	copy(tail[1004:], frameHeader)
+	data := append(frames(k), tail...)
+
+	// The walk's window ends a Chunk past the open's exact reads, six bytes
+	// short of confirming the frame at 974, so that confirm is a read from there.
+	const windowEnd = mp3.HeaderLen + frameLen + srcwin.Chunk
+	var o walkOpts
+	src := &testutil.CountingSource{Src: container.BytesSource(data), Log: true}
+	w := New(src, src.Size(), o.options())
+	if _, _, err := w.Begin(0); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Complete(context.Background()); err != nil || w.Frames() != k+1 {
+		t.Fatalf("a source that reads: Complete = %v with %d frames, want %d", err, w.Frames(), k+1)
+	}
+	if got := joined(o.msgs); got != "974 unparsable bytes skipped | truncated final frame dropped" {
+		t.Fatalf("a source that reads: findings = %q", got)
+	}
+	if !slices.ContainsFunc(src.Spans, func(s [2]int64) bool { return s[0] == windowEnd }) {
+		t.Fatalf("no read starts at %d: the reads are %v", windowEnd, src.Spans)
+	}
+
+	for _, strict := range []bool{false, true} {
+		o := walkOpts{}
+		if strict {
+			o.fail = errors.New("strict")
+		}
+		src := &testutil.FailingSource{Src: container.BytesSource(data), From: windowEnd}
+		w := New(src, int64(len(data)), o.options())
+		if _, _, err := w.Begin(0); err != nil {
+			t.Fatal(err)
+		}
+		err := w.Complete(context.Background())
+		// The read that fails is the confirm's, or this holds nothing.
+		if src.FailedAt[0] != windowEnd {
+			t.Fatalf("reads failing from %d, strict %v: the first failed read is %v, want the confirm's from %d", windowEnd, strict, src.FailedAt, windowEnd)
+		}
+		if waxerr.CodeOf(err) != waxerr.CodeSourceUnreadable || w.Done() || len(o.msgs) != 0 {
+			t.Errorf("reads failing from %d, strict %v: Complete = %v, Done = %v, findings %q; want the read's error, a walk not done and no findings",
+				windowEnd, strict, err, w.Done(), o.msgs)
+		}
+	}
+}
+
+// TestAFailedHeaderReadNeverFinishesTheWalk: a walk stopped by a read of the
+// last indexed frame's header that failed is not done, and the next Complete
+// returns the error again. The frames indexed so far are never the run's count.
+func TestAFailedHeaderReadNeverFinishesTheWalk(t *testing.T) {
+	data := frames(2000)
+	src := &testutil.FailingSource{Src: container.BytesSource(data), From: int64(len(data))}
+	var o walkOpts
+	w := New(src, src.Size(), o.options())
+	if _, _, err := w.Begin(0); err != nil {
+		t.Fatal(err)
+	}
+	// Index 1,500 frames, then read the first: the window has left the last
+	// indexed frame, so the walk's next read is that frame's header.
+	ctx := context.Background()
+	if _, err := w.Landing(ctx, 1500); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Frame(0); err != nil || src.Failed != 0 {
+		t.Fatalf("Frame(0) = %v after %d failed reads, want a source that still reads", err, src.Failed)
+	}
+	src.From = 0 // the source goes down
+	for _, call := range []string{"the first Complete", "the second Complete"} {
+		err := w.Complete(ctx)
+		if waxerr.CodeOf(err) != waxerr.CodeSourceUnreadable || w.Done() || len(o.msgs) != 0 {
+			t.Errorf("%s = %v, Done = %v, findings %q; want the read's error, a walk not done and no findings",
+				call, err, w.Done(), o.msgs)
+		}
 	}
 }
 

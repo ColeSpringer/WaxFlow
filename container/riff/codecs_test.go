@@ -86,7 +86,7 @@ func TestG711Tags(t *testing.T) {
 		t.Run(string(tc.want), func(t *testing.T) {
 			payload := []byte{0xD5, 0x55, 0xFF, 0x7F, 0x00, 0x80}
 			raw := wavHeader(tc.tag, 2, 8000, 2, 8, nil, payload, -1)
-			track, data, warns := demuxAll(t, container.BytesSource(raw), &DemuxerOptions{Strict: true})
+			track, data, warns := demuxAll(t, container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 			if track.Codec != tc.want {
 				t.Fatalf("codec = %q, want %q", track.Codec, tc.want)
 			}
@@ -123,7 +123,7 @@ func TestG711WidthIsNotTheFieldsToState(t *testing.T) {
 	if len(warns) == 0 {
 		t.Error("a 16-bit A-law header must warn")
 	}
-	if _, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true}); err == nil {
+	if _, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err == nil {
 		t.Error("strict demux of a 16-bit A-law header must fail")
 	}
 }
@@ -165,7 +165,7 @@ func TestADPCMTags(t *testing.T) {
 			}
 			raw := wavHeader(tc.tag, tc.channels, 8000, tc.blockAlign, 4,
 				tc.extra(tc.want.SamplesPerBlock), payload, -1)
-			track, data, warns := demuxAll(t, container.BytesSource(raw), &DemuxerOptions{Strict: true})
+			track, data, warns := demuxAll(t, container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 			if track.Codec != tc.codecID {
 				t.Fatalf("codec = %q, want %q", track.Codec, tc.codecID)
 			}
@@ -201,7 +201,7 @@ func TestFactChunk(t *testing.T) {
 
 	t.Run("trims a block codec", func(t *testing.T) {
 		raw := wavHeader(tagIMAADPCM, 1, 8000, blockAlign, 4, imaExtra(spb), blocks(4), 100)
-		track, _, warns := demuxAll(t, container.BytesSource(raw), &DemuxerOptions{Strict: true})
+		track, _, warns := demuxAll(t, container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 		if track.Samples != 100 {
 			t.Errorf("samples = %d, want the fact chunk's 100", track.Samples)
 		}
@@ -219,7 +219,7 @@ func TestFactChunk(t *testing.T) {
 
 	t.Run("absent leaves the capacity", func(t *testing.T) {
 		raw := wavHeader(tagIMAADPCM, 1, 8000, blockAlign, 4, imaExtra(spb), blocks(4), -1)
-		track, _, _ := demuxAll(t, container.BytesSource(raw), &DemuxerOptions{Strict: true})
+		track, _, _ := demuxAll(t, container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 		if track.Samples != 4*spb {
 			t.Errorf("samples = %d, want the capacity %d", track.Samples, 4*spb)
 		}
@@ -254,7 +254,7 @@ func TestFactChunk(t *testing.T) {
 		}
 		// One sample inside the last block is a real truncation.
 		raw = wavHeader(tagIMAADPCM, 1, 8000, blockAlign, 4, imaExtra(spb), blocks(4), int64(3*spb+1))
-		track, _, warns := demuxAll(t, container.BytesSource(raw), &DemuxerOptions{Strict: true})
+		track, _, warns := demuxAll(t, container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 		if track.Samples != int64(3*spb+1) || !track.SamplesExact {
 			t.Errorf("samples = %d exact = %v, want %d and exact", track.Samples, track.SamplesExact, 3*spb+1)
 		}
@@ -275,7 +275,7 @@ func TestFactChunk(t *testing.T) {
 		if len(warns) == 0 {
 			t.Error("a fact chunk past the capacity must warn")
 		}
-		if _, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true}); err == nil {
+		if _, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err == nil {
 			t.Error("strict demux of an oversized fact must fail")
 		}
 	})
@@ -297,7 +297,7 @@ func TestFactChunk(t *testing.T) {
 	// "input damage" on ordinary files whose payload says the right thing.
 	t.Run("ignored for PCM", func(t *testing.T) {
 		raw := wavHeader(tagPCM, 1, 8000, 2, 16, nil, make([]byte, 20), 3)
-		track, _, warns := demuxAll(t, container.BytesSource(raw), &DemuxerOptions{Strict: true})
+		track, _, warns := demuxAll(t, container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 		if track.Samples != 10 {
 			t.Errorf("samples = %d, want 10", track.Samples)
 		}
@@ -317,7 +317,7 @@ func TestFactChunk(t *testing.T) {
 		out = append(out, u32le(0)...)
 		out = append(out, raw[at:]...)
 		le.PutUint32(out[4:], uint32(len(out)-8))
-		track, _, warns := demuxAll(t, container.BytesSource(out), &DemuxerOptions{Strict: true})
+		track, _, warns := demuxAll(t, container.BytesSource(out), &container.DemuxerOptions{Strict: true})
 		if track.Samples != 10 {
 			t.Errorf("samples = %d, want 10", track.Samples)
 		}
@@ -450,7 +450,7 @@ func TestNonStandardCoefTableIsANote(t *testing.T) {
 	odd := adpcm.DefaultCoefs
 	odd[3] = [2]int16{300, -100}
 	raw := wavHeader(tagMSADPCM, 1, 8000, 20, 4, msExtra(28, odd), make([]byte, 40), -1)
-	track, _, warns := demuxAll(t, container.BytesSource(raw), &DemuxerOptions{Strict: true})
+	track, _, warns := demuxAll(t, container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	cfg, err := adpcm.ParseConfig(track.CodecConfig)
 	if err != nil {
 		t.Fatal(err)

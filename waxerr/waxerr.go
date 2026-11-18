@@ -151,6 +151,40 @@ func (e *Error) Is(target error) bool {
 	return ok && t.Code == e.Code
 }
 
+// Fixed returns an error that reads and classifies as New(code, msg) does
+// and that no caller can change, for a refusal a package builds once and
+// shares: errors.AsType[*Error] on it gets a fresh copy each time.
+func Fixed(code Code, msg string) error {
+	return &fixed{code: code, msg: msg}
+}
+
+type fixed struct {
+	code Code
+	msg  string
+}
+
+func (f *fixed) Error() string {
+	if f.msg == "" {
+		return string(f.code)
+	}
+	return f.msg
+}
+
+// Is classifies f as Error.Is does.
+func (f *fixed) Is(target error) bool {
+	t, ok := target.(*Error)
+	return ok && t.Code == f.code
+}
+
+// As hands a *Error target a copy of f.
+func (f *fixed) As(target any) bool {
+	p, ok := target.(**Error)
+	if ok {
+		*p = New(f.code, f.msg)
+	}
+	return ok
+}
+
 // Sentinels for errors.Is classification, one per Code. Boundary code should
 // construct rich errors with New/Wrap; these exist for matching only.
 var (

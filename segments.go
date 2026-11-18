@@ -475,7 +475,7 @@ func timelineWidthVersion(ch int) string { return fmt.Sprintf("tlwidth-%d-1", ch
 // so the packet discard below stays exact.
 //
 // floor is the lowest position the media can deliver, which is 0 for a file
-// and negative for a span: see Headroomer. It bounds the chain's window
+// and negative for a span: see format.Headroomer. It bounds the chain's window
 // only, and the asymmetry is the point rather than an oversight. Feeding
 // the chain from before a span's sample 0 is what makes that sample hold
 // the audio a continuous run of the whole source delivers there, since the
@@ -503,7 +503,7 @@ func primeStarts(p0 int64, rate, frame int, horizon time.Duration, floor int64) 
 
 // headroomFloor is the lowest output position the chain may be fed from: 0
 // for an ordinary media, negative for one that has real audio ahead of its
-// sample 0. See Headroomer.
+// sample 0. See format.Headroomer.
 //
 // It converts the media's headroom from source samples to output samples,
 // keeping a small margin at the far end, because the caller maps the
@@ -513,11 +513,7 @@ func primeStarts(p0 int64, rate, frame int, horizon time.Duration, floor int64) 
 // and fail the seek. Understating the headroom costs a sample of priming;
 // overstating it costs the request.
 func headroomFloor(med format.Media, chain *dsp.Chain) int64 {
-	h, ok := med.(Headroomer)
-	if !ok {
-		return 0
-	}
-	room := h.Headroom() - headroomMargin
+	room := format.MediaHeadroom(med) - headroomMargin
 	if room <= 0 {
 		return 0
 	}

@@ -12,3 +12,15 @@ func ReserveEntriesForTest(samples int64, blocksPerFrame int) int {
 
 // MaxSeekEntriesForTest is the cap that reservation is held under.
 const MaxSeekEntriesForTest = maxSeekEntries
+
+// MaxJunkForTest is the bound on the scan for the file header.
+const MaxJunkForTest = maxJunk
+
+// BaseForTest is the offset the file header was found at.
+func (d *Demuxer) BaseForTest() int64 { return d.base }
+
+// ResidentForTest is how many bytes the read window holds.
+func (d *Demuxer) ResidentForTest() int {
+	n, _ := d.w.Resident()
+	return n
+}

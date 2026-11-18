@@ -49,7 +49,7 @@ func readFrames(t testing.TB, d *flacn.Demuxer) ([]frame, error) {
 // frameSpans is where each frame of raw, an intact native FLAC, sits.
 func frameSpans(t testing.TB, raw []byte) [][2]int {
 	t.Helper()
-	d, err := flacn.NewDemuxer(container.BytesSource(raw), &flacn.DemuxerOptions{Strict: true})
+	d, err := flacn.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +243,7 @@ func TestStrictRefusesAtTheFirstHole(t *testing.T) {
 	spans := frameSpans(t, clean)
 	n := len(spans)
 	raw := damageFrames(t, clean, spans, n/3, 2*n/3)
-	d, err := flacn.NewDemuxer(container.BytesSource(raw), &flacn.DemuxerOptions{Strict: true})
+	d, err := flacn.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatalf("a strict open refused damage its tail read cannot see: %v", err)
 	}

@@ -68,3 +68,26 @@ func SettleShortfall(t Track, raw int64) int64 {
 	}
 	return max(t.Samples-SettleLength(t, raw).Samples, 0)
 }
+
+// SettleRead holds t's exact length against reached, where a whole read of
+// the track ended. Short of it, the track takes what the read reached, its
+// config restated by restate, and the rest is returned as truncated. Either
+// side the length is no longer exact, since a seek can reach what a read
+// cannot; at it, nothing moves.
+func SettleRead(t Track, reached int64, restate func(config []byte, samples int64) ([]byte, error)) (Track, int64, error) {
+	switch {
+	case reached == t.Samples:
+		return t, 0, nil
+	case reached > t.Samples:
+		t.SamplesExact = false
+		return t, 0, nil
+	}
+	config, err := restate(t.CodecConfig, reached)
+	if err != nil {
+		return t, 0, err
+	}
+	n := SettleShortfall(t, reached)
+	t = SettleLength(t, reached)
+	t.CodecConfig, t.SamplesExact = config, false
+	return t, n, nil
+}

@@ -19,6 +19,7 @@ import (
 	"github.com/colespringer/waxflow/container/flacn"
 	"github.com/colespringer/waxflow/container/internal/apev2"
 	"github.com/colespringer/waxflow/container/internal/trailer"
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
 // fixture loads a committed testdata file.
@@ -78,7 +79,7 @@ func TestDemuxPackets(t *testing.T) {
 }
 
 func TestStrictCleanFixture(t *testing.T) {
-	d, err := flacn.NewDemuxer(container.BytesSource(fixture(t, "noise-s16.flac")), &flacn.DemuxerOptions{Strict: true})
+	d, err := flacn.NewDemuxer(container.BytesSource(fixture(t, "noise-s16.flac")), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +349,7 @@ func TestTrailingTags(t *testing.T) {
 			}
 
 			// Strict mode reads straight through, and to the same end.
-			d, err = flacn.NewDemuxer(container.BytesSource(tagged), &flacn.DemuxerOptions{Strict: true})
+			d, err = flacn.NewDemuxer(container.BytesSource(tagged), &container.DemuxerOptions{Strict: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -366,7 +367,7 @@ func TestTrailingTags(t *testing.T) {
 	t.Run("nul padding absorbed", func(t *testing.T) {
 		tagged := append(append([]byte(nil), raw...), make([]byte, 300)...)
 		for _, strict := range []bool{false, true} {
-			d, err := flacn.NewDemuxer(container.BytesSource(tagged), &flacn.DemuxerOptions{Strict: strict})
+			d, err := flacn.NewDemuxer(container.BytesSource(tagged), &container.DemuxerOptions{Strict: strict})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -425,7 +426,7 @@ func emptyFLAC(declared int64) []byte {
 // track rather than fail (reads EOF, seeks land at 0).
 func TestZeroFrameStream(t *testing.T) {
 	for _, strict := range []bool{false, true} {
-		d, err := flacn.NewDemuxer(container.BytesSource(emptyFLAC(0)), &flacn.DemuxerOptions{Strict: strict})
+		d, err := flacn.NewDemuxer(container.BytesSource(emptyFLAC(0)), &container.DemuxerOptions{Strict: strict})
 		if err != nil {
 			t.Fatalf("strict=%v: %v", strict, err)
 		}
@@ -460,7 +461,7 @@ func TestZeroFrameStream(t *testing.T) {
 	if s := d.Tracks()[0].Samples; s != 0 {
 		t.Errorf("samples = %d, want 0 (content wins over the declaration)", s)
 	}
-	if _, err := flacn.NewDemuxer(container.BytesSource(emptyFLAC(1000)), &flacn.DemuxerOptions{Strict: true}); err == nil {
+	if _, err := flacn.NewDemuxer(container.BytesSource(emptyFLAC(1000)), &container.DemuxerOptions{Strict: true}); err == nil {
 		t.Error("strict mode accepted declared samples with no frames")
 	}
 }
@@ -477,26 +478,9 @@ func TestRejectsTruncatedMetadata(t *testing.T) {
 	}
 }
 
-var errSentinel = errors.New("sentinel")
-
-// failAfter fails reads past a byte limit, for I/O error propagation.
-type failAfter struct {
-	data  []byte
-	limit int64
-}
-
-func (s failAfter) ReadAt(p []byte, off int64) (int, error) {
-	if off+int64(len(p)) > s.limit {
-		return 0, errSentinel
-	}
-	return copy(p, s.data[off:]), nil
-}
-
-func (s failAfter) Size() int64 { return int64(len(s.data)) }
-
 func TestReadErrorPropagates(t *testing.T) {
 	raw := fixture(t, "sine-s16.flac")
-	d, err := flacn.NewDemuxer(failAfter{raw, int64(len(raw)) / 2}, nil)
+	d, err := flacn.NewDemuxer(&testutil.FailingSource{Src: container.BytesSource(raw), From: int64(len(raw)) / 2}, nil)
 	if err != nil {
 		// Header area unreadable is also a valid failure point.
 		return
@@ -508,7 +492,7 @@ func TestReadErrorPropagates(t *testing.T) {
 			t.Fatal("mid-file read failure surfaced as clean EOF")
 		}
 		if err != nil {
-			if !errors.Is(err, errSentinel) {
+			if !errors.Is(err, testutil.ErrSourceDown) {
 				t.Fatalf("error chain lost the cause: %v", err)
 			}
 			return
@@ -552,7 +536,7 @@ func TestTruncatedStreamReportsWhatItCanDeliver(t *testing.T) {
 
 			// Strict mode exists to refuse exactly this.
 			if _, err := flacn.NewDemuxer(container.BytesSource(short),
-				&flacn.DemuxerOptions{Strict: true}); err == nil {
+				&container.DemuxerOptions{Strict: true}); err == nil {
 				t.Error("strict mode accepted a file that cannot deliver its declared length")
 			}
 		})
@@ -615,7 +599,7 @@ func TestOverDeclaredTotalAdoptsTheFrames(t *testing.T) {
 		t.Errorf("note %q does not say the frames run past the declared total", ws[0].Msg)
 	}
 	// Strict never escalates a Note, so the file still opens.
-	if _, err := flacn.NewDemuxer(container.BytesSource(raw), &flacn.DemuxerOptions{Strict: true}); err != nil {
+	if _, err := flacn.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err != nil {
 		t.Errorf("strict refused a well-formed file over a Note: %v", err)
 	}
 }

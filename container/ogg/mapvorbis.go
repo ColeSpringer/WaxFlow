@@ -73,13 +73,14 @@ func (m *vorbisMapping) finalizeTrack(first firstPage, lastGranule func() int64,
 		samples = max(lg-delay, 0)
 	}
 	return container.Track{
-		Codec:        codec.Vorbis,
-		CodecConfig:  vorbis.PackHeaders(m.id, m.comment, m.setup),
-		Fmt:          f,
-		Samples:      samples,
-		SamplesExact: samples >= 0,
-		Delay:        delay,
-		Default:      true,
+		DemuxerVersion: DemuxerVersion,
+		Codec:          codec.Vorbis,
+		CodecConfig:    vorbis.PackHeaders(m.id, m.comment, m.setup),
+		Fmt:            f,
+		Samples:        samples,
+		SamplesExact:   samples >= 0,
+		Delay:          delay,
+		Default:        true,
 	}, nil
 }
 
@@ -109,3 +110,6 @@ func (m *vorbisMapping) preroll() int64 { return int64(m.cfg.LongBlock()) }
 
 // resetTiming clears the block-size accumulator for a seek restart.
 func (m *vorbisMapping) resetTiming() { m.prevBlock = 0 }
+
+func (m *vorbisMapping) heldTiming() int         { return m.prevBlock }
+func (m *vorbisMapping) putTiming(prevBlock int) { m.prevBlock = prevBlock }

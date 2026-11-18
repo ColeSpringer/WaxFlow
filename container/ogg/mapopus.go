@@ -132,13 +132,14 @@ func (m *opusMapping) finalizeTrack(first firstPage, lastGranule func() int64, r
 		samples = max(lg-m.preSkip, 0)
 	}
 	return container.Track{
-		Codec:        codec.Opus,
-		CodecConfig:  m.head,
-		Fmt:          f,
-		Samples:      samples,
-		SamplesExact: samples >= 0,
-		Delay:        m.preSkip,
-		Default:      true,
+		DemuxerVersion: DemuxerVersion,
+		Codec:          codec.Opus,
+		CodecConfig:    m.head,
+		Fmt:            f,
+		Samples:        samples,
+		SamplesExact:   samples >= 0,
+		Delay:          m.preSkip,
+		Default:        true,
 	}, nil
 }
 
@@ -195,3 +196,6 @@ func (m *opusMapping) selfTiming() bool { return false }
 func (m *opusMapping) preroll() int64 { return 3840 }
 
 func (m *opusMapping) resetTiming() {}
+
+func (m *opusMapping) heldTiming() int { return 0 }
+func (m *opusMapping) putTiming(int)   {}

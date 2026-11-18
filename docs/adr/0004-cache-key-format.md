@@ -290,3 +290,318 @@ has not been seen. Explicit conversions in the kernels would forbid fusing
 and make the bytes one thing everywhere, at a cost in speed and a revision
 of every float codec; that stays open. The byte goldens are where a move
 would show.
+
+## Amendment (2026-11-15): WavPack names its demuxer's revision
+
+A WavPack decoder takes its blocks in stream order whatever their indexes
+say. `container/wv` now states other things about a damaged file than it
+did, and every plan built from such a file holds other samples:
+
+- The length is that of the last block of the stream's own shape, and it is
+  exact only where the open checked the indexes it rests on: the header's
+  total and the tail agree, or the block in front of the tail carries on to
+  it, and with no total the block behind the first carries on from it too. A
+  stream with no total whose ends are not borne out now opens with no
+  length (-1), where it had the tail's, exact. A tail past what the bytes
+  could hold, a first index past the tail, and a block of another shape
+  behind the stream's last each leave it not exact, so a decode is not cut
+  there. A tail short of the total and past the block in front of it is
+  still the cut file it was: warned, counted as truncated, and not exact.
+  One rule then holds for every length the open states and does not call
+  exact: it is no less than the last audio block's own end, of any shape,
+  where every open took it before, wherever the bytes could hold that. A
+  read, a seek or a measure may reach that far, so a caller's span to it is
+  served as it was. Past a total it is noted; short of one it is warned, and
+  only the samples past it count as truncated. An open that states no length
+  (-1) is not raised by this rule.
+- A skip in the block indexes is a hole of lost samples only in a stream
+  that bears every skip out: from the first block to the last no index
+  steps back, each gap is one the bytes could hold, the stream does not
+  change shape, and the last block ends inside any exact length. One walk
+  of the stream's headers says so for every skip: a 32-byte read a block,
+  no further than 131,072 blocks or 4 MiB of resynced bytes, and at most
+  1,024 gaps kept. The packet behind a hole carries `Lost` and `Discont`,
+  and one warning names the samples, merged with a resync's bytes warning
+  where there is one. In any other stream, and where the walk has no
+  answer, every skip and every step back is read on in stream order with
+  one warning and nothing lost, as before the indexes were read.
+- A block of another shape whose index carries on from the stream's own
+  numbering is the mid-stream format change it was, on a read. One whose
+  index does not is a stray block: a read steps over a run of them with
+  one warning, as a seek does, and goes on with the stream.
+- Each of those is a finding, so Strict refuses it, on a read and on a seek
+  whose walk crosses it.
+- A read from the first block (or behind a seek whose walk began there and
+  found every block at its own index) that ends off the exact length takes
+  the claim back. Short of it, the read warns in the open's words, the
+  track takes what the read reached, and the rest is counted truncated;
+  past it, the overrun is noted. A Media takes the track on its next Walk,
+  which for a demuxer with no walk of its own now refreshes the length.
+- A length the open did not call exact is measured from the same walk of
+  the headers (`container.Measurer`, which `MeasureLength` asks before it
+  seeks and every Media wrapper forwards), so the measure decodes nothing
+  and a damaged last block does not fail it. In a stream that bears its
+  skips out it is where the indexes end, or the tail the open found where
+  a seek reaches further. In any other every read is the read it was, in
+  stream order, so it is the further of the length every open gave before
+  this revision (the last audio block's own end) and where a read from the
+  first block leaves the run of blocks at their own indexes: a seek lands
+  in that run on the timeline the read keeps, so a span or an HLS plan
+  holds every window it held, and one bad last index no longer cuts the
+  plan to that block's own end. Past the run a seek lands on a block's own
+  index, off the read's timeline, and a window there would end short.
+  A change of shape is the measure's finding. The track
+  is left as it was: nothing is cut at the measure.
+- A copy carries a hole as the packets it copies: a WavPack block states
+  its own index, so the copy rung writes the bytes it wrote before, counts
+  the samples lost (`LostSamples`), and refuses nothing. That is the rule
+  for any codec whose packets state their own positions. FLAC's copy
+  still writes silent frames, and a codec with neither still refuses, as
+  does a cut with a hole inside a kept window: no cut rung serves WavPack.
+
+A seek lands where it did, by bisection on the blocks' own indexes and a
+walk, which reports what it crosses in the read's words. A skip it crosses
+walks the headers under the seek's context, which pauses that walk with
+`CodeCanceled` where the next seek resumes it.
+
+`wv.DemuxerVersion` is `wv-demux-2`, on every plan over a WavPack source,
+so every cached entry of a WavPack source, and of a timeline with one as a
+member, misses once. The server's cache-key golden shows the term on a
+WavPack source's transcode and HLS lines.
+
+An open reads the head and one tail window when the header's total and the
+tail agree. For a stream with no total, or one carved out of a longer one,
+it also reads the header behind the first block (32 bytes) and, where the
+tail window does not hold the block in front of the tail, reads back for
+it: that block's bytes in windows of 128 KiB, 2 MiB at most (measured
+against the open before this revision: 131 KiB more for blocks of 100 KiB,
+262 KiB for 200 KiB, 655 KiB for 600 KiB). Nothing short of that finds a
+block's header from behind it, and a walk from the front costs a read a
+block. An exact length says nothing of the blocks between: a file that
+holds more than its ends state, such as two streams end to end, is not
+told apart at open, and a consumer cuts the decode at the stated length,
+as before.
+
+## Amendment (2026-11-15): ASF names its demuxer's revision for WMA v1/v2
+
+ASF states presentation times and no durations, so `container/asf` gives an
+object the distance to its successor, and the last object the duration of
+the one before it. The only packet of a one-object WMA v1/v2 stream has
+neither, and took what the track's length left. That length is the rounded
+play duration at the open and the counted frames once a walk, a seek's
+count or a read to the end has counted the stream, so one file read two
+ways: a Strict open, which always walks, delivered another packet than a
+tolerant one, and a walk taken mid-read moved the end.
+
+That packet now lasts what its own frames deliver, walked or not, which is
+the length the count settles: its frames (one without the bit reservoir,
+the count its superframe header states with it) times the frame length,
+less the last frame where the reservoir leaves it incomplete. Where that
+is nothing (no frame stated, or the reservoir's one frame), the packet
+lasts 0. A stream of several objects reads as it did. So does a WMA Pro,
+Voice or Lossless stream, whose length no walk moves.
+
+`asf.DemuxerVersion` is `asf-demux-2` and is carried by a WMA v1/v2 track
+alone: a Pro, Voice or Lossless track names none. So every cached entry of
+a WMA v1/v2 source, and of a timeline with one as a member, misses once,
+and no key of the other three codecs moves. The server's cache-key golden
+shows the term on a WMA v2 source's transcode and HLS lines, and none on a
+WMA Pro source's line.
+
+## Amendment (2026-11-15): FLAC names its demuxers' revisions
+
+`container/flacn`, and `container/ogg` over a FLAC stream, place a damaged
+or oddly headed file's frames otherwise than they did, and every plan built
+from such a file holds other samples:
+
+- After damage at the head the first frame read can be the stream's short
+  last one, and it used to place itself, the hole in front of it and the
+  length in its own size. Where that frame is known to be the last (the
+  data, or the Ogg stream, ends behind it with no damage between) and
+  STREAMINFO's bounds are equal and ones a stream may state (16 to 65535,
+  RFC 9639 section 8.2), its number is now counted in that block size. With
+  a frame behind it, or nothing known of what follows, the first frame's
+  own size is the block size as before. A length behind a hole at the head
+  is held to what the bytes that hole took could hold as well as the
+  frames' own, so the larger positions leave it exact.
+- A hole from sample 0 in front of the first frame read is held to the
+  stream's length: a decode is cut there, and the hole's silence used to
+  fill it. A first frame numbered at or past where the closing frame ends
+  starts a native FLAC stream late, as one whose head bytes could not hold
+  the hole. In Ogg it is joined on with nothing owed, and so is a first
+  frame behind damage that is numbered above frames that follow it, which
+  used to disown them as another stream's. Such a head is placed at 0, as
+  a stream starting late is, with the frames numbered on from it behind
+  it, and the stream's own frames follow at their numbers, what lies
+  between counted lost. A seek lands on those packets as a read from the
+  open comes to them. Where neither the packet behind the head nor the
+  tail shows a frame numbered below it, the open reads through the frames
+  numbered on from the head, as far as a resync reaches (1 MiB), for the
+  one that ends their run.
+- A first frame with the frame numbered right in front of it lying behind
+  it, nothing damaged in front, used to start the stream late and drop
+  that frame as another stream's, natively and in Ogg. The stream now
+  starts at the earlier frame and both are read in order with nothing
+  lost. Only a stream numbered from past 0 is asked, at the cost of one
+  window at the first frame natively and one packet ahead in Ogg.
+- Native FLAC: a closing frame numbered before the successor of the whole
+  frame in front of it lies inside the frames a read delivers and is out
+  of sequence to it. The open states where it ends, notes it, and does not
+  call the length exact, so a decode that used to be cut there delivers
+  those frames whole. Where the frames in front are the ones numbered
+  ahead, a walk from the nearest frame the closing one could follow
+  settles whether a read comes to it, however long their run. A closing
+  frame numbered on is asked of the same walk, one step from the frame in
+  front on a healthy stream, since a read can take that frame's bytes on
+  through it. The frame in front is looked for in the tail window the open
+  already holds, at the cost of its parse and checksum and no read. A
+  healthy stream whose frames are larger than that window pays one read
+  more, back to where the largest frame could start; only damage in front
+  of the closing frame reads further, as far as a resync reaches, and a
+  closing frame with no whole frame in that reach in front of it is not
+  called exact either. Where no frame in front of it is whole at all, the
+  walk is a read's from the first frame. The parses that look for the
+  frame in front may read twice the bytes that search can hold; past that
+  the length is called as it was.
+- With the blocking strategy bit clear, bounds that state no block size no
+  longer make the numbers sample numbers by themselves. The frame behind
+  the first settles it: numbered one on, the stream counts frames; numbered
+  a block on, samples. Where a native FLAC's first frame does not check,
+  the first frame behind it that does, and the header behind that one,
+  settle it the same way. With no such frame to read, or one that says
+  neither, unequal bounds mean sample numbers as before, whether a stream
+  may state them or not. A STREAMINFO with damaged bounds used to turn a
+  plain stream's frames 0, 1, 2 into samples 0, 1, 2, of which a read
+  delivered one, or none where the first frame was damaged too. A copy
+  numbers its frames as it did (`flac.Numberer`).
+- Reading that second frame is paid only where it can change the answer:
+  bounds that state no block size, or a first frame shorter than the one
+  they state. Native FLAC under a seek window reads nothing its tail scan
+  does not, and a longer stream one window at the first frame, which is
+  also all a damaged first frame's search reads (eight headers that parse
+  at most); Ogg reads one packet ahead. A read that fails there is no
+  answer and not the open's error.
+- Native FLAC: a frame that is whole by its own checksum with more bytes
+  behind it than a frame can be long, none of them a successor, ends the
+  stream as a junk tail does. The frame is delivered and the rest reported
+  as trailing bytes, which Strict refuses; a read used to fail there and
+  lose the frame.
+- Native FLAC: a seek whose walk begins on a header with no frame behind it
+  starts again further back, and what the abandoned walk found is neither
+  listed nor counted.
+- Behind damage, a frame that checks and is numbered where the stream could
+  not have it (past the exact length, or further on than the damaged bytes
+  could hold) used to end a native FLAC read there, and in Ogg was paid out
+  as silence up to its number. Native FLAC now reads on from the next frame
+  the stream could have, the strays in front of it lying in the hole, and
+  where there is none joins the strays on in order with nothing lost; Ogg
+  holds a hole behind a damaged page to the exact length and joins a frame
+  past it on. A native seek into a hole at the stream's head lands where
+  the read behind it places what it owes, which in front of frames joined
+  on is not sample 0.
+- Native FLAC: whole frames behind a frame that are numbered before its
+  successor check together with it, since a frame's own checksum leaves
+  zero, and used to ride in its packet, which a decoder ignored and a copy
+  refused. The frame now ends where they begin, and they are dropped and
+  reported as frames out of sequence.
+- Native FLAC: numbers that skip, with the next frame starting where the
+  last one ends, used to be taken at once: as samples lost where the stream
+  could have the frame, and joined on where not. A frame numbered inside
+  the gap that follows within a resync's reach (1 MiB) is now read on from
+  instead, whether it lies right behind the frames numbered ahead or behind
+  damage. The whole frames of that run are held and read in order (a
+  swapped pair reads as the pair), or, where the run fills the gap in front
+  of that frame exactly and is not numbered right behind it, read at the
+  gap, as frames misnumbered. A run numbered past the stream that is
+  shorter than its gap is read at the gap's head, the rest counted lost;
+  longer, it is joined at its own numbers, as it was. A held run is read
+  behind the first frame that no frame numbered before the run follows: the
+  frame in front of its numbers, or one in front of a frame gone, of
+  damage, of another skip or of the stream's end. Every other end of the
+  wait takes the skip as before, so the frame the skip lands on and the
+  whole frames numbered on from it are read whatever follows them: a
+  second run while one is held, a run in front of a frame numbered past
+  it, and a wait that finds no frame numbered in the gap. What follows a
+  run is found as after any frame. Such a skip costs a scan of the bytes it
+  waits over, a run held past a resync's reach is read again from the
+  source when it is due, and a seek whose walk meets a skip behind its
+  first frame, takes a run aside there, or meets frames out of sequence
+  starts one block further back, where the frames due in it may lie.
+  Behind frames out of sequence the read always waited for the successor,
+  so there a frame numbered ahead ends nothing by itself: the successor is
+  read on from, the run held where the stream could have it and dropped
+  with those frames where not, as is a frame behind damage; only with no
+  successor to the scan's end does the first frame numbered in the gap, or
+  the skip, settle it. A frame behind damage that a read of the run would
+  not come to, numbered inside the run or before where it ends (frames
+  numbered by sample can lie over one another), is the hole the read
+  always took.
+- A seek whose walk from further back comes to frames joined on in front
+  of its target, with nothing lost between, lands by the walk it began
+  with, natively and in Ogg: no read from there comes to the target, and
+  a seek by the frames' own numbers always did. So does a native seek
+  whose first walk began on the frame that holds the target where the
+  walk from further back lands on another, and an Ogg seek where that
+  walk meets the same hole behind the same frame. Past the end, a native
+  seek whose walk from further back ends in front of the frame the first
+  began on lands by whichever ends later, so the measure stays at the
+  furthest end a seek reaches. The walk the native open
+  measures a damaged tail by starts further back by the same rules, and
+  counts where it comes past the frame it first began on. So a seek past
+  the end, which is the native measure, comes to where a read places the
+  frames it can come to. An Ogg seek into the hole the stream starts with
+  keeps the frame behind its landing that is numbered before it, as a
+  read from the open does.
+- Ogg: where the open did not call a FLAC length exact, or a read took the
+  claim back, the measure is what a read from the first frame delivers,
+  counted by reading the packets (`container.Measurer`), once for an
+  open. A seek past the end lands by the last frames' numbers, which a
+  read through frames joined on or out of order does not come to.
+- Ogg: two FLAC frames out of order, a frame numbered ahead with the frame
+  due in the next packet, damage in front of them or not, used to be read
+  as two holes whose silence a decode cut at the exact length paid for with
+  the stream's last frames. They are now read in order with nothing lost.
+  Behind a seek that lands on the later one the earlier is dropped, and a
+  seek walk that finds a hole behind its first frame starts further back,
+  where the frame due in it may lie. The same holds behind a hole, at the
+  head or in the stream: a frame with the one due right in front of it in
+  the next packet is read behind that one, which is owed what is left of
+  the hole.
+- Ogg, every mapping: damage with no page in the 1 MiB a resync scans
+  behind it used to fail a read, and a seek whose probe met it. A tolerant
+  read now ends there, as every other demuxer's does, with the bytes
+  dropped reported, and a seek looks in front of the damage. Strict
+  refuses it as before, and an open that finds no audio page in reach
+  still refuses the file.
+- A read from the first frame, or behind a seek whose walk began there,
+  that ends off the exact length says so and takes the claim back. Short
+  of it, the read warns (in the open's words where the length is
+  STREAMINFO's own), which Strict refuses, the track takes what the read
+  reached with its STREAMINFO restated, and the rest is counted truncated;
+  past it the read notes it, as the open notes frames past STREAMINFO's
+  total, and the length stays. Either side of it the length is no longer
+  exact, since a seek lands by a frame's own number and can reach frames a
+  read cannot. A hole stays held to the length the open called exact, and
+  an Ogg seek to the length the open gave, so a second pass reads and
+  lands as the first did. A Media takes the length on its next Walk.
+
+`flacn.DemuxerVersion` is `flacn-demux-2`, on every plan over a native FLAC
+source. `ogg.DemuxerVersion` is `ogg-demux-2` and is carried by every Ogg
+track: a FLAC one for the rules above, and a Vorbis or an Opus one because
+a damaged stream that failed a read at the resync horizon now delivers
+the packets in front of it. So every cached entry of a native FLAC or an
+Ogg source, and of a timeline with one as a member, misses once. The
+server's cache-key golden shows `flacn-demux-2` on the copy, transcode,
+timeline and HLS lines of native FLAC sources, and `ogg-demux-2` on the
+lines of an Ogg FLAC, an Ogg Opus and an Ogg Vorbis source.
+
+An intact file reads as it did, and at the same cost but for one kind: an
+intact old-format stream (unequal block size bounds) pays the numbering
+look at open, one more window natively (131,072 bytes) and one or two
+pages in Ogg. A native seek with no SEEKTABLE costs less: each bisection
+probe is one read of the largest frame's bytes and a header (what the
+largest block codes verbatim, or the size STREAMINFO states where that is
+less, so an overstated field costs nothing), where it was three to five
+reads that doubled from 1 KiB. What an exact length
+still does not say is unchanged: the open confirms the closing frame and
+the frame in front of it, not the frames between.

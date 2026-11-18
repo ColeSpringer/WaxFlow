@@ -1,0 +1,922 @@
+# <case> p<n> <pts> <dur> <crc-32 of the data>, with lost=<samples> and discont where the packet says so
+# <case> seek <target> landed <position>, then the packet read next in the same fields
+clean file 12889 bytes
+clean open samples=-1 exact=false
+clean packets 75
+clean p0 0 2048 48667e57
+clean p1 2048 2048 7a6408b1
+clean p2 4096 2048 c5184572
+clean p3 6144 2048 8c442c27
+clean p4 8192 2048 0d9e5a74
+clean p5 10240 2048 38dea896
+clean p6 12288 2048 21cbb8f5
+clean p7 14336 2048 31e28e89
+clean p8 16384 2048 3c0dc0d6
+clean p9 18432 2048 08f75277
+clean p10 20480 2048 faca8e98
+clean p11 22528 2048 edfe5ce8
+clean p12 24576 2048 8de86182
+clean p13 26624 2048 6a1b3264
+clean p14 28672 2048 d939bdee
+clean p15 30720 2048 e9e03286
+clean p16 32768 2048 0fab3e90
+clean p17 34816 2048 22e846d4
+clean p18 36864 2048 56bc593c
+clean p19 38912 2048 e913ab9b
+clean p20 40960 2048 96fb2311
+clean p21 43008 2048 4b979b99
+clean p22 45056 2048 cf6c28fe
+clean p23 47104 2048 edf9367c
+clean p24 49152 2048 4b0d0ca7
+clean p25 51200 2048 59921dd4
+clean p26 53248 2048 ec5dc23b
+clean p27 55296 2048 4edd3e04
+clean p28 57344 2048 ee0cb96c
+clean p29 59392 2048 8f3e113e
+clean p30 61440 2048 53004ad3
+clean p31 63488 2048 f6a77281
+clean p32 65536 2048 9b9d1479
+clean p33 67584 2048 29d8d3ec
+clean p34 69632 2048 69b65a4b
+clean p35 71680 2048 354dbbab
+clean p36 73728 2048 f94ce3ef
+clean p37 75776 2048 35fa244b
+clean p38 77824 2048 a59bae9d
+clean p39 79872 2048 ce7d410a
+clean p40 81920 2048 2e7e7eed
+clean p41 83968 2048 bcb2aba6
+clean p42 86016 2048 7d791c9a
+clean p43 88064 2048 d3879bfb
+clean p44 90112 2048 8e4e72db
+clean p45 92160 2048 f9d84d0e
+clean p46 94208 2048 099518d7
+clean p47 96256 2048 669e57c4
+clean p48 98304 2048 ed178dee
+clean p49 100352 2048 c11f1ace
+clean p50 102400 2048 8d58cb53
+clean p51 104448 2048 14ae5d96
+clean p52 106496 2048 dfe7b566
+clean p53 108544 2048 8d29e760
+clean p54 110592 2048 b63dc043
+clean p55 112640 2048 d12f89d7
+clean p56 114688 2048 513a6bc9
+clean p57 116736 2048 c49361ec
+clean p58 118784 2048 708ae843
+clean p59 120832 2048 b60cd8df
+clean p60 122880 2048 ced6c634
+clean p61 124928 2048 b6c547eb
+clean p62 126976 2048 d76a27e7
+clean p63 129024 2048 30dee909
+clean p64 131072 2048 b9ec64ee
+clean p65 133120 2048 21fb321c
+clean p66 135168 2048 062b9a52
+clean p67 137216 2048 a3028527
+clean p68 139264 2048 d497250c
+clean p69 141312 2048 431130cf
+clean p70 143360 2048 e74a0cd6
+clean p71 145408 2048 d1a51b67
+clean p72 147456 2048 0abcdb03
+clean p73 149504 2048 7a67efdb
+clean p74 151552 2048 4f623dcc
+clean warnings 0
+clean seek 38400 landed 12288, then 12288 2048 21cbb8f5
+clean seek 76800 landed 51200, then 51200 2048 59921dd4
+clean seek 115200 landed 90112, then 90112 2048 8e4e72db
+clean seek warnings 0
+junk-head file 21081 bytes: 8192 bytes of junk at 0, every second one 0xff
+junk-head open samples=-1 exact=false
+junk-head packets 75
+junk-head p0 0 2048 48667e57
+junk-head p1 2048 2048 7a6408b1
+junk-head p2 4096 2048 c5184572
+junk-head p3 6144 2048 8c442c27
+junk-head p4 8192 2048 0d9e5a74
+junk-head p5 10240 2048 38dea896
+junk-head p6 12288 2048 21cbb8f5
+junk-head p7 14336 2048 31e28e89
+junk-head p8 16384 2048 3c0dc0d6
+junk-head p9 18432 2048 08f75277
+junk-head p10 20480 2048 faca8e98
+junk-head p11 22528 2048 edfe5ce8
+junk-head p12 24576 2048 8de86182
+junk-head p13 26624 2048 6a1b3264
+junk-head p14 28672 2048 d939bdee
+junk-head p15 30720 2048 e9e03286
+junk-head p16 32768 2048 0fab3e90
+junk-head p17 34816 2048 22e846d4
+junk-head p18 36864 2048 56bc593c
+junk-head p19 38912 2048 e913ab9b
+junk-head p20 40960 2048 96fb2311
+junk-head p21 43008 2048 4b979b99
+junk-head p22 45056 2048 cf6c28fe
+junk-head p23 47104 2048 edf9367c
+junk-head p24 49152 2048 4b0d0ca7
+junk-head p25 51200 2048 59921dd4
+junk-head p26 53248 2048 ec5dc23b
+junk-head p27 55296 2048 4edd3e04
+junk-head p28 57344 2048 ee0cb96c
+junk-head p29 59392 2048 8f3e113e
+junk-head p30 61440 2048 53004ad3
+junk-head p31 63488 2048 f6a77281
+junk-head p32 65536 2048 9b9d1479
+junk-head p33 67584 2048 29d8d3ec
+junk-head p34 69632 2048 69b65a4b
+junk-head p35 71680 2048 354dbbab
+junk-head p36 73728 2048 f94ce3ef
+junk-head p37 75776 2048 35fa244b
+junk-head p38 77824 2048 a59bae9d
+junk-head p39 79872 2048 ce7d410a
+junk-head p40 81920 2048 2e7e7eed
+junk-head p41 83968 2048 bcb2aba6
+junk-head p42 86016 2048 7d791c9a
+junk-head p43 88064 2048 d3879bfb
+junk-head p44 90112 2048 8e4e72db
+junk-head p45 92160 2048 f9d84d0e
+junk-head p46 94208 2048 099518d7
+junk-head p47 96256 2048 669e57c4
+junk-head p48 98304 2048 ed178dee
+junk-head p49 100352 2048 c11f1ace
+junk-head p50 102400 2048 8d58cb53
+junk-head p51 104448 2048 14ae5d96
+junk-head p52 106496 2048 dfe7b566
+junk-head p53 108544 2048 8d29e760
+junk-head p54 110592 2048 b63dc043
+junk-head p55 112640 2048 d12f89d7
+junk-head p56 114688 2048 513a6bc9
+junk-head p57 116736 2048 c49361ec
+junk-head p58 118784 2048 708ae843
+junk-head p59 120832 2048 b60cd8df
+junk-head p60 122880 2048 ced6c634
+junk-head p61 124928 2048 b6c547eb
+junk-head p62 126976 2048 d76a27e7
+junk-head p63 129024 2048 30dee909
+junk-head p64 131072 2048 b9ec64ee
+junk-head p65 133120 2048 21fb321c
+junk-head p66 135168 2048 062b9a52
+junk-head p67 137216 2048 a3028527
+junk-head p68 139264 2048 d497250c
+junk-head p69 141312 2048 431130cf
+junk-head p70 143360 2048 e74a0cd6
+junk-head p71 145408 2048 d1a51b67
+junk-head p72 147456 2048 0abcdb03
+junk-head p73 149504 2048 7a67efdb
+junk-head p74 151552 2048 4f623dcc
+junk-head warnings 1
+junk-head w0 damage at 0: 8192 unparsable bytes before the first frame
+junk-head seek 38400 landed 12288, then 12288 2048 21cbb8f5
+junk-head seek 76800 landed 51200, then 51200 2048 59921dd4
+junk-head seek 115200 landed 90112, then 90112 2048 8e4e72db
+junk-head seek warnings 0
+junk-span file 13910 bytes: 1021 bytes of junk at 0, every second one 0xff
+junk-span open samples=-1 exact=false
+junk-span packets 75
+junk-span p0 0 2048 48667e57
+junk-span p1 2048 2048 7a6408b1
+junk-span p2 4096 2048 c5184572
+junk-span p3 6144 2048 8c442c27
+junk-span p4 8192 2048 0d9e5a74
+junk-span p5 10240 2048 38dea896
+junk-span p6 12288 2048 21cbb8f5
+junk-span p7 14336 2048 31e28e89
+junk-span p8 16384 2048 3c0dc0d6
+junk-span p9 18432 2048 08f75277
+junk-span p10 20480 2048 faca8e98
+junk-span p11 22528 2048 edfe5ce8
+junk-span p12 24576 2048 8de86182
+junk-span p13 26624 2048 6a1b3264
+junk-span p14 28672 2048 d939bdee
+junk-span p15 30720 2048 e9e03286
+junk-span p16 32768 2048 0fab3e90
+junk-span p17 34816 2048 22e846d4
+junk-span p18 36864 2048 56bc593c
+junk-span p19 38912 2048 e913ab9b
+junk-span p20 40960 2048 96fb2311
+junk-span p21 43008 2048 4b979b99
+junk-span p22 45056 2048 cf6c28fe
+junk-span p23 47104 2048 edf9367c
+junk-span p24 49152 2048 4b0d0ca7
+junk-span p25 51200 2048 59921dd4
+junk-span p26 53248 2048 ec5dc23b
+junk-span p27 55296 2048 4edd3e04
+junk-span p28 57344 2048 ee0cb96c
+junk-span p29 59392 2048 8f3e113e
+junk-span p30 61440 2048 53004ad3
+junk-span p31 63488 2048 f6a77281
+junk-span p32 65536 2048 9b9d1479
+junk-span p33 67584 2048 29d8d3ec
+junk-span p34 69632 2048 69b65a4b
+junk-span p35 71680 2048 354dbbab
+junk-span p36 73728 2048 f94ce3ef
+junk-span p37 75776 2048 35fa244b
+junk-span p38 77824 2048 a59bae9d
+junk-span p39 79872 2048 ce7d410a
+junk-span p40 81920 2048 2e7e7eed
+junk-span p41 83968 2048 bcb2aba6
+junk-span p42 86016 2048 7d791c9a
+junk-span p43 88064 2048 d3879bfb
+junk-span p44 90112 2048 8e4e72db
+junk-span p45 92160 2048 f9d84d0e
+junk-span p46 94208 2048 099518d7
+junk-span p47 96256 2048 669e57c4
+junk-span p48 98304 2048 ed178dee
+junk-span p49 100352 2048 c11f1ace
+junk-span p50 102400 2048 8d58cb53
+junk-span p51 104448 2048 14ae5d96
+junk-span p52 106496 2048 dfe7b566
+junk-span p53 108544 2048 8d29e760
+junk-span p54 110592 2048 b63dc043
+junk-span p55 112640 2048 d12f89d7
+junk-span p56 114688 2048 513a6bc9
+junk-span p57 116736 2048 c49361ec
+junk-span p58 118784 2048 708ae843
+junk-span p59 120832 2048 b60cd8df
+junk-span p60 122880 2048 ced6c634
+junk-span p61 124928 2048 b6c547eb
+junk-span p62 126976 2048 d76a27e7
+junk-span p63 129024 2048 30dee909
+junk-span p64 131072 2048 b9ec64ee
+junk-span p65 133120 2048 21fb321c
+junk-span p66 135168 2048 062b9a52
+junk-span p67 137216 2048 a3028527
+junk-span p68 139264 2048 d497250c
+junk-span p69 141312 2048 431130cf
+junk-span p70 143360 2048 e74a0cd6
+junk-span p71 145408 2048 d1a51b67
+junk-span p72 147456 2048 0abcdb03
+junk-span p73 149504 2048 7a67efdb
+junk-span p74 151552 2048 4f623dcc
+junk-span warnings 1
+junk-span w0 damage at 0: 1021 unparsable bytes before the first frame
+junk-span seek 38400 landed 12288, then 12288 2048 21cbb8f5
+junk-span seek 76800 landed 51200, then 51200 2048 59921dd4
+junk-span seek 115200 landed 90112, then 90112 2048 8e4e72db
+junk-span seek warnings 0
+junk-mid file 21081 bytes: 8192 bytes of junk at 6407, every second one 0xff
+junk-mid open samples=-1 exact=false
+junk-mid packets 75
+junk-mid p0 0 2048 48667e57
+junk-mid p1 2048 2048 7a6408b1
+junk-mid p2 4096 2048 c5184572
+junk-mid p3 6144 2048 8c442c27
+junk-mid p4 8192 2048 0d9e5a74
+junk-mid p5 10240 2048 38dea896
+junk-mid p6 12288 2048 21cbb8f5
+junk-mid p7 14336 2048 31e28e89
+junk-mid p8 16384 2048 3c0dc0d6
+junk-mid p9 18432 2048 08f75277
+junk-mid p10 20480 2048 faca8e98
+junk-mid p11 22528 2048 edfe5ce8
+junk-mid p12 24576 2048 8de86182
+junk-mid p13 26624 2048 6a1b3264
+junk-mid p14 28672 2048 d939bdee
+junk-mid p15 30720 2048 e9e03286
+junk-mid p16 32768 2048 0fab3e90
+junk-mid p17 34816 2048 22e846d4
+junk-mid p18 36864 2048 56bc593c
+junk-mid p19 38912 2048 e913ab9b
+junk-mid p20 40960 2048 96fb2311
+junk-mid p21 43008 2048 4b979b99
+junk-mid p22 45056 2048 cf6c28fe
+junk-mid p23 47104 2048 edf9367c
+junk-mid p24 49152 2048 4b0d0ca7
+junk-mid p25 51200 2048 59921dd4
+junk-mid p26 53248 2048 ec5dc23b
+junk-mid p27 55296 2048 4edd3e04
+junk-mid p28 57344 2048 ee0cb96c
+junk-mid p29 59392 2048 8f3e113e
+junk-mid p30 61440 2048 53004ad3
+junk-mid p31 63488 2048 f6a77281
+junk-mid p32 65536 2048 9b9d1479
+junk-mid p33 67584 2048 29d8d3ec
+junk-mid p34 69632 2048 69b65a4b
+junk-mid p35 71680 2048 354dbbab
+junk-mid p36 73728 2048 f94ce3ef
+junk-mid p37 75776 2048 35fa244b
+junk-mid p38 77824 2048 a59bae9d
+junk-mid p39 79872 2048 ce7d410a
+junk-mid p40 81920 2048 2e7e7eed
+junk-mid p41 83968 2048 bcb2aba6
+junk-mid p42 86016 2048 7d791c9a
+junk-mid p43 88064 2048 d3879bfb
+junk-mid p44 90112 2048 8e4e72db
+junk-mid p45 92160 2048 f9d84d0e
+junk-mid p46 94208 2048 099518d7
+junk-mid p47 96256 2048 669e57c4
+junk-mid p48 98304 2048 ed178dee
+junk-mid p49 100352 2048 c11f1ace
+junk-mid p50 102400 2048 8d58cb53
+junk-mid p51 104448 2048 14ae5d96
+junk-mid p52 106496 2048 dfe7b566
+junk-mid p53 108544 2048 8d29e760
+junk-mid p54 110592 2048 b63dc043
+junk-mid p55 112640 2048 d12f89d7
+junk-mid p56 114688 2048 513a6bc9
+junk-mid p57 116736 2048 c49361ec
+junk-mid p58 118784 2048 708ae843
+junk-mid p59 120832 2048 b60cd8df
+junk-mid p60 122880 2048 ced6c634
+junk-mid p61 124928 2048 b6c547eb
+junk-mid p62 126976 2048 d76a27e7
+junk-mid p63 129024 2048 30dee909
+junk-mid p64 131072 2048 b9ec64ee
+junk-mid p65 133120 2048 21fb321c
+junk-mid p66 135168 2048 062b9a52
+junk-mid p67 137216 2048 a3028527
+junk-mid p68 139264 2048 d497250c
+junk-mid p69 141312 2048 431130cf
+junk-mid p70 143360 2048 e74a0cd6
+junk-mid p71 145408 2048 d1a51b67
+junk-mid p72 147456 2048 0abcdb03
+junk-mid p73 149504 2048 7a67efdb
+junk-mid p74 151552 2048 4f623dcc
+junk-mid warnings 1
+junk-mid w0 damage at 6407: 8192 unparsable bytes skipped
+junk-mid seek 38400 landed 12288, then 12288 2048 21cbb8f5
+junk-mid seek 76800 landed 51200, then 51200 2048 59921dd4
+junk-mid seek 115200 landed 90112, then 90112 2048 8e4e72db
+junk-mid seek warnings 0
+decoy-mid file 21081 bytes: 8192 bytes of junk at 6407, every second one 0xff, the 32 bytes that follow it also at 8455
+decoy-mid open samples=-1 exact=false
+decoy-mid packets 75
+decoy-mid p0 0 2048 48667e57
+decoy-mid p1 2048 2048 7a6408b1
+decoy-mid p2 4096 2048 c5184572
+decoy-mid p3 6144 2048 8c442c27
+decoy-mid p4 8192 2048 0d9e5a74
+decoy-mid p5 10240 2048 38dea896
+decoy-mid p6 12288 2048 21cbb8f5
+decoy-mid p7 14336 2048 31e28e89
+decoy-mid p8 16384 2048 3c0dc0d6
+decoy-mid p9 18432 2048 08f75277
+decoy-mid p10 20480 2048 faca8e98
+decoy-mid p11 22528 2048 edfe5ce8
+decoy-mid p12 24576 2048 8de86182
+decoy-mid p13 26624 2048 6a1b3264
+decoy-mid p14 28672 2048 d939bdee
+decoy-mid p15 30720 2048 e9e03286
+decoy-mid p16 32768 2048 0fab3e90
+decoy-mid p17 34816 2048 22e846d4
+decoy-mid p18 36864 2048 56bc593c
+decoy-mid p19 38912 2048 e913ab9b
+decoy-mid p20 40960 2048 96fb2311
+decoy-mid p21 43008 2048 4b979b99
+decoy-mid p22 45056 2048 cf6c28fe
+decoy-mid p23 47104 2048 edf9367c
+decoy-mid p24 49152 2048 4b0d0ca7
+decoy-mid p25 51200 2048 59921dd4
+decoy-mid p26 53248 2048 ec5dc23b
+decoy-mid p27 55296 2048 4edd3e04
+decoy-mid p28 57344 2048 ee0cb96c
+decoy-mid p29 59392 2048 8f3e113e
+decoy-mid p30 61440 2048 53004ad3
+decoy-mid p31 63488 2048 f6a77281
+decoy-mid p32 65536 2048 9b9d1479
+decoy-mid p33 67584 2048 29d8d3ec
+decoy-mid p34 69632 2048 69b65a4b
+decoy-mid p35 71680 2048 354dbbab
+decoy-mid p36 73728 2048 f94ce3ef
+decoy-mid p37 75776 2048 35fa244b
+decoy-mid p38 77824 2048 a59bae9d
+decoy-mid p39 79872 2048 ce7d410a
+decoy-mid p40 81920 2048 2e7e7eed
+decoy-mid p41 83968 2048 bcb2aba6
+decoy-mid p42 86016 2048 7d791c9a
+decoy-mid p43 88064 2048 d3879bfb
+decoy-mid p44 90112 2048 8e4e72db
+decoy-mid p45 92160 2048 f9d84d0e
+decoy-mid p46 94208 2048 099518d7
+decoy-mid p47 96256 2048 669e57c4
+decoy-mid p48 98304 2048 ed178dee
+decoy-mid p49 100352 2048 c11f1ace
+decoy-mid p50 102400 2048 8d58cb53
+decoy-mid p51 104448 2048 14ae5d96
+decoy-mid p52 106496 2048 dfe7b566
+decoy-mid p53 108544 2048 8d29e760
+decoy-mid p54 110592 2048 b63dc043
+decoy-mid p55 112640 2048 d12f89d7
+decoy-mid p56 114688 2048 513a6bc9
+decoy-mid p57 116736 2048 c49361ec
+decoy-mid p58 118784 2048 708ae843
+decoy-mid p59 120832 2048 b60cd8df
+decoy-mid p60 122880 2048 ced6c634
+decoy-mid p61 124928 2048 b6c547eb
+decoy-mid p62 126976 2048 d76a27e7
+decoy-mid p63 129024 2048 30dee909
+decoy-mid p64 131072 2048 b9ec64ee
+decoy-mid p65 133120 2048 21fb321c
+decoy-mid p66 135168 2048 062b9a52
+decoy-mid p67 137216 2048 a3028527
+decoy-mid p68 139264 2048 d497250c
+decoy-mid p69 141312 2048 431130cf
+decoy-mid p70 143360 2048 e74a0cd6
+decoy-mid p71 145408 2048 d1a51b67
+decoy-mid p72 147456 2048 0abcdb03
+decoy-mid p73 149504 2048 7a67efdb
+decoy-mid p74 151552 2048 4f623dcc
+decoy-mid warnings 1
+decoy-mid w0 damage at 6407: 8192 unparsable bytes skipped
+decoy-mid seek 38400 landed 12288, then 12288 2048 21cbb8f5
+decoy-mid seek 76800 landed 51200, then 51200 2048 59921dd4
+decoy-mid seek 115200 landed 90112, then 90112 2048 8e4e72db
+decoy-mid seek warnings 0
+junk-island file 29273 bytes: 8192 bytes of junk at 6407 and at 14820, every second one 0xff, the 221 bytes between them whole
+junk-island open samples=-1 exact=false
+junk-island packets 74
+junk-island p0 0 2048 48667e57
+junk-island p1 2048 2048 7a6408b1
+junk-island p2 4096 2048 c5184572
+junk-island p3 6144 2048 8c442c27
+junk-island p4 8192 2048 0d9e5a74
+junk-island p5 10240 2048 38dea896
+junk-island p6 12288 2048 21cbb8f5
+junk-island p7 14336 2048 31e28e89
+junk-island p8 16384 2048 3c0dc0d6
+junk-island p9 18432 2048 08f75277
+junk-island p10 20480 2048 faca8e98
+junk-island p11 22528 2048 edfe5ce8
+junk-island p12 24576 2048 8de86182
+junk-island p13 26624 2048 6a1b3264
+junk-island p14 28672 2048 d939bdee
+junk-island p15 30720 2048 e9e03286
+junk-island p16 32768 2048 0fab3e90
+junk-island p17 34816 2048 22e846d4
+junk-island p18 36864 2048 56bc593c
+junk-island p19 38912 2048 e913ab9b
+junk-island p20 40960 2048 96fb2311
+junk-island p21 43008 2048 4b979b99
+junk-island p22 45056 2048 cf6c28fe
+junk-island p23 47104 2048 edf9367c
+junk-island p24 49152 2048 4b0d0ca7
+junk-island p25 51200 2048 59921dd4
+junk-island p26 53248 2048 ec5dc23b
+junk-island p27 55296 2048 4edd3e04
+junk-island p28 57344 2048 ee0cb96c
+junk-island p29 59392 2048 8f3e113e
+junk-island p30 61440 2048 53004ad3
+junk-island p31 63488 2048 f6a77281
+junk-island p32 65536 2048 9b9d1479
+junk-island p33 67584 2048 29d8d3ec
+junk-island p34 69632 2048 69b65a4b
+junk-island p35 71680 2048 354dbbab
+junk-island p36 73728 2048 f94ce3ef
+junk-island p37 75776 2048 a59bae9d
+junk-island p38 77824 2048 ce7d410a
+junk-island p39 79872 2048 2e7e7eed
+junk-island p40 81920 2048 bcb2aba6
+junk-island p41 83968 2048 7d791c9a
+junk-island p42 86016 2048 d3879bfb
+junk-island p43 88064 2048 8e4e72db
+junk-island p44 90112 2048 f9d84d0e
+junk-island p45 92160 2048 099518d7
+junk-island p46 94208 2048 669e57c4
+junk-island p47 96256 2048 ed178dee
+junk-island p48 98304 2048 c11f1ace
+junk-island p49 100352 2048 8d58cb53
+junk-island p50 102400 2048 14ae5d96
+junk-island p51 104448 2048 dfe7b566
+junk-island p52 106496 2048 8d29e760
+junk-island p53 108544 2048 b63dc043
+junk-island p54 110592 2048 d12f89d7
+junk-island p55 112640 2048 513a6bc9
+junk-island p56 114688 2048 c49361ec
+junk-island p57 116736 2048 708ae843
+junk-island p58 118784 2048 b60cd8df
+junk-island p59 120832 2048 ced6c634
+junk-island p60 122880 2048 b6c547eb
+junk-island p61 124928 2048 d76a27e7
+junk-island p62 126976 2048 30dee909
+junk-island p63 129024 2048 b9ec64ee
+junk-island p64 131072 2048 21fb321c
+junk-island p65 133120 2048 062b9a52
+junk-island p66 135168 2048 a3028527
+junk-island p67 137216 2048 d497250c
+junk-island p68 139264 2048 431130cf
+junk-island p69 141312 2048 e74a0cd6
+junk-island p70 143360 2048 d1a51b67
+junk-island p71 145408 2048 0abcdb03
+junk-island p72 147456 2048 7a67efdb
+junk-island p73 149504 2048 4f623dcc
+junk-island warnings 1
+junk-island w0 damage at 6407: 16605 unparsable bytes skipped
+junk-island seek 38400 landed 12288, then 12288 2048 21cbb8f5
+junk-island seek 76800 landed 51200, then 51200 2048 59921dd4
+junk-island seek 115200 landed 90112, then 90112 2048 f9d84d0e
+junk-island seek warnings 0
+junk-island-header file 29273 bytes: 8192 bytes of junk at 6407 and at 14852, every second one 0xff, the 253 bytes between them whole
+junk-island-header open samples=-1 exact=false
+junk-island-header packets 75
+junk-island-header p0 0 2048 48667e57
+junk-island-header p1 2048 2048 7a6408b1
+junk-island-header p2 4096 2048 c5184572
+junk-island-header p3 6144 2048 8c442c27
+junk-island-header p4 8192 2048 0d9e5a74
+junk-island-header p5 10240 2048 38dea896
+junk-island-header p6 12288 2048 21cbb8f5
+junk-island-header p7 14336 2048 31e28e89
+junk-island-header p8 16384 2048 3c0dc0d6
+junk-island-header p9 18432 2048 08f75277
+junk-island-header p10 20480 2048 faca8e98
+junk-island-header p11 22528 2048 edfe5ce8
+junk-island-header p12 24576 2048 8de86182
+junk-island-header p13 26624 2048 6a1b3264
+junk-island-header p14 28672 2048 d939bdee
+junk-island-header p15 30720 2048 e9e03286
+junk-island-header p16 32768 2048 0fab3e90
+junk-island-header p17 34816 2048 22e846d4
+junk-island-header p18 36864 2048 56bc593c
+junk-island-header p19 38912 2048 e913ab9b
+junk-island-header p20 40960 2048 96fb2311
+junk-island-header p21 43008 2048 4b979b99
+junk-island-header p22 45056 2048 cf6c28fe
+junk-island-header p23 47104 2048 edf9367c
+junk-island-header p24 49152 2048 4b0d0ca7
+junk-island-header p25 51200 2048 59921dd4
+junk-island-header p26 53248 2048 ec5dc23b
+junk-island-header p27 55296 2048 4edd3e04
+junk-island-header p28 57344 2048 ee0cb96c
+junk-island-header p29 59392 2048 8f3e113e
+junk-island-header p30 61440 2048 53004ad3
+junk-island-header p31 63488 2048 f6a77281
+junk-island-header p32 65536 2048 9b9d1479
+junk-island-header p33 67584 2048 29d8d3ec
+junk-island-header p34 69632 2048 69b65a4b
+junk-island-header p35 71680 2048 354dbbab
+junk-island-header p36 73728 2048 f94ce3ef
+junk-island-header p37 75776 2048 35fa244b
+junk-island-header p38 77824 2048 4eb802ae
+junk-island-header p39 79872 2048 ce7d410a
+junk-island-header p40 81920 2048 2e7e7eed
+junk-island-header p41 83968 2048 bcb2aba6
+junk-island-header p42 86016 2048 7d791c9a
+junk-island-header p43 88064 2048 d3879bfb
+junk-island-header p44 90112 2048 8e4e72db
+junk-island-header p45 92160 2048 f9d84d0e
+junk-island-header p46 94208 2048 099518d7
+junk-island-header p47 96256 2048 669e57c4
+junk-island-header p48 98304 2048 ed178dee
+junk-island-header p49 100352 2048 c11f1ace
+junk-island-header p50 102400 2048 8d58cb53
+junk-island-header p51 104448 2048 14ae5d96
+junk-island-header p52 106496 2048 dfe7b566
+junk-island-header p53 108544 2048 8d29e760
+junk-island-header p54 110592 2048 b63dc043
+junk-island-header p55 112640 2048 d12f89d7
+junk-island-header p56 114688 2048 513a6bc9
+junk-island-header p57 116736 2048 c49361ec
+junk-island-header p58 118784 2048 708ae843
+junk-island-header p59 120832 2048 b60cd8df
+junk-island-header p60 122880 2048 ced6c634
+junk-island-header p61 124928 2048 b6c547eb
+junk-island-header p62 126976 2048 d76a27e7
+junk-island-header p63 129024 2048 30dee909
+junk-island-header p64 131072 2048 b9ec64ee
+junk-island-header p65 133120 2048 21fb321c
+junk-island-header p66 135168 2048 062b9a52
+junk-island-header p67 137216 2048 a3028527
+junk-island-header p68 139264 2048 d497250c
+junk-island-header p69 141312 2048 431130cf
+junk-island-header p70 143360 2048 e74a0cd6
+junk-island-header p71 145408 2048 d1a51b67
+junk-island-header p72 147456 2048 0abcdb03
+junk-island-header p73 149504 2048 7a67efdb
+junk-island-header p74 151552 2048 4f623dcc
+junk-island-header warnings 2
+junk-island-header w0 damage at 6407: 8192 unparsable bytes skipped
+junk-island-header w1 damage at 15029: 8192 unparsable bytes skipped
+junk-island-header seek 38400 landed 12288, then 12288 2048 21cbb8f5
+junk-island-header seek 76800 landed 51200, then 51200 2048 59921dd4
+junk-island-header seek 115200 landed 90112, then 90112 2048 8e4e72db
+junk-island-header seek warnings 0
+junk-last file 21081 bytes: 8192 bytes of junk at 12832, every second one 0xff
+junk-last open samples=-1 exact=false
+junk-last packets 75
+junk-last p0 0 2048 48667e57
+junk-last p1 2048 2048 7a6408b1
+junk-last p2 4096 2048 c5184572
+junk-last p3 6144 2048 8c442c27
+junk-last p4 8192 2048 0d9e5a74
+junk-last p5 10240 2048 38dea896
+junk-last p6 12288 2048 21cbb8f5
+junk-last p7 14336 2048 31e28e89
+junk-last p8 16384 2048 3c0dc0d6
+junk-last p9 18432 2048 08f75277
+junk-last p10 20480 2048 faca8e98
+junk-last p11 22528 2048 edfe5ce8
+junk-last p12 24576 2048 8de86182
+junk-last p13 26624 2048 6a1b3264
+junk-last p14 28672 2048 d939bdee
+junk-last p15 30720 2048 e9e03286
+junk-last p16 32768 2048 0fab3e90
+junk-last p17 34816 2048 22e846d4
+junk-last p18 36864 2048 56bc593c
+junk-last p19 38912 2048 e913ab9b
+junk-last p20 40960 2048 96fb2311
+junk-last p21 43008 2048 4b979b99
+junk-last p22 45056 2048 cf6c28fe
+junk-last p23 47104 2048 edf9367c
+junk-last p24 49152 2048 4b0d0ca7
+junk-last p25 51200 2048 59921dd4
+junk-last p26 53248 2048 ec5dc23b
+junk-last p27 55296 2048 4edd3e04
+junk-last p28 57344 2048 ee0cb96c
+junk-last p29 59392 2048 8f3e113e
+junk-last p30 61440 2048 53004ad3
+junk-last p31 63488 2048 f6a77281
+junk-last p32 65536 2048 9b9d1479
+junk-last p33 67584 2048 29d8d3ec
+junk-last p34 69632 2048 69b65a4b
+junk-last p35 71680 2048 354dbbab
+junk-last p36 73728 2048 f94ce3ef
+junk-last p37 75776 2048 35fa244b
+junk-last p38 77824 2048 a59bae9d
+junk-last p39 79872 2048 ce7d410a
+junk-last p40 81920 2048 2e7e7eed
+junk-last p41 83968 2048 bcb2aba6
+junk-last p42 86016 2048 7d791c9a
+junk-last p43 88064 2048 d3879bfb
+junk-last p44 90112 2048 8e4e72db
+junk-last p45 92160 2048 f9d84d0e
+junk-last p46 94208 2048 099518d7
+junk-last p47 96256 2048 669e57c4
+junk-last p48 98304 2048 ed178dee
+junk-last p49 100352 2048 c11f1ace
+junk-last p50 102400 2048 8d58cb53
+junk-last p51 104448 2048 14ae5d96
+junk-last p52 106496 2048 dfe7b566
+junk-last p53 108544 2048 8d29e760
+junk-last p54 110592 2048 b63dc043
+junk-last p55 112640 2048 d12f89d7
+junk-last p56 114688 2048 513a6bc9
+junk-last p57 116736 2048 c49361ec
+junk-last p58 118784 2048 708ae843
+junk-last p59 120832 2048 b60cd8df
+junk-last p60 122880 2048 ced6c634
+junk-last p61 124928 2048 b6c547eb
+junk-last p62 126976 2048 d76a27e7
+junk-last p63 129024 2048 30dee909
+junk-last p64 131072 2048 b9ec64ee
+junk-last p65 133120 2048 21fb321c
+junk-last p66 135168 2048 062b9a52
+junk-last p67 137216 2048 a3028527
+junk-last p68 139264 2048 d497250c
+junk-last p69 141312 2048 431130cf
+junk-last p70 143360 2048 e74a0cd6
+junk-last p71 145408 2048 d1a51b67
+junk-last p72 147456 2048 0abcdb03
+junk-last p73 149504 2048 7a67efdb
+junk-last p74 151552 2048 4f623dcc
+junk-last warnings 1
+junk-last w0 damage at 12832: 8192 unparsable bytes skipped
+junk-last seek 38400 landed 12288, then 12288 2048 21cbb8f5
+junk-last seek 76800 landed 51200, then 51200 2048 59921dd4
+junk-last seek 115200 landed 90112, then 90112 2048 8e4e72db
+junk-last seek warnings 0
+junk-tail file 21081 bytes: 8192 bytes of junk at 12889, every second one 0xff
+junk-tail open samples=-1 exact=false
+junk-tail packets 75
+junk-tail p0 0 2048 48667e57
+junk-tail p1 2048 2048 7a6408b1
+junk-tail p2 4096 2048 c5184572
+junk-tail p3 6144 2048 8c442c27
+junk-tail p4 8192 2048 0d9e5a74
+junk-tail p5 10240 2048 38dea896
+junk-tail p6 12288 2048 21cbb8f5
+junk-tail p7 14336 2048 31e28e89
+junk-tail p8 16384 2048 3c0dc0d6
+junk-tail p9 18432 2048 08f75277
+junk-tail p10 20480 2048 faca8e98
+junk-tail p11 22528 2048 edfe5ce8
+junk-tail p12 24576 2048 8de86182
+junk-tail p13 26624 2048 6a1b3264
+junk-tail p14 28672 2048 d939bdee
+junk-tail p15 30720 2048 e9e03286
+junk-tail p16 32768 2048 0fab3e90
+junk-tail p17 34816 2048 22e846d4
+junk-tail p18 36864 2048 56bc593c
+junk-tail p19 38912 2048 e913ab9b
+junk-tail p20 40960 2048 96fb2311
+junk-tail p21 43008 2048 4b979b99
+junk-tail p22 45056 2048 cf6c28fe
+junk-tail p23 47104 2048 edf9367c
+junk-tail p24 49152 2048 4b0d0ca7
+junk-tail p25 51200 2048 59921dd4
+junk-tail p26 53248 2048 ec5dc23b
+junk-tail p27 55296 2048 4edd3e04
+junk-tail p28 57344 2048 ee0cb96c
+junk-tail p29 59392 2048 8f3e113e
+junk-tail p30 61440 2048 53004ad3
+junk-tail p31 63488 2048 f6a77281
+junk-tail p32 65536 2048 9b9d1479
+junk-tail p33 67584 2048 29d8d3ec
+junk-tail p34 69632 2048 69b65a4b
+junk-tail p35 71680 2048 354dbbab
+junk-tail p36 73728 2048 f94ce3ef
+junk-tail p37 75776 2048 35fa244b
+junk-tail p38 77824 2048 a59bae9d
+junk-tail p39 79872 2048 ce7d410a
+junk-tail p40 81920 2048 2e7e7eed
+junk-tail p41 83968 2048 bcb2aba6
+junk-tail p42 86016 2048 7d791c9a
+junk-tail p43 88064 2048 d3879bfb
+junk-tail p44 90112 2048 8e4e72db
+junk-tail p45 92160 2048 f9d84d0e
+junk-tail p46 94208 2048 099518d7
+junk-tail p47 96256 2048 669e57c4
+junk-tail p48 98304 2048 ed178dee
+junk-tail p49 100352 2048 c11f1ace
+junk-tail p50 102400 2048 8d58cb53
+junk-tail p51 104448 2048 14ae5d96
+junk-tail p52 106496 2048 dfe7b566
+junk-tail p53 108544 2048 8d29e760
+junk-tail p54 110592 2048 b63dc043
+junk-tail p55 112640 2048 d12f89d7
+junk-tail p56 114688 2048 513a6bc9
+junk-tail p57 116736 2048 c49361ec
+junk-tail p58 118784 2048 708ae843
+junk-tail p59 120832 2048 b60cd8df
+junk-tail p60 122880 2048 ced6c634
+junk-tail p61 124928 2048 b6c547eb
+junk-tail p62 126976 2048 d76a27e7
+junk-tail p63 129024 2048 30dee909
+junk-tail p64 131072 2048 b9ec64ee
+junk-tail p65 133120 2048 21fb321c
+junk-tail p66 135168 2048 062b9a52
+junk-tail p67 137216 2048 a3028527
+junk-tail p68 139264 2048 d497250c
+junk-tail p69 141312 2048 431130cf
+junk-tail p70 143360 2048 e74a0cd6
+junk-tail p71 145408 2048 d1a51b67
+junk-tail p72 147456 2048 0abcdb03
+junk-tail p73 149504 2048 7a67efdb
+junk-tail p74 151552 2048 4f623dcc
+junk-tail warnings 1
+junk-tail w0 damage at 12889: 8192 trailing bytes are not frames, dropped
+junk-tail seek 38400 landed 12288, then 12288 2048 21cbb8f5
+junk-tail seek 76800 landed 51200, then 51200 2048 59921dd4
+junk-tail seek 115200 landed 90112, then 90112 2048 8e4e72db
+junk-tail seek warnings 0
+zero-middle file 12889 bytes: 64 bytes zeroed at 6444
+zero-middle open samples=-1 exact=false
+zero-middle packets 75
+zero-middle p0 0 2048 48667e57
+zero-middle p1 2048 2048 7a6408b1
+zero-middle p2 4096 2048 c5184572
+zero-middle p3 6144 2048 8c442c27
+zero-middle p4 8192 2048 0d9e5a74
+zero-middle p5 10240 2048 38dea896
+zero-middle p6 12288 2048 21cbb8f5
+zero-middle p7 14336 2048 31e28e89
+zero-middle p8 16384 2048 3c0dc0d6
+zero-middle p9 18432 2048 08f75277
+zero-middle p10 20480 2048 faca8e98
+zero-middle p11 22528 2048 edfe5ce8
+zero-middle p12 24576 2048 8de86182
+zero-middle p13 26624 2048 6a1b3264
+zero-middle p14 28672 2048 d939bdee
+zero-middle p15 30720 2048 e9e03286
+zero-middle p16 32768 2048 0fab3e90
+zero-middle p17 34816 2048 22e846d4
+zero-middle p18 36864 2048 56bc593c
+zero-middle p19 38912 2048 e913ab9b
+zero-middle p20 40960 2048 96fb2311
+zero-middle p21 43008 2048 4b979b99
+zero-middle p22 45056 2048 cf6c28fe
+zero-middle p23 47104 2048 edf9367c
+zero-middle p24 49152 2048 4b0d0ca7
+zero-middle p25 51200 2048 59921dd4
+zero-middle p26 53248 2048 ec5dc23b
+zero-middle p27 55296 2048 4edd3e04
+zero-middle p28 57344 2048 ee0cb96c
+zero-middle p29 59392 2048 8f3e113e
+zero-middle p30 61440 2048 53004ad3
+zero-middle p31 63488 2048 f6a77281
+zero-middle p32 65536 2048 9b9d1479
+zero-middle p33 67584 2048 29d8d3ec
+zero-middle p34 69632 2048 69b65a4b
+zero-middle p35 71680 2048 354dbbab
+zero-middle p36 73728 2048 f94ce3ef
+zero-middle p37 75776 2048 ef6278fe
+zero-middle p38 77824 2048 a59bae9d
+zero-middle p39 79872 2048 ce7d410a
+zero-middle p40 81920 2048 2e7e7eed
+zero-middle p41 83968 2048 bcb2aba6
+zero-middle p42 86016 2048 7d791c9a
+zero-middle p43 88064 2048 d3879bfb
+zero-middle p44 90112 2048 8e4e72db
+zero-middle p45 92160 2048 f9d84d0e
+zero-middle p46 94208 2048 099518d7
+zero-middle p47 96256 2048 669e57c4
+zero-middle p48 98304 2048 ed178dee
+zero-middle p49 100352 2048 c11f1ace
+zero-middle p50 102400 2048 8d58cb53
+zero-middle p51 104448 2048 14ae5d96
+zero-middle p52 106496 2048 dfe7b566
+zero-middle p53 108544 2048 8d29e760
+zero-middle p54 110592 2048 b63dc043
+zero-middle p55 112640 2048 d12f89d7
+zero-middle p56 114688 2048 513a6bc9
+zero-middle p57 116736 2048 c49361ec
+zero-middle p58 118784 2048 708ae843
+zero-middle p59 120832 2048 b60cd8df
+zero-middle p60 122880 2048 ced6c634
+zero-middle p61 124928 2048 b6c547eb
+zero-middle p62 126976 2048 d76a27e7
+zero-middle p63 129024 2048 30dee909
+zero-middle p64 131072 2048 b9ec64ee
+zero-middle p65 133120 2048 21fb321c
+zero-middle p66 135168 2048 062b9a52
+zero-middle p67 137216 2048 a3028527
+zero-middle p68 139264 2048 d497250c
+zero-middle p69 141312 2048 431130cf
+zero-middle p70 143360 2048 e74a0cd6
+zero-middle p71 145408 2048 d1a51b67
+zero-middle p72 147456 2048 0abcdb03
+zero-middle p73 149504 2048 7a67efdb
+zero-middle p74 151552 2048 4f623dcc
+zero-middle warnings 0
+zero-middle seek 38400 landed 12288, then 12288 2048 21cbb8f5
+zero-middle seek 76800 landed 51200, then 51200 2048 59921dd4
+zero-middle seek 115200 landed 90112, then 90112 2048 8e4e72db
+zero-middle seek warnings 0
+cut-tail file 12789 bytes: the last 100 bytes cut
+cut-tail open samples=-1 exact=false
+cut-tail packets 73
+cut-tail p0 0 2048 48667e57
+cut-tail p1 2048 2048 7a6408b1
+cut-tail p2 4096 2048 c5184572
+cut-tail p3 6144 2048 8c442c27
+cut-tail p4 8192 2048 0d9e5a74
+cut-tail p5 10240 2048 38dea896
+cut-tail p6 12288 2048 21cbb8f5
+cut-tail p7 14336 2048 31e28e89
+cut-tail p8 16384 2048 3c0dc0d6
+cut-tail p9 18432 2048 08f75277
+cut-tail p10 20480 2048 faca8e98
+cut-tail p11 22528 2048 edfe5ce8
+cut-tail p12 24576 2048 8de86182
+cut-tail p13 26624 2048 6a1b3264
+cut-tail p14 28672 2048 d939bdee
+cut-tail p15 30720 2048 e9e03286
+cut-tail p16 32768 2048 0fab3e90
+cut-tail p17 34816 2048 22e846d4
+cut-tail p18 36864 2048 56bc593c
+cut-tail p19 38912 2048 e913ab9b
+cut-tail p20 40960 2048 96fb2311
+cut-tail p21 43008 2048 4b979b99
+cut-tail p22 45056 2048 cf6c28fe
+cut-tail p23 47104 2048 edf9367c
+cut-tail p24 49152 2048 4b0d0ca7
+cut-tail p25 51200 2048 59921dd4
+cut-tail p26 53248 2048 ec5dc23b
+cut-tail p27 55296 2048 4edd3e04
+cut-tail p28 57344 2048 ee0cb96c
+cut-tail p29 59392 2048 8f3e113e
+cut-tail p30 61440 2048 53004ad3
+cut-tail p31 63488 2048 f6a77281
+cut-tail p32 65536 2048 9b9d1479
+cut-tail p33 67584 2048 29d8d3ec
+cut-tail p34 69632 2048 69b65a4b
+cut-tail p35 71680 2048 354dbbab
+cut-tail p36 73728 2048 f94ce3ef
+cut-tail p37 75776 2048 35fa244b
+cut-tail p38 77824 2048 a59bae9d
+cut-tail p39 79872 2048 ce7d410a
+cut-tail p40 81920 2048 2e7e7eed
+cut-tail p41 83968 2048 bcb2aba6
+cut-tail p42 86016 2048 7d791c9a
+cut-tail p43 88064 2048 d3879bfb
+cut-tail p44 90112 2048 8e4e72db
+cut-tail p45 92160 2048 f9d84d0e
+cut-tail p46 94208 2048 099518d7
+cut-tail p47 96256 2048 669e57c4
+cut-tail p48 98304 2048 ed178dee
+cut-tail p49 100352 2048 c11f1ace
+cut-tail p50 102400 2048 8d58cb53
+cut-tail p51 104448 2048 14ae5d96
+cut-tail p52 106496 2048 dfe7b566
+cut-tail p53 108544 2048 8d29e760
+cut-tail p54 110592 2048 b63dc043
+cut-tail p55 112640 2048 d12f89d7
+cut-tail p56 114688 2048 513a6bc9
+cut-tail p57 116736 2048 c49361ec
+cut-tail p58 118784 2048 708ae843
+cut-tail p59 120832 2048 b60cd8df
+cut-tail p60 122880 2048 ced6c634
+cut-tail p61 124928 2048 b6c547eb
+cut-tail p62 126976 2048 d76a27e7
+cut-tail p63 129024 2048 30dee909
+cut-tail p64 131072 2048 b9ec64ee
+cut-tail p65 133120 2048 21fb321c
+cut-tail p66 135168 2048 062b9a52
+cut-tail p67 137216 2048 a3028527
+cut-tail p68 139264 2048 d497250c
+cut-tail p69 141312 2048 431130cf
+cut-tail p70 143360 2048 e74a0cd6
+cut-tail p71 145408 2048 d1a51b67
+cut-tail p72 147456 2048 0abcdb03
+cut-tail warnings 1
+cut-tail w0 damage at 12637: truncated final frame dropped
+cut-tail seek 38400 landed 12288, then 12288 2048 21cbb8f5
+cut-tail seek 76800 landed 51200, then 51200 2048 59921dd4
+cut-tail seek 115200 landed 90112, then 90112 2048 8e4e72db
+cut-tail seek warnings 0

@@ -73,3 +73,18 @@ func Settle(raw []byte, origin, span int64) (Settled, error) {
 	s.StreamInfo, err = RestateStreamInfo(s.StreamInfo, span)
 	return s, err
 }
+
+// ReadOff words a read from the stream's start that reached its end at
+// reached, off length, the exact length a reader settled: Settle's words
+// where it fell short of STREAMINFO's own total, declared.
+func ReadOff(declared, length, reached int64) string {
+	switch {
+	case reached > length && declared == length:
+		return fmt.Sprintf("STREAMINFO declares %d samples but the frames hold %d", length, reached)
+	case reached > length:
+		return fmt.Sprintf("the closing frame ends at sample %d but the frames hold %d", length, reached)
+	case declared == length:
+		return fmt.Sprintf("STREAMINFO declares %d samples but the frames end at %d", length, reached)
+	}
+	return fmt.Sprintf("the closing frame ends at sample %d but the frames a read reaches end at %d", length, reached)
+}

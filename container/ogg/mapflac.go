@@ -14,9 +14,13 @@ type flacMapping struct {
 	codecConfig []byte
 	num         flac.Numbering
 	haveNum     bool
-	// origin is the first frame's sample position. Positions run from 0 at
-	// that frame, whatever number it carries, as a native FLAC's do.
+	// first is the frame the numbering was latched from, and origin its
+	// sample position. Positions run from 0 at that frame, whatever number
+	// it carries, as a native FLAC's do.
+	first  flac.FrameInfo
 	origin int64
+	// before says a frame numbered before the first was shown and passed over.
+	before bool
 }
 
 func (m *flacMapping) codecID() codec.ID { return codec.FLAC }
@@ -86,12 +90,13 @@ func (m *flacMapping) finalizeTrack(first firstPage, lastEnd func() int64, r rep
 	}
 	r.truncatedBy(st.Truncated)
 	return container.Track{
-		Codec:        codec.FLAC,
-		CodecConfig:  st.StreamInfo,
-		Fmt:          f,
-		Samples:      st.Samples,
-		SamplesExact: st.Measured,
-		Default:      true,
+		DemuxerVersion: DemuxerVersion,
+		Codec:          codec.FLAC,
+		CodecConfig:    st.StreamInfo,
+		Fmt:            f,
+		Samples:        st.Samples,
+		SamplesExact:   st.Measured,
+		Default:        true,
 	}, nil
 }
 
@@ -101,16 +106,23 @@ func (m *flacMapping) packetTiming(pkt []byte, _ int64) (pts, dur int64, sync, o
 		return 0, 0, false, false
 	}
 	if !m.haveNum {
-		m.num = m.si.Numbering(fi)
+		m.num, m.first = m.si.Numbering(fi), fi
 		m.origin = m.num.Start(fi)
 		m.haveNum = true
 	}
 	if m.num.Start(fi) < m.origin {
+		m.before = true
 		return 0, 0, false, false // numbered before the first frame: not this stream's
 	}
 	return m.num.Start(fi) - m.origin, int64(fi.BlockSize), true, true
 }
 
+// unsettled reports whether what follows the first frame can change the
+// numbering (flac.NumberingUnsettled).
+func (m *flacMapping) unsettled() bool { return m.si.NumberingUnsettled(m.first) }
+
 func (m *flacMapping) selfTiming() bool { return true }
 func (m *flacMapping) preroll() int64   { return 0 }
 func (m *flacMapping) resetTiming()     {}
+func (m *flacMapping) heldTiming() int  { return 0 }
+func (m *flacMapping) putTiming(int)    {}

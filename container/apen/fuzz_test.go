@@ -25,12 +25,13 @@ func FuzzDemux(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		testutil.DemuxFuzz{
 			Open: func(src container.Source, strict bool) (container.Demuxer, error) {
-				return apen.NewDemuxer(src, &apen.DemuxerOptions{Strict: strict})
+				return apen.NewDemuxer(src, &container.DemuxerOptions{Strict: strict})
 			},
 			// A frame's extent comes from the seek table, whose entries are
 			// four bytes each, so packet production is bounded by the input.
 			MaxPackets: func(raw []byte) int64 { return int64(len(raw))/4 + 4 },
 			Targets:    []int64{0, 1000, 1 << 40},
+			SeekPTS:    true,
 			// Landing past the target is only legitimate when the stream
 			// itself starts after it.
 			LateLanding: true,

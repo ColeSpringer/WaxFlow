@@ -1,5 +1,7 @@
 package musepack
 
+import "github.com/colespringer/waxflow/waxerr"
+
 // frameState is everything a frame's bitstream fills in and everything the
 // next frame reads back: the per-band resolutions and scalefactors, the
 // mid/side flags, the quantised samples, and the two pieces of state the
@@ -28,10 +30,12 @@ func (s *frameState) init() {
 	*s = frameState{rng: newPRNG()}
 }
 
+// A frame's refusals are shared, so they are fixed: no caller can change
+// another's.
 var (
-	errBook   = malformed("frame carries a codeword outside its Huffman book")
-	errOver   = malformed("frame reads past the end of its packet")
-	errResRng = malformed("frame codes a quantiser resolution outside -1..17")
+	errBook   = waxerr.Fixed(waxerr.CodeMalformedInput, "musepack: frame carries a codeword outside its Huffman book")
+	errOver   = waxerr.Fixed(waxerr.CodeMalformedInput, "musepack: frame reads past the end of its packet")
+	errResRng = waxerr.Fixed(waxerr.CodeMalformedInput, "musepack: frame codes a quantiser resolution outside -1..17")
 )
 
 // scfMute is the value the SV7 reader substitutes for a scalefactor index

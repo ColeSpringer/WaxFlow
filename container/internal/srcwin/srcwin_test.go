@@ -111,15 +111,8 @@ func TestForwardExtensionKeepsEarlierBytesAddressable(t *testing.T) {
 	}
 }
 
-// TestViewSurvivesARebase pins the aliasing a rebase must not break, and it is
-// not a theoretical one: flacn's frame-boundary scan holds a Chunk-sized view
-// while it reads a CRC range BEHIND it for each sync candidate it tests, and a
-// backward read is exactly what rebases the window. The bytes the held view
-// serves have to keep serving.
-//
-// This is the reason the rebase path allocates where everything else was made
-// to reuse. Reading the new range correctly is the easy half; leaving the old
-// one readable is the half a demuxer depends on.
+// TestViewSurvivesARebase: a view taken before a rebase still reads its bytes
+// after it, whether the read that rebased was behind the window or past it.
 func TestViewSurvivesARebase(t *testing.T) {
 	src := &counted{size: 10 * Chunk}
 	w := New(src, src.size, "test: reading")
@@ -277,6 +270,33 @@ func TestWindowDoesNotAccreteTheWholeStream(t *testing.T) {
 	}
 }
 
+// TestALinearReadCostsOneReadPerChunk: a packet path that trims to each
+// packet and takes it through BytesAt reads the stream once, a read per Chunk,
+// whatever the packet's size, and holds a bounded window.
+func TestALinearReadCostsOneReadPerChunk(t *testing.T) {
+	const size = 64 * Chunk
+	for _, step := range []int{16, 417, 33880, 67126, Chunk - 1, Chunk} {
+		src := &counted{size: size}
+		w := New(src, src.size, "test: reading")
+		held := 0
+		for off := int64(0); off < size; off += int64(step) {
+			w.Trim(off)
+			n := int(min(int64(step), size-off))
+			if got := w.BytesAt(off, n); len(got) != n {
+				t.Fatalf("step %d: view at %d is %d bytes, want %d", step, off, len(got), n)
+			}
+			held = max(held, len(w.win))
+		}
+		if src.reads > size/Chunk || src.bytes != size {
+			t.Errorf("step %d: a linear read of %d Chunks took %d reads of %d bytes, want one a Chunk and each byte once",
+				step, size/Chunk, src.reads, src.bytes)
+		}
+		if held > 3*Chunk {
+			t.Errorf("step %d: the window held %d bytes, want at most three Chunks", step, held)
+		}
+	}
+}
+
 // TestBytesAtViewCannotScribbleOnItsNeighbours pins the full-capacity slicing:
 // a caller that appends to a view must not write into the bytes after it,
 // which is what a three-index slice prevents.
@@ -334,14 +354,14 @@ func TestPeekLoadsExactly(t *testing.T) {
 			src.bytes, src.reads, len(w.win), w.winOff, 5*Chunk)
 	}
 
-	// A BytesAt on the same region then costs one read of about a window:
-	// read-ahead resumes where the exact read left off.
+	// A BytesAt on the same region then costs one read of a window: read-ahead
+	// resumes where the exact read left off.
 	src.reads, src.bytes = 0, 0
 	if got := w.BytesAt(5*Chunk, 4096); !equal(got, want(5*Chunk, 4096)) {
 		t.Fatal("BytesAt after a Peek served the wrong bytes")
 	}
-	if src.reads != 1 || src.bytes != Chunk-16 {
-		t.Errorf("BytesAt after a Peek read %d bytes in %d reads, want %d in 1", src.bytes, src.reads, Chunk-16)
+	if src.reads != 1 || src.bytes != Chunk {
+		t.Errorf("BytesAt after a Peek read %d bytes in %d reads, want %d in 1", src.bytes, src.reads, Chunk)
 	}
 
 	// The data end clamps a Peek the way it clamps BytesAt.
@@ -386,5 +406,234 @@ func TestPeekThenLinearReadSettles(t *testing.T) {
 	}
 	if settled > 4*Chunk {
 		t.Errorf("the window settled at %d bytes, want it bounded near %d", settled, Chunk)
+	}
+}
+
+// TestHoldsReportsWhatIsResident: Holds says whether a range would be served
+// from the window, and reads nothing to say it.
+func TestHoldsReportsWhatIsResident(t *testing.T) {
+	src := &counted{size: 10 * Chunk}
+	w := New(src, src.size, "test: reading")
+	if w.Holds(0, 1) {
+		t.Error("an empty window holds a byte")
+	}
+	w.Peek(1000, 100)
+	src.reads = 0
+	for _, tc := range []struct {
+		off  int64
+		n    int
+		want bool
+	}{
+		{1000, 100, true}, {1050, 50, true}, {1099, 1, true},
+		{1000, 101, false}, {999, 2, false}, {1100, 1, false}, {0, 1, false},
+	} {
+		if got := w.Holds(tc.off, tc.n); got != tc.want {
+			t.Errorf("Holds(%d, %d) = %v with [1000, 1100) resident, want %v", tc.off, tc.n, got, tc.want)
+		}
+	}
+	if src.reads != 0 {
+		t.Errorf("Holds read %d times with [1000, 1100) resident", src.reads)
+	}
+	// The last byte of the data, as a trailer probe asks for it: in a window
+	// loaded to the data end, then with the data end pulled below the
+	// window's end, then below its start.
+	end := src.size
+	w.BytesAt(end-100, 100)
+	src.reads = 0
+	for _, tc := range []struct {
+		name    string
+		dataEnd int64
+		want    bool
+	}{
+		{"a window loaded to the data end", end, true},
+		{"a data end below the window's end", end - 40, true},
+		{"a data end at the window's start", end - 100, false},
+	} {
+		w.SetDataEnd(tc.dataEnd)
+		if got := w.Holds(w.DataEnd()-1, 1); got != tc.want {
+			t.Errorf("%s: Holds of the last byte = %v with [%d, %d) resident, want %v", tc.name, got, end-100, end, tc.want)
+		}
+	}
+	if w.Holds(end-1, 2) {
+		t.Error("a window loaded to the data end holds a byte behind it")
+	}
+	if src.reads != 0 {
+		t.Errorf("Holds read %d times", src.reads)
+	}
+}
+
+// TestAsideLeavesTheWindowAsItWas: a window set aside starts with what the
+// window holds, at no read, and nothing done through it, a trim, a growth or
+// a failed read, changes the window's bytes, what it holds or its error.
+func TestAsideLeavesTheWindowAsItWas(t *testing.T) {
+	src := &counted{size: 10 * Chunk}
+	w := New(src, src.size, "test: reading")
+	view := w.BytesAt(0, 2*Chunk)
+	held, _ := w.Resident()
+	src.reads = 0
+
+	a := w.aside()
+	if got := a.BytesAt(100, 64); !equal(got, want(100, 64)) || src.reads != 0 {
+		t.Fatalf("the window set aside served the wrong bytes or read %d times for bytes the window holds", src.reads)
+	}
+	// Off a multiple of 256, which the pattern repeats at.
+	a.Trim(Chunk + 13)
+	if got := a.BytesAt(Chunk+13, 3*Chunk); !equal(got, want(Chunk+13, 3*Chunk)) {
+		t.Fatal("the window set aside served the wrong bytes behind a trim and a growth")
+	}
+	a.Trim(3*Chunk + 29)
+	if got := a.BytesAt(3*Chunk+29, 64); !equal(got, want(3*Chunk+29, 64)) {
+		t.Fatal("the window set aside served the wrong bytes behind a second trim")
+	}
+	src.fail = true
+	if a.BytesAt(9*Chunk, 64) != nil || a.Err() == nil {
+		t.Fatal("a failed read through the window set aside did not stick on it")
+	}
+	src.fail = false
+
+	if !equal(view, want(0, 2*Chunk)) {
+		t.Error("the window's view changed under a window set aside")
+	}
+	if n, _ := w.Resident(); n != held || !w.Holds(0, 2*Chunk) || w.Err() != nil {
+		t.Errorf("the window holds %d bytes with error %v, want the %d it held and none", n, w.Err(), held)
+	}
+	src.reads = 0
+	if got := w.BytesAt(0, 2*Chunk); !equal(got, want(0, 2*Chunk)) || src.reads != 0 {
+		t.Errorf("the window served the wrong bytes or read %d times for bytes it held", src.reads)
+	}
+}
+
+// TestAnAsideHasNoRoomToGrowIntoAndNoError: a window that trimmed in place
+// has room past its bytes, which an aside must not grow into, or its next
+// trim moves the window's bytes; and an aside of a failed window can read.
+func TestAnAsideHasNoRoomToGrowIntoAndNoError(t *testing.T) {
+	src := &counted{size: 20 * Chunk}
+	w := New(src, src.size, "test: reading")
+	w.BytesAt(0, 4*Chunk)
+	w.Trim(2 * Chunk)
+	n, c := w.Resident()
+	if c <= n {
+		t.Fatalf("the window has no room to spare: %d of %d", n, c)
+	}
+	end := int64(2*Chunk + n)
+	view := w.BytesAt(2*Chunk, n)
+	a := w.aside()
+	if _, ac := a.Resident(); ac != n {
+		t.Errorf("the aside has room for %d, want its length %d", ac, n)
+	}
+	if got := a.BytesAt(end-8, 64); !equal(got, want(end-8, 64)) {
+		t.Fatal("the aside served the wrong bytes over the window's end")
+	}
+	a.Trim(end - 16)
+	if got := a.BytesAt(end-16, 128); !equal(got, want(end-16, 128)) {
+		t.Fatal("the aside served the wrong bytes behind its trim")
+	}
+	if !equal(view, want(2*Chunk, n)) {
+		t.Error("the window's bytes moved under an aside that grew and trimmed")
+	}
+
+	src.fail = true
+	if w.BytesAt(15*Chunk, 8) != nil || w.Err() == nil {
+		t.Fatal("a failed read did not stick on the window")
+	}
+	src.fail = false
+	b := w.aside()
+	if b.Err() != nil {
+		t.Error("an aside of a failed window starts with its error")
+	}
+	if got := b.BytesAt(15*Chunk, 8); !equal(got, want(15*Chunk, 8)) {
+		t.Error("an aside of a failed window does not read")
+	}
+	if w.Err() == nil {
+		t.Error("the window's error went away")
+	}
+}
+
+// TestTryKeepsWhatTheLookRead: a look that is kept leaves the window holding
+// what it read, at no read again, whatever it answered.
+func TestTryKeepsWhatTheLookRead(t *testing.T) {
+	for _, answer := range []bool{true, false} {
+		src := &counted{size: 10 * Chunk}
+		w := New(src, src.size, "test: reading")
+		w.BytesAt(0, 64)
+		ok, err := w.Try(true, func() bool {
+			w.BytesAt(8*Chunk, 64)
+			return answer
+		})
+		if ok != answer || err != nil {
+			t.Fatalf("Try answered %v, %v, want %v and no error", ok, err, answer)
+		}
+		src.reads = 0
+		if got := w.BytesAt(8*Chunk, 64); !equal(got, want(8*Chunk, 64)) || src.reads != 0 || w.Err() != nil {
+			t.Errorf("answering %v, the window read %d times for bytes the kept look read", answer, src.reads)
+		}
+	}
+}
+
+// TestTryDropsWhatTheLookRead: a look that is not kept leaves the window
+// holding what it held, its views intact, whatever the look read or trimmed.
+func TestTryDropsWhatTheLookRead(t *testing.T) {
+	src := &counted{size: 10 * Chunk}
+	w := New(src, src.size, "test: reading")
+	view := w.BytesAt(0, 2*Chunk)
+	held, _ := w.Resident()
+	ok, err := w.Try(false, func() bool {
+		w.BytesAt(Chunk, 3*Chunk)
+		w.Trim(2 * Chunk)
+		w.BytesAt(8*Chunk, 64)
+		return true
+	})
+	if !ok || err != nil {
+		t.Fatalf("Try answered %v, %v, want true and no error", ok, err)
+	}
+	if !equal(view, want(0, 2*Chunk)) {
+		t.Error("the window's view changed under a dropped look")
+	}
+	src.reads = 0
+	if n, _ := w.Resident(); n != held || !w.Holds(0, 2*Chunk) || w.Holds(8*Chunk, 64) || src.reads != 0 {
+		t.Errorf("the window holds %d bytes, want the %d it held and none the look read", n, held)
+	}
+}
+
+// TestAFailedReadInATryIsReturnedAndSticksNowhere: whichever way the look
+// was to go, a read that fails in it comes back from Try beside false, and
+// the window is what it held, with no error.
+func TestAFailedReadInATryIsReturnedAndSticksNowhere(t *testing.T) {
+	for _, keep := range []bool{true, false} {
+		src := &counted{size: 10 * Chunk}
+		w := New(src, src.size, "test: reading")
+		w.BytesAt(0, 64)
+		held, _ := w.Resident()
+		ok, err := w.Try(keep, func() bool {
+			src.fail = true
+			w.BytesAt(8*Chunk, 64)
+			src.fail = false
+			return true
+		})
+		if ok || waxerr.CodeOf(err) != waxerr.CodeSourceUnreadable {
+			t.Errorf("keep %v: Try answered %v, %v, want false and the read's error", keep, ok, err)
+		}
+		if n, _ := w.Resident(); n != held || w.Holds(8*Chunk, 64) || w.Err() != nil {
+			t.Errorf("keep %v: the window holds %d bytes with error %v, want the %d it held and none", keep, n, w.Err(), held)
+		}
+	}
+}
+
+// TestATryKeepsAFailureStuckBefore: a look reads through a clean aside, and
+// the window's own failure is still stuck behind it, kept or not.
+func TestATryKeepsAFailureStuckBefore(t *testing.T) {
+	for _, keep := range []bool{true, false} {
+		src := &counted{size: 10 * Chunk, fail: true}
+		w := New(src, src.size, "test: reading")
+		w.BytesAt(0, 64)
+		stuck := w.Err()
+		src.fail = false
+		ok, err := w.Try(keep, func() bool { return len(w.BytesAt(Chunk, 64)) == 64 })
+		if !ok || err != nil {
+			t.Errorf("keep %v: Try answered %v, %v, want a look that reads", keep, ok, err)
+		}
+		if w.Err() != stuck {
+			t.Errorf("keep %v: the window's error is %v, want the one stuck before", keep, w.Err())
+		}
 	}
 }

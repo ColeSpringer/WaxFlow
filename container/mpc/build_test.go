@@ -45,7 +45,7 @@ func codecFixture(t testing.TB, name string) []byte {
 
 func open(t testing.TB, raw []byte, strict bool) *mpc.Demuxer {
 	t.Helper()
-	d, err := mpc.NewDemuxer(container.BytesSource(raw), &mpc.DemuxerOptions{Strict: strict})
+	d, err := mpc.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: strict})
 	if err != nil {
 		t.Fatalf("demux: %v", err)
 	}

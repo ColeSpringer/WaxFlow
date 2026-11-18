@@ -132,14 +132,36 @@ var bitrateKbps = [2][16]int{
 // and MPEG-2.5 quarters it.
 var rateHz = [4]int{44100, 48000, 32000, -1}
 
+// ParseHeader's refusals are built once, since a scan asks it at every byte
+// it resyncs over, and fixed, so no caller can change another's.
+var (
+	errTruncatedHeader = refusal("truncated frame header")
+	errNoSync          = refusal("missing frame sync")
+	errReservedVersion = refusal("reserved MPEG version")
+	// errNotLayer3 is indexed by the layer bits; 1 is Layer III.
+	errNotLayer3 = [4]error{
+		0: refusal("not Layer III (layer bits 0)"),
+		2: refusal("not Layer III (layer bits 2)"),
+		3: refusal("not Layer III (layer bits 3)"),
+	}
+	errForbiddenBitrate = refusal("forbidden bit rate index")
+	errReservedRate     = refusal("reserved sample rate")
+	errReservedEmphasis = refusal("reserved emphasis")
+)
+
+// refusal is a shared malformed-input error (waxerr.Fixed).
+func refusal(msg string) error {
+	return waxerr.Fixed(waxerr.CodeMalformedInput, "mp3: "+msg)
+}
+
 // ParseHeader parses a Layer III frame header from the first HeaderLen
-// bytes of b.
+// bytes of b. A failed parse allocates nothing.
 func ParseHeader(b []byte) (Header, error) {
 	if len(b) < HeaderLen {
-		return Header{}, malformed("truncated frame header")
+		return Header{}, errTruncatedHeader
 	}
 	if b[0] != 0xFF || b[1]&0xE0 != 0xE0 {
-		return Header{}, malformed("missing frame sync")
+		return Header{}, errNoSync
 	}
 	var h Header
 	switch b[1] >> 3 & 3 {
@@ -150,10 +172,10 @@ func ParseHeader(b []byte) (Header, error) {
 	case 3:
 		h.Version = MPEG1
 	default:
-		return Header{}, malformed("reserved MPEG version")
+		return Header{}, errReservedVersion
 	}
 	if layer := b[1] >> 1 & 3; layer != 1 {
-		return Header{}, malformed("not Layer III (layer bits %d)", layer)
+		return Header{}, errNotLayer3[layer]
 	}
 	h.Protected = b[1]&1 == 0
 
@@ -163,13 +185,13 @@ func ParseHeader(b []byte) (Header, error) {
 	}
 	bi := int(b[2] >> 4)
 	if kbps := bitrateKbps[lsf][bi]; kbps < 0 {
-		return Header{}, malformed("forbidden bit rate index")
+		return Header{}, errForbiddenBitrate
 	} else {
 		h.Bitrate = kbps * 1000
 	}
 	ri := int(b[2] >> 2 & 3)
 	if rateHz[ri] < 0 {
-		return Header{}, malformed("reserved sample rate")
+		return Header{}, errReservedRate
 	}
 	h.rateIdx = ri
 	h.Rate = rateHz[ri]
@@ -188,7 +210,7 @@ func ParseHeader(b []byte) (Header, error) {
 		h.Channels = 1
 	}
 	if b[3]&3 == 2 {
-		return Header{}, malformed("reserved emphasis")
+		return Header{}, errReservedEmphasis
 	}
 	return h, nil
 }

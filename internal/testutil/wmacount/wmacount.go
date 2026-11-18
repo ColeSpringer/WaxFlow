@@ -36,7 +36,7 @@ type Object struct {
 // count's position, which the measured objects either side of it bound.
 func Objects(t testing.TB, raw []byte) (objs []Object, frameLen int64) {
 	t.Helper()
-	d, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+	d, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}

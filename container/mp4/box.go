@@ -27,12 +27,12 @@ func (b box) payloadLen() int64 { return b.size - b.hdrLen }
 // size-0 box resolves to reach end (the top-level mdat convention). The
 // progress guarantee holds: a returned box always has size >= hdrLen >= 8,
 // so callers advancing by size make progress.
-func readBox(src container.Source, off, end int64) (box, error) {
+func (d *Demuxer) readBox(off, end int64) (box, error) {
 	if off+8 > end {
-		return box{}, malformed("box header at %d runs past end", off)
+		return box{}, malformed("box header at %d runs past end", d.log.At(off))
 	}
 	var hdr [16]byte
-	if err := container.ReadFull(src, hdr[:8], off); err != nil {
+	if err := container.ReadFull(d.src, hdr[:8], off); err != nil {
 		return box{}, err
 	}
 	b := box{typ: string(hdr[4:8]), off: off, hdrLen: 8}
@@ -40,9 +40,9 @@ func readBox(src container.Source, off, end int64) (box, error) {
 	switch size {
 	case 1:
 		if off+16 > end {
-			return box{}, malformed("64-bit box size at %d runs past end", off)
+			return box{}, malformed("64-bit box size at %d runs past end", d.log.At(off))
 		}
-		if err := container.ReadFull(src, hdr[8:16], off+8); err != nil {
+		if err := container.ReadFull(d.src, hdr[8:16], off+8); err != nil {
 			return box{}, err
 		}
 		size = int64(be64(hdr[8:]))
@@ -58,7 +58,7 @@ func readBox(src container.Source, off, end int64) (box, error) {
 	// overflow the sum and slip past the guard. off <= end here (the header
 	// reads above bounded it), so end-off does not underflow.
 	if size > end-off {
-		return box{}, malformed("box %q at %d (size %d) runs past end %d", b.typ, off, size, end)
+		return box{}, malformed("box %q at %d (size %d) runs past end %d", b.typ, d.log.At(off), size, d.log.At(end))
 	}
 	b.size = size
 	return b, nil

@@ -69,7 +69,7 @@ func TestAFailedWalkKeepsItsError(t *testing.T) {
 	p := BuildMidPadding(t)
 	file := damageBlocks(t, p.File, 250)
 	src := &testutil.CountingSource{Src: container.BytesSource(file)}
-	d, err := NewDemuxer(src, &DemuxerOptions{Strict: true})
+	d, err := NewDemuxer(src, &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}

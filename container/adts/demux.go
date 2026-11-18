@@ -1,7 +1,6 @@
 package adts
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -9,6 +8,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/diag"
 	"github.com/colespringer/waxflow/container/internal/id3"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
 	"github.com/colespringer/waxflow/waxerr"
@@ -20,24 +20,17 @@ var (
 	_ container.Warner  = (*Demuxer)(nil)
 )
 
-// DemuxerOptions configures parsing.
-type DemuxerOptions struct {
-	// Strict turns tolerated damage (the Warnings list) into errors.
-	Strict bool
-}
-
 // Demuxer reads one AAC track from an ADTS elementary stream. It carries no
 // gapless trims (ADTS has none) and seeks early for the decoder's restart
 // state: one frame of IMDCT overlap for AAC-LC, and the HE-AAC preroll
 // when the first frame's SBR probe upgraded the track.
 type Demuxer struct {
-	src  container.Source
-	opts DemuxerOptions
+	src container.Source
 
-	ref      header
-	haveRef  bool // ref is set (distinct from firstFrame, which can be 0)
-	track    container.Track
-	warnings container.Warnings
+	ref     header
+	haveRef bool // ref is set (distinct from firstFrame, which can be 0)
+	track   container.Track
+	log     diag.Log
 	// refused is a strict refusal, kept: the walk is not finished while it
 	// stands, and Walk and the reads return it again.
 	refused error
@@ -60,11 +53,8 @@ type Demuxer struct {
 // NewDemuxer parses the stream head (ID3 tags, the first frame) and derives
 // the AudioSpecificConfig. The returned Demuxer implements container.Seeker,
 // container.Warner and container.Walker.
-func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
-	d := &Demuxer{src: src, w: srcwin.New(src, src.Size(), "adts: reading frame data")}
-	if opts != nil {
-		d.opts = *opts
-	}
+func NewDemuxer(src container.Source, opts *container.DemuxerOptions) (*Demuxer, error) {
+	d := &Demuxer{src: src, w: srcwin.New(src, src.Size(), "adts: reading frame data"), log: diag.New("adts: ", opts)}
 	if err := d.parse(); err != nil {
 		return nil, err
 	}
@@ -72,12 +62,10 @@ func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 }
 
 func (d *Demuxer) warn(off int64, format string, args ...any) error {
-	msg := fmt.Sprintf(format, args...)
-	if d.opts.Strict {
-		d.refused = malformed("%s (at offset %d)", msg, off)
-		return d.refused
+	if err := d.log.Warn(off, format, args...); err != nil {
+		d.refused = err
+		return err
 	}
-	d.warnings.Damage(off, msg)
 	return nil
 }
 
@@ -85,7 +73,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 // convention): warn is for framing mess; a probe that cannot decode a
 // payload says nothing about framing, and the file still remuxes.
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.warnings.Note(off, fmt.Sprintf(format, args...))
+	d.log.Note(off, format, args...)
 }
 
 func (d *Demuxer) parse() error {
@@ -216,34 +204,39 @@ func (d *Demuxer) parse() error {
 }
 
 // nextFrame scans [from, limit) for a valid, length-confirmed frame header.
+// The frame at from is tried first, through the window a clean stream reads
+// its frames from. Only junk pays the scan.
 func (d *Demuxer) nextFrame(from, limit int64) (int64, header, bool) {
 	limit = min(limit, d.w.DataEnd())
-	for off := from; off < limit; {
-		buf := d.w.BytesAt(off, srcwin.Chunk)
-		if len(buf) < headerLen {
-			return 0, header{}, false
-		}
-		i := bytes.IndexByte(buf, 0xFF)
-		if i < 0 {
-			off += int64(len(buf)) - headerLen + 1
-			continue
-		}
-		cand := off + int64(i)
-		if cand >= limit {
-			return 0, header{}, false
-		}
-		if h, ok := d.frameAt(cand); ok {
-			return cand, h, true
-		}
-		off = cand + 1
+	if from >= limit {
+		return 0, header{}, false
 	}
-	return 0, header{}, false
+	if h, ok := d.frameAt(from); ok {
+		return from, h, true
+	}
+	var h header
+	off, ok := d.w.Scan(from, limit, []byte{0xFF}, headerLen, func(off int64, hdr []byte) srcwin.Verdict {
+		got, ok := d.confirmed(off, hdr, d.w.Ahead)
+		if !ok {
+			return srcwin.Skip
+		}
+		h = got
+		return srcwin.Take
+	})
+	return off, h, ok
 }
 
-// frameAt parses and confirms the frame at the exact offset: its declared
-// length must point at a kin frame header (or the end of data).
+// frameAt parses and confirms the frame at the exact offset, through the
+// packet path's read: a miss loads a window.
 func (d *Demuxer) frameAt(off int64) (header, bool) {
-	h, ok := parseHeader(d.w.BytesAt(off, 9))
+	return d.confirmed(off, d.w.BytesAt(off, 9), d.w.BytesAt)
+}
+
+// confirmed parses the candidate header hdr found at off and confirms it by
+// the header its length points at (the end of data counts), read with the
+// frame in one read from off. read is Ahead inside a scan.
+func (d *Demuxer) confirmed(off int64, hdr []byte, read func(off int64, n int) []byte) (header, bool) {
+	h, ok := parseHeader(hdr)
 	if !ok {
 		return header{}, false
 	}
@@ -254,11 +247,7 @@ func (d *Demuxer) frameAt(off int64) (header, bool) {
 	if next >= d.w.DataEnd() {
 		return h, true // runs to the end: nothing to confirm against
 	}
-	// The confirming header is read with the frame, from an offset that is
-	// resident: a read starting inside the window extends it, where one
-	// starting past its end would rebase into fresh storage at every window
-	// boundary the index walk crosses.
-	b := d.w.BytesAt(off, h.frameLen+9)
+	b := read(off, h.frameLen+9)
 	if len(b) < h.frameLen+9 {
 		return header{}, false
 	}
@@ -272,10 +261,10 @@ func (d *Demuxer) frameAt(off int64) (header, bool) {
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns damage tolerated during parsing.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
+func (d *Demuxer) Warnings() []container.Warning { return d.log.List() }
 
 // DamageCount implements container.Damaged.
-func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
+func (d *Demuxer) DamageCount() int { return d.log.DamageCount() }
 
 // extend grows the frame index by one and reports whether it did. The
 // window is trimmed to the last indexed frame first, and the next header is
@@ -303,8 +292,12 @@ func (d *Demuxer) extend() (bool, error) {
 	d.w.Trim(last)
 	h, ok := parseHeader(d.w.BytesAt(last, 9))
 	if !ok {
+		// A read that failed is no end: the walk is not done.
+		if err := d.w.Err(); err != nil {
+			return false, err
+		}
 		d.done = true
-		return false, d.w.Err()
+		return false, nil
 	}
 	next := last + int64(h.frameLen)
 	if next >= d.w.DataEnd() {
@@ -332,6 +325,11 @@ func (d *Demuxer) extend() (bool, error) {
 		var found bool
 		cand, nh, found = d.nextFrame(next, next+maxResync)
 		if !found {
+			// A scan a read failed in found nothing, which says nothing
+			// about the bytes.
+			if d.w.Err() != nil {
+				return false, d.w.Err()
+			}
 			d.done = true
 			if tail := d.w.DataEnd() - next; tail > 0 {
 				return false, d.warn(next, "%d trailing bytes are not frames, dropped", tail)
@@ -429,6 +427,9 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 	off := d.idx[d.cur]
 	h, ok := parseHeader(d.w.BytesAt(off, 9))
 	if !ok {
+		if d.w.Err() != nil {
+			return d.w.Err()
+		}
 		return waxerr.New(waxerr.CodeSourceUnreadable, "adts: indexed frame vanished")
 	}
 	d.w.Trim(off)

@@ -97,6 +97,14 @@ type Runner struct {
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
 	subs    map[string]map[chan *Job]struct{}
+
+	hooks testHooks
+}
+
+// testHooks are seams a test sets on a Runner it opened; nil otherwise.
+type testHooks struct {
+	// subscribed runs in Subscribe once its snapshot is taken.
+	subscribed func()
 }
 
 // Open loads the store (requeueing interrupted jobs) and starts the
@@ -212,9 +220,18 @@ func (r *Runner) Delete(id string) error {
 // immediately, then every update, closed after a terminal event (or a
 // delete). The cancel func must be called when the consumer leaves.
 func (r *Runner) Subscribe(id string) (<-chan *Job, func(), bool) {
+	// Snapshot and register under the lock notify holds. Every change
+	// lands in the store before its notify, so a change is either in the
+	// snapshot or reaches the registered channel; taken apart, a claim
+	// between them sent its running event to nobody.
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	j, ok := r.store.get(id)
 	if !ok {
 		return nil, nil, false
+	}
+	if fn := r.hooks.subscribed; fn != nil {
+		fn()
 	}
 	ch := make(chan *Job, 8)
 	ch <- j
@@ -222,30 +239,12 @@ func (r *Runner) Subscribe(id string) (<-chan *Job, func(), bool) {
 		close(ch)
 		return ch, func() {}, true
 	}
-	r.mu.Lock()
 	set := r.subs[id]
 	if set == nil {
 		set = map[chan *Job]struct{}{}
 		r.subs[id] = set
 	}
 	set[ch] = struct{}{}
-	// The job may have finished (or been deleted) between the snapshot
-	// and this registration, in which case the terminal notify already
-	// passed and nothing would ever close the channel. Re-check under
-	// the lock notify holds, emit the terminal state, and close out.
-	if cur, ok := r.store.get(id); !ok || cur.State.Terminal() {
-		if ok {
-			ch <- cur
-		}
-		delete(set, ch)
-		if len(set) == 0 {
-			delete(r.subs, id)
-		}
-		close(ch)
-		r.mu.Unlock()
-		return ch, func() {}, true
-	}
-	r.mu.Unlock()
 	cancel := func() {
 		r.mu.Lock()
 		if set, ok := r.subs[id]; ok {
@@ -474,18 +473,9 @@ func (r *Runner) resolvePinned(ctx context.Context, ref, id string, member int) 
 // closingMedia releases the source handle with the media, so a Concat member
 // closed on advance gives its file descriptor back.
 type closingMedia struct {
-	format.Media
+	format.Forwarder
 	f *source.File
 }
-
-// Walk and Walked forward format.Walker: embedding the interface promotes
-// nothing outside it, and this wraps one file.
-func (m closingMedia) Walk(ctx context.Context) error { return format.WalkMedia(ctx, m.Media) }
-
-func (m closingMedia) Walked() bool { return format.MediaWalked(m.Media) }
-
-// MixedWidth forwards format.MixedWidth, for the same reason.
-func (m closingMedia) MixedWidth() bool { return format.MediaMixedWidth(m.Media) }
 
 func (m closingMedia) Close() error {
 	err := m.Media.Close()
@@ -514,7 +504,7 @@ func (r *Runner) openMemberMedia(ctx context.Context, req Request, i int) (forma
 		f.Close()
 		return nil, err
 	}
-	return closingMedia{Media: med, f: f}, nil
+	return closingMedia{Forwarder: format.Forwarder{Media: med}, f: f}, nil
 }
 
 // progressFunc builds the per-chunk hook: it updates the in-memory

@@ -1,0 +1,141 @@
+# <case> p<n> <pts> <dur> <crc-32 of the data>, with lost=<samples> and discont where the packet says so
+# <case> seek <target> landed <position>, then the packet read next in the same fields
+clean file 3017 bytes: golden-vorbis.ogg rebuilt a packet a page
+clean open samples=2048 exact=true
+clean packets 9
+clean p0 0 0 99a0865b
+clean p1 0 256 2ab49943
+clean p2 256 256 2636284a
+clean p3 512 256 75b3fd03
+clean p4 768 256 bfae5dd3
+clean p5 1024 256 78096cd7
+clean p6 1280 256 3a321b69
+clean p7 1536 256 9ad3fe14
+clean p8 1792 256 14d88e51
+clean warnings 0
+clean seek 512 landed 0, then 0 0 99a0865b
+clean seek 1024 landed 0, then 0 0 99a0865b
+clean seek 1536 landed 0, then 0 0 99a0865b
+clean seek warnings 0
+junk-first file 11209 bytes: 8192 bytes of junk at 2611, every second one 0x4f
+junk-first open samples=2048 exact=true
+junk-first packets 9
+junk-first p0 0 0 99a0865b
+junk-first p1 0 256 2ab49943
+junk-first p2 256 256 2636284a
+junk-first p3 512 256 75b3fd03
+junk-first p4 768 256 bfae5dd3
+junk-first p5 1024 256 78096cd7
+junk-first p6 1280 256 3a321b69
+junk-first p7 1536 256 9ad3fe14
+junk-first p8 1792 256 14d88e51
+junk-first warnings 1
+junk-first w0 damage at 2611: damaged page, resyncing
+junk-first seek 512 landed 0, then 0 0 99a0865b
+junk-first seek 1024 landed 0, then 0 0 99a0865b
+junk-first seek 1536 landed 0, then 0 0 99a0865b
+junk-first seek warnings 0
+junk-mid file 11209 bytes: 8192 bytes of junk at 2745, every second one 0x4f
+junk-mid open samples=2048 exact=true
+junk-mid packets 9
+junk-mid p0 0 0 99a0865b
+junk-mid p1 0 256 2ab49943
+junk-mid p2 256 256 2636284a
+junk-mid p3 512 256 75b3fd03
+junk-mid p4 768 256 bfae5dd3
+junk-mid p5 1024 256 78096cd7
+junk-mid p6 1280 256 3a321b69
+junk-mid p7 1536 256 9ad3fe14
+junk-mid p8 1792 256 14d88e51
+junk-mid warnings 1
+junk-mid w0 damage at 2745: damaged page, resyncing
+junk-mid seek 512 landed 0, then 0 0 99a0865b
+junk-mid seek 1024 landed 0, then 0 0 99a0865b
+junk-mid seek 1536 landed 0, then 0 0 99a0865b
+junk-mid seek warnings 0
+junk-window file 68551 bytes: 65534 bytes of junk at 2745, every second one 0x4f
+junk-window open samples=2048 exact=true
+junk-window packets 9
+junk-window p0 0 0 99a0865b
+junk-window p1 0 256 2ab49943
+junk-window p2 256 256 2636284a
+junk-window p3 512 256 75b3fd03
+junk-window p4 768 256 bfae5dd3
+junk-window p5 1024 256 78096cd7
+junk-window p6 1280 256 3a321b69
+junk-window p7 1536 256 9ad3fe14
+junk-window p8 1792 256 14d88e51
+junk-window warnings 1
+junk-window w0 damage at 2745: damaged page, resyncing
+junk-window seek 512 landed 0, then 0 0 99a0865b
+junk-window seek 1024 landed 0, then 0 0 99a0865b
+junk-window seek 1536 landed 0, then 0 0 99a0865b
+junk-window seek warnings 0
+decoy-mid file 11209 bytes: 8192 bytes of junk at 2745, every second one 0x4f, the 32 bytes that follow it also at 4793
+decoy-mid open samples=2048 exact=true
+decoy-mid packets 9
+decoy-mid p0 0 0 99a0865b
+decoy-mid p1 0 256 2ab49943
+decoy-mid p2 256 256 2636284a
+decoy-mid p3 512 256 75b3fd03
+decoy-mid p4 768 256 bfae5dd3
+decoy-mid p5 1024 256 78096cd7
+decoy-mid p6 1280 256 3a321b69
+decoy-mid p7 1536 256 9ad3fe14
+decoy-mid p8 1792 256 14d88e51
+decoy-mid warnings 1
+decoy-mid w0 damage at 2745: damaged page, resyncing
+decoy-mid seek 512 landed 0, then 0 0 99a0865b
+decoy-mid seek 1024 landed 0, then 0 0 99a0865b
+decoy-mid seek 1536 landed 0, then 0 0 99a0865b
+decoy-mid seek warnings 0
+junk-island file 19401 bytes: 8192 bytes of junk at 2745 and at 10982, every second one 0x4f, the 45 bytes between them whole
+junk-island open samples=2048 exact=true
+junk-island packets 9
+junk-island p0 0 0 99a0865b
+junk-island p1 0 256 2ab49943
+junk-island p2 256 256 2636284a
+junk-island p3 512 256 75b3fd03
+junk-island p4 768 256 bfae5dd3
+junk-island p5 1024 256 78096cd7
+junk-island p6 1280 256 3a321b69
+junk-island p7 1536 256 9ad3fe14
+junk-island p8 1792 256 14d88e51
+junk-island warnings 2
+junk-island w0 damage at 2745: damaged page, resyncing
+junk-island w1 damage at 10982: damaged page, resyncing
+junk-island seek 512 landed 0, then 0 0 99a0865b
+junk-island seek 1024 landed 0, then 0 0 99a0865b
+junk-island seek 1536 landed 0, then 0 0 99a0865b
+junk-island seek warnings 0
+junk-under-bound file 1117078 bytes: 1114061 bytes of junk at 2745, every second one 0x4f
+junk-under-bound open samples=2048 exact=true
+junk-under-bound packets 9
+junk-under-bound p0 0 0 99a0865b
+junk-under-bound p1 0 256 2ab49943
+junk-under-bound p2 256 256 2636284a
+junk-under-bound p3 512 256 75b3fd03
+junk-under-bound p4 768 256 bfae5dd3
+junk-under-bound p5 1024 256 78096cd7
+junk-under-bound p6 1280 256 3a321b69
+junk-under-bound p7 1536 256 9ad3fe14
+junk-under-bound p8 1792 256 14d88e51
+junk-under-bound warnings 1
+junk-under-bound w0 damage at 2745: damaged page, resyncing
+junk-under-bound seek 512 landed 0, then 0 0 99a0865b
+junk-under-bound seek 1024 landed 0, then 0 0 99a0865b
+junk-under-bound seek 1536 landed 768, then 768 0 75b3fd03
+junk-under-bound seek warnings 0
+junk-past-bound file 1117079 bytes: 1114062 bytes of junk at 2745, every second one 0x4f
+junk-past-bound open samples=2048 exact=true
+junk-past-bound packets 3
+junk-past-bound p0 0 0 99a0865b
+junk-past-bound p1 0 256 2ab49943
+junk-past-bound p2 256 256 2636284a
+junk-past-bound warnings 2
+junk-past-bound w0 damage at 2745: damaged page, resyncing
+junk-past-bound w1 damage at 2745: no page within 1048576 bytes behind the damage, the 1114334 bytes left dropped
+junk-past-bound seek 512 landed 0, then 0 0 99a0865b
+junk-past-bound seek 1024 landed 0, then 0 0 99a0865b
+junk-past-bound seek 1536 landed 768, then 768 0 75b3fd03
+junk-past-bound seek warnings 0

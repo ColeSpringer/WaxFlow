@@ -270,7 +270,7 @@ func TestChannelLayoutBoxes(t *testing.T) {
 			if tc.damage != "" && !strings.Contains(strings.Join(damage, "; "), tc.damage) {
 				t.Errorf("damage = %v, want one naming %q", damage, tc.damage)
 			}
-			_, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true})
+			_, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 			switch {
 			case tc.damage != "" && err == nil:
 				t.Error("strict accepted a layout box that contradicts the entry")

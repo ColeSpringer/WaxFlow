@@ -1,0 +1,119 @@
+# <case> p<n> <pts> <dur> <crc-32 of the data>, with lost=<samples> and discont where the packet says so
+# <case> seek <target> landed <position>, then the packet read next in the same fields
+clean file 8661 bytes: ref-flac.oga rebuilt a packet a page
+clean open samples=22050 exact=true
+clean packets 6
+clean p0 0 4096 8a091c66
+clean p1 4096 4096 1fc583ff
+clean p2 8192 4096 460f7947
+clean p3 12288 4096 d3c3e6de
+clean p4 16384 4096 ec81bd77
+clean p5 20480 1570 ec6e8ca5
+clean warnings 0
+clean seek 5512 landed 4096, then 4096 4096 1fc583ff
+clean seek 11025 landed 8192, then 8192 4096 460f7947
+clean seek 16536 landed 16384, then 16384 4096 ec81bd77
+clean seek warnings 0
+junk-first file 16853 bytes: 8192 bytes of junk at 8407, every second one 0x4f
+junk-first open samples=22050 exact=true
+junk-first packets 6
+junk-first p0 0 4096 8a091c66
+junk-first p1 4096 4096 1fc583ff
+junk-first p2 8192 4096 460f7947
+junk-first p3 12288 4096 d3c3e6de
+junk-first p4 16384 4096 ec81bd77
+junk-first p5 20480 1570 ec6e8ca5
+junk-first warnings 1
+junk-first w0 damage at 8407: damaged page, resyncing
+junk-first seek 5512 landed 4096, then 4096 4096 1fc583ff
+junk-first seek 11025 landed 8192, then 8192 4096 460f7947
+junk-first seek 16536 landed 16384, then 16384 4096 ec81bd77
+junk-first seek warnings 0
+junk-mid file 16853 bytes: 8192 bytes of junk at 8449, every second one 0x4f
+junk-mid open samples=22050 exact=true
+junk-mid packets 6
+junk-mid p0 0 4096 8a091c66
+junk-mid p1 4096 4096 1fc583ff
+junk-mid p2 8192 4096 460f7947
+junk-mid p3 12288 4096 d3c3e6de
+junk-mid p4 16384 4096 ec81bd77
+junk-mid p5 20480 1570 ec6e8ca5
+junk-mid warnings 1
+junk-mid w0 damage at 8449: damaged page, resyncing
+junk-mid seek 5512 landed 4096, then 4096 4096 1fc583ff
+junk-mid seek 11025 landed 8192, then 8192 4096 460f7947
+junk-mid seek 16536 landed 16384, then 16384 4096 ec81bd77
+junk-mid seek warnings 0
+junk-window file 74195 bytes: 65534 bytes of junk at 8449, every second one 0x4f
+junk-window open samples=22050 exact=true
+junk-window packets 6
+junk-window p0 0 4096 8a091c66
+junk-window p1 4096 4096 1fc583ff
+junk-window p2 8192 4096 460f7947
+junk-window p3 12288 4096 d3c3e6de
+junk-window p4 16384 4096 ec81bd77
+junk-window p5 20480 1570 ec6e8ca5
+junk-window warnings 1
+junk-window w0 damage at 8449: damaged page, resyncing
+junk-window seek 5512 landed 4096, then 4096 4096 1fc583ff
+junk-window seek 11025 landed 8192, then 8192 4096 460f7947
+junk-window seek 16536 landed 16384, then 16384 4096 ec81bd77
+junk-window seek warnings 0
+decoy-mid file 16853 bytes: 8192 bytes of junk at 8449, every second one 0x4f, the 32 bytes that follow it also at 10497
+decoy-mid open samples=22050 exact=true
+decoy-mid packets 6
+decoy-mid p0 0 4096 8a091c66
+decoy-mid p1 4096 4096 1fc583ff
+decoy-mid p2 8192 4096 460f7947
+decoy-mid p3 12288 4096 d3c3e6de
+decoy-mid p4 16384 4096 ec81bd77
+decoy-mid p5 20480 1570 ec6e8ca5
+decoy-mid warnings 1
+decoy-mid w0 damage at 8449: damaged page, resyncing
+decoy-mid seek 5512 landed 4096, then 4096 4096 1fc583ff
+decoy-mid seek 11025 landed 8192, then 8192 4096 460f7947
+decoy-mid seek 16536 landed 16384, then 16384 4096 ec81bd77
+decoy-mid seek warnings 0
+junk-island file 25045 bytes: 8192 bytes of junk at 8449 and at 16683, every second one 0x4f, the 42 bytes between them whole
+junk-island open samples=22050 exact=true
+junk-island packets 6
+junk-island p0 0 4096 8a091c66
+junk-island p1 4096 4096 1fc583ff
+junk-island p2 8192 4096 460f7947
+junk-island p3 12288 4096 d3c3e6de
+junk-island p4 16384 4096 ec81bd77
+junk-island p5 20480 1570 ec6e8ca5
+junk-island warnings 2
+junk-island w0 damage at 8449: damaged page, resyncing
+junk-island w1 damage at 16683: damaged page, resyncing
+junk-island seek 5512 landed 4096, then 4096 4096 1fc583ff
+junk-island seek 11025 landed 8192, then 8192 4096 460f7947
+junk-island seek 16536 landed 16384, then 16384 4096 ec81bd77
+junk-island seek warnings 0
+junk-under-bound file 1122722 bytes: 1114061 bytes of junk at 8449, every second one 0x4f
+junk-under-bound open samples=22050 exact=true
+junk-under-bound packets 6
+junk-under-bound p0 0 4096 8a091c66
+junk-under-bound p1 4096 4096 1fc583ff
+junk-under-bound p2 8192 4096 460f7947
+junk-under-bound p3 12288 4096 d3c3e6de
+junk-under-bound p4 16384 4096 ec81bd77
+junk-under-bound p5 20480 1570 ec6e8ca5
+junk-under-bound warnings 1
+junk-under-bound w0 damage at 8449: damaged page, resyncing
+junk-under-bound seek 5512 landed 4096, then 4096 4096 1fc583ff
+junk-under-bound seek 11025 landed 8192, then 8192 4096 460f7947
+junk-under-bound seek 16536 landed 16384, then 16384 4096 ec81bd77
+junk-under-bound seek warnings 0
+junk-past-bound file 1122723 bytes: 1114062 bytes of junk at 8449, every second one 0x4f
+junk-past-bound open samples=22050 exact=true
+junk-past-bound packets 1
+junk-past-bound p0 0 4096 8a091c66
+junk-past-bound warnings 3
+junk-past-bound w0 damage at 8449: damaged page, resyncing
+junk-past-bound w1 damage at 8449: no page within 1048576 bytes behind the damage, the 1114274 bytes left dropped
+junk-past-bound w2 damage at 8407: STREAMINFO declares 22050 samples but the frames end at 4096
+junk-past-bound seek 5512 landed 4096, then 4096 4096 1fc583ff
+junk-past-bound seek 11025 landed 8192, then 8192 4096 460f7947
+junk-past-bound seek 16536 landed 16384, then 16384 4096 ec81bd77
+junk-past-bound seek warnings 0

@@ -6,6 +6,7 @@ import (
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/diag"
 	"github.com/colespringer/waxflow/container/internal/id3"
 	"github.com/colespringer/waxflow/container/internal/mpegframes"
 	"github.com/colespringer/waxflow/waxerr"
@@ -26,33 +27,24 @@ const (
 	trailerScan = 64 << 10
 )
 
-// DemuxerOptions configures parsing.
-type DemuxerOptions struct {
-	// Strict turns tolerated damage (the Warnings list) into errors.
-	Strict bool
-}
-
 // Demuxer reads one MP3 track from an elementary stream source.
 type Demuxer struct {
-	opts DemuxerOptions
-
 	// walk is the frame index and the window it walks, pkts the packet
 	// stream over it; this package owns the tags around them and the track
 	// those frames describe.
-	walk     *mpegframes.Walker
-	pkts     *mpegframes.Reader
-	track    container.Track
-	warnings container.Warnings
+	walk  *mpegframes.Walker
+	pkts  *mpegframes.Reader
+	track container.Track
+	log   diag.Log
+	// indexer answers container.Indexer and container.Walker over pkts.
+	indexer mpegframes.Indexed
 }
 
 // NewDemuxer parses the stream head (tags, the VBR metadata frame) and
 // positions on the first audio frame. The returned Demuxer implements
 // container.Seeker and container.Warner.
-func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
-	d := &Demuxer{}
-	if opts != nil {
-		d.opts = *opts
-	}
+func NewDemuxer(src container.Source, opts *container.DemuxerOptions) (*Demuxer, error) {
+	d := &Demuxer{log: diag.New("mp3: ", opts)}
 	d.walk = mpegframes.New(src, src.Size(), mpegframes.Options{
 		Prefix:  "mp3: ",
 		Warn:    func(off int64, msg string) error { return d.warn(off, "%s", msg) },
@@ -67,18 +59,13 @@ func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 
 // warn records tolerated damage, or fails in strict mode.
 func (d *Demuxer) warn(off int64, format string, args ...any) error {
-	msg := fmt.Sprintf(format, args...)
-	if d.opts.Strict {
-		return waxerr.Malformed("mp3: ", "%s (at offset %d)", msg, off)
-	}
-	d.warnings.Damage(off, msg)
-	return nil
+	return d.log.Warn(off, format, args...)
 }
 
 // note records a finding Strict must not escalate: the file is loose rather
 // than damaged, and it still reads exactly as it stands.
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.warnings.Note(off, fmt.Sprintf(format, args...))
+	d.log.Note(off, format, args...)
 }
 
 func (d *Demuxer) parse() error {
@@ -98,6 +85,7 @@ func (d *Demuxer) parse() error {
 		return err
 	}
 	d.pkts = d.walk.Reader()
+	d.indexer = mpegframes.NewIndexed(d.pkts, &d.track)
 
 	f := d.walk.Header().PCMFormat()
 	if err := f.Valid(); err != nil {
@@ -120,10 +108,10 @@ func (d *Demuxer) parse() error {
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns damage tolerated during parsing.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
+func (d *Demuxer) Warnings() []container.Warning { return d.log.List() }
 
 // DamageCount implements container.Damaged.
-func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
+func (d *Demuxer) DamageCount() int { return d.log.DamageCount() }
 
 // TruncatedSamples implements container.Truncated: what the metadata frame's
 // count declares past the run, known once the walk has reached its end.

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
 	"strings"
@@ -98,7 +99,7 @@ func TestMP3CompressionTypes(t *testing.T) {
 	for _, comp := range []string{compMP3, ".MP3", "ms\x00\x55"} {
 		t.Run(comp, func(t *testing.T) {
 			raw := buildAIFCrate(comp, mp3Channels, 0, mp3Rate, payload, mp3FrameCount)
-			d, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true})
+			d, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -131,7 +132,7 @@ func TestMP3CompressionTypes(t *testing.T) {
 // which of the two counts nobody defined.
 func TestMP3LengthIsUnknownWithoutAMetadataFrame(t *testing.T) {
 	raw := buildAIFCrate(compMP3, mp3Channels, 0, mp3Rate, mp3Payload(), mp3FrameCount)
-	d, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true})
+	d, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +155,7 @@ func TestMP3LengthIsUnknownWithoutAMetadataFrame(t *testing.T) {
 func TestMP3XingLeadPayloadTakesItsTrims(t *testing.T) {
 	payload := append(xingFrame(t, mp3FrameCount, 576, 990), mp3Payload()...)
 	raw := buildAIFCrate(compMP3, mp3Channels, 0, mp3Rate, payload, mp3FrameCount+1)
-	d, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true})
+	d, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +190,7 @@ func TestMP3COMMDisagreeingWithTheFrames(t *testing.T) {
 	if len(warns) == 0 || warns[0].Kind != container.Damage || !strings.Contains(warns[0].Msg, "the frame wins") {
 		t.Fatalf("warnings = %v, want a Damage naming the winner", warns)
 	}
-	if _, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true}); !errors.Is(err, waxerr.ErrMalformedInput) {
+	if _, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); !errors.Is(err, waxerr.ErrMalformedInput) {
 		t.Errorf("strict mode error = %v, want malformed", err)
 	}
 }
@@ -222,6 +223,44 @@ func TestMP3SeekBacksOffForTheReservoir(t *testing.T) {
 	var pkt container.Packet
 	if err := d.ReadPacket(&pkt); err != nil || pkt.PTS != landed {
 		t.Errorf("post-seek packet PTS = %d (%v), want %d", pkt.PTS, err, landed)
+	}
+}
+
+// TestMP3JunkBehindTheMetadataFrameIsReported: bytes skipped between a
+// wrapped run's metadata frame and its first audio frame are damage at the
+// frame's end, which Strict refuses at the open.
+func TestMP3JunkBehindTheMetadataFrameIsReported(t *testing.T) {
+	frames := mp3Payload()
+	// A kin header of no stated size confirms the metadata frame and cannot
+	// be the first audio frame, so the scan starts behind the frame.
+	junk := bytes.Repeat([]byte{0x11}, 32)
+	copy(junk, frames[:mp3.HeaderLen])
+	junk[2] &= 0x0F
+	payload := slices.Concat(xingFrame(t, mp3FrameCount, 576, 990), junk, frames)
+	raw := buildAIFCrate(compMP3, mp3Channels, 0, mp3Rate, payload, mp3FrameCount+1)
+	at := int64(len(raw) - len(payload) + mp3FrameLen)
+
+	d, err := NewDemuxer(container.BytesSource(raw), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr := d.Tracks()[0]; tr.Delay != 576+529 || tr.Padding != 990-529 {
+		t.Errorf("trims = %d/%d, want the metadata frame's %d/%d", tr.Delay, tr.Padding, 576+529, 990-529)
+	}
+	if _, n := walkMP3(t, d); n != mp3FrameCount {
+		t.Errorf("walked %d frames, want %d", n, mp3FrameCount)
+	}
+	finding := container.Warning{Offset: at, Msg: "32 unparsable bytes after the metadata frame", Kind: container.Damage}
+	if ws := d.Warnings(); len(ws) != 1 || ws[0] != finding {
+		t.Errorf("warnings = %v, want %v", ws, finding)
+	}
+
+	_, err = NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
+	if !errors.Is(err, waxerr.ErrMalformedInput) {
+		t.Fatalf("a strict open answered %v, want malformed", err)
+	}
+	if want := fmt.Sprintf("aiff: 32 unparsable bytes after the metadata frame (at offset %d)", at); err.Error() != want {
+		t.Errorf("a strict open refused with %q, want %q", err, want)
 	}
 }
 
@@ -290,7 +329,7 @@ func TestMP3ToleratedDamage(t *testing.T) {
 				t.Errorf("warnings after Walk = %v, want %q", walked.Warnings(), tc.want)
 			}
 
-			strict, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true})
+			strict, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 			if tc.atOpen {
 				if err == nil {
 					t.Fatal("strict mode accepted damage at the head")
@@ -312,7 +351,7 @@ func TestMP3ToleratedDamage(t *testing.T) {
 				break
 			}
 			// The strict probe's path: Walk refuses with the same error.
-			strict, err = NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true})
+			strict, err = NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 			if err != nil {
 				t.Fatal(err)
 			}

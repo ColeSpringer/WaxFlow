@@ -1,0 +1,228 @@
+# <case> p<n> <pts> <dur> <crc-32 of the data>, with lost=<samples> and discont where the packet says so
+# <case> seek <target> landed <position>, then the packet read next in the same fields
+clean file 3342 bytes
+clean open samples=5003 exact=false
+clean packets 7
+clean p0 0 1152 0f9ceb5c
+clean p1 1152 1152 17258923
+clean p2 2304 1152 6d29d5ce
+clean p3 3456 1152 f530e7e5
+clean p4 4608 1152 bf775ca0
+clean p5 5760 1152 4fe854d4
+clean p6 6912 1152 b910130e
+clean warnings 0
+clean seek 2016 landed 0, then 0 1152 0f9ceb5c
+clean seek 4032 landed 0, then 0 1152 0f9ceb5c
+clean seek 6048 landed 0, then 0 1152 0f9ceb5c
+clean seek warnings 0
+junk-head file 11534 bytes: 8192 bytes of junk at 0, every second one 0xff
+junk-head open samples=5003 exact=false
+junk-head packets 7
+junk-head p0 0 1152 0f9ceb5c
+junk-head p1 1152 1152 17258923
+junk-head p2 2304 1152 6d29d5ce
+junk-head p3 3456 1152 f530e7e5
+junk-head p4 4608 1152 bf775ca0
+junk-head p5 5760 1152 4fe854d4
+junk-head p6 6912 1152 b910130e
+junk-head warnings 1
+junk-head w0 damage at 0: 8192 unparsable bytes before the first frame
+junk-head seek 2016 landed 0, then 0 1152 0f9ceb5c
+junk-head seek 4032 landed 0, then 0 1152 0f9ceb5c
+junk-head seek 6048 landed 0, then 0 1152 0f9ceb5c
+junk-head seek warnings 0
+junk-span file 4363 bytes: 1021 bytes of junk at 0, every second one 0xff
+junk-span open samples=5003 exact=false
+junk-span packets 7
+junk-span p0 0 1152 0f9ceb5c
+junk-span p1 1152 1152 17258923
+junk-span p2 2304 1152 6d29d5ce
+junk-span p3 3456 1152 f530e7e5
+junk-span p4 4608 1152 bf775ca0
+junk-span p5 5760 1152 4fe854d4
+junk-span p6 6912 1152 b910130e
+junk-span warnings 1
+junk-span w0 damage at 0: 1021 unparsable bytes before the first frame
+junk-span seek 2016 landed 0, then 0 1152 0f9ceb5c
+junk-span seek 4032 landed 0, then 0 1152 0f9ceb5c
+junk-span seek 6048 landed 0, then 0 1152 0f9ceb5c
+junk-span seek warnings 0
+junk-after-tag file 11534 bytes: 8192 bytes of junk at 417, every second one 0xff
+junk-after-tag open samples=-1 exact=false
+junk-after-tag packets 7
+junk-after-tag p0 0 1152 0f9ceb5c
+junk-after-tag p1 1152 1152 17258923
+junk-after-tag p2 2304 1152 6d29d5ce
+junk-after-tag p3 3456 1152 f530e7e5
+junk-after-tag p4 4608 1152 bf775ca0
+junk-after-tag p5 5760 1152 4fe854d4
+junk-after-tag p6 6912 1152 b910130e
+junk-after-tag warnings 1
+junk-after-tag w0 damage at 0: 8609 unparsable bytes before the first frame
+junk-after-tag seek 2016 landed 0, then 0 1152 0f9ceb5c
+junk-after-tag seek 4032 landed 0, then 0 1152 0f9ceb5c
+junk-after-tag seek 6048 landed 0, then 0 1152 0f9ceb5c
+junk-after-tag seek warnings 0
+free-after-tag file 11534 bytes: 8192 bytes of junk at 417, every second one 0xff, its first four a header of the free format
+free-after-tag open samples=5003 exact=false
+free-after-tag packets 7
+free-after-tag p0 0 1152 0f9ceb5c
+free-after-tag p1 1152 1152 17258923
+free-after-tag p2 2304 1152 6d29d5ce
+free-after-tag p3 3456 1152 f530e7e5
+free-after-tag p4 4608 1152 bf775ca0
+free-after-tag p5 5760 1152 4fe854d4
+free-after-tag p6 6912 1152 b910130e
+free-after-tag warnings 1
+free-after-tag w0 damage at 417: 8192 unparsable bytes after the metadata frame
+free-after-tag seek 2016 landed 0, then 0 1152 0f9ceb5c
+free-after-tag seek 4032 landed 0, then 0 1152 0f9ceb5c
+free-after-tag seek 6048 landed 0, then 0 1152 0f9ceb5c
+free-after-tag seek warnings 0
+junk-mid file 11534 bytes: 8192 bytes of junk at 1670, every second one 0xff
+junk-mid open samples=5003 exact=false
+junk-mid packets 7
+junk-mid p0 0 1152 0f9ceb5c
+junk-mid p1 1152 1152 17258923
+junk-mid p2 2304 1152 6d29d5ce
+junk-mid p3 3456 1152 f530e7e5
+junk-mid p4 4608 1152 bf775ca0
+junk-mid p5 5760 1152 4fe854d4
+junk-mid p6 6912 1152 b910130e
+junk-mid warnings 1
+junk-mid w0 damage at 1670: 8192 unparsable bytes skipped
+junk-mid seek 2016 landed 0, then 0 1152 0f9ceb5c
+junk-mid seek 4032 landed 0, then 0 1152 0f9ceb5c
+junk-mid seek 6048 landed 0, then 0 1152 0f9ceb5c
+junk-mid seek warnings 0
+decoy-mid file 11534 bytes: 8192 bytes of junk at 1670, every second one 0xff, the 32 bytes that follow it also at 3718
+decoy-mid open samples=5003 exact=false
+decoy-mid packets 7
+decoy-mid p0 0 1152 0f9ceb5c
+decoy-mid p1 1152 1152 17258923
+decoy-mid p2 2304 1152 6d29d5ce
+decoy-mid p3 3456 1152 f530e7e5
+decoy-mid p4 4608 1152 bf775ca0
+decoy-mid p5 5760 1152 4fe854d4
+decoy-mid p6 6912 1152 b910130e
+decoy-mid warnings 1
+decoy-mid w0 damage at 1670: 8192 unparsable bytes skipped
+decoy-mid seek 2016 landed 0, then 0 1152 0f9ceb5c
+decoy-mid seek 4032 landed 0, then 0 1152 0f9ceb5c
+decoy-mid seek 6048 landed 0, then 0 1152 0f9ceb5c
+decoy-mid seek warnings 0
+junk-island file 19726 bytes: 8192 bytes of junk at 1670 and at 10280, every second one 0xff, the 418 bytes between them whole
+junk-island open samples=5003 exact=false
+junk-island packets 6
+junk-island p0 0 1152 0f9ceb5c
+junk-island p1 1152 1152 17258923
+junk-island p2 2304 1152 6d29d5ce
+junk-island p3 3456 1152 bf775ca0
+junk-island p4 4608 1152 4fe854d4
+junk-island p5 5760 1152 b910130e
+junk-island warnings 2
+junk-island w0 damage at 1670: 16802 unparsable bytes skipped
+junk-island w1 note at 19726: the metadata frame declares 7 frames but the run holds 6
+junk-island seek 2016 landed 0, then 0 1152 0f9ceb5c
+junk-island seek 4032 landed 0, then 0 1152 0f9ceb5c
+junk-island seek 6048 landed 0, then 0 1152 0f9ceb5c
+junk-island seek warnings 0
+junk-island-header file 19726 bytes: 8192 bytes of junk at 1670 and at 10312, every second one 0xff, the 450 bytes between them whole
+junk-island-header open samples=5003 exact=false
+junk-island-header packets 7
+junk-island-header p0 0 1152 0f9ceb5c
+junk-island-header p1 1152 1152 17258923
+junk-island-header p2 2304 1152 6d29d5ce
+junk-island-header p3 3456 1152 f530e7e5
+junk-island-header p4 4608 1152 ec6b551e
+junk-island-header p5 5760 1152 4fe854d4
+junk-island-header p6 6912 1152 b910130e
+junk-island-header warnings 2
+junk-island-header w0 damage at 1670: 8192 unparsable bytes skipped
+junk-island-header w1 damage at 10698: 8192 unparsable bytes skipped
+junk-island-header seek 2016 landed 0, then 0 1152 0f9ceb5c
+junk-island-header seek 4032 landed 0, then 0 1152 0f9ceb5c
+junk-island-header seek 6048 landed 0, then 0 1152 0f9ceb5c
+junk-island-header seek warnings 0
+junk-last file 11534 bytes: 8192 bytes of junk at 2924, every second one 0xff
+junk-last open samples=5003 exact=false
+junk-last packets 7
+junk-last p0 0 1152 0f9ceb5c
+junk-last p1 1152 1152 17258923
+junk-last p2 2304 1152 6d29d5ce
+junk-last p3 3456 1152 f530e7e5
+junk-last p4 4608 1152 bf775ca0
+junk-last p5 5760 1152 4fe854d4
+junk-last p6 6912 1152 b910130e
+junk-last warnings 1
+junk-last w0 damage at 2924: 8192 unparsable bytes skipped
+junk-last seek 2016 landed 0, then 0 1152 0f9ceb5c
+junk-last seek 4032 landed 0, then 0 1152 0f9ceb5c
+junk-last seek 6048 landed 0, then 0 1152 0f9ceb5c
+junk-last seek warnings 0
+junk-tail file 11534 bytes: 8192 bytes of junk at 3342, every second one 0xff
+junk-tail open samples=5003 exact=false
+junk-tail packets 7
+junk-tail p0 0 1152 0f9ceb5c
+junk-tail p1 1152 1152 17258923
+junk-tail p2 2304 1152 6d29d5ce
+junk-tail p3 3456 1152 f530e7e5
+junk-tail p4 4608 1152 bf775ca0
+junk-tail p5 5760 1152 4fe854d4
+junk-tail p6 6912 1152 b910130e
+junk-tail warnings 1
+junk-tail w0 damage at 3342: 8192 trailing bytes are not frames, dropped
+junk-tail seek 2016 landed 0, then 0 1152 0f9ceb5c
+junk-tail seek 4032 landed 0, then 0 1152 0f9ceb5c
+junk-tail seek 6048 landed 0, then 0 1152 0f9ceb5c
+junk-tail seek warnings 0
+junk-under-bound file 1051917 bytes: 1048575 bytes of junk at 0, every second one 0xff
+junk-under-bound open samples=5003 exact=false
+junk-under-bound packets 7
+junk-under-bound p0 0 1152 0f9ceb5c
+junk-under-bound p1 1152 1152 17258923
+junk-under-bound p2 2304 1152 6d29d5ce
+junk-under-bound p3 3456 1152 f530e7e5
+junk-under-bound p4 4608 1152 bf775ca0
+junk-under-bound p5 5760 1152 4fe854d4
+junk-under-bound p6 6912 1152 b910130e
+junk-under-bound warnings 1
+junk-under-bound w0 damage at 0: 1048575 unparsable bytes before the first frame
+junk-under-bound seek 2016 landed 0, then 0 1152 0f9ceb5c
+junk-under-bound seek 4032 landed 0, then 0 1152 0f9ceb5c
+junk-under-bound seek 6048 landed 0, then 0 1152 0f9ceb5c
+junk-under-bound seek warnings 0
+junk-past-bound file 1051918 bytes: 1048576 bytes of junk at 0, every second one 0xff
+junk-past-bound open refused malformed-input: mp3: no Layer III frames found
+zero-middle file 3342 bytes: 64 bytes zeroed at 1671
+zero-middle open samples=5003 exact=false
+zero-middle packets 6
+zero-middle p0 0 1152 0f9ceb5c
+zero-middle p1 1152 1152 17258923
+zero-middle p2 2304 1152 6d29d5ce
+zero-middle p3 3456 1152 bf775ca0
+zero-middle p4 4608 1152 4fe854d4
+zero-middle p5 5760 1152 b910130e
+zero-middle warnings 2
+zero-middle w0 damage at 1670: 418 unparsable bytes skipped
+zero-middle w1 note at 3342: the metadata frame declares 7 frames but the run holds 6
+zero-middle seek 2016 landed 0, then 0 1152 0f9ceb5c
+zero-middle seek 4032 landed 0, then 0 1152 0f9ceb5c
+zero-middle seek 6048 landed 0, then 0 1152 0f9ceb5c
+zero-middle seek warnings 0
+cut-tail file 3242 bytes: the last 100 bytes cut
+cut-tail open samples=5003 exact=false
+cut-tail packets 6
+cut-tail p0 0 1152 0f9ceb5c
+cut-tail p1 1152 1152 17258923
+cut-tail p2 2304 1152 6d29d5ce
+cut-tail p3 3456 1152 f530e7e5
+cut-tail p4 4608 1152 bf775ca0
+cut-tail p5 5760 1152 4fe854d4
+cut-tail warnings 2
+cut-tail w0 damage at 2924: truncated final frame dropped
+cut-tail w1 damage at 2924: the metadata frame declares 7 frames but the run holds 6
+cut-tail seek 2016 landed 0, then 0 1152 0f9ceb5c
+cut-tail seek 4032 landed 0, then 0 1152 0f9ceb5c
+cut-tail seek 6048 landed 0, then 0 1152 0f9ceb5c
+cut-tail seek warnings 0

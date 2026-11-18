@@ -133,7 +133,7 @@ func TestASeekReportsNoDamageItsWindowNeverReads(t *testing.T) {
 		t.Error("Walk did not report the damage it walked over")
 	}
 
-	s, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+	s, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestALandingStepsOverAnObjectThatCompletesNoFrame(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			d, err := asf.NewDemuxer(container.BytesSource(reservoirStream(t, tc.counts)), &asf.DemuxerOptions{Strict: true})
+			d, err := asf.NewDemuxer(container.BytesSource(reservoirStream(t, tc.counts)), &container.DemuxerOptions{Strict: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -231,7 +231,7 @@ func TestACountTakesBackAFrameNothingCarries(t *testing.T) {
 		}
 	}
 	openHooked := func() *asf.Demuxer {
-		d, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+		d, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -557,7 +557,7 @@ func TestACountWithAFoldedStampKeepsItsSidecar(t *testing.T) {
 	if !has(r.Warnings()) {
 		t.Errorf("the restored count reported %v, want the fold a walk reports", r.Warnings())
 	}
-	strict, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+	strict, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -619,7 +619,7 @@ func TestSeekLandsOnTheFrameIndex(t *testing.T) {
 		t.Run(filepath.Base(name), func(t *testing.T) {
 			raw := readFixture(t, name)
 			objs, frameLen := wmacount.Objects(t, raw)
-			d, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+			d, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -663,7 +663,7 @@ func TestWalkSettlesTheLength(t *testing.T) {
 	for _, name := range v1v2Fixtures {
 		t.Run(filepath.Base(name), func(t *testing.T) {
 			raw := readFixture(t, name)
-			d, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+			d, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 			if err != nil {
 				t.Fatal(err)
 			}

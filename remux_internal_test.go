@@ -404,7 +404,7 @@ func TestCopiedRunClampsAHostileTrim(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := &padDemuxer{dur: dur, pads: tc.pads}
-			run, err := copyPackets(t.Context(), d, 0, true, nil, func(container.Packet) error { return nil })
+			run, err := copyPackets(t.Context(), d, 0, true, holeFill{}, func(container.Packet) error { return nil })
 			if err != nil {
 				t.Fatal(err)
 			}

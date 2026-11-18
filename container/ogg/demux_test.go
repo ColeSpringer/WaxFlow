@@ -67,7 +67,12 @@ func buildPage(flags byte, granule int64, serial, seq uint32, packets ...[]byte)
 // comparison.
 func repaginate(t *testing.T, name string, split bool) ([]byte, []container.Packet) {
 	t.Helper()
-	raw := fixture(t, name)
+	return repaginateRaw(t, fixture(t, name), split)
+}
+
+// repaginateRaw is repaginate over a stream in hand.
+func repaginateRaw(t *testing.T, raw []byte, split bool) ([]byte, []container.Packet) {
+	t.Helper()
 	d, err := NewDemuxer(container.BytesSource(raw), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -88,19 +93,9 @@ func repaginate(t *testing.T, name string, split bool) ([]byte, []container.Pack
 		packets = append(packets, cp)
 	}
 
-	// Copy the BOS and header pages verbatim.
-	var out []byte
-	off := 0
-	for range 2 {
-		n := int(raw[off+26])
-		size := headerLen + n
-		for _, l := range raw[off+headerLen : off+headerLen+n] {
-			size += int(l)
-		}
-		out = append(out, raw[off:off+size]...)
-		off += size
-	}
-	seq := uint32(2)
+	// Copy the pages in front of the first audio page verbatim.
+	out := append([]byte(nil), raw[:d.firstData]...)
+	seq := uint32(len(pageStarts(t, out)) - 1)
 	for i, p := range packets {
 		granule := p.PTS + p.Dur
 		flags := byte(0)
@@ -339,7 +334,7 @@ func flacBOSPacket() []byte { return flacBOSPacketBlocks(4096, 4096) }
 // explicit 16-bit block size, 44.1k stereo 16-bit) followed by dummy
 // payload. The CRC-8 is brute-forced through the real parser so the
 // helper cannot drift from the wire format.
-func buildFrameBytes(t *testing.T, coded uint64, blockSize int) []byte {
+func buildFrameBytes(t testing.TB, coded uint64, blockSize int) []byte {
 	t.Helper()
 	b := []byte{0xFF, 0xF8, 0x79, 0x18}
 	switch {
@@ -438,7 +433,7 @@ func TestEmptyStream(t *testing.T) {
 		t.Fatalf("post-seek ReadPacket = %v, want EOF", err)
 	}
 
-	if _, err := NewDemuxer(container.BytesSource(stream), &DemuxerOptions{Strict: true}); err == nil {
+	if _, err := NewDemuxer(container.BytesSource(stream), &container.DemuxerOptions{Strict: true}); err == nil {
 		t.Error("strict mode accepted a stream with no audio")
 	}
 }
@@ -595,7 +590,7 @@ func TestDamagedPageResync(t *testing.T) {
 	}
 
 	// Strict mode refuses.
-	d, err = NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true})
+	d, err = NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		return // damage may already surface at parse time
 	}
@@ -626,7 +621,7 @@ func TestChainedStreamIsANoteNotDamage(t *testing.T) {
 		buildPage(flagBOS, 0, 0x5EC0, 0, []byte("second stream header"))...)
 
 	for _, strict := range []bool{false, true} {
-		d, err := NewDemuxer(container.BytesSource(chained), &DemuxerOptions{Strict: strict})
+		d, err := NewDemuxer(container.BytesSource(chained), &container.DemuxerOptions{Strict: strict})
 		if err != nil {
 			t.Fatalf("strict=%v refused a chained Ogg at open: %v", strict, err)
 		}
@@ -659,7 +654,7 @@ func TestChainedStreamIsANoteNotDamage(t *testing.T) {
 	// note.
 	damaged := append([]byte(nil), raw...)
 	damaged[len(damaged)/2] ^= 0xff
-	d, err := NewDemuxer(container.BytesSource(damaged), &DemuxerOptions{Strict: true})
+	d, err := NewDemuxer(container.BytesSource(damaged), &container.DemuxerOptions{Strict: true})
 	if err == nil {
 		var pkt container.Packet
 		for err == nil {

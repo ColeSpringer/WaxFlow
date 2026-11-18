@@ -176,13 +176,13 @@ func requireStrictCopyCut(t *testing.T, raw []byte, hint string) {
 		ws []container.Warning
 	)
 	if hint == "flac" {
-		d, err := flacn.NewDemuxer(container.BytesSource(raw), &flacn.DemuxerOptions{Strict: true})
+		d, err := flacn.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 		if err != nil {
 			t.Fatalf("a strict open refused ffmpeg's cut: %v", err)
 		}
 		tr, ws = d.Tracks()[0], d.Warnings()
 	} else {
-		d, err := ogg.NewDemuxer(container.BytesSource(raw), &ogg.DemuxerOptions{Strict: true})
+		d, err := ogg.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 		if err != nil {
 			t.Fatalf("a strict open refused ffmpeg's cut: %v", err)
 		}

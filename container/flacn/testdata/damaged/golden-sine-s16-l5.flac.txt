@@ -1,0 +1,124 @@
+# <case> p<n> <pts> <dur> <crc-32 of the data>, with lost=<samples> and discont where the packet says so
+# <case> seek <target> landed <position>, then the packet read next in the same fields
+clean file 3323 bytes
+clean open samples=4596 exact=true
+clean packets 2
+clean p0 0 4096 11552986
+clean p1 4096 500 e007b50e
+clean warnings 0
+clean seek 1149 landed 0, then 0 4096 11552986
+clean seek 2298 landed 0, then 0 4096 11552986
+clean seek 3447 landed 0, then 0 4096 11552986
+clean seek warnings 0
+junk-head file 11515 bytes: 8192 bytes of junk at 64, every second one 0xff
+junk-head open samples=4596 exact=true
+junk-head packets 2
+junk-head p0 0 4096 11552986
+junk-head p1 4096 500 e007b50e
+junk-head warnings 1
+junk-head w0 damage at 64: 8192 unparsable bytes before the first frame
+junk-head seek 1149 landed 0, then 0 4096 11552986
+junk-head seek 2298 landed 0, then 0 4096 11552986
+junk-head seek 3447 landed 0, then 0 4096 11552986
+junk-head seek warnings 0
+junk-span file 4344 bytes: 1021 bytes of junk at 64, every second one 0xff
+junk-span open samples=4596 exact=true
+junk-span packets 2
+junk-span p0 0 4096 11552986
+junk-span p1 4096 500 e007b50e
+junk-span warnings 1
+junk-span w0 damage at 64: 1021 unparsable bytes before the first frame
+junk-span seek 1149 landed 0, then 0 4096 11552986
+junk-span seek 2298 landed 0, then 0 4096 11552986
+junk-span seek 3447 landed 0, then 0 4096 11552986
+junk-span seek warnings 0
+decoy-head file 11515 bytes: 8192 bytes of junk at 64, every second one 0xff, the 32 bytes that follow it also at 2112
+decoy-head open samples=4596 exact=true
+decoy-head packets 1
+decoy-head p0 4096 500 e007b50e lost=4096 discont
+decoy-head warnings 2
+decoy-head w0 damage at 64: 2048 unparsable bytes before the first frame
+decoy-head w1 damage at 2112: 8963 bytes are not a valid frame, dropped: 4096 samples lost
+decoy-head seek 1149 landed 0, then 4096 500 e007b50e lost=4096 discont
+decoy-head seek 2298 landed 0, then 4096 500 e007b50e lost=4096 discont
+decoy-head seek 3447 landed 0, then 4096 500 e007b50e lost=4096 discont
+decoy-head seek warnings 0
+junk-mid file 11515 bytes: 8192 bytes of junk at 2883, every second one 0xff
+junk-mid open samples=4596 exact=true
+junk-mid packets 2
+junk-mid p0 0 4096 11552986
+junk-mid p1 4096 500 e007b50e discont
+junk-mid warnings 1
+junk-mid w0 damage at 2883: 8192 bytes are not a valid frame, dropped: 0 samples lost
+junk-mid seek 1149 landed 0, then 0 4096 11552986
+junk-mid seek 2298 landed 0, then 0 4096 11552986
+junk-mid seek 3447 landed 0, then 0 4096 11552986
+junk-mid seek warnings 0
+junk-tail file 11515 bytes: 8192 bytes of junk at 3323, every second one 0xff
+junk-tail open samples=4596 exact=false
+junk-tail packets 2
+junk-tail p0 0 4096 11552986
+junk-tail p1 4096 500 e007b50e
+junk-tail warnings 1
+junk-tail w0 damage at 3323: 8192 trailing bytes are not a valid frame, dropped
+junk-tail seek 1149 landed 0, then 0 4096 11552986
+junk-tail seek 2298 landed 0, then 0 4096 11552986
+junk-tail seek 3447 landed 0, then 0 4096 11552986
+junk-tail seek warnings 0
+junk-probe file 310423 bytes: 307200 bytes of junk at 2883, every second one 0xff, and the last 100 bytes cut
+junk-probe open samples=4096 exact=false
+junk-probe packets 1
+junk-probe p0 0 4096 11552986
+junk-probe warnings 3
+junk-probe w0 damage at 310083: 340 trailing bytes are not a valid frame, dropped
+junk-probe w1 damage at 64: STREAMINFO declares 4596 samples but the frames end at 4096
+junk-probe w2 damage at 2883: 307540 trailing bytes are not a valid frame, dropped
+junk-probe seek 1149 landed 0, then 0 4096 11552986
+junk-probe seek 2298 landed 0, then 0 4096 11552986
+junk-probe seek 3447 landed 0, then 0 4096 11552986
+junk-probe seek warnings 0
+decoy-probe file 310523 bytes: 307200 bytes of junk at 2883, every second one 0xff, the 32 bytes that follow it also at 308035
+decoy-probe open samples=4596 exact=true
+decoy-probe packets 2
+decoy-probe p0 0 4096 11552986
+decoy-probe p1 4096 500 e007b50e discont
+decoy-probe warnings 1
+decoy-probe w0 damage at 2883: 307200 bytes are not a valid frame, dropped: 0 samples lost
+decoy-probe seek 1149 landed 0, then 0 4096 11552986
+decoy-probe seek 2298 landed 0, then 0 4096 11552986
+decoy-probe seek 3447 landed 0, then 0 4096 11552986
+decoy-probe seek warnings 0
+junk-under-bound file 1051898 bytes: 1048575 bytes of junk at 64, every second one 0xff
+junk-under-bound open samples=4596 exact=true
+junk-under-bound packets 2
+junk-under-bound p0 0 4096 11552986
+junk-under-bound p1 4096 500 e007b50e
+junk-under-bound warnings 1
+junk-under-bound w0 damage at 64: 1048575 unparsable bytes before the first frame
+junk-under-bound seek 1149 landed 0, then 0 4096 11552986
+junk-under-bound seek 2298 landed 0, then 0 4096 11552986
+junk-under-bound seek 3447 landed 0, then 0 4096 11552986
+junk-under-bound seek warnings 0
+junk-past-bound file 1051899 bytes: 1048576 bytes of junk at 64, every second one 0xff
+junk-past-bound open refused malformed-input: flac: no audio frame after the metadata blocks
+zero-middle file 3323 bytes: 64 bytes zeroed at 1661
+zero-middle open samples=4596 exact=true
+zero-middle packets 1
+zero-middle p0 4096 500 e007b50e lost=4096 discont
+zero-middle warnings 1
+zero-middle w0 damage at 64: 2819 bytes are not a valid frame, dropped: 4096 samples lost
+zero-middle seek 1149 landed 0, then 4096 500 e007b50e lost=4096 discont
+zero-middle seek 2298 landed 0, then 4096 500 e007b50e lost=4096 discont
+zero-middle seek 3447 landed 0, then 4096 500 e007b50e lost=4096 discont
+zero-middle seek warnings 0
+cut-tail file 3223 bytes: the last 100 bytes cut
+cut-tail open samples=4096 exact=false
+cut-tail packets 1
+cut-tail p0 0 4096 11552986
+cut-tail warnings 2
+cut-tail w0 damage at 2883: 340 trailing bytes are not a valid frame, dropped
+cut-tail w1 damage at 64: STREAMINFO declares 4596 samples but the frames end at 4096
+cut-tail seek 1149 landed 0, then 0 4096 11552986
+cut-tail seek 2298 landed 0, then 0 4096 11552986
+cut-tail seek 3447 landed 0, then 0 4096 11552986
+cut-tail seek warnings 0

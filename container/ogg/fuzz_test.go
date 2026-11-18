@@ -28,24 +28,50 @@ func FuzzDemux(f *testing.F) {
 	f.Add(testutil.SetOggGranule(f, opus, 2, 0))
 	// A lone first page, no end of stream after it, short of its packets.
 	f.Add(testutil.SetOggGranule(f, testutil.TruncateOggAfter(f, opus, 2), 2, 0))
+	// FLAC frames whose read ends short of the closing frame's length, runs
+	// past it, and holds two out of order.
+	short, _, _ := lostToAHole(f)
+	f.Add(short)
+	f.Add(oggFLACFrames(f, 4*4096, 0, 1, 2, 1, 2, 3))
+	f.Add(oggFLACFrames(f, 7*4096, 0, 1, 2, 4, 3, 5, 6))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		var packets int64
+		// The packets read, the length the open stated, and the packet that
+		// starts latest inside it: where it starts and ends.
+		var packets, opened, inPTS, inEnd int64
 		testutil.DemuxFuzz{
 			Open: func(src container.Source, strict bool) (container.Demuxer, error) {
-				return NewDemuxer(src, &DemuxerOptions{Strict: strict})
+				return NewDemuxer(src, &container.DemuxerOptions{Strict: strict})
 			},
 			// Every packet consumes at least one lacing byte, so packet
 			// production is bounded by the input length.
 			MaxPackets: func(raw []byte) int64 { return int64(len(raw)) + 8 },
 			Targets:    []int64{0, 1000, 1 << 40},
+			SeekPTS:    true,
 			// Landing past the target is only legitimate when the stream
 			// itself starts after it.
 			LateLanding: true,
-			Opened:      func(testing.TB, container.Demuxer, bool) { packets = 0 },
+			// A FLAC track's exact length holds; a read may outrun it only
+			// where the packet starting latest inside it ends inside it, the
+			// excess being frames overlapping or met again, and the rest start
+			// past it, numbered past the closing frame the open saw.
+			ExactLength: true,
+			OpenLength:  true,
+			LengthOn:    func(tr container.Track) bool { return tr.Codec == codec.FLAC },
+			LongerWhen:  func(container.Demuxer) bool { return inEnd <= opened },
+			Opened: func(_ testing.TB, d container.Demuxer, _ bool) {
+				packets, inPTS, inEnd, opened = 0, -1, 0, d.Tracks()[0].Samples
+			},
 			Packet: func(t testing.TB, pkt *container.Packet) {
 				if pkt.PTS < 0 {
 					t.Fatalf("packet %d at %d: positions start at 0", packets, pkt.PTS)
+				}
+				switch end := pkt.PTS + pkt.Dur; {
+				case pkt.PTS >= opened:
+				case pkt.PTS > inPTS:
+					inPTS, inEnd = pkt.PTS, end
+				case pkt.PTS == inPTS:
+					inEnd = max(inEnd, end)
 				}
 				packets++
 			},
@@ -97,7 +123,7 @@ func FuzzMuxerPages(f *testing.F) {
 			t.Fatal(err)
 		}
 		requirePageFlow(t, readPages(t, out.Bytes()), durs)
-		d, err := NewDemuxer(container.BytesSource(out.Bytes()), &DemuxerOptions{Strict: true})
+		d, err := NewDemuxer(container.BytesSource(out.Bytes()), &container.DemuxerOptions{Strict: true})
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -808,13 +808,13 @@ func (e *Engine) segmentWalk(ctx context.Context, demux container.Demuxer, segTr
 	// callers refuse such a source before the run starts, and this is the
 	// backstop. The position arithmetic below stays raw, which is the
 	// delivered timeline exactly because no emitted packet carries one.
-	silence, err := silenceFor(segTrack)
+	fill, err := silenceFor(segTrack)
 	if err != nil {
 		return nil, err
 	}
-	run, err := copyPackets(ctx, demux, walkTrackID, false, silence, func(pkt container.Packet) error {
+	run, err := copyPackets(ctx, demux, walkTrackID, false, fill, func(pkt container.Packet) error {
 		if pos < p0 {
-			pos += pkt.Dur
+			pos += pkt.Lost + pkt.Dur
 			return nil // still walking up to the restart point
 		}
 		if err := release(true); err != nil {
@@ -994,21 +994,21 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 	// A FLAC muxer numbers the frames it writes, the silent ones a hole leaves
 	// included; the copy only makes those.
 	var done int64
-	silence, err := silenceFor(muxTrack)
+	fill, err := silenceFor(muxTrack)
 	if err != nil {
 		return nil, err
 	}
-	if fill := silence; clearMD5 != nil {
-		silence = func(template []byte, n int64) ([]byte, error) {
+	if fresh := fill.silence; clearMD5 != nil {
+		fill.silence = func(template []byte, n int64) ([]byte, error) {
 			clearMD5()
-			return fill(template, n)
+			return fresh(template, n)
 		}
 	}
-	run, err := copyPackets(ctx, demux, track.ID, StatesTrimsPerPacket(plan.Container), silence, func(pkt container.Packet) error {
+	run, err := copyPackets(ctx, demux, track.ID, StatesTrimsPerPacket(plan.Container), fill, func(pkt container.Packet) error {
 		// Padding forwarded, not dropped: Matroska is the one destination that
 		// states trims per packet, and it is the only one this call lets an
 		// inner trim reach.
-		if err := mux.WritePacket(container.Packet{Track: 0, Padding: pkt.Padding, Packet: pkt.Packet}); err != nil {
+		if err := mux.WritePacket(container.Packet{Track: 0, Padding: pkt.Padding, Lost: pkt.Lost, Packet: pkt.Packet}); err != nil {
 			return err
 		}
 		// Progress means the same thing on every rung, so a caller that gets
@@ -1021,7 +1021,7 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 		// a filtered view of a longer source: reporting the uncut length there
 		// would have progress stall short of its total forever.
 		if opts.Progress != nil {
-			done += pkt.Dur
+			done += pkt.Lost + pkt.Dur
 			opts.Progress(done, plan.Track.Samples)
 		}
 		return nil
@@ -1074,17 +1074,34 @@ func fillHole(pkt container.Packet, bs int64, silence func([]byte, int64) ([]byt
 	return nil
 }
 
-// silenceFor builds the silent frames a copy of t carries a hole in, nil for a
-// codec whose copy cannot carry one.
-func silenceFor(t container.Track) (func(template []byte, n int64) ([]byte, error), error) {
-	if t.Codec != codec.FLAC {
-		return nil, nil
+// holeFill is how a copy carries the samples damage took in front of a
+// packet (container.Packet.Lost).
+type holeFill struct {
+	// silence makes the silent frame of n samples the copy writes, from the
+	// packet behind the hole; nil for a codec with none.
+	silence func(template []byte, n int64) ([]byte, error)
+	// inPackets says each packet states its own position, so the hole is
+	// already on the timeline the copy writes and needs no frames.
+	inPackets bool
+}
+
+// silenceFor says how a copy of t carries a hole: silent frames where the
+// codec has one (FLAC), the packets alone where each states its own position
+// (a WavPack block carries its index), and not at all otherwise.
+func silenceFor(t container.Track) (holeFill, error) {
+	switch t.Codec {
+	case codec.WavPack:
+		return holeFill{inPackets: true}, nil
+	case codec.FLAC:
+		si, err := flac.ParseStreamInfo(t.CodecConfig)
+		if err != nil {
+			return holeFill{}, err
+		}
+		return holeFill{silence: func(template []byte, n int64) ([]byte, error) {
+			return flac.SilentFrame(template, si, int(n))
+		}}, nil
 	}
-	si, err := flac.ParseStreamInfo(t.CodecConfig)
-	if err != nil {
-		return nil, err
-	}
-	return func(template []byte, n int64) ([]byte, error) { return flac.SilentFrame(template, si, int(n)) }, nil
+	return holeFill{}, nil
 }
 
 // copyPackets walks demux and hands every packet of the given track to write,
@@ -1097,7 +1114,7 @@ func silenceFor(t container.Track) (func(template []byte, n int64) ([]byte, erro
 // container.Muxer), which is why the rule is stated there rather than defended
 // with a copy here: a copy per packet would cost the rung its reason to exist.
 func copyPackets(ctx context.Context, demux container.Demuxer, track int, perPacketTrims bool,
-	silence func(template []byte, n int64) ([]byte, error), write func(container.Packet) error) (copiedRun, error) {
+	fill holeFill, write func(container.Packet) error) (copiedRun, error) {
 	var pkt container.Packet
 	var run copiedRun
 	var prevPad int64 // the previous packet's trim, clamped to what it can mean
@@ -1124,13 +1141,16 @@ func copyPackets(ctx context.Context, demux container.Demuxer, track int, perPac
 		}
 		if pkt.Lost > 0 {
 			// Damage took these samples, and a decode delivers them as
-			// silence; the copy carries them as silent frames so it keeps
-			// the same timeline, and a header's length still holds.
-			if err := fillHole(pkt, lastDur, silence, write); err != nil {
-				return copiedRun{}, err
-			}
+			// silence; the copy keeps the same timeline, in silent frames or
+			// in the packets' own positions, so a header's length still holds.
 			run.samples += pkt.Lost
 			run.lost += pkt.Lost
+			if !fill.inPackets {
+				if err := fillHole(pkt, lastDur, fill.silence, write); err != nil {
+					return copiedRun{}, err
+				}
+				pkt.Lost = 0 // filled: the packet goes on with no hole in front
+			}
 		}
 		lastDur = pkt.Dur
 		// Something followed the previous packet, so its trim was an inner one
@@ -1196,7 +1216,7 @@ type copiedRun struct {
 	// is the only trim any output container carries.
 	lastPadding int64
 	trimmed     bool
-	// lost is how many of samples are the silent frames written for holes
-	// (container.Packet.Lost): the copy's fill, as a decode's silence is.
+	// lost is how many of samples are holes (container.Packet.Lost) the copy
+	// carried, as a decode's silence is.
 	lost int64
 }

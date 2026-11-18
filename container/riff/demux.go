@@ -3,7 +3,6 @@ package riff
 import (
 	"context"
 	"fmt"
-	"io"
 	"math"
 
 	"github.com/colespringer/waxflow/audio"
@@ -14,7 +13,9 @@ import (
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/codec/wavpack"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/blocks"
 	"github.com/colespringer/waxflow/container/internal/codecname"
+	"github.com/colespringer/waxflow/container/internal/diag"
 	"github.com/colespringer/waxflow/container/internal/mpegframes"
 	"github.com/colespringer/waxflow/container/internal/waveformat"
 	"github.com/colespringer/waxflow/waxerr"
@@ -33,73 +34,26 @@ const (
 	maxFmtPayload = 4096
 )
 
-// DemuxerOptions configures parsing.
-type DemuxerOptions struct {
-	// Strict turns tolerated damage (the Warnings list) into errors.
-	// Conformance tests and `waxflow probe --strict` use it; playback
-	// paths stay tolerant because real libraries are messy.
-	Strict bool
-}
-
 // Demuxer reads one audio track from a WAV source.
 type Demuxer struct {
-	src  container.Source
-	opts DemuxerOptions
+	src container.Source
 
-	track    container.Track
-	payload  payload
-	warnings container.Warnings
+	track   container.Track
+	payload blocks.Payload // the walk over the data chunk
+	// indexer answers container.Indexer and container.Walker: over the frame
+	// walk for an MP3 payload, and as nothing to walk for the rest.
+	indexer mpegframes.Indexed
+	log     diag.Log
 	// truncated is how far the headers' claims run past the data the file
 	// holds (container.Truncated).
 	truncated int64
 }
 
-// payload is the walk over the data chunk. Two shapes reach it, and the
-// difference between them is not a detail of the walk but its whole
-// geometry: a flat array of fixed-size units, where position is arithmetic,
-// and a run of self-framing MPEG audio frames, where it is an index built by
-// walking. That is what earns a seam rather than a flag.
-type payload interface {
-	// ReadPacket yields the next run of payload, io.EOF past the end.
-	ReadPacket(pkt *container.Packet) error
-	// SeekSample repositions to the unit or frame holding a sample and
-	// reports the sample that unit starts on.
-	SeekSample(ctx context.Context, sample int64) (landed int64, err error)
-}
-
-// blockReader walks the data chunk as a run of equal units.
-//
-// A unit is whatever the codec addresses its payload by: one frame for PCM
-// and G.711, one block for the ADPCM families. That is the only difference
-// between them at this level, which is why one walk serves all four: the
-// payload is a flat array of fixed-size units either way, and the sample
-// timeline is the unit index times what a unit decodes to.
-type blockReader struct {
-	src        container.Source
-	dataOff    int64
-	unitBytes  int64
-	unitFrames int64
-	units      int64
-	samples    int64 // the track's length, which a fact chunk can trim
-	pos        int64 // next unit to read
-	buf        []byte
-}
-
-// perPacket is how many units one packet carries: the pipeline's working
-// size, in units, and never fewer than one. For PCM this is the same
-// audio.StandardChunk frames the reader has always delivered.
-func (r *blockReader) perPacket() int64 {
-	return max(int64(audio.StandardChunk)/r.unitFrames, 1)
-}
-
 // NewDemuxer parses the headers of a WAV source. The returned Demuxer
 // implements container.Seeker (WAV seeks are trivially sample-exact) and
 // container.Warner.
-func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
-	d := &Demuxer{src: src}
-	if opts != nil {
-		d.opts = *opts
-	}
+func NewDemuxer(src container.Source, opts *container.DemuxerOptions) (*Demuxer, error) {
+	d := &Demuxer{src: src, log: diag.New("wav: ", opts)}
 	if err := d.parse(); err != nil {
 		return nil, err
 	}
@@ -123,19 +77,14 @@ func unsupported(format string, args ...any) error {
 
 // warn records tolerated damage, or fails in strict mode.
 func (d *Demuxer) warn(off int64, format string, args ...any) error {
-	msg := fmt.Sprintf(format, args...)
-	if d.opts.Strict {
-		return malformed("%s (at offset %d)", msg, off)
-	}
-	d.warnings.Damage(off, msg)
-	return nil
+	return d.log.Warn(off, format, args...)
 }
 
 // note records a Warning that Strict must not escalate: this build doing
 // something with a well-formed file that a caller should know about, rather
 // than damage in the file. See [container.Note].
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.warnings.Note(off, fmt.Sprintf(format, args...))
+	d.log.Note(off, format, args...)
 }
 
 // waveFormat is what a fmt chunk resolves to: the codec, the configuration
@@ -417,8 +366,13 @@ func (d *Demuxer) parse() error {
 		}
 	}
 
-	d.payload = &blockReader{src: d.src, dataOff: dataOff, unitBytes: unitBytes,
-		unitFrames: int64(wf.unitFrames), units: units, samples: samples}
+	// A unit is whatever the codec addresses its payload by: one frame for PCM
+	// and G.711, one block for the ADPCM families. That is the only difference
+	// between them at this level, which is why one walk serves all four.
+	// Every unit is independently decodable: a PCM frame trivially, and an
+	// ADPCM block because its header restates the coder state. The one layout
+	// that does not restate it, Apple's ima4, is not a thing a WAV can carry.
+	d.payload = blocks.NewReader(d.src, dataOff, unitBytes, int64(wf.unitFrames), units, samples, "wav: reading data")
 	d.track = container.Track{
 		Codec:          wf.codec,
 		CodecConfig:    wf.config,
@@ -721,7 +675,8 @@ func (d *Demuxer) startMPEG(wf waveFormat, dataOff, dataBytes, factSamples int64
 		d.note(0, "nCodecDelay declares %d samples; trims come from a Xing or LAME frame, so it is not applied",
 			wf.codecDelay)
 	}
-	d.payload = walk.Reader()
+	r := walk.Reader()
+	d.payload, d.indexer = r, mpegframes.NewIndexed(r, &d.track)
 	d.track = container.Track{
 		Codec:   codec.MP3,
 		Fmt:     f,
@@ -795,10 +750,10 @@ func (d *Demuxer) adpcmConfig(b []byte, off int64) (adpcm.Config, error) {
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns damage tolerated during parsing.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
+func (d *Demuxer) Warnings() []container.Warning { return d.log.List() }
 
 // DamageCount implements container.Damaged.
-func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
+func (d *Demuxer) DamageCount() int { return d.log.DamageCount() }
 
 // TruncatedSamples implements container.Truncated. An MP3 payload's count is
 // its frame walk's, known once that walk has reached the end.
@@ -812,39 +767,6 @@ func (d *Demuxer) TruncatedSamples(int) int64 {
 // ReadPacket yields the next run of payload. Packet data is reused across
 // calls.
 func (d *Demuxer) ReadPacket(pkt *container.Packet) error { return d.payload.ReadPacket(pkt) }
-
-// ReadPacket yields the next run of units: up to audio.StandardChunk frames
-// of raw interleaved PCM, or the blocks that decode to about as many.
-func (r *blockReader) ReadPacket(pkt *container.Packet) error {
-	remaining := r.units - r.pos
-	if remaining <= 0 {
-		return io.EOF
-	}
-	n := min(r.perPacket(), remaining)
-	need := int(n * r.unitBytes)
-	if cap(r.buf) < need {
-		r.buf = make([]byte, need)
-	}
-	r.buf = r.buf[:need]
-	if err := container.ReadFull(r.src, r.buf, r.dataOff+r.pos*r.unitBytes); err != nil {
-		return container.ShortRead("wav: reading data", err)
-	}
-	*pkt = container.Packet{
-		Track: 0,
-		Packet: codec.Packet{
-			Data: r.buf,
-			PTS:  r.pos * r.unitFrames,
-			Dur:  n * r.unitFrames,
-			// Every unit is independently decodable: a PCM frame trivially,
-			// and an ADPCM block because its header restates the coder state.
-			// The one layout that does not restate it, Apple's ima4, is not a
-			// thing a WAV can carry.
-			Sync: true,
-		},
-	}
-	r.pos += n
-	return nil
-}
 
 // SeekSample repositions to the unit or frame holding the given sample.
 //
@@ -862,14 +784,4 @@ func (d *Demuxer) SeekSample(ctx context.Context, track int, sample int64) (int6
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, "wav: negative seek target")
 	}
 	return d.payload.SeekSample(ctx, sample)
-}
-
-// SeekSample lands on the unit boundary at or before the target.
-func (r *blockReader) SeekSample(_ context.Context, sample int64) (int64, error) {
-	// Clamped to the track's length and not to the payload's, which for a
-	// fact-trimmed block track is strictly larger: container.Seeker's landing
-	// is authoritative for its callers, and one past the end of the track is a
-	// position the track does not have.
-	r.pos = min(min(sample, r.samples)/r.unitFrames, r.units)
-	return r.pos * r.unitFrames, nil
 }

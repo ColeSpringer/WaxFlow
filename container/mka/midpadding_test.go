@@ -254,7 +254,7 @@ func TestMidPaddingWalkRetryAfterFailure(t *testing.T) {
 	want := clean.Tracks()[0]
 
 	f := &flakySource{src: container.BytesSource(p.File)}
-	d, err := NewDemuxer(f, &DemuxerOptions{Strict: true})
+	d, err := NewDemuxer(f, &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatalf("NewDemuxer: %v", err)
 	}

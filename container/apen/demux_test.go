@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -277,6 +278,55 @@ func TestLeadingID3v2Tag(t *testing.T) {
 	}
 }
 
+// id3Lead is n bytes that open with an ID3v2 header stating size bytes in all.
+func id3Lead(size, n int) []byte {
+	b := make([]byte, n)
+	copy(b, "ID3\x04\x00\x00")
+	body := size - 10
+	b[6], b[7], b[8], b[9] = byte(body>>21)&0x7f, byte(body>>14)&0x7f, byte(body>>7)&0x7f, byte(body)&0x7f
+	return b
+}
+
+// negativeCount is a number printed below zero.
+var negativeCount = regexp.MustCompile(`-\d`)
+
+// TestALeadingTagPastTheEndIsRefusedByName: a leading ID3v2 tag that states
+// more bytes than the data holds is refused in words that say so, with audio
+// behind it or not, and no refusal here prints a negative count. A tag that
+// ends at the end of the data, or a byte short of it, leaves a scan of what
+// is left.
+func TestALeadingTagPastTheEndIsRefusedByName(t *testing.T) {
+	audio := fixture(t, "sine-s16.ape")
+	lying := append(id3Lead(1<<20, 10), audio...)
+	for _, tc := range []struct {
+		name string
+		file []byte
+		want string
+	}{
+		{"past the end", id3Lead(5002, 100), "ape: leading ID3v2 tag declares 5002 bytes, past the 100 the data holds"},
+		{"a byte past the end", id3Lead(101, 100), "ape: leading ID3v2 tag declares 101 bytes, past the 100 the data holds"},
+		{"past the end of a file with audio", lying,
+			fmt.Sprintf("ape: leading ID3v2 tag declares 1048576 bytes, past the %d the data holds", len(lying))},
+		{"ends at the end", id3Lead(100, 100), "ape: no Monkey's Audio header in the first 0 bytes"},
+		{"a byte short of the end", id3Lead(99, 100), "ape: no Monkey's Audio header in the first 1 bytes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, strict := range []bool{false, true} {
+				_, err := apen.NewDemuxer(container.BytesSource(tc.file), &container.DemuxerOptions{Strict: strict})
+				if err == nil {
+					t.Fatalf("strict %v: accepted", strict)
+				}
+				if waxerr.CodeOf(err) != waxerr.CodeMalformedInput || err.Error() != tc.want {
+					t.Errorf("strict %v: refused with %s %q, want %s %q", strict, waxerr.CodeOf(err), err, waxerr.CodeMalformedInput, tc.want)
+				}
+				if negativeCount.MatchString(err.Error()) {
+					t.Errorf("strict %v: the refusal %q prints a negative number", strict, err)
+				}
+			}
+		})
+	}
+}
+
 // TestRefusals pins the files the demuxer turns away rather than half-reads.
 func TestRefusals(t *testing.T) {
 	raw := fixture(t, "sine-s16.ape")
@@ -336,7 +386,7 @@ func TestTruncatedTailIsReported(t *testing.T) {
 			if !strings.Contains(d.Warnings()[0].Msg, "bytes of frame data") {
 				t.Errorf("warning = %q", d.Warnings()[0].Msg)
 			}
-			if _, err := apen.NewDemuxer(container.BytesSource(raw), &apen.DemuxerOptions{Strict: true}); err == nil {
+			if _, err := apen.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err == nil {
 				t.Error("strict mode accepted a truncated file")
 			}
 		})

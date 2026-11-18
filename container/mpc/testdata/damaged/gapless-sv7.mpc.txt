@@ -1,0 +1,154 @@
+# <case> p<n> <pts> <dur> <crc-32 of the data>, with lost=<samples> and discont where the packet says so
+# <case> seek <target> landed <position>, then the packet read next in the same fields
+clean file 6904 bytes
+clean open samples=23740 exact=true
+clean packets 22
+clean p0 0 1152 ac503a98
+clean p1 1152 1152 73d1e09f
+clean p2 2304 1152 ab10dc02
+clean p3 3456 1152 bc73127f
+clean p4 4608 1152 afab60ba
+clean p5 5760 1152 5be70907
+clean p6 6912 1152 d5b82d70
+clean p7 8064 1152 60053f91
+clean p8 9216 1152 1a9ddbae
+clean p9 10368 1152 af8e0e14
+clean p10 11520 1152 d05a8e52
+clean p11 12672 1152 492217e2
+clean p12 13824 1152 f9f14c15
+clean p13 14976 1152 6ec38a17
+clean p14 16128 1152 c239768c
+clean p15 17280 1152 3ac2d4af
+clean p16 18432 1152 a3b41b10
+clean p17 19584 1152 f80977e7
+clean p18 20736 1152 48d719b2
+clean p19 21888 1152 ffccc7eb
+clean p20 23040 1152 d16a9b86
+clean p21 24192 1152 85aa58b6
+clean warnings 0
+clean seek 6336 landed 5760, then 5760 1152 d953066e
+clean seek 12672 landed 11520, then 11520 1152 c1b07894
+clean seek 19008 landed 18432, then 18432 1152 4f646ee5
+clean seek warnings 0
+junk-head file 15096 bytes: 8192 bytes of junk at 0, every second one 0x4d
+junk-head open samples=23740 exact=true
+junk-head packets 22
+junk-head p0 0 1152 ac503a98
+junk-head p1 1152 1152 73d1e09f
+junk-head p2 2304 1152 ab10dc02
+junk-head p3 3456 1152 bc73127f
+junk-head p4 4608 1152 afab60ba
+junk-head p5 5760 1152 5be70907
+junk-head p6 6912 1152 d5b82d70
+junk-head p7 8064 1152 60053f91
+junk-head p8 9216 1152 1a9ddbae
+junk-head p9 10368 1152 af8e0e14
+junk-head p10 11520 1152 d05a8e52
+junk-head p11 12672 1152 492217e2
+junk-head p12 13824 1152 f9f14c15
+junk-head p13 14976 1152 6ec38a17
+junk-head p14 16128 1152 c239768c
+junk-head p15 17280 1152 3ac2d4af
+junk-head p16 18432 1152 a3b41b10
+junk-head p17 19584 1152 f80977e7
+junk-head p18 20736 1152 48d719b2
+junk-head p19 21888 1152 ffccc7eb
+junk-head p20 23040 1152 d16a9b86
+junk-head p21 24192 1152 85aa58b6
+junk-head warnings 0
+junk-head seek 6336 landed 5760, then 5760 1152 d953066e
+junk-head seek 12672 landed 11520, then 11520 1152 c1b07894
+junk-head seek 19008 landed 18432, then 18432 1152 4f646ee5
+junk-head seek warnings 0
+junk-span file 7925 bytes: 1021 bytes of junk at 0, every second one 0x4d
+junk-span open samples=23740 exact=true
+junk-span packets 22
+junk-span p0 0 1152 ac503a98
+junk-span p1 1152 1152 73d1e09f
+junk-span p2 2304 1152 ab10dc02
+junk-span p3 3456 1152 bc73127f
+junk-span p4 4608 1152 afab60ba
+junk-span p5 5760 1152 5be70907
+junk-span p6 6912 1152 d5b82d70
+junk-span p7 8064 1152 60053f91
+junk-span p8 9216 1152 1a9ddbae
+junk-span p9 10368 1152 af8e0e14
+junk-span p10 11520 1152 d05a8e52
+junk-span p11 12672 1152 492217e2
+junk-span p12 13824 1152 f9f14c15
+junk-span p13 14976 1152 6ec38a17
+junk-span p14 16128 1152 c239768c
+junk-span p15 17280 1152 3ac2d4af
+junk-span p16 18432 1152 a3b41b10
+junk-span p17 19584 1152 f80977e7
+junk-span p18 20736 1152 48d719b2
+junk-span p19 21888 1152 ffccc7eb
+junk-span p20 23040 1152 d16a9b86
+junk-span p21 24192 1152 85aa58b6
+junk-span warnings 0
+junk-span seek 6336 landed 5760, then 5760 1152 d953066e
+junk-span seek 12672 landed 11520, then 11520 1152 c1b07894
+junk-span seek 19008 landed 18432, then 18432 1152 4f646ee5
+junk-span seek warnings 0
+decoy-head file 15096 bytes: 8192 bytes of junk at 0, every second one 0x4d, the 32 bytes that follow it also at 2048
+decoy-head open samples=671 exact=true
+decoy-head packets 1
+decoy-head p0 0 1152 fdd1b37a
+decoy-head warnings 2
+decoy-head w0 damage at 3590: frame 1 declares 880461 bits, which no frame can hold; the stream ends there
+decoy-head w1 damage at 15096: the header declares 23740 samples but the frames present deliver 671
+decoy-head seek 6336 landed 0, then 0 1152 fdd1b37a
+decoy-head seek 12672 landed 0, then 0 1152 fdd1b37a
+decoy-head seek 19008 landed 0, then 0 1152 fdd1b37a
+decoy-head seek warnings 0
+zero-middle file 6904 bytes: 64 bytes zeroed at 3452
+zero-middle open samples=11039 exact=true
+zero-middle packets 10
+zero-middle p0 0 1152 ac503a98
+zero-middle p1 1152 1152 73d1e09f
+zero-middle p2 2304 1152 ab10dc02
+zero-middle p3 3456 1152 bc73127f
+zero-middle p4 4608 1152 afab60ba
+zero-middle p5 5760 1152 5be70907
+zero-middle p6 6912 1152 d5b82d70
+zero-middle p7 8064 1152 60053f91
+zero-middle p8 9216 1152 1a9ddbae
+zero-middle p9 10368 1152 983aded7
+zero-middle warnings 2
+zero-middle w0 damage at 3486: frame 10 declares 0 bits, which no frame can hold; the stream ends there
+zero-middle w1 damage at 6904: the header declares 23740 samples but the frames present deliver 11039
+zero-middle seek 6336 landed 5760, then 5760 1152 d953066e
+zero-middle seek 12672 landed 10368, then 10368 1152 89d02811
+zero-middle seek 19008 landed 10368, then 10368 1152 89d02811
+zero-middle seek warnings 0
+cut-tail file 6804 bytes: the last 100 bytes cut
+cut-tail open samples=23711 exact=true
+cut-tail packets 21
+cut-tail p0 0 1152 ac503a98
+cut-tail p1 1152 1152 73d1e09f
+cut-tail p2 2304 1152 ab10dc02
+cut-tail p3 3456 1152 bc73127f
+cut-tail p4 4608 1152 afab60ba
+cut-tail p5 5760 1152 5be70907
+cut-tail p6 6912 1152 d5b82d70
+cut-tail p7 8064 1152 60053f91
+cut-tail p8 9216 1152 1a9ddbae
+cut-tail p9 10368 1152 af8e0e14
+cut-tail p10 11520 1152 d05a8e52
+cut-tail p11 12672 1152 492217e2
+cut-tail p12 13824 1152 f9f14c15
+cut-tail p13 14976 1152 6ec38a17
+cut-tail p14 16128 1152 c239768c
+cut-tail p15 17280 1152 3ac2d4af
+cut-tail p16 18432 1152 a3b41b10
+cut-tail p17 19584 1152 f80977e7
+cut-tail p18 20736 1152 48d719b2
+cut-tail p19 21888 1152 ffccc7eb
+cut-tail p20 23040 1152 d16a9b86
+cut-tail warnings 2
+cut-tail w0 damage at 6778: the last frame's 700 samples need a decay frame the stream does not hold
+cut-tail w1 damage at 6804: the header declares 23740 samples but the frames present deliver 23711
+cut-tail seek 6336 landed 5760, then 5760 1152 d953066e
+cut-tail seek 12672 landed 11520, then 11520 1152 c1b07894
+cut-tail seek 19008 landed 18432, then 18432 1152 4f646ee5
+cut-tail seek warnings 0

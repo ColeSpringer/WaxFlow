@@ -117,24 +117,25 @@ func FuzzDemux(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		testutil.DemuxFuzz{
 			Open: func(src container.Source, strict bool) (container.Demuxer, error) {
-				return NewDemuxer(src, &DemuxerOptions{Strict: strict})
+				return NewDemuxer(src, &container.DemuxerOptions{Strict: strict})
 			},
-			// A generous safety cap so a bug that failed to terminate is caught,
-			// not a tight bound: a fragmented trun may declare zero-size samples
-			// (each capped per fragment at maxSamplesPerFragment), so the true
-			// packet count is not bounded by the byte size. Reading a prefix
-			// still exercises the Dur>0 and no-crash invariants on every packet.
-			MaxPackets:  func(raw []byte) int64 { return int64(len(raw)) + maxSamplesPerFragment + 8 },
-			CapNotFatal: true,
-			EmptyData:   true,
-			Targets:     []int64{0, 1, 1000, 1 << 20, 1 << 40},
+			// A sample table holds at most two samples a byte (a 4-bit stz2),
+			// and a fragment, at least the 32 bytes of its moof, traf and trun,
+			// at most maxSamplesPerFragment. Either may state a sample of no bytes.
+			MaxPackets: func(raw []byte) int64 {
+				return 2*int64(len(raw)) + int64(len(raw))/32*maxSamplesPerFragment + 8
+			},
+			EmptyData: true,
+			Targets:   []int64{0, 1, 1000, 1 << 20, 1 << 40},
+			SeekPTS:   true,
 			// A landing past the target is legitimate only when the stream
 			// itself starts after it, which container.Seeker allows and a
 			// crafted tfdt produces: the fragments can begin anywhere.
 			LateLanding: true,
-			// The walk reads the moof headers and settles the length, so it is
-			// on the fuzzed path with the read. Its error is a refusal, not a
-			// crash, and a settled track still has to describe itself.
+			Walk:        true,
+			// Beyond what Walk holds: walking at open puts the read and the
+			// seeks on a walked demuxer, and a settled track still has to
+			// describe itself. The walk's error is a refusal, not a crash.
 			Opened: func(t testing.TB, dm container.Demuxer, _ bool) {
 				d := dm.(*Demuxer)
 				if err := d.Walk(context.Background()); err == nil {

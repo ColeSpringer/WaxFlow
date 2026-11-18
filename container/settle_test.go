@@ -2,6 +2,7 @@ package container_test
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 
@@ -271,5 +272,28 @@ func TestSettleShortfall(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSettleReadTakesTheClaimBackEitherSide: a whole read short of an exact
+// length settles it, restated, and counts the rest truncated; past it the
+// length stays; at it nothing moves; a restate that fails moves nothing.
+func TestSettleReadTakesTheClaimBackEitherSide(t *testing.T) {
+	exact := container.Track{Samples: 100, SamplesExact: true, CodecConfig: []byte("100")}
+	restate := func(_ []byte, n int64) ([]byte, error) { return fmt.Append(nil, n), nil }
+	for _, tc := range []struct {
+		reached, samples, truncated int64
+		exact                       bool
+		config                      string
+	}{{100, 100, 0, true, "100"}, {60, 60, 40, false, "60"}, {130, 100, 0, false, "100"}} {
+		got, n, err := container.SettleRead(exact, tc.reached, restate)
+		if err != nil || got.Samples != tc.samples || n != tc.truncated || got.SamplesExact != tc.exact || string(got.CodecConfig) != tc.config {
+			t.Errorf("reached %d: %d samples, exact %v, config %q, %d truncated (%v); want %d, %v, %q, %d",
+				tc.reached, got.Samples, got.SamplesExact, got.CodecConfig, n, err, tc.samples, tc.exact, tc.config, tc.truncated)
+		}
+	}
+	failed := func([]byte, int64) ([]byte, error) { return nil, errors.New("no") }
+	if got, n, err := container.SettleRead(exact, 60, failed); err == nil || got.Samples != 100 || !got.SamplesExact || n != 0 {
+		t.Errorf("a failed restate: %d samples, exact %v, %d truncated (%v); want the track as it was and the error", got.Samples, got.SamplesExact, n, err)
 	}
 }

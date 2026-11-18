@@ -66,7 +66,7 @@ func TestStrictAcceptsExplicitHEAAC(t *testing.T) {
 			name = "strict"
 		}
 		t.Run(name, func(t *testing.T) {
-			d, err := NewDemuxer(container.BytesSource(data), &DemuxerOptions{Strict: strict})
+			d, err := NewDemuxer(container.BytesSource(data), &container.DemuxerOptions{Strict: strict})
 			if err != nil {
 				t.Fatalf("a valid HE-AAC file was rejected (strict=%v): %v", strict, err)
 			}
@@ -104,7 +104,7 @@ func TestStrictKeepsPSWarning(t *testing.T) {
 			name = "strict"
 		}
 		t.Run(name, func(t *testing.T) {
-			d, err := NewDemuxer(container.BytesSource(data), &DemuxerOptions{Strict: strict})
+			d, err := NewDemuxer(container.BytesSource(data), &container.DemuxerOptions{Strict: strict})
 			if err != nil {
 				t.Fatalf("a conformant PS file was rejected (strict=%v): %v", strict, err)
 			}

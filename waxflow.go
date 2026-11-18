@@ -97,7 +97,7 @@ func (e *Engine) OpenStream(src container.Source, hint string) (format.Media, er
 			}
 		}
 	}
-	return &indexSavingMedia{Media: med, ix: ix, cache: e.idx, src: src}, nil
+	return &indexSavingMedia{Forwarder: format.Forwarder{Media: med}, ix: ix, cache: e.idx, src: src}, nil
 }
 
 // The assertion keeps a method added to container.Indexer from silently
@@ -107,10 +107,10 @@ var _ container.Indexer = (*indexSavingMedia)(nil)
 // indexSavingMedia saves a grown source index when the media closes.
 // Close is idempotent like the media it wraps (ix nils after the first
 // call, so a double Close cannot double-save), and the wrapper stays
-// transparent to container.Indexer asserts: embedding the Media
-// interface does not promote methods outside it.
+// transparent to container.Indexer asserts: format.Forwarder does not
+// forward it.
 type indexSavingMedia struct {
-	format.Media
+	format.Forwarder
 	ix    container.Indexer
 	cache IndexCache
 	src   container.Source
@@ -138,16 +138,6 @@ func (m *indexSavingMedia) IndexSnapshot() []byte {
 func (m *indexSavingMedia) RestoreIndex(blob []byte) bool {
 	return m.ix != nil && m.ix.RestoreIndex(blob)
 }
-
-// Walk and Walked forward format.Walker the way the index pair is forwarded:
-// embedding the interface promotes nothing outside it, and the daemon's job
-// gate asks the media it opened through this engine.
-func (m *indexSavingMedia) Walk(ctx context.Context) error { return format.WalkMedia(ctx, m.Media) }
-
-func (m *indexSavingMedia) Walked() bool { return format.MediaWalked(m.Media) }
-
-// MixedWidth forwards format.MixedWidth, for the same reason.
-func (m *indexSavingMedia) MixedWidth() bool { return format.MediaMixedWidth(m.Media) }
 
 // TranscodeResult reports what Transcode produced.
 type TranscodeResult struct {
@@ -182,9 +172,11 @@ type TranscodeResult struct {
 	// the stream's length, so Samples cannot say how much of the output is
 	// the file's own. It is this run's own read, on the output's timeline as
 	// Samples is: a run that resamples scales the source's count to
-	// Format.Rate. A copy rung reports the silent frames it wrote. Zero for a
-	// source with no hole, and for one whose holes shorten the read instead,
-	// which is every format but FLAC, native or in Ogg.
+	// Format.Rate. A copy rung reports the silent frames it wrote, and a copy
+	// of a codec whose packets state their own positions (WavPack) the gap its
+	// packets carry, writing no silence. Zero for a source with no hole, and
+	// for one whose holes shorten the read instead, which is every format but
+	// FLAC (native or in Ogg) and WavPack.
 	LostSamples int64
 	// TruncatedSamples counts the samples the source's header declares past
 	// the end of what the file holds (format.Info.Truncated), as this run's

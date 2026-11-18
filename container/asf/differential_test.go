@@ -126,7 +126,7 @@ func TestDemuxMatchesFFprobePackets(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			d, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+			d, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -207,7 +207,7 @@ func committedDemuxMatchesFFprobe(t *testing.T, name string, id codec.ID, fm aud
 	if len(want) == 0 {
 		t.Fatal("ffprobe reported no packets")
 	}
-	d, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+	d, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +381,7 @@ func TestChaptersMatchFFprobe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+	d, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -425,7 +425,7 @@ func TestCuesWalkRetryAfterFailure(t *testing.T) {
 	want, _, _ := landAll(t, file, []int64{shallow, deep})
 
 	f := &flakySource{src: container.BytesSource(file)}
-	d, err := NewDemuxer(f, &DemuxerOptions{Strict: true})
+	d, err := NewDemuxer(f, &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatalf("NewDemuxer: %v", err)
 	}

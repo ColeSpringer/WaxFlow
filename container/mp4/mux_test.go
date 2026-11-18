@@ -63,17 +63,18 @@ type fmp4Sample struct {
 
 // parseFMP4 is a minimal fragmented-MP4 reader for the tests: it extracts
 // the ALAC cookie from moov/stsd and the samples from each moof+mdat pair,
-// validating that every trun data offset lands on its mdat payload. It is
-// deliberately independent of the production demuxer (which reads only
-// non-fragmented movies), so it is an honest second implementation.
+// validating that every trun data offset lands on its mdat payload. It shares
+// only the box readers with the production code (the bare Demuxer carries
+// readBox's source) and none of the demuxer's parsing, so it is an honest
+// second implementation.
 func parseFMP4(t *testing.T, data []byte) (cookie []byte, samples []fmp4Sample) {
 	t.Helper()
-	src := container.BytesSource(data)
+	boxes := &Demuxer{src: container.BytesSource(data)}
 	size := int64(len(data))
 	off := int64(0)
 	var expectBase int64 // running decode time; each fragment's tfdt must equal it
 	for off < size {
-		b, err := readBox(src, off, size)
+		b, err := boxes.readBox(off, size)
 		if err != nil {
 			t.Fatalf("readBox at %d: %v", off, err)
 		}

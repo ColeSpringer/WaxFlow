@@ -1,0 +1,310 @@
+# <case> p<n> <pts> <dur> <crc-32 of the data>, with lost=<samples> and discont where the packet says so
+# <case> seek <target> landed <position>, then the packet read next in the same fields
+clean file 29376 bytes
+clean open samples=40000 exact=true
+clean packets 20
+clean p0 0 2000 e99b8016
+clean p1 2000 2000 e589a544
+clean p2 4000 2000 2d075bae
+clean p3 6000 2000 9f3338cd
+clean p4 8000 2000 029be3f6
+clean p5 10000 2000 5804981d
+clean p6 12000 2000 f8b7297c
+clean p7 14000 2000 dcf9807a
+clean p8 16000 2000 e3b431ab
+clean p9 18000 2000 32ea708c
+clean p10 20000 2000 6eb20cb0
+clean p11 22000 2000 64ed2249
+clean p12 24000 2000 a57488ee
+clean p13 26000 2000 a83c7ef9
+clean p14 28000 2000 51b98c89
+clean p15 30000 2000 328e1027
+clean p16 32000 2000 5dc6d0ca
+clean p17 34000 2000 14c2544e
+clean p18 36000 2000 c67159c9
+clean p19 38000 2000 5eccaa2b
+clean warnings 0
+clean seek 10000 landed 10000, then 10000 2000 5804981d
+clean seek 20000 landed 20000, then 20000 2000 6eb20cb0
+clean seek 30000 landed 30000, then 30000 2000 328e1027
+clean seek warnings 0
+junk-mid file 37568 bytes: 8192 bytes of junk at 14706, every second one 0x77
+junk-mid open samples=40000 exact=true
+junk-mid packets 20
+junk-mid p0 0 2000 e99b8016
+junk-mid p1 2000 2000 e589a544
+junk-mid p2 4000 2000 2d075bae
+junk-mid p3 6000 2000 9f3338cd
+junk-mid p4 8000 2000 029be3f6
+junk-mid p5 10000 2000 5804981d
+junk-mid p6 12000 2000 f8b7297c
+junk-mid p7 14000 2000 dcf9807a
+junk-mid p8 16000 2000 e3b431ab
+junk-mid p9 18000 2000 32ea708c
+junk-mid p10 20000 2000 6eb20cb0
+junk-mid p11 22000 2000 64ed2249
+junk-mid p12 24000 2000 a57488ee
+junk-mid p13 26000 2000 a83c7ef9
+junk-mid p14 28000 2000 51b98c89
+junk-mid p15 30000 2000 328e1027
+junk-mid p16 32000 2000 5dc6d0ca
+junk-mid p17 34000 2000 14c2544e
+junk-mid p18 36000 2000 c67159c9
+junk-mid p19 38000 2000 5eccaa2b
+junk-mid warnings 1
+junk-mid w0 damage at 14706: 8192 unparsable bytes between blocks
+junk-mid seek 10000 landed 10000, then 10000 2000 5804981d
+junk-mid seek 20000 landed 20000, then 20000 2000 6eb20cb0
+junk-mid seek 30000 landed 30000, then 30000 2000 328e1027
+junk-mid seek warnings 0
+junk-span file 30397 bytes: 1021 bytes of junk at 14706, every second one 0x77
+junk-span open samples=40000 exact=true
+junk-span packets 20
+junk-span p0 0 2000 e99b8016
+junk-span p1 2000 2000 e589a544
+junk-span p2 4000 2000 2d075bae
+junk-span p3 6000 2000 9f3338cd
+junk-span p4 8000 2000 029be3f6
+junk-span p5 10000 2000 5804981d
+junk-span p6 12000 2000 f8b7297c
+junk-span p7 14000 2000 dcf9807a
+junk-span p8 16000 2000 e3b431ab
+junk-span p9 18000 2000 32ea708c
+junk-span p10 20000 2000 6eb20cb0
+junk-span p11 22000 2000 64ed2249
+junk-span p12 24000 2000 a57488ee
+junk-span p13 26000 2000 a83c7ef9
+junk-span p14 28000 2000 51b98c89
+junk-span p15 30000 2000 328e1027
+junk-span p16 32000 2000 5dc6d0ca
+junk-span p17 34000 2000 14c2544e
+junk-span p18 36000 2000 c67159c9
+junk-span p19 38000 2000 5eccaa2b
+junk-span warnings 1
+junk-span w0 damage at 14706: 1021 unparsable bytes between blocks
+junk-span seek 10000 landed 10000, then 10000 2000 5804981d
+junk-span seek 20000 landed 20000, then 20000 2000 6eb20cb0
+junk-span seek 30000 landed 30000, then 30000 2000 328e1027
+junk-span seek warnings 0
+junk-window file 160446 bytes: 131070 bytes of junk at 14706, every second one 0x77
+junk-window open samples=40000 exact=true
+junk-window packets 20
+junk-window p0 0 2000 e99b8016
+junk-window p1 2000 2000 e589a544
+junk-window p2 4000 2000 2d075bae
+junk-window p3 6000 2000 9f3338cd
+junk-window p4 8000 2000 029be3f6
+junk-window p5 10000 2000 5804981d
+junk-window p6 12000 2000 f8b7297c
+junk-window p7 14000 2000 dcf9807a
+junk-window p8 16000 2000 e3b431ab
+junk-window p9 18000 2000 32ea708c
+junk-window p10 20000 2000 6eb20cb0
+junk-window p11 22000 2000 64ed2249
+junk-window p12 24000 2000 a57488ee
+junk-window p13 26000 2000 a83c7ef9
+junk-window p14 28000 2000 51b98c89
+junk-window p15 30000 2000 328e1027
+junk-window p16 32000 2000 5dc6d0ca
+junk-window p17 34000 2000 14c2544e
+junk-window p18 36000 2000 c67159c9
+junk-window p19 38000 2000 5eccaa2b
+junk-window warnings 1
+junk-window w0 damage at 14706: 131070 unparsable bytes between blocks
+junk-window seek 10000 landed 10000, then 10000 2000 5804981d
+junk-window seek 20000 landed 20000, then 20000 2000 6eb20cb0
+junk-window seek 30000 landed 30000, then 30000 2000 328e1027
+junk-window seek warnings 0
+decoy-mid file 37568 bytes: 8192 bytes of junk at 14706, every second one 0x77, the 32 bytes that follow it also at 16754
+decoy-mid open samples=40000 exact=true
+decoy-mid packets 20
+decoy-mid p0 0 2000 e99b8016
+decoy-mid p1 2000 2000 e589a544
+decoy-mid p2 4000 2000 2d075bae
+decoy-mid p3 6000 2000 9f3338cd
+decoy-mid p4 8000 2000 029be3f6
+decoy-mid p5 10000 2000 5804981d
+decoy-mid p6 12000 2000 f8b7297c
+decoy-mid p7 14000 2000 dcf9807a
+decoy-mid p8 16000 2000 e3b431ab
+decoy-mid p9 18000 2000 32ea708c
+decoy-mid p10 20000 2000 6eb20cb0
+decoy-mid p11 22000 2000 64ed2249
+decoy-mid p12 24000 2000 a57488ee
+decoy-mid p13 26000 2000 a83c7ef9
+decoy-mid p14 28000 2000 51b98c89
+decoy-mid p15 30000 2000 328e1027
+decoy-mid p16 32000 2000 5dc6d0ca
+decoy-mid p17 34000 2000 14c2544e
+decoy-mid p18 36000 2000 c67159c9
+decoy-mid p19 38000 2000 5eccaa2b
+decoy-mid warnings 1
+decoy-mid w0 damage at 14706: 8192 unparsable bytes between blocks
+decoy-mid seek 10000 landed 10000, then 10000 2000 5804981d
+decoy-mid seek 20000 landed 20000, then 20000 2000 6eb20cb0
+decoy-mid seek 30000 landed 30000, then 30000 2000 328e1027
+decoy-mid seek warnings 0
+junk-island file 45760 bytes: 8192 bytes of junk at 14706 and at 24360, every second one 0x77, the 1462 bytes between them whole
+junk-island open samples=40000 exact=true
+junk-island packets 19
+junk-island p0 0 2000 e99b8016
+junk-island p1 2000 2000 e589a544
+junk-island p2 4000 2000 2d075bae
+junk-island p3 6000 2000 9f3338cd
+junk-island p4 8000 2000 029be3f6
+junk-island p5 10000 2000 5804981d
+junk-island p6 12000 2000 f8b7297c
+junk-island p7 14000 2000 dcf9807a
+junk-island p8 16000 2000 e3b431ab
+junk-island p9 18000 2000 32ea708c
+junk-island p10 22000 2000 64ed2249 lost=2000 discont
+junk-island p11 24000 2000 a57488ee
+junk-island p12 26000 2000 a83c7ef9
+junk-island p13 28000 2000 51b98c89
+junk-island p14 30000 2000 328e1027
+junk-island p15 32000 2000 5dc6d0ca
+junk-island p16 34000 2000 14c2544e
+junk-island p17 36000 2000 c67159c9
+junk-island p18 38000 2000 5eccaa2b
+junk-island warnings 1
+junk-island w0 damage at 14706: 17846 unparsable bytes between blocks: 2000 samples lost
+junk-island seek 10000 landed 10000, then 10000 2000 5804981d
+junk-island seek 20000 landed 18000, then 18000 2000 32ea708c
+junk-island seek 30000 landed 30000, then 30000 2000 328e1027
+junk-island seek warnings 0
+junk-tail file 37568 bytes: 8192 bytes of junk at 29376, every second one 0x77
+junk-tail open samples=40000 exact=false
+junk-tail packets 20
+junk-tail p0 0 2000 e99b8016
+junk-tail p1 2000 2000 e589a544
+junk-tail p2 4000 2000 2d075bae
+junk-tail p3 6000 2000 9f3338cd
+junk-tail p4 8000 2000 029be3f6
+junk-tail p5 10000 2000 5804981d
+junk-tail p6 12000 2000 f8b7297c
+junk-tail p7 14000 2000 dcf9807a
+junk-tail p8 16000 2000 e3b431ab
+junk-tail p9 18000 2000 32ea708c
+junk-tail p10 20000 2000 6eb20cb0
+junk-tail p11 22000 2000 64ed2249
+junk-tail p12 24000 2000 a57488ee
+junk-tail p13 26000 2000 a83c7ef9
+junk-tail p14 28000 2000 51b98c89
+junk-tail p15 30000 2000 328e1027
+junk-tail p16 32000 2000 5dc6d0ca
+junk-tail p17 34000 2000 14c2544e
+junk-tail p18 36000 2000 c67159c9
+junk-tail p19 38000 2000 5eccaa2b
+junk-tail warnings 1
+junk-tail w0 damage at 29376: 8192 trailing bytes are not a block, dropped
+junk-tail seek 10000 landed 10000, then 10000 2000 5804981d
+junk-tail seek 20000 landed 20000, then 20000 2000 6eb20cb0
+junk-tail seek 30000 landed 30000, then 30000 2000 328e1027
+junk-tail seek warnings 0
+junk-island-header file 45760 bytes: 8192 bytes of junk at 14706 and at 24392, every second one 0x77, the 1494 bytes between them whole
+junk-island-header open samples=40000 exact=true
+junk-island-header packets 20
+junk-island-header p0 0 2000 e99b8016
+junk-island-header p1 2000 2000 e589a544
+junk-island-header p2 4000 2000 2d075bae
+junk-island-header p3 6000 2000 9f3338cd
+junk-island-header p4 8000 2000 029be3f6
+junk-island-header p5 10000 2000 5804981d
+junk-island-header p6 12000 2000 f8b7297c
+junk-island-header p7 14000 2000 dcf9807a
+junk-island-header p8 16000 2000 e3b431ab
+junk-island-header p9 18000 2000 32ea708c
+junk-island-header p10 20000 2000 6eb20cb0
+junk-island-header p11 22000 2000 9d574890
+junk-island-header p12 24000 2000 a57488ee
+junk-island-header p13 26000 2000 a83c7ef9
+junk-island-header p14 28000 2000 51b98c89
+junk-island-header p15 30000 2000 328e1027
+junk-island-header p16 32000 2000 5dc6d0ca
+junk-island-header p17 34000 2000 14c2544e
+junk-island-header p18 36000 2000 c67159c9
+junk-island-header p19 38000 2000 5eccaa2b
+junk-island-header warnings 2
+junk-island-header w0 damage at 14706: 8192 unparsable bytes between blocks
+junk-island-header w1 damage at 25822: 8192 unparsable bytes between blocks
+junk-island-header seek 10000 landed 10000, then 10000 2000 5804981d
+junk-island-header seek 20000 landed 20000, then 20000 2000 6eb20cb0
+junk-island-header seek 30000 landed 30000, then 30000 2000 328e1027
+junk-island-header seek warnings 0
+junk-probe file 1086044 bytes: 1056768 bytes of junk at 14706, every second one 0x77, and the last 100 bytes cut
+junk-probe open samples=38000 exact=false
+junk-probe packets 10
+junk-probe p0 0 2000 e99b8016
+junk-probe p1 2000 2000 e589a544
+junk-probe p2 4000 2000 2d075bae
+junk-probe p3 6000 2000 9f3338cd
+junk-probe p4 8000 2000 029be3f6
+junk-probe p5 10000 2000 5804981d
+junk-probe p6 12000 2000 f8b7297c
+junk-probe p7 14000 2000 dcf9807a
+junk-probe p8 16000 2000 e3b431ab
+junk-probe p9 18000 2000 32ea708c
+junk-probe warnings 2
+junk-probe w0 damage at 0: the header declares 40000 samples but the blocks end at 38000
+junk-probe w1 damage at 14706: 1071338 trailing bytes are not a block, dropped
+junk-probe seek 10000 landed 10000, then 10000 2000 5804981d
+junk-probe seek 20000 landed 20000, then 20000 2000 6eb20cb0
+junk-probe seek 30000 landed 30000, then 30000 2000 328e1027
+junk-probe seek warnings 0
+zero-middle file 29376 bytes: 64 bytes zeroed at 14688
+zero-middle open samples=40000 exact=true
+zero-middle packets 19
+zero-middle p0 0 2000 e99b8016
+zero-middle p1 2000 2000 e589a544
+zero-middle p2 4000 2000 2d075bae
+zero-middle p3 6000 2000 9f3338cd
+zero-middle p4 8000 2000 029be3f6
+zero-middle p5 10000 2000 5804981d
+zero-middle p6 12000 2000 f8b7297c
+zero-middle p7 14000 2000 dcf9807a
+zero-middle p8 16000 2000 e3b431ab
+zero-middle p9 18000 2000 a0862da7
+zero-middle p10 22000 2000 64ed2249 lost=2000 discont
+zero-middle p11 24000 2000 a57488ee
+zero-middle p12 26000 2000 a83c7ef9
+zero-middle p13 28000 2000 51b98c89
+zero-middle p14 30000 2000 328e1027
+zero-middle p15 32000 2000 5dc6d0ca
+zero-middle p16 34000 2000 14c2544e
+zero-middle p17 36000 2000 c67159c9
+zero-middle p18 38000 2000 5eccaa2b
+zero-middle warnings 1
+zero-middle w0 damage at 14706: 1462 unparsable bytes between blocks: 2000 samples lost
+zero-middle seek 10000 landed 10000, then 10000 2000 5804981d
+zero-middle seek 20000 landed 18000, then 18000 2000 a0862da7
+zero-middle seek 30000 landed 30000, then 30000 2000 328e1027
+zero-middle seek warnings 0
+cut-tail file 29276 bytes: the last 100 bytes cut
+cut-tail open samples=38000 exact=false
+cut-tail packets 19
+cut-tail p0 0 2000 e99b8016
+cut-tail p1 2000 2000 e589a544
+cut-tail p2 4000 2000 2d075bae
+cut-tail p3 6000 2000 9f3338cd
+cut-tail p4 8000 2000 029be3f6
+cut-tail p5 10000 2000 5804981d
+cut-tail p6 12000 2000 f8b7297c
+cut-tail p7 14000 2000 dcf9807a
+cut-tail p8 16000 2000 e3b431ab
+cut-tail p9 18000 2000 32ea708c
+cut-tail p10 20000 2000 6eb20cb0
+cut-tail p11 22000 2000 64ed2249
+cut-tail p12 24000 2000 a57488ee
+cut-tail p13 26000 2000 a83c7ef9
+cut-tail p14 28000 2000 51b98c89
+cut-tail p15 30000 2000 328e1027
+cut-tail p16 32000 2000 5dc6d0ca
+cut-tail p17 34000 2000 14c2544e
+cut-tail p18 36000 2000 c67159c9
+cut-tail warnings 2
+cut-tail w0 damage at 0: the header declares 40000 samples but the blocks end at 38000
+cut-tail w1 damage at 27864: 1412 trailing bytes are not a block, dropped
+cut-tail seek 10000 landed 10000, then 10000 2000 5804981d
+cut-tail seek 20000 landed 20000, then 20000 2000 6eb20cb0
+cut-tail seek 30000 landed 30000, then 30000 2000 328e1027
+cut-tail seek warnings 0

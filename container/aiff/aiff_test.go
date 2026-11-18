@@ -61,7 +61,7 @@ func muxAIFF(t *testing.T, w io.Writer, cfg pcm.Config, f audio.Format, wire []b
 	}
 }
 
-func demuxAll(t *testing.T, src container.Source, opts *DemuxerOptions) (container.Track, []byte, []container.Warning) {
+func demuxAll(t *testing.T, src container.Source, opts *container.DemuxerOptions) (container.Track, []byte, []container.Warning) {
 	t.Helper()
 	d, err := NewDemuxer(src, opts)
 	if err != nil {
@@ -145,7 +145,7 @@ func TestMuxDemuxRoundTrip(t *testing.T) {
 					t.Fatalf("form = %q, want %q", ws.Buf[8:12], wantForm)
 				}
 
-				track, data, _ := demuxAll(t, container.BytesSource(ws.Buf), &DemuxerOptions{Strict: true})
+				track, data, _ := demuxAll(t, container.BytesSource(ws.Buf), &container.DemuxerOptions{Strict: true})
 				if track.Fmt != f {
 					t.Errorf("format = %v, want %v", track.Fmt, f)
 				}
@@ -179,7 +179,7 @@ func buildAIFC(comp string, bits int, payload []byte, frames uint32) []byte {
 func TestSowtAndRawDecode(t *testing.T) {
 	t.Run("sowt", func(t *testing.T) {
 		payload := []byte{0x02, 0x01, 0xFE, 0xFF} // 0x0102, -2 little-endian
-		track, data, _ := demuxAll(t, container.BytesSource(buildAIFC("sowt", 16, payload, 2)), &DemuxerOptions{Strict: true})
+		track, data, _ := demuxAll(t, container.BytesSource(buildAIFC("sowt", 16, payload, 2)), &container.DemuxerOptions{Strict: true})
 		cfg, _ := pcm.ParseConfig(track.CodecConfig)
 		if cfg.BigEndian || cfg.Bits != 16 {
 			t.Errorf("sowt config = %+v, want little-endian 16", cfg)
@@ -191,7 +191,7 @@ func TestSowtAndRawDecode(t *testing.T) {
 
 	t.Run("raw", func(t *testing.T) {
 		payload := []byte{0x80, 0x00, 0xFF}
-		track, _, _ := demuxAll(t, container.BytesSource(buildAIFC("raw ", 8, payload, 3)), &DemuxerOptions{Strict: true})
+		track, _, _ := demuxAll(t, container.BytesSource(buildAIFC("raw ", 8, payload, 3)), &container.DemuxerOptions{Strict: true})
 		cfg, _ := pcm.ParseConfig(track.CodecConfig)
 		if cfg.Encoding != pcm.UnsignedInt {
 			t.Errorf("raw config = %+v, want unsigned", cfg)
@@ -287,7 +287,7 @@ func TestPartialTrailingFrameWarns(t *testing.T) {
 	if !found {
 		t.Errorf("expected a partial-frame warning, got %v", warns)
 	}
-	if _, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true}); err == nil {
+	if _, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err == nil {
 		t.Error("strict demux of a partial trailing frame must fail")
 	}
 }
@@ -317,7 +317,7 @@ func TestCOMMFramesDisagreeWithSSND(t *testing.T) {
 	if got := container.TruncatedOf(d, 0); got != 50 {
 		t.Errorf("%d samples truncated, want the 50 COMM declares past SSND", got)
 	}
-	if _, err := NewDemuxer(container.BytesSource(ws.Buf), &DemuxerOptions{Strict: true}); err == nil {
+	if _, err := NewDemuxer(container.BytesSource(ws.Buf), &container.DemuxerOptions{Strict: true}); err == nil {
 		t.Error("strict demux of disagreeing counts must fail")
 	}
 }
@@ -396,7 +396,7 @@ func TestOddPayloadPads(t *testing.T) {
 	if len(ws.Buf)%2 != 0 {
 		t.Errorf("file length %d is odd; SSND must be padded", len(ws.Buf))
 	}
-	track, data, _ := demuxAll(t, container.BytesSource(ws.Buf), &DemuxerOptions{Strict: true})
+	track, data, _ := demuxAll(t, container.BytesSource(ws.Buf), &container.DemuxerOptions{Strict: true})
 	if track.Samples != 33 || !bytes.Equal(data, wire) {
 		t.Error("odd payload did not round-trip")
 	}
@@ -413,7 +413,7 @@ func TestMuxAtANonZeroStart(t *testing.T) {
 	raw := testutil.MuxAtOffset(t, 97, func(w io.Writer) {
 		muxAIFF(t, w, cfg, f, wire, frames)
 	})
-	track, data, _ := demuxAll(t, container.BytesSource(raw), &DemuxerOptions{Strict: true})
+	track, data, _ := demuxAll(t, container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if track.Samples != frames {
 		t.Errorf("read back %d frames, want %d", track.Samples, frames)
 	}
@@ -468,7 +468,7 @@ func TestFractionalRateIsANoteNotDamage(t *testing.T) {
 	be.PutUint32(raw[4:], uint32(len(raw)-8))
 
 	for _, strict := range []bool{false, true} {
-		d, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: strict})
+		d, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: strict})
 		if err != nil {
 			t.Fatalf("strict=%v refused a fractional sample rate: %v", strict, err)
 		}

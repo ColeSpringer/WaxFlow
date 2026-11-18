@@ -1,0 +1,98 @@
+# <case> p<n> <pts> <dur> <crc-32 of the data>, with lost=<samples> and discont where the packet says so
+# <case> seek <target> landed <position>, then the packet read next in the same fields
+clean file 1989 bytes
+clean open samples=30000 exact=true
+clean packets 7
+clean p0 0 4608 d44ea335
+clean p1 4608 4608 b7080d6e
+clean p2 9216 4608 df29557b
+clean p3 13824 4608 17ac3da3
+clean p4 18432 4608 81d83b1e
+clean p5 23040 4608 1b46c523
+clean p6 27648 3456 f4692530
+clean warnings 0
+clean seek 7776 landed 4608, then 4608 4608 01e08ffb
+clean seek 15552 landed 13824, then 13824 4608 31743215
+clean seek 23328 landed 18432, then 18432 4608 93986a51
+clean seek warnings 0
+junk-head file 10181 bytes: 8192 bytes of junk at 0, every second one 0x4d
+junk-head open samples=30000 exact=true
+junk-head packets 7
+junk-head p0 0 4608 d44ea335
+junk-head p1 4608 4608 b7080d6e
+junk-head p2 9216 4608 df29557b
+junk-head p3 13824 4608 17ac3da3
+junk-head p4 18432 4608 81d83b1e
+junk-head p5 23040 4608 1b46c523
+junk-head p6 27648 3456 f4692530
+junk-head warnings 0
+junk-head seek 7776 landed 4608, then 4608 4608 01e08ffb
+junk-head seek 15552 landed 13824, then 13824 4608 31743215
+junk-head seek 23328 landed 18432, then 18432 4608 93986a51
+junk-head seek warnings 0
+junk-span file 3010 bytes: 1021 bytes of junk at 0, every second one 0x4d
+junk-span open samples=30000 exact=true
+junk-span packets 7
+junk-span p0 0 4608 d44ea335
+junk-span p1 4608 4608 b7080d6e
+junk-span p2 9216 4608 df29557b
+junk-span p3 13824 4608 17ac3da3
+junk-span p4 18432 4608 81d83b1e
+junk-span p5 23040 4608 1b46c523
+junk-span p6 27648 3456 f4692530
+junk-span warnings 0
+junk-span seek 7776 landed 4608, then 4608 4608 01e08ffb
+junk-span seek 15552 landed 13824, then 13824 4608 31743215
+junk-span seek 23328 landed 18432, then 18432 4608 93986a51
+junk-span seek warnings 0
+decoy-head file 10181 bytes: 8192 bytes of junk at 0, every second one 0x4d, the 32 bytes that follow it also at 2048
+decoy-head open refused malformed-input: musepack: no whole packet at offset 2083 before the first audio packet
+junk-under-bound file 1050564 bytes: 1048575 bytes of junk at 0, every second one 0x4d
+junk-under-bound open samples=30000 exact=true
+junk-under-bound packets 7
+junk-under-bound p0 0 4608 d44ea335
+junk-under-bound p1 4608 4608 b7080d6e
+junk-under-bound p2 9216 4608 df29557b
+junk-under-bound p3 13824 4608 17ac3da3
+junk-under-bound p4 18432 4608 81d83b1e
+junk-under-bound p5 23040 4608 1b46c523
+junk-under-bound p6 27648 3456 f4692530
+junk-under-bound warnings 0
+junk-under-bound seek 7776 landed 4608, then 4608 4608 01e08ffb
+junk-under-bound seek 15552 landed 13824, then 13824 4608 31743215
+junk-under-bound seek 23328 landed 18432, then 18432 4608 93986a51
+junk-under-bound seek warnings 0
+junk-past-bound file 1050565 bytes: 1048576 bytes of junk at 0, every second one 0x4d
+junk-past-bound open refused malformed-input: musepack: not a Musepack stream
+zero-middle file 1989 bytes: 64 bytes zeroed at 994
+zero-middle open samples=30000 exact=true
+zero-middle packets 7
+zero-middle p0 0 4608 d44ea335
+zero-middle p1 4608 4608 b7080d6e
+zero-middle p2 9216 4608 17e5f377
+zero-middle p3 13824 4608 17ac3da3
+zero-middle p4 18432 4608 81d83b1e
+zero-middle p5 23040 4608 1b46c523
+zero-middle p6 27648 3456 f4692530
+zero-middle warnings 0
+zero-middle seek 7776 landed 4608, then 4608 4608 01e08ffb
+zero-middle seek 15552 refused malformed-input: musepack: frame carries a codeword outside its Huffman book
+zero-middle seek 23328 refused malformed-input: musepack: frame carries a codeword outside its Huffman book
+zero-middle seek warnings 0
+cut-tail file 1889 bytes: the last 100 bytes cut
+cut-tail open samples=27167 exact=true
+cut-tail packets 6
+cut-tail p0 0 4608 d44ea335
+cut-tail p1 4608 4608 b7080d6e
+cut-tail p2 9216 4608 df29557b
+cut-tail p3 13824 4608 17ac3da3
+cut-tail p4 18432 4608 81d83b1e
+cut-tail p5 23040 4608 1b46c523
+cut-tail warnings 3
+cut-tail w0 damage at 1782: 107 trailing bytes are not a whole packet, dropped
+cut-tail w1 damage at 1889: the stream has no end marker
+cut-tail w2 damage at 1889: the header declares 30000 samples in 7 blocks but only 6 blocks are present, delivering 27167
+cut-tail seek 7776 landed 4608, then 4608 4608 01e08ffb
+cut-tail seek 15552 landed 13824, then 13824 4608 31743215
+cut-tail seek 23328 landed 18432, then 18432 4608 93986a51
+cut-tail seek warnings 0

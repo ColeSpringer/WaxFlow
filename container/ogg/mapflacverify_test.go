@@ -196,7 +196,7 @@ func TestOggFLACDeclaredTotalIsVerified(t *testing.T) {
 				// And a strict open still succeeds, which is what separates a
 				// Note from a warning.
 				if _, err := NewDemuxer(container.BytesSource(patchOggFLACTotal(t, raw, granule-100)),
-					&DemuxerOptions{Strict: true}); err != nil {
+					&container.DemuxerOptions{Strict: true}); err != nil {
 					t.Errorf("a strict open refused an over-running stream: %v", err)
 				}
 			})
@@ -229,7 +229,7 @@ func TestOggFLACDeclaredTotalIsVerified(t *testing.T) {
 				if damage != 1 || notes != 0 {
 					t.Errorf("%d damage, %d notes, want one damage warning: %v", damage, notes, ws)
 				}
-				if _, err := NewDemuxer(container.BytesSource(cut), &DemuxerOptions{Strict: true}); err == nil {
+				if _, err := NewDemuxer(container.BytesSource(cut), &container.DemuxerOptions{Strict: true}); err == nil {
 					t.Error("a strict open accepted a stream that declares more than it holds")
 				}
 			})

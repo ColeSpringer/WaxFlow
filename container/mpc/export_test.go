@@ -1,8 +1,22 @@
 package mpc
 
-import "github.com/colespringer/waxflow/codec/musepack"
+import (
+	"github.com/colespringer/waxflow/codec/musepack"
+	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/srcwin"
+)
 
 // Test-only seams exposed to the external mpc_test package.
+
+// FindMagicForTest runs the scan for the stream magic over src and nothing
+// else, and returns where it landed and how many bytes the window then
+// holds. An open walks the stream behind the magic and trims as it goes.
+func FindMagicForTest(src container.Source) (base int64, resident int, err error) {
+	d := &Demuxer{w: srcwin.New(src, src.Size(), "musepack: reading stream data")}
+	base, err = d.findMagic()
+	resident, _ = d.w.Resident()
+	return base, resident, err
+}
 
 // SeekTableForTest parses the seek table the stream carries and returns its
 // entries as byte offsets with its spacing exponent over the block spacing, or
@@ -114,4 +128,5 @@ const (
 	MaxSeekEntriesKeptForTest = maxSeekEntriesKept
 	CheckpointFramesForTest   = checkpointFrames
 	SynthWarmupForTest        = synthWarmup
+	MaxJunkForTest            = maxJunk
 )

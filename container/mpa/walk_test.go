@@ -72,7 +72,7 @@ func decodeLength(t *testing.T, raw []byte) int64 {
 
 func walked(t *testing.T, raw []byte, strict bool) (container.Track, []container.Warning, error) {
 	t.Helper()
-	d, err := mpa.NewDemuxer(container.BytesSource(raw), &mpa.DemuxerOptions{Strict: strict})
+	d, err := mpa.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: strict})
 	if err != nil {
 		return container.Track{}, nil, err
 	}
@@ -85,7 +85,7 @@ func walked(t *testing.T, raw []byte, strict bool) (container.Track, []container
 // same file reach the same verdict.
 func readToEnd(t *testing.T, raw []byte, strict bool) error {
 	t.Helper()
-	d, err := mpa.NewDemuxer(container.BytesSource(raw), &mpa.DemuxerOptions{Strict: strict})
+	d, err := mpa.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: strict})
 	if err != nil {
 		return err
 	}

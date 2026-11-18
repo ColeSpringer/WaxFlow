@@ -191,10 +191,10 @@ func (d *Demuxer) indexFragments(ctx context.Context) (raw int64, err error) {
 		if err := container.WalkCanceled(ctx, "mp4: "); err != nil {
 			return raw, err
 		}
-		b, err := readBox(d.src, off, d.size)
+		b, err := d.readBox(off, d.size)
 		if err != nil {
 			if waxerr.CodeOf(err) == waxerr.CodeMalformedInput {
-				return stop(off, "fragment chain ends at %d: %s", off, err)
+				return stop(off, "fragment chain ends at %d: %s", d.log.At(off), err)
 			}
 			return raw, err
 		}
@@ -210,7 +210,7 @@ func (d *Demuxer) indexFragments(ctx context.Context) (raw int64, err error) {
 				return raw, err // unreadable, not ended
 			}
 			if err := parseFragment(&fi, buf, d.trex, d.sel.id); err != nil {
-				return stop(b.off, "fragment at %d: %s", b.off, err)
+				return stop(b.off, "fragment at %d: %s", d.log.At(b.off), err)
 			}
 			// A moof with nothing for the selected track (an interleaved
 			// stream's video fragment) is not a landing place, so it is not
@@ -221,7 +221,7 @@ func (d *Demuxer) indexFragments(ctx context.Context) (raw int64, err error) {
 				// samples whose bytes are not in the file, and the read that
 				// follows fails on the fragment the walk counted.
 				if !d.fragmentFits(b, &fi) {
-					return stop(b.off, "fragment at %d runs past the end of the source", b.off)
+					return stop(b.off, "fragment at %d runs past the end of the source", d.log.At(b.off))
 				}
 				if fi.haveBaseTime {
 					ticks = fi.baseDecodeTime
@@ -294,7 +294,10 @@ func (d *Demuxer) compareDeclared(raw int64) (err error) {
 	}
 	t := d.track
 	if t.Samples < 0 || t.SamplesAdvisory {
-		return nil // nothing was claimed, so nothing can disagree
+		// Nothing was claimed, so nothing can disagree; latched like the
+		// others, since a length Walk settles later is a measurement.
+		d.fragCompared = true
+		return nil
 	}
 	// Latched only past the refusal below: a strict compare that fails leaves
 	// the next one to fail the same way.

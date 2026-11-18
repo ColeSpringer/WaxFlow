@@ -52,7 +52,7 @@ func holdToTwin(t *testing.T, twin, shifted []byte, w twinWant) {
 	// A legal stream is read strictly throughout, walk and seeks included, so
 	// damage anywhere fails; a damaged one is read tolerantly and held, once
 	// the seeks are done, to the one warning it carries.
-	strict := &DemuxerOptions{Strict: true}
+	strict := &container.DemuxerOptions{Strict: true}
 	ref, err := NewDemuxer(container.BytesSource(twin), strict)
 	if err != nil {
 		t.Fatal(err)
@@ -224,7 +224,7 @@ func TestOpusInvalidInitialGranule(t *testing.T) {
 		if tr := openTrack(t, raw); tr.Samples != 2000-312 || !tr.SamplesExact {
 			t.Errorf("%d samples (exact %v), want %d", tr.Samples, tr.SamplesExact, 2000-312)
 		}
-		if _, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true}); err != nil {
+		if _, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err != nil {
 			t.Errorf("a strict open refused an end-trimmed stream: %v", err)
 		}
 	})
@@ -233,7 +233,7 @@ func TestOpusInvalidInitialGranule(t *testing.T) {
 		if tr := openTrack(t, raw); tr.Samples != 2880-312 || !tr.SamplesExact {
 			t.Errorf("%d samples (exact %v), want %d", tr.Samples, tr.SamplesExact, 2880-312)
 		}
-		if _, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true}); err != nil {
+		if _, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err != nil {
 			t.Errorf("a strict open refused a stream starting later: %v", err)
 		}
 	})
@@ -265,7 +265,7 @@ func requireDamage(t *testing.T, raw []byte, want string) {
 	if len(damage) != 1 || !strings.Contains(damage[0], want) {
 		t.Errorf("warnings %v, want one damage warning about %q", d.Warnings(), want)
 	}
-	if _, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true}); err == nil {
+	if _, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err == nil {
 		t.Error("a strict open accepted it")
 	}
 }
@@ -425,7 +425,7 @@ func TestOggFLACFrameBeforeTheFirst(t *testing.T) {
 	if damage, _ := countKinds(d.Warnings()); damage != 1 {
 		t.Errorf("warnings %v, want one damage warning for frame 3", d.Warnings())
 	}
-	d, err = NewDemuxer(container.BytesSource(stream), &DemuxerOptions{Strict: true})
+	d, err = NewDemuxer(container.BytesSource(stream), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -504,7 +504,7 @@ func TestVorbisNegativeStartNeedsItsLayout(t *testing.T) {
 		t.Errorf("%d samples (exact %v), delay %d; want %d exact, delay 0",
 			got.Samples, got.SamplesExact, got.Delay, ref.Samples)
 	}
-	d, err := NewDemuxer(container.BytesSource(shifted), &DemuxerOptions{Strict: true})
+	d, err := NewDemuxer(container.BytesSource(shifted), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -642,7 +642,7 @@ func TestOggFLACFirstGranuleMovesNothing(t *testing.T) {
 				if c.granule >= 0 {
 					raw = testutil.SetOggGranule(t, raw, first, c.granule)
 				}
-				d, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true})
+				d, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -721,7 +721,7 @@ func TestOggLoneFirstPageShortOfItsSamples(t *testing.T) {
 			t.Run(c.name+" "+g.name, func(t *testing.T) {
 				raw := testutil.SetOggGranule(t, lone, first, g.granule)
 				short := g.granule < c.end
-				_, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true})
+				_, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 				if (err != nil) != (short && c.damage != "") {
 					t.Errorf("a strict open returned %v", err)
 				}
@@ -818,7 +818,7 @@ func TestOggLookAheadCapLeavesTheStartUnverified(t *testing.T) {
 	end := 48000 + int64(n+2)*960
 	stream = append(stream, buildPage(flagEOS, end, 4321, seq, pkt)...)
 
-	d, err := NewDemuxer(container.BytesSource(stream), &DemuxerOptions{Strict: true})
+	d, err := NewDemuxer(container.BytesSource(stream), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -951,7 +951,7 @@ func TestOggFLACSourceLengthTotalIsANote(t *testing.T) {
 		} {
 			t.Run(layout.name+", "+c.name, func(t *testing.T) {
 				raw := patchOggFLACTotal(t, layout.raw, c.total)
-				if _, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true}); (err != nil) != c.damage {
+				if _, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); (err != nil) != c.damage {
 					t.Errorf("a strict open returned %v; damage expected: %v", err, c.damage)
 				}
 				d, err := NewDemuxer(container.BytesSource(raw), nil)
@@ -1095,7 +1095,7 @@ func TestOggFLACLengthIsTheFramesSpan(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			bad := testutil.SetOggGranule(t, raw, c.page, c.granule)
-			d, err := NewDemuxer(container.BytesSource(bad), &DemuxerOptions{Strict: true})
+			d, err := NewDemuxer(container.BytesSource(bad), &container.DemuxerOptions{Strict: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1187,7 +1187,7 @@ func TestOggUnstatedPageAfterTheLastGranule(t *testing.T) {
 	}
 	for name, raw := range map[string][]byte{"short": short, "capped": capped} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true}); err == nil {
+			if _, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err == nil {
 				t.Error("a strict open accepted it")
 			}
 			d, err := NewDemuxer(container.BytesSource(raw), nil)
@@ -1252,7 +1252,7 @@ func TestOggFLACSeeksOnFramesLargerThanAPage(t *testing.T) {
 	const bs, frames = 4096, 150
 	raw := bigFrameOggFLAC(t, frames, 80000)
 	cs := &testutil.CountingSource{Src: container.BytesSource(raw)}
-	d, err := NewDemuxer(cs, &DemuxerOptions{Strict: true})
+	d, err := NewDemuxer(cs, &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}

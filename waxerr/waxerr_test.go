@@ -188,3 +188,30 @@ func TestConstructorsCarryTheirOwnCode(t *testing.T) {
 		t.Error("Unsupported classifies as malformed input")
 	}
 }
+
+// TestFixedReadsAsNewAndCannotBeEdited: a Fixed error reads and classifies
+// as New's, through every waxerr reader, and an edit to the *Error a caller
+// extracts reaches no one else.
+func TestFixedReadsAsNewAndCannotBeEdited(t *testing.T) {
+	f := waxerr.Fixed(waxerr.CodeMalformedInput, "mp3: missing frame sync")
+	wrapped := fmt.Errorf("scan: %w", f)
+	if f.Error() != "mp3: missing frame sync" || waxerr.CodeOf(wrapped) != waxerr.CodeMalformedInput ||
+		!errors.Is(wrapped, waxerr.ErrMalformedInput) || errors.Is(f, waxerr.ErrUnsupportedFormat) ||
+		waxerr.ExitCode(f) != waxerr.CodeMalformedInput.ExitCode() {
+		t.Errorf("Fixed reads %q, code %q, not as New's", f, waxerr.CodeOf(wrapped))
+	}
+	if a := waxerr.Annotate("open", f); a.Code != waxerr.CodeMalformedInput || a.Error() != "open: mp3: missing frame sync" {
+		t.Errorf("Annotate gave %q (%s)", a, a.Code)
+	}
+	e, ok := errors.AsType[*waxerr.Error](wrapped)
+	if !ok || e.Code != waxerr.CodeMalformedInput || e.Msg != "mp3: missing frame sync" {
+		t.Fatalf("AsType gave %+v, %v", e, ok)
+	}
+	e.Code, e.Msg = waxerr.CodeInternal, "edited"
+	if f.Error() != "mp3: missing frame sync" || waxerr.CodeOf(f) != waxerr.CodeMalformedInput {
+		t.Errorf("an edit to an extracted copy reached the error: %q (%s)", f, waxerr.CodeOf(f))
+	}
+	if got := waxerr.Fixed(waxerr.CodeCanceled, "").Error(); got != "canceled" {
+		t.Errorf("an empty message reads %q, want the code as New's does", got)
+	}
+}

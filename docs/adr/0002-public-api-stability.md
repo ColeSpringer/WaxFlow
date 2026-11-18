@@ -660,3 +660,79 @@ alone, no keys on a non-loopback `addr` and a `debugAddr` that is not
 loopback, are refused by `server` before it creates anything and failed by
 `doctor`, which also loads a configured TLS pair and warns when a
 non-loopback `addr` is served without one (ADR-0007).
+
+## Amendment (2026-11-13): one demuxer options type, revisions and measured lengths
+
+What a caller of the public packages sees:
+
+- The twelve `<pkg>.DemuxerOptions` types (`adts`, `aiff`, `apen`, `asf`,
+  `flacn`, `mka`, `mp4`, `mpa`, `mpc`, `ogg`, `riff`, `wv`) are gone, each
+  a struct of one field, `Strict`. `container.DemuxerOptions` replaces them
+  with `Strict` as it was and a new field `Base`, where the source's byte 0
+  sits in the file it was cut from. Every `NewDemuxer` takes
+  `*container.DemuxerOptions`, and nil still means the defaults. No alias is
+  left behind, so `mp4.NewDemuxer(src, &mp4.DemuxerOptions{Strict: true})`
+  is now `mp4.NewDemuxer(src, &container.DemuxerOptions{Strict: true})`.
+  The options change alone moves no sample or packet a demuxer delivers. A
+  demuxer adds `Base` to every offset it reports: a warning's `Offset`, the
+  `(at offset N)` of a Strict refusal, and an offset a message names.
+  `format` sets it to the length of the leading ID3v2 tag it steps over, so
+  a finding behind one names its place in the file; with no tag ahead
+  nothing moves. A finding with no place stays at -1, and its Strict
+  refusal now names no offset where it used to say `(at offset -1)`.
+  `mp4.Demuxer` gains `DamageCount` (`container.Damaged`), so
+  `container.DamageOf` counts its damage past the list's cap and its
+  de-duplication, as it does every other demuxer's.
+- `container/wv` exports `DemuxerVersion` (`wv-demux-2`), the term its track
+  carries into every cache key over a WavPack source, as `mka.DemuxerVersion`
+  does for Matroska (ADR-0004, 2026-11-15). `codec/wavpack` gains
+  `MaxSamplesIn`, the most samples a run of bytes can hold as blocks, which
+  is what the demuxer holds a skip in the block indexes to. `container`
+  gains `Measurer` (`MeasureSamples`), for a demuxer that measures a track
+  from headers where its open did not call the length exact, and `format`
+  gains `Measurer` and `MeasureMedia`, which ask a Media's demuxer for it
+  and which a wrapper forwards as it forwards `Walker`; `MeasureLength`
+  takes that route before it seeks. `wv.Demuxer` implements it.
+- `container/asf` exports `DemuxerVersion` (`asf-demux-2`), the term a WMA
+  v1/v2 track carries into every cache key over such a source; a WMA Pro,
+  Voice or Lossless track carries none (ADR-0004, 2026-11-15).
+- `container/flacn` exports `DemuxerVersion` (`flacn-demux-2`) and
+  `container/ogg` exports `DemuxerVersion` (`ogg-demux-2`), the terms their
+  tracks carry into every cache key over a native FLAC source and over an
+  Ogg one, whatever its codec (ADR-0004, 2026-11-15). `codec/flac` gains `FrameLenRead`, which is `FrameLen` with the bytes
+  it read to answer, `StreamInfo.FixedBlock`, the block size
+  STREAMINFO states for a fixed-blocksize stream, `StreamInfo.NumberingBy`,
+  `StreamInfo.NumberingFrom`, `StreamInfo.NumberingLast` and
+  `StreamInfo.NumberingUnsettled`, which settle a stream's numbering by what
+  follows the first frame (the frame behind it, the frame behind the first
+  whole one where the first does not check, or the stream's end) where
+  STREAMINFO and that frame leave it open, and `ReadOff`, the words of a
+  read that ends off an exact length. `StreamInfo.Numbering` reads as it
+  did. `container` gains `SettleRead`, which holds a track's exact length
+  against where a whole read ended, for both FLAC demuxers and WavPack's.
+  `ogg.Demuxer` implements `container.Measurer` for a FLAC track: where the
+  open did not call the length exact, or a read took the claim back,
+  `MeasureLength` is what a read from the first frame delivers.
+- `format` gains `Forwarder`, which a wrapper of a Media embeds in place of
+  the Media to forward `Walker`, `Measurer`, `MixedWidth` and `Headroomer`,
+  each answering for a Media without it as that Media does unwrapped.
+  `LengthConfirmer` and `Composite` are not forwarded. `waxflow.Headroomer`
+  moves to `format.Headroomer`, beside `format.MediaHeadroom`, with no
+  alias left.
+- `waxerr` gains `Fixed`, an error that reads and classifies as `New`'s and
+  that no caller can change: `errors.AsType[*waxerr.Error]` on it gets a
+  fresh copy. `mp3.ParseHeader`'s refusals and the Musepack decoder's frame
+  refusals are `Fixed`, so a caller's edit reaches no other caller.
+
+What changes meaning without moving an identifier (ADR-0004, 2026-11-15):
+
+- `Result.LostSamples` counts a WavPack copy's holes: its blocks state their
+  own indexes, so the copy carries the gap, writes no silence, and counts
+  the gap in `Samples` and in the header's total as a transcode does. The
+  copy hands `container.Packet.Lost` to the muxer for such packets, and
+  `wv.Muxer` counts it in the length it writes.
+- `container.Truncated` and `format.Info.Truncated` can grow at a read's
+  end: a read from the first packet that ends short of an exact length adds
+  the rest, past what the open counted.
+- A Media's `Walk` (`format.Walker`) refreshes the length for a demuxer with
+  no walk, taking a claim a read's end withdrew, which can lift the cap.

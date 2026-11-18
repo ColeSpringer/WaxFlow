@@ -25,20 +25,26 @@ func FuzzDemux(f *testing.F) {
 	f.Add(buildSV8(sv8Packet("SH", shPayload(sv8Header{count: 0, freq: 1, maxBand: 31, channels: 1, blockPwr: 14})), sv8Packet("AP", apBlock(30)), sv8Packet("SE", nil)))
 	f.Add(buildSV7(sv7Header{frames: 2, maxBand: 20, gapless: true, last: 700}, []sv7Frame{randomFrame(1, 100), randomFrame(2, 50)}, 700, nil))
 
+	// A snapshot needs 64 scanned states, more than a fuzz-sized input
+	// holds; at two, every input whose seeks scan gives one to restore.
+	f.Cleanup(mpc.SetIdxMinStatesForTest(2))
+
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var cfg musepack.Config
 		testutil.DemuxFuzz{
 			Open: func(src container.Source, strict bool) (container.Demuxer, error) {
-				return mpc.NewDemuxer(src, &mpc.DemuxerOptions{Strict: strict})
+				return mpc.NewDemuxer(src, &container.DemuxerOptions{Strict: strict})
 			},
 			// A packet is at least a 20-bit length field (SV7) or a
 			// three-byte header (SV8) of input, so production is bounded by
 			// the input length.
 			MaxPackets: func(raw []byte) int64 { return int64(len(raw))/2 + 4 },
 			Targets:    []int64{0, 1000, 1 << 40},
+			SeekPTS:    true,
 			// Landing past the target is only legitimate when the stream
 			// itself starts after it.
 			LateLanding: true,
+			Restore:     true,
 			Opened: func(t testing.TB, d container.Demuxer, _ bool) {
 				track := d.Tracks()[0]
 				if track.Samples < -1 {

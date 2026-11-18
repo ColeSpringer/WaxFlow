@@ -14,9 +14,17 @@ func MaxSamplesIn(n int64) int64 { return (max(n, 0)/minFrameBytes + 1) * MaxBlo
 // is what a reader needs when that header is damaged. scratch, when not nil,
 // is reused for the residual across calls.
 func FrameLen(b []byte, si StreamInfo, scratch *[]int64) (int, error) {
+	n, _, err := FrameLenRead(b, si, scratch)
+	return n, err
+}
+
+// FrameLenRead is FrameLen with the bytes of b it read to answer, for a
+// caller that bounds what its parses cost: a header where none parses, and
+// otherwise as far as the subframes ran.
+func FrameLenRead(b []byte, si StreamInfo, scratch *[]int64) (n, read int, err error) {
 	fi, err := ParseFrameHeader(b)
 	if err != nil {
-		return 0, err
+		return 0, min(len(b), MaxFrameHeaderLen), err
 	}
 	bits := fi.Bits
 	if bits == 0 {
@@ -34,21 +42,21 @@ func FrameLen(b []byte, si StreamInfo, scratch *[]int64) (int, error) {
 	r := &bitReader{data: b, pos: fi.hdrLen}
 	for c := 0; c < fi.Channels; c++ {
 		if err := decodeSubframe(r, res, fi.subframeBits(c, bits)); err != nil {
-			return 0, err
+			return 0, min(len(b), r.consumed()), err
 		}
 	}
 	r.align()
 	if r.err {
-		return 0, malformed("frame overruns its data")
+		return 0, len(b), malformed("frame overruns its data")
 	}
 	end := r.consumed() + 2
 	if end > len(b) {
-		return 0, malformed("frame truncated")
+		return 0, len(b), malformed("frame truncated")
 	}
 	if !crcCloses(b[:end]) {
-		return 0, malformed("frame CRC-16 mismatch")
+		return 0, end, malformed("frame CRC-16 mismatch")
 	}
-	return end, nil
+	return end, end, nil
 }
 
 // SilentFrame returns a frame of n samples of digital silence shaped like

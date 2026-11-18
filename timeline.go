@@ -53,10 +53,10 @@ const ToEnd = -1
 // two numbers where the caller needs one, and the gap between them refuses
 // windows the file can serve or commits headers the run then misses.
 //
-// It forwards format.Walker and nothing else. Embedding the interface promotes
-// no method outside it, so a container.Indexer on the inner media is hidden
-// here on purpose: the sidecar save lives in the wrapper the engine put around
-// it, whose own Close still runs.
+// It forwards what format.Forwarder forwards and nothing else, so a
+// container.Indexer on the inner media is hidden here on purpose: the
+// sidecar save lives in the wrapper the engine put around it, whose own
+// Close still runs.
 func MeasuredMedia(med format.Media, measured container.Track) format.Media {
 	info := med.Info()
 	samples := measured.Samples
@@ -80,25 +80,15 @@ func MeasuredMedia(med format.Media, measured container.Track) format.Media {
 	patched.Tracks[idx].SamplesExact = true
 	patched.Tracks[idx].SamplesAdvisory = false
 	patched.Tracks[idx].SamplesCounted = measured.SamplesCounted
-	return measuredMedia{Media: med, info: &patched}
+	return measuredMedia{Forwarder: format.Forwarder{Media: med}, info: &patched}
 }
 
 // measuredMedia is a Media whose declared info is replaced; MeasuredMedia is
 // its only constructor and carries the rationale.
 type measuredMedia struct {
-	format.Media
+	format.Forwarder
 	info *format.Info
 }
-
-// Walk and Walked forward format.Walker, as the engine's own wrappers do.
-func (m measuredMedia) Walk(ctx context.Context) error { return format.WalkMedia(ctx, m.Media) }
-
-func (m measuredMedia) Walked() bool { return format.MediaWalked(m.Media) }
-
-// MixedWidth forwards format.MixedWidth for the same reason: the guard that
-// reads it runs over whatever Media a caller hands the engine, and a wrapper
-// that answered for itself would answer false for a timeline it wraps.
-func (m measuredMedia) MixedWidth() bool { return format.MediaMixedWidth(m.Media) }
 
 // Info returns the patched description, its live fields refreshed from the
 // inner media on every call (see format.Media): the copy holds the measured
@@ -381,30 +371,6 @@ func SpanTrack(track container.Track, from, to int64) (container.Track, error) {
 	return out, nil
 }
 
-// Headroomer is implemented by a Media that has real audio before its own
-// sample 0, as a window onto a longer stream does. It is an optional
-// capability in the same idiom as container.Indexer, container.Warner, and
-// dsp.Settler: a Media opened from a file has nothing before its first
-// sample and does not implement it, so the assertion is an honest gate.
-//
-// It exists because priming a chain and starting a stream are different
-// questions, and only a span can answer the first one for its own sample 0.
-// A stateful node primes from nothing at a stream's start, which is correct
-// for a file (there is nothing earlier) and wrong for a span (there is). A
-// consumer that wants a span's sample 0 to hold the same audio a continuous
-// run of the whole source delivers there reads Headroom, seeks to a
-// negative position, and discards the output it fed through.
-//
-// Positions below 0 are the whole point of the interface and are legal only
-// on a Media that implements it. They stay within [-Headroom(), 0): the
-// samples are real, they are simply upstream of the window this Media
-// presents.
-type Headroomer interface {
-	// Headroom is how many samples of real audio lie before sample 0, so a
-	// caller knows how far back it may seek. Zero means none.
-	Headroom() int64
-}
-
 // slice is Slice's Media: one source, positioned at the window's start and
 // cut off at its end.
 //
@@ -586,10 +552,7 @@ func (s *slice) ConfirmLength(ctx context.Context) error {
 // would under-report it, which does not fail loudly. It quietly primes a
 // chain with less than it asked for.
 func (s *slice) Headroom() int64 {
-	if h, ok := s.med.(Headroomer); ok {
-		return s.from + h.Headroom()
-	}
-	return s.from
+	return s.from + format.MediaHeadroom(s.med)
 }
 
 // MixedWidth forwards the source's answer (format.MixedWidth). This one is
@@ -803,7 +766,7 @@ func damageIn(med format.Media) int { return med.Info().Damage }
 // addresses the real audio ahead of the window, which is what a consumer
 // priming a chain for the span's sample 0 asks for. Everything below the
 // window is still the source's own audio, so the seek is an ordinary one
-// once rebased. See Headroomer.
+// once rebased. See format.Headroomer.
 func (s *slice) SeekSample(ctx context.Context, target int64) (int64, error) {
 	// The bound is what Headroom advertises, not from alone: the two have to
 	// agree, or a caller that primes by exactly the headroom it was told

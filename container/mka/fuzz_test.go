@@ -55,17 +55,19 @@ func FuzzDemux(f *testing.F) {
 		var inner []container.PacketTrim
 		testutil.DemuxFuzz{
 			Open: func(src container.Source, strict bool) (container.Demuxer, error) {
-				return NewDemuxer(src, &DemuxerOptions{Strict: strict})
+				return NewDemuxer(src, &container.DemuxerOptions{Strict: strict})
 			},
-			// Every packet consumes input, so the size bounds the count. This
-			// target stops reading at the cap and does not fail there.
-			MaxPackets:  func(raw []byte) int64 { return int64(len(raw)) + 16 },
-			CapNotFatal: true,
+			// Blocks do not overlap, and a laced one is at least 7 bytes and
+			// laces at most maxLaceFrames frames, each a packet however few
+			// bytes it holds, so the size bounds the count.
+			MaxPackets: func(raw []byte) int64 { return int64(len(raw))/7*maxLaceFrames + 16 },
 			// A block may hold a frame of no bytes, and a frame of no samples.
 			EmptyData: true,
 			ZeroDur:   true,
 			// Seeks land at or before the target (or at the earliest sync point).
 			Targets: []int64{0, 1, 1000, 1 << 20, 1 << 40},
+			SeekPTS: true,
+			Walk:    true,
 			Opened: func(testing.TB, container.Demuxer, bool) {
 				rawDur, kept, lastPad, lastDur, inner = 0, 0, 0, 0, nil
 			},

@@ -193,7 +193,8 @@ type AnalyzeResult struct {
 	// of the measurement is the file's own. It is this measurement's own
 	// read. A group's result carries its members' total, as its Samples
 	// does. Zero for a source with no hole, and for one whose holes shorten
-	// the read instead, which is every format but FLAC, native or in Ogg.
+	// the read instead, which is every format but FLAC (native or in Ogg) and
+	// WavPack.
 	LostSamples int64
 	// TruncatedSamples counts the samples the source's header declares past
 	// the end of what the file holds (format.Info.Truncated), as this

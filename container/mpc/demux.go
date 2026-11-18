@@ -1,7 +1,6 @@
 package mpc
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -9,6 +8,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/musepack"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/diag"
 	"github.com/colespringer/waxflow/container/internal/id3"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
 	"github.com/colespringer/waxflow/container/internal/trailer"
@@ -26,10 +26,7 @@ var (
 
 // Demuxer reads one Musepack track from a native .mpc source.
 type Demuxer struct {
-	opts DemuxerOptions
-
-	src container.Source
-	w   srcwin.Window
+	w srcwin.Window
 	// base is the byte offset of the magic: nonzero when a tag or padding sits
 	// in front of it. SV7 word positions and SV8 seek-table entries are both
 	// measured from here.
@@ -39,7 +36,7 @@ type Demuxer struct {
 	track    container.Track
 	tags     map[string][]string
 	chapters []container.Chapter
-	warnings container.Warnings
+	log      diag.Log
 	rg       replayGain
 
 	// total is how many packets the stream delivers (SV7 frames, SV8
@@ -61,11 +58,8 @@ type Demuxer struct {
 // length against the packets present, and positions on the first frame. The
 // returned Demuxer implements container.Seeker, container.Warner,
 // container.Tagger, container.Chapterer, and container.Indexer.
-func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
-	d := &Demuxer{src: src, w: srcwin.New(src, src.Size(), "musepack: reading stream data")}
-	if opts != nil {
-		d.opts = *opts
-	}
+func NewDemuxer(src container.Source, opts *container.DemuxerOptions) (*Demuxer, error) {
+	d := &Demuxer{w: srcwin.New(src, src.Size(), "musepack: reading stream data"), log: diag.New("musepack: ", opts)}
 	if err := d.parse(); err != nil {
 		return nil, err
 	}
@@ -89,19 +83,14 @@ func unsupported(format string, args ...any) error {
 
 // warn records tolerated damage, or fails in strict mode.
 func (d *Demuxer) warn(off int64, format string, args ...any) error {
-	msg := fmt.Sprintf(format, args...)
-	if d.opts.Strict {
-		return malformed("%s (at offset %d)", msg, off)
-	}
-	d.warnings.Damage(off, msg)
-	return nil
+	return d.log.Warn(off, format, args...)
 }
 
 // note records a Warning that Strict must not escalate: this build doing
 // something with a well-formed file that a caller should know about, rather
 // than damage in the file. See [container.Note].
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.warnings.Note(off, fmt.Sprintf(format, args...))
+	d.log.Note(off, format, args...)
 }
 
 func (d *Demuxer) parse() error {
@@ -152,51 +141,73 @@ func (d *Demuxer) parse() error {
 
 // findMagic locates the stream magic: at the end of a leading ID3v2 tag when
 // there is one, else within the junk allowance. A "MP+" with a stream version
-// this decoder refuses still counts as found, so the refusal can name it.
+// this decoder refuses still counts as found, so the refusal can name it. A
+// leading tag that states more bytes than the data holds is refused by name.
 func (d *Demuxer) findMagic() (int64, error) {
 	from := id3.Size(d.w.Peek(0, 10))
-	limit := min(from+maxJunk, d.w.DataEnd())
-	for off := from; off+4 <= limit; {
-		b := d.w.BytesAt(off, srcwin.Chunk)
-		if len(b) < 4 {
-			break
-		}
-		i := bytes.Index(b, []byte("MP"))
-		if i < 0 {
-			off += int64(len(b)) - 3
-			continue
-		}
-		cand := off + int64(i)
-		if h := d.w.BytesAt(cand, 4); len(h) == 4 && cand < limit &&
-			(string(h) == "MPCK" || (string(h[:3]) == "MP+" && h[3]&0x0F >= 4 && h[3]&0x0F <= 7)) {
-			return cand, nil
-		}
-		off = cand + 1
+	if end := d.w.DataEnd(); from > end {
+		return 0, malformed("leading ID3v2 tag declares %d bytes, past the %d the data holds", from, end)
 	}
-	if d.w.Err() != nil {
-		return 0, d.w.Err()
+	off, ok := d.magicIn(from, from+maxJunk)
+	if !ok {
+		if d.w.Err() != nil {
+			return 0, d.w.Err()
+		}
+		return 0, malformed("not a Musepack stream")
 	}
-	return 0, malformed("not a Musepack stream")
+	return off, nil
+}
+
+// magicIn returns the first magic that starts in [from, limit). The one at
+// from is tried first, through the window the header behind it is parsed
+// from. Only junk pays the scan.
+func (d *Demuxer) magicIn(from, limit int64) (int64, bool) {
+	if from < limit && isMagic(d.w.BytesAt(from, 4)) {
+		return from, true
+	}
+	return d.w.Scan(from, limit, []byte("MP"), 4, func(_ int64, hdr []byte) srcwin.Verdict {
+		if isMagic(hdr) {
+			return srcwin.Take
+		}
+		return srcwin.Skip
+	})
+}
+
+// isMagic reports whether h is a stream magic: "MPCK", or "MP+" and a stream
+// version of 4 to 7.
+func isMagic(h []byte) bool {
+	return len(h) == 4 && (string(h) == "MPCK" || (string(h[:3]) == "MP+" && h[3]&0x0F >= 4 && h[3]&0x0F <= 7))
 }
 
 // stripTrailers peels the tags a tagger appended after the audio, shrinking
 // the window's data end so the packet walk never runs into them. The APEv2
 // block is also where the track's tags come from. No warning: a tag after the
 // audio is the normal shape of a .mpc file rather than damage recovered from.
-func (d *Demuxer) stripTrailers(floor int64) {
-	end, tags := trailer.PeelAll(&d.w, trailer.APEv2|trailer.ID3v1|trailer.ID3v2, floor, d.w.DataEnd())
+func (d *Demuxer) stripTrailers(floor int64) error {
+	// The probes read the tail through a window of their own, or they would
+	// move the window off the head and the walk would read the head again.
+	// They decide where the audio ends, so a read that fails is the open's.
+	end := d.w.DataEnd()
+	var tags map[string][]string
+	if _, err := d.w.Try(false, func() bool {
+		end, tags = trailer.PeelAll(&d.w, trailer.APEv2|trailer.ID3v1|trailer.ID3v2, floor, end)
+		return true
+	}); err != nil {
+		return err
+	}
 	d.tags = tags
 	d.w.SetDataEnd(end)
+	return nil
 }
 
 // Tracks returns the single Musepack track.
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns damage tolerated during parsing.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
+func (d *Demuxer) Warnings() []container.Warning { return d.log.List() }
 
 // DamageCount implements container.Damaged.
-func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
+func (d *Demuxer) DamageCount() int { return d.log.DamageCount() }
 
 // TruncatedSamples implements container.Truncated.
 func (d *Demuxer) TruncatedSamples(int) int64 { return d.truncated }

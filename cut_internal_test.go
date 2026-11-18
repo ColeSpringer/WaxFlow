@@ -290,7 +290,7 @@ func TestCutTrackResolvesATailInsideTheFinalPacket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := copyPackets(context.Background(), view, 0, false, nil, func(container.Packet) error { return nil })
+	run, err := copyPackets(context.Background(), view, 0, false, holeFill{}, func(container.Packet) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}

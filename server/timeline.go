@@ -503,10 +503,7 @@ func (s *Server) timelineNeedsJob(srcs []*source.File) (bool, error) {
 		}
 		info := med.Info()
 		track := info.Default()
-		walked := true
-		if w, ok := med.(format.Walker); ok {
-			walked = w.Walked()
-		}
+		walked := format.MediaWalked(med)
 		if track.SamplesExact {
 			// Nothing walks in a constructor, so this is a length the headers
 			// settled rather than one this open paid for. Memoizing it is still

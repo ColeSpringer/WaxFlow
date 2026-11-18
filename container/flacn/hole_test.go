@@ -328,7 +328,7 @@ func TestZeroedFrameIsAHole(t *testing.T) {
 // tolerant one lists them.
 func TestJunkTailIsDamageAtOpen(t *testing.T) {
 	raw := append(fixture(t, "sine-s16.flac"), bytes.Repeat([]byte{0x5A}, 100)...)
-	if _, err := flacn.NewDemuxer(container.BytesSource(raw), &flacn.DemuxerOptions{Strict: true}); err == nil {
+	if _, err := flacn.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err == nil {
 		t.Fatal("a strict open accepted junk after the last frame")
 	}
 	d, err := flacn.NewDemuxer(container.BytesSource(raw), nil)
@@ -515,10 +515,10 @@ func TestDamagedFirstFrameIsAHoleFromZero(t *testing.T) {
 	}
 }
 
-// TestFalseHeaderInTheLastFrameIsNotDamage: a header the last frame's own
-// bytes spell is a candidate the tail scan tries and rejects, and what its
-// rejection reported is not the file's: the file opens strictly, exact.
-func TestFalseHeaderInTheLastFrameIsNotDamage(t *testing.T) {
+// falseHeaderInLastFrame is a stream whose last frame's own bytes spell a
+// consistent header, its checksum made good, so every frame checks.
+func falseHeaderInLastFrame(t *testing.T) []byte {
+	t.Helper()
 	raw := append([]byte(nil), unseekableTwin(t, 4)...)
 	spans := frameSpans(t, raw)
 	n := len(spans)
@@ -531,7 +531,15 @@ func TestFalseHeaderInTheLastFrameIsNotDamage(t *testing.T) {
 	copy(raw[at:], hdr)
 	crc := flac.CRC16(raw[last[0] : last[1]-2])
 	raw[last[1]-2], raw[last[1]-1] = byte(crc>>8), byte(crc)
-	d, err := flacn.NewDemuxer(container.BytesSource(raw), &flacn.DemuxerOptions{Strict: true})
+	return raw
+}
+
+// TestFalseHeaderInTheLastFrameIsNotDamage: a header the last frame's own
+// bytes spell is a candidate the tail scan tries and rejects, and what its
+// rejection reported is not the file's: the file opens strictly, exact.
+func TestFalseHeaderInTheLastFrameIsNotDamage(t *testing.T) {
+	raw := falseHeaderInLastFrame(t)
+	d, err := flacn.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatalf("a strict open refused a file whose every frame checks: %v", err)
 	}

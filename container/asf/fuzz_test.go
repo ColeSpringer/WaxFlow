@@ -41,21 +41,30 @@ func FuzzDemux(f *testing.F) {
 	// The bit reservoir, whose frame counts are the superframe headers'.
 	f.Add(fixture(f, windowsFixture))
 	f.Add(fixture(f, windowsFixture)[:30000])
+	// A lone object that delivers nothing.
+	f.Add(loneReservoir(f, 1))
 	f.Add(guidHeader)
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		targets := []int64{0, 1000, 1 << 40}
 		testutil.DemuxFuzz{
 			Open: func(src container.Source, strict bool) (container.Demuxer, error) {
-				return asf.NewDemuxer(src, &asf.DemuxerOptions{Strict: strict})
+				return asf.NewDemuxer(src, &container.DemuxerOptions{Strict: strict})
 			},
 			// A media object needs at least a length byte and a byte of its
 			// own, so production is bounded by the input either way.
 			MaxPackets: func(raw []byte) int64 { return int64(len(raw))/2 + 8 },
 			Targets:    targets,
+			// SeekPTS is off: a landing is on the frame grid a decode resumes on,
+			// and a packet's PTS is its object's stated time, which sits off it.
 			// Landing past the target is only legitimate when the stream
 			// itself starts after it.
 			LateLanding: true,
+			// The only object of a WMA v1/v2 stream lasts what its frames
+			// deliver, and a reservoir's lone frame delivers nothing.
+			ZeroDur: true,
+			Walk:    true,
+			Restore: true,
 			Opened: func(t testing.TB, dm container.Demuxer, _ bool) {
 				d := dm.(*asf.Demuxer)
 				if d.Tracks()[0].SamplesExact {
@@ -80,7 +89,7 @@ func FuzzDemux(f *testing.F) {
 					return
 				}
 				d := dm.(*asf.Demuxer)
-				w, err := asf.NewDemuxer(container.BytesSource(data), &asf.DemuxerOptions{Strict: strict})
+				w, err := asf.NewDemuxer(container.BytesSource(data), &container.DemuxerOptions{Strict: strict})
 				if err != nil {
 					t.Fatalf("a second open of the same bytes failed: %v", err)
 				}
@@ -96,35 +105,15 @@ func FuzzDemux(f *testing.F) {
 					t.Fatal("a read to the end and a walk took different counts")
 				}
 			},
-			After: func(t testing.TB, _ []byte, dm container.Demuxer, strict bool) {
+			// Beyond what Walk holds: the length a walk settles describes
+			// itself.
+			After: func(t testing.TB, _ []byte, dm container.Demuxer, _ bool) {
 				d := dm.(*asf.Demuxer)
 				if err := d.Walk(context.Background()); err != nil {
 					return
 				}
-				if !d.Walked() {
-					t.Fatal("a walk that returned nil is not walked")
-				}
 				if tr := d.Tracks()[0]; tr.SamplesExact && (tr.Samples < 0 || tr.SamplesAdvisory) {
 					t.Fatalf("the walk settled %d samples, exact %v advisory %v", tr.Samples, tr.SamplesExact, tr.SamplesAdvisory)
-				}
-				blob := d.IndexSnapshot()
-				if blob == nil {
-					return
-				}
-				// A restore of its own snapshot, accepted or refused, lands
-				// where the count it was taken from does.
-				e, err := asf.NewDemuxer(container.BytesSource(data), &asf.DemuxerOptions{Strict: strict})
-				if err != nil {
-					t.Fatalf("a second open of the same bytes failed: %v", err)
-				}
-				e.RestoreIndex(blob)
-				for _, target := range targets {
-					want, errD := d.SeekSample(context.Background(), 0, target)
-					got, errE := e.SeekSample(context.Background(), 0, target)
-					if (errD == nil) != (errE == nil) || got != want {
-						t.Fatalf("seek to %d: the restored count landed at %d (%v), the walked one at %d (%v)",
-							target, got, errE, want, errD)
-					}
 				}
 			},
 		}.Run(t, data)

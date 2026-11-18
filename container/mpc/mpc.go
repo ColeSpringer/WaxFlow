@@ -27,12 +27,6 @@ const MatchNeed = musepack.MatchNeed
 // sniff-table entry.
 func Match(head []byte) bool { return musepack.Match(head) }
 
-// DemuxerOptions configures parsing.
-type DemuxerOptions struct {
-	// Strict turns tolerated damage (the Warnings list) into errors.
-	Strict bool
-}
-
 // Hostile-input caps (ADR-0005 invariants), sized to the legitimate maximum
 // rather than to the reference's buffer hints.
 const (

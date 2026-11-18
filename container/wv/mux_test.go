@@ -260,7 +260,7 @@ func TestTagThatSpellsID3v1(t *testing.T) {
 		t.Fatalf("the tag added %d bytes, want 131", got)
 	}
 
-	d, err := wv.NewDemuxer(container.BytesSource(tagged.Bytes()), &wv.DemuxerOptions{Strict: true})
+	d, err := wv.NewDemuxer(container.BytesSource(tagged.Bytes()), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}

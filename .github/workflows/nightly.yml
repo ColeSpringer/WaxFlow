@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   # Long fuzz soak over every native fuzz target: 10 minutes per target
-  # nightly versus the 45-second smoke in ci.yml. The list is 61 targets,
+  # nightly versus the 45-second smoke in ci.yml. The list is 62 targets,
   # about 10 hours of fuzzing, and a hosted job dies at 6 hours, so it is
   # sharded: scripts/fuzz.sh discovers every target and FUZZ_SHARD=k/N runs
   # every Nth one, so the six shards cover the list once at 100 to 110

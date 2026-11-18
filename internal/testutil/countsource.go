@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"context"
+	"io"
 	"slices"
 	"testing"
 
@@ -43,6 +44,34 @@ func (c *CountingSource) Size() int64 { return c.Src.Size() }
 
 // Reset zeroes the counters, so one phase of a read can be measured alone.
 func (c *CountingSource) Reset() { c.Reads, c.Bytes, c.Low, c.Spans = 0, 0, 0, nil }
+
+// ReadsOnceInOrder calls read to io.EOF and fails t unless src served it in n
+// reads running contiguously over [from, to): those bytes once, in order. src
+// is reset first, so what came before, such as an open, is not counted.
+func ReadsOnceInOrder(t testing.TB, src *CountingSource, read func(*container.Packet) error, from, to int64, n int) {
+	t.Helper()
+	src.Reset()
+	src.Log = true
+	for {
+		var pkt container.Packet
+		if err := read(&pkt); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if src.Reads != n || src.Bytes != to-from {
+		t.Errorf("the read to the end read %d bytes in %d reads, want %d in %d", src.Bytes, src.Reads, to-from, n)
+	}
+	if len(src.Spans) == 0 || src.Spans[0][0] != from || src.Spans[len(src.Spans)-1][1] != to {
+		t.Errorf("the reads span %v, want %d to %d", src.Spans, from, to)
+	}
+	for i := 1; i < len(src.Spans); i++ {
+		if src.Spans[i][0] != src.Spans[i-1][1] {
+			t.Errorf("read %d begins at %d, the one before it ended at %d", i, src.Spans[i][0], src.Spans[i-1][1])
+		}
+	}
+}
 
 // CancelAfterChecks returns a context that ends on its n-th Err call, so a
 // test can stop a loop that reads its context per step at a chosen step,

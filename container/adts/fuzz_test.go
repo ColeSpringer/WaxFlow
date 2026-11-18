@@ -35,12 +35,14 @@ func FuzzDemux(f *testing.F) {
 		var want int64
 		testutil.DemuxFuzz{
 			Open: func(src container.Source, strict bool) (container.Demuxer, error) {
-				return NewDemuxer(src, &DemuxerOptions{Strict: strict})
+				return NewDemuxer(src, &container.DemuxerOptions{Strict: strict})
 			},
+			// A frame is at least its 7-byte header and frames do not overlap,
+			// so the bytes bound the packets.
 			MaxPackets: func(raw []byte) int64 { return int64(len(raw)/7 + 4) },
 			Targets:    []int64{0, 1024, 1 << 20, 1 << 40},
-			// This target stops reading at the cap and does not fail there.
-			CapNotFatal: true,
+			SeekPTS:    true,
+			Walk:       true,
 			// A frame may be its header and nothing more, and its packet is empty.
 			EmptyData: true,
 			Opened: func(_ testing.TB, d container.Demuxer, _ bool) {
@@ -66,14 +68,15 @@ func FuzzDemux(f *testing.F) {
 // walkCountsWhatAReadDelivers holds a tolerant walk of data to a read of it:
 // the walk publishes exactly the frames a read delivers, and every one of
 // them is whole. The index is what makes a strict probe's count trustworthy,
-// so a frame it holds must fit in the source.
+// so a frame it holds must fit in the source. Beyond what Walk holds, a
+// tolerant walk of accepted bytes never fails.
 func walkCountsWhatAReadDelivers(t testing.TB, data []byte) {
 	w, err := NewDemuxer(container.BytesSource(data), nil)
 	if err != nil {
 		return
 	}
-	if err := w.Walk(context.Background()); err != nil || !w.Walked() {
-		t.Fatalf("a tolerant walk of accepted bytes failed: %v (walked %v)", err, w.Walked())
+	if err := w.Walk(context.Background()); err != nil {
+		t.Fatalf("a tolerant walk of accepted bytes failed: %v", err)
 	}
 	// Every entry's whole frame lies inside the data. Asserted on the
 	// index rather than on the packets a read delivers, because a read

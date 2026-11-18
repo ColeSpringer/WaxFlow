@@ -45,23 +45,81 @@ type FrameInfo struct {
 // here rather than in each container: pre-1.0 "old format" streams
 // (Flake) code sample numbers with the variable-blocksize bit clear, and
 // unequal STREAMINFO block size bounds are how libFLAC detects them too.
-// Containers latch it once from STREAMINFO and the first frame.
+// Containers latch it once, from STREAMINFO, the first frame they are
+// shown and, where NumberingUnsettled, what follows that frame.
 type Numbering struct {
 	// SampleCoded means coded numbers are sample positions; otherwise
 	// they are frame indexes at a constant block size.
 	SampleCoded bool
-	// ConstBlock is the fixed-strategy constant block size, from the
-	// first frame.
+	// ConstBlock is the fixed-strategy constant block size: the first
+	// frame's, or STREAMINFO's where that frame is the stream's short last.
 	ConstBlock int
 }
 
-// Numbering latches the stream's coded-number semantics from the first
-// frame.
+// boundsValid reports whether the block size bounds are ones a stream may
+// state: 16 to 65535, the minimum no larger (RFC 9639 section 8.2).
+func (si StreamInfo) boundsValid() bool {
+	return si.MinBlock >= 16 && si.MinBlock <= si.MaxBlock && si.MaxBlock <= MaxBlockSize
+}
+
+// FixedBlock is the block size STREAMINFO states for a fixed-blocksize
+// stream, its bounds being equal and valid, and 0 when it states none.
+func (si StreamInfo) FixedBlock() int {
+	if si.MinBlock == si.MaxBlock && si.boundsValid() {
+		return si.MinBlock
+	}
+	return 0
+}
+
+// Numbering latches the stream's coded-number semantics from STREAMINFO and
+// the first frame a reader is shown, with nothing known of what follows it.
 func (si StreamInfo) Numbering(first FrameInfo) Numbering {
 	return Numbering{
 		SampleCoded: first.Variable || si.MinBlock != si.MaxBlock,
 		ConstBlock:  first.BlockSize,
 	}
+}
+
+// NumberingUnsettled reports whether what follows first can change what
+// Numbering says: first is shorter than the block size the bounds state, as
+// only a last frame may be, or they state none and first is over a sample.
+func (si StreamInfo) NumberingUnsettled(first FrameInfo) bool {
+	if fixed := si.FixedBlock(); fixed != 0 {
+		return !first.Variable && first.BlockSize < fixed
+	}
+	return !first.Variable && first.BlockSize > 1
+}
+
+// NumberingBy is Numbering with next, the frame behind first, as evidence,
+// which unequal bounds, damaged or not, give way to. Numbered one higher,
+// the stream counts frames. Numbered a block higher under bounds that state
+// no block size, it counts samples.
+func (si StreamInfo) NumberingBy(first, next FrameInfo) Numbering {
+	return si.NumberingFrom(first, first, next)
+}
+
+// NumberingFrom is NumberingBy with next behind whole, a frame behind first
+// that checks where first does not: the same evidence, one frame on.
+func (si StreamInfo) NumberingFrom(first, whole, next FrameInfo) Numbering {
+	switch {
+	case !si.NumberingUnsettled(first) || whole.Variable || next.Variable || whole.BlockSize < 2:
+	case next.Coded == whole.Coded+1:
+		return Numbering{ConstBlock: whole.BlockSize}
+	case next.Coded == whole.Coded+uint64(whole.BlockSize) && si.FixedBlock() == 0:
+		return Numbering{SampleCoded: true, ConstBlock: whole.BlockSize}
+	}
+	return si.Numbering(first)
+}
+
+// NumberingLast is Numbering where first is known to be the stream's last
+// frame, the one frame that may be shorter than the block size STREAMINFO
+// states: that size then places it, not its own.
+func (si StreamInfo) NumberingLast(first FrameInfo) Numbering {
+	n := si.Numbering(first)
+	if fixed := si.FixedBlock(); first.BlockSize < fixed {
+		n.ConstBlock = fixed
+	}
+	return n
 }
 
 // Start returns the frame's first sample position.

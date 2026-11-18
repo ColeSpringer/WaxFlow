@@ -143,6 +143,12 @@ const (
 	src51     = "src=lib/sine-5_1.flac"    // six channels
 	srcGained = "src=lib/gained.m4a"       // REPLAYGAIN_TRACK_GAIN of -6 dB
 	srcWebM   = "src=lib/seed.webm"        // Opus in WebM, seven 960-sample packets
+	srcWV     = "src=lib/sine.wv"          // WavPack, 44.1 kHz stereo, 16-bit
+	srcOGA    = "src=lib/sine.oga"         // FLAC in Ogg, 44.1 kHz stereo, 16-bit
+	srcOpus   = "src=lib/sine.opus"        // Opus in Ogg
+	srcVorbis = "src=lib/sine.ogg"         // Vorbis in Ogg
+	srcWMA    = "src=lib/sine.wma"         // WMA v2 in ASF, 44.1 kHz stereo
+	srcWMAPro = "src=lib/pro.wma"          // WMA Pro in ASF
 	srcM4B    = "src=lib/book.m4b"         // AAC-LC in MP4, with tags
 	srcHEAAC  = "src=lib/he.aac"           // HE-AAC in ADTS, signalled implicitly
 	spanOpus  = "&from=960&to=3840"        // whole 960-sample packets
@@ -178,6 +184,8 @@ func keyMatrix(tl, mixed, withWebM string) (cases []keyCase) {
 		{"remux-webm-mka", srcWebM + "&format=opus&container=mka"},
 		{"remux-flac-mka", srcFLAC + "&format=flac&container=mka"},
 		{"remux-flac-ogg", srcFLAC + "&format=flac&container=ogg"},
+		// An Ogg FLAC source: its demuxer's revision heads the versions.
+		{"remux-oga-flac", srcOGA + "&format=flac"},
 		{"remux-m4b-aac", srcM4B + "&format=aac"},
 		{"remux-m4b-adts", srcM4B + "&format=aac&container=adts"},
 		{"remux-m4b-fragmented", srcM4B + "&format=aac&container=fragmented"},
@@ -246,6 +254,16 @@ func keyMatrix(tl, mixed, withWebM string) (cases []keyCase) {
 		// A Matroska source: its demuxer's revision heads the versions on
 		// this rung as on the copy rungs above.
 		{"webm-flac", srcWebM + "&format=flac"},
+		// And a WavPack one's.
+		{"wv-flac", srcWV + "&format=flac"},
+		// And an Ogg one's, whatever its codec: FLAC, Opus and Vorbis.
+		{"oga-wav", srcOGA + "&format=wav"},
+		{"ogg-opus-flac", srcOpus + "&format=flac"},
+		{"ogg-vorbis-flac", srcVorbis + "&format=flac"},
+		// And a WMA v1/v2 one's in ASF. A WMA Pro source names none: only
+		// the counted codec reads otherwise than it did.
+		{"wma-flac", srcWMA + "&format=flac"},
+		{"wma-pro-flac", srcWMAPro + "&format=flac"},
 		{"he-aac-in-adts", srcWAV + "&format=he-aac&container=adts"},
 		{"he-aac-fragmented", srcWAV + "&format=he-aac&container=fragmented"},
 		{"he-aac-in-mka", srcWAV + "&format=he-aac&container=mka"},
@@ -269,6 +287,7 @@ func keyMatrix(tl, mixed, withWebM string) (cases []keyCase) {
 		{"hls-remux-opus", srcWebM + "&format=opus"},
 		{"hls-remux-flac16", srcFLAC + "&format=flac"},
 		{"hls-remux-flac24", srcFLAC24 + "&format=flac"},
+		{"hls-remux-oga", srcOGA + "&format=flac"},
 		{"hls-remux-aac", srcM4B + "&format=aac"},
 		// A copy answers the stream's own signalling, where an encode answers LC.
 		{"hls-remux-heaac-as-aac", srcHEAAC + "&format=aac"},
@@ -298,6 +317,8 @@ func keyMatrix(tl, mixed, withWebM string) (cases []keyCase) {
 		{"hls-tl-flac-webm-member", "tl=" + withWebM + "&format=flac" + gainOff},
 		{"hls-ref-not-utf8", straySrc + "&format=flac"},
 		{"hls-webm-flac", srcWebM + "&format=flac"},
+		{"hls-wv-flac", srcWV + "&format=flac"},
+		{"hls-wma-flac", srcWMA + "&format=flac"},
 	})
 	return cases
 }
@@ -330,6 +351,12 @@ func keyEnv(t *testing.T) (*testEnv, *keyLog) {
 	put("sine-5_1.flac", read("..", "testdata", "sine-5_1-s16.flac"))
 	put("book.m4b", read("..", "testdata", "golden", "m4b-chapters.m4b"))
 	put("he.aac", read("..", "container", "adts", "testdata", "golden-heaac-implicit.aac"))
+	put("sine.wv", read("..", "testdata", "sine-s16.wv"))
+	put("sine.oga", read("..", "testdata", "sine-s16.oga"))
+	put("sine.opus", read("..", "container", "ogg", "testdata", "golden-opus.opus"))
+	put("sine.ogg", read("..", "container", "ogg", "testdata", "golden-vorbis.ogg"))
+	put("sine.wma", read("..", "testdata", "sine-s16.wma"))
+	put("pro.wma", read("..", "container", "asf", "testdata", "pro-s16.wma"))
 	// A line holds no byte of these two, only the depth and the gain they
 	// carry, so an encoder change does not move it. The gain rides an MP4
 	// because that is a container whose tags the demuxer hands back.

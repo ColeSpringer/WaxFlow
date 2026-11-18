@@ -96,7 +96,9 @@ func (d *Demuxer) parseSV7() error {
 	d.rg = sv7ReplayGain(uint16(w3>>16), uint16(w3), uint16(w4>>16), uint16(w4))
 	d.sv7 = sv7Stream{frames: frames, cursor: -1}
 
-	d.stripTrailers(d.base + sv7HeaderLen)
+	if err := d.stripTrailers(d.base + sv7HeaderLen); err != nil {
+		return err
+	}
 	d.sv7.endBits = ((d.w.DataEnd() - d.base) &^ 3) * 8
 	if err := d.sv7Walk(); err != nil {
 		return err
@@ -117,7 +119,9 @@ func (d *Demuxer) sv7Walk() error {
 	for present < s.frames {
 		if present%checkpointFrames == 0 {
 			s.checkpoints = append(s.checkpoints, pos)
-			d.w.Trim(d.base + pos>>3)
+			// To the word the length field's read starts in, or that read
+			// lands in front of the window and reads it all again.
+			d.w.Trim(d.base + (pos>>3)&^3)
 		}
 		n, ok := d.sv7Bits(pos, 20)
 		if !ok {
@@ -320,7 +324,7 @@ func (d *Demuxer) sv7Packet(i int64, pkt *container.Packet) error {
 	if err != nil {
 		return err
 	}
-	d.w.Trim(d.base + pos>>3)
+	d.w.Trim(d.base + (pos>>3)&^3) // the word sv7Realign's read starts in
 	head := d.packetHeader(1, bitLen)
 	var ok bool
 	if d.pkt, ok = d.sv7Realign(d.pkt[:head], pos, bitLen); !ok {

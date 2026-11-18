@@ -75,7 +75,7 @@ func muxWAV(t *testing.T, w io.Writer, cfg pcm.Config, f audio.Format, wire []by
 }
 
 // demuxAll parses src and returns the track and concatenated packet data.
-func demuxAll(t *testing.T, src container.Source, opts *DemuxerOptions) (container.Track, []byte, []container.Warning) {
+func demuxAll(t *testing.T, src container.Source, opts *container.DemuxerOptions) (container.Track, []byte, []container.Warning) {
 	t.Helper()
 	d, err := NewDemuxer(src, opts)
 	if err != nil {
@@ -142,7 +142,7 @@ func TestMuxDemuxRoundTrip(t *testing.T) {
 					raw = ws.Buf
 				}
 
-				track, data, warns := demuxAll(t, container.BytesSource(raw), &DemuxerOptions{Strict: true})
+				track, data, warns := demuxAll(t, container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 				_ = warns
 				if track.Fmt != f {
 					t.Errorf("format = %v, want %v", track.Fmt, f)
@@ -192,7 +192,7 @@ func TestRF64AutoWriteKnownLength(t *testing.T) {
 			if string(raw[12:16]) != "ds64" {
 				t.Fatalf("first chunk = %q, want ds64", raw[12:16])
 			}
-			track, data, _ := demuxAll(t, container.BytesSource(raw), &DemuxerOptions{Strict: true})
+			track, data, _ := demuxAll(t, container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 			if track.Samples != frames {
 				t.Errorf("samples = %d, want %d", track.Samples, frames)
 			}
@@ -218,7 +218,7 @@ func TestRF64RewriteUnknownLength(t *testing.T) {
 	if string(ws.Buf[12:16]) != "ds64" {
 		t.Fatalf("reservation = %q, want ds64 after rewrite", ws.Buf[12:16])
 	}
-	track, data, _ := demuxAll(t, container.BytesSource(ws.Buf), &DemuxerOptions{Strict: true})
+	track, data, _ := demuxAll(t, container.BytesSource(ws.Buf), &container.DemuxerOptions{Strict: true})
 	if track.Samples != 500 || !bytes.Equal(data, wire) {
 		t.Error("RF64 rewrite did not round-trip")
 	}
@@ -251,7 +251,7 @@ func TestStreamingUnknownLengthPlaceholders(t *testing.T) {
 	if len(warns) == 0 {
 		t.Error("expected a streaming-size warning")
 	}
-	if _, err := NewDemuxer(container.BytesSource(raw), &DemuxerOptions{Strict: true}); err == nil {
+	if _, err := NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err == nil {
 		t.Error("strict demux of streaming sizes must fail")
 	}
 }
@@ -306,7 +306,7 @@ func TestExtensibleLayoutRoundTrip(t *testing.T) {
 	ws := &memWS{}
 	muxWAV(t, ws, cfg, f, wire, 64, nil)
 
-	track, data, _ := demuxAll(t, container.BytesSource(ws.Buf), &DemuxerOptions{Strict: true})
+	track, data, _ := demuxAll(t, container.BytesSource(ws.Buf), &container.DemuxerOptions{Strict: true})
 	if track.Fmt.Layout != layout {
 		t.Errorf("layout = %v, want %v", track.Fmt.Layout, layout)
 	}
@@ -327,7 +327,7 @@ func TestOddDataSizePads(t *testing.T) {
 	if len(ws.Buf)%2 != 0 {
 		t.Errorf("file length %d is odd; data chunk must be padded", len(ws.Buf))
 	}
-	track, data, _ := demuxAll(t, container.BytesSource(ws.Buf), &DemuxerOptions{Strict: true})
+	track, data, _ := demuxAll(t, container.BytesSource(ws.Buf), &container.DemuxerOptions{Strict: true})
 	if track.Samples != 33 || !bytes.Equal(data, wire) {
 		t.Error("odd-sized payload did not round-trip")
 	}
@@ -423,7 +423,7 @@ func TestDemuxRefusesWavPackPayload(t *testing.T) {
 		{"magic without a header's shape", wav(head(0x407, 27)), false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			d, err := NewDemuxer(container.BytesSource(tc.raw), &DemuxerOptions{Strict: tc.strict})
+			d, err := NewDemuxer(container.BytesSource(tc.raw), &container.DemuxerOptions{Strict: tc.strict})
 			if tc.want == "" {
 				if err != nil {
 					t.Fatalf("a PCM payload spelling the magic was refused: %v", err)
@@ -455,7 +455,7 @@ func TestDemuxClampsTruncatedData(t *testing.T) {
 	if len(warns) == 0 {
 		t.Error("expected truncation warnings")
 	}
-	if _, err := NewDemuxer(container.BytesSource(cut), &DemuxerOptions{Strict: true}); err == nil {
+	if _, err := NewDemuxer(container.BytesSource(cut), &container.DemuxerOptions{Strict: true}); err == nil {
 		t.Error("strict demux of truncated file must fail")
 	}
 }
@@ -488,7 +488,7 @@ func TestDS64HugeDataSizeClamped(t *testing.T) {
 	if !found {
 		t.Errorf("expected a clamp warning, got %v", warns)
 	}
-	if _, err := NewDemuxer(container.BytesSource(ws.Buf), &DemuxerOptions{Strict: true}); err == nil {
+	if _, err := NewDemuxer(container.BytesSource(ws.Buf), &container.DemuxerOptions{Strict: true}); err == nil {
 		t.Error("strict demux of a lying ds64 must fail")
 	}
 }
@@ -596,7 +596,7 @@ func TestMuxAtANonZeroStart(t *testing.T) {
 			raw := testutil.MuxAtOffset(t, 97, func(w io.Writer) {
 				muxWAV(t, w, cfg, f, wire, -1, tt.opts)
 			})
-			track, data, _ := demuxAll(t, container.BytesSource(raw), &DemuxerOptions{Strict: true})
+			track, data, _ := demuxAll(t, container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 			if track.Samples != frames {
 				t.Errorf("read back %d frames, want %d", track.Samples, frames)
 			}
@@ -621,7 +621,7 @@ func TestMuxPipeLandsInTheStreamingColumn(t *testing.T) {
 	if string(w.Buf[12:16]) == "JUNK" {
 		t.Error("a writer whose Seek fails got the ds64 reservation")
 	}
-	track, data, _ := demuxAll(t, container.BytesSource(w.Buf), &DemuxerOptions{Strict: true})
+	track, data, _ := demuxAll(t, container.BytesSource(w.Buf), &container.DemuxerOptions{Strict: true})
 	if track.Samples != frames || !bytes.Equal(data, wire) {
 		t.Errorf("read back %d frames of %d bytes", track.Samples, len(data))
 	}
@@ -663,7 +663,7 @@ func TestMuxProbesAtBegin(t *testing.T) {
 	if !bytes.Equal(w.Buf[:len(preamble)], preamble) {
 		t.Fatalf("the caller's preamble was overwritten: % x", w.Buf[:8])
 	}
-	track, data, _ := demuxAll(t, container.BytesSource(w.Buf[len(preamble):]), &DemuxerOptions{Strict: true})
+	track, data, _ := demuxAll(t, container.BytesSource(w.Buf[len(preamble):]), &container.DemuxerOptions{Strict: true})
 	if track.Samples != frames || !bytes.Equal(data, wire) {
 		t.Errorf("read back %d frames of %d bytes", track.Samples, len(data))
 	}

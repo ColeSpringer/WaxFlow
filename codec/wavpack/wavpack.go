@@ -199,6 +199,11 @@ func SyncOK(b []byte) bool {
 	return ver >= MinStreamVersion && ver <= MaxStreamVersion
 }
 
+// MaxSamplesIn is the most samples n bytes of blocks can hold: a block is at
+// least its header and states at most maxBlockSamples. A block index past it
+// is a claim the bytes refute.
+func MaxSamplesIn(n int64) int64 { return (max(n, 0)/BlockHeaderLen + 1) * maxBlockSamples }
+
 // ParseBlockHeader parses the 32-byte header at the head of b.
 func ParseBlockHeader(b []byte) (BlockHeader, error) {
 	if len(b) < BlockHeaderLen {

@@ -259,7 +259,7 @@ func TestMuxerSplitsLargePackets(t *testing.T) {
 			}
 			requirePageFlow(t, readPages(t, out.Bytes()), durs)
 
-			d, err := NewDemuxer(container.BytesSource(out.Bytes()), &DemuxerOptions{Strict: true})
+			d, err := NewDemuxer(container.BytesSource(out.Bytes()), &container.DemuxerOptions{Strict: true})
 			if err != nil {
 				t.Fatal(err)
 			}

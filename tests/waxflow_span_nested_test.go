@@ -53,7 +53,7 @@ func TestSliceNestedHeadroom(t *testing.T) {
 	}
 	defer outer.Close()
 
-	h, ok := outer.(waxflow.Headroomer)
+	h, ok := outer.(format.Headroomer)
 	if !ok {
 		t.Fatal("a slice of a slice does not implement Headroomer")
 	}

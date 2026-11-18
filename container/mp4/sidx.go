@@ -150,7 +150,7 @@ func (d *Demuxer) readSidxAhead(sel *track) (sidxInfo, bool, error) {
 	have := false
 	off := d.fragStart
 	for off < d.size {
-		b, err := readBox(d.src, off, d.size)
+		b, err := d.readBox(off, d.size)
 		if err != nil {
 			// The box chain past the index is damaged. That ends the scan, it
 			// does not discard what the scan already found: an index whose
@@ -198,7 +198,7 @@ func (d *Demuxer) readSidxAhead(sel *track) (sidxInfo, bool, error) {
 	// more of the same segment stream: ffmpeg's trailing mfra, an mdat of some
 	// other track, anything the index was never describing. A moof, a styp or
 	// another sidx there means this index covered a prefix.
-	b, err := readBox(d.src, end, d.size)
+	b, err := d.readBox(end, d.size)
 	if err != nil {
 		return sidxInfo{}, false, nil
 	}

@@ -1,7 +1,6 @@
 package apen
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -10,6 +9,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/ape"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/diag"
 	"github.com/colespringer/waxflow/container/internal/id3"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
 	"github.com/colespringer/waxflow/container/internal/trailer"
@@ -45,20 +45,12 @@ const (
 	frameSlack = 4
 )
 
-// DemuxerOptions configures parsing.
-type DemuxerOptions struct {
-	// Strict turns tolerated damage (the Warnings list) into errors.
-	Strict bool
-}
-
 // Demuxer reads one Monkey's Audio track from a native .ape source.
 type Demuxer struct {
-	opts DemuxerOptions
-
-	hdr      ape.Header
-	track    container.Track
-	tags     map[string][]string
-	warnings container.Warnings
+	hdr   ape.Header
+	track container.Track
+	tags  map[string][]string
+	log   diag.Log
 
 	// base is the byte offset of the file header: nonzero when a tag or
 	// padding sits in front of it. Every offset the header states is measured
@@ -79,11 +71,8 @@ type Demuxer struct {
 // NewDemuxer parses the header of a native Monkey's Audio source and positions
 // on the first frame. The returned Demuxer implements container.Seeker,
 // container.Warner, and container.Tagger.
-func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
-	d := &Demuxer{src: src, w: srcwin.New(src, src.Size(), "ape: reading the file header")}
-	if opts != nil {
-		d.opts = *opts
-	}
+func NewDemuxer(src container.Source, opts *container.DemuxerOptions) (*Demuxer, error) {
+	d := &Demuxer{src: src, w: srcwin.New(src, src.Size(), "ape: reading the file header"), log: diag.New("ape: ", opts)}
 	if err := d.parse(); err != nil {
 		return nil, err
 	}
@@ -99,12 +88,7 @@ func malformed(format string, args ...any) error {
 
 // warn records tolerated damage, or fails in strict mode.
 func (d *Demuxer) warn(off int64, format string, args ...any) error {
-	msg := fmt.Sprintf(format, args...)
-	if d.opts.Strict {
-		return malformed("%s (at offset %d)", msg, off)
-	}
-	d.warnings.Damage(off, msg)
-	return nil
+	return d.log.Warn(off, format, args...)
 }
 
 func (d *Demuxer) parse() error {
@@ -146,69 +130,62 @@ func (d *Demuxer) parse() error {
 }
 
 // findHeader locates the file header, allowing for a tag or padding in front
-// of it, and parses it.
+// of it, and parses it. A leading tag that states more bytes than the data
+// holds is refused by name, since no header can follow it.
 func (d *Demuxer) findHeader() (int64, ape.Header, error) {
 	from := id3.Size(d.w.Peek(0, 10))
-	limit := min(from+maxJunk, d.w.DataEnd())
-	var firstErr error
-	tries := 0
-	for off := from; off < limit; tries++ {
-		if tries >= maxHeaderCandidates {
-			return 0, ape.Header{}, malformed("no Monkey's Audio header in the first %d candidates", tries)
+	if end := d.w.DataEnd(); from > end {
+		return 0, ape.Header{}, malformed("leading ID3v2 tag declares %d bytes, past the %d the data holds", from, end)
+	}
+	return d.headerIn(from, from+maxJunk)
+}
+
+// headerIn parses the first file header in [from, limit) that parses, of the
+// first maxHeaderCandidates magics, keeping the first parse error. The magic's
+// letters are a word a tag will spell, so Match is asked about the byte behind.
+func (d *Demuxer) headerIn(from, limit int64) (int64, ape.Header, error) {
+	limit = min(limit, d.w.DataEnd())
+	// The header is where it belongs in every file that is not damaged, so
+	// it is read there exactly: the scan then finds it resident and a clean
+	// open pays no span.
+	if from < limit && ape.Match(d.w.Peek(from, ape.MatchNeed)) {
+		d.w.Peek(from, ape.MaxHeaderLen)
+	}
+	var (
+		hdr      ape.Header
+		firstErr error
+		tries    int
+		capped   bool
+	)
+	off, ok := d.w.Scan(from, limit, ape.Magic, ape.MatchNeed, func(off int64, magic []byte) srcwin.Verdict {
+		if !ape.Match(magic) {
+			return srcwin.Skip
 		}
-		cand, ok := d.nextMagic(off, limit)
-		if !ok {
-			break
+		h, err := ape.ParseHeader(d.w.Ahead(off, ape.MaxHeaderLen))
+		if err == nil {
+			hdr = h
+			return srcwin.Take
 		}
-		if h, err := ape.ParseHeader(d.w.Peek(cand, ape.MaxHeaderLen)); err == nil {
-			return cand, h, nil
-		} else if firstErr == nil {
+		if firstErr == nil {
 			firstErr = err
 		}
-		off = cand + 1
-	}
-	if d.w.Err() != nil {
+		if tries++; tries >= maxHeaderCandidates && off+1 < limit {
+			capped = true
+			return srcwin.Stop
+		}
+		return srcwin.Skip
+	})
+	switch {
+	case ok:
+		return off, hdr, nil
+	case d.w.Err() != nil:
 		return 0, ape.Header{}, d.w.Err()
-	}
-	if firstErr != nil {
+	case capped:
+		return 0, ape.Header{}, malformed("no Monkey's Audio header in the first %d candidates", tries)
+	case firstErr != nil:
 		return 0, ape.Header{}, firstErr
 	}
 	return 0, ape.Header{}, malformed("no Monkey's Audio header in the first %d bytes", limit-from)
-}
-
-// nextMagic returns the next offset in [from, limit) carrying the file magic.
-// It scans a window at a time and searches the whole magic, since the three
-// bytes it starts with are an ordinary word that a tag comment or a cover
-// image will spell.
-func (d *Demuxer) nextMagic(from, limit int64) (int64, bool) {
-	// The magic is where it belongs in every file that is not damaged, so
-	// that is tried with an exact read before the scan pays for a window.
-	if b := d.w.Peek(from, ape.MatchNeed); len(b) == ape.MatchNeed && ape.Match(b) {
-		return from, true
-	}
-	for off := from; off < limit; {
-		b := d.w.BytesAt(off, srcwin.Chunk)
-		// A window too short to hold the magic ends the scan, and it also
-		// keeps the step below positive.
-		if len(b) < ape.MatchNeed {
-			return 0, false
-		}
-		for rel := 0; rel+ape.MatchNeed <= len(b); {
-			i := bytes.Index(b[rel:], ape.Magic)
-			if i < 0 {
-				break
-			}
-			rel += i
-			if cand := off + int64(rel); cand < limit && ape.Match(b[rel:]) {
-				return cand, true
-			}
-			rel++
-		}
-		// Step back by the magic length so one straddling the window boundary
-		// is not lost between passes.
-		off += int64(len(b)) - int64(ape.MatchNeed) + 1
-	}
-	return 0, false
 }
 
 // stripTrailers peels the tags a tagger appended after the audio, shrinking
@@ -287,13 +264,13 @@ func (d *Demuxer) readSeekTable() error {
 	// same thing; disagreement means one of them is wrong, and neither is
 	// checkable against the other's evidence, so the file is refused.
 	if want := d.base + h.FrameDataOffset; d.seek[0] != want {
-		return malformed("seek table starts at %d but the header puts the frames at %d", d.seek[0], want)
+		return malformed("seek table starts at %d but the header puts the frames at %d", d.log.At(d.seek[0]), d.log.At(want))
 	}
 	maxFrame := d.maxFrameBytes()
 	for i := range n {
 		switch {
 		case d.seek[i+1] < d.seek[i]:
-			return malformed("frame %d ends at %d, before its start at %d", i, d.seek[i+1], d.seek[i])
+			return malformed("frame %d ends at %d, before its start at %d", i, d.log.At(d.seek[i+1]), d.log.At(d.seek[i]))
 		case d.seek[i+1] == d.seek[i]:
 			// A frame is never empty: it opens with a CRC word and closes
 			// with the range coder's four-byte flush, so the shortest one the
@@ -303,9 +280,9 @@ func (d *Demuxer) readSeekTable() error {
 			// and it is the only way an entry can equal its predecessor.
 			// Refusing here is what keeps the packet the demuxer emits one
 			// the decoder can parse.
-			return malformed("frame %d holds no bytes: the audio ends where it starts, at %d", i, d.seek[i])
+			return malformed("frame %d holds no bytes: the audio ends where it starts, at %d", i, d.log.At(d.seek[i]))
 		case d.seek[i+1] > d.w.DataEnd():
-			return malformed("frame %d runs to %d, past the %d bytes of audio", i, d.seek[i+1], d.w.DataEnd())
+			return malformed("frame %d runs to %d, past the %d bytes of audio", i, d.log.At(d.seek[i+1]), d.log.At(d.w.DataEnd()))
 		case d.seek[i+1]-d.seek[i] > maxFrame:
 			return malformed("frame %d of %d bytes exceeds the %d-byte bound", i, d.seek[i+1]-d.seek[i], maxFrame)
 		}
@@ -327,10 +304,10 @@ func (d *Demuxer) maxFrameBytes() int64 {
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns damage tolerated during parsing.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
+func (d *Demuxer) Warnings() []container.Warning { return d.log.List() }
 
 // DamageCount implements container.Damaged.
-func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
+func (d *Demuxer) DamageCount() int { return d.log.DamageCount() }
 
 // Tags returns the APEv2 tag's fields under canonical uppercase keys.
 func (d *Demuxer) Tags() map[string][]string { return d.tags }

@@ -37,7 +37,7 @@ func voiceFile(t *testing.T, hole int) (raw []byte, rate int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d, err := asf.NewDemuxer(container.BytesSource(src), &asf.DemuxerOptions{Strict: true})
+	d, err := asf.NewDemuxer(container.BytesSource(src), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestADroppedObjectIsADiscontinuity(t *testing.T) {
 	raw, _ := voiceFile(t, hole)
 
 	t.Run("strict refuses it", func(t *testing.T) {
-		d, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+		d, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 		if err == nil {
 			err = readToErr(d)
 		}
@@ -182,7 +182,7 @@ func TestADecodeReadsPastAHoleAsAResume(t *testing.T) {
 // directly: the format layer buffers and would blur the object boundary.
 func superframesPerObject(t *testing.T, raw []byte) []int {
 	t.Helper()
-	d, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+	d, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -62,7 +62,7 @@ func TestG711CompressionTypes(t *testing.T) {
 			t.Run(string(tc.want), func(t *testing.T) {
 				payload := []byte{0xD5, 0x55, 0xFF, 0x7F}
 				raw := buildAIFCn(tc.comp, 1, bits, payload, 4)
-				track, data, warns := demuxAll(t, container.BytesSource(raw), &DemuxerOptions{Strict: true})
+				track, data, warns := demuxAll(t, container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 				if track.Codec != tc.want {
 					t.Fatalf("codec = %q, want %q", track.Codec, tc.want)
 				}
@@ -101,7 +101,7 @@ func TestIMA4CountsPackets(t *testing.T) {
 			payload[i] = byte(i)
 		}
 		raw := buildAIFCn(compIMA4, channels, 4, payload, 3)
-		track, data, warns := demuxAll(t, container.BytesSource(raw), &DemuxerOptions{Strict: true})
+		track, data, warns := demuxAll(t, container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 		if track.Codec != codec.IMAADPCM {
 			t.Fatalf("codec = %q, want %q", track.Codec, codec.IMAADPCM)
 		}
@@ -186,7 +186,7 @@ func TestWidthStatingTypes(t *testing.T) {
 		t.Run(tc.comp, func(t *testing.T) {
 			payload := make([]byte, tc.bits/8*4)
 			raw := buildAIFCn(tc.comp, 1, 16, payload, 4)
-			track, data, warns := demuxAll(t, container.BytesSource(raw), &DemuxerOptions{Strict: true})
+			track, data, warns := demuxAll(t, container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 			cfg, err := pcm.ParseConfig(track.CodecConfig)
 			if err != nil {
 				t.Fatal(err)
@@ -229,7 +229,7 @@ func TestCompressionTypesFoldCase(t *testing.T) {
 				frames = 1
 			}
 			raw := buildAIFCn(tc.comp, 1, tc.bits, make([]byte, tc.bytes), frames)
-			track, _, warns := demuxAll(t, container.BytesSource(raw), &DemuxerOptions{Strict: true})
+			track, _, warns := demuxAll(t, container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 			if track.Codec != tc.want {
 				t.Errorf("codec = %q, want %q", track.Codec, tc.want)
 			}
@@ -245,7 +245,7 @@ func TestCompressionTypesFoldCase(t *testing.T) {
 func TestSowtIsLittleEndianAtEveryWidth(t *testing.T) {
 	for _, comp := range []string{"sowt", "SOWT"} {
 		raw := buildAIFCn(comp, 1, 16, []byte{0x02, 0x01}, 1)
-		track, _, _ := demuxAll(t, container.BytesSource(raw), &DemuxerOptions{Strict: true})
+		track, _, _ := demuxAll(t, container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 		cfg, err := pcm.ParseConfig(track.CodecConfig)
 		if err != nil {
 			t.Fatal(err)

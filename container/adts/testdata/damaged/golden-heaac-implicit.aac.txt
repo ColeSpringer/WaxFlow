@@ -1,0 +1,174 @@
+# <case> p<n> <pts> <dur> <crc-32 of the data>, with lost=<samples> and discont where the packet says so
+# <case> seek <target> landed <position>, then the packet read next in the same fields
+clean file 2080 bytes
+clean open samples=-1 exact=false
+clean packets 7
+clean p0 0 2048 e71083eb
+clean p1 2048 2048 d6d6230c
+clean p2 4096 2048 843336ac
+clean p3 6144 2048 2212c1a9
+clean p4 8192 2048 7fa3ba06
+clean p5 10240 2048 faa034d5
+clean p6 12288 2048 e0f28c06
+clean warnings 0
+clean seek 3584 landed 0, then 0 2048 e71083eb
+clean seek 7168 landed 0, then 0 2048 e71083eb
+clean seek 10752 landed 0, then 0 2048 e71083eb
+clean seek warnings 0
+junk-head file 10272 bytes: 8192 bytes of junk at 0, every second one 0xff
+junk-head open samples=-1 exact=false
+junk-head packets 7
+junk-head p0 0 2048 e71083eb
+junk-head p1 2048 2048 d6d6230c
+junk-head p2 4096 2048 843336ac
+junk-head p3 6144 2048 2212c1a9
+junk-head p4 8192 2048 7fa3ba06
+junk-head p5 10240 2048 faa034d5
+junk-head p6 12288 2048 e0f28c06
+junk-head warnings 1
+junk-head w0 damage at 0: 8192 unparsable bytes before the first frame
+junk-head seek 3584 landed 0, then 0 2048 e71083eb
+junk-head seek 7168 landed 0, then 0 2048 e71083eb
+junk-head seek 10752 landed 0, then 0 2048 e71083eb
+junk-head seek warnings 0
+junk-span file 3101 bytes: 1021 bytes of junk at 0, every second one 0xff
+junk-span open samples=-1 exact=false
+junk-span packets 7
+junk-span p0 0 2048 e71083eb
+junk-span p1 2048 2048 d6d6230c
+junk-span p2 4096 2048 843336ac
+junk-span p3 6144 2048 2212c1a9
+junk-span p4 8192 2048 7fa3ba06
+junk-span p5 10240 2048 faa034d5
+junk-span p6 12288 2048 e0f28c06
+junk-span warnings 1
+junk-span w0 damage at 0: 1021 unparsable bytes before the first frame
+junk-span seek 3584 landed 0, then 0 2048 e71083eb
+junk-span seek 7168 landed 0, then 0 2048 e71083eb
+junk-span seek 10752 landed 0, then 0 2048 e71083eb
+junk-span seek warnings 0
+junk-mid file 10272 bytes: 8192 bytes of junk at 1047, every second one 0xff
+junk-mid open samples=-1 exact=false
+junk-mid packets 7
+junk-mid p0 0 2048 e71083eb
+junk-mid p1 2048 2048 d6d6230c
+junk-mid p2 4096 2048 843336ac
+junk-mid p3 6144 2048 2212c1a9
+junk-mid p4 8192 2048 7fa3ba06
+junk-mid p5 10240 2048 faa034d5
+junk-mid p6 12288 2048 e0f28c06
+junk-mid warnings 1
+junk-mid w0 damage at 1047: 8192 unparsable bytes skipped
+junk-mid seek 3584 landed 0, then 0 2048 e71083eb
+junk-mid seek 7168 landed 0, then 0 2048 e71083eb
+junk-mid seek 10752 landed 0, then 0 2048 e71083eb
+junk-mid seek warnings 0
+decoy-mid file 10272 bytes: 8192 bytes of junk at 1047, every second one 0xff, the 32 bytes that follow it also at 3095
+decoy-mid open samples=-1 exact=false
+decoy-mid packets 7
+decoy-mid p0 0 2048 e71083eb
+decoy-mid p1 2048 2048 d6d6230c
+decoy-mid p2 4096 2048 843336ac
+decoy-mid p3 6144 2048 2212c1a9
+decoy-mid p4 8192 2048 7fa3ba06
+decoy-mid p5 10240 2048 faa034d5
+decoy-mid p6 12288 2048 e0f28c06
+decoy-mid warnings 1
+decoy-mid w0 damage at 1047: 8192 unparsable bytes skipped
+decoy-mid seek 3584 landed 0, then 0 2048 e71083eb
+decoy-mid seek 7168 landed 0, then 0 2048 e71083eb
+decoy-mid seek 10752 landed 0, then 0 2048 e71083eb
+decoy-mid seek warnings 0
+junk-island file 18464 bytes: 8192 bytes of junk at 1047 and at 9561, every second one 0xff, the 322 bytes between them whole
+junk-island open samples=-1 exact=false
+junk-island packets 6
+junk-island p0 0 2048 e71083eb
+junk-island p1 2048 2048 d6d6230c
+junk-island p2 4096 2048 843336ac
+junk-island p3 6144 2048 7fa3ba06
+junk-island p4 8192 2048 faa034d5
+junk-island p5 10240 2048 e0f28c06
+junk-island warnings 1
+junk-island w0 damage at 1047: 16706 unparsable bytes skipped
+junk-island seek 3584 landed 0, then 0 2048 e71083eb
+junk-island seek 7168 landed 0, then 0 2048 e71083eb
+junk-island seek 10752 landed 0, then 0 2048 e71083eb
+junk-island seek warnings 0
+junk-island-header file 18464 bytes: 8192 bytes of junk at 1047 and at 9593, every second one 0xff, the 354 bytes between them whole
+junk-island-header open samples=-1 exact=false
+junk-island-header packets 7
+junk-island-header p0 0 2048 e71083eb
+junk-island-header p1 2048 2048 d6d6230c
+junk-island-header p2 4096 2048 843336ac
+junk-island-header p3 6144 2048 2212c1a9
+junk-island-header p4 8192 2048 97036123
+junk-island-header p5 10240 2048 faa034d5
+junk-island-header p6 12288 2048 e0f28c06
+junk-island-header warnings 2
+junk-island-header w0 damage at 1047: 8192 unparsable bytes skipped
+junk-island-header w1 damage at 9896: 8192 unparsable bytes skipped
+junk-island-header seek 3584 landed 0, then 0 2048 e71083eb
+junk-island-header seek 7168 landed 0, then 0 2048 e71083eb
+junk-island-header seek 10752 landed 0, then 0 2048 e71083eb
+junk-island-header seek warnings 0
+junk-last file 10272 bytes: 8192 bytes of junk at 2050, every second one 0xff
+junk-last open samples=-1 exact=false
+junk-last packets 7
+junk-last p0 0 2048 e71083eb
+junk-last p1 2048 2048 d6d6230c
+junk-last p2 4096 2048 843336ac
+junk-last p3 6144 2048 2212c1a9
+junk-last p4 8192 2048 7fa3ba06
+junk-last p5 10240 2048 faa034d5
+junk-last p6 12288 2048 e0f28c06
+junk-last warnings 1
+junk-last w0 damage at 2050: 8192 unparsable bytes skipped
+junk-last seek 3584 landed 0, then 0 2048 e71083eb
+junk-last seek 7168 landed 0, then 0 2048 e71083eb
+junk-last seek 10752 landed 0, then 0 2048 e71083eb
+junk-last seek warnings 0
+junk-tail file 10272 bytes: 8192 bytes of junk at 2080, every second one 0xff
+junk-tail open samples=-1 exact=false
+junk-tail packets 7
+junk-tail p0 0 2048 e71083eb
+junk-tail p1 2048 2048 d6d6230c
+junk-tail p2 4096 2048 843336ac
+junk-tail p3 6144 2048 2212c1a9
+junk-tail p4 8192 2048 7fa3ba06
+junk-tail p5 10240 2048 faa034d5
+junk-tail p6 12288 2048 e0f28c06
+junk-tail warnings 1
+junk-tail w0 damage at 2080: 8192 trailing bytes are not frames, dropped
+junk-tail seek 3584 landed 0, then 0 2048 e71083eb
+junk-tail seek 7168 landed 0, then 0 2048 e71083eb
+junk-tail seek 10752 landed 0, then 0 2048 e71083eb
+junk-tail seek warnings 0
+zero-middle file 2080 bytes: 64 bytes zeroed at 1040
+zero-middle open samples=-1 exact=false
+zero-middle packets 6
+zero-middle p0 0 2048 e71083eb
+zero-middle p1 2048 2048 d6d6230c
+zero-middle p2 4096 2048 b50e068c
+zero-middle p3 6144 2048 7fa3ba06
+zero-middle p4 8192 2048 faa034d5
+zero-middle p5 10240 2048 e0f28c06
+zero-middle warnings 1
+zero-middle w0 damage at 1047: 322 unparsable bytes skipped
+zero-middle seek 3584 landed 0, then 0 2048 e71083eb
+zero-middle seek 7168 landed 0, then 0 2048 e71083eb
+zero-middle seek 10752 landed 0, then 0 2048 e71083eb
+zero-middle seek warnings 0
+cut-tail file 1980 bytes: the last 100 bytes cut
+cut-tail open samples=-1 exact=false
+cut-tail packets 5
+cut-tail p0 0 2048 e71083eb
+cut-tail p1 2048 2048 d6d6230c
+cut-tail p2 4096 2048 843336ac
+cut-tail p3 6144 2048 2212c1a9
+cut-tail p4 8192 2048 7fa3ba06
+cut-tail warnings 1
+cut-tail w0 damage at 1704: truncated final frame dropped
+cut-tail seek 3584 landed 0, then 0 2048 e71083eb
+cut-tail seek 7168 landed 0, then 0 2048 e71083eb
+cut-tail seek 10752 landed 0, then 0 2048 e71083eb
+cut-tail seek warnings 0

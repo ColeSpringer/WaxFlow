@@ -736,7 +736,7 @@ func TestTruncatedFileIsToleratedThenRefused(t *testing.T) {
 		t.Errorf("warnings do not mention the short packet run: %v", d.Warnings())
 	}
 
-	if _, err := asf.NewDemuxer(container.BytesSource(cut), &asf.DemuxerOptions{Strict: true}); err == nil {
+	if _, err := asf.NewDemuxer(container.BytesSource(cut), &container.DemuxerOptions{Strict: true}); err == nil {
 		t.Error("strict mode accepted a truncated file")
 	}
 }
@@ -745,7 +745,7 @@ func TestTruncatedFileIsToleratedThenRefused(t *testing.T) {
 // real-world mess, so a well-formed file must sail through unchanged.
 func TestStrictAcceptsACleanFile(t *testing.T) {
 	for _, name := range []string{"sine-wmav2.wma", "sine-wmav1.wma", "mono-8k.wma", "frag.wma", "tagged.wma", "chapters.wma"} {
-		d, err := asf.NewDemuxer(container.BytesSource(fixture(t, name)), &asf.DemuxerOptions{Strict: true})
+		d, err := asf.NewDemuxer(container.BytesSource(fixture(t, name)), &container.DemuxerOptions{Strict: true})
 		if err != nil {
 			t.Fatalf("%s: strict mode refused a clean file: %v", name, err)
 		}
@@ -777,7 +777,7 @@ func TestTrailingBytesAreNotDamage(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := append(bytes.Clone(fixture(t, "sine-wmav2.wma")), tc.tail...)
-			d, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+			d, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 			if err != nil {
 				t.Fatalf("strict mode refused a file with %s behind the audio: %v", tc.name, err)
 			}
@@ -964,7 +964,7 @@ func TestDataObjectGUIDIsRequired(t *testing.T) {
 // rather than reported. Without that, every seek in such a file logs a warning
 // and strict mode fails one outright.
 func TestSeekIntoAFragmentedObjectIsNotDamage(t *testing.T) {
-	d, err := asf.NewDemuxer(container.BytesSource(fixture(t, "frag.wma")), &asf.DemuxerOptions{Strict: true})
+	d, err := asf.NewDemuxer(container.BytesSource(fixture(t, "frag.wma")), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}

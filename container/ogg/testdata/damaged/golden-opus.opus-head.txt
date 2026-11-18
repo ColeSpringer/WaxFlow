@@ -1,0 +1,372 @@
+# <case> p<n> <pts> <dur> <crc-32 of the data>, with lost=<samples> and discont where the packet says so
+# <case> seek <target> landed <position>, then the packet read next in the same fields
+clean file 16652 bytes: golden-opus.opus up to its sixth audio page
+clean open samples=62088 exact=true
+clean packets 65
+clean p0 0 960 d44304fb
+clean p1 960 960 927b1652
+clean p2 1920 960 c3149186
+clean p3 2880 960 15c1c8bd
+clean p4 3840 960 d4109be4
+clean p5 4800 960 9631478f
+clean p6 5760 960 b2307a09
+clean p7 6720 960 e1f57d50
+clean p8 7680 960 4433af3e
+clean p9 8640 960 b01049e9
+clean p10 9600 960 567089f2
+clean p11 10560 960 8bc900af
+clean p12 11520 960 eec2fb4b
+clean p13 12480 960 199732b9
+clean p14 13440 960 b4f050ca
+clean p15 14400 960 2a6b375f
+clean p16 15360 960 489e11b1
+clean p17 16320 960 4c7557d6
+clean p18 17280 960 6184ece1
+clean p19 18240 960 8e2e9824
+clean p20 19200 960 15c36b4b
+clean p21 20160 960 98021e19
+clean p22 21120 960 e3c94b3e
+clean p23 22080 960 11821571
+clean p24 23040 960 4031fc17
+clean p25 24000 960 ba3de7c9
+clean p26 24960 960 258fb08b
+clean p27 25920 960 eaf80211
+clean p28 26880 960 8ae160dd
+clean p29 27840 960 4804134c
+clean p30 28800 960 31edf167
+clean p31 29760 960 ca12c1b4
+clean p32 30720 960 9d652f5e
+clean p33 31680 960 a5b80f20
+clean p34 32640 960 ec1e2ab1
+clean p35 33600 960 3c650f37
+clean p36 34560 960 48623d23
+clean p37 35520 960 029b0a04
+clean p38 36480 960 59f8e2d2
+clean p39 37440 960 6129d6aa
+clean p40 38400 960 625999e0
+clean p41 39360 960 a6bf069a
+clean p42 40320 960 0c71344a
+clean p43 41280 960 83be1377
+clean p44 42240 960 e75b3340
+clean p45 43200 960 563448b4
+clean p46 44160 960 f68f5da7
+clean p47 45120 960 7b279cb7
+clean p48 46080 960 17ae59cb
+clean p49 47040 960 47c7d6c2
+clean p50 48000 960 24914b84
+clean p51 48960 960 b2fbc267
+clean p52 49920 960 b76cb82d
+clean p53 50880 960 28d6bc02
+clean p54 51840 960 99427732
+clean p55 52800 960 b69ce88e
+clean p56 53760 960 3ebeeba7
+clean p57 54720 960 75326a13
+clean p58 55680 960 a3afdd6a
+clean p59 56640 960 8316b29e
+clean p60 57600 960 05e49ef5
+clean p61 58560 960 d6b4efd2
+clean p62 59520 960 69b746a5
+clean p63 60480 960 aedf9a48
+clean p64 61440 960 01101188
+clean warnings 0
+clean seek 15600 landed 0, then 0 960 d44304fb
+clean seek 31200 landed 0, then 0 960 d44304fb
+clean seek 46800 landed 0, then 0 960 d44304fb
+clean seek warnings 0
+junk-last file 24844 bytes: 8192 bytes of junk at 12753, every second one 0x4f
+junk-last open samples=62088 exact=true
+junk-last packets 65
+junk-last p0 0 960 d44304fb
+junk-last p1 960 960 927b1652
+junk-last p2 1920 960 c3149186
+junk-last p3 2880 960 15c1c8bd
+junk-last p4 3840 960 d4109be4
+junk-last p5 4800 960 9631478f
+junk-last p6 5760 960 b2307a09
+junk-last p7 6720 960 e1f57d50
+junk-last p8 7680 960 4433af3e
+junk-last p9 8640 960 b01049e9
+junk-last p10 9600 960 567089f2
+junk-last p11 10560 960 8bc900af
+junk-last p12 11520 960 eec2fb4b
+junk-last p13 12480 960 199732b9
+junk-last p14 13440 960 b4f050ca
+junk-last p15 14400 960 2a6b375f
+junk-last p16 15360 960 489e11b1
+junk-last p17 16320 960 4c7557d6
+junk-last p18 17280 960 6184ece1
+junk-last p19 18240 960 8e2e9824
+junk-last p20 19200 960 15c36b4b
+junk-last p21 20160 960 98021e19
+junk-last p22 21120 960 e3c94b3e
+junk-last p23 22080 960 11821571
+junk-last p24 23040 960 4031fc17
+junk-last p25 24000 960 ba3de7c9
+junk-last p26 24960 960 258fb08b
+junk-last p27 25920 960 eaf80211
+junk-last p28 26880 960 8ae160dd
+junk-last p29 27840 960 4804134c
+junk-last p30 28800 960 31edf167
+junk-last p31 29760 960 ca12c1b4
+junk-last p32 30720 960 9d652f5e
+junk-last p33 31680 960 a5b80f20
+junk-last p34 32640 960 ec1e2ab1
+junk-last p35 33600 960 3c650f37
+junk-last p36 34560 960 48623d23
+junk-last p37 35520 960 029b0a04
+junk-last p38 36480 960 59f8e2d2
+junk-last p39 37440 960 6129d6aa
+junk-last p40 38400 960 625999e0
+junk-last p41 39360 960 a6bf069a
+junk-last p42 40320 960 0c71344a
+junk-last p43 41280 960 83be1377
+junk-last p44 42240 960 e75b3340
+junk-last p45 43200 960 563448b4
+junk-last p46 44160 960 f68f5da7
+junk-last p47 45120 960 7b279cb7
+junk-last p48 46080 960 17ae59cb
+junk-last p49 47040 960 47c7d6c2
+junk-last p50 48000 960 24914b84
+junk-last p51 48960 960 b2fbc267
+junk-last p52 49920 960 b76cb82d
+junk-last p53 50880 960 28d6bc02
+junk-last p54 51840 960 99427732
+junk-last p55 52800 960 b69ce88e
+junk-last p56 53760 960 3ebeeba7
+junk-last p57 54720 960 75326a13
+junk-last p58 55680 960 a3afdd6a
+junk-last p59 56640 960 8316b29e
+junk-last p60 57600 960 05e49ef5
+junk-last p61 58560 960 d6b4efd2
+junk-last p62 59520 960 69b746a5
+junk-last p63 60480 960 aedf9a48
+junk-last p64 61440 960 01101188
+junk-last warnings 1
+junk-last w0 damage at 12753: damaged page, resyncing
+junk-last seek 15600 landed 0, then 0 960 d44304fb
+junk-last seek 31200 landed 0, then 0 960 d44304fb
+junk-last seek 46800 landed 0, then 0 960 d44304fb
+junk-last seek warnings 0
+junk-window file 82186 bytes: 65534 bytes of junk at 432, every second one 0x4f
+junk-window open samples=62088 exact=true
+junk-window packets 65
+junk-window p0 0 960 d44304fb
+junk-window p1 960 960 927b1652
+junk-window p2 1920 960 c3149186
+junk-window p3 2880 960 15c1c8bd
+junk-window p4 3840 960 d4109be4
+junk-window p5 4800 960 9631478f
+junk-window p6 5760 960 b2307a09
+junk-window p7 6720 960 e1f57d50
+junk-window p8 7680 960 4433af3e
+junk-window p9 8640 960 b01049e9
+junk-window p10 9600 960 567089f2
+junk-window p11 10560 960 8bc900af
+junk-window p12 11520 960 eec2fb4b
+junk-window p13 12480 960 199732b9
+junk-window p14 13440 960 b4f050ca
+junk-window p15 14400 960 2a6b375f
+junk-window p16 15360 960 489e11b1
+junk-window p17 16320 960 4c7557d6
+junk-window p18 17280 960 6184ece1
+junk-window p19 18240 960 8e2e9824
+junk-window p20 19200 960 15c36b4b
+junk-window p21 20160 960 98021e19
+junk-window p22 21120 960 e3c94b3e
+junk-window p23 22080 960 11821571
+junk-window p24 23040 960 4031fc17
+junk-window p25 24000 960 ba3de7c9
+junk-window p26 24960 960 258fb08b
+junk-window p27 25920 960 eaf80211
+junk-window p28 26880 960 8ae160dd
+junk-window p29 27840 960 4804134c
+junk-window p30 28800 960 31edf167
+junk-window p31 29760 960 ca12c1b4
+junk-window p32 30720 960 9d652f5e
+junk-window p33 31680 960 a5b80f20
+junk-window p34 32640 960 ec1e2ab1
+junk-window p35 33600 960 3c650f37
+junk-window p36 34560 960 48623d23
+junk-window p37 35520 960 029b0a04
+junk-window p38 36480 960 59f8e2d2
+junk-window p39 37440 960 6129d6aa
+junk-window p40 38400 960 625999e0
+junk-window p41 39360 960 a6bf069a
+junk-window p42 40320 960 0c71344a
+junk-window p43 41280 960 83be1377
+junk-window p44 42240 960 e75b3340
+junk-window p45 43200 960 563448b4
+junk-window p46 44160 960 f68f5da7
+junk-window p47 45120 960 7b279cb7
+junk-window p48 46080 960 17ae59cb
+junk-window p49 47040 960 47c7d6c2
+junk-window p50 48000 960 24914b84
+junk-window p51 48960 960 b2fbc267
+junk-window p52 49920 960 b76cb82d
+junk-window p53 50880 960 28d6bc02
+junk-window p54 51840 960 99427732
+junk-window p55 52800 960 b69ce88e
+junk-window p56 53760 960 3ebeeba7
+junk-window p57 54720 960 75326a13
+junk-window p58 55680 960 a3afdd6a
+junk-window p59 56640 960 8316b29e
+junk-window p60 57600 960 05e49ef5
+junk-window p61 58560 960 d6b4efd2
+junk-window p62 59520 960 69b746a5
+junk-window p63 60480 960 aedf9a48
+junk-window p64 61440 960 01101188
+junk-window warnings 1
+junk-window w0 damage at 432: damaged page, resyncing
+junk-window seek 15600 landed 0, then 0 960 d44304fb
+junk-window seek 31200 landed 0, then 0 960 d44304fb
+junk-window seek 46800 landed 0, then 0 960 d44304fb
+junk-window seek warnings 0
+decoy-mid file 24844 bytes: 8192 bytes of junk at 432, every second one 0x4f, the 32 bytes that follow it also at 2480
+decoy-mid open samples=62088 exact=true
+decoy-mid packets 65
+decoy-mid p0 0 960 d44304fb
+decoy-mid p1 960 960 927b1652
+decoy-mid p2 1920 960 c3149186
+decoy-mid p3 2880 960 15c1c8bd
+decoy-mid p4 3840 960 d4109be4
+decoy-mid p5 4800 960 9631478f
+decoy-mid p6 5760 960 b2307a09
+decoy-mid p7 6720 960 e1f57d50
+decoy-mid p8 7680 960 4433af3e
+decoy-mid p9 8640 960 b01049e9
+decoy-mid p10 9600 960 567089f2
+decoy-mid p11 10560 960 8bc900af
+decoy-mid p12 11520 960 eec2fb4b
+decoy-mid p13 12480 960 199732b9
+decoy-mid p14 13440 960 b4f050ca
+decoy-mid p15 14400 960 2a6b375f
+decoy-mid p16 15360 960 489e11b1
+decoy-mid p17 16320 960 4c7557d6
+decoy-mid p18 17280 960 6184ece1
+decoy-mid p19 18240 960 8e2e9824
+decoy-mid p20 19200 960 15c36b4b
+decoy-mid p21 20160 960 98021e19
+decoy-mid p22 21120 960 e3c94b3e
+decoy-mid p23 22080 960 11821571
+decoy-mid p24 23040 960 4031fc17
+decoy-mid p25 24000 960 ba3de7c9
+decoy-mid p26 24960 960 258fb08b
+decoy-mid p27 25920 960 eaf80211
+decoy-mid p28 26880 960 8ae160dd
+decoy-mid p29 27840 960 4804134c
+decoy-mid p30 28800 960 31edf167
+decoy-mid p31 29760 960 ca12c1b4
+decoy-mid p32 30720 960 9d652f5e
+decoy-mid p33 31680 960 a5b80f20
+decoy-mid p34 32640 960 ec1e2ab1
+decoy-mid p35 33600 960 3c650f37
+decoy-mid p36 34560 960 48623d23
+decoy-mid p37 35520 960 029b0a04
+decoy-mid p38 36480 960 59f8e2d2
+decoy-mid p39 37440 960 6129d6aa
+decoy-mid p40 38400 960 625999e0
+decoy-mid p41 39360 960 a6bf069a
+decoy-mid p42 40320 960 0c71344a
+decoy-mid p43 41280 960 83be1377
+decoy-mid p44 42240 960 e75b3340
+decoy-mid p45 43200 960 563448b4
+decoy-mid p46 44160 960 f68f5da7
+decoy-mid p47 45120 960 7b279cb7
+decoy-mid p48 46080 960 17ae59cb
+decoy-mid p49 47040 960 47c7d6c2
+decoy-mid p50 48000 960 24914b84
+decoy-mid p51 48960 960 b2fbc267
+decoy-mid p52 49920 960 b76cb82d
+decoy-mid p53 50880 960 28d6bc02
+decoy-mid p54 51840 960 99427732
+decoy-mid p55 52800 960 b69ce88e
+decoy-mid p56 53760 960 3ebeeba7
+decoy-mid p57 54720 960 75326a13
+decoy-mid p58 55680 960 a3afdd6a
+decoy-mid p59 56640 960 8316b29e
+decoy-mid p60 57600 960 05e49ef5
+decoy-mid p61 58560 960 d6b4efd2
+decoy-mid p62 59520 960 69b746a5
+decoy-mid p63 60480 960 aedf9a48
+decoy-mid p64 61440 960 01101188
+decoy-mid warnings 1
+decoy-mid w0 damage at 432: damaged page, resyncing
+decoy-mid seek 15600 landed 0, then 0 960 d44304fb
+decoy-mid seek 31200 landed 0, then 0 960 d44304fb
+decoy-mid seek 46800 landed 0, then 0 960 d44304fb
+decoy-mid seek warnings 0
+junk-island file 33036 bytes: 8192 bytes of junk at 432 and at 12779, every second one 0x4f, the 4155 bytes between them whole
+junk-island open samples=62088 exact=true
+junk-island packets 65
+junk-island p0 0 960 d44304fb
+junk-island p1 960 960 927b1652
+junk-island p2 1920 960 c3149186
+junk-island p3 2880 960 15c1c8bd
+junk-island p4 3840 960 d4109be4
+junk-island p5 4800 960 9631478f
+junk-island p6 5760 960 b2307a09
+junk-island p7 6720 960 e1f57d50
+junk-island p8 7680 960 4433af3e
+junk-island p9 8640 960 b01049e9
+junk-island p10 9600 960 567089f2
+junk-island p11 10560 960 8bc900af
+junk-island p12 11520 960 eec2fb4b
+junk-island p13 12480 960 199732b9
+junk-island p14 13440 960 b4f050ca
+junk-island p15 14400 960 2a6b375f
+junk-island p16 15360 960 489e11b1
+junk-island p17 16320 960 4c7557d6
+junk-island p18 17280 960 6184ece1
+junk-island p19 18240 960 8e2e9824
+junk-island p20 19200 960 15c36b4b
+junk-island p21 20160 960 98021e19
+junk-island p22 21120 960 e3c94b3e
+junk-island p23 22080 960 11821571
+junk-island p24 23040 960 4031fc17
+junk-island p25 24000 960 ba3de7c9
+junk-island p26 24960 960 258fb08b
+junk-island p27 25920 960 eaf80211
+junk-island p28 26880 960 8ae160dd
+junk-island p29 27840 960 4804134c
+junk-island p30 28800 960 31edf167
+junk-island p31 29760 960 ca12c1b4
+junk-island p32 30720 960 9d652f5e
+junk-island p33 31680 960 a5b80f20
+junk-island p34 32640 960 ec1e2ab1
+junk-island p35 33600 960 3c650f37
+junk-island p36 34560 960 48623d23
+junk-island p37 35520 960 029b0a04
+junk-island p38 36480 960 59f8e2d2
+junk-island p39 37440 960 6129d6aa
+junk-island p40 38400 960 625999e0
+junk-island p41 39360 960 a6bf069a
+junk-island p42 40320 960 0c71344a
+junk-island p43 41280 960 83be1377
+junk-island p44 42240 960 e75b3340
+junk-island p45 43200 960 563448b4
+junk-island p46 44160 960 f68f5da7
+junk-island p47 45120 960 7b279cb7
+junk-island p48 46080 960 17ae59cb
+junk-island p49 47040 960 47c7d6c2
+junk-island p50 48000 960 24914b84
+junk-island p51 48960 960 b2fbc267
+junk-island p52 49920 960 b76cb82d
+junk-island p53 50880 960 28d6bc02
+junk-island p54 51840 960 99427732
+junk-island p55 52800 960 b69ce88e
+junk-island p56 53760 960 3ebeeba7
+junk-island p57 54720 960 75326a13
+junk-island p58 55680 960 a3afdd6a
+junk-island p59 56640 960 8316b29e
+junk-island p60 57600 960 05e49ef5
+junk-island p61 58560 960 d6b4efd2
+junk-island p62 59520 960 69b746a5
+junk-island p63 60480 960 aedf9a48
+junk-island p64 61440 960 01101188
+junk-island warnings 2
+junk-island w0 damage at 432: damaged page, resyncing
+junk-island w1 damage at 12779: damaged page, resyncing
+junk-island seek 15600 landed 0, then 0 960 d44304fb
+junk-island seek 31200 landed 0, then 0 960 d44304fb
+junk-island seek 46800 landed 0, then 0 960 d44304fb
+junk-island seek warnings 0

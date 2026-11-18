@@ -11,6 +11,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/internal/codecname"
+	"github.com/colespringer/waxflow/container/internal/diag"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -24,12 +25,6 @@ var (
 	_ container.Walker    = (*Demuxer)(nil)
 	_ container.Indexer   = (*Demuxer)(nil)
 )
-
-// DemuxerOptions configures parsing.
-type DemuxerOptions struct {
-	// Strict turns tolerated damage (the Warnings list) into errors.
-	Strict bool
-}
 
 // stream is one Stream Properties Object reduced to what selection needs.
 type stream struct {
@@ -136,7 +131,6 @@ func (r *reader) warnTime(off int64, format string, args ...any) error {
 // Demuxer reads one audio stream from an ASF source, emitting one packet per
 // media object.
 type Demuxer struct {
-	opts DemuxerOptions
 	// syncOK reports whether a decoder can begin at a media object, from the
 	// codec that will decode it. Nil when every object is a start point.
 	syncOK func([]byte) bool
@@ -151,9 +145,9 @@ type Demuxer struct {
 	w    srcwin.Window
 	size int64
 
-	track    container.Track
-	tags     map[string][]string
-	warnings container.Warnings
+	track container.Track
+	tags  map[string][]string
+	log   diag.Log
 	// chapters is the Marker Object's list, read as stored and moved onto
 	// the playback timeline once the pre-roll is known; markerObject and
 	// markersOff record that one was read and where, for the reports the
@@ -220,11 +214,9 @@ type Demuxer struct {
 // NewDemuxer parses an ASF header and positions on the first data packet. The
 // returned Demuxer implements container.Seeker, container.Warner,
 // container.Tagger, and container.Chapterer.
-func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
+func NewDemuxer(src container.Source, opts *container.DemuxerOptions) (*Demuxer, error) {
 	d := &Demuxer{src: src, size: src.Size()}
-	if opts != nil {
-		d.opts = *opts
-	}
+	d.log = diag.New("wma: ", opts)
 	d.w = srcwin.New(src, d.size, "wma: reading packet data")
 	d.rd = reader{d: d, w: &d.w}
 	if err := d.parse(); err != nil {
@@ -235,28 +227,23 @@ func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 
 // warn records tolerated damage, or fails in strict mode.
 func (d *Demuxer) warn(off int64, format string, args ...any) error {
-	msg := fmt.Sprintf(format, args...)
-	if d.opts.Strict {
-		return malformed("%s (at offset %d)", msg, off)
-	}
-	d.warnings.Damage(off, msg)
-	return nil
+	return d.log.Warn(off, format, args...)
 }
 
 // note records a Warning that Strict must not escalate: a limitation of this
 // build against a file that is well formed, rather than damage in the file.
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.warnings.Note(off, fmt.Sprintf(format, args...))
+	d.log.Note(off, format, args...)
 }
 
 // Tracks returns the selected audio track.
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns the tolerated oddities seen so far.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
+func (d *Demuxer) Warnings() []container.Warning { return d.log.List() }
 
 // DamageCount implements container.Damaged.
-func (d *Demuxer) DamageCount() int { return d.warnings.DamageCount() }
+func (d *Demuxer) DamageCount() int { return d.log.DamageCount() }
 
 // Tags returns the canonical tags parsed from the header's two tag objects.
 func (d *Demuxer) Tags() map[string][]string { return d.tags }
@@ -286,7 +273,7 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 		d.idx.read(d, &d.cur, d.ord)
 		d.ord++
 	}
-	dur := d.tailDur(d.cur.pts)
+	dur := d.tailDur(&d.cur)
 	if d.haveNxt {
 		dur = max(1, d.nxt.pts-d.cur.pts)
 	}
@@ -342,15 +329,19 @@ func (d *Demuxer) ensure() error {
 
 // tailDur is the duration of an object with no successor to measure against.
 // A super-frame is constant-length, so the predecessor's duration is the best
-// answer there is; the container's own remaining-length arithmetic is the
-// fallback for a stream one object long, and it is coarser because the total
-// it works from is a rounded play duration.
-func (d *Demuxer) tailDur(pts int64) int64 {
+// answer there is. With none, a counted track's object lasts what its own
+// frames deliver, which no walk moves and may be nothing; any other takes
+// what the rounded play duration leaves.
+func (d *Demuxer) tailDur(o *object) int64 {
 	if d.lastDur > 0 {
 		return d.lastDur
 	}
-	if d.track.Samples > pts {
-		return min(d.track.Samples-pts, maxObjectSamples)
+	if d.counter != nil {
+		f, _ := d.counter.PacketFrames(o.data)
+		return d.counter.StreamSamples(1, int64(f))
+	}
+	if d.track.Samples > o.pts {
+		return min(d.track.Samples-o.pts, maxObjectSamples)
 	}
 	return 1
 }
@@ -873,6 +864,12 @@ func (d *Demuxer) checkErrorCorrection(b []byte, off int64, number int, tsLen in
 	return nil
 }
 
+// DemuxerVersion is this demuxer's term in the ADR-0004 cache key, carried
+// by a WMA v1/v2 track alone. Bump it for a change that makes the demuxer
+// deliver other samples for a file that has not changed; the ADR says what
+// revision 2 is.
+const DemuxerVersion = "asf-demux-2"
+
 // selectStream picks the audio stream to decode and wires the track. A file
 // with no decodable stream is refused by name: the codec table exists so a
 // WMA Pro or Voice file says what it is instead of "unsupported format".
@@ -978,6 +975,9 @@ func (d *Demuxer) wireTrack(s stream, id codec.ID, name string) error {
 		SamplesExact:    false,
 		SamplesAdvisory: true,
 		Default:         true,
+	}
+	if d.counter != nil {
+		d.track.DemuxerVersion = DemuxerVersion
 	}
 	// How many packets one media object spans, which sizes both the seek
 	// run-up and how long a resumed reader steps over fragments. A packet

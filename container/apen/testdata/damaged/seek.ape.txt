@@ -1,0 +1,82 @@
+# <case> p<n> <pts> <dur> <crc-32 of the data>, with lost=<samples> and discont where the packet says so
+# <case> seek <target> landed <position>, then the packet read next in the same fields
+clean file 38868 bytes
+clean open samples=152456 exact=true
+clean packets 3
+clean p0 0 73728 14cb0c03
+clean p1 73728 73728 d83b3e32
+clean p2 147456 5000 fd04aa88
+clean warnings 0
+clean seek 38114 landed 0, then 0 73728 14cb0c03
+clean seek 76228 landed 73728, then 73728 73728 d83b3e32
+clean seek 114342 landed 73728, then 73728 73728 d83b3e32
+clean seek warnings 0
+junk-head file 47060 bytes: 8192 bytes of junk at 0, every second one 0x4d
+junk-head open samples=152456 exact=true
+junk-head packets 3
+junk-head p0 0 73728 14cb0c03
+junk-head p1 73728 73728 d83b3e32
+junk-head p2 147456 5000 fd04aa88
+junk-head warnings 0
+junk-head seek 38114 landed 0, then 0 73728 14cb0c03
+junk-head seek 76228 landed 73728, then 73728 73728 d83b3e32
+junk-head seek 114342 landed 73728, then 73728 73728 d83b3e32
+junk-head seek warnings 0
+junk-span file 39889 bytes: 1021 bytes of junk at 0, every second one 0x4d
+junk-span open samples=152456 exact=true
+junk-span packets 3
+junk-span p0 0 73728 14cb0c03
+junk-span p1 73728 73728 d83b3e32
+junk-span p2 147456 5000 fd04aa88
+junk-span warnings 0
+junk-span seek 38114 landed 0, then 0 73728 14cb0c03
+junk-span seek 76228 landed 73728, then 73728 73728 d83b3e32
+junk-span seek 114342 landed 73728, then 73728 73728 d83b3e32
+junk-span seek warnings 0
+junk-window file 169938 bytes: 131070 bytes of junk at 0, every second one 0x4d
+junk-window open samples=152456 exact=true
+junk-window packets 3
+junk-window p0 0 73728 14cb0c03
+junk-window p1 73728 73728 d83b3e32
+junk-window p2 147456 5000 fd04aa88
+junk-window warnings 0
+junk-window seek 38114 landed 0, then 0 73728 14cb0c03
+junk-window seek 76228 landed 73728, then 73728 73728 d83b3e32
+junk-window seek 114342 landed 73728, then 73728 73728 d83b3e32
+junk-window seek warnings 0
+decoy-head file 47060 bytes: 8192 bytes of junk at 0, every second one 0x4d, the 32 bytes that follow it also at 2048
+decoy-head open samples=152456 exact=true
+decoy-head packets 3
+decoy-head p0 0 73728 14cb0c03
+decoy-head p1 73728 73728 d83b3e32
+decoy-head p2 147456 5000 fd04aa88
+decoy-head warnings 0
+decoy-head seek 38114 landed 0, then 0 73728 14cb0c03
+decoy-head seek 76228 landed 73728, then 73728 73728 d83b3e32
+decoy-head seek 114342 landed 73728, then 73728 73728 d83b3e32
+decoy-head seek warnings 0
+junk-island file 55252 bytes: 8192 bytes of junk at 0 and at 8268, every second one 0x4d, the 76 bytes between them whole
+junk-island open refused malformed-input: ape: seek table starts at 1305636149 but the header puts the frames at 8324
+zero-middle file 38868 bytes: 64 bytes zeroed at 19434
+zero-middle open samples=152456 exact=true
+zero-middle packets 3
+zero-middle p0 0 73728 14cb0c03
+zero-middle p1 73728 73728 6d81df2f
+zero-middle p2 147456 5000 fd04aa88
+zero-middle warnings 0
+zero-middle seek 38114 landed 0, then 0 73728 14cb0c03
+zero-middle seek 76228 landed 73728, then 73728 73728 6d81df2f
+zero-middle seek 114342 landed 73728, then 73728 73728 6d81df2f
+zero-middle seek warnings 0
+cut-tail file 38768 bytes: the last 100 bytes cut
+cut-tail open samples=152456 exact=true
+cut-tail packets 3
+cut-tail p0 0 73728 14cb0c03
+cut-tail p1 73728 73728 d83b3e32
+cut-tail p2 147456 5000 445695ad
+cut-tail warnings 1
+cut-tail w0 damage at 38768: the descriptor counts 38736 bytes of frame data but 38636 are present
+cut-tail seek 38114 landed 0, then 0 73728 14cb0c03
+cut-tail seek 76228 landed 73728, then 73728 73728 d83b3e32
+cut-tail seek 114342 landed 73728, then 73728 73728 d83b3e32
+cut-tail seek warnings 0

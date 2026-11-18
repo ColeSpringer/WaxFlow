@@ -11,6 +11,7 @@ import (
 	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/diag"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -21,13 +22,8 @@ var (
 	_ container.Warner    = (*Demuxer)(nil)
 	_ container.Chapterer = (*Demuxer)(nil)
 	_ container.Tagger    = (*Demuxer)(nil)
+	_ container.Damaged   = (*Demuxer)(nil)
 )
-
-// DemuxerOptions configures parsing.
-type DemuxerOptions struct {
-	// Strict turns tolerated damage (the Warnings list) into errors.
-	Strict bool
-}
 
 // Chapter is one parsed chapter marker, timed in the movie timeline. It
 // aliases the container-level type so demuxer chapters feed muxer options
@@ -39,7 +35,6 @@ type Chapter = container.Chapter
 // packets from mdat on demand.
 type Demuxer struct {
 	src  container.Source
-	opts DemuxerOptions
 	size int64
 
 	track    container.Track
@@ -47,7 +42,7 @@ type Demuxer struct {
 	brands   []string
 	chapters []Chapter
 	tags     map[string][]string // ilst tags, canonical keys
-	warnings container.Warnings
+	log      diag.Log
 
 	movieTimescale int64     // mvhd timescale (ticks per second)
 	movieDuration  int64     // mvhd duration in movie ticks, 0 when unstated
@@ -130,12 +125,9 @@ type Demuxer struct {
 
 // NewDemuxer parses the movie header and positions on the first sample.
 // The returned Demuxer implements container.Seeker and container.Warner.
-func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
+func NewDemuxer(src container.Source, opts *container.DemuxerOptions) (*Demuxer, error) {
 	d := &Demuxer{src: src, size: src.Size(),
-		w: srcwin.New(src, src.Size(), "mp4: reading sample data")}
-	if opts != nil {
-		d.opts = *opts
-	}
+		w: srcwin.New(src, src.Size(), "mp4: reading sample data"), log: diag.New("mp4: ", opts)}
 	if err := d.parse(); err != nil {
 		return nil, err
 	}
@@ -144,12 +136,7 @@ func NewDemuxer(src container.Source, opts *DemuxerOptions) (*Demuxer, error) {
 
 // warn records tolerated damage, or fails in strict mode.
 func (d *Demuxer) warn(off int64, format string, args ...any) error {
-	msg := fmt.Sprintf(format, args...)
-	if d.opts.Strict {
-		return malformed("%s (at offset %d)", msg, off)
-	}
-	d.warnings.Damage(off, msg)
-	return nil
+	return d.log.Warn(off, format, args...)
 }
 
 // note records a Warning that Strict must not escalate: a limitation of this
@@ -161,7 +148,7 @@ func (d *Demuxer) warn(off int64, format string, args ...any) error {
 // `probe --strict` reject valid HE-AAC files as malformed, which is why this
 // path exists and why it cannot fail.
 func (d *Demuxer) note(off int64, format string, args ...any) {
-	d.warnings.Note(off, fmt.Sprintf(format, args...))
+	d.log.Note(off, format, args...)
 }
 
 // parse scans the top-level boxes up to and including moov, reads moov into
@@ -187,7 +174,7 @@ func (d *Demuxer) parse() error {
 	sawFtyp := false
 	off := int64(0)
 	for off < d.size {
-		b, err := readBox(d.src, off, d.size)
+		b, err := d.readBox(off, d.size)
 		if err != nil {
 			// A damaged top-level chain is unrecoverable: unlike a page
 			// stream there is no resync, so stop where we are. If moov was
@@ -447,7 +434,10 @@ func decodableAudio(id codec.ID) bool {
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns damage tolerated during parsing.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
+func (d *Demuxer) Warnings() []container.Warning { return d.log.List() }
+
+// DamageCount implements container.Damaged.
+func (d *Demuxer) DamageCount() int { return d.log.DamageCount() }
 
 // TruncatedSamples implements container.Truncated: what the sample table
 // times past the end of the file's data, or what a fragmented movie's head
@@ -501,7 +491,7 @@ func (d *Demuxer) ReadPacket(pkt *container.Packet) error {
 			return d.w.Err()
 		}
 		return waxerr.New(waxerr.CodeSourceUnreadable,
-			fmt.Sprintf("mp4: sample %d truncated (want %d bytes at %d)", d.cur, size, off))
+			fmt.Sprintf("mp4: sample %d truncated (want %d bytes at %d)", d.cur, size, d.log.At(off)))
 	}
 	pts, dur := st.timeOf(d.cur)
 	*pkt = container.Packet{
@@ -552,7 +542,7 @@ func (d *Demuxer) readUniformPacket(pkt *container.Packet, st *sampleTable) erro
 			return d.w.Err()
 		}
 		return waxerr.New(waxerr.CodeSourceUnreadable,
-			fmt.Sprintf("mp4: samples %d..%d truncated (want %d bytes at %d)", d.cur, d.cur+n, size, off))
+			fmt.Sprintf("mp4: samples %d..%d truncated (want %d bytes at %d)", d.cur, d.cur+n, size, d.log.At(off)))
 	}
 	*pkt = container.Packet{
 		Track: 0,

@@ -141,7 +141,7 @@ func TestSV7TailRegimes(t *testing.T) {
 				t.Errorf("warnings %v lack %q", warnings, c.warn)
 			}
 			if c.warn != "" {
-				if _, err := mpc.NewDemuxer(container.BytesSource(raw), &mpc.DemuxerOptions{Strict: true}); err == nil {
+				if _, err := mpc.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err == nil {
 					t.Error("strict mode accepted a stream that warned")
 				}
 			}
@@ -225,7 +225,7 @@ func TestSV8Packets(t *testing.T) {
 	if got, want := container.TruncatedOf(d, 0), 20000-d.Tracks()[0].Samples; got != want {
 		t.Errorf("%d samples truncated, want the %d the header declares past the blocks", got, want)
 	}
-	if _, err := mpc.NewDemuxer(container.BytesSource(short), &mpc.DemuxerOptions{Strict: true}); err == nil {
+	if _, err := mpc.NewDemuxer(container.BytesSource(short), &container.DemuxerOptions{Strict: true}); err == nil {
 		t.Error("strict mode accepted a stream short of its declared blocks")
 	}
 
@@ -561,7 +561,7 @@ func TestChapters(t *testing.T) {
 		if w := d.Warnings(); len(w) != 1 || !strings.Contains(w[0].Msg, "header record") {
 			t.Errorf("%s: warnings %v, want one about the header record", name, w)
 		}
-		if _, err := mpc.NewDemuxer(container.BytesSource(raw), &mpc.DemuxerOptions{Strict: true}); err == nil {
+		if _, err := mpc.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err == nil {
 			t.Errorf("%s: strict mode accepted a chapter tag with no header record", name)
 		}
 	}
@@ -649,11 +649,11 @@ func TestChapterStartBounds(t *testing.T) {
 	// chapters than this build reads is not damaged for having them and
 	// strict must accept it.
 	for name, raw := range map[string][]byte{"beyond the bound": huge, "past the end": past} {
-		if _, err := mpc.NewDemuxer(container.BytesSource(raw), &mpc.DemuxerOptions{Strict: true}); err == nil {
+		if _, err := mpc.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err == nil {
 			t.Errorf("strict mode accepted a chapter %s", name)
 		}
 	}
-	if _, err := mpc.NewDemuxer(container.BytesSource(stream(run...)), &mpc.DemuxerOptions{Strict: true}); err != nil {
+	if _, err := mpc.NewDemuxer(container.BytesSource(stream(run...)), &container.DemuxerOptions{Strict: true}); err != nil {
 		t.Errorf("strict mode refused a file with more chapters than this build reads: %v", err)
 	}
 	if w := d.Warnings(); len(w) != 1 || w[0].Kind != container.Note {
@@ -759,6 +759,46 @@ func TestLeadingID3v2(t *testing.T) {
 	}
 }
 
+// id3Lead is n bytes that open with an ID3v2 header stating size bytes in all.
+func id3Lead(size, n int) []byte {
+	b := make([]byte, n)
+	copy(b, "ID3\x04\x00\x00")
+	body := size - 10
+	b[6], b[7], b[8], b[9] = byte(body>>21)&0x7f, byte(body>>14)&0x7f, byte(body>>7)&0x7f, byte(body)&0x7f
+	return b
+}
+
+// TestALeadingTagPastTheEndIsRefusedByName: a leading ID3v2 tag that states
+// more bytes than the data holds is refused in words that say so, with audio
+// behind it or not. A tag that ends at the end of the data leaves a scan of
+// what is left.
+func TestALeadingTagPastTheEndIsRefusedByName(t *testing.T) {
+	lying := append(id3Lead(1<<20, 10), fixture(t, "seek.mpc")...)
+	for _, tc := range []struct {
+		name string
+		file []byte
+		want string
+	}{
+		{"past the end", id3Lead(5002, 100), "musepack: leading ID3v2 tag declares 5002 bytes, past the 100 the data holds"},
+		{"a byte past the end", id3Lead(101, 100), "musepack: leading ID3v2 tag declares 101 bytes, past the 100 the data holds"},
+		{"past the end of a file with audio", lying,
+			"musepack: leading ID3v2 tag declares 1048576 bytes, past the " + strconv.Itoa(len(lying)) + " the data holds"},
+		{"ends at the end", id3Lead(100, 100), "musepack: not a Musepack stream"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, strict := range []bool{false, true} {
+				_, err := mpc.NewDemuxer(container.BytesSource(tc.file), &container.DemuxerOptions{Strict: strict})
+				if err == nil {
+					t.Fatalf("strict %v: accepted", strict)
+				}
+				if waxerr.CodeOf(err) != waxerr.CodeMalformedInput || err.Error() != tc.want {
+					t.Errorf("strict %v: refused with %s %q, want %s %q", strict, waxerr.CodeOf(err), err, waxerr.CodeMalformedInput, tc.want)
+				}
+			}
+		})
+	}
+}
+
 // TestTruncatedTailIsReported pins the declared-length invariant: a stream cut
 // short warns and fails strict mode, reports what it can deliver, and what
 // the probe reports is what a read delivers. A cut that loses audio shrinks
@@ -789,7 +829,7 @@ func TestTruncatedTailIsReported(t *testing.T) {
 				if delivered < track.Delay+track.Samples {
 					t.Errorf("probe reports %d samples after %d of delay, the read delivers %d raw", track.Samples, track.Delay, delivered)
 				}
-				if _, err := mpc.NewDemuxer(container.BytesSource(raw), &mpc.DemuxerOptions{Strict: true}); err == nil {
+				if _, err := mpc.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err == nil {
 					t.Error("strict mode accepted a truncated stream")
 				}
 			})

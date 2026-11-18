@@ -17,7 +17,13 @@ import (
 // compresses to a few kilobytes, and these files have to outgrow a window.
 func noiseBlocks(t testing.TB, n int) (container.Track, []container.Packet) {
 	t.Helper()
-	enc, err := wavpack.NewEncoder(muxFormat, nil)
+	return noiseBlocksIn(t, muxFormat, n)
+}
+
+// noiseBlocksIn is noiseBlocks in format f, full-scale for its depth.
+func noiseBlocksIn(t testing.TB, f audio.Format, n int) (container.Track, []container.Packet) {
+	t.Helper()
+	enc, err := wavpack.NewEncoder(f, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,14 +35,14 @@ func noiseBlocks(t testing.TB, n int) (container.Track, []container.Packet) {
 		return nil
 	}
 	r := rand.New(rand.NewPCG(3, 11)) // one seed, so the first block is the same in every file
-	buf := audio.Get(muxFormat, wavpack.BlockSamples)
+	buf := audio.Get(f, wavpack.BlockSamples)
 	defer audio.Put(buf)
 	for off := 0; off < n; off += wavpack.BlockSamples {
 		buf.N = min(wavpack.BlockSamples, n-off)
-		for c := range muxFormat.Channels {
+		for c := range f.Channels {
 			s := buf.ChanI(c)
 			for i := range buf.N {
-				s[i] = int32(r.IntN(1<<16)) - 1<<15
+				s[i] = int32(r.Int64N(1<<f.BitDepth) - 1<<(f.BitDepth-1))
 			}
 		}
 		if err := enc.Encode(buf, emit); err != nil {
@@ -47,7 +53,7 @@ func noiseBlocks(t testing.TB, n int) (container.Track, []container.Packet) {
 		t.Fatal(err)
 	}
 	track := container.Track{Codec: codec.WavPack, CodecConfig: enc.CodecConfig(),
-		Fmt: muxFormat, Samples: int64(n), Default: true}
+		Fmt: f, Samples: int64(n), Default: true}
 	return track, pkts
 }
 

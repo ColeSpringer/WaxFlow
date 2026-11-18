@@ -362,7 +362,7 @@ func (d *Demuxer) settle() {
 // of the data, by a walk, a seek or a restored complete sidecar, and was not
 // refused on the way. A track that counts nothing has nothing to walk.
 func (d *Demuxer) Walked() bool {
-	return d.counter == nil || (d.idx.done && !(d.opts.Strict && len(d.idx.pending) > 0))
+	return d.counter == nil || (d.idx.done && !(d.log.Strict() && len(d.idx.pending) > 0))
 }
 
 // Index snapshot format, versioned on its own: magic and version, then as

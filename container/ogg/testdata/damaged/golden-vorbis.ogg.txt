@@ -1,0 +1,49 @@
+# <case> p<n> <pts> <dur> <crc-32 of the data>, with lost=<samples> and discont where the packet says so
+# <case> seek <target> landed <position>, then the packet read next in the same fields
+clean file 2828 bytes
+clean open samples=2000 exact=true
+clean packets 9
+clean p0 0 0 99a0865b
+clean p1 0 256 2ab49943
+clean p2 256 256 2636284a
+clean p3 512 256 75b3fd03
+clean p4 768 256 bfae5dd3
+clean p5 1024 256 78096cd7
+clean p6 1280 256 3a321b69
+clean p7 1536 256 9ad3fe14
+clean p8 1792 256 14d88e51
+clean warnings 0
+clean seek 512 landed 0, then 0 0 99a0865b
+clean seek 1024 landed 0, then 0 0 99a0865b
+clean seek 1536 landed 0, then 0 0 99a0865b
+clean seek warnings 0
+junk-last file 11020 bytes: 8192 bytes of junk at 2657, every second one 0x4f
+junk-last open samples=2000 exact=true
+junk-last packets 9
+junk-last p0 0 0 99a0865b
+junk-last p1 0 256 2ab49943
+junk-last p2 256 256 2636284a
+junk-last p3 512 256 75b3fd03
+junk-last p4 768 256 bfae5dd3
+junk-last p5 1024 256 78096cd7
+junk-last p6 1280 256 3a321b69
+junk-last p7 1536 256 9ad3fe14
+junk-last p8 1792 256 14d88e51
+junk-last warnings 1
+junk-last w0 damage at 2657: damaged page, resyncing
+junk-last seek 512 landed 0, then 0 0 99a0865b
+junk-last seek 1024 landed 0, then 0 0 99a0865b
+junk-last seek 1536 landed 0, then 0 0 99a0865b
+junk-last seek warnings 0
+zero-middle file 2828 bytes: 64 bytes zeroed at 1414
+zero-middle open refused malformed-input: ogg: page checksum mismatch at offset 58
+cut-tail file 2728 bytes: the last 100 bytes cut
+cut-tail open samples=0 exact=true
+cut-tail packets 1
+cut-tail p0 0 0 99a0865b
+cut-tail warnings 1
+cut-tail w0 damage at 2657: damaged page, resyncing
+cut-tail seek 512 landed 0, then 0 0 99a0865b
+cut-tail seek 1024 landed 0, then 0 0 99a0865b
+cut-tail seek 1536 landed 0, then 0 0 99a0865b
+cut-tail seek warnings 0

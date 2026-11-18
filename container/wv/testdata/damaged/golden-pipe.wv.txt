@@ -1,0 +1,98 @@
+# <case> p<n> <pts> <dur> <crc-32 of the data>, with lost=<samples> and discont where the packet says so
+# <case> seek <target> landed <position>, then the packet read next in the same fields
+clean file 1527 bytes
+clean open samples=9000 exact=true
+clean packets 2
+clean p0 0 8192 454300cb
+clean p1 8192 808 cd27c4ea
+clean warnings 0
+clean seek 2250 landed 0, then 0 8192 454300cb
+clean seek 4500 landed 0, then 0 8192 454300cb
+clean seek 6750 landed 0, then 0 8192 454300cb
+clean seek warnings 0
+junk-mid file 9719 bytes: 8192 bytes of junk at 1336, every second one 0x77
+junk-mid open samples=9000 exact=true
+junk-mid packets 2
+junk-mid p0 0 8192 454300cb
+junk-mid p1 8192 808 cd27c4ea
+junk-mid warnings 1
+junk-mid w0 damage at 1336: 8192 unparsable bytes between blocks
+junk-mid seek 2250 landed 0, then 0 8192 454300cb
+junk-mid seek 4500 landed 0, then 0 8192 454300cb
+junk-mid seek 6750 landed 0, then 0 8192 454300cb
+junk-mid seek warnings 0
+junk-span file 2548 bytes: 1021 bytes of junk at 1336, every second one 0x77
+junk-span open samples=9000 exact=true
+junk-span packets 2
+junk-span p0 0 8192 454300cb
+junk-span p1 8192 808 cd27c4ea
+junk-span warnings 1
+junk-span w0 damage at 1336: 1021 unparsable bytes between blocks
+junk-span seek 2250 landed 0, then 0 8192 454300cb
+junk-span seek 4500 landed 0, then 0 8192 454300cb
+junk-span seek 6750 landed 0, then 0 8192 454300cb
+junk-span seek warnings 0
+junk-window file 132597 bytes: 131070 bytes of junk at 1336, every second one 0x77
+junk-window open samples=9000 exact=true
+junk-window packets 2
+junk-window p0 0 8192 454300cb
+junk-window p1 8192 808 cd27c4ea
+junk-window warnings 1
+junk-window w0 damage at 1336: 131070 unparsable bytes between blocks
+junk-window seek 2250 landed 0, then 0 8192 454300cb
+junk-window seek 4500 landed 0, then 0 8192 454300cb
+junk-window seek 6750 landed 0, then 0 8192 454300cb
+junk-window seek warnings 0
+decoy-mid file 9719 bytes: 8192 bytes of junk at 1336, every second one 0x77, the 32 bytes that follow it also at 3384
+decoy-mid open samples=9000 exact=true
+decoy-mid packets 2
+decoy-mid p0 0 8192 454300cb
+decoy-mid p1 8192 808 cd27c4ea
+decoy-mid warnings 1
+decoy-mid w0 damage at 1336: 8192 unparsable bytes between blocks
+decoy-mid seek 2250 landed 0, then 0 8192 454300cb
+decoy-mid seek 4500 landed 0, then 0 8192 454300cb
+decoy-mid seek 6750 landed 0, then 0 8192 454300cb
+decoy-mid seek warnings 0
+junk-island file 17911 bytes: 8192 bytes of junk at 1336 and at 9608, every second one 0x77, the 80 bytes between them whole
+junk-island open samples=-1 exact=false
+junk-island packets 1
+junk-island p0 0 8192 454300cb
+junk-island warnings 1
+junk-island w0 damage at 1336: 16464 trailing bytes are not a block, dropped
+junk-island seek 2250 landed 0, then 0 8192 454300cb
+junk-island seek 4500 landed 0, then 0 8192 454300cb
+junk-island seek 6750 landed 0, then 0 8192 454300cb
+junk-island seek warnings 0
+junk-tail file 9719 bytes: 8192 bytes of junk at 1416, every second one 0x77
+junk-tail open samples=-1 exact=false
+junk-tail packets 2
+junk-tail p0 0 8192 454300cb
+junk-tail p1 8192 808 cd27c4ea
+junk-tail warnings 1
+junk-tail w0 damage at 1416: 8192 trailing bytes are not a block, dropped
+junk-tail seek 2250 landed 0, then 0 8192 454300cb
+junk-tail seek 4500 landed 0, then 0 8192 454300cb
+junk-tail seek 6750 landed 0, then 0 8192 454300cb
+junk-tail seek warnings 0
+zero-middle file 1527 bytes: 64 bytes zeroed at 763
+zero-middle open samples=9000 exact=true
+zero-middle packets 2
+zero-middle p0 0 8192 1a95e630
+zero-middle p1 8192 808 cd27c4ea
+zero-middle warnings 0
+zero-middle seek 2250 landed 0, then 0 8192 1a95e630
+zero-middle seek 4500 landed 0, then 0 8192 1a95e630
+zero-middle seek 6750 landed 0, then 0 8192 1a95e630
+zero-middle seek warnings 0
+cut-tail file 1427 bytes: the last 100 bytes cut
+cut-tail open samples=-1 exact=false
+cut-tail packets 2
+cut-tail p0 0 8192 454300cb
+cut-tail p1 8192 808 cd27c4ea
+cut-tail warnings 1
+cut-tail w0 damage at 1416: 11 trailing bytes are not a block, dropped
+cut-tail seek 2250 landed 0, then 0 8192 454300cb
+cut-tail seek 4500 landed 0, then 0 8192 454300cb
+cut-tail seek 6750 landed 0, then 0 8192 454300cb
+cut-tail seek warnings 0

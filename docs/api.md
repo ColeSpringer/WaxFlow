@@ -295,8 +295,10 @@ FLAC (native and Ogg), WavPack, Musepack, WAV, AIFF and a progressive MP4's
 sample table. An MP3 (bare or in a WAV or AIFF-C) and a fragmented MP4 are
 held against their declared count only where a read reaches the end of the
 payload, which a tolerant probe leaves to the read, so theirs is on the
-result of a job that read the file (below) and not here. The field is absent for a
-whole file, for a header that states no length to fall short of, for a
+result of a job that read the file (below) and not here. A WavPack or FLAC
+whose read from the start ends short of the length its open checked counts
+the rest too, so a job's count can exceed the probe's. The field is absent
+for a whole file, for a header that states no length to fall short of, for a
 length that is not stated in samples (ASF, Matroska), and for Monkey's
 Audio, where a file cut short keeps its declared length and its last frame
 fails to decode instead.
@@ -1358,10 +1360,12 @@ cut order; every other type has at most one. Its index is what `GET
 
 An output and `analysis` each carry two counts of what the source lost, at
 that entry's own `rate` and absent when zero. `lostSamples` is the samples
-that are silence standing in for audio damage took: a FLAC, native or in
-Ogg, that lost frames keeps its length and reads silence where they were,
-so `samples` does not shrink and this is the only number that says how much
-of the result is the file's own. `truncatedSamples` is what the source's
+that are silence standing in for audio damage took: a FLAC (native or in
+Ogg) that lost frames, or a WavPack that lost blocks, keeps its length and
+reads silence where they were, so `samples` does not shrink and this is the
+only number that says how much of the result is the file's own. A copy of a codec whose
+packets state their own positions (WavPack) counts the gap its packets
+carry, and writes no silence. `truncatedSamples` is what the source's
 header declares past the end of what it holds, as /probe reports it, and
 here it covers an MP3 and a fragmented MP4 too, since the job's read reaches
 the end where theirs is found. A transcode that resamples states both at the

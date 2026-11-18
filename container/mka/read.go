@@ -15,7 +15,7 @@ import (
 func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track} }
 
 // Warnings returns damage tolerated during parsing.
-func (d *Demuxer) Warnings() []container.Warning { return d.warnings.List() }
+func (d *Demuxer) Warnings() []container.Warning { return d.log.List() }
 
 // resetReading positions the frame iterator at a cluster boundary and clears
 // per-run state (accumulated position, Vorbis timing, end-of-stream).
@@ -143,7 +143,7 @@ func (d *Demuxer) frameDur(f frameLoc) (int64, error) {
 		if e := d.w.Err(); e != nil {
 			return 0, e
 		}
-		return 0, malformed("frame prefix at %d truncated", f.off)
+		return 0, malformed("frame prefix at %d truncated", d.log.At(f.off))
 	}
 	return d.frameSamples(data), nil
 }
@@ -157,7 +157,7 @@ func (d *Demuxer) frameBytes(f frameLoc) ([]byte, error) {
 		if e := d.w.Err(); e != nil {
 			return nil, e
 		}
-		return nil, malformed("frame at %d truncated (want %d bytes)", f.off, f.size)
+		return nil, malformed("frame at %d truncated (want %d bytes)", d.log.At(f.off), f.size)
 	}
 	return data, nil
 }
@@ -684,7 +684,7 @@ func (d *Demuxer) seekWalk(ctx context.Context, sample int64) error {
 	// the next seek tries again. A full walk the file's damage stopped is
 	// Walk's to report: a strict seek refuses with it, a tolerant one lands
 	// on what the walk indexed.
-	if err == nil || limit >= 0 || d.opts.Strict || waxerr.CodeOf(err) == waxerr.CodeCanceled {
+	if err == nil || limit >= 0 || d.log.Strict() || waxerr.CodeOf(err) == waxerr.CodeCanceled {
 		return err
 	}
 	return nil

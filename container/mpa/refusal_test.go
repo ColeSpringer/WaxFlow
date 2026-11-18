@@ -26,7 +26,7 @@ func TestAStrictRefusalIsKept(t *testing.T) {
 		{"xing shortfall", raw[:offs[len(offs)-2]]},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			d, err := mpa.NewDemuxer(container.BytesSource(tc.file), &mpa.DemuxerOptions{Strict: true})
+			d, err := mpa.NewDemuxer(container.BytesSource(tc.file), &container.DemuxerOptions{Strict: true})
 			if err != nil {
 				t.Fatal(err)
 			}

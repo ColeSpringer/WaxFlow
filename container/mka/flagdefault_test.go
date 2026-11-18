@@ -89,7 +89,7 @@ func TestMissingFlagDefaultIsDefault(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			file, frames := twoTrackFile(tc.flags)
-			d, err := NewDemuxer(container.BytesSource(file), &DemuxerOptions{Strict: true})
+			d, err := NewDemuxer(container.BytesSource(file), &container.DemuxerOptions{Strict: true})
 			if err != nil {
 				t.Fatal(err)
 			}

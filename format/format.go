@@ -141,7 +141,8 @@ func (i *Info) Default() container.Track {
 // crosses it. A caller that wants the whole verdict reads or seeks to the end
 // first and asks again; Tracks, Chapters and Tags are what opening found,
 // until Walk settles the default track's length to what the payload actually
-// holds. Probe's Info is a detached snapshot, complete under Strict.
+// holds, or takes back a claim a read's end did not bear out, which can lift
+// the cap. Probe's Info is a detached snapshot, complete under Strict.
 type Media interface {
 	Info() *Info
 	ReadChunk(dst *audio.Buffer) error
@@ -164,8 +165,9 @@ type Media interface {
 // own Info carries that measurement: the walk is observable on the Media that
 // ran it, without a reopen. A walk finished some other way (a seek or a read
 // to the end, a restored sidecar) reads true from Walked, which changes
-// nothing, and Walk then takes the measurement at no cost. Walk's context
-// is container.Walker's: a context that ends pauses the walk, with
+// nothing, and Walk then takes the measurement at no cost. Where a read's end
+// withdrew an exact length, Walk takes that too, lifting the cap. Walk's
+// context is container.Walker's: a context that ends pauses the walk, with
 // CodeCanceled, where the next Walk resumes it.
 type Walker interface {
 	Walk(ctx context.Context) error
@@ -215,11 +217,11 @@ type LengthConfirmer interface {
 // be one.
 //
 // They exist for the wrappers. Embedding the Media interface promotes no
-// method outside it, so a wrapper that does not write these two by hand
-// answers "nothing deferred" for a media that defers a whole-file walk, and
-// every consumer downstream of it quietly gets the wrong answer: a job gate
-// calls an expensive member cheap, a run commits a length nothing confirmed.
-// The forwarding cannot be inherited, so it is at least written once.
+// method outside it, so a wrapper that does not forward these two answers
+// "nothing deferred" for a media that defers a whole-file walk, and every
+// consumer downstream of it quietly gets the wrong answer: a job gate calls
+// an expensive member cheap, a run commits a length nothing confirmed.
+// Forwarder is how a wrapper forwards them.
 func WalkMedia(ctx context.Context, med Media) error {
 	if w, ok := med.(Walker); ok {
 		return w.Walk(ctx)
@@ -230,6 +232,22 @@ func WalkMedia(ctx context.Context, med Media) error {
 func MediaWalked(med Media) bool {
 	w, ok := med.(Walker)
 	return !ok || w.Walked()
+}
+
+// Measurer is implemented by a Media that can ask its demuxer to measure the
+// default track without decoding (container.Measurer). ok is false where there
+// is no such answer. A wrapper forwards it as it forwards Walker.
+type Measurer interface {
+	MeasureSamples(ctx context.Context) (n int64, ok bool, err error)
+}
+
+// MeasureMedia is Measurer asked of a Media that may not be one, which
+// answers false: it is what a wrapper forwards with.
+func MeasureMedia(ctx context.Context, med Media) (int64, bool, error) {
+	if m, ok := med.(Measurer); ok {
+		return m.MeasureSamples(ctx)
+	}
+	return 0, false, nil
 }
 
 // MixedWidth is answered by a Media whose channels were conformed to its own
@@ -258,6 +276,38 @@ type MixedWidth interface {
 func MediaMixedWidth(med Media) bool {
 	m, ok := med.(MixedWidth)
 	return ok && m.MixedWidth()
+}
+
+// Headroomer is implemented by a Media that has real audio before its own
+// sample 0, as a window onto a longer stream does. A Media opened from a file
+// has nothing before its first sample and answers zero, or does not
+// implement it; a wrapper forwards it (see Forwarder).
+//
+// It exists because priming a chain and starting a stream are different
+// questions, and only a span can answer the first one for its own sample 0.
+// A stateful node primes from nothing at a stream's start, which is correct
+// for a file (there is nothing earlier) and wrong for a span (there is). A
+// consumer that wants a span's sample 0 to hold the same audio a continuous
+// run of the whole source delivers there reads Headroom, seeks to a
+// negative position, and discards the output it fed through.
+//
+// Positions below 0 are the whole point of the interface and are legal only
+// on a Media whose Headroom is above zero. They stay within
+// [-Headroom(), 0): the samples are real, they are simply upstream of the
+// window this Media presents.
+type Headroomer interface {
+	// Headroom is how many samples of real audio lie before sample 0, so a
+	// caller knows how far back it may seek. Zero means none.
+	Headroom() int64
+}
+
+// MediaHeadroom asks Headroomer of a Media that may not implement it, which
+// has none.
+func MediaHeadroom(med Media) int64 {
+	if h, ok := med.(Headroomer); ok {
+		return h.Headroom()
+	}
+	return 0
 }
 
 // Composite is implemented by a Media assembled from several sources rather
@@ -295,12 +345,12 @@ var maxSniffNeed = func() int64 {
 // its verdict, which a context that ends stops with CodeCanceled; a tolerant
 // probe reads headers and walks nothing, so it has nothing to stop.
 func Probe(ctx context.Context, src container.Source, hint string, opts *Options) (*Info, error) {
-	src, d, err := resolve(src, hint)
+	src, d, base, err := resolve(src, hint)
 	if err != nil {
 		return nil, err
 	}
 	strict := opts != nil && opts.Strict
-	demux, err := d.open(src, openOptions{strict: strict})
+	demux, err := d.open(src, openOptions{strict: strict, base: base})
 	if err != nil {
 		return nil, err
 	}
@@ -323,11 +373,11 @@ func Probe(ctx context.Context, src container.Source, hint string, opts *Options
 
 // Open identifies src and wires demuxer and decoder into Media.
 func Open(src container.Source, hint string, opts *Options) (Media, error) {
-	src, d, err := resolve(src, hint)
+	src, d, base, err := resolve(src, hint)
 	if err != nil {
 		return nil, err
 	}
-	demux, err := d.open(src, openOptions{strict: opts != nil && opts.Strict})
+	demux, err := d.open(src, openOptions{strict: opts != nil && opts.Strict, base: base})
 	if err != nil {
 		return nil, err
 	}
@@ -346,11 +396,11 @@ func Open(src container.Source, hint string, opts *Options) (Media, error) {
 // Demuxer has no Close; what needs closing is src, which the caller owns, as it
 // does for Probe.
 func OpenDemuxer(src container.Source, hint string, opts *Options) (container.Demuxer, *Info, error) {
-	src, d, err := resolve(src, hint)
+	src, d, base, err := resolve(src, hint)
 	if err != nil {
 		return nil, nil, err
 	}
-	demux, err := d.open(src, openOptions{strict: opts != nil && opts.Strict})
+	demux, err := d.open(src, openOptions{strict: opts != nil && opts.Strict, base: base})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -427,33 +477,36 @@ func foldWarnings(info *Info, ws []container.Warning) {
 
 // resolve picks a driver: bounded sniff first (skipping a leading ID3v2
 // tag if present), extension hint as the tiebreak for unrecognized magic.
-func resolve(src container.Source, hint string) (container.Source, *driver, error) {
+// The int64 is the length of the tag skipped: where the source it returns
+// begins in the file.
+func resolve(src container.Source, hint string) (container.Source, *driver, int64, error) {
 	// One read covers both the ID3v2 check and the sniff; only a present
 	// tag forces a second read past it.
 	head, err := readHead(src, max(maxSniffNeed, 10))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
+	base := int64(0)
 	if skip := id3v2Size(head); skip > 0 && skip < src.Size() {
-		src = sectionSource{src, skip}
+		src, base = sectionSource{src, skip}, skip
 		head, err = readHead(src, maxSniffNeed)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 	}
 	for i := range drivers {
 		if drivers[i].match(head) {
-			return src, &drivers[i], nil
+			return src, &drivers[i], base, nil
 		}
 	}
 	if ext := strings.ToLower(strings.TrimPrefix(hint, ".")); ext != "" {
 		for i := range drivers {
 			if slices.Contains(drivers[i].exts, ext) {
-				return src, &drivers[i], nil
+				return src, &drivers[i], base, nil
 			}
 		}
 	}
-	return src, nil, waxerr.New(waxerr.CodeUnsupportedFormat, "format: unrecognized input (no magic bytes matched)")
+	return src, nil, base, waxerr.New(waxerr.CodeUnsupportedFormat, "format: unrecognized input (no magic bytes matched)")
 }
 
 // readHead reads up to n leading bytes. Sources smaller than n yield a

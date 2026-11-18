@@ -233,7 +233,7 @@ func appendU32(b []byte, v uint32) []byte {
 // collect reads every packet out of a built file.
 func collect(t *testing.T, raw []byte) []container.Packet {
 	t.Helper()
-	d, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+	d, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +371,7 @@ func TestBrokenFragmentRunIsDamage(t *testing.T) {
 	b.packet(0, 7, 9, 12, pres, []byte{10, 11, 12})
 	raw := b.build()
 
-	ds, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+	ds, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatalf("strict open: %v", err)
 	}
@@ -420,7 +420,7 @@ func TestAReadFailureIsSticky(t *testing.T) {
 		b.packet(60, 4, 0, 4, pres+60, []byte{4, 4, 4, 4})
 		b.packet(80, 5, 0, 4, pres+80, []byte{5, 5, 5, 5})
 
-		d, err := asf.NewDemuxer(container.BytesSource(b.build()), &asf.DemuxerOptions{Strict: true})
+		d, err := asf.NewDemuxer(container.BytesSource(b.build()), &container.DemuxerOptions{Strict: true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -597,7 +597,7 @@ func TestTruncatedTailIsDamage(t *testing.T) {
 		t.Error("a file ending mid-object probed clean")
 	}
 
-	ds, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+	ds, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -638,7 +638,7 @@ func TestResumeSuppressionExpires(t *testing.T) {
 	if linear == nil || errors.Is(linear, io.EOF) {
 		t.Fatalf("a strict linear walk accepted the stray fragments (%v)", linear)
 	}
-	d, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+	d, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -664,7 +664,7 @@ func TestResumeSuppressionExpires(t *testing.T) {
 // walkErr reads a built file to its first error under strict mode.
 func walkErr(t *testing.T, raw []byte) error {
 	t.Helper()
-	d, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+	d, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 	if err != nil {
 		return err
 	}
@@ -718,7 +718,7 @@ func TestBackwardsPresentationTimesAreDamage(t *testing.T) {
 		}
 
 		// Strict refuses, and refuses again after a seek re-walks the same fold.
-		ds, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+		ds, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -892,8 +892,8 @@ func TestPayloadWithNoReplicatedData(t *testing.T) {
 	if len(d.Warnings()) == 0 {
 		t.Error("a file that decodes to nothing probed clean")
 	}
-	if _, err := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true}); err == nil {
-		ds, _ := asf.NewDemuxer(container.BytesSource(raw), &asf.DemuxerOptions{Strict: true})
+	if _, err := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true}); err == nil {
+		ds, _ := asf.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: true})
 		if err := ds.ReadPacket(&pkt); err == nil || errors.Is(err, io.EOF) {
 			t.Errorf("strict mode accepted a file it can read nothing out of (%v)", err)
 		}
@@ -919,10 +919,10 @@ func TestAudioSpreadIsRefused(t *testing.T) {
 		return b.build()
 	}
 	// Span 1 is the identity, which is what ffmpeg writes on every file.
-	if _, err := asf.NewDemuxer(container.BytesSource(build(1)), &asf.DemuxerOptions{Strict: true}); err != nil {
+	if _, err := asf.NewDemuxer(container.BytesSource(build(1)), &container.DemuxerOptions{Strict: true}); err != nil {
 		t.Errorf("Audio Spread with span 1 refused: %v", err)
 	}
-	_, err := asf.NewDemuxer(container.BytesSource(build(4)), &asf.DemuxerOptions{Strict: true})
+	_, err := asf.NewDemuxer(container.BytesSource(build(4)), &container.DemuxerOptions{Strict: true})
 	if err == nil {
 		t.Fatal("a stream interleaved across 4 packets was accepted")
 	}
