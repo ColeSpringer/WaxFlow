@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/colespringer/waxflow"
@@ -95,6 +96,9 @@ type Runner struct {
 	wg     sync.WaitGroup
 	wake   chan struct{}
 
+	// started is set by start, which must run once.
+	started atomic.Bool
+
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
 	subs    map[string]map[chan *Job]struct{}
@@ -115,6 +119,16 @@ type testHooks struct {
 // the running state on disk, which the next Open resets to queued (the
 // restart contract).
 func Open(cfg Config) (*Runner, error) {
+	r, err := newRunner(cfg)
+	if err != nil {
+		return nil, err
+	}
+	r.start()
+	return r, nil
+}
+
+// newRunner is Open without the workers.
+func newRunner(cfg Config) (*Runner, error) {
 	log := cfg.Logger
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -132,11 +146,22 @@ func Open(cfg Config) (*Runner, error) {
 		subs:    map[string]map[chan *Job]struct{}{},
 	}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
-	for range max(1, cfg.Slots) {
+	return r, nil
+}
+
+// start launches the workers. Each claims before it first parks, so a job
+// already queued runs without a kick: that is how the jobs Open requeues
+// get picked up. A second call panics rather than double the pool. The flag
+// is atomic, not under mu, because a test hook calls start inside Subscribe,
+// which holds mu.
+func (r *Runner) start() {
+	if !r.started.CompareAndSwap(false, true) {
+		panic("jobs: Runner started twice")
+	}
+	for range max(1, r.cfg.Slots) {
 		r.wg.Add(1)
 		go r.worker()
 	}
-	return r, nil
 }
 
 // Close stops the workers and waits for running jobs to unwind. Their

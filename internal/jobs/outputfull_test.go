@@ -29,8 +29,8 @@ func TestAFullDiskNamesNoPath(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
-			r := openRunner(t, Config{Dir: dir, Resolver: res, MeasureTrack: measureTrack()})
-			j, err := r.store.create(req) // queued; no worker woken
+			r := openUnstartedRunner(t, Config{Dir: dir, Resolver: res, MeasureTrack: measureTrack()})
+			j, err := r.store.create(req) // queued; no worker yet
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -38,7 +38,7 @@ func TestAFullDiskNamesNoPath(t *testing.T) {
 			if err := os.Symlink(full, filepath.Join(r.store.jobDir(j.ID), "out.flac")); err != nil {
 				t.Fatal(err)
 			}
-			r.kick()
+			r.start()
 			failed := waitJob(t, r, j.ID, StateFailed)
 			if failed.Error == nil || failed.Error.Code != string(waxerr.CodeOutputUnwritable) {
 				t.Fatalf("the job failed with %+v, want %s", failed.Error, waxerr.CodeOutputUnwritable)

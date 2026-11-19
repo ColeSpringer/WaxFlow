@@ -11,15 +11,15 @@ func TestSubscribeSeesAClaimBehindItsSnapshot(t *testing.T) {
 	res := openRoots(t, root)
 	srcID := pinID(t, res, ref)
 	pools, _ := saturatedPool(t)
-	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, Pools: pools})
+	r := openUnstartedRunner(t, Config{Dir: t.TempDir(), Resolver: res, Pools: pools})
 
-	j, err := r.store.create(transcodeReq(ref, srcID)) // queued; no worker woken
+	j, err := r.store.create(transcodeReq(ref, srcID)) // queued; no worker yet
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.hooks.subscribed = func() {
 		r.hooks.subscribed = nil
-		r.kick()
+		r.start()
 		waitFor(t, "the claim", func() bool {
 			cur, _ := r.store.get(j.ID)
 			return cur.State == StateRunning

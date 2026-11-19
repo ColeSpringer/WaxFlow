@@ -82,18 +82,37 @@ func pinID(t *testing.T, res source.Resolver, ref string) string {
 // registered as a cleanup; calling it again earlier is harmless.
 func openRunner(t *testing.T, cfg Config) *Runner {
 	t.Helper()
+	r, err := Open(withTestDefaults(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.Close)
+	return r
+}
+
+// openUnstartedRunner is openRunner without its workers, so a job created on
+// its store stays queued until the test calls start. A started runner gives
+// no such hold: its worker claims before it first parks, so a job created
+// after Open can run without a kick.
+func openUnstartedRunner(t *testing.T, cfg Config) *Runner {
+	t.Helper()
+	r, err := newRunner(withTestDefaults(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.Close)
+	return r
+}
+
+// withTestDefaults fills in the engine and slot count a test leaves unset.
+func withTestDefaults(cfg Config) Config {
 	if cfg.Engine == nil {
 		cfg.Engine = waxflow.New()
 	}
 	if cfg.Slots == 0 {
 		cfg.Slots = 1
 	}
-	r, err := Open(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(r.Close)
-	return r
+	return cfg
 }
 
 func transcodeReq(ref, srcID string) Request {
@@ -1577,6 +1596,18 @@ func TestFIFOSingleSlot(t *testing.T) {
 	if secondDone.Started.Before(*firstDone.Finished) {
 		t.Errorf("second started %v before first finished %v", secondDone.Started, firstDone.Finished)
 	}
+}
+
+// A second start would run a second pool past Slots, the bound
+// TestFIFOSingleSlot pins at one worker; it panics instead.
+func TestASecondStartPanics(t *testing.T) {
+	r := openRunner(t, Config{Dir: t.TempDir()})
+	defer func() {
+		if recover() == nil {
+			t.Error("a second start did not panic")
+		}
+	}()
+	r.start()
 }
 
 // failingMapper counts Apply calls and fails each one, so a post-pass that

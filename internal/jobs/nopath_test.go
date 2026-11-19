@@ -370,9 +370,9 @@ func TestAnOutputGoneBeforeItsStatNamesNoPath(t *testing.T) {
 func TestASilenceMapThatCannotBeWrittenNamesNoPath(t *testing.T) {
 	res, ref, srcID := openLib(t)
 	dir := t.TempDir()
-	r := openRunner(t, Config{Dir: dir, Resolver: res})
+	r := openUnstartedRunner(t, Config{Dir: dir, Resolver: res})
 	req := Request{Type: TypeAnalyze, Src: source.Ref(ref), SourceID: srcID, Silence: true}
-	j, err := r.store.create(req) // queued; no worker woken
+	j, err := r.store.create(req) // queued; no worker yet
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +380,7 @@ func TestASilenceMapThatCannotBeWrittenNamesNoPath(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(r.store.jobDir(j.ID), silenceMapFile), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	r.kick()
+	r.start()
 	failed := waitJob(t, r, j.ID, StateFailed)
 	if failed.Error == nil || failed.Error.Code != string(waxerr.CodeOutputUnwritable) {
 		t.Fatalf("the job failed with %+v, want %s", failed.Error, waxerr.CodeOutputUnwritable)
