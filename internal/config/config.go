@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -269,7 +270,8 @@ func EnvVars() []string {
 // WAXFLOW_* environment variables (looked up via lookupEnv, typically
 // os.LookupEnv). An empty path skips the file layer; a non-empty path must
 // exist. Unknown JSON keys are rejected (strict decode). Errors carry
-// waxerr.CodeInvalidRequest.
+// waxerr.CodeInvalidRequest, or not-found for a missing file; a fault of the
+// file is a *FileError, and a refused pidLookupURL a *SettingError.
 func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 	var cfg Config
 
@@ -280,22 +282,26 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 			if errors.Is(err, fs.ErrNotExist) {
 				code = waxerr.CodeNotFound
 			}
-			return cfg, waxerr.Wrap(code, "config file", err)
+			op := "read"
+			if pe, ok := errors.AsType[*fs.PathError](err); ok {
+				op = pe.Op
+			}
+			return cfg, &FileError{Path: path, Err: waxerr.Wrap(code, op, waxerr.Pathless(err))}
 		}
 		// Refused rather than decoded: the decoder reads a stray byte, or
 		// half a surrogate pair, as U+FFFD, and a path would name another
 		// folder, a secret another key.
 		if err := source.CheckJSON(raw); err != nil {
-			return cfg, waxerr.Wrap(waxerr.CodeInvalidRequest, fmt.Sprintf("config file %s", path), err)
+			return cfg, &FileError{Path: path, Err: err}
 		}
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&cfg); err != nil {
-			return cfg, waxerr.Wrap(waxerr.CodeInvalidRequest, fmt.Sprintf("config file %s", path), err)
+			return cfg, &FileError{Path: path, Err: waxerr.Wrap(waxerr.CodeInvalidRequest, "", err)}
 		}
 		// A second value in the stream is as malformed as a bad key.
 		if dec.More() {
-			return cfg, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("config file %s: trailing data after JSON object", path))
+			return cfg, &FileError{Path: path, Err: waxerr.New(waxerr.CodeInvalidRequest, "trailing data after JSON object")}
 		}
 	}
 
@@ -328,6 +334,67 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+// FileError is a config file that did not load. Its text names no file,
+// since a reload hands it to a client; Path names it for the daemon's own
+// user and log (Named, LogAttrs).
+type FileError struct {
+	Path string
+	Err  error
+}
+
+func (e *FileError) Error() string { return "config file: " + e.Err.Error() }
+func (e *FileError) Unwrap() error { return e.Err }
+
+// SettingError is a setting Validate refused. Its text does not quote the
+// value, which can be a path of the daemon's and which a reload hands to a
+// client; Value holds it, as a log may show it, for the daemon's own readers.
+type SettingError struct {
+	Key, Value string
+	Err        error
+}
+
+func (e *SettingError) Error() string { return e.Key + ": " + e.Err.Error() }
+func (e *SettingError) Unwrap() error { return e.Err }
+
+// Named is err as the daemon's own user reads it: the refused file or
+// setting's value named, with the code kept. Any other error is err.
+func Named(err error) error {
+	if fe, ok := errors.AsType[*FileError](err); ok {
+		return waxerr.Annotate("config file "+source.Ref(fe.Path).Text(), fe.Err)
+	}
+	if se, ok := errors.AsType[*SettingError](err); ok && se.Value != "" {
+		return waxerr.Annotate(se.Key+" "+strconv.Quote(se.Value), se.Err)
+	}
+	return err
+}
+
+// LogAttrs is what a log line about err adds to it: the file or the value
+// its text leaves out.
+func LogAttrs(err error) []any {
+	if fe, ok := errors.AsType[*FileError](err); ok {
+		return []any{"config", source.Ref(fe.Path)}
+	}
+	if se, ok := errors.AsType[*SettingError](err); ok && se.Value != "" {
+		return []any{se.Key, se.Value}
+	}
+	return nil
+}
+
+// shownURL is a URL as a log may show it: its user information masked
+// whole (a lone user name is as often a token) and no query or fragment,
+// where a token rides; empty when it does not parse.
+func shownURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	u.RawQuery, u.ForceQuery, u.Fragment, u.RawFragment = "", false, "", ""
+	if u.User != nil {
+		u.User = url.User("xxxxx")
+	}
+	return u.String()
 }
 
 // pathField is one setting that names a place on disk.
@@ -397,7 +464,7 @@ func (c Config) Validate() error {
 	}
 	if c.PIDLookupURL != "" {
 		if _, err := source.ParsePIDLookupURL(c.PIDLookupURL); err != nil {
-			return waxerr.Wrap(waxerr.CodeInvalidRequest, "pidLookupURL", err)
+			return &SettingError{Key: "pidLookupURL", Value: shownURL(c.PIDLookupURL), Err: err}
 		}
 		if c.CatalogDB != "" {
 			return waxerr.New(waxerr.CodeInvalidRequest, "pid: sources come from one place: set pidLookupURL or catalogDB, not both")

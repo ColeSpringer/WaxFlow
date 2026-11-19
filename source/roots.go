@@ -242,9 +242,7 @@ func listable(or *os.Root, path string) error {
 	case errors.Is(err, io.EOF):
 		err = ErrRootEmpty
 	default:
-		if pe, ok := errors.AsType[*fs.PathError](err); ok {
-			err = pe.Err
-		}
+		err = waxerr.Pathless(err)
 	}
 	return &fs.PathError{Op: op, Path: path, Err: err}
 }
@@ -606,7 +604,7 @@ func (r *Roots) Resolve(ctx context.Context, ref string) (*File, error) {
 	fi, err := f.Stat()
 	if err != nil {
 		f.Close()
-		return nil, waxerr.Wrap(waxerr.CodeSourceUnreadable, "source: stat", err)
+		return nil, waxerr.Wrap(waxerr.CodeSourceUnreadable, "source: stat", waxerr.Pathless(err))
 	}
 	if err := container.CheckRegular(ref, fi.Mode()); err != nil {
 		f.Close()
@@ -709,11 +707,8 @@ func (e *RootDownError) Unwrap() error { return e.Err }
 // root but not its path, since a signed playback URL hands this message to a
 // client.
 func unavailable(name string, cause error) error {
-	if pe, ok := errors.AsType[*fs.PathError](cause); ok {
-		cause = pe.Err
-	}
 	return waxerr.Wrap(waxerr.CodeRootUnavailable, fmt.Sprintf("source: root %q is unavailable", name),
-		&RootDownError{Root: name, Err: cause})
+		&RootDownError{Root: name, Err: waxerr.Pathless(cause)})
 }
 
 // openFault codes an open error on a healthy root. A missing file is
@@ -739,18 +734,19 @@ func openFault(err error) error {
 // openFault without the last case: no request spelled this path, so an error
 // nothing here names is the file's fault too, and only a path that names
 // nothing is not-found: a missing file, or one whose path runs through a
-// file.
+// file. The path is the daemon's own, so the error does not quote it.
 func localFault(err error) error {
+	cause := waxerr.Pathless(err)
 	switch {
 	case errors.Is(err, fs.ErrNotExist), errors.Is(err, syscall.ENOTDIR):
-		return waxerr.Wrap(waxerr.CodeNotFound, "source: no such file", err)
+		return waxerr.Wrap(waxerr.CodeNotFound, "source: no such file", cause)
 	case errors.Is(err, fs.ErrPermission):
-		return waxerr.Wrap(waxerr.CodeSourceUnreadable, "source: permission denied", err)
+		return waxerr.Wrap(waxerr.CodeSourceUnreadable, "source: permission denied", cause)
 	case isIOFault(err):
-		return waxerr.Wrap(waxerr.CodeSourceUnreadable, "source: reading the file", err)
+		return waxerr.Wrap(waxerr.CodeSourceUnreadable, "source: reading the file", cause)
 	case isOutOfHandles(err):
-		return waxerr.Wrap(waxerr.CodeOverloaded, "source: out of file handles", err)
+		return waxerr.Wrap(waxerr.CodeOverloaded, "source: out of file handles", cause)
 	default:
-		return waxerr.Wrap(waxerr.CodeSourceUnreadable, "source: opening the file", err)
+		return waxerr.Wrap(waxerr.CodeSourceUnreadable, "source: opening the file", cause)
 	}
 }

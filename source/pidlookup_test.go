@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/colespringer/waxflow/internal/lru"
 	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -906,6 +908,39 @@ func TestPIDLookupCacheEvictsExpiredThenLeastRecentlyUsed(t *testing.T) {
 	})
 }
 
+// TestPIDLookupCacheEvictsAnExpiredEntryBeforeAnOlderLiveOne: at capacity
+// an expired entry makes the room, even when a live one was used longer ago.
+func TestPIDLookupCacheEvictsAnExpiredEntryBeforeAnOlderLiveOne(t *testing.T) {
+	id := func(i int) string { return fmt.Sprintf("pid:%026d", i) }
+	host := newPIDHost(t, answerRef("lib/sub/a.wav", "Cache-Control", "max-age=60"))
+	l, _ := newLookup(t, host, PIDLookupOptions{})
+	base := time.Now()
+	var offset time.Duration
+	l.now = func() time.Time { return base.Add(offset) }
+	fill := func(from, to int) {
+		t.Helper()
+		for i := from; i < to; i++ {
+			f, err := l.Resolve(context.Background(), id(i))
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.Close()
+		}
+	}
+	fill(0, 1) // id 0 is live for a minute and the least recently used
+	host.setAnswer(answerRef("lib/sub/a.wav", "Cache-Control", "max-age=1"))
+	fill(1, 2) // id 1 expires in a second
+	offset = 2 * time.Second
+	host.setAnswer(answerRef("lib/sub/a.wav", "Cache-Control", "max-age=60"))
+	fill(2, pidCacheEntries+1) // fills the cache, then one more
+
+	before := host.requests.Load()
+	fill(0, 1)
+	if n := host.requests.Load(); n != before {
+		t.Fatal("the older live entry was evicted ahead of the expired one")
+	}
+}
+
 // TestPIDLookupAnswerInTextForm: the host may write any reference pct:
 // escaped, which is how it names a file whose name is not UTF-8.
 func TestPIDLookupAnswerInTextForm(t *testing.T) {
@@ -1104,5 +1139,149 @@ func TestPIDLookupURLRefusalsQuoteNoQuery(t *testing.T) {
 		if !strings.Contains(err.Error(), "pid") {
 			t.Errorf("%s: the refusal no longer says which URL: %v", raw, err)
 		}
+	}
+}
+
+// TestPIDLookupCacheSkipsThePassWhileNothingCanHaveExpired: at capacity the
+// pass for an expired entry runs only once the clock reaches the soonest
+// expiry, and it stops at the first expired entry.
+func TestPIDLookupCacheSkipsThePassWhileNothingCanHaveExpired(t *testing.T) {
+	base := time.Now()
+	var offset time.Duration
+	l := &PIDLookup{now: func() time.Time { return base.Add(offset) }, cache: lru.New[string, pidEntry](pidCacheEntries)}
+	for i := range pidCacheEntries {
+		l.remember(fmt.Sprintf("fill%d", i), "lib/a.wav", time.Minute)
+	}
+	step := func(id string, ttl time.Duration, wantVisits int) {
+		t.Helper()
+		before := l.scanned
+		l.remember(id, "lib/a.wav", ttl)
+		if got := l.scanned - before; got != wantVisits {
+			t.Fatalf("remembering %s visited %d entries, want %d", id, got, wantVisits)
+		}
+		if n := l.cache.Len(); n != pidCacheEntries {
+			t.Fatalf("the cache holds %d entries, want %d", n, pidCacheEntries)
+		}
+	}
+	step("a", time.Minute, pidCacheEntries) // no bound yet: one full pass sets it
+	step("b", time.Minute, 0)
+	step("short", time.Second, 0) // lowers the bound
+	offset = 2 * time.Second
+	step("c", time.Minute, pidCacheEntries) // short is the newest entry
+	if _, ok := l.cache.Peek("short"); ok {
+		t.Fatal("c took the place of a live entry while short was expired")
+	}
+	step("d", time.Minute, pidCacheEntries) // the bound was too low: a pass resets it
+	step("e", time.Minute, 0)
+	offset = time.Minute
+	step("f", time.Minute, 1) // every fill entry has expired; the oldest goes
+	if _, ok := l.cache.Peek("fill5"); ok {
+		t.Fatal("the oldest expired entry survived")
+	}
+}
+
+// TestPIDLookupCacheKeepsTheEvictionRule runs random puts, drops, reads and
+// clock steps (some backwards) against a model that states the rule
+// directly: a new id at capacity takes the place of the least recently used
+// expired entry, else of the least recently used entry.
+func TestPIDLookupCacheKeepsTheEvictionRule(t *testing.T) {
+	type modelEntry struct {
+		expires time.Time
+		used    int
+	}
+	const ids = 2 * pidCacheEntries
+	for seed := range uint64(4) {
+		r := rand.New(rand.NewPCG(seed, 1))
+		base := time.Now()
+		var offset time.Duration
+		now := func() time.Time { return base.Add(offset) }
+		l := &PIDLookup{now: now, cache: lru.New[string, pidEntry](pidCacheEntries)}
+		model := map[string]modelEntry{}
+		tick := 0
+		remember := func(id string, ttl time.Duration) {
+			l.remember(id, "lib/a.wav", ttl)
+			at := now()
+			if _, ok := model[id]; !ok && len(model) >= pidCacheEntries {
+				victim, expired := "", false
+				for k, e := range model {
+					isExpired := !at.Before(e.expires)
+					switch {
+					case victim == "",
+						isExpired && !expired,
+						isExpired == expired && e.used < model[victim].used:
+						victim, expired = k, isExpired
+					}
+				}
+				delete(model, victim)
+			}
+			tick++
+			model[id] = modelEntry{expires: at.Add(ttl), used: tick}
+		}
+		for i := range pidCacheEntries {
+			remember(fmt.Sprint("id", i), time.Duration(1+r.IntN(3000))*time.Millisecond)
+		}
+		for step := range 4000 {
+			id := fmt.Sprint("id", r.IntN(ids))
+			switch r.IntN(40) {
+			case 0, 1, 2, 3:
+				offset += time.Duration(r.IntN(1500)-500) * time.Millisecond
+			case 4:
+				l.drop(id)
+				delete(model, id)
+			case 5, 6:
+				l.cached(id)
+				if e, ok := model[id]; ok {
+					if !now().Before(e.expires) {
+						delete(model, id)
+					} else {
+						tick++
+						e.used = tick
+						model[id] = e
+					}
+				}
+			default:
+				remember(id, time.Duration(1+r.IntN(3000))*time.Millisecond)
+			}
+			if l.cache.Len() != len(model) {
+				t.Fatalf("seed %d step %d: the cache holds %d entries, the rule %d", seed, step, l.cache.Len(), len(model))
+			}
+			if step%256 != 255 {
+				continue
+			}
+			for k, e := range model {
+				if got, ok := l.cache.Peek(k); !ok || !got.expires.Equal(e.expires) {
+					t.Fatalf("seed %d step %d: the cache holds %s as %v (%v), the rule as %v", seed, step, k, got.expires, ok, e.expires)
+				}
+			}
+		}
+	}
+}
+
+// BenchmarkPIDLookupRememberAtCapacity times a new id put into a full cache:
+// with no entry expired, with the oldest expired and with only the newest.
+func BenchmarkPIDLookupRememberAtCapacity(b *testing.B) {
+	for _, bc := range []struct {
+		name      string
+		fill, ttl time.Duration
+	}{
+		{"none expired", time.Minute, time.Minute},
+		{"oldest expired", 0, 0},
+		{"newest expired", time.Minute, 0},
+	} {
+		b.Run(bc.name, func(b *testing.B) {
+			now := time.Now()
+			l := &PIDLookup{now: func() time.Time { return now }, cache: lru.New[string, pidEntry](pidCacheEntries)}
+			for i := range pidCacheEntries {
+				l.remember(fmt.Sprintf("fill%d", i), "lib/a.wav", bc.fill)
+			}
+			ids := make([]string, 1<<16)
+			for i := range ids {
+				ids[i] = fmt.Sprintf("id%d", i)
+			}
+			b.ResetTimer()
+			for i := range b.N {
+				l.remember(ids[i%len(ids)], "lib/a.wav", bc.ttl)
+			}
+		})
 	}
 }

@@ -1173,7 +1173,7 @@ func TestEveryWrapperCarriesEveryLiveField(t *testing.T) {
 	measured := source().track
 	measured.SamplesCounted = true // a different claim, so the wrapper is built
 	wrappers := map[string]func() (format.Media, error){
-		"a measured Media": func() (format.Media, error) { return MeasuredMedia(source(), measured), nil },
+		"a measured Media": func() (format.Media, error) { return MeasuredMedia(source(), measured) },
 		"a span":           func() (format.Media, error) { return Slice(source(), 0, ToEnd) },
 		"a timeline": func() (format.Media, error) {
 			m := fixedMember(stereo48, 20_000)

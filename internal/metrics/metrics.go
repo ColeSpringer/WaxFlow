@@ -43,8 +43,8 @@ type Metrics struct {
 	Cuts atomic.Uint64
 	// AdmissionRejects counts 503s from saturated pools.
 	AdmissionRejects atomic.Uint64
-	// Degradations counts sessions downgraded to ring-fed streaming by
-	// cache write failures.
+	// Degradations counts sessions downgraded to ring-fed streaming, and HLS
+	// segments made for one request, by cache write failures.
 	Degradations atomic.Uint64
 	// TTFB observes seconds from request start to first stream byte.
 	TTFB Histogram
@@ -163,7 +163,7 @@ func (m *Metrics) WritePrometheus(w io.Writer, version string, g Gauges) {
 		p("waxflow_roots_unmounted %d\n", *g.RootsUnmounted)
 	}
 
-	p("# HELP waxflow_session_degradations_total Sessions downgraded to ring-fed streaming by cache write failures.\n")
+	p("# HELP waxflow_session_degradations_total Sessions downgraded to ring-fed streaming, and HLS segments made for one request, by cache write failures.\n")
 	p("# TYPE waxflow_session_degradations_total counter\n")
 	p("waxflow_session_degradations_total %d\n", m.Degradations.Load())
 

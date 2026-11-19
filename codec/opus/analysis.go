@@ -27,6 +27,27 @@ const (
 	analysisFFTSize   = 480
 )
 
+// quietSwing is the peak-to-peak swing under which 20 ms is silence to a
+// listener: four steps of 16 bits, between flat dither and the quietest
+// sound (docs/quality-gates.md has the measure).
+const quietSwing = 4.0 / 32768
+
+// quiet reports whether x[from:from+n] swings under quietSwing on every one
+// of its first C channels. It is judged on the channels: a downmix can
+// cancel what they hold, and a swing ignores an offset.
+func quiet(x [][]float32, from, n, C int) bool {
+	for c := range C {
+		lo, hi := x[c][from], x[c][from]
+		for _, v := range x[c][from : from+n] {
+			lo, hi = min(lo, v), max(hi, v)
+		}
+		if !(hi-lo < quietSwing) {
+			return false
+		}
+	}
+	return true
+}
+
 var analysisTbands = [nbTbands + 1]int{
 	4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 136, 160, 192, 240,
 }
@@ -74,6 +95,8 @@ type tonalityAnalysisState struct {
 	writePos         int
 	readPos          int
 	readSubframe     int
+	sounded          bool            // the frame before was not silence to a listener
+	counts           [detectSize]int // count as each info was written
 	hpEnerAccum      float32
 	initialized      bool
 	rnnState         [mlpMaxNeurons]float32
@@ -337,6 +360,12 @@ func (t *tonalityAnalysisState) tonalityAnalysis(x [][]float32, len48, offset48,
 		remaining, offset+analysisBufSize-t.memFill, c1, c2, C)
 	t.memFill = 240 + remaining
 
+	// Dither and the like are silence too, from the second such frame as
+	// zeros are (the window still holds the tail of the frame before): the
+	// classifier's history is kept for sound.
+	hush := quiet(x, offset48, len48, C)
+	isSilence = isSilence || hush && !t.sounded
+	t.sounded = !hush
 	if isSilence {
 		prevPos := t.writePos - 2
 		if prevPos < 0 {
@@ -833,6 +862,7 @@ func (t *tonalityAnalysisState) runAnalysis(x [][]float32, analysisFrameSize, fr
 		offset := t.analysisOffset
 		for pcmLen > 0 {
 			t.tonalityAnalysis(x, minIntA(48000/50, pcmLen), offset, c1, c2, C, lsbDepth)
+			t.counts[(t.writePos+detectSize-1)%detectSize] = t.count
 			offset += 48000 / 50
 			pcmLen -= 48000 / 50
 		}
@@ -840,6 +870,31 @@ func (t *tonalityAnalysisState) runAnalysis(x [][]float32, analysisFrameSize, fr
 		t.analysisOffset -= frameSize
 	}
 	t.tonalityGetInfo(infoOut, frameSize)
+}
+
+// analysisReader is a place in an analyser's results behind where it has
+// analysed to: the frame it reads next, and how far past that it may see.
+type analysisReader struct {
+	readPos, readSubframe int
+	ahead                 int // frames in view past the one read
+	count                 int // the analyser's count at the edge of the view
+}
+
+// readAs is tonalityGetInfo for r: the info of r's frame as an analyser
+// that had analysed no further than r's view would give it. One analyser
+// kept ahead then serves a reader that stands at the frame being coded.
+func (t *tonalityAnalysisState) readAs(r *analysisReader, infoOut *analysisInfo, length int) {
+	readPos, readSubframe, writePos, count := t.readPos, t.readSubframe, t.writePos, t.count
+	t.readPos, t.readSubframe = r.readPos, r.readSubframe
+	t.writePos = (r.readPos + 1 + r.ahead) % detectSize
+	t.count = t.counts[(t.writePos+detectSize-1)%detectSize]
+	r.count = t.count
+	t.tonalityGetInfo(infoOut, length)
+	r.readPos, r.readSubframe = t.readPos, t.readSubframe
+	if r.ahead > 0 {
+		r.ahead--
+	}
+	t.readPos, t.readSubframe, t.writePos, t.count = readPos, readSubframe, writePos, count
 }
 
 func minA(a, b float32) float32 {

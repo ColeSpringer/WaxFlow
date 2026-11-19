@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"os"
@@ -105,6 +106,8 @@ type Runner struct {
 type testHooks struct {
 	// subscribed runs in Subscribe once its snapshot is taken.
 	subscribed func()
+	// memberCloser replaces what closes merge member i's file.
+	memberCloser func(i int, f io.Closer) io.Closer
 }
 
 // Open loads the store (requeueing interrupted jobs) and starts the
@@ -362,7 +365,7 @@ func (r *Runner) run(j *Job) {
 		job.Progress = nil
 		if err != nil {
 			job.State = StateFailed
-			job.Error = &ErrInfo{Code: string(waxerr.CodeOf(err)), Message: err.Error()}
+			job.Error = &ErrInfo{Code: string(waxerr.CodeOf(err)), Message: waxerr.Message(err)}
 		} else {
 			job.State = StateDone
 		}
@@ -402,7 +405,7 @@ func (r *Runner) retry(j *Job, err error) {
 	if every <= 0 {
 		every = 10 * time.Second
 	}
-	queued, waits, delay := r.store.requeue(j.ID, every, string(waxerr.CodeOf(err)), err.Error())
+	queued, waits, delay := r.store.requeue(j.ID, every, string(waxerr.CodeOf(err)), waxerr.Message(err))
 	if queued == nil {
 		os.RemoveAll(r.store.jobDir(j.ID)) // deleted mid-run, as run's terminal path sweeps
 		return
@@ -470,19 +473,6 @@ func (r *Runner) resolvePinned(ctx context.Context, ref, id string, member int) 
 	return src, nil
 }
 
-// closingMedia releases the source handle with the media, so a Concat member
-// closed on advance gives its file descriptor back.
-type closingMedia struct {
-	format.Forwarder
-	f *source.File
-}
-
-func (m closingMedia) Close() error {
-	err := m.Media.Close()
-	m.f.Close()
-	return err
-}
-
 // openMemberMedia is a merge member's Open: resolve, re-pin, decode.
 //
 // The pin is checked here as well as during the measuring pass, because these
@@ -494,7 +484,7 @@ func (m closingMedia) Close() error {
 // ctx is the job's own, never a request's, exactly as ConcatSource.Open
 // requires: this fires deep inside the transcode, long after the call that
 // built the Concat returned.
-func (r *Runner) openMemberMedia(ctx context.Context, req Request, i int) (format.Media, error) {
+func (r *Runner) openMemberMedia(ctx context.Context, id string, req Request, i int) (format.Media, error) {
 	f, err := r.openMember(ctx, req, i)
 	if err != nil {
 		return nil, err
@@ -504,7 +494,35 @@ func (r *Runner) openMemberMedia(ctx context.Context, req Request, i int) (forma
 		f.Close()
 		return nil, err
 	}
-	return closingMedia{Forwarder: format.Forwarder{Media: med}, f: f}, nil
+	// The handle goes with the media, so a member closed on advance gives
+	// its file descriptor back.
+	c := memberCloser{r: r, id: id, name: fmt.Sprintf("member %d (%s)", i, req.Srcs[i].Text()), c: f}
+	if fn := r.hooks.memberCloser; fn != nil {
+		c.c = fn(i, f)
+	}
+	member, err := format.WithCloser(med, c)
+	if err != nil {
+		med.Close()
+		c.Close()
+		return nil, err
+	}
+	return member, nil
+}
+
+// memberCloser closes a merge member's file. A close that fails is a job
+// warning naming the member, never the job's failure: every sample the
+// member declared was read before it.
+type memberCloser struct {
+	r        *Runner
+	id, name string
+	c        io.Closer
+}
+
+func (m memberCloser) Close() error {
+	if err := m.c.Close(); err != nil {
+		m.r.warnErr(m.id, m.name, err)
+	}
+	return nil
 }
 
 // progressFunc builds the per-chunk hook: it updates the in-memory
@@ -539,6 +557,12 @@ func (r *Runner) warn(id, note string) {
 	if j := r.store.update(id, false, func(job *Job) { job.Warnings = append(job.Warnings, note) }); j != nil {
 		r.notify(j, false)
 	}
+}
+
+// warnErr records a failure the job survived, as what and the text of err a
+// client may read.
+func (r *Runner) warnErr(id, what string, err error) {
+	r.warn(id, what+": "+waxerr.Message(err))
 }
 
 // warnInput attaches the input damage the read worked around (an engine
@@ -870,7 +894,7 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 			// not take the container's tags with it either: those are already
 			// parsed and the fold below still has them. The CLI reached the
 			// same answer for the same reason.
-			r.warn(j.ID, "metadata unread: "+err.Error())
+			r.warnErr(j.ID, "metadata unread", err)
 			mi = &meta.Info{}
 		}
 		info = mi
@@ -1111,7 +1135,7 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 	// interrupted Apply never loses anything a rerun does not redo.
 	if r.cfg.Meta != nil && !embedsTags && tagInfo != nil {
 		if err := r.cfg.Meta.Apply(ctx, outPath, tagInfo, rg); err != nil {
-			r.warn(j.ID, "metadata post-pass: "+err.Error())
+			r.warnErr(j.ID, "metadata post-pass", err)
 		}
 	}
 
@@ -1265,7 +1289,7 @@ func (r *Runner) runMerge(ctx context.Context, j *Job) error {
 		haveReqTitle := i < len(req.MemberTitles) && req.MemberTitles[i] != ""
 		if wantChapters && !haveReqTitle && r.cfg.Meta != nil {
 			if info, err := r.cfg.Meta.Read(ctx, f, f.Ext, meta.ReadOptions{}); err != nil {
-				r.warn(j.ID, fmt.Sprintf("member %d: reading title: %v", i, err))
+				r.warnErr(j.ID, fmt.Sprintf("member %d: reading title", i), err)
 			} else if vs := info.Tags["TITLE"]; len(vs) > 0 {
 				tagTitles[i] = vs[0]
 			}
@@ -1278,7 +1302,7 @@ func (r *Runner) runMerge(ctx context.Context, j *Job) error {
 	for i := range tracks {
 		members[i] = waxflow.ConcatSource{
 			Track: tracks[i],
-			Open:  func() (format.Media, error) { return r.openMemberMedia(ctx, req, i) },
+			Open:  func() (format.Media, error) { return r.openMemberMedia(ctx, j.ID, req, i) },
 		}
 	}
 	// The daemon's profile and no crossfade, built by the same call the server

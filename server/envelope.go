@@ -59,7 +59,7 @@ func (s *Server) writeError(w http.ResponseWriter, err error) {
 		// library root: tell clients when to come back.
 		w.Header().Set("Retry-After", "2")
 	}
-	s.writeEnvelope(w, statusFor(code), code, err.Error())
+	s.writeEnvelope(w, statusFor(code), code, waxerr.Message(err))
 }
 
 // writeEnvelope writes an envelope with an explicit status (the 416 range

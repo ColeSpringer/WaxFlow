@@ -22,8 +22,8 @@ import (
 	"github.com/colespringer/waxflow/container/riff"
 	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/format"
-	"github.com/colespringer/waxflow/internal/hls"
 	"github.com/colespringer/waxflow/internal/testutil"
+	"github.com/colespringer/waxflow/internal/testutil/hlsclient"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -1251,7 +1251,7 @@ func TestPlanTranscodeTimelinePlansTheRenderedLength(t *testing.T) {
 // TestHLSReadBackTimeline is the full-stack gapless proof, and the one test
 // here that exercises every layer at once: one continuous signal is cut into
 // three files, handed back as a timeline, planned, encoded to FLAC, framed
-// into CMAF segments, served over HTTP, read back through the HLS client's
+// into CMAF segments, served over HTTP, read back through hlsclient's
 // fragmented-MP4 demuxer, and decoded. The result must be the original, bit
 // for bit.
 //
@@ -1302,7 +1302,7 @@ func TestHLSReadBackTimeline(t *testing.T) {
 	segs := timelineSegments(t, e, raws, waxflow.ConcatOptions{}, opts, plan.SegmentSamples, 0)
 	masterURL := servePresentation(t, []hlsVariant{{plan: plan, init: init, segs: segs}})
 
-	med, err := hls.OpenVOD(context.Background(), hls.HTTPFetcher{}, masterURL, nil)
+	med, err := hlsclient.OpenVOD(context.Background(), hlsclient.HTTPFetcher{}, masterURL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2082,7 +2082,7 @@ func TestTimelineRefusesAConversionAcrossAMixedSeam(t *testing.T) {
 	}{
 		{"bare", func(m format.Media) format.Media { return m }},
 		{"behind MeasuredMedia", func(m format.Media) format.Media {
-			return waxflow.MeasuredMedia(m, measuredLen(m.Info().Default().Samples-1))
+			return measuredAs(t, m, measuredLen(m.Info().Default().Samples-1))
 		}},
 		{"behind a Slice", func(m format.Media) format.Media {
 			s, err := waxflow.Slice(m, 0, 2*frames-16)

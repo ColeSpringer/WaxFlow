@@ -11,6 +11,7 @@ import (
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -24,7 +25,7 @@ func trackWithSamples(n int64) container.Track {
 // that matters: a library-wide sweep must not push a live session's track out
 // of the memo, because rebuilding one can cost a full decode.
 func TestTrackCacheEvictsLeastRecentlyUsed(t *testing.T) {
-	var c trackCache
+	c := newTrackCache()
 	for i := range trackCacheCap {
 		c.put(strconv.Itoa(i), trackWithSamples(int64(i)), nil)
 	}
@@ -42,13 +43,13 @@ func TestTrackCacheEvictsLeastRecentlyUsed(t *testing.T) {
 	if _, ok := c.get("1"); ok {
 		t.Error("key 1 survived; it was the least recently used and should have been evicted")
 	}
-	if len(c.entries) != trackCacheCap {
-		t.Errorf("cache holds %d entries, want the %d cap", len(c.entries), trackCacheCap)
+	if c.entries.Len() != trackCacheCap {
+		t.Errorf("cache holds %d entries, want the %d cap", c.entries.Len(), trackCacheCap)
 	}
 }
 
 func TestTrackCacheGetReturnsStoredTrack(t *testing.T) {
-	var c trackCache
+	c := newTrackCache()
 	if _, ok := c.get("absent"); ok {
 		t.Error("zero-value cache reported a hit")
 	}
@@ -66,14 +67,62 @@ func TestTrackCacheGetReturnsStoredTrack(t *testing.T) {
 // identity grows once per file for the process's life, so a library sweep would
 // pin the whole catalog.
 func TestTrackCacheBoundHolds(t *testing.T) {
-	var c trackCache
-	// Enough past the cap to force many evictions, but not so far that the
-	// linear evict scan (O(cap) per insert once full) dominates the suite.
+	c := newTrackCache()
+	// Enough past the cap to force many evictions.
 	for i := range trackCacheCap + 500 {
 		c.put(strconv.Itoa(i), trackWithSamples(int64(i)), nil)
 	}
-	if len(c.entries) > trackCacheCap {
-		t.Errorf("cache grew to %d entries past the %d cap", len(c.entries), trackCacheCap)
+	if c.entries.Len() > trackCacheCap {
+		t.Errorf("cache grew to %d entries past the %d cap", c.entries.Len(), trackCacheCap)
+	}
+}
+
+// TestTrackCacheKeepsAnExactTrackOverAnAdvisoryOne: an advisory write never
+// replaces a measured entry, but its tags fill an entry that has none.
+func TestTrackCacheKeepsAnExactTrackOverAnAdvisoryOne(t *testing.T) {
+	c := newTrackCache()
+	exact := container.Track{Samples: 100, SamplesExact: true}
+	c.put("k", exact, nil)
+	tags := map[string][]string{"TITLE": {"first"}}
+	c.put("k", container.Track{Samples: 99}, tags)
+	got, gotTags, ok := c.getWithTags("k")
+	if !ok || got.Samples != 100 || !got.SamplesExact {
+		t.Fatalf("entry = %d (exact %v, held %v), want the measured 100", got.Samples, got.SamplesExact, ok)
+	}
+	if len(gotTags["TITLE"]) != 1 || gotTags["TITLE"][0] != "first" {
+		t.Errorf("tags = %v, want the advisory write's adopted", gotTags)
+	}
+	c.put("k", container.Track{Samples: 98}, map[string][]string{"TITLE": {"second"}})
+	if _, gotTags, _ := c.getWithTags("k"); gotTags["TITLE"][0] != "first" {
+		t.Errorf("tags = %v, want the ones already held", gotTags)
+	}
+	// Any other write replaces the entry whole.
+	c.put("k", container.Track{Samples: 200, SamplesExact: true}, nil)
+	if got, gotTags, _ := c.getWithTags("k"); got.Samples != 200 || gotTags != nil {
+		t.Errorf("entry = %d with tags %v, want the newer exact write", got.Samples, gotTags)
+	}
+	c.put("adv", container.Track{Samples: 1}, nil)
+	c.put("adv", container.Track{Samples: 2}, nil)
+	if got, _ := c.get("adv"); got.Samples != 2 {
+		t.Errorf("advisory entry = %d, want the later write", got.Samples)
+	}
+}
+
+// TestTrackCacheALosingWriteIsNotAUse: the advisory write that loses leaves
+// the entry where it was in the eviction order.
+func TestTrackCacheALosingWriteIsNotAUse(t *testing.T) {
+	c := newTrackCache()
+	c.put("0", container.Track{Samples: 100, SamplesExact: true}, nil)
+	for i := 1; i < trackCacheCap; i++ {
+		c.put(strconv.Itoa(i), trackWithSamples(int64(i)), nil)
+	}
+	c.put("0", trackWithSamples(99), nil)
+	c.put("new", trackWithSamples(-1), nil)
+	if _, ok := c.get("0"); ok {
+		t.Error("key 0 survived; the write that lost must not refresh it")
+	}
+	if _, ok := c.get("1"); !ok {
+		t.Error("key 1 was evicted ahead of the least recently used entry")
 	}
 }
 
@@ -123,7 +172,7 @@ func trackForEnv(t *testing.T, names ...string) (*Server, *countingIdx, *source.
 	t.Helper()
 	root := t.TempDir()
 	for _, name := range names {
-		b, err := os.ReadFile(filepath.Join("..", "testdata", "sine-untagged.mp3"))
+		b, err := os.ReadFile(testutil.PkgFile("..", "testdata", "sine-untagged.mp3"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -137,7 +186,7 @@ func trackForEnv(t *testing.T, names ...string) (*Server, *countingIdx, *source.
 	}
 	t.Cleanup(func() { roots.Close() })
 	idx := &countingIdx{loaded: make(chan struct{})}
-	return &Server{eng: waxflow.New(waxflow.WithIndexCache(idx))}, idx, roots
+	return &Server{eng: waxflow.New(waxflow.WithIndexCache(idx)), trackCache: newTrackCache()}, idx, roots
 }
 
 // TestTrackForLetsALeavingCallerGo: the shared measure runs on a context and
@@ -317,7 +366,7 @@ func trackForFile(t *testing.T, src, name string) (*Server, *source.File) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { f.Close() })
-	return &Server{eng: waxflow.New()}, f
+	return &Server{eng: waxflow.New(), trackCache: newTrackCache()}, f
 }
 
 // TestTrackForKeepsAnAdvisoryTotalForANonExactCaller pins the asymmetry
@@ -332,8 +381,8 @@ func trackForFile(t *testing.T, src, name string) (*Server, *source.File) {
 // for a measured one by name; see the cell below.
 func TestTrackForKeepsAnAdvisoryTotalForANonExactCaller(t *testing.T) {
 	for _, tc := range []struct{ src, name string }{
-		{filepath.Join("..", "container", "mka", "testdata", "seed-opus.webm"), "seed.webm"},
-		{filepath.Join("..", "testdata", "sine-s16.wma"), "sine.wma"},
+		{testutil.PkgFile("..", "container", "mka", "testdata", "seed-opus.webm"), "seed.webm"},
+		{testutil.PkgFile("..", "testdata", "sine-s16.wma"), "sine.wma"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, f := trackForFile(t, tc.src, tc.name)
@@ -363,7 +412,7 @@ func TestTrackForKeepsAnAdvisoryTotalForANonExactCaller(t *testing.T) {
 // member to ask whether measuring it is slow; the open is a head read, the
 // answer is slow, and there is nothing to memoize because nothing was paid.
 func TestTimelineGateReadsTheHeadOfAWebMMember(t *testing.T) {
-	s, f := trackForFile(t, filepath.Join("..", "container", "mka", "testdata", "seed-opus.webm"), "seed.webm")
+	s, f := trackForFile(t, testutil.PkgFile("..", "container", "mka", "testdata", "seed-opus.webm"), "seed.webm")
 	if s.trackIsExact(f) {
 		t.Fatal("the memo is warm before the gate ran")
 	}
@@ -406,7 +455,7 @@ func TestTrackForCarriesTheWalksTrims(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { f.Close() })
-	s := &Server{eng: waxflow.New()}
+	s := &Server{eng: waxflow.New(), trackCache: newTrackCache()}
 
 	probe, err := s.trackFor(t.Context(), f, false)
 	if err != nil {

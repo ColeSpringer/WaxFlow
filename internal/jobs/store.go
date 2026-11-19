@@ -6,7 +6,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,7 +25,9 @@ import (
 // or the new state, never a torn one.
 type store struct {
 	dir string
-	log *slog.Logger
+	// dirs is dir in each spelling a message may quote it, longer first.
+	dirs []spelling
+	log  *slog.Logger
 
 	mu   sync.Mutex
 	jobs map[string]*Job
@@ -38,10 +43,15 @@ type wait struct {
 }
 
 func openStore(dir string, log *slog.Logger) (*store, error) {
+	// Absolute, so a path an error quotes is one waxerr.Message drops.
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeInternal, "jobs: resolving store dir", err)
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: creating store dir", err)
 	}
-	s := &store{dir: dir, log: log, jobs: map[string]*Job{}, waits: map[string]wait{}}
+	s := &store{dir: dir, dirs: spellings(dir), log: log, jobs: map[string]*Job{}, waits: map[string]wait{}}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeSourceUnreadable, "jobs: scanning store dir", err)
@@ -73,6 +83,10 @@ func openStore(dir string, log *slog.Logger) (*store, error) {
 			}
 			continue
 		}
+		s.cutDir(j)
+		// Every job directory it loads is swept, requeued or not: nothing
+		// is in flight at open, so a temp is a write a crash interrupted.
+		posixfs.SweepTemps(s.jobDir(j.ID))
 		if !j.State.Terminal() {
 			// The restart contract: incomplete jobs restart cleanly from
 			// zero. Partial outputs are deleted so the rerun is idempotent.
@@ -115,6 +129,59 @@ func (s *store) resetForRequeue(j *Job) {
 
 const jobFile = "job.json"
 
+// spelling is a directory and its separator as a message writes them.
+type spelling struct{ dir, sep string }
+
+// spellings is dir as a message may quote it: as given and as its symlinks
+// resolve, each as it is and as %q escapes it (the tagging library quotes
+// the path it is handed so, which on Windows doubles every separator).
+// Longer first, since one can hold another.
+func spellings(dir string) []spelling {
+	dirs := []string{dir}
+	if real, err := filepath.EvalSymlinks(dir); err == nil && real != dir {
+		dirs = append(dirs, real)
+	}
+	sep := string(filepath.Separator)
+	var out []spelling
+	for _, d := range dirs {
+		out = append(out, spelling{d, sep})
+		if q, qsep := quoted(d), quoted(sep); q != d || qsep != sep {
+			out = append(out, spelling{q, qsep})
+		}
+	}
+	slices.SortFunc(out, func(a, b spelling) int { return len(b.dir) - len(a.dir) })
+	return out
+}
+
+// quoted is s as %q writes it, without the quotes around it.
+func quoted(s string) string {
+	q := strconv.Quote(s)
+	return q[1 : len(q)-1]
+}
+
+// cutDir takes the job's directory out of every message on it, whatever
+// built the message: a client reads them, and a tagging library quotes the
+// paths it is handed in its own words, where no typed error carries them.
+func (s *store) cutDir(j *Job) {
+	cut := func(msg string) string {
+		for _, sp := range s.dirs {
+			d := sp.dir + sp.sep + j.ID
+			msg = strings.ReplaceAll(msg, d+sp.sep, "")
+			msg = strings.ReplaceAll(msg, d, ".")
+		}
+		return msg
+	}
+	if j.Error != nil {
+		j.Error.Message = cut(j.Error.Message)
+	}
+	if j.Waiting != nil {
+		j.Waiting.Message = cut(j.Waiting.Message)
+	}
+	for i, w := range j.Warnings {
+		j.Warnings[i] = cut(w)
+	}
+}
+
 func (s *store) jobDir(id string) string { return filepath.Join(s.dir, id) }
 
 func (s *store) load(id string) (*Job, error) {
@@ -144,13 +211,8 @@ func (s *store) persistLocked(j *Job) error {
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeInternal, "jobs: encoding job", err)
 	}
-	tmp := filepath.Join(dir, jobFile+".tmp")
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	if err := posixfs.WriteFile(filepath.Join(dir, jobFile), b, 0o600); err != nil {
 		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: writing job", err)
-	}
-	if err := posixfs.Replace(tmp, filepath.Join(dir, jobFile)); err != nil {
-		os.Remove(tmp)
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: promoting job", err)
 	}
 	return nil
 }
@@ -246,6 +308,7 @@ func (s *store) requeue(id string, every time.Duration, code, msg string) (*Job,
 	w.until = time.Now().Add(delay)
 	s.waits[id] = w
 	j.Waiting = &Wait{Code: code, Message: msg, Until: w.until.UTC()}
+	s.cutDir(j)
 	reftext.EscapeStrays(j)
 	if err := s.persistLocked(j); err != nil {
 		s.log.Warn("jobs: requeue persist failed", "id", id, "err", err)
@@ -264,6 +327,7 @@ func (s *store) update(id string, persist bool, fn func(*Job)) *Job {
 		return nil
 	}
 	fn(j)
+	s.cutDir(j)
 	// Every message on a job is written as JSON, here and to its readers. A
 	// name it quotes that is not UTF-8 is made legible once, for all of them.
 	reftext.EscapeStrays(j)

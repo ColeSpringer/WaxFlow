@@ -13,9 +13,9 @@
 // carries uncacheable sync one-shots.
 //
 // Keys follow ADR-0004; the layout is cacheDir/v1/<aa>/<hash>/ holding
-// meta.json plus out.<ext>. Writes go to *.tmp with atomic rename, and
-// only completed outputs promote, so a crash leaves nothing that could be
-// mistaken for a finished transcode.
+// meta.json plus out.<ext>. Writes go to a temp name beside the target
+// with an atomic rename, and only completed outputs promote, so a crash
+// leaves nothing that could be mistaken for a finished transcode.
 package cache
 
 import (

@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/colespringer/waxflow/internal/posixfs"
 	"github.com/colespringer/waxflow/internal/ulid"
 	"github.com/colespringer/waxflow/source"
 )
@@ -55,6 +56,10 @@ func TestRestartCompletedJobSurvives(t *testing.T) {
 	}
 	done := waitJob(t, r1, j.ID, StateDone)
 	r1.Close()
+	// What a finished job published is never a temp, or open would sweep it.
+	if name := soleOutput(t, done).File; posixfs.IsTemp(name) {
+		t.Fatalf("the job's output is %s, which reads as a temp", name)
+	}
 
 	r2 := openRunner(t, Config{Dir: dir, Resolver: res})
 	got, ok := r2.Get(j.ID)
@@ -181,6 +186,73 @@ func TestRestartLeavesTerminalUntouched(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(jdir, "leftover.bin")); err != nil {
 		t.Errorf("terminal job's directory was swept: %v", err)
+	}
+}
+
+// TestOpenSweepsTemps: a temp a crashed write left beside a finished job
+// goes at open, in both spellings job.json has been staged under and in the
+// tagging library's, which a post-pass that died leaves. The job and its
+// outputs stay, and a quarantined directory is left whole.
+func TestOpenSweepsTemps(t *testing.T) {
+	dir := t.TempDir()
+	finished := time.Now().UTC()
+	done := &Job{
+		SchemaVersion: SchemaVersion,
+		ID:            mustULID(t),
+		Type:          TypeTranscode,
+		State:         StateDone,
+		Created:       finished,
+		Finished:      &finished,
+	}
+	writeJob(t, dir, done)
+	broken := mustULID(t)
+	if err := os.MkdirAll(filepath.Join(dir, broken), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if posixfs.IsTemp(jobFile) {
+		t.Fatalf("%s reads as a temp", jobFile)
+	}
+	temps := []string{jobFile + ".tmp", jobFile + ".tmp-0123456789abcdef", ".waxlabel-1234567.tmp"}
+	published := []string{"out.flac", "out.0.flac", "out.1.flac", silenceMapFile}
+	for _, id := range []string{done.ID, broken} {
+		for _, name := range slices.Concat(temps, published) {
+			if err := os.WriteFile(filepath.Join(dir, id, name), []byte(name), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, broken, jobFile), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(dir, done.ID, jobFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := openStore(dir, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.get(done.ID); !ok {
+		t.Fatal("the finished job is gone after open")
+	}
+	for _, name := range temps {
+		if _, err := os.Stat(filepath.Join(dir, done.ID, name)); !os.IsNotExist(err) {
+			t.Errorf("%s survived open: %v", name, err)
+		}
+	}
+	for _, name := range published {
+		if b, err := os.ReadFile(filepath.Join(dir, done.ID, name)); err != nil || string(b) != name {
+			t.Errorf("%s after open = %q (%v), want it untouched", name, b, err)
+		}
+	}
+	if after, err := os.ReadFile(filepath.Join(dir, done.ID, jobFile)); err != nil || !bytes.Equal(before, after) {
+		t.Errorf("job.json changed across open: %v", err)
+	}
+	for _, name := range slices.Concat(temps, published) {
+		if _, err := os.Stat(filepath.Join(dir, broken+".unreadable", name)); err != nil {
+			t.Errorf("the quarantined directory lost %s: %v", name, err)
+		}
 	}
 }
 

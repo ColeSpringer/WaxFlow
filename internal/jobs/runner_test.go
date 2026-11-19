@@ -35,7 +35,7 @@ const fixtureWAV = "sine-s16.wav"
 // copyFixture copies a repo testdata file into dir under the same name.
 func copyFixture(t *testing.T, dir, name string) {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "..", "testdata", name))
+	b, err := os.ReadFile(testutil.PkgFile("..", "..", "testdata", name))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -113,7 +113,7 @@ func TestRootUnavailableIsRetryable(t *testing.T) {
 		t.Fatalf("metrics missing waxflow_roots_unmounted 1:\n%s", body)
 	}
 
-	flac, err := os.ReadFile("../testdata/sine-s16.flac")
+	flac, err := os.ReadFile(testutil.PkgFile("..", "testdata", "sine-s16.flac"))
 	if err != nil {
 		t.Fatal(err)
 	}

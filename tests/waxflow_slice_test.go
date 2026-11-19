@@ -417,13 +417,13 @@ func TestSliceOpenSpanOfAnExactSourceThatEndsEarlyFails(t *testing.T) {
 	}{
 		{"a declared exact length", func(m format.Media) format.Media { return m }, waxerr.CodeMalformedInput},
 		{"a measure counted by decoding", func(m format.Media) format.Media {
-			return waxflow.MeasuredMedia(&declaringMedia{Media: m, samples: frames, advisory: true}, countedLen(frames))
+			return measuredAs(t, &declaringMedia{Media: m, samples: frames, advisory: true}, countedLen(frames))
 		}, waxerr.CodeInternal},
 		{"a decode count behind a wrapper", func(m format.Media) format.Media {
-			return struct{ format.Media }{waxflow.MeasuredMedia(m, countedLen(frames))}
+			return struct{ format.Media }{measuredAs(t, m, countedLen(frames))}
 		}, waxerr.CodeInternal},
 		{"a measure found by seeking past the end", func(m format.Media) format.Media {
-			return waxflow.MeasuredMedia(&declaringMedia{Media: m, samples: frames}, measuredLen(frames))
+			return measuredAs(t, &declaringMedia{Media: m, samples: frames}, measuredLen(frames))
 		}, waxerr.CodeMalformedInput},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -474,7 +474,7 @@ func TestSliceOpenSpanOfAnExactSourceThatEndsEarlyFails(t *testing.T) {
 func TestSliceShortOfADecodedCountIsInternal(t *testing.T) {
 	const frames, at = 10000, 4000
 	raw, _ := ratedWAV(t, 48000, 1, frames, 9)
-	src := waxflow.MeasuredMedia(&declaringMedia{Media: shortWAV(t, waxflow.New(), raw, at),
+	src := measuredAs(t, &declaringMedia{Media: shortWAV(t, waxflow.New(), raw, at),
 		samples: frames, advisory: true}, countedLen(frames))
 	sl, err := waxflow.Slice(src, 1000, 9000)
 	if err != nil {
@@ -562,7 +562,7 @@ func TestSliceOpenSpanAllowsAnOverDeliveringSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	src := waxflow.MeasuredMedia(open(), walked)
+	src := measuredAs(t, open(), walked)
 	sl, err := waxflow.Slice(src, from, waxflow.ToEnd)
 	if err != nil {
 		src.Close()

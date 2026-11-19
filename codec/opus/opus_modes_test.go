@@ -14,12 +14,10 @@ import (
 // and per-packet final ranges.
 func encodeAll(t *testing.T, e *Encoder, pcm []float32) (pkts [][]byte, ranges []uint32) {
 	t.Helper()
-	buf := audio.Buffer{Fmt: e.fmt, N: opusFrameSize}
-	_ = buf
 	for off := 0; off+opusFrameSize <= len(pcm); off += opusFrameSize {
 		b := audio.Get(e.fmt, opusFrameSize)
-		copy(b.ChanF(0), pcm[off:off+opusFrameSize])
 		b.N = opusFrameSize
+		copy(b.ChanF(0), pcm[off:off+opusFrameSize])
 		err := e.Encode(b, func(p codec.Packet) error {
 			pkt := append([]byte(nil), p.Data...)
 			pkts = append(pkts, pkt)
@@ -61,9 +59,9 @@ func encodeAllStereo(t *testing.T, e *Encoder, left, right []float32) (pkts [][]
 	t.Helper()
 	for off := 0; off+opusFrameSize <= len(left); off += opusFrameSize {
 		b := audio.Get(e.fmt, opusFrameSize)
+		b.N = opusFrameSize
 		copy(b.ChanF(0), left[off:off+opusFrameSize])
 		copy(b.ChanF(1), right[off:off+opusFrameSize])
-		b.N = opusFrameSize
 		err := e.Encode(b, func(p codec.Packet) error {
 			pkts = append(pkts, append([]byte(nil), p.Data...))
 			ranges = append(ranges, e.FinalRange())
@@ -277,8 +275,8 @@ func TestOpusEncoderModeSwitch(t *testing.T) {
 			e.forcedMode = modeSILK
 		}
 		b := audio.Get(f, opusFrameSize)
-		copy(b.ChanF(0), pcm[off:off+opusFrameSize])
 		b.N = opusFrameSize
+		copy(b.ChanF(0), pcm[off:off+opusFrameSize])
 		err := e.Encode(b, func(p codec.Packet) error {
 			pkts = append(pkts, append([]byte(nil), p.Data...))
 			ranges = append(ranges, e.FinalRange())

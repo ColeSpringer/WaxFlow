@@ -278,9 +278,9 @@ func (e *Engine) Transcode(ctx context.Context, src container.Source, hint strin
 // TranscodeMedia transcodes an already-opened Media to dst, the same
 // decode -> DSP -> encode -> mux pipeline as Transcode without the source-open
 // step. It is the entry point for inputs that are not a single sniffable Source:
-// the HLS client assembles a presentation from many fetched resources and
-// exposes it as a format.Media, which flows through here exactly like a local
-// file. The caller owns med and closes it.
+// a caller that assembles a presentation from many fetched resources, as the
+// tests' HLS client does, hands it over as a format.Media, which flows through
+// here exactly like a local file. The caller owns med and closes it.
 func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Writer, opts TranscodeOptions) (*TranscodeResult, error) {
 	srcTrack := med.Info().Default()
 	if opts.FromSample < 0 {
@@ -1807,7 +1807,7 @@ func (e *Engine) logImplicitDownmix(opts TranscodeOptions, src, out audio.Format
 // of the chain. A timeline built at the width it delivers (ConcatOptions.
 // Channels) folds each member before the seam, so by the time the run's chain
 // sees the envelope there is nothing left to fold and logImplicitDownmix has
-// nothing to say — but a 5.1 master was still quietly halved, and the operator
+// nothing to say. A 5.1 master was still quietly halved, and the operator
 // should not need a flag to find out.
 //
 // It reads the members rather than the option, so it fires exactly when audio

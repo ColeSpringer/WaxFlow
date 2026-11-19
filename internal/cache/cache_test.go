@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/colespringer/waxflow/internal/posixfs"
 )
 
 func testMeta(ext string) Meta {
@@ -893,7 +895,8 @@ func TestBootScanRebuildsIndexAndDropsPartials(t *testing.T) {
 
 // TestBootScanPrunesTempsBesideACompletedEntry: a temp file left beside a
 // promoted entry (a runtime removal that failed) goes at the next boot, since
-// nothing is in flight then; the entry stays.
+// nothing is in flight then; the entry stays. One temp per spelling: the
+// streamed body's, the sequence-numbered meta's, and a staged write's.
 func TestBootScanPrunesTempsBesideACompletedEntry(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(dir, Options{})
@@ -902,11 +905,24 @@ func TestBootScanPrunesTempsBesideACompletedEntry(t *testing.T) {
 	}
 	key := NewKey("boot-orphan", "p", nil)
 	e, _ := s.Begin(key, testMeta("wav"))
-	e.Write(pattern(5000))
+	want := pattern(5000)
+	e.Write(want)
 	e.Complete(9)
-	orphan := filepath.Join(s.entryDir(key), "out.wav.tmp-77")
-	if err := os.WriteFile(orphan, []byte("junk"), 0o644); err != nil {
-		t.Fatal(err)
+	// What the entry published is never a temp, or the sweep would take it.
+	published, err := os.ReadDir(s.entryDir(key))
+	if err != nil || len(published) != 2 {
+		t.Fatalf("the entry published %d files (%v), want meta.json and the output", len(published), err)
+	}
+	for _, p := range published {
+		if posixfs.IsTemp(p.Name()) {
+			t.Fatalf("the entry publishes %s, which reads as a temp", p.Name())
+		}
+	}
+	orphans := []string{"out.wav.tmp-77", "meta.json.tmp-78", "meta.json.tmp-0123456789abcdef"}
+	for _, name := range orphans {
+		if err := os.WriteFile(filepath.Join(s.entryDir(key), name), []byte("junk"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	s.Close()
 
@@ -915,14 +931,19 @@ func TestBootScanPrunesTempsBesideACompletedEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s2.Close()
-	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("the boot scan kept a temp file beside a completed entry: %v", err)
+	for _, name := range orphans {
+		if _, err := os.Stat(filepath.Join(s.entryDir(key), name)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the boot scan kept %s beside a completed entry: %v", name, err)
+		}
 	}
 	c := s2.Lookup(key)
 	if c == nil {
 		t.Fatal("the boot scan lost the completed entry")
 	}
-	c.File.Close()
+	defer c.File.Close()
+	if got, err := io.ReadAll(c.File); err != nil || !bytes.Equal(got, want) {
+		t.Errorf("the entry after the boot scan is %d bytes (%v), want its %d intact", len(got), err, len(want))
+	}
 }
 
 // TestConcurrentAttachEvictComplete is a randomized concurrent-operation

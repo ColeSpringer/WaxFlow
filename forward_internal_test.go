@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
 )
 
@@ -30,6 +31,27 @@ func TestTheEnginesWrappersForwardEveryCapability(t *testing.T) {
 		if format.WalkMedia(ctx, med) != errWalk || format.MediaWalked(med) || n != 7 || !ok || err != nil ||
 			!format.MediaMixedWidth(med) || format.MediaHeadroom(med) != 5 {
 			t.Errorf("%T drops a capability of the Media it wraps", med)
+		}
+	}
+}
+
+// claimingMedia confirms its own length and names its members.
+type claimingMedia struct{ format.Media }
+
+func (claimingMedia) ConfirmLength(context.Context) error { return nil }
+func (claimingMedia) Members() []container.Track          { return nil }
+
+// TestTheEnginesWrappersNeverConfirmLength: neither wrapper type confirms a
+// length or names members, whatever it holds. MeasuredMedia keeps a
+// timeline's members through a type of its own.
+func TestTheEnginesWrappersNeverConfirmLength(t *testing.T) {
+	inner := format.Forwarder{Media: claimingMedia{}}
+	for _, med := range []format.Media{measuredMedia{Forwarder: inner}, &indexSavingMedia{Forwarder: inner}} {
+		if _, ok := med.(format.LengthConfirmer); ok {
+			t.Errorf("%T is a LengthConfirmer", med)
+		}
+		if _, ok := med.(format.Composite); ok {
+			t.Errorf("%T is a Composite", med)
 		}
 	}
 }

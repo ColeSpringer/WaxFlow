@@ -3,7 +3,7 @@
 # which case it falls back to cmd.exe and the recipes die on the first POSIX
 # construct. Only that case is repointed, at the shell Git for Windows ships.
 # It has to be the launcher in bin/: usr/bin/sh.exe runs without the POSIX
-# utilities on PATH, so depcheck's grep pipeline exits 0 having run no grep.
+# utilities on PATH, so a recipe finds no grep or sed (depcheck fails there).
 # The ? stands in for a space in the wildcards, since make splits their
 # argument on spaces and both "Program Files" and a profile name can hold one.
 ifeq ($(OS),Windows_NT)
@@ -75,20 +75,24 @@ test-oracle:
 test-example:
 	cd examples/catalogcli && go vet ./... && go test -timeout 10m ./...
 
-# The GOOS=windows pass compiles every test file as Windows would. The
+# The GOOS=windows passes compile every test file as Windows would. The
 # cross-compile job's go build skips test files and the Windows job tests only
-# ./source/, so without it a call into a unix-only test helper breaks Windows
-# unseen. The -tags passes type-check the build-tagged table extractor, which
-# nothing else in the tree compiles. Without them a drifted pin or a broken
-# parser surfaces only when someone attempts the audit THIRD-PARTY-NOTICES
-# promises.
+# ./source/ and a named list in cli/, so without them a call into a unix-only
+# test helper breaks Windows unseen. The plan9 pass compiles a file no other
+# build reaches. The -tags passes type-check the table extractors and fixture
+# generators, which nothing else compiles, so a drifted pin or a broken parser
+# would otherwise surface only at the audit THIRD-PARTY-NOTICES promises.
 vet:
 	go vet ./...
 	GOOS=windows go vet ./...
+	cd cli && GOOS=windows go vet ./...
+	GOOS=plan9 go vet ./source/
 	go vet -tags wmatablesgen ./codec/wma/
 	go vet -tags wmaprotablesgen ./codec/wmapro/
 	go vet -tags wmavoicetablesgen ./codec/wmavoice/
 	go vet -tags mpcfixtures ./codec/musepack/
+	go vet -tags booksgen ./codec/vorbis/
+	go vet -tags apefixtures ./codec/ape/
 
 # The 32-bit pass. Go's int is 32 bits there, so a constant or a conversion
 # that is fine here stops compiling or silently wraps: a uint32 field read into
@@ -113,13 +117,12 @@ fmt-check:
 	@out="$$(gofmt -l .)"; if [ -n "$$out" ]; then \
 		echo "gofmt needed on:"; echo "$$out"; exit 1; fi
 
+# Two clauses, for the host and for Windows (scripts/depcheck.sh): the public
+# tree is stdlib-only, and no product package (the public tree, or anything
+# cli/cmd/waxflow links) imports test support. A listing that fails, or lacks
+# the packages it must hold, fails the check.
 depcheck:
-	@bad="$$(go list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' $(PUBLIC_PKGS) \
-		| grep -v '^$$' | grep -v '^$(MODULE)' || true)"; \
-	if [ -n "$$bad" ]; then \
-		echo "depcheck FAILED: non-stdlib imports in the public tree:"; \
-		echo "$$bad"; exit 1; fi; \
-	echo "depcheck ok: public tree ($(PUBLIC_PKGS)) is stdlib-only"
+	@sh scripts/depcheck.sh '$(MODULE)' $(PUBLIC_PKGS)
 
 check: fmt-check vet test test-race test-cli test-oracle test-example depcheck
 

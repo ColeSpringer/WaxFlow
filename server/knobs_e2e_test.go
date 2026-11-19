@@ -111,7 +111,7 @@ func TestGoldenKnobAnswers(t *testing.T) {
 		}
 	}
 
-	testutil.GoldenText(t, filepath.Join("testdata", "golden", "knob-answers.txt"), []byte(out.String()), *update,
+	testutil.GoldenText(t, testutil.PkgFile("testdata", "golden", "knob-answers.txt"), []byte(out.String()), *update,
 		"what a surface answers to an encoder knob moved.\n"+
 			"If the change says it moves these answers, run `make goldens` and review the diff line by line.")
 }

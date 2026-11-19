@@ -792,3 +792,39 @@ func BenchmarkTouchArmed(b *testing.B) {
 	b.StopTimer()
 	w.finish(nil)
 }
+
+// Waiters counts the Segment calls in flight, across variants, and none
+// once they have returned.
+func TestManagerWaitersCountsCallsInFlight(t *testing.T) {
+	a, b := newHarness(), newHarness()
+	m := &Manager{}
+	waiters := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for m.Waiters() != want {
+			if time.Now().After(deadline) {
+				t.Fatalf("%d calls in flight, want %d", m.Waiters(), want)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	waiters(0)
+	first, second, other := segmentAsync(m, "a", 0, a.ops()), segmentAsync(m, "a", 1, a.ops()), segmentAsync(m, "b", 0, b.ops())
+	wa, wb := a.worker(t, 0), b.worker(t, 0)
+	waiters(3)
+	wa.produce(0)
+	if err := mustReturn(t, first); err != nil {
+		t.Fatal(err)
+	}
+	waiters(2)
+	wa.produce(1)
+	wb.produce(0)
+	for _, ch := range []chan error{second, other} {
+		if err := mustReturn(t, ch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waiters(0)
+	wa.finish(nil)
+	wb.finish(nil)
+}

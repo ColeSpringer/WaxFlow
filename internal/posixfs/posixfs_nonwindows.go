@@ -8,10 +8,11 @@ import "os"
 // what the Windows build adds.
 func Replace(tmpName, target string) error { return os.Rename(tmpName, target) }
 
-// Create creates path exclusively for read-write (O_RDWR|O_CREATE|O_EXCL).
-func Create(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644)
+func create(path string, perm os.FileMode) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, perm)
 }
+
+func remove(path string) { os.Remove(path) }
 
 // Open opens path for reading.
 func Open(path string) (*os.File, error) { return os.Open(path) }

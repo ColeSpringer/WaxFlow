@@ -137,16 +137,18 @@ func OpusDemoRoundTrip(t testing.TB, opusDemo string, pcm []int16, rate, channel
 // OpusDemoEncode encodes raw PCM with the reference libopus encoder alone
 // (opus_demo -e) at the given CBR bit rate and complexity, returning the raw
 // Opus packets. The TOC byte of each packet carries libopus's mode and
-// bandwidth decisions, which the speech gate compares against ours.
-func OpusDemoEncode(t testing.TB, opusDemo string, pcm []int16, rate, channels, bps, complexity int) [][]byte {
+// bandwidth decisions, which the speech gate compares against ours. extra
+// are further opus_demo options, such as a bit rate sweep.
+func OpusDemoEncode(t testing.TB, opusDemo string, pcm []int16, rate, channels, bps, complexity int, extra ...string) [][]byte {
 	t.Helper()
 	dir := mkTempDir(t)
 	defer os.RemoveAll(dir)
 	in := filepath.Join(dir, "in.sw")
 	out := filepath.Join(dir, "out.bit")
 	writeSW(t, in, pcm)
-	cmd := exec.Command(opusDemo, "-e", "audio", strconv.Itoa(rate), strconv.Itoa(channels),
-		strconv.Itoa(bps), "-cbr", "-complexity", strconv.Itoa(complexity), in, out)
+	args := []string{"-e", "audio", strconv.Itoa(rate), strconv.Itoa(channels),
+		strconv.Itoa(bps), "-cbr", "-complexity", strconv.Itoa(complexity)}
+	cmd := exec.Command(opusDemo, append(append(args, extra...), in, out)...)
 	if msg, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("opus_demo -e: %v\n%s", err, msg)
 	}

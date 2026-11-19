@@ -2,10 +2,13 @@ package cache
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/colespringer/waxflow/internal/testutil"
 )
 
 func openTestStore(t *testing.T, dir string, opts Options) *Store {
@@ -87,7 +90,7 @@ func TestHLSVariantNameValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"", "meta.json", "../escape", "a/b", `a\b`} {
+	for _, name := range []string{"", "meta.json", "../escape", "a/b", `a\b`, "seg-1.m4s.tmp", "seg-1.m4s.tmp-0123456789abcdef"} {
 		if err := v.WriteFile(name, []byte("x")); err == nil {
 			t.Errorf("WriteFile(%q) accepted", name)
 		}
@@ -99,6 +102,7 @@ func TestHLSVariantNameValidation(t *testing.T) {
 
 func TestHLSVariantScanRebuild(t *testing.T) {
 	dir := t.TempDir()
+	debris := []string{"seg-2.m4s.tmp-9", "seg-2.m4s.tmp-0123456789abcdef", "meta.json.tmp-10"}
 	key := NewKey("id", "hls-params", []string{"v1"})
 	func() {
 		s := openTestStore(t, dir, Options{})
@@ -112,9 +116,12 @@ func TestHLSVariantScanRebuild(t *testing.T) {
 		if err := v.WriteFile("seg-1.m4s", make([]byte, 50)); err != nil {
 			t.Fatal(err)
 		}
-		// A crash-interrupted temp write is debris the rescan removes.
-		if err := os.WriteFile(filepath.Join(v.dir, "seg-2.m4s.tmp-9"), make([]byte, 7), 0o644); err != nil {
-			t.Fatal(err)
+		// A crash-interrupted temp write is debris the rescan removes, in
+		// the sequence-numbered spelling and in a staged write's.
+		for _, name := range debris {
+			if err := os.WriteFile(filepath.Join(v.dir, name), make([]byte, 7), 0o644); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}()
 
@@ -126,8 +133,11 @@ func TestHLSVariantScanRebuild(t *testing.T) {
 	if !v.Has("seg-0.m4s") || !v.Has("seg-1.m4s") {
 		t.Fatal("segments lost across restart")
 	}
-	if v.Has("seg-2.m4s.tmp-9") {
-		t.Fatal("temp debris survived the rescan")
+	// os.Stat, not Has: Has refuses a temp's name whether or not it exists.
+	for _, name := range debris {
+		if _, err := os.Stat(filepath.Join(v.dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("temp debris %s survived the rescan: %v", name, err)
+		}
 	}
 	st := s.Stats()
 	// 150 payload bytes plus the meta.json the size walk includes.
@@ -188,5 +198,60 @@ func TestHLSKeyNeverServesProgressive(t *testing.T) {
 	}
 	if !v.Has("seg-0.m4s") {
 		t.Fatal("the miss dropped the variant")
+	}
+}
+
+// A store opened on a relative directory names its files by absolute path,
+// so a refusal it reports never spells the directory as it was configured.
+func TestARelativeCacheDirectoryIsHeldAbsolute(t *testing.T) {
+	abs := t.TempDir()
+	// A temp working directory has a relative path to abs on any volume.
+	wd := t.TempDir()
+	testutil.Chdir(t, wd)
+	rel, err := filepath.Rel(wd, abs)
+	if err != nil {
+		t.Fatalf("no relative path from %s to %s: %v", wd, abs, err)
+	}
+	s := openTestStore(t, rel, Options{})
+	// A file where the versioned directory was, so no variant can be made.
+	version := filepath.Join(abs, "v1")
+	if err := os.RemoveAll(version); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(version, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.HLS(NewKey("id", "hls-params", []string{"v1"}), Meta{Ref: "lib/a.flac", Ext: "m4s"})
+	pe, ok := errors.AsType[*os.PathError](err)
+	if !ok || !filepath.IsAbs(pe.Path) {
+		t.Errorf("HLS = %v, want a refusal that quotes an absolute path", err)
+	}
+}
+
+// A directory under a segment's name is no cached segment: Open misses it
+// as Has does.
+func TestHLSVariantOpenMissesWhatIsNotAFile(t *testing.T) {
+	dir := t.TempDir()
+	s := openTestStore(t, dir, Options{})
+	key := NewKey("id", "hls-params", []string{"v1"})
+	v, err := s.HLS(key, Meta{Ref: "lib/a.flac", Ext: "m4s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(s.entryDir(key), "seg-0.m4s", "kept"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if c, ok := v.Open("seg-0.m4s"); ok {
+		c.File.Close()
+		t.Error("Open served a directory as a cached segment")
+	}
+	if v.Has("seg-0.m4s") {
+		t.Error("Has takes a directory for a cached segment")
+	}
+	if err := v.WriteFile("seg-0.m4s", []byte("segment")); err == nil {
+		t.Error("a segment replaced a directory that is not empty")
+	}
+	if left, _ := filepath.Glob(filepath.Join(s.entryDir(key), "*.tmp*")); len(left) != 0 {
+		t.Errorf("the refused write left %v", left)
 	}
 }

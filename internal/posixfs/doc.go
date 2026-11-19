@@ -18,4 +18,9 @@
 //
 // [ReadFile] is the whole-file read built on [Open], for brief reads that
 // must never block a concurrent Replace of the same path.
+//
+// [WriteFile] and [Stage] are the publish itself: a uniquely named temp
+// beside the target, then Replace, with the temp removed on any failure.
+// [IsTemp] names what a crash can still leave, and [SweepTemps] removes it
+// at a store's open.
 package posixfs

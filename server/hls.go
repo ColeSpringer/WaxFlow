@@ -2,12 +2,15 @@ package server
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +23,7 @@ import (
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/cache"
 	"github.com/colespringer/waxflow/internal/hls"
+	"github.com/colespringer/waxflow/internal/lru"
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/sign"
 	"github.com/colespringer/waxflow/internal/timeline"
@@ -897,7 +901,10 @@ func (s *Server) servePlaylist(w http.ResponseWriter, playlist string) {
 
 // handleHLSInit serves the variant's init header, from cache when a
 // worker already wrote it, else computed on the spot (deterministic
-// either way) and cached best effort.
+// either way) and cached best effort. In an outage it keeps to the
+// segments' rules: a refused write marks the variant, a variant known to
+// refuse writes is answered from memory with no write tried, and the
+// outage is one Warn.
 func (s *Server) handleHLSInit(w http.ResponseWriter, r *http.Request) {
 	reqStart := time.Now()
 	s.applyCORS(w, r)
@@ -907,26 +914,43 @@ func (s *Server) handleHLSInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer req.Close()
-	variant, err := s.store.HLS(req.key, req.meta)
-	if err != nil {
-		s.writeError(w, err)
+	variant, cacheErr := s.hlsVariant(req)
+	if cacheErr != nil && waxerr.CodeOf(cacheErr) != waxerr.CodeOutputUnwritable {
+		s.writeError(w, cacheErr)
 		return
 	}
 	w.Header().Set("ETag", `"`+string(req.key)+`-init"`)
 	w.Header().Set("Content-Type", hlsMediaType)
-	if c, ok := variant.Open("init.mp4"); ok {
-		defer c.File.Close()
-		s.met.TTFB.Observe(time.Since(reqStart).Seconds())
-		http.ServeContent(w, r, "", c.ModTime, c.File)
-		return
+	if variant != nil {
+		if c, ok := variant.Open("init.mp4"); ok {
+			defer c.File.Close()
+			s.met.TTFB.Observe(time.Since(reqStart).Seconds())
+			http.ServeContent(w, r, "", c.ModTime, c.File)
+			return
+		}
 	}
 	init, err := s.initSegmentFor(req)
 	if err != nil {
 		s.writeError(w, err)
 		return
 	}
-	if err := variant.WriteFile("init.mp4", init); err != nil {
-		s.log.Warn("hls: caching init header failed", "key", req.key, "err", err)
+	cause := s.hlsBroken.cause(req.key)
+	if variant != nil && cause == nil {
+		switch err := variant.WriteFile("init.mp4", init); waxerr.CodeOf(err) {
+		case "":
+		case waxerr.CodeOutputUnwritable:
+			s.hlsBroken.mark(req.key, err)
+			cause = err
+		default:
+			s.log.Warn("hls: caching init header failed", "key", req.key, "err", err)
+		}
+	}
+	if cause != nil {
+		level := slog.LevelDebug
+		if s.hlsBroken.warnOnce(req.key, hlsInitUncached) {
+			level = slog.LevelWarn
+		}
+		s.log.Log(r.Context(), level, hlsInitUncached, "key", req.key, "src", source.Ref(req.members[0].Ref), "err", cause)
 	}
 	s.met.TTFB.Observe(time.Since(reqStart).Seconds())
 	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(init))
@@ -947,9 +971,25 @@ func (s *Server) initSegmentFor(req *hlsRequest) ([]byte, error) {
 	}
 }
 
+// hlsVariant opens req's variant in the cache. A cache that cannot hold it
+// leaves it nil with the refusal, which marks the variant. While the mark
+// stands and the store has no such variant, making it is tried again only
+// once a probe is due.
+func (s *Server) hlsVariant(req *hlsRequest) (*cache.Variant, error) {
+	if cause := s.hlsBroken.cause(req.key); cause != nil && !s.store.Contains(req.key) && !s.hlsBroken.due(req.key) {
+		return nil, cause
+	}
+	variant, err := s.store.HLS(req.key, req.meta)
+	if waxerr.CodeOf(err) == waxerr.CodeOutputUnwritable {
+		s.hlsBroken.mark(req.key, err)
+	}
+	return variant, err
+}
+
 // handleHLSSegment serves one media segment: cache hit, wait on the
 // running worker when it is close, else restart a worker at the segment
-// (decoder pre-rolled sample-exact, encoder primed).
+// (decoder pre-rolled sample-exact, encoder primed). While the cache cannot
+// be written the segment is made for this request alone.
 func (s *Server) handleHLSSegment(w http.ResponseWriter, r *http.Request) {
 	reqStart := time.Now()
 	s.applyCORS(w, r)
@@ -970,15 +1010,50 @@ func (s *Server) handleHLSSegment(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("segment %d past the end (%d segments)", n, req.plan.Segments)))
 		return
 	}
-	variant, err := s.store.HLS(req.key, req.meta)
-	if err != nil {
-		s.writeError(w, err)
+	variant, cacheErr := s.hlsVariant(req)
+	if cacheErr != nil && waxerr.CodeOf(cacheErr) != waxerr.CodeOutputUnwritable {
+		s.writeError(w, cacheErr)
 		return
 	}
 	name := segmentName(n)
 	w.Header().Set("ETag", `"`+string(req.key)+"-"+name+`"`)
 	w.Header().Set("Content-Type", hlsMediaType)
 
+	if variant == nil {
+		// The cache cannot hold the variant, so no worker can fill it.
+		s.serveHLSSegmentUncached(w, r, req, n, cacheErr, nil, reqStart)
+		return
+	}
+	ask := func(ctx context.Context, probe *hlsProbe) error {
+		return s.hlsMgr.Segment(ctx, string(req.key), n, hls.Ops{
+			Has:   func(i int64) bool { return variant.Has(segmentName(i)) },
+			Spawn: s.hlsSpawner(req, variant, probe),
+		})
+	}
+	// probe has a worker try the cache, for no longer than the probe's
+	// bound, and ends a worker that has not written by then or by the time
+	// the listener leaves. A worker that wrote as the bound passed healed
+	// the variant all the same. The first probe of an outage given up at
+	// the bound is a Warn: a write that hangs says nothing else until it
+	// ends.
+	probe := func() (healed bool) {
+		wait := s.hlsBroken.probeWait(req.plan)
+		ctx, cancel := s.hlsBroken.withDeadline(r.Context(), wait)
+		defer cancel()
+		var worker hlsProbe
+		if err := ask(ctx, &worker); err == nil || worker.end() {
+			return true
+		}
+		if ctx.Err() != nil && r.Context().Err() == nil {
+			level := slog.LevelDebug
+			if s.hlsBroken.warnOnce(req.key, hlsProbeGivenUp) {
+				level = slog.LevelWarn
+			}
+			s.log.Log(r.Context(), level, hlsProbeGivenUp, "key", req.key, "segment", n,
+				"src", source.Ref(req.members[0].Ref), "wait", wait)
+		}
+		return false
+	}
 	// Two passes: eviction can race the manager's ground-truth check, so
 	// one honest re-drive; a second miss is a real failure.
 	for range 2 {
@@ -992,14 +1067,26 @@ func (s *Server) handleHLSSegment(w http.ResponseWriter, r *http.Request) {
 			http.ServeContent(w, r, "", c.ModTime, c.File)
 			return
 		}
-		err := s.hlsMgr.Segment(r.Context(), string(req.key), n, hls.Ops{
-			Has:   func(i int64) bool { return variant.Has(segmentName(i)) },
-			Spawn: s.hlsSpawner(req, variant),
-		})
-		if err != nil {
-			if r.Context().Err() != nil {
-				return // the client left while waiting; nobody reads an envelope
+		if cause := s.hlsBroken.cause(req.key); cause != nil {
+			// Known to refuse writes: the request takes the variant's turn
+			// before anything else. A probe that finds the cache healed
+			// leaves the segment on disk for the next pass.
+			if !s.serveHLSSegmentUncached(w, r, req, n, cause, probe, reqStart) {
+				return
 			}
+			continue
+		}
+		err := ask(r.Context(), nil)
+		switch {
+		case err == nil:
+		case r.Context().Err() != nil:
+			return // the client left while waiting; nobody reads an envelope
+		case waxerr.CodeOf(err) == waxerr.CodeOutputUnwritable:
+			// A worker could not write the segment, or none was started
+			// for a variant already marked.
+			s.serveHLSSegmentUncached(w, r, req, n, err, nil, reqStart)
+			return
+		default:
 			s.writeError(w, err)
 			return
 		}
@@ -1007,18 +1094,438 @@ func (s *Server) handleHLSSegment(w http.ResponseWriter, r *http.Request) {
 	s.writeError(w, waxerr.New(waxerr.CodeInternal, "segment evicted while being served"))
 }
 
+// errOneSegment ends a run that was started for a single segment.
+var errOneSegment = errors.New("hls: the one segment is made")
+
+// serveHLSSegmentUncached answers segment n from memory: what a listener gets
+// while the cache cannot be written, cause being why. The body goes out
+// whole and is not to be stored, as a degraded progressive stream's is. It
+// reports true, having written nothing, when probe found the cache healed.
+func (s *Server) serveHLSSegmentUncached(w http.ResponseWriter, r *http.Request, req *hlsRequest, n int64, cause error,
+	probe func() bool, reqStart time.Time) (healed bool) {
+	ctx := r.Context()
+	data, healed, err := s.hlsSegmentUncached(ctx, req, n, probe)
+	switch {
+	case ctx.Err() != nil:
+		return false // the client left; nobody reads an answer
+	case err != nil:
+		s.writeError(w, err)
+		return false
+	case healed:
+		return true
+	}
+	// A variant says so once at Warn; a full disk serves many segments.
+	level := slog.LevelDebug
+	if s.hlsBroken.warnOnce(req.key, hlsServedUncached) {
+		level = slog.LevelWarn
+	}
+	s.log.Log(ctx, level, hlsServedUncached, "key", req.key, "segment", n, "src", source.Ref(req.members[0].Ref),
+		"rung", rungName(req.rung()), "members", len(req.members), "err", cause)
+	s.met.HLSSegments.Add(1)
+	s.met.Degradations.Add(1)
+	s.met.TTFB.Observe(time.Since(reqStart).Seconds())
+	h := w.Header()
+	// No validator: a conditional request would cost the encode it asks to skip.
+	h.Del("ETag")
+	h.Set("Accept-Ranges", "none")
+	h.Set("Cache-Control", "no-store")
+	h.Set("Content-Length", strconv.Itoa(len(data)))
+	if r.Method != http.MethodHead {
+		w.Write(data)
+	}
+	return false
+}
+
+// hlsSegmentUncached makes segment n for one request: the rung a worker
+// would run, started at n and stopped after n, on one live slot. All of it
+// happens under the variant's turn, so a variant holds one live slot at a
+// time whoever asks, and a request waiting its turn for the segment just
+// made takes those bytes.
+//
+// probe, when the variant is due one, has a worker try the segment first,
+// under the same turn: a write that succeeds heals the variant, reported
+// as healed with the segment on disk. A probe that fails in any way costs
+// the listener its bound at most, and the segment is made here as between
+// probes.
+func (s *Server) hlsSegmentUncached(ctx context.Context, req *hlsRequest, n int64, probe func() bool) (data []byte, healed bool, err error) {
+	limit := s.hlsMgr.WaitTimeout
+	if limit <= 0 {
+		limit = hls.DefaultWaitTimeout
+	}
+	turn, err := s.hlsUncached.enter(ctx, req.key, limit)
+	if err != nil {
+		return nil, false, err
+	}
+	defer s.hlsUncached.leave(req.key, turn)
+	if turn.data != nil && turn.n == n {
+		return turn.data, false, nil
+	}
+	if probe != nil && s.hlsBroken.probeDue(req.key) {
+		if probe() {
+			return nil, true, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, false, err // the listener left during the probe
+		}
+	}
+	release, ok := s.pools.AcquireLive()
+	if !ok {
+		s.met.AdmissionRejects.Add(1)
+		return nil, false, waxerr.New(waxerr.CodeOverloaded, "live transcode slots are full")
+	}
+	// Deferred, so a run that panics gives the slot back.
+	defer release()
+	_, err = s.runHLSRung(ctx, req.members, req.desc.Tl != "", descSpan(req.desc), req.variantPlan, nil, n,
+		func(seg mp4.Segment) error {
+			if gate := s.hooks.hlsPublish; gate != nil {
+				gate(ctx, seg.Index)
+			}
+			if seg.Index != n {
+				return waxerr.New(waxerr.CodeInternal, fmt.Sprintf("hls: a run started at segment %d made segment %d", n, seg.Index))
+			}
+			data = bytes.Clone(seg.Data)
+			return errOneSegment
+		})
+	switch {
+	case errors.Is(err, errOneSegment):
+		turn.n, turn.data = n, data
+		return data, false, nil
+	case err != nil:
+		return nil, false, err
+	default:
+		return nil, false, waxerr.New(waxerr.CodeNotFound, fmt.Sprintf("hls: segment %d is past the end of the stream", n))
+	}
+}
+
+// uncachedTurns gives each variant one turn at making a segment for a
+// request. The zero value is ready.
+type uncachedTurns struct {
+	mu   sync.Mutex
+	keys map[cache.Key]*uncachedTurn
+}
+
+// uncachedTurn is one variant's turn. Its holder alone reads and sets the
+// segment the last run made, which lives while requests still wait.
+type uncachedTurn struct {
+	held    chan struct{}
+	waiting int
+	n       int64
+	data    []byte
+}
+
+// enter waits for key's turn, for ctx to end, or for limit to pass, which is
+// answered as a full pool is.
+func (u *uncachedTurns) enter(ctx context.Context, key cache.Key, limit time.Duration) (*uncachedTurn, error) {
+	u.mu.Lock()
+	turn := u.keys[key]
+	if turn == nil {
+		if u.keys == nil {
+			u.keys = make(map[cache.Key]*uncachedTurn)
+		}
+		turn = &uncachedTurn{held: make(chan struct{}, 1)}
+		u.keys[key] = turn
+	}
+	turn.waiting++
+	u.mu.Unlock()
+	late := time.NewTimer(limit)
+	defer late.Stop()
+	select {
+	case turn.held <- struct{}{}:
+		return turn, nil
+	case <-ctx.Done():
+		u.forget(key, turn)
+		return nil, ctx.Err()
+	case <-late.C:
+		u.forget(key, turn)
+		return nil, waxerr.New(waxerr.CodeOverloaded, "hls: timed out waiting to make the segment")
+	}
+}
+
+// leave ends the holder's turn.
+func (u *uncachedTurns) leave(key cache.Key, turn *uncachedTurn) {
+	<-turn.held
+	u.forget(key, turn)
+}
+
+func (u *uncachedTurns) forget(key cache.Key, turn *uncachedTurn) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if turn.waiting--; turn.waiting == 0 {
+		delete(u.keys, key)
+	}
+}
+
+// brokenVariants remembers the variants whose cache refused a write: why,
+// when a write was last tried, and which log lines said so at Warn, so a
+// cache that stays unwritable warns once a variant and not once a segment.
+// A worker's next good write forgets the variant: a second outage is news.
+// Marking a variant and warning once are separate: only a refused write
+// marks. The zero value is ready.
+//
+// At most max variants are remembered. Past that the oldest is dropped
+// and the outage is taken to be the store's until a worker's write lands:
+// a variant not remembered is then served as one known to refuse writes,
+// on one probe schedule and one Warn shared by all of them. After such a
+// write, the next dropped variant asked for pays one failing worker, whose
+// mark brings that state back.
+type brokenVariants struct {
+	mu   sync.Mutex
+	seen *lru.Cache[cache.Key, brokenVariant]
+	// spill stands for every variant dropped from seen in this outage.
+	spill *brokenVariant
+	// now is the clock, time.Now when nil.
+	now func() time.Time
+	// wait bounds a probe, hlsProbeWait when zero.
+	wait time.Duration
+	// deadline makes a probe's context from its request's and its bound,
+	// context.WithTimeout when nil.
+	deadline func(context.Context, time.Duration) (context.Context, context.CancelFunc)
+	// max is how many variants are remembered, hlsBrokenMax when zero.
+	max int
+}
+
+type brokenVariant struct {
+	cause  error
+	said   []string
+	probed time.Time // when a write was last tried
+}
+
+// hlsBrokenMax is how many variants known to refuse writes are remembered.
+const hlsBrokenMax = 1024
+
+func (b *brokenVariants) withDeadline(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	if b.deadline != nil {
+		return b.deadline(parent, d)
+	}
+	return context.WithTimeout(parent, d)
+}
+
+// probeWait is the bound of a probe of plan's variant: the floor, or the
+// duration of one of its segments when that is longer.
+func (b *brokenVariants) probeWait(plan *waxflow.SegmentPlan) time.Duration {
+	wait := hlsProbeWait
+	if b.wait > 0 {
+		wait = b.wait
+	}
+	if plan != nil && plan.Format.Rate > 0 {
+		wait = max(wait, time.Duration(plan.SegmentSamples)*time.Second/time.Duration(plan.Format.Rate))
+	}
+	return wait
+}
+
+func (b *brokenVariants) clock() time.Time {
+	if b.now != nil {
+		return b.now()
+	}
+	return time.Now()
+}
+
+// mark records that key's cache refused a write just now, with cause. A
+// cause that is no refused write marks nothing.
+func (b *brokenVariants) mark(key cache.Key, cause error) {
+	if waxerr.CodeOf(cause) != waxerr.CodeOutputUnwritable {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	limit := cmp.Or(b.max, hlsBrokenMax)
+	if b.seen == nil {
+		b.seen = lru.New[cache.Key, brokenVariant](limit)
+	}
+	now := b.clock()
+	v, known := b.seen.Get(key)
+	if !known {
+		v.cause = cause
+		if b.seen.Len() >= limit {
+			// Full: the oldest goes, and what it said the outage has said.
+			_, dropped, _ := b.seen.RemoveOldest()
+			if b.spill == nil {
+				b.spill = &brokenVariant{cause: cause}
+			}
+			for _, line := range dropped.said {
+				if !slices.Contains(b.spill.said, line) {
+					b.spill.said = append(b.spill.said, line)
+				}
+			}
+			b.spill.probed = now
+		}
+	}
+	v.probed = now
+	b.seen.Put(key, v)
+}
+
+// held is what is remembered of key: its own entry, or the one standing
+// for the variants dropped. Locked.
+func (b *brokenVariants) held(key cache.Key) (v *brokenVariant, own bool) {
+	if b.seen != nil {
+		if v, known := b.seen.Get(key); known {
+			return &v, true
+		}
+	}
+	return b.spill, false
+}
+
+// warnOnce reports whether line has not been said in key's outage, and
+// counts it said. It marks nothing.
+func (b *brokenVariants) warnOnce(key cache.Key, line string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	said := false
+	if v, own := b.held(key); own {
+		if said = slices.Contains(v.said, line); !said {
+			v.said = append(v.said, line)
+			b.seen.Put(key, *v)
+		}
+	}
+	if b.spill != nil {
+		if slices.Contains(b.spill.said, line) {
+			said = true
+		} else {
+			b.spill.said = append(b.spill.said, line)
+		}
+	}
+	return !said
+}
+
+// cause is the refused write that began key's outage, nil for a variant
+// not known to refuse writes.
+func (b *brokenVariants) cause(key cache.Key) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if v, _ := b.held(key); v != nil {
+		return v.cause
+	}
+	return nil
+}
+
+// due reports whether a write should be tried for key again: at most once
+// every hlsProbeEvery for a variant known to refuse them, and at once for
+// any other.
+func (b *brokenVariants) due(key cache.Key) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	v, _ := b.held(key)
+	return v == nil || b.clock().Sub(v.probed) >= hlsProbeEvery
+}
+
+// probeDue is due, counting the try as made.
+func (b *brokenVariants) probeDue(key cache.Key) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	v, own := b.held(key)
+	if v == nil {
+		return true
+	}
+	now := b.clock()
+	if now.Sub(v.probed) < hlsProbeEvery {
+		return false
+	}
+	v.probed = now
+	if own {
+		b.seen.Put(key, *v)
+	}
+	return true
+}
+
+// forget drops what is remembered of key, and of the variants dropped:
+// a write landed, so the store takes them.
+func (b *brokenVariants) forget(key cache.Key) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.seen != nil {
+		b.seen.Delete(key)
+	}
+	b.spill = nil
+}
+
+// hlsProbeWait is the least a probe is given. A worker's first segment takes
+// tens of milliseconds, a few hundred behind a seek that walks, so two
+// seconds tells a write that hangs from one that is slow, and the probing
+// listener still has its segment well inside a player's patience. A variant
+// whose segments last longer is given that long: no host that can serve the
+// stream needs more than a segment's duration to make one.
+const hlsProbeWait = 2 * time.Second
+
+// hlsProbe is the worker a probe started, if it started one, and whether
+// it wrote before the probe ended.
+type hlsProbe struct {
+	mu      sync.Mutex
+	stop    func()
+	written bool
+}
+
+// wrote records the worker's first good write.
+func (p *hlsProbe) wrote() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.written = true
+}
+
+func (p *hlsProbe) started(stop func()) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.stop = stop
+}
+
+// end stops the probe's worker and gives its live slot back at once,
+// unless the worker has written: it then reports true and leaves a healthy
+// worker alone.
+func (p *hlsProbe) end() (written bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.written {
+		return true
+	}
+	if p.stop != nil {
+		p.stop()
+		p.stop = nil
+	}
+	return false
+}
+
+// errProbeEnded is the cause a probe's worker is canceled with.
+var errProbeEnded = errors.New("hls: the probe ended before its worker wrote")
+
+// hlsProbeEvery is how often a worker is tried for a variant known to
+// refuse writes: how long a healed cache can go unnoticed, against how
+// often a broken one pays for a worker that fails. Ten seconds is two or
+// three segments of listening.
+const hlsProbeEvery = 10 * time.Second
+
+// hlsInitUncached is the log line of an init header served with no cache.
+const hlsInitUncached = "hls: init header served uncached"
+
+// hlsWorkerRefused names a worker's refused write among the lines an
+// outage says once.
+const hlsWorkerRefused = "hls worker"
+
+// hlsProbeGivenUp is the log line of a probe given up at its bound.
+const hlsProbeGivenUp = "hls: probe given up"
+
+// hlsServedUncached is the log line of a segment made for one request.
+const hlsServedUncached = "hls: segment served uncached"
+
 func segmentName(n int64) string { return fmt.Sprintf("seg-%d.m4s", n) }
 
 // hlsSpawner builds the manager's Spawn callback: admission (workers
 // hold live slots), pinning (gc must not evict a variant mid-fill), and
 // the worker goroutine bounded by the server's base context (workers
 // outlive their requests, like read-behind pipelines).
-func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64, func(int64), func(error)) (context.CancelCauseFunc, error) {
+//
+// A variant known to refuse writes gets a worker from its probe alone: any
+// other request for one, probe being nil, is refused with the variant's
+// cause, a refused write as the mark only takes one, taking no slot. A
+// probe is handed the means to end its worker and is told of its first
+// good write.
+func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant, probe *hlsProbe) func(int64, func(int64), func(error)) (context.CancelCauseFunc, error) {
 	// The worker outlives the request; capture values, never req.srcs.
 	members, tl := req.members, req.desc.Tl != ""
 	vp, key := req.variantPlan, req.key
 	sp := descSpan(req.desc)
 	return func(start int64, notify func(int64), exit func(error)) (context.CancelCauseFunc, error) {
+		if cause := s.hlsBroken.cause(key); cause != nil && probe == nil {
+			return nil, cause
+		}
 		release, ok := s.pools.AcquireLive()
 		if !ok {
 			s.met.AdmissionRejects.Add(1)
@@ -1037,6 +1544,14 @@ func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64,
 			}
 			cancel(cause)
 		}
+		if probe != nil {
+			// Ended by its request, the slot comes back at once, as on
+			// an idle cancel.
+			probe.started(func() {
+				release()
+				cancel(errProbeEnded)
+			})
+		}
 		s.store.Pin(key)
 		s.met.SessionsHLS.Add(1)
 		s.met.SessionsActive.Add(1)
@@ -1047,7 +1562,11 @@ func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64,
 			// Unpinned only after exit: the manager reads a running worker's
 			// progress as proof its segments are on disk.
 			defer s.store.Unpin(key)
-			err := s.runHLSWorker(ctx, members, tl, sp, vp, variant, start, notify)
+			var wrote func()
+			if probe != nil {
+				wrote = probe.wrote
+			}
+			err := s.runHLSWorker(ctx, key, members, tl, sp, vp, variant, start, notify, wrote)
 			if err != nil && errors.Is(context.Cause(ctx), hls.ErrIdle) {
 				s.met.AbandonedHLS.Add(1)
 			}
@@ -1061,21 +1580,25 @@ func (s *Server) hlsSpawner(req *hlsRequest, variant *cache.Variant) func(int64,
 	}
 }
 
-// logHLSWorker records a finished worker and passes its error through, so both
-// rungs report the same way and a session can be filtered by which one ran it.
-func (s *Server) logHLSWorker(ctx context.Context, ref, rung string, members int, start int64, err error) error {
-	return s.logHLSWorkerResult(ctx, ref, rung, members, start, nil, err)
-}
-
-// logHLSWorkerResult is logHLSWorker with the run's result, for the rung
-// that has one. A variant worker has no caller to warn, so the log line is
-// the whole surface; the clipped/truePeak keys appear only when the rung
-// measured (the count spans the priming feed, hence per worker, not summed).
-func (s *Server) logHLSWorkerResult(ctx context.Context, ref, rung string, members int, start int64,
+// logHLSWorkerResult records a finished worker and passes its error through,
+// so every rung reports the same way and a session can be filtered by which
+// one ran it. res is the run's result on the rung that has one. A variant
+// worker has no caller to warn, so the log line is the whole surface; the
+// clipped/truePeak keys appear only when the rung measured (the count spans
+// the priming feed, hence per worker, not summed).
+func (s *Server) logHLSWorkerResult(ctx context.Context, key cache.Key, ref, rung string, members int, start int64,
 	res *waxflow.SegmentedResult, err error) error {
 	if err != nil {
 		// A seek restart cancels the worker it replaces; that is routine.
 		level, why := stopReason(ctx, err)
+		// A refused write makes the variant known to refuse them, and only
+		// the first of an outage is a Warn: a probe refused again is routine.
+		if level == slog.LevelWarn && waxerr.CodeOf(err) == waxerr.CodeOutputUnwritable {
+			s.hlsBroken.mark(key, err)
+			if !s.hlsBroken.warnOnce(key, hlsWorkerRefused) {
+				level = slog.LevelDebug
+			}
+		}
 		s.log.Log(ctx, level, "hls worker "+why, "src", source.Ref(ref), "rung", rung, "members", members, "start", start, "err", err)
 		return err
 	}
@@ -1110,7 +1633,7 @@ func (s *Server) runHLSRemuxWorker(ctx context.Context, m memberSource, opts wax
 	if src.ID != m.ID {
 		return waxerr.New(waxerr.CodeSourceChanged, "source changed while starting the worker")
 	}
-	if !variant.Has("init.mp4") {
+	if variant != nil && !variant.Has("init.mp4") {
 		// The source's own sample entry, not an encoder's: the packets these
 		// segments carry are the ones this header must describe.
 		init, err := s.eng.RemuxInitSegment(plan)
@@ -1148,7 +1671,7 @@ func (s *Server) runHLSCutWorker(ctx context.Context, m memberSource, opts waxfl
 	if src.ID != m.ID {
 		return waxerr.New(waxerr.CodeSourceChanged, "source changed while starting the worker")
 	}
-	if !variant.Has("init.mp4") {
+	if variant != nil && !variant.Has("init.mp4") {
 		init, err := s.eng.CutInitSegment(plan)
 		if err != nil {
 			return err
@@ -1166,9 +1689,10 @@ func (s *Server) runHLSCutWorker(ctx context.Context, m memberSource, opts waxfl
 
 // runHLSWorker is one variant worker: its own input, opened afresh, the init
 // header if the variant lacks one, then segments from start to end of
-// stream, each published atomically and announced.
-func (s *Server) runHLSWorker(ctx context.Context, members []memberSource, tl bool, sp span, vp variantPlan,
-	variant *cache.Variant, start int64, notify func(int64)) error {
+// stream, each published atomically and announced. wrote, when set, is told
+// of each good write before it is announced.
+func (s *Server) runHLSWorker(ctx context.Context, key cache.Key, members []memberSource, tl bool, sp span, vp variantPlan,
+	variant *cache.Variant, start int64, notify func(int64), wrote func()) error {
 	publish := func(seg mp4.Segment) error {
 		if gate := s.hooks.hlsPublish; gate != nil {
 			gate(ctx, seg.Index)
@@ -1176,25 +1700,40 @@ func (s *Server) runHLSWorker(ctx context.Context, members []memberSource, tl bo
 		if err := variant.WriteFile(segmentName(seg.Index), seg.Data); err != nil {
 			return err
 		}
+		// The probe hears of the write first: its bound may pass at any
+		// moment, and must find a worker that wrote.
+		if wrote != nil {
+			wrote()
+		}
+		// The cache takes this variant's writes: its next refusal warns.
+		s.hlsBroken.forget(key)
+		if gate := s.hooks.hlsPublished; gate != nil {
+			gate(ctx, seg.Index)
+		}
 		notify(seg.Index)
 		return nil
 	}
-	ref := members[0].Ref
+	res, err := s.runHLSRung(ctx, members, tl, sp, vp, variant, start, publish)
+	return s.logHLSWorkerResult(ctx, key, members[0].Ref, rungName(vp.rung()), len(members), start, res, err)
+}
+
+// runHLSRung produces segments from start on the plan's rung, handing each to
+// publish, until the stream ends or publish refuses one. A nil variant is a
+// run with no cache behind it, which writes no init header.
+func (s *Server) runHLSRung(ctx context.Context, members []memberSource, tl bool, sp span, vp variantPlan,
+	variant *cache.Variant, start int64, publish func(mp4.Segment) error) (*waxflow.SegmentedResult, error) {
 	// The rung is the plan's, passed rather than re-derived, so the bytes a
-	// worker writes are the ones the playlist's segment count and the cache key
+	// run makes are the ones the playlist's segment count and the cache key
 	// were computed for.
-	switch r := vp.rung(); r {
+	switch vp.rung() {
 	case rungRemux:
 		// Ladder rung 2: the source's own packets, resegmented.
-		return s.logHLSWorker(ctx, ref, rungName(r), len(members), start,
-			s.runHLSRemuxWorker(ctx, members[0], vp.opts, vp.remux, variant, start, publish))
+		return nil, s.runHLSRemuxWorker(ctx, members[0], vp.opts, vp.remux, variant, start, publish)
 	case rungCut:
 		// Between rung 2 and rung 3: a span whose codec survives being moved.
-		return s.logHLSWorker(ctx, ref, rungName(r), len(members), start,
-			s.runHLSCutWorker(ctx, members[0], vp.opts, sp, vp.cut, variant, start, publish))
+		return nil, s.runHLSCutWorker(ctx, members[0], vp.opts, sp, vp.cut, variant, start, publish)
 	default:
-		res, err := s.runHLSTranscodeWorker(ctx, members, tl, sp, vp.copts, vp.opts, vp.plan, variant, start, publish)
-		return s.logHLSWorkerResult(ctx, ref, rungName(r), len(members), start, res, err)
+		return s.runHLSTranscodeWorker(ctx, members, tl, sp, vp.copts, vp.opts, vp.plan, variant, start, publish)
 	}
 }
 
@@ -1208,7 +1747,7 @@ func (s *Server) runHLSTranscodeWorker(ctx context.Context, members []memberSour
 		return nil, err
 	}
 	defer med.Close()
-	if !variant.Has("init.mp4") {
+	if variant != nil && !variant.Has("init.mp4") {
 		init, err := s.eng.InitSegment(plan, opts)
 		if err != nil {
 			return nil, err
@@ -1230,7 +1769,7 @@ func (s *Server) runHLSTranscodeWorker(ctx context.Context, members []memberSour
 func (s *Server) openHLSMedia(ctx context.Context, members []memberSource, tl bool,
 	sp span, copts waxflow.ConcatOptions) (format.Media, error) {
 	if !tl {
-		return s.openSlicedMember(ctx, members[0], sp)
+		return s.openSlicedMember(ctx, members[0], -1, sp)
 	}
 	return s.openTimelineMedia(ctx, members, copts)
 }
@@ -1253,7 +1792,7 @@ func (s *Server) openTimelineMedia(ctx context.Context, members []memberSource,
 		srcs[i] = waxflow.ConcatSource{
 			Track: m.Track,
 			Open: func() (format.Media, error) {
-				return s.openSlicedMember(ctx, m, span{from: m.From, to: m.To})
+				return s.openSlicedMember(ctx, m, i, span{from: m.From, to: m.To})
 			},
 		}
 	}
@@ -1262,9 +1801,9 @@ func (s *Server) openTimelineMedia(ctx context.Context, members []memberSource,
 
 // openSlicedMember opens m, bounded to sp when sp narrows it: a timeline
 // member's own stored window, or the descriptor span on a single source.
-// The zero span opens the member untouched.
-func (s *Server) openSlicedMember(ctx context.Context, m memberSource, sp span) (format.Media, error) {
-	med, err := s.openMember(ctx, m)
+// The zero span opens the member untouched. index is openMember's.
+func (s *Server) openSlicedMember(ctx context.Context, m memberSource, index int, sp span) (format.Media, error) {
+	med, err := s.openMember(ctx, m, index)
 	if err != nil || !sp.narrowed() {
 		return med, err
 	}
@@ -1277,8 +1816,9 @@ func (s *Server) openSlicedMember(ctx context.Context, m memberSource, sp span) 
 // against, and opens it. The returned Media owns the handle, so closing it
 // releases the descriptor: that is what makes a timeline's lazy opening
 // worth having, since a 500-track queue then holds one open file and not
-// 500.
-func (s *Server) openMember(ctx context.Context, m memberSource) (format.Media, error) {
+// 500. index is m's place in a timeline, negative for a single source: a
+// timeline member's close error names it.
+func (s *Server) openMember(ctx context.Context, m memberSource, index int) (format.Media, error) {
 	f, err := s.resolver.Resolve(ctx, m.Ref)
 	if err != nil {
 		return nil, err
@@ -1292,21 +1832,17 @@ func (s *Server) openMember(ctx context.Context, m memberSource) (format.Media, 
 		f.Close()
 		return nil, err
 	}
-	return closingMedia{Forwarder: format.Forwarder{Media: med}, f: f}, nil
-}
-
-// closingMedia releases the source handle with the media.
-type closingMedia struct {
-	format.Forwarder
-	f *source.File
-}
-
-func (m closingMedia) Close() error {
-	err := m.Media.Close()
-	if cerr := m.f.Close(); err == nil {
-		err = cerr
+	var c io.Closer = f
+	if index >= 0 {
+		c = f.NamedCloser(fmt.Sprintf("member %d", index))
 	}
-	return err
+	member, err := format.WithCloser(med, c)
+	if err != nil {
+		med.Close()
+		f.Close()
+		return nil, err
+	}
+	return member, nil
 }
 
 // mintHLSDescriptor builds the canonical descriptor from raw mint

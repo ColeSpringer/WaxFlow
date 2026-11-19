@@ -20,6 +20,7 @@ import (
 	"github.com/colespringer/waxflow/client"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/jobs"
+	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -548,7 +549,7 @@ func mp3TimelineEnv(t *testing.T) *testEnv {
 		cfg.JobsDir = filepath.Join(t.TempDir(), "jobs")
 		cfg.TimelineDir = filepath.Join(t.TempDir(), "timelines")
 	})
-	raw, err := os.ReadFile("../testdata/noise-cbr320.mp3")
+	raw, err := os.ReadFile(testutil.PkgFile("..", "testdata", "noise-cbr320.mp3"))
 	if err != nil {
 		t.Fatal(err)
 	}

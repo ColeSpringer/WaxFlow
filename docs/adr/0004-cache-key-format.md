@@ -41,8 +41,9 @@ transcoder has.
 
 Layout (fixed alongside the key): `cacheDir/v1/<aa>/<hash>/meta.json` plus
 `out.<ext>` (progressive) or `init.mp4 seg-*.m4s media.m3u8` (HLS variant).
-Writes go to `*.tmp` with atomic rename; only completed progressive outputs
-promote; HLS segments are individually complete and cache incrementally.
+Writes go to a temp name beside the target with an atomic rename; only
+completed progressive outputs promote; HLS segments are individually
+complete and cache incrementally.
 Probe results and frame indexes live under `cacheDir/idx/`, keyed by the
 same source identity.
 
@@ -605,3 +606,51 @@ less, so an overstated field costs nothing), where it was three to five
 reads that doubled from 1 KiB. What an exact length
 still does not say is unchanged: the open confirms the closing frame and
 the frame in front of it, not the frames between.
+
+## Amendment (2026-11-18): the Opus encoder reads ahead at an onset
+
+`opus.EncoderVersion` is `opus-enc-6`. It covers these moves, and a stream
+none of them names keeps its bytes.
+
+- At an onset the analyser reads one second ahead before the frame is
+  coded, so the speech/music call that picks the mode rests on the sound
+  and not on a classifier with no history, which called everything speech
+  and kept music in SILK or hybrid for 0.4 to 1.2 s at 48 kbit/s and under.
+  An onset is the first frame of sound in a stream and the first behind a
+  second or more of silence, and silence is 20 ms that swing less than
+  four 16-bit steps peak to peak on every channel: zeros, flat dither, an
+  offset, noise at -100 dB. An onset whose second ahead holds less than
+  four fifths sound (a stream under 0.8 s, or 200 ms of silence in its
+  first second) is decided as music is, which is CELT wherever the speech
+  and music calls differ, until the analyser has heard that much.
+- A lead-in above that (room tone, tape hiss, a noise bed, shaped dither) is sound, and
+  the analyser calls it speech. So the analyser is kept one second ahead
+  of the frame being coded and read in two places: at the frame, as the
+  reference reads it, and where it stands. While it reads the second
+  ahead as more music than not, a frame the history has not put in CELT
+  goes there, if a music call of that strength chooses CELT at the rate.
+  The switch falls ahead of the music, so the last frames of whatever
+  precedes it are coded in CELT: thirteen frames of speech in the mean
+  where speech runs straight into music. Every frame therefore waits until a
+  second of input lies behind its start, and `Finish` emits the last
+  second. A frame the history already codes in CELT, a second that reads
+  as speech and a stream under a signal hint are untouched. Steady speech
+  keeps its bytes. Music keeps them where the history calls it music;
+  music the history calls speech moves to CELT sooner than it did.
+- What that moves: the frames behind an onset, where the mode or the
+  analyser's reading changed. At 48 kbit/s and under that is most streams.
+  In CBR they lie within a few frames of the onset, and at the rates where
+  the mode is CELT whatever the call, eight inputs at 96 kbit/s moved in
+  no frame. In VBR it is any stream: music to 57 frames behind the onset,
+  and speech at 64 to 128 kbit/s in scattered packets as far as 12 s
+  behind a pause.
+- The frame behind a mode switch that resets the decoder's CELT state is
+  coded without prediction from the frame before, and the CELT frames at a
+  switch under the reference's prediction and start band settings. Only
+  frames at a mode switch move.
+- A CBR frame is decided on the rate its packet carries, which differs
+  from the rate asked for when that is not a multiple of 400 bit/s. And a
+  CBR stream of 6 to 9 kbit/s may be SILK, where it was always CELT.
+
+Every cached Opus entry misses once. The server's cache-key golden shows
+the term on each Opus line.

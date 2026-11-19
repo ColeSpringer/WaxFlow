@@ -3,14 +3,17 @@ package uploads
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"github.com/colespringer/waxflow/internal/posixfs"
 	"github.com/colespringer/waxflow/internal/ulid"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -203,9 +206,17 @@ func TestRestartAdoption(t *testing.T) {
 		t.Fatalf("Put b: %v", err)
 	}
 	s.Close()
+	// What the store published is never a temp, or the rescan would take it.
+	for _, name := range dirNames(t, dir) {
+		if posixfs.IsTemp(name) {
+			t.Fatalf("the store publishes %s, which reads as a temp", name)
+		}
+	}
 
 	// Plant debris a crash could leave behind: an interrupted spool
-	// write, a sidecar whose payload never landed, and the reverse.
+	// write, an interrupted sidecar write in both spellings it has had, a
+	// sidecar whose payload never landed, the reverse, and a file that is
+	// none of the store's.
 	orphanSidecarID, err := ulid.Make(time.UnixMilli(1), bytes.NewReader([]byte("0123456789")))
 	if err != nil {
 		t.Fatal(err)
@@ -214,17 +225,38 @@ func TestRestartAdoption(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	spoolingID, err := ulid.Make(time.UnixMilli(3), bytes.NewReader([]byte("klmnopqrst")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	temps := []string{"junk.tmp", spoolingID + ".tmp", a.ID + ".json.tmp", a.ID + ".json.tmp-0123456789abcdef"}
 	for _, stray := range []struct{ name, content string }{
-		{"junk.tmp", "interrupted spool write"},
+		{temps[0], "interrupted spool write"},
+		{temps[1], "interrupted spool write"},
+		{temps[2], "torn sidecar"},
+		{temps[3], "torn sidecar"},
 		{orphanSidecarID + ".json", `{"name":"ghost","created":1}`},
 		{orphanPayloadID, "payload without metadata"},
+		{"notes.txt", "not the store's"},
 	} {
 		if err := os.WriteFile(filepath.Join(dir, stray.name), []byte(stray.content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	s2 := openStore(t, dir, Options{})
+	var logged bytes.Buffer
+	s2 := openStore(t, dir, Options{Logger: slog.New(slog.NewTextHandler(&logged, nil))})
+	// The log tells a temp in either spelling from any other stray file.
+	for _, l := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
+		_, file, _ := strings.Cut(l, " file=")
+		isTemp, isStray := strings.Contains(l, `msg="uploads: removing stray temp file"`), strings.Contains(l, `msg="uploads: removing stray file"`)
+		if slices.Contains(temps, file) != isTemp || (file == "notes.txt") != isStray {
+			t.Errorf("the open logged %q", l)
+		}
+	}
+	if n := strings.Count(logged.String(), "removing stray temp file"); n != len(temps) {
+		t.Errorf("the open logged %d temps removed, want %d:\n%s", n, len(temps), &logged)
+	}
 	items := s2.Items()
 	if len(items) != 2 {
 		t.Fatalf("Items after reopen = %+v, want 2", items)
@@ -245,13 +277,11 @@ func TestRestartAdoption(t *testing.T) {
 		t.Errorf("Bytes after reopen = %d, want %d", n, a.Bytes+b.Bytes)
 	}
 	names := dirNames(t, dir)
-	if len(names) != 4 {
-		t.Errorf("dir after reopen = %v, want only the two adopted pairs", names)
-	}
-	for _, n := range names {
-		if strings.Contains(n, "junk") || strings.Contains(n, orphanSidecarID) || strings.Contains(n, orphanPayloadID) {
-			t.Errorf("stray %q survived the rescan", n)
-		}
+	want := []string{a.ID, a.ID + ".json", b.ID, b.ID + ".json"}
+	slices.Sort(names)
+	slices.Sort(want)
+	if !slices.Equal(names, want) {
+		t.Errorf("dir after reopen = %v, want only the two adopted pairs %v", names, want)
 	}
 }
 

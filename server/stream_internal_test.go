@@ -302,7 +302,7 @@ func TestNoVariantWorkerStartsOnceCloseBegins(t *testing.T) {
 	req := &hlsRequest{members: []memberSource{{Ref: "lib/a.wav"}}, key: key,
 		variantPlan: variantPlan{plan: &waxflow.SegmentPlan{}}}
 	s.Close()
-	cancel, err := s.hlsSpawner(req, variant)(0, func(int64) {}, func(error) {})
+	cancel, err := s.hlsSpawner(req, variant, nil)(0, func(int64) {}, func(error) {})
 	if cancel != nil {
 		cancel(nil)
 	}
@@ -327,7 +327,7 @@ func spawnMissing(t *testing.T, s *Server, atExit func()) error {
 		variantPlan: variantPlan{plan: &waxflow.SegmentPlan{}}}
 	exited := make(chan struct{})
 	var exitErr error
-	cancel, err := s.hlsSpawner(req, variant)(0, func(int64) {}, func(err error) {
+	cancel, err := s.hlsSpawner(req, variant, nil)(0, func(int64) {}, func(err error) {
 		exitErr = err
 		atExit()
 		close(exited)
@@ -366,6 +366,14 @@ func TestHLSTranscodeWorkerLogsItsOwnFailure(t *testing.T) {
 	if !rec.Has(slog.LevelWarn, "hls worker failed") {
 		t.Errorf("a worker whose source is gone logged %v, want a Warn", rec.Warnings())
 	}
+	// Only a refused cache write is routine the second time: this fault is
+	// a Warn each time it happens.
+	if err := spawnMissing(t, s, func() {}); waxerr.CodeOf(err) != waxerr.CodeNotFound {
+		t.Fatalf("the second worker failed with %v, want %s", err, waxerr.CodeNotFound)
+	}
+	if n := len(rec.Warnings()); n != 2 {
+		t.Errorf("two workers whose source is gone logged %d warnings, want 2: %v", n, rec.Warnings())
+	}
 }
 
 // TestStreamOptionsUseTheDaemonsResampleProfile: a progressive transcode
@@ -379,5 +387,58 @@ func TestStreamOptionsUseTheDaemonsResampleProfile(t *testing.T) {
 	}
 	if opts.ResampleProfile != resample.Fast {
 		t.Errorf("a /stream transcode resamples with profile %q, want the daemon's %q", opts.ResampleProfile, resample.Fast)
+	}
+}
+
+// A probe is given two seconds, or as long as one of its variant's segments
+// lasts when that is longer.
+func TestHLSProbeWaitIsTheSegmentDurationPastTwoSeconds(t *testing.T) {
+	plan := func(samples, rate int) *waxflow.SegmentPlan {
+		p := &waxflow.SegmentPlan{SegmentSamples: samples}
+		p.Format.Rate = rate
+		return p
+	}
+	var b brokenVariants
+	for _, tc := range []struct {
+		name string
+		plan *waxflow.SegmentPlan
+		want time.Duration
+	}{
+		{"one-second segments", plan(48000, 48000), 2 * time.Second},
+		{"two-second segments", plan(88200, 44100), 2 * time.Second},
+		{"four-second segments", plan(192000, 48000), 4 * time.Second},
+		{"six seconds and a frame", plan(6*48000+960, 48000), 6*time.Second + 20*time.Millisecond},
+		{"no plan", nil, 2 * time.Second},
+	} {
+		if got := b.probeWait(tc.plan); got != tc.want {
+			t.Errorf("%s: a probe is given %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// Only a refused write makes a variant known to refuse them: saying a line
+// once marks nothing, and neither does an error of another kind.
+func TestOnlyARefusedWriteMarksAVariant(t *testing.T) {
+	var b brokenVariants
+	key := cache.NewKey("lib/a.wav|0", "hls", nil)
+	if !b.warnOnce(key, hlsProbeGivenUp) || b.cause(key) != nil {
+		t.Errorf("a line said for a variant not known marked it: %v", b.cause(key))
+	}
+	b.mark(key, waxerr.New(waxerr.CodeInternal, "hls: timed out waiting for the segment worker"))
+	b.mark(key, context.DeadlineExceeded)
+	if cause := b.cause(key); cause != nil {
+		t.Errorf("an error that is no refused write marked the variant: %v", cause)
+	}
+	refusal := waxerr.New(waxerr.CodeOutputUnwritable, "cache: writing variant file")
+	b.mark(key, refusal)
+	if cause := b.cause(key); cause != refusal {
+		t.Errorf("a refused write left the cause %v, want it", cause)
+	}
+	if !b.warnOnce(key, hlsProbeGivenUp) || b.warnOnce(key, hlsProbeGivenUp) {
+		t.Error("a marked variant does not say a line once and only once")
+	}
+	b.forget(key)
+	if b.cause(key) != nil || !b.due(key) {
+		t.Error("a forgotten variant is still known to refuse writes")
 	}
 }

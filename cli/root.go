@@ -356,7 +356,7 @@ func resolveConfig(cmd *cobra.Command) (config.Config, error) {
 	}
 	cfg, err := config.Load(path, os.LookupEnv)
 	if err != nil {
-		return cfg, err
+		return cfg, config.Named(err) // the user who wrote it reads what it named
 	}
 	for name, field := range map[string]*string{
 		"addr":      &cfg.Addr,

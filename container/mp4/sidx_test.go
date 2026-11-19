@@ -250,7 +250,7 @@ func TestFragmentedSidxNamesATruncation(t *testing.T) {
 	}
 }
 
-// TestFragmentedSidxOnABareSegment: the HLS client's live probe opens a
+// TestFragmentedSidxOnABareSegment: hlsclient's live probe opens a
 // zero-length media source against a fetched init. The scan finds nothing and
 // says so rather than failing the open.
 func TestFragmentedSidxOnABareSegment(t *testing.T) {

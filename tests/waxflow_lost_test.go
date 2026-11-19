@@ -141,7 +141,7 @@ func TestMeasuredMediaReportsItsSourcesLost(t *testing.T) {
 	}
 	measured := med.Info().Default()
 	measured.SamplesCounted = true // a different claim, so the wrapper is built
-	wrapped := waxflow.MeasuredMedia(med, measured)
+	wrapped := measuredAs(t, med, measured)
 	defer wrapped.Close()
 	if wrapped == med {
 		t.Fatal("MeasuredMedia returned its source; this cell needs the wrapper")

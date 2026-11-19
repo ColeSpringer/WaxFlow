@@ -25,13 +25,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/colespringer/waxflow/internal/lru"
 	"github.com/colespringer/waxflow/internal/posixfs"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
@@ -150,13 +150,13 @@ type Store struct {
 	log *slog.Logger
 	max int
 
-	mu      sync.Mutex
-	entries map[string]*entry
-	clock   int64
+	mu sync.Mutex
+	// entries has no bound of its own: Open may hold more than max, and Put
+	// evicts down to it.
+	entries *lru.Cache[string, *entry]
 }
 
-// entry is what the store keeps in memory for one timeline: when it expires,
-// and when it was last used.
+// entry is what the store keeps in memory for one timeline: when it expires.
 //
 // The members themselves stay on disk and are read per request. That is the
 // trade the hot path wants: a segment request already resolves and identity-
@@ -165,7 +165,6 @@ type Store struct {
 // in memory for every timeline the process has ever seen.
 type entry struct {
 	expires time.Time
-	used    int64 // clock value at last access; the LRU order
 }
 
 // Open loads the store's index, sweeping anything already expired.
@@ -180,6 +179,11 @@ type entry struct {
 // over the cap until then costs about a hundred bytes an entry, which is what
 // makes waiting the cheaper mistake.
 func Open(dir string, opts Options) (*Store, error) {
+	// Absolute, so a path an error quotes is one waxerr.Message drops.
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeInternal, "timeline: resolving store dir", err)
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "timeline: creating store dir", err)
 	}
@@ -191,7 +195,9 @@ func Open(dir string, opts Options) (*Store, error) {
 	if maxEntries <= 0 {
 		maxEntries = defaultMaxEntries
 	}
-	s := &Store{dir: dir, log: log, max: maxEntries, entries: map[string]*entry{}}
+	s := &Store{dir: dir, log: log, max: maxEntries, entries: lru.NewUnbounded[string, *entry]()}
+	// Nothing is in flight at open, so a temp is a write a crash interrupted.
+	posixfs.SweepTemps(dir)
 	names, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeSourceUnreadable, "timeline: scanning store dir", err)
@@ -216,8 +222,7 @@ func Open(dir string, opts Options) (*Store, error) {
 			s.removeFile(digest)
 			continue
 		}
-		s.clock++
-		s.entries[digest] = &entry{expires: d.Expires, used: s.clock}
+		s.entries.Put(digest, &entry{expires: d.Expires})
 	}
 	return s, nil
 }
@@ -236,10 +241,10 @@ func (s *Store) Put(members []Member, exp time.Time) (string, error) {
 	digest := Digest(members)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e, known := s.entries[digest]
+	e, known := s.entries.Peek(digest)
 	if known && !exp.After(e.expires) {
 		// Held already, and already outliving this URL: nothing to write.
-		s.markLocked(e)
+		s.entries.Get(digest)
 		return digest, nil
 	}
 	// Write before making room, because making room is destructive: eviction
@@ -251,16 +256,20 @@ func (s *Store) Put(members []Member, exp time.Time) (string, error) {
 		return "", err
 	}
 	if !known {
-		for len(s.entries) >= s.max {
-			if !s.evictOldestLocked() {
+		// Least recently used rather than soonest to expire: expiry is the
+		// real bound, so this only fires under pathological growth, and the
+		// entry worth keeping is the one a session still reads.
+		for s.entries.Len() >= s.max {
+			oldest, _, ok := s.entries.RemoveOldest()
+			if !ok {
 				break
 			}
+			s.removeFile(oldest)
 		}
 		e = &entry{}
-		s.entries[digest] = e
 	}
 	e.expires = exp
-	s.markLocked(e)
+	s.entries.Put(digest, e)
 	return digest, nil
 }
 
@@ -275,10 +284,7 @@ func (s *Store) Members(digest string) ([]Member, error) {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, "timeline: malformed tl digest")
 	}
 	s.mu.Lock()
-	e, ok := s.entries[digest]
-	if ok {
-		s.markLocked(e)
-	}
+	_, ok := s.entries.Get(digest)
 	s.mu.Unlock()
 	if !ok {
 		return nil, errUnknown()
@@ -289,7 +295,7 @@ func (s *Store) Members(digest string) ([]Member, error) {
 		// disk, drop the index entry, and answer what is true.
 		s.log.Warn("timeline: indexed timeline is unreadable", "tl", digest, "err", err)
 		s.mu.Lock()
-		delete(s.entries, digest)
+		s.entries.Delete(digest)
 		s.mu.Unlock()
 		return nil, errUnknown()
 	}
@@ -307,10 +313,7 @@ func (s *Store) Members(digest string) ([]Member, error) {
 // would 404 the player at a buffer refill rather than at a natural boundary.
 func (s *Store) Touch(digest string, exp time.Time) {
 	s.mu.Lock()
-	e, ok := s.entries[digest]
-	if ok {
-		s.markLocked(e)
-	}
+	e, ok := s.entries.Get(digest)
 	extend := ok && exp.After(e.expires)
 	s.mu.Unlock()
 	if !extend {
@@ -350,14 +353,13 @@ func (s *Store) GC() int {
 	now := time.Now()
 	s.mu.Lock()
 	var dead []string
-	for digest, e := range s.entries {
-		if !e.expires.After(now) {
-			dead = append(dead, digest)
+	s.entries.DeleteFunc(func(digest string, e *entry) bool {
+		if e.expires.After(now) {
+			return false
 		}
-	}
-	for _, digest := range dead {
-		delete(s.entries, digest)
-	}
+		dead = append(dead, digest)
+		return true
+	})
 	s.mu.Unlock()
 	for _, digest := range dead {
 		s.removeFile(digest)
@@ -369,7 +371,7 @@ func (s *Store) GC() int {
 func (s *Store) Entries() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.entries)
+	return s.entries.Len()
 }
 
 func checkMembers(members []Member) error {
@@ -453,40 +455,8 @@ func (s *Store) writeLocked(digest string, exp time.Time, members []Member) erro
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeInternal, "timeline: encoding a timeline", err)
 	}
-	tmp := s.path(digest) + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	if err := posixfs.WriteFile(s.path(digest), b, 0o600); err != nil {
 		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "timeline: writing a timeline", err)
 	}
-	if err := posixfs.Replace(tmp, s.path(digest)); err != nil {
-		os.Remove(tmp)
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "timeline: promoting a timeline", err)
-	}
 	return nil
-}
-
-func (s *Store) markLocked(e *entry) {
-	s.clock++
-	e.used = s.clock
-}
-
-// evictOldestLocked drops the least recently used timeline, reporting
-// whether it found one. Eviction is least-recently-used rather than
-// soonest-to-expire: expiry is already the real bound (GC sweeps it), so
-// this only fires under pathological growth, and there the entry worth
-// keeping is the one a session is still reading.
-func (s *Store) evictOldestLocked() bool {
-	var oldest string
-	var found bool
-	minUsed := int64(math.MaxInt64)
-	for digest, e := range s.entries {
-		if !found || e.used < minUsed {
-			minUsed, oldest, found = e.used, digest, true
-		}
-	}
-	if !found {
-		return false
-	}
-	delete(s.entries, oldest)
-	s.removeFile(oldest)
-	return true
 }

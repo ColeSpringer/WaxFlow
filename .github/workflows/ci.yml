@@ -45,8 +45,10 @@ jobs:
         run: make test
 
   # source's Windows-only paths (the Win32 codes a failing drive or share
-  # reports, the directory semantics its tests skip around) and the daemon's
-  # root sweep and doctor rows, on real Windows.
+  # reports, the directory semantics its tests skip around), posixfs's
+  # Windows create, replace and remove that every store write goes through,
+  # the cli's tests of a library root that is missing or unmounted, and make
+  # depcheck under a Windows shell, on real Windows.
   windows:
     runs-on: windows-latest
     timeout-minutes: 15
@@ -56,10 +58,14 @@ jobs:
         with:
           go-version-file: .go-version
       - run: go test ./source/
+      - run: go test ./internal/posixfs/
       - name: cli root tests
         working-directory: cli
         shell: bash
-        run: go test -run '^Test(RemountSweep|RemountStopIsBounded|BuildServerConfig(ToleratesMissingRoot|LogsNoRootMounted|CleanupStopsTheSweep)|ReloadLogsUnmountedRoots|Doctor(ReportsEachRoot|FailsOnMissingRoot)|SignNamesAnUnmountedRootsPath)$' .
+        run: go test -run '^Test(RemountSweep|RemountStopIsBounded|BuildServerConfig(ToleratesMissingRoot|LogsNoRootMounted|CleanupStopsTheSweep)|Reload(LogsUnmountedRoots|DoesNotRelogADownRoot)|RequestMountIsLogged|Doctor(ReportsEachRoot|FailsOnMissingRoot)|SignNamesAnUnmountedRootsPath(ForAPID)?)$' .
+      - name: depcheck
+        shell: bash
+        run: make depcheck
 
   depcheck:
     runs-on: ubuntu-latest

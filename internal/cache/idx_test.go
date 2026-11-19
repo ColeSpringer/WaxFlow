@@ -2,10 +2,17 @@ package cache
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+
+	"github.com/colespringer/waxflow/internal/posixfs"
+	"github.com/colespringer/waxflow/internal/testutil"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 func TestIdxStoreRoundTrip(t *testing.T) {
@@ -95,5 +102,65 @@ func TestIdxStoreConcurrentSaves(t *testing.T) {
 	wg.Wait()
 	if got := s.Load("shared"); !bytes.Equal(got, blob) {
 		t.Error("final blob does not round-trip")
+	}
+}
+
+// TestIdxStoreTrimSweepsTemps: the first Save's scan removes a temp a crashed
+// Save left behind, in both spellings a blob has been staged under, and
+// neither counts against the cap. The blobs beside them stay.
+func TestIdxStoreTrimSweepsTemps(t *testing.T) {
+	dir := t.TempDir()
+	s, err := OpenIdx(dir, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob := bytes.Repeat([]byte("idx"), 300)
+	s.Save("kept", blob)
+	if name := filepath.Base(s.path("kept")); posixfs.IsTemp(name) {
+		t.Fatalf("a blob is published as %s, which reads as a temp", name)
+	}
+
+	temps := []string{
+		filepath.Base(s.path("kept")) + ".tmp",
+		filepath.Base(s.path("kept")) + ".tmp-0123456789abcdef",
+	}
+	for _, name := range temps {
+		// Each is large enough to evict a blob if it were counted as one.
+		if err := os.WriteFile(filepath.Join(dir, name), make([]byte, 4096), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s, err = OpenIdx(dir, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Save("new", blob)
+	for _, name := range temps {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s survived the scan: %v", name, err)
+		}
+	}
+	for _, id := range []string{"kept", "new"} {
+		if got := s.Load(id); !bytes.Equal(got, blob) {
+			t.Errorf("blob %q after the scan is %d bytes, want %d", id, len(got), len(blob))
+		}
+	}
+}
+
+// A relative directory that cannot be resolved, the working directory being
+// gone, is refused with a code as the stores refuse it.
+func TestOpenIdxCodesADirectoryItCannotResolve(t *testing.T) {
+	gone := filepath.Join(t.TempDir(), "gone")
+	if err := os.Mkdir(gone, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testutil.Chdir(t, gone)
+	if err := os.Remove(gone); err != nil {
+		t.Skipf("the working directory cannot be removed here: %v", err)
+	}
+	_, err := OpenIdx("idx", 0)
+	if e, ok := errors.AsType[*waxerr.Error](err); !ok || e.Code != waxerr.CodeInternal || !strings.HasPrefix(e.Error(), "cache: resolving idx dir: ") {
+		t.Errorf("OpenIdx = %v, want %s from resolving the directory", err, waxerr.CodeInternal)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxflow/client"
+	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
@@ -39,7 +40,7 @@ func capsRootsReload(t *testing.T, env *testEnv) bool {
 func TestRootsReloadEndpoint(t *testing.T) {
 	// dirB holds a real source; the live roots do not know "B" yet.
 	dirB := t.TempDir()
-	flac, err := os.ReadFile("../testdata/sine-s16.flac")
+	flac, err := os.ReadFile(testutil.PkgFile("..", "testdata", "sine-s16.flac"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +167,7 @@ func TestRootsReloadDisabled(t *testing.T) {
 // flag is not re-asserted here; it belongs to the endpoint tests.
 func TestRootsReloadClient(t *testing.T) {
 	dirB := t.TempDir()
-	flac, err := os.ReadFile("../testdata/sine-s16.flac")
+	flac, err := os.ReadFile(testutil.PkgFile("..", "testdata", "sine-s16.flac"))
 	if err != nil {
 		t.Fatal(err)
 	}

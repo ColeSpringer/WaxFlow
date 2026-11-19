@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxflow/internal/jobs"
+	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -246,7 +247,7 @@ func (c *countingResolver) live() int {
 // happens to have open.
 func TestValidateMergeHoldsOneMemberAtATime(t *testing.T) {
 	root := t.TempDir()
-	wav, err := os.ReadFile(filepath.Join("..", "testdata", "sine-s16.wav"))
+	wav, err := os.ReadFile(testutil.PkgFile("..", "testdata", "sine-s16.wav"))
 	if err != nil {
 		t.Fatal(err)
 	}

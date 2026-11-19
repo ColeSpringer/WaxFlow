@@ -393,7 +393,7 @@ func TestSliceAfterMeasureMatchesAFreshSlice(t *testing.T) {
 			}
 			n := track.Samples
 			for _, w := range [][2]int64{{0, waxflow.ToEnd}, {n / 3, 2 * n / 3}} {
-				ref, err := waxflow.Slice(waxflow.MeasuredMedia(open(), track), w[0], w[1])
+				ref, err := waxflow.Slice(measuredAs(t, open(), track), w[0], w[1])
 				if err != nil {
 					t.Fatal(err)
 				}

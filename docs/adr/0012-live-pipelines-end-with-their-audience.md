@@ -89,3 +89,45 @@ grace is that distinction.
   point, so a worker stopped between fetches costs at most a restart at the
   next miss.
 - `0` keeps the old behaviour on either surface.
+
+## Amendment (2026-11-18): a segment made for one request
+
+A worker stops at the first segment it cannot write. A refused write, a
+worker's, the init header's or the making of the variant's directory, marks
+the variant as known to refuse them, and nothing else does: saying a thing
+once per outage is kept apart from the mark. From then on a segment request
+takes the variant's turn before anything else and, under it, runs the
+worker's rung itself, from its segment and for that segment only, on the
+request's context and one live slot, and serves the result from memory. A
+request waiting for the segment just made takes those bytes, and the init
+header is answered from memory with no write tried. Every ten seconds the
+request whose turn it is has a worker try first, under the same turn: a
+write that succeeds makes the variant an ordinary one again. The try has two
+seconds, or as long as one of the variant's segments lasts where that is
+longer: a host that can serve the stream makes a segment in less than it
+plays. A worker that has not written by then, or whose listener leaves
+first, is stopped and gives its slot back at once, and a listener still
+there has its segment made as between tries, however the try failed. A
+worker that wrote as the bound passed is not stopped: the variant healed,
+and the request reads its segment from disk. The first try of an outage
+given up at its bound is logged at Warn, since a write that hangs reports
+nothing until it returns. No other worker starts for the variant, so it
+holds one live slot at a time, the worker's or the run's, however many
+listeners ask.
+
+1024 variants are remembered. Variant keys come from requests, so the set
+is bounded, and what matters is what happens past the bound: the oldest is
+dropped and the outage is taken to be the store's until any worker's write
+lands. A variant not remembered is then served as one known to refuse
+writes, with one try every ten seconds and one Warn shared among all such
+variants, so an outage wider than the set costs neither a failing worker
+nor a Warn per request. It has two prices. In such an outage a variant
+whose own directory is sound is served uncached until that shared try or
+another worker's write. And after a sound variant's write has cleared that
+state while others still refuse, the next dropped variant asked for pays
+one failing worker, whose mark brings the state back.
+
+The run ends with its listener by construction, so it needs no grace. It is
+not a session: it counts as a segment served and as a degradation, and on
+the remux and cut rungs, the two with a pipeline counter, as one more
+pipeline.

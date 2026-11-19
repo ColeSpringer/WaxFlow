@@ -135,15 +135,20 @@ func countDecoded(ctx context.Context, med format.Media) (int64, error) {
 // as well (see Slice). ctx bounds the seek the window's first read runs to
 // its start, which can be a walk (container.Seeker) that a read carries no
 // context to stop; a caller that seeks the window itself seeks once. It takes
-// ownership of med and closes it on error.
+// ownership of med and closes it on error. It refuses a span as MeasuredMedia
+// does; with a negative Samples a span is sliced as it stands.
 func SliceMeasured(ctx context.Context, med format.Media, measured container.Track, from, to int64) (format.Media, error) {
 	if med == nil {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: SliceMeasured of a nil Media")
 	}
-	med = MeasuredMedia(med, measured)
-	sl, err := newSlice(ctx, med, from, to)
+	src, err := MeasuredMedia(med, measured)
 	if err != nil {
 		med.Close()
+		return nil, err
+	}
+	sl, err := newSlice(ctx, src, from, to)
+	if err != nil {
+		src.Close()
 		return nil, err
 	}
 	return sl, nil

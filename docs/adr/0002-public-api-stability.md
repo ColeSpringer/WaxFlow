@@ -736,3 +736,81 @@ What changes meaning without moving an identifier (ADR-0004, 2026-11-15):
   the rest, past what the open counted.
 - A Media's `Walk` (`format.Walker`) refreshes the length for a demuxer with
   no walk, taking a claim a read's end withdrew, which can lift the cap.
+
+## Amendment (2026-11-18): the HLS client is test support
+
+The client that reads an HLS presentation back (`OpenVOD`, `OpenLive`,
+`Fetcher`, `HTTPFetcher`) moves from `internal/hls` to
+`internal/testutil/hlsclient`. It exists so the tests can read what the
+segmenter and the daemon write, and no product package calls it.
+`internal/hls` keeps the descriptor and the variant manager. This
+supersedes the two sentences above that place the client in `internal/hls`
+(2026-10-30 and 2026-11-02, left as they were written); what the second
+says the client does still holds. No exported identifier of a public
+package moves and no behaviour changes.
+
+`make depcheck` gains a second clause to keep it that way: nothing in the
+public tree, and nothing `cli/cmd/waxflow` links, imports
+`internal/testutil` or a package under it. Both clauses read the host's
+build and the Windows one, and a listing that fails, or that lacks the
+packages it must hold, fails the check.
+
+## Amendment (2026-11-18): a Media wrapper refuses a span, one closer for a Media, and errors that name no path
+
+What a caller of the public packages sees:
+
+- `format` gains `WithCloser(med, c)`: a Media that closes `med` and then
+  `c`, and reports the first error of the two. It closes both once, and a
+  later `Close` returns nil. It forwards what `Forwarder` forwards, and over
+  a `Composite` it answers `Members` as that Media does. A Media that is a
+  `LengthConfirmer` (a span) is refused with `invalid-request` and neither
+  is closed, because the wrapper would hide the confirming and a run would
+  commit a length nothing confirmed. A nil `med` or `c` is refused the same
+  way.
+- `waxflow.MeasuredMedia(med, measured)` returns `(format.Media, error)`.
+  It refuses a `LengthConfirmer` the same way, and only where it would
+  restate the length: a negative `Samples`, or a Media that already
+  declares the measure, still comes back untouched with a nil error. A
+  `Concat` is restated as before and now still answers `Members`. A refused
+  Media stays open and the caller's.
+- `waxflow.SliceMeasured` keeps its signature and returns that refusal for a
+  span whose length the measure would restate, closing the span as it
+  closes its source on every error. With a negative `Samples` a span of a
+  span is served as before.
+- `source.File.Close` reports a close the system refuses as
+  `source-unreadable`, with the system's error behind it and no path in the
+  message. It returned the bare `*fs.PathError`.
+- `source.File.ReadAt` returns a failed read's error without the
+  `*fs.PathError` around it, so the message a demuxer builds on it holds no
+  path of the daemon's; `io.EOF` and a short read are unchanged, and
+  `errors.Is` still finds the system's error. A stat that fails in
+  `Roots.Resolve` or `source.OpenLocal`, and an open that fails in
+  `OpenLocal`, drop the path the same way.
+- `waxerr` gains `Message(err)`, the text of an error for a client: every
+  `*fs.PathError` and `*os.LinkError` in the chain whose path is absolute
+  keeps its operation and cause and loses the path, and a relative path,
+  the client's own reference under a root, stays. The daemon applies it
+  where an error becomes something a client reads: the error envelope, a
+  job's error and wait, and a job warning made from an error. The cache,
+  jobs and timeline stores make their directory absolute when they open,
+  as the uploads store does, so the rule sees every path of theirs. A
+  failed job's message and a refused request hold no part of a store's
+  directory.
+- `waxerr` gains `Pathless(err)`, which returns the cause of the
+  `*fs.PathError` or `*os.LinkError` in `err`, or `err` itself, so whatever
+  wraps the path error goes with the path. `source` builds the errors
+  above on it: an embedder of that package has no boundary that applies
+  `Message`.
+- `source.File` gains `NamedCloser(name)`, a closer of the file that names
+  it in a failed close's error and keeps the code: how an HLS timeline
+  names the member below.
+
+What changes meaning without moving an identifier:
+
+- A merge job reports a member whose file fails to close as a warning that
+  names the member (`member 1 (lib/b.flac): source: closing the file: ...`)
+  and finishes with its output: every sample the member declared was read
+  before the close. The job runner used to drop the error. An HLS timeline
+  has no warning to carry it, so the read that advanced past the member
+  still fails there, `source-unreadable`, and now names the member
+  (`member 1: source: closing the file`).

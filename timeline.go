@@ -57,12 +57,22 @@ const ToEnd = -1
 // container.Indexer on the inner media is hidden here on purpose: the
 // sidecar save lives in the wrapper the engine put around it, whose own
 // Close still runs.
-func MeasuredMedia(med format.Media, measured container.Track) format.Media {
+//
+// A Media that confirms its own length (a span) is refused where its length
+// would be restated, with CodeInvalidRequest and med left open: the wrapper
+// would hide the confirming. One returned untouched is never refused, and a
+// Concat confirms nothing, so it is restated like a file and still answers
+// Members (format.Composite).
+func MeasuredMedia(med format.Media, measured container.Track) (format.Media, error) {
 	info := med.Info()
 	samples := measured.Samples
 	if t := info.Default(); samples < 0 ||
 		(t.Samples == samples && t.SamplesExact && t.SamplesCounted == measured.SamplesCounted) {
-		return med
+		return med, nil
+	}
+	if _, ok := med.(format.LengthConfirmer); ok {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest,
+			"waxflow: MeasuredMedia of a Media that confirms its own length")
 	}
 	patched := *info
 	patched.Tracks = slices.Clone(info.Tracks)
@@ -80,7 +90,18 @@ func MeasuredMedia(med format.Media, measured container.Track) format.Media {
 	patched.Tracks[idx].SamplesExact = true
 	patched.Tracks[idx].SamplesAdvisory = false
 	patched.Tracks[idx].SamplesCounted = measured.SamplesCounted
-	return measuredMedia{Forwarder: format.Forwarder{Media: med}, info: &patched}
+	m := measuredMedia{Forwarder: format.Forwarder{Media: med}, info: &patched}
+	if members, ok := med.(format.Composite); ok {
+		return measuredComposite{measuredMedia: m, Composite: members}, nil
+	}
+	return m, nil
+}
+
+// measuredComposite is a measuredMedia over a Composite: a restated length
+// changes no member, so the members are the wrapped Media's.
+type measuredComposite struct {
+	measuredMedia
+	format.Composite
 }
 
 // measuredMedia is a Media whose declared info is replaced; MeasuredMedia is

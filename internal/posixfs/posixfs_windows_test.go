@@ -120,6 +120,42 @@ func TestReplaceOutlastsATransientHold(t *testing.T) {
 	}
 }
 
+// TestAbortOutlastsATransientHold: a handle without delete sharing on the
+// staged file blocks its removal until it closes, so only a retry leaves
+// nothing behind. os.Remove fails outright under the same hold.
+func TestAbortOutlastsATransientHold(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	st, err := Stage(filepath.Join(dir, "out.flac"), 0o644, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.File.Write([]byte("half")); err != nil {
+		t.Fatal(err)
+	}
+	held, err := os.Open(st.Path) // no delete sharing, as a scanner opens it
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(st.Path); err == nil {
+		held.Close()
+		t.Fatal("os.Remove took a plain-held file; the transient hold proves nothing here")
+	}
+
+	// The hold outlives the first attempt and clears inside the backoff.
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		time.Sleep(15 * time.Millisecond)
+		held.Close()
+	})
+	defer wg.Wait()
+
+	st.Abort()
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("Abort under a transient hold left %d files behind", len(entries))
+	}
+}
+
 // TestCreateSurvivesReplaceRename pins what cache promotion depends on: the
 // entry file renames to its final name while the write handle stays open,
 // and that handle keeps serving reads afterward. With a plain os.OpenFile

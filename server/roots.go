@@ -1,6 +1,10 @@
 package server
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/colespringer/waxflow/internal/config"
+)
 
 // handleRootsReload serves POST /roots/reload: re-read the daemon's
 // configuration and reconcile the live library roots to match, so a
@@ -23,7 +27,9 @@ func (s *Server) handleRootsReload(w http.ResponseWriter, _ *http.Request) {
 		// an operator tailing logs to see why a root started 404ing wants the
 		// reason a reload was rejected, the same "operator wants to know"
 		// reason the success path logs.
-		s.log.Warn("roots reload failed", "err", err)
+		// The client's message names no config file or setting's path; the
+		// log does.
+		s.log.Warn("roots reload failed", append([]any{"err", err}, config.LogAttrs(err)...)...)
 		s.writeError(w, err)
 		return
 	}

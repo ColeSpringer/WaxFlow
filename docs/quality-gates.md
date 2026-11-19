@@ -579,6 +579,70 @@ keg-only, so point the oracles at it explicitly or put it ahead on PATH).
   per-track bound tightens from 2.6 to **1.5**.
 - Speech/music mode decision agrees with libopus on >= **90%** of corpus
   windows (report-only below 95%, blocking below 90%).
+- A start is held to the stream's own steady state at **24, 32, 48 kbps**,
+  mono and stereo, on a tonal and a plucked input: over the first 500 ms
+  of sound, and over the 400 ms behind a restarted segment run, the rms
+  of the 5 ms window errors stays within **1.25** times that of the same
+  samples coded in steady state, and the largest window within **2.0**
+  times. It holds at the head of a stream, behind silence (zeros, flat
+  dither, an offset, noise at -100 dB), behind shaped dither and a noise
+  bed, behind a noise pickup
+  that needs the whole second of look-ahead, behind a pause in mid stream,
+  for a restart into a quiet passage, and for streams shorter than the
+  look-ahead. The corpus gates score whole files and cannot see a stretch
+  this short.
+- Silence is 20 ms that swing less than four 16-bit steps (-78.3 dBFS)
+  peak to peak on every channel: midway in dB between flat dither's two
+  steps (-84.3) and the quietest of the corpora's 191,827 frames (-73.4;
+  music -59.7). A call on less sound than four fifths of the second read
+  ahead is not used, and the frame is decided as music is: by frames
+  read, the starts called wrongly at 24 kbps are 46, 29, 23, 20 and 17 of
+  58 for music at 11, 25, 35, 40 and 50 frames, and 10 or fewer of 180 for
+  speech throughout.
+- Music behind two seconds of a noise bed (white and pink at -70, -60 and
+  -50 dBFS, hum with hiss; the two fixtures and five corpus tracks at 24,
+  32 and 48 kbps, 147 cells) starts in CELT in every cell, its first
+  500 ms at 1.00 times the same music with no lead-in (worst 1.01), which
+  are libopus's figures at complexity 5. Without the second read ahead
+  all 147 start in SILK or hybrid at 2.11 times (worst 10.2), and libopus
+  at complexity 10 starts all 147 that way. Speech behind the same beds
+  starts in SILK or hybrid in every cell, at 1.00 times (worst 1.07).
+- The reading of the second ahead that moves the mode to CELT is 0.5:
+  more music than not. On the 147 bed cells 0.5, 0.6 and 0.7 all leave
+  none outside CELT (0.8 leaves 24, 0.9 leaves 60), but those cells do
+  not decide it. On the whole corpus (all 20 tracks behind 2 s of white
+  noise at -60 and -50 dBFS, 24/32/48 kbps, the 96 cells whose start with
+  no lead-in is CELT) 0.5 leaves 3 off, all track 19 behind the -50 bed,
+  by 2, 1 and 1 frames of 60, with the first 500 ms at 1.00 times the
+  no-lead start (worst 1.06); 0.7 leaves 12 off, tracks 04 and 19 in
+  every cell, by 6 to 43 frames (worst 1.11). Where
+  speech runs straight into music (six pairs, 18 cells) 0.5 puts the
+  speech's last 13.2 frames in CELT in the mean at 0.93 times the error
+  of the same speech alone (worst 1.02), and the music starts in CELT at
+  1.00 times its own start, where without the rule 27.6 of its first 30
+  frames are SILK or hybrid at 2.14 times (worst 4.69). Music into speech
+  is the same with and without it. On steady speech (1,444 utterances and
+  ten 60 s items, 200,677 frames at each of 12, 16, 24, 32 and 48 kbps)
+  it moves no frame. Music that the history calls speech it moves to CELT
+  sooner: three corpus tracks gain 26 to 51 CELT frames at 0.68 to 0.95
+  times the error.
+- Two properties are libopus's own and are kept. SILK or hybrid codes a
+  stationary tone badly wherever the analyser's call is speech: libopus at
+  complexity 10 starts the tonal fixture in hybrid, and at 24 kbps stereo
+  it reaches a 5 ms error of 0.60 and a peak of 0.97 of full scale from a
+  source that peaks at 0.55, as this encoder did to the same figures
+  before it read ahead. And with a second read ahead the analyser still
+  calls 2 of the 20 music tracks (sample07r, sample20r) speech, so they
+  start in SILK or hybrid; libopus at complexity 10 starts 18 of the 20
+  that way.
+- A mode switch is held to libopus's where the reference tools are
+  present: over two bit rate sweeps on four inputs the mode and bandwidth
+  agree on every frame, and the two frames behind each of the 24 switches
+  cost no more than **1.5** times libopus's (measured 1.00). Bytes are not
+  compared. This CELT is not bit-exact with libopus's float build on any
+  stream: at a constant 96 kbps with no switch half to all of the
+  frames differ, the mode and bandwidth on none, the quantised band
+  energies by one fine step at most.
 - Non-negotiable for v1.0: CELT-only is sequencing, not scope fallback.
 
 ### Vorbis

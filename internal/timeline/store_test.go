@@ -1,6 +1,7 @@
 package timeline
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxflow/internal/posixfs"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -283,12 +285,112 @@ func TestOpenSweepsExpired(t *testing.T) {
 	}
 }
 
+// TestOpenSweepsTemps: a temp a crashed write left behind goes at open, in
+// both spellings a timeline has been staged under, and the timelines beside
+// them stay.
+func TestOpenSweepsTemps(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := s.Put(members("a.flac"), later())
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := Digest(members("b.flac"))
+	if name := filepath.Base(s.path(digest)); posixfs.IsTemp(name) {
+		t.Fatalf("a timeline is published as %s, which reads as a temp", name)
+	}
+	temps := []string{
+		digest + docExt + ".tmp",
+		other + docExt + ".tmp",
+		digest + docExt + ".tmp-0123456789abcdef",
+		other + docExt + ".tmp-fedcba9876543210",
+	}
+	for _, name := range temps {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("torn"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	reopened, err := Open(dir, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range temps {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s survived open: %v", name, err)
+		}
+	}
+	got, err := reopened.Members(digest)
+	if err != nil || !slices.Equal(got, members("a.flac")) {
+		t.Errorf("the stored timeline after open = %v (%v), want it intact", got, err)
+	}
+}
+
 // TestEvictionIsLeastRecentlyUsed pins the backstop's order. Eviction only
 // fires under pathological growth, and there the entry worth keeping is the
-// one a session is still reading, not the one minted most recently: touching
-// on every read is what makes that distinction exist.
+// one a session is still using, not the one minted most recently: a read, a
+// Touch and a Put of a held timeline each count as a use.
 func TestEvictionIsLeastRecentlyUsed(t *testing.T) {
-	s, err := Open(t.TempDir(), Options{MaxEntries: 2})
+	for name, use := range map[string]func(s *Store, a string, exp time.Time) error{
+		"a read": func(s *Store, a string, _ time.Time) error {
+			_, err := s.Members(a)
+			return err
+		},
+		"a Touch": func(s *Store, a string, exp time.Time) error {
+			s.Touch(a, exp)
+			return nil
+		},
+		// The same expiry, so the store holds it already and writes nothing.
+		"a Put of a held timeline": func(s *Store, a string, exp time.Time) error {
+			again, err := s.Put(members("a.flac"), exp)
+			if err == nil && again != a {
+				err = fmt.Errorf("the second Put minted %s, want %s", again, a)
+			}
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, err := Open(t.TempDir(), Options{MaxEntries: 2})
+			if err != nil {
+				t.Fatal(err)
+			}
+			exp := later()
+			a, err := s.Put(members("a.flac"), exp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := s.Put(members("b.flac"), later())
+			if err != nil {
+				t.Fatal(err)
+			}
+			// a is the oldest by mint order; using it makes b the oldest by use.
+			if err := use(s, a, exp); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Put(members("c.flac"), later()); err != nil {
+				t.Fatal(err)
+			}
+			// b first: reading a would itself be a use.
+			if _, err := s.Members(b); waxerr.CodeOf(err) != waxerr.CodeNotFound {
+				t.Errorf("the least recently used timeline survived eviction: %v", err)
+			}
+			if _, err := s.Members(a); err != nil {
+				t.Errorf("the store evicted the timeline a session was using: %v", err)
+			}
+			if n := s.Entries(); n != 2 {
+				t.Errorf("the store holds %d timelines, want its 2-entry cap", n)
+			}
+		})
+	}
+}
+
+// TestEvictionRemovesTheFile: an evicted timeline leaves the disk with the
+// index, or the store dir would grow past the cap it enforces.
+func TestEvictionRemovesTheFile(t *testing.T) {
+	s, err := Open(t.TempDir(), Options{MaxEntries: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,21 +402,52 @@ func TestEvictionIsLeastRecentlyUsed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// a is the oldest by mint order; reading it makes b the oldest by use.
-	if _, err := s.Members(a); err != nil {
+	if _, err := os.Stat(s.path(a)); !os.IsNotExist(err) {
+		t.Errorf("the evicted timeline's file is still there (stat: %v)", err)
+	}
+	if _, err := os.Stat(s.path(b)); err != nil {
+		t.Errorf("the stored timeline's file: %v", err)
+	}
+}
+
+// TestOpenKeepsEntriesOverTheCapUntilAPut: a restart has no use order to
+// evict by, so Open holds everything unexpired and the first new Put brings
+// the store back to its cap, files included. After a restart the entries
+// stand in directory order until they are used.
+func TestOpenKeepsEntriesOverTheCapUntilAPut(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, Options{MaxEntries: 4})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Put(members("c.flac"), later()); err != nil {
+	for _, ref := range []string{"a.flac", "b.flac", "c.flac", "d.flac"} {
+		if _, err := s.Put(members(ref), later()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, err = Open(dir, Options{MaxEntries: 2})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Members(a); err != nil {
-		t.Fatalf("the store evicted the timeline a session was reading: %v", err)
+	if n := s.Entries(); n != 4 {
+		t.Fatalf("the reopened store holds %d timelines, want all 4", n)
 	}
-	if _, err := s.Members(b); waxerr.CodeOf(err) != waxerr.CodeNotFound {
-		t.Fatalf("the least recently used timeline survived eviction: %v", err)
+	e, err := s.Put(members("e.flac"), later())
+	if err != nil {
+		t.Fatal(err)
 	}
 	if n := s.Entries(); n != 2 {
-		t.Fatalf("the store holds %d timelines, want its 2-entry cap", n)
+		t.Fatalf("the store holds %d timelines after a Put, want its 2-entry cap", n)
+	}
+	if _, err := s.Members(e); err != nil {
+		t.Errorf("the timeline just stored was evicted: %v", err)
+	}
+	docs, err := filepath.Glob(filepath.Join(dir, "*"+docExt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 2 {
+		t.Errorf("%d timeline files on disk, want 2", len(docs))
 	}
 }
 

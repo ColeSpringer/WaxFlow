@@ -53,8 +53,10 @@ type celtEncoder struct {
 	// CELT_SET_SILK_INFO, analysis mirrors CELT_SET_ANALYSIS (cleared by
 	// Reset like the reference's post-ENCODER_RESET_START region, so
 	// mode-transition frames encode analyser-less exactly as libopus does).
-	disablePF          bool
-	forceIntra         bool
+	disablePF  bool
+	forceIntra bool
+	// calls, when a test sets it, takes the settings of every frame coded.
+	calls              *[]celtCall
 	silkInfoSignalType int
 	silkInfoOffset     int
 	analysis           analysisInfo
@@ -239,11 +241,20 @@ func (e *celtEncoder) celtEncode(pcm [][]float32, N, LM, C, start, end, nbBytes 
 	return enc.payload()[:n]
 }
 
+// celtCall is the settings one CELT frame was coded under.
+type celtCall struct {
+	n, start       int
+	intra, noPitch bool
+}
+
 // celtEncodeWithEC encodes one frame into enc, which may already carry SILK
 // data (the hybrid stitch; libopus celt_encode_with_ec with an external
 // ec_enc). nbBytes is the total packet budget including any bits already in
 // enc. It finalizes enc and returns the compressed size in bytes.
 func (e *celtEncoder) celtEncodeWithEC(pcm [][]float32, N, LM, C, start, end int, enc *rangeEncoder, nbBytes int) int {
+	if e.calls != nil {
+		*e.calls = append(*e.calls, celtCall{N, start, e.forceIntra, e.disablePF})
+	}
 	M := 1 << LM
 	overlap := e.overlap
 	nb := celtNBands

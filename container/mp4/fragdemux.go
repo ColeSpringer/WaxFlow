@@ -24,7 +24,7 @@ import (
 // our own muxer writes) routes through the normal driver sniff and the
 // fragmented branch in parse(); a bare media segment (moof+mdat, no ftyp/moov)
 // is reachable only through NewFragmentedDemuxer with an out-of-band init
-// segment, which is what the HLS client uses. A bare segment has no magic to
+// segment, as the tests' HLS client does. A bare segment has no magic to
 // sniff, so it is deliberately not a drivers row.
 
 // Fragmented-input caps (the ADR-0005 hostile-input invariants).
@@ -194,7 +194,7 @@ func (d *Demuxer) fragmentedLength(t *track) (delay, samples int64, exact, advis
 // (ffmpeg writes 45056 for the 44 AUs in the moov of a six-second file), so a
 // header duration beside a table is ignored outright. And a bare segment source
 // gets no length from its init at all: the init describes a presentation, the
-// source holds one piece of it, and the caller (the HLS client) owns the
+// source holds one piece of it, and the caller (an HLS client) owns the
 // length of what it assembled.
 func (d *Demuxer) headerDuration(t *track) (samples int64, box string) {
 	if d.bareSegments || t.st.total > 0 {
@@ -218,7 +218,7 @@ func (d *Demuxer) headerDuration(t *track) (samples int64, box string) {
 
 // NewFragmentedDemuxer reads a bare CMAF/HLS media segment (moof+mdat with no
 // ftyp/moov) using an out-of-band init segment for the codec config, sample
-// entry, mvex defaults, and edit list. The HLS client calls it with the init it
+// entry, mvex defaults, and edit list. An HLS client calls it with the init it
 // fetched from the playlist's EXT-X-MAP; the media Source holds one or more
 // concatenated media segments. A bare segment has no magic to sniff, so it is
 // not in the drivers table and `probe segment.m4s` is not expected to work.

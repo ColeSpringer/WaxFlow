@@ -16,10 +16,10 @@ import (
 // state, while a genuine seek restarts immediately.
 const DefaultLookahead = 3
 
-// defaultWaitTimeout bounds one Segment call's total wait. Encoding runs
+// DefaultWaitTimeout bounds one Segment call's total wait. Encoding runs
 // well above realtime, so a segment not materializing within this is a
 // wedged worker, and erroring beats holding the client forever.
-const defaultWaitTimeout = 60 * time.Second
+const DefaultWaitTimeout = 60 * time.Second
 
 // Ops are the per-variant callbacks the server supplies to Segment. The
 // same key must always arrive with equivalent Ops.
@@ -47,7 +47,7 @@ var ErrIdle = errors.New("hls: nobody fetched from the variant")
 type Manager struct {
 	// Lookahead overrides DefaultLookahead when positive.
 	Lookahead int64
-	// WaitTimeout overrides defaultWaitTimeout when positive.
+	// WaitTimeout overrides DefaultWaitTimeout when positive.
 	WaitTimeout time.Duration
 	// IdleTimeout cancels a worker once nobody has fetched from its variant
 	// for this long, cache hits included (see Touch); 0 lets every worker
@@ -93,7 +93,7 @@ func (m *Manager) Segment(ctx context.Context, key string, n int64, ops Ops) err
 	}
 	timeout := m.WaitTimeout
 	if timeout <= 0 {
-		timeout = defaultWaitTimeout
+		timeout = DefaultWaitTimeout
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -344,6 +344,17 @@ func waitSignal(ctx context.Context, ch <-chan struct{}) error {
 		}
 		return waxerr.Wrap(waxerr.CodeCanceled, "hls: canceled waiting for a segment", ctx.Err())
 	}
+}
+
+// Waiters reports the number of Segment calls in flight (tests).
+func (m *Manager) Waiters() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, v := range m.variants {
+		n += v.waiters
+	}
+	return n
 }
 
 // Variants reports the number of tracked variants (tests and metrics).

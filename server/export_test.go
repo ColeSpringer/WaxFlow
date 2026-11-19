@@ -5,9 +5,9 @@ import (
 	"context"
 	"io"
 	"os"
-	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
@@ -51,10 +51,74 @@ func (s *Server) GatePipelineDst(wrap func(io.Writer) io.Writer) { s.hooks.pipel
 // to the entry the flight returned. Set it before the first request.
 func (s *Server) GateAfterFlight(gate func()) { s.hooks.afterFlight = gate }
 
-// GateHLSPublish runs gate before a variant worker publishes segment n. ctx is
-// the worker's, so a gate can release a canceled worker. Set it before the
-// first request.
+// GateHLSPublish runs gate before a variant worker publishes segment n, and
+// before a request that made n for itself keeps it. ctx is the run's, so a
+// gate can release a canceled one. Set it before the first request.
 func (s *Server) GateHLSPublish(gate func(ctx context.Context, n int64)) { s.hooks.hlsPublish = gate }
+
+// HLSUncachedTurns reports how many variants have a turn at an uncached
+// segment, and how many requests hold or wait for one.
+func (s *Server) HLSUncachedTurns() (variants, requests int) {
+	s.hlsUncached.mu.Lock()
+	defer s.hlsUncached.mu.Unlock()
+	for _, turn := range s.hlsUncached.keys {
+		requests += turn.waiting
+	}
+	return len(s.hlsUncached.keys), requests
+}
+
+// SetHLSWaitTimeout bounds a segment request's wait, for a worker or for
+// its turn at an uncached segment. Set it before the first request.
+func (s *Server) SetHLSWaitTimeout(d time.Duration) { s.hlsMgr.WaitTimeout = d }
+
+// HLSProbeEvery is how often a variant known to refuse writes is tried.
+const HLSProbeEvery = hlsProbeEvery
+
+// SetHLSClock sets the clock a variant known to refuse writes is probed by.
+// Set it before the first request.
+func (s *Server) SetHLSClock(now func() time.Time) { s.hlsBroken.now = now }
+
+// SetHLSProbeWait bounds a probe of a variant known to refuse writes. Set
+// it before the first request.
+func (s *Server) SetHLSProbeWait(d time.Duration) { s.hlsBroken.wait = d }
+
+// HLSWaiters reports the segment requests waiting on the session manager.
+func (s *Server) HLSWaiters() int { return s.hlsMgr.Waiters() }
+
+// SetHLSProbeDeadline replaces what makes a probe's context from its
+// request's and its bound. Set it before the first request.
+func (s *Server) SetHLSProbeDeadline(deadline func(context.Context, time.Duration) (context.Context, context.CancelFunc)) {
+	s.hlsBroken.deadline = deadline
+}
+
+// SetHLSBrokenMax sets how many variants known to refuse writes are
+// remembered. Set it before the first request.
+func (s *Server) SetHLSBrokenMax(n int) { s.hlsBroken.max = n }
+
+// GateHLSPublished runs gate after a variant worker has written segment n
+// and before it says so. Set it before the first request.
+func (s *Server) GateHLSPublished(gate func(ctx context.Context, n int64)) {
+	s.hooks.hlsPublished = gate
+}
+
+// HLSBrokenVariants reports how many variants are known to refuse writes.
+func (s *Server) HLSBrokenVariants() int {
+	s.hlsBroken.mu.Lock()
+	defer s.hlsBroken.mu.Unlock()
+	if s.hlsBroken.seen == nil {
+		return 0
+	}
+	return s.hlsBroken.seen.Len()
+}
+
+// HLSInitUncached is the log line of an init header served with no cache.
+const HLSInitUncached = hlsInitUncached
+
+// HLSProbeGivenUp is the log line of a probe given up at its bound.
+const HLSProbeGivenUp = hlsProbeGivenUp
+
+// HLSServedUncached is the log line of a segment made for one request.
+const HLSServedUncached = hlsServedUncached
 
 // OnKey reports every cache key as it is built: the surface, the ladder rung
 // taken, and the identity, canonical parameter string and version terms it
@@ -84,7 +148,7 @@ func (s *Server) Metrics() *metrics.Metrics { return s.met }
 // It returns the gapless length a read of the file delivers.
 func MidTrimWebM(t *testing.T, path string, declareLength bool) int64 {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "container", "mka", "testdata", "seed-opus.webm"))
+	raw, err := os.ReadFile(testutil.PkgFile("..", "container", "mka", "testdata", "seed-opus.webm"))
 	if err != nil {
 		t.Fatal(err)
 	}

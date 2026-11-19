@@ -2,10 +2,10 @@ package server
 
 import (
 	"context"
-	"math"
 	"sync"
 
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/lru"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -37,8 +37,7 @@ const trackCacheCap = 4096
 // library-wide sweep must not push a live session's track out of the memo.
 type trackCache struct {
 	mu      sync.Mutex
-	entries map[string]*trackEntry
-	clock   int64
+	entries *lru.Cache[string, *trackEntry]
 }
 
 type trackEntry struct {
@@ -49,7 +48,10 @@ type trackEntry struct {
 	// probe on the path this exists to keep off the wire. Read-only by
 	// contract, like format.Info's own map.
 	tags map[string][]string
-	used int64 // clock value at last access; the LRU order
+}
+
+func newTrackCache() *trackCache {
+	return &trackCache{entries: lru.New[string, *trackEntry](trackCacheCap)}
 }
 
 func (c *trackCache) get(key string) (container.Track, bool) {
@@ -60,12 +62,10 @@ func (c *trackCache) get(key string) (container.Track, bool) {
 func (c *trackCache) getWithTags(key string) (container.Track, map[string][]string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	e, ok := c.entries[key]
+	e, ok := c.entries.Get(key)
 	if !ok {
 		return container.Track{}, nil, false
 	}
-	c.clock++
-	e.used = c.clock
 	return e.track, e.tags, true
 }
 
@@ -82,44 +82,17 @@ func (c *trackCache) getWithTags(key string) (container.Track, map[string][]stri
 func (c *trackCache) put(key string, t container.Track, tags map[string][]string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.entries == nil {
-		c.entries = make(map[string]*trackEntry, trackCacheCap)
-	}
-	if e, exists := c.entries[key]; exists {
-		if e.track.SamplesExact && !t.SamplesExact {
-			// The advisory write loses the track, but not the tags: they do
-			// not differ between an exact probe and an advisory one, and the
-			// kept entry may have been written before this file grew any.
-			if len(e.tags) == 0 {
-				e.tags = tags
-			}
-			return
+	// Peek: the write that loses is not a use of the entry.
+	if e, exists := c.entries.Peek(key); exists && e.track.SamplesExact && !t.SamplesExact {
+		// The advisory write loses the track, but not the tags: they do
+		// not differ between an exact probe and an advisory one, and the
+		// kept entry may have been written before this file grew any.
+		if len(e.tags) == 0 {
+			e.tags = tags
 		}
-	} else if len(c.entries) >= trackCacheCap {
-		c.evictOldestLocked()
+		return
 	}
-	c.clock++
-	c.entries[key] = &trackEntry{track: t, tags: tags, used: c.clock}
-}
-
-// evictOldestLocked drops the least recently used entry: a linear scan, run
-// only on insert at capacity. The scan is microseconds against a miss that
-// costs a probe at best and a full decode at worst, so it is not worth a heap.
-func (c *trackCache) evictOldestLocked() {
-	var oldest string
-	var found bool
-	minUsed := int64(math.MaxInt64)
-	for k, e := range c.entries {
-		// found, not oldest != "": an empty key is a legal map key, so the
-		// zero value cannot double as "nothing selected". Identities are never
-		// empty today, which is exactly what would make the bug silent.
-		if !found || e.used < minUsed {
-			minUsed, oldest, found = e.used, k, true
-		}
-	}
-	if found {
-		delete(c.entries, oldest)
-	}
+	c.entries.Put(key, &trackEntry{track: t, tags: tags})
 }
 
 // trackFor returns src's default track, probed and (as exact requires)

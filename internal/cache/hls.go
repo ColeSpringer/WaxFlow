@@ -51,13 +51,8 @@ func (s *Store) HLS(key Key, meta Meta) (*Variant, error) {
 	if err != nil {
 		return nil, err
 	}
-	tmp := filepath.Join(dir, fmt.Sprintf("meta.json.tmp-%d", s.tmpSeq.Add(1)))
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	if err := posixfs.WriteFile(filepath.Join(dir, "meta.json"), b, 0o644); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "cache: writing variant meta", err)
-	}
-	if err := posixfs.Replace(tmp, filepath.Join(dir, "meta.json")); err != nil {
-		os.Remove(tmp)
-		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "cache: publishing variant meta", err)
 	}
 
 	// Registering with size 0 and growing per file keeps the eviction
@@ -73,9 +68,10 @@ func (s *Store) HLS(key Key, meta Meta) (*Variant, error) {
 
 // validName rejects anything but the flat file names the HLS layout uses;
 // the handlers build names from parsed integers, so a violation is a
-// wiring bug, not hostile input.
+// wiring bug, not hostile input. A temp's name is refused too: the boot
+// scan would sweep the file.
 func validName(name string) error {
-	if name == "" || name == "meta.json" || strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
+	if name == "" || name == "meta.json" || strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") || posixfs.IsTemp(name) {
 		return waxerr.New(waxerr.CodeInternal, fmt.Sprintf("cache: invalid variant file name %q", name))
 	}
 	return nil
@@ -104,13 +100,8 @@ func (v *Variant) WriteFile(name string, data []byte) error {
 	if fi, err := os.Stat(final); err == nil {
 		prev = fi.Size()
 	}
-	tmp := filepath.Join(v.dir, fmt.Sprintf("%s.tmp-%d", name, v.s.tmpSeq.Add(1)))
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := posixfs.WriteFile(final, data, 0o644); err != nil {
 		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "cache: writing variant file", err)
-	}
-	if err := posixfs.Replace(tmp, final); err != nil {
-		os.Remove(tmp)
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "cache: publishing variant file", err)
 	}
 
 	s := v.s
@@ -161,11 +152,17 @@ func (v *Variant) Open(name string) (*Cached, bool) {
 		s.misses.Add(1)
 		return nil, false
 	}
+	fi, err := f.Stat()
+	if err == nil && !fi.Mode().IsRegular() {
+		// Has takes a regular file alone for a cached one, and so does this.
+		f.Close()
+		s.misses.Add(1)
+		return nil, false
+	}
 	if stale {
 		os.Chtimes(filepath.Join(v.dir, "meta.json"), now, now)
 	}
 	s.hits.Add(1)
-	fi, err := f.Stat()
 	mod := meta.CreatedAt
 	if err == nil {
 		mod = fi.ModTime()

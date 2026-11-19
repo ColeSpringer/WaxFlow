@@ -39,13 +39,15 @@ func Replace(tmpName, target string) error {
 			rename = func() error { return root.Rename(filepath.Base(tmpName), filepath.Base(target)) }
 		}
 	}
+	return retry(rename)
+}
+
+// retry runs op until it succeeds, fails for good, or the backoff runs out.
+func retry(op func() error) error {
 	var err error
 	delay := initialDelay
 	for attempt := range attempts {
-		if err = rename(); err == nil {
-			return nil
-		}
-		if !retryable(err) {
+		if err = op(); err == nil || !retryable(err) {
 			return err
 		}
 		if attempt < attempts-1 {
@@ -56,6 +58,12 @@ func Replace(tmpName, target string) error {
 	return err
 }
 
+// remove deletes path over the backoff Replace uses: the hold that blocks a
+// rename of a just-closed file blocks its removal too.
+func remove(path string) {
+	retry(func() error { return os.Remove(path) })
+}
+
 // retryable reports whether a failed rename is worth another attempt.
 // Anything but a transient handle must surface at once, not after the full
 // backoff.
@@ -63,10 +71,9 @@ func retryable(err error) bool {
 	return errors.Is(err, syscall.ERROR_ACCESS_DENIED) || errors.Is(err, errnoSharingViolation)
 }
 
-// Create creates path exclusively for read-write (O_RDWR|O_CREATE|O_EXCL
-// semantics) with delete sharing, so the file can be renamed or unlinked
-// while this handle is open.
-func Create(path string) (*os.File, error) {
+// create shares delete, so the file can be renamed or unlinked while this
+// handle is open. Windows files carry no mode.
+func create(path string, _ os.FileMode) (*os.File, error) {
 	return sharedFile(path, syscall.GENERIC_READ|syscall.GENERIC_WRITE, syscall.CREATE_NEW)
 }
 

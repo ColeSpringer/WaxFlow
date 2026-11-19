@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -351,6 +353,69 @@ func TestEnvVarsNamesEveryKnob(t *testing.T) {
 	for _, want := range []string{"WAXFLOW_ADDR", "WAXFLOW_PID_LOOKUP_URL", "WAXFLOW_PID_LOOKUP_KEY"} {
 		if !slices.Contains(names, want) {
 			t.Errorf("EnvVars() lacks %s", want)
+		}
+	}
+}
+
+// The loader's own text names no part of the config file, given absolute
+// or relative, so whatever hands it on cannot leak it.
+func TestLoadNamesNoPath(t *testing.T) {
+	dir := t.TempDir()
+	testutil.Chdir(t, dir)
+	for _, fault := range []struct {
+		name string
+		body string // empty: no file
+		code waxerr.Code
+	}{
+		{"malformed JSON", `{"roots": [`, waxerr.CodeInvalidRequest},
+		{"trailing data", `{} {}`, waxerr.CodeInvalidRequest},
+		{"a byte that is not UTF-8", "{\"addr\": \"\xff\"}", waxerr.CodeInvalidRequest},
+		{"missing", "", waxerr.CodeNotFound},
+	} {
+		for spelling, path := range map[string]string{"absolute": filepath.Join(dir, "waxflow.json"), "relative": "waxflow.json"} {
+			t.Run(fault.name+"/"+spelling, func(t *testing.T) {
+				os.Remove(path)
+				if fault.body != "" {
+					if err := os.WriteFile(path, []byte(fault.body), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				_, err := Load(path, envMap(nil))
+				if waxerr.CodeOf(err) != fault.code {
+					t.Fatalf("Load = %v, want %s", err, fault.code)
+				}
+				for _, part := range []string{path, dir, "waxflow.json"} {
+					if strings.Contains(err.Error(), part) {
+						t.Errorf("Load's error %q names %q of the config file", err, part)
+						break
+					}
+				}
+			})
+		}
+	}
+}
+
+// A refused lookup URL is shown to the CLI's user and the daemon's log
+// without its user information, query or fragment: a secret rides there.
+func TestARefusedLookupURLShowsNoSecret(t *testing.T) {
+	for _, raw := range []string{
+		"ftp://user:s3cret@deck/pid?token=s3cret",
+		"http://user:s3cret@/pid",
+		"ftp://s3cret@deck/pid",
+		"http://deck/pid?token=s3cret#s3cret",
+	} {
+		_, err := Load("", envMap(map[string]string{"WAXFLOW_PID_LOOKUP_URL": raw}))
+		if waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+			t.Fatalf("%s: Load = %v, want invalid-request", raw, err)
+		}
+		named, logged := Named(err).Error(), fmt.Sprint(LogAttrs(err))
+		for _, shown := range []string{named, logged} {
+			if strings.Contains(shown, "s3cret") || strings.Contains(shown, "token") {
+				t.Errorf("%s is shown as %q", raw, shown)
+			}
+		}
+		if !strings.Contains(logged, "deck") && !strings.Contains(logged, "/pid") {
+			t.Errorf("%s: the log shows %q, which names no URL", raw, logged)
 		}
 	}
 }

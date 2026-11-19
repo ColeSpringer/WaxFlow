@@ -39,17 +39,17 @@ func (c *memIndexCache) Drop(src container.Source) { delete(c.blobs, c.key(src))
 func TestTimelineJobGateAsksTheFile(t *testing.T) {
 	root := t.TempDir()
 	for _, f := range []struct{ src, dst string }{
-		{filepath.Join("..", "testdata", "sine-s16.wav"), "pcm.wav"},
-		{filepath.Join("..", "container", "riff", "testdata", "mp3.wav"), "mp3.wav"},
-		{filepath.Join("..", "testdata", "sine-ima.wav"), "ima-nofact.wav"},
-		{filepath.Join("..", "container", "adts", "testdata", "stereo.aac"), "stereo.aac"},
-		{filepath.Join("..", "container", "mka", "testdata", "seed-pcm.mka"), "pcm.mka"},
-		{filepath.Join("..", "container", "mka", "testdata", "seed-cues.mka"), "cues.mka"},
-		{filepath.Join("..", "testdata", "sine-s16.wma"), "sine.wma"},
-		{filepath.Join("..", "container", "asf", "testdata", "ms-v2-44100-2ch-128k.wma"), "ms.wma"},
-		{filepath.Join("..", "container", "asf", "testdata", "pro-s16.wma"), "pro.wma"},
-		{filepath.Join("..", "container", "mp4", "testdata", "alac-stereo.m4a"), "prog.m4a"},
-		{filepath.Join("..", "container", "mp4", "testdata", "ima4-frag.mov"), "frag.mov"},
+		{testutil.PkgFile("..", "testdata", "sine-s16.wav"), "pcm.wav"},
+		{testutil.PkgFile("..", "container", "riff", "testdata", "mp3.wav"), "mp3.wav"},
+		{testutil.PkgFile("..", "testdata", "sine-ima.wav"), "ima-nofact.wav"},
+		{testutil.PkgFile("..", "container", "adts", "testdata", "stereo.aac"), "stereo.aac"},
+		{testutil.PkgFile("..", "container", "mka", "testdata", "seed-pcm.mka"), "pcm.mka"},
+		{testutil.PkgFile("..", "container", "mka", "testdata", "seed-cues.mka"), "cues.mka"},
+		{testutil.PkgFile("..", "testdata", "sine-s16.wma"), "sine.wma"},
+		{testutil.PkgFile("..", "container", "asf", "testdata", "ms-v2-44100-2ch-128k.wma"), "ms.wma"},
+		{testutil.PkgFile("..", "container", "asf", "testdata", "pro-s16.wma"), "pro.wma"},
+		{testutil.PkgFile("..", "container", "mp4", "testdata", "alac-stereo.m4a"), "prog.m4a"},
+		{testutil.PkgFile("..", "container", "mp4", "testdata", "ima4-frag.mov"), "frag.mov"},
 	} {
 		b, err := os.ReadFile(f.src)
 		if err != nil {
@@ -73,7 +73,7 @@ func TestTimelineJobGateAsksTheFile(t *testing.T) {
 	}
 	defer roots.Close()
 	cache := &memIndexCache{blobs: map[string][]byte{}}
-	s := &Server{eng: waxflow.New(waxflow.WithIndexCache(cache)), resolver: roots}
+	s := &Server{eng: waxflow.New(waxflow.WithIndexCache(cache)), resolver: roots, trackCache: newTrackCache()}
 
 	resolve := func(ref string) *source.File {
 		t.Helper()

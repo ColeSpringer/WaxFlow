@@ -2,34 +2,29 @@ package jobs
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/colespringer/waxflow/format"
+	"github.com/colespringer/waxflow/source"
 )
 
-var errWalk = errors.New("walked")
-
-// capableMedia answers every capability a wrapper forwards, each with an
-// answer no Media without it gives.
-type capableMedia struct{ format.Media }
-
-func (capableMedia) Walk(context.Context) error                          { return errWalk }
-func (capableMedia) Walked() bool                                        { return false }
-func (capableMedia) MeasureSamples(context.Context) (int64, bool, error) { return 7, true, nil }
-func (capableMedia) MixedWidth() bool                                    { return true }
-func (capableMedia) Headroom() int64                                     { return 5 }
-
-// TestClosingMediaForwardsEveryCapability: every capability of the Media a wrapper holds
-// answers through it.
-func TestClosingMediaForwardsEveryCapability(t *testing.T) {
+// TestMemberMediaKeepsTheFilesWalk: a merge member's Media answers for the
+// walk its file defers, where a wrapper that dropped it would say done.
+func TestMemberMediaKeepsTheFilesWalk(t *testing.T) {
+	const name = "sine-cbr128.mp3"
+	root := t.TempDir()
+	copyFixture(t, root, name)
+	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: openRoots(t, root)})
 	ctx := context.Background()
-	inner := format.Forwarder{Media: capableMedia{}}
-	for _, med := range []format.Media{closingMedia{Forwarder: inner}} {
-		n, ok, err := format.MeasureMedia(ctx, med)
-		if format.WalkMedia(ctx, med) != errWalk || format.MediaWalked(med) || n != 7 || !ok || err != nil ||
-			!format.MediaMixedWidth(med) || format.MediaHeadroom(med) != 5 {
-			t.Errorf("%T drops a capability of the Media it wraps", med)
-		}
+	med, err := r.openMemberMedia(ctx, "", Request{Srcs: []source.Ref{"lib/" + name}}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer med.Close()
+	if format.MediaWalked(med) {
+		t.Fatal("a freshly opened MP3 member reads as walked")
+	}
+	if err := format.WalkMedia(ctx, med); err != nil || !format.MediaWalked(med) {
+		t.Errorf("after Walk = %v the member reads walked %v, want nil and true", err, format.MediaWalked(med))
 	}
 }

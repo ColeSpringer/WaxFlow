@@ -346,17 +346,17 @@ func keyEnv(t *testing.T) (*testEnv, *keyLog) {
 		}
 		return b
 	}
-	put("sine-s24.flac", read("..", "testdata", "sine-s24.flac"))
-	put("sine-f32.wav", read("..", "testdata", "sine-f32.wav"))
-	put("sine-5_1.flac", read("..", "testdata", "sine-5_1-s16.flac"))
-	put("book.m4b", read("..", "testdata", "golden", "m4b-chapters.m4b"))
-	put("he.aac", read("..", "container", "adts", "testdata", "golden-heaac-implicit.aac"))
-	put("sine.wv", read("..", "testdata", "sine-s16.wv"))
-	put("sine.oga", read("..", "testdata", "sine-s16.oga"))
-	put("sine.opus", read("..", "container", "ogg", "testdata", "golden-opus.opus"))
-	put("sine.ogg", read("..", "container", "ogg", "testdata", "golden-vorbis.ogg"))
-	put("sine.wma", read("..", "testdata", "sine-s16.wma"))
-	put("pro.wma", read("..", "container", "asf", "testdata", "pro-s16.wma"))
+	put("sine-s24.flac", read(testutil.PkgFile("..", "testdata", "sine-s24.flac")))
+	put("sine-f32.wav", read(testutil.PkgFile("..", "testdata", "sine-f32.wav")))
+	put("sine-5_1.flac", read(testutil.PkgFile("..", "testdata", "sine-5_1-s16.flac")))
+	put("book.m4b", read(testutil.PkgFile("..", "testdata", "golden", "m4b-chapters.m4b")))
+	put("he.aac", read(testutil.PkgFile("..", "container", "adts", "testdata", "golden-heaac-implicit.aac")))
+	put("sine.wv", read(testutil.PkgFile("..", "testdata", "sine-s16.wv")))
+	put("sine.oga", read(testutil.PkgFile("..", "testdata", "sine-s16.oga")))
+	put("sine.opus", read(testutil.PkgFile("..", "container", "ogg", "testdata", "golden-opus.opus")))
+	put("sine.ogg", read(testutil.PkgFile("..", "container", "ogg", "testdata", "golden-vorbis.ogg")))
+	put("sine.wma", read(testutil.PkgFile("..", "testdata", "sine-s16.wma")))
+	put("pro.wma", read(testutil.PkgFile("..", "container", "asf", "testdata", "pro-s16.wma")))
 	// A line holds no byte of these two, only the depth and the gain they
 	// carry, so an encoder change does not move it. The gain rides an MP4
 	// because that is a container whose tags the demuxer hands back.
@@ -368,7 +368,7 @@ func keyEnv(t *testing.T) (*testEnv, *keyLog) {
 		}
 		return ws.Buf
 	}
-	put("sine-s20.flac", encode(read("..", "testdata", "sine-s24.wav"),
+	put("sine-s20.flac", encode(read(testutil.PkgFile("..", "testdata", "sine-s24.wav")),
 		waxflow.TranscodeOptions{Format: "flac", BitDepth: 20}))
 	put("gained.m4a", encode(read(env.root, "sine.wav"), waxflow.TranscodeOptions{Format: "aac", Tags: []container.Tag{
 		{Key: "REPLAYGAIN_TRACK_GAIN", Value: "-6.00 dB"},
@@ -483,7 +483,7 @@ func TestGoldenCacheKeys(t *testing.T) {
 	if t.Failed() {
 		return
 	}
-	testutil.GoldenText(t, filepath.Join("testdata", "golden", "cache-keys.txt"), []byte(out.String()), *update,
+	testutil.GoldenText(t, testutil.PkgFile("testdata", "golden", "cache-keys.txt"), []byte(out.String()), *update,
 		"a cache key moved: entries under the old key are orphaned, and requests that now share a key share bytes.\n"+
 			"If the change says it moves these lines, run `make goldens` and review the diff line by line.")
 }

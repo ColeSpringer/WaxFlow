@@ -4,11 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/colespringer/waxflow/internal/posixfs"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // IdxStore is the source-index sidecar cache: probe
@@ -19,11 +19,10 @@ import (
 // rename) so a crash cannot leave a torn blob that parses.
 //
 // The store is shared across request goroutines through the one Engine,
-// so writes serialize under mu: concurrent Saves for the same identity
-// would otherwise interleave on the same temp file and rename a torn
-// blob into place. Load stays lock-free on purpose: rename is atomic, so
-// a reader sees either the old or the new complete blob, and a read
-// racing trim's removal just misses.
+// so writes serialize under mu: it guards the byte total, and it is what
+// lets trim treat every temp file as debris. Load stays lock-free on
+// purpose: rename is atomic, so a reader sees either the old or the new
+// complete blob, and a read racing trim's removal just misses.
 type IdxStore struct {
 	mu       sync.Mutex
 	dir      string
@@ -43,6 +42,11 @@ const maxIdxBlob = 32 << 20
 
 // OpenIdx opens (creating if needed) the sidecar store under dir.
 func OpenIdx(dir string, maxBytes int64) (*IdxStore, error) {
+	// Absolute, as the cache's own directory is.
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeInternal, "cache: resolving idx dir", err)
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -95,13 +99,7 @@ func (s *IdxStore) Save(identity string, blob []byte) {
 	if fi, err := os.Stat(path); err == nil {
 		old = fi.Size()
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, blob, 0o644); err != nil {
-		os.Remove(tmp)
-		return
-	}
-	if err := posixfs.Replace(tmp, path); err != nil {
-		os.Remove(tmp)
+	if err := posixfs.WriteFile(path, blob, 0o644); err != nil {
 		return
 	}
 	if s.total >= 0 {
@@ -150,7 +148,7 @@ func (s *IdxStore) trim() {
 			continue
 		}
 		path := filepath.Join(s.dir, e.Name())
-		if strings.HasSuffix(e.Name(), ".tmp") || fi.Size() > maxIdxBlob {
+		if posixfs.IsTemp(e.Name()) || fi.Size() > maxIdxBlob {
 			os.Remove(path)
 			continue
 		}

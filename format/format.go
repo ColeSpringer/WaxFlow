@@ -199,17 +199,13 @@ type LengthConfirmer interface {
 	ConfirmLength(ctx context.Context) error
 }
 
-// A wrapper around a Media forwards this only when what it wraps implements
-// it, which is the opposite of the rule for Walker (see WalkMedia) and is not
-// an oversight. Walker's forwarding is safe unconditionally because Walked
-// answers true for a Media that defers nothing, so a wrapper over one reports
-// "already walked" and nothing acts. This interface has no such answer: merely
-// implementing it says there is confirming to do, and a run about to write a
-// header reads that as "do not commit the count". A wrapper that forwarded it
-// blindly would drop the projection from every source underneath it that had
-// nothing to confirm. Nothing in this tree wraps a span today, so nothing
-// forwards it; a wrapper that comes to needs a type assertion on what it wraps
-// rather than a method that always answers.
+// A wrapper around a Media never forwards this, which is the opposite of the
+// rule for Walker (see WalkMedia). Walked answers true for a Media that defers
+// nothing, so a wrapper over one reports "already walked" and nothing acts.
+// This interface has no such answer: merely implementing it says there is
+// confirming to do, and a run about to write a header reads that as "do not
+// commit the count". So a wrapper refuses a Media that implements it, where
+// wrapping would hide it (WithCloser, waxflow.MeasuredMedia).
 
 // WalkMedia runs med's deferred walk under ctx, and nothing when it defers
 // none. MediaWalked reports whether that walk has run, true when there is
@@ -263,7 +259,7 @@ func MeasureMedia(ctx context.Context, med Media) (int64, bool, error) {
 // folded alone would give. waxflow refuses the conversion rather than deliver
 // it (see waxflow.ConcatOptions.Channels), and this is how it asks.
 //
-// Unlike Composite this is forwarded by a wrapper and by a slice: Composite's
+// Unlike Composite this is forwarded by a slice as well as by a wrapper:
 // "what are the members of a span of a timeline" has no right answer, and this
 // one does, since a slice of a mixed-width timeline is still mixed-width
 // samples. Every wrapper that forwards Walked forwards this too.
@@ -415,8 +411,8 @@ func OpenDemuxer(src container.Source, hint string, opts *Options) (container.De
 }
 
 // FromDemuxer wraps an already-opened demuxer into a Media, for sources that
-// are assembled rather than sniffed from one byte stream. The HLS client builds
-// a fragmented-MP4 demuxer over concatenated media segments behind an
+// are assembled rather than sniffed from one byte stream. The tests' HLS client
+// builds a fragmented-MP4 demuxer over concatenated media segments behind an
 // out-of-band init segment, which has no single sniffable Source for Open to
 // resolve; name labels the synthetic container in Info. The decoder wiring,
 // gapless trims, and seek support are identical to Open's.

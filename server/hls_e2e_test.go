@@ -27,6 +27,8 @@ import (
 	"github.com/colespringer/waxflow/client"
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/internal/posixfs"
+	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/m3u8"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -185,6 +187,17 @@ func TestHLSEndToEnd(t *testing.T) {
 	// segment files (leaving the index), refetch. The worker restarts at
 	// segment 0 and must reproduce the bytes exactly.
 	waitForIdle(t, env)
+	// With nothing in flight, what the variant holds is what it published
+	// (its meta, the init, the segments), and none of it reads as a temp.
+	published, err := filepath.Glob(filepath.Join(env.cache, "v1", "*", "*", "*"))
+	if err != nil || len(published) < 2+len(segURIs) {
+		t.Fatalf("the variant published %v (%v), want its meta, init and %d segments", published, err, len(segURIs))
+	}
+	for _, p := range published {
+		if posixfs.IsTemp(filepath.Base(p)) {
+			t.Errorf("the variant publishes %s, which reads as a temp", filepath.Base(p))
+		}
+	}
 	removeSegmentFiles(t, env.cache)
 	for i, uri := range segURIs {
 		resp = keyless(t, env, "/hls/"+uri)
@@ -693,7 +706,7 @@ func TestSingleSegmentTargetDuration(t *testing.T) {
 // transcode rung's mp4a.40.2 while the segments carried AOT-5 packets.
 func TestHLSMasterAdvertisesHECopy(t *testing.T) {
 	env := newTestEnv(t, nil)
-	fixture, err := os.ReadFile(filepath.Join("..", "codec", "aac", "testdata", "fdk_he_v1.m4a"))
+	fixture, err := os.ReadFile(testutil.PkgFile("..", "codec", "aac", "testdata", "fdk_he_v1.m4a"))
 	if err != nil {
 		t.Fatalf("reading the committed HE-AAC fixture: %v", err)
 	}

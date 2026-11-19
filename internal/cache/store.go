@@ -74,6 +74,11 @@ type Store struct {
 // eviction index from the meta.json scan. Directories without a meta.json
 // are abandoned partials from a crash and are deleted.
 func Open(dir string, opts Options) (*Store, error) {
+	// Absolute, so a path an error quotes is one waxerr.Message drops.
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeInternal, "cache: resolving cache dir", err)
+	}
 	s := &Store{
 		dir:          dir,
 		maxBytes:     opts.MaxBytes,
@@ -145,7 +150,9 @@ func (s *Store) scan() error {
 				os.RemoveAll(dir)
 				continue
 			}
-			pruneTemps(dir)
+			// Nothing is in flight at boot, so a temp here is debris: a
+			// write a crash interrupted, or a removal that failed.
+			posixfs.SweepTemps(dir)
 			if meta.Kind == KindHLS {
 				// A variant's size lives in its files, not its meta (born
 				// before its segments).
@@ -156,16 +163,6 @@ func (s *Store) scan() error {
 		}
 	}
 	return nil
-}
-
-// pruneTemps removes the temp files in an entry directory. At boot nothing is
-// in flight, so each is debris: a write a crash interrupted, or a removal that
-// failed at runtime. The published files around them stay valid.
-func pruneTemps(dir string) {
-	matches, _ := filepath.Glob(filepath.Join(dir, "*.tmp-*"))
-	for _, m := range matches {
-		os.Remove(m)
-	}
 }
 
 func readMeta(dir string) (Meta, time.Time, error) {
@@ -309,12 +306,7 @@ func (s *Store) promote(e *Entry, meta *Meta) error {
 	if err != nil {
 		return err
 	}
-	metaTmp := filepath.Join(e.dir, fmt.Sprintf("meta.json.tmp-%d", s.tmpSeq.Add(1)))
-	if err := os.WriteFile(metaTmp, b, 0o644); err != nil {
-		return err
-	}
-	if err := posixfs.Replace(metaTmp, filepath.Join(e.dir, "meta.json")); err != nil {
-		os.Remove(metaTmp)
+	if err := posixfs.WriteFile(filepath.Join(e.dir, "meta.json"), b, 0o644); err != nil {
 		return err
 	}
 

@@ -1,4 +1,7 @@
-package hls
+// Package hlsclient reads an HLS presentation back: OpenVOD loads a complete
+// one and OpenLive follows a growing one, each as a format.Media. It is test
+// support, so no product package imports it (make depcheck).
+package hlsclient
 
 import (
 	"context"

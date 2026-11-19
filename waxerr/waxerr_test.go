@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/colespringer/waxflow/waxerr"
@@ -213,5 +216,76 @@ func TestFixedReadsAsNewAndCannotBeEdited(t *testing.T) {
 	}
 	if got := waxerr.Fixed(waxerr.CodeCanceled, "").Error(); got != "canceled" {
 		t.Errorf("an empty message reads %q, want the code as New's does", got)
+	}
+}
+
+// A file-system error loses the paths it quotes and keeps its cause,
+// wherever it sits in the chain, and every other error is returned as it is.
+func TestPathlessReturnsTheCauseOfAFileSystemError(t *testing.T) {
+	cause := errors.New("input/output error")
+	quoted := &fs.PathError{Op: "read", Path: "/srv/music/a.flac", Err: cause}
+	linked := &os.LinkError{Op: "rename", Old: "/var/jobs/1/job.json.tmp-0a", New: "/var/jobs/1/job.json", Err: cause}
+	plain := errors.New("plain")
+	for _, tc := range []struct {
+		name     string
+		in, want error
+	}{
+		{"a PathError", quoted, cause},
+		{"a wrapped PathError", fmt.Errorf("reading: %w", quoted), cause},
+		{"a LinkError", linked, cause},
+		{"a wrapped LinkError", fmt.Errorf("publishing: %w", linked), cause},
+		{"a plain error", plain, plain},
+		{"io.EOF", io.EOF, io.EOF},
+		{"nil", nil, nil},
+	} {
+		if got := waxerr.Pathless(tc.in); got != tc.want {
+			t.Errorf("%s: Pathless = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// An absolute path leaves a client's message with its operation and cause
+// kept, under any wrapping, and nothing else in the text moves.
+func TestMessageDropsAbsolutePathsAndKeepsTheRest(t *testing.T) {
+	abs := func(elem ...string) string {
+		p, err := filepath.Abs(filepath.Join(elem...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	cause := errors.New("permission denied")
+	quoted := &fs.PathError{Op: "open", Path: abs("var", "jobs", "1", "out.flac"), Err: cause}
+	linked := &os.LinkError{Op: "rename", Old: abs("var", "jobs", "1", "job.json.tmp-0a"), New: abs("var", "jobs", "1", "job.json"), Err: cause}
+	relative := &fs.PathError{Op: "openat", Path: filepath.Join("album", "a.flac"), Err: fs.ErrNotExist}
+	for _, tc := range []struct {
+		name string
+		in   error
+		want string
+	}{
+		{"a path error", quoted, "open: permission denied"},
+		{"a link error with two paths", linked, "rename: permission denied"},
+		{
+			"one nested under several wraps",
+			waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: creating output", fmt.Errorf("spool: %w", fmt.Errorf("try 2: %w", quoted))),
+			"jobs: creating output: spool: try 2: open: permission denied",
+		},
+		{
+			"a joined error",
+			fmt.Errorf("publishing: %w", errors.Join(quoted, errors.New("plain"), linked)),
+			"publishing: open: permission denied\nplain\nrename: permission denied",
+		},
+		{
+			"two wrapped at once",
+			fmt.Errorf("%w, then %w", quoted, linked),
+			"open: permission denied, then rename: permission denied",
+		},
+		{"a relative path kept", fmt.Errorf("source: %w", relative), "source: openat " + filepath.Join("album", "a.flac") + ": file does not exist"},
+		{"a plain error unchanged", errors.New("mp3: missing frame sync"), "mp3: missing frame sync"},
+		{"nil", nil, ""},
+	} {
+		if got := waxerr.Message(tc.in); got != tc.want {
+			t.Errorf("%s: Message = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }

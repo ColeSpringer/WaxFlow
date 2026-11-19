@@ -1,8 +1,8 @@
 package waxflow_test
 
 // HLS VOD read-back: the symmetry closer for HLS. The segmenter
-// writes an init segment, numbered fMP4 media segments, and M3U8 playlists; the
-// HLS client reads that presentation back over HTTP, follows the playlists,
+// writes an init segment, numbered fMP4 media segments, and M3U8 playlists;
+// package hlsclient reads that presentation back over HTTP, follows the playlists,
 // concatenates the media behind the out-of-band init, and decodes it through the
 // fragmented-MP4 demuxer as a format.Media. FLAC proves it bit-exact; the lossy
 // codecs prove the dOps/edit-list path; a two-variant master proves variant
@@ -22,7 +22,7 @@ import (
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/format"
-	"github.com/colespringer/waxflow/internal/hls"
+	"github.com/colespringer/waxflow/internal/testutil/hlsclient"
 	"github.com/colespringer/waxflow/m3u8"
 )
 
@@ -86,7 +86,7 @@ func servePresentation(t *testing.T, variants []hlsVariant) string {
 
 // serveHLS plans, inits and segments each variant of one source and serves
 // them through servePresentation, returning the master URL and the fetcher.
-func serveHLS(t *testing.T, e *waxflow.Engine, raw []byte, src *audio.Buffer, variants []waxflow.TranscodeOptions, segSamples int) (string, hls.Fetcher) {
+func serveHLS(t *testing.T, e *waxflow.Engine, raw []byte, src *audio.Buffer, variants []waxflow.TranscodeOptions, segSamples int) (string, hlsclient.Fetcher) {
 	t.Helper()
 	var vs []hlsVariant
 	for vi, opts := range variants {
@@ -101,7 +101,7 @@ func serveHLS(t *testing.T, e *waxflow.Engine, raw []byte, src *audio.Buffer, va
 		segs, _ := collectSegments(t, e, raw, opts, plan.SegmentSamples, 0)
 		vs = append(vs, hlsVariant{plan: plan, init: init, segs: segs})
 	}
-	return servePresentation(t, vs), hls.HTTPFetcher{}
+	return servePresentation(t, vs), hlsclient.HTTPFetcher{}
 }
 
 // decodeMedia reads a whole Media into one buffer, refusing to exceed capMax
@@ -142,7 +142,7 @@ func TestHLSReadBackFLAC(t *testing.T) {
 	opts := waxflow.TranscodeOptions{Format: "flac"}
 	masterURL, fetcher := serveHLS(t, e, raw, src, []waxflow.TranscodeOptions{opts}, 48000)
 
-	med, err := hls.OpenVOD(context.Background(), fetcher, masterURL, nil)
+	med, err := hlsclient.OpenVOD(context.Background(), fetcher, masterURL, nil)
 	if err != nil {
 		t.Fatalf("OpenVOD: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestHLSReadBackLossy(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			masterURL, fetcher := serveHLS(t, e, raw, src, []waxflow.TranscodeOptions{tc.opts}, tc.segSamples)
-			med, err := hls.OpenVOD(context.Background(), fetcher, masterURL, nil)
+			med, err := hlsclient.OpenVOD(context.Background(), fetcher, masterURL, nil)
 			if err != nil {
 				t.Fatalf("OpenVOD: %v", err)
 			}
@@ -213,7 +213,7 @@ func TestHLSReadBackVariantSelect(t *testing.T) {
 	masterURL, fetcher := serveHLS(t, e, raw, src, variants, 48000)
 
 	// Index 1 must read (proves the master is parsed and the selector honored).
-	med, err := hls.OpenVOD(context.Background(), fetcher, masterURL, &hls.ClientOptions{VariantIndex: 1})
+	med, err := hlsclient.OpenVOD(context.Background(), fetcher, masterURL, &hlsclient.ClientOptions{VariantIndex: 1})
 	if err != nil {
 		t.Fatalf("OpenVOD variant 1: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestHLSReadBackVariantSelect(t *testing.T) {
 	equalPCM(t, src, got)
 
 	// An out-of-range index fails cleanly rather than panicking.
-	if _, err := hls.OpenVOD(context.Background(), fetcher, masterURL, &hls.ClientOptions{VariantIndex: 5}); err == nil {
+	if _, err := hlsclient.OpenVOD(context.Background(), fetcher, masterURL, &hlsclient.ClientOptions{VariantIndex: 5}); err == nil {
 		t.Error("variant index 5 of a 2-variant master must fail")
 	}
 }
@@ -238,7 +238,7 @@ func TestHLSReadBackTranscode(t *testing.T) {
 	e := waxflow.New()
 
 	masterURL, fetcher := serveHLS(t, e, raw, src, []waxflow.TranscodeOptions{{Format: "flac"}}, 48000)
-	med, err := hls.OpenVOD(context.Background(), fetcher, masterURL, nil)
+	med, err := hlsclient.OpenVOD(context.Background(), fetcher, masterURL, nil)
 	if err != nil {
 		t.Fatalf("OpenVOD: %v", err)
 	}

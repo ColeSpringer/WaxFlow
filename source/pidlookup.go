@@ -8,7 +8,6 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
-	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -20,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/colespringer/waxflow/internal/flight"
+	"github.com/colespringer/waxflow/internal/lru"
 	"github.com/colespringer/waxflow/internal/reftext"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -87,8 +87,11 @@ type PIDLookup struct {
 	flights flight.Group[pidAnswer]
 
 	mu    sync.Mutex
-	cache map[string]*pidEntry
-	clock uint64
+	cache *lru.Cache[string, pidEntry]
+	// soonest is at or before every entry's expiry: while the clock is
+	// under it nothing has expired. Too low only costs a pass.
+	soonest time.Time
+	scanned int // entries the eviction passes have visited, for tests
 }
 
 // pidAnswer is what one request to the host yields.
@@ -97,17 +100,17 @@ type pidAnswer struct {
 	ttl time.Duration
 }
 
-// pidEntry is one remembered answer; used orders entries for eviction.
+// pidEntry is one remembered answer.
 type pidEntry struct {
 	ref     string
 	expires time.Time
-	used    uint64
 }
 
 // ParsePIDLookupURL validates a lookup base: an absolute http or https URL
 // with a host and no query or fragment. Errors carry
-// waxerr.CodeInvalidRequest and never the URL's password, query or
-// fragment: a query is where a token rides.
+// waxerr.CodeInvalidRequest and do not quote the URL: a query is where a
+// token rides, and a reload hands the refusal to a client while the URL
+// may be a path of the daemon's.
 func ParsePIDLookupURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -118,19 +121,16 @@ func ParsePIDLookupURL(raw string) (*url.URL, error) {
 		}
 		return nil, waxerr.Wrap(waxerr.CodeInvalidRequest, "source: pid lookup URL does not parse", err)
 	}
-	bare := *u
-	bare.RawQuery, bare.ForceQuery, bare.Fragment, bare.RawFragment = "", false, "", ""
-	shown := bare.Redacted()
 	switch {
+	case u.Scheme == "":
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, "source: pid lookup URL has no scheme; it must be http or https")
 	case u.Scheme != "http" && u.Scheme != "https":
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("source: pid lookup URL %q must be http or https", shown))
+			fmt.Sprintf("source: pid lookup URL must be http or https, not %s", u.Scheme))
 	case u.Host == "":
-		return nil, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("source: pid lookup URL %q has no host", shown))
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, "source: pid lookup URL has no host")
 	case u.RawQuery != "" || u.ForceQuery || u.Fragment != "":
-		return nil, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("source: pid lookup URL %q must carry no query or fragment", shown))
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, "source: pid lookup URL must carry no query or fragment")
 	}
 	return u, nil
 }
@@ -191,7 +191,7 @@ func NewPIDLookup(rawURL string, next Resolver, opts PIDLookupOptions) (*PIDLook
 		timeout: timeout,
 		now:     time.Now,
 		log:     log,
-		cache:   make(map[string]*pidEntry),
+		cache:   lru.New[string, pidEntry](pidCacheEntries),
 	}, nil
 }
 
@@ -507,51 +507,52 @@ func maxAge(h http.Header) time.Duration {
 func (l *PIDLookup) cached(id string) (string, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	e, ok := l.cache[id]
+	e, ok := l.cache.Get(id)
 	if !ok {
 		return "", false
 	}
 	if !l.now().Before(e.expires) {
-		delete(l.cache, id)
+		l.cache.Delete(id)
 		return "", false
 	}
-	l.clock++
-	e.used = l.clock
 	return e.ref, true
 }
 
-// remember stores an answer, making room at capacity.
+// remember stores an answer. At capacity a new id takes the place of the
+// least recently used expired entry when there is one, else of the entry used
+// longest ago. The pass for an expired entry is linear, so it runs only at
+// capacity and only once the clock reaches soonest.
 func (l *PIDLookup) remember(id, ref string, ttl time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.now()
-	if _, ok := l.cache[id]; !ok && len(l.cache) >= pidCacheEntries {
-		l.evictLocked(now)
-	}
-	l.clock++
-	l.cache[id] = &pidEntry{ref: ref, expires: now.Add(ttl), used: l.clock}
-}
-
-// evictLocked drops an expired entry when there is one, else the entry used
-// longest ago. One linear pass, run only on an insert at capacity.
-func (l *PIDLookup) evictLocked(now time.Time) {
-	var victim string
-	oldest := uint64(math.MaxUint64)
-	for k, e := range l.cache {
-		if !now.Before(e.expires) {
-			victim = k
-			break
+	if _, ok := l.cache.Peek(id); !ok && l.cache.Len() >= pidCacheEntries && !now.Before(l.soonest) {
+		visited := 0
+		if !l.cache.DeleteFirstFunc(func(_ string, e pidEntry) bool {
+			visited++
+			return !now.Before(e.expires)
+		}) {
+			// Nothing has expired: the soonest expiry is the next bound.
+			l.soonest = time.Time{}
+			l.cache.DeleteFunc(func(_ string, e pidEntry) bool {
+				if l.soonest.IsZero() || e.expires.Before(l.soonest) {
+					l.soonest = e.expires
+				}
+				return false
+			})
 		}
-		if e.used < oldest {
-			oldest, victim = e.used, k
-		}
+		l.scanned += visited
 	}
-	delete(l.cache, victim)
+	expires := now.Add(ttl)
+	if expires.Before(l.soonest) {
+		l.soonest = expires
+	}
+	l.cache.Put(id, pidEntry{ref: ref, expires: expires})
 }
 
 // drop forgets id.
 func (l *PIDLookup) drop(id string) {
 	l.mu.Lock()
-	delete(l.cache, id)
+	l.cache.Delete(id)
 	l.mu.Unlock()
 }

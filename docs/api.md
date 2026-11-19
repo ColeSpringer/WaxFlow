@@ -15,6 +15,11 @@ Conventions:
 
       {"error": "human text", "code": "not-found", "schemaVersion": 1}
 
+- A message a client reads (the envelope's `error`, a job's error, wait
+  and warnings) names no path of the daemon's: where the system's
+  error quoted one, its operation and cause stay (`open: permission
+  denied`) and the path goes, while a reference under a library root
+  stays. `GET /roots` shows paths by design.
 - Codes: `invalid-request unauthorized signature-invalid
   signature-expired source-changed not-found unsupported-format
   unsupported-source malformed-input payload-too-large source-unreadable
@@ -740,6 +745,31 @@ with a segmented form: `opus`, `flac`, `aac`, `alac` (see `/caps`
 re-encoding (see `/caps` `delivery.cutFormats`). A `410 source-changed` means
 the file changed since minting: re-mint and reload.
 
+A cache that cannot be written (a full or failing volume) does not stop a
+stream. A refused write, of a segment or of the init header, makes the
+variant known to refuse them. From then on each segment request makes its
+own segment, started there as a restarted worker starts, and answers it
+whole from memory with `Accept-Ranges: none`, `Cache-Control: no-store` and
+no `ETag`, and the init header is built per request with no write tried. A
+lossless, remuxed or cut stream is byte for byte the one a healthy daemon
+serves, and a lossy one has every segment encoded on its own, as the first
+segment after a seek is. A variant in this state holds one live slot at a
+time, whoever asks: its requests take turns, each for no longer than it
+would wait for a worker before it is answered `503 overloaded`, as it is
+when no live slot is free for its segment. Every ten seconds one of them
+has a worker try the cache again, so a cache that heals is noticed within
+that and the stream, init header included, goes back to it. The try has
+two seconds, or a segment's duration where that is longer, and ends with
+its listener: a worker that has not written by then is stopped, and the
+listener gets its segment as between tries, whatever the try came to. A
+worker that wrote as the time ran out healed the variant all the same. An
+outage is one warning per variant for each thing it has to say (a worker's
+refused write, the first segment and the first init header served
+uncached, the first try given up), and past 1024 variants at once one for
+all the rest, which then share one try every ten seconds until a write
+lands. `waxflow_session_degradations_total` counts each segment served
+uncached.
+
 The playlist text is public: `m3u8.Media` over a plan's
 `SegmentPlan.MediaSegments` renders the media playlist the daemon serves for
 that plan, given its own URIs, and `SegmentPlan.MasterVariant` is the plan's
@@ -1281,7 +1311,10 @@ replaced before the job ran fails with `source-changed` rather than
 quietly producing different audio. A merge pins each member, and the error
 names the index that moved (`member 2 (lib/ch3.flac): the source changed
 since the job was created`): naming one of forty candidates is the
-difference between re-uploading a file and re-uploading a library.
+difference between re-uploading a file and re-uploading a library. A member
+whose file fails to close costs the merge nothing, since every sample it
+declared was read first: the job finishes and carries a warning that names
+the member (`member 2 (lib/ch3.flac): source: closing the file: ...`).
 
 ### Silence detection
 

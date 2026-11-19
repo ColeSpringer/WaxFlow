@@ -2,9 +2,9 @@ package server
 
 import (
 	"context"
-	"math"
 	"sync"
 
+	"github.com/colespringer/waxflow/internal/lru"
 	"github.com/colespringer/waxflow/source"
 )
 
@@ -31,56 +31,23 @@ const gridCacheCap = 4096
 // grid out of the memo.
 type gridCache struct {
 	mu      sync.Mutex
-	entries map[string]*gridEntry
-	clock   int64
+	entries *lru.Cache[string, int]
 }
 
-type gridEntry struct {
-	grid int
-	used int64 // clock value at last access; the LRU order
+func newGridCache() *gridCache {
+	return &gridCache{entries: lru.New[string, int](gridCacheCap)}
 }
 
 func (c *gridCache) get(key string) (int, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	e, ok := c.entries[key]
-	if !ok {
-		return 0, false
-	}
-	c.clock++
-	e.used = c.clock
-	return e.grid, true
+	return c.entries.Get(key)
 }
 
 func (c *gridCache) put(key string, grid int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.entries == nil {
-		c.entries = make(map[string]*gridEntry, gridCacheCap)
-	}
-	if _, exists := c.entries[key]; !exists && len(c.entries) >= gridCacheCap {
-		c.evictOldestLocked()
-	}
-	c.clock++
-	c.entries[key] = &gridEntry{grid: grid, used: c.clock}
-}
-
-// evictOldestLocked drops the least recently used entry: a linear scan, run
-// only on insert at capacity, exactly as trackCache does it.
-func (c *gridCache) evictOldestLocked() {
-	var oldest string
-	var found bool
-	minUsed := int64(math.MaxInt64)
-	for k, e := range c.entries {
-		// found, not oldest != "": an empty key is a legal map key, so the zero
-		// value cannot double as "nothing selected".
-		if !found || e.used < minUsed {
-			minUsed, oldest, found = e.used, k, true
-		}
-	}
-	if found {
-		delete(c.entries, oldest)
-	}
+	c.entries.Put(key, grid)
 }
 
 // gridFor returns src's packet grid, memoized by source identity: the decode

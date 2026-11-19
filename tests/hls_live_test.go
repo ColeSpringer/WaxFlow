@@ -21,7 +21,7 @@ import (
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/container/mp4"
-	"github.com/colespringer/waxflow/internal/hls"
+	"github.com/colespringer/waxflow/internal/testutil/hlsclient"
 )
 
 // liveServer serves an init segment and media segments, plus a media playlist
@@ -106,7 +106,7 @@ func TestHLSLiveFollow(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	med, err := hls.OpenLive(ctx, hls.HTTPFetcher{}, srv.URL+"/live.m3u8", &hls.LiveOptions{
+	med, err := hlsclient.OpenLive(ctx, hlsclient.HTTPFetcher{}, srv.URL+"/live.m3u8", &hlsclient.LiveOptions{
 		// Start from the first segment (not the live edge) so the whole stream is
 		// decoded, and reload fast so the test does not wait real target durations.
 		LiveEdgeSegments: 1 << 20,
@@ -143,7 +143,7 @@ func TestHLSLiveFormatLock(t *testing.T) {
 		"#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS=\"mp4a.40.2\"\naac.m3u8\n" +
 		"#EXT-X-STREAM-INF:BANDWIDTH=200000,CODECS=\"fLaC\"\nflac.m3u8\n"
 	f := staticFetcher{"http://h/master.m3u8": master}
-	_, err := hls.OpenLive(context.Background(), f, "http://h/master.m3u8", nil)
+	_, err := hlsclient.OpenLive(context.Background(), f, "http://h/master.m3u8", nil)
 	if err == nil {
 		t.Fatal("a mixed-codec master must be refused (format-lock)")
 	}
@@ -167,7 +167,7 @@ func TestHLSLiveCancel(t *testing.T) {
 	ls.mu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	med, err := hls.OpenLive(ctx, hls.HTTPFetcher{}, srv.URL+"/live.m3u8", &hls.LiveOptions{
+	med, err := hlsclient.OpenLive(ctx, hlsclient.HTTPFetcher{}, srv.URL+"/live.m3u8", &hlsclient.LiveOptions{
 		LiveEdgeSegments: 1 << 20,
 		ReloadInterval:   10 * time.Millisecond,
 	})

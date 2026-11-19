@@ -9,7 +9,9 @@ package opus
 //
 // Scope notes against the reference: the application is fixed to
 // OPUS_APPLICATION_AUDIO (dc_reject input filter, analysis-driven
-// voice estimate); frames are always 20 ms at 48 kHz; DTX, in-band FEC
+// voice estimate); the analyser reads a second ahead of the first sound it
+// meets, through the look-ahead run_analysis takes, where opus_demo gives
+// it none; frames are always 20 ms at 48 kHz; DTX, in-band FEC
 // (packet loss is always 0 for file encoding), surround masking, and the
 // adaptive stereo->mono downmix are not wired (stream channels == input
 // channels).
@@ -47,6 +49,17 @@ const (
 	// encoderBuffer is the delay ring the frame path reads through
 	// (libopus st->encoder_buffer = Fs/100).
 	encoderBuffer = SampleRate / 100
+	// startLookahead is how many frames past the first sounding frame the
+	// analyser reads before that frame is coded: with the frame itself, one
+	// second, which is what its speech/music call takes to settle on music.
+	startLookahead = SampleRate/opusFrameSize - 1
+	// pauseFrames is how long a silence leaves the analyser's history
+	// with nothing to say about the sound behind it: as long as the
+	// look-ahead, from where the second ahead holds more than the last.
+	pauseFrames = startLookahead + 1
+	// musicAhead is the reading of the second ahead at which the mode
+	// goes to CELT whatever the history holds: more music than not.
+	musicAhead = 0.5
 )
 
 // Coding modes reuse the decoder's TOC constants (opus.go): modeSILK,
@@ -90,7 +103,7 @@ const (
 
 // EncoderVersion identifies the encoder bitstream/algorithm revision for the
 // cache key. Bump it when a change alters the produced bytes.
-const EncoderVersion = "opus-enc-5"
+const EncoderVersion = "opus-enc-6"
 
 // EncoderOptions configures the Opus encoder.
 type EncoderOptions struct {
@@ -142,11 +155,11 @@ type Encoder struct {
 	celt     *celtEncoder
 	silk     *silkEncoder
 	silkMode silkEncControl
-	analysis tonalityAnalysisState
 
 	mode              int
 	prevMode          int
 	forcedMode        int // modeNone = auto; tests force modeSILK etc.
+	forcedBandwidth   int // 0 = auto; tests pin it as OPUS_SET_BANDWIDTH does
 	signal            Signal
 	lsbDepth          int
 	bandwidth         int
@@ -165,6 +178,18 @@ type Encoder struct {
 	rangeFinal           uint32
 
 	complexity int
+	// lookahead is startLookahead; the tests that hold the encoder byte for
+	// byte to opus_demo, which gives its analyser none, set 0.
+	lookahead int
+	// silent counts the frames of silence behind the FIFO's head, to
+	// pauseFrames; a stream starts as behind a pause.
+	silent int
+	// scout is the analyser, kept a look-ahead in front of the frame being
+	// coded: read where it stands it tells what sound is coming. past
+	// reads it at the frame being coded, as the reference's analyser is
+	// read, for what has been.
+	scout tonalityAnalysisState
+	past  analysisReader
 
 	buf       [][]float32 // per-channel input FIFO
 	inSamples int64
@@ -231,6 +256,8 @@ func NewEncoder(f audio.Format, opts *EncoderOptions) (*Encoder, error) {
 		celt:       newCELTEncoder(f.Channels),
 		silk:       newSILKEncoder(f.Channels),
 		complexity: complexity,
+		lookahead:  startLookahead,
+		silent:     pauseFrames,
 		signal:     signal,
 		lsbDepth:   lsbDepth,
 		voiceRatio: -1,
@@ -318,7 +345,9 @@ func (e *Encoder) CodecConfig() []byte {
 	return head
 }
 
-// Encode buffers src and emits every whole 20 ms frame that becomes available.
+// Encode buffers src and emits the 20 ms frames that are ready. A frame is
+// ready once a second of input lies behind its start: a stream shorter
+// than that emits nothing until Finish, and Finish emits the last second.
 func (e *Encoder) Encode(src *audio.Buffer, emit func(codec.Packet) error) error {
 	if src.Fmt != e.fmt {
 		return waxerr.New(waxerr.CodeUnsupportedFormat,
@@ -332,40 +361,73 @@ func (e *Encoder) Encode(src *audio.Buffer, emit func(codec.Packet) error) error
 }
 
 func (e *Encoder) drainFrames(emit func(codec.Packet) error) error {
-	for len(e.buf[0]) >= opusFrameSize {
+	for len(e.buf[0]) >= (e.lookahead+1)*opusFrameSize {
 		if err := e.emitFrame(emit); err != nil {
 			return err
-		}
-		for c := 0; c < e.channels; c++ {
-			e.buf[c] = append(e.buf[c][:0], e.buf[c][opusFrameSize:]...)
 		}
 	}
 	return nil
 }
 
-// emitFrame encodes the leading 20 ms of the FIFO into one Opus packet.
+// readsAhead reports whether the FIFO's leading frame is an onset: sound
+// at the head of the stream or behind a pause (hush says it is quiet). Its
+// speech/music call picks the mode the sound starts in, and the analyser's
+// history says nothing about it (with none it calls everything speech), so
+// that one frame is read with look-ahead.
+func (e *Encoder) readsAhead(hush bool) bool {
+	return e.lookahead != 0 && e.silent >= pauseFrames && e.past.ahead == 0 && !hush
+}
+
+// emitFrame encodes the leading 20 ms of the FIFO into one Opus packet and
+// drops it from the FIFO.
 func (e *Encoder) emitFrame(emit func(codec.Packet) error) error {
+	held := min(len(e.buf[0])/opusFrameSize, e.lookahead+1) * opusFrameSize
+	hush := quiet(e.buf, 0, opusFrameSize, e.channels)
+	onset := e.readsAhead(hush)
+	if onset {
+		// What the analyser heard before the pause would colour the call:
+		// the sound is read as a stream's first is, with all that is held
+		// in view.
+		e.scout = tonalityAnalysisState{}
+		e.past = analysisReader{ahead: held/opusFrameSize - 1}
+	}
+	// The scout's reading of the second ahead, once it has heard a second.
+	music := float32(-1)
+	var ahead analysisInfo
+	e.scout.runAnalysis(e.buf, held, opusFrameSize, 0, -2, e.channels, e.lsbDepth, &ahead)
+	if e.lookahead != 0 && ahead.valid && e.scout.count > e.lookahead {
+		music = ahead.musicProb
+	}
+	if hush {
+		e.silent = min(e.silent+1, pauseFrames)
+	} else {
+		e.silent = 0
+	}
 	pcm := make([][]float32, e.channels)
 	for c := 0; c < e.channels; c++ {
 		pcm[c] = e.buf[c][:opusFrameSize]
 	}
-	pkt := e.encodePacket(pcm)
+	pkt := e.encodePacket(pcm, onset, music)
+	// The FIFO is read by moving its head: append makes room when the
+	// slice's own runs out, and copies only what is still held.
+	for c := 0; c < e.channels; c++ {
+		e.buf[c] = e.buf[c][opusFrameSize:]
+	}
 	e.outFrames++
 	return emit(codec.Packet{Data: pkt, PTS: (e.outFrames - 1) * opusFrameSize, Dur: opusFrameSize, Sync: true})
 }
 
-// Finish pads the tail to a whole frame, emits enough frames to cover the
-// pre-skip priming, and reports the gapless trailer.
+// Finish pads the tail to a whole frame, emits the frames still held and
+// enough more to cover the pre-skip priming, and reports the gapless trailer.
 func (e *Encoder) Finish(emit func(codec.Packet) error) (codec.Trailer, error) {
-	if n := len(e.buf[0]); n > 0 {
+	if n := len(e.buf[0]) % opusFrameSize; n > 0 {
 		for c := 0; c < e.channels; c++ {
 			e.buf[c] = append(e.buf[c], make([]float32, opusFrameSize-n)...)
 		}
+	}
+	for len(e.buf[0]) > 0 {
 		if err := e.emitFrame(emit); err != nil {
 			return codec.Trailer{}, err
-		}
-		for c := 0; c < e.channels; c++ {
-			e.buf[c] = e.buf[c][:0]
 		}
 	}
 	// Emit silent frames until the output covers pre-skip + all real samples.
@@ -375,9 +437,6 @@ func (e *Encoder) Finish(emit func(codec.Packet) error) (codec.Trailer, error) {
 		}
 		if err := e.emitFrame(emit); err != nil {
 			return codec.Trailer{}, err
-		}
-		for c := 0; c < e.channels; c++ {
-			e.buf[c] = e.buf[c][:0]
 		}
 	}
 	delay := int64(EncoderDelay)
@@ -636,8 +695,10 @@ var opusFadeWindow = celtWindow(celtOverlap)
 
 // encodePacket encodes one 20 ms frame (planar float, exactly opusFrameSize
 // samples per channel) into a complete Opus packet
-// (opus_encode_frame_native).
-func (e *Encoder) encodePacket(pcm [][]float32) []byte {
+// (opus_encode_frame_native). An onset is decided as a stream's first
+// frame is, with no mode to stay in. music is the scout's reading of the
+// second ahead, or negative.
+func (e *Encoder) encodePacket(pcm [][]float32, onset bool, music float32) []byte {
 	frameSize := opusFrameSize
 	C := e.channels
 	frameRate := SampleRate / frameSize
@@ -648,11 +709,17 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 	} else {
 		maxDataBytes = e.cbrBytes()
 	}
+	// The rate the frame is decided on: what the packet can carry, which in
+	// CBR is the packet size itself (st->bitrate_bps).
+	bitrate := min(e.bitrate, maxDataBytes*8*frameRate)
+	if !e.vbr {
+		bitrate = maxDataBytes * 8 * frameRate
+	}
 
-	// Tonality analysis over the incoming frame; the encoded signal trails it
-	// by delayCompensation samples.
+	// Tonality analysis over the incoming frame and any look-ahead; the
+	// encoded signal trails it by delayCompensation samples.
 	var info analysisInfo
-	e.analysis.runAnalysis(pcm, frameSize, frameSize, 0, -2, C, e.lsbDepth, &info)
+	e.scout.readAs(&e.past, &info, frameSize)
 
 	isSilence := true
 	for c := 0; c < C && isSilence; c++ {
@@ -667,16 +734,24 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 	e.voiceRatio = -1
 	e.detectedBandwidth = 0
 	if info.valid {
-		var prob float32
-		switch e.prevMode {
-		case modeNone:
-			prob = info.musicProb
-		case modeCELT:
-			prob = info.musicProbMax
-		default:
-			prob = info.musicProbMin
+		// A call made on less sound than four fifths of the look-ahead
+		// leans to speech and is not used. The frame is decided as music
+		// is: CELT wherever the two calls would differ, which fails on
+		// nothing, until the analyser has heard enough to be asked.
+		if e.past.count < (e.lookahead+1)*4/5 {
+			e.voiceRatio = 0
+		} else {
+			var prob float32
+			switch {
+			case e.prevMode == modeNone || onset:
+				prob = info.musicProb
+			case e.prevMode == modeCELT:
+				prob = info.musicProbMax
+			default:
+				prob = info.musicProbMin
+			}
+			e.voiceRatio = int(math.Floor(0.5 + 100*float64(1-prob)))
 		}
-		e.voiceRatio = int(math.Floor(0.5 + 100*float64(1-prob)))
 
 		switch {
 		case info.bandwidth <= 12:
@@ -715,7 +790,7 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 	// mode-unknown branch. Our modeSILK is 0, so the sentinel must be
 	// modeNone or the SILK complexity<2 penalty would leak into the mode
 	// decision itself.
-	equivRate := computeEquivRate(int32(e.bitrate), C, frameRate, e.vbr, modeNone, e.complexity, 0)
+	equivRate := computeEquivRate(int32(bitrate), C, frameRate, e.vbr, modeNone, e.complexity, 0)
 
 	// Mode selection.
 	redundancy := false
@@ -734,10 +809,12 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 		modeMusic := int32(float32(1-stereoWidth)*float32(opusModeThresholds[1][1]) +
 			stereoWidth*float32(opusModeThresholds[1][1]))
 		threshold := modeMusic + int32(voiceEst*voiceEst)*(modeVoice-modeMusic)>>14
-		// Hysteresis.
-		if e.prevMode == modeCELT {
+		// Hysteresis, where there is a mode to stay in.
+		switch {
+		case onset || e.prevMode == modeNone:
+		case e.prevMode == modeCELT:
 			threshold -= 4000
-		} else if e.prevMode != modeNone {
+		default:
 			threshold += 4000
 		}
 		if equivRate >= threshold {
@@ -745,8 +822,12 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 		} else {
 			e.mode = modeSILK
 		}
-		// Too little space for anything but CELT.
-		if maxDataBytes < 9000/(frameRate*8) {
+		if ve, ok := e.musicAheadCall(music, equivRate, modeVoice, modeMusic); ok {
+			e.mode = modeCELT
+			voiceEst = min(voiceEst, ve)
+		}
+		// Under 6 kbit/s of space there is room for nothing but CELT.
+		if maxDataBytes < 6000/(frameRate*8) {
 			e.mode = modeCELT
 		}
 	}
@@ -764,7 +845,7 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 		}
 	}
 
-	equivRate = computeEquivRate(int32(e.bitrate), C, frameRate, e.vbr, e.mode, e.complexity, 0)
+	equivRate = computeEquivRate(int32(bitrate), C, frameRate, e.vbr, e.mode, e.complexity, 0)
 
 	if e.mode != modeCELT && e.prevMode == modeCELT {
 		e.silk = newSILKEncoder(C)
@@ -812,6 +893,10 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 		}
 	}
 
+	if e.forcedBandwidth != 0 {
+		e.bandwidth = e.forcedBandwidth
+	}
+
 	// Hybrid needs a safe rate.
 	if e.mode != modeCELT && maxRate < 15000 {
 		if e.bandwidth > bandwidthWide {
@@ -820,7 +905,7 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 	}
 
 	// Use the detected bandwidth to reduce the coded bandwidth.
-	if e.detectedBandwidth != 0 {
+	if e.detectedBandwidth != 0 && e.forcedBandwidth == 0 {
 		var minDetected int
 		switch {
 		case equivRate <= int32(18000*C) && e.mode == modeCELT:
@@ -873,13 +958,13 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 
 	redundancyBytes := 0
 	if redundancy {
-		redundancyBytes = computeRedundancyBytes(minIntA(maxDataBytes, maxFrameBytes+1), int32(e.bitrate), frameRate, C)
+		redundancyBytes = computeRedundancyBytes(minIntA(maxDataBytes, maxFrameBytes+1), int32(bitrate), frameRate, C)
 		if redundancyBytes == 0 {
 			redundancy = false
 		}
 	}
 
-	bitsTarget := minIntA(8*(maxDataBytes-redundancyBytes), e.bitrate*frameSize/SampleRate) - 8
+	bitsTarget := minIntA(8*(maxDataBytes-redundancyBytes), bitrate*frameSize/SampleRate) - 8
 
 	// Range coder over the payload (the TOC byte is prepended at the end).
 	payloadCap := minIntA(maxDataBytes, maxFrameBytes+1) - 1
@@ -1035,7 +1120,7 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 
 		e.silkMode.opusCanSwitch = e.silkMode.switchReady
 		if e.silkMode.opusCanSwitch {
-			redundancyBytes = computeRedundancyBytes(minIntA(maxDataBytes, maxFrameBytes+1), int32(e.bitrate), frameRate, C)
+			redundancyBytes = computeRedundancyBytes(minIntA(maxDataBytes, maxFrameBytes+1), int32(bitrate), frameRate, C)
 			redundancy = redundancyBytes != 0
 			celtToSilk = false
 			e.silkBwSwitch = true
@@ -1052,8 +1137,13 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 	case bandwidthSuperwide:
 		endband = 19
 	}
-	e.celt.disablePF = e.mode != modeCELT // prediction reduced in non-CELT modes
-	e.celt.forceIntra = false
+	// CELT_SET_PREDICTION(2) on a frame with a CELT layer. A SILK-only
+	// frame leaves the setting where the last frame put it, and codes a
+	// redundant frame under that.
+	if e.mode != modeSILK {
+		e.celt.disablePF = false
+		e.celt.forceIntra = false
+	}
 
 	// tmp_prefill: the 2.5 ms just before this frame, for CELT prefill on
 	// mode transitions.
@@ -1177,9 +1267,9 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 		e.celt.vbr = e.vbr
 		e.celt.constrainedVBR = false
 		if e.mode == modeHybrid {
-			e.celt.bitrate = e.bitrate - int(e.silkMode.bitRate)
+			e.celt.bitrate = bitrate - int(e.silkMode.bitRate)
 		} else {
-			e.celt.bitrate = e.bitrate
+			e.celt.bitrate = bitrate
 			e.celt.constrainedVBR = e.useCVBR
 		}
 		if !e.vbr {
@@ -1188,18 +1278,13 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 
 		if e.mode != e.prevMode && e.prevMode != modeNone {
 			e.celt.Reset()
-			// Prefill with the 2.5 ms before the frame; discard the output.
-			e.celt.disablePF = true
+			// Prefill with the 2.5 ms before the frame, under the frame's
+			// own settings; the output is discarded.
+			e.celt.celtEncode(tmpPrefill, SampleRate/400, 0, C, startBand, endband, 2)
+			// The decoder resets its CELT state at this switch, so the
+			// frame is coded with no prediction from the one before
+			// (CELT_SET_PREDICTION(0)).
 			e.celt.forceIntra = true
-			prevVBR := e.celt.vbr
-			e.celt.vbr = false
-			bitratePrev := e.celt.bitrate
-			e.celt.bitrate = 0
-			e.celt.celtEncode(tmpPrefill, SampleRate/400, 0, C, 0, endband, 2)
-			e.celt.bitrate = bitratePrev
-			e.celt.vbr = prevVBR
-			e.celt.forceIntra = false
-			// Prediction stays off for the first regular frame.
 			e.celt.disablePF = true
 		}
 
@@ -1240,7 +1325,6 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 		redundantRng = e.celt.rng
 		e.celt.bitrate = prevBitrate
 		e.celt.vbr = prevVBR
-		e.celt.forceIntra = false
 	}
 
 	e.rangeFinal ^= redundantRng
@@ -1275,6 +1359,21 @@ func (e *Encoder) encodePacket(pcm [][]float32) []byte {
 		pkt = opusPacketPad(pkt, maxDataBytes)
 	}
 	return pkt
+}
+
+// musicAheadCall reports whether a frame the history has not put in CELT
+// goes there because music is coming: the second ahead reads as music at
+// musicAhead or over, and a music call of that strength chooses CELT at
+// this rate. It moves a frame one way only, into CELT and never out, and
+// not at all under a signal hint. What sound precedes the music has its
+// last frames coded in CELT (docs/quality-gates.md has what that costs
+// speech). ve is the voice estimate of the call.
+func (e *Encoder) musicAheadCall(music float32, equivRate, modeVoice, modeMusic int32) (ve int, ok bool) {
+	if e.mode == modeCELT || e.signal != signalAuto || music < musicAhead {
+		return 0, false
+	}
+	ve = min(int(math.Floor(0.5+100*float64(1-music)))*327>>8, 115)
+	return ve, equivRate >= modeMusic+int32(ve*ve)*(modeVoice-modeMusic)>>14
 }
 
 // opusPacketPad grows a code-0 single-frame packet to exactly targetLen bytes

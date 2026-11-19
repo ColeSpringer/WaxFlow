@@ -90,21 +90,28 @@ type File struct {
 	extra atomic.Int32
 }
 
-// ReadAt implements container.Source.
-func (f *File) ReadAt(p []byte, off int64) (int, error) { return f.f.ReadAt(p, off) }
+// ReadAt implements container.Source. A failed read names no path; io.EOF
+// and a short read are the file's own.
+func (f *File) ReadAt(p []byte, off int64) (int, error) {
+	n, err := f.f.ReadAt(p, off)
+	if err != nil && err != io.EOF {
+		err = waxerr.Pathless(err)
+	}
+	return n, err
+}
 
 // Size implements container.Source, from the identity captured at open.
 func (f *File) Size() int64 { return f.ID.Size }
 
 // ReadSeeker exposes the open file for http.ServeContent (direct play).
 // It shares state with ReadAt callers only in position-independent ways:
-// ReadAt never moves the seek offset.
+// ReadAt never moves the seek offset. Its errors keep the path on purpose:
+// a wrapper around the file would cost sendfile on direct play.
 func (f *File) ReadSeeker() io.ReadSeeker { return f.f }
 
 // ModTime returns the identity mtime as a time, for HTTP validators.
 func (f *File) ModTime() time.Time { return time.Unix(0, f.ID.MtimeNS) }
 
-// Close releases the underlying file.
 // Retain adds a holder: the file stays open until every holder has closed it,
 // so work that outlives the caller it was started by keeps its handle.
 func (f *File) Retain() *File {
@@ -112,12 +119,34 @@ func (f *File) Retain() *File {
 	return f
 }
 
-// Close releases one holder, and the file with the last.
+// Close releases one holder, and the file with the last. A close that fails
+// is source-unreadable and names no path, since a client can read it.
 func (f *File) Close() error {
 	if f.extra.Add(-1) >= 0 {
 		return nil
 	}
-	return f.f.Close()
+	err := f.f.Close()
+	if err == nil {
+		return nil
+	}
+	return waxerr.Wrap(waxerr.CodeSourceUnreadable, "source: closing the file", waxerr.Pathless(err))
+}
+
+// NamedCloser returns a closer that closes f as Close does and names it in
+// the error of a close that fails, the way the caller's surface names its
+// files ("member 3"). The error keeps its code.
+func (f *File) NamedCloser(name string) io.Closer { return namedCloser{f: f, name: name} }
+
+type namedCloser struct {
+	f    *File
+	name string
+}
+
+func (n namedCloser) Close() error {
+	if err := n.f.Close(); err != nil {
+		return waxerr.Annotate(n.name, err)
+	}
+	return nil
 }
 
 var _ container.Source = (*File)(nil)
@@ -181,7 +210,7 @@ func OpenLocal(ref, path, name string) (*File, error) {
 	fi, err := f.Stat()
 	if err != nil {
 		f.Close()
-		return nil, waxerr.Wrap(waxerr.CodeSourceUnreadable, "source: stat", err)
+		return nil, waxerr.Wrap(waxerr.CodeSourceUnreadable, "source: stat", waxerr.Pathless(err))
 	}
 	if err := container.CheckRegular(ref, fi.Mode()); err != nil {
 		f.Close()

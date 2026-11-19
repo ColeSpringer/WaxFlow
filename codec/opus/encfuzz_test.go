@@ -72,11 +72,15 @@ func FuzzCELTEncode(f *testing.F) {
 // decoder: no panics, every packet decodable, exactly one frame out per
 // packet, all samples finite. Low bitrates route through the SILK and hybrid
 // paths the CELT-only fuzz above never reaches, and content shifts drive
-// mode-switch redundancy packets.
+// mode-switch redundancy packets, and the input forces the mode of each
+// frame (free, SILK or CELT) so the switches stay under fuzz whatever the
+// analyser makes of it. A run is four frames, which Finish codes on a short
+// look-ahead, or sixty, which runs past the whole of it.
 func FuzzOpusEncode(f *testing.F) {
 	f.Add([]byte{0x01, 0x02, 0x03, 0x04}, uint16(12), uint8(1), false, false)
 	f.Add(make([]byte, 6000), uint16(32), uint8(0), true, false)
 	f.Add([]byte{0xff, 0x00, 0x80, 0x7f}, uint16(96), uint8(2), false, true)
+	f.Add([]byte{0x10, 0xf0, 0x00, 0x80, 0x7f, 0x81}, uint16(26), uint8(3), true, false)
 	f.Fuzz(func(t *testing.T, data []byte, kbpsSel uint16, sigSel uint8, stereo, vbr bool) {
 		C := 1
 		if stereo {
@@ -100,7 +104,10 @@ func FuzzOpusEncode(f *testing.F) {
 			t.Fatal(err)
 		}
 
-		const frames = 4
+		frames := 4
+		if sigSel/3%2 == 1 {
+			frames = 60
+		}
 		decoded := 0
 		emit := func(p codec.Packet) error {
 			if len(p.Data) == 0 {
@@ -119,8 +126,21 @@ func FuzzOpusEncode(f *testing.F) {
 			})
 		}
 		packets := 0
+		force := func() {
+			enc.forcedMode = modeNone
+			if len(data) > 0 {
+				enc.forcedMode = [...]int{modeNone, modeSILK, modeCELT, modeNone}[data[packets%len(data)]>>6]
+			}
+		}
+		force()
+		count := func(p codec.Packet) error {
+			packets++
+			force()
+			return emit(p)
+		}
 		for fi := range frames {
 			b := audio.Get(f32, opusFrameSize)
+			b.N = opusFrameSize
 			for c := 0; c < C; c++ {
 				ch := b.ChanF(c)
 				for i := range ch {
@@ -132,15 +152,18 @@ func FuzzOpusEncode(f *testing.F) {
 					ch[i] = float32(by)/127.5 - 1.0
 				}
 			}
-			b.N = opusFrameSize
-			err := enc.Encode(b, func(p codec.Packet) error {
-				packets++
-				return emit(p)
-			})
+			err := enc.Encode(b, count)
 			audio.Put(b)
 			if err != nil {
 				t.Fatal(err)
 			}
+		}
+		if _, err := enc.Finish(count); err != nil {
+			t.Fatal(err)
+		}
+		// The frames, and one more to carry the pre-skip.
+		if packets != frames+1 {
+			t.Fatalf("%d packets from %d frames, want %d", packets, frames, frames+1)
 		}
 		if decoded != packets*opusFrameSize {
 			t.Fatalf("decoded %d samples from %d packets, want %d", decoded, packets, packets*opusFrameSize)

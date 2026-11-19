@@ -208,18 +208,21 @@ type Server struct {
 
 	// trackCache holds per-identity probed, measured tracks, and trackFlight
 	// collapses concurrent misses for one identity (see trackFor).
-	trackCache  trackCache
+	trackCache  *trackCache
 	trackFlight flight.Group[container.Track]
 
 	// gridCache holds per-identity packet grids for the remux rung, and
 	// gridFlight collapses concurrent misses, exactly as the pair above do for
 	// tracks and for the same reason: prepareHLS runs per segment request, and
 	// the grid costs a demuxer walk of the whole source.
-	gridCache  gridCache
+	gridCache  *gridCache
 	gridFlight flight.Group[int]
 
 	fl     flight.Group[*cache.Entry]
 	hlsMgr hls.Manager
+	// hlsUncached and hlsBroken serve HLS while the cache cannot be written.
+	hlsUncached uncachedTurns
+	hlsBroken   brokenVariants
 
 	// baseCtx bounds pipeline goroutines: pipelines outlive their
 	// requests (read-behind), not the server.
@@ -247,8 +250,11 @@ type Server struct {
 type testHooks struct {
 	pipelineDst func(io.Writer) io.Writer
 	hlsPublish  func(ctx context.Context, n int64)
-	afterFlight func()
-	keyed       func(surface, rung, identity, canonical string, versions []string)
+	// hlsPublished runs after a variant worker has written segment n and
+	// before it says so.
+	hlsPublished func(ctx context.Context, n int64)
+	afterFlight  func()
+	keyed        func(surface, rung, identity, canonical string, versions []string)
 }
 
 // newKey is cache.NewKey, shown to a test watching keys (testHooks.keyed).
@@ -386,6 +392,8 @@ func New(cfg Config) (*Server, error) {
 		defaultGain: defaultGain,
 		profile:     profile,
 		uploads:     uploadStore,
+		trackCache:  newTrackCache(),
+		gridCache:   newGridCache(),
 	}
 	s.baseCtx, s.cancel = context.WithCancel(context.Background())
 	s.hlsMgr.IdleTimeout = cfg.HLSIdleGrace

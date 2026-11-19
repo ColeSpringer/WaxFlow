@@ -112,7 +112,7 @@ func newTestEnv(t *testing.T, mutate func(*server.Config)) *testEnv {
 		{"../container/mka/testdata/seed-opus.webm", "seed.webm"},
 		{"../testdata/sine-s16.wma", "sine.wma"},
 	} {
-		b, err := os.ReadFile(fixture.src)
+		b, err := os.ReadFile(testutil.PkgFile(fixture.src))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -131,6 +131,9 @@ func newTestEnv(t *testing.T, mutate func(*server.Config)) *testEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Each close is registered as its thing opens: a skip or a failure in
+	// mutate must not hold the root open, or Windows keeps its temp directory.
+	t.Cleanup(func() { roots.Close() })
 	cacheDir := t.TempDir()
 	cfg := server.Config{
 		Addr:        "127.0.0.1:4418",
@@ -152,16 +155,30 @@ func newTestEnv(t *testing.T, mutate func(*server.Config)) *testEnv {
 	}
 	srv, err := server.New(cfg)
 	if err != nil {
-		roots.Close()
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { srv.Close() })
 	ts := httptest.NewServer(srv)
-	t.Cleanup(func() {
-		ts.Close()
-		srv.Close()
-		roots.Close()
-	})
+	t.Cleanup(ts.Close)
 	return &testEnv{ts: ts, srv: srv, root: root, cache: cacheDir}
+}
+
+// A test that skips while newTestEnv configures the server leaves nothing
+// open under its temp directories, which Windows could not then remove.
+func TestASkipInMutateReleasesTheLibraryRoot(t *testing.T) {
+	var tmp string
+	t.Run("skipped", func(t *testing.T) {
+		newTestEnv(t, func(*server.Config) {
+			tmp = filepath.Dir(t.TempDir())
+			t.Skip("skipped while the server is configured")
+		})
+	})
+	if tmp == "" {
+		t.Fatal("mutate never ran")
+	}
+	if open := openUnder(t, tmp); len(open) != 0 {
+		t.Errorf("after the skip these are still open: %q", open)
+	}
 }
 
 // get performs a keyed request with optional extra headers.
@@ -385,7 +402,7 @@ func TestGoldenResponses(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := env.req(t, tc.method, tc.path, tc.hdr)
 			body := readBody(t, resp)
-			golden := filepath.Join("testdata", "golden", tc.name+".json")
+			golden := testutil.PkgFile("testdata", "golden", tc.name+".json")
 			if *update {
 				if err := os.MkdirAll(filepath.Dir(golden), 0o755); err != nil {
 					t.Fatal(err)
@@ -1375,7 +1392,7 @@ func TestStrictProbeTakesALiveSlot(t *testing.T) {
 func TestProbeReportsSourceBitDepth(t *testing.T) {
 	env := newTestEnv(t, nil)
 	for _, fixture := range []string{"sine-f64.wav", "sine-f32.wav", "sine-s16.wav"} {
-		b, err := os.ReadFile(filepath.Join("..", "testdata", fixture))
+		b, err := os.ReadFile(testutil.PkgFile("..", "testdata", fixture))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1422,7 +1439,7 @@ func TestProbeReportsSourceBitDepth(t *testing.T) {
 // it reports what /art can serve, and /art needs the mapper.
 func TestProbeReadsContainerTagsWithoutAMapper(t *testing.T) {
 	env := newTestEnv(t, nil)
-	b, err := os.ReadFile(filepath.Join("..", "testdata", "chapters.m4b"))
+	b, err := os.ReadFile(testutil.PkgFile("..", "testdata", "chapters.m4b"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1764,7 +1781,7 @@ func TestDynamicsRejectsUnknownPreset(t *testing.T) {
 // the test says so rather than leaving the HLS half to be assumed.
 func TestWideSourceServesLossyDelivery(t *testing.T) {
 	env := newTestEnv(t, nil)
-	b, err := os.ReadFile(filepath.Join("..", "testdata", "sine-5_1-s16.flac"))
+	b, err := os.ReadFile(testutil.PkgFile("..", "testdata", "sine-5_1-s16.flac"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1804,7 +1821,7 @@ func TestWideSourceServesLossyDelivery(t *testing.T) {
 // so every tag on the output came off the container.
 func TestStreamEmbedsContainerTagsWithoutAMapper(t *testing.T) {
 	env := newTestEnv(t, nil)
-	b, err := os.ReadFile(filepath.Join("..", "testdata", "chapters.m4b"))
+	b, err := os.ReadFile(testutil.PkgFile("..", "testdata", "chapters.m4b"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1996,7 +2013,7 @@ func TestDamagedSourceIs422(t *testing.T) {
 // broken rip from a QuickTime file that simply has no ftyp box.
 func TestProbeReportsNotesSeparately(t *testing.T) {
 	env := newTestEnv(t, nil)
-	b, err := os.ReadFile(filepath.Join("..", "testdata", "chapters.m4b"))
+	b, err := os.ReadFile(testutil.PkgFile("..", "testdata", "chapters.m4b"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2077,7 +2094,7 @@ func TestStreamOfAMeasuredAdvisorySourceIsWhole(t *testing.T) {
 			// a probe of the body measures its payload, so it answers whatever
 			// is there and cannot say that something is missing. The source is
 			// the only thing that knows how much there should be.
-			if want := decodedFrames(t, "../testdata/sine-s16.wma", "wma"); got != want {
+			if want := decodedFrames(t, testutil.PkgFile("..", "testdata", "sine-s16.wma"), "wma"); got != want {
 				t.Errorf("the streamed %s holds %d samples, the source decodes to %d; the run was cut short",
 					f, got, want)
 			}

@@ -14,6 +14,7 @@ import (
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/internal/hls"
+	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/internal/timeline"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
@@ -23,7 +24,7 @@ import (
 func timelineSourcesEnv(t *testing.T) (*Server, []string) {
 	t.Helper()
 	root := t.TempDir()
-	wav, err := os.ReadFile(filepath.Join("..", "testdata", "sine-s16.wav"))
+	wav, err := os.ReadFile(testutil.PkgFile("..", "testdata", "sine-s16.wav"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +51,7 @@ func bareServer(t *testing.T, root string) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Server{eng: waxflow.New(), resolver: roots, timelines: store}
+	return &Server{eng: waxflow.New(), resolver: roots, timelines: store, trackCache: newTrackCache()}
 }
 
 // shortXingMP3 writes sine-cbr128.mp3 cut 100 bytes short into root: its Xing
@@ -58,7 +59,7 @@ func bareServer(t *testing.T, root string) *Server {
 // file's reference and the count a decode delivers.
 func shortXingMP3(t *testing.T, root string) (string, int64) {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "testdata", "sine-cbr128.mp3"))
+	raw, err := os.ReadFile(testutil.PkgFile("..", "testdata", "sine-cbr128.mp3"))
 	if err != nil {
 		t.Fatal(err)
 	}

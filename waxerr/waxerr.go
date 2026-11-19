@@ -9,6 +9,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
 )
 
 // Code is a machine-readable, kebab-case error code. Codes are part of the
@@ -127,6 +131,58 @@ func Wrap(code Code, msg string, err error) *Error {
 // error crossing a boundary is a bug to surface, not one to guess a code for.
 func Annotate(msg string, err error) *Error {
 	return Wrap(CodeOf(err), msg, err)
+}
+
+// Pathless returns err without the paths a file-system error quotes: the
+// cause alone of the *fs.PathError or *os.LinkError in it, so whatever wraps
+// that error is dropped with it, or err itself. It is for a package whose
+// caller has no boundary that applies Message.
+func Pathless(err error) error {
+	if pe, ok := errors.AsType[*fs.PathError](err); ok {
+		return pe.Err
+	}
+	if le, ok := errors.AsType[*os.LinkError](err); ok {
+		return le.Err
+	}
+	return err
+}
+
+// Message is err's text for a client. Every *fs.PathError and *os.LinkError
+// in err's chain whose path is absolute keeps its operation and its cause and
+// loses the path, so the text names no directory of the daemon's. A relative
+// path stays: it is the client's own reference under a root. Nil reads "".
+func Message(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	var walk func(error)
+	walk = func(e error) {
+		switch e := e.(type) {
+		case *fs.PathError:
+			if filepath.IsAbs(e.Path) {
+				msg = strings.ReplaceAll(msg, e.Op+" "+e.Path+": ", e.Op+": ")
+			}
+		case *os.LinkError:
+			if filepath.IsAbs(e.Old) || filepath.IsAbs(e.New) {
+				msg = strings.ReplaceAll(msg, e.Op+" "+e.Old+" "+e.New+": ", e.Op+": ")
+			}
+		}
+		switch u := e.(type) {
+		case interface{ Unwrap() error }:
+			if next := u.Unwrap(); next != nil {
+				walk(next)
+			}
+		case interface{ Unwrap() []error }:
+			for _, c := range u.Unwrap() {
+				if c != nil {
+					walk(c)
+				}
+			}
+		}
+	}
+	walk(err)
+	return msg
 }
 
 func (e *Error) Error() string {

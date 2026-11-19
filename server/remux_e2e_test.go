@@ -55,7 +55,7 @@ func TestRemuxServesTheMiddleRung(t *testing.T) {
 // /stream direct-plays the file, so the one-shot is the request that copies.
 func TestRemuxOfAWavPackHoleStreamsWhole(t *testing.T) {
 	env, rec := recordingEnv(t, nil)
-	src, err := os.ReadFile(filepath.Join("..", "container", "wv", "testdata", "seek-mono.wv"))
+	src, err := os.ReadFile(testutil.PkgFile("..", "container", "wv", "testdata", "seek-mono.wv"))
 	if err != nil {
 		t.Fatal(err)
 	}

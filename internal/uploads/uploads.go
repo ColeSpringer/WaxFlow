@@ -104,7 +104,7 @@ func Open(dir string, opts Options) (*Store, error) {
 }
 
 // scan rebuilds the index at boot. Put publishes the payload before the
-// sidecar, so a crash leaves either a complete pair, a ".tmp" file, or
+// sidecar, so a crash leaves either a complete pair, a temp file, or
 // an orphan half; everything but a complete pair is debris.
 func (s *Store) scan() error {
 	entries, err := os.ReadDir(s.dir)
@@ -120,7 +120,7 @@ func (s *Store) scan() error {
 		name := e.Name()
 		path := filepath.Join(s.dir, name)
 		switch {
-		case strings.HasSuffix(name, ".tmp"):
+		case posixfs.IsTemp(name):
 			s.log.Info("uploads: removing stray temp file", "file", name)
 			os.Remove(path)
 		case strings.HasSuffix(name, ".json") && ulid.Valid(strings.TrimSuffix(name, ".json")):
@@ -254,23 +254,14 @@ func (s *Store) spool(w io.Writer, r io.Reader) (int64, error) {
 	}
 }
 
-// writeSidecar persists an upload's metadata atomically. The ".json.tmp"
-// suffix keeps a torn write inside scan's ".tmp" debris sweep.
+// writeSidecar persists an upload's metadata atomically. A torn write is a
+// temp file, which scan sweeps.
 func (s *Store) writeSidecar(id string, sc sidecar) error {
 	b, err := json.Marshal(sc)
 	if err != nil {
 		return err
 	}
-	tmp := filepath.Join(s.dir, id+".json.tmp")
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if err := posixfs.Replace(tmp, filepath.Join(s.dir, id+".json")); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return nil
+	return posixfs.WriteFile(filepath.Join(s.dir, id+".json"), b, 0o644)
 }
 
 // Get returns the item and the absolute path of its spooled bytes.

@@ -17,6 +17,7 @@ import (
 	"github.com/colespringer/waxflow/client"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/internal/jobs"
+	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -345,7 +346,7 @@ func TestSplitCutsAreMeasuredNotDeclared(t *testing.T) {
 // than a job that fails with nothing written.
 func TestSplitLastCutPastTheMeasureIsRefused(t *testing.T) {
 	env := jobsEnv(t)
-	raw, err := os.ReadFile(filepath.Join("..", "testdata", "sine-cbr128.mp3"))
+	raw, err := os.ReadFile(testutil.PkgFile("..", "testdata", "sine-cbr128.mp3"))
 	if err != nil {
 		t.Fatal(err)
 	}

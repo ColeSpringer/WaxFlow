@@ -238,10 +238,10 @@ func (e *Engine) Analyze(ctx context.Context, src container.Source, hint string,
 
 // AnalyzeMedia analyzes an already-opened Media, the same measurement as
 // Analyze without the source-open step. It is the entry point for inputs
-// that are not a single sniffable Source: the HLS client assembles a
-// presentation from many fetched resources and exposes it as a
-// format.Media, which flows through here exactly like a local file. The
-// caller owns med and closes it.
+// that are not a single sniffable Source: a caller that assembles a
+// presentation from many fetched resources, as the tests' HLS client does,
+// hands it over as a format.Media, which flows through here exactly like a
+// local file. The caller owns med and closes it.
 func (e *Engine) AnalyzeMedia(ctx context.Context, med format.Media, opts AnalyzeOptions) (*AnalyzeResult, error) {
 	res, _, err := e.analyzeMedia(ctx, med, opts)
 	return res, err

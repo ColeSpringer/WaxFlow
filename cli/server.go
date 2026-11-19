@@ -194,7 +194,7 @@ func buildServerConfig(ctx context.Context, cfg config.Config, path string, vers
 					// unwired; report every config problem as invalid-request
 					// (400), the documented contract.
 					if waxerr.CodeOf(err) == waxerr.CodeNotFound {
-						err = waxerr.Wrap(waxerr.CodeInvalidRequest, "reload: config file unavailable", err)
+						err = waxerr.Wrap(waxerr.CodeInvalidRequest, "reload", err)
 					}
 					return source.ReloadResult{}, err
 				}

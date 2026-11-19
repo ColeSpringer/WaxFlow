@@ -131,10 +131,10 @@ func TestOpusEncodeRealtimeFactor(t *testing.T) {
 				t.Fatal(err)
 			}
 			for fi := range frames {
+				b.N = opusFrameSize
 				for c := range C {
 					copy(b.ChanF(c), tc.pcm[c][fi*opusFrameSize:(fi+1)*opusFrameSize])
 				}
-				b.N = opusFrameSize
 				if err := enc.Encode(b, emit); err != nil {
 					t.Fatal(err)
 				}
