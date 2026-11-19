@@ -529,7 +529,7 @@ behind an id, `GET <url>/<id>` answering `{"ref": "<root>/<path>"}`, and
 opens it through the roots. The one consumer of the 2026-07-17 seam,
 WaxDeck, stopped shipping an engine image with a catalog reader linked in
 and asked for exactly this, so the published image serves pids for any
-host. The README's `pid:` sources section is the host contract.
+host. The `pid:` lookup host section of docs/api.md is the host contract.
 
 The `cli.Flavor` seam and `catalogDB` stay as the extension surface for a
 build that resolves pids another way (against a catalog directly), with

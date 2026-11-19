@@ -56,7 +56,15 @@ func newDoctorCmd(flavor Flavor) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check the local environment a waxflow daemon needs",
-		Args:  usageArgs(cobra.NoArgs),
+		Long: `Doctor checks the environment a daemon would run in: the configuration
+resolves and is one a daemon starts under, a configured TLS pair loads (a
+non-loopback addr served without one is a warning), every root opens and
+reads, the cache, data and scratch directories accept writes, the pid
+lookup host answers (or the catalog opens, in a build with a catalog
+resolver), and a quick self-bench transcodes faster than realtime. ffmpeg
+is not needed, and its absence is reported as fine. It never contacts a
+running daemon; that is waxflow ping.`,
+		Args: usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := resolveConfig(cmd)
 			if err != nil {

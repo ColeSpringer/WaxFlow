@@ -119,7 +119,7 @@ A source reference names one input, wherever one is taken: `src`, a job's
 - `<root>/<relative/path>`: a file under a configured library root.
 - `upload:<id>`: a spooled one-shot upload (POST /uploads).
 - `pid:<id>`: an item the daemon's pid lookup maps to a root-relative
-  reference (`pidLookupURL`, the README's `pid:` sources section) or a
+  reference (`pidLookupURL`, see [`pid:` lookup host](#pid-lookup-host)) or a
   catalog resolver serves (`delivery.pid` in `/caps`), and `501
   unsupported-source` where neither is configured. A pid reference
   re-resolves to the item's current path on every request, or as often as
@@ -176,6 +176,72 @@ A path in the configuration is bytes too, and takes the same form:
 `roots[].path`, `dataDir`, `cacheDir`, `scratchDir`, `tlsCert`, `tlsKey`
 and `catalogDB`, in the file or in their `WAXFLOW_*` variables, are read
 from it, and `GET /roots` writes it.
+
+## `pid:` lookup host
+
+A `pid:<id>` reference names an item by the id its host (WaxDeck, say)
+hands out instead of by location. The stock daemon resolves it by asking
+that host over HTTP when `pidLookupURL` is configured
+([configuration](configuration.md#pid-sources)); without it, every build
+here answers `pid:` with `501 unsupported-source`.
+
+The host's side of the contract:
+
+- **Request.** `GET <pidLookupURL>/<id>` with `Accept: application/json`,
+  `User-Agent: waxflow`, and `Authorization: Bearer <pidLookupKey>` when a
+  key is configured. The id is 1 to 128 characters of `A-Z a-z 0-9 _ -` (a
+  WaxBin ULID, or a prefixed id); anything else is refused as
+  `400 invalid-request` before any request is made. The daemon connects to
+  the host directly; the proxy environment variables are not consulted.
+- **Answer.** `200` with a JSON object whose `ref` is a root-relative
+  reference under one of the daemon's roots,
+  `{"ref": "music/Artist/Album/01.flac"}`; other fields are ignored and the
+  body is capped at 64 KiB. `ref` is the reference's text form
+  ([Source references](#source-references)), which is how a host names a
+  file whose name is not UTF-8, as JSON holds no such bytes:
+  `{"ref": "pct:music/Artist/caf%E9.flac"}`, each stray byte and each `%`
+  written `%XX` behind the `pct:` marker. A host may write every answer
+  that way (`"pct:" + url.PathEscape(ref)` in Go, or `source.Ref(ref).Text()`
+  with this module, which escapes only what needs it). `404` or `410` means
+  no such item (`not-found` to the client); `400` or `422` means the host
+  rejected the id (`invalid-request`). `401`, `403`, `408`, `429`, any
+  `5xx`, a connection failure or an answer slower than 5 s read as the host
+  being down: clients get `503 catalog-unavailable` with `Retry-After: 2`,
+  and jobs wait for it (`waiting`) as they wait for an unmounted root; a
+  refused key is logged once and is the operator's to fix. Any other
+  status, redirects included, a `200` whose body is not that shape, or a
+  `ref` the roots refuse (no root, a scheme, a path that escapes its root,
+  a directory) is `500 internal`: the host is broken, not down. So is a
+  `ref` a JSON decoder would read as another name (a stray byte, or a
+  `\udXXX` escape of half a surrogate pair, which is how Python's
+  `json.dumps` writes such a name), and a `pct:` reference with a malformed
+  escape. Envelope text names the pid and a status, never the host or a
+  path (a signed URL's holder reads it); what the host answered, and why it
+  could not be reached, go to the daemon log, once per outage. Callers
+  asking for one pid at the same time share one request.
+- **Caching.** The daemon asks on every resolution unless the answer
+  carries `Cache-Control: max-age=N`, which lets it remember the reference
+  for N seconds (an hour at most; `no-store` or `no-cache` beside it means
+  do not). An answer is remembered only once its file opened, and a
+  remembered path that turns out gone is asked again once, so a rename the
+  host tracks heals on the next request. A path reused for a different
+  file inside the window is served under the stale pid until it expires: a
+  signed URL answers `410` (its identity no longer matches), while a keyed
+  request or a job, which pins no identity, gets the new file's bytes.
+- **Health.** `waxflow doctor` asks for the id `00000000000000000000000000`
+  and passes when the answer is one a client would get as `not-found`
+  (`404`, `410`) or `invalid-request` (`400`, `422`), or a `200` whose file
+  opens. An answer clients would get as `503` or `500`, such as a `200`
+  whose `ref` the roots refuse, fails it. The daemon itself never waits on
+  the host at startup.
+
+The resolved file keeps `pid:<id>` as its reference, so signed URLs and
+cache keys are keyed by pid: a rename or move the host tracks keeps a
+minted URL playing and its cache entries warm, while replaced bytes still
+die with `410 source-changed` (identity pins bytes, not locations,
+ADR-0003). Every surface that takes a source reference takes a pid
+(`/stream`, `/probe`, `/sign`, jobs, HLS, timelines, and
+`waxflow probe|transcode|split|sign`), and `/caps` reports `delivery.pid`.
 
 ## GET /probe, POST /probe
 

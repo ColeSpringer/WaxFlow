@@ -455,7 +455,7 @@ with true-peak limiting, dither).`,
 	// hand-written list had already fallen a format behind.
 	cmd.Flags().StringVar(&formatName, "format", "",
 		fmt.Sprintf("output format: %s (default: from output extension)", strings.Join(waxflow.OutputFormats(), ", ")))
-	cmd.Flags().StringVar(&containerName, "container", "", "container override where the format has one: adts for aac/he-aac, progressive/fragmented for aac/he-aac/alac (flat vs CMAF MP4), mka/webm for opus/aac/flac/wav, ogg for flac (default: the format's native container; a bare .aac output implies adts, and an mp4-family file output is progressive, the form players and taggers expect)")
+	cmd.Flags().StringVar(&containerName, "container", "", "container override where the format has one: adts for aac/he-aac, progressive/fragmented for aac/he-aac/alac (flat vs CMAF MP4), mka for aac/he-aac/flac/wav, mka or webm for opus/vorbis, ogg for flac (default: the format's native container; a bare .aac output implies adts, and an mp4-family file output is progressive, the form players and taggers expect)")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite the output if it exists")
 	cmd.Flags().IntVar(&rate, "rate", 0, "output sample rate in Hz (default: source rate)")
 	cmd.Flags().IntVar(&channels, "channels", 0, "output channel count: 1 or 2 (default: source layout)")
@@ -475,7 +475,7 @@ with true-peak limiting, dither).`,
 	cmd.Flags().StringVar(&opusSignal, "opus-signal", "auto", "Opus content hint: auto, voice, or music (opus output only)")
 	cmd.Flags().IntVar(&aacBitrate, "aac-bitrate", 0, "AAC target bit rate in kbit/s (aac and he-aac outputs; default: the encoder's, 128 for aac, 64 for he-aac, 32 under --he-v2)")
 	cmd.Flags().BoolVar(&heV2, "he-v2", false, "encode HE-AAC v2: parametric stereo over a mono SBR core, for low-rate stereo (he-aac output only; stereo sources)")
-	cmd.Flags().StringVar(&loudness, "loudness", "", "analyze: two-pass loudness (exact gain to the ReplayGain reference, measured RG tags on the output); the gain is measured after any --channels downmix")
+	cmd.Flags().StringVar(&loudness, "loudness", "", "analyze: two-pass loudness (exact gain to the ReplayGain reference, then RG tags measured from the output, or estimated from the source for Ogg-FLAC, WavPack, Monkey's Audio and fragmented MP4 outputs); the gain is measured after any --channels downmix")
 	cmd.Flags().BoolVar(&noTags, "no-tags", false, "skip the metadata passthrough (tags, chapters, art)")
 	return cmd
 }

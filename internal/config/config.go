@@ -66,7 +66,7 @@ type Root struct {
 }
 
 // Config holds the daemon/CLI configuration. Every field is documented in
-// the README configuration table. JSON keys are camelCase; the matching
+// docs/configuration.md. JSON keys are camelCase; the matching
 // environment variable is WAXFLOW_ plus the upper-snake key (addr ->
 // WAXFLOW_ADDR, logLevel -> WAXFLOW_LOG_LEVEL).
 type Config struct {

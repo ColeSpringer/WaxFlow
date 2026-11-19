@@ -25,6 +25,9 @@
 # local scratch config
 /waxflow.json
 
+# compose's environment file; the quick start keeps the API key there
+/.env
+
 # playwright install for the gated browser e2e (make client-e2e)
 /node_modules/
 /package.json

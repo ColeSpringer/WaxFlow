@@ -34,15 +34,15 @@ func TestCodecContainerSymmetry(t *testing.T) {
 	// symmetryGaps is the allowlist: every asymmetry that is known-open,
 	// whether deferred or decided against.
 	symmetryGaps := map[string]string{
-		"wma-encode":         "WMA encoding is a non-goal (README non-goals); decode-only by decision",
+		"wma-encode":         "WMA encoding is a non-goal (docs/quality-gates.md); decode-only by decision",
 		"asf-mux":            "ASF muxing is a non-goal; it exists only to carry WMA, which we do not encode",
-		"musepack-encode":    "Musepack encoding is a non-goal (README non-goals); decode-only by decision",
-		"wmalossless-encode": "WMA Lossless encoding is a non-goal (README non-goals); decode-only by decision",
-		"wmapro-encode":      "WMA Pro encoding is a non-goal (README non-goals); decode-only by decision",
-		"wmavoice-encode":    "WMA Voice encoding is a non-goal (README non-goals); decode-only by decision",
+		"musepack-encode":    "Musepack encoding is a non-goal (docs/quality-gates.md); decode-only by decision",
+		"wmalossless-encode": "WMA Lossless encoding is a non-goal (docs/quality-gates.md); decode-only by decision",
+		"wmapro-encode":      "WMA Pro encoding is a non-goal (docs/quality-gates.md); decode-only by decision",
+		"wmavoice-encode":    "WMA Voice encoding is a non-goal (docs/quality-gates.md); decode-only by decision",
 		"mpc-mux":            "Musepack muxing is a non-goal; the container exists only to carry a codec we do not encode",
-		"g711-encode":        "G.711 encoding is a non-goal (README non-goals); decode-only by decision",
-		"adpcm-encode":       "ADPCM encoding is a non-goal (README non-goals); decode-only by decision",
+		"g711-encode":        "G.711 encoding is a non-goal (docs/quality-gates.md); decode-only by decision",
+		"adpcm-encode":       "ADPCM encoding is a non-goal (docs/quality-gates.md); decode-only by decision",
 	}
 	// symmetryNonGoals marks the entries above that are decisions rather than
 	// deferrals, so a closed one reads as "revisit the decision" instead of
@@ -155,7 +155,7 @@ func TestCodecContainerSymmetry(t *testing.T) {
 			t.Errorf("symmetry gap %q is open but not in the allowlist: close it or record it with the change that will", name)
 		case !isOpen && listed && symmetryNonGoals[name]:
 			t.Errorf("symmetry gap %q was recorded as a decision, not a deferral, and something closed it anyway (%s); "+
-				"revisit the decision and its README non-goal rather than only deleting the entry", name, symmetryGaps[name])
+				"revisit the decision and its non-goal in docs/quality-gates.md rather than only deleting the entry", name, symmetryGaps[name])
 		case !isOpen && listed:
 			t.Errorf("symmetry gap %q has closed; delete its allowlist entry (%s)", name, symmetryGaps[name])
 		}

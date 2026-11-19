@@ -1,7 +1,9 @@
 # MAINTENANCE
 
 Operational procedures that gate releases. The policy behind them is
-ADR-0001 (clean-room) and docs/quality-gates.md.
+ADR-0001 (clean-room) and docs/quality-gates.md. Understood defects left
+unfixed on purpose, with the reason, go in docs/deferred-work.md; what
+WaxFlow needs from the sibling Wax repos goes in docs/upstream-requests.md.
 
 ## Clean-room procedure
 
@@ -231,8 +233,9 @@ across those targets; run it on a spare box, not CI).
       that a new `go.mod` entry needs justification is where that gets
       caught
 - [ ] `make soak` on a quiet box: streaming soak clean (no goroutine or
-      heap growth), TTFA p95 targets met; update the README performance
-      section if the numbers moved
+      heap growth), TTFA p95 targets met; if the numbers moved, update
+      them under Service targets in docs/quality-gates.md and the README's
+      Performance summary
 - [ ] Fuzz soak run for a release that touched any parser
       (`make fuzz FUZZTIME=160m`, see the fuzzing posture above)
 - [ ] Client matrix re-run for a release that touched delivery:

@@ -1,0 +1,13 @@
+# The image build needs only the Go sources and module files. Keep secrets
+# (the quick start's .env), music (compose's default ./library mount), VCS
+# history, build output and test data out of the build context. `.*` covers
+# every top-level dot entry: .env, .git and tool state.
+.*
+library
+bin
+dist
+node_modules
+fuzz-logs
+**/testdata
+**/*.test
+waxflow.json

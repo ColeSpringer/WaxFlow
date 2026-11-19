@@ -1,405 +1,196 @@
 # WaxFlow
 
-Self-hosted, **pure-Go**, on-the-fly audio transcoding: request -> decode -> DSP -> encode -> stream, tuned for time-to-first-audio, sample-exact seeking, and flaky
-mobile networks.
+A self-hosted audio transcoding and streaming server, written in pure Go.
+Point it at an audio file library and it streams those files as Opus, AAC, MP3,
+FLAC and more, progressively or over HLS, with sample-exact seeking and
+gapless playback. It also signs playback URLs, caches transcodes, applies ReplayGain
+loudness, carries tags and cover art through, and runs background jobs
+(whole-file transcodes, loudness analysis, splitting a CUE rip into tracks).
 
-The codecs (Opus, MP3, AAC-LC, HE-AAC v1, Vorbis, FLAC, ALAC, WavPack, Monkey's
-Audio, and WAV encoders, plus a wider decoder set) are written from scratch for Go 1.26 and published as public,
-**stdlib-only** packages under this module, CI-enforced by `make depcheck`,
-so anyone can import them.
+It ships as one static binary with no ffmpeg and no cgo. The codecs are
+written from scratch and can be imported on their own.
 
-## Status
+## Formats
 
-Everything below is tested, capability-gated
-(`/caps` never advertises what does not work), and held to the pinned
-gates in [docs/quality-gates.md](docs/quality-gates.md).
+| Codec | Reads from | Writes to |
+|---|---|---|
+| FLAC | .flac, Ogg, MP4, Matroska | .flac, Ogg, Matroska, HLS |
+| ALAC | MP4 | MP4, HLS |
+| WavPack | .wv | .wv |
+| Monkey's Audio | .ape | .ape |
+| PCM | WAV, AIFF, MP4/MOV, Matroska | WAV, AIFF, Matroska |
+| MP3 | .mp3, MP4/MOV, WAV, AIFF-C | .mp3 |
+| AAC-LC, HE-AAC v1/v2 | MP4, ADTS, Matroska | MP4, ADTS, Matroska, HLS |
+| Opus | Ogg, Matroska/WebM, MP4 | Ogg, Matroska/WebM, HLS |
+| Vorbis | Ogg, Matroska/WebM | Ogg, Matroska/WebM |
+| Musepack SV7/SV8 | .mpc | |
+| WMA, WMA Pro, WMA Lossless, WMA Voice | ASF (.wma) | |
+| G.711, IMA ADPCM | WAV, AIFF-C, MOV | |
+| Microsoft ADPCM | WAV, MOV | |
 
-- **Encoders** (all from scratch, stdlib-only): Opus (full SILK, hybrid,
-  and CELT with the tonality analyser; at quality parity with libopus
-  on the reference `opus_compare` metric across music and speech
-  corpora), MP3 (psychoacoustic model, joint stereo, CBR and VBR, LAME
-  gapless tag), AAC-LC (window switching, TNS, M/S, two-loop
-  quantization; at parity with ffmpeg's native encoder on the ODG-proxy
-  gate), HE-AAC v1 and v2 (SBR over a half-rate AAC-LC core:
-  transient-aware envelope grids, tonality-driven noise floors and
-  inverse filtering, coupled stereo; v2 adds parametric stereo over a
-  phase-aligned mono downmix, selected explicitly; explicit signalling
-  in M4A, implicit in ADTS),
-  Vorbis (product-lattice VQ residue books, perceptual
-  coupled-stereo classification; ODG-proxy gate green), FLAC (levels 0-8,
-  smaller than `flac -5` at level 5), ALAC (bit-exact round trip),
-  WavPack (four compression levels, each a wider search over candidate
-  decorrelation cascades; at parity with libwavpack on the official
-  suite's own audio, and ahead of it at the fast setting), Monkey's
-  Audio (three compression levels; the coded frames are the reference
-  encoder's frames, byte for byte), and WAV/AIFF PCM.
-- **Decoders / inputs**: FLAC (bit-exact on the IETF suite), WAV, AIFF,
-  MP3 (bare, and in MP4/M4A, QuickTime `.mov`, WAV and AIFF-C; the last
-  two are read-only, and `format=mp3` on one copies its frames into a bare
-  `.mp3` rather than re-encoding them), AAC-LC, HE-AAC v1 and
-  v2 (SBR+PS, ffmpeg-differential-verified),
-  and ALAC in MP4/M4A/M4B, uncompressed PCM in MP4/MOV (QuickTime's
-  `sowt`/`twos`/`NONE`/`raw `/`in24`/`in32`/`fl32`/`fl64` fourccs, its
-  version 2 `lpcm` flags and its `ms` entries for WAVE format tags 1 and 3,
-  plus ISO `ipcm`/`fpcm`, with a multichannel track's layout read from the
-  file's own `chan` or `chnl` box and its channels reordered into the
-  pipeline's order where the file's order differs; **decode only, and
-  writing it there is a non-goal**, a WAV serving every such use better),
-  G.711 A-law and mu-law and both 4-bit ADPCM families (IMA/DVI in its WAV
-  and QuickTime `ima4` layouts, and Microsoft ADPCM), each bit-exact
-  against ffmpeg wherever the container spells it: a WAV format tag, an
-  AIFF-C compression type, or a QuickTime fourcc or `ms` entry in a
-  progressive or fragmented movie
-  (**decode only, and encoding any of them is a non-goal**: they are lossy
-  codings of exactly what a WAV already carries losslessly, so the only
-  reason to write one is a reader that takes nothing else, and every such
-  reader also takes PCM),
-  ADTS (implicit HE-AAC detected), Opus (all
-  RFC 6716/8251 conformance vectors pass), Vorbis, Ogg, Matroska/WebM,
-  WavPack (bit-exact on the official test suite: 8- to 32-bit integers,
-  the three stereo block modes, APEv2 tags; encodes too), Monkey's Audio
-  (all five compression levels, 8/16/24-bit, APEv2 tags; encodes the
-  first three), Windows Media Audio 1 and 2 in ASF (mono and stereo,
-  8-48 kHz, tags and Marker Object chapters; **decode only, and encoding
-  it is a non-goal**: nothing plays WMA that does not also play a format
-  this tree writes better), Windows Media Audio 9.2 Lossless
-  (bit-exact against the encoder's own input, 16- and 24-bit, stereo and
-  5.1 at 44.1 to 96 kHz; **decode only, and encoding it is a non-goal**
-  for the same reason, and because the only encoder for it is a Windows
-  component), and
-  Windows Media Audio 9/10 Professional (differential-verified against
-  ffmpeg on files Windows' own encoder wrote, 16- and 24-bit, stereo and
-  5.1 at 44.1 to 96 kHz; **decode only, and encoding it is a non-goal**
-  for the same reasons as the other two),
-  Windows Media Audio Voice (the CELP speech coder, differential-verified
-  the same way, mono at 8 to 22.05 kHz across the whole seven-format
-  envelope Windows' encoder offers; **decode only, and encoding it is a
-  non-goal** for the same reasons again), and
-  Musepack SV7 and SV8 (bit-identical to the reference decoder's float
-  output; true gapless, noise substitution, APEv2 tags, SV8 chapters and
-  ReplayGain; **decode only, and encoding it is a non-goal** for the same
-  reason, the only encoder in existence being LGPL).
-  Sample-exact
-  seeking everywhere, gapless honored per format (LAME tag, iTunSMPB,
-  edit lists or a fragmented movie's segment index when it has none, Ogg
-  pre-skip/end-trim, Matroska CodecDelay). One format
-  charges for that exactness: QuickTime `ima4` carries its predictor
-  across blocks and a block header restates only nine bits of it, so a
-  seek decodes from the file's start rather than from the block, at
-  roughly a second per hour of stereo 44.1 kHz audio. A WMA Pro
-  stream that sets the low-bit-rate tool no decoder outside Windows
-  implements is refused by name, as is the second registered WMA Voice
-  tag (0x000B), which no reference decoder reads. A WAV, AIFF-C or
-  MP4/MOV payload in a codec this build does not decode is refused by
-  that codec's name too, the same name the sibling tag reader reports
-  for the same bytes.
-- **DSP**: Kaiser windowed-sinc resampling (`hq`/`fast`), BS.775
-  downmix (on a timeline, applied per member before the seam so a
-  member's level is its own fold's), gain with true-peak limiting, TPDF
-  and shaped dither, EBU R128 / BS.1770-4 loudness
-  (differential-verified against ffmpeg).
-- **Service**: progressive streaming with a direct-play/transmux/
-  transcode ladder, sample-exact `t=` seeks, HMAC-signed URLs pinned to
-  source identity, a write-through cache with read-behind delivery and
-  full ranges on completed entries, HLS (CMAF/fMP4, stateless signed
-  URLs, bitrate ladders, byte-identical segment regeneration), async
-  jobs with restart safety (transcode, analyze, and the gapless
-  merge/split pair: a lossless split rejoins bit for bit, less any data
-  track it skipped, and a split takes a CUE sheet or sample cut points),
-  uploads,
-  loudness analysis with ReplayGain
-  tagging, metadata passthrough (tags, chapters, cover art, lyrics),
-  admission control, Prometheus metrics, named client delivery profiles
-  in `/caps`, and a full API contract in [docs/api.md](docs/api.md).
-- **Structure**: the root module is the importable, dependency-free
-  audio library; its `go.mod` has an **empty require block**, so
-  importing `codec/flac` (or any public package) pulls in nothing.
-  Beside the codecs and containers it holds the two text formats a host
-  shares with the daemon, `cue` (CUE sheets) and `m3u8` (HLS playlists).
-  The CLI/daemon binary lives in the nested `cli/` module (cobra +
-  waxlabel), the tests that need third-party oracles in `oracletest/`,
-  and a worked example of extending the CLI in `examples/catalogcli/`.
-
-## Performance
-
-Measured by the committed harnesses on the reference dev box (12-core
-x86-64, Linux, loopback HTTP; `server/load_soak_test.go`, re-run per
-release with `make soak`):
-
-- **Time to first audio** (`TestTTFAPercentiles`, n=50): cold transcode
-  (also the cost of every `t=` seek, since each offset is its own cache
-  entry) p50 0.6 ms / p95 0.9 ms; warm (completed cache entry) p50
-  0.21 ms / p95 0.24 ms; seek into a 60 s FLAC source (bisection seek +
-  pipeline start) p50 1.7 ms / p95 2.7 ms. Targets: p95 <300 ms warm,
-  <800 ms cold, met with three orders of headroom on this box; network
-  and disk latency dominate in deployment.
-- **HLS seek-to-segment** (variant-worker restart): worst 49 ms in the
-  restart-heavy e2e fetch pattern, p95 well under the 1 s target.
-- **Load** (`TestLoadMixedTraffic`): 6,350 req/s of mixed live
-  transcodes, seeks, direct play, probes, and HLS over 8 concurrent
-  workers with zero malformed responses (503s under saturation carry
-  the honest `overloaded` envelope).
-- **Streaming soak** (`TestStreamingSoak`, goroutine/heap leak watch):
-  918k requests over a sustained run with full reads, mid-body client
-  disconnects, seeks, and HLS fetches; goroutines returned to baseline
-  and heap stayed flat (~1.3 MiB). The nightly job runs a 20-minute
-  soak; `make soak` runs 30 minutes locally.
-- **Codec throughput** (per core, `make bench`): every codec clears its
-  pinned floor in [docs/quality-gates.md](docs/quality-gates.md) by a
-  wide margin (Opus encode 55-67x realtime, decode 274-514x; MP3 encode
-  50-69x, decode ~200x; FLAC encode ~200x, decode 490-870x; AAC encode
-  20-68x, decode ~240x; Musepack decode 690-1900x).
+Lossless decoders are bit-exact, lossy ones match the reference decoder or
+ffmpeg within tight error bounds, and Opus passes all the RFC 6716/8251 test
+vectors; [docs/quality-gates.md](docs/quality-gates.md) has the numbers. A
+variant a decoder does not handle (WavPack hybrid, say) is refused by name,
+and `waxflow probe` tells you what a file is.
 
 ## Quick start
 
 ```sh
-# Hardened standalone deployment, port 4418. Publishing a non-loopback
-# port requires API keys (the daemon fails closed without them).
-WAXFLOW_API_KEYS=$(openssl rand -hex 24) docker compose up -d
-curl http://localhost:4418/ping
-curl -H "X-API-Key: $WAXFLOW_API_KEYS" http://localhost:4418/caps
+git clone https://github.com/ColeSpringer/WaxFlow && cd WaxFlow
+grep -qs '^WAXFLOW_API_KEYS=' .env || echo "WAXFLOW_API_KEYS=$(openssl rand -hex 24)" >> .env
+echo "WAXFLOW_LIBRARY=$HOME/Music" >> .env
+docker compose up -d
 ```
 
-Put music under `./library`, or point the compose bind mount elsewhere
-with `WAXFLOW_LIBRARY=/path/to/music`, and stream: mint a URL with `POST
-/sign`, or try the dev demo page (`--demo`). `WAXFLOW_LIBRARY` is
-compose's variable for that mount, not a daemon setting; the daemon reads
-`roots` / `WAXFLOW_ROOTS`. Or from source (Go 1.26):
+Docker Compose reads `.env` on every run, so the key stays put, and mounts
+the `WAXFLOW_LIBRARY` folder (default `./library`) as the root `lib`. Every
+`up` pulls the published image, so rerunning it updates. Until a release
+exists, the pull reports `denied` and Compose uses an image built from the
+checkout (add `--build` after a `git pull`). The port is plain HTTP: put
+TLS in front (`tlsCert`/`tlsKey`, or a reverse proxy) before exposing it
+beyond your LAN.
+
+Stream a file. `src` is the root name `lib` plus a path inside your library;
+add `&t=95.5` to start 95.5 seconds in.
+
+```sh
+KEY=$(sed -n 's/^WAXFLOW_API_KEYS=//p' .env)
+curl -H "X-API-Key: $KEY" -o song.opus \
+  "http://localhost:4418/stream?src=lib/Artist/Album/01.flac&format=opus"
+```
+
+Players that cannot send a header get a signed URL instead, for a
+progressive stream or an HLS playlist. Each command prints a path to put
+after `http://localhost:4418`.
+
+```sh
+curl -s -H "X-API-Key: $KEY" http://localhost:4418/sign \
+  -d '{"params": {"src": "lib/Artist/Album/01.flac", "format": "aac"}}' | jq -r .url
+curl -s -H "X-API-Key: $KEY" http://localhost:4418/sign \
+  -d '{"path": "/hls/master.m3u8", "params": {"src": "lib/Artist/Album/01.flac", "format": "aac"}}' | jq -r .url
+```
+
+From source (Go 1.26), where loopback needs no key and
+http://127.0.0.1:4418/demo probes and plays files in the browser:
 
 ```sh
 make build
-./bin/waxflow server --demo &   # loopback: keyless is allowed
-./bin/waxflow ping
-open http://127.0.0.1:4418/demo
+WAXFLOW_ROOTS=lib=$HOME/Music ./bin/waxflow server --demo
 ```
+
+Tagged releases publish binaries for Linux, macOS and Windows, and an
+amd64/arm64 image at `ghcr.io/colespringer/waxflow`.
 
 ## Configuration
 
-Precedence: **flag > `WAXFLOW_*` env > JSON config file > default**
-(config file via `--config` or `WAXFLOW_CONFIG`; unknown keys are rejected).
-The file is UTF-8, and one that is not, or that escapes half a surrogate
-pair, is refused rather than read with those replaced. A path that is not
-UTF-8 (a root's, `dataDir`, `cacheDir`, `scratchDir`, `tlsCert`, `tlsKey`,
-`catalogDB`) is written in the text form a reference takes
-([docs/api.md](docs/api.md#source-references)), in the file or in its
-`WAXFLOW_*` variable: `pct:/mnt/caf%E9`.
-
-A key whose value is malformed is refused by every command that loads the
-configuration (`server`, `doctor`, `sign`, `transcode`, `split`, `ping`,
-`cache`, and a probe of a `pid:` or `upload:` reference; a probe of a plain
-path loads none). Two rules belong to a daemon's start alone, so `server`
-and `doctor` apply them and a local `transcode` does not: no keys on a
-non-loopback `addr`, and a `debugAddr` that is not loopback.
+Flags beat `WAXFLOW_*` environment variables, which beat a JSON config file
+(`--config`), which beats the defaults. The settings most deployments touch:
 
 | Key | Env | Default | Purpose |
 |---|---|---|---|
-| `addr` | `WAXFLOW_ADDR` | `127.0.0.1:4418` | listen address (compose widens to `0.0.0.0`) |
-| `logLevel` | `WAXFLOW_LOG_LEVEL` | `info` | `debug`\|`info`\|`warn`\|`error` |
-| `roots` | `WAXFLOW_ROOTS` | none | named library roots; JSON `[{"name","path"}]`, env `name=path,name2=path2`; each opened via `os.Root` (no escape, symlinks confined), files validated regular and size-capped; a root whose folder does not open, or is empty, starts unmounted (see below) |
-| `pidLookupURL` | `WAXFLOW_PID_LOOKUP_URL` | none | the host endpoint that maps `pid:<id>` source references to root-relative ones, `GET <url>/<id>` (see [`pid:` sources](#pid-sources)); read at start |
-| `pidLookupKey` | `WAXFLOW_PID_LOOKUP_KEY` | none | bearer token sent with every pid lookup |
-| `catalogDB` | `WAXFLOW_CATALOG_DB` | none | WaxBin catalog path for a build that injects a catalog resolver through `cli.Flavor` (see [`pid:` sources](#pid-sources)); exclusive with `pidLookupURL`. No build here serves it: this server refuses to start with it set (a one-shot on a plain path opens no resolver, so it neither honors nor refuses it) |
-| `apiKeys` | `WAXFLOW_API_KEYS` | none | control-API keys (comma-separated in env); a key no request can present, an empty one or one with white space at an end, is refused. **Fail closed**: required on a non-loopback `addr` unless `allowUnauthenticated` |
-| `allowUnauthenticated` | `WAXFLOW_ALLOW_UNAUTHENTICATED` | `false` | explicit opt-in to keyless on non-loopback |
-| `sourceMaxBytes` | `WAXFLOW_SOURCE_MAX_BYTES` | 4 GiB | per-source open cap |
-| `metricsKey` | `WAXFLOW_METRICS_KEY` | none | additionally unlocks `GET /metrics` |
-| `signingSecret` | `WAXFLOW_SIGNING_SECRET` | auto-generated into `dataDir` (0600) | HMAC key for signed URLs; `kid:hex,kid2:hex` rotation list or a literal secret |
-| `allowedOrigins` | `WAXFLOW_ALLOWED_ORIGINS` | none | CORS allowlist for playback endpoints |
-| `dataDir` / `cacheDir` | `WAXFLOW_DATA_DIR` / `WAXFLOW_CACHE_DIR` | platform dirs | daemon state (signing secret, job store) / transcode cache |
-| `scratchDir` | `WAXFLOW_SCRATCH_DIR` | temp dir + `/waxflow` | upload spool (the hardened container mounts a tmpfs) |
-| `uploadMaxBytes` / `uploadTTL` | `WAXFLOW_UPLOAD_MAX_BYTES` / `WAXFLOW_UPLOAD_TTL` | 2 GiB / `1h` | one upload's size cap / spool eviction after creation (Go duration, `0` never) |
-| `scratchMaxBytes` | `WAXFLOW_SCRATCH_MAX_BYTES` | 8 GiB | aggregate spool cap (`uploadMaxBytes` only caps one upload) |
-| `cacheMaxBytes` / `cacheMaxAge` | `WAXFLOW_CACHE_MAX_*` | 10 GiB / off | LRU eviction policy (`cacheMaxAge` is a Go duration) |
-| `liveSlots` / `jobSlots` | `WAXFLOW_*_SLOTS` | NumCPU-1 / 2 | live admission pool (over limit means 503 + `Retry-After: 2`) / concurrent job workers (jobs queue and also pause while the live pool is saturated) |
-| `defaultGain` | `WAXFLOW_DEFAULT_GAIN` | `track` | gain mode when `gain=` absent: `off`, `track`, `album`, or a dB number |
-| `resampleProfile` | `WAXFLOW_RESAMPLE_PROFILE` | `hq` | `hq` or `fast` (constrained hosts) |
-| `tlsCert` / `tlsKey` | `WAXFLOW_TLS_*` | none | native TLS; else put a terminating proxy in front (ADR-0007) |
-| `debugAddr` | `WAXFLOW_DEBUG_ADDR` | off | loopback-only pprof listener |
-| `paceBurstSeconds` / `paceFactor` | `WAXFLOW_PACE_*` | 30 / 2.0 | read-behind delivery pacing (factor 0 disables) |
-| `liveIdleGrace` / `hlsIdleGrace` | `WAXFLOW_LIVE_IDLE_GRACE` / `WAXFLOW_HLS_IDLE_GRACE` | `5s` / `60s` | stop a `/stream` encode once every client reading it has been gone this long / an HLS variant worker once nobody has fetched from it this long (Go durations, `0` never); see ADR-0012 |
-| `demo` | `WAXFLOW_DEMO` | `false` | serve the browser test page at `/demo` (dev only) |
+| `roots` | `WAXFLOW_ROOTS` | none | library folders (env form `name=path,name2=path2`) |
+| `apiKeys` | `WAXFLOW_API_KEYS` | none | required off loopback, unless `allowUnauthenticated` is set |
+| `addr` | `WAXFLOW_ADDR` | `127.0.0.1:4418` | listen address |
+| `tlsCert`, `tlsKey` | `WAXFLOW_TLS_CERT`, `WAXFLOW_TLS_KEY` | none | serve TLS directly |
+| `cacheDir`, `cacheMaxBytes` | `WAXFLOW_CACHE_DIR`, `WAXFLOW_CACHE_MAX_BYTES` | platform dir, 10 GiB | transcode cache |
 
-**Runtime root reload.** A daemon configured through the JSON `roots` (not
-`WAXFLOW_ROOTS`) serves `POST /roots/reload`, which re-reads the config and
-reconciles its live library roots so a root added at runtime streams
-without a restart. It reconciles only what the resolver owns (the roots and
-`sourceMaxBytes`); every other setting still needs a restart. It is wired
-only when a reload could do something, a config file is set and
-`WAXFLOW_ROOTS` is not pinning roots, so env-only and no-config deployments
-report `delivery.rootsReload: false` in `/caps` and keep serving new roots
-by direct download. The integration contract for a caller that adds a root
-(WaxDeck): write the root into the sidecar's JSON config **atomically**
-(write a temp file, then rename), then `POST /roots/reload`; the atomic
-write keeps a reload from reading a half-written file and `400`ing.
-
-**Unmounted roots.** A root whose folder does not open, or is empty (an
-unplugged drive, a mount point whose drive has not arrived, a mount that
-failed), does not stop the daemon or fail a reload: the other roots serve,
-requests on that one answer `503 root-unavailable` with `Retry-After: 2`,
-and it mounts on the first request after its folder holds something, or
-within 10 s by the daemon's sweep, which also notices a root whose folder
-goes away later. A folder that stops answering before it mounts (a dead
-network mount) holds no request, reload or sweep for more than 5 s; one that
-hangs while mounted holds the requests reading it, as any blocked read does.
-The log names each change
-once, whoever finds it (Warn for a missing or empty folder, Error for
-anything else, a mistake that needs an operator), `GET /roots` lists every
-root with its state, a reload's `unmounted` field names the roots it leaves
-down, jobs on an unavailable root wait for it instead of failing, and
-`waxflow doctor` fails each one by name (an empty one is a warning).
+Every setting is in [docs/configuration.md](docs/configuration.md).
+`waxflow doctor` checks a configuration before you deploy it.
 
 ## CLI
 
-- `waxflow server`: run the daemon (`--demo` for the browser test page)
-- `waxflow probe <file>`: identify a file and print stream parameters
-  (`--json` for the schemaVersion'd machine shape, identical to `GET
-  /probe`; `--strict` to treat tolerated input damage as errors, which on a
-  frame-indexed payload such as MP3 or ADTS also walks it to its end so the
-  verdict covers the whole file; without it a probe reads headers, and
-  damage past the head is reported by the read that reaches it)
-- `waxflow transcode <in> <out>`: local one-shot file-to-file transcode
-  through the same engine the daemon uses (`--format wav|aiff|flac|mp3|aac|he-aac|alac|opus|vorbis|wavpack|ape`,
-  `--flac-level`, `--wavpack-level`, `--ape-level`, `--mp3-bitrate`, default from the output extension;
-  `--force` to overwrite). An mp4-family output (`.m4a`, `.m4b`, alac)
-  is written flat: a file can satisfy the header back-patch that form
-  needs, and it is the shape players and taggers expect. The fragmented
-  (CMAF) form is for delivery, and `/stream` and HLS keep it. Metadata
-  (tags, chapters, cover art, lyrics) passes through onto the output
-  automatically (`--no-tags` to skip); `--loudness analyze` measures the
-  source, applies the exact gain to the ReplayGain reference, and writes
-  measured RG tags on the output. Ogg-FLAC, WavPack, and Monkey's Audio outputs get a
-  projection there rather than a measurement, and say so: their muxer
-  takes its tags before the encode and cannot be patched afterward.
-- `waxflow split <in> <dir>`: cut a single-file rip into one output per
-  track, from a CUE sheet (`--cue album.cue`) or explicit source-sample
-  offsets (`--at`). Cut points are samples either way: a sheet's `MM:SS:FF`
-  times are CD frames of 1/75 s, which every CD-family rate divides exactly
-  (44100/75 = 588), so a boundary converts with no rounding, where seconds
-  would land a sample off and click at every join. The default FLAC output
-  at the source's own rate makes the cut bit-exact, so the pieces rejoin
-  into the original, less a mixed-mode disc's data track, which is skipped
-  rather than written as audio, under the disc's own numbering. `--dry-run`
-  prints the pieces and their ranges
-- `waxflow sign --src lib/a.flac`: mint a signed playback URL offline
-  (ADR-0003; uses the same secret and roots the daemon holds)
-- `waxflow cache stats|gc`: inspect or evict a running daemon's cache
-- `waxflow doctor`: check the local environment a daemon needs: config
-  resolves and is one a daemon starts under, a configured TLS pair loads
-  (and a non-loopback `addr` served without one is a warning), every root
-  opens and reads, the cache/data/scratch dirs
-  accept writes, the pid lookup host answers (or the catalog opens, in a
-  build with a catalog resolver), a quick self-bench transcodes faster
-  than realtime, and the
-  absence of ffmpeg is confirmed to be fine (`--json` for the machine
-  shape)
-- `waxflow ping`: liveness probe; the container HEALTHCHECK
-- `waxflow version`: version and build info
-- `waxflow exit-codes`: print the documented exit-code contract (0 ok,
-  1 internal, 2 invalid, 3 not-found, 4 io, 5 unsupported, 6 canceled,
-  7 unauthorized, 8 overloaded, 9 malformed)
+```
+waxflow server                       run the daemon
+waxflow transcode <in> <out>         convert a file locally (format from the extension or --format)
+waxflow probe <file>                 show what a file contains (--json for the API's shape)
+waxflow split <in> <dir> --cue <f>   cut a single-file rip into tracks, losslessly
+waxflow sign --src <ref>             mint a signed playback URL
+waxflow doctor                       check config, roots, directories and speed
+waxflow cache stats|gc               inspect or trim a running daemon's cache
+waxflow ping | version | exit-codes
+```
 
-The HTTP surface is documented in [docs/api.md](docs/api.md).
+`waxflow <command> --help` lists each command's flags.
 
-## `pid:` sources
+## Go library
 
-A `pid:<id>` reference names an item by the id its host (WaxDeck, say)
-hands out instead of by location. The stock daemon resolves it by asking
-that host over HTTP when `pidLookupURL` is configured; without it, every
-build here answers `pid:` with `501 unsupported-source`.
+The root module requires nothing, so `go get github.com/colespringer/waxflow`
+pulls in no other module.
 
-The host's side of the contract:
+```go
+package main
 
-- **Request.** `GET <pidLookupURL>/<id>` with `Accept: application/json`,
-  `User-Agent: waxflow`, and `Authorization: Bearer <pidLookupKey>` when a
-  key is configured. The id is 1 to 128 characters of `A-Z a-z 0-9 _ -` (a
-  WaxBin ULID, or a prefixed id); anything else is refused as
-  `400 invalid-request` before any request is made. The daemon connects to
-  the host directly; the proxy environment variables are not consulted.
-- **Answer.** `200` with a JSON object whose `ref` is a root-relative
-  reference under one of the daemon's roots,
-  `{"ref": "music/Artist/Album/01.flac"}`; other fields are ignored and the
-  body is capped at 64 KiB. `ref` is the reference's text form
-  ([docs/api.md](docs/api.md#source-references)), which is how a host names
-  a file whose name is not UTF-8, as JSON holds no such bytes:
-  `{"ref": "pct:music/Artist/caf%E9.flac"}`, each stray byte and each `%`
-  written `%XX` behind the `pct:` marker. A host may write every answer
-  that way (`"pct:" + url.PathEscape(ref)` in Go, or `source.Ref(ref).Text()`
-  with this module, which escapes only what needs it). `404` or `410` means no
-  such item (`not-found` to the client); `400` or `422` means the host
-  rejected the id (`invalid-request`). `401`, `403`, `408`, `429`, any `5xx`, a connection
-  failure or an answer slower than 5 s read as the host being down: clients
-  get `503 catalog-unavailable` with `Retry-After: 2`, and jobs wait for it
-  (`waiting`) as they wait for an unmounted root; a refused key is logged
-  once and is the operator's to fix. Any other status, redirects included,
-  a `200` whose body is not that shape, or a `ref` the roots refuse (no
-  root, a scheme, a path that escapes its root, a directory) is
-  `500 internal`: the host is broken, not down. So is a `ref` a JSON
-  decoder would read as another name (a stray byte, or a `\udXXX` escape of
-  half a surrogate pair, which is how Python's `json.dumps` writes such a
-  name), and a `pct:` reference with a malformed escape. Envelope text
-  names the pid and a status, never the host or a path (a signed URL's
-  holder reads it);
-  what the host answered, and why it could not be reached, go to the daemon
-  log, once per outage. Callers asking for one pid at the same time share
-  one request.
-- **Caching.** The daemon asks on every resolution unless the answer
-  carries `Cache-Control: max-age=N`, which lets it remember the reference
-  for N seconds (an hour at most; `no-store` or `no-cache` beside it means
-  do not). An answer is remembered only once its file opened, and a
-  remembered path that turns out gone is asked again once, so a rename the
-  host tracks heals on the next request. A path reused for a different
-  file inside the window is served under the stale pid until it expires: a
-  signed URL answers `410` (its identity no longer matches), while a keyed
-  request or a job, which pins no identity, gets the new file's bytes.
-- **Health.** `waxflow doctor` asks for the id `00000000000000000000000000`
-  and reads `404`, `400` or `200` as the host answering. The daemon itself
-  never waits on the host at startup.
+import (
+	"context"
+	"log"
+	"os"
 
-The resolved file keeps `pid:<id>` as its reference, so signed URLs and
-cache keys are keyed by pid: a rename or move the host tracks keeps a
-minted URL playing and its cache entries warm, while replaced bytes still
-die with `410 source-changed` (identity pins bytes, not locations,
-ADR-0003). Every surface that takes a source reference takes a pid
-(`/stream`, `/probe`, `/sign`, jobs, HLS, timelines, and
-`waxflow probe|transcode|split|sign`), and `/caps` reports `delivery.pid`.
-`pidLookupURL` is read at start; change it with a restart.
+	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/container"
+)
 
-A build that resolves `pid:` some other way (against a catalog directly)
-still injects its resolver through the `cli.Flavor` seam (`cli/root.go`),
-with `catalogDB` as the configuration field carried across it, exclusive
-with `pidLookupURL`; `examples/catalogcli/` is a working CLI built that
-way. A Flavor that is present but unconfigured hands `pid:` to the stock
-chain, adding its own key to the refusal.
+func main() {
+	in, err := os.Open("in.flac")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer in.Close()
+	src, err := container.FileSource(in)
+	if err != nil {
+		log.Fatal(err)
+	}
+	out, err := os.Create("out.opus")
+	if err != nil {
+		log.Fatal(err)
+	}
+	opts := waxflow.TranscodeOptions{Format: "opus"}
+	if _, err := waxflow.New().Transcode(context.Background(), src, "", out, opts); err != nil {
+		log.Fatal(err)
+	}
+	if err := out.Close(); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+The pieces are packages of their own: `codec/...` (one per codec),
+`container/...`, `dsp/...` (resampling, mixing, gain, loudness), `cue`,
+`m3u8`, and `client`, a Go client for the HTTP API.
+
+## Performance
+
+On a 12-core x86-64 Linux box over loopback (`make soak`, `make bench`):
+
+- First audio in under 1 ms at p95 for a fresh transcode, 0.24 ms from
+  cache.
+- 6,350 requests/s of mixed streaming, seeking, probing and HLS on 8
+  workers; a 918k-request soak showed no goroutine or heap growth.
+- Per core, Opus encodes at 55-67x realtime, MP3 at 50-69x, AAC at 20-68x
+  and FLAC at about 200x; FLAC, MP3, AAC, Opus and Musepack decode at 200
+  to 1900x.
+
+## Documentation
+
+- [docs/api.md](docs/api.md): the HTTP API (streaming, HLS, signed URLs, jobs, `pid:` lookup)
+- [docs/configuration.md](docs/configuration.md): every setting
+- [docs/client-matrix.md](docs/client-matrix.md): which players were tested with which formats
+- [docs/quality-gates.md](docs/quality-gates.md): codec quality and speed gates
+- [docs/adr/](docs/adr/README.md): design decisions
 
 ## Development
 
 ```sh
-make check           # gofmt + vet + test + test-race + nested modules + depcheck
-make test            # root-module suite, no race detector (the fast default loop)
-make test-race       # race detector over the root module (heavy numeric suites self-skip)
-make test-cli        # the cli module (cobra CLI + waxlabel mapper), race included
-make test-oracle     # the third-party-oracle tests (waxlabel round trips, go-mp3)
-make test-example    # examples/catalogcli: the out-of-prefix cli.Flavor canary
-make soak            # 30m streaming soak + load + TTFA percentiles (nightly-scale)
-make client-e2e      # browser client-matrix cells via Playwright (gated tooling)
-make docker          # local image build
-make verify-vectors  # fetch SHA-256-pinned conformance vectors (CI-cached)
-make goldens         # regenerate golden files (review the diff)
+make test             # root module without the race detector: the everyday loop
+make verify-vectors   # fetch the pinned conformance vectors; those tests skip without them
+make check            # the full gate (slow): fmt, vet, race, every module, depcheck
 ```
 
-- Architecture invariants live in [docs/adr/](docs/adr/README.md). Read
-  ADR-0001 (clean-room policy) before touching codec code.
-- Encoder/decoder acceptance thresholds are pinned in
-  [docs/quality-gates.md](docs/quality-gates.md); gates only ratchet up.
-- Defects that are understood but deliberately unfixed, with the reason,
-  are in [docs/deferred-work.md](docs/deferred-work.md); what WaxFlow
-  wants from the sibling Wax repos it depends on is in
-  [docs/upstream-requests.md](docs/upstream-requests.md).
-- ffmpeg is a **test oracle only** (differential CI job), never a runtime
-  dependency.
-- Releases are tag-driven: pushing `vX.Y.Z` publishes binaries + SHA256SUMS
-  and a multi-arch (amd64/arm64) image to `ghcr.io/colespringer/waxflow`.
+`cli/` (the command, with cobra and waxlabel) and `oracletest/` (tests
+against third-party libraries) are nested modules, so `go test ./...` at the
+root does not reach them; `make check` does.
 
 ## License
 
-[MIT](LICENSE). Third-party attributions: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+[MIT](LICENSE). Third-party attributions are in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

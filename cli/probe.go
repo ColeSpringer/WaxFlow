@@ -27,7 +27,13 @@ func newProbeCmd(flavor Flavor) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "probe <file>",
 		Short: "Identify an audio file and print its stream parameters",
-		Args:  usageArgs(cobra.ExactArgs(1)),
+		Long: `Probe identifies a file and prints its container, tracks and stream
+parameters. It reads headers, so damage past the head of the file is
+reported by whatever later reads it. --strict treats tolerated damage as an
+error, and on a frame-indexed payload such as MP3 or ADTS walks the file to
+its end so the verdict covers all of it. --json prints the same shape as
+GET /probe.`,
+		Args: usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			src, hint, cleanup, err := openSourceRef(cmd, flavor, args[0], nil, nil)
 			if err != nil {

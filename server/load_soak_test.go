@@ -2,7 +2,8 @@ package server_test
 
 // The v1.0 hardening harnesses: a mixed-traffic load test, a long
 // streaming soak with a goroutine/heap leak watch, and the TTFA/seek
-// latency percentiles recorded in the README.
+// latency percentiles recorded under Service targets in
+// docs/quality-gates.md.
 //
 // All three run short in the default suite (seconds, a smoke that the
 // harness itself works) and escalate through the environment for the
@@ -396,9 +397,9 @@ func percentile(ds []time.Duration, p float64) time.Duration {
 // the latency targets name: cold (a fresh transcode, which is also what a
 // t= seek costs, since every seek offset is its own cache entry) and
 // warm (a completed cache entry served with ranges). Results are
-// logged; the README records them per release. WAXFLOW_PERF=1 turns
-// the targets (p95 warm <300 ms, cold <800 ms) into hard assertions
-// for a dedicated perf run.
+// logged; docs/quality-gates.md records them per release.
+// WAXFLOW_PERF=1 turns the targets (p95 warm <300 ms, cold <800 ms) into
+// hard assertions for a dedicated perf run.
 func TestTTFAPercentiles(t *testing.T) {
 	env := newTestEnv(t, nil)
 	iters := envInt("WAXFLOW_PERF_ITERS", 5)
