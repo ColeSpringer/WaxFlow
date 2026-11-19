@@ -1,0 +1,108 @@
+name: Packages from apt
+description: >-
+  Installs apt packages through a cache of their .deb files, so a run
+  downloads only the files the cache lacks. The index is still fetched, and
+  when that fails the run goes on with the lists already on disk.
+inputs:
+  packages:
+    description: The packages to install, space-separated.
+    required: true
+  save:
+    description: >-
+      Whether to save the cache. Only the job with the widest package list on
+      an image should: a narrower list restores that set through the fallback
+      key, and saving its own would store the same files twice.
+    default: "false"
+runs:
+  using: composite
+  steps:
+    # The key is the list of .deb files the install needs, each with its size
+    # and the index's SHA-256, taken against an empty archive so the list is
+    # complete. URIs are left out because the runner's mirror list picks the
+    # host. A changed list restores the newest older set for the image. The
+    # archive is outside the home directory so that apt's _apt download user
+    # can reach it.
+    - id: plan
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        read -ra pkgs <<< "$PACKAGES"
+        mkdir -p /tmp/apt-archives/partial
+        # A failed update leaves the lists on disk, which can still name what
+        # the cache holds; the install fails if they name what it cannot get.
+        for delay in 30 60 ''; do
+          sudo apt-get update && break
+          if [ -z "$delay" ]; then
+            echo "::warning::apt-get update failed; going on with the lists on disk"
+            break
+          fi
+          echo "::warning::apt-get update failed; retrying in $delay s"
+          sleep "$delay"
+        done
+        sudo apt-get install --print-uris -qq -o Acquire::ForceHash=SHA256 \
+          -o Dir::Cache::Archives=/tmp/apt-archives "${pkgs[@]}" |
+          awk '{print $2, $3, $4}' | LC_ALL=C sort > "$RUNNER_TEMP/apt-debs"
+        image="$(. /etc/os-release && echo "$ID-$VERSION_ID")-$(uname -m)"
+        echo "debs=$(wc -l < "$RUNNER_TEMP/apt-debs")" >> "$GITHUB_OUTPUT"
+        echo "prefix=apt-$image-" >> "$GITHUB_OUTPUT"
+        echo "key=apt-$image-$(sha256sum < "$RUNNER_TEMP/apt-debs" | cut -c1-64)" >> "$GITHUB_OUTPUT"
+    # With nothing to download there is nothing to restore or save.
+    - id: debs
+      if: steps.plan.outputs.debs != '0'
+      uses: actions/cache/restore@v6
+      with:
+        path: /tmp/apt-archives/*.deb
+        key: ${{ steps.plan.outputs.key }}
+        restore-keys: ${{ steps.plan.outputs.prefix }}
+    - id: install
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        read -ra pkgs <<< "$PACKAGES"
+        declare -A want
+        while read -r name size hash; do want[$name]=${hash#SHA256:}; done < "$RUNNER_TEMP/apt-debs"
+        # apt takes a cached file of the listed size without checking its
+        # hash, so a restored file stays only if it is listed and its SHA-256
+        # matches the index.
+        for f in /tmp/apt-archives/*.deb; do
+          [ -e "$f" ] || continue
+          name=${f##*/}
+          if [ -z "${want[$name]:-}" ]; then
+            rm -f "$f"
+          elif [ "$(sha256sum < "$f" | cut -c1-64)" != "${want[$name]}" ]; then
+            echo "::warning::cached $name does not match the index; fetching it again"
+            rm -f "$f"
+          fi
+        done
+        # Each attempt keeps what it fetched, so a retry after a mirror
+        # outage fetches only the rest.
+        for delay in 60 120 ''; do
+          sudo apt-get install -y -o Dir::Cache::Archives=/tmp/apt-archives "${pkgs[@]}" && break
+          [ -n "$delay" ] || exit 1
+          echo "::warning::apt-get install failed; retrying in $delay s"
+          sleep "$delay"
+          sudo apt-get update || true
+        done
+        # The entry under the key holds the listed files and nothing else. A
+        # retry's update can move the index, so what it fetched goes, and a
+        # list left incomplete is not saved.
+        for f in /tmp/apt-archives/*.deb; do
+          [ -e "$f" ] || continue
+          name=${f##*/}
+          [ -n "${want[$name]:-}" ] || rm -f "$f"
+        done
+        complete=true
+        for name in "${!want[@]}"; do
+          [ -e "/tmp/apt-archives/$name" ] || complete=false
+        done
+        echo "complete=$complete" >> "$GITHUB_OUTPUT"
+    # Saved as soon as the install succeeds, as the vector and tool caches are.
+    - if: >-
+        inputs.save == 'true' && steps.plan.outputs.debs != '0' &&
+        steps.debs.outputs.cache-hit != 'true' && steps.install.outputs.complete == 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: /tmp/apt-archives/*.deb
+        key: ${{ steps.plan.outputs.key }}

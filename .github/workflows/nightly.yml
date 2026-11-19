@@ -69,7 +69,10 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: .go-version
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg flac wavpack
+      - uses: ./.github/actions/apt-packages
+        with:
+          packages: ffmpeg flac wavpack
+          save: "true"
       # Every pinned vector and every reference tool, as in ci.yml's
       # differential job; this image's tool builds are saved from here.
       - uses: ./.github/actions/vectors-and-tools
@@ -171,7 +174,11 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: .go-version
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # Not saved: ffmpeg's debs are a subset of the set ci.yml's differential
+      # job saves on this image, which the fallback key restores.
+      - uses: ./.github/actions/apt-packages
+        with:
+          packages: ffmpeg
       # The differential jobs' caches, restored and not saved: this job
       # fetches and builds only their Opus part. The whole vector set comes
       # down, about 5 s more than the Opus part would; an Opus-only cache

@@ -176,7 +176,10 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: .go-version
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg flac wavpack
+      - uses: ./.github/actions/apt-packages
+        with:
+          packages: ffmpeg flac wavpack
+          save: "true"
       # Every pinned vector, and the reference tools built from pinned
       # source: the Monkey's Audio console tool (the only APE encoder there
       # is), the Musepack encoders and reference decoder, and libopus's

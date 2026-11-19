@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -158,6 +159,11 @@ func TestOpenIdxCodesADirectoryItCannotResolve(t *testing.T) {
 	testutil.Chdir(t, gone)
 	if err := os.Remove(gone); err != nil {
 		t.Skipf("the working directory cannot be removed here: %v", err)
+	}
+	// Linux's getcwd fails on a removed directory, as getcwd(2) documents;
+	// darwin's still resolves it, which leaves nothing to refuse.
+	if wd, err := os.Getwd(); err == nil && runtime.GOOS != "linux" {
+		t.Skipf("the removed working directory still resolves, to %s", wd)
 	}
 	_, err := OpenIdx("idx", 0)
 	if e, ok := errors.AsType[*waxerr.Error](err); !ok || e.Code != waxerr.CodeInternal || !strings.HasPrefix(e.Error(), "cache: resolving idx dir: ") {
