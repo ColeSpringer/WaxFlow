@@ -248,22 +248,8 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 			return bad("gain and loudness apply to transcode jobs; %s writes the samples it is given", req.Type)
 		}
 	}
-	if req.Type == jobs.TypeMerge {
-		return s.validateMergeRequest(ctx, body, req)
-	}
-
-	src, err := s.resolver.Resolve(ctx, string(body.Src))
-	if err != nil {
-		return nil, err
-	}
-	defer src.Close()
-	req.SourceID = src.ID.String()
-
-	info, err := s.eng.Probe(ctx, src, src.Ext, nil)
-	if err != nil {
-		return nil, err
-	}
-
+	// What the request alone decides is refused before any source resolves or
+	// is measured, so no 404 or measure pass hides it.
 	if req.Type == jobs.TypeAnalyze {
 		if body.Format != "" || body.Container != "" || body.Rate != 0 || body.Ch != 0 ||
 			body.Bits != 0 || body.Bitrate != 0 || body.HEv2 || body.Gain != "" ||
@@ -282,6 +268,25 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 				return nil, err
 			}
 		}
+	} else if err := s.checkOutputShape(req); err != nil {
+		return nil, err
+	}
+	if req.Type == jobs.TypeMerge {
+		return s.validateMergeRequest(ctx, body, req)
+	}
+
+	src, err := s.resolver.Resolve(ctx, string(body.Src))
+	if err != nil {
+		return nil, err
+	}
+	defer src.Close()
+	req.SourceID = src.ID.String()
+
+	info, err := s.eng.Probe(ctx, src, src.Ext, nil)
+	if err != nil {
+		return nil, err
+	}
+	if req.Type == jobs.TypeAnalyze {
 		return req, nil
 	}
 	if req.Type == jobs.TypeSplit {
@@ -373,9 +378,6 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 			}
 		}
 	}
-	if err := s.checkOutputShape(req); err != nil {
-		return nil, err
-	}
 	plan, err := s.eng.PlanTranscode(info.Default(), req.TranscodeOptions(0, s.profile))
 	if err != nil {
 		return nil, err
@@ -409,7 +411,8 @@ func (s *Server) applyFileOutputContainer(req *jobs.Request, track container.Tra
 
 // checkOutputShape validates the shaping fields every audio-writing job
 // carries, in one place because transcode, merge, and split take the same set
-// and must refuse the same values.
+// and must refuse the same values. It reads only the request, so creation runs
+// it before any source resolves.
 func (s *Server) checkOutputShape(req *jobs.Request) error {
 	bad := func(format string, args ...any) error {
 		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(format, args...))
@@ -425,6 +428,9 @@ func (s *Server) checkOutputShape(req *jobs.Request) error {
 	if req.Rate < 0 || req.Channels < 0 || req.Bitrate < 0 {
 		return bad("rate, ch, and bitrate must be non-negative")
 	}
+	if err := req.CheckBitrate(); err != nil {
+		return err
+	}
 	if req.Loudness != "" && req.Loudness != "analyze" {
 		return bad("loudness %q: want analyze (or omit)", req.Loudness)
 	}
@@ -434,14 +440,8 @@ func (s *Server) checkOutputShape(req *jobs.Request) error {
 	if _, err := parseGain(req.Gain, s.defaultGain); err != nil {
 		return err
 	}
-	if req.Bitrate != 0 {
-		if lossy, known := waxflow.LossyFormat(req.Format); known && !lossy {
-			return waxerr.New(waxerr.CodeUnsupportedFormat,
-				fmt.Sprintf("bitrate applies to lossy output; %s is lossless", req.Format))
-		}
-	}
-	if err := checkHEv2Format(req.HEv2, req.Format); err != nil {
-		return err
+	if err := req.TranscodeOptions(0, s.profile).Check(); err != nil {
+		return knobRefusal(err, jobKnobs)
 	}
 	return nil
 }
@@ -495,13 +495,8 @@ func (s *Server) validateMergeRequest(ctx context.Context, body jobRequest, req 
 	// merge to a lossy row must be built at the width it delivers or every
 	// member's fold is the envelope's (see waxflow.ConcatOptions.Channels).
 	// runMerge resolves it through the same call from the stored request.
-	// The output's own shape first, so a request that names an impossible
-	// output still gets the message about it: resolving the width plans a
-	// transcode, and its refusal would otherwise arrive first and speak in the
-	// encoder's terms about a request the shape check would have named plainly.
-	if err := s.checkOutputShape(req); err != nil {
-		return nil, err
-	}
+	// validateJobRequest checked the output's shape before any member was
+	// measured.
 	opts := req.TranscodeOptions(0, s.profile)
 	copts, err := s.eng.ConcatOptionsFor(tracks, 0, opts)
 	if err != nil {

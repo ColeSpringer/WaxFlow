@@ -54,11 +54,8 @@ func TestGoldenM4BChapters(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := waxflow.New()
-	res, err := e.Transcode(ctx, src, "m4b", f, waxflow.TranscodeOptions{
-		Format:   "aac",
-		Tags:     meta.FullTags(info),
-		Chapters: info.Chapters,
-	})
+	res, err := e.Transcode(ctx, src, "m4b", f, waxflow.TranscodeOptions{Format: "aac"},
+		waxflow.WithTags(meta.FullTags(info)), waxflow.WithChapters(info.Chapters))
 	if err != nil {
 		t.Fatal(err)
 	}

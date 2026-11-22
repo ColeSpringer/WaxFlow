@@ -426,7 +426,9 @@ Parameters (unknown parameter names are rejected):
   **Absent** keeps the source's; omitting the parameter is the only
   spelling of that. `rate=0`, `ch=0`, `bits=0`, `maxBitRate=0`, and a bare `rate=` are 400, because zero is
   not a rate, a channel count, a depth, or a cap. The same rule holds on
-  the HLS master form.
+  the HLS master form. A lossy format's encoder owns its sample format,
+  so `bits` does not apply to `mp3`, `aac`, `he-aac`, `opus` or `vorbis`
+  and is ignored there; it is an output shape, not an encoder knob.
 
   "Keeps the source's" has one exception, and it is the lossy/lossless
   split rather than a per-encoder quirk. A source wider than the output
@@ -577,17 +579,46 @@ Parameters (unknown parameter names are rejected):
   is an explicit CBR rate in kbit/s; `q` is a preset (`low` 96, `med`
   128, `high` 192). Both require an explicit lossy `format` (`mp3`,
   `aac`, `he-aac`, `opus`); on a lossless output they are `415`, and so
-  under `format=auto`, which resolves to `wav`. `vorbis` accepts both and
-  ignores them: it encodes at its default quality whatever they say. A
+  under `format=auto`, which resolves to `wav`. `vorbis` refuses both
+  (`415`): its encoder takes a quality and has no bit rate to set. A
   `bitrate`/`q` request forces a re-encode (never direct-play), and the
   resolved bit rate is part of the cache key, so two rates that encode
-  differently never share an entry.
+  differently never share an entry. Every kbit/s value a surface takes
+  (`bitrate`, `maxBitRate`, an HLS `bitrates` rung, a job's `bitrate`, the
+  CLI's bit-rate flags) is refused above 2147483, the engine's
+  `MaxBitrate` (`math.MaxInt32` bits per second) over 1000, with `400`
+  (exit 2 on the CLI), before it is multiplied.
 - `hev2`: boolean, selects HE-AAC v2 (parametric stereo, `mp4a.40.29`)
   for `format=he-aac`; any other format is `415`. Selection is explicit
   rather than bitrate-automatic, and the flag is part of the cache key:
   v1 and v2 at one bitrate are two different codecs and never share an
   entry. Mono sources are refused (encode v1 instead); the v2 default
   bitrate is 32 kbit/s.
+
+  **Encoder knobs.** A knob is taken only by the formats below. Every
+  surface refuses one set on any other format with `415`
+  (`unsupported-format`, exit 5 on the CLI), naming the knob in its own
+  spelling, the format, and the formats that take it; nothing ignores a
+  knob silently. Unset, each keeps the encoder's default.
+
+  | knob | `/stream` | HLS | jobs | CLI | formats that take it |
+  |---|---|---|---|---|---|
+  | `Bitrate` | `bitrate`, `q` | `bitrate`, `bitrates` | `bitrate` | `--mp3-bitrate`, `--opus-bitrate`, `--aac-bitrate` | `opus`, `mp3`, `aac`, `he-aac` |
+  | `VBR` | | | | `--mp3-vbr`, `--opus-vbr` | `opus`, `mp3` |
+  | `VorbisQuality` | | | | | `vorbis` |
+  | `HEAACv2` | `hev2` | `hev2` | `hev2` | `--he-v2` | `he-aac` |
+  | `FLACLevel` | | | `flacLevel` | `--flac-level` | `flac` |
+  | `WavPackLevel` | | | `wavpackLevel` | `--wavpack-level` | `wavpack` |
+  | `APELevel` | | | `apeLevel` | `--ape-level` | `ape` |
+  | `OpusComplexity` | | | | `--opus-complexity` | `opus` |
+  | `OpusSignal` | | | | `--opus-signal` | `opus` |
+
+  The first column is the `TranscodeOptions` field. The CLI's bit-rate
+  and VBR flags each name their formats, and one given with any other
+  format is refused as the rest are. HLS serves only its segmented
+  formats, so its bit-rate refusal names `opus`, `aac` and `he-aac`.
+  `bits` is not a knob: a lossy format ignores it (see `rate`, `ch`,
+  `bits` above).
 - `container`: overrides the format's packaging where an alternative
   exists. It requires an explicit `format`, and a name the format cannot
   produce is `400` rather than a silent fall back to the default form.
@@ -599,6 +630,7 @@ Parameters (unknown parameter names are rejected):
   | format | `container=` |
   |---|---|
   | `aac` | `adts`, `progressive`, `fragmented`, `mka` (empty is fragmented MP4) |
+  | `he-aac` | `adts`, `progressive`, `fragmented`, `mka` (empty is fragmented MP4) |
   | `alac` | `progressive`, `fragmented` (empty is fragmented MP4) |
   | `flac` | `mka`, `ogg` (empty is native FLAC) |
   | `opus` | `mka`, `webm` (empty is Ogg) |
@@ -788,12 +820,13 @@ span's first sample and the segment count covers `to-from`. A span is
 exclusive with `tl`, since it bounds one source and a timeline is several.
 
 `bitrates` (the ladder) appears only in master URLs; every other URL is
-per-variant. Descriptors are minted by the daemon (`POST /sign` with
-`path:/hls/master.m3u8`, or the keyed raw-parameter master form below),
-never hand-built by clients. Auth is an API key or the signed query,
-like `/stream`; playlist child URLs come out signed (when signing is
-configured) with the parent's expiry, so one minting governs a playback
-session.
+per-variant. A rung that is not positive is `400` ("ladder bitrate -5 is
+not positive") before anything resolves. Descriptors are minted by the
+daemon (`POST /sign` with `path:/hls/master.m3u8`, or the keyed
+raw-parameter master form below), never hand-built by clients. Auth is an
+API key or the signed query, like `/stream`; playlist child URLs come out
+signed (when signing is configured) with the parent's expiry, so one minting
+governs a playback session.
 
 | Path | Purpose |
 |---|---|
@@ -892,11 +925,11 @@ timeline's exact length before its first byte; `aiff` and `ape` stay
 job-only. `src`, `from`, `to`, `id` and `track` are refused beside `tl`, since
 a member's window is minted into the timeline and the digest pins every
 member's identity. A refusal the query alone decides (a tag-derived gain,
-`bitrate` on a lossless format, `hev2` off `he-aac`) answers before any
-member resolves, here and on HLS, so it costs no member read and no `410`
-hides it. To start at
-a member, send its `offsetSamples / envelopeRate` from the mint as `t`, in
-enough digits to round back (the shortest decimal that round-trips a float64
+an unknown format or a container it has no form for, a knob the format
+does not take) answers before any member resolves, here and on HLS, so it
+costs no member read and no `410` hides it. To start at a member, send
+its `offsetSamples / envelopeRate` from the mint as `t`, in enough digits
+to round back (the shortest decimal that round-trips a float64
 does): `t` names the nearest sample. Send it only when `/caps`
 `delivery.timelineStream` is true: an older daemon `400`s `tl` on `/stream`
 as an unknown parameter, and one with timelines off `415`s it.
@@ -1024,15 +1057,23 @@ and `/lyrics` (`params` take only `src`; identity is embedded), and
 `/jobs/<id>/events` / `/jobs/<id>/result` / `/jobs/<id>/result/<n>` (no
 `params`; the signature pins the job id, and the index, through the path;
 the index is checked for shape only, since a URL worth signing is minted
-while the job is still queued and has no outputs yet). `params` are validated like a live
-request, the source identity is resolved and embedded, and the response
-is below. A `/stream` URL naming `tl` in place of `src` is planned at sign
-time, as an HLS master is, every member resolved and checked, and pins no
-`id`, since the digest pins every member's. The URL's `src` is the
-reference's own bytes, percent-encoded as a query string encodes any,
-whichever spelling `params` used (see Source references). An HLS master
-refuses `src` beside `tl` by presence, as `/stream` does, so an empty
-`src` is not dropped:
+while the job is still queued and has no outputs yet). `params` are
+validated like a live request, the source identity is resolved and
+embedded (an `id` in `params` is replaced, not checked, so re-signing an
+old URL's query pins the file as it is now), and the response is below. A
+single-source `/stream` URL is answered as a `HEAD` of it would be, so a
+URL that signs plays. What the
+query alone decides (an unknown format, a container the format has no
+form for, a knob the format does not take) is refused before the source
+resolves, so no `404` hides it; a source container's own name such as
+`format=ogg`, which may direct-play, is decided against the source unless
+the query already rules direct play out. A `/stream` URL naming `tl` in
+place of `src` is planned at sign time, as an HLS master is, every member
+resolved and checked, and pins no `id`, since the digest pins every
+member's. The URL's `src` is the reference's own bytes, percent-encoded as
+a query string encodes any, whichever spelling `params` used (see Source
+references). An HLS master refuses `src` beside `tl` by presence, as
+`/stream` does, so an empty `src` is not dropped:
 
     {"schemaVersion": 1, "url": "/stream?exp=...&format=wav&id=...&kid=1&sig=...&src=...", "exp": 1767225600}
 
@@ -1189,7 +1230,8 @@ errors decoded to waxerr codes like every other method.
 
 Transcode jobs take the /stream shaping parameters (`format` required,
 plus `container`, `rate`, `ch`, `bits`, `bitrate`, `hev2`, `gain`,
-`flacLevel`, `wavpackLevel`, `apeLevel`)
+`flacLevel`, `wavpackLevel`, `apeLevel`; a knob the format does not take
+is `415` at creation, see Encoder knobs)
 and, unlike /stream, may target non-streaming formats (`aiff`, `ape`): job
 outputs are seekable files, so every muxer back-patch applies (exact WAV
 sizes, FLAC seek tables, the MP4 `iTunSMPB` gapless atom, the Monkey's Audio
@@ -1201,6 +1243,11 @@ outputs get a projection there instead of a measurement, because their
 muxer takes its tags before the encode and cannot be patched after it:
 Ogg-FLAC, WavPack, and Monkey's Audio. The job's `analysis` still carries
 the measurement in every case; only the file carries the estimate.
+Creation refuses what the request alone decides (a field the type does not
+take, a missing format, a bad `bits` or `bitrate`, a knob the format does not
+take or a level outside its range) before any source, sheet or merge member
+resolves or is measured, so a missing source cannot hide it and a long merge
+measures nothing first.
 Analyze jobs measure EBU R128 loudness (integrated LUFS, loudness
 range, true peak, sample peak) without producing audio.
 

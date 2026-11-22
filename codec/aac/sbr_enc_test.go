@@ -7,6 +7,7 @@ import (
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // heEncodeAll drives an HEEncoder over interleaved samples and returns
@@ -407,6 +408,22 @@ func TestHEEncoderChunkInvariance(t *testing.T) {
 			if !slices.Equal(got[i], ref[i]) {
 				t.Fatalf("chunk %d: AU %d differs from the 2048-fed reference", chunk, i)
 			}
+		}
+	}
+}
+
+// TestHEEncoderRefusesANegativeBitrate: a negative bit rate is an invalid
+// request at plan time and at construction, v1 and v2 alike.
+func TestHEEncoderRefusesANegativeBitrate(t *testing.T) {
+	f := audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayout(2),
+		Type: audio.Float, BitDepth: 32}
+	for _, v2 := range []bool{false, true} {
+		opts := &EncoderOptions{Bitrate: -64000, ParametricStereo: v2}
+		if _, err := HEPlanBitrate(f, opts); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+			t.Errorf("v2=%v HEPlanBitrate: %v, want an invalid request", v2, err)
+		}
+		if _, err := NewHEEncoder(f, opts); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+			t.Errorf("v2=%v NewHEEncoder: %v, want an invalid request", v2, err)
 		}
 	}
 }

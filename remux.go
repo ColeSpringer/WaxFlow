@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
@@ -17,65 +16,9 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-// RemuxVersion identifies the remux rung's own sample-affecting logic for the
-// ADR-0004 cache key.
-//
-// It is the only version constant this rung adds, and the absence of the others
-// is deliberate rather than an oversight. A remux runs no decoder, no DSP, and
-// no encoder, so no revision of any of them can change its bytes; keying on
-// them would invalidate remuxes for fixes that cannot reach them. The
-// progressive muxers carried no version constants at all, which was equally
-// deliberate: a whole-file cache entry is self-consistent, so a framing change
-// leaves older entries as merely older bytes that still decode identically.
-// (The segmented form inherits mp4.SegmenterVersion for free, which exists
-// because segments must agree with each other and with a restarted worker
-// within one stream.)
-//
-// The muxer half of that reasoning was wrong, and remux-2 is the correction. A
-// framing change is not always "merely older bytes that still decode
-// identically": the Ogg-Vorbis granulepos fix changed what the muxer writes for
-// the stream's length, so cached remuxes kept reporting a duration ~21 ms long.
-// The encoder-side lever for that fix (vorbis.EncoderVersion) is not in this
-// rung's key at all, by the design above, so this constant is the only one that
-// can invalidate them. Bump it for a muxer change that alters what a file says
-// about itself, not merely how it is framed.
-//
-// What is left is the gapless trailer this rung synthesizes from the input
-// track, and that is not merely older bytes: a bug there writes a wrong
-// iTunSMPB or a wrong edit list, and wrong gapless metadata is wrong playback.
-// That is the one thing here that needs a version, so it is the one that has
-// one.
-//
-// remux-3 is the same argument for WavPack. The muxer patches the first
-// block's stream length, a block checksum covers the header that field sits
-// in, and until now the patch left that checksum stale: `wvunpack -v` refuses
-// the files this rung produced whenever a source's length was unknown or a cut
-// changed it. Nothing but this constant can invalidate them.
-//
-// remux-4: the mp4 sample entry carries the ALAC cookie's depth where it wrote
-// a conventional 16, a statement about the file by the rule above even though
-// every decoder reads the cookie. A remux is a packet copy, so regenerating
-// costs a copy, not an encode. The transcode rung's progressive outputs get no
-// lever for the same change (ADR-0004's known gap: no muxer term), and none is
-// borrowed: no reader takes the entry's depth over the cookie, so those files
-// play and report identically.
-//
-// That gap is closed (ADR-0004's 2026-09-10 amendment): every progressive
-// muxer carries a MuxerVersion now, and a remux plan names its container's
-// beside this constant. So this one narrows to what it always described best,
-// the gapless trailer this rung synthesizes, and a muxer change bumps the
-// muxer's own term instead of borrowing this.
-//
-// remux-5 is the gapless trailer again, for a Matroska source whose blocks
-// carry a trim before the last: the run this rung counts now excludes those
-// frames, so the trailer it synthesizes is shorter by them, and the rung
-// declines such a source for every destination but Matroska rather than
-// copying the frames out as audio. A cached output of one was wrong on both
-// counts. Over-keying the sources that have no inner trim is safe (ADR-0004).
-//
-// remux-6: a FLAC copy numbers its frames from 0 in every container, a
-// segmented one by each frame's true position, and carries its source's MD5
-// only into a header it patches at End and only while it fills no hole.
+// RemuxVersion is the remux rung's term in the ADR-0004 cache key, beside its
+// container's MuxerVersion. Bump it for a change to what the rung synthesizes
+// from the input track, such as the gapless trailer, rather than to framing.
 const RemuxVersion = "remux-6"
 
 // RemuxPlan describes what a remux would produce, computed from the source
@@ -155,18 +98,18 @@ func remuxRow(track container.Track, format string) (*output, error) {
 // row's hls column, so Opus-in-WebM to Opus-in-fMP4 is just this rung with
 // format=opus on the segmented path. Remux connects outputs that already exist.
 func (e *Engine) PlanRemux(track container.Track, opts TranscodeOptions) (*RemuxPlan, error) {
+	if err := opts.Check(); err != nil {
+		return nil, err
+	}
 	row, err := remuxRow(track, opts.Format)
 	if err != nil {
 		return nil, err
 	}
-	containerName, mediaType, err := resolveContainer(row, opts.Container)
+	fm, err := row.form(opts.Container)
 	if err != nil {
 		return nil, err
 	}
-	muxV, err := muxerVersion(containerName)
-	if err != nil {
-		return nil, err
-	}
+	containerName := row.containerName(fm)
 	if !codecSurvives(track.Codec, row.codecID) || !remuxable(opts, track.Fmt) || !gaplessSurvives(track) {
 		return nil, nil
 	}
@@ -208,9 +151,9 @@ func (e *Engine) PlanRemux(track container.Track, opts TranscodeOptions) (*Remux
 		TranscodePlan: TranscodePlan{
 			Format:    track.Fmt,
 			Container: containerName,
-			MediaType: mediaType,
-			Live:      containerLive(row.live, opts.Container),
-			Versions:  withDemuxer(track, RemuxVersion, muxV),
+			MediaType: fm.mediaType,
+			Live:      fm.live,
+			Versions:  withDemuxer(track, RemuxVersion, fm.version),
 			Samples:   track.Samples,
 			// BytesPerFrame, FrameSize, BitRate, and EstimatedBytes stay at
 			// their unknown values. The source's packets have a bit rate, but
@@ -253,14 +196,9 @@ func codecSurvives(src, out codec.ID) bool {
 
 // remuxable reports whether opts asks for nothing but a container rewrite.
 //
-// The field list is derived rather than written out, and that is the whole
-// point. planOpts is already the exact projection of every option that shapes
-// the chain or the plan, and TestPlanOptsCoverage pins it to TranscodeOptions
-// field for field. So comparing a request's projection against the projection
-// of the same request stripped to its format and container asks precisely "does
-// anything but the wrapper differ", and it cannot drift when a new option
-// lands: a shaping field must appear in planOpts, and it then appears here for
-// free.
+// It compares the whole options value against the same request stripped to its
+// format and container, so an option added later counts as a transform with no
+// edit here. A seek counts too: a remux cannot cut mid-packet.
 //
 // Hand-listing the fields is how this bug comes back, and the bitrate family is
 // where it would bite hardest and be easiest to forget. On the HLS path bitrate
@@ -268,13 +206,6 @@ func codecSurvives(src, out codec.ID) bool {
 // a set bitrate would serve one set of source packets under two different
 // bitrate labels: two cache entries claiming different things about identical
 // bytes.
-//
-// FromSample is checked separately, because it is deliberately *not* in
-// planOpts: the plan cache normalizes the seek out of its key, since two seeks
-// of one source share a plan. A remux cannot honor a seek at all, since cutting
-// at an arbitrary sample means cutting mid-packet, so the one field the
-// derivation cannot see is exactly one this rung must refuse. A derived rule
-// with a hole in it would be worse than no derived rule, so the hole is named.
 //
 // The baseline carries ResampleProfile and Shaping rather than zeroing them,
 // and the distinction they draw is the one this whole predicate is about. Both
@@ -308,10 +239,7 @@ func codecSurvives(src, out codec.ID) bool {
 // nor a widen. A float source with a depth request is left alone, since that
 // one does quantize.
 func remuxable(opts TranscodeOptions, src audio.Format) bool {
-	if opts.FromSample != 0 {
-		return false
-	}
-	norm := opts
+	norm := opts.normalized()
 	if norm.Rate == src.Rate {
 		norm.Rate = 0
 	}
@@ -328,7 +256,7 @@ func remuxable(opts TranscodeOptions, src audio.Format) bool {
 		ResampleProfile: opts.ResampleProfile,
 		Shaping:         opts.Shaping,
 	}
-	return planOptsOf(norm) == planOptsOf(base)
+	return norm == base
 }
 
 // remuxTrailer synthesizes the gapless trailer for a remuxed track, from the
@@ -552,6 +480,9 @@ type RemuxSegmentPlan struct {
 // since there is then no grid to snap to. That is the real decline, and it is
 // the one PacketGrid reports.
 func (e *Engine) PlanRemuxSegments(track container.Track, opts TranscodeOptions, segSeconds float64, grid int) (*RemuxSegmentPlan, error) {
+	if err := checkSegmented(opts); err != nil {
+		return nil, err
+	}
 	row, err := remuxRow(track, opts.Format)
 	if err != nil {
 		return nil, err
@@ -559,8 +490,7 @@ func (e *Engine) PlanRemuxSegments(track container.Track, opts TranscodeOptions,
 	if row.hls == nil {
 		// Not a decline: the format has no segmented form at all, so no rung
 		// serves this and the caller must hear why.
-		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("waxflow: %s has no segmented (HLS) form (available: %s)", opts.Format, strings.Join(SegmentedFormats(), ", ")))
+		return nil, noSegmentedForm(opts.Format)
 	}
 	// The segmented depth rule, applied before the rung is asked, which is
 	// what makes it decline: a 20-bit FLAC has to be widened for MSE, and this
@@ -569,14 +499,6 @@ func (e *Engine) PlanRemuxSegments(track container.Track, opts TranscodeOptions,
 	rp, err := e.PlanRemux(track, segmentBitDepth(opts, track.Fmt))
 	if err != nil || rp == nil {
 		return nil, err
-	}
-	if track.MidPadding > 0 {
-		// Stated here as well as in PlanRemux, because this rung's destination
-		// is not the one PlanRemux resolved: a segmented run always writes
-		// fMP4, whatever Container the options name, and fMP4 states no trim
-		// per packet. Without this a request that named a Matroska container
-		// passed PlanRemux's gate and then met segmentWalk's mid-copy refusal.
-		return nil, nil
 	}
 	if grid <= 0 {
 		return nil, nil
@@ -611,7 +533,7 @@ func (e *Engine) PlanRemuxSegments(track container.Track, opts TranscodeOptions,
 	// The peak-rate bound falls back to the PCM wire rate, as it does for VBR
 	// lossless, because a plan reads headers and the packets' real rate is not
 	// in them. It is loose for a lossy source, and that costs nothing here: a
-	// bitrate ladder is a per-variant OpusBitrate, which this rung declines, so
+	// bitrate ladder is a per-variant Bitrate, which this rung declines, so
 	// a remux is always a single variant and this number picks nothing.
 	base := sp.Format.Rate * sp.Format.Channels * max(sp.Format.BitDepth, 16)
 	sp.Bandwidth = base + sp.Format.Rate/grid*64 + 2000
@@ -647,6 +569,16 @@ func (e *Engine) RemuxInitSegment(plan *RemuxSegmentPlan) ([]byte, error) {
 // because it is built from the same bytes.
 func (e *Engine) RemuxSegments(ctx context.Context, src container.Source, hint string, opts TranscodeOptions,
 	segOpts SegmentedOptions, emit func(mp4.Segment) error) (*SegmentedResult, error) {
+	if err := checkSegmented(opts); err != nil {
+		return nil, err
+	}
+	row, err := outputRow(opts.Format)
+	if err != nil {
+		return nil, err
+	}
+	if row.hls == nil {
+		return nil, noSegmentedForm(opts.Format)
+	}
 	if err := validateSegOpts(segOpts); err != nil {
 		return nil, err
 	}
@@ -663,10 +595,9 @@ func (e *Engine) RemuxSegments(ctx context.Context, src container.Source, hint s
 	if err != nil {
 		return nil, err
 	}
-	// PlanRemux answers for the options' container, and this run always writes
-	// fMP4, which states no trim per packet: PlanRemuxSegments's own decline,
-	// repeated so a caller past the plan is refused before a segment goes out.
-	if rp == nil || track.MidPadding > 0 {
+	// What PlanRemux declines, a trim inside the run among it, is refused
+	// before a segment goes out.
+	if rp == nil {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("waxflow: a %s source cannot be remuxed to %s with these options; transcode it",
 				track.Codec, opts.Format))
@@ -893,12 +824,12 @@ func seekPackets(ctx context.Context, demux container.Demuxer, track int, target
 // already decided which rung it wants and a fallback it did not ask for would
 // be the wrong kind of help. The ladder calls PlanRemux first and falls through
 // on its own.
-func (e *Engine) Remux(ctx context.Context, src container.Source, hint string, dst io.Writer, opts TranscodeOptions) (*TranscodeResult, error) {
+func (e *Engine) Remux(ctx context.Context, src container.Source, hint string, dst io.Writer, opts TranscodeOptions, run ...RunOption) (*TranscodeResult, error) {
 	demux, info, err := format.OpenDemuxer(src, hint, nil)
 	if err != nil {
 		return nil, err
 	}
-	return e.RemuxDemuxer(ctx, demux, info.Default(), dst, opts)
+	return e.RemuxDemuxer(ctx, demux, info.Default(), dst, opts, run...)
 }
 
 // RemuxDemuxer remuxes an already-opened demuxer to dst, the same packet copy
@@ -919,7 +850,8 @@ func (e *Engine) Remux(ctx context.Context, src container.Source, hint string, d
 // commitment, so a source length a header declared and nothing checked is
 // confirmed by walking the source first, exactly as the transcode rung does.
 func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, track container.Track,
-	dst io.Writer, opts TranscodeOptions) (*TranscodeResult, error) {
+	dst io.Writer, opts TranscodeOptions, run ...RunOption) (*TranscodeResult, error) {
+	x := newRunConfig(run)
 	patchable := muxseek.CanSeek(dst)
 	plan, err := e.PlanRemux(track, opts)
 	if err != nil {
@@ -965,9 +897,13 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 	// costs the output nothing a muxer could have written honestly.
 	muxTrack := plan.Track
 	muxTrack.Samples = projectedLength(muxTrack, demux, patchable)
-	// nil encoder: see output.mux. There is no encoder on this rung, which is
+	// nil encoder: see form.mux. There is no encoder on this rung, which is
 	// what the whole seam exists to express.
-	mux, err := row.mux(muxTrack, opts, nil, dst)
+	fm, err := row.form(opts.Container)
+	if err != nil {
+		return nil, err
+	}
+	mux, err := fm.mux(muxTrack, opts, x, nil, dst)
 	if err != nil {
 		return nil, err
 	}
@@ -1004,7 +940,7 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 			return fresh(template, n)
 		}
 	}
-	run, err := copyPackets(ctx, demux, track.ID, StatesTrimsPerPacket(plan.Container), fill, func(pkt container.Packet) error {
+	copied, err := copyPackets(ctx, demux, track.ID, StatesTrimsPerPacket(plan.Container), fill, func(pkt container.Packet) error {
 		// Padding forwarded, not dropped: Matroska is the one destination that
 		// states trims per packet, and it is the only one this call lets an
 		// inner trim reach.
@@ -1020,16 +956,16 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 		// number for a whole-file remux and are not for a cut, whose demuxer is
 		// a filtered view of a longer source: reporting the uncut length there
 		// would have progress stall short of its total forever.
-		if opts.Progress != nil {
+		if x.progress != nil {
 			done += pkt.Lost + pkt.Dur
-			opts.Progress(done, plan.Track.Samples)
+			x.progress(done, plan.Track.Samples)
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	trailer := remuxTrailer(muxTrack, run)
+	trailer := remuxTrailer(muxTrack, copied)
 	if err := mux.End(trailer); err != nil {
 		return nil, missedProjection(patchable, muxTrack.Samples, trailer.Samples, err)
 	}
@@ -1044,7 +980,7 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 	var found format.Info
 	format.RefreshWarnings(&found, demux)
 	return &TranscodeResult{Samples: trailer.Samples, Format: track.Fmt, Container: plan.Container,
-		InputWarnings: found.Warnings, LostSamples: run.lost,
+		InputWarnings: found.Warnings, LostSamples: copied.lost,
 		TruncatedSamples: container.TruncatedOf(demux, track.ID)}, nil
 }
 

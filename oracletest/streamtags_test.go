@@ -4,7 +4,7 @@ package oracletest
 // structural assertions live with each container package; this is the
 // cross-implementation half, moved here at the v1.0 extraction so the
 // main module carries no waxlabel dependency. It runs the tags through
-// the REAL path (engine transcode with TranscodeOptions.Tags) rather
+// the REAL path (engine transcode with waxflow.WithTags) rather
 // than hand-built muxer calls, so it also pins the engine plumbing.
 
 import (
@@ -48,10 +48,10 @@ func TestStreamTagsWaxlabelRoundTrip(t *testing.T) {
 
 	transcode := func(t *testing.T, format, containerName string, seekable bool) []byte {
 		t.Helper()
-		opts := waxflow.TranscodeOptions{Format: format, Container: containerName, Tags: tags}
+		opts := waxflow.TranscodeOptions{Format: format, Container: containerName}
 		if !seekable {
 			var out bytes.Buffer
-			if _, err := waxflow.New().Transcode(context.Background(), container.BytesSource(wav), "", &out, opts); err != nil {
+			if _, err := waxflow.New().Transcode(context.Background(), container.BytesSource(wav), "", &out, opts, waxflow.WithTags(tags)); err != nil {
 				t.Fatalf("Transcode to %s: %v", format, err)
 			}
 			return out.Bytes()
@@ -61,7 +61,7 @@ func TestStreamTagsWaxlabelRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := waxflow.New().Transcode(context.Background(), container.BytesSource(wav), "", file, opts); err != nil {
+		if _, err := waxflow.New().Transcode(context.Background(), container.BytesSource(wav), "", file, opts, waxflow.WithTags(tags)); err != nil {
 			t.Fatalf("Transcode to %s (seekable): %v", format, err)
 		}
 		if err := file.Close(); err != nil {

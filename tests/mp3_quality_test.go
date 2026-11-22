@@ -56,7 +56,7 @@ func TestMP3EncoderQuality(t *testing.T) {
 		ref := item.samples
 
 		// Our encoder through the engine, decoded by ffmpeg.
-		ours := transcodeMP3(t, wav, waxflow.TranscodeOptions{MP3Bitrate: kbps * 1000})
+		ours := transcodeMP3(t, wav, waxflow.TranscodeOptions{Bitrate: kbps * 1000})
 		ourPath := filepath.Join(t.TempDir(), item.name+".ours.mp3")
 		if err := os.WriteFile(ourPath, ours, 0o644); err != nil {
 			t.Fatal(err)

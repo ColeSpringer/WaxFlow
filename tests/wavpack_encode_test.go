@@ -39,11 +39,11 @@ var wavpackLevels = []struct {
 }
 
 // encodeWavPack transcodes a WAV to WavPack and returns the .wv bytes.
-func encodeWavPack(t *testing.T, e *waxflow.Engine, wav []byte, opts waxflow.TranscodeOptions) []byte {
+func encodeWavPack(t *testing.T, e *waxflow.Engine, wav []byte, opts waxflow.TranscodeOptions, run ...waxflow.RunOption) []byte {
 	t.Helper()
 	opts.Format = "wavpack"
 	out := &memWS{}
-	res, err := e.Transcode(context.Background(), container.BytesSource(wav), "wav", out, opts)
+	res, err := e.Transcode(context.Background(), container.BytesSource(wav), "wav", out, opts, run...)
 	if err != nil {
 		t.Fatalf("transcode to wavpack: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestWavPackEncodeTags(t *testing.T) {
 	wav, src := makeWAV(t, pcm.Config{Encoding: pcm.SignedInt, Bits: 16}, 2, 8000, 41)
 	defer audio.Put(src)
 	tags := []container.Tag{{Key: "TITLE", Value: "Stage Five"}, {Key: "ALBUM", Value: "WaxFlow"}}
-	raw := encodeWavPack(t, e, wav, waxflow.TranscodeOptions{Tags: tags})
+	raw := encodeWavPack(t, e, wav, waxflow.TranscodeOptions{}, waxflow.WithTags(tags))
 
 	info, err := e.Probe(context.Background(), container.BytesSource(raw), "wv", nil)
 	if err != nil {

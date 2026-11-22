@@ -9,21 +9,9 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-// LimiterVersion is the limiter node's revision for cache keys: bump on
-// any change to detection, smoothing constants, or the clamp (plan
-// section 10).
-//
-// limiter-2 is the settle horizon (see Horizon). The kernel's arithmetic
-// did not change, so a whole-file transcode is byte-identical to
-// limiter-1's; a segmented run starting mid-stream is not, because the old
-// flat 100 ms priming left the gain envelope short of convergence and the
-// segments it produced were not the ones a continuous run produces. This
-// constant is the right one to bump for that even so: it is in the cache
-// key exactly when the limiter is in the chain, which is exactly when the
-// bytes change.
-//
-// limiter-3 replaces the one-pole attack with the min-hold envelope on
-// Limiter. Output bytes change wherever the limiter engages.
+// LimiterVersion is the limiter node's revision for cache keys (ADR-0004):
+// bump on any change to detection, smoothing constants, the settle horizon,
+// or the clamp.
 const LimiterVersion = "limiter-3"
 
 // limiterRelease is the gain-recovery time constant: 50 ms to climb back

@@ -42,9 +42,6 @@ var _ codec.Encoder = (*Encoder)(nil)
 // EncoderVersion is the encoder's cache-key version constant (ADR-0004):
 // bump on any change that alters the encoded bitstream. It composes the
 // psychoacoustic model's revision: retuning dsp/psy changes these streams.
-//
-// mp3-enc-3: a two-channel stream declares joint stereo in every frame
-// and carries the per-frame mid/side decision in mode_extension alone.
 const EncoderVersion = "mp3-enc-3+" + psy.Version
 
 // thrCalib maps psy thresholds (FFT energy of unit-full-scale input, 1024
@@ -221,10 +218,9 @@ func NewEncoder(f audio.Format, opts *EncoderOptions) (*Encoder, error) {
 		vbr:      vbr,
 		channels: f.Channels,
 	}
-	e.granules = 1
+	e.granules = FrameSize(f.Rate) / granuleSamples
 	e.resCap = 255
 	if ver == MPEG1 {
-		e.granules = 2
 		e.resCap = 511
 	}
 	h := e.header(false, false)
@@ -321,7 +317,23 @@ func (e *Encoder) Bitrate() int {
 }
 
 // FrameSize is the encoder-native chunk in frames: one whole MP3 frame.
-func (e *Encoder) FrameSize() int { return 576 * e.granules }
+func (e *Encoder) FrameSize() int { return FrameSize(e.fmt.Rate) }
+
+// granuleSamples is the length of one Layer III granule in samples.
+const granuleSamples = 576
+
+// FrameSize is the Layer III frame length in samples at rate: two granules
+// for MPEG-1, one for MPEG-2 and 2.5, 0 for a rate Layer III does not have.
+func FrameSize(rate int) int {
+	v, _, ok := legalRate(rate)
+	switch {
+	case !ok:
+		return 0
+	case v == MPEG1:
+		return 2 * granuleSamples
+	}
+	return granuleSamples
+}
 
 // CodecConfig is nil: MP3 is self-framing and carries no out-of-band setup.
 func (e *Encoder) CodecConfig() []byte { return nil }

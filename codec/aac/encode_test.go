@@ -8,6 +8,7 @@ import (
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // encodeAll drives the encoder over src (per-channel planar) and
@@ -275,6 +276,16 @@ func TestAACEncoderOptionValidation(t *testing.T) {
 		if _, err := NewEncoder(f, nil); err == nil {
 			t.Errorf("format %d accepted", i)
 		}
+	}
+}
+
+// TestAACEncoderRefusesANegativeBitrate: a negative bit rate is an invalid
+// request, as it is for the other bit-rate encoders, not a clamp to the floor.
+func TestAACEncoderRefusesANegativeBitrate(t *testing.T) {
+	f := audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayout(2),
+		Type: audio.Float, BitDepth: 32}
+	if _, err := NewEncoder(f, &EncoderOptions{Bitrate: -128000}); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+		t.Errorf("Bitrate -128000: %v, want an invalid request", err)
 	}
 }
 

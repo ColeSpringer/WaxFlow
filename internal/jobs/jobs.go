@@ -441,17 +441,9 @@ type Progress struct {
 	Percent float64 `json:"percent"`
 }
 
-// SchemaVersion is the job.json version this build writes, and the only one
-// it reads: a job.json naming any other version is refused by the store, which
-// quarantines the directory rather than deleting it.
-//
-// 2 replaced the single Output field with the Outputs list, a different JSON
-// key. There is no migration because there is nothing released to migrate
-// from, and a migration for a schema that never shipped is code that can only
-// rot. Refusing is what keeps the alternative from happening quietly: a v1
-// file still parses as a valid job whose product list is simply empty, so
-// without the bump a finished output would sit on disk unreachable, its job
-// terminal and therefore never requeued.
+// SchemaVersion is the job.json version this build writes and the only one
+// it reads: any other is refused and its directory quarantined, not deleted.
+// Bump it for any change to the job.json layout.
 const SchemaVersion = 2
 
 // Job is one job's full state: the job.json shape and the wire shape are

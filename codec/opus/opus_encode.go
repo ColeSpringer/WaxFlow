@@ -29,8 +29,10 @@ import (
 // Opus encoding constants. Frames are fixed at 20 ms (960 samples), one
 // frame per packet.
 const (
-	opusFrameLM   = celtMaxLM // a 20 ms frame is 2^3 short blocks
-	opusFrameSize = celtShortMDCTSize << opusFrameLM
+	opusFrameLM = celtMaxLM // a 20 ms frame is 2^3 short blocks
+	// FrameSize is the encoder-native frame in samples, 20 ms at 48 kHz.
+	FrameSize     = celtShortMDCTSize << opusFrameLM
+	opusFrameSize = FrameSize
 	opusCELTBands = 21 // fullband
 	// delayCompensation is the encoder-side buffering that lets the
 	// analyser and the mode switches run ahead of the coded signal
@@ -294,7 +296,7 @@ func NewEncoder(f audio.Format, opts *EncoderOptions) (*Encoder, error) {
 func (e *Encoder) InputFormat() audio.Format { return e.fmt }
 
 // FrameSize is the encoder-native chunk: one 20 ms frame.
-func (e *Encoder) FrameSize() int { return opusFrameSize }
+func (e *Encoder) FrameSize() int { return FrameSize }
 
 // maxBitrate is the highest rate a 20 ms frame can carry, derived from the
 // frame cap rather than written out again: 510000 bit/s.

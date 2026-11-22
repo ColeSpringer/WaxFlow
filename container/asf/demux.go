@@ -866,8 +866,7 @@ func (d *Demuxer) checkErrorCorrection(b []byte, off int64, number int, tsLen in
 
 // DemuxerVersion is this demuxer's term in the ADR-0004 cache key, carried
 // by a WMA v1/v2 track alone. Bump it for a change that makes the demuxer
-// deliver other samples for a file that has not changed; the ADR says what
-// revision 2 is.
+// deliver other samples for a file that has not changed.
 const DemuxerVersion = "asf-demux-2"
 
 // selectStream picks the audio stream to decode and wires the track. A file

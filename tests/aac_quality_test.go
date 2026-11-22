@@ -53,7 +53,7 @@ func TestAACEncoderQuality(t *testing.T) {
 
 		// Our encoder through the engine, decoded by ffmpeg.
 		var out bytes.Buffer
-		transcodeAAC(t, wav, &out, waxflow.TranscodeOptions{AACBitrate: kbps * 1000, Container: "adts"})
+		transcodeAAC(t, wav, &out, waxflow.TranscodeOptions{Bitrate: kbps * 1000, Container: "adts"})
 		ourPath := filepath.Join(t.TempDir(), item.name+".ours.aac")
 		if err := os.WriteFile(ourPath, out.Bytes(), 0o644); err != nil {
 			t.Fatal(err)

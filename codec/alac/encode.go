@@ -36,8 +36,7 @@ const (
 
 // EncoderVersion is the encoder's algorithm revision for cache keys
 // (ADR-0004): the compressed bytes for a given input must not change
-// without a bump. 2 adopted the reference's shift-off policy for 24- and
-// 32-bit input, which changed those depths' bytes.
+// without a bump.
 const EncoderVersion = "alacenc-2"
 
 // EncoderOptions configures the encoder. It is currently empty: ALAC is

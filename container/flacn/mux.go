@@ -14,13 +14,9 @@ import (
 
 var _ container.Muxer = (*Muxer)(nil)
 
-// MuxerVersion is this muxer's term in the ADR-0004 cache key: a cached
-// output of it regenerates when this bumps. Bump it for a change to what
-// gets written around unchanged encoded packets, which is the one kind of
-// change no encoder or DSP version can notice.
-//
-// flacn-mux-2: frames are numbered from 0 as they are written, so a copy of a
-// stream that starts past frame 0 changes bytes.
+// MuxerVersion is this muxer's term in the ADR-0004 cache key. Bump it for a
+// change to what gets written around unchanged encoded packets, which no
+// encoder or DSP version can notice.
 const MuxerVersion = "flacn-mux-2"
 
 // seekInterval is the target spacing between SEEKTABLE points in

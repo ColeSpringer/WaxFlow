@@ -327,13 +327,13 @@ func TestHEAACSegmented(t *testing.T) {
 	}
 }
 
-// TestHEAACBitrateScales checks AACBitrate reaches the HE encoder.
+// TestHEAACBitrateScales checks Bitrate reaches the HE encoder.
 func TestHEAACBitrateScales(t *testing.T) {
 	const frames = 48000 * 2
 	wav := brightWAV(t, 48000, frames, 2)
 	var lo, hi bytes.Buffer
-	transcodeHEAAC(t, wav, &lo, waxflow.TranscodeOptions{AACBitrate: 32000, Container: "adts"})
-	transcodeHEAAC(t, wav, &hi, waxflow.TranscodeOptions{AACBitrate: 96000, Container: "adts"})
+	transcodeHEAAC(t, wav, &lo, waxflow.TranscodeOptions{Bitrate: 32000, Container: "adts"})
+	transcodeHEAAC(t, wav, &hi, waxflow.TranscodeOptions{Bitrate: 96000, Container: "adts"})
 	if hi.Len() < lo.Len()*2 {
 		t.Fatalf("96k output (%d bytes) not clearly larger than 32k (%d bytes)", hi.Len(), lo.Len())
 	}

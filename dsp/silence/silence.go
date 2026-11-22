@@ -28,10 +28,9 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-// Version identifies the detector algorithm revision (ADR-0004 style).
-// WaxFlow recomputes the map fresh per job and does not cache it, but a
-// caller that persists one (WaxDeck's is the anticipated case) should
-// store this alongside so a detector revision invalidates it.
+// Version is the detector algorithm's revision (ADR-0004). WaxFlow does not
+// cache the map; a caller that persists one stores it alongside so a
+// detector revision invalidates it.
 const Version = "silence-1"
 
 // Span is one detected silence, in frames on the analyzed stream's own

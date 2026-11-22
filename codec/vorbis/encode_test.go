@@ -7,6 +7,7 @@ import (
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // TestFloorPostRoundTrip proves the floor-1 differential encoding inverts the
@@ -115,9 +116,6 @@ func decodePackets(t *testing.T, cfg Config, packets [][]byte) []float32 {
 	return out
 }
 
-// TestEncodeDecodeRoundTrip is the correctness gate: encode a signal, decode
-// it through our own decoder, confirm the gapless sample-count invariant holds
-// exactly and the reconstruction tracks the source under a lossy bound.
 // TestNewEncoderRejectsBitrate confirms a nonzero ABR Bitrate target is rejected
 // rather than silently ignored: ABR rate control is not implemented, the stream
 // is pure VBR, and Bitrate() must not report a rate the stream never holds.
@@ -135,6 +133,40 @@ func TestNewEncoderRejectsBitrate(t *testing.T) {
 	}
 }
 
+// TestNewEncoderRefusesANonFiniteQuality: a NaN passes every range
+// comparison, so the quality bound must refuse it by name.
+func TestNewEncoderRefusesANonFiniteQuality(t *testing.T) {
+	f := audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Float, BitDepth: 32}
+	for _, q := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		_, err := NewEncoder(f, &EncoderOptions{Quality: q})
+		if code := waxerr.CodeOf(err); code != waxerr.CodeInvalidRequest {
+			t.Errorf("quality %g: error %v has code %v, want %v", q, err, code, waxerr.CodeInvalidRequest)
+		}
+	}
+}
+
+// TestEncoderVersionNamesTheExactQuality: the term carries the quality in
+// full, so qualities that differ by any amount never share a cache key, and
+// the default (unset, named or negative zero) keeps the bare revision.
+func TestEncoderVersionNamesTheExactQuality(t *testing.T) {
+	if got, want := EncoderVersion(2), encoderRevision+"-q2"; got != want {
+		t.Errorf("EncoderVersion(2) = %q, want %q", got, want)
+	}
+	for _, q := range []float64{0, math.Copysign(0, -1), DefaultQuality} {
+		if got := EncoderVersion(q); got != encoderRevision {
+			t.Errorf("EncoderVersion(%g) = %q, want the bare %q", q, got, encoderRevision)
+		}
+	}
+	for _, pair := range [][2]float64{{2.25, 2.5}, {2, math.Nextafter(2, 3)}} {
+		if a, b := EncoderVersion(pair[0]), EncoderVersion(pair[1]); a == b {
+			t.Errorf("qualities %v and %v share the term %q", pair[0], pair[1], a)
+		}
+	}
+}
+
+// TestEncodeDecodeRoundTrip is the correctness gate: encode a signal, decode
+// it through our own decoder, confirm the gapless sample-count invariant holds
+// exactly and the reconstruction tracks the source under a lossy bound.
 func TestEncodeDecodeRoundTrip(t *testing.T) {
 	const rate = 44100
 	for _, tc := range []struct {

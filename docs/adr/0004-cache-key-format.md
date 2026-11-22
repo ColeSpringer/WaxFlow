@@ -93,9 +93,9 @@ the tuple is `[decoder, dsp..., encoder, muxer]`:
   `mka`, `mp4`, `mpa`, `ogg`, `riff`, `wv`. All start at `-1` except
   `mpa`, which ships at `mpa-mux-2` because the same change that added
   the term also fixed what that muxer writes.
-  `waxflow.muxerVersion` maps a resolved container name onto its
-  package's constant, keyed on the same name `output.mux` branches on so
-  the term cannot name a muxer other than the one that ran.
+  Each output form names its package's constant beside the `mux` that
+  builds the muxer, so the term cannot name a muxer other than the one
+  that ran.
 - A remux plan carries `[RemuxVersion, muxer]`, and a progressive cut
   appends `CutVersion` to that. `RemuxVersion` keeps only what it always
   described best, the gapless trailer this rung synthesizes; a muxer
@@ -654,3 +654,12 @@ none of them names keeps its bytes.
 
 Every cached Opus entry misses once. The server's cache-key golden shows
 the term on each Opus line.
+
+## Amendment (2026-11-21): the Vorbis encoder's term names its quality
+
+The Vorbis quality changes the bytes, and the encoder's term was a constant,
+so two qualities of one source shared a key. The term is now
+`vorbis.EncoderVersion(quality)`: the revision as before, then `-q` and the
+quality in `%g`, as `flac.EncoderVersion(level)` names its level. Quality 0
+resolves to the default, 3, as the encoder does, and both keep the bare
+revision, so no existing key moves.

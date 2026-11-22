@@ -245,7 +245,7 @@ func TestIlstCovrFlags(t *testing.T) {
 	}
 
 	// A cover with no MIME is normal: container.Picture carries one only where
-	// the source stored one, and TranscodeOptions.Art is a caller's struct.
+	// the source stored one, and the art a run is given is a caller's struct.
 	// The bytes decide there, or a JPEG handed over unlabelled would go out as
 	// raw binary and every reader that dispatches on the type would skip it.
 	sniffed := map[string]struct {

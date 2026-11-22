@@ -128,7 +128,7 @@ func TestMP3EncodeGapless(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := audio.Format{Rate: tc.rate, Channels: tc.ch, Layout: audio.DefaultLayout(tc.ch), Type: tc.typ, BitDepth: tc.bits}
 			wav := synthWAV(t, f, tc.frames)
-			mp3 := transcodeMP3(t, wav, waxflow.TranscodeOptions{MP3Bitrate: tc.bitrate})
+			mp3 := transcodeMP3(t, wav, waxflow.TranscodeOptions{Bitrate: tc.bitrate})
 			out, reported := decodeMP3Ours(t, mp3)
 			gotFrames := int64(len(out) / tc.ch)
 			if reported != int64(tc.frames) {
@@ -151,7 +151,7 @@ func TestMP3EncodeDifferential(t *testing.T) {
 	f := audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
 	const frames = 44100
 	wav := synthWAV(t, f, frames)
-	mp3 := transcodeMP3(t, wav, waxflow.TranscodeOptions{MP3Bitrate: 128000})
+	mp3 := transcodeMP3(t, wav, waxflow.TranscodeOptions{Bitrate: 128000})
 
 	// Reference input as interleaved float.
 	ref := make([]float32, frames*2)
@@ -202,7 +202,7 @@ func TestMP3VBRGaplessAndOracle(t *testing.T) {
 	const rate, frames = 44100, 40000
 	f := audio.Format{Rate: rate, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
 	wav := synthWAV(t, f, frames)
-	mp3Bytes := transcodeMP3(t, wav, waxflow.TranscodeOptions{MP3Bitrate: 128000, MP3VBR: true})
+	mp3Bytes := transcodeMP3(t, wav, waxflow.TranscodeOptions{Bitrate: 128000, VBR: true})
 
 	// Frames pick their own rates; at least the Xing frame's rate and one
 	// content rate must appear.
@@ -264,7 +264,7 @@ func TestMP3EncodeFFmpegAlignment(t *testing.T) {
 			f := audio.Format{Rate: tc.rate, Channels: tc.ch, Layout: audio.DefaultLayout(tc.ch), Type: audio.Int, BitDepth: 16}
 			ref := sweep(tc.rate, tc.frames, tc.ch)
 			wav := wavOf(t, f, ref)
-			mp3 := transcodeMP3(t, wav, waxflow.TranscodeOptions{MP3Bitrate: tc.bitrate, MP3VBR: tc.vbr})
+			mp3 := transcodeMP3(t, wav, waxflow.TranscodeOptions{Bitrate: tc.bitrate, VBR: tc.vbr})
 
 			dir := t.TempDir()
 			fp := filepath.Join(dir, "out.mp3")

@@ -10,9 +10,8 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-// Version is the decoder's cache-key version constant (ADR-0004): bump on any
-// change that alters decoded samples. 3 also covers container/asf's landing
-// change, since the key has no demuxer term (as vorbis-enc-9 did for Ogg).
+// Version is the decoder's cache-key version constant (ADR-0004): bump on
+// any change that alters decoded samples.
 const Version = "wma-dec-3"
 
 // The wFormatTag values this package decodes. The tags it refuses belong to

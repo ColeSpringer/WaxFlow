@@ -137,7 +137,7 @@ func TestHEAACv2EncoderQuality(t *testing.T) {
 				}
 
 				var out bytes.Buffer
-				transcodeHEAAC(t, wav, &out, waxflow.TranscodeOptions{HEAACv2: true, AACBitrate: kbps * 1000, Container: "adts"})
+				transcodeHEAAC(t, wav, &out, waxflow.TranscodeOptions{HEAACv2: true, Bitrate: kbps * 1000, Container: "adts"})
 				ourPath := filepath.Join(t.TempDir(), item.name+".ours.aac")
 				if err := os.WriteFile(ourPath, out.Bytes(), 0o644); err != nil {
 					t.Fatal(err)
@@ -165,7 +165,7 @@ func TestHEAACv2EncoderQuality(t *testing.T) {
 				}
 
 				var v1Out bytes.Buffer
-				transcodeHEAAC(t, wav, &v1Out, waxflow.TranscodeOptions{AACBitrate: kbps * 1000, Container: "adts"})
+				transcodeHEAAC(t, wav, &v1Out, waxflow.TranscodeOptions{Bitrate: kbps * 1000, Container: "adts"})
 				v1Path := filepath.Join(t.TempDir(), item.name+".v1.aac")
 				if err := os.WriteFile(v1Path, v1Out.Bytes(), 0o644); err != nil {
 					t.Fatal(err)

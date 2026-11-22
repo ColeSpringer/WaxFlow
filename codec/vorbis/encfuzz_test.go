@@ -128,7 +128,7 @@ func TestEncodeDeterministic(t *testing.T) {
 }
 
 // TestEncodeGolden pins a hash of a fixed encode so a bitstream change is a
-// deliberate, reviewed event (EncoderVersion must bump with it). The hash is a
+// deliberate, reviewed event (encoderRevision must bump with it). The hash is a
 // cheap stand-in for a committed golden file; it fails loud on any drift.
 //
 // The pin is per-architecture, and asserts only on goldenEncodeArch. Go leaves
@@ -176,7 +176,7 @@ func TestEncodeGolden(t *testing.T) {
 		t.Skipf("encode hash %#016x != golden %#016x: expected, the golden is pinned to %s and this is %s, which evaluates the encoder's float path to different last-ulp values. Re-pin from a %s build if this needs to gate here.",
 			h, golden, goldenEncodeArch, runtime.GOARCH, goldenEncodeArch)
 	}
-	t.Errorf("encode hash %#016x != golden %#016x: the bitstream changed. If intended, bump EncoderVersion and update goldenEncodeHash.", h, golden)
+	t.Errorf("encode hash %#016x != golden %#016x: the bitstream changed. If intended, bump encoderRevision and update goldenEncodeHash.", h, golden)
 }
 
 func encodeAll(t *testing.T, fm audio.Format, src [][]float32) [][]byte {
@@ -202,7 +202,7 @@ func bytesEqual(a, b []byte) bool {
 }
 
 // goldenEncodeHash pins the FNV-1a hash of the reference encode (headers plus
-// length-prefixed packets). Regenerate it and bump EncoderVersion whenever a
+// length-prefixed packets). Regenerate it and bump encoderRevision whenever a
 // deliberate bitstream change lands on amd64, the architecture it is pinned
 // to; see TestEncodeGolden for why it is not portable.
 const goldenEncodeHash uint64 = 0x343a156c99ba207d

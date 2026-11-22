@@ -16,16 +16,9 @@ import (
 
 var _ container.Muxer = (*Muxer)(nil)
 
-// MuxerVersion is this muxer's term in the ADR-0004 cache key: a cached
-// output of it regenerates when this bumps. Bump it for a change to what
-// gets written around unchanged encoded packets, which is the one kind of
-// change no encoder or DSP version can notice.
-//
-// One constant covers the Matroska and WebM forms: they are one muxer
-// under a DocType flag.
-//
-// mka-mux-3: a BlockGroup carrying DiscardPadding now states its
-// BlockDuration too, so every file with an inner trim changes bytes.
+// MuxerVersion is this muxer's term in the ADR-0004 cache key, one for the
+// Matroska and WebM forms. Bump it for a change to what gets written around
+// unchanged encoded packets, which no encoder or DSP version can notice.
 const MuxerVersion = "mka-mux-3"
 
 // Write-side element IDs, the header and track-entry elements the demuxer does
@@ -73,10 +66,10 @@ type MuxerOptions struct {
 	WebM bool
 	// Tags are accepted so the wiring matches the other muxers, but the muxer
 	// does NOT emit Matroska Tags elements: metadata for .mka output is written
-	// by the CLI's post-pass (cli/label, via waxlabel), which the CLI reaches
-	// because Matroska is not in its embedsTags set. If this muxer is ever
-	// taught to write Tags at Begin, add the Matroska containers to that
-	// embedsTags check in cli/transcode.go so the tags are not written twice.
+	// by the CLI's post-pass (cli/label, via waxlabel), which runs because the
+	// engine's Matroska forms report embedsTags false (waxflow.OutputEmbedsTags).
+	// If this muxer is ever taught to write Tags at Begin, set embedsTags on
+	// those forms (waxflow.matroskaForm) so the tags are not written twice.
 	Tags []container.Tag
 }
 

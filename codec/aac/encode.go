@@ -24,8 +24,11 @@ const EncoderVersion = "aac-enc-3+" + psy.Version
 // Trailer.Delay and the container's edit list.
 const EncoderDelay = 1024
 
+// FrameSize is the AAC-LC encoder's native frame in samples per channel.
+const FrameSize = 1024
+
 // frameLen is the AAC-LC long frame in samples per channel.
-const frameLen = 1024
+const frameLen = FrameSize
 
 // DefaultBitrate is used when EncoderOptions.Bitrate is zero.
 const DefaultBitrate = 128000
@@ -44,10 +47,10 @@ const psyOffsetDB = 0.0
 // EncoderOptions configures NewEncoder. The zero value is the default.
 type EncoderOptions struct {
 	// Bitrate is the target in bits per second for the whole stream
-	// (all channels), 0 for DefaultBitrate. AAC frames are inherently
-	// variable-size; the encoder holds the long-term mean at the target
-	// with a bit reservoir (ABR), which is what both fMP4 and ADTS
-	// carry naturally.
+	// (all channels), 0 for DefaultBitrate; a negative one is refused.
+	// AAC frames are inherently variable-size; the encoder holds the
+	// long-term mean at the target with a bit reservoir (ABR), which is
+	// what both fMP4 and ADTS carry naturally.
 	Bitrate int
 	// ParametricStereo selects HE-AAC v2 for NewHEEncoder: the stereo
 	// input is folded into a phase-aligned mono downmix coded by a mono
@@ -163,6 +166,10 @@ func NewEncoder(f audio.Format, opts *EncoderOptions) (*Encoder, error) {
 	if opts != nil {
 		o = *opts
 	}
+	if o.Bitrate < 0 {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("aac: bit rate %d is negative", o.Bitrate))
+	}
 	if o.Bitrate == 0 {
 		o.Bitrate = DefaultBitrate
 	}
@@ -248,7 +255,7 @@ func coveringSfb(swb []uint16, numSwb int, cutoff float64, rate, n int) int {
 func (e *Encoder) InputFormat() audio.Format { return e.fmt }
 
 // FrameSize implements codec.Encoder: 1024 samples per frame.
-func (e *Encoder) FrameSize() int { return frameLen }
+func (e *Encoder) FrameSize() int { return FrameSize }
 
 // Bitrate reports the clamped target bit rate the plan advertises.
 func (e *Encoder) Bitrate() int { return e.bitrate }

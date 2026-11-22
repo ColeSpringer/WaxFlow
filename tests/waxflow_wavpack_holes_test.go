@@ -150,8 +150,8 @@ func TestWavPackCopyOfAHoleIntoAStreamCompletes(t *testing.T) {
 	}
 	var dst bytes.Buffer
 	var done, total int64
-	opts := waxflow.TranscodeOptions{Format: "wavpack", Progress: func(d, t int64) { done, total = d, t }}
-	res, err := waxflow.New().RemuxDemuxer(context.Background(), d, d.Tracks()[0], &dst, opts)
+	res, err := waxflow.New().RemuxDemuxer(context.Background(), d, d.Tracks()[0], &dst,
+		waxflow.TranscodeOptions{Format: "wavpack"}, waxflow.WithProgress(func(d, t int64) { done, total = d, t }))
 	if err != nil {
 		t.Fatalf("the copy failed: %v", err)
 	}

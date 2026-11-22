@@ -11,18 +11,19 @@ import (
 
 var _ codec.Encoder = (*HEEncoder)(nil)
 
-// HEEncoderVersion identifies the HE-AAC encode revision for cache keys
-// (ADR-0004). It composes the LC core's full revision (EncoderVersion,
-// which itself carries the psychoacoustic model's: an aac-enc bump
-// changes these streams too, and omitting it would serve stale HE bytes
-// after core-encoder work rotates only the aac keys) and the resampler's
-// (the 2:1 core feed is part of the signal path).
+// HEEncoderVersion is the HE-AAC encoder's cache-key term (ADR-0004). It
+// composes the LC core's EncoderVersion and the resampler's, both in the
+// signal path, so a bump to either changes these keys too.
 var HEEncoderVersion = "aac-heenc-1+" + EncoderVersion + "+" + resample.HQ.Version()
 
 // HEV2EncoderVersion is the HE-AAC v2 revision. It composes the whole v1
 // revision because a v2 stream is the v1 machinery over the downmix: any
 // change that rotates the v1 key changes v2 bytes too.
 var HEV2EncoderVersion = "aac-hev2enc-1+" + HEEncoderVersion
+
+// HEFrameSize is the HE-AAC encoder's native frame in output samples: one
+// core frame at half the output rate.
+const HEFrameSize = 2 * FrameSize
 
 // HEEncoderDelay is the encoder priming in output samples: the core's
 // one-frame priming (1024 core samples, 2048 here) plus the decoder-side
@@ -106,6 +107,10 @@ func hePlanParams(f audio.Format, opts *EncoderOptions) (bitrate int, hdr sbrHea
 	if o.ParametricStereo && f.Channels != 2 {
 		return 0, hdr, tbl, waxerr.New(waxerr.CodeUnsupportedFormat,
 			"aac: HE-AAC v2 codes a stereo pair and this encode resolves to mono; drop the mono conversion or encode HE-AAC v1 instead")
+	}
+	if o.Bitrate < 0 {
+		return 0, hdr, tbl, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("aac: bit rate %d is negative", o.Bitrate))
 	}
 	if o.Bitrate == 0 {
 		o.Bitrate = HEDefaultBitrate
@@ -245,7 +250,7 @@ func NewHEEncoder(f audio.Format, opts *EncoderOptions) (*HEEncoder, error) {
 func (e *HEEncoder) InputFormat() audio.Format { return e.fmt }
 
 // FrameSize implements codec.Encoder: 2048 output samples per frame.
-func (e *HEEncoder) FrameSize() int { return 2 * frameLen }
+func (e *HEEncoder) FrameSize() int { return HEFrameSize }
 
 // Bitrate reports the clamped target bit rate the plan advertises.
 func (e *HEEncoder) Bitrate() int { return e.core.bitrate }

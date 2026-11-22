@@ -49,8 +49,7 @@ func TestFFprobeReadsProgressiveChapterTrack(t *testing.T) {
 	if _, err := waxflow.New().Transcode(ctx, src, "m4b", f, waxflow.TranscodeOptions{
 		Format:    "aac",
 		Container: "progressive",
-		Chapters:  info.Chapters,
-	}); err != nil {
+	}, waxflow.WithChapters(info.Chapters)); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.Close(); err != nil {

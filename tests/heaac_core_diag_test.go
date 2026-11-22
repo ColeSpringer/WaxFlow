@@ -147,7 +147,7 @@ func TestHECoreClickPhase(t *testing.T) {
 			wav := synthWAVFromSamples(t, f, ref)
 
 			var out bytes.Buffer
-			transcodeAAC(t, wav, &out, waxflow.TranscodeOptions{AACBitrate: bps, Container: "adts"})
+			transcodeAAC(t, wav, &out, waxflow.TranscodeOptions{Bitrate: bps, Container: "adts"})
 			ourPath := filepath.Join(dir, "ours.aac")
 			if err := os.WriteFile(ourPath, out.Bytes(), 0o644); err != nil {
 				t.Fatal(err)
@@ -177,7 +177,7 @@ func TestHECoreTransientDiag(t *testing.T) {
 			wav := synthWAVFromSamples(t, f, ref)
 
 			var out bytes.Buffer
-			transcodeAAC(t, wav, &out, waxflow.TranscodeOptions{AACBitrate: bps, Container: "adts"})
+			transcodeAAC(t, wav, &out, waxflow.TranscodeOptions{Bitrate: bps, Container: "adts"})
 			ourPath := filepath.Join(dir, "ours.aac")
 			if err := os.WriteFile(ourPath, out.Bytes(), 0o644); err != nil {
 				t.Fatal(err)

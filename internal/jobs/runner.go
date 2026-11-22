@@ -360,17 +360,18 @@ func (r *Runner) run(j *Job) {
 		r.mu.Unlock()
 	}()
 
-	var err error
-	switch j.Type {
-	case TypeTranscode:
+	err := j.Request.CheckBitrate()
+	switch {
+	case err != nil:
+	case j.Type == TypeTranscode:
 		err = r.runTranscode(ctx, j)
-	case TypeAnalyze:
+	case j.Type == TypeAnalyze:
 		err = r.runAnalyze(ctx, j)
-	case TypeTimeline:
+	case j.Type == TypeTimeline:
 		err = r.runTimeline(ctx, j)
-	case TypeMerge:
+	case j.Type == TypeMerge:
 		err = r.runMerge(ctx, j)
-	case TypeSplit:
+	case j.Type == TypeSplit:
 		err = r.runSplit(ctx, j)
 	default:
 		err = waxerr.New(waxerr.CodeInvalidRequest, "jobs: unknown job type")
@@ -860,10 +861,20 @@ func secondsToDuration(seconds float64) time.Duration {
 	return time.Duration(seconds * float64(time.Second))
 }
 
+// CheckBitrate refuses a Bitrate above waxflow.MaxBitrate in kbit/s, which
+// TranscodeOptions would multiply past the bound. Creation runs it, and so does
+// a run, since a stored request is read back from disk.
+func (req Request) CheckBitrate() error {
+	if limit := waxflow.MaxBitrate / 1000; req.Bitrate > limit {
+		return waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("bitrate %d: want at most %d kbit/s", req.Bitrate, limit))
+	}
+	return nil
+}
+
 // TranscodeOptions maps the request onto engine options. gainDB is the
-// resolved gain and profile the daemon's resampler profile; the lossy
-// bit rate feeds every encoder's field, since exactly one format is
-// selected.
+// resolved gain and profile the daemon's resampler profile. The caller has run
+// CheckBitrate.
 func (req Request) TranscodeOptions(gainDB float64, profile resample.Profile) waxflow.TranscodeOptions {
 	return waxflow.TranscodeOptions{
 		Format:          req.Format,
@@ -875,9 +886,7 @@ func (req Request) TranscodeOptions(gainDB float64, profile resample.Profile) wa
 		FLACLevel:       req.FLACLevel,
 		WavPackLevel:    req.WavPackLevel,
 		APELevel:        req.APELevel,
-		MP3Bitrate:      req.Bitrate * 1000,
-		OpusBitrate:     req.Bitrate * 1000,
-		AACBitrate:      req.Bitrate * 1000,
+		Bitrate:         req.Bitrate * 1000,
 		HEAACv2:         req.HEv2,
 		ResampleProfile: profile,
 	}
@@ -933,7 +942,7 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 		}
 	}
 	// The container's own tags are the floor and the mapper's win over them,
-	// the same resolution opts.Chapters makes below and GET /probe makes on
+	// the same resolution the chapters make below and GET /probe makes on
 	// the wire. A daemon with no mapper wired leaves info nil, which the fold
 	// reads as a floor to build on. Folded here, before the ReplayGain drop:
 	// the container carries the four REPLAYGAIN_* keys too, and a later fold
@@ -1007,9 +1016,9 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 	if dropRG {
 		tagInfo = meta.WithoutReplayGain(info)
 	}
-	// The resolved gain and the per-call payloads land on the options the plan
-	// was taken from, so what runs is what was planned: PlanTranscode
-	// normalizes the payloads away, and gain shapes no field the plan reports.
+	// The resolved gain lands on the options the plan was taken from, so what
+	// runs is what was planned: gain shapes no field the plan reports. The
+	// tags, chapters and art ride with the run.
 	opts.GainDB = gainDB
 	// Trimmed to what an embedding muxer can hold: these are the source's own
 	// tags, not tags this request named, so one oversized value must not fail
@@ -1017,7 +1026,6 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 	// vanishing, which is the whole point of trimming here instead of leaving
 	// the muxer to skip them.
 	tags, droppedTags := meta.EmbeddableTags(meta.FullTags(tagInfo))
-	opts.Tags = tags
 	for _, key := range droppedTags {
 		r.warn(j.ID, "tag "+key+" is too large for the output and was not embedded")
 	}
@@ -1029,13 +1037,14 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 	// then lacks. Reading them only from the mapper is what made a daemon
 	// embedded by anyone who injects none write chapterless outputs, for a
 	// file whose chapters the demuxer had already parsed off the header.
-	opts.Chapters = probe.Chapters
+	chapters := probe.Chapters
+	var art *container.Picture
 	if info != nil {
 		if len(info.Chapters) > 0 {
-			opts.Chapters = info.Chapters
+			chapters = info.Chapters
 		}
 		if p := info.FrontPicture(); p != nil {
-			opts.Art = &container.Picture{MIME: p.MIME, Data: p.Data}
+			art = &container.Picture{MIME: p.MIME, Data: p.Data}
 		}
 	}
 
@@ -1056,7 +1065,7 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 		// best-effort post-pass cannot run (its real values arrive
 		// through Apply's extra tags instead). Tags never shape the
 		// plan, so appending after planning is safe.
-		opts.Tags = append(opts.Tags,
+		tags = append(tags,
 			container.Tag{Key: "REPLAYGAIN_TRACK_GAIN", Value: meta.FormatGain(0)},
 			container.Tag{Key: "REPLAYGAIN_TRACK_PEAK", Value: meta.FormatPeak(0)})
 	case analyzeLoudness && embedsTags:
@@ -1068,7 +1077,7 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 		// measurement still runs below and still reaches the job's Analysis;
 		// only the file gets the estimate.
 		outLUFS, outTP := deriveOutputLoudness(srcRes, gainDB, peakLimited)
-		opts.Tags = append(opts.Tags, meta.ReplayGainTags(outLUFS, outTP)...)
+		tags = append(tags, meta.ReplayGainTags(outLUFS, outTP)...)
 	}
 
 	outName := "out." + outputExt(opts)
@@ -1079,8 +1088,9 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 	}
 	defer f.Close()
 
-	opts.Progress = r.progressFunc(ctx, j.ID, "transcode")
-	res, err := r.cfg.Engine.Transcode(ctx, src, src.Ext, f, opts)
+	res, err := r.cfg.Engine.Transcode(ctx, src, src.Ext, f, opts,
+		waxflow.WithTags(tags), waxflow.WithChapters(chapters), waxflow.WithArt(art),
+		waxflow.WithProgress(r.progressFunc(ctx, j.ID, "transcode")))
 	if err != nil {
 		return err
 	}
@@ -1214,14 +1224,14 @@ func outputExt(opts waxflow.TranscodeOptions) string {
 // write is still in the writer, and a close error (a full disk reporting late)
 // would be discarded exactly when it is the whole story.
 func (r *Runner) writeMedia(ctx context.Context, j *Job, med format.Media, name string,
-	opts waxflow.TranscodeOptions, mediaType string) (*Output, error) {
+	opts waxflow.TranscodeOptions, mediaType string, run ...waxflow.RunOption) (*Output, error) {
 	path := filepath.Join(r.store.jobDir(j.ID), name)
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: creating output", err)
 	}
 	defer f.Close()
-	res, err := r.cfg.Engine.TranscodeMedia(ctx, med, f, opts)
+	res, err := r.cfg.Engine.TranscodeMedia(ctx, med, f, opts, run...)
 	if err != nil {
 		return nil, err
 	}
@@ -1356,7 +1366,6 @@ func (r *Runner) runMerge(ctx context.Context, j *Job) error {
 	// since both are per-track answers and this has N tracks in and one file
 	// out. The server refuses them at creation; this is only where that shows.
 	opts := req.TranscodeOptions(0, r.cfg.Profile)
-	opts.Progress = r.progressFunc(ctx, j.ID, "transcode")
 	copts, err := r.cfg.Engine.ConcatOptionsFor(tracks, 0, opts)
 	if err != nil {
 		return err
@@ -1373,17 +1382,17 @@ func (r *Runner) runMerge(ctx context.Context, j *Job) error {
 		return err
 	}
 	defer med.Close()
+	var chapters []container.Chapter
 	if wantChapters {
 		// One chapter per member, at the member's start on the concatenated
 		// timeline. The offsets come from the same ConcatBoundaries the timeline
 		// path plans through, so a marker lands exactly where its seam does.
-		chapters, err := mergeChapters(tracks, copts, req.MemberTitles, tagTitles)
-		if err != nil {
+		if chapters, err = mergeChapters(tracks, copts, req.MemberTitles, tagTitles); err != nil {
 			return err
 		}
-		opts.Chapters = chapters
 	}
-	out, err := r.writeMedia(ctx, j, med, "out."+outputExt(opts), opts, plan.MediaType)
+	out, err := r.writeMedia(ctx, j, med, "out."+outputExt(opts), opts, plan.MediaType,
+		waxflow.WithChapters(chapters), waxflow.WithProgress(r.progressFunc(ctx, j.ID, "transcode")))
 	if err != nil {
 		return err
 	}
@@ -1606,9 +1615,9 @@ func (r *Runner) runSplit(ctx context.Context, j *Job) error {
 		// The hook still fires per chunk, and that is not a waste even when
 		// the bar barely moves: progressFunc is also where a job yields to a
 		// saturated live pool, and that has to be asked per chunk.
-		opts.Progress = func(done, pieceTotal int64) {
+		progress := waxflow.WithProgress(func(done, pieceTotal int64) {
 			report(splitProgressAt(pieceBase, span, done, pieceTotal), total)
-		}
+		})
 		med, err := r.cfg.Engine.OpenStream(src, src.Ext)
 		if err != nil {
 			return err
@@ -1641,7 +1650,7 @@ func (r *Runner) runSplit(ctx context.Context, j *Job) error {
 		// Named by output index, not piece index: it is the index /result
 		// takes and the name a warning about the piece carries, and with a
 		// piece skipped the two indices part company.
-		out, err := r.writeMedia(ctx, j, sl, fmt.Sprintf("out.%d.%s", len(outs), ext), opts, plan.MediaType)
+		out, err := r.writeMedia(ctx, j, sl, fmt.Sprintf("out.%d.%s", len(outs), ext), opts, plan.MediaType, progress)
 		sl.Close()
 		if err != nil {
 			return err

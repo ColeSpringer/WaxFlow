@@ -752,7 +752,7 @@ func TestCutFormatsIsHonest(t *testing.T) {
 		if !Cuttable(container.Track{Codec: o.codecID}) {
 			t.Errorf("%q is advertised for cut but its codec %v is not Cuttable", name, o.codecID)
 		}
-		if !o.live {
+		if !o.forms[0].live {
 			t.Errorf("%q is advertised for cut but has no live progressive form", name)
 		}
 		if !segmented[name] {
@@ -771,7 +771,7 @@ func TestCutFormatsIsHonest(t *testing.T) {
 		if _, ok := cutCodecs[o.codecID]; !ok {
 			continue
 		}
-		if o.live {
+		if o.forms[0].live {
 			cuttableLive = append(cuttableLive, o.name)
 		}
 		if o.hls != nil {

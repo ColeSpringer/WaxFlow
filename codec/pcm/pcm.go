@@ -183,10 +183,8 @@ func ContainerBits(validBits int) int {
 	return (validBits + 7) / 8 * 8
 }
 
-// Version is the PCM encoder's algorithm revision for cache keys
-// (ADR-0004). PCM packing has no tunable algorithm, but the constant
-// exists from birth like every encoder's: a packing fix must invalidate
-// cached outputs.
+// Version is the PCM encoder's revision for cache keys (ADR-0004): a packing
+// fix must bump it to invalidate cached outputs.
 const Version = "pcm-1"
 
 // configVersion versions the marshaled Config layout.

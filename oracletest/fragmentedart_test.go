@@ -41,11 +41,10 @@ func writeFragmentedArt(t *testing.T, srcWAV, path string, png []byte) {
 	defer out.Close()
 	// The empty Container is the aac row's own default: fragmented.
 	if _, err := waxflow.New().Transcode(t.Context(), container.BytesSource(raw), "wav", out,
-		waxflow.TranscodeOptions{
-			Format: "aac",
-			Tags:   []container.Tag{{Key: "TITLE", Value: "Arty Fragment"}},
-			Art:    &container.Picture{MIME: "image/png", Data: png},
-		}); err != nil {
+		waxflow.TranscodeOptions{Format: "aac"},
+		waxflow.WithTags([]container.Tag{{Key: "TITLE", Value: "Arty Fragment"}}),
+		waxflow.WithArt(&container.Picture{MIME: "image/png", Data: png}),
+	); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -108,9 +107,8 @@ func TestWebPCoverKeepsItsTypeThroughMP4(t *testing.T) {
 	raw := transcodeToBytes(t, f, 4410, waxflow.TranscodeOptions{
 		Format:    "alac",
 		Container: "fragmented",
-		Tags:      []container.Tag{{Key: "TITLE", Value: "Lossless WebP"}},
-		Art:       &container.Picture{MIME: "image/webp", Data: webp},
-	})
+	}, waxflow.WithTags([]container.Tag{{Key: "TITLE", Value: "Lossless WebP"}}),
+		waxflow.WithArt(&container.Picture{MIME: "image/webp", Data: webp}))
 
 	if got := covrDataType(t, raw); got != 0 {
 		t.Errorf("covr well-known type = %d for a WebP cover, want 0 (raw binary)", got)

@@ -58,7 +58,7 @@ func TestARestartedOpusSegmentRunJoinsAtItsSteadyStateError(t *testing.T) {
 			raw := testutil.FloatWAVBytes(t, 48000, pcm)
 			for _, kbps := range []int{24, 32, 48} {
 				t.Run(fmt.Sprintf("%s/%dch/%dk", in.name, chans, kbps), func(t *testing.T) {
-					opts := waxflow.TranscodeOptions{Format: "opus", OpusBitrate: kbps * 1000}
+					opts := waxflow.TranscodeOptions{Format: "opus", Bitrate: kbps * 1000}
 					full, _ := collectSegments(t, e, raw, opts, segSamples, 0)
 					steady := decodeOpusSegments(t, full, chans)
 					for _, at := range []int64{2, 3, 5} {
@@ -98,7 +98,7 @@ func TestAnOpusRestartIntoAQuietPassageStartsTheSoundAtItsSteadyStateError(t *te
 		raw := testutil.FloatWAVBytes(t, 48000, pcm)
 		for _, kbps := range []int{24, 32, 48} {
 			t.Run(fmt.Sprintf("%dch/%dk", chans, kbps), func(t *testing.T) {
-				opts := waxflow.TranscodeOptions{Format: "opus", OpusBitrate: kbps * 1000}
+				opts := waxflow.TranscodeOptions{Format: "opus", Bitrate: kbps * 1000}
 				full, _ := collectSegments(t, e, raw, opts, segSamples, 0)
 				whole := decodeOpusSegments(t, full, chans)
 				steady := testutil.ErrorLevelsOf(pcm, whole, 2*48000, 2*48000+head)

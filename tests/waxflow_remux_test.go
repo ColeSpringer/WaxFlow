@@ -328,8 +328,8 @@ func TestPlanRemuxDeclinesEveryShapingOption(t *testing.T) {
 		{"GainDB", waxflow.TranscodeOptions{GainDB: -6}},
 		{"Dynamics", waxflow.TranscodeOptions{Dynamics: gain.PresetVoice}},
 		{"FromSample", waxflow.TranscodeOptions{FromSample: 480}},
-		{"OpusBitrate", waxflow.TranscodeOptions{OpusBitrate: 64000}},
-		{"OpusVBR", waxflow.TranscodeOptions{OpusVBR: true}},
+		{"Bitrate", waxflow.TranscodeOptions{Bitrate: 64000}},
+		{"VBR", waxflow.TranscodeOptions{VBR: true}},
 		{"OpusComplexity", waxflow.TranscodeOptions{OpusComplexity: 3}},
 		{"OpusSignal", waxflow.TranscodeOptions{OpusSignal: "voice"}},
 	} {

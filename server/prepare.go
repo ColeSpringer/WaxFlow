@@ -33,8 +33,11 @@ type streamRequest struct {
 	// resolves tag-based gain and supplies the live minimal tag set.
 	meta *meta.Info
 
-	// Set by planTranscode for transcode-shaped requests.
+	// Set by planTranscode for transcode-shaped requests. tags ride with the
+	// run beside opts: they never shape the plan, and the cache key folds
+	// them in on its own.
 	opts waxflow.TranscodeOptions
+	tags []container.Tag
 	plan *waxflow.TranscodePlan
 	// remux is the ladder's rung 2 when this request can be served by
 	// rewriting the container around the source's own packets, nil when it
@@ -181,7 +184,7 @@ func (s *Server) planTranscode(ctx context.Context, req *streamRequest) error {
 	// muxers with a stream-form tag representation.
 	// Trimmed for the reason internal/jobs does it: a source's own tags
 	// carried onto a stream must not turn an oversized one into a refusal.
-	opts.Tags = embeddableTags(req.meta)
+	req.tags = embeddableTags(req.meta)
 	req.opts = opts
 	// Ladder rung 2: rewrite the container around the source's own packets.
 	// Rung 1 (directPlayable) already declined, or we would not be here, so
@@ -211,36 +214,21 @@ func (s *Server) planTranscode(ctx context.Context, req *streamRequest) error {
 	// Keyed for every output, the few that embed no tags included (ADTS, WAV,
 	// Matroska): a term too many costs a re-encode, a term too few serves
 	// another mapping's tags.
-	if len(req.opts.Tags) > 0 {
-		req.canonical += "&tags=" + tagsFingerprint(req.opts.Tags)
+	if len(req.tags) > 0 {
+		req.canonical += "&tags=" + tagsFingerprint(req.tags)
 	}
 	return nil
 }
 
 // streamOptions maps a progressive request's parameters onto engine options,
-// resolving format=auto and refusing what the output format alone rules out.
-// Tags are left to the caller.
+// resolving format=auto and refusing what the options alone rule out, a knob
+// the format does not take among them. Tags are left to the caller.
 func (s *Server) streamOptions(p *streamParams, gainDB float64, from int64) (waxflow.TranscodeOptions, error) {
 	outFormat := p.format
 	if outFormat == "auto" {
 		outFormat = waxflow.DefaultLiveFormat()
 	}
-	// bitrate/q select a lossy output bit rate; a registered lossless format
-	// has none to set, so the request is refused rather than silently
-	// ignored. An unregistered format falls through to PlanTranscode's
-	// unsupported-format error instead of being mislabeled "lossless".
-	if p.bitrate != 0 {
-		if lossy, known := waxflow.LossyFormat(outFormat); known && !lossy {
-			return waxflow.TranscodeOptions{}, waxerr.New(waxerr.CodeUnsupportedFormat,
-				fmt.Sprintf("bitrate/q apply to lossy output; %s is lossless", outFormat))
-		}
-	}
-	// The refusal also keeps the cache key's hev2 term honest: true only
-	// where it shaped the stream.
-	if err := checkHEv2Format(p.hev2, outFormat); err != nil {
-		return waxflow.TranscodeOptions{}, err
-	}
-	return waxflow.TranscodeOptions{
+	opts := waxflow.TranscodeOptions{
 		Format:          outFormat,
 		Container:       p.container,
 		Rate:            p.rate,
@@ -250,11 +238,15 @@ func (s *Server) streamOptions(p *streamParams, gainDB float64, from int64) (wax
 		Dynamics:        p.dynamics,
 		FromSample:      from,
 		ResampleProfile: s.profile,
-		MP3Bitrate:      p.bitrate * 1000,
-		OpusBitrate:     p.bitrate * 1000,
-		AACBitrate:      p.bitrate * 1000,
+		Bitrate:         p.bitrate * 1000,
 		HEAACv2:         p.hev2,
-	}, nil
+	}
+	// The refusal also keeps the cache key's hev2 term honest: true only
+	// where it shaped the stream.
+	if err := opts.Check(); err != nil {
+		return waxflow.TranscodeOptions{}, knobRefusal(err, streamKnobs)
+	}
+	return opts, nil
 }
 
 // checkLivePlan enforces what a progressive plan must promise: a streaming

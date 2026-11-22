@@ -160,7 +160,12 @@ func ExecuteFlavor(version string, args []string, stdout, stderr io.Writer, flav
 	if strings.HasPrefix(err.Error(), "unknown command") {
 		err = waxerr.Wrap(waxerr.CodeInvalidRequest, "usage", err)
 	}
-	fmt.Fprintf(stderr, "waxflow: %v\n", err)
+	// Engine errors already start with the program's name; one is enough.
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "waxflow: ") {
+		msg = "waxflow: " + msg
+	}
+	fmt.Fprintln(stderr, msg)
 	return waxerr.ExitCode(err)
 }
 

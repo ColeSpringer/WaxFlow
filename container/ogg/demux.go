@@ -44,8 +44,8 @@ const (
 )
 
 // DemuxerVersion is this demuxer's term in the ADR-0004 cache key, carried
-// by every Ogg track. Bump it for a change that delivers other samples; the
-// ADR says what revision 2 is.
+// by every Ogg track. Bump it for a change that makes the demuxer
+// deliver other samples for a file that has not changed.
 const DemuxerVersion = "ogg-demux-2"
 
 // mappingCtor pairs a BOS signature with a mapping constructor. A nil make is a

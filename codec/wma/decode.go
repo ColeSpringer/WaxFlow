@@ -860,8 +860,7 @@ func (d *Decoder) decodeLSPExponents(ch, blockLen int) error {
 		// math.Sqrt is correctly rounded, so the two forms differ by under two
 		// float64 ulps and agree exactly once stored as float32
 		// (BenchmarkLSPExponentCurve, and 20M sampled values found no
-		// disagreement); the Version constant is bumped anyway, since "agrees
-		// on everything sampled" is not "cannot differ".
+		// disagreement).
 		v := float32(1 / math.Sqrt(math.Sqrt(s)))
 		exp[i] = v
 		maxv = max(maxv, v)

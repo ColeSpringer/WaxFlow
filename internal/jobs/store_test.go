@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/internal/posixfs"
 	"github.com/colespringer/waxflow/internal/ulid"
 	"github.com/colespringer/waxflow/source"
@@ -520,5 +522,37 @@ func TestStoreKeepsEveryMessageLegible(t *testing.T) {
 	}
 	if !utf8.Valid(doc) || bytes.Contains(doc, []byte(`�`)) || !bytes.Contains(doc, []byte(`caf\\xe9`)) {
 		t.Errorf("job.json lost a message's bytes:\n%s", doc)
+	}
+}
+
+// TestRestartRefusesAnUnboundedBitrate: a stored request is read back from
+// disk, so a run refuses a Bitrate above waxflow.MaxBitrate in kbit/s in the
+// jobs surface's words, where the multiply would wrap it to a rate the job
+// never named.
+func TestRestartRefusesAnUnboundedBitrate(t *testing.T) {
+	res, ref, srcID := openLib(t)
+	kbps := []int{waxflow.MaxBitrate/1000 + 1}
+	if math.MaxInt > waxflow.MaxBitrate {
+		shift := 61
+		kbps = append(kbps, 1<<shift+128) // times 1000 wraps a 64-bit int to 128000
+	}
+	for _, k := range kbps {
+		t.Run(fmt.Sprint(k), func(t *testing.T) {
+			dir := t.TempDir()
+			req := transcodeReq(ref, srcID)
+			req.Format, req.FLACLevel, req.Bitrate = "opus", 0, k
+			writeJob(t, dir, &Job{SchemaVersion: SchemaVersion, ID: mustULID(t), Type: TypeTranscode,
+				State: StateQueued, Request: req, Created: time.Now().UTC()})
+			r := openRunner(t, Config{Dir: dir, Resolver: res})
+			jobs := r.List()
+			if len(jobs) != 1 {
+				t.Fatalf("%d jobs after reopen, want 1", len(jobs))
+			}
+			failed := waitJob(t, r, jobs[0].ID, StateFailed)
+			want := fmt.Sprintf("bitrate %d: want at most %d kbit/s", k, waxflow.MaxBitrate/1000)
+			if failed.Error == nil || failed.Error.Code != "invalid-request" || failed.Error.Message != want {
+				t.Errorf("error = %+v, want invalid-request %q", failed.Error, want)
+			}
+		})
 	}
 }

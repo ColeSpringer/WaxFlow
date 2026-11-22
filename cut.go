@@ -14,25 +14,9 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-// CutVersion identifies the cut rung's own sample-affecting logic for the
-// ADR-0004 cache key.
-//
-// It rides beside RemuxVersion rather than replacing it, because a cut is a
-// remux with a packet filter in front: everything RemuxVersion covers still
-// applies, and this covers what the filter adds. RemuxVersion's own argument for
-// existing is the one that puts this here too. A cut runs no decoder, no DSP and
-// no encoder, so no revision of any of them can change its bytes; what it does
-// synthesize is a set of trims and a rewritten codec config, and wrong gapless
-// metadata is wrong playback rather than merely older bytes.
-//
-// cut-2: the HE-AAC decode preroll (aac.HESeekPreroll) grew from 4096 to
-// 24576 samples, and the preroll picks each span's first kept packet, so
-// the same request now cuts different bytes on HE-AAC sources.
-//
-// cut-3: every interior edge of a multi-span cut snaps INWARD, with no
-// pre-roll, so the bytes and the Landed semantics both change for every cut
-// of more than one span (ADR-0011). TranscodeOptions.SpliceTrims rides in
-// the cache key beside this.
+// CutVersion is the cut rung's term in the ADR-0004 cache key, beside
+// RemuxVersion. Bump it for a change to the trims, span edges or codec config
+// the cut synthesizes.
 const CutVersion = "cut-3"
 
 // Span is a kept sample range [From, To) of a source's own track timeline.
@@ -201,7 +185,7 @@ func CutFormats() []string {
 		// A remux-only row is not advertised (Outputs() precedent); its
 		// sources reach the cut through the family redirect on the row a
 		// client can name (format=aac cuts an HE-AAC source).
-		if cc, ok := cutCodecs[o.codecID]; ok && !cc.headOnly && o.live && o.hls != nil && !o.remuxOnly {
+		if cc, ok := cutCodecs[o.codecID]; ok && !cc.headOnly && o.forms[0].live && o.hls != nil && !o.remuxOnly {
 			names = append(names, o.name)
 		}
 	}
@@ -890,8 +874,8 @@ func adoptMeasured(track, measured container.Track) container.Track {
 //
 // It is a wrapper rather than a TranscodeOptions field for the reason Slice is,
 // and for one more that is this rung's own. The remux rung shares
-// TranscodeOptions deliberately: remuxable derives its rule by comparing option
-// projections instead of hand-listing fields, which is what keeps it from
+// TranscodeOptions deliberately: remuxable derives its rule by comparing whole
+// option values instead of hand-listing fields, which is what keeps it from
 // drifting as options land, and a parallel options struct would destroy that
 // derivation. The codebase has already answered "how do I express a span" twice,
 // and both answers say the same thing: a span is applied by wrapping, never
@@ -1153,6 +1137,9 @@ func cutTrimMismatch(got, want, at int64) error {
 // only fail there with the same words, several minutes of decoding later,
 // under a status that told the client to send a different format.
 func (e *Engine) PlanCut(track container.Track, opts TranscodeOptions, spans []Span, grid int) (*CutPlan, error) {
+	if err := opts.Check(); err != nil {
+		return nil, err
+	}
 	cut, landed, err := CutTrack(track, opts, spans, grid)
 	if err != nil {
 		// The seam. CutTrack cannot express a decline through its signature, so
@@ -1318,7 +1305,10 @@ func cutTrimsExpressible(containerName string, delay, padding int64) bool {
 // plan did. The walk's trim check refuses that rather than writing it, so the
 // mistake surfaces as a refusal naming a trim the source does not carry.
 func (e *Engine) CutStream(ctx context.Context, src container.Source, hint string, dst io.Writer,
-	opts TranscodeOptions, spans []Span, grid int, measured container.Track) (*TranscodeResult, error) {
+	opts TranscodeOptions, spans []Span, grid int, measured container.Track, run ...RunOption) (*TranscodeResult, error) {
+	if err := opts.Check(); err != nil {
+		return nil, err
+	}
 	demux, info, err := format.OpenDemuxer(src, hint, nil)
 	if err != nil {
 		return nil, err
@@ -1336,5 +1326,5 @@ func (e *Engine) CutStream(ctx context.Context, src container.Source, hint strin
 	if err != nil {
 		return nil, err
 	}
-	return e.RemuxDemuxer(ctx, cutDemux, cut, dst, opts)
+	return e.RemuxDemuxer(ctx, cutDemux, cut, dst, opts, run...)
 }

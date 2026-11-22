@@ -93,6 +93,23 @@ data track occupies part of the file the split says what it skipped.`,
 				outFormat = "flac"
 			}
 
+			// What the flags alone decide is refused before the source opens, in
+			// the engine's order, as transcode does.
+			optLevel, levelErr := flacLevelOption(cmd, flacLevel)
+			opts := waxflow.TranscodeOptions{
+				Format:       outFormat,
+				Container:    containerName,
+				FLACLevel:    optLevel,
+				WavPackLevel: changedOr(cmd, "wavpack-level", wavpackLevel),
+				APELevel:     changedOr(cmd, "ape-level", apeLevel),
+			}
+			if err := opts.Check(); err != nil {
+				return knobFlagRefusal(err)
+			}
+			if levelErr != nil {
+				return levelErr
+			}
+
 			src, srcHint, cleanup, err := openSplitSource(cmd, flavor, args[0], &cfg, logger)
 			if err != nil {
 				return err
@@ -105,29 +122,16 @@ data track occupies part of the file the split says what it skipped.`,
 				return err
 			}
 			track := info.Default()
-			// The options field cannot say "level 0" with a plain 0 (that
-			// selects the encoder default), so the flag's 0 maps to the
-			// sentinel. The flag's own default is the encoder default spelled
-			// out, which is what leaves an explicit 0 a level and not a guess.
-			optLevel := flacLevel
-			if optLevel == 0 {
-				optLevel = waxflow.FLACLevelFastest
+			// The plan refuses the rest, a level the encoder refuses among it,
+			// before any piece is named. A piece is a file, so an mp4-family
+			// output then takes the flat MP4 form unless the caller named a
+			// container: the engine's own rule, shared with transcode and
+			// every job type.
+			plan, err := e.PlanTranscode(track, opts)
+			if err != nil {
+				return knobFlagRefusal(err)
 			}
-			// A piece is a file, so an mp4-family output takes the flat MP4
-			// form unless the caller named a container: the engine's own rule,
-			// shared with transcode and with every job type. Decided before the
-			// extension is derived below, though progressive is the row's own
-			// MP4 and does not rename the file either way.
-			if containerName == "" {
-				plan, perr := e.PlanTranscode(track, waxflow.TranscodeOptions{
-					Format:    outFormat,
-					FLACLevel: optLevel,
-				})
-				if perr != nil {
-					return perr
-				}
-				containerName = waxflow.FileOutputContainer(containerName, plan)
-			}
+			containerName = waxflow.FileOutputContainer(containerName, plan)
 			// A cut list is meaningless against a length the headers only
 			// guess at: every piece is checked against the total. Measure
 			// rather than trust, the same call a timeline's mint makes for the
@@ -204,7 +208,7 @@ data track occupies part of the file the split says what it skipped.`,
 			sp := splitter{
 				e: e, log: logger, src: src, hint: srcHint,
 				outFormat: outFormat, container: containerName,
-				flacLevel: optLevel, wavpackLevel: wavpackLevel, apeLevel: apeLevel,
+				flacLevel: optLevel, wavpackLevel: opts.WavPackLevel, apeLevel: opts.APELevel,
 				force: force, ofN: ofN, srcTrack: srcTrack,
 				mapper: label.NewLogged(logger), containerTags: info.Tags,
 			}
@@ -633,9 +637,7 @@ func (s *splitter) writePiece(cmd *cobra.Command, path string, p piece) (*waxflo
 		FLACLevel:    s.flacLevel,
 		WavPackLevel: s.wavpackLevel,
 		APELevel:     s.apeLevel,
-		Tags:         tags,
-		Art:          s.art,
-	})
+	}, waxflow.WithTags(tags), waxflow.WithArt(s.art))
 	if err != nil {
 		return fail(err)
 	}

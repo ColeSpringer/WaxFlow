@@ -63,7 +63,7 @@ func TestMP3EncodeAgainstGoMP3(t *testing.T) {
 
 	var mp3 bytes.Buffer
 	if _, err := waxflow.New().Transcode(context.Background(), container.BytesSource(wav), "", &mp3,
-		waxflow.TranscodeOptions{Format: "mp3", MP3Bitrate: 128000}); err != nil {
+		waxflow.TranscodeOptions{Format: "mp3", Bitrate: 128000}); err != nil {
 		t.Fatalf("Transcode to mp3: %v", err)
 	}
 

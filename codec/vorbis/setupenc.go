@@ -10,7 +10,7 @@ import "math/bits"
 //
 // The original configuration was deliberately minimal: long blocks only, one
 // floor, one residue, one mapping, one mode. Block switching adds the short
-// block size with its own floor/residue/mapping/mode and bumps EncoderVersion.
+// block size with its own floor/residue/mapping/mode and bumps encoderRevision.
 // The header format therefore tracks the encoder's scope, and is not frozen
 // here.
 

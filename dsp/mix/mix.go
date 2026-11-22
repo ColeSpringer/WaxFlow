@@ -37,10 +37,6 @@ import (
 
 // Version is this node's algorithm revision for cache keys: bump on any
 // change to the gain table or normalization (ADR-0004).
-//
-// The widening arm did not bump it: it changed no matrix that existed, since
-// every pair it answers was a refusal before, and a refusal has no cached
-// output to key against.
 const Version = "mix-1"
 
 // Matrix is an immutable channel conversion: out[o] = sum_i coef[o][i] * in[i].

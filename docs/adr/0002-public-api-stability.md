@@ -814,3 +814,207 @@ What changes meaning without moving an identifier:
   has no warning to carry it, so the read that advanced past the member
   still fails there, `source-unreadable`, and now names the member
   (`member 1: source: closing the file`).
+
+## Amendment (2026-11-21): one output table, and options that are a value
+
+The output table now holds each format's container forms, its encoder knobs
+and whether it is lossy, and every plan, run and boundary asks it.
+`TranscodeOptions` holds only what shapes a plan, so it compares with `==`.
+
+What a caller of the public packages sees:
+
+- `TranscodeOptions` loses `Tags`, `Chapters`, `Art` and `Progress`. None of
+  them shaped a plan, and a slice, a pointer and a func made the options a
+  value nothing could compare. What is left compares with `==` and keys a
+  map.
+- `waxflow` gains `RunOption`, what rides along with one run and never
+  shapes its plan, and its four constructors: `WithTags(tags)`,
+  `WithChapters(chapters)`, `WithArt(art)` and `WithProgress(fn)`. Each
+  means what the field of the same name meant. A later option of a kind
+  replaces an earlier one.
+- The five run entry points take them as a trailing variadic:
+  `Transcode(ctx, src, hint, dst, opts, run...)`,
+  `TranscodeMedia(ctx, med, dst, opts, run...)`,
+  `Remux(ctx, src, hint, dst, opts, run...)`,
+  `RemuxDemuxer(ctx, demux, track, dst, opts, run...)` and
+  `CutStream(ctx, src, hint, dst, opts, spans, grid, measured, run...)`.
+  A call with none compiles unchanged and writes no tags, chapters or art
+  and reports no progress, as the zero fields did. The plan calls keep
+  their signatures.
+- `TranscodeOptions` replaces `MP3Bitrate`, `OpusBitrate`, `AACBitrate` and
+  `VorbisBitrate` with one `Bitrate int`, and `MP3VBR` and `OpusVBR` with
+  one `VBR bool`. Each means what the field of its format meant: bits per
+  second, 0 for the encoder's default. The naming rule for the struct: a
+  knob more than one format takes has no format prefix.
+- `TranscodeOptions` gains `Check() error`, which refuses what the options
+  alone rule out, in this order: a non-finite `GainDB` or `VorbisQuality`,
+  a negative `Bitrate` or one above `MaxBitrate`, a negative `FromSample`
+  (each `CodeInvalidRequest` naming the field), an empty `Format`
+  (`CodeInvalidRequest`) or an unregistered one (`CodeUnsupportedFormat`),
+  a `Container` the format has no form for (`CodeInvalidRequest`, in the
+  form lookup's words), a set knob the format does not take
+  (`CodeUnsupportedFormat` wrapping a `*KnobError`), and a `FLACLevel`,
+  `WavPackLevel`, `APELevel`, `OpusComplexity` or `OpusSignal` outside its
+  range (`CodeInvalidRequest`, in the words the plan used). `PlanTranscode`,
+  `PlanRemux`, `PlanCut`, `PlanSegments`, `PlanRemuxSegments`,
+  `PlanCutSegments`, `InitSegment`, `TranscodeMedia`, `TranscodeSegments`,
+  `TranscodeSegmentsMedia`, `RemuxSegments`, `CutStream` and `CutSegments`
+  run it first, and every other engine method that takes the options
+  reaches one of them before it plans or encodes anything. `CutTrack` and
+  `Cut`, which read only the trim options, do not run it.
+- `waxflow` gains `MaxBitrate`, the largest `Bitrate` in bits per second,
+  `math.MaxInt32`, so a rate fits an `int` on every build. Every boundary
+  that takes kbit/s refuses a value above `MaxBitrate/1000` before it
+  multiplies.
+- `waxflow` gains `Knob`, an encoder option only some output formats take,
+  with one constant per knob: `KnobBitrate`, `KnobVBR`,
+  `KnobVorbisQuality`, `KnobHEAACv2`, `KnobFLACLevel`, `KnobWavPackLevel`,
+  `KnobAPELevel`, `KnobOpusComplexity` and `KnobOpusSignal`. `Knob.String`
+  is the option's field name. `TranscodeOptions.Knobs()` reports the knobs
+  a value sets: each field that differs from its zero value, with
+  `OpusSignal` "auto" counted as unset.
+- Each format takes a fixed set: wav, aiff and alac none, flac
+  `FLACLevel`, wavpack `WavPackLevel`, ape `APELevel`, mp3 `Bitrate` and
+  `VBR`, aac `Bitrate`, he-aac `Bitrate` and `HEAACv2`, opus `Bitrate`,
+  `VBR`, `OpusComplexity` and `OpusSignal`, vorbis `VorbisQuality`.
+- `waxflow` gains `KnobError{Knob, Format, Takers, Lossless}`, a set knob
+  the named format does not take. `Takers` lists the formats that take it
+  in table order, and `Lossless` says the refusal's reason is a lossless
+  format, which holds no bit rate (set for `Bitrate` and `VBR` only).
+- `OutputInfo`, what `Outputs()` lists, gains `Lossy` and `Knobs`, the
+  format's knob set. `LossyFormat` is removed and `OutputInfo.Lossy`
+  replaces it: a name `Outputs()` does not list is the old `known` false.
+- The codec packages name their frame sizes: `opus.FrameSize` (960),
+  `aac.FrameSize` (1024), `aac.HEFrameSize` (2048) and
+  `mp3.FrameSize(rate int) int`.
+- `vorbis.EncoderVersion` is a function, `EncoderVersion(quality float64)
+  string`, where it was a constant, so an importer that reads it as one no
+  longer builds. Quality 0 and 3 give the old string (ADR-0004, amended the
+  same day). `vorbis.NewEncoder` refuses a NaN quality, which passed its
+  range check.
+- `aac.NewEncoder`, `aac.NewHEEncoder` and `aac.HEPlanBitrate` refuse a
+  negative bit rate, as the mp3 and opus encoders do.
+
+What changes meaning without moving an identifier:
+
+- A knob the format does not take is refused. Before this the engine
+  ignored it, except a vorbis bit rate, which the encoder refused with
+  `CodeInvalidRequest`; that is now `CodeUnsupportedFormat` from `Check`.
+- A negative `Bitrate` is refused on every format, lossless ones included.
+  Before this mp3 and opus refused it, aac and he-aac clamped it up to their
+  floor, and the lossless formats ignored it.
+- A non-finite `GainDB` was refused by the DSP chain in its own words where a
+  chain was built and declined by the remux and cut plans, and a NaN
+  `VorbisQuality` planned and encoded. `PlanRemux` and `PlanCut` refuse a
+  negative `FromSample` where they declined it, and `format=aac` with
+  `HEAACv2` on an HE-AAC track is refused against the named aac row where
+  `PlanRemux` declined it.
+- A container the format has no form for is refused ahead of any other
+  option, on every row, by every plan and run; only what `Check` refuses
+  before it comes first. Before this `PlanTranscode` refused the other
+  option first while a run refused the container, on every row but aac and
+  he-aac. The he-aac refusal says `he-aac container` where it said `aac
+  container`.
+- `OutputExt` and `OutputEmbedsTags` answer a pair no form takes for the
+  row's default form: (`wavpack`, `mka`) names `wv` where it named `mka`,
+  and (`mp3`, `ogg`) does not embed where every pair with `ogg` did.
+  `OutputEmbedsTags` of an unknown format is false where it was true with
+  `ogg`.
+- The segmented plans and runs and `InitSegment` refuse a format with no
+  HLS form in one sentence that names the formats with one, where
+  `RemuxSegments` and `CutSegments` answered with the remux rung's decline
+  (`CodeInvalidRequest`) or the segmenter's refusal. `PlanSegments`,
+  `InitSegment` and the two segmented transcode runs refuse a `FromSample`
+  in one sentence too, and `InitSegment`, which accepted one, refuses it.
+- A `FLACLevel`, `WavPackLevel`, `APELevel`, `OpusComplexity` or
+  `OpusSignal` outside its range is refused by `Check`, so every plan and
+  run refuses it before it plans, opens or encodes, in the words the plan
+  or encoder used; an Opus complexity reads "waxflow: Opus complexity 11
+  outside -1..10" where the encoder said "opus: complexity 11 outside
+  -1..10".
+- `PlanSegments`, `PlanSegmentsTimeline`, `InitSegment`,
+  `TranscodeSegments`, `TranscodeSegmentsMedia`, `PlanRemuxSegments`,
+  `RemuxSegments`, `PlanCutSegments` and `CutSegments` refuse a non-empty
+  `Container`, `CodeInvalidRequest`, in one sentence, after `Check`. The
+  segmenter writes fragmented MP4 whatever the options name, and a plan for
+  `{aac, adts}` answered with the ADTS container, media type and muxer
+  version while its run wrote fMP4. No product caller passes one.
+- `OpusSignal` "auto" is the unset hint in the plan cache's key and in the
+  remux rung's test, as in `Knobs`. On an Opus source, `{opus, OpusSignal:
+  "auto"}` now remuxes where it re-encoded, and it keys the plan `{opus}`
+  keys.
+
+On the wire and in the CLI:
+
+- A vorbis `bitrate` or `q` at /stream, and a vorbis `bitrate` at a job's
+  creation, is refused, `415`. At 7cbb90d both were accepted and ignored
+  (the knob golden's lines answered `200` and `201`). A job's
+  `flacLevel`, `wavpackLevel` or `apeLevel` for another format is `415`
+  where it was `201`.
+- The server words a `*KnobError` in its parameter names, at the point it
+  refused a bit rate on a lossless format: /stream, HLS and job creation.
+  An HLS refusal names the bit rate as `bitrate/bitrates` and only the
+  formats HLS serves.
+- An unknown format on a timeline stream or on any HLS path (a `v=` URL,
+  the keyed master mint and `POST /sign` of a master), and a container the
+  format has no form for on a timeline stream, are refused before any
+  source resolves. On a `v=` URL the unknown format now comes before a bad
+  gain, timeline gain or dynamics, which answered first. The mint checks
+  the query before it resolves the source, which it must do before
+  `Canonical` because a descriptor needs the source's ID, so a knob refusal
+  there now also beats a missing source (`404` became `415`) and the
+  descriptor's own checks (`format=flac&bits=20&bitrate=128` answered
+  `400` "bits 20: want 16 or 24" and now answers `415`).
+- `POST /sign` of a single-source `/stream` URL answers what a `HEAD` of it
+  would, through the `HEAD`'s own preparation, where it signed any URL
+  whose source resolved: what the query alone decides (an unknown format, a
+  bad container, a knob the format lacks, under `format=auto` too) is
+  refused before the source resolves, and a source container's own name
+  that may direct-play is decided against the source. An `id` in the
+  params is replaced by the source's current one, unchecked, as it was.
+- `waxflow transcode` and `waxflow split` send `--flac-level`,
+  `--wavpack-level`, `--ape-level`, `--opus-complexity`, `--opus-signal`
+  and `--he-v2` only when given, so a bare command writes the bytes it did,
+  and a flag the format does not take exits 5. That includes the bit-rate
+  and VBR flags (`--mp3-bitrate`, `--mp3-vbr`, `--opus-bitrate`,
+  `--opus-vbr`, `--aac-bitrate`), which were dropped in silence for a
+  format they do not name.
+- `waxflow split --dry-run` refuses what the run would: a pair no form
+  takes, and a level the encoder refuses. It listed the pieces.
+- `waxflow transcode` and `waxflow split` refuse what the flags alone decide
+  before the source is opened or probed, in the engine's order: the format
+  and container, then a bit-rate or VBR flag, then the other knob flags. A
+  missing source behind a bad flag answers the flag, and `--format opsu
+  --opus-bitrate 64` answers the unknown format where it named the flag.
+- `--flac-level` and `--opus-complexity` refuse a value outside 0 to 8 and
+  0 to 10, exit 2, in the flag's words ("--flac-level -1: want 0 to 8"). -1
+  wrote level 0 and complexity 0 through the engine's sentinel, and the
+  rest were refused after the source opened in the engine's range, which
+  names the sentinel. `--wavpack-level`, `--ape-level` and `--opus-signal`
+  out of range are refused before the source opens too, in the engine's
+  words.
+- Every kbit/s value is refused above 2147483, `MaxBitrate/1000`, `400`
+  and exit 2, in its surface's words: /stream `bitrate` and `maxBitRate`,
+  the HLS mint's `bitrate` and each `bitrates` rung, a `v=` descriptor's
+  `bitrate` and `bitrates`, a job's `bitrate` and the CLI's
+  `--mp3-bitrate`, `--opus-bitrate` and `--aac-bitrate`. A larger value was
+  multiplied by 1000 unchecked, and one like 2305843009213694080 wrapped to
+  128000 and played. A negative CLI bit-rate flag is refused in the flag's
+  words too. A stored job whose `bitrate` is past the bound fails when it
+  runs, `invalid-request`, in the job's words, where it ran at the wrapped
+  rate.
+- The HLS mint refuses a `bitrates` rung that is not positive in the
+  ladder's words, `400` "ladder bitrate -5 is not positive", ahead of the
+  options check, which answered in the engine's field name and value.
+- Job creation refuses what the request alone decides before any source,
+  sheet or merge member resolves or is measured: the job-only output
+  rules and `Check` for transcode, split and merge, and the field rules for
+  analyze. A level out of range is among them now that `Check` holds it, so
+  `flacLevel: 9` beside a missing source answers `400` where it answered
+  `404`. A merge with a knob its format does not take and a missing
+  member answers the knob's `415` where it answered `404` after measuring
+  every member before it, and likewise a transcode or split's missing
+  source, and an analyze job with a stray field answers `400` before its
+  source resolves.
+- A CLI error whose message already starts with `waxflow: ` is printed
+  once, not as `waxflow: waxflow: ...`.

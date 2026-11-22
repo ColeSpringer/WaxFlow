@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
@@ -40,7 +42,7 @@ func writeTaggedFragmentedMP4(t *testing.T, in, path string, tags []container.Ta
 	}
 	defer out.Close()
 	_, err = waxflow.New().Transcode(t.Context(), container.BytesSource(raw), "wav", out,
-		waxflow.TranscodeOptions{Format: "aac", Tags: tags, Art: art})
+		waxflow.TranscodeOptions{Format: "aac"}, waxflow.WithTags(tags), waxflow.WithArt(art))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,6 +213,60 @@ func TestFragmentedSourceAdvertisesItsArt(t *testing.T) {
 	}
 	if !doc.HasArt {
 		t.Error("hasArt is false on a source carrying a covr atom both readers can see")
+	}
+}
+
+// TestTranscodeCarriesChaptersAndArt pins that a transcode to m4a carries the
+// source's chapters and its cover beside its tags: each rides the run as its
+// own option, and one left off drops its payload with the others still there.
+func TestTranscodeCarriesChaptersAndArt(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	writeWAV(t, in, 2*48000)
+	raw, err := os.ReadFile(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chapters := []container.Chapter{
+		{Start: 0, End: time.Second, Title: "First"},
+		{Start: time.Second, End: 2 * time.Second, Title: "Second"},
+	}
+	cover := tinyPNG(t)
+	src := filepath.Join(dir, "src.m4a")
+	f, err := os.Create(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = waxflow.New().Transcode(t.Context(), container.BytesSource(raw), "wav", f,
+		waxflow.TranscodeOptions{Format: "aac", Container: waxflow.ContainerProgressive},
+		waxflow.WithTags(sourceTags), waxflow.WithChapters(chapters),
+		waxflow.WithArt(&container.Picture{MIME: "image/png", Data: cover}))
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc := probeJSON(t, src); len(doc.Chapters) != len(chapters) || !doc.HasArt {
+		t.Fatalf("the source carries %d chapters and art %v, want %d and true", len(doc.Chapters), doc.HasArt, len(chapters))
+	}
+
+	out := filepath.Join(dir, "out.m4a")
+	if code, _, errOut := run(t, "transcode", src, out); code != 0 {
+		t.Fatalf("transcode exit = %d; stderr: %s", code, errOut)
+	}
+	doc := probeJSON(t, out)
+	var titles []string
+	for _, ch := range doc.Chapters {
+		titles = append(titles, ch.Title)
+	}
+	if want := []string{"First", "Second"}; !slices.Equal(titles, want) {
+		t.Errorf("output chapters = %v, want %v", titles, want)
+	}
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !doc.HasArt || !bytes.Contains(b, cover) {
+		t.Errorf("the output does not carry the source's cover (hasArt %v)", doc.HasArt)
 	}
 }
 

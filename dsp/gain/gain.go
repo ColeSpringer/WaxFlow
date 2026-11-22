@@ -10,8 +10,7 @@ import (
 	"math"
 )
 
-// Version is the scalar gain node's revision for cache keys (plan
-// section 10).
+// Version is the scalar gain node's revision for cache keys (ADR-0004).
 const Version = "gain-1"
 
 // FromDB converts decibels to a linear amplitude factor.

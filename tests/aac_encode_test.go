@@ -144,8 +144,8 @@ func TestAACBitrateScales(t *testing.T) {
 	f := audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Int, BitDepth: 16}
 	wav := synthWAV(t, f, frames)
 	var lo, hi bytes.Buffer
-	transcodeAAC(t, wav, &lo, waxflow.TranscodeOptions{AACBitrate: 64000, Container: "adts"})
-	transcodeAAC(t, wav, &hi, waxflow.TranscodeOptions{AACBitrate: 192000, Container: "adts"})
+	transcodeAAC(t, wav, &lo, waxflow.TranscodeOptions{Bitrate: 64000, Container: "adts"})
+	transcodeAAC(t, wav, &hi, waxflow.TranscodeOptions{Bitrate: 192000, Container: "adts"})
 	if hi.Len() < lo.Len()*2 {
 		t.Fatalf("192k output (%d bytes) not clearly larger than 64k (%d bytes)", hi.Len(), lo.Len())
 	}

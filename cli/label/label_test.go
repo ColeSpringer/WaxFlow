@@ -35,7 +35,7 @@ func writeFragmentedMP4(t *testing.T, path string, tags []container.Tag) {
 	}
 	defer out.Close()
 	if _, err := waxflow.New().Transcode(t.Context(), container.BytesSource(raw), "wav", out,
-		waxflow.TranscodeOptions{Format: "aac", Tags: tags}); err != nil {
+		waxflow.TranscodeOptions{Format: "aac"}, waxflow.WithTags(tags)); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -551,14 +551,8 @@ func parseAudioSettings(t *trackEntry, body []byte) {
 }
 
 // DemuxerVersion is this demuxer's term in the ADR-0004 cache key, carried
-// by its track: a cached output of a Matroska or WebM source regenerates
-// when this bumps. Bump it for a change that makes the demuxer deliver other
-// samples for a file that has not changed.
-//
-// mka-demux-2: a track with no FlagDefault, or an empty one, is a default
-// track, and a track whose FlagEnabled is 0 is passed over while a usable
-// one exists, so a file of several audio tracks can select another one.
-// Revision 1 is every key built before the term existed.
+// by its track. Bump it for a change that makes the demuxer
+// deliver other samples for a file that has not changed.
 const DemuxerVersion = "mka-demux-2"
 
 // selectTrack picks the first audio track carrying a codec this build decodes,

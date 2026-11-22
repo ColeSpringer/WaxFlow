@@ -511,14 +511,17 @@ func (s *Server) planHLSVariant(ctx context.Context, desc hls.Descriptor, tracks
 // caller can run it before resolving anything (refuseHLSQuery).
 func (s *Server) hlsVariantOptions(desc hls.Descriptor, m *meta.Info) (waxflow.TranscodeOptions, error) {
 	fail := func(err error) (waxflow.TranscodeOptions, error) { return waxflow.TranscodeOptions{}, err }
-	if desc.Bitrate != 0 {
-		if lossy, known := waxflow.LossyFormat(desc.Format); known && !lossy {
-			return fail(waxerr.New(waxerr.CodeUnsupportedFormat,
-				fmt.Sprintf("bitrate applies to lossy output; %s is lossless", desc.Format)))
-		}
+	opts := waxflow.TranscodeOptions{
+		Format:          desc.Format,
+		Rate:            desc.Rate,
+		Channels:        desc.Ch,
+		BitDepth:        desc.Bits,
+		ResampleProfile: s.profile,
+		Bitrate:         desc.Bitrate * 1000,
+		HEAACv2:         desc.HEv2,
 	}
-	if err := checkHEv2Format(desc.HEv2, desc.Format); err != nil {
-		return fail(err)
+	if err := opts.Check(); err != nil {
+		return fail(knobRefusal(err, hlsKnobs))
 	}
 	g, err := parseGain(desc.Gain, s.defaultGain)
 	if err != nil {
@@ -533,19 +536,8 @@ func (s *Server) hlsVariantOptions(desc hls.Descriptor, m *meta.Info) (waxflow.T
 	if err != nil {
 		return fail(err)
 	}
-	return waxflow.TranscodeOptions{
-		Format:          desc.Format,
-		Rate:            desc.Rate,
-		Channels:        desc.Ch,
-		BitDepth:        desc.Bits,
-		GainDB:          resolveGainDB(g, m, dyn),
-		Dynamics:        dyn,
-		ResampleProfile: s.profile,
-		MP3Bitrate:      desc.Bitrate * 1000,
-		OpusBitrate:     desc.Bitrate * 1000,
-		AACBitrate:      desc.Bitrate * 1000,
-		HEAACv2:         desc.HEv2,
-	}, nil
+	opts.GainDB, opts.Dynamics = resolveGainDB(g, m, dyn), dyn
+	return opts, nil
 }
 
 // refuseHLSQuery refuses what desc alone rules out, before anything resolves:
@@ -1896,6 +1888,9 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params SignParams) (hls.
 	if d.Bitrate, err = atoi("bitrate"); err != nil {
 		return hls.Descriptor{}, 0, err
 	}
+	if err := hls.CheckBitrate(d.Bitrate); err != nil {
+		return hls.Descriptor{}, 0, err
+	}
 	if d.Bits, err = atoi("bits"); err != nil {
 		return hls.Descriptor{}, 0, err
 	}
@@ -1943,6 +1938,9 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params SignParams) (hls.
 			if err != nil {
 				return bad("bitrates %q: want comma-separated kbit/s values", v)
 			}
+			if err := hls.CheckRung(kbps); err != nil {
+				return hls.Descriptor{}, 0, err
+			}
 			d.Bitrates = append(d.Bitrates, kbps)
 		}
 	}
@@ -1951,6 +1949,11 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params SignParams) (hls.
 		return hls.Descriptor{}, 0, err
 	}
 	if _, err := parseDynamics(d.Dynamics); err != nil {
+		return hls.Descriptor{}, 0, err
+	}
+	// What the query alone rules out is refused before the source resolves,
+	// so no 404 hides it.
+	if err := s.refuseHLSQuery(d); err != nil {
 		return hls.Descriptor{}, 0, err
 	}
 
@@ -1969,9 +1972,6 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params SignParams) (hls.
 	// playback.
 	out, err := d.Canonical()
 	if err != nil {
-		return hls.Descriptor{}, 0, err
-	}
-	if err := s.refuseHLSQuery(out); err != nil {
 		return hls.Descriptor{}, 0, err
 	}
 	// Every rung must plan (mirroring the master handler), so a URL that

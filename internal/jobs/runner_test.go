@@ -1189,10 +1189,90 @@ func TestSplitJobProgressIsOnTheSourceTimeline(t *testing.T) {
 			t.Errorf("progress %d went backwards: done %d after %d", i, p.Done, seen[i-1].Done)
 		}
 	}
+	// The pieces' own encodes report inside each piece; a value on a boundary
+	// alone is the split stepping between pieces.
+	bounds := append([]int64{0, srcSamples}, cuts...)
+	if !slices.ContainsFunc(seen, func(p Progress) bool { return !slices.Contains(bounds, p.Done) }) {
+		t.Errorf("every progress value sat on a piece boundary (%v): no piece reported its own encode", seen)
+	}
 
 	done := waitJob(t, r, j.ID, StateDone)
 	if len(done.Outputs) != len(cuts)+1 {
 		t.Errorf("split produced %d outputs, want %d", len(done.Outputs), len(cuts)+1)
+	}
+}
+
+// TestMergeJobReportsTranscodeProgress pins that a merge's encode reports its
+// progress, strictly between the start and the end: the measure phase reports
+// on its own, so a merge whose encode reported nothing still moves the bar.
+func TestMergeJobReportsTranscodeProgress(t *testing.T) {
+	root := t.TempDir()
+	refs := []source.Ref{
+		source.Ref(writeMergeWAV(t, root, "m0.wav", 48000)),
+		source.Ref(writeMergeWAV(t, root, "m1.wav", 48000)),
+	}
+	pools, release := saturatedPool(t)
+	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: openRoots(t, root), MeasureTrack: measureTrack(), Pools: pools})
+	j, err := r.Create(Request{Type: TypeMerge, Srcs: refs, Format: "flac"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	waitJob(t, r, j.ID, StateRunning)
+	ch, cancelSub, ok := r.Subscribe(j.ID)
+	if !ok {
+		t.Fatal("Subscribe: job not found")
+	}
+	defer cancelSub()
+	if snap, open := recv(t, ch); !open || snap.State != StateRunning {
+		t.Fatalf("initial snapshot = %+v, want a running job", snap)
+	}
+
+	release()
+	var seen []Progress
+	for {
+		s, open := recv(t, ch)
+		if !open {
+			break
+		}
+		if s.State == StateRunning && s.Progress != nil {
+			seen = append(seen, *s.Progress)
+		}
+	}
+	if !slices.ContainsFunc(seen, func(p Progress) bool {
+		return p.Phase == "transcode" && p.Done > 0 && p.Done < p.Total
+	}) {
+		t.Errorf("no transcode progress inside the merge's run: %v", seen)
+	}
+	waitJob(t, r, j.ID, StateDone)
+}
+
+// pictureMapper is a mapper whose source carries one front cover.
+type pictureMapper struct{ pic meta.Picture }
+
+func (m pictureMapper) Read(context.Context, container.Source, string, meta.ReadOptions) (*meta.Info, error) {
+	return &meta.Info{HasPictures: true, Pictures: []meta.Picture{m.pic}}, nil
+}
+
+func (m pictureMapper) Apply(context.Context, string, *meta.Info, []container.Tag) error { return nil }
+
+// TestTranscodeJobEmbedsTheFrontPicture pins that a transcode job's output
+// carries the source's front cover. The mapper's Apply writes nothing, so the
+// cover can only have come from the encode.
+func TestTranscodeJobEmbedsTheFrontPicture(t *testing.T) {
+	res, ref, srcID := openLib(t)
+	pic := meta.Picture{MIME: "image/png", Front: true, Data: []byte("\x89PNG\r\n\x1a\nthe front cover of this job")}
+	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, Meta: pictureMapper{pic: pic}})
+	j, err := r.Create(Request{Type: TypeTranscode, Src: source.Ref(ref), SourceID: srcID, Format: "aac"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	done := waitJob(t, r, j.ID, StateDone)
+	raw, err := os.ReadFile(r.OutputPath(done, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, pic.Data) {
+		t.Error("the output does not carry the source's front cover")
 	}
 }
 

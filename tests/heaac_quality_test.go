@@ -143,7 +143,7 @@ func TestHEAACEncoderQuality(t *testing.T) {
 				}
 
 				var out bytes.Buffer
-				transcodeHEAAC(t, wav, &out, waxflow.TranscodeOptions{AACBitrate: kbps * 1000, Container: "adts"})
+				transcodeHEAAC(t, wav, &out, waxflow.TranscodeOptions{Bitrate: kbps * 1000, Container: "adts"})
 				ourPath := filepath.Join(t.TempDir(), item.name+".ours.aac")
 				if err := os.WriteFile(ourPath, out.Bytes(), 0o644); err != nil {
 					t.Fatal(err)
@@ -173,7 +173,7 @@ func TestHEAACEncoderQuality(t *testing.T) {
 				// subtest asserted nothing on a machine without libfdk, and
 				// 48k is where the recorded deficit lives.
 				var lcOut bytes.Buffer
-				transcodeAAC(t, wav, &lcOut, waxflow.TranscodeOptions{AACBitrate: kbps * 1000, Container: "adts"})
+				transcodeAAC(t, wav, &lcOut, waxflow.TranscodeOptions{Bitrate: kbps * 1000, Container: "adts"})
 				lcPath := filepath.Join(t.TempDir(), item.name+".lc.aac")
 				if err := os.WriteFile(lcPath, lcOut.Bytes(), 0o644); err != nil {
 					t.Fatal(err)

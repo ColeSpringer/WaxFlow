@@ -14,17 +14,9 @@ import (
 
 var _ container.Muxer = (*Muxer)(nil)
 
-// MuxerVersion is this muxer's term in the ADR-0004 cache key: a cached
-// output of it regenerates when this bumps. Bump it for a change to what
-// gets written around unchanged encoded packets, which is the one kind of
-// change no encoder or DSP version can notice.
-//
-// mpa-mux-3: the encoder string is LAME-prefixed (see encoderTag) and the
-// extension sits at its canonical offset with its counts and CRCs filled
-// in, where before it was branded WaxFlow01 and ffmpeg, Firefox and
-// GStreamer therefore ignored the gapless fields. Encoded output is
-// byte-identical; every MP3 written so far plays late and long in those
-// decoders and regenerates.
+// MuxerVersion is this muxer's term in the ADR-0004 cache key. Bump it for a
+// change to what gets written around unchanged encoded packets, which no
+// encoder or DSP version can notice.
 const MuxerVersion = "mpa-mux-3"
 
 // Muxer writes one MP3 track as a bare Layer III elementary stream led by a

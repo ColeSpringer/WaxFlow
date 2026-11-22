@@ -3,6 +3,7 @@ package waxflow_test
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxflow"
@@ -268,17 +269,17 @@ func TestCutSegmentsAcrossAMidStreamTrim(t *testing.T) {
 	}
 }
 
-// TestCutSegmentsRefusesAKeptTrimBeforeAnySegment: a run reached past the
-// plan with a Matroska container in its options passes PlanRemux, whose
-// answer is for that container, and the run always writes fMP4; it refuses
-// before a segment goes out rather than through the copy's backstop mid-run.
+// TestCutSegmentsRefusesAKeptTrimBeforeAnySegment: a run reached past the plan
+// over kept packets that carry a trim is declined by PlanRemux's gate, since
+// opus's default form states none per packet, and so refuses before a segment
+// goes out rather than through the copy's backstop mid-run.
 func TestCutSegmentsRefusesAKeptTrimBeforeAnySegment(t *testing.T) {
 	src := midTrimWebM(t, true)
 	track, grid := midTrimTrack(t, src)
 	e := waxflow.New()
 	emitted := 0
 	_, err := e.CutSegments(context.Background(), container.BytesSource(src), "webm",
-		waxflow.TranscodeOptions{Format: "opus", Container: "mka"}, []waxflow.Span{{From: 9600, To: 28800}}, grid, track,
+		waxflow.TranscodeOptions{Format: "opus"}, []waxflow.Span{{From: 9600, To: 28800}}, grid, track,
 		waxflow.SegmentedOptions{SegmentSamples: 4800}, func(mp4.Segment) error {
 			emitted++
 			return nil
@@ -286,8 +287,8 @@ func TestCutSegmentsRefusesAKeptTrimBeforeAnySegment(t *testing.T) {
 	if err == nil {
 		t.Fatal("CutSegments segmented a cut whose kept packets carry a trim")
 	}
-	if code := waxerr.CodeOf(err); code != waxerr.CodeInvalidRequest {
-		t.Errorf("code = %v, want %v: %v", code, waxerr.CodeInvalidRequest, err)
+	if code := waxerr.CodeOf(err); code != waxerr.CodeInvalidRequest || !strings.Contains(err.Error(), "cannot be remuxed") {
+		t.Errorf("code = %v, want %v and the remux refusal: %v", code, waxerr.CodeInvalidRequest, err)
 	}
 	if emitted != 0 {
 		t.Errorf("%d segments went out before the refusal", emitted)

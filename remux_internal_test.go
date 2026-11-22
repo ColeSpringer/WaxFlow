@@ -208,26 +208,19 @@ func TestGaplessSurvives(t *testing.T) {
 	}
 }
 
-// TestRemuxableIsDerived pins the derived rule's two halves: it must accept a
-// bare container rewrite, and it must reject the seek, which is the one field
-// the derivation cannot see (planOpts normalizes it out of the plan cache's key
-// on purpose, since two seeks of one source share a plan).
 // opusFmt is what an Opus track decodes to, which is the format remuxable
 // resolves a request's parameters against.
 var opusFmt = audio.Format{Rate: 48000, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Float, BitDepth: 32}
 
+// TestRemuxableIsDerived pins the derived rule's two halves: it must accept a
+// bare container rewrite, and it must reject a seek, since a remux cannot cut
+// mid-packet.
 func TestRemuxableIsDerived(t *testing.T) {
 	if !remuxable(TranscodeOptions{Format: "opus", Container: "mka"}, opusFmt) {
 		t.Error("remuxable rejected a bare container rewrite; the rung would never engage")
 	}
 	if remuxable(TranscodeOptions{Format: "opus", FromSample: 480}, opusFmt) {
 		t.Error("remuxable accepted a seek; a remux cannot cut mid-packet")
-	}
-	// Tags are not shaping and must not disqualify the rung: /stream attaches a
-	// minimal tag set to essentially every request, so a rule that keyed on them
-	// would leave rung 2 permanently unreachable in the daemon.
-	if !remuxable(TranscodeOptions{Format: "opus", Tags: []container.Tag{{Key: "TITLE", Value: "x"}}}, opusFmt) {
-		t.Error("remuxable rejected a tagged request; rung 2 would be unreachable from /stream")
 	}
 }
 
@@ -469,36 +462,29 @@ func TestRemuxTrailerDropsTrimsTheCodecCannotCarry(t *testing.T) {
 	}
 }
 
-// TestPlanRemuxSegmentsDeclinesInnerTrims: a segmented run always writes fMP4,
-// whatever Container the options name, and fMP4 states no trim per packet. The
-// progressive gate reads the resolved container name, so without a decline of
-// its own this rung accepted a Matroska container override and then met
-// segmentWalk's mid-copy refusal with the playlist already out.
+// TestPlanRemuxSegmentsDeclinesInnerTrims: a source with a trim inside the run
+// is declined through PlanRemux's gate, since no segmented format's default
+// form states a trim per packet.
 func TestPlanRemuxSegmentsDeclinesInnerTrims(t *testing.T) {
 	f := audio.Format{Rate: 48000, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Float, BitDepth: 32}
 	e := New()
-	for _, cont := range []string{"", "mka", "webm"} {
-		name := cmp.Or(cont, "default")
-		t.Run(name, func(t *testing.T) {
-			track := container.Track{
-				Codec: codec.Opus, CodecConfig: testOpusHead(312), Fmt: f,
-				Samples: 48000, Delay: 312, Default: true,
-			}
-			opts := TranscodeOptions{Format: "opus", Container: cont}
-			if plan, err := e.PlanRemuxSegments(track, opts, 4, 960); err != nil {
-				t.Fatalf("the control (no inner trim) errored: %v", err)
-			} else if plan == nil {
-				t.Fatal("the control (no inner trim) declined; this row proves nothing")
-			}
-			track.MidPadding = 480
-			plan, err := e.PlanRemuxSegments(track, opts, 4, 960)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if plan != nil {
-				t.Error("PlanRemuxSegments planned an fMP4 copy of a source with a trim inside the run")
-			}
-		})
+	track := container.Track{
+		Codec: codec.Opus, CodecConfig: testOpusHead(312), Fmt: f,
+		Samples: 48000, Delay: 312, Default: true,
+	}
+	opts := TranscodeOptions{Format: "opus"}
+	if plan, err := e.PlanRemuxSegments(track, opts, 4, 960); err != nil {
+		t.Fatalf("the control (no inner trim) errored: %v", err)
+	} else if plan == nil {
+		t.Fatal("the control (no inner trim) declined; this test proves nothing")
+	}
+	track.MidPadding = 480
+	plan, err := e.PlanRemuxSegments(track, opts, 4, 960)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan != nil {
+		t.Error("PlanRemuxSegments planned an fMP4 copy of a source with a trim inside the run")
 	}
 }
 

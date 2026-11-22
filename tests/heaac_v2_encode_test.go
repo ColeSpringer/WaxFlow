@@ -213,7 +213,7 @@ func TestHEAACv2PlanDefaults(t *testing.T) {
 		t.Errorf("v1 plan = bitrate %d versions %v; the flag must not leak", v1.BitRate, v1.Versions)
 	}
 
-	plan, err = e.PlanTranscode(stereo, waxflow.TranscodeOptions{Format: "he-aac", HEAACv2: true, AACBitrate: 64000})
+	plan, err = e.PlanTranscode(stereo, waxflow.TranscodeOptions{Format: "he-aac", HEAACv2: true, Bitrate: 64000})
 	if err != nil {
 		t.Fatal(err)
 	}

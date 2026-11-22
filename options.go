@@ -1,7 +1,11 @@
 package waxflow
 
 import (
+	"fmt"
 	"log/slog"
+	"math"
+	"math/bits"
+	"strings"
 
 	"github.com/colespringer/waxflow/codec/ape"
 	"github.com/colespringer/waxflow/codec/wavpack"
@@ -9,6 +13,7 @@ import (
 	"github.com/colespringer/waxflow/dsp/dither"
 	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/dsp/resample"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // Option configures an Engine.
@@ -63,15 +68,15 @@ func WithIndexCache(c IndexCache) Option {
 // the trip (the output format's codec must already be the source's). PlanRemux
 // answers whether a given request is one of those, and the server's ladder asks
 // it before reaching for a transcode.
+//
+// An encoder knob (see Knob) is taken only by the formats its field names, and
+// Check refuses one set on any other format.
 type TranscodeOptions struct {
-	// Format is the output format name: "wav", "aiff", "flac", "mp3",
-	// "alac", "aac", "opus", or "vorbis".
+	// Format is the output format name, one of OutputFormats.
 	Format string
-	// Container overrides the format's default container where the
-	// format defines an alternative; empty selects the default. Today
-	// only aac has one: "adts" replaces the progressive fragmented MP4
-	// with the raw ADTS elementary stream, a legacy opt-out that
-	// sacrifices gapless signaling (ADTS has none).
+	// Container names one of the format's other forms ("adts" for aac, "mka"
+	// for flac); empty selects its default. Check refuses a name the format
+	// has no form for, and its error lists the ones it has.
 	Container string
 	// SpliceTrims asks a multi-span cut for exact interior splices, which
 	// only Matroska can carry.
@@ -146,30 +151,24 @@ type TranscodeOptions struct {
 	// audio. The format's two deeper levels decode here but are not
 	// written; see ape.MaxEncodeLevel.
 	APELevel int
-	// MP3Bitrate selects the constant bit rate in bits per second for mp3
-	// output; the zero value uses the encoder default (128000). It must be
-	// a legal Layer III CBR rate for the output sample rate. Under MP3VBR
-	// it anchors the quality level instead.
-	MP3Bitrate int
-	// MP3VBR selects variable bit rate for mp3 output: each frame carries
-	// the smallest legal bit-rate index that holds its psychoacoustic
-	// demand, anchored at MP3Bitrate. The zero value is constant bit rate.
-	MP3VBR bool
-	// OpusBitrate selects the target bit rate in bits per second for opus
-	// output; the zero value uses the encoder default (96000).
-	OpusBitrate int
-	// AACBitrate selects the target bit rate in bits per second for aac
-	// output; the zero value uses the encoder default (128000). AAC
-	// frames are variable-size, so the encoder holds the long-term mean
-	// at the target with a bit reservoir.
-	AACBitrate int
+	// Bitrate selects the target bit rate in bits per second for every
+	// format with a bit rate (mp3, opus, aac, he-aac); 0 keeps the encoder's
+	// default (mp3 128000, opus 96000, aac 128000, he-aac 64000 or 32000 under
+	// HEAACv2). A negative value or one above MaxBitrate is refused. An mp3
+	// rate must be a legal Layer III rate for the output sample rate; aac
+	// holds its long-term mean with a bit reservoir. Vorbis takes none (no
+	// ABR).
+	Bitrate int
+	// VBR selects variable bit rate for mp3 and opus output, sizing each
+	// frame to its content around Bitrate (for mp3, the quality anchor). The
+	// zero value is constant bit rate.
+	VBR bool
 	// HEAACv2 selects HE-AAC v2 (parametric stereo over a mono SBR core,
-	// an AOT-29 stream) for he-aac output, and drops the zero-AACBitrate
+	// an AOT-29 stream) for he-aac output, and drops the zero-Bitrate
 	// default to 32000. Selection is explicit rather than
 	// bitrate-automatic: an auto threshold would silently switch stereo
 	// coding technology across a bitrate boundary. Stereo sources only;
-	// a mono source is refused at plan time (encode v1 instead). Other
-	// formats ignore it.
+	// a mono source is refused at plan time (encode v1 instead).
 	HEAACv2 bool
 	// OpusComplexity gates the Opus encoder's analysis depth: 1 through 10
 	// literally, OpusComplexityDefault (the zero value) for the encoder
@@ -177,9 +176,6 @@ type TranscodeOptions struct {
 	// sentinel because the zero value cannot mean it without stealing the
 	// default. Higher is slower and higher quality.
 	OpusComplexity int
-	// OpusVBR selects variable bit rate for opus output, sizing each frame to its
-	// content around OpusBitrate. The zero value is constant bit rate.
-	OpusVBR bool
 	// OpusSignal hints the opus encoder about the content type: "voice"
 	// biases the speech/music mode decision toward SILK/hybrid (audiobooks,
 	// podcasts), "music" toward CELT. The zero value ("" or "auto") lets the
@@ -191,50 +187,241 @@ type TranscodeOptions struct {
 	// primary knob; a small nonzero value near 0 reaches the lowest qualities
 	// (the zero value cannot, matching the "0 means default" idiom).
 	VorbisQuality float64
-	// VorbisBitrate is a reserved ABR target in bits per second for vorbis
-	// output. ABR rate control is not implemented, so a nonzero value is
-	// rejected at plan time rather than silently ignored; leave it 0 for
-	// quality-driven VBR.
-	VorbisBitrate int
 	// Shaping selects the dither strategy for quantization; the default
 	// is flat TPDF.
 	Shaping dither.Shaping
 	// ResampleProfile selects resampler quality; empty means resample.HQ.
 	ResampleProfile resample.Profile
-	// Tags embeds canonical metadata fields (TITLE, ARTIST, ...) in the
-	// output where the muxer can represent them in its stream form: Ogg
-	// OpusTags, a FLAC VORBIS_COMMENT block, an MP3 ID3v2 tag, MP4 ilst
-	// atoms. Formats without stream-form tagging (WAV, AIFF, ADTS)
-	// ignore them; a finished file gets full metadata from the mapping
-	// post-pass instead. Tags never change the plan: callers keying
-	// cached bytes must fold the tag values into their own key.
-	// WavPack and Monkey's Audio take them too, as the APEv2 block they
-	// write after the audio.
-	//
-	// Every muxer that bounds its tag block refuses a value that does not
-	// fit, failing the transcode with waxerr.CodeUnsupportedFormat naming
-	// the key, rather than writing an output that quietly lacks it. The
-	// refusal comes before the encode, so it costs nothing to retry with
-	// the value trimmed. Those bounds sit at each format's own read or
-	// field limit, so tags read off a source can always be written back;
-	// Ogg is the exception, capping its comment header at 48 KiB to keep
-	// the pre-audio headers small. MP4 sets no bound at all.
-	Tags []container.Tag
-	// Chapters embeds chapter markers. Only the MP4 muxer represents
-	// them (Nero chpl); the mapping post-pass covers finished files of
-	// the other formats.
-	Chapters []container.Chapter
-	// Art embeds cover art. Only the MP4 muxer represents it (the ilst
-	// covr atom); art inflates the pre-audio init header, so live
-	// streams should leave it nil.
-	Art *container.Picture
-	// Progress, when non-nil, is called after each encoded chunk with
-	// the encoder-input samples consumed so far and the projected total
-	// (-1 unknown). It runs on the transcoding goroutine, so blocking it
-	// pauses the pipeline; the job runner's yield-to-live-streams check
-	// rides on exactly that.
-	Progress func(done, total int64)
 }
+
+// Check refuses what the options alone rule out, in this order: a non-finite
+// float (a NaN in the plan cache's key is an entry no lookup reaches again), a
+// Bitrate below 0 or above MaxBitrate, a negative FromSample, an unregistered
+// Format, a Container the format has no form for, a set knob the format does
+// not take, which is CodeUnsupportedFormat wrapping a *KnobError, and a
+// level, Opus complexity or Opus signal outside its range. Every engine method
+// that takes the options runs it before it plans or encodes, and a boundary
+// may run it before it has a track.
+func (o TranscodeOptions) Check() error {
+	for _, f := range []struct {
+		name string
+		v    float64
+	}{
+		{"GainDB", o.GainDB},
+		{"VorbisQuality", o.VorbisQuality},
+	} {
+		if math.IsNaN(f.v) || math.IsInf(f.v, 0) {
+			return waxerr.New(waxerr.CodeInvalidRequest,
+				fmt.Sprintf("waxflow: %s is %g, want a finite number", f.name, f.v))
+		}
+	}
+	if o.Bitrate < 0 || o.Bitrate > MaxBitrate {
+		return waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("waxflow: Bitrate is %d, want 0 for the default or a positive bit rate up to %d",
+				o.Bitrate, MaxBitrate))
+	}
+	if o.FromSample < 0 {
+		return waxerr.New(waxerr.CodeInvalidRequest, "waxflow: negative FromSample")
+	}
+	row, err := outputRow(o.Format)
+	if err != nil {
+		return err
+	}
+	if _, err := row.form(o.Container); err != nil {
+		return err
+	}
+	if off := o.Knobs() &^ row.knobs; off != 0 {
+		k := off & -off
+		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "", &KnobError{
+			Knob:     k,
+			Format:   row.name,
+			Takers:   knobTakers(k),
+			Lossless: !row.lossy && k&(KnobBitrate|KnobVBR) != 0,
+		})
+	}
+	// The range of each knob the format takes. An unset knob is its default
+	// and passes, and the knob rule above refused a set one the format lacks.
+	for _, check := range []func(TranscodeOptions) error{
+		func(o TranscodeOptions) error { _, err := flacLevel(o); return err },
+		func(o TranscodeOptions) error { _, err := wavpackLevel(o); return err },
+		func(o TranscodeOptions) error { _, err := apeLevel(o); return err },
+		checkOpusComplexity,
+		func(o TranscodeOptions) error { _, err := opusSignal(o); return err },
+	} {
+		if err := check(o); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Knob names an encoder option only some output formats take.
+type Knob uint16
+
+// The knobs, one bit each, in the order Check reports them.
+const (
+	KnobBitrate Knob = 1 << iota
+	KnobVBR
+	KnobVorbisQuality
+	KnobHEAACv2
+	KnobFLACLevel
+	KnobWavPackLevel
+	KnobAPELevel
+	KnobOpusComplexity
+	KnobOpusSignal
+)
+
+// knobNames are the knobs' field names, in bit order.
+var knobNames = [...]string{
+	"Bitrate", "VBR", "VorbisQuality", "HEAACv2", "FLACLevel",
+	"WavPackLevel", "APELevel", "OpusComplexity", "OpusSignal",
+}
+
+// String is the option's field name; a value that is not one knob reads
+// Knob(n).
+func (k Knob) String() string {
+	if k != 0 && k&(k-1) == 0 {
+		if i := bits.TrailingZeros16(uint16(k)); i < len(knobNames) {
+			return knobNames[i]
+		}
+	}
+	return fmt.Sprintf("Knob(%d)", uint16(k))
+}
+
+// normalized folds the spellings of one request into one value: OpusSignal
+// "auto" is the unset hint. The plan key, the remux test and Knobs read it.
+func (o TranscodeOptions) normalized() TranscodeOptions {
+	if o.OpusSignal == "auto" {
+		o.OpusSignal = ""
+	}
+	return o
+}
+
+// Knobs reports the encoder knobs o sets: each field that differs from its
+// zero value, with OpusSignal "auto" counted as unset.
+func (o TranscodeOptions) Knobs() Knob {
+	o = o.normalized()
+	var k Knob
+	for _, f := range []struct {
+		set  bool
+		knob Knob
+	}{
+		{o.Bitrate != 0, KnobBitrate},
+		{o.VBR, KnobVBR},
+		{o.VorbisQuality != 0, KnobVorbisQuality},
+		{o.HEAACv2, KnobHEAACv2},
+		{o.FLACLevel != 0, KnobFLACLevel},
+		{o.WavPackLevel != 0, KnobWavPackLevel},
+		{o.APELevel != 0, KnobAPELevel},
+		{o.OpusComplexity != 0, KnobOpusComplexity},
+		{o.OpusSignal != "", KnobOpusSignal},
+	} {
+		if f.set {
+			k |= f.knob
+		}
+	}
+	return k
+}
+
+// KnobError is a set knob the named format does not take. Check returns it
+// inside a CodeUnsupportedFormat error, so a boundary can word it in its own
+// spelling of the knob.
+type KnobError struct {
+	Knob     Knob
+	Format   string
+	Takers   []string // the formats that take it, in table order
+	Lossless bool     // the format holds no bit rate because it is lossless
+}
+
+func (e *KnobError) Error() string {
+	takers := strings.Join(e.Takers, ", ")
+	if e.Lossless {
+		return fmt.Sprintf("waxflow: %s applies to lossy output (%s); %s is lossless", e.Knob, takers, e.Format)
+	}
+	return fmt.Sprintf("waxflow: %s applies to %s output; this request names %s", e.Knob, takers, e.Format)
+}
+
+// knobTakers lists the formats that take k, in table order.
+func knobTakers(k Knob) []string {
+	var names []string
+	for _, o := range outputs {
+		if !o.remuxOnly && o.knobs&k != 0 {
+			names = append(names, o.name)
+		}
+	}
+	return names
+}
+
+// RunOption attaches what rides along with one run and never shapes its plan.
+type RunOption func(*runConfig)
+
+// runConfig is what a run's RunOptions set.
+type runConfig struct {
+	tags     []container.Tag
+	chapters []container.Chapter
+	art      *container.Picture
+	progress func(done, total int64)
+}
+
+// newRunConfig applies run in order, so a later option wins.
+func newRunConfig(run []RunOption) runConfig {
+	var x runConfig
+	for _, o := range run {
+		if o != nil {
+			o(&x)
+		}
+	}
+	return x
+}
+
+// WithTags embeds canonical metadata fields (TITLE, ARTIST, ...) in the
+// output where the muxer can represent them in its stream form: Ogg
+// OpusTags, a FLAC VORBIS_COMMENT block, an MP3 ID3v2 tag, MP4 ilst
+// atoms. Formats without stream-form tagging (WAV, AIFF, ADTS)
+// ignore them; a finished file gets full metadata from the mapping
+// post-pass instead. Tags never change the plan: callers keying
+// cached bytes must fold the tag values into their own key.
+// WavPack and Monkey's Audio take them too, as the APEv2 block they
+// write after the audio.
+//
+// Every muxer that bounds its tag block refuses a value that does not
+// fit, failing the run with waxerr.CodeUnsupportedFormat naming
+// the key, rather than writing an output that quietly lacks it. The
+// refusal comes before the encode, so it costs nothing to retry with
+// the value trimmed. Those bounds sit at each format's own read or
+// field limit, so tags read off a source can always be written back;
+// Ogg is the exception, capping its comment header at 48 KiB to keep
+// the pre-audio headers small. MP4 sets no bound at all.
+func WithTags(tags []container.Tag) RunOption {
+	return func(x *runConfig) { x.tags = tags }
+}
+
+// WithChapters embeds chapter markers. Only the MP4 muxer represents
+// them (Nero chpl); the mapping post-pass covers finished files of
+// the other formats.
+func WithChapters(chapters []container.Chapter) RunOption {
+	return func(x *runConfig) { x.chapters = chapters }
+}
+
+// WithArt embeds cover art. Only the MP4 muxer represents it (the ilst
+// covr atom); art inflates the pre-audio init header, so live
+// streams should leave it nil.
+func WithArt(art *container.Picture) RunOption {
+	return func(x *runConfig) { x.art = art }
+}
+
+// WithProgress, given a non-nil fn, calls it after each encoded chunk or
+// copied packet with the samples carried so far and the projected total (-1
+// unknown). It runs on the run's goroutine, so blocking it pauses the
+// pipeline; the job runner's yield-to-live-streams check rides on exactly that.
+func WithProgress(fn func(done, total int64)) RunOption {
+	return func(x *runConfig) { x.progress = fn }
+}
+
+// MaxBitrate is the largest Bitrate, in bits per second, and so fits an int on
+// every build. A boundary that takes kbit/s refuses a value above
+// MaxBitrate/1000 before it multiplies.
+const MaxBitrate = math.MaxInt32
 
 // FLACLevel spellings whose meaning the zero value cannot carry.
 const (

@@ -752,8 +752,8 @@ func TestAdvisoryLengthStillDrivesProgress(t *testing.T) {
 	}
 	var totals []int64
 	if _, err := waxflow.New().Transcode(context.Background(), container.BytesSource(raw), "wma",
-		&bytes.Buffer{}, waxflow.TranscodeOptions{Format: "wav",
-			Progress: func(_, total int64) { totals = append(totals, total) }}); err != nil {
+		&bytes.Buffer{}, waxflow.TranscodeOptions{Format: "wav"},
+		waxflow.WithProgress(func(_, total int64) { totals = append(totals, total) })); err != nil {
 		t.Fatal(err)
 	}
 	if len(totals) == 0 {

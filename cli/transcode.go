@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -166,6 +168,72 @@ with true-peak limiting, dither).`,
 				return waxerr.New(waxerr.CodeInvalidRequest, "--loudness analyze replaces --gain; drop one")
 			}
 
+			// What the flags alone decide is refused before the source opens, in
+			// the engine's order: the format and container, then a bit-rate or
+			// VBR flag, then the other knob flags.
+			if err := (waxflow.TranscodeOptions{Format: outFormat, Container: containerName}).Check(); err != nil {
+				return err
+			}
+			// Only the output format's own flags reach Bitrate and VBR, and
+			// a bit rate only when given: unset, the encoder default stands.
+			// One given for another format is refused as a knob flag is.
+			for _, c := range []struct {
+				flag    string
+				set     bool
+				formats []string
+			}{
+				{"mp3-bitrate", mp3Bitrate != 0, []string{"mp3"}},
+				{"mp3-vbr", mp3VBR, []string{"mp3"}},
+				{"opus-bitrate", opusBitrate != 0, []string{"opus"}},
+				{"opus-vbr", opusVBR, []string{"opus"}},
+				{"aac-bitrate", aacBitrate != 0, []string{"aac", "he-aac"}},
+			} {
+				if c.set && cmd.Flags().Changed(c.flag) && !slices.Contains(c.formats, outFormat) {
+					return flagRefusal("--"+c.flag, c.formats, outFormat)
+				}
+			}
+			var bitrate int
+			var vbr bool
+			switch outFormat {
+			case "mp3":
+				bitrate, err = bitrateOption(cmd, "mp3-bitrate", mp3Bitrate)
+				vbr = mp3VBR
+			case "opus":
+				bitrate, err = bitrateOption(cmd, "opus-bitrate", opusBitrate)
+				vbr = opusVBR
+			case "aac", "he-aac":
+				bitrate, err = bitrateOption(cmd, "aac-bitrate", aacBitrate)
+			}
+			if err != nil {
+				return err
+			}
+			level, levelErr := flacLevelOption(cmd, flacLevel)
+			complexity, complexityErr := opusComplexityOption(cmd, opusComplexity)
+			opts := waxflow.TranscodeOptions{
+				Format:          outFormat,
+				Container:       containerName,
+				Rate:            rate,
+				Channels:        channels,
+				BitDepth:        bits,
+				Dynamics:        gain.Preset(dynamics),
+				Shaping:         shaping,
+				ResampleProfile: profile,
+				FLACLevel:       level,
+				WavPackLevel:    changedOr(cmd, "wavpack-level", wavpackLevel),
+				APELevel:        changedOr(cmd, "ape-level", apeLevel),
+				Bitrate:         bitrate,
+				VBR:             vbr,
+				OpusComplexity:  complexity,
+				OpusSignal:      changedOr(cmd, "opus-signal", opusSignal),
+				HEAACv2:         changedOr(cmd, "he-v2", heV2),
+			}
+			if err := opts.Check(); err != nil {
+				return knobFlagRefusal(err)
+			}
+			if err := cmp.Or(levelErr, complexityErr); err != nil {
+				return err
+			}
+
 			src, srcHint, cleanup, err := openSourceRef(cmd, flavor, args[0], &cfg, logger)
 			if err != nil {
 				return err
@@ -186,18 +254,6 @@ with true-peak limiting, dither).`,
 
 			e := waxflow.New(waxflow.WithLogger(logger))
 
-			// The options fields cannot say "level 0" or "complexity 0"
-			// with a plain 0 (that selects the default), so the flags' 0
-			// maps to the sentinels.
-			optLevel := flacLevel
-			if optLevel == 0 {
-				optLevel = waxflow.FLACLevelFastest
-			}
-			optComplexity := opusComplexity
-			if optComplexity == 0 {
-				optComplexity = waxflow.OpusComplexityLowest
-			}
-
 			// One probe of the source, read before anything is created on
 			// disk. Three things downstream need it and each used to fetch
 			// (or skip) its own: the container's own tags for the metadata
@@ -209,30 +265,9 @@ with true-peak limiting, dither).`,
 			}
 			srcTrack := srcInfo.Default()
 
-			opts := waxflow.TranscodeOptions{
-				Format:          outFormat,
-				Container:       containerName,
-				Rate:            rate,
-				Channels:        channels,
-				BitDepth:        bits,
-				Dynamics:        gain.Preset(dynamics),
-				Shaping:         shaping,
-				ResampleProfile: profile,
-				FLACLevel:       optLevel,
-				WavPackLevel:    wavpackLevel,
-				APELevel:        apeLevel,
-				MP3Bitrate:      mp3Bitrate * 1000,
-				MP3VBR:          mp3VBR,
-				OpusBitrate:     opusBitrate * 1000,
-				OpusComplexity:  optComplexity,
-				OpusVBR:         opusVBR,
-				OpusSignal:      opusSignal,
-				AACBitrate:      aacBitrate * 1000,
-				HEAACv2:         heV2,
-			}
 			plan, err := e.PlanTranscode(srcTrack, opts)
 			if err != nil {
-				return err
+				return knobFlagRefusal(err)
 			}
 			// A file output takes the flat MP4 form unless the caller named a
 			// container. The rule is the engine's, shared with split and with
@@ -400,14 +435,13 @@ with true-peak limiting, dither).`,
 				}
 			}
 
-			// The per-call payloads and the measured gain land on the options
-			// the plan was taken from, so what runs is what was planned. None
-			// of them shape a plan: PlanTranscode normalizes the payloads away
-			// and gain changes no output field the container default or the
-			// resolved width above read.
+			// The measured gain lands on the options the plan was taken from,
+			// so what runs is what was planned: gain changes no output field
+			// the container default or the resolved width above read. The
+			// tags, chapters and art ride with the run.
 			opts.GainDB = gainDB
-			opts.Tags, opts.Chapters, opts.Art = tags, chapters, art
-			res, err := e.Transcode(cmd.Context(), src, srcHint, out, opts)
+			res, err := e.Transcode(cmd.Context(), src, srcHint, out, opts,
+				waxflow.WithTags(tags), waxflow.WithChapters(chapters), waxflow.WithArt(art))
 			if err != nil {
 				out.Close()
 				// A failed transcode leaves no half-written artifact;
@@ -478,6 +512,95 @@ with true-peak limiting, dither).`,
 	cmd.Flags().StringVar(&loudness, "loudness", "", "analyze: two-pass loudness (exact gain to the ReplayGain reference, then RG tags measured from the output, or estimated from the source for Ogg-FLAC, WavPack, Monkey's Audio and fragmented MP4 outputs); the gain is measured after any --channels downmix")
 	cmd.Flags().BoolVar(&noTags, "no-tags", false, "skip the metadata passthrough (tags, chapters, art)")
 	return cmd
+}
+
+// changedOr is a knob flag's value when the user set it and the zero value,
+// the encoder's default, when not, so a bare command sends no knob the output
+// format might not take.
+func changedOr[T any](cmd *cobra.Command, flag string, v T) T {
+	if cmd.Flags().Changed(flag) {
+		return v
+	}
+	var zero T
+	return zero
+}
+
+// bitrateOption is a kbit/s flag's Bitrate: 0 when the flag is unset, so the
+// encoder default stands. A negative value, or one above waxflow.MaxBitrate in
+// kbit/s, is refused before it is multiplied.
+func bitrateOption(cmd *cobra.Command, flag string, kbps int) (int, error) {
+	if !cmd.Flags().Changed(flag) {
+		return 0, nil
+	}
+	if kbps < 0 || kbps > waxflow.MaxBitrate/1000 {
+		return 0, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("--%s %d: want 0 (the encoder's default) to %d kbit/s", flag, kbps, waxflow.MaxBitrate/1000))
+	}
+	return kbps * 1000, nil
+}
+
+// flacLevelOption maps --flac-level onto FLACLevel. The options cannot say
+// "level 0" with a plain 0, which selects the default, so the flag's 0 maps to
+// FLACLevelFastest. A level outside 0 to 8 is refused; the value returned
+// beside the error is an in-range stand-in that keeps the knob set, so Check
+// can refuse it for another format first.
+func flacLevelOption(cmd *cobra.Command, level int) (int, error) {
+	return levelFlag(cmd, "flac-level", level, 8, waxflow.FLACLevelDefault, waxflow.FLACLevelFastest)
+}
+
+// opusComplexityOption maps --opus-complexity onto OpusComplexity, the flag's
+// 0 to OpusComplexityLowest, as flacLevelOption does.
+func opusComplexityOption(cmd *cobra.Command, complexity int) (int, error) {
+	return levelFlag(cmd, "opus-complexity", complexity, 10, waxflow.OpusComplexityDefault, waxflow.OpusComplexityLowest)
+}
+
+// levelFlag maps a 0-to-top flag onto an option whose zero value is the
+// default: unset is dflt, 0 is zero (the sentinel), and a value outside 0 to
+// top is refused beside top as its stand-in.
+func levelFlag(cmd *cobra.Command, flag string, v, top, dflt, zero int) (int, error) {
+	switch {
+	case !cmd.Flags().Changed(flag):
+		return dflt, nil
+	case v < 0 || v > top:
+		return top, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("--%s %d: want 0 to %d", flag, v, top))
+	case v == 0:
+		return zero, nil
+	}
+	return v, nil
+}
+
+// knobFlags are the flags transcode and split spell the engine's knobs with.
+// The bit-rate and VBR flags are absent: each names its formats, and transcode
+// refuses one given for another before it builds the options.
+var knobFlags = map[waxflow.Knob]string{
+	waxflow.KnobHEAACv2:        "--he-v2",
+	waxflow.KnobFLACLevel:      "--flac-level",
+	waxflow.KnobWavPackLevel:   "--wavpack-level",
+	waxflow.KnobAPELevel:       "--ape-level",
+	waxflow.KnobOpusComplexity: "--opus-complexity",
+	waxflow.KnobOpusSignal:     "--opus-signal",
+}
+
+// knobFlagRefusal words the engine's *KnobError in flag names, naming the
+// flag, the format and the formats that take it. Any other error passes
+// through.
+func knobFlagRefusal(err error) error {
+	ke, ok := errors.AsType[*waxflow.KnobError](err)
+	if !ok {
+		return err
+	}
+	flag, ok := knobFlags[ke.Knob]
+	if !ok {
+		return err
+	}
+	return flagRefusal(flag, ke.Takers, ke.Format)
+}
+
+// flagRefusal refuses a flag the output format does not take, naming the
+// flag, the format and the formats that take it.
+func flagRefusal(flag string, takers []string, format string) error {
+	return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("%s applies to %s output; this request names %s",
+		flag, strings.Join(takers, ", "), format))
 }
 
 // predictedRG estimates the output ReplayGain from the source analysis and the

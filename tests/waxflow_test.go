@@ -345,13 +345,12 @@ func TestTranscodeRejections(t *testing.T) {
 	audio.Put(src)
 	e := waxflow.New()
 
-	// A nonzero VorbisBitrate is a reserved ABR target the encoder does not
-	// implement, so a vorbis request carrying one must fail at plan time rather
-	// than silently produce a VBR stream that never holds the rate.
+	// Vorbis is quality-driven and takes no Bitrate, so the knob is refused as
+	// one the format does not take, before any encoder is built.
 	_, err := e.Transcode(context.Background(), container.BytesSource(wav), "", &memWS{},
-		waxflow.TranscodeOptions{Format: "vorbis", VorbisBitrate: 128000})
-	if !errors.Is(err, waxerr.ErrInvalidRequest) {
-		t.Errorf("vorbis ABR err = %v, want invalid-request (ABR unimplemented)", err)
+		waxflow.TranscodeOptions{Format: "vorbis", Bitrate: 128000})
+	if !errors.Is(err, waxerr.ErrUnsupportedFormat) {
+		t.Errorf("vorbis Bitrate err = %v, want unsupported-format (a knob vorbis does not take)", err)
 	}
 	_, err = e.Transcode(context.Background(), container.BytesSource(wav), "", &memWS{}, waxflow.TranscodeOptions{})
 	if !errors.Is(err, waxerr.ErrInvalidRequest) {

@@ -18,9 +18,7 @@ import (
 )
 
 // Version is the decoder's cache-key version constant (ADR-0004): bump on
-// any change that alters decoded samples. 2 covers the FLAC readers: a lost
-// frame is now silence, Ogg FLAC is timed by its frames, and a stream whose
-// first frame is past 0 reads from it (the key has no demuxer term).
+// any change that alters decoded samples.
 const Version = "flac-dec-2"
 
 // StreamInfoLen is the byte length of a STREAMINFO metadata block body,

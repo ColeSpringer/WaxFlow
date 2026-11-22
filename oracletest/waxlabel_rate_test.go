@@ -110,7 +110,7 @@ func TestWaxlabelReadsTheTrueRateFromTheCodecConfig(t *testing.T) {
 // transcodeToBytes runs one Transcode of the synthesized test signal and
 // returns the output file's bytes. A real file, not a buffer: the fragmented
 // muxer back-patches, so the destination has to be seekable.
-func transcodeToBytes(t *testing.T, f audio.Format, frames int, opts waxflow.TranscodeOptions) []byte {
+func transcodeToBytes(t *testing.T, f audio.Format, frames int, opts waxflow.TranscodeOptions, run ...waxflow.RunOption) []byte {
 	t.Helper()
 	wav, _ := synthWAV(t, f, frames)
 	path := filepath.Join(t.TempDir(), "out")
@@ -118,7 +118,7 @@ func transcodeToBytes(t *testing.T, f audio.Format, frames int, opts waxflow.Tra
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := waxflow.New().Transcode(context.Background(), container.BytesSource(wav), "", file, opts); err != nil {
+	if _, err := waxflow.New().Transcode(context.Background(), container.BytesSource(wav), "", file, opts, run...); err != nil {
 		file.Close()
 		t.Fatalf("Transcode(%s/%s): %v", opts.Format, opts.Container, err)
 	}

@@ -235,18 +235,11 @@ func segmentBitDepth(opts TranscodeOptions, src audio.Format) TranscodeOptions {
 // off the same source format, so no rung of the ladder can plan one depth and
 // run another.
 func (e *Engine) PlanSegments(track container.Track, opts TranscodeOptions, segSeconds float64) (*SegmentPlan, error) {
-	if opts.FromSample != 0 {
-		return nil, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: segmented transcodes have no FromSample; segments address time")
-	}
-	opts = segmentBitDepth(opts, track.Fmt)
-	row, err := outputRow(opts.Format)
+	row, err := segmentOutputRow(opts)
 	if err != nil {
 		return nil, err
 	}
-	if row.hls == nil {
-		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("waxflow: %s has no segmented (HLS) form (available: %s)", opts.Format, strings.Join(SegmentedFormats(), ", ")))
-	}
+	opts = segmentBitDepth(opts, track.Fmt)
 	plan, err := e.PlanTranscode(track, opts)
 	if err != nil {
 		return nil, err
@@ -429,22 +422,14 @@ func timelineVersions(tracks []container.Track, env audio.Format, copts ConcatOp
 	return out, nil
 }
 
-// crossfadeVersion is a blended timeline's cache entry, in the shape
-// resample-hq-1 already uses: what was done, and the revision of how.
-//
-// It carries the length as well as the revision because the length is part of
-// what was done, not a parameter of it: a 512-sample blend and a 48000-sample
-// one are different audio out of the same code, and a key that named only the
-// revision would serve one caller's segments to the other. No comma, so
-// strings.Join(versions, ",") stays unambiguous.
+// crossfadeVersion is a blended timeline's cache-key term. It names the blend
+// length too, since blends of different lengths are different audio out of
+// the same code. No comma, so strings.Join(versions, ",") stays unambiguous.
 func crossfadeVersion(x int64) string { return fmt.Sprintf("xfade-%d-1", x) }
 
-// timelineWidthVersion is a width-pinned timeline's cache entry, in
-// crossfadeVersion's shape and for the same reason: two timelines over the
-// same members at different widths are different audio out of the same code,
-// because each member is folded or placed to that width before the seam. It
-// also retires every cached render that carried the fold-after-widening level
-// error. No comma, so strings.Join(versions, ",") stays unambiguous.
+// timelineWidthVersion is a width-pinned timeline's cache-key term, naming
+// the width for crossfadeVersion's reason: each member is folded or placed to
+// that width before the seam. No comma, so strings.Join stays unambiguous.
 func timelineWidthVersion(ch int) string { return fmt.Sprintf("tlwidth-%d-1", ch) }
 
 // primeStarts computes a run's two priming starts on the output timeline:
@@ -568,13 +553,9 @@ func SegmentedFormats() []string {
 // be the options the plan was computed from. Deterministic: regenerating
 // after cache eviction yields identical bytes.
 func (e *Engine) InitSegment(plan *SegmentPlan, opts TranscodeOptions) ([]byte, error) {
-	row, err := outputRow(opts.Format)
+	row, err := segmentOutputRow(opts)
 	if err != nil {
 		return nil, err
-	}
-	if row.hls == nil {
-		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("waxflow: %s has no segmented (HLS) form", opts.Format))
 	}
 	enc, err := row.hls.encode(plan.Format, opts, 0)
 	if err != nil {
@@ -649,20 +630,41 @@ func (e *Engine) TranscodeSegments(ctx context.Context, src container.Source, hi
 
 // segmentOutputRow validates the segmented options that do not depend on the
 // source and returns the output row they select. It is a pure function of opts,
-// so both segmented entry points can call it and agree.
+// so the segmented plan, InitSegment and both runs call it and refuse alike.
 func segmentOutputRow(opts TranscodeOptions) (*output, error) {
+	if err := checkSegmented(opts); err != nil {
+		return nil, err
+	}
 	if opts.FromSample != 0 {
-		return nil, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: segmented transcodes have no FromSample")
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: segmented transcodes have no FromSample; segments address time")
 	}
 	row, err := outputRow(opts.Format)
 	if err != nil {
 		return nil, err
 	}
 	if row.hls == nil {
-		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("waxflow: %s has no segmented (HLS) form", opts.Format))
+		return nil, noSegmentedForm(opts.Format)
 	}
 	return row, nil
+}
+
+// checkSegmented runs Check and refuses a Container: the segmenter writes
+// fragmented MP4 whatever the options name.
+func checkSegmented(opts TranscodeOptions) error {
+	if err := opts.Check(); err != nil {
+		return err
+	}
+	if opts.Container != "" {
+		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
+			"waxflow: segmented output is always fragmented MP4 and takes no Container (got %q)", opts.Container))
+	}
+	return nil
+}
+
+// noSegmentedForm refuses a format with no HLS form, naming those with one.
+func noSegmentedForm(format string) error {
+	return waxerr.New(waxerr.CodeUnsupportedFormat,
+		fmt.Sprintf("waxflow: %s has no segmented (HLS) form (available: %s)", format, strings.Join(SegmentedFormats(), ", ")))
 }
 
 // TranscodeSegmentsMedia emits numbered CMAF media segments from an

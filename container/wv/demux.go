@@ -54,8 +54,8 @@ const (
 )
 
 // DemuxerVersion is this demuxer's term in the ADR-0004 cache key, carried
-// by its track. Bump it for a change that makes the demuxer deliver other
-// samples for a file that has not changed; the ADR says what revision 2 is.
+// by its track. Bump it for a change that makes the demuxer
+// deliver other samples for a file that has not changed.
 const DemuxerVersion = "wv-demux-2"
 
 // Demuxer reads one WavPack track from a native .wv source.

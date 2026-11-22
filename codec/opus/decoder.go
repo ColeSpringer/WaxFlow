@@ -14,14 +14,11 @@ import (
 	"github.com/colespringer/waxflow/codec"
 )
 
-// maxFrameSamples is the largest single Opus frame at 48 kHz (SILK 60 ms).
 // Version is the decoder's cache-key version constant (ADR-0004): bump on
-// any change that alters decoded samples. Revision 2: the CELT inverse
-// MDCT's DFT moved from a float64 direct form to the float32 dsp/fft
-// kernel. Revision 3: container/ogg honours an initial granule, which
-// changes the length and samples of such a stream (no demuxer term).
+// any change that alters decoded samples.
 const Version = "opus-dec-3"
 
+// maxFrameSamples is the largest single Opus frame at 48 kHz (SILK 60 ms).
 const maxFrameSamples = 2880
 
 // CELT sub-frame sizes at 48 kHz used by the redundancy/transition logic

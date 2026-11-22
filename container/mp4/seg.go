@@ -12,11 +12,9 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-// SegmenterVersion identifies the segment and init-header box layout for
-// the ADR-0004 cache key: cached segments regenerate when this bumps, so
-// a box-layout fix can never serve stale segments next to fresh ones.
-// mp4-seg-4: the init header's sample entry carries the codec's depth and
-// agrees with dOps on rate (both refused by Chromium's MSE parser before).
+// SegmenterVersion is the HLS segment and init-header layout's term in the
+// ADR-0004 cache key. Bump it for a box-layout change, so stale segments are
+// never served beside fresh ones.
 const SegmenterVersion = "mp4-seg-4"
 
 // maxSegmentPayload bounds one segment's mdat payload. A segment is a

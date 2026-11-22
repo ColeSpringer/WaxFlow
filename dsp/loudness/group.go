@@ -6,14 +6,9 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-// GroupVersion identifies the group accumulator's revision, for a cache
-// key that stores a group measurement (ADR-0004). It rides beside Version
-// rather than replacing it: a group is the same meter over more blocks, so
-// a change to either moves the answer.
-//
-// Like Version, nothing in this tree reads it. A cache key is the caller's
-// to build, and a result reports numbers rather than the revision that
-// produced them.
+// GroupVersion is the group accumulator's revision, beside Version, for a
+// caller's cache key that stores a group measurement (ADR-0004). Nothing in
+// this tree reads it.
 const GroupVersion = "r128-group-1"
 
 // Group measures a set of streams as one programme, which is what an album

@@ -224,10 +224,8 @@ func containerWritten(name string) bool {
 		if rowDefaultContainer[o.name] == name {
 			return true
 		}
-		if o.container != nil {
-			if _, err := o.container(name); err == nil {
-				return true
-			}
+		if takesOverride(o, name) {
+			return true
 		}
 	}
 	return false
@@ -238,10 +236,8 @@ func containerWritten(name string) bool {
 // wiring pattern).
 func containerWritable(name string) bool {
 	for i := range outputs {
-		if outputs[i].container != nil {
-			if _, err := outputs[i].container(name); err == nil {
-				return true
-			}
+		if takesOverride(&outputs[i], name) {
+			return true
 		}
 	}
 	return false
@@ -258,10 +254,8 @@ func rowWritesContainer(row, container string) bool {
 		if rowDefaultContainer[o.name] == container {
 			return true
 		}
-		if o.container != nil {
-			if _, err := o.container(container); err == nil {
-				return true
-			}
+		if takesOverride(o, container) {
+			return true
 		}
 	}
 	return false
@@ -278,13 +272,20 @@ func codecWritesContainer(id codec.ID, container string) bool {
 		if rowDefaultContainer[o.name] == container {
 			return true
 		}
-		if o.container != nil {
-			if _, err := o.container(container); err == nil {
-				return true
-			}
+		if takesOverride(o, container) {
+			return true
 		}
 	}
 	return false
+}
+
+// takesOverride reports whether row has a form for the Container value name.
+func takesOverride(o *output, name string) bool {
+	if name == "" {
+		return false
+	}
+	_, err := o.form(name)
+	return err == nil
 }
 
 // rowDefaultContainer maps an output row's name to the demuxer-side container

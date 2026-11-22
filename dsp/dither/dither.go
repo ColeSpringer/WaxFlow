@@ -29,12 +29,8 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-// Version is this node's algorithm revision for cache keys: bump on any
-// change to the dither, shaping coefficients, or rounding (plan
-// section 10).
-//
-// dither-2 made the noise a pure function of absolute sample position. The
-// noise values change, so every cached transcode that quantized is stale.
+// Version is this node's algorithm revision for cache keys (ADR-0004): bump
+// on any change to the dither, shaping coefficients, or rounding.
 const Version = "dither-2"
 
 // DefaultSeed seeds deterministic-mode quantizers. There is nothing

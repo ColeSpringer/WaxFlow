@@ -2,7 +2,7 @@ package waxflow
 
 import "testing"
 
-// TestOutputEmbedsTags pins the switch all three post-pass callers share (the
+// TestOutputEmbedsTags pins the answer all three post-pass callers share (the
 // CLI's transcode and split, the job runner). The behavioral halves live with
 // those callers: the split and runner tests prove the tags arrive from the
 // mux, and the runner's mock counts post-pass calls. What none of them can see
@@ -29,6 +29,8 @@ func TestOutputEmbedsTags(t *testing.T) {
 		{"opus", "", false},
 		{"mp3", "", false},
 		{"wav", "", false},
+		// An unknown format has no form, and so no muxer to write tags.
+		{"xyz", ContainerOgg, false},
 	} {
 		if got := OutputEmbedsTags(tc.format, tc.container); got != tc.want {
 			t.Errorf("OutputEmbedsTags(%q, %q) = %v, want %v", tc.format, tc.container, got, tc.want)

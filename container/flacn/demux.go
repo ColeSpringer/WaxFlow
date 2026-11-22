@@ -46,8 +46,8 @@ const (
 )
 
 // DemuxerVersion is this demuxer's term in the ADR-0004 cache key, carried
-// by its track. Bump it for a change that makes the demuxer deliver other
-// samples for a file that has not changed; the ADR says what revision 2 is.
+// by its track. Bump it for a change that makes the demuxer
+// deliver other samples for a file that has not changed.
 const DemuxerVersion = "flacn-demux-2"
 
 // Metadata block types (RFC 9639 section 8).

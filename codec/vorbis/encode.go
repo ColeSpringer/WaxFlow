@@ -12,17 +12,20 @@ import (
 
 var _ codec.Encoder = (*Encoder)(nil)
 
-// EncoderVersion identifies the encode algorithm/bitstream revision for the
-// ADR-0004 cache key. It composes the psychoacoustic model's revision, so
-// retuning dsp/psy invalidates exactly these streams. Bump it whenever a change
-// alters the produced bytes.
-//
-// vorbis-enc-9 was borrowed for a muxer change, not an encoder one: the Ogg
-// granulepos convention changed (container/ogg/muxmap.go) and the cache key
-// tuple had no container term, so this was the narrowest lever available. It
-// has one now (ogg.MuxerVersion, ADR-0004's 2026-09-10 amendment), so the next
-// such change bumps that instead and this constant is the encoder's again.
-const EncoderVersion = "vorbis-enc-11+" + psy.Version
+// encoderRevision is the encoder's cache-key term (ADR-0004): bump it whenever
+// a change alters the produced bytes. It composes the psychoacoustic model's
+// revision, so retuning dsp/psy invalidates exactly these streams.
+const encoderRevision = "vorbis-enc-11+" + psy.Version
+
+// EncoderVersion is the encoder's cache-key term at quality (ADR-0004): the
+// quality changes the bytes, so it is part of the term. Quality resolves as in
+// NewEncoder, so 0 and DefaultQuality give the same term, the bare revision.
+func EncoderVersion(quality float64) string {
+	if quality == 0 || quality == DefaultQuality {
+		return encoderRevision
+	}
+	return fmt.Sprintf("%s-q%g", encoderRevision, quality)
+}
 
 // encVendor is the fixed vendor string the standalone encoder stamps into the
 // comment header, so deterministic-mode output stays byte-identical. In the
@@ -131,7 +134,7 @@ func NewEncoder(f audio.Format, opts *EncoderOptions) (*Encoder, error) {
 	if opts != nil && opts.Quality != 0 {
 		quality = opts.Quality
 	}
-	if quality < -1 || quality > 10 {
+	if !(quality >= -1 && quality <= 10) { // a NaN fails both comparisons
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("vorbis: quality %g outside -1..10", quality))
 	}

@@ -360,20 +360,20 @@ func keyEnv(t *testing.T) (*testEnv, *keyLog) {
 	// A line holds no byte of these two, only the depth and the gain they
 	// carry, so an encoder change does not move it. The gain rides an MP4
 	// because that is a container whose tags the demuxer hands back.
-	encode := func(src []byte, opts waxflow.TranscodeOptions) []byte {
+	encode := func(src []byte, opts waxflow.TranscodeOptions, run ...waxflow.RunOption) []byte {
 		t.Helper()
 		ws := &testutil.MemWriteSeeker{}
-		if _, err := waxflow.New().Transcode(t.Context(), container.BytesSource(src), "wav", ws, opts); err != nil {
+		if _, err := waxflow.New().Transcode(t.Context(), container.BytesSource(src), "wav", ws, opts, run...); err != nil {
 			t.Fatal(err)
 		}
 		return ws.Buf
 	}
 	put("sine-s20.flac", encode(read(testutil.PkgFile("..", "testdata", "sine-s24.wav")),
 		waxflow.TranscodeOptions{Format: "flac", BitDepth: 20}))
-	put("gained.m4a", encode(read(env.root, "sine.wav"), waxflow.TranscodeOptions{Format: "aac", Tags: []container.Tag{
+	put("gained.m4a", encode(read(env.root, "sine.wav"), waxflow.TranscodeOptions{Format: "aac"}, waxflow.WithTags([]container.Tag{
 		{Key: "REPLAYGAIN_TRACK_GAIN", Value: "-6.00 dB"},
 		{Key: "REPLAYGAIN_TRACK_PEAK", Value: "0.500000"},
-	}}))
+	})))
 	put("tl-a.wav", rampWAV(t, 48000, 2, 3*48000))
 	put("tl-b.wav", rampWAV(t, 48000, 2, 5*24000))
 

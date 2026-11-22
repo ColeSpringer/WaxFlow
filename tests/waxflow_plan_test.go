@@ -152,7 +152,7 @@ func TestPlanTranscode(t *testing.T) {
 	if cbrPlan.BitRate == 0 || cbrPlan.EstimatedBytes < 0 {
 		t.Fatalf("CBR opus plan = bitRate %d estimated %d, want both known", cbrPlan.BitRate, cbrPlan.EstimatedBytes)
 	}
-	vbrPlan, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "opus", OpusVBR: true})
+	vbrPlan, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "opus", VBR: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestPlanTranscode(t *testing.T) {
 	if mp3CBR.BitRate != 128000 || mp3CBR.EstimatedBytes < 0 {
 		t.Fatalf("CBR mp3 plan = bitRate %d estimated %d, want 128000 and known", mp3CBR.BitRate, mp3CBR.EstimatedBytes)
 	}
-	mp3VBR, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "mp3", Rate: 44100, MP3VBR: true})
+	mp3VBR, err := e.PlanTranscode(track, waxflow.TranscodeOptions{Format: "mp3", Rate: 44100, VBR: true})
 	if err != nil {
 		t.Fatal(err)
 	}

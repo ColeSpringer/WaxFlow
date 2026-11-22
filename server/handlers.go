@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/cache"
 	"github.com/colespringer/waxflow/internal/metrics"
 	"github.com/colespringer/waxflow/internal/sign"
@@ -145,19 +147,36 @@ func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 			duration = ts.seconds
 			break
 		}
-		f, err := s.resolver.Resolve(r.Context(), p.src)
+		// The sign answers what a HEAD of the signed URL would: what the
+		// query alone decides before the source resolves, the rest through
+		// the HEAD's own preparation, which plans and starts no pipeline.
+		if queryDecides(p) {
+			if _, err := s.streamOptions(p, 0, 0); err != nil {
+				s.writeError(w, err)
+				return
+			}
+		}
+		// The sign pins the source's current id below, so an id the query
+		// carries, such as a re-signed URL's stale one, is replaced unchecked.
+		q.Del("id")
+		sreq, err := s.prepareSource(r.Context(), q, false)
 		if err != nil {
 			s.writeError(w, err)
 			return
 		}
-		q.Set("id", f.ID.String())
-		// Duration comes from the probe; unknown lengths get the floor.
-		duration = -1
-		if info, err := s.eng.Probe(r.Context(), f, f.Ext, nil); err == nil {
-			track := info.Default()
-			duration = DurationSeconds(track.Samples, track.Fmt.Rate)
+		if !directPlayable(sreq) {
+			err = s.planTranscode(r.Context(), sreq)
 		}
-		f.Close()
+		sreq.Close()
+		if err != nil {
+			s.writeError(w, err)
+			return
+		}
+		q.Set("id", sreq.src.ID.String())
+		// Duration is the whole source's, from the probe; unknown lengths
+		// get the floor.
+		track := sreq.info.Default()
+		duration = DurationSeconds(track.Samples, track.Fmt.Rate)
 	case "/hls/master.m3u8":
 		// The HLS surface signs one URL: master. Its children (media
 		// playlists, init, segments) are signed by the daemon as it
@@ -383,4 +402,16 @@ func boolish(v string) bool {
 	default:
 		return false
 	}
+}
+
+// queryDecides reports whether a /stream query's options can be checked
+// without the source. format=auto resolves to a constant, and every refusal
+// under it also rules out direct play; so does any for an output format. A
+// source container's own name (format=ogg on an Ogg file) may direct-play, so
+// it waits for the source unless the query rules that out.
+func queryDecides(p *streamParams) bool {
+	if p.format == "auto" || slices.Contains(waxflow.OutputFormats(), p.format) {
+		return true
+	}
+	return !slices.Contains(format.Inputs(), p.format) || queryRulesOutDirectPlay(p)
 }

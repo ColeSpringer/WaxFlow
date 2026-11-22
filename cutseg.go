@@ -45,6 +45,16 @@ type CutSegmentPlan struct {
 // error/decline seam PlanCut documents.
 func (e *Engine) PlanCutSegments(track container.Track, opts TranscodeOptions, spans []Span,
 	grid int, segSeconds float64) (*CutSegmentPlan, error) {
+	if err := checkSegmented(opts); err != nil {
+		return nil, err
+	}
+	row, err := outputRow(opts.Format)
+	if err != nil {
+		return nil, err
+	}
+	if row.hls == nil {
+		return nil, noSegmentedForm(opts.Format)
+	}
 	cutTrack, landed, err := CutTrack(track, opts, spans, grid)
 	if err != nil {
 		// The seam, exactly as PlanCut maps it: CutTrack cannot express a decline
@@ -122,6 +132,16 @@ func (e *Engine) CutInitSegment(plan *CutSegmentPlan) ([]byte, error) {
 // RemuxSegments: the source.File owns the handle.
 func (e *Engine) CutSegments(ctx context.Context, src container.Source, hint string, opts TranscodeOptions,
 	spans []Span, grid int, measured container.Track, segOpts SegmentedOptions, emit func(mp4.Segment) error) (*SegmentedResult, error) {
+	if err := checkSegmented(opts); err != nil {
+		return nil, err
+	}
+	row, err := outputRow(opts.Format)
+	if err != nil {
+		return nil, err
+	}
+	if row.hls == nil {
+		return nil, noSegmentedForm(opts.Format)
+	}
 	if err := validateSegOpts(segOpts); err != nil {
 		return nil, err
 	}
@@ -145,11 +165,10 @@ func (e *Engine) CutSegments(ctx context.Context, src container.Source, hint str
 	if err != nil {
 		return nil, err
 	}
-	// PlanRemux answers for the options' container, and a segmented run always
-	// writes fMP4, which states no trim per packet: the decline PlanRemuxSegments
-	// makes, repeated here so a caller past the plan is refused before a segment
-	// goes out rather than by the copy's backstop mid-run.
-	if rp == nil || cutTrack.MidPadding > 0 {
+	// What PlanRemux declines, a trim inside the kept packets among it, is
+	// refused before a segment goes out rather than by the copy's backstop
+	// mid-run.
+	if rp == nil {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("waxflow: a %s cut cannot be remuxed to %s with these options; transcode it",
 				track.Codec, opts.Format))

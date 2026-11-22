@@ -15,10 +15,9 @@ import (
 
 var _ container.Muxer = (*Muxer)(nil)
 
-// MuxerVersion is this muxer's term in the ADR-0004 cache key: a cached
-// output of it regenerates when this bumps. Bump it for a change to what
-// gets written around unchanged encoded packets, which is the one kind of
-// change no encoder or DSP version can notice.
+// MuxerVersion is this muxer's term in the ADR-0004 cache key. Bump it for a
+// change to what gets written around unchanged encoded packets, which no
+// encoder or DSP version can notice.
 const MuxerVersion = "riff-mux-1"
 
 // MuxerOptions configures writing.

@@ -21,6 +21,7 @@ import (
 	"github.com/colespringer/waxflow/container/riff"
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/testutil"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // writeWAV writes a synthesized 16-bit stereo WAV fixture.
@@ -832,6 +833,67 @@ func TestTranscodeHEAAC(t *testing.T) {
 	}
 }
 
+// TestTranscodeBitrateFlagsReachOnlyTheirFormat: each format's bit-rate and
+// VBR flags reach its own output, and a flag for another format exits 5,
+// naming the flag, the format and the formats it applies to.
+func TestTranscodeBitrateFlagsReachOnlyTheirFormat(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	writeWAV(t, in, 48000)
+	encode := func(name string, flags ...string) []byte {
+		t.Helper()
+		out := filepath.Join(dir, name)
+		args := append(append([]string{"transcode"}, flags...), in, out)
+		if code, _, errOut := run(t, args...); code != 0 {
+			t.Fatalf("%s: exit = %d, stderr: %s", name, code, errOut)
+		}
+		data, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	for _, c := range []struct {
+		ext, own, low, vbr string
+	}{
+		{"mp3", "--mp3-bitrate", "64", "--mp3-vbr"},
+		{"opus", "--opus-bitrate", "32", "--opus-vbr"},
+		{"m4a", "--aac-bitrate", "48", ""},
+	} {
+		def := encode("def." + c.ext)
+		if low := encode("low."+c.ext, c.own, c.low); len(low) > len(def)*2/3 {
+			t.Errorf("%s %s %s: %d bytes, not clearly smaller than the default's %d",
+				c.ext, c.own, c.low, len(low), len(def))
+		}
+		if c.vbr != "" {
+			if vbr := encode("vbr."+c.ext, c.vbr); bytes.Equal(vbr, def) {
+				t.Errorf("%s %s: the constant-rate default's bytes", c.ext, c.vbr)
+			}
+		}
+	}
+	for i, c := range []struct {
+		ext   string
+		other []string
+		want  string
+	}{
+		{"mp3", []string{"--opus-bitrate", "32"}, "--opus-bitrate applies to opus output; this request names mp3"},
+		{"mp3", []string{"--opus-vbr"}, "--opus-vbr applies to opus output; this request names mp3"},
+		{"opus", []string{"--mp3-bitrate", "32"}, "--mp3-bitrate applies to mp3 output; this request names opus"},
+		{"opus", []string{"--mp3-vbr"}, "--mp3-vbr applies to mp3 output; this request names opus"},
+		{"opus", []string{"--aac-bitrate", "48"}, "--aac-bitrate applies to aac, he-aac output; this request names opus"},
+		{"m4a", []string{"--opus-bitrate", "32"}, "--opus-bitrate applies to opus output; this request names aac"},
+	} {
+		out := filepath.Join(dir, fmt.Sprintf("other%d.%s", i, c.ext))
+		args := append(append([]string{"transcode"}, c.other...), in, out)
+		if code, _, errOut := run(t, args...); code != 5 || !strings.Contains(errOut, c.want) {
+			t.Errorf("%s %v: exit = %d, stderr %q, want 5 and %q", c.ext, c.other, code, errOut, c.want)
+		}
+		if _, err := os.Stat(out); err == nil {
+			t.Errorf("%s %v wrote %s", c.ext, c.other, out)
+		}
+	}
+}
+
 // TestTranscodeHEAACv2 covers --he-v2: the flag reaches the engine (the
 // output stores an AOT-29 config and rides the 32 kb/s default, clearly
 // smaller than v1's 64), and a mono chain under the flag is refused by
@@ -879,6 +941,213 @@ func TestTranscodeHEAACv2(t *testing.T) {
 		t.Error("--he-v2 with a mono chain succeeded, want a named refusal")
 	} else if !strings.Contains(errOut, "stereo") {
 		t.Errorf("the mono refusal does not name the constraint: %s", errOut)
+	}
+}
+
+// TestTranscodeRefusesAFlagOffItsFormat: a knob flag the output format does
+// not take exits 5, named in the flag's own spelling with the formats that
+// take it, and writes nothing.
+func TestTranscodeRefusesAFlagOffItsFormat(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	writeWAV(t, in, 48000)
+	for _, c := range []struct {
+		format string
+		flag   []string
+		want   string
+	}{
+		{"aac", []string{"--he-v2"}, "--he-v2 applies to he-aac output; this request names aac"},
+		{"wav", []string{"--flac-level", "8"}, "--flac-level applies to flac output; this request names wav"},
+		{"wav", []string{"--flac-level", "0"}, "--flac-level applies to flac output; this request names wav"},
+		{"flac", []string{"--wavpack-level", "3"}, "--wavpack-level applies to wavpack output; this request names flac"},
+		{"wavpack", []string{"--ape-level", "3000"}, "--ape-level applies to ape output; this request names wavpack"},
+		{"mp3", []string{"--opus-complexity", "8"}, "--opus-complexity applies to opus output; this request names mp3"},
+		{"vorbis", []string{"--opus-signal", "voice"}, "--opus-signal applies to opus output; this request names vorbis"},
+	} {
+		out := filepath.Join(dir, c.format+"."+waxflow.OutputExt(c.format, ""))
+		args := append([]string{"transcode", "--format", c.format, in, out}, c.flag...)
+		code, _, errOut := run(t, args...)
+		if code != 5 {
+			t.Errorf("%v: exit = %d, want 5; stderr: %s", args[1:], code, errOut)
+		} else if !strings.Contains(errOut, c.want) {
+			t.Errorf("%v: stderr = %q, want %q", args[1:], errOut, c.want)
+		}
+		if _, err := os.Stat(out); err == nil {
+			t.Errorf("%v wrote %s", args[1:], out)
+		}
+	}
+}
+
+// TestSplitRefusesAFlagOffItsFormat: split words a level flag the format does
+// not take as transcode does, and exits 5.
+func TestSplitRefusesAFlagOffItsFormat(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	writeWAV(t, in, 48000)
+	code, _, errOut := run(t, "split", in, filepath.Join(dir, "out"), "--at", "24000", "--format", "wav", "--flac-level", "8")
+	if want := "--flac-level applies to flac output; this request names wav"; code != 5 || !strings.Contains(errOut, want) {
+		t.Errorf("exit = %d, stderr %q, want 5 and %q", code, errOut, want)
+	}
+}
+
+// TestTranscodeRefusesFlagsBeforeTheSourceOpens: what the flags alone decide
+// is refused in the engine's order, the format and container before a flag,
+// and before the source is opened, so a source that is not there answers the
+// flag's refusal and not not-found.
+func TestTranscodeRefusesFlagsBeforeTheSourceOpens(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	writeWAV(t, in, 4800)
+	missing := filepath.Join(dir, "missing.wav")
+	for _, c := range []struct {
+		args []string
+		code int
+		want string
+	}{
+		{[]string{"--format", "opsu", "--opus-bitrate", "64"}, 5, `unsupported output format "opsu"`},
+		{[]string{"--format", "mp3", "--container", "mka", "--opus-bitrate", "64"}, 2, "format mp3 has no alternate container (container=mka)"},
+		{[]string{"--format", "mp3", "--opus-bitrate", "64"}, 5, "--opus-bitrate applies to opus output; this request names mp3"},
+		{[]string{"--format", "wav", "--flac-level", "8"}, 5, "--flac-level applies to flac output; this request names wav"},
+		{[]string{"--format", "flac", "--flac-level", "9"}, 2, "--flac-level 9: want 0 to 8"},
+		{[]string{"--format", "opus", "--opus-complexity", "11"}, 2, "--opus-complexity 11: want 0 to 10"},
+		{[]string{"--format", "wavpack", "--wavpack-level", "9"}, 2, "WavPack level 9 outside 1..4"},
+		{[]string{"--format", "ape", "--ape-level", "4000"}, 2, "APE level 4000 decodes but is not written"},
+		{[]string{"--format", "opus", "--opus-signal", "foo"}, 2, `opus signal hint "foo" is not auto, voice, or music`},
+		{[]string{"--format", "mp3", "--mp3-bitrate", "-5"}, 2, "--mp3-bitrate -5: want 0"},
+	} {
+		for _, src := range []string{in, missing} {
+			out := filepath.Join(dir, "out.bin")
+			args := append([]string{"transcode", src, out}, c.args...)
+			code, _, errOut := run(t, args...)
+			if code != c.code || !strings.Contains(errOut, c.want) {
+				t.Errorf("%v: exit = %d, stderr %q, want %d and %q", args[1:], code, errOut, c.code, c.want)
+			}
+			if _, err := os.Stat(out); err == nil {
+				t.Errorf("%v wrote %s", args[1:], out)
+			}
+		}
+	}
+}
+
+// TestSplitRefusesFlagsBeforeTheSourceOpens: split refuses what its flags
+// alone decide before the source is opened, as transcode does.
+func TestSplitRefusesFlagsBeforeTheSourceOpens(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing.wav")
+	for _, c := range []struct {
+		args []string
+		code int
+		want string
+	}{
+		{[]string{"--format", "opsu", "--flac-level", "8"}, 5, `unsupported output format "opsu"`},
+		{[]string{"--format", "wav", "--container", "webm", "--flac-level", "8"}, 2, `wav container "webm"`},
+		{[]string{"--format", "wav", "--flac-level", "8"}, 5, "--flac-level applies to flac output; this request names wav"},
+		{[]string{"--format", "flac", "--flac-level", "9"}, 2, "--flac-level 9: want 0 to 8"},
+		{[]string{"--format", "wavpack", "--wavpack-level", "9"}, 2, "WavPack level 9 outside 1..4"},
+		{[]string{"--format", "ape", "--ape-level", "4000"}, 2, "APE level 4000 decodes but is not written"},
+	} {
+		args := append([]string{"split", missing, filepath.Join(dir, "out"), "--at", "24000"}, c.args...)
+		code, _, errOut := run(t, args...)
+		if code != c.code || !strings.Contains(errOut, c.want) {
+			t.Errorf("%v: exit = %d, stderr %q, want %d and %q", args[1:], code, errOut, c.code, c.want)
+		}
+	}
+}
+
+// TestTranscodeBitrateFlagsAreBounded: a bit-rate flag below 0 or above
+// waxflow.MaxBitrate in kbit/s is refused in the flag's words before it is
+// multiplied, so no value wraps to a rate the caller never asked for.
+func TestTranscodeBitrateFlagsAreBounded(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	writeWAV(t, in, 4800)
+	over := fmt.Sprint(waxflow.MaxBitrate/1000 + 1)
+	for _, c := range []struct {
+		format string
+		args   []string
+		want   string
+	}{
+		{"mp3", []string{"--mp3-bitrate", over}, "--mp3-bitrate " + over + ": want 0 (the encoder's default) to 2147483 kbit/s"},
+		{"opus", []string{"--opus-bitrate", over}, "--opus-bitrate " + over + ": want 0"},
+		{"aac", []string{"--aac-bitrate", over}, "--aac-bitrate " + over + ": want 0"},
+		{"he-aac", []string{"--aac-bitrate", "-5"}, "--aac-bitrate -5: want 0"},
+	} {
+		out := filepath.Join(dir, "out."+waxflow.OutputExt(c.format, ""))
+		args := append([]string{"transcode", "--format", c.format, in, out}, c.args...)
+		code, _, errOut := run(t, args...)
+		if code != waxerr.CodeInvalidRequest.ExitCode() || !strings.Contains(errOut, c.want) {
+			t.Errorf("%v: exit = %d, stderr %q, want %d and %q", args[1:], code, errOut,
+				waxerr.CodeInvalidRequest.ExitCode(), c.want)
+		}
+	}
+}
+
+// TestNegativeLevelFlagsAreRefused: --flac-level and --opus-complexity take 0
+// and up, and a negative one is refused in the flag's words, never read as the
+// engine's level-0 sentinel.
+func TestNegativeLevelFlagsAreRefused(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	writeWAV(t, in, 4800)
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"transcode", "--format", "flac", in, filepath.Join(dir, "a.flac"), "--flac-level", "-1"}, "--flac-level -1: want 0 to 8"},
+		{[]string{"transcode", "--format", "flac", in, filepath.Join(dir, "b.flac"), "--flac-level", "-2"}, "--flac-level -2: want 0 to 8"},
+		{[]string{"transcode", "--format", "opus", in, filepath.Join(dir, "c.opus"), "--opus-complexity", "-1"}, "--opus-complexity -1: want 0 to 10"},
+		{[]string{"split", in, filepath.Join(dir, "d"), "--at", "2400", "--flac-level", "-1"}, "--flac-level -1: want 0 to 8"},
+	} {
+		code, _, errOut := run(t, c.args...)
+		if code != waxerr.CodeInvalidRequest.ExitCode() || !strings.Contains(errOut, c.want) {
+			t.Errorf("%v: exit = %d, stderr %q, want %d and %q", c.args, code, errOut,
+				waxerr.CodeInvalidRequest.ExitCode(), c.want)
+		}
+	}
+	for _, p := range []string{"a.flac", "b.flac", "c.opus", "d"} {
+		if _, err := os.Stat(filepath.Join(dir, p)); err == nil {
+			t.Errorf("a refused flag wrote %s", p)
+		}
+	}
+}
+
+// TestAnErrorIsPrefixedOnce: stderr names the program once, for an engine
+// error that already starts with it and for one that does not.
+func TestAnErrorIsPrefixedOnce(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	writeWAV(t, in, 4800)
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--format", "wavpack", "--wavpack-level", "9"}, "waxflow: WavPack level 9"},
+		{[]string{"--format", "aac", "--he-v2"}, "waxflow: --he-v2 applies"},
+	} {
+		args := append([]string{"transcode", in, filepath.Join(dir, "out.bin")}, c.args...)
+		_, _, errOut := run(t, args...)
+		if !strings.HasPrefix(errOut, c.want) || strings.Count(errOut, "waxflow: ") != 1 {
+			t.Errorf("%v: stderr = %q, want one prefix and %q", c.args, errOut, c.want)
+		}
+	}
+}
+
+// TestDefaultsReachNoOtherFormat: a bare transcode and a bare split to every
+// output format succeed, so no flag default reaches a format as a knob it
+// does not take.
+func TestDefaultsReachNoOtherFormat(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	writeWAV(t, in, 48000)
+	for _, format := range waxflow.OutputFormats() {
+		out := filepath.Join(dir, format+"."+waxflow.OutputExt(format, ""))
+		if code, _, errOut := run(t, "transcode", "--format", format, in, out); code != 0 {
+			t.Errorf("transcode --format %s: exit = %d, stderr: %s", format, code, errOut)
+		}
+		if code, _, errOut := run(t, "split", in, filepath.Join(dir, "split-"+format), "--at", "24000",
+			"--format", format); code != 0 {
+			t.Errorf("split --format %s: exit = %d, stderr: %s", format, code, errOut)
+		}
 	}
 }
 

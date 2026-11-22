@@ -11,22 +11,9 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-// MuxerVersion is this muxer's term in the ADR-0004 cache key: a cached
-// output of it regenerates when this bumps. Bump it for a change to what
-// gets written around unchanged encoded packets, which is the one kind of
-// change no encoder or DSP version can notice.
-//
-// ogg-mux-2: the FLAC mapping stamps the run's projected length into
-// STREAMINFO instead of passing the source's total through, and a seekable
-// destination is patched at End. It is one constant for the whole muxer, so
-// every cached Ogg-Opus and Ogg-Vorbis output regenerates too although its
-// bytes do not change, which ADR-0004 accepts: over-keying costs a
-// regeneration, under-keying serves a wrong file.
-//
-// ogg-mux-3: a packet too large for one page continues onto the next, where
-// it used to write a page no reader could parse, and the FLAC mapping numbers
-// its frames from 0, so a copy of a stream that starts past frame 0 changes
-// bytes.
+// MuxerVersion is this muxer's term in the ADR-0004 cache key. Bump it for a
+// change to what gets written around unchanged encoded packets, which no
+// encoder or DSP version can notice.
 const MuxerVersion = "ogg-mux-3"
 
 // Muxer writes an Ogg stream: header pages (identification, comment), then

@@ -493,6 +493,32 @@ func TestStreamTimelineMatchesTheMergeJob(t *testing.T) {
 	}
 }
 
+// TestAnUnknownFormatOrContainerIsRefusedBeforeResolving: a format no row has,
+// or a container the format has no form for, is refused on a timeline stream
+// and on every HLS path before any source resolves, so neither a member
+// changed since the mint (410) nor a missing source (404) can hide it.
+func TestAnUnknownFormatOrContainerIsRefusedBeforeResolving(t *testing.T) {
+	env, refs := timelineEnv(t)
+	tl := mintTimeline(t, env, refs)
+	if err := os.WriteFile(memberFile(env, refs[1]), rampWAV(t, 48000, 2, 96000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wantRefusal(t, env.get(t, tlStream(tl.Tl, "nosuch"), nil),
+		http.StatusUnsupportedMediaType, waxerr.CodeUnsupportedFormat, `unsupported output format "nosuch"`)
+	wantRefusal(t, env.get(t, tlStream(tl.Tl, "flac")+"&container=webm", nil),
+		http.StatusBadRequest, waxerr.CodeInvalidRequest, `flac container "webm"`)
+	desc := base64.RawURLEncoding.EncodeToString([]byte(`{"ver":1,"tl":"` + tl.Tl + `","format":"nosuch","gain":"off"}`))
+	wantRefusal(t, env.get(t, "/hls/media.m3u8?v="+desc, nil),
+		http.StatusUnsupportedMediaType, waxerr.CodeUnsupportedFormat, `unsupported output format "nosuch"`)
+	missing := base64.RawURLEncoding.EncodeToString([]byte(`{"ver":1,"src":"lib/nosuch.wav","id":"1-1","format":"nosuch"}`))
+	wantRefusal(t, env.get(t, "/hls/media.m3u8?v="+missing, nil),
+		http.StatusUnsupportedMediaType, waxerr.CodeUnsupportedFormat, `unsupported output format "nosuch"`)
+	wantRefusal(t, env.get(t, "/hls/master.m3u8?src=lib/nosuch.wav&format=nosuch", nil),
+		http.StatusUnsupportedMediaType, waxerr.CodeUnsupportedFormat, `unsupported output format "nosuch"`)
+	wantRefusal(t, env.postJSON(t, "/sign", `{"path":"/hls/master.m3u8","params":{"src":"lib/nosuch.wav","format":"nosuch"}}`),
+		http.StatusUnsupportedMediaType, waxerr.CodeUnsupportedFormat, `unsupported output format "nosuch"`)
+}
+
 // wantRefusal asserts an error envelope whose message contains want, which is
 // what tells a named refusal from the generic one it replaced.
 func wantRefusal(t *testing.T, resp *http.Response, status int, code waxerr.Code, want string) {

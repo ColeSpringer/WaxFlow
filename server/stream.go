@@ -225,7 +225,7 @@ type pipeline struct {
 // captures values, never req.src: the run outlives the request's handle.
 func (s *Server) sourcePipeline(req *streamRequest) pipeline {
 	ref, id, hint := req.p.src, req.src.ID, req.src.Ext
-	opts, sp, r, grid, cutTrack := req.opts, req.p.span, req.rung(), req.cutGrid, req.cutTrack
+	opts, tags, sp, r, grid, cutTrack := req.opts, req.tags, req.p.span, req.rung(), req.cutGrid, req.cutTrack
 	return pipeline{ref: ref, rung: r, run: func(ctx context.Context, dst io.Writer) (*waxflow.TranscodeResult, error) {
 		// The pipeline owns its own source handle; the request's closes
 		// with the handler.
@@ -237,7 +237,7 @@ func (s *Server) sourcePipeline(req *streamRequest) pipeline {
 		if src.ID != id {
 			return nil, waxerr.New(waxerr.CodeSourceChanged, "source changed while starting the pipeline")
 		}
-		return s.transcodeSpan(ctx, src, hint, dst, opts, sp, r, grid, cutTrack)
+		return s.transcodeSpan(ctx, src, hint, dst, opts, tags, sp, r, grid, cutTrack)
 	}}
 }
 
@@ -361,11 +361,12 @@ func rungName(r rung) string {
 // arithmetic that served t= on a whole file serves t= inside a virtual
 // track with no special case.
 func (s *Server) transcodeSpan(ctx context.Context, src *source.File, hint string, dst io.Writer,
-	opts waxflow.TranscodeOptions, sp span, r rung, grid int, cutTrack container.Track) (*waxflow.TranscodeResult, error) {
+	opts waxflow.TranscodeOptions, tags []container.Tag, sp span, r rung, grid int, cutTrack container.Track) (*waxflow.TranscodeResult, error) {
+	run := waxflow.WithTags(tags)
 	switch r {
 	case rungRemux:
 		s.met.Remuxes.Add(1)
-		return s.eng.Remux(ctx, src, hint, dst, opts)
+		return s.eng.Remux(ctx, src, hint, dst, opts, run)
 	case rungCut:
 		// The single-window progressive cut: the span is one [from, to) range,
 		// so the run is always one Span. grid and cutTrack were measured at
@@ -373,7 +374,7 @@ func (s *Server) transcodeSpan(ctx context.Context, src *source.File, hint strin
 		// length its init segment writes are the keyed ones.
 		s.met.Cuts.Add(1)
 		return s.eng.CutStream(ctx, src, hint, dst, opts,
-			[]waxflow.Span{{From: sp.from, To: sp.end()}}, grid, cutTrack)
+			[]waxflow.Span{{From: sp.from, To: sp.end()}}, grid, cutTrack, run)
 	}
 	if !sp.narrowed() {
 		// The plan's measure is not pushed onto the run here, and the asymmetry
@@ -394,7 +395,7 @@ func (s *Server) transcodeSpan(ctx context.Context, src *source.File, hint strin
 		// advisory source's streamed output carries a placeholder size rather
 		// than an exact one; X-Content-Duration still advertises the measure,
 		// and the body still holds what the source holds.
-		return s.eng.Transcode(ctx, src, hint, dst, opts)
+		return s.eng.Transcode(ctx, src, hint, dst, opts, run)
 	}
 	// The plan validated the window against the measured total (prepareSource
 	// measures on the span branch), so the run slices against the same number
@@ -414,7 +415,7 @@ func (s *Server) transcodeSpan(ctx context.Context, src *source.File, hint strin
 		return nil, err
 	}
 	defer sl.Close()
-	return s.eng.TranscodeMedia(ctx, sl, dst, opts)
+	return s.eng.TranscodeMedia(ctx, sl, dst, opts, run)
 }
 
 // serveDirect is ladder rung 1: the original bytes with full range
@@ -587,6 +588,54 @@ func (c *idxCache) Drop(src container.Source) {
 	c.store.Drop(identityString(f.Ref, f.ID))
 }
 
+// queryRulesOutDirectPlay reports whether the query alone asks for bytes the
+// source cannot hold whatever it is, so the original file is never the answer.
+// The sign reads it too, to refuse before resolving what playback would.
+func queryRulesOutDirectPlay(p *streamParams) bool {
+	switch {
+	case p.span.narrowed():
+		// A span is the same statement as t=: the request is for a stream
+		// whose timeline is not the file's. Note this cannot be folded into
+		// directPlayable's t= check, and the trap is the same asymmetry the
+		// dynamics clause below exists for: a span that only trims the end
+		// leaves from at 0, so it would pass every other clause and
+		// direct-play the whole file, delivering the entire rip for a
+		// request that asked for one track of it.
+		return true
+	case p.bitrate != 0:
+		return true // bitrate/q asks for a lossy re-encode, not the original
+	case p.hev2:
+		// The same species as bitrate: hev2 asks for a specific encode, so
+		// the original bytes are never the answer. Falling through also
+		// lets planTranscode's he-aac-only refusal fire; without this
+		// clause a direct-playable source served its own bytes with the
+		// flag silently ignored.
+		return true
+	case p.container != "":
+		// A container override names a wrapper other than the one the format
+		// delivers by default, and direct play delivers the file in the wrapper
+		// it already has, so an override is always a request for bytes this rung
+		// does not hold. It cannot be folded into directPlayable's format
+		// clause: that one matches an output format name against the *input*
+		// container's name, and the two namespaces meet only where the source
+		// already is what was asked for, which says nothing about the
+		// wrapper. Without this
+		// clause, format=flac&container=mka on a FLAC source direct-played the
+		// native .flac file and ignored the override entirely. Rung 2 is what
+		// honors an override without re-encoding.
+		return true
+	case p.dynamics != gain.PresetOff:
+		// Note the asymmetry with the gain check in directPlayable, which is
+		// what makes this easy to miss: gain=track on an untagged file
+		// resolves to 0 dB and direct-plays correctly, because 0 dB is a
+		// genuine no-op. A dynamics preset has no no-op state. Without this
+		// clause a dynamics=voice request on a format-matching source would
+		// serve the original bytes with no compression at all.
+		return true
+	}
+	return false
+}
+
 // directPlayable decides ladder rung 1: the source itself satisfies the
 // request (codec allowed, bitrate under the cap, container acceptable)
 // and no parameter transforms audio.
@@ -601,35 +650,7 @@ func directPlayable(req *streamRequest) bool {
 	switch {
 	case req.from > 0:
 		return false // t= means a transcode timeline
-	case req.p.span.narrowed():
-		// A span is the same statement as t=: the request is for a stream
-		// whose timeline is not the file's. Note this cannot be folded into
-		// the check above, and the trap is the same asymmetry the dynamics
-		// clause below exists for: a span that only trims the end leaves
-		// from at 0, so it would pass every clause here and direct-play the
-		// whole file, delivering the entire rip for a request that asked
-		// for one track of it.
-		return false
-	case p.bitrate != 0:
-		return false // bitrate/q asks for a lossy re-encode, not the original
-	case p.hev2:
-		// The same species as bitrate: hev2 asks for a specific encode, so
-		// the original bytes are never the answer. Falling through also
-		// lets planTranscode's he-aac-only refusal fire; without this
-		// clause a direct-playable source served its own bytes with the
-		// flag silently ignored.
-		return false
-	case p.container != "":
-		// A container override names a wrapper other than the one the format
-		// delivers by default, and direct play delivers the file in the wrapper
-		// it already has, so an override is always a request for bytes this rung
-		// does not hold. It cannot be folded into the format clause below: that
-		// one matches an output format name against the *input* container's
-		// name, and the two namespaces meet only where the source already is
-		// what was asked for, which says nothing about the wrapper. Without this
-		// clause, format=flac&container=mka on a FLAC source direct-played the
-		// native .flac file and ignored the override entirely. Rung 2 is what
-		// honors an override without re-encoding.
+	case queryRulesOutDirectPlay(p):
 		return false
 	case p.format != "auto" && p.format != req.info.Container:
 		return false
@@ -646,14 +667,6 @@ func directPlayable(req *streamRequest) bool {
 	case p.bits != 0 && (track.Fmt.Type != audio.Int || p.bits != track.Fmt.BitDepth):
 		return false
 	case req.gainDB != 0:
-		return false
-	case p.dynamics != gain.PresetOff:
-		// Note the asymmetry with the gain check above, which is what makes
-		// this easy to miss: gain=track on an untagged file resolves to 0 dB
-		// and direct-plays correctly, because 0 dB is a genuine no-op. A
-		// dynamics preset has no no-op state. Without this clause a
-		// dynamics=voice request on a format-matching source would serve the
-		// original bytes with no compression at all.
 		return false
 	}
 	if p.maxBitRate > 0 {

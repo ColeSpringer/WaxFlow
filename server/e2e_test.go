@@ -657,7 +657,7 @@ func TestStreamALACRejectsBitrate(t *testing.T) {
 func TestStreamTranscodeMP3(t *testing.T) {
 	env := newTestEnv(t, nil)
 	want := engineReference(t, filepath.Join(env.root, "sine.wav"),
-		waxflow.TranscodeOptions{Format: "mp3", MP3Bitrate: 128000})
+		waxflow.TranscodeOptions{Format: "mp3", Bitrate: 128000})
 
 	resp := liveGet(t, env, "/stream?src=lib/sine.wav&format=mp3&bitrate=128")
 	first := readBody(t, resp)
@@ -714,7 +714,7 @@ func TestStreamTranscodeMP3(t *testing.T) {
 func TestStreamTranscodeOpus(t *testing.T) {
 	env := newTestEnv(t, nil)
 	want := engineReference(t, filepath.Join(env.root, "sine.wav"),
-		waxflow.TranscodeOptions{Format: "opus", OpusBitrate: 96000})
+		waxflow.TranscodeOptions{Format: "opus", Bitrate: 96000})
 
 	resp := liveGet(t, env, "/stream?src=lib/sine.wav&format=opus")
 	first := readBody(t, resp)
@@ -1474,11 +1474,10 @@ func TestProbeReadsContainerTagsWithoutAMapper(t *testing.T) {
 	}
 	var arty bytes.Buffer
 	if _, err := waxflow.New().Transcode(t.Context(), container.BytesSource(raw), "wav", &arty,
-		waxflow.TranscodeOptions{
-			Format: "aac",
-			Tags:   []container.Tag{{Key: "TITLE", Value: "Arty"}},
-			Art:    &container.Picture{MIME: "image/jpeg", Data: []byte("\xff\xd8\xff\xe0not really a jpeg")},
-		}); err != nil {
+		waxflow.TranscodeOptions{Format: "aac"},
+		waxflow.WithTags([]container.Tag{{Key: "TITLE", Value: "Arty"}}),
+		waxflow.WithArt(&container.Picture{MIME: "image/jpeg", Data: []byte("\xff\xd8\xff\xe0not really a jpeg")}),
+	); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(arty.Bytes(), []byte("covr")) {
@@ -1849,6 +1848,51 @@ func TestStreamEmbedsContainerTagsWithoutAMapper(t *testing.T) {
 	}
 }
 
+// TestStreamTagsReachEveryRung holds each body /stream runs to the source's
+// tags: the remux, the cut, and a transcode with and without a span each take
+// a separate engine call, and one that drops the tags still streams.
+func TestStreamTagsReachEveryRung(t *testing.T) {
+	env := newTestEnv(t, nil)
+	raw, err := os.ReadFile(filepath.Join(env.root, "ramp.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const title = "Every Rung Title"
+	var src bytes.Buffer
+	if _, err := waxflow.New().Transcode(context.Background(), container.BytesSource(raw), "wav", &src,
+		waxflow.TranscodeOptions{Format: "aac"}, waxflow.WithTags([]container.Tag{{Key: "TITLE", Value: title}})); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.root, "titled.m4a"), src.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	met := env.srv.Metrics()
+	for _, tc := range []struct {
+		name, query   string
+		remuxes, cuts uint64
+	}{
+		{"remux", "format=aac&container=fragmented", 1, 0},
+		{"cut", "format=aac&from=48000&to=144000", 0, 1},
+		{"transcode", "format=opus", 0, 0},
+		{"spanned transcode", "format=opus&from=48000&to=144000", 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			remuxes, cuts := met.Remuxes.Load(), met.Cuts.Load()
+			resp := env.get(t, "/stream?src=lib/titled.m4a&"+tc.query, nil)
+			body := readBody(t, resp)
+			if resp.StatusCode != 200 {
+				t.Fatalf("GET /stream = %d: %s", resp.StatusCode, body)
+			}
+			if r, c := met.Remuxes.Load()-remuxes, met.Cuts.Load()-cuts; r != tc.remuxes || c != tc.cuts {
+				t.Fatalf("ran %d remuxes and %d cuts, want %d and %d", r, c, tc.remuxes, tc.cuts)
+			}
+			if !bytes.Contains(body, []byte(title)) {
+				t.Error("the stream does not carry the source's TITLE")
+			}
+		})
+	}
+}
+
 // TestHLSResolvesGainFromContainerTags pins that both delivery surfaces
 // resolve tag-based gain from the same tags. /stream folded the container's in
 // and the HLS path did not, so a source whose ReplayGain only the demuxer can
@@ -1864,10 +1908,10 @@ func TestHLSResolvesGainFromContainerTags(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := waxflow.New().Transcode(t.Context(), container.BytesSource(raw), "wav", &buf,
-		waxflow.TranscodeOptions{Format: "aac", Tags: []container.Tag{
+		waxflow.TranscodeOptions{Format: "aac"}, waxflow.WithTags([]container.Tag{
 			{Key: "REPLAYGAIN_TRACK_GAIN", Value: "-06.00 dB"},
 			{Key: "REPLAYGAIN_TRACK_PEAK", Value: "0.500000"},
-		}}); err != nil {
+		})); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(env.root, "gained.m4a"), buf.Bytes(), 0o644); err != nil {
@@ -1923,10 +1967,10 @@ func TestProbeFallbackExcludesLyrics(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := waxflow.New().Transcode(t.Context(), container.BytesSource(raw), "wav", &buf,
-		waxflow.TranscodeOptions{Format: "aac", Tags: []container.Tag{
+		waxflow.TranscodeOptions{Format: "aac"}, waxflow.WithTags([]container.Tag{
 			{Key: "TITLE", Value: "Sung"},
 			{Key: "LYRICS", Value: strings.Repeat("a line of the sheet\n", 200)},
-		}}); err != nil {
+		})); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(env.root, "sung.m4a"), buf.Bytes(), 0o644); err != nil {

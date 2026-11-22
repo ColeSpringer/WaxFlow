@@ -148,6 +148,34 @@ func (d Descriptor) Encode() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
+// MaxKbps is the largest kbit/s a descriptor names: waxflow.MaxBitrate over
+// 1000, kept here so the descriptor need not import the engine. A server test
+// holds the two equal.
+const MaxKbps = math.MaxInt32 / 1000
+
+// CheckBitrate refuses a variant bit rate above MaxKbps. A negative or zero
+// one is each caller's own rule: 0 is the descriptor's encoder default.
+func CheckBitrate(kbps int) error {
+	if kbps > MaxKbps {
+		return waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("bitrate %d: want at most %d kbit/s", kbps, MaxKbps))
+	}
+	return nil
+}
+
+// CheckRung refuses a ladder rung that is not a positive kbit/s value up to
+// MaxKbps, in the ladder's words.
+func CheckRung(kbps int) error {
+	switch {
+	case kbps <= 0:
+		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("ladder bitrate %d is not positive", kbps))
+	case kbps > MaxKbps:
+		return waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("ladder bitrate %d: want at most %d kbit/s", kbps, MaxKbps))
+	}
+	return nil
+}
+
 // Variant returns the single-variant descriptor for one ladder rung: the
 // master descriptor with Bitrate pinned and the ladder dropped.
 func (d Descriptor) Variant(bitrate int) Descriptor {
@@ -256,9 +284,12 @@ func DecodeDescriptor(s string) (Descriptor, error) {
 		// it did nothing.
 		return bad("names a src and a crossfade; a crossfade blends a timeline's seams")
 	}
+	if err := CheckBitrate(d.Bitrate); err != nil {
+		return bad("%s", waxerr.Message(err))
+	}
 	for _, b := range d.Bitrates {
-		if b <= 0 {
-			return bad("ladder bitrate %d is not positive", b)
+		if err := CheckRung(b); err != nil {
+			return bad("%s", waxerr.Message(err))
 		}
 	}
 	if len(d.Bitrates) > 0 && d.Bitrate != 0 {

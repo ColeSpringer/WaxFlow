@@ -380,7 +380,7 @@ func TestSegmentedRestartOpus(t *testing.T) {
 	const frames = 100000
 	raw, _ := makeWAV(t, pcm.Config{Bits: 16}, 2, frames, 23)
 	e := waxflow.New()
-	opts := waxflow.TranscodeOptions{Format: "opus", OpusBitrate: 64000}
+	opts := waxflow.TranscodeOptions{Format: "opus", Bitrate: 64000}
 	segSamples := 48000 // 50 frames of 960: 1 s segments
 
 	full, _ := collectSegments(t, e, raw, opts, segSamples, 0)

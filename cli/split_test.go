@@ -708,13 +708,61 @@ func TestSplitDryRunPrintsTheMeasuredEnd(t *testing.T) {
 	}
 }
 
+// TestSplitDryRunRefusesAContainerTheFormatHasNoFormFor: the pair is checked
+// before any piece is named, so a dry run cannot list names a real run would
+// refuse to write.
+func TestSplitDryRunRefusesAContainerTheFormatHasNoFormFor(t *testing.T) {
+	dir := t.TempDir()
+	wav, sheet, _ := cueRip(t, dir, []int{0, 30 * 75})
+	code, stdout, errOut := run(t, "split", wav, filepath.Join(dir, "out"), "--cue", sheet,
+		"--format", "wav", "--container", "webm", "--dry-run")
+	if code == 0 {
+		t.Fatalf("exit = 0, want a refusal; stdout:\n%s", stdout)
+	}
+	if !strings.Contains(errOut, `wav container "webm": want mka`) {
+		t.Errorf("stderr = %q, want the container refusal", errOut)
+	}
+	if strings.Contains(stdout, ".webm") {
+		t.Errorf("dry run named pieces for a refused pair:\n%s", stdout)
+	}
+}
+
+// TestSplitDryRunRefusesALevelTheRunWould: the pre-plan carries every option
+// the pieces are written with, so a dry run cannot list names for a level the
+// run would refuse.
+func TestSplitDryRunRefusesALevelTheRunWould(t *testing.T) {
+	dir := t.TempDir()
+	wav, sheet, _ := cueRip(t, dir, []int{0, 30 * 75})
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"wavpack", []string{"--format", "wavpack", "--wavpack-level", "9"}, "WavPack level 9"},
+		{"flac in mka", []string{"--format", "flac", "--container", "mka", "--flac-level", "99"}, "--flac-level 99: want 0 to 8"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"split", wav, filepath.Join(dir, "out"), "--cue", sheet, "--dry-run"}, tc.args...)
+			code, stdout, errOut := run(t, args...)
+			if code == 0 {
+				t.Fatalf("exit = 0, want a refusal; stdout:\n%s", stdout)
+			}
+			if !strings.Contains(errOut, tc.want) {
+				t.Errorf("stderr = %q, want it to mention %q", errOut, tc.want)
+			}
+			if strings.Contains(stdout, "Track 1") {
+				t.Errorf("dry run named pieces for a refused level:\n%s", stdout)
+			}
+		})
+	}
+}
+
 // TestSplitDefaultsToTheEncoderDefaultLevel pins the --flac-level default.
 //
 // The flag's 0 has to mean level 0, so it maps to the FLACLevelFastest
-// sentinel (a plain 0 in the options selects the encoder default). That remap
-// only leaves the default reachable if the flag itself defaults to something
-// other than 0: with a 0 default, a bare split writes the least compressed
-// FLAC there is and level 5 cannot be asked for at all.
+// sentinel (a plain 0 in the options selects the encoder default). An unset
+// flag sends the plain 0, so a bare split must still write the encoder's
+// default level and never level 0.
 //
 // The output bytes are the signal, compared against both levels written
 // explicitly: the encoder is deterministic, so a bare piece is byte-identical

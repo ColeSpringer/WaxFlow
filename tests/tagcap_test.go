@@ -58,10 +58,10 @@ func TestOversizedTagIsRefused(t *testing.T) {
 			}
 			defer out.Close()
 			_, err = waxflow.New().Transcode(context.Background(), container.BytesSource(raw), "wav", out,
-				waxflow.TranscodeOptions{Format: row.format, Tags: []container.Tag{
+				waxflow.TranscodeOptions{Format: row.format}, waxflow.WithTags([]container.Tag{
 					{Key: "TITLE", Value: "Kept"},
 					{Key: row.key, Value: big},
-				}})
+				}))
 			if err == nil {
 				t.Fatal("the transcode succeeded over a tag the output cannot hold")
 			}
@@ -108,10 +108,10 @@ func TestOrdinaryTagsStillEmbed(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, err = waxflow.New().Transcode(context.Background(), container.BytesSource(raw), "wav", out,
-				waxflow.TranscodeOptions{Format: row.format, Tags: []container.Tag{
+				waxflow.TranscodeOptions{Format: row.format}, waxflow.WithTags([]container.Tag{
 					{Key: "TITLE", Value: "A Title"},
 					{Key: "ARTIST", Value: "WaxFlow"},
-				}})
+				}))
 			out.Close()
 			if err != nil {
 				t.Fatalf("transcode with ordinary tags: %v", err)
@@ -148,10 +148,10 @@ func TestForwardedSourceTagsStillTranscode(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = waxflow.New().Transcode(context.Background(), container.BytesSource(raw), "wav", f,
-		waxflow.TranscodeOptions{Format: "aac", Tags: []container.Tag{
+		waxflow.TranscodeOptions{Format: "aac"}, waxflow.WithTags([]container.Tag{
 			{Key: "TITLE", Value: "Sung"},
 			{Key: "LYRICS", Value: big},
-		}})
+		}))
 	f.Close()
 	if err != nil {
 		t.Fatalf("MP4 refused a tag it bounds nothing on: %v", err)
@@ -180,7 +180,7 @@ func TestForwardedSourceTagsStillTranscode(t *testing.T) {
 			}
 			defer out.Close()
 			if _, err := waxflow.New().Transcode(context.Background(), container.BytesSource(raw), "wav", out,
-				waxflow.TranscodeOptions{Format: row.format, Tags: forwarded}); err != nil {
+				waxflow.TranscodeOptions{Format: row.format}, waxflow.WithTags(forwarded)); err != nil {
 				t.Errorf("a source carrying an oversized tag no longer transcodes: %v", err)
 			}
 		})

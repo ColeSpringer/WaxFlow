@@ -20,20 +20,11 @@ import (
 	"github.com/colespringer/waxflow/container/wv"
 )
 
-// containerCandidates is every Container override any row accepts. A row that
-// refuses one is skipped, so the list may be a superset; what it may not be
-// is short, since a name missing here is a muxer this test never reaches.
-var containerCandidates = []string{
-	"", "mka", "webm", ContainerOgg, "adts", ContainerProgressive, ContainerFragmented,
-}
-
 // muxerVersionByType maps the muxer a row constructs to the term the cache key
 // should carry for it, keyed by Go type rather than by container name.
 //
-// The independent derivation is the whole point. muxerVersion answers from the
-// resolved container name, which is what row.mux branches on, so a table
-// keyed the same way would agree with it by construction and catch nothing.
-// This one is keyed on the object that actually wrote the bytes.
+// The independent derivation is the whole point: a form's version is declared
+// beside its mux, and this is keyed on the object that actually wrote the bytes.
 var muxerVersionByType = map[string]string{
 	"*riff.Muxer":           riff.MuxerVersion,
 	"*aiff.Muxer":           aiff.MuxerVersion,
@@ -49,52 +40,37 @@ var muxerVersionByType = map[string]string{
 }
 
 // TestMuxerVersionNamesTheMuxerThatRuns holds ADR-0004's container term to the
-// muxer it is supposed to describe, for every (row, container) pair the table
-// admits.
-//
-// Two things could go wrong and neither is visible from one side alone. A row
-// whose mux hook gains a branch (a new wrapper for an existing format) would
-// leave muxerVersion answering the old container's term, so two different
-// containers would share a cache key. And a name accepted by a row's container
-// hook but missing from muxerVersion would fail every plan for it, which is
-// loud but only if something plans it.
+// muxer it is supposed to describe, for every form of every row: a form whose
+// mux gains a branch, or whose version names another muxer, would key two
+// different containers alike.
 func TestMuxerVersionNamesTheMuxerThatRuns(t *testing.T) {
 	pairs := 0
 	for i := range outputs {
 		row := &outputs[i]
-		for _, name := range containerCandidates {
-			containerName, _, err := resolveContainer(row, name)
+		for j := range row.forms {
+			f := &row.forms[j]
+			opts := TranscodeOptions{Format: row.name, Container: f.name}
+			mux, err := f.mux(container.Track{Fmt: audio.Format{Rate: 44100, Channels: 2, BitDepth: 16}}, opts, runConfig{}, nil, io.Discard)
 			if err != nil {
-				continue
-			}
-			opts := TranscodeOptions{Format: row.name, Container: name}
-			mux, err := row.mux(container.Track{Fmt: audio.Format{Rate: 44100, Channels: 2, BitDepth: 16}}, opts, nil, io.Discard)
-			if err != nil {
-				t.Errorf("%s/%q: mux: %v", row.name, name, err)
+				t.Errorf("%s/%q: mux: %v", row.name, f.name, err)
 				continue
 			}
 			typ := fmt.Sprintf("%T", mux)
 			want, ok := muxerVersionByType[typ]
 			if !ok {
-				t.Errorf("%s/%q builds %s, which muxerVersionByType does not name", row.name, name, typ)
+				t.Errorf("%s/%q builds %s, which muxerVersionByType does not name", row.name, f.name, typ)
 				continue
 			}
-			got, err := muxerVersion(containerName)
-			if err != nil {
-				t.Errorf("%s/%q resolves to container %q: muxerVersion: %v", row.name, name, containerName, err)
-				continue
-			}
-			if got != want {
-				t.Errorf("%s/%q (container %q) muxes through %s but keys on %q, want %q",
-					row.name, name, containerName, typ, got, want)
+			if f.version != want {
+				t.Errorf("%s/%q muxes through %s but keys on %q, want %q", row.name, f.name, typ, f.version, want)
 			}
 			pairs++
 		}
 	}
-	// Every row has at least its default container, so a pass over nothing
-	// means the enumeration broke rather than that the table is clean.
+	// Every row has at least its default form, so a pass over nothing means
+	// the enumeration broke rather than that the table is clean.
 	if pairs < len(outputs) {
-		t.Errorf("checked %d (row, container) pairs for %d rows", pairs, len(outputs))
+		t.Errorf("checked %d (row, form) pairs for %d rows", pairs, len(outputs))
 	}
 }
 

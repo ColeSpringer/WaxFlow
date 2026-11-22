@@ -96,7 +96,7 @@ func TestHLSMintEmptyHEv2(t *testing.T) {
 	}
 }
 
-// TestHLSAACBitrateLadder pins planHLSVariant's AACBitrate wiring: an
+// TestHLSAACBitrateLadder pins planHLSVariant's Bitrate wiring: an
 // aac master with a bitrate ladder must produce rungs that actually
 // encode at their advertised rates. Before the fix the field was never
 // set from the descriptor, so every rung encoded at the row default and

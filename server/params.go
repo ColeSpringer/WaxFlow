@@ -1,9 +1,11 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -125,22 +127,65 @@ func parseDynamics(v string) (gain.Preset, error) {
 		fmt.Sprintf("dynamics %q: want %s", v, strings.Join(dynamicsSpellings(), ", ")))
 }
 
-// checkHEv2Format is the hev2 policy, shared by /stream, the HLS
-// descriptor, and jobs so the three surfaces cannot drift: the flag
-// selects a coding technology only the he-aac row has, and any other
-// KNOWN format refuses it rather than silently encoding v1 under a v2
-// request. An unregistered name falls through to the plan's own
-// unsupported-format error, the LossyFormat pattern: refusing here
-// would blame hev2 for a format that does not exist at all.
-func checkHEv2Format(hev2 bool, format string) error {
-	if !hev2 || format == "he-aac" {
-		return nil
+// maxKbps is the largest kbit/s value a request may name, refused before it is
+// multiplied to bits per second.
+const maxKbps = waxflow.MaxBitrate / 1000
+
+// knobParams are the parameters /stream, HLS and jobs spell the engine's
+// knobs with; a knob none of them sets has no entry.
+var knobParams = map[waxflow.Knob]string{
+	waxflow.KnobBitrate:      "bitrate",
+	waxflow.KnobHEAACv2:      "hev2",
+	waxflow.KnobFLACLevel:    "flacLevel",
+	waxflow.KnobWavPackLevel: "wavpackLevel",
+	waxflow.KnobAPELevel:     "apeLevel",
+}
+
+// knobWording is how one surface words a knob refusal.
+type knobWording struct {
+	bitrate string // the bit rate's parameter, or its two spelled "a/b"
+	verb    string // "applies", or "apply" for two parameters
+	// formats are the ones the surface produces; nil is every format.
+	formats []string
+}
+
+// The surfaces' wordings: /stream takes bitrate or q, an HLS mint bitrate or
+// bitrates and only the segmented formats, a job bitrate.
+var (
+	streamKnobs = knobWording{bitrate: "bitrate/q", verb: "apply"}
+	hlsKnobs    = knobWording{bitrate: "bitrate/bitrates", verb: "apply", formats: waxflow.SegmentedFormats()}
+	jobKnobs    = knobWording{bitrate: "bitrate", verb: "applies"}
+)
+
+// knobRefusal words the engine's *KnobError in a surface's parameter names,
+// naming the parameter, the format and the formats that take it among those
+// the surface produces. Any other error passes through.
+func knobRefusal(err error, w knobWording) error {
+	ke, ok := errors.AsType[*waxflow.KnobError](err)
+	if !ok {
+		return err
 	}
-	if _, known := waxflow.LossyFormat(format); !known {
-		return nil
+	param, ok := knobParams[ke.Knob]
+	if !ok {
+		return err
+	}
+	verb := "applies"
+	if ke.Knob == waxflow.KnobBitrate {
+		param, verb = w.bitrate, w.verb
+	}
+	var takers []string
+	for _, f := range ke.Takers {
+		if w.formats == nil || slices.Contains(w.formats, f) {
+			takers = append(takers, f)
+		}
+	}
+	list := strings.Join(takers, ", ")
+	if ke.Lossless {
+		return waxerr.New(waxerr.CodeUnsupportedFormat,
+			fmt.Sprintf("%s %s to lossy output (%s); %s is lossless", param, verb, list, ke.Format))
 	}
 	return waxerr.New(waxerr.CodeUnsupportedFormat,
-		fmt.Sprintf("hev2 applies to he-aac output; this request names %s", format))
+		fmt.Sprintf("%s %s to %s output; this request names %s", param, verb, list, ke.Format))
 }
 
 // maxSeekSeconds bounds t=. Beyond any real recording, and small enough
@@ -436,6 +481,9 @@ func parseStreamParams(q url.Values, defaultGain gainspec.Spec) (*streamParams, 
 			return bad("%s must be positive; omit it to keep the source's value", np.name)
 		}
 	}
+	if p.maxBitRate > maxKbps {
+		return bad("maxBitRate %d: want at most %d kbit/s", p.maxBitRate, maxKbps)
+	}
 	// track has its own message: 0 is a legal track, so it refuses at
 	// negative.
 	if q.Has("track") {
@@ -477,6 +525,9 @@ func parseStreamParams(q url.Values, defaultGain gainspec.Spec) (*streamParams, 
 		}
 		if p.bitrate <= 0 {
 			return bad("bitrate must be a positive kbit/s value")
+		}
+		if p.bitrate > maxKbps {
+			return bad("bitrate %d: want at most %d kbit/s", p.bitrate, maxKbps)
 		}
 	}
 	// hev2 is boolean; like the format check on bitrate, whether the
