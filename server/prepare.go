@@ -9,6 +9,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/meta"
+	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -210,7 +211,7 @@ func (s *Server) planTranscode(ctx context.Context, req *streamRequest) error {
 	if err := checkLivePlan(plan, req.p); err != nil {
 		return err
 	}
-	req.canonical = canonicalParams(plan, req.gainDB, req.p.dynamics, req.p.span, req.opts.HEAACv2, req.from)
+	req.canonical = canonicalParams(plan, req.gainDB, req.p.dynamics, req.p.span, req.opts.HEAACv2, req.from, req.opts.VorbisQuality)
 	// Keyed for every output, the few that embed no tags included (ADTS, WAV,
 	// Matroska): a term too many costs a re-encode, a term too few serves
 	// another mapping's tags.
@@ -221,31 +222,32 @@ func (s *Server) planTranscode(ctx context.Context, req *streamRequest) error {
 }
 
 // streamOptions maps a progressive request's parameters onto engine options,
-// resolving format=auto and refusing what the options alone rule out, a knob
-// the format does not take among them. Tags are left to the caller.
+// resolving format=auto, then q for that format, and refusing what the options
+// alone rule out, a knob the format does not take among them. Tags are left to
+// the caller.
 func (s *Server) streamOptions(p *streamParams, gainDB float64, from int64) (waxflow.TranscodeOptions, error) {
-	outFormat := p.format
-	if outFormat == "auto" {
-		outFormat = waxflow.DefaultLiveFormat()
+	shape := p.shape
+	if shape.Format == "auto" {
+		shape.Format = waxflow.DefaultLiveFormat()
 	}
-	opts := waxflow.TranscodeOptions{
-		Format:          outFormat,
-		Container:       p.container,
-		Rate:            p.rate,
-		Channels:        p.ch,
-		BitDepth:        p.bits,
-		GainDB:          gainDB,
-		Dynamics:        p.dynamics,
-		FromSample:      from,
-		ResampleProfile: s.profile,
-		Bitrate:         p.bitrate * 1000,
-		HEAACv2:         p.hev2,
+	if p.q != "" {
+		var err error
+		if shape.Bitrate, shape.VorbisQuality, err = outshape.Preset(shape.Format, p.q); err != nil {
+			// A container error comes before any knob refusal, q's included.
+			form := outshape.Params{Format: shape.Format, Container: shape.Container}
+			if cerr := form.Check(outshape.Stream); cerr != nil {
+				return waxflow.TranscodeOptions{}, cerr
+			}
+			return waxflow.TranscodeOptions{}, err
+		}
 	}
 	// The refusal also keeps the cache key's hev2 term honest: true only
 	// where it shaped the stream.
-	if err := opts.Check(); err != nil {
-		return waxflow.TranscodeOptions{}, knobRefusal(err, streamKnobs)
+	if err := shape.Check(outshape.Stream); err != nil {
+		return waxflow.TranscodeOptions{}, err
 	}
+	opts := shape.Options(gainDB, p.dynamics, s.profile)
+	opts.FromSample = from
 	return opts, nil
 }
 

@@ -1018,3 +1018,234 @@ On the wire and in the CLI:
   source resolves.
 - A CLI error whose message already starts with `waxflow: ` is printed
   once, not as `waxflow: waxflow: ...`.
+
+## Amendment (2026-11-22): one request shape
+
+The server's surfaces carry one output shape. `/stream` and the HLS mint
+read it through one parser, so a parameter they share is refused in the
+same words on both. They and a job map it onto engine options through one
+function and check it by one wire policy, and a knob the format does not
+take is refused in one sentence on every surface and by the CLI, each in
+its own names for the parameters. The CLI names each knob with one flag.
+
+For a Go caller:
+
+- `waxflow` gains `CheckKnobs(format, set)`, the knob rule `Check` applies:
+  `CodeUnsupportedFormat` wrapping a `*KnobError` for the lowest knob in
+  `set` the format does not take, the refusal `Check` gives an unregistered
+  format, and nil when the format takes them all. A bit in `set` that names
+  no knob is `CodeInvalidRequest` ("waxflow: Knob(4096) is not a knob"),
+  before the format is asked. `Check` calls it, so a boundary that knows
+  which knobs it was given, set or not, asks the engine rather than copying
+  its takers and its lossless rule.
+- The `Bitrate` doc says what the mp3 encoder does: a whole number of
+  kbit/s, clamped to the highest rate the layer holds at or below it. It
+  said an mp3 rate must be a legal Layer III rate, which nothing enforced.
+- `TranscodeOptions.Check` refuses a `VorbisQuality` off -1..10,
+  `CodeInvalidRequest` "waxflow: Vorbis quality 50 outside -1..10", after the
+  knob rule and beside the other ranges. The encoder refused it when a plan
+  built it, in its own words ("vorbis: quality 50 outside -1..10"), and still
+  does.
+- `client.JobRequest` gains `VorbisQuality`.
+- `waxflow` gains `RangeError`: `Check` refuses a level, Opus complexity, Opus
+  signal or Vorbis quality out of range as `CodeInvalidRequest` wrapping a
+  `*RangeError` holding the knob, the value as given, and what the knob takes
+  (`Min` and `Max`, or `Values`, with `Unwritten` for an APE level the format
+  decodes and the encoder does not write), so a boundary words it in its own
+  names as it does a `*KnobError`. `Want` spells what the knob takes ("-1 to
+  8", "auto, voice, or music"). `Error` gives the sentences `Check` gave,
+  word for word.
+
+On the wire:
+
+- The HLS mint refuses `crossfadeSeconds`, `segDur` and `bitrates` present
+  but empty, `400` on the keyed master form and on `POST /sign`, as `/stream`
+  refuses an empty `crossfadeSeconds`. The first two minted a URL that left
+  them out and the third was ignored. The refusal comes before the source
+  resolves and ahead of a knob or format refusal, so codes move on both
+  forms: `segDur=` on a missing source answers `400` where it answered
+  `404`, and `hev2=1&bitrates=` and `format=nosuch&segDur=` answer `400`
+  where they answered `415`.
+- `rate`, `ch`, `bits` and `bitrate` are refused in one sentence on both
+  surfaces: `rate "abc": want a positive integer` for any value that is not
+  a positive integer, where `/stream` said `rate "abc": want an integer`,
+  `rate must be positive; omit it to keep the source's value` and
+  `bitrate must be a positive kbit/s value`. The mint's empty `bitrate`
+  says `omit it to take the format's default`, as `/stream`'s did, where it
+  said `omit it to keep the source's value`.
+- Both surfaces refuse in one order: `rate`, `ch`, `bits` and `bitrate`,
+  each empty and then not a positive integer, then `q`, then `hev2`, then
+  the `bits` and kbit/s bounds. `rate=&ch=abc` answers `rate` where
+  `/stream` answered `ch`, and `format=mp3&bitrate=0&q=low` answers the
+  bitrate where `/stream` answered that `q` and `bitrate` are exclusive.
+- On `/stream` that order runs after `src`, `tl` and `crossfadeSeconds` and
+  ahead of `container requires an explicit format`, `track` and `maxBitRate`.
+  What answered ahead of the shared parameters and no longer does: the
+  container rule ahead of all of them (`container=adts&rate=abc` answers
+  `rate`); a non-integer `track` or `maxBitRate` ahead of an empty or
+  non-positive `rate`, `ch` or `bits` (`rate=0&track=x` answers `rate`); and
+  every `track` and `maxBitRate` refusal ahead of `bitrate`, `q`, `hev2` and
+  the `bits` bound (`track=-1&bitrate=0` answers `bitrate`, `bits=8&track=x`
+  and `bits=8&maxBitRate=0` answer `bits`). A non-integer `rate`, `ch` or
+  `bits` already answered first (`rate=abc&track=x` did not move). The `bits`
+  bound now follows `bitrate`'s empty and integer checks, `q` and `hev2`, so
+  `bits=8&bitrate=`, `bits=8&bitrate=abc` and `bits=8&bitrate=0` answer
+  `bitrate` and `bits=8&q=huge` answers `q`; and the kbit/s bound follows
+  `hev2` (`bitrate=2147484&hev2=` answers `hev2`). An empty `maxBitRate`
+  says `omit it for no cap`, where it said `omit it to keep the source's
+  value`, which a cap does not have. A `maxBitRate` that is not a positive
+  integer reads as `bitrate` does, `maxBitRate "0": want a positive
+  integer`, where it read `maxBitRate "abc": want an integer` and
+  `maxBitRate must be positive; omit it to keep the source's value`.
+- On the mint the order comes before the span, `crossfadeSeconds`, `segDur`,
+  `bitrates`, `gain` and `dynamics`, where `bitrate`, `bits` and `rate` were
+  read first and `ch` and `hev2` after the span: `bitrate=abc&rate=abc`
+  answers `rate`, and `from=-1&hev2=` answers `hev2`. A `bitrate` above
+  2147483 answers after an empty `hev2` where it answered first.
+- The mint applies the `bits` bound when it parses, as `/stream` does:
+  `bits=20` answers `400` "bits 20: want 16 or 24" ahead of every later
+  parameter and before the source resolves, where it answered after them
+  as "hls: descriptor bits 20: want 16 or 24", or `404` for a missing
+  source. So `format=flac&bits=20&bitrate=128`, which answered `415` for
+  the knob since the amendment of 2026-11-21, answers `400` for the depth
+  again, and so does `format=nosuch&bits=20`, which answered `415` for the
+  format.
+- A `POST /jobs` body takes `vorbisQuality` for `transcode`, `merge` and
+  `split`; `vorbis` takes it and every other format answers `415`, and `analyze`
+  refuses it with `400`. A job's `bitrate` on `vorbis` reads "bitrate does not
+  apply to vorbis, which is quality-driven; use vorbisQuality", where it named
+  the formats that take a bit rate. A `vorbisQuality` off -1..10 is `400`
+  "vorbisQuality 50: want -1 to 10" before the source resolves. A
+  job document's `request` writes the same keys, `gain` and `loudness` now
+  after the shape's.
+- A job's negative `rate`, `ch` or `bitrate` names the field and its value
+  and says what 0 means there, "rate -1: want 0 for the source's value or a
+  positive integer" (for `bitrate`, "the format's default"), where each read
+  "rate, ch, and bitrate must be non-negative". The order did not move.
+- A JSON body (`POST /jobs`, `/probe`, `/sign` and `/hls/timeline`) holding
+  a value of the wrong type is refused by its key path and the type the key
+  wants, "request body: bitrate: want an integer", "request body: srcs.from:
+  want an integer", "request body: cuts: want an array of integers", where
+  it quoted encoding/json, Go struct and type names included ("request
+  body: json: cannot unmarshal string into Go struct field
+  jobRequest.bitrate of type int"). A number the key's type cannot hold is
+  named by its value, "request body: vorbisQuality: 1e400 is out of range",
+  as is an integer past the build's `int` on a 32-bit one, where encoding/json
+  wrote "cannot unmarshal number 1e400 into Go struct field ...". A number
+  written with a fraction or an exponent for an integer key still reads "want
+  an integer". Still `400`.
+- `q` on `/stream` and `POST /transcode` selects a Vorbis quality on
+  `vorbis`, `low` 2, `med` 4 and `high` 6, where it answered `415`; on a
+  format that takes a bit rate it names 96, 128 or 192 kbit/s as before. With
+  `hev2=1` on `vorbis` the refusal names `hev2`, where it named the bit rate.
+  The quality joins the progressive cache key's canonical string as
+  `&vq=<quality>` after `seek`, only when one is set, so no existing key
+  moves.
+- `/stream`, `POST /transcode` and `POST /sign` word a `bitrate` and a `q`
+  apart. A `bitrate` on a format that takes none reads "bitrate applies to lossy
+  output (opus, mp3, aac, he-aac); flac is lossless", where it read "bitrate/q
+  apply to ...", and on `vorbis` "bitrate does not apply to vorbis, which is
+  quality-driven; use q=low, med, or high", where it named the formats that take
+  a bit rate. A `q` on a format that takes neither a bit rate nor a quality
+  reads "q applies to lossy output (opus, vorbis, mp3, aac, he-aac); flac is
+  lossless", where it read "bitrate/q apply to lossy output (opus, mp3, aac,
+  he-aac); flac is lossless". Both stay `415`, and a container the format has no
+  form in is still refused first, `400`.
+- A stored job is held again, when it runs, to every rule creation applies to
+  its type from the request alone, in creation's words and order: which fields
+  its type takes (`srcs` and `titles` for a merge, `cuts` and `skip` for a
+  split, the silence fields for an analyze job, `gain` and `loudness` for a
+  transcode), `src` or `srcs` and the member bound, the format, the shape's wire
+  policy, a knob its format does not take or out of range, `loudness` and its
+  exclusion with `gain`, `gain`'s spelling, the silence fields' need for
+  `silence: true` and their bounds, and a merge's title per member. Only the
+  `cue` rules stay with creation, since a job carries the cut points its sheet
+  resolved to. A stored job that broke one of these ran, or failed later in
+  other words, and now fails in creation's: one holding a knob its format does
+  not take fails in the job's field name ("flacLevel applies to flac output;
+  this request names opus"), where it failed in the engine's ("waxflow:
+  FLACLevel applies ..."), and a negative `bitrate` fails "bitrate -1: want 0
+  for the format's default or a positive integer", where it failed as "waxflow:
+  Bitrate is -1000, ...". A timeline job holding `src`, a shaping field, `gain`,
+  `loudness`, `titles`, `cuts`, `skip` or a silence field fails "type timeline
+  takes srcs, spans and crossfadeSeconds".
+- A job's level out of range is worded in its field names on the engine's
+  scale, at creation and when a stored job runs: "flacLevel 9: want -1 to 8"
+  where it read "waxflow: FLAC level 9 outside -1..8", "wavpackLevel 7: want
+  1 to 4" where it read "waxflow: WavPack level 7 outside 1..4", "apeLevel
+  2500: want 1000, 2000, or 3000" where it read "waxflow: APE level 2500 is
+  not one of 1000, 2000, or 3000", and "apeLevel 4000 decodes but is not
+  written; want 1000, 2000, or 3000" where it read "waxflow: APE level 4000
+  decodes but ...". Still `400`, at the same point in the order.
+- A query parameter that holds a number, a boolean or an `id` pin refuses an
+  empty value, `400` "<name> is present but empty; omit it to ...", where
+  each read as absent and answered as if omitted. A named choice (`format`,
+  `container`, `gain`, `dynamics`, `q`) still takes empty as its default.
+  What moved: `from=`, `to=` and `t=` on `/stream`, `POST /transcode` and a
+  `/stream` `POST /sign`, and `from=` and `to=` on the HLS mint (both
+  forms), each refused where its value is parsed, so before the source
+  resolves and, on the mint, before the query's format and knob refusals:
+  `src=lib/missing.wav&from=` answers `400` where it answered `404`, and
+  `format=nosuch&to=` on the mint `400` where it answered `415`. An empty
+  `from`, `to` or `t` also comes before `/stream`'s and `POST /transcode`'s
+  format and knob refusals: `src=lib/sine.wav&format=flac&bitrate=128&from=`
+  answers `400` where it answered `415`. `id=` on `/stream`, `POST
+  /transcode`, `/art` and `/lyrics` is refused where a malformed `id` is,
+  after the source resolves, so a missing source still answers `404`, and
+  ahead of every refusal the plan makes once it has: `format=nosuch&id=` and
+  `format=flac&bitrate=128&id=` on a source that resolves answer `400` where
+  they answered `415`. `POST /sign` still replaces a sign request's own `id`,
+  empty or not.
+- The HLS mint refuses an empty `tl`, "tl is present but empty; omit it to
+  stream one src", as `/stream` does, on both forms and ahead of every other
+  rule but the unknown-parameter one. `src=lib/sine.wav&tl=&format=opus`
+  answered `200` with the `tl` dropped and now answers `400`; `tl=` with no
+  `src` answers it where it answered "src or tl is required"; and
+  `src=lib/missing.wav&tl=` answers `400` where it answered `404`.
+- `GET /probe` reads `strict` as `1`, `true` or `yes` and `0`, `false` or
+  `no`, in any case, and refuses anything else, `400` `strict "maybe": want
+  a boolean`, and an empty one "strict is present but empty; omit it for a
+  tolerant probe", where every other value, empty included, read as false.
+  The refusal comes after `src`'s spelling and before `src is required` and
+  the source's resolution: `strict=maybe` with no `src` answers the
+  `strict` refusal where it answered `src is required`, and beside a missing
+  source `400` where it answered `404`.
+
+On the CLI:
+
+- `waxflow transcode` takes `--bitrate` (kbit/s) and `--vbr` in place of
+  `--mp3-bitrate`, `--opus-bitrate`, `--aac-bitrate`, `--mp3-vbr` and
+  `--opus-vbr`, which are removed: a script that passes one now fails with
+  "unknown flag", exit 2. Each new flag reaches `Bitrate` or `VBR` only
+  when given, so a bare command writes the bytes it did, and the bound,
+  exit 2 before the source opens, is the one the old flags had.
+- A knob flag the format does not take is worded by one rule for all of
+  them, exit 5. `--bitrate` or `--vbr` on a lossless format reads as the
+  server's refusal does ("--bitrate applies to lossy output (opus, mp3, aac,
+  he-aac); flac is lossless"), and `--bitrate` on vorbis names the flag that
+  applies ("--bitrate does not apply to vorbis, which is quality-driven; use
+  --vorbis-quality").
+- `waxflow transcode` and `waxflow split` refuse a knob flag the format
+  does not take whenever it is given, whatever its value, exit 5, at the
+  point in the order where a nonzero value was refused. A value that means
+  the encoder's default (`--bitrate 0`, `--vbr=false`, `--he-v2=false`,
+  `--wavpack-level 0`, `--ape-level 0`, `--opus-signal auto`) was dropped
+  in silence there, and the command went on to open the source. On a
+  format that takes the knob it still means the encoder's default.
+- `waxflow transcode` gains `--vorbis-quality`, a float on libvorbis's -1 to
+  10 scale that reaches `VorbisQuality` only when given. An explicit 0 is
+  refused, exit 2, with a value off the scale, NaN or infinite: the encoder
+  reads 0 as its default, 3, so a typed 0 would have encoded at 3.
+- `--flac-level`, `--opus-complexity` and `--opus-signal` show no default of
+  their own in the help (they showed 5, 5 and auto) and name the encoder's,
+  as the other level flags did, and `--flac-level` likewise on `waxflow
+  split`. Each already reached the options only when given, so no output
+  changes.
+- The flags that leave their range to the engine name themselves in the
+  refusal, exit 2 as before: `--wavpack-level 9: want 1 to 4` where it read
+  "waxflow: WavPack level 9 outside 1..4", `--ape-level 2500: want 1000,
+  2000, or 3000` and `--ape-level 4000 decodes but is not written; want
+  1000, 2000, or 3000` where each read "waxflow: APE level ...", on
+  `transcode` and `split`, and `--opus-signal "foo": want auto, voice, or
+  music` where it read `opus signal hint "foo" is not auto, voice, or
+  music`.

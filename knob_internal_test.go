@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -112,6 +113,114 @@ func TestKnobsAreRefusedOffTheirRows(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// TestCheckKnobsAnswersAsCheck: CheckKnobs gives every format, for each knob
+// alone and for all of them at once, the answer Check gives the options that
+// set those knobs, and refuses an unknown format as Check does.
+func TestCheckKnobsAnswersAsCheck(t *testing.T) {
+	same := func(what string, got, want error) {
+		t.Helper()
+		gk, _ := errors.AsType[*KnobError](got)
+		wk, _ := errors.AsType[*KnobError](want)
+		if (got == nil) != (want == nil) || got != nil && (got.Error() != want.Error() ||
+			waxerr.CodeOf(got) != waxerr.CodeOf(want) || !reflect.DeepEqual(gk, wk)) {
+			t.Errorf("%s: CheckKnobs = %v, Check = %v", what, got, want)
+		}
+	}
+	for _, row := range outputs {
+		all := TranscodeOptions{Format: row.name}
+		var set Knob
+		for bit := range len(knobNames) {
+			k := Knob(1) << bit
+			v := knobValues[k][0]
+			opts := withField(t, TranscodeOptions{Format: row.name}, k.String(), v)
+			got := CheckKnobs(row.name, k)
+			same(fmt.Sprintf("%s %s=%v", row.name, k, v), got, opts.Check())
+			if (got == nil) != (knobTakes[row.name]&k != 0) {
+				t.Errorf("CheckKnobs(%s, %s) = %v, want it taken: %v", row.name, k, got, knobTakes[row.name]&k != 0)
+			}
+			all = withField(t, all, k.String(), v)
+			set |= k
+		}
+		same(row.name+" every knob", CheckKnobs(row.name, set), all.Check())
+		same(row.name+" no knob", CheckKnobs(row.name, 0), TranscodeOptions{Format: row.name}.Check())
+	}
+	for _, f := range []string{"opsu", ""} {
+		same(fmt.Sprintf("format %q", f), CheckKnobs(f, KnobBitrate), TranscodeOptions{Format: f, Bitrate: 64000}.Check())
+	}
+}
+
+// TestCheckKnobsRefusesABitThatNamesNoKnob: a set holding a bit past the
+// knobs is CodeInvalidRequest naming the lowest such bit, before the format or
+// its knobs are asked.
+func TestCheckKnobsRefusesABitThatNamesNoKnob(t *testing.T) {
+	stray := Knob(1) << len(knobNames)
+	for _, c := range []struct {
+		format string
+		set    Knob
+	}{
+		{"flac", Knob(1) << 12},
+		{"flac", KnobBitrate | Knob(1)<<12 | Knob(1)<<14},
+		{"opus", KnobBitrate | stray},
+		{"opsu", stray},
+	} {
+		err := CheckKnobs(c.format, c.set)
+		want := fmt.Sprintf("waxflow: %s is not a knob", (c.set&^(stray-1))&-(c.set&^(stray-1)))
+		if waxerr.CodeOf(err) != waxerr.CodeInvalidRequest || err.Error() != want {
+			t.Errorf("CheckKnobs(%q, %d) = %v (%s), want %s %q", c.format, uint16(c.set), err,
+				waxerr.CodeOf(err), waxerr.CodeInvalidRequest, want)
+		}
+	}
+}
+
+// TestARangeRefusalIsTyped: Check refuses a knob out of range as
+// CodeInvalidRequest wrapping a *RangeError that names the knob, the value as
+// given and what the knob takes, in the sentence it always gave.
+func TestARangeRefusalIsTyped(t *testing.T) {
+	written := []string{"1000", "2000", "3000"}
+	for _, c := range []struct {
+		opts TranscodeOptions
+		want RangeError
+		text string
+		take string
+	}{
+		{TranscodeOptions{Format: "flac", FLACLevel: 9}, RangeError{Knob: KnobFLACLevel, Value: 9, Min: -1, Max: 8},
+			"waxflow: FLAC level 9 outside -1..8", "-1 to 8"},
+		{TranscodeOptions{Format: "wavpack", WavPackLevel: 7}, RangeError{Knob: KnobWavPackLevel, Value: 7, Min: 1, Max: 4},
+			"waxflow: WavPack level 7 outside 1..4", "1 to 4"},
+		{TranscodeOptions{Format: "ape", APELevel: 4000}, RangeError{Knob: KnobAPELevel, Value: 4000, Values: written, Unwritten: true},
+			"waxflow: APE level 4000 decodes but is not written; want 1000, 2000, or 3000", "1000, 2000, or 3000"},
+		{TranscodeOptions{Format: "ape", APELevel: 2500}, RangeError{Knob: KnobAPELevel, Value: 2500, Values: written},
+			"waxflow: APE level 2500 is not one of 1000, 2000, or 3000", "1000, 2000, or 3000"},
+		{TranscodeOptions{Format: "opus", OpusComplexity: 11}, RangeError{Knob: KnobOpusComplexity, Value: 11, Min: -1, Max: 10},
+			"waxflow: Opus complexity 11 outside -1..10", "-1 to 10"},
+		{TranscodeOptions{Format: "opus", OpusSignal: "foo"}, RangeError{Knob: KnobOpusSignal, Value: "foo", Values: []string{"auto", "voice", "music"}},
+			`opus signal hint "foo" is not auto, voice, or music`, "auto, voice, or music"},
+		{TranscodeOptions{Format: "vorbis", VorbisQuality: -1.5}, RangeError{Knob: KnobVorbisQuality, Value: -1.5, Min: -1, Max: 10},
+			"waxflow: Vorbis quality -1.5 outside -1..10", "-1 to 10"},
+	} {
+		err := c.opts.Check()
+		re, ok := errors.AsType[*RangeError](err)
+		switch {
+		case waxerr.CodeOf(err) != waxerr.CodeInvalidRequest || !ok:
+			t.Errorf("%+v: %v (%s), want an invalid request wrapping a *RangeError", c.opts, err, waxerr.CodeOf(err))
+		case !reflect.DeepEqual(*re, c.want):
+			t.Errorf("%+v: %+v, want %+v", c.opts, *re, c.want)
+		case err.Error() != c.text || re.Error() != c.text:
+			t.Errorf("%+v: %q, want %q", c.opts, err.Error(), c.text)
+		case re.Want() != c.take:
+			t.Errorf("%+v: Want() = %q, want %q", c.opts, re.Want(), c.take)
+		}
+	}
+	// What a caller builds itself reads as English: two values take no comma,
+	// and a knob with no subject of its own goes by its field name.
+	if got := (&RangeError{Knob: KnobOpusSignal, Values: []string{"voice", "music"}}).Want(); got != "voice or music" {
+		t.Errorf("two values: Want() = %q, want %q", got, "voice or music")
+	}
+	if got := (&RangeError{Knob: KnobBitrate, Value: 5, Min: 1, Max: 2}).Error(); got != "waxflow: Bitrate 5 outside 1..2" {
+		t.Errorf("a knob with no subject: %q, want %q", got, "waxflow: Bitrate 5 outside 1..2")
 	}
 }
 

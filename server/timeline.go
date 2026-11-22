@@ -113,9 +113,17 @@ func checkSeconds(name string, x float64) error {
 }
 
 // parseSeconds reads the wire duration name from v, by checkSeconds' rule.
-// strconv.ParseFloat reads "NaN" and "Inf", which is why the value is
-// checked and not only the spelling.
-func parseSeconds(name, v string) (float64, error) {
+// Absent is 0; present and empty is refused, naming what omitting it gives
+// (hint). strconv.ParseFloat reads "NaN" and "Inf", which is why the value
+// is checked and not only the spelling.
+func parseSeconds(name, hint, v string, present bool) (float64, error) {
+	if !present {
+		return 0, nil
+	}
+	if v == "" {
+		return 0, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("%s is present but empty; omit it %s", name, hint))
+	}
 	x, err := strconv.ParseFloat(v, 64)
 	if err != nil {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("%s %q: want seconds", name, v))

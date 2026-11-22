@@ -17,6 +17,7 @@ import (
 	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/internal/cache"
 	"github.com/colespringer/waxflow/internal/hls"
+	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -381,7 +382,7 @@ func TestHLSTranscodeWorkerLogsItsOwnFailure(t *testing.T) {
 // key names.
 func TestStreamOptionsUseTheDaemonsResampleProfile(t *testing.T) {
 	s := &Server{profile: resample.Fast}
-	opts, err := s.streamOptions(&streamParams{format: "auto"}, 0, 0)
+	opts, err := s.streamOptions(&streamParams{shape: outshape.Params{Format: "auto"}}, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

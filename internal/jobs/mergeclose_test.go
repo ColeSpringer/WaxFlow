@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -25,7 +26,7 @@ func TestAMergeMemberCloseErrorIsAWarningAndTheJobCompletes(t *testing.T) {
 	merged := func(t *testing.T, hook func(i int, f io.Closer) io.Closer) (*Job, []byte, []source.Ref) {
 		r, refs := mergeMembers(t, []int{24000, 24000}, nil)
 		r.hooks.memberCloser = hook
-		j, err := r.Create(Request{Type: TypeMerge, Srcs: refs, Format: "flac"})
+		j, err := r.Create(Request{Type: TypeMerge, Srcs: refs, Params: outshape.Params{Format: "flac"}})
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -80,7 +81,7 @@ func TestMergeMemberReadErrorNamesNoPath(t *testing.T) {
 		}
 		return f
 	}
-	j, err := r.Create(Request{Type: TypeMerge, Srcs: refs, Format: "flac"})
+	j, err := r.Create(Request{Type: TypeMerge, Srcs: refs, Params: outshape.Params{Format: "flac"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

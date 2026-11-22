@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -17,7 +18,7 @@ func TestAnOutputThatCannotBeCreatedNamesNoPath(t *testing.T) {
 	res, ref, srcID := openLib(t)
 	for name, req := range map[string]Request{
 		"a transcode": transcodeReq(ref, srcID),
-		"a merge":     {Type: TypeMerge, Srcs: []source.Ref{source.Ref(ref), source.Ref(ref)}, Format: "flac"},
+		"a merge":     {Type: TypeMerge, Srcs: []source.Ref{source.Ref(ref), source.Ref(ref)}, Params: outshape.Params{Format: "flac"}},
 	} {
 		for spelling, spell := range map[string]func(*testing.T, string) string{
 			"an absolute directory": func(_ *testing.T, dir string) string { return dir },

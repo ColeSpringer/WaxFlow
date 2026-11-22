@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxflow/internal/jobs"
+	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/source"
 )
 
@@ -59,40 +60,40 @@ func TestJobResultFilenameNamesAFileForm(t *testing.T) {
 		{
 			// The default an mp4-family merge picks for itself.
 			name: "an mp4 merge's progressive default",
-			req:  jobs.Request{Type: jobs.TypeMerge, Srcs: []source.Ref{"lib/ch1.mp3"}, Format: "aac", Container: "progressive"},
+			req:  jobs.Request{Type: jobs.TypeMerge, Srcs: []source.Ref{"lib/ch1.mp3"}, Params: outshape.Params{Format: "aac", Container: "progressive"}},
 			outs: []jobs.Output{{Container: "progressive"}},
 			want: "ch1.m4a",
 		},
 		{
 			name: "alac in a flat mp4",
-			req:  jobs.Request{Type: jobs.TypeMerge, Srcs: []source.Ref{"lib/book.flac"}, Format: "alac", Container: "progressive"},
+			req:  jobs.Request{Type: jobs.TypeMerge, Srcs: []source.Ref{"lib/book.flac"}, Params: outshape.Params{Format: "alac", Container: "progressive"}},
 			outs: []jobs.Output{{Container: "progressive"}},
 			want: "book.m4a",
 		},
 		{
 			// The row's own default form: aac writes .m4a, never .aac.
 			name: "aac with no override",
-			req:  jobs.Request{Type: jobs.TypeTranscode, Src: "lib/a.wav", Format: "aac"},
+			req:  jobs.Request{Type: jobs.TypeTranscode, Src: "lib/a.wav", Params: outshape.Params{Format: "aac"}},
 			outs: []jobs.Output{{Container: "aac"}},
 			want: "a.m4a",
 		},
 		{
 			// ...and the override that does rename the file.
 			name: "aac as raw adts",
-			req:  jobs.Request{Type: jobs.TypeTranscode, Src: "lib/a.wav", Format: "aac", Container: "adts"},
+			req:  jobs.Request{Type: jobs.TypeTranscode, Src: "lib/a.wav", Params: outshape.Params{Format: "aac", Container: "adts"}},
 			outs: []jobs.Output{{Container: "adts"}},
 			want: "a.aac",
 		},
 		{
 			name: "flac in ogg is oga",
-			req:  jobs.Request{Type: jobs.TypeTranscode, Src: "lib/a.wav", Format: "flac", Container: "ogg"},
+			req:  jobs.Request{Type: jobs.TypeTranscode, Src: "lib/a.wav", Params: outshape.Params{Format: "flac", Container: "ogg"}},
 			outs: []jobs.Output{{Container: "ogg"}},
 			want: "a.oga",
 		},
 		{
 			// The case that always worked, kept so the table cannot regress it.
 			name: "flac plain",
-			req:  jobs.Request{Type: jobs.TypeTranscode, Src: "lib/a.wav", Format: "flac"},
+			req:  jobs.Request{Type: jobs.TypeTranscode, Src: "lib/a.wav", Params: outshape.Params{Format: "flac"}},
 			outs: []jobs.Output{{Container: "flac"}},
 			want: "a.flac",
 		},
@@ -100,7 +101,7 @@ func TestJobResultFilenameNamesAFileForm(t *testing.T) {
 			// A split's pieces carry the index before the extension, and the
 			// extension is still the table's.
 			name: "a split piece",
-			req:  jobs.Request{Type: jobs.TypeSplit, Src: "lib/rip.wav", Format: "aac", Container: "progressive"},
+			req:  jobs.Request{Type: jobs.TypeSplit, Src: "lib/rip.wav", Params: outshape.Params{Format: "aac", Container: "progressive"}},
 			outs: []jobs.Output{{Container: "progressive"}, {Container: "progressive"}},
 			n:    1,
 			want: "rip.1.m4a",

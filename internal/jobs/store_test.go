@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/internal/posixfs"
 	"github.com/colespringer/waxflow/internal/ulid"
 	"github.com/colespringer/waxflow/source"
@@ -468,7 +469,7 @@ func TestJobErrorNamesAnyReference(t *testing.T) {
 	dir := t.TempDir()
 	r := openRunner(t, Config{Dir: dir, Resolver: aliasResolver{res, ref}, MeasureTrack: measureTrack()})
 	j, err := r.Create(Request{Type: TypeMerge, Srcs: []source.Ref{"lib/caf\xe9.wav"}, SourceIDs: []string{"1-1"},
-		Format: "flac", FLACLevel: -1})
+		Params: outshape.Params{Format: "flac", FLACLevel: -1}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +480,7 @@ func TestJobErrorNamesAnyReference(t *testing.T) {
 
 	// An error the file system wrote quotes the name's own bytes.
 	r2 := openRunner(t, Config{Dir: t.TempDir(), Resolver: res})
-	j, err = r2.Create(Request{Type: TypeTranscode, Src: "lib/gone\xe9.wav", Format: "flac", FLACLevel: -1})
+	j, err = r2.Create(Request{Type: TypeTranscode, Src: "lib/gone\xe9.wav", Params: outshape.Params{Format: "flac", FLACLevel: -1}})
 	if err != nil {
 		t.Fatal(err)
 	}

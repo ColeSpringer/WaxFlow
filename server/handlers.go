@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -62,7 +63,10 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.Src = source.Ref(src)
-		req.Strict = boolish(q.Get("strict"))
+		if req.Strict, err = strictParam(q); err != nil {
+			s.writeError(w, err)
+			return
+		}
 	}
 	if req.Src == "" {
 		s.writeError(w, waxerr.New(waxerr.CodeInvalidRequest, "src is required"))
@@ -387,6 +391,9 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) error {
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			return waxerr.Wrap(waxerr.CodePayloadTooLarge, "request body", err)
 		}
+		if te, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
+			return mistyped(reflect.TypeOf(v), te)
+		}
 		return waxerr.Wrap(waxerr.CodeInvalidRequest, "request body", err)
 	}
 	if dec.More() {
@@ -395,13 +402,124 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) error {
 	return nil
 }
 
-func boolish(v string) bool {
+// mistyped words a JSON value of the wrong type in the body's own terms: its
+// key path, which encoding/json spells with the Go names of embedded structs,
+// and the type the key wants, or that a number it would take is out of range.
+func mistyped(root reflect.Type, e *json.UnmarshalTypeError) error {
+	var keys []string
+	t := root
+	for name := range strings.SplitSeq(e.Field, ".") {
+		if name == "" {
+			continue
+		}
+		for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
+			t = t.Elem()
+		}
+		if t.Kind() != reflect.Struct {
+			keys, t = append(keys, name), e.Type
+			continue
+		}
+		if f, ok := t.FieldByName(name); ok && f.Anonymous && f.Tag.Get("json") == "" {
+			t = f.Type
+			continue
+		}
+		keys, t = append(keys, name), keyType(t, name, e.Type)
+	}
+	want := jsonNoun(e.Type, false)
+	// A key holding an array or object whose entry was the wrong type.
+	if k := deref(t).Kind(); (k == reflect.Slice || k == reflect.Array || k == reflect.Map) && deref(e.Type).Kind() != k {
+		of := "an array of "
+		if k == reflect.Map {
+			of = "an object of "
+		}
+		want = of + jsonNoun(e.Type, true)
+	}
+	msg := "request body: "
+	if len(keys) > 0 {
+		msg += strings.Join(keys, ".") + ": "
+	}
+	if n, ok := strings.CutPrefix(e.Value, "number "); ok && fits(deref(e.Type).Kind(), n) {
+		return waxerr.New(waxerr.CodeInvalidRequest, msg+n+" is out of range")
+	}
+	return waxerr.New(waxerr.CodeInvalidRequest, msg+"want "+want)
+}
+
+// fits reports whether a JSON number literal is the kind of number k holds,
+// so its refusal can only have been its size: any number for a float, an
+// integral literal for an integer.
+func fits(k reflect.Kind, n string) bool {
+	switch k {
+	case reflect.Float32, reflect.Float64:
+		return true
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return !strings.ContainsAny(n, ".eE")
+	}
+	return false
+}
+
+// keyType is the type of t's field the JSON key names, or dflt.
+func keyType(t reflect.Type, key string, dflt reflect.Type) reflect.Type {
+	for _, f := range reflect.VisibleFields(t) {
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if name == "" {
+			name = f.Name
+		}
+		if f.IsExported() && name == key {
+			return f.Type
+		}
+	}
+	return dflt
+}
+
+func deref(t reflect.Type) reflect.Type {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t
+}
+
+// jsonNoun names the JSON value a Go type takes.
+func jsonNoun(t reflect.Type, plural bool) string {
+	one, many := "a value", "values"
+	switch deref(t).Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		one, many = "an integer", "integers"
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		one, many = "a non-negative integer", "non-negative integers"
+	case reflect.Float32, reflect.Float64:
+		one, many = "a number", "numbers"
+	case reflect.String:
+		one, many = "a string", "strings"
+	case reflect.Bool:
+		one, many = "a boolean", "booleans"
+	case reflect.Slice, reflect.Array:
+		one, many = "an array", "arrays"
+	case reflect.Map, reflect.Struct:
+		one, many = "an object", "objects"
+	}
+	if plural {
+		return many
+	}
+	return one
+}
+
+// strictParam reads GET /probe's strict. Anything but a boolean spelling is
+// refused, since reading it as false would answer the tolerant probe.
+func strictParam(q url.Values) (bool, error) {
+	v, ok := q.Get("strict"), q.Has("strict")
 	switch strings.ToLower(v) {
 	case "1", "true", "yes":
-		return true
-	default:
-		return false
+		return true, nil
+	case "0", "false", "no":
+		return false, nil
+	case "":
+		if !ok {
+			return false, nil
+		}
+		return false, waxerr.New(waxerr.CodeInvalidRequest, "strict is present but empty; omit it for a tolerant probe")
 	}
+	return false, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("strict %q: want a boolean", v))
 }
 
 // queryDecides reports whether a /stream query's options can be checked
@@ -410,8 +528,8 @@ func boolish(v string) bool {
 // source container's own name (format=ogg on an Ogg file) may direct-play, so
 // it waits for the source unless the query rules that out.
 func queryDecides(p *streamParams) bool {
-	if p.format == "auto" || slices.Contains(waxflow.OutputFormats(), p.format) {
+	if f := p.shape.Format; f == "auto" || slices.Contains(waxflow.OutputFormats(), f) {
 		return true
 	}
-	return !slices.Contains(format.Inputs(), p.format) || queryRulesOutDirectPlay(p)
+	return !slices.Contains(format.Inputs(), p.shape.Format) || queryRulesOutDirectPlay(p)
 }

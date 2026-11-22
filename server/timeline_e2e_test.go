@@ -1075,6 +1075,29 @@ func TestHLSMintRefusesANonFiniteSegDur(t *testing.T) {
 	}
 }
 
+// TestHLSMintRefusesEmptyValues: crossfadeSeconds, segDur, bitrates, from, to
+// and a tl beside the src present but empty are each a 400 naming the
+// parameter, on the keyed master and on POST /sign, as /stream treats them.
+// Absent is their only spelling of the default.
+func TestHLSMintRefusesEmptyValues(t *testing.T) {
+	env := newTestEnv(t, nil)
+	for _, tc := range []struct{ name, want string }{
+		{"crossfadeSeconds", "crossfadeSeconds is present but empty; omit it for a butt-join"},
+		{"segDur", "segDur is present but empty; omit it for the default segment duration"},
+		{"bitrates", "bitrates is present but empty; omit it for a single variant"},
+		{"from", "from is present but empty; omit it to start at the source's start"},
+		{"to", "to is present but empty; omit it to run to the source's end"},
+		{"tl", "tl is present but empty; omit it to stream one src"},
+	} {
+		status, body := mintAnswer(t, env, map[string]string{"src": "lib/sine.wav", "format": "opus", tc.name: ""})
+		for i, surface := range []string{"the keyed master", "POST /sign"} {
+			if status[i] != http.StatusBadRequest || !strings.Contains(body[i], tc.want) {
+				t.Errorf("%s= on %s = %d %s; want a 400 saying %q", tc.name, surface, status[i], body[i], tc.want)
+			}
+		}
+	}
+}
+
 // TestDescriptorFloatsAreGuardedAtTheMint: every float the descriptor holds
 // is refused at the mint when it is not finite, under the parameter its JSON
 // tag names. A float field added without a guard fails here, where it would

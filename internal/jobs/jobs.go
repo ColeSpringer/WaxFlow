@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxflow"
+	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -86,16 +87,10 @@ type Request struct {
 	// were true, which is the whole guarantee.
 	SourceIDs []string `json:"sourceIds,omitempty"`
 
-	// Transcode parameters, mirroring the /stream surface.
-	Format    string `json:"format,omitempty"`
-	Container string `json:"container,omitempty"`
-	Rate      int    `json:"rate,omitempty"`
-	Channels  int    `json:"ch,omitempty"`
-	Bits      int    `json:"bits,omitempty"`
-	// Bitrate is the lossy output bit rate in kbit/s.
-	Bitrate int `json:"bitrate,omitempty"`
-	// HEv2 selects HE-AAC v2 for he-aac output, as on /stream.
-	HEv2 bool `json:"hev2,omitempty"`
+	// Params is the output's shape. An analyze or timeline job leaves it
+	// empty. Its methods check and map the shape alone, so they are called
+	// through Params; Request.Check checks the whole request.
+	outshape.Params
 	// Gain is the gain parameter as /stream spells it (off, track,
 	// album, or a dB number); empty means the daemon default. Ignored
 	// when Loudness is analyze.
@@ -104,15 +99,6 @@ type Request struct {
 	// apply the exact ReplayGain-reference gain, and write measured
 	// ReplayGain tags on the output.
 	Loudness string `json:"loudness,omitempty"`
-	// FLACLevel is the FLAC compression level (1..8, -1 for 0); 0 keeps
-	// the encoder default.
-	FLACLevel int `json:"flacLevel,omitempty"`
-	// WavPackLevel is the WavPack compression level (1 fast through 4 very
-	// high); 0 keeps the encoder default.
-	WavPackLevel int `json:"wavpackLevel,omitempty"`
-	// APELevel is the Monkey's Audio compression level (1000 fast, 2000
-	// normal, 3000 high); 0 keeps the encoder default.
-	APELevel int `json:"apeLevel,omitempty"`
 
 	// Silence adds the silence map to an analyze job, from the same
 	// decode the loudness measurement runs on. Analyze-only.

@@ -16,6 +16,7 @@ import (
 	"github.com/colespringer/waxflow/container/riff"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/meta"
+	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/source"
 )
@@ -153,7 +154,7 @@ func TestMergeStampsChapters(t *testing.T) {
 		titles := []string{"Intro", "The Long Middle", "Coda"}
 		got := mergeOutputChapters(t, r, Request{
 			Type: TypeMerge, Srcs: refs, MemberTitles: titles,
-			Format: "alac", Container: mp4ProgressiveContainer,
+			Params: outshape.Params{Format: "alac", Container: mp4ProgressiveContainer},
 		})
 		if len(got) != len(refs) {
 			t.Fatalf("output carries %d chapters, want one per member (%d)", len(got), len(refs))
@@ -171,7 +172,7 @@ func TestMergeStampsChapters(t *testing.T) {
 	t.Run("member TITLE tags when no request title", func(t *testing.T) {
 		r, refs := mergeMembers(t, lens, &countingTitleMapper{titles: []string{"TagA", "TagB", "TagC"}})
 		got := mergeOutputChapters(t, r, Request{
-			Type: TypeMerge, Srcs: refs, Format: "alac", Container: mp4ProgressiveContainer,
+			Type: TypeMerge, Srcs: refs, Params: outshape.Params{Format: "alac", Container: mp4ProgressiveContainer},
 		})
 		want := []string{"TagA", "TagB", "TagC"}
 		if len(got) != len(want) {
@@ -194,7 +195,7 @@ func TestMergeStampsChapters(t *testing.T) {
 		titles := []string{"ReqA", "ReqB", "ReqC"}
 		got := mergeOutputChapters(t, r, Request{
 			Type: TypeMerge, Srcs: refs, MemberTitles: titles,
-			Format: "alac", Container: mp4ProgressiveContainer,
+			Params: outshape.Params{Format: "alac", Container: mp4ProgressiveContainer},
 		})
 		for i := range got {
 			if got[i].Title != titles[i] {
@@ -209,7 +210,7 @@ func TestMergeStampsChapters(t *testing.T) {
 	t.Run("generated Chapter N when no title anywhere", func(t *testing.T) {
 		r, refs := mergeMembers(t, lens, nil)
 		got := mergeOutputChapters(t, r, Request{
-			Type: TypeMerge, Srcs: refs, Format: "alac", Container: mp4ProgressiveContainer,
+			Type: TypeMerge, Srcs: refs, Params: outshape.Params{Format: "alac", Container: mp4ProgressiveContainer},
 		})
 		want := []string{"Chapter 1", "Chapter 2", "Chapter 3"}
 		if len(got) != len(want) {
@@ -231,7 +232,7 @@ func TestMergeGatesChaptersOnMP4(t *testing.T) {
 	m := &countingTitleMapper{titles: []string{"A", "B"}}
 	r, refs := mergeMembers(t, []int{48000, 48000}, m)
 	got := mergeOutputChapters(t, r, Request{
-		Type: TypeMerge, Srcs: refs, MemberTitles: []string{"A", "B"}, Format: "flac",
+		Type: TypeMerge, Srcs: refs, MemberTitles: []string{"A", "B"}, Params: outshape.Params{Format: "flac"},
 	})
 	if len(got) != 0 {
 		t.Errorf("a flac merge wrote %d chapters; the QuickTime chapter track is mp4-only", len(got))

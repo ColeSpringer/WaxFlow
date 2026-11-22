@@ -490,6 +490,9 @@ type JobRequest struct {
 	Bitrate int `json:"bitrate,omitempty"`
 	// HEv2 selects HE-AAC v2 for he-aac output, as on /stream.
 	HEv2 bool `json:"hev2,omitempty"`
+	// VorbisQuality is vorbis output's quality on libvorbis's -q scale
+	// (-1..10); 0 keeps the encoder default. Vorbis takes no Bitrate.
+	VorbisQuality float64 `json:"vorbisQuality,omitempty"`
 	// Gain and Loudness are transcode-only. Loudness "analyze" selects
 	// the two-pass form (measure, apply the exact ReplayGain-reference
 	// gain, tag the output) and replaces Gain.

@@ -25,6 +25,7 @@ import (
 	"github.com/colespringer/waxflow/internal/hls"
 	"github.com/colespringer/waxflow/internal/lru"
 	"github.com/colespringer/waxflow/internal/meta"
+	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/internal/sign"
 	"github.com/colespringer/waxflow/internal/timeline"
 	"github.com/colespringer/waxflow/m3u8"
@@ -511,17 +512,9 @@ func (s *Server) planHLSVariant(ctx context.Context, desc hls.Descriptor, tracks
 // caller can run it before resolving anything (refuseHLSQuery).
 func (s *Server) hlsVariantOptions(desc hls.Descriptor, m *meta.Info) (waxflow.TranscodeOptions, error) {
 	fail := func(err error) (waxflow.TranscodeOptions, error) { return waxflow.TranscodeOptions{}, err }
-	opts := waxflow.TranscodeOptions{
-		Format:          desc.Format,
-		Rate:            desc.Rate,
-		Channels:        desc.Ch,
-		BitDepth:        desc.Bits,
-		ResampleProfile: s.profile,
-		Bitrate:         desc.Bitrate * 1000,
-		HEAACv2:         desc.HEv2,
-	}
-	if err := opts.Check(); err != nil {
-		return fail(knobRefusal(err, hlsKnobs))
+	shape := descriptorShape(desc)
+	if err := shape.Check(outshape.HLS); err != nil {
+		return fail(err)
 	}
 	g, err := parseGain(desc.Gain, s.defaultGain)
 	if err != nil {
@@ -536,8 +529,19 @@ func (s *Server) hlsVariantOptions(desc hls.Descriptor, m *meta.Info) (waxflow.T
 	if err != nil {
 		return fail(err)
 	}
-	opts.GainDB, opts.Dynamics = resolveGainDB(g, m, dyn), dyn
-	return opts, nil
+	return shape.Options(resolveGainDB(g, m, dyn), dyn, s.profile), nil
+}
+
+// descriptorShape is the output shape d carries, and setDescriptorShape
+// writes one into d: the one mapping between the two, so hls stays free of
+// the engine.
+func descriptorShape(d hls.Descriptor) outshape.Params {
+	return outshape.Params{Format: d.Format, Rate: d.Rate, Channels: d.Ch, Bits: d.Bits,
+		Bitrate: d.Bitrate, HEv2: d.HEv2}
+}
+
+func setDescriptorShape(d *hls.Descriptor, p outshape.Params) {
+	d.Format, d.Rate, d.Ch, d.Bits, d.Bitrate, d.HEv2 = p.Format, p.Rate, p.Channels, p.Bits, p.Bitrate, p.HEv2
 }
 
 // refuseHLSQuery refuses what desc alone rules out, before anything resolves:
@@ -1852,87 +1856,55 @@ func (s *Server) mintHLSDescriptor(ctx context.Context, params SignParams) (hls.
 			return bad("unknown parameter %q", k)
 		}
 	}
-	// By presence, as /stream judges the pair: an empty src beside a tl is
-	// refused, not dropped.
+	// By presence, as /stream judges the pair: an empty src beside a tl, or an
+	// empty tl, is refused, not dropped.
 	src, hasSrc := params.src()
-	d := hls.Descriptor{Ver: hls.DescriptorVersion, Src: source.Ref(src), Tl: params["tl"],
-		Format: params["format"], Gain: params["gain"], Dynamics: params["dynamics"]}
-	var err error
+	tl, hasTl := params["tl"]
+	d := hls.Descriptor{Ver: hls.DescriptorVersion, Src: source.Ref(src), Tl: tl,
+		Gain: params["gain"], Dynamics: params["dynamics"]}
 	switch {
+	case hasTl && tl == "":
+		return bad("tl is present but empty; omit it to stream one src")
 	case d.Src == "" && d.Tl == "":
 		return bad("src or tl is required")
 	case hasSrc && d.Tl != "":
 		return bad("src and tl are exclusive: a URL names one stream or one timeline")
 	}
-	if d.Format == "" {
-		d.Format = waxflow.SegmentedFormats()[0]
-	}
-	// Absent is how "keep the source's value" is spelled, as on /stream. The
-	// master form copies the query key by key, so a bare rate= arrives
-	// present and empty.
-	atoi := func(name string) (int, error) {
+	get := func(name string) (string, bool) {
 		v, ok := params[name]
-		if !ok {
-			return 0, nil
-		}
-		if v == "" {
-			return 0, waxerr.New(waxerr.CodeInvalidRequest,
-				fmt.Sprintf("%s is present but empty; omit it to keep the source's value", name))
-		}
-		n, err := strconv.Atoi(v)
-		if err != nil || n <= 0 {
-			return 0, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("%s %q: want a positive integer", name, v))
-		}
-		return n, nil
+		return v, ok
 	}
-	if d.Bitrate, err = atoi("bitrate"); err != nil {
+	// q is not a mint parameter (the check above refused it), so it is empty.
+	shape, _, err := outshape.ParseQuery(get)
+	if err != nil {
 		return hls.Descriptor{}, 0, err
 	}
-	if err := hls.CheckBitrate(d.Bitrate); err != nil {
-		return hls.Descriptor{}, 0, err
+	if shape.Format == "" {
+		shape.Format = waxflow.SegmentedFormats()[0]
 	}
-	if d.Bits, err = atoi("bits"); err != nil {
-		return hls.Descriptor{}, 0, err
-	}
-	if d.Rate, err = atoi("rate"); err != nil {
-		return hls.Descriptor{}, 0, err
-	}
+	setDescriptorShape(&d, shape)
 	// The span is parsed by the same function /stream uses, so the two
 	// surfaces cannot come to disagree about what from and to mean.
-	sp, err := parseSpan(params["from"], params["to"])
+	sp, err := parseSpan(get)
 	if err != nil {
 		return hls.Descriptor{}, 0, err
 	}
 	d.From, d.To = sp.from, sp.to
-	if d.Ch, err = atoi("ch"); err != nil {
-		return hls.Descriptor{}, 0, err
-	}
 	// Each duration is refused here when it is not finite, before anything
 	// resolves; Canonical below refuses one for any float the descriptor
 	// holds, since it could not be encoded.
-	if v := params["crossfadeSeconds"]; v != "" {
-		if d.CrossfadeSeconds, err = parseSeconds("crossfadeSeconds", v); err != nil {
-			return hls.Descriptor{}, 0, err
-		}
+	v, ok := get("crossfadeSeconds")
+	if d.CrossfadeSeconds, err = parseSeconds("crossfadeSeconds", "for a butt-join", v, ok); err != nil {
+		return hls.Descriptor{}, 0, err
 	}
-	if v := params["segDur"]; v != "" {
-		if d.SegDur, err = parseSeconds("segDur", v); err != nil {
-			return hls.Descriptor{}, 0, err
-		}
+	v, ok = get("segDur")
+	if d.SegDur, err = parseSeconds("segDur", "for the default segment duration", v, ok); err != nil {
+		return hls.Descriptor{}, 0, err
 	}
-	// Present-but-empty refuses, the same rule /stream applies (and atoi
-	// above applies to the numeric params): a client templating
-	// hev2=${flag} into an empty value would otherwise mint, and POST
-	// /sign would sign, a silently downgraded v1 ladder.
-	if v, ok := params["hev2"]; ok {
+	if v, ok := get("bitrates"); ok {
 		if v == "" {
-			return bad("hev2 is present but empty; omit it to encode HE-AAC v1")
+			return bad("bitrates is present but empty; omit it for a single variant")
 		}
-		if d.HEv2, err = strconv.ParseBool(v); err != nil {
-			return bad("hev2 %q: want a boolean", v)
-		}
-	}
-	if v := params["bitrates"]; v != "" {
 		for part := range strings.SplitSeq(v, ",") {
 			kbps, err := strconv.Atoi(strings.TrimSpace(part))
 			if err != nil {

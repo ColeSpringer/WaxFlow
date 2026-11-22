@@ -21,11 +21,14 @@ import (
 
 // JobRequestJSONTags lists the POST /jobs body's field names as the wire
 // spells them, so an external test can assert its own table covers every one.
-func JobRequestJSONTags() []string {
-	t := reflect.TypeFor[jobRequest]()
-	tags := make([]string, 0, t.NumField())
-	for field := range t.Fields() {
-		if tag := jsonTag(field); tag != "" {
+func JobRequestJSONTags() []string { return jsonTags(reflect.TypeFor[jobRequest]()) }
+
+// jsonTags lists the json names of the struct type t's fields, an embedded
+// struct's among them, as encoding/json flattens it.
+func jsonTags(t reflect.Type) []string {
+	var tags []string
+	for _, field := range reflect.VisibleFields(t) {
+		if tag := jsonTag(field); tag != "" && !field.Anonymous {
 			tags = append(tags, tag)
 		}
 	}

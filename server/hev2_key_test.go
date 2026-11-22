@@ -28,8 +28,8 @@ func TestHEv2InCacheKeys(t *testing.T) {
 		Container: "progressive",
 		BitRate:   64000,
 	}
-	p1 := canonicalParams(plan, 0, gain.PresetOff, span{}, false, 0)
-	p2 := canonicalParams(plan, 0, gain.PresetOff, span{}, true, 0)
+	p1 := canonicalParams(plan, 0, gain.PresetOff, span{}, false, 0, 0)
+	p2 := canonicalParams(plan, 0, gain.PresetOff, span{}, true, 0, 0)
 	if p1 == p2 {
 		t.Fatalf("progressive keys collide across hev2: %s", p1)
 	}
@@ -45,5 +45,27 @@ func TestHEv2InCacheKeys(t *testing.T) {
 	}
 	if !strings.Contains(h1, "hev2=false") || !strings.Contains(h2, "hev2=true") {
 		t.Errorf("segmented keys do not spell the hev2 term:\n%s\n%s", h1, h2)
+	}
+}
+
+// TestVorbisQualityInProgressiveKey: a Vorbis quality joins the progressive
+// canonical string as the encoder's version spells it, and an unset one adds
+// nothing, so no key without one moves.
+func TestVorbisQualityInProgressiveKey(t *testing.T) {
+	plan := &waxflow.TranscodePlan{
+		Format:    audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Float, BitDepth: 32},
+		Container: "vorbis",
+	}
+	bare := canonicalParams(plan, 0, gain.PresetOff, span{}, false, 0, 0)
+	if strings.Contains(bare, "vq=") {
+		t.Errorf("an unset quality is in the key: %s", bare)
+	}
+	for _, c := range []struct {
+		q    float64
+		want string
+	}{{2, "&vq=2"}, {6, "&vq=6"}, {-1, "&vq=-1"}, {4.25, "&vq=4.25"}} {
+		if got := canonicalParams(plan, 0, gain.PresetOff, span{}, false, 0, c.q); got != bare+c.want {
+			t.Errorf("quality %g: %s, want %s%s", c.q, got, bare, c.want)
+		}
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/internal/hls"
+	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/internal/timeline"
 	"github.com/colespringer/waxflow/source"
@@ -288,5 +291,55 @@ func TestResolveHLSSourcesKeepsTheSingleSourceHandle(t *testing.T) {
 	}
 	if len(req.srcs) != 1 {
 		t.Fatalf("a single-source request holds %d handles, want the 1 the metadata read needs", len(req.srcs))
+	}
+}
+
+// TestDescriptorShapeRoundTrips: every Params field a descriptor carries
+// (the same JSON key on both) is written by setDescriptorShape into the
+// descriptor field of that key and read back by descriptorShape, so a field
+// added to both and missed by either function fails here.
+func TestDescriptorShapeRoundTrips(t *testing.T) {
+	jsonKey := func(f reflect.StructField) string {
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		return name
+	}
+	descFields := map[string][]int{} // JSON key to the field's index
+	for _, f := range reflect.VisibleFields(reflect.TypeFor[hls.Descriptor]()) {
+		descFields[jsonKey(f)] = f.Index
+	}
+	var want outshape.Params
+	pv := reflect.ValueOf(&want).Elem()
+	carried := map[string][]int{} // JSON key to the Params field's index
+	for i, f := range reflect.VisibleFields(pv.Type()) {
+		if _, ok := descFields[jsonKey(f)]; !ok {
+			continue
+		}
+		carried[jsonKey(f)] = f.Index
+		switch v := pv.FieldByIndex(f.Index); v.Kind() {
+		case reflect.String:
+			v.SetString("v-" + f.Name)
+		case reflect.Int:
+			v.SetInt(int64(i + 1))
+		case reflect.Bool:
+			v.SetBool(true)
+		case reflect.Float64:
+			v.SetFloat(float64(i) + 0.5)
+		default:
+			t.Fatalf("Params.%s is a %s; teach this test to set one", f.Name, v.Kind())
+		}
+	}
+	if len(carried) == 0 {
+		t.Fatal("no Params field shares a JSON key with hls.Descriptor")
+	}
+	var d hls.Descriptor
+	setDescriptorShape(&d, want)
+	dv := reflect.ValueOf(d)
+	for key, i := range carried {
+		if got, sent := dv.FieldByIndex(descFields[key]).Interface(), pv.FieldByIndex(i).Interface(); got != sent {
+			t.Errorf("descriptor %s = %v after setDescriptorShape, want %v", key, got, sent)
+		}
+	}
+	if got := descriptorShape(d); got != want {
+		t.Errorf("descriptorShape(setDescriptorShape(%+v)) = %+v", want, got)
 	}
 }

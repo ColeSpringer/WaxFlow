@@ -8,8 +8,11 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/audio"
@@ -20,6 +23,7 @@ import (
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/riff"
 	"github.com/colespringer/waxflow/internal/meta"
+	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -812,7 +816,7 @@ func TestTranscodeHEAAC(t *testing.T) {
 		t.Fatalf("exit = %d, stderr: %s", code, errOut)
 	}
 	hiOut := filepath.Join(dir, "hi.m4a")
-	if code, _, errOut := run(t, "transcode", "--format", "he-aac", "--aac-bitrate", "128", in, hiOut); code != 0 {
+	if code, _, errOut := run(t, "transcode", "--format", "he-aac", "--bitrate", "128", in, hiOut); code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", code, errOut)
 	}
 	defSize, hiSize := fileBytes(t, defOut), fileBytes(t, hiOut)
@@ -833,19 +837,28 @@ func TestTranscodeHEAAC(t *testing.T) {
 	}
 }
 
-// TestTranscodeBitrateFlagsReachOnlyTheirFormat: each format's bit-rate and
-// VBR flags reach its own output, and a flag for another format exits 5,
-// naming the flag, the format and the formats it applies to.
-func TestTranscodeBitrateFlagsReachOnlyTheirFormat(t *testing.T) {
+// knobFlagCase is one run of transcode with knob flags, and the engine's own
+// encode of the same source under the options those flags should set.
+type knobFlagCase struct {
+	ext   string
+	flags []string
+	opts  waxflow.TranscodeOptions
+}
+
+// checkKnobFlagReaches runs each case through the CLI and through the engine,
+// and wants the same bytes from both and other bytes than the bare command's,
+// so the flag reaches the option it names and nothing else.
+func checkKnobFlagReaches(t *testing.T, cases []knobFlagCase) {
+	t.Helper()
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.wav")
 	writeWAV(t, in, 48000)
-	encode := func(name string, flags ...string) []byte {
+	cli := func(name string, flags ...string) []byte {
 		t.Helper()
 		out := filepath.Join(dir, name)
 		args := append(append([]string{"transcode"}, flags...), in, out)
 		if code, _, errOut := run(t, args...); code != 0 {
-			t.Fatalf("%s: exit = %d, stderr: %s", name, code, errOut)
+			t.Fatalf("%v: exit = %d, stderr: %s", args[1:], code, errOut)
 		}
 		data, err := os.ReadFile(out)
 		if err != nil {
@@ -853,43 +866,173 @@ func TestTranscodeBitrateFlagsReachOnlyTheirFormat(t *testing.T) {
 		}
 		return data
 	}
-	for _, c := range []struct {
-		ext, own, low, vbr string
-	}{
-		{"mp3", "--mp3-bitrate", "64", "--mp3-vbr"},
-		{"opus", "--opus-bitrate", "32", "--opus-vbr"},
-		{"m4a", "--aac-bitrate", "48", ""},
-	} {
-		def := encode("def." + c.ext)
-		if low := encode("low."+c.ext, c.own, c.low); len(low) > len(def)*2/3 {
-			t.Errorf("%s %s %s: %d bytes, not clearly smaller than the default's %d",
-				c.ext, c.own, c.low, len(low), len(def))
+	for i, c := range cases {
+		format := "--format=" + c.opts.Format
+		got := cli(fmt.Sprintf("flag%d.%s", i, c.ext), append([]string{format}, c.flags...)...)
+		bare := cli(fmt.Sprintf("bare%d.%s", i, c.ext), format)
+		if want := engineEncode(t, in, c.opts); !bytes.Equal(got, want) {
+			t.Errorf("%s %v: %d bytes differ from the engine's %d under %+v",
+				c.opts.Format, c.flags, len(got), len(want), c.opts)
 		}
-		if c.vbr != "" {
-			if vbr := encode("vbr."+c.ext, c.vbr); bytes.Equal(vbr, def) {
-				t.Errorf("%s %s: the constant-rate default's bytes", c.ext, c.vbr)
-			}
+		if bytes.Equal(got, bare) {
+			t.Errorf("%s %v: the bare command's bytes", c.opts.Format, c.flags)
 		}
 	}
-	for i, c := range []struct {
-		ext   string
-		other []string
-		want  string
-	}{
-		{"mp3", []string{"--opus-bitrate", "32"}, "--opus-bitrate applies to opus output; this request names mp3"},
-		{"mp3", []string{"--opus-vbr"}, "--opus-vbr applies to opus output; this request names mp3"},
-		{"opus", []string{"--mp3-bitrate", "32"}, "--mp3-bitrate applies to mp3 output; this request names opus"},
-		{"opus", []string{"--mp3-vbr"}, "--mp3-vbr applies to mp3 output; this request names opus"},
-		{"opus", []string{"--aac-bitrate", "48"}, "--aac-bitrate applies to aac, he-aac output; this request names opus"},
-		{"m4a", []string{"--opus-bitrate", "32"}, "--opus-bitrate applies to opus output; this request names aac"},
-	} {
-		out := filepath.Join(dir, fmt.Sprintf("other%d.%s", i, c.ext))
-		args := append(append([]string{"transcode"}, c.other...), in, out)
-		if code, _, errOut := run(t, args...); code != 5 || !strings.Contains(errOut, c.want) {
-			t.Errorf("%s %v: exit = %d, stderr %q, want 5 and %q", c.ext, c.other, code, errOut, c.want)
+}
+
+// engineEncode is the engine's own encode of in under opts, in the form a
+// file output takes.
+func engineEncode(t *testing.T, in string, opts waxflow.TranscodeOptions) []byte {
+	t.Helper()
+	f, err := os.Open(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	src, err := container.FileSource(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Format == "aac" || opts.Format == "he-aac" {
+		opts.Container = waxflow.ContainerProgressive
+	}
+	out := filepath.Join(t.TempDir(), "engine.bin")
+	w, err := os.Create(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := waxflow.New().Transcode(t.Context(), src, "wav", w, opts); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// checkFlagRefusals runs transcode for each case and wants the exit code and
+// message, and no output written.
+func checkFlagRefusals(t *testing.T, cases []flagRefusalCase) {
+	t.Helper()
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.wav")
+	writeWAV(t, in, 4800)
+	for i, c := range cases {
+		out := filepath.Join(dir, fmt.Sprintf("out%d.%s", i, waxflow.OutputExt(c.format, "")))
+		args := append([]string{"transcode", "--format", c.format, in, out}, c.flags...)
+		if code, _, errOut := run(t, args...); code != c.code || !strings.Contains(errOut, c.want) {
+			t.Errorf("%v: exit = %d, stderr %q, want %d and %q", args[1:], code, errOut, c.code, c.want)
 		}
 		if _, err := os.Stat(out); err == nil {
-			t.Errorf("%s %v wrote %s", c.ext, c.other, out)
+			t.Errorf("%v wrote %s", args[1:], out)
+		}
+	}
+}
+
+// flagRefusalCase is one refused transcode: its format, flags, exit code and message.
+type flagRefusalCase struct {
+	format string
+	flags  []string
+	code   int
+	want   string
+}
+
+// TestTranscodeBitrateFlag: --bitrate in kbit/s reaches Bitrate on each format
+// with a bit rate, and any other format refuses it, exit 5, in the flag's
+// words: a lossless one as lossless, and vorbis naming --vorbis-quality.
+func TestTranscodeBitrateFlag(t *testing.T) {
+	checkKnobFlagReaches(t, []knobFlagCase{
+		{"mp3", []string{"--bitrate", "64"}, waxflow.TranscodeOptions{Format: "mp3", Bitrate: 64000}},
+		{"opus", []string{"--bitrate", "32"}, waxflow.TranscodeOptions{Format: "opus", Bitrate: 32000}},
+		{"m4a", []string{"--bitrate", "48"}, waxflow.TranscodeOptions{Format: "aac", Bitrate: 48000}},
+		{"m4a", []string{"--bitrate", "32"}, waxflow.TranscodeOptions{Format: "he-aac", Bitrate: 32000}},
+	})
+	checkFlagRefusals(t, []flagRefusalCase{
+		{"flac", []string{"--bitrate", "128"}, 5, "--bitrate applies to lossy output (opus, mp3, aac, he-aac); flac is lossless"},
+		{"wav", []string{"--bitrate", "128"}, 5, "--bitrate applies to lossy output (opus, mp3, aac, he-aac); wav is lossless"},
+		{"vorbis", []string{"--bitrate", "128"}, 5, "--bitrate does not apply to vorbis, which is quality-driven; use --vorbis-quality"},
+	})
+}
+
+// TestKnobFlagRefusalsReadAsTheServers: --bitrate on a lossless format and on
+// vorbis is refused in a job's sentence for bitrate, with the flags in place
+// of the fields.
+func TestKnobFlagRefusalsReadAsTheServers(t *testing.T) {
+	fields := strings.NewReplacer("--bitrate", "bitrate", "--vorbis-quality", "vorbisQuality")
+	for _, format := range []string{"flac", "vorbis"} {
+		err := waxflow.CheckKnobs(format, waxflow.KnobBitrate)
+		flag, job := flagWording.Reword(err), outshape.Job.Reword(err)
+		if waxerr.CodeOf(flag) != waxerr.CodeOf(job) || fields.Replace(waxerr.Message(flag)) != waxerr.Message(job) {
+			t.Errorf("%s: the CLI says %v, a job %v", format, flag, job)
+		}
+	}
+}
+
+// TestTranscodeVBRFlag: --vbr reaches VBR on mp3 and opus, beside a bit rate
+// too, and any other format refuses it, exit 5, in the flag's words.
+func TestTranscodeVBRFlag(t *testing.T) {
+	checkKnobFlagReaches(t, []knobFlagCase{
+		{"mp3", []string{"--vbr"}, waxflow.TranscodeOptions{Format: "mp3", VBR: true}},
+		{"mp3", []string{"--vbr", "--bitrate", "64"}, waxflow.TranscodeOptions{Format: "mp3", Bitrate: 64000, VBR: true}},
+		{"opus", []string{"--vbr"}, waxflow.TranscodeOptions{Format: "opus", VBR: true}},
+	})
+	checkFlagRefusals(t, []flagRefusalCase{
+		{"aac", []string{"--vbr"}, 5, "--vbr applies to opus, mp3 output; this request names aac"},
+		{"vorbis", []string{"--vbr"}, 5, "--vbr applies to opus, mp3 output; this request names vorbis"},
+		{"flac", []string{"--vbr"}, 5, "--vbr applies to lossy output (opus, mp3); flac is lossless"},
+	})
+}
+
+// TestTranscodeVorbisQualityFlag: --vorbis-quality reaches VorbisQuality on
+// vorbis, and any other format refuses it, exit 5. A value off the -1 to 10
+// scale, or not finite, is refused, exit 2, and so is 0, which the encoder
+// would read as its default.
+func TestTranscodeVorbisQualityFlag(t *testing.T) {
+	checkKnobFlagReaches(t, []knobFlagCase{
+		{"ogg", []string{"--vorbis-quality", "6"}, waxflow.TranscodeOptions{Format: "vorbis", VorbisQuality: 6}},
+		{"ogg", []string{"--vorbis-quality", "-1"}, waxflow.TranscodeOptions{Format: "vorbis", VorbisQuality: -1}},
+		{"ogg", []string{"--vorbis-quality", "0.5"}, waxflow.TranscodeOptions{Format: "vorbis", VorbisQuality: 0.5}},
+	})
+	want := ": want -1 to 10 other than 0 (omit the flag for the encoder's default, 3)"
+	checkFlagRefusals(t, []flagRefusalCase{
+		{"opus", []string{"--vorbis-quality", "4"}, 5, "--vorbis-quality applies to vorbis output; this request names opus"},
+		{"flac", []string{"--vorbis-quality", "0"}, 5, "--vorbis-quality applies to vorbis output; this request names flac"},
+		{"vorbis", []string{"--vorbis-quality", "0"}, 2, "--vorbis-quality 0" + want},
+		{"vorbis", []string{"--vorbis-quality", "10.5"}, 2, "--vorbis-quality 10.5" + want},
+		{"vorbis", []string{"--vorbis-quality", "-1.5"}, 2, "--vorbis-quality -1.5" + want},
+		{"vorbis", []string{"--vorbis-quality", "NaN"}, 2, "--vorbis-quality NaN" + want},
+		{"vorbis", []string{"--vorbis-quality", "Inf"}, 2, "--vorbis-quality +Inf" + want},
+	})
+}
+
+// TestFormatFlagsNameTheEncodersDefault: a format's own flag shows no default
+// of its own, since it reaches the options only when given; its help names the
+// encoder's.
+func TestFormatFlagsNameTheEncodersDefault(t *testing.T) {
+	for _, c := range []struct {
+		cmd   *cobra.Command
+		flags []string
+	}{
+		{newTranscodeCmd(Flavor{}), []string{"flac-level", "wavpack-level", "ape-level", "bitrate", "vbr",
+			"vorbis-quality", "opus-complexity", "opus-signal", "he-v2"}},
+		{newSplitCmd(Flavor{}), []string{"flac-level", "wavpack-level", "ape-level"}},
+	} {
+		for _, name := range c.flags {
+			f := c.cmd.Flags().Lookup(name)
+			if f == nil {
+				t.Errorf("%s has no --%s", c.cmd.Name(), name)
+				continue
+			}
+			if !slices.Contains([]string{"0", "false", ""}, f.DefValue) {
+				t.Errorf("%s --%s shows the default %q", c.cmd.Name(), name, f.DefValue)
+			}
+			if !strings.Contains(f.Usage, "default: the encoder's, ") {
+				t.Errorf("%s --%s help does not name the encoder's default: %q", c.cmd.Name(), name, f.Usage)
+			}
 		}
 	}
 }
@@ -1004,16 +1147,33 @@ func TestTranscodeRefusesFlagsBeforeTheSourceOpens(t *testing.T) {
 		code int
 		want string
 	}{
-		{[]string{"--format", "opsu", "--opus-bitrate", "64"}, 5, `unsupported output format "opsu"`},
-		{[]string{"--format", "mp3", "--container", "mka", "--opus-bitrate", "64"}, 2, "format mp3 has no alternate container (container=mka)"},
-		{[]string{"--format", "mp3", "--opus-bitrate", "64"}, 5, "--opus-bitrate applies to opus output; this request names mp3"},
+		{[]string{"--format", "opsu", "--bitrate", "64"}, 5, `unsupported output format "opsu"`},
+		{[]string{"--format", "wavpack", "--container", "mka", "--bitrate", "64"}, 2, "format wavpack has no alternate container (container=mka)"},
+		{[]string{"--format", "flac", "--bitrate", "-5", "--vorbis-quality", "0"}, 5, "--bitrate applies to lossy output (opus, mp3, aac, he-aac); flac is lossless"},
+		{[]string{"--format", "vorbis", "--bitrate", "64"}, 5, "--bitrate does not apply to vorbis, which is quality-driven; use --vorbis-quality"},
+		{[]string{"--format", "aac", "--vbr", "--flac-level", "8"}, 5, "--vbr applies to opus, mp3 output; this request names aac"},
+		{[]string{"--format", "aac", "--vbr", "--bitrate", "-5"}, 5, "--vbr applies to opus, mp3 output; this request names aac"},
+		{[]string{"--format", "mp3", "--bitrate", "-5", "--flac-level", "8"}, 2, "--bitrate -5: want 0"},
+		// A knob flag given at its zero value is refused off its formats too,
+		// at the same point in the order.
+		{[]string{"--format", "vorbis", "--bitrate", "0"}, 5, "--bitrate does not apply to vorbis, which is quality-driven; use --vorbis-quality"},
+		{[]string{"--format", "flac", "--bitrate", "0"}, 5, "--bitrate applies to lossy output (opus, mp3, aac, he-aac); flac is lossless"},
+		{[]string{"--format", "flac", "--vbr=false"}, 5, "--vbr applies to lossy output (opus, mp3); flac is lossless"},
+		{[]string{"--format", "aac", "--vbr=false", "--bitrate", "-5"}, 5, "--vbr applies to opus, mp3 output; this request names aac"},
+		{[]string{"--format", "aac", "--he-v2=false"}, 5, "--he-v2 applies to he-aac output; this request names aac"},
+		{[]string{"--format", "flac", "--wavpack-level", "0"}, 5, "--wavpack-level applies to wavpack output; this request names flac"},
+		{[]string{"--format", "wavpack", "--ape-level", "0"}, 5, "--ape-level applies to ape output; this request names wavpack"},
+		{[]string{"--format", "mp3", "--opus-signal", "auto"}, 5, "--opus-signal applies to opus output; this request names mp3"},
+		{[]string{"--format", "mp3", "--bitrate", "-5", "--wavpack-level", "0"}, 2, "--bitrate -5: want 0"},
+		{[]string{"--format", "opus", "--vorbis-quality", "4"}, 5, "--vorbis-quality applies to vorbis output; this request names opus"},
+		{[]string{"--format", "vorbis", "--vorbis-quality", "0"}, 2, "--vorbis-quality 0: want -1 to 10 other than 0"},
 		{[]string{"--format", "wav", "--flac-level", "8"}, 5, "--flac-level applies to flac output; this request names wav"},
 		{[]string{"--format", "flac", "--flac-level", "9"}, 2, "--flac-level 9: want 0 to 8"},
 		{[]string{"--format", "opus", "--opus-complexity", "11"}, 2, "--opus-complexity 11: want 0 to 10"},
-		{[]string{"--format", "wavpack", "--wavpack-level", "9"}, 2, "WavPack level 9 outside 1..4"},
-		{[]string{"--format", "ape", "--ape-level", "4000"}, 2, "APE level 4000 decodes but is not written"},
-		{[]string{"--format", "opus", "--opus-signal", "foo"}, 2, `opus signal hint "foo" is not auto, voice, or music`},
-		{[]string{"--format", "mp3", "--mp3-bitrate", "-5"}, 2, "--mp3-bitrate -5: want 0"},
+		{[]string{"--format", "wavpack", "--wavpack-level", "9"}, 2, "--wavpack-level 9: want 1 to 4"},
+		{[]string{"--format", "ape", "--ape-level", "4000"}, 2, "--ape-level 4000 decodes but is not written; want 1000, 2000, or 3000"},
+		{[]string{"--format", "ape", "--ape-level", "2500"}, 2, "--ape-level 2500: want 1000, 2000, or 3000"},
+		{[]string{"--format", "opus", "--opus-signal", "foo"}, 2, `--opus-signal "foo": want auto, voice, or music`},
 	} {
 		for _, src := range []string{in, missing} {
 			out := filepath.Join(dir, "out.bin")
@@ -1043,8 +1203,11 @@ func TestSplitRefusesFlagsBeforeTheSourceOpens(t *testing.T) {
 		{[]string{"--format", "wav", "--container", "webm", "--flac-level", "8"}, 2, `wav container "webm"`},
 		{[]string{"--format", "wav", "--flac-level", "8"}, 5, "--flac-level applies to flac output; this request names wav"},
 		{[]string{"--format", "flac", "--flac-level", "9"}, 2, "--flac-level 9: want 0 to 8"},
-		{[]string{"--format", "wavpack", "--wavpack-level", "9"}, 2, "WavPack level 9 outside 1..4"},
-		{[]string{"--format", "ape", "--ape-level", "4000"}, 2, "APE level 4000 decodes but is not written"},
+		{[]string{"--format", "wavpack", "--wavpack-level", "9"}, 2, "--wavpack-level 9: want 1 to 4"},
+		{[]string{"--format", "ape", "--ape-level", "4000"}, 2, "--ape-level 4000 decodes but is not written; want 1000, 2000, or 3000"},
+		{[]string{"--format", "ape", "--ape-level", "2500"}, 2, "--ape-level 2500: want 1000, 2000, or 3000"},
+		{[]string{"--format", "flac", "--wavpack-level", "0"}, 5, "--wavpack-level applies to wavpack output; this request names flac"},
+		{[]string{"--format", "wavpack", "--ape-level", "0"}, 5, "--ape-level applies to ape output; this request names wavpack"},
 	} {
 		args := append([]string{"split", missing, filepath.Join(dir, "out"), "--at", "24000"}, c.args...)
 		code, _, errOut := run(t, args...)
@@ -1054,10 +1217,10 @@ func TestSplitRefusesFlagsBeforeTheSourceOpens(t *testing.T) {
 	}
 }
 
-// TestTranscodeBitrateFlagsAreBounded: a bit-rate flag below 0 or above
+// TestTranscodeBitrateFlagIsBounded: --bitrate below 0 or above
 // waxflow.MaxBitrate in kbit/s is refused in the flag's words before it is
 // multiplied, so no value wraps to a rate the caller never asked for.
-func TestTranscodeBitrateFlagsAreBounded(t *testing.T) {
+func TestTranscodeBitrateFlagIsBounded(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.wav")
 	writeWAV(t, in, 4800)
@@ -1067,10 +1230,10 @@ func TestTranscodeBitrateFlagsAreBounded(t *testing.T) {
 		args   []string
 		want   string
 	}{
-		{"mp3", []string{"--mp3-bitrate", over}, "--mp3-bitrate " + over + ": want 0 (the encoder's default) to 2147483 kbit/s"},
-		{"opus", []string{"--opus-bitrate", over}, "--opus-bitrate " + over + ": want 0"},
-		{"aac", []string{"--aac-bitrate", over}, "--aac-bitrate " + over + ": want 0"},
-		{"he-aac", []string{"--aac-bitrate", "-5"}, "--aac-bitrate -5: want 0"},
+		{"mp3", []string{"--bitrate", over}, "--bitrate " + over + ": want 0 (the encoder's default) to 2147483 kbit/s"},
+		{"opus", []string{"--bitrate", over}, "--bitrate " + over + ": want 0"},
+		{"aac", []string{"--bitrate", over}, "--bitrate " + over + ": want 0"},
+		{"he-aac", []string{"--bitrate", "-5"}, "--bitrate -5: want 0"},
 	} {
 		out := filepath.Join(dir, "out."+waxflow.OutputExt(c.format, ""))
 		args := append([]string{"transcode", "--format", c.format, in, out}, c.args...)
@@ -1121,7 +1284,7 @@ func TestAnErrorIsPrefixedOnce(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"--format", "wavpack", "--wavpack-level", "9"}, "waxflow: WavPack level 9"},
+		{[]string{"--format", "opsu"}, `waxflow: unsupported output format "opsu"`},
 		{[]string{"--format", "aac", "--he-v2"}, "waxflow: --he-v2 applies"},
 	} {
 		args := append([]string{"transcode", in, filepath.Join(dir, "out.bin")}, c.args...)

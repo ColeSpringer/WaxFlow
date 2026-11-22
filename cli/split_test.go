@@ -738,7 +738,7 @@ func TestSplitDryRunRefusesALevelTheRunWould(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"wavpack", []string{"--format", "wavpack", "--wavpack-level", "9"}, "WavPack level 9"},
+		{"wavpack", []string{"--format", "wavpack", "--wavpack-level", "9"}, "--wavpack-level 9: want 1 to 4"},
 		{"flac in mka", []string{"--format", "flac", "--container", "mka", "--flac-level", "99"}, "--flac-level 99: want 0 to 8"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1897,15 +1897,29 @@ func opusSignal(opts TranscodeOptions) (opus.Signal, error) {
 	case "music":
 		return opus.SignalMusic, nil
 	}
-	return opus.SignalAuto, waxerr.New(waxerr.CodeInvalidRequest,
-		fmt.Sprintf("opus signal hint %q is not auto, voice, or music", opts.OpusSignal))
+	return opus.SignalAuto, rangeError(&RangeError{Knob: KnobOpusSignal, Value: opts.OpusSignal,
+		Values: []string{"auto", "voice", "music"}})
+}
+
+// rangeError is Check's refusal of a knob out of range.
+func rangeError(e *RangeError) error {
+	return waxerr.Wrap(waxerr.CodeInvalidRequest, "", e)
 }
 
 // checkOpusComplexity refuses an OpusComplexity outside OpusComplexityLowest
 // and 0 through 10.
 func checkOpusComplexity(opts TranscodeOptions) error {
 	if c := opts.OpusComplexity; c < OpusComplexityLowest || c > 10 {
-		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("waxflow: Opus complexity %d outside -1..10", c))
+		return rangeError(&RangeError{Knob: KnobOpusComplexity, Value: c, Min: OpusComplexityLowest, Max: 10})
+	}
+	return nil
+}
+
+// checkVorbisQuality refuses a VorbisQuality off libvorbis's -q scale. Zero is
+// the default and in range.
+func checkVorbisQuality(opts TranscodeOptions) error {
+	if q := opts.VorbisQuality; q < -1 || q > 10 {
+		return rangeError(&RangeError{Knob: KnobVorbisQuality, Value: q, Min: -1, Max: 10})
 	}
 	return nil
 }
@@ -1944,8 +1958,7 @@ func flacLevel(opts TranscodeOptions) (int, error) {
 	case opts.FLACLevel >= 1 && opts.FLACLevel <= 8:
 		return opts.FLACLevel, nil
 	}
-	return 0, waxerr.New(waxerr.CodeInvalidRequest,
-		fmt.Sprintf("waxflow: FLAC level %d outside -1..8", opts.FLACLevel))
+	return 0, rangeError(&RangeError{Knob: KnobFLACLevel, Value: opts.FLACLevel, Min: FLACLevelFastest, Max: 8})
 }
 
 // wavpackLevel resolves TranscodeOptions.WavPackLevel: the zero value keeps
@@ -1959,9 +1972,8 @@ func wavpackLevel(opts TranscodeOptions) (int, error) {
 	case opts.WavPackLevel >= WavPackLevelFast && opts.WavPackLevel <= WavPackLevelVeryHigh:
 		return opts.WavPackLevel, nil
 	}
-	return 0, waxerr.New(waxerr.CodeInvalidRequest,
-		fmt.Sprintf("waxflow: WavPack level %d outside %d..%d",
-			opts.WavPackLevel, WavPackLevelFast, WavPackLevelVeryHigh))
+	return 0, rangeError(&RangeError{Knob: KnobWavPackLevel, Value: opts.WavPackLevel,
+		Min: WavPackLevelFast, Max: WavPackLevelVeryHigh})
 }
 
 // apeLevel resolves TranscodeOptions.APELevel: the zero value keeps the
@@ -1975,16 +1987,12 @@ func apeLevel(opts TranscodeOptions) (int, error) {
 		return ape.DefaultEncoderLevel, nil
 	case opts.APELevel >= APELevelFast && opts.APELevel <= APELevelHigh && opts.APELevel%1000 == 0:
 		return opts.APELevel, nil
-	case opts.APELevel > APELevelHigh && opts.APELevel <= ape.LevelInsane && opts.APELevel%1000 == 0:
+	}
+	return 0, rangeError(&RangeError{Knob: KnobAPELevel, Value: opts.APELevel,
+		Values: []string{fmt.Sprint(APELevelFast), fmt.Sprint(APELevelNormal), fmt.Sprint(APELevelHigh)},
 		// The likeliest wrong answer, since the format documents five levels
 		// and this writes three. Say which half of that it is.
-		return 0, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("waxflow: APE level %d decodes but is not written; want %d, %d, or %d",
-				opts.APELevel, APELevelFast, APELevelNormal, APELevelHigh))
-	}
-	return 0, waxerr.New(waxerr.CodeInvalidRequest,
-		fmt.Sprintf("waxflow: APE level %d is not one of %d, %d, or %d",
-			opts.APELevel, APELevelFast, APELevelNormal, APELevelHigh))
+		Unwritten: opts.APELevel > APELevelHigh && opts.APELevel <= ape.LevelInsane && opts.APELevel%1000 == 0})
 }
 
 // apeSnapDepth rounds an integer bit depth up to the nearest Monkey's Audio

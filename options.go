@@ -155,9 +155,10 @@ type TranscodeOptions struct {
 	// format with a bit rate (mp3, opus, aac, he-aac); 0 keeps the encoder's
 	// default (mp3 128000, opus 96000, aac 128000, he-aac 64000 or 32000 under
 	// HEAACv2). A negative value or one above MaxBitrate is refused. An mp3
-	// rate must be a legal Layer III rate for the output sample rate; aac
-	// holds its long-term mean with a bit reservoir. Vorbis takes none (no
-	// ABR).
+	// rate must be a whole number of kbit/s, and one the layer does not hold
+	// at the output sample rate is clamped to the highest it holds at or below
+	// it (its lowest, below that); aac holds its long-term mean with a bit
+	// reservoir. Vorbis takes none (no ABR).
 	Bitrate int
 	// VBR selects variable bit rate for mp3 and opus output, sizing each
 	// frame to its content around Bitrate (for mp3, the quality anchor). The
@@ -198,10 +199,11 @@ type TranscodeOptions struct {
 // float (a NaN in the plan cache's key is an entry no lookup reaches again), a
 // Bitrate below 0 or above MaxBitrate, a negative FromSample, an unregistered
 // Format, a Container the format has no form for, a set knob the format does
-// not take, which is CodeUnsupportedFormat wrapping a *KnobError, and a
-// level, Opus complexity or Opus signal outside its range. Every engine method
-// that takes the options runs it before it plans or encodes, and a boundary
-// may run it before it has a track.
+// not take (CheckKnobs), which is CodeUnsupportedFormat wrapping a *KnobError,
+// and a level, Opus complexity, Opus signal or Vorbis quality outside its
+// range, CodeInvalidRequest wrapping a *RangeError. Every engine method that
+// takes the options runs it before it plans or encodes, and a boundary may run
+// it before it has a track.
 func (o TranscodeOptions) Check() error {
 	for _, f := range []struct {
 		name string
@@ -230,14 +232,8 @@ func (o TranscodeOptions) Check() error {
 	if _, err := row.form(o.Container); err != nil {
 		return err
 	}
-	if off := o.Knobs() &^ row.knobs; off != 0 {
-		k := off & -off
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "", &KnobError{
-			Knob:     k,
-			Format:   row.name,
-			Takers:   knobTakers(k),
-			Lossless: !row.lossy && k&(KnobBitrate|KnobVBR) != 0,
-		})
+	if err := CheckKnobs(row.name, o.Knobs()); err != nil {
+		return err
 	}
 	// The range of each knob the format takes. An unset knob is its default
 	// and passes, and the knob rule above refused a set one the format lacks.
@@ -247,10 +243,36 @@ func (o TranscodeOptions) Check() error {
 		func(o TranscodeOptions) error { _, err := apeLevel(o); return err },
 		checkOpusComplexity,
 		func(o TranscodeOptions) error { _, err := opusSignal(o); return err },
+		checkVorbisQuality,
 	} {
 		if err := check(o); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// CheckKnobs refuses a knob in set that format does not take, as Check does:
+// CodeUnsupportedFormat wrapping a *KnobError for the lowest such knob. A bit
+// that names no knob is CodeInvalidRequest, before the format is asked. An
+// unregistered format is Check's refusal of it, and nil means format takes
+// every knob in set.
+func CheckKnobs(format string, set Knob) error {
+	if bad := set &^ (Knob(1)<<len(knobNames) - 1); bad != 0 {
+		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("waxflow: %s is not a knob", bad&-bad))
+	}
+	row, err := outputRow(format)
+	if err != nil {
+		return err
+	}
+	if off := set &^ row.knobs; off != 0 {
+		k := off & -off
+		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "", &KnobError{
+			Knob:     k,
+			Format:   row.name,
+			Takers:   knobTakers(k),
+			Lossless: !row.lossy && k&(KnobBitrate|KnobVBR) != 0,
+		})
 	}
 	return nil
 }
@@ -339,6 +361,60 @@ func (e *KnobError) Error() string {
 		return fmt.Sprintf("waxflow: %s applies to lossy output (%s); %s is lossless", e.Knob, takers, e.Format)
 	}
 	return fmt.Sprintf("waxflow: %s applies to %s output; this request names %s", e.Knob, takers, e.Format)
+}
+
+// RangeError is a knob set to a value it does not take. Check returns it
+// inside a CodeInvalidRequest error, so a boundary can word it in its own
+// spelling of the knob, as it does a *KnobError.
+type RangeError struct {
+	Knob  Knob
+	Value any // as given: an int, a float64 or a string
+	// Min and Max bound a numeric knob; Values lists the ones a knob that
+	// takes a set accepts.
+	Min, Max float64
+	Values   []string
+	// Unwritten is a level the format decodes and the encoder does not write.
+	Unwritten bool
+}
+
+// Want is what the knob takes, "-1 to 8" or "auto, voice, or music".
+func (e *RangeError) Want() string {
+	if len(e.Values) == 0 {
+		return fmt.Sprintf("%g to %g", e.Min, e.Max)
+	}
+	switch n := len(e.Values); n {
+	case 1:
+		return e.Values[0]
+	case 2:
+		return e.Values[0] + " or " + e.Values[1]
+	default:
+		return strings.Join(e.Values[:n-1], ", ") + ", or " + e.Values[n-1]
+	}
+}
+
+// rangeSubjects name each knob with a range in Check's sentences.
+var rangeSubjects = map[Knob]string{
+	KnobFLACLevel:      "FLAC level",
+	KnobWavPackLevel:   "WavPack level",
+	KnobAPELevel:       "APE level",
+	KnobOpusComplexity: "Opus complexity",
+	KnobVorbisQuality:  "Vorbis quality",
+}
+
+func (e *RangeError) Error() string {
+	subject, ok := rangeSubjects[e.Knob]
+	if !ok {
+		subject = e.Knob.String()
+	}
+	switch {
+	case e.Knob == KnobOpusSignal:
+		return fmt.Sprintf("opus signal hint %q is not %s", e.Value, e.Want())
+	case e.Unwritten:
+		return fmt.Sprintf("waxflow: %s %v decodes but is not written; want %s", subject, e.Value, e.Want())
+	case len(e.Values) > 0:
+		return fmt.Sprintf("waxflow: %s %v is not one of %s", subject, e.Value, e.Want())
+	}
+	return fmt.Sprintf("waxflow: %s %v outside %g..%g", subject, e.Value, e.Min, e.Max)
 }
 
 // knobTakers lists the formats that take k, in table order.

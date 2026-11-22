@@ -1,19 +1,17 @@
 package server
 
 import (
-	"errors"
 	"fmt"
 	"math"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/internal/gainspec"
 	"github.com/colespringer/waxflow/internal/meta"
+	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/internal/sign"
 	"github.com/colespringer/waxflow/internal/timeline"
 	"github.com/colespringer/waxflow/source"
@@ -56,37 +54,6 @@ func gainCeilingFor(d gain.Preset) float64 {
 	return maxVoiceGainDB
 }
 
-// The policy bounds on the silence= parameters. Like the gain ceilings
-// above, these are taste and so they live here rather than in the engine: a
-// threshold under -90 dBFS is below the noise floor of any real source and a
-// minimum span past a minute is not describing silence any more, but neither
-// is wrong in the way a NaN threshold is wrong, and a library caller
-// analyzing synthetic content may legitimately want either. The engine
-// enforces only what dsp/silence needs to be correct (finite, negative,
-// positive), exactly as it bounds gain at +-120 dB and leaves the +12 dB
-// taste to this layer.
-const (
-	minSilenceThresholdDB = -90.0
-	maxSilenceMinDuration = 60 * time.Second
-)
-
-// checkSilenceOptions applies the policy bounds at the API boundary, so an
-// accepted job cannot fail on request shape later.
-func checkSilenceOptions(o *waxflow.SilenceOptions) error {
-	// Written to fail NaN as well as out-of-range values, the dsp.NewChain
-	// idiom: a non-finite threshold would otherwise slip past a > check.
-	if o.ThresholdDB != 0 && !(o.ThresholdDB >= minSilenceThresholdDB && o.ThresholdDB < 0) {
-		return waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("silence threshold %g dBFS outside %g..0", o.ThresholdDB, minSilenceThresholdDB))
-	}
-	// 0 is legal and means the engine default, like the threshold's 0.
-	if o.MinDuration < 0 || o.MinDuration > maxSilenceMinDuration {
-		return waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("silence minimum duration %v outside 0..%v", o.MinDuration, maxSilenceMinDuration))
-	}
-	return nil
-}
-
 // dynamicsOff is the wire spelling of gain.PresetOff. The kernel's
 // vocabulary spells it as the empty string, but a URL and a cache key both
 // need it nameable.
@@ -125,67 +92,6 @@ func parseDynamics(v string) (gain.Preset, error) {
 	}
 	return "", waxerr.New(waxerr.CodeInvalidRequest,
 		fmt.Sprintf("dynamics %q: want %s", v, strings.Join(dynamicsSpellings(), ", ")))
-}
-
-// maxKbps is the largest kbit/s value a request may name, refused before it is
-// multiplied to bits per second.
-const maxKbps = waxflow.MaxBitrate / 1000
-
-// knobParams are the parameters /stream, HLS and jobs spell the engine's
-// knobs with; a knob none of them sets has no entry.
-var knobParams = map[waxflow.Knob]string{
-	waxflow.KnobBitrate:      "bitrate",
-	waxflow.KnobHEAACv2:      "hev2",
-	waxflow.KnobFLACLevel:    "flacLevel",
-	waxflow.KnobWavPackLevel: "wavpackLevel",
-	waxflow.KnobAPELevel:     "apeLevel",
-}
-
-// knobWording is how one surface words a knob refusal.
-type knobWording struct {
-	bitrate string // the bit rate's parameter, or its two spelled "a/b"
-	verb    string // "applies", or "apply" for two parameters
-	// formats are the ones the surface produces; nil is every format.
-	formats []string
-}
-
-// The surfaces' wordings: /stream takes bitrate or q, an HLS mint bitrate or
-// bitrates and only the segmented formats, a job bitrate.
-var (
-	streamKnobs = knobWording{bitrate: "bitrate/q", verb: "apply"}
-	hlsKnobs    = knobWording{bitrate: "bitrate/bitrates", verb: "apply", formats: waxflow.SegmentedFormats()}
-	jobKnobs    = knobWording{bitrate: "bitrate", verb: "applies"}
-)
-
-// knobRefusal words the engine's *KnobError in a surface's parameter names,
-// naming the parameter, the format and the formats that take it among those
-// the surface produces. Any other error passes through.
-func knobRefusal(err error, w knobWording) error {
-	ke, ok := errors.AsType[*waxflow.KnobError](err)
-	if !ok {
-		return err
-	}
-	param, ok := knobParams[ke.Knob]
-	if !ok {
-		return err
-	}
-	verb := "applies"
-	if ke.Knob == waxflow.KnobBitrate {
-		param, verb = w.bitrate, w.verb
-	}
-	var takers []string
-	for _, f := range ke.Takers {
-		if w.formats == nil || slices.Contains(w.formats, f) {
-			takers = append(takers, f)
-		}
-	}
-	list := strings.Join(takers, ", ")
-	if ke.Lossless {
-		return waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("%s %s to lossy output (%s); %s is lossless", param, verb, list, ke.Format))
-	}
-	return waxerr.New(waxerr.CodeUnsupportedFormat,
-		fmt.Sprintf("%s %s to %s output; this request names %s", param, verb, list, ke.Format))
 }
 
 // maxSeekSeconds bounds t=. Beyond any real recording, and small enough
@@ -365,11 +271,12 @@ type streamParams struct {
 	// exclusive.
 	tl string
 	// crossfade is the timeline's seam blend in seconds, 0 for a butt-join.
-	crossfade  float64
-	format     string // output name or "auto"
-	rate       int
-	ch         int
-	bits       int
+	crossfade float64
+	// shape is the output shape as sent, its format "auto" when absent.
+	shape outshape.Params
+	// q is the quality preset as sent, "" when absent; the resolved format
+	// says what it selects.
+	q          string
 	gain       gainspec.Spec
 	gainParam  string // gain= as sent, "" when absent, which a timeline's refusal names
 	dynamics   gain.Preset
@@ -377,17 +284,9 @@ type streamParams struct {
 	span       span    // source-sample window; the zero value is the whole source
 	track      int     // -1 when absent
 	maxBitRate int     // kbit/s cap for the decision ladder; 0 (absent) is no cap, an explicit 0 is refused
-	bitrate    int     // lossy output bit rate in kbit/s; 0 selects the default
-	hev2       bool    // HE-AAC v2 selection; he-aac output only
-	container  string  // container override ("adts"); "" selects the format default
 	identity   string  // id= parameter, "" when absent
+	pinned     bool    // id= is present, empty or not
 }
-
-// qPreset maps the q= quality preset to a lossy CBR bit rate in kbit/s. These
-// are MP3 CBR points; when a VBR codec lands, q will need a per-codec quality
-// mapping rather than a shared bit-rate ladder (the encoder clamps an
-// out-of-range preset to a layer-legal rate, so a preset never fails).
-var qPreset = map[string]int{"low": 96, "med": 128, "high": 192}
 
 func parseStreamParams(q url.Values, defaultGain gainspec.Spec) (*streamParams, error) {
 	bad := func(format string, args ...any) (*streamParams, error) {
@@ -402,8 +301,7 @@ func parseStreamParams(q url.Values, defaultGain gainspec.Spec) (*streamParams, 
 	if err != nil {
 		return nil, err
 	}
-	p := &streamParams{src: src, tl: q.Get("tl"), format: q.Get("format"), track: -1,
-		identity: q.Get("id"), gainParam: q.Get("gain")}
+	p := &streamParams{src: src, tl: q.Get("tl"), track: -1, identity: q.Get("id"), pinned: q.Has("id"), gainParam: q.Get("gain")}
 	if q.Has("tl") {
 		switch {
 		case p.tl == "":
@@ -419,70 +317,47 @@ func parseStreamParams(q url.Values, defaultGain gainspec.Spec) (*streamParams, 
 	} else if p.src == "" {
 		return bad("src is required")
 	}
-	if q.Has("crossfadeSeconds") {
-		v := q.Get("crossfadeSeconds")
-		if v == "" {
-			return bad("crossfadeSeconds is present but empty; omit it for a butt-join")
-		}
-		x, err := parseSeconds("crossfadeSeconds", v)
-		if err != nil {
-			return nil, err
-		}
-		// Refused rather than ignored, as on the HLS descriptor: one source has
-		// no seam, so a crossfade on it would silently do nothing.
-		if x > 0 && p.tl == "" {
-			return bad("crossfadeSeconds %g on a src: a crossfade blends a timeline's seams, and one source has none", x)
-		}
-		p.crossfade = x
+	x, err := parseSeconds("crossfadeSeconds", "for a butt-join", q.Get("crossfadeSeconds"), q.Has("crossfadeSeconds"))
+	if err != nil {
+		return nil, err
 	}
-	if p.format == "" {
-		p.format = "auto"
+	// Refused rather than ignored, as on the HLS descriptor: one source has
+	// no seam, so a crossfade on it would silently do nothing.
+	if x > 0 && p.tl == "" {
+		return bad("crossfadeSeconds %g on a src: a crossfade blends a timeline's seams, and one source has none", x)
+	}
+	p.crossfade = x
+	get := func(name string) (string, bool) { return q.Get(name), q.Has(name) }
+	// q stays as sent until the format resolves: what it selects is the
+	// format's (streamOptions).
+	if p.shape, p.q, err = outshape.ParseQuery(get); err != nil {
+		return nil, err
+	}
+	if p.shape.Format == "" {
+		p.shape.Format = "auto"
 	}
 	// container= overrides the format's default packaging where one
 	// exists (today: aac's adts opt-out). Whether the resolved format
 	// honors it is the plan's call; format=auto never resolves to a
 	// format with alternates, so pairing it with auto is a caller error.
-	p.container = q.Get("container")
-	if p.container != "" && p.format == "auto" {
+	if p.shape.Container != "" && p.shape.Format == "auto" {
 		return bad("container requires an explicit format")
-	}
-
-	if p.rate, err = intParam(q, "rate", 0); err != nil {
-		return nil, err
-	}
-	if p.ch, err = intParam(q, "ch", 0); err != nil {
-		return nil, err
-	}
-	if p.bits, err = intParam(q, "bits", 0); err != nil {
-		return nil, err
 	}
 	if p.track, err = intParam(q, "track", -1); err != nil {
 		return nil, err
 	}
-	if p.maxBitRate, err = intParam(q, "maxBitRate", 0); err != nil {
-		return nil, err
-	}
-	// These four default to 0 meaning "keep the source's value", so intParam
-	// cannot tell absent from an explicit zero. Omitting the parameter is the
-	// only spelling of the default, as with track below and to=0 in
-	// parseSpan. Empty is refused separately: "must be positive" would name a
-	// value the request does not contain.
-	for _, np := range []struct {
-		name string
-		val  int
-	}{{"rate", p.rate}, {"ch", p.ch}, {"bits", p.bits}, {"maxBitRate", p.maxBitRate}} {
-		if !q.Has(np.name) {
-			continue
+	// Omitting maxBitRate is the only spelling of no cap, as with track below
+	// and to=0 in parseSpan; a value is a kbit/s rate, refused as bitrate is.
+	if v := q.Get("maxBitRate"); q.Has("maxBitRate") {
+		if v == "" {
+			return bad("maxBitRate is present but empty; omit it for no cap")
 		}
-		if q.Get(np.name) == "" {
-			return bad("%s is present but empty; omit it to keep the source's value", np.name)
-		}
-		if np.val <= 0 {
-			return bad("%s must be positive; omit it to keep the source's value", np.name)
+		if p.maxBitRate, err = strconv.Atoi(v); err != nil || p.maxBitRate <= 0 {
+			return bad("maxBitRate %q: want a positive integer", v)
 		}
 	}
-	if p.maxBitRate > maxKbps {
-		return bad("maxBitRate %d: want at most %d kbit/s", p.maxBitRate, maxKbps)
+	if p.maxBitRate > outshape.MaxKbps {
+		return bad("maxBitRate %d: want at most %d kbit/s", p.maxBitRate, outshape.MaxKbps)
 	}
 	// track has its own message: 0 is a legal track, so it refuses at
 	// negative.
@@ -494,89 +369,53 @@ func parseStreamParams(q url.Values, defaultGain gainspec.Spec) (*streamParams, 
 			return bad("track must be non-negative")
 		}
 	}
-	switch p.bits {
-	case 0, 16, 24:
-		// The public contract is bits=16|24; the chain could do more,
-		// but the API stays small until a need exists.
-	default:
-		return bad("bits %d: want 16 or 24", p.bits)
-	}
-	// Lossy quality selection: q= is a named preset, bitrate= an explicit
-	// kbit/s rate, mutually exclusive. Whether the resolved output can honor
-	// them is checked after format resolution (planTranscode).
-	//
-	// bitrate takes the empty-value rule too, or it and the HLS mint (whose
-	// atoi refuses an empty one) answer the same URL differently.
-	if q.Has("bitrate") && q.Get("bitrate") == "" {
-		return bad("bitrate is present but empty; omit it to take the format's default")
-	}
-	if q.Get("q") != "" && q.Get("bitrate") != "" {
-		return bad("q and bitrate are mutually exclusive")
-	}
-	if v := q.Get("q"); v != "" {
-		kbps, ok := qPreset[v]
-		if !ok {
-			return bad("q %q: want low, med, or high", v)
-		}
-		p.bitrate = kbps
-	} else if q.Get("bitrate") != "" {
-		if p.bitrate, err = intParam(q, "bitrate", 0); err != nil {
-			return nil, err
-		}
-		if p.bitrate <= 0 {
-			return bad("bitrate must be a positive kbit/s value")
-		}
-		if p.bitrate > maxKbps {
-			return bad("bitrate %d: want at most %d kbit/s", p.bitrate, maxKbps)
-		}
-	}
-	// hev2 is boolean; like the format check on bitrate, whether the
-	// resolved output can honor it is planTranscode's call.
-	if v := q.Get("hev2"); v != "" {
-		if p.hev2, err = strconv.ParseBool(v); err != nil {
-			return bad("hev2 %q: want a boolean", v)
-		}
-	} else if q.Has("hev2") {
-		return bad("hev2 is present but empty; omit it to encode HE-AAC v1")
-	}
 	if p.gain, err = parseGain(q.Get("gain"), defaultGain); err != nil {
 		return nil, err
 	}
 	if p.dynamics, err = parseDynamics(q.Get("dynamics")); err != nil {
 		return nil, err
 	}
-	if ts := q.Get("t"); ts != "" {
+	if ts, ok := get("t"); ok {
+		if ts == "" {
+			return bad("t is present but empty; omit it to start at the beginning")
+		}
 		t, err := strconv.ParseFloat(ts, 64)
 		if err != nil || math.IsNaN(t) || t < 0 || t > maxSeekSeconds {
 			return bad("t %q: want seconds within 0..%g", ts, float64(maxSeekSeconds))
 		}
 		p.t = t
 	}
-	if p.span, err = parseSpan(q.Get("from"), q.Get("to")); err != nil {
+	if p.span, err = parseSpan(get); err != nil {
 		return nil, err
 	}
 	return p, nil
 }
 
-// parseSpan parses the from/to virtual-track window. Both are source
-// samples and to is exclusive; either may be absent.
+// parseSpan parses the from/to virtual-track window from get. Both are source
+// samples and to is exclusive; either may be absent, and neither empty.
 //
 // The window is only checked for internal sense here (non-negative,
 // ascending). Whether it fits the source is SpanTrack's call, which needs
 // the probed length and makes it in one place for both the plan and the
 // run.
-func parseSpan(fromV, toV string) (span, error) {
+func parseSpan(get func(name string) (string, bool)) (span, error) {
 	bad := func(format string, args ...any) (span, error) {
 		return span{}, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(format, args...))
 	}
 	var sp span
 	var err error
-	if fromV != "" {
+	if fromV, ok := get("from"); ok {
+		if fromV == "" {
+			return bad("from is present but empty; omit it to start at the source's start")
+		}
 		if sp.from, err = strconv.ParseInt(fromV, 10, 64); err != nil || sp.from < 0 {
 			return bad("from %q: want a non-negative sample offset on the source timeline", fromV)
 		}
 	}
-	if toV != "" {
+	if toV, ok := get("to"); ok {
+		if toV == "" {
+			return bad("to is present but empty; omit it to run to the source's end")
+		}
 		if sp.to, err = strconv.ParseInt(toV, 10, 64); err != nil || sp.to <= 0 {
 			// Zero is refused rather than read as "the whole source": to is
 			// exclusive, so to=0 spells the empty span, and a caller who
@@ -612,12 +451,14 @@ func identityString(ref string, id source.Identity) string {
 // share, in one fixed order (ADR-0004). Values are the resolved plan, not
 // the raw request: "rate=48000" and an absent rate on a 48 kHz source are
 // the same output and must share an entry. The plan's BitRate stands in for
-// the lossy bitrate/q request so two rates never share a cache entry.
+// a bit rate request (bitrate, or q on a format that takes a bit rate) so two
+// rates never share a cache entry.
 //
-// The progressive and segmented keys each append what is theirs alone (a
-// seek position, a segment length). Sharing the core is what stops a new
-// shaping parameter from landing in one key and not the other, which is how
-// two different requests come to share a stale entry.
+// The progressive and segmented keys each append what is theirs alone: the
+// progressive key a seek position and a Vorbis quality (no segmented form
+// encodes vorbis), the segmented key a segment length. Sharing the core is
+// what stops a new shaping parameter from landing in one key and not the
+// other, which is how two different requests come to share a stale entry.
 //
 // The span belongs here rather than in either key alone, and that is the
 // same rule: two different windows of one file are two different streams,
@@ -635,13 +476,18 @@ func canonicalCore(plan *waxflow.TranscodePlan, gainDB float64, dyn gain.Preset,
 }
 
 // canonicalParams is the progressive cache key's parameter string: the
-// shared core plus the seek position.
+// shared core plus the seek position, and the Vorbis quality when one is set,
+// spelled as vorbis.EncoderVersion spells it.
 //
 // The seek is spelled seek=, not from=, because from= now names the span's
 // start in the shared core and the two are different quantities: the span
 // says which samples are this track, the seek says where inside it playback
 // begins. Spelling both from= would put the term in one key twice, and the
 // names now match the wire (from/to are parameters, the seek is t=).
-func canonicalParams(plan *waxflow.TranscodePlan, gainDB float64, dyn gain.Preset, sp span, hev2 bool, seek int64) string {
-	return fmt.Sprintf("%s&seek=%d", canonicalCore(plan, gainDB, dyn, sp, hev2), seek)
+func canonicalParams(plan *waxflow.TranscodePlan, gainDB float64, dyn gain.Preset, sp span, hev2 bool, seek int64, vorbisQuality float64) string {
+	s := fmt.Sprintf("%s&seek=%d", canonicalCore(plan, gainDB, dyn, sp, hev2), seek)
+	if vorbisQuality != 0 {
+		s += "&vq=" + strconv.FormatFloat(vorbisQuality, 'g', -1, 64)
+	}
+	return s
 }

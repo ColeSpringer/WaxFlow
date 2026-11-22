@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -102,6 +103,7 @@ var jobFields = []jobField{
 	// lossless one, which this table cannot express; validateJobRequest
 	// carries it.
 	{"hev2", `"hev2":true`, []string{"transcode", "merge", "split"}},
+	{"vorbisQuality", `"vorbisQuality":4`, []string{"transcode", "merge", "split"}},
 	// Gain and loudness stop at transcode: both answer "how loud is this one
 	// track", which a merge (N in, one out) and a split (one in, N out) have
 	// no honest way to apply.
@@ -125,6 +127,23 @@ var jobTypeBodies = map[string]string{
 	"transcode": `{"type":"transcode","src":"lib/sine.wav","format":"flac"}`,
 	"merge":     `{"type":"merge","srcs":["lib/sine.wav","lib/sine.wav"],"format":"flac"}`,
 	"split":     `{"type":"split","src":"lib/ramp.wav","format":"flac","cuts":[1000]}`,
+}
+
+// TestJobCueRulesKeepTheirPlace: the cue rules answer between the cuts rule
+// and the skip rule, as they always have, whichever package holds the rest.
+func TestJobCueRulesKeepTheirPlace(t *testing.T) {
+	env := jobsEnv(t)
+	for _, c := range []struct{ body, want string }{
+		{`{"type":"transcode","src":"lib/sine.wav","format":"flac","titles":["a"],"cue":"lib/rip.cue"}`, "titles applies to merge jobs"},
+		{`{"type":"transcode","src":"lib/sine.wav","format":"flac","cuts":[1000],"cue":"lib/rip.cue"}`, "cuts applies to split jobs"},
+		{`{"type":"transcode","src":"lib/sine.wav","format":"flac","cue":"lib/rip.cue","skip":[0]}`, "cue applies to split jobs"},
+		{`{"type":"transcode","src":"lib/sine.wav","format":"flac","cue":"lib/rip.cue","silence":true}`, "cue applies to split jobs"},
+		{`{"type":"split","src":"lib/ramp.wav","format":"flac","cue":"lib/rip.cue","skip":[0],"silence":true}`,
+			"cuts and skip are exclusive with cue: a split's boundaries come from one place"},
+		{`{"type":"split","src":"lib/ramp.wav","format":"flac","cuts":[1000],"silence":true}`, "the silence fields apply to analyze jobs"},
+	} {
+		wantRefusal(t, env.postJSON(t, "/jobs", c.body), http.StatusBadRequest, waxerr.CodeInvalidRequest, c.want)
+	}
 }
 
 // TestJobFieldPolicing drives every (type, field) pair the table describes: a
@@ -181,6 +200,58 @@ func TestJobFieldPolicing(t *testing.T) {
 		resp := env.postJSON(t, "/jobs", `{"type":"timeline","srcs":["lib/sine.wav"]}`)
 		wantEnvelope(t, resp, http.StatusBadRequest, waxerr.CodeInvalidRequest)
 	})
+}
+
+// TestAMistypedFieldIsNamedByItsKey: a JSON value of the wrong type is refused
+// by the body's key path and the type it wants, on every endpoint that decodes
+// a JSON body, so no Go type or field name reaches the client.
+func TestAMistypedFieldIsNamedByItsKey(t *testing.T) {
+	// 2^32 kbit/s fits a 64-bit int and meets the bound; a 32-bit int cannot
+	// hold it.
+	int32Bitrate := "bitrate 4294967296: want at most 2147483 kbit/s"
+	if strconv.IntSize == 32 {
+		int32Bitrate = "request body: bitrate: 4294967296 is out of range"
+	}
+	env := newTestEnv(t, func(cfg *server.Config) {
+		cfg.JobsDir = filepath.Join(t.TempDir(), "jobs")
+		cfg.TimelineDir = filepath.Join(t.TempDir(), "timelines")
+	})
+	const job = `{"type": "transcode", "src": "lib/sine.wav", "format": "opus", `
+	for _, c := range []struct{ path, body, want string }{
+		{"/jobs", job + `"bitrate": "96"}`, "request body: bitrate: want an integer"},
+		{"/jobs", job + `"hev2": 1}`, "request body: hev2: want a boolean"},
+		{"/jobs", job + `"gain": 3}`, "request body: gain: want a string"},
+		{"/jobs", `{"type": "transcode", "src": 5}`, "request body: src: want a string"},
+		{"/jobs", `{"type": "split", "src": "lib/sine.wav", "format": "flac", "cuts": ["a"]}`,
+			"request body: cuts: want an array of integers"},
+		{"/jobs", `{"type": "merge", "srcs": "lib/sine.wav"}`, "request body: srcs: want an array"},
+		{"/jobs", `[]`, "request body: want an object"},
+		{"/hls/timeline", `{"srcs": [{"src": "lib/sine.wav", "from": "x"}]}`, "request body: srcs.from: want an integer"},
+		{"/hls/timeline", `{"srcs": [], "crossfadeSeconds": "2"}`, "request body: crossfadeSeconds: want a number"},
+		{"/probe", `{"src": "lib/sine.wav", "strict": "yes"}`, "request body: strict: want a boolean"},
+		// A number the key's type cannot hold is named, not asked for again.
+		{"/jobs", job + `"vorbisQuality": 1e400}`, "request body: vorbisQuality: 1e400 is out of range"},
+		{"/hls/timeline", `{"srcs": [], "crossfadeSeconds": -1e400}`, "request body: crossfadeSeconds: -1e400 is out of range"},
+		{"/jobs", job + `"bitrate": 99999999999999999999}`, "request body: bitrate: 99999999999999999999 is out of range"},
+		{"/jobs", `{"type": "split", "src": "lib/sine.wav", "format": "flac", "cuts": [99999999999999999999]}`,
+			"request body: cuts: 99999999999999999999 is out of range"},
+		{"/jobs", job + `"bitrate": 4294967296}`, int32Bitrate},
+		// One that is not an integer still asks for one.
+		{"/jobs", job + `"bitrate": 1.5}`, "request body: bitrate: want an integer"},
+		{"/jobs", job + `"bitrate": 1e3}`, "request body: bitrate: want an integer"},
+	} {
+		t.Run(c.path+" "+c.body, func(t *testing.T) {
+			resp := env.postJSON(t, c.path, c.body)
+			body := readBody(t, resp)
+			var got server.ErrorBody
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatalf("not an envelope: %s", body)
+			}
+			if resp.StatusCode != http.StatusBadRequest || got.Code != waxerr.CodeInvalidRequest || got.Error != c.want {
+				t.Errorf("%d %s %q, want 400 %s %q", resp.StatusCode, got.Code, got.Error, waxerr.CodeInvalidRequest, c.want)
+			}
+		})
+	}
 }
 
 // probeSamples asks the daemon how long a source really is. It is how the cut

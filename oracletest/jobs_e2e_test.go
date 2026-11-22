@@ -28,6 +28,7 @@ import (
 	"github.com/colespringer/waxflow/cli/label"
 	"github.com/colespringer/waxflow/internal/jobs"
 	"github.com/colespringer/waxflow/internal/meta"
+	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
@@ -612,7 +613,7 @@ func TestJobRestartSafety(t *testing.T) {
 		State:         jobs.StateRunning,
 		Request: jobs.Request{
 			Type: jobs.TypeTranscode, Src: "lib/sine.wav", SourceID: sourceID,
-			Format: "flac",
+			Params: outshape.Params{Format: "flac"},
 		},
 		Created: time.Now().UTC(),
 	}

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -25,7 +26,7 @@ func TestAFullDiskNamesNoPath(t *testing.T) {
 	res, ref, srcID := openLib(t)
 	for name, req := range map[string]Request{
 		"a transcode": transcodeReq(ref, srcID),
-		"a merge":     {Type: TypeMerge, Srcs: []source.Ref{source.Ref(ref), source.Ref(ref)}, Format: "flac"},
+		"a merge":     {Type: TypeMerge, Srcs: []source.Ref{source.Ref(ref), source.Ref(ref)}, Params: outshape.Params{Format: "flac"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()

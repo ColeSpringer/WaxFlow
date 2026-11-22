@@ -121,7 +121,7 @@ func (s *Server) prepareTimelineStream(ctx context.Context, p *streamParams) (*t
 		opts:      opts,
 		copts:     copts,
 		plan:      plan,
-		canonical: canonicalParams(plan, gainDB, p.dynamics, span{}, opts.HEAACv2, opts.FromSample),
+		canonical: canonicalParams(plan, gainDB, p.dynamics, span{}, opts.HEAACv2, opts.FromSample, opts.VorbisQuality),
 		seconds:   DurationSeconds(env.Samples, env.Fmt.Rate),
 	}, nil
 }

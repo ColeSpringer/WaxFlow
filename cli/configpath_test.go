@@ -2,6 +2,8 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,12 +25,14 @@ var configFaults = []struct {
 	body  []byte
 	code  waxerr.Code // what the loader answers
 	value string
-	wire  string // the reload's message, where it is pinned
+	// wire is the reload's message, where it is pinned; a missing file's is
+	// the OS's own words (missingFileText).
+	wire string
 }{
 	{name: "malformed JSON", body: []byte(`{"roots": [`), code: waxerr.CodeInvalidRequest},
 	{name: "trailing data", body: []byte(`{} {}`), code: waxerr.CodeInvalidRequest},
 	{name: "a byte that is not UTF-8", body: []byte("{\"addr\": \"\xff\"}"), code: waxerr.CodeInvalidRequest},
-	{name: "missing", code: waxerr.CodeNotFound, wire: "reload: config file: open: no such file or directory"},
+	{name: "missing", code: waxerr.CodeNotFound},
 	{name: "a pid lookup URL that is a bare path", body: []byte(`{"pidLookupURL": "/var/lib/waxflow/pids"}`),
 		code: waxerr.CodeInvalidRequest, value: "/var/lib/waxflow/pids"},
 	{name: "a pid lookup URL that is a file URL", body: []byte(`{"pidLookupURL": "file:///var/lib/waxflow/pids"}`),
@@ -60,6 +64,18 @@ func breakConfig(t *testing.T, path string, body []byte) {
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// missingFileText is the OS's words for opening a file that is not there,
+// which Linux and Windows spell differently.
+func missingFileText(t *testing.T) string {
+	t.Helper()
+	_, err := os.Open(filepath.Join(t.TempDir(), "missing.json"))
+	pe, ok := errors.AsType[*fs.PathError](err)
+	if !ok {
+		t.Fatalf("opening a missing file: %v, want a *fs.PathError", err)
+	}
+	return pe.Err.Error()
 }
 
 // holdsPart reports the first part of path that text holds: the path as
@@ -131,8 +147,12 @@ func TestAFailedReloadNamesNoConfigPath(t *testing.T) {
 					}
 					var said struct{ Error string }
 					json.Unmarshal([]byte(body), &said)
-					if fault.wire != "" && said.Error != fault.wire {
-						t.Errorf("the reload says %q, want %q", said.Error, fault.wire)
+					wire := fault.wire
+					if fault.body == nil {
+						wire = "reload: config file: open: " + missingFileText(t)
+					}
+					if wire != "" && said.Error != wire {
+						t.Errorf("the reload says %q, want %q", said.Error, wire)
 					}
 					named := path
 					if fault.value != "" {

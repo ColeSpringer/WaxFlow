@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 2,
+  "id": "01M82G06H9WVR4Q3ZVY4HYCEZM",
+  "type": "transcode",
+  "state": "queued",
+  "request": {
+    "type": "transcode",
+    "src": "lib/sine-s16.wav",
+    "sourceId": "8898-1764547200000000000",
+    "format": "flac",
+    "rate": 22050,
+    "ch": 1,
+    "bits": 16,
+    "flacLevel": -1
+  },
+  "created": "2026-11-22T20:43:42.505924172Z"
+}

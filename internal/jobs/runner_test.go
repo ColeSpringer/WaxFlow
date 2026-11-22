@@ -24,6 +24,7 @@ import (
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/admission"
 	"github.com/colespringer/waxflow/internal/meta"
+	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/internal/ulid"
 	"github.com/colespringer/waxflow/source"
@@ -116,7 +117,7 @@ func withTestDefaults(cfg Config) Config {
 }
 
 func transcodeReq(ref, srcID string) Request {
-	return Request{Type: TypeTranscode, Src: source.Ref(ref), SourceID: srcID, Format: "flac", FLACLevel: -1}
+	return Request{Type: TypeTranscode, Src: source.Ref(ref), SourceID: srcID, Params: outshape.Params{Format: "flac", FLACLevel: -1}}
 }
 
 func analyzeReq(ref, srcID string) Request {
@@ -421,7 +422,7 @@ func TestSplitFillsAnAbsentLength(t *testing.T) {
 
 		j, err := r.Create(Request{
 			Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
-			Format: "flac", FLACLevel: -1, Cuts: []int64{cut},
+			Params: outshape.Params{Format: "flac", FLACLevel: -1}, Cuts: []int64{cut},
 		})
 		if err != nil {
 			t.Fatalf("Create: %v", err)
@@ -481,7 +482,7 @@ func TestSplitFillsAnAbsentLength(t *testing.T) {
 
 		j, err := r.Create(Request{
 			Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
-			Format: "flac", FLACLevel: -1, Cuts: []int64{cut, past},
+			Params: outshape.Params{Format: "flac", FLACLevel: -1}, Cuts: []int64{cut, past},
 		})
 		if err != nil {
 			t.Fatalf("Create: %v", err)
@@ -546,7 +547,7 @@ func TestSplitRefusesAnUnderDeclaredCutConsistently(t *testing.T) {
 
 	j, err := r.Create(Request{
 		Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
-		Format: "flac", FLACLevel: -1, Cuts: []int64{cut},
+		Params: outshape.Params{Format: "flac", FLACLevel: -1}, Cuts: []int64{cut},
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -594,7 +595,7 @@ func TestSplitNeverReportsAnEmptyPiece(t *testing.T) {
 	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, MeasureTrack: measureTrack()})
 	j, err := r.Create(Request{
 		Type: TypeSplit, Src: "lib/sine.wma", SourceID: pinID(t, res, "lib/sine.wma"),
-		Format: "flac", FLACLevel: -1, Cuts: []int64{22510},
+		Params: outshape.Params{Format: "flac", FLACLevel: -1}, Cuts: []int64{22510},
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -657,7 +658,7 @@ func TestSplitHoldsAnUnverifiedLastPieceToAMeasure(t *testing.T) {
 
 	j, err := r.Create(Request{
 		Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
-		Format: "flac", FLACLevel: -1, Cuts: []int64{cut},
+		Params: outshape.Params{Format: "flac", FLACLevel: -1}, Cuts: []int64{cut},
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -693,7 +694,7 @@ func TestSplitOfAnUnderDeclaredMP3MeetsItsMeasure(t *testing.T) {
 
 	j, err := r.Create(Request{
 		Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
-		Format: "flac", FLACLevel: -1, Cuts: []int64{cut},
+		Params: outshape.Params{Format: "flac", FLACLevel: -1}, Cuts: []int64{cut},
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -719,7 +720,7 @@ func TestSplitOfAnExactSourceMeasuresNothing(t *testing.T) {
 
 	j, err := r.Create(Request{
 		Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
-		Format: "flac", FLACLevel: -1, Cuts: []int64{1000},
+		Params: outshape.Params{Format: "flac", FLACLevel: -1}, Cuts: []int64{1000},
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -768,7 +769,7 @@ func TestSplitOfAnOverDeclaredMP3MeetsItsMeasure(t *testing.T) {
 
 	j, err := r.Create(Request{
 		Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
-		Format: "flac", FLACLevel: -1, Cuts: []int64{cut},
+		Params: outshape.Params{Format: "flac", FLACLevel: -1}, Cuts: []int64{cut},
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -794,7 +795,7 @@ func TestSplitSkippingItsLastPieceMeasuresNothing(t *testing.T) {
 
 	j, err := r.Create(Request{
 		Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
-		Format: "flac", FLACLevel: -1, Cuts: []int64{10_000}, Skip: []int{1},
+		Params: outshape.Params{Format: "flac", FLACLevel: -1}, Cuts: []int64{10_000}, Skip: []int{1},
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -830,7 +831,7 @@ func TestSplitRefusesALastPieceItsMeasureLeavesEmpty(t *testing.T) {
 			r := openRunner(t, Config{Dir: dir, Resolver: res, MeasureTrack: measureTrack()})
 			j, err := r.Create(Request{
 				Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
-				Format: "flac", FLACLevel: -1, Cuts: []int64{tc.cut},
+				Params: outshape.Params{Format: "flac", FLACLevel: -1}, Cuts: []int64{tc.cut},
 			})
 			if err != nil {
 				t.Fatalf("Create: %v", err)
@@ -1025,7 +1026,7 @@ func transcodedChapterTitles(t *testing.T, m meta.Mapper) []string {
 	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, Meta: m})
 
 	j, err := r.Create(Request{
-		Type: TypeTranscode, Src: source.Ref(ref), SourceID: pinID(t, res, ref), Format: "alac",
+		Type: TypeTranscode, Src: source.Ref(ref), SourceID: pinID(t, res, ref), Params: outshape.Params{Format: "alac"},
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -1148,7 +1149,7 @@ func TestSplitJobProgressIsOnTheSourceTimeline(t *testing.T) {
 	const srcSamples = 5 * 44100
 	cuts := []int64{1 * 44100, 2 * 44100, 4 * 44100}
 	j, err := r.Create(Request{
-		Type: TypeSplit, Src: source.Ref(ref), SourceID: srcID, Format: "flac", FLACLevel: -1, Cuts: cuts,
+		Type: TypeSplit, Src: source.Ref(ref), SourceID: srcID, Params: outshape.Params{Format: "flac", FLACLevel: -1}, Cuts: cuts,
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -1213,7 +1214,7 @@ func TestMergeJobReportsTranscodeProgress(t *testing.T) {
 	}
 	pools, release := saturatedPool(t)
 	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: openRoots(t, root), MeasureTrack: measureTrack(), Pools: pools})
-	j, err := r.Create(Request{Type: TypeMerge, Srcs: refs, Format: "flac"})
+	j, err := r.Create(Request{Type: TypeMerge, Srcs: refs, Params: outshape.Params{Format: "flac"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1262,7 +1263,7 @@ func TestTranscodeJobEmbedsTheFrontPicture(t *testing.T) {
 	res, ref, srcID := openLib(t)
 	pic := meta.Picture{MIME: "image/png", Front: true, Data: []byte("\x89PNG\r\n\x1a\nthe front cover of this job")}
 	r := openRunner(t, Config{Dir: t.TempDir(), Resolver: res, Meta: pictureMapper{pic: pic}})
-	j, err := r.Create(Request{Type: TypeTranscode, Src: source.Ref(ref), SourceID: srcID, Format: "aac"})
+	j, err := r.Create(Request{Type: TypeTranscode, Src: source.Ref(ref), SourceID: srcID, Params: outshape.Params{Format: "aac"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1303,7 +1304,7 @@ func TestMP4OutputsAreNamedByTheirExtension(t *testing.T) {
 
 			j, err := r.Create(Request{
 				Type: TypeTranscode, Src: source.Ref(ref), SourceID: srcID,
-				Format: "alac", Container: tc.container,
+				Params: outshape.Params{Format: "alac", Container: tc.container},
 			})
 			if err != nil {
 				t.Fatalf("Create: %v", err)
@@ -1335,7 +1336,7 @@ func TestMP4OutputsAreNamedByTheirExtension(t *testing.T) {
 
 		j, err := r.Create(Request{
 			Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
-			Format: "alac", Cuts: []int64{2 * 44100},
+			Params: outshape.Params{Format: "alac"}, Cuts: []int64{2 * 44100},
 		})
 		if err != nil {
 			t.Fatalf("Create: %v", err)
@@ -1721,7 +1722,7 @@ func TestWavPackJobSkipsPostPass(t *testing.T) {
 
 	j, err := r.Create(Request{
 		Type: TypeTranscode, Src: source.Ref(ref), SourceID: srcID,
-		Format: "wavpack", Loudness: "analyze",
+		Params: outshape.Params{Format: "wavpack"}, Loudness: "analyze",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1761,7 +1762,7 @@ func TestLoudnessAnalyzeNonMP4OmitsPlaceholders(t *testing.T) {
 
 	j, err := r.Create(Request{
 		Type: TypeTranscode, Src: source.Ref(ref), SourceID: srcID,
-		Format: "flac", Loudness: "analyze",
+		Params: outshape.Params{Format: "flac"}, Loudness: "analyze",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1797,7 +1798,7 @@ func TestSplitSkipWritesTheRest(t *testing.T) {
 	// split writes [1 s, 2 s) and [4 s, 5 s).
 	const written = 2 * 44100
 	j, err := r.Create(Request{
-		Type: TypeSplit, Src: source.Ref(ref), SourceID: srcID, Format: "flac", FLACLevel: -1,
+		Type: TypeSplit, Src: source.Ref(ref), SourceID: srcID, Params: outshape.Params{Format: "flac", FLACLevel: -1},
 		Cuts: []int64{1 * 44100, 2 * 44100, 4 * 44100}, Skip: []int{0, 2},
 	})
 	if err != nil {

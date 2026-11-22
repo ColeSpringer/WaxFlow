@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxflow/internal/jobs"
+	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
@@ -29,19 +31,74 @@ func jsonTag(f reflect.StructField) string {
 	return tag
 }
 
+// fieldsByJSONTag maps t's fields by json name, an embedded struct's among
+// them, as encoding/json flattens it.
 func fieldsByJSONTag(t reflect.Type) map[string]reflect.StructField {
 	out := map[string]reflect.StructField{}
-	for f := range t.Fields() {
-		if tag := jsonTag(f); tag != "" {
+	for _, f := range reflect.VisibleFields(t) {
+		if tag := jsonTag(f); tag != "" && !f.Anonymous {
 			out[tag] = f
 		}
 	}
 	return out
 }
 
+// zeroFields lists the fields of the struct v that hold their zero value, an
+// embedded struct's by field rather than as one.
+func zeroFields(v reflect.Value) []reflect.StructField {
+	var out []reflect.StructField
+	for _, f := range reflect.VisibleFields(v.Type()) {
+		if !f.Anonymous && v.FieldByIndex(f.Index).IsZero() {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// TestJobRequestGuardsFlattenEmbeddedFields: the guards below see a field an
+// embedded struct promotes, as encoding/json does, so a key reached through
+// one is checked like any other.
+func TestJobRequestGuardsFlattenEmbeddedFields(t *testing.T) {
+	type inner struct {
+		B int `json:"b"`
+	}
+	type probe struct {
+		A int `json:"a"`
+		inner
+	}
+	typ := reflect.TypeFor[probe]()
+	if got := slices.Sorted(maps.Keys(fieldsByJSONTag(typ))); !slices.Equal(got, []string{"a", "b"}) {
+		t.Errorf("fieldsByJSONTag sees %v, want [a b]", got)
+	}
+	if got := jsonTags(typ); !slices.Equal(got, []string{"a", "b"}) {
+		t.Errorf("jsonTags sees %v, want [a b]", got)
+	}
+	var names []string
+	for _, f := range zeroFields(reflect.ValueOf(probe{A: 1})) {
+		names = append(names, f.Name)
+	}
+	if !slices.Equal(names, []string{"B"}) {
+		t.Errorf("zeroFields names %v, want [B]", names)
+	}
+}
+
+// TestJobRequestHasNoShadowedKeys: neither job type repeats a key of the
+// shape it embeds. encoding/json takes the shallower field, so a leftover one
+// would hide the embedded key without an error.
+func TestJobRequestHasNoShadowedKeys(t *testing.T) {
+	shape := fieldsByJSONTag(reflect.TypeFor[outshape.Params]())
+	for _, typ := range []reflect.Type{reflect.TypeFor[jobs.Request](), reflect.TypeFor[jobRequest]()} {
+		for f := range typ.Fields() {
+			if _, ok := shape[jsonTag(f)]; ok && !f.Anonymous {
+				t.Errorf("%s.%s repeats the json key %q of outshape.Params", typ, f.Name, jsonTag(f))
+			}
+		}
+	}
+}
+
 // TestJobRequestCoverage pins jobRequest (the wire body) against jobs.Request
 // (the domain type) so the two cannot drift, matching on json tag because the
-// Go names deliberately differ (Channels vs Ch).
+// Go names may differ (MemberTitles vs Titles).
 //
 // It is a coverage test with an exemption list rather than a bijection, and
 // that distinction is the point. The two types are not field-for-field
@@ -119,15 +176,11 @@ func TestJobRequestCoverage(t *testing.T) {
 
 	// requestFrom must copy every mapped field; a zero in the projection of a
 	// fully populated body is a forgotten assignment.
-	got := reflect.ValueOf(*requestFrom(populatedJobRequest()))
-	for i := range got.NumField() {
-		f := got.Type().Field(i)
+	for _, f := range zeroFields(reflect.ValueOf(*requestFrom(populatedJobRequest()))) {
 		if _, allowed := exempt[jsonTag(f)]; allowed {
 			continue // filled by the caller from the resolved source, not the body
 		}
-		if got.Field(i).IsZero() {
-			t.Errorf("requestFrom leaves %s zero for a fully populated body", f.Name)
-		}
+		t.Errorf("requestFrom leaves %s zero for a fully populated body", f.Name)
 	}
 }
 
@@ -141,9 +194,12 @@ func populatedJobRequest() jobRequest {
 	// and a body missing a field checks the mapping of that field not at all.
 	return jobRequest{
 		Type: "transcode", Src: "x", Srcs: []source.Ref{"x"}, Titles: []string{"x"}, Cuts: []int64{1}, Skip: []int{0}, Cue: "x",
-		Format: "x", Container: "x",
-		Rate: 1, Ch: 1, Bits: 1, Bitrate: 1, HEv2: true, Gain: "x", Loudness: "x",
-		FLACLevel: 1, WavPackLevel: 1, APELevel: 1000,
+		Params: outshape.Params{
+			Format: "x", Container: "x",
+			Rate: 1, Channels: 1, Bits: 1, Bitrate: 1, HEv2: true, VorbisQuality: 4,
+			FLACLevel: 1, WavPackLevel: 1, APELevel: 1000,
+		},
+		Gain: "x", Loudness: "x",
 		Silence: true, SilenceThresholdDB: -60, SilenceMinSeconds: 0.25,
 	}
 }
@@ -152,12 +208,9 @@ func populatedJobRequest() jobRequest {
 // only proves anything if it sets every wire field, so a field added to
 // jobRequest without being added there would be silently untested.
 func TestJobRequestPopulatedIsExhaustive(t *testing.T) {
-	v := reflect.ValueOf(populatedJobRequest())
-	for i := range v.NumField() {
-		if v.Field(i).IsZero() {
-			t.Errorf("the populated jobRequest literal leaves %s zero, so TestJobRequestCoverage "+
-				"does not actually check its mapping", v.Type().Field(i).Name)
-		}
+	for _, f := range zeroFields(reflect.ValueOf(populatedJobRequest())) {
+		t.Errorf("the populated jobRequest literal leaves %s zero, so TestJobRequestCoverage "+
+			"does not actually check its mapping", f.Name)
 	}
 }
 
@@ -283,7 +336,7 @@ func TestValidateMergeHoldsOneMemberAtATime(t *testing.T) {
 	}
 	defer s.Close()
 
-	body := jobRequest{Type: "merge", Srcs: refs, Format: "flac"}
+	body := jobRequest{Type: "merge", Srcs: refs, Params: outshape.Params{Format: "flac"}}
 	req, err := s.validateJobRequest(context.Background(), body)
 	if err != nil {
 		t.Fatal(err)

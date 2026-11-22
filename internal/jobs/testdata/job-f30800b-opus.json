@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 2,
+  "id": "01M82G06HA0D2W9WGEMDX5JRPA",
+  "type": "transcode",
+  "state": "queued",
+  "request": {
+    "type": "transcode",
+    "src": "lib/sine-s16.wav",
+    "sourceId": "8898-1764547200000000000",
+    "format": "opus",
+    "ch": 1,
+    "bitrate": 96
+  },
+  "created": "2026-11-22T20:43:42.506240976Z"
+}

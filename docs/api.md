@@ -45,6 +45,15 @@ Conventions:
   dead network mount) costs a request 5 s once, then answers at once; one
   that hangs while mounted holds the requests reading it, as any blocked read
   does.
+- A JSON body holding a value of the wrong type is `400` naming the key
+  path and the type it wants (`request body: srcs.from: want an integer`),
+  and one holding a number its key cannot hold names the number
+  (`request body: vorbisQuality: 1e400 is out of range`).
+- A query parameter that holds a number, a boolean or an `id` pin refuses an
+  empty value, `400` naming what omitting it means (`from is present but
+  empty; omit it to start at the source's start`): absent is its only
+  spelling of the default. A named choice (`format`, `container`, `gain`,
+  `dynamics`, `q`) takes an empty value as its default.
 - A path that exists under other methods answers **405** with an `Allow`
   header listing them, and code `invalid-request` (no code maps to 405).
   A path no endpoint claims stays 404 `not-found`.
@@ -248,7 +257,9 @@ ADR-0003). Every surface that takes a source reference takes a pid
 `GET /probe?src=<ref>[&strict=1]` or `POST /probe` with
 `{"src": "<ref>", "strict": false}`. Both forms reject names they do not
 know: `src` and `strict` are the whole surface, and a misspelled `strict`
-would otherwise return the opposite of what was asked.
+would otherwise return the opposite of what was asked. For the same reason
+GET reads `strict` as `1`, `true` or `yes` and `0`, `false` or `no` in any
+case, and refuses any other value, `400` (`strict "maybe": want a boolean`).
 
     {
       "schemaVersion": 1,
@@ -425,8 +436,12 @@ Parameters (unknown parameter names are rejected):
   does not have left silent), bit depth (16 or 24, dithered when reducing).
   **Absent** keeps the source's; omitting the parameter is the only
   spelling of that. `rate=0`, `ch=0`, `bits=0`, `maxBitRate=0`, and a bare `rate=` are 400, because zero is
-  not a rate, a channel count, a depth, or a cap. The same rule holds on
-  the HLS master form. A lossy format's encoder owns its sample format,
+  not a rate, a channel count, a depth, or a cap. The HLS master form reads
+  `format`, `rate`, `ch`, `bits`, `bitrate` and `hev2` through the same
+  parser, so each parse refusal is the same answer in the same words on both
+  (`rate "0": want a positive integer`), in one order: `rate`, `ch`,
+  `bits`, `bitrate`, then `q`, then `hev2`, then the `bits` and kbit/s
+  bounds. A lossy format's encoder owns its sample format,
   so `bits` does not apply to `mp3`, `aac`, `he-aac`, `opus` or `vorbis`
   and is ignored there; it is an output shape, not an encoder knob.
 
@@ -576,16 +591,21 @@ Parameters (unknown parameter names are rejected):
 - `track`: must name the default track until multi-track containers
   land.
 - `bitrate`, `q`: lossy quality selection, mutually exclusive. `bitrate`
-  is an explicit CBR rate in kbit/s; `q` is a preset (`low` 96, `med`
-  128, `high` 192). Both require an explicit lossy `format` (`mp3`,
-  `aac`, `he-aac`, `opus`); on a lossless output they are `415`, and so
-  under `format=auto`, which resolves to `wav`. `vorbis` refuses both
-  (`415`): its encoder takes a quality and has no bit rate to set. A
-  `bitrate`/`q` request forces a re-encode (never direct-play), and the
-  resolved bit rate is part of the cache key, so two rates that encode
-  differently never share an entry. Every kbit/s value a surface takes
-  (`bitrate`, `maxBitRate`, an HLS `bitrates` rung, a job's `bitrate`, the
-  CLI's bit-rate flags) is refused above 2147483, the engine's
+  is an explicit CBR rate in kbit/s and needs a format that takes one
+  (`mp3`, `aac`, `he-aac`, `opus`). `q` is a preset, resolved for the
+  format after `format=auto` resolves: a bit rate where the format takes
+  one (`low` 96, `med` 128, `high` 192 kbit/s), and on `vorbis`, which is
+  quality-driven, a Vorbis quality (`low` 2, `med` 4, `high` 6 on
+  libvorbis's `-q` scale). On a lossless output both are `415`, and so
+  under `format=auto`, which resolves to `wav`; a `q` refusal names the
+  formats `q` serves ("q applies to lossy output (opus, vorbis, mp3, aac,
+  he-aac); flac is lossless"). A `bitrate` on `vorbis` is `415` "bitrate
+  does not apply to vorbis, which is quality-driven; use q=low, med, or
+  high". A `bitrate`/`q` request forces a re-encode (never direct-play),
+  and the resolved bit rate or quality is part of the cache key, so two
+  presets that encode differently never share an entry. Every kbit/s value
+  a surface takes (`bitrate`, `maxBitRate`, an HLS `bitrates` rung, a job's
+  `bitrate`, the CLI's `--bitrate`) is refused above 2147483, the engine's
   `MaxBitrate` (`math.MaxInt32` bits per second) over 1000, with `400`
   (exit 2 on the CLI), before it is multiplied.
 - `hev2`: boolean, selects HE-AAC v2 (parametric stereo, `mp4a.40.29`)
@@ -599,13 +619,15 @@ Parameters (unknown parameter names are rejected):
   surface refuses one set on any other format with `415`
   (`unsupported-format`, exit 5 on the CLI), naming the knob in its own
   spelling, the format, and the formats that take it; nothing ignores a
-  knob silently. Unset, each keeps the encoder's default.
+  knob silently. Unset, each keeps the encoder's default. A CLI knob flag
+  counts as set whenever it is given, whatever its value, so `--bitrate 0`
+  on flac is refused too.
 
   | knob | `/stream` | HLS | jobs | CLI | formats that take it |
   |---|---|---|---|---|---|
-  | `Bitrate` | `bitrate`, `q` | `bitrate`, `bitrates` | `bitrate` | `--mp3-bitrate`, `--opus-bitrate`, `--aac-bitrate` | `opus`, `mp3`, `aac`, `he-aac` |
-  | `VBR` | | | | `--mp3-vbr`, `--opus-vbr` | `opus`, `mp3` |
-  | `VorbisQuality` | | | | | `vorbis` |
+  | `Bitrate` | `bitrate`, `q` | `bitrate`, `bitrates` | `bitrate` | `--bitrate` | `opus`, `mp3`, `aac`, `he-aac` |
+  | `VBR` | | | | `--vbr` | `opus`, `mp3` |
+  | `VorbisQuality` | `q` | | `vorbisQuality` | `--vorbis-quality` | `vorbis` |
   | `HEAACv2` | `hev2` | `hev2` | `hev2` | `--he-v2` | `he-aac` |
   | `FLACLevel` | | | `flacLevel` | `--flac-level` | `flac` |
   | `WavPackLevel` | | | `wavpackLevel` | `--wavpack-level` | `wavpack` |
@@ -613,9 +635,11 @@ Parameters (unknown parameter names are rejected):
   | `OpusComplexity` | | | | `--opus-complexity` | `opus` |
   | `OpusSignal` | | | | `--opus-signal` | `opus` |
 
-  The first column is the `TranscodeOptions` field. The CLI's bit-rate
-  and VBR flags each name their formats, and one given with any other
-  format is refused as the rest are. HLS serves only its segmented
+  The first column is the `TranscodeOptions` field. The CLI's
+  `--bitrate` is kbit/s, as every surface's bit rate is; on vorbis its
+  refusal names `--vorbis-quality`. `--vorbis-quality` takes libvorbis's
+  -1 to 10 scale, and an explicit 0 is refused (exit 2) because the
+  encoder reads 0 as its default, 3. HLS serves only its segmented
   formats, so its bit-rate refusal names `opus`, `aac` and `he-aac`.
   `bits` is not a knob: a lossy format ignores it (see `rate`, `ch`,
   `bits` above).
@@ -657,7 +681,9 @@ Parameters (unknown parameter names are rejected):
   embedded art included): direct play ships the entire file, so the wire
   cost is what the cap protects. A VBR-lossless plan has no fixed rate to
   hold under the cap, so a cap on it is `415` rather than silently
-  unenforced.
+  unenforced. Omitting it is the only spelling of no cap: a value that is
+  not a positive integer is `400` (`maxBitRate "0": want a positive
+  integer`), as an empty one is.
 - `tl`, `crossfadeSeconds`: stream a minted timeline (the digest
   `POST /hls/timeline` returns) as one live encode over every member, in
   place of `src`. `tl` refuses `src`, `from`, `to`, `id` and `track` by
@@ -821,9 +847,12 @@ exclusive with `tl`, since it bounds one source and a timeline is several.
 
 `bitrates` (the ladder) appears only in master URLs; every other URL is
 per-variant. A rung that is not positive is `400` ("ladder bitrate -5 is
-not positive") before anything resolves. Descriptors are minted by the
-daemon (`POST /sign` with `path:/hls/master.m3u8`, or the keyed
-raw-parameter master form below), never hand-built by clients. Auth is an
+not positive") before anything resolves. At the mint (the keyed master form
+and `POST /sign`), `bitrates`, `segDur` and `crossfadeSeconds` present but
+empty are `400`, as `/stream` treats `crossfadeSeconds`: omitting one is its
+only spelling of the default. Descriptors are minted by the daemon
+(`POST /sign` with `path:/hls/master.m3u8`, or the keyed raw-parameter
+master form below), never hand-built by clients. Auth is an
 API key or the signed query, like `/stream`; playlist child URLs come out
 signed (when signing is configured) with the parent's expiry, so one minting
 governs a playback session.
@@ -1230,8 +1259,8 @@ errors decoded to waxerr codes like every other method.
 
 Transcode jobs take the /stream shaping parameters (`format` required,
 plus `container`, `rate`, `ch`, `bits`, `bitrate`, `hev2`, `gain`,
-`flacLevel`, `wavpackLevel`, `apeLevel`; a knob the format does not take
-is `415` at creation, see Encoder knobs)
+`vorbisQuality`, `flacLevel`, `wavpackLevel`, `apeLevel`; a knob the format
+does not take is `415` at creation, see Encoder knobs)
 and, unlike /stream, may target non-streaming formats (`aiff`, `ape`): job
 outputs are seekable files, so every muxer back-patch applies (exact WAV
 sizes, FLAC seek tables, the MP4 `iTunSMPB` gapless atom, the Monkey's Audio
@@ -1245,9 +1274,21 @@ Ogg-FLAC, WavPack, and Monkey's Audio. The job's `analysis` still carries
 the measurement in every case; only the file carries the estimate.
 Creation refuses what the request alone decides (a field the type does not
 take, a missing format, a bad `bits` or `bitrate`, a knob the format does not
-take or a level outside its range) before any source, sheet or merge member
-resolves or is measured, so a missing source cannot hide it and a long merge
-measures nothing first.
+take or a level or quality outside its range, `flacLevel 9: want -1 to 8`)
+before any source, sheet or merge member resolves or is measured, so a
+missing source cannot hide it and a long merge measures nothing first. A
+negative `rate`, `ch` or `bitrate` names the field, its value and what 0 means
+there (`rate -1: want 0 for the source's value or a positive integer`).
+Vorbis is quality-driven: `vorbisQuality` is its quality on libvorbis's `-q`
+scale (-1..10, 0 keeps the encoder default), and a `bitrate` on it is `415`
+"bitrate does not apply to vorbis, which is quality-driven; use
+vorbisQuality". A queued job is held again, when it runs,
+to every rule creation applies to its type from the request alone, and fails
+in the same words and order: which fields its type takes, its sources' shape
+(`src`, or `srcs` and the member bound), the format, the shaping parameters and
+their knobs, `loudness`, `gain`'s spelling, the silence parameters and a merge's
+title per member. The `cue` rules are creation's alone, since a job carries the
+cut points its sheet resolved to.
 Analyze jobs measure EBU R128 loudness (integrated LUFS, loudness
 range, true peak, sample peak) without producing audio.
 

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/internal/testutil"
 	"github.com/colespringer/waxflow/source"
 )
@@ -122,7 +123,7 @@ func TestSplitJobWarnsOnClipping(t *testing.T) {
 
 	j, err := r.Create(Request{
 		Type: TypeSplit, Src: source.Ref(ref), SourceID: pinID(t, res, ref),
-		Format: "flac", FLACLevel: -1, Cuts: []int64{22050},
+		Params: outshape.Params{Format: "flac", FLACLevel: -1}, Cuts: []int64{22050},
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)

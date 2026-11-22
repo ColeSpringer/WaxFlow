@@ -602,16 +602,13 @@ func queryRulesOutDirectPlay(p *streamParams) bool {
 		// direct-play the whole file, delivering the entire rip for a
 		// request that asked for one track of it.
 		return true
-	case p.bitrate != 0:
-		return true // bitrate/q asks for a lossy re-encode, not the original
-	case p.hev2:
-		// The same species as bitrate: hev2 asks for a specific encode, so
-		// the original bytes are never the answer. Falling through also
-		// lets planTranscode's he-aac-only refusal fire; without this
-		// clause a direct-playable source served its own bytes with the
-		// flag silently ignored.
+	case p.shape.Knobs() || p.q != "":
+		// An encoder knob, or q naming one, asks for a specific encode, so
+		// the original bytes are never the answer. Falling through also lets
+		// the knob refusal fire on a format that does not take it, where
+		// direct play would serve the source with the knob ignored.
 		return true
-	case p.container != "":
+	case p.shape.Container != "":
 		// A container override names a wrapper other than the one the format
 		// delivers by default, and direct play delivers the file in the wrapper
 		// it already has, so an override is always a request for bytes this rung
@@ -652,7 +649,7 @@ func directPlayable(req *streamRequest) bool {
 		return false // t= means a transcode timeline
 	case queryRulesOutDirectPlay(p):
 		return false
-	case p.format != "auto" && p.format != req.info.Container:
+	case p.shape.Format != "auto" && p.shape.Format != req.info.Container:
 		return false
 	case !playableAsIs(track.Codec, req.info.Container):
 		// A coding no general-purpose player reads out of this container.
@@ -660,11 +657,11 @@ func directPlayable(req *streamRequest) bool {
 		// a refusal, and the transcode rung serves the same audio in a form
 		// that plays.
 		return false
-	case p.rate != 0 && p.rate != track.Fmt.Rate:
+	case p.shape.Rate != 0 && p.shape.Rate != track.Fmt.Rate:
 		return false
-	case p.ch != 0 && p.ch != track.Fmt.Channels:
+	case p.shape.Channels != 0 && p.shape.Channels != track.Fmt.Channels:
 		return false
-	case p.bits != 0 && (track.Fmt.Type != audio.Int || p.bits != track.Fmt.BitDepth):
+	case p.shape.Bits != 0 && (track.Fmt.Type != audio.Int || p.shape.Bits != track.Fmt.BitDepth):
 		return false
 	case req.gainDB != 0:
 		return false
@@ -717,11 +714,16 @@ func playableAsIs(id codec.ID, containerName string) bool {
 // pin identity voluntarily. Identity pinning is orthogonal to auth: it
 // guards which bytes are served, not who may ask, so a keyed request
 // carrying id still gets 410 when the file changed. That is the contract
-// the id parameter exists for; drop id to opt out.
+// the id parameter exists for; drop id to opt out. An empty id is refused,
+// so a client that lost its pin does not get unpinned bytes.
 func checkIdentity(p *streamParams, sigAuthed bool, f *source.File) error {
 	if p.identity == "" {
-		if sigAuthed {
+		switch {
+		case sigAuthed:
 			return waxerr.New(waxerr.CodeSignatureInvalid, "signed URLs must carry the id parameter")
+		case p.pinned:
+			return waxerr.New(waxerr.CodeInvalidRequest,
+				"id is present but empty; omit it to serve the source as it is now")
 		}
 		return nil
 	}

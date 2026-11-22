@@ -1279,6 +1279,17 @@ func TestParameterValidation(t *testing.T) {
 			wantEnvelope(t, resp, tc.status, tc.code)
 		})
 	}
+	// Omitting maxBitRate means no cap; a cap has no source value to keep.
+	for _, tc := range []struct{ query, want string }{
+		{"src=lib/sine.wav&maxBitRate=", "maxBitRate is present but empty; omit it for no cap"},
+		{"src=lib/sine.wav&maxBitRate=0", `maxBitRate "0": want a positive integer`},
+		{"src=lib/sine.wav&maxBitRate=-64", `maxBitRate "-64": want a positive integer`},
+		{"src=lib/sine.wav&maxBitRate=abc", `maxBitRate "abc": want a positive integer`},
+	} {
+		t.Run(tc.query+" words", func(t *testing.T) {
+			wantRefusal(t, env.get(t, "/stream?"+tc.query, nil), http.StatusBadRequest, waxerr.CodeInvalidRequest, tc.want)
+		})
+	}
 }
 
 func TestProbeRejectsUnknownParameters(t *testing.T) {
@@ -1292,6 +1303,119 @@ func TestProbeRejectsUnknownParameters(t *testing.T) {
 	// The two it does know still work.
 	if resp := env.get(t, "/probe?src=lib/sine.wav&strict=1", nil); resp.StatusCode != 200 {
 		t.Fatalf("strict=1 = %d, want 200 (body: %s)", resp.StatusCode, readBody(t, resp))
+	}
+}
+
+// TestProbeStrictIsABoolean: GET /probe reads strict as a boolean and refuses
+// it present and empty or spelled any other way, so a typo never answers the
+// tolerant probe in place of the strict one.
+func TestProbeStrictIsABoolean(t *testing.T) {
+	env := newTestEnv(t, nil)
+	for _, c := range []struct{ query, want string }{
+		{"strict=", "strict is present but empty; omit it for a tolerant probe"},
+		{"strict=maybe", `strict "maybe": want a boolean`},
+		{"strict=2", `strict "2": want a boolean`},
+	} {
+		t.Run(c.query, func(t *testing.T) {
+			wantRefusal(t, env.get(t, "/probe?src=lib/damaged.mp3&"+c.query, nil),
+				http.StatusBadRequest, waxerr.CodeInvalidRequest, c.want)
+		})
+	}
+	// The refusal comes before the source resolves.
+	wantRefusal(t, env.get(t, "/probe?src=lib/missing.wav&strict=maybe", nil),
+		http.StatusBadRequest, waxerr.CodeInvalidRequest, `strict "maybe": want a boolean`)
+	// Either spelling of each answer, in any case: strict walks the damaged
+	// run and refuses it, tolerant reads the clean head.
+	for _, v := range []string{"1", "true", "YES"} {
+		wantEnvelope(t, env.get(t, "/probe?src=lib/damaged.mp3&strict="+v, nil), 422, waxerr.CodeMalformedInput)
+	}
+	for _, v := range []string{"0", "false", "No"} {
+		if resp := env.get(t, "/probe?src=lib/damaged.mp3&strict="+v, nil); resp.StatusCode != 200 {
+			t.Errorf("strict=%s = %d, want 200 (body: %s)", v, resp.StatusCode, readBody(t, resp))
+		}
+	}
+}
+
+// TestAnEmptyNumberOrPinIsRefused: from, to and t on the /stream parser and id
+// wherever a query carries it are refused present and empty, naming what
+// omitting each means, since absent is their only spelling of the default.
+func TestAnEmptyNumberOrPinIsRefused(t *testing.T) {
+	env := newTestEnv(t, func(cfg *server.Config) { cfg.Meta = coverMapper{} })
+	const (
+		from = "from is present but empty; omit it to start at the source's start"
+		to   = "to is present but empty; omit it to run to the source's end"
+		seek = "t is present but empty; omit it to start at the beginning"
+		id   = "id is present but empty; omit it to serve the source as it is now"
+	)
+	get := func(path string) func() *http.Response {
+		return func() *http.Response { return env.get(t, path, nil) }
+	}
+	post := func(path string) func() *http.Response {
+		return func() *http.Response { return env.req(t, http.MethodPost, path, nil) }
+	}
+	sign := func(param string) func() *http.Response {
+		return func() *http.Response {
+			return env.postJSON(t, "/sign", `{"path":"/stream","params":{"src":"lib/sine.wav","`+param+`":""}}`)
+		}
+	}
+	for _, c := range []struct {
+		name string
+		do   func() *http.Response
+		want string
+	}{
+		{"/stream from", get("/stream?src=lib/sine.wav&from="), from},
+		{"/stream to", get("/stream?src=lib/sine.wav&to="), to},
+		{"/stream t", get("/stream?src=lib/sine.wav&t="), seek},
+		{"/stream id", get("/stream?src=lib/sine.wav&id="), id},
+		{"/transcode from", post("/transcode?src=lib/sine.wav&format=wav&from="), from},
+		{"/transcode to", post("/transcode?src=lib/sine.wav&format=wav&to="), to},
+		{"/transcode t", post("/transcode?src=lib/sine.wav&format=wav&t="), seek},
+		{"/transcode id", post("/transcode?src=lib/sine.wav&format=wav&id="), id},
+		{"/sign from", sign("from"), from},
+		{"/sign to", sign("to"), to},
+		{"/sign t", sign("t"), seek},
+		{"/art id", get("/art?src=lib/sine.wav&id="), id},
+		{"/lyrics id", get("/lyrics?src=lib/sine.wav&id="), id},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			wantRefusal(t, c.do(), http.StatusBadRequest, waxerr.CodeInvalidRequest, c.want)
+		})
+	}
+	// HEAD answers as GET does, with no envelope to read.
+	for _, param := range []string{"from", "to", "t", "id"} {
+		resp := env.req(t, http.MethodHead, "/stream?src=lib/sine.wav&"+param+"=", nil)
+		if resp.Body.Close(); resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("HEAD /stream with %s= = %d, want 400", param, resp.StatusCode)
+		}
+	}
+	// A sign request's own id is replaced with the source's, empty or not, and
+	// the URL it signs plays.
+	resp := sign("id")()
+	body := readBody(t, resp)
+	var minted server.SignResponse
+	if resp.StatusCode != 200 {
+		t.Errorf("POST /sign with an empty id = %d, want 200 (body: %s)", resp.StatusCode, body)
+	} else if err := json.Unmarshal(body, &minted); err != nil {
+		t.Fatal(err)
+	} else if played := keyless(t, env, minted.URL); played.StatusCode != 200 {
+		t.Errorf("the URL signed over an empty id = %d, want 200 (body: %s)", played.StatusCode, readBody(t, played))
+	} else if len(readBody(t, played)) == 0 {
+		t.Error("the URL signed over an empty id played no bytes")
+	}
+	// An empty number is refused where it is parsed, before the source
+	// resolves; an empty id where a malformed one is, after.
+	wantRefusal(t, env.get(t, "/stream?src=lib/missing.wav&t=", nil), http.StatusBadRequest, waxerr.CodeInvalidRequest, seek)
+	wantEnvelope(t, env.get(t, "/stream?src=lib/missing.wav&id=", nil), http.StatusNotFound, waxerr.CodeNotFound)
+	// Both come before the format and knob refusals the plan makes.
+	wantRefusal(t, env.get(t, "/stream?src=lib/sine.wav&format=flac&bitrate=128&from=", nil),
+		http.StatusBadRequest, waxerr.CodeInvalidRequest, from)
+	wantRefusal(t, env.get(t, "/stream?src=lib/sine.wav&format=nosuch&id=", nil),
+		http.StatusBadRequest, waxerr.CodeInvalidRequest, id)
+	status, answers := mintAnswer(t, env, map[string]string{"src": "lib/missing.wav", "format": "nosuch", "to": ""})
+	for i, surface := range []string{"the keyed master", "POST /sign"} {
+		if status[i] != http.StatusBadRequest || !strings.Contains(answers[i], to) {
+			t.Errorf("format=nosuch&to= on %s = %d %s; want a 400 saying %q", surface, status[i], answers[i], to)
+		}
 	}
 }
 

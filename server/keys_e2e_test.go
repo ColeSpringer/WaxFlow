@@ -246,6 +246,9 @@ func keyMatrix(tl, mixed, withWebM string) (cases []keyCase) {
 		{"opus-in-webm", srcWAV + "&format=opus&container=webm"},
 		{"vorbis-in-mka", srcWAV + "&format=vorbis&container=mka"},
 		{"vorbis-in-webm", srcWAV + "&format=vorbis&container=webm"},
+		// q is a quality on vorbis, and the canonical string spells it.
+		{"vorbis-q-low", srcWAV + "&format=vorbis&q=low"},
+		{"vorbis-q-high", srcWAV + "&format=vorbis&q=high"},
 		{"flac-in-mka", srcWAV + "&format=flac&container=mka"},
 		{"flac-in-ogg", srcWAV + "&format=flac&container=ogg"},
 		{"aac-in-adts", srcWAV + "&format=aac&container=adts"},
@@ -279,6 +282,7 @@ func keyMatrix(tl, mixed, withWebM string) (cases []keyCase) {
 		{"tl-opus-crossfade", "tl=" + tl + "&format=opus" + gainOff + xfade},
 		{"tl-opus-seek", "tl=" + tl + "&format=opus" + gainOff + seek},
 		{"tl-opus-gain", "tl=" + tl + "&format=opus&gain=-3"},
+		{"tl-vorbis-q-high", "tl=" + tl + "&format=vorbis&q=high" + gainOff},
 		{"tl-flac-mixed-width", "tl=" + mixed + "&format=flac" + gainOff},
 		{"tl-flac-webm-member", "tl=" + withWebM + "&format=flac" + gainOff},
 	})

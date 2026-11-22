@@ -94,7 +94,14 @@ data track occupies part of the file the split says what it skipped.`,
 			}
 
 			// What the flags alone decide is refused before the source opens, in
-			// the engine's order, as transcode does.
+			// transcode's order: the format and container, then a knob flag off
+			// its formats, then its range.
+			if err := (waxflow.TranscodeOptions{Format: outFormat, Container: containerName}).Check(); err != nil {
+				return err
+			}
+			if err := givenKnobRefusal(cmd, outFormat, ^waxflow.Knob(0)); err != nil {
+				return err
+			}
 			optLevel, levelErr := flacLevelOption(cmd, flacLevel)
 			opts := waxflow.TranscodeOptions{
 				Format:       outFormat,
@@ -104,7 +111,7 @@ data track occupies part of the file the split says what it skipped.`,
 				APELevel:     changedOr(cmd, "ape-level", apeLevel),
 			}
 			if err := opts.Check(); err != nil {
-				return knobFlagRefusal(err)
+				return flagWording.Reword(err)
 			}
 			if levelErr != nil {
 				return levelErr
@@ -129,7 +136,7 @@ data track occupies part of the file the split says what it skipped.`,
 			// every job type.
 			plan, err := e.PlanTranscode(track, opts)
 			if err != nil {
-				return knobFlagRefusal(err)
+				return flagWording.Reword(err)
 			}
 			containerName = waxflow.FileOutputContainer(containerName, plan)
 			// A cut list is meaningless against a length the headers only
@@ -237,9 +244,7 @@ data track occupies part of the file the split says what it skipped.`,
 	cmd.Flags().StringSliceVar(&atFlag, "at", nil, "explicit cut points as source sample offsets (repeatable or comma-separated)")
 	cmd.Flags().StringVar(&formatName, "format", "", "output format (default: flac, which keeps the split lossless)")
 	cmd.Flags().StringVar(&containerName, "container", "", "container override where the format has one")
-	cmd.Flags().IntVar(&flacLevel, "flac-level", 5, "FLAC compression level 0-8, size vs speed (flac output only)")
-	cmd.Flags().IntVar(&wavpackLevel, "wavpack-level", 0, "WavPack compression level: 1 fast, 2 normal, 3 high, 4 very high (wavpack output only; default: the encoder's, 2)")
-	cmd.Flags().IntVar(&apeLevel, "ape-level", 0, "Monkey's Audio compression level: 1000 fast, 2000 normal, 3000 high (ape output only; default: the encoder's, 2000)")
+	levelFlags(cmd, &flacLevel, &wavpackLevel, &apeLevel)
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing outputs")
 	cmd.Flags().BoolVar(&noTags, "no-tags", false, "do not carry the source's metadata onto the pieces")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the pieces and their sample ranges without writing anything")

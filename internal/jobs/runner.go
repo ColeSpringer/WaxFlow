@@ -1,8 +1,6 @@
 package jobs
 
 import (
-	"strings"
-
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -360,7 +359,9 @@ func (r *Runner) run(j *Job) {
 		r.mu.Unlock()
 	}()
 
-	err := j.Request.CheckBitrate()
+	// A stored request is read back from disk, so it is checked again, as
+	// its creation checked it.
+	err := j.Request.Check()
 	switch {
 	case err != nil:
 	case j.Type == TypeTranscode:
@@ -861,35 +862,11 @@ func secondsToDuration(seconds float64) time.Duration {
 	return time.Duration(seconds * float64(time.Second))
 }
 
-// CheckBitrate refuses a Bitrate above waxflow.MaxBitrate in kbit/s, which
-// TranscodeOptions would multiply past the bound. Creation runs it, and so does
-// a run, since a stored request is read back from disk.
-func (req Request) CheckBitrate() error {
-	if limit := waxflow.MaxBitrate / 1000; req.Bitrate > limit {
-		return waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("bitrate %d: want at most %d kbit/s", req.Bitrate, limit))
-	}
-	return nil
-}
-
 // TranscodeOptions maps the request onto engine options. gainDB is the
-// resolved gain and profile the daemon's resampler profile. The caller has run
-// CheckBitrate.
+// resolved gain and profile the daemon's resampler profile. A job carries no
+// dynamics.
 func (req Request) TranscodeOptions(gainDB float64, profile resample.Profile) waxflow.TranscodeOptions {
-	return waxflow.TranscodeOptions{
-		Format:          req.Format,
-		Container:       req.Container,
-		Rate:            req.Rate,
-		Channels:        req.Channels,
-		BitDepth:        req.Bits,
-		GainDB:          gainDB,
-		FLACLevel:       req.FLACLevel,
-		WavPackLevel:    req.WavPackLevel,
-		APELevel:        req.APELevel,
-		Bitrate:         req.Bitrate * 1000,
-		HEAACv2:         req.HEv2,
-		ResampleProfile: profile,
-	}
+	return req.Params.Options(gainDB, gain.PresetOff, profile)
 }
 
 // runTranscode is the full job pipeline: read metadata, resolve gain

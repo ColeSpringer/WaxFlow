@@ -18,8 +18,8 @@ import (
 	"github.com/colespringer/waxflow/cue"
 	"github.com/colespringer/waxflow/internal/jobs"
 	"github.com/colespringer/waxflow/internal/meta"
+	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/internal/sign"
-	"github.com/colespringer/waxflow/internal/timeline"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -93,19 +93,13 @@ type jobRequest struct {
 	// Skip lists the pieces Cuts opens that the split does not write, as
 	// 0-based piece indices. Split-only, and resolved from a sheet as Cuts is:
 	// a data track's piece lands here.
-	Skip         []int  `json:"skip,omitempty"`
-	Format       string `json:"format,omitempty"`
-	Container    string `json:"container,omitempty"`
-	Rate         int    `json:"rate,omitempty"`
-	Ch           int    `json:"ch,omitempty"`
-	Bits         int    `json:"bits,omitempty"`
-	Bitrate      int    `json:"bitrate,omitempty"`
-	HEv2         bool   `json:"hev2,omitempty"`
-	Gain         string `json:"gain,omitempty"`
-	Loudness     string `json:"loudness,omitempty"`
-	FLACLevel    int    `json:"flacLevel,omitempty"`
-	WavPackLevel int    `json:"wavpackLevel,omitempty"`
-	APELevel     int    `json:"apeLevel,omitempty"`
+	Skip []int `json:"skip,omitempty"`
+	// Params is the output's shape: transcode, merge and split take it, and
+	// analyze refuses it. Its methods check and map the shape alone, so they
+	// are called through Params.
+	outshape.Params
+	Gain     string `json:"gain,omitempty"`
+	Loudness string `json:"loudness,omitempty"`
 
 	Silence            bool    `json:"silence,omitempty"`
 	SilenceThresholdDB float64 `json:"silenceThresholdDb,omitempty"`
@@ -126,18 +120,9 @@ func requestFrom(body jobRequest) *jobs.Request {
 		MemberTitles:       slices.Clone(body.Titles),
 		Cuts:               slices.Clone(body.Cuts),
 		Skip:               slices.Clone(body.Skip),
-		Format:             body.Format,
-		Container:          body.Container,
-		Rate:               body.Rate,
-		Channels:           body.Ch,
-		Bits:               body.Bits,
-		Bitrate:            body.Bitrate,
-		HEv2:               body.HEv2,
+		Params:             body.Params,
 		Gain:               body.Gain,
 		Loudness:           body.Loudness,
-		FLACLevel:          body.FLACLevel,
-		WavPackLevel:       body.WavPackLevel,
-		APELevel:           body.APELevel,
 		Silence:            body.Silence,
 		SilenceThresholdDB: body.SilenceThresholdDB,
 		SilenceMinSeconds:  body.SilenceMinSeconds,
@@ -170,12 +155,13 @@ func (s *Server) handleJobCreate(w http.ResponseWriter, r *http.Request) {
 // against its probed source (gain 0: the resolved value never shapes plan
 // validity), so a 201 means the job will not fail on request shape later.
 //
-// The per-type field policing below is that promise's front half, and it is a
-// hand-maintained rule per field. It reads as bureaucracy until the
-// alternative is spelled out: a field that does not apply to a type would be
-// accepted, stored, broadcast on every progress event, and silently ignored,
-// so the caller's evidence that their cuts were honored would be the request
-// they sent. TestJobFieldPolicing drives every (type, field) pair against it.
+// The per-type field policing (jobs.Request.CheckBody) is that promise's front
+// half, and it is a hand-maintained rule per field. It reads as bureaucracy
+// until the alternative is spelled out: a field that does not apply to a type
+// would be accepted, stored, broadcast on every progress event, and silently
+// ignored, so the caller's evidence that their cuts were honored would be the
+// request they sent. TestJobFieldPolicing drives every (type, field) pair
+// against it.
 func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs.Request, error) {
 	bad := func(format string, args ...any) (*jobs.Request, error) {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(format, args...))
@@ -190,85 +176,21 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 		// door here would skip both that fast path and the mint's validation.
 		return bad("type %q: want transcode, analyze, merge, or split", body.Type)
 	}
-	// The source side forks once: a merge names its members in srcs, and every
-	// other type names one source in src. Neither spelling is tolerated on the
-	// other, so a merge with a src is a 400 rather than a merge of one file
-	// that quietly ignored a member list.
-	if req.Type == jobs.TypeMerge {
-		if body.Src != "" {
-			return bad("type merge takes srcs, not src")
-		}
-		if len(body.Srcs) == 0 {
-			return bad("type merge needs srcs: at least one member")
-		}
-		if len(body.Srcs) > timeline.MaxMembers {
-			return bad("%d members is past the %d-member bound; a merge is a play queue, not a library",
-				len(body.Srcs), timeline.MaxMembers)
-		}
-		for i, m := range body.Srcs {
-			if m == "" {
-				return bad("member %d has no src", i)
-			}
-		}
-	} else {
-		if body.Src == "" {
-			return bad("src is required")
-		}
-		if len(body.Srcs) > 0 {
-			return bad("srcs applies to merge jobs")
-		}
-	}
-	if req.Type != jobs.TypeMerge && len(body.Titles) > 0 {
-		return bad("titles applies to merge jobs")
-	}
-	if req.Type != jobs.TypeSplit && len(body.Cuts) > 0 {
-		return bad("cuts applies to split jobs")
-	}
-	if req.Type != jobs.TypeSplit && body.Cue != "" {
-		return bad("cue applies to split jobs")
-	}
-	if req.Type != jobs.TypeSplit && len(body.Skip) > 0 {
-		return bad("skip applies to split jobs")
-	}
-	if (len(body.Cuts) > 0 || len(body.Skip) > 0) && body.Cue != "" {
-		return bad("cuts and skip are exclusive with cue: a split's boundaries come from one place")
-	}
-	if req.Type != jobs.TypeAnalyze && (body.Silence || body.SilenceThresholdDB != 0 || body.SilenceMinSeconds != 0) {
-		return bad("the silence fields apply to analyze jobs")
-	}
-	// Gain and loudness are transcode-only, and that is a real restriction
-	// rather than an unfinished one. Both answer "how loud should this one
-	// track be", against that track's own measurement or its own ReplayGain
-	// tags: a merge has N tracks in and one file out, and a split has one in
-	// and N out, so either would have to pick one source's number and apply it
-	// to things it does not describe. A caller who wants normalized pieces
-	// transcodes them after the cut, where the numbers name what they measure.
-	if req.Type == jobs.TypeMerge || req.Type == jobs.TypeSplit {
-		if body.Gain != "" || body.Loudness != "" {
-			return bad("gain and loudness apply to transcode jobs; %s writes the samples it is given", req.Type)
-		}
-	}
 	// What the request alone decides is refused before any source resolves or
-	// is measured, so no 404 or measure pass hides it.
-	if req.Type == jobs.TypeAnalyze {
-		if body.Format != "" || body.Container != "" || body.Rate != 0 || body.Ch != 0 ||
-			body.Bits != 0 || body.Bitrate != 0 || body.HEv2 || body.Gain != "" ||
-			body.Loudness != "" || body.FLACLevel != 0 || body.WavPackLevel != 0 ||
-			body.APELevel != 0 {
-			return bad("type analyze takes src and the silence fields")
+	// is measured, so no 404 or measure pass hides it. A stored job runs the
+	// same rules before it runs. A cue is the body's alone: a request carries
+	// its cut points, so its rules run here, in their place.
+	cueRules := func() error {
+		if req.Type != jobs.TypeSplit && body.Cue != "" {
+			return waxerr.New(waxerr.CodeInvalidRequest, "cue applies to split jobs")
 		}
-		// A threshold with no silence:true would be silently ignored, which
-		// is the shape of acceptance this gate exists to refuse.
-		if !body.Silence && (body.SilenceThresholdDB != 0 || body.SilenceMinSeconds != 0) {
-			return bad("silenceThresholdDb and silenceMinSeconds need silence:true")
+		if (len(body.Cuts) > 0 || len(body.Skip) > 0) && body.Cue != "" {
+			return waxerr.New(waxerr.CodeInvalidRequest,
+				"cuts and skip are exclusive with cue: a split's boundaries come from one place")
 		}
-		// Named sil, not s: the receiver is the Server.
-		if sil := req.SilenceOptions(); sil != nil {
-			if err := checkSilenceOptions(sil); err != nil {
-				return nil, err
-			}
-		}
-	} else if err := s.checkOutputShape(req); err != nil {
+		return nil
+	}
+	if err := req.CheckBody(cueRules); err != nil {
 		return nil, err
 	}
 	if req.Type == jobs.TypeMerge {
@@ -409,43 +331,6 @@ func (s *Server) applyFileOutputContainer(req *jobs.Request, track container.Tra
 	return err
 }
 
-// checkOutputShape validates the shaping fields every audio-writing job
-// carries, in one place because transcode, merge, and split take the same set
-// and must refuse the same values. It reads only the request, so creation runs
-// it before any source resolves.
-func (s *Server) checkOutputShape(req *jobs.Request) error {
-	bad := func(format string, args ...any) error {
-		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(format, args...))
-	}
-	if req.Format == "" || req.Format == "auto" {
-		return bad("%s jobs need an explicit format (%s)", req.Type, strings.Join(waxflow.OutputFormats(), ", "))
-	}
-	switch req.Bits {
-	case 0, 16, 24:
-	default:
-		return bad("bits %d: want 16 or 24", req.Bits)
-	}
-	if req.Rate < 0 || req.Channels < 0 || req.Bitrate < 0 {
-		return bad("rate, ch, and bitrate must be non-negative")
-	}
-	if err := req.CheckBitrate(); err != nil {
-		return err
-	}
-	if req.Loudness != "" && req.Loudness != "analyze" {
-		return bad("loudness %q: want analyze (or omit)", req.Loudness)
-	}
-	if req.Loudness == "analyze" && req.Gain != "" {
-		return bad("loudness analyze replaces gain; drop the gain field")
-	}
-	if _, err := parseGain(req.Gain, s.defaultGain); err != nil {
-		return err
-	}
-	if err := req.TranscodeOptions(0, s.profile).Check(); err != nil {
-		return knobRefusal(err, jobKnobs)
-	}
-	return nil
-}
-
 // mp4ProgressiveContainer is the container override that selects the flat
 // (moov+mdat) MP4 form, aliased from the engine so the wire value has one
 // definition rather than one per package.
@@ -468,14 +353,6 @@ const mp4ProgressiveContainer = waxflow.ContainerProgressive
 // longest, since the measure pass is the slow part. runMerge already proves one
 // at a time suffices.
 func (s *Server) validateMergeRequest(ctx context.Context, body jobRequest, req *jobs.Request) (*jobs.Request, error) {
-	// Titles are index-aligned to the members, so the only shapes that mean
-	// anything are none and one-per-member. A short or long list would leave
-	// the alignment to guesswork at run time, which is the silent-mismatch this
-	// refuses. A blank entry is legal: it falls through to the tag or fallback.
-	if n := len(body.Titles); n != 0 && n != len(body.Srcs) {
-		return nil, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
-			"titles has %d entries but the merge has %d members; a title per member, or none", n, len(body.Srcs)))
-	}
 	tracks := make([]container.Track, len(body.Srcs))
 	req.SourceIDs = make([]string, len(body.Srcs))
 	for i, ref := range body.Srcs {
@@ -536,7 +413,7 @@ func (s *Server) validateMergeRequest(ctx context.Context, body jobRequest, req 
 	// Titles write a QuickTime chapter track, which only the flat MP4 form
 	// carries. If the resolved output is not that form the runner drops them, so
 	// refuse here rather than accept a field that will be silently inert, the
-	// way a lossless bitrate is refused (checkOutputShape): a field the request
+	// way a lossless bitrate is refused (Request.Check): a field the request
 	// carries but the output cannot honor is a 400 where the caller can still
 	// fix it, not a clean success that quietly did less. The container is final
 	// by now (the block above settled the mp4-family default), and the test is
@@ -827,7 +704,7 @@ func (s *Server) cueFileFor(ctx context.Context, ref string) (*cue.File, error) 
 //
 // A job that wrote no audio has no row to ask: an analyze job's silence map is
 // application/json, and its container name IS its extension. Format is the
-// test because checkOutputShape requires an explicit one of every audio-writing
+// test because Request.Check requires an explicit one of every audio-writing
 // type and analyze refuses it outright, so the two cases cannot blur.
 func jobResultFilename(j *jobs.Job, n int) string {
 	ref := j.Request.Src
@@ -883,7 +760,7 @@ func (s *Server) prepareMetaRequest(w http.ResponseWriter, r *http.Request, pict
 		s.writeError(w, err)
 		return nil, nil, false
 	}
-	p := &streamParams{src: ref, identity: q.Get("id")}
+	p := &streamParams{src: ref, identity: q.Get("id"), pinned: q.Has("id")}
 	if p.src == "" {
 		s.writeError(w, waxerr.New(waxerr.CodeInvalidRequest, "src is required"))
 		return nil, nil, false
