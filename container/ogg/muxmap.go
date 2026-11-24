@@ -73,7 +73,7 @@ func (opusMuxMapping) writeHeaders(t container.Track, tags []container.Tag, vend
 	// The comment is built before anything is emitted: a refusal here must
 	// leave the destination untouched rather than stranding a BOS page in
 	// front of a stream that never arrives.
-	comment, err := buildComment("OpusTags", vendor, tags)
+	comment, err := buildComment(opusTagsMagic, vendor, tags)
 	if err != nil {
 		return 0, err
 	}

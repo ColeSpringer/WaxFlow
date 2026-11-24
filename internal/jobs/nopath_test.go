@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/outshape"
@@ -222,7 +223,7 @@ func TestEveryStringOfAJobIsCutOrKept(t *testing.T) {
 		"Type": true, "State": true,
 		"Request.Type": true, "Request.Src": true, "Request.SourceID": true, "Request.SourceIDs[]": true,
 		"Request.Params.Format": true, "Request.Params.Container": true, "Request.Gain": true, "Request.Loudness": true,
-		"Request.Srcs[]": true, "Request.MemberTitles[]": true,
+		"Request.Srcs[]": true, "Request.MemberTitles[]": true, "Request.Pieces[].Title": true,
 		"Error.Code": true, "Waiting.Code": true,
 		"Outputs[].File": true, "Outputs[].MediaType": true, "Outputs[].Container": true,
 		"Analysis.ReplayGainTrackGain": true, "Analysis.ReplayGainTrackPeak": true, "Analysis.Silence.Version": true,
@@ -312,7 +313,7 @@ func (m quotingMapper) Apply(context.Context, string, *meta.Info, []container.Ta
 func TestAMapperQuotingTheJobDirectoryIsRecordedWithoutIt(t *testing.T) {
 	res, ref, srcID := openLib(t)
 	mergeRoot := t.TempDir()
-	merge := Request{Type: TypeMerge, Params: outshape.Params{Format: "alac", Container: mp4ProgressiveContainer}, Srcs: []source.Ref{
+	merge := Request{Type: TypeMerge, Params: outshape.Params{Format: "alac", Container: waxflow.ContainerProgressive}, Srcs: []source.Ref{
 		source.Ref(writeMergeWAV(t, mergeRoot, "a.wav", 4800)), source.Ref(writeMergeWAV(t, mergeRoot, "b.wav", 4800)),
 	}}
 	for _, tc := range []struct {

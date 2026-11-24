@@ -42,6 +42,27 @@ func Replace(tmpName, target string) error {
 	return retry(rename)
 }
 
+// publishNew moves tmpName to target unless something is there: MoveFile
+// without MOVEFILE_REPLACE_EXISTING fails ERROR_ALREADY_EXISTS on an
+// existing target, atomically. It takes the backoff Replace does.
+func publishNew(tmpName, target string) error {
+	from, err := syscall.UTF16PtrFromString(longPath(tmpName))
+	if err != nil {
+		return &os.LinkError{Op: "rename", Old: tmpName, New: target, Err: err}
+	}
+	to, err := syscall.UTF16PtrFromString(longPath(target))
+	if err != nil {
+		return &os.LinkError{Op: "rename", Old: tmpName, New: target, Err: err}
+	}
+	if err := retry(func() error { return syscall.MoveFile(from, to) }); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return errExists(target)
+		}
+		return &os.LinkError{Op: "rename", Old: tmpName, New: target, Err: err}
+	}
+	return nil
+}
+
 // retry runs op until it succeeds, fails for good, or the backoff runs out.
 func retry(op func() error) error {
 	var err error

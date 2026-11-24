@@ -303,7 +303,7 @@ type Tag struct {
 // maxWriteBytes bounds a rendered tag. The engine passes a small descriptive
 // set; a tag that would grow a file's trailer past this is refused rather than
 // written, since there is no larger block to fall back on. Callers that project
-// a source's tags onto an output trim to meta.EmbeddableTags first, so this
+// a source's tags onto an output fit them to the block first, so this
 // refuses what a caller named, not what a file happened to carry.
 const maxWriteBytes = 48 << 10
 

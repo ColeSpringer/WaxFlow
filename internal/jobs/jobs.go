@@ -176,6 +176,43 @@ type Request struct {
 	// say to leave out. A client sending cuts by hand may name pieces of its
 	// own. The outputs are the pieces not named here, in order.
 	Skip []int `json:"skip,omitempty"`
+	// Pieces are a split's TRACKNUMBER and TITLE per piece, index-aligned
+	// with the pieces Cuts opens, skipped ones included: from the body's
+	// titles, or from a sheet. Empty numbers piece i as i+1 with no title of
+	// its own. Split-only, and set by the server.
+	Pieces []PieceTag `json:"pieces,omitempty"`
+	// TrackTotal is a split's TRACKTOTAL: the sheet's track count, or the
+	// number of pieces. 0 means the number of pieces. Split-only, and set by
+	// the server.
+	TrackTotal int `json:"trackTotal,omitempty"`
+}
+
+// PieceTag is what one piece of a split is called. An empty Title leaves
+// the source's TITLE on the piece.
+type PieceTag struct {
+	Number int    `json:"number"`
+	Title  string `json:"title,omitempty"`
+}
+
+// TitledPieces numbers a split's pieces from 1 and titles them, one per
+// title.
+func TitledPieces(titles []string) []PieceTag {
+	if len(titles) == 0 {
+		return nil
+	}
+	out := make([]PieceTag, len(titles))
+	for i, t := range titles {
+		out[i] = PieceTag{Number: i + 1, Title: t}
+	}
+	return out
+}
+
+// PieceLabel is the TRACKNUMBER and TITLE of piece i of a split.
+func (req Request) PieceLabel(i int) (number int, title string) {
+	if i < len(req.Pieces) {
+		return req.Pieces[i].Number, req.Pieces[i].Title
+	}
+	return i + 1, ""
 }
 
 // Skipped reports whether the split leaves piece i unwritten (Skip).
@@ -484,6 +521,7 @@ func (j *Job) clone() *Job {
 	c.Request.Cuts = slices.Clone(j.Request.Cuts)
 	c.Request.Skip = slices.Clone(j.Request.Skip)
 	c.Request.MemberTitles = slices.Clone(j.Request.MemberTitles)
+	c.Request.Pieces = slices.Clone(j.Request.Pieces)
 	c.Request.Spans = slices.Clone(j.Request.Spans)
 	// Output holds no reference field of its own, so cloning the slice is
 	// the whole of it; a pointer added to Output would need a loop here.

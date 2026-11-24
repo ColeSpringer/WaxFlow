@@ -468,6 +468,36 @@ func Cutpoints(pieces []Piece) (cuts []int64, skip []int) {
 	return cuts, skip
 }
 
+// Label is the TRACKNUMBER and TITLE a split gives piece p, one of
+// f.Pieces: its track's, or 0 and no title for a piece no track names (the
+// lead-in is track 0, the disc's own address for the audio ahead of track 1)
+// and for one whose track f does not hold.
+func (f *File) Label(p Piece) (number int, title string) {
+	if p.Track < 0 || p.Track >= len(f.Tracks) {
+		return 0, ""
+	}
+	t := f.Tracks[p.Track]
+	return t.Number, t.Title
+}
+
+// TrackTotal is the disc's TRACKTOTAL: every TRACK in any of the sheet's
+// files up to and including the last audio one. A mixed-mode disc's leading
+// data track counts, an Enhanced CD's trailing one does not, and a lead-in
+// is not a track. It is at least every audio track's number, so no piece
+// is numbered past it.
+func (s *Sheet) TrackTotal() int {
+	total, n := 0, 0
+	for _, f := range s.Files {
+		for _, t := range f.Tracks {
+			n++
+			if t.IsAudio() {
+				total = max(total, n, t.Number)
+			}
+		}
+	}
+	return total
+}
+
 // Cuts returns the interior cut points a split of this file uses, in
 // samples at rate, for a file whose every piece is written: [0,c0), [c0,c1),
 // ..., [cn,end) partition the whole file, nothing discarded, one piece per

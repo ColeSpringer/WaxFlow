@@ -95,6 +95,10 @@ minted here dies with 410 source-changed if the file changes.`,
 					track := info.Default()
 					d = durationSeconds(track.Samples, track.Fmt.Rate)
 				}
+				// A canceled probe is a cancel, never the unknown-duration TTL.
+				if err := cmd.Context().Err(); err != nil {
+					return waxerr.Wrap(waxerr.CodeCanceled, "sign canceled", err)
+				}
 				ttl = sign.DefaultTTLFor(d)
 			}
 

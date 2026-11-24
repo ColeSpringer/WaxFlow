@@ -104,10 +104,39 @@ type MuxerOptions struct {
 // every mapping; the serial only needs to be stable within one stream.
 const oggOpusSerial = 0x4F707573
 
+// defaultVendor is the comment-header vendor string a muxer writes unless
+// MuxerOptions.Vendor names another.
+const defaultVendor = "WaxFlow"
+
+// opusTagsMagic opens an Opus comment header (RFC 7845 section 5.2); the
+// header's cap counts it.
+const opusTagsMagic = "OpusTags"
+
+// OpusTagsFit reports whether tags fit the comment header the muxer writes
+// for an Opus stream under the default vendor: nil, or Begin's own refusal.
+func OpusTagsFit(tags []container.Tag) error {
+	_, err := buildComment(opusTagsMagic, defaultVendor, tags)
+	return err
+}
+
+// VorbisTagsFit reports whether tags fit the comment header the muxer writes
+// for a Vorbis stream under the default vendor: nil, or Begin's own refusal.
+func VorbisTagsFit(tags []container.Tag) error {
+	_, err := buildComment("", defaultVendor, tags)
+	return err
+}
+
+// FLACTagsFit reports whether tags fit the comment header the muxer writes
+// for a FLAC stream under the default vendor: nil, or Begin's own refusal.
+func FLACTagsFit(tags []container.Tag) error {
+	_, err := buildComment("", defaultVendor, tags)
+	return err
+}
+
 // NewMuxer returns an Ogg muxer writing to w. The codec (and so the mapping) is
 // selected from the track at Begin.
 func NewMuxer(w io.Writer, opts *MuxerOptions) *Muxer {
-	m := &Muxer{w: w, serial: oggOpusSerial, vendor: "WaxFlow"}
+	m := &Muxer{w: w, serial: oggOpusSerial, vendor: defaultVendor}
 	if opts != nil {
 		if opts.Vendor != "" {
 			m.vendor = opts.Vendor

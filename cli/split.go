@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -20,6 +22,7 @@ import (
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/posixfs"
+	"github.com/colespringer/waxflow/internal/tofile"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -166,7 +169,7 @@ data track occupies part of the file the split says what it skipped.`,
 			var pieces []piece
 			var ofN int
 			if cueFile != "" {
-				pieces, ofN, err = cuePieces(cueFile, track.Fmt.Rate, track.Samples)
+				pieces, ofN, err = cuePieces(cueFile, outFormat, containerName, track.Fmt.Rate, track.Samples)
 			} else {
 				pieces, err = atPieces(atFlag, track.Samples)
 				ofN = len(pieces)
@@ -207,7 +210,20 @@ data track occupies part of the file the split says what it skipped.`,
 				return nil
 			}
 
+			// Every piece's path is checked before any is written, so a
+			// refusal never leaves a partial set behind.
 			outDir := args[1]
+			if !force {
+				for _, p := range pieces {
+					if p.skip != "" {
+						continue
+					}
+					name := pieceName(p, ext)
+					if err := posixfs.CheckAbsent(filepath.Join(outDir, name)); errors.Is(err, os.ErrExist) {
+						return fmt.Errorf("%s: %w", name, errOutputExists(err))
+					}
+				}
+			}
 			if err := os.MkdirAll(outDir, 0o755); err != nil {
 				return waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating the output directory", err)
 			}
@@ -217,10 +233,13 @@ data track occupies part of the file the split says what it skipped.`,
 				outFormat: outFormat, container: containerName,
 				flacLevel: optLevel, wavpackLevel: opts.WavPackLevel, apeLevel: opts.APELevel,
 				force: force, ofN: ofN, srcTrack: srcTrack,
-				mapper: label.NewLogged(logger), containerTags: info.Tags,
+				mapper: label.NewLogged(logger),
+			}
+			if splitMapper != nil {
+				sp.mapper = splitMapper(sp.mapper)
 			}
 			if !noTags {
-				sp.readMeta(cmd)
+				sp.readMeta(cmd, info.Tags)
 			}
 
 			for _, p := range pieces {
@@ -258,6 +277,10 @@ data track occupies part of the file the split says what it skipped.`,
 func splitEngine(logger *slog.Logger) *waxflow.Engine {
 	return waxflow.New(waxflow.WithLogger(logger), waxflow.WithIndexCache(&oneSourceIndex{}))
 }
+
+// splitMapper, when set, wraps the mapper a split reads and tags with: the
+// tests' gate for a cancel that lands in the post-pass.
+var splitMapper func(meta.Mapper) meta.Mapper
 
 // openSplitSource opens a split's source. A variable so a test can watch the
 // reads a whole split makes.
@@ -405,8 +428,10 @@ func truncateTitle(s string, max int) string {
 // its own, and the audio after it is numbered 2 and up of that total; an
 // Enhanced CD's data track sits in a second session after the audio, which
 // a CD player never counts, so its audio is 1 and up of the audio alone. A
-// lead-in is not a track and is not counted.
-func cuePieces(path string, rate int, total int64) ([]piece, int, error) {
+// lead-in is not a track and is not counted. The count is never less than
+// any audio track's number. The pieces' own tags are checked against
+// the writer of formatName in containerName.
+func cuePieces(path, formatName, containerName string, rate int, total int64) ([]piece, int, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, 0, waxerr.Wrap(waxerr.CodeInvalidRequest, "reading the CUE sheet", err)
@@ -428,9 +453,9 @@ func cuePieces(path string, rate int, total int64) ([]piece, int, error) {
 	// data track that is a piece nothing writes.
 	//
 	// The lead-in gets track 0, the disc's own address for the audio ahead
-	// of track 1, which is also where a listing sorts it. It gets no title:
-	// the sheet gave it none, and a piece with no title carries no TITLE
-	// tag rather than an invented one.
+	// of track 1, which is also where a listing sorts it. It gets no title
+	// of its own, since the sheet gave it none, so it keeps the source's
+	// TITLE.
 	cuts, err := file.Pieces(rate, total)
 	if err != nil {
 		return nil, 0, err
@@ -441,10 +466,10 @@ func cuePieces(path string, rate int, total int64) ([]piece, int, error) {
 		if c.To < 0 {
 			p.to = waxflow.ToEnd
 		}
+		p.number, p.title = file.Label(c)
 		switch {
 		case c.Track >= 0:
 			t := file.Tracks[c.Track]
-			p.title, p.number = t.Title, t.Number
 			if !c.Audio {
 				// Quoted and bounded: the datatype is a token off the sheet,
 				// and this line reaches a terminal.
@@ -455,13 +480,15 @@ func cuePieces(path string, rate int, total int64) ([]piece, int, error) {
 		}
 		out = append(out, p)
 	}
-	tracks, n := 0, 0
-	for _, f := range sheet.Files {
-		for _, t := range f.Tracks {
-			n++
-			if t.IsAudio() {
-				tracks = n
-			}
+	// A title the sheet names is the caller's, so one too large to embed is
+	// refused before any piece is written, never dropped.
+	tracks := sheet.TrackTotal()
+	for _, p := range out {
+		if p.skip != "" {
+			continue
+		}
+		if err := tofile.CheckPieceTags(formatName, containerName, p.number, tracks, p.title); err != nil {
+			return nil, 0, waxerr.Annotate(fmt.Sprintf("cue: track %d", p.number), err)
 		}
 	}
 	return out, tracks, nil
@@ -518,99 +545,35 @@ type splitter struct {
 	// when the headers' own length was exact.
 	srcTrack container.Track
 
-	// The metadata half: albumTags and art ride onto every piece at mux
-	// time, tagInfo carries what a tag list cannot (art again, for the
-	// formats whose muxer does not embed it) through the post-pass. All
-	// three are empty under --no-tags.
-	//
-	// containerTags are the source's own tags as the demuxer parsed them,
-	// the floor readMeta folds the mapper's over.
-	mapper        label.Mapper
-	containerTags map[string][]string
-	tagInfo       *meta.Info
-	albumTags     []container.Tag
-	art           *container.Picture
+	// mapper reads the album and tags the pieces its muxer does not; album
+	// is what every piece carries under its own number and title, empty
+	// under --no-tags.
+	mapper meta.Mapper
+	album  tofile.Album
 }
 
 // readMeta reads the album's metadata off the source, once for the whole
-// split. It is the transcode command's file-output passthrough matrix: full
-// tags and art flow onto every piece, with the per-piece title and number
-// from the cut list on top of them.
-//
-// Metadata is best-effort, so an unreadable one leaves the pieces untagged
-// rather than failing a split whose audio is fine.
-func (s *splitter) readMeta(cmd *cobra.Command) {
-	m, err := s.mapper.Read(cmd.Context(), s.src, s.hint, meta.ReadOptions{Pictures: true})
-	if err != nil {
-		// The container fallback below does not go through the mapper, so a
-		// read that failed outright must not take with it the tags the demuxer
-		// already parsed off the header.
-		m = &meta.Info{Warnings: []string{"metadata unread: " + err.Error()}}
-	}
-	logMetaRead(s.log, m)
-	// The container's own tags are the floor and the mapper's win over them,
-	// folded here (where the mapper's arrive) and so before the ReplayGain
-	// drop below: the container carries the four REPLAYGAIN_* keys too, and a
-	// later fold would put the rip's album values back onto every piece.
-	m = meta.WithContainerTags(m, s.containerTags)
-	// The album's ReplayGain measures the whole rip, and a piece is not it:
-	// the tags would tell a player to adjust a piece by a number nothing
-	// measured. A fresh measurement is what --loudness is for, on the piece.
-	s.tagInfo = withoutTimeline(meta.WithoutReplayGain(m))
-	// Trimmed to what an embedding muxer holds: these are the rip's own tags,
-	// so one too large for a piece's output is dropped rather than failing
-	// every piece. See meta.EmbeddableTags.
-	albumTags, droppedTags := meta.EmbeddableTags(meta.FullTags(s.tagInfo))
-	s.albumTags = albumTags
-	for _, key := range droppedTags {
-		s.log.Warn("tag too large for the output, not embedded", "key", key)
-	}
-	if p := s.tagInfo.FrontPicture(); p != nil {
-		s.art = &container.Picture{MIME: p.MIME, Data: p.Data}
-	}
-}
-
-// withoutTimeline drops the source's chapters and synced lyrics (a shallow
-// copy, the transfer WithoutReplayGain makes for the same kind of reason).
-// Both are marks on the source's own timeline, and a piece starts elsewhere
-// on it: stamped onto a piece unchanged, a rip's chapter list would put
-// every mark it has into each piece, minutes past the end of a four-minute
-// file. Rebasing them per piece is a thing a split could do (Slice does it
-// for the audio); dropping them is what it does until it does.
-func withoutTimeline(info *meta.Info) *meta.Info {
-	if info == nil {
-		return nil
-	}
-	out := *info
-	out.Chapters, out.Synced = nil, nil
-	return &out
-}
-
-// embedsTags reports whether the piece's muxer writes the tags itself, which
-// is what the metadata post-pass has to skip so it does not write them a
-// second time (or a conflicting one).
-func (s *splitter) embedsTags() bool {
-	return waxflow.OutputEmbedsTags(s.outFormat, s.container)
+// split: the source's tags over the container's, without ReplayGain or the
+// rip's timeline, and its front cover. Metadata is best-effort, so an
+// unreadable one leaves the pieces untagged rather than failing the split.
+func (s *splitter) readMeta(cmd *cobra.Command, containerTags map[string][]string) {
+	s.album = tofile.ReadAlbum(cmd.Context(), s.mapper, s.src, s.hint, containerTags, s.outFormat, s.container, func(n tofile.Note) {
+		if !logMetaNote(s.log, n) && n.Kind == tofile.NoteTagTooLarge {
+			s.log.Warn("tag too large for the output, not embedded", "key", n.Key)
+		}
+	})
 }
 
 // writePiece transcodes one span of the source to its own file. It returns
 // the engine's result so the caller can report on the piece, which is how a
 // clipped piece gets the same note a plain transcode of it would print.
 func (s *splitter) writePiece(cmd *cobra.Command, path string, p piece) (*waxflow.TranscodeResult, error) {
-	writePath := path
-	if s.force {
-		writePath = fmt.Sprintf("%s.tmp-%d", path, os.Getpid())
-	}
-	out, err := os.OpenFile(writePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	st, err := stageOutput(path, s.force)
 	if err != nil {
-		if !s.force && os.IsExist(err) {
-			return nil, waxerr.Wrap(waxerr.CodeInvalidRequest, "output exists (use --force to overwrite)", err)
-		}
-		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating output", err)
+		return nil, err
 	}
 	fail := func(err error) (*waxflow.TranscodeResult, error) {
-		out.Close()
-		os.Remove(writePath)
+		st.Abort()
 		return nil, err
 	}
 
@@ -629,62 +592,42 @@ func (s *splitter) writePiece(cmd *cobra.Command, path string, p piece) (*waxflo
 	}
 	defer sl.Close()
 
-	tags := append([]container.Tag(nil), s.albumTags...)
-	tags = replaceTag(tags, "TRACKNUMBER", strconv.Itoa(p.number))
-	tags = replaceTag(tags, "TRACKTOTAL", strconv.Itoa(s.ofN))
-	if p.title != "" {
-		tags = replaceTag(tags, "TITLE", p.title)
-	}
-
-	res, err := s.e.TranscodeMedia(cmd.Context(), sl, out, waxflow.TranscodeOptions{
-		Format:       s.outFormat,
-		Container:    s.container,
-		FLACLevel:    s.flacLevel,
-		WavPackLevel: s.wavpackLevel,
-		APELevel:     s.apeLevel,
-	}, waxflow.WithTags(tags), waxflow.WithArt(s.art))
+	tags := s.album.PieceTags(p.number, s.ofN, p.title)
+	res, err := tofile.WriteMedia(st.File, func(dst io.Writer) (*waxflow.TranscodeResult, error) {
+		res, err := s.e.TranscodeMedia(cmd.Context(), sl, dst, waxflow.TranscodeOptions{
+			Format:       s.outFormat,
+			Container:    s.container,
+			FLACLevel:    s.flacLevel,
+			WavPackLevel: s.wavpackLevel,
+			APELevel:     s.apeLevel,
+		}, waxflow.WithTags(tags), waxflow.WithArt(s.album.Art))
+		if err != nil {
+			return nil, err
+		}
+		// The slice already fails a piece that ends short of its length, and
+		// every length here is exact, so this is a belt: a piece is never
+		// empty, and zero samples at any output rate is a seek that landed
+		// past the audio, refused rather than written.
+		if res.Samples == 0 {
+			return nil, waxerr.New(waxerr.CodeInternal, fmt.Sprintf("the source delivered no samples from sample %d", p.from))
+		}
+		return res, nil
+	}, nil)
 	if err != nil {
 		return fail(err)
 	}
-	// The slice already fails a piece that ends short of its length, and every
-	// length here is exact, so this is a belt: a piece is never empty, and zero
-	// samples at any output rate is a seek that landed past the audio, refused
-	// rather than written.
-	if res.Samples == 0 {
-		return fail(waxerr.New(waxerr.CodeInternal, fmt.Sprintf("the source delivered no samples from sample %d", p.from)))
-	}
-	if err := out.Close(); err != nil {
-		os.Remove(writePath)
-		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "closing output", err)
-	}
 
-	// Post-pass on the finished piece, for the outputs whose muxer did not
-	// already write the metadata: it is what carries the art onto them, and
-	// everything else a Tag list cannot hold. The piece's own tags go as the
-	// extras, which win over the album's same-keyed ones, so the title and
-	// number the mux wrote survive the rewrite.
-	if s.tagInfo != nil && !s.embedsTags() {
-		if err := s.mapper.Apply(cmd.Context(), writePath, s.tagInfo, tags); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "metadata: post-pass failed: %v\n", err)
-		}
+	// The piece's own tags win over the album's in the post-pass, so the
+	// title and number the mux wrote survive the rewrite. A cancel that lands
+	// in it leaves the piece unpublished: it may be untagged.
+	if err := s.album.PostPass(cmd.Context(), st.Path, tags, func(err error) {
+		fmt.Fprintf(cmd.ErrOrStderr(), "metadata: post-pass failed: %v\n", err)
+	}); err != nil {
+		st.Abort()
+		return nil, err
 	}
-	if s.force && writePath != path {
-		if err := posixfs.Replace(writePath, path); err != nil {
-			os.Remove(writePath)
-			return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "renaming output into place", err)
-		}
+	if err := commitOutput(st, s.force); err != nil {
+		return nil, err
 	}
 	return res, nil
-}
-
-// replaceTag sets key to value, dropping whatever the album carried: a
-// piece's own title and number are the sheet's, not the whole rip's.
-func replaceTag(tags []container.Tag, key, value string) []container.Tag {
-	out := tags[:0]
-	for _, t := range tags {
-		if !strings.EqualFold(t.Key, key) {
-			out = append(out, t)
-		}
-	}
-	return append(out, container.Tag{Key: key, Value: value})
 }

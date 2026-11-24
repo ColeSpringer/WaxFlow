@@ -10,12 +10,14 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
 	"github.com/colespringer/waxflow/internal/config"
-	"github.com/colespringer/waxflow/internal/meta"
+	"github.com/colespringer/waxflow/internal/tofile"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -145,12 +147,24 @@ func Execute(version string, args []string, stdout, stderr io.Writer) int {
 
 // ExecuteFlavor is Execute for a build that customizes the command tree
 // (see Flavor); the stock main passes the zero Flavor via Execute.
+//
+// The first interrupt or SIGTERM cancels the command, which cleans up and
+// exits 6. Its registration is released then, so a second one kills the
+// process, unless the command holds its own, as server does while it drains.
 func ExecuteFlavor(version string, args []string, stdout, stderr io.Writer, flavor Flavor) int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	context.AfterFunc(ctx, stop)
+	return execute(ctx, version, args, stdout, stderr, flavor)
+}
+
+// execute runs the command tree under ctx and returns the exit code.
+func execute(ctx context.Context, version string, args []string, stdout, stderr io.Writer, flavor Flavor) int {
 	root := newRootCmd(version, flavor)
 	root.SetArgs(args)
 	root.SetOut(stdout)
 	root.SetErr(stderr)
-	err := root.Execute()
+	err := root.ExecuteContext(ctx)
 	if err == nil {
 		return 0
 	}
@@ -387,17 +401,20 @@ func newLogger(w io.Writer, cfg config.Config) (*slog.Logger, error) {
 	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: lvl})), nil
 }
 
-// logMetaRead reports a metadata read through the logger --log-level
-// configures, so warnings can be quieted without --no-tags dropping the
-// metadata too. Notes are source lint (see meta.Info.Notes) and sit at Debug.
-func logMetaRead(logger *slog.Logger, info *meta.Info) {
-	if info == nil {
-		return
+// logMetaNote logs a metadata read's own finding through the logger
+// --log-level configures, so warnings can be quieted without --no-tags
+// dropping the metadata too: an unread source or a warning at Warn, a note
+// on the source (see meta.Info.Notes) at Debug. It reports whether n was one.
+func logMetaNote(logger *slog.Logger, n tofile.Note) bool {
+	switch n.Kind {
+	case tofile.NoteMetadataUnread:
+		logger.Warn("metadata", "warning", "metadata unread: "+n.Text)
+	case tofile.NoteMetadataWarning:
+		logger.Warn("metadata", "warning", n.Text)
+	case tofile.NoteMetadataLint:
+		logger.Debug("metadata", "note", n.Text)
+	default:
+		return false
 	}
-	for _, w := range info.Warnings {
-		logger.Warn("metadata", "warning", w)
-	}
-	for _, n := range info.Notes {
-		logger.Debug("metadata", "note", n)
-	}
+	return true
 }

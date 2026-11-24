@@ -453,9 +453,9 @@ func newRunConfig(run []RunOption) runConfig {
 // WithTags embeds canonical metadata fields (TITLE, ARTIST, ...) in the
 // output where the muxer can represent them in its stream form: Ogg
 // OpusTags, a FLAC VORBIS_COMMENT block, an MP3 ID3v2 tag, MP4 ilst
-// atoms. Formats without stream-form tagging (WAV, AIFF, ADTS)
-// ignore them; a finished file gets full metadata from the mapping
-// post-pass instead. Tags never change the plan: callers keying
+// atoms. Formats without stream-form tagging (WAV, AIFF, ADTS,
+// Matroska) ignore them; a finished file gets full metadata from the
+// mapping post-pass instead. Tags never change the plan: callers keying
 // cached bytes must fold the tag values into their own key.
 // WavPack and Monkey's Audio take them too, as the APEv2 block they
 // write after the audio.
@@ -464,10 +464,9 @@ func newRunConfig(run []RunOption) runConfig {
 // fit, failing the run with waxerr.CodeUnsupportedFormat naming
 // the key, rather than writing an output that quietly lacks it. The
 // refusal comes before the encode, so it costs nothing to retry with
-// the value trimmed. Those bounds sit at each format's own read or
-// field limit, so tags read off a source can always be written back;
-// Ogg is the exception, capping its comment header at 48 KiB to keep
-// the pre-audio headers small. MP4 sets no bound at all.
+// the value trimmed, and TagsFit asks the same question before the run.
+// Each bound is 48 KiB, which keeps the pre-audio headers small; MP4
+// sets none.
 func WithTags(tags []container.Tag) RunOption {
 	return func(x *runConfig) { x.tags = tags }
 }

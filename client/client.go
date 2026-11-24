@@ -436,16 +436,22 @@ type RootStatus struct {
 //
 // Echo-only, daemon-set (leave zero on create; the daemon refuses each
 // with a 400 there, since unknown create fields are errors): SourceID,
-// SourceIDs, CrossfadeSeconds, and Spans. The identity pins are computed
-// server-side so a client cannot send the ones it wishes were true, and
-// a timeline job's crossfade and member windows are set from the POST
-// /hls/timeline body (a timeline is not a /jobs type; see
-// CreateTimeline). A fetched job's Request carries them set, so zero
-// them before reusing one as a create body.
+// SourceIDs, CrossfadeSeconds, Spans, Pieces, and TrackTotal. The identity
+// pins are computed server-side so a client cannot send the ones it wishes
+// were true, a timeline job's crossfade and member windows are set from
+// the POST /hls/timeline body (a timeline is not a /jobs type; see
+// CreateTimeline), and a split's pieces are named from Titles or its
+// sheet. A fetched job's Request carries them set, so zero them before
+// reusing one as a create body.
 //
-// Create-only, never echoed: Cue. It resolves into Cuts at validation,
-// so the document carries the boundaries the 201 accepted and an edit
-// to the sheet afterward cannot change what runs.
+// Create-only, never echoed: Cue, and a split's Titles. Cue resolves
+// into Cuts at validation, so the document carries the boundaries the
+// 201 accepted and an edit to the sheet afterward cannot change what
+// runs. A split's titles, its own or its sheet's, come back as Pieces:
+// to keep them on reuse, copy each piece's Title into Titles. Titles
+// number the pieces by place from 1, with the piece count as TRACKTOTAL,
+// so a sheet split keeps its own numbers, lead-in 0 included, only when
+// its Cue is resent in place of Cuts and Skip.
 type JobRequest struct {
 	// Type is transcode, analyze, merge, or split. A fifth type,
 	// timeline, appears on job documents but is not creatable here:
@@ -464,19 +470,33 @@ type JobRequest struct {
 	// Srcs are a merge's members, in order. Merge-only.
 	Srcs []string `json:"srcs,omitempty"`
 	// Titles are optional per-member chapter titles for a merge,
-	// index-aligned to Srcs: a title per member, or none. Merge-only.
+	// index-aligned to Srcs, or a split's per-piece titles, index-aligned
+	// to the pieces Cuts opens: one each, or none. A blank title keeps the
+	// member's or the source's own. Merge and split; a split with Cue
+	// refuses it, since the sheet names the pieces. A split's are
+	// create-only: its document carries them as Pieces.
 	Titles []string `json:"titles,omitempty"`
 	// Cuts are a split's cut points, as sample offsets on the source's
 	// own timeline, strictly ascending and interior: N cuts make N+1
 	// pieces. Split-only.
 	Cuts []int64 `json:"cuts,omitempty"`
 	// Cue names a CUE sheet whose track boundaries are this split's cut
-	// points, exclusive with Cuts and Skip. Split-only and create-only.
+	// points and whose tracks name its pieces, exclusive with Cuts, Skip
+	// and Titles. Split-only and create-only.
 	Cue string `json:"cue,omitempty"`
 	// Skip lists the pieces Cuts opens that the split does not write, as
 	// 0-based piece indices, strictly ascending; the outputs are the rest,
 	// in order. A sheet's data track resolves to one. Split-only.
 	Skip []int `json:"skip,omitempty"`
+	// Pieces are the TRACKNUMBER and TITLE each piece of a split is
+	// tagged with, index-aligned with the pieces Cuts opens, skipped ones
+	// included: numbered from 1 and titled from Titles, or the sheet's
+	// tracks (a lead-in is track 0). Empty numbers the pieces from 1 with
+	// the source's title. Echo-only.
+	Pieces []JobPiece `json:"pieces,omitempty"`
+	// TrackTotal is a split's TRACKTOTAL: the number of pieces, or the
+	// sheet's track count. Echo-only.
+	TrackTotal int `json:"trackTotal,omitempty"`
 
 	// Output shaping, mirroring /stream; transcode, merge, and split
 	// take these, and Format is required by all three. Analyze takes
@@ -663,6 +683,13 @@ type JobProgress struct {
 type JobError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+// JobPiece is what one piece of a split is tagged as. An empty Title
+// leaves the source's TITLE on the piece.
+type JobPiece struct {
+	Number int    `json:"number"`
+	Title  string `json:"title,omitempty"`
 }
 
 // Job is one job's full document: POST /jobs' 201 body, GET /jobs/{id},

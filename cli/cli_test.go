@@ -21,6 +21,7 @@ import (
 
 	"github.com/colespringer/waxflow/internal/config"
 	"github.com/colespringer/waxflow/internal/testutil"
+	"github.com/colespringer/waxflow/internal/tofile"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
@@ -30,12 +31,48 @@ const lookupPID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 
 // TestMain clears every setting the environment can carry, so a shell that
 // exports WAXFLOW_* for a running stack cannot steer these tests; a test
-// that wants one sets it.
+// that wants one sets it. With WAXFLOW_CLI_HELPER set the binary is a child a
+// test started: it runs the CLI on its own arguments and exits with the code,
+// under holdFlavor when the variable says hold, and held mid-encode by
+// holdInEncode when it says hold-encode.
 func TestMain(m *testing.M) {
+	switch os.Getenv("WAXFLOW_CLI_HELPER") {
+	case "1":
+		os.Exit(Execute("test", os.Args[1:], os.Stdout, os.Stderr))
+	case "hold":
+		os.Exit(ExecuteFlavor("test", os.Args[1:], os.Stdout, os.Stderr, holdFlavor()))
+	case "hold-encode":
+		transcodeHook = holdInEncode
+		os.Exit(Execute("test", os.Args[1:], os.Stdout, os.Stderr))
+	}
 	for _, name := range config.EnvVars() {
 		os.Unsetenv(name)
 	}
 	os.Exit(m.Run())
+}
+
+// holdFlavor's resolver is a step that ignores cancellation: it prints
+// "held", waits for the command's context to end, prints "canceled", then
+// blocks until stdin closes.
+func holdFlavor() Flavor {
+	return Flavor{OpenResolver: func(ctx context.Context, _ ResolverOptions) (source.Resolver, io.Closer, error) {
+		fmt.Println("held")
+		<-ctx.Done()
+		fmt.Println("canceled")
+		io.Copy(io.Discard, os.Stdin)
+		return nil, nil, ctx.Err()
+	}}
+}
+
+// holdInEncode stops a transcode in its first encode progress report before
+// the end: it prints "encoding", then blocks until stdin closes.
+func holdInEncode(req *tofile.Request) {
+	req.Progress = func(phase string, done, total int64) {
+		if phase == "transcode" && done < total {
+			fmt.Println("encoding")
+			io.Copy(io.Discard, os.Stdin)
+		}
+	}
 }
 
 // pidHost is a fake lookup host for the CLI tests: it serves GET /pid/{id}

@@ -16,13 +16,13 @@ import (
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
-	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/format"
 	"github.com/colespringer/waxflow/internal/admission"
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/posixfs"
+	"github.com/colespringer/waxflow/internal/tofile"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -666,13 +666,6 @@ func (r *Runner) warnClipping(id, output string, res *waxflow.TranscodeResult) {
 	r.warn(id, note)
 }
 
-// deriveOutputLoudness projects the output's loudness and true peak for outputs
-// the engine cannot decode back (fragmented MP4). See meta.ProjectLoudness for
-// the projection and the direction each result errs in.
-func deriveOutputLoudness(src *waxflow.AnalyzeResult, gainDB float64, limited bool) (lufs, truePeakDB float64) {
-	return meta.ProjectLoudness(src.IntegratedLUFS, src.TruePeakDB, gainDB, limited)
-}
-
 // analysisOf maps an engine measurement onto the wire shape.
 func analysisOf(res *waxflow.AnalyzeResult) *Analysis {
 	a := &Analysis{
@@ -869,11 +862,9 @@ func (req Request) TranscodeOptions(gainDB float64, profile resample.Profile) wa
 	return req.Params.Options(gainDB, gain.PresetOff, profile)
 }
 
-// runTranscode is the full job pipeline: read metadata, resolve gain
-// (measuring the source first under loudness:analyze), transcode into
-// the job directory, then finish the metadata: measured ReplayGain
-// patched into MP4 headers or written with the full tag set by the
-// mapping post-pass.
+// runTranscode is the full job pipeline on tofile.Run: read metadata, resolve
+// gain (measuring the source first under loudness:analyze), transcode into the
+// job directory, then finish the metadata.
 func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 	req := j.Request
 	src, err := r.open(ctx, req)
@@ -882,275 +873,64 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 	}
 	defer src.Close()
 
-	// Probe before the metadata read rather than after: its Info carries the
-	// container's own tags and chapters, which both the tag fold below and the
-	// options further down need, and it fixes the output's identity fields
-	// (media type, container) for the plan. Creation validated this same plan,
-	// so failures here mean the source itself changed shape.
+	// The probe carries the container's own tags and chapters, and fixes the
+	// output's identity fields for the plan. Creation validated this same
+	// plan, so failures here mean the source itself changed shape.
 	probe, err := r.cfg.Engine.Probe(ctx, src, src.Ext, nil)
 	if err != nil {
 		return err
 	}
-
-	var info *meta.Info
-	if r.cfg.Meta != nil {
-		mi, err := r.cfg.Meta.Read(ctx, src, src.Ext, meta.ReadOptions{Pictures: true})
-		switch {
-		case err != nil && ctx.Err() != nil:
-			// Cancellation is the job being stopped, not a metadata problem.
-			return err
-		case err != nil:
-			// Metadata is best-effort and the audio is fine, so a mapper that
-			// failed outright warns rather than killing a transcode. It must
-			// not take the container's tags with it either: those are already
-			// parsed and the fold below still has them. The CLI reached the
-			// same answer for the same reason.
-			r.warnErr(j.ID, "metadata unread", err)
-			mi = &meta.Info{}
-		}
-		info = mi
-		for _, w := range info.Warnings {
-			r.warn(j.ID, w)
-		}
-		// Notes describe the source, not this transfer, so they stay off the
-		// client-visible Job.Warnings.
-		for _, n := range info.Notes {
-			r.log.Debug("job metadata", "id", j.ID, "note", n)
-		}
-	}
-	// The container's own tags are the floor and the mapper's win over them,
-	// the same resolution the chapters make below and GET /probe makes on
-	// the wire. A daemon with no mapper wired leaves info nil, which the fold
-	// reads as a floor to build on. Folded here, before the ReplayGain drop:
-	// the container carries the four REPLAYGAIN_* keys too, and a later fold
-	// would put the source's stale values back onto a gained output.
-	info = meta.WithContainerTags(info, probe.Tags)
-
-	// Planned before the loudness pass, because the measurement's basis is the
-	// plan's resolved channel count. Gain is the one option still unresolved
-	// here and it shapes no field this reads, so it lands on opts afterwards
-	// rather than forcing a second plan.
+	// The container was settled at creation, so an empty one is trusted.
 	opts := req.TranscodeOptions(0, r.cfg.Profile)
 	plan, err := r.cfg.Engine.PlanTranscode(probe.Default(), opts)
 	if err != nil {
 		return err
 	}
-	isMP4 := plan.MediaType == "audio/mp4"
-	// The two meanings isMP4 used to carry, which have diverged: both MP4
-	// forms embed tags at Begin and so need the fixed-width placeholders, but
-	// only the fragmented one cannot be decoded back, which is the condition
-	// for deriving the output's ReplayGain instead of measuring it. A request
-	// naming the flat form (as every merge does) writes a file the engine
-	// reads back perfectly well, and used to get an estimate anyway.
-	fragmentedMP4 := isMP4 && opts.Container != mp4ProgressiveContainer
-	// The engine owns which muxers write their own tags; those outputs skip
-	// the mapping post-pass below and take their ReplayGain up front.
-	embedsTags := waxflow.OutputEmbedsTags(opts.Format, opts.Container)
-
-	analyzeLoudness := req.Loudness == "analyze"
-	var gainDB float64
-	var analysis *Analysis
-	var srcRes *waxflow.AnalyzeResult
-	if analyzeLoudness {
-		res, err := r.cfg.Engine.Analyze(ctx, src, src.Ext, waxflow.AnalyzeOptions{
-			Progress: r.progressFunc(ctx, j.ID, "analyze"),
-			// Measure after the encode's downmix so the gain (and the
-			// derived-output RG for fragmented MP4) sits on the audio the
-			// encode meters. The stored Analysis.Channels then reports this
-			// measurement basis, not the source count, which is what makes
-			// IntegratedLUFS + AppliedGainDB land on the RG reference.
-			//
-			// The basis is the plan's resolved width, not the ch field: a
-			// lossy row that cannot hold the source layout folds to stereo on
-			// its own, and a request-keyed measurement sees none of it and
-			// meters channels the encode never encodes.
-			Channels: plan.Format.Channels,
-		})
-		if err != nil {
-			return err
-		}
-		// Attached now rather than left to the encode's own read of the same
-		// source: warnInput keeps one copy per finding, and an encode that
-		// fails after this pass would otherwise take the findings with it.
-		r.warnInput(j.ID, "", res.InputWarnings)
-		srcRes = res
-		analysis = analysisOf(res)
-		if !math.IsInf(res.IntegratedLUFS, -1) {
-			// The exact gain to the RG2 reference, deliberately unclamped
-			// (unlike the HTTP gain= policy bound): the measurement is
-			// exact and the true-peak limiter guards the top end.
-			gainDB = meta.ReplayGainGainDB(res.IntegratedLUFS)
-		}
-		analysis.AppliedGainDB = &gainDB
-	} else if r.cfg.ResolveGain != nil {
-		if gainDB, err = r.cfg.ResolveGain(req.Gain, info); err != nil {
-			return err
-		}
-	}
-
-	dropRG := gainDB != 0 || analyzeLoudness
-	tagInfo := info
-	if dropRG {
-		tagInfo = meta.WithoutReplayGain(info)
-	}
-	// The resolved gain lands on the options the plan was taken from, so what
-	// runs is what was planned: gain shapes no field the plan reports. The
-	// tags, chapters and art ride with the run.
-	opts.GainDB = gainDB
-	// Trimmed to what an embedding muxer can hold: these are the source's own
-	// tags, not tags this request named, so one oversized value must not fail
-	// the job. The dropped keys reach the client as warnings rather than
-	// vanishing, which is the whole point of trimming here instead of leaving
-	// the muxer to skip them.
-	tags, droppedTags := meta.EmbeddableTags(meta.FullTags(tagInfo))
-	for _, key := range droppedTags {
-		r.warn(j.ID, "tag "+key+" is too large for the output and was not embedded")
-	}
-	// The container's own chapters are the floor, and the mapper's win when a
-	// mapper is wired and read some: a richer tag library may know forms the
-	// container package does not. GET /probe resolves the same two sources the
-	// same way, which is the point of matching it here: a caller that probes a
-	// file and then transcodes it must not be told about chapters the output
-	// then lacks. Reading them only from the mapper is what made a daemon
-	// embedded by anyone who injects none write chapterless outputs, for a
-	// file whose chapters the demuxer had already parsed off the header.
-	chapters := probe.Chapters
-	var art *container.Picture
-	if info != nil {
-		if len(info.Chapters) > 0 {
-			chapters = info.Chapters
-		}
-		if p := info.FrontPicture(); p != nil {
-			art = &container.Picture{MIME: p.MIME, Data: p.Data}
-		}
-	}
-
-	// The true-peak limiter engages for positive gain or a downmix (its matrix
-	// can sum past unity) and caps the peak at its ceiling, so a derived peak
-	// has to be capped too rather than reading back the raw fold's overshoot.
-	// The downmix test reads the plan's resolved width, not the request's ch
-	// field: a fold the row applied on its own is invisible to the request,
-	// and missing it publishes a peak the limiter clamped.
-	peakLimited := gainDB > 0 || opts.Dynamics != gain.PresetOff ||
-		plan.Format.Channels < probe.Default().Fmt.Channels
-	switch {
-	case analyzeLoudness && isMP4:
-		// Fixed-width placeholders for the MP4 muxer to embed at Begin;
-		// the measured values patch in place after the encode. Only the
-		// MP4 path patches, so only it gets placeholders: any other
-		// format would ship the unity values verbatim whenever the
-		// best-effort post-pass cannot run (its real values arrive
-		// through Apply's extra tags instead). Tags never shape the
-		// plan, so appending after planning is safe.
-		tags = append(tags,
-			container.Tag{Key: "REPLAYGAIN_TRACK_GAIN", Value: meta.FormatGain(0)},
-			container.Tag{Key: "REPLAYGAIN_TRACK_PEAK", Value: meta.FormatPeak(0)})
-	case analyzeLoudness && embedsTags:
-		// Ogg and WavPack take their tags at Begin and cannot be patched
-		// afterward, and the post-pass that would otherwise carry the
-		// measured values is skipped for them. Since the source's own
-		// ReplayGain was just stripped, writing nothing here would leave the
-		// output worse off than untouched, so embed the projection now. The
-		// measurement still runs below and still reaches the job's Analysis;
-		// only the file gets the estimate.
-		outLUFS, outTP := deriveOutputLoudness(srcRes, gainDB, peakLimited)
-		tags = append(tags, meta.ReplayGainTags(outLUFS, outTP)...)
-	}
 
 	outName := "out." + outputExt(opts)
 	outPath := filepath.Join(r.store.jobDir(j.ID), outName)
-	f, err := os.OpenFile(outPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: creating output", err)
-	}
-	defer f.Close()
-
-	res, err := r.cfg.Engine.Transcode(ctx, src, src.Ext, f, opts,
-		waxflow.WithTags(tags), waxflow.WithChapters(chapters), waxflow.WithArt(art),
-		waxflow.WithProgress(r.progressFunc(ctx, j.ID, "transcode")))
+	f, err := createOutput(outPath)
 	if err != nil {
 		return err
 	}
-	// A warning, not a field: the count is already on the engine result, and
-	// mirroring it onto Output would churn the client type and the goldens
-	// for a number this job's own warning list can carry. No output name: a
-	// transcode job writes one file, so the note needs no address.
-	r.warnClipping(j.ID, "", res)
-	r.warnInput(j.ID, "", res.InputWarnings)
-	// The output's own count, at its own rate. A loudness:analyze pass left
-	// the source's on the Analysis and said nothing, so the line is here once.
-	r.warnLoss(j.ID, "", res.LossNote())
-
-	var rg []container.Tag
-	if analyzeLoudness {
-		var outLUFS, outTP float64
-		if fragmentedMP4 {
-			// There is no fragmented-MP4 read path, so the output cannot
-			// be decoded back; derive its values from the source
-			// measurement instead: exact for lossless ALAC, within the
-			// encoder's fraction of a dB for AAC. The true-peak limiter
-			// engages for positive gain or a downmix (its matrix can sum
-			// past unity), and caps the derived peak at its ceiling; pass
-			// that so a negative-gain downmix's peak is capped rather than
-			// reading back the raw fold's overshoot.
-			outLUFS, outTP = deriveOutputLoudness(srcRes, gainDB, peakLimited)
-		} else {
-			// Measure the finished output so the written ReplayGain
-			// values describe exactly the bytes a player gets (the
-			// limiter may have shaved the projected peak).
-			fsrc, err := container.FileSource(f)
-			if err != nil {
-				return err
-			}
-			outRes, err := r.cfg.Engine.Analyze(ctx, fsrc, plan.Container, waxflow.AnalyzeOptions{
-				Progress: r.progressFunc(ctx, j.ID, "finalize"),
-			})
-			if err != nil {
-				return err
-			}
-			// A file this job just wrote reads back damaged only through a
-			// WaxFlow bug, and the numbers below then describe a partial
-			// decode; say so rather than stamp them silently.
-			for _, w := range outRes.InputWarnings {
-				r.warn(j.ID, "output read back with damage: "+w)
-			}
-			outLUFS, outTP = outRes.IntegratedLUFS, outRes.TruePeakDB
-		}
-		rg = meta.ReplayGainTags(outLUFS, outTP)
-		analysis.ReplayGainTrackGain = rg[0].Value
-		analysis.ReplayGainTrackPeak = rg[1].Value
-		if isMP4 {
-			if err := mp4.PatchFreeform(f, "REPLAYGAIN_TRACK_GAIN", meta.FormatGain(0), rg[0].Value); err != nil {
-				return err
-			}
-			if err := mp4.PatchFreeform(f, "REPLAYGAIN_TRACK_PEAK", meta.FormatPeak(0), rg[1].Value); err != nil {
-				return err
-			}
-		}
+	// One hook per phase for the whole job: each keeps its own throttle.
+	hooks := map[string]func(done, total int64){}
+	for _, phase := range []string{"analyze", "transcode", "finalize"} {
+		hooks[phase] = r.progressFunc(ctx, j.ID, phase)
 	}
-	if err := f.Sync(); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: output sync", err)
+	treq := tofile.Request{
+		Engine: r.cfg.Engine, Source: src, Hint: src.Ext, Probe: probe,
+		Options: opts, Plan: plan, Out: f, Path: outPath, Mapper: r.cfg.Meta,
+		Loudness: req.Loudness == "analyze", MeasurePredicted: true,
+		Progress: func(phase string, done, total int64) {
+			if h := hooks[phase]; h != nil {
+				h(done, total)
+			}
+		},
+		Note: func(n tofile.Note) { r.noteTranscode(j.ID, n) },
 	}
-	if err := f.Close(); err != nil {
-		return waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: output close", err)
+	if r.cfg.ResolveGain != nil {
+		treq.Gain = func(info *meta.Info) (float64, error) { return r.cfg.ResolveGain(req.Gain, info) }
+	}
+	res, err := tofile.Run(ctx, treq)
+	if res != nil && res.Transcode != nil {
+		// No output name: a transcode job writes one file. The loss note is
+		// the output's own count; the loudness pass left the source's on the
+		// Analysis.
+		r.warnClipping(j.ID, "", res.Transcode)
+		r.warnLoss(j.ID, "", res.Transcode.LossNote())
+	}
+	if err != nil {
+		return err
 	}
 
-	// The mapping post-pass writes the full set (tags, pictures,
-	// chapters, synced lyrics, measured ReplayGain) onto formats the
-	// mapper can rewrite; the outputs whose muxer embedded them itself
-	// (MP4, which also took the patches above, and Ogg and WavPack) are
-	// skipped, since a second write there conflicts or fails. A post-pass failure is a warning, not a dead job:
-	// the audio is finished and correct. The job context applies here
-	// like everywhere else: the mapper's write is atomic, a shutdown
-	// leaves the job running on disk to rerun from zero (post-pass
-	// included), and a delete is discarding the directory anyway, so an
-	// interrupted Apply never loses anything a rerun does not redo.
-	if r.cfg.Meta != nil && !embedsTags && tagInfo != nil {
-		if err := r.cfg.Meta.Apply(ctx, outPath, tagInfo, rg); err != nil {
-			r.warnErr(j.ID, "metadata post-pass", err)
-		}
+	var analysis *Analysis
+	if res.Source != nil {
+		analysis = analysisOf(res.Source)
+		analysis.AppliedGainDB = &res.GainDB
+		analysis.ReplayGainTrackGain = res.RG[0].Value
+		analysis.ReplayGainTrackPeak = res.RG[1].Value
 	}
-
 	fi, err := os.Stat(outPath)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeInternal, "jobs: output stat", err)
@@ -1161,15 +941,36 @@ func (r *Runner) runTranscode(ctx context.Context, j *Job) error {
 			MediaType: plan.MediaType,
 			Container: plan.Container,
 			Bytes:     fi.Size(),
-			Samples:   res.Samples,
+			Samples:   res.Transcode.Samples,
 			Rate:      plan.Format.Rate,
 
-			LostSamples:      res.LostSamples,
-			TruncatedSamples: res.TruncatedSamples,
+			LostSamples:      res.Transcode.LostSamples,
+			TruncatedSamples: res.Transcode.TruncatedSamples,
 		}}
 		job.Analysis = analysis
 	})
 	return nil
+}
+
+// noteTranscode words a transcode's note as a job warning. Source lint stays
+// off the client-visible warnings, and the loudness lines are the Analysis's.
+func (r *Runner) noteTranscode(id string, n tofile.Note) {
+	switch n.Kind {
+	case tofile.NoteMetadataUnread:
+		r.warnErr(id, "metadata unread", n.Err)
+	case tofile.NoteMetadataWarning:
+		r.warn(id, n.Text)
+	case tofile.NoteMetadataLint:
+		r.log.Debug("job metadata", "id", id, "note", n.Text)
+	case tofile.NoteTagTooLarge:
+		r.warn(id, "tag "+n.Key+" is too large for the output and was not embedded")
+	case tofile.NoteInputDamage:
+		r.warnInput(id, "", []string{n.Text})
+	case tofile.NoteReadBackDamage:
+		r.warn(id, "output read back with damage: "+n.Text)
+	case tofile.NotePostPassFailed:
+		r.warnErr(id, "metadata post-pass", n.Err)
+	}
 }
 
 // outputExt is the extension a job's product is written with.
@@ -1192,34 +993,34 @@ func outputExt(opts waxflow.TranscodeOptions) string {
 }
 
 // writeMedia transcodes med into the job directory under name and describes
-// what landed. It is the tail every audio-writing job shares: create, run,
-// sync, close, stat.
-//
-// The sync and the explicit close are not ceremony. A job's product outlives
-// the process that made it, and its size is recorded in job.json from the stat
-// below; a deferred close would let that stat run against a file whose last
-// write is still in the writer, and a close error (a full disk reporting late)
-// would be discarded exactly when it is the whole story.
+// what landed. It is the tail every audio-writing job shares: create, then
+// tofile.WriteMedia, then postPass on the closed file when it is not nil,
+// whose error fails the write, then stat. The stat comes last because the
+// size recorded in job.json must be the file's last write.
 func (r *Runner) writeMedia(ctx context.Context, j *Job, med format.Media, name string,
-	opts waxflow.TranscodeOptions, mediaType string, run ...waxflow.RunOption) (*Output, error) {
+	opts waxflow.TranscodeOptions, mediaType string, postPass func(path string) error, run ...waxflow.RunOption) (*Output, error) {
 	path := filepath.Join(r.store.jobDir(j.ID), name)
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: creating output", err)
-	}
-	defer f.Close()
-	res, err := r.cfg.Engine.TranscodeMedia(ctx, med, f, opts, run...)
+	f, err := createOutput(path)
 	if err != nil {
 		return nil, err
 	}
-	r.warnClipping(j.ID, name, res)
-	r.warnInput(j.ID, name, res.InputWarnings)
-	r.warnLoss(j.ID, name, res.LossNote())
-	if err := f.Sync(); err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: output sync", err)
+	res, err := tofile.WriteMedia(f, func(dst io.Writer) (*waxflow.TranscodeResult, error) {
+		res, err := r.cfg.Engine.TranscodeMedia(ctx, med, dst, opts, run...)
+		if err != nil {
+			return nil, err
+		}
+		r.warnClipping(j.ID, name, res)
+		r.warnInput(j.ID, name, res.InputWarnings)
+		r.warnLoss(j.ID, name, res.LossNote())
+		return res, nil
+	}, nil)
+	if err != nil {
+		return nil, err
 	}
-	if err := f.Close(); err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: output close", err)
+	if postPass != nil {
+		if err := postPass(path); err != nil {
+			return nil, err
+		}
 	}
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -1238,13 +1039,15 @@ func (r *Runner) writeMedia(ctx context.Context, j *Job, med format.Media, name 
 	}, nil
 }
 
-// mp4ProgressiveContainer mirrors the server's container override for the flat
-// (moov+mdat) MP4 form: validateMergeRequest stamps it on an mp4-family merge's
-// request, and it is the one output shape that carries a QuickTime chapter text
-// track. It is a wire string, spelled the same by the CLI's --container flag,
-// so it is re-declared here rather than exported from the engine, matching the
-// server's own re-declaration.
-const mp4ProgressiveContainer = "progressive"
+// createOutput creates or truncates a job's output file, read-write for the
+// patches and read-backs that follow the encode.
+func createOutput(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "jobs: creating output", err)
+	}
+	return f, nil
+}
 
 // runMerge concatenates the request's members into one output.
 //
@@ -1270,7 +1073,7 @@ func (r *Runner) runMerge(ctx context.Context, j *Job) error {
 	// one that carries the track. Only then are per-member titles read and
 	// chapters computed, so a non-mp4 merge pays no per-member metadata reads
 	// and gets no ignored chapters.
-	wantChapters := req.Container == mp4ProgressiveContainer
+	wantChapters := req.Container == waxflow.ContainerProgressive
 	measure := r.progressFunc(ctx, j.ID, "measure")
 	tracks := make([]container.Track, len(req.Srcs))
 	tagTitles := make([]string, len(req.Srcs))
@@ -1368,7 +1171,7 @@ func (r *Runner) runMerge(ctx context.Context, j *Job) error {
 			return err
 		}
 	}
-	out, err := r.writeMedia(ctx, j, med, "out."+outputExt(opts), opts, plan.MediaType,
+	out, err := r.writeMedia(ctx, j, med, "out."+outputExt(opts), opts, plan.MediaType, nil,
 		waxflow.WithChapters(chapters), waxflow.WithProgress(r.progressFunc(ctx, j.ID, "transcode")))
 	if err != nil {
 		return err
@@ -1479,12 +1282,7 @@ func splitProgressAt(base, span, done, pieceTotal int64) int64 {
 // and nothing can disagree with it: the server always wires the hook, so a nil
 // one means the server is not the caller and no validation of these cuts ran
 // anywhere.
-func (r *Runner) splitLength(ctx context.Context, src *source.File) (track container.Track, measured, exact bool, err error) {
-	info, err := r.cfg.Engine.Probe(ctx, src, src.Ext, nil)
-	if err != nil {
-		return container.Track{}, false, false, err
-	}
-	track = info.Default()
+func (r *Runner) splitLength(ctx context.Context, src *source.File, track container.Track) (_ container.Track, measured, exact bool, err error) {
 	exact = track.SamplesExact && track.Samples >= 0
 	if (track.Samples >= 0 && !track.SamplesAdvisory) || r.cfg.MeasureTrack == nil {
 		return track, false, exact, nil
@@ -1512,7 +1310,11 @@ func (r *Runner) runSplit(ctx context.Context, j *Job) error {
 		return err
 	}
 	defer src.Close()
-	srcTrack, measured, exact, err := r.splitLength(ctx, src)
+	probe, err := r.cfg.Engine.Probe(ctx, src, src.Ext, nil)
+	if err != nil {
+		return err
+	}
+	srcTrack, measured, exact, err := r.splitLength(ctx, src, probe.Default())
 	if err != nil {
 		return err
 	}
@@ -1543,7 +1345,16 @@ func (r *Runner) runSplit(ctx context.Context, j *Job) error {
 			lastBound, from))
 	}
 
+	// Read once for the whole split; each piece carries it under its own
+	// number and title.
 	opts := req.TranscodeOptions(0, r.cfg.Profile)
+	album := tofile.ReadAlbum(ctx, r.cfg.Meta, src, src.Ext, probe.Tags, opts.Format, opts.Container,
+		func(n tofile.Note) { r.noteTranscode(j.ID, n) })
+	trackTotal := req.TrackTotal
+	if trackTotal == 0 {
+		trackTotal = len(spans)
+	}
+
 	outs := make([]Output, 0, len(spans))
 	// Every piece is the same format through the same options, so the pieces
 	// differ by index alone; a plan is still made per piece, since only a
@@ -1627,7 +1438,16 @@ func (r *Runner) runSplit(ctx context.Context, j *Job) error {
 		// Named by output index, not piece index: it is the index /result
 		// takes and the name a warning about the piece carries, and with a
 		// piece skipped the two indices part company.
-		out, err := r.writeMedia(ctx, j, sl, fmt.Sprintf("out.%d.%s", len(outs), ext), opts, plan.MediaType, progress)
+		number, title := req.PieceLabel(i)
+		tags := album.PieceTags(number, trackTotal, title)
+		name := fmt.Sprintf("out.%d.%s", len(outs), ext)
+		// A cancel that lands in the post-pass fails the piece: it may be
+		// untagged.
+		out, err := r.writeMedia(ctx, j, sl, name, opts, plan.MediaType, func(path string) error {
+			return album.PostPass(ctx, path, tags, func(err error) {
+				r.warnErr(j.ID, "metadata post-pass of "+name, err)
+			})
+		}, progress, waxflow.WithTags(tags), waxflow.WithArt(album.Art))
 		sl.Close()
 		if err != nil {
 			return err

@@ -98,8 +98,8 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	if t.Samples >= 0 && t.Samples <= wavpack.MaxSamples {
 		m.promised = t.Samples
 	}
-	if m.tag, err = apev2.Build(muxTags(m.opts.Tags)); err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "wavpack", err)
+	if m.tag, err = buildTag(m.opts.Tags); err != nil {
+		return err
 	}
 	m.began = true
 	return nil
@@ -192,6 +192,22 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 		return err
 	}
 	return m.patch.Resume(m.off)
+}
+
+// TagsFit reports whether tags fit the APEv2 block the muxer writes: nil, or
+// Begin's own refusal.
+func TagsFit(tags []container.Tag) error {
+	_, err := buildTag(tags)
+	return err
+}
+
+// buildTag renders the muxer's APEv2 block, refusing a set it cannot hold.
+func buildTag(tags []container.Tag) ([]byte, error) {
+	b, err := apev2.Build(muxTags(tags))
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeUnsupportedFormat, "wavpack", err)
+	}
+	return b, nil
 }
 
 // muxTags converts the engine's tags to the writer's. container/apen holds the

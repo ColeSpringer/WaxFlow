@@ -62,6 +62,10 @@ func smpbPayload(delay, length int64) string {
 		uint32(delay), uint32(0), uint64(length))
 }
 
+// TagsFit reports whether tags fit the ilst the muxer writes. It always does:
+// an ilst has no block cap, so the muxer refuses no tag set for its size.
+func TagsFit([]container.Tag) error { return nil }
+
 // udtaBox assembles the moov user-data box: meta/ilst when there are tags,
 // art, or an iTunSMPB payload, plus chpl when there are chapters. smpb is
 // the pre-built iTunSMPB freeform atom (nil for none). Returns nil when

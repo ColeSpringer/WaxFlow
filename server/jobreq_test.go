@@ -123,6 +123,11 @@ func TestJobRequestCoverage(t *testing.T) {
 		"spans": "a timeline-job field for the same reason crossfadeSeconds is: per-member " +
 			"windows are set from the POST /hls/timeline body's TimelineSrc from/to and ride " +
 			"the job only to survive the 202",
+		"pieces": "a split's per-piece number and title, server-set: from the body's titles, " +
+			"or from the sheet a cue names. A body may not send them, so a job's numbering is " +
+			"one the daemon derived",
+		"trackTotal": "a split's TRACKTOTAL, server-set for the reason pieces is: the number of " +
+			"pieces, or the sheet's track count",
 	}
 
 	// Wire fields with no domain counterpart, and why. This direction needs
@@ -181,6 +186,14 @@ func TestJobRequestCoverage(t *testing.T) {
 			continue // filled by the caller from the resolved source, not the body
 		}
 		t.Errorf("requestFrom leaves %s zero for a fully populated body", f.Name)
+	}
+
+	// A split's titles name its pieces, never its members.
+	split := populatedJobRequest()
+	split.Type = "split"
+	req := requestFrom(split)
+	if len(req.MemberTitles) != 0 || len(req.Pieces) != len(split.Titles) || req.Pieces[0].Title != split.Titles[0] {
+		t.Errorf("a split's titles map to member titles %q and pieces %+v, want pieces alone", req.MemberTitles, req.Pieces)
 	}
 }
 

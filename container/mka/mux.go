@@ -69,9 +69,14 @@ type MuxerOptions struct {
 	// by the CLI's post-pass (cli/label, via waxlabel), which runs because the
 	// engine's Matroska forms report embedsTags false (waxflow.OutputEmbedsTags).
 	// If this muxer is ever taught to write Tags at Begin, set embedsTags on
-	// those forms (waxflow.matroskaForm) so the tags are not written twice.
+	// those forms (waxflow.matroskaForm) so the tags are not written twice,
+	// and have TagsFit answer for the block it writes.
 	Tags []container.Tag
 }
+
+// TagsFit reports whether tags fit what the muxer writes of them. They always
+// do: it writes none, so the post-pass tags a Matroska file.
+func TagsFit([]container.Tag) error { return nil }
 
 // Muxer writes one audio track as Matroska (.mka/.mkv) or WebM. NeedsSeek
 // reports false: a plain io.Writer gets a compliant stream with an unknown-size

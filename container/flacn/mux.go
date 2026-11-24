@@ -160,9 +160,9 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	table := m.patch.Seekable() && tableSamples > 0
 	// Before began: a Begin that refuses leaves the muxer unstarted, the way
 	// every other check above it does.
-	vc, err := vorbisCommentBlock(m.opts.Tags)
+	vc, err := buildComment(m.opts.Tags)
 	if err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "flac", err)
+		return err
 	}
 	m.began = true
 	head := [4]byte{0x80} // STREAMINFO, last metadata block
@@ -326,6 +326,23 @@ func (m *Muxer) write(parts ...[]byte) error {
 		}
 	}
 	return nil
+}
+
+// TagsFit reports whether tags fit the VORBIS_COMMENT block the muxer
+// writes: nil, or Begin's own refusal.
+func TagsFit(tags []container.Tag) error {
+	_, err := buildComment(tags)
+	return err
+}
+
+// buildComment renders the muxer's VORBIS_COMMENT body, refusing a set it
+// cannot hold.
+func buildComment(tags []container.Tag) ([]byte, error) {
+	vc, err := vorbisCommentBlock(tags)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeUnsupportedFormat, "flac", err)
+	}
+	return vc, nil
 }
 
 // maxCommentBytes bounds the VORBIS_COMMENT block body. The engine passes

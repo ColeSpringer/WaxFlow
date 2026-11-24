@@ -20,7 +20,9 @@
 // must never block a concurrent Replace of the same path.
 //
 // [WriteFile] and [Stage] are the publish itself: a uniquely named temp
-// beside the target, then Replace, with the temp removed on any failure.
+// beside the target, then Replace, or for a file that must not replace one
+// a publish that refuses an existing target, with the temp removed on any
+// failure.
 // [IsTemp] names what a crash can still leave, and [SweepTemps] removes it
 // at a store's open.
 package posixfs

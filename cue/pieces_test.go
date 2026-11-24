@@ -698,3 +698,74 @@ func TestSingleFileFindsTheAudioFile(t *testing.T) {
 		})
 	}
 }
+
+// TestLabelNamesEachPiece: a piece takes its track's number and title, and a
+// piece no track names (the lead-in) is track 0 with no title.
+func TestLabelNamesEachPiece(t *testing.T) {
+	f := pieceFile(t, "FILE \"disc.wav\" WAVE\n"+
+		"  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:02:00\n"+
+		"  TRACK 02 AUDIO\n    INDEX 01 00:05:00\n")
+	pieces, err := f.Pieces(44100, 10*sec)
+	if err != nil {
+		t.Fatalf("Pieces: %v", err)
+	}
+	type label struct {
+		number int
+		title  string
+	}
+	var got []label
+	for _, p := range pieces {
+		n, title := f.Label(p)
+		got = append(got, label{n, title})
+	}
+	if want := []label{{0, ""}, {1, "One"}, {2, ""}}; !slices.Equal(got, want) {
+		t.Errorf("labels = %+v, want %+v", got, want)
+	}
+}
+
+// TestLabelAnswersZeroForATrackTheFileLacks: a piece whose track the file does
+// not hold, one of another file's, is labelled as the lead-in is, never a
+// panic.
+func TestLabelAnswersZeroForATrackTheFileLacks(t *testing.T) {
+	f := pieceFile(t, "FILE \"disc.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n")
+	if n, title := f.Label(Piece{Track: 1}); n != 0 || title != "" {
+		t.Errorf("Label(track 1 of a one-track file) = %d, %q; want 0 and no title", n, title)
+	}
+}
+
+// TestTrackTotalCountsTheDisc: every track up to the last audio one, in any
+// file; a data track after the audio is a second session a player does not
+// count. No piece's number exceeds the total.
+func TestTrackTotalCountsTheDisc(t *testing.T) {
+	const audio = "FILE \"disc.wav\" WAVE\n" +
+		"  TRACK 02 AUDIO\n    INDEX 01 00:00:00\n" +
+		"  TRACK 03 AUDIO\n    INDEX 01 00:05:00\n"
+	const fromOne = "FILE \"disc.wav\" WAVE\n" +
+		"  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n" +
+		"  TRACK 02 AUDIO\n    INDEX 01 00:05:00\n"
+	const dataAfter = "FILE \"disc.iso\" BINARY\n  TRACK 04 MODE1/2352\n    INDEX 01 00:00:00\n"
+	for _, tc := range []struct {
+		name, sheet string
+		want        int
+	}{
+		{"audio only", fromOne, 2},
+		{"a data track ahead in a file of its own", "FILE \"disc.iso\" BINARY\n  TRACK 01 MODE1/2352\n" + audio, 3},
+		{"an enhanced CD's data track after", fromOne +
+			"FILE \"disc.iso\" BINARY\n  TRACK 03 MODE1/2352\n    INDEX 01 00:00:00\n", 2},
+		{"audio from 02 with a data track after", audio + dataAfter, 3},
+		{"a second disc numbered from 13", "FILE \"disc2.wav\" WAVE\n" +
+			"  TRACK 13 AUDIO\n    INDEX 01 00:00:00\n" +
+			"  TRACK 14 AUDIO\n    INDEX 01 00:05:00\n", 14},
+		{"numbers that do not ascend", "FILE \"disc.wav\" WAVE\n" +
+			"  TRACK 05 AUDIO\n    INDEX 01 00:00:00\n" +
+			"  TRACK 02 AUDIO\n    INDEX 01 00:05:00\n", 5},
+	} {
+		s, err := Parse([]byte(tc.sheet))
+		if err != nil {
+			t.Fatalf("%s: Parse: %v", tc.name, err)
+		}
+		if got := s.TrackTotal(); got != tc.want {
+			t.Errorf("%s: TrackTotal = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}

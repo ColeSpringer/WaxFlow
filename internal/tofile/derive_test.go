@@ -1,4 +1,4 @@
-package jobs
+package tofile
 
 import (
 	"math"
@@ -6,6 +6,7 @@ import (
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/dsp/gain"
+	"github.com/colespringer/waxflow/internal/meta"
 )
 
 // TestDeriveOutputLoudnessClampsWhenLimited pins the downmix half of the
@@ -24,6 +25,12 @@ func TestDeriveOutputLoudnessClampsWhenLimited(t *testing.T) {
 	}
 	if _, tp := deriveOutputLoudness(src, gainDB, false); tp != src.TruePeakDB+gainDB {
 		t.Errorf("unlimited peak = %.3f dBTP, want %.3f (gain-shifted, no clamp)", tp, src.TruePeakDB+gainDB)
+	}
+	// The clamp reaches the predicted peak tag the output embeds.
+	lufs, ltp := deriveOutputLoudness(src, gainDB, true)
+	_, utp := deriveOutputLoudness(src, gainDB, false)
+	if l, u := meta.ReplayGainTags(lufs, ltp)[1].Value, meta.ReplayGainTags(lufs, utp)[1].Value; l == u {
+		t.Errorf("limited and unlimited peak tags are both %s", l)
 	}
 	// A projection already under the ceiling is never lifted to it, even when
 	// limited: the clamp is a min, not an assignment.

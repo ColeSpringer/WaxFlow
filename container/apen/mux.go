@@ -137,8 +137,8 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	m.cfg = cfg
 	m.entries = reserveEntries(t.Samples, cfg.BlocksPerFrame)
 	m.seek = make([]uint32, 0, m.entries)
-	if m.tag, err = apev2.Build(muxTags(m.opts.Tags)); err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "ape", err)
+	if m.tag, err = buildTag(m.opts.Tags); err != nil {
+		return err
 	}
 	m.began = true
 	return m.writeHeaders()
@@ -399,6 +399,22 @@ func (m *Muxer) descriptor(frameDataBytes int64) []byte {
 	// rather than a finalization.
 	m.md5.Sum(desc[36:36])
 	return desc[:]
+}
+
+// TagsFit reports whether tags fit the APEv2 block the muxer writes: nil, or
+// Begin's own refusal.
+func TagsFit(tags []container.Tag) error {
+	_, err := buildTag(tags)
+	return err
+}
+
+// buildTag renders the muxer's APEv2 block, refusing a set it cannot hold.
+func buildTag(tags []container.Tag) ([]byte, error) {
+	b, err := apev2.Build(muxTags(tags))
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeUnsupportedFormat, "ape", err)
+	}
+	return b, nil
 }
 
 // muxTags converts the engine's tags to the writer's. container/wv holds the

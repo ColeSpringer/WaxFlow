@@ -20,6 +20,7 @@ import (
 	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/internal/sign"
+	"github.com/colespringer/waxflow/internal/tofile"
 	"github.com/colespringer/waxflow/source"
 	"github.com/colespringer/waxflow/waxerr"
 )
@@ -77,18 +78,21 @@ type jobRequest struct {
 	Srcs []source.Ref `json:"srcs,omitempty"`
 	// Titles are optional per-member chapter titles for a merge, index-aligned
 	// to Srcs. They stamp the QuickTime chapter track of an mp4-family merge,
-	// overriding each member's own TITLE tag; see validateMergeRequest.
+	// overriding each member's own TITLE tag; see validateMergeRequest. On a
+	// split they are the pieces' titles, one per piece Cuts opens, and become
+	// jobs.Request.Pieces.
 	Titles []string `json:"titles,omitempty"`
 	Cuts   []int64  `json:"cuts,omitempty"`
 	// Cue is a source reference naming a CUE sheet whose track boundaries
-	// are this split's cut points, exclusive with Cuts and Skip. It resolves
-	// through the same resolver src does, so a sheet can be uploaded
-	// (upload:<id>) or sit in a library root beside its rip.
+	// are this split's cut points and whose tracks name its pieces, exclusive
+	// with Cuts, Skip and Titles. It resolves through the same resolver src
+	// does, so a sheet can be uploaded (upload:<id>) or sit in a library root
+	// beside its rip.
 	//
-	// It is resolved into Cuts and Skip at creation and does not reach the
-	// domain Request: the job is its cut points, so re-reading a sheet at
-	// run time would let an edit between creation and execution change what
-	// the job was accepted as.
+	// It is resolved into Cuts, Skip, Pieces and TrackTotal at creation and
+	// does not reach the domain Request: the job is its cut points, so
+	// re-reading a sheet at run time would let an edit between creation and
+	// execution change what the job was accepted as.
 	Cue source.Ref `json:"cue,omitempty"`
 	// Skip lists the pieces Cuts opens that the split does not write, as
 	// 0-based piece indices. Split-only, and resolved from a sheet as Cuts is:
@@ -113,11 +117,10 @@ type jobRequest struct {
 // fills them from the resolved sources instead. TestJobRequestCoverage pins
 // both the mapping and those exemptions.
 func requestFrom(body jobRequest) *jobs.Request {
-	return &jobs.Request{
+	req := &jobs.Request{
 		Type:               jobs.Type(body.Type),
 		Src:                body.Src,
 		Srcs:               slices.Clone(body.Srcs),
-		MemberTitles:       slices.Clone(body.Titles),
 		Cuts:               slices.Clone(body.Cuts),
 		Skip:               slices.Clone(body.Skip),
 		Params:             body.Params,
@@ -127,6 +130,13 @@ func requestFrom(body jobRequest) *jobs.Request {
 		SilenceThresholdDB: body.SilenceThresholdDB,
 		SilenceMinSeconds:  body.SilenceMinSeconds,
 	}
+	// A split's titles name its pieces, every other type's its members.
+	if req.Type == jobs.TypeSplit {
+		req.Pieces = jobs.TitledPieces(body.Titles)
+	} else {
+		req.MemberTitles = slices.Clone(body.Titles)
+	}
+	return req
 }
 
 // handleJobCreate serves POST /jobs: validate everything a queued job
@@ -188,6 +198,10 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 			return waxerr.New(waxerr.CodeInvalidRequest,
 				"cuts and skip are exclusive with cue: a split's boundaries come from one place")
 		}
+		if req.Type == jobs.TypeSplit && len(body.Titles) > 0 && body.Cue != "" {
+			return waxerr.New(waxerr.CodeInvalidRequest,
+				"titles are exclusive with cue: the sheet names a split's pieces")
+		}
 		return nil
 	}
 	if err := req.CheckBody(cueRules); err != nil {
@@ -214,9 +228,10 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 	if req.Type == jobs.TypeSplit {
 		// The sheet is read before the source is measured, so a sheet the
 		// daemon cannot use is a 400 that never waits on a decode.
+		var sheet *cue.Sheet
 		var file *cue.File
 		if body.Cue != "" {
-			if file, err = s.cueFileFor(ctx, string(body.Cue)); err != nil {
+			if sheet, file, err = s.cueFileFor(ctx, string(body.Cue)); err != nil {
 				return nil, err
 			}
 		}
@@ -277,6 +292,21 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 				return nil, err
 			}
 			req.Cuts, req.Skip = cue.Cutpoints(pieces)
+			req.Pieces = make([]jobs.PieceTag, len(pieces))
+			for i, p := range pieces {
+				req.Pieces[i].Number, req.Pieces[i].Title = file.Label(p)
+			}
+			req.TrackTotal = sheet.TrackTotal()
+			// The sheet names the pieces, so a title that cannot be embedded
+			// is the sheet's to answer for, before any piece is written.
+			for i, p := range req.Pieces {
+				if !pieces[i].Audio {
+					continue
+				}
+				if err := tofile.CheckPieceTags(req.Format, req.Container, p.Number, req.TrackTotal, p.Title); err != nil {
+					return nil, waxerr.Annotate(fmt.Sprintf("cue: track %d", p.Number), err)
+				}
+			}
 		}
 		// The cut arithmetic itself is the runner's own function, so the two
 		// cannot disagree about which samples are piece 3. They are handed
@@ -285,6 +315,9 @@ func (s *Server) validateJobRequest(ctx context.Context, body jobRequest) (*jobs
 		spans, err := req.SplitSpans(track.Samples)
 		if err != nil {
 			return nil, err
+		}
+		if req.TrackTotal == 0 {
+			req.TrackTotal = len(spans)
 		}
 		// The run holds an open last piece to a measure when the header's
 		// length is not exact (an MP3's Xing count), and the same measure
@@ -330,11 +363,6 @@ func (s *Server) applyFileOutputContainer(req *jobs.Request, track container.Tra
 	_, err := s.eng.PlanTranscode(track, req.TranscodeOptions(0, s.profile))
 	return err
 }
-
-// mp4ProgressiveContainer is the container override that selects the flat
-// (moov+mdat) MP4 form, aliased from the engine so the wire value has one
-// definition rather than one per package.
-const mp4ProgressiveContainer = waxflow.ContainerProgressive
 
 // validateMergeRequest resolves, measures, and plans a merge's members. It
 // pins their identities as it goes, which is where the merge's source-changed
@@ -419,7 +447,7 @@ func (s *Server) validateMergeRequest(ctx context.Context, body jobRequest, req 
 	// by now (the block above settled the mp4-family default), and the test is
 	// the same one the runner gates on, so the two agree on which merges carry
 	// chapters.
-	if len(body.Titles) > 0 && req.Container != mp4ProgressiveContainer {
+	if len(body.Titles) > 0 && req.Container != waxflow.ContainerProgressive {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			"titles write a QuickTime chapter track, which only the flat MP4 form carries; this merge's "+
 				"format and container produce none, so the titles would be dropped. Merge to an mp4-family "+
@@ -659,10 +687,10 @@ func (s *Server) writeJobProduct(w http.ResponseWriter, j *jobs.Job) {
 // reading it into memory to find out it is not a sheet.
 const maxCueBytes = 1 << 20
 
-// cueFileFor resolves a CUE sheet reference and returns the one file it
-// cuts: the sheet parsed strictly (a line the daemon cannot read is a 400
-// naming the line, since a skipped line would be a silently wrong cut) and
-// its audio file picked out (cue.SingleFile).
+// cueFileFor resolves a CUE sheet reference and returns the sheet and the one
+// file it cuts: the sheet parsed strictly (a line the daemon cannot read is a
+// 400 naming the line, since a skipped line would be a silently wrong cut)
+// and its audio file picked out (cue.SingleFile).
 //
 // What the sheet says about that file is cue.Pieces' business, and the
 // caller's, since Pieces takes the source's rate and measured length: a sheet
@@ -670,25 +698,29 @@ const maxCueBytes = 1 << 20
 // CD-family rate divides exactly, and no length to hold a data track against.
 // That funnel is shared with the CLI, which is what stops one sheet being cut
 // two ways.
-func (s *Server) cueFileFor(ctx context.Context, ref string) (*cue.File, error) {
+func (s *Server) cueFileFor(ctx context.Context, ref string) (*cue.Sheet, *cue.File, error) {
 	f, err := s.resolver.Resolve(ctx, ref)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer f.Close()
 	if f.ID.Size > maxCueBytes {
-		return nil, waxerr.New(waxerr.CodePayloadTooLarge, fmt.Sprintf(
+		return nil, nil, waxerr.New(waxerr.CodePayloadTooLarge, fmt.Sprintf(
 			"cue %q is %d bytes; a CUE sheet is text and is bounded at %d", ref, f.ID.Size, maxCueBytes))
 	}
 	raw := make([]byte, f.ID.Size)
 	if err := container.ReadFull(f, raw, 0); err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeSourceUnreadable, "reading the CUE sheet", err)
+		return nil, nil, waxerr.Wrap(waxerr.CodeSourceUnreadable, "reading the CUE sheet", err)
 	}
 	sheet, err := cue.Parse(raw)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return sheet.SingleFile()
+	file, err := sheet.SingleFile()
+	if err != nil {
+		return nil, nil, err
+	}
+	return sheet, file, nil
 }
 
 // jobResultFilename names the download. A split's pieces carry the index the

@@ -384,7 +384,7 @@ func TestCuePieces(t *testing.T) {
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, sheet, _ := cueRip(t, t.TempDir(), tc.starts)
-			got, tracks, err := cuePieces(sheet, 44100, total)
+			got, tracks, err := cuePieces(sheet, "flac", "", 44100, total)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -417,7 +417,7 @@ func mixedModeSheet(t *testing.T, dir string, audioStarts []int) string {
 func TestCuePiecesSkipsADataTrack(t *testing.T) {
 	dir := t.TempDir()
 	sheet := mixedModeSheet(t, dir, []int{100, 250})
-	got, tracks, err := cuePieces(sheet, 44100, 400_000)
+	got, tracks, err := cuePieces(sheet, "flac", "", 44100, 400_000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,7 +443,7 @@ func TestCuePiecesSkipsADataTrack(t *testing.T) {
 			"  TRACK 03 AUDIO\n    TITLE \"Three\"\n    INDEX 01 00:01:00\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got, tracks, err = cuePieces(beside, 44100, 400_000)
+	got, tracks, err = cuePieces(beside, "flac", "", 44100, 400_000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +468,7 @@ func TestCuePiecesSkipsADataTrack(t *testing.T) {
 			"  TRACK 03 MODE1/2352\n    INDEX 01 05:00:00\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got, tracks, err = cuePieces(enhanced, 44100, 400_000)
+	got, tracks, err = cuePieces(enhanced, "flac", "", 44100, 400_000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +493,7 @@ func TestCuePiecesTrackZeroIsATrack(t *testing.T) {
 		"  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:01:00\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got, _, err := cuePieces(sheet, 44100, 400_000)
+	got, _, err := cuePieces(sheet, "flac", "", 44100, 400_000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +515,7 @@ func TestCuePiecesReadsWhatTheSheetMeans(t *testing.T) {
 			"TRACK 02 AUDIO\n  TITLE \"Track Two\"\n  INDEX 01 00:01:00\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got, _, err := cuePieces(sheet, 44100, 400_000)
+	got, _, err := cuePieces(sheet, "flac", "", 44100, 400_000)
 	if err != nil {
 		t.Fatal(err)
 	}

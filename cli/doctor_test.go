@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxflow/dsp/resample"
 	"github.com/colespringer/waxflow/internal/config"
 	"github.com/colespringer/waxflow/server"
 	"github.com/colespringer/waxflow/source"
@@ -68,9 +69,16 @@ func TestDoctorHealthy(t *testing.T) {
 	for _, c := range report.Checks {
 		status[c.Name] = c.Status
 	}
-	for _, name := range []string{"config", "root:lib", "cache", "data", "scratch", "bench:opus", "bench:flac", "ffmpeg"} {
+	for _, name := range []string{"config", "root:lib", "cache", "data", "scratch", "ffmpeg"} {
 		if got := status[name]; got != "ok" {
 			t.Errorf("check %s = %q, want ok", name, got)
+		}
+	}
+	// The bench ran; how fast is the machine's, and benchVerdict's test
+	// pins the rule.
+	for _, name := range []string{"bench:opus", "bench:flac"} {
+		if got := status[name]; got != "ok" && got != "warn" {
+			t.Errorf("check %s = %q, want ok or warn", name, got)
 		}
 	}
 	if got := status["pid"]; got != "skip" {
@@ -165,6 +173,34 @@ func TestDoctorFailsOnCatalogDBWithoutFlavor(t *testing.T) {
 	}
 }
 
+// TestBenchVerdictWarnsBelowTwiceRealtime: the self-bench is ok at 2x
+// realtime or better and warns below it, with the remedy the profile leaves.
+func TestBenchVerdictWarnsBelowTwiceRealtime(t *testing.T) {
+	const (
+		hqNote   = "; below 2x, try resampleProfile=fast and a lower opus complexity"
+		fastNote = "; below 2x on the fast resample profile, try a lower opus complexity"
+	)
+	for _, tc := range []struct {
+		elapsed time.Duration
+		profile resample.Profile
+		status  string
+		detail  string
+	}{
+		{0, resample.HQ, "ok", "2s of 44.1 kHz stereo in 1ms (2000x realtime)"},
+		{500 * time.Millisecond, resample.HQ, "ok", "2s of 44.1 kHz stereo in 500ms (4x realtime)"},
+		{time.Second, resample.HQ, "ok", "2s of 44.1 kHz stereo in 1s (2x realtime)"},
+		{1001 * time.Millisecond, resample.HQ, "warn", "2s of 44.1 kHz stereo in 1.001s (2x realtime)" + hqNote},
+		{4 * time.Second, resample.HQ, "warn", "2s of 44.1 kHz stereo in 4s (0x realtime)" + hqNote},
+		{4 * time.Second, resample.Fast, "warn", "2s of 44.1 kHz stereo in 4s (0x realtime)" + fastNote},
+		{time.Second, resample.Fast, "ok", "2s of 44.1 kHz stereo in 1s (2x realtime)"},
+	} {
+		got := benchVerdict("bench:opus", tc.elapsed, tc.profile)
+		if got.Name != "bench:opus" || got.Status != tc.status || got.Detail != tc.detail {
+			t.Errorf("benchVerdict(%v, %v) = %s %q %q, want %q %q", tc.elapsed, tc.profile, got.Name, got.Status, got.Detail, tc.status, tc.detail)
+		}
+	}
+}
+
 func TestDoctorWarnsOnEmptyRoot(t *testing.T) {
 	doctorEnv(t)
 	t.Setenv("WAXFLOW_ROOTS", "lib="+t.TempDir())
@@ -185,9 +221,8 @@ func TestDoctorBenchUsesConfiguredProfile(t *testing.T) {
 		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
 	}
 	// The plumbing cannot be observed through the ok detail (the note
-	// only appears under 2x), so at minimum the bench must run and pass
-	// under the fast profile; the note-text split is covered by reading
-	// benchChecks with a warn on a slow box.
+	// only appears under 2x), so at minimum the bench must run under the
+	// fast profile; TestBenchVerdictWarnsBelowTwiceRealtime pins the notes.
 	if !strings.Contains(out, "bench:opus") || !strings.Contains(out, "x realtime") {
 		t.Errorf("bench line missing under fast profile:\n%s", out)
 	}

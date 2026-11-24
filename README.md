@@ -111,7 +111,9 @@ waxflow cache stats|gc               inspect or trim a running daemon's cache
 waxflow ping | version | exit-codes
 ```
 
-`waxflow <command> --help` lists each command's flags.
+`waxflow <command> --help` lists each command's flags. Ctrl-C cancels a
+command, removes the file it was writing and exits 6; a second one kills it.
+`waxflow server` drains its requests instead.
 
 ## Go library
 

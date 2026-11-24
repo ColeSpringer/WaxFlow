@@ -285,7 +285,7 @@ func TestStageAbortRemoves(t *testing.T) {
 		}
 		mustRead(t, target, "old")
 	})
-	t.Run("created in place", func(t *testing.T) {
+	t.Run("staged as a new file", func(t *testing.T) {
 		dir := t.TempDir()
 		target := filepath.Join(dir, "out.flac")
 		st, err := Stage(target, 0o644, false)
@@ -296,11 +296,14 @@ func TestStageAbortRemoves(t *testing.T) {
 			t.Fatal(err)
 		}
 		st.Abort()
-		if _, err := os.Stat(target); !errors.Is(err, fs.ErrNotExist) {
-			t.Errorf("Abort left the half-written file: %v", err)
+		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+			t.Errorf("Abort left %d files behind", len(entries))
 		}
 		if err := st.Commit(); err == nil {
 			t.Error("Commit after Abort = nil, want an error")
+		}
+		if _, err := os.Stat(target); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("Commit after Abort published the file: %v", err)
 		}
 	})
 	t.Run("the file is already closed", func(t *testing.T) {
@@ -394,15 +397,33 @@ func TestStageCommitReplaces(t *testing.T) {
 			t.Errorf("the failed Commit left %v behind", temps)
 		}
 	})
-	t.Run("created in place", func(t *testing.T) {
+}
+
+// wantExistsRefusal checks err refuses target as existing, in the one form
+// Stage and Commit share: it names the target and no temp.
+func wantExistsRefusal(t *testing.T, err error, target string) {
+	t.Helper()
+	var pe *fs.PathError
+	if !errors.Is(err, fs.ErrExist) || !errors.As(err, &pe) || pe.Op != "stage" || pe.Path != target {
+		t.Fatalf("refusal = %v, want stage %s: file exists", err, target)
+	}
+}
+
+// A new file is staged beside its target as a replace is, and published
+// only where nothing is, so the target never holds a partial file.
+func TestStageNewPublishesWithoutReplacing(t *testing.T) {
+	t.Parallel()
+	t.Run("publishes a complete file", func(t *testing.T) {
 		dir := t.TempDir()
 		target := filepath.Join(dir, "out.flac")
 		st, err := Stage(target, 0o644, false)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if st.Path != target {
-			t.Errorf("Path = %q, want the target itself", st.Path)
+		defer st.Abort()
+		name := filepath.Base(st.Path)
+		if filepath.Dir(st.Path) != dir || !regexp.MustCompile(`^out\.flac\.tmp-[0-9a-f]{16}$`).MatchString(name) {
+			t.Errorf("staged at %q, want out.flac.tmp-<16 hex> beside the target", st.Path)
 		}
 		if _, err := st.File.Write([]byte("new")); err != nil {
 			t.Fatal(err)
@@ -411,8 +432,14 @@ func TestStageCommitReplaces(t *testing.T) {
 		if _, err := st.File.ReadAt(buf, 0); err != nil || string(buf) != "new" {
 			t.Errorf("read back %q (%v), want %q", buf, err, "new")
 		}
+		if _, err := os.Stat(target); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("the target exists before Commit: %v", err)
+		}
 		if err := st.Commit(); err != nil {
 			t.Fatal(err)
+		}
+		if st.Path != target {
+			t.Errorf("Path after Commit = %q, want the target", st.Path)
 		}
 		st.Abort()
 		mustRead(t, target, "new")
@@ -420,19 +447,40 @@ func TestStageCommitReplaces(t *testing.T) {
 			t.Errorf("the directory holds %d files, want the one output", len(entries))
 		}
 	})
-	t.Run("in place refuses an existing target", func(t *testing.T) {
+	t.Run("refuses an existing target up front", func(t *testing.T) {
 		dir := t.TempDir()
 		target := filepath.Join(dir, "out.flac")
 		if err := os.WriteFile(target, []byte("old"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if st, err := Stage(target, 0o644, false); !errors.Is(err, fs.ErrExist) {
-			if err == nil {
-				st.Abort()
-			}
-			t.Fatalf("Stage over an existing target = %v, want fs.ErrExist", err)
+		st, err := Stage(target, 0o644, false)
+		if err == nil {
+			st.Abort()
 		}
+		wantExistsRefusal(t, err, target)
 		mustRead(t, target, "old")
+		if temps := tempsIn(t, dir); len(temps) != 0 {
+			t.Errorf("the refusal left %v behind", temps)
+		}
+	})
+	t.Run("refuses a target that appeared after Stage", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "out.flac")
+		st, err := Stage(target, 0o644, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.File.Write([]byte("new")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte("theirs"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		wantExistsRefusal(t, st.Commit(), target)
+		mustRead(t, target, "theirs")
+		if temps := tempsIn(t, dir); len(temps) != 0 {
+			t.Errorf("the refused Commit left %v behind", temps)
+		}
 	})
 }
 

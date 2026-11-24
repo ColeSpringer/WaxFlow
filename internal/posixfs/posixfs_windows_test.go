@@ -257,3 +257,87 @@ func TestLongPaths(t *testing.T) {
 	}
 	g.Close()
 }
+
+// TestStageNewOutlastsATransientHold: a handle without delete sharing on the
+// staged file blocks its no-replace publish until it closes, so only a
+// retry lands it. A plain rename fails outright under the same hold.
+func TestStageNewOutlastsATransientHold(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "out.flac")
+	st, err := Stage(target, 0o644, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Abort()
+	if _, err := st.File.Write([]byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	held, err := os.Open(st.Path) // no delete sharing, as a scanner opens it
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(st.Path, filepath.Join(dir, "elsewhere")); err == nil {
+		held.Close()
+		t.Fatal("os.Rename moved a plain-held file; the transient hold proves nothing here")
+	}
+
+	// The hold outlives the first attempt and clears inside the backoff.
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		time.Sleep(15 * time.Millisecond)
+		held.Close()
+	})
+	defer wg.Wait()
+
+	if err := st.Commit(); err != nil {
+		t.Fatalf("Commit under a transient hold: %v", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || string(got) != "new" {
+		t.Errorf("target holds %q (%v), want %q", got, err, "new")
+	}
+}
+
+// TestStageNewOnALongPath: the no-replace publish takes a path past MAX_PATH
+// on a host without long-path support, and still refuses an existing one.
+func TestStageNewOnALongPath(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	deep := filepath.Join(dir, strings.Repeat("d", 100), strings.Repeat("e", 100), strings.Repeat("f", 100))
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	final := filepath.Join(deep, "out.flac")
+	if len(final) <= 260 {
+		t.Fatalf("fixture path is %d chars, not past MAX_PATH", len(final))
+	}
+	stage := func() *Staged {
+		t.Helper()
+		st, err := Stage(final, 0o644, false)
+		if err != nil {
+			t.Fatalf("Stage on a long path: %v", err)
+		}
+		if _, err := st.File.Write([]byte("x")); err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	if err := stage().Commit(); err != nil {
+		t.Fatalf("Commit on a long path: %v", err)
+	}
+	mustRead(t, final, "x")
+	if err := os.Remove(final); err != nil {
+		t.Fatal(err)
+	}
+
+	st := stage()
+	if err := os.WriteFile(final, []byte("theirs"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wantExistsRefusal(t, st.Commit(), final)
+	mustRead(t, final, "theirs")
+	if entries, _ := os.ReadDir(deep); len(entries) != 1 {
+		t.Errorf("the directory holds %d files, want the one target", len(entries))
+	}
+}

@@ -42,7 +42,7 @@ func writeFragmentedMP4(t *testing.T, path string, tags []container.Tag) {
 
 // TestFragmentedIsANoteNotAWarning pins the sourceLint classification at its
 // source, which is the switch behind both surfaces that show a mapper warning
-// to a user: logMetaRead (transcode and split) and a job's client-visible
+// to a user: logMetaNote (transcode and split) and a job's client-visible
 // Warnings. Probe's human line and the /probe envelope are not among them,
 // though they look like they should be: both iterate format.Info.Warnings off
 // the probe itself, and ProbeMetadata carries no warnings at all.
@@ -95,9 +95,9 @@ func TestFragmentedIsANoteNotAWarning(t *testing.T) {
 // and no error, and a cell built from a tagged fixture would pass on the
 // unfixed mapping. Hence the untagged fixture.
 //
-// All three production Apply sites route MP4 outputs to the muxer instead
-// (cli/transcode.go, cli/split.go, internal/jobs/runner.go), so this pins the
-// seam's contract rather than a live route.
+// The production Apply sites route MP4 outputs to the muxer instead
+// (internal/tofile/tofile.go, cli/split.go), so this pins the seam's contract
+// rather than a live route.
 func TestFragmentedApplyIsUnsupportedNotInternal(t *testing.T) {
 	frag := filepath.Join(t.TempDir(), "frag.m4a")
 	writeFragmentedMP4(t, frag, nil)

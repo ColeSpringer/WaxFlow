@@ -78,10 +78,11 @@ type jobField struct {
 // Driving every (type, field) pair is what makes a missing clause fail here.
 var jobFields = []jobField{
 	{"srcs", `"srcs":["lib/sine.wav","lib/sine.wav"]`, []string{"merge"}},
-	// Per-member chapter titles: merge's alone, one per member. A two-title
-	// spelling matches the two-member merge base above, so a type that does not
-	// own it refuses a well-formed value rather than a malformed one.
-	{"titles", `"titles":["Intro","Chapter Two"]`, []string{"merge"}},
+	// Per-member chapter titles on a merge, per-piece titles on a split. A
+	// two-title spelling matches the two-member merge base and the two-piece
+	// split base below, so a type that does not own it refuses a well-formed
+	// value rather than a malformed one.
+	{"titles", `"titles":["Intro","Chapter Two"]`, []string{"merge", "split"}},
 	{"cuts", `"cuts":[1000]`, []string{"split"}},
 	// cue is split's other way of saying cuts. It is owned by split alone
 	// for the same reason cuts is, and the two being exclusive of each
@@ -134,12 +135,14 @@ var jobTypeBodies = map[string]string{
 func TestJobCueRulesKeepTheirPlace(t *testing.T) {
 	env := jobsEnv(t)
 	for _, c := range []struct{ body, want string }{
-		{`{"type":"transcode","src":"lib/sine.wav","format":"flac","titles":["a"],"cue":"lib/rip.cue"}`, "titles applies to merge jobs"},
+		{`{"type":"transcode","src":"lib/sine.wav","format":"flac","titles":["a"],"cue":"lib/rip.cue"}`, "titles applies to merge and split jobs"},
 		{`{"type":"transcode","src":"lib/sine.wav","format":"flac","cuts":[1000],"cue":"lib/rip.cue"}`, "cuts applies to split jobs"},
 		{`{"type":"transcode","src":"lib/sine.wav","format":"flac","cue":"lib/rip.cue","skip":[0]}`, "cue applies to split jobs"},
 		{`{"type":"transcode","src":"lib/sine.wav","format":"flac","cue":"lib/rip.cue","silence":true}`, "cue applies to split jobs"},
 		{`{"type":"split","src":"lib/ramp.wav","format":"flac","cue":"lib/rip.cue","skip":[0],"silence":true}`,
 			"cuts and skip are exclusive with cue: a split's boundaries come from one place"},
+		{`{"type":"split","src":"lib/ramp.wav","format":"flac","cue":"lib/rip.cue","titles":["a"],"silence":true}`,
+			"titles are exclusive with cue: the sheet names a split's pieces"},
 		{`{"type":"split","src":"lib/ramp.wav","format":"flac","cuts":[1000],"silence":true}`, "the silence fields apply to analyze jobs"},
 	} {
 		wantRefusal(t, env.postJSON(t, "/jobs", c.body), http.StatusBadRequest, waxerr.CodeInvalidRequest, c.want)
@@ -899,5 +902,65 @@ func TestSplitBoundIsWhatTheRunEnforces(t *testing.T) {
 				t.Errorf("the second piece is %d samples, want %d", got, tc.second)
 			}
 		})
+	}
+}
+
+// TestSplitJobTitlesNameItsPieces: a split's titles become its pieces,
+// numbered from 1, one per piece or none; a sheet names them itself; and the
+// job echoes the pieces and the total it will tag, neither of which a body
+// may send. A title the pieces' tag block cannot hold is refused, and one an
+// MP4's ilst holds is written.
+func TestSplitJobTitlesNameItsPieces(t *testing.T) {
+	env := jobsEnv(t)
+	j := awaitJob(t, env, createJob(t, env,
+		`{"type":"split","src":"lib/ramp.wav","format":"flac","cuts":[1000],"titles":["Intro",""]}`))
+	if want := []jobs.PieceTag{{Number: 1, Title: "Intro"}, {Number: 2}}; !slices.Equal(j.Request.Pieces, want) {
+		t.Errorf("pieces = %+v, want %+v", j.Request.Pieces, want)
+	}
+	if j.Request.TrackTotal != 2 || len(j.Request.MemberTitles) != 0 {
+		t.Errorf("trackTotal = %d and member titles %q, want 2 and none", j.Request.TrackTotal, j.Request.MemberTitles)
+	}
+	untitled := awaitJob(t, env, createJob(t, env, `{"type":"split","src":"lib/ramp.wav","format":"flac","cuts":[1000,2000]}`))
+	if len(untitled.Request.Pieces) != 0 || untitled.Request.TrackTotal != 3 {
+		t.Errorf("an untitled split carries pieces %+v and trackTotal %d, want none and 3",
+			untitled.Request.Pieces, untitled.Request.TrackTotal)
+	}
+
+	cueFixture(t, env, "named", []int{75, 5 * 75})
+	sheet := awaitJob(t, env, createJob(t, env, `{"type":"split","src":"lib/named.wav","format":"flac","cue":"lib/named.cue"}`))
+	if want := []jobs.PieceTag{{Number: 0}, {Number: 1, Title: "Track 1"}, {Number: 2, Title: "Track 2"}}; !slices.Equal(sheet.Request.Pieces, want) {
+		t.Errorf("a sheet's pieces = %+v, want %+v", sheet.Request.Pieces, want)
+	}
+	if sheet.Request.TrackTotal != 2 {
+		t.Errorf("a sheet's trackTotal = %d, want its 2 tracks", sheet.Request.TrackTotal)
+	}
+
+	// A sheet whose title no tag block holds, over the same rip.
+	if err := os.WriteFile(filepath.Join(env.root, "huge.cue"), []byte("FILE \"named.wav\" WAVE\n"+
+		"  TRACK 01 AUDIO\n    INDEX 01 00:01:00\n"+
+		"  TRACK 02 AUDIO\n    TITLE \""+strings.Repeat("t", 60000)+"\"\n    INDEX 01 00:05:00\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ body, want string }{
+		{`{"type":"split","src":"lib/ramp.wav","format":"flac","cuts":[1000],"titles":["a"]}`,
+			"titles has 1 entries but the split has 2 pieces; a title per piece, or none"},
+		{`{"type":"split","src":"lib/ramp.wav","format":"flac","cuts":[1000],"pieces":[{"number":1}]}`, `unknown field "pieces"`},
+		{`{"type":"split","src":"lib/ramp.wav","format":"flac","cuts":[1000],"trackTotal":2}`, `unknown field "trackTotal"`},
+		{`{"type":"split","src":"lib/ramp.wav","format":"flac","cuts":[1000],"titles":["a","` + strings.Repeat("t", 60000) + `"]}`,
+			"titles[1]: a 60000-byte title is too large to embed in a piece's tags"},
+		{`{"type":"split","src":"lib/named.wav","format":"flac","cue":"lib/huge.cue"}`,
+			"cue: track 2: a 60000-byte title is too large to embed in a piece's tags"},
+	} {
+		wantRefusal(t, env.postJSON(t, "/jobs", c.body), http.StatusBadRequest, waxerr.CodeInvalidRequest, c.want)
+	}
+
+	// An MP4's ilst holds that title, so the same sheet splits to alac.
+	huge := awaitJob(t, env, createJob(t, env, `{"type":"split","src":"lib/named.wav","format":"alac","cue":"lib/huge.cue"}`))
+	if len(huge.Outputs) != 3 {
+		t.Fatalf("the alac split wrote %d pieces, want 3", len(huge.Outputs))
+	}
+	raw := readBody(t, env.get(t, "/jobs/"+huge.ID+"/result/2", nil))
+	if !bytes.Contains(raw, []byte(strings.Repeat("t", 60000))) {
+		t.Error("the alac piece lacks the sheet's 60000-byte title")
 	}
 }

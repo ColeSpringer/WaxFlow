@@ -45,8 +45,12 @@ GET /probe.`,
 				return err
 			}
 			// Metadata is best-effort: a source the mapper cannot read
-			// still probes (m carries the warning, or stays nil).
+			// still probes (m carries the warning, or stays nil). A canceled
+			// read is a cancel, since the report would lack it.
 			m, _ := label.New().Read(cmd.Context(), src, hint, meta.ReadOptions{})
+			if err := cmd.Context().Err(); err != nil {
+				return waxerr.Wrap(waxerr.CodeCanceled, "probe canceled", err)
+			}
 			if jsonOut {
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(server.ProbeJSON(info, probeMetadata(m)))
 			}

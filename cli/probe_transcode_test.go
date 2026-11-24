@@ -1586,6 +1586,44 @@ func TestTranscodeReportsInputDamage(t *testing.T) {
 	}
 }
 
+// TestTranscodeReportsTheLoudnessPassDamage: under --loudness analyze the
+// source is read twice. The pass's findings print when it ends, ahead of the
+// source loudness line, and a finding the encode meets again is not repeated.
+func TestTranscodeReportsTheLoudnessPassDamage(t *testing.T) {
+	dir := t.TempDir()
+	in := damagedMP3(t, dir)
+	code, _, errOut := run(t, "transcode", "--loudness", "analyze", in, filepath.Join(dir, "out.wav"))
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, errOut)
+	}
+	damage, source := strings.Index(errOut, "input damage: "), strings.Index(errOut, "loudness: source ")
+	if damage < 0 || source < 0 || damage > source {
+		t.Errorf("stderr = %q, want the pass's input damage before the source loudness line", errOut)
+	}
+	seen := map[string]int{}
+	for line := range strings.Lines(errOut) {
+		if strings.HasPrefix(line, "input damage: ") {
+			if seen[line]++; seen[line] == 2 {
+				t.Errorf("printed twice: %q", line)
+			}
+		}
+	}
+}
+
+// TestFragmentedLoudnessIsMarkedEstimated: a fragmented MP4 is never read
+// back, so its output loudness is projected and the line says so.
+func TestFragmentedLoudnessIsMarkedEstimated(t *testing.T) {
+	dir := t.TempDir()
+	in := sineWAV(t, dir)
+	code, _, errOut := run(t, "transcode", "--loudness", "analyze", "--container", "fragmented", in, filepath.Join(dir, "out.m4a"))
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", code, errOut)
+	}
+	if !strings.Contains(errOut, "loudness: output ~") || !strings.Contains(errOut, "LUFS (estimated), ") {
+		t.Errorf("stderr = %q, want the output loudness marked estimated", errOut)
+	}
+}
+
 // writeFixture writes raw into dir under name and returns its path.
 func writeFixture(t *testing.T, dir, name string, raw []byte) string {
 	t.Helper()

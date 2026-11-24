@@ -392,31 +392,21 @@ const (
 
 // EmbeddableTags trims a tag set projected from a source down to what every
 // muxer that embeds tags can hold, returning the kept tags and the keys it
-// dropped, in order.
-//
-// The muxers refuse a tag that does not fit rather than skipping it, because a
-// caller that named a tag must not be told the write succeeded without it. That
-// is the right answer for a caller's own tags and the wrong one here: these are
-// a source's tags carried forward, and a file whose lyric sheet is larger than
-// an Ogg comment header must still transcode. Losing a tag the output cannot
-// hold is the same class of fact as cover art not surviving a .wv output, so
-// the projection absorbs it. Callers report the dropped keys; the point is that
-// the decision is made here, where it is a projection, rather than inside a
-// muxer where nobody could see it.
-//
-// Tags are walked in order and each is kept if it still fits, which is what the
-// muxers themselves used to do: one oversized value does not erase the small
-// descriptive tags around it.
+// dropped, in order: each tag is kept if it still fits. It is for the live
+// stream path, whose bytes are cache-keyed and whose tags are the source's
+// alone; a file writer fits its set to the output's own block instead
+// (waxflow.TagsFit).
 func EmbeddableTags(tags []container.Tag) (kept []container.Tag, dropped []string) {
 	used := embedFixedOverhead
 	for _, t := range tags {
-		need := embedItemOverhead + len(t.Key) + len(t.Value)
-		if used+need > maxEmbeddableTagBytes {
+		if used+embedCost(t) > maxEmbeddableTagBytes {
 			dropped = append(dropped, t.Key)
 			continue
 		}
-		used += need
+		used += embedCost(t)
 		kept = append(kept, t)
 	}
 	return kept, dropped
 }
+
+func embedCost(t container.Tag) int { return embedItemOverhead + len(t.Key) + len(t.Value) }

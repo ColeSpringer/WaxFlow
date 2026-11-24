@@ -1317,8 +1317,9 @@ one source's timeline.
 
 Each field belongs to a specific set of job types, and a field on a type
 that does not take it is a 400 rather than a field silently ignored at
-run time: `srcs` and `titles` are merge-only, `cuts`, `skip` and `cue`
-split-only (`cue` exclusive with the other two), the silence fields
+run time: `srcs` is merge-only, `titles` merge's and split's, `cuts`,
+`skip` and `cue` split-only (`cue` exclusive with the other two and with
+`titles`), the silence fields
 analyze-only, `gain`
 and `loudness` transcode-only, and the shaping parameters belong to
 transcode, merge, and split. `src` is required by every type but merge,
@@ -1408,10 +1409,10 @@ holds audio: a data track given a FILE of its own beside the rip is how EAC
 and XLD write a mixed-mode disc, and the audio file is the one cut.
 
 The sheet does not reach the job. It is resolved into `cuts` and `skip`,
-which is what the job carries, so `GET /jobs/{id}` shows the boundaries
-the 201 accepted and an edit to the sheet afterward cannot change what
-runs.
-Sending `cue` and sending the samples it means produce the identical job.
+and its tracks into `pieces` and `trackTotal` (below), which is what the
+job carries, so `GET /jobs/{id}` shows the boundaries the 201 accepted and
+an edit to the sheet afterward cannot change what runs. Sending `cue` and
+sending the samples it means cut the identical pieces.
 
 The pair is exact, and that is the property worth having: **a split to a
 lossless format at the source rate rejoins bit for bit through a merge**,
@@ -1420,14 +1421,52 @@ No resampler and no limiter means nothing to prime, so each piece's sample
 0 is the source's sample `from` exactly. Ask for a rate change and each
 piece carries the same ~1.5 ms head transient a seek already does.
 
+**A split's pieces carry the source's tags**, as `waxflow split`'s do: the
+source's tags over its container's, without its ReplayGain, its chapters or
+its synced lyrics (each describes the whole rip, not a piece), and its front
+cover, with each piece's own `TRACKNUMBER`, `TRACKTOTAL` and `TITLE` on top.
+The tags are embedded by the muxer where it takes them and written by the
+tagging post-pass otherwise; a piece the post-pass could not tag is a job
+warning naming it. `titles`, a string per piece of the N+1 `cuts` open
+(skipped ones included) or none, titles the pieces, which are numbered from
+1 and total N+1; a blank title keeps the source's `TITLE`. With `cue` the
+sheet names them instead, and `titles` is a 400: a piece is its track's
+number and title, the lead-in is track 0 with the source's title, and the
+total is the disc's track count (every track up to the last audio one, a
+mixed-mode disc's leading data track included), and never less than any
+audio track's number. The job echoes the result as `pieces` (`[{"number",
+"title"}]`, index-aligned with the pieces) and `trackTotal`, which a body
+may not send. A stored split with no `pieces` numbers each piece by its
+place from 1.
+
+A piece's own `TRACKNUMBER`, `TRACKTOTAL` and `TITLE` are the caller's, so
+they are never dropped: a title too large to embed with them in the block
+the pieces' muxer writes (48 KiB; the MP4 family's has no cap, and a form
+whose muxer writes no tags, WAV, AIFF, ADTS or Matroska, refuses none) is a
+400 at creation, `titles[1]: a 60000-byte title is too large to embed in a
+piece's tags`, or `cue: track 2: ...` for a sheet's (a skipped data track's
+title is not checked).
+
+Every tag set a job hands a muxer is fitted to that muxer's own block: the
+source's tags, then the job's own (a split piece's number, total and title,
+or the ReplayGain a `loudness: "analyze"` job embeds), which are never
+dropped. The source's tags go whole when the set fits; otherwise they are
+walked in order, each kept if it still fits. A source tag left out is a
+warning, `tag COMMENT is too large for the output and was not embedded`
+(once per key, however many of its values were left out), only where it is
+lost: the output's muxer is the final tag writer (WavPack, APE, the MP4
+family, FLAC in Ogg), or the daemon has no tag library to run the tagging
+post-pass with. Elsewhere the post-pass writes the full set and nothing is
+warned.
+
 Neither takes `gain` or `loudness`. Both answer "how loud should this one
 track be", against that track's own measurement or its own ReplayGain
 tags; a merge has N tracks in and one file out and a split one in and N
 out, so either would have to apply one source's number to things it does
 not describe. Normalize with a transcode job after the cut, where the
-numbers name what they measure. Neither carries source tags, and a split
-carries no chapters; an mp4-family merge stamps chapter markers, one per
-member (below).
+numbers name what they measure. A merge carries no source tags and a split
+no chapters; an mp4-family merge stamps chapter markers, one per member
+(below).
 
 An mp4-family merge (`alac`, `aac`) writes the **flat** MP4 form by
 default, `container: "progressive"`, which is what the job document will

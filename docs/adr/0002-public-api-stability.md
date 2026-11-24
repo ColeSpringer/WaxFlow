@@ -1249,3 +1249,201 @@ On the CLI:
   `transcode` and `split`, and `--opus-signal "foo": want auto, voice, or
   music` where it read `opus signal hint "foo" is not auto, voice, or
   music`.
+
+## Amendment (2026-11-22): one file pipeline
+
+A transcode job and `waxflow transcode` write a file through one pipeline,
+`internal/tofile`: metadata fold, loudness pass, tags, encode, ReplayGain,
+MP4 patch, sync, close and the tagging post-pass. It is not public API.
+What a job reports changes as follows:
+
+- A transcode job's `warnings` come in the order things happen: the input
+  damage each read finds, a damaged read-back and a failed post-pass, then
+  the clipping and loss notes read from the finished result. They came
+  clipping, input damage, loss, read-back, post-pass. Each line reads as it
+  did.
+- A daemon shutdown that lands in a transcode job's post-pass leaves the
+  job running on disk, so the next boot reruns it from zero, post-pass
+  included. The job used to finish `done` with an output the post-pass
+  never tagged, and a mapper failing on the shutdown no longer adds a
+  "metadata post-pass" warning.
+- A failed sync or close of a job's output reads "output sync: ..." and
+  "output close: ..." in the job's error, where it read "jobs: output
+  sync: ..." and "jobs: output close: ...", for transcode, merge and split
+  jobs.
+- A split job carries its metadata read's warnings, as a transcode job
+  does: "metadata unread: ..." for a source whose tags cannot be read, and
+  the tag library's own. A split job carried none.
+
+`waxflow transcode` runs on the same pipeline, and changes as follows. The
+daemon's shutdown does not change.
+
+- Ctrl-C or SIGTERM cancels the command. It removes what it was writing,
+  leaves a `--force` target as it was, and exits 6 (canceled). A second
+  signal kills the process. The first signal used to kill it, leaving a
+  partial file at the final path, which a rerun then refused as "output
+  exists", or a temp beside it under `--force`. Every other command but
+  `server` is canceled the same way, where the signal killed it: `ping`,
+  `probe` and `sign` exit 6, and `doctor` stops its self-bench, prints no
+  report and exits 6.
+- Every output of `waxflow transcode` and `waxflow split` is written to a
+  temp beside its target and published only once finished, as a `--force`
+  one was: a command killed outright (a second signal, SIGKILL, a crash)
+  leaves a temp beside the file it was writing, never a partial file. A
+  killed transcode's rerun is not refused. A killed split's pieces finished
+  before the kill stand, so its rerun needs `--force`. A file another
+  writer puts at the target meanwhile is kept, and the command refuses
+  "output exists (use --force to overwrite)", exit 2, where the two wrote
+  over each other. Both refusals end "stage <path>: file exists"; the
+  up-front one ended "open <path>: file exists". A failed publish reads
+  "publishing output: ...", where it read "replacing output: ..." and, for
+  a split piece, "renaming output into place: ...".
+- `waxflow split` without `--force` checks every piece's path before it
+  writes any, and refuses the first that exists ("02.flac: output exists
+  (use --force to overwrite)", exit 2) with nothing written. It refused
+  that piece only on reaching it, after writing the pieces ahead of it.
+- A cancel that lands in the tagging post-pass is a cancel: exit 6 and no
+  output.
+- The output is synced before it is reported written, and a failed sync
+  reads "output sync: ...". A failed close reads "output close: ..." where
+  it read "closing output: ...".
+- The input damage the loudness pass finds is printed, which it was not.
+  Each finding's "input damage:" line comes as it is found, ahead of the
+  clipping note and the loss line; they came after the clipping note.
+- A fragmented MP4's loudness line reads "loudness: output ~%.2f LUFS
+  (estimated), ..." where it read "loudness: output %.2f LUFS, ...": the
+  value is projected from the source, never read back.
+
+Split jobs tag their pieces as `waxflow split` does: both read the source's
+metadata once through one call and tag each piece through another, so one
+sheet over one rip gives the same tags from either. `waxflow split` writes
+each piece through the transcode's tail: a piece is synced before it is
+reported, and a failed close reads "output close: ..." where it read
+"closing output: ...". A sheet title too large to embed is refused before
+any piece is written, exit 2, "cue: track 2: a 60000-byte title is too
+large to embed in a piece's tags", where the pieces before it were written
+and its own failed, exit 5. A cancel in a piece's post-pass ("split
+canceled") exits 6 without publishing that piece.
+
+Every tag set a file writer hands a muxer is fitted to that muxer's own
+block, by one function both front ends share. The writer's own tags (a
+split piece's TRACKNUMBER, TRACKTOTAL and TITLE, or the ReplayGain a
+loudness run embeds) are never dropped, and a piece title too large to embed
+on its own is refused before anything is written. The source's tags go whole
+when the set fits, so an output written before is as it was; in a set the
+muxer would refuse, the source's tags are walked in order, each kept if it
+still fits. A tag left out is reported only where it is lost: the output's
+muxer is the final tag writer (WavPack, APE, the MP4 family, FLAC in Ogg),
+or no tag library runs the post-pass. Elsewhere the post-pass writes the
+full set and nothing is reported. `waxflow split` prints "tag too large for
+the output, not embedded", `waxflow transcode` "metadata: tag KEY is too
+large for the output and was not embedded", and a job warns "tag KEY is too
+large for the output and was not embedded"; a transcode or a split reports
+each key once.
+
+On a source whose tags sit just under the 48 KiB budget, that moves:
+
+- `waxflow split` with a long piece title, which stopped at that piece
+  ("TITLE does not fit ...", exit 5), writes every piece: to flac, opus or
+  vorbis the post-pass tags each in full and nothing is printed, and to
+  WavPack, APE or FLAC in Ogg the tag the block cannot hold beside the title
+  is dropped, with the line. With short titles WavPack and APE drop the
+  rip's COMMENT, which their block cannot hold beside a piece's own tags,
+  where the split stopped at its first piece ("TRACKTOTAL does not fit ...",
+  exit 5); every other output is as it was.
+- `waxflow transcode --loudness analyze` and a `loudness: analyze` job to
+  WavPack, APE or FLAC in Ogg write the output with its ReplayGain and drop
+  the source tag the block cannot hold beside it, with the line or warning,
+  where they failed ("REPLAYGAIN_TRACK_GAIN does not fit ...", exit 5).
+- `waxflow transcode`, `waxflow split` and a transcode job no longer report
+  a tag the post-pass writes as lost, for any output but WavPack, APE, the
+  MP4 family and FLAC in Ogg, where the line or warning said otherwise.
+
+The source's tags are fitted to the output's own block alone, where they
+were first trimmed to a worst-case estimate of the 48 KiB every embedding
+muxer holds. So an output whose block holds a tag keeps it, and the line or
+warning moves with it:
+
+- `waxflow transcode`, `waxflow split` and transcode and split jobs to the
+  MP4 family keep a source tag past 48 KiB (an .m4a's 60 KB COMMENT), where
+  they dropped it with the line or warning. WavPack, APE and FLAC in Ogg
+  still drop it with the line or warning.
+- A set between the estimate and the writer's real cap is embedded where it
+  was dropped. FLAC in Ogg keeps a lone 49100-byte COMMENT with no line or
+  warning; WavPack and APE gain a few bytes. The native FLAC, Opus and
+  Vorbis muxers embed it themselves where only the post-pass wrote it, so
+  their tagged files read as before.
+- A split's piece title is held to the pieces' own writer: a 60000-byte
+  title is written to the MP4 family, and accepted for a form whose muxer
+  writes no tags (WAV, AIFF, ADTS, Matroska), where the post-pass writes
+  it. Both were refused: `waxflow split` exited 2, a split job answered
+  `400` and a stored one failed. Every other output refuses it as before.
+
+What is reported moves too:
+
+- A key with several values left out is reported once, where `waxflow
+  transcode` printed a line and a transcode job warned once per value.
+- With no tag library, a tag is no longer reported too large for an output
+  whose muxer writes no tags or does not map its key (MP3's ID3v2 for
+  COMMENT). Size was never why it was left out there: it was reported only
+  when it was also over the old estimate.
+
+A split's TRACKTOTAL moves on a sheet numbered past its count:
+
+- TRACKTOTAL is never less than any audio track's number: `waxflow split`
+  and a split job on a sheet whose audio is TRACK 02 and 03 with a data
+  TRACK 04 after it write TRACKTOTAL 3 where they wrote 2, on a second
+  disc's sheet numbered from 13 they write 14, and on one whose TRACK 05
+  comes before TRACK 02 they write 5.
+
+For a Go caller:
+
+- `cue.(*Sheet).TrackTotal` is the disc's track count a split's TRACKTOTAL
+  takes: every track in any of the sheet's files up to the last audio one,
+  and never less than any audio track's number.
+  `cue.(*File).Label(p)` is the number and title a split gives piece `p`:
+  its track's, or 0 and none for a lead-in.
+- `waxflow.TagsFit(format, container, tags)` says whether the muxer of that
+  output form would take a tag set: nil when it would, and the muxer's own
+  refusal when its block cannot hold it. Every form answers, each from the
+  builder its muxer writes with: `ogg.OpusTagsFit`, `ogg.VorbisTagsFit` and
+  `ogg.FLACTagsFit` for the Ogg comment header of each codec,
+  `flacn.TagsFit` for the VORBIS_COMMENT block, `mpa.TagsFit` for the ID3v2
+  tag (a key it does not map takes no room), `wv.TagsFit` and
+  `apen.TagsFit` for the APEv2 block, and `mp4.TagsFit` and `mka.TagsFit`,
+  nil always: an ilst has no cap, and the Matroska muxer writes no tags. A
+  form whose muxer takes none (WAV, AIFF, ADTS) answers nil.
+- `internal/posixfs`, which stages and publishes every CLI output, is
+  internal: its `Stage` without replace now writes a temp and publishes it
+  only where nothing is, which moves no API.
+- `client.JobRequest` gains `Pieces` (`[]client.JobPiece`, a `Number` and a
+  `Title`) and `TrackTotal`, both echo-only. `Titles` is a split's per-piece
+  titles as well as a merge's per-member ones.
+
+On the wire:
+
+- A split's pieces carry the source's tags without its ReplayGain, chapters
+  and synced lyrics, and its front cover, with their own `TRACKNUMBER`,
+  `TRACKTOTAL` and `TITLE` on top. They carried no tags before.
+- A split takes `titles`, one per piece its `cuts` open or none, else a 400
+  in the merge rule's words ("titles has 1 entries but the split has 2
+  pieces; a title per piece, or none"). With `cue`, `titles` is a 400:
+  "titles are exclusive with cue: the sheet names a split's pieces".
+  `titles` on a transcode or analyze now reads "titles applies to merge and
+  split jobs" where it read "titles applies to merge jobs".
+- A split job echoes `pieces` (`[{"number", "title"}]`, index-aligned with
+  the pieces) and `trackTotal`: from `titles`, numbered from 1 and totalled
+  by the piece count, or from the sheet. A body that sends either is a 400,
+  as for the other echo-only fields. A stored split with no `pieces` numbers
+  its pieces by place from 1.
+- A split whose piece title cannot be embedded beside the piece's number and
+  total is a 400 at creation: "titles[1]: a 60000-byte title is too large
+  to embed in a piece's tags", and "cue: track 2: ..." for a sheet's. A
+  stored split is held to the same rule with the field it holds, "pieces[1]:
+  ...", and its count refusal reads "pieces has 2 entries ..." where a body's
+  reads "titles has ...". A stored split carrying member titles reads "a
+  split's titles name its pieces, so a split job carries them as pieces".
+- A split piece's tags follow the tag rule above: a tag left out is a "tag
+  KEY is too large for the output and was not embedded" warning only where
+  it is lost, once per split. A piece the post-pass could not tag is a
+  warning naming it, "metadata post-pass of out.1.flac: ...".

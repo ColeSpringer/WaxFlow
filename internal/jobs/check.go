@@ -9,6 +9,7 @@ import (
 	"github.com/colespringer/waxflow/internal/gainspec"
 	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/internal/timeline"
+	"github.com/colespringer/waxflow/internal/tofile"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -38,7 +39,8 @@ func (req Request) CheckBody(wire func() error) error {
 	switch req.Type {
 	case TypeAnalyze, TypeTranscode, TypeMerge, TypeSplit:
 	case TypeTimeline:
-		if !unshaped || !silent || req.Src != "" || len(req.MemberTitles) > 0 || len(req.Cuts) > 0 || len(req.Skip) > 0 {
+		if !unshaped || !silent || req.Src != "" || len(req.MemberTitles) > 0 || len(req.Cuts) > 0 || len(req.Skip) > 0 ||
+			len(req.Pieces) > 0 || req.TrackTotal != 0 {
 			return bad("type timeline takes srcs, spans and crossfadeSeconds")
 		}
 		return nil
@@ -71,11 +73,17 @@ func (req Request) CheckBody(wire func() error) error {
 			return bad("srcs applies to merge jobs")
 		}
 	}
-	if req.Type != TypeMerge && len(req.MemberTitles) > 0 {
-		return bad("titles applies to merge jobs")
+	if req.Type == TypeSplit && len(req.MemberTitles) > 0 {
+		return bad("a split's titles name its pieces, so a split job carries them as pieces")
+	}
+	if req.Type != TypeMerge && req.Type != TypeSplit && len(req.MemberTitles) > 0 {
+		return bad("titles applies to merge and split jobs")
 	}
 	if req.Type != TypeSplit && len(req.Cuts) > 0 {
 		return bad("cuts applies to split jobs")
+	}
+	if req.Type != TypeSplit && (len(req.Pieces) > 0 || req.TrackTotal != 0) {
+		return bad("pieces and trackTotal apply to split jobs")
 	}
 	if wire != nil {
 		if err := wire(); err != nil {
@@ -133,6 +141,46 @@ func (req Request) CheckBody(wire func() error) error {
 	// through to the tag or the fallback.
 	if n := len(req.MemberTitles); req.Type == TypeMerge && n != 0 && n != len(req.Srcs) {
 		return bad("titles has %d entries but the merge has %d members; a title per member, or none", n, len(req.Srcs))
+	}
+	if req.Type == TypeSplit {
+		// A body names a split's pieces in titles, a job in pieces.
+		field := "pieces"
+		if wire != nil {
+			field = "titles"
+		}
+		return req.checkPieces(field)
+	}
+	return nil
+}
+
+// checkPieces holds a split's Pieces to one per piece or none, and the own
+// tags of each piece it writes to what a tag block embeds. field names the
+// list in a refusal. A split with no cuts is refused by its cut rule.
+func (req Request) checkPieces(field string) error {
+	bad := func(format string, args ...any) error {
+		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(format, args...))
+	}
+	n, pieces := len(req.Pieces), len(req.Cuts)+1
+	if len(req.Cuts) > 0 && n != 0 && n != pieces {
+		return bad("%s has %d entries but the split has %d pieces; a title per piece, or none", field, n, pieces)
+	}
+	if req.TrackTotal < 0 {
+		return bad("trackTotal %d: want a positive count, or 0 for the number of pieces", req.TrackTotal)
+	}
+	total := req.TrackTotal
+	if total == 0 {
+		total = pieces
+	}
+	for i, p := range req.Pieces {
+		if p.Number < 0 {
+			return bad("piece %d has track number %d; want 0 or more", i, p.Number)
+		}
+		if req.Skipped(i) {
+			continue
+		}
+		if err := tofile.CheckPieceTags(req.Format, req.Container, p.Number, total, p.Title); err != nil {
+			return waxerr.Annotate(fmt.Sprintf("%s[%d]", field, i), err)
+		}
 	}
 	return nil
 }

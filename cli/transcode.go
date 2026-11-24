@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,14 +15,12 @@ import (
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/cli/label"
 	"github.com/colespringer/waxflow/codec/vorbis"
-	"github.com/colespringer/waxflow/container"
-	"github.com/colespringer/waxflow/container/mp4"
 	"github.com/colespringer/waxflow/dsp/dither"
 	"github.com/colespringer/waxflow/dsp/gain"
 	"github.com/colespringer/waxflow/dsp/resample"
-	"github.com/colespringer/waxflow/internal/meta"
 	"github.com/colespringer/waxflow/internal/outshape"
 	"github.com/colespringer/waxflow/internal/posixfs"
+	"github.com/colespringer/waxflow/internal/tofile"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -41,17 +39,6 @@ func clippingNote(w io.Writer, res *waxflow.TranscodeResult) {
 	fmt.Fprintf(w, "%s%s\n", note, remedy)
 }
 
-// inputNotes prints the input damage the read worked around, one line per
-// finding, after the write: a frame-walked source finds its damage where the
-// read reaches it, so this is the first point the whole list exists. The
-// probe at the top of the command reports only what opening found.
-func inputNotes(w io.Writer, res *waxflow.TranscodeResult) {
-	for _, note := range res.InputWarnings {
-		fmt.Fprintf(w, "input damage: %s\n", note)
-	}
-	lossNote(w, res)
-}
-
 // lossNote prints the engine's loss note on stderr: how much of what was
 // written is silence standing in for a hole, and how much more the source
 // declared than it holds. waxflow.TranscodeResult.LossNote owns the wording.
@@ -61,19 +48,36 @@ func lossNote(w io.Writer, res *waxflow.TranscodeResult) {
 	}
 }
 
-// isMP4Container reports whether an output written by format with this
-// container override goes through the mp4 muxer: the one path that embeds tags
-// in moov at Begin and so takes the mp4-specific ReplayGain patch. The AAC
-// family also rides in adts (elementary) and mka (Matroska), which are NOT
-// MP4: patching those as MP4 would fail and delete the output. ALAC is
-// always MP4.
-func isMP4Container(format, container string) bool {
-	if format == "alac" {
-		return true
+// transcodeNote prints what the file pipeline reports as it happens. The
+// metadata read's own findings go to the logger, as split's do.
+func transcodeNote(w io.Writer, logger *slog.Logger, n tofile.Note) {
+	if logMetaNote(logger, n) {
+		return
 	}
-	return (format == "aac" || format == "he-aac") && (container == "" ||
-		container == waxflow.ContainerProgressive || container == waxflow.ContainerFragmented)
+	switch n.Kind {
+	case tofile.NoteTagTooLarge:
+		fmt.Fprintf(w, "metadata: tag %s is too large for the output and was not embedded\n", n.Key)
+	case tofile.NoteInputDamage:
+		fmt.Fprintf(w, "input damage: %s\n", n.Text)
+	case tofile.NoteLoudnessSource:
+		fmt.Fprintf(w, "loudness: source %.2f LUFS, applying %+.2f dB\n", n.LUFS, n.GainDB)
+	case tofile.NoteLoudnessOutput:
+		// An estimate is one projected from the source, never read back.
+		if n.Estimated {
+			fmt.Fprintf(w, "loudness: output ~%.2f LUFS (estimated), %s / %s\n", n.LUFS, n.RG[0].Value, n.RG[1].Value)
+		} else {
+			fmt.Fprintf(w, "loudness: output %.2f LUFS, %s / %s\n", n.LUFS, n.RG[0].Value, n.RG[1].Value)
+		}
+	case tofile.NoteReadBackDamage:
+		fmt.Fprintf(w, "output read back with damage: %s\n", n.Text)
+	case tofile.NotePostPassFailed:
+		fmt.Fprintf(w, "metadata: post-pass failed: %v\n", n.Err)
+	}
 }
+
+// transcodeHook, when set, sees each transcode's request before it runs:
+// the tests' gate for a cancel that lands mid-encode or in the post-pass.
+var transcodeHook func(*tofile.Request)
 
 func newTranscodeCmd(flavor Flavor) *cobra.Command {
 	var formatName, containerName string
@@ -259,208 +263,45 @@ with true-peak limiting, dither).`,
 				}
 			}
 
-			// The output is created exclusively at its final path, or,
-			// under --force, staged in the same directory and renamed
-			// into place only after the transcode succeeds. Overwriting
-			// in place would truncate first, so any failure (a bad flag
-			// caught by chain validation, an unreadable source, a full
-			// disk) would destroy the file it was asked to replace.
+			// Staged before the long passes, so "output exists" answers
+			// first. A failure or a cancel removes it, and the target only
+			// ever holds a finished file.
 			outPath := args[1]
-			writePath := outPath
-			if force {
-				writePath = fmt.Sprintf("%s.tmp-%d", outPath, os.Getpid())
-			}
-			// Created rather than required, as split does. Both write paths
-			// (final, and the staged .tmp under --force) sit here.
+			// Created rather than required, as split does.
 			if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
 				return waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating the output directory", err)
 			}
-			out, err := os.OpenFile(writePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+			st, err := stageOutput(outPath, force)
 			if err != nil {
-				if !force && errors.Is(err, os.ErrExist) {
-					return waxerr.Wrap(waxerr.CodeInvalidRequest, "output exists (use --force to overwrite)", err)
-				}
-				return waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating output", err)
-			}
-
-			// The file-output passthrough matrix: full tags, chapters,
-			// and art flow onto the output (the MP4 muxer embeds them;
-			// every other format gets the mapping post-pass below).
-			mapper := label.NewLogged(logger)
-			var info *meta.Info
-			if !noTags {
-				m, merr := mapper.Read(cmd.Context(), src, srcHint, meta.ReadOptions{Pictures: true})
-				if merr != nil {
-					// The container fallback below does not go through the
-					// mapper, so a read that failed outright must not take with
-					// it the tags the demuxer already parsed off the header.
-					// Reported rather than silently dropped, which is what a
-					// failure here used to be.
-					m = &meta.Info{Warnings: []string{"metadata unread: " + merr.Error()}}
-				}
-				logMetaRead(logger, m)
-				// Folded where the mapper's own tags arrive, and so before the
-				// ReplayGain drop below rather than after it: the container
-				// carries the four REPLAYGAIN_* keys too, and a later fold would
-				// put the source's stale values back onto a gained output.
-				info = meta.WithContainerTags(m, srcInfo.Tags)
-			}
-			analyzeLoudness := loudness == "analyze"
-			var srcRes *waxflow.AnalyzeResult
-			var peakLimited bool
-			if analyzeLoudness {
-				// Both the measurement and the predicted peak key on the width
-				// the encode actually produces, which is the plan's resolved
-				// channel count and not the --channels flag: a lossy row that
-				// cannot hold the source layout folds to stereo on its own, and
-				// a flag-keyed test sees none of it.
-				//
-				// Measuring on that basis is what puts the two-pass gain on the
-				// audio the encode meters. Clamping on it is what keeps the
-				// predicted peak (predictedRG / analyzeOutputRG) at the ceiling
-				// whenever the chain's true-peak limiter is engaged: positive
-				// gain, a dynamics preset, or a downmix whose matrix can sum
-				// past unity. Analyze runs the raw fold with no limiter, so its
-				// true peak can sit above the ceiling the encode holds.
-				outChannels := plan.Format.Channels
-				res, aerr := e.Analyze(cmd.Context(), src, srcHint, waxflow.AnalyzeOptions{Channels: outChannels})
-				if aerr != nil {
-					out.Close()
-					os.Remove(writePath)
-					return aerr
-				}
-				srcRes = res
-				if !math.IsInf(res.IntegratedLUFS, -1) {
-					gainDB = meta.ReplayGainGainDB(res.IntegratedLUFS)
-				}
-				fmt.Fprintf(cmd.ErrOrStderr(), "loudness: source %.2f LUFS, applying %+.2f dB\n",
-					res.IntegratedLUFS, gainDB)
-				peakLimited = gainDB > 0 || gain.Preset(dynamics) != gain.PresetOff ||
-					outChannels < srcTrack.Fmt.Channels
-			}
-			dropRG := gainDB != 0 || analyzeLoudness
-			tagInfo := info
-			if dropRG {
-				tagInfo = meta.WithoutReplayGain(info)
-			}
-			// The source's own tags, not tags this run named: one too large
-			// for the output is dropped with a note rather than failing the
-			// transcode. See meta.EmbeddableTags.
-			tags, droppedTags := meta.EmbeddableTags(meta.FullTags(tagInfo))
-			for _, key := range droppedTags {
-				fmt.Fprintf(cmd.ErrOrStderr(),
-					"metadata: tag %s is too large for the output and was not embedded\n", key)
-			}
-			// Only the MP4 path patches placeholders after the encode;
-			// any other format gets its measured values through the
-			// mapping post-pass, and embedding unity placeholders there
-			// would ship wrong ReplayGain whenever that post-pass is
-			// skipped (--no-tags) or fails.
-			isMP4 := isMP4Container(outFormat, containerName)
-			// The two meanings isMP4 used to carry, which have diverged: both
-			// MP4 forms embed tags at Begin and so need the fixed-width
-			// placeholders, but only the fragmented one cannot be decoded back,
-			// which is the condition for deriving the output's ReplayGain
-			// instead of measuring it. With a file output now flat by default,
-			// keeping them as one predicate would publish an estimate where a
-			// measurement is there for the reading.
-			fragmentedMP4 := isMP4 && containerName != waxflow.ContainerProgressive
-			// The engine owns which muxers write their own tags; the
-			// post-pass below skips those outputs.
-			embedsTags := waxflow.OutputEmbedsTags(outFormat, containerName)
-			// Of those, the ones that cannot be patched after the encode have
-			// to embed their ReplayGain before it, from an estimate.
-			predictsRG := embedsTags && !isMP4
-			switch {
-			case analyzeLoudness && isMP4:
-				// Unity placeholders, patched with the measured RG by
-				// analyzeOutputRG after the encode.
-				tags = append(tags,
-					container.Tag{Key: "REPLAYGAIN_TRACK_GAIN", Value: meta.FormatGain(0)},
-					container.Tag{Key: "REPLAYGAIN_TRACK_PEAK", Value: meta.FormatPeak(0)})
-			case analyzeLoudness && predictsRG:
-				// The Ogg muxer embeds the comment header at Begin and the
-				// WavPack and Monkey's Audio muxers take their tags there, and
-				// none can be patched afterward; the post-pass is skipped for
-				// all of them, so the
-				// measured RG would otherwise be computed and dropped. Since
-				// meta.WithoutReplayGain has already stripped the source's own,
-				// writing nothing here is strictly worse than doing nothing at
-				// all. Embed the RG predicted from the source loudness and the
-				// applied gain now (the same estimate the MP4 path patches in).
-				rg, outLUFS := predictedRG(srcRes, gainDB, peakLimited)
-				tags = append(tags, rg...)
-				// Labelled as an estimate: analyzeOutputRG prints the same
-				// shape from a real measurement.
-				fmt.Fprintf(cmd.ErrOrStderr(), "loudness: output ~%.2f LUFS (estimated), %s / %s\n",
-					outLUFS, rg[0].Value, rg[1].Value)
-			}
-			// The container's own chapters are the floor and the mapper's win
-			// when it read some, the resolution the job runner and GET /probe
-			// make (internal/jobs/runner.go): a mapper read that failed must
-			// not cost the output the chapters the demuxer already parsed
-			// off the header, and --no-tags skips every source of them.
-			var chapters []container.Chapter
-			var art *container.Picture
-			if !noTags {
-				chapters = srcInfo.Chapters
-			}
-			if tagInfo != nil {
-				if len(tagInfo.Chapters) > 0 {
-					chapters = tagInfo.Chapters
-				}
-				if p := tagInfo.FrontPicture(); p != nil {
-					art = &container.Picture{MIME: p.MIME, Data: p.Data}
-				}
-			}
-
-			// The measured gain lands on the options the plan was taken from,
-			// so what runs is what was planned: gain changes no output field
-			// the container default or the resolved width above read. The
-			// tags, chapters and art ride with the run.
-			opts.GainDB = gainDB
-			res, err := e.Transcode(cmd.Context(), src, srcHint, out, opts,
-				waxflow.WithTags(tags), waxflow.WithChapters(chapters), waxflow.WithArt(art))
-			if err != nil {
-				out.Close()
-				// A failed transcode leaves no half-written artifact;
-				// under --force the target was never touched.
-				os.Remove(writePath)
 				return err
 			}
-			if err := out.Close(); err != nil {
-				os.Remove(writePath)
-				return waxerr.Wrap(waxerr.CodeOutputUnwritable, "closing output", err)
-			}
 
-			// Post-pass on the finished file: measured ReplayGain under
-			// --loudness analyze, and the full metadata set for formats
-			// the mapper can rewrite (MP4 got everything at Begin).
-			var rg []container.Tag
-			if analyzeLoudness && !predictsRG {
-				// Ogg and WavPack already embedded their predicted RG at Begin
-				// (neither can be patched); mp4 patches its placeholders here,
-				// and post-pass formats get their measured values written below.
-				if rg, err = analyzeOutputRG(cmd, e, writePath, extHint(outPath), isMP4, fragmentedMP4, srcRes, gainDB, peakLimited); err != nil {
-					os.Remove(writePath)
-					return err
-				}
+			stderr := cmd.ErrOrStderr()
+			opts.GainDB = gainDB
+			req := tofile.Request{
+				Engine: e, Source: src, Hint: srcHint, Probe: srcInfo,
+				Options: opts, Plan: plan, Out: st.File, Path: st.Path,
+				Mapper:     label.NewLogged(logger),
+				NoMetadata: noTags,
+				Loudness:   loudness == "analyze",
+				Note:       func(n tofile.Note) { transcodeNote(stderr, logger, n) },
 			}
-			if !noTags && !embedsTags && tagInfo != nil {
-				if aerr := mapper.Apply(cmd.Context(), writePath, tagInfo, rg); aerr != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "metadata: post-pass failed: %v\n", aerr)
-				}
+			if transcodeHook != nil {
+				transcodeHook(&req)
 			}
-			if force {
-				if err := posixfs.Replace(writePath, outPath); err != nil {
-					os.Remove(writePath)
-					return waxerr.Wrap(waxerr.CodeOutputUnwritable, "replacing output", err)
-				}
+			res, err := tofile.Run(cmd.Context(), req)
+			if err != nil {
+				st.Abort()
+				return err
 			}
-			clippingNote(cmd.ErrOrStderr(), res)
-			inputNotes(cmd.ErrOrStderr(), res)
+			if err := commitOutput(st, force); err != nil {
+				return err
+			}
+			clippingNote(stderr, res.Transcode)
+			lossNote(stderr, res.Transcode)
 			fmt.Fprintf(cmd.OutOrStdout(), "wrote %s: %s %d samples (%.3fs)\n",
-				outPath, res.Format, res.Samples, durationSeconds(res.Samples, res.Format.Rate))
+				outPath, res.Transcode.Format, res.Transcode.Samples,
+				durationSeconds(res.Transcode.Samples, res.Transcode.Format.Rate))
 			return nil
 		},
 	}
@@ -487,6 +328,39 @@ with true-peak limiting, dither).`,
 	cmd.Flags().StringVar(&loudness, "loudness", "", "analyze: two-pass loudness (exact gain to the ReplayGain reference, then RG tags measured from the output, or estimated from the source for Ogg-FLAC, WavPack, Monkey's Audio and fragmented MP4 outputs); the gain is measured after any --channels downmix")
 	cmd.Flags().BoolVar(&noTags, "no-tags", false, "skip the metadata passthrough (tags, chapters, art)")
 	return cmd
+}
+
+// stageOutput stages a command's output in a temp beside path, published
+// there by [commitOutput]: a new file, or under force over path. An existing
+// path without force is a usage mistake.
+func stageOutput(path string, force bool) (*posixfs.Staged, error) {
+	st, err := posixfs.Stage(path, 0o644, force)
+	if err != nil {
+		if !force && errors.Is(err, os.ErrExist) {
+			return nil, errOutputExists(err)
+		}
+		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "creating output", err)
+	}
+	return st, nil
+}
+
+// commitOutput publishes what [stageOutput] staged. Without force a path
+// that appeared meanwhile is refused as an existing one is at the stage.
+func commitOutput(st *posixfs.Staged, force bool) error {
+	err := st.Commit()
+	if err == nil {
+		return nil
+	}
+	if !force && errors.Is(err, os.ErrExist) {
+		return errOutputExists(err)
+	}
+	return waxerr.Wrap(waxerr.CodeOutputUnwritable, "publishing output", err)
+}
+
+// errOutputExists is the one refusal of an output path that exists, when
+// --force does not allow replacing it.
+func errOutputExists(err error) error {
+	return waxerr.Wrap(waxerr.CodeInvalidRequest, "output exists (use --force to overwrite)", err)
 }
 
 // changedOr is a knob flag's value when the user set it and the zero value,
@@ -595,67 +469,6 @@ func givenKnobRefusal(cmd *cobra.Command, format string, among waxflow.Knob) err
 		}
 	}
 	return flagWording.Reword(waxflow.CheckKnobs(format, given))
-}
-
-// predictedRG estimates the output ReplayGain from the source analysis and the
-// applied gain, for the Ogg path (whose tags are written at Begin) and the MP4
-// placeholders. See meta.ProjectLoudness for the projection and the direction
-// each result errs in.
-func predictedRG(srcRes *waxflow.AnalyzeResult, gainDB float64, limited bool) (rg []container.Tag, outLUFS float64) {
-	outLUFS, outTP := meta.ProjectLoudness(srcRes.IntegratedLUFS, srcRes.TruePeakDB, gainDB, limited)
-	return meta.ReplayGainTags(outLUFS, outTP), outLUFS
-}
-
-// analyzeOutputRG returns (after patching MP4 headers in place) the
-// ReplayGain tags for the finished output: measured from the file where
-// the engine can decode it back, derived from the source measurement
-// plus the applied gain for fragmented MP4, which has no read path
-// (exact for lossless ALAC, within the encoder's fraction of a dB for
-// AAC; the encode's limiter caps the derived peak).
-//
-// The two MP4 flags are separate because they answer different questions:
-// isMP4 says the muxer embedded fixed-width placeholders to patch, which
-// both forms do, and fragmented says the output cannot be read back, which
-// only the fragmented one is.
-func analyzeOutputRG(cmd *cobra.Command, e *waxflow.Engine, path, hint string, isMP4, fragmented bool, srcRes *waxflow.AnalyzeResult, gainDB float64, limited bool) ([]container.Tag, error) {
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
-	if err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeOutputUnwritable, "reopening output", err)
-	}
-	defer f.Close()
-	var rg []container.Tag
-	var outLUFS float64
-	if fragmented {
-		// No read path, so the RG is predicted from the source and gain and
-		// then patched into the placeholders.
-		rg, outLUFS = predictedRG(srcRes, gainDB, limited)
-	} else {
-		fsrc, err := container.FileSource(f)
-		if err != nil {
-			return nil, err
-		}
-		outRes, err := e.Analyze(cmd.Context(), fsrc, hint, waxflow.AnalyzeOptions{})
-		if err != nil {
-			return nil, err
-		}
-		// Only a WaxFlow bug makes a file this command just wrote read back
-		// damaged, and the tags below then describe a partial decode.
-		for _, w := range outRes.InputWarnings {
-			fmt.Fprintf(cmd.ErrOrStderr(), "output read back with damage: %s\n", w)
-		}
-		rg, outLUFS = meta.ReplayGainTags(outRes.IntegratedLUFS, outRes.TruePeakDB), outRes.IntegratedLUFS
-	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "loudness: output %.2f LUFS, %s / %s\n",
-		outLUFS, rg[0].Value, rg[1].Value)
-	if isMP4 {
-		if err := mp4.PatchFreeform(f, "REPLAYGAIN_TRACK_GAIN", meta.FormatGain(0), rg[0].Value); err != nil {
-			return nil, err
-		}
-		if err := mp4.PatchFreeform(f, "REPLAYGAIN_TRACK_PEAK", meta.FormatPeak(0), rg[1].Value); err != nil {
-			return nil, err
-		}
-	}
-	return rg, nil
 }
 
 func parseProfile(name string) (resample.Profile, error) {

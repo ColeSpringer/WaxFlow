@@ -3,6 +3,7 @@ package posixfs
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -60,28 +61,36 @@ func SweepTemps(dir string) {
 type Staged struct {
 	// File is open for reading and writing.
 	File *os.File
-	// Path is where the file is: the target itself, or the temp beside it
-	// until a successful Commit, and the target from then on. Read it
-	// after Commit returns.
+	// Path is where the file is: the temp beside the target until a
+	// successful Commit, and the target from then on. Read it after Commit
+	// returns.
 	Path string
 
-	target string // what Commit replaces with Path; empty when Path is it
+	target  string // where Commit publishes Path
+	replace bool   // whether Commit may replace a file at target
 
 	mu   sync.Mutex // held across Commit and across Abort
 	done bool
 }
 
-// Stage opens a file to be published at path. With replace false it creates
-// path exclusively. With replace true it creates a uniquely named temp
-// beside path, which Commit moves over it: the published file takes perm,
-// not the old target's mode, and a symlink at path is replaced, not written
-// through. perm is ignored on Windows, where reading the staged file back
-// by name goes through [Open], or the handle blocks Commit and Abort.
+// Stage opens a uniquely named temp beside path, which Commit publishes
+// there, so path only ever holds a complete file. With replace true Commit
+// moves the temp over path: the published file takes perm, not the old
+// target's mode, and a symlink at path is replaced, not written through.
+// With replace false an existing path is refused here, with an error
+// wrapping [os.ErrExist], and Commit never replaces one. perm is ignored on
+// Windows, where reading the staged file back by name goes through [Open],
+// or the handle blocks Commit and Abort.
 func Stage(path string, perm os.FileMode, replace bool) (*Staged, error) {
-	st := &Staged{Path: path}
-	if replace {
-		st.Path = fmt.Sprintf("%s%s%016x", path, tempMark, rand.Uint64())
-		st.target = path
+	if !replace {
+		if err := CheckAbsent(path); err != nil {
+			return nil, err
+		}
+	}
+	st := &Staged{
+		Path:    fmt.Sprintf("%s%s%016x", path, tempMark, rand.Uint64()),
+		target:  path,
+		replace: replace,
 	}
 	f, err := create(st.Path, perm)
 	if err != nil {
@@ -91,10 +100,29 @@ func Stage(path string, perm os.FileMode, replace bool) (*Staged, error) {
 	return st, nil
 }
 
-// Commit closes File, if the caller has not, and publishes a staged temp
-// over its target. A failure removes the file. The first of Commit and
-// Abort wins, from any goroutine: a Commit after either fails, and returns
-// only once the winner's outcome is on disk.
+// CheckAbsent returns nil when nothing is at path, the error Stage refuses
+// an existing path with when something is, or the failure to look.
+func CheckAbsent(path string) error {
+	if _, err := os.Lstat(path); err == nil {
+		return errExists(path)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// errExists is the refusal of a target that exists, at Stage or at a Commit
+// that must not replace it, so both read alike and name no temp.
+func errExists(target string) error {
+	return &os.PathError{Op: "stage", Path: target, Err: os.ErrExist}
+}
+
+// Commit closes File, if the caller has not, and publishes the temp at its
+// target: over it with replace, else only where nothing is, failing with an
+// error wrapping [os.ErrExist] on a target that appeared since Stage. A
+// failure removes the temp. The first of Commit and Abort wins, from any
+// goroutine: a Commit after either fails, and returns only once the
+// winner's outcome is on disk.
 func (st *Staged) Commit() error {
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -106,10 +134,11 @@ func (st *Staged) Commit() error {
 		remove(st.Path)
 		return err
 	}
-	if st.target == "" {
-		return nil
+	publish := publishNew
+	if st.replace {
+		publish = Replace
 	}
-	if err := Replace(st.Path, st.target); err != nil {
+	if err := publish(st.Path, st.target); err != nil {
 		remove(st.Path)
 		return err
 	}

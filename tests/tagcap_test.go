@@ -127,15 +127,11 @@ func TestOrdinaryTagsStillEmbed(t *testing.T) {
 	}
 }
 
-// TestForwardedSourceTagsStillTranscode is the regression the refusal
-// introduced. The callers that carry a source's tags onto an output (the jobs
-// runner, the CLI's transcode and split, the server's stream path) hand the
-// muxer whatever the source had. Once an oversized tag became a refusal rather
-// than a skip, any file carrying one stopped transcoding at all -- to every
-// embedding format, for a tag nobody asked for. meta.EmbeddableTags is the
-// projection that absorbs it, and this walks the whole path: build a source
-// with a tag no capped block can hold (MP4 bounds nothing, so it can hold it),
-// read its tags back, project them, and transcode.
+// TestForwardedSourceTagsStillTranscode: a source tag no capped block can
+// hold must not stop the stream path transcoding. meta.EmbeddableTags is that
+// path's projection, and this walks it: build a source with such a tag (MP4
+// bounds nothing, so it can hold it), read its tags back, project them, and
+// transcode.
 func TestForwardedSourceTagsStillTranscode(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "testdata", "sine-s16.wav"))
 	if err != nil {

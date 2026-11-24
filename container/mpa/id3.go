@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/waxerr"
 )
 
 // Minimal ID3v2.4 writer for the muxer's leading tag. The mapped set is
@@ -37,6 +38,22 @@ const id3HeaderLen = 10
 
 // id3FrameHeaderLen is a frame header: four-byte ID, syncsafe size, two flags.
 const id3FrameHeaderLen = 10
+
+// TagsFit reports whether tags fit the ID3v2 tag the muxer writes: nil, or
+// Begin's own refusal. A key the tag does not map takes no room.
+func TagsFit(tags []container.Tag) error {
+	_, err := buildID3(tags)
+	return err
+}
+
+// buildID3 renders the muxer's ID3v2 tag, refusing a set it cannot hold.
+func buildID3(tags []container.Tag) ([]byte, error) {
+	b, err := id3v2Tag(tags)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeUnsupportedFormat, "mp3", err)
+	}
+	return b, nil
+}
 
 // id3v2Tag renders tags as an ID3v2.4 tag block, nil when nothing maps.
 func id3v2Tag(tags []container.Tag) ([]byte, error) {

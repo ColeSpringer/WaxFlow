@@ -993,6 +993,10 @@ type form struct {
 	// A form with it false may still write the run's tags; the post-pass then
 	// writes the full set over them.
 	embedsTags bool
+	// tagsFit is the muxer's answer to whether a tag set fits its block, from
+	// the builder it writes with (TagsFit). Every form has one: noTags for a
+	// muxer that takes none.
+	tagsFit func([]container.Tag) error
 	// mux constructs the writer. It is apart from the row's encode because
 	// remux has no encoder and must write through the same muxer. t is the
 	// output track, where a muxer reads what it needs (the mpa Xing delay),
@@ -1066,7 +1070,7 @@ var outputs = []output{
 		// WebM, whose audio subset is Opus and Vorbis only.
 		forms: []form{
 			{
-				mediaType: "audio/wav", version: riff.MuxerVersion, live: true,
+				mediaType: "audio/wav", version: riff.MuxerVersion, live: true, tagsFit: noTags,
 				mux: func(_ container.Track, _ TranscodeOptions, _ runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 					return riff.NewMuxer(dst, nil), nil
 				},
@@ -1115,7 +1119,7 @@ var outputs = []output{
 			return opus.NewEncoder(f, eopts)
 		},
 		// Opus rides in Matroska and WebM (its native container besides Ogg).
-		forms: []form{oggForm(), mkaForm(), webmForm()},
+		forms: []form{oggForm(ogg.OpusTagsFit), mkaForm(), webmForm()},
 		hls: &hlsOutput{
 			codecs: "Opus",
 			delay:  opus.EncoderDelay,
@@ -1171,7 +1175,7 @@ var outputs = []output{
 		},
 		// Vorbis rides in Matroska and WebM (it is, with Opus, one of webm's two
 		// audio codecs) besides its native Ogg.
-		forms: []form{oggForm(), mkaForm(), webmForm()},
+		forms: []form{oggForm(ogg.VorbisTagsFit), mkaForm(), webmForm()},
 		// hls stays nil: Vorbis has no CMAF/HLS segmented form.
 	},
 	{
@@ -1195,7 +1199,7 @@ var outputs = []output{
 		},
 		// The AIFF muxer back-patches its chunk sizes, so it is not live.
 		forms: []form{{
-			mediaType: "audio/aiff", version: aiff.MuxerVersion,
+			mediaType: "audio/aiff", version: aiff.MuxerVersion, tagsFit: noTags,
 			mux: func(_ container.Track, _ TranscodeOptions, _ runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 				return aiff.NewMuxer(dst), nil
 			},
@@ -1242,7 +1246,7 @@ var outputs = []output{
 		// STREAMINFO, so both take the encoder's MD5.
 		forms: []form{
 			{
-				mediaType: "audio/flac", version: flacn.MuxerVersion, live: true,
+				mediaType: "audio/flac", version: flacn.MuxerVersion, live: true, tagsFit: flacn.TagsFit,
 				mux: func(_ container.Track, _ TranscodeOptions, x runConfig, enc codec.Encoder, dst io.Writer) (container.Muxer, error) {
 					return flacn.NewMuxer(dst, &flacn.MuxerOptions{Tags: x.tags, MD5: flacMD5(enc)}), nil
 				},
@@ -1252,7 +1256,7 @@ var outputs = []output{
 				// .oga, the Xiph extension for Ogg audio that is not Vorbis:
 				// .flac would name a native-FLAC file these bytes are not.
 				name: ContainerOgg, mediaType: "audio/ogg", ext: "oga", version: ogg.MuxerVersion,
-				live: true, embedsTags: true,
+				live: true, embedsTags: true, tagsFit: ogg.FLACTagsFit,
 				mux: func(_ container.Track, _ TranscodeOptions, x runConfig, enc codec.Encoder, dst io.Writer) (container.Muxer, error) {
 					return ogg.NewMuxer(dst, &ogg.MuxerOptions{Tags: x.tags, MD5: flacMD5(enc)}), nil
 				},
@@ -1321,7 +1325,7 @@ var outputs = []output{
 		// while a demuxer's has the fixed 529-sample decoder latency already
 		// added. See mpa.MuxerOptions.DecodedTrims.
 		forms: []form{{
-			mediaType: "audio/mpeg", version: mpa.MuxerVersion, live: true,
+			mediaType: "audio/mpeg", version: mpa.MuxerVersion, live: true, tagsFit: mpa.TagsFit,
 			mux: func(t container.Track, opts TranscodeOptions, x runConfig, enc codec.Encoder, dst io.Writer) (container.Muxer, error) {
 				return mpa.NewMuxer(dst, &mpa.MuxerOptions{
 					Delay:        int(t.Delay),
@@ -1533,7 +1537,7 @@ var outputs = []output{
 		// A_WAVPACK4, which our mka muxer does not write. The muxer writes the
 		// APEv2 tag block after the audio itself.
 		forms: []form{{
-			mediaType: "audio/x-wavpack", version: wv.MuxerVersion, live: true, embedsTags: true,
+			mediaType: "audio/x-wavpack", version: wv.MuxerVersion, live: true, embedsTags: true, tagsFit: wv.TagsFit,
 			mux: func(_ container.Track, _ TranscodeOptions, x runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 				return wv.NewMuxer(dst, &wv.MuxerOptions{Tags: x.tags}), nil
 			},
@@ -1594,7 +1598,7 @@ var outputs = []output{
 		// index, and with totals nothing knows until the audio has gone out.
 		// The muxer writes the APEv2 tag block after the audio itself.
 		forms: []form{{
-			mediaType: "audio/x-ape", version: apen.MuxerVersion, embedsTags: true,
+			mediaType: "audio/x-ape", version: apen.MuxerVersion, embedsTags: true, tagsFit: apen.TagsFit,
 			mux: func(_ container.Track, _ TranscodeOptions, x runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 				return apen.NewMuxer(dst, &apen.MuxerOptions{Tags: x.tags}), nil
 			},
@@ -1682,7 +1686,7 @@ func aacForms() []form {
 	return []form{
 		mp4Form(""),
 		{
-			name: "adts", mediaType: "audio/aac", ext: "aac", version: adts.MuxerVersion, live: true,
+			name: "adts", mediaType: "audio/aac", ext: "aac", version: adts.MuxerVersion, live: true, tagsFit: noTags,
 			mux: func(_ container.Track, _ TranscodeOptions, _ runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 				return adts.NewMuxer(dst), nil
 			},
@@ -1700,6 +1704,7 @@ func mp4Form(name string) form {
 	progressive := name == ContainerProgressive
 	return form{
 		name: name, mediaType: mp4MediaType, version: mp4.MuxerVersion, live: !progressive, embedsTags: true,
+		tagsFit: mp4.TagsFit,
 		mux: func(_ container.Track, _ TranscodeOptions, x runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 			if progressive {
 				return mp4.NewProgressiveMuxer(dst, mp4MuxerOptions(x)), nil
@@ -1709,10 +1714,11 @@ func mp4Form(name string) form {
 	}
 }
 
-// oggForm is Ogg-Opus and Ogg-Vorbis, each row's default form.
-func oggForm() form {
+// oggForm is Ogg-Opus and Ogg-Vorbis, each row's default form, whose comment
+// header tagsFit answers for.
+func oggForm(tagsFit func([]container.Tag) error) form {
 	return form{
-		mediaType: "audio/ogg", version: ogg.MuxerVersion, live: true,
+		mediaType: "audio/ogg", version: ogg.MuxerVersion, live: true, tagsFit: tagsFit,
 		mux: func(_ container.Track, _ TranscodeOptions, x runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 			return ogg.NewMuxer(dst, &ogg.MuxerOptions{Tags: x.tags}), nil
 		},
@@ -1730,7 +1736,7 @@ func webmForm() form { return matroskaForm("webm", "audio/webm") }
 func matroskaForm(name, mediaType string) form {
 	webm := name == "webm"
 	return form{
-		name: name, mediaType: mediaType, ext: name, version: mka.MuxerVersion, live: true,
+		name: name, mediaType: mediaType, ext: name, version: mka.MuxerVersion, live: true, tagsFit: mka.TagsFit,
 		mux: func(_ container.Track, _ TranscodeOptions, x runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 			return mka.NewMuxer(dst, &mka.MuxerOptions{WebM: webm, Tags: x.tags}), nil
 		},
@@ -1781,6 +1787,23 @@ func OutputEmbedsTags(format, container string) bool {
 	_, f, ok := formOrDefault(format, container)
 	return ok && f.embedsTags
 }
+
+// TagsFit reports whether the muxer of the output format and container
+// names would take tags as the run's tags: nil when it would, and the muxer's
+// own refusal when its block cannot hold them. It asks the builder the muxer
+// writes with, so the answer and the write cannot disagree. A muxer that
+// writes no tags or sets no cap takes any set; so does a pair no row takes.
+func TagsFit(format, container string, tags []container.Tag) error {
+	_, f, ok := formOrDefault(format, container)
+	if !ok || f.tagsFit == nil {
+		return nil
+	}
+	return f.tagsFit(tags)
+}
+
+// noTags is the tag answer of a form whose muxer takes no tags: any set fits,
+// since the muxer never sees it.
+func noTags([]container.Tag) error { return nil }
 
 // mp4MediaType is what an mp4-family output's plan reports. The file-output
 // rule keys on it rather than on a format name, so a new mp4-family row is

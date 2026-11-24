@@ -79,8 +79,12 @@ running daemon; that is waxflow ping.`,
 			checks = append(checks, rootChecks(cfg)...)
 			checks = append(checks, dirChecks(cfg)...)
 			checks = append(checks, pidCheck(cmd.Context(), cfg, flavor, logger))
-			checks = append(checks, benchChecks(cfg)...)
+			checks = append(checks, benchChecks(cmd.Context(), cfg)...)
 			checks = append(checks, ffmpegCheck())
+			// A canceled run's report is partial: it is not printed.
+			if err := cmd.Context().Err(); err != nil {
+				return waxerr.Wrap(waxerr.CodeCanceled, "doctor canceled", err)
+			}
 
 			var nfail int
 			var firstFail error
@@ -343,41 +347,52 @@ func pidCheck(ctx context.Context, cfg config.Config, flavor Flavor, logger *slo
 // FLAC (the lossless path), and reports the realtime factor. A box that
 // cannot clear 2x has no headroom for even one live stream; the warn
 // points at the remedies the configuration has not already taken.
-func benchChecks(cfg config.Config) []doctorCheck {
-	const seconds = 2
-	src := benchWAV(seconds)
+func benchChecks(ctx context.Context, cfg config.Config) []doctorCheck {
+	src := benchWAV(benchSeconds)
 	eng := waxflow.New()
 	profile := resample.Profile(cfg.ResolvedResampleProfile())
 	var checks []doctorCheck
 	for _, formatName := range []string{"opus", "flac"} {
 		name := "bench:" + formatName
+		if benchHook != nil {
+			benchHook(formatName)
+		}
 		start := time.Now()
-		_, err := eng.Transcode(context.Background(), bytesSource{bytes.NewReader(src)}, "wav",
+		_, err := eng.Transcode(ctx, bytesSource{bytes.NewReader(src)}, "wav",
 			io.Discard, waxflow.TranscodeOptions{Format: formatName, ResampleProfile: profile})
 		elapsed := time.Since(start)
 		if err != nil {
 			checks = append(checks, doctorCheck{Name: name, Status: "fail", Detail: err.Error(), err: err})
 			continue
 		}
-		// A coarse platform timer could measure the transcode as zero,
-		// which would divide to +Inf and dodge the warn gate below; the
-		// millisecond floor also keeps the printed factor sane.
-		elapsed = max(elapsed, time.Millisecond)
-		xrt := seconds * float64(time.Second) / float64(elapsed)
-		status, note := "ok", ""
-		if xrt < 2 {
-			status = "warn"
-			if profile == resample.Fast {
-				note = "; below 2x on the fast resample profile, try a lower opus complexity"
-			} else {
-				note = "; below 2x, try resampleProfile=fast and a lower opus complexity"
-			}
-		}
-		checks = append(checks, doctorCheck{Name: name, Status: status,
-			Detail: fmt.Sprintf("%ds of 44.1 kHz stereo in %s (%.0fx realtime)%s",
-				seconds, elapsed.Round(time.Millisecond), xrt, note)})
+		checks = append(checks, benchVerdict(name, elapsed, profile))
 	}
 	return checks
+}
+
+// benchSeconds is how much audio the self-bench transcodes.
+const benchSeconds = 2
+
+// benchVerdict rates a bench that took elapsed: ok at 2x realtime or better,
+// else a warn naming the remedies the profile has not already taken.
+func benchVerdict(name string, elapsed time.Duration, profile resample.Profile) doctorCheck {
+	// A coarse platform timer could measure the transcode as zero,
+	// which would divide to +Inf and dodge the warn gate below; the
+	// millisecond floor also keeps the printed factor sane.
+	elapsed = max(elapsed, time.Millisecond)
+	xrt := benchSeconds * float64(time.Second) / float64(elapsed)
+	status, note := "ok", ""
+	if xrt < 2 {
+		status = "warn"
+		if profile == resample.Fast {
+			note = "; below 2x on the fast resample profile, try a lower opus complexity"
+		} else {
+			note = "; below 2x, try resampleProfile=fast and a lower opus complexity"
+		}
+	}
+	return doctorCheck{Name: name, Status: status,
+		Detail: fmt.Sprintf("%ds of 44.1 kHz stereo in %s (%.0fx realtime)%s",
+			benchSeconds, elapsed.Round(time.Millisecond), xrt, note)}
 }
 
 // ffmpegCheck confirms the runtime promise: WaxFlow needs no ffmpeg. The
@@ -391,6 +406,10 @@ func ffmpegCheck() doctorCheck {
 	return doctorCheck{Name: "ffmpeg", Status: "ok",
 		Detail: "not installed, and none needed (pure-Go runtime)"}
 }
+
+// benchHook, when set, sees each bench's format before it runs: the tests'
+// gate for a cancel that lands mid-bench.
+var benchHook func(formatName string)
 
 // bytesSource adapts an in-memory buffer to container.Source.
 type bytesSource struct{ *bytes.Reader }

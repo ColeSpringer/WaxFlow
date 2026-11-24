@@ -36,6 +36,10 @@ func newPingCmd() *cobra.Command {
 			}
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
+				// A canceled command is a cancel; the timeout is the daemon's.
+				if cerr := cmd.Context().Err(); cerr != nil {
+					return waxerr.Wrap(waxerr.CodeCanceled, "ping canceled", cerr)
+				}
 				return waxerr.Wrap(waxerr.CodeInternal, "daemon unreachable", err)
 			}
 			defer resp.Body.Close()
