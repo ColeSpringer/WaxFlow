@@ -121,7 +121,7 @@ func TestSegmentedCopyAcrossAHoleRestartsIdentically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := e.PlanRemuxSegments(track, opts, 1.0, grid)
+	plan, err := e.PlanRemuxSegments(track, opts, 1.0, knownGrid(grid))
 	if err != nil || plan == nil {
 		t.Fatalf("plan: %v (%v)", plan, err)
 	}

@@ -400,7 +400,7 @@ func requireSegmentedFLACCopy(t *testing.T, c flacCopy, want *audio.Buffer) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := e.PlanRemuxSegments(probeTrack(t, c.src, "flac"), opts, 0.5, grid)
+	plan, err := e.PlanRemuxSegments(probeTrack(t, c.src, "flac"), opts, 0.5, knownGrid(grid))
 	if err != nil || plan == nil {
 		t.Fatalf("the segmented copy rung declined (%v)", err)
 	}
@@ -534,7 +534,7 @@ func TestFLACCopyFromZeroIsUnchanged(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		plan, err := e.PlanRemuxSegments(probeTrack(t, src, "flac"), waxflow.TranscodeOptions{Format: "flac"}, 0.5, grid)
+		plan, err := e.PlanRemuxSegments(probeTrack(t, src, "flac"), waxflow.TranscodeOptions{Format: "flac"}, 0.5, knownGrid(grid))
 		if err != nil || plan == nil {
 			t.Fatalf("the segmented copy rung declined (%v)", err)
 		}
@@ -579,7 +579,7 @@ func TestSegmentedFLACRestartNumbersByItsFrames(t *testing.T) {
 		t.Fatalf("grid %d (%v), want the frames' 1152", grid, err)
 	}
 	for _, seconds := range []float64{1.0, 36864.0 / 44100} {
-		plan, err := e.PlanRemuxSegments(track, opts, seconds, grid)
+		plan, err := e.PlanRemuxSegments(track, opts, seconds, knownGrid(grid))
 		if err != nil || plan == nil {
 			t.Fatalf("plan: %v (%v)", plan, err)
 		}

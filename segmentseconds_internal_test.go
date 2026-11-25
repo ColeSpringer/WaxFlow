@@ -29,31 +29,34 @@ func TestSegmentSecondsMustBeFinite(t *testing.T) {
 	opts := TranscodeOptions{Format: "opus"}
 	plans := []struct {
 		name string
-		plan func(seconds float64) (planned bool, err error)
+		plan func(seconds float64, grid int) (planned bool, err error)
 	}{
-		{"PlanSegments", func(s float64) (bool, error) {
+		{"PlanSegments", func(s float64, _ int) (bool, error) {
 			p, err := e.PlanSegments(pcm, opts, s)
 			return p != nil, err
 		}},
-		{"PlanRemuxSegments", func(s float64) (bool, error) {
-			p, err := e.PlanRemuxSegments(opus, opts, s, 960)
+		{"PlanRemuxSegments", func(s float64, g int) (bool, error) {
+			p, err := e.PlanRemuxSegments(opus, opts, s, knownGrid(g))
 			return p != nil, err
 		}},
-		{"PlanCutSegments", func(s float64) (bool, error) {
-			p, err := e.PlanCutSegments(opus, opts, []Span{{96000, 288000}}, 960, s)
+		{"PlanCutSegments", func(s float64, g int) (bool, error) {
+			p, err := e.PlanCutSegments(opus, opts, []Span{{96000, 288000}}, knownGrid(g), s)
 			return p != nil, err
 		}},
 	}
 	for _, p := range plans {
 		// The control: these inputs plan, so a refusal below is the
 		// duration's and not a decline for some other reason.
-		if planned, err := p.plan(2); err != nil || !planned {
+		if planned, err := p.plan(2, 960); err != nil || !planned {
 			t.Fatalf("%s at 2 s: planned %v, err %v; the rows below prove nothing", p.name, planned, err)
 		}
-		for _, seconds := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), -1} {
-			planned, err := p.plan(seconds)
-			if waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
-				t.Errorf("%s at %g s: planned %v, err %v; want an invalid-request refusal", p.name, seconds, planned, err)
+		// A grid of 0 declines a copy, and the duration is refused first.
+		for _, grid := range []int{960, 0} {
+			for _, seconds := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), -1} {
+				planned, err := p.plan(seconds, grid)
+				if waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
+					t.Errorf("%s at %g s on a %d grid: planned %v, err %v; want an invalid-request refusal", p.name, seconds, grid, planned, err)
+				}
 			}
 		}
 	}

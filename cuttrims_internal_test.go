@@ -192,7 +192,7 @@ func TestCutTrackMapsSpansThroughInnerTrims(t *testing.T) {
 				}
 				raw += end - w.from
 			}
-			run := copiedRun{samples: raw - cut.MidPadding, lastPadding: cut.Padding, trimmed: cut.Padding > 0}
+			run := copiedRun{samples: raw - cut.MidPadding, endPadding: cut.Padding, trimmed: cut.Padding > 0}
 			tr := remuxTrailer(cut, run)
 			if tr.Padding != cut.Padding || tr.Samples != cut.Samples || tr.Delay != cut.Delay {
 				t.Errorf("remuxTrailer = %+v, want {Samples %d Delay %d Padding %d}", tr, cut.Samples, cut.Delay, cut.Padding)
@@ -461,7 +461,7 @@ func TestSeekableCutDeclinesAWholePacketTrim(t *testing.T) {
 	} else if code := waxerr.CodeOf(err); code != waxerr.CodeUnsupportedFormat {
 		t.Errorf("cutSeekable code = %v, want %v", code, waxerr.CodeUnsupportedFormat)
 	}
-	plan, err := New().PlanCutSegments(track, TranscodeOptions{Format: "opus"}, spans, 960, 1.0)
+	plan, err := New().PlanCutSegments(track, TranscodeOptions{Format: "opus"}, spans, knownGrid(960), 1.0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -497,6 +497,295 @@ func TestCutTrackDeclinesTrimsOffTheGrid(t *testing.T) {
 			}
 			if got := waxerr.CodeOf(err); got != waxerr.CodeUnsupportedFormat {
 				t.Errorf("code = %v, want %v", got, waxerr.CodeUnsupportedFormat)
+			}
+		})
+	}
+}
+
+// TestCutViewTakesATrailingRunAsTheEndTrim: the trims that run unbroken to
+// the end of the source are its end trim, which a walk states as the track's
+// Padding and no list places. The view carries them to the end of a cut that
+// reaches it, a copy states them as one end trim, and a trim on the last kept
+// packet that the cut's own end trim does not cover is still refused.
+func TestCutViewTakesATrailingRunAsTheEndTrim(t *testing.T) {
+	// 100 packets of 960: packet 97 trimmed by 480, 98 and 99 whole.
+	pads := map[int]int64{97: 480, 98: 960, 99: 960}
+	const trim = 480 + 2*960
+	track := opusTrack(312, 96000-312-trim)
+	track.Padding, track.SamplesExact = trim, true
+
+	for _, tc := range []struct {
+		name          string
+		span          Span
+		last          int
+		wantP, wantLn int64
+	}{
+		{"to the end", Span{9600, ToEnd}, 99, trim, 96000 - 312 - trim - 9600},
+		{"to the end of the audio", Span{9600, track.Samples}, 97, 480, 96000 - 312 - trim - 9600},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cut, _, err := CutTrack(track, TranscodeOptions{}, []Span{tc.span}, 960)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cut.Padding != tc.wantP || cut.MidPadding != 0 || cut.Samples != tc.wantLn {
+				t.Fatalf("the cut track has Padding %d, MidPadding %d, Samples %d; want %d, 0, %d",
+					cut.Padding, cut.MidPadding, cut.Samples, tc.wantP, tc.wantLn)
+			}
+			view, err := Cut(&trimDemuxer{n: 100, dur: 960, pads: pads}, track, TranscodeOptions{}, []Span{tc.span}, 960)
+			if err != nil {
+				t.Fatal(err)
+			}
+			last := -1
+			// false: a destination that states one end trim and nothing else.
+			run, err := copyPackets(t.Context(), view, 0, false, holeFill{}, func(pkt container.Packet) error {
+				last = int(pkt.Data[0])
+				if pkt.Padding != pads[last] {
+					t.Errorf("packet %d: Padding = %d, want %d forwarded", last, pkt.Padding, pads[last])
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("the copy refused the cut: %v", err)
+			}
+			if last != tc.last {
+				t.Errorf("the view ended on packet %d, want %d", last, tc.last)
+			}
+			if tr := remuxTrailer(cut, run); tr.Padding != tc.wantP || tr.Samples != tc.wantLn {
+				t.Errorf("the trailer states Padding %d, Samples %d; want %d, %d", tr.Padding, tr.Samples, tc.wantP, tc.wantLn)
+			}
+		})
+	}
+
+	// A plan that knew no trim, and states its length: whether its cut ends
+	// 268 samples into packet 97's last 480, which are not audio, or runs to
+	// the source's end over all three, the packets that end it trim more
+	// than its own end trim covers.
+	blind := opusTrack(312, 93600)
+	blind.Padding = 648
+	whole := opusTrack(312, 96000-312)
+	whole.SamplesExact = true
+	for _, tc := range []struct {
+		name  string
+		track container.Track
+		span  Span
+		pads  map[int]int64
+	}{
+		{"ending in the first trimmed packet", blind, Span{9600, 93500}, pads},
+		{"to the end", whole, Span{9600, ToEnd}, pads},
+		{"to a bound at the end", whole, Span{9600, whole.Samples}, pads},
+		{"to the end, the last packet alone trimmed", whole, Span{9600, ToEnd}, map[int]int64{99: 480}},
+	} {
+		t.Run("a plan that knew no trim, "+tc.name, func(t *testing.T) {
+			view, err := Cut(&trimDemuxer{n: 100, dur: 960, pads: tc.pads}, tc.track, TranscodeOptions{}, []Span{tc.span}, 960)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var pkt container.Packet
+			for {
+				err := view.ReadPacket(&pkt)
+				if err == nil {
+					continue
+				}
+				if err == io.EOF {
+					t.Fatal("the view finished over a trim its end trim does not cover")
+				}
+				if code := waxerr.CodeOf(err); code != waxerr.CodeUnsupportedFormat {
+					t.Fatalf("code = %v, want %v: %v", code, waxerr.CodeUnsupportedFormat, err)
+				}
+				return
+			}
+		})
+	}
+
+	// A track that states no length takes the packets' trim as its own.
+	unread := opusTrack(312, -1)
+	view, err := Cut(&trimDemuxer{n: 100, dur: 960, pads: pads}, unread, TranscodeOptions{}, []Span{{9600, ToEnd}}, 960)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut, _, err := CutTrack(unread, TranscodeOptions{}, []Span{{9600, ToEnd}}, 960)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := copyPackets(t.Context(), view, 0, false, holeFill{}, func(container.Packet) error { return nil })
+	if err != nil {
+		t.Fatalf("a cut with no length to hold refused the source's end trim: %v", err)
+	}
+	if tr := remuxTrailer(cut, run); tr.Padding != trim || tr.Samples != 96000-312-trim-9600 {
+		t.Errorf("the trailer states Padding %d, Samples %d; want %d, %d", tr.Padding, tr.Samples, trim, 96000-312-trim-9600)
+	}
+}
+
+// TestCutSeekForgetsTheTrimsItHeld: a seek leaves the packets the view read
+// behind, and the trims it was holding for the end with them.
+func TestCutSeekForgetsTheTrimsItHeld(t *testing.T) {
+	pads := map[int]int64{97: 480, 98: 960, 99: 960}
+	track := opusTrack(312, 96000-312-2400)
+	track.Padding, track.SamplesExact = 2400, true
+	view, err := cutSeekable(&trimDemuxer{n: 100, dur: 960, pads: pads}, track, TranscodeOptions{}, []Span{{9600, ToEnd}}, 960)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pkt container.Packet
+	for {
+		err := view.ReadPacket(&pkt)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := view.(container.Seeker).SeekSample(context.Background(), 0, 9600); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if err := view.ReadPacket(&pkt); err != nil {
+			t.Fatalf("after the seek: %v", err)
+		}
+	}
+}
+
+// TestCutViewCopiesWhatThePacketsHold: a source whose last packet is trimmed,
+// cut from the track a Matroska header gives (an estimate, trims unread). A
+// cut whose length the packets deliver copies, the trailer taking its end
+// trim from them, and so does one whose length is an estimate. A span past
+// the end is a wrong span, answered as one.
+func TestCutViewCopiesWhatThePacketsHold(t *testing.T) {
+	const raw, pre, from = 100 * 960, 312, 9600
+	pads := map[int]int64{99: 480}
+	const audio = raw - pre - 480
+	header := func(samples int64) container.Track {
+		tr := opusTrack(pre, samples)
+		tr.SamplesAdvisory, tr.TrimsUnread = samples >= 0, true
+		return tr
+	}
+	for _, tc := range []struct {
+		name          string
+		track         container.Track
+		to            int64
+		wantS, wantP  int64
+		wantShortSpan bool
+	}{
+		{"an exact estimate, to its end", header(audio), audio, audio - from, 480, false},
+		{"an exact estimate, 100 short of its end", header(audio), audio - 100, audio - 100 - from, 580, false},
+		{"an estimate 380 over, to the end of the audio", header(audio + 380), audio, audio - from, 480, false},
+		{"an estimate 380 over, to the end", header(audio + 380), ToEnd, audio - from, 480, false},
+		{"no length, 5000 past the audio", header(-1), audio + 5000, 0, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spans := []Span{{from, tc.to}}
+			cut, _, err := CutTrack(tc.track, TranscodeOptions{}, spans, 960)
+			if err != nil {
+				t.Fatal(err)
+			}
+			view, err := Cut(&trimDemuxer{n: 100, dur: 960, pads: pads}, tc.track, TranscodeOptions{}, spans, 960)
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := copyPackets(t.Context(), view, 0, false, holeFill{}, func(container.Packet) error { return nil })
+			if tc.wantShortSpan {
+				if code := waxerr.CodeOf(err); code != waxerr.CodeInvalidRequest {
+					t.Errorf("code = %v, want %v: %v", code, waxerr.CodeInvalidRequest, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("the copy refused a cut the packets hold: %v", err)
+			}
+			if tr := remuxTrailer(cut, run); tr.Samples != tc.wantS || tr.Padding != tc.wantP {
+				t.Errorf("the trailer states Samples %d, Padding %d; want %d, %d", tr.Samples, tr.Padding, tc.wantS, tc.wantP)
+			}
+		})
+	}
+}
+
+// TestCutViewIgnoresATrimItDidNotKeep: a source that ends in a gap between
+// two windows, on a trimmed packet the cut does not keep, ends the cut where
+// its packets do, as a source with no trim there does.
+func TestCutViewIgnoresATrimItDidNotKeep(t *testing.T) {
+	track := opusTrack(312, 96000-312)
+	spans := []Span{{0, 19200 - 312}, {48000, ToEnd}}
+	for _, pads := range []map[int]int64{nil, {29: 480}} {
+		view, err := Cut(&trimDemuxer{n: 30, dur: 960, pads: pads}, track, TranscodeOptions{}, spans, 960)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		if _, err := copyPackets(t.Context(), view, 0, false, holeFill{}, func(container.Packet) error { n++; return nil }); err != nil {
+			t.Errorf("pads %v: %v", pads, err)
+		}
+		if n != 20 {
+			t.Errorf("pads %v: the view delivered %d packets, want the first window's 20", pads, n)
+		}
+	}
+}
+
+// TestCutViewWithNoLengthTakesAnyEndTrim: a cut that states no length has
+// none to hold against its packets, however much of what it keeps they trim.
+func TestCutViewWithNoLengthTakesAnyEndTrim(t *testing.T) {
+	// Twelve packets, the last two trimmed whole: the cut keeps packets 6 to
+	// 11 behind a 4152-sample delay, more than the four that play.
+	view, err := Cut(&trimDemuxer{n: 12, dur: 960, pads: map[int]int64{10: 960, 11: 960}},
+		opusTrack(312, -1), TranscodeOptions{}, []Span{{9600, ToEnd}}, 960)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	run, err := copyPackets(t.Context(), view, 0, false, holeFill{}, func(container.Packet) error { n++; return nil })
+	if err != nil {
+		t.Fatalf("the copy refused a cut with no length: %v", err)
+	}
+	if n != 6 || run.endPadding != 1920 {
+		t.Errorf("the view delivered %d packets ending in a %d trim, want 6 and 1920", n, run.endPadding)
+	}
+}
+
+// TestSplicedCutHoldsItsLengthToThePackets: a spliced cut trims inside its
+// own run, and those trims are not in its length. One planned from the
+// measured track copies; one planned from a track that knew no end trim
+// states the last packet's 480 trimmed samples as audio, and is refused.
+func TestSplicedCutHoldsItsLengthToThePackets(t *testing.T) {
+	pads := map[int]int64{99: 480}
+	spans := []Span{{0, 20000}, {40000, ToEnd}}
+	opts := TranscodeOptions{SpliceTrims: true}
+	measured := opusTrack(312, 96000-312-480)
+	measured.Padding, measured.SamplesExact = 480, true
+	stale := opusTrack(312, 96000-312)
+	stale.SamplesExact = true
+	for _, tc := range []struct {
+		name    string
+		track   container.Track
+		refuses bool
+	}{
+		{"planned from the measured track", measured, false},
+		{"planned from a track that knew no end trim", stale, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cut, _, err := CutTrack(tc.track, opts, spans, 960)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cut.MidPadding <= 480 {
+				t.Fatalf("the cut trims %d samples inside its run; this cell needs more than the 480 the source ends in", cut.MidPadding)
+			}
+			view, err := Cut(&trimDemuxer{n: 100, dur: 960, pads: pads}, tc.track, opts, spans, 960)
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := copyPackets(t.Context(), view, 0, true, holeFill{}, func(container.Packet) error { return nil })
+			if tc.refuses {
+				if code := waxerr.CodeOf(err); code != waxerr.CodeUnsupportedFormat {
+					t.Errorf("the copy = %v, want an unsupported-format refusal", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("the copy refused a cut the packets hold: %v", err)
+			}
+			if tr := remuxTrailer(cut, run); tr.Samples != cut.Samples || tr.Padding != 480 {
+				t.Errorf("the trailer states Samples %d, Padding %d; want %d, 480", tr.Samples, tr.Padding, cut.Samples)
 			}
 		})
 	}

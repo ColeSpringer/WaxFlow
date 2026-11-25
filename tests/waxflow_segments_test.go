@@ -1124,7 +1124,7 @@ func TestSegmentsWidenUnplayableFLACDepths(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			rp, err := e.PlanRemuxSegments(track, opts, 1.0, grid)
+			rp, err := e.PlanRemuxSegments(track, opts, 1.0, knownGrid(grid))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1137,7 +1137,7 @@ func TestSegmentsWidenUnplayableFLACDepths(t *testing.T) {
 			// also what makes the decline above the rule's own doing rather
 			// than something else about these fixtures.
 			explicit := waxflow.TranscodeOptions{Format: "flac", BitDepth: tc.src}
-			ex, err := e.PlanRemuxSegments(track, explicit, 1.0, grid)
+			ex, err := e.PlanRemuxSegments(track, explicit, 1.0, knownGrid(grid))
 			if err != nil {
 				t.Fatal(err)
 			}

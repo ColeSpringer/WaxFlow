@@ -1,20 +1,20 @@
 wav | "" | container=wav media=audio/wav muxer=*riff.Muxer version=riff-mux-1 live=true | ext=wav embeds=false
-wav | "mka" | container=mka media=audio/x-matroska muxer=*mka.Muxer version=mka-mux-3 live=true | ext=mka embeds=false
+wav | "mka" | container=mka media=audio/x-matroska muxer=*mka.Muxer version=mka-mux-4 live=true | ext=mka embeds=false
 wav | "webm" | refused invalid-request: waxflow: wav container "webm": want mka | ext=wav embeds=false
 wav | "ogg" | refused invalid-request: waxflow: wav container "ogg": want mka | ext=wav embeds=false
 wav | "adts" | refused invalid-request: waxflow: wav container "adts": want mka | ext=wav embeds=false
 wav | "progressive" | refused invalid-request: waxflow: wav container "progressive": want mka | ext=wav embeds=false
 wav | "fragmented" | refused invalid-request: waxflow: wav container "fragmented": want mka | ext=wav embeds=false
 opus | "" | container=opus media=audio/ogg muxer=*ogg.Muxer version=ogg-mux-3 live=true | ext=opus embeds=false
-opus | "mka" | container=mka media=audio/x-matroska muxer=*mka.Muxer version=mka-mux-3 live=true | ext=mka embeds=false
-opus | "webm" | container=webm media=audio/webm muxer=*mka.Muxer version=mka-mux-3 live=true | ext=webm embeds=false
+opus | "mka" | container=mka media=audio/x-matroska muxer=*mka.Muxer version=mka-mux-4 live=true | ext=mka embeds=false
+opus | "webm" | container=webm media=audio/webm muxer=*mka.Muxer version=mka-mux-4 live=true | ext=webm embeds=false
 opus | "ogg" | refused invalid-request: waxflow: opus container "ogg": want mka or webm | ext=opus embeds=false
 opus | "adts" | refused invalid-request: waxflow: opus container "adts": want mka or webm | ext=opus embeds=false
 opus | "progressive" | refused invalid-request: waxflow: opus container "progressive": want mka or webm | ext=opus embeds=false
 opus | "fragmented" | refused invalid-request: waxflow: opus container "fragmented": want mka or webm | ext=opus embeds=false
 vorbis | "" | container=vorbis media=audio/ogg muxer=*ogg.Muxer version=ogg-mux-3 live=true | ext=ogg embeds=false
-vorbis | "mka" | container=mka media=audio/x-matroska muxer=*mka.Muxer version=mka-mux-3 live=true | ext=mka embeds=false
-vorbis | "webm" | container=webm media=audio/webm muxer=*mka.Muxer version=mka-mux-3 live=true | ext=webm embeds=false
+vorbis | "mka" | container=mka media=audio/x-matroska muxer=*mka.Muxer version=mka-mux-4 live=true | ext=mka embeds=false
+vorbis | "webm" | container=webm media=audio/webm muxer=*mka.Muxer version=mka-mux-4 live=true | ext=webm embeds=false
 vorbis | "ogg" | refused invalid-request: waxflow: vorbis container "ogg": want mka or webm | ext=ogg embeds=false
 vorbis | "adts" | refused invalid-request: waxflow: vorbis container "adts": want mka or webm | ext=ogg embeds=false
 vorbis | "progressive" | refused invalid-request: waxflow: vorbis container "progressive": want mka or webm | ext=ogg embeds=false
@@ -27,7 +27,7 @@ aiff | "adts" | refused invalid-request: waxflow: format aiff has no alternate c
 aiff | "progressive" | refused invalid-request: waxflow: format aiff has no alternate container (container=progressive) | ext=aif embeds=false
 aiff | "fragmented" | refused invalid-request: waxflow: format aiff has no alternate container (container=fragmented) | ext=aif embeds=false
 flac | "" | container=flac media=audio/flac muxer=*flacn.Muxer version=flacn-mux-2 live=true | ext=flac embeds=false
-flac | "mka" | container=mka media=audio/x-matroska muxer=*mka.Muxer version=mka-mux-3 live=true | ext=mka embeds=false
+flac | "mka" | container=mka media=audio/x-matroska muxer=*mka.Muxer version=mka-mux-4 live=true | ext=mka embeds=false
 flac | "webm" | refused invalid-request: waxflow: flac container "webm": want mka or ogg | ext=flac embeds=false
 flac | "ogg" | container=ogg media=audio/ogg muxer=*ogg.Muxer version=ogg-mux-3 live=true | ext=oga embeds=true
 flac | "adts" | refused invalid-request: waxflow: flac container "adts": want mka or ogg | ext=flac embeds=false
@@ -41,14 +41,14 @@ mp3 | "adts" | refused invalid-request: waxflow: format mp3 has no alternate con
 mp3 | "progressive" | refused invalid-request: waxflow: format mp3 has no alternate container (container=progressive) | ext=mp3 embeds=false
 mp3 | "fragmented" | refused invalid-request: waxflow: format mp3 has no alternate container (container=fragmented) | ext=mp3 embeds=false
 aac | "" | container=aac media=audio/mp4 muxer=*mp4.Muxer version=mp4-mux-1 live=true | ext=m4a embeds=true
-aac | "mka" | container=mka media=audio/x-matroska muxer=*mka.Muxer version=mka-mux-3 live=true | ext=mka embeds=false
+aac | "mka" | container=mka media=audio/x-matroska muxer=*mka.Muxer version=mka-mux-4 live=true | ext=mka embeds=false
 aac | "webm" | refused invalid-request: waxflow: aac container "webm": want adts, progressive, fragmented, or mka | ext=m4a embeds=true
 aac | "ogg" | refused invalid-request: waxflow: aac container "ogg": want adts, progressive, fragmented, or mka | ext=m4a embeds=true
 aac | "adts" | container=adts media=audio/aac muxer=*adts.Muxer version=adts-mux-1 live=true | ext=aac embeds=false
 aac | "progressive" | container=progressive media=audio/mp4 muxer=*mp4.ProgressiveMuxer version=mp4-mux-1 live=false | ext=m4a embeds=true
 aac | "fragmented" | container=fragmented media=audio/mp4 muxer=*mp4.Muxer version=mp4-mux-1 live=true | ext=m4a embeds=true
 he-aac | "" | container=he-aac media=audio/mp4 muxer=*mp4.Muxer version=mp4-mux-1 live=true | ext=m4a embeds=true
-he-aac | "mka" | container=mka media=audio/x-matroska muxer=*mka.Muxer version=mka-mux-3 live=true | ext=mka embeds=false
+he-aac | "mka" | container=mka media=audio/x-matroska muxer=*mka.Muxer version=mka-mux-4 live=true | ext=mka embeds=false
 he-aac | "webm" | refused invalid-request: waxflow: he-aac container "webm": want adts, progressive, fragmented, or mka | ext=m4a embeds=true
 he-aac | "ogg" | refused invalid-request: waxflow: he-aac container "ogg": want adts, progressive, fragmented, or mka | ext=m4a embeds=true
 he-aac | "adts" | container=adts media=audio/aac muxer=*adts.Muxer version=adts-mux-1 live=true | ext=aac embeds=false

@@ -23,6 +23,9 @@ import (
 // accumulation through writePacket lets each mapping own that accounting.
 type muxMapping interface {
 	codecID() codec.ID
+	// check refuses a track the mapping cannot write, keeping what it parsed
+	// for writeHeaders, which runs only after it passes.
+	check(t container.Track) error
 	// writeHeaders emits the codec's header pages (identification, comment) via
 	// emit, whose signature matches Muxer.emitPage. t is the track being
 	// written; the muxer owns the comment header, so it passes vendor and tags
@@ -64,12 +67,16 @@ type opusMuxMapping struct{}
 
 func (opusMuxMapping) codecID() codec.ID { return codec.Opus }
 
+func (opusMuxMapping) check(t container.Track) error {
+	if len(t.CodecConfig) < 19 || string(t.CodecConfig[:8]) != "OpusHead" {
+		return waxerr.New(waxerr.CodeUnsupportedFormat, "ogg: track CodecConfig is not an OpusHead")
+	}
+	return nil
+}
+
 func (opusMuxMapping) writeHeaders(t container.Track, tags []container.Tag, vendor string,
 	emit func(payload, seg []byte, granule int64, headerType byte) error) (int64, error) {
 	cfg := t.CodecConfig
-	if len(cfg) < 19 || string(cfg[:8]) != "OpusHead" {
-		return 0, waxerr.New(waxerr.CodeUnsupportedFormat, "ogg: track CodecConfig is not an OpusHead")
-	}
 	// The comment is built before anything is emitted: a refusal here must
 	// leave the destination untouched rather than stranding a BOS page in
 	// front of a stream that never arrives.
@@ -103,10 +110,25 @@ func (opusMuxMapping) endGranule(trailer codec.Trailer) int64 {
 // audio pages whose granule is the running sample count (FLAC self-times). It
 // reuses the existing FLAC encoder; no Vorbis encoder is involved.
 type flacMuxMapping struct {
-	number *flac.Numberer // numbers the frames from 0
+	si     flac.StreamInfo // the track's, from check
+	number *flac.Numberer  // numbers the frames from 0
 }
 
 func (*flacMuxMapping) codecID() codec.ID { return codec.FLAC }
+
+// check parses the STREAMINFO for the frames' numbering, which its block
+// bounds settle; it is the parse every reader of the stream makes.
+func (m *flacMuxMapping) check(t container.Track) error {
+	if len(t.CodecConfig) != flac.StreamInfoLen {
+		return waxerr.New(waxerr.CodeUnsupportedFormat, "ogg: FLAC CodecConfig is not a STREAMINFO block")
+	}
+	si, err := flac.ParseStreamInfo(t.CodecConfig)
+	if err != nil {
+		return err
+	}
+	m.si = si
+	return nil
+}
 
 // writeHeaders stamps the run's own projected length into STREAMINFO rather
 // than passing the source's total through.
@@ -124,16 +146,7 @@ func (*flacMuxMapping) codecID() codec.ID { return codec.FLAC }
 // End's to patch in.
 func (m *flacMuxMapping) writeHeaders(t container.Track, tags []container.Tag, vendor string,
 	emit func(payload, seg []byte, granule int64, headerType byte) error) (int64, error) {
-	if len(t.CodecConfig) != flac.StreamInfoLen {
-		return 0, waxerr.New(waxerr.CodeUnsupportedFormat, "ogg: FLAC CodecConfig is not a STREAMINFO block")
-	}
-	// Parsed for the frames' numbering, which its block bounds settle; it is
-	// the parse every reader of the stream makes.
-	si, err := flac.ParseStreamInfo(t.CodecConfig)
-	if err != nil {
-		return 0, err
-	}
-	m.number = flac.NewNumberer(si, 0, 0)
+	m.number = flac.NewNumberer(m.si, 0, 0)
 	// The block's own bytes with one field rewritten, rather than a parse and a
 	// re-marshal. flac.StreamInfo.MarshalBinary validates more than
 	// ParseStreamInfo does (block bounds, the rate's upper end), so a
@@ -213,6 +226,7 @@ func (*flacMuxMapping) endGranule(trailer codec.Trailer) int64 { return trailer.
 // the comment header from vendor+tags exactly as the Opus mapping rebuilds
 // OpusTags.
 type vorbisMuxMapping struct {
+	id, setup []byte // the identification and setup headers, from check
 	cfg       vorbis.Config
 	modeBits  int
 	haveCfg   bool
@@ -221,22 +235,26 @@ type vorbisMuxMapping struct {
 
 func (m *vorbisMuxMapping) codecID() codec.ID { return codec.Vorbis }
 
-func (m *vorbisMuxMapping) writeHeaders(t container.Track, tags []container.Tag, vendor string,
-	emit func(payload, seg []byte, granule int64, headerType byte) error) (int64, error) {
-	cfg := t.CodecConfig
-	id, _, setup, err := vorbis.SplitConfig(cfg)
+// check splits the config and parses it now, so writePacket can read each
+// packet's block size (ModeBits + PacketBlockSize) without a full decode.
+func (m *vorbisMuxMapping) check(t container.Track) error {
+	id, _, setup, err := vorbis.SplitConfig(t.CodecConfig)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	if len(id) < 7 || id[0] != 0x01 || string(id[1:7]) != "vorbis" {
-		return 0, waxerr.New(waxerr.CodeUnsupportedFormat, "ogg: track CodecConfig is not a Vorbis identification header")
+		return waxerr.New(waxerr.CodeUnsupportedFormat, "ogg: track CodecConfig is not a Vorbis identification header")
 	}
-	// Parse the config now so writePacket can read each packet's block size
-	// (ModeBits + PacketBlockSize) without a full decode.
-	c, err := vorbis.ParseConfig(cfg)
+	c, err := vorbis.ParseConfig(t.CodecConfig)
 	if err != nil {
-		return 0, err
+		return err
 	}
+	m.id, m.setup, m.cfg = id, setup, c
+	return nil
+}
+
+func (m *vorbisMuxMapping) writeHeaders(_ container.Track, tags []container.Tag, vendor string,
+	emit func(payload, seg []byte, granule int64, headerType byte) error) (int64, error) {
 	// Rebuild the comment header from vendor+tags: type byte 0x03, the "vorbis"
 	// signature, the Vorbis-comment structure, then the framing bit (a
 	// byte-aligned 0x01), matching the encoder's commentHeader byte-for-byte.
@@ -246,13 +264,12 @@ func (m *vorbisMuxMapping) writeHeaders(t container.Track, tags []container.Tag,
 	if err != nil {
 		return 0, err
 	}
-	m.cfg = c
-	m.modeBits = vorbis.ModeBits(c)
+	m.modeBits = vorbis.ModeBits(m.cfg)
 	m.haveCfg = true
 
 	// BOS page: the identification packet alone (the demuxer sniffs it as the
 	// whole page body, so it must not share a page).
-	if err := emit(id, lacing(len(id)), 0, flagBOS); err != nil {
+	if err := emit(m.id, lacing(len(m.id)), 0, flagBOS); err != nil {
 		return 0, err
 	}
 	comment := append([]byte{0x03, 'v', 'o', 'r', 'b', 'i', 's'}, body...)
@@ -261,7 +278,7 @@ func (m *vorbisMuxMapping) writeHeaders(t container.Track, tags []container.Tag,
 	// setup is large enough to overflow one page's 255x255-byte segment table.
 	// The identification header states no sample total, so nothing here is a
 	// claim for End to make good.
-	return 0, emitHeaderPages([][]byte{comment, setup}, emit)
+	return 0, emitHeaderPages([][]byte{comment, m.setup}, emit)
 }
 
 // writePacket returns pkt's granule increment. The first audio packet primes the

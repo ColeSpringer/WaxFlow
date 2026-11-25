@@ -437,6 +437,7 @@ type runConfig struct {
 	chapters []container.Chapter
 	art      *container.Picture
 	progress func(done, total int64)
+	measured *container.Track
 }
 
 // newRunConfig applies run in order, so a later option wins.
@@ -448,6 +449,14 @@ func newRunConfig(run []RunOption) runConfig {
 		}
 	}
 	return x
+}
+
+// WithMeasured hands a copy the measurement of its source's track that the
+// caller planned from (a measure's or a strict probe's), so a run that would
+// walk the source for what a walk finds reads it there. A track nothing
+// measured is ignored. It rides along: the plan is the caller's already.
+func WithMeasured(track container.Track) RunOption {
+	return func(x *runConfig) { x.measured = &track }
 }
 
 // WithTags embeds canonical metadata fields (TITLE, ARTIST, ...) in the

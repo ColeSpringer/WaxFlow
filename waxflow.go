@@ -316,9 +316,11 @@ func (e *Engine) TranscodeMedia(ctx context.Context, med format.Media, dst io.Wr
 	}
 	// A header a muxer cannot go back and fix is a commitment, so the length it
 	// commits to is confirmed first. Walk leaves the packet position, so this
-	// sits after the seek and changes nothing about what is read out.
+	// sits after the seek and changes nothing about what is read out. A
+	// declared length that is a bound the decode is not yet held to is
+	// confirmed for any destination (unconfirmedBound).
 	patchable := muxseek.CanSeek(dst)
-	if !patchable {
+	if !patchable || unconfirmedBound(srcTrack) {
 		if confirm := confirmableLength(srcTrack, med); confirm != nil {
 			if err := confirm(ctx); err != nil {
 				return nil, err
@@ -518,6 +520,10 @@ func confirmableLength(t container.Track, src any) func(context.Context) error {
 	}
 	return nil
 }
+
+// unconfirmedBound reports whether t's declared length is a bound nothing
+// holds the run to yet: its end trim is unread, and no delay caps the decode.
+func unconfirmedBound(t container.Track) bool { return t.TrimsUnread && t.Delay == 0 }
 
 // projectedLength is what a run may write into its output's headers for a
 // source track: the track's own count, or -1 for no claim at all.
@@ -997,6 +1003,13 @@ type form struct {
 	// the builder it writes with (TagsFit). Every form has one: noTags for a
 	// muxer that takes none.
 	tagsFit func([]container.Tag) error
+	// trackFits is the muxer's own refusal of a track at Begin (TrackFits),
+	// which PlanRemux asks so a copy declines what the muxer would refuse.
+	// Nil for a muxer whose Begin refuses nothing its row's codec can bring.
+	trackFits func(container.Track) error
+	// trimByLength: with no delay, the muxer states an end trim only in the
+	// length its Begin writes, so a copy needs both before Begin.
+	trimByLength bool
 	// mux constructs the writer. It is apart from the row's encode because
 	// remux has no encoder and must write through the same muxer. t is the
 	// output track, where a muxer reads what it needs (the mpa Xing delay),
@@ -1247,6 +1260,7 @@ var outputs = []output{
 		forms: []form{
 			{
 				mediaType: "audio/flac", version: flacn.MuxerVersion, live: true, tagsFit: flacn.TagsFit,
+				trackFits: flacn.TrackFits,
 				mux: func(_ container.Track, _ TranscodeOptions, x runConfig, enc codec.Encoder, dst io.Writer) (container.Muxer, error) {
 					return flacn.NewMuxer(dst, &flacn.MuxerOptions{Tags: x.tags, MD5: flacMD5(enc)}), nil
 				},
@@ -1256,7 +1270,7 @@ var outputs = []output{
 				// .oga, the Xiph extension for Ogg audio that is not Vorbis:
 				// .flac would name a native-FLAC file these bytes are not.
 				name: ContainerOgg, mediaType: "audio/ogg", ext: "oga", version: ogg.MuxerVersion,
-				live: true, embedsTags: true, tagsFit: ogg.FLACTagsFit,
+				live: true, embedsTags: true, tagsFit: ogg.FLACTagsFit, trackFits: ogg.TrackFits,
 				mux: func(_ container.Track, _ TranscodeOptions, x runConfig, enc codec.Encoder, dst io.Writer) (container.Muxer, error) {
 					return ogg.NewMuxer(dst, &ogg.MuxerOptions{Tags: x.tags, MD5: flacMD5(enc)}), nil
 				},
@@ -1538,6 +1552,7 @@ var outputs = []output{
 		// APEv2 tag block after the audio itself.
 		forms: []form{{
 			mediaType: "audio/x-wavpack", version: wv.MuxerVersion, live: true, embedsTags: true, tagsFit: wv.TagsFit,
+			trackFits: wv.TrackFits,
 			mux: func(_ container.Track, _ TranscodeOptions, x runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 				return wv.NewMuxer(dst, &wv.MuxerOptions{Tags: x.tags}), nil
 			},
@@ -1599,6 +1614,7 @@ var outputs = []output{
 		// The muxer writes the APEv2 tag block after the audio itself.
 		forms: []form{{
 			mediaType: "audio/x-ape", version: apen.MuxerVersion, embedsTags: true, tagsFit: apen.TagsFit,
+			trackFits: apen.TrackFits,
 			mux: func(_ container.Track, _ TranscodeOptions, x runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 				return apen.NewMuxer(dst, &apen.MuxerOptions{Tags: x.tags}), nil
 			},
@@ -1687,6 +1703,7 @@ func aacForms() []form {
 		mp4Form(""),
 		{
 			name: "adts", mediaType: "audio/aac", ext: "aac", version: adts.MuxerVersion, live: true, tagsFit: noTags,
+			trackFits: adts.TrackFits,
 			mux: func(_ container.Track, _ TranscodeOptions, _ runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 				return adts.NewMuxer(dst), nil
 			},
@@ -1702,9 +1719,13 @@ func aacForms() []form {
 // The muxer embeds an ilst, the only way the fragmented form gets tags.
 func mp4Form(name string) form {
 	progressive := name == ContainerProgressive
+	fits := mp4.TrackFits
+	if progressive {
+		fits = mp4.ProgressiveTrackFits
+	}
 	return form{
 		name: name, mediaType: mp4MediaType, version: mp4.MuxerVersion, live: !progressive, embedsTags: true,
-		tagsFit: mp4.TagsFit,
+		tagsFit: mp4.TagsFit, trackFits: fits, trimByLength: !progressive,
 		mux: func(_ container.Track, _ TranscodeOptions, x runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 			if progressive {
 				return mp4.NewProgressiveMuxer(dst, mp4MuxerOptions(x)), nil
@@ -1718,7 +1739,7 @@ func mp4Form(name string) form {
 // header tagsFit answers for.
 func oggForm(tagsFit func([]container.Tag) error) form {
 	return form{
-		mediaType: "audio/ogg", version: ogg.MuxerVersion, live: true, tagsFit: tagsFit,
+		mediaType: "audio/ogg", version: ogg.MuxerVersion, live: true, tagsFit: tagsFit, trackFits: ogg.TrackFits,
 		mux: func(_ container.Track, _ TranscodeOptions, x runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 			return ogg.NewMuxer(dst, &ogg.MuxerOptions{Tags: x.tags}), nil
 		},
@@ -1737,6 +1758,7 @@ func matroskaForm(name, mediaType string) form {
 	webm := name == "webm"
 	return form{
 		name: name, mediaType: mediaType, ext: name, version: mka.MuxerVersion, live: true, tagsFit: mka.TagsFit,
+		trackFits: func(t container.Track) error { return mka.TrackFits(t, webm) },
 		mux: func(_ container.Track, _ TranscodeOptions, x runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 			return mka.NewMuxer(dst, &mka.MuxerOptions{WebM: webm, Tags: x.tags}), nil
 		},

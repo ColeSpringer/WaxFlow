@@ -178,6 +178,7 @@ func (m *media) adoptLength() {
 		m.track.Samples = t.Samples
 		m.track.Padding = t.Padding
 		m.track.MidPadding, m.track.MidTrims = t.MidPadding, t.MidTrims
+		m.track.TrimsUnread = t.TrimsUnread
 		m.track.SamplesExact = t.SamplesExact
 		m.track.SamplesAdvisory = t.SamplesAdvisory
 		m.rawEnd = rawEndFor(m.track)

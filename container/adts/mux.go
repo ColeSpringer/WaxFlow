@@ -53,22 +53,39 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	if len(tracks) != 1 {
 		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("adts: muxers are single-track, got %d", len(tracks)))
 	}
-	t := tracks[0]
+	var err error
+	if m.rateIdx, m.channels, err = headerFields(tracks[0]); err != nil {
+		return err
+	}
+	m.began = true
+	return nil
+}
+
+// TrackFits reports whether the muxer can frame track t: nil, or Begin's own
+// refusal.
+func TrackFits(t container.Track) error {
+	_, _, err := headerFields(t)
+	return err
+}
+
+// headerFields derives the header's rate index and channel configuration
+// from t's AudioSpecificConfig, refusing a track ADTS cannot frame.
+func headerFields(t container.Track) (rateIdx, channels int, err error) {
 	if t.Codec != codec.AACLC && t.Codec != codec.HEAAC {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("adts: cannot mux codec %q", t.Codec))
+		return 0, 0, waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("adts: cannot mux codec %q", t.Codec))
 	}
 	if len(t.CodecConfig) < 2 {
-		return waxerr.New(waxerr.CodeInvalidRequest, "adts: track carries no AudioSpecificConfig")
+		return 0, 0, waxerr.New(waxerr.CodeInvalidRequest, "adts: track carries no AudioSpecificConfig")
 	}
 	// ParseASC rather than fixed bit positions, so the hierarchical AOT-5
 	// and sync-extension HE forms land on the same core fields as plain LC
 	// (its first samplingFrequencyIndex is the core rate in every form).
 	cfg, err := aac.ParseASC(t.CodecConfig)
 	if err != nil {
-		return waxerr.Wrap(waxerr.CodeUnsupportedFormat, "adts: track's AudioSpecificConfig", err)
+		return 0, 0, waxerr.Wrap(waxerr.CodeUnsupportedFormat, "adts: track's AudioSpecificConfig", err)
 	}
 	if cfg.FrameLength != samplesPerFrame {
-		return waxerr.New(waxerr.CodeUnsupportedFormat,
+		return 0, 0, waxerr.New(waxerr.CodeUnsupportedFormat,
 			fmt.Sprintf("adts: %d-sample frames; ADTS carries only the %d-sample form", cfg.FrameLength, samplesPerFrame))
 	}
 	if cfg.SBR && cfg.ExtensionRate == cfg.SampleRate {
@@ -76,19 +93,17 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 		// dual-rate by convention: these access units re-framed here would
 		// legally decode at double their real rate. fdk refuses the same
 		// combination on the encode side.
-		return waxerr.New(waxerr.CodeUnsupportedFormat,
+		return 0, 0, waxerr.New(waxerr.CodeUnsupportedFormat,
 			"adts: downsampled (single-rate) SBR has no ADTS form; implicit signalling implies the dual rate")
 	}
-	m.rateIdx = rateIndex(cfg.SampleRate)
-	m.channels = cfg.ChannelConfig
-	if m.rateIdx < 0 {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("adts: no sampling frequency index for %d Hz", cfg.SampleRate))
+	rateIdx, channels = rateIndex(cfg.SampleRate), cfg.ChannelConfig
+	if rateIdx < 0 {
+		return 0, 0, waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("adts: no sampling frequency index for %d Hz", cfg.SampleRate))
 	}
-	if m.channels < 1 || m.channels > 7 {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("adts: channel configuration %d", m.channels))
+	if channels < 1 || channels > 7 {
+		return 0, 0, waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("adts: channel configuration %d", channels))
 	}
-	m.began = true
-	return nil
+	return rateIdx, channels, nil
 }
 
 // rateIndex maps a core sample rate to its samplingFrequencyIndex (Table

@@ -1447,3 +1447,392 @@ On the wire:
   KEY is too large for the output and was not embedded" warning only where
   it is lost, once per split. A piece the post-pass could not tag is a
   warning naming it, "metadata post-pass of out.1.flac: ...".
+
+## Amendment (2026-11-24): one rung walk
+
+/stream and HLS walk the copy rungs below direct play in one place: remux
+for a whole source, cut for a span, transcode otherwise. The copy planners
+that need the packet grid take it as a function and measure it only when
+the request's headers allow a copy.
+
+- `PlanRemuxSegments`, `PlanCut` and `PlanCutSegments` take
+  `grid func() (int, error)` where they took `grid int`. Each asks it at
+  most once, and only after every question the track, options and spans
+  answer has passed: for the segmented two the segment duration and the
+  init header, for the cuts the spans, the codec allowlist, the HE-AAC
+  head rule, the track's Delay bound, whether the codec crosses into the
+  format unchanged with nothing transformed (the test `PlanRemux` applies,
+  at the segmented depth for `PlanCutSegments`), whether the source's inner
+  trims are listed whole and some grid places them (and, segmented, none
+  fills the first packet), whether SpliceTrims can splice the spans, and
+  whether the destination can carry the trims every cut of the spans has.
+  A source whose inner trims fit one grid alone is planned on that grid
+  before the ask, since every other grid declines at those trims. Only the
+  OpusHead rewrite, which writes the cut's delay, parses the head after
+  the ask. The grid's error comes back unchanged, and a grid of 0
+  declines. An invalid span still errors in today's words, before the ask.
+  `CutTrack`, `Cut`, `CutStream` and `CutSegments` keep their `int`.
+- `CutPlan` gains `Grid` and `Source`, the grid and the measured track it
+  was planned from, as `CutSegmentPlan` carries them, so a caller hands
+  `CutStream` what the plan was computed from.
+- `PlanRemuxSegments` checks that the init header can express the track
+  before it asks the grid, where it checked after, and `PlanCutSegments`
+  asks the same of the track as the cut presents it, its OpusHead pre-skip
+  rewritten to the cut's own delay.
+- `mp4.TrackFits`, `mp4.ProgressiveTrackFits`, `ogg.TrackFits`,
+  `mka.TrackFits` (WebM by a flag), `adts.TrackFits`, `flacn.TrackFits`,
+  `wv.TrackFits` and `apen.TrackFits` report whether that muxer can write a
+  track: nil, or the refusal its Begin makes of the track, which Begin now
+  runs. `PlanRemux` asks its destination's and declines what it
+  refuses; `PlanCut` asks it of the track as the cut presents it, before the
+  grid. The segmented planners and runs leave it out: they write fMP4
+  whatever the form, and ask the init header instead. `mpa` has none, since
+  its Begin refuses nothing an MP3 track can bring.
+- `container.Track` gains `TrimsUnread`: Padding, MidPadding and MidTrims
+  are not read yet, because the container states its trims on its packets
+  and no walk has run, so a zero there means unknown where on any other
+  track it means none. Matroska sets it at open, and so does a
+  fragmented MP4 whose edit list rounds its length, which has only a
+  bound for its end until its fragments are counted. Walk clears it, and
+  a measured track carries the walk's answer. No sample a demuxer
+  delivers changes for it, so no `DemuxerVersion` moves.
+- `mp4.TrackFits` and the fragmented muxer's Begin refuse an AAC track
+  that declares an end trim with no delay and no length. Its End takes an
+  end trim with no delay when the edit list holds the trailer's length,
+  written at Begin or patched on a destination that seeks, where it
+  refused every one.
+- `WithMeasured` is a new run option: the measurement of the source's
+  track that the caller planned from, which a copy reads where it would
+  walk the source. A track nothing measured is ignored.
+
+Requests that walked the source's packets and then declined or were
+refused now answer before the walk:
+
+- a span of an Opus, AAC or HE-AAC source asked in a format of another
+  codec or with a transform (a bitrate, a gain, a seek, a bitrate ladder
+  over HLS), or of a track its destination muxer cannot write (the first
+  move below, and single-rate SBR asked for adts);
+- a span the cut refuses on its own (one that keeps no samples, an HE-AAC
+  span off the stream head), or of a source whose Delay is outside the
+  timeline a cut computes in, or whose inner trims the walk left unlisted
+  or no grid places (the gcd of their ends under the largest);
+- spans SpliceTrims overlaps on every grid, Matroska included: one that
+  touches the span before it, whose head backs off by its pre-roll from
+  where that span ends, and a later one that starts within the pre-roll,
+  whose head backs off to raw 0;
+- a span whose trims the destination cannot carry on any grid: a front
+  trim, which a span past sample 0 or a primed source always leaves, asked
+  of a container that states none (adts); the source's end trim alone, from
+  sample 0 of an unprimed source to its end, asked of one that cannot state
+  it; and off Matroska, a trim inside the cut's run, which SpliceTrims
+  across spans and a source trim ending inside the first span, past its
+  pre-roll point, always make;
+- a span the cut declines on the one grid a source's inner trims fit (one
+  holding a trim over half the gcd of their ends; a trim at raw 0 pins its
+  own length), whatever the reason on that grid;
+- an HLS span of a track the init header cannot express however the cut
+  rewrites its delay (an Opus head in channel mapping family 1), or of a
+  source whose first packet a trim fills, which a restart's seek cannot
+  place;
+- an HLS variant of a 12- or 20-bit FLAC asked as flac, which MSE needs
+  widened, and one whose segment duration is out of range.
+
+Six answers move by design:
+
+- A copy whose destination muxer refuses the track at Begin was planned,
+  and then failed the request with that refusal (over /stream a 415 or 422
+  and no audio). It now declines to the transcode rung, which serves it:
+  an AAC track with a program config element (channel configuration 0)
+  asked as aac, in either MP4 form, or as adts; an AAC config longer than
+  the 104 bytes the esds holds asked as aac (at the base a panic in the
+  pipeline's goroutine, which took the daemon down); and a FLAC whose
+  STREAMINFO block bounds the native muxer cannot write (a minimum block
+  under 16) asked as flac. Through the engine, so does a copy of 960-sample
+  frames or an escape-coded rate asked as adts, which the transcode refuses
+  in turn, and of the shapes no demuxer hands over (a truncated OpusHead, a
+  Vorbis config that will not split, an ALAC cookie that will not parse, a
+  WavPack or APE trim, a format its codec config disagrees with, a negative
+  trim). `Remux`, `RemuxDemuxer` and `CutStream`, asked for such a copy
+  without the ladder, refuse it before Begin with "a C source cannot be
+  remuxed to F" and the muxer's refusal after it, in the muxer's code,
+  where Begin's refusal came alone.
+- A span asked with `container=fragmented`, the aac rows' default fMP4
+  muxer by its own name, is cut wherever the default container cuts it,
+  where it was transcoded: the cut's trims are the ones that muxer states.
+  No generation is lost, and the request keys under the cut's versions.
+- A cut whose first span is so short that its tail snaps in before the
+  span's own start was served: its delay ran past the first window and
+  trimmed the start of the next span, which `Landed` reported whole.
+  `CutTrack` and both cut planners now decline it, a malformed OpusHead of
+  that shape included, where the rewrite refused it. Only an engine caller
+  can ask it, since the server sends one span, and no plan that serves
+  changes, so `CutVersion` stays.
+- A copy to the fragmented MP4 muxer (the aac and he-aac rows' default, and
+  `container=fragmented`) of a track whose end trim has no delay beside it
+  was planned, wrote the whole file and failed at End. Over /stream the
+  body stopped short of its last fragment under a 200 and the entry never
+  completed, so such a source could not be played as `format=aac`. It is
+  now copied, with the trim stated as the edit list's length. Two shapes
+  bring one. A Matroska AAC with no CodecDelay whose last block carries a
+  DiscardPadding: this engine's own cut from sample 0 to mka writes it.
+  ffmpeg 8.0.1's Matroska muxer does not (a CodecDelay and no
+  DiscardPadding for its own encode, neither for a stream copy of ADTS
+  or MP4), and mkvmerge was not on hand to measure. And a fragmented MP4
+  whose edit list runs from 0 for less than its fragments hold: a
+  segmented copy's init header and segments back to back, or this copy's
+  own output.
+
+  The muxer already stated the trim it refused. With no delay its edit
+  list runs from 0 for the track's length, which is how the segmented
+  init header states the same trim and how the fragmented reader reads
+  it, so End now takes a trailer whose length that list holds. That
+  alone copies the MP4 shape, whose header has the length. The list is
+  written at Begin, and a Matroska track opens with its end trim unread
+  and its length an estimate, so such a copy needs a measurement before
+  Begin: when the track's trims are unread, it declares no delay, its
+  codec has a trim to state and the destination is this muxer. The run
+  takes the caller's, handed in with the new `WithMeasured` run option,
+  and the daemon passes the track it planned from, which it had measured
+  already; with none, `Remux` and `RemuxDemuxer` walk the source. A
+  measurement that holds an end trim hands Begin the measured track. One
+  that holds none, or a trim inside the run too, changes nothing: the
+  copy runs as it was planned, to the same bytes or the same refusal.
+  `PlanRemux` still reads headers alone. Its answer is a copy whether or
+  not there is a trim, so only a run nobody measured for pays for the
+  walk, and "remux started" logs `walked` to say which run did.
+
+  Three other answers were weighed. Declining the copy at the plan loses a
+  generation for every Matroska AAC with no delay unless the same walk
+  runs first to spare those with no trim, and then still loses one for
+  the trimmed, where the transcode would state its own encoder's padding
+  in the same edit list. Giving the trim up at End costs no walk and
+  plays samples the source marks as trimmed, under a header that says
+  nothing. Writing an edit list for every such track, to patch at End,
+  moves the bytes of copies that are right today and does nothing on a
+  pipe. The walk is one more read of the file ahead of the first byte,
+  and only where no caller measured. ffmpeg 8.0.1 reads no end trim
+  from any fragmented MP4 this muxer writes, with a delay or without
+  (30176 samples of a 30000-sample copy with one); the statement is as
+  strong as the one every primed copy and transcode already makes.
+
+  No track that wrote before writes other bytes, so `mp4.MuxerVersion`
+  and `RemuxVersion` stand and no cache key moves. A track with a
+  declared end trim, no delay and no length, which no demuxer hands over,
+  declines at the plan. A Matroska track trimmed to nothing (one block
+  whose DiscardPadding covers it) is the same track once measured: the
+  measured plan declines, so the daemon transcodes it, and a run from its
+  header refuses before a byte where it refused at End.
+
+  The cuts keep their own rule for this muxer (`cutTrimsExpressible` asks
+  for a delay). The muxer could state such a cut's end trim from its
+  exact length, but a player that reads no length from an fMP4 edit, as
+  ffmpeg's does not, would then play up to a packet of audio the caller
+  cut, where a transcode's tail is its encoder's padding. That is as
+  true of a cut with a delay, which is served for the generation it
+  saves; the decline of one with none is kept by choice. The rule the
+  muxer gained is asked of the track as the cut presents it, with the
+  delay a span past sample 0 or a primed source leaves, so a primed
+  track that states a padding and no length still cuts to its end.
+- A cut run handed a track nothing walked as its measured one took that
+  track's estimated length for the source's end: a span to the end of a
+  Matroska file whose Info Duration rounds down (ffmpeg's stream copy,
+  32 samples short) wrote a cut that much short, to mka before this
+  phase and to fragmented MP4 since the move above. `CutStream` and
+  `CutSegments` now take only a measurement (a length that is neither
+  absent nor an estimate, on a track whose trims are read). Handed none
+  for a track whose trims are unread, they walk the source once and cut
+  from that, as the copy does: the cut view has no walk of its own, so
+  without one a span to the end of the trimmed shape failed at End as
+  fragmented MP4, or played the trimmed samples on a pipe. A track with
+  nothing unread keeps the header's own, whose end the run resolves
+  from the packets. A plan made from such an unwalked track was made
+  from its estimate, so the run may land where the plan did not say;
+  the run is the file's. A segmented cut of a source that trims inside
+  its run is refused before a segment goes out, where it was refused at
+  the packet carrying the trim.
+- The MP4 reader takes an edit list's duration as the played length with
+  a delay or without, and reads a coarse movie timescale as the rounding
+  it is. `mp4.DemuxerVersion` is new, `mp4-demux-2` (ADR-0004), so every
+  cached entry of an MP4 source misses once.
+
+  The progressive reader trusted an edit list only beside a delay, so the
+  one edit from 0 that this engine's progressive muxer writes for an end
+  trim with no delay was dropped: the shape copied or cut to
+  `container=progressive` reopened at 50176 samples for 50000, and a
+  stream of that file advertised and played the trimmed tail. One edit
+  from media time 0 now states the played length, as the fragmented
+  reader already read it. Several edits are a cut list, which a length
+  cannot stand for: from 0 they read as before, and from a delay the
+  delay stands and the length is the table's, where their sum was read
+  as one length.
+
+  A duration is in the movie timescale, and ffmpeg 8.0.1 writes
+  milliseconds for every codec, rounded either way: up for ALAC, FLAC,
+  PCM and a stream-copied AAC, which all carry an edit from 0 that only
+  restates the sample table, and down for its own AAC at 44.1 kHz and its
+  MP3, where the reader had been trimming up to a tick of audio the table
+  holds (31 and 34 samples measured). So both readers convert a duration
+  to the longest length it can be the rounding of, which is the duration
+  itself where the movie timescale is the sample rate. An edit that
+  restates the table within a tick trims nothing, with a delay or
+  without; one that trims more is honored to within a tick, and plays up
+  to that much of what it trimmed and never less than the audio. The 51
+  MP4-family fixtures in the tree read as they did.
+
+  A fragmented movie has no table to hold such a length against, so its
+  reader reports a coarse edit's length as a bound, declared and not
+  exact, where it called every edit's length exact. Fragments that hold
+  any length the duration can be the rounding of are whole, and a walk
+  settles the length and caps the run at the bound. Until one, the end
+  trim under the bound is unread (`TrimsUnread`). Beside a delay the
+  bound caps the decode already. With none, every copy and transcode,
+  progressive or segmented, confirms the length before it begins, for a
+  file as for a pipe, and ends at the bound; a decode nothing walked
+  plays what the fragments hold. In a sample timescale, which is all
+  this engine writes, the length is exact as before.
+
+  One cut answer moves with the read. A span from sample 0 to the end,
+  asked as aac, of a progressive file with an end trim and no delay was
+  cut, and played the trimmed tail it had not read. The trim is now the
+  cut's own end trim with no delay, which `cutTrimsExpressible` declines
+  for fragmented MP4, so the transcode serves it.
+
+  With the trim read, a copy of such a file to fragmented MP4 on a pipe
+  would have had no length to state it by, since nothing confirms a
+  sample table. `RemuxDemuxer` hands that muxer the source's count beside
+  an end trim with no delay, confirmed or not: the two are one statement,
+  and a run that ends short of it brings no trim.
+
+- A copy to Matroska spreads an end trim longer than its last packet over
+  the final blocks, one DiscardPadding a block and none over its block.
+  `mka.MuxerVersion` is `mka-mux-4` (ADR-0004), so every cached Matroska
+  and WebM entry misses once.
+
+  The muxer wrote the whole trim on the last block. A DiscardPadding trims
+  the block it rides on, so a decode that read the block alone played the
+  excess, ffmpeg ignored the trim outright, and this engine's own reader
+  called the file damaged: a strict probe refused it. fdk's HE-AAC v2
+  states 2494 samples on access units of 2048, and its copy played 144446
+  samples for 144000. An Ogg stream whose final granule trims more than
+  its last packet is the other producer found.
+
+  The muxer holds back the packets the trim can reach: those a Padding
+  stated at Begin spans, and those ending past a length stated there,
+  which is how an Ogg source states its trim. It holds at most 256, an
+  Ogg page's worth; a trim that reaches further back is spread over the
+  last 256 blocks and the rest stays on the last one, oversized, as
+  before. A length of 0 is a stated length. A trim within its last block,
+  and one nothing foretold, are written as they were, byte for byte. A
+  block behind a spread trim is stamped on the delivered timeline, so a
+  copy of the copy is the same file.
+
+  A file an older build wrote keeps its one oversized trim through
+  `Remux`, which is told neither a Padding nor a length for it, and a
+  walk still reads its length right. A cut of it to Matroska spreads the
+  trim, since the cut states the measured Padding as its own, and so does
+  `RemuxDemuxer` handed a walked track.
+
+  The reader counts the trims that run unbroken to the end of the stream
+  as the track's end trim (`Track.Padding`): the last packet's and, while
+  every packet after it is trimmed whole, the one before's. They were
+  inner trims (`MidPadding`), which every copy off Matroska declines, so
+  the round trip to MP4 or Ogg would have re-encoded. The copy loop and
+  the cut view read the packets the same way, and a final laced block
+  whose trim spreads over its laces reads as an end trim for the same
+  reason. The samples a read delivers do not change, so
+  `mka.DemuxerVersion` stays.
+
+  WebM states an end trim on its last block alone, since Firefox rejects a
+  file with more than one DiscardPadding. A source whose packets state
+  the trim between them, which is what a Matroska copy with a spread trim
+  is, leaves as WebM with the total on the last block: the file a WebM
+  copy of the first source is, where each block's trim was forwarded.
+  Every other WebM file keeps its bytes. `mka.TrackFits` declines a WebM
+  copy whose stated end trim is longer than any packet of its codec (120
+  ms of Opus, half a long Vorbis block), so the transcode serves it. A
+  stated trim under that bound that still passes its last packet, one an
+  Ogg source states by its granule, and one its packets state between
+  them are not seen before the packets are, and go on the last block,
+  oversized, as before. No encoder measured writes any: libopus,
+  libvorbis and this engine's own end within a packet. A plan made from
+  an unread track does not see the trim either, so `CutStream`, which
+  measures the source, refuses at Begin a WebM cut that a plan from the
+  measured track declines.
+
+  The cut view refuses a cut whose stated length reaches into samples
+  its last kept packets trim, at the end of the source as where the
+  windows end: the trailer would state them as audio, so the plan
+  measured another source. A cut planned from a track that knew no trim
+  copied the last packet's own trim that way; it is refused now, with a
+  spread one. A cut whose length the packets deliver copies as before,
+  the trailer taking its end trim from them, and so does one whose
+  length is an estimate or unknown.
+
+Otherwise no answer moves but for four corners, the first over HTTP and the
+others in the engine:
+
+- A segmented remux the engine declines or refuses before the grid (the
+  odd FLAC depth, a track the init header cannot express, or an
+  out-of-range segment duration) of a source whose packet walk fails was
+  answered with the walk's error. The transcode rung now answers it: it
+  serves the first two and refuses the duration in its own words.
+- `PlanCut` and `PlanCutSegments` decline, where they errored after the
+  grid, for an Opus track whose OpusHead the pre-skip rewrite refuses as
+  malformed asked in a format or with options that rule out a copy, or
+  with a trim inside the cut's run off Matroska, and `PlanCutSegments` for
+  one whose first packet a trim fills, the span anywhere. No demuxer hands
+  one over: Ogg, Matroska and MP4 parse the head at open with the same
+  checks and fail the open.
+- `PlanRemuxSegments` and `PlanCutSegments` refuse a NaN, negative or
+  over-long segment duration ahead of every decline, as `PlanSegments`
+  does, where a grid of 0 or any other decline answered (nil, nil) and a
+  failed grid answered with its own error. In `PlanCutSegments` it now
+  comes ahead of the OpusHead rewrite too, which refuses a malformed head
+  after the grid, so such a track asked with a bad duration answers
+  CodeInvalidRequest where it answered CodeMalformedInput. Over HTTP the
+  remux's refusal before the grid declines and the cut's is swallowed, and
+  the transcode refuses the duration in the same words, so a /hls answer
+  keeps its status and text unless the walk fails (the first corner).
+- The native FLAC muxer's Begin refuses a STREAMINFO it cannot write ahead
+  of tags it cannot hold, where the tags' refusal came first, and leaves
+  the muxer unstarted as its other refusals do. A copy declines such a
+  track before Begin, so only a caller of the muxer itself sees the order.
+
+The server logs a cut decline at Debug as "cut declined", with `delivery`
+("progressive" or "hls"), `reason` and `src`. The HLS line read "hls cut
+declined", and the reasons "PlanCut refused the span" and "PlanCutSegments
+refused the span" read "the planner refused the span". A cut that declines
+before the grid reads "the track, span, format or options rule out a copy".
+The engine's planner logs its own reason on its own line beside the
+server's. Its lines that moved: a format or options that rule out a copy
+now log "the format or options need a re-encode" under "cut declined" and
+"segmented cut declined", where the mismatch reached `PlanRemux`'s bare nil
+and logged nothing, and the bound on a Delay and a grid outside the timeline
+is two reasons, "this source declares a N-sample delay, which is outside the
+timeline this rung can compute in" and "this source's N-sample grid is
+outside ...", where it was one naming both. Before the grid each line names
+`outContainer`, the container the rules judged. An inner trim list left
+short logs "this source trims inside the run at places the walk did not
+record", and one no grid places "... at places no packet grid holds";
+spans SpliceTrims cannot splice log "spans N and M touch, so a spliced
+head's pre-roll reaches into the span before it; join them or drop
+SpliceTrims" or "span M starts within the pre-roll, so its spliced head's
+pre-roll reaches into span N; drop SpliceTrims", where they declined after
+the grid as two spans too close;
+trims the destination cannot carry log "the destination cannot signal the
+cut's trims", as after the grid, or "the cut keeps a trim inside the
+source's run, which only mka or webm state" ("which a segmented cut cannot
+state" when segmented), where `PlanRemux`'s bare nil logged nothing; a cut
+that declines on the one grid its source's trims fit logs "the cut declines
+on the one grid the source's inner trims fit", with that `grid`; and a
+segmented track the init header cannot
+express logs "the init header cannot express this track", where
+`PlanRemuxSegments`' nil logged nothing. The SpliceTrims remedy now logs
+before the grid and reads "SpliceTrims needs a destination that states a
+trim per packet (mka or webm); drop the option to take the snapped
+splices", or "..., and this source trims inside its run too", where it
+asked for mka or webm by name; the segmented cut's says "which a segmented
+cut's fMP4 is not" for the parenthesis. `PlanRemux` logs a copy its
+destination muxer refuses as "remux declined", with that refusal as
+`reason`, and a cut it rules out before the grid logs "the destination
+cannot write this track (...)".

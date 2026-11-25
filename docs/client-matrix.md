@@ -82,12 +82,15 @@ one per stream and marks any later padded block's duration invalid. Measured
 here on 2026-09-20 (playwright 1.62.0, Firefox 153.0): such a file stops after
 15,616 of 95,352 frames with a media error, and its MSE `SourceBuffer` raises
 on `appendBuffer`. The same cut without the inner trims plays to `ended`.
-Chromium plays both, MSE included. Two things
+Chromium plays both, MSE included. Three things
 in this tree can write one. An mka-to-mka copy forwards a source's own inner
-trims, which is inherited rather than chosen; and `TranscodeOptions.SpliceTrims`
+trims, which is inherited rather than chosen; `TranscodeOptions.SpliceTrims`
 writes them deliberately, to make a multi-span cut's interior joins exact
-(ADR-0011). Chromium, ExoPlayer and everything ffmpeg-based take both. The
-default cut writes none, so nothing here changes for a caller who does not ask
+(ADR-0011); and a copy to `mka` of a source whose end trim is longer than its
+last packet spreads the trim over the final blocks, since a `DiscardPadding`
+trims its own block. Chromium, ExoPlayer and everything ffmpeg-based take all
+three. The default cut writes none, and the `webm` form states an end trim on
+its last block alone, so nothing here changes for a caller who does not ask
 for it.
 
 The **manual, pending** cells are the "Safari progressive playback of a

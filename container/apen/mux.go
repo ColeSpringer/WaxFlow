@@ -119,20 +119,9 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("ape: muxers are single-track, got %d", len(tracks)))
 	}
 	t := tracks[0]
-	if t.Codec != codec.APE {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("ape: cannot mux codec %q", t.Codec))
-	}
-	if t.Delay != 0 || t.Padding != 0 {
-		return waxerr.New(waxerr.CodeUnsupportedFormat,
-			"ape: Monkey's Audio signals no gapless trims (lossless streams have none)")
-	}
-	cfg, err := ape.ParseConfig(t.CodecConfig)
+	cfg, err := trackConfig(t)
 	if err != nil {
 		return err
-	}
-	if want := cfg.Format(); t.Fmt != want {
-		return waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("ape: track format %v does not match its codec config (want %v)", t.Fmt, want))
 	}
 	m.cfg = cfg
 	m.entries = reserveEntries(t.Samples, cfg.BlocksPerFrame)
@@ -142,6 +131,34 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	}
 	m.began = true
 	return m.writeHeaders()
+}
+
+// TrackFits reports whether the muxer can write track t: nil, or Begin's own
+// refusal of the track (its destination must be seekable besides).
+func TrackFits(t container.Track) error {
+	_, err := trackConfig(t)
+	return err
+}
+
+// trackConfig parses t's codec config, refusing a track the muxer cannot
+// write.
+func trackConfig(t container.Track) (ape.Config, error) {
+	if t.Codec != codec.APE {
+		return ape.Config{}, waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("ape: cannot mux codec %q", t.Codec))
+	}
+	if t.Delay != 0 || t.Padding != 0 {
+		return ape.Config{}, waxerr.New(waxerr.CodeUnsupportedFormat,
+			"ape: Monkey's Audio signals no gapless trims (lossless streams have none)")
+	}
+	cfg, err := ape.ParseConfig(t.CodecConfig)
+	if err != nil {
+		return ape.Config{}, err
+	}
+	if want := cfg.Format(); t.Fmt != want {
+		return ape.Config{}, waxerr.New(waxerr.CodeUnsupportedFormat,
+			fmt.Sprintf("ape: track format %v does not match its codec config (want %v)", t.Fmt, want))
+	}
+	return cfg, nil
 }
 
 // reserveEntries sizes the seek table from the engine's projected length, with

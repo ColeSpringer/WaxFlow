@@ -100,12 +100,19 @@ func BuildMidPaddingShape(t *testing.T, midPad, endPad int64) MidPadding {
 // buildMidPadding muxes one fixture shape. The trims go through WritePacket,
 // which is the muxer's only seam for one: the held packet carries its own
 // DiscardPadding out and the final one takes the trailer's instead.
+//
+// An end trim larger than its block is the shape of a file written by a
+// muxer that put the whole trim on the last block. This one does that only
+// when Begin states no length, so those shapes state none.
 func buildMidPadding(t *testing.T, p MidPadding) MidPadding {
 	t.Helper()
 	p.Fmt = audio.Format{Rate: 48000, Channels: 1, Layout: audio.DefaultLayout(1), Type: audio.Int, BitDepth: 32}
 	p.Raw = int64(p.Blocks) * p.BlockDur
 
 	track := container.Track{Codec: codec.PCM, Fmt: p.Fmt, Samples: p.Samples(), Default: true}
+	if p.EndPad > p.BlockDur {
+		track.Samples = -1
+	}
 	buf := &bytes.Buffer{}
 	ws := &memWS{}
 	var w io.Writer = buf

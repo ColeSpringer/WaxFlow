@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 
 	"github.com/colespringer/waxflow/codec"
@@ -29,8 +30,8 @@ const CutVersion = "cut-3"
 // internally rather than making a caller do it.
 type Span struct{ From, To int64 }
 
-// CutPlan describes what a cut would produce, computed from the source track's
-// headers alone.
+// CutPlan describes what a cut would produce, computed from the source track
+// and its measured packet grid.
 //
 // It embeds RemuxPlan for the reason RemuxPlan embeds TranscodePlan: consumers
 // read one shape whichever rung answered. Track is the cut's synthesized track,
@@ -59,6 +60,10 @@ type CutPlan struct {
 	// TranscodeOptions.SpliceTrims exists for the destinations that can carry
 	// an exact splice. See ADR-0011.
 	Landed []Span
+	// Grid is the packet grid and Source the track the plan was computed
+	// from: CutStream takes both, so the run cuts on the keyed boundaries.
+	Grid   int
+	Source container.Track
 }
 
 // cutCodec is one allowlisted codec's cut parameters.
@@ -155,8 +160,8 @@ var cutCodecs = map[codec.ID]cutCodec{
 
 // Cuttable reports whether track's codec is one whose packets survive being
 // moved within a stream, which is the premise the cut rung rests on. It is the
-// exported form of the cutCodecs membership test, so a caller can skip the
-// packet-grid walk for a codec no cut could ever serve.
+// exported form of the cutCodecs membership test, for a caller that names the
+// codec as its reason before it plans; PlanCut asks it too, before the grid.
 //
 // It answers only the codec question, which is the cheap one: a true here does
 // not promise the cut will be taken, since a span holding no whole packet,
@@ -351,22 +356,40 @@ func plannedTrim(trims []container.PacketTrim, end int64) int64 {
 	return 0
 }
 
-// placeableTrims reports whether track's inner trims are ones a cut can plan
-// around on a g-sample grid: every trim MidPadding sums is listed, in order,
-// each inside one packet and ending on its boundary, and the sum is under
-// maxCutSample like the other addends. A walk that ran out of room leaves the
-// list short, a track nothing walked has a sum and no list, and a caller's
-// own track may say anything.
-func placeableTrims(track container.Track, g int64) bool {
+// listedTrims reports whether track's inner trims are listed whole, which a
+// cut needs whatever the grid: there are none, or every trim MidPadding sums
+// is listed, in order, each positive, and the sum is under maxCutSample like
+// the other addends. A walk that ran out of room leaves the list short, a
+// track nothing walked has a sum and no list, and a caller's own track may
+// say anything.
+func listedTrims(track container.Track) bool {
+	if track.MidPadding <= 0 && len(track.MidTrims) == 0 {
+		return true
+	}
 	if !track.MidTrimsComplete() || track.MidPadding >= maxCutSample {
 		return false
 	}
 	var prev int64
 	for _, tr := range track.MidTrims {
-		if tr.Samples <= 0 || tr.Samples > g || tr.Pos < prev || (tr.Pos+tr.Samples)%g != 0 {
+		if tr.Samples <= 0 || tr.Pos < prev {
 			return false
 		}
 		prev = tr.Pos + tr.Samples
+	}
+	return true
+}
+
+// placeableTrims reports whether track's inner trims are ones a cut can plan
+// around on a g-sample grid: listed whole, each inside one packet and ending
+// on its boundary.
+func placeableTrims(track container.Track, g int64) bool {
+	if !listedTrims(track) {
+		return false
+	}
+	for _, tr := range track.MidTrims {
+		if tr.Samples > g || (tr.Pos+tr.Samples)%g != 0 {
+			return false
+		}
 	}
 	return true
 }
@@ -485,14 +508,15 @@ func validateCutSpans(track container.Track, spans []Span) error {
 	return nil
 }
 
-// computeCut is the rung's arithmetic, in one place.
-func computeCut(track container.Track, opts TranscodeOptions, spans []Span, grid int) (*cutResult, error) {
+// cutHeaders asks the cut's own questions that need no packet grid: the
+// spans, the codec allowlist, the HE-AAC head rule and the Delay bound. An
+// invalid span errors; the rest decline with CodeUnsupportedFormat.
+func cutHeaders(track container.Track, spans []Span) error {
 	if err := validateCutSpans(track, spans); err != nil {
-		return nil, err
+		return err
 	}
-	cc, ok := cutCodecs[track.Codec]
-	if !ok {
-		return nil, waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
+	if _, ok := cutCodecs[track.Codec]; !ok {
+		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
 			"waxflow: %s packets do not survive being moved within the stream, so this source cannot be cut without re-encoding",
 			track.Codec))
 	}
@@ -504,21 +528,34 @@ func computeCut(track container.Track, opts TranscodeOptions, spans []Span, grid
 	// zero makes a cut never decode worse than its source; rung 3 serves a
 	// mid-stream slice with the header it read on the way.
 	if track.Codec == codec.HEAAC && spans[0].From > 0 {
-		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
+		return waxerr.New(waxerr.CodeUnsupportedFormat,
 			"waxflow: an HE-AAC cut must start at sample 0 (the SBR header lives in the leading access units; a mid-stream slice would play with a muted high band)")
 	}
+	// The Delay is an addend the container declared, so a bad one declines
+	// (rung 3 decodes what it can) where a bad span errors. See maxCutSample.
+	if track.Delay < 0 || track.Delay >= maxCutSample {
+		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
+			"waxflow: this source declares a %d-sample delay, which is outside the timeline this rung can compute in",
+			track.Delay))
+	}
+	return nil
+}
+
+// computeCut is the rung's arithmetic, in one place.
+func computeCut(track container.Track, opts TranscodeOptions, spans []Span, grid int) (*cutResult, error) {
+	if err := cutHeaders(track, spans); err != nil {
+		return nil, err
+	}
+	cc := cutCodecs[track.Codec]
 	if grid <= 0 {
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 			"waxflow: this source's packet durations vary, so there is no grid to cut on")
 	}
-	// The other two addends, checked here rather than in validateCutSpans
-	// because neither is the caller's number: the Delay is what the container
-	// declared and the grid is what PacketGrid measured, so a bad one declines
-	// (rung 3 decodes what it can) where a bad span errors. See maxCutSample.
-	if track.Delay < 0 || track.Delay >= maxCutSample || int64(grid) >= maxCutSample {
+	// The grid is the third addend, measured rather than the caller's, so a
+	// bad one declines as a bad Delay does. See maxCutSample.
+	if int64(grid) >= maxCutSample {
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
-			"waxflow: this source declares a %d-sample delay on a %d-sample grid, which is outside the timeline this rung can compute in",
-			track.Delay, grid))
+			"waxflow: this source's %d-sample grid is outside the timeline this rung can compute in", grid))
 	}
 	g := int64(grid)
 	// A trim inside the run is where the two timelines part: past it every
@@ -640,8 +677,14 @@ func computeCut(track container.Track, opts TranscodeOptions, spans []Span, grid
 	// rung 3 re-encodes it exactly -- where delivering the nearest packet
 	// would hand back audio from outside the request. After the merge
 	// above, because a short span adjacent to the next one is not empty.
+	// The first span's audio begins at its requested head, the delay
+	// trimming the pre-roll before it, so its tail must land past that.
 	for i := range spans {
-		if su[i] >= 0 && hd[i] >= su[i] {
+		head := hd[i]
+		if i == 0 {
+			head = df[0]
+		}
+		if su[i] >= 0 && head >= su[i] {
 			return nil, waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
 				"waxflow: span %d keeps no whole packet on this source's %d-sample grid, so this cut cannot be made without re-encoding",
 				i, grid))
@@ -678,6 +721,8 @@ func computeCut(track container.Track, opts TranscodeOptions, spans []Span, grid
 	}
 
 	out := track
+	// The cut's trims are its own arithmetic, whatever the source had read.
+	out.TrimsUnread = false
 	// The trims the kept packets carry stay on them (the view forwards each,
 	// Matroska writes it), so they are the cut track's own MidPadding, which is
 	// what PlanRemux declines every other destination on. The final kept
@@ -764,8 +809,8 @@ func computeCut(track container.Track, opts TranscodeOptions, spans []Span, grid
 		// (a ToEnd span, or a bounded one clamped to it above), su is the decode
 		// total and dt is the end of the audio, so this reduces to the source's
 		// own Padding by the same definition rather than by a special case. It
-		// is in the final packet's own samples, which is what a trailer's trim
-		// means, so a trim the source stated on that packet is inside it.
+		// is the tail of the kept packets' samples, which is what a trailer's
+		// trim means, so a trim the source stated there is inside it.
 		out.Padding = su[n-1] - dt[n-1]
 		// The landed length, not the requested one. This is the keystone.
 		//
@@ -852,19 +897,40 @@ func computeCut(track container.Track, opts TranscodeOptions, spans []Span, grid
 // adoptMeasured overlays onto a fresh header open the facts only a measurement
 // establishes: the length, and the gapless trims a container states per packet
 // rather than in its header (see container.Track.MidPadding). A measured track
-// whose Samples is negative measured nothing, so the header's own stands.
+// whose Samples is negative or an estimate, or whose trims nothing has read,
+// measured nothing, so the header's own stands.
 //
 // It is one function because plan and run must agree field for field: the cut
 // windows, the trailer and the init segment all read these, and a run that
 // re-derived a subset of them would bound its spans differently from the plan
 // that was advertised and keyed.
 func adoptMeasured(track, measured container.Track) container.Track {
-	if measured.Samples < 0 {
+	if measured.Samples < 0 || measured.SamplesAdvisory || measured.TrimsUnread {
 		return track
 	}
 	track.Samples, track.SamplesExact, track.SamplesAdvisory = measured.Samples, true, false
 	track.Padding, track.MidPadding, track.MidTrims = measured.Padding, measured.MidPadding, measured.MidTrims
+	track.TrimsUnread = false
 	return track
+}
+
+// cutSource is the source track a cut runs from: the header's, with the
+// caller's measurement over it. Handed none for a track whose trims are
+// unread, the run walks the source once, as a copy does: the cut view has
+// no walk of its own, and a cut from an estimate ends where the estimate does.
+func cutSource(ctx context.Context, demux container.Demuxer, header, measured container.Track) (container.Track, error) {
+	track := adoptMeasured(header, measured)
+	if !track.TrimsUnread {
+		return track, nil
+	}
+	walked, ok, err := walkedTrack(ctx, demux, header.ID)
+	if err != nil {
+		return track, err
+	}
+	if ok {
+		return adoptMeasured(header, walked), nil
+	}
+	return track, nil
 }
 
 // Cut returns a view of demux holding only track's packets that fall in spans,
@@ -924,6 +990,12 @@ type cutDemuxer struct {
 	// havePrev says prevPad describes a packet this view read: false at the
 	// start and after a seek, when the packet before the cursor is unknown.
 	havePrev bool
+	// prevKept says the view delivered that packet: it lay in a window.
+	prevKept bool
+	// tailPad is the trims the plan placed nowhere, the first ending at the
+	// raw position tailAt, 0 for none: the end trim's while every packet
+	// after the first is trimmed whole.
+	tailPad, tailAt int64
 }
 
 // Tracks reports the cut's own track, which is the one the packets coming out of
@@ -969,7 +1041,8 @@ func (c *cutDemuxer) ReadPacket(pkt *container.Packet) error {
 			// Every window is behind us. Stopping here rather than reading the
 			// rest out is what makes a head-only cut cost only the head, and the
 			// bare sentinel is the clean end container.Demuxer specifies.
-			return io.EOF
+			// Trims still held ride on the last kept packets.
+			return c.endOfCut(c.tailPad)
 		}
 		if err := c.Demuxer.ReadPacket(pkt); err != nil {
 			if err == io.EOF {
@@ -997,12 +1070,26 @@ func (c *cutDemuxer) ReadPacket(pkt *container.Packet) error {
 		// place, and this is the backstop for a source nothing measured first
 		// or a stale measure. Checked before the windows advance, so the last
 		// kept packet is covered too; the packet that ends the walk never is.
+		//
+		// A trim the plan placed nowhere may still be the end trim's, which a
+		// walk counts from the last packet back while each is trimmed whole,
+		// so it is held until a packet plays after it.
+		own := min(max(pkt.Padding, 0), pkt.Dur)
 		if c.havePrev {
 			if planned := plannedTrim(c.trims, start); planned != c.prevPad {
-				return cutTrimMismatch(c.prevPad, planned, start)
+				if planned != 0 {
+					return cutTrimMismatch(c.prevPad, planned, start)
+				}
+				if c.tailPad == 0 {
+					c.tailAt = start
+				}
+				c.tailPad += c.prevPad
+			}
+			if c.tailPad > 0 && own < pkt.Dur {
+				return cutTrimMismatch(c.tailPad, 0, c.tailAt)
 			}
 		}
-		c.prevPad, c.havePrev = min(max(pkt.Padding, 0), pkt.Dur), true
+		c.prevPad, c.havePrev, c.prevKept = own, true, false
 		for c.cur < len(c.windows) && c.windows[c.cur].to >= 0 && start >= c.windows[c.cur].to {
 			c.cur++
 		}
@@ -1043,6 +1130,7 @@ func (c *cutDemuxer) ReadPacket(pkt *container.Packet) error {
 		// a wholly discarded pre-roll packet shares the splice's timestamp.
 		pkt.PTS = c.out
 		c.out += pkt.Dur - pad
+		c.prevKept = true
 		return nil
 	}
 }
@@ -1069,10 +1157,27 @@ func (c *cutDemuxer) keptIn(from, to int64) int64 {
 // malformed input otherwise. Otherwise the walk ends where the packets do.
 func (c *cutDemuxer) endOfPackets() error {
 	if c.pos >= c.lastEnd || container.DamageOf(c.Demuxer) > c.damage {
-		return io.EOF // reached, or short with the damage reported on the way
+		// Reached, or short with the damage reported on the way. The trims
+		// held and the last packet's own, if it was kept, end the cut.
+		trim := c.tailPad
+		if c.prevKept {
+			trim += c.prevPad
+		}
+		return c.endOfCut(trim)
 	}
 	return shortSource(fmt.Sprintf("waxflow: the source's packets end at %d, short of the cut window ending at %d",
 		c.pos, c.lastEnd), c.blind)
+}
+
+// endOfCut ends the view, or refuses a cut whose stated length reaches into
+// the trim samples its last kept packets trim: the trailer would state them
+// as audio. The cut's inner trims are in the raw run and not in its length.
+func (c *cutDemuxer) endOfCut(trim int64) error {
+	over := c.cut.Delay + c.cut.Samples + c.cut.MidPadding - (c.outRaw - trim)
+	if trim > 0 && over > 0 && c.cut.Samples >= 0 && !c.cut.SamplesAdvisory {
+		return cutEndTrimMismatch(over, trim)
+	}
+	return io.EOF
 }
 
 func cutStraddle(start, end, at int64) error {
@@ -1093,6 +1198,15 @@ func cutTrimMismatch(got, want, at int64) error {
 		want, at, got))
 }
 
+// cutEndTrimMismatch is the cut view's refusal when the cut's length states
+// over of the trim samples its last kept packets trim between them: a source
+// nothing measured first, or one that changed since.
+func cutEndTrimMismatch(over, trim int64) error {
+	return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
+		"waxflow: the plan's length takes in %d of the %d samples the packets that end this cut trim; the source is not the one that was measured, so this cut cannot be made without re-measuring it",
+		over, trim))
+}
+
 // PlanCut reports whether opts can be served by cutting track's existing packets
 // to spans and rewriting the container around them, and how.
 //
@@ -1102,9 +1216,11 @@ func cutTrimMismatch(got, want, at int64) error {
 // sample-exactly in the decode domain. An error means the request is wrong for
 // every rung, and a transcode of it would fail identically.
 //
-// grid is the source's packet duration from Engine.PacketGrid, exactly as
-// PlanRemuxSegments takes one. A varying grid (0) declines the cut as it
-// declines the segmented remux.
+// grid measures the source's packet duration, as Engine.PacketGrid does, and
+// is asked as PlanRemuxSegments asks it: at most once, only after every
+// question the track, options and spans answer has passed, its error back
+// unchanged. A varying grid (0) declines the cut as it declines the segmented
+// remux.
 //
 // # Why the declines say nothing to the caller
 //
@@ -1128,50 +1244,55 @@ func cutTrimMismatch(got, want, at int64) error {
 // made of. Two more come from the destination: PlanRemux declines a cut whose
 // kept packets carry a trim for every destination but Matroska (the cut
 // track's MidPadding is exactly those), and cutTrimsExpressible declines one
-// whose head or tail trim the destination cannot signal.
+// whose head or tail trim the destination cannot signal. Before the grid is
+// asked, the track, options and spans decline what they rule out for every
+// grid, each logged as such: a format or options that need a re-encode, a
+// trim list the walk left short or no grid places, spans SpliceTrims cannot
+// splice, trims the destination cannot carry, and a track its muxer would
+// refuse. A source whose inner trims fit one grid alone is planned on it
+// first, since every other grid declines.
 //
 // Only that code declines. A config that will not parse at all is different
-// and now errors: since the codes split it says CodeMalformedInput, and a
-// config the demuxer built and the decoder accepts does not reach that answer.
+// and errors once the grid is asked (a request ruled out before the ask
+// declines instead): it says CodeMalformedInput, and a config the demuxer
+// built and the decoder accepts does not reach that answer.
 // A damaged source errors for the same reason: falling through to rung 3 would
 // only fail there with the same words, several minutes of decoding later,
 // under a status that told the client to send a different format.
-func (e *Engine) PlanCut(track container.Track, opts TranscodeOptions, spans []Span, grid int) (*CutPlan, error) {
+//
+// A plan answers for the track it is handed. One whose trims are unread
+// (container.Track.TrimsUnread) hides the end trim the run measures, so
+// CutStream refuses a cut that a plan from the measured track declines: an
+// end trim WebM cannot state is the muxer's refusal at Begin.
+func (e *Engine) PlanCut(track container.Track, opts TranscodeOptions, spans []Span, grid func() (int, error)) (*CutPlan, error) {
 	if err := opts.Check(); err != nil {
 		return nil, err
 	}
-	cut, landed, err := CutTrack(track, opts, spans, grid)
+	g, asked, err := e.cutGrid(track, opts, spans, false, grid, func(g int) bool {
+		p, err := e.planCutOn(track, opts, spans, g)
+		return p == nil && err == nil
+	})
+	if !asked || err != nil {
+		return nil, err
+	}
+	return e.planCutOn(track, opts, spans, g)
+}
+
+// planCutOn is PlanCut on a grid of g.
+func (e *Engine) planCutOn(track container.Track, opts TranscodeOptions, spans []Span, g int) (*CutPlan, error) {
+	cut, landed, err := CutTrack(track, opts, spans, g)
 	if err != nil {
 		// The seam. CutTrack cannot express a decline through its signature, so
 		// it returns codes and this maps them onto the ladder's contract.
 		if waxerr.CodeOf(err) == waxerr.CodeUnsupportedFormat {
-			e.log.Debug("cut declined", "codec", track.Codec, "grid", grid, "reason", err)
+			e.log.Debug("cut declined", "codec", track.Codec, "grid", g, "reason", err)
 			return nil, nil
 		}
 		return nil, err
 	}
 	rp, err := e.PlanRemux(cut, opts)
-	if err != nil {
+	if err != nil || rp == nil {
 		return nil, err
-	}
-	if rp == nil {
-		// PlanRemux returns a bare nil, so the one decline a caller is most
-		// likely to have caused gets named here. SpliceTrims makes the cut's
-		// track trim inside its run, and only Matroska states that per
-		// packet, so every other container falls through to a re-encode.
-		//
-		// The source's own inner trims decline the same destinations, and
-		// dropping the option would not lift that, so the remedy is only
-		// offered where the option is the whole of the reason.
-		if opts.SpliceTrims && len(spans) > 1 && cut.MidPadding > 0 {
-			reason := "SpliceTrims needs a destination that states a trim per packet; ask for mka or webm, or drop the option and take the snapped splices"
-			if track.MidPadding > 0 {
-				reason = "SpliceTrims needs a destination that states a trim per packet, and this source trims inside its run too, so only mka or webm can serve it at all"
-			}
-			e.log.Debug("cut declined", "reason", reason,
-				"outFormat", opts.Format, "outContainer", opts.Container)
-		}
-		return nil, nil
 	}
 	// The trims are new, and PlanRemux only ever checked the source's. A cut's
 	// track carries a Delay and a Padding the source never had, and the
@@ -1186,7 +1307,226 @@ func (e *Engine) PlanCut(track container.Track, opts TranscodeOptions, spans []S
 	// term there (ADR-0004's container term), and a progressive cut writes
 	// through that muxer like any other remux does.
 	rp.Versions = append(rp.Versions, CutVersion)
-	return &CutPlan{RemuxPlan: *rp, Landed: landed}, nil
+	return &CutPlan{RemuxPlan: *rp, Landed: landed, Grid: g, Source: track}, nil
+}
+
+// cutGrid asks a cut's header questions and then the grid, which it asks
+// only when they pass. asked is false for a decline before the ask; an
+// invalid span and the grid's own error come back as errors. opts is what
+// the copy predicate reads: a segmented cut passes the segmented depth, and
+// asks its init header's questions too. declines reports whether the
+// planner declines on a grid of g, asked of the one grid a source's inner
+// trims fit, since every other declines at those trims.
+func (e *Engine) cutGrid(track container.Track, opts TranscodeOptions, spans []Span, segmented bool,
+	grid func() (int, error), declines func(g int) bool) (g int, asked bool, err error) {
+	msg := "cut declined"
+	if segmented {
+		msg = "segmented cut declined"
+	}
+	if err := cutHeaders(track, spans); err != nil {
+		if waxerr.CodeOf(err) == waxerr.CodeUnsupportedFormat {
+			e.log.Debug(msg, "codec", track.Codec, "reason", err)
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	if reason, out := cutRuledOut(track, opts, spans, segmented); reason != "" {
+		e.log.Debug(msg, "reason", reason, "codec", track.Codec, "outFormat", opts.Format, "outContainer", out)
+		return 0, false, nil
+	}
+	if pg, ok := pinnedGrid(track); ok && declines(pg) {
+		e.log.Debug(msg, "reason", "the cut declines on the one grid the source's inner trims fit", "grid", pg)
+		return 0, false, nil
+	}
+	g, err = grid()
+	return g, true, err
+}
+
+// cutRuledOut names what rules out every cut of spans from track under opts
+// whatever the grid, and the container it judged, or returns "". A row or
+// form error is left to the planner, which reports it once the grid is
+// asked.
+func cutRuledOut(track container.Track, opts TranscodeOptions, spans []Span, segmented bool) (reason, out string) {
+	row, fm, copies, err := remuxForm(track, opts)
+	if err != nil {
+		return "", ""
+	}
+	out = row.containerName(fm)
+	g, most, trimmed := trimGrid(track)
+	switch {
+	case !copies:
+		return "the format or options need a re-encode", out
+	case !listedTrims(track):
+		return "this source trims inside the run at places the walk did not record", out
+	case trimmed && g < most:
+		return "this source trims inside the run at places no packet grid holds", out
+	}
+	if reason := splicedOverlap(track, opts, spans); reason != "" {
+		return reason, out
+	}
+	if reason := cutTrimsRuledOut(track, opts, spans, out, segmented); reason != "" {
+		return reason, out
+	}
+	probe, ok := cutProbe(track, spans)
+	if !segmented {
+		if ok && fm.trackFits != nil {
+			if err := fm.trackFits(probe); err != nil {
+				return fmt.Sprintf("the destination cannot write this track (%v)", err), out
+			}
+		}
+		return "", out
+	}
+	// A trim at the run's start fills the first packet on any grid it fits,
+	// and a restart's seek cannot tell such a packet from the next.
+	if len(track.MidTrims) > 0 && track.MidTrims[0].Pos == 0 {
+		return "a trim empties a packet, so a restart's seek is ambiguous", out
+	}
+	if ok && !cutInitExpressible(probe) {
+		return "the init header cannot express this track", out
+	}
+	return "", out
+}
+
+// trimGrid returns the gcd of the ends of track's inner trims and the
+// largest trim: a grid places them only when it divides every end and holds
+// every trim. trimmed is false for no trims, or one too far out to add.
+func trimGrid(track container.Track) (g, most int64, trimmed bool) {
+	for _, tr := range track.MidTrims {
+		if tr.Pos >= maxCutSample {
+			return 0, 0, false
+		}
+		g, most = gcd(g, tr.Pos+tr.Samples), max(most, tr.Samples)
+	}
+	return g, most, len(track.MidTrims) > 0
+}
+
+// pinnedGrid returns the one grid that places track's inner trims when no
+// other can: their largest trim is over half the gcd of their ends, and
+// every divisor of the gcd but itself is at most half of it. A trim at raw
+// 0 pins its own length.
+func pinnedGrid(track container.Track) (int, bool) {
+	g, most, trimmed := trimGrid(track)
+	if !trimmed || most > g || 2*most <= g || g >= maxCutSample || g > math.MaxInt {
+		return 0, false
+	}
+	return int(g), true
+}
+
+// gcd is the greatest common divisor of a and b, neither negative.
+func gcd(a, b int64) int64 {
+	for b != 0 {
+		a, b = b, a%b
+	}
+	return a
+}
+
+// splicedOverlap names two spans whose windows SpliceTrims overlaps on every
+// grid, or returns "". Span i backs off by the pre-roll from its head's
+// snap, so it reaches into span i-1 when the two touch on the raw timeline
+// and snap to one grid point (a trim at the join parts them), and when it
+// starts within the pre-roll and backs off to raw 0.
+func splicedOverlap(track container.Track, opts TranscodeOptions, spans []Span) string {
+	preroll := cutCodecs[track.Codec].preroll
+	if !opts.SpliceTrims || preroll <= 0 {
+		return ""
+	}
+	for i := 1; i < len(spans); i++ {
+		from := rawStart(track.MidTrims, track.Delay, spans[i].From)
+		switch {
+		case rawEnd(track.MidTrims, track.Delay, spans[i-1].To) == from:
+			return fmt.Sprintf("spans %d and %d touch, so a spliced head's pre-roll reaches into the span before it; join them or drop SpliceTrims", i-1, i)
+		case from <= preroll:
+			return fmt.Sprintf("span %d starts within the pre-roll, so its spliced head's pre-roll reaches into span %d; drop SpliceTrims", i, i-1)
+		}
+	}
+	return ""
+}
+
+// cutProbe is track as a cut of spans presents it to its destination, for
+// the questions the cut leaves alone. The reprime writes the cut's own
+// priming into the codec config, so the probe carries one, with a delay to
+// match: positive, as the first head's back-off leaves it, for a span past
+// sample 0 or a primed source, and 0 otherwise. A last span to
+// the end keeps the source's padding on every grid; another's padding is
+// the grid's, and the probe states none. ok is false when the reprime cannot
+// build one, which the cut answers once the grid is asked.
+func cutProbe(track container.Track, spans []Span) (container.Track, bool) {
+	cc := cutCodecs[track.Codec]
+	delay := min(cc.preroll, track.Delay+spans[0].From)
+	if cc.reprime != nil {
+		cfg, err := cc.reprime(track.CodecConfig, delay)
+		if err != nil {
+			return track, false
+		}
+		track.CodecConfig = cfg
+	}
+	track.Delay = delay
+	if spans[len(spans)-1].To != ToEnd {
+		track.Padding = 0
+	}
+	return track, true
+}
+
+// cutTrimsRuledOut names the trims containerName cannot carry that every cut
+// of spans from track has, whatever the grid, or returns "". A segmented cut
+// writes fMP4, which carries no trim inside the run.
+func cutTrimsRuledOut(track container.Track, opts TranscodeOptions, spans []Span, containerName string, segmented bool) string {
+	preroll := cutCodecs[track.Codec].preroll
+	if !StatesTrimsPerPacket(containerName) {
+		// Each spliced interior head's pre-roll is trimmed inside the run.
+		if opts.SpliceTrims && len(spans) > 1 && preroll > 0 {
+			reason := "SpliceTrims needs a destination that states a trim per packet (mka or webm)"
+			if segmented {
+				reason = "SpliceTrims needs a destination that states a trim per packet, which a segmented cut's fMP4 is not"
+			}
+			if track.MidPadding > 0 {
+				return reason + ", and this source trims inside its run too"
+			}
+			return reason + "; drop the option to take the snapped splices"
+		}
+		if keepsSourceTrim(track, spans) {
+			if segmented {
+				return "the cut keeps a trim inside the source's run, which a segmented cut cannot state"
+			}
+			return "the cut keeps a trim inside the source's run, which only mka or webm state"
+		}
+		// The first head backs off by the pre-roll, so a span past sample 0
+		// or a primed source leaves the cut a front trim, or moves it inside
+		// the run. cutTrimsExpressible answers any front trim by the
+		// container alone.
+		if preroll > 0 && (spans[0].From > 0 || track.Delay > 0) && !cutTrimsExpressible(containerName, 1, 0) {
+			return "the destination cannot signal the cut's trims"
+		}
+	}
+	// From the first sample of an unprimed source to its end, the cut keeps
+	// the source's end trim and no front trim.
+	if spans[0].From == 0 && track.Delay == 0 && spans[len(spans)-1].To == ToEnd &&
+		!cutTrimsExpressible(containerName, 0, track.Padding) {
+		return "the destination cannot signal the cut's trims"
+	}
+	return ""
+}
+
+// keepsSourceTrim reports whether the first window keeps a source trim
+// whatever the grid: one ending past the first span's pre-roll point and
+// inside the span, within the run the source states. That window's head
+// snaps down from the pre-roll point, and a trim ends on the grid and holds
+// at most a packet, so one ending past the point starts at or after the
+// head. The tail keeps every packet ending inside the span.
+func keepsSourceTrim(track container.Track, spans []Span) bool {
+	from := rawStart(track.MidTrims, track.Delay, spans[0].From) - cutCodecs[track.Codec].preroll
+	to := int64(-1)
+	if spans[0].To != ToEnd {
+		to = rawEnd(track.MidTrims, track.Delay, spans[0].To)
+	}
+	for _, tr := range track.MidTrims {
+		end := tr.Pos + tr.Samples
+		if end > from && (to < 0 || end < to) &&
+			(track.Samples < 0 || end <= track.Delay+track.Samples+track.Padding+track.MidPadding) {
+			return true
+		}
+	}
+	return false
 }
 
 // cutTrimsExpressible reports whether containerName can signal the trims a cut
@@ -1203,12 +1543,13 @@ func (e *Engine) PlanCut(track container.Track, opts TranscodeOptions, spans []S
 //
 // Two concrete failures make it necessary, and neither is theoretical:
 //
-//   - fMP4 dies at End, after the whole file is written. Its guard is not
-//     codec-keyed: only the AAC branch of Begin sets the muxer's delay, so an
-//     AAC track with Delay 0 (an MP4 muxed without iTunSMPB or an edit list,
-//     which is common) cut to a Padding that is not a whole frame trips it about
-//     1023 times in 1024. That is precisely the "die inside the muxer part way
-//     through a response" failure gaplessSurvives exists to prevent.
+//   - fMP4 states an end trim as its edit list's length, which a player may
+//     not read (ffmpeg's does not), and then plays up to a packet of audio
+//     the caller cut, where the transcode's tail is its encoder's padding.
+//     That holds beside a delay too. A cut with a delay is served all the
+//     same, for the generation it saves; one with none (an AAC track with
+//     Delay 0 cut from sample 0 to a Padding that is not a whole frame) is
+//     declined by choice, as it was while the muxer refused it.
 //   - ADTS silently plays the audio the caller removed. gaplessSurvives
 //     deliberately permits AAC to ADTS with a nonzero delay, and its reasoning
 //     is sound for a remux: a transcode to ADTS cannot signal its fresh
@@ -1235,11 +1576,11 @@ func cutTrimsExpressible(containerName string, delay, padding int64) bool {
 		// The flat muxer writes its edit list at End, when it knows everything,
 		// so it can express either trim.
 		return true
-	case "aac", "he-aac":
-		// The fragmented muxer (both rows' default), whose edit list is
-		// written at Begin from the track's delay. With no delay to write one
-		// from, a padding arriving at End has nowhere to go and the muxer
-		// says so.
+	case "aac", "he-aac", ContainerFragmented:
+		// The fragmented muxer (both rows' default, and by its own name)
+		// states an end trim as its edit list's length, which not every
+		// player reads. A cut with a delay is served for the generation it
+		// saves; one with none declines by choice, as it always has.
 		return delay > 0
 	}
 	return false
@@ -1248,10 +1589,10 @@ func cutTrimsExpressible(containerName string, delay, padding int64) bool {
 // The pieces assemble like this, and the order is the ladder's own: plan, then
 // run only what the plan accepted.
 //
-//	grid, err := e.PacketGrid(src, hint)
+//	grid := func() (int, error) { return e.PacketGrid(ctx, src, hint) }
 //	plan, err := e.PlanCut(track, opts, spans, grid) // (nil, nil) declines
-//	cut, landed, err := CutTrack(track, opts, spans, grid)
-//	demux, err := Cut(demux, track, opts, spans, grid)
+//	cut, landed, err := CutTrack(track, opts, spans, plan.Grid)
+//	demux, err := Cut(demux, track, opts, spans, plan.Grid)
 //	res, err := e.RemuxDemuxer(ctx, demux, cut, dst, opts)
 //
 // RemuxDemuxer takes CutTrack's track and not plan.Track, which looks like the
@@ -1291,11 +1632,14 @@ func cutTrimsExpressible(containerName string, delay, padding int64) bool {
 // running from the header's -1 would write a stream whose own duration disagrees
 // with the plan's advertised one. A Matroska source's trims are the same kind of
 // fact for the same reason: they live on the blocks rather than in the header, so
-// only a walk finds them, and computeCut's decodedEnd reads the tail trim. Plan
-// and run must read one track or their windows drift. Everything else (codec,
-// config, delay, track ID) a fresh open reads identically. Pass a track whose
-// Samples is negative to take the header's own, which is what a source that
-// declares its length already has.
+// only a walk finds them, and computeCut's decodedEnd reads the tail trim. A
+// plan made from a measurement and its run read one track, so their windows
+// agree. Everything else (codec, config, delay, track ID) a fresh open reads
+// identically. Pass a track whose Samples is negative to take the header's
+// own, which is what a source that declares its length already has. Handed
+// no measurement of a source whose trims are unread, the run walks it once
+// and cuts from that: such a plan was made from an estimate, and where the
+// two differ the run is the file's.
 //
 // It is the SOURCE's track, not CutPlan.Track. The two differ in exactly the
 // fields this adopts, and a cut's own track carries a length and trims the
@@ -1313,7 +1657,10 @@ func (e *Engine) CutStream(ctx context.Context, src container.Source, hint strin
 	if err != nil {
 		return nil, err
 	}
-	track := adoptMeasured(info.Default(), measured)
+	track, err := cutSource(ctx, demux, info.Default(), measured)
+	if err != nil {
+		return nil, err
+	}
 	// CutTrack's track, not a plan's, and for the same reason RemuxDemuxer takes
 	// the demuxer's own track: the walk filters on the source's track ID, which
 	// CutTrack preserves, while a plan normalizes it to 0. There is no

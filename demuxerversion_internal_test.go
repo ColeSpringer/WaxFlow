@@ -56,21 +56,21 @@ func TestDemuxerVersionRidesEveryPlan(t *testing.T) {
 			return p.Versions, nil
 		}},
 		{"PlanRemuxSegments", opus, func(tr container.Track) ([]string, error) {
-			p, err := e.PlanRemuxSegments(tr, toOpus, 2, 960)
+			p, err := e.PlanRemuxSegments(tr, toOpus, 2, knownGrid(960))
 			if err != nil || p == nil {
 				return nil, err
 			}
 			return p.Versions, nil
 		}},
 		{"PlanCut", opus, func(tr container.Track) ([]string, error) {
-			p, err := e.PlanCut(tr, toOpus, span, 960)
+			p, err := e.PlanCut(tr, toOpus, span, knownGrid(960))
 			if err != nil || p == nil {
 				return nil, err
 			}
 			return p.Versions, nil
 		}},
 		{"PlanCutSegments", opus, func(tr container.Track) ([]string, error) {
-			p, err := e.PlanCutSegments(tr, toOpus, span, 960, 2)
+			p, err := e.PlanCutSegments(tr, toOpus, span, knownGrid(960), 2)
 			if err != nil || p == nil {
 				return nil, err
 			}

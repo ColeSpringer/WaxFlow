@@ -663,3 +663,62 @@ so two qualities of one source shared a key. The term is now
 quality in `%g`, as `flac.EncoderVersion(level)` names its level. Quality 0
 resolves to the default, 3, as the encoder does, and both keep the bare
 revision, so no existing key moves.
+
+## Amendment (2026-11-24): MP4 names its demuxer's revision
+
+The MP4 reader delivers other samples for five kinds of unchanged file
+(ADR-0002, 2026-11-24):
+
+- A progressive file whose one edit runs from media time 0 for less than
+  its sample table holds, by more than a tick of the movie timescale, is
+  trimmed to that edit, where the edit was ignored. This engine's
+  progressive output of a track with an end trim and no delay is one.
+- A file whose edit states its length in a timescale coarser than the
+  sample rate, rounded down, keeps the tick of audio the reader had
+  trimmed. ffmpeg's AAC at 44.1 kHz and its MP3 are two.
+- A file whose edit really trims in such a timescale plays up to a tick
+  more of what it trimmed, with a delay or without, progressive or
+  fragmented: the length is the longest its duration can be the rounding
+  of (44144 samples where 1000 ms at 44.1 kHz read as 44100).
+- A fragmented file with such an edit reports that length as a bound,
+  declared and no longer exact. Fragments that hold any length the
+  duration can be the rounding of are whole, where a writer that rounded
+  up read as truncated and one that rounded down lost up to a tick. A
+  walk settles the length and caps the run at the bound. Beside a delay
+  the bound caps the decode with no walk. With none, every copy and
+  transcode, progressive or segmented, walks first, so each ends at the
+  bound on a file as on a pipe, and a decode nothing walked plays all
+  the fragments hold.
+- A file whose list holds several edits, the first from a delay, keeps
+  the delay and plays its sample table's length, where the sum of the
+  edits was read as one length. Several edits are a cut list, from a
+  delay as from 0.
+
+`mp4.DemuxerVersion` is `mp4-demux-2`, on every plan over an MP4 source,
+so every cached entry of one misses once. The server's cache-key golden
+shows it on the copy, cut, transcode and HLS lines of its two MP4 sources.
+
+## Amendment (2026-11-24): the Matroska muxer spreads an end trim
+
+The Matroska muxer wrote an end trim as one DiscardPadding on the last
+block, whatever that block held. One longer than the block is now spread
+over the final blocks, each within its own (ADR-0002, 2026-11-24), so a
+track that wrote before writes other bytes: a copy whose source states such
+a trim, by its padding or by a length short of its packets. fdk's HE-AAC v2
+is one, 2494 samples on access units of 2048.
+
+`mka.MuxerVersion` is `mka-mux-4`, one term for the Matroska and WebM
+forms, so every cached entry of either misses once. A trim within its last
+block is written as before: the bytes of those entries are the ones they
+held. So is every WebM file but the copy of a source whose packets state
+an end trim between them, which forwarded each block's and now states the
+total on the last block. The server's cache-key golden shows the term on
+its ten Matroska and WebM lines.
+
+`mka.DemuxerVersion` stays `mka-demux-2`. The reader now counts the trims
+that run unbroken to the end of a stream as the track's end trim, where it
+called all but the last packet's inner. Each packet still states the same
+trim at the same position, so a read delivers the same samples and a walk
+settles the same length. What moves is which rung answers: a copy or a cut
+off such a file to a container that states one end trim was declined to
+the transcode and is now a copy, under the copy's own key.

@@ -35,16 +35,19 @@ type CutSegmentPlan struct {
 // PlanCutSegments plans the segmented form of a cut: the HLS spelling of the cut
 // rung, and the mirror of PlanRemuxSegments over a synthesized cut track. It runs
 // CutTrack for the cut's own track, plans that track's segmented remux, and then
-// applies the destination-trim gate PlanCut applies, so a segmented cut declines
-// in exactly the cases the progressive one does.
+// applies the destination-trim gate PlanCut applies, to the fMP4 it writes.
+// Where PlanCut asks the destination's muxer it asks the init header, and it
+// also declines a source a restart's seek cannot place.
 //
-// grid is the source's packet duration from PacketGrid, as PlanRemuxSegments
-// takes one. A varying grid (0) declines, as does anything PlanRemuxSegments
-// declines, and all of these return (nil, nil): the caller falls through to a
-// transcode. An error means the request is wrong for every rung, exactly the
-// error/decline seam PlanCut documents.
+// grid measures the source's packet duration, and is asked as PlanCut asks
+// it, with the copy and the init header judged at the segmented depth. An
+// invalid span and then a NaN, negative or over-long segSeconds are refused
+// before any decline. Past that, a varying grid (0) declines, as does anything
+// PlanRemuxSegments declines, and all of these return (nil, nil): the caller
+// falls through to a transcode. An error means the request is wrong for every
+// rung, exactly the error/decline seam PlanCut documents.
 func (e *Engine) PlanCutSegments(track container.Track, opts TranscodeOptions, spans []Span,
-	grid int, segSeconds float64) (*CutSegmentPlan, error) {
+	grid func() (int, error), segSeconds float64) (*CutSegmentPlan, error) {
 	if err := checkSegmented(opts); err != nil {
 		return nil, err
 	}
@@ -55,14 +58,35 @@ func (e *Engine) PlanCutSegments(track container.Track, opts TranscodeOptions, s
 	if row.hls == nil {
 		return nil, noSegmentedForm(opts.Format)
 	}
-	cutTrack, landed, err := CutTrack(track, opts, spans, grid)
+	// An invalid span, then the duration, are refused before any decline, as
+	// a transcode of the span refuses them.
+	if err := validateCutSpans(track, spans); err != nil {
+		return nil, err
+	}
+	if _, err := segmentSeconds(segSeconds); err != nil {
+		return nil, err
+	}
+	g, asked, err := e.cutGrid(track, segmentBitDepth(opts, track.Fmt), spans, true, grid, func(g int) bool {
+		p, err := e.planCutSegmentsOn(track, opts, spans, g, segSeconds)
+		return p == nil && err == nil
+	})
+	if !asked || err != nil {
+		return nil, err
+	}
+	return e.planCutSegmentsOn(track, opts, spans, g, segSeconds)
+}
+
+// planCutSegmentsOn is PlanCutSegments on a grid of g.
+func (e *Engine) planCutSegmentsOn(track container.Track, opts TranscodeOptions, spans []Span, g int,
+	segSeconds float64) (*CutSegmentPlan, error) {
+	cutTrack, landed, err := CutTrack(track, opts, spans, g)
 	if err != nil {
 		// The seam, exactly as PlanCut maps it: CutTrack cannot express a decline
 		// through its signature, so a CodeUnsupportedFormat becomes the ladder's
 		// (nil, nil), while a CodeInvalidRequest or a CodeMalformedInput
 		// propagates as an error rung 3 would hit identically.
 		if waxerr.CodeOf(err) == waxerr.CodeUnsupportedFormat {
-			e.log.Debug("segmented cut declined", "codec", track.Codec, "grid", grid, "reason", err)
+			e.log.Debug("segmented cut declined", "codec", track.Codec, "grid", g, "reason", err)
 			return nil, nil
 		}
 		return nil, err
@@ -70,11 +94,11 @@ func (e *Engine) PlanCutSegments(track container.Track, opts TranscodeOptions, s
 	// A restart seeks the source, and a trim that empties a packet makes the
 	// landing ambiguous (see cutSeekable); the progressive cut, which never
 	// seeks, is unaffected.
-	if wholePacketTrim(track.MidTrims, int64(grid)) {
+	if wholePacketTrim(track.MidTrims, int64(g)) {
 		e.log.Debug("segmented cut declined", "reason", "a trim empties a packet, so a restart's seek is ambiguous")
 		return nil, nil
 	}
-	rsp, err := e.PlanRemuxSegments(cutTrack, opts, segSeconds, grid)
+	rsp, err := e.PlanRemuxSegments(cutTrack, opts, segSeconds, func() (int, error) { return g, nil })
 	if err != nil || rsp == nil {
 		return nil, err
 	}
@@ -93,9 +117,17 @@ func (e *Engine) PlanCutSegments(track container.Track, opts TranscodeOptions, s
 	return &CutSegmentPlan{
 		RemuxSegmentPlan: *rsp,
 		Landed:           landed,
-		Grid:             grid,
+		Grid:             g,
 		Source:           track,
 	}, nil
+}
+
+// cutInitExpressible reports whether the init header can express probe, a
+// track as a cut presents it (cutProbe): the sample entry reads nothing else
+// a cut changes.
+func cutInitExpressible(probe container.Track) bool {
+	_, err := mp4.InitSegment(probe)
+	return err == nil
 }
 
 // CutInitSegment builds the CMAF init header for a planned segmented cut. It is
@@ -153,7 +185,10 @@ func (e *Engine) CutSegments(ctx context.Context, src container.Source, hint str
 	// cut arithmetic reads its length and its trims (see computeCut's
 	// decodedEnd), and plan and run must read the same ones or their windows
 	// drift.
-	track := adoptMeasured(info.Default(), measured)
+	track, err := cutSource(ctx, demux, info.Default(), measured)
+	if err != nil {
+		return nil, err
+	}
 	cutTrack, _, err := CutTrack(track, opts, spans, grid)
 	if err != nil {
 		return nil, err
@@ -161,7 +196,7 @@ func (e *Engine) CutSegments(ctx context.Context, src container.Source, hint str
 	// The segmenter's track is PlanRemux's ID-0 normalization of the cut track,
 	// exactly as RemuxSegments segments rp.Track; the walk filters on the source's
 	// own track ID, which CutTrack preserves onto cutTrack.
-	rp, err := e.PlanRemux(cutTrack, opts)
+	rp, _, err := e.planRemux(cutTrack, opts, false)
 	if err != nil {
 		return nil, err
 	}
@@ -323,6 +358,6 @@ func (c *cutSeekDemuxer) SeekSample(ctx context.Context, track int, outTarget in
 	// The packet before the cursor is unknown after a seek: carrying the
 	// pre-seek packet's trim across would check the first packet the seek
 	// lands on against a trim it does not follow.
-	c.havePrev = false
+	c.havePrev, c.prevKept, c.tailPad = false, false, 0
 	return c.out, nil
 }

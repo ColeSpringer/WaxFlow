@@ -44,12 +44,12 @@ func aacTrack(delay, samples int64) container.Track {
 	return container.Track{
 		Codec: codec.AACLC,
 		Fmt:   audio.Format{Rate: 48000, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Float, BitDepth: 32},
-		// CodecConfig stays nil: nothing on the cut path parses an ASC, since
-		// AAC's priming lives in the container's edit list rather than in the
-		// config. PlanRemux's muxer-side checks are where a real ASC is needed,
-		// and the tests that need one drive a real file.
-		Samples: samples,
-		Delay:   delay,
+		// A 48 kHz stereo AAC-LC ASC: the cut's arithmetic never reads it (AAC's
+		// priming lives in the container's edit list), and the destination
+		// muxer PlanRemux asks does.
+		CodecConfig: []byte{0x11, 0x90},
+		Samples:     samples,
+		Delay:       delay,
 	}
 }
 
@@ -221,6 +221,27 @@ func TestCutTrackRefusesASpanWithNoWholePacket(t *testing.T) {
 	// One packet is enough.
 	if _, _, err := CutTrack(track, TranscodeOptions{}, []Span{{0, 10000}, {20000, 22000}, {40000, 50000}}, 1024); err != nil {
 		t.Errorf("a span holding one whole packet was declined: %v", err)
+	}
+}
+
+// TestCutTrackRefusesAFirstSpanWhoseTailSnapsBeforeItsHead: the first span's
+// audio begins at its requested head, the pre-roll before it trimmed by the
+// delay, so a tail that snaps in to before that head keeps nothing, and the
+// delay would trim the next span's audio instead.
+func TestCutTrackRefusesAFirstSpanWhoseTailSnapsBeforeItsHead(t *testing.T) {
+	track := opusTrack(0, 480000)
+	// [5000, 5500): the window is [960, 4800), all of it before 5000.
+	_, landed, err := CutTrack(track, TranscodeOptions{}, []Span{{5000, 5500}, {96000, 192000}}, 960)
+	if waxerr.CodeOf(err) != waxerr.CodeUnsupportedFormat {
+		t.Errorf("a first span that keeps nothing landed at %v, err %v; want a decline", landed, err)
+	}
+	// [5000, 5800) keeps [5000, 5760) of the window [960, 5760).
+	cut, landed, err := CutTrack(track, TranscodeOptions{}, []Span{{5000, 5800}, {96000, 192000}}, 960)
+	if err != nil {
+		t.Fatalf("a first span keeping 760 samples was declined: %v", err)
+	}
+	if want := []Span{{5000, 5760}, {96000, 192000}}; !slices.Equal(landed, want) || cut.Delay != 4040 || cut.Samples != 96760 {
+		t.Errorf("landed %v, delay %d, samples %d; want %v, 4040, 96760", landed, cut.Delay, cut.Samples, want)
 	}
 }
 
@@ -557,16 +578,16 @@ func TestPlanCutMapsCodesOntoTheLadder(t *testing.T) {
 	opts := TranscodeOptions{Format: "aac", Container: "mka"}
 
 	// A decline is (nil, nil): the caller falls through to a transcode.
-	plan, err := e.PlanCut(aacTrack(0, 96000), opts, []Span{{0, 1000}, {1200, 20000}}, 1024)
+	plan, err := e.PlanCut(aacTrack(0, 96000), opts, []Span{{0, 1000}, {1200, 20000}}, knownGrid(1024))
 	if err != nil || plan != nil {
 		t.Errorf("PlanCut(a span with no whole packet) = (%v, %v), want (nil, nil): a decline is not an error", plan, err)
 	}
 	// An error is an error: no rung serves it.
-	if _, err := e.PlanCut(aacTrack(0, 96000), opts, []Span{{100, 100}}, 1024); err == nil {
+	if _, err := e.PlanCut(aacTrack(0, 96000), opts, []Span{{100, 100}}, knownGrid(1024)); err == nil {
 		t.Error("PlanCut(zero-length span) returned no error; rung 3 would refuse it identically")
 	}
 	// And a servable cut plans.
-	plan, err = e.PlanCut(aacTrack(1024, 96000), opts, []Span{{0, 20480}}, 1024)
+	plan, err = e.PlanCut(aacTrack(1024, 96000), opts, []Span{{0, 20480}}, knownGrid(1024))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -795,7 +816,7 @@ func TestCutDeclinesTrimsTheDestinationCannotWrite(t *testing.T) {
 	// common), cut so the padding is not a whole frame. To fMP4 this must
 	// decline rather than die at End after the whole file is written.
 	track := aacTrack(0, 96000)
-	plan, err := e.PlanCut(track, TranscodeOptions{Format: "aac"}, []Span{{0, 20000}}, 1024)
+	plan, err := e.PlanCut(track, TranscodeOptions{Format: "aac"}, []Span{{0, 20000}}, knownGrid(1024))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -808,7 +829,7 @@ func TestCutDeclinesTrimsTheDestinationCannotWrite(t *testing.T) {
 	// caller removed: ADTS can signal no trim at all, and this rung's Delay
 	// covers real source audio from before the cut point.
 	plan, err = e.PlanCut(aacTrack(1024, 96000), TranscodeOptions{Format: "aac", Container: "adts"},
-		[]Span{{20000, 40000}}, 1024)
+		[]Span{{20000, 40000}}, knownGrid(1024))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -820,7 +841,7 @@ func TestCutDeclinesTrimsTheDestinationCannotWrite(t *testing.T) {
 	// A From == 0 cut to ADTS that synthesizes no trims at all stays legal,
 	// which is the useful case and the early-out that keeps this narrow.
 	plan, err = e.PlanCut(aacTrack(0, -1), TranscodeOptions{Format: "aac", Container: "adts"},
-		[]Span{{0, ToEnd}}, 1024)
+		[]Span{{0, ToEnd}}, knownGrid(1024))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -831,7 +852,7 @@ func TestCutDeclinesTrimsTheDestinationCannotWrite(t *testing.T) {
 	// Matroska carries both trims outright, so the same cut the fMP4 case
 	// declined plans fine there. Without this row the test would pass on a
 	// PlanCut that declined everything.
-	plan, err = e.PlanCut(track, TranscodeOptions{Format: "aac", Container: "mka"}, []Span{{0, 20000}}, 1024)
+	plan, err = e.PlanCut(track, TranscodeOptions{Format: "aac", Container: "mka"}, []Span{{0, 20000}}, knownGrid(1024))
 	if err != nil {
 		t.Fatal(err)
 	}

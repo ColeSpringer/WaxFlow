@@ -117,11 +117,13 @@ func trexFor(trexes []trexDefaults, trackID int) trexDefaults {
 //
 // The edit list is the first and the only one that is authoritative. It is the
 // fMP4 convention: the encoder delay and the playable length ride in edts/elst,
-// read by the same parseElst the progressive path uses. This shares
-// editListTrims with the progressive gapless resolver but trusts the edit at
-// any media_time, since a fragmented movie has no sample table to fall back to,
-// and the edit's segment_duration is a measurement of the content
-// (SamplesExact).
+// read by the same parseElst the progressive path uses and rescaled by the
+// same editListTrims. A fragmented movie has no sample table to hold the edit
+// against, so a segment_duration that names one length is the length
+// outright (SamplesExact). One in a timescale coarser than the samples is
+// the longest length it can mean, declared and not exact: fragments that end
+// short of it by no more than its rounding are whole (compareDeclared), and
+// the end trim under that bound is unread until Walk (Track.TrimsUnread).
 //
 // A segment index is the second, and it is a declared count rather than an
 // authoritative one (both flags false, the tier the progressive sample table
@@ -141,10 +143,13 @@ func trexFor(trexes []trexDefaults, trackID int) trexDefaults {
 // stream.
 func (d *Demuxer) fragmentedLength(t *track) (delay, samples int64, exact, advisory bool, err error) {
 	if t.hasEdit {
-		delay0, seg, haveSeg := editListTrims(t, d.movieTimescale)
+		delay0, seg, slack, haveSeg := editListTrims(t, d.movieTimescale)
 		delay = delay0
 		if haveSeg {
-			return delay, seg, true, false, nil
+			// A duration that names one length is the length; a coarser
+			// one is a bound, exact once Walk holds it to the fragments.
+			d.fragSlack = slack
+			return delay, seg, slack == 0, false, nil
 		}
 	}
 	s, ok, err := d.readSidxAhead(t)

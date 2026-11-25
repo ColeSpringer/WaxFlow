@@ -304,7 +304,7 @@ func TestHEAACv2SegmentedRemuxCodecs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sp, err := waxflow.New().PlanRemuxSegments(info.Default(), waxflow.TranscodeOptions{Format: "aac"}, 4, 2048)
+	sp, err := waxflow.New().PlanRemuxSegments(info.Default(), waxflow.TranscodeOptions{Format: "aac"}, 4, knownGrid(2048))
 	if err != nil {
 		t.Fatalf("PlanRemuxSegments: %v", err)
 	}

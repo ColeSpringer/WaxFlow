@@ -225,7 +225,7 @@ type pipeline struct {
 // captures values, never req.src: the run outlives the request's handle.
 func (s *Server) sourcePipeline(req *streamRequest) pipeline {
 	ref, id, hint := req.p.src, req.src.ID, req.src.Ext
-	opts, tags, sp, r, grid, cutTrack := req.opts, req.tags, req.p.span, req.rung(), req.cutGrid, req.cutTrack
+	opts, tags, sp, r, cut, track := req.opts, req.tags, req.p.span, req.rung(), req.cut, req.track
 	return pipeline{ref: ref, rung: r, run: func(ctx context.Context, dst io.Writer) (*waxflow.TranscodeResult, error) {
 		// The pipeline owns its own source handle; the request's closes
 		// with the handler.
@@ -237,7 +237,7 @@ func (s *Server) sourcePipeline(req *streamRequest) pipeline {
 		if src.ID != id {
 			return nil, waxerr.New(waxerr.CodeSourceChanged, "source changed while starting the pipeline")
 		}
-		return s.transcodeSpan(ctx, src, hint, dst, opts, tags, sp, r, grid, cutTrack)
+		return s.transcodeSpan(ctx, src, hint, dst, opts, tags, sp, r, cut, track)
 	}}
 }
 
@@ -361,20 +361,23 @@ func rungName(r rung) string {
 // arithmetic that served t= on a whole file serves t= inside a virtual
 // track with no special case.
 func (s *Server) transcodeSpan(ctx context.Context, src *source.File, hint string, dst io.Writer,
-	opts waxflow.TranscodeOptions, tags []container.Tag, sp span, r rung, grid int, cutTrack container.Track) (*waxflow.TranscodeResult, error) {
+	opts waxflow.TranscodeOptions, tags []container.Tag, sp span, r rung, cut *waxflow.CutPlan,
+	planned container.Track) (*waxflow.TranscodeResult, error) {
 	run := waxflow.WithTags(tags)
 	switch r {
 	case rungRemux:
+		// planned is the track the remux was planned from, measured where
+		// the plan needed a measure, so the run walks no file for it.
 		s.met.Remuxes.Add(1)
-		return s.eng.Remux(ctx, src, hint, dst, opts, run)
+		return s.eng.Remux(ctx, src, hint, dst, opts, run, waxflow.WithMeasured(planned))
 	case rungCut:
 		// The single-window progressive cut: the span is one [from, to) range,
-		// so the run is always one Span. grid and cutTrack were measured at
-		// plan time and carried in, so the boundaries the run snaps to and the
+		// so the run is always one Span. The plan carries the grid and measured
+		// track it was computed from, so the boundaries the run snaps to and the
 		// length its init segment writes are the keyed ones.
 		s.met.Cuts.Add(1)
 		return s.eng.CutStream(ctx, src, hint, dst, opts,
-			[]waxflow.Span{{From: sp.from, To: sp.end()}}, grid, cutTrack, run)
+			[]waxflow.Span{{From: sp.from, To: sp.end()}}, cut.Grid, cut.Source, run)
 	}
 	if !sp.narrowed() {
 		// The plan's measure is not pushed onto the run here, and the asymmetry

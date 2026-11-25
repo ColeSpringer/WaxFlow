@@ -14,8 +14,9 @@ import (
 
 // gapless resolves the audio track's trims in output samples: the iTunes
 // iTunSMPB tag first (exact priming, padding, and length), then an edit
-// list (media_time as priming), else no trim. format.Media consumes
-// Delay/Padding/Samples to deliver the trimmed timeline and to map seeks.
+// list (media_time as priming, duration as length), else no trim.
+// format.Media consumes Delay/Padding/Samples to deliver the trimmed timeline
+// and to map seeks.
 //
 // It also puts what the table times past the file's data (shortDur) on the
 // played timeline, which is the one the length is on: the length the whole
@@ -59,14 +60,11 @@ func (d *Demuxer) statedTrims(t *track) (delay, length int64) {
 		return delay, length
 	}
 
-	// A nonzero edit-list media_time is the encoder-delay priming. The
-	// progressive path trusts it only for a real (nonzero) delay, falling back
-	// to the stbl raw total for the length; a zero-delay edit is ignored here
-	// because the sample table already gives the exact length. (The fragmented
-	// path in fragdemux.go has no sample table, so it trusts the edit's
-	// duration even at zero delay; both share editListTrims for the rescale.)
-	if t.hasEdit && t.editMedia > 0 {
-		delay, seg, haveSeg := editListTrims(t, d.movieTimescale)
+	// An edit list states the front trim in its media_time and the played
+	// length in its duration, so one edit from media_time 0 states an end
+	// trim alone.
+	if t.hasEdit {
+		delay, seg, _, haveSeg := editListTrims(t, d.movieTimescale)
 		if !haveSeg {
 			seg = -1
 		}
@@ -87,15 +85,18 @@ func playedIn(raw, front, stated int64) (delay, samples int64, fromRaw bool) {
 	return delay, stated, false
 }
 
-// editListTrims rescales a track's first real edit into gapless trims in output
-// samples: the front delay from its media_time (media timescale) and the played
-// length from its segment_duration (movie timescale). haveSeg is false when the
-// edit declares no usable duration, leaving the length to the caller's fallback.
-// The progressive (gapless) and fragmented (fragmentedLength) readers share
-// this rescale and differ only in that fallback: the stbl raw total, against
-// the fragmented tiers (a segment index, then a header duration, then nothing),
-// which each applies around this call.
-func editListTrims(t *track, movieTimescale int64) (delay, segSamples int64, haveSeg bool) {
+// editListTrims rescales a track's edit list into gapless trims in output
+// samples: the front delay from its first media_time (media timescale) and
+// the played length from its segment_duration (movie timescale), as the
+// longest length that duration can be the rounding of. slack is how far under
+// it the shortest such length lies: 0 where the duration names one length.
+// haveSeg is false when the edit declares no usable duration, or the list
+// holds several edits: that is a cut list, which no length stands for. The
+// length is then the caller's fallback, which is where the progressive
+// (gapless) and fragmented (fragmentedLength) readers differ: the stbl raw
+// total, against the fragmented tiers (a segment index, then a header
+// duration, then nothing).
+func editListTrims(t *track, movieTimescale int64) (delay, segSamples, slack int64, haveSeg bool) {
 	rate := int64(t.fmt.Rate)
 	delay = t.editMedia
 	if t.timescale > 0 && rate > 0 && t.timescale != rate {
@@ -104,10 +105,23 @@ func editListTrims(t *track, movieTimescale int64) (delay, segSamples int64, hav
 	if delay < 0 {
 		delay = 0
 	}
-	if t.editSegDur > 0 && movieTimescale > 0 && rate > 0 {
-		return delay, satmath.MulDiv(t.editSegDur, rate, movieTimescale), true
+	if t.editSegDur > 0 && movieTimescale > 0 && rate > 0 && t.edits <= 1 {
+		longest := longestIn(t.editSegDur, rate, movieTimescale)
+		// The shortest is the first length past the tick before.
+		shortest := satmath.Add(satmath.MulDiv(t.editSegDur-1, rate, movieTimescale), 1)
+		return delay, longest, max(longest-shortest, 0), true
 	}
-	return delay, 0, false
+	return delay, 0, 0, false
+}
+
+// longestIn is the longest run of samples at rate that ticks at timescale
+// can be the rounding of: the ticks themselves where a tick is a sample.
+func longestIn(ticks, rate, timescale int64) int64 {
+	n := satmath.MulDiv(satmath.Add(ticks, 1), rate, timescale)
+	if satmath.MulDiv(n, timescale, rate) == satmath.Add(ticks, 1) {
+		n-- // a whole number of samples reaches the next tick
+	}
+	return n
 }
 
 func clamp(v, lo, hi int64) int64 {

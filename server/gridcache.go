@@ -18,9 +18,9 @@ import (
 // different questions at very different costs, and merging them would make the
 // cheap one pay for the expensive one. A track is a header parse that every
 // stream needs; a grid is a walk of every packet in the source that only a
-// segmented remux asks for. A single entry would either force the walk on
-// requests that never wanted it, or carry a "not walked yet" state that is a
-// second cache in one struct.
+// segmented remux or a cut asks for. A single entry would either force the
+// walk on requests that never wanted it, or carry a "not walked yet" state
+// that is a second cache in one struct.
 const gridCacheCap = 4096
 
 // gridCache is a bounded identity-keyed memo of packet grids.
@@ -51,8 +51,8 @@ func (c *gridCache) put(key string, grid int) {
 }
 
 // gridFor returns src's packet grid, memoized by source identity: the decode
-// duration every packet shares, or 0 when they vary and no segmented remux can
-// lay boundaries on them.
+// duration every packet shares, or 0 when they vary and neither a segmented
+// remux nor a cut can lay its boundaries on them.
 //
 // A zero grid is memoized like any other answer, which is the point of storing
 // the number rather than only the successes: "this source cannot be segment-

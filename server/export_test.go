@@ -136,6 +136,14 @@ func (s *Server) OnKey(fn func(surface, rung, identity, canonical string, versio
 // surface audit removed the public method as unusable).
 func (s *Server) Metrics() *metrics.Metrics { return s.met }
 
+// PacketGridsMeasured counts the packet grids the memo holds: one per source
+// whose grid a request measured.
+func (s *Server) PacketGridsMeasured() int {
+	s.gridCache.mu.Lock()
+	defer s.gridCache.mu.Unlock()
+	return s.gridCache.entries.Len()
+}
+
 // MidTrimWebM is the mid-stream-trim fixture both server test packages drive
 // the ladder with: seed-opus.webm's own packets remuxed through our Matroska
 // muxer with a DiscardPadding on the block at MidTrimBlock.

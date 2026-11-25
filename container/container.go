@@ -184,11 +184,13 @@ type Track struct {
 	// Delay and Padding are the container-signaled gapless trims
 	// (LAME tag, iTunSMPB, Opus pre-skip, edit lists), in samples. For a
 	// container that states its trims per packet (Packet.Padding), Padding is
-	// the *last* packet's, which is the only one an end trim can mean.
+	// the trims that run unbroken to the end: the last packet's and, while
+	// every packet after it is trimmed whole, the one before's. A trim
+	// longer than the last packet is stated that way.
 	Delay   int64
 	Padding int64
 	// MidPadding is the samples a walk found trimmed inside the run, by a
-	// per-packet trim on packets before the last (Packet.Padding). It is zero
+	// per-packet trim that audio follows (Packet.Padding). It is zero
 	// until a walk has run and on every container that states no trim per
 	// packet, which is all of them but Matroska.
 	//
@@ -214,6 +216,12 @@ type Track struct {
 	// past that, so a list whose samples add up to less than MidPadding is
 	// incomplete; MidTrimsComplete says which. Nil until a walk has run.
 	MidTrims []PacketTrim
+	// TrimsUnread marks Padding, MidPadding and MidTrims as not read yet, so
+	// a zero there means unknown where on any other track it means none.
+	// Matroska states its trims on its packets (Packet.Padding), and a
+	// fragmented MP4 whose edit list rounds its length has only a bound for
+	// its end until the fragments are counted. Walk reads them and clears it.
+	TrimsUnread bool
 	// SamplesExact marks Samples as an authoritative length rather than a
 	// declared or advisory one: something read the payload and this is what it
 	// found. Where the decoder over-produces past it (Ogg-Vorbis and Ogg-Opus,
@@ -301,8 +309,8 @@ type Track struct {
 	Default bool
 }
 
-// PacketTrim is one trim inside a run: a Packet.Padding on a packet something
-// followed, placed on the raw decode timeline, which is the sum of every
+// PacketTrim is one trim inside a run: a Packet.Padding on a packet audio
+// follows, placed on the raw decode timeline, which is the sum of every
 // packet's Dur and the timeline a packet grid is laid on. The trimmed samples
 // occupy [Pos, Pos+Samples), the tail of the packet ending at Pos+Samples, so
 // a trim never crosses a packet boundary and Samples never exceeds the packet.
@@ -367,8 +375,9 @@ type Packet struct {
 	// landing a seek returns are all on the timeline the reader delivers, and
 	// a seek across an inner trim lands where it says. Dur stays the frame's
 	// own decoded length, which is what a decoder produces before the trim.
-	// A walk's raw total counts the *final* packet's trim and no other, since
-	// that one is the track's end trim and SettleLength takes it off again.
+	// A walk's raw total counts the trims that run unbroken to the end and no
+	// other, since those are the track's end trim (Track.Padding) and
+	// SettleLength takes it off again.
 	//
 	// A muxer writes it only if its container states trims per packet
 	// (Matroska's does); the rest never see one, because the copy rungs

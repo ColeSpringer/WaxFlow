@@ -98,7 +98,13 @@ func (d *Demuxer) Walk(ctx context.Context) error {
 	if err := d.compareDeclared(raw); err != nil {
 		return err
 	}
-	d.track = container.SettleLength(d.track, raw)
+	t := d.track
+	if d.fragSlack > 0 {
+		// A coarse edit's bound caps the run as an exact length does.
+		t.SamplesExact = true
+	}
+	d.track = container.SettleLength(t, raw)
+	d.track.TrimsUnread = false
 	d.fragWalked = true
 	return nil
 }
@@ -313,16 +319,21 @@ func (d *Demuxer) compareDeclared(raw int64) (err error) {
 	if t.Delay+t.Samples == raw || t.Samples == raw {
 		return nil
 	}
-	if t.Delay+t.Samples > raw {
+	// A coarse edit's length is the longest its ticks can mean, so the
+	// fragments are held to the least: a run between the two is whole.
+	declared := t.Delay + t.Samples
+	t.Samples -= d.fragSlack
+	switch {
+	case t.Delay+t.Samples > raw:
 		if err := d.warn(d.fragStart, "the head declares %d samples, the fragments hold %d",
 			t.Delay+t.Samples, raw); err != nil {
 			return err
 		}
 		d.fragTruncated = container.SettleShortfall(t, raw) // what Walk's settle takes off
-		return nil
+	case raw > declared:
+		d.note(d.fragStart, "the fragments hold %d samples, %d more than the head declares",
+			raw, raw-declared)
 	}
-	d.note(d.fragStart, "the fragments hold %d samples, %d more than the head declares",
-		raw, raw-t.Delay-t.Samples)
 	return nil
 }
 

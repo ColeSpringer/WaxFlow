@@ -29,7 +29,7 @@ func fixture(t testing.TB, name string) []byte {
 // target, and a walk's settled length is the run the packets reported (a
 // tolerated hole in the payload shortens both sides, so they still agree).
 // The packets are stamped on the trimmed timeline, so the run they report is
-// what they deliver plus the final packet's own trim.
+// what they deliver plus the trims that run unbroken to the end.
 // seed-cues.mka is the only seed carrying a Cues index.
 func FuzzDemux(f *testing.F) {
 	for _, name := range []string{"seed-opus.webm", "seed-flac.mka", "seed-pcm.mka", "seed-cues.mka"} {
@@ -38,6 +38,11 @@ func FuzzDemux(f *testing.F) {
 		f.Add(full[:len(full)/2])
 		f.Add(full[:min(len(full), 200)])
 	}
+	// An end trim spread over three blocks, one left whole on its last
+	// block, and trimmed blocks with audio after them.
+	f.Add(muxEndTrim(f, foretold("padding", 1000), false, false, nil, 1000))
+	f.Add(muxEndTrim(f, foretold("none", 1000), false, false, nil, 1000))
+	f.Add(muxEndTrim(f, foretold("none", 96), false, false, map[int]int64{4: 100, 5: endTrimDur, 6: endTrimDur}, 96))
 	// A bare EBML magic so the sniff accepts the input and the parser runs.
 	f.Add([]byte{0x1A, 0x45, 0xDF, 0xA3, 0x80})
 	// EBML header then a Segment with an unknown (all-ones) size.
@@ -48,11 +53,13 @@ func FuzzDemux(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		// rawDur is every frame's own length; kept is what the packets
 		// deliver, which is the timeline they are stamped on; lastPad and
-		// lastDur describe the final packet, whose trim is the only one
-		// that stays inside the run. inner is every earlier packet's trim
-		// with its place on the raw timeline, which is what a walk records.
-		var rawDur, kept, lastPad, lastDur int64
-		var inner []container.PacketTrim
+		// lastDur describe the final packet. tail is the trims that run
+		// unbroken up to the newest packet, each with its place on the raw
+		// timeline, and tailSum their samples: the end trim, which stays
+		// inside the run, unless a packet plays after them. inner is the
+		// trims one did, which is what a walk records.
+		var rawDur, kept, lastPad, lastDur, tailSum int64
+		var inner, tail []container.PacketTrim
 		testutil.DemuxFuzz{
 			Open: func(src container.Source, strict bool) (container.Demuxer, error) {
 				return NewDemuxer(src, &container.DemuxerOptions{Strict: strict})
@@ -70,16 +77,23 @@ func FuzzDemux(f *testing.F) {
 			Walk:    true,
 			Opened: func(testing.TB, container.Demuxer, bool) {
 				rawDur, kept, lastPad, lastDur, inner = 0, 0, 0, 0, nil
+				tailSum, tail = 0, nil
 			},
 			Packet: func(t testing.TB, pkt *container.Packet) {
 				if pkt.Padding < 0 {
 					t.Fatalf("packet with negative padding %d", pkt.Padding)
 				}
-				if c := min(lastPad, lastDur); c > 0 {
-					inner = append(inner, container.PacketTrim{Pos: rawDur - c, Samples: c})
+				c := min(pkt.Padding, pkt.Dur)
+				if c < pkt.Dur {
+					inner = append(inner, tail...)
+					tailSum, tail = 0, nil
 				}
 				rawDur += pkt.Dur
-				kept += pkt.Dur - min(pkt.Padding, pkt.Dur)
+				kept += pkt.Dur - c
+				if c > 0 {
+					tail = append(tail, container.PacketTrim{Pos: rawDur - c, Samples: c})
+					tailSum += c
+				}
 				lastPad, lastDur = pkt.Padding, pkt.Dur
 			},
 			// A read that reached the end inside the bound saw the whole
@@ -98,7 +112,7 @@ func FuzzDemux(f *testing.F) {
 					return
 				}
 				tr := w.Tracks()[0]
-				rawTotal := kept + min(lastPad, lastDur)
+				rawTotal := kept + tailSum
 				excess := lastPad - min(lastPad, lastDur)
 				if want := max(kept-tr.Delay-excess, 0); tr.Samples != want {
 					t.Fatalf("walk settled %d, the packets hold %d (kept %d, delay %d, final trim %d of %d)",
@@ -107,8 +121,8 @@ func FuzzDemux(f *testing.F) {
 				// A trim can never exceed the run it trims, however much
 				// the file's DiscardPaddings add up to, and a settled
 				// length can never exceed the samples the walk counted.
-				if want := min(lastPad, rawTotal); tr.Padding != want {
-					t.Fatalf("settled padding %d, want the final packet's trim bounded by the run (%d)",
+				if want := min(tailSum+excess, rawTotal); tr.Padding != want {
+					t.Fatalf("settled padding %d, want the end trim bounded by the run (%d)",
 						tr.Padding, want)
 				}
 				if tr.Samples < 0 || tr.Samples > rawDur {

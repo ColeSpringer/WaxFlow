@@ -78,6 +78,25 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 			fmt.Sprintf("wavpack: muxers are single-track, got %d", len(tracks)))
 	}
 	t := tracks[0]
+	if err := TrackFits(t); err != nil {
+		return err
+	}
+	// The header's field caps what it can state; a longer stream keeps the
+	// escape, which every reader must handle anyway.
+	if t.Samples >= 0 && t.Samples <= wavpack.MaxSamples {
+		m.promised = t.Samples
+	}
+	var err error
+	if m.tag, err = buildTag(m.opts.Tags); err != nil {
+		return err
+	}
+	m.began = true
+	return nil
+}
+
+// TrackFits reports whether the muxer can write track t: nil, or Begin's own
+// refusal of the track.
+func TrackFits(t container.Track) error {
 	if t.Codec != codec.WavPack {
 		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("wavpack: cannot mux codec %q", t.Codec))
 	}
@@ -93,15 +112,6 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 		return waxerr.New(waxerr.CodeUnsupportedFormat,
 			fmt.Sprintf("wavpack: track format %v does not match its codec config (want %v)", t.Fmt, want))
 	}
-	// The header's field caps what it can state; a longer stream keeps the
-	// escape, which every reader must handle anyway.
-	if t.Samples >= 0 && t.Samples <= wavpack.MaxSamples {
-		m.promised = t.Samples
-	}
-	if m.tag, err = buildTag(m.opts.Tags); err != nil {
-		return err
-	}
-	m.began = true
 	return nil
 }
 

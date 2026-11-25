@@ -237,6 +237,7 @@ func (s *Server) trackOnce(ctx context.Context, src *source.File, exact bool) (c
 			track.Samples, track.SamplesExact, track.SamplesAdvisory, track.SamplesCounted =
 				measured.Samples, measured.SamplesExact, measured.SamplesAdvisory, measured.SamplesCounted
 			track.Padding, track.MidPadding, track.MidTrims = measured.Padding, measured.MidPadding, measured.MidTrims
+			track.TrimsUnread = measured.TrimsUnread
 		}
 		s.trackCache.put(key, track, info.Tags)
 		return track, nil

@@ -111,36 +111,9 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	if len(tracks) != 1 {
 		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("flac: muxers are single-track, got %d", len(tracks)))
 	}
-	t := tracks[0]
-	if t.Codec != codec.FLAC {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("flac: cannot mux codec %q", t.Codec))
-	}
-	if t.Delay != 0 || t.Padding != 0 {
-		return waxerr.New(waxerr.CodeUnsupportedFormat, "flac: FLAC signals no gapless trims (lossless streams have none)")
-	}
-	srcSI, err := flac.ParseStreamInfo(t.CodecConfig)
+	si, srcSI, body, err := streamInfoFor(tracks[0])
 	if err != nil {
 		return err
-	}
-	si := srcSI
-	if want := si.PCMFormat(); t.Fmt != want {
-		return waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("flac: track format %v does not match the STREAMINFO to write (want %v)", t.Fmt, want))
-	}
-	// The header claims the projection, never the source's STREAMINFO total.
-	// The encoder cannot know the stream length, so the engine's projection
-	// arrives via the track and is the only number that describes *this* run:
-	// a source's own total is a claim about a different one, its own, which a
-	// truncated source overstates and a cut shortens. Copying it across meant
-	// a remux of a source the open had shrunk declared a count the frames
-	// could not fill, and failed at End on a destination that cannot be
-	// patched (the daemon's live cache entry is one).
-	//
-	// The 36-bit field caps what it can say; longer streams and unknown ones
-	// stay 0, which every reader must handle anyway.
-	si.Samples = 0
-	if t.Samples > 0 && t.Samples < 1<<36 {
-		si.Samples = t.Samples
 	}
 	m.si = si
 	m.wroteTotal = si.Samples
@@ -170,10 +143,6 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 		head[0] = 0x00
 	}
 	head[1], head[2], head[3] = 0, 0, flac.StreamInfoLen
-	body, err := si.MarshalBinary()
-	if err != nil {
-		return err
-	}
 	if err := m.write([]byte("fLaC"), head[:], body); err != nil {
 		return err
 	}
@@ -326,6 +295,51 @@ func (m *Muxer) write(parts ...[]byte) error {
 		}
 	}
 	return nil
+}
+
+// TrackFits reports whether the muxer can write track t: nil, or Begin's own
+// refusal of the track.
+func TrackFits(t container.Track) error {
+	_, _, _, err := streamInfoFor(t)
+	return err
+}
+
+// streamInfoFor is the STREAMINFO the muxer writes for t, with the source's
+// own beside it and the written block, refusing a track it cannot write.
+func streamInfoFor(t container.Track) (si, srcSI flac.StreamInfo, body []byte, err error) {
+	if t.Codec != codec.FLAC {
+		return si, srcSI, nil, waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("flac: cannot mux codec %q", t.Codec))
+	}
+	if t.Delay != 0 || t.Padding != 0 {
+		return si, srcSI, nil, waxerr.New(waxerr.CodeUnsupportedFormat, "flac: FLAC signals no gapless trims (lossless streams have none)")
+	}
+	if srcSI, err = flac.ParseStreamInfo(t.CodecConfig); err != nil {
+		return si, srcSI, nil, err
+	}
+	si = srcSI
+	if want := si.PCMFormat(); t.Fmt != want {
+		return si, srcSI, nil, waxerr.New(waxerr.CodeUnsupportedFormat,
+			fmt.Sprintf("flac: track format %v does not match the STREAMINFO to write (want %v)", t.Fmt, want))
+	}
+	// The header claims the projection, never the source's STREAMINFO total.
+	// The encoder cannot know the stream length, so the engine's projection
+	// arrives via the track and is the only number that describes *this* run:
+	// a source's own total is a claim about a different one, its own, which a
+	// truncated source overstates and a cut shortens. Copying it across meant
+	// a remux of a source the open had shrunk declared a count the frames
+	// could not fill, and failed at End on a destination that cannot be
+	// patched (the daemon's live cache entry is one).
+	//
+	// The 36-bit field caps what it can say; longer streams and unknown ones
+	// stay 0, which every reader must handle anyway.
+	si.Samples = 0
+	if t.Samples > 0 && t.Samples < 1<<36 {
+		si.Samples = t.Samples
+	}
+	// MarshalBinary holds the fields to their wire widths and block bounds,
+	// which a STREAMINFO the parse accepted can still fail.
+	body, err = si.MarshalBinary()
+	return si, srcSI, body, err
 }
 
 // TagsFit reports whether tags fit the VORBIS_COMMENT block the muxer

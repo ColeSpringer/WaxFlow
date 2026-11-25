@@ -221,7 +221,7 @@ func TestHEAACSegmentedRemuxCodecs(t *testing.T) {
 	track := info.Default()
 
 	e := waxflow.New()
-	sp, err := e.PlanRemuxSegments(track, waxflow.TranscodeOptions{Format: "aac"}, 4, 2048)
+	sp, err := e.PlanRemuxSegments(track, waxflow.TranscodeOptions{Format: "aac"}, 4, knownGrid(2048))
 	if err != nil {
 		t.Fatalf("PlanRemuxSegments: %v", err)
 	}

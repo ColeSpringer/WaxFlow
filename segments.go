@@ -54,18 +54,29 @@ const primeSeconds = 0.1
 // them. Both rungs snap through here so neither can drift from the other's
 // notion of where a segment ends.
 func snapSegmentSamples(segSeconds float64, rate, grid int) (int, error) {
-	switch {
-	case segSeconds == 0:
-		segSeconds = DefaultSegmentSeconds
-	// A NaN compares false against both bounds, so it is named.
-	case math.IsNaN(segSeconds) || segSeconds < 0 || segSeconds > maxSegmentSeconds:
-		return 0, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("waxflow: segment duration %g outside 0..%g seconds", segSeconds, maxSegmentSeconds))
+	segSeconds, err := segmentSeconds(segSeconds)
+	if err != nil {
+		return 0, err
 	}
 	if grid <= 0 {
 		return 0, waxerr.New(waxerr.CodeInternal, "waxflow: segment grid must be positive")
 	}
 	return max(int(segSeconds*float64(rate)/float64(grid)+0.5), 1) * grid, nil
+}
+
+// segmentSeconds resolves a requested segment duration: 0 is the default, and
+// a NaN, negative or over-long one is refused. A copy planner asks it before
+// it measures the packet grid.
+func segmentSeconds(s float64) (float64, error) {
+	switch {
+	case s == 0:
+		return DefaultSegmentSeconds, nil
+	// A NaN compares false against both bounds, so it is named.
+	case math.IsNaN(s) || s < 0 || s > maxSegmentSeconds:
+		return 0, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("waxflow: segment duration %g outside 0..%g seconds", s, maxSegmentSeconds))
+	}
+	return s, nil
 }
 
 // SegmentPlan describes the segmented CMAF (HLS) form of a transcode,
@@ -678,6 +689,16 @@ func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, o
 		return nil, err
 	}
 	srcTrack := med.Info().Default()
+	// A declared length that is only a bound is confirmed first, as
+	// TranscodeMedia confirms it, so the decode stops where the plan's did.
+	if unconfirmedBound(srcTrack) {
+		if confirm := confirmableLength(srcTrack, med); confirm != nil {
+			if err := confirm(ctx); err != nil {
+				return nil, err
+			}
+			srcTrack = med.Info().Default()
+		}
+	}
 	// The same rule PlanSegments applied, off the same source format (a
 	// timeline's Media reports the envelope track ConcatTrack computes), so
 	// the run encodes the depth the plan and the init header promised.

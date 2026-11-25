@@ -27,16 +27,25 @@ func aacSampleEntry(t container.Track) ([]byte, error) {
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 			fmt.Sprintf("mp4: track format %v does not match the AudioSpecificConfig (%v)", t.Fmt, want))
 	}
+	if len(t.CodecConfig) > maxESDSConfig {
+		return nil, waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
+			"mp4: a %d-byte AudioSpecificConfig is longer than the esds this muxer writes can hold (%d bytes)",
+			len(t.CodecConfig), maxESDSConfig))
+	}
 	h := sampleEntryHeader{channels: t.Fmt.Channels, depth: 16, rate16: clampRate16(t.Fmt.Rate)}
 	return audioSampleEntry("mp4a", h, esdsBox(t.CodecConfig)), nil
 }
 
+// maxESDSConfig is the longest AudioSpecificConfig esdsBox frames: the
+// ES_Descriptor carries it and 23 bytes more under a one-byte length.
+const maxESDSConfig = 127 - 23
+
 // esdsBox assembles the MPEG-4 descriptor chain: an ES_Descriptor
 // holding a DecoderConfigDescriptor (objectTypeIndication 0x40, MPEG-4
 // Audio) whose DecoderSpecificInfo is the AudioSpecificConfig, plus the
-// mandatory SLConfigDescriptor. Lengths are single-byte (every payload
-// here is far under 128 bytes); readDescriptor accepts that form and so
-// does every demuxer.
+// mandatory SLConfigDescriptor. Lengths are single-byte (aacSampleEntry
+// refuses a config too long for them); readDescriptor accepts that form
+// and so does every demuxer.
 func esdsBox(asc []byte) []byte {
 	dsi := descriptor(tagDecoderSpecific, asc)
 	decCfg := descriptor(tagDecoderConfig, concat(

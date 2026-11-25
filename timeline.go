@@ -383,6 +383,7 @@ func SpanTrack(track container.Track, from, to int64) (container.Track, error) {
 	// along: they describe the source's *packets*, and a span of a decoded
 	// view has none.
 	out.Delay, out.Padding, out.MidPadding, out.MidTrims = 0, 0, 0, nil
+	out.TrimsUnread = false
 	// The source's own codec is kept, unlike a Concat's synthetic PCM
 	// envelope, and that is not cosmetic: the codec is what names the
 	// decoder revision in a plan's Versions, so a span of a FLAC keys on the

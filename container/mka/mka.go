@@ -16,10 +16,12 @@
 // signal them. DiscardPadding is stated per block rather than per file, so any
 // block may carry one (mkvmerge writes one at each append seam): it trims the
 // block's end, so a laced block's is spread over its laces from the last one
-// backwards, each lace's packet states its own share, the packet timeline
-// excludes it, and only the last packet's is the track's end trim. The rest
-// are reported as Track.MidPadding, with their positions in Track.MidTrims,
-// which the copy rung declines on and a cut plans around.
+// backwards, each lace's packet states its own share, and the packet timeline
+// excludes it. The trims that run unbroken to the end of the stream are the
+// track's end trim, since one longer than the last block is spread over the
+// final ones. The rest are reported as Track.MidPadding, with their
+// positions in Track.MidTrims, which the copy rung declines on and a cut
+// plans around.
 //
 // EBML is a nesting attack surface, so the parser holds to the hostile-input
 // invariants: a fixed, shallow descent that never recurses on attacker-chosen

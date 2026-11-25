@@ -161,15 +161,17 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	if len(tracks) != 1 {
 		return waxerr.New(waxerr.CodeUnsupportedFormat, "ogg: muxer needs a single track")
 	}
-	m.mapping = muxMappingFor(tracks[0].Codec)
-	if m.mapping == nil {
-		return waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("ogg: cannot mux codec %q (opus, flac, vorbis)", tracks[0].Codec))
+	if m.mapping = muxMappingFor(tracks[0].Codec); m.mapping == nil {
+		return noMapping(tracks[0].Codec)
 	}
 	// Probed here rather than in NewMuxer: the base a Patcher records is where
 	// the destination sits now, so probing earlier would fix it before the
 	// caller had finished positioning (see muxseek).
 	m.patch = muxseek.New(m.w, "ogg")
+	if err := m.mapping.check(tracks[0]); err != nil {
+		m.ended = true
+		return err
+	}
 	// The mapping emits its identification and comment pages; comments stay
 	// bounded (maxTagsPageBytes) so the comment header always fits one page's
 	// segment table (255*255 bytes) and the pre-audio headers stay small.
@@ -183,6 +185,21 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	m.begun = true
 	m.wroteTotal = total
 	return nil
+}
+
+// TrackFits reports whether the muxer can write track t: nil, or Begin's own
+// refusal of the track.
+func TrackFits(t container.Track) error {
+	mapping := muxMappingFor(t.Codec)
+	if mapping == nil {
+		return noMapping(t.Codec)
+	}
+	return mapping.check(t)
+}
+
+// noMapping refuses a codec the muxer has no mapping for.
+func noMapping(id codec.ID) error {
+	return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("ogg: cannot mux codec %q (opus, flac, vorbis)", id))
 }
 
 // maxTagsPageBytes bounds a comment header so it stays a single page (the

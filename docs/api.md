@@ -348,7 +348,13 @@ frames; a first frame lost to damage is a hole from sample 0, not a stream
 that starts late. A native FLAC or WavPack
 whose measurement had to cross damage keeps the corrected length without the
 flag, since an authoritative length caps a decode and one walked past a hole
-should not. A fragmented MP4 states its length in an edit list where it has
+should not. A progressive MP4 with no iTunSMPB takes its trims from its edit
+list: the front one from the media time, and the played length from the
+duration, with a delay or without. A duration in a timescale coarser than the
+sample rate is read as the longest length it can be the rounding of, so a
+millisecond edit that only restates the sample table trims nothing. A list
+of several edits is a cut list and states no length. A
+fragmented MP4 states its length in an edit list where it has
 one; where it does not, a segment index (`sidx`) covering the whole file is
 read as the headers' own count, the same declared tier a progressive sample
 table sits in. An index covering only the first fragment is ignored rather
@@ -708,6 +714,14 @@ Parameters (unknown parameter names are rejected):
    so there is no decode, no re-encode, and no generation loss for a lossy
    source. Gapless trims are carried across and re-signalled in whatever
    the target container uses (iTunSMPB, an edit list, an Ogg pre-skip).
+   Fragmented MP4 states an end trim that has no delay beside it as its edit
+   list's length, written ahead of the audio, so the copy of a Matroska
+   source that declares no delay takes its end trim from the measure the
+   plan made of it. Matroska states an end trim as a `DiscardPadding`, which
+   trims the block it rides on, so `container=mka` spreads one longer than
+   the last packet over the final blocks. `container=webm` states it on the
+   last block alone, and a copy whose trim no packet of the codec can hold
+   falls through to the transcode.
    `format=flac&container=mka` on a FLAC file is this rung, as is
    `format=opus` on an Opus file over HLS. A FLAC copy numbers its frames
    from 0, carries a hole damage left in the source as silent frames, and
@@ -760,18 +774,22 @@ not the output format's), any parameter transforms samples (`rate`, `ch`,
 (`from`/`to` cut at an arbitrary sample, which means mid-packet), the URL names
 a timeline (one fMP4 timeline carries one edit list, and the packets at a seam
 overlap), the source trims samples inside its run and the destination is not
-Matroska (only a container that states its trims per packet can carry one), or
-`maxBitRate` is set (this rung reads headers, and a source's real bit rate is
-in its packets). Over HLS it also declines a source whose packet
-durations vary, since there is then no grid to lay segment boundaries on.
+Matroska (only a container that states its trims per packet can carry one),
+the destination's muxer would refuse the track (an AAC program config element
+asked as MP4 or ADTS, an AAC config longer than an MP4 esds holds, a FLAC
+STREAMINFO the native muxer cannot write), or `maxBitRate` is set (this rung
+reads headers, and a source's real bit rate is in its packets). Over HLS it
+also declines a source whose packet durations vary, since there is then no
+grid to lay segment boundaries on.
 `waxflow_remux_total` counts the pipelines it served. The cut declines in turn
-(a codec off the Opus/AAC-LC allowlist, `maxBitRate` set, a snapped window the
-destination cannot express, a span that keeps no whole packet, two spans
-closer together than the windows can be kept apart, a source that trims
-samples inside its run at places the measure did not record, a kept packet
-that carries such a trim and a destination other than Matroska, or over HLS a
-source whose packet durations vary and so give no grid to lay segment
-boundaries on) and falls to
+(a codec off the Opus, AAC-LC and HE-AAC allowlist, an HE-AAC span that does
+not keep the stream head, a declared delay outside the timeline a cut computes
+in, `maxBitRate` set, a snapped window the destination cannot express, a
+track the destination's muxer would refuse, a span that keeps no whole packet,
+two spans closer together than the windows can be kept apart, a source that
+trims samples inside its run at places the measure did not record, a kept
+packet that carries such a trim and a destination other than Matroska, or a
+source whose packet durations vary and so give no grid to cut on) and falls to
 a transcode of the same span, so a span is always served: zero-generation
 when it can be, sample-exact through the decoder when it cannot. A cut plans
 its windows on the source's raw packet timeline, past every trim before them,
@@ -906,7 +924,10 @@ renditions a variant names by its `Audio` group (the daemon's masters list
 none). The daemon's plan is its rung's. Where the source's own packets serve
 the variant it is `PlanRemuxSegments` (or `PlanCutSegments` for a span) over
 the source's `PacketGrid`, whose delay, segment grid and CODECS come from the
-source; otherwise it is `PlanSegments`.
+source; otherwise it is `PlanSegments`. Each planner takes the grid as a
+function and measures it only once the request's headers allow a copy, so a
+variant whose format or options rule out a copy never walks the source's
+packets.
 
 ### Multi-source timelines (`tl`)
 

@@ -51,23 +51,29 @@ type Demuxer struct {
 	clusterIndex []clusterPos
 	walked       bool // the full walk has run; the four below are whole
 	rawTotal     int64
-	padding      int64                  // the last packet's trim, in samples
-	midPadding   int64                  // the trims on packets before the last, summed
+	padding      int64                  // the trims that run to the end, in samples
+	midPadding   int64                  // the trims audio follows, summed
 	midCount     int                    // how many packets those came from, for the Note
 	midTrims     []container.PacketTrim // those trims, placed; at most maxMidTrims
 	recording    bool                   // walk is building the index
 
 	// In-flight walk state, carried across calls so a walk that stopped, at a
 	// bound or a cancel, extends the index rather than restarting.
-	walkCumulative  int64 // running sample count on the delivered timeline
-	walkRaw         int64 // running sample count on the raw one, every frame whole
-	walkMid         int64 // running sum of the inner trims seen so far
-	walkMidCount    int   // packets that contributed to walkMid
-	walkLastPad     int64 // the newest frame's own trim, the end-trim candidate
-	walkLastClamped int64 // that trim clamped to the frame it rides on
-	walkFrames      int   // running frame count, against maxFrames
-	walkLimit       int64
-	walkStopped     bool // the walk in progress hit walkLimit rather than the end
+	walkCumulative int64 // running sample count on the delivered timeline
+	walkRaw        int64 // running sample count on the raw one, every frame whole
+	walkMid        int64 // running sum of the inner trims seen so far
+	walkMidCount   int   // packets that contributed to walkMid
+	// The end-trim candidate: the trims that run unbroken up to the newest
+	// frame, each clamped to its frame, how many frames state them, and
+	// where they lie. walkTailOver is what the newest frame's trim states
+	// past the frame itself.
+	walkTail      int64
+	walkTailCount int
+	walkTailTrims []container.PacketTrim
+	walkTailOver  int64
+	walkFrames    int // running frame count, against maxFrames
+	walkLimit     int64
+	walkStopped   bool // the walk in progress hit walkLimit rather than the end
 	// walkCursor is the walk's own reader cursor, where the last walk stood;
 	// walkBegun says it holds one, and the counters above describe what lies
 	// before it.
@@ -620,8 +626,8 @@ func (d *Demuxer) finalizeTrack() error {
 	}
 
 	// Padding and MidPadding stay 0: no header element states a trim, and the
-	// blocks that do are payload. Walk splits the last block's from the ones
-	// before it and settles the length.
+	// blocks that do are payload. Walk splits the ones that run to the end
+	// from the ones audio follows and settles the length.
 	d.track = container.Track{
 		ID:              0,
 		DemuxerVersion:  DemuxerVersion,
@@ -631,6 +637,7 @@ func (d *Demuxer) finalizeTrack() error {
 		Samples:         samples,
 		Delay:           delay,
 		SamplesAdvisory: advisory,
+		TrimsUnread:     true,
 		Default:         true,
 	}
 	d.resetReading(d.firstClusterOff)

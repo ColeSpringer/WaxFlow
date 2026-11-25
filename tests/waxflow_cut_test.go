@@ -15,17 +15,20 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-// runCut assembles the rung the way a caller does: measure the grid, plan,
-// build the cut view, and run it through the demuxer seam. It returns nil when
-// the plan declines, which is the ladder's own contract and the cue to transcode.
+// knownGrid is a grid already measured, for a planner that asks for one.
+func knownGrid(g int) func() (int, error) {
+	return func() (int, error) { return g, nil }
+}
+
+// runCut assembles the rung the way a caller does: plan with a grid measured
+// on demand, build the cut view on the plan's grid, and run it through the
+// demuxer seam. It returns nil when the plan declines, which is the ladder's
+// own contract and the cue to transcode.
 func runCut(t *testing.T, src []byte, hint string, opts waxflow.TranscodeOptions,
 	spans []waxflow.Span) ([]byte, *waxflow.CutPlan) {
 	t.Helper()
 	e := waxflow.New()
-	grid, err := e.PacketGrid(context.Background(), container.BytesSource(src), hint)
-	if err != nil {
-		t.Fatal(err)
-	}
+	grid := func() (int, error) { return e.PacketGrid(context.Background(), container.BytesSource(src), hint) }
 	demux, info, err := format.OpenDemuxer(container.BytesSource(src), hint, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -38,11 +41,11 @@ func runCut(t *testing.T, src []byte, hint string, opts waxflow.TranscodeOptions
 	if plan == nil {
 		return nil, nil
 	}
-	cut, _, err := waxflow.CutTrack(track, opts, spans, grid)
+	cut, _, err := waxflow.CutTrack(track, opts, spans, plan.Grid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cutDemux, err := waxflow.Cut(demux, track, opts, spans, grid)
+	cutDemux, err := waxflow.Cut(demux, track, opts, spans, plan.Grid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +342,7 @@ func TestCutOfADamagedSourceIsMalformedNotADecline(t *testing.T) {
 	}
 	track := info.Default()
 	past := []waxflow.Span{{From: 0, To: track.Samples + 1}}
-	plan, err := e.PlanCut(track, waxflow.TranscodeOptions{Format: "opus", Container: "mka"}, past, 960)
+	plan, err := e.PlanCut(track, waxflow.TranscodeOptions{Format: "opus", Container: "mka"}, past, knownGrid(960))
 	if err == nil {
 		t.Fatalf("PlanCut accepted a span past the source (plan=%v); a decline here loses the reason", plan)
 	}
@@ -419,7 +422,7 @@ func TestCutAcrossAMidStreamTrim(t *testing.T) {
 	spans := []waxflow.Span{{From: 9600, To: 28800}}
 
 	// An Ogg granule names one end trim, so the kept trim declines it.
-	plan, err := e.PlanCut(track, waxflow.TranscodeOptions{Format: "opus"}, spans, grid)
+	plan, err := e.PlanCut(track, waxflow.TranscodeOptions{Format: "opus"}, spans, knownGrid(grid))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +432,7 @@ func TestCutAcrossAMidStreamTrim(t *testing.T) {
 	for _, cont := range []string{"mka", "webm"} {
 		t.Run(cont, func(t *testing.T) {
 			opts := waxflow.TranscodeOptions{Format: "opus", Container: cont}
-			plan, err := e.PlanCut(track, opts, spans, grid)
+			plan, err := e.PlanCut(track, opts, spans, knownGrid(grid))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -536,7 +539,7 @@ func runMeasuredCut(t *testing.T, src []byte, measured container.Track, opts wax
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := e.PlanCut(measured, opts, spans, grid)
+	plan, err := e.PlanCut(measured, opts, spans, knownGrid(grid))
 	if err != nil {
 		t.Fatal(err)
 	}

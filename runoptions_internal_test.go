@@ -101,7 +101,7 @@ func TestRunOptionsReachEveryEntryPoint(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			p, err := e.PlanCut(trackOf(t, opusSrc.Bytes(), "opus"), cutOpts, spans, grid)
+			p, err := e.PlanCut(trackOf(t, opusSrc.Bytes(), "opus"), cutOpts, spans, knownGrid(grid))
 			if err != nil || p == nil {
 				t.Fatalf("PlanCut = %v, %v", p, err)
 			}

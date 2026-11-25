@@ -109,7 +109,7 @@ func TestSegmentedPlansRefuseAsTheirRuns(t *testing.T) {
 				err  error
 			}
 			got := []refusal{{"TranscodeSegmentsMedia", merr}, {"InitSegment", ierr}, {"PlanSegments", perr}}
-			rp, rerr := e.PlanRemuxSegments(track, tc.opts, 0, 1024)
+			rp, rerr := e.PlanRemuxSegments(track, tc.opts, 0, knownGrid(1024))
 			_, rserr := e.RemuxSegments(ctx, container.BytesSource(raw), "wav", tc.opts,
 				SegmentedOptions{SegmentSamples: 4096}, emit)
 			switch {
@@ -161,7 +161,7 @@ func TestSegmentedPlansRefuseAsTheirRuns(t *testing.T) {
 			if want == nil {
 				t.Fatal("TranscodeSegments accepted the request")
 			}
-			_, perr := e.PlanCutSegments(opusTrack, opts, spans, grid, 2)
+			_, perr := e.PlanCutSegments(opusTrack, opts, spans, knownGrid(grid), 2)
 			_, cerr := e.CutSegments(ctx, container.BytesSource(opus.Bytes()), "opus", opts, spans, grid,
 				container.Track{Samples: -1}, segOpts, emit)
 			for what, err := range map[string]error{"PlanCutSegments": perr, "CutSegments": cerr} {

@@ -88,7 +88,7 @@ func TestKnobsAreRefusedOffTheirRows(t *testing.T) {
 					defer dst.Close()
 					_, perr := e.PlanTranscode(track, opts)
 					_, rerr := e.PlanRemux(track, opts)
-					_, cerr := e.PlanCut(track, opts, []Span{{From: 0, To: 2048}}, 1024)
+					_, cerr := e.PlanCut(track, opts, []Span{{From: 0, To: 2048}}, knownGrid(1024))
 					_, terr := e.TranscodeMedia(ctx, openWAV(t, e, raw), dst, opts)
 					for _, got := range []struct {
 						what string
@@ -272,9 +272,11 @@ func TestOpusSignalAutoIsUnset(t *testing.T) {
 // while a Bitrate, which aac takes, declines the copy for a transcode.
 func TestRemuxKnobsFollowTheNamedRow(t *testing.T) {
 	track := container.Track{
-		Codec:   codec.HEAAC,
-		Fmt:     audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Float, BitDepth: 32},
-		Samples: 44100,
+		Codec: codec.HEAAC,
+		// Explicit SBR over a 22.05 kHz stereo core.
+		CodecConfig: []byte{0x2B, 0x92, 0x08, 0x00},
+		Fmt:         audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Float, BitDepth: 32},
+		Samples:     44100,
 	}
 	e := New()
 	if rp, err := e.PlanRemux(track, TranscodeOptions{Format: "aac"}); err != nil || rp == nil {
@@ -296,7 +298,7 @@ func TestNegativeFromSampleIsRefusedByEveryPlan(t *testing.T) {
 	e := New()
 	_, perr := e.PlanTranscode(track, opts)
 	_, rerr := e.PlanRemux(track, opts)
-	_, cerr := e.PlanCut(track, opts, []Span{{From: 0, To: 2048}}, 1024)
+	_, cerr := e.PlanCut(track, opts, []Span{{From: 0, To: 2048}}, knownGrid(1024))
 	for _, got := range []struct {
 		what string
 		err  error

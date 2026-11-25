@@ -3,12 +3,14 @@ package mka
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
 
 	"github.com/colespringer/waxflow/audio"
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/codec/flac"
+	"github.com/colespringer/waxflow/codec/vorbis"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/internal/muxseek"
 	"github.com/colespringer/waxflow/waxerr"
@@ -19,7 +21,7 @@ var _ container.Muxer = (*Muxer)(nil)
 // MuxerVersion is this muxer's term in the ADR-0004 cache key, one for the
 // Matroska and WebM forms. Bump it for a change to what gets written around
 // unchanged encoded packets, which no encoder or DSP version can notice.
-const MuxerVersion = "mka-mux-3"
+const MuxerVersion = "mka-mux-4"
 
 // Write-side element IDs, the header and track-entry elements the demuxer does
 // not itself parse (or parses only on read) but a valid file needs. The
@@ -89,11 +91,19 @@ func TagsFit([]container.Tag) error { return nil }
 // Cues are seekable-only because only the SeekHead pointer locates them, and on
 // a plain writer that pointer cannot be filled.
 //
-// One codec packet is one SimpleBlock (no lacing). The final packet is held
-// until End so its block can carry DiscardPadding (the trailing gapless trim),
-// which a SimpleBlock cannot hold and a BlockGroup+Block can; CodecDelay on the
-// track carries the front trim. These are the exact inverse of the demuxer's
-// gapless read path.
+// One codec packet is one SimpleBlock (no lacing). The final packets are held
+// until End so their blocks can carry DiscardPadding (the trailing gapless
+// trim), which a SimpleBlock cannot hold and a BlockGroup+Block can; CodecDelay
+// on the track carries the front trim. These are the exact inverse of the
+// demuxer's gapless read path.
+//
+// A DiscardPadding trims the block it rides on and no more, so an end trim
+// longer than the last block is spread over the final blocks, each within its
+// own. Matroska holds back the packets the trim can reach: the ones a Padding
+// stated at Begin spans, and the ones ending past a length stated there. WebM
+// states the whole trim on its last block, since Firefox rejects a file with
+// more than one DiscardPadding, and holds back only a run of packets that
+// state the end trim between them, to move theirs there.
 type Muxer struct {
 	w     io.Writer
 	patch muxseek.Patcher
@@ -130,10 +140,25 @@ type Muxer struct {
 	clusterMs   int64
 	haveCluster bool
 
-	// The held packet, kept back one step so End can give the last one the
-	// trailer's DiscardPadding rather than its own.
-	pending     container.Packet
-	havePending bool
+	// held[head:] is the packets End may still trim, oldest first, at most
+	// maxHeld. heldDur sums their durations, wholeTail counts the newest
+	// ones trimmed whole, and spare is a payload buffer to reuse.
+	held      []heldPacket
+	head      int
+	heldDur   int64
+	wholeTail int
+	spare     []byte
+	// endTrim is the Padding Begin was told, and audioEnd where the audio
+	// ends on the delivered timeline (delay plus length), -1 when no length
+	// was stated. pos is where the next packet starts on that timeline.
+	endTrim  int64
+	audioEnd int64
+	pos      int64
+	// stated is the trim the blocks written just before the held ones state
+	// between them when it runs unbroken into the held ones: the last partly
+	// trimmed block's and every wholly trimmed one after it. An end trim
+	// that reaches back past the held blocks is already written there.
+	stated int64
 
 	// number numbers FLAC frames from 0, as RFC 9639 counts a stream's.
 	number *flac.Numberer
@@ -142,6 +167,17 @@ type Muxer struct {
 	md5Off   int64
 	clearMD5 bool
 }
+
+// heldPacket is a packet whose block is not written yet. end is where its
+// frames would end on the delivered timeline were none of them trimmed.
+type heldPacket struct {
+	pkt container.Packet
+	end int64
+}
+
+// maxHeld bounds the packets held for an end trim. An Ogg page carries at
+// most 255, which bounds the trim a final granule can state.
+const maxHeld = 256
 
 // cuePoint is one cluster's timestamp and its position relative to the
 // segment's data start, which is what CueClusterPosition means.
@@ -183,26 +219,11 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 		return waxerr.New(waxerr.CodeInvalidRequest, "mka: muxers are single-track")
 	}
 	t := tracks[0]
-	if err := t.Fmt.Valid(); err != nil {
-		return err
-	}
-	codecID, err := matroskaCodecID(t.Codec, t.Fmt)
-	if err != nil {
-		return err
-	}
-	if m.opts.WebM && t.Codec != codec.Opus && t.Codec != codec.Vorbis {
-		return waxerr.New(waxerr.CodeUnsupportedFormat,
-			"mka: webm carries only Opus and Vorbis audio; use .mka for "+string(t.Codec))
-	}
-	priv, err := codecPrivate(t.Codec, t.CodecConfig)
+	codecID, priv, si, err := entryFor(t, m.opts.WebM)
 	if err != nil {
 		return err
 	}
 	if t.Codec == codec.FLAC {
-		si, err := flac.ParseStreamInfo(t.CodecConfig)
-		if err != nil {
-			return err
-		}
 		m.number = flac.NewNumberer(si, 0, 0)
 	}
 	m.codecID = t.Codec
@@ -215,6 +236,11 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 		// the front trim the demuxer's finalizeTrack reads back.
 		m.delay = int64(binary.LittleEndian.Uint16(t.CodecConfig[10:12]))
 	}
+	m.endTrim = max(t.Padding, 0)
+	m.audioEnd = -1
+	if t.Samples >= 0 {
+		m.audioEnd = m.delay + t.Samples
+	}
 	m.begun = true
 
 	header := m.ebmlHeader()
@@ -226,15 +252,67 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	return m.write(header)
 }
 
+// TrackFits reports whether the muxer can write track t, as WebM when webm is
+// set: nil, or Begin's own refusal.
+func TrackFits(t container.Track, webm bool) error {
+	_, _, _, err := entryFor(t, webm)
+	return err
+}
+
+// longestPacket is the most samples one packet of t can hold, 0 for a codec
+// with no bound to state: 120 ms of Opus, half a long Vorbis block.
+func longestPacket(t container.Track) int64 {
+	switch t.Codec {
+	case codec.Opus:
+		return int64(t.Fmt.Rate) * 120 / 1000
+	case codec.Vorbis:
+		if cfg, err := vorbis.ParseConfig(t.CodecConfig); err == nil {
+			return int64(cfg.LongBlock()) / 2
+		}
+	}
+	return 0
+}
+
+// entryFor resolves t's CodecID and CodecPrivate, and a FLAC track's
+// STREAMINFO, refusing a track the muxer cannot write.
+func entryFor(t container.Track, webm bool) (codecID string, priv []byte, si flac.StreamInfo, err error) {
+	if err := t.Fmt.Valid(); err != nil {
+		return "", nil, si, err
+	}
+	if codecID, err = matroskaCodecID(t.Codec, t.Fmt); err != nil {
+		return "", nil, si, err
+	}
+	if webm && t.Codec != codec.Opus && t.Codec != codec.Vorbis {
+		return "", nil, si, waxerr.New(waxerr.CodeUnsupportedFormat,
+			"mka: webm carries only Opus and Vorbis audio; use .mka for "+string(t.Codec))
+	}
+	if priv, err = codecPrivate(t.Codec, t.CodecConfig); err != nil {
+		return "", nil, si, err
+	}
+	// WebM states an end trim on its last block alone, so one no packet of
+	// the codec can hold would play on any reader that trims by the block.
+	if longest := longestPacket(t); webm && longest > 0 && t.Padding > longest {
+		return "", nil, si, waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
+			"mka: webm states an end trim on its last block, and this track's %d samples are more than a packet holds; use .mka",
+			t.Padding))
+	}
+	if t.Codec == codec.FLAC {
+		if si, err = flac.ParseStreamInfo(t.CodecConfig); err != nil {
+			return "", nil, si, err
+		}
+	}
+	return codecID, priv, si, nil
+}
+
 // ClearMD5 has End state no MD5 in a FLAC track's CodecPrivate ("not
 // computed"), for a run whose audio no longer matches the signature it was
 // handed. It reaches the file where End can patch the header.
 func (m *Muxer) ClearMD5() { m.clearMD5 = true }
 
 // WritePacket appends one packet as a block, with its own trim when it states
-// one. The newest packet is held back one step (havePending) so End can give
-// the final one the trailer's DiscardPadding rather than its own; an untrimmed
-// block is a plain SimpleBlock, a trimmed one a BlockGroup.
+// one. The newest packets are held back (holds) so End can lay the trailer's
+// DiscardPadding over them; an untrimmed block is a plain SimpleBlock, a
+// trimmed one a BlockGroup.
 //
 // Matroska is the one output container that states trims per packet, so it is
 // the one muxer that reads container.Packet.Padding: an mka-to-mka copy of a
@@ -247,17 +325,6 @@ func (m *Muxer) WritePacket(pkt container.Packet) error {
 	if pkt.Track != 0 {
 		return waxerr.New(waxerr.CodeInvalidRequest, "mka: single-track muxer")
 	}
-	if m.havePending {
-		pad := max(m.pending.Padding, 0)
-		if err := m.emitBlock(m.pending.Packet, samplesToNs(pad, m.rate)); err != nil {
-			return err
-		}
-		// The block advances the run by what it delivers: this one is followed,
-		// so it is not the end trim and its frames are not in the run.
-		if m.pending.Dur > 0 {
-			m.rawSamples += m.pending.Dur - min(pad, m.pending.Dur)
-		}
-	}
 	data := pkt.Data
 	if m.number != nil {
 		var err error
@@ -266,40 +333,143 @@ func (m *Muxer) WritePacket(pkt container.Packet) error {
 		}
 	}
 	// Copy the payload: the demuxer/engine may reuse pkt.Data after the call,
-	// and this packet is held until the next WritePacket or End.
-	m.pending = container.Packet{
-		Padding: pkt.Padding,
-		Packet: codec.Packet{
-			Data: append([]byte(nil), data...),
-			PTS:  pkt.PTS,
-			Dur:  pkt.Dur,
+	// and this packet is held until a later WritePacket or End.
+	dur := max(pkt.Dur, 0)
+	trimmed := min(max(pkt.Padding, 0), dur)
+	m.held = append(m.held, heldPacket{
+		end: m.pos + dur,
+		pkt: container.Packet{
+			Padding: pkt.Padding,
+			Packet: codec.Packet{
+				Data: append(m.spare[:0], data...),
+				PTS:  pkt.PTS,
+				Dur:  pkt.Dur,
+			},
 		},
+	})
+	m.spare = nil
+	m.heldDur += dur
+	m.pos += dur - trimmed
+	if trimmed < dur {
+		m.wholeTail = 0
+	} else {
+		m.wholeTail++
 	}
-	m.havePending = true
+	for len(m.held)-m.head > 1 && !m.holds() {
+		if err := m.emitOldest(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-// End emits the held final packet (with DiscardPadding when the trailer carries
-// end padding), flushes the last cluster, and finishes the stream.
+// holds reports whether the oldest held packet must wait for End. Matroska
+// holds one the end trim Begin was told reaches, or that ends past the audio.
+// WebM holds one that states a trim while every packet after it is trimmed
+// whole: they may be the end trim, which goes on the last block.
+func (m *Muxer) holds() bool {
+	q := m.held[m.head:]
+	if len(q) > maxHeld {
+		return false
+	}
+	h, dur := q[0], max(q[0].pkt.Dur, 0)
+	if m.opts.WebM {
+		return min(h.pkt.Padding, dur) > 0 && m.wholeTail >= len(q)-1
+	}
+	return m.heldDur-dur < m.endTrim || m.audioEnd >= 0 && h.end > m.audioEnd
+}
+
+// emitOldest writes the oldest held packet with its own trim: something
+// follows it, so the trailer's is not its to carry.
+func (m *Muxer) emitOldest() error {
+	h := m.held[m.head].pkt
+	dur, pad := max(h.Dur, 0), max(h.Padding, 0)
+	if err := m.emitBlock(h.Packet, samplesToNs(pad, m.rate)); err != nil {
+		return err
+	}
+	// The block advances the run by what it delivers. Its trim opens a run
+	// of trimmed blocks unless it is trimmed whole, which extends one.
+	trimmed := min(pad, dur)
+	m.rawSamples += dur - trimmed
+	if trimmed < dur {
+		m.stated = 0
+	}
+	m.stated += trimmed
+	m.heldDur -= dur
+	m.spare = h.Data
+	m.held[m.head] = heldPacket{}
+	m.head++
+	// The queue slides along its slice; move it back once half is spent.
+	if m.head >= 32 && 2*m.head >= len(m.held) {
+		n := copy(m.held, m.held[m.head:])
+		clear(m.held[n:])
+		m.held, m.head = m.held[:n], 0
+	}
+	return nil
+}
+
+// End emits the held packets, the trailer's end padding laid over them as
+// DiscardPadding, flushes the last cluster, and finishes the stream.
 func (m *Muxer) End(trailer codec.Trailer) error {
 	if !m.begun || m.ended {
 		return waxerr.New(waxerr.CodeInternal, "mka: End outside Begin")
 	}
 	m.ended = true
-	if m.havePending {
-		// The trailer's trim, not the packet's: the trailer is the engine's
-		// statement about the end of this run, which remuxTrailer derives from
-		// this very packet when the codec allows one. The final block's frames
-		// stay inside the raw run, which is where SettleLength expects them.
-		discardNS := samplesToNs(trailer.Padding, m.rate)
-		if err := m.emitBlock(m.pending.Packet, discardNS); err != nil {
+	// The trailer's trim, not the packets': the trailer is the engine's
+	// statement about the end of this run. It goes on the last block and,
+	// past what that holds, on the blocks before it, each within its own.
+	// A block it does not reach keeps the trim its packet stated.
+	q := m.held[m.head:]
+	left := max(trailer.Padding, 0)
+	reached := len(q)
+	own := make([]int64, len(q))
+	for i := len(q) - 1; i >= 0; i-- {
+		h := &q[i]
+		dur := max(h.pkt.Dur, 0)
+		take := min(left, dur)
+		own[i] = min(max(h.pkt.Padding, 0), dur)
+		h.pkt.Padding, left, reached = take, left-take, i
+		if left == 0 {
+			break
+		}
+	}
+	if left > 0 && len(q) > 0 {
+		// Past the held blocks, the ones written just before them may state
+		// the rest already. What nothing holds stays on the last block.
+		taken := min(left, m.stated)
+		m.rawSamples += taken
+		if left -= taken; left > 0 {
+			q[len(q)-1].pkt.Padding += left
+		}
+	}
+	if m.opts.WebM {
+		// One DiscardPadding: the last block states what the trim laid on
+		// the blocks before it, and they state none.
+		for i := reached; i < len(q)-1; i++ {
+			q[len(q)-1].pkt.Padding += q[i].pkt.Padding
+			q[i].pkt.Padding = 0
+		}
+	}
+	// moved is how far the trims laid so far put the next block ahead of
+	// where its packet was stamped: positions exclude the trims before them
+	// (container.Packet.Padding), and the packet knew only its own.
+	var moved int64
+	for i, h := range q {
+		pad := max(h.pkt.Padding, 0)
+		h.pkt.PTS -= moved
+		if err := m.emitBlock(h.pkt.Packet, samplesToNs(pad, m.rate)); err != nil {
 			return err
 		}
-		if m.pending.Dur > 0 {
-			m.rawSamples += m.pending.Dur
+		// The end trim's frames stay inside the raw run, which is where
+		// SettleLength expects them; an inner trim's do not.
+		if dur := max(h.pkt.Dur, 0); i >= reached {
+			m.rawSamples += dur
+			moved += min(pad, dur) - own[i]
+		} else {
+			m.rawSamples += dur - min(pad, dur)
 		}
-		m.havePending = false
 	}
+	m.held, m.head = nil, 0
 	if err := m.flushCluster(); err != nil {
 		return err
 	}

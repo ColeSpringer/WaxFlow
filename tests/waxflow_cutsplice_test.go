@@ -197,7 +197,7 @@ func TestCutSpliceTrimsAreExactOnMatroska(t *testing.T) {
 				t.Fatal(err)
 			}
 			opts := waxflow.TranscodeOptions{Format: tc.format, Container: tc.container, SpliceTrims: true}
-			plan, err := e.PlanCut(info.Default(), opts, sp, grid)
+			plan, err := e.PlanCut(info.Default(), opts, sp, knownGrid(grid))
 			if err != nil {
 				t.Fatal(err)
 			}

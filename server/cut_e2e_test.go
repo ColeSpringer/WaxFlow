@@ -158,7 +158,7 @@ func TestCutDeclinedFallsThrough(t *testing.T) {
 // must NOT surface as a 400. The reachable case is a from at exactly the source
 // length: SpanTrack reads it as a zero-sample virtual track (a valid empty
 // stream), while validateCutSpans rejects a span that keeps no samples, so
-// PlanCut returns an error rather than a clean decline. cutPlanFor swallows that
+// PlanCut returns an error rather than a clean decline. The ladder swallows that
 // error and falls through, so the request is served as the empty 200 rung 3
 // gives it today. Propagating instead would regress it to a new 400.
 func TestCutSwallowsStricterRefusal(t *testing.T) {
@@ -190,9 +190,8 @@ func TestCutSwallowsStricterRefusal(t *testing.T) {
 // the cut PLAN measures it while the RUN opens the source fresh and would see
 // -1. If the run used the header's -1, its fMP4 init segment would declare an
 // unknown duration, contradicting the plan's advertised X-Content-Duration and
-// breaking a player's seek bar. cutPlanFor threads the measured length to the
-// run through req.cutSamples so the served stream declares the length the plan
-// promised.
+// breaking a player's seek bar. The cut plan carries the measured track to the
+// run so the served stream declares the length the plan promised.
 //
 // A ToEnd span is the discriminating case: only there does the header's -1 flow
 // into the run's synthesized track length (a bounded cut computes its own finite

@@ -68,7 +68,7 @@ func TestRemuxSegmentsSnapToThePacketGrid(t *testing.T) {
 		{"5760 is Opus at its 120ms maximum", 5760},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			plan, err := e.PlanRemuxSegments(track, waxflow.TranscodeOptions{Format: "opus"}, 4.0, tc.grid)
+			plan, err := e.PlanRemuxSegments(track, waxflow.TranscodeOptions{Format: "opus"}, 4.0, knownGrid(tc.grid))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -95,7 +95,7 @@ func TestRemuxSegmentsDeclineVaryingPackets(t *testing.T) {
 	src := remuxFixture(t, waxflow.TranscodeOptions{Format: "opus"}, 48000)
 	track := probeTrack(t, src, "opus")
 	e := waxflow.New()
-	plan, err := e.PlanRemuxSegments(track, waxflow.TranscodeOptions{Format: "opus"}, 4.0, 0)
+	plan, err := e.PlanRemuxSegments(track, waxflow.TranscodeOptions{Format: "opus"}, 4.0, knownGrid(0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestRemuxSegmentsShortFinalPacket(t *testing.T) {
 	if grid != 4096 {
 		t.Fatalf("PacketGrid = %d, want 4096: the fixture is not the shape this pins", grid)
 	}
-	plan, err := e.PlanRemuxSegments(track, opts, 1.0, grid)
+	plan, err := e.PlanRemuxSegments(track, opts, 1.0, knownGrid(grid))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestRemuxSegmentsRestartIsByteIdentical(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := e.PlanRemuxSegments(track, opts, 1.0, grid)
+	plan, err := e.PlanRemuxSegments(track, opts, 1.0, knownGrid(grid))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestRemuxSegmentsCountMatchesThePlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := e.PlanRemuxSegments(track, opts, 1.0, grid)
+	plan, err := e.PlanRemuxSegments(track, opts, 1.0, knownGrid(grid))
 	if err != nil {
 		t.Fatal(err)
 	}

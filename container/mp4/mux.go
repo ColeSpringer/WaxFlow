@@ -61,7 +61,9 @@ type MuxerOptions struct {
 // edit's duration with the encoder's exact trailer, upgrading a
 // projected or unknown length to the exact one. On a pure stream the
 // init bytes stand as written: full gapless when the length was known,
-// delay-only otherwise (the capability matrix's live fMP4 cell).
+// delay-only otherwise (the capability matrix's live fMP4 cell). With no
+// delay, an end trim is stated by the edit list's length alone, so End
+// refuses one the list does not hold.
 type Muxer struct {
 	w     io.Writer
 	patch muxseek.Patcher
@@ -118,45 +120,12 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf("mp4: muxers are single-track, got %d", len(tracks)))
 	}
 	t := tracks[0]
-	if err := t.Fmt.Valid(); err != nil {
+	entry, defaultDur, err := fragmentedEntry(t)
+	if err != nil {
 		return err
 	}
-
-	var entry, edts []byte
-	defaultDur := 0
-	switch t.Codec {
-	case codec.ALAC:
-		if t.Delay != 0 || t.Padding != 0 {
-			return waxerr.New(waxerr.CodeUnsupportedFormat, "mp4: ALAC signals no gapless trims (lossless streams have none)")
-		}
-		cfg, err := alac.ParseMagicCookie(t.CodecConfig)
-		if err != nil {
-			return err
-		}
-		// Compare the fields the cookie constrains, not the whole Format: the
-		// cookie has no channel-layout field, so cfg.Format always reports the
-		// default layout, but the chain may deliver a non-default mask (a WAV
-		// EXTENSIBLE stereo file, say) that ALAC codes in bitstream order all the
-		// same. Requiring an exact Layout match would reject a track the plan and
-		// the encoder both accepted.
-		if want := cfg.Format(); t.Fmt.Rate != want.Rate || t.Fmt.Channels != want.Channels ||
-			t.Fmt.Type != want.Type || t.Fmt.BitDepth != want.BitDepth {
-			return waxerr.New(waxerr.CodeUnsupportedFormat,
-				fmt.Sprintf("mp4: track format %v does not match the ALAC cookie (%v)", t.Fmt, want))
-		}
-		entry = alacSampleEntry(cfg)
-		defaultDur = alac.FrameSize
-	case codec.AACLC, codec.HEAAC:
-		if t.Delay < 0 || t.Padding < 0 {
-			return waxerr.New(waxerr.CodeInvalidRequest, "mp4: negative gapless trims")
-		}
-		var err error
-		entry, err = aacSampleEntry(t) // validates the ASC against t.Fmt
-		if err != nil {
-			return err
-		}
-		cfg, _ := aac.ParseASC(t.CodecConfig)
-		defaultDur = cfg.OutputSamplesPerAU()
+	var edts []byte
+	if t.Codec == codec.AACLC || t.Codec == codec.HEAAC {
 		// The edit list carries the encoder priming up front, plus the
 		// exact length when the engine projected one; End refines the
 		// length from the trailer when the writer can seek.
@@ -165,8 +134,6 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 		}
 		m.delay = t.Delay
 		m.knownLen = t.Samples
-	default:
-		return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("mp4: cannot mux codec %q (alac, aac-lc, he-aac)", t.Codec))
 	}
 
 	m.rate = t.Fmt.Rate
@@ -213,6 +180,71 @@ func (m *Muxer) Begin(tracks []container.Track) error {
 	return m.write(moov)
 }
 
+// TrackFits reports whether the fragmented muxer can write track t: nil, or
+// Begin's own refusal.
+func TrackFits(t container.Track) error {
+	_, _, err := fragmentedEntry(t)
+	return err
+}
+
+// fragmentedEntry builds the fragmented muxer's sample entry for t and its
+// trex default duration, refusing a track the muxer cannot write.
+func fragmentedEntry(t container.Track) (entry []byte, defaultDur int, err error) {
+	if err := t.Fmt.Valid(); err != nil {
+		return nil, 0, err
+	}
+	switch t.Codec {
+	case codec.ALAC:
+		if t.Delay != 0 || t.Padding != 0 {
+			return nil, 0, waxerr.New(waxerr.CodeUnsupportedFormat, "mp4: ALAC signals no gapless trims (lossless streams have none)")
+		}
+		cfg, err := alac.ParseMagicCookie(t.CodecConfig)
+		if err != nil {
+			return nil, 0, err
+		}
+		// Compare the fields the cookie constrains, not the whole Format: the
+		// cookie has no channel-layout field, so cfg.Format always reports the
+		// default layout, but the chain may deliver a non-default mask (a WAV
+		// EXTENSIBLE stereo file, say) that ALAC codes in bitstream order all the
+		// same. Requiring an exact Layout match would reject a track the plan and
+		// the encoder both accepted.
+		if want := cfg.Format(); t.Fmt.Rate != want.Rate || t.Fmt.Channels != want.Channels ||
+			t.Fmt.Type != want.Type || t.Fmt.BitDepth != want.BitDepth {
+			return nil, 0, waxerr.New(waxerr.CodeUnsupportedFormat,
+				fmt.Sprintf("mp4: track format %v does not match the ALAC cookie (%v)", t.Fmt, want))
+		}
+		return alacSampleEntry(cfg), alac.FrameSize, nil
+	case codec.AACLC, codec.HEAAC:
+		if t.Delay < 0 || t.Padding < 0 {
+			return nil, 0, waxerr.New(waxerr.CodeInvalidRequest, "mp4: negative gapless trims")
+		}
+		// The edit list is the one place this muxer states a trim, and
+		// Begin writes it from a delay or a length.
+		if t.Delay == 0 && t.Padding > 0 && t.Samples <= 0 {
+			return nil, 0, noEndTrim(t.Padding)
+		}
+		entry, err := aacSampleEntry(t) // validates the ASC against t.Fmt
+		if err != nil {
+			return nil, 0, err
+		}
+		cfg, _ := aac.ParseASC(t.CodecConfig)
+		return entry, cfg.OutputSamplesPerAU(), nil
+	}
+	return nil, 0, waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf("mp4: cannot mux codec %q (alac, aac-lc, he-aac)", t.Codec))
+}
+
+// noEndTrim refuses an end trim the edit list does not state.
+func noEndTrim(padding int64) error {
+	return waxerr.New(waxerr.CodeUnsupportedFormat, fmt.Sprintf(
+		"mp4: %d samples of end trim cannot be written: this track signals no gapless delay, and no edit list states its length", padding))
+}
+
+// statesLength reports whether the edit list holds n samples as its
+// duration, or will once End patches it.
+func (m *Muxer) statesLength(n int64) bool {
+	return m.elstDurOff >= 0 && (n == m.knownLen || m.patch.Seekable() && n > 0)
+}
+
 // WritePacket appends one ALAC frame to the current fragment, flushing when
 // the fragment reaches its target length.
 func (m *Muxer) WritePacket(pkt container.Packet) error {
@@ -255,25 +287,11 @@ func (m *Muxer) End(trailer codec.Trailer) error {
 		return waxerr.New(waxerr.CodeInternal,
 			fmt.Sprintf("mp4: trailer delay %d disagrees with the init header's %d", trailer.Delay, m.delay))
 	}
-	if m.delay == 0 && trailer.Padding != 0 {
-		// A track that declared no delay is one Begin recorded nothing
-		// for, so a trim arriving only now cannot be signalled.
-		//
-		// This was written as the ALAC path, and ALAC does still reach
-		// it (lossless declares no trims, so only the AAC branch above
-		// ever sets m.delay), but it was never really about the codec:
-		// it is this muxer asking whether it has anywhere to put a trim.
-		// The cut rung is the first thing that can bring an AAC track
-		// here, carrying a padding its source never had, so the message
-		// must stop naming a codec that is merely its most common
-		// visitor.
-		//
-		// The Delay sub-clause that used to ride along here was dead:
-		// the check above forces trailer.Delay == m.delay, and this
-		// branch is m.delay == 0.
-		return waxerr.New(waxerr.CodeUnsupportedFormat,
-			fmt.Sprintf("mp4: this track signals no gapless delay, so %d samples of end trim cannot be written",
-				trailer.Padding))
+	if m.delay == 0 && trailer.Padding != 0 && !m.statesLength(trailer.Samples) {
+		// With no delay, an end trim is stated by the edit list's
+		// duration alone, so one arriving with no list to hold the
+		// trailer's length cannot be signalled. ALAC never has a list.
+		return noEndTrim(trailer.Padding)
 	}
 	if len(m.durs) > 0 {
 		if err := m.flush(); err != nil {

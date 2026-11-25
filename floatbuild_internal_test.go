@@ -125,21 +125,21 @@ func TestFloatBuildVersionRidesTranscodePlans(t *testing.T) {
 			return p.Versions, nil
 		},
 		"PlanRemuxSegments": func() ([]string, error) {
-			p, err := e.PlanRemuxSegments(opus, toOpus, 2, 960)
+			p, err := e.PlanRemuxSegments(opus, toOpus, 2, knownGrid(960))
 			if err != nil || p == nil {
 				return nil, err
 			}
 			return p.Versions, nil
 		},
 		"PlanCut": func() ([]string, error) {
-			p, err := e.PlanCut(opus, toOpus, span, 960)
+			p, err := e.PlanCut(opus, toOpus, span, knownGrid(960))
 			if err != nil || p == nil {
 				return nil, err
 			}
 			return p.Versions, nil
 		},
 		"PlanCutSegments": func() ([]string, error) {
-			p, err := e.PlanCutSegments(opus, toOpus, span, 960, 2)
+			p, err := e.PlanCutSegments(opus, toOpus, span, knownGrid(960), 2)
 			if err != nil || p == nil {
 				return nil, err
 			}

@@ -196,10 +196,7 @@ func keyMatrix(tl, mixed, withWebM string) (cases []keyCase) {
 	add("stream", "cut", []ask{
 		{"cut-opus", srcWebM + "&format=opus" + spanOpus},
 		{"cut-aac", srcM4B + "&format=aac" + spanAAC},
-	})
-	// Named fragmented, the destination cannot state the cut's delay, so the
-	// span the default container copies is encoded.
-	add("stream", "transcode", []ask{
+		// Named fragmented, the default's own muxer states the cut's delay.
 		{"cut-aac-fragmented", srcM4B + "&format=aac&container=fragmented" + spanAAC},
 	})
 

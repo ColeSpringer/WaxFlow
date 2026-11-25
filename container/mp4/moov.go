@@ -71,6 +71,7 @@ type track struct {
 	hasEdit    bool
 	editMedia  int64 // media_time in media timescale ticks (-1 = empty edit)
 	editSegDur int64 // segment_duration in movie timescale ticks
+	edits      int   // the edits that play media; editSegDur sums theirs
 
 	// emptyEdit is the blank presentation time the edit list inserts before
 	// the first sample, in movie ticks: the standard way a track states that
@@ -327,6 +328,7 @@ func parseElst(t *track, payload []byte) {
 		count = int64(len(rest)) / entrySize
 	}
 	var totalSeg, empty int64
+	var edits int
 	mediaTime := int64(-1)
 	for i := int64(0); i < count; i++ {
 		e := rest[i*entrySize:]
@@ -352,6 +354,7 @@ func parseElst(t *track, payload []byte) {
 			mediaTime = mt // first real edit's start offset
 		}
 		totalSeg += segDur
+		edits++
 	}
 	t.emptyEdit = empty
 	if mediaTime < 0 {
@@ -360,6 +363,7 @@ func parseElst(t *track, payload []byte) {
 	t.hasEdit = true
 	t.editMedia = mediaTime
 	t.editSegDur = totalSeg
+	t.edits = edits
 }
 
 // parseTref records chapter track references so a text chapter track can

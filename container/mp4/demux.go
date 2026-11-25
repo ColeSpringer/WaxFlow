@@ -25,6 +25,11 @@ var (
 	_ container.Damaged   = (*Demuxer)(nil)
 )
 
+// DemuxerVersion is this demuxer's term in the ADR-0004 cache key, carried
+// by every MP4 track. Bump it for a change that makes the demuxer deliver
+// other samples for a file that has not changed.
+const DemuxerVersion = "mp4-demux-2"
+
 // Chapter is one parsed chapter marker, timed in the movie timeline. It
 // aliases the container-level type so demuxer chapters feed muxer options
 // (and the metadata mapper) without conversion.
@@ -97,6 +102,9 @@ type Demuxer struct {
 	fragTruncated int64
 	fragCompared  bool
 	fragRun       int64
+	// fragSlack is how far under the edit list's length the fragments may
+	// end and still hold all it states: the rounding of a coarse duration.
+	fragSlack int64
 	// fragTicks is where the fragment in flight begins on the media's own tick
 	// timeline, which is the unit a tfdt states. It exists for the fragments
 	// that carry none: their position is the sum of every prior sample's raw
@@ -401,6 +409,7 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		}
 	}
 	d.track = container.Track{
+		DemuxerVersion:  DemuxerVersion,
 		Codec:           sel.codec,
 		CodecConfig:     sel.codecConfig,
 		Fmt:             sel.fmt,
@@ -409,6 +418,7 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		Padding:         padding,
 		SamplesExact:    exact,
 		SamplesAdvisory: advisory,
+		TrimsUnread:     d.fragSlack > 0,
 		SourceBitDepth:  sel.sourceBits,
 		Default:         true,
 	}

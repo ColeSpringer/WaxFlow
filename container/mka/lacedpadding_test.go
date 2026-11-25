@@ -226,19 +226,20 @@ func (l LacedPadding) TrimStart() int64 { return int64(l.First+l.Count)*l.BlockD
 func (l LacedPadding) Final() bool { return l.First+l.Count == l.Blocks }
 
 // Padding is the walk's end trim: the last packet's own, which for a final
-// laced block is its last lace's share plus any excess past the block.
+// laced block is the whole of its trim, since nothing plays after any lace's
+// share.
 func (l LacedPadding) Padding() int64 {
 	if l.Final() {
-		return l.Pads()[l.Count-1]
+		return l.Trim
 	}
 	return l.EndPad
 }
 
-// MidPadding is the walk's inner trim total: every lace's share but the
-// stream's final packet's.
+// MidPadding is the walk's inner trim total: every lace's share of a block
+// audio follows.
 func (l LacedPadding) MidPadding() int64 {
 	if l.Final() {
-		return l.Honoured() - min(l.Pads()[l.Count-1], l.BlockDur)
+		return 0
 	}
 	return l.Honoured()
 }
@@ -248,10 +249,10 @@ func (l LacedPadding) MidPadding() int64 {
 // stream.
 func (l LacedPadding) MidTrims() []container.PacketTrim {
 	var out []container.PacketTrim
+	if l.Final() {
+		return nil
+	}
 	for i, pad := range l.Pads() {
-		if l.Final() && i == l.Count-1 {
-			break
-		}
 		if pad = min(pad, l.BlockDur); pad > 0 {
 			end := int64(l.First+i+1) * l.BlockDur
 			out = append(out, container.PacketTrim{Pos: end - pad, Samples: pad})
@@ -305,7 +306,8 @@ func (l LacedPadding) Pad(i int) int64 {
 // laced block trims the block's end, so the last lace gives what it holds and
 // the rest comes off the laces before it. Each lace reports its own share,
 // the timeline excludes each as it passes, and a walk records every share
-// that is not the stream's final packet's, with its position.
+// audio follows, with its position; the shares of a block that ends the
+// stream are its end trim.
 func TestLacedBlockSpreadsItsTrim(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -357,7 +359,7 @@ func TestLacedBlockSpreadsItsTrim(t *testing.T) {
 				t.Errorf("after Walk: %d samples (exact %v), want %d", tr.Samples, tr.SamplesExact, l.Samples())
 			}
 			if tr.Padding != l.Padding() {
-				t.Errorf("after Walk: Padding = %d, want the final packet's %d", tr.Padding, l.Padding())
+				t.Errorf("after Walk: Padding = %d, want the end trim's %d", tr.Padding, l.Padding())
 			}
 			if tr.MidPadding != l.MidPadding() {
 				t.Errorf("after Walk: MidPadding = %d, want %d", tr.MidPadding, l.MidPadding())

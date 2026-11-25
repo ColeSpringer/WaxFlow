@@ -40,7 +40,7 @@ func planCutSegments(t *testing.T, e *waxflow.Engine, src []byte, opts waxflow.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := e.PlanCutSegments(track, opts, spans, grid, segSeconds)
+	plan, err := e.PlanCutSegments(track, opts, spans, knownGrid(grid), segSeconds)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestPlanCutSegmentsMapsDeclinesAndErrors(t *testing.T) {
 
 	// A servable cut plans, carries the cut version, and threads the grid and the
 	// source length the run must reproduce.
-	plan, err := e.PlanCutSegments(track, waxflow.TranscodeOptions{Format: "opus"}, []waxflow.Span{{From: 0, To: 48000}}, grid, 1.0)
+	plan, err := e.PlanCutSegments(track, waxflow.TranscodeOptions{Format: "opus"}, []waxflow.Span{{From: 0, To: 48000}}, knownGrid(grid), 1.0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,14 +91,14 @@ func TestPlanCutSegmentsMapsDeclinesAndErrors(t *testing.T) {
 	// A codec mismatch declines (nil, nil): a FLAC output cannot hold Opus packets,
 	// so PlanRemux inside declines and the caller transcodes. This is the
 	// reachability fact: the cut needs a source-matching format.
-	plan, err = e.PlanCutSegments(track, waxflow.TranscodeOptions{Format: "flac"}, []waxflow.Span{{From: 0, To: 48000}}, grid, 1.0)
+	plan, err = e.PlanCutSegments(track, waxflow.TranscodeOptions{Format: "flac"}, []waxflow.Span{{From: 0, To: 48000}}, knownGrid(grid), 1.0)
 	if err != nil || plan != nil {
 		t.Errorf("PlanCutSegments(format mismatch) = (%v, %v), want (nil, nil): a decline is not an error", plan, err)
 	}
 
 	// A zero-length span errors: rung 3 refuses it identically, so it is not a
 	// decline the caller should swallow into a re-encode.
-	if _, err := e.PlanCutSegments(track, waxflow.TranscodeOptions{Format: "opus"}, []waxflow.Span{{From: 100, To: 100}}, grid, 1.0); err == nil {
+	if _, err := e.PlanCutSegments(track, waxflow.TranscodeOptions{Format: "opus"}, []waxflow.Span{{From: 100, To: 100}}, knownGrid(grid), 1.0); err == nil {
 		t.Error("PlanCutSegments(zero-length span) returned no error")
 	}
 }
@@ -233,7 +233,7 @@ func TestCutSegmentsAcrossAMidStreamTrim(t *testing.T) {
 
 	// The trimmed packet is in the head slop of this span, and fMP4 cannot
 	// carry it.
-	plan, err := e.PlanCutSegments(track, opts, []waxflow.Span{{From: 9600, To: 28800}}, grid, 0.5)
+	plan, err := e.PlanCutSegments(track, opts, []waxflow.Span{{From: 9600, To: 28800}}, knownGrid(grid), 0.5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestCutSegmentsAcrossAMidStreamTrim(t *testing.T) {
 	}
 
 	spans := []waxflow.Span{{From: 200000, To: 230000}}
-	plan, err = e.PlanCutSegments(track, opts, spans, grid, 0.5)
+	plan, err = e.PlanCutSegments(track, opts, spans, knownGrid(grid), 0.5)
 	if err != nil {
 		t.Fatal(err)
 	}

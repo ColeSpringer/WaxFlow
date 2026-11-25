@@ -430,22 +430,21 @@ func (d *Demuxer) Walk(ctx context.Context) error {
 	return nil
 }
 
-// adoptWalkedLength puts a finished walk's measurement on the track: the last
-// packet's trim becomes the track's tail trim, the trims on the packets
-// before it become MidPadding with their positions in MidTrims, and the raw
+// adoptWalkedLength puts a finished walk's measurement on the track: the
+// trims that run unbroken to the end become the track's tail trim, the trims
+// before them become MidPadding with their positions in MidTrims, and the raw
 // total settles the length through the one delivery rule. No open measures,
 // so every mka track arrives here with the advisory Info Duration or nothing
 // at all. SettleLength is idempotent on its own output, so running twice
 // changes nothing.
 //
-// The tail trim is the final packet's alone, not a sum, because that is the
-// only one an end trim can mean: the timeline already excludes the inner ones
-// (see container.Packet.Padding), so they are gone from the raw run and from
-// the settled length both, and folding them in here would shorten the end by
-// frames that play in the middle. A final laced block whose trim spreads
-// over its laces states the earlier laces' shares as inner trims for the
-// same reason: packets follow them, and a copy re-states each on the block
-// it writes.
+// The tail trim is the last packet's and, while each packet after it is
+// trimmed whole, the one before's: a DiscardPadding trims its own block, so a
+// trim longer than the last block is spread over the final ones, and nothing
+// plays between them. A trim something plays after is an inner one: the
+// timeline already excludes it (see container.Packet.Padding), so it is gone
+// from the raw run and from the settled length both, and folding it in here
+// would shorten the end by frames that play in the middle.
 //
 // It is still clamped to the run it trims. A DiscardPadding is a signed 64-bit
 // element, so one block's is a hostile input's to choose: unclamped it can
@@ -457,13 +456,14 @@ func (d *Demuxer) adoptWalkedLength() {
 	d.track.Padding = min(max(d.padding, 0), d.rawTotal)
 	d.track.MidPadding = d.midPadding
 	d.track.MidTrims = d.midTrims
+	d.track.TrimsUnread = false
 	d.track = container.SettleLength(d.track, d.rawTotal)
 	if d.midPadding > 0 && !d.notedMidPadding {
 		// A Note rather than a warning: the file is not damaged and the audio
 		// is right. It exists so a probe, and the transcode a copy rung
 		// declines into, can say why a lossy source was re-encoded.
 		d.notedMidPadding = true
-		d.note(0, "%d samples are trimmed inside the run by a DiscardPadding on %d of the packets before the last",
+		d.note(0, "%d samples are trimmed inside the run by a DiscardPadding on %d of the packets audio follows",
 			d.midPadding, d.midCount)
 	}
 }
@@ -510,8 +510,9 @@ func (d *Demuxer) Walked() bool { return d.walked }
 // byte offset, or -1 for the whole stream.
 //
 // Only a walk that reached the end commits rawTotal, the two trim totals, and
-// the walked flag: which block is the *last* is the whole of what separates an
-// end trim from an inner one, and a walk that stopped short does not know.
+// the walked flag: whether anything plays after a trim is the whole of what
+// separates an inner one from the end trim, and a walk that stopped short
+// does not know.
 //
 // The walk runs on a cursor of its own, swapped in for the packet reader's
 // and out again: a Walk mid-read moves nothing, and a walk stopped at a bound
@@ -534,7 +535,8 @@ func (d *Demuxer) walk(ctx context.Context, limit int64) error {
 	} else {
 		d.walkCumulative, d.walkRaw = 0, 0
 		d.walkMid, d.walkMidCount = 0, 0
-		d.walkLastPad, d.walkLastClamped = 0, 0
+		d.walkTail, d.walkTailOver, d.walkTailTrims = 0, 0, d.walkTailTrims[:0]
+		d.walkTailCount = 0
 		d.walkFrames = 0
 		d.midTrims = nil
 		d.clusterIndex = d.clusterIndex[:0]
@@ -578,11 +580,11 @@ func (d *Demuxer) walk(ctx context.Context, limit int64) error {
 	}
 	if !d.walkStopped {
 		// The stream ended, so the counts are whole even if a bound was set.
-		// The final packet's trim goes back into the raw run, since that is
-		// where SettleLength expects the end trim's frames to be; the inner
-		// ones stay out of both sides.
-		d.rawTotal = d.walkCumulative + d.walkLastClamped
-		d.padding = d.walkLastPad
+		// The trims that run to the end go back into the raw run, since that
+		// is where SettleLength expects the end trim's frames to be; the
+		// inner ones stay out of both sides.
+		d.rawTotal = d.walkCumulative + d.walkTail
+		d.padding = d.walkTail + d.walkTailOver
 		d.midPadding = d.walkMid
 		d.midCount = d.walkMidCount
 		d.walked = true
@@ -591,25 +593,31 @@ func (d *Demuxer) walk(ctx context.Context, limit int64) error {
 }
 
 // walkFrame counts one frame into the walk. Its trim comes off the running
-// position, so cluster anchors are the positions a read delivers. The newest
-// frame's trim is the end-trim candidate until another frame follows it,
-// which is what makes walkMid and the recorded positions the inner trims
-// alone. A position is on the raw timeline (every frame whole), clamped to
-// its frame; past maxMidTrims the sum keeps counting and the list stops.
+// position, so cluster anchors are the positions a read delivers. The trims
+// that run up to the newest frame are the end-trim candidate (walkTail): a
+// frame trimmed whole extends them, and one that plays anything turns them
+// into inner trims, which is what makes walkMid and the recorded positions
+// the inner trims alone. A position is on the raw timeline (every frame
+// whole), clamped to its frame; past maxMidTrims the sum keeps counting and
+// the list stops.
 func (d *Demuxer) walkFrame(f frameLoc) {
-	if d.walkLastClamped > 0 {
-		d.walkMid += d.walkLastClamped
-		d.walkMidCount++
-		if len(d.midTrims) < maxMidTrims {
-			d.midTrims = append(d.midTrims, container.PacketTrim{
-				Pos: d.walkRaw - d.walkLastClamped, Samples: d.walkLastClamped,
-			})
-		}
-	}
 	clamped := min(f.pad, f.dur)
+	if clamped < f.dur && d.walkTail > 0 {
+		d.walkMid += d.walkTail
+		d.walkMidCount += d.walkTailCount
+		d.midTrims = append(d.midTrims, d.walkTailTrims[:min(len(d.walkTailTrims), maxMidTrims-len(d.midTrims))]...)
+		d.walkTail, d.walkTailCount, d.walkTailTrims = 0, 0, d.walkTailTrims[:0]
+	}
 	d.walkCumulative += f.dur - clamped
 	d.walkRaw += f.dur
-	d.walkLastPad, d.walkLastClamped = f.pad, clamped
+	d.walkTailOver = f.pad - clamped
+	if clamped > 0 {
+		d.walkTail += clamped
+		d.walkTailCount++
+		if len(d.midTrims)+len(d.walkTailTrims) < maxMidTrims {
+			d.walkTailTrims = append(d.walkTailTrims, container.PacketTrim{Pos: d.walkRaw - clamped, Samples: clamped})
+		}
+	}
 }
 
 // maxSeekSeconds and maxSeekRate bound the operands of cueLimit's conversion to

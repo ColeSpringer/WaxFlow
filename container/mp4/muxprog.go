@@ -84,13 +84,7 @@ func (m *ProgressiveMuxer) Begin(tracks []container.Track) error {
 		return waxerr.New(waxerr.CodeInvalidRequest, "mp4: progressive output requires a seekable destination")
 	}
 	t := tracks[0]
-	if err := t.Fmt.Valid(); err != nil {
-		return err
-	}
-	if t.Delay < 0 || t.Padding < 0 {
-		return waxerr.New(waxerr.CodeInvalidRequest, "mp4: negative gapless trims")
-	}
-	entry, err := sampleEntryFor(t) // validates the codec config against t.Fmt
+	entry, err := progressiveEntry(t)
 	if err != nil {
 		return err
 	}
@@ -110,6 +104,26 @@ func (m *ProgressiveMuxer) Begin(tracks []container.Track) error {
 	m.mdatSizeOff = m.off + 8
 	m.mdatStart = m.off + 16
 	return m.write(mdatHeader)
+}
+
+// ProgressiveTrackFits reports whether the progressive muxer can write track
+// t: nil, or Begin's own refusal of the track (its destination must be
+// seekable besides).
+func ProgressiveTrackFits(t container.Track) error {
+	_, err := progressiveEntry(t)
+	return err
+}
+
+// progressiveEntry builds the progressive muxer's sample entry for t,
+// refusing a track the muxer cannot write.
+func progressiveEntry(t container.Track) ([]byte, error) {
+	if err := t.Fmt.Valid(); err != nil {
+		return nil, err
+	}
+	if t.Delay < 0 || t.Padding < 0 {
+		return nil, waxerr.New(waxerr.CodeInvalidRequest, "mp4: negative gapless trims")
+	}
+	return sampleEntryFor(t) // validates the codec config against t.Fmt
 }
 
 // WritePacket streams one sample into the mdat and records its size and

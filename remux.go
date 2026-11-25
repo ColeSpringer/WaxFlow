@@ -97,27 +97,35 @@ func remuxRow(track container.Track, format string) (*output, error) {
 // format=opus already means "Ogg-Opus progressive, fMP4-Opus segmented" via the
 // row's hls column, so Opus-in-WebM to Opus-in-fMP4 is just this rung with
 // format=opus on the segmented path. Remux connects outputs that already exist.
+//
+// The destination muxer is asked whether it can write the track (its own
+// TrackFits), so a copy it would refuse at Begin declines to the transcode
+// rung instead of failing the request.
 func (e *Engine) PlanRemux(track container.Track, opts TranscodeOptions) (*RemuxPlan, error) {
+	plan, _, err := e.planRemux(track, opts, true)
+	return plan, err
+}
+
+// planRemux is PlanRemux, asking the form's muxer only when dest is set: a
+// segmented copy writes fMP4 whatever the form, and asks its init header
+// instead. refused is that muxer's refusal when it alone declined the copy.
+func (e *Engine) planRemux(track container.Track, opts TranscodeOptions, dest bool) (plan *RemuxPlan, refused, err error) {
 	if err := opts.Check(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	row, err := remuxRow(track, opts.Format)
+	row, fm, copies, err := remuxForm(track, opts)
 	if err != nil {
-		return nil, err
-	}
-	fm, err := row.form(opts.Container)
-	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	containerName := row.containerName(fm)
-	if !codecSurvives(track.Codec, row.codecID) || !remuxable(opts, track.Fmt) || !gaplessSurvives(track) {
-		return nil, nil
+	if !copies || !gaplessSurvives(track) {
+		return nil, nil, nil
 	}
 	if track.Codec == codec.Vorbis && track.Delay > 0 && !isMatroska(containerName) {
 		// Ogg states a Vorbis front trim only as a negative start, which the
 		// Ogg muxer does not write: its granules run from 0, so a copy would
 		// play the trimmed samples. The transcode rung trims them in PCM.
-		return nil, nil
+		return nil, nil, nil
 	}
 	if track.MidPadding > 0 && !StatesTrimsPerPacket(containerName) {
 		// A trim inside the run, which only a container that states trims per
@@ -128,25 +136,19 @@ func (e *Engine) PlanRemux(track container.Track, opts TranscodeOptions) (*Remux
 		// This is the plan-time answer; copyPackets refuses mid-copy for a
 		// source nothing measured first, since MidPadding is a walk's finding
 		// and a plan reads headers.
-		return nil, nil
-	}
-	if containerName == "adts" && row.codecID == codec.HEAAC {
-		// Downsampled (single-rate) SBR has no ADTS form: implicit
-		// signalling implies the dual rate, so re-framing these units would
-		// change their legal meaning. The muxer refuses in Begin as the
-		// backstop; declining here at plan time lets the ladder fall through
-		// to the transcode rung instead of committing to one that cannot
-		// serve.
-		if cfg, err := aac.ParseASC(track.CodecConfig); err == nil && cfg.SBR &&
-			cfg.ExtensionRate == cfg.SampleRate {
-			return nil, nil
-		}
+		return nil, nil, nil
 	}
 	// The muxed track is the source's, normalized the way Transcode normalizes
 	// the one it builds: muxers are single-track, so the packet the loop writes
 	// is track 0 and this is track 0.
 	t := track
 	t.ID, t.Default = 0, true
+	if dest && fm.trackFits != nil {
+		if err := fm.trackFits(t); err != nil {
+			e.log.Debug("remux declined", "reason", err, "outContainer", containerName)
+			return nil, err, nil
+		}
+	}
 	return &RemuxPlan{
 		TranscodePlan: TranscodePlan{
 			Format:    track.Fmt,
@@ -164,7 +166,22 @@ func (e *Engine) PlanRemux(track container.Track, opts TranscodeOptions) (*Remux
 			EstimatedBytes: -1,
 		},
 		Track: t,
-	}, nil
+	}, nil, nil
+}
+
+// remuxForm resolves the row and form a copy of track under opts writes, and
+// reports whether the codec crosses unchanged with no transform asked: what
+// the format and options answer before the track's trims or packets are read.
+func remuxForm(track container.Track, opts TranscodeOptions) (*output, *form, bool, error) {
+	row, err := remuxRow(track, opts.Format)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	fm, err := row.form(opts.Container)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return row, fm, codecSurvives(track.Codec, row.codecID) && remuxable(opts, track.Fmt), nil
 }
 
 // codecSurvives reports whether a track's codec can cross into the output row's
@@ -302,13 +319,14 @@ func remuxable(opts TranscodeOptions, src audio.Format) bool {
 //
 // A source that states its trims per packet (Matroska's DiscardPadding) states
 // no tail trim in its header at all, so the packets supply the one the header
-// is missing and the settle runs over it as over any other. It is the *final*
-// packet's trim, and the inner ones are not missing from it, they are already
-// out of the run: the packet timeline excludes them (see
-// container.Packet.Padding), so the walk this settles never counted those
-// frames. An output container carries one end trim and nothing else, which is
-// why a source that has more than one never reaches here: the copy rungs
-// decline it and the transcode rung, which trims in PCM, serves instead.
+// is missing and the settle runs over it as over any other. It is the trims
+// that run unbroken to the end (copiedRun.endPadding), and the inner ones are
+// not missing from it, they are already out of the run: the packet timeline
+// excludes them (see container.Packet.Padding), so the walk this settles
+// never counted those frames. An output container carries one end trim and
+// nothing else, which is why a source that has more than one never reaches
+// here: the copy rungs decline it and the transcode rung, which trims in PCM,
+// serves instead.
 //
 // It fills a trim the header left at zero and never overrides one it stated:
 // a cut's track carries trims its own arithmetic computed, and the packets it
@@ -319,9 +337,9 @@ func remuxable(opts TranscodeOptions, src audio.Format) bool {
 // has been written.
 func remuxTrailer(t container.Track, run copiedRun) codec.Trailer {
 	if run.trimmed && t.Padding == 0 && gaplessSurvives(container.Track{
-		Codec: t.Codec, Padding: run.lastPadding,
+		Codec: t.Codec, Padding: run.endPadding,
 	}) {
-		t.Padding = run.lastPadding
+		t.Padding = run.endPadding
 	}
 	s := container.SettleLength(t, run.samples)
 	if !gaplessSurvives(s) {
@@ -374,9 +392,8 @@ func gaplessSurvives(t container.Track) bool {
 // than an error, and the caller's cue to take a rung that has its own grid.
 //
 // This is a demuxer walk, not a decode, in the same cost class as the
-// exact-length measure (sub-millisecond for a three-minute file). It costs the
-// progressive rung nothing, which needs no grid at all; only the segmented one
-// asks.
+// exact-length measure (sub-millisecond for a three-minute file). Only the
+// segmented remux and the cuts ask, once the request's headers allow a copy.
 //
 // The final packet is excluded on purpose. A stream's last packet is routinely
 // short (an encoder's tail flush), and that is no obstacle to segmenting, since
@@ -463,7 +480,11 @@ type RemuxSegmentPlan struct {
 // progressive, fMP4-Opus segmented" and so Opus-in-WebM to Opus-in-fMP4 is this
 // with nothing invented.
 //
-// grid is the source's packet duration from PacketGrid. A zero grid declines,
+// grid measures the source's packet duration, as PacketGrid does. It is asked
+// at most once, and only after every check the track's headers answer has
+// passed, so a request whose format or options rule out a copy never pays for
+// the walk. Its error comes back unchanged. A NaN, negative or over-long
+// segSeconds is refused before any decline; past that, a zero grid declines,
 // as does anything PlanRemux declines, and both return (nil, nil).
 //
 // The alignment rule is to snap, not to refuse. A 60 ms-frame Opus source
@@ -479,7 +500,7 @@ type RemuxSegmentPlan struct {
 // What genuinely cannot be served is a source whose packet durations vary,
 // since there is then no grid to snap to. That is the real decline, and it is
 // the one PacketGrid reports.
-func (e *Engine) PlanRemuxSegments(track container.Track, opts TranscodeOptions, segSeconds float64, grid int) (*RemuxSegmentPlan, error) {
+func (e *Engine) PlanRemuxSegments(track container.Track, opts TranscodeOptions, segSeconds float64, grid func() (int, error)) (*RemuxSegmentPlan, error) {
 	if err := checkSegmented(opts); err != nil {
 		return nil, err
 	}
@@ -496,11 +517,16 @@ func (e *Engine) PlanRemuxSegments(track container.Track, opts TranscodeOptions,
 	// what makes it decline: a 20-bit FLAC has to be widened for MSE, and this
 	// rung copies packets and cannot widen anything, so remuxable sees a depth
 	// request that is not the source's. See segmentBitDepth.
-	rp, err := e.PlanRemux(track, segmentBitDepth(opts, track.Fmt))
-	if err != nil || rp == nil {
+	rp, _, err := e.planRemux(track, segmentBitDepth(opts, track.Fmt), false)
+	if err != nil {
 		return nil, err
 	}
-	if grid <= 0 {
+	// The duration is refused after the other refusals, as PlanSegments
+	// refuses it, and before any decline.
+	if _, err := segmentSeconds(segSeconds); err != nil {
+		return nil, err
+	}
+	if rp == nil {
 		return nil, nil
 	}
 	// The init segment declares the sample entry, so a track it cannot express
@@ -508,7 +534,14 @@ func (e *Engine) PlanRemuxSegments(track container.Track, opts TranscodeOptions,
 	if _, err := mp4.InitSegment(rp.Track); err != nil {
 		return nil, nil
 	}
-	segSamples, err := snapSegmentSamples(segSeconds, track.Fmt.Rate, grid)
+	g, err := grid()
+	if err != nil {
+		return nil, err
+	}
+	if g <= 0 {
+		return nil, nil
+	}
+	segSamples, err := snapSegmentSamples(segSeconds, track.Fmt.Rate, g)
 	if err != nil {
 		return nil, err
 	}
@@ -525,9 +558,9 @@ func (e *Engine) PlanRemuxSegments(track container.Track, opts TranscodeOptions,
 		Segments:           -1,
 	}
 	sp.Versions = withDemuxer(track, RemuxVersion, mp4.SegmenterVersion)
-	sp.FrameSize = grid
+	sp.FrameSize = g
 	if track.Samples >= 0 {
-		sp.TotalDecodeSamples = totalDecodeSamples(track.Samples, track.Delay, int64(grid))
+		sp.TotalDecodeSamples = totalDecodeSamples(track.Samples, track.Delay, int64(g))
 		sp.Segments = (sp.TotalDecodeSamples + int64(segSamples) - 1) / int64(segSamples)
 	}
 	// The peak-rate bound falls back to the PCM wire rate, as it does for VBR
@@ -536,7 +569,7 @@ func (e *Engine) PlanRemuxSegments(track container.Track, opts TranscodeOptions,
 	// bitrate ladder is a per-variant Bitrate, which this rung declines, so
 	// a remux is always a single variant and this number picks nothing.
 	base := sp.Format.Rate * sp.Format.Channels * max(sp.Format.BitDepth, 16)
-	sp.Bandwidth = base + sp.Format.Rate/grid*64 + 2000
+	sp.Bandwidth = base + sp.Format.Rate/g*64 + 2000
 	return &RemuxSegmentPlan{SegmentPlan: sp, Track: rp.Track}, nil
 }
 
@@ -591,7 +624,7 @@ func (e *Engine) RemuxSegments(ctx context.Context, src container.Source, hint s
 	// format. Without it this accepts exactly the remux the plan declines: a
 	// 20-bit FLAC would have its own packets laid into segments a browser
 	// cannot append, past a plan that said the variant would be transcoded.
-	rp, err := e.PlanRemux(track, segmentBitDepth(opts, track.Fmt))
+	rp, _, err := e.planRemux(track, segmentBitDepth(opts, track.Fmt), false)
 	if err != nil {
 		return nil, err
 	}
@@ -849,28 +882,58 @@ func (e *Engine) Remux(ctx context.Context, src container.Source, hint string, d
 // A dst the muxer cannot patch makes the output's declared length a
 // commitment, so a source length a header declared and nothing checked is
 // confirmed by walking the source first, exactly as the transcode rung does.
+//
+// A source whose trims ride on its packets (container.Track.TrimsUnread) and
+// that declares no delay is walked first too when the muxer is the fragmented
+// MP4 one, which states an end trim only in the length its Begin writes. A
+// caller that measured the source hands the run that instead (WithMeasured).
 func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, track container.Track,
 	dst io.Writer, opts TranscodeOptions, run ...RunOption) (*TranscodeResult, error) {
 	x := newRunConfig(run)
 	patchable := muxseek.CanSeek(dst)
-	plan, err := e.PlanRemux(track, opts)
+	plan, err := e.runPlan(track, opts)
 	if err != nil {
 		return nil, err
-	}
-	if plan == nil {
-		return nil, waxerr.New(waxerr.CodeInvalidRequest,
-			fmt.Sprintf("waxflow: a %s source cannot be remuxed to %s with these options; transcode it",
-				track.Codec, opts.Format))
 	}
 	row, err := remuxRow(track, opts.Format)
 	if err != nil {
 		return nil, err
 	}
+	fm, err := row.form(opts.Container)
+	if err != nil {
+		return nil, err
+	}
+	// The end trim has to be in hand before Begin for this muxer to state
+	// it, and a source that keeps its trims on its packets has not read one.
+	// The caller's measurement has it, or a walk reads it. With none, or one
+	// beside a trim inside the run, the copy runs as it was planned.
+	walked := false
+	if fm.trimByLength && unreadEndTrim(track) {
+		measured, ok := track, false
+		if x.measured != nil {
+			measured = adoptMeasured(track, *x.measured)
+			ok = !measured.TrimsUnread
+		}
+		if !ok {
+			if measured, ok, err = walkedTrack(ctx, demux, track.ID); err != nil {
+				return nil, err
+			}
+			walked = ok
+		}
+		if ok && measured.Padding > 0 && measured.MidPadding == 0 {
+			track = measured
+			if plan, err = e.runPlan(track, opts); err != nil {
+				return nil, err
+			}
+		}
+	}
 	// The confirm step sits here rather than above, so a request that was never
 	// going to work is refused on its own inputs before anything reads the
 	// payload; the transcode rung orders its own the same way. A walk changes
-	// only the length, which no check above it reads.
-	if !patchable {
+	// only the length, which no check above it reads. A declared length that
+	// is a bound with no delay beside it is confirmed for any destination
+	// (unconfirmedBound): the trailer cannot find a trim nothing states.
+	if !patchable || unconfirmedBound(track) {
 		if confirm := confirmableLength(track, demux); confirm != nil {
 			if err := confirm(ctx); err != nil {
 				return nil, err
@@ -897,12 +960,15 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 	// costs the output nothing a muxer could have written honestly.
 	muxTrack := plan.Track
 	muxTrack.Samples = projectedLength(muxTrack, demux, patchable)
+	// With no delay this muxer refuses an end trim it has no length for, so
+	// the source's count goes with one, confirmed or not: a run that ends
+	// short of it brings no trim (remuxTrailer). An estimate states nothing,
+	// and beside a delay the copy keeps the header it wrote before.
+	if fm.trimByLength && muxTrack.Delay == 0 && muxTrack.Padding > 0 && !muxTrack.SamplesAdvisory {
+		muxTrack.Samples = plan.Track.Samples
+	}
 	// nil encoder: see form.mux. There is no encoder on this rung, which is
 	// what the whole seam exists to express.
-	fm, err := row.form(opts.Container)
-	if err != nil {
-		return nil, err
-	}
 	mux, err := fm.mux(muxTrack, opts, x, nil, dst)
 	if err != nil {
 		return nil, err
@@ -925,7 +991,7 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 		return nil, err
 	}
 	e.log.Debug("remux started", "codec", track.Codec,
-		"out", opts.Format, "outContainer", plan.Container, "samples", muxTrack.Samples)
+		"out", opts.Format, "outContainer", plan.Container, "samples", muxTrack.Samples, "walked", walked)
 
 	// A FLAC muxer numbers the frames it writes, the silent ones a hole leaves
 	// included; the copy only makes those.
@@ -982,6 +1048,49 @@ func (e *Engine) RemuxDemuxer(ctx context.Context, demux container.Demuxer, trac
 	return &TranscodeResult{Samples: trailer.Samples, Format: track.Fmt, Container: plan.Container,
 		InputWarnings: found.Warnings, LostSamples: copied.lost,
 		TruncatedSamples: container.TruncatedOf(demux, track.ID)}, nil
+}
+
+// runPlan is planRemux for a run, which refuses what a plan declines.
+func (e *Engine) runPlan(track container.Track, opts TranscodeOptions) (*RemuxPlan, error) {
+	plan, refused, err := e.planRemux(track, opts, true)
+	switch {
+	case err != nil:
+		return nil, err
+	case refused != nil:
+		// The destination muxer's own refusal, in its words and code, as its
+		// Begin would give it.
+		return nil, waxerr.Annotate(fmt.Sprintf("waxflow: a %s source cannot be remuxed to %s", track.Codec, opts.Format), refused)
+	case plan == nil:
+		return nil, waxerr.New(waxerr.CodeInvalidRequest,
+			fmt.Sprintf("waxflow: a %s source cannot be remuxed to %s with these options; transcode it",
+				track.Codec, opts.Format))
+	}
+	return plan, nil
+}
+
+// unreadEndTrim reports whether t may end in a trim nothing has read: its
+// trims ride on its packets, it declares no delay, and its codec has a trim
+// to state (gaplessSurvives).
+func unreadEndTrim(t container.Track) bool {
+	return t.TrimsUnread && t.Delay == 0 && gaplessSurvives(container.Track{Codec: t.Codec, Padding: 1})
+}
+
+// walkedTrack walks demux and returns its track id as the walk left it; ok
+// is false for a demuxer with no walk.
+func walkedTrack(ctx context.Context, demux container.Demuxer, id int) (t container.Track, ok bool, err error) {
+	w, ok := demux.(lengthWalker)
+	if !ok {
+		return t, false, nil
+	}
+	if err := w.Walk(ctx); err != nil {
+		return t, false, err
+	}
+	for _, t := range demux.Tracks() {
+		if t.ID == id {
+			return t, true, nil
+		}
+	}
+	return t, false, nil
 }
 
 // fillHole writes the pkt.Lost samples damage took before pkt as silent frames
@@ -1053,7 +1162,9 @@ func copyPackets(ctx context.Context, demux container.Demuxer, track int, perPac
 	fill holeFill, write func(container.Packet) error) (copiedRun, error) {
 	var pkt container.Packet
 	var run copiedRun
-	var prevPad int64 // the previous packet's trim, clamped to what it can mean
+	// tail is the trims that run unbroken up to the newest packet, each
+	// clamped to its packet: the end trim unless something plays after them.
+	var tail int64
 	var lastDur int64 // the previous packet's duration, the stream's block size
 	for {
 		if err := ctx.Err(); err != nil {
@@ -1063,10 +1174,11 @@ func copyPackets(ctx context.Context, demux container.Demuxer, track int, perPac
 		// failure that happens to carry it (see container.Demuxer).
 		err := demux.ReadPacket(&pkt)
 		if err == io.EOF {
-			// The final packet's own trim goes back into the run: it is the
-			// track's end trim, which SettleLength takes off again. Every
-			// earlier one is already out of both sides.
-			run.samples += prevPad
+			// The trims that reach the end go back into the run: they are
+			// the track's end trim, which SettleLength takes off again.
+			// Every earlier one is already out of both sides.
+			run.samples += tail
+			run.endPadding += tail
 			return run, nil
 		}
 		if err != nil {
@@ -1089,13 +1201,6 @@ func copyPackets(ctx context.Context, demux container.Demuxer, track int, perPac
 			}
 		}
 		lastDur = pkt.Dur
-		// Something followed the previous packet, so its trim was an inner one
-		// after all. A destination that cannot state trims per packet would
-		// play those frames back as audio, so the copy stops here rather than
-		// finishing a file that is quietly wrong.
-		if prevPad > 0 && !perPacketTrims {
-			return copiedRun{}, innerTrimRefusal(prevPad, copyTrimRemedy)
-		}
 		// Two clamps, because the two consumers mean different things by the
 		// trim. The timeline's is bounded by the packet, since a trim cannot
 		// reach past the frame it rides on. The trailer's is bounded only below,
@@ -1104,10 +1209,22 @@ func copyPackets(ctx context.Context, demux container.Demuxer, track int, perPac
 		// RemuxDemuxer takes a caller's demuxer, and a negative trim would
 		// otherwise lengthen the run rather than shorten it.
 		pad := max(pkt.Padding, 0)
-		run.samples += pkt.Dur - min(pad, pkt.Dur)
-		run.lastPadding = pad
+		clamped := min(pad, pkt.Dur)
+		// This packet plays something after the trims before it, so they
+		// were inner ones after all. A destination that cannot state trims
+		// per packet would play those frames back as audio, so the copy
+		// stops here rather than finishing a file that is quietly wrong. A
+		// packet trimmed whole plays nothing, and extends them.
+		if tail > 0 && clamped < pkt.Dur {
+			if !perPacketTrims {
+				return copiedRun{}, innerTrimRefusal(tail, copyTrimRemedy)
+			}
+			tail = 0
+		}
+		run.samples += pkt.Dur - clamped
+		tail += clamped
+		run.endPadding = pad - clamped
 		run.trimmed = run.trimmed || pad > 0
-		prevPad = min(pad, pkt.Dur)
 		if err := write(pkt); err != nil {
 			return copiedRun{}, err
 		}
@@ -1143,15 +1260,13 @@ const (
 type copiedRun struct {
 	// samples is the raw decode duration on the packet timeline, which is what
 	// SettleLength means by raw: every frame the packets deliver, plus the
-	// final packet's own trim and no other (see container.Packet.Padding). A
-	// copy never gets past an earlier one, so the two definitions only differ
-	// for a source this rung declined.
+	// end trim's and no other trim's (see container.Packet.Padding).
 	samples int64
-	// lastPadding is the final packet's own trim and trimmed whether any
-	// packet stated one. Only the last one can reach the output: an end trim
-	// is the only trim any output container carries.
-	lastPadding int64
-	trimmed     bool
+	// endPadding is the end trim the packets state: the final packet's own,
+	// and the trim of each packet before it while every later one is trimmed
+	// whole. trimmed is whether any packet stated a trim.
+	endPadding int64
+	trimmed    bool
 	// lost is how many of samples are holes (container.Packet.Lost) the copy
 	// carried, as a decode's silence is.
 	lost int64

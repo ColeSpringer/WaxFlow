@@ -279,6 +279,24 @@ func TestOpusSampleEntryRefusesTheWrongTrackRate(t *testing.T) {
 	}
 }
 
+// TestAACSampleEntryRefusesAConfigTheEsdsCannotFrame: the esds descriptors
+// take one-byte lengths, so an AudioSpecificConfig longer than they hold (a
+// source's config may carry trailing bytes ParseASC never reads) is refused,
+// and the longest that fits is written.
+func TestAACSampleEntryRefusesAConfigTheEsdsCannotFrame(t *testing.T) {
+	track := container.Track{
+		Codec: codec.AACLC, CodecConfig: append([]byte{0x12, 0x10}, make([]byte, maxESDSConfig-1)...),
+		Fmt: audio.Format{Rate: 44100, Channels: 2, Layout: audio.DefaultLayout(2), Type: audio.Float, BitDepth: 32},
+	}
+	if _, err := InitSegment(track); waxerr.CodeOf(err) != waxerr.CodeUnsupportedFormat {
+		t.Errorf("a %d-byte config: %v, want an unsupported-format refusal", len(track.CodecConfig), err)
+	}
+	track.CodecConfig = track.CodecConfig[:maxESDSConfig]
+	if _, err := InitSegment(track); err != nil {
+		t.Errorf("a %d-byte config: %v", len(track.CodecConfig), err)
+	}
+}
+
 // TestOpusSampleEntryNormalizesTheInputRate pins the Opus mapping: the entry's
 // samplerate is 48000 (Opus-in-ISOBMFF) and dOps's InputSampleRate is written
 // as 48000 too, whatever the OpusHead said. RFC 7845 makes that field

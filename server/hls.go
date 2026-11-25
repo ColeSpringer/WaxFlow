@@ -591,43 +591,20 @@ func (s *Server) planHLSRung(ctx context.Context, desc hls.Descriptor, tracks []
 		plan, err = s.eng.PlanSegmentsTimeline(tracks, copts, opts, desc.SegDur)
 	} else {
 		// The full source track, measured exact for a span (resolveMember). The
-		// rungs below plan from it directly; only the transcode fallback narrows it
+		// copy rungs plan from it directly; only the transcode fallback narrows it
 		// to a virtual track, because only a decode addresses the span by re-timing.
+		// With no source to read (mint-time validation) only the transcode plans.
 		src := tracks[0]
-		sp := descSpan(desc)
-		spanned := sp.narrowed()
-
-		// Ladder rung 2, the segmented spelling: rewrite the container around the
-		// source's own packets. This is where format=opus on an Opus source stops
-		// re-encoding, which is the case that motivated the rung. A timeline cannot
-		// remux (one fMP4 edit list cannot trim per-member seams) and a span cannot
-		// remux (cutting at an arbitrary sample means cutting mid-packet); both are
-		// structural declines the engine, handed a track and options, cannot see.
-		if rmx != nil && !spanned {
-			rp, err := s.remuxSegmentPlanFor(ctx, rmx, src, opts, desc.SegDur)
-			if err != nil {
-				return fail(err)
-			}
-			if rp != nil {
-				return variantPlan{opts: opts, plan: &rp.SegmentPlan, remux: rp}, nil
-			}
-		}
-		// The cut rung, the segmented spelling: a span served by moving the
-		// source's own packets, no decode. It sits below remux (a span declines
-		// remux) and above the transcode fallback, and like the progressive cut it
-		// is reached only with a source-matching format, since format=auto resolves
-		// to a codec the source is not. Its declines all fall through to the
-		// transcode below; see cutSegmentPlanFor.
-		if rmx != nil && spanned {
-			if cp := s.cutSegmentPlanFor(ctx, rmx, src, opts, sp, desc.SegDur); cp != nil {
-				return variantPlan{opts: opts, plan: &cp.SegmentPlan, cut: cp}, nil
+		if rmx != nil {
+			if vp, ok, err := s.planHLSCopy(ctx, desc, rmx, src, opts); err != nil || ok {
+				return vp, err
 			}
 		}
 		// Rung 3: decode, DSP, encode. The span narrows the track first, which is
 		// what makes a virtual track a stream in its own right: its segment 0 is the
 		// span's first sample and its count covers to-from, not the whole rip.
 		track := src
-		if spanned {
+		if sp := descSpan(desc); sp.narrowed() {
 			if track, err = waxflow.SpanTrack(track, sp.from, sp.end()); err != nil {
 				return fail(err)
 			}
@@ -640,85 +617,38 @@ func (s *Server) planHLSRung(ctx context.Context, desc hls.Descriptor, tracks []
 	return variantPlan{opts: opts, copts: copts, plan: plan}, nil
 }
 
-// remuxSegmentPlanFor tries the segmented remux rung for one variant, returning
-// nil when the source's packets have no uniform grid to lay segment boundaries
-// on and the variant must therefore be transcoded.
-//
-// The header-only check runs first and the packet walk second, which is the
-// whole reason this is not a single call into PlanRemuxSegments. gridFor walks
-// every packet in the source; PlanRemux reads the track and the options and
-// nothing else. A variant that cannot remux whatever the packets look like (a
-// bitrate ladder rung, a codec mismatch) must not pay for a walk to be told what
-// its options already say, and a ladder is exactly where that bites: every rung
-// of it declines, and every rung of it would have walked.
-func (s *Server) remuxSegmentPlanFor(ctx context.Context, src *source.File, track container.Track,
-	opts waxflow.TranscodeOptions, segDur float64) (*waxflow.RemuxSegmentPlan, error) {
-	// An error is not this rung's to report; PlanSegments is about to hit the
-	// same one with the same words.
-	//
-	// The options here are the request's, not the widened ones the engine's
-	// segmented entry points apply (segmentBitDepth), so this check passes
-	// for a 12- or 20-bit FLAC that PlanRemuxSegments then declines, and the
-	// walk below is paid for nothing. That is accepted rather than fixed:
-	// exporting the depth rule to spare it would put a permanent function on
-	// the public surface (ADR-0002) for one source shape whose next step is a
-	// full re-encode of the same file anyway. The answer is right either way,
-	// which is what this check is for.
-	if rp, err := s.eng.PlanRemux(track, opts); err != nil || rp == nil {
-		return nil, nil
+// planHLSCopy walks the copy rungs for one single-source variant: the
+// segmented remux for a whole source, the segmented cut for a span. ok is
+// false when the variant takes the transcode.
+func (s *Server) planHLSCopy(ctx context.Context, desc hls.Descriptor, src *source.File, track container.Track,
+	opts waxflow.TranscodeOptions) (vp variantPlan, ok bool, err error) {
+	sp := descSpan(desc)
+	var rp *waxflow.RemuxSegmentPlan
+	var cp *waxflow.CutSegmentPlan
+	r, err := s.walkLadder(ladderQuery{
+		src:      src,
+		delivery: "hls",
+		span:     sp,
+		track:    func() (container.Track, error) { return track, nil },
+		grid:     func() (int, error) { return s.gridFor(ctx, src) },
+	}, func(grid func() (int, error)) (bool, error) {
+		p, err := s.eng.PlanRemuxSegments(track, opts, desc.SegDur, grid)
+		rp = p
+		return p != nil, err
+	}, func(track container.Track, grid func() (int, error)) (bool, error) {
+		p, err := s.eng.PlanCutSegments(track, opts, []waxflow.Span{{From: sp.from, To: sp.end()}}, grid, desc.SegDur)
+		cp = p
+		return p != nil, err
+	})
+	switch {
+	case err != nil:
+		return variantPlan{}, false, err
+	case r == rungRemux:
+		return variantPlan{opts: opts, plan: &rp.SegmentPlan, remux: rp}, true, nil
+	case r == rungCut:
+		return variantPlan{opts: opts, plan: &cp.SegmentPlan, cut: cp}, true, nil
 	}
-	grid, err := s.gridFor(ctx, src)
-	if err != nil {
-		return nil, err
-	}
-	if grid <= 0 {
-		return nil, nil
-	}
-	return s.eng.PlanRemuxSegments(track, opts, segDur, grid)
-}
-
-// cutSegmentPlanFor tries the segmented cut rung for one spanned variant,
-// returning nil when the span must fall through to a transcode. It is the HLS
-// sibling of the progressive cutPlanFor, and it swallows every decline the same
-// way: a cut is a pure optimization below rung 3, so nothing it learns turns a
-// request the transcode fallback would serve into a failure. In particular
-// PlanCutSegments's stricter validation (validateCutSpans over SpanTrack) can
-// error on a degenerate span the fallback serves as an empty stream, so that
-// error is swallowed, not propagated. The fallback re-validates the span through
-// SpanTrack and reports a genuinely bad one there.
-//
-// The gates run header-cheap first: a codec off the allowlist answers before the
-// packet-grid walk, so no spanned request pays for a walk it cannot use. gridFor
-// is the same per-identity memo remuxSegmentPlanFor uses. Every decline is logged
-// at Debug naming its reason, because a caller asking why an Opus span re-encoded
-// on the HLS path has no other signal.
-func (s *Server) cutSegmentPlanFor(ctx context.Context, src *source.File, track container.Track,
-	opts waxflow.TranscodeOptions, sp span, segDur float64) *waxflow.CutSegmentPlan {
-	decline := func(reason string, args ...any) *waxflow.CutSegmentPlan {
-		kv := make([]any, 0, 4+len(args))
-		kv = append(kv, "reason", reason, "src", source.Ref(src.Ref))
-		kv = append(kv, args...)
-		s.log.Debug("hls cut declined", kv...)
-		return nil
-	}
-	if !waxflow.Cuttable(track) {
-		return decline("the codec is not on the cut allowlist", "codec", track.Codec)
-	}
-	grid, err := s.gridFor(ctx, src)
-	if err != nil {
-		return decline("the packet grid could not be measured", "err", err)
-	}
-	if grid <= 0 {
-		return decline("the source's packet durations vary, so there is no grid to cut on")
-	}
-	cp, err := s.eng.PlanCutSegments(track, opts, []waxflow.Span{{From: sp.from, To: sp.end()}}, grid, segDur)
-	if err != nil {
-		return decline("PlanCutSegments refused the span", "err", err)
-	}
-	if cp == nil {
-		return decline("no cut serves these options (gap, trims, or destination)")
-	}
-	return cp
+	return variantPlan{}, false, nil
 }
 
 // descSpan is the descriptor's span in the server's own spelling.

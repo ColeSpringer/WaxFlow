@@ -231,10 +231,7 @@ func TestHLSMediaPlaylistMatchesTheExportedPlan(t *testing.T) {
 	}
 	_, wav := track("ramp.wav", "wav")
 	opusSrc, opus := track("ramp.opus", "opus")
-	grid, err := e.PacketGrid(context.Background(), opusSrc, "opus")
-	if err != nil {
-		t.Fatal(err)
-	}
+	grid := func() (int, error) { return e.PacketGrid(context.Background(), opusSrc, "opus") }
 	asOpus := waxflow.TranscodeOptions{Format: "opus"}
 	met := env.srv.Metrics()
 	for _, tc := range []struct {

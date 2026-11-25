@@ -118,8 +118,8 @@ func TestNonFiniteOptionsAreRefused(t *testing.T) {
 				spans := []Span{{From: 0, To: 2048}}
 				header := container.Track{Samples: -1}
 				emit := func(mp4.Segment) error { return nil }
-				_, cerr := e.PlanCut(track, opts, spans, 1024)
-				_, cserr := e.PlanCutSegments(track, opts, spans, 1024, 2)
+				_, cerr := e.PlanCut(track, opts, spans, knownGrid(1024))
+				_, cserr := e.PlanCutSegments(track, opts, spans, knownGrid(1024), 2)
 				_, ierr := e.InitSegment(&SegmentPlan{TranscodePlan: TranscodePlan{Format: track.Fmt}}, opts)
 				_, terr := e.TranscodeMedia(ctx, openWAV(t, e, raw), io.Discard, opts)
 				_, serr := e.TranscodeSegments(ctx, container.BytesSource(raw), "wav", opts, SegmentedOptions{}, emit)
