@@ -39,6 +39,14 @@ func gridLastOpus() container.Track {
 	}
 }
 
+// unprimedOpus is gridLastOpus with no pre-skip, so a cut of it from sample
+// 0 synthesizes no delay.
+func unprimedOpus() container.Track {
+	track := gridLastOpus()
+	track.Delay, track.CodecConfig = 0, testOpusHead(0)
+	return track
+}
+
 // gridLastHEAAC is an HE-AAC track (explicit SBR, 24 kHz core) every copy
 // planner serves at format=aac on a 2048 grid, from the stream head.
 func gridLastHEAAC() container.Track {
@@ -342,6 +350,8 @@ func TestPlanCutAsksForTheGridLast(t *testing.T) {
 	halves := withTrims(opus, container.PacketTrim{Pos: 191520, Samples: 480}, container.PacketTrim{Pos: 288480, Samples: 480})
 	// A whole packet trimmed at raw 10240, where the spans join.
 	joined := withTrims(aac, container.PacketTrim{Pos: 10240, Samples: 1024})
+	paddedOpus := unprimedOpus()
+	paddedOpus.Padding = 500
 	spans := []Span{{From: 96000, To: 288000}}
 	two := []Span{{From: 96000, To: 192000}, {From: 240000, To: 288000}}
 	mka := TranscodeOptions{Format: "opus", Container: "mka"}
@@ -368,6 +378,7 @@ func TestPlanCutAsksForTheGridLast(t *testing.T) {
 		{"dual-rate SBR to adts", dual, adts, []Span{{From: 0, To: 20480}}, 2048},
 		{"implicit SBR to adts", implicit, adts, []Span{{From: 0, To: 20480}}, 2048},
 		{"a source trim inside the first span to mka", inside, mka, spans, 960},
+		{"an unprimed Opus end trim kept alone to Ogg", paddedOpus, TranscodeOptions{Format: "opus"}, []Span{{From: 0, To: ToEnd}}, 960},
 		{"SpliceTrims across two spans to mka", opus, spliceMKA, two, 960},
 		{"SpliceTrims over spans that touch to mka", opus, spliceMKA, []Span{{From: 96000, To: 192000}, {From: 192000, To: 288000}}, 0},
 		{"SpliceTrims over a later pair of spans that touch to mka", opus, spliceMKA,
@@ -425,6 +436,8 @@ func TestPlanCutSegmentsAsksForTheGridLast(t *testing.T) {
 	first.MidPadding, first.MidTrims = 960, []container.PacketTrim{{Pos: 0, Samples: 960}}
 	// Trims that empty their packets on the one grid they fit.
 	wholes := withTrims(gridLastOpus(), container.PacketTrim{Pos: 191040, Samples: 960}, container.PacketTrim{Pos: 288000, Samples: 960})
+	paddedOpus := unprimedOpus()
+	paddedOpus.Padding = 500
 	opus := TranscodeOptions{Format: "opus"}
 	checkCutGridLast(t, func(track container.Track, opts TranscodeOptions, spans []Span, grid func() (int, error)) (gridLastResult, error) {
 		p, err := e.PlanCutSegments(track, opts, spans, grid, 2)
@@ -440,6 +453,9 @@ func TestPlanCutSegmentsAsksForTheGridLast(t *testing.T) {
 		{"whole-packet trims one grid places", wholes, opus, []Span{{From: 0, To: 96000}}, 0},
 		{"a PCE", pce, TranscodeOptions{Format: "aac"}, []Span{{From: 10240, To: 20480}}, 0},
 		{"a negative padding kept to the end", unpadded, TranscodeOptions{Format: "aac"}, []Span{{From: 10240, To: ToEnd}}, 1024},
+		// A segmented cut takes fMP4's trim rule whatever the row's
+		// progressive form, so this declines where the Ogg cut serves it.
+		{"an unprimed Opus end trim kept alone", paddedOpus, opus, []Span{{From: 0, To: ToEnd}}, 0},
 	})
 	spans := []Span{{From: 96000, To: 288000}}
 	for _, seconds := range []float64{math.NaN(), 120} {
@@ -447,5 +463,40 @@ func TestPlanCutSegmentsAsksForTheGridLast(t *testing.T) {
 		if p, err := e.PlanCutSegments(gridLastOpus(), TranscodeOptions{Format: "opus"}, spans, neverAsked(t, what), seconds); waxerr.CodeOf(err) != waxerr.CodeInvalidRequest {
 			t.Errorf("%s: %v, %v; want an invalid-request refusal", what, p, err)
 		}
+	}
+}
+
+// TestSegmentedCutAsksTheFragmentedTrimRule: a segmented cut writes fMP4, so
+// an end trim with no delay declines once the grid places it, at format=opus
+// as at format=aac, while the Ogg cut serves it and a cut with a delay is
+// served.
+func TestSegmentedCutAsksTheFragmentedTrimRule(t *testing.T) {
+	e := New()
+	opus, aac := TranscodeOptions{Format: "opus"}, TranscodeOptions{Format: "aac"}
+	for _, tc := range []struct {
+		name   string
+		track  container.Track
+		opts   TranscodeOptions
+		spans  []Span
+		g      int
+		served bool
+	}{
+		{"an unprimed Opus head ending inside a packet", unprimedOpus(), opus, []Span{{From: 0, To: 96500}}, 960, false},
+		{"an unprimed AAC head ending inside a packet", gridLastAAC(), aac, []Span{{From: 0, To: 10500}}, 1024, false},
+		{"an Opus span past sample 0 ending inside a packet", unprimedOpus(), opus, []Span{{From: 96000, To: 192500}}, 960, true},
+	} {
+		cg := &countedGrid{g: tc.g}
+		p, err := e.PlanCutSegments(tc.track, tc.opts, tc.spans, cg.get, 2)
+		if (p != nil) != tc.served || err != nil || cg.asked != 1 {
+			t.Errorf("%s: served %v, err %v, grid asked %d times; want served %v on one ask", tc.name, p != nil, err, cg.asked, tc.served)
+		}
+	}
+	// The near miss: Ogg states the end trim in its final granule.
+	p, err := e.PlanCut(unprimedOpus(), opus, []Span{{From: 0, To: 96500}}, knownGrid(960))
+	if err != nil || p == nil {
+		t.Fatalf("the same cut to Ogg: %v, %v; want it served", p, err)
+	}
+	if p.Track.Delay != 0 || p.Track.Padding != 460 {
+		t.Errorf("the same cut to Ogg: delay %d, padding %d; want 0 and 460", p.Track.Delay, p.Track.Padding)
 	}
 }

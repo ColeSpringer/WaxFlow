@@ -1,7 +1,8 @@
 # Architecture Decision Records
 
-Invariants pinned before the code that depends on them exists. Changing an
-Accepted ADR requires a superseding ADR, not an edit.
+Invariants pinned before the code that depends on them exists. An Accepted
+ADR's text is never edited beyond its Status line: a change is a dated
+amendment at its end naming the sentences it supersedes, or a superseding ADR.
 
 | # | Title | Status |
 |---|---|---|
@@ -17,3 +18,5 @@ Accepted ADR requires a superseding ADR, not an edit.
 | [0010](0010-timeline-width.md) | A timeline is built at the width it is delivered at | Accepted |
 | [0011](0011-multi-span-packet-cuts.md) | Interior joins of a multi-span packet cut snap inward | Accepted |
 | [0012](0012-live-pipelines-end-with-their-audience.md) | Live pipelines end when their audience does | Accepted |
+| [0013](0013-copy-rungs.md) | The copy rungs | Accepted |
+| [0014](0014-priming-a-segmented-run.md) | Priming a segmented run | Accepted |

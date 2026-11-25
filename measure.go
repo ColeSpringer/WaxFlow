@@ -16,21 +16,17 @@ import (
 const measureCeiling = int64(1) << 61
 
 // MeasureLength returns med's default track with its length measured, exact
-// and not advisory, with any trims a walk settled. The answer does not depend
-// on where med is, and a media at its start (as OpenStream leaves it) is left
-// there. Errors keep their codes.
-//
-// It takes the cheapest route that works: a length the open settled costs no
-// read, a deferred walk (MP3, Matroska, fragmented MP4, the frame counts of a
-// WMA v1/v2 track) reads headers, as does a demuxer that measures a length
-// its open would not promise (WavPack, and FLAC in Ogg, which reads its
-// packets as a read does), a source with exact positions is seeked past its
-// end, and one whose positions are rounded and whose codec counts no frames
-// (WMA Pro, Voice and Lossless in ASF) is decoded from the start and
-// counted, since a seek there lands on a stated time, not on the decode.
-// The walk and the count both stop when ctx ends, with CodeCanceled, the
-// walk pausing where the next measure of the same media resumes it; a seek
-// past the end is a few reads and runs whole.
+// and not advisory, with any trims a walk settled. The answer does not
+// depend on where med is, and a media at its start (as OpenStream leaves it)
+// stays there. Errors keep their codes. The cheapest route that works: a
+// length the open settled costs no read; a deferred walk (MP3, Matroska,
+// fragmented MP4, WMA v1/v2 frame counts) or a demuxer that measures what its
+// open would not promise (WavPack; FLAC in Ogg reads its packets) reads
+// headers; exact positions are seeked past the end; rounded ones whose codec
+// counts no frames (WMA Pro, Voice and Lossless in ASF) are decoded from the
+// start and counted, since a seek there lands on a stated time. The walk and
+// the count stop with CodeCanceled when ctx ends, the walk pausing where the
+// next measure of the same media resumes it; a seek past the end runs whole.
 func MeasureLength(ctx context.Context, med format.Media) (container.Track, error) {
 	if med == nil {
 		return container.Track{}, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: MeasureLength of a nil Media")
@@ -127,16 +123,17 @@ func countDecoded(ctx context.Context, med format.Media) (int64, error) {
 }
 
 // SliceMeasured is Slice bounded by a measured length rather than med's
-// declared one: measured is the source's track as MeasureLength found it, or
-// one with a negative Samples to leave the declaration alone. A container that rounds its total
-// can declare less audio than it holds, and a window ending in that gap is one
-// the file can serve but a bare Slice refuses. Measure once and slice each
-// window of a source against the same total, which a ToEnd window is held to
-// as well (see Slice). ctx bounds the seek the window's first read runs to
-// its start, which can be a walk (container.Seeker) that a read carries no
-// context to stop; a caller that seeks the window itself seeks once. It takes
-// ownership of med and closes it on error. It refuses a span as MeasuredMedia
-// does; with a negative Samples a span is sliced as it stands.
+// declared one: measured is the track MeasureLength returned, or one with a
+// negative Samples to leave the declaration alone. A container that rounds
+// its total can declare less audio than it holds, and a bare Slice refuses a
+// window ending in that gap, so measure once and slice each window, ToEnd
+// included, against that total. ctx bounds the seek to the window's start,
+// which the window's first read makes after this returns, so ctx must stay
+// live until then: the seek can be a walk (container.Seeker) that a read
+// carries no context to stop. A caller that seeks the window itself seeks
+// once. It takes ownership of med and closes it on error. It refuses a span
+// as MeasuredMedia does; with a negative Samples a span is sliced as it
+// stands.
 func SliceMeasured(ctx context.Context, med format.Media, measured container.Track, from, to int64) (format.Media, error) {
 	if med == nil {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest, "waxflow: SliceMeasured of a nil Media")

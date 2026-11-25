@@ -744,6 +744,42 @@ func TestCutCodecsIsAnAllowlist(t *testing.T) {
 	}
 }
 
+// TestCutHeadOnlyEntryRefusesAMidStreamStart: the headRefusal on a codec's
+// cutCodecs entry is what refuses its cuts past sample 0, in its own words,
+// and what hides it from CutFormats, so a codec given one is never hidden yet
+// cut mid-stream. It changes a package variable, so it is not parallel.
+func TestCutHeadOnlyEntryRefusesAMidStreamStart(t *testing.T) {
+	he := aacTrack(0, 96000)
+	he.Codec = codec.HEAAC
+	const heRefusal = "waxflow: an HE-AAC cut must start at sample 0 (the SBR header lives in the " +
+		"leading access units; a mid-stream slice would play with a muted high band)"
+	if _, _, err := CutTrack(he, TranscodeOptions{}, []Span{{20480, 40960}}, 2048); err == nil || err.Error() != heRefusal {
+		t.Errorf("a mid-stream HE-AAC cut = %v, want %q", err, heRefusal)
+	}
+
+	saved := cutCodecs[codec.AACLC]
+	t.Cleanup(func() { cutCodecs[codec.AACLC] = saved })
+	head := saved
+	head.headRefusal = cutCodecs[codec.HEAAC].headRefusal
+
+	track := aacTrack(1024, 96000)
+	mid := []Span{{20480, 40960}}
+	if _, _, err := CutTrack(track, TranscodeOptions{}, mid, 1024); err != nil {
+		t.Fatalf("the unchanged entry declined a mid-stream cut: %v", err)
+	}
+	cutCodecs[codec.AACLC] = head
+	_, _, err := CutTrack(track, TranscodeOptions{}, mid, 1024)
+	if waxerr.CodeOf(err) != waxerr.CodeUnsupportedFormat || err.Error() != head.headRefusal {
+		t.Errorf("a head-only entry's mid-stream cut = %v, want a CodeUnsupportedFormat decline %q", err, head.headRefusal)
+	}
+	if _, _, err := CutTrack(track, TranscodeOptions{}, []Span{{0, 40960}}, 1024); err != nil {
+		t.Errorf("a head-only entry declined a cut from sample 0: %v", err)
+	}
+	if slices.Contains(CutFormats(), "aac") {
+		t.Errorf("CutFormats() = %v advertises a head-only codec", CutFormats())
+	}
+}
+
 // TestCutFormatsIsHonest is the source of truth for the /caps
 // delivery.cutFormats advertisement: it pins the exact list and proves every
 // name on it is reachable on both surfaces the cut serves. The server- and
@@ -1193,7 +1229,7 @@ func TestSpliceTrimsIsIgnoredForOneSpan(t *testing.T) {
 // TestCutTrackJoinsAdjacentSpansWithoutAHole: spans that touch name one
 // range in two pieces, so there is nothing between them to remove. An
 // off-grid boundary must not cost the packet it sits in, which is what two
-// independent inward snaps would do -- and which the rung used to avoid only
+// independent inward snaps would do, and which the rung used to avoid only
 // by declining the whole request.
 func TestCutTrackJoinsAdjacentSpansWithoutAHole(t *testing.T) {
 	track := aacTrack(0, 96000)

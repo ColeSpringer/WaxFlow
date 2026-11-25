@@ -28,22 +28,18 @@ func WithLogger(l *slog.Logger) Option {
 	}
 }
 
-// IndexCache persists demuxer-built source indexes across sessions (the
-// cacheDir/idx sidecar): MP3 frame tables today, seek tables for later
-// formats. The engine restores a cached index when it opens a source
-// whose demuxer can use one, and saves fresh snapshots on close. Keying
-// blobs by source identity is the implementation's job (the server keys
-// by ref plus size plus mtime); the engine stays identity-agnostic.
+// IndexCache persists demuxer-built source indexes, such as MP3 frame
+// tables, across sessions (the cacheDir/idx sidecar): the engine restores one
+// at open where the demuxer can use it and saves a fresh one on close. Keying
+// by source identity is the implementation's (the server's: ref, size, mtime).
 type IndexCache interface {
 	// Load returns the saved index blob for src, or nil.
 	Load(src container.Source) []byte
-	// Save persists a fresh snapshot for src. Best effort: failures are
-	// the implementation's to swallow (a lost sidecar only costs a
-	// rebuild).
+	// Save persists a fresh snapshot for src, best effort: a failure is the
+	// implementation's to swallow, since a lost sidecar costs a rebuild.
 	Save(src container.Source, blob []byte)
 	// Drop removes src's saved blob. The engine calls it when a demuxer
-	// rejects a loaded blob, so an invalid one stops being served (and
-	// LRU-refreshed) forever.
+	// rejects a loaded blob, so an invalid one stops being served.
 	Drop(src container.Source)
 }
 
@@ -54,23 +50,17 @@ func WithIndexCache(c IndexCache) Option {
 	}
 }
 
-// TranscodeOptions selects the Transcode output, with the DSP chain
-// (resample, mix, gain, dither) between decode and encode. Zero values keep
-// the source's properties, so the zero options add no DSP stage and the
-// decoder's samples reach the encoder unaltered: a bit-exact container
-// rewrite for a lossless source to a lossless output. A lossy source is
-// decoded and re-encoded even so, which costs a generation.
-//
-// Remux is what removes that generation, and the options it accepts are exactly
-// the ones described above: zero everywhere but Format and Container. It moves
-// the source's own packets rather than decoding them, so it is a bit-exact
-// container rewrite for a lossy source too, but only where the codec survives
-// the trip (the output format's codec must already be the source's). PlanRemux
-// answers whether a given request is one of those, and the server's ladder asks
-// it before reaching for a transcode.
-//
-// An encoder knob (see Knob) is taken only by the formats its field names, and
-// Check refuses one set on any other format.
+// TranscodeOptions selects the Transcode output and the DSP chain (resample,
+// mix, gain, dither) between decode and encode. Zero values keep the source's
+// properties, so the zero options add only the stages the output row needs. A
+// lossy source to a lossy output is re-encoded at the cost of a generation;
+// where the row takes the source's format as it is, a lossless source to a
+// lossless output is a bit-exact rewrite. Remux moves the source's packets
+// instead where the output codec is the source's and the options name no
+// change: every field zero but Format, Container, SpliceTrims,
+// ResampleProfile and Shaping, or stating the source's own Rate, Channels or
+// integer BitDepth (PlanRemux answers). An encoder knob (Knob) is taken only
+// by the formats its field names, and Check refuses one set on any other.
 type TranscodeOptions struct {
 	// Format is the output format name, one of OutputFormats.
 	Format string
@@ -79,29 +69,20 @@ type TranscodeOptions struct {
 	// has no form for, and its error lists the ones it has.
 	Container string
 	// SpliceTrims asks a multi-span cut for exact interior splices, which
-	// only Matroska can carry.
-	//
-	// The default cut snaps every interior edge inward onto the packet grid
-	// and gives up under one packet of wanted audio at each, because no
-	// per-splice trim is portable (ADR-0011). With this set, each interior
-	// span's head is preceded by the codec's pre-roll packets carrying a
-	// full-duration DiscardPadding -- decoded so the decoder converges,
-	// discarded so nothing is heard -- and each interior tail is exact.
-	//
-	// The cost is reach. The cut's track then trims inside its run, so
-	// PlanRemux declines every destination but mka and webm, and a request
-	// for any other container falls through to a re-encode. Firefox rejects
-	// a file with more than one DiscardPadding outright; Chromium and
-	// ffmpeg-based players take it. Ignored by a single-span cut, which has
-	// no interior edge.
+	// only Matroska carries (ADR-0011). The default snaps every interior edge
+	// inward onto the packet grid, giving up under one packet of wanted audio
+	// at each. With this set, each interior head is preceded by the codec's
+	// pre-roll packets with a full-duration DiscardPadding (decoded, never
+	// heard) and each interior tail is exact. PlanRemux then declines all but
+	// mka and webm (others re-encode), and Firefox rejects a file with more
+	// than one DiscardPadding. A single-span cut ignores it.
 	SpliceTrims bool
 	// Rate resamples to this sample rate in Hz; 0 keeps the source rate.
 	Rate int
 	// Channels converts the channel count: a downmix to 1 or 2, or a widening
-	// into the conventional layout for a larger count, which places the
-	// source's positions and leaves the rest silent. 0 keeps the source
-	// layout. A target whose layout has no place for one of the source's
-	// positions is refused rather than substituted.
+	// into a larger count's conventional layout, placing the source's
+	// positions and leaving the rest silent. 0 keeps the source layout. A
+	// target with no place for one of the source's positions is refused.
 	Channels int
 	// BitDepth forces integer output at this depth, dithered when
 	// reducing; 0 keeps the source domain and depth.
@@ -110,83 +91,60 @@ type TranscodeOptions struct {
 	// gain engages the true-peak limiter; tighter policy clamps (the
 	// HTTP +12 dB bound) live at the API boundary, not here.
 	GainDB float64
-	// Dynamics applies a dynamics-processing preset to the post-gain
-	// signal: gain.PresetOff (the zero value) applies none, gain.PresetVoice
-	// the spoken-word leveller. It is a closed vocabulary rather than raw
-	// compressor parameters; see gain.Preset for why.
-	//
-	// It composes with GainDB rather than replacing it, and the order is
-	// load-bearing: the preset's curve has a fixed threshold, so the caller
-	// levels the signal to a known point with GainDB first and the preset
-	// then shapes it. A caller with a measured loudness (an analyze job's)
-	// sends the exact dB alongside the preset. WaxFlow cannot measure a
-	// live stream, so it cannot do this for the caller: two-pass is
-	// jobs-only.
-	//
-	// A preset always engages the true-peak limiter.
+	// Dynamics applies a dynamics preset (a closed vocabulary, see
+	// gain.Preset) after GainDB: gain.PresetOff, the zero value, none;
+	// gain.PresetVoice the spoken-word leveller. Its curve has a fixed
+	// threshold, so the caller levels the signal with GainDB first, from a
+	// measured loudness in a two-pass job; WaxFlow cannot measure a live
+	// stream, so it does not level one for the caller. A preset always
+	// engages the true-peak limiter.
 	Dynamics gain.Preset
 	// FromSample starts output at this source-timeline sample, seeking
 	// sample-exact before the first chunk. Seconds convert to samples at
 	// the API boundary (ADR-0006); 0 starts at the beginning.
 	FromSample int64
-	// FLACLevel selects the FLAC compression level for flac output: 1
-	// through 8 literally, FLACLevelDefault (the zero value) for the
-	// encoder default, and FLACLevelFastest for level 0, which needs a
-	// sentinel because the zero value cannot mean it without stealing
-	// the default. Levels trade encode speed for size and never affect
-	// decoded audio.
+	// FLACLevel selects the flac compression level: 1 through 8 literally,
+	// FLACLevelDefault (the zero value) the encoder default, FLACLevelFastest
+	// level 0. A level trades encode speed for size, never decoded audio.
 	FLACLevel int
-	// WavPackLevel selects the WavPack compression level for wavpack
-	// output: WavPackLevelFast through WavPackLevelVeryHigh literally, and
-	// WavPackLevelDefault (the zero value) for the encoder default, which
-	// is normal. Levels choose how deep a decorrelation cascade each block
-	// runs: they trade encode speed for size and never affect decoded
-	// audio.
+	// WavPackLevel selects the wavpack compression level, WavPackLevelFast
+	// through WavPackLevelVeryHigh; the zero value is the default, normal. A
+	// level trades encode speed for size, never decoded audio.
 	WavPackLevel int
-	// APELevel selects the Monkey's Audio compression level for ape
-	// output: APELevelFast, APELevelNormal, or APELevelHigh literally, and
-	// APELevelDefault (the zero value) for the encoder default, which is
-	// normal. Levels choose the filter cascade each frame runs through:
-	// they trade encode and decode speed for size and never affect decoded
-	// audio. The format's two deeper levels decode here but are not
-	// written; see ape.MaxEncodeLevel.
+	// APELevel selects the ape compression level, APELevelFast,
+	// APELevelNormal or APELevelHigh; the zero value is the default, normal.
+	// A level trades encode and decode speed for size, never decoded audio.
+	// The format's two deeper levels decode but are not written
+	// (ape.MaxEncodeLevel).
 	APELevel int
-	// Bitrate selects the target bit rate in bits per second for every
-	// format with a bit rate (mp3, opus, aac, he-aac); 0 keeps the encoder's
-	// default (mp3 128000, opus 96000, aac 128000, he-aac 64000 or 32000 under
-	// HEAACv2). A negative value or one above MaxBitrate is refused. An mp3
-	// rate must be a whole number of kbit/s, and one the layer does not hold
-	// at the output sample rate is clamped to the highest it holds at or below
-	// it (its lowest, below that); aac holds its long-term mean with a bit
-	// reservoir. Vorbis takes none (no ABR).
+	// Bitrate is the target in bits per second for mp3, opus, aac and he-aac
+	// (vorbis takes none: no ABR); 0 keeps the encoder default (mp3 128000,
+	// opus 96000, aac 128000, he-aac 64000 or 32000 under HEAACv2). A negative
+	// value or one above MaxBitrate is refused. An mp3 rate must be whole
+	// kbit/s, and one the layer lacks at the output rate clamps to the
+	// highest it holds at or below it (its lowest, below that); aac holds its
+	// long-term mean with a bit reservoir.
 	Bitrate int
 	// VBR selects variable bit rate for mp3 and opus output, sizing each
 	// frame to its content around Bitrate (for mp3, the quality anchor). The
 	// zero value is constant bit rate.
 	VBR bool
-	// HEAACv2 selects HE-AAC v2 (parametric stereo over a mono SBR core,
-	// an AOT-29 stream) for he-aac output, and drops the zero-Bitrate
-	// default to 32000. Selection is explicit rather than
-	// bitrate-automatic: an auto threshold would silently switch stereo
-	// coding technology across a bitrate boundary. Stereo sources only;
-	// a mono source is refused at plan time (encode v1 instead).
+	// HEAACv2 selects HE-AAC v2 (parametric stereo over a mono SBR core, an
+	// AOT-29 stream) for he-aac output and drops the zero-Bitrate default to
+	// 32000. It is explicit so no bit rate threshold switches stereo coding
+	// silently. A mono source is refused at plan time (encode v1).
 	HEAACv2 bool
-	// OpusComplexity gates the Opus encoder's analysis depth: 1 through 10
-	// literally, OpusComplexityDefault (the zero value) for the encoder
-	// default (5), and OpusComplexityLowest for complexity 0, which needs a
-	// sentinel because the zero value cannot mean it without stealing the
-	// default. Higher is slower and higher quality.
+	// OpusComplexity sets the opus encoder's analysis depth: 1 through 10
+	// literally, OpusComplexityDefault (the zero value) the default 5,
+	// OpusComplexityLowest complexity 0. Higher is slower and better.
 	OpusComplexity int
-	// OpusSignal hints the opus encoder about the content type: "voice"
-	// biases the speech/music mode decision toward SILK/hybrid (audiobooks,
-	// podcasts), "music" toward CELT. The zero value ("" or "auto") lets the
-	// encoder's analyser decide per frame.
+	// OpusSignal hints the content type to the opus encoder: "voice" biases
+	// its mode decision toward SILK/hybrid, "music" toward CELT, and "" or
+	// "auto" (alike) let its analyser decide per frame.
 	OpusSignal string
-	// VorbisQuality selects VBR quality for vorbis output on libvorbis's -q
-	// scale (-1..10); higher is larger and better. The zero value uses the
-	// encoder default (3.0). Vorbis is natively quality-driven, so this is the
-	// primary knob; a small nonzero value near 0 reaches the lowest qualities
-	// (the zero value cannot, matching the "0 means default" idiom).
+	// VorbisQuality is the vorbis VBR quality on libvorbis's -q scale
+	// (-1..10), higher larger and better; the zero value is the encoder
+	// default 3.0, so a small nonzero value stands in for quality 0.
 	VorbisQuality float64
 	// Shaping selects the dither strategy for quantization; the default
 	// is flat TPDF.
@@ -459,45 +417,33 @@ func WithMeasured(track container.Track) RunOption {
 	return func(x *runConfig) { x.measured = &track }
 }
 
-// WithTags embeds canonical metadata fields (TITLE, ARTIST, ...) in the
-// output where the muxer can represent them in its stream form: Ogg
-// OpusTags, a FLAC VORBIS_COMMENT block, an MP3 ID3v2 tag, MP4 ilst
-// atoms. Formats without stream-form tagging (WAV, AIFF, ADTS,
-// Matroska) ignore them; a finished file gets full metadata from the
-// mapping post-pass instead. Tags never change the plan: callers keying
-// cached bytes must fold the tag values into their own key.
-// WavPack and Monkey's Audio take them too, as the APEv2 block they
-// write after the audio.
-//
-// Every muxer that bounds its tag block refuses a value that does not
-// fit, failing the run with waxerr.CodeUnsupportedFormat naming
-// the key, rather than writing an output that quietly lacks it. The
-// refusal comes before the encode, so it costs nothing to retry with
-// the value trimmed, and TagsFit asks the same question before the run.
-// Each bound is 48 KiB, which keeps the pre-audio headers small; MP4
-// sets none.
+// WithTags embeds canonical metadata fields (TITLE, ARTIST, ...) where the
+// muxer has a stream form: Ogg OpusTags, FLAC VORBIS_COMMENT, MP3 ID3v2, MP4
+// ilst, and WavPack's and Monkey's Audio's trailing APEv2. WAV, AIFF, ADTS
+// and Matroska ignore them (the mapping post-pass tags a finished file).
+// Tags never change the plan: a caller keying cached bytes keys them too.
+// Every muxer that bounds its tag block (at 48 KiB; MP4 sets none) refuses
+// a value that does not fit with waxerr.CodeUnsupportedFormat naming the
+// key, before the encode; TagsFit asks the same question before the run.
 func WithTags(tags []container.Tag) RunOption {
 	return func(x *runConfig) { x.tags = tags }
 }
 
-// WithChapters embeds chapter markers. Only the MP4 muxer represents
-// them (Nero chpl); the mapping post-pass covers finished files of
-// the other formats.
+// WithChapters embeds chapter markers. Only the MP4 muxer represents them
+// (Nero chpl); the mapping post-pass covers the other formats' files.
 func WithChapters(chapters []container.Chapter) RunOption {
 	return func(x *runConfig) { x.chapters = chapters }
 }
 
-// WithArt embeds cover art. Only the MP4 muxer represents it (the ilst
-// covr atom); art inflates the pre-audio init header, so live
-// streams should leave it nil.
+// WithArt embeds cover art. Only the MP4 muxer represents it (ilst covr);
+// it inflates the pre-audio init header, so live streams leave it nil.
 func WithArt(art *container.Picture) RunOption {
 	return func(x *runConfig) { x.art = art }
 }
 
 // WithProgress, given a non-nil fn, calls it after each encoded chunk or
 // copied packet with the samples carried so far and the projected total (-1
-// unknown). It runs on the run's goroutine, so blocking it pauses the
-// pipeline; the job runner's yield-to-live-streams check rides on exactly that.
+// unknown). It runs on the run's goroutine, so blocking it pauses the run.
 func WithProgress(fn func(done, total int64)) RunOption {
 	return func(x *runConfig) { x.progress = fn }
 }
@@ -515,9 +461,8 @@ const (
 	FLACLevelFastest = -1
 )
 
-// WavPackLevel spellings. WavPack's levels are named modes rather than a
-// numeric scale, and they are numbered from one, so the zero value means the
-// default with no sentinel needed.
+// WavPackLevel spellings. WavPack's levels are named modes numbered from
+// one, so the zero value is the default with no sentinel.
 const (
 	// WavPackLevelDefault keeps the encoder's default level (normal).
 	WavPackLevelDefault = 0
@@ -531,15 +476,12 @@ const (
 	WavPackLevelVeryHigh = wavpack.LevelVeryHigh
 )
 
-// APELevel spellings. Monkey's Audio names its levels in thousands, which is
-// the vocabulary the format itself uses in the file header, so the option
-// carries those numbers rather than a scale of its own; zero is not one of
-// them, so the default needs no sentinel.
+// APELevel spellings: the thousands Monkey's Audio's file header names its
+// levels by. Zero is none of them, so the default needs no sentinel.
 const (
 	// APELevelDefault keeps the encoder's default level (normal).
 	APELevelDefault = 0
-	// APELevelFast is the shallowest cascade: no filter at all, fastest,
-	// largest.
+	// APELevelFast runs no filter at all: fastest, largest.
 	APELevelFast = ape.LevelFast
 	// APELevelNormal is the default cascade, a 16-tap filter.
 	APELevelNormal = ape.LevelNormal

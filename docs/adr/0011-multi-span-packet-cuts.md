@@ -133,3 +133,44 @@ the Chromium MSE row above.
 - An mka-to-mka copy that forwards a source's own inner trims already produced a
   file Firefox rejects; `SpliceTrims` makes that reachable deliberately rather
   than only by inheritance.
+
+## Amendment (2026-11-25): the cut's length, its last span and SpliceTrims
+
+This adds to the Decision what the cut holds at its end, in its length and
+under `SpliceTrims`, which the Decision leaves unsaid.
+
+- The cut track's length is the landed length, never the requested one. The
+  trailer derives the end trim as decoded samples less the delay and the
+  length, so a requested length would have a muxer that writes the count
+  (Matroska's `DiscardPadding`) trim real audio by however far the interior
+  edges moved. With the landed length the terms cancel and the trailer
+  states exactly the synthesized padding, by default and under
+  `SpliceTrims` alike.
+- A bounded last span whose outward snap passes the source's end is clamped
+  to it, and its window runs to the end of the packets as a `ToEnd` span's
+  does. A `To` equal to the source's length snaps past the end whenever the
+  decode total is not a whole number of packets, so refusing it would
+  decline the plainest cut there is. `Landed` for a `ToEnd` last span
+  reports the source's length, or `ToEnd` when the source declares none; a
+  clamped bounded span lands at its own `To`.
+- Of two touching spans, the packet across their boundary stays with the
+  earlier span: the shared boundary is the later head snapped up, so the
+  earlier span's `Landed` reaches into the later one's request. This
+  corrects the Decision's sentence that the packet goes to the span that
+  starts there.
+- `SpliceTrims` is ignored on a single-span cut, which has no interior edge.
+  Under it, touching spans do not share a boundary, since the next head's
+  pre-roll reaches into the window before it: they decline, as does a span
+  starting within the pre-roll, before the grid is measured, with a reason
+  naming the remedy. A source trim already on an interior span's last kept
+  packet is the same tail as the synthesized one, and the larger stands.
+- Two windows overlap only under `SpliceTrims`. By default an interior tail
+  snaps down and the next head snaps up, so a window ends at or before the
+  next one starts; the first head's pre-roll reaches back, away from the
+  span after it. The cut declines an overlap and never merges one. A span
+  is tested for keeping a whole packet after touching spans share their
+  boundary, since a short span touching the next is not empty.
+- Spans are placed on the raw timeline through the source's inner trims
+  (`container.Track.MidTrims`): a bound steps past the delay and every trim
+  before it, and `Landed` maps back the same way. A source whose inner trims
+  the walk did not record, or that no grid places, declines.

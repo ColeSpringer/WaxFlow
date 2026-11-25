@@ -8,7 +8,7 @@
 //
 //	waxerr        - error taxonomy: codes, sentinels, exit-code contract
 //	audio         - PCM model (planar buffers, formats, layouts)
-//	dsp/...       - resample, mix, gain, dither, loudness, psy, fft
+//	dsp/...       - resample, mix, gain, dither, loudness, silence, psy, fft
 //	codec/...     - pcm, g711, adpcm, flac, alac, mp3, aac, opus, vorbis,
 //	                wavpack, ape, wma, wmalossless, wmapro, wmavoice, musepack
 //	container/... - riff, aiff, ogg, mp4, mka, adts, mpa, flacn, wv, apen, asf, mpc

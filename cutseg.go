@@ -11,41 +11,32 @@ import (
 )
 
 // CutSegmentPlan describes the segmented (CMAF) form of a cut, as CutPlan
-// describes its progressive form. It embeds RemuxSegmentPlan for the reason
-// CutPlan embeds RemuxPlan: the delivery layer reads the same segment facts off a
-// plan whichever rung answered, and a cut is a segmented remux with a packet
-// filter in front.
+// describes its progressive form. It embeds RemuxSegmentPlan so the delivery
+// layer reads one shape whichever rung answered.
 type CutSegmentPlan struct {
 	RemuxSegmentPlan
-	// Landed is where the requested spans fell, one for one, on the source's own
-	// track timeline, exactly as CutPlan.Landed reports for the progressive cut.
+	// Landed is where each requested span fell, one for one, as
+	// CutPlan.Landed reports it.
 	Landed []Span
-	// Grid is the source's packet grid and Source the measured track this plan
-	// was computed from, both threaded to CutSegments so the run cuts on the
-	// same boundaries and synthesizes the same track the plan (and so the cache
-	// key) was computed from. Source carries what a fresh header open cannot
-	// see: the length where the container declares none (ADTS AAC-LC reports -1
-	// from its headers) and the gapless trims where it states them per block
-	// (Matroska), both of which computeCut's arithmetic reads. Its Samples is
-	// -1 only when the plan itself was handed a lengthless track.
+	// Grid is the packet grid and Source the track the plan was handed:
+	// CutSegments takes both, so the run cuts on the keyed boundaries from
+	// the same length and trims (ADR-0013).
 	Grid   int
 	Source container.Track
 }
 
-// PlanCutSegments plans the segmented form of a cut: the HLS spelling of the cut
-// rung, and the mirror of PlanRemuxSegments over a synthesized cut track. It runs
-// CutTrack for the cut's own track, plans that track's segmented remux, and then
-// applies the destination-trim gate PlanCut applies, to the fMP4 it writes.
-// Where PlanCut asks the destination's muxer it asks the init header, and it
-// also declines a source a restart's seek cannot place.
+// PlanCutSegments plans the segmented form of a cut: CutTrack for the cut's
+// track, PlanRemuxSegments over that track, then PlanCut's trim check
+// (cutTrimsExpressible) with fMP4's rule. It asks the init header where
+// PlanCut asks the destination's muxer, judges the copy at the segmented
+// depth (segmentBitDepth), and also declines a source a restart's seek
+// cannot place.
 //
-// grid measures the source's packet duration, and is asked as PlanCut asks
-// it, with the copy and the init header judged at the segmented depth. An
-// invalid span and then a NaN, negative or over-long segSeconds are refused
-// before any decline. Past that, a varying grid (0) declines, as does anything
-// PlanRemuxSegments declines, and all of these return (nil, nil): the caller
-// falls through to a transcode. An error means the request is wrong for every
-// rung, exactly the error/decline seam PlanCut documents.
+// Invalid options, a format with no segmented form, an invalid span and then
+// a NaN, negative or over-long segSeconds are refused before any decline.
+// grid is asked as PlanCut asks it, and 0 declines. A decline returns
+// (nil, nil) and the caller falls through to a transcode; an error means no
+// rung can serve the request.
 func (e *Engine) PlanCutSegments(track container.Track, opts TranscodeOptions, spans []Span,
 	grid func() (int, error), segSeconds float64) (*CutSegmentPlan, error) {
 	if err := checkSegmented(opts); err != nil {
@@ -58,8 +49,7 @@ func (e *Engine) PlanCutSegments(track container.Track, opts TranscodeOptions, s
 	if row.hls == nil {
 		return nil, noSegmentedForm(opts.Format)
 	}
-	// An invalid span, then the duration, are refused before any decline, as
-	// a transcode of the span refuses them.
+	// Refused before any decline, as a transcode of the span refuses them.
 	if err := validateCutSpans(track, spans); err != nil {
 		return nil, err
 	}
@@ -81,10 +71,7 @@ func (e *Engine) planCutSegmentsOn(track container.Track, opts TranscodeOptions,
 	segSeconds float64) (*CutSegmentPlan, error) {
 	cutTrack, landed, err := CutTrack(track, opts, spans, g)
 	if err != nil {
-		// The seam, exactly as PlanCut maps it: CutTrack cannot express a decline
-		// through its signature, so a CodeUnsupportedFormat becomes the ladder's
-		// (nil, nil), while a CodeInvalidRequest or a CodeMalformedInput
-		// propagates as an error rung 3 would hit identically.
+		// CutTrack states its declines as CodeUnsupportedFormat.
 		if waxerr.CodeOf(err) == waxerr.CodeUnsupportedFormat {
 			e.log.Debug("segmented cut declined", "codec", track.Codec, "grid", g, "reason", err)
 			return nil, nil
@@ -92,8 +79,7 @@ func (e *Engine) planCutSegmentsOn(track container.Track, opts TranscodeOptions,
 		return nil, err
 	}
 	// A restart seeks the source, and a trim that empties a packet makes the
-	// landing ambiguous (see cutSeekable); the progressive cut, which never
-	// seeks, is unaffected.
+	// landing ambiguous (see cutSeekable).
 	if wholePacketTrim(track.MidTrims, int64(g)) {
 		e.log.Debug("segmented cut declined", "reason", "a trim empties a packet, so a restart's seek is ambiguous")
 		return nil, nil
@@ -102,17 +88,19 @@ func (e *Engine) planCutSegmentsOn(track container.Track, opts TranscodeOptions,
 	if err != nil || rsp == nil {
 		return nil, err
 	}
-	// The cut's trims are new, and PlanRemuxSegments only ever checked the
-	// source's. This is the one question nothing else in the segmented ladder
-	// asks; see cutTrimsExpressible.
-	if !cutTrimsExpressible(rsp.Container, cutTrack.Delay, cutTrack.Padding) {
+	// The cut's Delay and Padding are its own, and PlanRemuxSegments checked
+	// only the source's.
+	row, fm, _, err := remuxForm(cutTrack, opts)
+	if err != nil {
+		return nil, err
+	}
+	if out := copyDest(row, fm, true); !cutTrimsExpressible(out, cutTrack.Delay, cutTrack.Padding) {
 		e.log.Debug("segmented cut declined", "reason", "the destination cannot signal the cut's trims",
-			"outContainer", rsp.Container, "delay", cutTrack.Delay, "padding", cutTrack.Padding)
+			"outContainer", out, "delay", cutTrack.Delay, "padding", cutTrack.Padding)
 		return nil, nil
 	}
-	// RemuxVersion and the segmenter revision the remux plan already named, plus
-	// CutVersion for the trims and rewritten config the cut synthesized: the same
-	// three the progressive cut keys on, plus the segmenter's own.
+	// The segmented remux's terms plus CutVersion, for the trims and codec
+	// config the cut synthesized.
 	rsp.Versions = withDemuxer(track, RemuxVersion, mp4.SegmenterVersion, CutVersion)
 	return &CutSegmentPlan{
 		RemuxSegmentPlan: *rsp,
@@ -130,38 +118,27 @@ func cutInitExpressible(probe container.Track) bool {
 	return err == nil
 }
 
-// CutInitSegment builds the CMAF init header for a planned segmented cut. It is
-// RemuxInitSegment over the embedded plan with no new box code: the cut track
-// already carries the rewritten OpusHead and the synthesized delay, so its sample
-// entry and edit list are correct, and the edit list instructs the player to skip
-// the head pre-skip priming exactly as a remux's would. That the plan's Delay is
-// the cut's and not the source's zero is what PlanRemuxSegments guarantees, since
-// it sets SegmentPlan.Delay from the track it is handed, and it is handed the cut
-// track.
+// CutInitSegment builds the CMAF init header for a planned segmented cut:
+// RemuxInitSegment over the embedded plan. The plan's track and Delay are the
+// cut's (PlanRemuxSegments takes Delay from the track it is handed), so the
+// sample entry carries the rewritten codec config and the edit list skips the
+// cut's priming.
 func (e *Engine) CutInitSegment(plan *CutSegmentPlan) ([]byte, error) {
 	return e.RemuxInitSegment(&plan.RemuxSegmentPlan)
 }
 
 // CutSegments emits numbered CMAF media segments from a span of src's own
-// packets: the run half of the segmented cut rung, and the segmented sibling of
-// CutStream. No decode, no DSP, no encode, so no generation loss; each segment
-// holds the kept access units byte for byte. A source that runs out early fails
-// the run, as Cut describes.
+// packets, the segmented sibling of CutStream: each holds the kept access
+// units byte for byte, and segment n of a run started mid-stream is
+// byte-identical to a continuous run's (ADR-0013). The caller owns src.
 //
-// opts, spans, grid, and samples must be the pair PlanCutSegments accepted, for
-// the reason CutStream gives: a caller reaching this directly has chosen the rung,
-// and the fallback it did not ask for would be the wrong help. samples is the
-// source's exact length, threaded from the plan and patched over the reopened
-// header's, so an undeclared-length source (ADTS AAC-LC) cuts against the length
-// the plan measured rather than the -1 its headers report, and its trims, which
-// for a Matroska source live on the blocks. Pass a track whose Samples is
-// negative to take the header's own, which a source that declares one already
-// has. See CutStream and adoptMeasured.
-//
-// It opens the source, wraps it in a seekable Cut view, and hands that to the
-// same segmentWalk RemuxSegments uses, so a mid-stream restart reproduces a
-// continuous run's segment bytes for bytes. There is no demux.Close, mirroring
-// RemuxSegments: the source.File owns the handle.
+// opts and spans must be a pair PlanCutSegments accepted, grid its Grid and
+// measured its Source, read as CutStream reads measured. A decline by CutTrack
+// or by the copy rule (PlanRemux at the segmented depth, without its muxer
+// check) is an error, never a re-encode; the copy rule's is CodeInvalidRequest
+// before a segment goes out. The trim rule (cutTrimsExpressible) is the plan's
+// alone. A demuxer that cannot seek is refused with CodeUnsupportedFormat,
+// even from segment 0, and a source that runs out early fails the run.
 func (e *Engine) CutSegments(ctx context.Context, src container.Source, hint string, opts TranscodeOptions,
 	spans []Span, grid int, measured container.Track, segOpts SegmentedOptions, emit func(mp4.Segment) error) (*SegmentedResult, error) {
 	if err := checkSegmented(opts); err != nil {
@@ -181,10 +158,8 @@ func (e *Engine) CutSegments(ctx context.Context, src container.Source, hint str
 	if err != nil {
 		return nil, err
 	}
-	// The plan's measured track over the header's, the mirror of CutStream: the
-	// cut arithmetic reads its length and its trims (see computeCut's
-	// decodedEnd), and plan and run must read the same ones or their windows
-	// drift.
+	// The plan's measured track over the header's, as in CutStream: plan and
+	// run must read one length and one set of trims or their windows drift.
 	track, err := cutSource(ctx, demux, info.Default(), measured)
 	if err != nil {
 		return nil, err
@@ -193,16 +168,15 @@ func (e *Engine) CutSegments(ctx context.Context, src container.Source, hint str
 	if err != nil {
 		return nil, err
 	}
-	// The segmenter's track is PlanRemux's ID-0 normalization of the cut track,
-	// exactly as RemuxSegments segments rp.Track; the walk filters on the source's
-	// own track ID, which CutTrack preserves onto cutTrack.
-	rp, _, err := e.planRemux(cutTrack, opts, false)
+	// The plan's copy rule at its depth, as in RemuxSegments. The segmenter
+	// takes planRemux's ID-0 track; the walk filters on the source's track
+	// ID, which CutTrack keeps on cutTrack.
+	rp, _, err := e.planRemux(cutTrack, segmentBitDepth(opts, track.Fmt), true)
 	if err != nil {
 		return nil, err
 	}
-	// What PlanRemux declines, a trim inside the kept packets among it, is
-	// refused before a segment goes out rather than by the copy's backstop
-	// mid-run.
+	// What planRemux declines, a trim on a kept packet among it, is refused
+	// before a segment goes out, not by the walk's backstop mid-run.
 	if rp == nil {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("waxflow: a %s cut cannot be remuxed to %s with these options; transcode it",
@@ -222,20 +196,18 @@ func (e *Engine) CutSegments(ctx context.Context, src container.Source, hint str
 	return res, nil
 }
 
-// cutSeekDemuxer is Cut's seekable view, used only by the segmented cut path. It
-// is a cutDemuxer that can reposition, which the progressive Cut deliberately is
-// not (see Cut, which warns that a seeker mixing the source's timeline with the
-// cut's would be wrong in a way no error surfaces). This is the one caller that
-// genuinely needs one, and it needs the inner demuxer to seek too.
+// cutSeekDemuxer is Cut's view made seekable on the cut's own output
+// timeline, for CutSegments alone; Cut is no Seeker (see Cut). Seeking the
+// cut seeks the source, through seek, the inner demuxer.
 type cutSeekDemuxer struct {
 	*cutDemuxer
-	// seek is the inner demuxer, which must itself be a Seeker; the source's
-	// packets are what a cut moves, so seeking the cut means seeking the source.
 	seek container.Seeker
 }
 
-// cutSeekable wraps a seekable demuxer in a Cut view that can reposition on its
-// output timeline. It is the seekable form of Cut, for CutSegments alone.
+// cutSeekable is Cut for CutSegments: a view that seeks on its output
+// timeline. It refuses with CodeUnsupportedFormat a demuxer that cannot seek,
+// a cut whose kept packets trim, and a source with a trim that empties a
+// packet.
 func cutSeekable(demux container.Demuxer, track container.Track, opts TranscodeOptions, spans []Span, grid int) (container.Demuxer, error) {
 	sk, ok := demux.(container.Seeker)
 	if !ok {
@@ -246,12 +218,8 @@ func cutSeekable(demux container.Demuxer, track container.Track, opts TranscodeO
 	if err != nil {
 		return nil, err
 	}
-	// The output timeline this view seeks on is the raw one (segment
-	// boundaries are raw grid positions), which is the delivered one only
-	// while no kept packet carries a trim; and a landing is a packet start on
-	// the source's delivered timeline, which names two packets where a trim
-	// empties one. CutSegments and PlanCutSegments decline both shapes; this
-	// is the view's own guard.
+	// PlanCutSegments declines both first; this is the view's own guard
+	// (ADR-0013).
 	if res.track.MidPadding > 0 {
 		return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 			"waxflow: a kept packet of this cut trims inside the run, which a segmented run cannot carry; transcode it")
@@ -268,36 +236,24 @@ func cutSeekable(demux container.Demuxer, track container.Track, opts TranscodeO
 
 // The source demuxer seeks on the timeline it delivers, which excludes every
 // trim before the landing (container.Packet.Padding), while the windows are
-// raw, so a target crosses over on the way in and a landing on the way back.
-// Both are packet starts, so the landing stays at or before the target on
-// both timelines. No delay: these are packet positions, not a span's.
+// raw. Target and landing are packet starts, so a landing at or before the
+// target is so on both timelines. The delay is 0: these are packet
+// positions, not a span's.
 
 func (c *cutSeekDemuxer) deliveredPos(raw int64) int64 { return trackPos(c.trims, 0, raw) }
 
 func (c *cutSeekDemuxer) rawPos(delivered int64) int64 { return rawStart(c.trims, 0, delivered) }
 
-// SeekSample repositions the cut to outTarget on its own contiguous output
-// timeline, so a restarted segment worker resumes exactly where a continuous run
-// would be. It maps outTarget back through the windows to a source decode
-// position, seeks the inner demuxer there, and resets the walk's cursor, source
-// position, and output position so the retimed packets a restarted worker
-// produces are the same bytes a continuous run's are.
-//
-// No pre-roll is backed off, and that is the trap this rung must not fall into. A
-// mid-stream segment begins exactly on its grid boundary and RemuxSegments
-// discards packets before it, precisely so segment n from a restarted worker is
-// byte-identical to a continuous run's. Seeking back by the codec's pre-roll to
-// "prime" the segment would duplicate packets and break that; player-side priming
-// for a mid-stream seek comes from the codec roll signaling in the init segment,
-// not from packets in the media segment. The head pre-roll (segment 0) is a
-// different thing and is already in window 0, which CutTrack widened, so it never
-// reaches this seek.
+// SeekSample repositions the cut at outTarget on its contiguous output
+// timeline: it maps outTarget through the windows to a source position, seeks
+// the inner demuxer there, and resets the walk's cursor and positions, so the
+// packets from outTarget on are retimed as in a continuous run. It backs off
+// no pre-roll (ADR-0013). It returns the output position it landed on, at or
+// before outTarget, or outTarget itself past every window, where the view
+// ends. A track other than the view's, or a negative target, is refused with
+// CodeInvalidRequest.
 func (c *cutSeekDemuxer) SeekSample(ctx context.Context, track int, outTarget int64) (int64, error) {
-	// The cut view exposes one track (the source's own, which CutTrack preserves),
-	// so a seek names it exactly as every other demuxer's SeekSample names track 0;
-	// c.track then forwards to the inner demuxer, whose ID it is. The walk only ever
-	// calls this with that ID, so the guard documents the invariant rather than
-	// gating a reachable path.
+	// The view's one track is the source's own ID, the only one the walk seeks.
 	if track != c.track {
 		return 0, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("waxflow: cut view has no track %d", track))
@@ -306,17 +262,14 @@ func (c *cutSeekDemuxer) SeekSample(ctx context.Context, track int, outTarget in
 		return 0, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("waxflow: negative cut seek target %d", outTarget))
 	}
-	// Find the window outTarget falls in and that window's start on the output
-	// timeline. The output timeline runs the kept windows back to back with no
-	// gaps, so within a window the source and output positions advance in lockstep
-	// and the map is a single addition. For the single-window HTTP case this loop
-	// runs once and outStart is 0.
+	// The windows run back to back on the output timeline, so inside one the
+	// source and output positions move in lockstep.
 	var outStart int64
 	i := 0
 	for ; i < len(c.windows); i++ {
 		w := c.windows[i]
 		if w.to < 0 {
-			break // the last window runs to EOF; every remaining target lands in it
+			break // the last window runs to EOF and holds every later target
 		}
 		wlen := w.to - w.from
 		if outTarget < outStart+wlen {
@@ -325,8 +278,8 @@ func (c *cutSeekDemuxer) SeekSample(ctx context.Context, track int, outTarget in
 		outStart += wlen
 	}
 	if i == len(c.windows) {
-		// Past every window: nothing remains to read. Park the cursor at the end so
-		// the next ReadPacket returns io.EOF, and report the target back unchanged.
+		// Past every window: park the cursor at the end, so the next
+		// ReadPacket ends the view.
 		c.cur, c.pos, c.out, c.prevPad = len(c.windows), 0, outTarget, 0
 		c.outRaw = c.out
 		return outTarget, nil
@@ -337,27 +290,19 @@ func (c *cutSeekDemuxer) SeekSample(ctx context.Context, track int, outTarget in
 		return 0, err
 	}
 	landed = c.rawPos(landed)
-	// The inner demuxer's next packet begins at landed on the source decode
-	// timeline; cur names the window and pos the source position the walk resumes
-	// at. A seek is a coarse optimization, not an exact landing: a container that
-	// seeks by page (Ogg) routinely lands well before the target, even before the
-	// window's own start. The output offset is clamped at zero for exactly that
-	// case, so a pre-window landing seeds out at the window's output start and the
-	// walk then skips the pre-roll gap and everything up to the boundary itself,
-	// exactly as a from-the-top run does. Landing inside the window instead seeds
-	// the matching output position directly. Either way out is at or before
-	// outTarget, which is the "at or before" contract seekPackets checks, and the
-	// walk's own pos < p0 skip carries it the rest of the way to the boundary.
+	// A seek may land well before the target, even before the window (Ogg
+	// seeks by page). Such a landing seeds out at the window's output start,
+	// and one inside the window seeds the matching position; the view skips
+	// the packets before the window and the walk skips up to the boundary, as
+	// a run from the top does. Either way out is at or before outTarget, as
+	// seekPackets requires.
 	c.cur, c.pos = i, landed
 	c.out = outStart + max(0, landed-w.from)
-	// The raw output position is the delivered one here, and only here: this
-	// view refused a cut whose kept packets trim at all, so the two timelines
-	// have not parted. Keeping it in step is what lets ReadPacket read the
-	// plan's trims by position without a second rule for the seeking path.
+	// Raw and delivered output positions agree: cutSeekable refused a cut
+	// whose kept packets trim.
 	c.outRaw = c.out
-	// The packet before the cursor is unknown after a seek: carrying the
-	// pre-seek packet's trim across would check the first packet the seek
-	// lands on against a trim it does not follow.
+	// The packet before the cursor is unknown after a seek, so no trim check
+	// carries across it.
 	c.havePrev, c.prevKept, c.tailPad = false, false, 0
 	return c.out, nil
 }

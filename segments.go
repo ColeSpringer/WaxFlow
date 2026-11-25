@@ -20,39 +20,25 @@ import (
 )
 
 // DefaultSegmentSeconds is the HLS target segment duration when a request
-// names none, per the Apple authoring guidance for low-latency-enough
-// audio streaming without playlist bloat.
+// names none, per Apple's authoring guidance.
 const DefaultSegmentSeconds = 4.0
 
-// maxSegmentSeconds bounds requested segment durations: beyond it the
-// segment-sample arithmetic still holds but the delivery would be
-// degenerate (one segment per track defeats HLS).
+// maxSegmentSeconds bounds a requested segment duration. The arithmetic
+// holds past it, but delivery degenerates toward one segment per track,
+// which defeats HLS.
 const maxSegmentSeconds = 60.0
 
-// primeSeconds is how much pre-target audio a mid-stream segmented run
-// feeds the *encoder* before its first kept sample, rounded up to whole
-// encoder frames: enough to settle the encoder's cross-frame state
-// (psychoacoustic and prefilter history) and the resampler's window so
-// segment n from a restarted worker joins segment n-1 from a continuous one
-// without an audible seam. The priming packets are discarded on an exact
-// frame boundary, so the kept stream's decode timeline is unshifted.
-//
-// It is also the floor on the *chain's* pre-roll, which is a longer window
-// whenever the chain holds a node whose state decays rather than ends; see
-// dsp.Settler and primeStarts. The two were one constant only because
-// nothing yet needed them to differ.
+// primeSeconds is the pre-target audio a mid-stream segmented run feeds the
+// encoder, rounded up to whole frames and discarded on a frame boundary, and
+// the floor on the chain's pre-roll (ADR-0014).
 const primeSeconds = 0.1
 
 // snapSegmentSamples resolves a requested segment duration to a whole number
-// of frames of the given grid, at least one, so segment boundaries land exactly
-// between packets.
-//
-// The grid is the encoder's native frame size for a transcode and the source's
-// own packet duration for a remux, and that is the whole of what makes the
-// segmented remux rung work: mp4.Segmenter's tfdt = index * SegmentSamples is
-// only true if boundaries fall on packet boundaries, and snapping is what makes
-// them. Both rungs snap through here so neither can drift from the other's
-// notion of where a segment ends.
+// of grid frames, at least one, so segment boundaries land between packets.
+// The grid is the encoder's frame for a transcode and the source's packet
+// duration for a remux. mp4.Segmenter's tfdt = index * SegmentSamples holds
+// only on packet boundaries, and both rungs snap here so they agree on where
+// a segment ends.
 func snapSegmentSamples(segSeconds float64, rate, grid int) (int, error) {
 	segSeconds, err := segmentSeconds(segSeconds)
 	if err != nil {
@@ -80,22 +66,26 @@ func segmentSeconds(s float64) (float64, error) {
 }
 
 // SegmentPlan describes the segmented CMAF (HLS) form of a transcode,
-// computed from headers alone like TranscodePlan (which it embeds: the
-// embedded Versions already carry the segmenter revision, so an HLS cache
-// key derives from it directly).
+// computed from headers alone like the TranscodePlan it embeds. Its Versions
+// carry the segmenter revision, so an HLS cache key derives from it directly.
+// The embedded Container, MediaType and Live name the row's default
+// progressive form, which the plan's identity keys on; the segments are
+// fMP4, and a trim or muxer question about them asks copyDest, never these
+// fields.
 type SegmentPlan struct {
 	TranscodePlan
 	// SegmentSamples is the decode duration of every segment but the last,
-	// in output samples: the requested duration snapped to a whole number
-	// of encoder frames so boundaries land exactly between packets.
+	// in output samples: the requested duration snapped to whole frames.
 	SegmentSamples int
-	// Delay is the encoder delay the init segment's edit list carries.
+	// Delay is the encoder delay the init segment's edit list carries: the
+	// row's for a transcode, the source's own for a remux, the cut's
+	// synthesized one for a cut.
 	Delay int64
 	// Codecs is the RFC 6381 CODECS attribute for master playlists.
 	Codecs string
-	// Bandwidth is a peak-bit-rate bound for master playlists: the exact
-	// rate for CBR encoders, the PCM wire rate for VBR lossless (whose
-	// compressed peak can only be below it), plus segmentation overhead.
+	// Bandwidth is the master playlist's BANDWIDTH value: the encoder's
+	// target rate where the plan reports one (TranscodePlan.BitRate), else
+	// the PCM wire rate, plus segmentation overhead.
 	Bandwidth int
 	// TotalDecodeSamples is the whole stream's decode duration: the
 	// trimmed output length plus the delay and padding frames the encoder
@@ -119,22 +109,12 @@ func (p *SegmentPlan) SegmentDuration(n int64) int64 {
 	return p.TotalDecodeSamples - (p.Segments-1)*int64(p.SegmentSamples)
 }
 
-// PresentationDuration returns segment n's playable duration in samples: its
-// decode span intersected with the presentation window the init segment's
-// edit list declares, [Delay, Delay+Samples). The durations then sum to
-// exactly Samples, which is what a player deriving a total duration from
-// EXTINF should see.
-//
-// It is a second method rather than a change to SegmentDuration, which stays
-// decode-timeline truth: the segment count, the workers, and the segmenter's
-// tfdt all measure the decode timeline, and the segments themselves do not
-// move. Only the playlist text does.
-//
-// A format whose row declares no encoder delay (FLAC, ALAC) takes
-// totalDecodeSamples' delay == 0 early return, so TotalDecodeSamples equals
-// Samples and the intersection is the identity. All three rungs read the same
-// two fields: a transcode plan takes Delay from its row, a remux plan from the
-// source's own pre-skip, and the cut rung embeds a remux plan.
+// PresentationDuration returns segment n's playable duration in samples, or
+// -1 where SegmentDuration does: its decode span intersected with the edit
+// list's presentation window [Delay, Delay+Samples), so the durations sum to
+// Samples. Only the playlist reads it; the segment count, the workers and
+// the tfdt stay on the decode timeline. With no delay (FLAC, ALAC) it equals
+// SegmentDuration.
 func (p *SegmentPlan) PresentationDuration(n int64) int64 {
 	d := p.SegmentDuration(n)
 	if d < 0 {
@@ -144,16 +124,13 @@ func (p *SegmentPlan) PresentationDuration(n int64) int64 {
 	return max(0, min(start+d, p.Delay+p.Samples)-max(start, p.Delay))
 }
 
-// MediaSegments lists the plan's segments for a VOD media playlist: segment
-// n at segmentURI(n), timed by its presentation duration. m3u8.Media renders
-// them as the daemon's /hls/media.m3u8 renders the same plan. Which plan the
-// daemon serves is the daemon's choice of rung: PlanRemuxSegments or
-// PlanCutSegments over the source's PacketGrid where the source's own packets
-// serve, PlanSegments otherwise.
-//
-// A plan of unknown length is refused, since a VOD playlist lists every
-// segment: measure the source (MeasureLength) and plan from that track. So is
-// one whose segment fields disagree, which only a plan built by hand can.
+// MediaSegments lists the plan's segments for a VOD media playlist, segment
+// n at segmentURI(n) timed by PresentationDuration, for m3u8.Media to render
+// as the daemon's /hls/media.m3u8 does, from any rung's planner. It refuses
+// with CodeInvalidRequest a plan of unknown length (measure the source with
+// MeasureLength and plan from that track), a nil segmentURI, a plan with no
+// output rate, one whose segment fields disagree (only a hand-built plan
+// can), and one past m3u8.MaxSegments.
 func (p *SegmentPlan) MediaSegments(segmentURI func(n int64) string) ([]m3u8.MediaSegment, error) {
 	switch {
 	case p.Segments < 0:
@@ -178,10 +155,8 @@ func (p *SegmentPlan) MediaSegments(segmentURI func(n int64) string) ([]m3u8.Med
 	for n := range segs {
 		segs[n] = m3u8.MediaSegment{
 			URI: segmentURI(int64(n)),
-			// The presentation timeline, not the decode one: EXTINF is what a
-			// player sums into a total duration, and the decode span overshoots
-			// it by the encoder delay plus the tail rounding (23 ms on AAC,
-			// almost all of it the head). The segments themselves are unchanged.
+			// The presentation span: a player sums EXTINF into a total,
+			// which the decode span overshoots by the delay and tail rounding.
 			Seconds: float64(p.PresentationDuration(int64(n))) / rate,
 		}
 	}
@@ -194,30 +169,15 @@ func (p *SegmentPlan) MasterVariant(uri string) m3u8.MasterVariant {
 	return m3u8.MasterVariant{URI: uri, Bandwidth: p.Bandwidth, Codecs: p.Codecs}
 }
 
-// segmentBitDepth applies the segmented form's depth rule to opts: a FLAC
-// source at a depth no MSE parser accepts is widened to the next one that is,
-// which is lossless.
-//
-// Chromium's MP4 stream parser takes only 8, 16, 24 and 32 as an audio sample
-// size, and for FLAC it requires the entry's field to equal STREAMINFO's, so a
-// 12- or 20-bit FLAC track is unplayable over Media Source Extensions however
-// the header is written: the playlist and every segment answer 200 and the
-// browser refuses the first append. There is no header to write differently,
-// so the audio moves instead. Widening is a left shift of zero-padded LSBs,
-// which FLAC's wasted-bits coding takes straight back out, so the segments
-// carry the same audio at about the same size.
-//
-// What it costs is the remux rung: that rung copies the source's own packets
-// and cannot widen anything, so remuxable sees a depth request that is not the
-// source's and declines, and the variant transcodes. Only the depths that had
-// no playable form pay it.
-//
-// FLAC only, and the segmented path only. The other codecs' sample entries
-// carry a clamped depth instead, which is legal for them because their
-// decoders read the format from the codec config and Chromium does not check
-// the two against each other; FLAC's rule is that it does. Progressive
-// /stream is untouched, since it hands the file to a native decoder and those
-// play 20-bit FLAC.
+// segmentBitDepth applies the segmented depth rule to opts: a flac request
+// naming no BitDepth, off an integer source at a depth other than 8, 16, 24
+// or 32, is widened to the next whole byte. Chromium's MSE parser takes only
+// those four and requires a FLAC entry's depth to equal STREAMINFO's, so no
+// header makes such a track playable. Widening is lossless (FLAC's
+// wasted-bits coding takes the padding back out); it costs the remux rung,
+// which declines a depth that is not the source's. Other codecs carry a
+// clamped entry depth instead, and progressive output is untouched
+// (docs/hls-validation.md).
 func segmentBitDepth(opts TranscodeOptions, src audio.Format) TranscodeOptions {
 	if opts.Format != "flac" || opts.BitDepth != 0 || src.Type != audio.Int {
 		return opts
@@ -226,11 +186,7 @@ func segmentBitDepth(opts TranscodeOptions, src audio.Format) TranscodeOptions {
 	case 8, 16, 24, 32:
 		return opts
 	}
-	// The accepted depths are the whole-byte ones, so the next one up is the
-	// depth rounded to a whole byte: pcm.ContainerBits, which is the same
-	// question asked on the read side (a 20-bit WAV's samples sit in 24-bit
-	// words). Spelling it out here got a sub-8-bit source wrong, widening it
-	// to 16 where 8 is both accepted and enough.
+	// The next whole byte, which takes a sub-8-bit source to 8.
 	opts.BitDepth = pcm.ContainerBits(src.BitDepth)
 	return opts
 }
@@ -239,12 +195,9 @@ func segmentBitDepth(opts TranscodeOptions, src audio.Format) TranscodeOptions {
 // the per-variant output selection (FromSample must be zero: segments own
 // the timeline); segSeconds is the target segment duration, 0 for the
 // default. A plan that succeeds guarantees TranscodeSegments and
-// InitSegment accept the same options.
-//
-// The depth rule (segmentBitDepth) is applied here rather than asked of the
-// caller, and the same rule is applied at every other segmented entry point
-// off the same source format, so no rung of the ladder can plan one depth and
-// run another.
+// InitSegment accept the same options. It applies segmentBitDepth itself, as
+// the other segmented plans and the transcode, remux and cut runs do off the
+// same source format, so no rung plans one depth and runs another.
 func (e *Engine) PlanSegments(track container.Track, opts TranscodeOptions, segSeconds float64) (*SegmentPlan, error) {
 	row, err := segmentOutputRow(opts)
 	if err != nil {
@@ -263,12 +216,9 @@ func (e *Engine) PlanSegments(track container.Track, opts TranscodeOptions, segS
 	if err != nil {
 		return nil, err
 	}
-	// A segment no longer than the encoder's priming has no playable audio in
-	// it at all: the edit list discards the whole of segment 0, so its EXTINF
-	// is zero and a player is handed a segment that presents nothing. The
-	// request is degenerate rather than unlucky (AAC primes 1024 samples and
-	// snapSegmentSamples floors at one frame, so any segDur under ~23 ms
-	// reaches it), and it is refused here where segDur can still be corrected.
+	// The edit list discards all of a segment no longer than the encoder
+	// delay, so segment 0 would present nothing; refused while segSeconds can
+	// still be corrected.
 	if row.hls.delay > 0 && int64(segSamples) <= row.hls.delay {
 		return nil, waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("waxflow: segment duration %g s is %d samples, no longer than %s's %d-sample encoder priming; "+
@@ -296,9 +246,9 @@ func (e *Engine) PlanSegments(track container.Track, opts TranscodeOptions, segS
 		sp.Segments = (sp.TotalDecodeSamples + int64(segSamples) - 1) / int64(segSamples)
 	}
 
-	// Peak bandwidth: CBR encoders report exactly; VBR lossless is bounded
-	// by its PCM wire rate. Segmentation overhead is dominated by the
-	// 8-byte trun row per packet, padded a little for the fixed boxes.
+	// A plan with no bit rate (compressed lossless, unconstrained VBR) is
+	// bounded by its PCM wire rate. The overhead is the 8-byte trun row per
+	// packet plus a little for the fixed boxes.
 	base := plan.BitRate
 	if base == 0 {
 		base = plan.Format.Rate * plan.Format.Channels * max(plan.Format.BitDepth, 16)
@@ -308,15 +258,11 @@ func (e *Engine) PlanSegments(track container.Track, opts TranscodeOptions, segS
 }
 
 // PlanSegmentsTimeline plans the segmented form of a concatenated timeline
-// from its members' tracks alone (no decode, no open), exactly as
-// PlanSegments does for one track: it is the same plan, over the synthetic
-// track ConcatTrack computes, with the versions the synthetic track cannot
-// name prepended.
-//
-// opts and segSeconds mean what they mean for PlanSegments. copts must be the
-// options the matching Concat is built with, both fields of them: see
-// ConcatOptions, whose convention paragraph is what keeps this plan and that
-// run describing the same audio.
+// from its members' tracks alone (no open, no decode): PlanSegments over the
+// synthetic track ConcatTrack computes, with the versions that track cannot
+// name prepended. opts and segSeconds are as for PlanSegments. copts must be
+// the options the matching Concat is built with, every field, or the plan
+// and the run describe different audio (see ConcatOptions).
 func (e *Engine) PlanSegmentsTimeline(tracks []container.Track, copts ConcatOptions,
 	opts TranscodeOptions, segSeconds float64) (*SegmentPlan, error) {
 	env, err := ConcatTrack(tracks, copts)
@@ -334,15 +280,11 @@ func (e *Engine) PlanSegmentsTimeline(tracks []container.Track, copts ConcatOpti
 }
 
 // finishTimelinePlan is the tail both timeline plans share, so they refuse and
-// key alike: plan is the one PlanTranscode or PlanSegments made over the
-// synthetic track ConcatTrack built from tracks and copts, with env its format.
-//
-// It applies the plan-time half of the width rule, on the count the row
-// actually delivers rather than the one asked for. A run of this plan would
-// refuse, so the plan does, and here it can name the remedy while the caller
-// still has the tracks in hand. Then it prepends what the synthetic track
-// cannot name (timelineVersions). Both plans return a Versions slice of their
-// own, never the plan cache's shared one, so prepending is safe.
+// key alike: plan is PlanTranscode's or PlanSegments' over the synthetic track
+// ConcatTrack built from tracks and copts, env its format. It refuses what a
+// run would refuse under the width rule (ADR-0010), on the count the row
+// delivers, naming the remedy; then it prepends timelineVersions. Both plans
+// own their Versions slice, never the plan cache's, so prepending is safe.
 func finishTimelinePlan(tracks []container.Track, env audio.Format, copts ConcatOptions, plan *TranscodePlan) error {
 	if mixedWidthConversion(tracks, env, plan.Format.Channels) {
 		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
@@ -359,29 +301,12 @@ func finishTimelinePlan(tracks []container.Track, env audio.Format, copts Concat
 	return nil
 }
 
-// timelineVersions lists what a timeline's synthetic track cannot: every
-// member's demuxer and decoder revision, and the revisions of the nodes
-// each member's own normalization to the envelope runs through.
-//
-// Both are silent under-keying if left out, which ADR-0004 exists to
-// prevent. The synthetic track's codec is PCM, so the plan folds in pcm's
-// version and names no member's decoder, and a FLAC decoder fix would leave
-// every album's cached segments stale. The plan's chain runs envelope to
-// output, so it names none of the resampling a member does to reach the
-// envelope: a 44.1 kHz member of a 48 kHz timeline delivered to a 48 kHz
-// output resamples through a profile the key never mentions.
-//
-// A crossfade is the third, and it is not a node's revision at all: the blend
-// happens inside the timeline rather than in any chain, so nothing else in the
-// key can name it. Two timelines over identical members, one butt-joined and
-// one blended, are different audio out of the same code.
-//
-// The entries are prepended rather than replacing the synthetic pcm entry.
-// Replacing would mean knowing which entry the plan's decode version is,
-// which is fragile in exactly the way this is not; over-keying is safe, and
-// under-keying is the sin. Both lists are deduplicated (there are about
-// seven decoders, and a queue holds few distinct formats), so a
-// thousand-member timeline still keys on a handful of entries.
+// timelineVersions lists the cache-key terms a timeline's synthetic PCM track
+// cannot name (ADR-0009): the crossfade and width terms, every member's
+// demuxer and decoder revision, and the revisions of the chain each member
+// format normalizes to the envelope through. The caller prepends them to the
+// plan's own, and they are deduplicated, so a long timeline keys on a handful
+// of entries.
 func timelineVersions(tracks []container.Track, env audio.Format, copts ConcatOptions) ([]string, error) {
 	var out []string
 	seen := map[string]bool{}
@@ -391,18 +316,11 @@ func timelineVersions(tracks []container.Track, env audio.Format, copts ConcatOp
 			out = append(out, v)
 		}
 	}
-	// Only when nonzero, which is what keeps every timeline cache entry
-	// written before crossfades existed valid: every one of them was
-	// butt-joined, and a butt-join emits no entry now exactly as it emitted
-	// none then.
+	// Both terms only when nonzero, so a timeline that sets neither keys
+	// exactly as one without them.
 	if copts.Crossfade != 0 {
 		add(crossfadeVersion(copts.Crossfade))
 	}
-	// Same rule, same reason: emitted only when nonzero, so every entry
-	// written for a queue that never set a width stays valid, and an entry
-	// appears exactly where the audio changed. Engine.TimelineChannels answers
-	// 0 for a queue with no per-member conversion to do, so adopting it does
-	// not retire a uniform album's cache.
 	if copts.Channels != 0 {
 		add(timelineWidthVersion(copts.Channels))
 	}
@@ -416,13 +334,12 @@ func timelineVersions(tracks []container.Track, env audio.Format, copts ConcatOp
 			continue
 		}
 		normalized[t.Fmt] = true
-		// The same throwaway-chain trick buildPlanCore uses: build what the
-		// run will build, read its versions off, and release it, so the two
-		// cannot describe different processing.
+		// Build the chain the run will build and read its versions off, as
+		// buildPlanCore does, so the two cannot describe different processing.
 		chain, err := dsp.NewChain(dsp.NewSource(eofReader{}, t.Fmt), concatSpec(env, copts))
 		if err != nil {
-			// The first member of this format: the chain was handed a format,
-			// and which file it came from is what a caller can act on.
+			// The first member of this format; its index is what a caller
+			// can act on.
 			return nil, waxerr.Annotate(fmt.Sprintf("member %d", i), err)
 		}
 		for _, v := range chain.Versions() {
@@ -443,71 +360,31 @@ func crossfadeVersion(x int64) string { return fmt.Sprintf("xfade-%d-1", x) }
 // that width before the seam. No comma, so strings.Join stays unambiguous.
 func timelineWidthVersion(ch int) string { return fmt.Sprintf("tlwidth-%d-1", ch) }
 
-// primeStarts computes a run's two priming starts on the output timeline:
-// pChain is the first sample fed to the DSP chain, pEnc the first fed to the
-// encoder, both for a run whose first kept sample is p0.
-//
-// A run from the top of a media that has nothing ahead of its sample 0 primes
-// neither, and that falls out of the clamps rather than being tested for:
-// both windows reach back from p0, and at the top of such a stream there is
-// nothing behind p0 for them to reach into.
-//
-// The two windows are split because they settle different things at very
-// different costs. The encoder needs primeSeconds to settle its own
-// cross-frame state, and priming is discarded *after* the encoder, so every
-// primed sample costs a decode plus DSP plus an encode. A chain holding a
-// node whose state decays exponentially needs far longer (10 s for a voice
-// compressor against the encoder's 0.1 s), and feeding that through the
-// encoder would cost roughly 170 ms of CPU per worker restart instead of
-// ~2 ms. Feeding the long window to the chain alone and the short one to
-// the encoder keeps the expensive half at its old cost, which is what makes
-// the horizon affordable rather than an optimization held in reserve.
-//
-// Capping the long window is never an option: a short pre-roll is precisely
-// the bug the horizon exists to fix, and a restarted worker would resume
-// emitting segments that are not the ones a continuous run produces.
-//
-// Both starts round up to whole encoder frames and clamp at the stream top,
-// so the packet discard below stays exact.
-//
-// floor is the lowest position the media can deliver, which is 0 for a file
-// and negative for a span: see format.Headroomer. It bounds the chain's window
-// only, and the asymmetry is the point rather than an oversight. Feeding
-// the chain from before a span's sample 0 is what makes that sample hold
-// the audio a continuous run of the whole source delivers there, since the
-// resampler's window is then full of real samples instead of zeros. The
-// encoder needs no such thing: a span is served as its own stream, with its
-// own init segment, so its sample 0 genuinely is where its encoder starts,
-// exactly as a whole track's is. Priming the encoder from a negative
-// position would also number its first frame below zero, which is a thing
-// no encoder here can express.
+// primeStarts returns the priming starts on the output timeline of a run
+// whose first kept sample is p0: pChain, the first sample fed to the chain,
+// and pEnc, the first fed to the encoder. The encoder's window is
+// primeSeconds and stops at 0; the chain's adds horizon in front of it,
+// uncapped, and stops at floor (0 for a file, negative for a span, see
+// format.Headroomer). Given a p0 of whole frames, both are whole frames, so
+// the packet discard is exact; a run from the top of a file primes neither.
+// See ADR-0014.
 func primeStarts(p0 int64, rate, frame int, horizon time.Duration, floor int64) (pChain, pEnc int64) {
 	roundUp := func(n int64) int64 { return (n + int64(frame) - 1) / int64(frame) * int64(frame) }
 	encPrime := roundUp(int64(float64(rate) * primeSeconds))
-	// The chain's window sits in front of the encoder's, it does not replace
-	// it: the encoder's covers the finite-memory nodes (the resampler's FIR
-	// window) and the encoder's own cross-frame state, and the chain's
-	// horizon assumes those already converged. So they add. A chain that
-	// declares no horizon (no gain, no dynamics: every plain FLAC or
-	// untouched Opus stream) adds zero and primes exactly as it always did.
+	// The horizon assumes the encoder's window settled the finite-memory
+	// nodes, so the two add; no horizon primes the encoder's window alone.
 	chainPrime := encPrime + roundUp(int64(horizon.Seconds()*float64(rate)))
-	// The floor rounds toward zero to a whole frame, keeping every start a
-	// frame multiple so the packet discard stays exact.
+	// Toward zero to a whole frame, so every start stays a frame multiple.
 	floor = floor / int64(frame) * int64(frame)
 	return max(floor, p0-chainPrime), max(0, p0-encPrime)
 }
 
 // headroomFloor is the lowest output position the chain may be fed from: 0
-// for an ordinary media, negative for one that has real audio ahead of its
-// sample 0. See format.Headroomer.
-//
-// It converts the media's headroom from source samples to output samples,
-// keeping a small margin at the far end, because the caller maps the
-// position it picks back to the source with a floor and one further sample
-// of slop. Without the margin, a run priming to the very edge of the
-// headroom would ask the media for a sample just before its source's start
-// and fail the seek. Understating the headroom costs a sample of priming;
-// overstating it costs the request.
+// for an ordinary media, negative for one with real audio ahead of its
+// sample 0 (format.Headroomer). It holds back headroomMargin source samples,
+// since the caller maps its start back to the source with a floor and one
+// more sample: overstating the headroom fails the seek, understating it
+// costs a sample of priming.
 func headroomFloor(med format.Media, chain *dsp.Chain) int64 {
 	room := format.MediaHeadroom(med) - headroomMargin
 	if room <= 0 {
@@ -521,12 +398,9 @@ func headroomFloor(med format.Media, chain *dsp.Chain) int64 {
 // the floor-and-back-off the output-to-source map applies.
 const headroomMargin = 2
 
-// floorDiv is floor(a/b) for a positive b, over the whole range of a.
-//
-// Go's integer division truncates toward zero, which rounds a negative
-// position up, and up is the wrong way for a map that must land at or
-// before its target. A span priming ahead of its own sample 0 is the case
-// where a is negative.
+// floorDiv is floor(a/b) for a positive b and any a. Go's division
+// truncates toward zero, which takes a negative position (a span priming
+// ahead of its sample 0) past a target the map must land at or before.
 func floorDiv(a, b int64) int64 {
 	q, r := a/b, a%b
 	if r < 0 {
@@ -547,8 +421,8 @@ func totalDecodeSamples(samples, delay, frame int64) int64 {
 }
 
 // SegmentedFormats lists the output formats with a segmented (HLS) form,
-// in table order. Remux-only rows are omitted (their hls column serves the
-// segmented remux of their sources, not a requestable transcode).
+// in table order. Remux-only rows are omitted: their hls column serves only
+// the segmented remux of their sources.
 func SegmentedFormats() []string {
 	var names []string
 	for _, o := range outputs {
@@ -601,33 +475,26 @@ type SegmentedResult struct {
 	Samples int64
 	// Segments is the number of segments this run emitted.
 	Segments int64
-	// ClippedSamples counts samples the integer output could not carry; see
-	// TranscodeResult.ClippedSamples. It spans everything this run fed the
-	// chain, the discarded priming included, so a worker starting mid-stream
-	// counts pre-roll that belongs to the previous segment: sum the counts
-	// of a variant's workers and the overlap is counted twice.
+	// ClippedSamples counts samples the integer output could not carry (see
+	// TranscodeResult.ClippedSamples), over everything fed to the chain,
+	// priming included: summed over a variant's workers, overlaps count twice.
 	ClippedSamples int64
-	// TruePeak is the output's true-peak level, linear, 1.0 = full scale;
-	// see TranscodeResult.TruePeak. It spans the priming feed like the
-	// count, but workers' maxima combine by max without double counting.
+	// TruePeak is the output's true-peak level, linear, 1.0 = full scale
+	// (see TranscodeResult.TruePeak). It spans the priming too, which is
+	// harmless since workers' peaks combine by max.
 	TruePeak float64
 }
 
-// TranscodeSegments decodes src and emits numbered CMAF media segments:
-// the variant-worker back end of HLS delivery. A run starting mid-stream
-// (StartSegment > 0) seeks the source sample-exact and primes both sides:
-// the decode chain warms its resampler history and the encoder settles
-// its cross-frame state on ~100 ms of pre-target audio, whose packets are
-// discarded on an exact frame boundary, so the kept packets sit at the
-// same decode positions a continuous run would put them. Segments arrive
-// in order starting at StartSegment; ctx is checked between chunks.
+// TranscodeSegments decodes src and emits numbered CMAF media segments in
+// order from StartSegment: the variant-worker back end of HLS delivery. A
+// run from StartSegment > 0 seeks the source sample-exact and primes the
+// chain and the encoder (ADR-0014), discarding the priming packets on a
+// frame boundary, so the kept packets sit where a continuous run puts them.
+// ctx is checked between chunks.
 func (e *Engine) TranscodeSegments(ctx context.Context, src container.Source, hint string, opts TranscodeOptions,
 	segOpts SegmentedOptions, emit func(mp4.Segment) error) (*SegmentedResult, error) {
-	// Reject on the options alone before opening anything. TranscodeSegmentsMedia
-	// checks the same things, so the two entry points still fail identically;
-	// this only keeps a request that was never going to run from paying for a
-	// container open first, and keeps the error about the option that is wrong
-	// rather than about a source we had no reason to touch.
+	// Refused on the options before anything opens, with the same error
+	// TranscodeSegmentsMedia would give.
 	if _, err := segmentOutputRow(opts); err != nil {
 		return nil, err
 	}
@@ -699,9 +566,8 @@ func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, o
 			srcTrack = med.Info().Default()
 		}
 	}
-	// The same rule PlanSegments applied, off the same source format (a
-	// timeline's Media reports the envelope track ConcatTrack computes), so
-	// the run encodes the depth the plan and the init header promised.
+	// PlanSegments' rule off the same format (a timeline reports the envelope
+	// track), so the run encodes the depth the plan and init header promised.
 	opts = segmentBitDepth(opts, srcTrack.Fmt)
 
 	spec := specFor(opts)
@@ -737,29 +603,21 @@ func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, o
 	}
 	defer chain.Release()
 	f := chain.Format()
-	// The segmented path folds through the same adjust hook as a progressive
-	// transcode, so a fold nobody asked for has to be as visible here. It said
-	// nothing at all until this call, which made the claim that /stream and
-	// HLS behave alike true of the audio and false of the log.
+	// The same adjust hook as a progressive transcode, so the same log of a
+	// fold nobody asked for.
 	e.logImplicitDownmix(opts, srcTrack.Fmt, f)
 	e.logTimelineDownmix(opts, med, srcTrack.Fmt)
 
 	// Output-timeline positions: p0 is the first kept sample, pChain the
-	// first fed to the chain, pEnc the first fed to the encoder.
-	//
-	// A span primes its own segment 0, which a file cannot: headroomFloor is
-	// negative exactly when the media has real audio ahead of its sample 0,
-	// so the run has something to prime with even at the top of the stream,
-	// because for a span there genuinely is.
+	// first fed to the chain, pEnc the first fed to the encoder. A span's
+	// floor is negative, so it primes even its segment 0.
 	p0 := segOpts.StartSegment * int64(segOpts.SegmentSamples)
 	floor := headroomFloor(med, chain)
 	pChain, pEnc := primeStarts(p0, f.Rate, frame, chain.Horizon(), floor)
 
 	if pChain != 0 {
-		// Map the output position back to the source timeline. Rounding
-		// must land at or before pChain, so the conversion floors and then
-		// backs off one more source sample; the remainder is discarded from
-		// the chain's output below, positioned by the first chunk's Pos.
+		// To the source timeline, at or before pChain: floor, then one more
+		// sample back. The first chunk's Pos places the excess, dropped below.
 		srcPos := pChain
 		if l, m := chain.Ratio(); l != m {
 			srcPos = floorDiv(pChain*int64(m), int64(l)) - 1
@@ -790,9 +648,8 @@ func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, o
 		res.Segments++
 		return emit(s)
 	}
-	// Packets count off from pEnc, one per frame (the priming feed is
-	// frame-aligned, so the discard boundary is exact). The chain's own
-	// longer pre-roll never reaches the encoder, so it is not counted here.
+	// Packets count off from pEnc, one per frame; the chain's longer
+	// pre-roll never reaches the encoder.
 	discard := (p0 - pEnc) / int64(frame)
 	pkts := int64(0)
 	emitPkt := func(p codec.Packet) error {
@@ -816,11 +673,8 @@ func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, o
 	stage := audio.Get(f, frame)
 	defer audio.Put(stage)
 
-	// Output samples to drop before the encoder's first fed sample, set by
-	// the first chunk's Pos. It spans two things at once: the slop between
-	// where the seek landed and pChain, and the chain's own pre-roll from
-	// pChain to pEnc, which has done its work by passing through the chain
-	// and must not reach the encoder.
+	// Output samples dropped ahead of pEnc, set by the first chunk's Pos:
+	// the seek's slop before pChain and the chain's pre-roll up to pEnc.
 	skip := int64(-1)
 	for {
 		if err := ctx.Err(); err != nil {
@@ -863,9 +717,7 @@ func (e *Engine) TranscodeSegmentsMedia(ctx context.Context, med format.Media, o
 	if err := seg.End(emitSeg); err != nil {
 		return nil, err
 	}
-	// The encoder is the authority on what was produced, so the run's
-	// length counts from where the encoder started, not from the chain's
-	// earlier pre-roll start.
+	// The encoder is the authority on the length, so it counts from pEnc.
 	res.Samples = pEnc + trailer.Samples
 	res.ClippedSamples = chain.Clipped()
 	res.TruePeak = chain.TruePeak()

@@ -130,3 +130,63 @@ A uniform-width composite converts freely: that fold is every member's own.
   which is what makes that guarantee checkable rather than hoped for.
 - The crossfade bound is checked at the wider of the envelope's width and the
   widest member's, so a fold can never loosen a bound a caller already passed.
+
+## Amendment (2026-11-25): the width call, a fold before a blend, measurement
+
+This adds to the decision above what the engine's width call and a
+timeline's answer to `format.MixedWidth` hold to, what a fold inside a
+member's chain does to a crossfade, and the width a loudness measurement is
+taken at.
+
+### Resolving the width
+
+`Engine.TimelineChannels` is the width's counterpart of `CrossfadeSamples`:
+a number the caller cannot compute, because which width a delivery folds to
+is the output row's adjust hook's decision, the hook that also puts Opus at
+48 kHz. It plans the raw envelope, so a plan error is the real plan's
+refusal (alac over a 5.1 envelope) arriving one call early.
+
+This replaces the sentence above that it logs the fold it answers: it logs
+nothing, since it runs per variant on every HLS request, master fetches and
+segment workers included. The run announces a timeline that folded its
+members, unless the caller asked for a channel count.
+
+A Concat answers `MixedWidth` from its members' declared formats, against
+its own width after `Channels`, because the question gates a conversion
+that runs before the first member opens. A uniform stereo queue built at six
+channels answers yes: every member was placed, so a later fold is the 5.1
+matrix over placed stereo. It cannot see a member that is itself a
+mixed-width Concat, whose declared format is its inner envelope; nothing
+nests them, and a caller that does owns the answer for the inner one.
+
+### A fold before a blend
+
+With a fold inside a member's chain, the true-peak limiter runs before the
+crossfade blend, where a fold of the assembled timeline runs after it. A blend
+of correlated folded material can therefore peak up to 3 dB past the limiter's
+ceiling, which is what unfolded material already gets: float is left to the
+output quantizer, and integer samples clip at its rails.
+
+### Measurement follows the delivered width
+
+A loudness measurement for a two-pass gain is taken at the width the audio
+is delivered at, so the gain is computed on what the encode meters.
+`AnalyzeOptions.Channels` folds as the encode does. The fold runs
+outside the chain, with no limiter, gain or dither: the overshoot limiter
+the chain inserts for a downmix acts non-linearly and would flatten the
+true peak and move the loudness the measurement exists to report. The
+measurement stays at the source rate: a resample moves loudness by under
+0.01 LU, and the multi-dB error this guards against is the channel count.
+
+An album is measured with `AnalyzeGroup`, never by concatenating the
+members and measuring the timeline. A timeline is built at one width, so a
+concatenation would widen every member into one envelope and measure each
+through a fold that is not its own. Instead each member is decoded once and
+metered at its own delivered width (`GroupMember.Channels`, read off that
+member's own plan), and the group's gates run over the union of the
+members' blocks. The group's widest width is the wrong input: a mono member
+measured at a stereo width is duplicated onto both fronts and reads 3.01 dB
+hot, and the album gain then pushes that member down by as much. A group
+refuses a single `AnalyzeOptions.Channels` rather than override each
+member's width with it, since its members are delivered at different
+widths.

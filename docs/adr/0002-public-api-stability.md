@@ -1836,3 +1836,140 @@ cut's fMP4 is not" for the parenthesis. `PlanRemux` logs a copy its
 destination muxer refuses as "remux declined", with that refusal as
 `reason`, and a cut it rules out before the grid logs "the destination
 cannot write this track (...)".
+
+## Amendment (2026-11-25): how a length is projected and confirmed
+
+This extends the 2026-11-02 amendment, which made a span hold its source to
+a length and a measured length say how it was measured. It records why the
+root package projects, restates and confirms lengths the way it does.
+
+### A measured length is restated, not re-derived
+
+A freshly opened Media declares what its headers state, which for an
+advisory container can sit on either side of the audio it holds (a Matroska
+Info Duration is rounded to the millisecond), and `Slice` and a
+transcode's projection both re-derive from the Media they are handed. A
+plan validated against a measured total and a run bounded by the declared
+one are then two numbers where the caller needs one, and the gap refuses
+windows the file can serve or commits headers the run then misses.
+`MeasuredMedia` closes the gap: the caller's measurement becomes the Media's
+declaration, exact, with its `SamplesCounted`.
+
+"Already declares it" means the same number and the same claim. A Media
+stating the measured number as an estimate has not made the promise, so it
+is wrapped; returned unwrapped, every reader of `SamplesExact` would decide
+the opposite of what the measure says.
+
+### A span is a Media, not an option
+
+`Slice` is the one primitive behind a split job's cut points, an end trim
+(a span from 0), and a virtual track streamed over an offset range of one
+file. It is a wrapper rather than a `TranscodeOptions` field because every
+consumer of a length (the projected output length behind the muxer's
+declared length and the edit list, the progress total, the cache key's
+canonical strings, the segmented plan) reads it off the track, so a Media
+that is already the bounded stream needs a branch in none of them. It also
+composes: a sliced Media addresses from 0, so it hands the segmented path a
+start offset `PlanSegments` refuses to take as an option, and a queue from
+its third track is `Concat(members[2:])`.
+
+### A span past the end is refused, at the declared length
+
+A span is content identity: it says which samples are this track. A cut
+point past the end means the cut points describe some other file (a CUE
+sheet paired with the wrong rip, a chapter list from another edition), and
+a clamp would hand back a shorter track than the caller asked for, with
+nothing to notice it by.
+
+The bound is the declared length whatever `SamplesExact` says. A length that
+is not exact is not thereby approximate: an MP3's Xing count and an MP4
+sample table leave the flag false because nothing has checked them against
+the frames, and those are the sources a split is usually pointed at. Gating
+on the flag would trade a real refusal on the common case for a narrow one
+on third-party Matroska, whose advisory total can sit on either side of its
+audio. Matroska this library writes round-trips its Duration to the exact
+count, so a cut ending at its declared total is accepted.
+
+### What a span holds itself to
+
+A bounded span's length is the caller's arithmetic, so it is exact however
+the source stated its total, and the span is held to it. An open span
+inherits the source's length and the source's claim about it. It is held to
+that length against a shortfall when the claim is exact, and never clamped
+to it, since a clamp would truncate a source that is merely mis-declared. A
+source that reports damage on the way ends an open span where its read ends,
+because that shortfall is not silent.
+
+### A span confirms its length; it does not walk
+
+A span implements `format.LengthConfirmer` and not `format.Walker`. `Walker`
+is the per-file view a job gate reads as one file it can measure, which a
+span is not. `LengthConfirmer` answers what a run asks before it writes a
+length into headers it cannot patch: whether this Media can make its
+declared length good. A span can, by confirming its source and re-deriving
+its track through `SpanTrack`; a source that no longer covers the window is
+refused there, before a header commits.
+
+### A span is exact where its chain has nothing to prime
+
+A span cuts downstream of decode, so at any sample, never assuming a frame or
+packet boundary. The chain built on it starts fresh at its first sample, as
+after a seek. A cut through a chain with nothing to prime is exact: a split to
+FLAC at the source rate, with no gain, no dynamics preset and no downmix,
+builds no resampler and no limiter, so each piece's sample 0 is the source's
+sample `from`, bit for bit, and the pieces rejoin exactly. A resampled span
+would carry a short transient at sample 0, the resampler's window starting
+zero-filled. A span is a window onto a longer stream, so it has real audio
+ahead of it to prime with, which `Headroom` reports; the segmented run primes
+from it, so consecutive virtual tracks of one rip play gaplessly.
+
+### What an output's headers may promise
+
+A run writes a length into its output's headers before it has decoded
+anything. On a destination the muxer can patch, that projection is
+provisional: a miss is corrected at End and the bytes come out the same. On
+one it cannot, the headers are on the wire before the miss shows.
+`projectedLength`, which the transcode and remux rungs both ask, decides what
+a run may project:
+
+- An exact length projects as it is, and an unknown one commits to nothing.
+- An advisory total projects nothing, on any destination. It is a number
+  the decode is not expected to match (ASF's ticks, a Matroska Info
+  Duration, a WAV fact chunk over MP3 frames), so a muxer that sized its
+  headers from it would write a byte count the encoder then misses, and the
+  WAV muxer would fail the run at End on a writer it cannot seek. Walking
+  does not help, since an estimate is not a claim about content. Unknown is
+  the honest projection, and every muxer handles it.
+- A count a header declared and nothing has checked (a Xing frame count) is
+  a claim the frames can contradict. On a destination the muxer cannot
+  patch it is confirmed before it is projected, and a count the confirm
+  leaves unchecked stays unprojected; on one it can patch it projects
+  provisionally. A source with nothing to confirm it projects the number it
+  declared: dropping it would cost every streamed WAV of an MP4 or a FLAC
+  its exact sizes over a mismatch nothing could catch.
+- A declared length that is only a bound the decode is not yet held to (its
+  end trim unread, no delay to cap the decode) is confirmed for any
+  destination, patchable or not.
+
+The confirm is not free, so where it runs matters. A job's output file is
+seekable and pays nothing. A live pipeline's cache entry is an append-only
+ring with no Seek, so a cold stream of a source with a declared count and a
+deferred walk (a Xing-tagged MP3, a fragmented MP4 whose segment index
+states a length) builds the frame index before its first byte. The index
+sidecar makes repeats of the same source free. Where a header is only a
+hint, the cost is the hint: Matroska reserves a Duration only for a
+projected length or a writer it can seek, so a live mka of an
+advisory source carries none.
+
+A progress total keeps the headers' estimate, advisory or not: it only
+scales progress, and an unknown total would leave every advisory source
+with none.
+
+When an output on an unpatchable destination still misses its projection,
+the muxer's End raises an internal error. With a confirmed count the only
+cause left that is not a bug is damage the read tolerated (a page missing
+from an exact Ogg, a frame gap in a verified FLAC), so `missedProjection`
+reclassifies that one error as `malformed-input`, which a caller can act on.
+Every other End failure keeps its own code, since a write that did not land
+is not the file's fault, and on a patchable destination nothing was
+promised, so the muxer's error passes through.

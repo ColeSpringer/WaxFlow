@@ -22,46 +22,25 @@ import (
 	"github.com/colespringer/waxflow/waxerr"
 )
 
-// concatContainer names the synthetic container a Concat reports, the way
-// format.FromDemuxer labels an assembled one: there is no file here, so
-// Info.Container has to say what the media actually is.
+// concatContainer is the Info.Container a Concat reports: there is no file,
+// so it names what the media is.
 const concatContainer = "timeline"
 
 // ToEnd is Slice's open-ended upper bound: the span runs to the end of the
 // source.
 const ToEnd = -1
 
-// MeasuredMedia returns med reporting measured's length as its default
-// track's, authoritative, for a caller that measured the source and needs the
-// number it measured to be the number the run enforces. measured is the track
-// MeasureLength returned; its SamplesCounted comes with the length.
-//
-// Nothing else changes: Warnings and Notes stay live off the inner media, and
-// a media that already declares this length authoritatively is returned
-// untouched. A negative Samples means unknown and leaves the declaration alone.
-//
-// The flags are part of "already": a media declaring the same number as an
-// estimate has not made the promise, and returning it unwrapped would leave
-// every caller that reads SamplesExact deciding the opposite of what the
-// measure says. The number matching is not the question, the claim is.
-//
-// It exists because a freshly opened media declares what its headers state,
-// which for an advisory container can sit on either side of the audio it holds
-// (a Matroska Info Duration is millisecond-rounded), while Slice and a
-// transcode's projection both re-derive from the media they are handed. A plan
-// validated against a measured total and a run bounded by a declared one are
-// two numbers where the caller needs one, and the gap between them refuses
-// windows the file can serve or commits headers the run then misses.
-//
-// It forwards what format.Forwarder forwards and nothing else, so a
-// container.Indexer on the inner media is hidden here on purpose: the
-// sidecar save lives in the wrapper the engine put around it, whose own
-// Close still runs.
-//
-// A Media that confirms its own length (a span) is refused where its length
-// would be restated, with CodeInvalidRequest and med left open: the wrapper
-// would hide the confirming. One returned untouched is never refused, and a
-// Concat confirms nothing, so it is restated like a file and still answers
+// MeasuredMedia returns med declaring measured's length (the track
+// MeasureLength returned) as its default track's, exact and with measured's
+// SamplesCounted, so a run is held to the length the caller measured rather
+// than the one the headers state (ADR-0002). It returns med itself when
+// measured.Samples is negative, or when med already declares that length
+// exactly with the same SamplesCounted; the same number declared as an
+// estimate is not that. Warnings and Notes stay med's, live, and only what
+// format.Forwarder forwards is forwarded. A Media that confirms its own
+// length (format.LengthConfirmer) and is not returned itself is refused with
+// CodeInvalidRequest and left open, since the wrapper would hide the
+// confirming. A Concat confirms nothing, so it is restated and still answers
 // Members (format.Composite).
 func MeasuredMedia(med format.Media, measured container.Track) (format.Media, error) {
 	info := med.Info()
@@ -85,8 +64,7 @@ func MeasuredMedia(med format.Media, measured container.Track) (format.Media, er
 		}
 	}
 	patched.Tracks[idx].Samples = samples
-	// Honest rather than optimistic: the caller measured, and a measurement
-	// is authoritative, so the rounded claim it replaced goes with it.
+	// A measurement is exact, so the advisory claim it replaces goes.
 	patched.Tracks[idx].SamplesExact = true
 	patched.Tracks[idx].SamplesAdvisory = false
 	patched.Tracks[idx].SamplesCounted = measured.SamplesCounted
@@ -104,76 +82,31 @@ type measuredComposite struct {
 	format.Composite
 }
 
-// measuredMedia is a Media whose declared info is replaced; MeasuredMedia is
-// its only constructor and carries the rationale.
+// measuredMedia is a Media with its declared info replaced (MeasuredMedia).
 type measuredMedia struct {
 	format.Forwarder
 	info *format.Info
 }
 
 // Info returns the patched description, its live fields refreshed from the
-// inner media on every call (see format.Media): the copy holds the measured
-// total, not a verdict.
+// inner media on every call (see format.Media).
 func (m measuredMedia) Info() *format.Info {
 	m.info.AdoptLive(m.Media.Info())
 	return m.info
 }
 
-// Slice bounds med to the sample range [from, to) of its own timeline, as
-// a Media whose sample 0 is med's sample from and whose length is to-from.
-// to is exclusive; ToEnd means to the end. The returned Media owns med and
-// closes it. A span whose source ends short of a length the source stands
-// behind fails the read instead of ending early; a ToEnd span is held to it
-// too, unless the source reported damage on the way, and then it ends where
-// the read does. The failure is CodeMalformedInput for a length the file
-// stated and CodeInternal for one MeasureLength counted by decoding the same
-// source (container.Track.SamplesCounted).
-//
-// It is the primitive behind three things that looked like three features:
-// a split job's cut points, an end trim (a span with a from of 0), and a
-// virtual track streamed over an offset range of one file. All three are
-// "bound this stream to a sample range", so they land once.
-//
-// A wrapper rather than a TranscodeOptions field, deliberately. An end
-// bound as an option would need about six branches in the most
-// invariant-dense function in the library, permanently: a clamp in the
-// length math, a refusal in the segmented plan, the right interaction with
-// the projected output length that feeds both the muxer's declared length
-// and the edit list (get that wrong and every M4B lies about its
-// duration), the progress total, and both canonical cache-key strings. A
-// Media that is already the bounded stream needs none of them, because
-// every one of those reads the length off the track and the track is
-// already right.
-//
-// It composes, which is the clinching part. A sliced Media is the shifted
-// stream, addressing from 0, so it hands the segmented path a start offset
-// that PlanSegments refuses to take as an option ("segments address time");
-// and "start the album at track 3" is Concat(members[2:]) with no new
-// option at all.
-//
-// # Exactness is conditional, and the condition is worth stating
-//
-// A slice hands the chain a stream starting at sample from, and the chain
-// starts fresh there, so any stateful node primes from nothing exactly as
-// it does after a seek.
-//
-//   - A cut with no rate change is exact, and that is the case that
-//     matters. A CUE split to FLAC at the source rate builds a chain with
-//     no resampler and no limiter, so there is no state to prime and each
-//     piece's sample 0 is the source's sample from, bit for bit.
-//     TestSliceSplitRoundTrip proves precisely that: a transient would make
-//     a bit-exact rejoin fail.
-//   - A resampled span would carry a short transient at sample 0, because
-//     the resampler's FIR window starts zero-filled, and that is what
-//     Headroom exists to remove: a span is a window onto a longer stream, so
-//     unlike a file it genuinely has audio before its own sample 0 to prime
-//     with. The segmented run uses it, so a virtual track's first sample is
-//     the same audio a continuous run of the whole source delivers there.
-//     That is what lets consecutive virtual tracks of one rip play gaplessly.
-//
-// Cut points are not assumed frame- or packet-aligned. Slice sits
-// downstream of decode, so it cuts at any sample, which is the whole reason
-// it is sample-exact where a packet-level cut would not be.
+// Slice bounds med to the sample range [from, to) of its own timeline, as a
+// Media whose sample 0 is med's sample from; ToEnd means to the end. The
+// returned Media owns med and closes it. A nil med, and a range SpanTrack
+// refuses, are CodeInvalidRequest. A span whose source ends short is held to
+// its length: a bounded span to to-from, a ToEnd span to an exact length the
+// source declared (unless the source reported damage on the way). The read
+// then fails with CodeInvalidRequest when the source's total was unknown or
+// advisory, CodeInternal for a length MeasureLength counted by decoding
+// (container.Track.SamplesCounted), and CodeMalformedInput otherwise. A span
+// through a chain with nothing to prime is bit-exact; a resampled one carries
+// a short transient at its sample 0, except in a segmented run, which primes
+// from the audio ahead of from (Headroom, ADR-0002).
 func Slice(med format.Media, from, to int64) (format.Media, error) {
 	s, err := newSlice(context.Background(), med, from, to)
 	if err != nil {
@@ -195,12 +128,9 @@ func newSlice(ctx context.Context, med format.Media, from, to int64) (*slice, er
 	}
 	s := &slice{med: med, ctx: ctx, from: from, limit: ToEnd, fmt: track.Fmt,
 		blind: track.Samples < 0 || track.SamplesAdvisory, damage: damageIn(med)}
-	// limit is the clamp; the track's Samples is what it advertises. They
-	// differ on purpose for the open-ended form: an explicit end is a
-	// declaration this holds the source to, while a slice that just trims
-	// the front inherits the source's own length and honesty about it. That
-	// length is held against a shortfall (see endOfSource) but never
-	// clamped, which would truncate a source that is merely mis-declared.
+	// limit is the clamp; the track's Samples is what the span advertises. An
+	// open span inherits the source's length, held against a shortfall
+	// (endOfSource) but never clamped, which would truncate a mis-declared one.
 	if to >= 0 {
 		s.limit = to - from
 	}
@@ -215,26 +145,14 @@ func newSlice(ctx context.Context, med format.Media, from, to int64) (*slice, er
 	return s, nil
 }
 
-// spanChapters rebases a source's chapters onto the window [from, from+limit)
-// of its own timeline: shifted so the window's start is zero, clipped to the
-// window, and with everything outside it dropped. limit is ToEnd for an
-// unbounded window. A chapter straddling an edge survives with its title and
-// the part of its range that is inside.
-//
-// A zero End is the start-only chapter form (see container.Chapter): the
-// chapter runs until the next one, or to the end of the stream. It stays zero
-// on the way out, which is exact rather than a punt, because both things a
-// consumer resolves it against are already this Media's own: the next chapter
-// is in this list, rebased, and the stream ends where the window does.
-// Writing an end here instead would declare one the source never did.
-//
-// The unbounded window clips nothing at the far end, for the reason Slice's
-// limit exists: an open span holds the source to no length of its own, so a
-// chapter running past the source's advisory end is the source's own business,
-// exactly as the audio past it is.
-//
-// A rate of zero cannot place a chapter on a sample window at all, and there
-// is then no answer to give rather than a wrong one to give (see slice).
+// spanChapters rebases chapters onto the window [from, from+limit): shifted
+// so the window starts at zero, clipped to it, and dropped outside it. limit
+// is ToEnd for an unbounded window, which clips nothing at the far end. A
+// chapter straddling an edge keeps its title and the part inside. A zero End
+// (the start-only form, see container.Chapter) stays zero: the next chapter
+// is in the rebased list and the stream ends where the window does, so an
+// end written here would be one the source never declared. A rate of zero
+// places nothing, and the answer is nil.
 func spanChapters(chapters []container.Chapter, from, limit int64, rate int) []container.Chapter {
 	if len(chapters) == 0 || rate <= 0 {
 		return nil
@@ -246,12 +164,11 @@ func spanChapters(chapters []container.Chapter, from, limit int64, rate int) []c
 	}
 	var out []container.Chapter
 	for i, ch := range chapters {
-		// Begins at or after the window's end, or is over before its start:
-		// outside either way. The far test is skipped for an unbounded
-		// window, which has no far end to be past. A start-only chapter that
-		// begins exactly where the window does is inside it even when the
-		// next chapter shares its instant, so a span from the top of a file
-		// lists what a probe of the file lists.
+		// Outside if it begins at or after the window's end, or is over
+		// before its start. A start-only chapter beginning exactly at the
+		// window's start is inside even when the next chapter shares its
+		// instant, so a span from the top of a file lists what a probe of the
+		// file lists.
 		if end >= 0 && ch.Start >= end {
 			continue
 		}
@@ -270,16 +187,11 @@ func spanChapters(chapters []container.Chapter, from, limit int64, rate int) []c
 	return out
 }
 
-// chapterEnd is where chapter i really ends, for deciding whether it reaches
-// a window at all: its own End, or the next chapter's start for the
-// start-only form (a zero End). -1 means it runs to the end of the stream,
-// which no window can begin after: that is the last chapter of a start-only
-// list, and it always reaches.
-//
-// It resolves what spanChapters deliberately does not write down. Where a
-// start-only chapter ends decides whether it is in the window, so the test
-// needs the answer; the rebased list does not, and inventing an End there
-// would put a boundary in the output the source never declared.
+// chapterEnd is where chapter i ends, for deciding whether it reaches a
+// window: its own End, or the next chapter's start for the start-only form.
+// -1 means it runs to the end of the stream (the last start-only chapter),
+// which every window reaches. spanChapters filters on this but never writes
+// it.
 func chapterEnd(chapters []container.Chapter, i int) time.Duration {
 	if e := chapters[i].End; e > 0 {
 		return e
@@ -290,34 +202,23 @@ func chapterEnd(chapters []container.Chapter, i int) time.Duration {
 	return -1
 }
 
-// SampleTime is sample n's position on a stream's clock at rate. It is the
-// shared overflow-safe sample-to-duration converter: Slice's chapter retiming
-// here and a merge's chapter offsets (internal/jobs) both place samples on a
-// clock, and both must round the same way.
-//
-// The division is split so the whole-second part stays exact at any stream
-// length: the direct n*time.Second/rate overflows an int64 past about 53
-// hours at 48 kHz, and a long file is exactly the kind that carries chapters.
-// What is left rounds toward zero, below the nanosecond the Duration itself
-// resolves.
+// SampleTime is sample n's position on a stream's clock at rate, rounded
+// toward zero. A span's chapter retiming and a merge's chapter offsets
+// (internal/jobs) both use it, so both round alike. It splits off the whole
+// seconds, so it does not overflow on a long file, as n*time.Second does.
 func SampleTime(n int64, rate int) time.Duration {
 	sec, rem := n/int64(rate), n%int64(rate)
 	return time.Duration(sec)*time.Second + time.Duration(rem)*time.Second/time.Duration(rate)
 }
 
-// SpanTrack computes the track a Slice of track to [from, to) presents: the
-// same format, the window's length, and no gapless trims. It is a pure
-// function of the header, so planning a span and running it cannot disagree
-// about what gets delivered.
-//
-// It is the single funnel, the discipline ConcatTrack applies to a
-// timeline: Slice resolves its track through this at open, and a caller
-// planning a span resolves through it too, from the probed track alone and
-// without opening anything. Without that, a plan's length and the slice's
-// actual delivery drift, and the drift is invisible until a cache entry
-// holds segments for a track that is not the one being served.
-//
-// to is exclusive; ToEnd means to the end of track.
+// SpanTrack is the track a Slice of track to [from, to) presents: the same
+// format and codec, the window's length, and no trims. It is a pure function
+// of the header, and Slice resolves its track through it, so a plan made
+// from a probed track and the run cannot disagree. to is exclusive; ToEnd
+// means to the end of track. A negative from, a to below ToEnd, a to before
+// from, and a from or to past a known track.Samples, exact or not, are
+// CodeInvalidRequest (ADR-0002). A bounded span's length is exact; a ToEnd
+// span keeps the source's length less from, and its claim about it.
 func SpanTrack(track container.Track, from, to int64) (container.Track, error) {
 	switch {
 	case from < 0:
@@ -332,26 +233,9 @@ func SpanTrack(track container.Track, from, to int64) (container.Track, error) {
 	}
 	total := track.Samples
 
-	// A span past the end is refused rather than clamped, and that is the
-	// same call ConcatTrack makes about a member's declared length. A span
-	// is content identity: it says which samples are this track. So a cut
-	// point past the end means the caller's cut points do not describe this
-	// file (a CUE sheet paired with the wrong rip, a chapter list from a
-	// different edition), and silently clamping would hand back a track
-	// shorter than the caller believes it asked for, with no way to notice.
-	// That is precisely the desync a prefix sum cannot survive.
-	//
-	// The bound is the declared length whatever SamplesExact says, which
-	// looks like the wrong predicate and is not. A length that is not exact is
-	// not thereby approximate: an MP3's Xing count and an mp4's sample table
-	// leave the flag false because nothing has checked them against the
-	// frames, not because they are estimates, and those are exactly the
-	// sources a split is usually pointed at. Gating here would trade a real
-	// refusal on the common case for a narrow one on Matroska, whose advisory
-	// total a third-party muxer can put on either side of the audio it has.
-	// Matroska this library wrote is not in that group: its Duration
-	// round-trips to the exact sample count, so a cut ending at the declared
-	// total is accepted, not refused by a hair.
+	// Past the end is refused, not clamped: a span is content identity, so cut
+	// points past the end describe some other file. The bound is the declared
+	// length whatever SamplesExact says (ADR-0002).
 	if total >= 0 {
 		if from > total {
 			return container.Track{}, waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
@@ -366,77 +250,30 @@ func SpanTrack(track container.Track, from, to int64) (container.Track, error) {
 	out := track
 	switch {
 	case to >= 0:
-		// A bounded span's length is the caller's own arithmetic, so it is
-		// exact however the source stated its total; an open-ended one
-		// inherits whatever the source's claim was worth.
 		out.Samples, out.SamplesExact, out.SamplesAdvisory = to-from, true, false
 	case total >= 0:
 		out.Samples = total - from
 	}
-	// Zero, and load-bearing rather than incidental, exactly as a Concat's
-	// envelope is: a Media delivers gapless-trimmed PCM, so both trims
-	// happened inside it before a slice sees a sample. Passing the
-	// container's declaration through would make a downstream consumer trim
-	// a second time, against a stream that has no delay left to cut.
-	//
-	// MidPadding and MidTrims go with them, for a reason one step further
-	// along: they describe the source's *packets*, and a span of a decoded
-	// view has none.
+	// The Media delivered trimmed PCM, so a trim passed through would be cut
+	// twice; the mid-run trims describe packets, and a decoded view has none.
 	out.Delay, out.Padding, out.MidPadding, out.MidTrims = 0, 0, 0, nil
 	out.TrimsUnread = false
-	// The source's own codec is kept, unlike a Concat's synthetic PCM
-	// envelope, and that is not cosmetic: the codec is what names the
-	// decoder revision in a plan's Versions, so a span of a FLAC keys on the
-	// FLAC decoder and a decoder fix invalidates its cached bytes. A Concat
-	// cannot do that (N members, N codecs), which is why it has to repair
-	// the hole afterward; a span has exactly one source and keeps the truth.
+	// The source's codec is kept: it names the decoder revision in a plan's
+	// Versions.
 	return out, nil
 }
 
 // slice is Slice's Media: one source, positioned at the window's start and
-// cut off at its end.
-//
-// What it says about the source follows one rule: rebase onto the window's
-// own timeline where a right answer exists there, and answer nothing where
-// none does.
-//
-// Chapters have one, so they are rebased (spanChapters). A chapter is a
-// range on the very timeline the window cuts, so the part of the list lying
-// inside the window is a fact about the window rather than a guess at it.
-// Forwarding the source's list verbatim is the wrong answer and not a
-// cautious one: it says a span holds chapters it does not, at times it does
-// not hold them, and a consumer that writes them into the output (a split
-// job stamping a piece with its source's metadata) has no way to notice.
-//
-// format.Composite has no right answer, so it is deliberately not forwarded.
-// A slice of a timeline is not a timeline of the same members (its window
-// covers some part of some of them) and no member list describes the window,
-// so answering with the inner Media's would be a plain lie to a consumer
-// keying a cache on it. Nothing slices a Concat today; the point is that if
-// something does, it gets no answer rather than a wrong one.
-//
-// format.MixedWidth is forwarded, for the same rule read the other way: it
-// asks whether these samples were conformed to one width from several, which
-// is true of any window onto a timeline where it is true of the whole. The
-// conversion it gates must be refused over a piece exactly as over the whole.
-//
-// A concatenated timeline's Warnings and Notes are the members' own, each
-// line prefixed with the member's index, gathered as the members are read:
-// they open lazily, one at a time, so the whole verdict exists only once the
-// timeline has been read to its end. A slice of a single file forwards its
-// media's, live.
-//
-// container.Indexer needs no forwarding either, for a different reason: the
-// engine wraps index restore and save around the Media inside OpenStream,
-// under this, and the save fires on Close, which this delegates. The
-// sidecar keeps working through a slice without this knowing about it.
-//
-// format.Walker is deliberately not forwarded, and format.LengthConfirmer is
-// implemented instead. They answer different questions and a slice's answers
-// differ: Walker is the per-file view a job gate reads as "one file I can
-// measure", which a span is not, while the run that is about to write a length
-// into headers it cannot patch wants to know that this Media can make its own
-// declared length good, which a span can (see ConfirmLength).
+// cut off at its end. What has a right answer on the window is rebased onto
+// it, and what has none is not answered. Chapters are rebased
+// (spanChapters). format.Composite is not forwarded, since no member list
+// describes a window. format.MixedWidth is, since a window onto mixed-width
+// samples is mixed-width (ADR-0010). Warnings and Notes are med's, live.
+// container.Indexer needs no forwarding: the engine's sidecar save wraps the
+// Media under this one and fires on Close, which this delegates. It
+// implements format.LengthConfirmer and not format.Walker: a span is not one
+// measurable file, but it can make its declared length good before a header
+// commits to it (ADR-0002).
 type slice struct {
 	med  format.Media
 	info *format.Info
@@ -446,14 +283,14 @@ type slice struct {
 	ctx context.Context
 	// from is the window's first sample on med's timeline.
 	from int64
-	// limit is the window's length, ToEnd for an unbounded one. See Slice.
+	// limit is the window's length, ToEnd for an unbounded one.
 	limit int64
 	// blind marks a span whose cut points were checked against no length the
 	// source stood behind: its total was unknown or advisory. See endOfSource.
 	blind bool
 
-	// damage is how many Damage warnings med had when the span was made, so
-	// a shortfall that comes with more is known to be reported.
+	// damage is med's Damage count (format.Info.Damage) when the span was
+	// made, so a shortfall that comes with more is known to be reported.
 	damage int
 
 	// lost is the fill the window's reads delivered (format.Info.Lost) over
@@ -470,12 +307,10 @@ type slice struct {
 	closed  bool
 }
 
-// Info returns the span's description. Warnings and Notes are live on the
-// inner media (see format.Media) and are refreshed from it on every call;
-// Tracks and Chapters were rebased onto the window once and stay. Lost is
-// the window's own: the fill its reads delivered, not the source's. Truncated
-// is the source's for a window that reaches its end, which is where a file
-// cut short lost its audio, and 0 for one that stops short of it.
+// Info returns the span's description: Warnings and Notes refreshed live from
+// med, Tracks and Chapters rebased once. Lost is the fill the window's own
+// reads delivered. Truncated is the source's for a window that reaches its
+// end, and 0 for one that stops short of it.
 func (s *slice) Info() *format.Info {
 	in := s.med.Info()
 	s.info.AdoptLive(in)
@@ -484,15 +319,15 @@ func (s *slice) Info() *format.Info {
 		s.info.Lost += in.Lost - s.base
 	}
 	if !s.reachesEnd(in) {
-		s.info.Truncated = 0 // a window that stops short of the end holds all it asked for
+		// A window that stops short of the end holds all it asked for.
+		s.info.Truncated = 0
 	}
 	return s.info
 }
 
 // reachesEnd reports whether the window runs to the end of its source, whose
-// Info is in: an open one does, and so does one bounded at or past the length
-// the source reports, which is the same window spelled with a number. A cut
-// draws the same line (cutResult.toEnd).
+// Info is in: an open one does, and so does one bounded at or past the
+// source's reported length. A cut draws the same line (cutResult.toEnd).
 func (s *slice) reachesEnd(in *format.Info) bool {
 	if s.limit < 0 {
 		return true
@@ -512,25 +347,15 @@ func (s *slice) leave() {
 	}
 }
 
-// ConfirmLength implements format.LengthConfirmer: run whatever the inner
-// media defers, then re-derive this span's own track from what it found.
-//
-// The re-derivation is SpanTrack again, on the confirmed source, which is what
-// keeps this one rule rather than two. A bounded span comes back with the same
-// arithmetic it had; an open-ended one adopts the confirmed total less the
-// window's start, which is the number it was declaring on the source's word
-// before. A confirmed source that no longer covers the window is refused here,
-// before a header commits to it, with the same code the read-time overrun
-// gives: the file holds less audio than its headers declared.
-//
-// It clears blind, because after this the span's cut points have been checked
-// against a length the payload stands behind, which is exactly what blind
-// means the absence of (see endOfSource).
+// ConfirmLength implements format.LengthConfirmer: it runs what med defers
+// (med's own ConfirmLength, or a walk) and re-derives the span's track
+// through SpanTrack. A bounded span keeps its length; an open one adopts the
+// confirmed total less from. A confirmed source that no longer covers the
+// window is CodeMalformedInput, before a header commits to it. blind is
+// re-derived from the confirmed track.
 func (s *slice) ConfirmLength(ctx context.Context) error {
 	declared := s.med.Info().Default().Samples
-	// An inner span confirms itself the same way, for Headroom's reason:
-	// nothing nests spans today, and the right answer for one is the same
-	// answer one level down rather than a guess.
+	// A nested span confirms itself the same way, one level down.
 	if inner, ok := s.med.(format.LengthConfirmer); ok {
 		if err := inner.ConfirmLength(ctx); err != nil {
 			return err
@@ -556,32 +381,20 @@ func (s *slice) ConfirmLength(ctx context.Context) error {
 			confirmed.Samples, declared, s.from, end), err)
 	}
 	s.info.Tracks = []container.Track{spanned}
-	// Derived the way Slice derives it, not set to false: the confirmation may
-	// have found a source that still stands behind no length at all.
+	// Derived, not cleared: the confirmed source may stand behind no length.
 	s.blind = confirmed.Samples < 0 || confirmed.SamplesAdvisory
 	return nil
 }
 
-// Headroom is the audio ahead of the window: the samples between the inner
-// media's start and this span's, plus whatever the inner media can itself
-// reach back to.
-//
-// The second term is what makes a span of a span report the truth. Nothing
-// nests them today, and the sum is still the right answer rather than
-// speculation: headroom means "how far back can I be positioned", and for
-// an inner span that is its own window's start plus its own headroom, all
-// of which SeekSample below can actually deliver. Reporting only from
-// would under-report it, which does not fail loudly. It quietly primes a
-// chain with less than it asked for.
+// Headroom is the audio ahead of the window: from, plus what med can itself
+// reach back to, all of which SeekSample delivers. Reporting from alone would
+// under-report a nested span and quietly prime a chain short.
 func (s *slice) Headroom() int64 {
 	return s.from + format.MediaHeadroom(s.med)
 }
 
-// MixedWidth forwards the source's answer (format.MixedWidth). This one is
-// forwarded where Composite is not, and the difference is that it has a right
-// answer: a window onto a mixed-width timeline is still mixed-width samples,
-// whatever part of whichever members it covers, so the conversion that must be
-// refused over the whole is the same conversion over any piece of it.
+// MixedWidth forwards med's answer (format.MixedWidth): a conversion refused
+// over a mixed-width whole is refused over any window onto it.
 func (s *slice) MixedWidth() bool { return format.MediaMixedWidth(s.med) }
 
 func (s *slice) Close() error {
@@ -592,30 +405,11 @@ func (s *slice) Close() error {
 	return s.med.Close()
 }
 
-// ensureStart positions med at the window's start, lazily, under ctx.
-//
-// Lazily, and only when from is nonzero, so that a pure end trim (a span
-// starting at 0) neither seeks nor requires a seekable source. The
-// unbounded, unshifted slice is then free. A read carries no context, so a
-// first read positions under the one the span was built with (s.ctx).
-//
-// A failed seek leaves the span unstarted, so the next read attempts it
-// again, and that is the opposite of the call concat makes about its own
-// failed seek. The two are not inconsistent: the difference is whether
-// re-attempting is even defined. concat's seek walks toward a target the
-// caller chose, moving the state its position is relative to on the way
-// (which member is open, its chain, where that member's media sits), so a
-// failure part way leaves pos describing somewhere the stream no longer is
-// and nothing coherent to retry; it has to latch. This has one target for
-// the life of the Media, from, and reaches it in one step. A failure writes
-// nothing, so the state after it is the state before it, and the next read
-// re-attempts the identical seek from the identical place: a sticky error
-// would refuse what a retry can still get right, and would need a field to
-// say what started already says.
-//
-// What both answers share is the only part that is not a choice: a position
-// that never succeeded never becomes one a read can deliver samples against.
-// started latches after the seek here, exactly as it does in SeekSample.
+// ensureStart positions med at the window's start under ctx, once. A span
+// from 0 never seeks, so a pure end trim needs no seekable source. A failed
+// seek leaves the span unstarted and the next read retries it: the seek has
+// one target and a failure writes nothing. A concat latches instead, since
+// its seek moves the state its position depends on (ADR-0009).
 func (s *slice) ensureStart(ctx context.Context) error {
 	if s.started {
 		return nil
@@ -629,40 +423,23 @@ func (s *slice) ensureStart(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// A landing past the ask is what container.Seeker permits when the
-	// stream's first sync point lies beyond the target, and it means the
-	// span really does start late. Report where the stream is rather than
-	// pretending, exactly as a Concat's member seek does; for every
-	// seekable source in the tree the Media pre-rolls and this is 0.
-	//
-	// The floor is not the same floor SeekSample deliberately does without,
-	// and the difference is which question was asked. A negative target
-	// there is a caller reaching into the headroom on purpose, so a
-	// negative answer is the truth. Here the target is the window's own
-	// start, and a format.Media seek cannot land below its target except by
-	// running out of stream: it lands on a sync point at or before the ask
-	// and then decodes forward to the ask exactly, so a short answer means
-	// the source ended early, not that this is somehow positioned in its own
-	// headroom. Zero is then the honest position, and it is what lets
-	// endOfSource say the source ended n samples into a span of m rather
-	// than report a negative count.
+	// container.Seeker lets a seek land past the ask at a late first sync
+	// point, and then the span starts late and says so. A landing short of
+	// from means the source ended first (a seek lands at or before its target
+	// and decodes forward to it), so 0 is the honest position, from which
+	// endOfSource counts. SeekSample does not floor: its negative targets are
+	// headroom.
 	s.pos = max(landed-s.from, 0)
 	s.started = true
 	s.enter()
 	return nil
 }
 
-// ReadChunk fills dst from the window.
-//
-// The front of the window is handled by the seek in ensureStart rather than
-// by shifting a buffer, which is what lets the inner Media fill dst
-// directly: an audio.Buffer is planar with a stride and has no sub-buffer
-// view, so a shifted fill would need a copy. The read that reaches an edge
-// of the window, its end or its sample 0 from the headroom, is the one that
-// pays that copy (see read): the inner read stops at the edge, so the inner
-// media never delivers past the end, and what it counts as Lost can be told
-// apart on either side of sample 0. A chunk that crosses sample 0 is still
-// one full chunk, read in two parts.
+// ReadChunk fills dst from the window. med fills dst directly, except on the
+// read that reaches an edge of the window (its end, or its sample 0 from the
+// headroom), which goes through a right-sized buffer (read) so med never
+// delivers past the edge and its Lost is split at sample 0. A chunk that
+// crosses sample 0 is still one full chunk, read in two parts.
 func (s *slice) ReadChunk(dst *audio.Buffer) error {
 	switch {
 	case s.closed:
@@ -707,11 +484,8 @@ func (s *slice) ReadChunk(dst *audio.Buffer) error {
 			rest = min(rest, s.limit)
 		}
 		if rest > 0 {
-			// The source ending here is the next read's to find: the
-			// headroom frames are delivered. Any other failure fails this
-			// read, as it would have failed the one read this chunk used to
-			// be, and the span stands where the inner media does, at its
-			// sample 0.
+			// The source ending here is the next read's to find. Any other
+			// failure fails this read, with the span at sample 0.
 			if err := s.read(dst, int(rest)); err != nil && err != io.EOF {
 				s.pos = 0
 				return err
@@ -742,18 +516,14 @@ func (s *slice) read(dst *audio.Buffer, room int) error {
 	return nil
 }
 
-// endOfSource answers the source running out. A span is held to an exact
-// length it declared: a bounded span's to-from, or an open span's inherited
-// total when the source stood behind it (exact or measured), and only against
-// a shortfall, so a plan's segment count is never left a tail it cannot fill.
-// It sees a short delivery, not a late landing: ensureStart positions an
-// honest late landing, and one late but reported exact is caught only because
-// the delivery then runs short. An open span whose source reported damage on
-// the way ends there, as a plain read does: that shortfall is not silent. The
-// code names whose length was wrong: cut points no stated total checked are an
-// invalid request, a length MeasureLength counted by decoding this source is
-// internal (container.Track.SamplesCounted), and any other claim is the
-// file's, malformed input.
+// endOfSource answers med running out. A span is held, against a shortfall
+// only, to an exact length it declared: a bounded span's to-from, or an open
+// span's inherited exact total, so a plan's segment count never meets a tail
+// it cannot fill. An open span whose source reported damage on the way ends
+// there instead. It sees a short delivery, not a late landing (ensureStart).
+// The code names whose length was wrong: unchecked cut points (blind) are an
+// invalid request, a length MeasureLength counted by decoding is internal,
+// and any other is the file's, malformed input.
 func (s *slice) endOfSource() error {
 	declared := s.limit
 	if t := s.info.Tracks[0]; declared < 0 && t.SamplesExact && t.Samples >= 0 {
@@ -782,17 +552,14 @@ func shortSource(where string, blind bool) error {
 // damageIn counts the damage med has reported (format.Info.Damage).
 func damageIn(med format.Media) int { return med.Info().Damage }
 
-// SeekSample repositions to target on the window's own timeline.
-//
-// A negative target is legal here, and only here, down to -Headroom(): it
-// addresses the real audio ahead of the window, which is what a consumer
-// priming a chain for the span's sample 0 asks for. Everything below the
-// window is still the source's own audio, so the seek is an ordinary one
-// once rebased. See format.Headroomer.
+// SeekSample repositions to target on the window's timeline. A negative
+// target down to -Headroom() is legal and addresses the source's audio ahead
+// of the window, which priming a chain for sample 0 asks for (see
+// format.Headroomer); below that is CodeInvalidRequest. A target past a
+// bounded window's end lands at its end.
 func (s *slice) SeekSample(ctx context.Context, target int64) (int64, error) {
-	// The bound is what Headroom advertises, not from alone: the two have to
-	// agree, or a caller that primes by exactly the headroom it was told
-	// about gets refused for asking.
+	// Bounded by what Headroom advertises, so priming by exactly that is never
+	// refused.
 	room := s.Headroom()
 	switch {
 	case s.closed:
@@ -802,14 +569,11 @@ func (s *slice) SeekSample(ctx context.Context, target int64) (int64, error) {
 			"waxflow: seek to %d is %d samples before the source's start; the span has %d samples of headroom",
 			target, -target-room, room))
 	}
-	// Past the window's end lands at its end, as a single Media does at the
-	// end of a file.
 	if s.limit >= 0 {
 		target = min(target, s.limit)
 	}
-	// The run of reads before the seek ends here, and the next begins at
-	// the landing: a seek delivers nothing, so whatever the inner media
-	// counted while it positioned itself is no part of either.
+	// A seek delivers nothing: what med counts while it positions is no part of
+	// the run before the seek or the one after it.
 	counting := s.counting
 	s.leave()
 	landed, err := s.med.SeekSample(ctx, s.from+target)
@@ -837,174 +601,67 @@ func (s *slice) SeekSample(ctx context.Context, target int64) (int64, error) {
 // so a timeline can be planned without opening anything, and a function that
 // opens it on demand.
 type ConcatSource struct {
-	// Track describes the member from its headers. Concat holds the member
-	// to this declaration: one that opens in a different format, or delivers
-	// a different number of samples, fails the run rather than silently
-	// desyncing every position after it.
-	//
-	// Its length must be one the decode will match (Samples >= 0 and not
-	// SamplesAdvisory), because that is the declaration the run enforces. A
-	// container that only rounds a duration into a sample count is refused
-	// when the timeline is planned, not when the seam breaks; measure such a
-	// member first with MeasureLength and hand the track it returns here.
-	// That is what the daemon does. MeasureLength takes the cheapest route to
-	// the number the decode delivers: for an ASF member, a walk of a WMA v1/v2
-	// track's frame counts, or a full decode for the codecs whose positions
-	// are stated times.
-	//
-	// It is also why a Concat implements no format.LengthConfirmer while a
-	// span does: confirming a member's length behind the caller's back would
-	// replace the declaration this field *is* with something the timeline
-	// found, which is the opposite of what the run enforces here.
+	// Track describes the member from its headers, and Concat holds the member
+	// to it: one that opens in another format or delivers another number of
+	// samples fails the run. Its length must be one the decode matches
+	// (Samples >= 0 and not SamplesAdvisory), or ConcatTrack refuses it;
+	// measure such a member with MeasureLength and pass the track it returns.
+	// A Concat confirms no length behind the caller's back, since that would
+	// replace the declaration the run enforces.
 	Track container.Track
 	// Open opens the member's decodable media. Concat calls it when the
-	// timeline reaches this member and closes the result on advance, so a
-	// 500-track queue costs one file descriptor rather than 500.
-	//
-	// Any context this closure binds must be the engine's own, never a
-	// request's. Open fires lazily, mid-stream, long after the call that
-	// built the Concat returned: live pipelines resolve under the server's
-	// base context by design, so read-behind can finish an encode after the
-	// client has left, and a request context captured here would instead
-	// kill a member's first read at a track boundary minutes into playback.
-	// container.Contextual exists for exactly this handoff.
+	// timeline reaches the member and closes the result on advance. It runs
+	// lazily, mid-stream, so any context it binds must be the engine's, never
+	// a request's: a live pipeline keeps encoding after its client leaves, and
+	// a request context would kill a member's first read at a track boundary.
+	// container.Contextual is for this handoff.
 	Open func() (format.Media, error)
 }
 
-// ConcatOptions configures a Concat.
-//
-// # Hand the same options to the plan and to the run
-//
-// PlanSegmentsTimeline(tracks, copts, ...) or PlanTranscodeTimeline and
-// Concat(members, copts) are two calls taking two separately constructed
-// ConcatOptions, and nothing checks that they match. Both fields below make a
-// mismatch a silent wrong answer rather than an error, so the convention is:
-// build one ConcatOptions and pass it to both. Engine.ConcatOptionsFor builds
-// the one a transcode with given TranscodeOptions needs.
-//
-// For Profile a mismatch is a wrong cache key: the plan names one profile in
-// its Versions and the run resamples through another, so the cached bytes
-// describe processing that did not happen.
-//
-// For Crossfade it is worse, and it is why this paragraph exists rather than
-// the field being left to speak for itself. A crossfade changes the timeline's
-// length, so a plan built with one and a run built without it disagree about
-// how many samples exist: the plan promises the sum less (N-1)*Crossfade
-// against a run delivering the full sum. That is the prefix-sum desync and the
-// tail 404 that ADR-0009's advisory-length section exists to prevent, arriving
-// by a different door.
-//
-// For Channels a mismatch is a level error rather than a length one, and it is
-// the one case the tree now catches: a timeline built at the envelope's width
-// and then converted downstream is refused (see Engine.TimelineChannels), so
-// the mismatch reports itself instead of delivering audio 1 to 6 dB off.
+// ConcatOptions configures a Concat. Build one and hand the same value to the
+// plan (PlanSegmentsTimeline or PlanTranscodeTimeline) and to the run
+// (Concat); Engine.ConcatOptionsFor builds it for a transcode. Nothing checks
+// that the two match. A Profile mismatch is a wrong cache key, a Crossfade
+// mismatch a plan and a run that disagree about the timeline's length, and a
+// Channels mismatch a conversion the run refuses (Engine.TimelineChannels).
 type ConcatOptions struct {
-	// Profile selects the resampler quality profile for normalizing members
-	// whose rate is not the envelope's; empty means resample.HQ.
-	//
-	// It must be the profile the transcode's own TranscodeOptions carry. See
-	// the convention above.
+	// Profile is the resampler profile for members not at the envelope's rate;
+	// empty means resample.HQ. It must be the transcode's own
+	// TranscodeOptions.ResampleProfile.
 	Profile resample.Profile
 
-	// Crossfade is how many samples of each seam are a blend of the two
-	// members meeting there, on the envelope's timeline. Zero, the default, is
-	// a butt-join: sample len(a) is b's sample 0, exactly, which is what every
-	// existing caller gets and what ADR-0009's primitive is.
-	//
-	// There is no nonzero default and there will not be one. A gapless album
-	// must never blend, because the seam it would smear is the artifact this
-	// primitive exists to deliver intact. A crossfade is a thing a caller asks
-	// for on material that wants it (a declick between two independently
-	// recorded takes, a play queue of unrelated tracks), never something the
-	// library decides on their behalf.
-	//
-	// Each seam costs X samples of total length: N members crossfaded by X
-	// deliver sum(len) - (N-1)*X. Member i's tail zone and member i+1's head
-	// zone are the same region of the timeline, which is what the overlap is.
-	// The blend is equal-power (cos/sin), so uncorrelated material holds its
-	// level across the zone where a linear fade would dip 3 dB.
-	//
-	// Bounded twice, both refused at ConcatTrack so a plan and a run refuse
-	// identically: every member must be long enough for the zones it carries
-	// (head plus tail, so the edge members need only one), and a zone must fit
-	// maxCrossfadeBytes.
+	// Crossfade is how many envelope samples of each seam blend the two
+	// members meeting there; N members deliver sum(len) - (N-1)*Crossfade.
+	// Zero, the default, is a butt-join: sample len(a) is b's sample 0. There
+	// is no nonzero default (ADR-0009). The blend is equal-power (cos/sin).
+	// ConcatTrack refuses with CodeInvalidRequest a negative value, a member
+	// shorter than the zones it carries (one on each edge member), and a zone
+	// over maxCrossfadeBytes.
 	Crossfade int64
 
-	// Channels is the timeline's channel count. Zero, the default, keeps the
-	// envelope's own rule (the widest member). Nonzero makes this the
-	// envelope's count, and every member whose count differs is conformed to
-	// it by its own chain, before it meets its siblings: a fold for a wider
-	// member, a placement for a narrower one, which is exactly the conversion
-	// TranscodeOptions.Channels applies to that member read alone.
-	//
-	// That "before" is the whole point. A fold applied to the assembled
-	// timeline is not the member's own, because dsp/mix normalizes each output
-	// row over every source column and a member widened by placement has
-	// silent columns that still count in the divisor. The error is an exact
-	// scalar, sqrt(E_own/E_envelope), so LUFS, true peak and sample peak all
-	// move by it together and nothing downstream can tell: a stereo member of a
-	// 5.1 envelope folded to stereo comes out 3.010 dB down, where its own fold
-	// is the identity. docs/adr/0010 has the figure for every pair.
-	//
-	// The fold this runs is the delivery fold, not a measurement one: it is
-	// inside the member's chain, so the true-peak limiter runs with it (a 5.1
-	// to stereo matrix has MaxGain 1.707) and an integer envelope requantizes
-	// at the envelope's depth with TPDF, the same cost a resampled member
-	// already pays.
-	//
-	// Engine.TimelineChannels(tracks, opts) is the recipe: it answers the
-	// count the transcode delivers when some member would otherwise be placed
-	// and then folded, and 0 when no member needs its own conversion, so a
-	// caller sets this field from that answer alone and a queue that never had
-	// the defect keeps its chain and its cache keys byte for byte.
-	//
-	// One crossfade note: with a fold inside a member chain the limiter runs
-	// before the equal-power blend, where a fold of the envelope ran after it,
-	// so a blend of correlated folded material can peak up to 3 dB past the
-	// limiter's ceiling. That is what unfolded material already gets
-	// (blendFrames leaves float for the output quantizer and clips the int
-	// path at the quantizer's rails), but it is a change for folded queues.
-	//
-	// Refused at ConcatTrack, naming the member: a count with no layout
-	// convention, a negative count, a member whose positions have no place in
-	// the target (7.1 into 5.1), and, by the existing rule, a member already
-	// at the count whose layout is not the conventional one.
+	// Channels is the timeline's channel count. Zero keeps the envelope's, the
+	// widest member's. Nonzero makes it the envelope's, and each member of
+	// another count is conformed to it by its own chain before it meets its
+	// siblings, as TranscodeOptions.Channels converts it read alone (ADR-0010).
+	// Set it from Engine.TimelineChannels. ConcatTrack refuses a negative count
+	// with CodeInvalidRequest, and with CodeUnsupportedFormat a count with no
+	// layout convention, a member whose positions have no place in the target
+	// (7.1 into 5.1), and a member at the count whose layout is not the
+	// conventional one.
 	Channels int
 }
 
-// maxCrossfadeBytes bounds one blend buffer, and the number is derived rather
-// than chosen: audio/pool.go's top size class is maxClassBits = 22, "4 Mi
-// samples = 16 MiB int32/float32", and audio.Get sizes on frames*Channels. So
-// X*ch*4 <= 16 MiB is exactly X*ch <= 4 Mi, which is exactly the largest blend
-// audio.Get will pool.
-//
-// One sample more and classBits returns -1: the buffer allocates directly and
-// is dropped on Put (pool.go:14-17), so every seam of every timeline becomes a
-// 16 MB allocate-and-discard. That is the cliff this refuses at, and it is why
-// the constant is this number and not a round one near it.
-//
-// timeline.MaxMembers is the precedent for the form: a named constant carrying
-// its own reason. (ADR-0009 and /caps spell that bound maxTimelineMembers,
-// which is the wire field's name and not an identifier in the tree.)
+// maxCrossfadeBytes bounds one blend buffer at the largest buffer audio.Get
+// pools (its top size class, 4 Mi samples of 4 bytes): one sample more and
+// every seam allocates and drops 16 MiB (ADR-0009).
 const maxCrossfadeBytes = 16 << 20
 
-// concatLayout is the single walk every timeline-shape function reads from,
-// so the length a plan projects, the offsets a run seeks to, and the
-// boundaries the wire reports are one arithmetic rather than three copies of
-// it that agree only by inspection. ConcatTrack reads env+total, Concat reads
-// starts+lens to rebase positions, and ConcatBoundaries maps starts+lens onto
-// the wire.
-//
-// It owns the whole of what a timeline's shape is: the envelope format, the
-// per-member normalized lengths, the crossfade refusals, and the start
-// recurrence. The rationale for each of those choices lives on ConcatTrack,
-// the public function whose returned track this produces.
-//
-// starts has len(tracks)+1 entries: starts[i] is member i's first sample and
-// starts[len(tracks)] is the whole timeline's length, which equals total.
-// lens[i] is member i's own normalized length; under a crossfade the two
-// differ, since starts[i+1]-starts[i] is lens[i]-X while member i still
-// occupies lens[i] samples (see the concat struct's field docs).
+// concatLayout is the one walk ConcatTrack, Concat, ConcatBoundaries and
+// CrossfadeSamples read a timeline's shape from: the envelope, each member's
+// normalized length (lens), the starts, the total, and every refusal. starts
+// has len(tracks)+1 entries: starts[i] is member i's first sample and the
+// last is the total. Under a crossfade of X, starts[i+1]-starts[i] is
+// lens[i]-X, while member i still occupies lens[i] samples.
 func concatLayout(tracks []container.Track, opts ConcatOptions) (env audio.Format, lens, starts []int64, total int64, err error) {
 	if len(tracks) == 0 {
 		return audio.Format{}, nil, nil, 0, waxerr.New(waxerr.CodeInvalidRequest,
@@ -1016,16 +673,9 @@ func concatLayout(tracks []container.Track, opts ConcatOptions) (env audio.Forma
 			return audio.Format{}, nil, nil, 0, waxerr.Wrap(waxerr.CodeUnsupportedFormat,
 				fmt.Sprintf("waxflow: timeline member %d", i), err)
 		}
-		// An advisory length is refused here rather than at the seam it would
-		// break. The run enforces each member's declared length (count and
-		// advance), so a member whose container only rounded it fails minutes
-		// into a decode with a message about the file, when the cause is that
-		// nobody measured it. This is the only place that can say so. ASF, a
-		// Matroska falling back to Info Duration, and a WAV carrying MP3
-		// frames are the three that reach it; every caller inside this tree
-		// already measures (the daemon's trackFor, the merge runner's
-		// MeasureTrack, cli split), which is why the gap only ever bit a
-		// library consumer.
+		// Refused here, where the cause can be named: the run enforces each
+		// member's declared length and would fail minutes into a decode with a
+		// message about the file.
 		if t.Samples < 0 || t.SamplesAdvisory {
 			what := "has no declared length"
 			if t.Samples >= 0 {
@@ -1045,19 +695,16 @@ func concatLayout(tracks []container.Track, opts ConcatOptions) (env audio.Forma
 	if env.Type == audio.Float {
 		env.BitDepth = 32
 	}
-	// The widest member, kept before the override: the crossfade bound is
-	// checked at it as well as at the timeline's own width, so a fold can
-	// never loosen a bound a caller already passed at the wider one.
+	// The widest member: the crossfade bound is checked at it too, so a fold
+	// never loosens a bound passed at the wider width.
 	widest := env.Channels
 	if opts.Channels != 0 {
 		if opts.Channels < 0 {
 			return audio.Format{}, nil, nil, 0, waxerr.New(waxerr.CodeInvalidRequest,
 				fmt.Sprintf("waxflow: negative timeline channel count %d", opts.Channels))
 		}
-		// Checked on the requested count alone. A queue whose own members are
-		// wider than any convention keeps whatever it did before: this is the
-		// caller naming a target, and a target the mix node cannot build is a
-		// refusal here rather than one member into the run.
+		// Checked on the requested count alone: a target the mix node cannot
+		// build is refused here, not one member into the run.
 		if audio.DefaultLayout(opts.Channels) == 0 {
 			return audio.Format{}, nil, nil, 0, waxerr.New(waxerr.CodeUnsupportedFormat,
 				fmt.Sprintf("waxflow: no layout convention for %d channels", opts.Channels))
@@ -1066,38 +713,11 @@ func concatLayout(tracks []container.Track, opts ConcatOptions) (env audio.Forma
 	}
 	env.Layout = audio.DefaultLayout(env.Channels)
 
-	// The envelope's layout has to be the conventional one, because that is
-	// the only layout the mix node targets. Two rules, one per side of the
-	// envelope's channel count, and both are checked here rather than trusted:
-	// this is the plan-time funnel, and a layout that cannot be reached is a
-	// refusal minutes into a decode otherwise.
-	//
-	// A member that already has the envelope's channel count runs no mix and
-	// keeps its own layout, so its layout has to match already. That is true
-	// of every layout the decoders produce; a WAVEFORMATEXTENSIBLE mask naming
-	// some other pair of speakers is the one case it is not, and it is refused
-	// by name rather than relabelled, since calling a back-left channel
-	// front-right is a silent lie about what the file says it holds.
-	//
-	// Every other member is mixed, in whichever direction its own count lies.
-	// A narrower member is widened into the envelope, which places its
-	// positions and zero-fills the rest, so what has to hold is that the
-	// envelope has a place for every one of them. It does for the common
-	// cases (a mono member in a stereo queue, a stereo member in a surround
-	// one) and it does not for a back pair meeting a side pair, which is the
-	// same "normalizes channel counts, not speaker assignments" line read the
-	// other way. A wider member is reachable only under ConcatOptions.Channels
-	// (the envelope is otherwise a maximum) and is folded through the same
-	// probe, which refuses a fold the gain table has no answer for exactly as
-	// that member's own transcode to the count would: 7.1 into a 5.1 timeline
-	// has nowhere to put the back pair.
+	// A member at the envelope's count runs no mix, so its layout must already
+	// be the envelope's; every other must mix into it (ADR-0009).
 	for i, t := range tracks {
-		// A layout is resolved before either rule reads it, with the zero-mask
-		// fallback dsp.NewChain applies, so the two agree about what a member
-		// that declares none means and so the two rules here agree with each
-		// other: without it a member with no mask passed the widening rule by
-		// the fallback and failed the equal-count one against a raw zero.
-		// audio.Format.Valid accepts Layout 0, so this is reachable.
+		// Resolved with dsp.NewChain's zero-mask fallback, so both rules read
+		// the same layout for a member that declares none.
 		layout := t.Fmt.Layout
 		if layout == 0 {
 			layout = audio.DefaultLayout(t.Fmt.Channels)
@@ -1123,11 +743,8 @@ func concatLayout(tracks []container.Track, opts ConcatOptions) (env audio.Forma
 	for i, t := range tracks {
 		lens[i] = concatMemberSamples(t, env)
 		total += lens[i]
-		// The next member begins where this one's tail zone does, which is X
-		// before this one ends: the two share that region. The last member
-		// carries no tail, so it contributes its whole length and starts[N] is
-		// the total below. Running starts[i+1] = starts[i] + lens[i] - X through
-		// the last hop instead would leave the timeline X short of its own track.
+		// The next member begins at this one's tail zone, X before its end. The
+		// last carries no tail, so starts[N] is the total.
 		tail := int64(0)
 		if i < len(tracks)-1 {
 			tail = opts.Crossfade
@@ -1137,74 +754,23 @@ func concatLayout(tracks []container.Track, opts ConcatOptions) (env audio.Forma
 	if err := checkCrossfade(lens, env.Rate, max(widest, env.Channels), opts.Crossfade); err != nil {
 		return audio.Format{}, nil, nil, 0, err
 	}
-	// One zone per seam, and there are N-1 seams. Subtracted after every
-	// member's own ceil, so the sum-of-ceils the members produce is untouched;
-	// starts[N] already carries the same subtraction, so the two agree.
+	// One zone per seam, after every member's own ceil; starts[N] agrees.
 	total -= int64(len(tracks)-1) * opts.Crossfade
 	return env, lens, starts, total, nil
 }
 
-// ConcatTrack computes the synthetic track a Concat of these members
-// presents: the common (envelope) format, the summed normalized length, and
-// no gapless trims. It is a pure function of the headers, so planning and
-// running cannot disagree about the delivered format.
-//
-// The envelope is the format no member loses information to reach: the
-// maximum rate, the maximum channel count, and the wider sample domain
-// (float if any member is float). Refusing mixed members instead would not
-// push the problem to the caller, it would delete the feature for the normal
-// case: HLS cannot change format mid-variant without an EXT-X-DISCONTINUITY
-// and a second init, which one chain, one init, and one edit list forbid
-// structurally, and a play queue is mixed by nature.
-//
-// A member whose format already equals the envelope is read straight
-// through, with no chain and no copy, so a uniform timeline (a gapless
-// album, which is one master at one rate) pays nothing for the machinery.
-// That is structural rather than an optimization: it falls out of the
-// envelope being a maximum.
-//
-// One member at 96 kHz makes every other member resample twice, member to
-// envelope and envelope to output. The cost is real and deliberately
-// unaddressed: collapsing it needs the output format, which is not known
-// here (an output row's adjust hook owns the real rate, which is how Opus
-// forces 48 kHz whatever the caller asked for). Likewise the channel count
-// is a maximum and is not capped by inference: capping would silently destroy
-// a surround member, and it looks cheaper only because the output is usually
-// stereo, which is the same output-aware knowledge this function does not
-// have. A caller that does have it states the width it delivers through
-// ConcatOptions.Channels, and every member is then conformed to that width by
-// its own conversion rather than placed into an envelope and folded after the
-// seam.
-//
-// The track this returns carries no mark of having come from a timeline, so a
-// plan built from it alone (PlanTranscode) cannot see the seam and will not
-// refuse a conversion across it; the run does, off the Media. Ask
-// Engine.TimelineChannels for the width before building either.
-//
-// The common mixed-channel cases are a mono track in a stereo queue and a
-// stereo track in a surround one; a narrower member is widened into the
-// envelope by position, zero-filled and at unity, so it keeps its own levels.
-// A placed member measures the same loudness inside the queue as alone; a
-// mono member duplicated across a stereo or quad envelope measures
-// +10*log10(2), which is the long-standing mono-to-stereo convention rather
-// than anything the envelope added.
-//
-// Delay and Padding are zero, and that is load-bearing rather than
-// incidental: format.Media delivers already-trimmed PCM, so both trims
-// happened inside each member before Concat saw a sample. That is exactly
-// why concatenation is sample-exact, and a nonzero trim here would make a
-// downstream consumer trim a second time.
-//
-// It takes the options because concatLayout is the single funnel and a
-// crossfade changes the length: opts.Crossfade shortens the total by X per
-// seam, and every refusal a crossfade needs lives in concatLayout so that
-// planning a timeline and running one refuse the same requests for the same
-// reasons.
-//
-// Every member's length has to be one its decode will match, and a member
-// whose container only rounded a duration into one is refused here rather
-// than at the seam it would break; see ConcatSource.Track for how to measure
-// one.
+// ConcatTrack is the synthetic track a Concat of these members presents:
+// PCM in the envelope format (the highest rate, the most channels or
+// opts.Channels, the deepest bit depth, float if any member is float), the
+// summed normalized length less one Crossfade per seam, exact, and no trims.
+// It is a pure function of the headers, so a plan and a run agree
+// (ADR-0009). It refuses an empty list and a member whose length is unknown
+// or advisory (see ConcatSource.Track) with CodeInvalidRequest; an invalid
+// member format, and a member layout the envelope cannot take, with
+// CodeUnsupportedFormat; and what ConcatOptions lists. The track carries no
+// mark of a timeline, so a plan built from it alone will not refuse a
+// conversion across a seam; the run does, off the Media. Ask
+// Engine.TimelineChannels for the width first.
 func ConcatTrack(tracks []container.Track, opts ConcatOptions) (container.Track, error) {
 	env, _, _, total, err := concatLayout(tracks, opts)
 	if err != nil {
@@ -1213,11 +779,9 @@ func ConcatTrack(tracks []container.Track, opts ConcatOptions) (container.Track,
 	return concatSynthetic(env, total), nil
 }
 
-// concatSynthetic is the track ConcatTrack returns and the track a Concat
-// reports as its own, built in one place so the two cannot describe different
-// audio. Samples is authoritative rather than advisory, so SamplesExact is
-// honest: Concat holds every member to its declared length and fails the run
-// instead of delivering some other count.
+// concatSynthetic is the track ConcatTrack returns and a Concat reports,
+// built once so the two agree. SamplesExact holds because Concat fails a run
+// whose members miss their declared lengths.
 func concatSynthetic(env audio.Format, total int64) container.Track {
 	return container.Track{
 		Codec:        codec.PCM,
@@ -1228,32 +792,21 @@ func concatSynthetic(env audio.Format, total int64) container.Track {
 	}
 }
 
-// MemberBoundary is one member's place on a concatenated timeline. Both fields
-// are in samples at the envelope rate (the timeline's normalized rate,
-// reported alongside as the envelope rate). OffsetSamples is the member's
-// actual start on the timeline; DurationSamples is its own raw normalized
-// length.
-//
-// Under a crossfade of X, consecutive members OVERLAP: member i occupies
-// [OffsetSamples, OffsetSamples+DurationSamples), which runs X past where
-// member i+1 begins, so OffsetSamples+DurationSamples can exceed the next
-// member's OffsetSamples and sum(DurationSamples) is total + (N-1)X, not total.
-// Only at X=0 do the members tile without overlap.
+// MemberBoundary is one member's place on a concatenated timeline, in
+// samples at the envelope rate: OffsetSamples is its start on the timeline
+// and DurationSamples its own normalized length. Under a crossfade of X the
+// members overlap: member i occupies the DurationSamples from its offset,
+// which run X past the next member's offset, so the durations sum to the
+// total plus (N-1)X. At X=0 the members tile.
 type MemberBoundary struct {
 	OffsetSamples   int64 `json:"offsetSamples"`
 	DurationSamples int64 `json:"durationSamples"`
 }
 
-// ConcatBoundaries reports where each member lands on the concatenated
-// timeline and how long it is, from the members' headers alone (no decode, no
-// open), plus the envelope format the offsets are measured on. It reads the
-// same concatLayout ConcatTrack and Concat read, so a boundary reported here
-// is the position the run actually plays.
-//
-// The offsets are actual timeline positions and overlap under a crossfade; see
-// MemberBoundary for the contract, which is pinned from the first release so a
-// consumer does not build on a meaning that changes when a crossfade is
-// threaded to the wire.
+// ConcatBoundaries reports each member's MemberBoundary and the envelope
+// format they are measured on, from the headers alone. It reads the layout
+// ConcatTrack and Concat read, so a boundary is where the run plays the
+// member; under a crossfade the boundaries overlap.
 func ConcatBoundaries(tracks []container.Track, opts ConcatOptions) ([]MemberBoundary, audio.Format, error) {
 	env, lens, starts, _, err := concatLayout(tracks, opts)
 	if err != nil {
@@ -1267,17 +820,10 @@ func ConcatBoundaries(tracks []container.Track, opts ConcatOptions) ([]MemberBou
 }
 
 // mixedWidthConversion is the one predicate behind both halves of the width
-// rule: Engine.TimelineChannels answers a count exactly when it holds, and the
-// run-side guard refuses exactly when it holds. Writing it once is what keeps
-// the two an exact complement, so a queue the engine answers 0 for is a queue
-// nothing later refuses, and its chain and its cache keys are untouched.
-//
-// It holds when a conversion is asked for that the envelope does not already
-// deliver (channels != 0 and not the envelope's own count) over members that do
-// not all share the envelope's width. Both halves are needed: a conversion of a
-// uniform-width timeline is each member's own fold applied to all of them at
-// once, which is correct, and a "conversion" to the width the timeline already
-// has is not one.
+// rule (ADR-0010): Engine.TimelineChannels answers a count exactly when it
+// holds, and refuseMixedWidthConversion refuses exactly when it holds. It
+// holds when channels asks for a count other than env's over members that do
+// not all share env's.
 func mixedWidthConversion(members []container.Track, env audio.Format, channels int) bool {
 	if channels == 0 || channels == env.Channels {
 		return false
@@ -1290,30 +836,16 @@ func mixedWidthConversion(members []container.Track, env audio.Format, channels 
 	return false
 }
 
-// CrossfadeSamples converts a crossfade expressed in seconds into the envelope
-// samples ConcatOptions.Crossfade carries. The wire spells a crossfade in
-// seconds because a caller cannot know the envelope rate (the maximum member
-// rate) before the members are measured, and so cannot express the blend in the
-// samples the option wants; this is where the two meet.
-//
-// The rate is read from the same concatLayout ConcatTrack, Concat, and
-// ConcatBoundaries read, so a crossfade converted here is measured on exactly
-// the rate the run blends on. That is what lets a plan and a run convert one
-// signed number the same way and never come to disagree about how long the seam
-// is: the envelope is a pure function of the members' formats, which are pinned,
-// so the count is deterministic for a given set of members. The result is
-// rounded to the nearest sample.
-//
-// A non-positive (or NaN) seconds is a butt-join, the zero the default every
-// timeline that does not ask for a blend gets. An absurdly large seconds is
-// clamped to the int64 ceiling rather than wrapped, so it reaches checkCrossfade
-// as the refusal it is ("more than this timeline can blend") instead of a
-// silently wrapped small value: the fit and memory bounds are checkCrossfade's
-// to enforce inside ConcatTrack, not this converter's.
+// CrossfadeSamples converts a crossfade in seconds, as the wire spells it, to
+// the envelope samples ConcatOptions.Crossfade takes, rounded to the nearest.
+// The rate is the one the run blends at, a pure function of the members'
+// formats, so a plan and a run convert one signed number alike. A
+// non-positive or NaN seconds is 0, without reading tracks. A value too large
+// clamps to math.MaxInt64, which ConcatTrack then refuses; the bounds are
+// its to enforce. A layout error is returned as it is.
 func CrossfadeSamples(tracks []container.Track, seconds float64) (int64, error) {
 	if !(seconds > 0) {
-		// False for <=0 and for NaN. Validation refuses a NaN upstream, but
-		// guarding it here keeps a bad value from ever reaching the conversion.
+		// False for <=0 and for NaN.
 		return 0, nil
 	}
 	env, _, _, _, err := concatLayout(tracks, ConcatOptions{})
@@ -1328,33 +860,12 @@ func CrossfadeSamples(tracks []container.Track, seconds float64) (int64, error) 
 }
 
 // TimelineChannels is the width to build a timeline of these members at when
-// it will be transcoded with opts: the count ConcatOptions.Channels wants, and
-// 0 when that field should stay zero.
-//
-// It is the counterpart of CrossfadeSamples, and it exists for the same reason:
-// the caller cannot compute the number, because it is a fact about the output
-// row. Which width a lossy delivery folds to is an output row's adjust hook's
-// decision (foldWideToStereo), the same hook that decides Opus runs at 48 kHz
-// whatever was asked for, and the timeline layer deliberately does not know it
-// (ADR-0009 refused to cap the envelope by inference for exactly that reason).
-// This is where the two meet: the engine has the row, so the engine answers.
-//
-// It answers nonzero only when the defect would otherwise occur, which is the
-// exact complement of the refusal the run-side guard raises. A queue whose
-// members all share the envelope's width gets 0 and folds downstream as it
-// always has, with one fold at the envelope that is every member's own; so does
-// a delivery at the envelope's own width. Only a queue where some member would
-// be placed into a wider envelope and folded after the seam gets a count. That
-// is what keeps adopting this free: a uniform album to opus keeps its chain and
-// its cache keys byte for byte.
-//
-// It is a pure planning call and says nothing out loud. The fold it answers for
-// is announced by the run instead (Engine.logTimelineDownmix): this is called
-// per variant per HLS request, and a Warn on that path would be one line per
-// master fetch and per segment worker rather than one per encode.
-//
-// A plan error propagates as it is. It is the refusal the real plan would give
-// (alac over a 5.1 envelope, say), arriving one call earlier.
+// it is transcoded with opts: the count for ConcatOptions.Channels, or 0 to
+// leave that zero. The engine answers because the width is a fact about the
+// output row. It is nonzero only when the delivered count differs from the
+// envelope's and some member's does too (mixedWidthConversion), so a queue
+// without the defect keeps its chain and its cache keys (ADR-0010). It logs
+// nothing; the run announces the fold. A plan error is returned as it is.
 func (e *Engine) TimelineChannels(tracks []container.Track, opts TranscodeOptions) (int, error) {
 	env, err := ConcatTrack(tracks, ConcatOptions{})
 	if err != nil {
@@ -1383,28 +894,12 @@ func (e *Engine) ConcatOptionsFor(tracks []container.Track, crossfade int64, opt
 	return ConcatOptions{Profile: opts.ResampleProfile, Crossfade: crossfade, Channels: ch}, nil
 }
 
-// refuseMixedWidthConversion is the other half of the width rule: a channel
-// conversion never crosses a mixed-width seam.
-//
-// dsp/mix normalizes each output row over every source column, silent ones
-// included, so a fold applied to a timeline whose members were placed into a
-// wider envelope is not any member's own fold. It is that fold times
-// sqrt(E_own/E_envelope), between 0.8 and 6 dB down depending on the pair, and
-// because it is a scalar on the output every measurement moves with it and
-// nothing downstream can tell. The only way to get each member's own fold is to
-// build the timeline at the delivered width, so a request to convert one that
-// was not is refused rather than answered quietly wrong.
-//
-// Widenings are refused too, and the reason is mono. A placement commutes: a
-// stereo member placed into a 5.1 envelope sits on FL and FR either way. Mono
-// does not place, it duplicates: a mono member in a stereo envelope is on both
-// fronts, and widening that to 5.1 leaves it there, where the member's own
-// conversion to 5.1 puts it on the center, 3 dB away.
-//
-// The question is asked of the Media rather than of a member list, because it
-// is a property of the samples: format.MixedWidth, which a slice and every
-// wrapper forward, so a sliced or wrapped timeline is guarded the same as a
-// bare one.
+// refuseMixedWidthConversion refuses with CodeInvalidRequest a conversion to
+// channels of a Media whose samples were conformed from several widths
+// (format.MixedWidth, which a slice and every wrapper forward): dsp/mix's
+// fold of a placed member is not its own fold, and a widening moves a mono
+// member off the center (ADR-0010). A channels of 0 or of in's own count
+// converts nothing.
 func refuseMixedWidthConversion(med format.Media, in audio.Format, channels int) error {
 	if channels == 0 || channels == in.Channels || !format.MediaMixedWidth(med) {
 		return nil
@@ -1417,22 +912,12 @@ func refuseMixedWidthConversion(med format.Media, in audio.Format, channels int)
 		in.Channels, channels))
 }
 
-// checkCrossfade holds a crossfade to what the members and the envelope can
-// actually carry: a legal length, a blend that fits one pooled buffer, and a
-// zone that fits every member it lands on.
-//
-// It runs inside ConcatTrack, which is what makes a plan and a run refuse
-// identically. lens are the members' normalized lengths, in the envelope's
-// samples, which is the timeline X is measured on too.
-//
-// channels is the width to bound the pooled buffer at, which is the wider of
-// the envelope's own count and the widest member's. A timeline folded by
-// ConcatOptions.Channels blends at the folded width, so bounding on that alone
-// would let a fold accept a crossfade the same members were refused at their
-// own width, and a mint that checked the unfolded queue would be the looser
-// check. Bounding on the widest member instead never loosens; a render that
-// widens past its queue by an explicit count still refuses at plan time, which
-// is where an explicit count is first known.
+// checkCrossfade holds a crossfade x to what the members can carry, refusing
+// with CodeInvalidRequest a negative x, a zone over maxCrossfadeBytes at
+// channels, and a member shorter than the zones it carries. lens are the
+// members' normalized lengths, at rate. channels is the wider of the
+// envelope's count and the widest member's, so a fold never loosens a bound
+// the members pass at their own width (ADR-0010).
 func checkCrossfade(lens []int64, rate, channels int, x int64) error {
 	if x == 0 {
 		return nil
@@ -1441,25 +926,17 @@ func checkCrossfade(lens []int64, rate, channels int, x int64) error {
 		return waxerr.New(waxerr.CodeInvalidRequest,
 			fmt.Sprintf("waxflow: negative crossfade %d", x))
 	}
-	// Divide rather than multiply: x is a caller's int64, so x*ch*4 overflows
-	// before it refuses, and the refusal is the point. The message obeys the
-	// same rule, which is why it quotes no byte count: x*perFrame would
-	// overflow here too, on exactly the inputs this exists to catch.
+	// Divide, not multiply: x*ch*4 overflows on exactly the inputs this
+	// refuses, so the message quotes no byte count either.
 	if perFrame := int64(channels) * 4; x > maxCrossfadeBytes/perFrame {
 		limit := maxCrossfadeBytes / perFrame
-		// In the caller's own units. They set a frame count, not a byte count,
-		// so an answer in MiB would leave them to rediscover the channel
-		// arithmetic that produced it; the seconds are what make the number
-		// mean anything at the rate they are actually running.
+		// In the caller's units: frames, and seconds at the rate in use.
 		return waxerr.New(waxerr.CodeInvalidRequest, fmt.Sprintf(
 			"waxflow: a crossfade of %d samples is more than this timeline can blend; the most it can is "+
 				"%d samples (%.1f s at %d Hz, %d channels), which is the largest buffer the sample pool holds",
 			x, limit, float64(limit)/float64(rate), rate, channels))
 	}
-	// The fit rule is head+tail <= L, not 2X <= L: the first and last members
-	// carry one zone rather than two, and stating it this way makes N=1 pass
-	// with no special case (its only member is both first and last, so it
-	// carries neither zone).
+	// head+tail <= L: an edge member carries one zone, a lone member none.
 	for i, l := range lens {
 		var need int64
 		if i > 0 {
@@ -1478,24 +955,18 @@ func checkCrossfade(lens []int64, rate, channels int, x int64) error {
 	return nil
 }
 
-// concatMemberSamples is the member's length on the envelope timeline. It
-// goes through the resampler's own exact output count, so the prefix sum a
-// Concat rebases positions by and the length a plan projects are the same
-// arithmetic rather than two roundings that agree by inspection.
+// concatMemberSamples is the member's length on the envelope timeline: the
+// resampler's own exact output count, so the run's prefix sum and the plan's
+// length are one arithmetic.
 func concatMemberSamples(t container.Track, env audio.Format) int64 {
 	return resample.OutputLen(t.Samples, t.Fmt.Rate, env.Rate)
 }
 
-// concatSpec is the normalization one member needs to reach the envelope, in
-// one place so the version accounting (timelineVersions) and the run build
-// the identical chain.
-//
-// The dither strategy is pinned to TPDF rather than left to the zero value
-// it happens to equal. TPDF is keyed by absolute position and holds no
-// history, so a member normalized from a mid-stream start requantizes to the
-// same samples a continuous run produces; Shaped carries error feedback,
-// which would make a restarted worker's segments differ from a continuous
-// worker's for a reason no test here would name.
+// concatSpec is the chain that takes one member to the envelope, shared by
+// the version accounting (timelineVersions) and the run. Dither is pinned to
+// TPDF, which keys on absolute position and holds no history, so a member
+// started mid-stream requantizes as a continuous run does; Shaped carries
+// error feedback and would make a restarted worker's segments differ.
 func concatSpec(env audio.Format, opts ConcatOptions) dsp.ChainSpec {
 	spec := dsp.ChainSpec{
 		Rate:     env.Rate,
@@ -1511,31 +982,15 @@ func concatSpec(env audio.Format, opts ConcatOptions) dsp.ChainSpec {
 	return spec
 }
 
-// Concat sequences members into one gapless format.Media: a single
-// continuous timeline whose sample len(a) is b's sample 0, exactly, unless
-// opts.Crossfade asks for a blend.
-//
-// The butt-join is the default and the primitive. It is sample-exact by
-// construction rather than by arithmetic: format.Media already delivers
-// gapless-trimmed PCM, so there is no encoder delay or padding left to reason
-// about at the seam, and concatenation is just reading one stream after
-// another.
-//
-// A crossfade trades exactly that away, on purpose and only when asked: the
-// seam becomes a zone of Crossfade samples that is both members at once, and
-// the timeline shortens by one zone per seam. See ConcatOptions.Crossfade,
-// which is zero for every caller that does not want it.
-//
-// Members open on demand and close on advance. That is the design and not an
-// optimization: besides costing one file descriptor for a queue of any
-// length, it makes planning and running symmetric (both are driven by the
-// members' tracks alone) and it removes the rewind problem outright, since a
-// member reached a second time is a member opened a second time, from the
-// top, with no state to have gone stale.
-//
-// The returned Media owns nothing until it is read and closes whatever it
-// opened on Close. It also satisfies format.Composite, so a consumer keying
-// its own cache can reach the members' tracks rather than only the envelope.
+// Concat sequences members into one gapless format.Media whose sample len(a)
+// is b's sample 0, unless opts.Crossfade blends the seam (ADR-0009). Its track
+// is ConcatTrack's. It returns ConcatTrack's refusals, and
+// CodeInvalidRequest for a member with no Open. Members open on demand and
+// close on advance, so one is open at a time, and a member already in the
+// envelope's format is read through with no chain. The returned Media opens
+// nothing until it is read or seeked, and closes what it opened on Close. It
+// satisfies format.Composite, so a consumer keying its own cache can reach
+// the members' tracks.
 func Concat(members []ConcatSource, opts ConcatOptions) (format.Media, error) {
 	tracks := make([]container.Track, len(members))
 	for i := range members {
@@ -1570,21 +1025,10 @@ type concat struct {
 	opts    ConcatOptions
 	info    *format.Info
 	fmt     audio.Format
-	// starts is where each member begins on the timeline: starts[i] is member
-	// i's first sample, and starts[len(members)] is the whole timeline's
-	// length.
-	//
-	// lens is what each member is: lens[i] is member i's own normalized
-	// length. The two are separate fields rather than one derived from the
-	// other because a crossfade makes them genuinely different facts. A
-	// butt-joined timeline has starts[i+1]-starts[i] == lens[i] and the
-	// distinction is invisible; with a crossfade of X, consecutive members
-	// overlap by X, so starts[i+1]-starts[i] is lens[i]-X and a member
-	// occupies [starts[i], starts[i]+lens[i]), which runs past where the next
-	// one begins. Reading a length off starts is then wrong by exactly the
-	// overlap, and wrong in the direction that desyncs the prefix sum (see
-	// count and advance, and ADR-0009's advisory-length section for what that
-	// costs).
+	// starts[i] is member i's first timeline sample and starts[len(members)]
+	// the total; lens[i] is member i's normalized length. A crossfade of X
+	// makes them differ (starts[i+1]-starts[i] is lens[i]-X), so a length read
+	// off starts is short by the overlap and desyncs the prefix sum.
 	starts []int64
 	lens   []int64
 
@@ -1600,8 +1044,7 @@ type concat struct {
 	// own count as it was opened.
 	lost, lostBase int64
 	// truncated is each member's Truncated as its read last left it, on the
-	// envelope's timeline. It is a fact about the member's file rather than
-	// a count of deliveries, so it is kept per member: one closed and
+	// envelope's timeline. It is a fact about the member's file, so a member
 	// reopened by a seek states it again, not twice.
 	truncated []int64
 	// found and noted are the finished members' Warnings and Notes, each
@@ -1613,15 +1056,10 @@ type concat struct {
 	pos     int64 // timeline position of the next frame out
 	discont bool
 	closed  bool
-	// blend holds the previous member's captured tail while the open member's
-	// head zone is being read: the two are the same region of the timeline, so
-	// the zone's output is the one mixed with the other. It is nil whenever no
-	// zone is in flight, which is always at Crossfade 0.
-	//
-	// It outlives closeMember by design. The tail belongs to a member that is
-	// finished and closed; the blend is what is left of it, and it has to
-	// survive into the next member's first chunks or there is nothing to mix
-	// them with. There is one at a time, ever.
+	// blend is the previous member's captured tail while the open member's
+	// head zone is read (the same region of the timeline); nil when no zone is
+	// in flight, and always at Crossfade 0. It outlives closeMember, since the
+	// tail's member closes before its zone is mixed.
 	blend    *audio.Buffer
 	blendOff int // frames of blend already mixed out
 	// unpositioned latches a failed seek: pos no longer describes where the
@@ -1629,20 +1067,15 @@ type concat struct {
 	unpositioned bool
 }
 
-// Info returns the timeline's description. Warnings and Notes are the
-// members' own lists as the timeline reaches them, each line prefixed with
-// the member's index: the finished members' as they were closed, and the
-// open member's live (see format.Media). A member not yet opened contributes
-// nothing, so the whole verdict exists once the timeline has been read to
-// its end, which is what a merge does. Tracks stay the synthetic envelope.
-//
-// Lost sums the members' own counts as Damage does, so it is exact for a
-// timeline read through, and a crossfade zone holds two members, each counted
-// for its own fill. A seek counts nothing, as on any Media, which leaves two
-// things out that a read after it does deliver: the little a member's chain
-// had read ahead of the landing (about a resampling filter's length), and,
-// for a landing inside a crossfade zone, the outgoing member's fill in the
-// rest of that zone.
+// Info returns the timeline's description: the synthetic track, and the
+// members' Warnings and Notes as the timeline reaches them, each line
+// prefixed with the member's index (finished members' as they closed, the
+// open member's live), so the full lists exist once it is read to its end.
+// Damage and Lost sum the members' counts, so Lost is exact for a timeline
+// read through, and a crossfade zone counts each member's own fill. A seek
+// counts nothing, which leaves out what a member's chain read ahead of the
+// landing and, in a zone, the outgoing member's fill in the rest of it.
+// Truncated sums the members'.
 func (c *concat) Info() *format.Info {
 	c.info.Warnings = append([]string(nil), c.found...)
 	c.info.Notes = append([]string(nil), c.noted...)
@@ -1710,22 +1143,10 @@ func (c *concat) Members() []container.Track {
 	return append([]container.Track(nil), c.tracks...)
 }
 
-// MixedWidth reports whether any member reached this timeline's width from a
-// different one (format.MixedWidth). Read off the layout rather than the
-// chains: it has to be answerable before a member is open, since the question
-// gates a conversion that runs before the first read.
-//
-// It compares against the timeline's own width, which is the width after
-// ConcatOptions.Channels, and that is the comparison the question wants in both
-// directions. A uniform stereo queue built at six channels answers true, and
-// should: every member was placed, so a later fold to stereo is the 5.1 matrix
-// over placed stereo rather than each member's own identity.
-//
-// What it cannot see is a member that is itself a mixed-width timeline. The
-// members open lazily, one at a time, long after this is asked, so the only
-// thing available is the format each one declared, and a nested Concat declares
-// its inner envelope. Nothing in this tree nests them; a caller that does owns
-// the answer for the inner one.
+// MixedWidth reports whether any member's channel count differs from the
+// timeline's, after ConcatOptions.Channels (format.MixedWidth). It reads the
+// declared formats, so it answers before any member opens, and it cannot see
+// a member that is itself a mixed-width Concat (ADR-0010).
 func (c *concat) MixedWidth() bool {
 	for _, t := range c.tracks {
 		if t.Fmt.Channels != c.fmt.Channels {
@@ -1744,26 +1165,11 @@ func (c *concat) Close() error {
 	return c.closeMember()
 }
 
-// ReadChunk fills dst from the timeline, crossing member boundaries.
-//
-// A chunk never spans a seam. The member in flight is read first, and when
-// it ends the next one opens and fills a fresh chunk, so the only cost of a
-// boundary is one short chunk, which the Stage contract allows everywhere.
-// Filling across the boundary instead would need a carry buffer, since an
-// audio.Buffer is planar with a stride and has no sub-buffer view.
-//
-// That is exactly true of a butt-join, which is what a boundary is at
-// Crossfade 0 and what every seam was before crossfades existed. A crossfade
-// is the case where the carry buffer buys something, and it is the blend: the
-// zone's chunks come from the outgoing member's captured tail and the incoming
-// member's first frames, so the two do meet inside one chunk. The seam is
-// still not spanned, because with a zone there is no seam to span. The zone is
-// the seam, X samples wide, and the members overlap across it.
-//
-// This is where position and continuity are stamped and nowhere else, which is
-// what lets the seek's pre-roll drive fill directly: it wants the samples
-// without the bookkeeping, since a pre-rolled frame is one nobody is ever told
-// the position of.
+// ReadChunk fills dst from the timeline. A chunk never spans a seam: the
+// member in flight is read to its end and the next fills a fresh chunk, so a
+// boundary costs one short chunk. A crossfade zone is the seam, and its
+// chunks hold both members. Position and continuity are stamped here and
+// nowhere else, so the seek's pre-roll drives fill without them.
 func (c *concat) ReadChunk(dst *audio.Buffer) error {
 	switch {
 	case c.closed:
@@ -1781,19 +1187,9 @@ func (c *concat) ReadChunk(dst *audio.Buffer) error {
 		return err
 	}
 	dst.Pos = c.pos
-	// A pure override, never an OR with what the member said. A freshly
-	// opened or seeked member's own first chunk can carry Discont, and
-	// passing that through would stamp a discontinuity at the seam. That
-	// is the one thing this whole primitive exists to avoid: it drains
-	// the downstream resampler to end-of-stream and re-anchors, which
-	// both re-creates the seam and changes the timeline's output length
-	// from ceil((nA+nB)*L/M) to ceil(nA*L/M)+ceil(nB*L/M).
-	//
-	// A crossfade needs the override for the same reason and more of it: a
-	// zone's chunks are the incoming member's freshly opened first chunks,
-	// which is precisely the case above, so the override is what makes the
-	// blend invisible downstream rather than something a crossfade works
-	// around.
+	// An override, never an OR with the member's own: a fresh member's first
+	// chunk can carry Discont, which would drain the downstream resampler and
+	// re-create the seam, and a zone's chunks are such chunks (ADR-0009).
 	dst.Discont = c.discont
 	c.discont = false
 	c.pos += int64(dst.N)
@@ -1801,11 +1197,8 @@ func (c *concat) ReadChunk(dst *audio.Buffer) error {
 }
 
 // fill puts the timeline's next samples in dst, opening members, capturing
-// tails and mixing zones as the geometry requires. It answers what comes next;
-// ReadChunk owns what position and continuity to stamp on it (ADR-0006's
-// boundary), and the seek's pre-roll drives this without any of that.
-//
-// io.EOF means the timeline is spent.
+// tails and mixing zones; ReadChunk stamps position and continuity
+// (ADR-0006). io.EOF means the timeline is spent.
 func (c *concat) fill(dst *audio.Buffer) error {
 	for c.cur < len(c.members) {
 		if c.med == nil {
@@ -1845,19 +1238,11 @@ func (c *concat) fill(dst *audio.Buffer) error {
 }
 
 // SeekSample repositions to target on the timeline: the member holding it is
-// opened and positioned, and everything after it follows in order.
-//
-// A failed seek leaves the timeline unpositioned rather than half-moved, and
-// that is what the latch below is for. Every step of a seek moves state the
-// position depends on (the open member, its chain, where its media sits), so a
-// failure part way through leaves pos describing where the stream used to be
-// and the media sitting somewhere else. Closing the member is not enough on
-// its own: the next read would reopen it and deliver from its start, still
-// stamped with the old pos, which is the same desync by a longer route. So the
-// failure latches, and a caller that ignores it and reads anyway gets the
-// error again instead of samples labelled with a position they do not have.
-// Another seek clears it, because a seek is what puts the timeline back
-// somewhere known.
+// opened and positioned, and the rest follow in order. A target past the end
+// lands at the end; a negative one is CodeInvalidRequest. A failed seek
+// latches the timeline unpositioned, and reads refuse until a seek succeeds:
+// a failure part way leaves pos describing where the members no longer are,
+// and a reopened member would deliver from its start under the old pos.
 func (c *concat) SeekSample(ctx context.Context, target int64) (int64, error) {
 	switch {
 	case c.closed:
@@ -1875,10 +1260,8 @@ func (c *concat) SeekSample(ctx context.Context, target int64) (int64, error) {
 		c.releaseBlend()
 		c.unpositioned = true
 	}
-	// A seek delivers nothing, so it counts nothing: what the members it
-	// positioned counted on the way (a pre-roll it discarded, a little a
-	// chain read ahead of the landing) is set aside, and Lost stands where
-	// it stood. See Info for what that leaves out.
+	// A seek counts nothing: what it positioned counted on the way is set
+	// aside (see Info).
 	c.lost = counted
 	if c.med != nil {
 		c.lostBase = c.med.Info().Lost
@@ -1893,8 +1276,7 @@ func (c *concat) SeekSample(ctx context.Context, target int64) (int64, error) {
 // seekTo is SeekSample's body, split out so every failure inside it lands on
 // the one latch above rather than each error path having to remember.
 func (c *concat) seekTo(ctx context.Context, target int64) (int64, error) {
-	// A blend describes where the stream was, and a seek is what makes that
-	// wrong. Dropped before anything else, so no path below has to remember.
+	// A blend describes the position a seek leaves.
 	c.releaseBlend()
 	total := c.starts[len(c.members)]
 	if target >= total {
@@ -1908,9 +1290,8 @@ func (c *concat) seekTo(ctx context.Context, target int64) (int64, error) {
 	}
 	i := c.memberAt(target)
 	off := target - c.starts[i]
-	// Inside member i's head zone, which is member i-1's tail: those samples
-	// are a blend of two members, so they cannot be had by positioning one.
-	// Unreachable at Crossfade 0, where no member has a head zone.
+	// Inside member i's head zone, which is member i-1's tail: a blend no one
+	// member's seek reaches.
 	if i > 0 && off < c.opts.Crossfade {
 		return c.seekIntoBlend(ctx, i, off)
 	}
@@ -1934,27 +1315,20 @@ func (c *concat) seekTo(ctx context.Context, target int64) (int64, error) {
 	return c.pos, nil
 }
 
-// seekBody positions the open member at local and holds the landing to the
-// member's body: the part of it that is its own audio rather than a zone.
-//
-// The refusal is what container.Seeker's contract makes necessary. A member
-// may land past the ask when its first sync point lies beyond the target, and
-// seekMember reports that rather than pretending; with a crossfade, a landing
-// past the body is a landing inside the member's own tail zone, where the next
-// read would capture a tail shorter than X and blend it against a zone that
-// declared X. The result is audio, so nothing downstream would notice.
-//
-// Landing exactly at the body is legal and needs no case of its own: bound()
-// returns 0 there and the ordinary capture, advance and blend produce the zone.
-// Unreachable at Crossfade 0, where the body is the whole member.
+// seekBody positions the open member at local and refuses with
+// CodeMalformedInput a landing past the member's body (all of it but its
+// tail zone). container.Seeker allows a late landing, and one inside the
+// tail zone would capture a tail shorter than X and blend it against a zone
+// that declared X, silently. Landing exactly at the body's end is legal:
+// bound() is 0 there and the ordinary capture follows.
 func (c *concat) seekBody(ctx context.Context, local int64) (int64, error) {
 	landed, err := c.seekMember(ctx, local)
 	if err != nil {
 		return 0, err
 	}
 	if body := c.lens[c.cur] - c.tailOf(c.cur); landed > body {
-		// Malformed input, as advance says: the member's first sync point
-		// lies past its whole body, so its declared length is not this stream's.
+		// The first sync point lies past the whole body, so the member's
+		// declared length is not its stream's.
 		return 0, waxerr.New(waxerr.CodeMalformedInput, fmt.Sprintf(
 			"waxflow: timeline member %d could not be positioned before its crossfade zone: "+
 				"a seek to %d landed at %d, past the %d samples that are the member's own",
@@ -1963,41 +1337,12 @@ func (c *concat) seekBody(ctx context.Context, local int64) (int64, error) {
 	return landed, nil
 }
 
-// seekIntoBlend positions inside member i's head zone, off frames into it.
-//
-// The zone's samples come from two members and a curve, so it lands at the
-// zone's start and pre-rolls: member i-1 is opened and read to its tail, which
-// is captured exactly as a continuous read would capture it, and then off
-// frames of the zone are pumped through fill and discarded. Seeking both sides
-// into the middle of the zone would be the alternative, and this is cheaper as
-// well as more honest.
-//
-// # What is exact here, and what is not
-//
-// The incoming member's half is bit-identical whether the zone is reached
-// continuously or by this seek, unconditionally: member i is opened here and
-// read from its own sample 0, which is exactly what advance would have done.
-// That is what lazy opening buys (ADR-0009).
-//
-// The outgoing member's half is exact only on a uniform timeline. Member i-1
-// is opened fresh and seeked to its body's end, so buildChain builds a cold
-// chain and seekMember's back-off primes it by a frame or two. On a resampled
-// member the FIR window is still zero-filled, and that transient lands at gain
-// cos(0) = 1.0, at exactly zone[0], the one frame the curve promises is the
-// outgoing member's own sample. A continuous read reaches that frame with a
-// warm chain, so the two differ. A uniform timeline has no chain to be cold
-// (see buildChain), which is both the gapless album and the two-slice declick.
-// A crossfaded mixed-rate timeline seeked on /stream reaches it, and there the
-// transient is one landing among others: a progressive seek starts cold
-// everywhere else too, and the length stays exact.
-//
-// Priming the outgoing member is possible and is not worth it: it would be a
-// new invariant for one case, and the consumer that would notice already
-// primes. The segmented restart is exact even here, and for a reason worth
-// keeping straight: its priming window (primeStarts) reaches back at least the
-// chain's own prime before the first kept sample, which dwarfs any FIR window,
-// so the cold-chain transient at zone[0] is discarded before p0 rather than
-// served.
+// seekIntoBlend positions off frames into member i's head zone, which is two
+// members and a curve: it seeks member i-1 to its body's end, captures its
+// tail as a continuous read does, opens member i, and pre-rolls off frames
+// through fill. The incoming half is bit-identical to a continuous read; the
+// outgoing half is exact only on a uniform timeline, since member i-1's
+// chain starts cold (ADR-0009).
 func (c *concat) seekIntoBlend(ctx context.Context, i int, off int64) (int64, error) {
 	if err := c.closeMember(); err != nil {
 		return 0, err
@@ -2005,10 +1350,8 @@ func (c *concat) seekIntoBlend(ctx context.Context, i int, off int64) (int64, er
 	if err := c.open(i - 1); err != nil {
 		return 0, err
 	}
-	// seekBody refuses a landing past the body, and a landing short of it
-	// means the stream ended first (a seek past a Media's real end lands at
-	// that end), which captureTail refuses. So this lands exactly at the
-	// body's end, and the tail captured below is the full X the zone declares.
+	// seekBody refuses a landing past the body and captureTail one short of
+	// it, so the tail captured below is the full X the zone declares.
 	landed, err := c.seekBody(ctx, c.lens[i-1]-c.opts.Crossfade)
 	if err != nil {
 		return 0, err
@@ -2027,18 +1370,10 @@ func (c *concat) seekIntoBlend(ctx context.Context, i int, off int64) (int64, er
 	return c.pos, nil
 }
 
-// preRoll pumps n frames of the timeline through fill and discards them.
-//
-// It is dropOutput's twin one level up, and the level is the whole point: it
-// drives fill rather than a chain, because a zone's samples come from two
-// members and a curve, and no chain knows about any of them. The two pre-rolls
-// do not know about each other either, which is what keeps dropOutput and
-// seekMember member-level concerns below the blend.
-//
-// A right-sized buffer can never over-read past the target, so no carry
-// survives the seek. The loop needs no zero-progress guard for the same reason
-// dropOutput's does not: fill cannot answer with an empty chunk that is not
-// io.EOF, since readMember refuses one.
+// preRoll pumps n frames of the timeline through fill and discards them. It
+// drives fill, not a chain, because a zone's samples come from two members
+// and a curve. A right-sized buffer never over-reads, and fill answers no
+// empty chunk but io.EOF (readMember), so the loop needs no progress guard.
 func (c *concat) preRoll(n int64) error {
 	for n > 0 {
 		buf := audio.Get(c.fmt, int(min(n, int64(audio.StandardChunk))))
@@ -2058,17 +1393,9 @@ func (c *concat) preRoll(n int64) error {
 }
 
 // memberAt returns the member holding timeline sample target, which must be
-// inside the timeline. It searches for the first member ending past the
-// target rather than the last one starting at or before it, so a zero-length
-// member (an odd but legal header) is skipped rather than selected.
-//
-// With a crossfade, starts[i+1] is no longer where member i ends: it ends at
-// starts[i+1]+X, overlapping its successor by the zone they share. The search
-// is right anyway, because what it actually computes is the last member that
-// has begun at or before the target, and that is unaffected by where members
-// end. A target inside a zone selects the later of the two members, which is
-// the answer rather than a rounding of it: the zone is that member's head, and
-// its head is where a seek into the zone has to start from (see seekIntoBlend).
+// inside the timeline: the first whose successor starts past it, so a
+// zero-length member is skipped. A target in a crossfade zone selects the
+// later member, whose head the zone is (see seekIntoBlend).
 func (c *concat) memberAt(target int64) int {
 	return sort.Search(len(c.members), func(i int) bool { return target < c.starts[i+1] })
 }
@@ -2079,10 +1406,8 @@ func (c *concat) open(i int) error {
 	if err != nil {
 		return err
 	}
-	// The declared format is what the envelope was computed from and what
-	// the chain is built for, so a member that opens as something else would
-	// otherwise surface as a buffer-format mismatch from deep inside the
-	// chain. Say what actually happened instead.
+	// A member that opens as another format would fail deep in the chain, as a
+	// buffer mismatch; name it here.
 	if got := med.Info().Default().Fmt; got != c.tracks[i].Fmt {
 		med.Close()
 		return waxerr.New(waxerr.CodeSourceChanged, fmt.Sprintf(
@@ -2097,14 +1422,9 @@ func (c *concat) open(i int) error {
 	return nil
 }
 
-// buildChain wires the open member's normalization to the envelope, leaving
-// the member read straight through when it already matches.
-//
-// It always builds a fresh chain, which matters after a seek. Reusing one
-// would make its kernels take the seek's Discont as a splice and drain the
-// pre-seek segment first, delivering samples from the position we just left;
-// a chain that has never been read anchors on its first chunk instead, which
-// is the post-seek position exactly.
+// buildChain wires the open member's normalization to the envelope, or none
+// when it already matches. It always builds a fresh chain: a reused one
+// would take a seek's Discont as a splice and drain the pre-seek audio first.
 func (c *concat) buildChain() error {
 	if c.chain != nil {
 		c.chain.Release()
@@ -2116,23 +1436,17 @@ func (c *concat) buildChain() error {
 	}
 	chain, err := dsp.NewChain(dsp.NewSource(c.med, in), concatSpec(c.fmt, c.opts))
 	if err != nil {
-		// Which member is the only thing a caller can act on, and the chain
-		// does not know: it was handed one format out of several.
+		// The chain cannot name the member, which is what a caller needs.
 		return waxerr.Annotate(fmt.Sprintf("member %d", c.cur), err)
 	}
 	c.chain = chain
 	return nil
 }
 
-// readMember pulls the open member's next normalized chunk, holding the
-// member to the one part of the Stage contract a timeline cannot survive being
-// wrong about: io.EOF is the only empty answer.
-//
-// A member that returns no frames and no error would make this timeline return
-// the same to its own caller, which would spin whatever loop is reading it. The
-// chain path is already checked at the seam where a reader enters a chain
-// (dsp.NewSource); a uniform member has no chain by design, so it is read
-// straight through and this is that member's seam.
+// readMember pulls the open member's next normalized chunk and refuses, with
+// CodeInternal, an empty chunk that is not io.EOF, which would spin the
+// timeline's reader. dsp.NewSource checks the chain path; this is the check
+// for a member read straight through.
 func (c *concat) readMember(dst *audio.Buffer) error {
 	if c.chain != nil {
 		return c.chain.ReadChunk(dst)
@@ -2145,11 +1459,9 @@ func (c *concat) readMember(dst *audio.Buffer) error {
 	return err
 }
 
-// tailOf is member i's tail zone: X samples for every member but the last,
-// which has no seam after it to blend across. Its twin, the head zone, is X
-// for every member but the first, and it is not a function of its own because
-// the head zone is not a thing this member reads: it is the previous member's
-// tail, arriving as the blend.
+// tailOf is member i's tail zone: X for every member but the last. The head
+// zone (X for all but the first) is the previous member's tail, arriving as
+// the blend, so it has no function.
 func (c *concat) tailOf(i int) int64 {
 	if i >= len(c.members)-1 {
 		return 0
@@ -2157,24 +1469,11 @@ func (c *concat) tailOf(i int) int64 {
 	return c.opts.Crossfade
 }
 
-// bound is how many frames the next read may take, or -1 for no bound at all.
-// It is the one place the zone geometry is read.
-//
-// The two bounded cases are disjoint, and that is the fit rule doing the work
-// rather than luck. head+tail <= L means a member's tail zone starts at or
-// after its head zone ends (equality lands them adjacent, with no body
-// between), so at any moment at most one of them is in flight: while the blend
-// is live the read is bounded by what is left of it, and once it is spent the
-// read is bounded by the member's own tail zone. There is never a third case
-// where a frame belongs to both.
-//
-// The -1 is absent rather than computed, and structurally so. Cap() == Stride,
-// so bounding a read means a right-sized audio.Get plus a CopyFrames, and a
-// bound computed for a member with no tail zone would put the last chunk of
-// every member of every butt-joined timeline through that copy. A timeline at
-// Crossfade 0 has no tail zones anywhere, so it takes today's path for the
-// same reason it always did: there is nothing to bound (ADR-0009's zero-copy
-// case).
+// bound is how many frames the next read may take, or -1 for no bound; it is
+// the one place the zone geometry is read. The fit rule (head+tail <= L)
+// keeps a member's zones disjoint, so the live blend bounds the read, then
+// the member's tail zone. A member with no tail zone, every one at Crossfade
+// 0, is unbounded, so a butt-join never pays the bounded read's copy.
 func (c *concat) bound() int64 {
 	if c.blend != nil {
 		return int64(c.blend.N - c.blendOff)
@@ -2186,19 +1485,10 @@ func (c *concat) bound() int64 {
 	return c.lens[c.cur] - tail - c.local
 }
 
-// readBounded reads the open member's next chunk, holding it to n frames. n is
-// bound()'s answer, taken as a parameter rather than re-read: fill has already
-// established it is not 0 (that case is the tail capture, not a read), and a
-// bound is a fact about one moment, so the caller that acted on it is the
-// caller that should hand it over rather than ask twice and hope.
-//
-// A bound at or above dst's capacity is no bound: the read cannot reach it, so
-// it fills dst directly and the copy is skipped. That keeps the body of a
-// crossfaded member as zero-copy as a butt-joined one, and leaves the scratch
-// for the one chunk per zone edge that genuinely has to stop short. A
-// right-sized audio.Get can never over-read, because Get sets Stride to
-// exactly the frames asked for (the same property dropOutput's scratch rests
-// on).
+// readBounded reads the open member's next chunk, at most n frames, n being
+// fill's bound() answer (never 0). A bound at or past dst's capacity reads
+// into dst directly, so only a chunk at a zone edge goes through a scratch,
+// which audio.Get sizes exactly and so never over-reads.
 func (c *concat) readBounded(dst *audio.Buffer, n int64) error {
 	if n < 0 || n >= int64(dst.Cap()) {
 		return c.readMember(dst)
@@ -2213,45 +1503,24 @@ func (c *concat) readBounded(dst *audio.Buffer, n int64) error {
 	return err
 }
 
-// captureTail reads the open member's tail zone into a blend buffer and opens
-// the next member, whose head zone that buffer now is.
-//
-// The two are one step on purpose. A blend belongs to the member about to
-// open, so publishing it before the advance would leave a failed advance's
-// next read mixing a member into its own tail.
-//
-// It reads the member's rest to io.EOF rather than a count, which is what
-// keeps both of the timeline's existing length checks firing unchanged. The
-// buffer cannot overflow, and the reason is worth following: capture begins at
-// local == L-X, so blend.N == local - (L-X) throughout, and count's own
-// ceiling (local <= L) is therefore blend.N <= X. The bounds check and the
-// length check are the same check, and count runs first, so it refuses exactly
-// the read that would overrun the buffer. A member that instead ends early
-// inside its own tail reaches advance's "delivered %d, declared %d" rather
-// than blending against uninitialized frames.
-//
-// All of which rests on where capture begins, so that is checked rather than
-// assumed. fill arrives here only on bound() == 0, which is the body's end by
-// construction; seekIntoBlend arrives here from a member seek, and a member is
-// a caller's Media whose seek can land wherever it likes. A landing short of
-// the body would silently break the identity above and overflow the buffer,
-// and audio.CopyFrames bounds its offsets by Stride only as a contract on this
-// caller: the overrun would corrupt each channel into the next one's region
-// and panic on the last. The whole point of the identity is that no other
-// check stands behind it.
+// captureTail reads the open member's tail zone into a blend buffer and
+// advances to the next member, whose head zone the buffer is; publishing it
+// before a failed advance would mix a member into its own tail. It reads to
+// io.EOF, so count and advance hold the member to its length as on any read,
+// and since capture starts at local == L-X, count's ceiling (local <= L) is
+// the buffer's (blend.N <= X). That start is checked for this reason: a seek
+// landing elsewhere is CodeMalformedInput, since a short start would overrun
+// the buffer with no other check behind it.
 func (c *concat) captureTail() error {
 	x := c.tailOf(c.cur)
 	if want := c.lens[c.cur] - x; c.local != want {
-		// Malformed input, as advance says: the member's headers do not
-		// describe the stream its seek found.
+		// The member's headers do not describe the stream its seek found.
 		return waxerr.New(waxerr.CodeMalformedInput, fmt.Sprintf(
 			"waxflow: timeline member %d is at sample %d, not the %d where its crossfade zone begins; "+
 				"its seek landed somewhere the member's own headers say it should not have", c.cur, c.local, want))
 	}
 	blend := audio.Get(c.fmt, int(x))
-	// One scratch for the whole capture: it is the same size every pass, so a
-	// fresh one per chunk would be a pool round-trip per 4096 frames to hand
-	// back exactly what it just took.
+	// One scratch for the capture, not a pool round trip per chunk.
 	buf := audio.Get(c.fmt, audio.StandardChunk)
 	defer audio.Put(buf)
 	for {
@@ -2299,38 +1568,19 @@ func (c *concat) releaseBlend() {
 	c.blendOff = 0
 }
 
-// blendFrames mixes out's frames (the outgoing member's tail, from frame off)
-// into dst (the incoming member's head) with an equal-power curve, in place.
-// x is the zone's full width; off is how far into it dst's first frame lies.
-//
-// Unexported, and not in dsp/gain, which is where a gain curve would look like
-// it belongs. That package's convention is per-channel []float32 with no
-// buffers and no strides; this takes two strided audio.Buffers, in either
-// domain, and saturates at the envelope's rails. It cannot be a chain stage
-// either, because a uniform member has no chain (see buildChain) and that is
-// exactly the case a gapless album hits. ADR-0002: exported surface is cheap
-// to add and expensive to remove, and there is one caller.
-//
-// cos out and sin in, so the two gains square to one and uncorrelated material
-// holds its level across the zone where a linear fade dips 3 dB. t runs [0,1)
-// over the zone and reaches 1 only at the frame after it, which is the
-// half-open interval the zone is: the zone's first frame is the outgoing
-// member's own sample exactly, and the first frame past it is the incoming
-// member's. That is what makes a declick a declick, and it is also why there
-// is no dither here. This is a mix at the working depth rather than a
-// reduction to a shallower one, and dither would deny the zone's first frame
-// the exactness the endpoints promise.
+// blendFrames mixes out's frames from off (the outgoing member's tail) into
+// dst (the incoming member's head) in place, with an equal-power curve over
+// a zone x wide: cos out, sin in. t runs over [0,1) of the zone, so the
+// zone's first frame is the outgoing member's own sample. It takes no
+// dither, being a mix at the working depth (ADR-0009). Int samples round and
+// clamp at the quantizer's rails; float is left to the output quantizer
+// (ADR-0010).
 func blendFrames(dst, out *audio.Buffer, off, x int) {
 	n, chans := dst.N, dst.Fmt.Channels
-	// The domain branch is hoisted rather than per-sample, and the gains are
-	// computed per frame rather than per sample: they do not depend on the
-	// channel, so stereo halves the trigonometry and 8-channel divides it by
-	// eight.
+	// The gains are per frame: they do not depend on the channel.
 	if dst.Fmt.Type == audio.Float {
-		// Float is deliberately not clamped. audio.Buffer says float is
-		// nominal, and convertStage's own doc says the output quantizer
-		// absorbs the overshoot. The asymmetry with the int path below is the
-		// tree's, not this function's.
+		// Unclamped: float is nominal, and the output quantizer absorbs the
+		// overshoot (convertStage).
 		for k := range n {
 			sin, cos := math.Sincos(float64(off+k) / float64(x) * (math.Pi / 2))
 			gi, go_ := float32(sin), float32(cos)
@@ -2341,17 +1591,9 @@ func blendFrames(dst, out *audio.Buffer, off, x int) {
 		}
 		return
 	}
-	// The rails, and the rounding, are dither.Quantize's own (NewQuantizer
-	// sets lo/hi to exactly these; Quantize applies them after a
-	// math.Floor(x+0.5)). There is no audio.Buffer contract that an int sample
-	// fits its bit depth, so this is the anchor that exists: the quantizer is
-	// the only producer of int samples in the pipeline, and a crossfade is the
-	// first one that is not it, so it inherits the obligation.
-	//
-	// It is a real overflow and not a theoretical one. An equal-power blend of
-	// correlated material peaks at +3 dB (two identical signals at 0.707 each
-	// reach 1.414 where they meet), and for an Int/16 envelope delivered to
-	// FLAC, NewChain inserts nothing between here and the encoder.
+	// Clamped at dither.Quantize's rails, with its rounding: a blend of
+	// correlated material peaks at +3 dB, and no later stage (an Int/16
+	// envelope to FLAC has none) clamps an int sample to its depth.
 	scale := math.Ldexp(1, dst.Fmt.BitDepth-1)
 	lo, hi := -scale, scale-1
 	for k := range n {
@@ -2375,10 +1617,8 @@ func (c *concat) seekMember(ctx context.Context, local int64) (int64, error) {
 	if c.chain == nil {
 		return c.med.SeekSample(ctx, local)
 	}
-	// The member's own timeline runs at its source rate. Map back to it,
-	// flooring and then backing off one more sample so the landing is at or
-	// before the target whatever the ratio rounds to; the slop is discarded
-	// below.
+	// Mapped back to the source rate, floored, and backed off one more sample
+	// so the landing is at or before the target; the slop is discarded below.
 	src := local
 	if l, m := c.chain.Ratio(); l != m {
 		src = local * int64(m) / int64(l)
@@ -2395,9 +1635,8 @@ func (c *concat) seekMember(ctx context.Context, local int64) (int64, error) {
 	// resampler's anchor is the same ceil(pos*L/M) that OutputSamples is.
 	out := c.chain.OutputSamples(landed)
 	if out >= local {
-		// The member's first sync point lay past the target, which the
-		// container.Seeker contract permits. Report where the stream really
-		// starts rather than pretending it starts where it was asked to.
+		// A late first sync point, which container.Seeker permits: report where
+		// the stream starts.
 		return out, nil
 	}
 	if err := c.dropOutput(local - out); err != nil {
@@ -2407,13 +1646,9 @@ func (c *concat) seekMember(ctx context.Context, local int64) (int64, error) {
 }
 
 // dropOutput decodes and discards n frames of the open member's normalized
-// output: the slop between where the source seek could land and the sample
-// the caller asked for. A scratch sized to what is left can never over-read
-// past the target, so no carry survives the seek.
-//
-// The loop needs no zero-progress guard of its own: a chunk that is empty
-// without being io.EOF cannot reach it, because dsp.NewSource rejects one at
-// the point a reader enters the chain.
+// output, the slop between the source seek's landing and the ask. A scratch
+// sized to what is left never over-reads, and dsp.NewSource refuses an empty
+// chunk that is not io.EOF, so the loop needs no progress guard.
 func (c *concat) dropOutput(n int64) error {
 	for n > 0 {
 		buf := audio.Get(c.fmt, int(min(n, int64(audio.StandardChunk))))
@@ -2432,15 +1667,9 @@ func (c *concat) dropOutput(n int64) error {
 	return nil
 }
 
-// count advances the open member's position and holds it to the length its
-// headers declared.
-//
-// An advisory length is a tolerated oddity for one file and fatal for a
-// timeline: two samples of drift desync the prefix sum, and the playlist then
-// promises a segment count the stream cannot fill, which is the tail 404 the
-// exact-length walk exists to prevent. So this is enforced rather than
-// trusted, which is why a timeline's mint measures every member whose length
-// is not exact.
+// count advances the open member's position and refuses with
+// CodeMalformedInput a member delivering more than its headers declared:
+// drift in one member desyncs every position after it (ADR-0009).
 func (c *concat) count(n int) error {
 	c.local += int64(n)
 	if want := c.lens[c.cur]; c.local > want {
@@ -2453,8 +1682,8 @@ func (c *concat) count(n int) error {
 // advance closes the finished member and moves to the next.
 func (c *concat) advance() error {
 	if want := c.lens[c.cur]; c.local != want {
-		// Malformed input, not an I/O failure: the bytes were fetched fine and
-		// the file's own declaration is what does not describe them.
+		// Malformed input: the bytes were read, and the file's declaration is
+		// what does not describe them.
 		return waxerr.New(waxerr.CodeMalformedInput, fmt.Sprintf(
 			"waxflow: timeline member %d delivered %d samples, its headers declared %d", c.cur, c.local, want))
 	}

@@ -251,3 +251,65 @@ caller wants, refused at mint time where a client can act on it.
 - `Concat` failing a run on length drift means a lying header takes down a
   timeline's playback rather than one file's. The mint measuring is what keeps
   that theoretical.
+
+## Amendment (2026-11-25): the run's seams, seeks and crossfade zones
+
+This adds to the decision above what `Concat`'s run holds itself to, and
+what a crossfade zone costs a seek.
+
+### A member's layout is refused at plan time
+
+The envelope's layout is the conventional one for its count, the only
+layout the mix node targets. A member at the envelope's count runs no mix
+and keeps its own layout, so that layout must already be the conventional
+one. A WAVEFORMATEXTENSIBLE mask naming other speakers is refused by name,
+not relabelled, since calling a back channel a front one misstates what the
+file holds. Every other member is mixed, and the envelope must place each
+of its positions: a back pair meeting a side pair does not place. A
+timeline normalizes channel counts, not speaker assignments.
+
+A placed member keeps its own levels. A mono member duplicated across a
+stereo envelope measures 10*log10(2) dB louder, which is the mono-to-stereo
+convention, not anything the envelope added.
+
+### Seams and positions
+
+The timeline's `Discont` overrides a member's rather than joining it. A
+freshly opened member's first chunk can carry `Discont`; passed through, it
+would drain the downstream resampler to end of stream and re-anchor, which
+re-creates the seam and changes the output length from ceil((nA+nB)L/M) to
+ceil(nA L/M) + ceil(nB L/M).
+
+A failed seek latches the timeline unpositioned, and reads refuse until a
+seek succeeds. Every step of a seek moves state the position depends on
+(the open member, its chain, where its media sits), so a failure part way
+leaves the position describing somewhere the stream no longer is, and a
+reopened member would deliver from its start under the old position. A span
+(`Slice`) makes the other call: its seek has one target, reached in one
+step, and a failure writes nothing, so its next read retries.
+
+### Crossfade zones
+
+The blend is equal-power, cos out and sin in, so uncorrelated material
+holds its level across the zone where a linear fade dips 3 dB. The zone is
+half-open: its first frame is the outgoing member's own sample, and the
+first frame past the zone the incoming member's. It is a mix at the working
+depth, so it takes no dither, which would deny that first frame its
+exactness. The blend is neither a `dsp/gain` curve, which takes no strided
+buffers, nor a chain stage, since a member already at the envelope has no
+chain.
+
+A seek into a zone lands at the zone's start and pre-rolls through the
+timeline, since no single member holds those samples: the outgoing member
+is seeked to its body's end, its tail captured as a continuous read
+captures it, the incoming member opened, and the offset into the zone read
+and discarded. The incoming half is bit-identical to a continuous read,
+because the member is read from its own sample 0, which is what lazy
+opening buys. The outgoing half is exact only on a uniform timeline: its
+chain starts cold, so a resampled member's filter transient lands on the
+zone's first frame at full gain. A progressive seek starts cold everywhere
+else too, and the length stays exact. The segmented restart serves no
+transient: its priming window reaches back past the chain's own prime, so
+the transient is discarded before the first kept sample. Priming the
+outgoing member would be a new invariant for that one case, and the
+consumer that would notice already primes.
