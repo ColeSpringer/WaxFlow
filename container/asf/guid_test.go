@@ -29,6 +29,8 @@ func TestGUIDWireOrder(t *testing.T) {
 		{guidContentDescription, "75B22633-668E-11CF-A6D9-00AA0062CE6C"},
 		{guidExtendedContentDescription, "D2D0A440-E307-11D2-97F0-00A0C95EA850"},
 		{guidMarker, "F487CD01-A951-11CF-8EE6-00C00C205365"},
+		{guidMetadata, "C5F8CBEA-5BAF-4877-8467-AA8C44FA4CCA"},
+		{guidMetadataLibrary, "44231C94-9498-49D1-A141-1D134E457054"},
 		{guidContentEncryption, "2211B3FB-BD23-11D2-B4B7-00A0C955FC6E"},
 		{guidExtendedContentEncryption, "298AE614-2622-4C17-B935-DAE07EE9289C"},
 		{guidAdvancedContentEncryption, "43058533-6981-49E6-9B74-AD12CB86D58C"},

@@ -1,7 +1,10 @@
 package waxflow
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -47,12 +50,16 @@ func TestOutputEmbedsTags(t *testing.T) {
 }
 
 // TestEveryFormAnswersWhetherTagsFit: every form says whether a tag set fits
-// its muxer, so no caller hands a muxer a set it would refuse unasked.
+// its muxer, so no caller hands a muxer a set it would refuse unasked, and
+// which keys its muxer leaves out.
 func TestEveryFormAnswersWhetherTagsFit(t *testing.T) {
 	for _, o := range outputs {
 		for _, f := range o.forms {
 			if f.tagsFit == nil {
 				t.Errorf("%s/%q has no tagsFit", o.name, f.name)
+			}
+			if f.leftOut == nil {
+				t.Errorf("%s/%q has no leftOut", o.name, f.name)
 			}
 		}
 	}
@@ -86,6 +93,42 @@ func TestTagsFitAsksTheFormsOwnWriter(t *testing.T) {
 			fitErr := TagsFit(o.name, f.name, tags(n+1))
 			if err := write(n + 1); err == nil || err.Error() != fitErr.Error() {
 				t.Errorf("%s/%q: a %d-byte TITLE: the write says %v, TagsFit %v", o.name, f.name, n+1, err, fitErr)
+			}
+		}
+	}
+}
+
+// TestTagsLeftOutIsWhatTheMuxerDoesNotWrite: on every form, the keys
+// TagsLeftOut names are the ones whose values the muxer's output does not
+// hold, so a caller that warns by it warns of what was lost and no more.
+func TestTagsLeftOutIsWhatTheMuxerDoesNotWrite(t *testing.T) {
+	raw := sineWAV(t)
+	e := New()
+	var tags []container.Tag
+	for i, key := range []string{
+		"TITLE", "ARTIST", "COMMENT", "MOOD", "ENCODER", "MUSICBRAINZ TRACK ID", "A=B", " ALBUM", "X",
+	} {
+		tags = append(tags, container.Tag{Key: key, Value: fmt.Sprintf("the %d. value", i)})
+	}
+	for _, o := range outputs {
+		for _, f := range o.forms {
+			var out testutil.MemWriteSeeker
+			if _, err := e.Transcode(context.Background(), container.BytesSource(raw), "wav", &out,
+				TranscodeOptions{Format: o.name, Container: f.name}, WithTags(tags)); err != nil {
+				t.Errorf("%s/%q: %v", o.name, f.name, err)
+				continue
+			}
+			var absent []string
+			for _, tag := range tags {
+				if !bytes.Contains(out.Buf, []byte(tag.Value)) {
+					absent = append(absent, tag.Key)
+				}
+			}
+			got := TagsLeftOut(o.name, f.name, tags)
+			slices.Sort(got)
+			slices.Sort(absent)
+			if !slices.Equal(got, absent) {
+				t.Errorf("%s/%q: TagsLeftOut names %q, the output lacks %q", o.name, f.name, got, absent)
 			}
 		}
 	}

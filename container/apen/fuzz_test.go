@@ -21,6 +21,20 @@ func FuzzDemux(f *testing.F) {
 	f.Add(fixture(f, "sine-s16.ape"))
 	f.Add(fixture(f, "tagged.ape"))
 	f.Add([]byte("MAC \x8e\x0f\x62\x33\x34\x00\x00\x00"))
+	// What follows the audio: a Lyrics3 block between the tags, a tag behind
+	// junk, and a footer that points into the first frame.
+	f.Add(lyricsStack(f))
+	f.Add(tagBehindJunk(f, "seek.ape"))
+	f.Add(footerIntoFirstFrame(f, "seek.ape"))
+	// A block behind the stream that passes for a tag and is none.
+	f.Add(append(fixture(f, "seek.ape"), overlappingTag()...))
+	// A cut first frame behind tags, and a first frame stating more bytes
+	// than a frame may have with a footer pointing below its end.
+	f.Add(append(cutBy(f, "sine-s16.ape", 50), "TAGtitle"+string(make([]byte, 120))...))
+	f.Add(hugeFirstFrame(f))
+	// Cut short inside the last frame, and inside the one before it.
+	f.Add(full[:len(full)-100])
+	f.Add(full[:len(full)/2])
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		testutil.DemuxFuzz{

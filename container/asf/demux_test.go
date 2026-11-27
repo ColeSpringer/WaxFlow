@@ -997,7 +997,7 @@ func TestNumericDescriptorsAreRead(t *testing.T) {
 		{"WM/AlbumTitle", 0, utf16("Numeric Album")}, // the ordinary form
 		{"WM/Genre", 4, u64(42)},                     // QWORD
 		{"WM/Picture", 1, []byte{0xFF, 0xD8, 0xFF}},  // BYTE array: not a tag
-		{"WM/IsVBR", 2, []byte{1, 0, 0, 0}},          // BOOL: not a tag
+		{"IsVBR", 2, []byte{1, 0, 0, 0}},             // encoder bookkeeping: not a tag
 	}
 	tags := open(t, withExtendedContentDescription(t, raw, ecd)).Tags()
 	for key, want := range map[string]string{
@@ -1011,7 +1011,8 @@ func TestNumericDescriptorsAreRead(t *testing.T) {
 			t.Errorf("tag %s = %q, want [%q]", key, got, want)
 		}
 	}
-	// A picture is not what Tagger serves, and a flag is not a tag at all.
+	// A picture is not what Tagger serves, and IsVBR is encoder bookkeeping
+	// neither reader keeps.
 	for _, key := range []string{"PICTURE", "ISVBR", "WM/PICTURE"} {
 		if got := tags[key]; len(got) != 0 {
 			t.Errorf("tag %s = %q, want nothing", key, got)

@@ -3,6 +3,7 @@ package mpa_test
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/colespringer/waxflow/container"
@@ -32,6 +33,12 @@ func FuzzDemux(f *testing.F) {
 	f.Add([]byte("ID3\x04\x00\x00\x00\x00\x00\x0a0123456789\xff\xfb\x90\x64"))
 	// A frame run long enough for the walker to give an index snapshot.
 	f.Add(testutil.ShortMP3Frames(mpegframes.IdxMinFrames + 16))
+	// Two files joined, end to end and across a tag, and tags behind a last
+	// frame cut short.
+	tagged := fixture(f, "sine-8000-cbr16.mp3")
+	f.Add(slices.Concat(tagged, tagged))
+	f.Add(slices.Concat(tagged, []byte("ID3\x03\x00\x00\x00\x00\x00\x05tag!!"), tagged))
+	f.Add(slices.Concat(tagged[:len(tagged)-20], []byte("TAG"), make([]byte, 125)))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		testutil.DemuxFuzz{

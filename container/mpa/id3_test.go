@@ -93,6 +93,23 @@ func TestID3v2TagRender(t *testing.T) {
 			tags: []container.Tag{{Key: "TRACKNUMBER", Value: "7"}},
 			want: map[string]string{"TRCK": "7"},
 		},
+		{
+			// A number that carries its total is one pair, not a total twice.
+			name: "number holding the total, and the total key",
+			tags: []container.Tag{{Key: "TRACKNUMBER", Value: "3/12"}, {Key: "TRACKTOTAL", Value: "12"},
+				{Key: "DISCNUMBER", Value: "1 of 2"}, {Key: "DISCTOTAL", Value: "3"}},
+			want: map[string]string{"TRCK": "3/12", "TPOS": "1/3"},
+		},
+		{
+			name: "number holding the total alone",
+			tags: []container.Tag{{Key: "TRACKNUMBER", Value: "3 of 12"}, {Key: "DISCNUMBER", Value: "1/2"}},
+			want: map[string]string{"TRCK": "3/12", "TPOS": "1/2"},
+		},
+		{
+			name: "a number that is not a pair stays whole",
+			tags: []container.Tag{{Key: "TRACKNUMBER", Value: "A/B"}, {Key: "TRACKTOTAL", Value: "12"}},
+			want: map[string]string{"TRCK": "A/B/12"},
+		},
 		{name: "no tags", tags: nil, want: nil},
 		{name: "unmapped keys only", tags: []container.Tag{{Key: "MOOD", Value: "calm"}}, want: nil},
 		{name: "empty values only", tags: []container.Tag{{Key: "TITLE", Value: ""}}, want: nil},

@@ -722,3 +722,67 @@ trim at the same position, so a read delivers the same samples and a walk
 settles the same length. What moves is which rung answers: a copy or a cut
 off such a file to a container that states one end trim was declined to
 the transcode and is now a copy, under the copy's own key.
+
+## Amendment (2026-11-27): the readers and writers agree with the tag library
+
+waxlabel v1.9.0 reads tags, chapters and stream ends in shapes this engine
+read otherwise or refused, and both readers speak for one source. The
+native readers and the muxers that write tags were brought to its answers
+(MAINTENANCE.md names what was ported). Each term below moved because an
+unchanged file now delivers other samples, tags or chapters, or because a
+muxer writes other bytes around unchanged packets.
+
+Demuxers:
+
+- `mp4-demux-3`: a text track is a chapter track only where another track
+  names it, so subtitles are no longer chapters; a chapter list's last end,
+  its titles' text encoding and the choice among several `chpl` atoms
+  follow the library; tags are read from a `meta` under `moov`, a keys
+  store and QuickTime text atoms, first store first, under the library's
+  whole vocabulary; of two `mdhd` or `mvhd` atoms the first is read. In a
+  fragment, a `traf` whose `tfhd` states no base is read from behind the
+  data of the `traf` before it (ISO/IEC 14496-12, 8.8.7), and every `trun`
+  of a `traf` is read, where only the first was. An MPEG audio track whose
+  first frame is Layer I or II is passed over for the movie's next track.
+- `mka-demux-3`: bytes that head no element between a Segment's children
+  are stepped over, up to 64 KiB, where the stream ended at them; a file
+  cut inside a later cluster of an unsized Segment delivers that cluster's
+  whole blocks. An `A_MPEG/L3` track whose first frame is Layer I or II is
+  passed over for the file's next track.
+- `asf-demux-3`, now on a track of any codec: descriptor names read under
+  the library's keys, a number holding its total as the two keys, and
+  boolean descriptors as "1" or "0".
+- `wv-demux-3`, and `apen-demux-2`, `mpc-demux-2`, `adts-demux-2` and
+  `mpa-demux-2`, each new: a Lyrics3 block is a trailer, so the APEv2 tag in
+  front of it is read; a tag behind junk is read; an APE footer that would
+  place its tag inside the first audio unit is not a tag; item names are
+  trimmed and `USLT` is the lyrics. An ADTS or MP3 stream ends at its
+  trailing tags, so a last frame the tags cut short is no longer decoded
+  with their bytes; ADTS reads the APEv2 tag behind it. MP3 files joined
+  end to end play through, where the first file's count ended the stream:
+  a join is a byte count that ends on the next file's tags or metadata
+  frame, or on a frame where the stream's own frame count ends too.
+  A Monkey's Audio file cut inside its last frame ends at the last whole
+  frame.
+
+Muxers:
+
+- `mp4-mux-2`: the `ilst` holds the library's whole vocabulary, a value to
+  a `data` atom, with a value an integer atom cannot hold as a freeform. A
+  chapter track whose first chapter starts late runs its media on by that
+  start, so a reader that ends the last chapter with the media ends it
+  where the chapter does, but only where the track then ends no later than
+  the movie or at least 2 s past it. In between the media stays as long as
+  the chapters, since ffmpeg counts a track that ends within a second past
+  the audio into the file's duration.
+- `ogg-mux-4` and `flacn-mux-3`: the recording date is the `DATE` field.
+- `mpa-mux-4`: a track or disc number holding its total is written once.
+- `wv-mux-2` and `apen-mux-2`: an item name the format forbids is not
+  written, and a name is written trimmed.
+
+Every cached entry of a source in one of these containers, and of an
+output in one of these forms, misses once. A change that only reads a file
+the engine used to refuse moved no term: a stream behind chained ID3v2
+tags or a gap, a Matroska file cut short, PCM in Matroska with no stated
+channel count, MP3 in Matroska, an ASF header past 16 MiB, an MP4 whose
+`ftyp` follows a `free` box.

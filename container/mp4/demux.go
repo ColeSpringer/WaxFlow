@@ -11,8 +11,10 @@ import (
 	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/codecname"
 	"github.com/colespringer/waxflow/container/internal/diag"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
+	"github.com/colespringer/waxflow/internal/satmath"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -27,8 +29,8 @@ var (
 
 // DemuxerVersion is this demuxer's term in the ADR-0004 cache key, carried
 // by every MP4 track. Bump it for a change that makes the demuxer deliver
-// other samples for a file that has not changed.
-const DemuxerVersion = "mp4-demux-2"
+// other samples, tags or chapters for a file that has not changed.
+const DemuxerVersion = "mp4-demux-3"
 
 // Chapter is one parsed chapter marker, timed in the movie timeline. It
 // aliases the container-level type so demuxer chapters feed muxer options
@@ -46,12 +48,12 @@ type Demuxer struct {
 	sel      *track // the selected audio track's parsed detail
 	brands   []string
 	chapters []Chapter
-	tags     map[string][]string // ilst tags, canonical keys
+	tags     map[string][]string // the movie's tags, canonical keys
 	log      diag.Log
 
-	movieTimescale int64     // mvhd timescale (ticks per second)
-	movieDuration  int64     // mvhd duration in movie ticks, 0 when unstated
-	chplChapters   []Chapter // Nero chpl markers, if present
+	movieTimescale int64  // mvhd timescale (ticks per second)
+	movieDuration  int64  // mvhd duration in movie ticks, 0 when unstated
+	chpl           []byte // the Nero chpl payload read, nil when none holds chapters
 
 	// iTunes iTunSMPB gapless fields, in samples; valid only when smpbOK.
 	smpbDelay int64
@@ -85,15 +87,15 @@ type Demuxer struct {
 	// fragmentDuration is mehd's, in movie ticks: the fragmented movie's own
 	// statement of how long its fragments run to. 0 when unstated.
 	fragmentDuration int64
-	// trexes are the mvex per-track sample defaults, in box order; trex is the
-	// selected track's, resolved once selectAudio has picked one.
+	// trexes are the mvex per-track sample defaults, in box order. A traf
+	// takes its own track's (trexFor).
 	trexes     []trexDefaults
-	trex       trexDefaults
 	fragStart  int64        // offset of the first top-level box after moov
 	fragOff    int64        // next top-level box the fragment iterator reads
 	fragQueue  []fragSample // the current fragment's samples
 	fragIdx    int
-	fragDecode int64 // running decode time (samples) for the next sample's PTS
+	moofHeads  moofHeads // the first moofs' heads, for firstFragmentHead
+	fragDecode int64     // running decode time (samples) for the next sample's PTS
 	// fragTruncated is how far the head's declared length runs past what the
 	// fragments hold (container.Truncated), and fragCompared marks the one
 	// comparison that finds it as made: by Walk, or by a read reaching the end
@@ -294,6 +296,18 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 			named++
 			continue
 		}
+		if t.codec == codec.MP3 && sel == nil {
+			// An mp4a object type says MPEG audio and names no layer, and an
+			// entry that does name Layer III can be wrong about its frames.
+			// The first frame decides: Layer I and II are named and passed
+			// over like any codec this build has no decoder for, so a later
+			// track can still be chosen. Only the candidate in hand is
+			// looked at, so a movie whose first sound track decodes costs
+			// one look, and none once a track is chosen.
+			if name := codecname.MPEGLayer(d.firstFrameHead(t)); name == "MP1" || name == "MP2" {
+				t.codec = codec.ID(name)
+			}
+		}
 		if !decodableAudio(t.codec) {
 			foundCodecs = append(foundCodecs, string(t.codec))
 			// An esds object type nothing names reaches here with the same
@@ -332,6 +346,7 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		return unsupported("no audio track")
 	}
 	d.sel = sel
+	d.moofHeads = moofHeads{} // the selection is made; the heads have served
 	if sel.note != "" {
 		d.note(0, "%s", sel.note)
 	}
@@ -372,11 +387,6 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		d.seekPreroll = mp3SeekPreroll
 		d.mp3Overhead = mp3FrameOverhead(sel.fmt)
 	}
-
-	// The selected track's movie-extends defaults, now that there is a selected
-	// track: a traf may omit a duration, size or flags and defer to them, and
-	// another track's are the wrong answer (see parseMvex).
-	d.trex = trexFor(d.trexes, sel.id)
 
 	var delay, padding, samples int64
 	var exact, advisory bool
@@ -422,7 +432,7 @@ func (d *Demuxer) selectAudio(tracks []*track) error {
 		SourceBitDepth:  sel.sourceBits,
 		Default:         true,
 	}
-	d.resolveChapters(tracks, sel)
+	d.resolveChapters(tracks)
 	return nil
 }
 
@@ -463,7 +473,7 @@ func (d *Demuxer) TruncatedSamples(int) int64 { return max(d.sel.st.truncated, d
 // carries none. The slice is the demuxer's own and must not be mutated.
 func (d *Demuxer) Chapters() []Chapter { return d.chapters }
 
-// Tags returns the ilst tags, nil when the file carries none. The map is
+// Tags returns the movie's tags, nil when the file carries none. The map is
 // the demuxer's own and must not be mutated; format.Info hands it on to
 // read-only consumers.
 func (d *Demuxer) Tags() map[string][]string { return d.tags }
@@ -669,18 +679,14 @@ func (d *Demuxer) SeekSample(ctx context.Context, track int, sample int64) (int6
 // cannot serve the first frame has a problem ReadPacket states better, and
 // the entry standing is exactly the behaviour that shipped before.
 func (d *Demuxer) mp3AdoptFrameFormat(t *track) error {
-	if d.fragmented || t.st.total == 0 {
+	if d.fragmented {
+		return nil
+	}
+	b := d.firstFrameHead(t)
+	if b == nil {
 		return nil
 	}
 	off := t.st.offsets[0]
-	if int(t.st.sizes[0]) < mp3.HeaderLen {
-		return nil
-	}
-	d.w.Trim(off)
-	b := d.w.Peek(off, mp3.HeaderLen)
-	if len(b) != mp3.HeaderLen {
-		return nil
-	}
 	h, err := mp3.ParseHeader(b)
 	if err != nil {
 		return nil
@@ -698,6 +704,257 @@ func (d *Demuxer) mp3AdoptFrameFormat(t *track) error {
 	}
 	t.fmt = got
 	return nil
+}
+
+// firstFrameHead returns the header bytes of a track's first sample, nil
+// when nothing places one in the file or the read does not deliver. The
+// sample table's first sample is the one where it holds any; a fragmented
+// movie with an empty table is asked for the track's first fragment sample.
+func (d *Demuxer) firstFrameHead(t *track) []byte {
+	if t.st.total == 0 {
+		if d.fragmented {
+			return d.firstFragmentHead(t)
+		}
+		return nil
+	}
+	if t.st.uniform || int(t.st.sizes[0]) < mp3.HeaderLen {
+		return nil
+	}
+	off := t.st.offsets[0]
+	d.w.Trim(off)
+	b := d.w.Peek(off, mp3.HeaderLen)
+	if len(b) != mp3.HeaderLen {
+		return nil
+	}
+	return b
+}
+
+const (
+	// maxHeadPeekBoxes bounds the boxes stepped over behind the moov in
+	// search of a track's first fragment, and maxHeadPeekBytes how much of
+	// each moof among them is read: a first sample is placed by the head of
+	// its traf. So what an open reads is at most that many moof heads,
+	// whatever the number of fragments, their size, or the tracks asking.
+	maxHeadPeekBoxes = 8
+	maxHeadPeekBytes = 64 << 10
+)
+
+// moofHeads is the heads of the first moofs where the fragments begin, read
+// as far as a track has asked and shared by every track that asks.
+type moofHeads struct {
+	started bool
+	next    int64 // where the walk resumes
+	boxes   int   // boxes stepped over so far
+	heads   []moofHead
+}
+
+// moofHead is one moof's head: where the box starts, the trafs it holds
+// that name a track, in order, and the first of them for each track id.
+type moofHead struct {
+	off   int64
+	trafs []headTraf
+	byID  map[int]int // an index into trafs
+}
+
+// headTraf is one traf of a moof's head, which may be cut off, and the
+// chain that places it: where the data of the trafs ahead of it ends.
+type headTraf struct {
+	body  []byte
+	chain trafChain
+}
+
+// moofHead returns the i-th moof head in the window where the fragments
+// begin, reading on to it if no track has asked that far yet. ok is false
+// when the window holds no such moof.
+func (d *Demuxer) moofHead(i int) (moofHead, bool) {
+	m := &d.moofHeads
+	if !m.started {
+		// Behind the moov, or at 0 in a bare segment.
+		m.started, m.next = true, d.fragStart
+	}
+	for len(m.heads) <= i {
+		if m.boxes >= maxHeadPeekBoxes || m.next < 0 || m.next >= d.size {
+			return moofHead{}, false
+		}
+		m.boxes++
+		b, err := d.readBox(m.next, d.size)
+		if err != nil || b.toEnd && b.typ != "moof" {
+			m.boxes = maxHeadPeekBoxes
+			return moofHead{}, false
+		}
+		m.next = b.off + b.size
+		if b.typ != "moof" {
+			continue
+		}
+		buf := make([]byte, min(b.payloadLen(), maxHeadPeekBytes))
+		if container.ReadFull(d.src, buf, b.payloadOff()) != nil {
+			m.boxes = maxHeadPeekBoxes
+			return moofHead{}, false
+		}
+		m.heads = append(m.heads, readMoofHead(buf, d.trexes, b.off))
+	}
+	return m.heads[i], true
+}
+
+// firstFragmentHead returns the header bytes of the first sample a fragment
+// holds for t, nil when no moof head in the window places one. The first
+// traf of the track that a moof head holds decides, in whichever of those
+// moofs it sits: a movie that gives each track its own moofs opens with
+// another track's. The read is past the window the packets are read
+// through, so a miss costs the read path nothing.
+func (d *Demuxer) firstFragmentHead(t *track) []byte {
+	for i := 0; ; i++ {
+		h, ok := d.moofHead(i)
+		if !ok {
+			return nil
+		}
+		if !h.holds(t.id) {
+			continue
+		}
+		off, size, ok := h.firstSample(t.id, d.trexes)
+		if !ok || size < mp3.HeaderLen || off < 0 || off > d.size-mp3.HeaderLen {
+			return nil
+		}
+		head := make([]byte, mp3.HeaderLen)
+		if container.ReadFull(d.src, head, off) != nil {
+			return nil
+		}
+		return head
+	}
+}
+
+// readMoofHead indexes the trafs the head of a moof's payload holds, buf,
+// for a moof at off. buf may be cut off anywhere. A traf whose tfhd does not
+// lie whole ahead of its trun names no track and is passed over.
+func readMoofHead(buf []byte, trexes []trexDefaults, off int64) moofHead {
+	h := moofHead{off: off, byID: map[int]int{}}
+	c := trafChain{moof: off, end: off, known: true}
+	walkPrefix(buf, func(typ string, traf []byte) bool {
+		if typ != "traf" {
+			return true
+		}
+		id, named := 0, false
+		walkPrefix(traf, func(typ string, p []byte) bool {
+			if typ != "tfhd" {
+				return typ != "trun"
+			}
+			if _, _, rest, full := fullBox(p); full && len(rest) >= 4 {
+				id, named = int(be32(rest)), true
+			}
+			return false
+		})
+		if !named {
+			c.known = false // nothing sizes its samples
+			return true
+		}
+		if _, held := h.byID[id]; !held {
+			h.byID[id] = len(h.trafs)
+		}
+		h.trafs = append(h.trafs, headTraf{body: traf, chain: c})
+		// Whole unless it is the last of a cut buffer, where nothing is
+		// left to base on it.
+		_ = c.add(nil, traf, trexFor(trexes, id))
+		return true
+	})
+	return h
+}
+
+// traf returns the first traf the head holds for a track id, or the first
+// of all for a track with no id of its own.
+func (h moofHead) traf(id int) (headTraf, bool) {
+	i := 0
+	if id > 0 {
+		var held bool
+		if i, held = h.byID[id]; !held {
+			return headTraf{}, false
+		}
+	}
+	if i >= len(h.trafs) {
+		return headTraf{}, false
+	}
+	return h.trafs[i], true
+}
+
+// holds reports whether the head holds a traf for a track id.
+func (h moofHead) holds(id int) bool {
+	_, ok := h.traf(id)
+	return ok
+}
+
+// firstSample places the first sample the head holds for a track id: where
+// it starts in the file and its size. ok is false when the head holds no
+// traf for the track, when the traf's tfhd or the first entry of its first
+// trun does not lie whole inside the head, and when the traf is based on
+// data the head cannot place.
+func (h moofHead) firstSample(id int, trexes []trexDefaults) (off int64, size uint32, ok bool) {
+	tr, held := h.traf(id)
+	if !held {
+		return 0, 0, false
+	}
+	trex := trexFor(trexes, id)
+	th := trafHead{size: trex.defaultSize}
+	sawTfhd := false
+	walkPrefix(tr.body, func(typ string, p []byte) bool {
+		switch typ {
+		case "tfhd":
+			if sawTfhd || !th.parse(p) {
+				return false
+			}
+			sawTfhd = true
+		case "trun":
+			t, whole := parseTrunHead(p)
+			if !sawTfhd || !whole || t.count == 0 {
+				return false
+			}
+			size = th.size
+			if t.flags&trunSize != 0 {
+				sizeAt := 0
+				if t.flags&trunDuration != 0 {
+					sizeAt = 4
+				}
+				if len(t.entries) < sizeAt+4 {
+					return false
+				}
+				size = be32(t.entries[sizeAt:])
+			}
+			base, known := th.dataBase(tr.chain)
+			if !known {
+				return false
+			}
+			off = base
+			if t.flags&trunDataOffset != 0 {
+				off = satmath.Add(base, int64(t.dataOff))
+			}
+			ok = true
+			return false
+		}
+		return true
+	})
+	return off, size, ok
+}
+
+// walkPrefix calls fn for each child box of a buffer that may be cut off,
+// until fn returns false. A box that runs past the end of the buffer is
+// passed with the bytes that are there.
+func walkPrefix(body []byte, fn func(typ string, payload []byte) bool) {
+	for len(body) >= 8 {
+		size := int64(be32(body))
+		hdr := int64(8)
+		if size == 1 {
+			if len(body) < 16 {
+				return
+			}
+			size, hdr = int64(be64(body[8:])), 16
+		}
+		if size < hdr {
+			return
+		}
+		end := min(size, int64(len(body)))
+		if !fn(string(body[4:8]), body[hdr:end]) || end < size {
+			return
+		}
+		body = body[size:]
+	}
 }
 
 // trimBrand renders a 4-byte brand, trimming trailing spaces and NULs, or

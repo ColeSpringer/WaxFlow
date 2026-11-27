@@ -138,7 +138,7 @@ func TestLongHeaderRoundTrips(t *testing.T) {
 		if v, _, _, ok := fullBox(tkhd); !ok || v != 1 {
 			t.Fatalf("tkhd version = %d, want 1", v)
 		}
-		if id := tkhdTrackID(tkhd); id != trackID {
+		if id, _ := tkhdTrackID(tkhd); id != trackID {
 			t.Fatalf("tkhd track_ID reads back as %d, want %d: the version-1 layout is wrong", id, trackID)
 		}
 	})

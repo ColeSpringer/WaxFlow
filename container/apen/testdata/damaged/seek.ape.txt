@@ -69,13 +69,13 @@ zero-middle seek 76228 landed 73728, then 73728 73728 6d81df2f
 zero-middle seek 114342 landed 73728, then 73728 73728 6d81df2f
 zero-middle seek warnings 0
 cut-tail file 38768 bytes: the last 100 bytes cut
-cut-tail open samples=152456 exact=true
-cut-tail packets 3
+cut-tail open samples=147456 exact=true
+cut-tail packets 2
 cut-tail p0 0 73728 14cb0c03
 cut-tail p1 73728 73728 d83b3e32
-cut-tail p2 147456 5000 445695ad
-cut-tail warnings 1
+cut-tail warnings 2
 cut-tail w0 damage at 38768: the descriptor counts 38736 bytes of frame data but 38636 are present
+cut-tail w1 damage at 37246: the last frame is cut short and does not decode, dropped
 cut-tail seek 38114 landed 0, then 0 73728 14cb0c03
 cut-tail seek 76228 landed 73728, then 73728 73728 d83b3e32
 cut-tail seek 114342 landed 73728, then 73728 73728 d83b3e32

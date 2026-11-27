@@ -441,9 +441,10 @@ func TestSplitJobCueDataFileBesideTheRip(t *testing.T) {
 }
 
 // TestSplitJobCueDataTrackBehindALyingHeader: a header that under-declares
-// cannot turn a data track into noise. A concatenated MP3 declares half of
-// what it holds, and the demuxer files the surplus frames as trailing
-// padding rather than audio, so a data track addressed inside that surplus
+// cannot turn a data track into noise. An MP3 whose tag counts half the
+// frames its byte count spans declares half of what it holds, and the
+// demuxer files the surplus frames as trailing padding rather than audio,
+// so a data track addressed inside that surplus
 // is past the audio: the split folds it away, and what it writes adds up
 // to the declared count and not a sample more. That, and not a re-measure,
 // is what keeps the daemon's answer the CLI's.
@@ -453,7 +454,7 @@ func TestSplitJobCueDataTrackBehindALyingHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doubled := append(append([]byte(nil), raw...), raw...)
+	doubled := testutil.UnderDeclaredMP3(t, raw)
 	if err := os.WriteFile(filepath.Join(env.root, "lie.mp3"), doubled, 0o644); err != nil {
 		t.Fatal(err)
 	}

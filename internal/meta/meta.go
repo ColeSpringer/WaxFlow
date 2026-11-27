@@ -19,9 +19,11 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/dsp/gain"
@@ -41,6 +43,12 @@ type Info struct {
 	// Synced are the timed-lyrics sets (unsynced lyrics ride in Tags
 	// under LYRICS).
 	Synced []SyncedLyrics
+	// CommentItems and LyricsItems say which description and language a
+	// COMMENT or LYRICS value had in the source, matched to it by Text.
+	// The values in Tags stay the authority: an item whose text is no
+	// longer a value there describes nothing. Nil when the source told
+	// none apart.
+	CommentItems, LyricsItems []TextItem
 	// Warnings are non-fatal notes bearing on this transfer: something the
 	// source carried that may not survive onto the output, or metadata
 	// that could not be read at all.
@@ -56,8 +64,36 @@ type Info struct {
 type Picture struct {
 	MIME        string
 	Description string
-	Front       bool
-	Data        []byte
+	// Type is the picture's role as ID3v2's APIC frame and FLAC's PICTURE
+	// block number it (3 the front cover, 4 the back, 0 other). Front says
+	// the same of the one role callers ask about.
+	Type  uint8
+	Front bool
+	Data  []byte
+}
+
+// PictureFrontCover is the Picture.Type of a front cover.
+const PictureFrontCover = 3
+
+// TextItem is one COMMENT or LYRICS value with the description and language
+// its format stored beside it (an ID3 COMM or USLT frame, a Matroska tag's
+// language).
+type TextItem struct {
+	Text, Description, Language string
+}
+
+// WritableText returns s as every tag writer can store it: cut at its first
+// NUL, where a C-string field ends, with each run of invalid UTF-8 replaced
+// by U+FFFD, which is how a reader shows it. changed reports that s was not
+// writable as given.
+func WritableText(s string) (clean string, changed bool) {
+	if i := strings.IndexByte(s, 0); i >= 0 {
+		s, changed = s[:i], true
+	}
+	if !utf8.ValidString(s) {
+		s, changed = strings.ToValidUTF8(s, "\uFFFD"), true
+	}
+	return s, changed
 }
 
 // SyncedLyrics is one timed-lyrics set.
@@ -176,8 +212,19 @@ func MinimalTags(info *Info) []container.Tag {
 				vals = info.Tags["ORIGINALDATE"]
 			}
 		}
-		for _, v := range vals {
-			out = append(out, container.Tag{Key: key, Value: v})
+		out = appendWritable(out, key, vals)
+	}
+	return out
+}
+
+// appendWritable appends key's values as tags, each as a writer stores text
+// (WritableText). A value the repair leaves empty is dropped: the muxers
+// write a value as given, and a NUL inside one ends a C-string field early
+// or, in an ID3 frame, splits it in two.
+func appendWritable(out []container.Tag, key string, vals []string) []container.Tag {
+	for _, v := range vals {
+		if clean, _ := WritableText(v); clean != "" || v == "" {
+			out = append(out, container.Tag{Key: key, Value: clean})
 		}
 	}
 	return out
@@ -197,9 +244,7 @@ func FullTags(info *Info) []container.Tag {
 	sortStrings(keys)
 	var out []container.Tag
 	for _, k := range keys {
-		for _, v := range info.Tags[k] {
-			out = append(out, container.Tag{Key: k, Value: v})
-		}
+		out = appendWritable(out, k, info.Tags[k])
 	}
 	return out
 }
@@ -227,6 +272,120 @@ func WithoutReplayGain(info *Info) *Info {
 			continue
 		}
 		out.Tags[k] = v
+	}
+	return &out
+}
+
+// Writable returns info with all of its text as every tag writer stores it
+// (WritableText), and a line naming each field it had to repair, in a fixed
+// order. A tag value the repair leaves empty is dropped. Such text comes
+// straight off a source (a Vorbis comment stores a NUL as readily as a
+// letter), and written as given it is cut short by one reader and split in
+// two by the next. info itself comes back, with no lines, when nothing
+// needed repair.
+func Writable(info *Info) (*Info, []string) {
+	if info == nil {
+		return nil, nil
+	}
+	var repaired []string
+	text := func(what, s string) string {
+		clean, changed := WritableText(s)
+		if changed && !slices.Contains(repaired, what) {
+			repaired = append(repaired, what)
+		}
+		return clean
+	}
+	out := *info
+	keys := slices.Sorted(maps.Keys(info.Tags))
+	if info.Tags != nil {
+		out.Tags = make(map[string][]string, len(info.Tags))
+	}
+	for _, k := range keys {
+		vals := make([]string, 0, len(info.Tags[k]))
+		for _, v := range info.Tags[k] {
+			if clean := text("tag "+k, v); clean != "" || v == "" {
+				vals = append(vals, clean)
+			}
+		}
+		if len(vals) > 0 || len(info.Tags[k]) == 0 {
+			out.Tags[k] = vals
+		}
+	}
+	items := func(key string, in []TextItem) []TextItem {
+		res := slices.Clone(in)
+		for i := range res {
+			res[i].Text, _ = WritableText(res[i].Text) // the tag loop named it
+			res[i].Description = text("tag "+key, res[i].Description)
+			res[i].Language = text("tag "+key, res[i].Language)
+		}
+		return res
+	}
+	out.CommentItems, out.LyricsItems = items("COMMENT", info.CommentItems), items("LYRICS", info.LyricsItems)
+	out.Chapters = writableChapters(info.Chapters, text)
+	out.Pictures = slices.Clone(info.Pictures)
+	for i := range out.Pictures {
+		out.Pictures[i].Description = text("a picture description", out.Pictures[i].Description)
+	}
+	out.Synced = slices.Clone(info.Synced)
+	for i := range out.Synced {
+		sl := &out.Synced[i]
+		sl.Language = text("synced lyrics", sl.Language)
+		sl.Description = text("synced lyrics", sl.Description)
+		sl.Lines = slices.Clone(sl.Lines)
+		for j := range sl.Lines {
+			sl.Lines[j].Text = text("synced lyrics", sl.Lines[j].Text)
+		}
+	}
+	if len(repaired) == 0 {
+		return info, nil
+	}
+	return &out, repaired
+}
+
+// WritableChapters returns chs with each title as a writer stores text
+// (WritableText), and whether any had to be repaired; chs itself comes back
+// when none did.
+func WritableChapters(chs []container.Chapter) ([]container.Chapter, bool) {
+	var changed bool
+	out := writableChapters(chs, func(_, s string) string {
+		clean, c := WritableText(s)
+		changed = changed || c
+		return clean
+	})
+	if !changed {
+		return chs, false
+	}
+	return out, true
+}
+
+func writableChapters(chs []container.Chapter, text func(what, s string) string) []container.Chapter {
+	out := slices.Clone(chs)
+	for i := range out {
+		out[i].Title = text("a chapter title", out[i].Title)
+	}
+	return out
+}
+
+// encodingKeys are stamps that would be false on another encoding of the
+// same audio: the encoder that wrote the file, and mp3gain's record of the
+// gain steps it applied to the frames (undoing it on another encode would
+// shift a level that was never moved). What still holds stays: who encoded
+// the source, its coding history, and its fingerprint, which names the
+// recording and is exact wherever the samples are.
+var encodingKeys = [...]string{"ENCODER", "MP3GAIN_UNDO", "MP3GAIN_MINMAX", "MP3GAIN_ALBUM_MINMAX"}
+
+// WithoutEncoding returns info minus the stamps of the source's own encoding
+// (a shallow copy; the map is rebuilt, and info itself comes back when it
+// holds none). An output that was encoded again was written by another
+// encoder, so the source's stamp on it would name one that did not.
+func WithoutEncoding(info *Info) *Info {
+	if info == nil || !slices.ContainsFunc(encodingKeys[:], func(k string) bool { _, ok := info.Tags[k]; return ok }) {
+		return info
+	}
+	out := *info
+	out.Tags = maps.Clone(info.Tags)
+	for _, k := range encodingKeys {
+		delete(out.Tags, k)
 	}
 	return &out
 }

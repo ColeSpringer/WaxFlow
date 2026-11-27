@@ -5,6 +5,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/aac"
 	"github.com/colespringer/waxflow/codec/flac"
+	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/codec/opus"
 	"github.com/colespringer/waxflow/codec/pcm"
 	"github.com/colespringer/waxflow/codec/vorbis"
@@ -14,18 +15,22 @@ import (
 // trackEntry is the subset of a Matroska TrackEntry the demuxer keeps: enough
 // to select the audio track and wire its decoder.
 type trackEntry struct {
-	number      uint64
-	trackType   uint64
-	codecID     string
-	codecName   string // trimmed codecID prefix, for diagnostics
-	codecPriv   []byte
-	rate        int
-	channels    int
-	bitDepth    int
-	codecDelay  int64 // nanoseconds
-	seekPreRoll int64 // nanoseconds
-	def         bool
-	enabled     bool
+	number    uint64
+	trackType uint64
+	codecID   string
+	codecName string // trimmed codecID prefix, for diagnostics
+	codecPriv []byte
+	rate      int // 8000 unless the Audio element states one
+	channels  int // 1 unless the Audio element states one
+	bitDepth  int
+	// rateStated and channelsStated say the file wrote the two above rather
+	// than leaving them to the format's defaults.
+	rateStated     bool
+	channelsStated bool
+	codecDelay     int64 // nanoseconds
+	seekPreRoll    int64 // nanoseconds
+	def            bool
+	enabled        bool
 }
 
 // codecSetup is the result of resolving a TrackEntry to a wired codec: the
@@ -47,9 +52,8 @@ type codecSetup struct {
 	warning string
 }
 
-// mkvCodecs maps a Matroska CodecID to a waxflow codec.ID. A recognized but
-// unwired codec (ALAC, MP3, ...) resolves to its name so track selection can
-// report why it was skipped; an unknown one stays "".
+// mkvCodecID maps a Matroska CodecID to a waxflow codec.ID, or "" for one this
+// build does not decode; track selection names those by codecName.
 func mkvCodecID(codecID string) codec.ID {
 	switch {
 	case codecID == "A_OPUS":
@@ -62,6 +66,8 @@ func mkvCodecID(codecID string) codec.ID {
 		return codec.AACLC
 	case hasPrefix(codecID, "A_PCM/"):
 		return codec.PCM
+	case codecID == "A_MPEG/L3":
+		return codec.MP3
 	default:
 		return ""
 	}
@@ -70,7 +76,7 @@ func mkvCodecID(codecID string) codec.ID {
 func hasPrefix(s, p string) bool { return len(s) >= len(p) && s[:len(p)] == p }
 
 // resolveCodec builds the codec setup for an audio TrackEntry with one of the
-// five wired codecs. The container's CodecPrivate is translated to the
+// six wired codecs. The container's CodecPrivate is translated to the
 // Track.CodecConfig the matching decoder parses.
 func resolveCodec(t *trackEntry) (codecSetup, error) {
 	switch mkvCodecID(t.codecID) {
@@ -84,9 +90,19 @@ func resolveCodec(t *trackEntry) (codecSetup, error) {
 		return setupAAC(t)
 	case codec.PCM:
 		return setupPCM(t)
+	case codec.MP3:
+		return setupMP3(t), nil
 	default:
 		return codecSetup{}, unsupported("codec %q is not one this build decodes", t.codecID)
 	}
+}
+
+// setupMP3 wires an MPEG audio Layer III track from the Audio element. It has
+// no CodecPrivate: each frame states its own rate and channel mode, so the
+// first frame's header has the last word (selectTrack). The format is the
+// decoder's output, which is floating point whatever BitDepth says.
+func setupMP3(t *trackEntry) codecSetup {
+	return codecSetup{id: codec.MP3, fmt: mp3.Header{Rate: t.rate, Channels: t.channels}.PCMFormat()}
 }
 
 // setupOpus wires an Opus track: CodecPrivate is the OpusHead the decoder and
@@ -179,8 +195,34 @@ func (s codecSetup) preRoll() int64 {
 		return 1024 // one IMDCT frame of overlap history
 	case codec.HEAAC:
 		return aac.HESeekPreroll
+	case codec.MP3:
+		return mp3SeekPreroll
 	}
 	return 0
+}
+
+const (
+	// mp3SeekPreroll is three frames of the longest MPEG audio frame (1152
+	// samples), for the filterbank's IMDCT overlap and synthesis window. The
+	// bit reservoir is counted in bytes, which mp3Backoff covers.
+	mp3SeekPreroll = 3 * 1152
+	// mp3ReservoirBytes is the most main data a frame may take from the ones
+	// before it (511 bytes) plus container/mpa's 64-byte margin.
+	mp3ReservoirBytes = 511 + 64
+	// mp3BackoffClusters bounds mp3Backoff, so a file of tiny clusters cannot
+	// make a seek walk back to the start.
+	mp3BackoffClusters = 128
+)
+
+// mp3FrameOverhead is what one frame of f spends ahead of its main data: the
+// header, a CRC assumed present, and the side info, which is largest for
+// MPEG-1 (32 kHz and up) stereo.
+func mp3FrameOverhead(f audio.Format) int64 {
+	h := mp3.Header{Channels: f.Channels, Version: mp3.MPEG2}
+	if f.Rate >= 32000 {
+		h.Version = mp3.MPEG1
+	}
+	return int64(mp3.HeaderLen + 2 + h.SideInfoLen())
 }
 
 // setupPCM wires a raw-PCM track from the CodecID (endianness and encoding)
@@ -284,6 +326,12 @@ func (d *Demuxer) frameSamples(data []byte) int64 {
 			return 0
 		}
 		return int64(fi.BlockSize)
+	case codec.MP3:
+		h, err := mp3.ParseHeader(data)
+		if err != nil {
+			return 0
+		}
+		return int64(h.SamplesPerFrame())
 	case codec.Vorbis:
 		if !d.setup.haveVorbis {
 			return 0

@@ -9,6 +9,7 @@ import (
 	"github.com/colespringer/waxflow/container/internal/diag"
 	"github.com/colespringer/waxflow/container/internal/id3"
 	"github.com/colespringer/waxflow/container/internal/mpegframes"
+	"github.com/colespringer/waxflow/container/internal/trailer"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -26,6 +27,11 @@ const (
 	// trailerScan is how far back trailing tag recognition looks.
 	trailerScan = 64 << 10
 )
+
+// DemuxerVersion is this demuxer's term in the ADR-0004 cache key, carried
+// by its track. Bump it for a change that makes the demuxer deliver other
+// samples for a file that has not changed.
+const DemuxerVersion = "mpa-demux-2"
 
 // Demuxer reads one MP3 track from an elementary stream source.
 type Demuxer struct {
@@ -50,6 +56,10 @@ func NewDemuxer(src container.Source, opts *container.DemuxerOptions) (*Demuxer,
 		Warn:    func(off int64, msg string) error { return d.warn(off, "%s", msg) },
 		Note:    func(off int64, msg string) { d.note(off, "%s", msg) },
 		Trailer: d.recognizedTrailer,
+		// Padding is not asked for: nothing here confirms a peel, and a
+		// run of NULs behind the frames is recognizedTrailer's to answer.
+		Trailers: trailer.APEv2 | trailer.ID3v1 | trailer.ID3v2 | trailer.Lyrics3,
+		Joined:   true,
 	})
 	if err := d.parse(); err != nil {
 		return nil, err
@@ -94,12 +104,13 @@ func (d *Demuxer) parse() error {
 
 	samples, delay, padding := tag.Gapless(d.walk.SamplesPerFrame())
 	d.track = container.Track{
-		Codec:   codec.MP3,
-		Fmt:     f,
-		Samples: samples,
-		Delay:   delay,
-		Padding: padding,
-		Default: true,
+		Codec:          codec.MP3,
+		Fmt:            f,
+		DemuxerVersion: DemuxerVersion,
+		Samples:        samples,
+		Delay:          delay,
+		Padding:        padding,
+		Default:        true,
 	}
 	return nil
 }
@@ -121,7 +132,9 @@ func (d *Demuxer) TruncatedSamples(int) int64 { return d.walk.Truncated() }
 // data is plain tag baggage: ID3v1, APEv2, an appended ID3v2, Lyrics3,
 // or NUL padding, possibly stacked. It is what makes a bare stream's end
 // different from a wrapped one's, where the chunk bounds the frames and
-// anything else inside it is damage.
+// anything else inside it is damage. The whole tags at the file's end are
+// already peeled off the data (mpegframes.Options.Trailers), so what reaches
+// here is what lies in front of them: padding, or a tag cut short.
 func (d *Demuxer) recognizedTrailer(off int64) bool {
 	if d.walk.DataEnd()-off > trailerScan {
 		return false

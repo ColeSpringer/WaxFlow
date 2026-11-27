@@ -1,10 +1,15 @@
 package mka
 
 import (
+	"math"
+	"slices"
 	"sort"
 	"strings"
 
+	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/codecname"
 	"github.com/colespringer/waxflow/container/internal/diag"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
 	"github.com/colespringer/waxflow/waxerr"
@@ -25,6 +30,12 @@ type Demuxer struct {
 
 	segmentDataOff int64
 	segmentEnd     int64
+	// openEnd says the Segment ends where the file does: it states no size,
+	// or one past the file (cutShort, warned at open). An element the file
+	// ends inside is then read up to the end rather than refused.
+	openEnd        bool
+	cutShort       bool
+	junkBuf        []byte  // resync's scratch
 	timestampScale int64   // nanoseconds per tick
 	durationTicks  float64 // Info Duration, in ticks; 0 when absent
 
@@ -71,7 +82,8 @@ type Demuxer struct {
 	walkTailCount int
 	walkTailTrims []container.PacketTrim
 	walkTailOver  int64
-	walkFrames    int // running frame count, against maxFrames
+	walkFrames    int   // running frame count, against maxFrames
+	walkBytes     int64 // running byte count of those frames
 	walkLimit     int64
 	walkStopped   bool // the walk in progress hit walkLimit rather than the end
 	// walkCursor is the walk's own reader cursor, where the last walk stood;
@@ -168,8 +180,10 @@ func (d *Demuxer) parse() error {
 		return err
 	}
 
-	// Segment follows the EBML header.
-	seg, err := d.readElement(head.dataEnd(), d.size)
+	// Segment follows the EBML header. One that states more bytes than the
+	// file holds is a file cut short: what is there is read, and the cluster
+	// walk ends where the file does.
+	seg, _, err := d.readHeader(head.dataEnd(), d.size, true)
 	if err != nil {
 		return err
 	}
@@ -177,9 +191,15 @@ func (d *Demuxer) parse() error {
 		return malformed("no Segment after the EBML header")
 	}
 	d.segmentDataOff = seg.dataOff
-	if seg.unknownSize {
-		d.segmentEnd = d.size
-	} else {
+	switch {
+	case seg.unknownSize:
+		d.segmentEnd, d.openEnd = d.size, true
+	case seg.clamped:
+		if err := d.warn(head.dataEnd(), "the Segment states %d bytes more than the file holds; the file is cut short", seg.over); err != nil {
+			return err
+		}
+		d.segmentEnd, d.openEnd, d.cutShort = d.size, true, true
+	default:
 		d.segmentEnd = seg.dataEnd()
 	}
 
@@ -225,21 +245,40 @@ func (d *Demuxer) checkDocType(head element) error {
 // Info, and Tracks, and stops at the first cluster (which marks the media
 // start). Anything after the first cluster (Cues, or Tracks that trail the
 // media) is not read here; resolveDeferred fetches what is still missing via
-// the SeekHead pointers.
+// the SeekHead pointers. Junk between children is stepped over (resync); a
+// run longer than maxJunk refuses the file, which has no cluster yet.
 func (d *Demuxer) scanSegment() error {
+	// With no cluster found the reader starts where the Segment ends, so it
+	// reads nothing rather than the file's own header.
+	d.firstClusterOff = d.segmentEnd
 	off := d.segmentDataOff
 	for i := 0; off < d.segmentEnd; i++ {
 		if i > maxTopLevelElements {
 			return malformed("more than %d segment-level elements", maxTopLevelElements)
 		}
-		e, err := d.readElement(off, d.segmentEnd)
+		e, kind, err := d.segmentChild(off)
 		if err != nil {
-			// A damaged header chain is unrecoverable (no resync at this
-			// level); use whatever was parsed if a cluster was already found.
-			if d.haveFirstCluster {
-				break
-			}
 			return err
+		}
+		switch kind {
+		case childCut:
+			return d.cutBeforeMedia(off)
+		case childJunk:
+			next, err := d.resync(off, d.segmentEnd)
+			if err != nil {
+				return err
+			}
+			if next < 0 {
+				return malformed("more than %d bytes at %d head no element", maxJunk, d.log.At(off))
+			}
+			if err := d.warnJunk(off, next); err != nil {
+				return err
+			}
+			off = next
+			continue
+		}
+		if e.clamped && e.id != idCluster {
+			return d.cutBeforeMedia(off)
 		}
 		if e.id == idCluster {
 			d.firstClusterOff = e.dataOff - headerLen(e, off)
@@ -260,6 +299,46 @@ func (d *Demuxer) scanSegment() error {
 		off = e.dataEnd()
 	}
 	return nil
+}
+
+// cutBeforeMedia answers for a file the end cuts, inside the element at off,
+// before its first cluster. Without the Tracks there is nothing to read, which
+// is damage, not a file with no audio track; with them, the stream is empty
+// and the cut is reported.
+func (d *Demuxer) cutBeforeMedia(off int64) error {
+	if len(d.entries) == 0 {
+		return malformed("the file ends at %d, before the Segment's Tracks", d.log.At(d.size))
+	}
+	return d.warnCut(off)
+}
+
+// segmentChild reads the Segment child at off. An element the file ends inside
+// must be one a Segment holds; any other ID with a size past the file is junk
+// that happens to parse, and resync looks behind it.
+func (d *Demuxer) segmentChild(off int64) (element, childKind, error) {
+	e, kind, err := d.readChild(off, d.segmentEnd)
+	if err == nil && kind == childOK && e.clamped && !isSegmentLevel(e.id) && e.id != idVoid && e.id != idCRC32 {
+		kind = childJunk
+	}
+	return e, kind, err
+}
+
+// warnJunk reports the bytes between off and next, which head no element and
+// were stepped over.
+func (d *Demuxer) warnJunk(off, next int64) error {
+	if next >= d.segmentEnd {
+		return d.warn(off, "%d bytes at the end of the Segment head no element", next-off)
+	}
+	return d.warn(off, "%d bytes head no element; read on from %d", next-off, d.log.At(next))
+}
+
+// warnCut reports that the file ends inside the element at off, unless the
+// Segment already said the file is cut short.
+func (d *Demuxer) warnCut(off int64) error {
+	if d.cutShort {
+		return nil
+	}
+	return d.warn(off, "the file ends inside the element at %d; it is cut short", d.log.At(off))
 }
 
 // headerLen is the byte length of element e's ID+size header, given the offset
@@ -301,6 +380,11 @@ func (d *Demuxer) resolveDeferred() error {
 	if len(d.entries) == 0 {
 		if err := d.readViaSeek(idTracks, maxHeaderElement, d.parseTracksAt); err != nil {
 			return err
+		}
+		// Tracks the SeekHead places past the end of a file cut short are
+		// lost with the rest.
+		if off, ok := d.seekPositions[idTracks]; ok && len(d.entries) == 0 && d.cutShort && off >= d.segmentEnd {
+			return d.cutBeforeMedia(off)
 		}
 	}
 	if d.timestampScale <= 0 {
@@ -504,8 +588,9 @@ func (d *Demuxer) parseTracks(body []byte) error {
 // parseTrackEntry parses one TrackEntry's fields.
 func (d *Demuxer) parseTrackEntry(body []byte) (*trackEntry, error) {
 	// FlagDefault and FlagEnabled default to 1: a track that leaves one out
-	// is a default track, and a usable one.
-	t := &trackEntry{def: true, enabled: true}
+	// is a default track, and a usable one. Channels and SamplingFrequency
+	// default to 1 and 8000 Hz; mkvmerge leaves Channels out of a mono track.
+	t := &trackEntry{def: true, enabled: true, channels: 1, rate: 8000}
 	err := walkElements(body, func(id uint32, data []byte) error {
 		switch id {
 		case idTrackNumber:
@@ -540,15 +625,25 @@ func (d *Demuxer) parseTrackEntry(body []byte) (*trackEntry, error) {
 }
 
 // parseAudioSettings reads the Audio element's rate, channels, and bit depth.
+// A rate or channel count the element states replaces the format's default,
+// a zero or unreadable one included, which the codec setup then refuses. One
+// with no octets is the default (RFC 8794, 6.1).
 func parseAudioSettings(t *trackEntry, body []byte) {
 	_ = walkElements(body, func(id uint32, data []byte) error {
+		if len(data) == 0 && (id == idSamplingFreq || id == idChannels) {
+			return nil
+		}
 		switch id {
 		case idSamplingFreq:
-			if f, ok := beFloat(data); ok && f > 0 {
+			t.rate, t.rateStated = 0, true
+			if f, ok := beFloat(data); ok && f > 0 && f < math.MaxInt32 {
 				t.rate = int(f + 0.5)
 			}
 		case idChannels:
-			t.channels = int(beUint(data))
+			t.channels, t.channelsStated = 0, true
+			if v := beUint(data); v <= math.MaxInt32 {
+				t.channels = int(v)
+			}
 		case idBitDepth:
 			t.bitDepth = int(beUint(data))
 		}
@@ -559,13 +654,13 @@ func parseAudioSettings(t *trackEntry, body []byte) {
 // DemuxerVersion is this demuxer's term in the ADR-0004 cache key, carried
 // by its track. Bump it for a change that makes the demuxer
 // deliver other samples for a file that has not changed.
-const DemuxerVersion = "mka-demux-2"
+const DemuxerVersion = "mka-demux-3"
 
 // selectTrack picks the first audio track carrying a codec this build decodes,
 // preferring a track the file marks usable and then one it marks default
 // (trackEntry.rank), and resolves its codec setup.
 func (d *Demuxer) selectTrack() error {
-	var chosen *trackEntry
+	var cands []*trackEntry
 	var found []string
 	for _, t := range d.entries {
 		if t.trackType != trackTypeAudio {
@@ -575,9 +670,26 @@ func (d *Demuxer) selectTrack() error {
 			found = append(found, codecName(t.codecID))
 			continue
 		}
-		if chosen == nil || t.rank() > chosen.rank() {
-			chosen = t
+		cands = append(cands, t)
+	}
+	slices.SortStableFunc(cands, func(a, b *trackEntry) int { return b.rank() - a.rank() })
+	var chosen *trackEntry
+	var head []byte
+	var headAt int64
+	for _, t := range cands {
+		if mkvCodecID(t.codecID) == codec.MP3 {
+			// A CodecID that says Layer III can be wrong about its frames.
+			// The first frame decides: Layer I and II are named and passed
+			// over like any codec with no decoder here. Only the candidate
+			// in hand is looked at.
+			head, headAt, _ = d.firstFrameHead(t)
+			if id := layerCodecID(head); id != "" {
+				found = append(found, codecName(id))
+				continue
+			}
 		}
+		chosen = t
+		break
 	}
 	if chosen == nil {
 		if len(found) > 0 {
@@ -589,15 +701,136 @@ func (d *Demuxer) selectTrack() error {
 	if err != nil {
 		return err
 	}
+	d.sel = chosen
+	if setup.id == codec.MP3 && head != nil {
+		// Before Valid, so the format validated is the one decoded with.
+		if err := d.mp3AdoptFrameFormat(&setup, head, headAt); err != nil {
+			return err
+		}
+	}
 	if err := setup.fmt.Valid(); err != nil {
 		return container.UnusableFormat("mka", setup.fmt, err)
 	}
 	if setup.warning != "" {
 		d.note(0, "%s", setup.warning)
 	}
-	d.sel = chosen
 	d.setup = setup
 	return nil
+}
+
+// layerCodecID is the CodecID of the layer a frame header declares when that
+// is Layer I or II, "" for any other bytes.
+func layerCodecID(head []byte) string {
+	switch codecname.MPEGLayer(head) {
+	case "MP1":
+		return "A_MPEG/L1"
+	case "MP2":
+		return "A_MPEG/L2"
+	}
+	return ""
+}
+
+// mp3AdoptFrameFormat lets the first frame's header, head at off, decide an
+// MP3 track's format. The frame is what the decoder reads, so it wins; an
+// Audio element that stated otherwise is warned as damage, and one that
+// stated nothing held only the format's defaults. A track whose first frame
+// was not found, or is no Layer III frame, keeps what the element said.
+func (d *Demuxer) mp3AdoptFrameFormat(s *codecSetup, head []byte, off int64) error {
+	h, err := mp3.ParseHeader(head)
+	if err != nil {
+		return nil
+	}
+	got := h.PCMFormat()
+	if got == s.fmt {
+		return nil
+	}
+	t := d.sel
+	if (t.rateStated && t.rate != got.Rate) || (t.channelsStated && t.channels != got.Channels) {
+		if err := d.warn(off, "the Audio element says %d Hz, %d channels; the first frame says %v; the frame wins",
+			t.rate, t.channels, got); err != nil {
+			return err
+		}
+	}
+	s.fmt = got
+	return nil
+}
+
+// maxProbeChildren bounds how many of the first cluster's children
+// firstFrameHead looks through for a track's first block.
+const maxProbeChildren = 64
+
+// firstFrameHead reads the opening mp3.HeaderLen bytes of track t's first
+// frame, from the first cluster's first block of that track, and where they
+// begin. It reports nothing it cannot read, records no damage, and leaves the
+// reader where it was: the read meets the same bytes again and reports them
+// then.
+func (d *Demuxer) firstFrameHead(t *trackEntry) (head []byte, at int64, ok bool) {
+	if !d.haveFirstCluster {
+		return nil, 0, false
+	}
+	cl, kind, err := d.readChild(d.firstClusterOff, d.segmentEnd)
+	if err != nil || kind != childOK || cl.id != idCluster {
+		return nil, 0, false
+	}
+	end := d.segmentEnd
+	if !cl.unknownSize {
+		end = cl.dataEnd()
+	}
+	off := cl.dataOff
+	for range maxProbeChildren {
+		if off >= end {
+			break
+		}
+		e, kind, err := d.readChild(off, end)
+		if err != nil || kind != childOK || e.unknownSize || e.clamped {
+			break
+		}
+		if cl.unknownSize && isSegmentLevel(e.id) {
+			break
+		}
+		block := e
+		if e.id == idBlockGroup {
+			block = d.groupBlock(e)
+		}
+		if block.id == idSimpleBlock || block.id == idBlock {
+			mine, _ := d.w.Try(true, func() bool {
+				bh, err := parseBlock(&d.w, block.dataOff, block.size, nil)
+				if err != nil || bh.track != t.number || len(bh.frames) == 0 {
+					return false
+				}
+				f := bh.frames[0]
+				if b := d.w.BytesAt(f.off, min(f.size, mp3.HeaderLen)); len(b) == mp3.HeaderLen {
+					head, at, ok = append([]byte(nil), b...), f.off, true
+				}
+				return true
+			})
+			if mine {
+				return head, at, ok
+			}
+		}
+		off = e.dataEnd()
+	}
+	return nil, 0, false
+}
+
+// groupBlock returns the Block inside a BlockGroup, or an element of ID 0
+// when the first few children hold none.
+func (d *Demuxer) groupBlock(g element) element {
+	off, end := g.dataOff, g.dataEnd()
+	for range 8 {
+		if off >= end {
+			break
+		}
+		e, err := d.readElement(off, end)
+		if err != nil || e.unknownSize {
+			break
+		}
+		if e.id == idBlock {
+			return e
+		}
+		off = e.dataEnd()
+	}
+	return element{}
 }
 
 // finalizeTrack builds the container.Track, resolving gapless trims. No open

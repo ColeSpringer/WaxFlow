@@ -25,6 +25,7 @@ func (d *Demuxer) resetReading(off int64) {
 	d.clusterEnd = 0
 	d.clusterCursor = 0
 	d.clusterUnknown = false
+	d.clusterClamped = false
 	d.pending = d.pending[:0]
 	d.pendingIdx = 0
 	d.running = 0
@@ -206,16 +207,41 @@ func (d *Demuxer) stepSegment(ctx context.Context) (done bool, err error) {
 	if err := container.WalkCanceled(ctx, "mka: "); err != nil {
 		return false, err
 	}
-	e, err := d.readElement(d.curOff, d.segmentEnd)
+	e, kind, err := d.segmentChild(d.curOff)
 	if err != nil {
-		if waxerr.CodeOf(err) == waxerr.CodeSourceUnreadable {
-			return false, err // the source failed, not the file
+		return false, err // the source failed, not the file
+	}
+	switch kind {
+	case childCut:
+		return true, d.warnCut(d.curOff)
+	case childJunk:
+		// Junk is stepped over to the next Segment-level element; a run past
+		// maxJunk ends the stream there.
+		next, err := d.resync(d.curOff, d.segmentEnd)
+		if err != nil {
+			return false, err
 		}
-		// No resync at this level; tolerate trailing damage as end of stream.
-		if werr := d.warn(d.curOff, "damaged segment element, ending stream"); werr != nil {
+		if next < 0 {
+			if werr := d.warn(d.curOff, "more than %d bytes head no element, ending stream", maxJunk); werr != nil {
+				return false, werr
+			}
+			return true, nil
+		}
+		if werr := d.warnJunk(d.curOff, next); werr != nil {
 			return false, werr
 		}
-		return true, nil
+		d.curOff = next
+		return false, nil
+	}
+	if e.clamped {
+		// The file ends inside this element. A cluster's whole blocks are
+		// still read; the one the end splits is not.
+		if werr := d.warnCut(d.curOff); werr != nil {
+			return false, werr
+		}
+		if e.id != idCluster {
+			return true, nil
+		}
 	}
 	if e.id == idCluster {
 		d.enterCluster(e, d.curOff)
@@ -233,11 +259,13 @@ func (d *Demuxer) stepSegment(ctx context.Context) (done bool, err error) {
 // the exact cumulative sample position of its first frame.
 func (d *Demuxer) enterCluster(e element, startOff int64) {
 	if d.recording && len(d.clusterIndex) < maxClusters {
-		d.clusterIndex = append(d.clusterIndex, clusterPos{off: startOff, sample: d.walkCumulative})
+		d.clusterIndex = append(d.clusterIndex, clusterPos{off: startOff, sample: d.walkCumulative,
+			frames: int64(d.walkFrames), bytes: d.walkBytes})
 	}
 	d.inCluster = true
 	d.clusterCursor = e.dataOff
 	d.clusterUnknown = e.unknownSize
+	d.clusterClamped = e.clamped
 	if e.unknownSize {
 		d.clusterEnd = d.segmentEnd
 	} else {
@@ -261,10 +289,36 @@ func (d *Demuxer) stepCluster(ctx context.Context) (handled, done bool, err erro
 	if err := container.WalkCanceled(ctx, "mka: "); err != nil {
 		return false, false, err
 	}
-	e, err := d.readElement(d.clusterCursor, d.clusterEnd)
+	e, kind, err := d.readChild(d.clusterCursor, d.clusterEnd)
 	if err != nil {
-		if waxerr.CodeOf(err) == waxerr.CodeSourceUnreadable {
+		return false, false, err
+	}
+	switch kind {
+	case childCut:
+		return false, true, d.warnCutIn()
+	case childJunk:
+		if !d.clusterUnknown {
+			// A cluster that states its size says where the next begins, so
+			// only the rest of this one is lost.
+			if werr := d.warn(d.clusterCursor, "damaged cluster element; the rest of the cluster is skipped"); werr != nil {
+				return false, false, werr
+			}
+			d.clusterCursor = d.clusterEnd
+			return false, false, nil
+		}
+		// An unknown-size cluster ends at the next Segment-level element, so
+		// junk inside one is stepped over to it.
+		next, err := d.resync(d.clusterCursor, d.clusterEnd)
+		if err != nil {
 			return false, false, err
+		}
+		if next >= 0 && next < d.clusterEnd {
+			if werr := d.warnJunk(d.clusterCursor, next); werr != nil {
+				return false, false, werr
+			}
+			d.inCluster = false
+			d.curOff = next
+			return false, false, nil
 		}
 		if werr := d.warn(d.clusterCursor, "damaged cluster element, ending stream"); werr != nil {
 			return false, false, werr
@@ -276,6 +330,10 @@ func (d *Demuxer) stepCluster(ctx context.Context) (handled, done bool, err erro
 		d.inCluster = false
 		d.curOff = d.clusterCursor
 		return false, false, nil
+	}
+	if e.clamped {
+		// The file ends inside this child: a block it splits is not read.
+		return false, true, d.warnCutIn()
 	}
 	switch e.id {
 	case idTimestamp:
@@ -312,6 +370,15 @@ func (d *Demuxer) stepCluster(ctx context.Context) (handled, done bool, err erro
 		d.clusterCursor = e.dataEnd()
 	}
 	return false, false, nil
+}
+
+// warnCutIn reports that the file ends inside a cluster's child, unless the
+// cluster's own cut, or the Segment's, was already reported.
+func (d *Demuxer) warnCutIn() error {
+	if d.clusterClamped {
+		return nil
+	}
+	return d.warnCut(d.clusterCursor)
 }
 
 // loadBlock parses a (Simple)Block and, when it belongs to the selected track,
@@ -403,10 +470,13 @@ func (d *Demuxer) loadBlockGroup(g element) (bool, error) {
 }
 
 // clusterPos anchors a cluster's start offset to the exact cumulative sample
-// position of its first frame.
+// position of its first frame, and counts the selected track's frames and
+// their bytes before it, which mp3Backoff measures main data by.
 type clusterPos struct {
 	off    int64
 	sample int64
+	frames int64
+	bytes  int64
 }
 
 // ensureWalk frame-counts every block once, building the whole seek index and
@@ -477,6 +547,7 @@ type readerState struct {
 	clusterEnd     int64
 	clusterCursor  int64
 	clusterUnknown bool
+	clusterClamped bool // the file ends inside this cluster
 
 	pending    []frameLoc // the loaded block's frames, timed (see timeBlock)
 	pendingIdx int
@@ -533,7 +604,7 @@ func (d *Demuxer) walk(ctx context.Context, limit int64) error {
 	if d.walkBegun {
 		d.restoreReader(d.walkCursor)
 	} else {
-		d.walkCumulative, d.walkRaw = 0, 0
+		d.walkCumulative, d.walkRaw, d.walkBytes = 0, 0, 0
 		d.walkMid, d.walkMidCount = 0, 0
 		d.walkTail, d.walkTailOver, d.walkTailTrims = 0, 0, d.walkTailTrims[:0]
 		d.walkTailCount = 0
@@ -610,6 +681,7 @@ func (d *Demuxer) walkFrame(f frameLoc) {
 	}
 	d.walkCumulative += f.dur - clamped
 	d.walkRaw += f.dur
+	d.walkBytes += int64(f.size)
 	d.walkTailOver = f.pad - clamped
 	if clamped > 0 {
 		d.walkTail += clamped
@@ -664,7 +736,7 @@ func (d *Demuxer) cueLimit(sample int64) int64 {
 	// Read back the one entry this seek uses; parseCues checks none of them.
 	// One element header, and a stale offset costs only the seeks using it.
 	off := d.cues[i].off
-	if e, err := d.readElement(off, d.segmentEnd); err != nil || e.id != idCluster {
+	if e, kind, err := d.readChild(off, d.segmentEnd); err != nil || kind != childOK || e.id != idCluster {
 		return -1
 	}
 	return off
@@ -725,12 +797,35 @@ func (d *Demuxer) SeekSample(ctx context.Context, track int, sample int64) (int6
 			return d.clusterIndex[i].sample > searchRaw
 		}) - 1
 		idx = max(idx, 0)
+		if d.setup.id == codec.MP3 {
+			idx = d.mp3Backoff(idx)
+		}
 		clusterOff = d.clusterIndex[idx].off
 		landed = d.clusterIndex[idx].sample
 	}
 	d.resetReading(clusterOff)
 	d.running = landed
 	return landed, nil
+}
+
+// mp3Backoff steps a landing on cluster idx back over whole clusters until the
+// frames it adds carry enough main data for any bit-reservoir reference the
+// first frame of idx makes. The samples half of the backoff is preRoll's;
+// this is the bytes half, which a sample count cannot express. The walk
+// counted the track's own frames and bytes, so another track's blocks between
+// the clusters count for nothing.
+func (d *Demuxer) mp3Backoff(idx int) int {
+	overhead := mp3FrameOverhead(d.setup.fmt)
+	to := d.clusterIndex[idx]
+	land := idx
+	for n := 0; land > 0 && n < mp3BackoffClusters; n++ {
+		from := d.clusterIndex[land]
+		if to.bytes-from.bytes-(to.frames-from.frames)*overhead >= mp3ReservoirBytes {
+			break
+		}
+		land--
+	}
+	return land
 }
 
 // isSegmentLevel reports whether id is a top-level segment element, marking the
@@ -746,10 +841,17 @@ func isSegmentLevel(id uint32) bool {
 	return false
 }
 
-// codecName trims the Matroska "A_" prefix for diagnostics.
+// codecName trims the Matroska "A_" prefix for diagnostics. The two MPEG
+// audio layers before III are named as well, since their CodecIDs say only
+// "L1" and "L2" and the decoder this build has is Layer III's alone.
 func codecName(codecID string) string {
-	if codecID == "" {
+	switch codecID {
+	case "":
 		return "unknown"
+	case "A_MPEG/L1":
+		return "MPEG/L1 (MP1)"
+	case "A_MPEG/L2":
+		return "MPEG/L2 (MP2)"
 	}
 	if len(codecID) > 2 && codecID[:2] == "A_" {
 		return codecID[2:]

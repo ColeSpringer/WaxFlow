@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"slices"
+	"strings"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/flac"
@@ -17,7 +19,7 @@ var _ container.Muxer = (*Muxer)(nil)
 // MuxerVersion is this muxer's term in the ADR-0004 cache key. Bump it for a
 // change to what gets written around unchanged encoded packets, which no
 // encoder or DSP version can notice.
-const MuxerVersion = "flacn-mux-2"
+const MuxerVersion = "flacn-mux-3"
 
 // seekInterval is the target spacing between SEEKTABLE points in
 // seconds, matching the reference encoder's default table.
@@ -372,6 +374,12 @@ const maxCommentBytes = 48 << 10
 // A comment that does not fit is an error rather than a skip, for the reason
 // apev2.Build refuses one: writing the block without it reports a tag the file
 // does not carry.
+//
+// Keys are written as given but for the date: the canonical RECORDINGDATE is
+// the DATE field, the name every Vorbis comment reader looks for and the tag
+// library writes. A literal DATE key is that field too, so the two together
+// write one DATE per distinct value, in the order they come. The Ogg muxer's
+// comment header follows the same rule.
 func vorbisCommentBlock(tags []container.Tag) ([]byte, error) {
 	if len(tags) == 0 {
 		return nil, nil
@@ -382,16 +390,25 @@ func vorbisCommentBlock(tags []container.Tag) ([]byte, error) {
 	countAt := len(body)
 	body = binary.LittleEndian.AppendUint32(body, 0)
 	count := uint32(0)
+	var dates []string
 	for _, t := range tags {
 		if !container.ValidTagKey(t.Key) {
 			continue
 		}
-		c := t.Key + "=" + t.Value
+		key := t.Key
+		if strings.EqualFold(key, "RECORDINGDATE") || strings.EqualFold(key, "DATE") {
+			if slices.Contains(dates, t.Value) {
+				continue
+			}
+			dates = append(dates, t.Value)
+			key = "DATE"
+		}
+		c := key + "=" + t.Value
 		// The whole block's size, not this value's: a comment can overflow by
 		// being large or by being the one that crossed a running total.
 		if need := len(body) + 4 + len(c); need > maxCommentBytes {
 			return nil, fmt.Errorf("%s does not fit: the VORBIS_COMMENT block would need %d bytes, over its %d-byte limit",
-				t.Key, need, maxCommentBytes)
+				key, need, maxCommentBytes)
 		}
 		body = binary.LittleEndian.AppendUint32(body, uint32(len(c)))
 		body = append(body, c...)

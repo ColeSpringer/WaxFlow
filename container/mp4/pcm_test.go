@@ -409,7 +409,7 @@ func TestPCMInAFragmentedMovieIsRefused(t *testing.T) {
 
 // TestChapterTrackWithAPCMEntryKeepsItsSamples is the crash this gate exists to
 // stop. A chunk-indexed table leaves no per-sample offsets or sizes behind, and
-// readTextChapters reads exactly those, so a text track whose sample
+// the chapter walk reads exactly those, so a text track whose sample
 // description happens to carry a PCM fourcc used to open with a table whose two
 // halves disagreed and panic on the chapter walk before a packet was read.
 //
@@ -448,6 +448,14 @@ func TestChapterTrackWithAPCMEntryKeepsItsSamples(t *testing.T) {
 	if int64(len(text.st.offsets)) != text.st.total || int64(len(text.st.sizes)) != text.st.total {
 		t.Errorf("text track has %d offsets and %d sizes for %d samples",
 			len(text.st.offsets), len(text.st.sizes), text.st.total)
+	}
+
+	// The same entry on a track the sound track names, which is the one the
+	// chapter walk reads: its samples come back as chapters.
+	named := fxMovie{chap: []uint32{2}, text: []fxText{{entry: soundEntry("sowt", 2, 16, movieTimescale),
+		samples: [][]byte{textSample("One"), textSample("Two")}, deltas: []uint32{1000, 1000}}}}.build()
+	if got := open(t, named).Chapters(); len(got) != 2 || got[1].Title != "Two" {
+		t.Errorf("a named chapter track with a PCM entry read %+v, want its two titles", got)
 	}
 }
 

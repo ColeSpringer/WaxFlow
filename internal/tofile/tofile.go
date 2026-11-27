@@ -12,6 +12,7 @@ import (
 	"math"
 	"os"
 	"slices"
+	"strings"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/container"
@@ -285,6 +286,11 @@ func (r *run) prepare() error {
 			r.art = &container.Picture{MIME: p.MIME, Data: p.Data}
 		}
 	}
+	// The mapper's titles were repaired with its Info; the container's were not.
+	if chs, repaired := meta.WritableChapters(r.chapters); repaired {
+		r.chapters = chs
+		r.note(Note{Kind: NoteMetadataWarning, Text: unwritable("a chapter title")})
+	}
 
 	// Both MP4 forms embed tags at Begin and take the patch; only the
 	// fragmented one is derived rather than read back.
@@ -318,6 +324,9 @@ func (r *run) prepare() error {
 	var dropped []string
 	r.tags, dropped = fitTags(r.opts.Format, r.opts.Container, meta.FullTags(r.tagInfo), own)
 	r.noteDropped(dropped)
+	if !r.postPasses() {
+		noteLeftOut(r.opts.Format, r.opts.Container, r.tags, r.dropped, r.note)
+	}
 	if p := r.predicted; p != nil {
 		r.note(Note{Kind: NoteLoudnessOutput, LUFS: p.OutputLUFS, RG: p.RG, Estimated: true})
 	}
@@ -335,6 +344,31 @@ func (r *run) noteDropped(keys []string) {
 			r.dropped[key] = true
 			r.note(Note{Kind: NoteTagTooLarge, Key: key})
 		}
+	}
+}
+
+// noteLeftOut reports the keys of tags that the output's muxer writes no form
+// of, in one note, each key once in seen: a name the format forbids or has
+// no place for, or one that would read back as another key. It is for an
+// output no post-pass writes after.
+func noteLeftOut(formatName, containerName string, tags []container.Tag, seen map[string]bool, note func(Note)) {
+	if seen == nil {
+		return
+	}
+	var keys []string
+	for _, key := range waxflow.TagsLeftOut(formatName, containerName, tags) {
+		if !seen[key] {
+			seen[key] = true
+			keys = append(keys, key)
+		}
+	}
+	switch len(keys) {
+	case 0:
+	case 1:
+		note(Note{Kind: NoteMetadataWarning, Text: "tag " + keys[0] + " has no form in the output and was not embedded"})
+	default:
+		note(Note{Kind: NoteMetadataWarning,
+			Text: "tags " + strings.Join(keys, ", ") + " have no form in the output and were not embedded"})
 	}
 }
 
@@ -366,8 +400,21 @@ func (r *run) readMetadata() (*meta.Info, error) {
 		info = mi
 	}
 	// Folded before the ReplayGain drop: the container carries those keys
-	// too, and a later fold would restore the source's stale values.
-	return meta.WithContainerTags(info, req.Probe.Tags), nil
+	// too, and a later fold would restore the source's stale values. The
+	// same goes for the source's encoder stamp, which every file output
+	// drops: each is a fresh encode.
+	info = meta.WithoutEncoding(meta.WithContainerTags(info, req.Probe.Tags))
+	// Repaired once here, so the muxer and the post-pass write the same text.
+	info, repaired := meta.Writable(info)
+	for _, what := range repaired {
+		r.note(Note{Kind: NoteMetadataWarning, Text: unwritable(what)})
+	}
+	return info, nil
+}
+
+// unwritable words the warning for text meta.Writable repaired.
+func unwritable(what string) string {
+	return what + " held a NUL byte or invalid UTF-8 and is written repaired"
 }
 
 // encode runs the transcode into dst.

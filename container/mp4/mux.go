@@ -19,7 +19,7 @@ var _ container.Muxer = (*Muxer)(nil)
 // MuxerVersion is the ADR-0004 cache-key term of both stream muxers, NewMuxer
 // and NewProgressiveMuxer; SegmenterVersion keys the HLS form. Bump it for a
 // change to what gets written around unchanged encoded packets.
-const MuxerVersion = "mp4-mux-1"
+const MuxerVersion = "mp4-mux-2"
 
 // trackID is the single audio track's ID in the produced movie.
 const trackID = 1
@@ -36,10 +36,13 @@ type MuxerOptions struct {
 	// roughly defaultFragmentSeconds of audio at the track rate. A fragment
 	// closes once it reaches the target (the final one may be shorter).
 	FragmentSamples int
-	// Tags embeds canonical metadata fields as iTunes ilst atoms in the
-	// moov (the keys ilstText and ilstFreeform map; others are skipped).
+	// Tags embeds canonical metadata fields as iTunes ilst items in the
+	// moov: a text, number-pair or integer atom where the key has one and
+	// can hold the value, else a com.apple.iTunes freeform. The few keys
+	// that are not written are the ones DroppedTags names.
 	Tags []container.Tag
-	// Chapters embeds Nero chpl chapter markers in the moov's udta.
+	// Chapters embeds Nero chpl chapter markers in the moov's udta, and the
+	// progressive muxer writes them as a text chapter track as well.
 	Chapters []container.Chapter
 	// Art embeds cover art as the ilst covr atom. Init headers are written
 	// before the first audio byte, so large art delays first audio on a

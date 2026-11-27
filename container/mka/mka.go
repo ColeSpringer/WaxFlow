@@ -1,5 +1,5 @@
 // Package mka demuxes Matroska and WebM (ISO/IEC 14496 EBML) audio: the
-// .mka/.mkv/.webm family carrying Opus, Vorbis, FLAC, AAC-LC, or PCM. It
+// .mka/.mkv/.webm family carrying Opus, Vorbis, FLAC, AAC-LC, MP3, or PCM. It
 // parses the Segment's SeekHead, Info, and Tracks, selects the audio track,
 // and streams block frames from the clusters as codec packets.
 //
@@ -31,6 +31,12 @@
 // and a progress guarantee on every parse loop. The Segment header (SeekHead,
 // Info, Tracks) is read into bounded buffers and parsed from memory; cluster
 // block data stays on disk and only the bytes a packet needs are read.
+//
+// Damage is warned and read past, and refused under Strict. A file cut short
+// delivers every whole block before the cut, and not the one the end splits.
+// Bytes between Segment children that head no element are stepped over to the
+// next Segment-level element, at most maxJunk of them, as waxlabel and ffmpeg
+// step over them; past that the stream ends there.
 package mka
 
 import (
@@ -127,9 +133,13 @@ const (
 	// idVoid marks reserved or abandoned space; the muxer writes one where a
 	// value it reserved never arrived.
 	idVoid = 0xEC
+	// idCRC32 is a master's checksum child, which a Segment may open with.
+	idCRC32 = 0xBF
 
 	idCluster        = 0x1F43B675
 	idTimestamp      = 0xE7 // Cluster Timestamp (a.k.a. Timecode)
+	idPosition       = 0xA7
+	idPrevSize       = 0xAB
 	idSimpleBlock    = 0xA3
 	idBlockGroup     = 0xA0
 	idBlock          = 0xA1

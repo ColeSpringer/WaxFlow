@@ -161,6 +161,14 @@ func (d *Demuxer) parseStbl(t *track, body []byte, depth int) error {
 		parseErr  error
 		stsdErr   error
 	)
+	// A chapter track is titles and times, which no sample description has a
+	// say in, so a text track's tables are also read on their own, whatever
+	// its stsd holds and however the table below fares: from the track's
+	// first stbl alone, which is the one the tag library reads.
+	isText := t.handler == "text" || t.handler == "sbtl"
+	if isText && t.onTextPath {
+		t.text = parseTextTable(body)
+	}
 	err := walkBoxes(body, func(typ string, payload []byte) error {
 		if stsdErr != nil {
 			// The sample description failed, so this track has no codec and
@@ -199,7 +207,6 @@ func (d *Demuxer) parseStbl(t *track, body []byte, depth int) error {
 		return parseErr
 	})
 	isAudio := t.handler == "soun" && t.codec != ""
-	isText := t.handler == "text" || t.handler == "sbtl"
 	if stsdErr != nil {
 		// Keep the reason for selectAudio, which reports it when no track at
 		// all was selectable.
@@ -212,8 +219,8 @@ func (d *Demuxer) parseStbl(t *track, body []byte, depth int) error {
 			// truncated second one arrives here with the codec set.
 			return stsdErr
 		}
-		// No codec means no sample map worth building, for a sound track or
-		// a text one.
+		// No codec means no sample map worth building. A text track's
+		// chapters are read through t.text.
 		return nil
 	}
 	if err != nil {
@@ -250,7 +257,7 @@ func (d *Demuxer) parseStbl(t *track, body []byte, depth int) error {
 		if isAudio {
 			return malformed("audio track %d missing a sample table box", t.id)
 		}
-		return nil // an incomplete text track simply yields no chapters
+		return nil // a text track is read through t.text, not this table
 	}
 
 	// One table per track, whatever the file offers. Nothing orders or limits

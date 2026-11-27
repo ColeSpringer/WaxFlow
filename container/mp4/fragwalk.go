@@ -215,7 +215,7 @@ func (d *Demuxer) indexFragments(ctx context.Context) (raw int64, err error) {
 			if err := container.ReadFull(d.src, buf, b.payloadOff()); err != nil {
 				return raw, err // unreadable, not ended
 			}
-			if err := parseFragment(&fi, buf, d.trex, d.sel.id); err != nil {
+			if err := parseFragment(&fi, buf, d.trexes, d.sel.id, b.off); err != nil {
 				return stop(b.off, "fragment at %d: %s", d.log.At(b.off), err)
 			}
 			// A moof with nothing for the selected track (an interleaved
@@ -226,7 +226,7 @@ func (d *Demuxer) indexFragments(ctx context.Context) (raw int64, err error) {
 				// arithmetic. Without it the walk settles an exact length over
 				// samples whose bytes are not in the file, and the read that
 				// follows fails on the fragment the walk counted.
-				if !d.fragmentFits(b, &fi) {
+				if !d.fragmentFits(&fi) {
 					return stop(b.off, "fragment at %d runs past the end of the source", d.log.At(b.off))
 				}
 				if fi.haveBaseTime {
@@ -271,20 +271,13 @@ func (d *Demuxer) indexFragments(ctx context.Context) (raw int64, err error) {
 	return raw, nil
 }
 
-// fragmentFits reports whether every sample a fragment declares lies inside the
-// source, by loadFragment's own offset arithmetic: default-base-is-moof unless
-// a tfhd states a base, then the trun's data offset, then the sizes in order.
-func (d *Demuxer) fragmentFits(moof box, fi *fragInfo) bool {
-	base := moof.off
-	if fi.haveBaseOffset {
-		base = fi.baseDataOffset
-	}
-	off := base + int64(fi.dataOffset)
+// fragmentFits reports whether every sample a fragment declares lies inside
+// the source, the rule loadFragment holds each to.
+func (d *Demuxer) fragmentFits(fi *fragInfo) bool {
 	for _, s := range fi.samples {
-		if off < 0 || off > d.size-int64(s.size) {
+		if s.off < 0 || s.off > d.size-int64(s.size) {
 			return false
 		}
-		off += int64(s.size)
 	}
 	return true
 }

@@ -2,6 +2,7 @@ package mpa
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/colespringer/waxflow/container"
@@ -44,6 +45,32 @@ const id3FrameHeaderLen = 10
 func TagsFit(tags []container.Tag) error {
 	_, err := buildID3(tags)
 	return err
+}
+
+// DroppedTags names the keys of tags the muxer's ID3v2 tag has no frame for,
+// each once.
+func DroppedTags(tags []container.Tag) []string {
+	var out []string
+	for _, t := range tags {
+		if !id3Maps(t.Key) && !slices.Contains(out, t.Key) {
+			out = append(out, t.Key)
+		}
+	}
+	return out
+}
+
+// id3Maps reports whether id3v2Tag writes a frame from key.
+func id3Maps(key string) bool {
+	switch key {
+	case "TRACKNUMBER", "TRACKTOTAL", "DISCNUMBER", "DISCTOTAL":
+		return true
+	}
+	for _, m := range id3Text {
+		if m.key == key {
+			return true
+		}
+	}
+	return false
 }
 
 // buildID3 renders the muxer's ID3v2 tag, refusing a set it cannot hold.
@@ -120,17 +147,22 @@ func appendSyncsafe(b []byte, v uint32) []byte {
 	return append(b, byte(v>>21&0x7F), byte(v>>14&0x7F), byte(v>>7&0x7F), byte(v&0x7F))
 }
 
-// numberPair renders "n" or "n/total" from the first value of each list.
+// numberPair renders "n" or "n/total" from the first value of each list. A
+// number that holds its own total ("3/12", "3 of 12") is split, and that
+// total stands only where no total key gave one.
 func numberPair(nums, totals []string) string {
-	n := ""
+	n, total := "", ""
 	if len(nums) > 0 {
-		n = nums[0]
+		n, total, _ = container.SplitNumberTotal(nums[0])
 	}
 	if len(totals) > 0 && totals[0] != "" {
-		if n == "" {
-			n = "0"
-		}
-		return n + "/" + totals[0]
+		total = totals[0]
 	}
-	return n
+	if total == "" {
+		return n
+	}
+	if n == "" {
+		n = "0"
+	}
+	return n + "/" + total
 }

@@ -1378,7 +1378,7 @@ func (d *Demuxer) tailEnd(p pending) (int64, bool) {
 		}
 		// NUL padding is peeled here and nowhere else: it has no magic to
 		// recognize, and this is the only caller that confirms a peel.
-		stripped, _, ok := trailer.Peel(&d.w, trailer.APEv2|trailer.ID3v1|trailer.ID3v2|trailer.Padding,
+		stripped, _, ok := trailer.Peel(&d.w, trailer.APEv2|trailer.ID3v1|trailer.ID3v2|trailer.Lyrics3|trailer.Padding,
 			floor, end)
 		if !ok {
 			return 0, false

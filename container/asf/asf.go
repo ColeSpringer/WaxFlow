@@ -34,11 +34,13 @@
 //
 // Hostile-input invariants (ADR-0005): the object tree is walked, never
 // recursed on attacker-chosen depth -- the Header Object's children are
-// dispatched to named parsers and every unrecognized object, the Header
-// Extension included, is treated as a leaf and skipped by its own declared
-// size. Every size is validated against the bytes remaining before any slice
-// or allocation, the header is read once into a bounded buffer, table and tag
-// growth is capped, and each parse loop consumes input so none can spin.
+// dispatched to named parsers, the Header Extension's are walked one level
+// down for encryption and metadata, and every unrecognized object is a leaf
+// skipped by its own declared size. One object budget covers both levels.
+// Every size is validated against the bytes remaining before any slice or
+// allocation, only the header objects parsed are loaded, each into a bounded
+// buffer, table and tag growth is capped, and each parse loop consumes input
+// so none can spin.
 package asf
 
 import (
@@ -49,10 +51,22 @@ import (
 
 // Hostile-input caps.
 const (
-	// maxHeaderBytes bounds the in-memory Header Object. Cover art rides in
-	// the Extended Content Description, so this has to clear a few pictures;
-	// past it the file is refused rather than parsed.
-	maxHeaderBytes = 16 << 20
+	// maxHeaderObjectBytes bounds one Header Object child loaded to be
+	// parsed, and a tag object past it is skipped. An Extended Content
+	// Description is loaded whole, a picture among its descriptors with it,
+	// each 64 KiB at most. A Metadata or Metadata Library value past
+	// maxTagBytes, where larger cover art rides, is stepped over unread.
+	maxHeaderObjectBytes = 16 << 20
+	// headerPrefix is the Header Object's leading bytes one read takes up
+	// front, which hold an ordinary file's whole header; objects past it are
+	// read one at a time.
+	headerPrefix = 128 << 10
+	// maxHeaderObjects bounds the objects walked in the Header Object and its
+	// Header Extensions together. Real files carry a dozen or two.
+	maxHeaderObjects = 1 << 12
+	// maxMetadataRecords bounds the Metadata and Metadata Library records
+	// walked across the header. Real files carry a few dozen.
+	maxMetadataRecords = 1 << 12
 	// maxPacketBytes bounds one data packet. Real files use 3200 to 65536;
 	// the field is 32-bit, so it needs a ceiling of its own.
 	maxPacketBytes = 1 << 20
@@ -71,9 +85,13 @@ const (
 	// maxStreams bounds the Stream Properties objects parsed from one header.
 	// The stream number is seven bits, so 127 is the format's own ceiling.
 	maxStreams = 128
-	// maxTagBytes bounds one tag value, and maxTags the whole tag map.
-	maxTagBytes = 1 << 16
-	maxTags     = 1 << 10
+	// maxTagBytes bounds one tag value, maxTags the keys of the tag map,
+	// maxTagValues the values of one key and maxTagText the text of them all,
+	// so a header of a million descriptors keeps no more than a few MiB.
+	maxTagBytes  = 1 << 16
+	maxTags      = 1 << 10
+	maxTagValues = 1 << 10
+	maxTagText   = 4 << 20
 	// maxMarkers bounds the Marker Object walk, entries kept or not: the
 	// chapters a WMA audiobook carries. One every few seconds clears the
 	// longest of them; past it the list is cut with a note.

@@ -40,6 +40,44 @@ func Match(head []byte) bool {
 	return false
 }
 
+// FindStart returns the offset of the first frame window holds whole with a
+// kin header right behind it. Unlike Match it takes no frame on its own word
+// and looks as far as window reaches: it is how a stream behind stray bytes
+// is told from a sync word in them.
+func FindStart(window []byte) (int, bool) {
+	for off := 0; off+mp3.HeaderLen <= len(window); off++ {
+		if window[off] != 0xFF {
+			continue
+		}
+		h, err := mp3.ParseHeader(window[off:])
+		if err != nil || h.Size() == 0 || off+h.Size()+mp3.HeaderLen > len(window) {
+			continue
+		}
+		if n, err := mp3.ParseHeader(window[off+h.Size():]); err == nil && h.Kin(n) {
+			return off, true
+		}
+	}
+	return 0, false
+}
+
+// Chain counts the kin frames that follow one another from the start of
+// window, up to limit, and the bytes they take. A stream chains to its end;
+// a frame pair that some other format's payload spells does not go on.
+func Chain(window []byte, limit int) (frames, n int) {
+	var first mp3.Header
+	for frames < limit {
+		h, err := mp3.ParseHeader(window[n:])
+		if err != nil || h.Size() == 0 || n+h.Size() > len(window) || frames > 0 && !first.Kin(h) {
+			break
+		}
+		if frames == 0 {
+			first = h
+		}
+		frames, n = frames+1, n+h.Size()
+	}
+	return frames, n
+}
+
 // maxLeadingJunk bounds the Match scan; the tolerant demuxer itself
 // scans further (maxResync) once the driver is chosen.
 const maxLeadingJunk = 8 << 10

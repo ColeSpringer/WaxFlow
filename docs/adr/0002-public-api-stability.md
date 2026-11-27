@@ -1973,3 +1973,37 @@ reclassifies that one error as `malformed-input`, which a caller can act on.
 Every other End failure keeps its own code, since a write that did not land
 is not the file's fault, and on a patchable destination nothing was
 promised, so the muxer's error passes through.
+
+## Amendment (2026-11-27): what a reader and a muxer say about tags
+
+The native tag and chapter readers and the tag-writing muxers were brought
+to the tag library's answers (ADR-0004, 2026-11-27), and a file a demuxer
+used to refuse behind stray leading bytes is found by its structure.
+
+- `container.SplitNumberTotal` splits a track or disc number that holds
+  its total ("3/12", "3 of 12"), and `container.SplitNumberPairs` applies
+  it to a demuxer's tag map by the count of values the tag library sees, so
+  a reader never derives a total the library does not.
+- `container.ValidTagKey` refuses a key with a space at either edge.
+- `waxflow.TagsLeftOut(format, container, tags)` names the keys the
+  output's muxer writes no form of, beside `TagsFit`, on every form: from
+  `mp4.DroppedTags`, `wv.DroppedTags`, `apen.DroppedTags` and
+  `mpa.DroppedTags`, the keys a Vorbis comment forbids for FLAC and Ogg,
+  and every key for a muxer that writes no tags. The file pipeline warns
+  of them, in one warning, where no post-pass writes after the muxer.
+- `mp4.MuxerOptions.Tags` takes every canonical key, where it took fifteen,
+  a value to a `data` atom. `mp4.PatchFreeform` takes the canonical key and
+  finds the freeform under the name the muxer wrote. `mp4.MatchNeed` is
+  1024: `mp4.Match` steps over `free`, `skip` and `wide` boxes ahead of
+  the `ftyp`.
+- `container.DemuxerOptions.Lead` hands a demuxer the warnings for bytes
+  the format resolver skipped ahead of the stream; it lists them first and
+  counts their damage, so a copy rung reports what a transcode does.
+- `FindStart(window)` in `flacn`, `wv`, `apen`, `mpc`, `ogg`, `adts` and
+  `mpa` reports a stream start the structure confirms, and `adts.Chain` and
+  `mpa.Chain` count a run of frames. `format` asks them behind chained
+  ID3v2 tags or a gap, within 64 KiB.
+- `adts.Demuxer` implements `container.Tagger` over the APEv2 tag behind
+  the stream. `apen.Demuxer.TruncatedSamples` counts what a cut took.
+- `adts`, `mpa`, `apen` and `mpc` export `DemuxerVersion`.
+

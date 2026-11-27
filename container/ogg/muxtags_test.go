@@ -277,3 +277,33 @@ func opusTagsPacketLen(t *testing.T, stream []byte) int {
 	}
 	return n
 }
+
+// TestMuxSpellsTheDateDATE: the canonical RECORDINGDATE is written as the
+// DATE field, the name every Vorbis comment reader looks for and the one the
+// tag library writes. A literal DATE key is the same field, so the two write
+// one DATE per distinct value, in the order they come. Nothing else is
+// respelled.
+func TestMuxSpellsTheDateDATE(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tags []container.Tag
+		want []string
+	}{
+		{"canonical", []container.Tag{{Key: "TITLE", Value: "T"}, {Key: "RECORDINGDATE", Value: "2026-11-27"}},
+			[]string{"TITLE=T", "DATE=2026-11-27"}},
+		{"both agree", []container.Tag{{Key: "RECORDINGDATE", Value: "1999"}, {Key: "DATE", Value: "1999"}},
+			[]string{"DATE=1999"}},
+		{"both differ", []container.Tag{{Key: "DATE", Value: "2001"}, {Key: "RECORDINGDATE", Value: "1999"}, {Key: "DATE", Value: "2001"}},
+			[]string{"DATE=2001", "DATE=1999"}},
+		{"any case", []container.Tag{{Key: "recordingdate", Value: "1999"}, {Key: "date", Value: "1999"}},
+			[]string{"DATE=1999"}},
+		{"others verbatim", []container.Tag{{Key: "ORIGINALDATE", Value: "1970"}, {Key: "RELEASEDATE", Value: "1971"}, {Key: "YEAR", Value: "1972"}},
+			[]string{"ORIGINALDATE=1970", "RELEASEDATE=1971", "YEAR=1972"}},
+	} {
+		stream, _, _ := muxCannedOpus(t, &MuxerOptions{Tags: tc.tags}, 2)
+		_, got := opusTagsComments(t, stream)
+		if strings.Join(got, "\n") != strings.Join(tc.want, "\n") {
+			t.Errorf("%s: comments %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

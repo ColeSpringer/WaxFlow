@@ -3,7 +3,7 @@ package mka_test
 // Differential tests for the Matroska/WebM demuxer against ffmpeg-generated
 // fixtures and the ffmpeg decode oracle (testutil skips these when ffmpeg is
 // absent; the CI differential job sets WAXFLOW_REQUIRE_FFMPEG=1). Lossless
-// codecs (FLAC, PCM) must decode bit-for-bit; lossy codecs (Opus, Vorbis, AAC)
+// codecs (FLAC, PCM) must decode bit-for-bit; lossy codecs (Opus, Vorbis, AAC, MP3)
 // must match within a loose margin, since the demuxer feeds the same packets
 // the decoders were already validated on. The Opus fixtures pin the gapless
 // contract: CodecDelay and DiscardPadding trims yield ffmpeg's exact count.
@@ -46,6 +46,7 @@ var specs = []spec{
 	{"flac.mka", "flac", 44100, 44100, 2, codec.FLAC, true, nil},
 	{"flac-mono.mka", "flac", 48000, 48000, 1, codec.FLAC, true, nil},
 	{"aac.mka", "aac", 44100, 44100, 2, codec.AACLC, false, []string{"-b:a", "128k"}},
+	{"mp3.mka", "libmp3lame", 44100, 44100, 2, codec.MP3, false, []string{"-b:a", "128k"}},
 	{"pcm16.mka", "pcm_s16le", 44100, 44100, 2, codec.PCM, true, nil},
 	{"pcm16be.mka", "pcm_s16be", 44100, 44100, 2, codec.PCM, true, nil},
 	{"pcm24.mka", "pcm_s24le", 48000, 48000, 2, codec.PCM, true, nil},
@@ -253,6 +254,8 @@ func lossyTolerance(id codec.ID) float64 {
 		return 1e-3
 	case codec.AACLC:
 		return 1e-2
+	case codec.MP3:
+		return 1e-4 // the MP3 gate's (docs/quality-gates.md)
 	default: // Opus
 		return 5e-2
 	}

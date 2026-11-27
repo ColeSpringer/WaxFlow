@@ -287,6 +287,8 @@ func (d *Demuxer) setMP4A(t *track, children []byte, rate, channels int) error {
 		return err
 	}
 	if isMP3ObjectType(objType) {
+		// The object type names MPEG audio and no layer; selectAudio reads
+		// that off the first frame.
 		return d.setMP3(t, rate, channels)
 	}
 	if !isAACObjectType(objType) {
@@ -468,9 +470,9 @@ func isAACObjectType(ot byte) bool {
 }
 
 // isMP3ObjectType reports whether an object type indication names MPEG audio.
-// 0x69 is MPEG-2 Layer III and 0x6B MPEG-1 Layer III; both are the same
-// bitstream to a decoder that reads each frame's own header, which is what
-// codec/mp3 does, so they are one arm.
+// 0x69 is MPEG-2 audio and 0x6B MPEG-1, of any layer; Layer III of both is
+// the same bitstream to a decoder that reads each frame's own header, which
+// is what codec/mp3 does, so they are one arm.
 func isMP3ObjectType(ot byte) bool {
 	switch ot {
 	case 0x69, 0x6B:
@@ -486,14 +488,25 @@ func isMP3ObjectType(ot byte) bool {
 // is decoded now, so setMP4A takes it before this is reached; leaving the arm
 // would be a name nothing can produce.
 func objectTypeName(ot byte) string {
-	switch ot {
-	case 0xA9:
-		return "dts"
-	case 0xA5, 0xA6:
-		return "ac3"
-	default:
-		return unnamedCodec
+	if name, ok := objectTypeNames[ot]; ok {
+		return name
 	}
+	return unnamedCodec
+}
+
+// objectTypeNames names the audio object type indications that carry no
+// AudioSpecificConfig, as the MP4 registration authority lists them; 0xDD is
+// ffmpeg's for Vorbis. The names are waxlabel's for the same bytes.
+var objectTypeNames = map[byte]string{
+	0xA5: "AC-3",
+	0xA6: "E-AC-3",
+	0xA9: "DTS",
+	0xAA: "DTS-HD High Resolution",
+	0xAB: "DTS-HD Master Audio",
+	0xAC: "DTS Express",
+	0xAD: "Opus",
+	0xDD: "Vorbis",
+	0xE1: "QCELP",
 }
 
 // unnamedCodec is what a track carries when nothing could name its codec: an

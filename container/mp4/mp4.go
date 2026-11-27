@@ -29,8 +29,10 @@
 //
 // Gapless trims come from the iTunes iTunSMPB tag or an edit list, mapped
 // onto Track.Delay/Padding so format.Media delivers the trimmed timeline.
-// Nero (chpl) and QuickTime text chapter tracks are parsed and surfaced
-// through Chapters for probe.
+// Chapters come from a Nero chpl list and the QuickTime text track a tref
+// names (chapters.go), tags from the movie's item lists, a keys store and
+// classic udta text atoms (tags.go). Both are read as the tag library reads
+// them, so the two readers give one answer for a file.
 //
 // The box parser is the service's widest attack surface, so it holds
 // to the hostile-input invariants strictly: bounded nesting depth, every
@@ -77,26 +79,38 @@ const (
 // with an audio handler and a codec we know is the real gate, applied at
 // parse time.
 
-// Match reports whether head is an ISO base media file: a leading box
-// whose type is ftyp. It is the format sniff-table entry. Some muxers
-// emit a leading styp or a free/skip box before ftyp; the sniffer only
-// needs the common case, and the ext hint covers the rest.
+// Match reports whether head is an ISO base media file: an ftyp box, at
+// the start or behind the free, skip or wide boxes some muxers lead with,
+// while those fit the window. It is the format sniff-table entry. A file
+// that opens with anything else (a styp, a bare moov) is left to the ext
+// hint.
 func Match(head []byte) bool {
-	if len(head) < 8 {
-		return false
+	for off := 0; off+8 <= len(head); {
+		size := int64(be32(head[off:]))
+		switch string(head[off+4 : off+8]) {
+		case "ftyp":
+			// A plausible box: size at least 8 and no larger than a sane
+			// ftyp. Guarding the size keeps random data with "ftyp" in the
+			// type field from matching.
+			return size >= 8 && size <= 1024
+		case "free", "skip", "wide":
+			// A size under 8 is the to-end or 64-bit form, neither of which
+			// names a next box in this window; each step is at least a
+			// header, so the walk ends.
+			if size < 8 || int64(off)+size > int64(len(head)) {
+				return false
+			}
+			off += int(size)
+		default:
+			return false
+		}
 	}
-	// A plausible box: size at least 8 and no larger than a sane ftyp, then
-	// the ftyp type. Guarding the size keeps random data with "ftyp" at
-	// bytes 4..8 from matching.
-	size := be32(head)
-	if size < 8 || size > 1024 {
-		return false
-	}
-	return string(head[4:8]) == "ftyp"
+	return false
 }
 
-// MatchNeed is how many leading bytes Match inspects.
-const MatchNeed = 8
+// MatchNeed is how many leading bytes Match inspects: room for the padding
+// boxes it steps over ahead of ftyp.
+const MatchNeed = 1 << 10
 
 // malformed reports bytes that deviate from this format: truncated,
 // inconsistent, or out of range. See [waxerr.Malformed] for the rule that

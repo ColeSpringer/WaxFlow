@@ -85,6 +85,9 @@ func (a Album) PieceTags(number, total int, title string) []container.Tag {
 	})
 	tags, dropped := fitTags(a.formatName, a.containerName, album, own)
 	a.noteDropped(dropped)
+	if !a.postPasses && a.note != nil {
+		noteLeftOut(a.formatName, a.containerName, tags, a.dropped, a.note)
+	}
 	return tags
 }
 

@@ -5,6 +5,7 @@ package diag
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/internal/satmath"
@@ -19,6 +20,9 @@ type Log struct {
 	prefix string
 	strict bool
 	base   int64
+	// lead is what the source's cutter found in front of it, at file
+	// offsets (container.DemuxerOptions.Lead), listed ahead of w.
+	lead []container.Warning
 }
 
 // New is the Log of a demuxer whose errors start with prefix, under opts
@@ -27,6 +31,7 @@ func New(prefix string, opts *container.DemuxerOptions) Log {
 	l := Log{prefix: prefix}
 	if opts != nil {
 		l.strict, l.base = opts.Strict, opts.Base
+		l.lead = slices.Clone(opts.Lead)
 	}
 	return l
 }
@@ -95,16 +100,26 @@ func (l *Log) Strict() bool { return l.strict }
 // List is what was listed, in order, at file offsets.
 func (l *Log) List() []container.Warning {
 	ws := l.w.List()
-	if l.base == 0 || len(ws) == 0 {
+	if len(l.lead) == 0 && (l.base == 0 || len(ws) == 0) {
 		return ws
 	}
-	out := make([]container.Warning, len(ws))
-	for i, w := range ws {
+	out := make([]container.Warning, 0, len(l.lead)+len(ws))
+	out = append(out, l.lead...)
+	for _, w := range ws {
 		w.Offset = l.At(w.Offset)
-		out[i] = w
+		out = append(out, w)
 	}
 	return out
 }
 
-// DamageCount is every damage recorded, the list's cap and dedup aside.
-func (l *Log) DamageCount() int { return l.w.DamageCount() }
+// DamageCount is every damage recorded, the list's cap and dedup aside, and
+// the damage in front of the source with it.
+func (l *Log) DamageCount() int {
+	n := l.w.DamageCount()
+	for _, w := range l.lead {
+		if w.Kind == container.Damage {
+			n++
+		}
+	}
+	return n
+}

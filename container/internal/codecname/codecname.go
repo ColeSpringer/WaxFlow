@@ -93,12 +93,38 @@ func Fourcc(fourcc string) string {
 		return "AC-3"
 	case "EC-3", "EAC3":
 		return "E-AC-3"
+	case "MLPA":
+		return "TrueHD"
+	// The DTS extensions are profiles of DTS, each with its own fourcc.
+	case "DTSC", "DTSH", "DTSL", "DTSE", "DTSX":
+		return "DTS"
 	case ".MP3":
 		return "MP3"
 	case ".MP2":
 		return "MP2"
 	case ".MP1":
 		return "MP1"
+	}
+	return ""
+}
+
+// MPEGLayer names the layer an MPEG audio frame header declares ("MP1",
+// "MP2" or "MP3"), "" when b opens with no such header.
+func MPEGLayer(b []byte) string {
+	if len(b) < 4 || b[0] != 0xFF || b[1]&0xE0 != 0xE0 {
+		return ""
+	}
+	// A reserved version, bit rate or sample rate is no frame header.
+	if b[1]>>3&3 == 1 || b[2]>>4 == 0xF || b[2]>>2&3 == 3 {
+		return ""
+	}
+	switch b[1] >> 1 & 3 {
+	case 3:
+		return "MP1"
+	case 2:
+		return "MP2"
+	case 1:
+		return "MP3"
 	}
 	return ""
 }

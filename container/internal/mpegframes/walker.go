@@ -28,7 +28,9 @@ import (
 
 	"github.com/colespringer/waxflow/codec/mp3"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/id3"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
+	"github.com/colespringer/waxflow/container/internal/trailer"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -47,6 +49,10 @@ const (
 	// a satisfied reservoir for the filterbank history (IMDCT overlap
 	// plus synthesis window) to converge exactly.
 	stateFrames = 3
+	// maxJoins bounds the streams a joined run is followed through at open,
+	// and maxJoinTags the ID3v2 tags stepped over between two of them.
+	maxJoins    = 8
+	maxJoinTags = 8
 )
 
 // Options are the owner's vocabulary and hooks.
@@ -74,6 +80,19 @@ type Options struct {
 	// the run, which is every wrapper: only a bare stream can have tags
 	// appended to the frames themselves.
 	Trailer func(off int64) bool
+	// Trailers is the kinds of tag a bare stream can have appended to its
+	// frames. Begin peels them, so the walk ends where they begin and a last
+	// frame cut short in front of them is not completed with their bytes;
+	// Trailer still answers for what lies between the frames and that point.
+	// Zero wherever the container bounds the run.
+	Trailers trailer.Kind
+	// Joined says the run may be several streams end to end, as a file
+	// joined from others is. A metadata frame's byte count that ends on
+	// another stream's first frame then stops counting for the run (see
+	// VBRInfo.Joined), and an ID3v2 tag between two frames is stepped over
+	// as the baggage the joined file opened with. False wherever the
+	// container bounds the run.
+	Joined bool
 }
 
 // Walker owns the lazy exact frame index over a run of frames. Construct
@@ -103,7 +122,10 @@ type Walker struct {
 	// records a mid-run finding, bytes the walk stepped over between two
 	// indexed frames, which is the one finding a restored index would omit
 	// (see Snapshot).
-	declared   int64
+	declared int64
+	// streams is how many joined streams' counts declared sums, 1 for a run
+	// that is one stream.
+	streams    int64
 	compared   bool
 	endFinding bool
 	skipped    bool
@@ -195,6 +217,23 @@ func (w *Walker) Begin(off int64) (VBRInfo, bool, error) {
 
 	// Find the first frame: parse at off, else bounded junk scan.
 	first, h, ok := w.nextCandidate(off, off+maxResync)
+	if w.opts.Trailers != 0 && w.w.Err() == nil {
+		// A trailing tag starts no lower than the end of a first frame the
+		// header behind it confirms. With no such frame (none found, or one
+		// taken only because it runs to the end of the data), a header is all
+		// that has to survive, and the look is taken again without the tags:
+		// a lone frame in front of them has nothing else to confirm it.
+		floor := off + mp3.HeaderLen
+		if ok && first+int64(h.Size()) < w.w.DataEnd() {
+			floor = first + int64(h.Size())
+		}
+		if err := w.peel(floor); err != nil {
+			return none, false, err
+		}
+		if floor == off+mp3.HeaderLen {
+			first, h, ok = w.nextCandidate(off, off+maxResync)
+		}
+	}
 	if !ok {
 		if w.w.Err() != nil {
 			return none, false, w.w.Err()
@@ -253,6 +292,12 @@ func (w *Walker) Begin(off int64) (VBRInfo, bool, error) {
 			}
 			tag.Frames = 0
 		}
+		if w.opts.Joined {
+			var err error
+			if tag, err = w.joined(tagOff, first, h, tag); err != nil {
+				return none, false, err
+			}
+		}
 	}
 	w.declared, w.tag = tag.Frames, tag
 
@@ -270,6 +315,169 @@ func (w *Walker) Begin(off int64) (VBRInfo, bool, error) {
 	return tag, hasTag, nil
 }
 
+// peel takes the tags Options.Trailers names off the end of the data, none of
+// them starting below floor, through a window of its own so the head stays
+// where it is. The probes decide where the frames end, so a read that fails
+// is the caller's.
+func (w *Walker) peel(floor int64) error {
+	end := w.w.DataEnd()
+	if _, err := w.w.Try(false, func() bool {
+		for range trailer.Max {
+			start, _, ok := trailer.Peel(&w.w, w.opts.Trailers, floor, end)
+			if !ok {
+				break
+			}
+			end = start
+		}
+		return true
+	}); err != nil {
+		return err
+	}
+	w.w.SetDataEnd(end)
+	return nil
+}
+
+// joined follows the byte counts of a run's metadata frames from stream to
+// stream, from the frame at at, whose header is ref and whose fields are tag;
+// first is where the run's audio frames begin. A count that ends on a frame
+// of the same stream, or on ID3v2 tags with one behind them, ends its stream
+// where a file joined onto it begins: the frame count beside it covers only
+// its own stream.
+//
+// Where every stream states its own counts, the run's count is their sum,
+// each later stream's metadata frame counted as the frame it is delivered
+// as, and the end padding is the last stream's. Where one does not, nothing
+// says where the run ends: the count and the padding are dropped, and the
+// first stream's delay still holds. So it is where a count, or the sum, is
+// more than the bytes behind it can hold, which is reported as it is for a
+// lone stream. A count that ends on no such frame is merely a count, and tag
+// comes back as it was.
+//
+// Every frame of a constant-bitrate stream has a frame behind it, so a count
+// that lands on one is a join only where something says the stream ends
+// there: tags, a metadata frame, or its own frame count (countsAgree).
+func (w *Walker) joined(at, first int64, ref mp3.Header, tag VBRInfo) (VBRInfo, error) {
+	out, open, streams := tag, false, int64(1)
+	var refused error
+	_, err := w.w.Try(false, func() bool {
+		for i := 0; tag.Bytes > 0 && at+tag.Bytes < w.w.DataEnd(); i++ {
+			end := at + tag.Bytes
+			next, h, ok := w.opensAt(end, ref)
+			if !ok {
+				return true
+			}
+			var t VBRInfo
+			var meta bool
+			if frame := w.w.Peek(next, h.Size()); len(frame) == h.Size() {
+				t, meta = ParseVBRTag(h, frame)
+			}
+			if next == end && !meta && !w.countsAgree(first, end, ref, tag.Frames) {
+				return true
+			}
+			out.Joined = true
+			// What the bytes behind this stream's metadata frame can hold,
+			// and what the whole run's can.
+			if room := w.w.DataEnd() - next - int64(h.Size()); t.Frames > MaxFrames(room) {
+				refused = w.warn(next, "the metadata frame declares %d frames, more than %d bytes can hold; ignored", t.Frames, room)
+				t.Frames = 0
+			} else if sum, room := out.Frames+1+t.Frames, w.w.DataEnd()-first; out.Frames > 0 && t.Frames > 0 && sum > MaxFrames(room) {
+				refused = w.warn(next, "the joined metadata frames declare %d frames, more than %d bytes can hold; ignored", sum, room)
+				t.Frames = 0
+			}
+			if i == maxJoins || t.Frames <= 0 || t.Bytes <= 0 || out.Frames <= 0 || refused != nil {
+				open = true
+				return true
+			}
+			out.Frames += 1 + t.Frames
+			out.Padding = t.Padding
+			at, tag = next, t
+			// The next stream's audio starts behind its metadata frame, at
+			// frames of its own size.
+			first = next + int64(h.Size())
+			if fh, err := mp3.ParseHeader(w.w.Peek(first, mp3.HeaderLen)); err == nil && fh.Size() > 0 {
+				ref = fh
+			}
+			streams++
+		}
+		return true
+	})
+	switch {
+	case err != nil:
+		return out, err
+	case refused != nil:
+		return out, refused
+	case open:
+		out.Frames, out.Padding = 0, -1
+	case out.Joined:
+		w.streams = streams
+	}
+	return out, nil
+}
+
+// countsAgree reports whether a stream's frame count ends its audio where
+// its byte count does, at end: the bytes from first are what frames frames
+// at unit's bit rate take, or one frame fewer for an encoder that counts its
+// metadata frame. No frame count is nothing to disagree with. A stream of
+// varying frame sizes does not agree, and only a walk could say it does, so
+// with only frames behind its count it is left as that count says.
+//
+// An encoder holds a bit rate by padding some frames a byte, so a run of
+// frames is within a byte of their count times the average frame; a window
+// of a byte a frame would take a count several frames short for the end.
+func (w *Walker) countsAgree(first, end int64, unit mp3.Header, frames int64) bool {
+	if frames <= 0 {
+		return true
+	}
+	span := end - first
+	size := int64(unit.Size())
+	if unit.Padding {
+		size--
+	}
+	// Bytes against frames in units of 1/(8*rate) byte, so nothing rounds.
+	perFrame, scale := int64(unit.SamplesPerFrame())*int64(unit.Bitrate), 8*int64(unit.Rate)
+	for _, n := range [2]int64{frames, frames - 1} {
+		if n <= 0 {
+			continue
+		}
+		if d := span*scale - n*perFrame; perFrame > 0 && -scale <= d && d <= scale {
+			return true
+		}
+		// A stream that never pads runs under its bit rate, and is held to
+		// its last frame being unpadded, which one that pads seldom is.
+		if size > 0 && span == n*size {
+			if h, err := mp3.ParseHeader(w.w.Peek(end-size, mp3.HeaderLen)); err == nil && unit.Kin(h) && !h.Padding {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// opensAt reports the frame a joined stream opens with at off, or behind the
+// ID3v2 tags that start there: one kin to ref that the header behind it
+// confirms.
+func (w *Walker) opensAt(off int64, ref mp3.Header) (int64, mp3.Header, bool) {
+	for range maxJoinTags {
+		n := id3.Size(w.w.Peek(off, id3.HeaderLen))
+		if n == 0 || off+n > w.w.DataEnd() {
+			break
+		}
+		off += n
+	}
+	h, err := mp3.ParseHeader(w.w.Peek(off, mp3.HeaderLen))
+	if err != nil || h.Size() == 0 || !ref.Kin(h) {
+		return 0, mp3.Header{}, false
+	}
+	frame := w.w.Peek(off, h.Size()+mp3.HeaderLen)
+	if len(frame) < h.Size()+mp3.HeaderLen {
+		return 0, mp3.Header{}, false
+	}
+	if nh, err := mp3.ParseHeader(frame[h.Size():]); err != nil || !h.Kin(nh) {
+		return 0, mp3.Header{}, false
+	}
+	return off, h, true
+}
+
 // latchDone marks the index complete and settles the declared count against
 // it. Every arm that ends the walk goes through it, on the read path as on
 // the walk path, so a strict read and a strict walk of the same run reach
@@ -285,7 +493,8 @@ func (w *Walker) latchDone() error {
 // Two shapes are the file being loose rather than damaged, and are Notes: an
 // overrun, where the tag simply undercounts a run that is all there; and a
 // shortfall of exactly one frame on a run that ended cleanly, which is what
-// an encoder counting its own metadata frame produces on an intact file.
+// an encoder counting its own metadata frame produces on an intact file. A
+// run of joined streams may fall short by one frame for each of them.
 func (w *Walker) compare() error {
 	if w.compared {
 		return nil
@@ -303,7 +512,7 @@ func (w *Walker) compare() error {
 	case n > w.declared:
 		w.note(end, "the run holds %d frames past the %d the metadata frame declares", n-w.declared, w.declared)
 		return nil
-	case w.declared-n == 1 && !w.endFinding:
+	case w.declared-n <= max(w.streams, 1) && !w.endFinding:
 		w.note(end, "the metadata frame declares %d frames but the run holds %d", w.declared, n)
 		return nil
 	default:
@@ -465,6 +674,15 @@ func (w *Walker) extend() (bool, error) {
 	}
 	cand := next
 	nh, ok := w.headerAfter(last, h)
+	if !ok && w.opts.Joined {
+		// ID3v2 tags with the stream's frames behind them are what a file
+		// joined on here opened with. The step is not snapshotted, so a
+		// restored index never reads it without this note.
+		if at, th, tagged := w.pastTags(next); tagged {
+			w.note(next, "%d bytes of ID3v2 tag between frames, where another stream was joined on", at-next)
+			cand, nh, ok, w.skipped = at, th, true, true
+		}
+	}
 	if !ok {
 		// Damage: resync within bounds, or recognize a trailer and end.
 		cand, nh, ok = w.nextCandidate(next, next+maxResync)
@@ -496,6 +714,24 @@ func (w *Walker) extend() (bool, error) {
 	w.idx = append(w.idx, cand)
 	w.grew = true
 	return true, nil
+}
+
+// pastTags reports the frame behind the ID3v2 tags that start at off, when
+// there are any and a frame of the run follows them.
+func (w *Walker) pastTags(off int64) (int64, mp3.Header, bool) {
+	at := off
+	for range maxJoinTags {
+		n := id3.Size(w.w.BytesAt(at, id3.HeaderLen))
+		if n == 0 || at+n > w.w.DataEnd() {
+			break
+		}
+		at += n
+	}
+	if at == off {
+		return 0, mp3.Header{}, false
+	}
+	h, ok := w.confirmed(at, w.w.BytesAt(at, mp3.HeaderLen), w.w.BytesAt)
+	return at, h, ok
 }
 
 // recognizedTrailer asks the owner whether the tail is tag baggage. A

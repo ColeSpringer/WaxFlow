@@ -19,9 +19,13 @@ const DecoderDelay = 529
 //
 // The trims and the length are adopted together or not at all: the back trim
 // is only expressible through a known length, and a front-trim-only stream
-// would be neither raw nor gapless.
+// would be neither raw nor gapless. A joined run with no count is the one
+// exception: its first stream's delay still opens it, and what follows plays
+// to the end of the run.
 func (i VBRInfo) Gapless(spf int64) (samples, delay, padding int64) {
 	switch {
+	case i.Joined && i.Frames == 0 && i.Delay >= 0:
+		return -1, i.Delay + DecoderDelay, 0
 	case i.Delay >= 0 && i.Frames > 0:
 		// LAME gapless: the decoder's fixed latency joins the encoder
 		// delay at the front and comes off the padding at the back.

@@ -14,7 +14,7 @@ import (
 // MuxerVersion is this muxer's term in the ADR-0004 cache key. Bump it for a
 // change to what gets written around unchanged encoded packets, which no
 // encoder or DSP version can notice.
-const MuxerVersion = "ogg-mux-3"
+const MuxerVersion = "ogg-mux-4"
 
 // Muxer writes an Ogg stream: header pages (identification, comment), then
 // audio pages batching multiple packets each. The codec-specific part (which

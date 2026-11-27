@@ -11,6 +11,7 @@ import (
 	"github.com/colespringer/waxflow/container/internal/diag"
 	"github.com/colespringer/waxflow/container/internal/id3"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
+	"github.com/colespringer/waxflow/container/internal/trailer"
 	"github.com/colespringer/waxflow/waxerr"
 )
 
@@ -18,7 +19,13 @@ var (
 	_ container.Demuxer = (*Demuxer)(nil)
 	_ container.Seeker  = (*Demuxer)(nil)
 	_ container.Warner  = (*Demuxer)(nil)
+	_ container.Tagger  = (*Demuxer)(nil)
 )
+
+// DemuxerVersion is this demuxer's term in the ADR-0004 cache key, carried
+// by its track. Bump it for a change that makes the demuxer deliver other
+// samples or tags for a file that has not changed.
+const DemuxerVersion = "adts-demux-2"
 
 // Demuxer reads one AAC track from an ADTS elementary stream. It carries no
 // gapless trims (ADTS has none) and seeks early for the decoder's restart
@@ -30,7 +37,9 @@ type Demuxer struct {
 	ref     header
 	haveRef bool // ref is set (distinct from firstFrame, which can be 0)
 	track   container.Track
-	log     diag.Log
+	// tags are the fields of an APEv2 tag appended to the frames.
+	tags map[string][]string
+	log  diag.Log
 	// refused is a strict refusal, kept: the walk is not finished while it
 	// stands, and Walk and the reads return it again.
 	refused error
@@ -50,9 +59,10 @@ type Demuxer struct {
 	w srcwin.Window
 }
 
-// NewDemuxer parses the stream head (ID3 tags, the first frame) and derives
-// the AudioSpecificConfig. The returned Demuxer implements container.Seeker,
-// container.Warner and container.Walker.
+// NewDemuxer parses the stream head (ID3 tags, the first frame), peels the
+// tags appended to the frames, and derives the AudioSpecificConfig. The
+// returned Demuxer implements container.Seeker, container.Warner,
+// container.Tagger and container.Walker.
 func NewDemuxer(src container.Source, opts *container.DemuxerOptions) (*Demuxer, error) {
 	d := &Demuxer{src: src, w: srcwin.New(src, src.Size(), "adts: reading frame data"), log: diag.New("adts: ", opts)}
 	if err := d.parse(); err != nil {
@@ -87,6 +97,23 @@ func (d *Demuxer) parse() error {
 	}
 
 	first, h, ok := d.nextFrame(off, off+maxResync)
+	if d.w.Err() == nil {
+		// A trailing tag starts no lower than the end of a first frame the
+		// header behind it confirms. With no such frame (none found, or one
+		// taken only because it runs to the end of the data), a header is all
+		// that has to survive, and the look is taken again without the tags:
+		// a lone frame in front of them has nothing else to confirm it.
+		floor := off + headerLen
+		if ok && first+int64(h.frameLen) < d.w.DataEnd() {
+			floor = first + int64(h.frameLen)
+		}
+		if err := d.stripTrailers(floor); err != nil {
+			return err
+		}
+		if floor == off+headerLen {
+			first, h, ok = d.nextFrame(off, off+maxResync)
+		}
+	}
 	if !ok {
 		if d.w.Err() != nil {
 			return d.w.Err()
@@ -194,12 +221,35 @@ func (d *Demuxer) parse() error {
 		d.preFrames = aac.HESeekPreroll / d.spf
 	}
 	d.track = container.Track{
-		Codec:       aac.TrackID(cfg),
-		CodecConfig: asc,
-		Fmt:         f,
-		Samples:     -1, // ADTS declares no length; the stream runs to EOF
-		Default:     true,
+		Codec:          aac.TrackID(cfg),
+		CodecConfig:    asc,
+		Fmt:            f,
+		DemuxerVersion: DemuxerVersion,
+		Samples:        -1, // ADTS declares no length; the stream runs to EOF
+		Default:        true,
 	}
+	return nil
+}
+
+// stripTrailers peels the tags a tagger appended to the frames (APEv2, ID3v1,
+// a footed ID3v2, a Lyrics3 block), shrinking the window's data end so the
+// frame walk ends where they begin: a last frame cut short in front of them
+// does not read their bytes as its own. floor is the lowest offset one may
+// start at.
+// The APEv2 block is where the track's tags come from. No warning: a tagged
+// stream is not a damaged one.
+func (d *Demuxer) stripTrailers(floor int64) error {
+	// Through a window of their own, so the head the probe frames are read
+	// from stays where it is. The probes decide where the audio ends, so a
+	// read that fails is the open's.
+	end := d.w.DataEnd()
+	if _, err := d.w.Try(false, func() bool {
+		end, d.tags = trailer.PeelAll(&d.w, trailer.APEv2|trailer.ID3v1|trailer.ID3v2|trailer.Lyrics3, floor, end)
+		return true
+	}); err != nil {
+		return err
+	}
+	d.w.SetDataEnd(end)
 	return nil
 }
 
@@ -262,6 +312,11 @@ func (d *Demuxer) Tracks() []container.Track { return []container.Track{d.track}
 
 // Warnings returns damage tolerated during parsing.
 func (d *Demuxer) Warnings() []container.Warning { return d.log.List() }
+
+// Tags returns the fields of an APEv2 tag appended to the frames, under
+// canonical uppercase keys: nil with none. A leading ID3v2 tag is not read
+// here.
+func (d *Demuxer) Tags() map[string][]string { return d.tags }
 
 // DamageCount implements container.Damaged.
 func (d *Demuxer) DamageCount() int { return d.log.DamageCount() }

@@ -17,7 +17,7 @@ var _ container.Muxer = (*Muxer)(nil)
 // MuxerVersion is this muxer's term in the ADR-0004 cache key. Bump it for a
 // change to what gets written around unchanged encoded packets, which no
 // encoder or DSP version can notice.
-const MuxerVersion = "mpa-mux-3"
+const MuxerVersion = "mpa-mux-4"
 
 // Muxer writes one MP3 track as a bare Layer III elementary stream led by a
 // Xing/Info metadata frame with a LAME-format gapless extension. NeedsSeek

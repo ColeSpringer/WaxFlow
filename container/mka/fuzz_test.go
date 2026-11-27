@@ -1,6 +1,7 @@
 package mka
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -30,13 +31,47 @@ func fixture(t testing.TB, name string) []byte {
 // tolerated hole in the payload shortens both sides, so they still agree).
 // The packets are stamped on the trimmed timeline, so the run they report is
 // what they deliver plus the trims that run unbroken to the end.
-// seed-cues.mka is the only seed carrying a Cues index.
+// seed-cues.mka and mp3.mka carry a Cues index.
 func FuzzDemux(f *testing.F) {
-	for _, name := range []string{"seed-opus.webm", "seed-flac.mka", "seed-pcm.mka", "seed-cues.mka"} {
+	for _, name := range []string{"seed-opus.webm", "seed-flac.mka", "seed-pcm.mka", "seed-cues.mka", "mp3.mka"} {
 		full := fixture(f, name)
 		f.Add(full)
 		f.Add(full[:len(full)/2])
 		f.Add(full[:min(len(full), 200)])
+	}
+	// Junk ahead of the second cluster, which a resync steps over, and junk
+	// holding a false Cluster ID whose size runs past the file.
+	pcm := fixture(f, "seed-pcm.mka")
+	clusterID := []byte{0x1F, 0x43, 0xB6, 0x75}
+	if first := bytes.Index(pcm, clusterID); first > 0 {
+		if second := bytes.Index(pcm[first+1:], clusterID); second > 0 {
+			at := first + 1 + second
+			for _, junk := range [][]byte{make([]byte, 100), append(append(make([]byte, 7), clusterID...), 0x08, 0xFF, 0, 0, 0, 0, 0, 0, 0)} {
+				junked := append(append(append([]byte(nil), pcm[:at]...), junk...), pcm[at:]...)
+				f.Add(junked)
+				// The same with Clusters of unknown size, so the junk sits
+				// inside the first one and a resync ends it.
+				if unsized := unsizeClusters(junked); unsized != nil {
+					f.Add(unsized)
+				}
+			}
+			// Junk ahead of the last cluster of a file cut inside it, with
+			// decoys or with a false ID planted in that cluster's blocks:
+			// the cut-short cluster is the element a resync lands on.
+			for _, junk := range [][]byte{junkDecoys(), make([]byte, 100)} {
+				cut := append(append(append([]byte(nil), pcm[:at]...), junk...), pcm[at:]...)
+				cut = cut[:at+len(junk)+(len(pcm)-at)/2]
+				if len(junk) == 100 {
+					copy(cut[at+len(junk)+200:], []byte{0x12, 0x54, 0xC3, 0x67, 0x80})
+				}
+				f.Add(cut)
+			}
+		}
+	}
+	for _, name := range []string{"seed-pcm.mka", "mp3.mka"} {
+		if unsized := unsizeClusters(fixture(f, name)); unsized != nil {
+			f.Add(unsized)
+		}
 	}
 	// An end trim spread over three blocks, one left whole on its last
 	// block, and trimmed blocks with audio after them.

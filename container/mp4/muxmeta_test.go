@@ -120,8 +120,8 @@ func muxAACMeta(t *testing.T, w io.Writer, n int, declaredLen int64, opts *Muxer
 
 // TestMuxTagsIlstAtoms checks the ilst text atoms land byte-exact: each
 // mapped key becomes its iTunes atom wrapping a UTF-8 data atom, a
-// repeated key joins with "; ", and TRACKNUMBER/TRACKTOTAL render as the
-// trkn binary pair. The expected bytes come from the package's own
+// repeated key takes one data atom per value, and TRACKNUMBER/TRACKTOTAL
+// render as the trkn binary pair. The expected bytes come from the package's own
 // builders, so the assertion is the whole atom, not substring luck.
 func TestMuxTagsIlstAtoms(t *testing.T) {
 	tags := []container.Tag{
@@ -144,7 +144,7 @@ func TestMuxTagsIlstAtoms(t *testing.T) {
 		want []byte
 	}{
 		{"nam", itemAtom("\xa9nam", dataAtom(1, []byte("Title Value")))},
-		{"ART", itemAtom("\xa9ART", dataAtom(1, []byte("Artist One; Artist Two")))},
+		{"ART", itemAtom("\xa9ART", dataAtom(1, []byte("Artist One")), dataAtom(1, []byte("Artist Two")))},
 		{"alb", itemAtom("\xa9alb", dataAtom(1, []byte("Album Value")))},
 		{"day", itemAtom("\xa9day", dataAtom(1, []byte("2026-07-11")))},
 		{"trkn", itemAtom("trkn", dataAtom(0, []byte{0, 0, 0, 3, 0, 12, 0, 0}))},
@@ -366,7 +366,7 @@ func TestPatchFreeform(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(data, freeformAtom("REPLAYGAIN_TRACK_GAIN", "-03.10 dB")) {
+	if !bytes.Contains(data, freeformAtom("replaygain_track_gain", "-03.10 dB")) {
 		t.Error("patched freeform atom missing")
 	}
 	if bytes.Contains(data, []byte(placeholder)) {
@@ -462,9 +462,8 @@ func TestPatchFreeformPastFixedWindow(t *testing.T) {
 }
 
 // tagRoundTripCases is the tag set the read-back tests write and expect
-// back: every atom shape the muxer emits, which is what bounds the reader.
-// The text keys cover ilstText, trkn and disk cover the number pairs, and
-// the ReplayGain key covers the freeform walk.
+// back: text atoms, both number pairs and a freeform. The whole vocabulary
+// is covered by tagVocabulary (muxtags_test.go).
 var tagRoundTripCases = []container.Tag{
 	{Key: "TITLE", Value: "Chaptered Book"},
 	{Key: "ARTIST", Value: "A Narrator"},

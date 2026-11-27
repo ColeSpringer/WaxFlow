@@ -2,6 +2,7 @@ package mpa_test
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"os"
@@ -70,9 +71,13 @@ func decodeLength(t *testing.T, raw []byte) int64 {
 	}
 }
 
+func mpaOpen(raw []byte, strict bool) (*mpa.Demuxer, error) {
+	return mpa.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: strict})
+}
+
 func walked(t *testing.T, raw []byte, strict bool) (container.Track, []container.Warning, error) {
 	t.Helper()
-	d, err := mpa.NewDemuxer(container.BytesSource(raw), &container.DemuxerOptions{Strict: strict})
+	d, err := mpaOpen(raw, strict)
 	if err != nil {
 		return container.Track{}, nil, err
 	}
@@ -229,15 +234,33 @@ func TestAShortfallOnACleanCutIsFoundByBothPaths(t *testing.T) {
 	}
 }
 
+// setByteCount rewrites the byte count in the metadata frame raw opens with.
+func setByteCount(t *testing.T, raw []byte, n int) {
+	t.Helper()
+	h, err := mp3.ParseHeader(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := mp3.HeaderLen + h.SideInfoLen()
+	if tag := string(raw[off : off+4]); tag != "Xing" && tag != "Info" || binary.BigEndian.Uint32(raw[off+4:])&3 != 3 {
+		t.Fatalf("the fixture opens with no metadata frame stating both counts")
+	}
+	binary.BigEndian.PutUint32(raw[off+12:], uint32(n))
+}
+
 // TestARunPastItsCountIsANote is the other direction: the frames the tag
-// named are all there, and more behind them. Nothing is missing, so it is the
-// file being loose rather than damaged, and the trims still bound the length.
+// named are all there, and more behind them, inside the bytes the tag counts.
+// Nothing is missing, so it is the file being loose rather than damaged, and
+// the trims still bound the length.
 func TestARunPastItsCountIsANote(t *testing.T) {
 	raw := mp3Fixture(t, "sine-vbr.mp3")
 	offs := frameOffsets(t, raw)
 	last := raw[offs[len(offs)-1]:]
 	grown := append(append([]byte(nil), raw...), last...)
 	grown = append(grown, last...)
+	// Frames behind the byte count are another stream's (see the joined
+	// tests); these are the tag's own.
+	setByteCount(t, grown, len(grown))
 
 	track, ws, err := walked(t, grown, true)
 	if err != nil {

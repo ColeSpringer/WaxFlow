@@ -45,6 +45,20 @@ type driver struct {
 	// probing only ever reads what the current table can use.
 	need int
 	exts []string
+	// start finds the first stream start in a window that the format's own
+	// structure confirms, for a stream behind bytes that are no tag (see
+	// resolve). nil for a container whose start nothing short of opening it
+	// confirms. checksummed says a checksum is what confirms it, leads that
+	// the demuxer looks past leading bytes itself, and loose that match can
+	// answer for a stream that does not start the head.
+	start       func(window []byte) (int, bool)
+	checksummed bool
+	leads       bool
+	loose       bool
+	// chain counts the frames that follow one another from a window's start
+	// and the bytes they take, for a stream that is a run of frames: a long
+	// run is the stream, whatever a magic in front of it began (see resolve).
+	chain func(window []byte, limit int) (frames, n int)
 	// mediaType is the container's HTTP media type; direct play serves it
 	// from here so no handler maintains its own container-to-type switch.
 	mediaType string
@@ -59,11 +73,13 @@ type driver struct {
 type openOptions struct {
 	strict bool
 	base   int64
+	// lead is what was left in front of the source (see resolve).
+	lead []container.Warning
 }
 
 // demuxerOptions is o as a demuxer takes it.
 func (o openOptions) demuxerOptions() *container.DemuxerOptions {
-	return &container.DemuxerOptions{Strict: o.strict, Base: o.base}
+	return &container.DemuxerOptions{Strict: o.strict, Base: o.base, Lead: o.lead}
 }
 
 // drivers is the explicit ordered magic table (no blank-import
@@ -74,6 +90,7 @@ var drivers = []driver{
 	{
 		name:      "flac",
 		match:     flacn.Match,
+		start:     flacn.FindStart,
 		need:      4,
 		exts:      []string{"flac"},
 		mediaType: "audio/flac",
@@ -102,11 +119,13 @@ var drivers = []driver{
 		},
 	},
 	{
-		name:      "ogg",
-		match:     ogg.Match,
-		need:      4,
-		exts:      []string{"ogg", "oga", "opus"},
-		mediaType: "audio/ogg",
+		name:        "ogg",
+		match:       ogg.Match,
+		start:       ogg.FindStart,
+		checksummed: true,
+		need:        4,
+		exts:        []string{"ogg", "oga", "opus"},
+		mediaType:   "audio/ogg",
 		open: func(src container.Source, o openOptions) (container.Demuxer, error) {
 			return ogg.NewDemuxer(src, o.demuxerOptions())
 		},
@@ -134,6 +153,9 @@ var drivers = []driver{
 	{
 		name:      "adts",
 		match:     adts.Match,
+		start:     adts.FindStart,
+		chain:     adts.Chain,
+		leads:     true,
 		need:      adts.MatchNeed,
 		exts:      []string{"aac", "adts"},
 		mediaType: "audio/aac",
@@ -144,6 +166,8 @@ var drivers = []driver{
 	{
 		name:      "ape",
 		match:     apen.Match,
+		start:     apen.FindStart,
+		leads:     true,
 		need:      apen.MatchNeed,
 		exts:      []string{"ape"},
 		mediaType: "audio/x-ape",
@@ -154,6 +178,7 @@ var drivers = []driver{
 	{
 		name:      "wavpack",
 		match:     wv.Match,
+		start:     wv.FindStart,
 		need:      4,
 		exts:      []string{"wv"},
 		mediaType: "audio/x-wavpack",
@@ -179,6 +204,8 @@ var drivers = []driver{
 		// window for a sync pair, and a Musepack body can contain one.
 		name:      "musepack",
 		match:     mpc.Match,
+		start:     mpc.FindStart,
+		leads:     true,
 		need:      mpc.MatchNeed,
 		exts:      []string{"mpc", "mp+", "mpp"},
 		mediaType: "audio/x-musepack",
@@ -191,6 +218,10 @@ var drivers = []driver{
 	{
 		name:      "mp3",
 		match:     mpa.Match,
+		start:     mpa.FindStart,
+		chain:     mpa.Chain,
+		leads:     true,
+		loose:     true,
 		need:      mpa.MatchNeed,
 		exts:      []string{"mp3", "mpga"},
 		mediaType: "audio/mpeg",

@@ -104,6 +104,16 @@ func dropChpl(t *testing.T, file []byte) []byte {
 	return bytes.Replace(file, []byte("chpl"), []byte("free"), 1)
 }
 
+// chplChapters is the Nero list a demuxer holds, read on its own: what the
+// file's chpl says before the chapter track is weighed against it.
+func chplChapters(d *Demuxer) []container.Chapter {
+	if d.chpl == nil {
+		return nil
+	}
+	chs, _ := parseChpl(d.chpl, &titleReader{page: &windows1252})
+	return chs
+}
+
 // wantChapters asserts a demuxer read back exactly the chapters written.
 func wantChapters(t *testing.T, got, want []container.Chapter) {
 	t.Helper()
@@ -134,11 +144,9 @@ func TestProgressiveChapterTrackRoundTrip(t *testing.T) {
 		wantChapters(t, d.Chapters(), want)
 	})
 
-	// End is what the text track has and chpl structurally cannot, so it is
-	// the reason this source outranks chpl. Reading it back is what makes
-	// that reason true of the code and not just of the format: a chapter's
-	// end is its sample's duration, and discarding it would leave the
-	// precedence comment above describing a container rather than a reader.
+	// End is what the text track has and a chpl cannot state for its last
+	// chapter. A movie that carries both takes that end from the track, so
+	// every chapter here reads back with one.
 	t.Run("ends", func(t *testing.T) {
 		file, want := muxChaptered(t, 4)
 		d, err := NewDemuxer(container.BytesSource(file), nil)
@@ -167,33 +175,31 @@ func TestProgressiveChapterTrackRoundTrip(t *testing.T) {
 		}
 	})
 
-	// The case chpl cannot represent, and so the case that proves the text
-	// track is real rather than a decoration on a list the reader still
-	// prefers: 400 chapters in, 400 chapters out, from a file whose chpl
-	// truncated to 255 on the way past.
+	// The case chpl cannot represent: 400 chapters in, 400 chapters out, from
+	// a file whose chpl truncated to 255 on the way past. The two stores
+	// disagree there, and the track is the one read.
 	t.Run("beyond the chpl cap", func(t *testing.T) {
 		file, want := muxChaptered(t, 400)
 		d, err := NewDemuxer(container.BytesSource(file), nil)
 		if err != nil {
 			t.Fatalf("NewDemuxer: %v", err)
 		}
-		if len(d.chplChapters) != 255 {
-			t.Fatalf("chpl carries %d chapters, want the 255 cap (is the fixture exercising the cap?)", len(d.chplChapters))
+		if len(chplChapters(d)) != 255 {
+			t.Fatalf("chpl carries %d chapters, want the 255 cap (is the fixture exercising the cap?)", len(chplChapters(d)))
 		}
 		wantChapters(t, d.Chapters(), want)
 	})
 
 	// A movie whose only chapter form is the text track, which is what every
-	// non-Nero writer produces and what the read precedence must not need a
-	// chpl to fall back on.
+	// non-Nero writer produces and what the read must not need a chpl for.
 	t.Run("text track only", func(t *testing.T) {
 		file, want := muxChaptered(t, 5)
 		d, err := NewDemuxer(container.BytesSource(dropChpl(t, file)), nil)
 		if err != nil {
 			t.Fatalf("NewDemuxer: %v", err)
 		}
-		if len(d.chplChapters) != 0 {
-			t.Fatalf("chpl survived the rename: %d chapters", len(d.chplChapters))
+		if len(chplChapters(d)) != 0 {
+			t.Fatalf("chpl survived the rename: %d chapters", len(chplChapters(d)))
 		}
 		wantChapters(t, d.Chapters(), want)
 	})
@@ -243,8 +249,8 @@ func TestProgressiveChapterTrackShape(t *testing.T) {
 	if text.timescale != chapterTimescale {
 		t.Errorf("chapter timescale = %d, want %d", text.timescale, chapterTimescale)
 	}
-	// The tref is what binds the two; without it a reader falls back to
-	// guessing at any text track it finds.
+	// The tref is what binds the two: a reader takes a text track for
+	// chapters only when another track names it.
 	if len(audio.chapRefs) != 1 || audio.chapRefs[0] != chapterTrackID {
 		t.Errorf("audio chapRefs = %v, want [%d]", audio.chapRefs, chapterTrackID)
 	}
@@ -350,10 +356,9 @@ func TestProgressiveChapterFirstStart(t *testing.T) {
 		wantChapters(t, d.Chapters(), want)
 	})
 
-	// chpl stores absolute starts, so it is right about this by construction
-	// and would cover for a text track that is wrong. resolveChapters prefers
-	// the text track, so the subtest above reads the track under test; renaming
-	// chpl away proves it rather than trusting that precedence to stay put.
+	// chpl stores absolute starts, so it is right about this by construction,
+	// and a movie that carries both reads its starts from it. Renaming chpl
+	// away puts the track itself under test.
 	t.Run("text track only", func(t *testing.T) {
 		d, err := NewDemuxer(container.BytesSource(dropChpl(t, file)), nil)
 		if err != nil {
@@ -372,10 +377,11 @@ func TestProgressiveChapterFirstStart(t *testing.T) {
 			t.Fatalf("movie has %d tracks, want audio plus chapters", len(traks))
 		}
 		edts := findBoxForTest(t, traks[1], "edts")
+		elst := findBoxForTest(t, edts, "elst")
 		chapTrak := &track{editMedia: -1}
-		parseElst(chapTrak, findBoxForTest(t, edts, "elst"))
-		if want := int64(5 * 48000); chapTrak.emptyEdit != want {
-			t.Errorf("empty edit = %d movie ticks, want %d (5 s at 48 kHz)", chapTrak.emptyEdit, want)
+		parseElst(chapTrak, elst)
+		if got, want := parseChapterEdits(elst).lead, uint64(5*48000); got != want {
+			t.Errorf("empty edit = %d movie ticks, want %d (5 s at 48 kHz)", got, want)
 		}
 		if chapTrak.editMedia != 0 {
 			t.Errorf("the edit after it starts %d media ticks in, want 0: the samples are not offset, the edit is",
@@ -384,38 +390,12 @@ func TestProgressiveChapterFirstStart(t *testing.T) {
 	})
 }
 
-// TestChapterAnchorRescaleRounds pins the rounding on the anchor's way back in.
-//
-// The empty edit crosses two grids that do not divide each other: the muxer
-// spells it in movie ticks, 44.1 of which make a millisecond at 44.1 kHz, and
-// the reader wants back the millisecond the chapter was authored on. Truncating
-// there drops the anchor to the millisecond below and shifts the whole track by
-// it, which is the same class of error as losing the anchor outright, only
-// smaller and harder to see.
-func TestChapterAnchorRescaleRounds(t *testing.T) {
-	for _, rate := range []int64{44100, 48000, 22050, 96000} {
-		t.Run(fmt.Sprint(rate), func(t *testing.T) {
-			for ms := int64(0); ms < 20000; ms += 7 {
-				empty := satmath.MulDiv(ms, rate, chapterTimescale) // what editDurs writes
-				if got := satmath.MulDivRound(empty, chapterTimescale, rate); got != ms {
-					t.Fatalf("a chapter at %d ms writes an empty edit of %d movie ticks and reads back at %d ms",
-						ms, empty, got)
-				}
-			}
-		})
-	}
-	// And the truncating rescale beside it does not round trip, which is what
-	// makes the one above a choice rather than a spelling.
-	if empty := satmath.MulDiv(1, 44100, chapterTimescale); satmath.MulDiv(empty, chapterTimescale, 44100) == 1 {
-		t.Fatal("the premise moved: truncating now round trips a millisecond at 44.1 kHz")
-	}
-}
-
-// TestProgressiveChapterAnchorAt44k is the rounding pin above wired through the
-// muxer and the reader, at the one rate in this file that can show it. The Opus
-// fixtures are 48 kHz, where a millisecond is a whole 48 movie ticks and the
-// anchor round trips whichever way the rescale goes; at 44.1 kHz a millisecond
-// is 44.1 ticks and an anchor between them is what a truncating read loses.
+// TestProgressiveChapterAnchorAt44k pins where a late first chapter lands at
+// the one rate in this file whose grids do not divide each other. The anchor
+// is an empty edit in movie ticks, 44.1 of which make a millisecond at
+// 44.1 kHz, so the track alone states the start to the tick below it, as it
+// does to every reader of the file. The chpl beside it states the start
+// itself, which is why a movie that carries both reads back exact.
 func TestProgressiveChapterAnchorAt44k(t *testing.T) {
 	const rate, npkt = 44100, 40 // ~3.7 s, past the last chapter
 	// 1001 ms is on the millisecond grid the chapter track spells and off the
@@ -430,13 +410,21 @@ func TestProgressiveChapterAnchorAt44k(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDemuxer: %v", err)
 	}
-	// chpl stores absolute starts and would cover for the anchor being wrong.
 	wantChapters(t, d.Chapters(), want)
 	d2, err := NewDemuxer(container.BytesSource(dropChpl(t, file)), nil)
 	if err != nil {
 		t.Fatalf("NewDemuxer: %v", err)
 	}
-	wantChapters(t, d2.Chapters(), want)
+	got := d2.Chapters()
+	if len(got) != len(want) {
+		t.Fatalf("the track alone reads %d chapters, want %d", len(got), len(want))
+	}
+	const tick = time.Second / rate
+	for i := range want {
+		if off := want[i].Start - got[i].Start; off < 0 || off > tick {
+			t.Errorf("chapter %d starts %v from the track alone, want within a movie tick under %v", i, got[i].Start, want[i].Start)
+		}
+	}
 }
 
 // TestProgressiveChapterTailWithinPresentation covers the other end of the
@@ -550,8 +538,8 @@ func chapterTrackMediaDur(t *testing.T, file []byte) int64 {
 //
 // The text track is the part a fragmented moov genuinely cannot hold: its
 // samples would live in the fragments and its moov sample table is empty by
-// design, so there is nothing for chapterTrack to match. That, and only that,
-// is what a fragmented file goes without.
+// design, so the track reads as absent. That, and only that, is what a
+// fragmented file goes without.
 func TestFragmentedChaptersSurvive(t *testing.T) {
 	src := metaTone(alac.FrameSize * 3)
 	defer audio.Put(src)
@@ -566,9 +554,9 @@ func TestFragmentedChaptersSurvive(t *testing.T) {
 	if !d.fragmented {
 		t.Fatal("the fixture is not fragmented; this test is not covering the gate")
 	}
-	if len(d.chplChapters) != len(want) {
+	if len(chplChapters(d)) != len(want) {
 		t.Fatalf("the moov parsed %d chpl chapters, want %d (the fixture carries no chapters to drop)",
-			len(d.chplChapters), len(want))
+			len(chplChapters(d)), len(want))
 	}
 	wantChapters(t, d.Chapters(), want)
 }

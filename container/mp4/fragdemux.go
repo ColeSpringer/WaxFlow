@@ -3,6 +3,7 @@ package mp4
 import (
 	"context"
 	"io"
+	"math/bits"
 	"slices"
 
 	"github.com/colespringer/waxflow/codec"
@@ -33,7 +34,8 @@ const (
 	// metadata (duration/size/flags), so even a fragment of many thousands of
 	// samples stays small; larger is refused rather than read.
 	maxMoofBytes = 8 << 20
-	// maxSamplesPerFragment bounds a single trun's sample count.
+	// maxSamplesPerFragment bounds the samples of one traf, all its runs
+	// together.
 	maxSamplesPerFragment = 1 << 20
 )
 
@@ -360,8 +362,9 @@ func (d *Demuxer) fragmentsEnded() error {
 	return io.EOF
 }
 
-// loadFragment reads one moof into memory, parses its traf/trun into a sample
-// queue anchored at the adjacent mdat, and advances the cursor past the mdat.
+// loadFragment reads one moof into memory, parses the selected track's traf
+// into a sample queue, each sample placed where its runs say, and advances
+// the cursor past the moof and the mdat behind it.
 func (d *Demuxer) loadFragment(moof box) error {
 	if moof.payloadLen() > maxMoofBytes {
 		return malformed("moof of %d bytes exceeds the %d cap", moof.payloadLen(), int64(maxMoofBytes))
@@ -371,16 +374,9 @@ func (d *Demuxer) loadFragment(moof box) error {
 		return err
 	}
 	var fi fragInfo
-	if err := parseFragment(&fi, buf, d.trex, d.sel.id); err != nil {
+	if err := parseFragment(&fi, buf, d.trexes, d.sel.id, moof.off); err != nil {
 		return err
 	}
-	// default-base-is-moof: the data reference base is the moof start unless a
-	// tfhd base_data_offset overrides it; trun's data_offset is relative to that.
-	base := moof.off
-	if fi.haveBaseOffset {
-		base = fi.baseDataOffset
-	}
-	off := base + int64(fi.dataOffset)
 
 	// The trun durations and the tfdt base are in media-timescale ticks, but
 	// the packet timeline is output samples. Rescale when the media timescale
@@ -391,7 +387,7 @@ func (d *Demuxer) loadFragment(moof box) error {
 
 	d.fragQueue = d.fragQueue[:0]
 	for _, s := range fi.samples {
-		if off < 0 || off > d.size-int64(s.size) {
+		if s.off < 0 || s.off > d.size-int64(s.size) {
 			return malformed("fragment sample runs past end of source")
 		}
 		dur := int64(s.dur)
@@ -404,8 +400,7 @@ func (d *Demuxer) loadFragment(moof box) error {
 			// non-positive Dur out, the same clamp the stbl reader applies.
 			dur = 1
 		}
-		d.fragQueue = append(d.fragQueue, fragSample{off: off, size: s.size, dur: uint32(dur), sync: s.sync})
-		off += int64(s.size)
+		d.fragQueue = append(d.fragQueue, fragSample{off: s.off, size: s.size, dur: uint32(dur), sync: s.sync})
 	}
 	d.fragIdx = 0
 	// Where this fragment begins, in ticks: its own tfdt, or the running sum of
@@ -436,8 +431,8 @@ func (d *Demuxer) loadFragment(moof box) error {
 	return nil
 }
 
-// fragInfo is one parsed fragment: its base decode time, the trun data offset,
-// an optional tfhd base_data_offset, and the per-sample metadata.
+// fragInfo is one parsed fragment: its base decode time and the selected
+// track's samples, each placed in the source.
 type fragInfo struct {
 	baseDecodeTime int64
 	// haveBaseTime says the traf carried a tfdt. Without one the fragment does
@@ -445,16 +440,14 @@ type fragInfo struct {
 	// one ended rather than restarting at zero: a movie whose fragments carry
 	// no tfdt otherwise replays its whole timeline from 0 at every fragment,
 	// and every PTS after the first goes backwards.
-	haveBaseTime   bool
-	dataOffset     int32
-	baseDataOffset int64
-	haveBaseOffset bool
-	samples        []fragSampleInfo
+	haveBaseTime bool
+	samples      []fragSampleInfo
 }
 
-// fragSampleInfo is one sample's timing/size/sync before its byte offset is
-// resolved against the mdat.
+// fragSampleInfo is one sample: where its bytes begin in the source, its
+// size, and its timing and sync.
 type fragSampleInfo struct {
+	off       int64
 	dur, size uint32
 	sync      bool
 }
@@ -465,13 +458,15 @@ type fragSampleInfo struct {
 // empty fragInfo, so the reader skips it rather than feeding the wrong track's
 // samples to the audio decoder. selID <= 0 (an unknown selected id) or a traf
 // with no readable id falls back to the first traf, the single-track case.
+// moofOff is the moof's first byte, which places the samples (trafChain).
 // It fills fi rather than returning one, and keeps its sample slice's capacity:
-// a trun may declare up to maxSamplesPerFragment entries, so a scan over a file
+// a traf may declare up to maxSamplesPerFragment entries, so a scan over a file
 // of many fragments would otherwise allocate that run once per moof. Every
 // other field is reset, since a reused fi must not carry the previous
-// fragment's base time or data offset into this one.
-func parseFragment(fi *fragInfo, buf []byte, trex trexDefaults, selID int) error {
+// fragment's base time into this one.
+func parseFragment(fi *fragInfo, buf []byte, trexes []trexDefaults, selID int, moofOff int64) error {
 	*fi = fragInfo{samples: fi.samples[:0]}
+	c := trafChain{moof: moofOff, end: moofOff, known: true}
 	matched := false
 	var perr error
 	_ = walkBoxes(buf, func(typ string, body []byte) error {
@@ -479,10 +474,13 @@ func parseFragment(fi *fragInfo, buf []byte, trex trexDefaults, selID int) error
 			return nil
 		}
 		if id, ok := trafTrackID(body); selID > 0 && ok && int(id) != selID {
-			return nil // a traf for a different track
+			// A traf for a different track: only where its data ends is
+			// taken, for a later traf that states no base.
+			_ = c.add(nil, body, trexFor(trexes, int(id)))
+			return nil
 		}
 		matched = true
-		perr = parseTraf(fi, body, trex)
+		perr = c.add(fi, body, trexFor(trexes, selID))
 		return nil
 	})
 	return perr
@@ -505,40 +503,82 @@ func trafTrackID(body []byte) (uint32, bool) {
 	return id, found
 }
 
-// parseTraf parses a traf: tfhd (flags and per-sample defaults), tfdt (base
-// decode time), and trun (the sample list).
-func parseTraf(fi *fragInfo, body []byte, trex trexDefaults) error {
-	defaultDur, defaultSize, defaultFlags := trex.defaultDur, trex.defaultSize, trex.defaultFlags
-	var trun []byte
-	haveTrun := false
+// trafChain places the trafs of one moof (ISO/IEC 14496-12, 8.8.7). A traf
+// is based where its tfhd says: at an offset it states, or at the moof. One
+// whose tfhd says neither is based at the moof when it is the moof's first
+// traf, and otherwise where the data of the traf before it ends.
+type trafChain struct {
+	moof  int64 // the moof's first byte
+	end   int64 // where the data of the trafs so far ends
+	known bool  // end could be worked out
+}
+
+// add parses a traf: tfhd (its base and per-sample defaults), tfdt (base
+// decode time) and its runs, placing each sample, and moves the chain to the
+// end of the traf's data. With fi nil the traf is only measured. A traf that
+// fails leaves the chain's end unknown.
+func (c *trafChain) add(fi *fragInfo, body []byte, trex trexDefaults) error {
+	h := trafHead{dur: trex.defaultDur, size: trex.defaultSize, flags: trex.defaultFlags}
+	sawTfhd := false
 	err := walkBoxes(body, func(typ string, p []byte) error {
 		switch typ {
 		case "tfhd":
-			parseTfhd(fi, p, &defaultDur, &defaultSize, &defaultFlags)
+			if !sawTfhd {
+				sawTfhd = true
+				h.parse(p)
+			}
 		case "tfdt":
-			parseTfdt(fi, p)
-		case "trun":
-			if !haveTrun {
-				trun, haveTrun = p, true
+			if fi != nil {
+				parseTfdt(fi, p)
 			}
 		}
 		return nil
 	})
+	base, known := h.dataBase(*c)
+	r := trafRuns{fi: fi, head: h, base: base, at: base}
+	if err == nil {
+		err = walkBoxes(body, func(typ string, p []byte) error {
+			if typ != "trun" {
+				return nil
+			}
+			r.runs++
+			return r.add(p)
+		})
+	}
+	switch {
+	case err != nil:
+	case fi == nil:
+	case r.runs == 0:
+		err = malformed("traf has no trun")
+	case !known:
+		err = malformed("traf is based on the data of a traf that cannot be read")
+	}
 	if err != nil {
+		c.known = false
 		return err
 	}
-	if !haveTrun {
-		return malformed("traf has no trun")
+	// A traf with no run defines no data, and leaves the end where it was.
+	if r.runs > 0 {
+		c.end, c.known = r.at, known
 	}
-	return parseTrun(fi, trun, defaultDur, defaultSize, defaultFlags)
+	return nil
 }
 
-// parseTfhd reads the track-fragment header: its base_data_offset (when the
-// flag is set) and any per-sample defaults it overrides.
-func parseTfhd(fi *fragInfo, payload []byte, defaultDur, defaultSize, defaultFlags *uint32) {
-	_, flags, rest, ok := fullBox(payload)
-	if !ok || len(rest) < 4 {
-		return
+// trafHead is what a tfhd states: the base of the traf's data, and the
+// per-sample defaults its runs fall back to, which begin as the trex's.
+type trafHead struct {
+	base             int64
+	haveBase         bool // base-data-offset-present
+	baseIsMoof       bool // default-base-is-moof
+	dur, size, flags uint32
+}
+
+// parse reads a tfhd into h. ok is false when it does not hold a track_ID;
+// a field past that which is cut off is left as it was.
+func (h *trafHead) parse(payload []byte) (ok bool) {
+	_, flags, rest, full := fullBox(payload)
+	if !full || len(rest) < 4 {
+		return false
 	}
 	q := rest[4:] // after track_ID
 	take := func(n int) []byte {
@@ -552,8 +592,7 @@ func parseTfhd(fi *fragInfo, payload []byte, defaultDur, defaultSize, defaultFla
 	}
 	if flags&0x000001 != 0 { // base-data-offset-present
 		if b := take(8); b != nil {
-			fi.baseDataOffset = int64(be64(b))
-			fi.haveBaseOffset = true
+			h.base, h.haveBase = int64(be64(b)), true
 		}
 	}
 	if flags&0x000002 != 0 { // sample-description-index-present
@@ -561,21 +600,33 @@ func parseTfhd(fi *fragInfo, payload []byte, defaultDur, defaultSize, defaultFla
 	}
 	if flags&0x000008 != 0 { // default-sample-duration-present
 		if b := take(4); b != nil {
-			*defaultDur = be32(b)
+			h.dur = be32(b)
 		}
 	}
 	if flags&0x000010 != 0 { // default-sample-size-present
 		if b := take(4); b != nil {
-			*defaultSize = be32(b)
+			h.size = be32(b)
 		}
 	}
 	if flags&0x000020 != 0 { // default-sample-flags-present
 		if b := take(4); b != nil {
-			*defaultFlags = be32(b)
+			h.flags = be32(b)
 		}
 	}
-	// 0x020000 default-base-is-moof: the base stays the moof start (loadFragment
-	// uses moof.off unless a base_data_offset above overrode it), so no field.
+	h.baseIsMoof = flags&0x020000 != 0
+	return true
+}
+
+// dataBase is where the traf's data is based in chain c, and whether that
+// is known: a stated offset first, then the moof, then the chain's end.
+func (h trafHead) dataBase(c trafChain) (base int64, known bool) {
+	switch {
+	case h.haveBase:
+		return h.base, true
+	case h.baseIsMoof:
+		return c.moof, true
+	}
+	return c.end, c.known
 }
 
 // parseTfdt reads the base media decode time (version 0: 32-bit; version 1: 64).
@@ -595,70 +646,128 @@ func parseTfdt(fi *fragInfo, payload []byte) {
 	}
 }
 
-// parseTrun reads the track-fragment run: the sample count, the data offset,
-// and each sample's duration, size, and flags (defaulting to the trex/tfhd
-// fallbacks for fields the run omits). Composition-time offsets are skipped
-// (audio has none that matter here).
-func parseTrun(fi *fragInfo, trun []byte, defaultDur, defaultSize, defaultFlags uint32) error {
-	_, flags, rest, ok := fullBox(trun)
-	if !ok || len(rest) < 4 {
+// The trun flags read here.
+const (
+	trunDataOffset  = 0x000001
+	trunFirstFlags  = 0x000004
+	trunDuration    = 0x000100
+	trunSize        = 0x000200
+	trunSampleFlags = 0x000400
+	trunComposition = 0x000800
+)
+
+// trunHead is a run's fixed fields and the per-sample entries behind them.
+type trunHead struct {
+	flags      uint32
+	count      uint32
+	dataOff    int32  // where flags has trunDataOffset
+	firstFlags uint32 // where flags has trunFirstFlags
+	entries    []byte
+}
+
+// parseTrunHead reads a trun's fixed fields. ok is false when they do not
+// lie whole in trun, which may be cut off behind them.
+func parseTrunHead(trun []byte) (t trunHead, ok bool) {
+	_, flags, rest, full := fullBox(trun)
+	if !full || len(rest) < 4 {
+		return t, false
+	}
+	t.flags, t.count, rest = flags, be32(rest), rest[4:]
+	if flags&trunDataOffset != 0 {
+		if len(rest) < 4 {
+			return t, false
+		}
+		t.dataOff, rest = int32(be32(rest)), rest[4:]
+	}
+	if flags&trunFirstFlags != 0 {
+		if len(rest) < 4 {
+			return t, false
+		}
+		t.firstFlags, rest = be32(rest), rest[4:]
+	}
+	t.entries = rest
+	return t, true
+}
+
+// entryLen is the bytes one sample takes in the run's table.
+func (t trunHead) entryLen() int {
+	return 4 * bits.OnesCount32(t.flags&(trunDuration|trunSize|trunSampleFlags|trunComposition))
+}
+
+// trafRuns places the runs of one traf in order (ISO/IEC 14496-12, 8.8.8):
+// a run begins at its data offset from the traf's base, and one that states
+// none where the run before it ended.
+type trafRuns struct {
+	fi    *fragInfo // nil to measure only
+	head  trafHead
+	base  int64
+	at    int64 // where the data of the runs so far ends
+	runs  int
+	count int // samples so far, held to maxSamplesPerFragment
+}
+
+// add reads one trun: each sample's duration, size and flags, falling back
+// to the traf's defaults, and where its bytes lie. Composition-time offsets
+// are skipped (audio has none that matter here).
+func (r *trafRuns) add(trun []byte) error {
+	t, ok := parseTrunHead(trun)
+	if !ok {
 		return malformed("trun truncated")
 	}
-	count := be32(rest)
-	rest = rest[4:]
-	if count > maxSamplesPerFragment {
-		return malformed("trun declares %d samples", count)
+	if int64(t.count) > int64(maxSamplesPerFragment-r.count) {
+		return malformed("traf declares more than %d samples", maxSamplesPerFragment)
 	}
-	if flags&0x000001 != 0 { // data-offset-present
-		if len(rest) < 4 {
-			return malformed("trun data offset truncated")
+	n := t.entryLen()
+	if int64(t.count)*int64(n) > int64(len(t.entries)) {
+		return malformed("trun declares %d samples for %d bytes", t.count, len(t.entries))
+	}
+	r.count += int(t.count)
+	if t.flags&trunDataOffset != 0 {
+		r.at = satmath.Add(r.base, int64(t.dataOff))
+	}
+	rest := t.entries
+	if r.fi == nil {
+		// Measured only: the sizes are all that is read, and where the run
+		// states none its length is a product, so a run of a million
+		// samples in sixteen bytes costs nothing.
+		if t.flags&trunSize == 0 {
+			r.at = satmath.Add(r.at, int64(t.count)*int64(r.head.size))
+			return nil
 		}
-		fi.dataOffset = int32(be32(rest))
-		rest = rest[4:]
-	}
-	var firstFlags uint32
-	haveFirstFlags := false
-	if flags&0x000004 != 0 { // first-sample-flags-present
-		if len(rest) < 4 {
-			return malformed("trun first-sample flags truncated")
+		sizeAt := 0
+		if t.flags&trunDuration != 0 {
+			sizeAt = 4
 		}
-		firstFlags = be32(rest)
-		rest = rest[4:]
-		haveFirstFlags = true
-	}
-	perSample := 0
-	for _, f := range []uint32{0x000100, 0x000200, 0x000400, 0x000800} {
-		if flags&f != 0 {
-			perSample += 4
+		for i := range int(t.count) {
+			r.at = satmath.Add(r.at, int64(be32(rest[i*n+sizeAt:])))
 		}
+		return nil
 	}
-	if int64(count)*int64(perSample) > int64(len(rest)) {
-		return malformed("trun declares %d samples for %d bytes", count, len(rest))
-	}
-	fi.samples = slices.Grow(fi.samples[:0], int(count))[:count]
-	for i := range count {
-		dur, size, sflags := defaultDur, defaultSize, defaultFlags
-		if flags&0x000100 != 0 {
+	r.fi.samples = slices.Grow(r.fi.samples, int(t.count))
+	for i := range t.count {
+		dur, size, sflags := r.head.dur, r.head.size, r.head.flags
+		if t.flags&trunDuration != 0 {
 			dur = be32(rest)
 			rest = rest[4:]
 		}
-		if flags&0x000200 != 0 {
+		if t.flags&trunSize != 0 {
 			size = be32(rest)
 			rest = rest[4:]
 		}
-		if flags&0x000400 != 0 {
+		if t.flags&trunSampleFlags != 0 {
 			sflags = be32(rest)
 			rest = rest[4:]
 		}
-		if flags&0x000800 != 0 {
-			rest = rest[4:] // sample_composition_time_offset
+		if t.flags&trunComposition != 0 {
+			rest = rest[4:]
 		}
-		if i == 0 && haveFirstFlags {
-			sflags = firstFlags
+		if i == 0 && t.flags&trunFirstFlags != 0 {
+			sflags = t.firstFlags
 		}
 		// sample_is_non_sync_sample is bit 0x00010000 of the sample flags; audio
 		// frames are all sync, but honor the flag when present.
-		fi.samples[i] = fragSampleInfo{dur: dur, size: size, sync: sflags&0x00010000 == 0}
+		r.fi.samples = append(r.fi.samples, fragSampleInfo{off: r.at, dur: dur, size: size, sync: sflags&0x00010000 == 0})
+		r.at = satmath.Add(r.at, int64(size))
 	}
 	return nil
 }
@@ -766,7 +875,7 @@ func (d *Demuxer) scanForward(ctx context.Context, from fragEntry, sample int64)
 			if err := container.ReadFull(d.src, buf, b.payloadOff()); err != nil {
 				return landed, err
 			}
-			if err := parseFragment(&fi, buf, d.trex, d.sel.id); err != nil {
+			if err := parseFragment(&fi, buf, d.trexes, d.sel.id, b.off); err != nil {
 				return landed, nil
 			}
 			if len(fi.samples) > 0 {

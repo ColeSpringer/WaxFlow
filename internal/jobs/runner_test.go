@@ -337,21 +337,22 @@ func writeUndeclaredADTS(t *testing.T, dir, name string, repeats int) (ref strin
 	return "lib/" + name, med.Info().Default().Samples
 }
 
-// writeDoubledMP3 writes a Xing-tagged MP3 twice over into dir under name, and
+// writeDoubledMP3 writes an under-declaring MP3 into dir under name, and
 // reports the ref, the count its leading tag declares, and the raw samples the
 // file really holds.
 //
-// Concatenation is how a real file comes to under-declare: the leading Xing
-// frame counts the first copy alone, and nothing in the format checks it, so
-// the header claims half of what the frames decode to. The second copy's own
-// tag frame is an ordinary silent MPEG frame to every reader downstream of it.
+// The file is a Xing-tagged MP3 twice over whose tag counts the frames of one
+// copy and the bytes of both (testutil.UnderDeclaredMP3), and nothing in the
+// format checks a frame count, so the header claims half of what the frames
+// decode to. The second copy's own tag frame is an ordinary silent MPEG frame
+// to every reader downstream of it.
 func writeDoubledMP3(t *testing.T, dir, name string) (ref string, declared, real int64) {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "sine-cbr128.mp3"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	doubled := append(append([]byte(nil), raw...), raw...)
+	doubled := testutil.UnderDeclaredMP3(t, raw)
 	if err := os.WriteFile(filepath.Join(dir, name), doubled, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -531,8 +532,8 @@ func TestSplitFillsAnAbsentLength(t *testing.T) {
 // The source is an MP3 rather than a FLAC, and the difference is the whole
 // reason the rule still has something to govern. A FLAC's STREAMINFO total is
 // verified against the frames at open, in both directions, so it cannot reach
-// here under-declaring; an MP3's Xing count is not, and two files concatenated
-// are the everyday way one comes to hold twice what its leading tag says.
+// here under-declaring; an MP3's Xing frame count is not, and a tag that
+// counts fewer frames than its own byte count spans holds more than it says.
 func TestSplitRefusesAnUnderDeclaredCutConsistently(t *testing.T) {
 	const cut = int64(30_000)
 	root := t.TempDir()

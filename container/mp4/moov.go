@@ -11,9 +11,13 @@ import (
 // codec/config/format, flattened sample table, and edit list.
 type track struct {
 	id        int    // tkhd track_ID
+	idKnown   bool   // a tkhd stated the id
 	handler   string // mdia/hdlr handler_type: "soun", "vide", "text", ...
 	timescale int64  // mdhd timescale (ticks per second)
 	duration  int64  // mdhd duration in timescale ticks
+	// The first of each header decides, as the first moov does: sawTkhd,
+	// sawMdhd and sawHdlr keep a later duplicate from restating the track.
+	sawTkhd, sawMdhd, sawHdlr bool
 
 	codec       codec.ID
 	codecConfig []byte
@@ -73,15 +77,24 @@ type track struct {
 	editSegDur int64 // segment_duration in movie timescale ticks
 	edits      int   // the edits that play media; editSegDur sums theirs
 
-	// emptyEdit is the blank presentation time the edit list inserts before
-	// the first sample, in movie ticks: the standard way a track states that
-	// it starts late. A chapter track's first chapter start rides here,
-	// because stts times its samples as deltas from zero and so cannot hold
-	// an absolute start; readTextChapters adds it back.
-	emptyEdit int64
-
 	// chapRefs are track_IDs referenced as chapter tracks ('chap' tref).
 	chapRefs []int
+
+	// text is a text track's sample tables as written, and chapEdits its
+	// first edit list as a chapter track reads one. The chapter reader times
+	// titles in the media's own ticks, which the flattened table's rescale
+	// and one-tick floor would move, and takes the first chapter's start
+	// from a leading empty edit: stts spells deltas from zero and so cannot
+	// hold an absolute start.
+	text      *textTable
+	chapEdits chapterEdits
+	sawElst   bool
+	// The chapter table is the one of the first stbl of the first minf of
+	// the first mdia, whether it reads or not: a later box does not restate
+	// it. sawMdia, sawMinf and sawStbl mark that path as walked, and
+	// onTextPath says the walk is on it.
+	sawMdia, sawMinf, sawStbl bool
+	onTextPath                bool
 }
 
 // addNote records a limitation of this track, which selectAudio emits only if
@@ -98,7 +111,11 @@ func (t *track) addNote(format string, args ...any) {
 }
 
 // parseMoov walks the movie box, returning the parsed tracks. It records
-// the movie timescale and Nero chapter list on the demuxer.
+// the movie timescale, the Nero chapter list and the tags on the demuxer.
+//
+// Of several mvhd, udta or meta boxes the first is the one read, as of
+// several moov boxes: a second is what joining two files leaves. Gapless
+// state is the exception and is still taken from every udta.
 func (d *Demuxer) parseMoov(moov []byte) ([]*track, error) {
 	// Pre-scan for mvex so parseStbl knows the movie is fragmented (its sample
 	// tables are empty by design) before it parses any trak; mvex trails the
@@ -110,10 +127,15 @@ func (d *Demuxer) parseMoov(moov []byte) ([]*track, error) {
 		return nil
 	})
 	var tracks []*track
+	var udta, meta []byte
+	var sawMvhd, sawUdta, sawMeta bool
 	err := walkBoxes(moov, func(typ string, payload []byte) error {
 		switch typ {
 		case "mvhd":
-			d.movieTimescale, d.movieDuration = mvhdTime(payload)
+			if !sawMvhd {
+				sawMvhd = true
+				d.movieTimescale, d.movieDuration = mvhdTime(payload)
+			}
 		case "trak":
 			if len(tracks) >= maxTracks {
 				return malformed("more than %d tracks", maxTracks)
@@ -124,11 +146,23 @@ func (d *Demuxer) parseMoov(moov []byte) ([]*track, error) {
 			}
 			tracks = append(tracks, t)
 		case "udta":
-			return d.parseUdta(payload, 1)
+			first := !sawUdta
+			if first {
+				sawUdta, udta = true, payload
+			}
+			return d.parseUdta(payload, 1, first)
+		case "meta":
+			if !sawMeta {
+				sawMeta, meta = true, payload
+			}
 		}
 		return nil
 	})
-	return tracks, err
+	if err != nil {
+		return tracks, err
+	}
+	d.readMovieTags(udta, meta)
+	return tracks, nil
 }
 
 // mvhdTime extracts the movie timescale and duration from an mvhd box.
@@ -191,28 +225,36 @@ func (d *Demuxer) parseTrak(t *track, body []byte, depth int) error {
 	return walkBoxes(body, func(typ string, payload []byte) error {
 		switch typ {
 		case "tkhd":
-			t.id = tkhdTrackID(payload)
+			if !t.sawTkhd {
+				t.sawTkhd = true
+				t.id, t.idKnown = tkhdTrackID(payload)
+			}
 		case "edts":
 			return walkBoxes(payload, func(t2 string, p2 []byte) error {
 				if t2 == "elst" {
 					parseElst(t, p2)
+					if !t.sawElst {
+						t.sawElst, t.chapEdits = true, parseChapterEdits(p2)
+					}
 				}
 				return nil
 			})
 		case "tref":
 			parseTref(t, payload)
 		case "mdia":
+			t.onTextPath, t.sawMdia = !t.sawMdia, true
 			return d.parseMdia(t, payload, depth+1)
 		}
 		return nil
 	})
 }
 
-// tkhdTrackID extracts the track_ID from a tkhd box.
-func tkhdTrackID(payload []byte) int {
+// tkhdTrackID extracts the track_ID from a tkhd box, ok false for a box too
+// short to state one.
+func tkhdTrackID(payload []byte) (id int, ok bool) {
 	version, _, rest, ok := fullBox(payload)
 	if !ok {
-		return 0
+		return 0, false
 	}
 	// version 0: creation(4) modification(4) track_ID(4)
 	// version 1: creation(8) modification(8) track_ID(4)
@@ -221,9 +263,9 @@ func tkhdTrackID(payload []byte) int {
 		off = 16
 	}
 	if len(rest) < off+4 {
-		return 0
+		return 0, false
 	}
-	return int(be32(rest[off:]))
+	return int(be32(rest[off:])), true
 }
 
 func (d *Demuxer) parseMdia(t *track, body []byte, depth int) error {
@@ -240,14 +282,22 @@ func (d *Demuxer) parseMdia(t *track, body []byte, depth int) error {
 	_ = walkBoxes(body, func(typ string, payload []byte) error {
 		switch typ {
 		case "mdhd":
-			t.timescale, t.duration = mdhdTime(payload)
+			if !t.sawMdhd {
+				t.sawMdhd = true
+				t.timescale, t.duration = mdhdTime(payload)
+			}
 		case "hdlr":
-			t.handler = hdlrType(payload)
+			if !t.sawHdlr {
+				t.sawHdlr = true
+				t.handler = hdlrType(payload)
+			}
 		}
 		return nil
 	})
+	first := t.onTextPath
 	return walkBoxes(body, func(typ string, payload []byte) error {
 		if typ == "minf" {
+			t.onTextPath, t.sawMinf = first && !t.sawMinf, true
 			return d.parseMinf(t, payload, depth+1)
 		}
 		return nil
@@ -298,8 +348,10 @@ func (d *Demuxer) parseMinf(t *track, body []byte, depth int) error {
 	if depth > maxDepth {
 		return malformed("box nesting deeper than %d", maxDepth)
 	}
+	first := t.onTextPath
 	return walkBoxes(body, func(typ string, payload []byte) error {
 		if typ == "stbl" {
+			t.onTextPath, t.sawStbl = first && !t.sawStbl, true
 			return d.parseStbl(t, payload, depth+1)
 		}
 		return nil
@@ -310,9 +362,8 @@ func (d *Demuxer) parseMinf(t *track, body []byte, depth int) error {
 // first non-empty edit's media_time (the encoder-delay priming iTunes
 // writes) and the total played duration (sum of segment durations over
 // non-empty edits, in movie ticks). An empty edit (media_time -1) consumes no
-// media and so contributes no delay, but its segment duration is kept: it is
-// how a track states that its presentation starts late, which is the whole of
-// a chapter track's first start.
+// media and so contributes no delay. A chapter track reads its own edits
+// through parseChapterEdits.
 func parseElst(t *track, payload []byte) {
 	version, _, rest, ok := fullBox(payload)
 	if !ok || len(rest) < 4 {
@@ -327,7 +378,7 @@ func parseElst(t *track, payload []byte) {
 	if count > int64(len(rest))/entrySize {
 		count = int64(len(rest)) / entrySize
 	}
-	var totalSeg, empty int64
+	var totalSeg int64
 	var edits int
 	mediaTime := int64(-1)
 	for i := int64(0); i < count; i++ {
@@ -341,14 +392,7 @@ func parseElst(t *track, payload []byte) {
 			mt = int64(int32(be32(e[4:])))
 		}
 		if mt < 0 {
-			// An empty edit: blank time, no media consumed. Only a leading run
-			// of them offsets the first sample, which is the offset wanted here;
-			// one between two real edits is a gap mid-track, and a sample table
-			// read straight through cannot express it anyway.
-			if mediaTime < 0 && segDur > 0 {
-				empty += segDur
-			}
-			continue
+			continue // an empty edit: blank time, no media consumed
 		}
 		if mediaTime < 0 {
 			mediaTime = mt // first real edit's start offset
@@ -356,7 +400,6 @@ func parseElst(t *track, payload []byte) {
 		totalSeg += segDur
 		edits++
 	}
-	t.emptyEdit = empty
 	if mediaTime < 0 {
 		return // only empty edits; nothing to trim
 	}

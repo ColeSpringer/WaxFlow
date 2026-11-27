@@ -8,6 +8,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/musepack"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/apev2"
 	"github.com/colespringer/waxflow/container/internal/diag"
 	"github.com/colespringer/waxflow/container/internal/id3"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
@@ -23,6 +24,11 @@ var (
 	_ container.Chapterer = (*Demuxer)(nil)
 	_ container.Indexer   = (*Demuxer)(nil)
 )
+
+// DemuxerVersion is this demuxer's term in the ADR-0004 cache key, carried
+// by its track. Bump it for a change that makes the demuxer deliver other
+// samples or tags for a file that has not changed.
+const DemuxerVersion = "mpc-demux-2"
 
 // Demuxer reads one Musepack track from a native .mpc source.
 type Demuxer struct {
@@ -133,6 +139,7 @@ func (d *Demuxer) parse() error {
 		return err
 	}
 	d.track.Codec = codec.Musepack
+	d.track.DemuxerVersion = DemuxerVersion
 	d.track.CodecConfig = blob
 	d.track.Fmt = f
 	d.track.Default = true
@@ -181,23 +188,45 @@ func isMagic(h []byte) bool {
 
 // stripTrailers peels the tags a tagger appended after the audio, shrinking
 // the window's data end so the packet walk never runs into them. The APEv2
-// block is also where the track's tags come from. No warning: a tag after the
-// audio is the normal shape of a .mpc file rather than damage recovered from.
+// block is also where the track's tags come from. No warning for a tag: one
+// after the audio is the normal shape of a .mpc file rather than damage
+// recovered from. floor is where the first frame or audio packet ends: a
+// footer that points in front of it is not a tag, and stays.
 func (d *Demuxer) stripTrailers(floor int64) error {
 	// The probes read the tail through a window of their own, or they would
 	// move the window off the head and the walk would read the head again.
 	// They decide where the audio ends, so a read that fails is the open's.
-	end := d.w.DataEnd()
+	end, refused, bad := d.w.DataEnd(), int64(0), false
 	var tags map[string][]string
 	if _, err := d.w.Try(false, func() bool {
-		end, tags = trailer.PeelAll(&d.w, trailer.APEv2|trailer.ID3v1|trailer.ID3v2, floor, end)
+		end, tags = trailer.PeelAll(&d.w, trailer.APEv2|trailer.ID3v1|trailer.ID3v2|trailer.Lyrics3, floor, end)
+		refused, bad = trailer.Refused(&d.w, floor, end)
 		return true
 	}); err != nil {
 		return err
 	}
 	d.tags = tags
+	if bad {
+		if err := d.warn(end-apev2.FooterLen, "an APEv2 footer places its tag at offset %d, inside the first frame; not read", d.log.At(refused)); err != nil {
+			return err
+		}
+	}
 	d.w.SetDataEnd(end)
 	return nil
+}
+
+// tagBehindJunk reads the APEv2 tag that bytes no peel recognizes hide from
+// it, when the peel found none and the stream's own structure ends at from,
+// short of the data's end. That structure still says where the audio ends. A
+// read that fails is no answer.
+func (d *Demuxer) tagBehindJunk(from int64) {
+	if d.tags != nil || d.w.DataEnd()-from < apev2.FooterLen {
+		return
+	}
+	d.w.Try(false, func() bool {
+		d.tags, _, _ = trailer.Behind(&d.w, from, d.w.DataEnd())
+		return true
+	})
 }
 
 // Tracks returns the single Musepack track.

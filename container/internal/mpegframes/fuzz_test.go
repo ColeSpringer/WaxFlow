@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"testing"
 
 	"github.com/colespringer/waxflow/container"
@@ -24,44 +25,60 @@ func FuzzWalk(f *testing.F) {
 	f.Add(frames(3)[:2*frameLen+100])
 	f.Add(append(frames(3), []byte("TAG this is an ID3v1 trailer, near enough")...))
 	f.Add([]byte{0xFF, 0xFB, 0x00, 0x00, 1, 2, 3})
+	// A bare stream's shapes: streams joined end to end and across a tag,
+	// one joined onto frames that state no count, and tags behind a last
+	// frame cut short.
+	f.Add(slices.Concat(stream(5, 576, 1000), stream(7, 576, 1200)))
+	f.Add(slices.Concat(stream(5, 576, 1000), id3v2(40), stream(7, 576, 1200), id3v1()))
+	f.Add(slices.Concat(stream(5, 576, 1000), frames(4)))
+	f.Add(slices.Concat(frames(3)[:2*frameLen+100], id3v1()))
+	// A joined stream whose count no file could hold.
+	f.Add(slices.Concat(stream(5, 576, 1000), streamCounting(7, 0xFFFFFFF0, 576, 1200)))
 	f.Fuzz(func(t *testing.T, data []byte) {
-		var o walkOpts
-		w := New(container.BytesSource(data), int64(len(data)), o.options())
-		if _, _, err := w.Begin(0); err != nil {
-			return
-		}
-		if err := w.Complete(context.Background()); err != nil {
-			t.Fatalf("a tolerant Complete failed: %v", err)
-		}
-		if !w.Done() {
-			t.Fatal("not Done after Complete")
-		}
-		found := len(o.msgs)
-		if err := w.Complete(context.Background()); err != nil || len(o.msgs) != found {
-			t.Fatalf("a second Complete returned %v and reported %d more findings", err, len(o.msgs)-found)
-		}
-		ref := w.Header()
-		for n := int64(0); ; n++ {
-			fr, err := w.Frame(n)
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				t.Fatalf("Frame(%d) after Complete: %v", n, err)
-			}
-			if len(fr.Data) != fr.Header.Size() || !ref.Kin(fr.Header) {
-				t.Fatalf("Frame(%d) is %d bytes for a %d-byte header, kin %v", n, len(fr.Data), fr.Header.Size(), ref.Kin(fr.Header))
-			}
-		}
-		// The strict half: a refusing hook stops at the first finding, and
-		// only where there was one.
-		strict := walkOpts{fail: errors.New("strict")}
-		ws := New(container.BytesSource(data), int64(len(data)), strict.options())
-		if _, _, err := ws.Begin(0); err != nil {
-			return
-		}
-		if err := ws.Complete(context.Background()); (err != nil) != (found > 0) {
-			t.Fatalf("strict Complete returned %v where the tolerant walk found %d things", err, found)
-		}
+		// As a wrapped run, and as the bare stream an owner peels and
+		// follows through joins.
+		fuzzWalk(t, data, (*walkOpts).options)
+		fuzzWalk(t, data, (*walkOpts).bare)
 	})
+}
+
+func fuzzWalk(t *testing.T, data []byte, options func(*walkOpts) Options) {
+	var o walkOpts
+	w := New(container.BytesSource(data), int64(len(data)), options(&o))
+	if _, _, err := w.Begin(0); err != nil {
+		return
+	}
+	if err := w.Complete(context.Background()); err != nil {
+		t.Fatalf("a tolerant Complete failed: %v", err)
+	}
+	if !w.Done() {
+		t.Fatal("not Done after Complete")
+	}
+	found := len(o.msgs)
+	if err := w.Complete(context.Background()); err != nil || len(o.msgs) != found {
+		t.Fatalf("a second Complete returned %v and reported %d more findings", err, len(o.msgs)-found)
+	}
+	ref := w.Header()
+	for n := int64(0); ; n++ {
+		fr, err := w.Frame(n)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Frame(%d) after Complete: %v", n, err)
+		}
+		if len(fr.Data) != fr.Header.Size() || !ref.Kin(fr.Header) {
+			t.Fatalf("Frame(%d) is %d bytes for a %d-byte header, kin %v", n, len(fr.Data), fr.Header.Size(), ref.Kin(fr.Header))
+		}
+	}
+	// The strict half: a refusing hook stops at the first finding, and
+	// only where there was one.
+	strict := walkOpts{fail: errors.New("strict")}
+	ws := New(container.BytesSource(data), int64(len(data)), options(&strict))
+	if _, _, err := ws.Begin(0); err != nil {
+		return
+	}
+	if err := ws.Complete(context.Background()); (err != nil) != (found > 0) {
+		t.Fatalf("strict Complete returned %v where the tolerant walk found %d things", err, found)
+	}
 }

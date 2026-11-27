@@ -38,6 +38,8 @@ func FuzzDemux(f *testing.F) {
 	fr := testutil.FLACFrames(f, full)
 	part := func(k int) []byte { return full[fr[k].Off:fr[k].End] }
 	f.Add(slices.Concat(full[:fr[0].Off], part(0), part(1), part(3), part(2)))
+	// A tagger's stack behind the frames, a Lyrics3 block in the middle.
+	f.Add(slices.Concat(full, apeTag(true), []byte("LYRICSBEGININD0000210LYR00005hello000034LYRICS200"), id3v1Tag()))
 	// A frame longer than the step its number gives: the read delivers more
 	// than the closing frame's end, which the open called exact.
 	f.Add(longFrameAt(f, packageFixture(f, "golden-noise-s16-l0.flac"), 1, packageFixture(f, "golden-sine-s16-l5.flac")))

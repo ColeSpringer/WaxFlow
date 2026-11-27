@@ -174,17 +174,17 @@ func TestOpenCost(t *testing.T) {
 		}
 	}
 
-	// Several windows: the tag probe, the window at the magic, two trailer
-	// probes, and the walk's three windows behind the first.
+	// Several windows: the tag probe, the window at the magic, the trailer
+	// probe, and the walk's three windows behind the first.
 	for _, s := range longStreams() {
 		for _, raw := range [][]byte{s.raw, append(append([]byte(nil), tag...), s.raw...)} {
 			src := &testutil.CountingSource{Src: container.BytesSource(raw), Log: true}
 			if _, err := mpc.NewDemuxer(src, nil); err != nil {
 				t.Fatalf("%s: %v", s.name, err)
 			}
-			// The trailer probes' bytes are the walk's last window's too.
-			if most := int64(len(raw)) + 64; src.Reads != 7 || src.Bytes > most {
-				t.Errorf("%s, %d bytes: the open read %d bytes in %d reads, want at most %d in 7: %v",
+			// The trailer probe's bytes are the walk's last window's too.
+			if most := int64(len(raw)) + 128; src.Reads != 6 || src.Bytes > most {
+				t.Errorf("%s, %d bytes: the open read %d bytes in %d reads, want at most %d in 6: %v",
 					s.name, len(raw), src.Bytes, src.Reads, most, src.Spans)
 				continue
 			}
@@ -233,11 +233,11 @@ func TestATrailerBehindALongStreamIsPeeledOffTheHeadWindow(t *testing.T) {
 			t.Errorf("%s: %d samples (exact %v) and warnings %v behind the trailer, want the stream's own %d (exact %v) and %v",
 				s.name, got.Samples, got.SamplesExact, d.Warnings(), want.Samples, want.SamplesExact, bare.Warnings())
 		}
-		// Five reads more than the stream alone: a round of probes for each
-		// tag, and the APEv2 block's header and its fields.
-		if most := int64(len(raw)) + 64; src.Reads != bareSrc.Reads+5 || src.Bytes > most {
+		// Four reads more than the stream alone: a probe for each tag, and
+		// the APEv2 block's header and its fields.
+		if most := int64(len(raw)) + 128; src.Reads != bareSrc.Reads+4 || src.Bytes > most {
 			t.Errorf("%s: the open read %d bytes in %d reads, want at most %d in %d: %v",
-				s.name, src.Bytes, src.Reads, most, bareSrc.Reads+5, src.Spans)
+				s.name, src.Bytes, src.Reads, most, bareSrc.Reads+4, src.Spans)
 		}
 		readsTheHeadOnce(t, s.name, src.Spans)
 		if got, want := len(readAll(t, d)), len(readAll(t, bare)); got != want {

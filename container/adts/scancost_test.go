@@ -171,7 +171,8 @@ func TestScanLeavesTheWindowAtItsRange(t *testing.T) {
 
 // TestOpenCost pins what opening a clean stream reads: the tag probes, then
 // one window from the last probe's end, which holds the frames the SBR probe
-// walks. A stream that never enters the scan pays no span.
+// walks, and the last 128 bytes for the trailer probes where that window does
+// not hold them. A stream that never enters the scan pays no span.
 func TestOpenCost(t *testing.T) {
 	fixture := func(name string) []byte {
 		raw, err := os.ReadFile(filepath.Join("testdata", name))
@@ -192,13 +193,16 @@ func TestOpenCost(t *testing.T) {
 		{"stereo.aac", fixture("stereo.aac"), 0, 2},
 		{"mono.aac", fixture("mono.aac"), 0, 2},
 		{"golden-heaac-implicit.aac, with SBR", fixture("golden-heaac-implicit.aac"), 0, 2},
-		{"2000 frames", lcFrames(2000), 0, 2},
+		{"2000 frames", lcFrames(2000), 0, 3},
 		// A tag costs its own probe and the one behind it.
-		{"2000 frames behind a tag", tagged, 30, 3},
+		{"2000 frames behind a tag", tagged, 30, 4},
 	} {
 		src := &testutil.CountingSource{Src: container.BytesSource(tc.raw)}
 		openBehind(t, src, tc.first)
-		want := min(int64(len(tc.raw)), int64(10*(tc.reads-1)+srcwin.Chunk))
+		want := int64(len(tc.raw))
+		if len(tc.raw) > srcwin.Chunk {
+			want = int64(10*(tc.reads-2) + srcwin.Chunk + 128)
+		}
 		if src.Bytes != want || src.Reads != tc.reads {
 			t.Errorf("%s: the open read %d bytes in %d reads, want %d in %d", tc.name, src.Bytes, src.Reads, want, tc.reads)
 		}

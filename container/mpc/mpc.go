@@ -18,7 +18,13 @@
 // precedent). The public container name and error prefix are "musepack".
 package mpc
 
-import "github.com/colespringer/waxflow/codec/musepack"
+import (
+	"bytes"
+	"encoding/binary"
+	"hash/crc32"
+
+	"github.com/colespringer/waxflow/codec/musepack"
+)
 
 // MatchNeed is the sniff window Match wants.
 const MatchNeed = musepack.MatchNeed
@@ -67,3 +73,75 @@ const (
 	// pre-roll: the filter reads 16 blocks of 64 V values, 512 output samples.
 	synthWarmup = 512
 )
+
+// FindStart returns the offset of the first stream start window holds, each
+// confirmed the way the demuxer reads it: "MPCK" with the stream header
+// packet behind it, whose checksum holds, or an SV7 magic whose header states
+// frames, a band count and a last-frame length the format allows and whose
+// first two frame lengths are ones a frame can have. It is how a stream
+// behind stray bytes is told from the same letters in them.
+func FindStart(window []byte) (int, bool) {
+	for i := 0; ; i++ {
+		j := bytes.Index(window[i:], []byte("MP"))
+		if j < 0 {
+			return 0, false
+		}
+		i += j
+		if b := window[i:]; len(b) >= 4 && (string(b[:4]) == "MPCK" && startsSV8(b[4:]) || string(b[:3]) == "MP+" && startsSV7(b)) {
+			return i, true
+		}
+	}
+}
+
+// startsSV8 reports whether p, the bytes behind the magic, open with a
+// stream header packet whose checksum holds.
+func startsSV8(p []byte) bool {
+	if len(p) < 3 || string(p[:2]) != "SH" {
+		return false
+	}
+	size, n, ok := musepack.ReadVarint(p[2:])
+	if !ok || size < uint64(2+n+4) || size > maxHeaderPacket || size > uint64(len(p)) {
+		return false
+	}
+	payload := p[2+n : size]
+	return binary.BigEndian.Uint32(payload) == crc32.ChecksumIEEE(payload[4:])
+}
+
+// startsSV7 reports whether b opens with an SV7 header and frames behind it.
+func startsSV7(b []byte) bool {
+	// The stream version, alone or under the one flag the byte carries.
+	if len(b) < sv7HeaderLen || b[3] != 0x07 && b[3] != 0x17 {
+		return false
+	}
+	frames := binary.LittleEndian.Uint32(b[4:])
+	maxBand := binary.LittleEndian.Uint32(b[8:]) >> 24 & 0x3F
+	last := binary.LittleEndian.Uint32(b[20:]) >> 20 & 0x7FF
+	if frames == 0 || maxBand < 1 || maxBand > musepack.MaxBands-1 || last > musepack.FrameLength {
+		return false
+	}
+	pos := int64(sv7FirstFrame)
+	for range min(frames, 2) {
+		n, ok := sv7BitsIn(b, pos, 20)
+		if !ok || n < minFrameBits || n > maxFrameBits {
+			return false
+		}
+		pos += 20 + int64(n)
+	}
+	return true
+}
+
+// sv7BitsIn reads n <= 32 bits at bit position pos of the word-swapped stream
+// b holds from its magic, or false when b does not hold the words they lie
+// in.
+func sv7BitsIn(b []byte, pos int64, n int) (uint32, bool) {
+	m0 := pos >> 3
+	w0 := m0 &^ 3
+	if w0+8 > int64(len(b)) {
+		return 0, false
+	}
+	var acc uint64
+	for j := range int64(5) {
+		acc = acc<<8 | uint64(b[w0+(m0+j-w0)^3])
+	}
+	return uint32(acc << (24 + pos&7) >> (64 - n)), true
+}

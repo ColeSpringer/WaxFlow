@@ -17,7 +17,7 @@ var _ container.Muxer = (*Muxer)(nil)
 // MuxerVersion is this muxer's term in the ADR-0004 cache key. Bump it for a
 // change to what gets written around unchanged encoded packets, which no
 // encoder or DSP version can notice.
-const MuxerVersion = "wv-mux-1"
+const MuxerVersion = "wv-mux-2"
 
 // MuxerOptions configures writing.
 type MuxerOptions struct {
@@ -211,29 +211,20 @@ func TagsFit(tags []container.Tag) error {
 	return err
 }
 
+// DroppedTags returns the keys of tags the muxer writes no item for, each
+// once: a key that is not legal, and a name the APEv2 format forbids.
+func DroppedTags(tags []container.Tag) []string { return apev2.LeftOut(tags) }
+
 // buildTag renders the muxer's APEv2 block, refusing a set it cannot hold.
+// Keys are not filtered here: apev2.Build drops the ones no reader could ask
+// for and the item names the specification reserves, and a pass over them
+// first would be those rules written twice.
 func buildTag(tags []container.Tag) ([]byte, error) {
-	b, err := apev2.Build(muxTags(tags))
+	b, err := apev2.Build(tags)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeUnsupportedFormat, "wavpack", err)
 	}
 	return b, nil
-}
-
-// muxTags converts the engine's tags to the writer's. container/apen holds the
-// same five lines, deliberately: sharing them would cost apev2 the container
-// import that container/internal/trailer is free of today, which is the trade
-// apev2.Tag itself documents.
-//
-// Keys are not filtered here. apev2.Build drops the ones no reader could ask
-// for and the item names the specification reserves, and a pass over them
-// first would be those rules written twice.
-func muxTags(tags []container.Tag) []apev2.Tag {
-	out := make([]apev2.Tag, len(tags))
-	for i, t := range tags {
-		out[i] = apev2.Tag{Key: t.Key, Value: t.Value}
-	}
-	return out
 }
 
 func (m *Muxer) write(parts ...[]byte) error {

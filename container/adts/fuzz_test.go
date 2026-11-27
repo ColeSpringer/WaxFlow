@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"testing"
 
 	"github.com/colespringer/waxflow/codec"
@@ -28,6 +29,10 @@ func FuzzDemux(f *testing.F) {
 	}
 	f.Add([]byte("\xff\xf1\x50\x80\x21\x1f\xfc")) // a lone header
 	f.Add([]byte("ID3\x04\x00\x00\x00\x00\x00\x0a\xff\xf1\x50\x80\x21\x1f\xfc"))
+	// Tags behind the frames, and behind a last frame cut short.
+	tagged := fixture(f, "stereo.aac")
+	f.Add(slices.Concat(tagged, apeTag(f, "t"), lyricsTag(), v1Tag()))
+	f.Add(slices.Concat(tagged[:len(tagged)-30], apeTag(f, "t"), v1Tag()))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		// The core frame is 1024 samples; a stream the first-frame probe

@@ -23,7 +23,8 @@ func TestWalkSurfacesAReadFailure(t *testing.T) {
 	if len(raw) < 2*srcwin.Chunk {
 		t.Fatalf("the stream is %d bytes, want over two windows", len(raw))
 	}
-	src := &testutil.FailingSource{Src: container.BytesSource(raw), From: int64(len(raw)) - srcwin.Chunk/2}
+	// The tail still reads: the open probes it for trailers.
+	src := &testutil.FailingSource{Src: container.BytesSource(raw), From: int64(len(raw)) - srcwin.Chunk/2, To: int64(len(raw)) - 4096}
 	d, err := adts.NewDemuxer(src, nil)
 	if err != nil {
 		t.Fatal(err)

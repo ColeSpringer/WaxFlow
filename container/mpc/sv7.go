@@ -35,6 +35,7 @@ const (
 type sv7Stream struct {
 	frames  int64 // the header's frame count
 	endBits int64 // the stream's whole-word length in bits, from base
+	used    int64 // the bit position the walk's frames and tail fields end at
 
 	// checkpoints[k] is the bit position of frame k*checkpointFrames's length
 	// field; frames in between are reached by hopping their lengths.
@@ -96,13 +97,23 @@ func (d *Demuxer) parseSV7() error {
 	d.rg = sv7ReplayGain(uint16(w3>>16), uint16(w3), uint16(w4>>16), uint16(w4))
 	d.sv7 = sv7Stream{frames: frames, cursor: -1}
 
-	if err := d.stripTrailers(d.base + sv7HeaderLen); err != nil {
+	// A trailing tag starts no lower than the word the first frame ends in.
+	floor := d.base + sv7HeaderLen
+	d.sv7.endBits = ((d.w.DataEnd() - d.base) &^ 3) * 8
+	if n, ok := d.sv7Bits(sv7FirstFrame, 20); ok && frames > 0 && int(n) >= minFrameBits && int(n) <= maxFrameBits {
+		floor = d.base + (sv7FirstFrame+20+int64(n)+31)>>5<<2
+	}
+	if err := d.w.Err(); err != nil {
+		return err
+	}
+	if err := d.stripTrailers(floor); err != nil {
 		return err
 	}
 	d.sv7.endBits = ((d.w.DataEnd() - d.base) &^ 3) * 8
 	if err := d.sv7Walk(); err != nil {
 		return err
 	}
+	d.tagBehindJunk(d.base + (d.sv7.used+31)>>5<<2)
 	d.sv7.states = []musepack.State{musepack.InitialState()}
 	d.sv7.scanState = d.sv7.states[0]
 	return nil
@@ -196,9 +207,11 @@ func (d *Demuxer) sv7Walk() error {
 					s.checkpoints = append(s.checkpoints, pos)
 				}
 				d.total = present + 1
+				pos += 20 + int64(n)
 			}
 		}
 	}
+	s.used = pos
 
 	declared := int64(0)
 	switch {

@@ -874,6 +874,10 @@ type form struct {
 	// the builder it writes with (TagsFit). Every form has one: noTags for a
 	// muxer that takes none.
 	tagsFit func([]container.Tag) error
+	// leftOut names the keys of a tag set the muxer writes no form of
+	// (TagsLeftOut): every key, for a muxer that writes no tags. Every form
+	// has one, whether or not a post-pass writes after its muxer.
+	leftOut func([]container.Tag) []string
 	// trackFits is the muxer's own refusal of a track at Begin (TrackFits),
 	// which PlanRemux asks so a copy declines what the muxer would refuse.
 	// Nil for a muxer whose Begin refuses nothing its row's codec can bring.
@@ -951,7 +955,7 @@ var outputs = []output{
 		// WebM, whose audio subset is Opus and Vorbis only.
 		forms: []form{
 			{
-				mediaType: "audio/wav", version: riff.MuxerVersion, live: true, tagsFit: noTags,
+				mediaType: "audio/wav", version: riff.MuxerVersion, live: true, tagsFit: noTags, leftOut: allTagKeys,
 				mux: func(_ container.Track, _ TranscodeOptions, _ runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 					return riff.NewMuxer(dst, nil), nil
 				},
@@ -1067,7 +1071,7 @@ var outputs = []output{
 		},
 		// The AIFF muxer back-patches its chunk sizes, so it is not live.
 		forms: []form{{
-			mediaType: "audio/aiff", version: aiff.MuxerVersion, tagsFit: noTags,
+			mediaType: "audio/aiff", version: aiff.MuxerVersion, tagsFit: noTags, leftOut: allTagKeys,
 			mux: func(_ container.Track, _ TranscodeOptions, _ runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 				return aiff.NewMuxer(dst), nil
 			},
@@ -1113,7 +1117,7 @@ var outputs = []output{
 		// encoder's MD5.
 		forms: []form{
 			{
-				mediaType: "audio/flac", version: flacn.MuxerVersion, live: true, tagsFit: flacn.TagsFit,
+				mediaType: "audio/flac", version: flacn.MuxerVersion, live: true, tagsFit: flacn.TagsFit, leftOut: invalidTagKeys,
 				trackFits: flacn.TrackFits,
 				mux: func(_ container.Track, _ TranscodeOptions, x runConfig, enc codec.Encoder, dst io.Writer) (container.Muxer, error) {
 					return flacn.NewMuxer(dst, &flacn.MuxerOptions{Tags: x.tags, MD5: flacMD5(enc)}), nil
@@ -1124,7 +1128,7 @@ var outputs = []output{
 				// .oga, the Xiph extension for Ogg audio that is not Vorbis:
 				// .flac would name a native-FLAC file these bytes are not.
 				name: ContainerOgg, mediaType: "audio/ogg", ext: "oga", version: ogg.MuxerVersion,
-				live: true, embedsTags: true, tagsFit: ogg.FLACTagsFit, trackFits: ogg.TrackFits,
+				live: true, embedsTags: true, tagsFit: ogg.FLACTagsFit, leftOut: invalidTagKeys, trackFits: ogg.TrackFits,
 				mux: func(_ container.Track, _ TranscodeOptions, x runConfig, enc codec.Encoder, dst io.Writer) (container.Muxer, error) {
 					return ogg.NewMuxer(dst, &ogg.MuxerOptions{Tags: x.tags, MD5: flacMD5(enc)}), nil
 				},
@@ -1184,7 +1188,7 @@ var outputs = []output{
 		// source's on a remux. A nil enc (remux) says the delay already holds
 		// the 529-sample decoder latency (mpa.MuxerOptions.DecodedTrims).
 		forms: []form{{
-			mediaType: "audio/mpeg", version: mpa.MuxerVersion, live: true, tagsFit: mpa.TagsFit,
+			mediaType: "audio/mpeg", version: mpa.MuxerVersion, live: true, tagsFit: mpa.TagsFit, leftOut: mpa.DroppedTags,
 			mux: func(t container.Track, opts TranscodeOptions, x runConfig, enc codec.Encoder, dst io.Writer) (container.Muxer, error) {
 				return mpa.NewMuxer(dst, &mpa.MuxerOptions{
 					Delay:        int(t.Delay),
@@ -1370,7 +1374,7 @@ var outputs = []output{
 		// One form: the mka muxer does not write A_WAVPACK4. The muxer writes
 		// the APEv2 tag block after the audio.
 		forms: []form{{
-			mediaType: "audio/x-wavpack", version: wv.MuxerVersion, live: true, embedsTags: true, tagsFit: wv.TagsFit,
+			mediaType: "audio/x-wavpack", version: wv.MuxerVersion, live: true, embedsTags: true, tagsFit: wv.TagsFit, leftOut: wv.DroppedTags,
 			trackFits: wv.TrackFits,
 			mux: func(_ container.Track, _ TranscodeOptions, x runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 				return wv.NewMuxer(dst, &wv.MuxerOptions{Tags: x.tags}), nil
@@ -1421,7 +1425,7 @@ var outputs = []output{
 		// Not live: a .ape opens with its seek table and totals, known only
 		// after the audio. The muxer writes the APEv2 tag block after it.
 		forms: []form{{
-			mediaType: "audio/x-ape", version: apen.MuxerVersion, embedsTags: true, tagsFit: apen.TagsFit,
+			mediaType: "audio/x-ape", version: apen.MuxerVersion, embedsTags: true, tagsFit: apen.TagsFit, leftOut: apen.DroppedTags,
 			trackFits: apen.TrackFits,
 			mux: func(_ container.Track, _ TranscodeOptions, x runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 				return apen.NewMuxer(dst, &apen.MuxerOptions{Tags: x.tags}), nil
@@ -1485,7 +1489,7 @@ func aacForms() []form {
 	return []form{
 		mp4Form(""),
 		{
-			name: "adts", mediaType: "audio/aac", ext: "aac", version: adts.MuxerVersion, live: true, tagsFit: noTags,
+			name: "adts", mediaType: "audio/aac", ext: "aac", version: adts.MuxerVersion, live: true, tagsFit: noTags, leftOut: allTagKeys,
 			trackFits: adts.TrackFits,
 			mux: func(_ container.Track, _ TranscodeOptions, _ runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 				return adts.NewMuxer(dst), nil
@@ -1508,7 +1512,7 @@ func mp4Form(name string) form {
 	}
 	return form{
 		name: name, mediaType: mp4MediaType, version: mp4.MuxerVersion, live: !progressive, embedsTags: true,
-		tagsFit: mp4.TagsFit, trackFits: fits, trimByLength: !progressive,
+		tagsFit: mp4.TagsFit, leftOut: mp4.DroppedTags, trackFits: fits, trimByLength: !progressive,
 		mux: func(_ container.Track, _ TranscodeOptions, x runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 			if progressive {
 				return mp4.NewProgressiveMuxer(dst, mp4MuxerOptions(x)), nil
@@ -1522,7 +1526,7 @@ func mp4Form(name string) form {
 // header tagsFit answers for.
 func oggForm(tagsFit func([]container.Tag) error) form {
 	return form{
-		mediaType: "audio/ogg", version: ogg.MuxerVersion, live: true, tagsFit: tagsFit, trackFits: ogg.TrackFits,
+		mediaType: "audio/ogg", version: ogg.MuxerVersion, live: true, tagsFit: tagsFit, leftOut: invalidTagKeys, trackFits: ogg.TrackFits,
 		mux: func(_ container.Track, _ TranscodeOptions, x runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 			return ogg.NewMuxer(dst, &ogg.MuxerOptions{Tags: x.tags}), nil
 		},
@@ -1540,7 +1544,7 @@ func webmForm() form { return matroskaForm("webm", "audio/webm") }
 func matroskaForm(name, mediaType string) form {
 	webm := name == "webm"
 	return form{
-		name: name, mediaType: mediaType, ext: name, version: mka.MuxerVersion, live: true, tagsFit: mka.TagsFit,
+		name: name, mediaType: mediaType, ext: name, version: mka.MuxerVersion, live: true, tagsFit: mka.TagsFit, leftOut: allTagKeys,
 		trackFits: func(t container.Track) error { return mka.TrackFits(t, webm) },
 		mux: func(_ container.Track, _ TranscodeOptions, x runConfig, _ codec.Encoder, dst io.Writer) (container.Muxer, error) {
 			return mka.NewMuxer(dst, &mka.MuxerOptions{WebM: webm, Tags: x.tags}), nil
@@ -1593,6 +1597,44 @@ func TagsFit(format, container string, tags []container.Tag) error {
 		return nil
 	}
 	return f.tagsFit(tags)
+}
+
+// TagsLeftOut names the keys of tags that the muxer of the output format and
+// container writes no form of, each once: a name its tag block forbids or
+// has no place for, or one that would read back as another key. A muxer that
+// writes no tags leaves out every key. A muxer skips such a key and says
+// nothing, so this is how a caller learns of it. A set that fits (TagsFit)
+// and leaves nothing out is written whole. Whether a key left out is lost is
+// the caller's to know: a tagging pass over the finished file may write it.
+func TagsLeftOut(format, container string, tags []container.Tag) []string {
+	_, f, ok := formOrDefault(format, container)
+	if !ok || f.leftOut == nil {
+		return nil
+	}
+	return f.leftOut(tags)
+}
+
+// invalidTagKeys is leftOut for a Vorbis comment writer, which skips a key
+// that is no legal field name (container.ValidTagKey).
+func invalidTagKeys(tags []container.Tag) []string {
+	var out []string
+	for _, t := range tags {
+		if !container.ValidTagKey(t.Key) && !slices.Contains(out, t.Key) {
+			out = append(out, t.Key)
+		}
+	}
+	return out
+}
+
+// allTagKeys is leftOut for a muxer that writes no tags.
+func allTagKeys(tags []container.Tag) []string {
+	var out []string
+	for _, t := range tags {
+		if !slices.Contains(out, t.Key) {
+			out = append(out, t.Key)
+		}
+	}
+	return out
 }
 
 // noTags is the tag answer of a form whose muxer takes no tags: any set fits,

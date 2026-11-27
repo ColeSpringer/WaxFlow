@@ -49,7 +49,6 @@ func craftFragmentsAt(strict bool, src container.Source, timescale int64) *Demux
 		log:        diag.New("mp4: ", &container.DemuxerOptions{Strict: strict}),
 		w:          srcwin.New(src, src.Size(), "mp4: test"),
 		fragmented: true,
-		trex:       trexDefaults{have: true},
 		sel: &track{
 			id:        1,
 			timescale: timescale,

@@ -44,6 +44,9 @@ func FuzzDemux(f *testing.F) {
 	// A lone object that delivers nothing.
 	f.Add(loneReservoir(f, 1))
 	f.Add(guidHeader)
+	// Header children found by their own object headers, the descriptors
+	// that read as a flag and a number pair among them.
+	f.Add(headerWalkSeed())
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		targets := []int64{0, 1000, 1 << 40}

@@ -242,9 +242,10 @@ func TestParseElstCountsTheEditsThatPlay(t *testing.T) {
 			tr := editTrack(48000, 48000, -1, 0, 0)
 			tr.hasEdit = false
 			parseElst(tr, box(version, tc.list...))
-			if !tr.hasEdit || tr.edits != tc.edits || tr.editSegDur != tc.segDur || tr.emptyEdit != tc.empty {
+			lead := int64(parseChapterEdits(box(version, tc.list...)).lead)
+			if !tr.hasEdit || tr.edits != tc.edits || tr.editSegDur != tc.segDur || lead != tc.empty {
 				t.Errorf("%s (version %d): edits %d, duration %d, empty %d; want %d, %d, %d",
-					tc.name, version, tr.edits, tr.editSegDur, tr.emptyEdit, tc.edits, tc.segDur, tc.empty)
+					tc.name, version, tr.edits, tr.editSegDur, lead, tc.edits, tc.segDur, tc.empty)
 			}
 			d := &Demuxer{movieTimescale: 48000}
 			if _, _, samples, _ := d.gapless(tr); samples != tc.samples {

@@ -3,6 +3,7 @@ package apev2
 import (
 	"bytes"
 	"encoding/binary"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -113,6 +114,17 @@ func TestSizeRejects(t *testing.T) {
 	if got, _ := Size(huge); got != 0 {
 		t.Errorf("Size past the cap = %d, want 0", got)
 	}
+	// The size field counts the footer itself: one under 32 is no tag's,
+	// with a header claimed or not.
+	for _, flags := range []uint32{0, 1 << 31} {
+		small := build(false, item{key: "Title", value: "x"})
+		foot := small[len(small)-FooterLen:]
+		binary.LittleEndian.PutUint32(foot[12:], FooterLen-8)
+		binary.LittleEndian.PutUint32(foot[20:], flags)
+		if got, _ := Size(small); got != 0 {
+			t.Errorf("Size of a footer stating %d bytes (flags %#x) = %d, want 0", FooterLen-8, flags, got)
+		}
+	}
 	if StartsTag(tag[FooterLen:]) {
 		t.Error("StartsTag accepted bytes that are not the tag's header")
 	}
@@ -153,7 +165,7 @@ func TestParseSurvivesDamage(t *testing.T) {
 // TestCanonicalRejectsUnwritableKeys checks that a key no muxer could write
 // back is dropped rather than mangled.
 func TestCanonicalRejectsUnwritableKeys(t *testing.T) {
-	for _, key := range []string{"", "with=equals", "with\x01control", strings.Repeat("x", 300)} {
+	for _, key := range []string{"", " ", "with=equals", "with\x01control", "caf\xc3\xa9", strings.Repeat("x", maxValueBytes+1)} {
 		if got := canonical(key); got != "" {
 			t.Errorf("canonical(%q) = %q, want it dropped", key, got)
 		}
@@ -396,7 +408,7 @@ func TestParseAliasesMatchTheMapper(t *testing.T) {
 		"DATE_RELEASE": "RELEASEDATE", "DATE_ORIGINAL": "ORIGINALDATE",
 		"ORIGINAL_DATE": "ORIGINALDATE", "ENCODED_BY": "ENCODEDBY",
 		"REMIXED_BY": "REMIXER", "CONTENT_GROUP": "GROUPING",
-		"UNSYNCEDLYRICS": "LYRICS",
+		"UNSYNCEDLYRICS": "LYRICS", "USLT": "LYRICS",
 	} {
 		got := Parse(build(true, item{key: native, value: "v"}))
 		if vs := got[canon]; len(vs) != 1 || vs[0] != "v" {
@@ -478,5 +490,212 @@ func TestParseItemsCount(t *testing.T) {
 		if tc.want == 1 && got["ARTIST"] == nil {
 			t.Errorf("count 1 read %v, want the first item", got)
 		}
+	}
+}
+
+// TestParseTrimsItemNames: the tag library trims an item name before it looks
+// it up, so "ALBUM " is the ALBUM field there. Reading it under its own
+// spelling would surface a second key carrying the same value.
+func TestParseTrimsItemNames(t *testing.T) {
+	for native, canon := range map[string]string{
+		"ALBUM ":        "ALBUM",
+		" Title":        "TITLE",
+		"Year\t":        "RECORDINGDATE",
+		" USLT ":        "LYRICS",
+		"Album ":        "ALBUM",         // trimmed as Unicode white space, like the library
+		"Album  Artist": "ALBUM  ARTIST", // inner spaces are part of the name
+	} {
+		got := Parse(build(true, item{key: native, value: "v"}))
+		if vs := got[canon]; len(got) != 1 || len(vs) != 1 || vs[0] != "v" {
+			t.Errorf("item %q read back as %v, want it under %s", native, got, canon)
+		}
+	}
+	// The writer takes the trimmed name, so the item it writes is the field
+	// the library reads.
+	blob, err := Build([]Tag{{Key: "ALBUM ", Value: "v"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(blob, []byte("ALBUM\x00")) {
+		t.Errorf("Build wrote %q, want the item named ALBUM", blob)
+	}
+}
+
+// TestParseReadsLongItemNames: the library reads an item name of any length
+// as its key, so this does too. Writing one is another matter, below.
+func TestParseReadsLongItemNames(t *testing.T) {
+	long := strings.Repeat("K", 300)
+	if vs := Parse(build(true, item{key: long, value: "v"}))[long]; len(vs) != 1 {
+		t.Errorf("a 300-byte item name read back as %v, want its value", vs)
+	}
+}
+
+// TestBuildSkipsNamesTheFormatForbids: an APEv2 item name is 2 to 255 bytes of
+// printable ASCII, and the Cover Art names belong to binary picture items, so
+// a text item under one is malformed to every tagger that reads pictures.
+// Build skips them; Parse still reads whatever a file holds.
+func TestBuildSkipsNamesTheFormatForbids(t *testing.T) {
+	forbidden := []string{
+		"X",
+		strings.Repeat("K", 256),
+		"Cover Art (Front)",
+		"cover art (back)",
+		"Cover Art",
+		"COVER ART(MEDIA)",
+		"Cover Art (no such role)",
+		"Artist Picture",
+	}
+	tags := []Tag{{Key: "TITLE", Value: "Kept"}, {Key: "Cover Artist", Value: "Also kept"}}
+	for _, k := range forbidden {
+		tags = append(tags, Tag{Key: k, Value: "dropped"})
+	}
+	blob, err := Build(tags)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := binary.LittleEndian.Uint32(blob[len(blob)-FooterLen+16:]); n != 2 {
+		t.Errorf("the footer declares %d items, want 2 (TITLE and COVER ARTIST)", n)
+	}
+	got := Parse(blob)
+	if len(got) != 2 || got["TITLE"] == nil || got["COVER ARTIST"] == nil {
+		t.Errorf("read back %v, want TITLE and COVER ARTIST alone", got)
+	}
+	for _, k := range forbidden {
+		on := Parse(build(true, item{key: k, value: "on disk"}))
+		if vs := on[strings.ToUpper(k)]; len(vs) != 1 {
+			t.Errorf("a file-borne %q item read back as %v", k, on)
+		}
+	}
+}
+
+// TestParseSplitsNumberPairs: a track or disc number that holds its total
+// reads as the two keys, as the library's APE reader splits it. The split
+// needs a single value, and the total it derives yields to a total key the
+// tag already holds.
+func TestParseSplitsNumberPairs(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		items []item
+		want  map[string][]string
+	}{
+		{"slash", []item{{key: "Track", value: "3/12"}},
+			map[string][]string{"TRACKNUMBER": {"3"}, "TRACKTOTAL": {"12"}}},
+		{"worded", []item{{key: "Disc", value: "1 of 2"}},
+			map[string][]string{"DISCNUMBER": {"1"}, "DISCTOTAL": {"2"}}},
+		{"total key wins", []item{{key: "Track", value: "3/12"}, {key: "TRACKTOTAL", value: "10"}},
+			map[string][]string{"TRACKNUMBER": {"3"}, "TRACKTOTAL": {"10"}}},
+		{"total key first", []item{{key: "TOTALTRACKS", value: "10"}, {key: "Track", value: "3/12"}},
+			map[string][]string{"TRACKNUMBER": {"3"}, "TRACKTOTAL": {"10"}}},
+		{"no number", []item{{key: "Track", value: "/12"}},
+			map[string][]string{"TRACKTOTAL": {"12"}}},
+		{"no total", []item{{key: "Track", value: "3/"}},
+			map[string][]string{"TRACKNUMBER": {"3"}}},
+		{"leading zeros kept", []item{{key: "Track", value: " 03 / 12 "}},
+			map[string][]string{"TRACKNUMBER": {"03"}, "TRACKTOTAL": {"12"}}},
+		{"multi-valued stays", []item{{key: "Track", value: "3/12\x004/12"}},
+			map[string][]string{"TRACKNUMBER": {"3/12", "4/12"}}},
+		{"text stays", []item{{key: "Track", value: "Part 3 of 12"}},
+			map[string][]string{"TRACKNUMBER": {"Part 3 of 12"}}},
+		{"other keys stay", []item{{key: "Title", value: "3/12"}},
+			map[string][]string{"TITLE": {"3/12"}}},
+		// The library keeps an empty value ahead of or between others, so it
+		// sees two values here and splits nothing; a trailing NUL is a
+		// terminator and leaves one.
+		{"empty value ahead", []item{{key: "Track", value: "\x003/12"}},
+			map[string][]string{"TRACKNUMBER": {"3/12"}}},
+		{"empty item beside", []item{{key: "TRACKNUMBER", value: ""}, {key: "Track", value: "3/12"}},
+			map[string][]string{"TRACKNUMBER": {"3/12"}}},
+		{"terminator", []item{{key: "Track", value: "3/12\x00"}},
+			map[string][]string{"TRACKNUMBER": {"3"}, "TRACKTOTAL": {"12"}}},
+		{"empty total held", []item{{key: "Track", value: "3/12"}, {key: "TRACKTOTAL", value: ""}},
+			map[string][]string{"TRACKNUMBER": {"3"}}},
+		{"folded name beside", []item{{key: "Track", value: "3/12"}, {key: "Trac\u212a", value: "4"}},
+			map[string][]string{"TRACKNUMBER": {"3/12"}}},
+		// The library reads a total there, so a blank number side goes and
+		// nothing is derived.
+		{"folded total beside a blank number", []item{{key: "Track", value: "/12"}, {key: "Total_Part\u017f", value: "10"}},
+			map[string][]string{}},
+	} {
+		got := Parse(build(true, tc.items...))
+		if !equalTags(got, tc.want) {
+			t.Errorf("%s: read %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	// What Build writes for a pair reads back as that pair, split or not.
+	for _, tags := range [][]Tag{
+		{{Key: "TRACKNUMBER", Value: "3"}, {Key: "TRACKTOTAL", Value: "12"}},
+		{{Key: "TRACKNUMBER", Value: "3/12"}},
+	} {
+		blob, err := Build(tags)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := map[string][]string{"TRACKNUMBER": {"3"}, "TRACKTOTAL": {"12"}}
+		if got := Parse(blob); !equalTags(got, want) {
+			t.Errorf("Build(%v) read back as %v, want %v", tags, got, want)
+		}
+	}
+}
+
+func equalTags(a, b map[string][]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		bv := b[k]
+		if len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if av[i] != bv[i] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// TestParseReadsLegacyTextAsLatin1: a value that is not UTF-8 is APEv1's
+// Latin-1 or an out-of-spec writer's, and reads one byte to a code point,
+// as the tag library reads it. Valid UTF-8 is kept as it is.
+func TestParseReadsLegacyTextAsLatin1(t *testing.T) {
+	for raw, want := range map[string][]string{
+		"caf\xe9":               {"café"},
+		"caf\xc3\xa9":           {"café"},
+		"\xe9t\xe9\x00Na\xefve": {"été", "Naïve"},
+	} {
+		if got := Parse(build(true, item{key: "Artist", value: raw}))["ARTIST"]; !equalTags(map[string][]string{"A": got}, map[string][]string{"A": want}) {
+			t.Errorf("value %q read back as %q, want %q", raw, got, want)
+		}
+	}
+}
+
+// TestLeftOutNamesWhatBuildSkips holds LeftOut to the write: a key it names
+// has no item in the block, and every other key with a value has one.
+func TestLeftOutNamesWhatBuildSkips(t *testing.T) {
+	tags := []Tag{
+		{Key: "TITLE", Value: "t"},
+		{Key: "X", Value: "one byte"},
+		{Key: "Cover Art (Front)", Value: "a picture's name"},
+		{Key: "TAG", Value: "reserved"},
+		{Key: "A=B", Value: "not a key"},
+		{Key: "X", Value: "again"},
+		{Key: "EMPTY", Value: ""},
+		{Key: "ARTIST", Value: "a"},
+	}
+	want := []string{"X", "Cover Art (Front)", "TAG", "A=B"}
+	if got := LeftOut(tags); !slices.Equal(got, want) {
+		t.Errorf("LeftOut = %q, want %q", got, want)
+	}
+	block, err := Build(tags)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := Parse(block)
+	if len(read) != 2 || !slices.Equal(read["TITLE"], []string{"t"}) || !slices.Equal(read["ARTIST"], []string{"a"}) {
+		t.Errorf("the block holds %v, want TITLE and ARTIST alone", read)
+	}
+	if got := LeftOut([]Tag{{Key: "TITLE", Value: "t"}}); got != nil {
+		t.Errorf("LeftOut of a writable set = %q, want none", got)
 	}
 }

@@ -322,6 +322,9 @@ func TestTrailingTags(t *testing.T) {
 		"appended id3v2":     appendedID3v2(),
 		"ape then id3v1":     append(apeTag(true), id3v1Tag()...),
 		"padding then id3v1": append(make([]byte, 300), id3v1Tag()...),
+		// A Lyrics3 block sits between the APEv2 tag and the ID3v1 one.
+		"ape, lyrics3v2, id3v1": slices.Concat(apeTag(true), []byte("LYRICSBEGININD0000210LYR00005hello000034LYRICS200"), id3v1Tag()),
+		"ape, lyrics3v1, id3v1": slices.Concat(apeTag(false), []byte("LYRICSBEGINhello worldLYRICSEND"), id3v1Tag()),
 	}
 	for name, trailer := range trailers {
 		t.Run(name, func(t *testing.T) {
@@ -337,6 +340,12 @@ func TestTrailingTags(t *testing.T) {
 			}
 			if _, samples := walk(t, d); samples != 15435 {
 				t.Fatalf("walked %d samples (last frame lost to the trailer)", samples)
+			}
+			// A seek into the last frame reads it, and nothing behind it.
+			seekAndCheck(t, d, 15434)
+			var pkt container.Packet
+			if err := d.ReadPacket(&pkt); err != io.EOF {
+				t.Fatalf("a read behind the last frame = %v, want the end", err)
 			}
 			ws := d.Warnings()
 			if len(ws) == 0 {

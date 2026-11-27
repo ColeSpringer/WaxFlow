@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/container/asf"
 )
@@ -137,18 +136,14 @@ func TestLoneObjectLastsItsCountedFrames(t *testing.T) {
 	}
 }
 
-// TestTrackNamesTheDemuxerRevision: a WMA v1/v2 track carries
-// DemuxerVersion, which is what puts this demuxer's revision in a cache key,
-// and keeps it across the walk that settles its length. A Pro, Lossless or
-// Voice track reads as it did and names none, so its keys stay.
+// TestTrackNamesTheDemuxerRevision: every track carries DemuxerVersion, which
+// is what puts this demuxer's revision in a cache key, and keeps it across the
+// walk that settles its length.
 func TestTrackNamesTheDemuxerRevision(t *testing.T) {
 	for _, name := range []string{windowsFixture, "sine-wmav2.wma", "sine-wmav1.wma", "pro-s16.wma", "lossless-s16.wma", "voice-mono.wma"} {
 		d := open(t, fixture(t, name))
-		want := ""
-		if d.Tracks()[0].Codec == codec.WMA {
-			want = "asf-demux-2"
-		}
-		if got := d.Tracks()[0].DemuxerVersion; got != want || (want != "" && want != asf.DemuxerVersion) {
+		want := "asf-demux-3"
+		if got := d.Tracks()[0].DemuxerVersion; got != want || want != asf.DemuxerVersion {
 			t.Fatalf("%s: the %s track names demuxer revision %q, want %q", name, d.Tracks()[0].Codec, got, want)
 		}
 		if err := d.Walk(context.Background()); err != nil {

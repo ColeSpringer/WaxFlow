@@ -57,9 +57,45 @@ func FuzzDemux(f *testing.F) {
 		buildMovie(v1SoundEntry("in24", 1, 16, movieTimescale, 3, waveBox(endaBox(1))), 3, 64, 0),
 		buildMovie(lpcmEntry(float64(movieTimescale), 1, 24, lpcmSigned16LE, 3, 1), 3, 64, 0),
 		buildMovie(soundEntryWith("ipcm", 1, 16, 0, pcmCBox(1, 24), sratBox(movieTimescale)), 3, 64, 0),
-		// A chapter track whose sample description is an audio entry: the
-		// shape that reaches the chapter walk through the PCM setter.
+		// A text track whose sample description is an audio entry, unnamed
+		// and then as the chapter track the sound track names: the shape that
+		// reaches the chapter walk through the PCM setter.
 		withTextTrack(buildMovie(soundEntry("sowt", 2, 16, movieTimescale), 4, 64, 0)),
+		fxMovie{frames: 64, chap: []uint32{2}, text: []fxText{{entry: soundEntry("sowt", 2, 16, movieTimescale),
+			samples: [][]byte{textSample("One"), textSample("Two")}, deltas: []uint32{1000, 1000}}}}.build(),
+		// A chapter track with no sample description whose samples sit past
+		// the end of the file, and one with an stsd of no entries.
+		fxMovie{frames: 64, chap: []uint32{2}, text: []fxText{{stsd: []byte{}, pastEOF: true,
+			samples: [][]byte{textSample("One"), textSample("Two")}, deltas: []uint32{1000, 1000}}}}.build(),
+		fxMovie{frames: 64, chap: []uint32{2}, text: []fxText{{stsd: makeFullBox("stsd", 0, 0, u32(0)),
+			samples: [][]byte{textSample("One"), textSample("Two")}, deltas: []uint32{1000, 1000}}}}.build(),
+		// A chapter track whose sample-to-chunk runs start at chunk 0, and
+		// one sized by stz2.
+		fxMovie{frames: 64, chap: []uint32{2}, text: []fxText{{stsc: makeFullBox("stsc", 0, 0, u32(1), u32(0), u32(2), u32(1)),
+			samples: [][]byte{textSample("One"), textSample("Two")}, deltas: []uint32{1000, 1000}}}}.build(),
+		fxMovie{frames: 64, chap: []uint32{2}, text: []fxText{{stz2: true,
+			samples: [][]byte{textSample("One"), textSample("Two")}, deltas: []uint32{1000, 1000}}}}.build(),
+		// MPEG audio in an mp4a entry whose first frame is in a fragment, so
+		// the layer is read from there.
+		append(hybridMovie(movie{entry: mpegEsdsEntry(0x6B, 2, 44100), unitBytes: 417, timescale: 44100, sttsDelta: 1152}, 0, 0, true),
+			fragmentBoxes(1, 0, []uint32{1152, 1152}, []uint32{417, 417}, mpegFrames(0xFB, 417, 2))...),
+		// Every metadata store at once: a chapter track placed by an empty
+		// edit beside a chpl, an item list of each atom shape, classic udta
+		// text atoms, and a keys store directly under moov.
+		fxMovie{frames: 64, movieTimescale: 1000, chap: []uint32{2},
+			text: []fxText{{timescale: 90000, elst: chapElst(500, 1500),
+				samples: [][]byte{textSample("Late"), textSample("\xff\xfeC\x00a\x00f\x00\xe9\x00")}, deltas: []uint32{63000, 117000}}},
+			udta: [][]byte{joinBytes(
+				fxChpl(fxChplEntry{5_000_000, "Late"}, fxChplEntry{12_000_000, "Caf\xe9"}),
+				fxQTText("\xa9nam", "Mov"), fxQTText("\xa9swr", "Tool"),
+				fxMeta(fxText1("\xa9nam", "Song"), fxText1("\xa9nam", "Again"),
+					makeBox("trkn", dataAtom(0, []byte{0, 0, 0, 7})), makeBox("cpil", dataAtom(21, []byte{1})),
+					makeBox("tmpo", dataAtom(21, []byte{0, 120})), makeBox("gnre", dataAtom(0, []byte{0, 18})),
+					fxFreeform("com.apple.iTunes", "replaygain_track_gain", 1, "-3.00 dB"),
+					fxFreeform("com.apple.iTunes", "originalyear", 1, "1999"),
+					fxFreeform("com.apple.iTunes", "originaldate", 1, "1999-03-04"),
+					fxFreeform("com.apple.iTunes", "iTunSMPB", 1, smpbPayload(8, 40))))},
+			meta: fxKeysMeta([2]string{"title", "Keys"}, [2]string{"track", "3/12"}, [2]string{"custom.thing", "x"})}.build(),
 		// The two "ms" block codecs, whose whole geometry is a WAVEFORMATEX
 		// inside the wave wrapper: a mutation of one of these edits a block
 		// size, a samples-per-block count or a predictor table, none of which
@@ -256,10 +292,17 @@ func FuzzFragment(f *testing.F) {
 	f.Add([]byte{}) // empty
 	f.Add([]byte("\x00\x00\x00\x08traf"))
 
-	trex := trexDefaults{have: true, defaultDur: 1024, defaultSize: 100, defaultFlags: 0}
+	// A moof of two tracks whose second traf is based on the first's data.
+	f.Add(joinBytes(
+		trafOf(2, 0, 0, runSpec{off: at(64), sizes: []uint32{4, 4}}, runSpec{sizes: make([]uint32, 3), bare: true}),
+		trafOf(1, 0, 0, runSpec{sizes: []uint32{8, 8}})))
+
+	trexes := []trexDefaults{{trackID: 1, defaultDur: 1024, defaultSize: 100}, {trackID: 2, defaultSize: 7}}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var fi fragInfo
-		err := parseFragment(&fi, data, trex, 1)
+		err := parseFragment(&fi, data, trexes, 1, 1000)
+		// The head peek reads the same bytes, cut off or not.
+		readMoofHead(data, trexes, 1000).firstSample(1, trexes)
 		if err != nil {
 			return
 		}

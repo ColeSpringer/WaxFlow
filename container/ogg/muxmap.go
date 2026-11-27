@@ -3,6 +3,8 @@ package ogg
 import (
 	"encoding/binary"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/flac"
@@ -362,6 +364,11 @@ func paginate(body, seg []byte, granule int64, flags byte,
 // A comment that would push the header past its single-page budget is an error
 // rather than a skip, for the reason apev2.Build refuses one: writing the page
 // without it reports a tag the stream does not carry.
+//
+// Keys are written as given but for the date: the canonical RECORDINGDATE is
+// the DATE field, the name every Vorbis comment reader looks for and the tag
+// library writes. A literal DATE key is that field too, so the two together
+// write one DATE per distinct value, in the order they come.
 func buildComment(magic, vendor string, tags []container.Tag) ([]byte, error) {
 	out := make([]byte, 0, len(magic)+4+len(vendor)+4)
 	out = append(out, magic...)
@@ -370,17 +377,26 @@ func buildComment(magic, vendor string, tags []container.Tag) ([]byte, error) {
 	countAt := len(out)
 	out = binary.LittleEndian.AppendUint32(out, 0) // user comment count, patched below
 	count := uint32(0)
+	var dates []string
 	for _, t := range tags {
 		if !container.ValidTagKey(t.Key) {
 			continue
 		}
-		c := t.Key + "=" + t.Value
+		key := t.Key
+		if strings.EqualFold(key, "RECORDINGDATE") || strings.EqualFold(key, "DATE") {
+			if slices.Contains(dates, t.Value) {
+				continue
+			}
+			dates = append(dates, t.Value)
+			key = "DATE"
+		}
+		c := key + "=" + t.Value
 		// The whole header's size, not this value's: a comment can overflow by
 		// being large or by being the one that crossed a running total.
 		if need := len(out) + 4 + len(c); need > maxTagsPageBytes {
 			return nil, waxerr.New(waxerr.CodeUnsupportedFormat,
 				fmt.Sprintf("ogg: %s does not fit: the comment header would need %d bytes, over its %d-byte limit",
-					t.Key, need, maxTagsPageBytes))
+					key, need, maxTagsPageBytes))
 		}
 		out = binary.LittleEndian.AppendUint32(out, uint32(len(c)))
 		out = append(out, c...)

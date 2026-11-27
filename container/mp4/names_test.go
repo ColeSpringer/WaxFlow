@@ -159,6 +159,8 @@ func TestRefusalNamesTheSampleEntryFormat(t *testing.T) {
 	for _, tc := range []struct{ format, want string }{
 		{"MAC3", "MAC3"},
 		{"ms\x00\x50", "MP2 (ms 0x0050)"},
+		{"mlpa", "TrueHD (mlpa)"},
+		{"dtsc", "DTS (dtsc)"},
 		// No name either way: the fourcc as it stands.
 		{"QDM2", "QDM2"},
 	} {

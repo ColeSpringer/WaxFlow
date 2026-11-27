@@ -31,6 +31,7 @@ type fakeMapper struct {
 	applyErr        error
 	onRead, onApply func()
 	reads, applies  int
+	applied         *meta.Info // what the last Apply was handed
 }
 
 func (m *fakeMapper) Read(context.Context, container.Source, string, meta.ReadOptions) (*meta.Info, error) {
@@ -44,8 +45,9 @@ func (m *fakeMapper) Read(context.Context, container.Source, string, meta.ReadOp
 	return m.info, nil
 }
 
-func (m *fakeMapper) Apply(context.Context, string, *meta.Info, []container.Tag) error {
+func (m *fakeMapper) Apply(_ context.Context, _ string, info *meta.Info, _ []container.Tag) error {
 	m.applies++
+	m.applied = info
 	if m.onApply != nil {
 		m.onApply()
 	}
@@ -56,6 +58,12 @@ func (m *fakeMapper) Apply(context.Context, string, *meta.Info, []container.Tag)
 // container itself holds metadata to fold.
 func taggedSource(t *testing.T) string {
 	t.Helper()
+	return taggedWith(t, container.Tag{Key: "TITLE", Value: "from the container"})
+}
+
+// taggedWith is taggedSource holding tags.
+func taggedWith(t *testing.T, tags ...container.Tag) string {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "tagged.m4a")
 	f, err := os.Create(path)
 	if err != nil {
@@ -65,7 +73,7 @@ func taggedSource(t *testing.T) string {
 	src := openSource(t, testutil.PkgFile("..", "..", "testdata", "sine-s16.wav"))
 	_, err = waxflow.New().Transcode(context.Background(), src, "wav", f,
 		waxflow.TranscodeOptions{Format: "alac", Container: waxflow.ContainerProgressive},
-		waxflow.WithTags([]container.Tag{{Key: "TITLE", Value: "from the container"}}),
+		waxflow.WithTags(tags),
 		waxflow.WithChapters([]container.Chapter{
 			{Start: 0, End: 50 * time.Millisecond, Title: "one"},
 			{Start: 50 * time.Millisecond, End: 100 * time.Millisecond, Title: "two"},
@@ -277,6 +285,197 @@ func TestAFailedPostPassIsANote(t *testing.T) {
 		return n.Kind == NotePostPassFailed && n.Text == "not taggable"
 	}) {
 		t.Errorf("%d post-passes, notes %+v; want one, failed, noted", m.applies, notes)
+	}
+}
+
+// TestTheSourcesEncodingTagsStayBehind: every file output is a fresh encode,
+// so the source's encoder stamp and mp3gain's record of its frames would be
+// false on it. Neither door may carry them: the tags the muxer embeds, nor
+// the set the post-pass writes. What still describes the audio is carried:
+// who encoded the source, its coding history and its fingerprint.
+func TestTheSourcesEncodingTagsStayBehind(t *testing.T) {
+	kept := []string{"TITLE", "ENCODEDBY", "ENCODING_HISTORY", "ACOUSTID_FINGERPRINT"}
+	left := []string{"ENCODER", "MP3GAIN_UNDO", "MP3GAIN_MINMAX", "MP3GAIN_ALBUM_MINMAX"}
+	stamped := func() *meta.Info {
+		tags := map[string][]string{}
+		for _, k := range slices.Concat(kept, left) {
+			tags[k] = []string{"v"}
+		}
+		return &meta.Info{Tags: tags}
+	}
+	wav := testutil.PkgFile("..", "..", "testdata", "sine-s16.wav")
+	check := func(t *testing.T, where string, tags map[string][]string) {
+		t.Helper()
+		for _, k := range kept {
+			if !slices.Equal(tags[k], []string{"v"}) {
+				t.Errorf("%s: %s = %q, want it carried", where, k, tags[k])
+			}
+		}
+		for _, k := range left {
+			if v, ok := tags[k]; ok {
+				t.Errorf("%s: %s = %q, want it left behind", where, k, v)
+			}
+		}
+	}
+	t.Run("the post-pass", func(t *testing.T) {
+		req := request(t, wav, waxflow.TranscodeOptions{Format: "flac"})
+		m := &fakeMapper{info: stamped()}
+		req.Mapper = m
+		if _, err := Run(context.Background(), req); err != nil {
+			t.Fatal(err)
+		}
+		if m.applied == nil {
+			t.Fatal("no post-pass ran, so this cell covers nothing")
+		}
+		check(t, "the set the post-pass was handed", m.applied.Tags)
+		if _, ok := m.info.Tags["ENCODER"]; !ok {
+			t.Error("the mapper's own Info was edited in place")
+		}
+	})
+	t.Run("the muxer", func(t *testing.T) {
+		req := request(t, wav, waxflow.TranscodeOptions{Format: "wavpack"})
+		req.Mapper = &fakeMapper{info: stamped()}
+		if _, err := Run(context.Background(), req); err != nil {
+			t.Fatal(err)
+		}
+		check(t, "the tags the muxer embedded", probeOutput(t, req.Path).Tags)
+	})
+}
+
+// TestUnwritableSourceTextIsRepairedOnceForBothDoors: a NUL or invalid UTF-8
+// in a source's tag reaches a muxer as given, where the NUL splits an ID3
+// value in two and lands raw in an MP4 atom. It is repaired where the
+// metadata is read, so the muxer and the post-pass write one text, and the
+// repair is a warning, since part of the value does not survive.
+func TestUnwritableSourceTextIsRepairedOnceForBothDoors(t *testing.T) {
+	wav := testutil.PkgFile("..", "..", "testdata", "sine-s16.wav")
+	bad := func() *meta.Info {
+		return &meta.Info{
+			Tags:     map[string][]string{"TITLE": {"t"}, "ARTIST": {"cut\x00here", "whole"}, "ALBUM": {"bad\xffbyte"}},
+			Chapters: []container.Chapter{{Start: 0, Title: "one\x00two"}},
+		}
+	}
+	req := request(t, wav, waxflow.TranscodeOptions{Format: "wavpack"})
+	m := &fakeMapper{info: bad()}
+	req.Mapper = m
+	var notes []Note
+	req.Note = func(n Note) { notes = append(notes, n) }
+	if _, err := Run(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	tags := probeOutput(t, req.Path).Tags
+	if got := tags["ARTIST"]; !slices.Equal(got, []string{"cut", "whole"}) {
+		t.Errorf("the muxer wrote ARTIST = %q, want [cut whole]", got)
+	}
+	if got := tags["ALBUM"]; !slices.Equal(got, []string{"bad\uFFFDbyte"}) {
+		t.Errorf("the muxer wrote ALBUM = %q, want the invalid byte replaced", got)
+	}
+	for _, what := range []string{"tag ARTIST", "tag ALBUM", "a chapter title"} {
+		if n := countNotes(notes, what); n != 1 {
+			t.Errorf("%d warnings name %q, want 1: %+v", n, what, notes)
+		}
+	}
+	if countNotes(notes, "tag TITLE") != 0 {
+		t.Errorf("a writable tag drew a warning: %+v", notes)
+	}
+
+	// The post-pass is handed the repaired set, not the source's.
+	post := request(t, wav, waxflow.TranscodeOptions{Format: "flac"})
+	pm := &fakeMapper{info: bad()}
+	post.Mapper = pm
+	if _, err := Run(context.Background(), post); err != nil {
+		t.Fatal(err)
+	}
+	if pm.applied == nil || !slices.Equal(pm.applied.Tags["ARTIST"], []string{"cut", "whole"}) ||
+		len(pm.applied.Chapters) != 1 || pm.applied.Chapters[0].Title != "one" {
+		t.Errorf("the post-pass was handed %+v, want the repaired text", pm.applied)
+	}
+}
+
+// countNotes counts the metadata warnings whose text starts with what.
+func countNotes(notes []Note, what string) int {
+	n := 0
+	for _, note := range notes {
+		if note.Kind == NoteMetadataWarning && strings.HasPrefix(note.Text, what+" held") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestATagTheMuxerHasNoFormForIsNotedOnlyWhereItIsLost: a muxer skips a key
+// it has no form for and says nothing. Where it is the final tag writer the
+// tag is gone, so the run says so; where the post-pass writes after it, the
+// tag library takes the key and nothing is lost.
+func TestATagTheMuxerHasNoFormForIsNotedOnlyWhereItIsLost(t *testing.T) {
+	wav := testutil.PkgFile("..", "..", "testdata", "sine-s16.wav")
+	for _, tc := range []struct {
+		opts  waxflow.TranscodeOptions
+		key   string
+		noted bool
+	}{
+		// A custom key an MP4 freeform would read back as MUSICBRAINZ_TRACKID.
+		{flatALAC, "MUSICBRAINZ TRACK ID", true},
+		// An APEv2 item name is two characters at least.
+		{waxflow.TranscodeOptions{Format: "wavpack"}, "X", true},
+		{waxflow.TranscodeOptions{Format: "flac"}, "X", false},
+	} {
+		warning := "tag " + tc.key + " has no form in the output and was not embedded"
+		req := request(t, wav, tc.opts)
+		req.Mapper = &fakeMapper{info: &meta.Info{Tags: map[string][]string{"TITLE": {"t"}, tc.key: {"a value"}}}}
+		var notes []Note
+		req.Note = func(n Note) { notes = append(notes, n) }
+		if _, err := Run(context.Background(), req); err != nil {
+			t.Fatal(err)
+		}
+		noted := slices.ContainsFunc(notes, func(n Note) bool { return n.Kind == NoteMetadataWarning && n.Text == warning })
+		if noted != tc.noted {
+			t.Errorf("%s: noted %t, want %t (notes %+v)", tc.opts.Format, noted, tc.noted, notes)
+		}
+		if tc.noted {
+			tags := probeOutput(t, req.Path).Tags
+			if !slices.Equal(tags["TITLE"], []string{"t"}) || len(tags) != 1 {
+				t.Errorf("%s: the output holds %v, want TITLE alone", tc.opts.Format, tags)
+			}
+		}
+	}
+}
+
+// TestWithNoMapperWhatTheMuxerLeavesOutIsNoted: with no mapper nothing
+// writes tags after the muxer, so what the muxer leaves out is lost and is
+// said, in one note: nothing for a FLAC, whose comment block takes both
+// keys, the key with no frame for an MP3, and every key for a WAV. With a
+// mapper the post-pass writes them and nothing is said.
+func TestWithNoMapperWhatTheMuxerLeavesOutIsNoted(t *testing.T) {
+	src := taggedWith(t, container.Tag{Key: "TITLE", Value: "t"}, container.Tag{Key: "MOOD", Value: "m"})
+	for _, tc := range []struct {
+		format string
+		mapper meta.Mapper
+		want   string
+	}{
+		{"flac", nil, ""},
+		{"mp3", nil, "tag MOOD has no form in the output and was not embedded"},
+		{"wav", nil, "tags MOOD, TITLE have no form in the output and were not embedded"},
+		{"mp3", &fakeMapper{info: &meta.Info{Tags: map[string][]string{"TITLE": {"t"}, "MOOD": {"m"}}}}, ""},
+	} {
+		req := request(t, src, waxflow.TranscodeOptions{Format: tc.format})
+		req.Mapper = tc.mapper
+		var got []string
+		req.Note = func(n Note) {
+			if n.Kind == NoteMetadataWarning && strings.Contains(n.Text, "no form in the output") {
+				got = append(got, n.Text)
+			}
+		}
+		if _, err := Run(context.Background(), req); err != nil {
+			t.Fatal(err)
+		}
+		var want []string
+		if tc.want != "" {
+			want = []string{tc.want}
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("%s, mapper %t: noted %q, want %q", tc.format, tc.mapper != nil, got, want)
+		}
 	}
 }
 
@@ -531,8 +730,10 @@ func TestLoudnessMakesRoomForTheReplayGain(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// An MP4 freeform spells the name in lowercase, as taggers do.
+		upper := bytes.ToUpper(raw)
 		for _, key := range []string{"REPLAYGAIN_TRACK_GAIN", "REPLAYGAIN_TRACK_PEAK"} {
-			if !bytes.Contains(raw, []byte(key)) {
+			if !bytes.Contains(upper, []byte(key)) {
 				t.Errorf("%s: the output carries no %s", name, key)
 			}
 		}

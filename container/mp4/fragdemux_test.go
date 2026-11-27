@@ -44,7 +44,6 @@ func craftDemuxer(trackID uint32, timescale int64, rate int, durs, sizes []uint3
 		size:       int64(len(file)),
 		w:          srcwin.New(src, int64(len(file)), "mp4: test"),
 		fragmented: true,
-		trex:       trexDefaults{have: true},
 		sel: &track{
 			id:        int(trackID),
 			timescale: timescale,
@@ -367,7 +366,7 @@ func TestFragmentedTrackMatch(t *testing.T) {
 	body := append(append(append([]byte{}, mfhd...), other...), audioTraf...)
 
 	var fi fragInfo
-	if err := parseFragment(&fi, body, trexDefaults{have: true}, 1); err != nil {
+	if err := parseFragment(&fi, body, nil, 1, 0); err != nil {
 		t.Fatalf("parseFragment: %v", err)
 	}
 	if len(fi.samples) != 2 || fi.samples[0].dur != 960 {
@@ -376,7 +375,7 @@ func TestFragmentedTrackMatch(t *testing.T) {
 	// Selecting the other track picks the 3-sample traf. The same fragInfo is
 	// reused, which is what the scan does: every field but the sample slice's
 	// capacity must be reset, or the previous fragment's timing leaks in.
-	if err := parseFragment(&fi, body, trexDefaults{have: true}, 99); err != nil {
+	if err := parseFragment(&fi, body, nil, 99, 0); err != nil {
 		t.Fatal(err)
 	}
 	if len(fi.samples) != 3 {
@@ -385,7 +384,7 @@ func TestFragmentedTrackMatch(t *testing.T) {
 	// A moof with only a non-matching traf yields no samples (skipped), not the
 	// wrong track's, and not the ones left in the reused slice.
 	onlyOther := append(append([]byte{}, mfhd...), other...)
-	if err := parseFragment(&fi, onlyOther, trexDefaults{have: true}, 1); err != nil {
+	if err := parseFragment(&fi, onlyOther, nil, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	if len(fi.samples) != 0 {

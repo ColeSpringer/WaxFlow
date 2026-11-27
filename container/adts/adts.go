@@ -56,6 +56,43 @@ func Match(head []byte) bool {
 	return ok && h.kin(nh)
 }
 
+// FindStart returns the offset of the first frame window holds whole with a
+// kin header right behind it. Unlike Match it takes no frame on its own word:
+// it is how a stream behind stray bytes is told from a sync word in them.
+func FindStart(window []byte) (int, bool) {
+	for i := 0; i+headerLen <= len(window); i++ {
+		if window[i] != 0xFF {
+			continue
+		}
+		h, ok := parseHeader(window[i:])
+		if !ok || i+h.frameLen+headerLen > len(window) {
+			continue
+		}
+		if nh, ok := parseHeader(window[i+h.frameLen:]); ok && h.kin(nh) {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// Chain counts the kin frames that follow one another from the start of
+// window, up to limit, and the bytes they take. A stream chains to its end;
+// a frame pair that some other format's payload spells does not go on.
+func Chain(window []byte, limit int) (frames, n int) {
+	var first header
+	for frames < limit {
+		h, ok := parseHeader(window[n:])
+		if !ok || n+h.frameLen > len(window) || frames > 0 && !first.kin(h) {
+			break
+		}
+		if frames == 0 {
+			first = h
+		}
+		frames, n = frames+1, n+h.frameLen
+	}
+	return frames, n
+}
+
 // header is a parsed ADTS frame header.
 type header struct {
 	profile  int // 0 main, 1 LC, 2 SSR, 3 (reserved/LTP)

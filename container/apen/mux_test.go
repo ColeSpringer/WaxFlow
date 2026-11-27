@@ -1,9 +1,12 @@
 package apen_test
 
 import (
+	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"slices"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
@@ -389,17 +392,18 @@ func TestMuxPacksAFrameWhoseLastWordIsShort(t *testing.T) {
 	}
 }
 
-// TestTruncationAtAFrameBoundaryIsRefused pins the shape a .ape cut exactly at
-// a frame's first byte takes. Every earlier boundary refuses because the next
-// table entry then runs past the audio; only the last frame can tie with the
-// synthetic end entry, and a zero-length frame is impossible (a frame opens
-// with a CRC word and closes with the coder's four-byte flush).
+// TestTruncationAtAFrameBoundary pins the shape a .ape cut exactly at a
+// frame's first byte takes. The descriptor counts the bytes that are gone, so
+// the file is known cut: the frames in front of the cut are whole and are
+// delivered, the rest are counted truncated, and Strict refuses the file. A
+// cut at the first frame's first byte leaves nothing to deliver and is
+// refused, since a frame is never empty (it opens with a CRC word and closes
+// with the coder's four-byte flush).
 //
-// Before this was refused the demuxer emitted a packet its own decoder could
-// not parse, and the message read like an internal inconsistency rather than
-// "this file is short". The muxer inherited it too, since a transmux parses
-// the same header, so a truncated source died mid-write.
-func TestTruncationAtAFrameBoundaryIsRefused(t *testing.T) {
+// The demuxer once emitted a packet for the frame the cut took, which its
+// own decoder could not parse, and a transmux of such a source died
+// mid-write.
+func TestTruncationAtAFrameBoundary(t *testing.T) {
 	const n = 2*ape.BlocksPerFrame + 4321
 	track, pkts := muxFrames(t, n, n)
 	raw := writeAll(t, track, pkts, nil)
@@ -407,29 +411,143 @@ func TestTruncationAtAFrameBoundaryIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := range h.TotalFrames {
-		at := int64(binary.LittleEndian.Uint32(raw[h.SeekTableOffset+int64(i)*4:]))
-		d, err := apen.NewDemuxer(container.BytesSource(raw[:at]), nil)
-		if err == nil {
-			// It must not have opened; if it somehow did, every packet it
-			// hands out still has to be one the decoder accepts.
-			var pkt container.Packet
-			for d.ReadPacket(&pkt) == nil {
-				if _, _, _, _, perr := ape.ParseFrameHeader(pkt.Data); perr != nil {
-					t.Fatalf("cut at frame %d's first byte: emitted a packet the decoder rejects: %v", i, perr)
-				}
+	read := func(d *apen.Demuxer) (out [][]byte) {
+		var pkt container.Packet
+		for {
+			err := d.ReadPacket(&pkt)
+			if err == io.EOF {
+				return out
 			}
-			t.Fatalf("cut at frame %d's first byte was accepted", i)
-		}
-		if code := waxerr.CodeOf(err); code != waxerr.CodeMalformedInput {
-			t.Errorf("cut at frame %d: code = %v, want %v", i, code, waxerr.CodeMalformedInput)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The frame's own coded bytes: a packet also carries a few of
+			// the bytes behind them, which a cut takes.
+			_, skip, n, data, err := ape.ParseFrameHeader(pkt.Data)
+			if err != nil {
+				t.Fatalf("emitted a packet the decoder rejects: %v", err)
+			}
+			out = append(out, bytes.Clone(data[skip:skip+n]))
 		}
 	}
-	// One byte further in is a different file: the last frame is short rather
-	// than absent, so it opens and dies at that frame's own CRC.
-	last := int64(binary.LittleEndian.Uint32(raw[h.SeekTableOffset+int64(h.TotalFrames-1)*4:]))
-	if _, err := apen.NewDemuxer(container.BytesSource(raw[:last+1]), nil); err != nil {
-		t.Fatalf("a file with one byte of its last frame should still open: %v", err)
+	whole, err := apen.NewDemuxer(container.BytesSource(raw), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := read(whole)
+	for i := range h.TotalFrames {
+		at := int64(binary.LittleEndian.Uint32(raw[h.SeekTableOffset+int64(i)*4:]))
+		cut := raw[:at]
+		if _, err := apen.NewDemuxer(container.BytesSource(cut), &container.DemuxerOptions{Strict: true}); waxerr.CodeOf(err) != waxerr.CodeMalformedInput {
+			t.Errorf("cut at frame %d: a strict open = %v, want malformed", i, err)
+		}
+		d, err := apen.NewDemuxer(container.BytesSource(cut), nil)
+		if i == 0 {
+			if code := waxerr.CodeOf(err); code != waxerr.CodeMalformedInput {
+				t.Errorf("cut at frame 0: open = %v, want malformed", err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("cut at frame %d's first byte: %v", i, err)
+		}
+		kept := int64(i) * ape.BlocksPerFrame
+		if tr := d.Tracks()[0]; tr.Samples != kept || d.TruncatedSamples(0) != n-kept {
+			t.Errorf("cut at frame %d: %d samples and %d truncated, want %d and %d", i, tr.Samples, d.TruncatedSamples(0), kept, n-kept)
+		}
+		got := read(d)
+		if len(got) != i || !slices.EqualFunc(got, want[:i], bytes.Equal) {
+			t.Errorf("cut at frame %d: read %d frames, want the %d in front of the cut as the whole file reads them", i, len(got), i)
+		}
+		if d.Tracks()[0].Samples != kept || len(d.Warnings()) != 2 {
+			t.Errorf("cut at frame %d: %d samples after the read, warnings %v", i, d.Tracks()[0].Samples, d.Warnings())
+		}
+	}
+}
+
+// TestACutLastFrameIsDropped: a last frame short of the bytes the descriptor
+// counts is tried at open. It carries a CRC over its samples, so one that
+// does not decode is dropped whole: the open states the frames in front of
+// it and counts the rest truncated, and a read, a seek into the dropped
+// frame and the open all agree on that length. Strict refuses the file. A
+// cut the coder never read from leaves a frame that still decodes, and it
+// is kept.
+func TestACutLastFrameIsDropped(t *testing.T) {
+	const n = 2*ape.BlocksPerFrame + 4321
+	track, pkts := muxFrames(t, n, n)
+	raw := writeAll(t, track, pkts, nil)
+	// read drains d and returns the samples its packets hold from the first
+	// one's position on.
+	read := func(d *apen.Demuxer) (from, samples int64) {
+		var pkt container.Packet
+		from = -1
+		for {
+			err := d.ReadPacket(&pkt)
+			if err == io.EOF {
+				return from, samples
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if from < 0 {
+				from = pkt.PTS
+			}
+			samples += pkt.Dur
+		}
+	}
+	for _, tc := range []struct {
+		cut  int
+		kept int64 // the samples left
+	}{{1, n}, {50, 2 * ape.BlocksPerFrame}, {1000, 2 * ape.BlocksPerFrame}} {
+		short := raw[:len(raw)-tc.cut]
+		if _, err := apen.NewDemuxer(container.BytesSource(short), &container.DemuxerOptions{Strict: true}); waxerr.CodeOf(err) != waxerr.CodeMalformedInput {
+			t.Errorf("cut %d: a strict open = %v, want malformed", tc.cut, err)
+		}
+		d, err := apen.NewDemuxer(container.BytesSource(short), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tr := d.Tracks()[0]; tr.Samples != tc.kept || !tr.SamplesExact || d.TruncatedSamples(0) != n-tc.kept {
+			t.Errorf("cut %d: the open states %d samples (exact %v), %d truncated; want %d and %d",
+				tc.cut, tr.Samples, tr.SamplesExact, d.TruncatedSamples(0), tc.kept, n-tc.kept)
+		}
+		if from, got := read(d); from != 0 || got != tc.kept {
+			t.Errorf("cut %d: a read delivered %d samples from %d, the open states %d", tc.cut, got, from, tc.kept)
+		}
+		dropped := slices.ContainsFunc(d.Warnings(), func(w container.Warning) bool {
+			return w.Msg == "the last frame is cut short and does not decode, dropped"
+		})
+		if dropped != (tc.kept != n) {
+			t.Errorf("cut %d: warnings %v", tc.cut, d.Warnings())
+		}
+		// A seek into the last frame the header counts lands on the last one
+		// there is, and the read from there ends where the open said.
+		landed, err := d.SeekSample(context.Background(), 0, n-1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if from, got := read(d); from != landed || landed+got != tc.kept {
+			t.Errorf("cut %d: a seek landed at %d and the read from %d ended at %d, the open states %d", tc.cut, landed, from, landed+got, tc.kept)
+		}
+		if tr := d.Tracks()[0]; tr.Samples != tc.kept || d.TruncatedSamples(0) != n-tc.kept {
+			t.Errorf("cut %d: the length moved to %d after the reads", tc.cut, tr.Samples)
+		}
+	}
+	// One frame, cut: nothing is left, and the open says so.
+	one, onePkts := muxFrames(t, 4321, 4321)
+	lone := writeAll(t, one, onePkts, nil)
+	d, err := apen.NewDemuxer(container.BytesSource(lone[:len(lone)-50]), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr := d.Tracks()[0]; tr.Samples != 0 || d.TruncatedSamples(0) != 4321 {
+		t.Errorf("a lone cut frame: the open states %d samples, %d truncated", tr.Samples, d.TruncatedSamples(0))
+	}
+	if landed, err := d.SeekSample(context.Background(), 0, 100); err != nil || landed != 0 {
+		t.Errorf("a lone cut frame: a seek landed at %d: %v", landed, err)
+	}
+	if _, got := read(d); got != 0 {
+		t.Errorf("a lone cut frame: a read delivered %d samples", got)
 	}
 }
 

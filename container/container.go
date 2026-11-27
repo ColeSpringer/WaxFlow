@@ -407,6 +407,11 @@ type DemuxerOptions struct {
 	// (the bytes behind a leading ID3v2 tag). A demuxer adds it to every
 	// offset it reports.
 	Base int64
+	// Lead is what whoever cut the source out of the file found in front of
+	// it and left out, such as bytes between a leading tag and the stream, at
+	// file offsets. A demuxer reports it ahead of its own findings, so every
+	// reader of its warnings and its damage count sees one list.
+	Lead []Warning
 }
 
 // Demuxer yields a container's tracks and packets. ReadPacket returns

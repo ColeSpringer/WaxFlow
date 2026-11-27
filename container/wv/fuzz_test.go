@@ -33,6 +33,13 @@ func FuzzDemux(f *testing.F) {
 	f.Add(headRaised(f))
 	// One whose read outruns it by a step back the read does reach.
 	f.Add(append(append([]byte(nil), full...), full...))
+	// What follows the audio: a Lyrics3 block between the tags, a tag behind
+	// junk, and a footer that points into the first block.
+	f.Add(lyricsStack(f))
+	f.Add(tagBehindJunk(f))
+	f.Add(footerIntoFirstBlock(f))
+	// A block behind the stream that passes for a tag and is none.
+	f.Add(append(fixture(f, "sine-s16.wv"), overlappingTag()...))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		testutil.DemuxFuzz{

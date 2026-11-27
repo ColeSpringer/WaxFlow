@@ -366,8 +366,10 @@ func TestTranscodeJobMakesRoomForItsReplayGain(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// An MP4 freeform spells the name in lowercase, as taggers do.
+			upper := bytes.ToUpper(raw)
 			for _, key := range []string{"REPLAYGAIN_TRACK_GAIN", "REPLAYGAIN_TRACK_PEAK"} {
-				if !bytes.Contains(raw, []byte(key)) {
+				if !bytes.Contains(upper, []byte(key)) {
 					t.Errorf("the output carries no %s", key)
 				}
 			}

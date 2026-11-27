@@ -9,6 +9,7 @@
 package format
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -341,12 +342,8 @@ var maxSniffNeed = func() int64 {
 // its verdict, which a context that ends stops with CodeCanceled; a tolerant
 // probe reads headers and walks nothing, so it has nothing to stop.
 func Probe(ctx context.Context, src container.Source, hint string, opts *Options) (*Info, error) {
-	src, d, base, err := resolve(src, hint)
-	if err != nil {
-		return nil, err
-	}
 	strict := opts != nil && opts.Strict
-	demux, err := d.open(src, openOptions{strict: strict, base: base})
+	demux, d, err := openSource(src, hint, strict)
 	if err != nil {
 		return nil, err
 	}
@@ -369,11 +366,7 @@ func Probe(ctx context.Context, src container.Source, hint string, opts *Options
 
 // Open identifies src and wires demuxer and decoder into Media.
 func Open(src container.Source, hint string, opts *Options) (Media, error) {
-	src, d, base, err := resolve(src, hint)
-	if err != nil {
-		return nil, err
-	}
-	demux, err := d.open(src, openOptions{strict: opts != nil && opts.Strict, base: base})
+	demux, d, err := openSource(src, hint, opts != nil && opts.Strict)
 	if err != nil {
 		return nil, err
 	}
@@ -392,11 +385,7 @@ func Open(src container.Source, hint string, opts *Options) (Media, error) {
 // Demuxer has no Close; what needs closing is src, which the caller owns, as it
 // does for Probe.
 func OpenDemuxer(src container.Source, hint string, opts *Options) (container.Demuxer, *Info, error) {
-	src, d, base, err := resolve(src, hint)
-	if err != nil {
-		return nil, nil, err
-	}
-	demux, err := d.open(src, openOptions{strict: opts != nil && opts.Strict, base: base})
+	demux, d, err := openSource(src, hint, opts != nil && opts.Strict)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -471,38 +460,268 @@ func foldWarnings(info *Info, ws []container.Warning) {
 	}
 }
 
-// resolve picks a driver: bounded sniff first (skipping a leading ID3v2
-// tag if present), extension hint as the tiebreak for unrecognized magic.
-// The int64 is the length of the tag skipped: where the source it returns
-// begins in the file.
-func resolve(src container.Source, hint string) (container.Source, *driver, int64, error) {
+// Detection bounds, the tag library's own: the chained ID3v2 tags skipped at
+// the head, how far behind them a stream is looked for, and the bytes read
+// past that to confirm one found at the far end (an Ogg page is the largest
+// unit confirmed whole).
+const (
+	maxLeadingTags = 8
+	startScan      = 64 << 10
+	startConfirm   = 66 << 10
+	// chainFrames is how many kin frames in a row make a run of them the
+	// stream (see resolve).
+	chainFrames = 8
+)
+
+// opening is one way to open a source: the driver, the section of the file
+// its demuxer reads and where that begins, and what was left in front of it.
+// sniffed marks the row the sniff matched, and long a run of frames too long
+// to be another stream's payload.
+type opening struct {
+	src     container.Source
+	d       *driver
+	base    int64
+	lead    []container.Warning
+	sniffed bool
+	long    bool
+}
+
+// refusal is the Strict refusal of the damage left in front of o's stream,
+// nil with none.
+func (o opening) refusal() error {
+	for _, w := range o.lead {
+		if w.Kind == container.Damage {
+			return waxerr.Malformed("format: ", "%s (at offset %d)", w.Msg, w.Offset)
+		}
+	}
+	return nil
+}
+
+// openSource identifies src and opens its demuxer, and returns the driver
+// with a refusal that is one stream's.
+//
+// The openings resolve lists are tried in order, and the first a tolerant
+// open accepts is the file's format; where none is, the error is the sniffed
+// row's, the stream the bytes were taken for, or with none the first. Strict
+// never chooses: the format is the one a tolerant open picks, and the strict
+// verdict is that one driver's, the bytes left in front of its stream
+// included. A source that fails to read ends the attempt.
+//
+// A strict open of a file strict accepts costs one open, and so does one of
+// a file with a single opening, where there is nothing to choose: the
+// tolerant open is only paid where the strict one refused and another
+// opening waits, to learn whether the refusal is the file's or the opening
+// is no stream at all.
+func openSource(src container.Source, hint string, strict bool) (container.Demuxer, *driver, error) {
+	tries, err := resolve(src, hint)
+	if err != nil {
+		return nil, nil, err
+	}
+	var first, sniffed error
+	for _, o := range tries {
+		opts := openOptions{strict: strict, base: o.base, lead: o.lead}
+		// refused is what Strict says of this opening, should it be the one.
+		var refused error
+		if gap := o.refusal(); strict && gap == nil {
+			demux, err := o.d.open(o.src, opts)
+			switch {
+			case err == nil:
+				return demux, o.d, nil
+			case len(tries) == 1 || waxerr.CodeOf(err) == waxerr.CodeSourceUnreadable:
+				return nil, o.d, err // nothing to choose between
+			}
+			refused = err
+		} else if strict {
+			refused = gap
+		}
+		opts.strict = false
+		demux, err := o.d.open(o.src, opts)
+		switch {
+		case err == nil && refused != nil:
+			return nil, o.d, refused
+		case err == nil:
+			return demux, o.d, nil
+		case waxerr.CodeOf(err) == waxerr.CodeSourceUnreadable:
+			return nil, nil, err
+		}
+		// An opening that is no stream keeps what Strict said of it. The gap
+		// in front of one is no finding, so there the open's own error stands.
+		if refused != nil && o.refusal() == nil {
+			err = refused
+		}
+		if first == nil {
+			first = err
+		}
+		if o.sniffed {
+			sniffed = err
+		}
+	}
+	if sniffed != nil {
+		return nil, nil, sniffed
+	}
+	return nil, nil, first
+}
+
+// resolve lists the ways to open src, the likeliest first (see openSource).
+//
+// Leading ID3v2 tags are skipped, up to maxLeadingTags of them chained, and
+// the sniff table is asked about what follows. A row that matches there is
+// the one opening. Otherwise the stream may start behind bytes that are no
+// tag, and the openings are, in order: a run of chainFrames kin MPEG or ADTS
+// frames, which no other stream's payload holds; each start a driver's own
+// structure confirms within startScan bytes (FindStart), earliest first; and
+// the mp3 row where its sniff matched a frame pair behind junk, or else the
+// row the extension hint names.
+//
+// Behind tags every driver with a FindStart is asked. With no tag in front
+// only one whose start is checksummed is, since a start confirmed by shape
+// alone, in bytes nothing vouches for, is a guess.
+//
+// Two limits are known. A magic right where the tags end takes its row,
+// whatever follows it. And a frame stream shorter than chainFrames behind the
+// cut-off head of another stream opens as that head, since a short run is
+// what another stream's payload can hold.
+//
+// The source is a section of the file: the demuxer's byte 0 is the opening's
+// base, where the skipped tags end or, for a driver that does not look past
+// stray bytes itself, where the stream was found. Everything a demuxer does
+// is in the section's own offsets: its seeks, and its peel of trailing tags,
+// whose end is the section's size and so the file's. Only the offsets it
+// reports are translated back (container.DemuxerOptions.Base).
+//
+// Stray bytes the section leaves out are damage: handed to the demuxer to
+// report ahead of its own findings (container.DemuxerOptions.Lead), at their
+// file offset. A driver that reads past them itself reports them its own
+// way, and tags alone are no finding.
+func resolve(src container.Source, hint string) ([]opening, error) {
 	// One read covers both the ID3v2 check and the sniff; only a present
 	// tag forces a second read past it.
 	head, err := readHead(src, max(maxSniffNeed, 10))
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, err
 	}
-	base := int64(0)
-	if skip := id3v2Size(head); skip > 0 && skip < src.Size() {
-		src, base = sectionSource{src, skip}, skip
-		head, err = readHead(src, maxSniffNeed)
-		if err != nil {
-			return nil, nil, 0, err
+	base, size := int64(0), src.Size()
+	for range maxLeadingTags {
+		skip := id3v2Size(head)
+		if skip <= 0 || skip >= size-base {
+			break
+		}
+		base += skip
+		if head, err = readHead(sectionSource{src, base}, max(maxSniffNeed, 10)); err != nil {
+			return nil, err
 		}
 	}
+	if base > 0 {
+		src = sectionSource{src, base}
+	}
+	var tries []opening
+	var found *driver
 	for i := range drivers {
 		if drivers[i].match(head) {
-			return src, &drivers[i], base, nil
+			found = &drivers[i]
+			break
 		}
 	}
-	if ext := strings.ToLower(strings.TrimPrefix(hint, ".")); ext != "" {
-		for i := range drivers {
-			if slices.Contains(drivers[i].exts, ext) {
-				return src, &drivers[i], base, nil
+	// limit is how far in a confirmed start may lie: anywhere in the scan
+	// when nothing matched, and nowhere when the match starts the section.
+	// The mp3 row also matches a frame pair behind junk, which is weaker than
+	// a start another driver confirms in front of that pair.
+	limit := startScan
+	if found != nil {
+		limit = 0
+		if found.loose {
+			if at, ok := found.start(head); ok {
+				limit = at
 			}
 		}
 	}
-	return src, nil, base, waxerr.New(waxerr.CodeUnsupportedFormat, "format: unrecognized input (no magic bytes matched)")
+	if limit > 0 {
+		starts, window, err := findStarts(src, base > 0, limit)
+		if err != nil {
+			return nil, err
+		}
+		// long reports a run of d's frames from at that is the stream.
+		long := func(d *driver, at int) bool {
+			if d.chain == nil || at > len(window) {
+				return false
+			}
+			frames, _ := d.chain(window[at:], chainFrames)
+			return frames >= chainFrames
+		}
+		for _, st := range starts {
+			o := opening{src: src, d: st.d, base: base, long: long(st.d, int(st.at))}
+			if !st.d.leads && st.at > 0 {
+				gap := container.Warning{Offset: base, Kind: container.Damage,
+					Msg: fmt.Sprintf("%d bytes in front of the stream belong to no tag", st.at)}
+				o = opening{src: sectionSource{src, st.at}, d: st.d, base: base + st.at, lead: []container.Warning{gap}}
+			}
+			tries = append(tries, o)
+		}
+		if found != nil {
+			tries = append(tries, opening{src: src, d: found, base: base, sniffed: true, long: long(found, limit)})
+		}
+	} else {
+		tries = append(tries, opening{src: src, d: found, base: base, sniffed: true})
+	}
+	if found == nil {
+		if ext := strings.ToLower(strings.TrimPrefix(hint, ".")); ext != "" {
+			for i := range drivers {
+				if !slices.Contains(drivers[i].exts, ext) {
+					continue
+				}
+				// A driver that reads past stray bytes itself is already there.
+				if !slices.ContainsFunc(tries, func(o opening) bool { return o.d == &drivers[i] && o.d.leads }) {
+					tries = append(tries, opening{src: src, d: &drivers[i], base: base})
+				}
+				break
+			}
+		}
+	}
+	slices.SortStableFunc(tries, func(a, b opening) int {
+		switch {
+		case a.long == b.long:
+			return 0
+		case a.long:
+			return -1
+		}
+		return 1
+	})
+	if len(tries) == 0 {
+		return nil, waxerr.New(waxerr.CodeUnsupportedFormat, "format: unrecognized input (no magic bytes matched)")
+	}
+	return tries, nil
+}
+
+// start is a stream start a driver confirmed, at bytes into the source.
+type start struct {
+	d  *driver
+	at int64
+}
+
+// findStarts asks the drivers for the stream starts their own structure
+// confirms in the first startScan bytes of src, below limit, and returns them
+// earliest first, a tie going to the earlier row, with the window it read.
+// Every driver with a
+// FindStart is asked when tagged says tags led the source, else only the
+// checksummed ones. The earliest is the stream; the ones behind it are there
+// for the file whose earliest turns out not to open.
+func findStarts(src container.Source, tagged bool, limit int) ([]start, []byte, error) {
+	window, err := readHead(src, startScan+startConfirm)
+	if err != nil {
+		return nil, nil, err
+	}
+	var starts []start
+	for i := range drivers {
+		d := &drivers[i]
+		if d.start == nil || !tagged && !d.checksummed {
+			continue
+		}
+		if off, ok := d.start(window); ok && off < min(limit, startScan) {
+			starts = append(starts, start{d, int64(off)})
+		}
+	}
+	slices.SortStableFunc(starts, func(a, b start) int { return cmp.Compare(a.at, b.at) })
+	return starts, window, nil
 }
 
 // readHead reads up to n leading bytes. Sources smaller than n yield a
@@ -550,7 +769,8 @@ func id3v2Size(head []byte) int64 {
 	return n
 }
 
-// sectionSource offsets a Source, hiding a leading tag from drivers.
+// sectionSource offsets a Source, hiding what leads the stream from drivers
+// (see resolve). A sectionSource of one is the sum of the two.
 type sectionSource struct {
 	src container.Source
 	off int64

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/colespringer/waxflow/audio"
@@ -27,6 +28,9 @@ func FuzzProbe(f *testing.F) {
 			f.Fatal(err)
 		}
 		f.Add(raw, "")
+		// Behind chained tags and stray bytes, and behind stray bytes alone.
+		f.Add(slices.Concat(behind(nil, 60, 200), make([]byte, 100), raw), "")
+		f.Add(slices.Concat(make([]byte, 100), raw), "mp3")
 	}
 	f.Add([]byte("fLaC\x80\x00\x00\x22"), "flac")
 	f.Add([]byte("OggS\x00\x02"), "ogg")

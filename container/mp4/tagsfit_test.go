@@ -15,7 +15,12 @@ import (
 func TestTagsFitAgreesWithTheWrite(t *testing.T) {
 	src := metaTone(alac.FrameSize)
 	defer audio.Put(src)
-	tags := []container.Tag{{Key: "COMMENT", Value: strings.Repeat("c", 200<<10)}}
+	// One value in a text atom and one in a freeform, the two shapes a long
+	// value takes.
+	tags := []container.Tag{
+		{Key: "COMMENT", Value: strings.Repeat("c", 200<<10)},
+		{Key: "CUSTOMNOTES", Value: strings.Repeat("n", 200<<10)},
+	}
 	if err := TagsFit(tags); err != nil {
 		t.Fatalf("TagsFit = %v, want nil", err)
 	}
@@ -25,7 +30,9 @@ func TestTagsFitAgreesWithTheWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := d.Tags()["COMMENT"]; len(got) != 1 || len(got[0]) != 200<<10 {
-		t.Error("the muxer did not write the COMMENT TagsFit answered for")
+	for _, tag := range tags {
+		if got := d.Tags()[tag.Key]; len(got) != 1 || len(got[0]) != 200<<10 {
+			t.Errorf("the muxer did not write the %s TagsFit answered for", tag.Key)
+		}
 	}
 }

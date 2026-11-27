@@ -284,10 +284,11 @@ need **no** mapper: a container that parses them surfaces them either
 way, so a daemon embedded without one still reports what the file
 carries. A mapper's values win when one is wired, since a tag library may
 know forms and containers the container package does not. `endSeconds` is
-omitted for the start-only chapter forms (Nero `chpl`, Musepack SV8
-chapter packets, ASF markers) that mean "until the next chapter, or end
-of stream"; a caller deriving a span from chapter *n* reads it when
-present and chapter *n+1*'s `startSeconds` when not.
+omitted for the start-only chapter forms (Musepack SV8 chapter packets,
+ASF markers, and the last chapter of a Nero `chpl`, whose others end at
+the next start) that mean "until the next chapter, or end of stream"; a
+caller deriving a span from chapter *n* reads it when present and chapter
+*n+1*'s `startSeconds` when not.
 
 `hasArt` and `GET /art` do still need a mapper, and that is deliberate
 rather than an oversight: `hasArt` reports what `/art` **can serve**, and
@@ -385,11 +386,14 @@ held against their declared count only where a read reaches the end of the
 payload, which a tolerant probe leaves to the read, so theirs is on the
 result of a job that read the file (below) and not here. A WavPack or FLAC
 whose read from the start ends short of the length its open checked counts
-the rest too, so a job's count can exceed the probe's. The field is absent
-for a whole file, for a header that states no length to fall short of, for a
-length that is not stated in samples (ASF, Matroska), and for Monkey's
-Audio, where a file cut short keeps its declared length and its last frame
-fails to decode instead.
+the rest too, so a job's count can exceed the probe's. A probe knows it for
+Monkey's Audio as well: the descriptor counts the frame data, so a cut file
+is known at open, where the frame the cut fell in is tried and counted with
+the frames behind it when it no longer decodes. A file of a version before
+3.98 carries no such count: one cut inside its last frame is not detected
+at open and fails at that frame. The field is absent for a whole file, for a
+header that states no length to fall short of, and for a length that is not
+stated in samples (ASF, Matroska).
 
 ## GET /stream
 
@@ -426,7 +430,8 @@ Parameters (unknown parameter names are rejected):
   the muxer itself rather than by the tagging post-pass: text tags only,
   under APEv2's own key spellings (`Track`, `Year`, `Album Artist`), with
   multi-valued fields NUL-joined into one item per key as the format
-  requires. Cover art and chapters do not survive a .wv output.
+  requires, and none under a name the format forbids (one byte long, or a
+  Cover Art name). Cover art and chapters do not survive a .wv output.
   Other formats
   join as encoders land (`/caps` is the truth). `aiff` and `ape` exist for
   jobs but have no streaming form: 415. Monkey's Audio has no streaming form
@@ -1478,7 +1483,21 @@ warning, `tag COMMENT is too large for the output and was not embedded`
 lost: the output's muxer is the final tag writer (WavPack, APE, the MP4
 family, FLAC in Ogg), or the daemon has no tag library to run the tagging
 post-pass with. Elsewhere the post-pass writes the full set and nothing is
-warned.
+warned. Under the same condition the source tags the muxer has no form for
+(a name its tag block forbids or has no place for, or one that would read
+back as another key; every tag, for a muxer that writes none) are one
+warning: `tag X has no form in the output and was not embedded`, or `tags
+X, Y have no form in the output and were not embedded`.
+
+Two kinds of source tag never reach an output as the source held them. The
+stamps of the source's own encoding (`ENCODER` and mp3gain's `MP3GAIN_*`
+records) are left behind with no warning: the output is a fresh encode, and
+they would be false on it. `ENCODEDBY`, `ENCODING_HISTORY` and
+`ACOUSTID_FINGERPRINT` are carried.
+Text no tag writer stores as given, a value holding a NUL byte or invalid
+UTF-8, is written cut at the NUL with the invalid bytes replaced by U+FFFD,
+under a warning that names the field: `tag ARTIST held a NUL byte or
+invalid UTF-8 and is written repaired`.
 
 Neither takes `gain` or `loudness`. Both answer "how loud should this one
 track be", against that track's own measurement or its own ReplayGain

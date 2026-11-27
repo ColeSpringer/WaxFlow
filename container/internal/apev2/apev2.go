@@ -13,7 +13,11 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"slices"
 	"strings"
+	"unicode/utf8"
+
+	"github.com/colespringer/waxflow/container"
 )
 
 // FooterLen is the size of the fixed footer, and of the optional identical
@@ -57,14 +61,18 @@ func Size(b []byte) (total int64, hasHeader bool) {
 	if flags&flagIsHeader != 0 {
 		return 0, false // a header, not a footer: the tag starts here rather than ends
 	}
-	// The size field covers the items plus this footer; a header, when
-	// present, is an equally sized preamble the field does not count.
+	// The size field covers the items plus this footer, so one under a
+	// footer's own length is no tag's; a header, when present, is an equally
+	// sized preamble the field does not count.
 	total = int64(binary.LittleEndian.Uint32(f[12:16]))
+	if total < FooterLen {
+		return 0, false
+	}
 	hasHeader = flags&flagHasHeader != 0
 	if hasHeader {
 		total += FooterLen
 	}
-	if total < FooterLen || total > maxTagBytes {
+	if total > maxTagBytes {
 		return 0, false
 	}
 	return total, hasHeader
@@ -80,7 +88,8 @@ func StartsTag(b []byte) bool {
 // Parse reads the items of a whole APEv2 tag block (header if present, items,
 // footer) into canonical uppercase keys, values in file order. Binary items
 // such as cover art are skipped: this is the descriptive-tag surface, and a
-// picture needs an opt-in accessor rather than a field read.
+// picture needs an opt-in accessor rather than a field read. A track or disc
+// number holding its total reads as the two keys.
 func Parse(tag []byte) map[string][]string {
 	if len(tag) < FooterLen {
 		return nil
@@ -102,7 +111,70 @@ func Parse(tag []byte) map[string][]string {
 		items = items[FooterLen:]
 	}
 
-	return parseItems(items, count)
+	tags, seen := parseItems(items, count)
+	if declared := binary.LittleEndian.Uint32(f[16:20]); declared > maxItems {
+		seen.blind() // the library reads items past the cap
+	}
+	if tags != nil {
+		container.SplitNumberPairs(tags, seen.count)
+	}
+	if len(tags) == 0 {
+		return nil
+	}
+	return tags
+}
+
+// pairSeen counts the values the tag library's read of a tag holds under the
+// track and disc number and total keys, which decides its number split. The
+// library keeps an empty value ahead of or between others, where Parse drops
+// it, and reads items Parse skips, so the count is taken off the raw items.
+// The empty key marks a count Parse could not take.
+type pairSeen map[string]int
+
+var pairKeys = map[string]bool{"TRACKNUMBER": true, "TRACKTOTAL": true, "DISCNUMBER": true, "DISCTOTAL": true}
+
+func (s pairSeen) count(key string) int {
+	if s[""] != 0 {
+		return -1
+	}
+	return s[key]
+}
+
+// blind marks the counts unknown (container.SplitNumberPairs).
+func (s pairSeen) blind() { s[""] = 1 }
+
+// note counts one text item as the library reads it: its values are the ones
+// left once the trailing NULs, which are terminators, are cut.
+func (s pairSeen) note(name string, value []byte) {
+	if pairKeys[name] {
+		s[name] += bytes.Count(bytes.TrimRight(value, "\x00"), []byte{0}) + 1
+	} else if foldsOntoPair(name) {
+		s.blind()
+	}
+}
+
+// foldsOntoPair reports a name past ASCII that the library's Unicode case
+// folding reads as a number or total key, which Parse refuses to read.
+func foldsOntoPair(name string) bool {
+	t := strings.TrimSpace(name)
+	if !hasNonASCII(t) {
+		return false
+	}
+	for _, f := range [...]string{strings.ToLower(t), strings.ToUpper(t)} {
+		if !hasNonASCII(f) && pairKeys[canonical(f)] {
+			return true
+		}
+	}
+	return false
+}
+
+func hasNonASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return true
+		}
+	}
+	return false
 }
 
 // RecordLen is a header or footer record less its 8-byte preamble: version,
@@ -137,12 +209,15 @@ func ParseItems(items []byte, count int) map[string][]string {
 	if count < 0 || count > maxItems {
 		count = maxItems
 	}
-	return parseItems(items, count)
+	tags, _ := parseItems(items, count)
+	return tags
 }
 
-// parseItems reads up to count items off the front of items.
-func parseItems(items []byte, count int) map[string][]string {
+// parseItems reads up to count items off the front of items, and counts the
+// number pair values the library sees there.
+func parseItems(items []byte, count int) (map[string][]string, pairSeen) {
 	out := map[string][]string{}
+	seen := pairSeen{}
 	for range count {
 		if len(items) < 8 {
 			break
@@ -161,24 +236,43 @@ func parseItems(items []byte, count int) map[string][]string {
 		}
 		value := items[:size]
 		items = items[size:]
-		if flags&typeMask != 0 || size > maxValueBytes {
-			continue // binary or locator payload, or a value too large to be text
+		if flags&typeMask != 0 {
+			continue // binary or locator payload
 		}
 		name := canonical(string(key))
 		if name == "" {
+			seen.note(string(key), value)
 			continue
 		}
+		seen.note(name, value)
+		if size > maxValueBytes {
+			continue // too large to be text
+		}
 		// A multi-valued item stores its values NUL-separated.
-		for v := range strings.SplitSeq(string(value), "\x00") {
+		for v := range strings.SplitSeq(text(value), "\x00") {
 			if v != "" {
 				out[name] = append(out[name], v)
 			}
 		}
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, seen
 	}
-	return out
+	return out, seen
+}
+
+// text decodes an item value: UTF-8 as the format requires, and anything else
+// as the Latin-1 of APEv1 and of out-of-spec writers, one byte to a code
+// point, which is how the tag library reads it too.
+func text(b []byte) string {
+	if utf8.Valid(b) {
+		return string(b)
+	}
+	r := make([]rune, len(b))
+	for i, c := range b {
+		r[i] = rune(c)
+	}
+	return string(r)
 }
 
 // aliases maps the APEv2 spellings that differ from the canonical uppercase
@@ -196,7 +290,8 @@ func parseItems(items []byte, count int) map[string][]string {
 //
 // The library resolves an APE item name through its APE convention table and
 // then the shared alias table every codec reads through (internal/mapping/ape.go
-// and tag/aliases.go). Mirror both when either moves.
+// and tag/aliases.go). Mirror both when either moves;
+// oracletest/apev2_mirror_test.go fails when they disagree.
 var aliases = map[string]string{
 	// Bare and separated user spellings.
 	"TRACK":        "TRACKNUMBER",
@@ -234,6 +329,7 @@ var aliases = map[string]string{
 	"CONTENT_GROUP":  "GROUPING",
 	"ENCODED_BY":     "ENCODEDBY",
 	"UNSYNCEDLYRICS": "LYRICS",
+	"USLT":           "LYRICS", // the ID3 lyrics frame's name, as ffmpeg writes it
 	// The legacy Picard spellings, still the current APE convention.
 	"MUSICBRAINZ_ALBUMSTATUS": "RELEASESTATUS",
 	"MUSICBRAINZ_ALBUMTYPE":   "RELEASETYPE",
@@ -270,18 +366,16 @@ var apeSpelling = map[string]string{
 // reads one off a file that carries it, since the value is real either way.
 var reservedItemNames = map[string]bool{"ID3": true, "TAG": true, "OGGS": true, "MP+": true}
 
-// canonical uppercases an item key and maps it onto the canonical vocabulary,
-// returning "" for a key no muxer could write back. The accepted range is
-// container.ValidTagKey's, restated rather than imported: this package sits
-// under container and the predicate is three lines.
+// canonical trims an item key, uppercases it and maps it onto the canonical
+// vocabulary, returning "" for a key no muxer could write back. The tag
+// library trims too, so "ALBUM " is the ALBUM field there and must be here.
+// Length is not the reader's business: the library reads a name of any
+// length, and only Build holds names to the format's 255 bytes. A name past
+// the value cap is refused anyway, since no tagger writes one.
 func canonical(key string) string {
-	if key == "" || len(key) > 255 {
+	key = strings.TrimSpace(key)
+	if len(key) > maxValueBytes || !container.ValidTagKey(key) {
 		return ""
-	}
-	for i := 0; i < len(key); i++ {
-		if c := key[i]; c < 0x20 || c > 0x7d || c == '=' {
-			return ""
-		}
 	}
 	up := strings.ToUpper(key)
 	if alias, ok := aliases[up]; ok {
@@ -290,14 +384,88 @@ func canonical(key string) string {
 	return up
 }
 
-// Tag is one item to write. It mirrors container.Tag without importing it, for
-// the same reason canonical restates ValidTagKey: this package sits under
-// container and the two fields cost less than the dependency. The dependency is
-// not notional: container/internal/trailer reads tags through here and imports
-// none of container, audio, codec or waxerr, which is what it would gain.
-type Tag struct {
-	Key   string
-	Value string
+// writableName reports whether a text item may be written under name: 2 to
+// 255 bytes of printable ASCII, not one of the reserved names, and not a
+// Cover Art name, which taggers read as a binary picture item.
+func writableName(name string) bool {
+	if len(name) < 2 || len(name) > 255 || reservedItemNames[strings.ToUpper(name)] {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		if c := name[i]; c < 0x20 || c > 0x7e {
+			return false
+		}
+	}
+	return !coverName(name)
+}
+
+// coverName reports a picture item's name in any case: "Cover Art", alone or
+// with a role in parentheses, or "Artist Picture".
+func coverName(name string) bool {
+	s := strings.ToLower(strings.TrimSpace(name))
+	if s == "artist picture" {
+		return true
+	}
+	rest, ok := strings.CutPrefix(s, "cover art")
+	if !ok {
+		return false
+	}
+	rest = strings.TrimSpace(rest)
+	return rest == "" || rest[0] == '('
+}
+
+// Tag is one item to write, the engine's own tag shape.
+type Tag = container.Tag
+
+// writeItem is one item to write: its name as the format spells it, and its
+// values.
+type writeItem struct {
+	key    string
+	values []string
+}
+
+// group sorts tags into the items Build writes, in first-seen order, and
+// names the keys it writes no item for, each once: a key that is not legal,
+// and one whose item name the format forbids (writableName). A tag with no
+// value is no item and is not named.
+func group(tags []Tag) (grouped []writeItem, leftOut []string) {
+	at := make(map[string]int, len(tags))
+	skip := func(key string) {
+		if !slices.Contains(leftOut, key) {
+			leftOut = append(leftOut, key)
+		}
+	}
+	for _, t := range tags {
+		if t.Value == "" {
+			continue
+		}
+		name := canonical(t.Key)
+		if name == "" {
+			skip(t.Key)
+			continue
+		}
+		if i, ok := at[name]; ok {
+			grouped[i].values = append(grouped[i].values, t.Value)
+			continue
+		}
+		key := name
+		if spelled, ok := apeSpelling[name]; ok {
+			key = spelled
+		}
+		if !writableName(key) {
+			skip(t.Key)
+			continue
+		}
+		at[name] = len(grouped)
+		grouped = append(grouped, writeItem{key: key, values: []string{t.Value}})
+	}
+	return grouped, leftOut
+}
+
+// LeftOut names the keys of tags that Build writes no item for, each once.
+func LeftOut(tags []Tag) []string {
+	_, leftOut := group(tags)
+	return leftOut
 }
 
 // maxWriteBytes bounds a rendered tag. The engine passes a small descriptive
@@ -330,28 +498,7 @@ func Build(tags []Tag) ([]byte, error) {
 	// one field (YEAR and RECORDINGDATE) merge rather than emitting the
 	// duplicate key the format forbids. First-seen order is kept, since map
 	// iteration would break byte determinism.
-	type item struct {
-		key    string
-		values []string
-	}
-	var grouped []item
-	at := make(map[string]int, len(tags))
-	for _, t := range tags {
-		name := canonical(t.Key)
-		if name == "" || reservedItemNames[name] || t.Value == "" {
-			continue
-		}
-		if i, ok := at[name]; ok {
-			grouped[i].values = append(grouped[i].values, t.Value)
-			continue
-		}
-		key := name
-		if spelled, ok := apeSpelling[name]; ok {
-			key = spelled
-		}
-		at[name] = len(grouped)
-		grouped = append(grouped, item{key: key, values: []string{t.Value}})
-	}
+	grouped, _ := group(tags)
 
 	items, count := []byte(nil), uint32(0)
 	for _, g := range grouped {

@@ -28,6 +28,7 @@ type sv8Stream struct {
 	stride  uint
 	present int64 // audio blocks in the stream
 	seAt    int64 // offset of the end marker, -1 when none
+	end     int64 // where the packets end: behind the end marker, or where the walk stopped
 	soAt    int64 // offset the SO packet points at, -1 when none
 	ctAt    int64 // offset of the chapter run, -1 when none
 	stHead  int64 // offset of the ST packet's header, -1 when none
@@ -73,9 +74,8 @@ func (d *Demuxer) parseSV8() error {
 	s := &d.sv8
 	*s = sv8Stream{seAt: -1, soAt: -1, ctAt: -1, stHead: -1}
 	haveSH := false
-	shEnd := int64(0)
 	pos := d.base + 4
-	var firstAP int64
+	var firstAP, firstEnd int64
 	for {
 		blk, ok := d.sv8Header(pos)
 		if !ok {
@@ -85,7 +85,7 @@ func (d *Demuxer) parseSV8() error {
 			return malformed("no whole packet at offset %d before the first audio packet", d.log.At(pos))
 		}
 		if blk.key == "AP" {
-			firstAP = pos
+			firstAP, firstEnd = pos, pos+int64(blk.hdrLen)+blk.payload
 			break
 		}
 		if blk.payload > maxHeaderPacket {
@@ -104,7 +104,6 @@ func (d *Demuxer) parseSV8() error {
 				return err
 			}
 			haveSH = true
-			shEnd = pos + int64(blk.hdrLen) + blk.payload
 		case "RG":
 			d.parseRG(payload)
 		case "EI":
@@ -122,12 +121,13 @@ func (d *Demuxer) parseSV8() error {
 		return malformed("no stream header before the first audio packet")
 	}
 
-	if err := d.stripTrailers(shEnd); err != nil {
+	if err := d.stripTrailers(firstEnd); err != nil {
 		return err
 	}
 	if err := d.sv8Walk(firstAP); err != nil {
 		return err
 	}
+	d.tagBehindJunk(s.end)
 	init := musepack.InitialState()
 	d.sv8.rng = [][2]uint32{init.RNG}
 	return nil
@@ -231,6 +231,7 @@ func (d *Demuxer) sv8Walk(first int64) error {
 		}
 		if blk.key == "SE" {
 			s.seAt = pos
+			pos += int64(blk.hdrLen) + blk.payload
 			break
 		}
 		switch blk.key {
@@ -254,6 +255,7 @@ func (d *Demuxer) sv8Walk(first int64) error {
 		pos += int64(blk.hdrLen) + blk.payload
 		d.w.Trim(pos)
 	}
+	s.end = pos
 	if s.seAt < 0 {
 		if err := d.warn(end, "the stream has no end marker"); err != nil {
 			return err

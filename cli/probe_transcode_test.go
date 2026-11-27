@@ -832,7 +832,8 @@ func TestTranscodeHEAAC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(data, []byte("REPLAYGAIN_TRACK_GAIN")) {
+	// An MP4 freeform spells the name in lowercase, as taggers do.
+	if !bytes.Contains(bytes.ToUpper(data), []byte("REPLAYGAIN_TRACK_GAIN")) {
 		t.Error("he-aac MP4 + --loudness analyze output is missing its ReplayGain tag")
 	}
 }

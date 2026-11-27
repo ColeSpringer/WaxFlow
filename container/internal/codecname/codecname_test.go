@@ -60,6 +60,13 @@ func TestFourccNamesEveryEntryInTheTable(t *testing.T) {
 		"ac-3": "AC-3",
 		"ec-3": "E-AC-3",
 		"eac3": "E-AC-3",
+		// TrueHD, and DTS under each of its profiles' fourccs.
+		"mlpa": "TrueHD",
+		"dtsc": "DTS",
+		"dtsh": "DTS",
+		"dtsl": "DTS",
+		"dtse": "DTS",
+		"dtsx": "DTS",
 	} {
 		if got := Fourcc(fourcc); got != want {
 			t.Errorf("Fourcc(%q) = %q, want %q", fourcc, got, want)
@@ -131,6 +138,30 @@ func TestLabel(t *testing.T) {
 	} {
 		if got := Label(fourcc); got != want {
 			t.Errorf("Label(%q) = %q, want %q", fourcc, got, want)
+		}
+	}
+}
+
+// TestMPEGLayer: the layer bits name the layer, and bytes that are no frame
+// header (no sync, or a reserved version, bit rate or sample rate) name none.
+func TestMPEGLayer(t *testing.T) {
+	for _, tc := range []struct {
+		head []byte
+		want string
+	}{
+		{[]byte{0xFF, 0xFB, 0x90, 0x00}, "MP3"},
+		{[]byte{0xFF, 0xFD, 0x90, 0x00}, "MP2"},
+		{[]byte{0xFF, 0xFF, 0x90, 0x00}, "MP1"},
+		{[]byte{0xFF, 0xF3, 0x90, 0x00}, "MP3"}, // MPEG-2
+		{[]byte{0xFF, 0xF9, 0x90, 0x00}, ""},    // layer bits 0
+		{[]byte{0xFF, 0xEB, 0x90, 0x00}, ""},    // reserved version
+		{[]byte{0xFF, 0xFB, 0xF0, 0x00}, ""},    // bit rate index 15
+		{[]byte{0xFF, 0xFB, 0x9C, 0x00}, ""},    // reserved sample rate
+		{[]byte{0x00, 0xFB, 0x90, 0x00}, ""},
+		{[]byte{0xFF, 0xFB, 0x90}, ""},
+	} {
+		if got := MPEGLayer(tc.head); got != tc.want {
+			t.Errorf("MPEGLayer(% x) = %q, want %q", tc.head, got, tc.want)
 		}
 	}
 }

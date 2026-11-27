@@ -130,13 +130,13 @@ func TestRollbackDropsWhatFollowsTheMark(t *testing.T) {
 // TestDemuxersExportNoDiagnosticsMutators: a demuxer holds its Log in an
 // unexported field, so no exported or embedded field, at any depth, reaches
 // it from outside. Each Demuxer exports what it exported before the Log,
-// mp4's DamageCount and the MeasureSamples of wv and ogg aside, and embeds
-// nothing it did not.
+// mp4's DamageCount, the MeasureSamples of wv and ogg, the Tags of adts and
+// the TruncatedSamples of apen aside, and embeds nothing it did not.
 func TestDemuxersExportNoDiagnosticsMutators(t *testing.T) {
 	allowed := map[string][]string{
-		"adts":  {"DamageCount", "ReadPacket", "SeekSample", "Tracks", "Walk", "Walked", "Warnings"},
+		"adts":  {"DamageCount", "ReadPacket", "SeekSample", "Tags", "Tracks", "Walk", "Walked", "Warnings"},
 		"aiff":  {"DamageCount", "IndexSnapshot", "KeepsIndex", "ReadPacket", "RestoreIndex", "SeekSample", "Tracks", "TruncatedSamples", "Walk", "Walked", "Warnings"},
-		"apen":  {"DamageCount", "ReadPacket", "SeekSample", "Tags", "Tracks", "Warnings"},
+		"apen":  {"DamageCount", "ReadPacket", "SeekSample", "Tags", "Tracks", "TruncatedSamples", "Warnings"},
 		"asf":   {"Chapters", "DamageCount", "IndexSnapshot", "KeepsIndex", "ReadPacket", "RestoreIndex", "SeekSample", "Tags", "Tracks", "Walk", "Walked", "Warnings"},
 		"flacn": {"DamageCount", "ReadPacket", "SeekSample", "Tracks", "TruncatedSamples", "Warnings"},
 		"mka":   {"DamageCount", "ReadPacket", "SeekSample", "Tracks", "Walk", "Walked", "Warnings"},
@@ -302,4 +302,22 @@ func typeName(e ast.Expr) string {
 		return e.Name
 	}
 	return "?"
+}
+
+// TestLeadIsListedFirstAtItsOwnOffset: what the source's cutter found in
+// front of it is a file offset already, so it is listed ahead of the log's
+// own findings untranslated, and its damage counts.
+func TestLeadIsListedFirstAtItsOwnOffset(t *testing.T) {
+	lead := container.Warning{Offset: 60, Msg: "100 bytes in front of the stream belong to no tag", Kind: container.Damage}
+	l := New("x: ", &container.DemuxerOptions{Base: 160, Lead: []container.Warning{lead}})
+	if got := l.List(); !slices.Equal(got, []container.Warning{lead}) || l.DamageCount() != 1 {
+		t.Errorf("list %v, damage %d; want the lead alone", got, l.DamageCount())
+	}
+	if err := l.Warn(5, "own"); err != nil {
+		t.Fatal(err)
+	}
+	want := []container.Warning{lead, {Offset: 165, Msg: "own", Kind: container.Damage}}
+	if got := l.List(); !slices.Equal(got, want) || l.DamageCount() != 2 {
+		t.Errorf("list %v, damage %d; want %v", got, l.DamageCount(), want)
+	}
 }

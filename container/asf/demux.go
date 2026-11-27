@@ -139,7 +139,7 @@ type Demuxer struct {
 	syncFrameLen int
 	// src backs the one-shot header and index reads; w is the streaming
 	// window the packet walk runs through. Keeping them apart is what stops a
-	// 16 MB header read from becoming the window every later packet read
+	// large header object read from becoming the window every later packet read
 	// rebases out of.
 	src  container.Source
 	w    srcwin.Window
@@ -147,7 +147,20 @@ type Demuxer struct {
 
 	track container.Track
 	tags  map[string][]string
-	log   diag.Log
+	// tagSeen holds the key and value pairs in tags, tagText their text's
+	// size, and tagsCut that a tag bound was met and said so.
+	tagSeen map[[2]string]bool
+	tagText int
+	tagsCut bool
+	// pairs is what the tag library sees under the number keys, which
+	// decides the number split; records counts the Metadata records walked.
+	pairs   pairSeen
+	records int
+	// counted says the header object being read is one the library reads
+	// too; recordsCut that the metadata record cap was met and said so.
+	counted    bool
+	recordsCut bool
+	log        diag.Log
 	// chapters is the Marker Object's list, read as stored and moved onto
 	// the playback timeline once the pre-roll is known; markerObject and
 	// markersOff record that one was read and where, for the reports the
@@ -671,13 +684,10 @@ func (d *Demuxer) parse() error {
 		}
 	}
 	hdrEnd := int64(size)
-	body, err := d.readBytes(headerObjectLen, hdrEnd-headerObjectLen, maxHeaderBytes)
-	if err != nil {
+	if err := d.walkHeader(hdrEnd); err != nil {
 		return err
 	}
-	if err := d.walkHeader(body); err != nil {
-		return err
-	}
+	d.splitNumberPairs()
 	if err := d.resolveChapters(); err != nil {
 		return err
 	}
@@ -703,53 +713,145 @@ func (d *Demuxer) readBytes(off, n, limit int64) ([]byte, error) {
 	return buf, nil
 }
 
-// walkHeader dispatches the Header Object's children. Every object this build
-// does not recognize is a leaf and is skipped by its own declared size, the
-// Header Extension included: nothing here descends on a depth the file
-// chooses.
-func (d *Demuxer) walkHeader(body []byte) error {
-	base := int64(headerObjectLen)
-	for len(body) >= objectHeaderLen {
-		id := guidAt(body)
-		size := le.Uint64(body[16:])
-		if size < objectHeaderLen || size > uint64(len(body)) {
-			return d.warn(base, "header object %s declares %d bytes with %d left", id, size, len(body))
+// headerReader serves the Header Object's bytes: from one read of its first
+// headerPrefix bytes, which holds the whole header of an ordinary file, and
+// past that from a read of each range asked for.
+type headerReader struct {
+	d      *Demuxer
+	prefix []byte
+}
+
+func (d *Demuxer) newHeaderReader(end int64) (headerReader, error) {
+	prefix, err := d.readBytes(0, min(end, headerPrefix), headerPrefix)
+	return headerReader{d: d, prefix: prefix}, err
+}
+
+// at returns the n bytes at off, n within limit.
+func (h headerReader) at(off, n, limit int64) ([]byte, error) {
+	if off >= 0 && n >= 0 && off+n <= int64(len(h.prefix)) {
+		return h.prefix[off : off+n], nil
+	}
+	return h.d.readBytes(off, n, limit)
+}
+
+// walkHeader dispatches the Header Object's children, which end at end. Each
+// child is found by its own object header, and only the bodies parsed here are
+// loaded, each under maxHeaderObjectBytes: Padding and every unrecognized
+// object are stepped over by size unread. A description or Marker Object
+// past the cap is skipped with a note rather than refusing the audio. Nothing here descends on a depth the file
+// chooses, and one object budget covers this walk and the Header Extension's.
+//
+// Every child is read whatever the Header Object's count states. The tag
+// library reads only the ones it covers, so values past it do not count
+// toward its number split (pairSeen).
+func (d *Demuxer) walkHeader(end int64) error {
+	h, err := d.newHeaderReader(end)
+	if err != nil {
+		return err
+	}
+	declared := int64(le.Uint32(h.prefix[24:28]))
+	walked := 0
+	off := int64(headerObjectLen)
+	for n := int64(0); end-off >= objectHeaderLen; n++ {
+		if err := d.charge(&walked, off); err != nil {
+			return err
 		}
-		payload := body[objectHeaderLen:size]
+		head, err := h.at(off, objectHeaderLen, objectHeaderLen)
+		if err != nil {
+			return err
+		}
+		id := guidAt(head)
+		size := le.Uint64(head[16:])
+		if size < objectHeaderLen || size > uint64(end-off) {
+			return d.warn(off, "header object %s declares %d bytes with %d left", id, size, end-off)
+		}
 		// The parsers index into the body, so they are given the body's own
 		// offset: handing them the object start put every warning they raise
 		// 24 bytes short of the field it names.
-		bodyOff := base + objectHeaderLen
+		bodyOff, bodyLen := off+objectHeaderLen, int64(size)-objectHeaderLen
+		body := func() ([]byte, error) { return h.at(bodyOff, bodyLen, maxHeaderObjectBytes) }
+		// The library reads only the children the count covers (zero is no
+		// limit), so a value past it is one its number split never sees.
+		d.counted = declared == 0 || n < declared
+		// tagBody is body for an object only tags or chapters come from,
+		// which is skipped past the cap.
+		tagBody := func(what string) ([]byte, bool, error) {
+			if bodyLen > maxHeaderObjectBytes {
+				d.note(off, "%s of %d bytes is past the %d-byte cap and is not read", what, size, maxHeaderObjectBytes)
+				if d.counted {
+					d.pairs.blind = true // the library reads it
+				}
+				return nil, false, nil
+			}
+			b, err := body()
+			return b, err == nil, err
+		}
 		switch id {
 		case guidFileProperties:
-			if err := d.parseFileProperties(payload, bodyOff); err != nil {
+			b, err := body()
+			if err != nil {
+				return err
+			}
+			if err := d.parseFileProperties(b, bodyOff); err != nil {
 				return err
 			}
 		case guidStreamProperties:
-			if err := d.parseStreamProperties(payload, bodyOff); err != nil {
+			b, err := body()
+			if err != nil {
+				return err
+			}
+			if err := d.parseStreamProperties(b, bodyOff); err != nil {
 				return err
 			}
 		case guidContentDescription:
-			d.parseContentDescription(payload)
-		case guidExtendedContentDescription:
-			d.parseExtendedContentDescription(payload)
-		case guidMarker:
-			if err := d.parseMarkers(payload, bodyOff); err != nil {
+			b, ok, err := tagBody("the Content Description Object")
+			if err != nil {
 				return err
+			}
+			if ok {
+				d.parseContentDescription(b)
+			}
+		case guidExtendedContentDescription:
+			b, ok, err := tagBody("the Extended Content Description Object")
+			if err != nil {
+				return err
+			}
+			if ok {
+				d.parseExtendedContentDescription(b)
+			}
+		case guidMarker:
+			b, ok, err := tagBody("the Marker Object")
+			if err != nil {
+				return err
+			}
+			if ok {
+				if err := d.parseMarkers(b, bodyOff); err != nil {
+					return err
+				}
 			}
 		case guidContentEncryption, guidExtendedContentEncryption:
 			d.encrypted = true
 		case guidHeaderExtension:
-			// The one object worth descending for. Everything else in here is
-			// a leaf like every other unrecognized object, but the Advanced
-			// Content Encryption Object is a Header Extension child by spec,
-			// so leaving the extension opaque would open a WMDRM-protected
-			// file and hand stage 10's decoder ciphertext as super-frames.
-			d.walkHeaderExtension(payload)
+			// The one object worth descending for: the Advanced Content
+			// Encryption Object is a Header Extension child by spec, and the
+			// Metadata and Metadata Library Objects carry tags there.
+			if err := d.walkHeaderExtension(h, bodyOff, bodyLen, &walked); err != nil {
+				return err
+			}
 		}
-		base += int64(size)
-		body = body[size:]
+		off += int64(size)
 	}
+	return nil
+}
+
+// charge spends one object of the header walk's budget. A header past it is
+// refused rather than cut short: an encryption object behind the cut would
+// go unseen, and the file would be decoded as clear audio.
+func (d *Demuxer) charge(walked *int, off int64) error {
+	if *walked == maxHeaderObjects {
+		return malformed("the header holds more than %d objects at %d", maxHeaderObjects, off)
+	}
+	*walked++
 	return nil
 }
 
@@ -865,9 +967,9 @@ func (d *Demuxer) checkErrorCorrection(b []byte, off int64, number int, tsLen in
 }
 
 // DemuxerVersion is this demuxer's term in the ADR-0004 cache key, carried
-// by a WMA v1/v2 track alone. Bump it for a change that makes the demuxer
-// deliver other samples for a file that has not changed.
-const DemuxerVersion = "asf-demux-2"
+// by every track. Bump it for a change that makes the demuxer deliver other
+// samples, tags or chapters for a file that has not changed.
+const DemuxerVersion = "asf-demux-3"
 
 // selectStream picks the audio stream to decode and wires the track. A file
 // with no decodable stream is refused by name: the codec table exists so a
@@ -975,9 +1077,7 @@ func (d *Demuxer) wireTrack(s stream, id codec.ID, name string) error {
 		SamplesAdvisory: true,
 		Default:         true,
 	}
-	if d.counter != nil {
-		d.track.DemuxerVersion = DemuxerVersion
-	}
+	d.track.DemuxerVersion = DemuxerVersion
 	// How many packets one media object spans, which sizes both the seek
 	// run-up and how long a resumed reader steps over fragments. A packet
 	// carries less payload than its own length: the parsing information and
@@ -1336,26 +1436,102 @@ func (d *Demuxer) packetSendTime(i int64) (int64, bool) {
 	return info.sendMS, true
 }
 
-// walkHeaderExtension looks through the Header Extension's children for the
-// encryption object that lives there. Everything else is a leaf, so this
-// descends exactly one level and never on a depth the file chooses.
-func (d *Demuxer) walkHeaderExtension(body []byte) {
+// walkHeaderExtension walks the children of the Header Extension whose body is
+// the n bytes at off, by their object headers, for the encryption object that
+// lives there and the Metadata and Metadata Library Objects' tags. It spends
+// the header walk's budget, and descends exactly one level.
+func (d *Demuxer) walkHeaderExtension(h headerReader, off, n int64, walked *int) error {
 	// Reserved GUID (16), reserved word (2), then the data length and data.
 	const prologue = 22
-	if len(body) < prologue {
-		return
+	if n < prologue {
+		return nil
 	}
-	size := min(int64(le.Uint32(body[18:])), int64(len(body)-prologue))
-	children := body[prologue : prologue+size]
-	for len(children) >= objectHeaderLen {
-		n := le.Uint64(children[16:])
-		if n < objectHeaderLen || n > uint64(len(children)) {
-			return
+	pro, err := h.at(off, prologue, prologue)
+	if err != nil {
+		return err
+	}
+	at, end := off+prologue, off+prologue+min(int64(le.Uint32(pro[18:])), n-prologue)
+	for end-at >= objectHeaderLen {
+		if err := d.charge(walked, at); err != nil {
+			return err
 		}
-		if guidAt(children) == guidAdvancedContentEncryption {
+		head, err := h.at(at, objectHeaderLen, objectHeaderLen)
+		if err != nil {
+			return err
+		}
+		id, size := guidAt(head), le.Uint64(head[16:])
+		if size < objectHeaderLen || size > uint64(end-at) {
+			// What follows, an encryption object included, is out of reach.
+			return d.warn(at, "Header Extension child %s declares %d bytes with %d left; the rest is not read", id, size, end-at)
+		}
+		switch id {
+		case guidAdvancedContentEncryption:
 			d.encrypted = true
-			return
+		case guidMetadata, guidMetadataLibrary:
+			if err := d.parseMetadataRecords(h, at+objectHeaderLen, int64(size)-objectHeaderLen); err != nil {
+				return err
+			}
 		}
-		children = children[n:]
+		at += int64(size)
 	}
+	return nil
+}
+
+// parseMetadataRecords reads the descriptor records of the Metadata or
+// Metadata Library Object whose body is the n bytes at off, as one file-level
+// set the way the tag library reads them. Each record is read by its own
+// header, and a value too large to be a tag (cover art) is stepped over
+// unread. maxMetadataRecords bounds the records walked across the header.
+func (d *Demuxer) parseMetadataRecords(h headerReader, off, n int64) error {
+	if n < 2 {
+		return nil
+	}
+	cb, err := h.at(off, 2, 2)
+	if err != nil {
+		return err
+	}
+	count := int(le.Uint16(cb))
+	at, end := off+2, off+n
+	for range count {
+		if d.records == maxMetadataRecords {
+			if !d.recordsCut {
+				d.recordsCut = true
+				d.note(at, "more than %d metadata records; the rest are not read", maxMetadataRecords)
+			}
+			if d.counted {
+				d.pairs.blind = true // the library reads them
+			}
+			return nil
+		}
+		d.records++
+		if end-at < 12 {
+			return nil
+		}
+		head, err := h.at(at, 12, 12)
+		if err != nil {
+			return err
+		}
+		nameLen, valType, valLen := int64(le.Uint16(head[4:])), le.Uint16(head[6:]), int64(le.Uint32(head[8:]))
+		at += 12
+		if nameLen > end-at || valLen > end-at-nameLen {
+			return nil
+		}
+		nb, err := h.at(at, nameLen, nameLen)
+		if err != nil {
+			return err
+		}
+		name := utf16Text(nb)
+		at += nameLen
+		if valLen <= maxTagBytes {
+			v, err := h.at(at, valLen, valLen)
+			if err != nil {
+				return err
+			}
+			d.addDescriptor(name, valType, v)
+		} else if key := descriptorKey(name); d.counted && (pairKeys[key] || foldsOntoPair(name)) {
+			d.pairs.blind = true // a value only the library reads
+		}
+		at += valLen
+	}
+	return nil
 }

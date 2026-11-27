@@ -19,7 +19,7 @@ written from scratch and can be imported on their own.
 | WavPack | .wv | .wv |
 | Monkey's Audio | .ape | .ape |
 | PCM | WAV, AIFF, MP4/MOV, Matroska | WAV, AIFF, Matroska |
-| MP3 | .mp3, MP4/MOV, WAV, AIFF-C | .mp3 |
+| MP3 | .mp3, MP4/MOV, WAV, AIFF-C, Matroska | .mp3 |
 | AAC-LC, HE-AAC v1/v2 | MP4, ADTS, Matroska | MP4, ADTS, Matroska, HLS |
 | Opus | Ogg, Matroska/WebM, MP4 | Ogg, Matroska/WebM, HLS |
 | Vorbis | Ogg, Matroska/WebM | Ogg, Matroska/WebM |

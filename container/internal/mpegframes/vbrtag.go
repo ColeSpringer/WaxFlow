@@ -7,14 +7,22 @@ import (
 )
 
 // VBRInfo is a parsed Xing, Info, or VBRI metadata frame: the fields a
-// demuxer consumes today. The tags carry more (byte counts, TOCs, a CBR
-// marker) that nothing reads yet; parsing skips over it.
+// demuxer consumes today. The tags carry more (TOCs, a CBR marker) that
+// nothing reads yet; parsing skips over it.
 type VBRInfo struct {
 	// Frames is the audio frame count, 0 when absent.
 	Frames int64
+	// Bytes is the stream's byte count from the metadata frame's own first
+	// byte, 0 when absent. It is where the stream this frame describes ends,
+	// which is how a file joined onto it is told from its own frames.
+	Bytes int64
 	// Delay and Padding are the LAME gapless fields (encoder samples),
 	// -1 when the tag carries no LAME extension.
 	Delay, Padding int64
+	// Joined says the run goes on past the stream this frame counts (see
+	// Options.Joined). Frames is then the whole run's count where every
+	// joined stream stated its own, and 0 where one did not.
+	Joined bool
 }
 
 // ParseVBRTag inspects a frame's payload for a Xing/Info or VBRI tag. h is
@@ -46,7 +54,9 @@ func ParseVBRTag(h mp3.Header, frame []byte) (VBRInfo, bool) {
 				}
 			}
 			if flags&2 != 0 {
-				take(4) // stream byte count
+				if b := take(4); b != nil {
+					tag.Bytes = int64(binary.BigEndian.Uint32(b))
+				}
 			}
 			if flags&4 != 0 {
 				take(100) // TOC: coarse byte hints; the exact index supersedes it
@@ -73,6 +83,7 @@ func ParseVBRTag(h mp3.Header, frame []byte) (VBRInfo, bool) {
 	// VBRI (Fraunhofer): fixed 32 bytes after the header.
 	off = mp3.HeaderLen + 32
 	if len(frame) >= off+26 && string(frame[off:off+4]) == "VBRI" {
+		tag.Bytes = int64(binary.BigEndian.Uint32(frame[off+10:]))
 		tag.Frames = int64(binary.BigEndian.Uint32(frame[off+14:]))
 		return tag, true
 	}

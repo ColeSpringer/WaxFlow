@@ -138,9 +138,10 @@ func TestScanLeavesTheWindowAtItsRange(t *testing.T) {
 	}
 }
 
-// TestOpenCost pins the reads a clean open makes for its header: the tag
-// probe and the rest of the header's 4 KiB in one read, or behind a tag the
-// magic and then the header. A file that never enters the scan pays no span.
+// TestOpenCost pins the reads a clean open makes: the tag probe and the rest
+// of the header's 4 KiB in one read, or behind a tag the magic and then the
+// header, and one read of the tail for every trailer probe. A file that never
+// enters the scan pays no span.
 func TestOpenCost(t *testing.T) {
 	file := longFile(t)
 	tag := make([]byte, 10+64)
@@ -149,15 +150,17 @@ func TestOpenCost(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		raw  []byte
-		want [][2]int64 // the reads behind the two trailer probes
+		want [][2]int64 // the reads in front of the trailer probe
 	}{
 		{"bare", file, [][2]int64{{0, 10}, {10, ape.MaxHeaderLen}}},
 		{"behind a tag", append(tag, file...), [][2]int64{{0, 10}, {74, 78}, {78, 74 + ape.MaxHeaderLen}}},
 	} {
 		src := &testutil.CountingSource{Src: container.BytesSource(tc.raw), Log: true}
 		openBehind(t, src, len(tc.raw)-len(file))
-		if len(src.Spans) < 2 || !slices.Equal(src.Spans[2:], tc.want) {
-			t.Errorf("%s: the open read %v, want two trailer probes and then %v", tc.name, src.Spans, tc.want)
+		size := int64(len(tc.raw))
+		want := append(slices.Clone(tc.want), [2]int64{size - 128, size})
+		if !slices.Equal(src.Spans, want) {
+			t.Errorf("%s: the open read %v, want %v", tc.name, src.Spans, want)
 		}
 	}
 }

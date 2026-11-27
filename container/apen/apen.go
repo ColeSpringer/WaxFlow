@@ -14,7 +14,11 @@
 // error prefix are "ape" either way.
 package apen
 
-import "github.com/colespringer/waxflow/codec/ape"
+import (
+	"bytes"
+
+	"github.com/colespringer/waxflow/codec/ape"
+)
 
 // MatchNeed is the sniff window Match wants.
 const MatchNeed = ape.MatchNeed
@@ -22,3 +26,23 @@ const MatchNeed = ape.MatchNeed
 // Match reports whether head begins with a Monkey's Audio file. It is the
 // format sniff-table entry.
 func Match(head []byte) bool { return ape.Match(head) }
+
+// FindStart returns the offset of the first file header window holds: the
+// magic with a header behind it that parses. It is how a file behind stray
+// bytes is told from a word in them.
+func FindStart(window []byte) (int, bool) {
+	for i := 0; ; i++ {
+		j := bytes.Index(window[i:], ape.Magic)
+		if j < 0 {
+			return 0, false
+		}
+		i += j
+		b := window[i:]
+		if !ape.Match(b) {
+			continue
+		}
+		if _, err := ape.ParseHeader(b[:min(len(b), ape.MaxHeaderLen)]); err == nil {
+			return i, true
+		}
+	}
+}

@@ -260,7 +260,7 @@ func progMoovBox(rate int, entry, edts, udta []byte, durs, sizes []uint32, chunk
 		u32(nextTrack))
 	parts := [][]byte{mvhd, progTrakBox(rate, entry, edts, durs, sizes, chunkOff, movieDur, mediaDur, chap != nil)}
 	if chap != nil {
-		parts = append(parts, chap.trakBox(rate, movieDur))
+		parts = append(parts, chap.trakBox())
 	}
 	if udta != nil {
 		parts = append(parts, udta)
@@ -286,8 +286,9 @@ func progTrakBox(rate int, entry, edts []byte, durs, sizes []uint32, chunkOff, m
 		parts = append(parts, edts)
 	}
 	if hasChapters {
-		// The 'chap' reference is what binds the text track to this one, and is
-		// how chapterTrack finds it again on the way back in.
+		// The 'chap' reference is what binds the text track to this one: a
+		// reader takes a text track for chapters only when another track names
+		// it here.
 		parts = append(parts, makeBox("tref", makeBox("chap", u32(chapterTrackID))))
 	}
 	return makeBox("trak", append(parts, mdia)...)
@@ -382,9 +383,17 @@ const (
 	// chapters far finer than anyone marks them.
 	chapterTimescale = 1000
 
+	// chapterRunOnOverrun is how far past the movie's end, in
+	// chapterTimescale ticks, a run-on chapter track has to end for the
+	// run-on to be taken (see buildChapterTrack). ffmpeg counts a track's
+	// end into the file's duration unless it passes the audio's by a second:
+	// measured with ffprobe 8.0.1, an overrun of 1.000 s and more is left
+	// out and one of 0.999 s is counted. Twice that keeps clear of the edge.
+	chapterRunOnOverrun = 2 * chapterTimescale
+
 	// maxChapterTitleBytes caps a title at what the sample format spells: a
 	// 16-bit length prefix, less the prefix's own two bytes, so the whole
-	// sample still fits the 1<<16 bound readTextChapters enforces.
+	// sample fits 1<<16.
 	maxChapterTitleBytes = 1<<16 - 2
 )
 
@@ -397,19 +406,22 @@ type chapterTrack struct {
 	chunkOff int64    // where data lands in the file
 	mediaDur int64    // sum of durs
 
-	// startTicks is the first chapter's start, in chapterTimescale ticks. It
-	// is the one time in the track that no sample duration can express, since
-	// stts spells deltas from zero; the empty edit in edtsBox carries it.
-	startTicks int64
+	// empty and played are the track's two edit segments, in movie ticks: the
+	// blank time holding the first chapter's start, which is the one time no
+	// sample duration can express, since stts spells deltas from zero, and the
+	// span the chapters cover behind it. Their sum is the track's presentation
+	// length, and both clamp so it cannot exceed the movie's own: a trak
+	// outlasting its mvhd is a file disagreeing with itself.
+	empty, played int64
 }
 
 // buildChapterTrack renders chapters as QuickTime text samples: a 16-bit
 // big-endian title length then that many UTF-8 bytes, the exact inverse of
 // readTextChapters. Returns nil when there are no chapters.
 //
-// Every chapter is written, however many there are, which is the whole reason
-// resolveChapters prefers this track: the Nero chpl list beside it in the udta
-// stops at the 255 its one-byte count can spell. A caller that wants that
+// Every chapter is written, however many there are: the Nero chpl list
+// beside it in the udta stops at the 255 its one-byte count can spell, and a
+// reader that finds the two differ takes this track. A caller that wants that
 // truncation surfaced must report it itself; a muxer has no warning channel
 // (container.Warner is demuxer-side only).
 //
@@ -419,6 +431,20 @@ type chapterTrack struct {
 // deltas hold every start but the first: that one is the track's anchor, and
 // edtsBox writes it as an empty edit. Dropping it shifts every chapter in the
 // file earlier by it.
+//
+// A first chapter that starts late may also run the media on by that start,
+// so the media ends where the last chapter does on the movie timeline:
+// ffmpeg takes the media duration for that end, and without the run-on reads
+// the last chapter short by the first one's start. The edit that plays the
+// media keeps the chapters' own span, which is how a reader that honours
+// edits still ends the track there.
+//
+// Run on, the track ends at the last chapter's end plus the first one's
+// start, and ffmpeg takes a track that ends up to a second past the audio
+// for the length of the file. So the media runs on only where that end is
+// no later than the movie's, or at least chapterRunOnOverrun past it;
+// between the two it stays as long as the chapters, a last chapter read
+// short being the lesser error beside a file reported longer than it plays.
 //
 // movieSamples and rate are the presentation length (what the audio track's
 // edit list plays, not its raw sample total) and its sample rate, together the
@@ -441,7 +467,7 @@ func buildChapterTrack(chapters []container.Chapter, movieSamples int64, rate in
 		end = min(satmath.MulDiv(int64(last.End), chapterTimescale, int64(time.Second)), movieEnd)
 	}
 
-	c := &chapterTrack{chunkOff: chunkOff, startTicks: starts[0]}
+	c := &chapterTrack{chunkOff: chunkOff}
 	for i, ch := range chapters {
 		next := end
 		if i+1 < len(chapters) {
@@ -459,15 +485,49 @@ func buildChapterTrack(chapters []container.Chapter, movieSamples int64, rate in
 		c.sizes = append(c.sizes, uint32(2+len(title)))
 		c.mediaDur += dur
 	}
+	c.empty = min(satmath.MulDiv(starts[0], int64(rate), chapterTimescale), movieSamples)
+	c.played = min(satmath.MulDiv(c.mediaDur, int64(rate), chapterTimescale), movieSamples-c.empty)
+	// A last chapter nothing bounds took one tick above and has no end to
+	// carry onto the media.
+	if last := len(starts) - 1; end > starts[last] {
+		// Where the track would end run on, against the movie's own end.
+		over := starts[0] + c.mediaDur + starts[0] - movieEnd
+		c.runOn(starts[0], over, rate, movieSamples)
+	}
 	return c
 }
 
-// trakBox renders the chapter track's trak. movieRate is the movie timescale
-// (the progressive mvhd uses the audio sample rate) and movieDur the movie's
-// length in it; the tkhd duration and the edit list are spelled in that scale,
-// while everything under mdia uses chapterTimescale instead.
-func (c *chapterTrack) trakBox(movieRate int, movieDur int64) []byte {
-	empty, played := c.editDurs(movieRate, movieDur)
+// runOn extends the last sample, and the media with it, by the first
+// chapter's start, so the media ends where the track does on the movie
+// timeline. over is how far past the movie's end the track would then end.
+// It stands down for an overrun under chapterRunOnOverrun, where a reader
+// would not take the longer media for that end, and where a 32-bit delta
+// would not hold it.
+func (c *chapterTrack) runOn(lead, over int64, rate int, movieSamples int64) {
+	last := len(c.durs) - 1
+	run := c.mediaDur + lead
+	if lead <= 0 || over > 0 && over < chapterRunOnOverrun ||
+		c.empty <= 0 || int64(c.durs[last])+lead > math.MaxUint32 {
+		return
+	}
+	offset := ticksToDuration(uint64(c.empty), int64(rate))
+	played := ticksToDuration(uint64(c.played), int64(rate))
+	lastStart := addClamp(ticksToDuration(uint64(c.mediaDur-int64(c.durs[last])), chapterTimescale), offset)
+	end := ticksToDuration(uint64(run), chapterTimescale)
+	slack := ticksToDuration(1, int64(rate)) + ticksToDuration(1, chapterTimescale)
+	if placeholderTail(lastStart, uint64(c.durs[last])+uint64(lead), chapterTimescale, int64(rate), movieSamples) ||
+		trackEnd(end, lastStart, offset, played, slack) != end {
+		return
+	}
+	c.durs[last] += uint32(lead)
+	c.mediaDur = run
+}
+
+// trakBox renders the chapter track's trak. The tkhd duration and the edit
+// list are spelled in the movie timescale (the progressive mvhd uses the
+// audio sample rate), while everything under mdia uses chapterTimescale.
+func (c *chapterTrack) trakBox() []byte {
+	empty, played := c.empty, c.played
 	// Flag 0x2 is track_in_movie without track_enabled: a chapter track is
 	// read for its titles, never played, and an enabled text track renders as
 	// burnt-in subtitles.
@@ -494,20 +554,6 @@ func (c *chapterTrack) trakBox(movieRate int, movieDur int64) []byte {
 	return makeBox("trak", tkhd, mdia)
 }
 
-// editDurs splits the chapter track's presentation into its two edit segment
-// durations, in movie ticks: the leading empty edit holding the first chapter's
-// start, and the edit playing the samples.
-//
-// Their sum is the track's presentation length, and both clamp so it cannot
-// exceed the movie's own. A trak outlasting its mvhd is a file disagreeing with
-// itself, and neither a rescale that rounded up nor a chapter list reaching past
-// the end of the audio gets to cause that.
-func (c *chapterTrack) editDurs(movieRate int, movieDur int64) (empty, played int64) {
-	empty = min(satmath.MulDiv(c.startTicks, int64(movieRate), chapterTimescale), movieDur)
-	played = min(satmath.MulDiv(c.mediaDur, int64(movieRate), chapterTimescale), movieDur-empty)
-	return empty, played
-}
-
 // edtsBox delays the chapter track's presentation by an empty edit, which is
 // the only thing that can carry the first chapter's start: stts spells deltas
 // from zero, so a track without this reads back anchored at the movie's start
@@ -515,8 +561,7 @@ func (c *chapterTrack) editDurs(movieRate int, movieDur int64) (empty, played in
 //
 // The empty edit (media_time -1) inserts blank presentation time consuming no
 // media; the entry after it plays the samples from the top of their timeline.
-// parseElst reads both back, and readTextChapters adds the blank time to every
-// chapter it recovers.
+// The chapter reader adds the blank time to every chapter it recovers.
 //
 // A first chapter at zero needs no delay and gets no edit list, which is the
 // common case and keeps those files byte-identical to a muxer that never knew
@@ -534,11 +579,12 @@ func (c *chapterTrack) edtsBox(empty, played int64) []byte {
 	return makeBox("edts", elst)
 }
 
-// mdhdBox states the chapter track's duration on its own timeline, which
-// ticks in milliseconds. That is the one duration here with genuine room
-// (2^32 ms is 49.7 days), so the version is all but always 0; it is chosen
-// rather than assumed so that this box and the track header above cannot
-// disagree about how a duration is written.
+// mdhdBox states the chapter track's media duration on its own timeline,
+// which ticks in milliseconds: the chapters' span, run on by the first
+// chapter's start where runOn took it. That is the one duration here with
+// genuine room (2^32 ms is 49.7 days), so the version is all but always 0;
+// it is chosen rather than assumed so that this box and the track header
+// above cannot disagree about how a duration is written.
 func (c *chapterTrack) mdhdBox() []byte {
 	ver := durVersion(c.mediaDur)
 	return makeFullBox("mdhd", ver, 0,

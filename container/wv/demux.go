@@ -12,6 +12,7 @@ import (
 	"github.com/colespringer/waxflow/codec"
 	"github.com/colespringer/waxflow/codec/wavpack"
 	"github.com/colespringer/waxflow/container"
+	"github.com/colespringer/waxflow/container/internal/apev2"
 	"github.com/colespringer/waxflow/container/internal/diag"
 	"github.com/colespringer/waxflow/container/internal/srcwin"
 	"github.com/colespringer/waxflow/container/internal/trailer"
@@ -54,9 +55,9 @@ const (
 )
 
 // DemuxerVersion is this demuxer's term in the ADR-0004 cache key, carried
-// by its track. Bump it for a change that makes the demuxer
-// deliver other samples for a file that has not changed.
-const DemuxerVersion = "wv-demux-2"
+// by its track. Bump it for a change that makes the demuxer deliver other
+// samples or tags for a file that has not changed.
+const DemuxerVersion = "wv-demux-3"
 
 // Demuxer reads one WavPack track from a native .wv source.
 type Demuxer struct {
@@ -105,6 +106,12 @@ type Demuxer struct {
 
 	first wavpack.BlockHeader // the first audio block's header
 	path  path
+
+	// tagFloor is the lowest offset a tag may start at, the first block's end,
+	// and loose says the tail scan found no block that tiles onto the data's
+	// end: bytes that are no block lie behind the stream.
+	tagFloor int64
+	loose    bool
 
 	// w is the shared read-ahead window; its data end is the end of block
 	// data (trailing tags stripped during the header parse) and its sticky
@@ -297,6 +304,7 @@ func (d *Demuxer) parse() error {
 	if exact {
 		d.promised = samples
 	}
+	d.tagBehindJunk()
 	d.track = container.Track{
 		Codec:          codec.WavPack,
 		CodecConfig:    cfgBlob,
@@ -319,17 +327,41 @@ func (d *Demuxer) parse() error {
 // the window's data end so the block walk never runs into them. The APEv2
 // block is also where the track's tags come from.
 func (d *Demuxer) stripTrailers() error {
-	// A tag has to leave a whole block behind it. NUL padding is not peeled:
-	// this pass has nothing to confirm a recognition against, and a block
-	// declares its own length, so trailing zeros end the walk on their own.
-	end, tags := trailer.PeelAll(&d.w, trailer.APEv2|trailer.ID3v1|trailer.ID3v2,
-		wavpack.BlockHeaderLen, d.w.DataEnd())
-	d.tags = tags
-	// No warning here, unlike the FLAC demuxer: a tag after the audio is the
+	// A tag has to leave the first block whole behind it. NUL padding is not
+	// peeled: this pass has nothing to confirm a recognition against, and a
+	// block declares its own length, so trailing zeros end the walk on their
+	// own.
+	floor := int64(wavpack.BlockHeaderLen)
+	if h, ok := d.blockPeek(0); ok {
+		floor = h.Size
+	}
+	end, tags := trailer.PeelAll(&d.w, trailer.APEv2|trailer.ID3v1|trailer.ID3v2|trailer.Lyrics3,
+		floor, d.w.DataEnd())
+	d.tags, d.tagFloor = tags, floor
+	// No warning for a tag, unlike the FLAC demuxer: one after the audio is the
 	// normal shape of a .wv file rather than damage recovered from, and
-	// warning would make strict mode reject every tagged WavPack file.
+	// warning would make strict mode reject every tagged WavPack file. A
+	// footer that points into the first block is not a tag, and stays.
+	if at, ok := trailer.Refused(&d.w, floor, end); ok {
+		if err := d.warn(end-apev2.FooterLen, "an APEv2 footer places its tag at offset %d, inside the first block; not read", d.log.At(at)); err != nil {
+			return err
+		}
+	}
 	d.w.SetDataEnd(end)
 	return d.w.Err()
+}
+
+// tagBehindJunk reads the APEv2 tag that bytes no peel recognizes hide from
+// it, when the peel found none and the blocks stop short of the data's end.
+// The blocks still say where the audio ends. A read that fails is no answer.
+func (d *Demuxer) tagBehindJunk() {
+	if d.tags != nil || !d.loose {
+		return
+	}
+	d.w.Try(false, func() bool {
+		d.tags, _, _ = trailer.Behind(&d.w, d.tagFloor, d.w.DataEnd())
+		return true
+	})
 }
 
 // tail is the last audio block a read can deliver, as the open measured it.
@@ -377,6 +409,7 @@ func (d *Demuxer) scanTail() (tail, bool) {
 	}
 	found := d.scanBack(lo, audioEnd, try)
 	if t.sure {
+		d.loose = !found
 		return t, found
 	}
 	// The scan once ended at the block passed over, so behind it the scan
